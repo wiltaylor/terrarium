@@ -70,7 +70,8 @@ impl ExitStatus {
 }
 
 /// A handle to one typed turn. It resolves when the prompt-submit hook
-/// arrives, or when the delivery fails.
+/// arrives or the adapter's `screen_hint` says `Busy`, or when the delivery
+/// fails.
 #[derive(Debug)]
 pub struct Delivery {
     id: u64,
@@ -349,7 +350,8 @@ impl Runner {
 
     /// Queue a user turn. The runner types it when the agent is `idle` and
     /// the prompt is ready, and resolves the handle when the prompt-submit
-    /// hook arrives. Turns go out one at a time, in order.
+    /// hook arrives or the screen goes busy. Turns go out one at a time, in
+    /// order.
     pub fn type_turn(&self, text: impl Into<String>) -> Delivery {
         let (tx, rx) = oneshot::channel();
         let id = self.inner.next_delivery.fetch_add(1, Ordering::Relaxed);
@@ -731,12 +733,31 @@ impl Inner {
                 _ => {}
             }
 
+            // The prompt-submit hook is one sign that the harness took the
+            // turn. A busy screen is the other: the text left the input line
+            // and a turn runs. Codex and Copilot send the hook late (the
+            // first prompt also creates the session), so a retry on the
+            // hook alone would type the text twice.
+            if hint == ScreenHint::Busy
+                && let Some(f) = state.in_flight.take()
+            {
+                tracing::debug!("turn {} submitted: the screen is busy", f.turn.id);
+                let _ = f.turn.tx.send(Ok(()));
+                state.turn_open = true;
+                state.block = None;
+                self.transition(
+                    &mut state,
+                    AgentStatus::Working,
+                    "prompt submitted (screen busy)",
+                );
+            }
+
             if state.in_flight.as_ref().is_some_and(|f| now >= f.deadline)
                 && let Some(f) = state.in_flight.take()
             {
                 if f.turn.attempts < self.config.submit_attempts {
                     tracing::debug!(
-                        "turn {} got no prompt-submit hook; typing it again",
+                        "turn {} got no prompt-submit hook and no busy screen; typing it again",
                         f.turn.id
                     );
                     state.queue.push_front(f.turn);
@@ -748,7 +769,9 @@ impl Inner {
                     let attempts = f.turn.attempts;
                     self.emit(Event::DeliveryFailed {
                         text: f.turn.text.clone(),
-                        reason: format!("no prompt-submit hook after {attempts} attempts"),
+                        reason: format!(
+                            "no prompt-submit hook and no busy screen after {attempts} attempts"
+                        ),
                     });
                     let _ = f
                         .turn

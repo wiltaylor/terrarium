@@ -37,7 +37,8 @@ pub type Result<T, E = RunnerError> = std::result::Result<T, E>;
 /// Why a typed turn was not delivered.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum DeliveryError {
-    /// The prompt-submit hook did not fire after every attempt.
+    /// Neither the prompt-submit hook nor a busy screen came after every
+    /// attempt.
     #[error("no prompt-submit hook after {attempts} attempts")]
     NoSubmitHook { attempts: u32 },
     /// The child exited before the turn was delivered.

@@ -8,7 +8,7 @@ use semver::{Version, VersionReq};
 use serde_json::{Value, json};
 use terrarium_core::{
     Adapter, Agent, AgentId, AgentStatus, Answer, Event, EventRecord, HarnessId, HarnessSessionId,
-    HookPayload, LaunchSpec,
+    HookPayload, LaunchSpec, ScreenHint,
 };
 use terrarium_runner::{
     BoxFuture, DefaultReadyDetector, DeliveryError, NoHandler, RequestContext, RequestHandler,
@@ -19,8 +19,12 @@ use tokio::net::UnixStream;
 use tokio::sync::broadcast;
 use tokio::time::timeout;
 
-/// An adapter with the hook names of Claude Code and no screen hints.
-struct FakeAdapter;
+/// An adapter with the hook names of Claude Code. With `busy_screen` set,
+/// `screen_hint` says `Busy` while the fake TUI shows `working...`, and it
+/// cannot tell otherwise.
+struct FakeAdapter {
+    busy_screen: bool,
+}
 
 impl Adapter for FakeAdapter {
     fn id(&self) -> HarnessId {
@@ -46,6 +50,15 @@ impl Adapter for FakeAdapter {
                 question: true,
             }],
             _ => vec![],
+        }
+    }
+    fn screen_hint(&self, screen: &terrarium_core::adapter::Screen) -> ScreenHint {
+        let contents = screen.contents();
+        let last = contents.lines().rev().find(|l| !l.trim().is_empty());
+        if self.busy_screen && last.is_some_and(|l| l.trim() == "working...") {
+            ScreenHint::Busy
+        } else {
+            ScreenHint::Unknown
         }
     }
     /// Visible keys, so a test can see that the retry path sends them.
@@ -75,6 +88,7 @@ struct Opts {
     env: Vec<(&'static str, &'static str)>,
     stall: Duration,
     submit: Duration,
+    busy_screen: bool,
 }
 
 impl Default for Opts {
@@ -83,6 +97,7 @@ impl Default for Opts {
             env: vec![],
             stall: Duration::from_secs(30),
             submit: Duration::from_secs(5),
+            busy_screen: false,
         }
     }
 }
@@ -113,7 +128,10 @@ async fn start_with(opts: Opts, handler: Arc<dyn RequestHandler>) -> Harness {
     for (k, v) in opts.env {
         spec = spec.env(k, v);
     }
-    let runner = Runner::spawn(config, Arc::new(FakeAdapter), spec, handler)
+    let adapter = Arc::new(FakeAdapter {
+        busy_screen: opts.busy_screen,
+    });
+    let runner = Runner::spawn(config, adapter, spec, handler)
         .await
         .expect("spawn");
     // The Starting event goes out during spawn, before this subscribe. Every
@@ -147,6 +165,18 @@ async fn until_status(
     .await
     .unwrap_or_else(|_| panic!("no change to {to}; saw {seen:?}"));
     seen
+}
+
+/// Wait until the screen shows `text`. A hook can reach the runner before
+/// the PTY bytes that the harness wrote just before it.
+async fn until_screen(h: &Harness, text: &str) {
+    timeout(WAIT, async {
+        while !h.runner.screen().text().contains(text) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("no `{text}` on the screen: {}", h.runner.screen().text()));
 }
 
 async fn until_idle(h: &mut Harness) {
@@ -189,7 +219,7 @@ async fn turn_runs_starting_idle_working_idle() {
         prompt: Some("hello".into())
     }));
     assert!(seen.contains(&Event::TurnEnd));
-    assert!(h.runner.screen().text().contains("done: hello"));
+    until_screen(&h, "done: hello").await;
 
     h.runner.kill().expect("kill");
     h.runner.wait().await;
@@ -233,7 +263,7 @@ async fn second_turn_waits_for_stop() {
         .expect("second");
     let seen = until_status(&mut h.events, AgentStatus::Idle).await;
     assert!(seen.contains(&Event::TurnEnd));
-    assert!(h.runner.screen().text().contains("done: second"));
+    until_screen(&h, "done: second").await;
     h.runner.kill().expect("kill");
 }
 
@@ -273,7 +303,7 @@ async fn question_blocks_and_answer_resumes() {
     h.runner.answer("q1", &Answer::Allow).await.expect("answer");
     assert_eq!(h.runner.status(), AgentStatus::Working);
     until_status(&mut h.events, AgentStatus::Idle).await;
-    assert!(h.runner.screen().text().contains("answer: y"));
+    until_screen(&h, "answer: y").await;
     h.runner.kill().expect("kill");
 }
 
@@ -309,6 +339,46 @@ async fn delivery_fails_after_one_retry() {
     let all = read_events(h.runner.events_path());
     assert!(all.iter().any(|r| matches!(&r.event,
         Event::DeliveryFailed { text, .. } if text == "lost")));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn busy_screen_confirms_a_turn_without_the_submit_hook() {
+    let mut h = start(Opts {
+        env: vec![
+            ("FAKE_TUI_NO_SUBMIT_HOOK", "1"),
+            ("FAKE_TUI_DELAY_MS", "1000"),
+        ],
+        submit: Duration::from_millis(500),
+        busy_screen: true,
+        ..Opts::default()
+    })
+    .await;
+    until_idle(&mut h).await;
+    let d = h.runner.type_turn("steady");
+    timeout(WAIT, d.wait())
+        .await
+        .expect("time")
+        .expect("the busy screen confirms the turn");
+    let seen = until_status(&mut h.events, AgentStatus::Idle).await;
+    assert!(seen.contains(&Event::TurnEnd));
+    assert!(!seen.iter().any(|e| matches!(e, Event::TurnStart { .. })));
+    // Typed once: no clear keys and no retry, though the turn ran for
+    // longer than `submit_timeout`.
+    until_screen(&h, "done: steady").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let text = h.runner.screen().text();
+    assert_eq!(text.matches("done: steady").count(), 1, "{text}");
+    assert!(!text.contains("cleared"), "{text}");
+    h.runner.kill().expect("kill");
+    h.runner.wait().await;
+    let all = read_events(h.runner.events_path());
+    assert!(
+        !all.iter()
+            .any(|r| matches!(r.event, Event::DeliveryFailed { .. }))
+    );
+    assert!(all.iter().any(|r| matches!(&r.event,
+        Event::StatusChanged { to: AgentStatus::Working, reason: Some(r), .. }
+            if r.contains("screen busy"))));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

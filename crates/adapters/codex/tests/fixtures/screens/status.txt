@@ -1,0 +1,40 @@
+
+  >_ OpenAI Codex (v0.160.0)
+     $CWD
+  permissions: YOLO mode
+
+  Well, well, well. An idea approaches.
+
+/status
+
+  >_ OpenAI Codex (v0.160.0)
+
+  Visit https://chatgpt.com/codex/settings/usage for up-to-date
+  information on rate limits and credits
+
+  Model:               GPT-6-Luna (reasoning low, summaries auto)
+  Model provider:      openai
+  Directory:           $CWD
+  Permissions:         Full Access
+  Agents.md:           <none>
+  Account:             Pro 200
+  Collaboration mode:  Default
+  Session:             01a16cbd-1765-71b1-b881-edc572a066e6
+
+  Weekly limit:        [████████████████████] 100% left (resets 7:42 AM on 31 Oct)
+
+
+
+
+
+
+
+
+
+
+
+
+› Ask Codex to do anything
+
+  GPT-6-Luna low · $CWD
+  ? for shortcuts

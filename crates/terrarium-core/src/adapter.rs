@@ -5,6 +5,7 @@ use std::path::Path;
 use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
 
+use crate::config::SubscriptionDef;
 use crate::error::Result;
 use crate::event::Event;
 use crate::harness::HarnessId;
@@ -65,6 +66,19 @@ pub trait Adapter: Send + Sync {
     /// flags, the system prompt, the hook config, and the quiet-mode env.
     fn launch(&self, agent: &Agent, resume: Option<&HarnessSessionId>) -> LaunchSpec;
 
+    /// [`Adapter::launch`] for an agent whose subscription the caller has
+    /// resolved (`Agent::subscription` is only the name). A harness that
+    /// can spend many providers (pi) picks its provider flags from it. The
+    /// default ignores the subscription.
+    fn launch_for(
+        &self,
+        agent: &Agent,
+        resume: Option<&HarnessSessionId>,
+        _subscription: Option<&SubscriptionDef>,
+    ) -> LaunchSpec {
+        self.launch(agent, resume)
+    }
+
     /// Map a hook payload from the runner socket to events.
     fn hook_event(&self, hook: &HookPayload) -> Vec<Event>;
 
@@ -98,6 +112,21 @@ pub trait Adapter: Send + Sync {
     /// default is Ctrl-U (kill to the start of the line).
     fn clear_input_keys(&self) -> Vec<u8> {
         vec![CTRL_U]
+    }
+
+    /// Keystrokes that make an idle harness exit cleanly, for a graceful
+    /// stop before a kill. Empty (the default) means "no known keys": the
+    /// caller kills the process.
+    fn exit_keys(&self) -> Vec<u8> {
+        Vec::new()
+    }
+
+    /// True when the harness keeps the system prompt of a session from the
+    /// moment it made the session, so a resume with a changed prompt still
+    /// sends the old one. The supervisor then starts a fresh session (not a
+    /// resume) when the rendered prompt changed. The default is false.
+    fn prompt_frozen_on_resume(&self) -> bool {
+        false
     }
 
     /// Write the per-agent files that the harness reads from its home, and

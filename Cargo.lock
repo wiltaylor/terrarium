@@ -1896,9 +1896,15 @@ dependencies = [
 name = "terrarium-adapter-pi"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "semver",
+ "serde",
  "serde_json",
+ "tempfile",
  "terrarium-core",
+ "thiserror 2.0.21",
+ "toml",
+ "vt100",
 ]
 
 [[package]]

@@ -20,6 +20,8 @@ Env:
   FAKE_TUI_DELAY_MS    the work time of a normal turn (default 300)
   FAKE_TUI_STALL_MS    the silent time of /stall (default 1500)
   FAKE_TUI_NO_SUBMIT   when "1", never send UserPromptSubmit or Stop
+  FAKE_TUI_NO_SUBMIT_HOOK  when "1", do the turn and send Stop, but never
+                       send UserPromptSubmit (only the screen shows the turn)
   FAKE_TUI_RESUME_FAIL when "1", `--resume` prints an error and exits 1
   FAKE_TUI_EXIT_AFTER_MS  when set, exit with FAKE_TUI_EXIT_CODE (default 1)
                        this long after the start, with no hooks
@@ -36,6 +38,7 @@ SOCK = os.environ.get("TERRARIUM_SOCKET")
 DELAY = float(os.environ.get("FAKE_TUI_DELAY_MS", "300")) / 1000
 STALL = float(os.environ.get("FAKE_TUI_STALL_MS", "1500")) / 1000
 NO_SUBMIT = os.environ.get("FAKE_TUI_NO_SUBMIT") == "1"
+NO_SUBMIT_HOOK = os.environ.get("FAKE_TUI_NO_SUBMIT_HOOK") == "1"
 
 
 def hook(name, payload):
@@ -108,7 +111,8 @@ def main():
         if NO_SUBMIT:
             out("ignored\n")
             continue
-        hook("UserPromptSubmit", {"prompt": text})
+        if not NO_SUBMIT_HOOK:
+            hook("UserPromptSubmit", {"prompt": text})
         out("working...\n")
         if text == "/stall":
             time.sleep(STALL)

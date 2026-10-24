@@ -90,6 +90,7 @@ Error codes:
 | (spawn) | The runner starts the child. | `starting` |
 | `starting` | The prompt is ready for the first time. | `idle` |
 | any live status | A `TurnStart` event (the prompt-submit hook). | `working` |
+| `idle` | A typed turn is in flight and the adapter's `screen_hint` says `Busy`. | `working` |
 | any live status | A `TurnEnd` event (the stop hook). | `idle` |
 | any live status | A `Notification` with `question: true`, or a `Question` event. | `blocked` |
 | `working` | The adapter's `screen_hint` says `Question`. | `blocked` |
@@ -118,15 +119,26 @@ runner types turns one at a time, in order:
 1. The runner waits until the status is `idle` and the prompt is ready.
 2. It writes `Adapter::type_turn(text)`. The default is bracketed paste
    (`ESC[200~ text ESC[201~`) and then Enter.
-3. It waits `submit_timeout` (default 10 s) for the prompt-submit hook. The
-   hook resolves the handle with `Ok(())`.
-4. When the hook does not arrive, the runner first writes
+3. It waits `submit_timeout` (default 10 s) for a sign that the harness
+   took the turn. There are two signs. The first sign is the prompt-submit
+   hook (a `TurnStart` event). The second sign is a `Busy` screen hint from
+   the adapter: the text left the input line and a turn runs. The first sign
+   that comes resolves the handle with `Ok(())`. A busy screen also opens the
+   turn and sets the status to `working` (reason `prompt submitted (screen
+   busy)`). A prompt-submit hook that comes after that changes nothing.
+4. When neither sign comes, the runner first writes
    `Adapter::clear_input_keys` (default Ctrl-U), because the text of the
    failed attempt can still be in the input box. Then it types the turn
    again when the prompt is ready.
 5. After `submit_attempts` tries (default 2), the handle resolves with
    `DeliveryError::NoSubmitHook`, and the runner raises
    `Event::DeliveryFailed`.
+
+Why two signs: Codex and Copilot send the prompt-submit hook late. On the
+first prompt of a session, Codex creates the session first, and the hook
+comes 0.86 s after the Enter key (`docs/compat.md`). A retry on the hook
+alone can type the text twice. An adapter with no screen hint (`Unknown`)
+gets only the hook sign.
 
 A turn that is queued while the agent is `working` waits for the stop hook.
 When the child exits, every queued turn resolves with `DeliveryError::Exited`.
@@ -158,10 +170,10 @@ methods:
 |---|---|
 | `id` | The `harness` of each `HookPayload`, and `whoami`. |
 | `hook_event` | Turns each hook message into events. These events drive the status machine. |
-| `screen_hint` | Tells when the prompt is ready, and when a question shows. |
+| `screen_hint` | Tells when the prompt is ready, when a question shows, and when a typed turn went in (`Busy`). |
 | `type_turn` | The keystrokes for a turn. |
 | `answer` | The keystrokes for `Runner::answer`. |
-| `clear_input_keys` | The keystrokes that empty the input line before a retry. |
+| `clear_input_keys` | The keystrokes that empty the input line before a retry. The runner sends them only when no prompt-submit hook and no busy screen came. |
 
 The adapter's `launch` gives the `LaunchSpec`. The supervisor calls `launch`
 and gives the spec to `Runner::spawn`. When `screen_hint` cannot tell, set

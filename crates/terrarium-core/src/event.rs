@@ -94,8 +94,9 @@ pub enum Event {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
     },
-    /// The runner typed a turn, but the prompt-submit hook did not fire, even
-    /// after the retry. `text` is the turn that was not delivered.
+    /// The runner typed a turn, but the prompt-submit hook did not fire and
+    /// the screen did not go busy, even after the retry. `text` is the turn
+    /// that was not delivered.
     DeliveryFailed { text: String, reason: String },
 }
 

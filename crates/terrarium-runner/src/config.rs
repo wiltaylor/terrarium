@@ -29,7 +29,8 @@ pub struct RunnerConfig {
     /// A turn that is open with no hook and no PTY output for this long makes
     /// the agent `blocked`.
     pub stall_timeout: Duration,
-    /// How long to wait for the prompt-submit hook after a turn is typed.
+    /// How long to wait for the prompt-submit hook, or for a busy screen,
+    /// after a turn is typed.
     pub submit_timeout: Duration,
     /// How many times to type a turn before the delivery fails. PLAN §7 asks
     /// for one retry, so the default is 2.

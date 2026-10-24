@@ -1,0 +1,40 @@
+╭───────────────────────────────────────────────────────────────╮
+│ ✨ Update available! 0.160.0 -> 0.164.0                       │
+│ See https://github.com/openai/codex for installation options. │
+│                                                               │
+│ See full release notes:                                       │
+│ https://github.com/openai/codex/releases/latest               │
+╰───────────────────────────────────────────────────────────────╯
+
+
+  >_ OpenAI Codex (v0.160.0)
+     $CWD
+  permissions: YOLO mode
+
+  Shall we make a little something out of nothing?
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+› Ask Codex to do anything
+
+  GPT-6.1-Sol default · $CWD
+  ? for shortcuts
