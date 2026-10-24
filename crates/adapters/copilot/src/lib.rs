@@ -253,6 +253,20 @@ impl Adapter for CopilotAdapter {
         self.mapper.map(hook, &self.options.config_dir)
     }
 
+    /// A `UserPromptSubmit` (or `userPromptSubmitted`) whose prompt starts
+    /// with `<system_notification>`: Copilot made the turn itself, for
+    /// example after a background shell command ended.
+    fn is_system_prompt(&self, hook: &HookPayload) -> bool {
+        let name = hook
+            .str_field("hook_event_name")
+            .or_else(|| hook.str_field("hookName"))
+            .unwrap_or(&hook.hook);
+        matches!(name, "UserPromptSubmit" | "userPromptSubmitted")
+            && hook
+                .str_field("prompt")
+                .is_some_and(hooks::is_system_prompt)
+    }
+
     fn screen_hint(&self, screen: &Screen) -> ScreenHint {
         screen::screen_hint(screen)
     }
@@ -389,6 +403,35 @@ mod tests {
             ["COPILOT_GITHUB_TOKEN"]
         );
         assert_eq!(TOKEN_ENV, "COPILOT_GITHUB_TOKEN");
+    }
+
+    #[test]
+    fn system_notification_prompts_are_system_prompts() {
+        let a: &dyn Adapter = &CopilotAdapter::default();
+        let hook = |name: &str, body: serde_json::Value| HookPayload {
+            harness: HarnessId::Copilot,
+            hook: name.into(),
+            body,
+        };
+        let system = "<system_notification>Shell command completed</system_notification>";
+        assert!(a.is_system_prompt(&hook(
+            "UserPromptSubmit",
+            json!({"hook_event_name": "UserPromptSubmit", "prompt": system}),
+        )));
+        // The camelCase dialect.
+        assert!(a.is_system_prompt(&hook(
+            "userPromptSubmitted",
+            json!({"prompt": format!("  {system}")}),
+        )));
+        assert!(!a.is_system_prompt(&hook(
+            "UserPromptSubmit",
+            json!({"hook_event_name": "UserPromptSubmit", "prompt": "fix the bug"}),
+        )));
+        // Only a prompt-submit hook can be a system prompt.
+        assert!(!a.is_system_prompt(&hook(
+            "Notification",
+            json!({"hook_event_name": "Notification", "prompt": system}),
+        )));
     }
 
     #[test]

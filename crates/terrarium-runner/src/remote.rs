@@ -17,6 +17,7 @@ use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio::task::AbortHandle;
 
+use crate::attach::{AttachEvent, AttachStream};
 use crate::config::{agent_dir, control_socket_path};
 use crate::control::{
     AnswerKeysParams, AnswerParams, CancelParams, ClientFrame, EventsParams, Hello, HelloParams,
@@ -27,7 +28,7 @@ use crate::error::{DeliveryError, Result, RunnerError};
 use crate::handle::RunnerHandle;
 use crate::process::live_runner_pid;
 use crate::protocol::{BoxFuture, NoHandler, RequestHandler, RpcError};
-use crate::runner::{Delivery, ExitStatus, OutputChunk, ScreenSnapshot};
+use crate::runner::{Delivery, ExitStatus, ScreenSnapshot};
 use crate::spec::RunnerSpec;
 
 /// The capacity of the event and output channels of a `RemoteRunner`. A
@@ -57,6 +58,10 @@ pub struct ConnectOptions {
     /// A name for the runner log.
     pub client: String,
     pub connect_timeout: Duration,
+    /// The capacity of the local output channel of each attach. A reader
+    /// that falls this many chunks behind gets a resync
+    /// (`AttachEvent::Resynced`). The default is 1024.
+    pub attach_capacity: usize,
 }
 
 impl Default for ConnectOptions {
@@ -66,6 +71,7 @@ impl Default for ConnectOptions {
             events_since: None,
             client: "terrariumd".into(),
             connect_timeout: Duration::from_secs(5),
+            attach_capacity: OUTPUT_CAPACITY,
         }
     }
 }
@@ -144,6 +150,7 @@ struct Shared {
     handler: Arc<dyn RequestHandler>,
     /// `runner-exit.json`, read when the connection closes with no exit.
     exit_file: OnceLock<PathBuf>,
+    attach_capacity: usize,
 }
 
 fn control_err(e: RpcError) -> RunnerError {
@@ -464,6 +471,7 @@ impl RemoteRunner {
             last_seq: AtomicU64::new(0),
             handler: opts.handler.clone(),
             exit_file: OnceLock::new(),
+            attach_capacity: opts.attach_capacity.max(1),
         });
         let mut tasks = vec![
             tokio::spawn(write_loop(write, out_rx)).abort_handle(),
@@ -708,6 +716,84 @@ impl RemoteRunner {
     }
 }
 
+/// Open an `attach` stream and read its snapshot.
+async fn open_attach(
+    shared: &Shared,
+) -> Result<(u64, ScreenSnapshot, mpsc::UnboundedReceiver<StreamMsg>)> {
+    let (id, mut rx) = shared.open_stream("attach", json!({}))?;
+    let snapshot = match rx.recv().await {
+        Some(StreamMsg::Item(mut v)) => {
+            let snap = decode_value::<WireSnapshot>(v["snapshot"].take());
+            match snap.and_then(|s| s.into_snapshot().map_err(RunnerError::Control)) {
+                Ok(s) => s,
+                Err(e) => {
+                    shared.cancel(id);
+                    return Err(e);
+                }
+            }
+        }
+        Some(StreamMsg::End(Some(e))) => return Err(control_err(e)),
+        Some(StreamMsg::End(None)) => return Err(RunnerError::Exited),
+        None => return Err(RunnerError::Disconnected),
+    };
+    Ok((id, snapshot, rx))
+}
+
+/// Pass the output of the `attach` stream `id` to `tx`. When the runner ends
+/// the stream with `lagged`, or the reader of `tx` falls `attach_capacity`
+/// chunks behind, wait for room, attach again, and send
+/// [`AttachEvent::Resynced`] with the new snapshot.
+async fn forward_attach(
+    shared: Arc<Shared>,
+    mut id: u64,
+    mut rx: mpsc::UnboundedReceiver<StreamMsg>,
+    tx: mpsc::Sender<AttachEvent>,
+) {
+    loop {
+        let lagged = match rx.recv().await {
+            Some(StreamMsg::Item(v)) => {
+                let Some(text) = v.get("output").and_then(Value::as_str) else {
+                    continue;
+                };
+                let Ok(bytes) = decode(text) else { continue };
+                match tx.try_send(AttachEvent::Output(Arc::from(bytes))) {
+                    Ok(()) => false,
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        // Stop the old stream: its output is no use now.
+                        shared.cancel(id);
+                        true
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                        // No reader is left.
+                        shared.cancel(id);
+                        return;
+                    }
+                }
+            }
+            Some(StreamMsg::End(Some(e))) if e.code == codes::LAGGED => true,
+            Some(StreamMsg::End(_)) | None => return,
+        };
+        if !lagged {
+            continue;
+        }
+        let Ok(permit) = tx.reserve().await else {
+            return;
+        };
+        match open_attach(&shared).await {
+            Ok((new_id, snapshot, new_rx)) => {
+                tracing::debug!("the attach stream fell behind; attached again");
+                permit.send(AttachEvent::Resynced(snapshot));
+                id = new_id;
+                rx = new_rx;
+            }
+            Err(e) => {
+                tracing::debug!("attach again after a lag: {e}");
+                return;
+            }
+        }
+    }
+}
+
 impl RunnerHandle for RemoteRunner {
     fn agent(&self) -> AgentId {
         self.inner.hello.agent
@@ -744,35 +830,14 @@ impl RunnerHandle for RemoteRunner {
         })
     }
 
-    fn attach(&self) -> BoxFuture<'_, Result<(ScreenSnapshot, broadcast::Receiver<OutputChunk>)>> {
+    fn attach(&self) -> BoxFuture<'_, Result<(ScreenSnapshot, AttachStream)>> {
         Box::pin(async move {
             let shared = self.inner.shared.clone();
-            let (id, mut rx) = shared.open_stream("attach", json!({}))?;
-            let snapshot = match rx.recv().await {
-                Some(StreamMsg::Item(mut v)) => {
-                    let snap = decode_value::<WireSnapshot>(v["snapshot"].take())?;
-                    snap.into_snapshot().map_err(RunnerError::Control)?
-                }
-                Some(StreamMsg::End(Some(e))) => return Err(control_err(e)),
-                Some(StreamMsg::End(None)) => return Err(RunnerError::Exited),
-                None => return Err(RunnerError::Disconnected),
-            };
-            let (tx, out) = broadcast::channel::<OutputChunk>(OUTPUT_CAPACITY);
-            let task = tokio::spawn(async move {
-                while let Some(StreamMsg::Item(v)) = rx.recv().await {
-                    let Some(text) = v.get("output").and_then(Value::as_str) else {
-                        continue;
-                    };
-                    let Ok(bytes) = decode(text) else { continue };
-                    if tx.send(Arc::from(bytes)).is_err() {
-                        // No receiver is left.
-                        shared.cancel(id);
-                        break;
-                    }
-                }
-            });
+            let (id, snapshot, rx) = open_attach(&shared).await?;
+            let (tx, out) = mpsc::channel::<AttachEvent>(shared.attach_capacity);
+            let task = tokio::spawn(forward_attach(shared, id, rx, tx));
             self.track(task.abort_handle());
-            Ok((snapshot, out))
+            Ok((snapshot, AttachStream::remote(out)))
         })
     }
 

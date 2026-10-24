@@ -58,8 +58,8 @@ pub fn select(spec: &RunnerSpec) -> Arc<dyn Adapter> {
     }
 }
 
-/// `adapter: "fake"`: the hook names of Claude Code, no screen hints. The
-/// runner tests drive the fake TUI with it.
+/// `adapter: "fake"`: the hook names of Claude Code, no screen hints, and
+/// `/quit` as the exit keys. The runner tests drive the fake TUI with it.
 struct FakeAdapter {
     harness: HarnessId,
 }
@@ -98,6 +98,18 @@ impl Adapter for FakeAdapter {
             }],
             _ => vec![],
         }
+    }
+    /// A `UserPromptSubmit` with a `<system_notification>` prompt, as
+    /// Copilot sends it.
+    fn is_system_prompt(&self, hook: &HookPayload) -> bool {
+        hook.hook == "UserPromptSubmit"
+            && hook
+                .str_field("prompt")
+                .is_some_and(|p| p.trim_start().starts_with("<system_notification>"))
+    }
+    /// The fake TUI exits 0 on `/quit`.
+    fn exit_keys(&self) -> Vec<u8> {
+        b"/quit\r".to_vec()
     }
     fn answer(&self, _request_id: &str, answer: &Answer) -> Vec<u8> {
         match answer {

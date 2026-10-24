@@ -82,6 +82,16 @@ pub trait Adapter: Send + Sync {
     /// Map a hook payload from the runner socket to events.
     fn hook_event(&self, hook: &HookPayload) -> Vec<Event>;
 
+    /// True when `hook` is a prompt-submit hook for a prompt that the
+    /// harness made itself, not one that was typed. Copilot sends a
+    /// `UserPromptSubmit` with a `<system_notification>` prompt when a
+    /// background shell command ends. The runner does not count such a hook
+    /// as the delivery of a typed turn, and does not report it as a user
+    /// turn (`Event::TurnStart`). The default is false.
+    fn is_system_prompt(&self, _hook: &HookPayload) -> bool {
+        false
+    }
+
     /// Heuristics from the screen, for `blocked` detection and for "is the
     /// prompt ready" before typing.
     fn screen_hint(&self, _screen: &Screen) -> ScreenHint {

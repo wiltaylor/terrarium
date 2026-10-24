@@ -1,23 +1,26 @@
 //! Integration tests: the `terrarium-runner` process against the fake TUI,
-//! driven through `RemoteRunner` over the control socket.
+//! driven through `RemoteRunner` over the control socket. Every wait is
+//! for a condition, with the limits of `common`.
+
+mod common;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use common::{ms, until, wait};
 use serde_json::{Value, json};
 use terrarium_core::{AgentId, AgentStatus, Event, EventRecord, LaunchSpec};
 use terrarium_runner::events::read_since;
 use terrarium_runner::{
-    AdapterKind, BoxFuture, ConnectOptions, RemoteRunner, RequestContext, RequestHandler, RpcError,
-    RunnerHandle, RunnerSpec, SpawnOptions, live_runner_pid, read_exit_status,
+    AdapterKind, AttachEvent, BoxFuture, ConnectOptions, RemoteRunner, RequestContext,
+    RequestHandler, RpcError, RunnerHandle, RunnerSpec, SpawnOptions, live_runner_pid,
+    read_exit_status,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::broadcast;
 use tokio::time::timeout;
-
-const WAIT: Duration = Duration::from_secs(15);
 
 fn bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_terrarium-runner"))
@@ -80,7 +83,7 @@ impl Env {
             "rows": 24,
             "cols": 80,
             "tick_ms": 20,
-            "submit_timeout_ms": 5000,
+            "submit_timeout_ms": ms(10_000).as_millis() as u64,
             "ready_detector": {"quiet_ms": 100},
             "rpc_queue_timeout_ms": queue_ms,
         }))
@@ -101,25 +104,73 @@ impl Env {
     async fn spawn_spec(&self, spec: RunnerSpec) -> RemoteRunner {
         let mut opts = SpawnOptions::new(self.agent, self.state(), self.run(), spec);
         opts.connect = self.options(Some(0));
+        opts.start_timeout = wait();
         RemoteRunner::spawn_process(&bin(), opts)
             .await
             .expect("spawn the runner process")
     }
     async fn connect(&self, since: Option<u64>) -> RemoteRunner {
-        RemoteRunner::connect_with(&self.run(), self.agent, self.options(since))
+        self.connect_opts(self.options(since)).await
+    }
+    async fn connect_opts(&self, opts: ConnectOptions) -> RemoteRunner {
+        RemoteRunner::connect_with(&self.run(), self.agent, opts)
             .await
             .expect("connect")
+    }
+    /// Start the binary as a child of the test, so that the test sees its
+    /// exit code, and connect to it.
+    async fn spawn_direct(
+        &self,
+        spec: RunnerSpec,
+        opts: ConnectOptions,
+    ) -> (tokio::process::Child, RemoteRunner) {
+        let dir = self.state().join("agents").join(self.agent.to_string());
+        std::fs::create_dir_all(&dir).expect("agent dir");
+        let spec_path = dir.join("runner.json");
+        spec.write(&spec_path).expect("spec");
+        let child = tokio::process::Command::new(bin())
+            .arg("--agent")
+            .arg(self.agent.to_string())
+            .arg("--state-dir")
+            .arg(self.state())
+            .arg("--runtime-dir")
+            .arg(self.run())
+            .arg("--spec")
+            .arg(&spec_path)
+            .arg("--linger-ms")
+            .arg("200")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("start the runner");
+        let control = terrarium_runner::control_socket_path(&self.run(), self.agent);
+        until("the control socket", || control.exists()).await;
+        let r = self.connect_opts(opts).await;
+        (child, r)
+    }
+    /// Wait until `runner.log` holds `text`.
+    async fn until_log(&self, text: &str) {
+        let log = self
+            .state()
+            .join("agents")
+            .join(self.agent.to_string())
+            .join("runner.log");
+        until(&format!("`{text}` in runner.log"), || {
+            std::fs::read_to_string(&log)
+                .unwrap_or_default()
+                .contains(text)
+        })
+        .await;
     }
     /// Wait until the runner process is gone: no pid lock, no control socket.
     async fn until_gone(&self) {
         let control = terrarium_runner::control_socket_path(&self.run(), self.agent);
-        timeout(WAIT, async {
-            while live_runner_pid(&self.run(), self.agent).is_some() || control.exists() {
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
+        until("the runner process exits", || {
+            live_runner_pid(&self.run(), self.agent).is_none() && !control.exists()
         })
-        .await
-        .expect("the runner process did not exit");
+        .await;
     }
 }
 
@@ -128,7 +179,7 @@ async fn until_status(
     to: AgentStatus,
 ) -> Vec<EventRecord> {
     let mut seen = Vec::new();
-    timeout(WAIT, async {
+    timeout(wait(), async {
         loop {
             let rec = events.recv().await.expect("event");
             let done = matches!(rec.event, Event::StatusChanged { to: t, .. } if t == to);
@@ -154,7 +205,7 @@ async fn hook_socket(path: &Path, msg: Value, answer: bool) -> Option<Value> {
     }
     let mut reader = BufReader::new(s);
     let mut text = String::new();
-    timeout(WAIT, reader.read_line(&mut text))
+    timeout(wait(), reader.read_line(&mut text))
         .await
         .expect("answer in time")
         .expect("read");
@@ -195,9 +246,12 @@ async fn the_runner_process_survives_a_daemon_disconnect() {
     until_status(&mut events, AgentStatus::Working).await;
     until_status(&mut events, AgentStatus::Idle).await;
     let mut seen = Vec::new();
-    timeout(WAIT, async {
+    timeout(wait(), async {
         while !String::from_utf8_lossy(&seen).contains("done: hello") {
-            seen.extend_from_slice(&output.recv().await.expect("output"));
+            match output.recv().await.expect("output") {
+                AttachEvent::Output(chunk) => seen.extend_from_slice(&chunk),
+                AttachEvent::Resynced(snap) => seen = snap.text().into_bytes(),
+            }
         }
     })
     .await
@@ -243,16 +297,12 @@ async fn the_runner_process_survives_a_daemon_disconnect() {
     assert_eq!(rpc["error"]["code"], "unavailable", "{rpc}");
 
     // A new daemon connects and replays from its last seq.
-    timeout(WAIT, async {
-        while !std::fs::read_to_string(&events_path)
+    until("the offline hook is in events.jsonl", || {
+        std::fs::read_to_string(&events_path)
             .unwrap_or_default()
             .contains("s-offline")
-        {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
     })
-    .await
-    .expect("the offline hook is in events.jsonl");
+    .await;
     let second = env.connect(Some(last)).await;
     let hello = second.hello().clone();
     assert_eq!(hello.status, AgentStatus::Idle);
@@ -263,7 +313,7 @@ async fn the_runner_process_survives_a_daemon_disconnect() {
     assert!(hello.seq > last);
     let r: Arc<dyn RunnerHandle> = Arc::new(second.clone());
     let mut events = r.subscribe_events();
-    let replayed = timeout(WAIT, events.recv())
+    let replayed = timeout(wait(), events.recv())
         .await
         .expect("replay")
         .expect("event");
@@ -291,7 +341,7 @@ async fn the_runner_process_survives_a_daemon_disconnect() {
 
     // Kill: the harness stops, and the runner process exits.
     r.kill().await.expect("kill");
-    let status = timeout(WAIT, r.wait()).await.expect("exit");
+    let status = timeout(wait(), r.wait()).await.expect("exit");
     assert_ne!(
         status.signal.as_deref(),
         Some(terrarium_runner::LOST_SIGNAL)
@@ -349,13 +399,7 @@ async fn a_new_daemon_connection_replaces_the_old_one() {
     let env = Env::new();
     let old = env.spawn().await;
     let new = env.connect(None).await;
-    timeout(WAIT, async {
-        while old.is_connected() {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("the old connection closes");
+    until("the old connection closes", || !old.is_connected()).await;
     // A call on the old handle fails; the new one works.
     assert!(old.screen().await.is_err());
     assert!(new.screen().await.is_ok());
@@ -372,7 +416,7 @@ async fn the_runner_process_exits_with_the_harness() {
     until_status(&mut events, AgentStatus::Idle).await;
     // `/quit` is not a turn: no hook comes, so the delivery cannot confirm.
     let _ = r.type_turn("/quit".into());
-    let status = timeout(WAIT, r.wait()).await.expect("exit");
+    let status = timeout(wait(), r.wait()).await.expect("exit");
     assert!(status.success(), "{status:?}");
     let seen = until_status(&mut events, AgentStatus::Stopped).await;
     assert!(
@@ -388,9 +432,15 @@ async fn the_runner_process_exits_with_the_harness() {
 #[tokio::test]
 async fn an_agent_request_waits_for_a_daemon_to_connect() {
     let env = Env::new();
-    let first = env.spawn_spec(env.spec_with_queue(10_000)).await;
+    let first = env
+        .spawn_spec(env.spec_with_queue(ms(10_000).as_millis() as u64))
+        .await;
     let hooks = first.socket_path().to_path_buf();
     drop(first);
+    // A request that comes while the runner still holds the old connection
+    // goes to it, and gets `unavailable` when it closes. Wait until the
+    // runner has seen the disconnect.
+    env.until_log("the daemon disconnected").await;
     let pending = tokio::spawn(async move {
         hook_socket(
             &hooks,
@@ -402,7 +452,7 @@ async fn an_agent_request_waits_for_a_daemon_to_connect() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(!pending.is_finished(), "the request waits in the queue");
     let r = env.connect(None).await;
-    let rpc = timeout(WAIT, pending)
+    let rpc = timeout(wait(), pending)
         .await
         .expect("answer")
         .expect("task")
@@ -423,7 +473,7 @@ async fn sigterm_stops_the_harness_and_the_runner() {
     until_status(&mut events, AgentStatus::Idle).await;
     let pid = i32::try_from(r.hello().runner_pid).expect("pid");
     kill(Pid::from_raw(pid), Signal::SIGTERM).expect("SIGTERM");
-    let status = timeout(WAIT, r.wait()).await.expect("exit");
+    let status = timeout(wait(), r.wait()).await.expect("exit");
     let seen = until_status(&mut events, AgentStatus::Stopped).await;
     assert!(seen.iter().any(|e| matches!(e.event, Event::Exit { .. })));
     assert_ne!(
@@ -431,4 +481,229 @@ async fn sigterm_stops_the_harness_and_the_runner() {
         Some(terrarium_runner::LOST_SIGNAL)
     );
     env.until_gone().await;
+}
+
+/// The runner ends the attach stream with `lagged` (a 1-chunk output
+/// channel in the runner), or the local reader falls behind (a 4-item
+/// channel here, and a reader that does not read during a flood). Either
+/// way `RemoteRunner::attach` attaches again by itself and gives
+/// `Resynced`.
+#[tokio::test]
+async fn a_remote_attach_resyncs_after_a_lag() {
+    let env = Env::new();
+    let mut spec = env.spec();
+    spec.output_capacity = Some(1);
+    let opts = ConnectOptions {
+        attach_capacity: 4,
+        ..env.options(Some(0))
+    };
+    let (mut child, r) = env.spawn_direct(spec, opts).await;
+    let mut events = r.subscribe_events();
+    until_status(&mut events, AgentStatus::Idle).await;
+    let (_, mut stream) = r.attach().await.expect("attach");
+    r.type_turn("/flood 5000".into())
+        .wait()
+        .await
+        .expect("delivered");
+    let seen = until_status(&mut events, AgentStatus::Idle).await;
+    assert!(seen.iter().any(|e| matches!(e.event, Event::TurnEnd)));
+
+    let mut resyncs = 0;
+    let mut text = Vec::new();
+    timeout(wait(), async {
+        while resyncs == 0 || !String::from_utf8_lossy(&text).contains("done: /flood 5000") {
+            match stream.recv().await.expect("the stream goes on") {
+                AttachEvent::Output(chunk) => text.extend_from_slice(&chunk),
+                AttachEvent::Resynced(snap) => {
+                    resyncs += 1;
+                    text = snap.text().into_bytes();
+                }
+            }
+        }
+    })
+    .await
+    .expect("a resync, then the end of the flood");
+
+    // The stream goes on after the resync.
+    r.type_turn("after".into()).wait().await.expect("delivered");
+    timeout(wait(), async {
+        while !String::from_utf8_lossy(&text).contains("done: after") {
+            match stream.recv().await.expect("the stream goes on") {
+                AttachEvent::Output(chunk) => text.extend_from_slice(&chunk),
+                AttachEvent::Resynced(snap) => text = snap.text().into_bytes(),
+            }
+        }
+    })
+    .await
+    .expect("output after the resync");
+
+    r.kill().await.expect("kill");
+    timeout(wait(), async { while stream.recv().await.is_some() {} })
+        .await
+        .expect("the stream ends after the exit");
+    timeout(wait(), child.wait())
+        .await
+        .expect("exit")
+        .expect("wait");
+}
+
+/// One way for the harness to end, and what the runner must report.
+struct Ending {
+    env: Vec<(&'static str, &'static str)>,
+    /// A turn to type first, and a screen text that shows it runs.
+    turn: Option<(&'static str, &'static str)>,
+    how: How,
+    code: i32,
+    signal: Option<i32>,
+    status: AgentStatus,
+}
+
+enum How {
+    /// The harness exits by itself after the turn.
+    Itself,
+    /// The `kill` call.
+    Kill,
+    /// SIGTERM to the runner process.
+    Sigterm,
+}
+
+async fn check_ending(e: Ending) {
+    use nix::sys::signal::{Signal, kill};
+    use nix::unistd::Pid;
+    let env = Env::new();
+    let mut spec = env.spec();
+    for (k, v) in &e.env {
+        spec.launch.env.insert((*k).into(), (*v).into());
+    }
+    spec.kill_grace_ms = ms(300).as_millis() as u64;
+    let (mut child, r) = env.spawn_direct(spec, env.options(Some(0))).await;
+    let mut events = r.subscribe_events();
+    until_status(&mut events, AgentStatus::Idle).await;
+    if let Some((turn, shows)) = e.turn {
+        let _ = r.type_turn(turn.into());
+        // A harness that exits by itself can be gone before the screen
+        // shows the text.
+        if !matches!(e.how, How::Itself) {
+            timeout(wait(), async {
+                while !r.screen().await.expect("screen").text().contains(shows) {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("no `{shows}` on the screen"));
+        }
+    }
+    match e.how {
+        How::Itself => {}
+        How::Kill => r.kill().await.expect("kill"),
+        How::Sigterm => {
+            let pid = i32::try_from(r.hello().runner_pid).expect("pid");
+            kill(Pid::from_raw(pid), Signal::SIGTERM).expect("SIGTERM");
+        }
+    }
+    let status = timeout(wait(), r.wait()).await.expect("exit");
+    assert_eq!(status.exit_code(), e.code, "{status:?}");
+    assert_eq!(status.signal_number(), e.signal, "{status:?}");
+    until_status(&mut events, e.status).await;
+    let code = timeout(wait(), child.wait())
+        .await
+        .expect("the runner exits")
+        .expect("wait");
+    assert_eq!(
+        code.code(),
+        Some(e.code),
+        "the runner exit code reflects the harness"
+    );
+    assert_eq!(read_exit_status(&env.state(), env.agent), Some(status));
+    env.until_gone().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_normal_exit_gives_code_0() {
+    check_ending(Ending {
+        env: vec![],
+        turn: Some(("/quit", "bye")),
+        how: How::Itself,
+        code: 0,
+        signal: None,
+        status: AgentStatus::Stopped,
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_harness_crash_gives_its_code() {
+    check_ending(Ending {
+        env: vec![],
+        turn: Some(("/exit 7", "bye")),
+        how: How::Itself,
+        code: 7,
+        signal: None,
+        status: AgentStatus::Error,
+    })
+    .await;
+    check_ending(Ending {
+        env: vec![],
+        turn: Some(("/abort", "/abort")),
+        how: How::Itself,
+        code: 134,
+        signal: Some(6),
+        status: AgentStatus::Error,
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn kill_gives_sighup_then_sigkill() {
+    check_ending(Ending {
+        env: vec![],
+        turn: None,
+        how: How::Kill,
+        code: 129,
+        signal: Some(1),
+        status: AgentStatus::Stopped,
+    })
+    .await;
+    check_ending(Ending {
+        env: vec![("FAKE_TUI_IGNORE_HUP", "1")],
+        turn: None,
+        how: How::Kill,
+        code: 137,
+        signal: Some(9),
+        status: AgentStatus::Stopped,
+    })
+    .await;
+}
+
+/// SIGTERM to an idle harness: the exit keys, a clean exit. To a busy
+/// harness: SIGHUP, and SIGKILL after the grace when it ignores SIGHUP.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sigterm_stops_idle_with_exit_keys_and_busy_with_a_kill() {
+    check_ending(Ending {
+        env: vec![],
+        turn: None,
+        how: How::Sigterm,
+        code: 0,
+        signal: None,
+        status: AgentStatus::Stopped,
+    })
+    .await;
+    check_ending(Ending {
+        env: vec![],
+        turn: Some(("/hold", "holding...")),
+        how: How::Sigterm,
+        code: 129,
+        signal: Some(1),
+        status: AgentStatus::Stopped,
+    })
+    .await;
+    check_ending(Ending {
+        env: vec![("FAKE_TUI_IGNORE_HUP", "1")],
+        turn: Some(("/hold", "holding...")),
+        how: How::Sigterm,
+        code: 137,
+        signal: Some(9),
+        status: AgentStatus::Stopped,
+    })
+    .await;
 }

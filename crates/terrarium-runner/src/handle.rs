@@ -6,9 +6,10 @@ use std::path::Path;
 use terrarium_core::{AgentId, AgentStatus, Answer, EventRecord};
 use tokio::sync::{broadcast, watch};
 
+use crate::attach::AttachStream;
 use crate::error::Result;
 use crate::protocol::BoxFuture;
-use crate::runner::{Delivery, ExitStatus, OutputChunk, Runner, ScreenSnapshot};
+use crate::runner::{Delivery, ExitStatus, Runner, ScreenSnapshot};
 
 /// One harness, in this process or in a runner process. The trait is
 /// object safe: hold an `Arc<dyn RunnerHandle>`.
@@ -28,8 +29,10 @@ pub trait RunnerHandle: Send + Sync + 'static {
     fn subscribe_events(&self) -> broadcast::Receiver<EventRecord>;
     fn screen(&self) -> BoxFuture<'_, Result<ScreenSnapshot>>;
     /// The current screen and the output that follows it, with no gap and
-    /// no overlap. The receiver closes when the harness exits.
-    fn attach(&self) -> BoxFuture<'_, Result<(ScreenSnapshot, broadcast::Receiver<OutputChunk>)>>;
+    /// no overlap. When the stream falls behind, it attaches again by
+    /// itself and gives `AttachEvent::Resynced` with a new snapshot. The
+    /// stream ends after the harness exits.
+    fn attach(&self) -> BoxFuture<'_, Result<(ScreenSnapshot, AttachStream)>>;
     /// Write raw bytes to the PTY, as keystrokes.
     fn write<'a>(&'a self, bytes: &'a [u8]) -> BoxFuture<'a, Result<()>>;
     fn resize(&self, rows: u16, cols: u16) -> BoxFuture<'_, Result<()>>;
@@ -66,8 +69,8 @@ impl RunnerHandle for Runner {
         let s = Runner::screen(self);
         Box::pin(async move { Ok(s) })
     }
-    fn attach(&self) -> BoxFuture<'_, Result<(ScreenSnapshot, broadcast::Receiver<OutputChunk>)>> {
-        let a = Runner::attach(self);
+    fn attach(&self) -> BoxFuture<'_, Result<(ScreenSnapshot, AttachStream)>> {
+        let a = Runner::attach_stream(self);
         Box::pin(async move { Ok(a) })
     }
     fn write<'a>(&'a self, bytes: &'a [u8]) -> BoxFuture<'a, Result<()>> {

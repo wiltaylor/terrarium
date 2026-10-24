@@ -8,7 +8,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use terrarium_core::{AgentId, HarnessId, LaunchSpec};
 
-use crate::config::RunnerConfig;
+use crate::config::{DEFAULT_OUTPUT_CAPACITY, RunnerConfig};
 use crate::error::{Result, RunnerError};
 use crate::ready::DefaultReadyDetector;
 
@@ -85,6 +85,16 @@ pub struct RunnerSpec {
     /// it gets the `unavailable` tunnel error.
     #[serde(default = "d_rpc_queue")]
     pub rpc_queue_timeout_ms: u64,
+    /// SIGHUP, then SIGKILL after this time (`RunnerConfig::kill_grace`).
+    #[serde(default = "d_kill_grace")]
+    pub kill_grace_ms: u64,
+    /// The wait after the exit keys on SIGTERM (`RunnerConfig::stop_grace`).
+    #[serde(default = "d_stop_grace")]
+    pub stop_grace_ms: u64,
+    /// The PTY output channel capacity (`RunnerConfig::output_capacity`).
+    /// For tests only: a small value forces an attach lag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_capacity: Option<usize>,
 }
 
 fn defaults() -> RunnerConfig {
@@ -110,6 +120,12 @@ fn d_attempts() -> u32 {
 }
 fn d_log() -> u64 {
     defaults().log_max_bytes
+}
+fn d_kill_grace() -> u64 {
+    ms(defaults().kill_grace)
+}
+fn d_stop_grace() -> u64 {
+    ms(defaults().stop_grace)
 }
 fn d_tick() -> u64 {
     ms(defaults().tick)
@@ -142,6 +158,10 @@ impl RunnerSpec {
             tick_ms: ms(config.tick),
             ready_detector: None,
             rpc_queue_timeout_ms: d_rpc_queue(),
+            kill_grace_ms: ms(config.kill_grace),
+            stop_grace_ms: ms(config.stop_grace),
+            output_capacity: (config.output_capacity != DEFAULT_OUTPUT_CAPACITY)
+                .then_some(config.output_capacity),
         }
     }
 
@@ -163,6 +183,11 @@ impl RunnerSpec {
         c.submit_attempts = self.submit_attempts;
         c.log_max_bytes = self.log_max_bytes;
         c.tick = Duration::from_millis(self.tick_ms.max(1));
+        c.kill_grace = Duration::from_millis(self.kill_grace_ms);
+        c.stop_grace = Duration::from_millis(self.stop_grace_ms);
+        if let Some(n) = self.output_capacity {
+            c.output_capacity = n.max(1);
+        }
         if let Some(d) = &self.ready_detector {
             let quiet = Duration::from_millis(d.quiet_ms);
             let det = match &d.pattern {

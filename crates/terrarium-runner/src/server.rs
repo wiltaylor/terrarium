@@ -25,7 +25,7 @@ use crate::control::{
 use crate::error::RunnerError;
 use crate::events::read_since;
 use crate::protocol::{BoxFuture, RequestContext, RequestHandler, RpcError};
-use crate::runner::Runner;
+use crate::runner::{OUTPUT_DRAIN, Runner};
 
 /// The frames that wait for the writer of one connection.
 const OUT_CAPACITY: usize = 1024;
@@ -625,7 +625,7 @@ async fn attach_stream(runner: Runner, out: Out, id: u64) {
             },
             _ = &mut exited => {
                 // The reader thread can still hold the last bytes.
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                runner.output_drained(OUTPUT_DRAIN).await;
                 loop {
                     match rx.try_recv() {
                         Ok(chunk) => {

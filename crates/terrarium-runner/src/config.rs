@@ -6,6 +6,13 @@ use terrarium_core::AgentId;
 
 use crate::ready::ReadyDetector;
 
+/// The default of [`RunnerConfig::kill_grace`].
+pub const DEFAULT_KILL_GRACE: Duration = Duration::from_secs(3);
+/// The default of [`RunnerConfig::stop_grace`].
+pub const DEFAULT_STOP_GRACE: Duration = Duration::from_secs(5);
+/// The default of [`RunnerConfig::output_capacity`].
+pub const DEFAULT_OUTPUT_CAPACITY: usize = 1024;
+
 /// The settings of one runner.
 #[derive(Clone)]
 pub struct RunnerConfig {
@@ -41,6 +48,17 @@ pub struct RunnerConfig {
     pub tick: Duration,
     /// Overrides the default prompt-ready detector.
     pub ready_detector: Option<Arc<dyn ReadyDetector>>,
+    /// [`crate::Runner::kill`] sends SIGHUP first. When the harness has not
+    /// exited after this time, the runner sends SIGKILL to its process
+    /// group.
+    pub kill_grace: Duration,
+    /// [`crate::Runner::stop`] types the adapter's exit keys into an idle
+    /// harness, and waits this long for the exit before it kills.
+    pub stop_grace: Duration,
+    /// The capacity of the PTY output channel. An attach client that falls
+    /// this many chunks behind lags. The default is 1024. Tests set a small
+    /// value to force a lag.
+    pub output_capacity: usize,
 }
 
 impl RunnerConfig {
@@ -64,6 +82,9 @@ impl RunnerConfig {
             log_max_bytes: 8 * 1024 * 1024,
             tick: Duration::from_millis(50),
             ready_detector: None,
+            kill_grace: DEFAULT_KILL_GRACE,
+            stop_grace: DEFAULT_STOP_GRACE,
+            output_capacity: DEFAULT_OUTPUT_CAPACITY,
         }
     }
 

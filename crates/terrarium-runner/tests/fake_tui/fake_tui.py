@@ -13,7 +13,11 @@ Commands:
   /quit       exit 0 with no hooks
   /exit N     exit with code N, with no hooks
   /stall      submit, then stay silent for FAKE_TUI_STALL_MS before Stop
+  /hold       submit, print `holding...`, then wait (silent) for one line
+              before Stop: a stall that ends when the test says so
   /question   submit, send a Notification hook, wait for one answer line
+  /flood N    submit, print N numbered lines of 64 bytes, then Stop
+  /abort      die of SIGABRT, with no hooks
 
 Env:
   TERRARIUM_SOCKET     the runner socket (the runner sets it)
@@ -25,10 +29,20 @@ Env:
   FAKE_TUI_RESUME_FAIL when "1", `--resume` prints an error and exits 1
   FAKE_TUI_EXIT_AFTER_MS  when set, exit with FAKE_TUI_EXIT_CODE (default 1)
                        this long after the start, with no hooks
+  FAKE_TUI_SUBMIT_GATE a path: after a line is read, wait until this file
+                       exists before UserPromptSubmit goes out
+  FAKE_TUI_IGNORE_HUP  when "1", ignore SIGHUP (only SIGKILL stops it)
+  FAKE_TUI_ANSWER_HOLD when "1", /question waits for one more line after
+                       the answer before Stop, so the turn stays open
+
+Each hook goes out (connect, send, close) before the next output, so the
+order of hooks and screen text is fixed. The only timed waits are the
+work time of a normal turn and /stall.
 """
 
 import json
 import os
+import signal
 import socket
 import sys
 import threading
@@ -39,6 +53,7 @@ DELAY = float(os.environ.get("FAKE_TUI_DELAY_MS", "300")) / 1000
 STALL = float(os.environ.get("FAKE_TUI_STALL_MS", "1500")) / 1000
 NO_SUBMIT = os.environ.get("FAKE_TUI_NO_SUBMIT") == "1"
 NO_SUBMIT_HOOK = os.environ.get("FAKE_TUI_NO_SUBMIT_HOOK") == "1"
+SUBMIT_GATE = os.environ.get("FAKE_TUI_SUBMIT_GATE")
 
 
 def hook(name, payload):
@@ -68,6 +83,8 @@ def arg(name):
 
 
 def main():
+    if os.environ.get("FAKE_TUI_IGNORE_HUP") == "1":
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)
     out("fake tui 1.0\n")
     resume = arg("--resume")
     session = resume or arg("--session")
@@ -108,19 +125,32 @@ def main():
         if text.startswith("/exit "):
             out("bye\n")
             return int(text.split()[1])
+        if text == "/abort":
+            os.abort()
         if NO_SUBMIT:
             out("ignored\n")
             continue
+        if SUBMIT_GATE:
+            while not os.path.exists(SUBMIT_GATE):
+                time.sleep(0.01)
         if not NO_SUBMIT_HOOK:
             hook("UserPromptSubmit", {"prompt": text})
         out("working...\n")
         if text == "/stall":
             time.sleep(STALL)
+        elif text == "/hold":
+            out("holding...\n")
+            sys.stdin.readline()
+        elif text.startswith("/flood "):
+            for i in range(int(text.split()[1])):
+                out(f"flood {i:06d} " + "x" * 50 + "\n")
         elif text == "/question":
             hook("Notification", {"message": "Allow the tool?"})
             out("Allow the tool? [y/n] ")
             answer = sys.stdin.readline().strip()
             out(f"answer: {answer}\n")
+            if os.environ.get("FAKE_TUI_ANSWER_HOLD") == "1":
+                sys.stdin.readline()
         else:
             time.sleep(DELAY)
         out(f"done: {text}\n")

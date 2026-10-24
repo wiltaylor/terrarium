@@ -31,7 +31,7 @@ A runner process also uses these files:
 | `<state>/agents/<ulid>/runner.json` | The spec file (mode `0600`). `RemoteRunner::spawn_process` writes it. |
 | `<state>/agents/<ulid>/runner-argv.json` | The sandbox argv, when the daemon gives one. |
 | `<state>/agents/<ulid>/runner.log` | The stdout and stderr of the runner process. The process appends to it. |
-| `<state>/agents/<ulid>/runner-exit.json` | The `ExitStatus` of the harness, as JSON. The runner writes it after the harness exits, and removes an old one at the start. |
+| `<state>/agents/<ulid>/runner-exit.json` | The `ExitStatus` of the harness, as JSON. The runner writes it after each harness exit: a normal exit, a crash, a `kill`, and a SIGTERM. It writes a temp file and renames it, so a reader never sees half a file. It removes an old one at the start. |
 
 ### Event seq
 
@@ -70,6 +70,14 @@ connection.
 the harness wrote to the stdin of the hook. The runner makes a `HookPayload`
 from the two fields and the adapter's `HarnessId`. Then it calls
 `Adapter::hook_event` and gets the events.
+
+Each `terrarium hook` call is one connection, and a harness runs its hooks
+one after the other. The accept loop reads the first line of each
+connection itself and runs a hook at once, before it accepts the next
+connection. So the hooks reach the status machine in the order that the
+harness sent them: a `UserPromptSubmit` always comes before the
+`Notification` after it. A client that sends nothing for 1 s gets its own
+task, so it cannot stop the hooks for long.
 
 `terrarium hook` always exits 0, so that a hook never breaks the harness. It
 prints nothing when it succeeds. When `TERRARIUM_SOCKET` is not set, or the
@@ -116,6 +124,7 @@ Error codes:
 | (spawn) | The runner starts the child. | `starting` |
 | `starting` | The prompt is ready for the first time. | `idle` |
 | any live status | A `TurnStart` event (the prompt-submit hook). | `working` |
+| any live status | A system prompt: a prompt-submit hook for which `Adapter::is_system_prompt` is true. | `working` (reason `system prompt`) |
 | `idle` | A typed turn is in flight and the adapter's `screen_hint` says `Busy`. | `working` |
 | any live status | A `TurnEnd` event (the stop hook). | `idle` |
 | any live status | A `Notification` with `question: true`, or a `Question` event. | `blocked` |
@@ -160,6 +169,16 @@ runner types turns one at a time, in order:
    `DeliveryError::NoSubmitHook`, and the runner raises
    `Event::DeliveryFailed`.
 
+A system prompt is not a sign. Copilot sends a `UserPromptSubmit` with a
+`<system_notification>` prompt when a background shell command ends
+(`docs/compat.md`, "a background shell can start a second turn after
+Stop"). For such a hook, `Adapter::is_system_prompt` is true. The runner
+then does not resolve the handle, and it does not record a `TurnStart`.
+It records `Event::Notification { question: false }` with the prompt text,
+so the daemon still sees it. The turn is open and the status becomes
+`working`, because the harness works on the prompt. A pending delivery
+still waits for its own prompt-submit hook or a busy screen.
+
 Why two signs: Codex and Copilot send the prompt-submit hook late. On the
 first prompt of a session, Codex creates the session first, and the hook
 comes 0.86 s after the Enter key (`docs/compat.md`). A retry on the hook
@@ -182,7 +201,18 @@ The runner decides "the prompt is ready" in this order:
 
 - `Runner::attach()` gives a `ScreenSnapshot` and an output receiver. The
   snapshot and the receiver have no gap and no overlap. A client writes
-  `snapshot.formatted` to an empty terminal, then each output chunk.
+  `snapshot.formatted` to an empty terminal, then each output chunk. A
+  receiver that falls `RunnerConfig::output_capacity` chunks behind (default
+  1024) gets `RecvError::Lagged`.
+- `Runner::attach_stream()` and `RunnerHandle::attach` give a
+  `ScreenSnapshot` and an `AttachStream`. `AttachStream::recv` gives
+  `AttachEvent::Output(chunk)`, or `AttachEvent::Resynced(snapshot)`. When
+  the stream falls behind, it attaches again by itself: it gives
+  `Resynced` with a new snapshot, and the output goes on from that
+  snapshot. Output is missing before `Resynced`, so a UI clears the
+  terminal and writes `snapshot.formatted`. Each lag gets one new attach.
+  When that attach fails, the stream ends. The stream ends (`None`) after
+  the harness exits and the last output is out.
 - `Runner::write(bytes)` sends keystrokes. `Runner::resize(rows, cols)` sets
   the PTY size and the screen size.
 - `Runner::screen()` gives the text lines and the cursor.
@@ -200,6 +230,8 @@ methods:
 | `type_turn` | The keystrokes for a turn. |
 | `answer` | The keystrokes for `Runner::answer`. |
 | `clear_input_keys` | The keystrokes that empty the input line before a retry. The runner sends them only when no prompt-submit hook and no busy screen came. |
+| `is_system_prompt` | True for a prompt-submit hook of a prompt that the harness made itself. Such a hook does not confirm a delivery and is not a `TurnStart` (see "Typing a turn"). The default is false. Copilot implements it. |
+| `exit_keys` | The keystrokes that make an idle harness exit, for `Runner::stop`. |
 
 The adapter's `launch` gives the `LaunchSpec`. The supervisor calls `launch`
 and gives the spec to `Runner::spawn`. When `screen_hint` cannot tell, set
@@ -212,7 +244,21 @@ the hook JSON on stdin. The adapter maps the names that it gets back.
 
 The background tasks hold the runner until the child exits. Drop the last
 `Runner` handle and the harness keeps running. Call `Runner::kill` to stop it,
-and `Runner::wait` to get the `ExitStatus`. An in-process runner ends with
+and `Runner::wait` to get the `ExitStatus`.
+
+- `Runner::kill` sends SIGHUP to the harness. When the harness has not
+  exited after `RunnerConfig::kill_grace` (default 3 s), the runner sends
+  SIGKILL to the process group of the harness.
+- `Runner::stop` is the graceful stop. When the harness is `idle` and the
+  adapter has `exit_keys`, the runner types them and waits
+  `RunnerConfig::stop_grace` (default 5 s). When the harness is busy, the
+  adapter has no exit keys, or the harness does not exit in time, the
+  runner calls `kill`. No queued turn goes out after `stop` or `kill`.
+  Both set the final status to `stopped`.
+- `ExitStatus::signal` is the signal text of the PTY crate, for example
+  `Hangup` or `Killed`. `ExitStatus::signal_number` gives the number.
+  `ExitStatus::exit_code` gives the code as a shell does: the code, or 128
+  plus the signal number. An in-process runner ends with
 the daemon process. To keep the harness through a daemon restart, use a
 runner process.
 
@@ -237,11 +283,20 @@ The process does these steps:
    to the daemon over the control socket (see "Agent RPC through the
    daemon").
 5. It waits for the harness to exit. SIGTERM and SIGINT stop the harness
-   first (the status becomes `stopped`). SIGHUP does nothing.
+   with `Runner::stop`: the exit keys for an idle harness, else SIGHUP, and
+   SIGKILL after `kill_grace_ms`. The status becomes `stopped`. SIGHUP does
+   nothing.
 6. It writes `runner-exit.json`. When a daemon is connected, it waits up to
    `--linger-ms` for the daemon to disconnect. Then it removes the control
-   socket, empties the pid file, and exits with code 0. Code 1 means that
-   the runner itself failed, for example a bad spec or a launch error.
+   socket, empties the pid file, and exits.
+
+The exit code of the process reflects the harness: it is
+`ExitStatus::exit_code`. A harness that exits with code 7 gives 7. A
+harness that SIGHUP ends gives 129, and SIGKILL gives 137. When the runner
+itself fails before the harness starts (for example a bad spec or a launch
+error), the code is 1 and there is no `runner-exit.json`. Code 3 means that
+a live runner holds the agent. Read `runner-exit.json` to tell the cases
+apart.
 
 The process runs while no daemon is connected. The harness keeps working,
 hooks keep coming in, and the events go to `events.jsonl` with their seq.
@@ -264,7 +319,8 @@ other field takes the default of `RunnerConfig::new`.
   "stall_timeout_ms": 300000, "submit_timeout_ms": 10000, "submit_attempts": 2,
   "log_max_bytes": 8388608, "tick_ms": 50,
   "ready_detector": {"quiet_ms": 300, "pattern": "> $"},
-  "rpc_queue_timeout_ms": 10000
+  "rpc_queue_timeout_ms": 10000,
+  "kill_grace_ms": 3000, "stop_grace_ms": 5000
 }
 ```
 
@@ -276,6 +332,9 @@ other field takes the default of `RunnerConfig::new`.
 | `launch` | The `LaunchSpec`: the final command. For a sandbox, it is the full `bwrap` command. The runner does not call `Adapter::launch`. |
 | `ready_detector` | The settings of `DefaultReadyDetector`. Absent: the default detector. |
 | `rpc_queue_timeout_ms` | How long an agent request waits for a daemon connection. |
+| `kill_grace_ms` | The time from SIGHUP to SIGKILL (`RunnerConfig::kill_grace`). |
+| `stop_grace_ms` | The wait after the exit keys on SIGTERM (`RunnerConfig::stop_grace`). |
+| `output_capacity` | The PTY output channel capacity. Use it in tests only: a small value forces an attach lag. Absent: 1024. |
 
 `--sandbox-argv-file` names a JSON array of strings. The first string
 replaces `launch.program`, and the rest replace `launch.args`.
@@ -286,8 +345,27 @@ so set `RunnerSpec::ready_detector` yourself.
 
 The adapter selection is in one module:
 `crates/terrarium-runner/src/bin/terrarium-runner/adapters.rs`. The runner
-process uses the adapter for `hook_event`, `screen_hint`, `type_turn`,
-`clear_input_keys`, and `answer` only.
+process uses the adapter for `hook_event`, `is_system_prompt`,
+`screen_hint`, `type_turn`, `clear_input_keys`, `exit_keys`, and `answer`
+only.
+
+### The `bin` feature
+
+The binary and its adapter selection are behind the cargo feature `bin`.
+The feature is on by default, so `cargo build -p terrarium-runner` builds
+the binary. The feature adds the four adapter crates, `clap`, `anyhow`,
+`tracing-subscriber`, and `semver`. The library alone needs none of them.
+A crate that uses only the library (the daemon) can turn the feature off:
+
+```toml
+terrarium-runner = { workspace = true, default-features = false }
+```
+
+For a workspace dependency, the root `Cargo.toml` must also set
+`default-features = false` on `terrarium-runner`, because a member can only
+add features. `cargo build -p terrarium-runner --no-default-features`
+builds the library alone. The `process` integration test runs the binary,
+so it also needs the feature.
 
 ## The control socket
 
@@ -343,14 +421,14 @@ first connection get the error `unavailable`.
 | `watch_status` | none | Stream. The first item is `{"status":...}` with the current status. Then one item for each change. The stream ends after the harness exits, with the final status as the last item. |
 | `events` | `since` (optional seq) | Stream. Each item is an `EventRecord` with its `seq`. With `since`, the runner first sends the records after `since` from `events.jsonl`, then the new records. With no `since`, only new records. The stream has no gap and no doubles: the runner skips each record with a seq at or below the last one that it sent. When the stream falls behind, the runner reads the missed records from the file. The stream ends after the harness exits and the last record is sent. |
 | `screen` | none | `reply`: a snapshot: `rows`, `cols`, `lines`, `cursor` (`[row, col]`), and `formatted` (base64 escape sequences that draw the screen). |
-| `attach` | none | Stream. The first item is `{"snapshot":{...}}`, as for `screen`. Each next item is `{"output":"<base64>"}`, a chunk of raw PTY output. The snapshot and the output have no gap and no overlap. When the client falls 1024 chunks behind, the stream ends with the error `lagged`; attach again. The stream ends after the harness exits. |
+| `attach` | none | Stream. The first item is `{"snapshot":{...}}`, as for `screen`. Each next item is `{"output":"<base64>"}`, a chunk of raw PTY output. The snapshot and the output have no gap and no overlap. When the client falls `output_capacity` chunks behind (default 1024), the stream ends with the error `lagged`; attach again. `RemoteRunner::attach` does that by itself (see "Attaching"). The stream ends after the harness exits. |
 | `write` | `data` (base64) | `reply`: `null`. The bytes go to the PTY as keystrokes. This is the attach input. |
 | `resize` | `rows`, `cols` | `reply`: `null`. |
 | `type_turn` | `text` | `reply`: `{"delivery":<id>}`. Later, one `delivery` frame with the same id gives the outcome (below). |
 | `answer` | `request_id`, `answer` (`{"kind":"allow"}`, `{"kind":"deny"}`, `{"kind":"choice","value":2}`) | `reply`: `null`. As `Runner::answer`. |
 | `answer_keys` | `keys` | `reply`: `null`. As `Runner::answer_keys`. |
 | `kill` | none | `reply`: `null`. As `Runner::kill`. The status becomes `stopped` when the harness exits, and then the runner process exits. |
-| `wait` | none | `reply` when the harness exits: `{"code":0}` or `{"code":1,"signal":"SIGKILL"}`. |
+| `wait` | none | `reply` when the harness exits: `{"code":0}` or `{"code":1,"signal":"Killed"}`. |
 | `cancel` | `call` (the id of a stream call) | `reply`: `null`. The stream stops with an `end` frame with the error `cancelled`. |
 
 The `Hello` object:
@@ -429,6 +507,7 @@ hold an `Arc<dyn RunnerHandle>`.
 | `status`, `watch_status` | The live status. | The last status from the `watch_status` stream. |
 | `subscribe_events` | New events. | New events. The first call also gets the replay of `ConnectOptions::events_since`. |
 | `screen`, `attach` | Local, no wait. | One call, or one stream. |
+| `attach` lag | A new local attach and `Resynced`. | A new `attach` stream and `Resynced`, when the runner ends the stream with `lagged`, or when the local reader falls `ConnectOptions::attach_capacity` items behind (default 1024). |
 | `write`, `resize`, `answer`, `answer_keys`, `kill` | Local. | One call each. |
 | `type_turn` | A `Delivery` with the runner id. | A `Delivery` with a local id. The `delivery` frame resolves it. |
 | `wait` | The exit status. | The `wait` reply. When the connection closes first: `runner-exit.json`, else code 1 with the signal `RUNNER_LOST`. |
@@ -477,3 +556,14 @@ each agent that the database shows as live:
    `subscribe_events` receiver gets every event that the daemon missed, in
    order, with no gap.
 3. Take the status, the session ID, and the pids from `hello()`.
+
+## Tests
+
+The integration tests in `crates/terrarium-runner/tests` drive the fake TUI
+(`tests/fake_tui/fake_tui.py`). Each test waits for a condition, never for
+a fixed time, and each wait has a limit of 30 s. Set
+`TERRARIUM_TEST_SLOW=1` on a slow machine (CI) to multiply each limit and
+each timing setting by 4, or `TERRARIUM_TEST_SLOW=<n>` to multiply by `n`.
+The fake TUI has commands that wait for the test (`/hold`, the
+`FAKE_TUI_SUBMIT_GATE` file, `FAKE_TUI_ANSWER_HOLD`), so that a test does not
+race a timer in the fake TUI.

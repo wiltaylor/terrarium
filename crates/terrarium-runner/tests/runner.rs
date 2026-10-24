@@ -1,9 +1,13 @@
 //! Integration tests: the runner against the fake TUI in `tests/fake_tui/`.
+//! Every wait is for a condition, with the limits of `common`.
+
+mod common;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use common::{ms, until, wait};
 use semver::{Version, VersionReq};
 use serde_json::{Value, json};
 use terrarium_core::{
@@ -11,8 +15,8 @@ use terrarium_core::{
     HookPayload, LaunchSpec, ScreenHint,
 };
 use terrarium_runner::{
-    BoxFuture, DefaultReadyDetector, DeliveryError, NoHandler, RequestContext, RequestHandler,
-    RpcError, Runner, RunnerConfig,
+    AttachEvent, BoxFuture, DefaultReadyDetector, DeliveryError, NoHandler, RequestContext,
+    RequestHandler, RpcError, Runner, RunnerConfig, RunnerHandle,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
@@ -20,8 +24,10 @@ use tokio::sync::broadcast;
 use tokio::time::timeout;
 
 /// An adapter with the hook names of Claude Code. With `busy_screen` set,
-/// `screen_hint` says `Busy` while the fake TUI shows `working...`, and it
-/// cannot tell otherwise.
+/// `screen_hint` says `Busy` while the fake TUI shows `working...` or
+/// `holding...`, and it cannot tell otherwise. A `UserPromptSubmit` with a
+/// `<system_notification>` prompt is a system prompt, as for Copilot. The
+/// exit keys are `/quit`.
 struct FakeAdapter {
     busy_screen: bool,
 }
@@ -55,11 +61,21 @@ impl Adapter for FakeAdapter {
     fn screen_hint(&self, screen: &terrarium_core::adapter::Screen) -> ScreenHint {
         let contents = screen.contents();
         let last = contents.lines().rev().find(|l| !l.trim().is_empty());
-        if self.busy_screen && last.is_some_and(|l| l.trim() == "working...") {
+        if self.busy_screen && last.is_some_and(|l| matches!(l.trim(), "working..." | "holding..."))
+        {
             ScreenHint::Busy
         } else {
             ScreenHint::Unknown
         }
+    }
+    fn is_system_prompt(&self, hook: &HookPayload) -> bool {
+        hook.hook == "UserPromptSubmit"
+            && hook
+                .str_field("prompt")
+                .is_some_and(|p| p.starts_with("<system_notification>"))
+    }
+    fn exit_keys(&self) -> Vec<u8> {
+        b"/quit\r".to_vec()
     }
     /// Visible keys, so a test can see that the retry path sends them.
     fn clear_input_keys(&self) -> Vec<u8> {
@@ -85,21 +101,31 @@ struct Harness {
 }
 
 struct Opts {
-    env: Vec<(&'static str, &'static str)>,
+    env: Vec<(&'static str, String)>,
     stall: Duration,
     submit: Duration,
     busy_screen: bool,
+    output_capacity: Option<usize>,
+    kill_grace: Option<Duration>,
+    stop_grace: Option<Duration>,
 }
 
 impl Default for Opts {
     fn default() -> Self {
         Self {
             env: vec![],
-            stall: Duration::from_secs(30),
-            submit: Duration::from_secs(5),
+            stall: ms(60_000),
+            submit: ms(10_000),
             busy_screen: false,
+            output_capacity: None,
+            kill_grace: None,
+            stop_grace: None,
         }
     }
+}
+
+fn env(pairs: &[(&'static str, &str)]) -> Vec<(&'static str, String)> {
+    pairs.iter().map(|(k, v)| (*k, (*v).to_owned())).collect()
 }
 
 async fn start(opts: Opts) -> Harness {
@@ -120,6 +146,15 @@ async fn start_with(opts: Opts, handler: Arc<dyn RequestHandler>) -> Harness {
     config.stall_timeout = opts.stall;
     config.submit_timeout = opts.submit;
     config.tick = Duration::from_millis(20);
+    if let Some(n) = opts.output_capacity {
+        config.output_capacity = n;
+    }
+    if let Some(g) = opts.kill_grace {
+        config.kill_grace = g;
+    }
+    if let Some(g) = opts.stop_grace {
+        config.stop_grace = g;
+    }
     config.ready_detector = Some(Arc::new(DefaultReadyDetector {
         quiet: Duration::from_millis(100),
         pattern: None,
@@ -144,15 +179,13 @@ async fn start_with(opts: Opts, handler: Arc<dyn RequestHandler>) -> Harness {
     }
 }
 
-const WAIT: Duration = Duration::from_secs(10);
-
 /// Wait for a status-change event to `to`. Returns every event seen on the way.
 async fn until_status(
     events: &mut broadcast::Receiver<EventRecord>,
     to: AgentStatus,
 ) -> Vec<Event> {
     let mut seen = Vec::new();
-    timeout(WAIT, async {
+    timeout(wait(), async {
         loop {
             let rec = events.recv().await.expect("event");
             let done = matches!(rec.event, Event::StatusChanged { to: t, .. } if t == to);
@@ -170,13 +203,10 @@ async fn until_status(
 /// Wait until the screen shows `text`. A hook can reach the runner before
 /// the PTY bytes that the harness wrote just before it.
 async fn until_screen(h: &Harness, text: &str) {
-    timeout(WAIT, async {
-        while !h.runner.screen().text().contains(text) {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+    until(&format!("`{text}` on the screen"), || {
+        h.runner.screen().text().contains(text)
     })
-    .await
-    .unwrap_or_else(|_| panic!("no `{text}` on the screen: {}", h.runner.screen().text()));
+    .await;
 }
 
 async fn until_idle(h: &mut Harness) {
@@ -210,7 +240,7 @@ async fn turn_runs_starting_idle_working_idle() {
     assert!(h.runner.screen().text().contains("fake tui 1.0"));
 
     let delivery = h.runner.type_turn("hello");
-    timeout(WAIT, delivery.wait())
+    timeout(wait(), delivery.wait())
         .await
         .expect("delivery in time")
         .expect("delivered");
@@ -239,7 +269,7 @@ async fn turn_runs_starting_idle_working_idle() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn second_turn_waits_for_stop() {
     let mut h = start(Opts {
-        env: vec![("FAKE_TUI_DELAY_MS", "600")],
+        env: env(&[("FAKE_TUI_DELAY_MS", "600")]),
         ..Opts::default()
     })
     .await;
@@ -248,7 +278,7 @@ async fn second_turn_waits_for_stop() {
     let first = h.runner.type_turn("first");
     until_status(&mut h.events, AgentStatus::Working).await;
     let second = h.runner.type_turn("second");
-    timeout(WAIT, first.wait())
+    timeout(wait(), first.wait())
         .await
         .expect("time")
         .expect("first");
@@ -257,7 +287,7 @@ async fn second_turn_waits_for_stop() {
     let seen = until_status(&mut h.events, AgentStatus::Idle).await;
     assert!(!seen.iter().any(|e| matches!(e,
         Event::TurnStart { prompt: Some(p) } if p == "second")));
-    timeout(WAIT, second.wait())
+    timeout(wait(), second.wait())
         .await
         .expect("time")
         .expect("second");
@@ -269,29 +299,39 @@ async fn second_turn_waits_for_stop() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stall_blocks_then_stop_unblocks() {
+    // `/hold` stays silent until the test types a line, so the stall does
+    // not race a timer in the fake TUI.
     let mut h = start(Opts {
-        env: vec![("FAKE_TUI_STALL_MS", "1500")],
         stall: Duration::from_millis(400),
         ..Opts::default()
     })
     .await;
     until_idle(&mut h).await;
-    let d = h.runner.type_turn("/stall");
-    timeout(WAIT, d.wait())
+    let d = h.runner.type_turn("/hold");
+    timeout(wait(), d.wait())
         .await
         .expect("time")
         .expect("delivered");
     let seen = until_status(&mut h.events, AgentStatus::Blocked).await;
     assert!(seen.iter().any(|e| matches!(e,
         Event::StatusChanged { to: AgentStatus::Blocked, reason: Some(r), .. } if r == "stalled")));
-    // The fake TUI prints and sends Stop after the silence.
+    // The fake TUI prints and sends Stop after the line.
+    h.runner.write(b"\r").await.expect("release");
     until_status(&mut h.events, AgentStatus::Idle).await;
+    until_screen(&h, "done: /hold").await;
     h.runner.kill().expect("kill");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn question_blocks_and_answer_resumes() {
-    let mut h = start(Opts::default()).await;
+    // The fake TUI keeps the turn open after the answer until the test types
+    // one more line. Without that hold, the Stop hook can come before the
+    // test reads the status, and the status is already `idle`.
+    let mut h = start(Opts {
+        env: env(&[("FAKE_TUI_ANSWER_HOLD", "1")]),
+        ..Opts::default()
+    })
+    .await;
     until_idle(&mut h).await;
     h.runner.type_turn("/question");
     let seen = until_status(&mut h.events, AgentStatus::Blocked).await;
@@ -302,27 +342,38 @@ async fn question_blocks_and_answer_resumes() {
     assert!(h.runner.answer("q1", &Answer::Choice(0)).await.is_err());
     h.runner.answer("q1", &Answer::Allow).await.expect("answer");
     assert_eq!(h.runner.status(), AgentStatus::Working);
-    until_status(&mut h.events, AgentStatus::Idle).await;
+    let seen = until_status(&mut h.events, AgentStatus::Working).await;
+    assert!(
+        seen.iter().any(|e| matches!(e,
+        Event::StatusChanged { to: AgentStatus::Working, reason: Some(r), .. } if r == "answered"))
+    );
     until_screen(&h, "answer: y").await;
+    h.runner.write(b"\r").await.expect("release");
+    until_status(&mut h.events, AgentStatus::Idle).await;
     h.runner.kill().expect("kill");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn delivery_fails_after_one_retry() {
     let mut h = start(Opts {
-        env: vec![("FAKE_TUI_NO_SUBMIT", "1")],
-        submit: Duration::from_millis(500),
+        env: env(&[("FAKE_TUI_NO_SUBMIT", "1")]),
+        submit: ms(500),
         ..Opts::default()
     })
     .await;
     until_idle(&mut h).await;
     let d = h.runner.type_turn("lost");
-    let err = timeout(WAIT, d.wait())
+    let err = timeout(wait(), d.wait())
         .await
         .expect("time")
         .expect_err("fails");
     assert_eq!(err, DeliveryError::NoSubmitHook { attempts: 2 });
     // The fake TUI saw the turn twice, and the clear keys before the retry.
+    // The echo of the second try can reach the screen after the failure.
+    until("the second try on the screen", || {
+        h.runner.screen().text().matches("lost").count() >= 2
+    })
+    .await;
     let text = h.runner.screen().text();
     assert_eq!(text.matches("lost").count(), 2, "{text}");
     let cleared = text.find("cleared").expect("clear keys before the retry");
@@ -343,31 +394,33 @@ async fn delivery_fails_after_one_retry() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn busy_screen_confirms_a_turn_without_the_submit_hook() {
+    // `/hold` keeps the turn busy until the test types a line, so the turn
+    // runs past `submit_timeout` on any machine.
+    let submit = ms(1000);
     let mut h = start(Opts {
-        env: vec![
-            ("FAKE_TUI_NO_SUBMIT_HOOK", "1"),
-            ("FAKE_TUI_DELAY_MS", "1000"),
-        ],
-        submit: Duration::from_millis(500),
+        env: env(&[("FAKE_TUI_NO_SUBMIT_HOOK", "1")]),
+        submit,
         busy_screen: true,
         ..Opts::default()
     })
     .await;
     until_idle(&mut h).await;
-    let d = h.runner.type_turn("steady");
-    timeout(WAIT, d.wait())
+    let d = h.runner.type_turn("/hold");
+    timeout(wait(), d.wait())
         .await
         .expect("time")
         .expect("the busy screen confirms the turn");
+    // A retry would come `submit` after the typing. Wait past it, then let
+    // the turn end.
+    tokio::time::sleep(submit + Duration::from_millis(300)).await;
+    h.runner.write(b"\r").await.expect("release");
     let seen = until_status(&mut h.events, AgentStatus::Idle).await;
     assert!(seen.contains(&Event::TurnEnd));
     assert!(!seen.iter().any(|e| matches!(e, Event::TurnStart { .. })));
-    // Typed once: no clear keys and no retry, though the turn ran for
-    // longer than `submit_timeout`.
-    until_screen(&h, "done: steady").await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // Typed once: no clear keys and no retry.
+    until_screen(&h, "done: /hold").await;
     let text = h.runner.screen().text();
-    assert_eq!(text.matches("done: steady").count(), 1, "{text}");
+    assert_eq!(text.matches("done: /hold").count(), 1, "{text}");
     assert!(!text.contains("cleared"), "{text}");
     h.runner.kill().expect("kill");
     h.runner.wait().await;
@@ -379,6 +432,63 @@ async fn busy_screen_confirms_a_turn_without_the_submit_hook() {
     assert!(all.iter().any(|r| matches!(&r.event,
         Event::StatusChanged { to: AgentStatus::Working, reason: Some(r), .. }
             if r.contains("screen busy"))));
+}
+
+/// Copilot sends a `UserPromptSubmit` with a `<system_notification>`
+/// prompt when a background shell ends. It must not confirm a typed turn,
+/// and it is not a user turn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_system_prompt_does_not_confirm_a_delivery() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let gate = dir.path().join("gate");
+    let mut h = start(Opts {
+        env: vec![("FAKE_TUI_SUBMIT_GATE", gate.display().to_string())],
+        ..Opts::default()
+    })
+    .await;
+    until_idle(&mut h).await;
+    let mut delivery = Box::pin(h.runner.type_turn("hello").wait());
+    // The fake TUI holds its own UserPromptSubmit until the gate opens.
+    // A system prompt comes first.
+    until_screen(&h, "hello").await;
+    let system = "<system_notification>Shell command completed</system_notification>";
+    let mut s = UnixStream::connect(h.runner.socket_path())
+        .await
+        .expect("connect");
+    let hook = json!({"type":"hook","hook":"UserPromptSubmit","payload":{"prompt": system}});
+    s.write_all(format!("{hook}\n").as_bytes())
+        .await
+        .expect("hook");
+    drop(s);
+    let seen = until_status(&mut h.events, AgentStatus::Working).await;
+    assert!(seen.iter().any(|e| matches!(e,
+        Event::Notification { message, question: false } if message == system)));
+    assert!(!seen.iter().any(|e| matches!(e, Event::TurnStart { .. })));
+    assert!(
+        timeout(Duration::from_millis(200), &mut delivery)
+            .await
+            .is_err(),
+        "the system prompt confirmed the delivery"
+    );
+
+    // The real prompt-submit hook confirms it.
+    std::fs::write(&gate, b"").expect("open the gate");
+    timeout(wait(), delivery)
+        .await
+        .expect("time")
+        .expect("the real hook confirms the turn");
+    let seen = until_status(&mut h.events, AgentStatus::Idle).await;
+    assert!(seen.contains(&Event::TurnStart {
+        prompt: Some("hello".into())
+    }));
+    h.runner.kill().expect("kill");
+    h.runner.wait().await;
+    let all = read_events(h.runner.events_path());
+    let starts: Vec<_> = all
+        .iter()
+        .filter(|r| matches!(r.event, Event::TurnStart { .. }))
+        .collect();
+    assert_eq!(starts.len(), 1, "only the typed turn is a TurnStart");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -396,7 +506,7 @@ async fn attach_sees_output() {
     assert!(!snap.formatted.is_empty());
     h.runner.type_turn("ping-attach");
     let mut got = Vec::new();
-    timeout(WAIT, async {
+    timeout(wait(), async {
         loop {
             let chunk = rx.recv().await.expect("chunk");
             got.extend_from_slice(&chunk);
@@ -417,19 +527,18 @@ async fn kill_stops_and_exit_code_picks_stopped_or_error() {
     let mut h = start(Opts::default()).await;
     until_idle(&mut h).await;
     h.runner.kill().expect("kill");
-    let status = timeout(WAIT, h.runner.wait()).await.expect("exit");
+    let status = timeout(wait(), h.runner.wait()).await.expect("exit");
     assert!(!status.success());
     assert_eq!(h.runner.status(), AgentStatus::Stopped);
     // The driver removes the socket a tick after the exit.
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert!(!h.runner.socket_path().exists());
+    until("the socket is removed", || !h.runner.socket_path().exists()).await;
     let late = h.runner.type_turn("too late");
     assert_eq!(late.wait().await, Err(DeliveryError::Exited));
 
     let mut h = start(Opts::default()).await;
     until_idle(&mut h).await;
     let d = h.runner.type_turn("/quit");
-    let status = timeout(WAIT, h.runner.wait()).await.expect("exit");
+    let status = timeout(wait(), h.runner.wait()).await.expect("exit");
     assert!(status.success());
     assert_eq!(d.wait().await, Err(DeliveryError::Exited));
     // An exit with code 0 that no one asked for is `stopped`, not `error`.
@@ -438,7 +547,7 @@ async fn kill_stops_and_exit_code_picks_stopped_or_error() {
     let mut h = start(Opts::default()).await;
     until_idle(&mut h).await;
     let _ = h.runner.type_turn("/exit 3");
-    let status = timeout(WAIT, h.runner.wait()).await.expect("exit");
+    let status = timeout(wait(), h.runner.wait()).await.expect("exit");
     assert_eq!(status.code, 3);
     assert_eq!(h.runner.status(), AgentStatus::Error);
 }
@@ -480,7 +589,7 @@ async fn call(stream: &mut BufReader<UnixStream>, line: &str) -> Value {
         .await
         .expect("send");
     let mut reply = String::new();
-    timeout(WAIT, stream.read_line(&mut reply))
+    timeout(wait(), stream.read_line(&mut reply))
         .await
         .expect("reply in time")
         .expect("read");
@@ -525,4 +634,107 @@ async fn socket_answers_requests() {
     let r = call(&mut s, "not json").await;
     assert_eq!(r["error"]["code"], "parse_error");
     h.runner.kill().expect("kill");
+}
+
+/// A tiny output channel and a reader that does not read: the attach stream
+/// lags, attaches again by itself, and gives `Resynced` with a new
+/// snapshot. The output then goes on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_attach_stream_resyncs_after_a_lag() {
+    let mut h = start(Opts {
+        output_capacity: Some(2),
+        ..Opts::default()
+    })
+    .await;
+    until_idle(&mut h).await;
+    let (_, mut stream) = RunnerHandle::attach(&h.runner).await.expect("attach");
+    timeout(wait(), h.runner.type_turn("/flood 3000").wait())
+        .await
+        .expect("time")
+        .expect("delivered");
+    until_status(&mut h.events, AgentStatus::Idle).await;
+    until_screen(&h, "done: /flood 3000").await;
+
+    // The stream fell behind during the flood.
+    let mut resynced = None;
+    timeout(wait(), async {
+        while let Some(item) = stream.recv().await {
+            if let AttachEvent::Resynced(snap) = item {
+                resynced = Some(snap);
+                return;
+            }
+        }
+    })
+    .await
+    .expect("a resync in time");
+    let snap = resynced.expect("resynced");
+    assert!(!snap.formatted.is_empty());
+
+    // After the resync, the stream has live output again.
+    h.runner.type_turn("after-resync");
+    let mut got = Vec::new();
+    timeout(wait(), async {
+        while !String::from_utf8_lossy(&got).contains("done: after-resync") {
+            match stream.recv().await.expect("the stream goes on") {
+                AttachEvent::Output(chunk) => got.extend_from_slice(&chunk),
+                AttachEvent::Resynced(snap) => got = snap.text().into_bytes(),
+            }
+        }
+    })
+    .await
+    .expect("output after the resync");
+
+    // The stream ends after the harness exits.
+    h.runner.kill().expect("kill");
+    timeout(wait(), async { while stream.recv().await.is_some() {} })
+        .await
+        .expect("the stream ends");
+}
+
+/// `kill` sends SIGHUP. A harness that ignores it gets SIGKILL after
+/// `kill_grace`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn kill_escalates_to_sigkill() {
+    let mut h = start(Opts {
+        env: env(&[("FAKE_TUI_IGNORE_HUP", "1")]),
+        kill_grace: Some(ms(300)),
+        ..Opts::default()
+    })
+    .await;
+    until_idle(&mut h).await;
+    h.runner.kill().expect("kill");
+    let status = timeout(wait(), h.runner.wait()).await.expect("exit");
+    assert_eq!(status.signal_number(), Some(9), "{status:?}");
+    assert_eq!(status.exit_code(), 137);
+    assert_eq!(h.runner.status(), AgentStatus::Stopped);
+}
+
+/// `stop` types the exit keys into an idle harness: a clean exit, status
+/// `stopped`. A busy harness gets `kill`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stop_types_the_exit_keys_when_idle_and_kills_when_busy() {
+    let mut h = start(Opts::default()).await;
+    until_idle(&mut h).await;
+    let status = timeout(wait(), h.runner.stop()).await.expect("stop");
+    assert!(status.success(), "{status:?}");
+    assert_eq!(h.runner.status(), AgentStatus::Stopped);
+    until_screen(&h, "bye").await;
+
+    let mut h = start(Opts {
+        stop_grace: Some(ms(200)),
+        ..Opts::default()
+    })
+    .await;
+    until_idle(&mut h).await;
+    timeout(wait(), h.runner.type_turn("/hold").wait())
+        .await
+        .expect("time")
+        .expect("delivered");
+    until_screen(&h, "holding...").await;
+    let status = timeout(wait(), h.runner.stop()).await.expect("stop");
+    // SIGHUP ends the fake TUI.
+    assert_eq!(status.signal_number(), Some(1), "{status:?}");
+    assert_eq!(status.exit_code(), 129);
+    assert_eq!(h.runner.status(), AgentStatus::Stopped);
+    assert!(!h.runner.screen().text().contains("bye"));
 }

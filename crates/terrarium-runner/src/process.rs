@@ -111,7 +111,8 @@ fn lock_pid_file(path: &Path, agent: AgentId) -> Result<Flock<File>> {
 /// 3. Spawn the harness with [`Runner::spawn`]. The hook socket is
 ///    `<run>/agents/<ulid>.sock`, as for an in-process runner. Agent RPC
 ///    requests go to the daemon over the control socket.
-/// 4. Wait for the harness to exit (SIGTERM and SIGINT kill it first).
+/// 4. Wait for the harness to exit (SIGTERM and SIGINT stop it first, with
+///    [`Runner::stop`]).
 /// 5. Write `runner-exit.json`, give the daemon `linger` to read the last
 ///    frames, and remove the socket and the pid file.
 pub async fn run(opts: ProcessOptions, adapter: Arc<dyn Adapter>) -> Result<ExitStatus> {
@@ -155,14 +156,7 @@ pub async fn run(opts: ProcessOptions, adapter: Arc<dyn Adapter>) -> Result<Exit
 
     let status = wait_or_signal(&runner).await;
     tracing::info!(agent = %agent, code = status.code, signal = ?status.signal, "harness exited");
-    match serde_json::to_vec(&status) {
-        Ok(bytes) => {
-            if let Err(e) = std::fs::write(&exit_path, bytes) {
-                tracing::warn!("write {}: {e}", exit_path.display());
-            }
-        }
-        Err(e) => tracing::warn!("serialise the exit status: {e}"),
-    }
+    write_exit_status(&exit_path, &status);
     if hub.connected() {
         let _ = tokio::time::timeout(opts.linger, hub.disconnected()).await;
     }
@@ -171,6 +165,25 @@ pub async fn run(opts: ProcessOptions, adapter: Arc<dyn Adapter>) -> Result<Exit
     Ok(status)
 }
 
+/// Write `runner-exit.json` through a temp file and a rename, so that a
+/// reader never sees half a file.
+fn write_exit_status(path: &Path, status: &ExitStatus) {
+    let bytes = match serde_json::to_vec(status) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!("serialise the exit status: {e}");
+            return;
+        }
+    };
+    let tmp = path.with_extension("json.tmp");
+    if let Err(e) = std::fs::write(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, path)) {
+        tracing::warn!("write {}: {e}", path.display());
+    }
+}
+
+/// Wait for the harness to exit. SIGTERM and SIGINT stop it with
+/// [`Runner::stop`]: the exit keys for an idle harness, else SIGHUP, and
+/// SIGKILL after the grace.
 async fn wait_or_signal(runner: &Runner) -> ExitStatus {
     use tokio::signal::unix::{SignalKind, signal};
     let (Ok(mut term), Ok(mut int), Ok(mut hup)) = (
@@ -196,8 +209,5 @@ async fn wait_or_signal(runner: &Runner) -> ExitStatus {
             _ = hup.recv() => tracing::debug!("SIGHUP ignored"),
         }
     }
-    if let Err(e) = runner.kill() {
-        tracing::warn!("kill the harness: {e}");
-    }
-    runner.wait().await
+    runner.stop().await
 }

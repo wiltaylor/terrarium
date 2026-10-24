@@ -99,8 +99,8 @@ fn real_main() -> Result<i32> {
         },
         adapter,
     ))?;
-    // The harness exit code is in `runner-exit.json` and in the events; the
-    // runner itself did its job.
+    // The exit code of the runner reflects the harness: its code, or 128
+    // plus the signal. The full status is in `runner-exit.json`.
     tracing::info!(code = status.code, signal = ?status.signal, "runner done");
-    Ok(0)
+    Ok(status.exit_code())
 }

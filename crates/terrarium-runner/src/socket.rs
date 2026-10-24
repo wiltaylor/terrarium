@@ -2,10 +2,12 @@
 
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream};
+use tokio::net::UnixListener;
+use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 
 use crate::error::{Result, RunnerError};
 use crate::protocol::{Message, RpcError};
@@ -35,39 +37,77 @@ pub(crate) fn bind(path: &Path) -> Result<UnixListener> {
     Ok(listener)
 }
 
+/// How long the accept loop waits for the first line of a connection.
+const FIRST_LINE: Duration = Duration::from_secs(1);
+
+/// Serve the runner socket. Each `terrarium hook` call is its own
+/// connection, and a harness runs its hooks one after the other, so the
+/// accept loop reads the first line of each connection itself and runs a
+/// hook at once, before it accepts the next connection. The hooks then
+/// reach the status machine in the order the harness sent them. (Tasks per
+/// connection could swap a `UserPromptSubmit` and the `Notification` after
+/// it.) A client that sends nothing within `FIRST_LINE` gets its task with
+/// no first line, so it cannot hold up the hooks for long.
 pub(crate) async fn serve(listener: UnixListener, inner: Arc<Inner>) {
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
+                let (read, write) = stream.into_split();
+                let mut reader = BufReader::new(read);
+                let mut first = String::new();
+                let mut limited = (&mut reader).take(MAX_LINE as u64);
+                let read_first = limited.read_line(&mut first);
+                let eof = match tokio::time::timeout(FIRST_LINE, read_first).await {
+                    Ok(Ok(0)) => true,
+                    Ok(Ok(_)) | Err(_) => false,
+                    Ok(Err(e)) => {
+                        tracing::debug!("runner socket connection: {e}");
+                        continue;
+                    }
+                };
+                if first.ends_with('\n')
+                    && let Ok(Message::Hook { hook, payload }) =
+                        serde_json::from_str::<Message>(first.trim())
+                {
+                    inner.on_hook(hook, payload);
+                    first.clear();
+                }
                 let inner = inner.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = connection(stream, inner).await {
+                    if let Err(e) = connection(reader, write, inner, first, eof).await {
                         tracing::debug!("runner socket connection: {e}");
                     }
                 });
             }
             Err(e) => {
                 tracing::warn!("runner socket accept: {e}");
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                tokio::time::sleep(Duration::from_millis(100)).await;
             }
         }
     }
 }
 
-async fn connection(stream: UnixStream, inner: Arc<Inner>) -> std::io::Result<()> {
-    let (read, mut write) = stream.into_split();
-    let mut reader = BufReader::new(read);
-    let mut line = String::new();
+/// Serve one connection. `line` holds what the accept loop read already:
+/// nothing, a whole line, or the start of a line. `eof`: the client has
+/// closed its side.
+async fn connection(
+    mut reader: BufReader<OwnedReadHalf>,
+    mut write: OwnedWriteHalf,
+    inner: Arc<Inner>,
+    mut line: String,
+    mut eof: bool,
+) -> std::io::Result<()> {
     loop {
-        line.clear();
-        let n = (&mut reader)
-            .take(MAX_LINE as u64)
-            .read_line(&mut line)
-            .await?;
-        if n == 0 {
+        if !eof && !line.ends_with('\n') && line.len() < MAX_LINE {
+            let room = (MAX_LINE - line.len()) as u64;
+            if (&mut reader).take(room).read_line(&mut line).await? == 0 {
+                eof = true;
+            }
+        }
+        if line.is_empty() {
             return Ok(());
         }
-        if n >= MAX_LINE && !line.ends_with('\n') {
+        if line.len() >= MAX_LINE && !line.ends_with('\n') {
             let reply = Message::response(
                 Value::Null,
                 Err(RpcError::parse_error("the line is too long")),
@@ -76,32 +116,37 @@ async fn connection(stream: UnixStream, inner: Arc<Inner>) -> std::io::Result<()
             return Ok(());
         }
         let text = line.trim();
-        if text.is_empty() {
-            continue;
-        }
-        let reply = match serde_json::from_str::<Message>(text) {
-            Ok(Message::Hook { hook, payload }) => {
-                inner.on_hook(hook, payload);
-                None
-            }
-            Ok(Message::Request { id, method, params }) => Some(Message::response(
-                id,
-                request(&inner, &method, params).await,
-            )),
-            Ok(Message::Response { .. }) => Some(Message::response(
-                Value::Null,
-                Err(RpcError::new(
-                    "invalid_request",
-                    "the runner does not take responses",
+        let reply = if text.is_empty() {
+            None
+        } else {
+            match serde_json::from_str::<Message>(text) {
+                Ok(Message::Hook { hook, payload }) => {
+                    inner.on_hook(hook, payload);
+                    None
+                }
+                Ok(Message::Request { id, method, params }) => Some(Message::response(
+                    id,
+                    request(&inner, &method, params).await,
                 )),
-            )),
-            Err(e) => Some(Message::response(
-                Value::Null,
-                Err(RpcError::parse_error(e.to_string())),
-            )),
+                Ok(Message::Response { .. }) => Some(Message::response(
+                    Value::Null,
+                    Err(RpcError::new(
+                        "invalid_request",
+                        "the runner does not take responses",
+                    )),
+                )),
+                Err(e) => Some(Message::response(
+                    Value::Null,
+                    Err(RpcError::parse_error(e.to_string())),
+                )),
+            }
         };
         if let Some(reply) = reply {
             send(&mut write, &reply).await?;
+        }
+        line.clear();
+        if eof {
+            return Ok(());
         }
     }
 }
@@ -122,7 +167,7 @@ async fn request(inner: &Inner, method: &str, params: Value) -> Result<Value, Rp
     }
 }
 
-async fn send(write: &mut tokio::net::unix::OwnedWriteHalf, msg: &Message) -> std::io::Result<()> {
+async fn send(write: &mut OwnedWriteHalf, msg: &Message) -> std::io::Result<()> {
     let mut bytes = serde_json::to_vec(msg).map_err(std::io::Error::other)?;
     bytes.push(b'\n');
     write.write_all(&bytes).await

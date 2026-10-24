@@ -18,6 +18,7 @@ use terrarium_core::{
 use tokio::sync::{Notify, broadcast, oneshot, watch};
 use tokio::task::AbortHandle;
 
+use crate::attach::AttachStream;
 use crate::config::RunnerConfig;
 use crate::error::{DeliveryError, Result, RunnerError};
 use crate::events::EventLog;
@@ -26,9 +27,15 @@ use crate::ptylog::PtyLog;
 use crate::ready::{DefaultReadyDetector, ReadyDetector};
 use crate::socket;
 
-/// The capacity of the output and event broadcast channels. A slow
-/// subscriber that falls this far behind sees `RecvError::Lagged`.
+/// The capacity of the event broadcast channel. A slow subscriber that
+/// falls this far behind sees `RecvError::Lagged`. The output channel takes
+/// `RunnerConfig::output_capacity`.
 const CHANNEL_CAPACITY: usize = 1024;
+
+/// After the harness exits, how long an attach stream waits for the reader
+/// thread to pass on the last PTY bytes. A background process that keeps the
+/// PTY open delays the end of the output.
+pub(crate) const OUTPUT_DRAIN: Duration = Duration::from_secs(1);
 
 /// A chunk of raw PTY output, as sent to attach clients.
 pub type OutputChunk = Arc<[u8]>;
@@ -67,6 +74,49 @@ pub struct ExitStatus {
 impl ExitStatus {
     pub fn success(&self) -> bool {
         self.code == 0 && self.signal.is_none()
+    }
+
+    /// The number of the signal that ended the process, when the signal
+    /// name is known. The name is the `strsignal` text of the PTY crate
+    /// (`Killed`, `Hangup`), a `SIGKILL` style name, or `Signal 9`.
+    pub fn signal_number(&self) -> Option<i32> {
+        let name = self.signal.as_deref()?.trim();
+        const TEXT: [(&str, i32); 15] = [
+            ("Hangup", 1),
+            ("Interrupt", 2),
+            ("Quit", 3),
+            ("Illegal instruction", 4),
+            ("Trace/breakpoint trap", 5),
+            ("Aborted", 6),
+            ("Bus error", 7),
+            ("Floating point exception", 8),
+            ("Killed", 9),
+            ("User defined signal 1", 10),
+            ("Segmentation fault", 11),
+            ("User defined signal 2", 12),
+            ("Broken pipe", 13),
+            ("Alarm clock", 14),
+            ("Terminated", 15),
+        ];
+        if let Some((_, n)) = TEXT.iter().find(|(t, _)| *t == name) {
+            return Some(*n);
+        }
+        if let Ok(sig) = name.parse::<nix::sys::signal::Signal>() {
+            return Some(sig as i32);
+        }
+        name.strip_prefix("Signal ")
+            .and_then(|n| n.trim().parse().ok())
+    }
+
+    /// The exit code that reflects this status, as a shell gives it: the
+    /// code of the process, or 128 plus the signal number when a signal
+    /// ended it (128 when the signal is not known).
+    pub fn exit_code(&self) -> i32 {
+        if self.signal.is_some() {
+            128 + self.signal_number().unwrap_or(0)
+        } else {
+            i32::try_from(self.code.min(255)).unwrap_or(255)
+        }
     }
 }
 
@@ -121,6 +171,8 @@ struct State {
     /// The last PTY output or hook.
     last_activity: Instant,
     stop_requested: bool,
+    /// A SIGKILL follows the SIGHUP of `kill` after `kill_grace`.
+    kill_armed: bool,
     exited: bool,
     queue: VecDeque<PendingTurn>,
     in_flight: Option<InFlight>,
@@ -144,6 +196,8 @@ pub(crate) struct Inner {
     state: Mutex<State>,
     status_tx: watch::Sender<AgentStatus>,
     exit_tx: watch::Sender<Option<ExitStatus>>,
+    /// True when the reader thread has seen the end of the PTY output.
+    output_done: watch::Sender<bool>,
     wake: Notify,
     next_delivery: AtomicU64,
     socket_path: PathBuf,
@@ -211,7 +265,7 @@ impl Runner {
             .ready_detector
             .clone()
             .unwrap_or_else(|| Arc::new(DefaultReadyDetector::default()));
-        let (output_tx, _) = broadcast::channel(CHANNEL_CAPACITY);
+        let (output_tx, _) = broadcast::channel(config.output_capacity.max(1));
         let (events_tx, _) = broadcast::channel(CHANNEL_CAPACITY);
         let parser = vt100::Parser::new(config.rows, config.cols, 0);
         let inner = Arc::new(Inner {
@@ -235,12 +289,14 @@ impl Runner {
                 last_output: now,
                 last_activity: now,
                 stop_requested: false,
+                kill_armed: false,
                 exited: false,
                 queue: VecDeque::new(),
                 in_flight: None,
             }),
             status_tx: watch::Sender::new(AgentStatus::Starting),
             exit_tx: watch::Sender::new(None),
+            output_done: watch::Sender::new(false),
             wake: Notify::new(),
             next_delivery: AtomicU64::new(1),
             socket_path,
@@ -348,6 +404,22 @@ impl Runner {
         (snapshot(parser.screen()), self.inner.output_tx.subscribe())
     }
 
+    /// [`Runner::attach`] as an [`AttachStream`]. When the stream falls
+    /// behind, it attaches again and gives `AttachEvent::Resynced` with a
+    /// new snapshot. The stream ends after the harness exits and the last
+    /// output is out.
+    pub fn attach_stream(&self) -> (ScreenSnapshot, AttachStream) {
+        let (snap, rx) = self.attach();
+        (snap, AttachStream::local(self.clone(), rx))
+    }
+
+    /// Wait until the reader thread has passed on the last PTY output, up
+    /// to `limit`. Call it after the harness exits.
+    pub(crate) async fn output_drained(&self, limit: Duration) {
+        let mut rx = self.inner.output_done.subscribe();
+        let _ = tokio::time::timeout(limit, rx.wait_for(|d| *d)).await;
+    }
+
     pub fn screen(&self) -> ScreenSnapshot {
         snapshot(lock(&self.inner.parser).screen())
     }
@@ -426,18 +498,68 @@ impl Runner {
     }
 
     /// Stop the harness on purpose. The status becomes `stopped` when the
-    /// child exits.
+    /// child exits. The runner sends SIGHUP. When the harness has not exited
+    /// after `RunnerConfig::kill_grace`, it sends SIGKILL to the process
+    /// group of the harness.
     pub fn kill(&self) -> Result<()> {
-        {
+        let arm = {
             let mut state = lock(&self.inner.state);
             if state.exited {
                 return Ok(());
             }
             state.stop_requested = true;
-        }
-        lock(&self.inner.killer)
+            !std::mem::replace(&mut state.kill_armed, true)
+        };
+        let sent = lock(&self.inner.killer)
             .kill()
-            .map_err(|e| RunnerError::Pty(format!("kill: {e}")))
+            .map_err(|e| RunnerError::Pty(format!("kill: {e}")));
+        if arm && let Some(pid) = self.inner.harness_pid {
+            let inner = self.inner.clone();
+            let spawned = std::thread::Builder::new()
+                .name("terrarium-pty-kill".into())
+                .spawn(move || inner.escalate_kill(pid));
+            if let Err(e) = spawned {
+                tracing::warn!("cannot start the kill thread: {e}");
+            }
+        }
+        sent
+    }
+
+    /// Stop the harness gracefully. An idle harness gets the adapter's exit
+    /// keys and `RunnerConfig::stop_grace` to exit. A busy harness, a
+    /// harness with no exit keys, or one that does not exit in time gets
+    /// [`Runner::kill`]. No queued turn goes out after this call. Returns
+    /// the exit status.
+    pub async fn stop(&self) -> ExitStatus {
+        let keys = self.inner.adapter.exit_keys();
+        let (exited, idle) = {
+            let mut state = lock(&self.inner.state);
+            state.stop_requested = true;
+            (
+                state.exited,
+                state.status == AgentStatus::Idle && state.in_flight.is_none() && !state.turn_open,
+            )
+        };
+        if exited {
+            return self.wait().await;
+        }
+        if idle && !keys.is_empty() {
+            match self.inner.write_bytes(keys).await {
+                Ok(()) => {
+                    if let Ok(status) =
+                        tokio::time::timeout(self.inner.config.stop_grace, self.wait()).await
+                    {
+                        return status;
+                    }
+                    tracing::info!("the harness did not exit on its exit keys; killing it");
+                }
+                Err(e) => tracing::debug!("cannot type the exit keys: {e}"),
+            }
+        }
+        if let Err(e) = self.kill() {
+            tracing::warn!("kill the harness: {e}");
+        }
+        self.wait().await
     }
 
     /// Wait for the child to exit.
@@ -589,6 +711,30 @@ impl Inner {
             }
             self.on_output();
         }
+        self.output_done.send_replace(true);
+    }
+
+    /// The kill thread: SIGKILL the harness when SIGHUP did not end it.
+    fn escalate_kill(&self, pid: u32) {
+        use nix::sys::signal::{Signal, kill, killpg};
+        use nix::unistd::Pid;
+        let deadline = Instant::now() + self.config.kill_grace;
+        while Instant::now() < deadline {
+            if lock(&self.state).exited {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let state = lock(&self.state);
+        if state.exited {
+            return;
+        }
+        let Ok(raw) = i32::try_from(pid) else { return };
+        tracing::info!(pid, "the harness did not exit on SIGHUP; sending SIGKILL");
+        // The harness leads its own session and process group (the PTY).
+        if killpg(Pid::from_raw(raw), Signal::SIGKILL).is_err() {
+            let _ = kill(Pid::from_raw(raw), Signal::SIGKILL);
+        }
     }
 
     fn on_output(&self) {
@@ -610,12 +756,32 @@ impl Inner {
             body,
         };
         let events = self.adapter.hook_event(&payload);
+        // A prompt that the harness made itself (Copilot's
+        // `<system_notification>` after a background shell) is not a typed
+        // turn: it must not confirm a delivery, and it is not a user turn.
+        let system = self.adapter.is_system_prompt(&payload);
         let mut state = lock(&self.state);
         if state.exited {
             return;
         }
         state.last_activity = Instant::now();
         for event in events {
+            let event = match event {
+                Event::TurnStart { prompt } if system => {
+                    tracing::debug!("a system prompt opens a turn; no delivery counts it");
+                    self.emit(Event::Notification {
+                        message: prompt.unwrap_or_else(|| "system prompt".to_owned()),
+                        question: false,
+                    });
+                    // The harness works on it, so the turn is open, but an
+                    // in-flight delivery still waits for its own sign.
+                    state.turn_open = true;
+                    state.block = None;
+                    self.transition(&mut state, AgentStatus::Working, "system prompt");
+                    continue;
+                }
+                e => e,
+            };
             self.emit(event.clone());
             match event {
                 Event::TurnStart { .. } => {
@@ -810,6 +976,7 @@ impl Inner {
             }
 
             if state.in_flight.is_none()
+                && !state.stop_requested
                 && state.status == AgentStatus::Idle
                 && ready
                 && let Some(mut turn) = state.queue.pop_front()
