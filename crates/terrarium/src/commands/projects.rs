@@ -174,6 +174,8 @@ pub async fn repo(ctx: &Ctx, cmd: &RepoCmd) -> anyhow::Result<()> {
             target,
             branch,
             path,
+            depth,
+            agent,
         } => {
             let name = ctx.project_or(None).await?;
             let all = ctx
@@ -188,6 +190,8 @@ pub async fn repo(ctx: &Ctx, cmd: &RepoCmd) -> anyhow::Result<()> {
             set_opt(&mut body, "target", target.clone());
             set_opt(&mut body, "branch", branch.clone());
             set_opt(&mut body, "path", path.clone());
+            set_opt(&mut body, "depth", *depth);
+            set_opt(&mut body, "agent", agent.clone());
             let r = match ctx
                 .api
                 .post(&format!("/api/repos/{}/checkout", encode(&id)), Some(body))
@@ -195,15 +199,97 @@ pub async fn repo(ctx: &Ctx, cmd: &RepoCmd) -> anyhow::Result<()> {
             {
                 Err(e)
                     if e.downcast_ref::<ServerError>()
-                        .is_some_and(|s| s.status == 404 || s.status == 405) =>
+                        .is_some_and(ServerError::is_missing_route) =>
                 {
                     return Err(CliError::not_available(format!(
                         "awaiting server: the daemon does not check out repos yet (POST /api/repos/{id}/checkout)"
                     )));
                 }
+                Err(e)
+                    if e.downcast_ref::<ServerError>()
+                        .is_some_and(|s| s.status == 501) =>
+                {
+                    let msg = e
+                        .downcast_ref::<ServerError>()
+                        .map(|s| s.message.clone())
+                        .unwrap_or_default();
+                    return Err(CliError::not_available(msg));
+                }
                 r => r?,
             };
-            ctx.emit(&r, |c, _| c.line(format!("checked out {repo}")))
+            ctx.emit(&r, checkout_lines)
         }
+        RepoCmd::Credential { operation } => credential(ctx, operation).await,
+    }
+}
+
+/// The text answer of `repo checkout`.
+fn checkout_lines(c: &Ctx, r: &Value) {
+    let verb = match r["action"].as_str() {
+        Some("cloned") => "cloned",
+        Some("updated") => "updated",
+        Some("up_to_date") => "up to date:",
+        Some("not_updated") => "fetched, not updated:",
+        _ => "checked out",
+    };
+    c.line(format!(
+        "{verb} {} in work/{} of {}",
+        field(r, "repo"),
+        field(r, "path"),
+        field(r, "agent")
+    ));
+    c.line(format!(
+        "HEAD {} ({})",
+        field(r, "head"),
+        field(r, "branch")
+    ));
+    if let Some(note) = r["note"].as_str() {
+        c.line(note);
+    }
+}
+
+/// The fields of a git credential helper request: `key=value` lines up to
+/// the first blank line.
+pub fn parse_helper_input(text: &str) -> std::collections::BTreeMap<String, String> {
+    text.lines()
+        .take_while(|l| !l.is_empty())
+        .filter_map(|l| l.split_once('='))
+        .map(|(k, v)| (k.to_owned(), v.to_owned()))
+        .collect()
+}
+
+/// `terrarium repo credential <operation>`: git's credential helper. Only
+/// `get` answers, through the daemon (`POST /api/repos/credential`). A
+/// `404` prints nothing, so git falls back to its next helper or fails
+/// cleanly. A secret never goes to a log or to stderr.
+async fn credential(ctx: &Ctx, operation: &str) -> anyhow::Result<()> {
+    if operation != "get" {
+        return Ok(());
+    }
+    let input = parse_helper_input(&ctx.stdin_until_blank()?);
+    let (Some(protocol), Some(host)) = (input.get("protocol"), input.get("host")) else {
+        return Ok(());
+    };
+    let mut body = json!({"protocol": protocol, "host": host});
+    set_opt(&mut body, "path", input.get("path").cloned());
+    match ctx.api.post("/api/repos/credential", Some(body)).await {
+        Ok(r) => {
+            let (Some(user), Some(pass)) = (r["username"].as_str(), r["password"].as_str()) else {
+                return Ok(());
+            };
+            if user.contains('\n') || pass.contains('\n') {
+                return Ok(());
+            }
+            ctx.out
+                .write_str(&format!("username={user}\npassword={pass}\n"));
+            Ok(())
+        }
+        Err(e)
+            if e.downcast_ref::<ServerError>()
+                .is_some_and(|s| s.status == 404) =>
+        {
+            Ok(())
+        }
+        Err(e) => Err(e),
     }
 }

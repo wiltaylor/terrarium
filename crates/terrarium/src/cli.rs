@@ -213,8 +213,21 @@ pub enum RepoCmd {
         target: Option<String>,
         #[arg(long)]
         branch: Option<String>,
+        /// The directory under the workspace (default: the repo's path)
         #[arg(long)]
         path: Option<String>,
+        /// Clone or fetch only this many commits
+        #[arg(long)]
+        depth: Option<u32>,
+        /// The agent whose workspace gets the checkout (operator; an agent defaults to itself)
+        #[arg(long)]
+        agent: Option<String>,
+    },
+    /// The git credential helper: git runs `terrarium repo credential get`
+    #[command(hide = true)]
+    Credential {
+        /// `get`, `store`, or `erase`. Only `get` answers.
+        operation: String,
     },
     /// Attach a repo to the project (project_admin)
     Add(RepoAddArgs),

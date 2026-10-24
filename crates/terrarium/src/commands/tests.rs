@@ -342,6 +342,158 @@ async fn repo_checkout_awaits_the_server() {
 }
 
 #[tokio::test]
+async fn repo_checkout_prints_the_result() {
+    let out = ok(
+        false,
+        &[
+            "-p",
+            "terra",
+            "repo",
+            "checkout",
+            "terrarium",
+            "--agent",
+            "worker",
+            "--depth",
+            "1",
+        ],
+        vec![
+            (200, json!([{"id": "R1", "name": "terrarium"}])),
+            (
+                200,
+                json!({"repo": "terrarium", "repo_id": "R1", "project": "terra", "agent": "worker",
+                       "agent_id": "A1", "path": "terrarium", "action": "cloned",
+                       "head": "abc123", "branch": "main"}),
+            ),
+        ],
+        vec![
+            req(Get, "/api/projects/terra/repos"),
+            (
+                Post,
+                "/api/repos/R1/checkout",
+                vec![],
+                Some(json!({"depth": 1, "agent": "worker"})),
+            ),
+        ],
+    )
+    .await;
+    assert_eq!(
+        out,
+        "cloned terrarium in work/terrarium of worker\nHEAD abc123 (main)\n"
+    );
+    // A target is a later phase: exit 2 with the daemon's message.
+    let r = exec(
+        true,
+        &["repo", "checkout", "terrarium", "--target", "box"],
+        vec![
+            (200, json!([{"id": "R1", "name": "terrarium"}])),
+            (
+                501,
+                json!({"error": {"code": "not_available", "message": "host agents arrive in a later phase"}}),
+            ),
+        ],
+        None,
+    )
+    .await;
+    let e = r.result.unwrap_err();
+    assert!(e.to_string().contains("later phase"), "{e}");
+    assert_eq!(exit_code_of(&e), exit::USAGE);
+    // A missing repo is a server error, not "awaiting server".
+    let r = exec(
+        true,
+        &["repo", "checkout", "nope"],
+        vec![
+            (200, json!([])),
+            (
+                404,
+                json!({"error": {"code": "not_found", "message": "no repo `nope`"}}),
+            ),
+        ],
+        None,
+    )
+    .await;
+    let e = r.result.unwrap_err();
+    assert_eq!(exit_code_of(&e), exit::SERVER);
+}
+
+#[test]
+fn credential_helper_input_parses_to_the_blank_line() {
+    let m = super::projects::parse_helper_input(
+        "protocol=https\nhost=github.com\npath=a/b.git\nwwwauth[]=Basic x=y\n\nhost=ignored\n",
+    );
+    assert_eq!(m["protocol"], "https");
+    assert_eq!(m["host"], "github.com");
+    assert_eq!(m["path"], "a/b.git");
+    assert_eq!(m["wwwauth[]"], "Basic x=y");
+    assert_eq!(m.len(), 4);
+    assert!(super::projects::parse_helper_input("").is_empty());
+}
+
+#[tokio::test]
+async fn repo_credential_speaks_the_helper_protocol() {
+    let out = ok_in(
+        true,
+        &["repo", "credential", "get"],
+        vec![(200, json!({"username": "bot", "password": "tok"}))],
+        Some("protocol=https\nhost=git.example.com\npath=team/hub.git\n\n"),
+        vec![(
+            Post,
+            "/api/repos/credential",
+            vec![],
+            Some(json!({"protocol": "https", "host": "git.example.com", "path": "team/hub.git"})),
+        )],
+    )
+    .await;
+    assert_eq!(out, "username=bot\npassword=tok\n");
+    // 404: no output and exit 0, so git falls back.
+    let out = ok_in(
+        true,
+        &["repo", "credential", "get"],
+        vec![(
+            404,
+            json!({"error": {"code": "not_found", "message": "no credential"}}),
+        )],
+        Some("protocol=https\nhost=x\n"),
+        vec![(
+            Post,
+            "/api/repos/credential",
+            vec![],
+            Some(json!({"protocol": "https", "host": "x"})),
+        )],
+    )
+    .await;
+    assert_eq!(out, "");
+    // `store` and `erase` do nothing; neither does a request without a host.
+    for (op, input) in [
+        ("store", "protocol=https\nhost=x\npassword=p\n"),
+        ("erase", ""),
+        ("get", "protocol=https\n"),
+    ] {
+        let out = ok_in(
+            true,
+            &["repo", "credential", op],
+            vec![],
+            Some(input),
+            vec![],
+        )
+        .await;
+        assert_eq!(out, "");
+    }
+    // Another error is an error.
+    let r = exec(
+        true,
+        &["repo", "credential", "get"],
+        vec![(
+            429,
+            json!({"error": {"code": "rate_limited", "message": "slow down"}}),
+        )],
+        Some("protocol=https\nhost=x\n"),
+    )
+    .await;
+    assert!(r.result.is_err());
+    assert_eq!(r.out, "");
+}
+
+#[tokio::test]
 async fn a_missing_project_is_a_usage_error() {
     let r = exec(false, &["board"], vec![], None).await;
     let e = r.result.unwrap_err();

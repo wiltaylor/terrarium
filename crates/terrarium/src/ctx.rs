@@ -162,6 +162,24 @@ impl Ctx {
         Ok(s)
     }
 
+    /// Lines of stdin up to the first blank line or the end (the git
+    /// credential helper protocol).
+    pub fn stdin_until_blank(&self) -> anyhow::Result<String> {
+        if let Some(s) = &self.stdin {
+            return Ok(s.clone());
+        }
+        let mut out = String::new();
+        for line in std::io::stdin().lines() {
+            let line = line.context("cannot read stdin")?;
+            if line.is_empty() {
+                break;
+            }
+            out.push_str(&line);
+            out.push('\n');
+        }
+        Ok(out)
+    }
+
     pub fn opt_text(&self, arg: Option<&str>) -> anyhow::Result<Option<String>> {
         arg.map(|a| self.text(a)).transpose()
     }

@@ -98,11 +98,26 @@ terrarium project repos [name]
 terrarium project repo-add <url> [--name n] [--branch b] [--credential key] [--path p]
 terrarium repo ls
 terrarium repo add <url> ...                  the same as project repo-add
-terrarium repo checkout <repo> [--target T] [--branch b] [--path p]
+terrarium repo checkout <repo> [--target T] [--branch b] [--path p] [--depth n] [--agent a]
 ```
 
-`repo checkout` takes a repo name or ID. While the daemon has no checkout
-route, it prints `awaiting server` and exits 2.
+`repo checkout` takes a repo name or ID. It clones or updates the repo in
+the workspace of the agent (`docs/api.md` §5.1). An agent checks out into
+its own workspace. The operator names the agent with `--agent`. The output
+is the action, the directory under `$HOME/work`, and the HEAD commit:
+
+```
+cloned terrarium in work/terrarium of worker
+HEAD 3f2c1e0b9a0d... (main)
+```
+
+`--target` exits 2: host agents arrive in a later phase.
+
+`terrarium repo credential get` is hidden. git runs it as the credential
+helper that the daemon writes into each workspace clone. It reads git's
+`key=value` lines up to a blank line, and asks `POST /api/repos/credential`.
+It prints `username=` and `password=` lines, or nothing when the daemon has
+no credential for the host and path. `store` and `erase` do nothing.
 
 ### Agents
 
