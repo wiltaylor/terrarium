@@ -37,7 +37,8 @@ pub struct ClaudeFlags {
     pub root_env: (&'static str, &'static str),
     /// The hooks that Terrarium registers. Each runs `terrarium hook <name>`.
     pub hook_events: &'static [&'static str],
-    /// The settings keys that stop start-up dialogs (beside the hooks).
+    /// The settings keys that stop start-up dialogs and switch off features
+    /// that Terrarium does itself (beside the hooks).
     pub quiet_settings: &'static [(&'static str, bool)],
 }
 
@@ -82,5 +83,13 @@ pub const CLAUDE_2_1: ClaudeFlags = ClaudeFlags {
         "Notification",
         "SessionEnd",
     ],
-    quiet_settings: &[("skipDangerousModePermissionPrompt", true)],
+    quiet_settings: &[
+        ("skipDangerousModePermissionPrompt", true),
+        // Read only: the settings schema in the 2.1.310 binary says "When
+        // false, Claude will not read from or write to the auto-memory
+        // directory". Terrarium has its own memory graph (PLAN §14). Not
+        // verified with a turn that would write memory, so the per-agent
+        // `projects/<cwd>/memory/` overlay stays (`config.rs`).
+        ("autoMemoryEnabled", false),
+    ],
 };

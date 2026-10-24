@@ -188,6 +188,7 @@ mod tests {
         let s: Value = serde_json::from_str(value_after(&spec, "--settings").expect("settings"))
             .expect("json");
         assert_eq!(s["skipDangerousModePermissionPrompt"], true);
+        assert_eq!(s["autoMemoryEnabled"], false);
         for name in [
             "SessionStart",
             "UserPromptSubmit",

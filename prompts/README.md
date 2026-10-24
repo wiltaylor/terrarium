@@ -32,8 +32,10 @@ The adapter gives that file to the harness. A change to a template applies
 at the next start or restart of the agent.
 
 - An agent with no `prompt` gets the built-in template
-  (`DEFAULT_TEMPLATE` in `crates/terrariumd/src/prompt.rs`). It does not
-  read `default.md`. To use `default.md`, set `prompt = "default"`.
+  (`DEFAULT_TEMPLATE` in `crates/terrariumd/src/prompt.rs`). It is a copy of
+  `default.md`, so it works when the prompts directory is not mounted. It
+  does not read `default.md` at run time. To use an edited `default.md`, set
+  `prompt = "default"`.
 - A `prompt` name that has no file stops the start with an error. The daemon
   does not fall back to the default.
 - A name with `/` or `..` is not valid.
@@ -68,4 +70,6 @@ the agent to run `terrarium agents ls` for the current list.
 5. Set `prompt = "<name>"` in the agent definition, then restart the agent.
 
 When you change the protocols in `default.md`, make the same change in each
-lead template.
+lead template. Copy the new `default.md` into `DEFAULT_TEMPLATE` too: the
+test `default_template_matches_prompts_default_md` fails until the two are
+the same.

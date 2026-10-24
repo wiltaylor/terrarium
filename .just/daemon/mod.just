@@ -2,8 +2,16 @@ set working-directory := '../..'
 
 import '../shared.just'
 
+# Dev defaults for `run`. Each one gives way to the variable when it is set.
+# Paths are absolute, so the daemon finds them from any cwd. 8091 keeps the
+# artifact origin off 8081, where the Docker stack listens.
 dev_listen := env("TERRARIUM_DEV_LISTEN", "127.0.0.1:8090")
-dev_state := env("TERRARIUM_DEV_STATE_DIR", "target/dev-state")
+dev_state := env("TERRARIUM_DEV_STATE_DIR", justfile_directory() / "target/dev-state")
+dev_sandbox := env("TERRARIUM_SANDBOX", "none")
+dev_prompts := env("TERRARIUM_PROMPTS_DIR", justfile_directory() / "prompts")
+dev_artifact_listen := env("TERRARIUM_ARTIFACT_LISTEN", "127.0.0.1:8091")
+dev_home := env("HOME", "")
+dev_harness_home := env("TERRARIUM_HARNESS_HOME", "claude=" + dev_home / ".claude" + ",codex=" + dev_home / ".codex" + ",copilot=" + dev_home / ".copilot" + ",pi=" + dev_home / ".pi/agent")
 
 [default, private]
 main:
@@ -14,10 +22,10 @@ main:
 build: require-cargo
 	cargo build --workspace
 
-# Run terrariumd on this machine, outside Docker, for fast iteration
+# Run terrariumd on this machine, outside Docker, with no sandbox and your own harness logins
 [group('daemon')]
 run: require-cargo
-	TERRARIUM_LISTEN={{dev_listen}} TERRARIUM_STATE_DIR={{dev_state}} TERRARIUM_CONFIG_DIR=. cargo run -p terrariumd
+	TERRARIUM_LISTEN={{dev_listen}} TERRARIUM_STATE_DIR={{quote(dev_state)}} TERRARIUM_CONFIG_DIR={{quote(justfile_directory())}} TERRARIUM_SANDBOX={{dev_sandbox}} TERRARIUM_PROMPTS_DIR={{quote(dev_prompts)}} TERRARIUM_ARTIFACT_LISTEN={{dev_artifact_listen}} TERRARIUM_HARNESS_HOME={{quote(dev_harness_home)}} cargo run -p terrariumd
 
 # Run the Rust tests
 [group('daemon')]
