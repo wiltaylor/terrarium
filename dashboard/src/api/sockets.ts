@@ -10,10 +10,13 @@
 //   server -> client: one JSON `AgentEvent` per text frame.
 //
 // Authentication (docs/security-review.md F4): a browser cannot set an
-// `Authorization` header on a WebSocket. The client offers the token as the
-// subprotocol `bearer.<token>` (`Sec-WebSocket-Protocol`), and the daemon
-// echoes it back. The URL carries no token. `AuthSocket` does this for every
-// socket: agent PTY, login PTY, target exec console, and events.
+// `Authorization` header on a WebSocket. Two modes, picked by `AuthSocket`
+// for every socket (agent PTY, login PTY, target exec console, events):
+// - Cookie session: no subprotocol. The browser sends the session cookie
+//   and the page's `Origin` on the upgrade, and the daemon checks both.
+// - Bearer: the client offers the token as the subprotocol `bearer.<token>`
+//   (`Sec-WebSocket-Protocol`), and the daemon echoes it back.
+// The URL never carries a token.
 
 import type { AgentEvent } from "./types";
 
@@ -222,7 +225,10 @@ export type MakeRawSocket = (url: string, protocols?: string[]) => RawSocket;
 export const browserSocket: MakeRawSocket = (url, protocols) => new WebSocket(url, protocols) as unknown as RawSocket;
 
 export interface AuthSocketOptions {
+  /** Bearer mode: offer `bearer.<token>`. Null: offer no subprotocol. */
   token: string | null;
+  /** A cookie session is active. Only names the mode (`cookie`); the browser sends the cookie. */
+  cookie?: boolean;
   make?: MakeRawSocket;
   /**
    * Dev only (`VITE_ALLOW_QUERY_TOKEN=1`). When the subprotocol handshake is
@@ -233,6 +239,9 @@ export interface AuthSocketOptions {
   /** Told when a socket falls back to `?token=`. */
   onQueryFallback?: (url: string) => void;
 }
+
+/** How a socket authenticates: the subprotocol, the dev `?token=` fallback, the session cookie, or nothing. */
+export type SocketAuthMode = "subprotocol" | "query" | "cookie" | "none";
 
 /** Why an `AuthSocket` failed before it opened, for tests and logs. */
 export type AuthFailure = "refused" | "protocol_not_echoed" | "token_not_subprotocol" | null;
@@ -249,13 +258,14 @@ export function withQueryToken(url: string, token: string): string {
 }
 
 /**
- * A WebSocket that authenticates with the `bearer.<token>` subprotocol and
- * checks that the server echoed it. It fits `PtySocket` and `EventSocket`,
+ * A WebSocket that authenticates with the session cookie (no subprotocol),
+ * or with the `bearer.<token>` subprotocol and a check that the server
+ * echoed it. It fits `PtySocket` and `EventSocket`,
  * so the terminal and the event stream use it unchanged.
  */
 export class AuthSocket implements PtySocket, EventSocket {
   /** How the open socket authenticated. */
-  mode: "subprotocol" | "query" | "none" = "none";
+  mode: SocketAuthMode = "none";
   failure: AuthFailure = null;
 
   private inner: RawSocket | null = null;
@@ -274,7 +284,7 @@ export class AuthSocket implements PtySocket, EventSocket {
     this.make = opts.make ?? browserSocket;
     const token = opts.token;
     if (!token) {
-      this.attach(this.make(url), "none");
+      this.attach(this.make(url), opts.cookie ? "cookie" : "none");
     } else if (!isSubprotocolSafe(token)) {
       if (opts.allowQueryToken) this.fallback();
       else this.failSoon("token_not_subprotocol");
@@ -341,7 +351,7 @@ export class AuthSocket implements PtySocket, EventSocket {
     this.attach(this.make(withQueryToken(this.url, token)), "query");
   }
 
-  private attach(ws: RawSocket, mode: "subprotocol" | "query" | "none"): void {
+  private attach(ws: RawSocket, mode: SocketAuthMode): void {
     this.inner = ws;
     ws.binaryType = this.type;
     const live = () => this.inner === ws;

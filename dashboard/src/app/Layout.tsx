@@ -6,7 +6,8 @@ import { isMock } from "../api";
 import { QuotaBanner } from "../components/QuotaBanner";
 import { ErrorBanner, useNow } from "../components/ui";
 import { duration } from "../lib/format";
-import { agents, api, auth, events, projects, subscriptions, theme, unread } from "../stores";
+import { agents, api, auth, events, projects, signOutNow, subscriptions, theme, unread } from "../stores";
+import { TokenScreen } from "./TokenScreen";
 
 const PROJECT_ITEMS = [
   { path: "board", label: "Board" },
@@ -29,6 +30,7 @@ const GLOBAL_ITEMS = [
   { href: "/hosts", label: "Hosts" },
   { href: "/events", label: "Event log" },
   { href: "/audit", label: "Audit" },
+  { href: "/settings", label: "Settings" },
 ] as const;
 
 export function Layout(props: RouteSectionProps) {
@@ -81,6 +83,9 @@ export function Layout(props: RouteSectionProps) {
 
   return (
     <div class="shell">
+      <Show when={auth.needsToken()}>
+        <TokenScreen overlay />
+      </Show>
       <Show when={open()}>
         <div class="scrim" onClick={() => setOpen(false)} />
       </Show>
@@ -160,12 +165,15 @@ export function Layout(props: RouteSectionProps) {
             <button class="small ghost" onClick={() => theme.cycle()} title="Theme: system, light, dark">
               theme: {theme.pref()}
             </button>
-            <Show when={!isMock}>
-              <button class="small ghost" onClick={() => auth.clear()} title={auth.remembered() ? "Forget the token on this device and in this tab" : "Forget the token in this tab"}>
-                sign out
-              </button>
-            </Show>
+            <button class="small ghost" onClick={() => void signOutNow()} title="End the session (DELETE /api/session) and forget it in this tab and on this device">
+              sign out
+            </button>
           </div>
+          <Show when={auth.bearerFallback()}>
+            <A href="/settings" class="small" title="This daemon has no cookie sessions, so the token stays in the browser">
+              <span class="chip warn">bearer mode</span> no cookie sessions
+            </A>
+          </Show>
         </div>
       </nav>
 

@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { ApiError, AuthError, buildQuery, createHttpTransport } from "./http";
+import { ApiError, AuthError, buildQuery, createHttpTransport, CSRF_HEADER, isMutating } from "./http";
+import type { MakeRawSocket } from "./sockets";
+import { FakePty } from "./mock/pty";
 
 function fakeFetch(status: number, body: unknown) {
   return vi.fn(async (_url: string | URL | Request, _init?: RequestInit) =>
@@ -86,4 +88,81 @@ describe("createHttpTransport", () => {
       { url: "ws://d/api/events", protocols: ["bearer.two"] },
     ]);
   });
+
+  it("with a session: no Authorization, X-CSRF-Token on POST/PUT/PATCH/DELETE only, cookies on the same origin", async () => {
+    const f = fakeFetch(200, {});
+    const t = createHttpTransport({ fetch: f, getToken: () => null, getCsrf: () => "c1" });
+    for (const m of ["GET", "POST", "PUT", "PATCH", "DELETE"]) await t.request(m, "/api/x");
+    for (const [i, m] of ["GET", "POST", "PUT", "PATCH", "DELETE"].entries()) {
+      const init = f.mock.calls[i]![1]!;
+      const headers = init.headers as Record<string, string>;
+      expect(headers.Authorization).toBeUndefined();
+      expect(headers[CSRF_HEADER]).toBe(m === "GET" ? undefined : "c1");
+      expect(init.credentials).toBe("same-origin");
+    }
+    expect(["post", "Put", "DELETE"].every(isMutating)).toBe(true);
+    expect(["GET", "HEAD", "OPTIONS"].some(isMutating)).toBe(false);
+  });
+
+  it("sends the explicit bearer of a sign-in, and a quiet 401 does not call onUnauthorized", async () => {
+    const onUnauthorized = vi.fn();
+    const f = fakeFetch(401, { error: { code: "unauthorized", message: "missing or wrong bearer token" } });
+    const t = createHttpTransport({ fetch: f, getToken: () => null, onUnauthorized });
+    await expect(t.request("POST", "/api/session", { bearer: "typed", quiet401: true })).rejects.toBeInstanceOf(AuthError);
+    expect((f.mock.calls[0]![1]!.headers as Record<string, string>).Authorization).toBe("Bearer typed");
+    expect(onUnauthorized).not.toHaveBeenCalled();
+  });
 });
+
+describe("WebSocket mode selection", () => {
+  const record = () => {
+    const made: { url: string; protocols?: string[] }[] = [];
+    const make: MakeRawSocket = (url, protocols) => {
+      made.push({ url, protocols });
+      return { readyState: 0, protocol: "", binaryType: "blob", send() {}, close() {}, addEventListener() {}, removeEventListener() {} };
+    };
+    return { made, make };
+  };
+
+  it("a session opens sockets without a subprotocol (cookie auth)", () => {
+    const { made, make } = record();
+    const t = createHttpTransport({ getToken: () => null, getCsrf: () => "c1", location: { protocol: "http:", host: "d" }, makeSocket: make });
+    const s = t.openSocket(t.wsUrl("/api/events"));
+    expect(made).toEqual([{ url: "ws://d/api/events", protocols: undefined }]);
+    expect(s.url).not.toContain("token");
+    expect(s.readyState).toBe(0);
+  });
+
+  it("a cookie socket opens as mode `cookie` when the daemon echoes no subprotocol", async () => {
+    const t = createHttpTransport({
+      getToken: () => null,
+      getCsrf: () => "c1",
+      location: { protocol: "http:", host: "d" },
+      makeSocket: () => new FakePty({ protocol: "" }),
+    });
+    const s = t.openSocket(t.wsUrl("/api/events"));
+    await new Promise<void>((r) => s.addEventListener("open", () => r()));
+    expect(s.mode).toBe("cookie");
+    expect(s.failure).toBeNull();
+  });
+
+  it("bearer mode offers bearer.<token>", () => {
+    const { made, make } = record();
+    const t = createHttpTransport({ getToken: () => "T", getCsrf: () => null, location: { protocol: "http:", host: "d" }, makeSocket: make });
+    t.openSocket(t.wsUrl("/api/events"));
+    expect(made[0]!.protocols).toEqual(["bearer.T"]);
+  });
+
+  it("follows the auth state from one socket to the next", () => {
+    const { made, make } = record();
+    let token: string | null = "T";
+    let csrf: string | null = null;
+    const t = createHttpTransport({ getToken: () => token, getCsrf: () => csrf, location: { protocol: "http:", host: "d" }, makeSocket: make });
+    t.openSocket(t.wsUrl("/api/events"));
+    token = null;
+    csrf = "c1";
+    t.openSocket(t.wsUrl("/api/events"));
+    expect(made.map((m) => m.protocols)).toEqual([["bearer.T"], undefined]);
+  });
+});
+

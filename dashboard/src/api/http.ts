@@ -1,6 +1,14 @@
-// HTTP transport: bearer token, JSON bodies, query strings, typed errors,
-// and cursor pages (docs/api.md §2.4 and §2.5). Sockets carry the token as
-// the `bearer.<token>` subprotocol, never in the URL (see ./sockets).
+// HTTP transport: credentials, JSON bodies, query strings, typed errors,
+// and cursor pages (docs/api.md §1, §2.4, and §2.5).
+//
+// Two ways to authenticate (see src/README.md, "Authentication"):
+// - Session: the browser sends the `HttpOnly` cookie of `POST /api/session`
+//   by itself. The transport adds `X-CSRF-Token` to every POST, PUT, PATCH,
+//   and DELETE. Sockets open without a subprotocol; the cookie and the
+//   page's `Origin` authenticate them.
+// - Bearer (a daemon without sessions): `Authorization: Bearer <token>` on
+//   each request, and the `bearer.<token>` subprotocol on sockets. The token
+//   never goes into a URL (see ./sockets).
 
 import { AuthSocket, browserSocket, type MakeRawSocket } from "./sockets";
 
@@ -11,7 +19,17 @@ export interface RequestOptions {
   body?: unknown;
   /** Multipart upload. Sent as-is, without a JSON content type. */
   form?: FormData;
+  /** Send this bearer token instead of the stored credentials. Only `POST /api/session` uses it. */
+  bearer?: string;
+  /** Do not call `onUnauthorized` on a 401. The caller handles it (sign-in, sign-out). */
+  quiet401?: boolean;
 }
+
+/** The header that carries the CSRF value of a cookie session on mutating requests. */
+export const CSRF_HEADER = "X-CSRF-Token";
+
+/** The methods that change state. With a cookie session they need `X-CSRF-Token`. */
+export const isMutating = (method: string): boolean => ["POST", "PUT", "PATCH", "DELETE"].includes(method.toUpperCase());
 
 /** One page of a list. `next` is the `X-Next-Cursor` header, or null on the last page. */
 export interface Page<T> {
@@ -25,7 +43,10 @@ export interface Transport {
   page<T>(path: string, query?: Query): Promise<Page<T>>;
   /** Absolute ws:// or wss:// URL for a socket path. It never carries the token. */
   wsUrl(path: string, query?: Query): string;
-  /** Open a socket to a `wsUrl` that authenticates with the `bearer.<token>` subprotocol. */
+  /**
+   * Open a socket to a `wsUrl`. With a session it offers no subprotocol: the
+   * cookie authenticates it. In bearer mode it offers `bearer.<token>`.
+   */
   openSocket(url: string): AuthSocket;
 }
 
@@ -56,7 +77,7 @@ export class ApiError extends Error {
   }
 }
 
-/** The daemon refused the bearer token (HTTP 401). */
+/** The daemon refused the credentials (HTTP 401): a wrong token, or a session that ended. */
 export class AuthError extends ApiError {
   constructor(body?: unknown) {
     const e = parseErrorBody(body);
@@ -97,7 +118,10 @@ export interface HttpTransportOptions {
   /** Origin of the daemon. Empty means the page origin. */
   baseUrl?: string;
   fetch?: typeof fetch;
+  /** The bearer token in bearer mode. Null with a cookie session or when signed out. */
   getToken: () => string | null;
+  /** The CSRF value of the cookie session. Null in bearer mode or when signed out. */
+  getCsrf?: () => string | null;
   onUnauthorized?: () => void;
   /** Page location, for the ws URL. Defaults to `window.location`. */
   location?: { protocol: string; host: string };
@@ -129,8 +153,10 @@ export function createHttpTransport(opts: HttpTransportOptions): Transport {
 
   const send = async (method: string, path: string, ro: RequestOptions = {}): Promise<{ data: unknown; res: Response }> => {
     const headers: Record<string, string> = { Accept: "application/json" };
-    const token = opts.getToken();
+    const token = ro.bearer ?? opts.getToken();
     if (token) headers.Authorization = `Bearer ${token}`;
+    const csrf = opts.getCsrf?.() ?? null;
+    if (csrf && isMutating(method)) headers[CSRF_HEADER] = csrf;
     let body: BodyInit | undefined;
     if (ro.form) {
       body = ro.form;
@@ -138,7 +164,8 @@ export function createHttpTransport(opts: HttpTransportOptions): Transport {
       headers["Content-Type"] = "application/json";
       body = JSON.stringify(ro.body);
     }
-    const res = await doFetch(`${base}${path}${buildQuery(ro.query)}`, { method, headers, body });
+    // `same-origin`: the session cookie goes to the dashboard origin only.
+    const res = await doFetch(`${base}${path}${buildQuery(ro.query)}`, { method, headers, body, credentials: "same-origin" });
     const text = await res.text();
     let data: unknown = undefined;
     if (text) {
@@ -149,7 +176,7 @@ export function createHttpTransport(opts: HttpTransportOptions): Transport {
       }
     }
     if (res.status === 401) {
-      opts.onUnauthorized?.();
+      if (!ro.quiet401) opts.onUnauthorized?.();
       throw new AuthError(data);
     }
     if (!res.ok) throw errorFrom(res.status, data, `${method} ${path} failed with ${res.status}`);
@@ -176,8 +203,10 @@ export function createHttpTransport(opts: HttpTransportOptions): Transport {
     },
 
     openSocket(url: string): AuthSocket {
+      const token = opts.getToken();
       return new AuthSocket(url, {
-        token: opts.getToken(),
+        token,
+        cookie: !token && !!opts.getCsrf?.(),
         make: opts.makeSocket ?? browserSocket,
         allowQueryToken: opts.allowQueryToken ?? false,
         onQueryFallback: (u) => console.warn(`terrarium: ${u} refused the bearer subprotocol; retried with ?token= (VITE_ALLOW_QUERY_TOKEN)`),

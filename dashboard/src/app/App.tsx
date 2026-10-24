@@ -22,6 +22,7 @@ const AuditPage = lazy(() => import("../features/audit/AuditPage"));
 const EventsPage = lazy(() => import("../features/events/EventsPage"));
 const ProjectsPage = lazy(() => import("../features/projects/ProjectsPage"));
 const ProjectSettings = lazy(() => import("../features/projects/ProjectSettings"));
+const SettingsPage = lazy(() => import("../features/settings/SettingsPage"));
 const SpendPage = lazy(() => import("../features/spend/SpendPage"));
 // Mock only: the hostile payloads, to eyeball that the sanitizer keeps them inert.
 const XssPage = lazy(() => import("../features/devxss/XssPage"));
@@ -41,7 +42,9 @@ function NotFound() {
 
 export function App() {
   return (
-    <Show when={isMock || !auth.needsToken()} fallback={<TokenScreen />}>
+    // Signed out: the token screen alone. A session that ended keeps the
+    // router mounted; the layout shows the token screen over the page.
+    <Show when={auth.mode() !== "none"} fallback={<TokenScreen />}>
       <Router root={Layout}>
         <Route path="/" component={Home} />
         <Route path="/projects" component={ProjectsPage} />
@@ -53,6 +56,7 @@ export function App() {
         <Route path="/hosts" component={HostsPage} />
         <Route path="/events" component={EventsPage} />
         <Route path="/audit" component={AuditPage} />
+        <Route path="/settings" component={SettingsPage} />
         <Route path="/p/:project" component={ProjectIndex} />
         <Route path="/p/:project/board" component={BoardPage} />
         <Route path="/p/:project/inbox" component={InboxPage} />

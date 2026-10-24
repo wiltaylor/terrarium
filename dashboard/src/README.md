@@ -41,7 +41,8 @@ Build-time settings (Vite reads them from the environment or `.env`):
 | `VITE_MOCK=1` | Fake data in the browser, no daemon. Adds the `/dev/xss` page. |
 | `VITE_API_BASE` | The daemon origin, when it is not the page origin. Also goes into the CSP. |
 | `VITE_ARTIFACT_ORIGIN` | The artifact origin, for example `https://artifacts.example.com:8081`. Signed `/a/...` paths go on this origin, and the CSP allows it in `frame-src`, `img-src`, and `connect-src`. |
-| `VITE_ALLOW_QUERY_TOKEN=1` | Dev only. A refused socket retries with `?token=`. |
+| `VITE_ALLOW_QUERY_TOKEN=1` | Dev only. A refused bearer socket retries with `?token=`. The daemon refuses `?token=` unless `TERRARIUM_WS_QUERY_TOKEN=1`. |
+| `VITE_META_CSP=1` | Keep the CSP `<meta>` tag in a production build, for a static host that sends no CSP header. |
 
 Other scripts:
 
@@ -53,48 +54,125 @@ Other scripts:
 
 ## Authentication
 
-The client sends `Authorization: Bearer <token>` on each request. When the
-daemon answers 401, the app shows a token screen. The token is
-`TERRARIUM_TOKEN` from `.env`.
+The token is `TERRARIUM_TOKEN` from `.env`. The dashboard sends it to the
+daemon once, at sign-in, and does not keep it (docs/api.md §1.1,
+docs/security-review.md F3).
 
-Where the token is kept (`stores/auth.ts`):
+### Sign-in flow
 
-- The primary copy is in memory.
-- A copy goes to `sessionStorage` key `terrarium.token`. A reload in the same
-  tab keeps the token. A new tab asks again.
-- **Remember on this device** on the token screen also puts the token in
-  `localStorage` key `terrarium.token.remembered`. The screen shows a warning:
-  the token stays after the tab closes, and any script on the page can read it.
-- A token that an older build left in `localStorage` key `terrarium.token`
-  moves to this tab's `sessionStorage` on the first load. It is not
-  remembered until the operator ticks the box.
-- **sign out** in the sidebar footer removes every copy.
+1. With no credentials, the app shows the token screen.
+2. **Sign in** sends `POST /api/session` with `Authorization: Bearer <token>`.
+3. The daemon sets the `terrarium_session` cookie (`HttpOnly`,
+   `SameSite=Strict`, `Path=/`, and `Secure` on HTTPS). It answers
+   `{"csrf", "expires_at"}`.
+4. The app keeps the `csrf` value and `expires_at`. It drops the token.
+5. Each request after that goes with `credentials: "same-origin"`, so the
+   browser sends the cookie. Each `POST`, `PUT`, `PATCH`, and `DELETE` also
+   sends `X-CSRF-Token: <csrf>` (`api/http.ts`). No request carries
+   `Authorization`.
+6. **sign out** (sidebar footer, or the Settings page) sends
+   `DELETE /api/session` with the CSRF header. Then the app removes every
+   local copy and shows the token screen.
 
-This only shortens how long the token lives in the browser. Script on the
-dashboard origin can still read memory and both storages. The real fix is an
-`HttpOnly`, `Secure`, `SameSite=Strict` session cookie that script cannot
-read. That needs the daemon (see "Daemon follow-ups" below).
+The state machine is in `stores/auth.ts`. Its modes are `none`, `session`,
+and `bearer`:
+
+- A 401 in `session` mode means that the cookie ended. The token screen then
+  shows **over** the current page. The router stays mounted, so the route and
+  the page state stay. After the sign-in, the event socket reconnects at
+  once.
+- The store also ends the session by itself at `expires_at`. On load it drops
+  a stored session whose `expires_at` has passed.
+- The Settings page (`/settings`) shows the mode and the time the session
+  ends.
+
+### What is stored where
+
+| Mode | Memory | `sessionStorage` | `localStorage` |
+|---|---|---|---|
+| Session | CSRF value, `expires_at` | `terrarium.session`: `{"csrf", "expires_at"}` | `terrarium.session.remembered`, the same value, only on **Remember on this device** |
+| Bearer fallback | token | `terrarium.token` | `terrarium.token.remembered`, only on **Remember on this device** |
+
+- The cookie is the browser's business. Script cannot read it. The daemon
+  sets its life (`Max-Age`), and the browser drops it at `expires_at`.
+- **Remember on this device** keeps the CSRF value in `localStorage`. A new
+  tab is then signed in until the session ends. Without the box, a new tab
+  asks again. (The cookie is still in the browser, but a tab without the CSRF
+  value cannot make a mutating call.)
+- The CSRF value alone is not a credential. Without the cookie it does
+  nothing. Script on the page can still read it and make calls while the page
+  is open, but it cannot take the token or the cookie away.
+- A token that an older build left in storage starts the app in bearer mode.
+  On load, `upgradeToSession` trades it for a session, and the token leaves
+  the browser.
+
+### Bearer fallback
+
+A daemon without sessions answers `POST /api/session` with `404` (or
+`405`). Then the app keeps the token as before: in memory and
+`sessionStorage`, and in `localStorage` on opt-in. The sidebar shows a
+**bearer mode** chip, and the Settings page says why. Each request sends
+`Authorization: Bearer`, and sockets offer the `bearer.<token>`
+subprotocol. Each load tries the session again, so an updated daemon moves
+the app to cookie mode without a new sign-in.
 
 ### WebSocket authentication
 
 A browser cannot set an `Authorization` header on a WebSocket. Every socket
 (agent PTY, login PTY, target exec console, events) opens through
-`AuthSocket` in `api/sockets.ts`:
+`AuthSocket` in `api/sockets.ts`. The URL never carries a token.
 
-- The URL carries no token.
-- The client offers the subprotocol `bearer.<token>`
-  (`new WebSocket(url, ["bearer." + token])`), so the token travels in the
-  `Sec-WebSocket-Protocol` header.
-- The daemon echoes the same subprotocol. `AuthSocket` checks the echo on
-  `open` and closes the socket if it does not match.
-- Dev only: when `VITE_ALLOW_QUERY_TOKEN=1` and the handshake is refused
-  (closed with 1006 before `open`), the socket tries once more with
-  `?token=`. This is for a daemon from before this change. It is off by
-  default. The daemon can refuse the query form with
-  `TERRARIUM_WS_QUERY_TOKEN=0`.
+- **Session:** the client offers no subprotocol. The browser sends the
+  cookie and the page's `Origin`. The daemon takes the upgrade when the
+  cookie is good and `Origin` is the dashboard's own origin. The socket mode
+  is `cookie`.
+- **Bearer fallback:** the client offers the subprotocol `bearer.<token>`
+  (`new WebSocket(url, ["bearer." + token])`). The daemon echoes it.
+  `AuthSocket` checks the echo on `open` and closes the socket if it does not
+  match.
+- Dev only: when `VITE_ALLOW_QUERY_TOKEN=1` and a bearer handshake is
+  refused (closed with 1006 before `open`), the socket tries once more with
+  `?token=`. The daemon refuses `?token=` by default
+  (`TERRARIUM_WS_QUERY_TOKEN=1` turns it on).
 
-The mock speaks the same contract (`api/mock/ws.ts`): its sockets go through
-`AuthSocket`, and the mock "daemon" refuses `?token=`.
+The Vite dev proxy keeps the page's `Host` header (`changeOrigin: false` on
+`/api`). The daemon compares `Origin` with `Host`, so a cookie upgrade
+through the proxy works.
+
+### What the daemon must do
+
+- `POST /api/session`: take `Authorization: Bearer`, set the cookie, and
+  answer `{"csrf", "expires_at"}`. A wrong token is `401`. A daemon without
+  sessions answers `404`.
+- `DELETE /api/session`: clear the cookie.
+- Take the cookie on every `/api` route. Refuse a cookie `POST`, `PUT`,
+  `PATCH`, or `DELETE` without a matching `X-CSRF-Token` (`403`).
+- Take the cookie on a WebSocket upgrade only with a matching `Origin`.
+- Answer `401` for a cookie that is wrong or ended. The app then asks for
+  the token again.
+- Keep `Authorization: Bearer` working, for the CLI and for the fallback.
+- Serve the dashboard and `/api` on one origin. The client sends the cookie
+  only to its own origin (`credentials: "same-origin"`), so cookie mode does
+  not work with `VITE_API_BASE` on another origin.
+
+### The mock
+
+`VITE_MOCK=1` speaks the same contract (`api/mock/index.ts`, `api/mock/ws.ts`).
+The token is `mock-operator-token`; the token screen shows it.
+
+- `session.create` sets an in-memory "cookie". The mock keeps it in
+  `sessionStorage` key `terrarium.mock.cookie`, so that a reload keeps the
+  session as a browser does. This is mock only; a real cookie is `HttpOnly`.
+- Every call needs the cookie or the bearer token, else `401`.
+- A mutating call with the cookie and without the right CSRF value is `403`.
+  The mock reads which calls mutate from the real client
+  (`api/mock/verbs.ts`), so the two cannot drift.
+- A socket without a subprotocol opens when the cookie is good. The mock
+  refuses `?token=`.
+- `createMockApi({ sessions: false })` acts as a daemon without sessions.
+- Without the `client` option (the unit tests), the mock lets every call in,
+  as the Unix socket does.
+
 `api/mock/parity.test.ts` checks the contract against the real transport.
 
 ## Layout
@@ -103,7 +181,7 @@ The mock speaks the same contract (`api/mock/ws.ts`): its sockets go through
 src/
   api/            typed client, transport, socket protocols, mock
     types.ts      domain types (PLAN §5)
-    http.ts       fetch transport: token, JSON, errors (ApiError, AuthError)
+    http.ts       fetch transport: cookie + CSRF or bearer, JSON, errors (ApiError, AuthError)
     client.ts     the Api interface and the HTTP implementation (PLAN §17)
     sockets.ts    PTY and events protocols, reconnecting event stream, AuthSocket
     mock/         in-memory Api, seed data, fake PTY
@@ -242,6 +320,7 @@ A `status` event carries `data.status`. A `card` event carries `data.card_id`.
 | `/hosts` | Host agents: status, capabilities, add with a one-time token, revoke | `GET`, `POST /api/hosts`, `DELETE /api/hosts/{name}` (new API, not in docs/api.md yet) |
 | `/events` | Event log with history | `GET /api/events?since=&kind=&project=&agent=`, events socket |
 | `/audit` | Audit log | `GET /api/audit?actor=&action=&project=` |
+| `/settings` | Session: mode, end time, what the browser keeps; sign out; theme | `DELETE /api/session` |
 | `/dev/xss` | Mock only: the hostile payloads of `lib/xss-payloads.ts`, rendered | none |
 
 Artifact upload sends a multipart form: `file`, `name`, `kind`, and
@@ -264,8 +343,14 @@ See `docs/security-review.md` F3, F4, and F5.
   renderer, at the sink. `setSafeHtml` is the only way HTML reaches the DOM:
   the `Markdown` and `SafeHtml` components call it. It appends a
   `DocumentFragment`, so the browser does not parse the markup a second time.
-- ESLint forbids `innerHTML`, `outerHTML`, `insertAdjacentHTML`,
-  `createContextualFragment`, `document.write`, and `eval` outside tests.
+- ESLint forbids the HTML sinks outside tests (F14): `innerHTML`,
+  `outerHTML`, and `srcdoc` as an assignment (also `el["innerHTML"]`), in
+  `Object.assign` or `Reflect.set`, and as a JSX attribute (also Solid's
+  `prop:innerHTML` and `attr:srcdoc`); `setAttribute("srcdoc", ...)`;
+  `insertAdjacentHTML`, `createContextualFragment`, `setHTMLUnsafe`,
+  `parseHTMLUnsafe`, `DOMParser` and `parseFromString`; `document.write`; and
+  `eval`. `lib/sink-lint.test.ts` lints one sample of each form and checks
+  that the rule flags it.
 - The DOMPurify config allows only the tags and attributes that the renderer
   emits. It forbids SVG, MathML, `style`, and every event handler. Links may
   be `http:`, `https:`, `mailto:`, or relative; the check reads the URL after
@@ -301,9 +386,19 @@ See `docs/security-review.md` F3, F4, and F5.
 
 ### Content-Security-Policy
 
-`index.html` has a `<meta http-equiv="Content-Security-Policy">`. The
-`terrarium-csp` plugin in `vite.config.ts` fills it in at build time. Without
-`VITE_ARTIFACT_ORIGIN` the policy is:
+The daemon sends the policy as a `Content-Security-Policy` header on the
+dashboard pages, with `frame-ancestors 'none'` and the artifact origin that it
+knows at run time (docs/api.md §1.2, `dashboard_csp` in
+`crates/terrariumd/src/api/mod.rs`).
+
+`index.html` also has a `<meta http-equiv="Content-Security-Policy">`. The
+`terrarium-csp` plugin in `vite.config.ts` fills it in on the dev servers
+(mock and real), because Vite serves the page there and sends no header. A
+production build drops the tag: next to the header it would also apply, and
+without `VITE_ARTIFACT_ORIGIN` it would block the artifact frames that the
+header allows. `VITE_META_CSP=1` keeps it in a build, for a static host that
+sends no header. A `VITE_MOCK=1` build keeps it too. Without
+`VITE_ARTIFACT_ORIGIN` the policy of the tag is:
 
 ```
 default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline';
@@ -322,8 +417,8 @@ With `VITE_ARTIFACT_ORIGIN`, the artifact origin goes into `img-src` and
   attributes, and xterm.js adds a `<style>` element. The sanitizer drops all
   `style` attributes from untrusted HTML.
 - A `<meta>` policy cannot set `frame-ancestors` or a report URL, and it
-  does not cover the response that carries it. The daemon should send the
-  same policy as a header.
+  does not cover the response that carries it. That is why the daemon's
+  header is the policy in production.
 - `<meta name="referrer" content="no-referrer">` keeps signed URLs out of
   `Referer` headers.
 
@@ -339,15 +434,10 @@ With `VITE_ARTIFACT_ORIGIN`, the artifact origin goes into `img-src` and
 
 These need changes in `terrariumd`. The dashboard cannot do them alone.
 
-1. **Cookie sessions.** Exchange the bearer token once for an `HttpOnly`,
-   `Secure`, `SameSite=Strict` session cookie, and accept the cookie on the API
-   and on WebSocket upgrades (check `Origin` on upgrades). Then the dashboard
-   keeps no token that script can read. This is the real fix for token theft
-   after an XSS bug.
-2. **CSP as a header.** Serve the dashboard's `index.html` with the policy
-   above as a `Content-Security-Policy` header, plus `frame-ancestors 'none'`.
-   The daemon knows the artifact origin at run time, so the header can name
-   it; the `<meta>` tag can only name what the build knew.
+1. **Cookie sessions.** Done in the dashboard (see "Authentication"). The
+   daemon side is `crates/terrariumd/src/api/session.rs`.
+2. **CSP as a header.** Done (docs/api.md §1.2). The production build has no
+   `<meta>` policy now.
 3. **Absolute signed URLs.** Have `POST /api/artifacts/{id}/url` answer a URL
    on the artifact origin (a `TERRARIUM_ARTIFACT_PUBLIC_URL` setting), and
    stop serving `/a/...` on the dashboard port. Then `VITE_ARTIFACT_ORIGIN` is
@@ -355,5 +445,5 @@ These need changes in `terrariumd`. The dashboard cannot do them alone.
 4. **CORS on the artifact routes.** `Access-Control-Allow-Origin: *` on
    `/a/...` (no credentials) lets the viewer `fetch` text and markdown
    artifacts from the artifact origin.
-5. **Refuse `?token=`.** Once every client uses the subprotocol, make
-   `TERRARIUM_WS_QUERY_TOKEN=0` the default.
+5. **Refuse `?token=`.** The daemon refuses it by default now
+   (`TERRARIUM_WS_QUERY_TOKEN=1` turns it on).

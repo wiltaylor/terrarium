@@ -5,6 +5,7 @@ import { parseOrigin } from "../lib/artifact-origin";
 import { createHttpApi, type Api } from "./client";
 import { createHttpTransport } from "./http";
 import { createMockApi } from "./mock";
+import { MOCK_TOKEN } from "./mock/ws";
 
 export const isMock: boolean = import.meta.env.VITE_MOCK === "1";
 
@@ -14,12 +15,29 @@ export const artifactOrigin: string | undefined = parseOrigin(import.meta.env.VI
 /** Dev only: let a socket retry with `?token=` when the daemon refuses the subprotocol. */
 export const allowQueryToken: boolean = import.meta.env.VITE_ALLOW_QUERY_TOKEN === "1";
 
+/** Mock only: the token that the mock "daemon" takes. The token screen shows it. */
+export const mockToken: string | undefined = isMock ? MOCK_TOKEN : undefined;
+
+const sessionStore = () => {
+  try {
+    return typeof sessionStorage === "undefined" ? null : sessionStorage;
+  } catch {
+    return null;
+  }
+};
+
 export function createApi(auth: AuthStore): Api {
-  if (isMock) return createMockApi();
+  if (isMock)
+    return createMockApi({
+      // The mock checks what the transport would send, as the TCP listener does.
+      client: { token: auth.token, csrf: auth.csrf, onUnauthorized: auth.requireToken },
+      cookieJar: sessionStore(),
+    });
   return createHttpApi(
     createHttpTransport({
       baseUrl: import.meta.env.VITE_API_BASE ?? "",
       getToken: auth.token,
+      getCsrf: auth.csrf,
       onUnauthorized: auth.requireToken,
       allowQueryToken,
     }),

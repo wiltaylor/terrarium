@@ -23,7 +23,17 @@ export function pushRecent(prev: AgentEvent[], e: AgentEvent, limit = RECENT_LIM
 export const firstSince = (latest: number | null, limit = RECENT_LIMIT): number | undefined =>
   latest === null ? undefined : Math.max(0, latest - limit);
 
-export function createEventsStore(api: Pick<Api, "events">) {
+export interface EventsStoreOptions {
+  /**
+   * May the socket open now? False while signed out: the stores listen
+   * (`on`) at load, before the sign-in, and a socket then would only get a
+   * 401. `start()` after the sign-in opens it. Default: always.
+   */
+  ready?: () => boolean;
+}
+
+export function createEventsStore(api: Pick<Api, "events">, opts: EventsStoreOptions = {}) {
+  const ready = opts.ready ?? (() => true);
   const [recent, setRecent] = createSignal<AgentEvent[]>([]);
   const [state, setState] = createSignal<ConnectionState>("closed");
   const [status, setStatus] = createSignal<StreamStatus>({ state: "closed", attempt: 0, retryAt: null, lastSeq: 0 });
@@ -50,7 +60,7 @@ export function createEventsStore(api: Pick<Api, "events">) {
   };
 
   const start = () => {
-    if (stream || starting) return;
+    if (stream || starting || !ready()) return;
     starting = true;
     stopped = false;
     setState("connecting");

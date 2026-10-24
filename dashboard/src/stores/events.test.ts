@@ -59,6 +59,22 @@ describe("createEventsStore", () => {
     store.stop();
   });
 
+  it("does not open the socket while signed out; start() after the sign-in opens it", async () => {
+    const sockets: Sock[] = [];
+    let signedIn = false;
+    const store = createRoot(() => createEventsStore(fakeApi(null, sockets, []), { ready: () => signedIn }));
+    store.on(() => {});
+    store.start();
+    await flush();
+    expect(sockets).toHaveLength(0);
+    expect(store.state()).toBe("closed");
+    signedIn = true;
+    store.start();
+    await flush();
+    expect(sockets).toHaveLength(1);
+    store.stop();
+  });
+
   it("shows disconnected after a drop, resumes with since, and fans out events", async () => {
     const sockets: Sock[] = [];
     const timers: (() => void)[] = [];

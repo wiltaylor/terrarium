@@ -7,11 +7,20 @@
 // usage, and login sessions follow docs/api.md §16. Hosts, target actions,
 // and exec sessions follow the daemon's new `api/hosts.rs` and
 // `api/targets.rs`, which docs/api.md does not describe yet.
+//
+// Auth (docs/api.md §1.1). Without `client`, the mock lets every call in,
+// as the Unix socket does; the unit tests use that. With `client` (the
+// browser mock), the mock acts as the TCP listener: `session.create` sets
+// an in-memory "cookie" (the browser keeps the real one), every call needs
+// that cookie or the bearer token, a mutating call with the cookie needs
+// `X-CSRF-Token` (else 403), and a socket opens without a subprotocol when
+// the cookie is good.
 
 import type { Api } from "../client";
-import { ApiError, type Page } from "../http";
+import { ApiError, AuthError, isMutating, type Page } from "../http";
 import { createWsEventStream, type EventStream, type RawSocket, type SocketEvent } from "../sockets";
-import { mockSocket } from "./ws";
+import { MOCK_TOKEN, mockSocket, type MockSocketAuth } from "./ws";
+import { httpVerbs } from "./verbs";
 import { splitFrontMatter } from "../../lib/markdown";
 import type {
   Agent,
@@ -61,7 +70,34 @@ export interface MockOptions {
   stepMs?: number;
   world?: MockWorld;
   now?: () => number;
+  /**
+   * The browser side: what the client would send. With it, the mock checks
+   * auth like the TCP listener. Without it, every call is in.
+   */
+  client?: MockClient;
+  /** False: a daemon without sessions. `session.create` gets 404, so the client answers null. Default true. */
+  sessions?: boolean;
+  /** How long a session lives. Default 12 hours. */
+  sessionTtlMs?: number;
+  /**
+   * Where the mock keeps its "cookie", so that a reload keeps the session as
+   * a browser does. The browser mock passes sessionStorage. Default: memory only.
+   */
+  cookieJar?: { getItem(k: string): string | null; setItem(k: string, v: string): void; removeItem(k: string): void } | null;
 }
+
+/** What the mock reads from the client: the headers that the HTTP transport would send. */
+export interface MockClient {
+  /** `Authorization: Bearer`, in bearer mode. */
+  token(): string | null;
+  /** `X-CSRF-Token`, with a session. */
+  csrf(): string | null;
+  /** The transport's 401 hook. */
+  onUnauthorized?(): void;
+}
+
+/** The mock's "cookie jar" key. Mock only: a real session cookie is `HttpOnly`. */
+export const MOCK_COOKIE_KEY = "terrarium.mock.cookie";
 
 const clone = <T>(v: T): T => structuredClone(v);
 
@@ -866,8 +902,78 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     for (let n = 2; ; n++) if (!taken(`${letters.slice(0, 3)}${n}`)) return `${letters.slice(0, 3)}${n}`;
   };
 
+  // ----- sessions (docs/api.md §1.1) -----
+  type MockCookie = { csrf: string; exp: number };
+  const jar = opts.cookieJar ?? null;
+  let cookie: MockCookie | null = (() => {
+    try {
+      const raw = jar?.getItem(MOCK_COOKIE_KEY);
+      return raw ? (JSON.parse(raw) as MockCookie) : null;
+    } catch {
+      return null;
+    }
+  })();
+  const saveCookie = () => {
+    try {
+      if (cookie) jar?.setItem(MOCK_COOKIE_KEY, JSON.stringify(cookie));
+      else jar?.removeItem(MOCK_COOKIE_KEY);
+    } catch {
+      // ignore
+    }
+  };
+  /** The cookie the browser still sends: it drops the cookie at its end (`Max-Age`). */
+  const liveCookie = (): MockCookie | null => {
+    if (cookie && cookie.exp <= now()) {
+      cookie = null;
+      saveCookie();
+    }
+    return cookie;
+  };
+  const unauthorized = (message: string): never => {
+    opts.client?.onUnauthorized?.();
+    throw new AuthError({ error: { code: "unauthorized", message } });
+  };
+  const CSRF_REFUSED = "a request with the session cookie must send X-CSRF-Token with the csrf value of POST /api/session";
+  /** The TCP listener's check: the bearer token first, then the cookie (with CSRF on a mutating call). */
+  const authorize = (verb: string) => {
+    const c = opts.client;
+    if (!c) return;
+    const bearer = c.token();
+    if (bearer !== null) {
+      if (bearer !== MOCK_TOKEN) unauthorized("missing or wrong bearer token");
+      return;
+    }
+    const ck = liveCookie();
+    if (!ck) unauthorized("missing or wrong bearer token");
+    if (isMutating(verb) && c.csrf() !== ck!.csrf) fail(403, "forbidden", CSRF_REFUSED);
+  };
+  /** What the mock "browser" offers on an upgrade. */
+  const wsAuth = (): MockSocketAuth | undefined =>
+    opts.client ? { token: opts.client.token(), cookie: liveCookie() !== null } : undefined;
+  const sock: typeof mockSocket = (path, make) => mockSocket(path, make, wsAuth());
+
   const api: Api & { world: MockWorld } = {
     world: w,
+    session: {
+      create: (token) =>
+        reply(() => {
+          // The daemon answers 404; the HTTP client turns that into null.
+          if (opts.sessions === false) return null;
+          if (token !== MOCK_TOKEN) throw new AuthError({ error: { code: "unauthorized", message: "missing or wrong bearer token" } });
+          const exp = Math.floor((now() + (opts.sessionTtlMs ?? 12 * 3600_000)) / 1000);
+          cookie = { csrf: `csrf_${ulid("csrf").toLowerCase()}`, exp: exp * 1000 };
+          saveCookie();
+          return { csrf: cookie.csrf, exp, expires_at: new Date(exp * 1000).toISOString().replace(/\.\d{3}Z$/, "Z") };
+        }),
+      remove: () =>
+        reply(() => {
+          if (opts.sessions === false) return;
+          const ck = liveCookie();
+          if (ck && opts.client && opts.client.csrf() !== ck.csrf) fail(403, "forbidden", CSRF_REFUSED);
+          cookie = null;
+          saveCookie();
+        }),
+    },
     health: () =>
       reply(() => ({
         status: "ok",
@@ -1091,7 +1197,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
         const a = w.agents.find((x) => x.id === id || `${x.project}/${x.name}` === id || x.name === id);
         const name = a?.name ?? id;
         let n = 0;
-        return mockSocket(`/api/agents/${encodeURIComponent(id)}/pty`, (protocol) => new FakePty({
+        return sock(`/api/agents/${encodeURIComponent(id)}/pty`, (protocol) => new FakePty({
           protocol,
           // The daemon answers 409 not_running before the upgrade.
           refuse: !a || !LIVE.includes(a.status),
@@ -1753,7 +1859,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           audit("login.input", s.id, undefined, { length: code.length });
           finishLogin(s);
         }),
-      loginPty: (id) => mockSocket(`/api/subscriptions/login/${encodeURIComponent(id)}/pty`, (protocol) => fakeLoginPty(logins.get(id), protocol)),
+      loginPty: (id) => sock(`/api/subscriptions/login/${encodeURIComponent(id)}/pty`, (protocol) => fakeLoginPty(logins.get(id), protocol)),
     },
 
     usage: {
@@ -1880,10 +1986,10 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
         }),
       sessionPty: (id, session) => {
         const path = `/api/targets/${encodeURIComponent(id)}/sessions/${encodeURIComponent(session)}/ws`;
-        if (execSessions.get(session) !== id) return mockSocket(path, () => new FakePty({ refuse: true }));
+        if (execSessions.get(session) !== id) return sock(path, () => new FakePty({ refuse: true }));
         const t = w.targets.find((x) => x.id === id || x.name === id);
         const user = t?.kind === "ssh" ? (t.address?.split("@")[0] ?? "build") : "wil";
-        return mockSocket(path, (protocol) => new FakePty({
+        return sock(path, (protocol) => new FakePty({
           protocol,
           banner: [`\x1b[2m(mock) shell on target ${id} via ${t?.host ?? t?.address ?? "?"}\x1b[0m`],
           prompt: `\x1b[32m${user}@${id}\x1b[0m:~$ `,
@@ -1925,7 +2031,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
         ensureActivity();
         return createWsEventStream((since) => `/api/events${since === undefined ? "" : `?since=${since}`}`, {
           since: o.since,
-          makeSocket: (path) => mockSocket(path, (protocol, h) => new MockEventSocket(h.url, protocol)),
+          makeSocket: (path) => sock(path, (protocol, h) => new MockEventSocket(h.url, protocol)),
         });
       },
       history: (q = {}) =>
@@ -1942,5 +2048,38 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
       }
     },
   };
+  guard(api, authorize);
   return Object.assign(api, { sim });
+}
+
+/**
+ * Put the auth check in front of every HTTP method of the mock. The verb
+ * comes from the real client (./verbs), so the mock and the transport agree
+ * on what mutates. Sockets check at the upgrade (./ws). `session.*` checks
+ * itself.
+ */
+function guard(api: object, authorize: (verb: string) => void): void {
+  const verbs = httpVerbs();
+  const namespaces = new Set([...verbs.keys()].filter((k) => k.includes(".")).map((k) => k.split(".")[0]!));
+  const wrap = (obj: Record<string, unknown>, prefix: string) => {
+    for (const [key, value] of Object.entries(obj)) {
+      const name = `${prefix}${key}`;
+      if (typeof value === "function") {
+        const verb = verbs.get(name);
+        if (!verb || verb === "WS" || name.startsWith("session.")) continue;
+        const fn = value as (...a: unknown[]) => unknown;
+        obj[key] = (...args: unknown[]) => {
+          try {
+            authorize(verb);
+          } catch (e) {
+            return Promise.reject(e);
+          }
+          return fn(...args);
+        };
+      } else if (!prefix && namespaces.has(key) && typeof value === "object" && value !== null) {
+        wrap(value as Record<string, unknown>, `${name}.`);
+      }
+    }
+  };
+  wrap(api as Record<string, unknown>, "");
 }

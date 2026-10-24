@@ -1,7 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createHttpApi, type HttpApiOptions } from "./client";
 import { AuthSocket } from "./sockets";
-import type { RequestOptions, Transport } from "./http";
+import { createHttpTransport, CSRF_HEADER, isMutating, type RequestOptions, type Transport } from "./http";
+import { eachMethod, httpVerbs, NOT_TRANSPORT } from "./mock/verbs";
 
 function recorder(opts: HttpApiOptions = {}, answer: unknown = undefined) {
   const calls: { method: string; path: string; opts?: RequestOptions }[] = [];
@@ -125,3 +126,111 @@ describe("createHttpApi, docs/api.md specifics", () => {
     expect(calls[1]).toMatchObject({ path: "/api/events", opts: { query: { since: 42, kind: "status" } } });
   });
 });
+
+describe("cookie session on every client method", () => {
+  /** The real transport with a session, over a fetch that records each request. */
+  const sessionApi = (status = 200) => {
+    const seen: { method: string; url: string; headers: Record<string, string> }[] = [];
+    const f = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      seen.push({ method: init!.method!, url: String(url), headers: init!.headers as Record<string, string> });
+      return new Response("[]", { status });
+    });
+    const t = createHttpTransport({
+      fetch: f,
+      getToken: () => null,
+      getCsrf: () => "csrf-1",
+      location: { protocol: "http:", host: "d" },
+      makeSocket: () => ({ readyState: 0, protocol: "", binaryType: "blob", send() {}, close() {}, addEventListener() {}, removeEventListener() {} }),
+    });
+    return { api: createHttpApi(t), seen };
+  };
+
+  it("sends X-CSRF-Token on every mutating method, and no token on any", async () => {
+    const { api, seen } = sessionApi();
+    const mutating: string[] = [];
+    const pending: Promise<unknown>[] = [];
+    eachMethod(api, (name, call) => {
+      if (NOT_TRANSPORT.has(name)) return;
+      const before = seen.length;
+      const out = call();
+      if (out instanceof Promise) pending.push(out.catch(() => undefined));
+      else (out as { close?: () => void } | undefined)?.close?.();
+      // The transport calls fetch before its first await.
+      for (const r of seen.slice(before)) {
+        // Only the sign-in itself carries the typed token.
+        if (name === "session.create") expect(r.headers.Authorization).toBe("Bearer x");
+        else expect(r.headers.Authorization, `${name} sent a token`).toBeUndefined();
+        if (isMutating(r.method)) {
+          mutating.push(name);
+          expect(r.headers[CSRF_HEADER], `${name} (${r.method}) has no CSRF header`).toBe("csrf-1");
+        } else {
+          expect(r.headers[CSRF_HEADER], `${name} (GET) sent the CSRF header`).toBeUndefined();
+        }
+      }
+    });
+    await Promise.all(pending);
+    // Every method the verb table calls mutating went through the check above.
+    const want = [...httpVerbs()].filter(([, v]) => isMutating(v)).map(([k]) => k);
+    expect(mutating.sort()).toEqual(want.sort());
+    expect(want.length).toBeGreaterThan(50);
+    expect(want).toEqual(expect.arrayContaining(["cards.create", "cards.update", "agents.setRoles", "wiki.save", "projects.remove", "session.remove"]));
+  });
+
+  it("opens every socket without a subprotocol with a session", () => {
+    const made: (string[] | undefined)[] = [];
+    const t = createHttpTransport({
+      getToken: () => null,
+      getCsrf: () => "c",
+      location: { protocol: "http:", host: "d" },
+      makeSocket: (_u, protocols) => {
+        made.push(protocols);
+        return { readyState: 0, protocol: "", binaryType: "blob", send() {}, close() {}, addEventListener() {}, removeEventListener() {} };
+      },
+    });
+    const api = createHttpApi(t);
+    api.agents.pty("A");
+    api.subscriptions.loginPty("L");
+    api.targets.sessionPty("box", "S");
+    api.events.stream().close();
+    expect(made).toEqual([undefined, undefined, undefined, undefined]);
+  });
+});
+
+describe("session endpoints", () => {
+  it("posts the typed token once to POST /api/session and answers the grant", async () => {
+    const f = vi.fn(async (_u: string | URL | Request, _i?: RequestInit) => new Response(JSON.stringify({ csrf: "c", expires_at: "2026-10-25T00:00:00Z" }), { status: 201 }));
+    const api = createHttpApi(createHttpTransport({ fetch: f, getToken: () => null }));
+    expect(await api.session.create("typed")).toEqual({ csrf: "c", expires_at: "2026-10-25T00:00:00Z" });
+    const [url, init] = f.mock.calls[0]!;
+    expect(url).toBe("/api/session");
+    expect(init!.method).toBe("POST");
+    expect((init!.headers as Record<string, string>).Authorization).toBe("Bearer typed");
+  });
+
+  it("answers null when the daemon has no sessions (404 or 405)", async () => {
+    for (const status of [404, 405]) {
+      const f = vi.fn(async () => new Response(JSON.stringify({ error: { code: "not_found", message: "no such API route" } }), { status }));
+      const api = createHttpApi(createHttpTransport({ fetch: f, getToken: () => null }));
+      expect(await api.session.create("t")).toBeNull();
+      await expect(api.session.remove()).resolves.toBeUndefined();
+    }
+  });
+
+  it("a wrong token rejects, and does not call onUnauthorized", async () => {
+    const onUnauthorized = vi.fn();
+    const f = vi.fn(async () => new Response(JSON.stringify({ error: { code: "unauthorized", message: "no" } }), { status: 401 }));
+    const api = createHttpApi(createHttpTransport({ fetch: f, getToken: () => null, onUnauthorized }));
+    await expect(api.session.create("bad")).rejects.toMatchObject({ status: 401 });
+    expect(onUnauthorized).not.toHaveBeenCalled();
+  });
+
+  it("sign-out sends DELETE /api/session with the CSRF header", async () => {
+    const f = vi.fn(async (_u: string | URL | Request, _i?: RequestInit) => new Response(null, { status: 204 }));
+    const api = createHttpApi(createHttpTransport({ fetch: f, getToken: () => null, getCsrf: () => "c9" }));
+    await api.session.remove();
+    const [url, init] = f.mock.calls[0]!;
+    expect(`${init!.method} ${String(url)}`).toBe("DELETE /api/session");
+    expect((init!.headers as Record<string, string>)[CSRF_HEADER]).toBe("c9");
+  });
+});
+

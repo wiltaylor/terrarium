@@ -1,12 +1,13 @@
 // The mock must answer in the daemon's shapes (docs/api.md), so mock mode and
 // real mode never diverge.
 import { describe, expect, it } from "vitest";
-import { ApiError, createHttpTransport } from "../http";
-import { createMockApi } from ".";
+import { ApiError, AuthError, createHttpTransport, isMutating } from "../http";
+import { createMockApi, type MockOptions } from ".";
 import type { AgentEvent } from "../types";
 import { bearerProtocol, type AuthSocket, type MakeRawSocket, type PtySocket } from "../sockets";
 import { FakePty } from "./pty";
-import { acceptHandshake, MOCK_TOKEN, type HandshakeRules } from "./ws";
+import { acceptHandshake, MOCK_ORIGIN, MOCK_RULES, MOCK_TOKEN, type HandshakeRules } from "./ws";
+import { eachMethod, httpVerbs, NOT_TRANSPORT } from "./verbs";
 
 const mock = () => createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 0 });
 const wait = (ms = 5) => new Promise((r) => setTimeout(r, ms));
@@ -583,6 +584,160 @@ describe("WebSocket auth contract (docs/security-review.md F4)", () => {
     await wait();
     expect(frames).toHaveLength(1);
     stream.close();
+  });
+});
+
+describe("session contract (docs/api.md §1.1)", () => {
+  /** The browser mock: the mock checks what the transport would send. */
+  const browser = (extra: MockOptions = {}) => {
+    const c = { token: null as string | null, csrf: null as string | null, unauthorized: 0 };
+    const api = createMockApi({
+      latencyMs: 0,
+      eventsIntervalMs: 0,
+      stepMs: 0,
+      client: { token: () => c.token, csrf: () => c.csrf, onUnauthorized: () => void c.unauthorized++ },
+      ...extra,
+    });
+    const signIn = async () => {
+      const g = await api.session.create(MOCK_TOKEN);
+      c.csrf = g!.csrf;
+      return g!;
+    };
+    return { api, c, signIn };
+  };
+
+  it("POST /api/session answers {csrf, exp, expires_at} for the right token, and 401 for a wrong one", async () => {
+    const t = Date.parse("2026-10-24T10:00:00Z");
+    const { api } = browser({ now: () => t, sessionTtlMs: 3600_000 });
+    const g = (await api.session.create(MOCK_TOKEN))!;
+    expect(Object.keys(g).sort()).toEqual(["csrf", "exp", "expires_at"]);
+    expect(g.expires_at).toBe("2026-10-24T11:00:00Z");
+    expect(g.exp).toBe(Date.parse(g.expires_at) / 1000);
+    const err = await api.session.create("wrong").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(AuthError);
+    expect(err).toMatchObject({ status: 401, code: "unauthorized" });
+  });
+
+  it("the cookie authenticates reads; a mutating call needs X-CSRF-Token, else 403", async () => {
+    const { api, c, signIn } = browser();
+    await expect(api.projects.list()).rejects.toMatchObject({ status: 401 });
+    expect(c.unauthorized).toBe(1);
+    const { csrf } = await signIn();
+    expect((await api.projects.list()).length).toBeGreaterThan(0);
+    c.csrf = null;
+    await expect(api.cards.create("terrarium", { title: "no csrf" })).rejects.toMatchObject({ status: 403, code: "forbidden" });
+    c.csrf = "wrong";
+    await expect(api.cards.create("terrarium", { title: "bad csrf" })).rejects.toMatchObject({ status: 403 });
+    c.csrf = csrf;
+    expect((await api.cards.create("terrarium", { title: "with csrf" })).title).toBe("with csrf");
+  });
+
+  it("guards every mutating Api method of the mock with the CSRF check", async () => {
+    const { api, c, signIn } = browser();
+    await signIn();
+    c.csrf = null;
+    const verbs = httpVerbs();
+    const checked: string[] = [];
+    const pending: Promise<void>[] = [];
+    eachMethod(api, (name, call) => {
+      const verb = verbs.get(name);
+      if (!verb || !isMutating(verb) || name.startsWith("session.")) return;
+      checked.push(name);
+      pending.push(
+        (call() as Promise<unknown>).then(
+          () => expect.fail(`${name} took a mutating call without X-CSRF-Token`),
+          (e: unknown) => expect((e as ApiError).status, name).toBe(403),
+        ),
+      );
+    });
+    await Promise.all(pending);
+    expect(checked.length).toBe([...verbs.values()].filter(isMutating).length - 2); // all but session.create and session.remove, which check themselves
+  });
+
+  it("every method of the HTTP client has a verb, and the mock has every method", () => {
+    const verbs = httpVerbs();
+    const mockNames: string[] = [];
+    eachMethod(mock(), (name) => void mockNames.push(name));
+    for (const name of verbs.keys()) expect(mockNames).toContain(name);
+    expect(verbs.size + NOT_TRANSPORT.size).toBe(mockNames.filter((n) => !n.startsWith("world.") && !n.startsWith("sim.")).length);
+  });
+
+  it("the bearer token still works without a session", async () => {
+    const { api, c } = browser();
+    c.token = MOCK_TOKEN;
+    expect((await api.cards.create("terrarium", { title: "bearer" })).title).toBe("bearer");
+    c.token = "wrong";
+    await expect(api.projects.list()).rejects.toBeInstanceOf(AuthError);
+  });
+
+  it("the cookie ends at expires_at: 401", async () => {
+    let t = Date.parse("2026-10-24T10:00:00Z");
+    const { api, signIn } = browser({ now: () => t, sessionTtlMs: 60_000 });
+    await signIn();
+    await api.projects.list();
+    t += 60_000;
+    await expect(api.projects.list()).rejects.toMatchObject({ status: 401 });
+  });
+
+  it("DELETE /api/session needs the CSRF header, then clears the cookie", async () => {
+    const { api, c, signIn } = browser();
+    const { csrf } = await signIn();
+    c.csrf = null;
+    await expect(api.session.remove()).rejects.toMatchObject({ status: 403 });
+    c.csrf = csrf;
+    await api.session.remove();
+    await expect(api.projects.list()).rejects.toMatchObject({ status: 401 });
+  });
+
+  it("a daemon without sessions: POST /api/session is 404, which the client answers as null", async () => {
+    const { api } = browser({ sessions: false });
+    expect(await api.session.create(MOCK_TOKEN)).toBeNull();
+    await expect(api.session.remove()).resolves.toBeUndefined();
+  });
+
+  it("keeps the cookie in the jar across a reload, as a browser does", async () => {
+    const m = new Map<string, string>();
+    const jar = { getItem: (k: string) => m.get(k) ?? null, setItem: (k: string, v: string) => void m.set(k, v), removeItem: (k: string) => void m.delete(k) };
+    const first = browser({ cookieJar: jar });
+    const { csrf } = await first.signIn();
+    const again = browser({ cookieJar: jar });
+    again.c.csrf = csrf;
+    expect((await again.api.cards.create("terrarium", { title: "after reload" })).id).toMatch(/^TER-/);
+  });
+
+  it("WebSockets: with the cookie, no subprotocol and the dashboard Origin; without it, refused", async () => {
+    const { api, signIn } = browser();
+    const live = (await (async () => {
+      await signIn();
+      return api.agents.list();
+    })()).find((a) => ["idle", "working"].includes(a.status))!;
+    const login = await api.subscriptions.startLogin({ kind: "claude" });
+    const exec = await api.targets.exec("pg-test", { shell: true, pty: { rows: 24, cols: 80 } });
+    const sockets = [api.agents.pty(live.id), api.subscriptions.loginPty(login.id), api.targets.sessionPty("pg-test", exec.session_id)];
+    expect(await Promise.all(sockets.map(outcome))).toEqual(["open:", "open:", "open:"]);
+    expect(sockets.map((s) => (s as AuthSocket).mode)).toEqual(["cookie", "cookie", "cookie"]);
+    const frames: AgentEvent[] = [];
+    const stream = api.events.stream({ since: api.world.seq - 1 });
+    stream.subscribe((e) => frames.push(e));
+    await wait();
+    expect(frames).toHaveLength(1);
+    stream.close();
+
+    await api.session.remove().catch(() => undefined);
+    const signedOut = browser();
+    expect(await outcome(signedOut.api.agents.pty(live.id))).toBe("closed");
+  });
+
+  it("the daemon takes a cookie upgrade only from the dashboard Origin", () => {
+    const h = { url: "ws://d/api/events", protocols: [] as string[], cookie: true };
+    expect(acceptHandshake({ ...h, origin: MOCK_ORIGIN }, MOCK_RULES)).toBe("");
+    expect(acceptHandshake({ ...h, origin: "https://evil.example" }, MOCK_RULES)).toBeNull();
+    expect(acceptHandshake(h, MOCK_RULES)).toBeNull();
+    expect(acceptHandshake({ ...h, origin: MOCK_ORIGIN }, { ...MOCK_RULES, origins: [] })).toBeNull();
+    // The bearer subprotocol wins over the cookie, as the daemon reads Authorization first.
+    expect(acceptHandshake({ ...h, origin: "https://evil.example", protocols: [`bearer.${MOCK_TOKEN}`] }, MOCK_RULES)).toBe(`bearer.${MOCK_TOKEN}`);
+    // No cookie and no token: refused, and `?token=` is off by default.
+    expect(acceptHandshake({ url: `ws://d/api/events?token=${MOCK_TOKEN}`, protocols: [], origin: MOCK_ORIGIN }, MOCK_RULES)).toBeNull();
   });
 });
 

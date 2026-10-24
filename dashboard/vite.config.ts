@@ -60,17 +60,35 @@ export function dashboardCsp(i: CspInputs): string {
     .join("; ");
 }
 
+/** The CSP `<meta>` tag of index.html, with the comment above it. */
+const CSP_META = /[ \t]*<!--[^>]*terrarium-csp[^>]*-->\s*<meta http-equiv="Content-Security-Policy"[^>]*>\n?/;
+
+/**
+ * Fill in the CSP `<meta>` tag, or drop it.
+ *
+ * A production build drops it: the daemon sends the policy as a header, with
+ * `frame-ancestors 'none'` and the artifact origin it knows at run time
+ * (docs/api.md §1.2). A meta tag next to the header would apply too, and
+ * without `VITE_ARTIFACT_ORIGIN` it would block the artifact frames that the
+ * header allows. The dev servers (mock and real) keep the tag, because Vite
+ * serves the page there and sends no header. `VITE_META_CSP=1` keeps it in a
+ * build, for a static host that sends no header; a mock build keeps it too.
+ */
 function cspPlugin(env: Record<string, string>): Plugin {
   const csp = dashboardCsp({
     artifactOrigin: origin(env.VITE_ARTIFACT_ORIGIN),
     apiBase: origin(env.VITE_API_BASE),
     mock: env.VITE_MOCK === "1",
   });
+  let keep = true;
   return {
     name: "terrarium-csp",
+    configResolved(config) {
+      keep = config.command === "serve" || env.VITE_MOCK === "1" || env.VITE_META_CSP === "1";
+    },
     transformIndexHtml: {
       order: "pre",
-      handler: (html) => html.replace("%TERRARIUM_CSP%", csp.replace(/"/g, "&quot;")),
+      handler: (html) => (keep ? html.replace("%TERRARIUM_CSP%", csp.replace(/"/g, "&quot;")) : html.replace(CSP_META, "")),
     },
   };
 }
@@ -82,7 +100,9 @@ export default defineConfig(({ mode }) => {
     server: {
       port: 5173,
       proxy: {
-        "^/api(/|$)": { target: daemon, changeOrigin: true, ws: true },
+        // Keep the page's Host: the daemon takes a cookie WebSocket upgrade
+        // only when `Origin` names the request's own host (docs/api.md §1.1).
+        "^/api(/|$)": { target: daemon, changeOrigin: false, ws: true },
         // Regex key: a bare "/a" prefix would also catch /agents and /audit.
         "^/a/": { target: daemon, changeOrigin: true },
       },

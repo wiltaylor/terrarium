@@ -1080,6 +1080,28 @@ th {
 .token-screen form {
   width: min(100%, 420px);
 }
+/* A session that ended: the token screen over the page, which stays mounted. */
+.token-screen.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  min-height: 0;
+  background: rgb(0 0 0 / 0.45);
+}
+.session-facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 6px 16px;
+  margin: 0;
+}
+.session-facts dt {
+  color: var(--muted);
+}
+.session-facts dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
 
 /* ----- error details, load more, confirm, connection banner ----- */
 .error-detail {

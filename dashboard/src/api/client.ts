@@ -62,6 +62,7 @@ import type {
   Revision,
   Role,
   Session,
+  SessionGrant,
   StartLogin,
   Subscription,
   Target,
@@ -81,6 +82,19 @@ import type {
 
 export interface Api {
   health(): Promise<Health>;
+
+  /** Dashboard sessions (docs/api.md §1.1). */
+  session: {
+    /**
+     * `POST /api/session` with `Authorization: Bearer <token>`. The daemon
+     * sets the `HttpOnly` cookie and answers the CSRF value. Null: this
+     * daemon has no sessions (`404` or `405`); keep to the bearer token.
+     * A wrong token is an `AuthError`.
+     */
+    create(token: string): Promise<SessionGrant | null>;
+    /** `DELETE /api/session`: the daemon clears the cookie. A daemon without sessions is not an error. */
+    remove(): Promise<void>;
+  };
 
   projects: {
     list(): Promise<Project[]>;
@@ -336,6 +350,26 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
 
   return {
     health: () => get("/api/health"),
+
+    session: {
+      create: async (token) => {
+        try {
+          return await t.request<SessionGrant>("POST", "/api/session", { bearer: token, quiet401: true });
+        } catch (e) {
+          if (e instanceof ApiError && !(e instanceof AuthError) && (e.status === 404 || e.status === 405)) return null;
+          throw e;
+        }
+      },
+      remove: async () => {
+        try {
+          await t.request<void>("DELETE", "/api/session", { quiet401: true });
+        } catch (e) {
+          // No sessions on this daemon, or the session ended already.
+          if (e instanceof ApiError && [401, 404, 405].includes(e.status)) return;
+          throw e;
+        }
+      },
+    },
 
     projects: {
       list: () => all("/api/projects"),

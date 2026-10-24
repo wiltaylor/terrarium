@@ -607,7 +607,7 @@ export interface Version {
   decided_at?: string;
   decided_by?: string;
   released_at?: string;
-  /** The dashboard page of the version. */
+  /** The dashboard page of the version: a path, `/p/<project>/versions/<id>`, or an absolute URL when the daemon has `TERRARIUM_PUBLIC_URL`. */
   url?: string;
   cards: { id: string; title: string; column: string }[];
   artifacts: { id: string; uid: string; name: string; kind: Artifact["kind"]; content_type: string; size: number }[];
@@ -970,4 +970,17 @@ export interface AuditQuery {
   project?: string;
   limit?: number;
   cursor?: string;
+}
+
+/**
+ * The answer of `POST /api/session` (docs/api.md §1.1). The cookie itself
+ * comes in `Set-Cookie` (`HttpOnly`), so script never sees it.
+ */
+export interface SessionGrant {
+  /** Send it as `X-CSRF-Token` on every POST, PUT, PATCH, and DELETE. */
+  csrf: string;
+  /** When the cookie ends, RFC 3339. */
+  expires_at: string;
+  /** The same time as a Unix time, in seconds. */
+  exp?: number;
 }

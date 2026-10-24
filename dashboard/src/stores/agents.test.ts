@@ -3,7 +3,6 @@ import { createRoot } from "solid-js";
 import { createMockApi } from "../api/mock";
 import type { Agent, AgentEvent } from "../api/types";
 import { applyAgentEvent, createAgentsStore } from "./agents";
-import { createAuthStore, type KeyValueStorage } from "./auth";
 import { createEventsStore } from "./events";
 
 const agent = (over: Partial<Agent> = {}): Agent => ({
@@ -93,26 +92,6 @@ describe("createAgentsStore backlog", () => {
       const a = store.byId(lead.id)!;
       expect(a.last_event?.id).toBe("STALE");
       expect(a.status).toBe("idle");
-      dispose();
-    });
-  });
-});
-
-describe("createAuthStore", () => {
-  it("persists the token and flags 401s", () => {
-    const mem = new Map<string, string>();
-    const storage: KeyValueStorage = { getItem: (k) => mem.get(k) ?? null, setItem: (k, v) => void mem.set(k, v), removeItem: (k) => void mem.delete(k) };
-    createRoot((dispose) => {
-      const auth = createAuthStore({ session: storage });
-      expect(auth.token()).toBeNull();
-      auth.requireToken();
-      expect(auth.needsToken()).toBe(true);
-      auth.setToken("  abc  ");
-      expect(auth.token()).toBe("abc");
-      expect(auth.needsToken()).toBe(false);
-      expect(createAuthStore({ session: storage }).token()).toBe("abc");
-      auth.clear();
-      expect(mem.size).toBe(0);
       dispose();
     });
   });
