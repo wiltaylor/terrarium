@@ -96,6 +96,10 @@ pub struct Entry {
     /// The roles that the apply grants or revokes.
     #[serde(skip)]
     pub roles_touched: Vec<Role>,
+    /// The policy entries that the apply adds and that need a sysadmin
+    /// (`policy::policy_grants`).
+    #[serde(skip)]
+    pub policy_grants: Vec<String>,
 }
 
 /// The counts of a plan.
@@ -494,6 +498,7 @@ fn classify(
         result: None,
         id: None,
         roles_touched: Vec::new(),
+        policy_grants: Vec::new(),
     };
     if let Some(o) = owner.filter(|o| o.fleet != fleet) {
         e.action = Action::Conflict;
@@ -637,6 +642,18 @@ pub fn plan(conn: &Connection, f: &Fleet) -> ApiResult<Plan> {
             .chain(have.iter().filter(|r| !want.contains(r)))
             .copied()
             .collect();
+        let project = a.def.project.as_str();
+        let project_target = |n: &str| {
+            f.all_targets()
+                .any(|t| t.name == n && t.project.as_deref() == Some(project))
+                || agents::project_target(conn, project, n)
+        };
+        e.policy_grants = policy::policy_grants(
+            project,
+            view.as_ref().map(|v| &v.agent.policy),
+            &a.def.policy,
+            &project_target,
+        );
         if let Some(v) = &view {
             e.id = Some(v.agent.id.to_string());
             e.live = v.agent.status.is_live();
@@ -864,42 +881,129 @@ pub fn plan_text(
 /// May `actor` apply this plan? PLAN §10: the operator and sysadmins may
 /// apply any fleet; a project_admin may apply a fleet that touches only
 /// its own project (no new projects, no global targets, no
-/// subscriptions); a member may not apply. With `prune`, the removals
-/// count too.
+/// subscriptions); a member may not apply.
+///
+/// The objects that the fleet owns now and the file no longer declares
+/// count too, with `prune` or not (`docs/security-review.md` F10): an
+/// apply replaces the stored content, so a later prune of it deletes
+/// them. Only a prune checks that an agent does not delete itself.
 pub fn authorize(actor: &Actor, plan: &Plan, prune: bool) -> ApiResult<()> {
+    if let Actor::Agent(a) = actor
+        && !a.is_sysadmin()
+        && !a.roles.contains(&Role::ProjectAdmin)
+    {
+        return Err(ApiError::forbidden(
+            "planning or applying a fleet needs project_admin, sysadmin, or the operator",
+        ));
+    }
     for e in &plan.entries {
-        if e.action == Action::Conflict
-            || (!prune && matches!(e.action, Action::Delete | Action::Release))
-        {
+        if e.action == Action::Conflict {
             continue;
         }
-        match e.kind {
-            Kind::Subscription => {
-                policy::manage_subscriptions(actor, "declaring a subscription in a fleet")?;
-            }
-            Kind::Project if e.action == Action::Create => {
-                policy::sysadmin(actor, "creating a project from a fleet")?;
-            }
-            Kind::Project => {
-                policy::admin_project(actor, &e.key, "changing a project from a fleet")?;
-            }
-            Kind::Target => policy::define_target(actor, e.project.as_deref())?,
-            Kind::Agent => {
-                let project = e.project.as_deref().unwrap_or_default();
-                policy::admin_project(actor, project, "managing agents from a fleet")?;
-                if e.action == Action::Delete
-                    && let (Some(me), Some(id)) = (actor.agent(), &e.id)
-                    && me.id == *id
-                {
-                    return Err(ApiError::forbidden("an agent cannot delete itself"));
+        let removal = matches!(e.action, Action::Delete | Action::Release);
+        let check = || -> ApiResult<()> {
+            match e.kind {
+                Kind::Subscription => {
+                    policy::manage_subscriptions(actor, "declaring a subscription in a fleet")
                 }
-                if !matches!(e.action, Action::Delete | Action::Release) {
-                    for role in &e.roles_touched {
-                        policy::change_role(actor, e.id.as_deref().unwrap_or(""), project, *role)?;
+                Kind::Project if e.action == Action::Create => {
+                    policy::sysadmin(actor, "creating a project from a fleet")
+                }
+                Kind::Project => {
+                    policy::admin_project(actor, &e.key, "changing a project from a fleet")
+                }
+                Kind::Target => policy::define_target(actor, e.project.as_deref()),
+                Kind::Agent => {
+                    let project = e.project.as_deref().unwrap_or_default();
+                    policy::admin_project(actor, project, "managing agents from a fleet")?;
+                    if prune
+                        && e.action == Action::Delete
+                        && let (Some(me), Some(id)) = (actor.agent(), &e.id)
+                        && me.id == *id
+                    {
+                        return Err(ApiError::forbidden("an agent cannot delete itself"));
                     }
+                    if !removal {
+                        for role in &e.roles_touched {
+                            policy::change_role(
+                                actor,
+                                e.id.as_deref().unwrap_or(""),
+                                project,
+                                *role,
+                            )?;
+                        }
+                        policy::grant_policy(actor, &e.policy_grants)?;
+                    }
+                    Ok(())
                 }
             }
+        };
+        match check() {
+            Err(err) if removal && !prune => {
+                return Err(ApiError::forbidden(format!(
+                    "fleet `{}` owns {} `{}`, which the file drops; changing the fleet: {}",
+                    plan.fleet, e.kind, e.key, err.message
+                )));
+            }
+            r => r?,
         }
+    }
+    Ok(())
+}
+
+/// The stored record of a fleet: `(origin, applied_by)`.
+fn stored(conn: &Connection, name: &str) -> ApiResult<Option<(String, String)>> {
+    Ok(conn
+        .query_row(
+            "SELECT origin, applied_by FROM fleets WHERE name = ?1",
+            [name],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?)
+}
+
+/// May `actor` write `f` over the stored fleet of the same name
+/// (`docs/security-review.md` F10)? [`authorize`] checks the objects; this
+/// checks the record:
+///
+/// - A fleet that declares nothing replaces a stored fleet only for a
+///   sysadmin or the operator.
+/// - An API apply (`origin = Some("api")`) over a fleet from a file needs
+///   `confirm`: the file is the source, and the next reload applies it
+///   again. `None` (a plan) skips this check.
+pub fn check_overwrite(
+    conn: &Connection,
+    actor: &Actor,
+    f: &Fleet,
+    origin: Option<&str>,
+    confirm: bool,
+) -> ApiResult<()> {
+    let Some((was, by)) = stored(conn, &f.name)? else {
+        return Ok(());
+    };
+    if f.objects().is_empty() {
+        policy::sysadmin(
+            actor,
+            &format!(
+                "replacing fleet `{}` (applied by {by}) with a fleet that declares nothing",
+                f.name
+            ),
+        )?;
+    }
+    if let Some(origin) = origin
+        && origin == "api"
+        && was.starts_with("file:")
+        && !confirm
+    {
+        return Err(ApiError::new(
+            Code::ConfirmRequired,
+            format!(
+                "fleet `{}` comes from {was}; an API apply replaces its record until the next \
+                 reload; add confirm to apply it anyway",
+                f.name
+            ),
+        )
+        .with_details(json!({"fleet": f.name, "origin": was, "applied_by": by})));
     }
     Ok(())
 }
@@ -946,16 +1050,20 @@ fn conflict_error(plan: &Plan) -> ApiError {
 /// Apply a checked fleet in the transaction `t`: plan again, check the
 /// policy, then create, update, and (with `prune`) delete. Any failure
 /// rolls the whole apply back.
+#[allow(clippy::too_many_arguments)]
 pub fn apply(
     t: &mut Tx<'_>,
     f: &Fleet,
     origin: &Origin,
     actor: &Actor,
     prune: bool,
+    confirm: bool,
     state_dir: &Path,
 ) -> ApiResult<Applied> {
     let mut plan = plan(t, f)?;
     authorize(actor, &plan, prune)?;
+    check_overwrite(t, actor, f, Some(&origin.origin), confirm)?;
+    let previous = stored(t, &f.name)?;
     if plan.conflicts().next().is_some() {
         return Err(conflict_error(&plan));
     }
@@ -1057,7 +1165,13 @@ pub fn apply(
         "fleet.apply",
         &name,
         f.projects.first().map(|p| p.def.name.as_str()),
-        json!({"origin": origin.origin, "prune": prune, "summary": plan.summary}),
+        json!({
+            "origin": origin.origin,
+            "prune": prune,
+            "summary": plan.summary,
+            "previous_origin": previous.as_ref().map(|p| &p.0),
+            "previous_applied_by": previous.as_ref().map(|p| &p.1),
+        }),
     )?;
     out.plan = Some(plan);
     Ok(out)
@@ -1417,7 +1531,7 @@ pub async fn apply_config_dir(state: &Shared) -> Vec<String> {
                 if !bad.is_empty() {
                     return Err(ApiError::new(Code::Invalid, bad.join("; ")));
                 }
-                apply(t, &f, &origin, &Actor::Operator, false, &state_dir)
+                apply(t, &f, &origin, &Actor::Operator, false, false, &state_dir)
             })
             .await;
         match result {

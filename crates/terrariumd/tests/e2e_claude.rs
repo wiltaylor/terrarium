@@ -145,6 +145,7 @@ async fn claude_in_bwrap_answers_one_turn() {
         supervisor: sup.clone(),
         insecure_agent_header: false,
         artifact_listen: None,
+        web: Default::default(),
     })
     .await
     .unwrap();
@@ -467,6 +468,7 @@ async fn two_claude_agents_share_one_home() {
         supervisor: sup.clone(),
         insecure_agent_header: false,
         artifact_listen: None,
+        web: Default::default(),
     })
     .await
     .unwrap();

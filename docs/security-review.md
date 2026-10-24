@@ -54,14 +54,14 @@ remote unauthenticated path to code execution or to another agent's secrets.
 | F3 | MEDIUM | Dashboard | `components/Markdown.tsx:15` | Untrusted markdown through `innerHTML` and a hand-rolled sanitizer | Fixed; token still script-readable |
 | F4 | MEDIUM | API auth | `api/mod.rs:207,256` | Bearer token in `?token=` query string for WebSockets | Fixed; `?token=` still accepted by default |
 | F5 | LOW | Artifacts | `api/mod.rs:173`, `api/artifacts.rs:34` | Artifacts on the dashboard origin by default; isolation depends on CSP | Fixed |
-| F6 | LOW | Login flow | `login_session.rs:789` | Login PTY output and `pty.log` in a temp dir hold the device code until cleanup | Partially fixed (code stays in SQLite) |
+| F6 | LOW | Login flow | `login_session.rs:789` | Login PTY output and `pty.log` in a temp dir hold the device code until cleanup | Partially fixed; the SQLite residual is fixed (a final state clears `url` and `device_code`). The `error` text residual stays. |
 | F7 | LOW | API auth | `api/mod.rs:189` | Token compare returns early on a length mismatch (length leak only) | Fixed |
 | F8 | INFO | SQL | `events.rs:208`, `store/usage.rs:177`, `store/mail.rs:266` | Dynamic SQL uses fixed identifiers and integers only; no injection found | Not re-checked (no change) |
 | F9 | INFO | Host verbs | `terrarium-host/src/verb.rs`, `executor.rs:982` | Commands build as argv, not shell strings; no injection found | Not re-checked (no change) |
-| F10 | LOW | Fleet | `fleet.rs:869,1042` | Any agent, a member too, overwrites the stored record of any fleet with an empty fleet of the same name | New (2026-10-24) |
-| F11 | LOW | Sandbox | `terrarium-runner/src/config.rs:150,181` | The split of an old agent dir follows symlinks that the agent planted before the upgrade | New (2026-10-24) |
-| F12 | LOW | Usage | `usage_collector.rs:199,530` | The collector tails any file that a forged `SessionStart` hook names | New (2026-10-24) |
-| F13 | LOW | Policy | `policy.rs:140`, `api/agents.rs:141` | A `project_admin` adds global targets to `policy.targets`, its own too | New (2026-10-24) |
+| F10 | LOW | Fleet | `fleet.rs:869,1042` | Any agent, a member too, overwrites the stored record of any fleet with an empty fleet of the same name | Fixed: an apply needs the rights over every object the stored fleet owns; a member gets 403; an empty fleet needs sysadmin; an API apply over a `file:` fleet needs `confirm` |
+| F11 | LOW | Sandbox | `terrarium-runner/src/config.rs:150,181` | The split of an old agent dir follows symlinks that the agent planted before the upgrade | Fixed in the daemon (`runner_supervisor.rs`, `migrate_dir`): a dir with a symlink goes to `<ulid>.quarantine-<ts>`, and a clean dir takes its place |
+| F12 | LOW | Usage | `usage_collector.rs:199,530` | The collector tails any file that a forged `SessionStart` hook names | Fixed: only a regular file under the session area of the harness, that names its session, and that no other agent owns; else a `usage.rejected_path` event |
+| F13 | LOW | Policy | `policy.rs:140`, `api/agents.rs:141` | A `project_admin` adds global targets to `policy.targets`, its own too | Fixed: a global target, a `cross_project` entry, or a `mail_to` entry outside the project needs sysadmin (API and fleet) |
 | F14 | INFO | Dashboard | `eslint.config.js:24`, `lib/sanitize.ts:76` | The sink lint rule has gaps; the sanitizer keeps remote images (the CSP blocks them) | New (2026-10-24) |
 
 ---
@@ -620,6 +620,9 @@ Residuals:
   (`store/subscriptions.rs:448-460`). A final state does not clear them. The code
   is on disk in SQLite for the life of the database, and in each backup. Fix:
   set `url` and `device_code` to `NULL` when the state becomes final.
+  **Fixed (2026-10-24):** `update_login` sets both to `NULL` for a final
+  state, the in-memory view clears them too, and the daemon start clears
+  them in old rows (`expire_open_logins`).
 - A failed login stores `the login command exited with code N: <last screen
   line>` in `error` (`login_session.rs:1011`). That text goes to the row and to
   the `login.end` audit detail. If the last line holds a code, it stays. Fix:

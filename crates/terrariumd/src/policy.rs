@@ -5,6 +5,7 @@
 //! The board rules of §13 live in `store::board`, because they need the card.
 
 use terrarium_core::Role;
+use terrarium_core::config::Policy;
 
 use crate::actor::{Actor, AgentActor};
 use crate::error::{ApiError, ApiResult};
@@ -155,6 +156,72 @@ pub fn use_target(actor: &Actor, target: &str, target_project: Option<&str>) -> 
             "target `{target}` is not in your policy.targets; ask a project admin to add it"
         )))
     }
+}
+
+/// The entries that a policy write adds to the policy of an agent of
+/// `project` and that need a `sysadmin` or the operator
+/// (`docs/security-review.md` F13): a target that is not a target of
+/// `project` (a global target, or a name that no target has yet), a
+/// `cross_project` entry, and a `mail_to` entry that names another
+/// project. `old` is the policy now (`None` for a new agent); an entry
+/// that it has already stays. `project_target` says whether a name is a
+/// target of `project`.
+pub fn policy_grants(
+    project: &str,
+    old: Option<&Policy>,
+    new: &Policy,
+    project_target: &dyn Fn(&str) -> bool,
+) -> Vec<String> {
+    let had =
+        |list: fn(&Policy) -> &Vec<String>, e: &String| old.is_some_and(|o| list(o).contains(e));
+    let mut out = Vec::new();
+    for t in &new.targets {
+        if !had(|p| &p.targets, t) && !project_target(t) {
+            out.push(format!(
+                "target `{t}` (not a target of project `{project}`)"
+            ));
+        }
+    }
+    for c in &new.cross_project {
+        if !had(|p| &p.cross_project, c) {
+            out.push(format!("cross_project `{c}`"));
+        }
+    }
+    for m in &new.mail_to {
+        if let Some((p, _)) = m.split_once('/')
+            && p != project
+            && !had(|p| &p.mail_to, m)
+        {
+            out.push(format!("mail_to `{m}` (outside project `{project}`)"));
+        }
+    }
+    out
+}
+
+/// Write `new` into the policy of an agent of `project` whose policy is
+/// `old` (PLAN §10). The caller checked `project_admin` of `project`. A
+/// global target, a `cross_project` entry, or a `mail_to` entry outside the
+/// project needs a `sysadmin` or the operator ([`policy_grants`]).
+pub fn set_policy(
+    actor: &Actor,
+    project: &str,
+    old: Option<&Policy>,
+    new: &Policy,
+    project_target: &dyn Fn(&str) -> bool,
+) -> ApiResult<()> {
+    let grants = policy_grants(project, old, new, project_target);
+    grant_policy(actor, &grants)
+}
+
+/// The check of [`set_policy`] on the list of [`policy_grants`].
+pub fn grant_policy(actor: &Actor, grants: &[String]) -> ApiResult<()> {
+    if grants.is_empty() {
+        return Ok(());
+    }
+    sysadmin(
+        actor,
+        &format!("adding {} to an agent's policy", grants.join(", ")),
+    )
 }
 
 /// Define, change, or delete a target: a global target needs sysadmin; a
@@ -345,7 +412,6 @@ pub fn release_version(actor: &Actor, project: &str) -> ApiResult<()> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use terrarium_core::config::Policy;
 
     fn agent(project: &str, roles: &[Role], policy: Policy) -> AgentActor {
         AgentActor {
@@ -429,6 +495,44 @@ mod tests {
         assert!(change_role(&sys, "other", "q", Role::Sysadmin).is_err());
         assert!(change_role(&Actor::Operator, "other", "q", Role::Sysadmin).is_ok());
         assert!(change_role(&admin, "p-id", "p", Role::ProjectAdmin).is_err());
+    }
+
+    /// F13: a project_admin sets project targets and mail_to in its
+    /// project; a global target and cross_project need sysadmin.
+    #[test]
+    fn policy_writes_by_role() {
+        let member = Actor::Agent(agent("p", &[], Policy::default()));
+        let admin = Actor::Agent(agent("p", &[Role::ProjectAdmin], Policy::default()));
+        let sys = Actor::Agent(agent("q", &[Role::Sysadmin], Policy::default()));
+        let local = |n: &str| n == "p-box";
+        let policy = |targets: &[&str], mail: &[&str], cross: &[&str]| Policy {
+            targets: targets.iter().map(|s| s.to_string()).collect(),
+            mail_to: mail.iter().map(|s| s.to_string()).collect(),
+            cross_project: cross.iter().map(|s| s.to_string()).collect(),
+        };
+        let in_project = policy(&["p-box"], &["*", "lead", "p/dev"], &[]);
+        assert!(set_policy(&admin, "p", None, &in_project, &local).is_ok());
+        assert!(policy_grants("p", None, &in_project, &local).is_empty());
+        for bad in [
+            policy(&["buildbox"], &["*"], &[]),
+            policy(&[], &["*"], &["ops/*"]),
+            policy(&[], &["ops/dev"], &[]),
+        ] {
+            let err = set_policy(&admin, "p", None, &bad, &local).unwrap_err();
+            assert!(err.message.contains("sysadmin"), "{}", err.message);
+            assert!(set_policy(&sys, "p", None, &bad, &local).is_ok());
+            assert!(set_policy(&Actor::Operator, "p", None, &bad, &local).is_ok());
+            // An entry that the policy has already may stay.
+            assert!(set_policy(&admin, "p", Some(&bad), &bad, &local).is_ok());
+            let mut more = bad.clone();
+            more.mail_to.push("lead".into());
+            assert!(set_policy(&admin, "p", Some(&bad), &more, &local).is_ok());
+        }
+        // The grants list names each entry; a member has no admin right, but
+        // the caller checks that first.
+        let g = policy_grants("p", None, &policy(&["buildbox"], &[], &["ops/x"]), &local);
+        assert_eq!(g.len(), 2, "{g:?}");
+        assert!(admin_project(&member, "p", "x").is_err());
     }
 
     #[test]

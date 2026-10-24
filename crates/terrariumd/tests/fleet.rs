@@ -481,19 +481,27 @@ harness = "claude"
         .await
         .err(409, "conflict");
     let own = own.replace("name = \"team\"", "name = \"terrarium\"");
-    // Same fleet name, fewer objects: a project admin may apply it, as
-    // long as it does not prune what it cannot delete.
+    // Same fleet name, fewer objects: the stored fleet owns the global
+    // subscription, so a project admin may not replace its record, with
+    // or without a prune (F10).
     let r = td.post_as(lead, "/api/fleet/apply", body(&own)).await;
-    assert_eq!(
-        entry(r.ok(), "agent", "terrarium/helper")["action"],
-        "create"
+    r.err(403, "forbidden");
+    assert!(
+        r.body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("owns subscription `anthropic-max`"),
+        "{}",
+        r.body
     );
     let mut b = body(&own);
     b["prune"] = json!(true);
-    // The prune would release the global subscription: sysadmin only.
     td.post_as(lead, "/api/fleet/apply", b)
         .await
         .err(403, "forbidden");
+    td.get("/api/agents/terrarium%2Fhelper")
+        .await
+        .err(404, "not_found");
 
     let other = r#"
 name = "elsewhere"
@@ -754,4 +762,211 @@ async fn the_lists_show_the_fleet_source_and_a_file_object_stays_file() {
     assert_eq!(sources(&td, "/api/projects").await["terrarium"], fleet);
     let plan = td.post("/api/fleet/plan", body(EXAMPLE)).await;
     assert_eq!(plan.ok()["summary"]["unchanged"], 6, "{}", plan.body);
+}
+
+/// F10 (`docs/security-review.md`): a fleet apply with the name of a
+/// stored fleet needs the rights over every object that the stored fleet
+/// owns. The scratch scenario of the review: a member applies an empty
+/// fleet with the name `terrarium`.
+#[tokio::test]
+async fn a_stored_fleet_is_replaced_only_by_its_owners() {
+    let td = TestDaemon::start().await;
+    td.post("/api/fleet/apply", body(EXAMPLE)).await.ok();
+    td.project("ops").await;
+    let member = td.agent("terrarium", "member", json!({})).await;
+    let member = member["id"].as_str().unwrap();
+    let lead = agent_by_key(&td, "terrarium/lead").await;
+    let lead = lead["id"].as_str().unwrap();
+    let ops_admin = td
+        .agent("ops", "boss", json!({"roles": ["project_admin"]}))
+        .await;
+    let ops_admin = ops_admin["id"].as_str().unwrap();
+
+    let empty = "version = 1\nname = \"terrarium\"\n";
+    // A member: no fleet at all.
+    for path in ["/api/fleet/apply", "/api/fleet/plan"] {
+        td.post_as(member, path, body(empty))
+            .await
+            .err(403, "forbidden");
+    }
+    // A project admin of another project, empty or with its own project.
+    td.post_as(ops_admin, "/api/fleet/apply", body(empty))
+        .await
+        .err(403, "forbidden");
+    let ops_only = r#"
+version = 1
+name = "terrarium"
+[[projects]]
+name = "ops"
+[[projects.agents]]
+name = "x"
+harness = "claude"
+"#;
+    td.post_as(ops_admin, "/api/fleet/apply", body(ops_only))
+        .await
+        .err(403, "forbidden");
+    // The project admin of `terrarium`: the fleet owns a subscription.
+    td.post_as(lead, "/api/fleet/apply", body(empty))
+        .await
+        .err(403, "forbidden");
+
+    // The record did not change: the operator's content, origin, and
+    // applier; the plan of the stored content is clean.
+    let shown = td.get("/api/fleet/terrarium").await;
+    let shown = shown.ok();
+    assert_eq!(shown["origin"], "api");
+    assert_eq!(shown["applied_by"], "operator", "{shown}");
+    assert_eq!(shown["content"], EXAMPLE);
+    assert_eq!(shown["plan"]["summary"]["delete"], 0, "{shown}");
+    assert_eq!(shown["plan"]["summary"]["release"], 0, "{shown}");
+
+    // The owner succeeds.
+    td.post("/api/fleet/apply", body(EXAMPLE)).await.ok();
+
+    // A fleet that only a project admin's project touches: that admin may
+    // apply it again; the other project's admin, a member, and an empty
+    // fleet may not.
+    td.project("side").await;
+    let lead = td
+        .agent("side", "lead", json!({"roles": ["project_admin"]}))
+        .await;
+    let lead = lead["id"].as_str().unwrap();
+    let mine = r#"
+name = "leads"
+[[projects]]
+name = "side"
+[[projects.agents]]
+name = "helper"
+harness = "claude"
+"#;
+    td.post_as(lead, "/api/fleet/apply", body(mine)).await.ok();
+    let mine2 = mine.replace("harness = \"claude\"", "harness = \"pi\"");
+    td.post_as(lead, "/api/fleet/apply", body(&mine2))
+        .await
+        .ok();
+    let shown = td.get("/api/fleet/leads").await;
+    assert_eq!(
+        shown.ok()["applied_by"],
+        format!("agent:{lead}"),
+        "{}",
+        shown.body
+    );
+    let theirs = ops_only.replace("name = \"terrarium\"", "name = \"leads\"");
+    td.post_as(ops_admin, "/api/fleet/apply", body(&theirs))
+        .await
+        .err(403, "forbidden");
+    td.post_as(member, "/api/fleet/apply", body(&mine2))
+        .await
+        .err(403, "forbidden");
+    let r = td
+        .post_as(lead, "/api/fleet/apply", body("name = \"leads\"\n"))
+        .await;
+    r.err(403, "forbidden");
+    assert!(
+        r.body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("declares nothing"),
+        "{}",
+        r.body
+    );
+    assert_eq!(agent_by_key(&td, "side/helper").await["harness"], "pi");
+}
+
+/// F10: an API apply over a fleet from a file needs `confirm`.
+#[tokio::test]
+async fn an_api_apply_over_a_file_fleet_needs_confirm() {
+    let small = r#"
+name = "dir"
+[[projects]]
+name = "dirproj"
+[[projects.agents]]
+name = "a"
+harness = "claude"
+"#;
+    let td = TestDaemon::with_config(|c| write(c, "fleets/dir.toml", small)).await;
+    let changed = small.replace("harness = \"claude\"", "harness = \"pi\"");
+    td.post("/api/fleet/apply", body(&changed))
+        .await
+        .err(409, "confirm_required");
+    // A plan is fine.
+    td.post("/api/fleet/plan", body(&changed)).await.ok();
+    assert_eq!(
+        td.get("/api/fleet/dir").await.ok()["origin"],
+        "file:fleets/dir.toml"
+    );
+    let mut b = body(&changed);
+    b["confirm"] = json!(true);
+    td.post("/api/fleet/apply", b).await.ok();
+    assert_eq!(td.get("/api/fleet/dir").await.ok()["origin"], "api");
+}
+
+/// F13: a fleet that adds a global target or a `cross_project` entry to an
+/// agent's policy needs a sysadmin; project targets are fine for a
+/// project admin.
+#[tokio::test]
+async fn fleet_policy_grants_need_sysadmin() {
+    let td = TestDaemon::start().await;
+    td.post("/api/fleet/apply", body(EXAMPLE)).await.ok();
+    td.post(
+        "/api/targets",
+        json!({"name": "shared", "kind": "ssh", "address": "u@h"}),
+    )
+    .await
+    .ok();
+    td.project("side").await;
+    td.post(
+        "/api/targets",
+        json!({"name": "sidebox", "kind": "ssh", "project": "side", "address": "u@h"}),
+    )
+    .await
+    .ok();
+    let lead = td
+        .agent("side", "lead", json!({"roles": ["project_admin"]}))
+        .await;
+    let lead = lead["id"].as_str().unwrap();
+    let sys = td
+        .agent("terrarium", "root", json!({"roles": ["sysadmin"]}))
+        .await;
+    let sys = sys["id"].as_str().unwrap();
+    let fleet = |policy: &str| {
+        format!(
+            r#"
+name = "grants"
+[[projects]]
+name = "side"
+[[projects.agents]]
+name = "w"
+harness = "claude"
+[projects.agents.policy]
+{policy}
+"#
+        )
+    };
+    let local = fleet("targets = [\"sidebox\"]\nmail_to = [\"lead\"]");
+    let global = fleet("targets = [\"shared\"]");
+    let cross = fleet("cross_project = [\"ops/*\"]");
+    for f in [&global, &cross] {
+        let r = td.post_as(lead, "/api/fleet/apply", body(f)).await;
+        r.err(403, "forbidden");
+        assert!(
+            r.body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("policy"),
+            "{}",
+            r.body
+        );
+        td.post_as(lead, "/api/fleet/plan", body(f))
+            .await
+            .err(403, "forbidden");
+    }
+    td.post_as(lead, "/api/fleet/apply", body(&local))
+        .await
+        .ok();
+    td.post_as(sys, "/api/fleet/apply", body(&global))
+        .await
+        .ok();
+    let w = agent_by_key(&td, "side/w").await;
+    assert_eq!(w["policy"]["targets"], json!(["shared"]));
 }

@@ -152,6 +152,7 @@ impl Td {
             supervisor: self.sup.clone(),
             insecure_agent_header: insecure,
             artifact_listen: None,
+            web: Default::default(),
         })
         .await
         .unwrap();
@@ -861,6 +862,7 @@ async fn artifact_origin_listens_on_its_own_port() {
         supervisor: sup,
         insecure_agent_header: false,
         artifact_listen: Some("127.0.0.1:0".into()),
+        web: Default::default(),
     })
     .await
     .unwrap();

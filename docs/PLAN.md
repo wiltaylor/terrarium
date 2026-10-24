@@ -466,7 +466,7 @@ to the audit log with the agent's ID.
 | Mail agents in own project | yes | yes | any agent |
 | Read the project inbox, reply from it | no | yes | any project |
 | Create, start, stop, restart, delete agents | no | in project | anywhere |
-| Set an agent's system prompt, harness, policy | no | in project | anywhere |
+| Set an agent's system prompt, harness, policy (project targets and `mail_to` in the project; a global target or a `cross_project` entry needs sysadmin) | no | in project | anywhere |
 | Assign, reassign, reopen any card; edit columns and WIP limits | no | in project | anywhere |
 | Edit or delete any memory | no | in project | anywhere |
 | Attach repos, define project targets | no | in project | anywhere |

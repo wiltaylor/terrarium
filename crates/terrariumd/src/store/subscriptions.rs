@@ -437,16 +437,20 @@ pub fn insert_login(t: &mut Tx<'_>, id: &str, kind: &str, provider: Option<&str>
     Ok(())
 }
 
+/// The final states of a login session.
+pub const FINAL_LOGIN_STATES: [&str; 4] = ["done", "failed", "cancelled", "expired"];
+
 /// Write the visible state of a login session. A final state sets
-/// `finished_at`.
+/// `finished_at` and clears `url` and `device_code`: the code must not stay
+/// in the database and its backups (`docs/security-review.md` F6).
 pub fn update_login(t: &mut Tx<'_>, l: &LoginRow) -> ApiResult<()> {
-    let final_state = matches!(
-        l.state.as_str(),
-        "done" | "failed" | "cancelled" | "expired"
-    );
+    let final_state = FINAL_LOGIN_STATES.contains(&l.state.as_str());
     t.execute(
-        "UPDATE login_sessions SET state = ?2, url = ?3, device_code = ?4, subscription = ?5,
-                error = ?6, finished_at = CASE WHEN ?7 THEN coalesce(finished_at, ?8) ELSE NULL END
+        "UPDATE login_sessions SET state = ?2,
+                url = CASE WHEN ?7 THEN NULL ELSE ?3 END,
+                device_code = CASE WHEN ?7 THEN NULL ELSE ?4 END,
+                subscription = ?5, error = ?6,
+                finished_at = CASE WHEN ?7 THEN coalesce(finished_at, ?8) ELSE NULL END
          WHERE id = ?1",
         params![
             l.id,
@@ -473,13 +477,22 @@ pub fn get_login(conn: &Connection, id: &str) -> ApiResult<LoginRow> {
 }
 
 /// Login sessions that a daemon stop left open become `expired`.
+/// Also clears the `url` and `device_code` of every ended session: rows
+/// from a version that kept them (`docs/security-review.md` F6).
 pub fn expire_open_logins(t: &mut Tx<'_>) -> ApiResult<usize> {
-    Ok(t.execute(
+    let n = t.execute(
         "UPDATE login_sessions SET state = 'expired', finished_at = ?1,
                 error = coalesce(error, 'the daemon stopped during the login')
          WHERE state IN ('starting', 'waiting', 'verifying')",
         [now()],
-    )?)
+    )?;
+    t.execute(
+        "UPDATE login_sessions SET url = NULL, device_code = NULL
+         WHERE state NOT IN ('starting', 'waiting', 'verifying')
+           AND (url IS NOT NULL OR device_code IS NOT NULL)",
+        [],
+    )?;
+    Ok(n)
 }
 
 #[cfg(test)]

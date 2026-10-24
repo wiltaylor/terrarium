@@ -1697,10 +1697,145 @@ fn events_seq(path: &Path) -> u64 {
     lines
 }
 
+/// The files that the layout before the split kept at the top of the agent
+/// dir and that now live in `private/` (`terrarium_runner::LEGACY_PRIVATE`).
+const LEGACY_PRIVATE: &[&str] = &[
+    "events.jsonl",
+    "pty.log",
+    "pty.log.1",
+    "runner.json",
+    "runner-argv.json",
+    "runner-exit.json",
+    "runner.log",
+    "session-prompt.sha256",
+];
+
+/// The entries that the layout before the split kept at the top of the
+/// agent dir and that now live in `harness/` (`terrarium_runner::LEGACY_HARNESS`).
+const LEGACY_HARNESS: &[&str] = &["prompt.md", "claude", "codex", "copilot", "pi"];
+
+/// The marker in the name of a quarantined agent dir:
+/// `<ulid>.quarantine-<unix seconds>`.
+const QUARANTINE_MARK: &str = ".quarantine-";
+
+/// The first entry of the agent dir `dir` that makes the layout unsafe to
+/// migrate or to launch from, or `None` (`docs/security-review.md` F11).
+///
+/// Before the split, the sandbox bound the whole agent dir read-write, so
+/// an agent could plant a symlink where the daemon or the runner now writes
+/// (`private/`, `harness/`, a record file). A symlink at the agent dir, at
+/// `private`, `harness`, or `workspace`, at an entry that the split moves
+/// (at the top or at its new place), or directly in an adapter dir, is
+/// unsafe. So is an entry to
+/// move that is not a regular file or a directory. Nothing follows a link.
+fn unsafe_layout_entry(dir: &Path) -> Option<PathBuf> {
+    let kind = |p: &Path| std::fs::symlink_metadata(p).ok().map(|m| m.file_type());
+    let is_link = |p: &Path| kind(p).is_some_and(|t| t.is_symlink());
+    if is_link(dir) {
+        return Some(dir.to_path_buf());
+    }
+    if !kind(dir).is_some_and(|t| t.is_dir()) {
+        return None;
+    }
+    for sub in [
+        terrarium_runner::PRIVATE_DIR,
+        terrarium_runner::HARNESS_DIR,
+        terrarium_runner::WORKSPACE_DIR,
+    ] {
+        if is_link(&dir.join(sub)) {
+            return Some(dir.join(sub));
+        }
+    }
+    for (sub, names) in [
+        (terrarium_runner::PRIVATE_DIR, LEGACY_PRIVATE),
+        (terrarium_runner::HARNESS_DIR, LEGACY_HARNESS),
+    ] {
+        for name in names {
+            let top = dir.join(name);
+            if let Some(t) = kind(&top)
+                && !(t.is_file() || t.is_dir())
+            {
+                return Some(top);
+            }
+            let placed = dir.join(sub).join(name);
+            if is_link(&placed) {
+                return Some(placed);
+            }
+            // The daemon writes the hook config and the harness files of
+            // an adapter dir (`claude/settings.json`, ...): one level in.
+            for d in [&top, &placed] {
+                if !kind(d).is_some_and(|t| t.is_dir()) {
+                    continue;
+                }
+                let Ok(entries) = std::fs::read_dir(d) else {
+                    continue;
+                };
+                for e in entries.flatten() {
+                    if e.file_type().is_ok_and(|t| t.is_symlink()) {
+                        return Some(e.path());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Rename the unsafe agent dir `dir` to `<ulid>.quarantine-<ts>` and make
+/// a clean one in its place (`docs/security-review.md` F11). The workspace
+/// comes back when it is a real directory: it is the agent's own work, and
+/// the sandbox binds it read-write anyway. The rest stays in the
+/// quarantine for the operator to read: the daemon needs none of it (the
+/// sessions live in the harness home, and the next launch writes a new
+/// prompt and a new private dir). Returns the quarantine path.
+fn quarantine_dir(dir: &Path) -> std::io::Result<PathBuf> {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let name = dir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let mut to = dir.with_file_name(format!("{name}{QUARANTINE_MARK}{ts}"));
+    let mut n = 1;
+    while std::fs::symlink_metadata(&to).is_ok() {
+        to = dir.with_file_name(format!("{name}{QUARANTINE_MARK}{ts}-{n}"));
+        n += 1;
+    }
+    // `rename` moves a symlink itself, never its target.
+    std::fs::rename(dir, &to)?;
+    std::fs::create_dir(dir)?;
+    let work = to.join(terrarium_runner::WORKSPACE_DIR);
+    if std::fs::symlink_metadata(&work).is_ok_and(|m| m.file_type().is_dir()) {
+        std::fs::rename(&work, dir.join(terrarium_runner::WORKSPACE_DIR))?;
+    }
+    Ok(to)
+}
+
 /// Move the files of an agent dir from the layout before the split into
 /// `private/` and `harness/` (`terrarium_runner::migrate_legacy_layout`).
-/// Idempotent; an error is logged, not fatal.
+/// A dir with a planted symlink is not migrated: it goes to quarantine and
+/// a clean dir takes its place ([`quarantine_dir`]). Idempotent; an error
+/// is logged, not fatal.
 fn migrate_dir(dir: &Path) {
+    if let Some(bad) = unsafe_layout_entry(dir) {
+        match quarantine_dir(dir) {
+            Ok(to) => warn!(
+                dir = %dir.display(),
+                entry = %bad.display(),
+                quarantine = %to.display(),
+                "the agent dir has a symlink or a special file where the daemon writes; \
+                 moved it to quarantine and made a clean one"
+            ),
+            Err(e) => warn!(
+                dir = %dir.display(),
+                entry = %bad.display(),
+                "the agent dir has a symlink where the daemon writes, and cannot go to \
+                 quarantine: {e}"
+            ),
+        }
+        return;
+    }
     match terrarium_runner::migrate_legacy_layout(dir) {
         Ok(0) => {}
         Ok(n) => info!(
@@ -1713,12 +1848,16 @@ fn migrate_dir(dir: &Path) {
 }
 
 /// Migrate every agent dir under `<state>/agents` once (see [`migrate_dir`]).
+/// A quarantined dir stays as it is.
 fn migrate_all(state_dir: &Path) {
     let Ok(entries) = std::fs::read_dir(state_dir.join("agents")) else {
         return;
     };
     for e in entries.flatten() {
-        if e.file_type().is_ok_and(|t| t.is_dir()) {
+        if e.file_name().to_string_lossy().contains(QUARANTINE_MARK) {
+            continue;
+        }
+        if e.file_type().is_ok_and(|t| t.is_dir() || t.is_symlink()) {
             migrate_dir(&e.path());
         }
     }
@@ -2188,6 +2327,130 @@ impl Supervisor for RunnerSupervisor {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    /// An old agent dir with the files at the top, as before the split.
+    fn legacy_dir(state: &Path) -> PathBuf {
+        let dir = state.join("agents").join("01K8AGENT0000000000000000A");
+        std::fs::create_dir_all(dir.join("workspace")).unwrap();
+        std::fs::write(dir.join("workspace/notes.txt"), "mine").unwrap();
+        std::fs::write(dir.join("events.jsonl"), "").unwrap();
+        std::fs::write(dir.join("runner.json"), "{}").unwrap();
+        std::fs::create_dir_all(dir.join("claude")).unwrap();
+        std::fs::write(dir.join("claude/claude.json"), "{}").unwrap();
+        dir
+    }
+
+    fn quarantined(state: &Path) -> Vec<PathBuf> {
+        std::fs::read_dir(state.join("agents"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.to_string_lossy().contains(QUARANTINE_MARK))
+            .collect()
+    }
+
+    #[test]
+    fn a_clean_legacy_dir_migrates() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = legacy_dir(tmp.path());
+        migrate_all(tmp.path());
+        assert!(dir.join("private/events.jsonl").is_file());
+        assert!(dir.join("private/runner.json").is_file());
+        assert!(dir.join("harness/claude/claude.json").is_file());
+        assert!(quarantined(tmp.path()).is_empty());
+    }
+
+    /// F11: a `private` symlink that the agent planted into its workspace.
+    #[test]
+    fn a_planted_private_symlink_sends_the_dir_to_quarantine() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = legacy_dir(tmp.path());
+        let target = dir.join("workspace/loot");
+        std::fs::create_dir_all(&target).unwrap();
+        std::os::unix::fs::symlink(&target, dir.join("private")).unwrap();
+        migrate_all(tmp.path());
+
+        let q = quarantined(tmp.path());
+        assert_eq!(q.len(), 1, "{q:?}");
+        // Nothing moved through the link.
+        assert!(!q[0].join("workspace").exists(), "the workspace came back");
+        assert!(q[0].join("events.jsonl").is_file());
+        assert!(q[0].join("private").is_symlink());
+        // A clean dir, with the agent's work, and no link.
+        let meta = std::fs::symlink_metadata(&dir).unwrap();
+        assert!(meta.is_dir() && !meta.file_type().is_symlink());
+        assert!(!dir.join("private").exists());
+        assert!(dir.join("workspace/notes.txt").is_file());
+        assert!(dir.join("workspace/loot").is_dir());
+        assert!(
+            std::fs::read_dir(dir.join("workspace/loot"))
+                .unwrap()
+                .next()
+                .is_none()
+        );
+        // The next launch makes the private dir as a real dir.
+        terrarium_runner::create_private_dir(&dir.join("private")).unwrap();
+        assert!(!dir.join("private").is_symlink());
+        // A second pass leaves both alone.
+        migrate_all(tmp.path());
+        assert_eq!(quarantined(tmp.path()).len(), 1);
+    }
+
+    /// F11: a moved record file, the harness dir, an adapter file, or the
+    /// agent dir itself as a symlink.
+    #[test]
+    fn every_planted_symlink_is_refused() {
+        type Plant = dyn Fn(&Path, &Path);
+        let cases: &[&Plant] = &[
+            &|dir, t| {
+                std::fs::remove_file(dir.join("runner.json")).unwrap();
+                std::os::unix::fs::symlink(t, dir.join("runner.json")).unwrap();
+            },
+            &|dir, t| std::os::unix::fs::symlink(t, dir.join("harness")).unwrap(),
+            &|dir, t| {
+                std::fs::remove_file(dir.join("claude/claude.json")).unwrap();
+                std::os::unix::fs::symlink(t, dir.join("claude/claude.json")).unwrap();
+            },
+            &|dir, t| {
+                std::fs::create_dir_all(dir.join("private")).unwrap();
+                std::os::unix::fs::symlink(t, dir.join("private/runner-exit.json")).unwrap();
+            },
+            &|dir, t| {
+                std::fs::remove_dir_all(dir.join("workspace")).unwrap();
+                std::os::unix::fs::symlink(t, dir.join("workspace")).unwrap();
+            },
+        ];
+        for (i, plant) in cases.iter().enumerate() {
+            let tmp = tempfile::tempdir().unwrap();
+            let dir = legacy_dir(tmp.path());
+            let elsewhere = tmp.path().join("elsewhere");
+            std::fs::create_dir_all(&elsewhere).unwrap();
+            plant(&dir, &elsewhere);
+            assert!(unsafe_layout_entry(&dir).is_some(), "case {i}");
+            migrate_dir(&dir);
+            assert_eq!(quarantined(tmp.path()).len(), 1, "case {i}");
+            assert!(unsafe_layout_entry(&dir).is_none(), "case {i}");
+            assert!(
+                std::fs::read_dir(&elsewhere).unwrap().next().is_none(),
+                "case {i}: something went through the link"
+            );
+        }
+
+        // The agent dir itself.
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("events.jsonl"), "").unwrap();
+        std::fs::create_dir_all(tmp.path().join("agents")).unwrap();
+        let dir = tmp.path().join("agents/01K8AGENT0000000000000000B");
+        std::os::unix::fs::symlink(&real, &dir).unwrap();
+        migrate_all(tmp.path());
+        assert!(real.join("events.jsonl").is_file(), "the target moved");
+        assert!(!real.join("private").exists());
+        let meta = std::fs::symlink_metadata(&dir).unwrap();
+        assert!(meta.is_dir() && !meta.file_type().is_symlink());
+        assert_eq!(quarantined(tmp.path()).len(), 1);
+    }
 
     #[test]
     fn every_harness_has_an_adapter() {

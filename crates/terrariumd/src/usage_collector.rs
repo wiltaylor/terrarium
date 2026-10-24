@@ -207,6 +207,129 @@ pub fn host_path(reported: &Path, harness: HarnessId, home: &Path) -> PathBuf {
     }
 }
 
+/// The directories where the session files of `harness` may be, for the
+/// agent whose harness dir is `harness_dir` (`docs/security-review.md`
+/// F12): the session area of the shared home for Claude Code
+/// (`projects/`), Codex (`sessions/`), and Copilot (`session-state/`), and
+/// the per-agent `harness/pi/sessions/` for pi.
+pub fn transcript_roots(harness: HarnessId, home: &Path, harness_dir: &Path) -> Vec<PathBuf> {
+    match harness {
+        HarnessId::Claude => vec![home.join("projects")],
+        HarnessId::Codex => vec![home.join("sessions")],
+        HarnessId::Copilot => vec![home.join("session-state")],
+        HarnessId::Pi => vec![harness_dir.join("pi").join("sessions")],
+    }
+}
+
+/// `p` with every symlink resolved. A path that does not exist yet (the
+/// harness writes the file at its first response) resolves through its
+/// nearest parent that exists. A `..` or `.` is refused.
+fn resolve(p: &Path) -> Result<PathBuf, String> {
+    use std::path::Component;
+    if !p.is_absolute() {
+        return Err("the path is not absolute".into());
+    }
+    if p.components()
+        .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
+    {
+        return Err("the path has a `..` or a `.`".into());
+    }
+    let mut rest = Vec::new();
+    let mut at = p;
+    loop {
+        if std::fs::symlink_metadata(at).is_ok() {
+            let mut out = std::fs::canonicalize(at).map_err(|e| e.to_string())?;
+            out.extend(rest.iter().rev());
+            return Ok(out);
+        }
+        match (at.parent(), at.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name.to_owned());
+                at = parent;
+            }
+            _ => return Err("no part of the path exists".into()),
+        }
+    }
+}
+
+/// Check the session file `path` (a host path) that a hook reported, and
+/// return it with every symlink resolved (`docs/security-review.md` F12).
+///
+/// The hook payload comes from the harness, so from the agent. The file
+/// must be under one of `roots` after the symlinks are resolved, and must
+/// be a regular file (not a symlink) when it exists. `session` is the
+/// harness session of the report: a Claude Code, Codex, or Copilot file
+/// must carry it in its name, so a report cannot name the session file of
+/// a different session without its exact id.
+pub fn check_transcript(
+    path: &Path,
+    harness: HarnessId,
+    session: &str,
+    roots: &[PathBuf],
+) -> Result<PathBuf, String> {
+    match std::fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_symlink() => return Err("the file is a symlink".into()),
+        Ok(m) if !m.is_file() => return Err("the path is not a regular file".into()),
+        _ => {}
+    }
+    let real = resolve(path)?;
+    let under = roots.iter().any(|r| {
+        let root = std::fs::canonicalize(r).unwrap_or_else(|_| r.clone());
+        real.starts_with(&root) && real != root
+    });
+    if !under {
+        return Err(format!(
+            "the file is not under {}",
+            roots
+                .iter()
+                .map(|r| r.display().to_string())
+                .collect::<Vec<_>>()
+                .join(" or ")
+        ));
+    }
+    let stem = real
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let parent = real
+        .parent()
+        .and_then(Path::file_name)
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let named = !session.is_empty()
+        && match harness {
+            HarnessId::Claude => stem == session,
+            HarnessId::Codex => stem.ends_with(&format!("-{session}")),
+            HarnessId::Copilot => parent == session,
+            // A per-agent directory: no other agent writes there.
+            HarnessId::Pi => true,
+        };
+    if !named {
+        return Err(format!(
+            "the file name does not name the session {session:?}"
+        ));
+    }
+    Ok(real)
+}
+
+/// A source that checks its file again at each poll: a file that turns
+/// into a symlink, or that moves out of the roots, is not read.
+struct Guarded {
+    path: PathBuf,
+    harness: HarnessId,
+    session: String,
+    roots: Vec<PathBuf>,
+    inner: Box<dyn UsageSource>,
+}
+
+impl UsageSource for Guarded {
+    fn poll(&mut self) -> Result<Vec<SourceSample>, String> {
+        check_transcript(&self.path, self.harness, &self.session, &self.roots)
+            .map_err(|e| format!("{}: {e}", self.path.display()))?;
+        self.inner.poll()
+    }
+}
+
 /// Claude Code: tail the session JSONL with the adapter's
 /// [`TranscriptTail`]. Each `assistant` record with a new `message.id` is
 /// one sample.
@@ -536,8 +659,52 @@ impl Collector {
             return;
         };
         let home = self.state.usage.config.home(info.harness);
+        let mut info = info;
+        let mut guard = None;
+        if let Some(reported) = info.transcript.clone() {
+            let roots = transcript_roots(
+                info.harness,
+                &home,
+                &terrarium_runner::harness_dir(&self.state.state_dir, a.id),
+            );
+            let mapped = host_path(&reported, info.harness, &home);
+            let mut checked = self.check_owner(agent, &info, &mapped, &roots);
+            if checked.is_ok() && info.harness != HarnessId::Pi {
+                let (me, session) = (agent.to_owned(), info.session.clone());
+                let owner = self
+                    .state
+                    .db
+                    .read(move |c| agents::harness_session_owner(c, &session, &me))
+                    .await;
+                checked = match owner {
+                    Ok(None) => checked,
+                    Ok(Some(other)) => Err(format!("the session belongs to the agent {other}")),
+                    Err(e) => Err(format!("cannot read the sessions: {e}")),
+                };
+            }
+            match checked {
+                Ok(real) => {
+                    info.transcript = Some(real.clone());
+                    guard = Some((real, roots));
+                }
+                Err(reason) => {
+                    reject(&self.state, &info, &reported, &reason).await;
+                    return;
+                }
+            }
+        }
         let Some(source) = factory.open(&info, &home) else {
             return;
+        };
+        let source: Box<dyn UsageSource> = match guard {
+            Some((path, roots)) => Box::new(Guarded {
+                path,
+                harness: info.harness,
+                session: info.session.clone(),
+                roots,
+                inner: source,
+            }),
+            None => source,
         };
         let key = agent.to_owned();
         let turn_seq = self
@@ -558,6 +725,28 @@ impl Collector {
         );
         // A resumed session file has history: read it now.
         self.poll(agent, false).await;
+    }
+
+    /// The checked session file of `info` ([`check_transcript`]), or why
+    /// the collector refuses it. Also refused: a file that another agent
+    /// tails now, and a harness session that the store gives to another
+    /// agent.
+    fn check_owner(
+        &self,
+        agent: &str,
+        info: &SessionInfo,
+        mapped: &Path,
+        roots: &[PathBuf],
+    ) -> Result<PathBuf, String> {
+        let real = check_transcript(mapped, info.harness, &info.session, roots)?;
+        if self
+            .agents
+            .iter()
+            .any(|(k, t)| k != agent && t.info.transcript.as_deref() == Some(real.as_path()))
+        {
+            return Err("another agent reads this file".into());
+        }
+        Ok(real)
     }
 
     async fn close(&mut self, agent: &str) {
@@ -673,6 +862,41 @@ impl Collector {
                 warn!(agent, "usage: cannot emit usage.sample: {e}");
             }
         }
+    }
+}
+
+/// Log and record a refused session file (`usage.rejected_path`).
+async fn reject(state: &Shared, info: &SessionInfo, reported: &Path, reason: &str) {
+    warn!(
+        agent = %info.agent,
+        harness = %info.harness,
+        path = %reported.display(),
+        "usage: refused the session file: {reason}"
+    );
+    let agent = info.agent.clone();
+    let info = info.clone();
+    let (path, reason) = (reported.display().to_string(), reason.to_owned());
+    let result = state
+        .db
+        .write("system", move |tx| {
+            tx.emit(
+                EventDraft::new(
+                    "usage.rejected_path",
+                    format!("{}: refused the session file {path}", info.name),
+                    json!({
+                        "harness": info.harness,
+                        "harness_session": info.session,
+                        "path": path,
+                        "reason": reason,
+                    }),
+                )
+                .agent(info.agent.clone(), info.name.clone())
+                .project(info.project.clone()),
+            )
+        })
+        .await;
+    if let Err(e) = result {
+        warn!(agent, "usage: cannot emit usage.rejected_path: {e}");
     }
 }
 

@@ -136,6 +136,7 @@ async fn boot(config: impl FnOnce(&Path), tune: impl FnOnce(&mut UsageConfig, &P
             supervisor: sup.clone(),
             insecure_agent_header: true,
             artifact_listen: None,
+            web: Default::default(),
         },
         usage,
     )
@@ -149,10 +150,34 @@ async fn boot(config: impl FnOnce(&Path), tune: impl FnOnce(&mut UsageConfig, &P
             config: cfg_dir,
             state,
             sup,
+            web: Default::default(),
+            artifact_listen: None,
         },
         http,
         homes,
     }
+}
+
+/// The `login_sessions` row of an ended login has no URL and no device
+/// code (`docs/security-review.md` F6).
+async fn assert_login_row_clean(td: &TestDaemon, id: &str) {
+    let key = id.to_owned();
+    let (url, code): (Option<String>, Option<String>) = td
+        .daemon
+        .as_ref()
+        .unwrap()
+        .state
+        .db
+        .read(move |c| {
+            Ok(c.query_row(
+                "SELECT url, device_code FROM login_sessions WHERE id = ?1",
+                [&key],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!((url, code), (None, None), "login {id}");
 }
 
 fn claude_creds(home: &Path) {
@@ -702,7 +727,8 @@ async fn budgets_hold_a_project() {
     let id = a["id"].as_str().unwrap().to_owned();
     td.post_empty(&format!("/api/agents/{id}/start")).await.ok();
     td.wait_status(&id, "idle").await;
-    let file = env.td.dir.path().join("s.jsonl");
+    let file = env.homes[&HarnessId::Claude].join("projects/-home-agent-work/s.jsonl");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
     std::fs::copy(format!("{}{SESSION}", env!("CARGO_MANIFEST_DIR")), &file).unwrap();
     emit(
         td,
@@ -1140,8 +1166,11 @@ esac"#
     assert!(!stale.exists(), "the stale login dir is removed");
     let id = r.ok()["id"].as_str().unwrap().to_owned();
     let done = wait_login(td, &id, "done").await;
-    assert_eq!(done["url"], "https://auth.openai.com/codex/device");
-    assert_eq!(done["device_code"], "ABCD-EF12G");
+    // F6: an ended login keeps neither the URL nor the code, in the
+    // answer or in the row.
+    assert!(done["url"].is_null(), "{done}");
+    assert!(done["device_code"].is_null(), "{done}");
+    assert_login_row_clean(td, &id).await;
     assert_eq!(done["subscription"], "openai-pro");
     assert_login_dir_gone(&id);
     let s = td.get("/api/subscriptions/openai-pro").await;
@@ -1158,6 +1187,12 @@ esac"#
     assert_no_login_output_on_disk(&id, "WXYZ-1234");
     let e = wait_login(td, &id, "expired").await;
     assert!(e["error"].as_str().unwrap().contains("did not finish"));
+    assert!(e["device_code"].is_null() && e["url"].is_null(), "{e}");
+    assert!(
+        e["started_at"].is_string() && e["finished_at"].is_string(),
+        "{e}"
+    );
+    assert_login_row_clean(td, &id).await;
     assert_login_dir_gone(&id);
 
     // A command that fails.

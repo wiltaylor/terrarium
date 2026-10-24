@@ -136,9 +136,16 @@ async fn plan(
     actor: Actor,
     ApiJson(body): ApiJson<Body>,
 ) -> ApiResult<Json<Plan>> {
-    let (_, p) = plan_of(&state, &body).await?;
+    let (f, p) = plan_of(&state, &body).await?;
     if p.valid {
         store::authorize(&actor, &p, body.prune)?;
+        if let Some(f) = f {
+            let a = actor.clone();
+            state
+                .db
+                .read(move |c| store::check_overwrite(c, &a, &f, None, false))
+                .await?;
+        }
     }
     Ok(Json(p))
 }
@@ -176,6 +183,13 @@ async fn apply(
         .with_details(json!({"errors": p.errors, "warnings": p.warnings})));
     };
     store::authorize(&actor, &p, body.prune)?;
+    {
+        let (a, fl, confirm) = (actor.clone(), f.clone(), body.confirm);
+        state
+            .db
+            .read(move |c| store::check_overwrite(c, &a, &fl, Some("api"), confirm))
+            .await?;
+    }
     if p.conflicts().next().is_some() {
         return Err(ApiError::conflict(format!(
             "fleet `{}` has conflicts; run `fleet plan` to see them",
@@ -217,11 +231,11 @@ async fn apply(
         content: body.content.clone(),
     };
     let state_dir = state.state_dir.clone();
-    let (prune, a, fl) = (body.prune, actor.clone(), f.clone());
+    let (prune, confirm, a, fl) = (body.prune, body.confirm, actor.clone(), f.clone());
     let applied = state
         .db
         .write(actor.label(), move |t| {
-            store::apply(t, &fl, &origin, &a, prune, &state_dir)
+            store::apply(t, &fl, &origin, &a, prune, confirm, &state_dir)
         })
         .await?;
     let mut result = ApplyResult {

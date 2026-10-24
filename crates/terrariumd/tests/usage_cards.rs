@@ -5,13 +5,67 @@
 
 mod common;
 
+use std::collections::HashMap;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use common::TestDaemon;
 use serde_json::{Value, json};
+use terrarium_core::HarnessId;
 use terrariumd::events::EventDraft;
+use terrariumd::supervisor::InMemorySupervisor;
+use terrariumd::usage_collector::UsageConfig;
+
+/// A daemon whose Claude home is `<dir>/auth/claude`.
+async fn start() -> TestDaemon {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config");
+    std::fs::create_dir_all(&config).unwrap();
+    let state = dir.path().join("state");
+    let socket = dir.path().join("api.sock");
+    let home = dir.path().join("auth/claude");
+    std::fs::create_dir_all(&home).unwrap();
+    let sup = Arc::new(InMemorySupervisor::new(common::DELAY));
+    let usage = UsageConfig {
+        homes: HashMap::from([(HarnessId::Claude, home)]),
+        ..UsageConfig::default()
+    };
+    let daemon = terrariumd::start_with_usage(
+        terrariumd::DaemonConfig {
+            socket: socket.clone(),
+            listen: None,
+            token: None,
+            state_dir: state.clone(),
+            config_dir: config.clone(),
+            supervisor: sup.clone(),
+            insecure_agent_header: true,
+            artifact_listen: None,
+            web: Default::default(),
+        },
+        usage,
+    )
+    .await
+    .unwrap();
+    TestDaemon {
+        daemon: Some(daemon),
+        dir,
+        socket,
+        config,
+        state,
+        sup,
+        web: Default::default(),
+        artifact_listen: None,
+    }
+}
+
+/// The directory of the Claude transcripts in the shared home.
+fn sessions_dir(td: &TestDaemon) -> PathBuf {
+    let dir = td.dir.path().join("auth/claude/projects/-home-agent-work");
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
 
 const SINCE: &str = "since=2026-01-01T00:00:00Z";
 
@@ -96,7 +150,7 @@ async fn wait_samples(td: &TestDaemon, n: usize) -> Vec<(String, Option<String>)
 
 #[tokio::test]
 async fn samples_carry_the_in_progress_card() {
-    let td = TestDaemon::start().await;
+    let td = start().await;
     td.project("p").await;
     td.project("q").await;
     let worker = td.agent("p", "worker", json!({})).await;
@@ -122,9 +176,8 @@ async fn samples_carry_the_in_progress_card() {
     assert_eq!(claimed["column"], "in_progress");
 
     // Two responses on two models while the card is in progress.
-    let dir = td.dir.path().join("sessions");
-    std::fs::create_dir_all(&dir).unwrap();
-    let file = dir.join("worker.jsonl");
+    let dir = sessions_dir(&td);
+    let file = dir.join("s.jsonl");
     append(
         &file,
         &(line("m1", "claude-haiku-5-5", 10, 5) + &line("m2", "claude-opus-5", 20, 7)),
@@ -220,7 +273,7 @@ async fn samples_carry_the_in_progress_card() {
     assert_eq!(s[2], ("m3".to_owned(), None));
 
     // An agent with no card in progress: no card.
-    let other = dir.join("idle.jsonl");
+    let other = dir.join("s2.jsonl");
     append(&other, &line("m4", "claude-opus-5", 1, 1));
     emit(
         &td,
@@ -282,7 +335,7 @@ async fn samples_carry_the_in_progress_card() {
 
 #[tokio::test]
 async fn a_reassigned_card_follows_its_new_assignee() {
-    let td = TestDaemon::start().await;
+    let td = start().await;
     td.project("p").await;
     let a = td.agent("p", "a", json!({})).await;
     let b = td.agent("p", "b", json!({})).await;
@@ -297,10 +350,9 @@ async fn a_reassigned_card_follows_its_new_assignee() {
         .await
         .ok();
 
-    let dir = td.dir.path().join("sessions");
-    std::fs::create_dir_all(&dir).unwrap();
-    let fa = dir.join("a.jsonl");
-    let fb = dir.join("b.jsonl");
+    let dir = sessions_dir(&td);
+    let fa = dir.join("sa.jsonl");
+    let fb = dir.join("sb.jsonl");
     append(&fa, &line("a1", "claude-opus-5", 1, 1));
     std::fs::write(&fb, "").unwrap();
     emit(
@@ -339,4 +391,174 @@ async fn a_reassigned_card_follows_its_new_assignee() {
             ("b1".to_owned(), Some(cid.clone())),
         ]
     );
+}
+
+/// The `usage.rejected_path` events: `(agent, reason)`.
+async fn rejected(td: &TestDaemon) -> Vec<(String, String)> {
+    let r = td.get("/api/events?kind=usage.rejected_path").await;
+    r.ok()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| {
+            (
+                e["agent"]["id"]
+                    .as_str()
+                    .or(e["agent_id"].as_str())
+                    .unwrap_or_default()
+                    .to_owned(),
+                e["data"]["reason"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect()
+}
+
+async fn wait_rejected(td: &TestDaemon, n: usize) -> Vec<(String, String)> {
+    for _ in 0..400 {
+        let r = rejected(td).await;
+        if r.len() >= n {
+            return r;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("timed out waiting for {n} usage.rejected_path events");
+}
+
+/// F12 (`docs/security-review.md`): a forged `session_started` cannot point
+/// the collector at a file outside the harness home, at a symlink, or at
+/// the transcript of another agent.
+#[tokio::test]
+async fn forged_transcript_paths_are_refused() {
+    let td = start().await;
+    td.project("p").await;
+    let victim = td.agent("p", "victim", json!({})).await;
+    let spy = td.agent("p", "spy", json!({})).await;
+    let vid = victim["id"].as_str().unwrap().to_owned();
+    let sid = spy["id"].as_str().unwrap().to_owned();
+    let dir = sessions_dir(&td);
+
+    // The victim's own session counts.
+    let vfile = dir.join("sv.jsonl");
+    append(&vfile, &line("v1", "claude-opus-5", 10, 10));
+    emit(
+        &td,
+        &victim,
+        "session_started",
+        json!({"harness_session": "sv", "transcript_path": vfile}),
+    )
+    .await;
+    wait_samples(&td, 1).await;
+
+    // A file outside the home.
+    emit(
+        &td,
+        &spy,
+        "session_started",
+        json!({"harness_session": "passwd", "transcript_path": "/etc/passwd"}),
+    )
+    .await;
+    let r = wait_rejected(&td, 1).await;
+    assert!(r[0].1.contains("not under"), "{r:?}");
+
+    // The victim's transcript while the victim reads it.
+    emit(
+        &td,
+        &spy,
+        "session_started",
+        json!({"harness_session": "sv", "transcript_path": vfile}),
+    )
+    .await;
+    let r = wait_rejected(&td, 2).await;
+    assert!(r[1].1.contains("another agent"), "{r:?}");
+
+    // The same, by the sandbox path, after the victim's session ended:
+    // the store gives `sv` to the victim.
+    emit(&td, &victim, "session_ended", json!({})).await;
+    let v = vid.clone();
+    td.daemon
+        .as_ref()
+        .unwrap()
+        .state
+        .db
+        .write("system", move |t| {
+            t.execute(
+                "INSERT INTO sessions (id, agent_id, current, started_at, harness_session_id)
+                 VALUES ('S1', ?1, 0, '2026-10-24T00:00:00Z', 'sv')",
+                [&v],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    emit(
+        &td,
+        &spy,
+        "session_started",
+        json!({"harness_session": "sv",
+               "transcript_path": "/home/agent/.claude/projects/-home-agent-work/sv.jsonl"}),
+    )
+    .await;
+    let r = wait_rejected(&td, 3).await;
+    assert!(r[2].1.contains("belongs to the agent"), "{r:?}");
+
+    // Another session id with the victim's file: the name does not match.
+    emit(
+        &td,
+        &spy,
+        "session_started",
+        json!({"harness_session": "mine", "transcript_path": vfile}),
+    )
+    .await;
+    let r = wait_rejected(&td, 4).await;
+    assert!(r[3].1.contains("does not name the session"), "{r:?}");
+
+    // A symlink in the home, and a `..` out of it.
+    let link = dir.join("sl.jsonl");
+    std::os::unix::fs::symlink(&vfile, &link).unwrap();
+    emit(
+        &td,
+        &spy,
+        "session_started",
+        json!({"harness_session": "sl", "transcript_path": link}),
+    )
+    .await;
+    let r = wait_rejected(&td, 5).await;
+    assert!(r[4].1.contains("symlink"), "{r:?}");
+    let dotdot = dir.join("../../../../../../etc/passwd");
+    emit(
+        &td,
+        &spy,
+        "session_started",
+        json!({"harness_session": "passwd", "transcript_path": dotdot}),
+    )
+    .await;
+    let r = wait_rejected(&td, 6).await;
+    assert!(r[5].1.contains(".."), "{r:?}");
+    assert!(r.iter().all(|(a, _)| a == &sid), "{r:?}");
+
+    // The victim's usage stays the victim's: the spy got nothing.
+    append(&vfile, &line("v2", "claude-opus-5", 10, 10));
+    emit(&td, &spy, "turn_end", json!({})).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let s = samples(&td).await;
+    assert_eq!(s.len(), 1, "{s:?}");
+    let spy_usage = td
+        .get(&format!("/api/usage?{SINCE}&bucket=day&agent={sid}"))
+        .await
+        .ok()
+        .clone();
+    assert_eq!(spy_usage, json!([]), "{spy_usage}");
+
+    // The spy's own session file in the home is fine.
+    let own = dir.join("ss.jsonl");
+    append(&own, &line("s1", "claude-opus-5", 1, 1));
+    emit(
+        &td,
+        &spy,
+        "session_started",
+        json!({"harness_session": "ss", "transcript_path": own}),
+    )
+    .await;
+    wait_samples(&td, 2).await;
+    assert_eq!(rejected(&td).await.len(), 6);
 }

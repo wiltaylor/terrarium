@@ -182,6 +182,7 @@ impl Td {
             supervisor: supervisor(self.dir.path()),
             insecure_agent_header: true,
             artifact_listen: None,
+            web: Default::default(),
         })
         .await
         .unwrap();

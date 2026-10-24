@@ -487,6 +487,47 @@ pub fn last_harness_session(conn: &Connection, agent: &str) -> ApiResult<Option<
         .map(HarnessSessionId))
 }
 
+/// Is `name` a target of `project`? For the policy rule of
+/// `policy::set_policy`: a project_admin adds only these to a policy.
+pub fn project_target(conn: &Connection, project: &str, name: &str) -> bool {
+    matches!(
+        crate::store::targets::find(conn, name),
+        Ok(Some(r)) if r.def.project.as_deref() == Some(project)
+    )
+}
+
+/// Check a policy write by `actor` on an agent of `project` whose policy
+/// is `old` (`None` for a new agent), against the targets in the store
+/// (`docs/security-review.md` F13).
+pub fn check_policy(
+    conn: &Connection,
+    actor: &crate::actor::Actor,
+    project: &str,
+    old: Option<&Policy>,
+    new: &Policy,
+) -> ApiResult<()> {
+    crate::policy::set_policy(actor, project, old, new, &|n| {
+        project_target(conn, project, n)
+    })
+}
+
+/// Another agent than `except` with the harness session `harness` in any
+/// of its sessions, if any (`docs/security-review.md` F12).
+pub fn harness_session_owner(
+    conn: &Connection,
+    harness: &str,
+    except: &str,
+) -> ApiResult<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT agent_id FROM sessions
+             WHERE harness_session_id = ?1 AND agent_id != ?2 LIMIT 1",
+            [harness, except],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
 /// End the current session, if any.
 pub fn end_session(t: &mut Tx<'_>, agent: &str, outcome: &str) -> ApiResult<()> {
     t.execute(

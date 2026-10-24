@@ -118,9 +118,11 @@ async fn create(
         policy::change_role(&actor, "", &def.project, *role)?;
     }
     let state_dir = state.state_dir.clone();
+    let who = actor.clone();
     let a = state
         .db
         .write(actor.label(), move |t| {
+            agents::check_policy(t, &who, &def.project, None, &def.policy)?;
             agents::create(t, &def, &state_dir, projects::SOURCE_API)
         })
         .await?;
@@ -156,9 +158,14 @@ async fn update(
     }
     let id = a.agent.id.to_string();
     let project = a.agent.project.clone();
+    let who = actor.clone();
     let v = state
         .db
         .write(actor.label(), move |t| {
+            if let Some(new) = &patch.policy {
+                let old = agents::get(t, &id)?.agent.policy;
+                agents::check_policy(t, &who, &project, Some(&old), new)?;
+            }
             agents::write_def(t, &id, &patch)?;
             t.audit(
                 "agent.update",

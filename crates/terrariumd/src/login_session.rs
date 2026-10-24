@@ -806,10 +806,7 @@ impl LoginView {
         let instructions = kind
             .map(|k| k.instructions(row.provider.as_deref()))
             .unwrap_or_default();
-        let done = matches!(
-            row.state.as_str(),
-            "done" | "failed" | "cancelled" | "expired"
-        );
+        let done = subs::FINAL_LOGIN_STATES.contains(&row.state.as_str());
         Self {
             row,
             done,
@@ -1039,7 +1036,31 @@ async fn watch(state: Shared, s: Arc<LoginSession>) {
     {
         warn!(login = %s.id, "cannot remove {}: {e}", s.dir.display());
     }
-    let row = s.update(|v| match &outcome {
+    let row = s.update(|v| {
+        // The code and the URL do not outlive the login (F6).
+        v.url = None;
+        v.device_code = None;
+        outcome_into(v, &outcome, timeout);
+    });
+    let (id, st) = (row.id.clone(), row.state.clone());
+    let detail =
+        json!({"kind": s.kind, "state": st, "subscription": row.subscription, "error": row.error});
+    persist(&state, row).await;
+    let _ = state
+        .db
+        .write("operator", move |t| t.audit("login.end", &id, None, detail))
+        .await;
+    info!(login = %s.id, state = %st, "login session ended");
+    state.usage.logins.remove(&s.id);
+}
+
+/// Write the final state of `outcome` into the view of a login session.
+fn outcome_into(
+    v: &mut LoginRow,
+    outcome: &Result<Option<Subscription>, String>,
+    timeout: Duration,
+) {
+    match outcome {
         Ok(sub) => {
             v.state = "done".into();
             v.subscription = sub.as_ref().map(|s| s.name.clone());
@@ -1056,17 +1077,7 @@ async fn watch(state: Shared, s: Arc<LoginSession>) {
             v.state = "failed".into();
             v.error = Some(e.clone());
         }
-    });
-    let (id, st) = (row.id.clone(), row.state.clone());
-    let detail =
-        json!({"kind": s.kind, "state": st, "subscription": row.subscription, "error": row.error});
-    persist(&state, row).await;
-    let _ = state
-        .db
-        .write("operator", move |t| t.audit("login.end", &id, None, detail))
-        .await;
-    info!(login = %s.id, state = %st, "login session ended");
-    state.usage.logins.remove(&s.id);
+    }
 }
 
 /// The login command finished: verify, register, probe.
