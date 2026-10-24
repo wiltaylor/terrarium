@@ -18,13 +18,13 @@ pub mod protocol;
 pub mod role;
 pub mod status;
 
-pub use adapter::{Adapter, ScreenHint};
+pub use adapter::{Adapter, Answer, ScreenHint};
 pub use error::{Error, Result};
 pub use event::{Event, EventRecord};
 pub use harness::HarnessId;
 pub use hook::HookPayload;
 pub use ids::{AgentId, EventId, HarnessSessionId, MessageId, SessionId, ThreadId};
-pub use launch::LaunchSpec;
+pub use launch::{FileOverlay, LaunchSpec};
 pub use model::Agent;
 pub use role::{Decision, Role};
 pub use status::AgentStatus;

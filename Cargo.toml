@@ -5,6 +5,7 @@ members = [
     "crates/terrariumd",
     "crates/terrarium",
     "crates/terrarium-host",
+    "crates/terrarium-runner",
     "crates/adapters/claude",
     "crates/adapters/codex",
     "crates/adapters/copilot",
@@ -21,6 +22,7 @@ repository = "https://github.com/wiltaylor/terrarium"
 [workspace.dependencies]
 # Internal crates
 terrarium-core = { path = "crates/terrarium-core" }
+terrarium-runner = { path = "crates/terrarium-runner" }
 terrarium-adapter-claude = { path = "crates/adapters/claude" }
 terrarium-adapter-codex = { path = "crates/adapters/codex" }
 terrarium-adapter-copilot = { path = "crates/adapters/copilot" }
@@ -33,6 +35,8 @@ tower = "0.5"
 hyper = { version = "1.6", features = ["client", "http1"] }
 hyper-util = { version = "0.1.16", features = ["tokio"] }
 http-body-util = "0.1.3"
+futures-util = { version = "0.3.31", default-features = false, features = ["sink", "std"] }
+tokio-tungstenite = "0.29"
 
 # Data
 serde = { version = "1.0.219", features = ["derive"] }
@@ -53,8 +57,12 @@ anyhow = "1.0.98"
 # Terminals and assets
 portable-pty = "0.9"
 vt100 = "0.16"
+regex = "1.11"
 rust-embed = "8.7"
 mime_guess = "2.0.5"
+
+# Tests
+tempfile = "3.20"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

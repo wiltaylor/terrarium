@@ -3,13 +3,16 @@
 //! Operator mode talks to the daemon over its Unix socket, or over TCP when
 //! `TERRARIUM_URL` is set. Agent mode starts when `TERRARIUM_AGENT` is set:
 //! the CLI then talks to the agent's runner socket (`TERRARIUM_SOCKET`).
-//! Agent mode has only a `whoami` stub in this build.
+//! Agent mode answers `whoami` from the runner socket. `terrarium hook
+//! <event>` forwards a harness hook to the runner socket.
 
 mod client;
+mod runner_socket;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use anyhow::Context;
 use clap::{Parser, Subcommand};
 use serde::Deserialize;
 use terrarium_core::{Agent, paths};
@@ -53,6 +56,11 @@ enum Command {
     },
     /// Show who this CLI acts as
     Whoami,
+    /// Forward a harness hook (JSON on stdin) to the runner socket
+    Hook {
+        /// The hook name, for example `Stop` or `UserPromptSubmit`
+        event: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -122,16 +130,34 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Whoami => {
             match agent_ctx {
                 Some(ctx) => {
-                    // Agent mode. The runner socket answers this in Phase 2.
                     let socket = ctx
                         .socket
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_else(|| "unset".into());
-                    println!("agent: {} (runner socket: {socket})", ctx.agent);
-                    println!("agent mode is a stub: project and harness come in Phase 2");
+                        .with_context(|| format!("agent mode needs {}", paths::ENV_AGENT_SOCKET))?;
+                    let me = runner_socket::request(&socket, "whoami", serde_json::Value::Null)?;
+                    if cli.json {
+                        println!("{}", serde_json::to_string_pretty(&me)?);
+                    } else {
+                        let field = |k: &str| me[k].as_str().unwrap_or("-").to_owned();
+                        let name = me["name"]
+                            .as_str()
+                            .filter(|n| !n.is_empty())
+                            .unwrap_or(&ctx.agent);
+                        println!(
+                            "agent: {name} ({})\nproject: {}\nharness: {}\nstatus: {}",
+                            field("agent"),
+                            field("project"),
+                            field("harness"),
+                            field("status")
+                        );
+                    }
                 }
                 None => println!("operator"),
             }
+            Ok(())
+        }
+        // `main` handles this before it starts the runtime.
+        Command::Hook { event } => {
+            runner_socket::hook_main(event);
             Ok(())
         }
         _ if agent_ctx.is_some() => {
@@ -197,10 +223,23 @@ fn encode_query(s: &str) -> String {
         .collect()
 }
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
     let cli = Cli::parse();
-    match run(cli).await {
+    // A hook runs on every harness event. Keep it fast: no async runtime.
+    if let Command::Hook { event } = &cli.command {
+        return runner_socket::hook_main(event);
+    }
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("terrarium: cannot start the runtime: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match runtime.block_on(run(cli)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("terrarium: {e:#}");

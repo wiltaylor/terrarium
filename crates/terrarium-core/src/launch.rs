@@ -42,3 +42,17 @@ impl LaunchSpec {
         self
     }
 }
+
+/// A file that the sandbox binds over a path inside a shared home, so each
+/// agent sees its own copy (PLAN §8, §11). The sandbox makes the bind after
+/// it mounts the shared home.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileOverlay {
+    /// The per-agent file on the host (the daemon's view).
+    pub source: PathBuf,
+    /// The path that the harness sees inside the sandbox.
+    pub target: PathBuf,
+    /// Bind read-write. The harness writes to some of its state files.
+    #[serde(default)]
+    pub writable: bool,
+}

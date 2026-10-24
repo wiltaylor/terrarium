@@ -1,0 +1,25 @@
+[package]
+name = "terrarium-runner"
+description = "The Terrarium agent runner: the PTY, the status machine, and the runner socket"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+terrarium-core.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+portable-pty.workspace = true
+vt100.workspace = true
+regex.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+semver.workspace = true
+
+[lints]
+workspace = true

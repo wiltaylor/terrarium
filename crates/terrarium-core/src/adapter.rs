@@ -1,5 +1,7 @@
 //! The adapter interface. One adapter per harness. See PLAN §7.
 
+use std::path::Path;
+
 use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
 
@@ -8,7 +10,7 @@ use crate::event::Event;
 use crate::harness::HarnessId;
 use crate::hook::HookPayload;
 use crate::ids::HarnessSessionId;
-use crate::launch::LaunchSpec;
+use crate::launch::{FileOverlay, LaunchSpec};
 use crate::model::Agent;
 
 /// The parsed terminal screen of a harness.
@@ -27,6 +29,23 @@ pub enum ScreenHint {
     Busy,
     /// The harness shows a question or a dialog to the user.
     Question,
+    /// The adapter knows the prompt does not accept a turn now, but the
+    /// screen is not a busy turn or a question either. Examples: a start
+    /// screen, text left in the input box, the process has exited. Do not
+    /// type, and do not fall back to a generic detector.
+    NotReady,
+}
+
+/// An answer to a question that the harness shows (see `Event::Question`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum Answer {
+    /// Pick the option at this index, counted from 0 in screen order.
+    Choice(usize),
+    /// Allow the request (a permission prompt).
+    Allow,
+    /// Deny the request, or cancel the question.
+    Deny,
 }
 
 /// Knowledge of one harness: launch flags, hook mapping, session capture, and
@@ -64,6 +83,20 @@ pub trait Adapter: Send + Sync {
     /// then Enter.
     fn type_turn(&self, text: &str) -> Vec<u8> {
         bracketed_paste(text)
+    }
+
+    /// Keystrokes that answer the question `request_id`. Empty when the
+    /// adapter has no answer path.
+    fn answer(&self, _request_id: &str, _answer: &Answer) -> Vec<u8> {
+        Vec::new()
+    }
+
+    /// Write the per-agent files that the harness reads from its home, and
+    /// return the overlays that the sandbox must bind. `home` is the shared
+    /// harness home on the host (for example `/auth/claude`). The default
+    /// writes nothing. This blocks.
+    fn materialize_config(&self, _agent: &Agent, _home: &Path) -> Result<Vec<FileOverlay>> {
+        Ok(Vec::new())
     }
 }
 

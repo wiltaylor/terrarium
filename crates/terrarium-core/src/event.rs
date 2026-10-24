@@ -1,7 +1,10 @@
+use std::path::PathBuf;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::ids::{AgentId, EventId, HarnessSessionId, MessageId, ThreadId};
+use crate::status::AgentStatus;
 
 /// One normalised event. Produced from hooks, the PTY, and the supervisor.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -14,17 +17,61 @@ pub enum Event {
     },
     /// A stop hook fired. The turn is closed.
     TurnEnd,
-    /// The harness called a tool.
+    /// The harness called a tool. The tool call starts now.
     ToolUse {
         tool: String,
         #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
         input: serde_json::Value,
+        /// The harness's ID for this tool call, if it has one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        /// One short line for the dashboard, for example the command.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        summary: Option<String>,
+    },
+    /// A tool call finished.
+    ToolFinished {
+        tool: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        /// One short line for the dashboard.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        summary: Option<String>,
+        /// False when the harness reports an error or an interrupt.
+        #[serde(default = "default_true")]
+        ok: bool,
     },
     /// The harness raised a notification. When `question` is true, the
     /// harness waits for the user, and the agent is `blocked`.
     Notification { message: String, question: bool },
+    /// The harness asks the user a question and waits. The agent is
+    /// `blocked` until the runner types an answer.
+    Question {
+        /// An ID for the answer path. Opaque to Terrarium.
+        request_id: String,
+        /// The tool that asks, for example `AskUserQuestion`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool: Option<String>,
+        question: String,
+        /// The choices, in screen order. Empty for a free-text question.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        options: Vec<String>,
+    },
     /// The harness told us its session ID.
-    SessionStarted { harness_session: HarnessSessionId },
+    SessionStarted {
+        harness_session: HarnessSessionId,
+        /// The session file of the harness, for usage accounting.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        transcript_path: Option<PathBuf>,
+        /// Why the session started, for example `startup` or `resume`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<String>,
+    },
+    /// The harness closed its session. The process exits soon after.
+    SessionEnded {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
     /// The harness process exited.
     Exit {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -40,6 +87,20 @@ pub enum Event {
     Card { card: String, change: String },
     /// A supervisor or daemon notice.
     System { message: String },
+    /// The agent status changed. The runner raises one per transition.
+    StatusChanged {
+        from: AgentStatus,
+        to: AgentStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+    /// The runner typed a turn, but the prompt-submit hook did not fire, even
+    /// after the retry. `text` is the turn that was not delivered.
+    DeliveryFailed { text: String, reason: String },
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// An event with its identity, agent, and timestamp.
@@ -74,11 +135,34 @@ mod tests {
             Event::ToolUse {
                 tool: "Bash".into(),
                 input: serde_json::json!({"command": "ls"}),
+                id: None,
+                summary: Some("ls".into()),
             },
         );
         let json = serde_json::to_value(&rec).expect("serialise");
         assert_eq!(json["type"], "tool_use");
         let back: EventRecord = serde_json::from_value(json).expect("deserialise");
         assert_eq!(back, rec);
+    }
+
+    #[test]
+    fn older_wire_forms_still_parse() {
+        let ev: Event = serde_json::from_value(serde_json::json!({
+            "type": "session_started", "harness_session": "abc"
+        }))
+        .expect("session_started");
+        assert_eq!(
+            ev,
+            Event::SessionStarted {
+                harness_session: HarnessSessionId("abc".into()),
+                transcript_path: None,
+                source: None,
+            }
+        );
+        let ev: Event = serde_json::from_value(serde_json::json!({
+            "type": "tool_finished", "tool": "Bash"
+        }))
+        .expect("tool_finished");
+        assert!(matches!(ev, Event::ToolFinished { ok: true, .. }));
     }
 }

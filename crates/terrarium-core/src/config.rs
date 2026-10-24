@@ -103,6 +103,10 @@ pub struct ProjectDef {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// The card ID prefix, for example `TER` for `TER-42`. The default comes
+    /// from the name. See PLAN §13.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub repos: Vec<RepoDef>,
     #[serde(default)]
