@@ -1,10 +1,18 @@
-//! The trash of deleted agents. `DELETE /api/agents/{id}` moves the agent
-//! dir `<state>/agents/<ulid>/` to `<state>/trash/<ulid>-<ts>/`, so that the
-//! operator can still read the transcripts and the event log. The prune
-//! timer removes a trash entry older than `TERRARIUM_TRASH_DAYS` (default 7).
+//! The trash of deleted agents. Each delete of an agent stops the agent and
+//! moves the agent dir `<state>/agents/<ulid>/` to
+//! `<state>/trash/<ulid>-<ts>/`, so that the operator can still read the
+//! transcripts and the event log. The three deletes are
+//! `DELETE /api/agents/{id}`, a reload after the removal of a definition
+//! file, and a fleet prune. The prune timer removes a trash entry older than
+//! `TERRARIUM_TRASH_DAYS` (default 7).
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
+
+use terrarium_core::AgentId;
+
+use crate::api::Shared;
+use crate::supervisor::SupervisorError;
 
 /// The trash dir, in the state dir.
 pub const TRASH_DIR: &str = "trash";
@@ -21,6 +29,58 @@ pub fn trash_days() -> u64 {
         .ok()
         .and_then(|v| v.trim().parse().ok())
         .unwrap_or(DEFAULT_TRASH_DAYS)
+}
+
+/// How long [`stop_agent`] waits for a live agent to stop.
+pub const STOP_WAIT: Duration = Duration::from_secs(10);
+
+/// Stop `agent` if it runs, then wait (up to [`STOP_WAIT`]) for the harness
+/// to end, so that the runner does not write into the agent dir while it
+/// moves. An agent that does not run is not an error.
+pub async fn stop_agent(state: &Shared, agent: AgentId) -> Result<(), SupervisorError> {
+    match state.supervisor.stop(agent).await {
+        Ok(()) | Err(SupervisorError::NotRunning(_)) => {}
+        Err(e) => return Err(e),
+    }
+    let deadline = std::time::Instant::now() + STOP_WAIT;
+    while std::time::Instant::now() < deadline
+        && state
+            .supervisor
+            .status(agent)
+            .await
+            .is_some_and(|s| s.is_live())
+    {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    Ok(())
+}
+
+/// Move the agent dir of `agent` to the trash ([`trash_agent_dir`]) in a
+/// blocking task, and log the result. A failure is a warning only: the
+/// agent is gone from the store already.
+pub async fn trash_agent(state: &Shared, agent: AgentId) {
+    let state_dir = state.state_dir.clone();
+    let id = agent.to_string();
+    match tokio::task::spawn_blocking(move || trash_agent_dir(&state_dir, &id)).await {
+        Ok(Ok(Some(to))) => {
+            tracing::info!(agent = %agent, trash = %to.display(), "moved the agent dir to the trash");
+        }
+        Ok(Ok(None)) => {}
+        Ok(Err(e)) => tracing::warn!(agent = %agent, "cannot move the agent dir to the trash: {e}"),
+        Err(e) => tracing::warn!(agent = %agent, "the trash task failed: {e}"),
+    }
+}
+
+/// The end of a delete of `agent` from the store: [`stop_agent`], then
+/// [`trash_agent`]. A reload (a definition file is gone) and a fleet prune
+/// call this after their transaction. `DELETE /api/agents/{id}` calls the
+/// two steps itself, with its delete between them. A stop failure is a
+/// warning: the dir goes to the trash all the same.
+pub async fn retire_agent(state: &Shared, agent: AgentId) {
+    if let Err(e) = stop_agent(state, agent).await {
+        tracing::warn!(agent = %agent, "cannot stop a deleted agent: {e}");
+    }
+    trash_agent(state, agent).await;
 }
 
 /// Move the agent dir of `agent` to `<state>/trash/<agent>-<ts>/`.

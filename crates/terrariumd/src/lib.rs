@@ -45,9 +45,7 @@ use crate::error::ApiResult;
 use crate::events::{EventDraft, EventHub};
 use crate::store::agents;
 use crate::store::sync::SyncReport;
-use crate::supervisor::{
-    Recovery, Supervisor, SupervisorError, SupervisorEvent, SupervisorEventKind,
-};
+use crate::supervisor::{Recovery, Supervisor, SupervisorEvent, SupervisorEventKind};
 
 /// What [`start`] needs.
 pub struct DaemonConfig {
@@ -289,7 +287,7 @@ fn spawn_prune_timer(state: Shared) -> JoinHandle<()> {
 }
 
 /// Sync definitions into the store, keep them for `/api/health`, and stop
-/// the file agents whose files are gone.
+/// the file agents whose files are gone and move their dirs to the trash.
 pub async fn apply_definitions(
     state: &Shared,
     defs: Definitions,
@@ -321,12 +319,10 @@ pub async fn apply_definitions(
     report.errors.extend(target_errors);
     report.errors.extend(fleet::apply_config_dir(state).await);
     state.set_definitions(defs);
+    // Like `DELETE /api/agents/{id}`: stop, then the dir to the trash.
     for id in &report.removed_agent_ids {
         if let Ok(id) = id.parse() {
-            match state.supervisor.stop(id).await {
-                Ok(()) | Err(SupervisorError::NotRunning(_)) => {}
-                Err(e) => warn!(agent = %id, "cannot stop a removed agent: {e}"),
-            }
+            trash::retire_agent(state, id).await;
         }
     }
     Ok(report)

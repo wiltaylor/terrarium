@@ -777,3 +777,60 @@ async fn events_live_and_latest_skip_the_backlog() {
         td.wait_status(&id, "idle").await;
     }
 }
+
+/// The trash entries of `agent` in `<state>/trash/`.
+fn trash_of(td: &TestDaemon, agent: &str) -> Vec<std::path::PathBuf> {
+    let Ok(entries) = std::fs::read_dir(td.state.join("trash")) else {
+        return Vec::new();
+    };
+    entries
+        .map(|e| e.unwrap().path())
+        .filter(|p| {
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(&format!("{agent}-"))
+        })
+        .collect()
+}
+
+/// A reload after the removal of an agent file does what
+/// `DELETE /api/agents/{id}` does: it stops the live agent and moves the
+/// agent dir to `<state>/trash/<ulid>-<ts>/`.
+#[tokio::test]
+async fn removed_file_agent_is_stopped_and_trashed_on_reload() {
+    let td = TestDaemon::with_config(|c| {
+        write(c, "projects/terra.toml", PROJECT);
+        write(c, "agents/lead.toml", LEAD);
+    })
+    .await;
+    let id = td.get("/api/agents/terra%2Flead").await.ok()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    td.post_empty(&format!("/api/agents/{id}/start")).await.ok();
+    td.wait_status(&id, "idle").await;
+    let agent_dir = td.state.join("agents").join(&id);
+    write(&agent_dir, "private/events.jsonl", "{}\n");
+
+    std::fs::remove_file(td.config.join("agents/lead.toml")).unwrap();
+    let report = td.post_empty("/api/reload").await;
+    assert_eq!(report.ok()["agents"]["removed"], json!(["terra/lead"]));
+    td.get("/api/agents/terra%2Flead")
+        .await
+        .err(404, "not_found");
+    let id_parsed = id.parse().unwrap();
+    assert!(
+        !terrariumd::supervisor::Supervisor::status(&*td.sup, id_parsed)
+            .await
+            .is_some_and(|s| s.is_live()),
+        "the removed agent still runs"
+    );
+    assert!(!agent_dir.exists());
+    let trash = trash_of(&td, &id);
+    assert_eq!(trash.len(), 1, "{trash:?}");
+    assert_eq!(
+        std::fs::read(trash[0].join("private/events.jsonl")).unwrap(),
+        b"{}\n"
+    );
+}

@@ -19,7 +19,6 @@ use crate::error::{ApiError, ApiResult, Code};
 use crate::fleet::{self as store, Action, Origin, Plan};
 use crate::policy;
 use crate::store::{agents, repos};
-use crate::supervisor::SupervisorError;
 
 pub fn routes() -> Router<Shared> {
     Router::new()
@@ -219,10 +218,9 @@ async fn apply(
     }
     for e in &live {
         if let Some(id) = e.id.as_deref().and_then(|i| i.parse().ok()) {
-            match state.supervisor.stop(id).await {
-                Ok(()) | Err(SupervisorError::NotRunning(_)) => {}
-                Err(e) => return Err(super::agents::supervisor_error(e)),
-            }
+            crate::trash::stop_agent(&state, id)
+                .await
+                .map_err(super::agents::supervisor_error)?;
         }
     }
 
@@ -238,6 +236,13 @@ async fn apply(
             store::apply(t, &fl, &origin, &a, prune, confirm, &state_dir)
         })
         .await?;
+    // Like `DELETE /api/agents/{id}`: each pruned agent dir goes to the
+    // trash (`crate::trash`).
+    for id in &applied.deleted_agents {
+        if let Ok(id) = id.parse() {
+            crate::trash::retire_agent(&state, id).await;
+        }
+    }
     let mut result = ApplyResult {
         plan: applied.plan.unwrap_or(p),
         prune: body.prune,

@@ -1016,6 +1016,9 @@ pub struct Applied {
     pub plan: Option<Plan>,
     /// The agents that the apply made: (ID, project).
     pub created_agents: Vec<(String, String)>,
+    /// The agents that a prune deleted (IDs). The caller stops each one and
+    /// moves its dir to the trash ([`crate::trash::retire_agent`]).
+    pub deleted_agents: Vec<String>,
 }
 
 /// Where a fleet came from.
@@ -1133,6 +1136,7 @@ pub fn apply(
                 Kind::Agent => {
                     if let Some(id) = &e.id {
                         agents::delete(t, id)?;
+                        out.deleted_agents.push(id.clone());
                     }
                 }
                 Kind::Target => {
@@ -1536,6 +1540,11 @@ pub async fn apply_config_dir(state: &Shared) -> Vec<String> {
             .await;
         match result {
             Ok(a) => {
+                for id in &a.deleted_agents {
+                    if let Ok(id) = id.parse() {
+                        crate::trash::retire_agent(state, id).await;
+                    }
+                }
                 if let Some(p) = a.plan {
                     tracing::info!(
                         fleet = %p.fleet,

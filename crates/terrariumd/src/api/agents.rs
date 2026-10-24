@@ -186,10 +186,6 @@ async fn update(
     Ok(Json(v))
 }
 
-/// How long a delete waits for a live agent to stop before it moves the
-/// agent dir to the trash.
-const STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
-
 async fn remove(
     State(state): State<Shared>,
     actor: Actor,
@@ -223,43 +219,18 @@ async fn remove(
         ));
     }
     if live {
-        match state.supervisor.stop(agent_id(&a)).await {
-            Ok(()) | Err(SupervisorError::NotRunning(_)) => {}
-            Err(e) => return Err(supervisor_error(e)),
-        }
-        // A graceful stop ends the harness later: wait, so that the
-        // runner does not write into the dir while it moves.
-        let deadline = std::time::Instant::now() + STOP_WAIT;
-        while std::time::Instant::now() < deadline
-            && state
-                .supervisor
-                .status(agent_id(&a))
-                .await
-                .is_some_and(|s| s.is_live())
-        {
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
+        crate::trash::stop_agent(&state, agent_id(&a))
+            .await
+            .map_err(supervisor_error)?;
     }
-    let id = a.agent.id.to_string();
-    let key = id.clone();
+    let key = a.agent.id.to_string();
     state
         .db
         .write(actor.label(), move |t| agents::delete(t, &key))
         .await?;
     // The agent dir goes to the trash, not away: the operator can still
     // read the transcripts (`crate::trash`).
-    let state_dir = state.state_dir.clone();
-    match tokio::task::spawn_blocking(move || crate::trash::trash_agent_dir(&state_dir, &id)).await
-    {
-        Ok(Ok(Some(to))) => {
-            tracing::info!(agent = %a.agent.id, trash = %to.display(), "moved the agent dir to the trash");
-        }
-        Ok(Ok(None)) => {}
-        Ok(Err(e)) => {
-            tracing::warn!(agent = %a.agent.id, "cannot move the agent dir to the trash: {e}")
-        }
-        Err(e) => tracing::warn!(agent = %a.agent.id, "the trash task failed: {e}"),
-    }
+    crate::trash::trash_agent(&state, agent_id(&a)).await;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 

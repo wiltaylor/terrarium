@@ -970,3 +970,60 @@ harness = "claude"
     let w = agent_by_key(&td, "side/w").await;
     assert_eq!(w["policy"]["targets"], json!(["shared"]));
 }
+
+/// A prune does what `DELETE /api/agents/{id}` does: it stops the live
+/// agent and moves the agent dir to `<state>/trash/<ulid>-<ts>/`.
+#[tokio::test]
+async fn prune_moves_the_agent_dir_to_the_trash() {
+    let td = TestDaemon::start().await;
+    let two = r#"
+name = "two"
+[defaults]
+harness = "codex"
+[[projects]]
+name = "keep"
+[[projects.agents]]
+name = "a"
+[[projects]]
+name = "drop"
+[[projects.agents]]
+name = "b"
+"#;
+    td.post("/api/fleet/apply", body(two)).await.ok();
+    let id = agent_by_key(&td, "drop/b").await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    td.post_empty(&format!("/api/agents/{id}/start")).await.ok();
+    td.wait_status(&id, "idle").await;
+    let agent_dir = td.state.join("agents").join(&id);
+    write(&agent_dir, "private/events.jsonl", "{}\n");
+
+    let one = &two[..two.find("[[projects]]\nname = \"drop\"").unwrap()];
+    let mut b = body(one);
+    b["prune"] = json!(true);
+    b["confirm"] = json!(true);
+    let r = td.post("/api/fleet/apply", b).await;
+    assert_eq!(entry(r.ok(), "agent", "drop/b")["result"], "done");
+    td.get(&format!("/api/agents/{id}"))
+        .await
+        .err(404, "not_found");
+    assert!(
+        !terrariumd::supervisor::Supervisor::status(&*td.sup, id.parse().unwrap())
+            .await
+            .is_some_and(|s| s.is_live()),
+        "the pruned agent still runs"
+    );
+    assert!(!agent_dir.exists());
+    let trash: Vec<_> = std::fs::read_dir(td.state.join("trash"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert_eq!(trash.len(), 1, "{trash:?}");
+    let name = trash[0].file_name().unwrap().to_string_lossy().into_owned();
+    assert!(name.starts_with(&format!("{id}-")), "{name}");
+    assert_eq!(
+        std::fs::read(trash[0].join("private/events.jsonl")).unwrap(),
+        b"{}\n"
+    );
+}
