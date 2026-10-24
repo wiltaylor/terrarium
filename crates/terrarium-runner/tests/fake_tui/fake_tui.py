@@ -35,6 +35,10 @@ Env:
   FAKE_TUI_ANSWER_HOLD when "1", /question waits for one more line after
                        the answer before Stop, so the turn stays open
 
+Signals: SIGTERM and SIGHUP end it at once (the Python default), unless
+FAKE_TUI_IGNORE_HUP is set. When its parent (the runner) dies, it exits
+too, also with FAKE_TUI_IGNORE_HUP: a test never leaves an orphan TUI.
+
 Each hook goes out (connect, send, close) before the next output, so the
 order of hooks and screen text is fixed. The only timed waits are the
 work time of a normal turn and /stall.
@@ -82,9 +86,26 @@ def arg(name):
     return None
 
 
+def watch_parent():
+    """Exit when the parent dies: then the process gets a new parent."""
+    parent = os.getppid()
+
+    def watch():
+        while os.getppid() == parent:
+            time.sleep(0.2)
+        os._exit(129)
+
+    threading.Thread(target=watch, daemon=True).start()
+
+
 def main():
+    # Python sets no handler for these; make the default explicit, so a
+    # signal ends the TUI at once.
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    signal.signal(signal.SIGHUP, signal.SIG_DFL)
     if os.environ.get("FAKE_TUI_IGNORE_HUP") == "1":
         signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    watch_parent()
     out("fake tui 1.0\n")
     resume = arg("--resume")
     session = resume or arg("--session")

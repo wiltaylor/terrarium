@@ -24,6 +24,7 @@ use serde_json::{Value, json};
 use terrarium_core::protocol::{HostCapabilities, ToolCapability};
 use terrarium_core::{Adapter, Agent, AgentId, Event, HarnessId, HarnessSessionId, HookPayload};
 use terrarium_core::{LaunchSpec, SessionId};
+use terrarium_runner::test_support::{RunnerProcessGuard, sweep_stale_runners_once};
 use terrarium_runner::{AdapterKind, ReadyDetectorSpec, live_runner_pid};
 use terrariumd::runner_supervisor::{
     AdapterEntry, RestartTuning, RunnerMode, RunnerSupervisor, RunnerSupervisorConfig, RunnerTuning,
@@ -141,7 +142,11 @@ fn supervisor(root: &Path) -> Arc<RunnerSupervisor> {
     Arc::new(RunnerSupervisor::new(cfg))
 }
 
+/// A daemon in a temp dir. `_guard` ends the runner processes of the dir
+/// when the test ends, also on a panic. It drops after the daemon (the
+/// `Drop` of `Td`) and before `dir`.
 struct Td {
+    _guard: RunnerProcessGuard,
     dir: tempfile::TempDir,
     daemon: Option<Daemon>,
     socket: PathBuf,
@@ -155,7 +160,9 @@ impl Td {
             .tempdir_in("/tmp")
             .unwrap();
         std::fs::create_dir_all(dir.path().join("config")).unwrap();
+        sweep_stale_runners_once(&runner_bin());
         let mut td = Self {
+            _guard: RunnerProcessGuard::new(dir.path().join("run")),
             socket: dir.path().join("api.sock"),
             dir,
             daemon: None,
@@ -315,24 +322,10 @@ impl Td {
     }
 }
 
+/// The runner processes outlive the daemon: `_guard` ends them next.
 impl Drop for Td {
     fn drop(&mut self) {
         self.shutdown();
-        // End the runner processes that a test left running.
-        let Ok(dir) = std::fs::read_dir(self.dir.path().join("run/runners")) else {
-            return;
-        };
-        for e in dir.flatten() {
-            let name = e.file_name().to_string_lossy().into_owned();
-            if let Some(id) = name.strip_suffix(".pid")
-                && let Ok(agent) = id.parse::<AgentId>()
-                && let Some(pid) = live_runner_pid(&self.run_dir(), agent)
-            {
-                let _ = std::process::Command::new("kill")
-                    .arg(pid.to_string())
-                    .status();
-            }
-        }
     }
 }
 

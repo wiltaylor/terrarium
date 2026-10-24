@@ -100,6 +100,16 @@ struct Harness {
     _dir: tempfile::TempDir,
 }
 
+/// A test that fails half way leaves the harness running: the PTY stays
+/// open while the test binary runs. End it: SIGHUP, then SIGKILL to its
+/// process group after the kill grace (on a thread of the runner, so it
+/// works while the runtime unwinds). It does nothing after an exit.
+impl Drop for Harness {
+    fn drop(&mut self) {
+        let _ = self.runner.kill();
+    }
+}
+
 struct Opts {
     env: Vec<(&'static str, String)>,
     stall: Duration,

@@ -12,6 +12,7 @@ use common::{ms, until, wait};
 use serde_json::{Value, json};
 use terrarium_core::{AgentId, AgentStatus, Event, EventRecord, LaunchSpec};
 use terrarium_runner::events::read_since;
+use terrarium_runner::test_support::{RunnerProcessGuard, sweep_stale_runners_once};
 use terrarium_runner::{
     AdapterKind, AttachEvent, BoxFuture, ConnectOptions, RemoteRunner, RequestContext,
     RequestHandler, RpcError, RunnerHandle, RunnerSpec, SpawnOptions, live_runner_pid,
@@ -49,15 +50,21 @@ impl RequestHandler for Echo {
     }
 }
 
+/// One agent in a temp dir. `guard` ends the runner processes of the dir
+/// when the test ends, also on a panic. It drops before `dir`.
 struct Env {
+    guard: RunnerProcessGuard,
     dir: tempfile::TempDir,
     agent: AgentId,
 }
 
 impl Env {
     fn new() -> Self {
+        sweep_stale_runners_once(&bin());
+        let dir = tempfile::tempdir().expect("tempdir");
         Self {
-            dir: tempfile::tempdir().expect("tempdir"),
+            guard: RunnerProcessGuard::new(dir.path().join("run")),
+            dir,
             agent: AgentId::new(),
         }
     }
@@ -145,6 +152,9 @@ impl Env {
             .kill_on_drop(true)
             .spawn()
             .expect("start the runner");
+        if let Some(pid) = child.id() {
+            self.guard.track(pid);
+        }
         let control = terrarium_runner::control_socket_path(&self.run(), self.agent);
         until("the control socket", || control.exists()).await;
         let r = self.connect_opts(opts).await;

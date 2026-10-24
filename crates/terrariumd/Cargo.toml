@@ -49,6 +49,8 @@ semver.workspace = true
 [dev-dependencies]
 # The integration tests use the fake supervisor.
 terrariumd = { path = ".", features = ["fake-supervisor"] }
+# The guard that ends the runner processes of a test.
+terrarium-runner = { workspace = true, features = ["test-support"] }
 semver.workspace = true
 toml.workspace = true
 hyper.workspace = true

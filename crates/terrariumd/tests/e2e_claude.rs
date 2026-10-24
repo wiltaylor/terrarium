@@ -29,6 +29,7 @@ use serde_json::{Value, json};
 use terrarium_adapter_claude::screen::screen_state;
 use terrarium_core::{AgentId, HarnessId};
 use terrarium_runner::RunnerHandle;
+use terrarium_runner::test_support::{RunnerProcessGuard, sweep_stale_runners_once};
 use terrariumd::runner_supervisor::{RunnerMode, RunnerSupervisor, RunnerSupervisorConfig};
 use terrariumd::sandbox::{self, SandboxConfig, SandboxMode};
 use terrariumd::{Daemon, DaemonConfig};
@@ -70,6 +71,7 @@ fn with_runner_mode(mut cfg: RunnerSupervisorConfig) -> RunnerSupervisorConfig {
     }
     let bin = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/terrarium-runner");
     assert!(bin.is_file(), "build the runner first: {}", bin.display());
+    sweep_stale_runners_once(&bin);
     println!("runner mode: process ({})", bin.display());
     cfg.mode = RunnerMode::Process {
         bin: std::fs::canonicalize(bin).unwrap(),
@@ -112,6 +114,8 @@ async fn claude_in_bwrap_answers_one_turn() {
         .prefix("te2e")
         .tempdir_in("/tmp")
         .unwrap();
+    // Ends the runner processes when the test ends, also on a panic.
+    let _guard = RunnerProcessGuard::new(run.path());
 
     let mut sandbox = SandboxConfig {
         mode: SandboxMode::Bwrap,
@@ -425,6 +429,8 @@ async fn two_claude_agents_share_one_home() {
         .prefix("te2e")
         .tempdir_in("/tmp")
         .unwrap();
+    // Ends the runner processes when the test ends, also on a panic.
+    let _guard = RunnerProcessGuard::new(run.path());
     let mut sandbox = SandboxConfig {
         mode: SandboxMode::Bwrap,
         cli: Some(std::fs::canonicalize(&cli).unwrap()),

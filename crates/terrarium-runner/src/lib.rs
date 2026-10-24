@@ -23,6 +23,8 @@ mod runner;
 mod server;
 mod socket;
 pub mod spec;
+#[cfg(feature = "test-support")]
+pub mod test_support;
 
 pub use attach::{AttachEvent, AttachStream};
 pub use config::{

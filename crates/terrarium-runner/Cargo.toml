@@ -21,6 +21,9 @@ bin = [
     "dep:tracing-subscriber",
     "dep:semver",
 ]
+# `test_support`: the guard that ends the runner processes of a test, and
+# the sweep of stale runners. For the tests of this crate and the daemon.
+test-support = []
 
 [[bin]]
 name = "terrarium-runner"
@@ -62,6 +65,8 @@ tracing-subscriber = { workspace = true, optional = true }
 semver = { workspace = true, optional = true }
 
 [dev-dependencies]
+# The tests use `test_support`.
+terrarium-runner = { path = ".", features = ["test-support"] }
 tempfile.workspace = true
 semver.workspace = true
 
