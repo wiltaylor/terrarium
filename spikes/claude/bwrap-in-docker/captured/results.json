@@ -1,0 +1,193 @@
+{
+  "a default": {
+    "opts": [],
+    "rc": 1,
+    "output": [
+      "uid=1000 bwrap=bubblewrap 0.8.0",
+      "TEST1b ro-bind /proc: FAIL: bwrap: No permissions to create new namespace, likely because the kernel does not allow non-privileged user namespaces. See <https://deb.li/bubblewrap> or <file:///usr/share/doc/bubblewrap/README.Debian.gz>.",
+      "TEST1 basic: FAIL: bwrap: No permissions to create new namespace, likely because the kernel does not allow non-privileged user namespaces. See <https://deb.li/bubblewrap> or <file:///usr/share/doc/bubblewrap/README.Debian.gz>."
+    ]
+  },
+  "a2 default +SYS_ADMIN": {
+    "opts": [
+      "--cap-add",
+      "SYS_ADMIN"
+    ],
+    "rc": 1,
+    "output": [
+      "uid=1000 bwrap=bubblewrap 0.8.0",
+      "TEST1b ro-bind /proc: FAIL: bwrap: pivot_root: Operation not permitted",
+      "TEST1 basic: FAIL: bwrap: pivot_root: Operation not permitted"
+    ]
+  },
+  "b seccomp=unconfined": {
+    "opts": [
+      "--security-opt",
+      "seccomp=unconfined"
+    ],
+    "rc": 0,
+    "output": [
+      "uid=1000 bwrap=bubblewrap 0.8.0",
+      "TEST1b ro-bind /proc: OK",
+      "TEST1 basic: FAIL: bwrap: Can't mount proc on /newroot/proc: Operation not permitted",
+      "TEST2 overlay: A sees 'agent A prompt'; B sees 'agent B prompt'; write attempt: sh: 1: cannot create /home/agent/.copilot/SYSTEM.md: Read-only file system",
+      "rc=2; shared file after: 'shared prompt'",
+      "TEST3 overlay on missing file: 'agent A prompt",
+      "rc=0'; left a 0-byte placeholder in the shared dir"
+    ]
+  },
+  "b2 seccomp=unconfined +SYS_ADMIN": {
+    "opts": [
+      "--security-opt",
+      "seccomp=unconfined",
+      "--cap-add",
+      "SYS_ADMIN"
+    ],
+    "rc": 0,
+    "output": [
+      "uid=1000 bwrap=bubblewrap 0.8.0",
+      "TEST1b ro-bind /proc: OK",
+      "TEST1 basic: FAIL: bwrap: Can't mount proc on /newroot/proc: Operation not permitted",
+      "TEST2 overlay: A sees 'agent A prompt'; B sees 'agent B prompt'; write attempt: sh: 1: cannot create /home/agent/.copilot/SYSTEM.md: Read-only file system",
+      "rc=2; shared file after: 'shared prompt'",
+      "TEST3 overlay on missing file: 'agent A prompt",
+      "rc=0'; left a 0-byte placeholder in the shared dir"
+    ]
+  },
+  "b3 seccomp=unconfined systempaths=unconfined": {
+    "opts": [
+      "--security-opt",
+      "seccomp=unconfined",
+      "--security-opt",
+      "systempaths=unconfined"
+    ],
+    "rc": 0,
+    "output": [
+      "uid=1000 bwrap=bubblewrap 0.8.0",
+      "TEST1b ro-bind /proc: OK",
+      "TEST1 basic: OK",
+      "TEST2 overlay: A sees 'agent A prompt'; B sees 'agent B prompt'; write attempt: sh: 1: cannot create /home/agent/.copilot/SYSTEM.md: Read-only file system",
+      "rc=2; shared file after: 'shared prompt'",
+      "TEST3 overlay on missing file: 'agent A prompt",
+      "rc=0'; left a 0-byte placeholder in the shared dir"
+    ]
+  },
+  "c custom(clone/unshare)": {
+    "opts": [
+      "--security-opt",
+      "seccomp=<spike-dir>/seccomp-userns.json"
+    ],
+    "rc": 1,
+    "output": [
+      "uid=1000 bwrap=bubblewrap 0.8.0",
+      "TEST1b ro-bind /proc: FAIL: bwrap: Failed to make / slave: Operation not permitted",
+      "TEST1 basic: FAIL: bwrap: Failed to make / slave: Operation not permitted"
+    ]
+  },
+  "c2 custom(clone/unshare) +SYS_ADMIN": {
+    "opts": [
+      "--security-opt",
+      "seccomp=<spike-dir>/seccomp-userns.json",
+      "--cap-add",
+      "SYS_ADMIN"
+    ],
+    "rc": 1,
+    "output": [
+      "uid=1000 bwrap=bubblewrap 0.8.0",
+      "TEST1b ro-bind /proc: FAIL: bwrap: pivot_root: Operation not permitted",
+      "TEST1 basic: FAIL: bwrap: pivot_root: Operation not permitted"
+    ]
+  },
+  "c3 custom(clone/unshare/mount/pivot_root)": {
+    "opts": [
+      "--security-opt",
+      "seccomp=<spike-dir>/seccomp-userns-mount.json"
+    ],
+    "rc": 0,
+    "output": [
+      "uid=1000 bwrap=bubblewrap 0.8.0",
+      "TEST1b ro-bind /proc: OK",
+      "TEST1 basic: FAIL: bwrap: Can't mount proc on /newroot/proc: Operation not permitted",
+      "TEST2 overlay: A sees 'agent A prompt'; B sees 'agent B prompt'; write attempt: sh: 1: cannot create /home/agent/.copilot/SYSTEM.md: Read-only file system",
+      "rc=2; shared file after: 'shared prompt'",
+      "TEST3 overlay on missing file: 'agent A prompt",
+      "rc=0'; left a 0-byte placeholder in the shared dir"
+    ]
+  },
+  "c4 custom(+mount) systempaths=unconfined": {
+    "opts": [
+      "--security-opt",
+      "seccomp=<spike-dir>/seccomp-userns-mount.json",
+      "--security-opt",
+      "systempaths=unconfined"
+    ],
+    "rc": 0,
+    "output": [
+      "uid=1000 bwrap=bubblewrap 0.8.0",
+      "TEST1b ro-bind /proc: OK",
+      "TEST1 basic: OK",
+      "TEST2 overlay: A sees 'agent A prompt'; B sees 'agent B prompt'; write attempt: sh: 1: cannot create /home/agent/.copilot/SYSTEM.md: Read-only file system",
+      "rc=2; shared file after: 'shared prompt'",
+      "TEST3 overlay on missing file: 'agent A prompt",
+      "rc=0'; left a 0-byte placeholder in the shared dir"
+    ]
+  },
+  "c5 custom(clone/unshare) systempaths=unconfined": {
+    "opts": [
+      "--security-opt",
+      "seccomp=<spike-dir>/seccomp-userns.json",
+      "--security-opt",
+      "systempaths=unconfined"
+    ],
+    "rc": 1,
+    "output": [
+      "uid=1000 bwrap=bubblewrap 0.8.0",
+      "TEST1b ro-bind /proc: FAIL: bwrap: Failed to make / slave: Operation not permitted",
+      "TEST1 basic: FAIL: bwrap: Failed to make / slave: Operation not permitted"
+    ]
+  },
+  "c6 min-a(clone/unshare/mount/pivot_root) systempaths=unconfined": {
+    "opts": [
+      "--security-opt",
+      "seccomp=<spike-dir>/seccomp-min-a.json",
+      "--security-opt",
+      "systempaths=unconfined"
+    ],
+    "rc": 1,
+    "output": [
+      "uid=1000 bwrap=bubblewrap 0.8.0",
+      "TEST1b ro-bind /proc: FAIL: bwrap: unmount old root: Operation not permitted",
+      "TEST1 basic: FAIL: bwrap: unmount old root: Operation not permitted"
+    ]
+  },
+  "c7 min-b(min-a+umount2) systempaths=unconfined": {
+    "opts": [
+      "--security-opt",
+      "seccomp=<spike-dir>/seccomp-min-b.json",
+      "--security-opt",
+      "systempaths=unconfined"
+    ],
+    "rc": 0,
+    "output": [
+      "uid=1000 bwrap=bubblewrap 0.8.0",
+      "TEST1b ro-bind /proc: OK",
+      "TEST1 basic: OK",
+      "TEST2 overlay: A sees 'agent A prompt'; B sees 'agent B prompt'; write attempt: sh: 1: cannot create /home/agent/.copilot/SYSTEM.md: Read-only file system",
+      "rc=2; shared file after: 'shared prompt'",
+      "TEST3 overlay on missing file: 'agent A prompt",
+      "rc=0'; left a 0-byte placeholder in the shared dir"
+    ]
+  },
+  "d apparmor=unconfined only": {
+    "opts": [
+      "--security-opt",
+      "apparmor=unconfined"
+    ],
+    "rc": 1,
+    "output": [
+      "uid=1000 bwrap=bubblewrap 0.8.0",
+      "TEST1b ro-bind /proc: FAIL: bwrap: No permissions to create new namespace, likely because the kernel does not allow non-privileged user namespaces. See <https://deb.li/bubblewrap> or <file:///usr/share/doc/bubblewrap/README.Debian.gz>.",
+      "TEST1 basic: FAIL: bwrap: No permissions to create new namespace, likely because the kernel does not allow non-privileged user namespaces. See <https://deb.li/bubblewrap> or <file:///usr/share/doc/bubblewrap/README.Debian.gz>."
+    ]
+  }
+}

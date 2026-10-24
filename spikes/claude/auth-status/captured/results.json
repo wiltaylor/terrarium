@@ -1,0 +1,59 @@
+{
+  "real (default)": {
+    "rc": 0,
+    "stdout": "{\n  \"loggedIn\": true,\n  \"authMethod\": \"claude.ai\",\n  \"apiProvider\": \"firstParty\",\n  \"analyticsDisabled\": true,\n  \"projectsDirectory\": \"$HOME/.claude/projects\",\n  \"configDirectory\": \"$HOME/.claude\",\n  \"email\": \"<email>\",\n  \"orgId\": \"<redacted>\",\n  \"orgName\": \"<redacted>\",\n  \"subscriptionType\": \"max\"\n}\n",
+    "stderr": ""
+  },
+  "real --json": {
+    "rc": 0,
+    "stdout": "{\n  \"loggedIn\": true,\n  \"authMethod\": \"claude.ai\",\n  \"apiProvider\": \"firstParty\",\n  \"analyticsDisabled\": true,\n  \"projectsDirectory\": \"$HOME/.claude/projects\",\n  \"configDirectory\": \"$HOME/.claude\",\n  \"email\": \"<email>\",\n  \"orgId\": \"<redacted>\",\n  \"orgName\": \"<redacted>\",\n  \"subscriptionType\": \"max\"\n}\n",
+    "stderr": ""
+  },
+  "real --text": {
+    "rc": 0,
+    "stdout": "Login method: Claude Max account\nOrganization: <email>'s Organization\nEmail: <email>\n",
+    "stderr": ""
+  },
+  "copied (default)": {
+    "rc": 0,
+    "stdout": "{\n  \"loggedIn\": true,\n  \"authMethod\": \"claude.ai\",\n  \"apiProvider\": \"firstParty\",\n  \"analyticsDisabled\": true,\n  \"projectsDirectory\": \"$CLAUDE_CONFIG_DIR/projects\",\n  \"configDirectory\": \"$CLAUDE_CONFIG_DIR\",\n  \"email\": null,\n  \"orgId\": null,\n  \"orgName\": null,\n  \"subscriptionType\": \"max\"\n}\n",
+    "stderr": ""
+  },
+  "copied --json": {
+    "rc": 0,
+    "stdout": "{\n  \"loggedIn\": true,\n  \"authMethod\": \"claude.ai\",\n  \"apiProvider\": \"firstParty\",\n  \"analyticsDisabled\": true,\n  \"projectsDirectory\": \"$CLAUDE_CONFIG_DIR/projects\",\n  \"configDirectory\": \"$CLAUDE_CONFIG_DIR\",\n  \"email\": null,\n  \"orgId\": null,\n  \"orgName\": null,\n  \"subscriptionType\": \"max\"\n}\n",
+    "stderr": ""
+  },
+  "copied --text": {
+    "rc": 0,
+    "stdout": "Login method: Claude Max account\n",
+    "stderr": ""
+  },
+  "empty (default)": {
+    "rc": 1,
+    "stdout": "{\n  \"loggedIn\": false,\n  \"authMethod\": \"none\",\n  \"apiProvider\": \"firstParty\",\n  \"analyticsDisabled\": true,\n  \"projectsDirectory\": \"$CLAUDE_CONFIG_DIR/projects\",\n  \"configDirectory\": \"$CLAUDE_CONFIG_DIR\"\n}\n",
+    "stderr": ""
+  },
+  "empty --json": {
+    "rc": 1,
+    "stdout": "{\n  \"loggedIn\": false,\n  \"authMethod\": \"none\",\n  \"apiProvider\": \"firstParty\",\n  \"analyticsDisabled\": true,\n  \"projectsDirectory\": \"$CLAUDE_CONFIG_DIR/projects\",\n  \"configDirectory\": \"$CLAUDE_CONFIG_DIR\"\n}\n",
+    "stderr": ""
+  },
+  "empty --text": {
+    "rc": 1,
+    "stdout": "Not logged in. Run claude auth login to authenticate.\n",
+    "stderr": ""
+  },
+  "credentials_file_shape": {
+    "claudeAiOauth": [
+      "accessToken",
+      "expiresAt",
+      "rateLimitTier",
+      "refreshToken",
+      "refreshTokenExpiresAt",
+      "scopes",
+      "subscriptionType",
+      "subscriptionTypeSource"
+    ]
+  }
+}

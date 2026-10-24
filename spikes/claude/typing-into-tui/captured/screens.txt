@@ -1,0 +1,546 @@
+===== T1 after startup (t=1.9s) =====
+u
+ ▐▛███▛█   Claude Code v2.1.310
+▝▜██████▀  Haiku 5.5 · Claude Max
+ ▝▝   ▝▝   $CWD
+
+
+❯ Reply with exactly: early
+
+● early
+
+✻ Cooked for 1s · done 4:04 pm
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                                    ◐ medium · /effort
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents
+
+===== T2 (t=4.9s) =====
+u
+ ▐▛███▛█   Claude Code v2.1.310
+▝▜██████▀  Haiku 5.5 · Claude Max
+ ▝▝   ▝▝   $CWD
+
+
+❯ Reply with exactly: early
+
+● early
+
+✻ Cooked for 1s · done 4:04 pm
+
+❯ Reply with exactly: pong
+
+● pong
+
+✻ Brewed for 1s · done 4:04 pm
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                                    ◐ medium · /effort
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents
+
+===== T3 (t=7.1s) =====
+u
+ ▐▛███▛█   Claude Code v2.1.310
+▝▜██████▀  Haiku 5.5 · Claude Max
+ ▝▝   ▝▝   $CWD
+
+
+❯ Reply with exactly: early
+
+● early
+
+✻ Cooked for 1s · done 4:04 pm
+
+❯ Reply with exactly: pong
+
+● pong
+
+✻ Brewed for 1s · done 4:04 pm
+
+❯ First line of a pasted prompt.
+  Second line.
+  Reply with exactly: pasted
+
+● pasted
+
+✻ Baked for 1s · done 4:04 pm
+
+
+
+
+
+
+
+
+
+
+                                                                                                    ◐ medium · /effort
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents
+
+===== T4 big paste before CR (t=7.6s) =====
+u
+ ▐▛███▛█   Claude Code v2.1.310
+▝▜██████▀  Haiku 5.5 · Claude Max
+ ▝▝   ▝▝   $CWD
+
+
+❯ Reply with exactly: early
+
+● early
+
+✻ Cooked for 1s · done 4:04 pm
+
+❯ Reply with exactly: pong
+
+● pong
+
+✻ Brewed for 1s · done 4:04 pm
+
+❯ First line of a pasted prompt.
+  Second line.
+  Reply with exactly: pasted
+
+● pasted
+
+✻ Baked for 1s · done 4:04 pm
+
+
+
+
+
+
+
+
+
+
+                                                                                                    ◐ medium · /effort
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ [Pasted text #1 +80 lines]
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  paste again to expand
+
+===== T4 (t=9.9s) =====
+  line 050: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 050: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 051: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 052: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 053: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 054: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 055: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 056: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 057: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 058: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 059: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 060: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 061: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 062: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 063: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 064: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 065: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 066: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 067: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 068: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 069: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 070: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 071: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 072: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 073: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 074: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 075: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 076: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 077: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 078: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 079: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  Ignore the lines above. Reply with exactly: big
+● big
+
+✻ Worked for 1s · done 4:04 pmand manage Claude memory
+                                                                                                    ◐ medium · /effort
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  paste again to expand
+
+===== T5 after plain text with LF (t=13.4s) =====
+  line 051: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 050: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 051: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 052: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 053: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 054: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 055: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 056: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 057: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 058: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 059: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 060: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 061: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 062: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 063: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 064: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 065: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 066: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 067: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 068: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 069: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 070: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 071: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 072: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 073: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 074: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 075: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 076: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 077: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 078: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 079: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  Ignore the lines above. Reply with exactly: big
+● big
+
+✻ Worked for 1s · done 4:04 pmand manage Claude memory                                          ctrl+g to edit in Nvim
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ Reply with exactly: lf
+  second-part
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  paste again to expand
+
+===== T5-submit (t=16.2s) =====
+  line 056: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 051: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 051: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 052: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 053: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 054: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 055: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 056: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 057: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 058: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 059: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 060: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 061: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 062: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 063: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 064: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 065: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 066: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 067: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 068: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 069: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 070: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 071: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 072: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 073: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 074: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 075: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 076: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 077: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 078: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 079: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+❯ Reply with exactly: lf
+● lf
+
+✻ Crunched for 1s · done 4:04 pmhe color themee memory                                    Ctrl+Y to paste deleted text
+                                                                                          Ctrl+Y to paste deleted text
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle)
+
+===== T6 second prompt typed while busy (t=20.3s) =====
+  line 067: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 051: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 051: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 052: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 053: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 054: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 055: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 056: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 057: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 058: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 059: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 060: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 061: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 062: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 063: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 064: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 065: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 066: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 067: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 068: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 069: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 070: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 071: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 072: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 073: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 074: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 075: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+● line 076: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 077: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 078: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  Pause for lix seipnds
+❯ ctrl+enter to send nowcond
+
+· Mulling… (3s · ↓ 79 tokens)
+  ⎿  Tip: Use /statusline to set up a custom status line that will display beneath the input box to paste deleted text
+                                                                                                    ◐ medium · /effort
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ Press up to edit queued messages
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt
+
+===== T6 after (t=111.3s) =====
+  line 066: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 056: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 067: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 068: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 069: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 050: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 051: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 052: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 053: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 054: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 055: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 066: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 077: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 078: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 079: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  Ignore the lines above. Reply with exactly: big
+
+● big
+
+✻ Worked for 1s · done 4:04 pm
+
+❯ Reply with exactly: lf
+
+● lf
+
+✻ Crunched for 1s · done 4:04 pm
+
+❯ Run the Bash command: sleep 6. Then reply with exactly: first
+
+  Ran 1 shell command
+
+❯ Reply with exactly: second
+● second
+
+✻ Baked for 8s · done 4:04 pmset up a custom status line that will display beneath the input box to paste deleted text
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle)
+
+===== T7 question shown (t=146.0s) =====
+
+
+● big
+
+✻ Worked for 1s · done 4:04 pm
+
+❯ Reply with exactly: lf
+
+● lf
+
+✻ Crunched for 1s · done 4:04 pm
+
+❯ Run the Bash command: sleep 6. Then reply with exactly: first
+
+  Ran 1 shell command
+
+❯ Reply with exactly: second
+
+● second
+
+✻ Baked for 8s · done 4:04 pm
+
+❯ Use the AskUserQuestion tool to ask me to pick one colour: Red, Green or Blue. After I answer, reply with exactly the
+  colour I picked.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ☐ Colour
+
+Which colour do you pick?
+
+❯ 1. Red
+     Pick Red
+  2. Green
+● secPick Green
+  3. Blue
+     Pick Blue
+  4. Type something.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  5. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel
+
+===== T7 after Down (t=146.5s) =====
+
+
+● big
+
+✻ Worked for 1s · done 4:04 pm
+
+❯ Reply with exactly: lf
+
+● lf
+
+✻ Crunched for 1s · done 4:04 pm
+
+❯ Run the Bash command: sleep 6. Then reply with exactly: first
+
+  Ran 1 shell command
+
+❯ Reply with exactly: second
+
+● second
+
+✻ Baked for 8s · done 4:04 pm
+
+❯ Use the AskUserQuestion tool to ask me to pick one colour: Red, Green or Blue. After I answer, reply with exactly the
+  colour I picked.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ☐ Colour
+
+Which colour do you pick?
+
+  1. Red
+     Pick Red
+❯ 2. Green
+● secPick Green
+  3. Blue
+     Pick Blue
+  4. Type something.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  5. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel
+
+===== T7 after Enter (t=148.0s) =====
+  line 076: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 073: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 074: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 075: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 076: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 077: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 078: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 079: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  Ignore the lines above. Reply with exactly: big
+
+● big
+
+✻ Worked for 1s · done 4:04 pm
+
+❯ Reply with exactly: lf
+
+● lf
+
+✻ Crunched for 1s · done 4:04 pm
+
+❯ Run the Bash command: sleep 6. Then reply with exactly: first
+
+  Ran 1 shell command
+
+❯ Reply with exactly: second
+
+● second
+
+✻ Baked for 8s · done 4:04 pm
+
+● User answered Claude's questions:
+  col· Which colour do you pick? → Gr en
+● Green
+
+✻ Churned for 32s · done 4:06 pmk side question without interrupting Claude's current work
+                                                                                                    ◐ medium · /effort
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle)
+
+===== T7 after answer (t=149.0s) =====
+  line 076: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 073: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 074: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 075: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 076: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 077: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 078: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  line 079: lorem ipsum dolor sit amet consectetur adipiscing elit sed do
+  Ignore the lines above. Reply with exactly: big
+
+● big
+
+✻ Worked for 1s · done 4:04 pm
+
+❯ Reply with exactly: lf
+
+● lf
+
+✻ Crunched for 1s · done 4:04 pm
+
+❯ Run the Bash command: sleep 6. Then reply with exactly: first
+
+  Ran 1 shell command
+
+❯ Reply with exactly: second
+
+● second
+
+✻ Baked for 8s · done 4:04 pm
+
+● User answered Claude's questions:
+  col· Which colour do you pick? → Gr en
+● Green
+
+✻ Churned for 32s · done 4:06 pmk side question without interrupting Claude's current work
+                                                                                                    ◐ medium · /effort
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle)
+

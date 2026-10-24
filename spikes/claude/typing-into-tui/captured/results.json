@@ -1,0 +1,104 @@
+{
+  "startup_ready_s": 1.85,
+  "T1_early_typing": {
+    "submitted": true,
+    "input_text_after_start": ""
+  },
+  "T2_plain_cr": {
+    "submitted_within_5s": true,
+    "submit_latency_ms_after_last_key": 31,
+    "prompt_len": 24,
+    "prompt_repr": "Reply with exactly: pong",
+    "reply": "pong"
+  },
+  "T3_paste_cr_nodelay": {
+    "submitted_within_5s": true,
+    "submit_latency_ms_after_last_key": 27,
+    "prompt_len": 70,
+    "prompt_repr": "First line of a pasted prompt.\nSecond line.\nReply with exactly: pasted",
+    "reply": "pasted"
+  },
+  "T3_newlines_preserved": true,
+  "T4_input_box_after_paste": "[Pasted text #1 +80 lines]",
+  "T4_big_paste": {
+    "submitted_within_5s": true,
+    "submit_latency_ms_after_last_key": 24,
+    "prompt_len": 5807,
+    "prompt_repr": "line 000: lorem ipsum dolor sit amet consectetur adipiscing elit sed do\nline 001: lorem ipsum dolor sit amet consectetur",
+    "reply": "big",
+    "sent_len": 5807,
+    "full_text_in_hook": true
+  },
+  "T5_plain_lf": {
+    "lf_submitted": false,
+    "input_text": "Reply with exactly: lf\n  second-part"
+  },
+  "T5_after_ctrl_u": "Reply with exactly: lf",
+  "T5_submit": {
+    "submitted_within_5s": true,
+    "submit_latency_ms_after_last_key": 23,
+    "prompt_len": 22,
+    "prompt_repr": "Reply with exactly: lf",
+    "reply": "lf"
+  },
+  "T6_busy_queue": {
+    "busy_when_typed": true,
+    "input_text_1s_after": "Press up to edit queued messages",
+    "user_prompt_submits": [
+      [
+        -2.52,
+        "Run the Bash command: sleep 6. Then repl"
+      ],
+      [
+        0.27,
+        "Reply with exactly: second"
+      ]
+    ],
+    "stops": [
+      [
+        6.0,
+        "second"
+      ]
+    ]
+  },
+  "T7_ask_user_question": {
+    "pre_tool_use_tool": "AskUserQuestion",
+    "pre_tool_input": {
+      "questions": [
+        {
+          "question": "Which colour do you pick?",
+          "header": "Colour",
+          "options": [
+            {
+              "label": "Red",
+              "description": "Pick Red"
+            },
+            {
+              "label": "Green",
+              "description": "Pick Green"
+            },
+            {
+              "label": "Blue",
+              "description": "Pick Blue"
+            }
+          ],
+          "multiSelect": false
+        }
+      ]
+    },
+    "notifications": [
+      [
+        "idle_prompt",
+        "Claude is waiting for your input"
+      ]
+    ],
+    "detector_on_question": {
+      "input_box": false,
+      "input_text": null,
+      "busy": false,
+      "ready": false,
+      "dialog": null
+    },
+    "reply": "Green"
+  }
+}

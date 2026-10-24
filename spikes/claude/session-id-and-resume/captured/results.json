@@ -1,0 +1,243 @@
+{
+  "session_id": "aee36d42-3246-4e16-be9c-16dd97c85c57",
+  "turn1_reply": "ok",
+  "exit_via_slash_exit": true,
+  "jsonl_paths": [
+    "projects/<encoded-cwd>/aee36d42-3246-4e16-be9c-16dd97c85c57.jsonl"
+  ],
+  "reuse_session_id_screen": [
+    "Error: Session ID aee36d42-3246-4e16-be9c-16dd97c85c57 is already in use."
+  ],
+  "reuse_session_id_alive": false,
+  "resume_other_cwd_shows_history": true,
+  "resume_other_cwd_alive": true,
+  "resume_screen_shows_history": true,
+  "turn2_reply": "PERIWINKLE",
+  "one_ctrl_c_alive": true,
+  "exit_via_ctrl_c_twice": true,
+  "hooks": [
+    [
+      "SessionStart",
+      true,
+      "startup"
+    ],
+    [
+      "UserPromptSubmit",
+      true,
+      null
+    ],
+    [
+      "Stop",
+      true,
+      null
+    ],
+    [
+      "SessionEnd",
+      true,
+      "prompt_input_exit"
+    ],
+    [
+      "SessionStart",
+      true,
+      "resume"
+    ],
+    [
+      "SessionEnd",
+      true,
+      "other"
+    ],
+    [
+      "SessionStart",
+      true,
+      "resume"
+    ],
+    [
+      "UserPromptSubmit",
+      true,
+      null
+    ],
+    [
+      "Stop",
+      true,
+      null
+    ],
+    [
+      "SessionEnd",
+      true,
+      "prompt_input_exit"
+    ]
+  ],
+  "jsonl_record_types": {
+    "mode": 3,
+    "permission-mode": 3,
+    "atis-latch": 3,
+    "file-history-snapshot": 3,
+    "user": 2,
+    "attachment": 16,
+    "api-request-shape": 1,
+    "api-request-blob": 4,
+    "api-request": 2,
+    "last-prompt": 3,
+    "ai-title": 2,
+    "assistant": 3,
+    "system": 4,
+    "cost-state": 6
+  },
+  "jsonl_top_keys": [
+    "aiTitle",
+    "apiBlockIndex",
+    "atis",
+    "attachment",
+    "cacheControl",
+    "cwd",
+    "durationMs",
+    "effort",
+    "entrypoint",
+    "gitBranch",
+    "hasOutput",
+    "hasUnknownModelCost",
+    "hash",
+    "hookAdditionalContext",
+    "hookCount",
+    "hookErrors",
+    "hookInfos",
+    "id",
+    "isMeta",
+    "isSidechain",
+    "isSnapshotUpdate",
+    "keep",
+    "lastPrompt",
+    "leafUuid",
+    "level",
+    "message",
+    "messageCount",
+    "messageId",
+    "mode",
+    "modelUsage",
+    "origin",
+    "params",
+    "parentUuid",
+    "perTurnEffort",
+    "permissionMode",
+    "preventedContinuation",
+    "promptId",
+    "promptSource",
+    "querySource",
+    "rendered",
+    "renderedBesideToolResult",
+    "renderedRole",
+    "requestDigest",
+    "requestId",
+    "requestRef",
+    "requestedModel",
+    "sessionId",
+    "session_id",
+    "shape",
+    "shapeHash",
+    "snapshot",
+    "startTime",
+    "stopReason",
+    "subtype",
+    "tail",
+    "thinkingDisplay",
+    "thinkingDurationMs",
+    "timestamp",
+    "toolUseID",
+    "totalAPIDuration",
+    "totalAPIDurationWithoutRetries",
+    "totalCostUSD",
+    "totalDuration",
+    "totalLinesAdded",
+    "totalLinesRemoved",
+    "totalToolDuration",
+    "turnOrigin",
+    "turnPosition",
+    "type",
+    "userType",
+    "uuid",
+    "version"
+  ],
+  "assistant_usage_records": [
+    {
+      "model": "claude-haiku-5-5",
+      "id": "msg_011CgLZ4D8Uzva9rUiX7ME9A",
+      "requestId": "req_011CgLZ4CvLCehzhpuUEXtfp",
+      "usage": {
+        "input_tokens": 2,
+        "cache_creation_input_tokens": 36712,
+        "cache_read_input_tokens": 0,
+        "output_tokens": 45,
+        "output_tokens_details": {
+          "thinking_tokens": 41
+        },
+        "server_tool_use": {
+          "web_search_requests": 0,
+          "web_fetch_requests": 0
+        },
+        "service_tier": "standard",
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 36712,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "inference_geo": "global",
+        "iterations": [],
+        "speed": "standard",
+        "fallback_credit": null
+      }
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "id": "msg_011CgLZ4D8Uzva9rUiX7ME9A",
+      "requestId": "req_011CgLZ4CvLCehzhpuUEXtfp",
+      "usage": {
+        "input_tokens": 2,
+        "cache_creation_input_tokens": 36712,
+        "cache_read_input_tokens": 0,
+        "output_tokens": 45,
+        "output_tokens_details": {
+          "thinking_tokens": 41
+        },
+        "server_tool_use": {
+          "web_search_requests": 0,
+          "web_fetch_requests": 0
+        },
+        "service_tier": "standard",
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 36712,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "inference_geo": "global",
+        "iterations": [],
+        "speed": "standard",
+        "fallback_credit": null
+      }
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "id": "msg_011CgLZ53e1NsQwFQGMNPpgf",
+      "requestId": "req_011CgLZ53PNeSqeHQvNNSHoG",
+      "usage": {
+        "input_tokens": 2,
+        "cache_creation_input_tokens": 271,
+        "cache_read_input_tokens": 36712,
+        "output_tokens": 10,
+        "output_tokens_details": {
+          "thinking_tokens": 0
+        },
+        "server_tool_use": {
+          "web_search_requests": 0,
+          "web_fetch_requests": 0
+        },
+        "service_tier": "standard",
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 271,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "inference_geo": "global",
+        "iterations": [],
+        "speed": "standard",
+        "fallback_credit": null
+      }
+    }
+  ]
+}

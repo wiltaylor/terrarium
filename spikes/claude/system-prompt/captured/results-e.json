@@ -1,0 +1,16 @@
+{
+  "e_default_sources": {
+    "reply": "MARMALADE TEAL",
+    "system": [
+      {
+        "n_blocks": 3,
+        "chars": 9014,
+        "has_default_cc_prompt": true,
+        "MARMALADE": true,
+        "QUINCE": false,
+        "TEAL_in_system": false
+      }
+    ],
+    "claude_md_in_transcript": true
+  }
+}

@@ -1,0 +1,12 @@
+--- user=root env=''
+--dangerously-skip-permissions cannot be used with root/sudo privileges for security reasons
+rc=0
+--- user=1000 env=''
+Not logged in · Please run /login
+rc=0
+--- user=root env='-e IS_SANDBOX=1'
+Not logged in · Please run /login
+rc=0
+--- user=1000 env='-e IS_SANDBOX=1'
+Not logged in · Please run /login
+rc=0

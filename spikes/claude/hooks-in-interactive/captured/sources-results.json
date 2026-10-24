@@ -1,0 +1,55 @@
+{
+  "default": {
+    "args": [],
+    "hooks_fired": [
+      "FLAG:SessionStart",
+      "PROJECT:SessionStart",
+      "USER:SessionStart"
+    ],
+    "idle_prompt": true,
+    "not_logged_in": false
+  },
+  "sources-user": {
+    "args": [
+      "--setting-sources",
+      "user"
+    ],
+    "hooks_fired": [
+      "FLAG:SessionStart",
+      "USER:SessionStart"
+    ],
+    "idle_prompt": true,
+    "not_logged_in": false
+  },
+  "sources-project": {
+    "args": [
+      "--setting-sources",
+      "project"
+    ],
+    "hooks_fired": [
+      "FLAG:SessionStart",
+      "PROJECT:SessionStart"
+    ],
+    "idle_prompt": true,
+    "not_logged_in": false
+  },
+  "sources-empty": {
+    "args": [
+      "--setting-sources",
+      ""
+    ],
+    "hooks_fired": [
+      "FLAG:SessionStart"
+    ],
+    "idle_prompt": true,
+    "not_logged_in": false
+  },
+  "bare": {
+    "args": [
+      "--bare"
+    ],
+    "hooks_fired": [],
+    "idle_prompt": true,
+    "not_logged_in": false
+  }
+}

@@ -1,0 +1,253 @@
+===== after /exit (t=5.8s) =====
+ ▐▛███▛█   Claude Code v2.1.310
+▝▜██████▀  Haiku 5.5 · Claude Max
+ ▝▝   ▝▝   $CWD
+
+
+❯ Remember the word PERIWINKLE. Reply with exactly: ok
+
+● ok
+
+✻ Sautéed for 1s · done 4:01 pm
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ❯ /exit                                           Exit the CLI
+    /context                                        Visualize current context usage as a colored grid
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ /exituuu
+Resume this session with:───────────────────────────────────────────────────────────────────────────────────────────────
+claude --resume aee36d42-3246-4e16-be9c-16dd97c85c57
+
+===== same --session-id again (t=2.4s) =====
+Error: Session ID aee36d42-3246-4e16-be9c-16dd97c85c57 is already in use.
+
+===== --resume from other cwd (t=2.5s) =====
+u
+ ▐▛███▛█   Claude Code v2.1.310
+▝▜██████▀  Haiku 5.5 · Claude Max
+ ▝▝   ▝▝   $CWD
+
+
+❯ Remember the word PERIWINKLE. Reply with exactly: ok
+
+● ok
+
+✻ Sautéed for 1s · done 4:01 pm
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                                    ◐ medium · /effort
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents
+
+===== --resume same cwd, before turn (t=2.8s) =====
+u
+ ▐▛███▛█   Claude Code v2.1.310
+▝▜██████▀  Haiku 5.5 · Claude Max
+ ▝▝   ▝▝   $CWD
+
+▎ [✻] [✻] [✻] · Share Claude Code and earn A$15 in usage credits · /passes
+
+❯ Remember the word PERIWINKLE. Reply with exactly: ok
+
+● ok
+
+✻ Sautéed for 1s · done 4:01 pm
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                                    ◐ medium · /effort
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents
+
+===== --resume same cwd, after turn (t=4.9s) =====
+u
+ ▐▛███▛█   Claude Code v2.1.310
+▝▜██████▀  Haiku 5.5 · Claude Max
+ ▝▝   ▝▝   $CWD
+
+▎ [✻] [✻] [✻] · Share Claude Code and earn A$15 in usage credits · /passes
+
+❯ Remember the word PERIWINKLE. Reply with exactly: ok
+
+● ok
+
+✻ Sautéed for 1s · done 4:01 pm
+
+❯ What word did I ask you to remember? Reply with only the word.
+
+● PERIWINKLE
+
+✻ Cogitated for 1s · done 4:01 pm
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                                    ◐ medium · /effort
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents
+
+===== after one Ctrl-C (t=5.3s) =====
+u
+ ▐▛███▛█   Claude Code v2.1.310
+▝▜██████▀  Haiku 5.5 · Claude Max
+ ▝▝   ▝▝   $CWD
+
+▎ [✻] [✻] [✻] · Share Claude Code and earn A$15 in usage credits · /passes
+
+❯ Remember the word PERIWINKLE. Reply with exactly: ok
+
+● ok
+
+✻ Sautéed for 1s · done 4:01 pm
+
+❯ What word did I ask you to remember? Reply with only the word.
+
+● PERIWINKLE
+
+✻ Cogitated for 1s · done 4:01 pm
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                                    ◐ medium · /effort
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Press Ctrl-C again to exit
+
+===== after two Ctrl-C (t=7.0s) =====
+ ▐▛███▛█   Claude Code v2.1.310
+▝▜██████▀  Haiku 5.5 · Claude Max
+ ▝▝   ▝▝   $CWD
+
+▎ [✻] [✻] [✻] · Share Claude Code and earn A$15 in usage credits · /passes
+
+❯ Remember the word PERIWINKLE. Reply with exactly: ok
+
+● ok
+
+✻ Sautéed for 1s · done 4:01 pm
+
+❯ What word did I ask you to remember? Reply with only the word.
+
+● PERIWINKLE
+
+✻ Cogitated for 1s · done 4:01 pm
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                                    ◐ medium · /effort
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ uuu
+Resume this session with:───────────────────────────────────────────────────────────────────────────────────────────────
+claude --resume aee36d42-3246-4e16-be9c-16dd97c85c57
+

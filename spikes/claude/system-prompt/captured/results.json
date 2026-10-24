@@ -1,0 +1,63 @@
+{
+  "a_append": {
+    "reply": "MARMALADE NONE",
+    "system": [
+      {
+        "n_blocks": 3,
+        "chars": 9014,
+        "has_default_cc_prompt": true,
+        "MARMALADE": true,
+        "QUINCE": false,
+        "TEAL_in_system": false
+      }
+    ]
+  },
+  "b_replace": {
+    "reply": "MARMALADE NONE",
+    "system": [
+      {
+        "n_blocks": 2,
+        "chars": 140,
+        "has_default_cc_prompt": true,
+        "MARMALADE": true,
+        "QUINCE": false,
+        "TEAL_in_system": false
+      }
+    ]
+  },
+  "c_resume_new_append": {
+    "reply": "MARMALADE NONE",
+    "system": [
+      {
+        "n_blocks": 3,
+        "chars": 9014,
+        "has_default_cc_prompt": true,
+        "MARMALADE": true,
+        "QUINCE": false,
+        "TEAL_in_system": false
+      }
+    ]
+  },
+  "d_resume_snapshot_off": {
+    "reply": "QUINCE NONE",
+    "system": [
+      {
+        "n_blocks": 3,
+        "chars": 9014,
+        "has_default_cc_prompt": true,
+        "MARMALADE": true,
+        "QUINCE": false,
+        "TEAL_in_system": false
+      },
+      {
+        "n_blocks": 3,
+        "chars": 9011,
+        "has_default_cc_prompt": true,
+        "MARMALADE": false,
+        "QUINCE": true,
+        "TEAL_in_system": false
+      }
+    ]
+  },
+  "claude_md_in_transcript": false
+}

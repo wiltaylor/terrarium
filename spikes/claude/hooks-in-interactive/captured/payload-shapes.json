@@ -1,0 +1,106 @@
+{
+  "SessionStart": {
+    "session_id": "str",
+    "transcript_path": "str",
+    "cwd": "str",
+    "scratchpad_dir": "str",
+    "hook_event_name": "str",
+    "source": "str",
+    "model": "str"
+  },
+  "UserPromptSubmit": {
+    "session_id": "str",
+    "transcript_path": "str",
+    "cwd": "str",
+    "scratchpad_dir": "str",
+    "prompt_id": "str",
+    "permission_mode": "str",
+    "hook_event_name": "str",
+    "prompt": "str"
+  },
+  "PreToolUse": {
+    "session_id": "str",
+    "transcript_path": "str",
+    "cwd": "str",
+    "scratchpad_dir": "str",
+    "prompt_id": "str",
+    "permission_mode": "str",
+    "effort": "dict",
+    "hook_event_name": "str",
+    "tool_name": "str",
+    "tool_input": "dict",
+    "tool_use_id": "str"
+  },
+  "PostToolUse": {
+    "session_id": "str",
+    "transcript_path": "str",
+    "cwd": "str",
+    "scratchpad_dir": "str",
+    "prompt_id": "str",
+    "permission_mode": "str",
+    "effort": "dict",
+    "hook_event_name": "str",
+    "tool_name": "str",
+    "tool_input": "dict",
+    "tool_response": "dict",
+    "tool_use_id": "str",
+    "duration_ms": "int"
+  },
+  "PostToolBatch": {
+    "session_id": "str",
+    "transcript_path": "str",
+    "cwd": "str",
+    "scratchpad_dir": "str",
+    "prompt_id": "str",
+    "permission_mode": "str",
+    "effort": "dict",
+    "hook_event_name": "str",
+    "tool_calls": "list"
+  },
+  "Stop": {
+    "session_id": "str",
+    "transcript_path": "str",
+    "cwd": "str",
+    "scratchpad_dir": "str",
+    "prompt_id": "str",
+    "permission_mode": "str",
+    "effort": "dict",
+    "hook_event_name": "str",
+    "stop_hook_active": "bool",
+    "last_assistant_message": "str",
+    "background_tasks": "list",
+    "session_crons": "list"
+  },
+  "MessageDisplay": {
+    "session_id": "str",
+    "transcript_path": "str",
+    "cwd": "str",
+    "scratchpad_dir": "str",
+    "prompt_id": "str",
+    "hook_event_name": "str",
+    "turn_id": "str",
+    "message_id": "str",
+    "index": "int",
+    "final": "bool",
+    "delta": "str"
+  },
+  "Notification": {
+    "session_id": "str",
+    "transcript_path": "str",
+    "cwd": "str",
+    "scratchpad_dir": "str",
+    "prompt_id": "str",
+    "hook_event_name": "str",
+    "message": "str",
+    "notification_type": "str"
+  },
+  "SessionEnd": {
+    "session_id": "str",
+    "transcript_path": "str",
+    "cwd": "str",
+    "scratchpad_dir": "str",
+    "prompt_id": "str",
+    "hook_event_name": "str",
+    "reason": "str"
+  }
+}
