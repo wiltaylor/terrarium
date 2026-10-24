@@ -3,7 +3,7 @@
 Terrarium wraps AI coding harnesses (Claude Code, Codex, Copilot CLI) so that
 one API, one CLI, one dashboard, and one status model apply to all of them.
 
-Status: draft v0.13, 2026-10-24. Nothing is built yet.
+Status: draft v0.14, 2026-10-24. Phases 0–2 largely built; see README.md for current state.
 
 ---
 
@@ -182,7 +182,7 @@ Status rules:
 ```
 
 Everything above runs inside **one Docker container**. The image contains the
-harness binaries (`claude`, `codex`, `copilot`, `pi`), Node 20.19+, the `copilot-custom-system-prompt` npm package,
+harness binaries (`claude`, `codex`, `copilot`, and `pi` from `@earendil-works/pi-coding-agent`), Node 22 (22.19+), the `copilot-custom-system-prompt` npm package,
 Rust-built Terrarium binaries, `bwrap`, and `ssh`. No Docker client and no vmlab: those run on outside hosts.
 On first start the entrypoint runs `copilot-custom-system-prompt install` so
 the extension lands in the Copilot home on the auth volume. On an image
@@ -190,7 +190,7 @@ upgrade it runs again with `--force`. The container mounts:
 
 | Mount | Purpose |
 |---|---|
-| `./config/claude`, `./config/codex`, `./config/copilot`, `./config/pi` bind-mounted under `/auth` | One host directory per harness home, so you can edit settings, hooks, and extensions from outside the container with your normal editor. Log in once from the dashboard's Subscriptions page (§16.1), or with `docker exec -it terrarium claude auth login` and the others. See §23. |
+| `./config/claude`, `./config/codex`, `./config/copilot`, `./config/pi` bind-mounted under `/auth` | One host directory per harness home, so you can edit settings, hooks, and extensions from outside the container with your normal editor. Log in once from the dashboard's Subscriptions page (§16.1), or with `docker compose exec terrarium claude auth login` and the others. See §23. |
 | `./state` bind-mounted at `/state` | SQLite, per-agent workspaces and logs, artifacts, credentials. |
 | `~/.ssh` or a key volume (optional) | For `ssh` targets. |
 | `/var/run/docker.sock` (optional) | Only for the sibling-container sandbox fallback (§11). Never for targets. |
@@ -1246,6 +1246,25 @@ dashboard.
 **Phase 6 — Polish.** Mail and event views. Fleet definition file that
 declares many agents and targets at once. Sibling-container sandbox fallback.
 
+### Build status (2026-10-24)
+
+From README.md and the tree. "Done" means built and in the tree; the
+end-to-end scenarios of each phase are not yet scripted (no `spikes/e2e/`).
+
+| Phase | Done | In flight or not started |
+|---|---|---|
+| 0 | Claude Code spikes; facts in `docs/compat.md`. | Codex, Copilot, and pi spikes (`spikes/codex/`, `spikes/copilot/`, `spikes/pi/`). Login and usage-probe spikes are not wired. |
+| 1 | Container, justfile, compose, `terrariumd` with SQLite and the API, Claude adapter, operator CLI, dashboard with agents and xterm.js terminals. | — |
+| 2 | Projects, `bwrap` sandbox (verified outside Docker), agent mode of the CLI with policy, mailbox with pull and push, built-in prompt template. | Repo clone on agent create (repo records exist; clone code in progress). `bwrap` inside Docker not fully verified. |
+| 2b, 2c | Board and memory graph: tables, rules, CLI, dashboard views. | — |
+| 2d | Project inboxes, roles, `terrarium admin`, audit log. | Project-lead and system-lead templates are in `prompts/` but not yet tried end to end. |
+| 2e | Wiki, artifacts with the separate serving origin, versions with review. | — |
+| 2f | — | Subscriptions and usage: no `/api/subscriptions`; dashboard pages use mock data. |
+| 3 | — | Codex, Copilot, and pi adapters are flag tables only. `just ci::compat` is not built. |
+| 4 | A restart resumes the same session. The supervisor has restart policies with backoff and crash-loop detection. | Runners that outlive the daemon, reconcile on start, recap turn. |
+| 5 | `terrarium-host` builds. | Dial-in to the daemon, executors, targets; `exec`, `shell`, and `cp` exit 2. |
+| 6 | — | Not started. |
+
 ---
 
 ## 21. Risks
@@ -1256,6 +1275,7 @@ declares many agents and targets at once. Sibling-container sandbox fallback.
 | Hooks do not fire or change shape | Fall back to PTY silence heuristics. Pin versions. Compatibility suite. |
 | `bwrap` blocked by Docker seccomp | Document the required `--security-opt`. Sibling-container fallback. |
 | Shared harness home under concurrent writers | Normal for all three harnesses. Verify in Phase 0 under load. |
+| Shared Claude home: `history.jsonl` and `sessions/<pid>.json` are written by every agent | Per-agent overlays (`sessions/` done; `history.jsonl` pending). |
 | Agent-to-agent prompt injection | Mail is untrusted. Push only a pointer, not the body. Delimit on read. Say so in the prompt. |
 | Runaway cost with yolo and `always` restart | Per-agent turn and time budgets. Crash-loop detection. Dashboard shows turn counts. |
 | Yolo agent escapes through `terrarium exec` | Policy limits targets per agent. Ephemeral targets by default for risky work. |
@@ -1320,7 +1340,7 @@ declares many agents and targets at once. Sibling-container sandbox fallback.
 terrarium/
   justfile                      entry point: main, exports, mod declarations, aggregates
   .just/
-    shared.just                 require-* helpers (docker, cargo, node, just)
+    shared.just                 require-* helpers (docker, cargo, node, just, uv, ssh)
     ci/mod.just                 the merge bar: check = fmt-check + lint + test + dashboard-check
     docker/mod.just             image build, compose up/down/logs/shell, volume init
     daemon/mod.just             cargo build/run/test for terrariumd and the CLI
@@ -1332,6 +1352,7 @@ terrarium/
     terrarium-core/             domain, events, adapter trait, executor protocol
     terrariumd/                 daemon, API, supervisor, embedded dashboard
     terrarium/                  CLI, operator and agent modes
+    terrarium-runner/           one harness in a PTY: screen, logs, hook socket, status
     terrarium-host/             host agent
     adapters/{claude,codex,copilot,pi}/
   dashboard/                    SolidJS + Vite
@@ -1339,15 +1360,20 @@ terrarium/
     Dockerfile                  multi-stage, see 23.3
     entrypoint.sh               volume init, extension install, exec terrariumd
     seccomp-bwrap.json          Docker seccomp profile that permits user namespaces
+    seccomp-bwrap.README.md     what the profile changes, and why
   compose.yaml
   .env.example                  ports, token, UID/GID
   config/                       bind-mounted harness homes (gitignored, except README)
     claude/  codex/  copilot/  pi/
   state/                        bind-mounted daemon state (gitignored)
   prompts/                      system prompt templates, mounted read-only
+  projects/  agents/  targets/  subscriptions/
+                                definition files, bind-mounted under /etc/terrarium (§23.4);
+                                `just docker::volumes-init` creates them
   docs/
-    PLAN.md  compat.md  decisions/
-  spikes/
+    PLAN.md  compat.md  cli.md  api.md  agent-rpc.md  runner.md
+    decisions/                  planned (§24 step 4), not yet written
+  spikes/                       Phase 0 scripts and captures: claude/ codex/ copilot/ pi/
 ```
 
 ### 23.2 justfile
@@ -1404,12 +1430,12 @@ Recipes the modules provide (names, not bodies):
 
 | Module | Recipes |
 |---|---|
-| `ci` | `check`, `fmt-check`, `lint` (clippy, `-D warnings`), `test`, `dashboard-check` (typecheck, lint, unit tests), `compat` (adapter compatibility suite against pinned harness versions; excluded from `check` because it needs logins, and the doc comment says so) |
+| `ci` | `check`, `fmt-check`, `lint` (clippy, `-D warnings`), `test`, `dashboard-check` (typecheck, lint, and the dashboard unit tests: `npm run check`, then `npm run test`), `compat` (adapter compatibility suite against pinned harness versions; excluded from `check` because it needs logins, and the doc comment says so) |
 | `docker` | `image-build`, `up`, `down`, `restart`, `logs`, `shell` (exec into the container as the terrarium user), `volumes-init` (creates `config/*` and `state/` with the right ownership), `config-edit harness` (opens `config/<harness>` in `$EDITOR`), `image-push tag` |
 | `daemon` | `build`, `run` (local, outside Docker, for fast iteration), `test`, `cli args` (runs the operator CLI against a running daemon) |
 | `dashboard` | `install`, `dev` (Vite dev server proxying to the daemon API), `build`, `test`, `check` |
 | `host` | `build` (static musl), `package`, `install host` (scp binary and unit to a host over ssh, enable the service), `token host` (mints a host agent token) |
-| `spikes` | `login harness`, `bwrap-check`, `hooks-capture harness`, `usage-probe provider`, `compat-matrix` (regenerates `docs/compat.md` from spike results) |
+| `spikes` | `bwrap-check`, `claude-auth-check`, `claude-bwrap-check`, `claude-detector-check`, `claude-prompt-check *variant`, `claude-session-check`, `claude-sources-check`, `claude-typing-check`, `claude-yolo-check *variants`, `claude-yolo-root-check`, `hooks-capture harness idle_s='70'` (only claude has it), and three that are not wired yet: `login harness`, `usage-probe provider`, `compat-matrix` (`docs/compat.md` is written by hand from the captures) |
 
 ### 23.3 Dockerfile
 
@@ -1421,10 +1447,11 @@ Multi-stage, one image:
 2. `node` stage: `npm ci && npm run build` for the dashboard; the output is
    embedded into `terrariumd` at build time with `rust-embed`, so the Rust
    stage depends on it.
-3. Runtime stage, Debian slim: Node 20.19+, `bubblewrap`, `git`, `openssh-
+3. Runtime stage, Debian slim: Node 22 (22.19+, which pi needs), `bubblewrap`, `git`, `openssh-
    client`, `ca-certificates`, and the harnesses installed with pinned
    versions: `@anthropic-ai/claude-code`, `@openai/codex`, `@github/copilot`,
-   `@mariozechner/pi-coding-agent`, plus `copilot-custom-system-prompt`.
+   `@earendil-works/pi-coding-agent` (pi's package after `@mariozechner/pi-coding-agent` 0.73.1),
+   plus `copilot-custom-system-prompt`.
    A non-root user `terrarium` whose UID and GID are build args, so files in
    the bind mounts are owned by you on the host. `HOME=/home/terrarium`, with
    `~/.claude`, `~/.codex`, `~/.copilot`, `~/.pi/agent` as symlinks into
@@ -1469,10 +1496,17 @@ services:
     security_opt:
       - seccomp:docker/seccomp-bwrap.json   # user namespaces for bwrap (§11)
       - apparmor:unconfined
+      - systempaths=unconfined              # bwrap --proc needs an unmasked /proc
     healthcheck:
       test: ["CMD", "terrarium", "daemon", "status"]
       interval: 30s
 ```
+
+The seccomp profile alone is not enough for `bwrap`. Docker masks paths
+under `/proc` with bind mounts, and the kernel then refuses a new procfs mount
+in a user namespace, so `bwrap --proc /proc` fails. `systempaths=unconfined`
+removes the masks without extra capabilities (§11).
+`docker/seccomp-bwrap.README.md` lists what the profile changes and why.
 
 Why bind mounts and not named volumes: you asked to reach and edit harness
 settings from outside. With `./config/<harness>` on the host, `config/claude/
