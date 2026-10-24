@@ -1140,3 +1140,77 @@ th {
   background: var(--info-soft);
   color: var(--info);
 }
+
+/* Spend: tokens per day */
+.day-bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
+  height: 120px;
+  overflow-x: auto;
+}
+.day-bar {
+  flex: 1 0 22px;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 2px;
+}
+.day-bar .bar-fill {
+  width: 100%;
+  min-height: 1px;
+  border-radius: 3px 3px 0 0;
+}
+
+/* Quota banner (PLAN §16.2) */
+.quota-banner {
+  margin: 0 0 12px;
+}
+.quota-alert {
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--warn);
+  background: var(--warn-soft);
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.quota-alert.exhausted {
+  border-color: var(--danger);
+  background: var(--danger-soft);
+}
+
+/* Self report: the agent's own word, apart from the runner status */
+.self-report {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border: 1px dashed var(--border);
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.self-report strong {
+  color: var(--text);
+  font-weight: 600;
+}
+.event-row.self-report-row .chip {
+  border-style: dashed;
+}
+
+/* Host token: shown once */
+.token-once {
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+  word-break: break-all;
+}
+
+.mock-only-foot {
+  margin-top: 18px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border);
+}

@@ -118,15 +118,39 @@ checks the shapes that differ from PLAN §17.
 `stores/events.ts` holds the one firehose socket. `createWsEventStream`
 reconnects with backoff (0.5 s, doubling to 15 s, with jitter) and resumes
 with `?since=<last seq>`, so a drop loses no event and a repeated frame is
-dropped. The first connect has no `since`, so the daemon sends the whole log
-as a backlog; the agents store uses it for the last event of each agent.
+dropped. Before the first connect, the store asks `GET /api/events/latest`.
+When the daemon has it, the first connect uses `since = latest - 300`: the
+backlog is the last 300 events only. When the daemon does not have it, the
+first connect has no `since`, and the daemon sends the whole log. The agents
+store uses the backlog for the last event of each agent.
 While the socket is down, the layout shows a **Disconnected** strip with a
 **Reconnect now** button.
 
-Every view listens through `events.on(...)`: agent status badges and the
-current card (`applyAgentEvent`), the board (`card` and `board` events), the
-mail and inbox counts in the sidebar (`stores/unread.ts`), the home queue,
-the Event log, and the agent's Events tab.
+Every view listens through `events.on(...)`: agent status badges, the
+current card, and the self-report (`applyAgentEvent`), the board (`card` and
+`board` events), the mail and inbox counts in the sidebar
+(`stores/unread.ts`), the quota banner and the hold badges
+(`stores/quota.ts`), the subscription list (`quota.*` events) and the detect
+banner (`subscription.offer`), the home queue and usage strip, the Event
+log, and the agent's Events tab.
+
+## Quota alerts and holds
+
+`stores/quota.ts` keeps the state of docs/api.md §16.6 from the event
+stream. The logic is pure: `applyQuotaEvent`, `activeAlerts`, `holdsFor`.
+
+- `quota.alert` shows a banner at the top of each page, one line for each
+  window. `exhausted` replaces `alert`. The operator can dismiss a line. A
+  new level or a new reset period shows it again.
+- `quota.sample` removes an alert when its window reads under `alert_at`.
+- `quota.blocked` puts a **quota hold** badge on the agent (agents grid,
+  board, agent page). `quota.resumed` removes it.
+- The agent page also reads `GET /api/usage/me?agent=`, for holds that are
+  older than the event backlog.
+
+A `self_report` event is the agent's own word (`terrarium status set`). The
+agent cards and the agent page show it as **says ...**, apart from the runner
+status badge. It does not change the runner status.
 
 The terminal reconnects with backoff when its socket drops. It reconnects at
 once when the agent starts again. The daemon's first frame after a connect is
@@ -134,7 +158,8 @@ a fresh snapshot of the screen; the terminal clears itself before it draws.
 
 ## Socket protocols
 
-PTY sockets (`/api/agents/{id}/pty` and `/api/subscriptions/login/{id}/pty`):
+PTY sockets (`/api/agents/{id}/pty`, `/api/subscriptions/login/{id}/pty`,
+and `/api/targets/{name}/sessions/{id}/ws`):
 
 - The server sends raw terminal output. Binary frames are preferred.
 - The client sends JSON text frames only:
@@ -152,12 +177,12 @@ A `status` event carries `data.status`. A `card` event carries `data.card_id`.
 
 | Route | View | API calls |
 |---|---|---|
-| `/` | Home: usage strip, waiting-on-you queue | `GET /api/subscriptions`, per project: `versions?status=in_review`, `wiki?status=ready_for_review`, `board`, `inbox?unread=true` |
+| `/` | Home: usage strip, waiting-on-you queue | `GET /api/subscriptions`, `GET /api/usage?bucket=hour&group=subscription`; tile detail: `GET /api/usage?subscription=&group=project\|agent\|model`, `GET .../quota`; per project: `versions?status=in_review`, `wiki?status=ready_for_review`, `board`, `inbox?unread=true` |
 | `/projects` | Projects: list, create | `GET`, `POST /api/projects` |
 | `/p/:project/settings` | Project edit and delete, Repos panel | `GET`, `PATCH`, `DELETE /api/projects/{name}?confirm=true`, `GET`, `POST .../repos`, `POST /api/repos/{id}/checkout` |
 | `/agents` | Agents grid, new agent | `GET`, `POST /api/agents`, events socket |
-| `/agents/:id` | Agent detail: edit, delete, roles, terminal, events, sessions | `GET`, `PATCH`, `DELETE /api/agents/{id}`, `start/stop/restart/send`, `GET`, `PUT .../roles`, `WS .../pty`, `GET .../events?since=`, `GET .../sessions` |
-| `/subscriptions` | Subscriptions and the add wizard | PLAN §16 (not in the daemon yet) |
+| `/agents/:id` | Agent detail: edit, delete, roles, quota, terminal, events, sessions | `GET`, `PATCH`, `DELETE /api/agents/{id}`, `start/stop/restart/send`, `GET`, `PUT .../roles`, `GET /api/usage/me?agent=`, `WS .../pty`, `GET .../events?since=`, `GET .../sessions` |
+| `/subscriptions` | Subscriptions, detect banner, add wizard | `GET`, `POST`, `DELETE /api/subscriptions[/{name}]`, `GET .../detect`, `POST .../{name}/probe\|verify\|logout\|api-key`, `POST /api/subscriptions/login`, `GET`, `DELETE .../login/{id}`, `POST .../login/{id}/input`, `WS .../login/{id}/pty` |
 | `/mail` | Threads, compose and reply as operator | `GET /api/mail`, `POST /api/mail`, `POST /api/mail/{id}/read`, `POST /api/mail/{id}/reply` |
 | `/p/:project/inbox` | Project inbox, make card | `GET .../inbox`, `POST .../inbox/{id}/read`, `POST .../inbox/{id}/reply`, `POST .../cards` (`from_mail`) |
 | `/p/:project/board` | Board, drag and drop, card drawer | `GET .../board`, `PATCH /api/cards/{id}`, `POST .../comments`, `GET .../events`, `DELETE /api/cards/{id}` |
@@ -165,8 +190,9 @@ A `status` event carries `data.status`. A `card` event carries `data.card_id`.
 | `/p/:project/wiki/*path` | Page tree, render, edit, history, create | `GET .../wiki`, `GET`, `PUT /api/wiki/{project/path}`, `revisions`, `diff`, `restore`, `backlinks`, `review` |
 | `/p/:project/artifacts/:id?` | Artifact viewer, upload, delete | `GET .../artifacts`, `.../artifacts/usage`, `POST .../artifacts` (multipart), `POST /api/artifacts/{id}/url` |
 | `/p/:project/versions/:id?` | Version timeline, review, new version | `GET`, `POST .../versions`, `POST /api/versions/{id}/submit|approve|reject|release`, `compare` |
-| `/p/:project/spend` | Usage by agent, model, and subscription | `GET /api/usage` (PLAN §16, mock only) |
-| `/targets` | Targets and host agents | `GET /api/targets`, `GET /api/hosts`; target actions are not in the daemon yet |
+| `/p/:project/spend` | Usage by day, agent, model, and subscription | `GET /api/usage?project=&bucket=day&group=agent\|model\|subscription` |
+| `/targets` | Targets, lifecycle, exec console | `GET /api/targets`, `POST /api/targets/{name}/up\|down\|snapshot\|restore`, `POST .../exec`, `WS .../sessions/{id}/ws`, `DELETE .../sessions/{id}` (new API, not in docs/api.md yet) |
+| `/hosts` | Host agents: status, capabilities, add with a one-time token, revoke | `GET`, `POST /api/hosts`, `DELETE /api/hosts/{name}` (new API, not in docs/api.md yet) |
 | `/events` | Event log with history | `GET /api/events?since=&kind=&project=&agent=`, events socket |
 | `/audit` | Audit log | `GET /api/audit?actor=&action=&project=` |
 
@@ -174,9 +200,17 @@ Artifact upload sends a multipart form: `file`, `name`, `kind`, and
 `attach_kind` with `attach_ref`. A folder goes up as one `bundle`: the
 browser builds a tar (`lib/tar.ts`) from the folder pick.
 
+The Targets and Hosts pages end with a footer that names the calls that are
+new or mock-only. A daemon without them answers "Not available yet".
+
 ## Security notes
 
 - Wiki pages come from agents. `lib/markdown.ts` escapes raw HTML and allows
   only safe URL schemes. Tests cover this.
+- The API-key form posts the key once (`POST .../api-key`) and clears the
+  field. No endpoint returns a key. A login code goes to `.../input` and the
+  daemon types it into the PTY; the page never shows it again.
+- A host token shows once, in the add-host dialog only. Closing the dialog
+  drops it.
 - HTML artifacts and bundles render in `<iframe sandbox="allow-scripts">`
   without `allow-same-origin`. In real mode they load from the artifact origin.

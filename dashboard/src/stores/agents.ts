@@ -40,6 +40,10 @@ export function applyAgentEvent(agents: Agent[], e: AgentEvent): Agent[] {
     delete a.turn_started_at;
   }
   if (e.kind === "exit") a.status = "error";
+  if (e.kind === "self_report") {
+    // The agent's own word. It does not change the runner status (docs/api.md §16.6).
+    a.self_report = { status: String(e.data?.status ?? ""), at: e.at, ...(typeof e.data?.note === "string" && e.data.note ? { note: e.data.note } : {}) };
+  }
   if (e.kind === "card") {
     // The `agent` of a card event is the assignee (docs/api.md §9).
     const card = typeof e.data?.card_id === "string" ? e.data.card_id : e.card;
@@ -67,7 +71,7 @@ export function createAgentsStore(api: Pick<Api, "agents">, events?: Pick<Events
       // Keep the client-side fields (turn age, last event) across a refresh.
       const merged = list.map((a) => {
         const old = state.agents.find((x) => x.id === a.id);
-        return old ? { ...a, last_event: old.last_event, turn_started_at: a.status === "working" ? old.turn_started_at : undefined } : a;
+        return old ? { ...a, last_event: old.last_event, self_report: old.self_report, turn_started_at: a.status === "working" ? old.turn_started_at : undefined } : a;
       });
       // Events that came before the list (the socket backlog) apply now, oldest first.
       const replayed = (events?.recent?.() ?? []).slice().reverse().reduce(applyAgentEvent, merged);
@@ -108,7 +112,7 @@ export function createAgentsStore(api: Pick<Api, "agents">, events?: Pick<Events
     upsert(agent: Agent) {
       const i = state.agents.findIndex((a) => a.id === agent.id);
       if (i < 0) setState("agents", (list) => [...list, agent]);
-      else setState("agents", i, (old) => ({ ...agent, last_event: old.last_event, turn_started_at: old.turn_started_at }));
+      else setState("agents", i, (old) => ({ ...agent, last_event: old.last_event, self_report: old.self_report, turn_started_at: old.turn_started_at }));
     },
     drop(id: string) {
       setState("agents", (list) => list.filter((a) => a.id !== id));

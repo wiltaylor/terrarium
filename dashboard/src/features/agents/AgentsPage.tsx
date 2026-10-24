@@ -1,5 +1,7 @@
 import { A, useNavigate } from "@solidjs/router";
 import { createSignal, For, Show } from "solid-js";
+import { HoldBadge } from "../../components/QuotaBanner";
+import { SelfReport } from "../../components/SelfReport";
 import { StatusBadge } from "../../components/StatusBadge";
 import { Empty, ErrorBanner, PageHead, useNow } from "../../components/ui";
 import { AGENT_STATUSES, type Agent, type AgentStatus } from "../../api/types";
@@ -23,8 +25,12 @@ export function AgentCard(props: { agent: Agent; now: number }) {
         <A class="name" href={`/agents/${encodeURIComponent(a().id)}`}>
           {a().name}
         </A>
-        <StatusBadge status={a().status} />
+        <span class="row" style={{ gap: "4px" }}>
+          <HoldBadge agentId={a().id} now={props.now} />
+          <StatusBadge status={a().status} />
+        </span>
       </div>
+      <SelfReport report={a().self_report} now={props.now} />
       <div class="row">
         <span class="chip">{a().harness}</span>
         <span class="chip">{a().project}</span>

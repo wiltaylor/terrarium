@@ -11,10 +11,10 @@ export function EventList(props: { events: AgentEvent[]; showAgent?: boolean; li
       <div class="event-list">
         <For each={shown()}>
           {(e) => (
-            <div class="event-row">
+            <div class={`event-row${e.kind === "self_report" ? " self-report-row" : ""}`} title={e.kind === "self_report" ? "The agent's own word (terrarium status set). It does not change the runner status." : undefined}>
               <span class="muted mono small">{time(e.at)}</span>
               <span class="kind">
-                <span class="chip">{humanize(e.kind)}</span>
+                <span class={`chip${e.kind === "quota.alert" || e.kind === "quota.blocked" ? " warn" : e.kind === "self_report" ? " info" : ""}`}>{e.kind === "self_report" ? "says" : humanize(e.kind)}</span>
               </span>
               <span class="ellipsis" title={e.summary}>
                 <Show when={props.showAgent && e.agent}>

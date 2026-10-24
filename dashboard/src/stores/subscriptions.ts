@@ -1,16 +1,26 @@
-// Subscriptions with their latest quota windows, refreshed on a timer.
+// Subscriptions with their latest quota windows, and the logins the daemon
+// found with no subscription (docs/api.md §16). Refreshed on a timer and on
+// the events that change them.
 
 import { createSignal } from "solid-js";
 import type { Api } from "../api/client";
 import { isMissingEndpoint } from "../api/http";
-import type { Subscription } from "../api/types";
+import type { AgentEvent, DetectedLogin, Subscription } from "../api/types";
+import type { EventsStore } from "./events";
 
-export function createSubscriptionsStore(api: Pick<Api, "subscriptions">) {
+/** Events after which the list is stale. */
+export const REFRESH_KINDS = ["quota.sample", "quota.blocked", "quota.resumed"];
+
+export function createSubscriptionsStore(api: Pick<Api, "subscriptions">, events?: Pick<EventsStore, "on">) {
   const [list, setList] = createSignal<Subscription[]>([]);
   const [error, setError] = createSignal<unknown>(null);
-  /** The daemon has no subscription endpoints yet (PLAN §16). */
+  const [detected, setDetected] = createSignal<DetectedLogin[]>([]);
+  const [detectError, setDetectError] = createSignal<unknown>(null);
+  /** The daemon has no subscription endpoints. */
   const [missing, setMissing] = createSignal(false);
+  const [loaded, setLoaded] = createSignal(false);
   let timer: ReturnType<typeof setInterval> | undefined;
+  let soon: ReturnType<typeof setTimeout> | undefined;
 
   const refresh = async () => {
     try {
@@ -23,14 +33,41 @@ export function createSubscriptionsStore(api: Pick<Api, "subscriptions">) {
         setMissing(true);
         clearInterval(timer);
       }
+    } finally {
+      setLoaded(true);
     }
   };
+
+  /** `GET /api/subscriptions/detect` runs the harness status commands: call it on demand, not on a timer. */
+  const detect = async () => {
+    try {
+      setDetected(await api.subscriptions.detect());
+      setDetectError(null);
+    } catch (e) {
+      setDetectError(e);
+    }
+  };
+
+  const refreshSoon = (ms = 400) => {
+    clearTimeout(soon);
+    soon = setTimeout(() => void refresh(), ms);
+  };
+
+  const off = events?.on((e: AgentEvent) => {
+    if (e.kind === "subscription.offer") void detect();
+    if (REFRESH_KINDS.includes(e.kind)) refreshSoon();
+  });
 
   return {
     list,
     error,
     missing,
+    loaded,
+    detected,
+    detectError,
     refresh,
+    detect,
+    byName: (name?: string) => (name ? list().find((s) => s.name === name) : undefined),
     /** Poll every `ms`. Safe to call twice. */
     poll(ms = 15_000) {
       if (timer) return;
@@ -39,10 +76,15 @@ export function createSubscriptionsStore(api: Pick<Api, "subscriptions">) {
     },
     stop() {
       clearInterval(timer);
+      clearTimeout(soon);
       timer = undefined;
+      off?.();
     },
     replace(s: Subscription) {
       setList((prev) => (prev.some((x) => x.name === s.name) ? prev.map((x) => (x.name === s.name ? s : x)) : [...prev, s]));
+    },
+    drop(name: string) {
+      setList((prev) => prev.filter((x) => x.name !== name));
     },
   };
 }

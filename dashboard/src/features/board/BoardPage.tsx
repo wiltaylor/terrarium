@@ -1,6 +1,7 @@
 import { useParams, useSearchParams } from "@solidjs/router";
 import { createEffect, createSignal, For, on, onCleanup, Show } from "solid-js";
 import { createPagedList } from "../../components/paged";
+import { HoldBadge } from "../../components/QuotaBanner";
 import { StatusBadge } from "../../components/StatusBadge";
 import { ConfirmButton, Drawer, ErrorBanner, LoadMore, Modal, PageHead } from "../../components/ui";
 import type { Card } from "../../api/types";
@@ -232,7 +233,14 @@ function KCard(props: {
       <Show when={props.card.assignee}>
         <div class="spread small">
           <span>{owner()?.name ?? props.card.assignee_name ?? props.card.assignee}</span>
-          <Show when={owner()}>{(a) => <StatusBadge status={a().status} />}</Show>
+          <Show when={owner()}>
+            {(a) => (
+              <>
+                <HoldBadge agentId={a().id} />
+                <StatusBadge status={a().status} />
+              </>
+            )}
+          </Show>
         </div>
       </Show>
     </article>

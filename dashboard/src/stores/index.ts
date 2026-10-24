@@ -6,6 +6,7 @@ import { createAgentsStore } from "./agents";
 import { createAuthStore } from "./auth";
 import { createEventsStore } from "./events";
 import { createProjectsStore } from "./projects";
+import { createQuotaStore } from "./quota";
 import { createSubscriptionsStore } from "./subscriptions";
 import { createThemeStore } from "./theme";
 import { createUnreadStore } from "./unread";
@@ -23,7 +24,8 @@ export const api = createApi(auth);
 export const events = createEventsStore(api);
 export const projects = createProjectsStore(api, storage);
 export const agents = createAgentsStore(api, events);
-export const subscriptions = createSubscriptionsStore(api);
+export const subscriptions = createSubscriptionsStore(api, events);
+export const quota = createQuotaStore(events);
 export const unread = createUnreadStore(api, events);
 
 export { createBoardStore } from "./board";

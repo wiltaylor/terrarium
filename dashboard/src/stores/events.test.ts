@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createRoot } from "solid-js";
 import { createWsEventStream, type EventSocket } from "../api/sockets";
 import type { AgentEvent } from "../api/types";
-import { createEventsStore, pushRecent } from "./events";
+import { createEventsStore, firstSince, pushRecent, RECENT_LIMIT } from "./events";
 
 const ev = (seq: number): AgentEvent => ({ seq, id: `E${seq}`, at: "", kind: "status", summary: "", data: {} });
 
@@ -28,28 +28,47 @@ describe("pushRecent", () => {
 });
 
 describe("createEventsStore", () => {
-  it("shows disconnected after a drop, resumes with since, and fans out events", () => {
+  const fakeApi = (latest: number | null, sockets: Sock[], timers: (() => void)[]) => ({
+    events: {
+      stream: (o: { since?: number } = {}) =>
+        createWsEventStream((s) => `ws://x${s === undefined ? "" : `?since=${s}`}`, {
+          since: o.since,
+          makeSocket: (u) => {
+            const s = new Sock(u);
+            sockets.push(s);
+            return s;
+          },
+          setTimer: (fn) => (timers.push(fn), timers.length),
+          clearTimer: () => {},
+        }),
+      history: async () => ({ items: [], next: null }),
+      latest: async () => latest,
+    },
+  });
+  const flush = () => new Promise((r) => setTimeout(r, 0));
+
+  it("starts after the newest events when the daemon has GET /api/events/latest", async () => {
+    expect(firstSince(null)).toBeUndefined();
+    expect(firstSince(50)).toBe(0);
+    expect(firstSince(1000, 300)).toBe(700);
+    const sockets: Sock[] = [];
+    const store = createRoot(() => createEventsStore(fakeApi(1000, sockets, [])));
+    store.start();
+    await flush();
+    expect(sockets[0]!.url).toBe(`ws://x?since=${1000 - RECENT_LIMIT}`);
+    store.stop();
+  });
+
+  it("shows disconnected after a drop, resumes with since, and fans out events", async () => {
     const sockets: Sock[] = [];
     const timers: (() => void)[] = [];
-    const api = {
-      events: {
-        stream: () =>
-          createWsEventStream((s) => `ws://x${s === undefined ? "" : `?since=${s}`}`, {
-            makeSocket: (u) => {
-              const s = new Sock(u);
-              sockets.push(s);
-              return s;
-            },
-            setTimer: (fn) => (timers.push(fn), timers.length),
-            clearTimer: () => {},
-          }),
-        history: async () => ({ items: [], next: null }),
-      },
-    };
-    createRoot((dispose) => {
+    const api = fakeApi(null, sockets, timers);
+    await createRoot(async (dispose) => {
       const store = createEventsStore(api);
       const got: number[] = [];
       store.on((e) => got.push(e.seq));
+      await flush();
+      expect(sockets[0]!.url).toBe("ws://x");
       expect(store.disconnected()).toBe(false);
       sockets[0]!.fire("open");
       sockets[0]!.fire("message", JSON.stringify(ev(7)));

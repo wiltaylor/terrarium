@@ -1,17 +1,21 @@
-// Spend for one project (PLAN §16.2): usage split by agent, by model, and by
-// agent and model. `GET /api/usage` is not in the daemon yet; the mock serves it.
+// Spend for one project (PLAN §16.2): local accounting split by agent, by
+// model, and by subscription, with a daily series.
+// `GET /api/usage?project=&group=agent|model|subscription&bucket=day` (docs/api.md §16.3).
 
 import { useParams } from "@solidjs/router";
 import { createResource, createSignal, For, Show } from "solid-js";
 import { Empty, ErrorBanner, PageHead } from "../../components/ui";
+import type { UsageGroup } from "../../api/types";
 import { compact } from "../../lib/format";
 import { api } from "../../stores";
-import { splitAgentModel, splitUsage, type SpendRow } from "./split";
+import { usageLabel } from "./labels";
+import { bucketStarts, tokenSeries, totalsByKey, type SpendRow } from "./split";
 
+const DAY = 86_400_000;
 const RANGES = [
-  { id: "24h", label: "Last 24 hours", hours: 24, bucket: "hour" },
-  { id: "7d", label: "Last 7 days", hours: 24 * 7, bucket: "day" },
-  { id: "30d", label: "Last 30 days", hours: 24 * 30, bucket: "day" },
+  { id: "1d", label: "Today and yesterday", days: 2 },
+  { id: "7d", label: "Last 7 days", days: 7 },
+  { id: "30d", label: "Last 30 days", days: 30 },
 ] as const;
 type RangeId = (typeof RANGES)[number]["id"];
 
@@ -30,6 +34,7 @@ function SpendTable(props: { title: string; rows: SpendRow[] }) {
                 <th>Input</th>
                 <th>Output</th>
                 <th>Cache</th>
+                <th>Responses</th>
                 <th>Turns</th>
               </tr>
             </thead>
@@ -49,6 +54,7 @@ function SpendTable(props: { title: string; rows: SpendRow[] }) {
                     <td class="mono small">{compact(r.input)}</td>
                     <td class="mono small">{compact(r.output)}</td>
                     <td class="mono small">{compact(r.cache)}</td>
+                    <td class="mono small">{r.messages}</td>
                     <td class="mono small">{r.turns}</td>
                   </tr>
                 )}
@@ -61,33 +67,62 @@ function SpendTable(props: { title: string; rows: SpendRow[] }) {
   );
 }
 
+function DailyBars(props: { days: string[]; values: number[] }) {
+  const max = () => Math.max(1, ...props.values);
+  return (
+    <section class="card-box">
+      <h3 style={{ "margin-top": 0 }}>By day (UTC)</h3>
+      <div class="day-bars" role="img" aria-label="Tokens per day">
+        <For each={props.days}>
+          {(d, i) => (
+            <div class="day-bar" title={`${d.slice(0, 10)}: ${props.values[i()]!.toLocaleString()} tokens`}>
+              <div class="bar-fill" style={{ height: `${(props.values[i()]! / max()) * 100}%` }} />
+              <span class="muted small">{d.slice(5, 10)}</span>
+            </div>
+          )}
+        </For>
+      </div>
+    </section>
+  );
+}
+
 export default function SpendPage() {
   const params = useParams<{ project: string }>();
-  const [range, setRange] = createSignal<RangeId>("24h");
+  const [range, setRange] = createSignal<RangeId>("7d");
+  const [tick, setTick] = createSignal(0);
+  const r = () => RANGES.find((x) => x.id === range())!;
+  const since = () => new Date(Math.floor(Date.now() / DAY) * DAY - (r().days - 1) * DAY).toISOString();
   const [usage] = createResource(
-    () => ({ project: params.project, r: RANGES.find((x) => x.id === range())! }),
-    ({ project, r }) => api.usage({ project, since: new Date(Date.now() - r.hours * 3600_000).toISOString(), bucket: r.bucket }),
+    () => ({ project: params.project, since: since(), t: tick() }),
+    async ({ project, since }) => {
+      const q = (group: UsageGroup) => api.usage.series({ project, since, bucket: "day", group });
+      const [agent, model, subscription] = await Promise.all([q("agent"), q("model"), q("subscription")]);
+      return { agent: agent!, model: model!, subscription: subscription! };
+    },
   );
-  const total = () => splitUsage(usage() ?? [], "subscription").reduce((n, r) => n + r.tokens, 0);
+  const days = () => bucketStarts(Date.parse(since()), Date.now(), "day");
+  const daily = () => tokenSeries(usage()?.subscription ?? [], days());
+  const total = () => daily().reduce((a, b) => a + b, 0);
 
   return (
     <>
       <PageHead title={`Spend · ${params.project}`}>
         <select value={range()} onChange={(e) => setRange(e.currentTarget.value as RangeId)} aria-label="Range">
-          <For each={RANGES}>{(r) => <option value={r.id}>{r.label}</option>}</For>
+          <For each={RANGES}>{(x) => <option value={x.id}>{x.label}</option>}</For>
         </select>
+        <button onClick={() => setTick((n) => n + 1)}>Refresh</button>
       </PageHead>
       <ErrorBanner error={usage.error} />
       <Show when={!usage.error}>
-        <Show when={usage()} fallback={<Empty>Loading…</Empty>}>
+        <Show when={usage.latest} fallback={<Empty>Loading…</Empty>}>
           <p class="muted">
-            {compact(total())} tokens in this range. Numbers come from local accounting of the harness session files (PLAN §16.2).
+            {compact(total())} tokens since {since().slice(0, 10)}. The numbers come from local accounting of the harness session files, by UTC day.
           </p>
           <div class="stack">
-            <SpendTable title="By agent" rows={splitUsage(usage() ?? [], "agent")} />
-            <SpendTable title="By model" rows={splitUsage(usage() ?? [], "model")} />
-            <SpendTable title="By agent and model" rows={splitAgentModel(usage() ?? [])} />
-            <SpendTable title="By subscription" rows={splitUsage(usage() ?? [], "subscription")} />
+            <DailyBars days={days()} values={daily()} />
+            <SpendTable title="By agent" rows={totalsByKey(usage.latest?.agent ?? [], usageLabel("agent"))} />
+            <SpendTable title="By model" rows={totalsByKey(usage.latest?.model ?? [])} />
+            <SpendTable title="By subscription" rows={totalsByKey(usage.latest?.subscription ?? [])} />
           </div>
         </Show>
       </Show>

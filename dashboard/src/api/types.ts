@@ -125,6 +125,8 @@ export interface Agent {
   turn_started_at?: string;
   /** Client-side: the last event seen for the agent. */
   last_event?: AgentEvent;
+  /** Client-side: the agent's last `self_report` (`terrarium status set`). Not the runner status. */
+  self_report?: { status: string; note?: string; at: string };
 }
 
 /** docs/api.md §6.3. */
@@ -140,7 +142,7 @@ export interface Session {
   current: boolean;
 }
 
-/** Event kinds of docs/api.md §9, then kinds that §14 to §16 will add. */
+/** Event kinds of docs/api.md §9 and §16.7. */
 export const EVENT_KINDS = [
   "status",
   "session_started",
@@ -179,8 +181,14 @@ export const EVENT_KINDS = [
   "version.approved",
   "version.rejected",
   "version.released",
-  // Planned (PLAN §16). A guessed name; the daemon does not emit it yet.
-  "subscription",
+  // docs/api.md §16.7.
+  "usage.sample",
+  "quota.sample",
+  "quota.alert",
+  "quota.blocked",
+  "quota.resumed",
+  "subscription.offer",
+  "self_report",
 ] as const;
 export type EventKind = (typeof EVENT_KINDS)[number];
 
@@ -638,54 +646,139 @@ export interface VersionCompare {
   pages: { id: string; path: string; from_rev?: number; to_rev: number }[];
 }
 
-// ----- Subscriptions and usage (§16) -----
+// ----- Subscriptions and usage (docs/api.md §16) -----
 
-export type SubscriptionStatus = "logged_in" | "expiring" | "expired" | "missing";
+/** `unknown`: not checked yet. */
+export type LoginStatus = "logged_in" | "expiring" | "expired" | "missing" | "unknown";
+/** `none`: no probe, or not run yet. */
+export type ProbeStatus = "ok" | "failed" | "none";
 
+/** The newest sample of one window (docs/api.md §16.1). */
 export interface QuotaWindow {
-  /** Window label, for example `5h`, `7d`, `monthly`. */
+  /** `5h`, `7d`, `7d_opus`, `<n>h`, `<n>d`, `monthly`, ... */
   window: string;
   used_pct: number;
-  resets_at: string;
+  resets_at?: string;
+  /** When the probe read it. */
+  at: string;
 }
 
+/** docs/api.md §16.1. */
 export interface Subscription {
   name: string;
   provider: string;
-  plan: string;
+  plan?: string;
   harnesses: Harness[];
-  /** Probe name, or null when only local accounting exists. */
-  probe: string | null;
+  probe?: string;
   alert_at: number;
-  status: SubscriptionStatus;
+  source: Source;
+  /** Set when an API key is stored: the env var that carries it. The key is never in the API. */
+  env_var?: string;
+  login_status: LoginStatus;
   verified_at?: string;
+  probe_status: ProbeStatus;
+  probe_error?: string;
+  last_probe_at?: string;
+  /** Stays when a probe fails. */
+  last_success_at?: string;
+  created_at: string;
+  updated_at: string;
   windows: QuotaWindow[];
-  /** Used percent of the busiest window, sampled hourly over 24 hours. */
-  history: number[];
-  last_poll_at?: string;
+  /** No probe: local accounting is the only number. */
+  local_estimate_only: boolean;
+  has_api_key: boolean;
+  /** Agents whose turns wait for a reset of this subscription. */
+  held_agents: number;
 }
 
-export interface DetectedLogin {
-  harness: Harness;
+/** `POST /api/subscriptions`, and the `suggested` definition of a detected login. */
+export interface SubscriptionDef {
+  name?: string;
   provider: string;
   plan?: string;
-  account?: string;
+  harnesses?: Harness[];
+  probe?: string;
+  alert_at?: number;
 }
 
-export type LoginKind = "claude" | "codex" | "copilot" | "pi_oauth" | "pi_api_key";
+export type NewSubscription = SubscriptionDef & { name: string };
 
+/** `GET /api/subscriptions/{name}/quota`: one sample, oldest first. */
+export interface QuotaSample {
+  subscription: string;
+  window: string;
+  used_pct: number;
+  resets_at?: string;
+  /** The provider's window object. */
+  raw?: unknown;
+  at: string;
+}
+
+/** `POST /api/subscriptions/{name}/probe`. A failed probe is still `200`. */
+export interface ProbeOutcome {
+  subscription: string;
+  probe_status: ProbeStatus;
+  error?: string;
+  windows: { window: string; used_pct: number; resets_at?: string; raw?: unknown }[];
+}
+
+/** A login check of one harness (and one pi provider). */
+export interface LoginCheck {
+  kind: LoginKind;
+  harness: Harness;
+  provider: string;
+  pi_provider?: string;
+  logged_in: boolean;
+  plan?: string;
+  detail?: string;
+}
+
+/** `POST /api/subscriptions/{name}/verify`. */
+export interface VerifyResult {
+  subscription: Subscription;
+  status: Partial<LoginCheck> & { logged_in: boolean };
+}
+
+/** `GET /api/subscriptions/detect`: a login that no subscription covers. */
+export interface DetectedLogin extends LoginCheck {
+  /** The subscription that covers it. The daemon leaves these out of the list. */
+  subscription?: string;
+  suggested: SubscriptionDef;
+}
+
+/** The kinds of the login wizard (docs/api.md §16.4). */
+export type LoginKind = "claude" | "codex" | "copilot" | "pi";
+export const LOGIN_KINDS: LoginKind[] = ["claude", "codex", "copilot", "pi"];
+
+export type LoginState = "starting" | "waiting" | "verifying" | "done" | "failed" | "cancelled" | "expired";
+
+/** A login session (docs/api.md §16.4). */
 export interface LoginSession {
   id: string;
   kind: LoginKind;
+  /** For `pi`: the provider. */
   provider?: string;
-  state: "starting" | "waiting_for_user" | "verifying" | "done" | "error";
+  state: LoginState;
   url?: string;
   device_code?: string;
-  error?: string;
-  /** Set when state is `done`. */
+  /** Set when `state` is `done`: the subscription made or updated. */
   subscription?: string;
+  started_at: string;
+  finished_at?: string;
+  error?: string;
+  /** True for `done`, `failed`, `cancelled`, and `expired`. */
+  done: boolean;
+  instructions: string;
 }
 
+/** `POST /api/subscriptions/login`. */
+export interface StartLogin {
+  kind: LoginKind;
+  provider?: string;
+  name?: string;
+}
+
+/** `POST /api/subscriptions/{name}/api-key`. Write-only: no endpoint returns the key. */
 export interface ApiKeyInput {
   provider: string;
   key: string;
@@ -693,30 +786,66 @@ export interface ApiKeyInput {
   models?: string[];
 }
 
+export type UsageGroup = "subscription" | "project" | "agent" | "model";
+
 export interface UsageQuery {
   subscription?: string;
   project?: string;
+  /** An agent key (docs/api.md §2.2). */
   agent?: string;
   model?: string;
+  /** RFC 3339. Default: 24 hours ago. */
   since?: string;
+  until?: string;
   bucket?: "hour" | "day";
+  group?: UsageGroup;
 }
 
-export interface UsageBucket {
-  at: string;
-  subscription: string;
-  project: string;
-  agent: string;
-  model: string;
+export interface UsageTotals {
   input_tokens: number;
   output_tokens: number;
-  cache_tokens: number;
+  cache_read: number;
+  cache_write: number;
+  /** API responses. */
+  messages: number;
+  /** Distinct turns. */
   turns: number;
 }
 
-// ----- Targets and hosts (§19) -----
+/** One point of `GET /api/usage`, oldest first. */
+export interface UsagePoint extends UsageTotals {
+  /** The start of the bucket. */
+  bucket: string;
+  /** The value of the `group` column when the series is split. For `agent` it is the agent ULID. */
+  key?: string;
+}
+
+/** A hold on an agent's new turns (docs/api.md §16.6). */
+export interface QuotaHold {
+  agent: string;
+  /** `quota:<subscription>` or `budget:project:<p>[/<sub>]`. */
+  cause: string;
+  until?: string;
+  reason: string;
+  /** False: the supervisor cannot hold turns, so the hold is advice only. */
+  enforced: boolean;
+  created_at?: string;
+}
+
+/** `GET /api/usage/me?agent=`. */
+export interface UsageMe {
+  agent: { id: string; name: string; project: string };
+  subscription?: Pick<Subscription, "name" | "provider" | "plan" | "probe_status" | "last_success_at" | "local_estimate_only" | "windows">;
+  today: { since: string; mine: UsageTotals; subscription?: UsageTotals; share_pct?: number };
+  holds: QuotaHold[];
+}
+
+// ----- Targets and hosts (PLAN §17, §19, docs/host-protocol.md) -----
+// Coded to the daemon's `api/hosts.rs` and `api/targets.rs`, which are new
+// and not yet in docs/api.md. The mock serves the same shapes.
 
 export type TargetKind = "host" | "ssh" | "docker" | "vmlab";
+export type TargetState = "up" | "down" | "starting" | "stopping" | "unknown";
 
 /** docs/api.md §4 `GET /api/targets`. */
 export interface Target {
@@ -729,22 +858,76 @@ export interface Target {
   address?: string;
   /** `global` or `project`. */
   scope?: "global" | "project";
-  state: "up" | "down" | "starting" | "stopping" | "unknown";
+  /** The state that the last lifecycle verb saw. */
+  state: TargetState;
+  state_at?: string | null;
   ephemeral: boolean;
   keep?: boolean;
   snapshot_before_task?: boolean;
   snapshots: string[];
+  source?: Source;
+  /** Whether the host agent is connected; `null` for `ssh`. */
+  host_online?: boolean | null;
+  /** Whether the caller may exec on it. */
+  usable?: boolean;
 }
 
+/** `POST /api/targets/{name}/exec`. `shell` opens a login shell in a PTY. */
+export interface ExecRequest {
+  cmd?: string[];
+  cwd?: string;
+  env?: Record<string, string>;
+  /** `true` (24x80) or a size. */
+  pty?: boolean | { rows: number; cols: number };
+  shell?: boolean;
+  timeout_secs?: number;
+}
+
+export interface ExecOpened {
+  session_id: string;
+  target: string;
+  kind: string;
+}
+
+/** `terrarium_core::protocol::ToolCapability`. */
+export interface ToolCapability {
+  present: boolean;
+  version?: string;
+}
+
+/** `terrarium_core::protocol::HostCapabilities` (docs/host-protocol.md, Handshake). */
+export interface HostCapabilities {
+  docker?: ToolCapability;
+  vmlab?: ToolCapability;
+  shell?: string;
+}
+
+/** `GET /api/hosts`: a host agent in the daemon's registry, with its link state. */
 export interface Host {
   name: string;
-  connected: boolean;
-  os: string;
-  arch: string;
-  capabilities: { docker: boolean; vmlab: boolean };
-  last_seen: string;
-  version: string;
+  id?: string;
+  host_id?: string;
+  /** `online` while the host agent's link is up. */
+  status: "online" | "offline";
+  online?: boolean;
+  /** Live exec sessions. */
+  sessions?: number;
+  /** From the last `hello`. `{}` before the first connect. */
+  capabilities?: HostCapabilities;
+  /** `HostCapabilities::summary`: the flat view for policy checks. */
+  summary?: { os: string; arch: string; docker: boolean; vmlab: boolean };
+  last_seen?: string | null;
+  os?: string | null;
+  arch?: string | null;
+  version?: string | null;
+  max_sessions?: number;
+  connected_at?: string;
+  created_at?: string;
+  created_by?: string;
 }
+
+/** `POST /api/hosts` (`201`): the host and its token. The token shows once, here only. */
+export type NewHostToken = Host & { token: string };
 
 // ----- Audit -----
 

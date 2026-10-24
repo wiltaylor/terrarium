@@ -3,9 +3,10 @@
 //
 // The mock follows docs/api.md: the same shapes, the same error bodies and
 // codes, the same list order and cursors, and the same event frames, so a
-// view that works on the mock works on the daemon. Endpoints the daemon does
-// not have yet (memories, wiki, artifacts, versions, subscriptions, usage,
-// target actions) follow PLAN §14 to §17.
+// view that works on the mock works on the daemon. Subscriptions, quota,
+// usage, and login sessions follow docs/api.md §16. Hosts, target actions,
+// and exec sessions follow the daemon's new `api/hosts.rs` and
+// `api/targets.rs`, which docs/api.md does not describe yet.
 
 import type { Api } from "../client";
 import { ApiError, type Page } from "../http";
@@ -25,6 +26,7 @@ import type {
   CardComment,
   ColumnEdit,
   EventQuery,
+  Host,
   LoginKind,
   LoginSession,
   Message,
@@ -32,11 +34,15 @@ import type {
   Repo,
   Role,
   Subscription,
+  Target,
+  UsagePoint,
+  UsageQuery,
+  UsageTotals,
   Version,
   WikiPage,
 } from "../types";
 import { paginate, type PageQuery } from "../../lib/paging";
-import { fakeUlid, seed, type MockWorld } from "./data";
+import { fakeUlid, seed, type MockWorld, type UsageRow } from "./data";
 import { FakePty } from "./pty";
 
 export interface MockOptions {
@@ -44,8 +50,12 @@ export interface MockOptions {
   latencyMs?: number;
   /** Interval of the fake activity (tool calls, turns). 0 turns it off. Default 3000 ms. */
   eventsIntervalMs?: number;
-  /** Delay before a device-code login completes by itself. Default 8000 ms. */
+  /** Delay before a device-code login completes by itself. Default 8000 ms. 0: never. */
   autoLoginMs?: number;
+  /** Delay before a login session is `waiting` (a URL is on screen). Default 800 ms; 0 with no latency. */
+  loginStepMs?: number;
+  /** How long a login session lives. Default ten minutes (docs/api.md §16.4). */
+  loginTtlMs?: number;
   /** Delay of each fake supervisor step (`starting` -> `idle`). Default 300 ms, like `TERRARIUM_FAKE_DELAY_MS`. */
   stepMs?: number;
   world?: MockWorld;
@@ -72,14 +82,21 @@ const PREFIX_RE = /^[A-Z][A-Z0-9]{0,9}$/;
 const REQUIRED_COLUMNS = ["backlog", "in_progress", "blocked", "done"];
 const LIVE: AgentStatus[] = ["starting", "idle", "working", "blocked", "restarting"];
 
-export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld } {
+/** Test and demo hooks: drive the quota policy without a timer. */
+export interface MockSim {
+  /** Set a window's used percent, as a probe would read it, and run the quota policy. */
+  setWindow(subscription: string, window: string, usedPct: number): void;
+  /** Emit `subscription.offer` for each detected login with no subscription, as the daemon does at start. */
+  offerLogins(): void;
+}
+
+export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld; sim: MockSim } {
   const now = opts.now ?? Date.now;
   const latency = opts.latencyMs ?? 120;
   const step = opts.stepMs ?? (latency > 0 ? 300 : 0);
   const w = opts.world ?? seed(now());
   const iso = () => new Date(now()).toISOString();
   let counter = 1000;
-  const nextId = (prefix: string) => `${prefix}-${++counter}`;
   const ulid = (tag: string) => fakeUlid(tag, ++counter);
   const startedAt = now();
   const later = (fn: () => void, ms = step) => setTimeout(fn, ms);
@@ -255,9 +272,12 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld 
       const reviewer = w.agents.find((x) => x.name === "reviewer");
       if (reviewer?.status === "starting") setStatus(reviewer, "idle");
     }
-    for (const s of w.subscriptions) {
-      for (const win of s.windows) win.used_pct = Math.min(100, win.used_pct + (tick % 3 === 0 ? 1 : 0));
+    if (tick % 3 === 0) {
+      for (const s of w.subscriptions) for (const win of s.windows) setWindow(s.name, win.window, Math.min(100, win.used_pct + 1));
     }
+    // A plan at 100% resets after a while, so the demo shows `quota.resumed`.
+    for (const [name, at] of exhaustedAt) if (tick - at >= 6) resetPlan(name);
+    if (tick % 2 === 0) usageTick();
   };
   let timer: ReturnType<typeof setInterval> | undefined;
   const ensureActivity = () => {
@@ -433,42 +453,261 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld 
     return a;
   };
 
-  // ----- logins -----
-  const logins = new Map<string, LoginSession>();
+  // ----- subscriptions and the quota policy (docs/api.md §16) -----
+  const PROBES = ["anthropic-oauth-usage", "openai-codex-usage", "codex-rate-limits", "github-copilot-quota", "copilot-premium-requests"];
+  const KEY_ENV: Record<string, string> = {
+    anthropic: "ANTHROPIC_API_KEY",
+    openai: "OPENAI_API_KEY",
+    "openai-compatible": "OPENAI_API_KEY",
+    google: "GEMINI_API_KEY",
+    gemini: "GEMINI_API_KEY",
+    openrouter: "OPENROUTER_API_KEY",
+    xai: "XAI_API_KEY",
+    groq: "GROQ_API_KEY",
+    github: "COPILOT_GITHUB_TOKEN",
+  };
+  /** The subscription as the API shows it (docs/api.md §16.1). */
+  const subView = (s: Subscription): Subscription => ({
+    ...s,
+    local_estimate_only: !s.probe,
+    has_api_key: !!s.env_var && !!w.apiKeys[s.name],
+    held_agents: w.holds.filter((h) => h.cause === `quota:${s.name}`).length,
+  });
+  const checkSubName = (name: string) => {
+    if (!NAME_RE.test(name)) fail(422, "invalid", `\`${name}\` is not a valid name: lowercase letters, digits, - and _`);
+    if (name === "login" || name === "detect") fail(422, "invalid", `\`${name}\` is a reserved name`);
+  };
+  const alerted = new Set<string>();
+  const exhaustedAt = new Map<string, number>();
+  const latestReset = (s: Subscription) => s.windows.map((x) => x.resets_at ?? "").sort().at(-1) || undefined;
+  /** The quota policy (docs/api.md §16.6) after a new reading of one window. */
+  const policy = (s: Subscription, win: Subscription["windows"][number]) => {
+    const period = `${s.name}/${win.window}/${win.resets_at ?? ""}`;
+    const alert = (level: "alert" | "exhausted") => {
+      if (alerted.has(`${period}/${level}`)) return;
+      alerted.add(`${period}/${level}`);
+      const subject = level === "alert" ? `${s.name}: window ${win.window} at ${win.used_pct}% (alert at ${s.alert_at}%)` : `${s.name}: window ${win.window} is used up`;
+      sendMail("operator", "operator", subject, `${subject}. Resets at ${win.resets_at ?? "an unknown time"}.`);
+      emit({ kind: "quota.alert", actor: "system", summary: subject, data: { subscription: s.name, window: win.window, used_pct: win.used_pct, resets_at: win.resets_at ?? null, level, alert_at: s.alert_at } });
+    };
+    if (win.used_pct >= s.alert_at) alert("alert");
+    if (win.used_pct >= 100) {
+      alert("exhausted");
+      exhaustedAt.set(s.name, tick);
+      const cause = `quota:${s.name}`;
+      const until = latestReset(s);
+      for (const a of w.agents.filter((x) => x.subscription === s.name)) {
+        if (w.holds.some((h) => h.agent === a.id && h.cause === cause)) continue;
+        const reason = `${s.name} window ${win.window} is at 100%`;
+        w.holds.push({ agent: a.id, cause, until, reason, enforced: false, created_at: iso() });
+        agentEvent(a, "quota.blocked", `${a.name}: turns held until ${until ?? "further notice"} (${reason})`, { cause, until: until ?? null, reason, enforced: false });
+      }
+    } else if (s.windows.every((x) => x.used_pct < 100)) {
+      release(s);
+    }
+  };
+  const release = (s: Subscription) => {
+    const cause = `quota:${s.name}`;
+    exhaustedAt.delete(s.name);
+    for (const h of w.holds.filter((x) => x.cause === cause)) {
+      w.holds.splice(w.holds.indexOf(h), 1);
+      const a = w.agents.find((x) => x.id === h.agent);
+      const left = w.holds.filter((x) => x.agent === h.agent).length;
+      if (a) agentEvent(a, "quota.resumed", `${a.name}: hold \`${cause}\` ended`, { cause, holds_left: left });
+    }
+  };
+  /** A probe reading: store the samples, emit `quota.sample`, and run the policy. */
+  const reading = (s: Subscription) => {
+    const at = iso();
+    for (const win of s.windows) {
+      win.at = at;
+      w.quota.push({ subscription: s.name, window: win.window, used_pct: win.used_pct, resets_at: win.resets_at, raw: { utilization: win.used_pct, resets_at: win.resets_at }, at });
+    }
+    s.probe_status = "ok";
+    delete s.probe_error;
+    s.last_probe_at = at;
+    s.last_success_at = at;
+    emit({ kind: "quota.sample", actor: "system", summary: `${s.name}: ${s.windows.map((x) => `${x.window} ${x.used_pct}%`).join(", ")}`, data: { subscription: s.name, windows: s.windows.map((x) => ({ window: x.window, used_pct: x.used_pct, resets_at: x.resets_at ?? null })) } });
+    for (const win of s.windows) policy(s, win);
+  };
+  const setWindow = (name: string, window: string, usedPct: number) => {
+    const s = sub(name);
+    const win = s.windows.find((x) => x.window === window);
+    if (!win) s.windows.push({ window, used_pct: usedPct, resets_at: new Date(now() + 5 * 3600_000).toISOString(), at: iso() });
+    else win.used_pct = usedPct;
+    reading(s);
+  };
+  const resetPlan = (name: string) => {
+    const s = sub(name);
+    for (const win of s.windows.filter((x) => x.used_pct >= 100)) {
+      win.used_pct = 4;
+      win.resets_at = new Date(now() + 5 * 3600_000).toISOString();
+    }
+    reading(s);
+  };
+  /** Fake local accounting while agents work: one `usage.sample` per working agent. */
+  const usageTick = () => {
+    for (const a of w.agents.filter((x) => x.status === "working" && x.subscription)) {
+      const row: UsageRow = { at: iso(), agent: a.id, project: a.project, subscription: a.subscription!, model: a.model ?? "claude-opus-5", input_tokens: 800 + (tick % 5) * 120, output_tokens: 140 + (tick % 3) * 40, cache_read: 21000, cache_write: 900, messages: 2, turn: w.seq };
+      w.usage.push(row);
+      agentEvent(a, "usage.sample", `${a.name}: ${row.input_tokens + row.output_tokens} tokens on ${row.subscription}`, {
+        subscription: row.subscription, harness: a.harness, model: row.model, input_tokens: row.input_tokens, output_tokens: row.output_tokens, cache_read: row.cache_read, cache_write: row.cache_write, messages: row.messages,
+      });
+    }
+  };
+
+  /** The logins in the harness homes (what the status commands would find). */
+  const homeLogins = () => [
+    ...w.subscriptions.filter((s) => s.login_status === "logged_in" || s.login_status === "expiring").map((s) => ({ provider: s.provider, harness: s.harnesses[0] ?? "pi" })),
+    { provider: "openai-codex", harness: "pi" as const },
+  ];
+  const detected = () =>
+    homeLogins()
+      .filter((l) => !w.subscriptions.some((s) => s.provider === l.provider && s.harnesses.includes(l.harness)))
+      .map((l) => ({
+        kind: l.harness,
+        harness: l.harness,
+        provider: l.provider,
+        ...(l.harness === "pi" ? { pi_provider: l.provider } : {}),
+        logged_in: true,
+        detail: l.harness === "pi" ? `pi auth check: ${l.provider} ready` : `${l.harness}: logged in`,
+        suggested: { name: `pi-${l.provider}`, provider: l.provider, harnesses: [l.harness], alert_at: 80 },
+      }));
+
+  // ----- local accounting (docs/api.md §16.3 `GET /api/usage`) -----
+  const sumRows = (rows: UsageRow[]): UsageTotals => {
+    const t: UsageTotals = { input_tokens: 0, output_tokens: 0, cache_read: 0, cache_write: 0, messages: 0, turns: 0 };
+    const turns = new Set<string>();
+    for (const r of rows) {
+      t.input_tokens += r.input_tokens;
+      t.output_tokens += r.output_tokens;
+      t.cache_read += r.cache_read;
+      t.cache_write += r.cache_write;
+      t.messages += r.messages;
+      turns.add(`${r.agent}/${r.turn}`);
+    }
+    t.turns = turns.size;
+    return t;
+  };
+  const checkTime = (what: string, v?: string) => {
+    if (v && Number.isNaN(Date.parse(v))) fail(400, "bad_request", `\`${what}\` is not an RFC 3339 time`);
+    return v ? new Date(v).toISOString() : undefined;
+  };
+  const usageSeries = (q: UsageQuery): UsagePoint[] => {
+    const since = checkTime("since", q.since) ?? new Date(now() - 24 * 3600_000).toISOString();
+    const until = checkTime("until", q.until);
+    const agentId = q.agent ? agent(q.agent).id : undefined;
+    const rows = w.usage.filter(
+      (r) =>
+        r.at >= since && (!until || r.at < until) && (!q.subscription || r.subscription === q.subscription) && (!q.project || r.project === q.project) && (!agentId || r.agent === agentId) && (!q.model || r.model === q.model),
+    );
+    const bucketOf = (at: string) => (q.bucket === "day" ? `${at.slice(0, 10)}T00:00:00Z` : `${at.slice(0, 13)}:00:00Z`);
+    const groups = new Map<string, UsageRow[]>();
+    for (const r of rows) {
+      const k = `${bucketOf(r.at)}\u0000${q.group ? r[q.group] : ""}`;
+      groups.set(k, [...(groups.get(k) ?? []), r]);
+    }
+    return [...groups.entries()]
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .map(([k, rs]) => {
+        const [bucket, key] = k.split("\u0000") as [string, string];
+        return { bucket, ...(q.group ? { key } : {}), ...sumRows(rs) };
+      });
+  };
+  const execSessions = new Map<string, string>();
+  const target = (id: string): Target => find(w.targets, (t) => t.id === id || t.name === id, `target \`${id}\``);
+
+  // ----- login sessions (docs/api.md §16.4) -----
+  const logins = new Map<string, LoginSession & { name?: string }>();
   const LOGIN_URL: Record<LoginKind, string> = {
-    claude: "https://claude.ai/oauth/authorize?code=true&client_id=mock&state=8f2c",
+    claude: "https://claude.ai/oauth/authorize?code=true&client_id=mock&response_type=code&state=8f2c",
     codex: "https://auth.openai.com/codex/device",
     copilot: "https://github.com/login/device",
-    pi_oauth: "https://console.anthropic.com/oauth/authorize?client_id=mock-pi",
-    pi_api_key: "",
+    pi: "https://auth.openai.com/oauth/authorize?client_id=mock-pi&state=77aa",
   };
-  const finishLogin = (s: LoginSession) => {
-    if (s.state === "done") return;
+  const DEVICE_CODE: Partial<Record<LoginKind, string>> = { codex: "QX7M-4KRP9", copilot: "8F3D-21AC" };
+  const LOGIN_CMD: Record<LoginKind, string> = { claude: "claude auth login", codex: "codex login --device-auth", copilot: "copilot login --device-code", pi: "pi" };
+  const INSTRUCTIONS = (kind: LoginKind, provider?: string) =>
+    kind === "claude"
+      ? "Open the URL, sign in, and paste the code that the page shows."
+      : kind === "pi"
+        ? `In the terminal, type /login, choose "Sign in with an account", and pick ${provider ?? "the provider"}. Then open the URL and paste the code or the final redirect URL.`
+        : "Open the URL, sign in, and enter the device code.";
+  const DEFAULTS: Record<LoginKind, (p?: string) => Pick<Subscription, "provider" | "plan" | "harnesses" | "probe"> & { name: string }> = {
+    claude: () => ({ name: "claude-pro", provider: "anthropic", plan: "Pro", harnesses: ["claude"], probe: "anthropic-oauth-usage" }),
+    codex: () => ({ name: "chatgpt-plus", provider: "openai", plan: "ChatGPT Plus", harnesses: ["codex"], probe: "openai-codex-usage" }),
+    copilot: () => ({ name: "copilot", provider: "github", plan: "Copilot Pro", harnesses: ["copilot"], probe: "github-copilot-quota" }),
+    pi: (p) => ({ name: `pi-${p ?? "anthropic"}`, provider: p ?? "anthropic", harnesses: ["pi"], probe: undefined }),
+  };
+  const live = (id: string) => {
+    const s = logins.get(id);
+    if (!s || s.done) fail(409, "not_running", `login session \`${id}\` is not live`);
+    return s!;
+  };
+  const endLogin = (s: LoginSession, state: "failed" | "cancelled" | "expired" | "done", error?: string) => {
+    if (s.done) return;
+    s.state = state;
+    s.done = true;
+    s.finished_at = iso();
+    if (error) s.error = error;
+    audit("login.end", s.id, undefined, { kind: s.kind, state });
+  };
+  const toWaiting = (s: LoginSession) => {
+    if (s.state !== "starting") return;
+    s.state = "waiting";
+    s.url = LOGIN_URL[s.kind];
+    if (DEVICE_CODE[s.kind]) {
+      s.device_code = DEVICE_CODE[s.kind];
+      const auto = opts.autoLoginMs ?? 8000;
+      if (auto > 0) setTimeout(() => finishLogin(s), auto);
+    }
+  };
+  /** The flow exited 0: verify, make or update the subscription, probe once. */
+  const finishLogin = (s: LoginSession & { name?: string }) => {
+    if (s.done || s.state === "verifying") return;
     s.state = "verifying";
-    setTimeout(() => {
-      const base: Record<LoginKind, Pick<Subscription, "provider" | "plan" | "harnesses" | "probe">> = {
-        claude: { provider: "anthropic", plan: "Pro", harnesses: ["claude", "pi"], probe: "anthropic-oauth-usage" },
-        codex: { provider: "openai", plan: "ChatGPT Plus", harnesses: ["codex", "pi"], probe: "codex-rate-limits" },
-        copilot: { provider: "github", plan: "Copilot Pro", harnesses: ["copilot"], probe: "copilot-premium-requests" },
-        pi_oauth: { provider: s.provider ?? "anthropic", plan: "OAuth", harnesses: ["pi"], probe: null },
-        pi_api_key: { provider: s.provider ?? "openai", plan: "API key", harnesses: ["pi"], probe: null },
-      };
-      const name = `${base[s.kind].provider}-${counter++}`;
-      w.subscriptions.push({
-        name,
-        ...base[s.kind],
-        alert_at: 80,
-        status: "logged_in",
-        verified_at: iso(),
-        last_poll_at: base[s.kind].probe ? iso() : undefined,
-        windows: base[s.kind].probe ? [{ window: s.kind === "copilot" ? "monthly" : "5h", used_pct: 3, resets_at: new Date(now() + 3 * 3600_000).toISOString() }] : [],
-        history: Array.from({ length: 24 }, () => 0),
-      });
-      s.state = "done";
+    later(() => {
+      if (s.done) return;
+      const d = DEFAULTS[s.kind](s.provider);
+      const name = s.name ?? d.name;
+      let row = w.subscriptions.find((x) => x.name === name);
+      if (!row) {
+        row = { ...d, name, alert_at: 80, source: "api", login_status: "logged_in", probe_status: "none", created_at: iso(), updated_at: iso(), windows: [], local_estimate_only: !d.probe, has_api_key: false, held_agents: 0 };
+        w.subscriptions.push(row);
+        audit("subscription.register", name, undefined, { kind: s.kind });
+      }
+      row.login_status = "logged_in";
+      row.verified_at = iso();
+      row.updated_at = iso();
+      if (row.probe) {
+        if (!row.windows.length) row.windows = [{ window: s.kind === "copilot" ? "monthly" : "5h", used_pct: 3, resets_at: new Date(now() + 3 * 3600_000).toISOString(), at: iso() }];
+        reading(row);
+      }
       s.subscription = name;
-      audit("subscription.login", name, undefined, { kind: s.kind });
-      emit({ kind: "subscription", actor: "operator", summary: `Logged in: ${name}`, data: { name } });
+      endLogin(s, "done");
     }, latency > 0 ? 1200 : 0);
+  };
+  const fakeLoginPty = (s: LoginSession | undefined) => {
+    if (!s || s.done) return new FakePty({ refuse: true });
+    const k = s.kind;
+    const banner = [`\x1b[2m$ ${LOGIN_CMD[k]}\x1b[0m  \x1b[2m(mock login terminal)\x1b[0m`];
+    if (k === "codex") banner.push("", "Welcome to Codex [v0.141.0]", "", "Follow these steps to sign in with ChatGPT using device code authorization:", "", `1. Open this link in your browser and sign in to your account`, `   \x1b[94m${LOGIN_URL.codex}\x1b[0m`, "", `2. Enter this one-time code \x1b[90m(expires in 15 minutes)\x1b[0m`, `   \x1b[94m${DEVICE_CODE.codex}\x1b[0m`, "");
+    if (k === "copilot") banner.push("", `! First copy your one-time code: \x1b[1m${DEVICE_CODE.copilot}\x1b[0m`, `Then open: ${LOGIN_URL.copilot}`, "Waiting for authorization...");
+    if (k === "claude") banner.push("", "Browser didn't open? Use the url below to sign in:", "", LOGIN_URL.claude, "", "Paste code here if prompted >");
+    if (k === "pi") banner.push("", "pi (mock). Type /login to sign in to a provider.");
+    return new FakePty({
+      prompt: k === "pi" ? "> " : "",
+      banner,
+      onLine: (line) => {
+        if (s.done || !line.trim()) return [];
+        if (k === "pi" && line.trim() === "/login") {
+          toWaiting(s);
+          return [`Sign in with an account: ${s.provider ?? "anthropic"}`, `Open: ${LOGIN_URL.pi}`, "Paste the code or the final redirect URL:"];
+        }
+        finishLogin(s);
+        return ["\x1b[32m✓ Login successful.\x1b[0m"];
+      },
+    });
   };
 
   // ----- memory (docs/api.md §10) -----
@@ -1359,108 +1598,147 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld 
     },
 
     subscriptions: {
-      list: () => reply(() => w.subscriptions),
-      quota: (name) =>
+      list: () => reply(() => w.subscriptions.map(subView)),
+      get: (name) => reply(() => subView(sub(name))),
+      create: (def) =>
+        reply(() => {
+          checkSubName(def.name);
+          if (w.subscriptions.some((x) => x.name === def.name)) fail(409, "conflict", `subscription \`${def.name}\` exists`);
+          if (def.probe && !PROBES.includes(def.probe)) fail(422, "invalid", `unknown probe \`${def.probe}\``);
+          if (!def.provider?.trim()) fail(422, "invalid", "the provider is empty");
+          const s: Subscription = {
+            name: def.name, provider: def.provider, ...(def.plan ? { plan: def.plan } : {}), harnesses: def.harnesses ?? [], ...(def.probe ? { probe: def.probe } : {}),
+            alert_at: def.alert_at ?? 80, source: "api", login_status: "unknown", probe_status: "none", created_at: iso(), updated_at: iso(),
+            windows: [], local_estimate_only: !def.probe, has_api_key: false, held_agents: 0,
+          };
+          w.subscriptions.push(s);
+          audit("subscription.create", s.name, undefined, { provider: s.provider });
+          return subView(s);
+        }),
+      remove: (name) =>
         reply(() => {
           const s = sub(name);
-          return s.history.map((pct, i) => ({
-            at: new Date(now() - (23 - i) * 3600_000).toISOString(),
-            windows: s.windows.map((win, j) => ({ ...win, used_pct: j === 0 ? pct : win.used_pct })),
-          }));
+          if (s.source === "file") fail(409, "file_managed", `subscription \`${name}\` comes from subscriptions/${name}.toml; edit or delete the file`);
+          w.subscriptions.splice(w.subscriptions.indexOf(s), 1);
+          delete w.apiKeys[name];
+          w.quota = w.quota.filter((q) => q.subscription !== name);
+          audit("subscription.delete", name, undefined);
+        }),
+      quota: (name, q = {}) =>
+        reply(() => {
+          sub(name);
+          const since = q.since || new Date(now() - 24 * 3600_000).toISOString();
+          return w.quota.filter((x) => x.subscription === name && x.at >= since && (!q.window || x.window === q.window)).slice(0, q.limit ?? 1000);
         }),
       probe: (name) =>
         reply(() => {
           const s = sub(name);
-          if (!s.probe) fail(422, "invalid", `${name} has no probe; local estimate only`);
-          s.last_poll_at = iso();
-          return s;
-        }),
-      detect: () => reply(() => [{ harness: "pi" as const, provider: "google", account: "wil@example.com" }]),
-      startLogin: (kind, provider) =>
-        reply(() => {
-          const s: LoginSession = { id: nextId("LOGIN"), kind, provider, state: "starting" };
-          logins.set(s.id, s);
-          setTimeout(() => {
-            s.state = "waiting_for_user";
-            s.url = LOGIN_URL[kind];
-            if (kind === "codex" || kind === "copilot") {
-              s.device_code = kind === "codex" ? "QX7M-4KRP" : "8F3D-21AC";
-              setTimeout(() => finishLogin(s), opts.autoLoginMs ?? 8000);
-            }
-          }, latency > 0 ? 800 : 0);
-          return s;
-        }),
-      loginState: (id) => reply(() => logins.get(id) ?? notFound(`login ${id}`)),
-      loginInput: (id, code) =>
-        reply(() => {
-          const s = logins.get(id) ?? notFound(`login ${id}`);
-          if (!code.trim()) fail(422, "invalid", "the code is empty");
-          finishLogin(s);
-        }),
-      loginPty: (id) => {
-        const s = logins.get(id);
-        const cmd: Record<LoginKind, string> = {
-          claude: "claude auth login",
-          codex: "codex login --device-auth",
-          copilot: "copilot login --device-code",
-          pi_oauth: "pi",
-          pi_api_key: "true",
-        };
-        const kind = s?.kind ?? "claude";
-        return new FakePty({
-          prompt: "",
-          banner: [
-            `\x1b[2m$ ${cmd[kind]}\x1b[0m  \x1b[2m(mock login terminal)\x1b[0m`,
-            kind === "codex" || kind === "copilot"
-              ? `Open ${LOGIN_URL[kind]} and enter the code \x1b[1m${kind === "codex" ? "QX7M-4KRP" : "8F3D-21AC"}\x1b[0m`
-              : kind === "pi_oauth"
-                ? "Type /login and choose a provider."
-                : `Browser did not open. Visit:\r\n${LOGIN_URL[kind]}`,
-            kind === "claude" ? "Paste code here if prompted > " : "Waiting for authorisation…",
-          ],
-          onLine: (line) => {
-            if (!s || !line.trim()) return [];
-            finishLogin(s);
-            return ["\x1b[32m✓ Login successful.\x1b[0m"];
-          },
-        });
-      },
-      setApiKey: (name, input) =>
-        reply(() => {
-          if (!input.key.trim()) fail(422, "invalid", "the key is empty");
-          let s = w.subscriptions.find((x) => x.name === name);
-          if (!s) {
-            s = { name, provider: input.provider, plan: "API key", harnesses: ["pi"], probe: null, alert_at: 80, status: "logged_in", windows: [], history: Array(24).fill(0) };
-            w.subscriptions.push(s);
+          if (!s.probe) return { subscription: s.name, probe_status: "none" as const, windows: [] };
+          s.last_probe_at = iso();
+          if (s.login_status === "missing" || s.login_status === "unknown" || s.probe_status === "failed") {
+            s.probe_status = "failed";
+            s.probe_error ??= "no credential in the shared harness home";
+            return { subscription: s.name, probe_status: "failed" as const, error: s.probe_error, windows: [] };
           }
-          s.status = "logged_in";
-          s.verified_at = iso();
-          audit("subscription.api_key_set", name, undefined, { provider: input.provider });
-          return s;
+          reading(s);
+          return { subscription: s.name, probe_status: "ok" as const, windows: s.windows.map((x) => ({ window: x.window, used_pct: x.used_pct, resets_at: x.resets_at, raw: { utilization: x.used_pct } })) };
         }),
-      logout: (name) => reply(() => void (sub(name).status = "missing")),
       verify: (name) =>
         reply(() => {
           const s = sub(name);
+          if (s.env_var && w.apiKeys[name]) {
+            s.login_status = "logged_in";
+            return { subscription: subView(s), status: { logged_in: true, detail: "a stored API key" } };
+          }
+          const harness = s.harnesses[0];
+          if (!harness) fail(422, "invalid", `subscription \`${name}\` names no harness to check`);
+          const ok = s.login_status !== "missing" && s.login_status !== "expired";
+          s.login_status = ok ? "logged_in" : "missing";
           s.verified_at = iso();
-          if (s.status === "expiring") s.status = "logged_in";
+          audit("subscription.verify", name, undefined, { logged_in: ok });
+          return { subscription: subView(s), status: { kind: harness, harness, provider: s.provider, logged_in: ok, ...(s.plan ? { plan: s.plan } : {}), detail: ok ? "Logged in" : "Not logged in" } };
+        }),
+      logout: (name) =>
+        reply(() => {
+          const s = sub(name);
+          const harness = s.harnesses[0];
+          if (!harness) fail(422, "invalid", `subscription \`${name}\` names no harness`);
+          if (harness === "pi") fail(422, "invalid", "pi has no logout command");
+          s.login_status = "missing";
+          audit("subscription.logout", name, undefined, { kind: harness });
+          return subView(s);
+        }),
+      setApiKey: (name, input) =>
+        reply(() => {
+          if (!input.key.trim()) fail(422, "invalid", "the key is empty");
+          const env = KEY_ENV[input.provider];
+          if (!env) fail(422, "invalid", `unknown provider \`${input.provider}\`; use anthropic, openai, openai-compatible, google, openrouter, xai, groq, or github`);
+          if (input.provider === "openai-compatible" && !input.base_url?.trim()) fail(422, "invalid", "openai-compatible needs base_url");
+          let s = w.subscriptions.find((x) => x.name === name);
+          if (!s) {
+            checkSubName(name);
+            s = { name, provider: input.provider, plan: "API key", harnesses: [input.provider === "github" ? "copilot" : "pi"], alert_at: 80, source: "api", login_status: "logged_in", probe_status: "none", created_at: iso(), updated_at: iso(), windows: [], local_estimate_only: true, has_api_key: true, held_agents: 0 };
+            w.subscriptions.push(s);
+          }
+          w.apiKeys[name] = { provider: input.provider, key: input.key, base_url: input.base_url, models: input.models };
+          s.env_var = env;
+          s.login_status = "logged_in";
+          s.updated_at = iso();
+          audit("subscription.api_key", name, undefined, { provider: input.provider, env_var: env, base_url: input.base_url ?? null, models: input.models ?? [] });
+          return subView(s);
+        }),
+      detect: () => reply(detected),
+      startLogin: (req) =>
+        reply(() => {
+          if (!["claude", "codex", "copilot", "pi"].includes(req.kind)) fail(422, "invalid", `unknown login kind \`${req.kind}\``);
+          if (req.kind === "pi" && !req.provider) fail(422, "invalid", "a pi login needs a provider");
+          if (req.name) checkSubName(req.name);
+          if ([...logins.values()].filter((x) => !x.done).length >= 4) fail(409, "conflict", "four login sessions are live; finish or cancel one");
+          const s: LoginSession & { name?: string } = {
+            id: ulid("login"), kind: req.kind, ...(req.provider ? { provider: req.provider } : {}), state: "starting", started_at: iso(), done: false, instructions: INSTRUCTIONS(req.kind, req.provider),
+            ...(req.name ? { name: req.name } : {}),
+          };
+          logins.set(s.id, s);
+          audit("login.start", s.id, undefined, { kind: s.kind, provider: s.provider ?? null });
+          if (s.kind !== "pi") setTimeout(() => toWaiting(s), opts.loginStepMs ?? (latency > 0 ? 800 : 0));
+          setTimeout(() => endLogin(s, "expired"), opts.loginTtlMs ?? 10 * 60_000);
           return s;
         }),
+      loginState: (id) => reply(() => logins.get(id) ?? fail(404, "not_found", `login session \`${id}\` not found`)),
+      cancelLogin: (id) =>
+        reply(() => {
+          const s = live(id);
+          audit("login.cancel", s.id, undefined);
+          endLogin(s, "cancelled");
+        }),
+      loginInput: (id, code) =>
+        reply(() => {
+          const s = live(id);
+          if (!code.trim() || /[\r\n]/.test(code)) fail(422, "invalid", "the code is empty or has a line break");
+          audit("login.input", s.id, undefined, { length: code.length });
+          finishLogin(s);
+        }),
+      loginPty: (id) => fakeLoginPty(logins.get(id)),
     },
 
-    usage: (q) =>
-      reply(() => {
-        const out = [];
-        for (let h = 23; h >= 0; h--) {
-          const at = new Date(now() - h * 3600_000).toISOString();
-          if (q.since && at < q.since) continue;
-          for (const a of w.agents.filter((x) => (!q.project || x.project === q.project) && (!q.subscription || x.subscription === q.subscription) && (!q.agent || x.id === q.agent || x.name === q.agent) && (!q.model || (x.model ?? "default") === q.model))) {
-            const k = (a.name.length * 31 + h * 7) % 13;
-            out.push({ at, subscription: a.subscription ?? "none", project: a.project, agent: a.name, model: a.model ?? "default", input_tokens: k * 4200, output_tokens: k * 900, cache_tokens: k * 15000, turns: k % 4 });
-          }
-        }
-        return out;
-      }),
+    usage: {
+      series: (q) => reply(() => usageSeries(q)),
+      me: (key) =>
+        reply(() => {
+          const a = agent(key);
+          const s = a.subscription ? w.subscriptions.find((x) => x.name === a.subscription) : undefined;
+          const since = `${new Date(now()).toISOString().slice(0, 10)}T00:00:00Z`;
+          const mine = sumRows(w.usage.filter((r) => r.agent === a.id && r.at >= since));
+          const all = s ? sumRows(w.usage.filter((r) => r.subscription === s.name && r.at >= since)) : undefined;
+          const whole = all ? all.input_tokens + all.output_tokens : 0;
+          return {
+            agent: { id: a.id, name: a.name, project: a.project },
+            ...(s ? { subscription: { name: s.name, provider: s.provider, plan: s.plan, probe_status: s.probe_status, last_success_at: s.last_success_at, local_estimate_only: !s.probe, windows: s.windows } } : {}),
+            today: { since, mine, ...(all ? { subscription: all } : {}), ...(whole > 0 ? { share_pct: Math.round(((mine.input_tokens + mine.output_tokens) / whole) * 1000) / 10 } : {}) },
+            holds: w.holds.filter((h) => h.agent === a.id),
+          };
+        }),
+    },
 
     mail: {
       list: (q = {}) => reply(() => listMail((m) => (!q.to || m.to === q.to || m.to_name === q.to) && (!q.from || m.from === q.from || m.from_name === q.from), q)),
@@ -1499,14 +1777,85 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld 
         ),
       ),
 
+    // The daemon's `api/targets.rs` is new; the mock runs the same lifecycle.
     targets: {
-      list: () => reply(() => w.targets),
-      // Not in the daemon yet: `POST /api/targets` is 405, the actions are 404.
+      list: () => reply(() => w.targets.map((t) => ({ ...t, host_online: t.kind === "ssh" ? null : w.hosts.some((h) => h.name === t.host && h.status === "online") }))),
       create: () => reply(() => fail(405, "method_not_allowed", "this route does not take this method")),
-      action: () => reply(noRoute),
+      action: (id, action) =>
+        reply(() => {
+          const t = target(id);
+          if (t.kind === "ssh" || t.kind === "host") fail(422, "invalid", `a ${t.kind} target has no lifecycle`);
+          const h = w.hosts.find((x) => x.name === t.host);
+          if (!h || h.status !== "online") fail(409, "host_offline", `host agent \`${t.host ?? "?"}\` is not connected`);
+          if (action === "snapshot" || action === "restore") {
+            if (t.kind !== "vmlab") fail(422, "invalid", "only vmlab targets have snapshots");
+            if (action === "snapshot") t.snapshots.push(`snap-${t.snapshots.length + 1}`);
+            else if (!t.snapshots.length) fail(409, "conflict", "the target has no snapshot");
+            else {
+              t.state = "starting";
+              later(() => (t.state = "up"), Math.max(step, 1) * 3);
+            }
+            return t;
+          }
+          if (action === "up") {
+            if (t.state === "up") fail(409, "conflict", "the target is up");
+            t.state = "starting";
+            later(() => (t.state = "up"), Math.max(step, 1) * 3);
+          } else {
+            if (t.state === "down") fail(409, "conflict", "the target is down");
+            t.state = "stopping";
+            later(() => (t.state = "down"), Math.max(step, 1) * 3);
+          }
+          return t;
+        }),
+      exec: (id, req) =>
+        reply(() => {
+          const t = target(id);
+          if (!req.shell && !req.cmd?.length) fail(422, "invalid", "give cmd, or shell: true");
+          if (t.kind !== "ssh" && w.hosts.find((h) => h.name === t.host)?.status !== "online") fail(409, "host_offline", `host agent \`${t.host ?? "?"}\` is not connected`);
+          const session_id = ulid("exec");
+          execSessions.set(session_id, t.name);
+          return { session_id, target: t.name, kind: req.shell ? "shell" : "exec" };
+        }),
+      sessionPty: (id, session) => {
+        if (execSessions.get(session) !== id) return new FakePty({ refuse: true });
+        const t = w.targets.find((x) => x.id === id || x.name === id);
+        const user = t?.kind === "ssh" ? (t.address?.split("@")[0] ?? "build") : "wil";
+        return new FakePty({
+          banner: [`\x1b[2m(mock) shell on target ${id} via ${t?.host ?? t?.address ?? "?"}\x1b[0m`],
+          prompt: `\x1b[32m${user}@${id}\x1b[0m:~$ `,
+          onLine: (line) => (line.trim() === "uname -a" ? [`Linux ${id} 6.12.0 #1 SMP x86_64 GNU/Linux`] : line.trim() ? [`${line.split(" ")[0]}: (mock) ran`] : []),
+        });
+      },
+      closeSession: (id, session) =>
+        reply(() => {
+          if (execSessions.get(session) !== id) fail(404, "not_found", `session \`${session}\` not found`);
+          execSessions.delete(session);
+        }),
     },
 
-    hosts: { list: () => reply(() => w.hosts) },
+    hosts: {
+      list: () => reply(() => w.hosts),
+      create: (name) =>
+        reply(() => {
+          if (!NAME_RE.test(name)) fail(422, "invalid", `\`${name}\` is not a valid host name`);
+          if (w.hosts.some((h) => h.name === name)) fail(409, "conflict", `host \`${name}\` exists`);
+          const token = `thk_${ulid("tok").toLowerCase()}`;
+          const id = ulid("host");
+          const host: Host = { name, id, host_id: id, status: "offline", online: false, sessions: 0, capabilities: {}, summary: { os: "", arch: "", docker: false, vmlab: false }, last_seen: null, os: null, arch: null, version: null, created_at: iso(), created_by: "operator" };
+          w.hosts.push(host);
+          w.hostTokens[name] = token;
+          audit("host.create", name, undefined, { host_id: id });
+          return { ...host, token };
+        }),
+      revoke: (name) =>
+        reply(() => {
+          const h = find(w.hosts, (x) => x.name === name, `host \`${name}\``);
+          w.hosts.splice(w.hosts.indexOf(h), 1);
+          delete w.hostTokens[name];
+          audit("host.revoke", name, undefined);
+        }),
+    },
 
     events: {
       stream: (o = {}): EventStream => {
@@ -1518,7 +1867,17 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld 
       },
       history: (q = {}) =>
         reply(() => eventsAfter(q, (e) => !q.agent || e.agent_id === q.agent || e.agent === q.agent || `${e.project}/${e.agent}` === q.agent)),
+      latest: () => reply(() => w.seq),
     },
   };
-  return api;
+  const sim: MockSim = {
+    setWindow,
+    offerLogins: () => {
+      for (const d of detected()) {
+        const { suggested, ...login } = d;
+        emit({ kind: "subscription.offer", actor: "system", summary: `Found a ${d.harness} login for ${d.provider} with no subscription`, data: { login, suggested } });
+      }
+    },
+  };
+  return Object.assign(api, { sim });
 }

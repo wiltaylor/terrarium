@@ -7,7 +7,7 @@
 // expose the cursor for "load more". Methods that return `T[]` follow every
 // cursor with `collectAll`.
 
-import { seg, type Page, type Query, type Transport } from "./http";
+import { AuthError, seg, type Page, type Query, type Transport } from "./http";
 import { collectAll, type PageQuery } from "../lib/paging";
 import { createWsEventStream, type EventStream, type PtySocket } from "./sockets";
 import type {
@@ -32,10 +32,11 @@ import type {
   CreatedMemory,
   DetectedLogin,
   EventQuery,
+  ExecOpened,
+  ExecRequest,
   Health,
   Host,
   InboxQuery,
-  LoginKind,
   LoginSession,
   MailQuery,
   Memory,
@@ -44,23 +45,29 @@ import type {
   MemoryQuery,
   Message,
   NewCard,
+  NewHostToken,
   NewMemory,
   NewMessage,
   NewProject,
   NewRepo,
+  NewSubscription,
   NewVersion,
   PageStatus,
+  ProbeOutcome,
   Project,
-  QuotaWindow,
+  QuotaSample,
   Relation,
   Repo,
   Revision,
   Role,
   Session,
+  StartLogin,
   Subscription,
   Target,
-  UsageBucket,
+  UsageMe,
+  UsagePoint,
   UsageQuery,
+  VerifyResult,
   Version,
   VersionCompare,
   VersionPatch,
@@ -192,22 +199,39 @@ export interface Api {
     compare(id: string, to: string): Promise<VersionCompare>;
   };
 
+  /** docs/api.md §16. */
   subscriptions: {
     list(): Promise<Subscription[]>;
-    quota(name: string, since?: string): Promise<{ at: string; windows: QuotaWindow[] }[]>;
-    probe(name: string): Promise<Subscription>;
-    detect(): Promise<DetectedLogin[]>;
-    startLogin(kind: LoginKind, provider?: string): Promise<LoginSession>;
-    loginState(id: string): Promise<LoginSession>;
-    loginInput(id: string, code: string): Promise<void>;
-    loginPty(id: string): PtySocket;
+    get(name: string): Promise<Subscription>;
+    /** `201`, `source = api`. `409 conflict` when the name exists; `422 invalid` for an unknown probe. */
+    create(def: NewSubscription): Promise<Subscription>;
+    /** `409 file_managed` for a file subscription. */
+    remove(name: string): Promise<void>;
+    /** Samples, oldest first. `since` defaults to 24 hours ago. */
+    quota(name: string, q?: { since?: string; window?: string; limit?: number }): Promise<QuotaSample[]>;
+    /** A failed probe is still `200`, with `probe_status: failed`. */
+    probe(name: string): Promise<ProbeOutcome>;
+    verify(name: string): Promise<VerifyResult>;
+    logout(name: string): Promise<Subscription>;
+    /** Write-only. The answer never has the key. */
     setApiKey(name: string, input: ApiKeyInput): Promise<Subscription>;
-    logout(name: string): Promise<void>;
-    verify(name: string): Promise<Subscription>;
+    detect(): Promise<DetectedLogin[]>;
+    startLogin(req: StartLogin): Promise<LoginSession>;
+    loginState(id: string): Promise<LoginSession>;
+    /** `202`; the session becomes `cancelled`. */
+    cancelLogin(id: string): Promise<void>;
+    /** `409 not_running` when the session ended. */
+    loginInput(id: string, code: string): Promise<void>;
+    /** The login terminal, with the PTY protocol of docs/api.md §6.5. */
+    loginPty(id: string): PtySocket;
   };
 
-  /** PLAN §16 `GET /api/usage`. Not in the daemon yet. */
-  usage(q: UsageQuery): Promise<UsageBucket[]>;
+  /** docs/api.md §16.3. */
+  usage: {
+    series(q: UsageQuery): Promise<UsagePoint[]>;
+    /** `GET /api/usage/me?agent=`: the agent's subscription, its share today, and its holds. */
+    me(agent: string): Promise<UsageMe>;
+  };
 
   mail: {
     list(q?: MailQuery): Promise<Page<Message>>;
@@ -228,16 +252,27 @@ export interface Api {
 
   audit(q?: AuditQuery): Promise<Page<AuditEntry>>;
 
+  /** PLAN §17, §19, the daemon's `api/targets.rs`. */
   targets: {
     list(): Promise<Target[]>;
-    /** Not in the daemon yet (405). */
     create(t: Partial<Target>): Promise<Target>;
-    /** Not in the daemon yet (404). */
-    action(id: string, action: "up" | "down" | "snapshot" | "restore"): Promise<Target>;
+    /** A lifecycle verb. The answer is the executor's report, not a target: refetch the list. */
+    action(id: string, action: TargetAction): Promise<unknown>;
+    /** Open an exec session. `{shell: true, pty}` gives an operator terminal. */
+    exec(id: string, req: ExecRequest): Promise<ExecOpened>;
+    /** The session terminal, with the PTY protocol of docs/api.md §6.5. */
+    sessionPty(id: string, session: string): PtySocket;
+    /** Kill the run. */
+    closeSession(id: string, session: string): Promise<void>;
   };
 
+  /** docs/host-protocol.md, the daemon's `api/hosts.rs`. */
   hosts: {
     list(): Promise<Host[]>;
+    /** Mint a host and its token. The token shows once, in this answer only. */
+    create(name: string): Promise<NewHostToken>;
+    /** Revoke the token: the daemon sends `goodbye token_revoked` and closes the link. */
+    revoke(name: string): Promise<void>;
   };
 
   events: {
@@ -245,7 +280,25 @@ export interface Api {
     stream(opts?: { since?: number }): EventStream;
     /** One page of the log after `since`, oldest first. */
     history(q?: EventQuery): Promise<Page<AgentEvent>>;
+    /**
+     * The newest `seq` in the log (`GET /api/events/latest`), or null when
+     * this daemon does not have the endpoint. Then the stream asks for the
+     * whole log, as before.
+     */
+    latest(): Promise<number | null>;
   };
+}
+
+export type TargetAction = "up" | "down" | "snapshot" | "restore";
+
+/** Read the answer of `GET /api/events/latest`: a number, `{seq}`, `{latest}`, or an event. */
+export function parseLatest(data: unknown): number | null {
+  if (typeof data === "number" && Number.isFinite(data)) return data;
+  if (typeof data === "object" && data !== null) {
+    const o = data as Record<string, unknown>;
+    for (const k of ["seq", "latest", "last_seq"]) if (typeof o[k] === "number") return o[k];
+  }
+  return null;
 }
 
 export function createHttpApi(t: Transport, makeSocket: (url: string) => WebSocket = (u) => new WebSocket(u)): Api {
@@ -264,6 +317,8 @@ export function createHttpApi(t: Transport, makeSocket: (url: string) => WebSock
   const p = (name: string) => `/api/projects/${seg(name)}`;
   const a = (id: string) => `/api/agents/${seg(id)}`;
   const c = (id: string) => `/api/cards/${seg(id)}`;
+  const sub = (name: string) => `/api/subscriptions/${seg(name)}`;
+  const login = (id: string) => `/api/subscriptions/login/${seg(id)}`;
 
   return {
     health: () => get("/api/health"),
@@ -374,20 +429,27 @@ export function createHttpApi(t: Transport, makeSocket: (url: string) => WebSock
     },
 
     subscriptions: {
-      list: () => all("/api/subscriptions"),
-      quota: (name, since) => all(`/api/subscriptions/${seg(name)}/quota`, { since }),
-      probe: (name) => post(`/api/subscriptions/${seg(name)}/probe`),
-      detect: () => all("/api/subscriptions/detect"),
-      startLogin: (kind, provider) => post("/api/subscriptions/login", { kind, provider }),
-      loginState: (id) => get(`/api/subscriptions/login/${seg(id)}`),
-      loginInput: (id, code) => post(`/api/subscriptions/login/${seg(id)}/input`, { code }),
-      loginPty: (id) => socket(`/api/subscriptions/login/${seg(id)}/pty`),
-      setApiKey: (name, input) => post(`/api/subscriptions/${seg(name)}/api-key`, input),
-      logout: (name) => post(`/api/subscriptions/${seg(name)}/logout`),
-      verify: (name) => post(`/api/subscriptions/${seg(name)}/verify`),
+      list: () => get("/api/subscriptions"),
+      get: (name) => get(sub(name)),
+      create: (def) => post("/api/subscriptions", def),
+      remove: (name) => del(sub(name)),
+      quota: (name, q = {}) => get(`${sub(name)}/quota`, { ...q }),
+      probe: (name) => post(`${sub(name)}/probe`),
+      verify: (name) => post(`${sub(name)}/verify`),
+      logout: (name) => post(`${sub(name)}/logout`),
+      setApiKey: (name, input) => post(`${sub(name)}/api-key`, input),
+      detect: () => get("/api/subscriptions/detect"),
+      startLogin: (req) => post("/api/subscriptions/login", req),
+      loginState: (id) => get(login(id)),
+      cancelLogin: (id) => del(login(id)),
+      loginInput: (id, code) => post(`${login(id)}/input`, { code }),
+      loginPty: (id) => socket(`${login(id)}/pty`),
     },
 
-    usage: (q) => all("/api/usage", { ...q }),
+    usage: {
+      series: (q) => get("/api/usage", { ...q }),
+      me: (agent) => get("/api/usage/me", { agent }),
+    },
 
     mail: {
       list: (q = {}) => page("/api/mail", { ...q }),
@@ -410,16 +472,29 @@ export function createHttpApi(t: Transport, makeSocket: (url: string) => WebSock
       list: () => all("/api/targets"),
       create: (target) => post("/api/targets", target),
       action: (id, action) => post(`/api/targets/${seg(id)}/${action}`),
+      exec: (id, req) => post(`/api/targets/${seg(id)}/exec`, req),
+      sessionPty: (id, session) => socket(`/api/targets/${seg(id)}/sessions/${seg(session)}/ws`),
+      closeSession: (id, session) => del(`/api/targets/${seg(id)}/sessions/${seg(session)}`),
     },
 
     hosts: {
       list: () => all("/api/hosts"),
+      create: (name) => post("/api/hosts", { name }),
+      revoke: (name) => del(`/api/hosts/${seg(name)}`),
     },
 
     events: {
       stream: (opts = {}) =>
         createWsEventStream((since) => t.wsUrl("/api/events", { since }), { makeSocket, since: opts.since }),
       history: (q = {}) => page("/api/events", { ...q }),
+      latest: async () => {
+        try {
+          return parseLatest(await get<unknown>("/api/events/latest"));
+        } catch (e) {
+          if (e instanceof AuthError) throw e;
+          return null; // not on this daemon: fall back to the whole log
+        }
+      },
     },
   };
 }

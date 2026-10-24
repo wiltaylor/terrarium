@@ -1,13 +1,16 @@
 import { A, useNavigate, useParams } from "@solidjs/router";
-import { createEffect, createResource, createSignal, For, Match, on, Show, Switch } from "solid-js";
+import { createEffect, createResource, createSignal, For, Match, on, onCleanup, onMount, Show, Switch } from "solid-js";
+import { HoldBadge } from "../../components/QuotaBanner";
+import { SelfReport } from "../../components/SelfReport";
 import { EventHistory } from "../../components/EventHistory";
 import { createPagedList } from "../../components/paged";
 import { StatusBadge } from "../../components/StatusBadge";
 import { Terminal } from "../../components/Terminal";
-import { ConfirmButton, ErrorBanner, LoadMore, PageHead, Tabs } from "../../components/ui";
+import { ConfirmButton, ErrorBanner, LoadMore, PageHead, Tabs, useNow } from "../../components/ui";
 import { GRANTABLE_ROLES, type Agent, type AgentStatus, type Role } from "../../api/types";
-import { ago } from "../../lib/format";
-import { agents, api } from "../../stores";
+import { ago, compact, timeUntil } from "../../lib/format";
+import { agents, api, events, quota } from "../../stores";
+import { describeCause } from "../../stores/quota";
 import { AgentForm } from "./AgentForm";
 import { RoleBadges } from "./AgentsPage";
 
@@ -70,7 +73,7 @@ export default function AgentDetail() {
           <PageHead
             title={
               <span class="row">
-                {a().name} <StatusBadge status={a().status} />
+                {a().name} <StatusBadge status={a().status} /> <HoldBadge agentId={a().id} long />
               </span>
             }
           >
@@ -100,8 +103,18 @@ export default function AgentDetail() {
                 {a().harness}
                 {a().model ? ` · ${a().model}` : ""}
               </dd>
+              <dt>Says</dt>
+              <dd>
+                <Show when={a().self_report} fallback={<span class="muted">no self-report</span>}>
+                  <SelfReport report={a().self_report} />
+                </Show>
+              </dd>
               <dt>Subscription</dt>
-              <dd>{a().subscription ?? <span class="muted">none</span>}</dd>
+              <dd>
+                <Show when={a().subscription} fallback={<span class="muted">none</span>}>
+                  {(s) => <A href="/subscriptions">{s()}</A>}
+                </Show>
+              </dd>
               <dt>Prompt</dt>
               <dd>{a().prompt ?? <span class="muted">default</span>}</dd>
               <dt>Restart</dt>
@@ -127,6 +140,10 @@ export default function AgentDetail() {
               </dd>
             </dl>
           </div>
+
+          <Show when={a().subscription}>
+            <QuotaPanel agent={a()} />
+          </Show>
 
           <RolesPanel agent={a()} onError={setError} />
 
@@ -253,6 +270,77 @@ function RolesPanel(props: { agent: Agent; onError: (e: unknown) => void }) {
           </button>
         </Show>
       </div>
+    </section>
+  );
+}
+
+/** The agent's subscription, its share today, and any hold (`GET /api/usage/me?agent=`, docs/api.md §16.3). */
+function QuotaPanel(props: { agent: Agent }) {
+  const now = useNow(30_000);
+  const [tick, setTick] = createSignal(0);
+  const [me] = createResource(
+    () => [props.agent.id, tick()] as const,
+    async ([id]) => {
+      const m = await api.usage.me(id).catch(() => null);
+      // Holds older than the event backlog come from here.
+      if (m) quota.seedHolds(id, m.holds, props.agent.name);
+      return m;
+    },
+  );
+  onMount(() => {
+    let t: ReturnType<typeof setTimeout> | undefined;
+    const off = events.on((e) => {
+      const mine = e.agent_id === props.agent.id || e.data?.agent_id === props.agent.id;
+      if (!(mine && (e.kind.startsWith("quota.") || e.kind === "usage.sample")) && e.kind !== "quota.sample") return;
+      clearTimeout(t);
+      t = setTimeout(() => setTick((n) => n + 1), 2000);
+    });
+    onCleanup(() => {
+      off();
+      clearTimeout(t);
+    });
+  });
+  const holds = () => quota.holdsFor(props.agent.id, now());
+  return (
+    <section class="card-box">
+      <div class="spread">
+        <h3 style={{ margin: 0 }}>Quota</h3>
+        <span class="muted small">{props.agent.subscription}</span>
+      </div>
+      <For each={holds()}>
+        {(h) => (
+          <div class="error-banner" role="status">
+            <span>
+              <strong>Blocked by quota until {h.until ? `${new Date(h.until).toLocaleString()} (in ${timeUntil(h.until, now())})` : "further notice"}.</strong> {describeCause(h.cause)}: {h.reason}
+              {h.enforced ? "" : " The supervisor does not hold turns yet, so this is advice only."}
+            </span>
+          </div>
+        )}
+      </For>
+      <Show when={me()} fallback={<p class="muted small">{me.loading ? "Loading…" : "No usage numbers from the daemon."}</p>}>
+        {(m) => (
+          <dl class="kv">
+            <dt>Plan</dt>
+            <dd>
+              {m().subscription?.plan ?? m().subscription?.name ?? props.agent.subscription}
+              <Show when={m().subscription?.local_estimate_only}> · local estimate only</Show>
+            </dd>
+            <dt>Windows</dt>
+            <dd class="small">
+              <Show when={m().subscription?.windows.length} fallback={<span class="muted">no samples</span>}>
+                {m()
+                  .subscription!.windows.map((w) => `${w.window} ${Math.round(w.used_pct)}%${w.resets_at ? ` (resets in ${timeUntil(w.resets_at, now())})` : ""}`)
+                  .join(" · ")}
+              </Show>
+            </dd>
+            <dt>Today</dt>
+            <dd class="small">
+              {compact(m().today.mine.input_tokens + m().today.mine.output_tokens)} tokens, {m().today.mine.turns} turns
+              <Show when={m().today.share_pct !== undefined}> · {m().today.share_pct}% of the subscription today</Show>
+            </dd>
+          </dl>
+        )}
+      </Show>
     </section>
   );
 }

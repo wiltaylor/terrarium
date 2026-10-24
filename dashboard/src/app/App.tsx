@@ -17,6 +17,7 @@ const WikiPage = lazy(() => import("../features/wiki/WikiPage"));
 const ArtifactsPage = lazy(() => import("../features/artifacts/ArtifactsPage"));
 const VersionsPage = lazy(() => import("../features/versions/VersionsPage"));
 const TargetsPage = lazy(() => import("../features/targets/TargetsPage"));
+const HostsPage = lazy(() => import("../features/hosts/HostsPage"));
 const AuditPage = lazy(() => import("../features/audit/AuditPage"));
 const EventsPage = lazy(() => import("../features/events/EventsPage"));
 const ProjectsPage = lazy(() => import("../features/projects/ProjectsPage"));
@@ -47,6 +48,7 @@ export function App() {
         <Route path="/subscriptions" component={SubscriptionsPage} />
         <Route path="/mail" component={MailPage} />
         <Route path="/targets" component={TargetsPage} />
+        <Route path="/hosts" component={HostsPage} />
         <Route path="/events" component={EventsPage} />
         <Route path="/audit" component={AuditPage} />
         <Route path="/p/:project" component={ProjectIndex} />

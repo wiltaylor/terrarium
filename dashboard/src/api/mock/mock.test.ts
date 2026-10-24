@@ -60,10 +60,10 @@ describe("mock API", () => {
   it("completes a Claude login after the code is pasted", async () => {
     const api = mock();
     const before = (await api.subscriptions.list()).length;
-    const s = await api.subscriptions.startLogin("claude");
+    const s = await api.subscriptions.startLogin({ kind: "claude" });
     await tick();
     const waiting = await api.subscriptions.loginState(s.id);
-    expect(waiting.state).toBe("waiting_for_user");
+    expect(waiting.state).toBe("waiting");
     expect(waiting.url).toMatch(/^https:/);
     await api.subscriptions.loginInput(s.id, "code-123");
     await tick();

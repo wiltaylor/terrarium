@@ -12,6 +12,8 @@ import type {
   MemoryEdge,
   Message,
   Project,
+  QuotaHold,
+  QuotaSample,
   Repo,
   Revision,
   Session,
@@ -39,12 +41,38 @@ export interface MockWorld {
   artifactBodies: Record<string, string>;
   versions: Version[];
   subscriptions: Subscription[];
+  /** Quota samples, oldest first (docs/api.md §16.3 `.../quota`). */
+  quota: QuotaSample[];
+  /** Local accounting rows (`usage_samples`). `agent` is the ULID, as in the daemon. */
+  usage: UsageRow[];
+  /** Holds on agents' turns (docs/api.md §16.6). */
+  holds: QuotaHold[];
+  /** Stored API keys by subscription. No endpoint returns them. */
+  apiKeys: Record<string, { provider: string; key: string; base_url?: string; models?: string[] }>;
   mail: Message[];
   targets: Target[];
   hosts: Host[];
+  /** Host tokens by host name. The API shows a token once, at create. */
+  hostTokens: Record<string, string>;
   audit: AuditEntry[];
   /** The last `seq` handed out. */
   seq: number;
+}
+
+/** One row of local accounting, as the daemon stores it. */
+export interface UsageRow {
+  at: string;
+  agent: string;
+  project: string;
+  subscription: string;
+  model: string;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read: number;
+  cache_write: number;
+  messages: number;
+  /** The `seq` of the agent's `turn_start`. */
+  turn: number;
 }
 
 const COLUMNS: Column[] = [
@@ -171,6 +199,17 @@ export function seed(now: number = Date.now()): MockWorld {
   ev(3, "turn_end", "lead", "terrarium", "Turn ended after 41s");
   ev(1, "tool_use", "shop-lead", "webshop", "Bash cargo test -p checkout", { tool: "Bash" });
   status(0.5, "reviewer", "stopped", "starting");
+  ev(10, "self_report", "adapter-codex", "terrarium", "adapter-codex says: blocked (waiting for an operator Codex login)", { status: "blocked", note: "waiting for an operator Codex login" }, { actor: "agent:01JB0WRK200000000000000003" });
+  seq++;
+  events.push({
+    seq,
+    id: fakeUlid("ev", seq),
+    at: ago(4),
+    kind: "quota.alert",
+    actor: "system",
+    summary: "chatgpt-pro: window 5h at 87% (alert at 80%)",
+    data: { subscription: "chatgpt-pro", window: "5h", used_pct: 87, resets_at: ahead(41), level: "alert", alert_at: 80 },
+  });
   ev(0.2, "tool_use", "runner-dev", "terrarium", "Edit crates/terrariumd/src/runner.rs", { tool: "Edit" });
 
   let pos = 0;
@@ -475,36 +514,63 @@ See [[does/not-exist]] for the old design.
     },
   );
 
-  const hist = (base: number, slope: number) => Array.from({ length: 24 }, (_, i) => Math.max(0, Math.min(100, Math.round(base + slope * i + 6 * Math.sin(i / 2)))));
-
+  const win = (window: string, used_pct: number, resets: number, readMin = 1) => ({ window, used_pct, resets_at: ahead(resets), at: ago(readMin) });
+  const subBase = { source: "api" as const, created_at: ago(60 * 24 * 9), updated_at: ago(60), has_api_key: false, held_agents: 0 };
   const subscriptions: Subscription[] = [
     {
-      name: "anthropic-max", provider: "anthropic", plan: "Max 20x", harnesses: ["claude", "pi"], probe: "anthropic-oauth-usage", alert_at: 80,
-      status: "logged_in", verified_at: ago(4), last_poll_at: ago(1),
-      windows: [{ window: "5h", used_pct: 62, resets_at: ahead(97) }, { window: "7d", used_pct: 38, resets_at: ahead(60 * 24 * 3 + 200) }],
-      history: hist(10, 2.2),
+      ...subBase, name: "anthropic-max", provider: "anthropic", plan: "Max 20x", harnesses: ["claude", "pi"], probe: "anthropic-oauth-usage", alert_at: 80, source: "file",
+      login_status: "logged_in", verified_at: ago(4), probe_status: "ok", last_probe_at: ago(1), last_success_at: ago(1),
+      windows: [win("5h", 62, 97), win("7d", 38, 60 * 24 * 3 + 200)], local_estimate_only: false,
     },
     {
-      name: "chatgpt-pro", provider: "openai", plan: "ChatGPT Pro", harnesses: ["codex", "pi"], probe: "codex-rate-limits", alert_at: 80,
-      status: "expiring", verified_at: ago(30), last_poll_at: ago(5),
-      windows: [{ window: "primary", used_pct: 87, resets_at: ahead(41) }, { window: "secondary", used_pct: 54, resets_at: ahead(60 * 24 * 5) }],
-      history: hist(40, 2),
+      ...subBase, name: "chatgpt-pro", provider: "openai", plan: "ChatGPT Pro", harnesses: ["codex", "pi"], probe: "openai-codex-usage", alert_at: 80,
+      login_status: "expiring", verified_at: ago(30), probe_status: "ok", last_probe_at: ago(5), last_success_at: ago(5),
+      windows: [win("5h", 87, 41, 5), win("7d", 54, 60 * 24 * 5, 5)], local_estimate_only: false,
     },
     {
-      name: "copilot-pro", provider: "github", plan: "Copilot Pro+", harnesses: ["copilot"], probe: "copilot-premium-requests", alert_at: 90,
-      status: "logged_in", verified_at: ago(12), last_poll_at: ago(12),
-      windows: [{ window: "monthly", used_pct: 23, resets_at: ahead(60 * 24 * 8) }],
-      history: hist(18, 0.2),
+      ...subBase, name: "copilot-pro", provider: "github", plan: "Copilot Pro+", harnesses: ["copilot"], probe: "github-copilot-quota", alert_at: 90,
+      login_status: "logged_in", verified_at: ago(12), probe_status: "failed", probe_error: "the provider answered 401: the token has no Copilot Requests permission",
+      last_probe_at: ago(2), last_success_at: ago(60 * 3), windows: [win("monthly", 23, 60 * 24 * 8, 60 * 3)], local_estimate_only: false,
     },
     {
-      name: "openrouter-key", provider: "openrouter", plan: "API key", harnesses: ["pi"], probe: null, alert_at: 80,
-      status: "logged_in", verified_at: ago(60 * 3), windows: [], history: hist(0, 0),
+      ...subBase, name: "openrouter-key", provider: "openrouter", plan: "API key", harnesses: ["pi"], alert_at: 80, env_var: "OPENROUTER_API_KEY", has_api_key: true,
+      login_status: "logged_in", verified_at: ago(60 * 3), probe_status: "none", windows: [], local_estimate_only: true,
     },
     {
-      name: "gemini", provider: "google", plan: "Gemini Code Assist", harnesses: ["pi"], probe: "gemini-stats", alert_at: 80,
-      status: "missing", windows: [], history: [],
+      ...subBase, name: "gemini", provider: "google", plan: "Gemini Code Assist", harnesses: ["pi"], alert_at: 80,
+      login_status: "missing", probe_status: "none", windows: [], local_estimate_only: true,
     },
   ];
+  const apiKeys: MockWorld["apiKeys"] = { "openrouter-key": { provider: "openrouter", key: "sk-or-mock-never-shown" } };
+
+  // Quota samples: one per window per hour for a day, rising to the current value.
+  const quota: QuotaSample[] = [];
+  for (const s of subscriptions) {
+    for (const w of s.windows) {
+      for (let h = 23; h >= 0; h--) {
+        const pct = Math.max(0, Math.round(w.used_pct - h * (w.used_pct / 30) + 3 * Math.sin(h)));
+        quota.push({ subscription: s.name, window: w.window, used_pct: h === 0 ? w.used_pct : pct, resets_at: w.resets_at, raw: { utilization: pct, resets_at: w.resets_at }, at: ago(h * 60 + 1) });
+      }
+    }
+  }
+  quota.sort((a, b) => a.at.localeCompare(b.at));
+
+  // Local accounting: a week of rows for every agent on a subscription.
+  const MODELS: Record<string, string> = { claude: "claude-opus-5", codex: "gpt-5-codex", copilot: "claude-sonnet-5", pi: "anthropic/claude-sonnet" };
+  const usage: UsageRow[] = [];
+  for (const a of agents) {
+    if (!a.subscription) continue;
+    for (let h = 24 * 7 - 1; h >= 0; h--) {
+      const k = (a.name.length * 31 + h * 7) % 13;
+      if (k < 3) continue;
+      const at = new Date(now - h * 3600_000 - 7 * 60_000).toISOString();
+      const model = a.model ?? MODELS[a.harness]!;
+      usage.push({ at, agent: a.id, project: a.project, subscription: a.subscription, model, input_tokens: k * 420, output_tokens: k * 90, cache_read: k * 15000, cache_write: k * 1200, messages: k, turn: 1000 + Math.floor(h / 2) });
+      if (a.harness === "claude" && k % 4 === 0) {
+        usage.push({ at, agent: a.id, project: a.project, subscription: a.subscription, model: "claude-haiku-5-5", input_tokens: k * 40, output_tokens: k * 12, cache_read: k * 900, cache_write: 0, messages: 1, turn: 1000 + Math.floor(h / 2) });
+      }
+    }
+  }
 
   const msg = (id: string, thread: string, from: string, to: string, subject: string, body: string, state: Message["state"], min: number, extra: Partial<Message> = {}): Message => {
     const f = who(from);
@@ -538,15 +604,23 @@ See [[does/not-exist]] for the old design.
   ].sort((x, y) => x.created_at.localeCompare(y.created_at));
 
   const targets: Target[] = [
-    { id: "lab-win11", name: "lab-win11", kind: "vmlab", project: "terrarium", host: "lab1", scope: "project", state: "unknown", ephemeral: true, keep: false, snapshot_before_task: true, snapshots: [] },
-    { id: "build-box", name: "build-box", kind: "ssh", address: "build@buildbox.lan", scope: "global", state: "unknown", ephemeral: false, keep: false, snapshot_before_task: false, snapshots: [] },
-    { id: "pg-test", name: "pg-test", kind: "docker", project: "webshop", host: "lab1", scope: "project", state: "unknown", ephemeral: true, keep: false, snapshot_before_task: false, snapshots: [] },
+    { id: "lab-win11", name: "lab-win11", kind: "vmlab", project: "terrarium", host: "lab1", scope: "project", state: "down", ephemeral: true, keep: false, snapshot_before_task: true, snapshots: ["clean"], source: "file", usable: true },
+    { id: "build-box", name: "build-box", kind: "ssh", address: "build@buildbox.lan", scope: "global", state: "unknown", ephemeral: false, keep: false, snapshot_before_task: false, snapshots: [], source: "file", usable: true },
+    { id: "pg-test", name: "pg-test", kind: "docker", project: "webshop", host: "lab1", scope: "project", state: "up", ephemeral: true, keep: false, snapshot_before_task: false, snapshots: [], source: "api", usable: true },
+    { id: "pi-runner", name: "pi-runner", kind: "host", host: "pi-cluster", scope: "global", state: "unknown", ephemeral: false, keep: false, snapshot_before_task: false, snapshots: [], source: "file", usable: true },
   ];
 
   const hosts: Host[] = [
-    { name: "lab1", connected: true, os: "linux", arch: "x86_64", capabilities: { docker: true, vmlab: true }, last_seen: ago(0.1), version: "0.1.0" },
-    { name: "pi-cluster", connected: false, os: "linux", arch: "aarch64", capabilities: { docker: true, vmlab: false }, last_seen: ago(60 * 7), version: "0.0.9" },
+    {
+      name: "lab1", id: fakeUlid("host", 1), host_id: fakeUlid("host", 1), status: "online", online: true, sessions: 1, max_sessions: 32, connected_at: ago(60), os: "linux", arch: "x86_64", version: "0.1.0", last_seen: ago(0.1),
+      capabilities: { docker: { present: true, version: "29.8.0" }, vmlab: { present: true, version: "0.30.0-alpha" }, shell: "/bin/bash" },
+    },
+    {
+      name: "pi-cluster", id: fakeUlid("host", 2), host_id: fakeUlid("host", 2), status: "offline", online: false, sessions: 0, os: "linux", arch: "aarch64", version: "0.0.9", last_seen: ago(60 * 7),
+      capabilities: { docker: { present: true, version: "27.1.1" }, vmlab: { present: false }, shell: "/bin/sh" },
+    },
   ];
+  const hostTokens: Record<string, string> = { lab1: "th-mock-lab1", "pi-cluster": "th-mock-pi" };
 
   const auditRow = (n: number, min: number, actor: string, action: string, target: string, project: string | undefined, detail: Record<string, unknown>): AuditEntry => ({
     id: fakeUlid("aud", n),
@@ -568,6 +642,6 @@ See [[does/not-exist]] for the old design.
 
   return {
     projects, repos, agents, sessions, events, columns: { terrarium: COLUMNS.map((c) => ({ ...c })), webshop: COLUMNS.map((c) => ({ ...c })) },
-    cards, memories, links, pages, revisions, artifacts, artifactBodies, versions, subscriptions, mail, targets, hosts, audit, seq,
+    cards, memories, links, pages, revisions, artifacts, artifactBodies, versions, subscriptions, quota, usage, holds: [], apiKeys, mail, targets, hosts, hostTokens, audit, seq,
   };
 }
