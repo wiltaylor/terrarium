@@ -1,0 +1,166 @@
+//! The API error type and the JSON error shape.
+//!
+//! Every error answer has the body `{"error": {"code", "message", "details"?}}`.
+//! `docs/api.md` lists the codes.
+
+use axum::Json;
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use serde::Serialize;
+use serde_json::Value;
+
+/// The stable error codes of the API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Code {
+    /// The request is malformed: bad JSON, a bad query, a bad ID.
+    BadRequest,
+    /// No bearer token, a wrong token, or an unknown agent header.
+    Unauthorized,
+    /// The actor may not do this. The message says which rule refused it.
+    Forbidden,
+    /// The object does not exist, or the actor may not see it.
+    NotFound,
+    /// The route exists, but not with this method.
+    MethodNotAllowed,
+    /// The object exists already, or its state does not allow the change.
+    Conflict,
+    /// The object is declared in a file. Edit the file and reload.
+    FileManaged,
+    /// A destructive action needs `?confirm=true`.
+    ConfirmRequired,
+    /// The values are well-formed but break a rule.
+    Invalid,
+    /// The target column is at its WIP limit.
+    WipLimit,
+    /// The card has dependencies that are not done.
+    DependenciesUnmet,
+    /// Moving a card to `blocked` needs a comment.
+    CommentRequired,
+    /// The agent is not running.
+    NotRunning,
+    /// The agent is running already.
+    AlreadyRunning,
+    /// A bug or an I/O failure in the daemon.
+    Internal,
+}
+
+impl Code {
+    pub fn status(self) -> StatusCode {
+        match self {
+            Self::BadRequest => StatusCode::BAD_REQUEST,
+            Self::Unauthorized => StatusCode::UNAUTHORIZED,
+            Self::Forbidden => StatusCode::FORBIDDEN,
+            Self::NotFound => StatusCode::NOT_FOUND,
+            Self::MethodNotAllowed => StatusCode::METHOD_NOT_ALLOWED,
+            Self::Conflict
+            | Self::FileManaged
+            | Self::ConfirmRequired
+            | Self::WipLimit
+            | Self::DependenciesUnmet
+            | Self::NotRunning
+            | Self::AlreadyRunning => StatusCode::CONFLICT,
+            Self::Invalid | Self::CommentRequired => StatusCode::UNPROCESSABLE_ENTITY,
+            Self::Internal => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+}
+
+/// An error that becomes an HTTP answer.
+#[derive(Debug, Clone)]
+pub struct ApiError {
+    pub code: Code,
+    pub message: String,
+    pub details: Option<Value>,
+}
+
+pub type ApiResult<T> = Result<T, ApiError>;
+
+impl ApiError {
+    pub fn new(code: Code, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            details: None,
+        }
+    }
+
+    pub fn with_details(mut self, details: Value) -> Self {
+        self.details = Some(details);
+        self
+    }
+
+    pub fn bad_request(m: impl Into<String>) -> Self {
+        Self::new(Code::BadRequest, m)
+    }
+    pub fn forbidden(m: impl Into<String>) -> Self {
+        Self::new(Code::Forbidden, m)
+    }
+    pub fn not_found(m: impl Into<String>) -> Self {
+        Self::new(Code::NotFound, m)
+    }
+    pub fn conflict(m: impl Into<String>) -> Self {
+        Self::new(Code::Conflict, m)
+    }
+    pub fn invalid(m: impl Into<String>) -> Self {
+        Self::new(Code::Invalid, m)
+    }
+    pub fn internal(m: impl Into<String>) -> Self {
+        Self::new(Code::Internal, m)
+    }
+}
+
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}: {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for ApiError {}
+
+impl From<rusqlite::Error> for ApiError {
+    fn from(e: rusqlite::Error) -> Self {
+        tracing::error!("database: {e}");
+        Self::internal(format!("database error: {e}"))
+    }
+}
+
+impl From<serde_json::Error> for ApiError {
+    fn from(e: serde_json::Error) -> Self {
+        tracing::error!("json: {e}");
+        Self::internal(format!("json error: {e}"))
+    }
+}
+
+impl From<anyhow::Error> for ApiError {
+    fn from(e: anyhow::Error) -> Self {
+        tracing::error!("{e:#}");
+        Self::internal(format!("{e:#}"))
+    }
+}
+
+#[derive(Serialize)]
+struct Body<'a> {
+    error: Inner<'a>,
+}
+
+#[derive(Serialize)]
+struct Inner<'a> {
+    code: Code,
+    message: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    details: Option<&'a Value>,
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        let body = Body {
+            error: Inner {
+                code: self.code,
+                message: &self.message,
+                details: self.details.as_ref(),
+            },
+        };
+        (self.code.status(), Json(body)).into_response()
+    }
+}

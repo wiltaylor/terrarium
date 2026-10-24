@@ -26,4 +26,14 @@ pub struct Settings {
     /// Definitions: projects/, agents/, targets/, subscriptions/.
     #[arg(long, env = paths::ENV_CONFIG_DIR, default_value = paths::DEFAULT_CONFIG_DIR)]
     pub config_dir: PathBuf,
+
+    /// The step delay of the in-memory supervisor, in milliseconds. The fake
+    /// stands in for the agent runner until the runner is wired in.
+    #[arg(
+        long,
+        env = "TERRARIUM_FAKE_DELAY_MS",
+        default_value_t = 300,
+        hide = true
+    )]
+    pub fake_delay_ms: u64,
 }
