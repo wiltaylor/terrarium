@@ -85,14 +85,14 @@ These are settled. The rest of the plan follows from them.
 | | Claude Code 2.1.310 | Codex 0.160.0 | Copilot CLI 1.0.103 | pi 0.85.1 |
 |---|---|---|---|---|
 | Interactive start | `claude` | `codex --no-daemon` (always: without it, Codex starts a shared app-server daemon that outlives the TUI) | `copilot --experimental` (needed for the prompt extension) | `pi --provider <p> --model <m>` |
-| Yolo | `--dangerously-skip-permissions` (refuses as root; `--allow-dangerously-skip-permissions` to override) | `--dangerously-bypass-approvals-and-sandbox` or `-a never -s danger-full-access` | `--yolo`, plus `COPILOT_ALLOW_ALL=true` to trust the folder | tools run without approval by default (to verify); `--approve` trusts project-local files |
+| Yolo | `--dangerously-skip-permissions` (refuses as root; `--allow-dangerously-skip-permissions` to override) | `--dangerously-bypass-approvals-and-sandbox` or `-a never -s danger-full-access` | `--yolo`, plus `COPILOT_ALLOW_ALL=true` to trust the folder | tools run without approval by default (verified); `--no-approve` skips the trust dialog |
 | Set session ID on start | `--session-id <uuid>` | none seen (read it from the session file or hook event) | `--session-id <uuid>` | `--session-id <id>` |
 | Resume | `--resume <id>` | `codex resume <id>` | `--resume <id>` or `--session-id <id>` | `--session <id>` or `--session-id <id>` |
-| System prompt | `--system-prompt`, `--append-system-prompt` | `-c` config override (key to verify: `model_instructions_file`), plus `AGENTS.md` in the workspace | [CopilotCustomSystemPrompt](https://github.com/wiltaylor/CopilotCustomSystemPrompt) extension: `~/.copilot/SYSTEM.md` replaces, `APPEND_SYSTEM.md` appends | `--system-prompt <text|file>`, `--append-system-prompt` |
+| System prompt | `--system-prompt`, `--append-system-prompt` | `-c model_instructions_file=<file>` replaces, `-c developer_instructions=` appends (verified); frozen at session creation | [CopilotCustomSystemPrompt](https://github.com/wiltaylor/CopilotCustomSystemPrompt) extension: `~/.copilot/SYSTEM.md` replaces, `APPEND_SYSTEM.md` appends | `--system-prompt <text|file>`, `--append-system-prompt` |
 | Hooks | yes, inject via `--settings <json>` | `-c 'hooks.<Event>=[...]'`, plus `--dangerously-bypass-hook-trust` (else a "Hooks need review" dialog blocks the start) | `--plugin-dir <dir>` with `hooks.json` at the plugin root. The shared home's own hooks also run. | no hooks: a Terrarium extension loaded with `-e <path>` sends the events to the runner socket |
 | Config home env | `CLAUDE_CONFIG_DIR` | `CODEX_HOME` | `COPILOT_HOME` | `PI_CODING_AGENT_DIR` (`~/.pi/agent`: `auth.json`, `models.json`, `settings.json`, `sessions/`), `PI_CODING_AGENT_SESSION_DIR` |
 | Trust dialog | pre-seed in `~/.claude.json` | `-c projects.<path>.trust_level="trusted"` (`--skip-git-repo-check` is an `exec` flag, and the TUI rejects it) | `COPILOT_ALLOW_ALL=true` | `--approve` or `--no-approve`; `--no-context-files` to skip AGENTS.md |
-| Updates / telemetry off | `DISABLE_AUTOUPDATER=1`, `DISABLE_TELEMETRY=1` | `-c` key (to verify) | `COPILOT_AUTO_UPDATE=false`, `--disable-client-telemetry` | `PI_TELEMETRY=0`, `--offline` for startup network (to verify) |
+| Updates / telemetry off | `DISABLE_AUTOUPDATER=1`, `DISABLE_TELEMETRY=1` | `-c check_for_update_on_startup=false -c analytics.enabled=false -c feedback.enabled=false` | `COPILOT_AUTO_UPDATE=false`, `--disable-client-telemetry` | `PI_TELEMETRY=0`, `--offline` for startup network |
 | Working dir | `cd` | `-C <dir>` | `-C <dir>` | `cd` |
 | Clean exit | `/exit` | `/exit` | `/exit` | `/quit` (Ctrl-C does not exit) |
 | Subscriptions | Anthropic OAuth | OpenAI OAuth | GitHub. On a host the token is in the system keychain (D-Bus). In a sandbox the daemon passes it as `COPILOT_GITHUB_TOKEN`. | OpenAI Codex, GitHub Copilot, Google, and API keys. pi cannot spend an Anthropic Pro/Max plan: Anthropic bills it as extra usage (`docs/compat.md`, "pi"). Use an Anthropic API key. `pi auth` prints and checks credentials. |
@@ -102,7 +102,8 @@ Observations that shape the design:
 
 - Interactive mode means the harness owns stdin. Terrarium talks to it by
   typing into the PTY. Terrarium learns its state from hooks, not from a JSON
-  stream. All three harnesses have hooks. Hooks are the primary status signal.
+  stream. Claude, Codex, and Copilot have hooks; pi has an extension API that
+  the Terrarium extension uses the same way. These are the primary status signal.
 - All three support a system prompt override from outside the workspace.
   Claude and Codex do it natively. Copilot needs the CopilotCustomSystemPrompt
   extension, which uses the Copilot SDK `systemMessage` API and keeps native
@@ -926,7 +927,7 @@ Two sources of truth, combined:
 
 1. **Provider probes.** Where a provider exposes usage for a subscription,
    the daemon polls it on a schedule and stores samples. Known or likely
-   endpoints, each to verify in Phase 0:
+   endpoints, verified in Phase 2f (see compat.md "Usage probes"):
    - Anthropic: the OAuth usage endpoint behind Claude Code's `/usage`, with
      5-hour and 7-day window utilisation and reset times.
    - OpenAI Codex: rate-limit windows that Codex reports in its session
