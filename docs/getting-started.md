@@ -70,6 +70,18 @@ Open <http://localhost:8080>. If you changed `TERRARIUM_PORT` in `.env`, use
 that port. The dashboard shows a token screen. Paste the value of
 `TERRARIUM_TOKEN`.
 
+The dashboard keeps the token in memory and in the `sessionStorage` of the
+tab. A reload keeps it. A new tab asks for it again. If you select
+**Remember on this device**, the dashboard also puts the token in
+`localStorage`. Then the token stays after you close the browser, and any
+script on the page can read it. Use this option only on a device that you
+trust. **sign out** in the sidebar removes every copy
+([../dashboard/src/README.md](../dashboard/src/README.md)).
+
+Set `TERRARIUM_PUBLIC_URL` in `.env` to the dashboard URL as you open it.
+The daemon puts this URL in the links of operator mail (the default is
+`http://localhost:8080`).
+
 ### 2.4 Log in to Claude
 
 All agents share one Claude home, so you log in once. Use the dashboard, or
@@ -171,6 +183,119 @@ docker compose exec terrarium terrarium agent attach demo/worker
 
 Press Ctrl-] to detach. The agent continues to run.
 
+### 2.7 Connect a host agent
+
+A host agent (`terrarium-host`) runs on a machine outside the container. It
+dials in to the daemon on port 8082 and runs the commands of `host`,
+`docker`, and `vmlab` targets (PLAN §19,
+[host-protocol.md](host-protocol.md)).
+
+The default host listener is plaintext on `127.0.0.1:8082` in the
+container. The published port cannot reach it, so a remote host agent
+cannot connect. This default keeps the host tokens and the exec traffic off
+the network in clear text. For a remote host agent, turn on TLS:
+
+1. Make a certificate for the name or the address that the host agents
+   dial:
+
+   ```sh
+   just host::cert terrarium.lan
+   ```
+
+   The recipe writes `config/tls/host-cert.pem` and
+   `config/tls/host-key.pem`, and prints the SHA-256 of the certificate.
+
+2. Set the two paths in `.env`. Compose mounts `config/tls` at
+   `/etc/terrarium/tls`:
+
+   ```sh
+   TERRARIUM_HOST_TLS_CERT=/etc/terrarium/tls/host-cert.pem
+   TERRARIUM_HOST_TLS_KEY=/etc/terrarium/tls/host-key.pem
+   ```
+
+3. Start the stack again with `just up`. The daemon now speaks TLS on
+   `0.0.0.0:8082`. The start log shows the SHA-256 of the certificate.
+
+4. Install the host agent on the remote machine over ssh:
+
+   ```sh
+   just host::install root@lab1.lan lab1
+   ```
+
+   The ssh user must be `root`, or must have `sudo` with no password
+   prompt. The recipe builds `terrarium-host`, copies the binary and the
+   systemd unit, and writes a config with `daemon_url` and the certificate
+   pin. Then it gets a one-time enrol token from the daemon, writes it to
+   the token file on the host, starts the service, and probes the link.
+   Add `--dry-run` to see each command first. Nothing runs then.
+
+The recipe finds `daemon_url` in `--daemon-url`, then in
+`TERRARIUM_HOST_DAEMON_URL`, then in the host of `TERRARIUM_PUBLIC_URL`
+(port 8082). A `localhost` URL stops the install, because a remote machine
+cannot dial it.
+
+The enrol token works one time, for 10 minutes. At its first connect, the
+host agent swaps it for a long-lived token and writes that token to its
+token file. So the long-lived token never goes through your clipboard. To
+do the steps by hand, get an enrol token with `admin host new <name>
+--enrol`, and give a host a new token with `admin host rotate <name>`. See
+[cli.md](cli.md) for the exact commands, and
+[host-protocol.md](host-protocol.md), "Tokens" and "Install", for each
+step.
+
+A host agent on the Docker host itself can stay on plaintext. Set
+`TERRARIUM_HOST_LISTEN=0.0.0.0:8082` and `TERRARIUM_HOST_PORT=127.0.0.1:8082`
+in `.env`, so that only the local machine can reach the port. The daemon
+logs a warning that starts with `INSECURE` for a plaintext bind to a
+non-loopback address. The warning is correct here, because the port is
+published on loopback only.
+
+### 2.8 Declare a fleet
+
+A fleet file declares projects, repos, agents, targets, and subscriptions
+in one TOML file ([fleet.md](fleet.md)). The example is
+[`examples/fleet/terrarium.fleet.toml`](../examples/fleet/terrarium.fleet.toml).
+
+1. Copy the example to `fleets/` and edit it:
+
+   ```sh
+   cp examples/fleet/terrarium.fleet.toml fleets/terrarium.toml
+   ```
+
+2. Check the file and see the changes. The `t` function of section 2.5
+   runs the CLI in the container, so give the path in the container:
+
+   ```sh
+   t fleet validate /etc/terrarium/fleets/terrarium.toml
+   t fleet plan /etc/terrarium/fleets/terrarium.toml
+   ```
+
+3. Apply it:
+
+   ```sh
+   t fleet apply /etc/terrarium/fleets/terrarium.toml
+   ```
+
+Compose mounts `./fleets` at `/etc/terrarium/fleets`. The daemon applies
+each `*.toml` file there at start and on `t daemon reload`. This
+auto-apply does not prune, does not start agents, and does not clone
+repos. Use `t fleet apply --prune` and `--start` for that.
+
+### 2.9 Write your own API client
+
+The TCP API needs `Authorization: Bearer <token>` on each request to
+`/api/*`. A browser cannot set this header on a WebSocket. So a WebSocket
+client sends the token as a subprotocol:
+`Sec-WebSocket-Protocol: bearer.<token>`. In a browser, that is
+`new WebSocket(url, ["bearer." + token])`. The daemon echoes the same
+subprotocol in its `101` answer.
+
+Do not put the token in the `?token=` query string. That form is
+deprecated, because a query string goes into proxy logs and browser
+history. The daemon logs a warning when a client uses it.
+`TERRARIUM_WS_QUERY_TOKEN=0` makes the daemon refuse it. See
+[api.md](api.md), section 1.
+
 ## 3. Configuration directories
 
 Compose bind-mounts these host directories into the container:
@@ -184,6 +309,8 @@ Compose bind-mounts these host directories into the container:
 | `state/` | `/state` | SQLite, agent workspaces and logs, artifacts, credentials. |
 | `prompts/` | `/prompts` (read-only) | System prompt templates. |
 | `projects/`, `agents/`, `targets/`, `subscriptions/` | `/etc/terrarium/...` | Definition files. |
+| `fleets/` | `/etc/terrarium/fleets` | Fleet files (section 2.8). |
+| `config/tls/` | `/etc/terrarium/tls` (read-only) | The certificate and key of the host listener (section 2.7). |
 
 These directories contain credentials. Do not commit them.
 

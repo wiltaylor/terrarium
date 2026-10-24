@@ -28,7 +28,7 @@ The daemon serves one router on two listeners.
 |---|---|---|
 | Unix socket | `$TERRARIUM_API_SOCKET` | None. The caller is the operator. |
 | TCP | `$TERRARIUM_LISTEN` | `Authorization: Bearer $TERRARIUM_TOKEN` on `/api/*`. Without a token the TCP listener stays off. |
-| TCP, host agents | `$TERRARIUM_HOST_LISTEN` (default `0.0.0.0:8082`) | `GET /hosts/connect` only, with a per-host token (§17.1). |
+| TCP, host agents | `$TERRARIUM_HOST_LISTEN` (default `auto`: `0.0.0.0:8082` with TLS, `127.0.0.1:8082` without) | `GET /hosts/connect` only, with a per-host token (§17.1). TLS when `TERRARIUM_HOST_TLS_CERT` and `TERRARIUM_HOST_TLS_KEY` are set. |
 
 A browser cannot set headers on a WebSocket. A WebSocket upgrade on TCP
 sends the token as a subprotocol: `Sec-WebSocket-Protocol: bearer.<token>`
@@ -458,7 +458,7 @@ An agent is the core `Agent` with bookkeeping fields:
 | `status` | `starting`, `idle`, `working`, `blocked`, `error`, `stopped`, `restarting`. |
 | `session` | The harness session ID of the current session, when known. |
 | `current_card` | The card the agent has in `in_progress`, if any. |
-| `source` | `file` or `api`. |
+| `source` | `file`, `api`, or `fleet:<name>` (§18.1). |
 
 ### 6.1 CRUD
 
@@ -1268,7 +1268,12 @@ Release points that the user reviews (PLAN §15.3). The code is in
   letter or a digit. A name is unique in its project.
 - Statuses: `draft`, `in_review`, `approved`, `rejected`, `released`.
 - `reviews` decisions: `submitted`, `approved`, `rejected`, `released`.
-- `url` is the dashboard page of the version.
+- `url` is the path of the version as the API names it:
+  `/projects/<project>/versions/<id>`. The dashboard route of the same
+  page is `/p/<project>/versions/<id>`, and operator mail links to that
+  route on `TERRARIUM_PUBLIC_URL` (§13.2). A client that opens the
+  dashboard page must build the `/p/...` path itself; `url` is not a
+  dashboard route.
 
 ### 13.2 Rules
 
@@ -1377,7 +1382,7 @@ A subscription:
 
 | Field | Meaning |
 |---|---|
-| `source` | `file` (`subscriptions/<name>.toml`) or `api` (the API, the login wizard, an API key). A file subscription whose file is gone becomes `api` on reload; its samples stay. |
+| `source` | `file` (`subscriptions/<name>.toml`), `api` (the API, the login wizard, an API key), or `fleet:<name>` (a fleet file, §18.1). A file subscription whose file is gone becomes `api` on reload; its samples stay. |
 | `login_status` | `logged_in`, `expiring`, `expired`, `missing`, or `unknown` (not checked yet). See "Expired logins" in §16.2. |
 | `probe_status` | `ok`, `failed` (`probe_error` says why), or `none` (no probe, or not run yet). `last_success_at` stays when a probe fails. |
 | `windows` | The newest sample of each window. Window names: `5h`, `7d`, `7d_opus`, `7d_sonnet` (Anthropic); `<n>h` or `<n>d` from the window length (OpenAI); `monthly` (Copilot premium requests). |
@@ -1707,8 +1712,9 @@ Rules:
 
 ### 17.2 Targets
 
-A target comes from `targets/<name>.toml` (`source: "file"`) or from
-`POST /api/targets` (`source: "api"`). Target names are one namespace for
+A target comes from `targets/<name>.toml` (`source: "file"`), from
+`POST /api/targets` (`source: "api"`), or from a fleet file
+(`source: "fleet:<name>"`, §18.1). Target names are one namespace for
 all projects.
 
 ```json

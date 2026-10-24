@@ -67,7 +67,7 @@ pub struct TargetView {
     pub def: TargetDef,
     /// `global` or `project`.
     pub scope: &'static str,
-    /// `file` or `api`.
+    /// `file`, `api`, or `fleet:<name>` (`docs/api.md` §18.1).
     pub source: String,
     /// The state that the last lifecycle verb saw.
     pub state: String,

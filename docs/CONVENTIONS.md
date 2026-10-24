@@ -90,8 +90,12 @@ a new token, when `.env` does not exist. The daemon reads:
 | `TERRARIUM_SANDBOX_NEW_SESSION` | off. On: pass `--new-session` to bwrap (the harness then misses PTY resizes). |
 | `TERRARIUM_HARNESS_HOME` | `/auth/<harness>`. Override as `claude=/path,codex=/path`. |
 | `TERRARIUM_CLI`        | `terrarium` next to `terrariumd`, else on `PATH`. The sandbox binds it at `/opt/terrarium/bin/terrarium`. |
-| `TERRARIUM_ARTIFACT_LISTEN` | `0.0.0.0:8081`. Empty: no artifact listener of its own. |
-| `TERRARIUM_HOST_LISTEN` | `0.0.0.0:8082`, the host agent dial-in. Empty: no listener of its own; the main router still serves `/hosts/connect`. |
+| `TERRARIUM_ARTIFACT_LISTEN` | `0.0.0.0:8081`. Empty: no artifact listener of its own, and the dashboard port serves `/a/...`. With a listener, the dashboard port does not serve artifacts. |
+| `TERRARIUM_HOST_LISTEN` | `auto`, the host agent dial-in: `0.0.0.0:8082` with TLS, `127.0.0.1:8082` without. Empty: no listener of its own; the main router still serves `/hosts/connect`. A plaintext bind to a non-loopback address logs an `INSECURE` warning. |
+| `TERRARIUM_HOST_TLS_CERT`, `TERRARIUM_HOST_TLS_KEY` | unset. Both set: the host listener speaks TLS with this PEM certificate chain and key (`just host::cert`). One alone stops the daemon at start. |
+| `TERRARIUM_PUBLIC_URL` | `http://localhost:8080`. The dashboard as the operator opens it, for the links in operator mail. `just host::install` also takes the host agent's `daemon_url` from its host. |
+| `TERRARIUM_ARTIFACT_PUBLIC_URL` | unset: the host of the request with the port of `TERRARIUM_ARTIFACT_LISTEN`. The artifact origin as a browser opens it, for signed artifact URLs. |
+| `TERRARIUM_WS_QUERY_TOKEN` | on. `0` (or `false`, `no`, `off`): refuse the bearer token in `?token=` on a WebSocket upgrade. Clients send it as the subprotocol `bearer.<token>`. |
 | `TERRARIUM_SSH` | `ssh`. The ssh binary for `ssh` targets. |
 | `TERRARIUM_INSECURE_AGENT_HEADER` | off. On: trust `X-Terrarium-Agent` on the Unix socket (tests only). |
 
@@ -107,11 +111,29 @@ through a reboot.
 | `<run>/runners/<ulid>.sock` | The control socket of each runner process, for the daemon (mode `0600`). |
 | `<run>/runners/<ulid>.pid` | The pid of each runner process. The live runner holds a `flock` on it; the daemon reads it at start to find the runners that still run. |
 
-A runner process also writes `runner.json`, `runner.log`, and
-`runner-exit.json` in `<state>/agents/<ulid>/` ([runner.md](runner.md)).
+### The agent directory
+
+Each agent has `<state>/agents/<ulid>/` with three parts
+([runner.md](runner.md), "Files"; PLAN §11). Keep each file in the right
+part. A file that the harness must not change never goes in `harness/` or
+`workspace/`.
+
+| Directory | Content | May write | In the sandbox |
+|---|---|---|---|
+| `private/` | `events.jsonl`, `pty.log`, `pty.log.1`, `runner.json` (the launch spec with the injected keys), `runner-argv.json`, `runner-exit.json`, `runner.log`, `session-prompt.sha256`. Mode `0700`. | The daemon and the runner only. | Not bound. The harness cannot read or change it. |
+| `harness/` | `prompt.md` and the per-agent files of each adapter (`claude/`, `codex/`, `copilot/`, `pi/`). | The daemon (through the adapter) when it builds the launch. The harness writes only the files that an adapter declares as a `FileOverlay` with `writable: true`. | Read-only at its own path. Each writable overlay has its own read-write bind. |
+| `workspace/` | The agent's files and repository checkouts. | The harness, and the daemon for clones. | Read-write at `$HOME/work`. |
+
+Use `terrarium_runner::{private_dir, harness_dir, workspace_dir}` for the
+paths. A daemon start moves an agent directory of the older flat layout
+into `private/` and `harness/` once (`migrate_legacy_layout`). The test
+`the_sandbox_never_binds_the_private_dir` in `sandbox.rs` checks that no
+bind names `private/`.
 
 The CLI uses the Unix socket. Set `TERRARIUM_URL` and `TERRARIUM_TOKEN` to use
 TCP instead. The CLI supports `http://` only.
 
 The TCP listener asks for the bearer token on `/api/*` only. The dashboard
 files are public, because a browser cannot send a header when it loads a page.
+A WebSocket upgrade sends the token as the subprotocol `bearer.<token>`
+(`Sec-WebSocket-Protocol`), not in the URL ([api.md](api.md) §1).

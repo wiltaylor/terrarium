@@ -184,7 +184,7 @@ definition directories runs first, so a definition file wins over a fleet
 file.
 
 The Docker image mounts each definition directory on its own (PLAN §23.4).
-To use `fleets/`, add a bind mount for `./fleets:/etc/terrarium/fleets`.
+`compose.yaml` mounts `./fleets` at `/etc/terrarium/fleets`, and `just docker::volumes-init` creates the directory.
 
 ## 5. Policy
 

@@ -3,7 +3,7 @@
 Terrarium wraps AI coding harnesses (Claude Code, Codex, Copilot CLI) so that
 one API, one CLI, one dashboard, and one status model apply to all of them.
 
-Status: draft v0.15, 2026-10-24. Phases 0 to 5 largely built; Phase 6 partly. See §20, "Build status", and README.md.
+Status: draft v0.16, 2026-10-24. Phases 0 to 5 largely built; Phase 6 partly (the fleet file is done). The security review fixes F1 to F7 are in (`docs/security-review.md`). See §20, "Build status", and README.md.
 
 ---
 
@@ -533,12 +533,22 @@ passes straight through. Visible to the harness:
 |---|---|---|
 | `/usr`, `/lib`, `/bin`, `/etc` (subset), Node, harness binaries | ro | the harness must run |
 | `/state/agents/<ulid>/workspace` as `$HOME/work` | rw | the agent's files |
-| `/state/agents/<ulid>/harness` at the same path | ro | `prompt.md` and the adapter's per-agent files |
+| `/state/agents/<ulid>/harness` at the same path | ro | `prompt.md` and the adapter's per-agent files. The harness cannot change them. |
 | `/auth/claude` as `$HOME/.claude`, `/auth/pi` as `$HOME/.pi`, etc. | rw | shared login and sessions |
 | per-agent overlays from `harness/` (`FileOverlay`) | rw or ro | the files that the harness writes itself are rw (Claude's `.claude.json`, `sessions/`, `history.jsonl`, `backups/`, memory; Copilot's settings, history, state files, `logs/`, cache; pi's `settings.json` and `sessions/`; Codex's `history.jsonl`); the rest are ro (Copilot's `SYSTEM.md`, hook dirs, Codex's `hooks.json`, pi's extension) |
 | `/run/terrarium/agents/<ulid>.sock` | rw | hooks and the agent CLI |
 | `/usr/local/bin/terrarium` | ro | the CLI |
 | `/tmp`, `/proc`, `/dev/pts` | private | normal process needs |
+| `/state/agents/<ulid>/private` | not bound | the runner's records; see below |
+
+The agent directory `/state/agents/<ulid>/` has three parts
+(`docs/runner.md`, "Files"):
+
+| Directory | Holds | Writers | In the sandbox |
+|---|---|---|---|
+| `private/` (mode 0700) | `events.jsonl`, `pty.log`, `runner.json`, `runner-argv.json`, `runner-exit.json`, `runner.log`, `session-prompt.sha256` | the daemon and the runner | not bound |
+| `harness/` | `prompt.md`, the adapter's per-agent dirs (`claude/`, `codex/`, `copilot/`, `pi/`) | the daemon (adapter) at launch; the harness only through the writable overlays | ro at its own path, with rw binds for the writable overlays |
+| `workspace/` | the agent's files and checkouts | the harness, and the daemon for clones | rw at `$HOME/work` |
 
 Hidden: other agents' workspaces, `/state/terrarium.db`, the daemon socket, the
 Docker socket, SSH keys, the host filesystem, and the agent's own
@@ -583,8 +593,9 @@ bwrap"; the code is `crates/terrariumd/src/sandbox.rs`):
 - The table above holds, with `/etc` limited to name lookup, TLS roots,
   `passwd`/`group`, `localtime`, `alternatives`, and the linker cache. A
   merged-`/usr` host gets `/lib`, `/lib64`, `/bin`, `/sbin` as symlinks.
-  `$HOME` is a tmpfs; the workspace is `$HOME/work`; the agent dir is bound
-  at its own path; the socket is `/run/terrarium/agent.sock`; the CLI is
+  `$HOME` is a tmpfs; the workspace is `$HOME/work`; the `harness/` dir is
+  bound read-only at its own path, with read-write binds for the writable
+  overlays only; `private/` is not bound; the socket is `/run/terrarium/agent.sock`; the CLI is
   `/opt/terrarium/bin/terrarium`. A harness binary outside `/usr` is bound
   read-only at its real path.
 - The child env starts empty: `PATH`, `HOME`, `TERM`, `LANG`, the
@@ -1134,6 +1145,22 @@ not be on the same machine as the labs. A **host agent** closes that gap.
 - It dials **out** to the daemon over WebSocket with a per-host token. Hosts
   need no open inbound port and work behind NAT. The daemon multiplexes many
   exec sessions over the one connection.
+- The link uses TLS (`wss://`) when the daemon has a certificate
+  (`TERRARIUM_HOST_TLS_CERT`, `TERRARIUM_HOST_TLS_KEY`; `just host::cert`
+  makes a self-signed one). The host agent can pin the certificate with
+  `server_fingerprint_sha256`. Without a certificate, the daemon's host
+  listener is plaintext on `127.0.0.1:8082` only, so a remote host cannot
+  reach it. A host agent refuses `ws://` to a host that is not loopback,
+  unless its config has `allow_insecure = true`
+  (`docs/host-protocol.md`, "TLS").
+- Tokens: the daemon stores only a hash of each token. The operator can
+  rotate a token (`terrarium admin host rotate`) or revoke it. An **enrol
+  token** works one time, for 10 minutes: at its first connect, the host
+  agent swaps it for a new long-lived token, which the daemon sends in
+  `welcome`. So the long-lived token never goes through the operator's
+  clipboard. `just host::install <user@host> <name>` does the full install
+  over ssh with an enrol token and the certificate pin
+  (`docs/host-protocol.md`, "Tokens" and "Install").
 - It implements the executor protocol locally: `exec` (streamed, optional
   PTY), `cp`, and `shell`.
 - It implements target lifecycle for the tools present on that host:
@@ -1257,7 +1284,7 @@ dashboard.
 **Phase 6 — Polish.** Mail and event views. Fleet definition file that
 declares many agents and targets at once. Sibling-container sandbox fallback.
 
-### Build status (2026-10-24)
+### Build status (2026-10-24, v0.16)
 
 From README.md and the tree. "Done" means built and in the tree. The
 end-to-end scenarios of each phase are not scripted yet (no `spikes/e2e/`).
@@ -1272,9 +1299,10 @@ end-to-end scenarios of each phase are not scripted yet (no `spikes/e2e/`).
 | 2e | Wiki, artifacts with the separate serving origin, versions with review. | — |
 | 2f | Subscriptions with file and API definitions, verified probes (Anthropic, OpenAI Codex, GitHub Copilot), local accounting from session files, the quota policy (alerts and holds), daily project budgets, API keys, expired-login mail, and the login wizard (embedded terminal, URL and device-code extraction). `terrarium usage`. Dashboard Subscriptions and Spend pages. | — |
 | 3 | Codex, Copilot, and pi adapters, registered in the daemon. `just ci::compat` (crate `terrarium-compat`). Claude passes every step of the suite. | Codex, Copilot, and pi are built against the Phase 0 captures. They have not run live through the daemon. On this host the suite skips Codex and Copilot (operator hooks in the shared home), and pi runs only on opt-in. |
-| 4 | One `terrarium-runner` process per agent (the default runner mode): the agents live through a daemon restart. Reconcile on daemon start (`Supervisor::recover`), reconnect on a dropped control connection, restart policies with backoff and crash-loop detection, resume of the same session, recap turn. | A daemon crash inside Docker still stops the runners (§21). |
-| 5 | `terrarium-host` with dial-out, token auth, and the executor protocol. `host`, `ssh`, `docker`, and `vmlab` targets. `terrarium exec`, `shell`, `cp`. Lifecycle verbs, ephemeral targets, snapshots. `repo checkout --target` through the host agent. Hosts and Targets views in the dashboard. | The vmlab verbs are verified only against the reference output of the vmlab CLI, not against a live lab. `just host::install` is not built. |
-| 6 | Mail and event views in the dashboard. | The fleet definition file is not started. The sibling-container sandbox fallback is not started. |
+| 4 | One `terrarium-runner` process per agent (the default runner mode): the agents live through a daemon restart. Reconcile on daemon start (`Supervisor::recover`), reconnect on a dropped control connection, restart policies with backoff and crash-loop detection, resume of the same session, recap turn. The entrypoint supervisor loop starts `terrariumd` again after a crash in Docker, and the runners keep running (verified with `just docker::crash-test`, `docker/README.md`). The `stopped_by` mark in `runner-exit.json` gives resume after a container stop. | — |
+| 5 | `terrarium-host` with dial-out, token auth, and the executor protocol. `host`, `ssh`, `docker`, and `vmlab` targets. `terrarium exec`, `shell`, `cp`. Lifecycle verbs, ephemeral targets, snapshots. `repo checkout --target` through the host agent. Hosts and Targets views in the dashboard. TLS on the host link with certificate pinning (`just host::cert`), token rotation and one-time enrol tokens (`terrarium admin host new\|rotate --enrol`), and `just host::install <user@host> <name>` (`scripts/host-install.py`, with `--dry-run`). | The vmlab verbs are verified only against the reference output of the vmlab CLI, not against a live lab. |
+| 6 | Mail and event views in the dashboard. The fleet file (`docs/fleet.md`): `terrarium fleet validate`, `plan`, `apply` (with `--prune`), `ls`, `show`, and `export`, ownership as `source: "fleet:<name>"`, and the auto-apply of `fleets/*.toml` at start and on reload. | The sibling-container sandbox fallback is not started. |
+| Security | The fixes for findings F1 to F7 of `docs/security-review.md`: the `private/` and `harness/` split of the agent dir (F1, §11); TLS on the host link with a loopback-only plaintext default, pinning, rotation, and enrol (F2, §19); DOMPurify as the one HTML sink, an ESLint guard, adversarial payload tests, and a page CSP in the dashboard (F3); the WebSocket token in the `bearer.<token>` subprotocol, with `TERRARIUM_WS_QUERY_TOKEN=0` to refuse `?token=` (F4); artifacts off the dashboard origin by default, with an origin badge in the viewer (F5); no PTY log for the login flow (F6); a constant-time token compare (F7). | An `HttpOnly` session cookie for the dashboard, and the CSP as a response header (`dashboard/src/README.md`, "Daemon follow-ups"). |
 
 ---
 
@@ -1285,8 +1313,8 @@ end-to-end scenarios of each phase are not scripted yet (no `spikes/e2e/`).
 | Typing into a TUI is fragile (prompt not ready, paste mangled) | Gate on `idle` plus a screen check. Bracketed paste. Confirm with the prompt-submit hook. Retry once. |
 | Hooks do not fire or change shape | Fall back to PTY silence heuristics. Pin versions. Compatibility suite. |
 | `bwrap` blocked by Docker seccomp | Document the required `--security-opt`. Sibling-container fallback. |
-| Shared harness home under concurrent writers | Normal for all three harnesses. Verify in Phase 0 under load. |
-| Shared Claude home: `history.jsonl`, `sessions/<pid>.json`, `backups/`, and auto memory are written by every agent | Per-agent overlays for all four, verified with two agents at once and a real `--resume` (spikes/claude/concurrency). Transcripts stay shared and readable by peers. |
+| Shared harness home under concurrent writers | **Mitigated** for the files that collide: each agent gets per-agent overlays for them (next row, §11). Two Claude agents at once are verified; a test under load is not done. |
+| Shared Claude home: `history.jsonl`, `sessions/<pid>.json`, `backups/`, and auto memory are written by every agent | **Mitigated.** Per-agent overlays for all four, verified with two agents at once and a real `--resume` (spikes/claude/concurrency). The overlays live in the agent's `harness/` dir and are its only writable binds there (§11). Transcripts stay shared and readable by peers. |
 | Agent-to-agent prompt injection | Mail is untrusted. Push only a pointer, not the body. Delimit on read. Say so in the prompt. |
 | Runaway cost with yolo and `always` restart | Per-agent turn and time budgets. Crash-loop detection. Dashboard shows turn counts. |
 | Yolo agent escapes through `terrarium exec` | Policy limits targets per agent. Ephemeral targets by default for risky work. |
@@ -1298,17 +1326,24 @@ end-to-end scenarios of each phase are not scripted yet (no `spikes/e2e/`).
 | API keys or OAuth codes leak through the dashboard | Keys are write-only through the API, stored 0600, injected as env only into the agents on that subscription. The login PTY is operator-only, short-lived, and audited. |
 | Provider usage endpoints are undocumented and change | Treat probes as best-effort with a last-success time. Local accounting is always present. Each probe is a small isolated module with a test fixture. |
 | A plan hits its limit mid-task and agents thrash | Pause at 100 percent, mark `blocked` with the reset time, resume after reset. Alert at a threshold so the operator or a sysadmin agent can move agents to another subscription first. |
-| An uploaded HTML artifact attacks the dashboard | Separate serving origin, signed short-lived URLs, sandboxed iframes without same-origin, sniffed content types, no script access to the API. |
+| An uploaded HTML artifact attacks the dashboard | Separate serving origin, signed short-lived URLs, sandboxed iframes without same-origin, sniffed content types, no script access to the API. With the artifact listener on (the default), the dashboard port does not serve `/a/...`; the viewer shows a badge when artifacts share the dashboard origin (F5 below). |
 | Artifact storage grows without bound | Content-hash dedupe, per-project quotas, retention tied to released versions and live pages, pruning with a day's warning. |
 | Wiki goes stale and misleads | Review status on pages. Backlinks show what depends on a page. The lead template includes a periodic wiki review. |
 | Memory bloat and near-duplicates | `mem new` shows top hits before writing. Supersede instead of delete. Dashboard dedupe hints. Operator can prune. |
 | A wrong memory misleads every later agent | Attribution on every node and link. `contradicts` and `supersedes` surface first. The protocol asks for a cited source. |
 | Board drifts from reality | The protocol asks for comments at checkpoints and a `review` or `blocked` move before idle. The dashboard flags `in_progress` cards whose assignee has been idle for too long. |
 | Git credentials reach an agent | Clones and fetches run outside the sandbox, by the daemon or a host agent. Pushes use a credential helper that the daemon answers per project. Tokens never enter the sandbox filesystem. |
-| Host agent token leaks or a host is compromised | One token per host, revocable from the dashboard. The host agent only accepts calls for targets defined on it. |
+| Host agent token leaks or a host is compromised | One token per host, stored as a hash, revocable from the dashboard. Rotation (`admin host rotate`) and one-time enrol tokens (`--enrol`, 10 minutes). `first_used_at` and `last_used_from` show a strange use. TLS on the link (F2 below). The host agent only accepts calls for targets defined on it. |
 | Host agent connection drops mid-exec | Exec sessions have IDs. The host agent keeps output buffered until acknowledged. Reconnect resumes or reports the exit code. |
 | Harness flags change | One adapter per harness, pinned version, CI. |
-| A daemon crash inside Docker stops every runner, because `terrariumd` is the only child of `tini`: when it exits, the container stops | An entrypoint supervisor loop that restarts the daemon in the container (in progress). Outside Docker, the runner processes live through a daemon restart. |
+| A daemon crash inside Docker stops every runner, because `terrariumd` is the only child of `tini`: when it exits, the container stops | **Mitigated.** The entrypoint is a supervisor loop: it starts `terrariumd` again after a crash, with backoff, and the runners keep running (`docker/README.md`, "The restart loop"; `just docker::crash-test`). Outside Docker, the runner processes live through a daemon restart. |
+| F1: a yolo agent rewrites its own event log, PTY log, launch spec, or exit record, and so defeats the budgets, the audit trail, and resume | **Fixed.** The agent dir has `private/`, `harness/`, and `workspace/`. The sandbox never binds `private/`, binds `harness/` read-only, and makes only the per-agent overlays writable (§11, `docs/runner.md` "Files"). A test checks that no bind names `private/`. |
+| F2: the host link is plaintext, so the host token and the exec traffic cross the network in clear text and the token replays | **Fixed.** TLS on the host listener with `TERRARIUM_HOST_TLS_CERT` and `TERRARIUM_HOST_TLS_KEY`, certificate pinning in the host agent, rotation, and enrol tokens (§19). Without a certificate, the host listener binds `127.0.0.1:8082` only (`TERRARIUM_HOST_LISTEN=auto`). A plaintext bind to another address logs an `INSECURE` warning. The host agent refuses `ws://` to a host that is not loopback without `allow_insecure`. |
+| F3: untrusted agent markdown reaches `innerHTML` through a hand-written sanitizer | **Fixed.** DOMPurify is the one HTML sink (`lib/sanitize.ts`), with an ESLint guard against other sinks, adversarial payload tests, and a page CSP. The dashboard token goes to `sessionStorage`; `localStorage` only on "Remember on this device" (`dashboard/src/README.md`). |
+| F4: the bearer token rides in `?token=` on WebSocket upgrades, so it reaches proxy logs and browser history | **Fixed.** The token goes in the subprotocol `bearer.<token>`, and the daemon echoes it. `?token=` still works with a warning; `TERRARIUM_WS_QUERY_TOKEN=0` refuses it (`docs/api.md` §1). |
+| F5: artifacts share the dashboard origin by default | **Fixed.** With the artifact listener on (the default), the dashboard port does not serve `/a/...`. `TERRARIUM_ARTIFACT_PUBLIC_URL` sets the origin of signed URLs. The viewer shows a badge when artifacts share the dashboard origin. |
+| F6: the login PTY log holds the device code until cleanup | **Fixed.** The login flow writes no `pty.log` (`log_max_bytes = 0`, `docs/runner.md` "Files"). |
+| F7: the token compare leaks the token length | **Fixed.** The daemon compares SHA-256 hashes of the two values in constant time. |
 
 ---
 
@@ -1446,7 +1481,7 @@ Recipes the modules provide (names, not bodies):
 | `docker` | `image-build`, `up`, `down`, `restart`, `logs`, `shell` (exec into the container as the terrarium user), `volumes-init` (creates `config/*` and `state/` with the right ownership), `config-edit harness` (opens `config/<harness>` in `$EDITOR`), `image-push tag` |
 | `daemon` | `build`, `run` (local, outside Docker, for fast iteration), `test`, `cli args` (runs the operator CLI against a running daemon) |
 | `dashboard` | `install`, `dev` (Vite dev server proxying to the daemon API), `build`, `test`, `check` |
-| `host` | `build` (static musl), `package`, `install host` (scp binary and unit to a host over ssh, enable the service), `token host` (mints a host agent token) |
+| `host` | `build` (static musl), `package`, `install host name` (binary, unit, config with the pin, and an enrol token over ssh; then a probe; `--dry-run`), `token host [enrol]` (mints a host agent token or an enrol token), `cert name` (the TLS certificate of the host listener) |
 | `spikes` | `bwrap-check`, `claude-auth-check`, `claude-bwrap-check`, `claude-detector-check`, `claude-prompt-check *variant`, `claude-session-check`, `claude-sources-check`, `claude-typing-check`, `claude-yolo-check *variants`, `claude-yolo-root-check`, `hooks-capture harness idle_s='70'` (only claude has it), and three that are not wired yet: `login harness`, `usage-probe provider`, `compat-matrix` (`docs/compat.md` is written by hand from the captures) |
 
 ### 23.3 Dockerfile
@@ -1494,6 +1529,9 @@ services:
     environment:
       TERRARIUM_TOKEN: ${TERRARIUM_TOKEN}
       TERRARIUM_PUBLIC_URL: ${TERRARIUM_PUBLIC_URL}
+      TERRARIUM_HOST_LISTEN: ${TERRARIUM_HOST_LISTEN:-auto}   # 127.0.0.1:8082 without TLS (§19)
+      TERRARIUM_HOST_TLS_CERT: ${TERRARIUM_HOST_TLS_CERT:-}
+      TERRARIUM_HOST_TLS_KEY: ${TERRARIUM_HOST_TLS_KEY:-}
     volumes:
       - ./config/claude:/auth/claude
       - ./config/codex:/auth/codex
@@ -1505,6 +1543,8 @@ services:
       - ./projects:/etc/terrarium/projects
       - ./agents:/etc/terrarium/agents
       - ./targets:/etc/terrarium/targets
+      - ./fleets:/etc/terrarium/fleets       # fleet files, applied at start and on reload
+      - ./config/tls:/etc/terrarium/tls:ro   # `just host::cert` writes here
     security_opt:
       - seccomp:docker/seccomp-bwrap.json   # user namespaces for bwrap (§11)
       - apparmor:unconfined

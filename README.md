@@ -28,6 +28,10 @@ What works today:
   at start, the daemon connects to each live runner again and replays the
   events that it missed. `TERRARIUM_RUNNER_MODE=inprocess` keeps the
   runners in the daemon, for tests and development.
+- A crash-safe entrypoint in Docker. A supervisor loop in the entrypoint
+  starts `terrariumd` again after a crash, with backoff. The runners and
+  their harnesses keep running. `just docker::crash-test` verifies this
+  ([docker/README.md](docker/README.md)).
 - Four adapters: Claude Code, Codex, Copilot CLI, and pi. The daemon
   registers all four.
   - Claude Code is verified end to end inside `bwrap`, with the external
@@ -55,6 +59,15 @@ What works today:
   lifecycle verbs, snapshots, and ephemeral targets. `terrarium exec`,
   `shell`, and `cp` work. The vmlab verbs are verified only against the
   reference output of the vmlab CLI.
+- Host agent onboarding: `just host::install <user@host> <name>` installs
+  the binary, the systemd unit, the config with the certificate pin, and a
+  one-time enrol token, then probes the link. `--dry-run` prints the plan
+  and runs nothing. `terrarium admin host new|rotate --enrol` gives an
+  enrol token by hand ([docs/cli.md](docs/cli.md)).
+- The fleet file: one TOML file declares projects, repos, agents, targets,
+  and subscriptions. `terrarium fleet validate`, `plan`, `apply` (with
+  `--prune`), `ls`, `show`, and `export` work. The daemon applies the
+  files in `fleets/` at start and on reload ([docs/fleet.md](docs/fleet.md)).
 - Three prompt templates in `prompts/`: `default`, `project-lead`, and
   `system-lead`.
 - The dashboard: home, projects, agents, terminals, mail, inbox, board,
@@ -62,14 +75,31 @@ What works today:
   events, and audit.
 - The `terrarium` CLI in operator mode and in agent mode.
 
+Security fixes from the review ([docs/security-review.md](docs/security-review.md)):
+
+- The sandbox split (F1). The agent directory has `private/`, `harness/`,
+  and `workspace/`. The sandbox never binds `private/`, so an agent cannot
+  change its event log, PTY log, launch spec, or exit record.
+- TLS on the host link (F2). With `TERRARIUM_HOST_TLS_CERT` and
+  `TERRARIUM_HOST_TLS_KEY`, the host listener speaks TLS, and a host agent
+  can pin the certificate. Without them, the listener is plaintext on loopback
+  only. Host tokens rotate, and a one-time enrol token keeps the
+  long-lived token off the operator's clipboard.
+- The dashboard sanitizer and CSP (F3). DOMPurify cleans every rendered
+  HTML string, and the page has a Content-Security-Policy. The token goes
+  to `sessionStorage`, not `localStorage`, unless the operator selects "Remember on this
+  device".
+- WebSocket auth by subprotocol (F4). A client sends the token as
+  `Sec-WebSocket-Protocol: bearer.<token>`, not in the URL.
+  `TERRARIUM_WS_QUERY_TOKEN=0` refuses the old `?token=` form.
+- Artifacts off the dashboard origin (F5), no login PTY log (F6), and a
+  constant-time token compare (F7).
+
 What does not work yet:
 
-- A daemon crash inside Docker stops the container, and with it every
-  runner, because `terrariumd` is the only child of `tini`. An entrypoint
-  supervisor loop is in progress (PLAN §21).
-- The fleet definition file and the sibling-container sandbox fallback
-  (Phase 6).
-- `just host::install` (Phase 5).
+- The sibling-container sandbox fallback (Phase 6). It is not started.
+- The vmlab verbs against a live lab. They are verified only against the
+  reference output of the vmlab CLI.
 
 Claude Code inside `bwrap` is verified outside Docker. Claude Code inside
 `bwrap` inside Docker is not tested yet ([docs/compat.md](docs/compat.md),
@@ -126,20 +156,25 @@ terrarium/
   dashboard/                SolidJS + Vite app; the daemon embeds dashboard/dist
   docker/
     Dockerfile              multi-stage: dashboard, rust, host-build, runtime
-    entrypoint.sh           directory init, Copilot extension install, start terrariumd
+    entrypoint.sh           directory init, Copilot extension install, the terrariumd supervisor loop
+    crash-test.py           kill terrariumd and check that the runners live (just docker::crash-test)
     seccomp-bwrap.json      Docker seccomp profile that lets bwrap make namespaces
     seccomp-bwrap.README.md what the profile changes, and why
   compose.yaml              the stack
   .env.example              every environment variable, documented
-  config/                   bind-mounted harness homes (gitignored, except README.md)
+  config/                   bind-mounted harness homes and config/tls (gitignored, except README.md)
+  fleets/                   fleet files that the daemon applies at start and on reload
+  examples/fleet/           an example fleet file
+  scripts/                  host-install.py (just host::install) and its tests
   prompts/                  system prompt templates (default, project-lead, system-lead), mounted read-only
   docs/                     design, contracts, and facts (see below)
   spikes/                   Phase 0 scripts and their captures (claude, codex, copilot, pi)
 ```
 
 `just docker::volumes-init` makes the directories for the bind mounts:
-`config/<harness>/`, `state/`, `projects/`, `agents/`, `targets/`, and
-`subscriptions/`. Git ignores `config/*` and `state/`.
+`config/<harness>/`, `config/tls/`, `state/`, `prompts/`, `projects/`,
+`agents/`, `targets/`, `subscriptions/`, and `fleets/`. Git ignores
+`config/*`, `state/`, and `fleets/*` (except the README files).
 
 ## Commands
 
@@ -162,6 +197,8 @@ recipes of a module.
 | Run the dashboard dev server | `just dashboard::dev` |
 | Check bwrap in the image | `just spikes::bwrap-check` |
 | Build the static host agent | `just host::build` |
+| Make the TLS certificate for the host listener | `just host::cert terrarium.lan` |
+| Install a host agent over ssh | `just host::install root@lab1 lab1` |
 | Register a host agent and print its token | `just host::token lab1` |
 
 `just ci::check` must pass before a change merges.
@@ -177,7 +214,9 @@ recipes of a module.
 | [docs/api.md](docs/api.md) | The daemon HTTP API: the contract for the CLI and the dashboard. |
 | [docs/agent-rpc.md](docs/agent-rpc.md) | How the CLI inside a sandbox reaches the daemon through the runner socket. |
 | [docs/runner.md](docs/runner.md) | The agent runner: PTY, files, socket protocols, status machine, and reconnect. |
-| [docs/host-protocol.md](docs/host-protocol.md) | The wire contract between the daemon and `terrarium-host`. |
+| [docs/host-protocol.md](docs/host-protocol.md) | The wire contract between the daemon and `terrarium-host`, TLS, tokens, and install. |
+| [docs/fleet.md](docs/fleet.md) | The fleet file: format, ownership, commands, and the auto-apply from the config dir. |
+| [docs/security-review.md](docs/security-review.md) | The security review: findings F1 to F9 and their fixes. |
 | [docs/compat.md](docs/compat.md) | Verified facts about each harness, the usage probes, and the login flows, from the spikes. |
 | [docs/compat-suite.md](docs/compat-suite.md) | The adapter compatibility suite: how to run it, its safety rules, and its steps. |
 
@@ -191,9 +230,13 @@ seccomp profile).
 ## Safety model
 
 - **Sandbox.** Each agent runs in its own `bwrap` sandbox inside the
-  container. The agent sees its workspace, the shared harness home, and its
-  own runner socket. It does not see other workspaces, the database, the
-  daemon socket, the Docker socket, SSH keys, or the host file system.
+  container. The harness sees its workspace (read-write), its `harness/`
+  directory (read-only), the per-agent writable overlays (the few files
+  that the harness writes itself), the shared harness home, and its own
+  runner socket. It never sees `private/`, where the runner keeps the
+  event log, the PTY log, the launch spec, and the exit record. It does
+  not see other agents, the database, the daemon socket, the Docker
+  socket, SSH keys, or the host file system (PLAN §11).
 - **Yolo only inside the sandbox.** Every harness runs with approvals off.
   This is safe only to the limit of the sandbox. `TERRARIUM_SANDBOX=none`
   removes the sandbox. Use it for development and tests only.
