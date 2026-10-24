@@ -1,16 +1,31 @@
-# systemd unit for the Terrarium host agent.
+# systemd unit for the Terrarium host agent (docs/host-protocol.md).
 # `just host::install <host>` copies this to /etc/systemd/system/.
+#
+# Commands from the daemon run as the User below. Set it to the account that
+# owns the labs and can use Docker (the `docker` group) and vmlab (`kvm`).
+# Do not run the agent as root unless the targets need root.
 [Unit]
 Description=Terrarium host agent
-After=network-online.target
+Documentation=https://github.com/wiltaylor/terrarium/blob/main/docs/host-protocol.md
+After=network-online.target docker.service
 Wants=network-online.target
 
 [Service]
 Type=simple
-EnvironmentFile=/etc/terrarium-host.env
-ExecStart=/usr/local/bin/terrarium-host
+User=terrarium
+Group=terrarium
+# Add the groups the targets need. A group that does not exist stops the unit.
+# SupplementaryGroups=docker kvm
+# Optional overrides: TERRARIUM_DAEMON_URL, TERRARIUM_HOST_NAME, RUST_LOG.
+EnvironmentFile=-/etc/terrarium-host/env
+ExecStart=/usr/local/bin/terrarium-host --config /etc/terrarium-host/config.toml run
+# vmlab is often a per-user install in ~/.local/bin.
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:%h/.local/bin
 Restart=always
 RestartSec=5
+# Sessions are process groups; stop them with the agent.
+KillMode=control-group
+TimeoutStopSec=15
 
 [Install]
 WantedBy=multi-user.target

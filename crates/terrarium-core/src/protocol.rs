@@ -2,8 +2,11 @@
 //! agent or an SSH executor. The executor streams responses back. Many exec
 //! sessions share one connection, so every message carries an [`ExecId`].
 //!
-//! The wire framing (WebSocket text frames with one JSON message each) is an
-//! open item (PLAN §22, item 4). These types fix the message shapes only.
+//! These types fix the daemon-side message shapes. The host agent wire
+//! protocol (framing, sessions, acks, reconnects) is in
+//! `docs/host-protocol.md`, with its frame types in
+//! `terrarium_host::protocol`. That protocol uses [`HostCapabilities`],
+//! [`ExitReason`], [`CpDirection`], and [`TargetState`] from here.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -132,6 +135,61 @@ pub struct Capabilities {
     pub vmlab: bool,
 }
 
+/// One external tool on a host agent's machine, as `terrarium-host`
+/// detects it on start.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ToolCapability {
+    /// The tool answered its version probe.
+    #[serde(default)]
+    pub present: bool,
+    /// The version that the tool reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+}
+
+/// The detailed capabilities that a host agent sends in its `hello` frame
+/// (docs/host-protocol.md). [`Capabilities`] is the flat summary of it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct HostCapabilities {
+    #[serde(default)]
+    pub docker: ToolCapability,
+    #[serde(default)]
+    pub vmlab: ToolCapability,
+    /// The shell that `terrarium shell` starts on a `host` target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell: Option<String>,
+}
+
+impl HostCapabilities {
+    /// The flat summary, for the dashboard and for policy checks.
+    pub fn summary(&self, os: &str, arch: &str) -> Capabilities {
+        Capabilities {
+            os: os.to_owned(),
+            arch: arch.to_owned(),
+            docker: self.docker.present,
+            vmlab: self.vmlab.present,
+        }
+    }
+}
+
+/// Why an exec session ended. A host agent sends it in its `exit` frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExitReason {
+    /// The process exited by itself. `code` is set.
+    Exited,
+    /// A signal ended the process. `signal` is set.
+    Signaled,
+    /// The session ran past its `timeout_secs`. The host agent killed it.
+    Timeout,
+    /// The link to the daemon was down and the unacknowledged output filled
+    /// the replay buffer. The host agent killed the process.
+    OutputOverflow,
+    /// The link to the daemon stayed down past the resume grace. The host
+    /// agent killed the process.
+    DetachedTimeout,
+}
+
 /// Executor to daemon.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -190,6 +248,22 @@ mod tests {
         assert_eq!(json["target"], "buildbox");
         let back: ExecutorRequest = serde_json::from_value(json).expect("deserialise");
         assert_eq!(back, req);
+    }
+
+    #[test]
+    fn host_capabilities_summarise() {
+        let caps: HostCapabilities = serde_json::from_str(
+            r#"{"docker":{"present":true,"version":"29.8.0"},"vmlab":{"present":false}}"#,
+        )
+        .expect("deserialise");
+        assert_eq!(caps.docker.version.as_deref(), Some("29.8.0"));
+        let flat = caps.summary("linux", "x86_64");
+        assert!(flat.docker);
+        assert!(!flat.vmlab);
+        assert_eq!(
+            serde_json::to_value(ExitReason::OutputOverflow).expect("serialise"),
+            "output_overflow"
+        );
     }
 
     #[test]

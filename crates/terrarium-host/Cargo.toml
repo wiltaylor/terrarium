@@ -6,10 +6,34 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[lib]
+name = "terrarium_host"
+path = "src/lib.rs"
+
+[[bin]]
+name = "terrarium-host"
+path = "src/main.rs"
+
 [dependencies]
 terrarium-core.workspace = true
 clap.workspace = true
 anyhow.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+futures-util.workspace = true
+tokio-tungstenite = { workspace = true, features = ["rustls-tls-native-roots"] }
+rustls.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+portable-pty.workspace = true
+sha2.workspace = true
+nix.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true
