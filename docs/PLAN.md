@@ -1149,7 +1149,7 @@ A target definition names its host agent:
 # targets/lab-win11.toml
 kind = "vmlab"
 host = "lab1"                 # host agent name
-lab  = "/home/wil/labs/win11.wcl"
+lab  = "/home/wil/labs/win11"          # directory that holds vmlab.wcl; vmlab finds only that file name
 machine = "win11"
 ephemeral = true
 snapshot_before_task = true

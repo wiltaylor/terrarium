@@ -10,7 +10,7 @@ The design is in [PLAN.md](PLAN.md).
 | `crates/terrarium-core`       | `terrarium-core` (lib)      | The domain model, events, hook payloads, the `Adapter` trait, the executor protocol, and the TOML definitions. No network and no database. |
 | `crates/terrariumd`           | `terrariumd` (bin)          | The daemon: the HTTP API on the Unix socket and TCP, SQLite and migrations, config loading, the embedded dashboard. Later: the supervisor, the mailbox, executors. |
 | `crates/terrarium`            | `terrarium` (bin)           | The CLI. Operator mode talks to the daemon. Agent mode talks to the runner socket. |
-| `crates/terrarium-host`       | `terrarium-host` (bin)      | The host agent that runs on machines outside the container.          |
+| `crates/terrarium-host`       | `terrarium-host` (lib + bin)| The host agent that runs on machines outside the container.          |
 | `crates/adapters/<harness>`   | `terrarium-adapter-<harness>` (lib) | One adapter per harness: launch flags, hook mapping, session ID capture. |
 | `dashboard/`                  | npm package                 | The SolidJS dashboard. The daemon embeds `dashboard/dist`.           |
 | `docker/`, `compose.yaml`     |                             | The image, the entrypoint, the seccomp profile, and the stack.        |
@@ -20,7 +20,8 @@ Rules for dependencies:
 - `terrarium-core` depends on no other Terrarium crate.
 - Adapters depend only on `terrarium-core`.
 - Bins depend on `terrarium-core` and on adapters. A bin never depends on
-  another bin.
+  another bin's binary. `terrarium-host` is also a library: the daemon uses
+  its `protocol` module for the host wire format, so it may depend on the lib.
 - Put each shared dependency version in `[workspace.dependencies]` in the root
   `Cargo.toml`. A crate refers to it with `foo.workspace = true`.
 
