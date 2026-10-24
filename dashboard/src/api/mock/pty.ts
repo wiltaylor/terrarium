@@ -13,6 +13,8 @@ export interface FakePtyOptions {
   /** Called on a timer. Return a line to print, or null. */
   ticker?: () => string | null;
   tickMs?: number;
+  /** Refuse the upgrade, as the daemon does for an agent that is not running (409). */
+  refuse?: boolean;
 }
 
 const enc = new TextEncoder();
@@ -39,6 +41,12 @@ export class FakePty implements PtySocket {
     this.prompt = opts.prompt ?? "\x1b[32m❯\x1b[0m ";
     queueMicrotask(() => {
       if (this.readyState !== FakePty.CONNECTING) return;
+      if (opts.refuse) {
+        this.readyState = FakePty.CLOSED;
+        this.emit("error", {});
+        this.emit("close", {});
+        return;
+      }
       this.readyState = FakePty.OPEN;
       this.emit("open", {});
       for (const l of opts.banner ?? []) this.writeLine(l);

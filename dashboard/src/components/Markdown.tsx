@@ -4,10 +4,9 @@
 import { useNavigate } from "@solidjs/router";
 import { createEffect, onCleanup } from "solid-js";
 import { render } from "solid-js/web";
-import type { Artifact } from "../api/types";
-import { ArtifactViewer } from "./ArtifactViewer";
+import { ArtifactViewer, type ArtifactLike } from "./ArtifactViewer";
 
-export function Markdown(props: { html: string; artifacts?: Record<string, Artifact> }) {
+export function Markdown(props: { html: string; artifacts?: Record<string, ArtifactLike> }) {
   let el!: HTMLDivElement;
   const navigate = useNavigate();
   let disposers: (() => void)[] = [];

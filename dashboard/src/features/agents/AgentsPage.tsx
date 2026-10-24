@@ -1,10 +1,11 @@
-import { A } from "@solidjs/router";
+import { A, useNavigate } from "@solidjs/router";
 import { createSignal, For, Show } from "solid-js";
 import { StatusBadge } from "../../components/StatusBadge";
 import { Empty, ErrorBanner, PageHead, useNow } from "../../components/ui";
 import { AGENT_STATUSES, type Agent, type AgentStatus } from "../../api/types";
 import { ago, duration } from "../../lib/format";
 import { agents, projects } from "../../stores";
+import { AgentForm } from "./AgentForm";
 
 export function RoleBadges(props: { agent: Agent }) {
   return (
@@ -19,7 +20,7 @@ export function AgentCard(props: { agent: Agent; now: number }) {
   return (
     <div class="card-box agent-card">
       <div class="spread">
-        <A class="name" href={`/agents/${a().id}`}>
+        <A class="name" href={`/agents/${encodeURIComponent(a().id)}`}>
           {a().name}
         </A>
         <StatusBadge status={a().status} />
@@ -27,6 +28,9 @@ export function AgentCard(props: { agent: Agent; now: number }) {
       <div class="row">
         <span class="chip">{a().harness}</span>
         <span class="chip">{a().project}</span>
+        <Show when={a().model}>
+          <span class="chip mono small">{a().model}</span>
+        </Show>
         <RoleBadges agent={a()} />
       </div>
       <dl class="kv">
@@ -61,6 +65,8 @@ export function AgentCard(props: { agent: Agent; now: number }) {
 
 export function AgentsPage() {
   const now = useNow(1000);
+  const navigate = useNavigate();
+  const [creating, setCreating] = createSignal(false);
   const [scope, setScope] = createSignal<"project" | "all">("project");
   const [status, setStatus] = createSignal<AgentStatus | "">("");
   const shown = () =>
@@ -80,7 +86,13 @@ export function AgentsPage() {
           <For each={AGENT_STATUSES}>{(s) => <option value={s}>{s}</option>}</For>
         </select>
         <button onClick={() => agents.refresh()}>Refresh</button>
+        <button class="primary" onClick={() => setCreating(true)}>
+          New agent
+        </button>
       </PageHead>
+      <Show when={creating()}>
+        <AgentForm project={projects.selected()} onClose={() => setCreating(false)} onSaved={(a) => navigate(`/agents/${encodeURIComponent(a.id)}`)} />
+      </Show>
       <ErrorBanner error={agents.state.error} />
       <Show when={shown().length} fallback={<Empty>{agents.state.loading ? "Loading…" : "No agents match."}</Empty>}>
         <div class="grid">

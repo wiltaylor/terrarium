@@ -3,19 +3,36 @@ import { createResource, createSignal, For, Match, onCleanup, onMount, Show, Swi
 import { UsageTile } from "../../components/UsageTile";
 import { Empty, Modal, PageHead, useNow } from "../../components/ui";
 import type { Subscription } from "../../api/types";
+import { isMissingEndpoint } from "../../api/http";
 import { ago, compact } from "../../lib/format";
+import { collectAll } from "../../lib/paging";
 import { api, events, projects, subscriptions } from "../../stores";
 import { buildQueue, type ProjectSnapshot } from "./queue";
 
-async function loadQueue() {
+/**
+ * Load every project's queue sources. Wiki and versions are not in the daemon
+ * yet (docs/api.md §10); a 404 there gives an empty list, and `missing`
+ * remembers it so the next refresh does not ask again.
+ */
+async function loadQueue(missing: Set<string>) {
   const list = projects.projects().length ? projects.projects() : await projects.refresh();
+  const optional = async <T,>(what: string, fn: () => Promise<T[]>): Promise<T[]> => {
+    if (missing.has(what)) return [];
+    try {
+      return await fn();
+    } catch (e) {
+      if (!isMissingEndpoint(e)) throw e;
+      missing.add(what);
+      return [];
+    }
+  };
   const snaps: ProjectSnapshot[] = await Promise.all(
     list.map(async (p) => {
       const [versions, pages, board, inbox] = await Promise.all([
-        api.versions.list(p.name),
-        api.wiki.tree(p.name),
+        optional("versions", () => api.versions.list(p.name, { status: "in_review" })),
+        optional("wiki", () => api.wiki.tree(p.name, { status: "ready_for_review" })),
         api.board.get(p.name),
-        api.inbox.list(p.name),
+        collectAll((cursor) => api.inbox.list(p.name, { unread: true, cursor, limit: 1000 }), 5),
       ]);
       return { project: p.name, versions, pages, board, inbox };
     }),
@@ -28,13 +45,14 @@ const KIND_CHIP = { version: "info", page: "warn", card: "bad", inbox: "" } as c
 
 export function Home() {
   const now = useNow(15_000);
-  const [queue, { refetch }] = createResource(loadQueue);
+  const missing = new Set<string>();
+  const [queue, { refetch }] = createResource(() => loadQueue(missing));
   const [detail, setDetail] = createSignal<Subscription | null>(null);
 
   onMount(() => {
     let t: ReturnType<typeof setTimeout> | undefined;
     const off = events.on((e) => {
-      if (["card", "version", "wiki", "mail"].includes(e.kind)) {
+      if (["card", "board", "mail"].includes(e.kind) || /^(version|wiki)\./.test(e.kind)) {
         clearTimeout(t);
         t = setTimeout(refetch, 400);
       }
@@ -55,7 +73,7 @@ export function Home() {
 
       <section aria-label="Usage">
         <div class="usage-strip">
-          <For each={subscriptions.list()} fallback={<Empty>No subscriptions yet.</Empty>}>
+          <For each={subscriptions.list()} fallback={<Empty>{subscriptions.missing() ? "Usage is not available yet: the daemon has no subscription endpoints." : "No subscriptions yet."}</Empty>}>
             {(s) => <UsageTile sub={s} now={now()} onClick={() => setDetail(s)} />}
           </For>
         </div>
@@ -95,7 +113,7 @@ export function Home() {
                               <A href={`/p/${p().project}/wiki/${p().page.path}`}>
                                 <strong>{p().page.title}</strong>
                               </A>{" "}
-                              is ready for review. <span class="muted">by {p().page.updated_by}</span>
+                              is ready for review. <span class="muted">by {p().page.author_name ?? p().page.author ?? "someone"}</span>
                             </>
                           )}
                         </Match>
@@ -115,7 +133,7 @@ export function Home() {
                               <A href={`/p/${m().project}/inbox?id=${m().message.id}`}>
                                 <strong>{m().message.subject}</strong>
                               </A>{" "}
-                              <span class="muted">from {m().message.from}</span>
+                              <span class="muted">from {m().message.from_name}</span>
                             </>
                           )}
                         </Match>

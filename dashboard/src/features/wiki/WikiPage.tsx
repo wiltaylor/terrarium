@@ -5,6 +5,8 @@ import { Empty, ErrorBanner, PageHead, Tabs } from "../../components/ui";
 import type { Artifact } from "../../api/types";
 import { ago, humanize } from "../../lib/format";
 import { renderWiki, splitFrontMatter } from "../../lib/markdown";
+import { isMissingEndpoint } from "../../api/http";
+import type { WikiPage as Page } from "../../api/types";
 import { api, projects } from "../../stores";
 import { buildTree, type TreeNode } from "./tree";
 
@@ -45,19 +47,34 @@ export default function WikiPage() {
   const params = useParams<{ project: string; path?: string }>();
   const path = () => (params.path && params.path.length ? decodeURIComponent(params.path) : "index");
   const [tab, setTab] = createSignal<(typeof TABS)[number]["id"]>("page");
-  const [error, setError] = createSignal<string | null>(null);
+  const [error, setError] = createSignal<unknown>(null);
   const [q, setQ] = createSignal("");
 
-  const [tree, { refetch: refetchTree }] = createResource(() => ({ p: params.project, q: q() }), (k) => api.wiki.tree(k.p, k.q || undefined));
-  const [allPages] = createResource(() => params.project, (p) => api.wiki.tree(p));
-  const [versions] = createResource(() => params.project, (p) => api.versions.list(p));
-  const [artifacts] = createResource(() => params.project, (p) => api.artifacts.list(p));
-  const summary = () => allPages()?.find((p) => p.path === path());
-  const [page, { mutate: setPage }] = createResource(() => summary()?.id, (id) => api.wiki.get(id));
-  const [revisions, { refetch: refetchRevs }] = createResource(() => (tab() === "history" ? summary()?.id : undefined), (id) => api.wiki.revisions(id));
-  const [backlinks] = createResource(() => summary()?.id, (id) => api.wiki.backlinks(id));
+  const [tree, { refetch: refetchTree }] = createResource(() => ({ p: params.project, q: q() }), (k) => api.wiki.tree(k.p, k.q ? { q: k.q } : {}));
+  const [allPages, { refetch: refetchAll }] = createResource(() => params.project, (p) => api.wiki.tree(p));
+  const [versions] = createResource(() => params.project, (p) => api.versions.list(p).catch(() => []));
+  const [artifacts] = createResource(() => params.project, (p) => api.artifacts.list(p).catch((): Artifact[] => []));
+  // The page key is `project/path` (docs/api.md §11.1).
+  const [page, { mutate: setPage }] = createResource(
+    () => (allPages() ? `${params.project}/${path()}` : undefined),
+    (key) => api.wiki.get(key).catch((e: unknown) => (isMissingEndpoint(e) ? Promise.reject(e) : null)),
+  );
+  const [revisions, { refetch: refetchRevs }] = createResource(() => (tab() === "history" ? page()?.id : undefined), (id) => api.wiki.revisions(id));
+  const [backlinks] = createResource(() => page()?.id, (id) => api.wiki.backlinks(id));
 
   const artifactMap = createMemo(() => Object.fromEntries((artifacts() ?? []).map((a) => [a.id, a])) as Record<string, Artifact>);
+  // Signed URLs for the artifacts the page links or shows inline (`artifact:ART-n`).
+  const [artifactUrls] = createResource(
+    () => {
+      const p = page();
+      if (!p) return null;
+      const fromLinks = (p.links ?? []).filter((l) => l.kind === "artifact").map((l) => l.target.split("/").pop()!);
+      const fromBody = [...p.body.matchAll(/artifact:(ART-\d+)/g)].map((m) => m[1]!);
+      const ids = [...new Set([...fromLinks, ...fromBody])].filter((id) => artifactMap()[id]);
+      return ids.length ? ids : null;
+    },
+    async (ids) => Object.fromEntries(await Promise.all(ids.map(async (id) => [id, (await api.artifacts.url(artifactMap()[id]!.uid)).url] as const))),
+  );
   const html = createMemo(() => {
     const p = page();
     if (!p) return "";
@@ -68,7 +85,7 @@ export default function WikiPage() {
       versions: new Set((versions() ?? []).map((v) => v.name)),
       cardPrefixes: new Set(Object.keys(prefixes)),
       prefixProject: prefixes,
-      artifactUrl: (id) => artifactMap()[id]?.url,
+      artifactUrl: (id) => artifactUrls()?.[id],
     });
   });
   const meta = () => splitFrontMatter(page()?.body ?? "").meta;
@@ -83,7 +100,7 @@ export default function WikiPage() {
       await fn();
       setError(null);
     } catch (e) {
-      setError((e as Error).message);
+      setError(e);
     }
   };
 
@@ -100,14 +117,29 @@ export default function WikiPage() {
           </Show>
         </nav>
 
-        <Show when={page()} fallback={<Empty>{allPages.loading || page.loading ? "Loading…" : `No page at ${path()}.`}</Empty>}>
+        <Show
+          when={page()}
+          fallback={
+            <Show when={allPages.loading || page.loading} fallback={<NewPage project={params.project} path={path()} onCreated={(p) => (setPage(p), void refetchAll(), void refetchTree())} />}>
+              <Empty>Loading…</Empty>
+            </Show>
+          }
+        >
           {(p) => (
             <article class="stack">
               <div class="spread">
                 <div>
                   <h1 style={{ margin: 0 }}>{p().title}</h1>
                   <div class="muted small">
-                    {p().path} · rev {p().current_rev} · {p().updated_by}, {ago(p().updated_at)} · <span class="chip">{humanize(p().status)}</span>
+                    {p().path} · rev {p().rev} · {p().author_name}, {ago(p().updated_at)}
+                    <Show when={p().status}>
+                      {(st) => (
+                        <>
+                          {" "}
+                          · <span class="chip">{humanize(st())}</span>
+                        </>
+                      )}
+                    </Show>
                   </div>
                 </div>
               </div>
@@ -117,7 +149,7 @@ export default function WikiPage() {
                   <strong>Ready for review</strong>
                   <span class="muted small">reviewer: {meta().reviewer ?? p().reviewer ?? "operator"}</span>
                   <input style={{ flex: 1, "min-width": "140px" }} placeholder="Comment" value={reviewComment()} onInput={(e) => setReviewComment(e.currentTarget.value)} aria-label="Review comment" />
-                  <button class="primary" onClick={() => run(async () => setPage(await api.wiki.review(p().id, "approve", reviewComment())))}>
+                  <button class="primary" onClick={() => run(async () => (setPage(await api.wiki.review(p().id, "approve", reviewComment() || undefined)), void refetchTree()))}>
                     Approve
                   </button>
                   <button disabled={!reviewComment().trim()} onClick={() => run(async () => (setPage(await api.wiki.review(p().id, "comment", reviewComment())), setReviewComment("")))}>
@@ -165,17 +197,18 @@ export default function WikiPage() {
                         disabled={!saveSummary().trim()}
                         onClick={() =>
                           run(async () => {
-                            setPage(await api.wiki.save(p().id, { body: draft(), base: p().current_rev, summary: saveSummary() }));
+                            // A stale base is `409 stale_base`; the banner shows the diff from `details`.
+                            setPage(await api.wiki.save(p().id, { body: draft(), base: p().rev, summary: saveSummary() }));
                             setTab("page");
                             void refetchTree();
                           })
                         }
                       >
-                        Save revision {p().current_rev + 1}
+                        Save revision {p().rev + 1}
                       </button>
                     </div>
                     <p class="muted small" style={{ margin: 0 }}>
-                      The save carries base rev {p().current_rev}. The daemon refuses it if someone saved since.
+                      The save carries base rev {p().rev}. The daemon refuses it if someone saved since, and shows the changes since your base.
                     </p>
                   </div>
                 </Match>
@@ -196,7 +229,7 @@ export default function WikiPage() {
                           {(r) => (
                             <tr>
                               <td>{r.rev}</td>
-                              <td>{r.author}</td>
+                              <td>{r.author_name ?? r.author}</td>
                               <td>{r.summary}</td>
                               <td>{ago(r.created_at)}</td>
                               <td class="row">
@@ -205,7 +238,7 @@ export default function WikiPage() {
                                     Diff
                                   </button>
                                 </Show>
-                                <Show when={r.rev !== p().current_rev}>
+                                <Show when={r.rev !== p().rev}>
                                   <button class="small" onClick={() => run(async () => (setPage(await api.wiki.restore(p().id, r.rev)), void refetchRevs()))}>
                                     Restore
                                   </button>
@@ -234,5 +267,37 @@ export default function WikiPage() {
         </Show>
       </div>
     </>
+  );
+}
+
+/** No page at this path yet: offer to create it. */
+function NewPage(props: { project: string; path: string; onCreated: (p: Page) => void }) {
+  const [body, setBody] = createSignal(`# ${props.path.split("/").pop()}\n`);
+  const [summary, setSummary] = createSignal("Create page");
+  const [error, setError] = createSignal<unknown>(null);
+  return (
+    <div class="card-box stack">
+      <p style={{ margin: 0 }}>
+        No page at <span class="mono">{props.path}</span>. Create it:
+      </p>
+      <ErrorBanner error={error()} onDismiss={() => setError(null)} />
+      <textarea class="mono" style={{ "min-height": "160px" }} value={body()} onInput={(e) => setBody(e.currentTarget.value)} aria-label="New page body" />
+      <div class="row">
+        <input style={{ flex: 1 }} value={summary()} onInput={(e) => setSummary(e.currentTarget.value)} aria-label="Summary" />
+        <button
+          class="primary"
+          disabled={!summary().trim()}
+          onClick={async () => {
+            try {
+              props.onCreated(await api.wiki.create(props.project, { path: props.path, body: body(), summary: summary() }));
+            } catch (e) {
+              setError(e);
+            }
+          }}
+        >
+          Create page
+        </button>
+      </div>
+    </div>
   );
 }

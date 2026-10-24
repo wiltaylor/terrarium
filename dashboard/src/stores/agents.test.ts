@@ -13,12 +13,12 @@ const agent = (over: Partial<Agent> = {}): Agent => ({
   harness: "claude",
   subscription: "s",
   status: "idle",
-  roles: ["member"],
+  roles: [],
   workspace: "/w",
   created_at: "",
   ...over,
 });
-const ev = (over: Partial<AgentEvent>): AgentEvent => ({ id: "E", at: "2026-10-24T10:00:00Z", kind: "status", agent: "lead", project: "p", summary: "", ...over });
+const ev = (over: Partial<AgentEvent>): AgentEvent => ({ seq: 1, id: "E", at: "2026-10-24T10:00:00Z", kind: "status", agent: "lead", project: "p", summary: "", data: {}, ...over });
 
 describe("applyAgentEvent", () => {
   it("applies status events and tracks turn start", () => {
@@ -35,6 +35,21 @@ describe("applyAgentEvent", () => {
     const [a] = applyAgentEvent([agent()], e);
     expect(a!.status).toBe("error");
     expect(a!.last_event).toEqual(e);
+  });
+
+  it("matches by agent_id first, as the daemon sends it", () => {
+    const list = [agent(), agent({ id: "A2", project: "q" })];
+    const next = applyAgentEvent(list, ev({ agent: "lead", project: "q", agent_id: "A2", data: { agent_id: "A2", status: "blocked", from: "idle", reason: null } }));
+    expect(next[0]!.status).toBe("idle");
+    expect(next[1]!.status).toBe("blocked");
+    expect(applyAgentEvent(list, ev({ agent_id: "GONE", data: { status: "idle" } }))).toBe(list);
+  });
+
+  it("tracks the current card from card events", () => {
+    const moved = applyAgentEvent([agent()], ev({ kind: "card", agent_id: "A1", card: "P-1", data: { card_id: "P-1", change: "moved", column: "in_progress" } }));
+    expect(moved[0]!.current_card).toBe("P-1");
+    const done = applyAgentEvent(moved, ev({ kind: "card", agent_id: "A1", card: "P-1", data: { card_id: "P-1", change: "moved", column: "review" } }));
+    expect(done[0]!.current_card).toBeUndefined();
   });
 
   it("ignores unknown agents, other projects, and bad statuses", () => {
@@ -54,9 +69,30 @@ describe("createAgentsStore", () => {
       await store.refresh();
       const lead = store.byName("terrarium", "lead")!;
       expect(lead.status).toBe("idle");
+      events.start();
+      await new Promise((r) => setTimeout(r, 5));
       await api.agents.send(lead.id, "hello");
-      expect(store.byId(lead.id)!.status).toBe("working");
-      expect(events.recent().length).toBeGreaterThan(0);
+      await new Promise((r) => setTimeout(r, 1));
+      expect(events.recent().some((e) => e.kind === "turn_start" && e.agent_id === lead.id)).toBe(true);
+      expect(store.byId("terrarium/lead")!.id).toBe(lead.id);
+      events.stop();
+      dispose();
+    });
+  });
+});
+
+describe("createAgentsStore backlog", () => {
+  it("applies events that came before the list, but keeps the list's status", async () => {
+    const api = createMockApi({ latencyMs: 0, eventsIntervalMs: 0 });
+    const lead = api.world.agents.find((a) => a.name === "lead")!;
+    const early = ev({ seq: 1, id: "EARLY", agent_id: lead.id, kind: "tool_use", summary: "Read a file", data: { agent_id: lead.id } });
+    const stale = ev({ seq: 2, id: "STALE", agent_id: lead.id, data: { agent_id: lead.id, status: "error" } });
+    await createRoot(async (dispose) => {
+      const store = createAgentsStore(api, { on: () => () => {}, recent: () => [stale, early] });
+      await store.refresh();
+      const a = store.byId(lead.id)!;
+      expect(a.last_event?.id).toBe("STALE");
+      expect(a.status).toBe("idle");
       dispose();
     });
   });

@@ -9,7 +9,7 @@ export function MemoryGraph(props: { graph: Graph; center: string; onPick: (id: 
   const layout = createMemo(() =>
     forceLayout(
       props.graph.nodes.map((n) => n.id),
-      props.graph.links,
+      props.graph.edges,
       { width: W, height: H },
       { [props.center]: { x: W / 2, y: H / 2 } },
     ),
@@ -24,7 +24,7 @@ export function MemoryGraph(props: { graph: Graph; center: string; onPick: (id: 
           <path d="M0,0 L10,5 L0,10 z" fill="currentColor" opacity="0.6" />
         </marker>
       </defs>
-      <For each={props.graph.links}>
+      <For each={props.graph.edges}>
         {(l) => {
           const a = () => pos(l.from);
           const b = () => pos(l.to);

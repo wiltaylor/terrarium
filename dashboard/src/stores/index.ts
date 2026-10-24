@@ -8,6 +8,7 @@ import { createEventsStore } from "./events";
 import { createProjectsStore } from "./projects";
 import { createSubscriptionsStore } from "./subscriptions";
 import { createThemeStore } from "./theme";
+import { createUnreadStore } from "./unread";
 
 const storage = (() => {
   try {
@@ -23,6 +24,7 @@ export const events = createEventsStore(api);
 export const projects = createProjectsStore(api, storage);
 export const agents = createAgentsStore(api, events);
 export const subscriptions = createSubscriptionsStore(api);
+export const unread = createUnreadStore(api, events);
 
 export { createBoardStore } from "./board";
 export const theme = createThemeStore();

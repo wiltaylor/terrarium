@@ -27,7 +27,12 @@ npm run dev
 ```
 
 Vite proxies `/api` (HTTP and WebSocket) and `/a/` to `http://localhost:8080`.
-Set `TERRARIUM_DAEMON_URL` to use a different daemon.
+Set `TERRARIUM_DAEMON_URL` to use a different daemon. `just daemon::run`
+listens on `127.0.0.1:8090`, so use:
+
+```sh
+TERRARIUM_DAEMON_URL=http://127.0.0.1:8090 npm run dev
+```
 
 Other scripts:
 
@@ -81,6 +86,52 @@ src/
   The theme follows `prefers-color-scheme`. `data-theme` on `<html>` overrides it.
 - Keep the layout usable at 400 px wide.
 
+## The API contract
+
+`docs/api.md` is the contract. The client in `api/client.ts` follows it, and
+the mock in `api/mock/` answers in the same shapes. `api/mock/parity.test.ts`
+checks the shapes that differ from PLAN §17.
+
+- **Lists.** The daemon answers a JSON array and puts the next cursor in the
+  `X-Next-Cursor` header. `Transport.page()` returns `{items, next}`. Methods
+  that return `Page<T>` (mail, inbox, audit, events, sessions, card events,
+  cards) give the cursor to the view, and the view shows **Load more**
+  (`components/paged.ts`). Methods that return `T[]` follow every cursor with
+  `collectAll` (`lib/paging.ts`).
+- **Errors.** The body is `{"error": {"code", "message", "details"?}}`.
+  `ApiError` carries `code` and `details`. `ErrorBanner` takes any thrown
+  value and shows `details`, for example `blocked_by`, a WIP limit, or the
+  wiki `stale_base` diff. A route that the daemon does not have yet
+  (`404 no such API route`, or `405`) shows "Not available yet".
+- **202 answers.** `start`, `stop`, and `restart` answer with the agent as the
+  daemon accepted the call: the old status. Do not put that body into the
+  store. The status change comes from the event stream.
+- **Agent keys.** `{id}` is a ULID, `project/name` (sent as
+  `project%2Fname`), or a unique name.
+- **Replies.** `mail.reply` and `inbox.reply` answer an array: one message
+  for each participant.
+- **Artifacts.** An artifact has no URL. The viewer mints a short-lived
+  signed URL with `POST /api/artifacts/{id}/url`.
+
+## Live updates
+
+`stores/events.ts` holds the one firehose socket. `createWsEventStream`
+reconnects with backoff (0.5 s, doubling to 15 s, with jitter) and resumes
+with `?since=<last seq>`, so a drop loses no event and a repeated frame is
+dropped. The first connect has no `since`, so the daemon sends the whole log
+as a backlog; the agents store uses it for the last event of each agent.
+While the socket is down, the layout shows a **Disconnected** strip with a
+**Reconnect now** button.
+
+Every view listens through `events.on(...)`: agent status badges and the
+current card (`applyAgentEvent`), the board (`card` and `board` events), the
+mail and inbox counts in the sidebar (`stores/unread.ts`), the home queue,
+the Event log, and the agent's Events tab.
+
+The terminal reconnects with backoff when its socket drops. It reconnects at
+once when the agent starts again. The daemon's first frame after a connect is
+a fresh snapshot of the screen; the terminal clears itself before it draws.
+
 ## Socket protocols
 
 PTY sockets (`/api/agents/{id}/pty` and `/api/subscriptions/login/{id}/pty`):
@@ -101,23 +152,27 @@ A `status` event carries `data.status`. A `card` event carries `data.card_id`.
 
 | Route | View | API calls |
 |---|---|---|
-| `/` | Home: usage strip, waiting-on-you queue | `GET /api/subscriptions`, `GET /api/usage`, per project: `versions`, `wiki`, `board`, `inbox` |
-| `/agents` | Agents grid | `GET /api/agents`, events socket |
-| `/agents/:id` | Agent detail: terminal, events, sessions | `GET /api/agents/{id}`, `start/stop/restart/send`, `WS /api/agents/{id}/pty`, `GET .../events`, `GET .../sessions` |
-| `/subscriptions` | Subscriptions and the add wizard | `GET /api/subscriptions`, `detect`, `login`, `WS login/{id}/pty`, `login/{id}/input`, `api-key`, `verify`, `probe`, `logout` |
-| `/mail` | Threads, compose as operator | `GET /api/mail`, `POST /api/mail`, `POST /api/mail/{id}/reply` |
-| `/p/:project/inbox` | Project inbox, make card | `GET /api/projects/{name}/inbox`, `POST /api/projects/{name}/cards` (`from_mail`) |
-| `/p/:project/board` | Board, drag and drop, card drawer | `GET /api/projects/{name}/board`, `PATCH /api/cards/{id}`, `POST /api/cards/{id}/comments`, `GET /api/cards/{id}/events` |
-| `/p/:project/memory` | Memory list, detail, graph | `GET /api/projects/{name}/memories`, `GET /api/memories/{id}/graph?depth=1` |
-| `/p/:project/wiki/*path` | Page tree, render, edit, history | `GET /api/projects/{name}/wiki`, `GET/PUT /api/wiki/{id}`, `revisions`, `diff`, `restore`, `backlinks`, `review` |
-| `/p/:project/artifacts/:id?` | Artifact viewer | `GET /api/projects/{name}/artifacts`, the signed URL on the artifact origin |
-| `/p/:project/versions/:id?` | Version timeline and review | `GET /api/projects/{name}/versions`, `POST /api/versions/{id}/approve|reject|submit|release`, `compare` |
-| `/targets` | Targets and host agents | `GET /api/targets`, `POST /api/targets/{id}/up|down|snapshot`, `GET /api/hosts` |
-| `/events` | Event log | events socket |
-| `/audit` | Audit log | `GET /api/audit` |
+| `/` | Home: usage strip, waiting-on-you queue | `GET /api/subscriptions`, per project: `versions?status=in_review`, `wiki?status=ready_for_review`, `board`, `inbox?unread=true` |
+| `/projects` | Projects: list, create | `GET`, `POST /api/projects` |
+| `/p/:project/settings` | Project edit and delete, Repos panel | `GET`, `PATCH`, `DELETE /api/projects/{name}?confirm=true`, `GET`, `POST .../repos`, `POST /api/repos/{id}/checkout` |
+| `/agents` | Agents grid, new agent | `GET`, `POST /api/agents`, events socket |
+| `/agents/:id` | Agent detail: edit, delete, roles, terminal, events, sessions | `GET`, `PATCH`, `DELETE /api/agents/{id}`, `start/stop/restart/send`, `GET`, `PUT .../roles`, `WS .../pty`, `GET .../events?since=`, `GET .../sessions` |
+| `/subscriptions` | Subscriptions and the add wizard | PLAN §16 (not in the daemon yet) |
+| `/mail` | Threads, compose and reply as operator | `GET /api/mail`, `POST /api/mail`, `POST /api/mail/{id}/read`, `POST /api/mail/{id}/reply` |
+| `/p/:project/inbox` | Project inbox, make card | `GET .../inbox`, `POST .../inbox/{id}/read`, `POST .../inbox/{id}/reply`, `POST .../cards` (`from_mail`) |
+| `/p/:project/board` | Board, drag and drop, card drawer | `GET .../board`, `PATCH /api/cards/{id}`, `POST .../comments`, `GET .../events`, `DELETE /api/cards/{id}` |
+| `/p/:project/memory` | Memory list, detail, graph | `GET .../memories`, `GET /api/memories/{project/MEM-n}/graph` |
+| `/p/:project/wiki/*path` | Page tree, render, edit, history, create | `GET .../wiki`, `GET`, `PUT /api/wiki/{project/path}`, `revisions`, `diff`, `restore`, `backlinks`, `review` |
+| `/p/:project/artifacts/:id?` | Artifact viewer, upload, delete | `GET .../artifacts`, `.../artifacts/usage`, `POST .../artifacts` (multipart), `POST /api/artifacts/{id}/url` |
+| `/p/:project/versions/:id?` | Version timeline, review, new version | `GET`, `POST .../versions`, `POST /api/versions/{id}/submit|approve|reject|release`, `compare` |
+| `/p/:project/spend` | Usage by agent, model, and subscription | `GET /api/usage` (PLAN §16, mock only) |
+| `/targets` | Targets and host agents | `GET /api/targets`, `GET /api/hosts`; target actions are not in the daemon yet |
+| `/events` | Event log with history | `GET /api/events?since=&kind=&project=&agent=`, events socket |
+| `/audit` | Audit log | `GET /api/audit?actor=&action=&project=` |
 
-`GET /api/hosts` and `GET /api/health` (`{version, uptime}`) are not in the
-§17 list yet. The dashboard expects both.
+Artifact upload sends a multipart form: `file`, `name`, `kind`, and
+`attach_kind` with `attach_ref`. A folder goes up as one `bundle`: the
+browser builds a tar (`lib/tar.ts`) from the folder pick.
 
 ## Security notes
 

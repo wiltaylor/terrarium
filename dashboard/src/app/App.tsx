@@ -19,6 +19,9 @@ const VersionsPage = lazy(() => import("../features/versions/VersionsPage"));
 const TargetsPage = lazy(() => import("../features/targets/TargetsPage"));
 const AuditPage = lazy(() => import("../features/audit/AuditPage"));
 const EventsPage = lazy(() => import("../features/events/EventsPage"));
+const ProjectsPage = lazy(() => import("../features/projects/ProjectsPage"));
+const ProjectSettings = lazy(() => import("../features/projects/ProjectSettings"));
+const SpendPage = lazy(() => import("../features/spend/SpendPage"));
 
 function ProjectIndex() {
   const params = useParams();
@@ -38,6 +41,7 @@ export function App() {
     <Show when={isMock || !auth.needsToken()} fallback={<TokenScreen />}>
       <Router root={Layout}>
         <Route path="/" component={Home} />
+        <Route path="/projects" component={ProjectsPage} />
         <Route path="/agents" component={AgentsPage} />
         <Route path="/agents/:id" component={AgentDetail} />
         <Route path="/subscriptions" component={SubscriptionsPage} />
@@ -48,6 +52,8 @@ export function App() {
         <Route path="/p/:project" component={ProjectIndex} />
         <Route path="/p/:project/board" component={BoardPage} />
         <Route path="/p/:project/inbox" component={InboxPage} />
+        <Route path="/p/:project/settings" component={ProjectSettings} />
+        <Route path="/p/:project/spend" component={SpendPage} />
         <Route path="/p/:project/memory" component={MemoryPage} />
         <Route path="/p/:project/wiki/*path" component={WikiPage} />
         <Route path="/p/:project/artifacts/:id?" component={ArtifactsPage} />

@@ -64,7 +64,7 @@ export function AddSubscriptionWizard(props: { initialKind?: LoginKind; onClose:
 function LoginStep(props: { kind: LoginKind; onBack: () => void; onDone: (name: string) => void }) {
   const now = useNow(1000);
   const [session, setSession] = createSignal<LoginSession | null>(null);
-  const [error, setError] = createSignal<string | null>(null);
+  const [error, setError] = createSignal<unknown>(null);
   const [code, setCode] = createSignal("");
   const [provider, setProvider] = createSignal("anthropic");
   const [reuse, setReuse] = createSignal(true);
@@ -98,7 +98,7 @@ function LoginStep(props: { kind: LoginKind; onBack: () => void; onDone: (name: 
             setError(st.error ?? "Login failed.");
           }
         } catch (e) {
-          setError((e as Error).message);
+          setError(e);
         }
       }, 1000);
       teardown = setTimeout(() => {
@@ -107,7 +107,7 @@ function LoginStep(props: { kind: LoginKind; onBack: () => void; onDone: (name: 
         setError("The login terminal closed after ten minutes. Start again.");
       }, TEARDOWN_MS);
     } catch (e) {
-      setError((e as Error).message);
+      setError(e);
     }
   };
 
@@ -118,7 +118,7 @@ function LoginStep(props: { kind: LoginKind; onBack: () => void; onDone: (name: 
       await api.subscriptions.loginInput(s.id, code().trim());
       setCode("");
     } catch (e) {
-      setError((e as Error).message);
+      setError(e);
     }
   };
 
@@ -257,7 +257,7 @@ function ApiKeyStep(props: { onBack: () => void; onDone: (name: string) => void 
   const [baseUrl, setBaseUrl] = createSignal("");
   const [models, setModels] = createSignal("");
   const [authJson, setAuthJson] = createSignal(true);
-  const [error, setError] = createSignal<string | null>(null);
+  const [error, setError] = createSignal<unknown>(null);
   const [busy, setBusy] = createSignal(false);
 
   const submit = async (e: Event) => {
@@ -273,7 +273,7 @@ function ApiKeyStep(props: { onBack: () => void; onDone: (name: string) => void 
       setKey("");
       props.onDone(name().trim());
     } catch (err) {
-      setError((err as Error).message);
+      setError(err);
     } finally {
       setBusy(false);
     }

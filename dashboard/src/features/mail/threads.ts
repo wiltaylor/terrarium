@@ -18,8 +18,8 @@ export function groupThreads(messages: Message[]): Thread[] {
       const sorted = msgs.slice().sort((a, b) => a.created_at.localeCompare(b.created_at));
       return {
         id,
-        subject: sorted[0]!.subject.replace(/^Re:\s*/i, ""),
-        participants: [...new Set(sorted.flatMap((m) => [m.from, m.to]))],
+        subject: (sorted.find((m) => m.subject)?.subject ?? "").replace(/^Re:\s*/i, ""),
+        participants: [...new Set(sorted.flatMap((m) => [m.from_name, m.to_name]))],
         messages: sorted,
         last_at: sorted.at(-1)!.created_at,
         unread: sorted.filter((m) => m.state === "queued" || m.state === "delivered").length,

@@ -18,7 +18,11 @@ describe("mock API", () => {
   it("enforces the board rules from §13", async () => {
     const api = mock();
     // TER-14 depends on TER-12, which is not done.
-    await expect(api.cards.update("TER-14", { column: "in_progress" })).rejects.toThrow(/depends on TER-12/);
+    const err = await api.cards.update("TER-14", { column: "in_progress" }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).code).toBe("dependencies_unmet");
+    expect((err as ApiError).details).toEqual({ blocked_by: ["TER-12"] });
+    expect((err as ApiError).message).toMatch(/depends on TER-12/);
     // Blocked needs a comment.
     await expect(api.cards.update("TER-13", { column: "blocked" })).rejects.toBeInstanceOf(ApiError);
     const moved = await api.cards.update("TER-13", { column: "blocked", comment: "need a login" });
@@ -30,15 +34,20 @@ describe("mock API", () => {
     const api = mock();
     await api.cards.update("TER-17", { column: "in_progress" });
     await api.cards.update("TER-18", { column: "in_progress" });
-    await expect(api.cards.update("TER-13", { column: "in_progress" })).rejects.toThrow(/WIP limit/);
+    const err = await api.cards.update("TER-13", { column: "in_progress" }).catch((e: unknown) => e);
+    expect((err as ApiError).code).toBe("wip_limit");
+    expect((err as ApiError).details).toEqual({ column: "in_progress", wip_limit: 3 });
   });
 
   it("emits events to subscribers when a card moves", async () => {
     const api = mock();
     const seen: string[] = [];
-    api.events().subscribe((e) => seen.push(e.summary));
+    const stream = api.events.stream({ since: api.world.seq });
+    stream.subscribe((e) => seen.push(e.summary));
+    await tick();
     await api.cards.update("TER-17", { column: "ready" });
     expect(seen).toContain("operator moved TER-17 to ready");
+    stream.close();
   });
 
   it("returns copies, so callers cannot mutate the world", async () => {

@@ -1,7 +1,8 @@
 import { useParams, useSearchParams } from "@solidjs/router";
-import { createEffect, createResource, createSignal, For, on, onCleanup, Show } from "solid-js";
+import { createEffect, createSignal, For, on, onCleanup, Show } from "solid-js";
+import { createPagedList } from "../../components/paged";
 import { StatusBadge } from "../../components/StatusBadge";
-import { Drawer, ErrorBanner, Modal, PageHead } from "../../components/ui";
+import { ConfirmButton, Drawer, ErrorBanner, LoadMore, Modal, PageHead } from "../../components/ui";
 import type { Card } from "../../api/types";
 import { ago, humanize } from "../../lib/format";
 import { cardsIn, createBoardStore } from "../../stores/board";
@@ -23,8 +24,9 @@ export function BoardPage() {
   createEffect(on(() => params.project, (p) => void board.load(p)));
 
   let reloadTimer: ReturnType<typeof setTimeout> | undefined;
+  // Live: card and board events of this project reload the board.
   const off = events.on((e) => {
-    if (e.kind === "card" && e.project === params.project && !dragging()) {
+    if ((e.kind === "card" || e.kind === "board") && e.project === params.project && !dragging()) {
       clearTimeout(reloadTimer);
       reloadTimer = setTimeout(() => void board.reload(), 300);
     }
@@ -35,8 +37,8 @@ export function BoardPage() {
   });
 
   const labels = () => [...new Set(board.state.board?.cards.flatMap((c) => c.labels) ?? [])].sort();
-  const assignees = () => [...new Set(board.state.board?.cards.map((c) => c.assignee).filter((a): a is string => !!a) ?? [])].sort();
-  const visible = (c: Card) => (!label() || c.labels.includes(label())) && (!assignee() || c.assignee === assignee());
+  const assignees = () => [...new Set(board.state.board?.cards.map((c) => c.assignee_name ?? c.assignee).filter((a): a is string => !!a) ?? [])].sort();
+  const visible = (c: Card) => (!label() || c.labels.includes(label())) && (!assignee() || (c.assignee_name ?? c.assignee) === assignee());
 
   const dropIndex = (columnEl: HTMLElement, y: number) => {
     const cards = [...columnEl.querySelectorAll<HTMLElement>("[data-card]")].filter((el) => el.dataset.card !== dragging());
@@ -75,7 +77,7 @@ export function BoardPage() {
             if (newTitle().trim() && (await board.create(newTitle().trim()))) setNewTitle("");
           }}
         >
-          <input placeholder="New card title" value={newTitle()} onInput={(e) => setNewTitle(e.currentTarget.value)} aria-label="New card title" />
+          <input placeholder={`New ${board.prefix() ?? ""} card title`.replace("  ", " ")} value={newTitle()} onInput={(e) => setNewTitle(e.currentTarget.value)} aria-label="New card title" />
           <button class="primary" type="submit">
             Add card
           </button>
@@ -183,6 +185,10 @@ export function BoardPage() {
               return commitMove(c().id, column, end, comment);
             }}
             onSaved={board.put}
+            onArchived={() => {
+              board.drop(c().id);
+              setSearch({ card: undefined });
+            }}
           />
         )}
       </Show>
@@ -198,7 +204,7 @@ function KCard(props: {
   onDragStart: (e: DragEvent) => void;
   onDragEnd: () => void;
 }) {
-  const owner = () => (props.card.assignee ? agents.byName(props.card.project, props.card.assignee) : undefined);
+  const owner = () => (props.card.assignee ? agents.byId(props.card.assignee) : undefined);
   return (
     <article
       class={`kcard${props.dragging ? " dragging" : ""}`}
@@ -213,9 +219,9 @@ function KCard(props: {
     >
       <div class="spread small">
         <span class="mono muted">{props.card.id}</span>
-        <Show when={props.card.depends_on.length}>
-          <span class="chip warn" title={`Depends on ${props.card.depends_on.join(", ")}`}>
-            deps {props.card.depends_on.length}
+        <Show when={(props.card.blocked_by ?? []).length}>
+          <span class="chip warn" title={`Waiting on ${props.card.blocked_by.join(", ")}`}>
+            waits on {props.card.blocked_by.length}
           </span>
         </Show>
       </div>
@@ -225,7 +231,7 @@ function KCard(props: {
       </div>
       <Show when={props.card.assignee}>
         <div class="spread small">
-          <span>{props.card.assignee}</span>
+          <span>{owner()?.name ?? props.card.assignee_name ?? props.card.assignee}</span>
           <Show when={owner()}>{(a) => <StatusBadge status={a().status} />}</Show>
         </div>
       </Show>
@@ -257,13 +263,18 @@ function CardDrawer(props: {
   onClose: () => void;
   onMove: (column: string, comment?: string) => Promise<void>;
   onSaved: (c: Card) => void;
+  onArchived: () => void;
 }) {
   const [comment, setComment] = createSignal("");
-  const [error, setError] = createSignal<string | null>(null);
+  const [error, setError] = createSignal<unknown>(null);
   const [editing, setEditing] = createSignal(false);
   const [title, setTitle] = createSignal("");
   const [body, setBody] = createSignal("");
-  const [history] = createResource(() => props.card.id, (id) => api.cards.events(id));
+  const history = createPagedList(
+    () => props.card.id,
+    (id, cursor) => api.cards.events(id, { cursor }),
+    (e) => e.id,
+  );
   const projectAgents = () => agents.inProject(props.card.project);
 
   const save = async (patch: Parameters<typeof api.cards.update>[1]) => {
@@ -272,7 +283,7 @@ function CardDrawer(props: {
       setError(null);
       return true;
     } catch (e) {
-      setError((e as Error).message);
+      setError(e);
       return false;
     }
   };
@@ -336,7 +347,7 @@ function CardDrawer(props: {
           <select value={props.card.assignee ?? ""} onChange={(e) => void save({ assignee: e.currentTarget.value || null })}>
             <option value="">unassigned</option>
             <option value="operator">operator</option>
-            <For each={projectAgents()}>{(a) => <option value={a.name}>{a.name}</option>}</For>
+            <For each={projectAgents()}>{(a) => <option value={a.id}>{a.name}</option>}</For>
           </select>
         </label>
       </div>
@@ -345,12 +356,20 @@ function CardDrawer(props: {
         <dt>Labels</dt>
         <dd>{props.card.labels.join(", ") || "—"}</dd>
         <dt>Depends on</dt>
-        <dd>{props.card.depends_on.join(", ") || "—"}</dd>
+        <dd>
+          {props.card.depends_on.join(", ") || "—"}
+          <Show when={(props.card.blocked_by ?? []).length}>
+            {" "}
+            <span class="chip warn">not done: {props.card.blocked_by.join(", ")}</span>
+          </Show>
+        </dd>
+        <dt>Repo</dt>
+        <dd class="mono small">{props.card.repo ?? "—"}</dd>
         <dt>Branch</dt>
         <dd class="mono small">{props.card.branch ?? "—"}</dd>
         <dt>Created</dt>
         <dd>
-          {props.card.created_by} · {ago(props.card.created_at)}
+          {props.card.created_by_name ?? props.card.created_by} · {ago(props.card.created_at)}
         </dd>
         <Show when={props.card.links.length}>
           <dt>Links</dt>
@@ -364,7 +383,7 @@ function CardDrawer(props: {
           {(c) => (
             <div class="comment">
               <div class="small muted">
-                <strong style={{ color: "var(--text)" }}>{c.author}</strong> · {ago(c.created_at)}
+                <strong style={{ color: "var(--text)" }}>{c.author_name ?? c.author}</strong> · {ago(c.created_at)}
               </div>
               <div style={{ "white-space": "pre-wrap" }}>{c.body}</div>
             </div>
@@ -380,7 +399,7 @@ function CardDrawer(props: {
               props.onSaved(await api.cards.comment(props.card.id, comment().trim()));
               setComment("");
             } catch (err) {
-              setError((err as Error).message);
+              setError(err);
             }
           }}
         >
@@ -396,7 +415,7 @@ function CardDrawer(props: {
       <details>
         <summary>History</summary>
         <ul class="small">
-          <For each={history()} fallback={<li class="muted">No events.</li>}>
+          <For each={history.items()} fallback={<li class="muted">{history.initial() ? "Loading…" : "No events."}</li>}>
             {(e) => (
               <li>
                 {ago(e.at)}: {e.summary}
@@ -404,7 +423,21 @@ function CardDrawer(props: {
             )}
           </For>
         </ul>
+        <LoadMore hasMore={history.hasMore()} loading={history.loading()} onMore={history.loadMore} />
       </details>
+      <div>
+        <ConfirmButton
+          label="Archive"
+          onConfirm={async () => {
+            try {
+              await api.cards.archive(props.card.id);
+              props.onArchived();
+            } catch (e) {
+              setError(e);
+            }
+          }}
+        />
+      </div>
     </Drawer>
   );
 }

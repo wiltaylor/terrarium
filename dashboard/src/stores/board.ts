@@ -2,7 +2,7 @@
 
 import { createStore, reconcile, unwrap } from "solid-js/store";
 import type { Api } from "../api/client";
-import type { Board, Card } from "../api/types";
+import type { Board, Card, NewCard } from "../api/types";
 
 /**
  * Move a card to `toColumn` at `toIndex` (index among that column's cards,
@@ -28,7 +28,7 @@ export function cardsIn(board: Board, column: string): Card[] {
 }
 
 export function createBoardStore(api: Pick<Api, "board" | "cards">) {
-  const [state, setState] = createStore<{ board: Board | null; loading: boolean; error: string | null }>({
+  const [state, setState] = createStore<{ board: Board | null; loading: boolean; error: unknown }>({
     board: null,
     loading: false,
     error: null,
@@ -44,7 +44,7 @@ export function createBoardStore(api: Pick<Api, "board" | "cards">) {
       const b = await api.board.get(name);
       if (project === name) setBoard(b);
     } catch (e) {
-      setState("error", (e as Error).message);
+      setState("error", e);
     } finally {
       setState("loading", false);
     }
@@ -70,29 +70,40 @@ export function createBoardStore(api: Pick<Api, "board" | "cards">) {
         return true;
       } catch (e) {
         setBoard(snapshot);
-        setState("error", (e as Error).message);
+        setState("error", e);
         return false;
       }
     },
 
-    async create(title: string, column = "backlog"): Promise<Card | null> {
+    async create(title: string, column = "backlog", extra: Omit<NewCard, "title" | "column"> = {}): Promise<Card | null> {
       if (!project) return null;
       try {
-        const card = await api.cards.create(project, { title, column });
+        const card = await api.cards.create(project, { ...extra, title, column });
         const b = state.board;
         if (b) setBoard({ ...b, cards: [...b.cards, card] });
         return card;
       } catch (e) {
-        setState("error", (e as Error).message);
+        setState("error", e);
         return null;
       }
     },
 
-    /** Replace one card after an edit or a comment. */
+    /** Replace one card after an edit or a comment. An archived card leaves the board. */
     put(card: Card) {
       const b = state.board;
-      if (b) setBoard({ ...b, cards: b.cards.map((c) => (c.id === card.id ? card : c)) });
+      if (!b) return;
+      const cards = card.archived ? b.cards.filter((c) => c.id !== card.id) : b.cards.some((c) => c.id === card.id) ? b.cards.map((c) => (c.id === card.id ? card : c)) : [...b.cards, card];
+      setBoard({ ...b, cards });
     },
+
+    /** Remove one card, after an archive. */
+    drop(id: string) {
+      const b = state.board;
+      if (b) setBoard({ ...b, cards: b.cards.filter((c) => c.id !== id) });
+    },
+
+    /** The card IDs of the board's project, for the `TER-42` form. */
+    prefix: () => state.board?.card_prefix ?? null,
   };
 }
 

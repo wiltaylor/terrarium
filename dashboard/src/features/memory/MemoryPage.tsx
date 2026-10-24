@@ -1,14 +1,14 @@
 import { A, useParams, useSearchParams } from "@solidjs/router";
 import { createMemo, createResource, createSignal, For, Show } from "solid-js";
 import { Empty, PageHead } from "../../components/ui";
-import { RELATIONS, type Memory, type MemoryLink, type Relation } from "../../api/types";
+import { RELATIONS, type Memory, type MemoryEdge, type Relation } from "../../api/types";
 import { ago, humanize } from "../../lib/format";
 import { api } from "../../stores";
 import { MemoryGraph } from "./MemoryGraph";
 
 const FIRST: Relation[] = ["contradicts", "supersedes"];
 
-export function sortLinks(links: MemoryLink[]): MemoryLink[] {
+export function sortLinks(links: MemoryEdge[]): MemoryEdge[] {
   return links.slice().sort((a, b) => Number(FIRST.includes(b.relation)) - Number(FIRST.includes(a.relation)));
 }
 
@@ -27,19 +27,20 @@ export default function MemoryPage() {
   );
   const [everything] = createResource(() => params.project, (p) => api.memories.list(p, { all: true }));
   const tags = () => [...new Set((everything() ?? []).flatMap((m) => m.tags))].sort();
-  const authors = () => [...new Set((everything() ?? []).map((m) => m.author))].sort();
+  const authors = () => [...new Map((everything() ?? []).map((m) => [m.author, m.author_name ?? m.author])).entries()].sort((a, b) => a[1].localeCompare(b[1]));
   const recent = () => (everything() ?? []).slice().sort((a, b) => b.updated_at.localeCompare(a.updated_at)).slice(0, 6);
 
   const selectedId = () => search.id ?? list()?.[0]?.id;
-  const [graph] = createResource(selectedId, (id) => api.memories.graph(id, 1));
+  // `project/MEM-n`: a bare ID is ambiguous for the operator (docs/api.md §10.1).
+  const [graph] = createResource(selectedId, (id) => api.memories.graph(`${params.project}/${id}`, 1));
   const selected = createMemo<Memory | undefined>(() => graph()?.nodes.find((n) => n.id === selectedId()));
   const filteredGraph = () => {
     const g = graph();
     if (!g || !relation()) return g;
-    return { ...g, links: g.links.filter((l) => l.relation === relation()) };
+    return { ...g, edges: g.edges.filter((l) => l.relation === relation()) };
   };
   const sourceHref = (s: Memory["sources"][number]) =>
-    s.kind === "card" ? `/p/${params.project}/board?card=${s.ref}` : s.kind === "thread" ? `/mail` : undefined;
+    s.kind === "card" ? `/p/${params.project}/board?card=${s.ref}` : s.kind === "thread" ? `/mail` : s.kind === "url" && /^https?:/.test(s.ref) ? s.ref : undefined;
 
   return (
     <>
@@ -51,7 +52,7 @@ export default function MemoryPage() {
         </select>
         <select value={author()} onChange={(e) => setAuthor(e.currentTarget.value)} aria-label="Author">
           <option value="">Any author</option>
-          <For each={authors()}>{(a) => <option value={a}>{a}</option>}</For>
+          <For each={authors()}>{([addr, name]) => <option value={addr}>{name}</option>}</For>
         </select>
         <select value={relation()} onChange={(e) => setRelation(e.currentTarget.value as Relation | "")} aria-label="Relation">
           <option value="">Any relation</option>
@@ -72,7 +73,7 @@ export default function MemoryPage() {
                     <span class="mono muted small">{m.id}</span> {m.title}
                   </span>
                   <span class="muted small">
-                    {m.author} · {m.tags.join(", ")}
+                    {m.author_name ?? m.author} · {m.tags.join(", ")}
                     {m.superseded_by ? ` · superseded by ${m.superseded_by}` : ""}
                   </span>
                 </button>
@@ -88,7 +89,7 @@ export default function MemoryPage() {
                     <a href={`?id=${m.id}`} onClick={(e) => (e.preventDefault(), setSearch({ id: m.id }))}>
                       {m.id}
                     </a>{" "}
-                    {m.title} <span class="muted">· {m.author}, {ago(m.updated_at)}</span>
+                    {m.title} <span class="muted">· {m.author_name ?? m.author}, {ago(m.updated_at)}</span>
                   </li>
                 )}
               </For>
@@ -110,7 +111,7 @@ export default function MemoryPage() {
                   </Show>
                 </div>
                 <div class="muted small">
-                  {m().author} · updated {ago(m().updated_at)} · {m().tags.map((t) => `#${t}`).join(" ")}
+                  {m().author_name ?? m().author} · updated {ago(m().updated_at)} · {m().tags.map((t) => `#${t}`).join(" ")}
                 </div>
                 <p style={{ margin: 0, "white-space": "pre-wrap" }}>{m().body}</p>
                 <Show when={m().sources.length}>
@@ -127,7 +128,7 @@ export default function MemoryPage() {
                 </Show>
                 <h3 style={{ margin: "6px 0 0" }}>Links</h3>
                 <ul class="small" style={{ margin: 0 }}>
-                  <For each={sortLinks(graph()?.links.filter((l) => l.from === m().id || l.to === m().id) ?? [])} fallback={<li class="muted">No links.</li>}>
+                  <For each={sortLinks(m().links)} fallback={<li class="muted">No links.</li>}>
                     {(l) => (
                       <li>
                         <span class={`chip ${FIRST.includes(l.relation) ? "bad" : ""}`}>{humanize(l.relation)}</span>{" "}
@@ -135,7 +136,10 @@ export default function MemoryPage() {
                         <a href={`?id=${l.from === m().id ? l.to : l.from}`} onClick={(e) => (e.preventDefault(), setSearch({ id: l.from === m().id ? l.to : l.from }))}>
                           {l.from === m().id ? l.to : l.from}
                         </a>{" "}
-                        <span class="muted">by {l.author}</span>
+                        <Show when={l.other_title}>
+                          <span>{l.other_title} </span>
+                        </Show>
+                        <span class="muted">by {l.author_name ?? l.author}</span>
                       </li>
                     )}
                   </For>

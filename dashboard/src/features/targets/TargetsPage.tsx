@@ -6,7 +6,7 @@ import { api } from "../../stores";
 export default function TargetsPage() {
   const [targets, { refetch }] = createResource(() => api.targets.list());
   const [hosts] = createResource(() => api.hosts.list());
-  const [error, setError] = createSignal<string | null>(null);
+  const [error, setError] = createSignal<unknown>(null);
 
   const act = async (id: string, action: "up" | "down" | "snapshot" | "restore") => {
     try {
@@ -14,7 +14,8 @@ export default function TargetsPage() {
       setError(null);
       void refetch();
     } catch (e) {
-      setError((e as Error).message);
+      // Target actions are not in the daemon yet (docs/api.md §10); the banner says so.
+      setError(e);
     }
   };
 
@@ -50,7 +51,7 @@ export default function TargetsPage() {
                     </td>
                     <td>{t.kind}</td>
                     <td>{t.project ?? "global"}</td>
-                    <td>{t.host ?? "—"}</td>
+                    <td class="mono small">{t.host ?? t.address ?? "—"}</td>
                     <td>
                       <span class={`chip ${t.state === "up" ? "ok" : t.state === "down" ? "" : "info"}`}>{t.state}</span>
                     </td>

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createRoot } from "solid-js";
 import { createMockApi } from "../api/mock";
 import type { Board, Card } from "../api/types";
+import { describeError, errorText } from "../lib/errors";
 import { cardsIn, createBoardStore, moveCard } from "./board";
 
 const card = (id: string, column: string, position: number): Card => ({
@@ -13,6 +14,8 @@ const card = (id: string, column: string, position: number): Card => ({
   body: "",
   labels: [],
   depends_on: [],
+  blocked_by: [],
+  archived: false,
   comments: [],
   links: [],
   created_by: "x",
@@ -81,7 +84,8 @@ describe("createBoardStore", () => {
       const ok = await s.move("TER-14", "in_progress", 0);
       expect(ok).toBe(false);
       expect(s.state.board!.cards.find((c) => c.id === "TER-14")!.column).toBe("ready");
-      expect(s.state.error).toMatch(/depends on/);
+      expect(errorText(s.state.error)).toMatch(/depends on/);
+      expect(describeError(s.state.error)!.details).toEqual([{ label: "Blocked by", value: "TER-12", pre: false }]);
     });
   });
 });

@@ -1080,3 +1080,63 @@ th {
 .token-screen form {
   width: min(100%, 420px);
 }
+
+/* ----- error details, load more, confirm, connection banner ----- */
+.error-detail {
+  margin: 4px 0 0;
+  max-height: 240px;
+  overflow: auto;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 6px 8px;
+  font-family: var(--mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+}
+.load-more {
+  justify-content: center;
+  padding: 8px 0;
+}
+.confirm {
+  flex-wrap: wrap;
+}
+.conn-banner {
+  position: sticky;
+  top: env(safe-area-inset-top, 0px);
+  z-index: 20;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+  background: var(--danger-soft);
+  color: var(--danger);
+  border-bottom: 1px solid var(--danger);
+  padding: 6px 16px;
+  font-size: 13px;
+}
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+.bar-track {
+  background: var(--border);
+  border-radius: 4px;
+  height: 8px;
+  min-width: 60px;
+  overflow: hidden;
+}
+.bar-fill {
+  background: var(--accent);
+  height: 100%;
+}
+.bar-fill.alt {
+  background: var(--info);
+}
+.nav-count.info {
+  background: var(--info-soft);
+  color: var(--info);
+}

@@ -17,7 +17,7 @@ export function kindFor(s: Pick<Subscription, "provider" | "harnesses" | "probe"
 export default function SubscriptionsPage() {
   const now = useNow(30_000);
   const [wizard, setWizard] = createSignal<{ kind?: LoginKind } | null>(null);
-  const [error, setError] = createSignal<string | null>(null);
+  const [error, setError] = createSignal<unknown>(null);
   const [busy, setBusy] = createSignal<string | null>(null);
   const [detected] = createResource(() => api.subscriptions.detect());
 
@@ -28,7 +28,7 @@ export default function SubscriptionsPage() {
       await subscriptions.refresh();
       setError(null);
     } catch (e) {
-      setError((e as Error).message);
+      setError(e);
     } finally {
       setBusy(null);
     }

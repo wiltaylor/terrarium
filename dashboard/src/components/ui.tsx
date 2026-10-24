@@ -1,19 +1,89 @@
 // Small shared UI pieces.
 
-import { createSignal, onCleanup, onMount, Show, type JSX } from "solid-js";
+import { createSignal, For, onCleanup, onMount, Show, type JSX } from "solid-js";
 import { Portal } from "solid-js/web";
+import { describeError } from "../lib/errors";
 
-export function ErrorBanner(props: { error: string | null | undefined; onDismiss?: () => void }) {
+/** Shows any thrown value. An ApiError shows its code and `error.details`. */
+export function ErrorBanner(props: { error: unknown; onDismiss?: () => void }) {
+  const view = () => describeError(props.error);
   return (
-    <Show when={props.error}>
-      <div class="error-banner" role="alert">
-        <span>{props.error}</span>
-        <Show when={props.onDismiss}>
-          <button class="ghost small" onClick={() => props.onDismiss?.()} aria-label="Dismiss">
-            ✕
+    <Show when={view()}>
+      {(v) => (
+        <div class="error-banner" role="alert">
+          <div class="stack" style={{ gap: "4px", "min-width": 0, flex: 1 }}>
+            <span>
+              {v().message}
+              <Show when={v().code}>
+                {" "}
+                <span class="mono small muted">({v().code})</span>
+              </Show>
+            </span>
+            <For each={v().details}>
+              {(d) => (
+                <div class="small">
+                  <strong>{d.label}:</strong>{" "}
+                  <Show when={d.pre} fallback={<span class="mono">{d.value}</span>}>
+                    <pre class="error-detail">{d.value}</pre>
+                  </Show>
+                </div>
+              )}
+            </For>
+          </div>
+          <Show when={props.onDismiss}>
+            <button class="ghost small" onClick={() => props.onDismiss?.()} aria-label="Dismiss">
+              ✕
+            </button>
+          </Show>
+        </div>
+      )}
+    </Show>
+  );
+}
+
+/** A "Load more" button for a cursor list. */
+export function LoadMore(props: { hasMore: boolean; loading?: boolean; onMore: () => void; count?: number }) {
+  return (
+    <Show when={props.hasMore || props.count !== undefined}>
+      <div class="row load-more">
+        <Show when={props.count !== undefined}>
+          <span class="muted small">{props.count} shown</span>
+        </Show>
+        <Show when={props.hasMore}>
+          <button class="small" disabled={props.loading} onClick={() => props.onMore()}>
+            {props.loading ? "Loading…" : "Load more"}
           </button>
         </Show>
       </div>
+    </Show>
+  );
+}
+
+/** A delete button that asks once, inline. Browsers in the viewer may block confirm(). */
+export function ConfirmButton(props: { label: string; confirmLabel?: string; onConfirm: () => void | Promise<void>; class?: string; disabled?: boolean }) {
+  const [asking, setAsking] = createSignal(false);
+  return (
+    <Show
+      when={asking()}
+      fallback={
+        <button class={props.class ?? "danger"} disabled={props.disabled} onClick={() => setAsking(true)}>
+          {props.label}
+        </button>
+      }
+    >
+      <span class="row confirm">
+        <span class="small">Are you sure?</span>
+        <button
+          class="danger"
+          onClick={async () => {
+            setAsking(false);
+            await props.onConfirm();
+          }}
+        >
+          {props.confirmLabel ?? `Yes, ${props.label.toLowerCase()}`}
+        </button>
+        <button onClick={() => setAsking(false)}>Cancel</button>
+      </span>
     </Show>
   );
 }

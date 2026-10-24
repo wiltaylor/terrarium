@@ -10,7 +10,11 @@ function recorder() {
       calls.push({ method, path, opts });
       return undefined as T;
     },
-    wsUrl: (path) => `ws://test${path}`,
+    async page<T>(path: string, query?: Record<string, unknown>) {
+      calls.push({ method: "GET", path, opts: { query: query as RequestOptions["query"] } });
+      return { items: [] as T[], next: null };
+    },
+    wsUrl: (path, query) => `ws://test${path}${query?.since !== undefined ? `?since=${query.since}` : ""}`,
   };
   const fakeSocket = (url: string) => {
     sockets.push(url);
@@ -47,7 +51,7 @@ describe("createHttpApi", () => {
       "GET /api/projects/webshop/inbox",
       "POST /api/targets/TGT-1/snapshot",
     ]);
-    expect(calls[1]!.opts?.query).toEqual({ project: "terrarium" });
+    expect(calls[1]!.opts?.query).toMatchObject({ project: "terrarium", limit: 1000 });
     expect(calls[4]!.opts?.body).toEqual({ column: "review", position: 0 });
     expect(calls[5]!.opts?.query).toEqual({ depth: 1 });
     expect(calls[6]!.opts?.query).toEqual({ a: 2, b: 3 });
@@ -60,5 +64,37 @@ describe("createHttpApi", () => {
     api.subscriptions.loginPty("LOGIN-9");
     expect(sockets).toEqual(["ws://test/api/agents/01JB/pty", "ws://test/api/subscriptions/login/LOGIN-9/pty"]);
     expect(s.binaryType).toBe("arraybuffer");
+  });
+});
+
+describe("createHttpApi, docs/api.md specifics", () => {
+  it("encodes a project/name agent key as one segment", async () => {
+    const { api, calls } = recorder();
+    await api.agents.get("terrarium/worker");
+    await api.agents.roles("terrarium/worker");
+    expect(calls.map((c) => c.path)).toEqual(["/api/agents/terrarium%2Fworker", "/api/agents/terrarium%2Fworker/roles"]);
+  });
+
+  it("sends confirm=true on project delete and on a confirmed agent delete", async () => {
+    const { api, calls } = recorder();
+    await api.projects.remove("ops");
+    await api.agents.remove("A1", true);
+    await api.agents.remove("A2");
+    expect(calls.map((c) => c.opts?.query)).toEqual([{ confirm: true }, { confirm: true }, undefined]);
+  });
+
+  it("uses the inbox reply and read routes", async () => {
+    const { api, calls } = recorder();
+    await api.inbox.reply("ops", "M1", "ok");
+    await api.inbox.markRead("ops", "M1");
+    expect(calls.map((c) => `${c.method} ${c.path}`)).toEqual(["POST /api/projects/ops/inbox/M1/reply", "POST /api/projects/ops/inbox/M1/read"]);
+  });
+
+  it("passes the cursor through page methods", async () => {
+    const { api, calls } = recorder();
+    await api.mail.list({ state: "unread", cursor: "01M" });
+    await api.events.history({ since: 42, kind: "status" });
+    expect(calls[0]).toMatchObject({ path: "/api/mail", opts: { query: { state: "unread", cursor: "01M" } } });
+    expect(calls[1]).toMatchObject({ path: "/api/events", opts: { query: { since: 42, kind: "status" } } });
   });
 });

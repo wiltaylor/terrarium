@@ -1,23 +1,37 @@
 import { A, useParams } from "@solidjs/router";
-import { createMemo, createResource, createSignal, For, Show } from "solid-js";
+import { createMemo, createResource, createSignal, For, onCleanup, Show } from "solid-js";
 import { ArtifactViewer } from "../../components/ArtifactViewer";
 import { Markdown } from "../../components/Markdown";
-import { Empty, ErrorBanner, PageHead } from "../../components/ui";
+import { Empty, ErrorBanner, Modal, PageHead } from "../../components/ui";
 import type { Version, VersionStatus } from "../../api/types";
+import { parseList } from "../agents/form";
 import { ago, humanize } from "../../lib/format";
 import { renderWiki } from "../../lib/markdown";
-import { api } from "../../stores";
+import { api, events } from "../../stores";
 
 const CHIP: Record<VersionStatus, string> = { draft: "", in_review: "warn", approved: "ok", rejected: "bad", released: "info" };
 
 export default function VersionsPage() {
   const params = useParams<{ project: string; id?: string }>();
   const [list, { refetch }] = createResource(() => params.project, (p) => api.versions.list(p));
-  const current = () => list()?.find((v) => v.id === params.id || v.name === params.id);
+  const current = () => list()?.find((v) => v.id === params.id || v.name === params.id) ?? (params.id ? undefined : list()?.[0]);
+  const [creating, setCreating] = createSignal(false);
+  // Live: version events of this project reload the list.
+  const off = events.on((e) => {
+    if (e.kind.startsWith("version.") && e.project === params.project) void refetch();
+  });
+  onCleanup(off);
 
   return (
     <>
-      <PageHead title={`Versions · ${params.project}`} />
+      <PageHead title={`Versions · ${params.project}`}>
+        <button class="primary" onClick={() => setCreating(true)}>
+          New version
+        </button>
+      </PageHead>
+      <Show when={creating()}>
+        <NewVersionModal project={params.project} onClose={() => setCreating(false)} onCreated={() => void refetch()} />
+      </Show>
       <div class="split">
         <div class="card-box">
           <Show when={list()?.length} fallback={<span class="muted">No versions.</span>}>
@@ -30,7 +44,7 @@ export default function VersionsPage() {
                     </A>{" "}
                     <span class={`chip ${CHIP[v.status]}`}>{humanize(v.status)}</span>
                     <div class="muted small">
-                      {v.created_by} · {ago(v.created_at)}
+                      {v.created_by_name ?? v.created_by} · {ago(v.created_at)}
                     </div>
                   </li>
                 )}
@@ -48,11 +62,10 @@ export default function VersionsPage() {
 
 function VersionView(props: { version: Version; all: Version[]; onChange: () => void }) {
   const [comment, setComment] = createSignal("");
-  const [error, setError] = createSignal<string | null>(null);
-  const [artifacts] = createResource(() => props.version.project, (p) => api.artifacts.list(p));
+  const [error, setError] = createSignal<unknown>(null);
   const previous = createMemo(() => props.all.filter((v) => v.id !== props.version.id && v.created_at < props.version.created_at)[0]);
   const [compare] = createResource(() => (previous() ? { a: props.version.id, b: previous()!.id } : null), (k) => api.versions.compare(k.a, k.b));
-  const attached = () => (artifacts() ?? []).filter((a) => props.version.artifacts.includes(a.id));
+  const attached = () => props.version.artifacts;
 
   const act = async (action: "submit" | "approve" | "reject" | "release") => {
     try {
@@ -61,7 +74,7 @@ function VersionView(props: { version: Version; all: Version[]; onChange: () => 
       setError(null);
       props.onChange();
     } catch (e) {
-      setError((e as Error).message);
+      setError(e);
     }
   };
 
@@ -108,7 +121,7 @@ function VersionView(props: { version: Version; all: Version[]; onChange: () => 
           <For each={props.version.cards} fallback={<span class="muted">None.</span>}>
             {(c) => (
               <div>
-                <A href={`/p/${props.version.project}/board?card=${c}`}>{c}</A>
+                <A href={`/p/${props.version.project}/board?card=${c.id}`}>{c.id}</A> {c.title} <span class="chip">{humanize(c.column)}</span>
               </div>
             )}
           </For>
@@ -117,10 +130,22 @@ function VersionView(props: { version: Version; all: Version[]; onChange: () => 
           <h3>Compare to {previous()?.name ?? "previous"}</h3>
           <Show when={compare()} fallback={<span class="muted">{previous() ? "Loading…" : "No previous version."}</span>}>
             {(c) => (
-              <div class="small">
-                <div>Cards: {c().cards.join(", ") || "none"}</div>
-                <div>Pages: {c().pages.join(", ") || "none"}</div>
-                <div>Artifacts: {c().artifacts.join(", ") || "none"}</div>
+              <div class="small stack" style={{ gap: "4px" }}>
+                <div>Cards added: {c().cards.added.join(", ") || "none"}</div>
+                <div>Cards removed: {c().cards.removed.join(", ") || "none"}</div>
+                <div>Cards landed (done): {c().cards.landed.join(", ") || "none"}</div>
+                <div>
+                  Pages changed:{" "}
+                  <For each={c().pages} fallback={<span>none</span>}>
+                    {(pg) => (
+                      <>
+                        <A href={`/p/${props.version.project}/wiki/${pg.path}`}>{pg.path}</A>
+                        <span class="muted"> ({pg.from_rev ? `rev ${pg.from_rev} → ${pg.to_rev}` : `new, rev ${pg.to_rev}`}) </span>
+                      </>
+                    )}
+                  </For>
+                </div>
+                <div>Artifacts added: {c().artifacts.added.join(", ") || "none"}</div>
               </div>
             )}
           </Show>
@@ -144,7 +169,7 @@ function VersionView(props: { version: Version; all: Version[]; onChange: () => 
           {(r) => (
             <div class="comment">
               <div class="small muted">
-                <strong style={{ color: "var(--text)" }}>{r.author}</strong> {r.decision} · {ago(r.created_at)}
+                <strong style={{ color: "var(--text)" }}>{r.author_name ?? r.author}</strong> {r.decision} · {ago(r.created_at)}
               </div>
               <div>{r.comment}</div>
             </div>
@@ -152,5 +177,53 @@ function VersionView(props: { version: Version; all: Version[]; onChange: () => 
         </For>
       </div>
     </div>
+  );
+}
+
+function NewVersionModal(props: { project: string; onClose: () => void; onCreated: (v: Version) => void }) {
+  const [name, setName] = createSignal("");
+  const [notes, setNotes] = createSignal("");
+  const [gitRef, setGitRef] = createSignal("");
+  const [cards, setCards] = createSignal("");
+  const [error, setError] = createSignal<unknown>(null);
+  return (
+    <Modal title="New version" onClose={() => props.onClose()}>
+      <ErrorBanner error={error()} onDismiss={() => setError(null)} />
+      <form
+        class="stack"
+        onSubmit={async (e) => {
+          e.preventDefault();
+          try {
+            const v = await api.versions.create(props.project, { name: name().trim(), notes: notes(), git_ref: gitRef().trim() || undefined, cards: parseList(cards()) });
+            props.onCreated(v);
+            props.onClose();
+          } catch (err) {
+            setError(err);
+          }
+        }}
+      >
+        <label>
+          Name
+          <input value={name()} onInput={(e) => setName(e.currentTarget.value)} required placeholder="v0.2.0" />
+        </label>
+        <label>
+          Notes (Markdown, wikilinks work)
+          <textarea value={notes()} onInput={(e) => setNotes(e.currentTarget.value)} />
+        </label>
+        <label>
+          Git ref
+          <input value={gitRef()} onInput={(e) => setGitRef(e.currentTarget.value)} placeholder="main@abc123" />
+        </label>
+        <label>
+          Cards (comma separated)
+          <input value={cards()} onInput={(e) => setCards(e.currentTarget.value)} placeholder="TER-1, TER-2" />
+        </label>
+        <div>
+          <button class="primary" type="submit">
+            Create version
+          </button>
+        </div>
+      </form>
+    </Modal>
   );
 }

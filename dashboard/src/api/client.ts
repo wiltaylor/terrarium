@@ -1,31 +1,55 @@
-// The typed API surface of PLAN §17. `createHttpApi` talks to the daemon.
-// `createMockApi` (./mock) implements the same interface in memory.
+// The typed API surface of PLAN §17, coded to docs/api.md where the daemon
+// has the endpoint. `createHttpApi` talks to the daemon. `createMockApi`
+// (./mock) implements the same interface in memory.
+//
+// Lists: the daemon answers a JSON array and puts the next cursor in the
+// `X-Next-Cursor` header (docs/api.md §2.4). Methods that return `Page<T>`
+// expose the cursor for "load more". Methods that return `T[]` follow every
+// cursor with `collectAll`.
 
-import { seg, type Query, type Transport } from "./http";
+import { seg, type Page, type Query, type Transport } from "./http";
+import { collectAll, type PageQuery } from "../lib/paging";
 import { createWsEventStream, type EventStream, type PtySocket } from "./sockets";
 import type {
   Agent,
+  AgentDef,
   AgentEvent,
+  AgentPatch,
   ApiKeyInput,
   Artifact,
+  ArtifactJsonUpload,
+  ArtifactLinkKind,
+  ArtifactUrl,
+  ArtifactUsage,
   AuditEntry,
+  AuditQuery,
   Board,
   Card,
+  CardLinkKind,
   CardPatch,
-  Column,
+  CardQuery,
+  ColumnEdit,
+  CreatedMemory,
   DetectedLogin,
+  EventQuery,
   Health,
   Host,
+  InboxQuery,
   LoginKind,
   LoginSession,
+  MailQuery,
   Memory,
   MemoryGraph,
-  MemoryLink,
+  MemoryPatch,
   MemoryQuery,
   Message,
-  MessageState,
   NewCard,
+  NewMemory,
   NewMessage,
+  NewProject,
+  NewRepo,
+  NewVersion,
+  PageStatus,
   Project,
   QuotaWindow,
   Relation,
@@ -38,6 +62,10 @@ import type {
   UsageBucket,
   UsageQuery,
   Version,
+  VersionCompare,
+  VersionPatch,
+  VersionStatus,
+  WikiDiff,
   WikiPage,
   WikiPageSummary,
 } from "./types";
@@ -48,30 +76,37 @@ export interface Api {
   projects: {
     list(): Promise<Project[]>;
     get(name: string): Promise<Project>;
-    create(p: Pick<Project, "name" | "description">): Promise<Project>;
-    update(name: string, patch: Partial<Pick<Project, "description">>): Promise<Project>;
+    create(p: NewProject): Promise<Project>;
+    update(name: string, patch: { description?: string; card_prefix?: string }): Promise<Project>;
+    /** Sends `?confirm=true`. The daemon refuses a project with agents or a file project. */
     remove(name: string): Promise<void>;
     agents(name: string): Promise<Agent[]>;
     targets(name: string): Promise<Target[]>;
     repos(name: string): Promise<Repo[]>;
-    attachRepo(name: string, repo: Pick<Repo, "url" | "default_branch" | "path">): Promise<Repo>;
+    attachRepo(name: string, repo: NewRepo): Promise<Repo>;
   };
 
   repos: {
+    /** Not in the daemon yet (docs/api.md §10): answers 404. */
     checkout(id: string, opts: { target?: string; branch?: string; path?: string }): Promise<void>;
   };
 
   agents: {
     list(project?: string): Promise<Agent[]>;
+    /** `id` is a ULID, `project/name`, or a unique name. */
     get(id: string): Promise<Agent>;
-    create(def: Record<string, unknown>): Promise<Agent>;
-    remove(id: string): Promise<void>;
-    start(id: string): Promise<void>;
-    stop(id: string): Promise<void>;
-    restart(id: string): Promise<void>;
-    send(id: string, text: string): Promise<void>;
-    events(id: string, since?: string): Promise<AgentEvent[]>;
-    sessions(id: string): Promise<Session[]>;
+    create(def: AgentDef): Promise<Agent>;
+    update(id: string, patch: AgentPatch): Promise<Agent>;
+    /** `confirm` adds `?confirm=true`, needed when the agent has a live session. */
+    remove(id: string, confirm?: boolean): Promise<void>;
+    /** 202: the body shows the agent when the daemon accepted the call. Watch the events for the change. */
+    start(id: string): Promise<Agent>;
+    stop(id: string): Promise<Agent>;
+    restart(id: string): Promise<Agent>;
+    send(id: string, text: string): Promise<{ accepted: boolean }>;
+    answer(id: string, body: { request_id: string; answer: unknown } | { text: string }): Promise<{ accepted: boolean }>;
+    events(id: string, q?: EventQuery): Promise<Page<AgentEvent>>;
+    sessions(id: string, q?: PageQuery): Promise<Page<Session>>;
     roles(id: string): Promise<Role[]>;
     setRoles(id: string, roles: Role[]): Promise<Role[]>;
     /** Bidirectional PTY. See ./sockets for the protocol. */
@@ -80,62 +115,81 @@ export interface Api {
 
   board: {
     get(project: string): Promise<Board>;
-    update(project: string, columns: Column[]): Promise<Board>;
+    update(project: string, columns: ColumnEdit[]): Promise<Board>;
   };
 
   cards: {
+    list(project: string, q?: CardQuery): Promise<Page<Card>>;
     create(project: string, card: NewCard): Promise<Card>;
     get(id: string): Promise<Card>;
     update(id: string, patch: CardPatch): Promise<Card>;
     archive(id: string): Promise<void>;
+    move(id: string, to: { column: string; position?: number; comment?: string }): Promise<Card>;
+    assign(id: string, assignee: string | null): Promise<Card>;
     comment(id: string, body: string): Promise<Card>;
-    events(id: string): Promise<AgentEvent[]>;
+    link(id: string, kind: CardLinkKind, ref: string): Promise<Card>;
+    events(id: string, q?: EventQuery): Promise<Page<AgentEvent>>;
   };
 
+  /** docs/api.md §10. `id` is `MEM-n` or `project/MEM-n`; pass the `key` from the operator. */
   memories: {
     list(project: string, q?: MemoryQuery): Promise<Memory[]>;
-    create(project: string, m: Pick<Memory, "title" | "body" | "tags">): Promise<Memory>;
+    create(project: string, m: NewMemory): Promise<CreatedMemory>;
     get(id: string): Promise<Memory>;
-    update(id: string, patch: Partial<Pick<Memory, "title" | "body" | "tags">>): Promise<Memory>;
+    update(id: string, patch: MemoryPatch): Promise<Memory>;
     remove(id: string): Promise<void>;
     graph(id: string, depth?: number): Promise<MemoryGraph>;
-    link(id: string, to: string, relation: Relation, note?: string): Promise<MemoryLink>;
-    unlink(id: string, to: string, relation: Relation): Promise<void>;
-    supersede(id: string, by: string): Promise<void>;
+    /** Answers the memory at the `from` end. */
+    link(id: string, to: string, relation: Relation, note?: string): Promise<Memory>;
+    unlink(id: string, to: string, relation: Relation): Promise<Memory>;
+    /** Answers the superseded memory. */
+    supersede(id: string, by: string): Promise<Memory>;
   };
 
+  /** docs/api.md §11. `id` is the page ULID or `project/path`. */
   wiki: {
-    tree(project: string, q?: string): Promise<WikiPageSummary[]>;
-    create(project: string, page: { path: string; title: string; body: string; summary: string }): Promise<WikiPage>;
+    tree(project: string, q?: { q?: string; status?: PageStatus; deleted?: boolean }): Promise<WikiPageSummary[]>;
+    create(project: string, page: { path: string; body: string; summary: string; title?: string }): Promise<WikiPage>;
     get(id: string): Promise<WikiPage>;
-    save(id: string, page: { body: string; base: number; summary: string }): Promise<WikiPage>;
+    /** A stale `base` is `409 stale_base` with `details: {base, current, diff}`. */
+    save(id: string, page: { body: string; base: number; summary: string; title?: string }): Promise<WikiPage>;
     remove(id: string): Promise<void>;
-    section(id: string, s: { heading: string; body: string; base: number; summary: string }): Promise<WikiPage>;
+    section(id: string, s: { heading: string; body: string; summary: string; base?: number }): Promise<WikiPage>;
+    append(id: string, s: { body: string; summary: string }): Promise<WikiPage>;
     revisions(id: string): Promise<Revision[]>;
     revision(id: string, rev: number): Promise<Revision & { body: string }>;
-    diff(id: string, a: number, b: number): Promise<{ diff: string }>;
+    diff(id: string, a?: number, b?: number): Promise<WikiDiff>;
     restore(id: string, rev: number): Promise<WikiPage>;
+    move(id: string, path: string): Promise<WikiPage>;
     backlinks(id: string): Promise<WikiPageSummary[]>;
-    review(id: string, decision: "approve" | "comment", comment: string): Promise<WikiPage>;
+    review(id: string, decision: "approve" | "comment", comment?: string): Promise<WikiPage>;
   };
 
+  /** docs/api.md §12. `id` is `ART-n`, `project/ART-n`, or the `uid`. */
   artifacts: {
     list(project: string): Promise<Artifact[]>;
+    usage(project: string): Promise<ArtifactUsage>;
+    /** Multipart: `file` (a tar for a bundle), `name`, `kind`, `attach_kind`, `attach_ref`. */
     upload(project: string, form: FormData): Promise<Artifact>;
+    /** The JSON body with base64 data. */
+    uploadJson(project: string, body: ArtifactJsonUpload): Promise<Artifact>;
     get(id: string): Promise<Artifact>;
     remove(id: string): Promise<void>;
-    link(id: string, kind: Artifact["links"][number]["kind"], ref: string): Promise<void>;
-    /** Text content for text, Markdown, and code previews. */
-    text(a: Artifact): Promise<string>;
+    link(id: string, kind: ArtifactLinkKind, ref: string): Promise<Artifact>;
+    /** A short-lived signed URL on the serving routes (`/a/{uid}/...`). */
+    url(id: string, ttl?: number): Promise<ArtifactUrl>;
+    /** Text content for text, Markdown, and code previews, from a signed URL. */
+    text(url: string): Promise<string>;
   };
 
+  /** docs/api.md §13. `id` is the ULID or `project/name`. */
   versions: {
-    list(project: string): Promise<Version[]>;
-    create(project: string, v: Pick<Version, "name" | "notes">): Promise<Version>;
+    list(project: string, q?: { status?: VersionStatus; name?: string }): Promise<Version[]>;
+    create(project: string, v: NewVersion): Promise<Version>;
     get(id: string): Promise<Version>;
-    update(id: string, patch: Partial<Pick<Version, "notes" | "cards" | "artifacts">>): Promise<Version>;
+    update(id: string, patch: VersionPatch): Promise<Version>;
     transition(id: string, action: "submit" | "approve" | "reject" | "release", comment?: string): Promise<Version>;
-    compare(id: string, to: string): Promise<{ cards: string[]; pages: string[]; artifacts: string[] }>;
+    compare(id: string, to: string): Promise<VersionCompare>;
   };
 
   subscriptions: {
@@ -152,35 +206,46 @@ export interface Api {
     verify(name: string): Promise<Subscription>;
   };
 
+  /** PLAN §16 `GET /api/usage`. Not in the daemon yet. */
   usage(q: UsageQuery): Promise<UsageBucket[]>;
 
   mail: {
-    list(q?: { to?: string; state?: MessageState }): Promise<Message[]>;
+    list(q?: MailQuery): Promise<Page<Message>>;
+    get(id: string): Promise<Message>;
     send(m: NewMessage): Promise<Message>;
-    markRead(id: string): Promise<void>;
-    reply(id: string, body: string): Promise<Message>;
+    markRead(id: string): Promise<Message>;
+    /** One message for each participant except the sender. */
+    reply(id: string, body: string, subject?: string): Promise<Message[]>;
   };
 
   inbox: {
-    list(project: string): Promise<Message[]>;
+    list(project: string, q?: InboxQuery): Promise<Page<Message>>;
     send(project: string, m: Omit<NewMessage, "to">): Promise<Message>;
+    markRead(project: string, id: string): Promise<Message>;
+    /** From `project:<name>`, one message for each participant. */
+    reply(project: string, id: string, body: string, subject?: string): Promise<Message[]>;
   };
 
-  audit(q?: { since?: string; actor?: string }): Promise<AuditEntry[]>;
+  audit(q?: AuditQuery): Promise<Page<AuditEntry>>;
 
   targets: {
     list(): Promise<Target[]>;
+    /** Not in the daemon yet (405). */
     create(t: Partial<Target>): Promise<Target>;
+    /** Not in the daemon yet (404). */
     action(id: string, action: "up" | "down" | "snapshot" | "restore"): Promise<Target>;
   };
 
-  /** Not yet in §17. Planned with the host agent (§19). */
   hosts: {
     list(): Promise<Host[]>;
   };
 
-  /** The dashboard firehose (`/api/events`). */
-  events(): EventStream;
+  events: {
+    /** The firehose socket (`/api/events`), reconnecting with `?since=<last seq>`. */
+    stream(opts?: { since?: number }): EventStream;
+    /** One page of the log after `since`, oldest first. */
+    history(q?: EventQuery): Promise<Page<AgentEvent>>;
+  };
 }
 
 export function createHttpApi(t: Transport, makeSocket: (url: string) => WebSocket = (u) => new WebSocket(u)): Api {
@@ -188,26 +253,30 @@ export function createHttpApi(t: Transport, makeSocket: (url: string) => WebSock
   const post = <T>(path: string, body?: unknown) => t.request<T>("POST", path, { body });
   const patch = <T>(path: string, body: unknown) => t.request<T>("PATCH", path, { body });
   const put = <T>(path: string, body: unknown) => t.request<T>("PUT", path, { body });
-  const del = (path: string) => t.request<void>("DELETE", path);
+  const del = (path: string, query?: Query) => t.request<void>("DELETE", path, { query });
+  const page = <T>(path: string, query?: Query) => t.page<T>(path, query);
+  const all = <T>(path: string, query: Query = {}) => collectAll<T>((cursor) => t.page<T>(path, { ...query, cursor, limit: 1000 }));
   const socket = (path: string): PtySocket => {
     const ws = makeSocket(t.wsUrl(path));
     ws.binaryType = "arraybuffer";
     return ws;
   };
   const p = (name: string) => `/api/projects/${seg(name)}`;
+  const a = (id: string) => `/api/agents/${seg(id)}`;
+  const c = (id: string) => `/api/cards/${seg(id)}`;
 
   return {
     health: () => get("/api/health"),
 
     projects: {
-      list: () => get("/api/projects"),
+      list: () => all("/api/projects"),
       get: (name) => get(p(name)),
       create: (proj) => post("/api/projects", proj),
       update: (name, body) => patch(p(name), body),
-      remove: (name) => del(p(name)),
-      agents: (name) => get(`${p(name)}/agents`),
-      targets: (name) => get(`${p(name)}/targets`),
-      repos: (name) => get(`${p(name)}/repos`),
+      remove: (name) => del(p(name), { confirm: true }),
+      agents: (name) => all(`${p(name)}/agents`),
+      targets: (name) => all(`${p(name)}/targets`),
+      repos: (name) => all(`${p(name)}/repos`),
       attachRepo: (name, repo) => post(`${p(name)}/repos`, repo),
     },
 
@@ -216,19 +285,21 @@ export function createHttpApi(t: Transport, makeSocket: (url: string) => WebSock
     },
 
     agents: {
-      list: (project) => get("/api/agents", { project }),
-      get: (id) => get(`/api/agents/${seg(id)}`),
+      list: (project) => all("/api/agents", { project }),
+      get: (id) => get(a(id)),
       create: (def) => post("/api/agents", def),
-      remove: (id) => del(`/api/agents/${seg(id)}`),
-      start: (id) => post(`/api/agents/${seg(id)}/start`),
-      stop: (id) => post(`/api/agents/${seg(id)}/stop`),
-      restart: (id) => post(`/api/agents/${seg(id)}/restart`),
-      send: (id, text) => post(`/api/agents/${seg(id)}/send`, { text }),
-      events: (id, since) => get(`/api/agents/${seg(id)}/events`, { since }),
-      sessions: (id) => get(`/api/agents/${seg(id)}/sessions`),
-      roles: (id) => get(`/api/agents/${seg(id)}/roles`),
-      setRoles: (id, roles) => put(`/api/agents/${seg(id)}/roles`, roles),
-      pty: (id) => socket(`/api/agents/${seg(id)}/pty`),
+      update: (id, body) => patch(a(id), body),
+      remove: (id, confirm) => del(a(id), confirm ? { confirm: true } : undefined),
+      start: (id) => post(`${a(id)}/start`),
+      stop: (id) => post(`${a(id)}/stop`),
+      restart: (id) => post(`${a(id)}/restart`),
+      send: (id, text) => post(`${a(id)}/send`, { text }),
+      answer: (id, body) => post(`${a(id)}/answer`, body),
+      events: (id, q = {}) => page(`${a(id)}/events`, { ...q }),
+      sessions: (id, q = {}) => page(`${a(id)}/sessions`, { ...q }),
+      roles: (id) => get(`${a(id)}/roles`),
+      setRoles: (id, roles) => put(`${a(id)}/roles`, roles),
+      pty: (id) => socket(`${a(id)}/pty`),
     },
 
     board: {
@@ -237,68 +308,76 @@ export function createHttpApi(t: Transport, makeSocket: (url: string) => WebSock
     },
 
     cards: {
+      list: (project, q = {}) => page(`${p(project)}/cards`, { ...q }),
       create: (project, card) => post(`${p(project)}/cards`, card),
-      get: (id) => get(`/api/cards/${seg(id)}`),
-      update: (id, body) => patch(`/api/cards/${seg(id)}`, body),
-      archive: (id) => del(`/api/cards/${seg(id)}`),
-      comment: (id, body) => post(`/api/cards/${seg(id)}/comments`, { body }),
-      events: (id) => get(`/api/cards/${seg(id)}/events`),
+      get: (id) => get(c(id)),
+      update: (id, body) => patch(c(id), body),
+      archive: (id) => del(c(id)),
+      move: (id, to) => post(`${c(id)}/move`, to),
+      assign: (id, assignee) => post(`${c(id)}/assign`, { assignee }),
+      comment: (id, body) => post(`${c(id)}/comments`, { body }),
+      link: (id, kind, ref) => post(`${c(id)}/links`, { kind, ref }),
+      events: (id, q = {}) => page(`${c(id)}/events`, { ...q }),
     },
 
     memories: {
-      list: (project, q = {}) => get(`${p(project)}/memories`, { ...q }),
+      list: (project, q = {}) => all(`${p(project)}/memories`, { ...q }),
       create: (project, m) => post(`${p(project)}/memories`, m),
       get: (id) => get(`/api/memories/${seg(id)}`),
       update: (id, body) => patch(`/api/memories/${seg(id)}`, body),
       remove: (id) => del(`/api/memories/${seg(id)}`),
       graph: (id, depth = 1) => get(`/api/memories/${seg(id)}/graph`, { depth }),
       link: (id, to, relation, note) => post(`/api/memories/${seg(id)}/links`, { to, relation, note }),
-      unlink: (id, to, relation) =>
-        t.request("DELETE", `/api/memories/${seg(id)}/links`, { body: { to, relation } }),
+      unlink: (id, to, relation) => t.request("DELETE", `/api/memories/${seg(id)}/links`, { query: { to, relation } }),
       supersede: (id, by) => post(`/api/memories/${seg(id)}/supersede`, { by }),
     },
 
     wiki: {
-      tree: (project, q) => get(`${p(project)}/wiki`, { q }),
-      create: (project, page) => post(`${p(project)}/wiki`, page),
+      tree: (project, q = {}) => all(`${p(project)}/wiki`, { ...q }),
+      create: (project, pg) => post(`${p(project)}/wiki`, pg),
       get: (id) => get(`/api/wiki/${seg(id)}`),
-      save: (id, page) => put(`/api/wiki/${seg(id)}`, page),
+      save: (id, pg) => put(`/api/wiki/${seg(id)}`, pg),
       remove: (id) => del(`/api/wiki/${seg(id)}`),
       section: (id, s) => post(`/api/wiki/${seg(id)}/section`, s),
-      revisions: (id) => get(`/api/wiki/${seg(id)}/revisions`),
+      append: (id, s) => post(`/api/wiki/${seg(id)}/append`, s),
+      revisions: (id) => all(`/api/wiki/${seg(id)}/revisions`),
       revision: (id, rev) => get(`/api/wiki/${seg(id)}/revisions/${rev}`),
-      diff: (id, a, b) => get(`/api/wiki/${seg(id)}/diff`, { a, b }),
+      diff: (id, x, y) => get(`/api/wiki/${seg(id)}/diff`, { a: x, b: y }),
       restore: (id, rev) => post(`/api/wiki/${seg(id)}/restore`, { rev }),
-      backlinks: (id) => get(`/api/wiki/${seg(id)}/backlinks`),
+      move: (id, path) => post(`/api/wiki/${seg(id)}/move`, { path }),
+      backlinks: (id) => all(`/api/wiki/${seg(id)}/backlinks`),
       review: (id, decision, comment) => post(`/api/wiki/${seg(id)}/review`, { decision, comment }),
     },
 
     artifacts: {
-      list: (project) => get(`${p(project)}/artifacts`),
+      list: (project) => all(`${p(project)}/artifacts`),
+      usage: (project) => get(`${p(project)}/artifacts/usage`),
       upload: (project, form) => t.request("POST", `${p(project)}/artifacts`, { form }),
+      uploadJson: (project, body) => post(`${p(project)}/artifacts`, body),
       get: (id) => get(`/api/artifacts/${seg(id)}`),
       remove: (id) => del(`/api/artifacts/${seg(id)}`),
       link: (id, kind, ref) => post(`/api/artifacts/${seg(id)}/links`, { kind, ref }),
-      text: async (a) => {
-        const res = await fetch(a.url);
+      url: (id, ttl) => post(`/api/artifacts/${seg(id)}/url`, ttl ? { ttl } : undefined),
+      text: async (url) => {
+        const res = await fetch(url);
         return res.text();
       },
     },
 
     versions: {
-      list: (project) => get(`${p(project)}/versions`),
+      list: (project, q = {}) => all(`${p(project)}/versions`, { ...q }),
       create: (project, v) => post(`${p(project)}/versions`, v),
       get: (id) => get(`/api/versions/${seg(id)}`),
       update: (id, body) => patch(`/api/versions/${seg(id)}`, body),
-      transition: (id, action, comment) => post(`/api/versions/${seg(id)}/${action}`, { comment }),
+      transition: (id, action, comment) => post(`/api/versions/${seg(id)}/${action}`, comment ? { comment } : undefined),
       compare: (id, to) => get(`/api/versions/${seg(id)}/compare`, { to }),
     },
 
     subscriptions: {
-      list: () => get("/api/subscriptions"),
-      quota: (name, since) => get(`/api/subscriptions/${seg(name)}/quota`, { since }),
+      list: () => all("/api/subscriptions"),
+      quota: (name, since) => all(`/api/subscriptions/${seg(name)}/quota`, { since }),
       probe: (name) => post(`/api/subscriptions/${seg(name)}/probe`),
-      detect: () => get("/api/subscriptions/detect"),
+      detect: () => all("/api/subscriptions/detect"),
       startLogin: (kind, provider) => post("/api/subscriptions/login", { kind, provider }),
       loginState: (id) => get(`/api/subscriptions/login/${seg(id)}`),
       loginInput: (id, code) => post(`/api/subscriptions/login/${seg(id)}/input`, { code }),
@@ -308,33 +387,39 @@ export function createHttpApi(t: Transport, makeSocket: (url: string) => WebSock
       verify: (name) => post(`/api/subscriptions/${seg(name)}/verify`),
     },
 
-    usage: (q) => get("/api/usage", { ...q }),
+    usage: (q) => all("/api/usage", { ...q }),
 
     mail: {
-      list: (q = {}) => get("/api/mail", { ...q }),
+      list: (q = {}) => page("/api/mail", { ...q }),
+      get: (id) => get(`/api/mail/${seg(id)}`),
       send: (m) => post("/api/mail", m),
       markRead: (id) => post(`/api/mail/${seg(id)}/read`),
-      reply: (id, body) => post(`/api/mail/${seg(id)}/reply`, { body }),
+      reply: (id, body, subject) => post(`/api/mail/${seg(id)}/reply`, { body, subject }),
     },
 
     inbox: {
-      list: (project) => get(`${p(project)}/inbox`),
+      list: (project, q = {}) => page(`${p(project)}/inbox`, { ...q }),
       send: (project, m) => post(`${p(project)}/inbox`, m),
+      markRead: (project, id) => post(`${p(project)}/inbox/${seg(id)}/read`),
+      reply: (project, id, body, subject) => post(`${p(project)}/inbox/${seg(id)}/reply`, { body, subject }),
     },
 
-    audit: (q = {}) => get("/api/audit", { ...q }),
+    audit: (q = {}) => page("/api/audit", { ...q }),
 
     targets: {
-      list: () => get("/api/targets"),
+      list: () => all("/api/targets"),
       create: (target) => post("/api/targets", target),
       action: (id, action) => post(`/api/targets/${seg(id)}/${action}`),
     },
 
     hosts: {
-      list: () => get("/api/hosts"),
+      list: () => all("/api/hosts"),
     },
 
-    events: () => createWsEventStream(() => t.wsUrl("/api/events"), makeSocket),
+    events: {
+      stream: (opts = {}) =>
+        createWsEventStream((since) => t.wsUrl("/api/events", { since }), { makeSocket, since: opts.since }),
+      history: (q = {}) => page("/api/events", { ...q }),
+    },
   };
 }
-

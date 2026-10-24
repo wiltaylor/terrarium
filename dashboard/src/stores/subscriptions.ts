@@ -2,11 +2,14 @@
 
 import { createSignal } from "solid-js";
 import type { Api } from "../api/client";
+import { isMissingEndpoint } from "../api/http";
 import type { Subscription } from "../api/types";
 
 export function createSubscriptionsStore(api: Pick<Api, "subscriptions">) {
   const [list, setList] = createSignal<Subscription[]>([]);
-  const [error, setError] = createSignal<string | null>(null);
+  const [error, setError] = createSignal<unknown>(null);
+  /** The daemon has no subscription endpoints yet (PLAN §16). */
+  const [missing, setMissing] = createSignal(false);
   let timer: ReturnType<typeof setInterval> | undefined;
 
   const refresh = async () => {
@@ -14,13 +17,19 @@ export function createSubscriptionsStore(api: Pick<Api, "subscriptions">) {
       setList(await api.subscriptions.list());
       setError(null);
     } catch (e) {
-      setError((e as Error).message);
+      setError(e);
+      if (isMissingEndpoint(e)) {
+        // Stop polling an endpoint the daemon does not have.
+        setMissing(true);
+        clearInterval(timer);
+      }
     }
   };
 
   return {
     list,
     error,
+    missing,
     refresh,
     /** Poll every `ms`. Safe to call twice. */
     poll(ms = 15_000) {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { seed } from "../api/mock/data";
+import { fakeUlid, seed } from "../api/mock/data";
 import { buildQueue } from "./home/queue";
 import { groupThreads } from "./mail/threads";
 import { buildTree } from "./wiki/tree";
@@ -25,9 +25,10 @@ describe("home queue", () => {
 describe("mail threads", () => {
   it("groups by thread and counts unread", () => {
     const threads = groupThreads(world.mail);
-    const th1 = threads.find((t) => t.id === "TH-1")!;
-    expect(th1.messages.map((m) => m.id)).toEqual(["MSG-1", "MSG-2"]);
-    expect(th1.subject).toBe("TER-15 blocked");
+    const th1 = threads.find((t) => t.id === fakeUlid("th", 1))!;
+    expect(th1.messages.map((m) => m.id)).toEqual([fakeUlid("msg", 1), fakeUlid("msg", 2)]);
+    expect(th1.subject).toBe("TER-15 blocked: Codex adapter: resume by session id");
+    expect(th1.participants).toEqual(["project:terrarium", "operator", "terrarium/lead", "terrarium/adapter-codex"]);
     expect(th1.unread).toBe(1);
     expect(threads[0]!.last_at >= threads.at(-1)!.last_at).toBe(true);
   });
