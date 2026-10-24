@@ -659,6 +659,17 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE hosts ADD COLUMN enrol_expires_at TEXT;
     CREATE UNIQUE INDEX hosts_enrol_token ON hosts(enrol_token_hash);
     "#,
+    // 11: dashboard sessions that a logout ended (`api/session.rs`). The
+    // cookie stays stateless; a logout writes its nonce here, and the
+    // cookie auth refuses it until `exp` (a Unix time). A row past `exp`
+    // is pruned: the cookie has ended anyway.
+    r#"
+    CREATE TABLE revoked_sessions (
+        nonce TEXT PRIMARY KEY,
+        exp   INTEGER NOT NULL
+    );
+    CREATE INDEX revoked_sessions_exp ON revoked_sessions(exp);
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call

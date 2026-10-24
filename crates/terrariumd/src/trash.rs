@@ -1,0 +1,147 @@
+//! The trash of deleted agents. `DELETE /api/agents/{id}` moves the agent
+//! dir `<state>/agents/<ulid>/` to `<state>/trash/<ulid>-<ts>/`, so that the
+//! operator can still read the transcripts and the event log. The prune
+//! timer removes a trash entry older than `TERRARIUM_TRASH_DAYS` (default 7).
+
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
+
+/// The trash dir, in the state dir.
+pub const TRASH_DIR: &str = "trash";
+
+/// The env var with the days that a trash entry stays.
+pub const TRASH_DAYS_ENV: &str = "TERRARIUM_TRASH_DAYS";
+
+/// The days that a trash entry stays when [`TRASH_DAYS_ENV`] is not set.
+pub const DEFAULT_TRASH_DAYS: u64 = 7;
+
+/// The days from [`TRASH_DAYS_ENV`], or [`DEFAULT_TRASH_DAYS`].
+pub fn trash_days() -> u64 {
+    std::env::var(TRASH_DAYS_ENV)
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(DEFAULT_TRASH_DAYS)
+}
+
+/// Move the agent dir of `agent` to `<state>/trash/<agent>-<ts>/`.
+/// `None`: the agent has no dir. `rename` moves a symlink itself, never
+/// its target.
+pub fn trash_agent_dir(state_dir: &Path, agent: &str) -> std::io::Result<Option<PathBuf>> {
+    let dir = state_dir.join("agents").join(agent);
+    if std::fs::symlink_metadata(&dir).is_err() {
+        return Ok(None);
+    }
+    let trash = state_dir.join(TRASH_DIR);
+    std::fs::create_dir_all(&trash)?;
+    let ts = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let mut to = trash.join(format!("{agent}-{ts}"));
+    let mut n = 1;
+    while std::fs::symlink_metadata(&to).is_ok() {
+        to = trash.join(format!("{agent}-{ts}-{n}"));
+        n += 1;
+    }
+    std::fs::rename(&dir, &to)?;
+    Ok(Some(to))
+}
+
+/// Remove the trash entries that went to the trash more than `max_age`
+/// before `now` (the time in the name; the mtime when the name has none).
+/// Returns the removed paths. A symlink is removed, not followed.
+pub fn prune_trash(
+    state_dir: &Path,
+    now: SystemTime,
+    max_age: Duration,
+) -> std::io::Result<Vec<PathBuf>> {
+    let trash = state_dir.join(TRASH_DIR);
+    let entries = match std::fs::read_dir(&trash) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let Some(cutoff) = now.checked_sub(max_age) else {
+        return Ok(Vec::new());
+    };
+    let mut removed = Vec::new();
+    for e in entries.flatten() {
+        let path = e.path();
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        let at = trashed_at(&e.file_name().to_string_lossy())
+            .or_else(|| meta.modified().ok())
+            .unwrap_or(now);
+        if at > cutoff {
+            continue;
+        }
+        let result = if meta.file_type().is_dir() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+        match result {
+            Ok(()) => removed.push(path),
+            Err(err) => {
+                tracing::warn!(path = %path.display(), "cannot prune the trash entry: {err}")
+            }
+        }
+    }
+    Ok(removed)
+}
+
+/// The time in a trash name `<ulid>-<ts>` or `<ulid>-<ts>-<n>`.
+fn trashed_at(name: &str) -> Option<SystemTime> {
+    let rest = name.split_once('-')?.1;
+    let ts: u64 = rest.split('-').next()?.parse().ok()?;
+    Some(SystemTime::UNIX_EPOCH + Duration::from_secs(ts))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trash_and_prune() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path();
+        assert!(trash_agent_dir(state, "01A").unwrap().is_none());
+        let dir = state.join("agents/01A/private");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("events.jsonl"), b"{}\n").unwrap();
+        let to = trash_agent_dir(state, "01A").unwrap().unwrap();
+        assert!(!state.join("agents/01A").exists());
+        assert!(to.starts_with(state.join(TRASH_DIR)));
+        assert_eq!(
+            std::fs::read(to.join("private/events.jsonl")).unwrap(),
+            b"{}\n"
+        );
+        // Twice in the same second: a second name.
+        std::fs::create_dir_all(state.join("agents/01A")).unwrap();
+        let again = trash_agent_dir(state, "01A").unwrap().unwrap();
+        assert_ne!(again, to);
+
+        let day = Duration::from_secs(86_400);
+        let now = SystemTime::now();
+        // Young entries stay.
+        assert!(prune_trash(state, now, 7 * day).unwrap().is_empty());
+        // An old one goes, by the time in its name.
+        let old = state.join(TRASH_DIR).join("01B-1000");
+        std::fs::create_dir_all(old.join("x")).unwrap();
+        assert_eq!(prune_trash(state, now, 7 * day).unwrap(), vec![old.clone()]);
+        assert!(!old.exists());
+        assert!(to.exists());
+        // Eight days on, all go.
+        assert_eq!(prune_trash(state, now + 8 * day, 7 * day).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn the_name_carries_the_time() {
+        let at =
+            |s| trashed_at(s).map(|t| t.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs());
+        assert_eq!(at("01ABC-1700000000"), Some(1_700_000_000));
+        assert_eq!(at("01ABC-1700000000-2"), Some(1_700_000_000));
+        assert_eq!(at("junk"), None);
+    }
+}

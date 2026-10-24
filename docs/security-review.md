@@ -59,7 +59,7 @@ remote unauthenticated path to code execution or to another agent's secrets.
 | F8 | INFO | SQL | `events.rs:208`, `store/usage.rs:177`, `store/mail.rs:266` | Dynamic SQL uses fixed identifiers and integers only; no injection found | Not re-checked (no change) |
 | F9 | INFO | Host verbs | `terrarium-host/src/verb.rs`, `executor.rs:982` | Commands build as argv, not shell strings; no injection found | Not re-checked (no change) |
 | F10 | LOW | Fleet | `fleet.rs:869,1042` | Any agent, a member too, overwrites the stored record of any fleet with an empty fleet of the same name | Fixed: an apply needs the rights over every object the stored fleet owns; a member gets 403; an empty fleet needs sysadmin; an API apply over a `file:` fleet needs `confirm` |
-| F11 | LOW | Sandbox | `terrarium-runner/src/config.rs:150,181` | The split of an old agent dir follows symlinks that the agent planted before the upgrade | Fixed in the daemon (`runner_supervisor.rs`, `migrate_dir`): a dir with a symlink goes to `<ulid>.quarantine-<ts>`, and a clean dir takes its place |
+| F11 | LOW | Sandbox | `terrarium-runner/src/config.rs:150,181` | The split of an old agent dir follows symlinks that the agent planted before the upgrade | Fixed (daemon quarantine + runner no-follow opens): `bc85806` and `efd9663` (§9) |
 | F12 | LOW | Usage | `usage_collector.rs:199,530` | The collector tails any file that a forged `SessionStart` hook names | Fixed: only a regular file under the session area of the harness, that names its session, and that no other agent owns; else a `usage.rejected_path` event |
 | F13 | LOW | Policy | `policy.rs:140`, `api/agents.rs:141` | A `project_admin` adds global targets to `policy.targets`, its own too | Fixed: a global target, a `cross_project` entry, or a `mail_to` entry outside the project needs sysadmin (API and fleet) |
 | F14 | INFO | Dashboard | `eslint.config.js:24`, `lib/sanitize.ts:76` | The sink lint rule has gaps; the sanitizer keeps remote images (the CSP blocks them) | Fixed: the lint rule covers the gaps, with a fixture test; the daemon sends the CSP as a header. Remote images are accepted (§5) |
@@ -757,6 +757,21 @@ the record files with `O_NOFOLLOW`. Add a test with a planted symlink.
 **Fixed (2026-10-24, `bc85806`):** the daemon checks an old agent dir before
 the split (`runner_supervisor.rs`, `migrate_dir`). A dir with a symlink goes to
 `<ulid>.quarantine-<ts>`, and a clean dir takes its place.
+
+**Fixed (2026-10-24, `efd9663`):** the runner opens every private file with
+`O_NOFOLLOW` and refuses a file that is not a regular file
+(`terrarium-runner/src/safefs.rs`). `create_private_dir` refuses a symlink at
+the agent dir and at `private/`, and a symlink or a special file with a record
+name in `private/`. The migration refuses planted links. A refusal is
+`RunnerError::UnsafePath`, with the path.
+
+**Follow-up (2026-10-24):** the daemon uses the same no-follow opens
+(`terrarium_runner::safefs`) for the private files that it reads and writes
+itself: `session-prompt.sha256` and `events.jsonl`. An `UnsafePath` at launch
+puts the agent in `error`, and the status event has the path in its reason.
+The restart policy does not try again, because a planted entry does not go
+away. The test is `unsafe_private_dir_is_an_error_without_a_restart_loop`
+(`crates/terrariumd/tests/runtime.rs`).
 
 ### F12 — The usage collector tails any file that a hook names (LOW)
 

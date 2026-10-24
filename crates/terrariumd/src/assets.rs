@@ -22,8 +22,24 @@ const PLACEHOLDER: &str = r#"<!doctype html>
 </html>
 "#;
 
+/// The path prefixes that are never a dashboard route: the host link
+/// (`/hosts/connect`) and the artifact routes (`/a/...`). A request there
+/// on a port that does not mount them gets 404, not `index.html`. So a
+/// WebSocket upgrade to `/hosts/connect` on the dashboard port fails.
+/// `/hosts` alone is the Hosts page of the dashboard.
+const NOT_ROUTES: &[&str] = &["hosts/", "a/", "api/"];
+
+/// True: `path` (without the leading `/`) can be a client-side route of the
+/// dashboard. A path with an extension in its last segment is a file, and a
+/// path under [`NOT_ROUTES`] (or `a` itself) belongs to a server route.
+fn is_route(path: &str) -> bool {
+    let last = path.rsplit('/').next().unwrap_or(path);
+    !last.contains('.') && path != "a" && !NOT_ROUTES.iter().any(|p| path.starts_with(p))
+}
+
 /// Serve a file from the dashboard. Unknown paths without an extension get
-/// `index.html`, so client-side routes work.
+/// `index.html`, so client-side routes work. A path that [`is_route`]
+/// refuses gets 404.
 pub async fn serve(uri: Uri) -> Response {
     let path = uri.path().trim_start_matches('/');
     if !path.is_empty()
@@ -31,8 +47,7 @@ pub async fn serve(uri: Uri) -> Response {
     {
         return file_response(path, file);
     }
-    let looks_like_route = !path.rsplit('/').next().unwrap_or(path).contains('.');
-    if looks_like_route {
+    if is_route(path) {
         return match Dist::get("index.html") {
             Some(file) => file_response("index.html", file),
             None => Html(PLACEHOLDER).into_response(),
@@ -56,4 +71,41 @@ fn file_response(path: &str, file: rust_embed::EmbeddedFile) -> Response {
         file.data,
     )
         .into_response()
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    async fn status(path: &str) -> StatusCode {
+        serve(path.parse().expect("uri")).await.status()
+    }
+
+    #[tokio::test]
+    async fn the_fallback_serves_routes_and_refuses_server_paths() {
+        for p in [
+            "/",
+            "/agents",
+            "/agents/01ABC",
+            "/hosts",
+            "/p/demo/board",
+            "/no/such/page",
+        ] {
+            assert_eq!(status(p).await, StatusCode::OK, "{p}");
+        }
+        for p in [
+            "/hosts/connect",
+            "/hosts/x/y",
+            "/a",
+            "/a/01ABC/index.html",
+            "/a/01ABC",
+            "/api/nothing",
+            "/missing.js",
+            "/assets/nothing.css",
+            "/agents/x.json",
+        ] {
+            assert_eq!(status(p).await, StatusCode::NOT_FOUND, "{p}");
+        }
+    }
 }

@@ -476,10 +476,15 @@ async fn require_token(
     if let Some(sessions) = &auth.sessions
         && let Some(cookie) = session::cookie_value(req.headers(), session::COOKIE)
     {
-        let Some(s) = sessions.key.verify(cookie, chrono::Utc::now().timestamp()) else {
-            return unauthorized(
-                "the session cookie is wrong or has expired; POST /api/session again",
-            );
+        let s = match sessions.check(cookie, chrono::Utc::now().timestamp()).await {
+            Ok(Some(s)) => s,
+            Ok(None) => {
+                return unauthorized(
+                    "the session cookie is wrong, has expired, or ended with a logout; \
+                     POST /api/session again",
+                );
+            }
+            Err(e) => return e.into_response(),
         };
         if websocket {
             if !ws_origin_allowed(req.headers(), auth.public_origin.as_deref()) {
@@ -612,6 +617,7 @@ pub fn tcp_router(state: Shared, token: String) -> anyhow::Result<Router> {
         session::Sessions {
             key,
             ttl: state.web.session_ttl,
+            db: state.db.clone(),
         },
         state.web.public_origin(),
     );
@@ -964,11 +970,17 @@ mod tests {
     async fn artifacts_mount_on_the_dashboard_only_without_their_own_origin() {
         let s = state();
         let auth = || TokenAuth::new("secret".into(), true);
-        // The SPA fallback answers an unknown path with the page, so look
-        // at the body: a served route answers JSON or a file, not HTML.
+        // A served route answers JSON or a file, not HTML. Without the
+        // routes, the SPA fallback answers `/a/...` with 404, not the page.
         let page = |b: &[u8]| String::from_utf8_lossy(b).contains("<html");
-        let (_, body) = get(tcp_router_with(s.clone(), auth(), false), "/a/ART-1/", None).await;
-        assert!(page(&body), "the dashboard must not serve /a/ here");
+        let (status, body) =
+            get(tcp_router_with(s.clone(), auth(), false), "/a/ART-1/", None).await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "the dashboard must not serve /a/ here"
+        );
+        assert!(!page(&body));
         let (status, body) = get(tcp_router_with(s.clone(), auth(), true), "/a/ART-1/", None).await;
         assert!(!page(&body), "{status}");
         let (_, body) = get(router(s), "/a/ART-1/", None).await;
@@ -991,6 +1003,7 @@ mod tests {
             session::Sessions {
                 key: session::SessionKey::from_bytes(key.to_vec()),
                 ttl: std::time::Duration::from_secs(3600),
+                db: s.db.clone(),
             },
             public.map(str::to_owned),
         );
@@ -1150,6 +1163,69 @@ mod tests {
         assert_eq!(r.status(), StatusCode::NO_CONTENT);
         assert!(clears_cookie(&r), "{}", hdr(&r, "set-cookie"));
         assert_eq!(hdr(&r, "cache-control"), "no-store");
+    }
+
+    /// A logout revokes the session on the server: a copy of the cookie
+    /// gets `401` until `exp`, and another session lives on. A revocation
+    /// past `exp` is pruned at the next logout.
+    #[tokio::test]
+    async fn session_logout_revokes_the_cookie() {
+        let s = state();
+        let app = || session_app(&s, KEY, None);
+        let (cookie, csrf) = login(app()).await;
+        let (other, _) = login(app()).await;
+        let r = send(
+            app(),
+            "DELETE",
+            "/api/session",
+            &[("cookie", &cookie), ("x-csrf-token", &csrf)],
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::NO_CONTENT);
+        let r = send(app(), "GET", "/api/health", &[("cookie", &cookie)]).await;
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+        let body = r.into_body().collect().await.unwrap().to_bytes();
+        assert!(String::from_utf8_lossy(&body).contains("logout"));
+        let r = send(app(), "GET", "/api/health", &[("cookie", &other)]).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        // A second logout with the revoked cookie ends nothing: `204`.
+        let r = send(
+            app(),
+            "DELETE",
+            "/api/session",
+            &[("cookie", &cookie), ("x-csrf-token", &csrf)],
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::NO_CONTENT);
+        // Prune: a row past `exp` goes at the next logout.
+        s.db.write("test", |t| {
+            t.execute(
+                "INSERT INTO revoked_sessions (nonce, exp) VALUES ('old', 1)",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let (third, csrf3) = login(app()).await;
+        let r = send(
+            app(),
+            "DELETE",
+            "/api/session",
+            &[("cookie", &third), ("x-csrf-token", &csrf3)],
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::NO_CONTENT);
+        let nonces: Vec<String> =
+            s.db.read(|c| {
+                let mut st = c.prepare("SELECT nonce FROM revoked_sessions")?;
+                let rows = st.query_map([], |r| r.get(0))?;
+                Ok(rows.collect::<Result<Vec<String>, _>>()?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(nonces.len(), 2, "{nonces:?}");
+        assert!(!nonces.iter().any(|n| n == "old"), "{nonces:?}");
     }
 
     /// A client that lost its cookie can still log out: no cookie, `204`.
@@ -1439,9 +1515,11 @@ mod tests {
             &[("authorization", "Bearer host-token")],
         )
         .await;
-        // The SPA fallback: a page, not the host handler.
+        // The SPA fallback refuses it: 404, not a page and not the host
+        // handler.
+        assert_eq!(r.status(), StatusCode::NOT_FOUND);
         let body = r.into_body().collect().await.unwrap().to_bytes();
-        assert!(String::from_utf8_lossy(&body).contains("<html"));
+        assert!(!String::from_utf8_lossy(&body).contains("<html"));
         let r = ws(
             router(s),
             terrarium_host::protocol::CONNECT_PATH,

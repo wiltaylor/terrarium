@@ -7,6 +7,10 @@
 //! fails with `ELOOP`. [`check_private_dir`] refuses a symlink at the agent
 //! dir and at `private/`. The opens also refuse a file that is not a
 //! regular file (a FIFO, a device, a socket).
+//!
+//! The daemon uses [`open_read`], [`read_to_string`], and [`write_private`]
+//! for the private files that it reads and writes itself
+//! (`session-prompt.sha256`, `events.jsonl`).
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -76,12 +80,12 @@ pub(crate) fn open(path: &Path, opts: &mut OpenOptions) -> Result<File> {
 }
 
 /// Open `path` for read, with no symlink follow.
-pub(crate) fn open_read(path: &Path) -> Result<File> {
+pub fn open_read(path: &Path) -> Result<File> {
     open(path, OpenOptions::new().read(true))
 }
 
 /// Read `path` as text, with no symlink follow.
-pub(crate) fn read_to_string(path: &Path) -> Result<String> {
+pub fn read_to_string(path: &Path) -> Result<String> {
     use std::io::Read;
     let mut s = String::new();
     open_read(path)?
@@ -101,7 +105,7 @@ pub(crate) fn open_append(path: &Path) -> Result<File> {
 
 /// Write `bytes` to `path` with mode `0600`, with no symlink follow. An old
 /// file is truncated, and its mode becomes `0600`.
-pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
+pub fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     let mut f = open(
         path,
         OpenOptions::new()

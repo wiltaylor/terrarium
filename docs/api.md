@@ -75,8 +75,10 @@ Set-Cookie: terrarium_session=v1.<exp>.<nonce>.<sig>; Path=/; Max-Age=<ttl>; Htt
   and `nonce` with the key in `<state>/session.key` (32 random bytes as
   hex, mode 0600; the daemon makes it at the first start). The `csrf`
   value is an HMAC of the nonce with the same key. To end every session,
-  delete or replace `session.key` and restart the daemon. A session cannot
-  be ended alone before `exp`; `DELETE` clears the browser's copy.
+  delete or replace `session.key` and restart the daemon. A logout
+  (`DELETE` with the session cookie and its `X-CSRF-Token`) ends that one
+  session on the server too: the daemon keeps its nonce in
+  `revoked_sessions` until `exp`, and a copy of the cookie gets `401`.
 - `DELETE /api/session` does not use the auth of the other routes. It
   looks at the cookie itself, so that a logout from another site (logout
   CSRF) fails:
@@ -84,9 +86,9 @@ Set-Cookie: terrarium_session=v1.<exp>.<nonce>.<sig>; Path=/; Max-Age=<ttl>; Htt
   | Request | Answer |
   |---|---|
   | No `terrarium_session` cookie, with or without `Authorization: Bearer` | `204` and the clearing `Set-Cookie`. A client that lost its cookie can log out again. |
-  | A valid session cookie and the right `X-CSRF-Token` | `204` and the clearing `Set-Cookie` |
+  | A valid session cookie and the right `X-CSRF-Token` | `204` and the clearing `Set-Cookie`. The session is revoked. |
   | A valid session cookie, and no `X-CSRF-Token` or a wrong one (the token of another session too) | `403 forbidden`, no `Set-Cookie`. The cookie stays. |
-  | A cookie that is wrong, from another key, or past `exp` | `204` and the clearing `Set-Cookie`. It is no session, so to clear it ends nothing. |
+  | A cookie that is wrong, from another key, revoked, or past `exp` | `204` and the clearing `Set-Cookie`. It is no session, so to clear it ends nothing. |
 
 - The answers carry `Cache-Control: no-store`. The Unix socket has no
   sessions (`404 not_found`).
@@ -102,7 +104,7 @@ token is `401` even with a good cookie. With the cookie:
   the origin of `TERRARIUM_PUBLIC_URL`, or `http(s)://<Host>` of the
   request itself. No `Origin`, `null`, or another origin: `403 forbidden`.
   The upgrade needs no subprotocol.
-- A cookie that is wrong, from another key, or past `exp`: `401
+- A cookie that is wrong, from another key, revoked, or past `exp`: `401
   unauthorized`. The dashboard then calls `POST /api/session` again.
 
 ### 1.2 Security headers
@@ -566,6 +568,12 @@ An agent is the core `Agent` with bookkeeping fields:
 | `GET /api/agents/{id}` | | `200` agent | read |
 | `PATCH /api/agents/{id}` | `{"harness"?, "subscription"?, "model"?, "prompt"?, "policy"?, "restart"?, "new_session_on_prompt_change"?}` | `200` agent | project_admin; some `policy` entries need sysadmin (below) |
 | `DELETE /api/agents/{id}` | `?confirm=true` when live | `204` | project_admin |
+
+`DELETE` stops a live agent, waits for it to end (up to 10 s), and moves
+its dir `<state>/agents/<ulid>/` to `<state>/trash/<ulid>-<ts>/`. The
+operator can still read the transcripts and the event log there. The daily
+prune timer removes a trash entry older than `TERRARIUM_TRASH_DAYS` days
+(default `7`).
 
 The definition is the TOML agent definition as JSON:
 

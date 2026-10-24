@@ -526,6 +526,123 @@ async fn unregistered_harness_is_refused() {
     assert_eq!(td.status(&id).await, "stopped");
 }
 
+/// F11: an unsafe entry in `private/` that the quarantine does not catch (a
+/// directory with a record name) refuses the launch. The agent goes to
+/// `error` with the path in the reason, and the restart policy does not try
+/// again. A planted symlink at `private/` goes to quarantine, and the
+/// launch goes on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unsafe_private_dir_is_an_error_without_a_restart_loop() {
+    let td = Td::start().await;
+    let id = td
+        .agent("demo", "planted", json!({"restart": "always"}))
+        .await;
+    let agent_dir = td.dir.path().join("state/agents").join(&id);
+    let private = agent_dir.join("private");
+
+    // A symlink at `private/`: quarantine, then a clean launch.
+    let elsewhere = td.dir.path().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &private).unwrap();
+    td.post(&format!("/api/agents/{id}/start"), None).await;
+    td.wait_status(&id, "idle").await;
+    assert!(!private.is_symlink());
+    assert!(std::fs::read_dir(&elsewhere).unwrap().next().is_none());
+    td.post(&format!("/api/agents/{id}/stop"), None).await;
+    td.wait_status(&id, "stopped").await;
+
+    // A directory where a record goes: the start is refused.
+    let bad = private.join("pty.log.1");
+    std::fs::create_dir(&bad).unwrap();
+    let (s, b) = td
+        .req(Method::POST, &format!("/api/agents/{id}/start"), None, None)
+        .await;
+    assert_eq!(s, 422, "{b}");
+    let bad_text = bad.display().to_string();
+    assert!(
+        b["error"]["message"].as_str().unwrap().contains(&bad_text),
+        "{b}"
+    );
+    td.wait_status(&id, "error").await;
+    let last = td.events(&id, "status").await.last().unwrap().clone();
+    let reason = last["data"]["reason"].as_str().unwrap();
+    assert!(reason.contains(&bad_text), "{last}");
+    assert!(reason.contains("not a regular file"), "{last}");
+    // No restart: the status stays `error`, with no `restarting`.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(td.status(&id).await, "error");
+    let n = td.events(&id, "status").await.len();
+
+    // The same entry, planted while the harness runs: the relaunch after a
+    // crash fails once, and the policy stops there.
+    std::fs::remove_dir(&bad).unwrap();
+    td.post(&format!("/api/agents/{id}/start"), None).await;
+    td.wait_status(&id, "idle").await;
+    std::fs::create_dir(&bad).unwrap();
+    td.post(
+        &format!("/api/agents/{id}/send"),
+        Some(json!({"text": "/exit 1"})),
+    )
+    .await;
+    let statuses = td
+        .wait_events(&id, "status", |e| {
+            e.len() > n && e.last().is_some_and(|x| x["data"]["status"] == "error")
+        })
+        .await;
+    let last = statuses.last().unwrap();
+    let reason = last["data"]["reason"].as_str().unwrap();
+    assert!(reason.contains("restart failed"), "{last}");
+    assert!(reason.contains(&bad_text), "{last}");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let after = td.events(&id, "status").await;
+    assert_eq!(after.len(), statuses.len(), "{after:#?}");
+    assert_eq!(td.status(&id).await, "error");
+    let restarts = after[n..]
+        .iter()
+        .filter(|x| x["data"]["status"] == "restarting")
+        .count();
+    assert_eq!(restarts, 1, "{after:#?}");
+}
+
+/// `DELETE /api/agents/{id}` stops a live agent and moves its dir to
+/// `<state>/trash/<ulid>-<ts>/`, with the event log in it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn delete_moves_the_agent_dir_to_the_trash() {
+    let td = Td::start().await;
+    let id = td.agent("demo", "gone", json!({})).await;
+    td.post(&format!("/api/agents/{id}/start"), None).await;
+    td.wait_status(&id, "idle").await;
+    let state = td.dir.path().join("state");
+    let agent_dir = state.join("agents").join(&id);
+    assert!(agent_dir.join("private/events.jsonl").is_file());
+    let (s, b) = td
+        .req(Method::DELETE, &format!("/api/agents/{id}"), None, None)
+        .await;
+    assert_eq!(s, 409, "a live agent needs confirm: {b}");
+    let (s, b) = td
+        .req(
+            Method::DELETE,
+            &format!("/api/agents/{id}?confirm=true"),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(s, 204, "{b}");
+    assert!(!agent_dir.exists());
+    let trash: Vec<PathBuf> = std::fs::read_dir(state.join("trash"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert_eq!(trash.len(), 1, "{trash:?}");
+    let name = trash[0].file_name().unwrap().to_string_lossy().into_owned();
+    assert!(name.starts_with(&format!("{id}-")), "{name}");
+    assert!(trash[0].join("private/events.jsonl").is_file());
+    // The runner does not make the dir again after the move.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!agent_dir.exists());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn mail_and_cards_push_a_pointer() {
     let td = Td::start().await;

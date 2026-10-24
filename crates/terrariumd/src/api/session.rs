@@ -12,7 +12,9 @@
 //!
 //! `exp` is a Unix time, `nonce` 16 random bytes in base64url. The key is
 //! 32 random bytes in `<state>/session.key` (hex, mode 0600). A new key
-//! makes every session invalid. The server keeps no session rows.
+//! makes every session invalid. The server keeps no session rows, only
+//! the nonces of the sessions that a logout ended (`revoked_sessions`),
+//! until their `exp`.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -28,6 +30,9 @@ use hmac::{Hmac, KeyInit, Mac};
 use serde::Serialize;
 use sha2::Sha256;
 
+use rusqlite::OptionalExtension;
+
+use crate::db::Db;
 use crate::error::{ApiError, ApiResult, Code};
 
 /// The name of the session cookie.
@@ -132,6 +137,7 @@ impl SessionKey {
         Ok(Session {
             cookie: format!("{VERSION}.{exp}.{nonce}.{}", self.sig(exp, &nonce)),
             csrf: self.csrf(&nonce),
+            nonce,
             exp,
         })
     }
@@ -155,6 +161,7 @@ impl SessionKey {
         Some(Session {
             cookie: cookie.to_owned(),
             csrf: self.csrf(nonce),
+            nonce: nonce.to_owned(),
             exp,
         })
     }
@@ -165,6 +172,8 @@ impl SessionKey {
 pub struct Session {
     pub cookie: String,
     pub csrf: String,
+    /// The nonce of the cookie: the key of a revocation.
+    pub nonce: String,
     pub exp: i64,
 }
 
@@ -175,11 +184,61 @@ impl Session {
     }
 }
 
-/// The sessions of the TCP listener: the key and the cookie life.
-#[derive(Debug, Clone)]
+/// The sessions of the TCP listener: the key, the cookie life, and the
+/// store of the revoked sessions.
+#[derive(Clone)]
 pub struct Sessions {
     pub key: SessionKey,
     pub ttl: std::time::Duration,
+    pub db: Db,
+}
+
+impl std::fmt::Debug for Sessions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Sessions")
+            .field("ttl", &self.ttl)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Sessions {
+    /// The session of a cookie value: the signature is right, the session
+    /// has not ended at the Unix time `now`, and no logout revoked it.
+    pub async fn check(&self, cookie: &str, now: i64) -> ApiResult<Option<Session>> {
+        let Some(s) = self.key.verify(cookie, now) else {
+            return Ok(None);
+        };
+        let nonce = s.nonce.clone();
+        let revoked = self
+            .db
+            .read(move |c| {
+                Ok(c.query_row(
+                    "SELECT 1 FROM revoked_sessions WHERE nonce = ?1",
+                    [&nonce],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some())
+            })
+            .await?;
+        Ok((!revoked).then_some(s))
+    }
+
+    /// End the session `s` before its `exp`, and prune the revocations
+    /// past their `exp` (at the Unix time `now`).
+    pub async fn revoke(&self, s: &Session, now: i64) -> ApiResult<()> {
+        let (nonce, exp) = (s.nonce.clone(), s.exp);
+        self.db
+            .write("operator", move |t| {
+                t.execute("DELETE FROM revoked_sessions WHERE exp <= ?1", [now])?;
+                t.execute(
+                    "INSERT OR IGNORE INTO revoked_sessions (nonce, exp) VALUES (?1, ?2)",
+                    rusqlite::params![nonce, exp],
+                )?;
+                Ok(())
+            })
+            .await
+    }
 }
 
 /// The value of the cookie `name` in the `Cookie` headers.
@@ -283,15 +342,18 @@ pub async fn create(
     ))
 }
 
-/// `DELETE /api/session`: clear the cookie. The auth middleware lets it
-/// through, so that a client that lost its cookie can still log out.
+/// `DELETE /api/session`: end the session and clear the cookie. The auth
+/// middleware lets it through, so that a client that lost its cookie can
+/// still log out.
 ///
 /// - No cookie (a bearer client, or a browser that has no session): `204`
 ///   and the clearing `Set-Cookie`.
 /// - A valid session cookie: it must send `X-CSRF-Token` of that session,
 ///   or the answer is `403` and the cookie stays. This stops a logout CSRF.
-/// - A cookie that is wrong or past `exp`: `204`. It is no session, so to
-///   clear it ends nothing.
+///   With the token, the session is revoked: a copy of the cookie gets
+///   `401` until `exp`.
+/// - A cookie that is wrong, revoked, or past `exp`: `204`. It is no
+///   session, so to clear it ends nothing.
 pub async fn delete(
     sessions: Option<Extension<Arc<Sessions>>>,
     req: Request,
@@ -300,9 +362,12 @@ pub async fn delete(
         return Err(no_sessions());
     };
     let headers = req.headers();
-    if let Some(cookie) = cookie_value(headers, COOKIE)
-        && let Some(s) = sessions.key.verify(cookie, chrono::Utc::now().timestamp())
-    {
+    let now = chrono::Utc::now().timestamp();
+    let session = match cookie_value(headers, COOKIE) {
+        Some(cookie) => sessions.check(cookie, now).await?,
+        None => None,
+    };
+    if let Some(s) = session {
         let ok = headers
             .get(CSRF_HEADER)
             .and_then(|v| v.to_str().ok())
@@ -314,6 +379,7 @@ pub async fn delete(
                  csrf value of POST /api/session",
             ));
         }
+        sessions.revoke(&s, now).await?;
     }
     let secure = is_https(req.uri().scheme_str(), headers);
     Ok(with_cookie(

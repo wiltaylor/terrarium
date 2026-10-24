@@ -60,6 +60,7 @@ use terrarium_core::{
     Adapter, Agent, AgentId, AgentStatus, Event, EventRecord, HarnessId, HarnessSessionId,
     LaunchSpec,
 };
+use terrarium_runner::safefs;
 use terrarium_runner::{
     AdapterKind, AdapterOptions, AttachEvent, ConnectOptions, ExitStatus, LOST_SIGNAL,
     ReadyDetector, ReadyDetectorSpec, RemoteRunner, RequestHandler, Runner, RunnerConfig,
@@ -317,6 +318,28 @@ const GRACEFUL_STOP: Duration = Duration::from_secs(5);
 /// The file that holds the SHA-256 of the prompt a harness session began
 /// with (`<agent dir>/private/session-prompt.sha256`).
 const SESSION_PROMPT_HASH: &str = "session-prompt.sha256";
+
+/// The mark in the message of a launch that a symlink or a special file in
+/// the agent dir refuses (`terrarium_runner::RunnerError::UnsafePath`,
+/// `docs/security-review.md` F11). Such a launch ends in `error`, and the
+/// restart policy does not try again: a planted entry does not go away.
+const UNSAFE_MARK: &str = "unsafe agent dir: ";
+
+/// The message of a file error at launch. An unsafe path gets
+/// [`UNSAFE_MARK`] and what to do.
+fn launch_fs_error(e: &terrarium_runner::RunnerError) -> String {
+    match e {
+        terrarium_runner::RunnerError::UnsafePath { .. } => {
+            format!("{UNSAFE_MARK}{e}; remove it, then start the agent again")
+        }
+        _ => e.to_string(),
+    }
+}
+
+/// True: the launch failed on an unsafe path ([`UNSAFE_MARK`]).
+fn is_unsafe_launch(e: &SupervisorError) -> bool {
+    matches!(e, SupervisorError::NotReady(m) | SupervisorError::Other(m) if m.contains(UNSAFE_MARK))
+}
 
 fn sha256_hex(text: &str) -> String {
     use sha2::Digest;
@@ -808,14 +831,27 @@ impl RunnerSupervisor {
                 std::fs::create_dir_all(d)
                     .map_err(|e| format!("cannot create {}: {e}", d.display()))?;
             }
-            terrarium_runner::create_private_dir(&dirs.2).map_err(|e| e.to_string())?;
+            terrarium_runner::create_private_dir(&dirs.2).map_err(|e| launch_fs_error(&e))?;
             let hash = sha256_hex(&text);
             let hash_path = dirs.2.join(SESSION_PROMPT_HASH);
-            let fresh_for_prompt =
-                check_prompt && std::fs::read_to_string(&hash_path).is_ok_and(|h| h.trim() != hash);
+            // No symlink follow (F11): the daemon reads and writes in
+            // `private/` with the runner's no-follow opens.
+            let old = match safefs::read_to_string(&hash_path) {
+                Ok(h) => Some(h),
+                Err(e @ terrarium_runner::RunnerError::UnsafePath { .. }) => {
+                    return Err(launch_fs_error(&e));
+                }
+                Err(_) => None,
+            };
+            let fresh_for_prompt = check_prompt && old.is_some_and(|h| h.trim() != hash);
             if fresh || fresh_for_prompt {
-                std::fs::write(&hash_path, &hash)
-                    .map_err(|e| format!("cannot write {}: {e}", hash_path.display()))?;
+                safefs::write_private(&hash_path, hash.as_bytes()).map_err(|e| {
+                    format!(
+                        "cannot write {}: {}",
+                        hash_path.display(),
+                        launch_fs_error(&e)
+                    )
+                })?;
             }
             let path = dirs.1.join("prompt.md");
             std::fs::write(&path, text)
@@ -944,7 +980,12 @@ impl RunnerSupervisor {
             RunnerMode::InProcess => {
                 let r = Runner::spawn(rc, entry.adapter.clone(), spec, self.rpc_handler())
                     .await
-                    .map_err(|e| SupervisorError::Other(format!("cannot start {program}: {e}")))?;
+                    .map_err(|e| {
+                        SupervisorError::Other(format!(
+                            "cannot start {program}: {}",
+                            launch_fs_error(&e)
+                        ))
+                    })?;
                 (Arc::new(r.clone()), Some(r))
             }
             RunnerMode::Process { bin } => {
@@ -1676,7 +1717,8 @@ fn final_status(status: &ExitStatus) -> (AgentStatus, String) {
 /// seq"): its number of lines. 0 when the file is missing.
 fn events_seq(path: &Path) -> u64 {
     use std::io::Read;
-    let Ok(mut f) = std::fs::File::open(path) else {
+    // No symlink follow (F11).
+    let Ok(mut f) = safefs::open_read(path) else {
         return 0;
     };
     let mut buf = vec![0u8; 64 * 1024];
@@ -1877,7 +1919,8 @@ fn type_detached(agent: AgentId, runner: &Arc<dyn RunnerHandle>, text: String) {
 /// the old session, from `events.jsonl` in `private_dir`, and the commands
 /// to pick up work.
 pub fn recap_turn(private_dir: &Path, old: Option<&HarnessSessionId>) -> String {
-    let lines: Vec<String> = std::fs::read_to_string(private_dir.join("events.jsonl"))
+    // No symlink follow (F11).
+    let lines: Vec<String> = safefs::read_to_string(&private_dir.join("events.jsonl"))
         .unwrap_or_default()
         .lines()
         .filter_map(|l| serde_json::from_str::<EventRecord>(l).ok())
@@ -1950,9 +1993,20 @@ impl Supervisor for RunnerSupervisor {
             }
             self.targets_up(&agent).await;
             let result = self.launch(id, epoch).await;
-            if result.is_err() {
-                self.release(id, epoch, AgentStatus::Stopped);
-                self.targets_down(&agent);
+            match &result {
+                Ok(()) => {}
+                // A planted entry in the agent dir: `error` with the path,
+                // so the operator sees it (F11).
+                Err(e) if is_unsafe_launch(e) => {
+                    warn!(agent = %id, "the launch refused the agent dir: {e}");
+                    self.release(id, epoch, AgentStatus::Error);
+                    self.emit_status(id, AgentStatus::Error, e.to_string());
+                    self.targets_down(&agent);
+                }
+                Err(_) => {
+                    self.release(id, epoch, AgentStatus::Stopped);
+                    self.targets_down(&agent);
+                }
             }
             result
         })

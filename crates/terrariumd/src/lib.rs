@@ -24,6 +24,7 @@ pub mod sandbox;
 pub mod settings;
 pub mod store;
 pub mod supervisor;
+pub mod trash;
 pub mod usage_collector;
 
 use std::path::PathBuf;
@@ -241,7 +242,9 @@ async fn start_usage(state: &Shared) -> Vec<JoinHandle<()>> {
 }
 
 /// Run the artifact retention prune (PLAN §15.2): first one hour after the
-/// start, then every `[artifacts] prune_interval_hours` (default 24).
+/// start, then every `[artifacts] prune_interval_hours` (default 24). The
+/// same timer prunes the trash of deleted agents (`TERRARIUM_TRASH_DAYS`,
+/// [`trash::prune_trash`]) and the revoked sessions past their `exp`.
 fn spawn_prune_timer(state: Shared) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut wait = std::time::Duration::from_secs(3600);
@@ -250,6 +253,31 @@ fn spawn_prune_timer(state: Shared) -> JoinHandle<()> {
             match api::run_prune(&state, chrono::Utc::now(), false, "system".into()).await {
                 Ok(r) => info!(blobs = r.blobs.len(), "artifact prune done"),
                 Err(e) => warn!("artifact prune failed: {e}"),
+            }
+            let dir = state.state_dir.clone();
+            let max_age = std::time::Duration::from_secs(trash::trash_days() * 86_400);
+            match tokio::task::spawn_blocking(move || {
+                trash::prune_trash(&dir, std::time::SystemTime::now(), max_age)
+            })
+            .await
+            {
+                Ok(Ok(removed)) if !removed.is_empty() => {
+                    info!(entries = removed.len(), "trash prune done");
+                }
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => warn!("trash prune failed: {e}"),
+                Err(e) => warn!("trash prune task failed: {e}"),
+            }
+            let now = chrono::Utc::now().timestamp();
+            if let Err(e) = state
+                .db
+                .write("system", move |t| {
+                    t.execute("DELETE FROM revoked_sessions WHERE exp <= ?1", [now])?;
+                    Ok(())
+                })
+                .await
+            {
+                warn!("cannot prune the revoked sessions: {e}");
             }
             let hours = store::artifacts::context(&state.state_dir, &state.config_dir)
                 .map(|c| c.limits.prune_interval_hours)
