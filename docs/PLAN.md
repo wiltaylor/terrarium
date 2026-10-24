@@ -270,6 +270,23 @@ Sending a turn into an interactive TUI:
 3. Expect the prompt-submit hook within a short timeout. If it does not fire,
    retry once, then mark the delivery failed and raise an event.
 
+Verified in Phase 0 (Claude Code 2.1.310, `docs/compat.md`):
+
+- Text typed while a turn runs joins that turn. Two prompt-submit hooks
+  fire, but only one stop hook. So step 1 is not enough. The runner checks
+  the screen for `busy` just before it types, and it does not count stop
+  hooks per delivery.
+- The prompt-ready rule is strict: the input box is at the bottom, it is
+  empty, the footer has no "esc to interrupt", and no dialog key hint
+  shows. No input box means "not ready". `ScreenHint::NotReady` says so.
+- Submit is bracketed paste, then CR. A bare LF adds a line and does not
+  submit. The prompt-submit hook came 23 to 31 ms after the CR.
+- The "needs input" hook is `PermissionRequest`. It fires for
+  `AskUserQuestion` in bypass mode too. The adapter maps it to
+  `Event::Question`. `Notification` is only the 60 s idle reminder. It does
+  not mean `blocked`.
+- Answer a question with Down (`ESC [B`) once for each step, then CR.
+
 ---
 
 ## 8. Quiet defaults and prompt control
@@ -300,6 +317,26 @@ after mounting the shared home, it mounts the agent's rendered `prompt.md` over
 `$HOME/.copilot/SYSTEM.md`. Each agent sees its own prompt at the shared path.
 The same trick covers any other per-agent file a harness insists on reading
 from its home, such as a hook config.
+
+Verified in Phase 0 (Claude Code 2.1.310, `docs/compat.md`):
+
+- Trust is not the only start-up dialog. A quiet start needs three things:
+  `hasCompletedOnboarding` and `projects[<workspace>].hasTrustDialogAccepted`
+  in `.claude.json`, and `skipDangerousModePermissionPrompt` in
+  `--settings`. The trust and bypass dialogs default to "No, exit".
+- Set `CLAUDE_CONFIG_DIR` always. Without it, `.claude.json` goes to
+  `$HOME`, outside the shared home.
+- Each agent gets its own `.claude.json`, bound over the shared one.
+  Concurrent writes to one file from many instances are not tested.
+- `--setting-sources ""` keeps the user's and the repository's settings
+  and hooks out. It also keeps the shared home's `CLAUDE.md` out.
+- `--bare` is not an option. It drops OAuth and all hooks.
+- Claude Code freezes the system prompt at the first request. Always pass
+  `--system-prompt-snapshot off`, so a changed template applies on resume.
+- `--system-prompt` cannot remove the first line, "You are Claude Code,
+  Anthropic's official CLI for Claude." The adapter appends by default.
+- `--session-id` on a used UUID fails with "already in use". A restart
+  uses `--resume <id>`.
 
 ---
 
@@ -512,6 +549,22 @@ privileges inside the Terrarium container.
 Yolo is safe to the extent the sandbox holds. The agent can destroy its own
 workspace and its own harness session files. It cannot touch the host except
 through `terrarium exec`, which the policy limits.
+
+Verified in Phase 0 (`docs/compat.md`, Docker 29.8.0, bwrap 0.8.0):
+
+- Allowing `unshare` and `clone` is not enough. The seccomp profile also
+  needs `clone3`, `mount`, `umount2`, and `pivot_root`, and the container
+  needs `--security-opt systempaths=unconfined` for `--proc`. `SYS_ADMIN`
+  does not help. Hosts with AppArmor can need `apparmor=unconfined`; that
+  is not tested.
+- The per-file overlay works. Each sandbox sees its own file, and the
+  shared file does not change. If the target file does not exist, bwrap
+  leaves an empty file in the shared home. The adapter creates the target
+  before the first start.
+- Claude Code writes to `.claude.json`, so its overlay is read-write. Not
+  tested: a rename-over write onto a file that is a bind mount.
+- Claude Code refuses yolo as root. `IS_SANDBOX=1` removes the refusal.
+  The adapter sets it only when the harness runs as root.
 
 ---
 
