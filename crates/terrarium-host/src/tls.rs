@@ -742,7 +742,10 @@ mod tests {
         assert!(r.ok, "{r:?}");
         assert!(r.tls_version.is_none());
         drop(listener);
-        let r = probe(&t, Duration::from_secs(5)).await;
-        assert!(!r.ok);
+        // Port 1 is privileged, so no parallel test can bind it. A probe of
+        // the dropped ephemeral port is a race: another test may take it.
+        let closed = transport("ws://127.0.0.1:1/hosts/connect", &TlsSettings::default()).unwrap();
+        let r = probe(&closed, Duration::from_secs(5)).await;
+        assert!(!r.ok, "{r:?}");
     }
 }
