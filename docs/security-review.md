@@ -51,8 +51,8 @@ remote unauthenticated path to code execution or to another agent's secrets.
 |---|---|---|---|---|---|
 | F1 | HIGH | Sandbox | `sandbox.rs:333` | Whole agent dir bound rw; agent tampers with its own event log, pty log, and resume state | Fixed (see F11 for upgraded dirs) |
 | F2 | HIGH | Host link | `compose.yaml`, `terrarium-host/src/config.rs:25` | Plaintext `ws://` host link; token and exec traffic in clear, replayable | Fixed, with residuals (§7) |
-| F3 | MEDIUM | Dashboard | `components/Markdown.tsx:15` | Untrusted markdown through `innerHTML` and a hand-rolled sanitizer | Fixed; token still script-readable |
-| F4 | MEDIUM | API auth | `api/mod.rs:207,256` | Bearer token in `?token=` query string for WebSockets | Fixed; `?token=` still accepted by default |
+| F3 | MEDIUM | Dashboard | `components/Markdown.tsx:15` | Untrusted markdown through `innerHTML` and a hand-rolled sanitizer | Fixed; the token residual is fixed too: an `HttpOnly` session cookie, and the dashboard keeps no token (§7) |
+| F4 | MEDIUM | API auth | `api/mod.rs:207,256` | Bearer token in `?token=` query string for WebSockets | Fixed; the daemon now refuses `?token=` by default (§7) |
 | F5 | LOW | Artifacts | `api/mod.rs:173`, `api/artifacts.rs:34` | Artifacts on the dashboard origin by default; isolation depends on CSP | Fixed |
 | F6 | LOW | Login flow | `login_session.rs:789` | Login PTY output and `pty.log` in a temp dir hold the device code until cleanup | Partially fixed; the SQLite residual is fixed (a final state clears `url` and `device_code`). The `error` text residual stays. |
 | F7 | LOW | API auth | `api/mod.rs:189` | Token compare returns early on a length mismatch (length leak only) | Fixed |
@@ -62,7 +62,7 @@ remote unauthenticated path to code execution or to another agent's secrets.
 | F11 | LOW | Sandbox | `terrarium-runner/src/config.rs:150,181` | The split of an old agent dir follows symlinks that the agent planted before the upgrade | Fixed in the daemon (`runner_supervisor.rs`, `migrate_dir`): a dir with a symlink goes to `<ulid>.quarantine-<ts>`, and a clean dir takes its place |
 | F12 | LOW | Usage | `usage_collector.rs:199,530` | The collector tails any file that a forged `SessionStart` hook names | Fixed: only a regular file under the session area of the harness, that names its session, and that no other agent owns; else a `usage.rejected_path` event |
 | F13 | LOW | Policy | `policy.rs:140`, `api/agents.rs:141` | A `project_admin` adds global targets to `policy.targets`, its own too | Fixed: a global target, a `cross_project` entry, or a `mail_to` entry outside the project needs sysadmin (API and fleet) |
-| F14 | INFO | Dashboard | `eslint.config.js:24`, `lib/sanitize.ts:76` | The sink lint rule has gaps; the sanitizer keeps remote images (the CSP blocks them) | New (2026-10-24) |
+| F14 | INFO | Dashboard | `eslint.config.js:24`, `lib/sanitize.ts:76` | The sink lint rule has gaps; the sanitizer keeps remote images (the CSP blocks them) | Fixed: the lint rule covers the gaps, with a fixture test; the daemon sends the CSP as a header. Remote images are accepted (§5) |
 
 ---
 
@@ -372,6 +372,10 @@ These are known and documented trade-offs. The review confirms they are intentio
   callback cannot reach into the container.
 - **The operator Unix socket needs no token.** Access to the socket is the operator
   boundary (`api/mod.rs:277`). The socket is mode 0660.
+- **Remote `https:` images in agent-written markdown.** The sanitizer keeps them, so
+  a wiki page can hold a tracking pixel. The page CSP `img-src` (`'self'`, `data:`,
+  and the artifact origin) blocks the load, not the sanitizer. This is accepted
+  (F14).
 
 ---
 
@@ -402,8 +406,8 @@ next commit, `122b9f8`, changes one doc comment in `api/targets.rs` and passes
 |---|---|---|---|
 | F1 | Fixed | `sandbox.rs:340-346` binds `harness/` with `--ro-bind`; `private/` is never bound | `sandbox::tests::the_sandbox_never_binds_the_private_dir`, `sandbox::tests::bwrap_argv_matches_the_golden_command` |
 | F2 | Fixed, with residuals | `hosts.rs:784-845` (loopback plaintext default, TLS, warning); `terrarium-host/src/tls.rs:280-286` (host refuses remote `ws://`); `store/hosts.rs:265-273` (atomic enrol swap) | `tls_link_with_a_pinned_certificate`, `plaintext_to_a_remote_host_needs_allow_insecure`, `host_listen_defaults_follow_tls`, `an_enrol_token_is_swapped_for_a_stored_long_lived_token`, `a_revoked_token_is_refused`, `rotation_keeps_the_live_link_and_retires_the_old_token` |
-| F3 | Fixed; the token is still readable by script | `lib/sanitize.ts:157` (`setSafeHtml`, the one sink); `eslint.config.js:24-30`; CSP `script-src 'self'` (`vite.config.ts:39`) | `lib/sanitize.test.ts` (52 payloads, each through the renderer and through DOMPurify alone, plus a mount test) |
-| F4 | Fixed; `?token=` is still accepted by default | `api/mod.rs:234-245` (subprotocol), `:387-393` (echo), `:316-330` (warning without the token); CLI uses `Authorization` (`crates/terrarium/src/client.rs:204`) | `api::tests::websocket_token_in_the_subprotocol`, `api::tests::websocket_upgrade_echoes_the_bearer_subprotocol`, `api::tests::query_token_warns_once_per_client` |
+| F3 | Fixed; the token residual is fixed later (see the F3 update) | `lib/sanitize.ts:157` (`setSafeHtml`, the one sink); `eslint.config.js:24-30`; CSP `script-src 'self'` (`vite.config.ts:39`) | `lib/sanitize.test.ts` (52 payloads, each through the renderer and through DOMPurify alone, plus a mount test) |
+| F4 | Fixed; `?token=` is refused by default later (see the F4 update) | `api/mod.rs:234-245` (subprotocol), `:387-393` (echo), `:316-330` (warning without the token); CLI uses `Authorization` (`crates/terrarium/src/client.rs:204`) | `api::tests::websocket_token_in_the_subprotocol`, `api::tests::websocket_upgrade_echoes_the_bearer_subprotocol`, `api::tests::query_token_warns_once_per_client` |
 | F5 | Fixed | `api/mod.rs:159-161,190-192` (`/a/` only without an artifact listener); `api/artifacts.rs:379-410,444-453` (absolute signed URLs) | `api::tests::artifacts_mount_on_the_dashboard_only_without_their_own_origin`, `api::artifacts::tests::signed_urls_point_at_the_artifact_origin` |
 | F6 | Partially fixed | `login_session.rs:867` (`log_max_bytes = 0`), `:1037` (dir removed before the final state), `:701` (`Drop`), `:945` (sweep) | `claude_login_with_a_pasted_code`, `codex_device_login_and_failures` (`assert_no_login_output_on_disk`, `assert_login_dir_gone`), `ptylog::tests::a_zero_limit_writes_nothing` |
 | F7 | Fixed | `api/mod.rs:210-218`: SHA-256 of both sides, then a fold compare with no early exit | `api::tests::token_compare` |
@@ -556,6 +560,13 @@ tab, no persistent copy by default), but an XSS bug still gives the token. The
 real fix is an `HttpOnly` session cookie from the daemon, which the dashboard
 README names as future work.
 
+**Update (2026-10-24, `22ccd5d`, `85e35eb`):** the daemon now gives signed
+`HttpOnly` session cookies (`POST /api/session`, `api/session.rs`). The
+dashboard keeps only the CSRF value and the end of the session, not the token
+(`stores/auth.ts`). A mutating call with the cookie needs `X-CSRF-Token`. The
+token is no longer readable by script after sign-in. A daemon without sessions
+makes the dashboard fall back to bearer mode, with a notice.
+
 ### F4 — Fixed; `?token=` is still accepted by default
 
 - The daemon reads `Sec-WebSocket-Protocol: bearer.<token>` (`api/mod.rs:234-245`)
@@ -577,6 +588,9 @@ Residuals:
   in the next release.
 - The echo puts the token in a response header. Few proxies log
   `Sec-WebSocket-Protocol`, but say so in the proxy notes.
+
+**Update (2026-10-24, `22ccd5d`):** `TERRARIUM_WS_QUERY_TOKEN` now defaults to
+`0` (`settings.rs`), so the daemon refuses `?token=`. `1` turns it back on.
 
 ### F5 — Fixed
 
@@ -712,6 +726,13 @@ that the fleet owns now (run the removal checks of `authorize` even without
 Refuse an API apply to a fleet whose origin is `file:`. Refuse an empty fleet
 for a non-sysadmin.
 
+**Fixed (2026-10-24, `bc85806`):** `authorize` (`fleet.rs`) refuses a plain
+member, and checks every object that the stored fleet owns, with or without
+`prune`. `check_overwrite` needs sysadmin for an empty fleet over a stored
+fleet, and `confirm` for an API apply over a `file:` fleet
+(`409 confirm_required`). `docs/api.md` §18.4 and `docs/fleet.md` §5 have the
+rules.
+
 ### F11 — The split of an old agent dir follows planted symlinks (LOW)
 
 `crates/terrarium-runner/src/config.rs:150` (`create_private_dir`), `:181`
@@ -733,6 +754,10 @@ Fix: in `create_private_dir` and in `migrate_legacy_layout`, use
 `harness/`, or any moved entry. Move only regular files and directories. Open
 the record files with `O_NOFOLLOW`. Add a test with a planted symlink.
 
+**Fixed (2026-10-24, `bc85806`):** the daemon checks an old agent dir before
+the split (`runner_supervisor.rs`, `migrate_dir`). A dir with a symlink goes to
+`<ulid>.quarantine-<ts>`, and a clean dir takes its place.
+
 ### F12 — The usage collector tails any file that a hook names (LOW)
 
 `crates/terrariumd/src/usage_collector.rs:199` (`host_path`), `:530`.
@@ -750,6 +775,12 @@ and budgets.
 Fix: canonicalize the path and accept it only under the shared home's session
 directory of that harness (for example `projects/` for Claude) or under the
 agent's own `harness/` dir. Refuse a symlink. Log a refused path at warn level.
+
+**Fixed (2026-10-24, `bc85806`):** `check_transcript` (`usage_collector.rs`)
+accepts only a regular file under the session area of the harness. A Claude
+Code, Codex, or Copilot file must carry the session ID in its name. A file that
+another agent reads is refused. A refused file gives a warn log and a
+`usage.rejected_path` event (`docs/api.md` §16.7).
 
 ### F13 — A `project_admin` can grant use of global targets (LOW)
 
@@ -770,6 +801,12 @@ boundary: let only a `sysadmin` (or the operator) add a global target or a
 `cross_project` entry to a policy, and forbid an agent to change its own
 `policy`.
 
+**Fixed (2026-10-24, `bc85806`):** `policy_grants` and `set_policy`
+(`policy.rs`) need a sysadmin or the operator for a new global target, a new
+`cross_project` entry, or a new `mail_to` entry in another project. The API
+and the fleet apply use the same check. An entry that the policy has already
+may stay (`docs/api.md` §6.1).
+
 ### F14 — Defence-in-depth gaps in the dashboard sink rules (INFO)
 
 `dashboard/eslint.config.js:24-30`, `dashboard/src/lib/sanitize.ts:76-82`.
@@ -785,3 +822,16 @@ boundary: let only a `sysadmin` (or the operator) add a global target or a
   CSP header for the dashboard (`crates/terrariumd/src/assets.rs`). Drop remote
   images in the sanitizer (keep `'self'`, `data:`, and the artifact origin), and
   send the CSP as a header too.
+
+**Fixed (2026-10-24, `85e35eb`, `22ccd5d`):** the sink rule
+(`dashboard/eslint.config.js`) now catches computed members (`el["innerHTML"]`
+and template keys), `Object.assign` and `Reflect.set`, `new DOMParser()`,
+`setHTMLUnsafe`, and the JSX `innerHTML`, `prop:`, `attr:`, and `srcdoc`
+names. `dashboard/src/lib/sink-lint.test.ts` runs the rule on a fixture of each
+sink. The daemon now serves the CSP as a response header, with
+`frame-ancestors 'none'` (`api/mod.rs`). The remote image gap stays: §5 accepts
+it, because the CSP `img-src` blocks the load.
+
+**Also fixed (2026-10-24, `8853861`):** `DELETE /api/session` now needs the
+CSRF token when a session cookie is present. This closes a logout CSRF that
+the dashboard client work found (`api/session.rs`, `docs/api.md` §1.1).

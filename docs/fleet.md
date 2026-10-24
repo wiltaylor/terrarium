@@ -196,13 +196,27 @@ PLAN §10 applies to each object of the plan:
 | A change to a project | project_admin of the project |
 | An agent (create, update, delete, start) | project_admin of its project |
 | A role on an agent | the rule of `role grant`: sysadmin needs the operator |
+| An agent's `policy`: a new global target, a new `cross_project` entry, or a new `mail_to` entry in another project | sysadmin or the operator |
 | A project target | project_admin of the project |
 | A global target | sysadmin |
 | A subscription | sysadmin |
 
 So a project_admin may apply a fleet that touches only its own project. A
-member may not plan or apply. Anyone may validate. With `--prune`, the
-removals count too. An agent cannot delete itself.
+member may not plan or apply (403). Anyone may validate. An agent cannot
+delete itself with `--prune`.
+
+When you plan or apply a fleet whose name is in the store already, these
+rules apply too:
+
+- You need the rights over every object that the stored fleet owns, with
+  or without `--prune`. An object that your file drops counts too, because
+  a later prune of the stored file deletes it.
+- A file that declares no objects can replace a stored fleet only if you
+  are a sysadmin or the operator.
+- If the stored fleet comes from the config dir (`origin = file:<path>`),
+  `apply` through the API needs `--confirm`. Else it stops with
+  `confirm_required`. The next reload applies the file in the config dir
+  again, so change that file instead. `plan` needs no `--confirm`.
 
 `GET /api/fleet` shows every fleet to the operator and to sysadmins. An
 agent sees the fleets that own objects in its own project.

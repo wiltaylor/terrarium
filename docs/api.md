@@ -562,9 +562,9 @@ An agent is the core `Agent` with bookkeeping fields:
 | Endpoint | Body | Answer | Needs |
 |---|---|---|---|
 | `GET /api/agents?project=` | | `200` agents by ID | read; an agent defaults to its project |
-| `POST /api/agents` | an agent definition | `201` agent | project_admin of `project` |
+| `POST /api/agents` | an agent definition | `201` agent | project_admin of `project`; some `policy` entries need sysadmin (below) |
 | `GET /api/agents/{id}` | | `200` agent | read |
-| `PATCH /api/agents/{id}` | `{"harness"?, "subscription"?, "model"?, "prompt"?, "policy"?, "restart"?, "new_session_on_prompt_change"?}` | `200` agent | project_admin |
+| `PATCH /api/agents/{id}` | `{"harness"?, "subscription"?, "model"?, "prompt"?, "policy"?, "restart"?, "new_session_on_prompt_change"?}` | `200` agent | project_admin; some `policy` entries need sysadmin (below) |
 | `DELETE /api/agents/{id}` | `?confirm=true` when live | `204` | project_admin |
 
 The definition is the TOML agent definition as JSON:
@@ -585,7 +585,18 @@ changed`. The old session stays in the history.
 `null` for the other fields changes nothing.
 
 `roles` in the definition need the grant rights of §3. `policy.cross_project`
-entries are `project/agent`. The project must exist (`not_found`). A file
+entries are `project/agent`.
+
+A `policy` write needs project_admin of the project. Some new entries need
+a sysadmin or the operator (`docs/security-review.md` F13):
+
+- a `targets` entry that is not a target of the project (a global target),
+- a `cross_project` entry,
+- a `mail_to` entry of the form `project/name` for another project.
+
+An entry that the policy has already may stay. Else the answer is
+`403 forbidden`, and the message names each entry. A fleet apply uses the
+same check (§18.4). The project must exist (`not_found`). A file
 agent refuses `PATCH`, `DELETE`, and `PUT .../roles` with `file_managed`.
 
 ### 6.2 Lifecycle and turns
@@ -974,7 +985,7 @@ Kinds:
 | `wiki.created`, `wiki.saved`, `wiki.deleted`, `wiki.restored`, `wiki.moved`, `wiki.reviewed` | `{page_id, path, title, rev, ...}`: `summary`, `author`, `from_rev`, `from`, `decision`, `comment`. |
 | `artifact.created`, `artifact.linked`, `artifact.deleted`, `artifact.pruned` | `{artifact_id, key, uid, name, kind, ...}`: `size`, `content_type`, `sha256`, `link_kind`, `ref`. |
 | `version.created`, `version.updated`, `version.submitted`, `version.approved`, `version.rejected`, `version.released` | `{version_id, name, status, ...}`: `fields`, `comment`, `thread_id`, `cards`. |
-| `usage.sample`, `quota.sample`, `quota.alert`, `quota.blocked`, `quota.resumed`, `subscription.offer`, `subscription.expired`, `self_report` | See §16.7. |
+| `usage.sample`, `usage.rejected_path`, `quota.sample`, `quota.alert`, `quota.blocked`, `quota.resumed`, `subscription.offer`, `subscription.expired`, `self_report` | See §16.7. |
 | `host.connected`, `host.disconnected` | `{host, host_id, ...}`: `version`, `os`, `arch`, `capabilities`, `summary`, `resumed` (sessions taken back), `reason`. See §17. |
 
 ### 9.1 Streams
@@ -1741,6 +1752,7 @@ status that the runner reports. An agent may report for itself only.
 | `kind` | `data` |
 |---|---|
 | `usage.sample` | `{subscription, harness, model, input_tokens, output_tokens, cache_read, cache_write, messages}`: the new usage of one agent since its last `usage.sample`, at most one each 10 s per agent. |
+| `usage.rejected_path` | `{harness, harness_session, path, reason}`: the usage collector refused the session file that a `session_started` hook named. The file must be a regular file (not a symlink) under the session area of the harness, and another agent must not read it. A Claude Code, Codex, or Copilot file must also carry the session ID in its name (`docs/security-review.md` F12). The collector does not read a refused file. |
 | `quota.sample` | `{subscription, windows}` after each successful probe. |
 | `quota.alert` | `{subscription, window, used_pct, resets_at, level, alert_at}`, or for a budget `{project, subscription, window, used, limit, used_pct, level}`. |
 | `quota.blocked` | `{cause, until, reason, enforced}`. The `agent` is the held agent. |
@@ -2178,16 +2190,29 @@ project with no changes.
 ### 18.4 Rules and errors
 
 The policy of [fleet.md](fleet.md) §5 applies to each entry of a plan.
-`plan` needs the same rights as `apply`. With `prune`, the removals count
-too.
+`plan` needs the same rights as `apply`. A plain `member` gets `403` for
+`plan` and `apply`.
+
+A fleet name that is in the store already has more rules
+(`docs/security-review.md` F10):
+
+- The caller needs the rights over every object that the stored fleet
+  owns, with or without `prune`. The objects that the new file drops
+  count too, because a later prune of the stored content deletes them.
+- A fleet that declares no objects replaces a stored fleet only for a
+  sysadmin or the operator.
+- An API `apply` over a fleet whose `origin` is `file:<path>` needs
+  `confirm: true`. Else the answer is `409 confirm_required`, with
+  `details` `{fleet, origin, applied_by}`. The next reload applies the
+  file again. `plan` does not need `confirm`.
 
 | Status | Code | When |
 |---|---|---|
 | 400 | `bad_request` | The body is not JSON, or has an unknown field. |
-| 403 | `forbidden` | `plan` or `apply`: the caller may not change an object of the plan. `export`: the caller may not read the project. |
+| 403 | `forbidden` | `plan` or `apply`: the caller is a plain member, may not change an object of the plan or of the stored fleet, or sends an empty fleet over a stored fleet without sysadmin. `export`: the caller may not read the project. |
 | 404 | `not_found` | `GET /api/fleet/{name}`: no such fleet, or the caller may not see it. `export`: no such project. |
 | 409 | `conflict` | `apply`: the plan has a conflict. `details` is the plan. |
-| 409 | `confirm_required` | `apply` with `prune` deletes an agent with a live session, and `confirm` is not `true`. `details.agents` names the agents. With `confirm`, the daemon stops them, then deletes them. |
+| 409 | `confirm_required` | `apply` with `prune` deletes an agent with a live session, and `confirm` is not `true`. `details.agents` names the agents. With `confirm`, the daemon stops them, then deletes them. Also: `apply` over a stored fleet from a `file:`, and `confirm` is not `true`. |
 | 422 | `invalid` | `apply`: the file has errors (`details.errors`, `details.warnings`), or the store refuses an object. `export`: a bad or reserved fleet name. |
 
 The operator and sysadmins see every fleet in `GET /api/fleet`. An agent

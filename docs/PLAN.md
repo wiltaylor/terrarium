@@ -3,7 +3,7 @@
 Terrarium wraps AI coding harnesses (Claude Code, Codex, Copilot CLI) so that
 one API, one CLI, one dashboard, and one status model apply to all of them.
 
-Status: draft v0.17, 2026-10-24. Phases 0 to 5 largely built; Phase 6 partly (the fleet file is done). The security review fixes F1 to F7 are in, with cookie sessions and the CSP header (`docs/security-review.md`). See §20, "Build status", and README.md.
+Status: draft v0.18, 2026-10-24. Phases 0 to 5 largely built; Phase 6 partly (the fleet file is done). The security review fixes F1 to F7 and F10 to F14 are in, with cookie sessions and the CSP header (`docs/security-review.md`). See §20, "Build status", and README.md.
 
 ---
 
@@ -1284,7 +1284,7 @@ dashboard.
 **Phase 6 — Polish.** Mail and event views. Fleet definition file that
 declares many agents and targets at once. Sibling-container sandbox fallback.
 
-### Build status (2026-10-24, v0.17)
+### Build status (2026-10-24, v0.18)
 
 From README.md and the tree. "Done" means built and in the tree. The
 end-to-end scenarios of each phase are not scripted yet (no `spikes/e2e/`).
@@ -1302,7 +1302,7 @@ end-to-end scenarios of each phase are not scripted yet (no `spikes/e2e/`).
 | 4 | One `terrarium-runner` process per agent (the default runner mode): the agents live through a daemon restart. Reconcile on daemon start (`Supervisor::recover`), reconnect on a dropped control connection, restart policies with backoff and crash-loop detection, resume of the same session, recap turn. The entrypoint supervisor loop starts `terrariumd` again after a crash in Docker, and the runners keep running (verified with `just docker::crash-test`, `docker/README.md`). The `stopped_by` mark in `runner-exit.json` gives resume after a container stop. | — |
 | 5 | `terrarium-host` with dial-out, token auth, and the executor protocol. `host`, `ssh`, `docker`, and `vmlab` targets. `terrarium exec`, `shell`, `cp`. Lifecycle verbs, ephemeral targets, snapshots. `repo checkout --target` through the host agent. Hosts and Targets views in the dashboard. TLS on the host link with certificate pinning (`just host::cert`), token rotation and one-time enrol tokens (`terrarium admin host new\|rotate --enrol`), and `just host::install <user@host> <name>` (`scripts/host-install.py`, with `--dry-run`). | The vmlab verbs are verified only against the reference output of the vmlab CLI, not against a live lab. |
 | 6 | Mail and event views in the dashboard. The fleet file (`docs/fleet.md`): `terrarium fleet validate`, `plan`, `apply` (with `--prune`), `ls`, `show`, and `export`, ownership as `source: "fleet:<name>"`, and the auto-apply of `fleets/*.toml` at start and on reload. | The sibling-container sandbox fallback is not started. |
-| Security | The fixes for findings F1 to F7 of `docs/security-review.md`: the `private/` and `harness/` split of the agent dir (F1, §11); TLS on the host link with a loopback-only plaintext default, pinning, rotation, and enrol (F2, §19); DOMPurify as the one HTML sink, an ESLint guard, adversarial payload tests, and a page CSP in the dashboard (F3); the WebSocket token in the `bearer.<token>` subprotocol, with `TERRARIUM_WS_QUERY_TOKEN=0` to refuse `?token=` (F4); artifacts off the dashboard origin by default, with an origin badge in the viewer (F5); no PTY log for the login flow (F6); a constant-time token compare (F7). Signed `HttpOnly` session cookies for the dashboard, with a CSRF header on mutating calls and an `Origin` check on WebSocket upgrades (`docs/api.md` §1.1); the CSP and other security headers from the daemon (§1.2); `?token=` refused by default. | F10 to F14 of `docs/security-review.md` §9: fixes in progress. |
+| Security | The fixes for findings F1 to F7 of `docs/security-review.md`: the `private/` and `harness/` split of the agent dir (F1, §11); TLS on the host link with a loopback-only plaintext default, pinning, rotation, and enrol (F2, §19); DOMPurify as the one HTML sink, an ESLint guard, adversarial payload tests, and a page CSP in the dashboard (F3); the WebSocket token in the `bearer.<token>` subprotocol, with `TERRARIUM_WS_QUERY_TOKEN=0` to refuse `?token=` (F4); artifacts off the dashboard origin by default, with an origin badge in the viewer (F5); no PTY log for the login flow (F6); a constant-time token compare (F7). Signed `HttpOnly` session cookies for the dashboard, with a CSRF header on mutating calls and an `Origin` check on WebSocket upgrades (`docs/api.md` §1.1); the CSP and other security headers from the daemon (§1.2); `?token=` refused by default. The fixes for F10 to F14 of §9: fleet ownership and overwrite checks (F10); quarantine of an old agent dir with a symlink (F11); transcript path checks with the `usage.rejected_path` event (F12); sysadmin for global targets, `cross_project`, and outside `mail_to` in a policy (F13); a wider ESLint sink rule with a fixture test, and the CSP as a header with `frame-ancestors 'none'` (F14). `DELETE /api/session` needs the CSRF token when a cookie is present. | — |
 
 ---
 
@@ -1345,6 +1345,7 @@ end-to-end scenarios of each phase are not scripted yet (no `spikes/e2e/`).
 | F5: artifacts share the dashboard origin by default | **Fixed.** With the artifact listener on (the default), the dashboard port does not serve `/a/...`. `TERRARIUM_ARTIFACT_PUBLIC_URL` sets the origin of signed URLs. The viewer shows a badge when artifacts share the dashboard origin. |
 | F6: the login PTY log holds the device code until cleanup | **Fixed.** The login flow writes no `pty.log` (`log_max_bytes = 0`, `docs/runner.md` "Files"). |
 | F7: the token compare leaks the token length | **Fixed.** The daemon compares SHA-256 hashes of the two values in constant time. |
+| F10 to F13: a member overwrites any fleet record; an old agent dir split follows planted symlinks; the usage collector tails any file that a hook names; a project_admin grants global targets | **Fixed.** See `docs/security-review.md` §9 for each fix. |
 
 ---
 
