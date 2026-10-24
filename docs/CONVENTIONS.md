@@ -93,9 +93,10 @@ a new token, when `.env` does not exist. The daemon reads:
 | `TERRARIUM_ARTIFACT_LISTEN` | `0.0.0.0:8081`. Empty: no artifact listener of its own, and the dashboard port serves `/a/...`. With a listener, the dashboard port does not serve artifacts. |
 | `TERRARIUM_HOST_LISTEN` | `auto`, the host agent dial-in: `0.0.0.0:8082` with TLS, `127.0.0.1:8082` without. Empty: no listener of its own; the main router still serves `/hosts/connect`. A plaintext bind to a non-loopback address logs an `INSECURE` warning. |
 | `TERRARIUM_HOST_TLS_CERT`, `TERRARIUM_HOST_TLS_KEY` | unset. Both set: the host listener speaks TLS with this PEM certificate chain and key (`just host::cert`). One alone stops the daemon at start. |
-| `TERRARIUM_PUBLIC_URL` | `http://localhost:8080`. The dashboard as the operator opens it, for the links in operator mail. `just host::install` also takes the host agent's `daemon_url` from its host. |
-| `TERRARIUM_ARTIFACT_PUBLIC_URL` | unset: the host of the request with the port of `TERRARIUM_ARTIFACT_LISTEN`. The artifact origin as a browser opens it, for signed artifact URLs. |
-| `TERRARIUM_WS_QUERY_TOKEN` | on. `0` (or `false`, `no`, `off`): refuse the bearer token in `?token=` on a WebSocket upgrade. Clients send it as the subprotocol `bearer.<token>`. |
+| `TERRARIUM_PUBLIC_URL` | unset (mail links use `http://localhost:8080`). The dashboard as the operator opens it, for the links in operator mail, `Version.url`, the cookie `Origin` check on WebSocket upgrades, and CORS on `/a/...`. `just host::install` also takes the host agent's `daemon_url` from its host. |
+| `TERRARIUM_ARTIFACT_PUBLIC_URL` | unset: the host of the request with the port of `TERRARIUM_ARTIFACT_LISTEN`. The artifact origin as a browser opens it, for signed artifact URLs and the dashboard CSP. |
+| `TERRARIUM_WS_QUERY_TOKEN` | `0`: refuse the bearer token in `?token=` on a WebSocket upgrade (`401`). `1` (or `true`, `yes`, `on`): take it, with a warning in the log. Clients send the token as the subprotocol `bearer.<token>`. |
+| `TERRARIUM_SESSION_TTL` | `12h`. The life of a dashboard session cookie: seconds, or a number with `s`, `m`, `h`, or `d`. |
 | `TERRARIUM_SSH` | `ssh`. The ssh binary for `ssh` targets. |
 | `TERRARIUM_INSECURE_AGENT_HEADER` | off. On: trust `X-Terrarium-Agent` on the Unix socket (tests only). |
 
@@ -137,3 +138,5 @@ The TCP listener asks for the bearer token on `/api/*` only. The dashboard
 files are public, because a browser cannot send a header when it loads a page.
 A WebSocket upgrade sends the token as the subprotocol `bearer.<token>`
 (`Sec-WebSocket-Protocol`), not in the URL ([api.md](api.md) §1).
+The dashboard uses a session cookie instead: `POST /api/session` trades the
+token for a signed `HttpOnly` cookie and a CSRF value ([api.md](api.md) §1.1).

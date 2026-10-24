@@ -70,12 +70,16 @@ Open <http://localhost:8080>. If you changed `TERRARIUM_PORT` in `.env`, use
 that port. The dashboard shows a token screen. Paste the value of
 `TERRARIUM_TOKEN`.
 
-The dashboard keeps the token in memory and in the `sessionStorage` of the
-tab. A reload keeps it. A new tab asks for it again. If you select
-**Remember on this device**, the dashboard also puts the token in
-`localStorage`. Then the token stays after you close the browser, and any
-script on the page can read it. Use this option only on a device that you
-trust. **sign out** in the sidebar removes every copy
+At sign-in, the dashboard trades the token for a session cookie
+(`POST /api/session`) and then drops the token. The cookie is `HttpOnly`,
+so no script on the page can read it. The dashboard keeps only the CSRF
+value, in memory and in the `sessionStorage` of the tab. A reload keeps the
+session. A new tab asks for the token again. If you select **Remember on this
+device**, the dashboard also puts the CSRF value in `localStorage`. Then a
+new tab stays signed in until the session ends. The CSRF value is not a
+credential without the cookie. The session ends after
+`TERRARIUM_SESSION_TTL` (default `12h`). **sign out** in the sidebar ends the
+session and removes every copy
 ([../dashboard/src/README.md](../dashboard/src/README.md)).
 
 Set `TERRARIUM_PUBLIC_URL` in `.env` to the dashboard URL as you open it.
@@ -283,18 +287,31 @@ repos. Use `t fleet apply --prune` and `--start` for that.
 
 ### 2.9 Write your own API client
 
-The TCP API needs `Authorization: Bearer <token>` on each request to
-`/api/*`. A browser cannot set this header on a WebSocket. So a WebSocket
-client sends the token as a subprotocol:
+A script uses the bearer token. Send `Authorization: Bearer <token>` on
+each request to `/api/*`. A browser cannot set this header on a WebSocket.
+So a WebSocket client sends the token as a subprotocol:
 `Sec-WebSocket-Protocol: bearer.<token>`. In a browser, that is
 `new WebSocket(url, ["bearer." + token])`. The daemon echoes the same
 subprotocol in its `101` answer.
 
-Do not put the token in the `?token=` query string. That form is
-deprecated, because a query string goes into proxy logs and browser
-history. The daemon logs a warning when a client uses it.
-`TERRARIUM_WS_QUERY_TOKEN=0` makes the daemon refuse it. See
-[api.md](api.md), section 1.
+A browser client uses a cookie session, as the dashboard does:
+
+1. Send `POST /api/session` with `Authorization: Bearer <token>`. The daemon
+   sets the `terrarium_session` cookie and answers
+   `{"csrf", "exp", "expires_at"}`.
+2. Drop the token. Keep the `csrf` value.
+3. Send `X-CSRF-Token: <csrf>` on each `POST`, `PUT`, `PATCH`, and `DELETE`.
+   Without it, the daemon answers `403`.
+4. Open a WebSocket with no subprotocol. The browser sends the cookie and
+   the page's `Origin`. The daemon refuses an `Origin` that is not the
+   dashboard origin.
+5. On a `401`, send `POST /api/session` again. `DELETE /api/session`
+   ends the session.
+
+Do not put the token in the `?token=` query string. A query string goes into
+proxy logs and browser history. The daemon refuses that form by default
+(`401`). `TERRARIUM_WS_QUERY_TOKEN=1` turns it back on for an old client,
+with a warning in the log. See [api.md](api.md), section 1.
 
 ## 3. Configuration directories
 

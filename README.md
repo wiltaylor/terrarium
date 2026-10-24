@@ -86,12 +86,17 @@ Security fixes from the review ([docs/security-review.md](docs/security-review.m
   only. Host tokens rotate, and a one-time enrol token keeps the
   long-lived token off the operator's clipboard.
 - The dashboard sanitizer and CSP (F3). DOMPurify cleans every rendered
-  HTML string, and the page has a Content-Security-Policy. The token goes
-  to `sessionStorage`, not `localStorage`, unless the operator selects "Remember on this
-  device".
+  HTML string. The daemon sends a Content-Security-Policy and other security
+  headers on every answer.
+- Dashboard sessions (F3). The dashboard trades the token for a signed
+  `HttpOnly` cookie (`POST /api/session`) and keeps only the CSRF value.
+  Mutating calls send `X-CSRF-Token`, and a WebSocket upgrade with the
+  cookie must send the dashboard `Origin`. `TERRARIUM_SESSION_TTL` sets the
+  cookie life (default `12h`).
 - WebSocket auth by subprotocol (F4). A client sends the token as
-  `Sec-WebSocket-Protocol: bearer.<token>`, not in the URL.
-  `TERRARIUM_WS_QUERY_TOKEN=0` refuses the old `?token=` form.
+  `Sec-WebSocket-Protocol: bearer.<token>`, not in the URL. The daemon
+  refuses the old `?token=` form by default. `TERRARIUM_WS_QUERY_TOKEN=1`
+  turns it back on.
 - Artifacts off the dashboard origin (F5), no login PTY log (F6), and a
   constant-time token compare (F7).
 
