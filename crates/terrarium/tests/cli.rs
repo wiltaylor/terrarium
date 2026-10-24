@@ -1,0 +1,368 @@
+//! The `terrarium` binary end to end:
+//!
+//! - operator mode over `HttpTransport`, against a stub daemon (axum) on a
+//!   Unix socket and on TCP: pagination, error mapping, exit codes, SSE;
+//! - agent mode over the runner tunnel, against a fake runner socket that
+//!   records each request line.
+
+#![allow(clippy::unwrap_used)]
+
+use std::io::{BufRead, BufReader, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+use std::sync::{Arc, Mutex};
+
+use axum::Json;
+use axum::extract::Query;
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::IntoResponse;
+use axum::routing::{get, post};
+use serde_json::{Value, json};
+
+fn temp_dir(tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("terrarium-cli-{tag}-{}", ulid::Ulid::new()));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn bin() -> Command {
+    let mut c = Command::new(env!("CARGO_BIN_EXE_terrarium"));
+    for k in [
+        "TERRARIUM_AGENT",
+        "TERRARIUM_SOCKET",
+        "TERRARIUM_URL",
+        "TERRARIUM_TOKEN",
+        "TERRARIUM_API_SOCKET",
+        "COLUMNS",
+    ] {
+        c.env_remove(k);
+    }
+    c
+}
+
+fn text(b: &[u8]) -> String {
+    String::from_utf8_lossy(b).into_owned()
+}
+
+/// A stub daemon: enough routes for pagination, errors, and SSE.
+fn stub() -> axum::Router {
+    async fn agents(
+        Query(q): Query<std::collections::HashMap<String, String>>,
+    ) -> impl IntoResponse {
+        let mut h = HeaderMap::new();
+        match q.get("cursor").map(String::as_str) {
+            None => {
+                h.insert("x-next-cursor", "A2".parse().unwrap());
+                (
+                    h,
+                    Json(
+                        json!([{"id": "A1", "name": "lead", "project": "terra", "harness": "claude", "status": "idle"}]),
+                    ),
+                )
+            }
+            Some(_) => (
+                h,
+                Json(
+                    json!([{"id": "A2", "name": "worker", "project": "terra", "harness": "pi", "status": "working"}]),
+                ),
+            ),
+        }
+    }
+    async fn refuse() -> impl IntoResponse {
+        (
+            StatusCode::FORBIDDEN,
+            Json(
+                json!({"error": {"code": "forbidden", "message": "`ops/dev` is outside project `terra`; write to `project:ops`"}}),
+            ),
+        )
+    }
+    async fn missing() -> impl IntoResponse {
+        (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": {"code": "not_found", "message": "no such API route"}})),
+        )
+    }
+    async fn events(headers: HeaderMap) -> axum::response::Response {
+        let sse = headers
+            .get("accept")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.contains("text/event-stream"));
+        if !sse {
+            return Json(json!([])).into_response();
+        }
+        let body = "id: 1\nevent: status\ndata: {\"seq\":1,\"kind\":\"status\",\"agent\":\"lead\",\"summary\":\"lead: starting -> idle\"}\n\n\
+                    : keepalive\n\n\
+                    id: 2\nevent: mail\ndata: {\"seq\":2,\"kind\":\"mail\",\"agent\":\"lead\",\"summary\":\"mail to lead\"}\n\n";
+        ([("content-type", "text/event-stream")], body).into_response()
+    }
+    axum::Router::new()
+        .route(
+            "/api/health",
+            get(|| async { Json(json!({"status": "ok", "version": "9.9.9", "uptime": 3700})) }),
+        )
+        .route("/api/agents", get(agents))
+        .route("/api/mail", post(refuse))
+        .route("/api/events", get(events))
+        .fallback(missing)
+}
+
+fn serve_unix(dir: &Path) -> PathBuf {
+    let socket = dir.join("api.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async move {
+            let l = tokio::net::UnixListener::from_std(listener).unwrap();
+            axum::serve(l, stub()).await.unwrap();
+        });
+    });
+    socket
+}
+
+fn run(socket: &Path, args: &[&str]) -> Output {
+    bin()
+        .arg("--socket")
+        .arg(socket)
+        .args(args)
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn operator_mode_over_the_unix_socket() {
+    let dir = temp_dir("unix");
+    let socket = serve_unix(&dir);
+
+    let o = run(&socket, &["daemon", "status"]);
+    assert!(o.status.success(), "{}", text(&o.stderr));
+    assert!(text(&o.stdout).starts_with("terrariumd 9.9.9 running at unix:"));
+    assert!(text(&o.stdout).contains("(up 1h1m)"));
+
+    // Pagination: both pages, in order.
+    let o = run(&socket, &["--json", "agent", "ls"]);
+    assert!(o.status.success(), "{}", text(&o.stderr));
+    let v: Value = serde_json::from_slice(&o.stdout).unwrap();
+    let ids: Vec<&str> = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["A1", "A2"]);
+    let o = run(&socket, &["agent", "ls"]);
+    let out = text(&o.stdout);
+    assert!(out.starts_with("ID  "), "{out}");
+    assert!(out.contains("lead") && out.contains("worker"), "{out}");
+
+    // A refusal: exit 3, the message verbatim.
+    let o = run(&socket, &["mail", "send", "ops/dev", "hi"]);
+    assert_eq!(o.status.code(), Some(3));
+    assert_eq!(
+        text(&o.stderr),
+        "terrarium: `ops/dev` is outside project `terra`; write to `project:ops` [forbidden]\n"
+    );
+    let o = run(&socket, &["--json", "mail", "send", "ops/dev", "hi"]);
+    assert_eq!(o.status.code(), Some(3));
+    let e: Value = serde_json::from_slice(&o.stderr).unwrap();
+    assert_eq!(e["error"]["code"], "forbidden");
+
+    // A route the daemon does not serve yet: exit 1 and a hint.
+    let o = run(&socket, &["-p", "terra", "mem", "search", "x"]);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(text(&o.stderr).contains("no such API route [not_found]"));
+    assert!(text(&o.stderr).contains("awaiting server"));
+
+    // Not available, and usage errors: exit 2.
+    let o = run(&socket, &["exec", "box", "--", "ls"]);
+    assert_eq!(o.status.code(), Some(2));
+    assert!(text(&o.stderr).contains("host agents arrive in a later phase"));
+    let o = run(&socket, &["board"]);
+    assert_eq!(o.status.code(), Some(2));
+    let o = run(&socket, &["card", "frobnicate"]);
+    assert_eq!(o.status.code(), Some(2));
+
+    // SSE follow: each event as it comes; the command ends with the stream.
+    let o = run(&socket, &["events", "--follow"]);
+    assert!(o.status.success(), "{}", text(&o.stderr));
+    let out = text(&o.stdout);
+    assert!(out.contains("lead: starting -> idle"), "{out}");
+    assert!(out.contains("mail to lead"), "{out}");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn operator_mode_over_tcp_sends_the_token() {
+    let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    std_listener.set_nonblocking(true).unwrap();
+    let addr = std_listener.local_addr().unwrap();
+    // The token is required, as on the daemon's TCP listener.
+    let app = axum::Router::new().route(
+        "/api/health",
+        get(|h: HeaderMap| async move {
+            if h.get("authorization").and_then(|v| v.to_str().ok()) != Some("Bearer t0ken") {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({"error": {"code": "unauthorized", "message": "a bearer token is needed"}})),
+                )
+                    .into_response();
+            }
+            Json(json!({"version": "9.9.9", "uptime": 5})).into_response()
+        }),
+    );
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async move {
+            let l = tokio::net::TcpListener::from_std(std_listener).unwrap();
+            axum::serve(l, app).await.unwrap();
+        });
+    });
+    let o = bin()
+        .env("TERRARIUM_URL", format!("http://{addr}"))
+        .env("TERRARIUM_TOKEN", "t0ken")
+        .args(["daemon", "status"])
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", text(&o.stderr));
+    assert!(text(&o.stdout).contains(&format!("running at http://{addr}")));
+    let o = bin()
+        .args([
+            "--url",
+            &format!("http://{addr}"),
+            "--token",
+            "wrong",
+            "daemon",
+            "status",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(3));
+    assert!(text(&o.stderr).contains("a bearer token is needed [unauthorized]"));
+    let o = bin()
+        .args(["--url", "https://nope", "daemon", "status"])
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(1));
+    assert!(text(&o.stderr).contains("bad daemon URL"));
+}
+
+/// A fake runner: answers `whoami` itself, answers `http` from `answer`,
+/// and records every request line.
+fn fake_runner(dir: &Path, answer: fn(&Value) -> Value) -> (PathBuf, Arc<Mutex<Vec<Value>>>) {
+    let socket = dir.join("agent.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let log = seen.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { break };
+            let mut w = stream.try_clone().unwrap();
+            let mut lines = BufReader::new(stream).lines();
+            while let Some(Ok(line)) = lines.next() {
+                let req: Value = serde_json::from_str(&line).unwrap();
+                log.lock().unwrap().push(req.clone());
+                let result = match req["method"].as_str() {
+                    Some("whoami") => json!({"agent": "01AGENT", "name": "worker",
+                        "project": "terra", "harness": "pi", "status": "idle"}),
+                    Some("http") => answer(&req["params"]),
+                    _ => Value::Null,
+                };
+                let mut reply = serde_json::to_vec(
+                    &json!({"type": "response", "id": req["id"], "result": result}),
+                )
+                .unwrap();
+                reply.push(b'\n');
+                w.write_all(&reply).unwrap();
+            }
+        }
+    });
+    (socket, seen)
+}
+
+#[test]
+fn agent_mode_tunnels_every_call_over_the_runner_socket() {
+    let dir = temp_dir("tunnel");
+    let (socket, seen) = fake_runner(&dir, |p| {
+        let cursor = p["query"]["cursor"].as_str();
+        match (p["method"].as_str(), p["path"].as_str(), cursor) {
+            (Some("GET"), Some("/api/projects/terra/cards"), None) => json!({
+                "status": 200, "headers": {"x-next-cursor": "2"},
+                "body": [{"id": "TER-1", "column": "ready", "title": "First"}]}),
+            (Some("GET"), Some("/api/projects/terra/cards"), Some(_)) => json!({
+                "status": 200, "headers": {},
+                "body": [{"id": "TER-2", "column": "ready", "title": "Second"}]}),
+            (Some("POST"), Some("/api/mail"), _) => json!({
+                "status": 403, "headers": {},
+                "body": {"error": {"code": "forbidden", "message": "outside your project"}}}),
+            _ => json!({"status": 404, "headers": {},
+                "body": {"error": {"code": "not_found", "message": "no such API route"}}}),
+        }
+    });
+    let agent = |args: &[&str]| {
+        bin()
+            .env("TERRARIUM_AGENT", "01AGENT")
+            .env("TERRARIUM_SOCKET", &socket)
+            // Agent mode ignores the operator socket.
+            .env("TERRARIUM_API_SOCKET", "/nonexistent/api.sock")
+            .args(args)
+            .output()
+            .unwrap()
+    };
+
+    let o = agent(&["card", "ls", "--unassigned", "--column", "ready"]);
+    assert!(o.status.success(), "{}", text(&o.stderr));
+    let out = text(&o.stdout);
+    assert!(out.contains("TER-1") && out.contains("TER-2"), "{out}");
+    {
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen[0]["method"], "whoami");
+        assert_eq!(
+            seen[1],
+            json!({"type": "request", "id": 1, "method": "http", "params": {
+                "method": "GET", "path": "/api/projects/terra/cards",
+                "query": {"column": "ready", "unassigned": "true"}}})
+        );
+        assert_eq!(seen[2]["params"]["query"]["cursor"], "2");
+    }
+
+    let o = agent(&["mail", "send", "ops/dev", "-s", "hi", "body text"]);
+    assert_eq!(o.status.code(), Some(3));
+    assert_eq!(
+        text(&o.stderr),
+        "terrarium: outside your project [forbidden]\n"
+    );
+    {
+        let seen = seen.lock().unwrap();
+        let last = seen.last().unwrap();
+        assert_eq!(
+            last["params"],
+            json!({"method": "POST", "path": "/api/mail",
+                   "body": {"to": "ops/dev", "subject": "hi", "body": "body text"}})
+        );
+    }
+
+    let o = agent(&["--json", "whoami"]);
+    assert!(o.status.success());
+    let me: Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(me["project"], "terra");
+
+    // A dead runner socket is a transport error: exit 1.
+    let o = bin()
+        .env("TERRARIUM_AGENT", "01AGENT")
+        .env("TERRARIUM_SOCKET", dir.join("gone.sock"))
+        .args(["-p", "terra", "board"])
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(1));
+    assert!(text(&o.stderr).contains("cannot connect to the runner"));
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn hook_stays_quiet_and_exits_zero() {
+    let o = bin().args(["hook", "Stop"]).output().unwrap();
+    assert!(o.status.success());
+    assert!(text(&o.stderr).contains("TERRARIUM_SOCKET is not set"));
+}

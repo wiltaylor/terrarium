@@ -21,6 +21,8 @@ serde_json.workspace = true
 clap.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
 
 [dev-dependencies]
 axum.workspace = true

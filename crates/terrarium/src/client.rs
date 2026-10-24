@@ -1,33 +1,18 @@
-//! An HTTP client for the daemon API, over the Unix socket or TCP.
+//! The HTTP transport: HTTP/1.1 to the daemon, over the Unix socket or TCP.
+//! It also opens the two streams that the runner tunnel cannot carry:
+//! Server-Sent Events (`--follow`) and the PTY WebSocket (`agent attach`).
 
 use std::path::PathBuf;
 
-use http_body_util::{BodyExt, Empty};
-use hyper::body::Bytes;
-use hyper::{Request, StatusCode, Uri, header};
+use anyhow::Context;
+use http_body_util::{BodyExt, Full};
+use hyper::body::{Bytes, Incoming};
+use hyper::{Request, Response, Uri, header};
 use hyper_util::rt::TokioIo;
-use serde::de::DeserializeOwned;
+use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncWrite};
 
-#[derive(Debug, thiserror::Error)]
-pub enum ClientError {
-    #[error("cannot reach the daemon at {endpoint}: {source}")]
-    Connect {
-        endpoint: String,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("bad daemon URL `{0}`: use http://host:port")]
-    BadUrl(String),
-    #[error("HTTP error: {0}")]
-    Http(#[from] hyper::Error),
-    #[error("cannot build the request: {0}")]
-    Request(#[from] hyper::http::Error),
-    #[error("the daemon answered {status}: {body}")]
-    Status { status: StatusCode, body: String },
-    #[error("cannot decode the daemon's answer: {0}")]
-    Decode(#[from] serde_json::Error),
-}
+use crate::transport::{ApiRequest, ApiResponse, BoxFuture, Transport, decode_body};
 
 /// Where the daemon is.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,21 +28,32 @@ pub enum Endpoint {
 
 impl Endpoint {
     /// Parse an `http://host[:port][/base]` URL.
-    pub fn from_url(url: &str) -> Result<Self, ClientError> {
-        let uri: Uri = url
-            .parse()
-            .map_err(|_| ClientError::BadUrl(url.to_owned()))?;
+    pub fn from_url(url: &str) -> anyhow::Result<Self> {
+        let bad = || anyhow::anyhow!("bad daemon URL `{url}`: use http://host:port");
+        let uri: Uri = url.parse().map_err(|_| bad())?;
         if uri.scheme_str() != Some("http") {
-            return Err(ClientError::BadUrl(url.to_owned()));
+            return Err(bad());
         }
-        let host = uri
-            .host()
-            .ok_or_else(|| ClientError::BadUrl(url.to_owned()))?;
+        let host = uri.host().ok_or_else(bad)?;
         let port = uri.port_u16().unwrap_or(80);
         Ok(Self::Tcp {
             authority: format!("{host}:{port}"),
             base: uri.path().trim_end_matches('/').to_owned(),
         })
+    }
+
+    fn host(&self) -> &str {
+        match self {
+            Self::Unix(_) => "localhost",
+            Self::Tcp { authority, .. } => authority,
+        }
+    }
+
+    fn base(&self) -> &str {
+        match self {
+            Self::Unix(_) => "",
+            Self::Tcp { base, .. } => base,
+        }
     }
 }
 
@@ -70,74 +66,196 @@ impl std::fmt::Display for Endpoint {
     }
 }
 
+/// A connected byte stream to the daemon.
+pub trait Stream: AsyncRead + AsyncWrite + Unpin + Send + 'static {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> Stream for T {}
+
 #[derive(Debug, Clone)]
-pub struct Client {
+pub struct HttpTransport {
     pub endpoint: Endpoint,
     token: Option<String>,
 }
 
-impl Client {
+impl HttpTransport {
     pub fn new(endpoint: Endpoint, token: Option<String>) -> Self {
         Self { endpoint, token }
     }
 
-    /// `GET path` and decode the JSON body.
-    pub async fn get_json<T: DeserializeOwned>(&self, path: &str) -> Result<T, ClientError> {
-        let body = self.get(path).await?;
-        Ok(serde_json::from_slice(&body)?)
+    async fn connect(&self) -> anyhow::Result<Box<dyn Stream>> {
+        let ctx = || format!("cannot reach the daemon at {}", self.endpoint);
+        Ok(match &self.endpoint {
+            Endpoint::Unix(socket) => Box::new(
+                tokio::net::UnixStream::connect(socket)
+                    .await
+                    .with_context(ctx)?,
+            ),
+            Endpoint::Tcp { authority, .. } => Box::new(
+                tokio::net::TcpStream::connect(authority.as_str())
+                    .await
+                    .with_context(ctx)?,
+            ),
+        })
     }
 
-    /// `GET path`. A non-2xx answer is an error.
-    pub async fn get(&self, path: &str) -> Result<Bytes, ClientError> {
-        let connect_err = |source| ClientError::Connect {
-            endpoint: self.endpoint.to_string(),
-            source,
-        };
-        match &self.endpoint {
-            Endpoint::Unix(socket) => {
-                let stream = tokio::net::UnixStream::connect(socket)
-                    .await
-                    .map_err(connect_err)?;
-                self.send(stream, "localhost", path).await
-            }
-            Endpoint::Tcp { authority, base } => {
-                let stream = tokio::net::TcpStream::connect(authority.as_str())
-                    .await
-                    .map_err(connect_err)?;
-                self.send(stream, authority, &format!("{base}{path}")).await
-            }
-        }
-    }
-
-    async fn send<S>(&self, stream: S, host: &str, path: &str) -> Result<Bytes, ClientError>
-    where
-        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-    {
-        let (mut sender, conn) =
-            hyper::client::conn::http1::handshake(TokioIo::new(stream)).await?;
+    /// Send one request and give the raw response, with its body unread.
+    async fn raw(&self, req: &ApiRequest, accept: &str) -> anyhow::Result<Response<Incoming>> {
+        let stream = self.connect().await?;
+        let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
+            .await
+            .context("HTTP handshake with the daemon failed")?;
         tokio::spawn(async move {
             // The connection ends when the response is read; errors surface
             // through the request.
             let _ = conn.await;
         });
-        let mut req = Request::get(path)
-            .header(header::HOST, host)
-            .header(header::ACCEPT, "application/json");
+        let uri = format!("{}{}", self.endpoint.base(), req.path_and_query());
+        let mut builder = Request::builder()
+            .method(req.method.as_str())
+            .uri(uri)
+            .header(header::HOST, self.endpoint.host())
+            .header(header::ACCEPT, accept);
         if let Some(token) = &self.token {
-            req = req.header(header::AUTHORIZATION, format!("Bearer {token}"));
+            builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
         }
+        let body = match &req.body {
+            Some(v) => {
+                builder = builder.header(header::CONTENT_TYPE, "application/json");
+                Bytes::from(serde_json::to_vec(v)?)
+            }
+            None => Bytes::new(),
+        };
         let resp = sender
-            .send_request(req.body(Empty::<Bytes>::new())?)
-            .await?;
-        let status = resp.status();
-        let body = resp.into_body().collect().await?.to_bytes();
-        if !status.is_success() {
-            return Err(ClientError::Status {
+            .send_request(builder.body(Full::new(body))?)
+            .await
+            .context("the daemon did not answer")?;
+        Ok(resp)
+    }
+
+    async fn round_trip(&self, req: ApiRequest) -> anyhow::Result<ApiResponse> {
+        let resp = self.raw(&req, "application/json").await?;
+        let status = resp.status().as_u16();
+        let headers = resp
+            .headers()
+            .iter()
+            .filter_map(|(k, v)| Some((k.as_str().to_owned(), v.to_str().ok()?.to_owned())))
+            .collect();
+        let body = resp
+            .into_body()
+            .collect()
+            .await
+            .context("cannot read the daemon's answer")?
+            .to_bytes();
+        Ok(ApiResponse {
+            status,
+            headers,
+            body: decode_body(&body),
+        })
+    }
+
+    /// Read Server-Sent Events. `on_event` gets each `data:` JSON. It
+    /// returns `false` to stop. A non-2xx answer comes back as a response.
+    pub async fn sse(
+        &self,
+        req: &ApiRequest,
+        mut on_event: impl FnMut(Value) -> anyhow::Result<bool>,
+    ) -> anyhow::Result<Option<ApiResponse>> {
+        let resp = self.raw(req, "text/event-stream").await?;
+        let status = resp.status().as_u16();
+        if !resp.status().is_success() {
+            let body = resp.into_body().collect().await?.to_bytes();
+            return Ok(Some(ApiResponse {
                 status,
-                body: String::from_utf8_lossy(&body).into_owned(),
-            });
+                headers: Default::default(),
+                body: decode_body(&body),
+            }));
         }
-        Ok(body)
+        let mut body = resp.into_body();
+        let mut parser = SseParser::default();
+        while let Some(frame) = body.frame().await {
+            let frame = frame.context("the event stream broke")?;
+            let Some(chunk) = frame.data_ref() else {
+                continue;
+            };
+            for data in parser.push(chunk) {
+                let event = serde_json::from_str(&data).unwrap_or(Value::String(data));
+                if !on_event(event)? {
+                    return Ok(None);
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Open a WebSocket on `path`, for `agent attach`.
+    pub async fn websocket(
+        &self,
+        path: &str,
+    ) -> anyhow::Result<tokio_tungstenite::WebSocketStream<Box<dyn Stream>>> {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let url = format!(
+            "ws://{}{}{}",
+            self.endpoint.host(),
+            self.endpoint.base(),
+            path
+        );
+        let mut req = url.into_client_request()?;
+        if let Some(token) = &self.token {
+            req.headers_mut()
+                .insert(header::AUTHORIZATION, format!("Bearer {token}").parse()?);
+        }
+        let stream = self.connect().await?;
+        let (ws, _) = tokio_tungstenite::client_async(req, stream)
+            .await
+            .map_err(|e| match e {
+                tokio_tungstenite::tungstenite::Error::Http(resp) => {
+                    let body = resp.body().as_deref().map(decode_body).unwrap_or_default();
+                    let msg = body["error"]["message"]
+                        .as_str()
+                        .map_or_else(|| body.to_string(), str::to_owned);
+                    anyhow::anyhow!("the daemon refused the attach ({}): {msg}", resp.status())
+                }
+                e => anyhow::Error::new(e).context("the WebSocket handshake failed"),
+            })?;
+        Ok(ws)
+    }
+}
+
+impl Transport for HttpTransport {
+    fn send(&self, req: ApiRequest) -> BoxFuture<'_, anyhow::Result<ApiResponse>> {
+        Box::pin(self.round_trip(req))
+    }
+
+    fn describe(&self) -> String {
+        self.endpoint.to_string()
+    }
+}
+
+/// An incremental parser for `text/event-stream`. It gives the `data` of
+/// each complete event.
+#[derive(Debug, Default)]
+pub struct SseParser {
+    buf: Vec<u8>,
+    data: Vec<String>,
+}
+
+impl SseParser {
+    pub fn push(&mut self, chunk: &[u8]) -> Vec<String> {
+        self.buf.extend_from_slice(chunk);
+        let mut out = Vec::new();
+        while let Some(pos) = self.buf.iter().position(|&b| b == b'\n') {
+            let line: Vec<u8> = self.buf.drain(..=pos).collect();
+            let line = String::from_utf8_lossy(&line);
+            let line = line.trim_end_matches(['\n', '\r']);
+            if line.is_empty() {
+                if !self.data.is_empty() {
+                    out.push(self.data.join("\n"));
+                    self.data.clear();
+                }
+            } else if let Some(d) = line.strip_prefix("data:") {
+                self.data.push(d.strip_prefix(' ').unwrap_or(d).to_owned());
+            }
+        }
+        out
     }
 }
 
@@ -145,7 +263,7 @@ impl Client {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use axum::routing::get;
+    use crate::transport::Method;
 
     #[test]
     fn urls_parse() {
@@ -167,56 +285,24 @@ mod tests {
         assert!(Endpoint::from_url("not a url").is_err());
     }
 
-    fn app() -> axum::Router {
-        axum::Router::new()
-            .route("/api/health", get(|| async { r#"{"ok":true}"# }))
-            .route(
-                "/api/auth",
-                get(|headers: axum::http::HeaderMap| async move {
-                    headers
-                        .get("authorization")
-                        .map(|v| v.to_str().unwrap_or_default().to_owned())
-                        .unwrap_or_default()
-                }),
-            )
-    }
-
-    #[tokio::test]
-    async fn talks_over_a_unix_socket() {
-        let dir = std::env::temp_dir().join(format!("terrarium-cli-{}", ulid::Ulid::new()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let socket = dir.join("api.sock");
-        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
-        tokio::spawn(async move { axum::serve(listener, app()).await });
-
-        let client = Client::new(Endpoint::Unix(socket), None);
-        let v: serde_json::Value = client.get_json("/api/health").await.unwrap();
-        assert_eq!(v["ok"], true);
-        assert!(matches!(
-            client.get("/missing").await,
-            Err(ClientError::Status { status, .. }) if status == StatusCode::NOT_FOUND
-        ));
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[tokio::test]
-    async fn talks_over_tcp_with_a_token() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move { axum::serve(listener, app()).await });
-
-        let endpoint = Endpoint::from_url(&format!("http://{addr}")).unwrap();
-        let client = Client::new(endpoint, Some("t0ken".into()));
-        let body = client.get("/api/auth").await.unwrap();
-        assert_eq!(&body[..], b"Bearer t0ken");
+    #[test]
+    fn sse_parses_split_chunks() {
+        let mut p = SseParser::default();
+        assert!(p.push(b"id: 1\nevent: status\nda").is_empty());
+        assert_eq!(
+            p.push(b"ta: {\"seq\":1}\n\n: keepalive\n\n"),
+            vec!["{\"seq\":1}"]
+        );
+        assert_eq!(p.push(b"data: a\r\ndata: b\r\n\r\n"), vec!["a\nb"]);
     }
 
     #[tokio::test]
     async fn a_missing_socket_is_a_connect_error() {
-        let client = Client::new(Endpoint::Unix("/nonexistent/api.sock".into()), None);
-        assert!(matches!(
-            client.get("/api/health").await,
-            Err(ClientError::Connect { .. })
-        ));
+        let t = HttpTransport::new(Endpoint::Unix("/nonexistent/api.sock".into()), None);
+        let err = t
+            .send(ApiRequest::new(Method::Get, "/api/health"))
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("cannot reach the daemon"));
     }
 }
