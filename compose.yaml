@@ -37,6 +37,7 @@ services:
       - ./projects:/etc/terrarium/projects
       - ./agents:/etc/terrarium/agents
       - ./targets:/etc/terrarium/targets
+      - ./fleets:/etc/terrarium/fleets           # *.toml fleet files, auto-applied at start and on reload
       - ./config/tls:/etc/terrarium/tls:ro   # `just host::cert <name>` writes here
     security_opt:
       - seccomp:docker/seccomp-bwrap.json   # user namespaces for bwrap (§11)

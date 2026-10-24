@@ -16,3 +16,5 @@ dashboard/dist/
 # Python
 __pycache__/
 .venv/
+/fleets/*
+!/fleets/README.md
