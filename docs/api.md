@@ -60,7 +60,7 @@ the bearer token; nothing changes for it.
 | Endpoint | Auth | Answer |
 |---|---|---|
 | `POST /api/session` | `Authorization: Bearer <token>` only (not the cookie) | `201 {"csrf", "exp", "expires_at"}` and `Set-Cookie` |
-| `DELETE /api/session` | none | `204` and a `Set-Cookie` that clears the cookie |
+| `DELETE /api/session` | none without a session cookie; with one, `X-CSRF-Token` of that session | `204` and a `Set-Cookie` that clears the cookie |
 
 ```
 Set-Cookie: terrarium_session=v1.<exp>.<nonce>.<sig>; Path=/; Max-Age=<ttl>; HttpOnly; SameSite=Strict[; Secure]
@@ -77,6 +77,17 @@ Set-Cookie: terrarium_session=v1.<exp>.<nonce>.<sig>; Path=/; Max-Age=<ttl>; Htt
   value is an HMAC of the nonce with the same key. To end every session,
   delete or replace `session.key` and restart the daemon. A session cannot
   be ended alone before `exp`; `DELETE` clears the browser's copy.
+- `DELETE /api/session` does not use the auth of the other routes. It
+  looks at the cookie itself, so that a logout from another site (logout
+  CSRF) fails:
+
+  | Request | Answer |
+  |---|---|
+  | No `terrarium_session` cookie, with or without `Authorization: Bearer` | `204` and the clearing `Set-Cookie`. A client that lost its cookie can log out again. |
+  | A valid session cookie and the right `X-CSRF-Token` | `204` and the clearing `Set-Cookie` |
+  | A valid session cookie, and no `X-CSRF-Token` or a wrong one (the token of another session too) | `403 forbidden`, no `Set-Cookie`. The cookie stays. |
+  | A cookie that is wrong, from another key, or past `exp` | `204` and the clearing `Set-Cookie`. It is no session, so to clear it ends nothing. |
+
 - The answers carry `Cache-Control: no-store`. The Unix socket has no
   sessions (`404 not_found`).
 

@@ -283,16 +283,39 @@ pub async fn create(
     ))
 }
 
-/// `DELETE /api/session`: clear the cookie. It needs no auth: clearing a
-/// cookie proves nothing, and `SameSite=Strict` keeps other sites out.
+/// `DELETE /api/session`: clear the cookie. The auth middleware lets it
+/// through, so that a client that lost its cookie can still log out.
+///
+/// - No cookie (a bearer client, or a browser that has no session): `204`
+///   and the clearing `Set-Cookie`.
+/// - A valid session cookie: it must send `X-CSRF-Token` of that session,
+///   or the answer is `403` and the cookie stays. This stops a logout CSRF.
+/// - A cookie that is wrong or past `exp`: `204`. It is no session, so to
+///   clear it ends nothing.
 pub async fn delete(
     sessions: Option<Extension<Arc<Sessions>>>,
     req: Request,
 ) -> ApiResult<Response> {
-    if sessions.is_none() {
+    let Some(Extension(sessions)) = sessions else {
         return Err(no_sessions());
+    };
+    let headers = req.headers();
+    if let Some(cookie) = cookie_value(headers, COOKIE)
+        && let Some(s) = sessions.key.verify(cookie, chrono::Utc::now().timestamp())
+    {
+        let ok = headers
+            .get(CSRF_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|t| s.csrf_matches(t));
+        if !ok {
+            return Err(ApiError::new(
+                Code::Forbidden,
+                "DELETE /api/session with the session cookie must send X-CSRF-Token with the \
+                 csrf value of POST /api/session",
+            ));
+        }
     }
-    let secure = is_https(req.uri().scheme_str(), req.headers());
+    let secure = is_https(req.uri().scheme_str(), headers);
     Ok(with_cookie(
         StatusCode::NO_CONTENT.into_response(),
         &set_cookie("", 0, secure),

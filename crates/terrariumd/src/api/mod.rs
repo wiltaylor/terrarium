@@ -426,7 +426,8 @@ async fn require_token(
     if !req.uri().path().starts_with("/api") {
         return next.run(req).await;
     }
-    // Clearing the cookie needs no proof (session::delete).
+    // `session::delete` checks a cookie itself: with no cookie, a logout
+    // needs no proof; with a session cookie, it needs `X-CSRF-Token`.
     if req.uri().path() == "/api/session" && req.method() == axum::http::Method::DELETE {
         return next.run(req).await;
     }
@@ -1101,6 +1102,86 @@ mod tests {
         // The Unix socket has no sessions.
         let r = send(unix_router(s.clone()), "POST", "/api/session", &[]).await;
         assert_eq!(r.status(), StatusCode::NOT_FOUND);
+    }
+
+    fn clears_cookie(r: &Response) -> bool {
+        let set = hdr(r, "set-cookie");
+        set.starts_with("terrarium_session=;") && set.contains("Max-Age=0")
+    }
+
+    /// Logout CSRF: with the session cookie, `DELETE /api/session` needs
+    /// the csrf token, and a refusal keeps the cookie.
+    #[tokio::test]
+    async fn session_delete_with_cookie_needs_csrf() {
+        let s = state();
+        let app = || session_app(&s, KEY, None);
+        let (cookie, csrf) = login(app()).await;
+        for headers in [
+            vec![("cookie", cookie.as_str())],
+            vec![("cookie", cookie.as_str()), ("x-csrf-token", "nope")],
+        ] {
+            let r = send(app(), "DELETE", "/api/session", &headers).await;
+            assert_eq!(r.status(), StatusCode::FORBIDDEN);
+            assert!(r.headers().get("set-cookie").is_none());
+            let body = r.into_body().collect().await.unwrap().to_bytes();
+            assert!(String::from_utf8_lossy(&body).contains("X-CSRF-Token"));
+        }
+        // The cookie still works.
+        let r = send(app(), "GET", "/api/health", &[("cookie", &cookie)]).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        // The csrf token of another session does not do.
+        let (_, other) = login(app()).await;
+        let r = send(
+            app(),
+            "DELETE",
+            "/api/session",
+            &[("cookie", &cookie), ("x-csrf-token", &other)],
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        // The right token clears it.
+        let r = send(
+            app(),
+            "DELETE",
+            "/api/session",
+            &[("cookie", &cookie), ("x-csrf-token", &csrf)],
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::NO_CONTENT);
+        assert!(clears_cookie(&r), "{}", hdr(&r, "set-cookie"));
+        assert_eq!(hdr(&r, "cache-control"), "no-store");
+    }
+
+    /// A client that lost its cookie can still log out: no cookie, `204`.
+    #[tokio::test]
+    async fn session_delete_without_cookie_is_idempotent() {
+        let s = state();
+        let app = || session_app(&s, KEY, None);
+        for _ in 0..2 {
+            let r = send(app(), "DELETE", "/api/session", &[]).await;
+            assert_eq!(r.status(), StatusCode::NO_CONTENT);
+            assert!(clears_cookie(&r), "{}", hdr(&r, "set-cookie"));
+        }
+        // A cookie that is no session (another key) ends nothing: `204`.
+        let (stale, _) = login(session_app(&s, [9; 32], None)).await;
+        let r = send(app(), "DELETE", "/api/session", &[("cookie", &stale)]).await;
+        assert_eq!(r.status(), StatusCode::NO_CONTENT);
+        assert!(clears_cookie(&r));
+    }
+
+    /// The CLI logs out with the bearer token and no cookie: `204`.
+    #[tokio::test]
+    async fn session_delete_with_bearer_and_no_cookie() {
+        let s = state();
+        let r = send(
+            session_app(&s, KEY, None),
+            "DELETE",
+            "/api/session",
+            &[("authorization", "Bearer secret")],
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::NO_CONTENT);
+        assert!(clears_cookie(&r));
     }
 
     #[tokio::test]
