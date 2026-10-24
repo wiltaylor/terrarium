@@ -91,6 +91,8 @@ a new token, when `.env` does not exist. The daemon reads:
 | `TERRARIUM_HARNESS_HOME` | `/auth/<harness>`. Override as `claude=/path,codex=/path`. |
 | `TERRARIUM_CLI`        | `terrarium` next to `terrariumd`, else on `PATH`. The sandbox binds it at `/opt/terrarium/bin/terrarium`. |
 | `TERRARIUM_ARTIFACT_LISTEN` | `0.0.0.0:8081`. Empty: no artifact listener of its own. |
+| `TERRARIUM_HOST_LISTEN` | `0.0.0.0:8082`, the host agent dial-in. Empty: no listener of its own; the main router still serves `/hosts/connect`. |
+| `TERRARIUM_SSH` | `ssh`. The ssh binary for `ssh` targets. |
 | `TERRARIUM_INSECURE_AGENT_HEADER` | off. On: trust `X-Terrarium-Agent` on the Unix socket (tests only). |
 
 ### The runtime directory

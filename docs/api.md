@@ -6,7 +6,18 @@ the dashboard, and (later) the agent runner. The code is in
 `crates/terrariumd/tests/` exercise each group. Change this file in the same
 change as the code.
 
-The design is in [PLAN.md](PLAN.md) §12 to §15, and §17.
+The design is in [PLAN.md](PLAN.md) §12 to §17, and §19.
+
+Sections: [1 Transports](#1-transports-and-callers) ·
+[2 Conventions](#2-conventions) · [3 Roles](#3-roles-and-rules) ·
+[4 System](#4-system) · [5 Projects and repos](#5-projects) ·
+[6 Agents](#6-agents) · [7 Mail](#7-mail) · [8 Board](#8-board) ·
+[9 Events](#9-events) · [10 Memory](#10-memory-graph) · [11 Wiki](#11-wiki) ·
+[12 Artifacts](#12-artifacts) · [13 Versions](#13-versions) ·
+[14 Not in this phase](#14-not-in-this-phase) ·
+[15 Notes for clients](#15-notes-for-clients) ·
+[16 Subscriptions and usage](#16-subscriptions-and-usage) ·
+[17 Targets, hosts, and exec](#17-targets-host-agents-and-exec-sessions).
 
 ## 1. Transports and callers
 
@@ -212,7 +223,9 @@ Sync rules:
 
 ### `GET /api/targets` and `GET /api/hosts`
 
-Targets and host agents are in §17.
+Both answer the real lists: the targets from the files and the API, and
+the registered host agents with their live link state. The shapes and the
+rules are in §17.
 
 ### `GET /api/audit`
 
@@ -865,7 +878,7 @@ three ways:
 | Query | Meaning |
 |---|---|
 | `since` | A `seq`, an event ID, or `latest`. Only later events come. Default: 0, the whole log. `latest` skips the backlog: only events after the newest `seq` at connect time come. |
-| `live` | `1`: the same as `since=latest`. It wins over `since`, a cursor, and `Last-Event-ID`. |
+| `live` | `1` or `true`: the same as `since=latest`. It wins over `since`, a cursor, and `Last-Event-ID`. `0`, `false`, or empty: off. Another value is `400`. |
 | `kind` | One kind. |
 | `project` | Firehose only: one project. |
 | `agent` | Firehose only: an agent key or ULID. A ULID works after the agent is deleted. |
@@ -1313,14 +1326,14 @@ Plans, quota probes, local accounting, the quota policy, and the login
 wizard (PLAN §16). The code is in `crates/terrariumd/src/api/subscriptions.rs`,
 `api/usage.rs`, `store/subscriptions.rs`, `store/usage.rs`, `probes/`,
 `usage_collector.rs`, `quota_policy.rs`, and `login_session.rs`. The tests
-are in `crates/terrariumd/tests/subscriptions.rs`.
+are in `crates/terrariumd/tests/subscriptions.rs` and `tests/usage_cards.rs`.
 
 ### 16.1 Shapes
 
 A subscription:
 
 ```json
-{"name":"anthropic-max","provider":"anthropic","plan":"Max 20x","harnesses":["claude","pi"],
+{"name":"anthropic-max","provider":"anthropic","plan":"Max 20x","harnesses":["claude"],
  "probe":"anthropic-oauth-usage","alert_at":80,"source":"file","login_status":"logged_in",
  "verified_at":"...","probe_status":"ok","last_probe_at":"...","last_success_at":"...",
  "created_at":"...","updated_at":"...",
@@ -1353,9 +1366,29 @@ A usage point (`GET /api/usage`):
  "input_tokens":4,"output_tokens":55,"cache_read":36712,"cache_write":36983,"messages":2,"turns":1}
 ```
 
-`key` is the value of the `group` column, when the series is split.
-`messages` counts API responses; `turns` counts distinct turns (the `seq` of
-the agent's `turn_start` event at the time of the response).
+`key` is absent when the series is not split. With `group`, it is the
+value of that column: the subscription name, the project name, the agent
+**ULID** (not the name; the ULID stays when the agent is deleted), or the
+model. `messages` counts API responses; `turns` counts distinct turns (the
+`seq` of the agent's `turn_start` event at the time of the response).
+
+With `group=card`, `key` is the card ID and the point also has the card's
+`title`. Samples with no card make points with no `key` and no `title`:
+
+```json
+{"bucket":"2026-10-24T00:00:00Z","key":"TER-42","title":"Write the parser",
+ "input_tokens":30,"output_tokens":12,"cache_read":0,"cache_write":0,"messages":2,"turns":1}
+```
+
+Card attribution. The collector gives each sample the card that the
+sample's agent has in `in_progress`, assigned to itself, at the time the
+collector stores the sample. When the agent has more than one such card,
+the card with the newest `updated_at` wins. When it has none, the sample
+has no card. The collector caches the card of each agent. Each `card`
+event that names the agent (as the event's agent, `assignee`, or
+`previous`) clears the agent's cache entry, so a claim, a move, or a
+reassignment applies from the next sample. Samples stored before a change
+keep their card.
 
 ### 16.2 Rules
 
@@ -1384,17 +1417,18 @@ the agent's `turn_start` event at the time of the response).
 | `GET /api/subscriptions/{name}` | | One subscription. |
 | `DELETE /api/subscriptions/{name}` | | `204`. `409 file_managed` for a file subscription. |
 | `GET /api/subscriptions/{name}/quota` | `?since=` (RFC 3339, default 24 h ago), `?window=`, `?limit=` (default 1000) | Array of samples, oldest first: `{subscription, window, used_pct, resets_at, raw, at}`. `raw` is the provider's window object. |
-| `POST /api/subscriptions/{name}/probe` | | `{subscription, probe_status, error?, windows}`. A failed probe is still `200`. |
-| `POST /api/subscriptions/{name}/verify` | | `{subscription, status}`: the harness status command runs against the shared home and sets `login_status` (and `plan`, when the subscription has none). A stored API key counts as logged in. |
-| `POST /api/subscriptions/{name}/logout` | | Runs `claude auth logout`, `codex logout`, or `copilot logout` against the shared home; `login_status` becomes `missing`. pi has no logout command: `422 invalid`. |
+| `POST /api/subscriptions/{name}/probe` | | `{subscription, probe_status, error?, windows}`. Here `subscription` is the **name** only, not the object. A failed probe is still `200`. |
+| `POST /api/subscriptions/{name}/verify` | | `{subscription, status}`. Here `subscription` is the **full** subscription (§16.1), after the check. `status` is `{kind, harness, provider, pi_provider?, logged_in, plan?, detail?}`. The harness status command runs against the shared home and sets `login_status` (and `plan`, when the subscription has none). A stored API key counts as logged in: `status` is then `{logged_in: true, detail}`. |
+| `POST /api/subscriptions/{name}/logout` | | The subscription (§16.1), with `login_status` `missing`. Runs `claude auth logout`, `codex logout`, or `copilot logout` against the shared home. pi has no logout command: `422 invalid`. |
 | `POST /api/subscriptions/{name}/api-key` | `{provider, key, base_url?, models?}` | The subscription, without the key. See §16.5. |
 | `GET /api/subscriptions/detect` | | Logins found in the harness homes that no subscription covers (same provider, and the harness is in `harnesses`): `[{kind, harness, provider, pi_provider?, logged_in, plan?, detail?, suggested}]`. `suggested` is a subscription definition. |
 | `POST /api/subscriptions/login` | `{kind, provider?, name?}` | `201` with the login session (§16.4). |
 | `GET /api/subscriptions/login/{id}` | | The login session. |
-| `DELETE /api/subscriptions/login/{id}` | | `202`; the session becomes `cancelled`. |
+| `DELETE /api/subscriptions/login/{id}` | | `202`; the session becomes `cancelled`. `409 not_running` when the session ended (also when it is `done`). |
 | `POST /api/subscriptions/login/{id}/input` | `{code}` | `204`. Types the code and Enter into the flow. `409 not_running` when the session ended. |
 | `GET /api/subscriptions/login/{id}/pty` | WebSocket | The login terminal, with the protocol of §6.5. |
-| `GET /api/usage` | `?subscription=&project=&agent=&model=&since=&until=&bucket=hour\|day&group=subscription\|project\|agent\|model` | Array of usage points, oldest first. `since` defaults to 24 h ago. `agent` is an agent key (§2.2). |
+| `GET /api/usage` | `?subscription=&project=&agent=&model=&card=&since=&until=&bucket=hour\|day&group=subscription\|project\|agent\|model\|card` | Array of usage points, oldest first. `since` defaults to 24 h ago. `agent` is an agent key (§2.2). `card` is a card ID, in any case. |
+| `GET /api/cards/{id}/usage` | `?since=&until=` (default: all time) | The usage of one card (below). The caller must be able to read the card's project. `404 not_found` for an unknown card. |
 | `GET /api/usage/me` | `?agent=` (the operator only) | The caller's subscription and its share today (below). |
 | `GET /api/usage/project` | `?project=` (default: the caller's), `?since=` (default: the start of the UTC day) | The per-agent split (below). |
 | `POST /api/agents/{id}/status` | `{status, note?}` | The stored `self_report` event. §16.6. |
@@ -1426,6 +1460,20 @@ agents on the subscription today, by local accounting.
 
 Agents with no usage are in the list with zero totals and no `share_pct`.
 
+`GET /api/cards/{id}/usage`:
+
+```json
+{"card":"TER-42","title":"Write the parser","project":"p",
+ "total":{"input_tokens":30,"output_tokens":12,"cache_read":0,"cache_write":0,"messages":2,"turns":1},
+ "models":[{"model":"claude-opus-5","input_tokens":20,"output_tokens":7,"cache_read":0,"cache_write":0,
+            "messages":1,"turns":1}, ...],
+ "agents":[{"id":"01M5...","name":"p/worker","input_tokens":30,"output_tokens":12,"cache_read":0,
+            "cache_write":0,"messages":2,"turns":1}]}
+```
+
+`models` and `agents` are biggest spender (input plus output tokens)
+first. `since` and `until` are in the answer when the query gives them.
+
 The CLI calls `GET /api/usage?agent=<me>` for `terrarium usage` and
 `GET /api/usage?project=<p>` for `terrarium usage project`. Both work;
 `/api/usage/me` and `/api/usage/project` are the richer answers for a later
@@ -1448,6 +1496,10 @@ user, with no sandbox, against the shared harness home:
  "device_code":"ABCD-EF12G","started_at":"...","done":false,
  "instructions":"Open the URL, sign in, and enter the device code."}
 ```
+
+`kind` is exactly `claude`, `codex`, `copilot`, or `pi`. `provider`,
+`url`, `device_code`, `subscription`, `finished_at`, and `error` are absent
+until they have a value.
 
 `state`: `starting`, `waiting` (a URL or a code is on screen), `verifying`,
 `done` (`subscription` names the definition made or updated), `failed`
@@ -1564,7 +1616,7 @@ or revoked token gets `401 unauthorized` before the upgrade.
 |---|---|---|---|
 | `GET /api/hosts` | | `200` hosts by name | any caller |
 | `GET /api/hosts/{name}` | | `200` host | any caller |
-| `POST /api/hosts` | `{"name"}` | `201` host with `token` | the operator |
+| `POST /api/hosts` | `{"name"}` | `201` one flat host object (the shape below) with one more field, `token` | the operator |
 | `DELETE /api/hosts/{name}` | | `204` | the operator |
 
 ```json
@@ -1653,9 +1705,12 @@ change a file target (`409 file_managed`).
 
 `POST /api/targets/{name}/up|down|snapshot|restore|status`. The body is
 empty, or `{"name"?, "discard_guest_changes"?, "destroy"?}`. The caller
-may use the target (§17.4), or may define it (§17.2). The answer is
-`{"target", "verb", "state", "snapshot"?, "result"?}`. The daemon stores
-the state and writes a `target.<verb>` audit row.
+may use the target (§17.4), or may define it (§17.2). The answer is the
+executor report, not the target: `{"target", "verb", "state", "snapshot"?,
+"result"?}`. `target` is the name, `state` is the new state, `snapshot` is
+there for `snapshot` and `restore`, and `result` is the result of the
+host agent verb when it gives one. The daemon stores the state and writes
+a `target.<verb>` audit row with the same report.
 
 | Kind | `up` | `down` | `snapshot` / `restore` | `status` |
 |---|---|---|---|---|

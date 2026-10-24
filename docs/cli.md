@@ -115,7 +115,7 @@ cloned terrarium in work/terrarium of worker
 HEAD 3f2c1e0b9a0d... (main)
 ```
 
-`--target` exits 2: host agents arrive in a later phase.
+`--target <name>` runs the clone or fetch on that target through its host agent. A vmlab target is refused (422).
 
 `terrarium repo credential get` is hidden. git runs it as the credential
 helper that the daemon writes into each workspace clone. It reads git's

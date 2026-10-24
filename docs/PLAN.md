@@ -3,7 +3,7 @@
 Terrarium wraps AI coding harnesses (Claude Code, Codex, Copilot CLI) so that
 one API, one CLI, one dashboard, and one status model apply to all of them.
 
-Status: draft v0.14, 2026-10-24. Phases 0–2 largely built; see README.md for current state.
+Status: draft v0.15, 2026-10-24. Phases 0 to 5 largely built; Phase 6 partly. See §20, "Build status", and README.md.
 
 ---
 
@@ -84,17 +84,18 @@ These are settled. The rest of the plan follows from them.
 
 | | Claude Code 2.1.310 | Codex 0.160.0 | Copilot CLI 1.0.103 | pi 0.85.1 |
 |---|---|---|---|---|
-| Interactive start | `claude` | `codex` | `copilot --experimental` (needed for the prompt extension) | `pi --provider <p> --model <m>` |
+| Interactive start | `claude` | `codex --no-daemon` (always: without it, Codex starts a shared app-server daemon that outlives the TUI) | `copilot --experimental` (needed for the prompt extension) | `pi --provider <p> --model <m>` |
 | Yolo | `--dangerously-skip-permissions` (refuses as root; `--allow-dangerously-skip-permissions` to override) | `--dangerously-bypass-approvals-and-sandbox` or `-a never -s danger-full-access` | `--yolo`, plus `COPILOT_ALLOW_ALL=true` to trust the folder | tools run without approval by default (to verify); `--approve` trusts project-local files |
 | Set session ID on start | `--session-id <uuid>` | none seen (read it from the session file or hook event) | `--session-id <uuid>` | `--session-id <id>` |
 | Resume | `--resume <id>` | `codex resume <id>` | `--resume <id>` or `--session-id <id>` | `--session <id>` or `--session-id <id>` |
 | System prompt | `--system-prompt`, `--append-system-prompt` | `-c` config override (key to verify: `model_instructions_file`), plus `AGENTS.md` in the workspace | [CopilotCustomSystemPrompt](https://github.com/wiltaylor/CopilotCustomSystemPrompt) extension: `~/.copilot/SYSTEM.md` replaces, `APPEND_SYSTEM.md` appends | `--system-prompt <text|file>`, `--append-system-prompt` |
-| Hooks | yes, inject via `--settings <json>` | yes (`--dangerously-bypass-hook-trust` suggests a trust step) | yes, loaded from the trusted workspace (to verify) | extensions: a Terrarium extension loaded with `-e <path>` posts events to the runner socket |
+| Hooks | yes, inject via `--settings <json>` | `-c 'hooks.<Event>=[...]'`, plus `--dangerously-bypass-hook-trust` (else a "Hooks need review" dialog blocks the start) | `--plugin-dir <dir>` with `hooks.json` at the plugin root. The shared home's own hooks also run. | no hooks: a Terrarium extension loaded with `-e <path>` sends the events to the runner socket |
 | Config home env | `CLAUDE_CONFIG_DIR` | `CODEX_HOME` | `COPILOT_HOME` | `PI_CODING_AGENT_DIR` (`~/.pi/agent`: `auth.json`, `models.json`, `settings.json`, `sessions/`), `PI_CODING_AGENT_SESSION_DIR` |
-| Trust dialog | pre-seed in `~/.claude.json` (to verify) | `--skip-git-repo-check`, `projects.<path>.trust_level` | `COPILOT_ALLOW_ALL=true` | `--approve` or `--no-approve`; `--no-context-files` to skip AGENTS.md |
+| Trust dialog | pre-seed in `~/.claude.json` | `-c projects.<path>.trust_level="trusted"` (`--skip-git-repo-check` is an `exec` flag, and the TUI rejects it) | `COPILOT_ALLOW_ALL=true` | `--approve` or `--no-approve`; `--no-context-files` to skip AGENTS.md |
 | Updates / telemetry off | `DISABLE_AUTOUPDATER=1`, `DISABLE_TELEMETRY=1` | `-c` key (to verify) | `COPILOT_AUTO_UPDATE=false`, `--disable-client-telemetry` | `PI_TELEMETRY=0`, `--offline` for startup network (to verify) |
 | Working dir | `cd` | `-C <dir>` | `-C <dir>` | `cd` |
-| Subscriptions | Anthropic OAuth | OpenAI OAuth | GitHub | any provider pi has an OAuth login for: Anthropic, OpenAI Codex, GitHub Copilot, Google, and API keys. `pi auth` prints and checks credentials. |
+| Clean exit | `/exit` | `/exit` | `/exit` | `/quit` (Ctrl-C does not exit) |
+| Subscriptions | Anthropic OAuth | OpenAI OAuth | GitHub. On a host the token is in the system keychain (D-Bus). In a sandbox the daemon passes it as `COPILOT_GITHUB_TOKEN`. | OpenAI Codex, GitHub Copilot, Google, and API keys. pi cannot spend an Anthropic Pro/Max plan: Anthropic bills it as extra usage (`docs/compat.md`, "pi"). Use an Anthropic API key. `pi auth` prints and checks credentials. |
 | Login without a browser callback | `claude auth login` (URL plus pasted code), `claude setup-token` for a long-lived token, `claude auth status` | `codex login --device-auth`, `--with-api-key` from stdin, `codex login status` | `copilot login --device-code`, `--with-token` from stdin, env tokens | `/login` inside the TUI per provider; API keys in `auth.json` or env; `pi auth check --json` |
 
 Observations that shape the design:
@@ -109,8 +110,9 @@ Observations that shape the design:
   repo to inject a prompt.
 - pi is the escape hatch. One harness, many subscriptions. Its `--provider`
   and `--model` flags pick which plan an agent spends, so Terrarium can route
-  an agent to whichever subscription has headroom. `pi auth print-bearer-token`
-  also gives the daemon a clean way to query provider usage endpoints.
+  an agent to whichever subscription has headroom. The exception is an
+  Anthropic plan: pi cannot spend it (`docs/compat.md`, "pi: facts that
+  contradict the plan"). The daemon refuses that start.
 - The flags change often. Each adapter pins the version it was tested against.
   A compatibility suite runs in CI.
 
@@ -468,7 +470,9 @@ to the audit log with the agent's ID.
 | Edit or delete any memory | no | in project | anywhere |
 | Attach repos, define project targets | no | in project | anywhere |
 | Create and delete projects | no | no | yes |
-| Define global targets, register host agents | no | no | yes |
+| Define global targets | no | no | yes |
+| List host agents | yes | yes | yes |
+| Register and revoke host agents | no | no | no (operator only) |
 | Grant `project_admin` | no | in project | anywhere |
 | Grant `sysadmin` | no | no | no (operator only) |
 | Manage credentials and host agent tokens | no | no | no (operator only) |
@@ -873,7 +877,7 @@ A subscription definition:
 name = "anthropic-max"
 provider = "anthropic"
 plan = "Max 20x"
-harnesses = ["claude", "pi"]           # which harnesses can spend it
+harnesses = ["claude"]                 # which harnesses can spend it (pi cannot spend an Anthropic plan)
 probe = "anthropic-oauth-usage"        # how to read remaining quota
 alert_at = 80                          # percent of any window
 ```
@@ -894,7 +898,7 @@ definition for each login it finds that has none.
 | Claude Code (Anthropic plan) | Opens an embedded terminal running `claude auth login` as the daemon user, outside any sandbox. Extracts the login URL and shows it as a link with a copy button. Gives a paste field for the code and types it into the PTY. Offers `claude setup-token` as the long-lived alternative. |
 | Codex (ChatGPT plan) | Runs `codex login --device-auth` in the embedded terminal. Shows the device code and URL large, with copy buttons. Polls `codex login status` until it succeeds. |
 | Copilot (GitHub plan) | Runs `copilot login --device-code`. Same device-code pattern. A second tab takes a fine-grained PAT with the Copilot Requests permission and feeds it through `--with-token` on stdin. |
-| pi, OAuth provider | Runs `pi` in the embedded terminal with instructions to use `/login` for the chosen provider. For Anthropic and OpenAI the wizard first offers to reuse the token the Claude Code or Codex login already holds, through `pi auth` compatible env vars, so one login serves both harnesses. |
+| pi, OAuth provider | Runs `pi` in the embedded terminal with instructions to use `/login` for the chosen provider. The idea to reuse the Claude Code token for Anthropic is dead: Anthropic bills a Pro/Max token used through pi as extra usage, not from the plan (`docs/compat.md`, "pi: facts that contradict the plan"). For Anthropic through pi, use an API-key subscription (next row). A copy of the Codex access token works for `openai-codex`, but only with no refresh token, so it expires. |
 | pi, API key | A form: provider (Anthropic, OpenAI, Google, OpenRouter, xAI, Groq, or an OpenAI-compatible endpoint with a base URL and model list). The key is stored under `/state/credentials` with mode 0600, never shown again, and injected as the provider's env var only into agents on this subscription. Optionally written to pi's `auth.json` for `pi auth` compatibility. |
 
 After the login succeeds the wizard:
@@ -1248,22 +1252,22 @@ declares many agents and targets at once. Sibling-container sandbox fallback.
 
 ### Build status (2026-10-24)
 
-From README.md and the tree. "Done" means built and in the tree; the
-end-to-end scenarios of each phase are not yet scripted (no `spikes/e2e/`).
+From README.md and the tree. "Done" means built and in the tree. The
+end-to-end scenarios of each phase are not scripted yet (no `spikes/e2e/`).
 
 | Phase | Done | In flight or not started |
 |---|---|---|
-| 0 | Claude Code spikes; facts in `docs/compat.md`. | Codex, Copilot, and pi spikes (`spikes/codex/`, `spikes/copilot/`, `spikes/pi/`). Login and usage-probe spikes are not wired. |
+| 0 | Spikes for Claude Code, Codex, Copilot CLI, and pi (`spikes/<harness>/`), and the usage probes and login flows. The facts are in `docs/compat.md`. | `just spikes::login`, `spikes::usage-probe`, and `spikes::compat-matrix` are not wired. Only Claude has `just` recipes for its spikes. |
 | 1 | Container, justfile, compose, `terrariumd` with SQLite and the API, Claude adapter, operator CLI, dashboard with agents and xterm.js terminals. | — |
-| 2 | Projects, `bwrap` sandbox (verified outside Docker), agent mode of the CLI with policy, mailbox with pull and push, built-in prompt template. | Repo clone on agent create (repo records exist; clone code in progress). `bwrap` inside Docker not fully verified. |
+| 2 | Projects, `bwrap` sandbox, agent mode of the CLI with policy, mailbox with pull and push, three prompt templates (`default`, `project-lead`, `system-lead`). Repo clone on agent create and on `repo checkout`, with the daemon's credential helper. | Claude Code inside `bwrap` inside Docker is not tested (verified outside Docker only). |
 | 2b, 2c | Board and memory graph: tables, rules, CLI, dashboard views. | — |
-| 2d | Project inboxes, roles, `terrarium admin`, audit log. | Project-lead and system-lead templates are in `prompts/` but not yet tried end to end. |
+| 2d | Project inboxes, roles, `terrarium admin`, audit log, lead templates. | The lead templates are not tried end to end. |
 | 2e | Wiki, artifacts with the separate serving origin, versions with review. | — |
-| 2f | — | Subscriptions and usage: no `/api/subscriptions`; dashboard pages use mock data. |
-| 3 | — | Codex, Copilot, and pi adapters are flag tables only. `just ci::compat` is not built. |
-| 4 | A restart resumes the same session. The supervisor has restart policies with backoff and crash-loop detection. | Runners that outlive the daemon, reconcile on start, recap turn. |
-| 5 | `terrarium-host` builds. | Dial-in to the daemon, executors, targets; `exec`, `shell`, and `cp` exit 2. |
-| 6 | — | Not started. |
+| 2f | Subscriptions with file and API definitions, verified probes (Anthropic, OpenAI Codex, GitHub Copilot), local accounting from session files, the quota policy (alerts and holds), daily project budgets, API keys, expired-login mail, and the login wizard (embedded terminal, URL and device-code extraction). `terrarium usage`. Dashboard Subscriptions and Spend pages. | Per-card usage (in progress). |
+| 3 | Codex, Copilot, and pi adapters, registered in the daemon. `just ci::compat` (crate `terrarium-compat`). Claude passes every step of the suite. | Codex, Copilot, and pi are built against the Phase 0 captures. They have not run live through the daemon. On this host the suite skips Codex and Copilot (operator hooks in the shared home), and pi runs only on opt-in. |
+| 4 | One `terrarium-runner` process per agent (the default runner mode): the agents live through a daemon restart. Reconcile on daemon start (`Supervisor::recover`), reconnect on a dropped control connection, restart policies with backoff and crash-loop detection, resume of the same session, recap turn. | A daemon crash inside Docker still stops the runners (§21). |
+| 5 | `terrarium-host` with dial-out, token auth, and the executor protocol. `host`, `ssh`, `docker`, and `vmlab` targets. `terrarium exec`, `shell`, `cp`. Lifecycle verbs, ephemeral targets, snapshots. `repo checkout --target` through the host agent. Hosts and Targets views in the dashboard. | The vmlab verbs are verified only against the reference output of the vmlab CLI, not against a live lab. `just host::install` is not built. |
+| 6 | Mail and event views in the dashboard. | The fleet definition file is not started. The sibling-container sandbox fallback is not started. |
 
 ---
 
@@ -1297,6 +1301,7 @@ end-to-end scenarios of each phase are not yet scripted (no `spikes/e2e/`).
 | Host agent token leaks or a host is compromised | One token per host, revocable from the dashboard. The host agent only accepts calls for targets defined on it. |
 | Host agent connection drops mid-exec | Exec sessions have IDs. The host agent keeps output buffered until acknowledged. Reconnect resumes or reports the exit code. |
 | Harness flags change | One adapter per harness, pinned version, CI. |
+| A daemon crash inside Docker stops every runner, because `terrariumd` is the only child of `tini`: when it exits, the container stops | An entrypoint supervisor loop that restarts the daemon in the container (in progress). Outside Docker, the runner processes live through a daemon restart. |
 
 ---
 

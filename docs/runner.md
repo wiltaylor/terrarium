@@ -557,6 +557,22 @@ each agent that the database shows as live:
    order, with no gap.
 3. Take the status, the session ID, and the pids from `hello()`.
 
+The daemon reconnects in two places, both in
+`crates/terrariumd/src/runner_supervisor.rs`. At start, `reconcile` in
+`crates/terrariumd/src/lib.rs` calls `Supervisor::recover` for each agent
+that the store shows as live but the supervisor does not run. `recover`
+does the three steps above with the stored `runner_seq` as
+`events_since`. It returns `Attached` (the harness keeps running), `Ended`
+(the harness ended while the daemon was down, and the restart policy does
+not start it again), or `Gone` (the daemon launches the agent again with
+`--resume`). While the daemon runs, the `forward` task of each agent
+passes the runner events on. When the control connection drops (`wait`
+gives the signal `RUNNER_LOST`) and `live_runner_pid` still finds the
+runner, `forward` connects again with `events_since` set to the last seq
+that it passed on, and adopts the new connection. Only when that connect
+fails does the supervisor treat the agent as exited. In `inprocess` mode,
+`recover` always returns `Gone`.
+
 ## Tests
 
 The integration tests in `crates/terrarium-runner/tests` drive the fake TUI

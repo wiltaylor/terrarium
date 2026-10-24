@@ -2,8 +2,9 @@
 
 This guide tells you how to run Terrarium in Docker, how to run it on your
 machine for development, how to run the tests, and how to fix common
-problems. Terrarium is early work. Only the Claude Code adapter works today
-(see the status in [../README.md](../README.md#status)).
+problems. Terrarium is early work. All four adapters exist, but only the
+Claude Code adapter is verified end to end (see the status in
+[../README.md](../README.md#status)).
 
 Run every command from the root of the repository.
 
@@ -23,8 +24,10 @@ To develop Terrarium outside Docker, you also need:
 - Node 22. The dashboard alone needs Node 20.19 or later. The image uses
   Node 22, because Claude Code and pi need it.
 - [uv](https://docs.astral.sh/uv/), for the spike scripts.
-- `bwrap` (bubblewrap) with unprivileged user namespaces, for the sandbox.
-- Claude Code on your `PATH`, for a real agent.
+- `bwrap` (bubblewrap) with unprivileged user namespaces, if you want the
+  sandbox. The dev loop runs without it by default (section 4.2).
+- Claude Code on your `PATH`, for a real agent. For the other adapters,
+  `codex`, `copilot`, or `pi` on your `PATH`.
 
 ## 2. First run with Docker
 
@@ -69,7 +72,25 @@ that port. The dashboard shows a token screen. Paste the value of
 
 ### 2.4 Log in to Claude
 
-All agents share one Claude home, so you log in once:
+All agents share one Claude home, so you log in once. Use the dashboard, or
+use a shell in the container.
+
+To log in from the dashboard:
+
+1. Open the **Subscriptions** page.
+2. Click **Add subscription**, then click **Claude Code**.
+3. Click the login URL that the wizard shows, and sign in.
+4. Paste the code from the browser into the code field, and click
+   **Send code**.
+
+The wizard runs `claude auth login` in an embedded terminal, outside the
+sandbox. When the login is done, the daemon makes the subscription,
+verifies the login, and runs the quota probe one time. The **Verify now**
+button checks the login again. The wizard has the same flow for Codex and
+Copilot (a device code), and for pi. To store an API key, click **API
+key**.
+
+To log in from a shell:
 
 ```sh
 docker compose exec terrarium claude auth login
@@ -82,11 +103,8 @@ back into the terminal. To check the login, run:
 docker compose exec terrarium claude auth status
 ```
 
-The command exits with 0 when you are logged in.
-
-The dashboard has a Subscriptions page for logins (PLAN §16.1). The daemon
-does not serve it yet, so the page shows "Not available yet". Use the shell
-command.
+The command exits with 0 when you are logged in. The Subscriptions page
+finds the login and offers to make a subscription for it.
 
 ### 2.5 Make a project and an agent
 
@@ -198,31 +216,41 @@ If the entrypoint says that a directory "is not writable", run
 
 ### 4.1 Run the daemon
 
-`just daemon::run` runs `terrariumd` with `cargo run`. It sets these values:
+`just daemon::run` builds `terrarium-runner`, then runs `terrariumd` with
+`cargo run`. It sets these values. Each value gives way to the variable
+when you set it:
 
 | Variable | Value |
 |---|---|
 | `TERRARIUM_LISTEN` | `127.0.0.1:8090` (change it with `TERRARIUM_DEV_LISTEN`) |
-| `TERRARIUM_STATE_DIR` | `target/dev-state` (change it with `TERRARIUM_DEV_STATE_DIR`) |
-| `TERRARIUM_CONFIG_DIR` | `.` (the definition directories in the repository root) |
+| `TERRARIUM_STATE_DIR` | `<repo>/target/dev-state` (change it with `TERRARIUM_DEV_STATE_DIR`) |
+| `TERRARIUM_CONFIG_DIR` | `<repo>` (the definition directories in the repository root) |
+| `TERRARIUM_SANDBOX` | `none` (no sandbox; see section 4.2) |
+| `TERRARIUM_PROMPTS_DIR` | `<repo>/prompts` |
+| `TERRARIUM_ARTIFACT_LISTEN` | `127.0.0.1:8091`, so that it does not collide with the Docker stack on 8081 |
+| `TERRARIUM_HARNESS_HOME` | `claude=$HOME/.claude,codex=$HOME/.codex,copilot=$HOME/.copilot,pi=$HOME/.pi/agent` |
 
-It does not set the harness home or the prompts directory. Their defaults
-(`/auth/<harness>` and `/prompts`) are container paths. Set them yourself.
+To see the full command, run `just --dry-run daemon::run`.
 
-1. Build the CLI. The daemon binds `target/debug/terrarium` into each
-   sandbox for the hooks:
+The daemon runs each agent in its own `terrarium-runner` process
+(`TERRARIUM_RUNNER_MODE=process`, the default). The agents live through a
+daemon restart: when the daemon starts again, it connects to each runner
+that still runs. The daemon finds `terrarium-runner` next to `terrariumd`
+(`target/debug/`), else on `PATH`. Set `TERRARIUM_RUNNER` to use another
+binary. Set `TERRARIUM_RUNNER_MODE=inprocess` to run the runners in the
+daemon. Then the agents stop with the daemon.
+
+1. Build the CLI once. The agents use `target/debug/terrarium` for the
+   hooks and the agent commands:
 
    ```sh
    just daemon::build
    ```
 
-2. Start the daemon with your Claude home and the prompts directory:
+2. Start the daemon:
 
    ```sh
-   TERRARIUM_HARNESS_HOME=claude=$HOME/.claude \
-   TERRARIUM_PROMPTS_DIR=prompts \
-   TERRARIUM_DEV_STATE_DIR=$PWD/target/dev-state \
-     just daemon::run
+   just daemon::run
    ```
 
 3. In a second shell, use the CLI:
@@ -237,20 +265,30 @@ It does not set the harness home or the prompts directory. Their defaults
 The CLI finds the daemon through the Unix socket
 (`$XDG_RUNTIME_DIR/terrarium/api.sock`). It needs no token there.
 
-Agents write to the shared Claude home: `history.jsonl`, `projects/`,
-`backups/`, and other files. To keep them out of your own `~/.claude`, make
-a separate directory, log in to it with `CLAUDE_CONFIG_DIR=<dir> claude auth
-login`, and give that directory in `TERRARIUM_HARNESS_HOME`.
+The agents use your own harness logins under `$HOME`, and they write to
+those homes. Claude agents write `history.jsonl`, `projects/`, `backups/`,
+and other files to `~/.claude`. To keep them out of your own home, make a
+separate directory, and log in to it with `CLAUDE_CONFIG_DIR=<dir> claude
+auth login`. Then give that directory in `TERRARIUM_HARNESS_HOME`, for
+example `TERRARIUM_HARNESS_HOME=claude=<dir> just daemon::run`. When you
+set `TERRARIUM_HARNESS_HOME`, it replaces the whole list.
 
-The daemon also opens the artifact origin on `0.0.0.0:8081`. If the Docker
-stack runs at the same time, the port is in use. Set
-`TERRARIUM_ARTIFACT_LISTEN=127.0.0.1:8091`.
+To use the dashboard login wizard (section 2.4) against this daemon, open
+the dev dashboard (section 4.3). The wizard writes the login to the
+harness home in `TERRARIUM_HARNESS_HOME`. With the default homes, a new
+login replaces your own login in that home.
 
-### 4.2 Run without the sandbox
+### 4.2 Run with the sandbox
 
-If your machine cannot run `bwrap`, add `TERRARIUM_SANDBOX=none`. The
-harness then runs in yolo mode with full access to your user account. Use it
-for development and tests only. See also section 7.4.
+`just daemon::run` uses `TERRARIUM_SANDBOX=none`. The harness then runs in
+yolo mode with full access to your user account. Use it for development
+and tests only. See also section 7.4.
+
+If your machine can run `bwrap`, turn the sandbox on:
+
+```sh
+TERRARIUM_SANDBOX=bwrap just daemon::run
+```
 
 ### 4.3 Run the dashboard
 
@@ -300,24 +338,63 @@ The gate does not run the dashboard unit tests. Run them with
 `just dashboard::test`, or run `just test` for the Rust tests and the
 dashboard tests together.
 
-## 6. Run the real Claude test
+## 6. Run the real-harness tests
+
+These tests start real harnesses and spend model turns. They are not in
+`just ci::check`.
+
+### 6.1 The real Claude test
 
 `crates/terrariumd/tests/e2e_claude.rs` runs one real Claude Code agent
 inside `bwrap`, through the whole daemon. Cargo ignores it by default,
-because it needs a logged-in Claude home and spends model turns. It is not
-in `just ci::check`.
+because it needs a logged-in Claude home and spends model turns.
 
 ```sh
-cargo build -p terrarium
+cargo build -p terrarium -p terrarium-runner
 TERRARIUM_E2E_CLAUDE_HOME=$HOME/.claude \
-  cargo test -p terrariumd --test e2e_claude -- --ignored --nocapture
+  cargo test -p terrariumd --test e2e_claude -- --ignored --exact claude_in_bwrap_answers_one_turn --nocapture
 ```
 
-The test sends one model turn, on `haiku`. It binds the Claude home
-read-write, as the container does. It does not copy or change the
-credentials. Set `TERRARIUM_E2E_CLI` to use a CLI other than
-`target/debug/terrarium`. The results are in
-[compat.md](compat.md), "Claude inside bwrap".
+The test sends one model turn, on `haiku`. The agent runs in a
+`terrarium-runner` process, as in the daemon. Set
+`TERRARIUM_E2E_RUNNER_MODE=inprocess` to run it in the test process. The
+test binds the Claude home read-write, as the container does. It does not
+copy or change the credentials. Set `TERRARIUM_E2E_CLI` to use a CLI other
+than `target/debug/terrarium`.
+
+The same file has `two_claude_agents_share_one_home`, which spends four
+model turns. Without `--exact`, `--ignored` runs both tests. The results
+are in [compat.md](compat.md), "Claude inside bwrap".
+
+### 6.2 The compatibility suite
+
+The suite starts each real harness through its adapter and checks the
+facts of [compat.md](compat.md). It does not use the daemon. See
+[compat-suite.md](compat-suite.md).
+
+```sh
+just ci::compat claude
+```
+
+The argument is `all` (the default), `claude`, `codex`, `copilot`, `pi`, or
+a comma list. The report goes to stdout and to `target/compat-report.md`.
+
+- Cost: at most 3 model turns for each harness, on the cheapest model
+  (Claude `haiku`, Codex `gpt-6-luna`, Copilot `claude-haiku-4.5`).
+- The suite uses your real harness homes under `$HOME`, in sandbox mode
+  `none`. It never runs a login or a logout. A harness that is not logged
+  in is skipped.
+- The user-hooks gate: when the shared home of a harness holds your own
+  hooks (for example `~/.codex/hooks.json` or `~/.copilot/hooks/*.json`),
+  the suite skips that harness. In mode `none` those hooks fire in the test
+  agent. Set `TERRARIUM_COMPAT_ALLOW_USER_HOOKS=1` to run it anyway.
+- pi does not run by default. To run it, set `TERRARIUM_COMPAT_PI=1`,
+  `TERRARIUM_COMPAT_PI_PROVIDER` (an API-key provider, for example
+  `openai`), `TERRARIUM_COMPAT_PI_MODEL`, and the API key of that provider
+  (`OPENAI_API_KEY` for `openai`).
+
+`cargo test -p terrarium-compat` without `--ignored` runs only the dry run.
+It starts no harness.
 
 ## 7. Troubleshooting
 
@@ -402,12 +479,51 @@ You can also accept the dialog by hand. Open the agent's terminal in the
 dashboard, select the input check box, and select "Yes, I trust this
 folder".
 
-### 7.5 Other messages
+### 7.5 Codex leaves a daemon behind
+
+A Codex start with no `-c` override starts a detached
+`codex app-server --managed-daemon`. It outlives the TUI, copies about
+736 MB into `$CODEX_HOME/packages/`, and runs an update loop. The adapter
+always passes `--no-daemon`, so agents do not cause it.
+
+The usual cause is `codex` that you start yourself against the shared home.
+Add `--no-daemon` when you do. Stop a leftover `codex app-server
+--managed-daemon` process by hand. See [compat.md](compat.md), "Codex:
+facts that contradict the plan".
+
+### 7.6 Copilot is logged out in the sandbox
+
+On a host, `copilot login` puts the OAuth token in the system keychain
+(libsecret over D-Bus). A sandbox has no D-Bus, so Copilot starts logged
+out there.
+
+Give the agent a token in `COPILOT_GITHUB_TOKEN`:
+
+1. Make a fine-grained GitHub token with the Copilot Requests permission.
+2. On the Subscriptions page, click **Add subscription**, then **API key**.
+   Select the GitHub provider, and paste the token.
+
+The daemon stores the token with mode `0600`. At each start, it puts the
+token into `COPILOT_GITHUB_TOKEN` for the agents on that subscription only.
+The API is `POST /api/subscriptions/{name}/api-key` with
+`{"provider":"github","key":"..."}` ([api.md](api.md) §16.5).
+
+### 7.7 pi refuses a Claude plan
+
+The daemon refuses to start a pi agent on an Anthropic plan subscription:
+"pi cannot spend a Claude plan". Anthropic bills a Pro/Max login that pi
+uses as extra usage, not from the plan ([compat.md](compat.md), "pi: facts
+that contradict the plan"). Use the `claude` harness for the plan. To use
+Anthropic through pi, make an API-key subscription with an Anthropic API
+key.
+
+### 7.8 Other messages
 
 | Message | Fix |
 |---|---|
 | `set TERRARIUM_TOKEN in .env` (from compose) | Set `TERRARIUM_TOKEN` in `.env` (section 2.1). |
-| `the claude home /auth/claude does not exist` | Outside Docker, set `TERRARIUM_HARNESS_HOME=claude=<dir>` (section 4.1). In Docker, log in first (section 2.4). |
+| `the claude home <dir> does not exist` | Log in to that harness first (section 2.4), or set `TERRARIUM_HARNESS_HOME=claude=<dir>` (section 4.1). The same message comes for `codex`, `copilot`, and `pi`. |
+| ``no `terrarium-runner` binary next to terrariumd or on PATH`` | Run `cargo build -p terrarium-runner` (`just daemon::run` does it), set `TERRARIUM_RUNNER`, or set `TERRARIUM_RUNNER_MODE=inprocess`. |
 | `cannot read the prompt template` | The agent names a template that is not in the prompts directory. Remove `--prompt`, or add `prompts/<name>.md`. |
 | `no terrarium CLI found` (daemon log) | Run `just daemon::build`, or set `TERRARIUM_CLI`. |
 | `awaiting server: this daemon does not serve this endpoint yet` | The CLI has the command, but the daemon does not have the route yet. |
