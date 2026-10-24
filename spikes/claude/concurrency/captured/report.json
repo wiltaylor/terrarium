@@ -1,0 +1,182 @@
+{
+  "nonce": "0ecea4f1",
+  "test_exit": 0,
+  "credentials_changed": false,
+  "shared_claude_json_changed": false,
+  "shared_history_size_delta": 0,
+  "shared_history_has_nonce": 0,
+  "new_top_level": [],
+  "new_in_dirs": {
+    "session-env": [
+      "session-env/01a16cda-c38a-4bfd-a9c6-1180c00a5918",
+      "session-env/01a16cda-c38a-4ce1-9e52-939518a397e7"
+    ],
+    "shell-snapshots": [
+      "shell-snapshots/snapshot-bash-1792827644200-gbr4k9.sh"
+    ],
+    "projects/-home-agent-work": [
+      "projects/-home-agent-work/01a16cda-c38a-4bfd-a9c6-1180c00a5918.jsonl",
+      "projects/-home-agent-work/01a16cda-c38a-4ce1-9e52-939518a397e7.jsonl"
+    ]
+  },
+  "transcripts_for_own_sessions": [
+    true,
+    true
+  ],
+  "test": {
+    "alpha": {
+      "answer_after_resume": "alpha-0ecea4f1",
+      "backups_dir": [
+        ".claude.json.backup.1792827639535"
+      ],
+      "events_mention_other_session": false,
+      "history_has_other_token": false,
+      "history_has_own_token": true,
+      "history_lines": 2,
+      "id": "01M5PDNGW6W0HJDS49F7SZ938B",
+      "memory_dir": [],
+      "session_ids": [
+        "01a16cda-c38a-4bfd-a9c6-1180c00a5918",
+        "01a16cda-c38a-4bfd-a9c6-1180c00a5918"
+      ],
+      "sessions_dir": [
+        "2.2628e0298c599dcf9a4767d7276a0b2d78ac2fcf934c56c580013d12da130d85.key",
+        "2.json"
+      ],
+      "sources": [
+        "startup",
+        "resume"
+      ],
+      "state_keys": [
+        "additionalModelCostsCache",
+        "additionalModelOptionsCache",
+        "autoCompactWindowsCache",
+        "cachedExtraUsageDisabledReason",
+        "claudeAiMcpEverConnected",
+        "clientDataCacheSlots",
+        "firstStartTime",
+        "groveConfigCache",
+        "hasCompletedOnboarding",
+        "hasResetAutoModeOptInForDefaultOffer",
+        "lastReleaseNotesSeen",
+        "machineID",
+        "migrationVersion",
+        "modelAccessCache",
+        "numStartups",
+        "oauthAccount",
+        "officialMarketplaceAutoInstallAttempted",
+        "officialMarketplaceAutoInstalled",
+        "opusProMigrationComplete",
+        "orgModelDefaultCache",
+        "passesEligibilityCache",
+        "pluginUsage",
+        "projects",
+        "seenNotifications",
+        "skillUsage",
+        "sonnet1m45MigrationComplete",
+        "tipLifetimeShownCounts",
+        "tipsHistory",
+        "userID"
+      ],
+      "state_num_startups": 2,
+      "status_reasons": [
+        "new session",
+        "prompt ready",
+        "prompt submitted",
+        "turn ended",
+        "stopped",
+        "resuming session 01a16cda-c38a-4bfd-a9c6-1180c00a5918",
+        "prompt ready",
+        "prompt submitted",
+        "turn ended"
+      ],
+      "token": "alpha-0ecea4f1",
+      "transcript_paths": [
+        "/home/agent/.claude/projects/-home-agent-work/01a16cda-c38a-4bfd-a9c6-1180c00a5918.jsonl",
+        "/home/agent/.claude/projects/-home-agent-work/01a16cda-c38a-4bfd-a9c6-1180c00a5918.jsonl"
+      ]
+    },
+    "beta": {
+      "answer_after_resume": "beta-0ecea4f1",
+      "backups_dir": [
+        ".claude.json.backup.1792827638798"
+      ],
+      "events_mention_other_session": false,
+      "history_has_other_token": false,
+      "history_has_own_token": true,
+      "history_lines": 2,
+      "id": "01M5PDNGW7TFARVJQFPD12TKFY",
+      "memory_dir": [],
+      "session_ids": [
+        "01a16cda-c38a-4ce1-9e52-939518a397e7",
+        "01a16cda-c38a-4ce1-9e52-939518a397e7"
+      ],
+      "sessions_dir": [
+        "2.2628e0298c599dcf9a4767d7276a0b2d78ac2fcf934c56c580013d12da130d85.key",
+        "2.json"
+      ],
+      "sources": [
+        "startup",
+        "resume"
+      ],
+      "state_keys": [
+        "additionalModelCostsCache",
+        "additionalModelOptionsCache",
+        "autoCompactWindowsCache",
+        "cachedExtraUsageDisabledReason",
+        "claudeAiMcpEverConnected",
+        "clientDataCacheSlots",
+        "firstStartTime",
+        "groveConfigCache",
+        "hasCompletedOnboarding",
+        "hasResetAutoModeOptInForDefaultOffer",
+        "lastReleaseNotesSeen",
+        "machineID",
+        "migrationVersion",
+        "modelAccessCache",
+        "numStartups",
+        "oauthAccount",
+        "officialMarketplaceAutoInstallAttempted",
+        "officialMarketplaceAutoInstalled",
+        "opusProMigrationComplete",
+        "orgModelDefaultCache",
+        "passesEligibilityCache",
+        "pluginUsage",
+        "projects",
+        "seenNotifications",
+        "skillUsage",
+        "sonnet1m45MigrationComplete",
+        "tipLifetimeShownCounts",
+        "tipsHistory",
+        "userID"
+      ],
+      "state_num_startups": 2,
+      "status_reasons": [
+        "new session",
+        "prompt ready",
+        "prompt submitted",
+        "turn ended",
+        "stopped",
+        "resuming session 01a16cda-c38a-4ce1-9e52-939518a397e7",
+        "prompt ready",
+        "prompt submitted",
+        "turn ended"
+      ],
+      "token": "beta-0ecea4f1",
+      "transcript_paths": [
+        "/home/agent/.claude/projects/-home-agent-work/01a16cda-c38a-4ce1-9e52-939518a397e7.jsonl",
+        "/home/agent/.claude/projects/-home-agent-work/01a16cda-c38a-4ce1-9e52-939518a397e7.jsonl"
+      ]
+    },
+    "nonce": "0ecea4f1",
+    "state_dir": "/tmp/.tmpvXZlMb/state"
+  },
+  "attributed_to_this_run": [
+    "session-env/01a16cda-c38a-4bfd-a9c6-1180c00a5918",
+    "session-env/01a16cda-c38a-4ce1-9e52-939518a397e7",
+    "shell-snapshots/snapshot-bash-1792827644200-gbr4k9.sh",
+    "projects/-home-agent-work/01a16cda-c38a-4bfd-a9c6-1180c00a5918.jsonl",
+    "projects/-home-agent-work/01a16cda-c38a-4ce1-9e52-939518a397e7.jsonl"
+  ],
+  "unattributed_new_paths": []
+}

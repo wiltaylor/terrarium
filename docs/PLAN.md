@@ -1275,7 +1275,7 @@ end-to-end scenarios of each phase are not yet scripted (no `spikes/e2e/`).
 | Hooks do not fire or change shape | Fall back to PTY silence heuristics. Pin versions. Compatibility suite. |
 | `bwrap` blocked by Docker seccomp | Document the required `--security-opt`. Sibling-container fallback. |
 | Shared harness home under concurrent writers | Normal for all three harnesses. Verify in Phase 0 under load. |
-| Shared Claude home: `history.jsonl` and `sessions/<pid>.json` are written by every agent | Per-agent overlays (`sessions/` done; `history.jsonl` pending). |
+| Shared Claude home: `history.jsonl`, `sessions/<pid>.json`, `backups/`, and auto memory are written by every agent | Per-agent overlays for all four, verified with two agents at once and a real `--resume` (spikes/claude/concurrency). Transcripts stay shared and readable by peers. |
 | Agent-to-agent prompt injection | Mail is untrusted. Push only a pointer, not the body. Delimit on read. Say so in the prompt. |
 | Runaway cost with yolo and `always` restart | Per-agent turn and time budgets. Crash-loop detection. Dashboard shows turn counts. |
 | Yolo agent escapes through `terrarium exec` | Policy limits targets per agent. Ephemeral targets by default for risky work. |

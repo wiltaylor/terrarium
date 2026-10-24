@@ -1,0 +1,111 @@
+
+running 1 test
+[  1.13s] alpha idle after start
+[  0.00s] beta idle after start
+[  6.05s] alpha turn_end #1
+[  0.00s] beta turn_end #1
+[  0.00s] alpha idle after turn 1
+[  0.00s] beta idle after turn 1
+alpha session_started: ["01a16cda-c38a-4bfd-a9c6-1180c00a5918"]
+beta session_started: ["01a16cda-c38a-4ce1-9e52-939518a397e7"]
+[  0.00s] alpha stopped
+[  0.00s] beta stopped
+[  0.31s] alpha idle after the resume
+[  0.00s] beta idle after the resume
+[  2.67s] alpha turn_end #2
+[  0.00s] beta turn_end #2
+[  0.00s] alpha idle after turn 2
+[  0.00s] beta idle after turn 2
+--- alpha screen after the resumed turn ---
+ ▐▛███▛█   Claude Code v2.1.310
+▝▜██████▀  Haiku 5.5 · Claude Max
+ ▝▝   ▝▝   ~/work
+
+
+❯ Reply with exactly: alpha-0ecea4f1
+
+● Bash(terrarium mail check)
+  ⎿  0 unread, 0 in total
+
+● alpha-0ecea4f1
+
+✻ Churned for 5s · done 17:40
+
+❯ What exact text did you reply with to my previous message? Reply with only that text.
+
+● alpha-0ecea4f1
+
+✻ Churned for 2s · done 17:40
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 1 agent                                         ◐ medium · /effort
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+---
+alpha: sessions ["01a16cda-c38a-4bfd-a9c6-1180c00a5918", "01a16cda-c38a-4bfd-a9c6-1180c00a5918"], sources [String("startup"), String("resume")], answer after resume "alpha-0ecea4f1"
+--- beta screen after the resumed turn ---
+ ▐▛███▛█   Claude Code v2.1.310
+▝▜██████▀  Haiku 5.5 · Claude Max
+ ▝▝   ▝▝   ~/work
+
+
+❯ Reply with exactly: beta-0ecea4f1
+
+● beta-0ecea4f1
+
+✻ Sautéed for 1s · done 17:40
+
+❯ What exact text did you reply with to my previous message? Reply with only that text.
+
+● beta-0ecea4f1
+
+✻ Crunched for 1s · done 17:40
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 1 agent                                         ◐ medium · /effort
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+---
+beta: sessions ["01a16cda-c38a-4ce1-9e52-939518a397e7", "01a16cda-c38a-4ce1-9e52-939518a397e7"], sources [String("startup"), String("resume")], answer after resume "beta-0ecea4f1"
+[  0.00s] alpha stopped
+[  0.00s] beta stopped
+.
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 10.25s
+
+
+--- stderr ---

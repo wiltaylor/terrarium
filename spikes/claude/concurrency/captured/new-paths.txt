@@ -1,0 +1,5 @@
+session-env/01a16cda-c38a-4bfd-a9c6-1180c00a5918
+session-env/01a16cda-c38a-4ce1-9e52-939518a397e7
+shell-snapshots/snapshot-bash-1792827644200-gbr4k9.sh
+projects/-home-agent-work/01a16cda-c38a-4bfd-a9c6-1180c00a5918.jsonl
+projects/-home-agent-work/01a16cda-c38a-4ce1-9e52-939518a397e7.jsonl
