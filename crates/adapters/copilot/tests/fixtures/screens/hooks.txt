@@ -1,0 +1,294 @@
+===== idle-before-turn (t=3.7s) =====
+ [Current]  Sessions   Issues   Pull requests   Gists
+
+╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                                    │
+│  ╭─╮╭─╮                             │  Getting started                                                             │
+│  ╰─╯╰─╯  Copilot v1.0.103 uses AI.  │  Use the tabs above to explore your sessions and pull requests               │
+│  █ ▘▝ █  Check for mistakes.        │  /init — Initialize Copilot instructions for this repository                 │
+│   ▔▔▔▔                              │  /model — Switch models across providers, or use Auto                        │
+│                                                                                                                    │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+ ● No copilot-instructions.md found. Run /init to generate.
+
+ ● Tip: /app
+   └ Prefer a visual workspace? Try out the GitHub Copilot desktop app
+      https://github.com/features/ai/github-app
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ $CWD [⎇ main%]
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ← open sidebar · Interactive · Allow All · / commands · ? help · tab next tab                         Claude Haiku 4.5
+
+===== working-0 (t=3.8s) =====
+ [Current]  Sessions   Issues   Pull requests   Gists
+
+╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                                    │
+│  ╭─╮╭─╮                             │  Getting started                                                             │
+│  ╰─╯╰─╯  Copilot v1.0.103 uses AI.  │  Use the tabs above to explore your sessions and pull requests               │
+│  █ ▘▝ █  Check for mistakes.        │  /init — Initialize Copilot instructions for this repository                 │
+│   ▔▔▔▔                              │  /model — Switch models across providers, or use Auto                        │
+│                                                                                                                    │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+ ● No copilot-instructions.md found. Run /init to generate.
+
+ ● Tip: /app
+   └ Prefer a visual workspace? Try out the GitHub Copilot desktop app
+      https://github.com/features/ai/github-app
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ $CWD [⎇ main%]
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ← open sidebar · Interactive · Allow All · / commands · ? help · tab next tab                         Claude Haiku 4.5
+
+===== working-6 (t=5.3s) =====
+ [Current]  Sessions   Issues   Pull requests   Gists
+
+╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                                    │
+│  ╭─╮╭─╮                             │  Getting started                                                             │
+│  ╰─╯╰─╯  Copilot v1.0.103 uses AI.  │  Use the tabs above to explore your sessions and pull requests               │
+│  █ ▘▝ █  Check for mistakes.        │  /init — Initialize Copilot instructions for this repository                 │
+│   ▔▔▔▔                              │  /model — Switch models across providers, or use Auto                        │
+│                                                                                                                    │
+├────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ Discover Auto                                                                                                      │
+│ Let Copilot choose the best available model for each task, 10% off right now.                                      │
+│ Click here or enter /model auto to switch                                                                          │
+│ ctrl+x → m switch for this session                                                                                 │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+ ● No copilot-instructions.md found. Run /init to generate.
+
+ ● Tip: /app
+   └ Prefer a visual workspace? Try out the GitHub Copilot desktop app
+      https://github.com/features/ai/github-app
+
+ ❯ Run the shell command `echo terrarium-hook-test`. Then reply with exactly: done                               17:11
+
+
+
+
+
+
+
+
+
+
+
+
+ $CWD [⎇ main%]
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ◎ Working esc esc edit prompt                                                                         Claude Haiku 4.5
+
+===== working-12 (t=6.8s) =====
+ [Current]  Sessions   Issues   Pull requests   Gists
+
+╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                                    │
+│  ╭─╮╭─╮                             │  Getting started                                                             │
+│  ╰─╯╰─╯  Copilot v1.0.103 uses AI.  │  Use the tabs above to explore your sessions and pull requests               │
+│  █ ▘▝ █  Check for mistakes.        │  /init — Initialize Copilot instructions for this repository                 │
+│   ▔▔▔▔                              │  /model — Switch models across providers, or use Auto                        │
+│                                                                                                                    │
+├────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ Discover Auto                                                                                                      │
+│ Let Copilot choose the best available model for each task, 10% off right now.                                      │
+│ Click here or enter /model auto to switch                                                                          │
+│ ctrl+x → m switch for this session                                                                                 │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+ ● No copilot-instructions.md found. Run /init to generate.
+
+ ● Tip: /app
+   └ Prefer a visual workspace? Try out the GitHub Copilot desktop app
+      https://github.com/features/ai/github-app
+
+ ❯ Run the shell command `echo terrarium-hook-test`. Then reply with exactly: done                               17:11
+
+ ⌄ Thought for 1s
+ │ The user wants me to:
+ │ 1. Run the shell command `echo terrarium-hook-test`
+ │ 2. Reply with exactly: done
+ │
+ │ Let me use the bash tool to run this command.
+
+ $ Shell Echo test command 1 line…
+   echo terrarium-hook-test
+
+
+ $CWD [⎇ main%]
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ◎ Working · 227 B esc esc interrupt                                                                   Claude Haiku 4.5
+
+===== idle-after-stop (t=10.6s) =====
+ [Current]  Sessions   Issues   Pull requests   Gists
+
+│                                                                                                                    │ ┃
+│  ╭─╮╭─╮                             │  Getting started                                                             │ ┃
+│  ╰─╯╰─╯  Copilot v1.0.103 uses AI.  │  Use the tabs above to explore your sessions and pull requests               │ ┃
+│  █ ▘▝ █  Check for mistakes.        │  /init — Initialize Copilot instructions for this repository                 │ ┃
+│   ▔▔▔▔                              │  /model — Switch models across providers, or use Auto                        │ ┃
+│                                                                                                                    │ ┃
+├────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤ ┃
+│ Discover Auto                                                                                                      │ ┃
+│ Let Copilot choose the best available model for each task, 10% off right now.                                      │ ┃
+│ Click here or enter /model auto to switch                                                                          │ ┃
+│ ctrl+x → m switch for this session                                                                                 │ ┃
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯ ┃
+                                                                                                                       ┃
+ ● No copilot-instructions.md found. Run /init to generate.                                                            ┃
+                                                                                                                       ┃
+ ● Tip: /app                                                                                                           ┃
+   └ Prefer a visual workspace? Try out the GitHub Copilot desktop app                                                 ┃
+      https://github.com/features/ai/github-app                                                                        ┃
+                                                                                                                       ┃
+ ❯ Run the shell command `echo terrarium-hook-test`. Then reply with exactly: done                               17:11 ┃
+                                                                                                                       ┃
+ ⌄ Thought for 1s                                                                                                      ┃
+ │ The user wants me to:                                                                                               ┃
+ │ 1. Run the shell command `echo terrarium-hook-test`                                                                 ┃
+ │ 2. Reply with exactly: done                                                                                         ┃
+ │                                                                                                                     ┃
+ │ Let me use the bash tool to run this command.                                                                       ┃
+                                                                                                                       ┃
+ $ Shell Echo test command 1 line…                                                                                     ┃
+   echo terrarium-hook-test                                                                                            ┃
+                                                                                                                       ┃
+ ● done                                                                                                                ┃
+                                                                                                                       ┃
+ $CWD [⎇ main%]
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ← open sidebar · Interactive · Allow All · / commands · ? help · tab next tab                         Claude Haiku 4.5
+
+===== after-idle-wait (t=30.6s) =====
+ [Current]  Sessions   Issues   Pull requests   Gists
+
+│                                                                                                                    │ ┃
+│  ╭─╮╭─╮                             │  Getting started                                                             │ ┃
+│  ╰─╯╰─╯  Copilot v1.0.103 uses AI.  │  Use the tabs above to explore your sessions and pull requests               │ ┃
+│  █ ▘▝ █  Check for mistakes.        │  /init — Initialize Copilot instructions for this repository                 │ ┃
+│   ▔▔▔▔                              │  /model — Switch models across providers, or use Auto                        │ ┃
+│                                                                                                                    │ ┃
+├────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤ ┃
+│ Discover Auto                                                                                                      │ ┃
+│ Let Copilot choose the best available model for each task, 10% off right now.                                      │ ┃
+│ Click here or enter /model auto to switch                                                                          │ ┃
+│ ctrl+x → m switch for this session                                                                                 │ ┃
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯ ┃
+                                                                                                                       ┃
+ ● No copilot-instructions.md found. Run /init to generate.                                                            ┃
+                                                                                                                       ┃
+ ● Tip: /app                                                                                                           ┃
+   └ Prefer a visual workspace? Try out the GitHub Copilot desktop app                                                 ┃
+      https://github.com/features/ai/github-app                                                                        ┃
+                                                                                                                       ┃
+ ❯ Run the shell command `echo terrarium-hook-test`. Then reply with exactly: done                               17:11 ┃
+                                                                                                                       ┃
+ ⌄ Thought for 1s                                                                                                      ┃
+ │ The user wants me to:                                                                                               ┃
+ │ 1. Run the shell command `echo terrarium-hook-test`                                                                 ┃
+ │ 2. Reply with exactly: done                                                                                         ┃
+ │                                                                                                                     ┃
+ │ Let me use the bash tool to run this command.                                                                       ┃
+                                                                                                                       ┃
+ $ Shell Echo test command 1 line…                                                                                     ┃
+   echo terrarium-hook-test                                                                                            ┃
+                                                                                                                       ┃
+ ● done                                                                                                                ┃
+                                                                                                                       ┃
+ $CWD [⎇ main%]
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ← open sidebar · Interactive · Allow All · / commands · ? help · tab next tab                         Claude Haiku 4.5
+
+===== after-exit (t=34.4s) =====
+ [Current]  Sessions   Issues   Pull requests   Gists
+
+│                                                                                                                    │ ┃
+│  ╭─╮╭─╮                             │  Getting started                                                             │ ┃
+│  ╰─╯╰─╯  Copilot v1.0.103 uses AI.  │  Use the tabs above to explore your sessions and pull requests               │ ┃
+│  █ ▘▝ █  Check for mistakes.        │  /init — Initialize Copilot instructions for this repository                 │ ┃
+│   ▔▔▔▔                              │  /model — Switch models across providers, or use Auto                        │ ┃
+                                                                                                                     │ ┃
+  ╭─╮╭─╮   Changes    +0 -0──────────────────────────────────────────────────────────────────────────────────────────┤ ┃
+  ╰─╯╰─╯   AI Credits 0 (32s)                                                                                        │ ┃
+  █ ▘▝ █   Tokens     ↑ 40.9k (20.3k cached, 20.5k written) • ↓ 130 (47 reasoning)                                   │ ┃
+   ▔▔▔▔    Resume     copilot --resume=3c27d166-9952-489f-8b96-969b46c533c1                                          │ ┃
+│ ctrl+x → m switch for this session                                                                                 │ ┃
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯ ┃
+                                                                                                                       ┃
+ ● No copilot-instructions.md found. Run /init to generate.                                                            ┃
+                                                                                                                       ┃
+ ● Tip: /app                                                                                                           ┃
+   └ Prefer a visual workspace? Try out the GitHub Copilot desktop app                                                 ┃
+      https://github.com/features/ai/github-app                                                                        ┃
+                                                                                                                       ┃
+ ❯ Run the shell command `echo terrarium-hook-test`. Then reply with exactly: done                               17:11 ┃
+                                                                                                                       ┃
+ ⌄ Thought for 1s                                                                                                      ┃
+ │ The user wants me to:                                                                                               ┃
+ │ 1. Run the shell command `echo terrarium-hook-test`                                                                 ┃
+ │ 2. Reply with exactly: done                                                                                         ┃
+ │                                                                                                                     ┃
+ │ Let me use the bash tool to run this command.                                                                       ┃
+                                                                                                                       ┃
+ $ Shell Echo test command 1 line…                                                                                     ┃
+   echo terrarium-hook-test                                                                                            ┃
+                                                                                                                       ┃
+ ● done                                                                                                                ┃
+                                                                                                                       ┃
+
+╭─╮╭─╮   Changes    +0 -0
+╰─╯╰─╯   AI Credits 0 (31s)
+█ ▘▝ █   Tokens     ↑ 40.9k (20.3k cached, 20.5k written) • ↓ 130 (47 reasoning)
+ ▔▔▔▔    Resume     copilot --resume=3c27d166-9952-489f-8b96-969b46c533c1
+
