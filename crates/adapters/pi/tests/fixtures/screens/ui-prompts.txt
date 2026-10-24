@@ -1,0 +1,328 @@
+===== idle =====
+Warning: No project session found with id 'a6acb784-5d88-4161-8792-90143365c46a'; creating a new session with that id.
+
+ pi v0.85.1
+ escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash · ctrl+o more
+ Press ctrl+o to show full startup help and loaded resources.
+
+ Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+
+[Context]
+  $AGENT_DIR/prompt.md
+
+[Extensions]
+  ask.ts, terrarium.ts
+
+ This project is not trusted. Project .pi resources and packages are ignored. Use /trust to save a trust decision, then
+ restart pi.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+$CWD
+0.0%/272k (auto)                                                                                   gpt-5.6-luna • medium
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+===== select-shown =====
+Warning: No project session found with id 'a6acb784-5d88-4161-8792-90143365c46a'; creating a new session with that id.
+
+ pi v0.85.1
+ escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash · ctrl+o more
+ Press ctrl+o to show full startup help and loaded resources.
+
+ Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+
+[Context]
+  $AGENT_DIR/prompt.md
+
+[Extensions]
+  ask.ts, terrarium.ts
+
+ This project is not trusted. Project .pi resources and packages are ignored. Use /trust to save a trust decision, then
+ restart pi.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+ Pick a colour
+
+ → Red
+   Green
+   Blue
+
+ ↑↓ navigate  enter select  escape/ctrl+c cancel
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+$CWD
+0.0%/272k (auto)                                                                                   gpt-5.6-luna • medium
+
+
+
+
+
+
+
+
+
+===== select-answered =====
+Warning: No project session found with id 'a6acb784-5d88-4161-8792-90143365c46a'; creating a new session with that id.
+
+ pi v0.85.1
+ escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash · ctrl+o more
+ Press ctrl+o to show full startup help and loaded resources.
+
+ Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+
+[Context]
+  $AGENT_DIR/prompt.md
+
+[Extensions]
+  ask.ts, terrarium.ts
+
+ This project is not trusted. Project .pi resources and packages are ignored. Use /trust to save a trust decision, then
+ restart pi.
+
+ picked Green
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+$CWD
+0.0%/272k (auto)                                                                                   gpt-5.6-luna • medium
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+===== confirm-shown =====
+Warning: No project session found with id 'a6acb784-5d88-4161-8792-90143365c46a'; creating a new session with that id.
+
+ pi v0.85.1
+ escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash · ctrl+o more
+ Press ctrl+o to show full startup help and loaded resources.
+
+ Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+
+[Context]
+  $AGENT_DIR/prompt.md
+
+[Extensions]
+  ask.ts, terrarium.ts
+
+ This project is not trusted. Project .pi resources and packages are ignored. Use /trust to save a trust decision, then
+ restart pi.
+
+ picked Green
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+ Really?
+ Proceed with the test?
+
+ → Yes
+   No
+
+ ↑↓ navigate  enter select  escape/ctrl+c cancel
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+$CWD
+0.0%/272k (auto)                                                                                   gpt-5.6-luna • medium
+
+
+
+
+
+
+
+===== confirm-answered =====
+Warning: No project session found with id 'a6acb784-5d88-4161-8792-90143365c46a'; creating a new session with that id.
+
+ pi v0.85.1
+ escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash · ctrl+o more
+ Press ctrl+o to show full startup help and loaded resources.
+
+ Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+
+[Context]
+  $AGENT_DIR/prompt.md
+
+[Extensions]
+  ask.ts, terrarium.ts
+
+ This project is not trusted. Project .pi resources and packages are ignored. Use /trust to save a trust decision, then
+ restart pi.
+
+ confirmed true
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+$CWD
+0.0%/272k (auto)                                                                                   gpt-5.6-luna • medium
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+===== no-key-0.3s =====
+Warning: No project session found with id 'a6acb784-5d88-4161-8792-90143365c46a'; creating a new session with that id.
+
+ pi v0.85.1
+ escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash · ctrl+o more
+ Press ctrl+o to show full startup help and loaded resources.
+
+ Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+
+[Context]
+  $AGENT_DIR/prompt.md
+
+[Extensions]
+  ask.ts, terrarium.ts
+
+ This project is not trusted. Project .pi resources and packages are ignored. Use /trust to save a trust decision, then
+ restart pi.
+
+ confirmed true
+
+ Error: No API key found for openai-codex.
+
+ Use /login to log into a provider via OAuth or API key. See:
+
+ $PI_PACKAGE
+ /docs/providers.md
+
+ $PI_PACKAGE
+ /docs/models.md
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+$CWD
+0.0%/272k (auto)                                                                                   gpt-5.6-luna • medium
+
+
+
+
+
+===== no-key-settled =====
+Warning: No project session found with id 'a6acb784-5d88-4161-8792-90143365c46a'; creating a new session with that id.
+
+ pi v0.85.1
+ escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash · ctrl+o more
+ Press ctrl+o to show full startup help and loaded resources.
+
+ Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+
+[Context]
+  $AGENT_DIR/prompt.md
+
+[Extensions]
+  ask.ts, terrarium.ts
+
+ This project is not trusted. Project .pi resources and packages are ignored. Use /trust to save a trust decision, then
+ restart pi.
+
+ confirmed true
+
+ Error: No API key found for openai-codex.
+
+ Use /login to log into a provider via OAuth or API key. See:
+
+ $PI_PACKAGE
+ /docs/providers.md
+
+ $PI_PACKAGE
+ /docs/models.md
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+$CWD
+0.0%/272k (auto)                                                                                   gpt-5.6-luna • medium
+
+
+
+
+
+===== after-ctrl-d =====
+Warning: No project session found with id 'a6acb784-5d88-4161-8792-90143365c46a'; creating a new session with that id.
+
+ pi v0.85.1
+ escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash · ctrl+o more
+ Press ctrl+o to show full startup help and loaded resources.
+
+ Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+
+[Context]
+  $AGENT_DIR/prompt.md
+
+[Extensions]
+  ask.ts, terrarium.ts
+
+ This project is not trusted. Project .pi resources and packages are ignored. Use /trust to save a trust decision, then
+ restart pi.
+
+ confirmed true
+
+ Error: No API key found for openai-codex.
+
+ Use /login to log into a provider via OAuth or API key. See:
+
+ $PI_PACKAGE
+ /docs/providers.md
+
+ $PI_PACKAGE
+ /docs/models.md
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+$CWD
+0.0%/272k (auto)                                                                                   gpt-5.6-luna • medium
+
+
+
+
+

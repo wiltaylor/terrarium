@@ -1989,6 +1989,7 @@ dependencies = [
  "tempfile",
  "terrarium-adapter-claude",
  "terrarium-core",
+ "terrarium-host",
  "terrarium-runner",
  "terrariumd",
  "thiserror 2.0.21",

@@ -1,0 +1,271 @@
+===== early-0.3s (t=0.7s) =====
+
+ pi v0.85.1
+ escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash · ctrl+o more
+ Press ctrl+o to show full startup help and loaded resources.
+
+ Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+[Extensions]
+  terrarium.ts
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+$CWD
+$0.000 (sub) 0.0%/272k (auto)                                                 (openai-codex) gpt-5.6-luna • thinking off
+
+===== idle-start (t=1.7s) =====
+
+ pi v0.85.1
+ escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash · ctrl+o more
+ Press ctrl+o to show full startup help and loaded resources.
+
+ Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+[Extensions]
+  terrarium.ts
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+$CWD
+$0.000 (sub) 0.0%/272k (auto)                                                 (openai-codex) gpt-5.6-luna • thinking off
+
+===== typed-after-LF (t=2.8s) =====
+
+ pi v0.85.1
+ escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash · ctrl+o more
+ Press ctrl+o to show full startup help and loaded resources.
+
+ Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+[Extensions]
+  terrarium.ts
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+abc
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+$CWD
+$0.000 (sub) 0.0%/272k (auto)                                                 (openai-codex) gpt-5.6-luna • thinking off
+
+===== idle-after-ctrl-c-clear (t=3.4s) =====
+
+ pi v0.85.1
+ escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash · ctrl+o more
+ Press ctrl+o to show full startup help and loaded resources.
+
+ Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+[Extensions]
+  terrarium.ts
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+$CWD
+$0.000 (sub) 0.0%/272k (auto)                                                 (openai-codex) gpt-5.6-luna • thinking off
+
+===== busy-T1 (t=3.9s) =====
+
+ pi v0.85.1
+ escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash · ctrl+o more
+ Press ctrl+o to show full startup help and loaded resources.
+
+ Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+[Extensions]
+  terrarium.ts
+
+
+ First line.
+ Second line.
+ Reply with exactly: two
+
+
+── ⠸ Working ───────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+$CWD
+$0.000 (sub) 0.0%/272k (auto)                                                 (openai-codex) gpt-5.6-luna • thinking off
+
+===== idle-after-T1 (t=6.4s) =====
+
+ pi v0.85.1
+ escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash · ctrl+o more
+ Press ctrl+o to show full startup help and loaded resources.
+
+ Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+[Extensions]
+  terrarium.ts
+
+
+ First line.
+ Second line.
+ Reply with exactly: two
+
+
+ two
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+$CWD
+↑1.1k ↓5 $0.000 (sub) 0.4%/272k (auto)                                        (openai-codex) gpt-5.6-luna • thinking off
+
+===== busy-T3-tool (t=7.9s) =====
+
+ pi v0.85.1
+ escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash · ctrl+o more
+ Press ctrl+o to show full startup help and loaded resources.
+
+ Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+[Extensions]
+  terrarium.ts
+
+
+ First line.
+ Second line.
+ Reply with exactly: two
+
+
+ two
+
+
+ Use the bash tool to run: sleep 5. Then reply with exactly: slept
+
+
+
+ $ sleep 5 (timeout 10s)
+
+ Elapsed 0.0s
+
+
+── ⠧ Working ───────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+$CWD
+↑1.2k ↓29 R1.0k CH89.5% $0.000 (sub) 0.4%/272k (auto)                         (openai-codex) gpt-5.6-luna • thinking off
+
+===== busy-typed-T4 (t=8.3s) =====
+
+ pi v0.85.1
+ escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash · ctrl+o more
+ Press ctrl+o to show full startup help and loaded resources.
+
+ Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+[Extensions]
+  terrarium.ts
+
+
+ First line.
+ Second line.
+ Reply with exactly: two
+
+
+ two
+
+
+ Use the bash tool to run: sleep 5. Then reply with exactly: slept
+
+
+
+ $ sleep 5 (timeout 10s)
+
+ Elapsed 0.0s
+
+
+── ⠙ Working ───────────────────────────────────────────────────────────────────────────────────────────────────────────
+Also add the word: queued
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+$CWD
+↑1.2k ↓29 R1.0k CH89.5% $0.000 (sub) 0.4%/272k (auto)                         (openai-codex) gpt-5.6-luna • thinking off
+
+===== busy-after-T4-enter (t=9.3s) =====
+
+ pi v0.85.1
+ escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash · ctrl+o more
+ Press ctrl+o to show full startup help and loaded resources.
+
+ Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+[Extensions]
+  terrarium.ts
+
+
+ First line.
+ Second line.
+ Reply with exactly: two
+
+
+ two
+
+
+ Use the bash tool to run: sleep 5. Then reply with exactly: slept
+
+
+
+ $ sleep 5 (timeout 10s)
+
+ Elapsed 1.0s
+
+
+ Steering: Also add the word: queued
+ ↳ Alt+Up to edit all queued messages
+
+── ⠼ Working ───────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+$CWD
+↑1.2k ↓29 R1.0k CH89.5% $0.000 (sub) 0.4%/272k (auto)                         (openai-codex) gpt-5.6-luna • thinking off
+
+===== idle-after-T3-T4 (t=15.6s) =====
+ pi v0.85.1
+ escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash · ctrl+o more
+ Press ctrl+o to show full startup help and loaded resources.
+
+ Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+[Extensions]
+  terrarium.ts
+
+
+ First line.
+ Second line.
+ Reply with exactly: two
+
+
+ two
+
+
+ Use the bash tool to run: sleep 5. Then reply with exactly: slept
+
+
+
+ $ sleep 5 (timeout 10s)
+
+ (no output)
+
+ Took 5.0s
+
+
+
+ Also add the word: queued
+
+
+ slept queued
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+$CWD
+↑2.4k ↓73 R1.0k CH0.0% $0.001 (sub) 0.5%/272k (auto)                          (openai-codex) gpt-5.6-luna • thinking off
+
