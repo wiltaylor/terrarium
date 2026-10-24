@@ -46,6 +46,11 @@ logs: require-docker
 shell: require-docker
 	docker compose exec -u terrarium terrarium bash
 
+# Start the stack, kill terrariumd with SIGKILL, and check that it comes back and reconnects to the live runner
+[group('stack')]
+crash-test: up require-uv
+	uv run docker/crash-test.py
+
 # Create config/*, state/, and the definition directories, owned by you
 [group('config')]
 volumes-init:

@@ -138,5 +138,8 @@ USER terrarium
 WORKDIR /home/terrarium
 # 8080 dashboard and API, 8081 artifact origin (§15.2), 8082 host agent dial-in (§19).
 EXPOSE 8080 8081 8082
+# tini is PID 1: it reaps the runners that terrariumd leaves when it dies.
+# No `-g`: tini sends SIGTERM to the entrypoint only, and the entrypoint
+# stops terrariumd and then the runners in order (docker/README.md).
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/terrarium-entrypoint"]
 CMD ["terrariumd"]

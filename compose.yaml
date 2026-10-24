@@ -8,6 +8,9 @@ services:
       args: { UID: "${TERRARIUM_UID:-1000}", GID: "${TERRARIUM_GID:-1000}" }
     image: ${TERRARIUM_IMAGE:-terrarium:dev}
     restart: unless-stopped
+    # The entrypoint stops terrariumd, then gives the agent runners
+    # TERRARIUM_SHUTDOWN_GRACE (20 s) to end their harnesses (docker/README.md).
+    stop_grace_period: 40s
     ports:
       - "${TERRARIUM_PORT:-8080}:8080"                 # dashboard and API
       - "${TERRARIUM_ARTIFACT_PORT:-8081}:8081"        # artifact serving origin (§15.2)
