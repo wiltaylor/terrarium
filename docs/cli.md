@@ -380,7 +380,9 @@ terrarium admin target ls
 terrarium admin target rm <name>
 terrarium admin target verb <name> up|down|snapshot|restore|status [--snapshot name]
 terrarium admin host ls
-terrarium admin host new <name>                prints the token once, alone on stdout
+terrarium admin host show <name>               the link, the capabilities, and the token use record
+terrarium admin host new <name> [--enrol]      prints the token once, alone on stdout
+terrarium admin host rotate <name> [--enrol]   a new token, printed once, alone on stdout
 terrarium admin host rm <name>                 revokes the token
 terrarium admin audit [--since time] [--actor a] [--action a]
 terrarium admin fleet validate|plan|apply|ls|show|export ...
@@ -389,9 +391,37 @@ terrarium admin fleet validate|plan|apply|ls|show|export ...
 `admin role grant` reads the roles, adds the role, and writes the whole set.
 `admin role revoke` removes the role in the same way. `admin target new`
 makes a project target. Use `--global` for a global target (sysadmin).
-`admin host new` and `admin host rm` are for the operator only (PLAN §10:
-host agent tokens are operator-only). `just host::token` can
-use `admin host new` in a pipe.
+`admin host new`, `admin host rotate`, and `admin host rm` are for the
+operator only (PLAN §10: host agent tokens are operator-only). An agent gets
+`403`. The API is [api.md §17.1](api.md#171-host-agents).
+
+| Command | Request | Text output |
+|---|---|---|
+| `admin host show <name>` | `GET /api/hosts/{name}` | One `key value` line each for `host`, `id`, `status`, `online`, `sessions`, `os`, `version`, `connected_at`, `created_at`, `first_used_at`, `last_used_at`, `last_used_from`, `rotated_at`, `enrol_expires_at`, and `capabilities`. An empty value shows as `-`. |
+| `admin host new <name>` | `POST /api/hosts` `{"name"}` | The `thk_` token, alone on stdout. |
+| `admin host new <name> --enrol` | `POST /api/hosts` `{"name", "enrol": true}` | The `the_` enrol token, alone on stdout. A line on stderr gives the expiry (`token_expires_at`, 10 minutes). |
+| `admin host rotate <name>` | `POST /api/hosts/{name}/rotate`, no body | The new `thk_` token, alone on stdout. |
+| `admin host rotate <name> --enrol` | `POST /api/hosts/{name}/rotate` `{"enrol": true}` | The new enrol token on stdout, and its expiry on stderr. |
+| `admin host rm <name>` | `DELETE /api/hosts/{name}` | `revoked host agent <name>` |
+
+- The token is on stdout one time only. The daemon keeps only its SHA-256.
+  Because stdout has only the token, the output can go into a pipe:
+  `terrarium admin host new lab1 | ssh lab1 sudo -u terrarium terrarium-host token-file /etc/terrarium-host/token`.
+- With `--json`, each command prints the daemon's answer. For `new` and
+  `rotate`, the answer has `token`, `token_kind` (`host` or `enrol`), and,
+  for an enrol token, `token_expires_at`.
+- After `rotate`, the old token does not work for new connections. A live
+  link stays up until it ends. Write the new token to `token_file` on the
+  host, then restart the host agent.
+- Use `show` to look for a leaked token: a `first_used_at` or a
+  `last_used_from` that you do not expect is a warning sign.
+- A host that exists gets `409` from `new`. Use `rotate` to give it a new
+  token.
+
+`just host::token <name> [enrol]` runs `admin host new <name>`, with
+`--enrol` when the second argument is `enrol`. `just host::install`
+([host-protocol.md "Install"](host-protocol.md#install)) uses
+`admin host new --enrol` or `admin host rotate --enrol`.
 
 ## 7. Examples
 

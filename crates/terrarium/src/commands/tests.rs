@@ -2334,3 +2334,172 @@ async fn json_prints_the_server_answer() {
     let v: Value = serde_json::from_str(&out).unwrap();
     assert_eq!(v, json!({"id": "TER-1", "title": "x"}));
 }
+
+#[tokio::test]
+async fn host_tokens_enrol_rotate_and_revoke() {
+    // `new --enrol`: the enrol body, the token alone on the first line, the
+    // expiry after it (stderr in a terminal).
+    let out = ok(
+        false,
+        &["admin", "host", "new", "lab1", "--enrol"],
+        vec![(
+            201,
+            json!({"name": "lab1", "token": "the_abc", "token_kind": "enrol",
+                   "token_expires_at": "2026-10-24T06:40:00.000Z"}),
+        )],
+        vec![(
+            Post,
+            "/api/hosts",
+            vec![],
+            Some(json!({"name": "lab1", "enrol": true})),
+        )],
+    )
+    .await;
+    assert_eq!(
+        out,
+        "the_abc\nenrol token for host lab1: one use, expires 2026-10-24T06:40:00.000Z\n"
+    );
+    // `--json` gives the whole answer, so a script can read the expiry.
+    let out = ok(
+        false,
+        &["--json", "admin", "host", "new", "lab1", "--enrol"],
+        vec![(
+            201,
+            json!({"name": "lab1", "token": "the_abc", "token_kind": "enrol",
+                   "token_expires_at": "2026-10-24T06:40:00.000Z"}),
+        )],
+        vec![(
+            Post,
+            "/api/hosts",
+            vec![],
+            Some(json!({"name": "lab1", "enrol": true})),
+        )],
+    )
+    .await;
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["token_kind"], "enrol");
+    assert_eq!(v["token_expires_at"], "2026-10-24T06:40:00.000Z");
+    // `rotate`: no body; a long-lived token prints alone.
+    let out = ok(
+        false,
+        &["admin", "host", "rotate", "lab1"],
+        vec![(
+            200,
+            json!({"name": "lab1", "token": "thk_new", "token_kind": "host"}),
+        )],
+        vec![req(Post, "/api/hosts/lab1/rotate")],
+    )
+    .await;
+    assert_eq!(out, "thk_new\n");
+    // `rotate --enrol`: the enrol body.
+    let out = ok(
+        false,
+        &["admin", "host", "rotate", "lab1", "--enrol"],
+        vec![(
+            200,
+            json!({"name": "lab1", "token": "the_xyz", "token_kind": "enrol",
+                   "token_expires_at": "2026-10-24T07:00:00.000Z"}),
+        )],
+        vec![(
+            Post,
+            "/api/hosts/lab1/rotate",
+            vec![],
+            Some(json!({"enrol": true})),
+        )],
+    )
+    .await;
+    assert!(out.starts_with("the_xyz\n"), "{out}");
+    assert!(out.contains("expires 2026-10-24T07:00:00.000Z"), "{out}");
+    // The name is a path segment: it is encoded.
+    ok(
+        false,
+        &["admin", "host", "rotate", "lab 1"],
+        vec![(200, json!({"token": "thk_x", "token_kind": "host"}))],
+        vec![req(Post, "/api/hosts/lab%201/rotate")],
+    )
+    .await;
+    // `rm` revokes.
+    let out = ok(
+        false,
+        &["admin", "host", "rm", "lab1"],
+        vec![(204, Value::Null)],
+        vec![req(Delete, "/api/hosts/lab1")],
+    )
+    .await;
+    assert_eq!(out, "revoked host agent lab1\n");
+    // An agent gets 403 from the daemon: a refusal, not a crash.
+    let r = exec(
+        true,
+        &["admin", "host", "rotate", "lab1"],
+        vec![(
+            403,
+            json!({"error": {"code": "forbidden", "message": "rotating a host agent token needs the operator"}}),
+        )],
+        None,
+    )
+    .await;
+    let e = r.result.unwrap_err();
+    assert!(e.to_string().contains("operator"), "{e}");
+    assert_ne!(exit_code_of(&e), exit::OK);
+}
+
+#[tokio::test]
+async fn host_show_prints_the_usage_record() {
+    let host = json!({
+        "name": "lab1", "id": "01JB", "host_id": "01JB", "status": "online", "online": true,
+        "sessions": 1,
+        "capabilities": {"docker": {"present": true, "version": "29.8.0"},
+                         "vmlab": {"present": false}, "shell": "/bin/bash"},
+        "os": "linux", "arch": "x86_64", "version": "0.1.0",
+        "connected_at": "2026-10-24T06:36:54.149Z", "created_at": "2026-10-24T06:30:00.000Z",
+        "first_used_at": "2026-10-24T06:31:02.410Z", "last_used_at": "2026-10-24T06:36:54.149Z",
+        "last_used_from": "10.0.0.7:51544", "rotated_at": null,
+        "enrol_expires_at": null
+    });
+    let out = ok(
+        false,
+        &["admin", "host", "show", "lab1"],
+        vec![(200, host.clone())],
+        vec![req(Get, "/api/hosts/lab1")],
+    )
+    .await;
+    for line in [
+        "host             lab1\n",
+        "online           true\n",
+        "first_used_at    2026-10-24T06:31:02.410Z\n",
+        "last_used_at     2026-10-24T06:36:54.149Z\n",
+        "last_used_from   10.0.0.7:51544\n",
+        "rotated_at       -\n",
+        "enrol_expires_at -\n",
+        "capabilities     docker 29.8.0, vmlab no, shell /bin/bash\n",
+    ] {
+        assert!(out.contains(line), "missing {line:?} in\n{out}");
+    }
+    // A host that never dialled: no capabilities yet, an open enrol token.
+    let out = ok(
+        false,
+        &["admin", "host", "show", "lab2"],
+        vec![(
+            200,
+            json!({"name": "lab2", "status": "offline", "online": false, "capabilities": {},
+                   "enrol_expires_at": "2026-10-24T06:40:00.000Z"}),
+        )],
+        vec![req(Get, "/api/hosts/lab2")],
+    )
+    .await;
+    assert!(out.contains("capabilities     -\n"), "{out}");
+    assert!(
+        out.contains("enrol_expires_at 2026-10-24T06:40:00.000Z\n"),
+        "{out}"
+    );
+    // `--json` passes the daemon's object through.
+    let out = ok(
+        false,
+        &["--json", "admin", "host", "show", "lab1"],
+        vec![(200, host.clone())],
+        vec![req(Get, "/api/hosts/lab1")],
+    )
+    .await;
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v, host);
+}

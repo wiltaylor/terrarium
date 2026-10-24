@@ -218,13 +218,24 @@ pub async fn hosts(ctx: &Ctx, cmd: &HostCmd) -> anyhow::Result<()> {
                 )
             })
         }
-        HostCmd::New { name } => {
-            let v = ctx
-                .api
-                .post("/api/hosts", Some(json!({"name": name})))
-                .await?;
-            // The token alone on stdout, so it can go into a pipe.
-            ctx.emit(&v, |c, v| c.line(field(v, "token")))
+        HostCmd::Show { name } => {
+            let path = format!("/api/hosts/{}", crate::transport::encode(name));
+            let v = ctx.api.get(&path, vec![]).await?;
+            ctx.emit(&v, print_host)
+        }
+        HostCmd::New { name, enrol } => {
+            let mut body = json!({"name": name});
+            if *enrol {
+                body["enrol"] = true.into();
+            }
+            let v = ctx.api.post("/api/hosts", Some(body)).await?;
+            ctx.emit(&v, print_token)
+        }
+        HostCmd::Rotate { name, enrol } => {
+            let path = format!("/api/hosts/{}/rotate", crate::transport::encode(name));
+            let body = enrol.then(|| json!({"enrol": true}));
+            let v = ctx.api.post(&path, body).await?;
+            ctx.emit(&v, print_token)
         }
         HostCmd::Rm { name } => {
             let path = format!("/api/hosts/{}", crate::transport::encode(name));
@@ -232,6 +243,66 @@ pub async fn hosts(ctx: &Ctx, cmd: &HostCmd) -> anyhow::Result<()> {
             ctx.emit(&v, |c, _| c.line(format!("revoked host agent {name}")))
         }
     }
+}
+
+/// The token alone on stdout, so it can go into a pipe. For an enrol
+/// token, the expiry goes to stderr.
+fn print_token(ctx: &Ctx, v: &Value) {
+    ctx.line(field(v, "token"));
+    if v["token_kind"] == "enrol" {
+        let line = format!(
+            "enrol token for host {}: one use, expires {}\n",
+            field(v, "name"),
+            field(v, "token_expires_at"),
+        );
+        ctx.out.write_bytes(true, line.as_bytes());
+    }
+}
+
+/// `admin host show`: the link, the capabilities, and the token use record
+/// (docs/api.md §17.1).
+fn print_host(ctx: &Ctx, v: &Value) {
+    let rows: [(&str, String); 15] = [
+        ("host", field(v, "name")),
+        ("id", field(v, "id")),
+        ("status", field(v, "status")),
+        ("online", field(v, "online")),
+        ("sessions", field(v, "sessions")),
+        ("os", format!("{}/{}", field(v, "os"), field(v, "arch"))),
+        ("version", field(v, "version")),
+        ("connected_at", field(v, "connected_at")),
+        ("created_at", field(v, "created_at")),
+        ("first_used_at", field(v, "first_used_at")),
+        ("last_used_at", field(v, "last_used_at")),
+        ("last_used_from", field(v, "last_used_from")),
+        ("rotated_at", field(v, "rotated_at")),
+        ("enrol_expires_at", field(v, "enrol_expires_at")),
+        ("capabilities", capability_line(v)),
+    ];
+    for (k, val) in rows {
+        ctx.line(format!("{k:<17}{val}"));
+    }
+}
+
+/// `docker 29.8.0, vmlab no, shell /bin/bash`, or `-` before the first `hello`.
+fn capability_line(v: &Value) -> String {
+    let caps = &v["capabilities"];
+    if caps.as_object().is_none_or(serde_json::Map::is_empty) {
+        return "-".into();
+    }
+    let tool = |name: &str| {
+        let t = &caps[name];
+        match (t["present"].as_bool(), t["version"].as_str()) {
+            (Some(true), Some(ver)) => format!("{name} {ver}"),
+            (Some(true), None) => format!("{name} yes"),
+            _ => format!("{name} no"),
+        }
+    };
+    let mut parts = vec![tool("docker"), tool("vmlab")];
+    if let Some(sh) = caps["shell"].as_str() {
+        parts.push(format!("shell {sh}"));
+    }
+    parts.join(", ")
 }
 
 pub async fn usage(ctx: &Ctx, cmd: Option<&UsageCmd>) -> anyhow::Result<()> {

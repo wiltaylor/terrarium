@@ -662,38 +662,82 @@ The systemd unit is `crates/terrarium-host/terrarium-host.service`. It runs
 `/usr/local/bin/terrarium-host --config /etc/terrarium-host/config.toml run`
 as the user `terrarium`, reads optional overrides from
 `/etc/terrarium-host/env`, adds `~/.local/bin` to `PATH` (for a per-user
-vmlab), and restarts on failure. Edit `User=` and `SupplementaryGroups=` to
-match the host.
+vmlab), and restarts on failure. `just host::install` sets `User=` and
+`Group=` from `--user`. Edit `SupplementaryGroups=` to match the host.
 
-`just host::token` works. The `just host::install` recipe is a stub today;
-it must do the steps under its heading below.
+**`just host::token <name> [enrol]`**
 
-**`just host::token <host>`**
-
-1. It runs `terrarium admin host new <host>` against the daemon (the Unix
-   socket, or `TERRARIUM_URL` with `TERRARIUM_TOKEN`). Only the operator
-   can do this. The daemon makes the host registry entry and stores only a
-   hash of the token. A host that exists already gets `409`: run
-   `terrarium admin host rm <host>` first to get a new token.
+1. It runs `terrarium admin host new <name>` against the daemon (the Unix
+   socket, or `TERRARIUM_URL` with `TERRARIUM_TOKEN`). With `enrol` as the
+   second argument, it adds `--enrol`. Only the operator can do this. The
+   daemon makes the host registry entry and stores only a hash of the
+   token. A host that exists already gets `409`: run
+   `terrarium admin host rotate <name>` to get a new token.
 2. It prints the token once on stdout, so it can go into a pipe. It prints
-   nothing else on stdout.
+   nothing else on stdout. For an enrol token, the expiry goes to stderr.
 
-**`just host::install <host>`**
+**`just host::install <user@host> [name] [flags]`**
 
-1. Build the static binary (`host::build`).
-2. Copy `target/host/terrarium-host` to `<host>:/usr/local/bin/` and
-   `terrarium-host.service` to `<host>:/etc/systemd/system/` over ssh.
-3. If `/etc/terrarium-host/config.toml` does not exist on the host, write
-   one with `daemon_url` (`wss://`, the host of `TERRARIUM_PUBLIC_URL`, port
-   8082), `token_file = "/etc/terrarium-host/token"`, `name = "<host>"`, and,
-   for a self-signed daemon, `server_fingerprint_sha256` from
-   `terrarium-host fingerprint config/tls/host-cert.pem`.
-4. If `/etc/terrarium-host/token` does not exist, run
-   `just host::token <host> | ssh <host> sudo terrarium-host token-file /etc/terrarium-host/token`,
-   then `chown` the file to the service user.
-5. Make the service user if it does not exist, then run
-   `systemctl daemon-reload` and `systemctl enable --now terrarium-host`.
-6. Run `terrarium-host check --probe` on the host and print the result.
+The recipe runs `host::build`, then `scripts/host-install.py` with `uv`.
+The script uses `ssh` and `scp` to `<user@host>` as ssh takes it (use
+`~/.ssh/config` or `--ssh-opt` for a port or a key). `name` is the host
+agent name. The default is the first label of the host name (`lab1.lan`
+gives `lab1`). The ssh user must be `root`, or must have `sudo` with no
+password prompt: the script uses `sudo -n`.
+
+The script does these steps:
+
+1. It finds `daemon_url`. The order is `--daemon-url`, then
+   `TERRARIUM_HOST_DAEMON_URL`, then the host of `TERRARIUM_PUBLIC_URL`.
+   A bare host name becomes `wss://<name>:8082`. A `localhost` URL stops
+   the install, because a remote machine cannot dial it.
+2. For a `wss://` URL, it finds the pin
+   (`server_fingerprint_sha256`). The order is `--fingerprint`, then
+   `config/tls/host-cert.fingerprint`, then
+   `terrarium-host fingerprint config/tls/host-cert.pem` (`--cert` sets
+   another certificate). With no certificate, or with `--no-pin`, the
+   config has no pin, and the host agent checks the daemon against the
+   system roots.
+3. It reads what is on the host already: the config, the token file, the
+   unit, and the service user.
+4. It copies `target/host/terrarium-host`, the unit (with `User=` and
+   `Group=` set), and a new config to the home directory of the ssh user
+   with `scp`. It does not copy the config when one exists.
+5. As root on the host, it makes the service user if it does not exist
+   (`useradd --system`), installs the binary in `/usr/local/bin/`, the
+   unit in `/etc/systemd/system/`, and runs `systemctl daemon-reload`. It
+   makes `/etc/terrarium-host` with mode 0700, owned by the service user,
+   because the host agent writes the new token through a temporary file
+   and a rename. A new config gets mode 0640 (`root`, the service group),
+   with `daemon_url`, `token_file = "/etc/terrarium-host/token"`, `name`,
+   and the pin. An existing config does not change.
+6. It gets an enrol token from the daemon:
+   `terrarium admin host new <name> --enrol`, or
+   `terrarium admin host rotate <name> --enrol` when the daemon knows the
+   host already. When the token file exists on the host, the script asks
+   before it replaces it. When the daemon knows the host but the host has
+   no token file, the script asks before it rotates. `--yes` answers yes.
+   On a no, the existing token file stays.
+7. It writes the enrol token to the token file with
+   `sudo -u <user> terrarium-host token-file /etc/terrarium-host/token`.
+   The token goes on stdin, not in an argument. The file has mode 0600.
+8. It runs `systemctl enable terrarium-host` and
+   `systemctl restart terrarium-host`. The host agent dials with the enrol
+   token in its 10 minutes and swaps it for the long-lived token
+   ([Tokens](#tokens)).
+9. It runs `terrarium-host check --probe` on the host as the service user
+   and prints the result. A failed probe makes the script exit 1. After a
+   new token, it waits up to 20 seconds for `admin host show` to show the
+   host online.
+
+A second run is safe. It replaces the binary and the unit, keeps the
+config, and asks before it replaces the token file.
+
+`just host::install <user@host> [name] --dry-run` skips `host::build`,
+prints each `ssh`, `scp`, and `terrarium` command and the generated unit
+and config, and runs nothing. A dry run assumes a new host. The enrol token
+shows as `<enrol token>`. `just host::install-test` runs the unit tests of
+the script (`scripts/test_host_install.py`).
 
 ## What the daemon side must do
 

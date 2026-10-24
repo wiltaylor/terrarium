@@ -1001,9 +1001,23 @@ pub enum AdminTargetCmd {
 pub enum HostCmd {
     /// List host agents
     Ls,
-    /// Register a host agent; prints its token once on stdout
-    New { name: String },
-    /// Revoke a host agent's token
+    /// Show a host agent: the link, the capabilities, and the token use record
+    Show { name: String },
+    /// Register a host agent; prints its token once, alone on stdout
+    New {
+        name: String,
+        /// Issue a one-time enrol token (10 minutes) in place of the long-lived token
+        #[arg(long)]
+        enrol: bool,
+    },
+    /// Make a new token for a host agent; prints it once, alone on stdout
+    Rotate {
+        name: String,
+        /// Issue a one-time enrol token (10 minutes) in place of the long-lived token
+        #[arg(long)]
+        enrol: bool,
+    },
+    /// Revoke a host agent's token and remove the host agent
     Rm { name: String },
 }
 
