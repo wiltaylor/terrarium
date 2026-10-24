@@ -1,0 +1,30 @@
+[package]
+name = "terrarium"
+description = "The Terrarium CLI, for the operator and for agents"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "terrarium"
+path = "src/main.rs"
+
+[dependencies]
+terrarium-core.workspace = true
+tokio.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+http-body-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+ulid.workspace = true
+
+[lints]
+workspace = true

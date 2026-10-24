@@ -1,0 +1,15 @@
+[package]
+name = "terrarium-host"
+description = "The Terrarium host agent: runs commands, Docker, and vmlab for the daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+terrarium-core.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+
+[lints]
+workspace = true

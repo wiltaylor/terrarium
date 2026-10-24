@@ -1,0 +1,15 @@
+[package]
+name = "terrarium-adapter-pi"
+description = "Terrarium adapter for the pi harness"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+terrarium-core.workspace = true
+semver.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

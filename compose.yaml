@@ -1,0 +1,40 @@
+# Terrarium stack (PLAN §23.4). Start it with `just up`; stop it with `just down`.
+# Every variable is documented in .env.example.
+services:
+  terrarium:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args: { UID: "${TERRARIUM_UID:-1000}", GID: "${TERRARIUM_GID:-1000}" }
+    image: ${TERRARIUM_IMAGE:-terrarium:dev}
+    restart: unless-stopped
+    ports:
+      - "${TERRARIUM_PORT:-8080}:8080"                 # dashboard and API
+      - "${TERRARIUM_ARTIFACT_PORT:-8081}:8081"        # artifact serving origin (§15.2)
+      - "${TERRARIUM_HOST_PORT:-8082}:8082"            # host agent dial-in (§19)
+    environment:
+      TERRARIUM_TOKEN: ${TERRARIUM_TOKEN:?set TERRARIUM_TOKEN in .env (see .env.example)}
+      TERRARIUM_PUBLIC_URL: ${TERRARIUM_PUBLIC_URL:-http://localhost:8080}
+      RUST_LOG: ${RUST_LOG:-info}
+    volumes:
+      - ./config/claude:/auth/claude
+      - ./config/codex:/auth/codex
+      - ./config/copilot:/auth/copilot
+      - ./config/pi:/auth/pi
+      - ./state:/state
+      - ./prompts:/prompts:ro
+      - ./subscriptions:/etc/terrarium/subscriptions
+      - ./projects:/etc/terrarium/projects
+      - ./agents:/etc/terrarium/agents
+      - ./targets:/etc/terrarium/targets
+    security_opt:
+      - seccomp:docker/seccomp-bwrap.json   # user namespaces for bwrap (§11)
+      - apparmor:unconfined
+      - systempaths=unconfined              # bwrap --proc needs an unmasked /proc (see docker/seccomp-bwrap.README.md)
+    healthcheck:
+      test: ["CMD", "terrarium", "daemon", "status"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+      start_interval: 2s

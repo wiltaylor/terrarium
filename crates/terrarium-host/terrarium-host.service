@@ -1,0 +1,16 @@
+# systemd unit for the Terrarium host agent.
+# `just host::install <host>` copies this to /etc/systemd/system/.
+[Unit]
+Description=Terrarium host agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/terrarium-host.env
+ExecStart=/usr/local/bin/terrarium-host
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

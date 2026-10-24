@@ -1,0 +1,10 @@
+# Build context filter for docker/Dockerfile (BuildKit reads <Dockerfile>.dockerignore).
+**
+!Cargo.toml
+!Cargo.lock
+!crates/**
+!dashboard/**
+dashboard/node_modules
+dashboard/dist
+!docker/entrypoint.sh
+**/target
