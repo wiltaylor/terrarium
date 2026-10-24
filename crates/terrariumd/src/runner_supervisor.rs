@@ -1,11 +1,12 @@
-//! The real supervisor: one `terrarium_runner::Runner` per running agent.
+//! The real supervisor: one agent runner per running agent, behind
+//! `terrarium_runner::RunnerHandle`.
 //!
 //! How the parts connect:
 //!
 //! ```text
-//!  API handler ──start/stop/send──▶ RunnerSupervisor ──spawn──▶ Runner (PTY, socket, status)
+//!  API handler ──start/stop/send──▶ RunnerSupervisor ──spawn──▶ runner (PTY, socket, status)
 //!                                        │   ▲                      │
-//!                     SupervisorEvent ◀──┘   └── forward task ◀─────┘ EventRecord broadcast
+//!                     SupervisorEvent ◀──┘   └── forward task ◀─────┘ EventRecord (with seq)
 //!                          │
 //!                    lib.rs pump ──▶ store (agents.status, sessions, events) ──▶ EventHub
 //!                                                                             │
@@ -13,11 +14,25 @@
 //!  runner socket ──▶ AgentRpc ──▶ api::router (Actor::Agent) ──▶ store
 //! ```
 //!
-//! - `start` renders `prompt.md`, writes the adapter's per-agent files, asks
-//!   the adapter for the `LaunchSpec`, builds a clean env, wraps it in the
-//!   sandbox, and spawns the runner. A forward task sends each runner event
-//!   to the daemon as a [`SupervisorEvent`]; the pump in `lib.rs` writes it
-//!   to the store, which broadcasts it to the API streams.
+//! - [`RunnerMode`] picks the runner. `Process` (the daemon default) starts
+//!   one `terrarium-runner` process per agent and talks to it with
+//!   `RemoteRunner` over the control socket; the harness lives through a
+//!   daemon restart (PLAN §6, §18). `InProcess` holds a `Runner` in the
+//!   daemon, for tests and development. Only the spawn and the shutdown
+//!   differ; the rest of the supervisor sees an `Arc<dyn RunnerHandle>`.
+//! - `start` brings the ephemeral targets of the agent's policy up
+//!   (PLAN §19), renders `prompt.md`, writes the adapter's per-agent files,
+//!   asks the adapter for the `LaunchSpec`, builds a clean env, wraps it in
+//!   the sandbox, and spawns the runner. A forward task sends each runner
+//!   event to the daemon as a [`SupervisorEvent`] with its seq; the pump in
+//!   `lib.rs` writes it to the store once, which broadcasts it to the API
+//!   streams.
+//! - After a daemon start, [`Supervisor::recover`] connects to each live
+//!   runner process again, with the events from the stored seq on. A
+//!   runner that ended while the daemon was down left `runner-exit.json`;
+//!   the restart policy decides on it.
+//! - A stop, or an exit that does not restart, removes the ephemeral
+//!   targets (unless `keep = true`). A daemon shutdown removes nothing.
 //! - When the harness exits, the supervisor applies the restart policy of
 //!   PLAN §18: exponential backoff, crash-loop detection, and a fresh session
 //!   with a recap turn when a resume fails.
@@ -40,14 +55,18 @@ use terrarium_adapter_claude::{ClaudeAdapter, ClaudeOptions};
 use terrarium_adapter_codex::{CodexAdapter, CodexOptions};
 use terrarium_adapter_copilot::{CopilotAdapter, CopilotOptions};
 use terrarium_adapter_pi::{PiAdapter, PiOptions};
-use terrarium_core::config::{RestartPolicy, SubscriptionDef};
+use terrarium_core::config::SubscriptionDef;
 use terrarium_core::{
     Adapter, Agent, AgentId, AgentStatus, Event, EventRecord, HarnessId, HarnessSessionId,
     LaunchSpec,
 };
-use terrarium_runner::{ReadyDetector, Runner, RunnerConfig};
+use terrarium_runner::{
+    AdapterKind, AdapterOptions, AttachEvent, ConnectOptions, ExitStatus, LOST_SIGNAL,
+    ReadyDetector, ReadyDetectorSpec, RemoteRunner, RequestHandler, Runner, RunnerConfig,
+    RunnerHandle, RunnerSpec, SpawnOptions, live_runner_pid, read_exit_status,
+};
 use tokio::sync::broadcast::error::RecvError;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, watch};
 use tracing::{debug, info, warn};
 
 use crate::agent_rpc::AgentRpc;
@@ -56,16 +75,25 @@ use crate::prompt::{self, Peer, PromptContext};
 use crate::sandbox::{self, AgentLayout, HarnessHome, SandboxConfig, SandboxMode};
 use crate::store::subscriptions::Subscription;
 use crate::supervisor::{
-    AnswerInput, BoxFuture, PtyAttachment, PtyInput, Supervisor, SupervisorError, SupervisorEvent,
-    SupervisorEventKind, TurnHold,
+    AnswerInput, BoxFuture, PtyAttachment, PtyInput, Recovery, Supervisor, SupervisorError,
+    SupervisorEvent, SupervisorEventKind, TurnHold, wants_restart,
 };
 
 /// One harness adapter and its prompt-ready detector.
 #[derive(Clone)]
 pub struct AdapterEntry {
     pub adapter: Arc<dyn Adapter>,
-    /// For a harness whose `screen_hint` cannot tell.
+    /// For a harness whose `screen_hint` cannot tell. In-process runners
+    /// only: a runner process takes [`AdapterEntry::ready_spec`].
     pub ready_detector: Option<Arc<dyn ReadyDetector>>,
+    /// The `DefaultReadyDetector` settings for a runner process.
+    pub ready_spec: Option<ReadyDetectorSpec>,
+    /// The adapter that a runner process picks (`RunnerSpec::adapter`).
+    /// `Fake` in tests only.
+    pub runner_adapter: AdapterKind,
+    /// The harness home paths that the hook mapping of a runner process
+    /// reads (`RunnerSpec::adapter_options`).
+    pub adapter_options: AdapterOptions,
 }
 
 impl AdapterEntry {
@@ -73,8 +101,23 @@ impl AdapterEntry {
         Self {
             adapter,
             ready_detector: None,
+            ready_spec: None,
+            runner_adapter: AdapterKind::Harness,
+            adapter_options: AdapterOptions::default(),
         }
     }
+}
+
+/// How the agent runners run (PLAN §6). The daemon picks it in one place,
+/// `Settings::runner_mode` (`TERRARIUM_RUNNER_MODE`, `TERRARIUM_RUNNER`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunnerMode {
+    /// One `terrarium-runner` process per agent, started from `bin`. The
+    /// harness lives through a daemon restart (PLAN §18).
+    Process { bin: PathBuf },
+    /// One `Runner` in the daemon process. The harness ends with the
+    /// daemon. For tests and development.
+    InProcess,
 }
 
 /// The restart policy numbers (PLAN §18).
@@ -141,6 +184,9 @@ pub struct RunnerSupervisorConfig {
     pub adapters: HashMap<HarnessId, AdapterEntry>,
     pub restart: RestartTuning,
     pub runner: RunnerTuning,
+    /// `InProcess` unless the caller sets it; the daemon binary sets it
+    /// from its settings.
+    pub mode: RunnerMode,
 }
 
 impl RunnerSupervisorConfig {
@@ -163,6 +209,7 @@ impl RunnerSupervisorConfig {
             adapters,
             restart: RestartTuning::default(),
             runner: RunnerTuning::default(),
+            mode: RunnerMode::InProcess,
         }
     }
 
@@ -232,7 +279,14 @@ pub fn default_adapters(
         (HarnessId::Pi, Arc::new(PiAdapter::new(pi))),
     ];
     for (h, a) in entries {
-        map.insert(h, AdapterEntry::new(a));
+        let mut entry = AdapterEntry::new(a);
+        // A runner process builds its own adapter for the hook mapping; it
+        // needs the same two home paths.
+        entry.adapter_options = AdapterOptions {
+            config_dir: Some(inside(h)),
+            host_config_dir: Some(host(h)),
+        };
+        map.insert(h, entry);
     }
     map
 }
@@ -382,7 +436,9 @@ enum Phase {
 
 struct Slot {
     agent: Agent,
-    runner: Option<Runner>,
+    runner: Option<Arc<dyn RunnerHandle>>,
+    /// The same runner, when it runs in this process: the shutdown ends it.
+    local: Option<Runner>,
     phase: Phase,
     /// Bumped by every `start` and `stop`, so a stale task does nothing.
     epoch: u64,
@@ -394,6 +450,11 @@ struct Slot {
     /// The session the harness reported (`SessionStarted`).
     session: Option<HarnessSessionId>,
     reached_idle: bool,
+    /// The status of the last status event that the forward task passed
+    /// on. A runner process reports its status on a stream of its own,
+    /// which can lag behind the events; the push decision follows the
+    /// events.
+    seen: AgentStatus,
     /// A recap turn to type at the first idle after a failed resume.
     recap: Option<String>,
     pointer: Pointer,
@@ -405,6 +466,7 @@ impl Slot {
         Self {
             agent,
             runner: None,
+            local: None,
             phase: Phase::Down(AgentStatus::Stopped),
             epoch: 0,
             stop_requested: false,
@@ -413,6 +475,7 @@ impl Slot {
             resume: None,
             session: None,
             reached_idle: false,
+            seen: AgentStatus::Starting,
             recap: None,
             pointer: Pointer::default(),
             pointer_busy: false,
@@ -453,9 +516,12 @@ struct Inner {
     tx: broadcast::Sender<SupervisorEvent>,
     state: OnceLock<Weak<AppState>>,
     shutting_down: AtomicBool,
+    /// True after the shutdown: the forward and attach tasks end, and drop
+    /// their runner handles, so the control connections close.
+    stop_tx: watch::Sender<bool>,
 }
 
-/// Runs each agent in a [`Runner`]. Cheap to clone.
+/// Runs each agent in a runner (see [`RunnerMode`]). Cheap to clone.
 #[derive(Clone)]
 pub struct RunnerSupervisor {
     inner: Arc<Inner>,
@@ -538,6 +604,7 @@ impl RunnerSupervisor {
                 tx,
                 state: OnceLock::new(),
                 shutting_down: AtomicBool::new(false),
+                stop_tx: watch::Sender::new(false),
             }),
         }
     }
@@ -547,7 +614,13 @@ impl RunnerSupervisor {
     }
 
     fn emit(&self, agent: AgentId, kind: SupervisorEventKind) {
-        let _ = self.inner.tx.send(SupervisorEvent { agent, kind });
+        self.emit_seq(agent, kind, None);
+    }
+
+    /// Emit an event of the runner, with its seq, so the pump records it
+    /// once.
+    fn emit_seq(&self, agent: AgentId, kind: SupervisorEventKind, seq: Option<u64>) {
+        let _ = self.inner.tx.send(SupervisorEvent { agent, kind, seq });
     }
 
     fn emit_status(&self, agent: AgentId, status: AgentStatus, reason: impl Into<String>) {
@@ -587,7 +660,7 @@ impl RunnerSupervisor {
     }
 
     /// The runner of a running agent, for tests and debugging.
-    pub fn runner(&self, agent: AgentId) -> Option<Runner> {
+    pub fn runner(&self, agent: AgentId) -> Option<Arc<dyn RunnerHandle>> {
         lock(&self.inner.slots)
             .get(&agent)
             .and_then(|s| s.runner.clone())
@@ -850,32 +923,81 @@ impl RunnerSupervisor {
         rc.submit_attempts = t.submit_attempts;
         rc.stall_timeout = t.stall_timeout;
         rc.ready_detector = entry.ready_detector.clone();
-        let handler = Arc::new(AgentRpc::new(
-            self.inner.state.get().cloned().unwrap_or_default(),
-        ));
         let program = spec.program.clone();
-        let runner = Runner::spawn(rc, entry.adapter.clone(), spec, handler)
-            .await
-            .map_err(|e| SupervisorError::Other(format!("cannot start {program}: {e}")))?;
+        // The seq before the launch: a runner process replays the events
+        // from here, so the ones before the connect are not lost.
+        let base =
+            events_seq(&terrarium_runner::agent_dir(&cfg.state_dir, id).join("events.jsonl"));
+        self.clamp_seq(id, base).await;
+        let (runner, local): (Arc<dyn RunnerHandle>, Option<Runner>) = match &cfg.mode {
+            RunnerMode::InProcess => {
+                let r = Runner::spawn(rc, entry.adapter.clone(), spec, self.rpc_handler())
+                    .await
+                    .map_err(|e| SupervisorError::Other(format!("cannot start {program}: {e}")))?;
+                (Arc::new(r.clone()), Some(r))
+            }
+            RunnerMode::Process { bin } => {
+                // After an exit, the old runner process can still be
+                // cleaning up (docs/runner.md, "The runner process", step 6).
+                let deadline = Instant::now() + OLD_RUNNER_WAIT;
+                while live_runner_pid(&cfg.runtime_dir, id).is_some() && Instant::now() < deadline {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                let mut rs = RunnerSpec::from_config(&rc, agent.harness, spec);
+                rs.adapter = entry.runner_adapter;
+                rs.adapter_options = entry.adapter_options.clone();
+                rs.ready_detector = entry.ready_spec.clone();
+                if rs.ready_detector.is_none() && entry.ready_detector.is_some() {
+                    warn!(
+                        agent = %id,
+                        "the {} adapter has a ready detector in code only; the runner process \
+                         uses the default detector",
+                        agent.harness
+                    );
+                }
+                let mut so = SpawnOptions::new(id, &cfg.state_dir, &cfg.runtime_dir, rs);
+                so.connect = ConnectOptions {
+                    handler: self.rpc_handler(),
+                    events_since: Some(base),
+                    ..ConnectOptions::default()
+                };
+                let r = RemoteRunner::spawn_process(bin, so).await.map_err(|e| {
+                    SupervisorError::Other(format!(
+                        "cannot start {program} in a runner process ({}): {e}",
+                        bin.display()
+                    ))
+                })?;
+                info!(agent = %id, pid = r.hello().runner_pid, "runner process started");
+                (Arc::new(r), None)
+            }
+        };
         let rx = runner.subscribe_events();
 
-        {
+        let installed = {
             let mut slots = lock(&self.inner.slots);
-            let current = slots
+            match slots
                 .get_mut(&id)
-                .filter(|s| s.epoch == epoch && !s.stop_requested);
-            let Some(slot) = current else {
-                drop(slots);
-                let _ = runner.kill();
-                return Ok(());
-            };
-            slot.runner = Some(runner.clone());
-            slot.phase = Phase::Running;
-            slot.reached_idle = false;
-            slot.pointer_busy = false;
-            for m in view.queued {
-                slot.pointer.add_mail(m);
+                .filter(|s| s.epoch == epoch && !s.stop_requested)
+            {
+                Some(slot) => {
+                    slot.runner = Some(runner.clone());
+                    slot.local = local;
+                    slot.phase = Phase::Running;
+                    slot.reached_idle = false;
+                    slot.seen = runner.status();
+                    slot.pointer_busy = false;
+                    for m in view.queued {
+                        slot.pointer.add_mail(m);
+                    }
+                    true
+                }
+                None => false,
             }
+        };
+        if !installed {
+            // A stop or a new start came while the harness launched.
+            let _ = runner.kill().await;
+            return Ok(());
         }
         let reason = match &resume {
             Some(s) => format!("resuming session {s}"),
@@ -901,59 +1023,230 @@ impl RunnerSupervisor {
         Ok(())
     }
 
-    /// Send the runner's events on, until the harness exits.
+    /// The handler for the agent RPC requests of a runner.
+    fn rpc_handler(&self) -> Arc<dyn RequestHandler> {
+        Arc::new(AgentRpc::new(
+            self.inner.state.get().cloned().unwrap_or_default(),
+        ))
+    }
+
+    /// Lower the stored runner seq of `id` to `seq` (see
+    /// `store::agents::clamp_runner_seq`).
+    async fn clamp_seq(&self, id: AgentId, seq: u64) {
+        let Some(state) = self.state() else { return };
+        let key = id.to_string();
+        let result = state
+            .db
+            .write("system", move |t| {
+                crate::store::agents::clamp_runner_seq(t, &key, seq)
+            })
+            .await;
+        if let Err(e) = result {
+            warn!(agent = %id, "cannot reset the runner seq: {e}");
+        }
+    }
+
+    fn is_process_mode(&self) -> bool {
+        matches!(self.inner.cfg.mode, RunnerMode::Process { .. })
+    }
+
+    /// Connect to the live runner process of `id`. `since`: replay the
+    /// events after this seq.
+    async fn connect_runner(
+        &self,
+        id: AgentId,
+        since: Option<u64>,
+    ) -> Result<RemoteRunner, SupervisorError> {
+        RemoteRunner::connect_with(
+            &self.inner.cfg.runtime_dir,
+            id,
+            ConnectOptions {
+                handler: self.rpc_handler(),
+                events_since: since,
+                ..ConnectOptions::default()
+            },
+        )
+        .await
+        .map_err(|e| SupervisorError::Other(format!("cannot connect to the runner of {id}: {e}")))
+    }
+
+    /// Take over a connected runner process: the slot of epoch `epoch`
+    /// holds it, and a forward task passes its events on. The harness does
+    /// not restart. False: the slot moved on (a stop or a new start).
+    fn adopt(&self, id: AgentId, epoch: u64, remote: RemoteRunner, since: Option<u64>) -> bool {
+        let hello = remote.hello().clone();
+        let runner: Arc<dyn RunnerHandle> = Arc::new(remote);
+        let rx = runner.subscribe_events();
+        {
+            let mut slots = lock(&self.inner.slots);
+            let Some(slot) = slots
+                .get_mut(&id)
+                .filter(|s| s.epoch == epoch && !s.stop_requested)
+            else {
+                return false;
+            };
+            slot.runner = Some(runner.clone());
+            slot.local = None;
+            slot.phase = Phase::Running;
+            slot.reached_idle = hello.status != AgentStatus::Starting;
+            slot.seen = hello.status;
+            slot.pointer_busy = false;
+            if let Some(s) = &hello.session {
+                // A later crash restarts with resume of this session.
+                slot.session = Some(s.clone());
+                slot.resume = Some(s.clone());
+            }
+        }
+        let reason = format!("connected to runner pid {}", hello.runner_pid);
+        info!(agent = %id, seq = hello.seq, since = ?since, status = %hello.status, "{reason}");
+        // With a replay, the replayed status changes bring the stored
+        // status up to date. With none, report the status now.
+        let replay = since.is_some_and(|s| s < hello.seq);
+        if !replay {
+            let now = runner.status();
+            match self.held(id) {
+                Some(h) if now == AgentStatus::Idle => {
+                    self.emit_status(id, AgentStatus::Blocked, hold_reason(&h));
+                }
+                _ => self.emit_status(id, now, reason),
+            }
+            if now == AgentStatus::Idle {
+                self.on_idle(id, epoch);
+            }
+        }
+        let me = self.clone();
+        tokio::spawn(async move { me.forward(id, epoch, runner, rx).await });
+        true
+    }
+
+    /// Pass one runner event on. True: it is the exit of the harness.
+    fn pass_on(&self, id: AgentId, epoch: u64, rec: EventRecord) -> bool {
+        match &rec.event {
+            // The supervisor decides the final status itself.
+            Event::StatusChanged {
+                to: AgentStatus::Stopped | AgentStatus::Error,
+                ..
+            } => return false,
+            Event::SessionStarted {
+                harness_session, ..
+            } => {
+                if let Some(slot) = lock(&self.inner.slots).get_mut(&id) {
+                    slot.session = Some(harness_session.clone());
+                }
+            }
+            Event::StatusChanged { to, .. } => {
+                if let Some(slot) = lock(&self.inner.slots)
+                    .get_mut(&id)
+                    .filter(|s| s.epoch == epoch)
+                {
+                    slot.seen = *to;
+                }
+            }
+            _ => {}
+        }
+        let exit = matches!(rec.event, Event::Exit { .. });
+        let idle = matches!(
+            rec.event,
+            Event::StatusChanged {
+                to: AgentStatus::Idle,
+                ..
+            }
+        );
+        match self.held(id) {
+            // A held agent is `blocked`, not `idle`.
+            Some(h) if idle => self.emit_seq(
+                id,
+                SupervisorEventKind::Status {
+                    status: AgentStatus::Blocked,
+                    reason: Some(hold_reason(&h)),
+                },
+                rec.seq,
+            ),
+            _ => self.emit_seq(id, SupervisorEventKind::Harness(rec.event), rec.seq),
+        }
+        if idle {
+            self.on_idle(id, epoch);
+        }
+        exit
+    }
+
+    /// Send the runner's events on, until the harness exits. A shutdown
+    /// ends the task at once. When the control connection of a live runner
+    /// process drops, the task connects again.
     async fn forward(
         self,
         id: AgentId,
         epoch: u64,
-        runner: Runner,
+        runner: Arc<dyn RunnerHandle>,
         mut rx: broadcast::Receiver<EventRecord>,
     ) {
-        loop {
-            let rec = match rx.recv().await {
-                Ok(rec) => rec,
-                Err(RecvError::Lagged(n)) => {
-                    warn!(agent = %id, "the supervisor missed {n} runner events");
-                    continue;
-                }
-                Err(RecvError::Closed) => break,
-            };
-            match &rec.event {
-                // The supervisor decides the final status itself.
-                Event::StatusChanged {
-                    to: AgentStatus::Stopped | AgentStatus::Error,
-                    ..
-                } => continue,
-                Event::SessionStarted {
-                    harness_session, ..
-                } => {
-                    if let Some(slot) = lock(&self.inner.slots).get_mut(&id) {
-                        slot.session = Some(harness_session.clone());
+        let mut stop = self.inner.stop_tx.subscribe();
+        let mut last = 0u64;
+        let mut note = |rec: &EventRecord| {
+            if let Some(seq) = rec.seq {
+                last = last.max(seq);
+            }
+        };
+        let mut exited = None;
+        {
+            let wait = runner.wait();
+            tokio::pin!(wait);
+            loop {
+                tokio::select! {
+                    biased;
+                    () = stopped(&mut stop) => return,
+                    r = rx.recv() => match r {
+                        Ok(rec) => {
+                            note(&rec);
+                            if self.pass_on(id, epoch, rec) {
+                                break;
+                            }
+                        }
+                        Err(RecvError::Lagged(n)) => {
+                            warn!(agent = %id, "the supervisor missed {n} runner events");
+                        }
+                        Err(RecvError::Closed) => break,
+                    },
+                    status = &mut wait => {
+                        exited = Some(status);
+                        break;
                     }
                 }
-                _ => {}
-            }
-            let exit = matches!(rec.event, Event::Exit { .. });
-            let idle = matches!(
-                rec.event,
-                Event::StatusChanged {
-                    to: AgentStatus::Idle,
-                    ..
-                }
-            );
-            match self.held(id) {
-                // A held agent is `blocked`, not `idle`.
-                Some(h) if idle => self.emit_status(id, AgentStatus::Blocked, hold_reason(&h)),
-                _ => self.emit(id, SupervisorEventKind::Harness(rec.event)),
-            }
-            if idle {
-                self.on_idle(id, epoch);
-            }
-            if exit {
-                break;
             }
         }
-        let status = runner.wait().await;
+        if exited.is_some() {
+            // The exit can come before the last events: take what is still
+            // on the way.
+            while let Ok(Ok(rec)) = tokio::time::timeout(EXIT_DRAIN, rx.recv()).await {
+                note(&rec);
+                if self.pass_on(id, epoch, rec) {
+                    break;
+                }
+            }
+        }
+        let status = match exited {
+            Some(s) => s,
+            None => runner.wait().await,
+        };
+        if *stop.borrow() {
+            return;
+        }
+        drop(runner);
+        if status.signal.as_deref() == Some(LOST_SIGNAL)
+            && self.is_process_mode()
+            && let Some(pid) = live_runner_pid(&self.inner.cfg.runtime_dir, id)
+        {
+            warn!(agent = %id, pid, "the control connection to the runner dropped; connecting again");
+            match self.connect_runner(id, Some(last)).await {
+                Ok(remote) => {
+                    if !self.adopt(id, epoch, remote, Some(last)) {
+                        debug!(agent = %id, "the agent moved on while the supervisor connected again");
+                    }
+                    return;
+                }
+                Err(e) => warn!(agent = %id, "{e}"),
+            }
+        }
         self.on_exit(id, epoch, status).await;
     }
 
@@ -996,7 +1289,7 @@ impl RunnerSupervisor {
         self.maybe_push(id);
     }
 
-    async fn on_exit(&self, id: AgentId, epoch: u64, status: terrarium_runner::ExitStatus) {
+    async fn on_exit(&self, id: AgentId, epoch: u64, status: ExitStatus) {
         if self.inner.shutting_down.load(Ordering::SeqCst) {
             return;
         }
@@ -1008,12 +1301,9 @@ impl RunnerSupervisor {
                 new_session: Option<String>,
             },
         }
-        let code = status.code;
         let clean = status.success();
-        let how = match &status.signal {
-            Some(s) => format!("exited with code {code} ({s})"),
-            None => format!("exited with code {code}"),
-        };
+        let how = exit_how(&status);
+        let mut ended_agent = None;
         let next = {
             let mut slots = lock(&self.inner.slots);
             let Some(slot) = slots.get_mut(&id).filter(|s| s.epoch == epoch) else {
@@ -1045,11 +1335,7 @@ impl RunnerSupervisor {
                     new_session: Some("resume_failed".into()),
                 }
             } else {
-                let wanted = match slot.agent.restart {
-                    RestartPolicy::Always => true,
-                    RestartPolicy::OnFailure => !clean,
-                    RestartPolicy::Never => false,
-                };
+                let wanted = wants_restart(slot.agent.restart, clean);
                 let now = Instant::now();
                 while slot
                     .restarts
@@ -1059,11 +1345,8 @@ impl RunnerSupervisor {
                     slot.restarts.pop_front();
                 }
                 if !wanted {
-                    if clean {
-                        Next::Done(AgentStatus::Stopped, "exited".into())
-                    } else {
-                        Next::Done(AgentStatus::Error, how.clone())
-                    }
+                    let (s, reason) = final_status(&status);
+                    Next::Done(s, reason)
                 } else if slot.restarts.len() >= tuning.crash_limit {
                     Next::Done(
                         AgentStatus::Error,
@@ -1093,8 +1376,12 @@ impl RunnerSupervisor {
                     }
                 }
             };
+            slot.local = None;
             match &next {
-                Next::Done(s, _) => slot.phase = Phase::Down(*s),
+                Next::Done(s, _) => {
+                    slot.phase = Phase::Down(*s);
+                    ended_agent = Some(slot.agent.clone());
+                }
                 Next::Relaunch { .. } => slot.phase = Phase::Restarting,
             }
             next
@@ -1103,6 +1390,9 @@ impl RunnerSupervisor {
             Next::Done(s, reason) => {
                 info!(agent = %id, status = %s, %reason, "agent ended");
                 self.emit_status(id, s, reason);
+                if let Some(a) = ended_agent {
+                    self.targets_down(&a);
+                }
             }
             Next::Relaunch {
                 delay,
@@ -1125,13 +1415,85 @@ impl RunnerSupervisor {
                     }
                     if let Err(e) = me.launch(id, epoch).await {
                         warn!(agent = %id, "restart failed: {e}");
-                        if let Some(slot) = lock(&me.inner.slots).get_mut(&id) {
+                        let agent = lock(&me.inner.slots).get_mut(&id).map(|slot| {
                             slot.phase = Phase::Down(AgentStatus::Error);
-                        }
+                            slot.agent.clone()
+                        });
                         me.emit_status(id, AgentStatus::Error, format!("restart failed: {e}"));
+                        if let Some(a) = agent {
+                            me.targets_down(&a);
+                        }
                     }
                 });
             }
+        }
+    }
+
+    /// Bring the ephemeral targets of the agent's policy up (PLAN §19). A
+    /// target that does not come up does not stop the start; the agent
+    /// gets a notification event.
+    async fn targets_up(&self, agent: &Agent) {
+        if agent.policy.targets.is_empty() {
+            return;
+        }
+        let Some(state) = self.state() else { return };
+        for (t, e) in crate::executor::on_agent_start(&state, &agent.policy.targets).await {
+            self.emit(
+                agent.id,
+                SupervisorEventKind::Harness(Event::Notification {
+                    message: format!("the ephemeral target `{t}` did not come up: {e}"),
+                    question: false,
+                }),
+            );
+        }
+    }
+
+    /// Remove the ephemeral targets of the agent's policy, unless
+    /// `keep = true` (PLAN §19). In the background: a stop does not wait.
+    fn targets_down(&self, agent: &Agent) {
+        if agent.policy.targets.is_empty() {
+            return;
+        }
+        let Some(state) = self.state() else { return };
+        let targets = agent.policy.targets.clone();
+        tokio::spawn(async move {
+            crate::executor::on_agent_stop(&state, &targets).await;
+        });
+    }
+
+    /// Mark the slot of `agent` as starting, with a new epoch. Fails when
+    /// the agent is live.
+    fn claim(
+        &self,
+        agent: &Agent,
+        resume: Option<HarnessSessionId>,
+    ) -> Result<u64, SupervisorError> {
+        let mut slots = lock(&self.inner.slots);
+        let slot = slots
+            .entry(agent.id)
+            .or_insert_with(|| Slot::new(agent.clone()));
+        if slot.live() {
+            return Err(SupervisorError::AlreadyRunning(agent.id));
+        }
+        slot.agent = agent.clone();
+        slot.epoch += 1;
+        slot.stop_requested = false;
+        slot.restart_requested = false;
+        slot.restarts.clear();
+        slot.resume = resume;
+        slot.session = None;
+        slot.recap = None;
+        slot.pointer = Pointer::default();
+        slot.phase = Phase::Running;
+        Ok(slot.epoch)
+    }
+
+    /// Set the slot of `id` down, when it is still at `epoch`.
+    fn release(&self, id: AgentId, epoch: u64, status: AgentStatus) {
+        if let Some(slot) = lock(&self.inner.slots).get_mut(&id)
+            && slot.epoch == epoch
+        {
+            slot.phase = Phase::Down(status);
         }
     }
 
@@ -1164,7 +1526,7 @@ impl RunnerSupervisor {
             if slot.pointer_busy
                 || slot.pointer.is_empty()
                 || slot.recap.is_some()
-                || runner.status() != AgentStatus::Idle
+                || slot.seen != AgentStatus::Idle
             {
                 return;
             }
@@ -1268,8 +1630,64 @@ impl RunnerSupervisor {
     }
 }
 
+/// How long a launch waits for the runner process of the last launch to
+/// end. It lingers up to 2 s after the harness exits.
+const OLD_RUNNER_WAIT: Duration = Duration::from_secs(5);
+
+/// Resolves when the shutdown flag is set.
+async fn stopped(rx: &mut watch::Receiver<bool>) {
+    let _ = rx.wait_for(|s| *s).await;
+}
+
+/// How long the forward task waits for the last events after the harness
+/// exits.
+const EXIT_DRAIN: Duration = Duration::from_secs(1);
+
+/// How a harness exit reads in a status reason.
+pub fn exit_how(status: &ExitStatus) -> String {
+    match &status.signal {
+        Some(s) => format!("exited with code {} ({s})", status.code),
+        None => format!("exited with code {}", status.code),
+    }
+}
+
+/// The final status of an exit that does not restart: `stopped` (reason
+/// `exited`) for a clean exit, else `error`.
+fn final_status(status: &ExitStatus) -> (AgentStatus, String) {
+    if status.success() {
+        (AgentStatus::Stopped, "exited".into())
+    } else {
+        (AgentStatus::Error, exit_how(status))
+    }
+}
+
+/// The seq of the last line of an `events.jsonl` (docs/runner.md, "Event
+/// seq"): its number of lines. 0 when the file is missing.
+fn events_seq(path: &Path) -> u64 {
+    use std::io::Read;
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return 0;
+    };
+    let mut buf = vec![0u8; 64 * 1024];
+    let (mut lines, mut last) = (0u64, b'\n');
+    loop {
+        match f.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                lines += buf[..n].iter().filter(|b| **b == b'\n').count() as u64;
+                last = buf[n - 1];
+            }
+        }
+    }
+    // A torn last line has no newline; it keeps its seq.
+    if last != b'\n' {
+        lines += 1;
+    }
+    lines
+}
+
 /// Queue `text` on the runner and log a failed delivery.
-fn type_detached(agent: AgentId, runner: &Runner, text: String) {
+fn type_detached(agent: AgentId, runner: &Arc<dyn RunnerHandle>, text: String) {
     let delivery = runner.type_turn(text);
     tokio::spawn(async move {
         if let Err(e) = delivery.wait().await {
@@ -1335,30 +1753,28 @@ impl Supervisor for RunnerSupervisor {
         Box::pin(async move {
             self.entry(agent.harness)?;
             let id = agent.id;
-            let epoch = {
-                let mut slots = lock(&self.inner.slots);
-                let slot = slots.entry(id).or_insert_with(|| Slot::new(agent.clone()));
-                if slot.live() {
-                    return Err(SupervisorError::AlreadyRunning(id));
-                }
-                slot.agent = agent;
-                slot.epoch += 1;
-                slot.stop_requested = false;
-                slot.restart_requested = false;
-                slot.restarts.clear();
-                slot.resume = resume;
-                slot.session = None;
-                slot.recap = None;
-                slot.pointer = Pointer::default();
-                slot.phase = Phase::Running;
-                slot.epoch
-            };
-            let result = self.launch(id, epoch).await;
-            if result.is_err()
-                && let Some(slot) = lock(&self.inner.slots).get_mut(&id)
-                && slot.epoch == epoch
+            let epoch = self.claim(&agent, resume)?;
+            // A runner process that an earlier daemon started still holds
+            // the agent: take it over. A second runner cannot start.
+            if self.is_process_mode()
+                && let Some(pid) = live_runner_pid(&self.inner.cfg.runtime_dir, id)
             {
-                slot.phase = Phase::Down(AgentStatus::Stopped);
+                warn!(agent = %id, pid, "a runner process still holds the agent; taking it over");
+                let remote = match self.connect_runner(id, None).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        self.release(id, epoch, AgentStatus::Stopped);
+                        return Err(e);
+                    }
+                };
+                self.adopt(id, epoch, remote, None);
+                return Ok(());
+            }
+            self.targets_up(&agent).await;
+            let result = self.launch(id, epoch).await;
+            if result.is_err() {
+                self.release(id, epoch, AgentStatus::Stopped);
+                self.targets_down(&agent);
             }
             result
         })
@@ -1366,26 +1782,28 @@ impl Supervisor for RunnerSupervisor {
 
     fn stop(&self, agent: AgentId) -> BoxFuture<'_, Result<(), SupervisorError>> {
         Box::pin(async move {
-            let (runner, harness) = {
+            let (runner, def) = {
                 let mut slots = lock(&self.inner.slots);
                 let slot = slots
                     .get_mut(&agent)
                     .filter(|s| s.live())
                     .ok_or(SupervisorError::NotRunning(agent))?;
                 slot.stop_requested = true;
-                let harness = slot.agent.harness;
+                let def = slot.agent.clone();
                 match slot.runner.clone() {
-                    Some(r) => (Some(r), harness),
+                    Some(r) => (Some(r), def),
                     None => {
                         // Waiting for a restart: cancel it.
                         slot.epoch += 1;
                         slot.phase = Phase::Down(AgentStatus::Stopped);
-                        (None, harness)
+                        (None, def)
                     }
                 }
             };
+            let harness = def.harness;
             let Some(r) = runner else {
                 self.emit_status(agent, AgentStatus::Stopped, "stopped");
+                self.targets_down(&def);
                 return Ok(());
             };
             // A graceful stop: an idle harness with known exit keys gets
@@ -1398,15 +1816,12 @@ impl Supervisor for RunnerSupervisor {
                 tokio::spawn(async move {
                     if tokio::time::timeout(GRACEFUL_STOP, r.wait()).await.is_err() {
                         debug!(agent = %agent, "the harness did not exit on its exit keys; killing it");
-                        let _ = tokio::task::spawn_blocking(move || r.kill()).await;
+                        let _ = r.kill().await;
                     }
                 });
                 return Ok(());
             }
-            tokio::task::spawn_blocking(move || r.kill())
-                .await
-                .map_err(other)?
-                .map_err(other)
+            r.kill().await.map_err(other)
         })
     }
 
@@ -1426,10 +1841,7 @@ impl Supervisor for RunnerSupervisor {
                 }
             };
             match runner {
-                Some(r) => tokio::task::spawn_blocking(move || r.kill())
-                    .await
-                    .map_err(other)?
-                    .map_err(other),
+                Some(r) => r.kill().await.map_err(other),
                 None => {
                     let resume = agent.session.clone();
                     self.start(agent, resume).await
@@ -1481,22 +1893,30 @@ impl Supervisor for RunnerSupervisor {
             let runner = self
                 .runner(agent)
                 .ok_or(SupervisorError::NotRunning(agent))?;
-            let (snapshot, mut output) = runner.attach();
+            let (snapshot, mut output) = runner.attach().await.map_err(other)?;
             let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>(256);
             let (in_tx, mut in_rx) = mpsc::channel::<PtyInput>(256);
+            let mut stop = self.inner.stop_tx.subscribe();
             tokio::spawn(async move {
-                let exited = runner.wait();
-                tokio::pin!(exited);
                 loop {
                     tokio::select! {
-                        chunk = output.recv() => match chunk {
-                            Ok(c) => {
-                                if out_tx.send(c.to_vec()).await.is_err() {
-                                    return;
+                        item = output.recv() => {
+                            let bytes = match item {
+                                Some(AttachEvent::Output(c)) => c.to_vec(),
+                                // The stream fell behind and attached
+                                // again: draw the new screen.
+                                Some(AttachEvent::Resynced(snap)) => {
+                                    debug!("a PTY viewer fell behind; redrawing the screen");
+                                    let mut b = b"\x1b[H\x1b[2J".to_vec();
+                                    b.extend_from_slice(&snap.formatted);
+                                    b
                                 }
+                                // The harness exited.
+                                None => return,
+                            };
+                            if out_tx.send(bytes).await.is_err() {
+                                return;
                             }
-                            Err(RecvError::Lagged(n)) => debug!("a PTY viewer missed {n} chunks"),
-                            Err(RecvError::Closed) => return,
                         },
                         input = in_rx.recv() => match input {
                             Some(PtyInput::Bytes(b)) => {
@@ -1505,13 +1925,13 @@ impl Supervisor for RunnerSupervisor {
                                 }
                             }
                             Some(PtyInput::Resize { rows, cols }) => {
-                                if let Err(e) = runner.resize(rows, cols) {
+                                if let Err(e) = runner.resize(rows, cols).await {
                                     debug!("PTY resize: {e}");
                                 }
                             }
                             None => return,
                         },
-                        _ = &mut exited => return,
+                        () = stopped(&mut stop) => return,
                     }
                 }
             });
@@ -1601,21 +2021,85 @@ impl Supervisor for RunnerSupervisor {
         })
     }
 
+    fn recover(
+        &self,
+        agent: Agent,
+        events_since: u64,
+    ) -> BoxFuture<'_, Result<Recovery, SupervisorError>> {
+        Box::pin(async move {
+            if !self.is_process_mode() {
+                return Ok(Recovery::Gone);
+            }
+            let id = agent.id;
+            let cfg = &self.inner.cfg;
+            if live_runner_pid(&cfg.runtime_dir, id).is_none() {
+                // The runner ended while the daemon was down. Its exit
+                // status decides; with none (the container stopped, or
+                // an in-process runner), launch again.
+                let Some(status) = read_exit_status(&cfg.state_dir, id) else {
+                    return Ok(Recovery::Gone);
+                };
+                if wants_restart(agent.restart, status.success()) {
+                    info!(
+                        agent = %id,
+                        exit = %exit_how(&status),
+                        restart = crate::store::agents::restart_str(agent.restart),
+                        "the harness ended while the daemon was down; the restart policy starts it again"
+                    );
+                    return Ok(Recovery::Gone);
+                }
+                let (s, reason) = final_status(&status);
+                let reason = format!("{reason} while the daemon was down");
+                lock(&self.inner.slots)
+                    .entry(id)
+                    .or_insert_with(|| Slot::new(agent.clone()))
+                    .phase = Phase::Down(s);
+                info!(agent = %id, status = %s, %reason, "agent ended");
+                self.emit_status(id, s, reason);
+                self.targets_down(&agent);
+                return Ok(Recovery::Ended);
+            }
+            let epoch = match self.claim(&agent, None) {
+                Ok(e) => e,
+                Err(SupervisorError::AlreadyRunning(_)) => return Ok(Recovery::Attached),
+                Err(e) => return Err(e),
+            };
+            let remote = match self.connect_runner(id, Some(events_since)).await {
+                Ok(r) => r,
+                Err(e) => {
+                    self.release(id, epoch, AgentStatus::Error);
+                    return Err(e);
+                }
+            };
+            self.adopt(id, epoch, remote, Some(events_since));
+            Ok(Recovery::Attached)
+        })
+    }
+
     fn bind(&self, state: &Shared) {
         if self.inner.state.set(Arc::downgrade(state)).is_ok() {
             self.spawn_hub_listener(state);
         }
     }
 
+    /// Drop every runner handle. A runner process keeps its harness: only
+    /// the control connection closes, and the next daemon connects again.
+    /// An in-process harness ends.
     fn shutdown(&self) {
         self.inner.shutting_down.store(true, Ordering::SeqCst);
-        let runners: Vec<Runner> = lock(&self.inner.slots)
-            .values()
-            .filter_map(|s| s.runner.clone())
+        self.inner.stop_tx.send_replace(true);
+        let taken: Vec<(Arc<dyn RunnerHandle>, Option<Runner>)> = lock(&self.inner.slots)
+            .values_mut()
+            .filter_map(|s| s.runner.take().map(|r| (r, s.local.take())))
             .collect();
-        for r in runners {
-            if let Err(e) = r.kill() {
-                warn!(agent = %r.agent(), "cannot end the harness: {e}");
+        for (r, local) in taken {
+            match local {
+                Some(l) => {
+                    if let Err(e) = l.kill() {
+                        warn!(agent = %l.agent(), "cannot end the harness: {e}");
+                    }
+                }
+                None => debug!(agent = %r.agent(), "leaving the runner process running"),
             }
         }
     }

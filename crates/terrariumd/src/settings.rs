@@ -1,8 +1,9 @@
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use terrarium_core::{HarnessId, paths};
 
+use crate::runner_supervisor::RunnerMode;
 use crate::sandbox::SandboxMode;
 
 /// The Terrarium daemon. Every option also reads an env var.
@@ -71,6 +72,17 @@ pub struct Settings {
     #[arg(long, env = "TERRARIUM_CLI")]
     pub cli: Option<PathBuf>,
 
+    /// How agent runners run: `process` (one `terrarium-runner` process per
+    /// agent; agents live through a daemon restart) or `inprocess` (in the
+    /// daemon; the agents end with it; tests and development only).
+    #[arg(long, env = "TERRARIUM_RUNNER_MODE", value_enum, default_value_t = RunnerModeName::Process)]
+    pub runner_mode: RunnerModeName,
+
+    /// The `terrarium-runner` binary for `--runner-mode process`. The
+    /// default is `terrarium-runner` next to this binary, else on PATH.
+    #[arg(long, env = "TERRARIUM_RUNNER")]
+    pub runner: Option<PathBuf>,
+
     /// Trust the `X-Terrarium-Agent` header on the Unix socket. Any local
     /// caller can then act as any agent. For tests and development only.
     #[arg(long, env = "TERRARIUM_INSECURE_AGENT_HEADER")]
@@ -78,6 +90,13 @@ pub struct Settings {
 
     #[command(subcommand)]
     pub command: Option<Command>,
+}
+
+/// The values of `--runner-mode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum RunnerModeName {
+    Process,
+    Inprocess,
 }
 
 /// Debug commands. Without one, the daemon serves.
@@ -105,18 +124,48 @@ fn parse_home(s: &str) -> Result<(HarnessId, PathBuf), String> {
     Ok((h.parse()?, PathBuf::from(dir)))
 }
 
+/// `program` next to the running binary, else on PATH.
+fn sibling_or_path(program: &str) -> Option<PathBuf> {
+    let sibling = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(|d| d.join(program)))
+        .filter(|p| p.is_file());
+    sibling.or_else(|| crate::sandbox::which(program, std::env::var("PATH").ok().as_deref()))
+}
+
 impl Settings {
+    /// The runner mode. This is the one place that picks it
+    /// (`TERRARIUM_RUNNER_MODE`, `TERRARIUM_RUNNER`).
+    pub fn runner_mode(&self) -> Result<RunnerMode, String> {
+        match self.runner_mode {
+            RunnerModeName::Inprocess => Ok(RunnerMode::InProcess),
+            RunnerModeName::Process => {
+                let bin = match &self.runner {
+                    Some(p) => p.clone(),
+                    None => sibling_or_path("terrarium-runner").ok_or_else(|| {
+                        "no `terrarium-runner` binary next to terrariumd or on PATH; build it \
+                         (`cargo build -p terrarium-runner`), set TERRARIUM_RUNNER, or set \
+                         TERRARIUM_RUNNER_MODE=inprocess for development"
+                            .to_owned()
+                    })?,
+                };
+                if !bin.is_file() {
+                    return Err(format!(
+                        "the runner binary {} does not exist; set TERRARIUM_RUNNER",
+                        bin.display()
+                    ));
+                }
+                Ok(RunnerMode::Process { bin })
+            }
+        }
+    }
+
     /// The `terrarium` CLI to bind: `--cli`, else next to this binary, else
     /// on PATH.
     pub fn cli_path(&self) -> Option<PathBuf> {
         if let Some(p) = &self.cli {
             return Some(p.clone());
         }
-        let sibling = std::env::current_exe()
-            .ok()
-            .and_then(|e| e.parent().map(|d| d.join("terrarium")))
-            .filter(|p| p.is_file());
-        sibling
-            .or_else(|| crate::sandbox::which("terrarium", std::env::var("PATH").ok().as_deref()))
+        sibling_or_path("terrarium")
     }
 }

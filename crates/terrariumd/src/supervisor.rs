@@ -5,13 +5,15 @@
 //! writes each one to the event log and keeps `agents.status` in step.
 //!
 //! [`crate::runner_supervisor::RunnerSupervisor`] is the real one: one
-//! `terrarium_runner::Runner` per running agent. `InMemorySupervisor` is a
+//! agent runner per running agent, in a `terrarium-runner` process or in
+//! the daemon process. `InMemorySupervisor` is a
 //! fake for tests. It is built only for unit tests and with the
 //! `fake-supervisor` feature (the integration tests turn it on).
 
 use std::future::Future;
 use std::pin::Pin;
 
+use terrarium_core::config::RestartPolicy;
 use terrarium_core::{Agent, AgentId, AgentStatus, Answer, Event, HarnessSessionId};
 use tokio::sync::{broadcast, mpsc};
 
@@ -94,6 +96,33 @@ pub struct TurnHold {
 pub struct SupervisorEvent {
     pub agent: AgentId,
     pub kind: SupervisorEventKind,
+    /// The runner seq of the event (`events.jsonl` line number), when the
+    /// event comes from a runner. The event pump records the event once:
+    /// it drops a seq at or below the last one that it recorded.
+    pub seq: Option<u64>,
+}
+
+/// What [`Supervisor::recover`] found for an agent after a daemon start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Recovery {
+    /// A runner process still holds the harness. The supervisor connected
+    /// to it and forwards its events again. The harness did not restart.
+    Attached,
+    /// The harness ended while the daemon was down, and the restart policy
+    /// does not start it again. The supervisor reported the final status.
+    Ended,
+    /// No runner holds the agent. Launch it again with resume.
+    Gone,
+}
+
+/// Does `policy` start a harness again after an exit? `clean`: the exit
+/// code was 0, with no signal.
+pub fn wants_restart(policy: RestartPolicy, clean: bool) -> bool {
+    match policy {
+        RestartPolicy::Always => true,
+        RestartPolicy::OnFailure => !clean,
+        RestartPolicy::Never => false,
+    }
 }
 
 /// Runs agents. Every method returns quickly; the work happens in the
@@ -140,13 +169,25 @@ pub trait Supervisor: Send + Sync + 'static {
             ))
         })
     }
+    /// After a daemon start, find the runner of an agent that the store
+    /// shows as live (PLAN §18). `events_since` is the last runner seq that
+    /// the store recorded for it. The default finds nothing: [`Recovery::Gone`].
+    fn recover(
+        &self,
+        agent: Agent,
+        events_since: u64,
+    ) -> BoxFuture<'_, Result<Recovery, SupervisorError>> {
+        let _ = (agent, events_since);
+        Box::pin(async { Ok(Recovery::Gone) })
+    }
     /// The daemon calls this once, after it builds its state and before it
     /// serves. A supervisor that needs the store, the event hub, or the
     /// router keeps a weak reference.
     fn bind(&self, _state: &Shared) {}
-    /// The daemon shuts down. End every harness, but keep the stored status,
-    /// so the next daemon start launches the agents again with resume
-    /// (PLAN §18).
+    /// The daemon shuts down. Keep the stored status. A harness in a
+    /// runner process keeps running, and the next daemon start connects to
+    /// it again. An in-process harness ends, and the next daemon start
+    /// launches it again with resume (PLAN §18).
     fn shutdown(&self) {}
 }
 
@@ -209,7 +250,11 @@ mod fake {
         }
 
         fn emit(&self, agent: AgentId, kind: SupervisorEventKind) {
-            let _ = self.tx.send(SupervisorEvent { agent, kind });
+            let _ = self.tx.send(SupervisorEvent {
+                agent,
+                kind,
+                seq: None,
+            });
         }
 
         /// Set the status and emit the change. Returns the new epoch.

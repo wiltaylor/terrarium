@@ -521,9 +521,25 @@ ten minutes set `error` (reason `crash loop: ...`). A resume that fails
 before the first prompt starts a fresh session and types a recap turn
 built from the last events.
 
-When the daemon starts, it launches again each agent whose stored status is
-live or `restarting`, with `--resume` of its last harness session. The
-daemon ends its harnesses when it stops, and keeps their stored status.
+Each agent runs in its own `terrarium-runner` process
+(`TERRARIUM_RUNNER_MODE=process`, the default). When the daemon stops, the
+runner processes and their harnesses keep running. When the daemon starts,
+it reconciles each agent whose stored status is live or `restarting`:
+
+- A live runner process: the daemon connects to it again. The harness does
+  not restart. The events of the downtime come in once, in order. No new
+  session begins.
+- A runner that ended while the daemon was down: the restart policy decides
+  on its exit status (`runner-exit.json`). With no restart, the status
+  becomes `stopped` or `error`, with the reason `... while the daemon was
+  down`.
+- No runner and no exit status (the container restarted), or a restart:
+  the daemon launches the agent again, with `--resume` of its last harness
+  session. A new session begins (outcome `daemon_restart`).
+
+With `TERRARIUM_RUNNER_MODE=inprocess` (tests and development), the daemon
+ends its harnesses when it stops, and launches them again with resume when
+it starts.
 
 Push delivery (PLAN §12, §13): new mail to an agent, a card assigned to it
 by someone else, and an unblocked card of its own each add one line to a
@@ -1272,8 +1288,7 @@ Compare:
 ## 14. Not in this phase
 
 Every PLAN §17 endpoint is in the daemon now. Targets, host agents, and
-exec sessions are in §17 of this document. The supervisor does not call
-`ensure_up` and `maybe_down` yet (§17.6).
+exec sessions are in §17 of this document.
 
 ## 15. Notes for clients
 
@@ -1549,8 +1564,8 @@ or revoked token gets `401 unauthorized` before the upgrade.
 |---|---|---|---|
 | `GET /api/hosts` | | `200` hosts by name | any caller |
 | `GET /api/hosts/{name}` | | `200` host | any caller |
-| `POST /api/hosts` | `{"name"}` | `201` host with `token` | sysadmin |
-| `DELETE /api/hosts/{name}` | | `204` | sysadmin |
+| `POST /api/hosts` | `{"name"}` | `201` host with `token` | the operator |
+| `DELETE /api/hosts/{name}` | | `204` | the operator |
 
 ```json
 {"name":"lab1","id":"01JB...","host_id":"01JB...","created_by":"operator",
@@ -1564,6 +1579,10 @@ or revoked token gets `401 unauthorized` before the upgrade.
 
 Rules:
 
+- Only the operator registers and revokes host agents, because each
+  registration makes a host agent token (PLAN §10: "manage credentials and
+  host agent tokens" is operator-only). An agent, also a sysadmin agent,
+  gets `403 forbidden`. Every caller can list and show hosts.
 - The answer of `POST` holds the token one time. The daemon keeps only the
   SHA-256 of it. To get a new token, delete the host and make it again.
 - `status`, `online`, and `sessions` come from the live link.
@@ -1788,7 +1807,10 @@ stderr}`. Each checkout writes a `repo.checkout` event and audit row with
 (`up`). `crate::executor::maybe_down(state, target)` removes it, unless
 `keep = true`. Both do nothing for a permanent target.
 `executor::on_agent_start` and `executor::on_agent_stop` call them for each
-name in an agent's `policy.targets`. The supervisor does not call them yet.
-The call sites are `RunnerSupervisor::start`, before the harness launches,
-and the stop path of `RunnerSupervisor` (a stop, or an exit that does not
-restart).
+name in an agent's `policy.targets`. `RunnerSupervisor::start` calls
+`on_agent_start` before the harness launches. A target that does not come
+up does not stop the start: the agent gets a `notification` event with the
+error. The supervisor calls `on_agent_stop` on a stop, on an exit that does
+not restart (also one that the daemon finds after its start), and when a
+start or a restart fails. A restart of the harness and a daemon shutdown
+leave the targets as they are.

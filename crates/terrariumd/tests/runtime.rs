@@ -285,6 +285,23 @@ impl Drop for Td {
         if let Some(d) = self.daemon.take() {
             d.shutdown();
         }
+        // With TERRARIUM_TEST_RUNNER_MODE=process, the runner processes
+        // live through the shutdown: end them.
+        let run = self.dir.path().join("run");
+        let Ok(dir) = std::fs::read_dir(run.join("runners")) else {
+            return;
+        };
+        for e in dir.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if let Some(id) = name.strip_suffix(".pid")
+                && let Ok(agent) = id.parse()
+                && let Some(pid) = terrarium_runner::live_runner_pid(&run, agent)
+            {
+                let _ = std::process::Command::new("kill")
+                    .arg(pid.to_string())
+                    .status();
+            }
+        }
     }
 }
 
@@ -309,6 +326,19 @@ fn supervisor(root: &Path, adapter: Arc<FakeAdapter>) -> RunnerSupervisor {
         quiet: Duration::from_millis(100),
         pattern: None,
     }));
+    if std::env::var("TERRARIUM_TEST_RUNNER_MODE").as_deref() == Ok("process") {
+        // A check of the runner processes: the runner maps the hooks with
+        // its fake adapter. Some tests here expect in-process behaviour
+        // (a daemon restart relaunches the harness).
+        entry.runner_adapter = terrarium_runner::AdapterKind::Fake;
+        entry.ready_spec = Some(terrarium_runner::ReadyDetectorSpec {
+            quiet_ms: 100,
+            pattern: None,
+        });
+        cfg.mode = terrariumd::runner_supervisor::RunnerMode::Process {
+            bin: Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/terrarium-runner"),
+        };
+    }
     cfg.adapters.clear();
     // Also as `pi`, so a pi agent reaches the subscription checks.
     cfg.adapters.insert(HarnessId::Pi, entry.clone());

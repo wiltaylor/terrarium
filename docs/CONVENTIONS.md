@@ -8,9 +8,11 @@ The design is in [PLAN.md](PLAN.md).
 | Path                          | Crate                       | Owns                                                                 |
 |-------------------------------|-----------------------------|----------------------------------------------------------------------|
 | `crates/terrarium-core`       | `terrarium-core` (lib)      | The domain model, events, hook payloads, the `Adapter` trait, the executor protocol, and the TOML definitions. No network and no database. |
-| `crates/terrariumd`           | `terrariumd` (bin)          | The daemon: the HTTP API on the Unix socket and TCP, SQLite and migrations, config loading, the embedded dashboard. Later: the supervisor, the mailbox, executors. |
+| `crates/terrariumd`           | `terrariumd` (lib + bin)    | The daemon: the HTTP API on the Unix socket and TCP, SQLite and migrations, config loading, the supervisor, the mailbox, the board, executors and the host registry, usage accounting, the embedded dashboard. The integration tests use the lib. |
+| `crates/terrarium-runner`     | `terrarium-runner` (lib + bin) | The agent runner: the PTY, the status machine, the runner socket, `events.jsonl`. The lib holds `Runner`, `RemoteRunner`, and `RunnerHandle`. The bin is the runner process, one per agent (feature `bin`, on by default). See [runner.md](runner.md). |
 | `crates/terrarium`            | `terrarium` (bin)           | The CLI. Operator mode talks to the daemon. Agent mode talks to the runner socket. |
-| `crates/terrarium-host`       | `terrarium-host` (lib + bin)| The host agent that runs on machines outside the container.          |
+| `crates/terrarium-host`       | `terrarium-host` (lib + bin)| The host agent that runs on machines outside the container. The lib holds the wire protocol that the daemon uses. |
+| `crates/terrarium-compat`     | `terrarium-compat` (lib)    | The adapter compatibility suite: real-harness scenarios against the pinned versions (`just ci::compat`, [compat-suite.md](compat-suite.md)). |
 | `crates/adapters/<harness>`   | `terrarium-adapter-<harness>` (lib) | One adapter per harness: launch flags, hook mapping, session ID capture. |
 | `dashboard/`                  | npm package                 | The SolidJS dashboard. The daemon embeds `dashboard/dist`.           |
 | `docker/`, `compose.yaml`     |                             | The image, the entrypoint, the seccomp profile, and the stack.        |
@@ -20,8 +22,10 @@ Rules for dependencies:
 - `terrarium-core` depends on no other Terrarium crate.
 - Adapters depend only on `terrarium-core`.
 - Bins depend on `terrarium-core` and on adapters. A bin never depends on
-  another bin's binary. `terrarium-host` is also a library: the daemon uses
-  its `protocol` module for the host wire format, so it may depend on the lib.
+  another bin's binary at build time. `terrarium-host` is also a library: the
+  daemon uses its `protocol` module for the host wire format, so it may
+  depend on the lib. `terrariumd` depends on the `terrarium-runner` lib, and
+  starts the `terrarium-runner` binary at run time (`TERRARIUM_RUNNER`).
 - Put each shared dependency version in `[workspace.dependencies]` in the root
   `Cargo.toml`. A crate refers to it with `foo.workspace = true`.
 
@@ -78,7 +82,9 @@ a new token, when `.env` does not exist. The daemon reads:
 | `TERRARIUM_TOKEN`      | none. Without a token, the TCP listener stays off. |
 | `TERRARIUM_STATE_DIR`  | `/state`                                          |
 | `TERRARIUM_CONFIG_DIR` | `/etc/terrarium`                                  |
-| `TERRARIUM_RUNTIME_DIR` | `$XDG_RUNTIME_DIR/terrarium`, else `/run/terrarium`. Runner sockets: `<dir>/agents/<ulid>.sock` |
+| `TERRARIUM_RUNTIME_DIR` | `$XDG_RUNTIME_DIR/terrarium`, else `/run/terrarium`. See "The runtime directory". |
+| `TERRARIUM_RUNNER_MODE` | `process`: one `terrarium-runner` process per agent; the agents live through a daemon restart. `inprocess`: the runners run in the daemon and end with it (tests and development only). |
+| `TERRARIUM_RUNNER`     | `terrarium-runner` next to `terrariumd`, else on `PATH`. The image sets `/usr/local/bin/terrarium-runner`. |
 | `TERRARIUM_PROMPTS_DIR` | `/prompts`                                       |
 | `TERRARIUM_SANDBOX`    | `bwrap`. `none` runs harnesses with no sandbox (development and tests only). |
 | `TERRARIUM_SANDBOX_NEW_SESSION` | off. On: pass `--new-session` to bwrap (the harness then misses PTY resizes). |
@@ -86,6 +92,21 @@ a new token, when `.env` does not exist. The daemon reads:
 | `TERRARIUM_CLI`        | `terrarium` next to `terrariumd`, else on `PATH`. The sandbox binds it at `/opt/terrarium/bin/terrarium`. |
 | `TERRARIUM_ARTIFACT_LISTEN` | `0.0.0.0:8081`. Empty: no artifact listener of its own. |
 | `TERRARIUM_INSECURE_AGENT_HEADER` | off. On: trust `X-Terrarium-Agent` on the Unix socket (tests only). |
+
+### The runtime directory
+
+`<run>` is `TERRARIUM_RUNTIME_DIR`. The files in it do not need to live
+through a reboot.
+
+| Path | Content |
+|---|---|
+| `<run>/api.sock` | The API socket, when `TERRARIUM_API_SOCKET` points here (the image does). |
+| `<run>/agents/<ulid>.sock` | The runner socket of each agent: hooks and agent RPC (mode `0600`). |
+| `<run>/runners/<ulid>.sock` | The control socket of each runner process, for the daemon (mode `0600`). |
+| `<run>/runners/<ulid>.pid` | The pid of each runner process. The live runner holds a `flock` on it; the daemon reads it at start to find the runners that still run. |
+
+A runner process also writes `runner.json`, `runner.log`, and
+`runner-exit.json` in `<state>/agents/<ulid>/` ([runner.md](runner.md)).
 
 The CLI uses the Unix socket. Set `TERRARIUM_URL` and `TERRARIUM_TOKEN` to use
 TCP instead. The CLI supports `http://` only.

@@ -324,6 +324,7 @@ claude=$HOME/.claude`). Two model turns in total. The test is
 | `sessions/<pid>.json` | Claude Code writes a live-process record to `$CLAUDE_CONFIG_DIR/sessions/<pid>.json` (and a `<pid>.<hash>.key` file). In the sandbox PID namespace the pid is always `2`, so all agents would write one file, and each agent would see the operator's own sessions. | verified |
 | Other writes to the shared home | `history.jsonl` (the typed prompt), `backups/.claude.json.backup.<ms>` (one each start), `session-env/<id>/`, `shell-snapshots/`, `usage-cache.json`, `projects/-home-agent-work/`. `.credentials.json` and the shared `.claude.json` did not change. | verified |
 | Root of the sandbox | `/lib`, `/lib64`, `/bin`, `/sbin` are symlinks on this host (merged `/usr`). The sandbox makes the same symlinks with `--symlink`. | verified |
+| External runner | The same test in runner process mode (`RunnerMode::Process`, the daemon default): `terrarium-runner` held the PTY, with the full `bwrap` argv in `runner.json`. The idle prompt came 0.3 s after the start call. The hooks (`SessionStart`, `UserPromptSubmit`, `Stop`) came in through the runner process. Ctrl-U, the resize to 150 columns, and one `haiku` turn (`pong`, 4.7 s) went through the control socket. The statuses were the same as in-process. The agent did not call the agent CLI in this run, so the agent RPC tunnel is verified only by `tests/runtime.rs` with `TERRARIUM_TEST_RUNNER_MODE=process`. One model turn. Run on 2026-10-24. | external runner: verified |
 
 Changes that this run made to the sandbox (PLAN §11):
 

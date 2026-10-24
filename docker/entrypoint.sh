@@ -3,9 +3,10 @@
 #
 # 1. Make missing directories under /auth, /state, and /run/terrarium.
 # 2. Fix ownership of empty bind mounts (only when started as root).
-# 3. Install the Copilot system-prompt extension when it is missing, or when
+# 3. Export TERRARIUM_RUNNER (the terrarium-runner binary) when it is not set.
+# 4. Install the Copilot system-prompt extension when it is missing, or when
 #    the image version changed.
-# 4. Exec the command (terrariumd by default) as the terrarium user.
+# 5. Exec the command (terrariumd by default) as the terrarium user.
 set -euo pipefail
 
 TERRARIUM_USER="${TERRARIUM_USER:-terrarium}"
@@ -41,6 +42,16 @@ for dir in "${AUTH_DIRS[@]}" "${STATE_DIRS[@]}"; do
 	fi
 done
 chmod 700 /state/credentials 2>/dev/null || true
+
+# The runner processes (PLAN §6). The image sets TERRARIUM_RUNNER; keep a
+# value from compose, else find the binary on PATH.
+if [ "${TERRARIUM_RUNNER_MODE:-process}" = "process" ] && [ -z "${TERRARIUM_RUNNER:-}" ]; then
+	if runner="$(command -v terrarium-runner)"; then
+		export TERRARIUM_RUNNER="$runner"
+	else
+		log "terrarium-runner is not on PATH; terrariumd will refuse to start in runner mode 'process'"
+	fi
+fi
 
 image_version="$(cat "$IMAGE_VERSION_FILE" 2>/dev/null || echo unknown)"
 installed_version="$(cat "$EXTENSION_MARKER" 2>/dev/null || true)"

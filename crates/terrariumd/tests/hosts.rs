@@ -456,6 +456,43 @@ async fn a_revoked_token_is_refused() {
     task.abort();
 }
 
+/// PLAN §10: host agent tokens are operator-only. A sysadmin agent may list
+/// the hosts, but not register or revoke one.
+#[tokio::test]
+async fn host_tokens_are_operator_only() {
+    let lab = Lab::start().await;
+    lab.td.project("ops").await;
+    let sys = lab
+        .td
+        .agent("ops", "lead", json!({"roles": ["sysadmin"]}))
+        .await;
+    let sys = sys["id"].as_str().unwrap().to_owned();
+    lab.td
+        .post_as(&sys, "/api/hosts", json!({"name": "lab1"}))
+        .await
+        .err(403, "forbidden");
+    lab.register("lab1").await;
+    let listed = lab.td.get_as(&sys, "/api/hosts").await;
+    assert_eq!(listed.ok().as_array().unwrap().len(), 1);
+    assert!(listed.body[0].get("token").is_none(), "{}", listed.body);
+    lab.td.get_as(&sys, "/api/hosts/lab1").await.ok();
+    let r = lab
+        .td
+        .req(hyper::Method::DELETE, "/api/hosts/lab1", None, Some(&sys))
+        .await;
+    r.err(403, "forbidden");
+    assert_eq!(
+        lab.td
+            .get("/api/hosts")
+            .await
+            .body
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
 #[tokio::test]
 async fn agent_policy_limits_the_targets() {
     let lab = Lab::start().await;

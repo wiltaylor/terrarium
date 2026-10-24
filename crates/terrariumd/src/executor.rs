@@ -1939,8 +1939,7 @@ fn host_online(state: &Shared, def: &TargetDef) -> ApiResult<()> {
 /// permanent target is not touched.
 ///
 /// Call site: `RunnerSupervisor::start`, for each name in the agent's
-/// `policy.targets`, before the harness launches (the supervisor does not
-/// call it yet).
+/// `policy.targets`, before the harness launches.
 pub async fn ensure_up(state: &Shared, target: &str) -> ApiResult<Option<Value>> {
     let n = target.to_owned();
     let row = state.db.read(move |c| targets::get(c, &n)).await?;
@@ -1962,7 +1961,7 @@ pub async fn ensure_up(state: &Shared, target: &str) -> ApiResult<Option<Value>>
 ///
 /// Call site: the supervisor's stop path (`RunnerSupervisor::stop` and the
 /// exit of a harness that will not restart), for each name in the agent's
-/// `policy.targets` (the supervisor does not call it yet).
+/// `policy.targets`.
 pub async fn maybe_down(state: &Shared, target: &str) -> ApiResult<Option<Value>> {
     let n = target.to_owned();
     let row = state.db.read(move |c| targets::get(c, &n)).await?;

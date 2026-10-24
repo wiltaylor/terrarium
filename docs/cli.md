@@ -359,7 +359,8 @@ terrarium admin audit [--since time] [--actor a] [--action a]
 `admin role grant` reads the roles, adds the role, and writes the whole set.
 `admin role revoke` removes the role in the same way. `admin target new`
 makes a project target. Use `--global` for a global target (sysadmin).
-`admin host new` and `admin host rm` need sysadmin; `just host::token` can
+`admin host new` and `admin host rm` are for the operator only (PLAN §10:
+host agent tokens are operator-only). `just host::token` can
 use `admin host new` in a pipe.
 
 ## 7. Examples

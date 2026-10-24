@@ -571,6 +571,42 @@ pub fn display_name(conn: &Connection, id: &str) -> ApiResult<Option<String>> {
         .optional()?)
 }
 
+/// The seq of the last runner event recorded for `agent` (migration 7).
+pub fn runner_seq(conn: &Connection, agent: &str) -> ApiResult<u64> {
+    let seq: i64 = conn
+        .query_row(
+            "SELECT runner_seq FROM agents WHERE id = ?1",
+            [agent],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or(0);
+    Ok(u64::try_from(seq).unwrap_or(0))
+}
+
+/// Record a runner event seq. False: the seq is at or below the stored
+/// one, so the event is a double (a replay after a reconnect).
+pub fn advance_runner_seq(t: &mut Tx<'_>, agent: &str, seq: u64) -> ApiResult<bool> {
+    let seq = i64::try_from(seq).unwrap_or(i64::MAX);
+    let n = t.execute(
+        "UPDATE agents SET runner_seq = ?2 WHERE id = ?1 AND runner_seq < ?2",
+        params![agent, seq],
+    )?;
+    Ok(n > 0)
+}
+
+/// Lower the stored seq to `seq` when it is higher: `events.jsonl` starts
+/// again at `seq` (the file was removed or cut), and the next events must
+/// not count as doubles.
+pub fn clamp_runner_seq(t: &mut Tx<'_>, agent: &str, seq: u64) -> ApiResult<()> {
+    let seq = i64::try_from(seq).unwrap_or(i64::MAX);
+    t.execute(
+        "UPDATE agents SET runner_seq = ?2 WHERE id = ?1 AND runner_seq > ?2",
+        params![agent, seq],
+    )?;
+    Ok(())
+}
+
 /// All agent IDs with their stored status.
 pub fn all_statuses(conn: &Connection) -> ApiResult<Vec<(String, AgentStatus)>> {
     let mut stmt = conn.prepare("SELECT id, status FROM agents ORDER BY id")?;

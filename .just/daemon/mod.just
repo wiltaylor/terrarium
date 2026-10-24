@@ -24,8 +24,13 @@ build: require-cargo
 
 # Run terrariumd on this machine, outside Docker, with no sandbox and your own harness logins
 [group('daemon')]
-run: require-cargo
+run: require-cargo runner-build
 	TERRARIUM_LISTEN={{dev_listen}} TERRARIUM_STATE_DIR={{quote(dev_state)}} TERRARIUM_CONFIG_DIR={{quote(justfile_directory())}} TERRARIUM_SANDBOX={{dev_sandbox}} TERRARIUM_PROMPTS_DIR={{quote(dev_prompts)}} TERRARIUM_ARTIFACT_LISTEN={{dev_artifact_listen}} TERRARIUM_HARNESS_HOME={{quote(dev_harness_home)}} cargo run -p terrariumd
+
+# Build terrarium-runner next to terrariumd: the daemon runs each agent in one runner process
+[private]
+runner-build: require-cargo
+	cargo build -q -p terrarium-runner
 
 # Run the Rust tests
 [group('daemon')]

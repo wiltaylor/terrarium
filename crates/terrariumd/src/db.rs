@@ -558,6 +558,13 @@ const MIGRATIONS: &[&str] = &[
     -- the harness keeps the prompt of a session (Codex).
     ALTER TABLE agents ADD COLUMN new_session_on_prompt_change INTEGER NOT NULL DEFAULT 1;
     "#,
+    // 7: the seq of the last runner event that the daemon recorded for each
+    // agent (`events.jsonl` line number, docs/runner.md "Event seq"). A
+    // reconnect to a runner process replays from it, and the event pump
+    // drops a record at or below it.
+    r#"
+    ALTER TABLE agents ADD COLUMN runner_seq INTEGER NOT NULL DEFAULT 0;
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call
@@ -834,6 +841,27 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn migration_7_starts_runner_seq_at_zero() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        for sql in &MIGRATIONS[..6] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 6).unwrap();
+        conn.execute_batch(
+            "INSERT INTO agents (id, name, project, harness, workspace, created_at, updated_at)
+               VALUES ('A1', 'a', 'p', 'claude', '/w', 't', 't');",
+        )
+        .unwrap();
+        assert_eq!(migrate(&mut conn).unwrap(), MIGRATIONS.len() - 6);
+        let seq: i64 = conn
+            .query_row("SELECT runner_seq FROM agents WHERE id = 'A1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(seq, 0);
     }
 
     #[test]

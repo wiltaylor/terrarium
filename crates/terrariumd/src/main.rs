@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use clap::Parser;
-use terrariumd::runner_supervisor::{RunnerSupervisor, RunnerSupervisorConfig};
+use terrariumd::runner_supervisor::{RunnerMode, RunnerSupervisor, RunnerSupervisorConfig};
 use terrariumd::sandbox::{self, SandboxConfig};
 use terrariumd::settings::{Command, Settings};
 use terrariumd::usage_collector::UsageConfig;
@@ -54,7 +54,18 @@ async fn main() -> anyhow::Result<()> {
             error!("no `terrarium` CLI found: hooks inside the sandbox will fail; set --cli");
         }
     }
-    let supervisor = Arc::new(RunnerSupervisor::new(supervisor_config(sandbox)));
+    let mode = settings.runner_mode().map_err(anyhow::Error::msg)?;
+    match &mode {
+        RunnerMode::Process { bin } => {
+            info!(runner = %bin.display(), "agents run in runner processes");
+        }
+        RunnerMode::InProcess => {
+            info!("agents run in the daemon process: they end when the daemon stops");
+        }
+    }
+    let mut cfg = supervisor_config(sandbox);
+    cfg.mode = mode;
+    let supervisor = Arc::new(RunnerSupervisor::new(cfg));
     let usage = UsageConfig {
         homes: homes.clone(),
         detect_on_start: true,

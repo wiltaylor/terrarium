@@ -7,7 +7,8 @@
 #
 # Stages:
 #   dashboard    npm ci && npm run build for the SolidJS app
-#   rust         cargo build --release for terrariumd and terrarium (embeds the dashboard)
+#   rust         cargo build --release for terrariumd, terrarium, and terrarium-runner
+#                (terrariumd embeds the dashboard)
 #   host-build   static musl terrarium-host, for `just host::build` (not in the image)
 #   host-export  scratch stage that holds only the host binary, for `--output`
 #   runtime      Debian slim + Node, bubblewrap, git, ssh, and the harnesses
@@ -33,9 +34,9 @@ COPY crates ./crates
 COPY --from=dashboard /src/dashboard/dist ./dashboard/dist
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target,id=terrarium-target \
-    cargo build --release --locked -p terrariumd -p terrarium \
+    cargo build --release --locked -p terrariumd -p terrarium -p terrarium-runner \
     && mkdir -p /out \
-    && cp target/release/terrariumd target/release/terrarium /out/
+    && cp target/release/terrariumd target/release/terrarium target/release/terrarium-runner /out/
 
 # ---------------------------------------------------------------------------
 FROM ${RUST_IMAGE} AS host-build
@@ -120,9 +121,13 @@ ENV HOME=/home/terrarium \
     TERRARIUM_STATE_DIR=/state \
     TERRARIUM_CONFIG_DIR=/etc/terrarium \
     TERRARIUM_API_SOCKET=/run/terrarium/api.sock \
-    TERRARIUM_LISTEN=0.0.0.0:8080
+    TERRARIUM_LISTEN=0.0.0.0:8080 \
+    TERRARIUM_RUNNER_MODE=process \
+    TERRARIUM_RUNNER=/usr/local/bin/terrarium-runner
 
-COPY --from=rust /out/terrariumd /out/terrarium /usr/local/bin/
+# One terrarium-runner process holds each agent (PLAN §6), so an agent
+# lives through a restart of terrariumd.
+COPY --from=rust /out/terrariumd /out/terrarium /out/terrarium-runner /usr/local/bin/
 COPY docker/entrypoint.sh /usr/local/bin/terrarium-entrypoint
 
 # The entrypoint reinstalls the Copilot extension when this string changes.

@@ -43,7 +43,9 @@ use crate::error::ApiResult;
 use crate::events::{EventDraft, EventHub};
 use crate::store::agents;
 use crate::store::sync::SyncReport;
-use crate::supervisor::{Supervisor, SupervisorError, SupervisorEvent, SupervisorEventKind};
+use crate::supervisor::{
+    Recovery, Supervisor, SupervisorError, SupervisorEvent, SupervisorEventKind,
+};
 
 /// What [`start`] needs.
 pub struct DaemonConfig {
@@ -74,8 +76,10 @@ pub struct Daemon {
 }
 
 impl Daemon {
-    /// Stop serving, end the harnesses, and remove the socket. The stored
-    /// status of each agent stays, so the next start launches it again.
+    /// Stop serving and remove the socket. The stored status of each agent
+    /// stays. Runner processes keep their harnesses, and the next start
+    /// connects to them again; in-process harnesses end, and the next start
+    /// launches them again.
     pub fn shutdown(self) {
         for t in &self.tasks {
             t.abort();
@@ -341,9 +345,16 @@ fn summary(name: &str, kind: &str, data: &Value) -> String {
     }
 }
 
-/// Write one supervisor event to the store.
+/// Write one supervisor event to the store. A runner event (with a seq)
+/// goes in once: a seq at or below the stored `runner_seq` is a double from
+/// a replay, and the pump drops it.
 fn record(t: &mut Tx<'_>, ev: &SupervisorEvent) -> ApiResult<()> {
     let id = ev.agent.to_string();
+    if let Some(seq) = ev.seq
+        && !agents::advance_runner_seq(t, &id, seq)?
+    {
+        return Ok(());
+    }
     let event = match &ev.kind {
         SupervisorEventKind::Status { status, reason } => {
             return apply_status(t, &id, *status, reason.as_deref());
@@ -401,10 +412,18 @@ fn spawn_pump(state: Shared) -> JoinHandle<()> {
     })
 }
 
-/// After a start, launch again every agent that the store thinks is live
-/// (or restarting) but the supervisor does not run, with `--resume` of its
-/// last harness session (PLAN §18). An agent that cannot start gets
-/// `error`, with the reason.
+/// After a start, reconcile every agent that the store thinks is live (or
+/// restarting) but the supervisor does not run (PLAN §18):
+///
+/// 1. [`Supervisor::recover`] connects to a live runner process. The
+///    harness keeps running, and the events that the daemon missed come
+///    from the stored `runner_seq` on.
+/// 2. When the harness ended while the daemon was down, the supervisor
+///    applies the restart policy to its exit status. With no restart, it
+///    reports `stopped` or `error`.
+/// 3. Else the daemon launches the agent again, with `--resume` of its
+///    last harness session. An agent that cannot start gets `error`, with
+///    the reason.
 async fn reconcile(state: &Shared) -> ApiResult<()> {
     let all = state.db.read(agents::all_statuses).await?;
     for (id, stored) in all {
@@ -419,6 +438,30 @@ async fn reconcile(state: &Shared) -> ApiResult<()> {
             .is_some_and(|s| s.is_live() || s == AgentStatus::Restarting);
         if live {
             continue;
+        }
+        let key = id.clone();
+        let (view, since) = state
+            .db
+            .read(move |c| Ok((agents::get(c, &key)?, agents::runner_seq(c, &key)?)))
+            .await?;
+        match state.supervisor.recover(view.agent, since).await {
+            Ok(Recovery::Attached) => {
+                info!(agent = %id, since, "connected to the live runner again");
+                continue;
+            }
+            Ok(Recovery::Ended) => continue,
+            Ok(Recovery::Gone) => {}
+            Err(e) => {
+                warn!(agent = %id, "cannot connect to the runner after daemon start: {e}");
+                let reason = format!("cannot connect to the runner after daemon start: {e}");
+                state
+                    .db
+                    .write("system", move |t| {
+                        apply_status(t, &id, AgentStatus::Error, Some(&reason))
+                    })
+                    .await?;
+                continue;
+            }
         }
         let key = id.clone();
         let (view, resume) = state

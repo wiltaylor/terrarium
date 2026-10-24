@@ -3,10 +3,13 @@
 //! turn. Run it with:
 //!
 //! ```sh
-//! cargo build -p terrarium
+//! cargo build -p terrarium -p terrarium-runner
 //! TERRARIUM_E2E_CLAUDE_HOME=$HOME/.claude \
 //!   cargo test -p terrariumd --test e2e_claude -- --ignored --nocapture
 //! ```
+//!
+//! The agents run in `terrarium-runner` processes, as in the daemon. Set
+//! `TERRARIUM_E2E_RUNNER_MODE=inprocess` to run them in the test process.
 //!
 //! It binds the Claude home read-write, as the container does with
 //! `/auth/claude`. It does not copy or change the credentials. The results
@@ -25,7 +28,8 @@ use hyper_util::rt::TokioIo;
 use serde_json::{Value, json};
 use terrarium_adapter_claude::screen::screen_state;
 use terrarium_core::{AgentId, HarnessId};
-use terrariumd::runner_supervisor::{RunnerSupervisor, RunnerSupervisorConfig};
+use terrarium_runner::RunnerHandle;
+use terrariumd::runner_supervisor::{RunnerMode, RunnerSupervisor, RunnerSupervisorConfig};
 use terrariumd::sandbox::{self, SandboxConfig, SandboxMode};
 use terrariumd::{Daemon, DaemonConfig};
 use tokio::net::UnixStream;
@@ -54,6 +58,31 @@ async fn req(socket: &Path, method: Method, path: &str, body: Option<Value>) -> 
     let status = resp.status().as_u16();
     let raw = resp.into_body().collect().await.unwrap().to_bytes();
     (status, serde_json::from_slice(&raw).unwrap_or(Value::Null))
+}
+
+/// The runner mode of the run: one `terrarium-runner` process per agent
+/// (built next to the test binaries: `cargo build -p terrarium-runner`),
+/// or in the test process with `TERRARIUM_E2E_RUNNER_MODE=inprocess`.
+fn with_runner_mode(mut cfg: RunnerSupervisorConfig) -> RunnerSupervisorConfig {
+    if std::env::var("TERRARIUM_E2E_RUNNER_MODE").as_deref() == Ok("inprocess") {
+        println!("runner mode: in-process");
+        return cfg;
+    }
+    let bin = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/terrarium-runner");
+    assert!(bin.is_file(), "build the runner first: {}", bin.display());
+    println!("runner mode: process ({})", bin.display());
+    cfg.mode = RunnerMode::Process {
+        bin: std::fs::canonicalize(bin).unwrap(),
+    };
+    cfg
+}
+
+/// The screen text of a running agent, for a failure message.
+async fn screen_of(sup: &RunnerSupervisor, id: AgentId) -> String {
+    match sup.runner(id) {
+        Some(r) => r.screen().await.map(|s| s.text()).unwrap_or_default(),
+        None => String::new(),
+    }
 }
 
 async fn wait_for(what: &str, limit: Duration, mut f: impl AsyncFnMut() -> bool) {
@@ -100,7 +129,7 @@ async fn claude_in_bwrap_answers_one_turn() {
         sandbox,
         homes,
     );
-    let sup = Arc::new(RunnerSupervisor::new(cfg));
+    let sup = Arc::new(RunnerSupervisor::new(with_runner_mode(cfg)));
     let socket = run.path().join("api.sock");
     std::fs::create_dir_all(root.path().join("config")).unwrap();
     let daemon: Daemon = terrariumd::start(DaemonConfig {
@@ -162,10 +191,7 @@ async fn claude_in_bwrap_answers_one_turn() {
     wait_for("idle after start", Duration::from_secs(60), async || {
         let s = status().await;
         if s == "error" || s == "stopped" {
-            let screen = sup
-                .runner(id)
-                .map(|r| r.screen().text())
-                .unwrap_or_default();
+            let screen = screen_of(&sup, id).await;
             panic!("the agent ended: {s}\n{screen}");
         }
         s == "idle"
@@ -176,24 +202,27 @@ async fn claude_in_bwrap_answers_one_turn() {
         started.elapsed().as_secs_f32()
     );
     let runner = sup.runner(id).expect("runner");
-    println!("--- idle screen ---\n{}\n---", runner.screen().text());
+    println!(
+        "--- idle screen ---\n{}\n---",
+        runner.screen().await.unwrap().text()
+    );
 
     // Clear-input keys: type text without Enter, then Ctrl-U.
     runner.write(b"draft text").await.unwrap();
     tokio::time::sleep(Duration::from_millis(800)).await;
-    let before = screen_state(&runner.screen().lines);
+    let before = screen_state(&runner.screen().await.unwrap().lines);
     println!("input before clear: {:?}", before.input_text);
     let keys = terrarium_core::Adapter::clear_input_keys(
         &terrarium_adapter_claude::ClaudeAdapter::default(),
     );
     runner.write(&keys).await.unwrap();
     tokio::time::sleep(Duration::from_millis(800)).await;
-    let after = screen_state(&runner.screen().lines);
+    let after = screen_state(&runner.screen().await.unwrap().lines);
     println!(
         "input after clear ({keys:?}): {:?}, ready = {}",
         after.input_text, after.ready
     );
-    assert!(after.ready, "{}", runner.screen().text());
+    assert!(after.ready, "{}", runner.screen().await.unwrap().text());
     assert_eq!(
         status().await,
         "idle",
@@ -202,8 +231,10 @@ async fn claude_in_bwrap_answers_one_turn() {
 
     // Resize: with `--new-session` the harness has no controlling
     // terminal. Does it still redraw at the new size?
-    let width = |r: &terrarium_runner::Runner| {
+    let width = async |r: &Arc<dyn RunnerHandle>| {
         r.screen()
+            .await
+            .unwrap()
             .lines
             .iter()
             .filter(|l| l.starts_with('─'))
@@ -211,10 +242,13 @@ async fn claude_in_bwrap_answers_one_turn() {
             .max()
             .unwrap_or(0)
     };
-    println!("rule width before resize: {}", width(&runner));
-    runner.resize(40, 150).unwrap();
+    println!("rule width before resize: {}", width(&runner).await);
+    runner.resize(40, 150).await.unwrap();
     tokio::time::sleep(Duration::from_millis(1500)).await;
-    println!("rule width after resize to 150 cols: {}", width(&runner));
+    println!(
+        "rule width after resize to 150 cols: {}",
+        width(&runner).await
+    );
 
     // The per-agent `sessions/` overlay: the registry file lands in the
     // agent dir, not in the shared home.
@@ -298,7 +332,7 @@ async fn claude_in_bwrap_answers_one_turn() {
         .map(|e| e["kind"].as_str().unwrap_or(""))
         .collect();
     println!("event kinds: {names:?}");
-    let screen = runner.screen().text();
+    let screen = runner.screen().await.unwrap().text();
     println!("--- screen after the turn ---\n{screen}\n---");
     assert!(screen.contains("pong"));
 
@@ -364,7 +398,7 @@ fn last_assistant_text(transcript: &Path) -> String {
 /// session) and one more turn each: four model turns. Run it alone:
 ///
 /// ```sh
-/// cargo build -p terrarium
+/// cargo build -p terrarium -p terrarium-runner
 /// TERRARIUM_E2E_CLAUDE_HOME=$HOME/.claude cargo test -p terrariumd \
 ///   --test e2e_claude -- --ignored --exact two_claude_agents_share_one_home --nocapture
 /// ```
@@ -406,7 +440,7 @@ async fn two_claude_agents_share_one_home() {
         sandbox,
         homes,
     );
-    let sup = Arc::new(RunnerSupervisor::new(cfg));
+    let sup = Arc::new(RunnerSupervisor::new(with_runner_mode(cfg)));
     let socket = run.path().join("api.sock");
     std::fs::create_dir_all(root.path().join("config")).unwrap();
     let daemon: Daemon = terrariumd::start(DaemonConfig {
@@ -466,10 +500,7 @@ async fn two_claude_agents_share_one_home() {
                 async || {
                     let s = status_of(&socket, &p.path).await;
                     if s == "error" || s == "stopped" {
-                        let screen = sup
-                            .runner(p.id)
-                            .map(|r| r.screen().text())
-                            .unwrap_or_default();
+                        let screen = screen_of(&sup, p.id).await;
                         panic!("{} ended: {s}\n{screen}", p.name);
                     }
                     s == "idle"
@@ -596,10 +627,7 @@ async fn two_claude_agents_share_one_home() {
         let state: Value =
             serde_json::from_slice(&std::fs::read(own.join("claude.json")).unwrap_or_default())
                 .unwrap_or(Value::Null);
-        let screen = sup
-            .runner(p.id)
-            .map(|r| r.screen().text())
-            .unwrap_or_default();
+        let screen = screen_of(&sup, p.id).await;
         println!(
             "--- {} screen after the resumed turn ---\n{screen}\n---",
             p.name

@@ -166,10 +166,11 @@ pub fn define_target(actor: &Actor, project: Option<&str>) -> ApiResult<()> {
     }
 }
 
-/// Register or revoke host agents: sysadmin or the operator (PLAN §10
-/// "register host agents").
+/// Register or revoke host agents: the operator only. Each registration
+/// makes a host agent token, and PLAN §10 keeps "manage credentials and
+/// host agent tokens" for the operator. A sysadmin agent may list hosts.
 pub fn manage_hosts(actor: &Actor, what: &str) -> ApiResult<()> {
-    sysadmin(actor, what)
+    operator_only(actor, what)
 }
 
 /// Read the project inbox and reply from it.
@@ -428,6 +429,14 @@ mod tests {
         assert!(change_role(&sys, "other", "q", Role::Sysadmin).is_err());
         assert!(change_role(&Actor::Operator, "other", "q", Role::Sysadmin).is_ok());
         assert!(change_role(&admin, "p-id", "p", Role::ProjectAdmin).is_err());
+    }
+
+    #[test]
+    fn host_tokens_are_for_the_operator() {
+        let sys = Actor::Agent(agent("p", &[Role::Sysadmin], Policy::default()));
+        assert!(manage_hosts(&Actor::Operator, "x").is_ok());
+        let err = manage_hosts(&sys, "registering a host agent").unwrap_err();
+        assert!(err.message.contains("the operator"), "{}", err.message);
     }
 
     #[test]

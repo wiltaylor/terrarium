@@ -27,8 +27,7 @@ install host: require-ssh
 	@echo "host::install {{host}} is not implemented yet: the host agent has no networking until Phase 5 (PLAN §19)" >&2
 	@exit 1
 
-# Mint a host agent token for a host (not implemented yet: Phase 5)
+# Register a host agent with the running daemon and print its token alone on stdout (operator only)
 [group('host')]
-token host:
-	@echo "host::token {{host}} is not implemented yet: the daemon has no host registry until Phase 5 (PLAN §19)" >&2
-	@exit 1
+token host: require-cargo
+	@cargo run -q -p terrarium -- admin host new {{quote(host)}}

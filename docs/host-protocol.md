@@ -544,16 +544,18 @@ as the user `terrarium`, reads optional overrides from
 vmlab), and restarts on failure. Edit `User=` and `SupplementaryGroups=` to
 match the host.
 
-The `just host::install` and `just host::token` recipes are stubs today.
-They must do this:
+`just host::token` works. The `just host::install` recipe is a stub today;
+it must do the steps under its heading below.
 
 **`just host::token <host>`**
 
-1. Ask the daemon to mint a token for `<host>` (for example
-   `terrarium hosts token <host>` against the API). The daemon makes the
-   host registry entry if it does not exist and stores only a hash.
-2. Print the token once on stdout, so it can go into a pipe. Print nothing
-   else on stdout.
+1. It runs `terrarium admin host new <host>` against the daemon (the Unix
+   socket, or `TERRARIUM_URL` with `TERRARIUM_TOKEN`). Only the operator
+   can do this. The daemon makes the host registry entry and stores only a
+   hash of the token. A host that exists already gets `409`: run
+   `terrarium admin host rm <host>` first to get a new token.
+2. It prints the token once on stdout, so it can go into a pipe. It prints
+   nothing else on stdout.
 
 **`just host::install <host>`**
 
@@ -572,22 +574,36 @@ They must do this:
 
 ## What the daemon side must do
 
-This list is for the daemon work that comes next (the host registry, the
-dial-in listener on :8082, and target routing):
+The daemon side is in `crates/terrariumd/src/hosts.rs` (the dial-in
+endpoint, the host registry, and the session multiplexer),
+`src/executor.rs` (the routing and the policy checks), and
+`src/api/hosts.rs`. The tests are in `crates/terrariumd/tests/hosts.rs`.
+Each item of the list is done:
 
-- Serve `GET /hosts/connect` on the dial-in listener. Check the bearer token
-  against the host registry before the upgrade. Answer `401` on a bad token.
-- Read `hello`. Refuse an unknown `protocol` with `goodbye` `protocol`.
+- [x] Serve `GET /hosts/connect` on the dial-in listener
+  (`TERRARIUM_HOST_LISTEN`, default `0.0.0.0:8082`, and also on the main
+  router). Check the bearer token against the host registry before the
+  upgrade. Answer `401` on a bad token. (`hosts::connect`)
+- [x] Read `hello`. Refuse an unknown `protocol` with `goodbye` `protocol`.
   Store the capabilities for the dashboard and for policy checks
-  (`HostCapabilities::summary` gives the flat `Capabilities`).
-- Send `welcome` with a new `resume_token` and the `resume` list, as in
-  [Reconnect](#reconnect).
-- Pick session IDs with a counter for each host. Never reuse a live ID.
-- Send `ack` at least once for each 1 MiB of output, and at the end.
-- Send `release` after each terminal frame.
-- Send `ping` every `heartbeat_secs`, and close a link that is silent for 3
+  (`HostCapabilities::summary` gives the flat `Capabilities`). The
+  registry keeps the capabilities of the last `hello`; `GET /api/hosts`
+  shows them with the `summary`.
+- [x] Send `welcome` with a new `resume_token` and the `resume` list, as in
+  [Reconnect](#reconnect). (`HostRegistry::attach`)
+- [x] Pick session IDs with a counter for each host. Never reuse a live ID.
+  (`HostRegistry::open`)
+- [x] Send `ack` at least once for each 1 MiB of output, and at the end.
+  The daemon acks each 256 KiB that the consumer took.
+- [x] Send `release` after each terminal frame.
+- [x] Send `ping` every `heartbeat_secs`, and close a link that is silent for 3
   intervals.
-- Apply the agent's policy before it sends any frame.
+- [x] Apply the agent's policy before it sends any frame
+  (`policy::use_target` in `executor`, before a session opens).
+- [x] Register and revoke host agents with `POST` and `DELETE /api/hosts`.
+  Only the operator can do this, because PLAN §10 keeps host agent tokens
+  for the operator. `just host::token <name>` runs
+  `terrarium admin host new <name>` and prints the token alone on stdout.
 
 ## Decisions on PLAN §22 item 4
 
