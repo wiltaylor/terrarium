@@ -79,6 +79,16 @@ pub enum SupervisorEventKind {
     NewSession { outcome: String },
 }
 
+/// Why an agent's new turns wait (PLAN §16.2): its plan is at 100 percent,
+/// or its project spent a daily budget.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnHold {
+    /// When the hold ends by itself (the window reset), if known.
+    pub until: Option<chrono::DateTime<chrono::Utc>>,
+    /// For the `blocked` status reason.
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct SupervisorEvent {
     pub agent: AgentId,
@@ -110,6 +120,25 @@ pub trait Supervisor: Send + Sync + 'static {
     fn status(&self, agent: AgentId) -> BoxFuture<'_, Option<AgentStatus>>;
     /// Every event from now on.
     fn subscribe(&self) -> broadcast::Receiver<SupervisorEvent>;
+    /// Hold (`Some`) or release (`None`) the agent's new turns, for the
+    /// quota policy (`crate::quota_policy`). While a hold lasts, the agent
+    /// is `blocked` with the reason, and turns (from `send_turn` and from
+    /// mail and card delivery) wait in order. A release sends them and
+    /// returns the agent to its status. A hold on an agent that does not
+    /// run applies when it starts. The default cannot hold: it answers
+    /// `NotReady`, and the policy records the hold as advice only.
+    fn hold_turns(
+        &self,
+        agent: AgentId,
+        hold: Option<TurnHold>,
+    ) -> BoxFuture<'_, Result<(), SupervisorError>> {
+        let _ = (agent, hold);
+        Box::pin(async {
+            Err(SupervisorError::NotReady(
+                "this supervisor cannot hold turns".into(),
+            ))
+        })
+    }
     /// The daemon calls this once, after it builds its state and before it
     /// serves. A supervisor that needs the store, the event hub, or the
     /// router keeps a weak reference.
@@ -131,7 +160,7 @@ mod fake {
 
     use super::{
         AnswerInput, BoxFuture, PtyAttachment, PtyInput, Supervisor, SupervisorError,
-        SupervisorEvent, SupervisorEventKind,
+        SupervisorEvent, SupervisorEventKind, TurnHold,
     };
 
     #[derive(Default)]
@@ -141,6 +170,9 @@ mod fake {
         epoch: u64,
         viewers: Vec<mpsc::Sender<Vec<u8>>>,
         size: Option<(u16, u16)>,
+        /// The quota hold, and the turns that wait for its end.
+        held: Option<TurnHold>,
+        waiting: Vec<String>,
     }
 
     #[derive(Default)]
@@ -238,8 +270,24 @@ mod fake {
                         source: Some("startup".into()),
                     }),
                 );
-                me.set_status(agent, AgentStatus::Idle, None);
+                match me.held(agent) {
+                    Some(h) => me.set_status(agent, AgentStatus::Blocked, Some(&h.reason)),
+                    None => me.set_status(agent, AgentStatus::Idle, None),
+                };
             });
+        }
+
+        fn held(&self, agent: AgentId) -> Option<TurnHold> {
+            self.lock().agents.get(&agent).and_then(|a| a.held.clone())
+        }
+
+        /// The turns that wait for the end of a quota hold. For tests.
+        pub fn waiting_turns(&self, agent: AgentId) -> Vec<String> {
+            self.lock()
+                .agents
+                .get(&agent)
+                .map(|a| a.waiting.clone())
+                .unwrap_or_default()
         }
 
         fn turn(&self, agent: AgentId, prompt: String) -> Result<(), SupervisorError> {
@@ -320,7 +368,56 @@ mod fake {
             agent: AgentId,
             text: String,
         ) -> BoxFuture<'_, Result<(), SupervisorError>> {
-            Box::pin(async move { self.turn(agent, text) })
+            Box::pin(async move {
+                {
+                    let mut inner = self.lock();
+                    if let Some(a) = inner.agents.get_mut(&agent)
+                        && a.held.is_some()
+                        && a.status.is_live()
+                    {
+                        a.waiting.push(text);
+                        return Ok(());
+                    }
+                }
+                self.turn(agent, text)
+            })
+        }
+
+        fn hold_turns(
+            &self,
+            agent: AgentId,
+            hold: Option<TurnHold>,
+        ) -> BoxFuture<'_, Result<(), SupervisorError>> {
+            Box::pin(async move {
+                let (status, waiting) = {
+                    let mut inner = self.lock();
+                    let a = inner.agents.entry(agent).or_default();
+                    let waiting = if hold.is_none() {
+                        std::mem::take(&mut a.waiting)
+                    } else {
+                        Vec::new()
+                    };
+                    a.held = hold.clone();
+                    (a.status, waiting)
+                };
+                match hold {
+                    Some(h) if status.is_live() => {
+                        self.set_status(agent, AgentStatus::Blocked, Some(&h.reason));
+                    }
+                    Some(_) => {}
+                    None => {
+                        if status == AgentStatus::Blocked {
+                            self.set_status(agent, AgentStatus::Idle, Some("quota hold ended"));
+                        }
+                        if status.is_live() {
+                            for text in waiting {
+                                self.turn(agent, text)?;
+                            }
+                        }
+                    }
+                }
+                Ok(())
+            })
         }
 
         fn answer(

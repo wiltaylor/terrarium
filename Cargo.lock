@@ -1865,18 +1865,31 @@ dependencies = [
 name = "terrarium-adapter-codex"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
+ "chrono",
  "semver",
+ "serde",
  "serde_json",
+ "tempfile",
  "terrarium-core",
+ "thiserror 2.0.21",
+ "toml",
+ "vt100",
 ]
 
 [[package]]
 name = "terrarium-adapter-copilot"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "semver",
+ "serde",
  "serde_json",
+ "tempfile",
  "terrarium-core",
+ "thiserror 2.0.21",
+ "toml",
+ "vt100",
 ]
 
 [[package]]

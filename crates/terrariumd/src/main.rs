@@ -9,7 +9,8 @@ use clap::Parser;
 use terrariumd::runner_supervisor::{RunnerSupervisor, RunnerSupervisorConfig};
 use terrariumd::sandbox::{self, SandboxConfig};
 use terrariumd::settings::{Command, Settings};
-use terrariumd::{DaemonConfig, start};
+use terrariumd::usage_collector::UsageConfig;
+use terrariumd::{DaemonConfig, start_with_usage};
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
@@ -54,16 +55,24 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     let supervisor = Arc::new(RunnerSupervisor::new(supervisor_config(sandbox)));
-    let daemon = start(DaemonConfig {
-        socket: settings.socket,
-        listen: Some(settings.listen),
-        token: settings.token,
-        state_dir: settings.state_dir,
-        config_dir: settings.config_dir,
-        supervisor,
-        insecure_agent_header: settings.insecure_agent_header,
-        artifact_listen: Some(settings.artifact_listen),
-    })
+    let usage = UsageConfig {
+        homes: homes.clone(),
+        detect_on_start: true,
+        ..UsageConfig::default()
+    };
+    let daemon = start_with_usage(
+        DaemonConfig {
+            socket: settings.socket,
+            listen: Some(settings.listen),
+            token: settings.token,
+            state_dir: settings.state_dir,
+            config_dir: settings.config_dir,
+            supervisor,
+            insecure_agent_header: settings.insecure_agent_header,
+            artifact_listen: Some(settings.artifact_listen),
+        },
+        usage,
+    )
     .await?;
 
     shutdown_signal().await;

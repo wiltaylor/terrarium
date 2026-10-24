@@ -45,6 +45,10 @@ pub enum Code {
     StaleBase,
     /// The upload is over the per-file limit or the project quota.
     TooLarge,
+    /// The caller sent too many requests of this kind; try again later.
+    RateLimited,
+    /// The endpoint exists, but this phase does not implement the request.
+    NotAvailable,
     /// A bug or an I/O failure in the daemon.
     Internal,
 }
@@ -66,6 +70,8 @@ impl Code {
             | Self::AlreadyRunning
             | Self::StaleBase => StatusCode::CONFLICT,
             Self::TooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+            Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
+            Self::NotAvailable => StatusCode::NOT_IMPLEMENTED,
             Self::Invalid | Self::CommentRequired => StatusCode::UNPROCESSABLE_ENTITY,
             Self::Internal => StatusCode::INTERNAL_SERVER_ERROR,
         }

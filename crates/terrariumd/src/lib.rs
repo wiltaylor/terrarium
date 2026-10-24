@@ -6,16 +6,22 @@ pub mod actor;
 pub mod agent_rpc;
 pub mod api;
 pub mod assets;
+pub mod credentials;
 pub mod db;
 pub mod error;
 pub mod events;
+pub mod git;
+pub mod login_session;
 pub mod policy;
+pub mod probes;
 pub mod prompt;
+pub mod quota_policy;
 pub mod runner_supervisor;
 pub mod sandbox;
 pub mod settings;
 pub mod store;
 pub mod supervisor;
+pub mod usage_collector;
 
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -94,8 +100,19 @@ fn log_definitions(defs: &Definitions, errors: &[String], dir: &std::path::Path)
     );
 }
 
-/// Open the store, sync the definitions, and serve the API.
+/// Open the store, sync the definitions, and serve the API. The usage
+/// subsystem takes its settings from the environment
+/// ([`usage_collector::UsageConfig::from_env`]).
 pub async fn start(cfg: DaemonConfig) -> anyhow::Result<Daemon> {
+    start_with_usage(cfg, usage_collector::UsageConfig::from_env()).await
+}
+
+/// [`start`] with the settings of usage accounting, quota probes, and login
+/// sessions (PLAN §16).
+pub async fn start_with_usage(
+    cfg: DaemonConfig,
+    usage: usage_collector::UsageConfig,
+) -> anyhow::Result<Daemon> {
     std::fs::create_dir_all(&cfg.state_dir)
         .with_context(|| format!("cannot create state dir {}", cfg.state_dir.display()))?;
     let db_path = cfg.state_dir.join("terrarium.db");
@@ -115,6 +132,7 @@ pub async fn start(cfg: DaemonConfig) -> anyhow::Result<Daemon> {
         state_dir: cfg.state_dir.clone(),
         config_dir: cfg.config_dir.clone(),
         insecure_agent_header: cfg.insecure_agent_header,
+        usage: Arc::new(usage_collector::UsageRuntime::new(usage)),
     });
     if cfg.insecure_agent_header {
         warn!("--insecure-agent-header: any local caller can act as any agent");
@@ -122,6 +140,7 @@ pub async fn start(cfg: DaemonConfig) -> anyhow::Result<Daemon> {
 
     let mut tasks = Vec::new();
     tasks.push(spawn_pump(state.clone()));
+    tasks.push(usage_collector::spawn(state.clone()));
     state.supervisor.bind(&state);
 
     let report = apply_definitions(&state, defs, errors, "system".into())
@@ -166,6 +185,7 @@ pub async fn start(cfg: DaemonConfig) -> anyhow::Result<Daemon> {
         artifact_addr = Some(local);
     }
     tasks.push(spawn_prune_timer(state.clone()));
+    tasks.extend(start_usage(&state).await);
     Ok(Daemon {
         state,
         socket: cfg.socket,
@@ -173,6 +193,32 @@ pub async fn start(cfg: DaemonConfig) -> anyhow::Result<Daemon> {
         artifact_addr,
         tasks,
     })
+}
+
+/// Start the usage subsystem (PLAN §16): the probe scheduler, the quota
+/// policy timer, and the start-up login check. Login sessions that a
+/// daemon stop left open become `expired`.
+async fn start_usage(state: &Shared) -> Vec<JoinHandle<()>> {
+    if let Err(e) = state
+        .db
+        .write("system", store::subscriptions::expire_open_logins)
+        .await
+    {
+        warn!("cannot expire old login sessions: {e}");
+    }
+    let mut tasks = vec![
+        probes::spawn_scheduler(state.clone()),
+        quota_policy::spawn(state.clone()),
+    ];
+    if state.usage.config.detect_on_start {
+        let s = state.clone();
+        tasks.push(tokio::spawn(async move {
+            if let Err(e) = login_session::detect_on_start(&s).await {
+                warn!("start-up login check failed: {e}");
+            }
+        }));
+    }
+    tasks
 }
 
 /// Run the artifact retention prune (PLAN §15.2): first one hour after the
@@ -210,6 +256,14 @@ pub async fn apply_definitions(
         .write(actor, move |t| store::sync::sync(t, &d, &state_dir))
         .await?;
     report.errors.splice(0..0, errors);
+    let subscriptions = defs.subscriptions.clone();
+    let changes = state
+        .db
+        .write("system", move |t| {
+            store::subscriptions::sync_files(t, &subscriptions)
+        })
+        .await?;
+    report.errors.extend(changes.errors);
     state.set_definitions(defs);
     for id in &report.removed_agent_ids {
         if let Ok(id) = id.parse() {

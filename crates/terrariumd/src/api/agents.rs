@@ -5,7 +5,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use terrarium_core::config::AgentDef;
 use terrarium_core::{AgentId, Answer, Role};
@@ -98,11 +98,21 @@ async fn list(
     Ok(paged(rows))
 }
 
+/// The answer of `POST /api/agents`: the agent, and the result of each
+/// `checkout.on_agent_create` clone.
+#[derive(Debug, Serialize)]
+struct Created {
+    #[serde(flatten)]
+    view: AgentView,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    checkout: Vec<serde_json::Value>,
+}
+
 async fn create(
     State(state): State<Shared>,
     actor: Actor,
     ApiJson(def): ApiJson<AgentDef>,
-) -> ApiResult<(StatusCode, Json<AgentView>)> {
+) -> ApiResult<(StatusCode, Json<Created>)> {
     policy::admin_project(&actor, &def.project, "creating an agent")?;
     for role in &def.roles {
         policy::change_role(&actor, "", &def.project, *role)?;
@@ -114,7 +124,11 @@ async fn create(
             agents::create(t, &def, &state_dir, projects::SOURCE_API)
         })
         .await?;
-    Ok((StatusCode::CREATED, Json(a)))
+    // PLAN §9: clone `checkout.on_agent_create` into the workspace before
+    // the first start. A failure is a `repo.checkout` event and an entry
+    // in `checkout`; the agent stays created.
+    let checkout = super::repos::checkout_on_create(&state, &actor, &a).await;
+    Ok((StatusCode::CREATED, Json(Created { view: a, checkout })))
 }
 
 async fn show(

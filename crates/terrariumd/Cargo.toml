@@ -38,6 +38,8 @@ base64.workspace = true
 tar.workspace = true
 similar.workspace = true
 toml.workspace = true
+reqwest.workspace = true
+semver.workspace = true
 
 [dev-dependencies]
 # The integration tests use the fake supervisor.

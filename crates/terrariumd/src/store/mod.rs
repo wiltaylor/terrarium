@@ -9,7 +9,10 @@ pub mod board;
 pub mod mail;
 pub mod memory;
 pub mod projects;
+pub mod repos;
+pub mod subscriptions;
 pub mod sync;
+pub mod usage;
 pub mod versions;
 pub mod wiki;
 

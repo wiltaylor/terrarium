@@ -1,0 +1,14 @@
+{
+  "login": "<user>",
+  "access_type_sku": "yearly_subscriber_quota",
+  "copilot_plan": "individual",
+  "chat_enabled": true,
+  "cli_enabled": true,
+  "quota_reset_date": "2026-11-01",
+  "quota_snapshots": {
+    "chat": {"overage_count": 0, "overage_permitted": false, "percent_remaining": 100.0, "quota_id": "chat", "quota_remaining": 0.0, "unlimited": true, "timestamp_utc": "2026-10-24T07:20:03.718Z", "has_quota": true, "remaining": 0, "entitlement": 0},
+    "completions": {"overage_count": 0, "overage_permitted": false, "percent_remaining": 100.0, "quota_id": "completions", "quota_remaining": 0.0, "unlimited": true, "timestamp_utc": "2026-10-24T07:20:03.718Z", "has_quota": true, "remaining": 0, "entitlement": 0},
+    "premium_interactions": {"overage_count": 0, "overage_permitted": false, "percent_remaining": 77.3, "quota_id": "premium_interactions", "quota_remaining": 232.1, "unlimited": false, "timestamp_utc": "2026-10-24T07:20:03.718Z", "has_quota": true, "credits_used": 67, "remaining": 232, "entitlement": 300}
+  },
+  "quota_reset_date_utc": "2026-11-01T00:00:00.000Z"
+}

@@ -136,6 +136,8 @@ refused it. Do not parse the message; use `code`.
 | 409 | `already_running` | The agent is running already. |
 | 409 | `stale_base` | A wiki edit names a base revision that is not current. `details: {"base", "current", "diff"}`. |
 | 413 | `too_large` | An upload is over the per-file limit or the project quota. |
+| 429 | `rate_limited` | Too many calls of one kind; try again later. The credential helper (§5.1) has a limit per agent. |
+| 501 | `not_available` | The route exists, but this phase does not do the request: a checkout onto a target (§5.1). |
 | 422 | `invalid` | Well-formed values that break a rule: a bad name, an empty title, a missing column. |
 | 422 | `comment_required` | A move to `blocked` without a comment; a version rejection or a wiki review comment without a comment. |
 | 500 | `internal` | A daemon bug or an I/O error. |
@@ -153,6 +155,9 @@ everything. Every privileged action writes an audit row (§9).
 | Create, change, start, stop, restart, delete agents; send turns; answer; attach the PTY | no | own project | any |
 | Assign, reassign, reopen any card; edit columns and WIP limits; archive any card | no | own project | any |
 | Attach repos; change the project | no | own project | any |
+| Check out a repo into its own workspace; ask the credential helper (§5.1) | own project | own project | own project |
+| Check out a repo into another agent's workspace | no | own project | any |
+| Store, list, or delete credentials (write-only) | no | no | yes |
 | Create and delete projects; `POST /api/reload` | no | no | yes |
 | Grant or revoke `project_admin` | no | own project | any |
 | Grant or revoke `sysadmin` | no | no | no (operator only) |
@@ -238,6 +243,8 @@ Rows oldest first. Cursor: `seq`.
 `project.delete`, `project.detach`, `repo.attach`, `agent.create`,
 `agent.update`, `agent.delete`, `agent.roles`, `agent.start`, `agent.stop`,
 `agent.restart`, `agent.send`, `agent.answer`, `agent.attach`,
+`repo.checkout`, `repo.credential` (each answer of the credential helper),
+`credential.put`, `credential.delete` (§5.1),
 `board.columns`, `card.reassign`, `card.reopen`, `card.archive` (by an admin
 on a card that is not its own), `definitions.sync`, `memory.edit` and
 `memory.delete` (§10), `wiki.delete`, `wiki.move`, `wiki.undelete` (§11),
@@ -278,8 +285,8 @@ letter. The prefix cannot change after the first card (`conflict`).
 `DELETE` refuses a project that has agents (`conflict`), and a file project
 (`file_managed`). It deletes the board and the repos.
 
-Attach a repo. The repo is data only now; no clone happens. Without `name`,
-the last part of the URL names it.
+Attach a repo. Attaching does not clone; a clone happens on a checkout or
+on agent create (§5.1). Without `name`, the last part of the URL names it.
 
 ```
 POST /api/projects/ops/repos
@@ -291,6 +298,119 @@ POST /api/projects/ops/repos
 ```
 
 `credential` is a key name in `/state/credentials`, never the secret.
+
+### 5.1 Repos, checkouts, and credentials
+
+PLAN §9 and §21. The daemon clones and fetches with the `git` binary,
+outside every sandbox. The agent never gets a clone secret on disk or in its
+env. After a clone, the daemon writes this into the workspace repo's
+`.git/config`:
+
+```ini
+[credential]
+	helper =
+	helper = !terrarium repo credential
+	useHttpPath = true
+```
+
+So a `git push` inside the sandbox asks `terrarium repo credential get`, which
+calls `POST /api/repos/credential` through the runner socket.
+
+| Endpoint | Body | Answer | Needs |
+|---|---|---|---|
+| `GET /api/repos/{id}` | | `200` repo | read |
+| `POST /api/repos/{id}/checkout` | below | `200` checkout result | own workspace: read; another agent's: project_admin |
+| `POST /api/repos/credential` | `{"protocol", "host", "path"?}` | `200` `{"username", "password"}` | an agent |
+| `GET /api/credentials` | | `200` `[{"name", "kind", "username"?, "created_at"}]` | sysadmin |
+| `POST /api/credentials` | `{"name", "kind", "value", "username"?}` | `201` credential, without `value` | sysadmin |
+| `DELETE /api/credentials/{name}` | | `204` | sysadmin |
+
+`{id}` is the repo ULID, `project/name`, or (for an agent) a repo name in
+its own project.
+
+**Checkout.** The body is `{"target"?, "branch"?, "path"?, "depth"?,
+"agent"?}`. All fields are optional.
+
+- `target`: `501 not_available`. Host agents arrive in a later phase.
+- `agent`: the agent whose workspace gets the checkout. An agent caller
+  defaults to itself. The operator must name one (`422 invalid` if not).
+  The repo and the agent must be in the same project (`403`).
+- `path`: one directory name under the workspace. The default is the repo's
+  `path`. In the sandbox it is `$HOME/work/<path>`.
+- `branch`: the default is the repo's `default_branch`, else the remote's
+  default on a clone and the current branch on an update.
+- No checkout yet: `git clone --no-hardlinks`, then the config above.
+- A checkout is there: the daemon fetches the branch from the stored URL
+  (not from `origin`), then fast-forwards when the work tree is clean. Local
+  changes or a diverged branch give `not_updated` with a `note`. The daemon
+  first reads the repo's local config as a file. It refuses (`409
+  conflict`) keys that could run code or move the secret, for example
+  `core.hooksPath`, `filter.*`, `url.*.insteadOf`, `http.proxy`, and
+  `include.path`.
+- A URL that is a local path in the state dir, a relative path, or a
+  remote-helper URL (`ext::`) gets `409 conflict`.
+- git fails: `422 invalid` with `details: {"command", "status", "stderr"}`.
+  A run is limited to 10 minutes.
+
+```
+POST /api/repos/01M5PA0T0TH91WNYTGH66DA2SP/checkout
+{"branch":"main"}
+
+200
+{"repo":"infra","repo_id":"01M5PA0T0TH91WNYTGH66DA2SP","project":"ops","agent":"worker",
+ "agent_id":"01M5PA0T0Z0K16V6G88P3SE78W","path":"infra","action":"cloned",
+ "head":"3f2c1e0b9a...","branch":"main"}
+```
+
+`action` is `cloned`, `updated`, `up_to_date`, or `not_updated`. `head` and
+`branch` are `null` when the repo has no commit or HEAD is detached.
+
+Each checkout writes `repo.checkout` events on the agent: `data.phase` is
+`progress` (git progress lines, at most one per phase each second), `done`
+(`data.result` is the answer above), or `error` (`data.error`). A `done`
+also writes a `repo.checkout` audit row.
+
+**On agent create.** `POST /api/agents` clones each repo in the project
+file's `[checkout] on_agent_create` list into the new workspace, after the
+agent row is stored and before any start. The answer has
+`checkout: [<checkout result> | {"repo", "error", "details"?}]`, or no
+`checkout` when the list is empty. A failure
+is a `repo.checkout` error event; the agent is still created. Only a project
+file has a `[checkout]` table. Agents from files (`POST /api/reload`) do
+not get this clone.
+
+**Credential helper.** `POST /api/repos/credential` takes the fields that
+git sends to a credential helper. The caller must be an agent (`403` for
+the operator). The daemon answers only when a repo of the agent's own
+project has an `https` or `http` URL with the same protocol, host
+(with port), and path (`.git` and slashes at the ends do not count), and a
+credential of kind `token`. Every other case is `404 not_found`, so git
+falls back to its next helper. An SSH key is never answered. Each answer
+writes a `repo.credential` audit row (without the secret). An agent gets at
+most 30 answers a minute (`429 rate_limited`).
+
+```
+POST /api/repos/credential          (agent)
+{"protocol":"https","host":"github.com","path":"wiltaylor/infra.git"}
+
+200
+{"username":"x-access-token","password":"ghp_..."}
+```
+
+**Credentials.** The store is `<state>/credentials/`, mode 0700. The secret
+is `<name>` (mode 0600). The metadata, without the secret, is `<name>.json`.
+No endpoint gives the secret back, except the credential helper above.
+`kind` is `token` or `ssh_key`. A token is one line. A token's `username`
+defaults to `x-access-token`. An `ssh_key` is a private key in OpenSSH or
+PEM format, and has no `username`. A `POST` with an existing name replaces
+the credential.
+
+For one clone or fetch, the daemon puts the secret in a 0700 run dir under
+`<state>/credentials/.run/`, and removes the dir after the run. A token goes
+to git through a one-shot helper script that answers only for the repo's
+protocol and host. An SSH key goes to `ssh -i` through `GIT_SSH_COMMAND`.
+The secret is never on a command line, in an env variable, or in the
+repo's `.git/config`.
 
 ## 6. Agents
 
@@ -697,6 +817,7 @@ Kinds:
 | `wiki.created`, `wiki.saved`, `wiki.deleted`, `wiki.restored`, `wiki.moved`, `wiki.reviewed` | `{page_id, path, title, rev, ...}`: `summary`, `author`, `from_rev`, `from`, `decision`, `comment`. |
 | `artifact.created`, `artifact.linked`, `artifact.deleted`, `artifact.pruned` | `{artifact_id, key, uid, name, kind, ...}`: `size`, `content_type`, `sha256`, `link_kind`, `ref`. |
 | `version.created`, `version.updated`, `version.submitted`, `version.approved`, `version.rejected`, `version.released` | `{version_id, name, status, ...}`: `fields`, `comment`, `thread_id`, `cards`. |
+| `usage.sample`, `quota.sample`, `quota.alert`, `quota.blocked`, `quota.resumed`, `subscription.offer`, `self_report` | See §16.7. |
 
 ### 9.1 Streams
 
@@ -1128,8 +1249,9 @@ Compare:
 
 ## 14. Not in this phase
 
-These §17 endpoints are not in the daemon yet: `POST /api/repos/{id}/checkout`,
-subscriptions and usage, and target
+These §17 endpoints are not in the daemon yet: checkout onto a target
+(`POST /api/repos/{id}/checkout` with `target` answers `501
+not_available`), and target
 actions (`POST /api/targets`, `.../up|down|snapshot|restore`). They answer
 `404 not_found`, or `405 method_not_allowed` where the path exists with
 another method (`POST /api/targets`).
@@ -1150,3 +1272,227 @@ another method (`POST /api/targets`).
   - A card comment has `id` and `author_name`; a card has `assignee_name`,
     `created_by_name`, `blocked_by`, and `archived`.
   - A column has `count`.
+
+## 16. Subscriptions and usage
+
+Plans, quota probes, local accounting, the quota policy, and the login
+wizard (PLAN §16). The code is in `crates/terrariumd/src/api/subscriptions.rs`,
+`api/usage.rs`, `store/subscriptions.rs`, `store/usage.rs`, `probes/`,
+`usage_collector.rs`, `quota_policy.rs`, and `login_session.rs`. The tests
+are in `crates/terrariumd/tests/subscriptions.rs`.
+
+### 16.1 Shapes
+
+A subscription:
+
+```json
+{"name":"anthropic-max","provider":"anthropic","plan":"Max 20x","harnesses":["claude","pi"],
+ "probe":"anthropic-oauth-usage","alert_at":80,"source":"file","login_status":"logged_in",
+ "verified_at":"...","probe_status":"ok","last_probe_at":"...","last_success_at":"...",
+ "created_at":"...","updated_at":"...",
+ "windows":[{"window":"5h","used_pct":16.0,"resets_at":"2026-10-24T10:59:59Z","at":"..."},
+            {"window":"7d","used_pct":10.0,"resets_at":"2026-10-31T01:59:59Z","at":"..."}],
+ "local_estimate_only":false,"has_api_key":false,"held_agents":0}
+```
+
+| Field | Meaning |
+|---|---|
+| `source` | `file` (`subscriptions/<name>.toml`) or `api` (the API, the login wizard, an API key). A file subscription whose file is gone becomes `api` on reload; its samples stay. |
+| `login_status` | `logged_in`, `expiring`, `expired`, `missing`, or `unknown` (not checked yet). |
+| `probe_status` | `ok`, `failed` (`probe_error` says why), or `none` (no probe, or not run yet). `last_success_at` stays when a probe fails. |
+| `windows` | The newest sample of each window. Window names: `5h`, `7d`, `7d_opus`, `7d_sonnet` (Anthropic); `<n>h` or `<n>d` from the window length (OpenAI); `monthly` (Copilot premium requests). |
+| `local_estimate_only` | `true` when there is no probe: local accounting is the only number. |
+| `env_var` | Set when an API key is stored: the env var that carries it into the agents. The key is never in the API. |
+| `held_agents` | Agents whose turns wait for a reset of this subscription. |
+
+Names follow the project name rules; `login` and `detect` are reserved.
+
+Probes: `anthropic-oauth-usage`, `openai-codex-usage` (alias
+`codex-rate-limits`), `github-copilot-quota` (alias
+`copilot-premium-requests`). `docs/compat.md`, "Usage probes", records
+each endpoint.
+
+A usage point (`GET /api/usage`):
+
+```json
+{"bucket":"2026-10-24T06:00:00Z","key":"claude-haiku-5-5",
+ "input_tokens":4,"output_tokens":55,"cache_read":36712,"cache_write":36983,"messages":2,"turns":1}
+```
+
+`key` is the value of the `group` column, when the series is split.
+`messages` counts API responses; `turns` counts distinct turns (the `seq` of
+the agent's `turn_start` event at the time of the response).
+
+### 16.2 Rules
+
+- `GET /api/subscriptions`, `.../quota`: the operator, a `sysadmin`, or a
+  `project_admin`. An agent may `GET /api/subscriptions/{name}` of its own
+  subscription.
+- Create, delete, probe, verify, detect: `sysadmin` or the operator.
+- Login sessions, logout, and API keys: the operator only (PLAN §10,
+  §16.1). Any agent gets `403 forbidden`.
+- `GET /api/usage`: an agent sees its own project only, unless it is a
+  `sysadmin`.
+
+### 16.3 Endpoints
+
+| Method and path | Body or query | Answer |
+|---|---|---|
+| `GET /api/subscriptions` | | Array of subscriptions. |
+| `POST /api/subscriptions` | `{name, provider, plan?, harnesses?, probe?, alert_at?}` | `201` with the subscription (`source = api`). `409 conflict` when the name exists; `422 invalid` for an unknown probe. |
+| `GET /api/subscriptions/{name}` | | One subscription. |
+| `DELETE /api/subscriptions/{name}` | | `204`. `409 file_managed` for a file subscription. |
+| `GET /api/subscriptions/{name}/quota` | `?since=` (RFC 3339, default 24 h ago), `?window=`, `?limit=` (default 1000) | Array of samples, oldest first: `{subscription, window, used_pct, resets_at, raw, at}`. `raw` is the provider's window object. |
+| `POST /api/subscriptions/{name}/probe` | | `{subscription, probe_status, error?, windows}`. A failed probe is still `200`. |
+| `POST /api/subscriptions/{name}/verify` | | `{subscription, status}`: the harness status command runs against the shared home and sets `login_status` (and `plan`, when the subscription has none). A stored API key counts as logged in. |
+| `POST /api/subscriptions/{name}/logout` | | Runs `claude auth logout`, `codex logout`, or `copilot logout` against the shared home; `login_status` becomes `missing`. pi has no logout command: `422 invalid`. |
+| `POST /api/subscriptions/{name}/api-key` | `{provider, key, base_url?, models?}` | The subscription, without the key. See §16.5. |
+| `GET /api/subscriptions/detect` | | Logins found in the harness homes that no subscription covers (same provider, and the harness is in `harnesses`): `[{kind, harness, provider, pi_provider?, logged_in, plan?, detail?, suggested}]`. `suggested` is a subscription definition. |
+| `POST /api/subscriptions/login` | `{kind, provider?, name?}` | `201` with the login session (§16.4). |
+| `GET /api/subscriptions/login/{id}` | | The login session. |
+| `DELETE /api/subscriptions/login/{id}` | | `202`; the session becomes `cancelled`. |
+| `POST /api/subscriptions/login/{id}/input` | `{code}` | `204`. Types the code and Enter into the flow. `409 not_running` when the session ended. |
+| `GET /api/subscriptions/login/{id}/pty` | WebSocket | The login terminal, with the protocol of §6.5. |
+| `GET /api/usage` | `?subscription=&project=&agent=&model=&since=&until=&bucket=hour\|day&group=subscription\|project\|agent\|model` | Array of usage points, oldest first. `since` defaults to 24 h ago. `agent` is an agent key (§2.2). |
+| `GET /api/usage/me` | `?agent=` (the operator only) | The caller's subscription and its share today (below). |
+| `GET /api/usage/project` | `?project=` (default: the caller's), `?since=` (default: the start of the UTC day) | The per-agent split (below). |
+| `POST /api/agents/{id}/status` | `{status, note?}` | The stored `self_report` event. §16.6. |
+
+`GET /api/usage/me`:
+
+```json
+{"agent":{"id":"01M5...","name":"worker","project":"p"},
+ "subscription":{"name":"anthropic-max","provider":"anthropic","plan":"Max 20x",
+   "probe_status":"ok","last_success_at":"...","local_estimate_only":false,
+   "windows":[{"window":"5h","used_pct":16.0,"resets_at":"...","at":"..."}]},
+ "today":{"since":"2026-10-24T00:00:00Z","mine":{"input_tokens":4,"output_tokens":55,"cache_read":36712,
+   "cache_write":36983,"messages":2,"turns":1},"subscription":{...},"share_pct":100.0},
+ "holds":[]}
+```
+
+`share_pct` is the agent's input plus output tokens as a percent of all
+agents on the subscription today, by local accounting.
+
+`GET /api/usage/project`:
+
+```json
+{"project":"p","since":"2026-10-24T00:00:00Z","total":{...},
+ "agents":[{"id":"01M5...","name":"worker","subscription":"anthropic-max","input_tokens":4,
+            "output_tokens":55,"cache_read":36712,"cache_write":36983,"messages":2,"turns":1,
+            "share_pct":100.0}],
+ "budgets":[{"subscription":"anthropic-max","tokens_per_day":60,"alert_at":50,"used_tokens":59,"used_turns":1}]}
+```
+
+Agents with no usage are in the list with zero totals and no `share_pct`.
+
+The CLI calls `GET /api/usage?agent=<me>` for `terrarium usage` and
+`GET /api/usage?project=<p>` for `terrarium usage project`. Both work;
+`/api/usage/me` and `/api/usage/project` are the richer answers for a later
+CLI change.
+
+### 16.4 Login sessions
+
+A login session runs the harness login command in a PTY, as the daemon
+user, with no sandbox, against the shared harness home:
+
+| `kind` | Command | What the session finds |
+|---|---|---|
+| `claude` | `claude auth login` | `url` (the OAuth authorize URL). Paste the code with `.../input`. |
+| `codex` | `codex login --device-auth` | `url` and `device_code`. |
+| `copilot` | `copilot login --device-code` | `url` and `device_code`. |
+| `pi` | `pi` (needs `provider`) | `url` after the operator types `/login` and picks the provider in the terminal. |
+
+```json
+{"id":"01M5...","kind":"codex","state":"waiting","url":"https://auth.openai.com/codex/device",
+ "device_code":"ABCD-EF12G","started_at":"...","done":false,
+ "instructions":"Open the URL, sign in, and enter the device code."}
+```
+
+`state`: `starting`, `waiting` (a URL or a code is on screen), `verifying`,
+`done` (`subscription` names the definition made or updated), `failed`
+(`error`), `cancelled`, or `expired` (after ten minutes, or after a daemon
+restart). `done` is `true` for the last four.
+
+When the command exits with code 0 (pi: when `pi auth check` says the
+provider is ready), the daemon runs the status command, makes or updates the
+subscription (name, provider, plan from the status output, the harness, the
+matching probe), sets `login_status = logged_in`, and runs the probe once. A
+file subscription keeps its definition; only its login state changes.
+The session's runner files are deleted at the end. The pasted code is never
+stored, logged, or sent back; the audit row `login.input` has its length
+only. Audit actions: `login.start`, `login.attach`, `login.input`,
+`login.cancel`, `login.end`, `subscription.register`.
+
+At most four sessions are live at once (`409 conflict`).
+
+### 16.5 API keys
+
+`POST /api/subscriptions/{name}/api-key` stores the key in
+`<state>/credentials/subscriptions/<name>.json`, mode `0600` (the
+directories are `0700`), and sets `env_var`:
+
+| `provider` | `env_var` |
+|---|---|
+| `anthropic` | `ANTHROPIC_API_KEY` |
+| `openai` | `OPENAI_API_KEY` |
+| `openai-compatible` (needs `base_url`) | `OPENAI_API_KEY`, and `OPENAI_BASE_URL` |
+| `google`, `gemini` | `GEMINI_API_KEY` |
+| `openrouter` | `OPENROUTER_API_KEY` |
+| `xai` | `XAI_API_KEY` |
+| `groq` | `GROQ_API_KEY` |
+| `github` | `COPILOT_GITHUB_TOKEN` (a fine-grained PAT with Copilot Requests; the Copilot probe uses it) |
+
+A new name makes an `api` subscription (harness `pi`, or `copilot` for
+`github`). No endpoint returns the key. The audit row
+`subscription.api_key` has the provider, the env var, `base_url`, and
+`models`.
+
+`terrariumd::login_session::credential_env_for(state_dir, &subscription)`
+gives the `(var, value)` pairs for an agent on the subscription. The agent
+launch path does not call it yet. The call site is the `LaunchSpec::env` of
+`RunnerSupervisor`, for an agent whose `subscription` has `env_var`.
+
+### 16.6 The quota policy
+
+- A window at or over `alert_at` percent: one mail to the operator (from
+  `operator`, event actor `system`) and one `quota.alert` event (`level:
+  alert`) per window period (the reset time).
+- A window at 100 percent: a `quota.alert` with `level: exhausted`, and a
+  hold on every agent on the subscription until the latest reset time. The
+  supervisor's `hold_turns` marks the agent `blocked` with the reason, and
+  new turns wait. The `quota.blocked` event has `{cause, until, reason,
+  enforced}`. `enforced: false` means the supervisor cannot hold turns
+  (the default of the `Supervisor` trait; `RunnerSupervisor` does not
+  implement it yet), so the hold is advice only.
+- The hold ends when a probe reads the window under 100 percent, or when its
+  reset time passes (checked on each probe tick). The `quota.resumed` event
+  follows, and the waiting turns go out.
+- Daily project budgets come from the project file:
+
+  ```toml
+  [[budget]]
+  subscription = "anthropic-max"   # optional: every subscription
+  tokens_per_day = 5000000         # input + output tokens, UTC day
+  turns_per_day = 200
+  alert_at = 80                    # optional, percent
+  ```
+
+  The same alert and hold apply, with the cause `budget:project:<p>[/<sub>]`
+  and the next UTC midnight as the reset.
+
+`POST /api/agents/{id}/status` (`terrarium status set`) is the agent's own
+word: `status` is `idle`, `working`, or `blocked`; `note` is up to 500
+characters. It is stored as a `self_report` event. It does not change the
+status that the runner reports. An agent may report for itself only.
+
+### 16.7 Events
+
+| `kind` | `data` |
+|---|---|
+| `usage.sample` | `{subscription, harness, model, input_tokens, output_tokens, cache_read, cache_write, messages}`: the new usage of one agent since its last `usage.sample`, at most one each 10 s per agent. |
+| `quota.sample` | `{subscription, windows}` after each successful probe. |
+| `quota.alert` | `{subscription, window, used_pct, resets_at, level, alert_at}`, or for a budget `{project, subscription, window, used, limit, used_pct, level}`. |
+| `quota.blocked` | `{cause, until, reason, enforced}`. The `agent` is the held agent. |
+| `quota.resumed` | `{cause, holds_left}`. |
+| `subscription.offer` | `{login, suggested}`: a login found at daemon start that no subscription covers. |
+| `self_report` | `{status, note}`. |

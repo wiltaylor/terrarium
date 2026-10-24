@@ -1011,3 +1011,157 @@ refused. `pi auth print-bearer-token` was not run (it prints the token).
 - Compaction events.
 - A Copilot subscription through pi (`github-copilot` provider).
 - `pi auth print-bearer-token` and the provider usage endpoints.
+
+---
+
+## Usage probes and login flows
+
+Tested on 2026-10-24 on the same host, against the operator's real logins:
+Claude Max (OAuth), ChatGPT Pro (Codex OAuth), GitHub Copilot Individual
+(through a GitHub CLI OAuth token). Each probe is one read-only `GET`. No
+token was printed or stored, and no login or logout ran against a real
+home. The code is in `crates/terrariumd/src/probes/`; the sanitised answers
+are in `crates/terrariumd/tests/fixtures/probes/`. Run them again with
+`cargo test -p terrariumd --test subscriptions -- --ignored live_probes`
+(set `GH_TOKEN` for Copilot). All three endpoints are undocumented. Treat
+each as best-effort (PLAN §21).
+
+### Summary
+
+| Probe | Request | Status |
+|---|---|---|
+| `anthropic-oauth-usage` | `GET https://api.anthropic.com/api/oauth/usage`, `Authorization: Bearer <claudeAiOauth.accessToken>`, `anthropic-beta: oauth-2025-04-20` | verified (200) |
+| `openai-codex-usage` | `GET https://chatgpt.com/backend-api/wham/usage`, `Authorization: Bearer <tokens.access_token>`, `ChatGPT-Account-Id: <tokens.account_id>` (both from `$CODEX_HOME/auth.json`) | verified (200) |
+| `github-copilot-quota` | `GET https://api.github.com/copilot_internal/user`, `Authorization: token <GitHub OAuth token or PAT>` | verified (200) with a `gh` OAuth token |
+| User-Agent | All three answered with `User-Agent: terrarium/0.1.0`. No harness UA is needed. | verified |
+| Token refresh | The probes never refresh. An expired Claude token (`expiresAt`, ms) fails before the request. | by design |
+
+### Anthropic
+
+`$CLAUDE_CONFIG_DIR/.credentials.json`: `claudeAiOauth.{accessToken,
+refreshToken, expiresAt, refreshTokenExpiresAt, scopes, subscriptionType,
+subscriptionTypeSource, rateLimitTier}`.
+
+Answer (sanitised; many other keys are `null`):
+
+```json
+{"five_hour": {"utilization": 16.0, "resets_at": "2026-10-24T10:59:59.514909+00:00",
+               "limit_dollars": null, "used_dollars": null, "remaining_dollars": null, "locked_reason": null},
+ "seven_day": {"utilization": 10.0, "resets_at": "2026-10-31T01:59:59.514930+00:00", ...},
+ "seven_day_opus": null, "seven_day_sonnet": null, "seven_day_oauth_apps": null,
+ "extra_usage": {"is_enabled": false, ...},
+ "limits": [{"kind": "session", "group": "session", "percent": 16, "resets_at": "...", "is_active": true},
+            {"kind": "weekly_all", "group": "weekly", "percent": 10, ...},
+            {"kind": "weekly_scoped", "percent": 3, "scope": {"model": {"display_name": "<model>"}}, ...}],
+ "spend": {...}, "seven_day_breakdown": {"rows": [{"key": "claude_code", "percent": 100}, ...]}}
+```
+
+- `utilization` is a percent (0 to 100). The probe reads `five_hour` (`5h`),
+  `seven_day` (`7d`), and, when not `null`, `seven_day_opus`,
+  `seven_day_sonnet`, `seven_day_oauth_apps`.
+- The answer has code-named objects with dollar limits (for example a
+  promotional credit). The probe ignores them.
+- `limits[]` repeats the windows as integer percents, and adds per-model
+  weekly limits. The probe does not read it yet.
+
+### OpenAI Codex
+
+`$CODEX_HOME/auth.json`: `{auth_mode, OPENAI_API_KEY, tokens: {id_token,
+access_token, refresh_token, account_id}, last_refresh}`.
+
+Answer (sanitised):
+
+```json
+{"user_id": "<id>", "account_id": "<id>", "email": "<email>", "plan_type": "pro",
+ "rate_limit": {"allowed": true, "limit_reached": false,
+   "primary_window": {"used_percent": 0, "limit_window_seconds": 604800,
+                      "reset_after_seconds": 570148, "reset_at": 1793396550},
+   "secondary_window": null},
+ "code_review_rate_limit": null, "additional_rate_limits": null,
+ "credits": {"has_credits": false, "unlimited": false, "balance": "0", ...},
+ "rate_limit_reached_type": null}
+```
+
+- On this Pro plan only the primary window is present, and it is 7 days
+  (`604800` s). Plans with a 5-hour window put it in `primary_window` and
+  the weekly one in `secondary_window`; that shape is a fixture built from
+  this schema (`openai_wham_usage_two_windows.json`), not a capture.
+- The probe names a window by its length: `5h`, `7d`. `reset_at` is Unix
+  seconds.
+- The plan is also in the `id_token` claim
+  `https://api.openai.com/auth`.`chatgpt_plan_type`. The login wizard reads
+  only that claim.
+
+### GitHub Copilot
+
+Answer (sanitised):
+
+```json
+{"login": "<user>", "access_type_sku": "yearly_subscriber_quota", "copilot_plan": "individual",
+ "quota_reset_date": "2026-11-01", "quota_reset_date_utc": "2026-11-01T00:00:00.000Z",
+ "quota_snapshots": {
+   "chat": {"unlimited": true, "percent_remaining": 100.0, "entitlement": 0, "remaining": 0, ...},
+   "completions": {"unlimited": true, ...},
+   "premium_interactions": {"unlimited": false, "entitlement": 300, "remaining": 232,
+     "quota_remaining": 232.1, "percent_remaining": 77.3, "credits_used": 67,
+     "overage_count": 0, "overage_permitted": false, "timestamp_utc": "...", ...}}}
+```
+
+- The probe reports `premium_interactions` as `monthly` (`used_pct = 100 -
+  percent_remaining`), and `chat` and `completions` only when they are not
+  unlimited. The reset is `quota_reset_date_utc`.
+- **The token.** Copilot keeps its login in the system credential store.
+  On this host `~/.copilot/config.json` holds no token (it is JSON with
+  `//` comment lines at the top: strip them before parsing). In a
+  container without a credential store, Copilot writes a plain-text token
+  under `~/.copilot/`; the key name is not verified (the probe tries
+  `copilot_tokens`, `github_token`, `oauth_token`, `token`). The probe
+  also takes a stored PAT (`POST /api/subscriptions/{name}/api-key` with
+  `provider = "github"`) and `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`,
+  `GITHUB_TOKEN` from the daemon env.
+
+### Status commands
+
+| Harness | Command | Output | Status |
+|---|---|---|---|
+| Claude | `claude auth status` | JSON (see "Auth status"). Exit 0 logged in. | verified |
+| Codex | `codex login status` | `Logged in using ChatGPT`, exit 0. Logged out: not seen (the parser wants exit 0 and a line that starts with `Logged in`). | verified (logged in) |
+| Copilot | none | There is no status command. The wizard checks the plain-text fallback in `config.json`. | read |
+| pi | `pi auth check --json --no-refresh --provider <p>` | `{"status":"not_ready","provider":"anthropic","reason":"credentials_not_configured"}` with no login. The ready value is not seen; the daemon accepts `ready`, `ok`, `valid`. | partly verified |
+
+- `pi auth check` without `--provider` or `--model` prints `Error: Auth
+  checks require --provider <provider> or --model <model>`.
+- `pi auth check` **refreshes expired OAuth credentials by default**. The
+  daemon always passes `--no-refresh`, so a check cannot rotate a token.
+
+### Login flows
+
+Each command ran in a PTY (120 x 40) with an **empty temp home**
+(`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `COPILOT_HOME`, `PI_CODING_AGENT_DIR`),
+and got Ctrl-C once the URL or code was on screen. No login finished. The
+raw output, with the PKCE values and the codes replaced, is in
+`crates/terrariumd/tests/fixtures/login/`.
+
+| Kind | Output | Pattern |
+|---|---|---|
+| `claude auth login` | `Opening browser to sign in…`, then `If the browser didn't open, visit: <url>` (the URL twice: an OSC 8 link target and the visible text), then `Paste code here if prompted > `. URL: `https://claude.com/cai/oauth/authorize?code=true&client_id=...&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=...&code_challenge=...&code_challenge_method=S256&state=...` | `https://[^\s]*/oauth/authorize\?[^\s]+`, the OSC 8 target first |
+| `codex login --device-auth` | `1. Open this link ... https://auth.openai.com/codex/device`, `2. Enter this one-time code (expires in 15 minutes)`, then the code on its own line, for example `ABCD-EF12G` (4, dash, 5). It warns about PATH aliases under `/tmp`. | URL `https://auth\.openai\.com/codex/device\S*`; code `one-time code.*?\b([A-Z0-9]{4}-[A-Z0-9]{4,6})\b` |
+| `copilot login --device-code` | `To authenticate, visit https://github.com/login/device and enter code WXYZ-1234`, `Waiting for authorization...`. It also writes the code to the clipboard with OSC 52. | `visit\s+(https://\S+/login/device)\s+and enter code\s+([A-Z0-9]{4}-[A-Z0-9]{4})` |
+| `pi`, `/login` | A menu (`Sign in with an account` / `with an API key`), then a provider list (`Anthropic`, `GitHub Copilot`, `Kimi For Coding`, `OpenAI Codex`, `OpenRouter`, `Radius`, `xAI`). Anthropic shows `https://claude.ai/oauth/authorize?...redirect_uri=http%3A%2F%2Flocalhost%3A53692%2Fcallback...` wrapped over four screen rows, and `paste the authorization code / redirect URL here`. | the OSC 8 link target (the screen text is wrapped) |
+
+- The Claude and pi URLs carry a fresh PKCE challenge and `state` on each
+  run. A device code expires in 15 minutes (Codex).
+- pi's Anthropic login uses a localhost callback. In a container the
+  operator pastes the final redirect URL into the prompt, as pi says.
+- A login PTY must not inherit `ANTHROPIC_*`, `CLAUDE_*`, `GH_TOKEN`,
+  `GITHUB_TOKEN`, `COPILOT_GITHUB_TOKEN`, or `OPENAI_API_KEY`: each makes the
+  harness use another credential. The daemon removes them.
+
+### Not tested
+
+- A login that completes (by design: no real login ran).
+- Claude `claude setup-token`.
+- An expired or refused token on each endpoint (the probes map a non-2xx
+  answer to `failed`).
+- Rate limits of the usage endpoints at the 5-minute interval.
+- `pi auth print-bearer-token` as the credential for a probe.

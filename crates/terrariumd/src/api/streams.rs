@@ -314,7 +314,8 @@ pub async fn pty(
     Ok(ws.on_upgrade(move |socket| pty_session(socket, attachment)))
 }
 
-async fn pty_session(socket: WebSocket, mut att: PtyAttachment) {
+/// Serve a PTY attachment over a WebSocket: agents and login sessions.
+pub(super) async fn pty_session(socket: WebSocket, mut att: PtyAttachment) {
     let (mut tx, mut rx) = socket.split();
     if !att.snapshot.is_empty()
         && tx

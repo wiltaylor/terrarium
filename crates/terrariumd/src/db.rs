@@ -393,6 +393,102 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX version_reviews_version ON version_reviews(version, created_at);
     "#,
+    // 4: subscriptions, quota probes, usage accounting, login sessions
+    // (PLAN §16).
+    r#"
+    -- Subscriptions: from `subscriptions/*.toml` (`file`) or the API and the
+    -- login wizard (`api`). The probe and login columns are daemon state.
+    CREATE TABLE subscriptions (
+        name            TEXT PRIMARY KEY,
+        provider        TEXT NOT NULL,
+        plan            TEXT,
+        harnesses       TEXT NOT NULL DEFAULT '[]',   -- JSON array of harness ids
+        probe           TEXT,                         -- probe name, NULL: local estimate only
+        alert_at        INTEGER NOT NULL DEFAULT 80,
+        source          TEXT NOT NULL DEFAULT 'api' CHECK (source IN ('file', 'api')),
+        env_var         TEXT,                         -- set when an API key is stored
+        login_status    TEXT NOT NULL DEFAULT 'unknown'
+                        CHECK (login_status IN ('logged_in', 'expiring', 'expired', 'missing', 'unknown')),
+        verified_at     TEXT,
+        probe_status    TEXT NOT NULL DEFAULT 'none' CHECK (probe_status IN ('ok', 'failed', 'none')),
+        probe_error     TEXT,
+        last_probe_at   TEXT,
+        last_success_at TEXT,
+        created_at      TEXT NOT NULL,
+        updated_at      TEXT NOT NULL
+    );
+
+    -- One row per window per probe run.
+    CREATE TABLE quota_samples (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        subscription TEXT NOT NULL REFERENCES subscriptions(name) ON DELETE CASCADE,
+        window       TEXT NOT NULL,                   -- `5h`, `7d`, `monthly`, ...
+        used_pct     REAL NOT NULL,
+        resets_at    TEXT,
+        raw          TEXT NOT NULL DEFAULT '{}',      -- JSON of the provider window
+        at           TEXT NOT NULL
+    );
+    CREATE INDEX quota_samples_sub ON quota_samples(subscription, window, at);
+
+    -- Local accounting: one row per API response. The unique index is the
+    -- dedupe rule of docs/compat.md: count each message id once per agent.
+    CREATE TABLE usage_samples (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        agent         TEXT NOT NULL,                  -- agent ULID; no foreign key, history stays
+        project       TEXT NOT NULL,
+        subscription  TEXT,
+        model         TEXT NOT NULL DEFAULT '',
+        input_tokens  INTEGER NOT NULL DEFAULT 0,
+        output_tokens INTEGER NOT NULL DEFAULT 0,
+        cache_read    INTEGER NOT NULL DEFAULT 0,
+        cache_write   INTEGER NOT NULL DEFAULT 0,
+        message_id    TEXT NOT NULL,
+        turn_seq      INTEGER,                        -- `seq` of the agent's last `turn_start` event
+        session       TEXT,                           -- the harness session id
+        at            TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX usage_samples_dedupe ON usage_samples(agent, message_id);
+    CREATE INDEX usage_samples_at ON usage_samples(at);
+    CREATE INDEX usage_samples_sub ON usage_samples(subscription, at);
+    CREATE INDEX usage_samples_project ON usage_samples(project, at);
+
+    -- Dashboard login flows (PLAN §16.1). The pasted code is never stored.
+    CREATE TABLE login_sessions (
+        id           TEXT PRIMARY KEY,                -- ULID
+        kind         TEXT NOT NULL CHECK (kind IN ('claude', 'codex', 'copilot', 'pi')),
+        provider     TEXT,
+        state        TEXT NOT NULL
+                     CHECK (state IN ('starting', 'waiting', 'verifying', 'done', 'failed', 'cancelled', 'expired')),
+        url          TEXT,
+        device_code  TEXT,
+        subscription TEXT,                            -- the definition made or updated
+        started_at   TEXT NOT NULL,
+        finished_at  TEXT,
+        error        TEXT
+    );
+
+    -- Agents whose new turns wait for a quota reset or a daily budget.
+    -- `cause` is `quota:<subscription>` or `budget:<project>`.
+    CREATE TABLE quota_holds (
+        agent      TEXT NOT NULL,
+        cause      TEXT NOT NULL,
+        until      TEXT,
+        reason     TEXT NOT NULL,
+        enforced   INTEGER NOT NULL DEFAULT 0,        -- 1: the supervisor holds the turns
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (agent, cause)
+    );
+
+    -- Alerts already sent, so each window period alerts once.
+    CREATE TABLE quota_alerts (
+        scope  TEXT NOT NULL,                         -- subscription name or `project:<name>`
+        window TEXT NOT NULL,
+        period TEXT NOT NULL,                         -- the reset time, or the UTC day
+        level  TEXT NOT NULL CHECK (level IN ('alert', 'exhausted')),
+        at     TEXT NOT NULL,
+        PRIMARY KEY (scope, window, period, level)
+    );
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call
@@ -588,6 +684,12 @@ mod tests {
             "version_cards",
             "version_artifacts",
             "version_reviews",
+            "subscriptions",
+            "quota_samples",
+            "usage_samples",
+            "login_sessions",
+            "quota_holds",
+            "quota_alerts",
         ] {
             let n: i64 = conn
                 .query_row(

@@ -58,6 +58,80 @@ pub fn sysadmin(actor: &Actor, what: &str) -> ApiResult<()> {
     }
 }
 
+/// Store, list, or delete git credentials (`/api/credentials`). The API
+/// never returns a secret.
+pub fn manage_credentials(actor: &Actor) -> ApiResult<()> {
+    sysadmin(actor, "managing credentials")
+}
+
+/// Ask for a git credential through the credential helper
+/// (`POST /api/repos/credential`). Agents only: the answer goes to git in
+/// the agent's own sandbox, for a repo of the agent's own project.
+pub fn credential_helper(actor: &Actor) -> ApiResult<&AgentActor> {
+    match actor {
+        Actor::Agent(a) => Ok(a),
+        Actor::Operator => Err(ApiError::forbidden(
+            "the credential helper answers agents only; the operator has the credential store",
+        )),
+    }
+}
+
+/// Clone or update a repo of `repo_project` into the workspace of the agent
+/// `agent_id` of `agent_project`. An agent may check out into its own
+/// workspace; into another agent's workspace needs `project_admin`. The
+/// repo and the agent are in the same project.
+pub fn checkout_into(
+    actor: &Actor,
+    repo_project: &str,
+    agent_id: &str,
+    agent_project: &str,
+) -> ApiResult<()> {
+    if repo_project != agent_project {
+        return Err(ApiError::forbidden(format!(
+            "the repo is in project `{repo_project}`; the agent is in `{agent_project}`"
+        )));
+    }
+    read_project(actor, repo_project)?;
+    match actor {
+        Actor::Agent(a) if a.id == agent_id => Ok(()),
+        _ => admin_project(
+            actor,
+            agent_project,
+            "checking out into another agent's workspace",
+        ),
+    }
+}
+
+/// Read the subscription list with quota numbers (`terrarium usage
+/// subscriptions`, PLAN §16): the operator, a `sysadmin`, or a
+/// `project_admin`.
+pub fn read_subscriptions(actor: &Actor) -> ApiResult<()> {
+    match actor {
+        Actor::Operator => Ok(()),
+        Actor::Agent(a) if a.is_sysadmin() || a.roles.contains(&Role::ProjectAdmin) => Ok(()),
+        Actor::Agent(_) => Err(deny(
+            "reading all subscriptions",
+            "project_admin, sysadmin, or the operator",
+        )),
+    }
+}
+
+/// Define subscriptions, run a probe, verify a login: `sysadmin` or the
+/// operator.
+pub fn manage_subscriptions(actor: &Actor, what: &str) -> ApiResult<()> {
+    sysadmin(actor, what)
+}
+
+/// Logins, logouts, and API keys (PLAN §10: credentials are operator-only;
+/// PLAN §16.1: the login terminal is never for agents).
+pub fn operator_only(actor: &Actor, what: &str) -> ApiResult<()> {
+    if actor.is_operator() {
+        Ok(())
+    } else {
+        Err(deny(what, "the operator"))
+    }
+}
+
 /// Read the project inbox and reply from it.
 pub fn read_inbox(actor: &Actor, project: &str) -> ApiResult<()> {
     admin_project(actor, project, "reading the project inbox")

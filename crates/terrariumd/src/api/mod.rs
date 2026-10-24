@@ -8,8 +8,11 @@ mod longpoll;
 mod mail;
 mod memory;
 mod projects;
+mod repos;
 mod streams;
+mod subscriptions;
 mod system;
+mod usage;
 mod versions;
 mod wiki;
 
@@ -57,6 +60,8 @@ pub struct AppState {
     /// Trust `X-Terrarium-Agent` on the Unix socket. Tests and development
     /// only: any local caller could act as any agent.
     pub insecure_agent_header: bool,
+    /// Usage accounting, quota probes, and login sessions (PLAN §16).
+    pub usage: Arc<crate::usage_collector::UsageRuntime>,
 }
 
 impl AppState {
@@ -145,6 +150,7 @@ pub fn router(state: Shared) -> Router {
         .route("/audit", get(system::audit))
         .route("/events", get(streams::firehose))
         .merge(projects::routes())
+        .merge(repos::routes())
         .merge(agents::routes())
         .merge(mail::routes())
         .merge(board::routes())
@@ -152,6 +158,8 @@ pub fn router(state: Shared) -> Router {
         .merge(wiki::routes())
         .merge(artifacts::routes())
         .merge(versions::routes())
+        .merge(subscriptions::routes())
+        .merge(usage::routes())
         .fallback(api_not_found)
         .method_not_allowed_fallback(api_method_not_allowed)
         .layer(middleware::from_fn_with_state(state.clone(), resolve_actor));
@@ -330,6 +338,7 @@ mod tests {
             state_dir: PathBuf::from("/state"),
             config_dir: PathBuf::from("/nonexistent"),
             insecure_agent_header: false,
+            usage: Arc::default(),
         })
     }
 

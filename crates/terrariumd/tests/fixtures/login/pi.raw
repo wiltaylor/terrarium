@@ -1,0 +1,93 @@
+[?2004h[>7u[?u[c[?25l[16t]11;?[?2026h[0m]8;;
+[38;2;80;80;80m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[39m[0m]8;;
+[7m [0m                                                                                                                       [0m]8;;
+[38;2;80;80;80m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[39m[0m]8;;
+[38;2;102;102;102m/auth/home[39m[0m]8;;
+[38;2;102;102;102m0.0%/0 (auto)[39m[38;2;102;102;102m                                                                                                    unknown[39m[0m]8;;[?2026l[3A[1G[?25l]0;π - cap-pi-whmw7gzj[?2026h[1A[2K [1m[38;2;138;190;183mpi[39m[22m[38;2;102;102;102m v0.85.1[39m                                                                                                             [0m]8;;
+[2K [38;2;102;102;102mescape[39m[38;2;128;128;128m interrupt[39m[38;2;128;128;128m · [39m[38;2;102;102;102mctrl+c/ctrl+d[39m[38;2;128;128;128m clear/exit[39m[38;2;128;128;128m · [39m[38;2;102;102;102m/[39m[38;2;128;128;128m commands[39m[38;2;128;128;128m · [39m[38;2;102;102;102m![39m[38;2;128;128;128m bash[39m[38;2;128;128;128m · [39m[38;2;102;102;102mctrl+o[39m[38;2;128;128;128m more[39m                                        [0m]8;;
+[2K [38;2;102;102;102mPress ctrl+o to show full startup help and loaded resources.[39m                                                           [0m]8;;
+[2K                                                                                                                        [0m]8;;
+[2K [38;2;102;102;102mPi can explain its own features and look up its docs. Ask it how to use or extend Pi.[39m                                  [0m]8;;
+[2K[0m]8;;
+[2K[38;2;240;198;116m[Skills][39m                                                                                                                [0m]8;;
+[2K[38;2;102;102;102m  ask-matt, batch-grill-me, claude-handoff, code-review, codebase-design, design-an-interface, diagnosing-bugs,         [0m]8;;
+[2K[38;2;102;102;102mdomain-modeling, edit-article, find-skills, git-guardrails-claude-code, grill-me, grill-with-docs, grilling, handoff,   [0m]8;;
+[2K[38;2;102;102;102mimplement, improve-codebase-architecture, loop-me, migrate-to-shoehorn, obsidian-vault, prototype, qa,                  [0m]8;;
+[2K[38;2;102;102;102mrequest-refactor-plan, research, resolving-merge-conflicts, scaffold-exercises, setup-matt-pocock-skills,               [0m]8;;
+[2K[38;2;102;102;102msetup-pre-commit, setup-ts-deep-modules, tdd, teach, to-questionnaire, to-spec, to-tickets, triage, ubiquitous-language,[0m]8;;
+[2K[38;2;102;102;102mwayfinder, wizard, writing-beats, writing-fragments, writing-great-skills, writing-shape[39m                                [0m]8;;
+[2K[0m]8;;
+[2K[0m]8;;
+[2K[38;2;80;80;80m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[39m[0m]8;;
+[2K[7m [0m                                                                                                                       [0m]8;;
+[2K[38;2;80;80;80m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[39m[0m]8;;
+[2K[38;2;102;102;102m/auth/home[39m[0m]8;;
+[2K[38;2;102;102;102m0.0%/0 (auto)[39m[38;2;102;102;102m                                                                                                    unknown[39m[0m]8;;[?2026l[3A[1G[?25l[?2026h[1A[2K [38;2;255;255;0mWarning: No models available. Use /login to log into a provider via OAuth or API key. See:                             [0m]8;;
+[2K [38;2;255;255;0m                                                                                                                       [0m]8;;
+[2K [38;2;255;255;0m/home/wil/.volta/tools/image/packages/@earendil-works/pi-coding-agent/lib/node_modules/@earendil-works/pi-coding-agent [0m]8;;
+[2K [38;2;255;255;0m/docs/providers.md                                                                                                     [0m]8;;
+[2K [38;2;255;255;0m                                                                                                                       [0m]8;;
+[2K [38;2;255;255;0m/home/wil/.volta/tools/image/packages/@earendil-works/pi-coding-agent/lib/node_modules/@earendil-works/pi-coding-agent [0m]8;;
+[2K [38;2;255;255;0m/docs/models.md[39m                                                                                                        [0m]8;;
+[2K[0m]8;;
+[2K[38;2;80;80;80m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[39m[0m]8;;
+[2K[7m [0m                                                                                                                       [0m]8;;
+[2K[38;2;80;80;80m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[39m[0m]8;;
+[2K[38;2;102;102;102m/auth/home[39m[0m]8;;
+[2K[38;2;102;102;102m0.0%/0 (auto)[39m[38;2;102;102;102m                                                                                                    unknown[39m[0m]8;;[?2026l[3A[1G[?25l[?2026h[2K/login[7m [0m                                                                                                                 [0m]8;;[?2026l[7G[?25l[?2026h[2B[2K[38;2;138;190;183m→ login       <provider> — Configure provider authentication[39m                                                            [0m]8;;
+[2K[38;2;102;102;102m/auth/home[39m[0m]8;;
+[2K[38;2;102;102;102m0.0%/0 (auto)[39m[38;2;102;102;102m                                                                                                    unknown[39m[0m]8;;[?2026l[4A[7G[?25l[?2026h[1A[2K[38;2;95;135;255m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[39m[0m]8;;
+[2K[0m]8;;
+[2K [38;2;138;190;183m[1mSelect authentication method:[22m[39m                                                                                          [0m]8;;
+[2K[0m]8;;
+[2K [38;2;138;190;183m→ [39m[38;2;138;190;183mSign in with an account[39m                                                                                              [0m]8;;
+[2K   [38;2;212;212;212mSign in with an API key[39m                                                                                              [0m]8;;
+[2K[0m]8;;
+[2K [38;2;102;102;102m↑↓[39m[38;2;128;128;128m navigate[39m  [38;2;102;102;102menter[39m[38;2;128;128;128m select[39m  [38;2;102;102;102mescape/ctrl+c[39m[38;2;128;128;128m cancel[39m                                                                        [0m]8;;
+[2K[0m]8;;
+[2K[38;2;95;135;255m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[39m[0m]8;;
+[2K[38;2;102;102;102m/auth/home[39m[0m]8;;
+[2K[38;2;102;102;102m0.0%/0 (auto)[39m[38;2;102;102;102m                                                                                                    unknown[39m[0m]8;;[?2026l[?25l[?2026h[9A[2K [38;2;138;190;183m[1mSelect provider to configure:[22m[39m                                                                                          [0m]8;;
+[2K[0m]8;;
+[2K> [7m [27m                                                                                                                     [0m]8;;
+[2K[0m]8;;
+[2K [38;2;138;190;183m→ [39m[38;2;138;190;183mAnthropic[39m[38;2;128;128;128m • unconfigured[39m                                                                                             [0m]8;;
+[2K   [38;2;212;212;212mGitHub Copilot[39m[38;2;128;128;128m • unconfigured[39m                                                                                        [0m]8;;
+[2K   [38;2;212;212;212mKimi For Coding[39m[38;2;128;128;128m • unconfigured[39m                                                                                       [0m]8;;
+[2K   [38;2;212;212;212mOpenAI Codex[39m[38;2;128;128;128m • unconfigured[39m                                                                                          [0m]8;;
+[2K   [38;2;212;212;212mOpenRouter[39m[38;2;128;128;128m • unconfigured[39m                                                                                            [0m]8;;
+[2K   [38;2;212;212;212mRadius[39m[38;2;128;128;128m • unconfigured[39m                                                                                                [0m]8;;
+[2K   [38;2;212;212;212mxAI[39m[38;2;128;128;128m • unconfigured[39m                                                                                                   [0m]8;;
+[2K[0m]8;;
+[2K[38;2;95;135;255m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[39m[0m]8;;
+[2K[38;2;102;102;102m/auth/home[39m[0m]8;;
+[2K[38;2;102;102;102m0.0%/0 (auto)[39m[38;2;102;102;102m                                                                                                    unknown[39m[0m]8;;[?2026l[12A[3G[?25l[?2026h[3A[2K [38;2;138;190;183m[1mLogin to Anthropic[22m[39m                                                                                                     [0m]8;;
+[2K[38;2;95;135;255m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[39m[0m]8;;
+[2K[38;2;102;102;102m/auth/home[39m[0m]8;;
+[2K[38;2;102;102;102m0.0%/0 (auto)[39m[38;2;102;102;102m                                                                                                    unknown[39m[0m]8;;
+[2K
+[2K
+[2K
+[2K
+[2K
+[2K
+[2K
+[2K
+[2K
+[2K
+[2K
+[2K[12A[?2026l[?25l[?2026h[2A[2K[0m]8;;
+[2K [38;2;138;190;183m]8;;https://claude.ai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e&response_type=code&redirect_uri=http%3A%2F%2Flocalhost%3A53692%2Fcallback&scope=org%3Acreate_api_key+user%3Aprofile+user%3Ainference+user%3Asessions%3Aclaude_code+user%3Amcp_servers+user%3Afile_upload&code_challenge=CHALLENGEchallengeCHALLENGEchallenge0123456&code_challenge_method=S256&state=STATEstateSTATEstateSTATEstate0123456789https://claude.ai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e&response_type=code&redirect]8;; [0m]8;;
+[2K [38;2;138;190;183m]8;;https://claude.ai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e&response_type=code&redirect_uri=http%3A%2F%2Flocalhost%3A53692%2Fcallback&scope=org%3Acreate_api_key+user%3Aprofile+user%3Ainference+user%3Asessions%3Aclaude_code+user%3Amcp_servers+user%3Afile_upload&code_challenge=CHALLENGEchallengeCHALLENGEchallenge0123456&code_challenge_method=S256&state=STATEstateSTATEstateSTATEstate0123456789_uri=http%3A%2F%2Flocalhost%3A53692%2Fcallback&scope=org%3Acreate_api_key+user%3Aprofile+user%3Ainference+user%3Asessi]8;; [0m]8;;
+[2K [38;2;138;190;183m]8;;https://claude.ai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e&response_type=code&redirect_uri=http%3A%2F%2Flocalhost%3A53692%2Fcallback&scope=org%3Acreate_api_key+user%3Aprofile+user%3Ainference+user%3Asessions%3Aclaude_code+user%3Amcp_servers+user%3Afile_upload&code_challenge=CHALLENGEchallengeCHALLENGEchallenge0123456&code_challenge_method=S256&state=STATEstateSTATEstateSTATEstate0123456789ons%3Aclaude_code+user%3Amcp_servers+user%3Afile_upload&code_challenge=CHALLENGEchallengeCHALLENGEchallenge0123456&cod]8;; [0m]8;;
+[2K [38;2;138;190;183m]8;;https://claude.ai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e&response_type=code&redirect_uri=http%3A%2F%2Flocalhost%3A53692%2Fcallback&scope=org%3Acreate_api_key+user%3Aprofile+user%3Ainference+user%3Asessions%3Aclaude_code+user%3Amcp_servers+user%3Afile_upload&code_challenge=CHALLENGEchallengeCHALLENGEchallenge0123456&code_challenge_method=S256&state=STATEstateSTATEstateSTATEstate0123456789e_challenge_method=S256&state=STATEstateSTATEstateSTATEstate0123456789]8;;[39m                                              [0m]8;;
+[2K [38;2;102;102;102m]8;;https://claude.ai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e&response_type=code&redirect_uri=http%3A%2F%2Flocalhost%3A53692%2Fcallback&scope=org%3Acreate_api_key+user%3Aprofile+user%3Ainference+user%3Asessions%3Aclaude_code+user%3Amcp_servers+user%3Afile_upload&code_challenge=CHALLENGEchallengeCHALLENGEchallenge0123456&code_challenge_method=S256&state=STATEstateSTATEstateSTATEstate0123456789Ctrl+click to open]8;;[39m                                                                                                     [0m]8;;
+[2K[0m]8;;
+[2K [38;2;255;255;0mComplete login in your browser. If the browser is on another machine, paste the final redirect URL here.[39m               [0m]8;;
+[2K[0m]8;;
+[2K [38;2;102;102;102mComplete login in your browser, or paste the authorization code / redirect URL here:[39m                                   [0m]8;;
+[2K> [7m [27m                                                                                                                     [0m]8;;
+[2K ([38;2;102;102;102mescape/ctrl+c[39m[38;2;128;128;128m to cancel[39m)                                                                                              [0m]8;;
+[2K[38;2;95;135;255m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[39m[0m]8;;
+[2K[38;2;102;102;102m/auth/home[39m[0m]8;;
+[2K[38;2;102;102;102m0.0%/0 (auto)[39m[38;2;102;102;102m                                                                                                    unknown[39m[0m]8;;[?2026l[4A[3G[?25l
