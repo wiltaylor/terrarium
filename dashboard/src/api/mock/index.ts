@@ -548,7 +548,8 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
   /** Fake local accounting while agents work: one `usage.sample` per working agent. */
   const usageTick = () => {
     for (const a of w.agents.filter((x) => x.status === "working" && x.subscription)) {
-      const row: UsageRow = { at: iso(), agent: a.id, project: a.project, subscription: a.subscription!, model: a.model ?? "claude-opus-5", input_tokens: 800 + (tick % 5) * 120, output_tokens: 140 + (tick % 3) * 40, cache_read: 21000, cache_write: 900, messages: 2, turn: w.seq };
+      const card = currentCard(a.id);
+      const row: UsageRow = { at: iso(), agent: a.id, project: a.project, subscription: a.subscription!, model: a.model ?? "claude-opus-5", input_tokens: 800 + (tick % 5) * 120, output_tokens: 140 + (tick % 3) * 40, cache_read: 21000, cache_write: 900, messages: 2, turn: w.seq, ...(card ? { card } : {}) };
       w.usage.push(row);
       agentEvent(a, "usage.sample", `${a.name}: ${row.input_tokens + row.output_tokens} tokens on ${row.subscription}`, {
         subscription: row.subscription, harness: a.harness, model: row.model, input_tokens: row.input_tokens, output_tokens: row.output_tokens, cache_read: row.cache_read, cache_write: row.cache_write, messages: row.messages,
@@ -575,6 +576,12 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
       }));
 
   // ----- local accounting (docs/api.md §16.3 `GET /api/usage`) -----
+  /** The attribution rule of docs/api.md §16.1: the agent's card in `in_progress`, newest `updated_at` first. */
+  const currentCard = (agentId: string): string | undefined =>
+    w.cards
+      .filter((c) => c.assignee === agentId && c.column === "in_progress" && !c.archived)
+      .sort((x, y) => y.updated_at.localeCompare(x.updated_at) || x.id.localeCompare(y.id))[0]?.id;
+  const cardTitle = (id: string) => w.cards.find((c) => c.id === id)?.title;
   const sumRows = (rows: UsageRow[]): UsageTotals => {
     const t: UsageTotals = { input_tokens: 0, output_tokens: 0, cache_read: 0, cache_write: 0, messages: 0, turns: 0 };
     const turns = new Set<string>();
@@ -597,21 +604,31 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     const since = checkTime("since", q.since) ?? new Date(now() - 24 * 3600_000).toISOString();
     const until = checkTime("until", q.until);
     const agentId = q.agent ? agent(q.agent).id : undefined;
+    const card = q.card?.trim().toUpperCase();
     const rows = w.usage.filter(
       (r) =>
-        r.at >= since && (!until || r.at < until) && (!q.subscription || r.subscription === q.subscription) && (!q.project || r.project === q.project) && (!agentId || r.agent === agentId) && (!q.model || r.model === q.model),
+        r.at >= since &&
+        (!until || r.at < until) &&
+        (!q.subscription || r.subscription === q.subscription) &&
+        (!q.project || r.project === q.project) &&
+        (!agentId || r.agent === agentId) &&
+        (!q.model || r.model === q.model) &&
+        (!card || r.card === card),
     );
+    if (q.group && !["subscription", "project", "agent", "model", "card"].includes(q.group)) fail(400, "bad_request", `unknown group \`${q.group}\``);
     const bucketOf = (at: string) => (q.bucket === "day" ? `${at.slice(0, 10)}T00:00:00Z` : `${at.slice(0, 13)}:00:00Z`);
     const groups = new Map<string, UsageRow[]>();
     for (const r of rows) {
-      const k = `${bucketOf(r.at)}\u0000${q.group ? r[q.group] : ""}`;
+      const k = `${bucketOf(r.at)}\u0000${q.group ? (r[q.group] ?? "") : ""}`;
       groups.set(k, [...(groups.get(k) ?? []), r]);
     }
     return [...groups.entries()]
       .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
       .map(([k, rs]) => {
         const [bucket, key] = k.split("\u0000") as [string, string];
-        return { bucket, ...(q.group ? { key } : {}), ...sumRows(rs) };
+        // A sample with no card has no key (the daemon's null).
+        const title = q.group === "card" && key ? cardTitle(key) : undefined;
+        return { bucket, ...(q.group && key ? { key } : {}), ...(title ? { title } : {}), ...sumRows(rs) };
       });
   };
   const execSessions = new Map<string, string>();
@@ -1723,6 +1740,32 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
 
     usage: {
       series: (q) => reply(() => usageSeries(q)),
+      card: (id, q = {}) =>
+        reply(() => {
+          const c = find(w.cards, (x) => x.id === id.trim().toUpperCase(), `card \`${id}\``);
+          const since = checkTime("since", q.since);
+          const until = checkTime("until", q.until);
+          const rows = w.usage.filter((r) => r.card === c.id && (!since || r.at >= since) && (!until || r.at < until));
+          const spend = (t: UsageTotals) => t.input_tokens + t.output_tokens;
+          const split = <K extends "model" | "agent">(col: K) => {
+            const m = new Map<string, UsageRow[]>();
+            for (const r of rows) m.set(r[col], [...(m.get(r[col]) ?? []), r]);
+            return [...m.entries()].map(([k, rs]) => [k, sumRows(rs)] as const).sort(([ka, a], [kb, b]) => spend(b) - spend(a) || ka.localeCompare(kb));
+          };
+          return {
+            card: c.id,
+            title: c.title,
+            project: c.project,
+            ...(since ? { since } : {}),
+            ...(until ? { until } : {}),
+            total: sumRows(rows),
+            models: split("model").map(([model, t]) => ({ model, ...t })),
+            agents: split("agent").map(([id, t]) => {
+              const a = w.agents.find((x) => x.id === id);
+              return { id, name: a ? `${a.project}/${a.name}` : id, ...t };
+            }),
+          };
+        }),
       me: (key) =>
         reply(() => {
           const a = agent(key);

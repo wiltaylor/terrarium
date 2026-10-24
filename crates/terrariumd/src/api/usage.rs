@@ -24,6 +24,7 @@ pub fn routes() -> Router<Shared> {
         .route("/usage", get(series))
         .route("/usage/me", get(me))
         .route("/usage/project", get(project))
+        .route("/cards/{id}/usage", get(card_usage))
         .route("/agents/{id}/status", post(self_report))
 }
 
@@ -34,6 +35,8 @@ struct UsageQuery {
     /// An agent key: ULID, `project/name`, or a name.
     agent: Option<String>,
     model: Option<String>,
+    /// A card ID (`TER-42`, any case).
+    card: Option<String>,
     since: Option<String>,
     until: Option<String>,
     #[serde(default)]
@@ -65,6 +68,10 @@ async fn series(
         project: q.project.filter(|s| !s.is_empty()),
         agent: None,
         model: q.model.filter(|s| !s.is_empty()),
+        card: q
+            .card
+            .filter(|s| !s.trim().is_empty())
+            .map(|c| crate::store::board::normalise_id(&c)),
         since: Some(time_or(q.since.as_deref(), "since")?.unwrap_or_else(day_ago)),
         until: time_or(q.until.as_deref(), "until")?,
     };
@@ -336,6 +343,95 @@ async fn project(
                 total,
                 agents,
                 budgets,
+            })
+        })
+        .await?;
+    Ok(Json(v))
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct CardUsageQuery {
+    since: Option<String>,
+    until: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ModelUsage {
+    model: String,
+    #[serde(flatten)]
+    totals: Totals,
+}
+
+#[derive(Debug, Serialize)]
+struct CardAgentUsage {
+    id: String,
+    name: String,
+    #[serde(flatten)]
+    totals: Totals,
+}
+
+#[derive(Debug, Serialize)]
+struct CardUsage {
+    card: String,
+    title: String,
+    project: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    since: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    until: Option<String>,
+    total: Totals,
+    models: Vec<ModelUsage>,
+    agents: Vec<CardAgentUsage>,
+}
+
+/// `GET /api/cards/{id}/usage`: the samples attributed to one card, in
+/// total, by model, and by agent. All time unless `?since=` or `?until=`.
+async fn card_usage(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(id): Path<String>,
+    ApiQuery(q): ApiQuery<CardUsageQuery>,
+) -> ApiResult<Json<CardUsage>> {
+    let since = time_or(q.since.as_deref(), "since")?;
+    let until = time_or(q.until.as_deref(), "until")?;
+    let card = state
+        .db
+        .read(move |c| crate::store::board::get_card(c, &id))
+        .await?;
+    policy::read_project(&actor, &card.project)?;
+    let v = state
+        .db
+        .read(move |c| {
+            let f = UsageFilter {
+                card: Some(card.id.clone()),
+                since: since.clone(),
+                until: until.clone(),
+                ..Default::default()
+            };
+            let models = ustore::by_model(c, &f)?
+                .into_iter()
+                .map(|(model, totals)| ModelUsage { model, totals })
+                .collect();
+            let agents = ustore::by_agent(c, &f)?
+                .into_iter()
+                .map(|(id, totals)| CardAgentUsage {
+                    name: crate::store::agents::display_name(c, &id)
+                        .ok()
+                        .flatten()
+                        .unwrap_or_else(|| id.clone()),
+                    id,
+                    totals,
+                })
+                .collect();
+            Ok(CardUsage {
+                total: ustore::totals(c, &f)?,
+                card: card.id,
+                title: card.title,
+                project: card.project,
+                since,
+                until,
+                models,
+                agents,
             })
         })
         .await?;

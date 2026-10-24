@@ -392,6 +392,44 @@ describe("mock parity with docs/api.md", () => {
     await expect(api.usage.series({ since: "yesterday" })).rejects.toMatchObject({ status: 400 });
   });
 
+  it("answers group=card with the title, a card filter, and GET /api/cards/{id}/usage", async () => {
+    const api = mock();
+    const since = new Date(Date.now() - 7 * 86_400_000).toISOString();
+    const byCard = await api.usage.series({ group: "card", bucket: "day", since });
+    const withCard = byCard.filter((p) => p.key);
+    expect(withCard.length).toBeGreaterThan(0);
+    // Samples with no card have no key and no title, like the daemon's null.
+    expect(byCard.some((p) => !("key" in p) && !("title" in p))).toBe(true);
+    for (const p of withCard) {
+      expect(p.key).toMatch(/^[A-Z]+-\d+$/);
+      expect(typeof p.title).toBe("string");
+    }
+    const flat = await api.usage.series({ bucket: "hour" });
+    expect(flat.every((p) => !("title" in p))).toBe(true);
+
+    const id = withCard[0]!.key!;
+    const filtered = await api.usage.series({ card: id.toLowerCase(), bucket: "day", since });
+    const sum = (ps: { input_tokens: number; output_tokens: number }[]) => ps.reduce((a, p) => a + p.input_tokens + p.output_tokens, 0);
+    expect(sum(filtered)).toBe(sum(byCard.filter((p) => p.key === id)));
+
+    const u = await api.usage.card(id.toLowerCase());
+    expect(Object.keys(u).sort()).toEqual(["agents", "card", "models", "project", "title", "total"]);
+    expect(u.card).toBe(id);
+    expect(Object.keys(u.total).sort()).toEqual(["cache_read", "cache_write", "input_tokens", "messages", "output_tokens", "turns"]);
+    expect(Object.keys(u.models[0]!).sort()).toEqual(["cache_read", "cache_write", "input_tokens", "messages", "model", "output_tokens", "turns"]);
+    expect(Object.keys(u.agents[0]!).sort()).toEqual(["cache_read", "cache_write", "id", "input_tokens", "messages", "name", "output_tokens", "turns"]);
+    expect(u.agents[0]!.name).toMatch(/^[a-z-]+\/[a-z-]+$/);
+    const spend = (t: { input_tokens: number; output_tokens: number }) => t.input_tokens + t.output_tokens;
+    expect(u.models.every((m, i) => i === 0 || spend(u.models[i - 1]!) >= spend(m))).toBe(true);
+    expect(spend(u.total)).toBe(u.models.reduce((a, m) => a + spend(m), 0));
+    expect(spend(u.total)).toBe(u.agents.reduce((a, m) => a + spend(m), 0));
+    const later = await api.usage.card(id, { since: "2999-01-01T00:00:00Z" });
+    expect(later).toMatchObject({ since: "2999-01-01T00:00:00.000Z", models: [], agents: [], total: { messages: 0 } });
+    await expect(api.usage.card("NOPE-1")).rejects.toMatchObject({ status: 404 });
+    await expect(api.usage.card(id, { since: "yesterday" })).rejects.toMatchObject({ status: 400 });
+    await expect(api.usage.series({ group: "board" as never })).rejects.toMatchObject({ status: 400 });
+  });
+
   it("answers GET /api/usage/me with the subscription, today, and holds", async () => {
     const api = mock();
     const me = await api.usage.me("terrarium/lead");

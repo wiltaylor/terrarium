@@ -65,6 +65,7 @@ import type {
   Subscription,
   Target,
   UsageMe,
+  CardUsage,
   UsagePoint,
   UsageQuery,
   VerifyResult,
@@ -231,6 +232,8 @@ export interface Api {
     series(q: UsageQuery): Promise<UsagePoint[]>;
     /** `GET /api/usage/me?agent=`: the agent's subscription, its share today, and its holds. */
     me(agent: string): Promise<UsageMe>;
+    /** `GET /api/cards/{id}/usage`: one card's usage by model and by agent. All time unless `since`/`until`. */
+    card(id: string, q?: { since?: string; until?: string }): Promise<CardUsage>;
   };
 
   mail: {
@@ -449,6 +452,7 @@ export function createHttpApi(t: Transport, makeSocket: (url: string) => WebSock
     usage: {
       series: (q) => get("/api/usage", { ...q }),
       me: (agent) => get("/api/usage/me", { agent }),
+      card: (id, q = {}) => get(`${c(id)}/usage`, { ...q }),
     },
 
     mail: {

@@ -4,6 +4,10 @@
 //! index on `(agent, message_id)` is the dedupe rule of `docs/compat.md`:
 //! a response that the session file repeats, or that a tail reads again
 //! after a restart, counts once.
+//!
+//! `card_id` is the card that the agent had in `in_progress`, assigned to
+//! itself, when the collector stored the sample ([`current_card`]). It is
+//! null when the agent had no such card.
 
 use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
 use serde::{Deserialize, Serialize};
@@ -25,6 +29,9 @@ pub struct NewUsage {
     pub message_id: String,
     pub turn_seq: Option<i64>,
     pub session: Option<String>,
+    /// The card the sample counts against (see [`current_card`]).
+    #[serde(default)]
+    pub card: Option<String>,
     /// RFC 3339. The time of the response, else now.
     pub at: Option<String>,
 }
@@ -44,8 +51,8 @@ pub fn insert(t: &mut Tx<'_>, samples: &[NewUsage]) -> ApiResult<Vec<NewUsage>> 
         let n = t.execute(
             "INSERT OR IGNORE INTO usage_samples
                  (agent, project, subscription, model, input_tokens, output_tokens, cache_read,
-                  cache_write, message_id, turn_seq, session, at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                  cache_write, message_id, turn_seq, session, at, card_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 s.agent,
                 s.project,
@@ -59,6 +66,7 @@ pub fn insert(t: &mut Tx<'_>, samples: &[NewUsage]) -> ApiResult<Vec<NewUsage>> 
                 s.turn_seq,
                 s.session,
                 s.at.clone().unwrap_or_else(now),
+                s.card,
             ],
         )?;
         if n == 1 {
@@ -128,6 +136,8 @@ pub struct UsageFilter {
     /// An agent ULID.
     pub agent: Option<String>,
     pub model: Option<String>,
+    /// A card ID (`TER-42`).
+    pub card: Option<String>,
     /// RFC 3339, inclusive.
     pub since: Option<String>,
     /// RFC 3339, exclusive.
@@ -143,6 +153,7 @@ impl UsageFilter {
             ("project", &self.project),
             ("agent", &self.agent),
             ("model", &self.model),
+            ("card_id", &self.card),
         ] {
             if let Some(v) = val {
                 sql.push_str(&format!(" AND {col} = ?"));
@@ -195,6 +206,8 @@ pub enum GroupBy {
     Project,
     Agent,
     Model,
+    /// The card ID; the point carries the card's title.
+    Card,
 }
 
 impl GroupBy {
@@ -204,9 +217,13 @@ impl GroupBy {
             Self::Project => "project",
             Self::Agent => "agent",
             Self::Model => "model",
+            Self::Card => "card_id",
         }
     }
 }
+
+/// The title of a sample's card, for `group=card`.
+const CARD_TITLE: &str = "(SELECT title FROM cards WHERE cards.id = usage_samples.card_id)";
 
 /// One point of a usage series.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -216,6 +233,9 @@ pub struct UsagePoint {
     /// The value of the group column, when the series is split.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
+    /// The card's title, with `group=card`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     #[serde(flatten)]
     pub totals: Totals,
 }
@@ -230,8 +250,13 @@ pub fn series(
 ) -> ApiResult<Vec<UsagePoint>> {
     let (filter, args) = f.sql();
     let key = group.map_or("NULL", GroupBy::col);
+    let title = if group == Some(GroupBy::Card) {
+        CARD_TITLE
+    } else {
+        "NULL"
+    };
     let sql = format!(
-        "SELECT {b} AS bucket, {key} AS key, {SUMS} FROM usage_samples{filter}
+        "SELECT {b} AS bucket, {key} AS key, {title} AS title, {SUMS} FROM usage_samples{filter}
          GROUP BY 1, 2 ORDER BY 1, 2",
         b = bucket.expr()
     );
@@ -240,6 +265,7 @@ pub fn series(
         Ok(UsagePoint {
             bucket: r.get("bucket")?,
             key: r.get("key")?,
+            title: r.get("title")?,
             totals: totals_row(r)?,
         })
     })?;
@@ -258,6 +284,36 @@ pub fn by_agent(conn: &Connection, f: &UsageFilter) -> ApiResult<Vec<(String, To
         Ok((r.get::<_, String>("agent")?, totals_row(r)?))
     })?;
     Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// Totals per model for a filter, biggest spender first.
+pub fn by_model(conn: &Connection, f: &UsageFilter) -> ApiResult<Vec<(String, Totals)>> {
+    let (filter, args) = f.sql();
+    let sql = format!(
+        "SELECT model, {SUMS} FROM usage_samples{filter}
+         GROUP BY model ORDER BY sum(input_tokens + output_tokens) DESC, model"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params_from_iter(args), |r| {
+        Ok((r.get::<_, String>("model")?, totals_row(r)?))
+    })?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// The card an agent works on: a card that is not archived, in the
+/// `in_progress` column of its board, and assigned to the agent. When the
+/// agent has more than one, the most recently updated wins (the newest
+/// claim or move); ties go to the lower card ID.
+pub fn current_card(conn: &Connection, agent: &str) -> ApiResult<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT c.id FROM cards c JOIN board_columns bc ON bc.id = c.column_id
+             WHERE c.assignee = ?1 AND bc.name = 'in_progress' AND c.archived = 0
+             ORDER BY c.updated_at DESC, c.id LIMIT 1",
+            [agent],
+            |r| r.get(0),
+        )
+        .optional()?)
 }
 
 /// The start of the current UTC day, RFC 3339.
@@ -419,6 +475,7 @@ mod tests {
             message_id: msg.into(),
             turn_seq: Some(1),
             session: None,
+            card: None,
             at: Some(at.into()),
         }
     }

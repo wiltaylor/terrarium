@@ -8,7 +8,7 @@ import { ago, compact } from "../../lib/format";
 import { collectAll } from "../../lib/paging";
 import { api, events, projects, subscriptions } from "../../stores";
 import { usageLabel } from "../spend/labels";
-import { bucketStarts, tokenSeries, toPercent, totalsByKey } from "../spend/split";
+import { bucketStarts, cardProject, cardRows, tokenSeries, toPercent, totalsByKey } from "../spend/split";
 import { buildQueue, type ProjectSnapshot } from "./queue";
 
 const HOUR = 3_600_000;
@@ -218,8 +218,8 @@ function UsageDetail(props: { sub: Subscription; onClose: () => void }) {
   const [split] = createResource(
     () => [props.sub.name, range()] as const,
     async () => {
-      const [project, agent, model] = await Promise.all((["project", "agent", "model"] as const).map((g) => api.usage.series(query(g))));
-      return { project: project!, agent: agent!, model: model! };
+      const [project, agent, model, card] = await Promise.all((["project", "agent", "model", "card"] as const).map((g) => api.usage.series(query(g))));
+      return { project: project!, agent: agent!, model: model!, card: card! };
     },
   );
   const [samples] = createResource(() => props.sub.name, (name) => api.subscriptions.quota(name, { limit: 1000 }));
@@ -270,6 +270,32 @@ function UsageDetail(props: { sub: Subscription; onClose: () => void }) {
           )}
         </For>
       </div>
+      <section>
+        <h3>Top cards by spend</h3>
+        <table>
+          <tbody>
+            <For each={cardRows(split()?.card ?? [], 10)} fallback={<tr><td class="muted">{split.loading ? "Loading…" : "No usage on cards."}</td></tr>}>
+              {(row) => {
+                const project = () => cardProject(row.key, projects.prefixes());
+                return (
+                  <tr title={`${row.turns} turns, ${row.messages} responses, ${compact(row.cache)} cache tokens`}>
+                    <td>
+                      <Show when={project()} fallback={row.name}>
+                        {(p) => (
+                          <A href={`/p/${p()}/board?card=${encodeURIComponent(row.key)}`} onClick={() => props.onClose()}>
+                            {row.name}
+                          </A>
+                        )}
+                      </Show>
+                    </td>
+                    <td class="mono">{compact(row.tokens)} tok</td>
+                  </tr>
+                );
+              }}
+            </For>
+          </tbody>
+        </table>
+      </section>
       <dl class="kv">
         <dt>Provider</dt>
         <dd>{props.sub.provider}</dd>
@@ -293,9 +319,6 @@ function UsageDetail(props: { sub: Subscription; onClose: () => void }) {
         <summary>Raw probe numbers</summary>
         <pre>{JSON.stringify(Object.keys(latestRaw()).length ? latestRaw() : props.sub.windows, null, 2)}</pre>
       </details>
-      <p class="muted small" style={{ margin: 0 }}>
-        The daemon has no per-card usage yet, so this view has no top cards by spend.
-      </p>
     </Modal>
   );
 }

@@ -35,6 +35,26 @@ export function totalsByKey(points: UsagePoint[], label: (key: string) => string
   return [...m.values()].sort((a, b) => b.tokens - a.tokens || a.name.localeCompare(b.name));
 }
 
+/**
+ * The rows of a `group=card` series, biggest first, named `TER-42 Title`.
+ * Points with no key (samples with no card) are left out.
+ */
+export function cardRows(points: UsagePoint[], limit = Infinity): SpendRow[] {
+  const titles = new Map<string, string>();
+  for (const p of points) if (p.key && p.title) titles.set(p.key, p.title);
+  const label = (k: string) => (titles.has(k) ? `${k} ${titles.get(k)}` : k);
+  return totalsByKey(
+    points.filter((p) => p.key),
+    label,
+  ).slice(0, limit);
+}
+
+/** The project of a card ID, from the card prefixes (`{TER: "terrarium"}`). */
+export function cardProject(id: string, prefixes: Record<string, string>): string | undefined {
+  const i = id.lastIndexOf("-");
+  return i > 0 ? prefixes[id.slice(0, i)] : undefined;
+}
+
 /** The bucket starts from `since` to `now`, oldest first. */
 export function bucketStarts(since: number, now: number, bucket: "hour" | "day"): string[] {
   const step = bucket === "day" ? 86_400_000 : 3_600_000;

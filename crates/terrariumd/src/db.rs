@@ -565,6 +565,13 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE agents ADD COLUMN runner_seq INTEGER NOT NULL DEFAULT 0;
     "#,
+    // 8: per-card usage attribution (PLAN §16.2). The card that the
+    // sample's agent had in `in_progress`, assigned to itself, when the
+    // collector stored the sample. No foreign key: history stays.
+    r#"
+    ALTER TABLE usage_samples ADD COLUMN card_id TEXT;
+    CREATE INDEX usage_samples_card ON usage_samples(card_id, at);
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call
@@ -862,6 +869,25 @@ mod tests {
             })
             .unwrap();
         assert_eq!(seq, 0);
+    }
+
+    #[test]
+    fn migration_8_adds_a_null_card_id() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        for sql in &MIGRATIONS[..7] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 7).unwrap();
+        conn.execute_batch(
+            "INSERT INTO usage_samples (agent, project, message_id, at)
+               VALUES ('A1', 'p', 'm1', 't');",
+        )
+        .unwrap();
+        assert_eq!(migrate(&mut conn).unwrap(), MIGRATIONS.len() - 7);
+        let card: Option<String> = conn
+            .query_row("SELECT card_id FROM usage_samples", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(card, None);
     }
 
     #[test]

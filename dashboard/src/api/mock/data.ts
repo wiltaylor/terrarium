@@ -73,6 +73,8 @@ export interface UsageRow {
   messages: number;
   /** The `seq` of the agent's `turn_start`. */
   turn: number;
+  /** The card the agent had in `in_progress` when the row was stored (`card_id`). */
+  card?: string;
 }
 
 const COLUMNS: Column[] = [
@@ -560,14 +562,17 @@ See [[does/not-exist]] for the old design.
   const usage: UsageRow[] = [];
   for (const a of agents) {
     if (!a.subscription) continue;
+    // The cards this agent worked on; some hours had no card in progress.
+    const worked = cards.filter((c) => c.assignee === a.id && !["backlog", "ready"].includes(c.column)).map((c) => c.id);
     for (let h = 24 * 7 - 1; h >= 0; h--) {
       const k = (a.name.length * 31 + h * 7) % 13;
       if (k < 3) continue;
       const at = new Date(now - h * 3600_000 - 7 * 60_000).toISOString();
       const model = a.model ?? MODELS[a.harness]!;
-      usage.push({ at, agent: a.id, project: a.project, subscription: a.subscription, model, input_tokens: k * 420, output_tokens: k * 90, cache_read: k * 15000, cache_write: k * 1200, messages: k, turn: 1000 + Math.floor(h / 2) });
+      const card = worked.length && k % 3 !== 0 ? { card: worked[Math.floor(h / 8) % worked.length]! } : {};
+      usage.push({ at, agent: a.id, project: a.project, subscription: a.subscription, model, input_tokens: k * 420, output_tokens: k * 90, cache_read: k * 15000, cache_write: k * 1200, messages: k, turn: 1000 + Math.floor(h / 2), ...card });
       if (a.harness === "claude" && k % 4 === 0) {
-        usage.push({ at, agent: a.id, project: a.project, subscription: a.subscription, model: "claude-haiku-5-5", input_tokens: k * 40, output_tokens: k * 12, cache_read: k * 900, cache_write: 0, messages: 1, turn: 1000 + Math.floor(h / 2) });
+        usage.push({ at, agent: a.id, project: a.project, subscription: a.subscription, model: "claude-haiku-5-5", input_tokens: k * 40, output_tokens: k * 12, cache_read: k * 900, cache_write: 0, messages: 1, turn: 1000 + Math.floor(h / 2), ...card });
       }
     }
   }

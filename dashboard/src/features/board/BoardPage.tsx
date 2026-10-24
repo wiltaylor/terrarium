@@ -1,11 +1,11 @@
 import { useParams, useSearchParams } from "@solidjs/router";
-import { createEffect, createSignal, For, on, onCleanup, Show } from "solid-js";
+import { createEffect, createResource, createSignal, For, on, onCleanup, Show } from "solid-js";
 import { createPagedList } from "../../components/paged";
 import { HoldBadge } from "../../components/QuotaBanner";
 import { StatusBadge } from "../../components/StatusBadge";
 import { ConfirmButton, Drawer, ErrorBanner, LoadMore, Modal, PageHead } from "../../components/ui";
 import type { Card } from "../../api/types";
-import { ago, humanize } from "../../lib/format";
+import { ago, compact, humanize } from "../../lib/format";
 import { cardsIn, createBoardStore } from "../../stores/board";
 import { agents, api, events } from "../../stores";
 
@@ -284,6 +284,18 @@ function CardDrawer(props: {
     (e) => e.id,
   );
   const projectAgents = () => agents.inProject(props.card.project);
+  // docs/api.md §16.3 `GET /api/cards/{id}/usage`. A daemon without it gives no line.
+  const [usage] = createResource(
+    () => props.card.id,
+    (id) => api.usage.card(id).catch(() => null),
+  );
+  const usageLine = () => {
+    const u = usage.latest;
+    if (!u) return null;
+    if (!u.total.messages) return "No usage recorded on this card.";
+    const tok = (t: { input_tokens: number; output_tokens: number }) => compact(t.input_tokens + t.output_tokens);
+    return `${tok(u.total)} tokens: ${u.models.map((m) => `${m.model} ${tok(m)}`).join(", ")}`;
+  };
 
   const save = async (patch: Parameters<typeof api.cards.update>[1]) => {
     try {
@@ -382,6 +394,12 @@ function CardDrawer(props: {
         <Show when={props.card.links.length}>
           <dt>Links</dt>
           <dd>{props.card.links.map((l) => `${l.kind}:${l.ref}`).join(", ")}</dd>
+        </Show>
+        <Show when={usageLine()}>
+          <dt>Usage</dt>
+          <dd class="small" title="Input plus output tokens of the samples attributed to this card, by model">
+            {usageLine()}
+          </dd>
         </Show>
       </dl>
 

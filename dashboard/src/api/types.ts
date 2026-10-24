@@ -786,7 +786,7 @@ export interface ApiKeyInput {
   models?: string[];
 }
 
-export type UsageGroup = "subscription" | "project" | "agent" | "model";
+export type UsageGroup = "subscription" | "project" | "agent" | "model" | "card";
 
 export interface UsageQuery {
   subscription?: string;
@@ -794,6 +794,8 @@ export interface UsageQuery {
   /** An agent key (docs/api.md §2.2). */
   agent?: string;
   model?: string;
+  /** A card ID (`TER-42`): only the samples attributed to that card. */
+  card?: string;
   /** RFC 3339. Default: 24 hours ago. */
   since?: string;
   until?: string;
@@ -816,8 +818,24 @@ export interface UsageTotals {
 export interface UsagePoint extends UsageTotals {
   /** The start of the bucket. */
   bucket: string;
-  /** The value of the `group` column when the series is split. For `agent` it is the agent ULID. */
+  /** The value of the `group` column when the series is split. For `agent` it is the agent ULID; for `card`, the card ID (absent: no card). */
   key?: string;
+  /** With `group=card`: the card's title. */
+  title?: string;
+}
+
+/** `GET /api/cards/{id}/usage` (docs/api.md §16.3): the samples attributed to one card. */
+export interface CardUsage {
+  card: string;
+  title: string;
+  project: string;
+  since?: string;
+  until?: string;
+  total: UsageTotals;
+  /** Biggest spender first. */
+  models: (UsageTotals & { model: string })[];
+  /** Biggest spender first. `name` is `project/name`. */
+  agents: (UsageTotals & { id: string; name: string })[];
 }
 
 /** A hold on an agent's new turns (docs/api.md §16.6). */

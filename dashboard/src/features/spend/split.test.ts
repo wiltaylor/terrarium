@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { UsagePoint } from "../../api/types";
-import { bucketStarts, tokenSeries, toPercent, totalsByKey } from "./split";
+import { bucketStarts, cardProject, cardRows, tokenSeries, toPercent, totalsByKey } from "./split";
 
 const p = (bucket: string, key: string, input: number, output: number): UsagePoint => ({ bucket, key, input_tokens: input, output_tokens: output, cache_read: 2, cache_write: 1, messages: 1, turns: 1 });
 
@@ -13,6 +13,23 @@ describe("spend split", () => {
       ["dev", "DEV", 330, 1, 3],
       ["lead", "LEAD", 165, 2, 6],
     ]);
+  });
+
+  it("ranks cards with their titles and drops samples with no card", () => {
+    const pts: UsagePoint[] = [
+      { ...p("2026-10-24T05:00:00Z", "TER-1", 10, 1), title: "Parser" },
+      { ...p("2026-10-24T06:00:00Z", "TER-1", 10, 1), title: "Parser" },
+      { ...p("2026-10-24T06:00:00Z", "TER-2", 100, 1), title: "Lexer" },
+      { bucket: "2026-10-24T06:00:00Z", input_tokens: 999, output_tokens: 0, cache_read: 0, cache_write: 0, messages: 1, turns: 1 },
+    ];
+    expect(cardRows(pts).map((r) => [r.key, r.name, r.tokens])).toEqual([
+      ["TER-2", "TER-2 Lexer", 101],
+      ["TER-1", "TER-1 Parser", 22],
+    ]);
+    expect(cardRows(pts, 1)).toHaveLength(1);
+    expect(cardProject("TER-42", { TER: "terrarium" })).toBe("terrarium");
+    expect(cardProject("MY-APP-3", { "MY-APP": "app" })).toBe("app");
+    expect(cardProject("NOPE", { TER: "terrarium" })).toBeUndefined();
   });
 
   it("fills a token series with zeros, per key or for all", () => {

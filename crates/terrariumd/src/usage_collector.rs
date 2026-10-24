@@ -12,6 +12,14 @@
 //! `docs/compat.md`), so a tail that reads a resumed session file again
 //! counts nothing twice.
 //!
+//! Each sample also carries the card the agent works on when the collector
+//! stores it: the agent's card in `in_progress` that is assigned to it
+//! ([`ustore::current_card`]), else none. The collector caches the answer
+//! per agent and drops an agent's entry on each `card` event that names
+//! the agent (as the event's agent, `assignee`, or `previous`), so a
+//! claim, a move, or a reassignment takes effect at the next sample. A
+//! `board` event, or a gap in the event stream, drops the whole cache.
+//!
 //! The collector emits a `usage.sample` event per agent at most once per
 //! `sample_throttle`, with the totals since the last one, for the
 //! dashboard's Usage strip.
@@ -398,6 +406,9 @@ pub struct Collector {
     state: Shared,
     sources: Vec<Arc<dyn UsageSourceFactory>>,
     agents: HashMap<String, Tracked>,
+    /// The current card of each agent, as [`ustore::current_card`] gave
+    /// it. `card` events invalidate it.
+    cards: HashMap<String, Option<String>>,
 }
 
 fn time_str(t: DateTime<Utc>) -> String {
@@ -410,6 +421,47 @@ impl Collector {
             state,
             sources,
             agents: HashMap::new(),
+            cards: HashMap::new(),
+        }
+    }
+
+    /// Forget every cached card, after a gap in the event stream.
+    pub fn forget_cards(&mut self) {
+        self.cards.clear();
+    }
+
+    /// Drop the cached cards of the agents that a `card` event names.
+    fn on_card_event(&mut self, e: &StoredEvent) {
+        if let Some(a) = &e.agent_id {
+            self.cards.remove(a);
+        }
+        for field in ["assignee", "previous"] {
+            if let Some(a) = e.data.get(field).and_then(Value::as_str) {
+                self.cards.remove(a);
+            }
+        }
+    }
+
+    /// The card that `agent` works on now, from the cache or the store.
+    async fn card_of(&mut self, agent: &str) -> Option<String> {
+        if let Some(c) = self.cards.get(agent) {
+            return c.clone();
+        }
+        let key = agent.to_owned();
+        match self
+            .state
+            .db
+            .read(move |c| ustore::current_card(c, &key))
+            .await
+        {
+            Ok(card) => {
+                self.cards.insert(agent.to_owned(), card.clone());
+                card
+            }
+            Err(e) => {
+                warn!(agent, "usage: cannot read the current card: {e}");
+                None
+            }
         }
     }
 
@@ -422,6 +474,11 @@ impl Collector {
 
     /// Handle one event of the hub.
     pub async fn on_event(&mut self, e: &StoredEvent) {
+        match e.kind.as_str() {
+            "card" => return self.on_card_event(e),
+            "board" => return self.forget_cards(),
+            _ => {}
+        }
         let Some(agent) = e.agent_id.clone() else {
             return;
         };
@@ -530,6 +587,14 @@ impl Collector {
                 Vec::new()
             }
         };
+        let card = if samples.is_empty() {
+            None
+        } else {
+            self.card_of(agent).await
+        };
+        let Some(t) = self.agents.get_mut(agent) else {
+            return;
+        };
         let rows: Vec<NewUsage> = samples
             .into_iter()
             .map(|s| NewUsage {
@@ -548,6 +613,7 @@ impl Collector {
                 message_id: s.message_id,
                 turn_seq: t.turn_seq,
                 session: Some(t.info.session.clone()).filter(|s| !s.is_empty()),
+                card: card.clone(),
                 at: s.at.map(time_str),
             })
             .collect();
@@ -623,7 +689,11 @@ pub fn spawn(state: Shared) -> JoinHandle<()> {
             tokio::select! {
                 ev = rx.recv() => match ev {
                     Ok(e) => c.on_event(&e).await,
-                    Err(RecvError::Lagged(n)) => warn!("the usage collector missed {n} events"),
+                    Err(RecvError::Lagged(n)) => {
+                        warn!("the usage collector missed {n} events");
+                        // A missed `card` event could leave a stale card.
+                        c.forget_cards();
+                    }
                     Err(RecvError::Closed) => return,
                 },
                 _ = tick.tick() => c.poll_all().await,
