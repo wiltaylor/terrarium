@@ -147,11 +147,13 @@ pub fn workspace_dir(state_dir: &Path, agent: AgentId) -> PathBuf {
 
 /// Make the private directory (and the agent directory), mode `0700`:
 /// it holds the launch spec with the injected keys.
+///
+/// It follows no symlink (`docs/security-review.md`, F11). It fails with
+/// [`crate::RunnerError::UnsafePath`] when the agent directory or `dir` is
+/// a symlink or not a directory, or when a record in `dir` (`events.jsonl`,
+/// `pty.log`, `runner.json`, ...) is a symlink or not a regular file.
 pub fn create_private_dir(dir: &Path) -> crate::error::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::create_dir_all(dir).map_err(|e| crate::error::RunnerError::io("create", dir, e))?;
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
-        .map_err(|e| crate::error::RunnerError::io("chmod", dir, e))
+    crate::safefs::ensure_private_dir(dir)
 }
 
 /// The files that a layout before the split kept at the top of the agent
@@ -178,9 +180,23 @@ pub const LEGACY_HARNESS: &[&str] = &["prompt.md", "claude", "codex", "copilot",
 /// new place, stays where it is. A rename keeps the inode, so a runner of
 /// an older version that still has a file open keeps writing to it.
 /// Returns the number of entries moved.
+///
+/// It follows no symlink (`docs/security-review.md`, F11). When `dir`,
+/// `private/`, `harness/`, or an entry to move is a symlink, or an entry
+/// is not a regular file or directory, it moves nothing and fails with
+/// `InvalidData`. (The daemon puts such a dir in quarantine first.)
 pub fn migrate_legacy_layout(dir: &Path) -> std::io::Result<usize> {
-    if !dir.is_dir() {
+    if !std::fs::symlink_metadata(dir).is_ok_and(|m| m.file_type().is_dir()) {
         return Ok(0);
+    }
+    if let Some(bad) = unsafe_legacy_entry(dir) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "refuse {}: a symlink or a special file; nothing moved",
+                bad.display()
+            ),
+        ));
     }
     let mut moved = 0;
     for (sub, names) in [(PRIVATE_DIR, LEGACY_PRIVATE), (HARNESS_DIR, LEGACY_HARNESS)] {
@@ -205,6 +221,30 @@ pub fn migrate_legacy_layout(dir: &Path) -> std::io::Result<usize> {
         }
     }
     Ok(moved)
+}
+
+/// The first entry that [`migrate_legacy_layout`] must not touch: a
+/// symlink at `private/` or `harness/`, or an entry to move that is a
+/// symlink or neither a regular file nor a directory.
+fn unsafe_legacy_entry(dir: &Path) -> Option<PathBuf> {
+    for sub in [PRIVATE_DIR, HARNESS_DIR] {
+        let path = dir.join(sub);
+        if let Ok(m) = std::fs::symlink_metadata(&path)
+            && !m.file_type().is_dir()
+        {
+            return Some(path);
+        }
+    }
+    LEGACY_PRIVATE
+        .iter()
+        .chain(LEGACY_HARNESS)
+        .map(|name| dir.join(name))
+        .find(|path| {
+            std::fs::symlink_metadata(path).is_ok_and(|m| {
+                let t = m.file_type();
+                t.is_symlink() || !(t.is_file() || t.is_dir())
+            })
+        })
 }
 
 /// The runner socket of one agent: `<runtime_dir>/agents/<ulid>.sock`.
@@ -266,5 +306,26 @@ mod tests {
             migrate_legacy_layout(&tmp.path().join("none")).expect("none"),
             0
         );
+    }
+
+    #[test]
+    fn legacy_layout_with_a_symlink_moves_nothing() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path().join("a");
+        std::fs::create_dir_all(dir.join("workspace")).expect("mk");
+        std::fs::write(dir.join("pty.log"), "x").expect("write");
+        symlink(dir.join("workspace/leak"), dir.join("runner.json")).expect("plant");
+        let err = migrate_legacy_layout(&dir).expect_err("refused");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("runner.json"), "{err}");
+        assert!(dir.join("pty.log").is_file());
+        assert!(!dir.join("private").exists());
+        // A symlink at `private/` is refused too.
+        std::fs::remove_file(dir.join("runner.json")).expect("rm");
+        symlink(dir.join("workspace"), dir.join("private")).expect("plant");
+        let err = migrate_legacy_layout(&dir).expect_err("refused");
+        assert!(err.to_string().contains("private"), "{err}");
+        assert!(!dir.join("workspace/pty.log").exists());
     }
 }

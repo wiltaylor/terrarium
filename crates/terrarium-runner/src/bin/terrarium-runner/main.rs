@@ -81,8 +81,9 @@ fn real_main() -> Result<i32> {
 
     let mut spec = RunnerSpec::read(&args.spec)?;
     if let Some(path) = &args.sandbox_argv_file {
-        let text =
-            std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+        // No symlink follow: the file is in `private/`
+        // (`docs/security-review.md`, F11).
+        let text = read_nofollow(path).with_context(|| format!("read {}", path.display()))?;
         let argv: Vec<String> =
             serde_json::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
         spec.set_argv(argv)?;
@@ -103,4 +104,17 @@ fn real_main() -> Result<i32> {
     // plus the signal. The full status is in `runner-exit.json`.
     tracing::info!(code = status.code, signal = ?status.signal, "runner done");
     Ok(status.exit_code())
+}
+
+/// Read `path` as text with `O_NOFOLLOW`: a symlink fails with `ELOOP`.
+fn read_nofollow(path: &std::path::Path) -> std::io::Result<String> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut text = String::new();
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits())
+        .open(path)?
+        .read_to_string(&mut text)?;
+    Ok(text)
 }

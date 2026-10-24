@@ -748,3 +748,61 @@ async fn stop_types_the_exit_keys_when_idle_and_kills_when_busy() {
     assert_eq!(h.runner.status(), AgentStatus::Stopped);
     assert!(!h.runner.screen().text().contains("bye"));
 }
+
+/// A runner config and a launch spec of the fake TUI in `dir`, for the
+/// tests of a planted symlink (`docs/security-review.md`, F11).
+fn planted_config(dir: &Path) -> (RunnerConfig, LaunchSpec) {
+    let config = RunnerConfig::new(AgentId::new(), dir.join("state"), dir.join("run"));
+    let spec = LaunchSpec::new("python3", dir).arg(fake_tui().display().to_string());
+    (config, spec)
+}
+
+async fn spawn_err(config: RunnerConfig, spec: LaunchSpec) -> terrarium_runner::RunnerError {
+    let adapter = Arc::new(FakeAdapter { busy_screen: false });
+    match Runner::spawn(config, adapter, spec, Arc::new(NoHandler)).await {
+        Ok(runner) => {
+            let _ = runner.kill();
+            panic!("the runner started over a planted symlink");
+        }
+        Err(e) => e,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_planted_events_symlink_stops_the_start() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (config, spec) = planted_config(dir.path());
+    let private = config.private_dir();
+    std::fs::create_dir_all(&private).expect("private");
+    let target = dir.path().join("workspace-events");
+    std::fs::write(&target, b"").expect("target");
+    let events = private.join("events.jsonl");
+    std::os::unix::fs::symlink(&target, &events).expect("plant");
+    let socket = config.socket_path();
+    let err = spawn_err(config, spec).await;
+    assert!(
+        matches!(&err, terrarium_runner::RunnerError::UnsafePath { path, .. } if *path == events),
+        "{err}"
+    );
+    assert!(err.to_string().contains("events.jsonl"), "{err}");
+    // Nothing went through the link, and the runner bound no socket.
+    assert_eq!(std::fs::read(&target).expect("read"), b"");
+    assert!(!socket.exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_planted_private_symlink_stops_the_start() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (config, spec) = planted_config(dir.path());
+    let agent_dir = config.agent_dir();
+    let work = agent_dir.join("workspace");
+    std::fs::create_dir_all(&work).expect("workspace");
+    let private = config.private_dir();
+    std::os::unix::fs::symlink(&work, &private).expect("plant");
+    let err = spawn_err(config, spec).await;
+    assert!(
+        matches!(&err, terrarium_runner::RunnerError::UnsafePath { path, .. } if *path == private),
+        "{err}"
+    );
+    assert!(std::fs::read_dir(&work).expect("ls").next().is_none());
+}

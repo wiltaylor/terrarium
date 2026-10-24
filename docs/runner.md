@@ -29,6 +29,24 @@ at the top) into `private/` and `harness/`, once
 (`terrarium_runner::migrate_legacy_layout`). An entry that is already at its
 new place stays; the old copy then stays too, with a warning.
 
+The runner follows no symlink in the agent directory (`docs/security-review.md`,
+F11). `create_private_dir` uses `symlink_metadata`. It makes `private/` with
+mode `0700`, and it sets the mode through a handle that it opens with
+`O_NOFOLLOW`. It refuses with `RunnerError::UnsafePath` ("refuse <path>: it is
+a symlink") when the agent directory or `private/` is a symlink or not a
+directory. It also refuses when a record name in `private/` (`events.jsonl`,
+`pty.log`, `pty.log.1`, `runner.json`, `runner-argv.json`, `runner-exit.json`
+and its `.tmp`, `runner.log`, `session-prompt.sha256`) is a symlink or not a
+regular file. Then the runner does not start and writes nothing. The runner
+opens every record, and the pid file, with `O_NOFOLLOW`, and it refuses a file
+that is not a regular file. It makes a new file with mode `0600`. The temp file
+of `runner-exit.json` is made new (`O_EXCL`) after the removal of an old one.
+`migrate_legacy_layout` moves nothing, and fails with `InvalidData`, when an
+entry to move, `private/`, or `harness/` is a symlink. The runner does not
+repair a planted entry: the daemon puts such a directory in quarantine before
+the migration. A refusal makes the launch fail, and the error text names the
+path.
+
 | Path | Content |
 |---|---|
 | `<state>/agents/<ulid>/private/pty.log` | The raw PTY bytes. The runner appends to it. With `log_max_bytes = 0` the runner writes no `pty.log` at all (the login flow does this: its output has a device code). |

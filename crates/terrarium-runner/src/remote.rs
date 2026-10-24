@@ -355,7 +355,7 @@ impl Shared {
             let status = self
                 .exit_file
                 .get()
-                .and_then(|p| std::fs::read_to_string(p).ok())
+                .and_then(|p| crate::safefs::read_to_string(p).ok())
                 .and_then(|t| serde_json::from_str::<ExitStatus>(&t).ok())
                 .unwrap_or(ExitStatus {
                     code: 1,
@@ -617,11 +617,8 @@ impl RemoteRunner {
         let spec_path = dir.join("runner.json");
         opts.spec.write(&spec_path)?;
         let log_path = dir.join("runner.log");
-        let log = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)
-            .map_err(|e| RunnerError::io("open", &log_path, e))?;
+        // No symlink follow for the private files (`docs/security-review.md`, F11).
+        let log = crate::safefs::open_append(&log_path)?;
         let err_log = log
             .try_clone()
             .map_err(|e| RunnerError::io("open", &log_path, e))?;
@@ -638,8 +635,7 @@ impl RemoteRunner {
         if let Some(argv) = &opts.sandbox_argv {
             let argv_path = dir.join("runner-argv.json");
             let bytes = serde_json::to_vec(argv).map_err(|e| RunnerError::Other(e.to_string()))?;
-            std::fs::write(&argv_path, bytes)
-                .map_err(|e| RunnerError::io("write", &argv_path, e))?;
+            crate::safefs::write_private(&argv_path, &bytes)?;
             cmd.arg("--sandbox-argv-file").arg(&argv_path);
         }
         cmd.stdin(std::process::Stdio::null())

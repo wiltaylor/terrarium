@@ -3,7 +3,7 @@
 //! archive) and a new `pty.log` starts. One archive is kept. A limit of 0
 //! turns the log off: no file is made.
 
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -70,12 +70,10 @@ impl PtyLog {
     }
 }
 
+/// No symlink follow (`docs/security-review.md`, F11). `rotate` uses
+/// `rename`, which moves a symlink itself, never its target.
 fn open_append(path: &Path) -> Result<File> {
-    OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .map_err(|e| RunnerError::io("open", path, e))
+    crate::safefs::open_append(path)
 }
 
 #[cfg(test)]

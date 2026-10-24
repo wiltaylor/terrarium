@@ -208,29 +208,21 @@ impl RunnerSpec {
         Duration::from_millis(self.rpc_queue_timeout_ms)
     }
 
-    /// Read a spec file.
+    /// Read a spec file. A symlink at `path` is not followed: the read
+    /// fails with [`RunnerError::UnsafePath`].
     pub fn read(path: &Path) -> Result<Self> {
-        let text = std::fs::read_to_string(path).map_err(|e| RunnerError::io("read", path, e))?;
+        let text = crate::safefs::read_to_string(path)?;
         serde_json::from_str(&text)
             .map_err(|e| RunnerError::Other(format!("{}: {e}", path.display())))
     }
 
     /// Write the spec file with mode `0600`: the launch env can carry
-    /// settings that other users must not read.
+    /// settings that other users must not read. A symlink at `path` is not
+    /// followed: the write fails with [`RunnerError::UnsafePath`].
     pub fn write(&self, path: &Path) -> Result<()> {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
         let bytes =
             serde_json::to_vec_pretty(self).map_err(|e| RunnerError::Other(e.to_string()))?;
-        let mut f = std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)
-            .map_err(|e| RunnerError::io("open", path, e))?;
-        f.write_all(&bytes)
-            .map_err(|e| RunnerError::io("write", path, e))
+        crate::safefs::write_private(path, &bytes)
     }
 
     /// Replace the program and the arguments with `argv` (from

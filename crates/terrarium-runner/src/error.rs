@@ -22,6 +22,11 @@ pub enum RunnerError {
     /// The control connection to the runner process is closed.
     #[error("the connection to the runner process is closed")]
     Disconnected,
+    /// A private path is a symlink or not of the right type (a planted
+    /// entry, `docs/security-review.md` F11). The runner does not follow it
+    /// and does not start.
+    #[error("refuse {path}: it {reason}")]
+    UnsafePath { path: PathBuf, reason: &'static str },
     /// Another live runner process holds this agent.
     #[error("a runner process (pid {pid}) already holds agent {agent}")]
     AlreadyRunning { agent: String, pid: String },

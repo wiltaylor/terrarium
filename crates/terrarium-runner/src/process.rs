@@ -4,6 +4,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -85,7 +86,7 @@ pub fn read_exit_status(state_dir: &Path, agent: AgentId) -> Option<ExitStatus> 
 
 /// The full `runner-exit.json` of `agent`, with `stopped_by`.
 pub fn read_exit_record(state_dir: &Path, agent: AgentId) -> Option<ExitRecord> {
-    let text = std::fs::read_to_string(exit_status_path(state_dir, agent)).ok()?;
+    let text = crate::safefs::read_to_string(&exit_status_path(state_dir, agent)).ok()?;
     serde_json::from_str(&text).ok()
 }
 
@@ -93,7 +94,7 @@ pub fn read_exit_record(state_dir: &Path, agent: AgentId) -> Option<ExitRecord> 
 /// holds an exclusive lock on its pid file for its whole life.
 pub fn live_runner_pid(runtime_dir: &Path, agent: AgentId) -> Option<u32> {
     let path = pid_path(runtime_dir, agent);
-    let file = File::open(&path).ok()?;
+    let file = crate::safefs::open_read(&path).ok()?;
     match Flock::lock(file, FlockArg::LockSharedNonblock) {
         // We got the lock, so no runner holds it.
         Ok(_) => None,
@@ -122,13 +123,16 @@ impl Drop for Cleanup {
 }
 
 fn lock_pid_file(path: &Path, agent: AgentId) -> Result<Flock<File>> {
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path)
-        .map_err(|e| RunnerError::io("open", path, e))?;
+    // No symlink follow (`docs/security-review.md`, F11).
+    let file = crate::safefs::open(
+        path,
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600),
+    )?;
     let mut lock = match Flock::lock(file, FlockArg::LockExclusiveNonblock) {
         Ok(l) => l,
         Err((mut f, _)) => {
@@ -229,7 +233,8 @@ pub async fn run(opts: ProcessOptions, adapter: Arc<dyn Adapter>) -> Result<Exit
 }
 
 /// Write `runner-exit.json` through a temp file and a rename, so that a
-/// reader never sees half a file.
+/// reader never sees half a file. The temp file is made new, with no
+/// symlink follow.
 fn write_exit_status(path: &Path, status: &ExitRecord) {
     let bytes = match serde_json::to_vec(status) {
         Ok(b) => b,
@@ -239,7 +244,7 @@ fn write_exit_status(path: &Path, status: &ExitRecord) {
         }
     };
     let tmp = path.with_extension("json.tmp");
-    if let Err(e) = std::fs::write(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, path)) {
+    if let Err(e) = crate::safefs::write_atomic(path, &tmp, &bytes) {
         tracing::warn!("write {}: {e}", path.display());
     }
 }

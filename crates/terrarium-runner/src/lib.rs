@@ -20,6 +20,7 @@ mod ptylog;
 pub mod ready;
 mod remote;
 mod runner;
+mod safefs;
 mod server;
 mod socket;
 pub mod spec;

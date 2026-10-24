@@ -4,6 +4,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
 use terrarium_core::EventRecord;
@@ -21,12 +22,15 @@ impl EventLog {
     /// died while it wrote) gets one, so that the next record starts on a
     /// new line. That broken line keeps its seq.
     pub(crate) fn open(path: &Path) -> Result<Self> {
-        let mut file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .append(true)
-            .open(path)
-            .map_err(|e| RunnerError::io("open", path, e))?;
+        // No symlink follow (`docs/security-review.md`, F11).
+        let mut file = crate::safefs::open(
+            path,
+            OpenOptions::new()
+                .create(true)
+                .read(true)
+                .append(true)
+                .mode(0o600),
+        )?;
         let (lines, ends_in_newline) =
             count_lines(&mut file).map_err(|e| RunnerError::io("read", path, e))?;
         let mut seq = lines;
@@ -73,8 +77,13 @@ fn count_lines(file: &mut File) -> std::io::Result<(u64, bool)> {
 
 /// The records after `since`, in order, with their seq set from the line
 /// number. Lines that do not parse are skipped. A missing file has none.
+/// A symlink at `path` is not followed: it is an error (`ELOOP`).
 pub fn read_since(path: &Path, since: u64) -> std::io::Result<Vec<EventRecord>> {
-    let file = match File::open(path) {
+    let file = match OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits())
+        .open(path)
+    {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e),
