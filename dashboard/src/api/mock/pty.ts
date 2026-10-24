@@ -1,9 +1,9 @@
 // A fake PTY that behaves like a WebSocket. It speaks the protocol in ../sockets:
 // it parses JSON input and resize frames, echoes keystrokes, and answers each line.
 
-import { parsePtyControl, type PtySocket } from "../sockets";
+import { parsePtyControl, type PtySocket, type RawSocket } from "../sockets";
 
-type Listener = (ev: { data?: unknown }) => void;
+type Listener = (ev: { data?: unknown; code?: number }) => void;
 
 export interface FakePtyOptions {
   banner?: string[];
@@ -15,11 +15,16 @@ export interface FakePtyOptions {
   tickMs?: number;
   /** Refuse the upgrade, as the daemon does for an agent that is not running (409). */
   refuse?: boolean;
+  /**
+   * The subprotocol the "daemon" echoes (see ./ws). `null`: the handshake
+   * failed auth, so the upgrade is refused. Absent: no auth check (unit tests).
+   */
+  protocol?: string | null;
 }
 
 const enc = new TextEncoder();
 
-export class FakePty implements PtySocket {
+export class FakePty implements PtySocket, RawSocket {
   static readonly CONNECTING = 0;
   static readonly OPEN = 1;
   static readonly CLOSING = 2;
@@ -27,6 +32,8 @@ export class FakePty implements PtySocket {
 
   readyState: number = FakePty.CONNECTING;
   binaryType: BinaryType = "arraybuffer";
+  /** The subprotocol the server picked, as on a real `WebSocket`. */
+  readonly protocol: string;
   /** Last size the client sent. Tests and the banner read it. */
   size = { cols: 80, rows: 24 };
   /** Every control frame the client sent, for tests. */
@@ -39,12 +46,14 @@ export class FakePty implements PtySocket {
 
   constructor(private readonly opts: FakePtyOptions = {}) {
     this.prompt = opts.prompt ?? "\x1b[32m❯\x1b[0m ";
+    this.protocol = opts.protocol ?? "";
     queueMicrotask(() => {
       if (this.readyState !== FakePty.CONNECTING) return;
-      if (opts.refuse) {
+      if (opts.refuse || opts.protocol === null) {
+        // A refused upgrade: the browser sees error, then close 1006.
         this.readyState = FakePty.CLOSED;
         this.emit("error", {});
-        this.emit("close", {});
+        this.emit("close", { code: 1006 });
         return;
       }
       this.readyState = FakePty.OPEN;
@@ -87,7 +96,7 @@ export class FakePty implements PtySocket {
     if (this.readyState === FakePty.CLOSED) return;
     clearInterval(this.timer);
     this.readyState = FakePty.CLOSED;
-    this.emit("close", {});
+    this.emit("close", { code: 1000 });
   }
 
   /** Print a line from the "server" side. */
@@ -124,7 +133,7 @@ export class FakePty implements PtySocket {
     this.emit("message", { data: buf });
   }
 
-  private emit(type: string, ev: { data?: unknown }): void {
+  private emit(type: string, ev: { data?: unknown; code?: number }): void {
     for (const fn of this.listeners.get(type) ?? []) fn(ev);
   }
 }

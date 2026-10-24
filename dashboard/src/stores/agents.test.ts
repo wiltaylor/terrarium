@@ -103,14 +103,14 @@ describe("createAuthStore", () => {
     const mem = new Map<string, string>();
     const storage: KeyValueStorage = { getItem: (k) => mem.get(k) ?? null, setItem: (k, v) => void mem.set(k, v), removeItem: (k) => void mem.delete(k) };
     createRoot((dispose) => {
-      const auth = createAuthStore(storage);
+      const auth = createAuthStore({ session: storage });
       expect(auth.token()).toBeNull();
       auth.requireToken();
       expect(auth.needsToken()).toBe(true);
       auth.setToken("  abc  ");
       expect(auth.token()).toBe("abc");
       expect(auth.needsToken()).toBe(false);
-      expect(createAuthStore(storage).token()).toBe("abc");
+      expect(createAuthStore({ session: storage }).token()).toBe("abc");
       auth.clear();
       expect(mem.size).toBe(0);
       dispose();

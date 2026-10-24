@@ -6,7 +6,7 @@ import { isMock } from "../api";
 import { QuotaBanner } from "../components/QuotaBanner";
 import { ErrorBanner, useNow } from "../components/ui";
 import { duration } from "../lib/format";
-import { agents, api, events, projects, subscriptions, theme, unread } from "../stores";
+import { agents, api, auth, events, projects, subscriptions, theme, unread } from "../stores";
 
 const PROJECT_ITEMS = [
   { path: "board", label: "Board" },
@@ -160,6 +160,11 @@ export function Layout(props: RouteSectionProps) {
             <button class="small ghost" onClick={() => theme.cycle()} title="Theme: system, light, dark">
               theme: {theme.pref()}
             </button>
+            <Show when={!isMock}>
+              <button class="small ghost" onClick={() => auth.clear()} title={auth.remembered() ? "Forget the token on this device and in this tab" : "Forget the token in this tab"}>
+                sign out
+              </button>
+            </Show>
           </div>
         </div>
       </nav>

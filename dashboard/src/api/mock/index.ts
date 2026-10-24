@@ -10,7 +10,8 @@
 
 import type { Api } from "../client";
 import { ApiError, type Page } from "../http";
-import { createWsEventStream, type EventSocket, type EventStream } from "../sockets";
+import { createWsEventStream, type EventStream, type RawSocket, type SocketEvent } from "../sockets";
+import { mockSocket } from "./ws";
 import { splitFrontMatter } from "../../lib/markdown";
 import type {
   Agent,
@@ -207,15 +208,26 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
   };
 
   /** A fake WebSocket to `/api/events`: the backlog after `?since=`, then live frames. */
-  class MockEventSocket implements EventSocket {
-    private handlers: Record<string, ((ev: { data: unknown }) => void)[]> = {};
+  class MockEventSocket implements RawSocket {
+    private handlers: Record<string, ((ev: SocketEvent) => void)[]> = {};
     private off: (() => void) | null = null;
-    private closed = false;
-    constructor(url: string) {
+    readyState = 0;
+    binaryType: BinaryType = "blob";
+    readonly protocol: string;
+    /** `protocol` is what the "daemon" echoes (./ws); null refuses the upgrade. */
+    constructor(url: string, protocol: string | null = "") {
+      this.protocol = protocol ?? "";
       const since = Number(new URL(url, "http://mock").searchParams.get("since") ?? 0);
       queueMicrotask(() => {
-        if (this.closed) return;
-        this.fire("open", { data: undefined });
+        if (this.readyState !== 0) return;
+        if (protocol === null) {
+          this.readyState = 3;
+          this.fire("error", {});
+          this.fire("close", { code: 1006 });
+          return;
+        }
+        this.readyState = 1;
+        this.fire("open", {});
         let last = since;
         for (const e of w.events.filter((x) => x.seq > since)) {
           this.fire("message", { data: JSON.stringify(e) });
@@ -231,16 +243,20 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
         this.off = () => hub.delete(fn);
       });
     }
-    addEventListener(type: string, fn: (ev: { data: unknown }) => void) {
+    addEventListener(type: string, fn: (ev: SocketEvent) => void) {
       (this.handlers[type] ??= []).push(fn);
     }
-    close() {
-      if (this.closed) return;
-      this.closed = true;
-      this.off?.();
-      this.fire("close", { data: undefined });
+    removeEventListener(type: string, fn: (ev: SocketEvent) => void) {
+      this.handlers[type] = (this.handlers[type] ?? []).filter((f) => f !== fn);
     }
-    private fire(type: string, ev: { data: unknown }) {
+    send() {}
+    close() {
+      if (this.readyState === 3) return;
+      this.readyState = 3;
+      this.off?.();
+      this.fire("close", { code: 1000 });
+    }
+    private fire(type: string, ev: SocketEvent) {
       for (const fn of this.handlers[type] ?? []) fn(ev);
     }
   }
@@ -704,8 +720,8 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
       endLogin(s, "done");
     }, latency > 0 ? 1200 : 0);
   };
-  const fakeLoginPty = (s: LoginSession | undefined) => {
-    if (!s || s.done) return new FakePty({ refuse: true });
+  const fakeLoginPty = (s: LoginSession | undefined, protocol: string | null) => {
+    if (!s || s.done) return new FakePty({ refuse: true, protocol });
     const k = s.kind;
     const banner = [`\x1b[2m$ ${LOGIN_CMD[k]}\x1b[0m  \x1b[2m(mock login terminal)\x1b[0m`];
     if (k === "codex") banner.push("", "Welcome to Codex [v0.141.0]", "", "Follow these steps to sign in with ChatGPT using device code authorization:", "", `1. Open this link in your browser and sign in to your account`, `   \x1b[94m${LOGIN_URL.codex}\x1b[0m`, "", `2. Enter this one-time code \x1b[90m(expires in 15 minutes)\x1b[0m`, `   \x1b[94m${DEVICE_CODE.codex}\x1b[0m`, "");
@@ -713,6 +729,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     if (k === "claude") banner.push("", "Browser didn't open? Use the url below to sign in:", "", LOGIN_URL.claude, "", "Paste code here if prompted >");
     if (k === "pi") banner.push("", "pi (mock). Type /login to sign in to a provider.");
     return new FakePty({
+      protocol,
       prompt: k === "pi" ? "> " : "",
       banner,
       onLine: (line) => {
@@ -1074,7 +1091,8 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
         const a = w.agents.find((x) => x.id === id || `${x.project}/${x.name}` === id || x.name === id);
         const name = a?.name ?? id;
         let n = 0;
-        return new FakePty({
+        return mockSocket(`/api/agents/${encodeURIComponent(id)}/pty`, (protocol) => new FakePty({
+          protocol,
           // The daemon answers 409 not_running before the upgrade.
           refuse: !a || !LIVE.includes(a.status),
           banner: [
@@ -1089,7 +1107,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
             return `\x1b[36m●\x1b[0m ${TOOLS[n % TOOLS.length]}(${FILES[n % FILES.length]}) \x1b[2m⎿ ok\x1b[0m`;
           },
           onLine: (line) => (line ? [`\x1b[33m(mock)\x1b[0m turn received: ${line}`, `\x1b[2mThinking… done.\x1b[0m`] : []),
-        });
+        }));
       },
     },
 
@@ -1735,7 +1753,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           audit("login.input", s.id, undefined, { length: code.length });
           finishLogin(s);
         }),
-      loginPty: (id) => fakeLoginPty(logins.get(id)),
+      loginPty: (id) => mockSocket(`/api/subscriptions/login/${encodeURIComponent(id)}/pty`, (protocol) => fakeLoginPty(logins.get(id), protocol)),
     },
 
     usage: {
@@ -1861,14 +1879,16 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           return { session_id, target: t.name, kind: req.shell ? "shell" : "exec" };
         }),
       sessionPty: (id, session) => {
-        if (execSessions.get(session) !== id) return new FakePty({ refuse: true });
+        const path = `/api/targets/${encodeURIComponent(id)}/sessions/${encodeURIComponent(session)}/ws`;
+        if (execSessions.get(session) !== id) return mockSocket(path, () => new FakePty({ refuse: true }));
         const t = w.targets.find((x) => x.id === id || x.name === id);
         const user = t?.kind === "ssh" ? (t.address?.split("@")[0] ?? "build") : "wil";
-        return new FakePty({
+        return mockSocket(path, (protocol) => new FakePty({
+          protocol,
           banner: [`\x1b[2m(mock) shell on target ${id} via ${t?.host ?? t?.address ?? "?"}\x1b[0m`],
           prompt: `\x1b[32m${user}@${id}\x1b[0m:~$ `,
           onLine: (line) => (line.trim() === "uname -a" ? [`Linux ${id} 6.12.0 #1 SMP x86_64 GNU/Linux`] : line.trim() ? [`${line.split(" ")[0]}: (mock) ran`] : []),
-        });
+        }));
       },
       closeSession: (id, session) =>
         reply(() => {
@@ -1903,9 +1923,9 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     events: {
       stream: (o = {}): EventStream => {
         ensureActivity();
-        return createWsEventStream((since) => `mock:///api/events${since === undefined ? "" : `?since=${since}`}`, {
+        return createWsEventStream((since) => `/api/events${since === undefined ? "" : `?since=${since}`}`, {
           since: o.since,
-          makeSocket: (url) => new MockEventSocket(url),
+          makeSocket: (path) => mockSocket(path, (protocol, h) => new MockEventSocket(h.url, protocol)),
         });
       },
       history: (q = {}) =>

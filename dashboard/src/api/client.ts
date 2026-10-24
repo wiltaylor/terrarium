@@ -7,9 +7,10 @@
 // expose the cursor for "load more". Methods that return `T[]` follow every
 // cursor with `collectAll`.
 
-import { AuthError, seg, type Page, type Query, type Transport } from "./http";
+import { ApiError, AuthError, seg, type Page, type Query, type Transport } from "./http";
 import { collectAll, type PageQuery } from "../lib/paging";
 import { createWsEventStream, type EventStream, type PtySocket } from "./sockets";
+import { onArtifactOrigin } from "../lib/artifact-origin";
 import type {
   Agent,
   AgentDef,
@@ -304,7 +305,17 @@ export function parseLatest(data: unknown): number | null {
   return null;
 }
 
-export function createHttpApi(t: Transport, makeSocket: (url: string) => WebSocket = (u) => new WebSocket(u)): Api {
+export interface HttpApiOptions {
+  /**
+   * The artifact origin, for example `https://artifacts.example.com`
+   * (`VITE_ARTIFACT_ORIGIN`). A signed URL that the daemon answers as a path
+   * is put on this origin, so that previews never load from the dashboard
+   * origin (docs/security-review.md F5).
+   */
+  artifactOrigin?: string;
+}
+
+export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
   const get = <T>(path: string, query?: Query) => t.request<T>("GET", path, { query });
   const post = <T>(path: string, body?: unknown) => t.request<T>("POST", path, { body });
   const patch = <T>(path: string, body: unknown) => t.request<T>("PATCH", path, { body });
@@ -313,7 +324,7 @@ export function createHttpApi(t: Transport, makeSocket: (url: string) => WebSock
   const page = <T>(path: string, query?: Query) => t.page<T>(path, query);
   const all = <T>(path: string, query: Query = {}) => collectAll<T>((cursor) => t.page<T>(path, { ...query, cursor, limit: 1000 }));
   const socket = (path: string): PtySocket => {
-    const ws = makeSocket(t.wsUrl(path));
+    const ws = t.openSocket(t.wsUrl(path));
     ws.binaryType = "arraybuffer";
     return ws;
   };
@@ -415,9 +426,14 @@ export function createHttpApi(t: Transport, makeSocket: (url: string) => WebSock
       get: (id) => get(`/api/artifacts/${seg(id)}`),
       remove: (id) => del(`/api/artifacts/${seg(id)}`),
       link: (id, kind, ref) => post(`/api/artifacts/${seg(id)}/links`, { kind, ref }),
-      url: (id, ttl) => post(`/api/artifacts/${seg(id)}/url`, ttl ? { ttl } : undefined),
+      url: async (id, ttl) => {
+        const signed = await post<ArtifactUrl>(`/api/artifacts/${seg(id)}/url`, ttl ? { ttl } : undefined);
+        return { ...signed, url: onArtifactOrigin(signed.url, opts.artifactOrigin) };
+      },
       text: async (url) => {
-        const res = await fetch(url);
+        // The artifact origin is another origin. No cookie, no referrer.
+        const res = await fetch(url, { mode: "cors", credentials: "omit", referrerPolicy: "no-referrer" });
+        if (!res.ok) throw new ApiError(res.status, `the artifact origin answered ${res.status}`);
         return res.text();
       },
     },
@@ -488,8 +504,8 @@ export function createHttpApi(t: Transport, makeSocket: (url: string) => WebSock
     },
 
     events: {
-      stream: (opts = {}) =>
-        createWsEventStream((since) => t.wsUrl("/api/events", { since }), { makeSocket, since: opts.since }),
+      stream: (o = {}) =>
+        createWsEventStream((since) => t.wsUrl("/api/events", { since }), { makeSocket: (u) => t.openSocket(u), since: o.since }),
       history: (q = {}) => page("/api/events", { ...q }),
       latest: async () => {
         try {

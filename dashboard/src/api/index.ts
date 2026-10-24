@@ -1,11 +1,18 @@
 // Pick the API implementation. VITE_MOCK=1 serves fake data in the browser.
 
 import type { AuthStore } from "../stores/auth";
+import { parseOrigin } from "../lib/artifact-origin";
 import { createHttpApi, type Api } from "./client";
 import { createHttpTransport } from "./http";
 import { createMockApi } from "./mock";
 
 export const isMock: boolean = import.meta.env.VITE_MOCK === "1";
+
+/** The artifact origin the build knows (`VITE_ARTIFACT_ORIGIN`). The CSP allows it too. */
+export const artifactOrigin: string | undefined = parseOrigin(import.meta.env.VITE_ARTIFACT_ORIGIN);
+
+/** Dev only: let a socket retry with `?token=` when the daemon refuses the subprotocol. */
+export const allowQueryToken: boolean = import.meta.env.VITE_ALLOW_QUERY_TOKEN === "1";
 
 export function createApi(auth: AuthStore): Api {
   if (isMock) return createMockApi();
@@ -14,7 +21,9 @@ export function createApi(auth: AuthStore): Api {
       baseUrl: import.meta.env.VITE_API_BASE ?? "",
       getToken: auth.token,
       onUnauthorized: auth.requireToken,
+      allowQueryToken,
     }),
+    { artifactOrigin },
   );
 }
 

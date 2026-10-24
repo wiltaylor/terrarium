@@ -1,9 +1,11 @@
 // Renders wiki HTML from lib/markdown, routes internal links through the
-// router, and mounts artifact embeds into their placeholders.
+// router, and mounts artifact embeds into their placeholders. The HTML goes
+// through DOMPurify (lib/sanitize) on its way into the DOM.
 
 import { useNavigate } from "@solidjs/router";
 import { createEffect, onCleanup } from "solid-js";
 import { render } from "solid-js/web";
+import { setSafeHtml } from "../lib/sanitize";
 import { ArtifactViewer, type ArtifactLike } from "./ArtifactViewer";
 
 export function Markdown(props: { html: string; artifacts?: Record<string, ArtifactLike> }) {
@@ -12,7 +14,7 @@ export function Markdown(props: { html: string; artifacts?: Record<string, Artif
   let disposers: (() => void)[] = [];
 
   createEffect(() => {
-    el.innerHTML = props.html;
+    setSafeHtml(el, props.html);
     disposers.forEach((d) => d());
     disposers = [];
     el.querySelectorAll<HTMLElement>(".artifact-embed").forEach((slot) => {

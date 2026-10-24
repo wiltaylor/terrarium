@@ -37,7 +37,7 @@ describe("mail threads", () => {
 describe("wiki tree", () => {
   it("nests by path with index first", () => {
     const tree = buildTree(world.pages.filter((p) => p.project === "terrarium"));
-    expect(tree.map((n) => n.path)).toEqual(["index", "designs", "reports"]);
+    expect(tree.map((n) => n.path)).toEqual(["index", "designs", "reports", "security"]);
     expect(tree[1]!.children[0]!.page?.title).toBe("Runner v2");
   });
 });

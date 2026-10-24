@@ -1,9 +1,12 @@
 // The mock must answer in the daemon's shapes (docs/api.md), so mock mode and
 // real mode never diverge.
 import { describe, expect, it } from "vitest";
-import { ApiError } from "../http";
+import { ApiError, createHttpTransport } from "../http";
 import { createMockApi } from ".";
 import type { AgentEvent } from "../types";
+import { bearerProtocol, type AuthSocket, type MakeRawSocket, type PtySocket } from "../sockets";
+import { FakePty } from "./pty";
+import { acceptHandshake, MOCK_TOKEN, type HandshakeRules } from "./ws";
 
 const mock = () => createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 0 });
 const wait = (ms = 5) => new Promise((r) => setTimeout(r, ms));
@@ -517,3 +520,69 @@ describe("mock parity with docs/api.md", () => {
     await expect(api.targets.action("pg-test", "snapshot")).rejects.toMatchObject({ code: "invalid" });
   });
 });
+
+/** A "daemon" that answers upgrades with the rules of ./ws, for the real transport. */
+const daemon = (rules: HandshakeRules): MakeRawSocket => (url, protocols = []) => new FakePty({ protocol: acceptHandshake({ url, protocols }, rules) });
+/** A daemon from before F4: it reads `?token=` only and sends no subprotocol back, so a browser fails the handshake. */
+const oldDaemon: MakeRawSocket = (url, protocols = []) =>
+  new FakePty({ protocol: protocols.length ? null : acceptHandshake({ url, protocols }, { token: "T", queryToken: true }) });
+
+const outcome = (s: AuthSocket | PtySocket) =>
+  new Promise<string>((resolve) => {
+    s.addEventListener("open", () => resolve(`open:${(s as AuthSocket).protocol}`));
+    s.addEventListener("close", () => resolve("closed"));
+  });
+
+describe("WebSocket auth contract (docs/security-review.md F4)", () => {
+  const transport = (make: MakeRawSocket, token: string | null, allowQueryToken = false) =>
+    createHttpTransport({ getToken: () => token, location: { protocol: "http:", host: "d" }, makeSocket: make, allowQueryToken });
+
+  it("authenticates with bearer.<token>, and the daemon echoes it", async () => {
+    const t = transport(daemon({ token: "T", queryToken: false }), "T");
+    const s = t.openSocket(t.wsUrl("/api/events"));
+    expect(await outcome(s)).toBe(`open:${bearerProtocol("T")}`);
+    expect(s.url).not.toContain("token");
+    expect(s.mode).toBe("subprotocol");
+  });
+
+  it("is refused with a wrong token, and does not try ?token= by default", async () => {
+    const t = transport(daemon({ token: "T", queryToken: true }), "wrong");
+    const s = t.openSocket(t.wsUrl("/api/events"));
+    expect(await outcome(s)).toBe("closed");
+    expect(s.failure).toBe("refused");
+  });
+
+  it("falls back to ?token= against an old daemon only with VITE_ALLOW_QUERY_TOKEN", async () => {
+    const strict = transport(oldDaemon, "T");
+    expect(await outcome(strict.openSocket(strict.wsUrl("/api/events")))).toBe("closed");
+    const dev = transport(oldDaemon, "T", true);
+    const s = dev.openSocket(dev.wsUrl("/api/events"));
+    expect(await outcome(s)).toBe("open:");
+    expect(s.mode).toBe("query");
+  });
+
+  it("the daemon refuses ?token= when TERRARIUM_WS_QUERY_TOKEN=0", () => {
+    expect(acceptHandshake({ url: "ws://d/api/events?token=T", protocols: [] }, { token: "T", queryToken: false })).toBeNull();
+    expect(acceptHandshake({ url: "ws://d/api/events?token=T", protocols: [] }, { token: "T", queryToken: true })).toBe("");
+    expect(acceptHandshake({ url: "ws://d/api/events", protocols: ["bearer.T"] }, { token: "T", queryToken: false })).toBe("bearer.T");
+    expect(acceptHandshake({ url: "ws://d/api/events?token=T", protocols: ["bearer.X"] }, { token: "T", queryToken: true })).toBeNull();
+  });
+
+  it("the mock's agent PTY, login PTY, exec console, and events use the subprotocol", async () => {
+    const api = mock();
+    const live = (await api.agents.list()).find((a) => ["idle", "working"].includes(a.status))!;
+    const login = await api.subscriptions.startLogin({ kind: "claude" });
+    const exec = await api.targets.exec("pg-test", { shell: true, pty: { rows: 24, cols: 80 } });
+    const want = `open:${bearerProtocol(MOCK_TOKEN)}`;
+    expect(await outcome(api.agents.pty(live.id))).toBe(want);
+    expect(await outcome(api.subscriptions.loginPty(login.id))).toBe(want);
+    expect(await outcome(api.targets.sessionPty("pg-test", exec.session_id))).toBe(want);
+    const frames: AgentEvent[] = [];
+    const stream = api.events.stream({ since: api.world.seq - 1 });
+    stream.subscribe((e) => frames.push(e));
+    await wait();
+    expect(frames).toHaveLength(1);
+    stream.close();
+  });
+});
+

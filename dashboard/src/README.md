@@ -34,6 +34,15 @@ listens on `127.0.0.1:8090`, so use:
 TERRARIUM_DAEMON_URL=http://127.0.0.1:8090 npm run dev
 ```
 
+Build-time settings (Vite reads them from the environment or `.env`):
+
+| Variable | What it does |
+|---|---|
+| `VITE_MOCK=1` | Fake data in the browser, no daemon. Adds the `/dev/xss` page. |
+| `VITE_API_BASE` | The daemon origin, when it is not the page origin. Also goes into the CSP. |
+| `VITE_ARTIFACT_ORIGIN` | The artifact origin, for example `https://artifacts.example.com:8081`. Signed `/a/...` paths go on this origin, and the CSP allows it in `frame-src`, `img-src`, and `connect-src`. |
+| `VITE_ALLOW_QUERY_TOKEN=1` | Dev only. A refused socket retries with `?token=`. |
+
 Other scripts:
 
 | Script | What it does |
@@ -44,12 +53,49 @@ Other scripts:
 
 ## Authentication
 
-The client sends `Authorization: Bearer <token>` on each request. It reads the
-token from `localStorage` key `terrarium.token`. When the daemon answers 401,
-the app shows a token screen. The token is `TERRARIUM_TOKEN` from `.env`.
+The client sends `Authorization: Bearer <token>` on each request. When the
+daemon answers 401, the app shows a token screen. The token is
+`TERRARIUM_TOKEN` from `.env`.
 
-Browsers cannot set headers on a WebSocket. Sockets send the token as the
-`?token=` query parameter.
+Where the token is kept (`stores/auth.ts`):
+
+- The primary copy is in memory.
+- A copy goes to `sessionStorage` key `terrarium.token`. A reload in the same
+  tab keeps the token. A new tab asks again.
+- **Remember on this device** on the token screen also puts the token in
+  `localStorage` key `terrarium.token.remembered`. The screen shows a warning:
+  the token stays after the tab closes, and any script on the page can read it.
+- A token that an older build left in `localStorage` key `terrarium.token`
+  moves to this tab's `sessionStorage` on the first load. It is not
+  remembered until the operator ticks the box.
+- **sign out** in the sidebar footer removes every copy.
+
+This only shortens how long the token lives in the browser. Script on the
+dashboard origin can still read memory and both storages. The real fix is an
+`HttpOnly`, `Secure`, `SameSite=Strict` session cookie that script cannot
+read. That needs the daemon (see "Daemon follow-ups" below).
+
+### WebSocket authentication
+
+A browser cannot set an `Authorization` header on a WebSocket. Every socket
+(agent PTY, login PTY, target exec console, events) opens through
+`AuthSocket` in `api/sockets.ts`:
+
+- The URL carries no token.
+- The client offers the subprotocol `bearer.<token>`
+  (`new WebSocket(url, ["bearer." + token])`), so the token travels in the
+  `Sec-WebSocket-Protocol` header.
+- The daemon echoes the same subprotocol. `AuthSocket` checks the echo on
+  `open` and closes the socket if it does not match.
+- Dev only: when `VITE_ALLOW_QUERY_TOKEN=1` and the handshake is refused
+  (closed with 1006 before `open`), the socket tries once more with
+  `?token=`. This is for a daemon from before this change. It is off by
+  default. The daemon can refuse the query form with
+  `TERRARIUM_WS_QUERY_TOKEN=0`.
+
+The mock speaks the same contract (`api/mock/ws.ts`): its sockets go through
+`AuthSocket`, and the mock "daemon" refuses `?token=`.
+`api/mock/parity.test.ts` checks the contract against the real transport.
 
 ## Layout
 
@@ -59,13 +105,14 @@ src/
     types.ts      domain types (PLAN §5)
     http.ts       fetch transport: token, JSON, errors (ApiError, AuthError)
     client.ts     the Api interface and the HTTP implementation (PLAN §17)
-    sockets.ts    PTY and events protocols, reconnecting event stream
+    sockets.ts    PTY and events protocols, reconnecting event stream, AuthSocket
     mock/         in-memory Api, seed data, fake PTY
     index.ts      picks mock or HTTP from VITE_MOCK
   stores/         all app-wide state (auth, projects, agents, events, board, ...)
-  components/     shared UI: Terminal, UsageTile, StatusBadge, ArtifactViewer, ...
+  components/     shared UI: Terminal, UsageTile, StatusBadge, ArtifactViewer, SafeHtml, ...
   features/       one folder per view
-  lib/            pure helpers: format, markdown and wikilinks, force layout
+  lib/            pure helpers: format, markdown and wikilinks, sanitize (DOMPurify),
+                  artifact origin, force layout
   styles/         global.css with the theme variables
   app/            router, layout, token screen
 ```
@@ -195,6 +242,7 @@ A `status` event carries `data.status`. A `card` event carries `data.card_id`.
 | `/hosts` | Host agents: status, capabilities, add with a one-time token, revoke | `GET`, `POST /api/hosts`, `DELETE /api/hosts/{name}` (new API, not in docs/api.md yet) |
 | `/events` | Event log with history | `GET /api/events?since=&kind=&project=&agent=`, events socket |
 | `/audit` | Audit log | `GET /api/audit?actor=&action=&project=` |
+| `/dev/xss` | Mock only: the hostile payloads of `lib/xss-payloads.ts`, rendered | none |
 
 Artifact upload sends a multipart form: `file`, `name`, `kind`, and
 `attach_kind` with `attach_ref`. A folder goes up as one `bundle`: the
@@ -205,12 +253,107 @@ new or mock-only. A daemon without them answers "Not available yet".
 
 ## Security notes
 
-- Wiki pages come from agents. `lib/markdown.ts` escapes raw HTML and allows
-  only safe URL schemes. Tests cover this.
+See `docs/security-review.md` F3, F4, and F5.
+
+### Untrusted HTML (F3)
+
+- Wiki pages, version notes, and markdown artifacts come from agents.
+  `lib/markdown.ts` escapes raw HTML and allows only safe URL schemes. Tests
+  cover this.
+- DOMPurify (`lib/sanitize.ts`, pinned in `package.json`) runs after the
+  renderer, at the sink. `setSafeHtml` is the only way HTML reaches the DOM:
+  the `Markdown` and `SafeHtml` components call it. It appends a
+  `DocumentFragment`, so the browser does not parse the markup a second time.
+- ESLint forbids `innerHTML`, `outerHTML`, `insertAdjacentHTML`,
+  `createContextualFragment`, `document.write`, and `eval` outside tests.
+- The DOMPurify config allows only the tags and attributes that the renderer
+  emits. It forbids SVG, MathML, `style`, and every event handler. Links may
+  be `http:`, `https:`, `mailto:`, or relative; the check reads the URL after
+  it drops whitespace and control characters. An `<img>` may also take a
+  base64 PNG, JPEG, or GIF `data:` URL. An external link gets
+  `target="_blank" rel="noopener noreferrer"`; other links lose `target`.
+  Class names must be ones the renderer makes.
+- Memory bodies, card bodies and comments, and mail bodies render as text
+  nodes. The browser does not parse them as HTML.
+- `lib/xss-payloads.ts` lists hostile payloads. `lib/sanitize.test.ts`
+  checks that each one comes out inert from the renderer plus DOMPurify, and
+  from DOMPurify alone. In mock mode, `/dev/xss` and the wiki page
+  `security/xss-payloads` show them, and a memory, a card comment, and a mail
+  carry one, so you can look at them.
+
+### Artifacts (F5)
+
+- The viewer gets a signed URL from `POST /api/artifacts/{id}/url`. When the
+  daemon answers a path (`/a/...`), the client puts it on
+  `VITE_ARTIFACT_ORIGIN`. Previews then load from the artifact origin.
+- When the URL is on the dashboard origin, the viewer shows the badge
+  "artifacts share the dashboard origin — set TERRARIUM_ARTIFACT_LISTEN".
+  When the URL is on an origin that the build's CSP does not allow, the
+  viewer says which `VITE_ARTIFACT_ORIGIN` to build with.
+- HTML artifacts, bundles, and PDFs render in `<iframe sandbox="allow-scripts">`
+  without `allow-same-origin`. There is no `<object>`; the CSP has
+  `object-src 'none'`. Some browsers do not draw a PDF in a sandboxed frame,
+  so the viewer also links to it.
+- Text and markdown previews `fetch` the signed URL with no credentials and
+  no referrer. On a separate origin this needs CORS on the artifact routes.
+- In mock mode, artifact URLs are `data:` URLs. A `data:` frame inherits the
+  dashboard CSP, so scripts in the mock HTML artifact do not run.
+
+### Content-Security-Policy
+
+`index.html` has a `<meta http-equiv="Content-Security-Policy">`. The
+`terrarium-csp` plugin in `vite.config.ts` fills it in at build time. Without
+`VITE_ARTIFACT_ORIGIN` the policy is:
+
+```
+default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline';
+img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-src 'self';
+worker-src 'none'; manifest-src 'self'; media-src 'none'; object-src 'none';
+base-uri 'none'; form-action 'none'
+```
+
+With `VITE_ARTIFACT_ORIGIN`, the artifact origin goes into `img-src` and
+`connect-src`, and it replaces `'self'` in `frame-src`. `VITE_MOCK=1` adds
+`data:` to `frame-src`. `'self'` in `connect-src` also covers `ws:` and
+`wss:` to the page's own host and port.
+
+- No inline script and no `eval`.
+- `style-src` keeps `'unsafe-inline'`: Solid templates carry static `style`
+  attributes, and xterm.js adds a `<style>` element. The sanitizer drops all
+  `style` attributes from untrusted HTML.
+- A `<meta>` policy cannot set `frame-ancestors` or a report URL, and it
+  does not cover the response that carries it. The daemon should send the
+  same policy as a header.
+- `<meta name="referrer" content="no-referrer">` keeps signed URLs out of
+  `Referer` headers.
+
+### Other notes
+
 - The API-key form posts the key once (`POST .../api-key`) and clears the
   field. No endpoint returns a key. A login code goes to `.../input` and the
   daemon types it into the PTY; the page never shows it again.
 - A host token shows once, in the add-host dialog only. Closing the dialog
   drops it.
-- HTML artifacts and bundles render in `<iframe sandbox="allow-scripts">`
-  without `allow-same-origin`. In real mode they load from the artifact origin.
+
+### Daemon follow-ups
+
+These need changes in `terrariumd`. The dashboard cannot do them alone.
+
+1. **Cookie sessions.** Exchange the bearer token once for an `HttpOnly`,
+   `Secure`, `SameSite=Strict` session cookie, and accept the cookie on the API
+   and on WebSocket upgrades (check `Origin` on upgrades). Then the dashboard
+   keeps no token that script can read. This is the real fix for token theft
+   after an XSS bug.
+2. **CSP as a header.** Serve the dashboard's `index.html` with the policy
+   above as a `Content-Security-Policy` header, plus `frame-ancestors 'none'`.
+   The daemon knows the artifact origin at run time, so the header can name
+   it; the `<meta>` tag can only name what the build knew.
+3. **Absolute signed URLs.** Have `POST /api/artifacts/{id}/url` answer a URL
+   on the artifact origin (a `TERRARIUM_ARTIFACT_PUBLIC_URL` setting), and
+   stop serving `/a/...` on the dashboard port. Then `VITE_ARTIFACT_ORIGIN` is
+   needed only for the CSP.
+4. **CORS on the artifact routes.** `Access-Control-Allow-Origin: *` on
+   `/a/...` (no credentials) lets the viewer `fetch` text and markdown
+   artifacts from the artifact origin.
+5. **Refuse `?token=`.** Once every client uses the subprotocol, make
+   `TERRARIUM_WS_QUERY_TOKEN=0` the default.

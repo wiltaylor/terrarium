@@ -59,10 +59,31 @@ describe("createHttpTransport", () => {
     await expect(t.request("DELETE", "/api/cards/TER-1")).resolves.toBeUndefined();
   });
 
-  it("builds ws URLs with the token as a query parameter", () => {
+  it("builds ws URLs without the token", () => {
     const t = createHttpTransport({ getToken: () => "tok", location: { protocol: "https:", host: "terra.local:8443" } });
-    expect(t.wsUrl("/api/agents/A1/pty")).toBe("wss://terra.local:8443/api/agents/A1/pty?token=tok");
+    expect(t.wsUrl("/api/agents/A1/pty")).toBe("wss://terra.local:8443/api/agents/A1/pty");
+    expect(t.wsUrl("/api/events", { since: 3 })).toBe("wss://terra.local:8443/api/events?since=3");
     const t2 = createHttpTransport({ baseUrl: "http://localhost:8080/", getToken: () => null });
     expect(t2.wsUrl("/api/events")).toBe("ws://localhost:8080/api/events");
+  });
+
+  it("opens sockets with the bearer subprotocol and the current token", () => {
+    const made: { url: string; protocols?: string[] }[] = [];
+    let token = "one";
+    const t = createHttpTransport({
+      getToken: () => token,
+      location: { protocol: "http:", host: "d" },
+      makeSocket: (url, protocols) => {
+        made.push({ url, protocols });
+        return { readyState: 0, protocol: "", binaryType: "blob", send() {}, close() {}, addEventListener() {}, removeEventListener() {} };
+      },
+    });
+    t.openSocket(t.wsUrl("/api/events"));
+    token = "two";
+    t.openSocket(t.wsUrl("/api/events"));
+    expect(made).toEqual([
+      { url: "ws://d/api/events", protocols: ["bearer.one"] },
+      { url: "ws://d/api/events", protocols: ["bearer.two"] },
+    ]);
   });
 });

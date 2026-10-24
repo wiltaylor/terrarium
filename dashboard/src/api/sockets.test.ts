@@ -1,5 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { backoffDelay, createWsEventStream, type ConnectionState, type EventSocket } from "./sockets";
+import {
+  AuthSocket,
+  backoffDelay,
+  bearerProtocol,
+  createWsEventStream,
+  isSubprotocolSafe,
+  withQueryToken,
+  type AuthSocketOptions,
+  type ConnectionState,
+  type EventSocket,
+  type RawSocket,
+  type SocketEvent,
+} from "./sockets";
 import type { AgentEvent } from "./types";
 
 /** A socket the test drives by hand. */
@@ -118,5 +130,159 @@ describe("createWsEventStream", () => {
     h.sockets[1]!.fire("message", "not json");
     h.sockets[1]!.fire("message", new ArrayBuffer(1));
     expect(h.seen).toEqual([]);
+  });
+});
+
+/** A raw WebSocket the AuthSocket tests drive by hand. */
+class FakeRaw implements RawSocket {
+  readyState = 0;
+  protocol = "";
+  binaryType: BinaryType = "blob";
+  closed = false;
+  sent: string[] = [];
+  private h: Record<string, ((ev: SocketEvent) => void)[]> = {};
+  constructor(
+    readonly url: string,
+    readonly protocols?: string[],
+  ) {}
+  addEventListener(type: string, fn: (ev: SocketEvent) => void) {
+    (this.h[type] ??= []).push(fn);
+  }
+  removeEventListener(type: string, fn: (ev: SocketEvent) => void) {
+    this.h[type] = (this.h[type] ?? []).filter((f) => f !== fn);
+  }
+  send(d: string) {
+    this.sent.push(d);
+  }
+  close() {
+    this.closed = true;
+  }
+  fire(type: string, ev: SocketEvent = {}) {
+    for (const fn of this.h[type] ?? []) fn(ev);
+  }
+  /** The server accepts and echoes `protocol`. */
+  accept(protocol = this.protocols?.[0] ?? "") {
+    this.protocol = protocol;
+    this.readyState = 1;
+    this.fire("open");
+  }
+  /** The upgrade fails before the handshake, as a browser reports it. */
+  refuse(code = 1006) {
+    this.readyState = 3;
+    this.fire("error");
+    this.fire("close", { code });
+  }
+}
+
+function authHarness(opts: Partial<AuthSocketOptions> = {}, url = "wss://d/api/agents/A1/pty") {
+  const raws: FakeRaw[] = [];
+  const seen: string[] = [];
+  const fallbacks: string[] = [];
+  const s = new AuthSocket(url, {
+    token: "abc123",
+    make: (u, p) => {
+      const r = new FakeRaw(u, p);
+      raws.push(r);
+      return r;
+    },
+    onQueryFallback: (u) => fallbacks.push(u),
+    ...opts,
+  });
+  for (const t of ["open", "message", "error", "close"]) s.addEventListener(t, (ev) => seen.push(t === "close" ? `close:${ev.code}` : t));
+  return { s, raws, seen, fallbacks };
+}
+
+describe("AuthSocket", () => {
+  it("offers bearer.<token> as the subprotocol, with no token in the URL", () => {
+    const h = authHarness();
+    expect(h.raws).toHaveLength(1);
+    expect(h.raws[0]!.url).toBe("wss://d/api/agents/A1/pty");
+    expect(h.raws[0]!.protocols).toEqual([bearerProtocol("abc123")]);
+    h.s.binaryType = "arraybuffer";
+    expect(h.raws[0]!.binaryType).toBe("arraybuffer");
+    h.raws[0]!.accept();
+    expect(h.s.readyState).toBe(1);
+    expect(h.s.mode).toBe("subprotocol");
+    h.raws[0]!.fire("message", { data: "x" });
+    h.s.send("hi");
+    expect(h.raws[0]!.sent).toEqual(["hi"]);
+    expect(h.seen).toEqual(["open", "message"]);
+  });
+
+  it("fails when the server does not echo the subprotocol", () => {
+    const h = authHarness();
+    h.raws[0]!.accept("");
+    expect(h.s.failure).toBe("protocol_not_echoed");
+    expect(h.raws[0]!.closed).toBe(true);
+    expect(h.seen).toEqual(["error", "close:1006"]);
+    expect(h.s.readyState).toBe(3);
+  });
+
+  it("does not fall back to ?token= by default", () => {
+    const h = authHarness();
+    h.raws[0]!.refuse();
+    expect(h.raws).toHaveLength(1);
+    expect(h.s.failure).toBe("refused");
+    expect(h.seen).toEqual(["error", "close:1006"]);
+  });
+
+  it("falls back to ?token= once, on a refused handshake, when the dev flag is on", () => {
+    const h = authHarness({ allowQueryToken: true });
+    h.s.binaryType = "arraybuffer";
+    h.raws[0]!.refuse();
+    expect(h.seen).toEqual([]); // the first failure is not reported
+    expect(h.raws).toHaveLength(2);
+    expect(h.raws[1]!.url).toBe("wss://d/api/agents/A1/pty?token=abc123");
+    expect(h.raws[1]!.protocols).toBeUndefined();
+    expect(h.raws[1]!.binaryType).toBe("arraybuffer");
+    expect(h.fallbacks).toEqual(["wss://d/api/agents/A1/pty"]);
+    h.raws[1]!.accept("");
+    expect(h.s.mode).toBe("query");
+    expect(h.seen).toEqual(["open"]);
+  });
+
+  it("stops after the fallback fails too, and does not fall back on other close codes", () => {
+    const h = authHarness({ allowQueryToken: true });
+    h.raws[0]!.refuse();
+    h.raws[1]!.refuse();
+    expect(h.raws).toHaveLength(2);
+    expect(h.seen).toEqual(["error", "close:1006"]);
+    const policy = authHarness({ allowQueryToken: true });
+    policy.raws[0]!.refuse(1008);
+    expect(policy.raws).toHaveLength(1);
+    expect(policy.seen).toEqual(["error", "close:1008"]);
+  });
+
+  it("does not fall back after an open, or after the client closed it", () => {
+    const h = authHarness({ allowQueryToken: true });
+    h.raws[0]!.accept();
+    h.raws[0]!.fire("close", { code: 1006 });
+    expect(h.raws).toHaveLength(1);
+    expect(h.seen).toEqual(["open", "close:1006"]);
+    const c = authHarness({ allowQueryToken: true });
+    c.s.close();
+    c.raws[0]!.refuse();
+    expect(c.raws).toHaveLength(1);
+  });
+
+  it("refuses a token that cannot be a subprotocol, unless the dev flag is on", async () => {
+    expect(isSubprotocolSafe("a b")).toBe(false);
+    expect(isSubprotocolSafe("deadbeef")).toBe(true);
+    const h = authHarness({ token: "has space" });
+    expect(h.raws).toHaveLength(0);
+    await Promise.resolve();
+    expect(h.s.failure).toBe("token_not_subprotocol");
+    expect(h.seen).toEqual(["error", "close:1006"]);
+    const q = authHarness({ token: "has space", allowQueryToken: true });
+    expect(q.raws[0]!.url).toBe("wss://d/api/agents/A1/pty?token=has+space");
+  });
+
+  it("offers no subprotocol without a token", () => {
+    const h = authHarness({ token: null });
+    expect(h.raws[0]!.protocols).toBeUndefined();
+  });
+
+  it("keeps other query parameters when it adds the token", () => {
+    expect(withQueryToken("ws://d/api/events?since=4", "t")).toBe("ws://d/api/events?since=4&token=t");
   });
 });

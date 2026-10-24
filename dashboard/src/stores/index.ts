@@ -19,7 +19,15 @@ const storage = (() => {
   }
 })();
 
-export const auth = createAuthStore(storage);
+const session = (() => {
+  try {
+    return typeof sessionStorage === "undefined" ? null : sessionStorage;
+  } catch {
+    return null;
+  }
+})();
+
+export const auth = createAuthStore({ session, local: storage });
 export const api = createApi(auth);
 export const events = createEventsStore(api);
 export const projects = createProjectsStore(api, storage);

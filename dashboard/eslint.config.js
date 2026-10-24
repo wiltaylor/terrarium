@@ -19,7 +19,22 @@ export default tseslint.config(
       "@typescript-eslint/no-unused-vars": ["error", { argsIgnorePattern: "^_", varsIgnorePattern: "^_", destructuredArrayIgnorePattern: "^_" }],
       // Solid assigns `let el!: T` through the `ref` prop, which this rule cannot see.
       "no-unassigned-vars": "off",
+      // Untrusted HTML goes into the DOM only through lib/sanitize (DOMPurify):
+      // the `Markdown` and `SafeHtml` components. See docs/security-review.md F3.
+      "no-restricted-syntax": [
+        "error",
+        { selector: "JSXAttribute[name.name=/^(innerHTML|outerHTML)$/]", message: "Use <SafeHtml> or <Markdown>: HTML must go through lib/sanitize." },
+        { selector: "AssignmentExpression > MemberExpression.left[property.name=/^(innerHTML|outerHTML|srcdoc)$/]", message: "Use setSafeHtml from lib/sanitize." },
+        { selector: "CallExpression[callee.property.name=/^(insertAdjacentHTML|createContextualFragment|setHTMLUnsafe)$/]", message: "Use setSafeHtml from lib/sanitize." },
+        { selector: "CallExpression[callee.object.name='document'][callee.property.name=/^(write|writeln)$/]", message: "No document.write." },
+        { selector: "CallExpression[callee.name=/^(eval|Function)$/], NewExpression[callee.name='Function']", message: "The CSP forbids eval." },
+      ],
     },
+  },
+  {
+    // Tests parse the sanitizer's output again to check it.
+    files: ["src/**/*.test.ts"],
+    rules: { "no-restricted-syntax": "off" },
   },
   {
     files: ["*.config.{js,ts}"],

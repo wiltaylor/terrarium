@@ -23,6 +23,8 @@ const EventsPage = lazy(() => import("../features/events/EventsPage"));
 const ProjectsPage = lazy(() => import("../features/projects/ProjectsPage"));
 const ProjectSettings = lazy(() => import("../features/projects/ProjectSettings"));
 const SpendPage = lazy(() => import("../features/spend/SpendPage"));
+// Mock only: the hostile payloads, to eyeball that the sanitizer keeps them inert.
+const XssPage = lazy(() => import("../features/devxss/XssPage"));
 
 function ProjectIndex() {
   const params = useParams();
@@ -60,6 +62,9 @@ export function App() {
         <Route path="/p/:project/wiki/*path" component={WikiPage} />
         <Route path="/p/:project/artifacts/:id?" component={ArtifactsPage} />
         <Route path="/p/:project/versions/:id?" component={VersionsPage} />
+        <Show when={isMock}>
+          <Route path="/dev/xss" component={XssPage} />
+        </Show>
         <Route path="*" component={NotFound} />
       </Router>
     </Show>

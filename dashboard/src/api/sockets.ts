@@ -8,6 +8,12 @@
 //
 // Events protocol (`/api/events`, `/api/agents/{id}/events`):
 //   server -> client: one JSON `AgentEvent` per text frame.
+//
+// Authentication (docs/security-review.md F4): a browser cannot set an
+// `Authorization` header on a WebSocket. The client offers the token as the
+// subprotocol `bearer.<token>` (`Sec-WebSocket-Protocol`), and the daemon
+// echoes it back. The URL carries no token. `AuthSocket` does this for every
+// socket: agent PTY, login PTY, target exec console, and events.
 
 import type { AgentEvent } from "./types";
 
@@ -183,4 +189,202 @@ export function createWsEventStream(url: (since: number | undefined) => string, 
       setState("closed");
     },
   };
+}
+
+// ----- authentication -----
+
+export const BEARER_PREFIX = "bearer.";
+export const bearerProtocol = (token: string): string => `${BEARER_PREFIX}${token}`;
+
+/** A subprotocol must be an RFC 7230 token, or `new WebSocket` throws. */
+const SUBPROTOCOL = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+export const isSubprotocolSafe = (token: string): boolean => SUBPROTOCOL.test(bearerProtocol(token));
+
+/** What `AuthSocket` needs from a `WebSocket`. A real one fits; the mock implements it. */
+export interface RawSocket {
+  readonly readyState: number;
+  readonly protocol: string;
+  binaryType: BinaryType;
+  send(data: string): void;
+  close(code?: number, reason?: string): void;
+  addEventListener(type: string, fn: (ev: SocketEvent) => void): void;
+  removeEventListener(type: string, fn: (ev: SocketEvent) => void): void;
+}
+
+export interface SocketEvent {
+  data?: unknown;
+  /** On `close`: the close code. 1006 is an abnormal close, for example a refused handshake. */
+  code?: number;
+}
+
+export type MakeRawSocket = (url: string, protocols?: string[]) => RawSocket;
+
+export const browserSocket: MakeRawSocket = (url, protocols) => new WebSocket(url, protocols) as unknown as RawSocket;
+
+export interface AuthSocketOptions {
+  token: string | null;
+  make?: MakeRawSocket;
+  /**
+   * Dev only (`VITE_ALLOW_QUERY_TOKEN=1`). When the subprotocol handshake is
+   * refused (closed with 1006 before open), try once more with `?token=`.
+   * Off by default: the token must not reach URLs and access logs.
+   */
+  allowQueryToken?: boolean;
+  /** Told when a socket falls back to `?token=`. */
+  onQueryFallback?: (url: string) => void;
+}
+
+/** Why an `AuthSocket` failed before it opened, for tests and logs. */
+export type AuthFailure = "refused" | "protocol_not_echoed" | "token_not_subprotocol" | null;
+
+const CONNECTING = 0;
+const CLOSED = 3;
+const ABNORMAL = 1006;
+
+/** Add `token=` to a ws URL. Only for the dev fallback. */
+export function withQueryToken(url: string, token: string): string {
+  const u = new URL(url);
+  u.searchParams.set("token", token);
+  return u.toString();
+}
+
+/**
+ * A WebSocket that authenticates with the `bearer.<token>` subprotocol and
+ * checks that the server echoed it. It fits `PtySocket` and `EventSocket`,
+ * so the terminal and the event stream use it unchanged.
+ */
+export class AuthSocket implements PtySocket, EventSocket {
+  /** How the open socket authenticated. */
+  mode: "subprotocol" | "query" | "none" = "none";
+  failure: AuthFailure = null;
+
+  private inner: RawSocket | null = null;
+  private listeners = new Map<string, Set<(ev: SocketEvent) => void>>();
+  private type: BinaryType = "blob";
+  private opened = false;
+  private closedByUser = false;
+  private pendingError: SocketEvent | null = null;
+  private triedQuery = false;
+  private readonly make: MakeRawSocket;
+
+  constructor(
+    readonly url: string,
+    private readonly opts: AuthSocketOptions,
+  ) {
+    this.make = opts.make ?? browserSocket;
+    const token = opts.token;
+    if (!token) {
+      this.attach(this.make(url), "none");
+    } else if (!isSubprotocolSafe(token)) {
+      if (opts.allowQueryToken) this.fallback();
+      else this.failSoon("token_not_subprotocol");
+    } else {
+      this.attach(this.make(url, [bearerProtocol(token)]), "subprotocol");
+    }
+  }
+
+  get readyState(): number {
+    if (this.failure && !this.inner) return CLOSED;
+    return this.inner?.readyState ?? CONNECTING;
+  }
+
+  get protocol(): string {
+    return this.inner?.protocol ?? "";
+  }
+
+  get binaryType(): BinaryType {
+    return this.type;
+  }
+
+  set binaryType(t: BinaryType) {
+    this.type = t;
+    if (this.inner) this.inner.binaryType = t;
+  }
+
+  send(data: string): void {
+    this.inner?.send(data);
+  }
+
+  close(): void {
+    this.closedByUser = true;
+    this.inner?.close();
+  }
+
+  addEventListener(type: "message", fn: (ev: { data: unknown }) => void): void;
+  addEventListener(type: string, fn: (ev: SocketEvent) => void): void;
+  addEventListener(type: string, fn: (ev: { data: unknown }) => void): void {
+    if (!this.listeners.has(type)) this.listeners.set(type, new Set());
+    // A message event always carries `data`; the other events do not read it.
+    this.listeners.get(type)!.add(fn as (ev: SocketEvent) => void);
+  }
+
+  removeEventListener(type: string, fn: (ev: SocketEvent) => void): void {
+    this.listeners.get(type)?.delete(fn);
+  }
+
+  private emit(type: string, ev: SocketEvent): void {
+    for (const fn of [...(this.listeners.get(type) ?? [])]) fn(ev);
+  }
+
+  private failSoon(why: Exclude<AuthFailure, null>): void {
+    this.failure = why;
+    queueMicrotask(() => {
+      this.emit("error", {});
+      this.emit("close", { code: ABNORMAL });
+    });
+  }
+
+  private fallback(): void {
+    const token = this.opts.token!;
+    this.triedQuery = true;
+    this.opts.onQueryFallback?.(this.url);
+    this.attach(this.make(withQueryToken(this.url, token)), "query");
+  }
+
+  private attach(ws: RawSocket, mode: "subprotocol" | "query" | "none"): void {
+    this.inner = ws;
+    ws.binaryType = this.type;
+    const live = () => this.inner === ws;
+    ws.addEventListener("open", (ev) => {
+      if (!live()) return;
+      if (mode === "subprotocol" && ws.protocol !== bearerProtocol(this.opts.token!)) {
+        // The server did not take the subprotocol. Browsers fail such a
+        // handshake on their own; this covers proxies and other clients.
+        this.failure = "protocol_not_echoed";
+        this.inner = null;
+        ws.close();
+        this.emit("error", {});
+        this.emit("close", { code: ABNORMAL });
+        return;
+      }
+      this.opened = true;
+      this.mode = mode;
+      this.emit("open", ev);
+    });
+    ws.addEventListener("message", (ev) => {
+      if (live()) this.emit("message", ev);
+    });
+    ws.addEventListener("error", (ev) => {
+      if (!live()) return;
+      // Hold an error before open: the close code decides between a retry with
+      // `?token=` and a failure.
+      if (!this.opened) this.pendingError = ev;
+      else this.emit("error", ev);
+    });
+    ws.addEventListener("close", (ev) => {
+      if (!live()) return;
+      if (!this.opened) {
+        const refused = ev.code === undefined || ev.code === ABNORMAL;
+        if (refused && mode === "subprotocol" && this.opts.allowQueryToken && !this.triedQuery && !this.closedByUser) {
+          this.pendingError = null;
+          this.fallback();
+          return;
+        }
+        this.failure ??= "refused";
+        if (this.pendingError) this.emit("error", this.pendingError);
+        this.pendingError = null;
+      }
+      this.emit("close", ev);
+    });
+  }
 }

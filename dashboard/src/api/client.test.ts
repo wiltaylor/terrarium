@@ -1,26 +1,34 @@
 import { describe, expect, it } from "vitest";
-import { createHttpApi } from "./client";
+import { createHttpApi, type HttpApiOptions } from "./client";
+import { AuthSocket } from "./sockets";
 import type { RequestOptions, Transport } from "./http";
 
-function recorder() {
+function recorder(opts: HttpApiOptions = {}, answer: unknown = undefined) {
   const calls: { method: string; path: string; opts?: RequestOptions }[] = [];
   const sockets: string[] = [];
+  const raw: { url: string; protocols?: string[] }[] = [];
   const t: Transport = {
     async request<T>(method: string, path: string, opts?: RequestOptions) {
       calls.push({ method, path, opts });
-      return undefined as T;
+      return answer as T;
     },
     async page<T>(path: string, query?: Record<string, unknown>) {
       calls.push({ method: "GET", path, opts: { query: query as RequestOptions["query"] } });
       return { items: [] as T[], next: null };
     },
     wsUrl: (path, query) => `ws://test${path}${query?.since !== undefined ? `?since=${query.since}` : ""}`,
+    openSocket: (url) => {
+      sockets.push(url);
+      return new AuthSocket(url, {
+        token: "tok",
+        make: (u, protocols) => {
+          raw.push({ url: u, protocols });
+          return { binaryType: "blob", readyState: 0, protocol: "", addEventListener() {}, removeEventListener() {}, send() {}, close() {} };
+        },
+      });
+    },
   };
-  const fakeSocket = (url: string) => {
-    sockets.push(url);
-    return { binaryType: "blob", readyState: 0, addEventListener() {}, removeEventListener() {}, send() {}, close() {} } as unknown as WebSocket;
-  };
-  return { api: createHttpApi(t, fakeSocket), calls, sockets };
+  return { api: createHttpApi(t, opts), calls, sockets, raw };
 }
 
 describe("createHttpApi", () => {
@@ -58,12 +66,31 @@ describe("createHttpApi", () => {
     expect(calls[7]!.opts?.body).toEqual({ comment: "tests fail" });
   });
 
-  it("opens PTY sockets on the right paths with arraybuffer frames", () => {
-    const { api, sockets } = recorder();
+  it("opens every socket with the bearer subprotocol, arraybuffer frames, and no token in the URL", () => {
+    const { api, sockets, raw } = recorder();
     const s = api.agents.pty("01JB");
     api.subscriptions.loginPty("LOGIN-9");
-    expect(sockets).toEqual(["ws://test/api/agents/01JB/pty", "ws://test/api/subscriptions/login/LOGIN-9/pty"]);
+    api.targets.sessionPty("box", "S1");
+    api.events.stream({ since: 5 }).close();
+    expect(sockets).toEqual([
+      "ws://test/api/agents/01JB/pty",
+      "ws://test/api/subscriptions/login/LOGIN-9/pty",
+      "ws://test/api/targets/box/sessions/S1/ws",
+      "ws://test/api/events?since=5",
+    ]);
+    expect(raw.map((r) => r.protocols)).toEqual([["bearer.tok"], ["bearer.tok"], ["bearer.tok"], ["bearer.tok"]]);
+    expect(raw.every((r) => !r.url.includes("token"))).toBe(true);
     expect(s.binaryType).toBe("arraybuffer");
+  });
+
+  it("puts a signed artifact path on the artifact origin", async () => {
+    const signed = { url: "/a/U1/r.txt?exp=1&sig=s", exp: 1, expires_at: "" };
+    const { api } = recorder({ artifactOrigin: "https://art.example:8081" }, signed);
+    expect((await api.artifacts.url("U1")).url).toBe("https://art.example:8081/a/U1/r.txt?exp=1&sig=s");
+    const same = recorder({}, signed);
+    expect((await same.api.artifacts.url("U1")).url).toBe("/a/U1/r.txt?exp=1&sig=s");
+    const abs = recorder({ artifactOrigin: "https://art.example" }, { ...signed, url: "https://other.example/a/U1/r.txt" });
+    expect((await abs.api.artifacts.url("U1")).url).toBe("https://other.example/a/U1/r.txt");
   });
 });
 

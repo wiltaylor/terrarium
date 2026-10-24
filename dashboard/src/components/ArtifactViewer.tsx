@@ -1,11 +1,16 @@
 // Preview for one artifact (§15.2, docs/api.md §12). The viewer mints a
 // short-lived signed URL (`POST /api/artifacts/{id}/url`) and loads the
-// bytes from the serving routes. HTML and bundles run only in a sandboxed
-// iframe without allow-same-origin, so they cannot reach the dashboard.
+// bytes from the artifact origin (docs/security-review.md F5). HTML, bundles,
+// and PDFs run only in a sandboxed iframe without allow-same-origin, so they
+// cannot reach the dashboard. Markdown goes through DOMPurify (SafeHtml).
+// When the signed URL is on the dashboard origin, a badge says so.
 
 import { createResource, Match, Show, Switch } from "solid-js";
+import { artifactOrigin } from "../api";
 import type { Artifact } from "../api/types";
+import { artifactOriginKind, SAME_ORIGIN_WARNING } from "../lib/artifact-origin";
 import { renderMarkdown } from "../lib/markdown";
+import { SafeHtml } from "./SafeHtml";
 import { bytes } from "../lib/format";
 import { api } from "../stores";
 import { ErrorBanner } from "./ui";
@@ -35,6 +40,17 @@ export function ArtifactViewer(props: { artifact: ArtifactLike; compact?: boolea
   // The uid is unique across projects, so it is the safest key.
   const [signed] = createResource(() => props.artifact.uid || props.artifact.id, (key) => api.artifacts.url(key));
   const url = () => signed()?.url;
+  const origin = () => {
+    const u = url();
+    return u ? artifactOriginKind(u, location.origin) : null;
+  };
+  // A separate origin that this build's CSP does not name: the browser blocks the preview.
+  const notInCsp = () => {
+    const u = url();
+    if (!u || origin() !== "separate") return null;
+    const o = new URL(u, location.origin).origin;
+    return o === artifactOrigin ? null : o;
+  };
   const [text] = createResource(
     () => (kind() === "markdown" || kind() === "text" ? url() : null),
     (u) => api.artifacts.text(u),
@@ -61,25 +77,40 @@ export function ArtifactViewer(props: { artifact: ArtifactLike; compact?: boolea
           </span>
         </div>
       </Show>
+      <Show when={origin() === "same"}>
+        <p class="small" role="status" style={{ margin: 0 }}>
+          <span class="chip warn" title="Artifacts are untrusted. Serve them from their own origin (PLAN §15.2).">
+            {SAME_ORIGIN_WARNING}
+          </span>
+        </p>
+      </Show>
+      <Show when={notInCsp()}>
+        {(o) => (
+          <p class="small" role="status" style={{ margin: 0 }}>
+            <span class="chip warn">the dashboard CSP does not allow {o()}; build the dashboard with VITE_ARTIFACT_ORIGIN={o()}</span>
+          </p>
+        )}
+      </Show>
       <ErrorBanner error={signed.error} />
+      <ErrorBanner error={text.error} />
       <Show when={url()} fallback={<Show when={!signed.error}><p class="muted small">Loading…</p></Show>}>
         {(u) => (
           <Switch>
             <Match when={kind() === "image"}>
-              <img src={u()} alt={props.artifact.name} style={{ "max-width": "100%", "border-radius": "var(--radius-sm)" }} />
+              <img src={u()} alt={props.artifact.name} referrerPolicy="no-referrer" style={{ "max-width": "100%", "border-radius": "var(--radius-sm)" }} />
             </Match>
             <Match when={kind() === "pdf"}>
-              <object data={u()} type="application/pdf" class="artifact-frame" style={{ "min-height": "420px" }}>
-                <a href={u()} download={props.artifact.name}>
-                  Download {props.artifact.name}
-                </a>
-              </object>
+              {/* No <object>: the CSP has object-src 'none'. Some browsers do not draw a PDF in a sandboxed frame; the link opens it. */}
+              <iframe class="artifact-frame" src={u()} sandbox="allow-scripts" referrerPolicy="no-referrer" title={props.artifact.name} style={{ "min-height": "420px" }} />
+              <a class="small" href={u()} target="_blank" rel="noopener noreferrer">
+                Open {props.artifact.name} in a new tab
+              </a>
             </Match>
             <Match when={kind() === "html"}>
               <iframe class="artifact-frame" src={u()} sandbox="allow-scripts" referrerPolicy="no-referrer" title={props.artifact.name} />
             </Match>
             <Match when={kind() === "markdown"}>
-              <div class="prose card-box artifact-text" innerHTML={renderMarkdown(text() ?? "")} />
+              <SafeHtml class="prose card-box artifact-text" html={renderMarkdown(text() ?? "")} />
             </Match>
             <Match when={kind() === "text"}>
               <pre class="artifact-text">{text() ?? "Loading…"}</pre>

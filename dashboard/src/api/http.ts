@@ -1,5 +1,8 @@
 // HTTP transport: bearer token, JSON bodies, query strings, typed errors,
-// and cursor pages (docs/api.md §2.4 and §2.5).
+// and cursor pages (docs/api.md §2.4 and §2.5). Sockets carry the token as
+// the `bearer.<token>` subprotocol, never in the URL (see ./sockets).
+
+import { AuthSocket, browserSocket, type MakeRawSocket } from "./sockets";
 
 export type Query = Record<string, string | number | boolean | undefined | null>;
 
@@ -20,8 +23,10 @@ export interface Transport {
   request<T>(method: string, path: string, opts?: RequestOptions): Promise<T>;
   /** GET a list endpoint: the JSON array and the `X-Next-Cursor` header. */
   page<T>(path: string, query?: Query): Promise<Page<T>>;
-  /** Absolute ws:// or wss:// URL for a socket path, with the token as a query parameter. */
+  /** Absolute ws:// or wss:// URL for a socket path. It never carries the token. */
   wsUrl(path: string, query?: Query): string;
+  /** Open a socket to a `wsUrl` that authenticates with the `bearer.<token>` subprotocol. */
+  openSocket(url: string): AuthSocket;
 }
 
 /** The daemon's error body: `{"error": {"code", "message", "details"?}}`. */
@@ -96,6 +101,10 @@ export interface HttpTransportOptions {
   onUnauthorized?: () => void;
   /** Page location, for the ws URL. Defaults to `window.location`. */
   location?: { protocol: string; host: string };
+  /** Make the underlying WebSocket. Defaults to the browser's. Tests and the mock pass their own. */
+  makeSocket?: MakeRawSocket;
+  /** Dev only: retry a refused subprotocol handshake with `?token=` (`VITE_ALLOW_QUERY_TOKEN=1`). */
+  allowQueryToken?: boolean;
 }
 
 export function buildQuery(query?: Query): string {
@@ -159,12 +168,20 @@ export function createHttpTransport(opts: HttpTransportOptions): Transport {
     },
 
     wsUrl(path: string, query: Query = {}): string {
-      const token = opts.getToken();
-      const q = buildQuery({ ...query, token });
+      const q = buildQuery(query);
       if (base) return `${base.replace(/^http/, "ws")}${path}${q}`;
       const loc = opts.location ?? window.location;
       const proto = loc.protocol === "https:" ? "wss:" : "ws:";
       return `${proto}//${loc.host}${path}${q}`;
+    },
+
+    openSocket(url: string): AuthSocket {
+      return new AuthSocket(url, {
+        token: opts.getToken(),
+        make: opts.makeSocket ?? browserSocket,
+        allowQueryToken: opts.allowQueryToken ?? false,
+        onQueryFallback: (u) => console.warn(`terrarium: ${u} refused the bearer subprotocol; retried with ?token= (VITE_ALLOW_QUERY_TOKEN)`),
+      });
     },
   };
 }

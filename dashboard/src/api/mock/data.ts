@@ -1,5 +1,6 @@
 // Seed data for mock mode. `seed(now)` returns a fresh, self-consistent world.
 
+import { XSS_DOCUMENT } from "../../lib/xss-payloads";
 import type {
   Agent,
   AgentEvent,
@@ -76,6 +77,9 @@ export interface UsageRow {
   /** The card the agent had in `in_progress` when the row was stored (`card_id`). */
   card?: string;
 }
+
+/** Hostile markup an agent could write. Text views must show it as text; /dev/xss lists them all. */
+const hostile = `<img src=x onerror="window.__xss=1"> <script>window.__xss=1</script> [x](javascript:window.__xss=1)`;
 
 const COLUMNS: Column[] = [
   { name: "backlog", position: 0 },
@@ -257,7 +261,7 @@ export function seed(now: number = Date.now()): MockWorld {
       comments: [comment("runner-dev", "Claimed. Branch `runner-dev/pty-resize`.", 40), comment("runner-dev", "SIGWINCH reaches the child. Writing a test with the fake TUI.", 12)],
       links: [{ kind: "branch", ref: "runner-dev/pty-resize", created_by: byName("runner-dev").id, created_at: ago(40) }],
     }),
-    card("TER-13", "terrarium", "ready", "Stall timeout marks agents blocked", { labels: ["runner"] }),
+    card("TER-13", "terrarium", "ready", "Stall timeout marks agents blocked", { labels: ["runner"], comments: [comment("lead", `Mock: hostile markup that must show as text. ${hostile}`, 30)] }),
     card("TER-14", "terrarium", "ready", "Board WIP limits in the API", { labels: ["api"], depends_on: ["TER-12"], blocked_by: ["TER-12"] }),
     card("TER-15", "terrarium", "blocked", "Codex adapter: resume by session id", {
       assigneeName: "adapter-codex",
@@ -327,7 +331,7 @@ export function seed(now: number = Date.now()): MockWorld {
     mem("MEM-2", "Claude Code fires Stop once per turn", ["hooks", "claude"], "lead", 60 * 28),
     mem("MEM-3", "Codex hooks need notify in config.toml", ["hooks", "codex"], "adapter-codex", 60 * 20),
     mem("MEM-4", "portable-pty needs a resize after spawn", ["runner", "pty"], "runner-dev", 20, { sources: [{ kind: "card", ref: "TER-12" }] }),
-    mem("MEM-5", "xterm.js resize must debounce", ["dashboard", "pty"], "runner-dev", 15),
+    mem("MEM-5", "xterm.js resize must debounce", ["dashboard", "pty"], "runner-dev", 15, { body: `xterm.js resize must debounce. The mock puts hostile markup here, which must show as text: ${hostile}` }),
     mem("MEM-6", "Stall timeout default is 10 minutes", ["runner"], "lead", 60 * 10, { supersedes: ["MEM-7"] }),
     mem("MEM-7", "Stall timeout default is 5 minutes", ["runner"], "lead", 60 * 40, { superseded_by: "MEM-6" }),
     mem("MEM-8", "bwrap needs user namespaces in Docker", ["sandbox", "docker"], "lead", 60 * 50, { sources: [{ kind: "commit", ref: "a1b2c3d" }] }),
@@ -398,6 +402,14 @@ fn push_turn(&mut self, text: &str) -> Result<()> {
 
 See [[does/not-exist]] for the old design.
 `,
+    "security/xss-payloads": `# XSS payloads (mock)
+
+Every block below is hostile. The page must show it inert: no dialog, no script, no
+\`window.__xss\`. The mock-only page [/dev/xss](/dev/xss) shows each payload
+through the sanitizer alone, too.
+
+${XSS_DOCUMENT}
+`,
     "webshop:index": `# Webshop wiki
 
 - [[WEB-4]] checkout is in progress.
@@ -427,6 +439,7 @@ See [[does/not-exist]] for the old design.
     page(fakeUlid("pg", 2), "terrarium", "reports/phase-1", "Phase 1 report", "ready_for_review", 3, 35),
     page(fakeUlid("pg", 3), "terrarium", "designs/runner-v2", "Runner v2", "draft", 2, 60 * 5),
     page(fakeUlid("pg", 4), "webshop", "index", "Webshop wiki", "reviewed", 1, 60 * 24),
+    page(fakeUlid("pg", 5), "terrarium", "security/xss-payloads", "XSS payloads (mock)", "draft", 1, 60 * 3),
   ];
 
   const revisions: MockWorld["revisions"] = {};
@@ -445,11 +458,12 @@ See [[does/not-exist]] for the old design.
     });
   }
 
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="480" height="240" viewBox="0 0 480 240"><rect width="480" height="240" fill="#1f2a24"/><rect x="16" y="16" width="120" height="208" rx="6" fill="#2f3d35"/><g fill="#7fd1a3"><rect x="152" y="16" width="96" height="60" rx="6"/><rect x="264" y="16" width="96" height="60" rx="6" fill="#e6b450"/><rect x="376" y="16" width="88" height="60" rx="6" fill="#6cb6ff"/></g><text x="160" y="140" fill="#cfe" font-family="monospace" font-size="16">terrarium dashboard (mock)</text></svg>`;
+  // A PNG, not an SVG: the sanitizer allows only base64 PNG, JPEG, and GIF `data:` images inline.
+  const screenshotPng = "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bUMIl17+i0Tdyq5VN6P+2Kcf3bJ2w7ShIzPbtgohlE98CCGSmprZplUIIatj+43vr9n4/pqsDtkhhKwO2Zs++KiCiy+/eqmt6zY0bX5WxRd/xELbNmxKnO3yG67rdd+9IYSiwsKcXnec9KNTrrjh+hBC02Znbl23weOHjzioyOY1Hw+bPvmxMRP7js7peGPXWCw2Y8T4CvZfOO+FCXNmfrFl676CvWnp6UWFhUfdbeaDkwZNmbDnq6+2rf/kWPsc4cmHpw54cNRVN/f4dO36xCFl1yo6VPjhO8snPvtESiTylxkzj3WSokOFWR2yr7/t1n0FBfnDx0Wj0X5jczv06HrwwIH83LFf7vjHsS6+/Oql3n1tUctWl21ZW1FPZ03KK7tQrdq1+43N7dSz+/69e/OGjvr645H41CHDJz77xBdbtl3YOmvZqws9flTp7er085p9pwMaNmlkatVj985dhlBNfwxSUgY+NOaRnNFV/Cp02f+o0n/c8GlDR5otAi3QQPAZNAACDSDQAAg0AAININAACDSAQAMg0AAINIBAAyDQAAINgEADINAAAg2AQAMINAACDSDQAAg0AAININAACDSAQAMg0AAINIBAAyDQAAINgEADCDQAAg2AQAMINAACDSDQAAg0AAININAACDSAQAMg0AACDYBAAyDQAAINgEADCDQAAg2AQAMINAACDSDQAAg0AAININAACDSAQAMg0AACDYBAAyDQAAINgEADCDQAAg2AQAMINAACDSDQAAg0gEADINAACDSAQAMg0AACDYBAA1C1QO/eucvUqoE5AxHtUGegRn3EoSDqDPxwP4PWEXUGvldRNQHwLQ4ABBpAoAEQaACBBkCgARBoAIEGQKABBBoAgQZAoAEEGgCBBqgp/gec1K9iimWI1AAAAABJRU5ErkJggg==";
   const artifactBodies: Record<string, string> = {
-    "ART-1": `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`,
+    "ART-1": `data:image/png;base64,${screenshotPng}`,
     "ART-2": `running 14 tests\ntest hooks::stop_once_per_turn ... ok\ntest runner::resume_after_restart ... ok\ntest runner::pty_resize ... FAILED\n\nfailures:\n  pty_resize: expected 120x40, got 80x24\n\ntest result: FAILED. 13 passed; 1 failed`,
-    "ART-3": `<!doctype html><html><body style="font-family:sans-serif;background:#fffbe8;padding:1rem"><h2>Coverage report</h2><p>Line coverage: <b>71.4%</b></p><button onclick="this.textContent='Scripts run, but sandboxed'">Click me</button></body></html>`,
+    "ART-3": `<!doctype html><html><body style="font-family:sans-serif;background:#fffbe8;padding:1rem"><h2>Coverage report</h2><p>Line coverage: <b>71.4%</b></p><p style="color:#555">On the daemon, scripts in this frame run on the sandboxed artifact origin. The mock serves a <code>data:</code> URL, which inherits the dashboard CSP, so scripts do not run here.</p></body></html>`,
     "ART-4": `# Release notes v0.1.0\n\n- One Claude agent, supervised.\n- Resume after restart.\n- Dashboard skeleton.`,
     "ART-5": "data:application/pdf;base64,JVBERi0xLjQKMSAwIG9iajw8L1R5cGUvQ2F0YWxvZy9QYWdlcyAyIDAgUj4+ZW5kb2JqCjIgMCBvYmo8PC9UeXBlL1BhZ2VzL0tpZHNbMyAwIFJdL0NvdW50IDE+PmVuZG9iagozIDAgb2JqPDwvVHlwZS9QYWdlL01lZGlhQm94WzAgMCAzMDAgMTQ0XS9QYXJlbnQgMiAwIFIvUmVzb3VyY2VzPDwvRm9udDw8L0YxIDQgMCBSPj4+Pi9Db250ZW50cyA1IDAgUj4+ZW5kb2JqCjQgMCBvYmo8PC9UeXBlL0ZvbnQvU3VidHlwZS9UeXBlMS9CYXNlRm9udC9IZWx2ZXRpY2E+PmVuZG9iago1IDAgb2JqPDwvTGVuZ3RoIDQ0Pj5zdHJlYW0KQlQgL0YxIDE4IFRmIDIwIDcwIFRkIChNb2NrIFBERikgVGogRVQKZW5kc3RyZWFtCmVuZG9iagp0cmFpbGVyPDwvUm9vdCAxIDAgUj4+CiUlRU9G",
   };
@@ -474,7 +488,7 @@ See [[does/not-exist]] for the old design.
   });
 
   const artifacts: Artifact[] = [
-    art(1, "dashboard.svg", "image/svg+xml", [], 40, "file", ["terrarium/reports/phase-1"]),
+    art(1, "dashboard.png", "image/png", [], 40, "file", ["terrarium/reports/phase-1"]),
     art(2, "test-output.txt", "text/plain; charset=utf-8", [{ kind: "version", ref: fakeUlid("ver", 1), label: "v0.1.0" }], 41, "file", ["terrarium/reports/phase-1"]),
     art(3, "coverage", "text/html; charset=utf-8", [], 42, "bundle", ["terrarium/reports/phase-1"]),
     art(4, "release-notes.md", "text/markdown; charset=utf-8", [{ kind: "version", ref: fakeUlid("ver", 1), label: "v0.1.0" }], 50),
@@ -606,6 +620,7 @@ See [[does/not-exist]] for the old design.
     msg(fakeUlid("msg", 4), fakeUlid("th", 3), "shop-lead", "project:terrarium", "bug: terrarium card ls ignores --column", "Running `terrarium card ls --column ready` lists every card. Seen from webshop.", "delivered", 70),
     msg(fakeUlid("msg", 5), fakeUlid("th", 4), "runner-dev", "lead", "PTY resize approach", "Going with SIGWINCH via portable-pty. Shout if you disagree.", "replied", 45),
     msg(fakeUlid("msg", 6), fakeUlid("th", 5), "lead", "project:webshop", "Shared CSS tokens?", "Can webshop reuse the dashboard CSS variables?", "delivered", 5),
+    msg(fakeUlid("msg", 7), fakeUlid("th", 6), "runner-dev", "operator", "Mock: hostile mail body", `This body must show as text. ${hostile}`, "read", 90),
   ].sort((x, y) => x.created_at.localeCompare(y.created_at));
 
   const targets: Target[] = [
