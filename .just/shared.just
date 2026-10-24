@@ -7,12 +7,12 @@ require-docker:
 
 [private]
 require-cargo:
-	@command -v cargo > /dev/null 2>&1 || (echo "cargo is required: install Rust 1.85 or later with rustup" >&2 && exit 1)
+	@command -v cargo > /dev/null 2>&1 || (echo "cargo is required: install Rust 1.88 or later with rustup" >&2 && exit 1)
 
 [private]
 require-node:
-	@command -v node > /dev/null 2>&1 || (echo "node is required: install Node 20.19 or later" >&2 && exit 1)
-	@command -v npm > /dev/null 2>&1 || (echo "npm is required: install Node 20.19 or later" >&2 && exit 1)
+	@command -v node > /dev/null 2>&1 || (echo "node is required: install Node 22.19 or later" >&2 && exit 1)
+	@command -v npm > /dev/null 2>&1 || (echo "npm is required: install Node 22.19 or later" >&2 && exit 1)
 
 [private]
 require-just:

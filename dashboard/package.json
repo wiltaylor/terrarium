@@ -13,7 +13,7 @@
     "check": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json && eslint ."
   },
   "engines": {
-    "node": ">=20.19"
+    "node": ">=22.19"
   },
   "dependencies": {
     "@solidjs/router": "^1.0.0",

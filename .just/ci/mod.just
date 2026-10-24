@@ -34,12 +34,13 @@ dashboard-check:
 		echo "dashboard-check: skipped, dashboard/package.json does not exist"
 		exit 0
 	fi
-	command -v npm > /dev/null 2>&1 || { echo "npm is required: install Node 20.19 or later" >&2; exit 1; }
+	command -v npm > /dev/null 2>&1 || { echo "npm is required: install Node 22.19 or later" >&2; exit 1; }
 	cd dashboard
 	if [ ! -d node_modules ]; then
 		if [ -f package-lock.json ]; then npm ci; else npm install; fi
 	fi
 	npm run check
+	npm run test -- --run
 
 # Adapter compatibility suite against the pinned harness versions. Not in `check`: it needs real logins in config/ and the image
 [group('ci')]
