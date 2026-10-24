@@ -1832,6 +1832,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "base64 0.22.1",
  "clap",
  "futures-util",
  "http-body-util",
@@ -1839,6 +1840,7 @@ dependencies = [
  "hyper-util",
  "serde",
  "serde_json",
+ "sha2",
  "terrarium-core",
  "thiserror 2.0.21",
  "tokio",

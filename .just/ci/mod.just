@@ -42,8 +42,8 @@ dashboard-check:
 	npm run check
 	npm run test -- --run
 
-# Adapter compatibility suite against the pinned harness versions. Not in `check`: it needs real logins in config/ and the image
+# Adapter compatibility suite against the pinned harness versions (docs/compat-suite.md). Not in `check`: it needs real logins and spends up to 3 model turns per harness. `harness`: all, claude, codex, copilot, pi, or a comma list
 [group('ci')]
-compat:
-	@echo "ci::compat is not implemented yet: it arrives with the adapters in Phase 3 (PLAN §23.5)" >&2
-	@exit 1
+compat harness='all': require-cargo
+	cargo build -p terrarium
+	TERRARIUM_COMPAT_HARNESSES={{quote(harness)}} cargo test -p terrarium-compat --test compat -- --ignored --exact real_harnesses --nocapture

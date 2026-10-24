@@ -1,0 +1,24 @@
+[package]
+name = "terrarium-compat"
+description = "Terrarium adapter compatibility suite: real-harness scenarios against the pinned versions"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+terrarium-core.workspace = true
+terrarium-runner.workspace = true
+terrarium-adapter-claude.workspace = true
+terrarium-adapter-codex.workspace = true
+terrarium-adapter-copilot.workspace = true
+terrarium-adapter-pi.workspace = true
+tokio.workspace = true
+serde_json.workspace = true
+semver.workspace = true
+chrono.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true
