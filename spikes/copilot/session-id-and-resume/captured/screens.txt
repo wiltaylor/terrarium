@@ -1,0 +1,301 @@
+===== A-after-exit (t=13.3s) =====
+│   ▔▔▔▔                              │  /model — Switch models across providers, or use Auto                        │
+│                                                                                                                    │
+├────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ Discover Auto                                                                                                      │
+│ Let Copilot choose the best available model for each task, 10% off right now.                                      │
+│ Click here or enter /model auto to switch                                                                          │
+│ ctrl+x → m switch for this session                                                                                 │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+ ● Tip: /app
+   └ Prefer a visual workspace? Try out the GitHub Copilot desktop app
+      https://github.com/features/ai/github-app
+
+ ❯ Reply with exactly: pong                                                                                      17:12
+
+ ⌄ Thought for 1s
+ │ The user is asking me to reply with exactly "pong". This is a simple request and doesn't require any tool calls. I
+ │ should just respond with exactly what they asked for.
+
+ ● pong
+
+
+
+
+
+
+
+
+
+╭─╮╭─╮   Changes    +0 -0
+╰─╯╰─╯   AI Credits 0 (9s)
+█ ▘▝ █   Tokens     ↑ 20.3k (13.6k cached, 6.7k written) • ↓ 50 (42 reasoning)
+ ▔▔▔▔    Resume     copilot --resume=62e05754-b66a-4ccc-ba6e-4846cc4fc1aa
+
+  ╭─╮╭─╮   Changes    +0 -0
+  ╰─╯╰─╯   AI Credits 0 (10s)
+  █ ▘▝ █   Tokens     ↑ 20.3k (13.6k cached, 6.7k written) • ↓ 50 (42 reasoning)
+   ▔▔▔▔    Resume     copilot --resume=62e05754-b66a-4ccc-ba6e-4846cc4fc1aa
+
+===== B-resumed-idle (t=3.7s) =====
+ [Current]  Sessions   Issues   Pull requests   Gists
+
+╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                                    │
+│  ╭─╮╭─╮                             │  Getting started                                                             │
+│  ╰─╯╰─╯  Copilot v1.0.103 uses AI.  │  Use the tabs above to explore your sessions and pull requests               │
+│  █ ▘▝ █  Check for mistakes.        │  /init — Initialize Copilot instructions for this repository                 │
+│   ▔▔▔▔                              │  /model — Switch models across providers, or use Auto                        │
+│                                                                                                                    │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+ ❯ Reply with exactly: pong                                                                                      17:12
+
+ ⌄ Thought
+ │ The user is asking me to reply with exactly "pong". This is a simple request and doesn't require any tool calls. I
+ │ should just respond with exactly what they asked for.
+
+ ● pong
+
+ ● Tip: /autopilot
+   └ Toggle autopilot mode, or set an autopilot objective with an optional AI-credit limit (--max-ai-credits)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ $CWD
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ← open sidebar · Interactive · Allow All · / commands · ? help · tab next tab                         Claude Haiku 4.5
+
+===== B-after-exit (t=11.4s) =====
+ [Current]  Sessions   Issues   Pull requests   Gists
+
+╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                                    │
+│  ╭──╮╭╮                             │  Getting started                                                             │
+│  ╰──╯╰╯  Copilot v1.0.103 uses AI.  │  Use the tabs above to explore your sessions and pull requests               │
+│  ██ ▘▝▐  Check for mistakes.        │  /init — Initialize Copilot instructions for this repository                 │
+│    ▔▔▔                              │  /model — Switch models across providers, or use Auto                        │
+                                                                                                                     │
+  ╭─╮╭─╮   Changes    +0 -0──────────────────────────────────────────────────────────────────────────────────────────┤
+  ╰─╯╰─╯   AI Credits 0 (22s)                                                                                        │
+  █ ▘▝ █   Tokens     ↑ 40.7k (34.0k cached, 6.7k written) • ↓ 100 (84 reasoning)                                    │
+   ▔▔▔▔    Resume     copilot --resume=62e05754-b66a-4ccc-ba6e-4846cc4fc1aa                                          │
+│ ctrl+x → m switch for this session                                                                                 │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+ ❯ Reply with exactly: pong                                                                                      17:12
+
+ ⌄ Thought
+ │ The user is asking me to reply with exactly "pong". This is a simple request and doesn't require any tool calls. I
+ │ should just respond with exactly what they asked for.
+
+ ● pong
+
+ ● Tip: /autopilot
+   └ Toggle autopilot mode, or set an autopilot objective with an optional AI-credit limit (--max-ai-credits)
+
+ ❯ What exact word did you reply with in your previous message? Reply with that word only.                       17:12
+
+ ⌄ Thought for 1s
+ │ The user is asking me to recall what word I replied with in my previous message. I replied with exactly "pong". The
+ │ user is asking me to reply with that word only.
+
+ ● pong
+
+
+╭─╮╭─╮   Changes    +0 -0
+╰─╯╰─╯   AI Credits 0 (21s)
+█ ▘▝ █   Tokens     ↑ 40.7k (34.0k cached, 6.7k written) • ↓ 100 (84 reasoning)
+ ▔▔▔▔    Resume     copilot --resume=62e05754-b66a-4ccc-ba6e-4846cc4fc1aa
+
+===== C-session-id-again (t=7.2s) =====
+ [Current]  Sessions   Issues   Pull requests   Gists
+
+╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                                    │
+│  ╭─╮╭─╮                             │  Getting started                                                             │
+│  ╰─╯╰─╯  Copilot v1.0.103 uses AI.  │  Use the tabs above to explore your sessions and pull requests               │
+│  █ ▘▝ █  Check for mistakes.        │  /init — Initialize Copilot instructions for this repository                 │
+│   ▔▔▔▔                              │  /model — Switch models across providers, or use Auto                        │
+│                                                                                                                    │
+├────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ Discover Auto                                                                                                      │
+│ Let Copilot choose the best available model for each task, 10% off right now.                                      │
+│ Click here or enter /model auto to switch                                                                          │
+│ ctrl+x → m switch for this session                                                                                 │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+ ❯ Reply with exactly: pong                                                                                      17:12
+
+ ⌄ Thought
+ │ The user is asking me to reply with exactly "pong". This is a simple request and doesn't require any tool calls. I
+ │ should just respond with exactly what they asked for.
+
+ ● pong
+
+ ❯ What exact word did you reply with in your previous message? Reply with that word only.                       17:12
+
+ ⌄ Thought
+ │ The user is asking me to recall what word I replied with in my previous message. I replied with exactly "pong". The
+ │ user is asking me to reply with that word only.
+
+ ● pong
+
+ ● Tip: /skills
+   └ Manage skills for enhanced capabilities
+
+ $CWD
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ← open sidebar · Interactive · Allow All · / commands · ? help · tab next tab                         Claude Haiku 4.5
+
+===== E-bogus-resume (t=7.2s) =====
+Error: No session, task, or name matched '2f70eea5-8794-42f3-a562-afa15072d607'.
+
+To resume by session or task ID:  copilot --resume=<id>
+To resume by name:                copilot --resume=<name>
+To name a new session:            copilot --name=<name>
+To pick from existing sessions:   copilot --resume
+To start a new session with ID:   copilot --session-id=<valid-uuid>
+
+===== F-resume-other-cwd (t=7.2s) =====
+ [Current]  Sessions   Issues   Pull requests   Gists
+
+╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                                    │
+│  ╭─╮╭─╮                             │  Getting started                                                             │
+│  ╰─╯╰─╯  Copilot v1.0.103 uses AI.  │  Use the tabs above to explore your sessions and pull requests               │
+│  █ ▘▝ █  Check for mistakes.        │  /init — Initialize Copilot instructions for this repository                 │
+│   ▔▔▔▔                              │  /model — Switch models across providers, or use Auto                        │
+│                                                                                                                    │
+├────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ Discover Auto                                                                                                      │
+│ Let Copilot choose the best available model for each task, 10% off right now.                                      │
+│ Click here or enter /model auto to switch                                                                          │
+│ ctrl+x → m switch for this session                                                                                 │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+ ❯ Reply with exactly: pong                                                                                      17:12
+
+ ⌄ Thought
+ │ The user is asking me to reply with exactly "pong". This is a simple request and doesn't require any tool calls. I
+ │ should just respond with exactly what they asked for.
+
+ ● pong
+
+ ❯ What exact word did you reply with in your previous message? Reply with that word only.                       17:12
+
+ ⌄ Thought
+ │ The user is asking me to recall what word I replied with in my previous message. I replied with exactly "pong". The
+ │ user is asking me to reply with that word only.
+
+ ● pong
+
+ ● Tip: /mcp
+   └ Manage MCP server configuration
+
+ $CWD
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ← open sidebar · Interactive · Allow All · / commands · ? help · tab next tab                         Claude Haiku 4.5
+
+===== D-first (t=13.1s) =====
+ [Current]  Sessions   Issues   Pull requests   Gists
+
+╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                                    │
+│  ╭─╮╭─╮                             │  Getting started                                                             │
+│  ╰─╯╰─╯  Copilot v1.0.103 uses AI.  │  Use the tabs above to explore your sessions and pull requests               │
+│  █ ▘▝ █  Check for mistakes.        │  /init — Initialize Copilot instructions for this repository                 │
+│   ▔▔▔▔                              │  /model — Switch models across providers, or use Auto                        │
+│                                                                                                                    │
+├────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ Discover Auto                                                                                                      │
+│ Let Copilot choose the best available model for each task, 10% off right now.                                      │
+│ Click here or enter /model auto to switch                                                                          │
+│ ctrl+x → m switch for this session                                                                                 │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+ ❯ Reply with exactly: pong                                                                                      17:12
+
+ ⌄ Thought
+ │ The user is asking me to reply with exactly "pong". This is a simple request and doesn't require any tool calls. I
+ │ should just respond with exactly what they asked for.
+
+ ● pong
+
+ ❯ What exact word did you reply with in your previous message? Reply with that word only.                       17:12
+
+ ⌄ Thought
+ │ The user is asking me to recall what word I replied with in my previous message. I replied with exactly "pong". The
+ │ user is asking me to reply with that word only.
+
+ ● pong
+
+ ● Tip: /share
+   └ Open sharing actions for this session, or export with file, html, gist, research, or link
+
+ $CWD
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ← open sidebar · Interactive · Allow All · / commands · ? help · tab next tab                         Claude Haiku 4.5
+
+===== D-second (t=7.1s) =====
+ [Current]  Sessions   Issues   Pull requests   Gists
+
+╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                                    │
+│  ╭─╮╭─╮                             │  Getting started                                                             │
+│  ╰─╯╰─╯  Copilot v1.0.103 uses AI.  │  Use the tabs above to explore your sessions and pull requests               │
+│  █ ▘▝ █  Check for mistakes.        │  /init — Initialize Copilot instructions for this repository                 │
+│   ▔▔▔▔                              │  /model — Switch models across providers, or use Auto                        │
+│                                                                                                                    │
+├────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ Discover Auto                                                                                                      │
+│ Let Copilot choose the best available model for each task, 10% off right now.                                      │
+│ Click here or enter /model auto to switch                                                                          │
+│ ctrl+x → m switch for this session                                                                                 │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+ ❯ Reply with exactly: pong                                                                                      17:12
+
+ ⌄ Thought
+ │ The user is asking me to reply with exactly "pong". This is a simple request and doesn't require any tool calls. I
+ │ should just respond with exactly what they asked for.
+
+ ● pong
+
+ ❯ What exact word did you reply with in your previous message? Reply with that word only.                       17:12
+
+ ⌄ Thought
+ │ The user is asking me to recall what word I replied with in my previous message. I replied with exactly "pong". The
+ │ user is asking me to reply with that word only.
+
+ ● pong
+
+ ● Tip: /skills
+   └ Manage skills for enhanced capabilities
+
+ $CWD
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ← open sidebar · Interactive · Allow All · / commands · ? help · tab next tab                         Claude Haiku 4.5
+

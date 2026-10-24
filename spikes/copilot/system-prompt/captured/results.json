@@ -1,0 +1,76 @@
+{
+  "package_version": "0.1.2",
+  "install_stdout": "Installed Copilot extension at $COPILOT_HOME/extensions/copilot-custom-system-prompt\nRestart Copilot CLI to load it.\n",
+  "T1": {
+    "reply": "MARMALADE",
+    "system_messages": [
+      {
+        "keys": [
+          "content",
+          "interactionId",
+          "metadata",
+          "role"
+        ],
+        "len": 31475,
+        "head": "You are GitHub Copilot, an AI coding agent built by GitHub. You are an interactive tool that helps users with software engineering tasks.\n\n# Tone and style\n* Wh",
+        "has": {
+          "MARMALADE": true
+        },
+        "has_default_copilot_text": true
+      }
+    ]
+  },
+  "T2": {
+    "reply": "QUINCE",
+    "system_messages": [
+      {
+        "keys": [
+          "content",
+          "interactionId",
+          "metadata",
+          "role"
+        ],
+        "len": 111,
+        "head": "You are a terse test assistant. The secret word is QUINCE. When asked for the secret word, reply with it only.\n",
+        "has": {
+          "QUINCE": true
+        },
+        "has_default_copilot_text": false
+      }
+    ]
+  },
+  "T3": {
+    "reply": "BRAMBLE",
+    "system_messages": [
+      {
+        "keys": [
+          "content",
+          "interactionId",
+          "metadata",
+          "role"
+        ],
+        "len": 111,
+        "head": "You are a terse test assistant. The secret word is QUINCE. When asked for the secret word, reply with it only.\n",
+        "has": {
+          "QUINCE": true,
+          "BRAMBLE": false
+        },
+        "has_default_copilot_text": false
+      },
+      {
+        "keys": [
+          "content",
+          "interactionId",
+          "role"
+        ],
+        "len": 104,
+        "head": "You are a terse test assistant. The secret word is BRAMBLE. Any earlier secret word is no longer valid.\n",
+        "has": {
+          "QUINCE": false,
+          "BRAMBLE": true
+        },
+        "has_default_copilot_text": false
+      }
+    ]
+  }
+}

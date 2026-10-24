@@ -1,0 +1,155 @@
+===== A-after-exit (t=11.8s) =====
+1u1uuToken usage: total=2,773 input=2,768 (+ 11,392 cached) output=5
+To continue this session, run:
+  codex resume 01a16cb2-0d95-7b40-894d-e19fc1b66c24
+Or run codex resume and select Reply with pong.
+
+===== B-resumed-idle (t=1.8s) =====
+
+  >_ OpenAI Codex (v0.160.0)
+     $CWD
+  permissions: YOLO mode
+
+
+› Reply with exactly: pong
+
+
+• pong
+
+  Worked for 1s • 4:56 PM
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+› Ask Codex to do anything
+
+  GPT-6-Luna low · $CWD · Reply with pong
+  ? for shortcuts                                                                              ⚠ 1 warning · f2 to view
+
+===== B-after-exit (t=11.7s) =====
+1u1uuToken usage: total=5,526 input=5,516 (+ 25,344 cached) output=10
+To continue this session, run:
+  codex resume 01a16cb2-0d95-7b40-894d-e19fc1b66c24
+Or run codex resume and select Reply with pong.
+
+===== C-resume-other-cwd (t=6.2s) =====
+
+  Working directory · resume
+  Session = latest cwd recorded in the resumed session
+  Current = your current working directory
+
+› 1. Use session directory $CWD)
+  2. Use current directory $CWD)
+  3. Always use session directory
+  4. Always use current directory
+
+  enter continue · esc use session · ctrl+c quit
+
+===== D-first (t=10.1s) =====
+
+  >_ OpenAI Codex (v0.160.0)
+     $CWD
+  permissions: YOLO mode
+
+
+› Reply with exactly: pong
+
+
+• pong
+
+  Worked for 1s • 4:56 PM
+
+
+› What exact word did you reply with in your previous message? Reply with that word only.
+
+
+• pong
+
+  Worked for 1s • 4:56 PM
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+› Ask Codex to do anything
+
+  GPT-6-Luna low · $CWD · Reply with pong
+  ? for shortcuts                                                                              ⚠ 1 warning · f2 to view
+
+===== D-second (t=6.1s) =====
+
+  >_ OpenAI Codex (v0.160.0)
+     $CWD
+  permissions: YOLO mode
+
+
+› Reply with exactly: pong
+
+
+• pong
+
+  Worked for 1s • 4:56 PM
+
+
+› What exact word did you reply with in your previous message? Reply with that word only.
+
+
+• pong
+
+  Worked for 1s • 4:56 PM
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  🔒  This conversation is open in another app                                                              r to retry
+      Close it there and press R to continue here.
+
+   r retry   f fork   esc/ctrl+c/q exit   ctrl+t transcript
+
+===== E-bogus-uuid (t=5.2s) =====
+ERROR: No saved session found with ID ab7324ba-b3a3-45db-a30e-626528c4df54. Run `codex resume` without an ID to choose f
+rom existing sessions.
+

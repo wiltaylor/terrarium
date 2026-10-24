@@ -1,0 +1,90 @@
+{
+  "first_ready_s": 0.4561283588409424,
+  "T1_submit_hook_s": 0.9498775005340576,
+  "T1_prompt": "First line.\nSecond line.\nReply with exactly: two",
+  "T2_lf_submitted": false,
+  "T2_submit_hook_s": 0.0716705322265625,
+  "T2_prompts": [
+    "Reply with exactly:\n plain"
+  ],
+  "T3_T4": {
+    "submits": [
+      [
+        -2.78,
+        "Run the shell command `sleep 5`, then reply with exactly: slept"
+      ],
+      [
+        4.42,
+        "<system_notification>\nShell command \"Sleep for 5 seconds\" (shellId: 0) has completed successfully.\n</system_notification>"
+      ]
+    ],
+    "stops": [
+      2.09,
+      5.63
+    ]
+  },
+  "T5_hooks_while_question": [
+    "UserPromptSubmit",
+    "PreToolUse",
+    "Notification"
+  ],
+  "T5_dialog_state": {
+    "input_box": false,
+    "input_text": null,
+    "busy": false,
+    "ready": false,
+    "dialog": null,
+    "footer": null
+  },
+  "replies": [
+    "two",
+    "plain",
+    "",
+    "queued",
+    "",
+    "slept",
+    "",
+    "blue"
+  ],
+  "T5_hook_payloads": [
+    {
+      "hook": "PreToolUse",
+      "ts": 1792826213.9674604,
+      "payload": {
+        "hook_event_name": "PreToolUse",
+        "session_id": "e5c28995-ddc5-4a53-a9d9-f534b2a95029",
+        "timestamp": "2026-10-24T07:16:53.955Z",
+        "cwd": "$CWD",
+        "tool_name": "AskUserQuestion",
+        "tool_input": {
+          "message": "Please pick one colour: red or blue.",
+          "requestedSchema": {
+            "properties": {
+              "colour": {
+                "type": "string",
+                "title": "Colour",
+                "enum": [
+                  "red",
+                  "blue"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "hook": "Notification",
+      "ts": 1792826213.9851716,
+      "payload": {
+        "sessionId": "e5c28995-ddc5-4a53-a9d9-f534b2a95029",
+        "timestamp": 1792826213970,
+        "cwd": "$CWD",
+        "message": "Information requested",
+        "title": "Information requested",
+        "hook_event_name": "Notification",
+        "notification_type": "elicitation_dialog"
+      }
+    }
+  ]
+}

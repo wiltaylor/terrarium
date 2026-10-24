@@ -1,0 +1,420 @@
+===== idle-start (t=1.4s) =====
+
+  >_ OpenAI Codex (v0.160.0)
+     $CWD
+  permissions: YOLO mode
+
+  Welcome to the neighborhood. Lots of characters here.
+
+
+
+
+
+                                                       ⣀⣤⣤⣤⣀⣀
+                                                    ⣠⣶⣿⣿⣿⣿⣿⣿⣿⣿⣦⣤⣤⣤⣤⣤⣤⡀
+                                                  ⢀⣾⣿⣿⠿⠋⠉⠉⢉⣭⣿⣿⣿⣿⣿⠿⣿⣿⣿⣿⣷⣄
+                                                 ⣀⣾⣿⣿⠃ ⣀⣴⣾⣿⣿⡿⠟⠋ ⣀⡀ ⠈⠙⢿⣿⣿⣧
+                                              ⣀⣶⣿⣿⣿⣿⡇ ⢸⣿⣿⡿⠛⠉⢀⣠⣴⣿⣿⣿⣷⣦⣀⠈⢻⣿⣿⡇
+                                             ⣰⣿⣿⡿⢿⣿⣿⡇ ⢸⣿⣿⢀⣤⣶⣿⣿⣿⠟⠛⠻⣿⣿⣿⣿⣮⣿⣿⡷
+                                            ⢰⣿⣿⡟⠁⢸⣿⣿⡇ ⢸⣿⣿⣿⣿⠿⠿⣿⣿⣿⣦⣄⡀⠈⠛⠿⣿⣿⣿⣧⡀
+                                            ⣾⣿⣿⠃ ⢸⣿⣿⡇ ⢸⣿⣿⠋⠁  ⠈⠙⢻⣿⣿⣿⣶⣤⡀ ⠹⢿⣿⣷⡄
+                                            ⢸⣿⣿⣇ ⠸⣿⣿⣷⣦⣼⣿⣿      ⢸⣿⣿⠻⢿⣿⣿⡇ ⠘⣿⣿⣿
+                                            ⠈⢿⣿⣿⣦⡀⠈⠛⠿⣿⣿⣿⣿⣄⡀  ⢀⣠⣼⣿⣿  ⣿⣿⡇  ⣿⣿⣿⠇
+                                              ⢻⣿⣿⣿⣷⣦⣀⠈⠙⠻⣿⣿⣿⣶⣶⣿⣿⣿⣿⣿  ⣿⣿⡇ ⣠⣿⣿⣿
+                                              ⢸⣿⣿⡿⢿⣿⣿⣿⣦⣠⣴⣿⣿⣿⡿⠟⠋⢸⣿⣿  ⣿⣿⣷⣴⣿⣿⣿⠃
+                                              ⠘⣿⣿⣷ ⠈⠛⢿⣿⣿⣿⠿⠋⠉ ⣠⣴⣿⣿⣿  ⣿⣿⣿⣿⣿⠟⠁
+                                               ⠻⣿⣿⣿⣤⣀ ⠈⠉ ⢀⣤⣶⣿⣿⣿⠿⠟⠁ ⣰⣿⣿⡟⠋⠁
+                                                ⠈⠿⣿⣿⣿⣿⣶⣾⣿⣿⣿⣿⠟⠋⠁  ⣠⣼⣿⣿⡟
+                                                   ⠙⠛⠛⠛⠻⠛⢿⣿⣿⣿⣿⣷⣾⣿⣿⣿⡿⠏
+                                                          ⠈⠙⠛⠿⠿⠿⠿⠛⠉
+
+
+
+
+
+
+
+
+› Ask Codex to do anything
+
+  GPT-6-Luna low · $CWD
+  ? for shortcuts                                                                              ⚠ 1 warning · f2 to view
+
+===== busy-T1 (t=2.6s) =====
+
+  >_ OpenAI Codex (v0.160.0)
+     $CWD
+  permissions: YOLO mode
+
+  Welcome to the neighborhood. Lots of characters here.
+
+
+› First line.
+  Second line.
+  Reply with exactly: two
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+• Working (1s • esc to interrupt)
+
+
+› Ask Codex to do anything
+
+  GPT-6-Luna low · $CWD · ⠹
+  ? for shortcuts                                                                              ⚠ 1 warning · f2 to view
+
+===== idle-after-T1 (t=4.1s) =====
+
+  >_ OpenAI Codex (v0.160.0)
+     $CWD
+  permissions: YOLO mode
+
+  Welcome to the neighborhood. Lots of characters here.
+
+
+› First line.
+  Second line.
+  Reply with exactly: two
+
+
+• two
+
+  Worked for 2s • 5:04 PM
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+› Ask Codex to do anything
+
+  GPT-6-Luna low · $CWD · Reply with exactly two
+  ? for shortcuts                                                                              ⚠ 1 warning · f2 to view
+
+===== typed-after-LF (t=6.1s) =====
+
+  >_ OpenAI Codex (v0.160.0)
+     $CWD
+  permissions: YOLO mode
+
+  Welcome to the neighborhood. Lots of characters here.
+
+
+› First line.
+  Second line.
+  Reply with exactly: two
+
+
+• two
+
+  Worked for 2s • 5:04 PM
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+› Reply with exactly:
+
+
+  GPT-6-Luna low · $CWD · Reply with exactly two
+                                                                                               ⚠ 1 warning · f2 to view
+
+===== typed-before-CR (t=6.7s) =====
+
+  >_ OpenAI Codex (v0.160.0)
+     $CWD
+  permissions: YOLO mode
+
+  Welcome to the neighborhood. Lots of characters here.
+
+
+› First line.
+  Second line.
+  Reply with exactly: two
+
+
+• two
+
+  Worked for 2s • 5:04 PM
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+› Reply with exactly:
+   plain
+
+  GPT-6-Luna low · $CWD · Reply with exactly two
+                                                                                               ⚠ 1 warning · f2 to view
+
+===== busy-T3-tool (t=10.3s) =====
+
+  >_ OpenAI Codex (v0.160.0)
+     $CWD
+  permissions: YOLO mode
+
+  Welcome to the neighborhood. Lots of characters here.
+
+
+› First line.
+  Second line.
+  Reply with exactly: two
+
+
+• two
+
+  Worked for 2s • 5:04 PM
+
+
+› Reply with exactly:
+   plain
+
+
+• plain
+
+  Worked for 1s • 5:04 PM
+
+
+› Run the shell command `sleep 5`, then reply with exactly: slept
+
+
+
+
+
+• Working (1s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close
+
+
+› Ask Codex to do anything
+
+  GPT-6-Luna low · $CWD · Reply with exactly two
+  ? for shortcuts                                                                              ⚠ 1 warning · f2 to view
+
+===== busy-typed-T4 (t=10.5s) =====
+
+  >_ OpenAI Codex (v0.160.0)
+     $CWD
+  permissions: YOLO mode
+
+  Welcome to the neighborhood. Lots of characters here.
+
+
+› First line.
+  Second line.
+  Reply with exactly: two
+
+
+• two
+
+  Worked for 2s • 5:04 PM
+
+
+› Reply with exactly:
+   plain
+
+
+• plain
+
+  Worked for 1s • 5:04 PM
+
+
+› Run the shell command `sleep 5`, then reply with exactly: slept
+
+
+
+
+
+• Working (2s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close
+
+
+› Also add the word: queued
+
+  GPT-6-Luna low · $CWD · Reply with exactly two
+  tab to queue message
+
+===== busy-after-T4-enter (t=11.6s) =====
+
+  >_ OpenAI Codex (v0.160.0)
+     $CWD
+  permissions: YOLO mode
+
+  Welcome to the neighborhood. Lots of characters here.
+
+
+› First line.
+  Second line.
+  Reply with exactly: two
+
+
+• two
+
+  Worked for 2s • 5:04 PM
+
+
+› Reply with exactly:
+   plain
+
+
+• plain
+
+  Worked for 1s • 5:04 PM
+
+
+› Run the shell command `sleep 5`, then reply with exactly: slept
+
+
+• Working (3s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close
+
+• Messages to be submitted after next tool call (press esc to interrupt and send immediately)
+  ↳ Also add the word: queued
+
+
+› Ask Codex to do anything
+
+  GPT-6-Luna low · $CWD · Reply with exactly two
+  ? for shortcuts                                                                              ⚠ 1 warning · f2 to view
+
+===== idle-after-T3-T4 (t=104.2s) =====
+
+› First line.
+  Second line.
+  Reply with exactly: two
+
+
+• two
+
+  Worked for 2s • 5:04 PM
+
+
+› Reply with exactly:
+   plain
+
+
+• plain
+
+  Worked for 1s • 5:04 PM
+
+
+› Run the shell command `sleep 5`, then reply with exactly: slept
+
+
+• Ran sleep 5
+  └ (no output)
+
+
+› Also add the word: queued
+
+
+• slept queued
+  └ Tip: Use /mcp to list configured MCP tools.
+
+  Worked for 8s • 5:05 PM
+
+
+› Ask Codex to do anything
+
+  GPT-6-Luna low · $CWD · Reply with exactly two
+  ? for shortcuts                                                                              ⚠ 1 warning · f2 to view
+
+===== resume-other-cwd-with-resume_cwd-session (t=5.2s) =====
+
+
+› First line.
+  Second line.
+  Reply with exactly: two
+
+
+• two
+
+  Worked for 2s • 5:04 PM
+
+
+› Reply with exactly:
+   plain
+
+
+• plain
+
+  Worked for 1s • 5:04 PM
+
+
+› Run the shell command `sleep 5`, then reply with exactly: slept
+
+
+• Ran sleep 5
+  └ (no output)
+
+
+› Also add the word: queued
+
+
+• slept queued
+
+  Worked for 8s • 5:05 PM
+
+
+› Ask Codex to do anything
+
+  GPT-6-Luna low · $CWD · Reply with exactly two
+  ? for shortcuts                                                                              ⚠ 1 warning · f2 to view
+

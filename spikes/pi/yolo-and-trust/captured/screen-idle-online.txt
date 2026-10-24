@@ -1,0 +1,22 @@
+
+ pi v0.85.1
+ escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash · ctrl+o more
+ Press ctrl+o to show full startup help and loaded resources.
+
+ Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+[Extensions]
+  terrarium.ts
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Update Available
+ New version 1.4.0 is available. Run pi update
+ Changelog: https://pi.dev/changelog
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+$CWD
+$0.000 (sub) 0.0%/272k (auto)                                                 (openai-codex) gpt-5.6-luna • thinking off

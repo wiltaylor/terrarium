@@ -1,0 +1,152 @@
+===== early-0.3s (t=0.7s) =====
+
+
+===== idle-start (t=1.7s) =====
+
+
+===== typed-after-LF (t=2.8s) =====
+
+
+
+
+
+
+
+
+
+
+
+
+abc
+
+===== idle-after-ctrl-c-clear (t=3.4s) =====
+
+
+===== busy-T1 (t=3.9s) =====
+
+
+===== idle-after-T1 (t=6.4s) =====
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ two
+
+===== busy-T3-tool (t=7.9s) =====
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ two
+
+===== busy-typed-T4 (t=8.3s) =====
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ two
+
+
+
+
+
+
+
+
+
+
+
+
+Also add the word: queued
+
+===== busy-after-T4-enter (t=9.3s) =====
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ two
+
+===== idle-after-T3-T4 (t=15.6s) =====
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ two
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ slept queued
+

@@ -1,0 +1,101 @@
+{
+  "sessionStart": {
+    "sessionId": "str",
+    "timestamp": "int",
+    "cwd": "str",
+    "source": "str",
+    "initialPrompt": "str"
+  },
+  "SessionStart": {
+    "hook_event_name": "str",
+    "session_id": "str",
+    "timestamp": "str",
+    "cwd": "str",
+    "source": "str",
+    "initial_prompt": "str"
+  },
+  "userPromptSubmitted": {
+    "sessionId": "str",
+    "timestamp": "int",
+    "cwd": "str",
+    "prompt": "str"
+  },
+  "UserPromptSubmit": {
+    "hook_event_name": "str",
+    "session_id": "str",
+    "timestamp": "str",
+    "cwd": "str",
+    "prompt": "str"
+  },
+  "preToolUse": {
+    "sessionId": "str",
+    "timestamp": "int",
+    "cwd": "str",
+    "toolName": "str",
+    "toolArgs": "dict"
+  },
+  "PreToolUse": {
+    "hook_event_name": "str",
+    "session_id": "str",
+    "timestamp": "str",
+    "cwd": "str",
+    "tool_name": "str",
+    "tool_input": "dict"
+  },
+  "PermissionRequest": {
+    "hookName": "str",
+    "sessionId": "str",
+    "timestamp": "int",
+    "cwd": "str",
+    "toolName": "str",
+    "toolInput": "dict",
+    "permissionSuggestions": "list"
+  },
+  "postToolUse": {
+    "sessionId": "str",
+    "timestamp": "int",
+    "cwd": "str",
+    "toolName": "str",
+    "toolArgs": "dict",
+    "toolResult": "dict"
+  },
+  "PostToolUse": {
+    "hook_event_name": "str",
+    "session_id": "str",
+    "timestamp": "str",
+    "cwd": "str",
+    "tool_name": "str",
+    "tool_input": "dict",
+    "tool_result": "dict"
+  },
+  "agentStop": {
+    "sessionId": "str",
+    "timestamp": "int",
+    "cwd": "str",
+    "transcriptPath": "str",
+    "stopReason": "str",
+    "stop_hook_active": "bool"
+  },
+  "Stop": {
+    "hook_event_name": "str",
+    "session_id": "str",
+    "timestamp": "str",
+    "cwd": "str",
+    "transcript_path": "str",
+    "stop_reason": "str",
+    "stop_hook_active": "bool"
+  },
+  "sessionEnd": {
+    "sessionId": "str",
+    "timestamp": "int",
+    "cwd": "str",
+    "reason": "str"
+  },
+  "SessionEnd": {
+    "hook_event_name": "str",
+    "session_id": "str",
+    "timestamp": "str",
+    "cwd": "str",
+    "reason": "str"
+  }
+}

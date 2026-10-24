@@ -1,0 +1,69 @@
+{
+  "hooks_before_first_turn": [],
+  "routes_that_fired": {
+    "homedir": [
+      "sessionStart",
+      "SessionStart",
+      "userPromptSubmitted",
+      "UserPromptSubmit",
+      "preToolUse",
+      "PreToolUse",
+      "PermissionRequest",
+      "postToolUse",
+      "PostToolUse",
+      "agentStop",
+      "Stop",
+      "sessionEnd",
+      "SessionEnd"
+    ],
+    "settings": [
+      "SessionStart",
+      "UserPromptSubmit",
+      "PreToolUse",
+      "PermissionRequest",
+      "PostToolUse",
+      "Stop",
+      "SessionEnd"
+    ],
+    "repo": [
+      "SessionStart",
+      "UserPromptSubmit",
+      "PreToolUse",
+      "PermissionRequest",
+      "PostToolUse",
+      "Stop",
+      "SessionEnd"
+    ],
+    "plugin-root": [
+      "SessionStart",
+      "UserPromptSubmit",
+      "PreToolUse",
+      "PermissionRequest",
+      "PostToolUse",
+      "Stop",
+      "SessionEnd"
+    ]
+  },
+  "exit_s": 1.3050909042358398,
+  "home_tree": [
+    "command-history-state.json",
+    "config.json",
+    "hooks.jsonl",
+    "hooks/terrarium.json",
+    "logs/.copilot-log.lock",
+    "logs/process-1792825860692-151505.log",
+    "open-sessions-state.json",
+    "session-state/.session-operation-locks/3c27d166-9952-489f-8b96-969b46c533c1.lock",
+    "session-state/3c27d166-9952-489f-8b96-969b46c533c1/.workspace-fork.lock",
+    "session-state/3c27d166-9952-489f-8b96-969b46c533c1/checkpoints/index.md",
+    "session-state/3c27d166-9952-489f-8b96-969b46c533c1/events.jsonl",
+    "session-state/3c27d166-9952-489f-8b96-969b46c533c1/rewind-file-snapshots/tracking.json",
+    "session-state/3c27d166-9952-489f-8b96-969b46c533c1/workspace.yaml",
+    "session-store.db",
+    "session-store.db-shm",
+    "session-store.db-wal",
+    "settings.json",
+    "settings.json.lock",
+    "sidebar-sessions-state/2f91c3688d8ae264d3e22556512c09c66a198107a4e1d92997a4ed241fbddea9.json"
+  ]
+}

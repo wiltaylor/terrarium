@@ -1,0 +1,22 @@
+# pi 0.85.1, --provider anthropic --model claude-haiku-4-5, ANTHROPIC_OAUTH_TOKEN = Claude Code's
+# OAuth access token (Claude Max). Captured from hooks-in-interactive run 2 (1 request, rejected).
+===== idle-after-settled (t=4.1s) =====
+ pi v0.85.1
+ escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash · ctrl+o more
+ Press ctrl+o to show full startup help and loaded resources.
+ Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+[Extensions]
+  terrarium.ts
+ Warning: Anthropic subscription auth is active. Third-party harness usage draws from extra usage and is billed per
+ token, not your Claude plan limits. Manage extra usage at https://claude.ai/settings/usage. Disable this warning in
+ /settings.
+ Use the bash tool to run: echo terrarium-hook-test. Then reply with exactly: done
+ Error: 400 {"type":"error","error":{"type":"invalid_request_error","message":"You're out of extra usage. Add more at
+ claude.ai/settings/usage and keep going."},"request_id":"req_011CgLfbSFqFgtEbNTJtRywU"}
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+$CWD
+0.0%/200k (auto)                                                             (anthropic) claude-haiku-4-5 • thinking off
+
+# message_end event:
+{"hook_event_name": "message_end", "ts": 1792826836981, "pid": 183487, "session_id": "01a16cce-8114-75e2-81b8-6be2953b08e2", "session_file": "$HARNESS_HOME/sessions/<encoded-cwd>--/2026-10-24T07-27-15-221Z_01a16cce-8114-75e2-81b8-6be2953b08e2.jsonl", "cwd": "$CWD", "model": "anthropic/claude-haiku-4-5", "role": "assistant", "provider": "anthropic", "message_model": "claude-haiku-4-5", "usage": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 0, "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0}}, "stop_reason": "error", "last_assistant_message": "", "_rx": 1792826836.9813688}

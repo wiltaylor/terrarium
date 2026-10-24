@@ -302,6 +302,48 @@ The shared file did not change. If the target file does not exist, bwrap
 **creates an empty file** in the shared directory as the mount point, and
 leaves it there.
 
+### Claude inside bwrap
+
+Tested on 2026-10-24, **outside Docker**: CachyOS host, kernel 7.2,
+bubblewrap 0.12.0, Claude Code 2.1.310 (the native build in
+`~/.local/share/claude/versions/`), Claude Max login, model `haiku`. The
+daemon ran in-process with `RunnerSupervisor`, sandbox mode `bwrap`, and
+the real Claude home bound as the shared home (`--harness-home
+claude=$HOME/.claude`). Two model turns in total. The test is
+`crates/terrariumd/tests/e2e_claude.rs` (`--ignored`).
+
+| Topic | Fact | Status |
+|---|---|---|
+| Start in bwrap | The quiet start works in the sandbox. The idle prompt came about 0.3 s after the start call. No dialog. | verified |
+| Hooks from the sandbox | `/opt/terrarium/bin/terrarium hook <Name>` (the CLI bound read-only) reached the runner socket that is bound at `/run/terrarium/agent.sock`. `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, and `Stop` arrived. The hook process gets the launch env (`TERRARIUM_SOCKET`). | verified |
+| Status | `starting` -> `idle` (prompt ready) -> `working` (prompt submitted) -> `idle` (turn ended) -> `stopped`. The turn took about 4 s. | verified |
+| Session ID | `SessionStart` gave the UUID of `--session-id`. `transcript_path` is `/home/agent/.claude/projects/-home-agent-work/<id>.jsonl`: the sandbox path. On the host the file is in the shared home under `projects/-home-agent-work/`. | verified |
+| Agent CLI | Without a prompt to do so, the agent ran `terrarium mail check` and `terrarium card ls --mine` (the default template asks for it). Both went through the runner socket `http` tunnel and answered. | verified |
+| Clear the input box | `draft text` typed with no Enter, then Ctrl-U (`0x15`): the box was empty, the prompt read as ready, and the agent stayed `idle`. Ctrl-U is `ClaudeAdapter::clear_input_keys`. | verified |
+| `--new-session` | With `--new-session`, a PTY resize from 120 to 150 columns did not redraw the screen: the harness has no controlling terminal, so it gets no `SIGWINCH`. Without the flag, it redrew at 150 columns. | verified |
+| `sessions/<pid>.json` | Claude Code writes a live-process record to `$CLAUDE_CONFIG_DIR/sessions/<pid>.json` (and a `<pid>.<hash>.key` file). In the sandbox PID namespace the pid is always `2`, so all agents would write one file, and each agent would see the operator's own sessions. | verified |
+| Other writes to the shared home | `history.jsonl` (the typed prompt), `backups/.claude.json.backup.<ms>` (one each start), `session-env/<id>/`, `shell-snapshots/`, `usage-cache.json`, `projects/-home-agent-work/`. `.credentials.json` and the shared `.claude.json` did not change. | verified |
+| Root of the sandbox | `/lib`, `/lib64`, `/bin`, `/sbin` are symlinks on this host (merged `/usr`). The sandbox makes the same symlinks with `--symlink`. | verified |
+
+Changes that this run made to the sandbox (PLAN §11):
+
+1. `--new-session` is off by default (`--sandbox-new-session` turns it
+   on). It guards against `TIOCSTI` injection into a terminal that the
+   sandbox shares with its parent. Each sandbox has its own PTY here, so an
+   injection can reach only the agent's own input. Kernels from 6.2 also
+   refuse `TIOCSTI` by default (`dev.tty.legacy_tiocsti = 0` on this host).
+2. Each agent gets its own `sessions/` directory, bound over
+   `$CLAUDE_CONFIG_DIR/sessions`, beside the per-agent `.claude.json`.
+   After the change, the record went to the agent dir and the shared
+   `sessions/` did not change.
+3. A harness binary outside `/usr` (the native Claude build in
+   `~/.local/share/claude/versions/`) runs by its real path, and its
+   directory is bound read-only at the same path.
+
+Not tested in this run: Docker (the seccomp profile of "bwrap inside
+Docker" still applies), two agents at the same time on one home, OAuth
+token refresh, `--resume` of a real session, and a question dialog.
+
 ---
 
 ## Changes to the plan
@@ -342,6 +384,11 @@ These facts contradict or change assumptions in `docs/PLAN.md`.
    placeholder.
 10. **`--bare` is not an option** for subscription agents. It drops OAuth and
     all hooks.
+11. **§11 `--new-session`.** It stops PTY resizes from reaching the harness.
+    The sandbox leaves it off by default ("Claude inside bwrap").
+12. **§11 the shared Claude home.** `sessions/<pid>.json` collides in the
+    sandbox PID namespace. Bind a per-agent `sessions/` directory over it,
+    as with `.claude.json`.
 
 ## Surprises
 
@@ -362,8 +409,582 @@ These facts contradict or change assumptions in `docs/PLAN.md`.
   `.credentials.json`, and a rename-over write of a file that is a bind mount.
 - Concurrent writes to one `.claude.json` from many instances.
 - Project `CLAUDE.md` in the workspace with `--setting-sources ""`.
-- Whether the hook process gets the launch environment (for the runner
-  socket path). Claude Code runs hooks as child processes, so it is likely.
 - Claude Code itself inside bwrap inside Docker (PTY, network, home binds).
+  It works outside Docker (see "Claude inside bwrap"). The hook process gets
+  the launch environment: verified there.
 - Managed (policy) settings.
 - `DISABLE_AUTOUPDATER` and `DISABLE_UPDATES` by network capture.
+
+---
+
+## Codex 0.160.0
+
+Tested on 2026-10-24. Same host. ChatGPT Pro login (OAuth, `auth_mode`
+`chatgpt`). Model for all turns: `gpt-6-luna` with
+`model_reasoning_effort="low"`. Spikes are in `spikes/codex/`. Each spike
+copies only `~/.codex/auth.json` into a temp `CODEX_HOME`.
+
+### Summary
+
+| Topic | Fact | Status | Spike |
+|---|---|---|---|
+| Recommended launch | `codex --no-daemon --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust -m <model> -c projects.<cwd>.trust_level="trusted" -c check_for_update_on_startup=false -c analytics.enabled=false -c feedback.enabled=false -c 'hooks.<Event>=[{hooks=[{type="command",command="..."}]}]' ...` with `CODEX_HOME` set | verified | 1, 2 |
+| Hook injection | `-c hooks.<Event>=[...]` works in interactive mode. The binary calls this source `session_flags`. No file in `CODEX_HOME` changes. | verified | 1 |
+| Hook trust | Hooks from `-c` show a "Hooks need review" dialog (default "Review hooks") unless `--dangerously-bypass-hook-trust` is given. The flag adds a start-up warning ("⚠ 1 warning · f2 to view"). | verified | 2 |
+| Hook events | `SessionStart`, `SessionEnd`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PermissionRequest`, `Stop`, `SubagentStart`, `SubagentStop`, `PreCompact`, `PostCompact`. There is no `Notification` event. An unknown event name is ignored without a message. | verified (list from the binary; codex counts 11) | 1, 2 |
+| Hooks that fire in one turn | `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`; `SessionEnd` at exit | verified | 1 |
+| `SessionStart` timing | It does **not** fire at start-up. It fires when the first prompt is submitted, 0.45 s after the Enter byte, just before `UserPromptSubmit`. No session file exists before the first prompt. | verified | 1 |
+| Hook payload IDs | Every payload has `session_id`, `transcript_path`, `cwd`, `hook_event_name`, `model`, `permission_mode` (except `SessionEnd`). Turn hooks also have `turn_id`. `Stop` has `last_assistant_message`. | verified | 1 |
+| "Turn ended" | `Stop` | verified | 1 |
+| "Needs input" | `PermissionRequest` is the only candidate. It did not fire in yolo mode. The `request_user_input` tool was not tried. | not tested | — |
+| `UserPromptSubmit` latency | 0.86 s for the first prompt (the session is created first), 0.04 s after that | verified | 5 |
+| Yolo | `--dangerously-bypass-approvals-and-sandbox` and `-a never -s danger-full-access` both show "permissions: YOLO mode" in the header. No "are you sure" dialog. | verified | 2 |
+| Trust dialog | Only in a git repository: "Folder access … Trust this folder?" (default "1. Trust and continue"). A cwd that is not a git repo has no dialog. | verified | 2 |
+| Trust pre-seed | `-c projects.<cwd>.trust_level="trusted"` (no quotes round the path) removes the dialog. The path must not contain a dot, because `-c` splits the key on dots. A `[projects."<cwd>"]` table in `config.toml` also works. | verified | 2 |
+| Update banner | Shows when `version.json` has a newer `latest_version`. `-c check_for_update_on_startup=false` removes it. | verified | 2 |
+| App-server daemon | A start with **no** `-c` override starts a detached `codex app-server --managed-daemon` and a `pid-update-loop`. Both outlive the TUI. They copy 736 MB into `$CODEX_HOME/packages/`. Any `-c` or `--enable` override, or `--no-daemon`, runs the TUI without the daemon. | verified | 2 |
+| Quiet keys | `check_for_update_on_startup`, `analytics.enabled`, `feedback.enabled`, `tui.resume_cwd`, `developer_instructions`, `model_instructions_file` are known keys (`--strict-config` accepts them; an unknown key fails). | verified | 2 |
+| Prompt ready | 0.28 to 0.37 s after spawn. The composer shows for about 0.35 s **before** a start-up dialog replaces it. | verified | 2, 5 |
+| Set session ID | Not possible. Read it from the `SessionStart` hook. `/status` also shows it before the first turn. | verified | 3, 8 |
+| Resume | `codex resume <id>`. `SessionStart.source` is `resume`. The ID stays the same. | verified | 3 |
+| Resume a missing ID | Exits at once: `ERROR: No saved session found with ID <id>.` | verified | 3 |
+| Resume from another cwd | A "Working directory · resume" dialog asks which cwd to use. `-c tui.resume_cwd="session"` removes it. | verified | 3, 5 |
+| Two resumes of one ID | The second shows "This conversation is open in another app … r retry f fork esc/ctrl+c/q exit" and waits. | verified | 3 |
+| Clean exit | `/exit` then CR. The process exits after 0.05 to 5.1 s. `SessionEnd.reason` = `other`. The exit text has the token usage and `codex resume <id>`. | verified | 1, 3 |
+| Session file | `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<local time>-<id>.jsonl`, plus `$CODEX_HOME/session_index.jsonl` (`id`, `thread_name`, `updated_at`). The hook `transcript_path` gives the exact path. | verified | 3 |
+| Usage in the session file | `token_usage_record` and `event_msg/token_count` records. `token_count` also carries `rate_limits` with the plan. See "Usage accounting". | verified | 3 |
+| `model_instructions_file` | Replaces the whole base prompt. `session_meta.base_instructions` = the file text, `provenance.type` = `custom`. A missing file stops the start: `failed to read model instructions file`. | verified | 4 |
+| `developer_instructions` | Adds a `developer` message. The default prompt stays. | verified | 4 |
+| `AGENTS.md` | Loaded from the workspace as a `user` message. Works beside `developer_instructions`. | verified | 4 |
+| Prompt on resume | **Frozen.** `codex resume` with a changed `developer_instructions` sent the old text. The new text is not in the session file. | verified | 4 |
+| Submit a turn | Bracketed paste, then CR at once. Newlines stay in the prompt. | verified | 5 |
+| Bare LF | Adds a new line. It does not submit. | verified | 5 |
+| Type while busy | The text **steers** the running turn: the same `turn_id`, one `Stop` for both prompts. `UserPromptSubmit` for the second prompt came 4.5 s after its CR, at the next model request. | verified | 5 |
+| Auth status | `codex login status`: stderr `Logged in using ChatGPT`, exit 0. No login: `Not logged in`, exit 1. | verified | 7 |
+| Plan | `id_token` claim `https://api.openai.com/auth.chatgpt_plan_type` (`pro`). `/status` shows `Account: Pro 200`. `token_count.rate_limits.plan_type` = `pro`. | verified | 7, 8 |
+| Quota | `/status` shows `Weekly limit: [███…] 100% left (resets 7:42 AM on 31 Oct)` with no turn sent. | verified | 8 |
+| `exec --json` names | `thread.started`, `turn.started`, `turn.completed`, `turn.failed`, `item.started`, `item.completed`, `error` | read (binary) | — |
+
+### Hooks
+
+Sequence for one turn with one shell call (spike 1, times from the Enter
+byte):
+
+| t (s) | Hook | Useful fields |
+|---|---|---|
+| 0.45 | `SessionStart` | `source` (`startup` or `resume`), `model`, `permission_mode` (`bypassPermissions`) |
+| 0.46 | `UserPromptSubmit` | `prompt`, `turn_id` |
+| 2.43 | `PreToolUse` | `tool_name` (`Bash`), `tool_input.command`, `tool_use_id` |
+| 2.50 | `PostToolUse` | `tool_response` (a string: the output) |
+| 3.69 | `Stop` | `last_assistant_message`, `stop_hook_active` |
+| 25.29 | `SessionEnd` | `reason` (`other` after `/exit`) |
+
+The payloads are in `spikes/codex/hooks-in-interactive/captured/hooks.jsonl`.
+The hook format is the Claude Code format (`hooks.<Event>` = a list of
+`{matcher?, hooks: [{type: "command", command, timeout?}]}`).
+
+Notes:
+
+- The user's own `~/.codex/hooks.json` and `[hooks.state]` trust hashes
+  are in the shared home. With a shared `CODEX_HOME`, those hooks also fire
+  in each agent. The spikes used an empty `CODEX_HOME`, so this is not
+  verified. No Codex equivalent of `--setting-sources ""` was found.
+- `PermissionRequest` did not fire in yolo mode. A Codex agent in yolo mode
+  has no hook for "needs input".
+
+### Quiet start
+
+To get to the idle composer with no dialog:
+
+1. Set `CODEX_HOME` to the harness home.
+2. Pass `--no-daemon`.
+3. Pass `-c projects.<cwd>.trust_level="trusted"` (or put the table in
+   `config.toml`). This matters only in a git repository.
+4. Pass `--dangerously-bypass-hook-trust` with the `-c hooks...` overrides.
+5. Pass `-c check_for_update_on_startup=false`.
+6. On resume, pass `-c tui.resume_cwd="session"`.
+
+First screen for each variant (spike 2):
+
+| Variant | First screen |
+|---|---|
+| no flags, not a git repo | idle composer |
+| no flags, git repo | "Folder access" trust dialog |
+| yolo, git repo | "Folder access" trust dialog |
+| `-a never -s danger-full-access` + trust by `-c` | idle composer, "permissions: YOLO mode" |
+| yolo + trust + `-c` hooks | "Hooks need review" dialog |
+| yolo + trust + hooks + `--dangerously-bypass-hook-trust` | idle composer, "⚠ 1 warning" |
+| newer version in `version.json` | idle composer under an "Update available!" box |
+| same + `check_for_update_on_startup=false` | idle composer, no box |
+
+Codex writes `config.toml` on the first start (`[tui]
+screen_reader_detection_done = true`, `[tui.model_availability_nux]`). It
+also writes `installation_id`, `models_cache.json`, `version.json`, and
+several SQLite files (`state_5`, `logs_2`, `memories_1`, `goals_1`,
+`queue_1`) into `CODEX_HOME`. With a temp `CODEX_HOME` under `/tmp` it
+prints "Refusing to create helper binaries under temporary dir".
+
+### Session file and usage accounting
+
+Record types in one two-turn session: `session_meta`, `turn_context`,
+`response_item/message`, `world_state`, `token_usage_record`,
+`event_msg/{task_started, item_completed, token_count, task_complete,
+thread_settings_applied}`.
+
+`token_usage_record` (one per model response):
+
+```json
+{"type": "token_usage_record", "payload": {"thread_id": "<id>", "turn_id": "<id>",
+ "response_id": "resp_...", "usage": {"input_tokens": 14160, "cached_input_tokens": 11392,
+ "cache_write_input_tokens": 0, "output_tokens": 5, "reasoning_output_tokens": 0,
+ "total_tokens": 14165}, "turn_token_usage": {...}, "thread_token_usage": {...}}}
+```
+
+`event_msg/token_count` (running totals plus the rate limits):
+
+```json
+{"type": "token_count", "info": {"total_token_usage": {...}, "last_token_usage": {...},
+ "model_context_window": 258400},
+ "rate_limits": {"limit_id": "codex", "primary": {"used_percent": 0.0,
+ "window_minutes": 10080, "resets_at": 1793396550}, "secondary": null,
+ "credits": {"has_credits": false, "unlimited": false, "balance": "0"},
+ "plan_type": "pro", "rate_limit_reached_type": null}}
+```
+
+Rules for the tailer:
+
+- Use `token_usage_record.usage` per response. It has a `response_id` for
+  de-duplication. `thread_token_usage` is the running total.
+- The model name is in `turn_context.model` (one per turn), not in the
+  usage record.
+- `token_count.rate_limits` is a free quota probe: it comes with every
+  turn. On this Pro plan only the 7-day primary window was present.
+- `session_meta` holds `creator_user_id` and `creator_account_id`, and the
+  whole base prompt in `base_instructions`.
+
+### Typing into the TUI
+
+The idle screen ends like this (spike 5):
+
+```
+› Ask Codex to do anything          <- placeholder, drawn dim (SGR 2)
+  GPT-6-Luna low · /path · <title>
+  ? for shortcuts                                       ⚠ 1 warning · f2 to view
+```
+
+While it works, a line `• Working (1s • esc to interrupt)` is above the
+composer.
+
+Detector (`screen_state()` in `spikes/codex/lib/codexlib.py`):
+
+1. The composer is the last line that starts with `›` and is not a
+   numbered option (`› 1. …`).
+2. The input text is the text after `›` with dim characters blanked
+   (`Session.dim_mask()`). The placeholder is dim.
+3. `busy` = "esc to interrupt" or "Working (Ns" in the four lines above the
+   composer or in the footer.
+4. `dialog` = one of the last six non-empty lines has "enter continue",
+   "enter confirm", "· esc quit/skip/cancel/use session", or
+   "esc/ctrl+c/q exit".
+5. `ready` = composer, empty input, not busy, no dialog, **and the same for
+   1 s**. The composer flashes for about 0.35 s before a trust dialog.
+
+`typing-into-tui/detector_check.py` runs the detector on 23 captured
+screens (idle, busy, typed, trust, hook review, update banner, resume cwd,
+"open in another app"). All were correct. The composer can hold more than
+one line; the detector reads only the first.
+
+---
+
+## Codex: facts that contradict the plan
+
+1. **§4 and §21 version pinning.** A start with no `-c` override starts a
+   shared app-server daemon in `CODEX_HOME`, which outlives the TUI, copies
+   736 MB into `packages/`, and runs an update loop. On this host the user's
+   own daemon is already 0.164.0 while the CLI is 0.160.0. Always pass
+   `--no-daemon`.
+2. **§7 step 3 (prompt-submit hook timeout and retry).** For text typed
+   while busy, `UserPromptSubmit` came 4.5 s later, at the next model
+   request. A short timeout plus "retry once" would type the text twice.
+   The first prompt of a session also takes 0.86 s.
+3. **§7 "Set session ID".** There is no flag. `SessionStart` fires only at
+   the first prompt, so the runner has no session ID until the first turn
+   (except by reading `/status`).
+4. **§7 blocked detection.** There is no `Notification` event, and
+   `PermissionRequest` does not fire in yolo mode. Codex gives no hook for
+   "needs input".
+5. **§8 system prompt.** `model_instructions_file` **replaces** the base
+   prompt. To append, use `-c developer_instructions=...`. Both are frozen
+   at session creation: a changed template does not apply on
+   `codex resume`.
+6. **§4 trust.** `--skip-git-repo-check` is an `exec` flag. The interactive
+   trust dialog shows only in a git repository. Use
+   `-c projects.<cwd>.trust_level="trusted"`; the path must have no dot.
+7. **§8 hooks.** Hooks passed by `-c` need `--dangerously-bypass-hook-trust`
+   or a dialog blocks the start.
+8. **§7 typing while busy.** The text steers the running turn (one `Stop`
+   for two prompts), as with Claude Code.
+
+## Codex: surprises
+
+- `/status` shows the session ID, the plan ("Pro 200"), and the weekly
+  limit before any turn.
+- The composer is drawn before the trust dialog, so a fast "ready" check
+  can type into a screen that is about to change.
+- `/exit` took 5 s in some runs.
+
+## Codex: not tested
+
+- The user's `~/.codex/hooks.json` with a shared `CODEX_HOME` (it would
+  likely fire in every agent).
+- `request_user_input` (question tool) and how to answer it.
+- A changed `model_instructions_file` on resume.
+- Whether the `/status` session ID equals the later `SessionStart`
+  `session_id`.
+- OAuth token refresh with many instances on one home.
+
+---
+
+## Copilot CLI 1.0.103
+
+Tested on 2026-10-24. Same host. GitHub Copilot subscription on the legacy
+premium-request billing. Model for all turns: `claude-haiku-4.5` (0.33x).
+`gpt-5-mini` (0x) shows as "Unavailable" in `/model`. Spikes are in
+`spikes/copilot/`. Each spike uses an empty temp `COPILOT_HOME`: the token
+is in the system keychain, so no file is copied.
+
+### Summary
+
+| Topic | Fact | Status | Spike |
+|---|---|---|---|
+| Recommended launch | `COPILOT_HOME=<home> COPILOT_ALLOW_ALL=true COPILOT_AUTO_UPDATE=false copilot --yolo --no-auto-update --disable-client-telemetry --model <m> --plugin-dir <terrarium plugin> [--experimental --plugin-dir <prompt extension>] [--session-id <uuid>]` | verified | 1, 2, 4 |
+| Hook routes | Four routes fire: `$COPILOT_HOME/hooks/*.json`, `hooks` in `$COPILOT_HOME/settings.json`, `--plugin-dir <dir>` with `hooks.json` at the plugin root, and `<cwd>/.github/hooks/*.json` (trusted folder). A plugin's `hooks/hooks.json` did **not** fire. | verified | 1 |
+| Hook injection by flag | `--plugin-dir <dir>` with `plugin.json` and `hooks.json`. Nothing in `COPILOT_HOME` changes. There is no `--additional-mcp-config`-style flag for hooks. | verified | 1 |
+| Hook format | `{"version": 1, "hooks": {"<Event>": [{"type": "command", "bash": "<cmd>", "timeoutSec": 10}]}}` | verified | 1 |
+| Two payload dialects | PascalCase names (`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`, `SessionEnd`, `Notification`) get snake_case keys (`hook_event_name`, `session_id`, `tool_name`, ...). camelCase names (`sessionStart`, `userPromptSubmitted`, `preToolUse`, `postToolUse`, `agentStop`, `sessionEnd`) get camelCase keys (`sessionId`, `toolName`, ...). `PermissionRequest` has camelCase keys either way. | verified | 1 |
+| Hooks that fire in one turn | `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `Stop`; `SessionEnd` at exit | verified | 1 |
+| `SessionStart` timing | Fires at the first prompt, not at start-up. It has `source` (`new`, `resume`) and `initial_prompt`. | verified | 1, 3 |
+| Payload IDs | Every payload has `session_id` and `cwd`. Only `Stop` has `transcript_path`. `Stop` has `stop_reason` (`end_turn`) but no assistant text. | verified | 1 |
+| `PermissionRequest` | Fires for **every** tool call, also with `--yolo` and Allow All. It is not a "needs input" signal. | verified | 1 |
+| "Needs input" | `Notification` with `notification_type` = `elicitation_dialog` ("Information requested"), after `PreToolUse` with `tool_name` = `AskUserQuestion`. | verified | 5 |
+| "Turn ended" | `Stop`. See the notes: a background shell can start another agent turn after it. | verified | 5 |
+| Idle `Notification` | None in 20 s of idle. | verified | 1 |
+| Yolo | `--yolo` alone: folder-trust dialog. `COPILOT_ALLOW_ALL=true` alone: no dialog, but the footer says "Manual Approval". Both: no dialog, "Allow All". `COPILOT_ALLOW_ALL=1` does not trust the folder. | verified | 2 |
+| Trust dialog | "Confirm folder trust … ❯ 1. Yes / 2. Yes, and remember / 3. No (Esc)". The default is "Yes". `COPILOT_ALLOW_ALL=true` or `config.json` `trustedFolders: ["<cwd>"]` removes it. | verified | 2 |
+| Prompt ready | 0.36 to 0.45 s after spawn; 2.6 s to the trust dialog | verified | 2, 5 |
+| Set session ID | `--session-id <uuid>` works. The hook `session_id` is the same UUID. | verified | 3 |
+| Reuse a session ID | `--session-id <used uuid>` **resumes** the session. No error. | verified | 3 |
+| Resume | `--resume <id>`; `SessionStart.source` = `resume`. It works from another cwd with no dialog. | verified | 3 |
+| Resume a missing ID | Exits: `Error: No session, task, or name matched '<id>'.` | verified | 3 |
+| Two resumes of one ID | Both start. No lock and no warning. | verified | 3 |
+| Clean exit | `/exit` then CR: exits in 1.0 to 1.5 s, `SessionEnd.reason` = `user_exit`. Ctrl-C shows "ctrl+c again to exit"; a second Ctrl-C exits in 0.1 s. The exit screen has the AI credits, tokens, and `copilot --resume=<id>`. | verified | 1, 2, 3 |
+| Session file | `$COPILOT_HOME/session-state/<id>/events.jsonl` plus `workspace.yaml`, `checkpoints/`, `rewind-file-snapshots/`. Also `$COPILOT_HOME/session-store.db`. | verified | 3 |
+| Usage in the session file | `session.usage_record` per model call, `session.usage_checkpoint` and `session.shutdown` with totals. See "Usage accounting". | verified | 3 |
+| System prompt extension | `copilot-custom-system-prompt` 0.1.2 loads only with `--experimental`. It loads from `$COPILOT_HOME/extensions/` after `install`, **or** from `--plugin-dir <package dir>` with no install. | verified | 4 |
+| `APPEND_SYSTEM.md` | Appends to the default prompt (31 475 chars, starts "You are GitHub Copilot"). Sentinel answered. | verified | 4 |
+| `SYSTEM.md` | Replaces the whole prompt (111 chars, no default text). Sentinel answered. | verified | 4 |
+| Prompt on resume | The extension reads the files at each start. `--resume` with a changed `SYSTEM.md` used the new text (a second `system.message` record). | verified | 4 |
+| Submit a turn | Bracketed paste, then CR at once. Newlines stay. The screen showed the paste only after more than 0.2 s. | verified | 5 |
+| Bare LF | Adds a new line. It does not submit. | verified | 5 |
+| Type while busy | Enter **steers**: the text joins the running work, and **no** `UserPromptSubmit` fires for it. The footer offers "ctrl+q enqueue" for a queued message. | verified | 5 |
+| Answer a question | `ask_user` shows a list: "↑/↓ select · enter accept · ctrl+d decline · esc cancel". Down (`ESC [B`) then CR picked option 2. | verified | 5 |
+| Auth status | No `auth status` command. `/user` prints "Signed in to https://github.com as <login> (GitHub.com)". With no token the TUI prints "Please use /login to sign in to use Copilot". | verified | 7 |
+| Quota | `/usage` shows "Requests 0 Premium" and "Weekly ■■■… 0% used • resets on Oct 26 at 10 AM", with no turn sent. | verified | 8 |
+
+### Hooks
+
+Sequence for one turn with one shell call (spike 1, PascalCase route, times
+from `SessionStart`):
+
+| t (s) | Hook | Useful fields |
+|---|---|---|
+| 0.00 | `SessionStart` | `source`, `initial_prompt` |
+| 0.04 | `UserPromptSubmit` | `prompt` |
+| 2.15 | `PreToolUse` | `tool_name` (`Bash`), `tool_input` (`command`, `description`) |
+| 2.28 | `PermissionRequest` | `toolName`, `toolInput`, `permissionSuggestions` (camelCase) |
+| 2.37 | `PostToolUse` | `tool_result.result_type`, `tool_result.text_result_for_llm` |
+| 3.59 | `Stop` | `transcript_path`, `stop_reason`, `stop_hook_active` |
+| exit | `SessionEnd` | `reason` (`user_exit`) |
+
+`UserPromptSubmit` came 0.95 s after the CR for the first prompt and 0.07 s
+for later prompts (spike 5).
+
+Notes:
+
+- Every route fires, and the hooks of all routes run. A shared
+  `COPILOT_HOME` brings the user's `hooks/*.json` (on this host
+  `~/.copilot/hooks/orca.json`) into every agent. There is no way to load
+  only the flag route. `disableAllHooks` would stop all routes (not
+  tested).
+- `UserPromptSubmit` also fires for prompts that Copilot makes itself:
+  `<system_notification> Shell command … has completed </system_notification>`.
+  Do not count it as a delivery.
+- A shell command can run in the background. Then `Stop` fires before the
+  command ends, and a `system_notification` turn starts later, with its own
+  `Stop`.
+
+### Quiet start
+
+1. Set `COPILOT_HOME`.
+2. Set `COPILOT_ALLOW_ALL=true` (folder trust) and pass `--yolo` (Allow
+   All mode). Or put the cwd in `config.json` `trustedFolders`.
+3. Set `COPILOT_AUTO_UPDATE=false` and pass `--no-auto-update`.
+4. Pass `--disable-client-telemetry`.
+
+First screen for each variant (spike 2):
+
+| Variant | First screen | Footer mode |
+|---|---|---|
+| no flags, no env | trust dialog | — |
+| `--yolo` | trust dialog | — |
+| `--yolo`, `COPILOT_ALLOW_ALL=1` | trust dialog | — |
+| `COPILOT_ALLOW_ALL=true` | idle | Manual Approval |
+| `--yolo`, `trustedFolders` in `config.json` | idle | Allow All |
+| `--yolo`, `COPILOT_ALLOW_ALL=true`, not a git repo | idle | Allow All |
+
+The start screen always has a welcome box, a "Discover Auto" box, and tips.
+They do not block. With auto-update on, nothing was downloaded into
+`COPILOT_HOME` in 15 s.
+
+Files outside `COPILOT_HOME`:
+
+- The OAuth token is in the system keychain (libsecret over D-Bus). With
+  the D-Bus address set to a dead path, Copilot starts logged out. `copilot
+  login` offers a plain-text fallback in the config. `COPILOT_GITHUB_TOKEN`,
+  `GH_TOKEN`, `GITHUB_TOKEN` override stored credentials (read).
+- `~/.cache/copilot/` (`COPILOT_CACHE_HOME` or `XDG_CACHE_HOME`, read from
+  the code): `exp-cache.json`, `managed-settings/`, `copilot-user-cache.json`,
+  and the unpacked runtime in `pkg/linux-x64/<version>/`. The spikes wrote
+  to the real `~/.cache/copilot`.
+
+### Session file and usage accounting
+
+Record types in one two-turn session: `session.start`, `session.resume`,
+`session.model_change`, `session.permissions_changed`, `hook.start`,
+`hook.end`, `user.message`, `system.message`, `assistant.turn_start`,
+`assistant.message`, `assistant.turn_end`, `model.*`,
+`session.usage_record`, `session.usage_checkpoint`, `session.shutdown`.
+
+`session.usage_record` (one per model call):
+
+```json
+{"usage": {"model": "claude-haiku-4.5", "provider": {"id": "copilot"},
+ "inputTokens": 20331, "outputTokens": 50, "cacheReadTokens": 13637,
+ "cacheWriteTokens": 6684, "reasoningTokens": 42, "cost": 0.33,
+ "initiator": "user", "isByok": false, "apiCallId": "msg_...",
+ "accounting": {"sourceSessionId": "<id>", "sequence": 1, "usageId": "msg_..."},
+ "copilotUsage": {"totalNanoAiu": 0}, "aiCreditsStatus": "complete"}}
+```
+
+- `cost` is the premium-request multiplier for that call.
+- `session.usage_checkpoint.totalPremiumRequests` is the running total.
+  `session.shutdown.accountingSnapshot.modelMetrics` has per-model totals.
+- The title side call (`gpt-4o-mini`) is only in `model.model_call_success`
+  records, with OpenAI-style `usage`. It is not in `usage_record`.
+- `system.message` holds the system prompt that was sent. The default
+  prompt contains "The current user is @<login>".
+- `workspace.yaml` has `mc_task_id` and `mc_session_id`. This suggests a
+  link to the cloud session history (`--sync-session`). Not tested.
+
+### Typing into the TUI
+
+The idle screen ends like this (spike 5):
+
+```
+ /path [⎇ main]
+────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────
+ ← open sidebar · Interactive · Allow All · / commands · ? help · tab next tab     Claude Haiku 4.5
+```
+
+While it works, the footer is ` ◉ Working esc esc edit prompt` or
+` ◎ Working · 256 B esc esc interrupt · ctrl+q enqueue`.
+
+Detector (`screen_state()` in `spikes/copilot/lib/copilotlib.py`): the
+last two rule lines with a `❯` line between them are the input box;
+`busy` = the footer starts with `◉/◎ Working` or has "esc esc interrupt";
+`dialog` = "↑/↓ (to) navigate/select" or "enter (to) select/accept" in the
+last six lines. `typing-into-tui/detector_check.py` checked 12 screens plus
+the 8 start-up screens. All were correct. One capture (the paste 0.2 s
+after it was sent) was not drawn yet; it is labelled `lag-`.
+
+---
+
+## Copilot CLI: facts that contradict the plan
+
+1. **§4 hooks "loaded from the trusted workspace".** Hooks load from four
+   places. Use `--plugin-dir` for Terrarium's hooks. The shared home's
+   own hooks (`hooks/*.json`, `settings.json`) also run in every agent, and
+   there is no switch that keeps them out.
+2. **§8 prompt extension install.** The extension does not need to be
+   installed into the shared home: `--plugin-dir <package dir>` loads it.
+   Only `SYSTEM.md` / `APPEND_SYSTEM.md` must be at `$COPILOT_HOME/`, so the
+   per-agent file bind of §8 is still needed for the prompt file.
+3. **§4 yolo.** `--yolo` does not skip the trust dialog. It needs
+   `COPILOT_ALLOW_ALL=true` (exactly `true`). `COPILOT_ALLOW_ALL=true` alone
+   does not give Allow All mode.
+4. **§7 "needs input".** `PermissionRequest` fires for every tool call even
+   in Allow All mode. Use `Notification` with `elicitation_dialog`.
+5. **§7 step 3.** Text typed while busy fires no `UserPromptSubmit`, and
+   `UserPromptSubmit` also fires for Copilot's own system notifications.
+   The prompt-submit hook is not a reliable delivery receipt.
+6. **§7 "turn ended".** `Stop` can fire while a background shell still
+   runs; a later system-notification turn follows.
+7. **§8 session ID.** `--session-id <used uuid>` resumes instead of
+   failing. Two processes can resume one session at the same time with no
+   warning. The daemon must prevent a second start itself.
+8. **§11 shared home.** Copilot also writes `~/.cache/copilot/`, and its
+   token is in the D-Bus keychain, which a sandbox does not have. A sandbox
+   needs `COPILOT_GITHUB_TOKEN` (or the plain-text fallback) and a cache
+   directory.
+9. **§16.2 usage.** The plan is on legacy premium requests, not AI credits.
+   `session.usage_record.cost` is the multiplier. The cheapest available
+   model is 0.33x.
+
+## Copilot CLI: surprises
+
+- The default system prompt names the GitHub login.
+- A plugin's `hooks/hooks.json` (Claude plugin layout) does not load; the
+  plugin-root `hooks.json` does.
+- The paste is drawn late (more than 0.2 s), but the CR right after it
+  still submits the full text.
+
+## Copilot CLI: not tested
+
+- `disableAllHooks` with the `--plugin-dir` route.
+- Hooks without folder trust.
+- The keychain-less start inside a container, and the plain-text token
+  fallback.
+- `--sync-session` and what `mc_task_id` sends to GitHub.
+- Concurrent writes to one `session-state/<id>/` from two processes.
+
+---
+
+## pi 0.85.1
+
+Tested on 2026-10-24. Same host. pi has **no** OAuth login on this host
+(`~/.pi/agent/auth.json` is `{}`). It has three custom LAN providers with
+API keys in `models.json`. Model for the completed turns:
+`openai-codex/gpt-5.6-luna`, thinking off, with a copy of Codex's access
+token (see "Auth"). Spikes are in `spikes/pi/`. Each spike uses a temp
+`PI_CODING_AGENT_DIR` with a copy of `models.json` and a new `auth.json`.
+
+### Summary
+
+| Topic | Fact | Status | Spike |
+|---|---|---|---|
+| Recommended launch | `PI_CODING_AGENT_DIR=<dir> PI_OFFLINE=1 PI_TELEMETRY=0 TERRARIUM_SOCKET=<sock> pi --provider <p> --model <m> --thinking <t> --offline -e <terrarium.ts> --no-skills --session-id <uuid> [--system-prompt <text>] [--append-system-prompt <text or file>]` | verified | 1, 3, 4 |
+| Event extension | `spikes/pi/terrarium-ext/terrarium.ts`, loaded with `-e`, sends one JSON line per event to `TERRARIUM_SOCKET` (Unix socket). It works in interactive mode. | verified | 1 |
+| Events in one turn | `input`, `before_agent_start`, `agent_start`, `turn_start`, `message_end`, `tool_execution_start`, `tool_execution_end`, `turn_end` (repeat per model call), `agent_end`, `agent_settled` | verified | 1 |
+| Start-up event | `session_start` (`reason` `startup`) fires **at start-up**, 0.35 s after spawn, before any prompt. | verified | 1, 5 |
+| Payload IDs | The extension adds `session_id`, `session_file`, `cwd`, `model` (`<provider>/<id>`) to every line from `ctx.sessionManager` and `ctx.model`. | verified | 1 |
+| "Prompt submitted" | `input`, 0.01 to 0.10 s after the CR. It has `prompt`, `source` (`interactive`), `streaming_behavior` (`null`, `steer`, `followUp`). | verified | 1, 5 |
+| "Turn ended" | `agent_settled` (`ctx.isIdle()` = true). `agent_end` and `turn_end` are not enough: they repeat for each model call and for each automatic retry. | verified | 1 |
+| "Needs input" | `ui_prompt_start` / `ui_prompt_end` (extension UI prompts). pi has no built-in question tool. | read (docs) | — |
+| Tool approval | None. The bash tool ran with no prompt and no flag. `--approve` is about project trust, not tools. | verified | 1 |
+| Project trust | A cwd with `.pi/settings.json` shows "Trust project folder?" (default "→ Trust", which saves to `trust.json`). `--approve`, `--no-approve`, or the extension's `project_trust` answer (`TERRARIUM_TRUST=yes`) remove it. A cwd without `.pi/` has no dialog. | verified | 2 |
+| Update notice | Without `--offline`: "Update Available · New version 1.4.0 is available. Run pi update". `--offline` (or `PI_OFFLINE=1`) removes it. It does not block. | verified | 2 |
+| Global resources | Skills load from `~/.agents/skills` (and other global paths) even with a temp `PI_CODING_AGENT_DIR`. `--no-skills` stops it. `--no-context-files` stops `AGENTS.md`/`CLAUDE.md`. | verified | 2 |
+| Prompt ready | 0.16 to 0.35 s after spawn | verified | 2, 5 |
+| Set session ID | `--session-id <uuid>` works. `session_start.session_id` is the same UUID. The file is created at the first message. | verified | 3 |
+| Reuse a session ID | `--session-id <used uuid>` resumes the session (`reason` stays `startup`). No error. | verified | 3 |
+| Resume | `--session-id <id>` or `--session <id>` in the same cwd | verified | 3 |
+| Session ID from another cwd | `--session-id <id>` starts a **new** session with the same ID in the other project's directory. `--session <id>` asks "Session found in different project … Fork this session into current directory? [y/N]". | verified | 3 |
+| Two starts with one ID | Both start. No lock. | verified | 3 |
+| Clean exit | Ctrl-D on an empty editor or `/quit`: exits in 0.1 s. `session_shutdown.reason` = `quit`. Ctrl-C only clears the editor (two Ctrl-C 1 s apart did not exit). | verified | 1, 3 |
+| Session file | `$PI_CODING_AGENT_DIR/sessions/--<cwd, "/" replaced by "-">--/<UTC time>_<id>.jsonl` (`PI_CODING_AGENT_SESSION_DIR` or `--session-dir` move it) | verified | 3 |
+| Usage in the session file | Each assistant `message` has `provider`, `model`, `usage` with `input`, `output`, `cacheRead`, `cacheWrite`, `reasoning`, `totalTokens`, and `cost` (API-price dollars) | verified | 3 |
+| `--system-prompt` | Replaces the whole default prompt. pi adds only "Current working directory: …". | verified | 4 |
+| `--append-system-prompt` | Appends. The file form (a path) works. | verified | 4 |
+| Prompt on resume | Not frozen. The prompt is built at each start, so a changed `--append-system-prompt` applied on the next start with the same `--session-id`. | verified | 4 |
+| Submit a turn | Bracketed paste, then CR at once. Newlines stay. | verified | 5 |
+| Bare LF | Adds a new line. It does not submit. | verified | 5 |
+| Type while busy | Enter steers. `input` fires at once with `streaming_behavior` = `steer`. One `agent_settled` for both. | verified | 5 |
+| Auth status | `pi auth check --provider <p> --json --no-refresh`: `{"status":"ready","provider":"…","authType":"oauth" or "api_key"}` exit 0, or `{"status":"not_ready",…,"reason":"credentials_not_configured"}` exit 1. Without `--json`: `ready`. | verified | 7 |
+| Quota | None. The footer and `/session` show tokens and cost for the session only (`$0.000 (sub)` for a subscription). | verified | 8 |
+
+### Events
+
+Sequence for one turn with one bash call (spike 1, run 3, times from the
+Enter byte):
+
+| t (s) | Event | Useful fields |
+|---|---|---|
+| -1.04 | `session_start` | `reason` (`startup`), `session_file` |
+| 0.10 | `input` | `prompt`, `source`, `streaming_behavior` |
+| 0.10 | `before_agent_start` | `prompt`, system prompt length and head |
+| 0.10 | `agent_start`, `turn_start` | `turn_index` |
+| 3.19 | `message_end` | `usage`, `stop_reason` (`toolUse`) |
+| 3.19 | `tool_execution_start` | `tool_name` (`bash`), `tool_input`, `tool_call_id` |
+| 3.20 | `tool_execution_end` | `is_error` |
+| 3.20 | `turn_end`, `turn_start` | |
+| 4.08 | `message_end` | `last_assistant_message` (`done`), `stop_reason` (`stop`) |
+| 4.08 | `turn_end`, `agent_end`, `agent_settled` | `idle: true` |
+| 16.22 | `session_shutdown` | `reason` (`quit`, after Ctrl-D) |
+
+With a provider error, pi retries by itself: `agent_start` … `agent_end`
+ran four times (2, 6, 14 s back-off), each `message_end` with
+`stop_reason` = `error`, then one `agent_settled`, and the screen showed
+"Error: Retry failed after 3 attempts: Connection error." (spike 1, run 1
+on the LAN provider; run 3 overwrote that capture, so the notes are in
+`hooks-in-interactive/captured/run1-lan-retry-notes.txt`).
+
+The extension keeps one socket connection, buffers up to 1000 lines while
+it connects, and never blocks pi. `TERRARIUM_EVENT_LOG` adds a file copy.
+`TERRARIUM_TRUST=yes|no` answers the project-trust question.
+`TERRARIUM_FULL_PROMPT=1` adds the full system prompt to
+`before_agent_start` (spikes only).
+
+### Auth and token reuse
+
+| Provider | Result | Status |
+|---|---|---|
+| `~/.pi/agent/auth.json` | `{}`: no OAuth or API-key entries | verified |
+| LAN providers (`glm53-exl3`, `vllm`, `qwen38-helios`) | `auth check` says `ready` (`api_key` from `models.json`). `vllm` and `qwen38-helios` refused connections. `glm53-exl3` answered one `/v1/models` probe (it serves `DeepSeek-V4.1-Flash-1017`, not the configured `GLM-5.3-Flash-EXL3`) and then went down before the first turn. | verified |
+| `anthropic` with `ANTHROPIC_OAUTH_TOKEN` = Claude Code's access token | `auth check` says `ready` (`api_key`). The API **refused** the call: `400 … "You're out of extra usage."` pi's docs say third-party harness use of Claude Pro/Max draws from extra usage, not the plan limits. | verified (1 request) |
+| `openai-codex` with a copy of `~/.codex/auth.json` | Works. The `auth.json` entry is `{"type": "oauth", "access": <access_token>, "refresh": "", "expires": <JWT exp ms>, "accountId": <chatgpt_account_id>}`. The refresh token is left empty, so pi can never rotate the host's Codex refresh token; the entry fails when the access token expires (73 h left at the test). | verified |
+| `github-copilot`, `google`, `xai`, `openrouter` | `not_ready`, `credentials_not_configured` | verified |
+
+`auth check` reports only that a credential is present. It said `ready`
+for a LAN server that was down and for the Anthropic token that the API
+refused. `pi auth print-bearer-token` was not run (it prints the token).
+
+---
+
+## pi: facts that contradict the plan
+
+1. **§4 and §16 "pi is the escape hatch, one harness for many
+   subscriptions".** On this host pi has no OAuth login. A Claude Pro/Max
+   OAuth token through pi is billed as extra usage, not the plan: pi cannot
+   spend the Claude Max subscription. The Codex (ChatGPT Pro) plan works
+   through pi. A copied credential with a shared refresh token can rotate
+   the host's token; the safe copy has no refresh token and expires.
+2. **§4 "`--session <id>` or `--session-id <id>`".** `--session-id` creates
+   or resumes and never fails. It is scoped to the cwd: the same ID in
+   another cwd is a different session. `--session <id>` from another cwd
+   blocks on a `[y/N]` fork question.
+3. **§7 "turn ended".** Use `agent_settled`. `agent_end` fires once per
+   attempt, also for each automatic retry after an error.
+4. **§8 quiet start.** `--approve` is project trust, not tool approval. pi
+   never asks before a tool. Global skills from `~/.agents/skills` load
+   from outside `PI_CODING_AGENT_DIR`; pass `--no-skills` or give the
+   sandbox its own `$HOME`.
+5. **§16.2 `pi auth print-bearer-token` for probes.** Not checked. `pi auth
+   check` cannot tell a usable credential from a refused one.
+6. **§7 exit.** Ctrl-C does not exit pi. Use Ctrl-D on an empty editor or
+   `/quit`.
+
+## pi: surprises
+
+- `--system-prompt` also drops pi's tool guidance. Only the cwd line is
+  added.
+- The session file name has the UTC start time and the ID; the extension
+  can report the path before the file exists.
+
+## pi: not tested
+
+- `ui_prompt_start` with a real extension prompt.
+- Compaction events.
+- A Copilot subscription through pi (`github-copilot` provider).
+- `pi auth print-bearer-token` and the provider usage endpoints.

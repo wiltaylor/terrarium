@@ -1,0 +1,54 @@
+{
+  "session_start_event_s": 0.35089755058288574,
+  "stable_s": 1.73,
+  "L_lf_submitted": false,
+  "L_alive_after_ctrl_c": true,
+  "T1_input_event_s": 0.010113716125488281,
+  "T1_prompt": "First line.\nSecond line.\nReply with exactly: two",
+  "T1_reply": "two",
+  "T3_T4": {
+    "inputs": [
+      [
+        -1.4,
+        "Use the bash tool to run: sleep 5. Then reply with exactly: slept",
+        null
+      ],
+      [
+        0.4,
+        "Also add the word: queued",
+        "steer"
+      ]
+    ],
+    "agent_runs": [
+      [
+        -4.38,
+        "agent_start"
+      ],
+      [
+        -2.82,
+        "agent_end"
+      ],
+      [
+        -2.82,
+        "agent_settled"
+      ],
+      [
+        -1.4,
+        "agent_start"
+      ],
+      [
+        5.78,
+        "agent_end"
+      ],
+      [
+        5.78,
+        "agent_settled"
+      ]
+    ],
+    "replies": [
+      "two",
+      "",
+      "slept queued"
+    ]
+  }
+}

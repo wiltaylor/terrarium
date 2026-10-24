@@ -1,0 +1,42 @@
+{
+  "ready_s": 0.31,
+  "hooks_before_first_turn": [],
+  "sequence": [
+    [
+      "SessionStart",
+      0.445
+    ],
+    [
+      "UserPromptSubmit",
+      0.462
+    ],
+    [
+      "PreToolUse",
+      2.426
+    ],
+    [
+      "PostToolUse",
+      2.496
+    ],
+    [
+      "Stop",
+      3.687
+    ],
+    [
+      "SessionEnd",
+      25.293
+    ]
+  ],
+  "exit_s": 0.0501556396484375,
+  "events": [
+    "PostToolUse",
+    "PreToolUse",
+    "SessionEnd",
+    "SessionStart",
+    "Stop",
+    "UserPromptSubmit"
+  ],
+  "session_files": [
+    "sessions/2026/10/24/rollout-2026-10-24T16-54-58-01a16cb0-f46c-7ea2-a000-55803cbcdad5.jsonl"
+  ]
+}

@@ -1,0 +1,72 @@
+{
+  "events_before_first_turn": [
+    "session_start"
+  ],
+  "sequence": [
+    [
+      "session_start",
+      -1.036
+    ],
+    [
+      "input",
+      0.102
+    ],
+    [
+      "before_agent_start",
+      0.103
+    ],
+    [
+      "agent_start",
+      0.103
+    ],
+    [
+      "turn_start",
+      0.103
+    ],
+    [
+      "message_end",
+      3.193
+    ],
+    [
+      "tool_execution_start",
+      3.194
+    ],
+    [
+      "tool_execution_end",
+      3.201
+    ],
+    [
+      "turn_end",
+      3.201
+    ],
+    [
+      "turn_start",
+      3.201
+    ],
+    [
+      "message_end",
+      4.075
+    ],
+    [
+      "turn_end",
+      4.075
+    ],
+    [
+      "agent_end",
+      4.075
+    ],
+    [
+      "agent_settled",
+      4.075
+    ],
+    [
+      "session_shutdown",
+      16.224
+    ]
+  ],
+  "exit_ctrl_d_s": 0.10047769546508789,
+  "approval_prompt_seen": false,
+  "session_files": [
+    "sessions/<encoded-cwd>--/2026-10-24T07-28-23-401Z_01a16ccf-8b68-73eb-9298-a210157d8f44.jsonl"
+  ]
+}

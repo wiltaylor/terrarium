@@ -1,0 +1,117 @@
+{
+  "real_auth_json_providers": [],
+  "real_auth_json_oauth_providers": [],
+  "real": {
+    "anthropic": {
+      "rc": 1,
+      "stdout": "{\"status\":\"not_ready\",\"provider\":\"anthropic\",\"reason\":\"credentials_not_configured\"}",
+      "stderr": ""
+    },
+    "openai-codex": {
+      "rc": 1,
+      "stdout": "{\"status\":\"not_ready\",\"provider\":\"openai-codex\",\"reason\":\"credentials_not_configured\"}",
+      "stderr": ""
+    },
+    "github-copilot": {
+      "rc": 1,
+      "stdout": "{\"status\":\"not_ready\",\"provider\":\"github-copilot\",\"reason\":\"credentials_not_configured\"}",
+      "stderr": ""
+    },
+    "google": {
+      "rc": 1,
+      "stdout": "{\"status\":\"not_ready\",\"provider\":\"google\",\"reason\":\"credentials_not_configured\"}",
+      "stderr": ""
+    },
+    "xai": {
+      "rc": 1,
+      "stdout": "{\"status\":\"not_ready\",\"provider\":\"xai\",\"reason\":\"credentials_not_configured\"}",
+      "stderr": ""
+    },
+    "openrouter": {
+      "rc": 1,
+      "stdout": "{\"status\":\"not_ready\",\"provider\":\"openrouter\",\"reason\":\"credentials_not_configured\"}",
+      "stderr": ""
+    },
+    "glm53-exl3": {
+      "rc": 0,
+      "stdout": "{\"status\":\"ready\",\"provider\":\"glm53-exl3\",\"authType\":\"api_key\"}",
+      "stderr": ""
+    },
+    "vllm": {
+      "rc": 0,
+      "stdout": "{\"status\":\"ready\",\"provider\":\"vllm\",\"authType\":\"api_key\"}",
+      "stderr": ""
+    },
+    "qwen38-helios": {
+      "rc": 0,
+      "stdout": "{\"status\":\"ready\",\"provider\":\"qwen38-helios\",\"authType\":\"api_key\"}",
+      "stderr": ""
+    }
+  },
+  "empty": {
+    "anthropic": {
+      "rc": 1,
+      "stdout": "{\"status\":\"not_ready\",\"provider\":\"anthropic\",\"reason\":\"credentials_not_configured\"}",
+      "stderr": ""
+    },
+    "openai-codex": {
+      "rc": 1,
+      "stdout": "{\"status\":\"not_ready\",\"provider\":\"openai-codex\",\"reason\":\"credentials_not_configured\"}",
+      "stderr": ""
+    },
+    "github-copilot": {
+      "rc": 1,
+      "stdout": "{\"status\":\"not_ready\",\"provider\":\"github-copilot\",\"reason\":\"credentials_not_configured\"}",
+      "stderr": ""
+    },
+    "google": {
+      "rc": 1,
+      "stdout": "{\"status\":\"not_ready\",\"provider\":\"google\",\"reason\":\"credentials_not_configured\"}",
+      "stderr": ""
+    },
+    "xai": {
+      "rc": 1,
+      "stdout": "{\"status\":\"not_ready\",\"provider\":\"xai\",\"reason\":\"credentials_not_configured\"}",
+      "stderr": ""
+    },
+    "openrouter": {
+      "rc": 1,
+      "stdout": "{\"status\":\"not_ready\",\"provider\":\"openrouter\",\"reason\":\"credentials_not_configured\"}",
+      "stderr": ""
+    },
+    "glm53-exl3": {
+      "rc": 1,
+      "stdout": "{\"status\":\"not_ready\",\"provider\":\"glm53-exl3\",\"reason\":\"provider_not_found\"}",
+      "stderr": ""
+    },
+    "vllm": {
+      "rc": 1,
+      "stdout": "{\"status\":\"not_ready\",\"provider\":\"vllm\",\"reason\":\"provider_not_found\"}",
+      "stderr": ""
+    },
+    "qwen38-helios": {
+      "rc": 1,
+      "stdout": "{\"status\":\"not_ready\",\"provider\":\"qwen38-helios\",\"reason\":\"provider_not_found\"}",
+      "stderr": ""
+    }
+  },
+  "env-anthropic": {
+    "anthropic": {
+      "rc": 0,
+      "stdout": "{\"status\":\"ready\",\"provider\":\"anthropic\",\"authType\":\"api_key\"}",
+      "stderr": ""
+    }
+  },
+  "codex-copy": {
+    "openai-codex": {
+      "rc": 0,
+      "stdout": "{\"status\":\"ready\",\"provider\":\"openai-codex\",\"authType\":\"oauth\"}",
+      "stderr": ""
+    }
+  },
+  "codex-copy-text": {
+    "rc": 0,
+    "stdout": "ready\n",
+    "stderr": ""
+  }
+}

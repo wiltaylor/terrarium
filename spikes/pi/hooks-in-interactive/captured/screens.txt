@@ -1,0 +1,121 @@
+===== idle-before-turn (t=1.4s) =====
+
+ pi v0.85.1
+ escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash · ctrl+o more
+ Press ctrl+o to show full startup help and loaded resources.
+
+ Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+[Extensions]
+  terrarium.ts
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+$CWD
+$0.000 (sub) 0.0%/272k (auto)                                                 (openai-codex) gpt-5.6-luna • thinking off
+
+===== working-0 (t=1.5s) =====
+
+ pi v0.85.1
+ escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash · ctrl+o more
+ Press ctrl+o to show full startup help and loaded resources.
+
+ Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+[Extensions]
+  terrarium.ts
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Use the bash tool to run: echo terrarium-hook-test. Then reply with exactly: done
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+$CWD
+$0.000 (sub) 0.0%/272k (auto)                                                 (openai-codex) gpt-5.6-luna • thinking off
+
+===== working-8 (t=3.5s) =====
+
+ pi v0.85.1
+ escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash · ctrl+o more
+ Press ctrl+o to show full startup help and loaded resources.
+
+ Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+[Extensions]
+  terrarium.ts
+
+
+ Use the bash tool to run: echo terrarium-hook-test. Then reply with exactly: done
+
+
+── ⠼ Working ───────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+$CWD
+$0.000 (sub) 0.0%/272k (auto)                                                 (openai-codex) gpt-5.6-luna • thinking off
+
+===== idle-after-settled (t=7.6s) =====
+
+ pi v0.85.1
+ escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash · ctrl+o more
+ Press ctrl+o to show full startup help and loaded resources.
+
+ Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+[Extensions]
+  terrarium.ts
+
+
+ Use the bash tool to run: echo terrarium-hook-test. Then reply with exactly: done
+
+
+
+ $ echo terrarium-hook-test
+
+ terrarium-hook-test
+
+ Took 0.0s
+
+
+ done
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+$CWD
+↑1.3k ↓27 R1.0k CH88.2% $0.000 (sub) 0.4%/272k (auto)                         (openai-codex) gpt-5.6-luna • thinking off
+
+===== after-ctrl-d (t=18.2s) =====
+
+ pi v0.85.1
+ escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash · ctrl+o more
+ Press ctrl+o to show full startup help and loaded resources.
+
+ Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+[Extensions]
+  terrarium.ts
+
+
+ Use the bash tool to run: echo terrarium-hook-test. Then reply with exactly: done
+
+
+
+ $ echo terrarium-hook-test
+
+ terrarium-hook-test
+
+ Took 0.0s
+
+
+ done
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+$CWD
+↑1.3k ↓27 R1.0k CH88.2% $0.000 (sub) 0.4%/272k (auto)                         (openai-codex) gpt-5.6-luna • thinking off
+
+To resume this session: pi --session 01a16ccf-8b68-73eb-9298-a210157d8f44
+

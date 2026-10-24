@@ -1,0 +1,64 @@
+{
+  "SessionStart": {
+    "session_id": "str",
+    "transcript_path": "str",
+    "cwd": "str",
+    "hook_event_name": "str",
+    "model": "str",
+    "permission_mode": "str",
+    "source": "str"
+  },
+  "UserPromptSubmit": {
+    "session_id": "str",
+    "turn_id": "str",
+    "transcript_path": "str",
+    "cwd": "str",
+    "hook_event_name": "str",
+    "model": "str",
+    "permission_mode": "str",
+    "prompt": "str"
+  },
+  "PreToolUse": {
+    "session_id": "str",
+    "turn_id": "str",
+    "transcript_path": "str",
+    "cwd": "str",
+    "hook_event_name": "str",
+    "model": "str",
+    "permission_mode": "str",
+    "tool_name": "str",
+    "tool_input": "dict",
+    "tool_use_id": "str"
+  },
+  "PostToolUse": {
+    "session_id": "str",
+    "turn_id": "str",
+    "transcript_path": "str",
+    "cwd": "str",
+    "hook_event_name": "str",
+    "model": "str",
+    "permission_mode": "str",
+    "tool_name": "str",
+    "tool_input": "dict",
+    "tool_response": "str",
+    "tool_use_id": "str"
+  },
+  "Stop": {
+    "session_id": "str",
+    "turn_id": "str",
+    "transcript_path": "str",
+    "cwd": "str",
+    "hook_event_name": "str",
+    "model": "str",
+    "permission_mode": "str",
+    "stop_hook_active": "bool",
+    "last_assistant_message": "str"
+  },
+  "SessionEnd": {
+    "session_id": "str",
+    "transcript_path": "str",
+    "cwd": "str",
+    "hook_event_name": "str",
+    "reason": "str"
+  }
+}

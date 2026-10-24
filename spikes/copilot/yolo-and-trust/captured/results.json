@@ -1,0 +1,205 @@
+{
+  "dialog-plain": {
+    "first_ready_or_dialog_s": 2.69,
+    "ready": false,
+    "dialog": "\u2502 \u2191/\u2193 to navigate \u00b7 enter to select \u00b7 esc to cancel                             ",
+    "footer": null,
+    "home_files": [
+      "config.json",
+      "open-sessions-state.json",
+      "session-state/.session-operation-locks/10e26aa3-8b88-4702-ba84-43d60303a32d.lock",
+      "session-state/10e26aa3-8b88-4702-ba84-43d60303a32d/.workspace-fork.lock",
+      "session-state/10e26aa3-8b88-4702-ba84-43d60303a32d/checkpoints/index.md",
+      "session-state/10e26aa3-8b88-4702-ba84-43d60303a32d/events.jsonl",
+      "session-state/10e26aa3-8b88-4702-ba84-43d60303a32d/workspace.yaml",
+      "settings.json.lock",
+      "sidebar-sessions-state/c9fc980f418b4abaaa962f9c5439a40a494427752e6b5487ff9a511dc2048410.json"
+    ],
+    "config_json_keys": [
+      "appTipShown",
+      "firstLaunchAt",
+      "reasoningSummariesCleanupDone"
+    ],
+    "pkg_dir": []
+  },
+  "dialog-yolo-only": {
+    "first_ready_or_dialog_s": 2.56,
+    "ready": false,
+    "dialog": "\u2502 \u2191/\u2193 to navigate \u00b7 enter to select \u00b7 esc to cancel                             ",
+    "footer": null,
+    "home_files": [
+      "config.json",
+      "open-sessions-state.json",
+      "session-state/.session-operation-locks/cb585ba6-fe01-48f8-b5c0-9b58b92d830c.lock",
+      "session-state/cb585ba6-fe01-48f8-b5c0-9b58b92d830c/.workspace-fork.lock",
+      "session-state/cb585ba6-fe01-48f8-b5c0-9b58b92d830c/checkpoints/index.md",
+      "session-state/cb585ba6-fe01-48f8-b5c0-9b58b92d830c/events.jsonl",
+      "session-state/cb585ba6-fe01-48f8-b5c0-9b58b92d830c/workspace.yaml",
+      "settings.json.lock",
+      "sidebar-sessions-state/413623b0edee4b4e0dccfb39a46b5e291d0126e9618c50c6f479adb8369f6237.json"
+    ],
+    "config_json_keys": [
+      "appTipShown",
+      "firstLaunchAt",
+      "reasoningSummariesCleanupDone"
+    ],
+    "pkg_dir": []
+  },
+  "dialog-allowall-1": {
+    "first_ready_or_dialog_s": 2.59,
+    "ready": false,
+    "dialog": "\u2502 \u2191/\u2193 to navigate \u00b7 enter to select \u00b7 esc to cancel                             ",
+    "footer": null,
+    "home_files": [
+      "config.json",
+      "open-sessions-state.json",
+      "session-state/.session-operation-locks/2f083dc6-017a-4866-8558-4ec0d914fbf8.lock",
+      "session-state/2f083dc6-017a-4866-8558-4ec0d914fbf8/.workspace-fork.lock",
+      "session-state/2f083dc6-017a-4866-8558-4ec0d914fbf8/checkpoints/index.md",
+      "session-state/2f083dc6-017a-4866-8558-4ec0d914fbf8/events.jsonl",
+      "session-state/2f083dc6-017a-4866-8558-4ec0d914fbf8/workspace.yaml",
+      "settings.json.lock",
+      "sidebar-sessions-state/902646ffa0838f97669b83dbf64ec26a50cdcbbd96a3d4383b293a5b21ee482d.json"
+    ],
+    "config_json_keys": [
+      "appTipShown",
+      "firstLaunchAt",
+      "reasoningSummariesCleanupDone"
+    ],
+    "pkg_dir": []
+  },
+  "idle-allowall-true": {
+    "first_ready_or_dialog_s": 0.45,
+    "ready": true,
+    "dialog": null,
+    "footer": " \u2190 open sidebar \u00b7 Interactive \u00b7 Manual Approval \u00b7 / commands \u00b7 ? help \u00b7 tab next tab                   Claude Haiku 4.5",
+    "home_files": [
+      "config.json",
+      "open-sessions-state.json",
+      "session-state/.session-operation-locks/11dc74a8-4be7-43d6-9d6f-5e00a1417be7.lock",
+      "session-state/11dc74a8-4be7-43d6-9d6f-5e00a1417be7/.workspace-fork.lock",
+      "session-state/11dc74a8-4be7-43d6-9d6f-5e00a1417be7/checkpoints/index.md",
+      "session-state/11dc74a8-4be7-43d6-9d6f-5e00a1417be7/events.jsonl",
+      "session-state/11dc74a8-4be7-43d6-9d6f-5e00a1417be7/workspace.yaml",
+      "settings.json.lock",
+      "sidebar-sessions-state/3cbb4f4936003252714e7ac33b4c66e829d606ce6e3fbd13e58e287b24312091.json"
+    ],
+    "config_json_keys": [
+      "appTipShown",
+      "firstLaunchAt",
+      "reasoningSummariesCleanupDone"
+    ],
+    "pkg_dir": []
+  },
+  "idle-trusted-config": {
+    "first_ready_or_dialog_s": 0.4,
+    "ready": true,
+    "dialog": null,
+    "footer": " \u2190 open sidebar \u00b7 Interactive \u00b7 Allow All \u00b7 / commands \u00b7 ? help \u00b7 tab next tab                         Claude Haiku 4.5",
+    "home_files": [
+      "config.json",
+      "open-sessions-state.json",
+      "session-state/.session-operation-locks/525dc73d-f4e4-4f37-aeb7-e668cf49e33d.lock",
+      "session-state/525dc73d-f4e4-4f37-aeb7-e668cf49e33d/.workspace-fork.lock",
+      "session-state/525dc73d-f4e4-4f37-aeb7-e668cf49e33d/checkpoints/index.md",
+      "session-state/525dc73d-f4e4-4f37-aeb7-e668cf49e33d/events.jsonl",
+      "session-state/525dc73d-f4e4-4f37-aeb7-e668cf49e33d/workspace.yaml",
+      "settings.json.lock",
+      "sidebar-sessions-state/4d5aee5d4d3fcd3a5030d70e04ca397939268fb442270767df11c7633b95d2e7.json"
+    ],
+    "config_json_keys": [
+      "appTipShown",
+      "firstLaunchAt",
+      "reasoningSummariesCleanupDone",
+      "trustedFolders"
+    ],
+    "pkg_dir": []
+  },
+  "idle-nongit": {
+    "first_ready_or_dialog_s": 0.4,
+    "ready": true,
+    "dialog": null,
+    "footer": " \u2190 open sidebar \u00b7 Interactive \u00b7 Allow All \u00b7 / commands \u00b7 ? help \u00b7 tab next tab                         Claude Haiku 4.5",
+    "home_files": [
+      "config.json",
+      "open-sessions-state.json",
+      "session-state/.session-operation-locks/143ffc46-b9c8-459c-ae55-dc32f0d30c8a.lock",
+      "session-state/143ffc46-b9c8-459c-ae55-dc32f0d30c8a/.workspace-fork.lock",
+      "session-state/143ffc46-b9c8-459c-ae55-dc32f0d30c8a/checkpoints/index.md",
+      "session-state/143ffc46-b9c8-459c-ae55-dc32f0d30c8a/events.jsonl",
+      "session-state/143ffc46-b9c8-459c-ae55-dc32f0d30c8a/workspace.yaml",
+      "settings.json.lock",
+      "sidebar-sessions-state/ad5fd0cadcecb45a396452eedf081536552d4a9e04263c1692899a96f2872e14.json"
+    ],
+    "config_json_keys": [
+      "appTipShown",
+      "firstLaunchAt",
+      "reasoningSummariesCleanupDone"
+    ],
+    "pkg_dir": []
+  },
+  "idle-autoupdate-on": {
+    "first_ready_or_dialog_s": 0.38,
+    "ready": true,
+    "dialog": null,
+    "footer": " \u2190 open sidebar \u00b7 Interactive \u00b7 Manual Approval \u00b7 / commands \u00b7 ? help \u00b7 tab next tab                   Claude Haiku 4.5",
+    "home_files": [
+      "config.json",
+      "installed-plugins.lock",
+      "open-sessions-state.json",
+      "session-state/.session-operation-locks/783ea741-d7d0-4a3f-82cd-db1dfa0fbe4a.lock",
+      "session-state/783ea741-d7d0-4a3f-82cd-db1dfa0fbe4a/.workspace-fork.lock",
+      "session-state/783ea741-d7d0-4a3f-82cd-db1dfa0fbe4a/checkpoints/index.md",
+      "session-state/783ea741-d7d0-4a3f-82cd-db1dfa0fbe4a/events.jsonl",
+      "session-state/783ea741-d7d0-4a3f-82cd-db1dfa0fbe4a/workspace.yaml",
+      "settings.json.lock",
+      "sidebar-sessions-state/4f890bd453da972f1f4814173e81a8508a370d5f7506537a2316f03a8a07a104.json"
+    ],
+    "config_json_keys": [
+      "appTipShown",
+      "firstLaunchAt",
+      "reasoningSummariesCleanupDone"
+    ],
+    "pkg_dir": []
+  },
+  "ctrlc": {
+    "first_ready_or_dialog_s": 0.35,
+    "ready": true,
+    "dialog": null,
+    "footer": " \u2190 open sidebar \u00b7 Interactive \u00b7 Manual Approval \u00b7 / commands \u00b7 ? help \u00b7 tab next tab                   Claude Haiku 4.5",
+    "after_first_ctrl_c": {
+      "alive": true,
+      "tail": [
+        "\u276f",
+        "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
+        " ctrl+c again to exit                                                                                  Claude Haiku 4.5"
+      ]
+    },
+    "exit_after_second_s": 0.10024261474609375,
+    "exit_screen_tail": [
+      "\u2502 ctrl+x \u2192 m switch for this session                                                                                 \u2502",
+      "\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f",
+      " \u25cf No copilot-instructions.md found. Run /init to generate.",
+      " \u25cf Tip: /app",
+      "   \u2514 Prefer a visual workspace? Try out the GitHub Copilot desktop app",
+      "     \u00a0https://github.com/features/ai/github-app"
+    ],
+    "home_files": [
+      "config.json",
+      "open-sessions-state.json",
+      "session-state/.session-operation-locks/0e179d94-697a-4b76-94db-a52407bef748.lock",
+      "session-state/0e179d94-697a-4b76-94db-a52407bef748/.workspace-fork.lock",
+      "session-state/0e179d94-697a-4b76-94db-a52407bef748/checkpoints/index.md",
+      "session-state/0e179d94-697a-4b76-94db-a52407bef748/events.jsonl",
+      "session-state/0e179d94-697a-4b76-94db-a52407bef748/workspace.yaml",
+      "settings.json.lock",
+      "sidebar-sessions-state/0271eac4f220fed9b2fb1ffa9c6027c58675e20d5fedd28fea0f9246018ebb34.json"
+    ],
+    "config_json_keys": [
+      "appTipShown",
+      "firstLaunchAt",
+      "reasoningSummariesCleanupDone"
+    ],
+    "pkg_dir": []
+  }
+}

@@ -1,0 +1,164 @@
+{
+  "A_reply": "pong",
+  "A_session_id": "01a16cb2-0d95-7b40-894d-e19fc1b66c24",
+  "A_SessionStart": {
+    "session_id": "01a16cb2-0d95-7b40-894d-e19fc1b66c24",
+    "transcript_path": "$HARNESS_HOME/sessions/2026/10/24/rollout-2026-10-24T16-56-10-01a16cb2-0d95-7b40-894d-e19fc1b66c24.jsonl",
+    "cwd": "$CWD",
+    "hook_event_name": "SessionStart",
+    "model": "gpt-6-luna",
+    "permission_mode": "bypassPermissions",
+    "source": "startup"
+  },
+  "A_exit_s": 5.066326379776001,
+  "A_exit_text": [
+    "1u1uuToken usage: total=2,773 input=2,768 (+ 11,392 cached) output=5",
+    "To continue this session, run:",
+    "  codex resume 01a16cb2-0d95-7b40-894d-e19fc1b66c24",
+    "Or run codex resume and select Reply with pong."
+  ],
+  "B_reply": "pong",
+  "B_SessionStart": [
+    {
+      "session_id": "01a16cb2-0d95-7b40-894d-e19fc1b66c24",
+      "transcript_path": "$HARNESS_HOME/sessions/2026/10/24/rollout-2026-10-24T16-56-10-01a16cb2-0d95-7b40-894d-e19fc1b66c24.jsonl",
+      "cwd": "$CWD",
+      "hook_event_name": "SessionStart",
+      "model": "gpt-6-luna",
+      "permission_mode": "bypassPermissions",
+      "source": "resume"
+    }
+  ],
+  "B_exit_s": 5.066777467727661,
+  "C_screen_tail": [
+    "  Working directory \u00b7 resume",
+    "  Session = latest cwd recorded in the resumed session",
+    "  Current = your current working directory",
+    "\u203a 1. Use session directory $CWD)",
+    "  2. Use current directory $CWD)",
+    "  3. Always use session directory",
+    "  4. Always use current directory",
+    "  enter continue \u00b7 esc use session \u00b7 ctrl+c quit"
+  ],
+  "D_second_alive": true,
+  "D_second_tail": [
+    "  permissions: YOLO mode",
+    "\u203a Reply with exactly: pong",
+    "\u2022 pong",
+    "  Worked for 1s \u2022 4:56 PM",
+    "\u203a What exact word did you reply with in your previous message? Reply with that word only.",
+    "\u2022 pong",
+    "  Worked for 1s \u2022 4:56 PM",
+    "  \ud83d\udd12  This conversation is open in another app                                                              r to retry",
+    "      Close it there and press R to continue here.",
+    "   r retry   f fork   esc/ctrl+c/q exit   ctrl+t transcript"
+  ],
+  "E_alive": false,
+  "E_tail": [
+    "ERROR: No saved session found with ID ab7324ba-b3a3-45db-a30e-626528c4df54. Run `codex resume` without an ID to choose f",
+    "rom existing sessions."
+  ],
+  "session_files": [
+    "sessions/2026/10/24/rollout-2026-10-24T16-56-10-01a16cb2-0d95-7b40-894d-e19fc1b66c24.jsonl"
+  ],
+  "session_index": "{\"id\":\"01a16cb2-0d95-7b40-894d-e19fc1b66c24\",\"thread_name\":\"Reply with pong\",\"updated_at\":\"2026-10-24T06:56:14.192173887Z\"}\n",
+  "record_types": {
+    "session_meta/": 1,
+    "event_msg/task_started": 2,
+    "response_item/message": 9,
+    "world_state/": 2,
+    "turn_context/": 2,
+    "event_msg/item_completed": 4,
+    "token_usage_record/": 2,
+    "event_msg/token_count": 2,
+    "event_msg/task_complete": 2,
+    "event_msg/thread_settings_applied": 4
+  },
+  "token_count_events": [
+    {
+      "type": "token_count",
+      "info": {
+        "total_token_usage": {
+          "input_tokens": 14160,
+          "cached_input_tokens": 11392,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 5,
+          "reasoning_output_tokens": 0,
+          "total_tokens": 14165
+        },
+        "last_token_usage": {
+          "input_tokens": 14160,
+          "cached_input_tokens": 11392,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 5,
+          "reasoning_output_tokens": 0,
+          "total_tokens": 14165
+        },
+        "model_context_window": 258400
+      },
+      "rate_limits": {
+        "limit_id": "codex",
+        "limit_name": null,
+        "primary": {
+          "used_percent": 0.0,
+          "window_minutes": 10080,
+          "resets_at": 1793396550
+        },
+        "secondary": null,
+        "credits": {
+          "has_credits": false,
+          "unlimited": false,
+          "balance": "0"
+        },
+        "individual_limit": null,
+        "spend_control_reached": null,
+        "plan_type": "pro",
+        "rate_limit_reached_type": null
+      }
+    },
+    {
+      "type": "token_count",
+      "info": {
+        "total_token_usage": {
+          "input_tokens": 30860,
+          "cached_input_tokens": 25344,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 10,
+          "reasoning_output_tokens": 0,
+          "total_tokens": 30870
+        },
+        "last_token_usage": {
+          "input_tokens": 16700,
+          "cached_input_tokens": 13952,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 5,
+          "reasoning_output_tokens": 0,
+          "total_tokens": 16705
+        },
+        "model_context_window": 258400
+      },
+      "rate_limits": {
+        "limit_id": "codex",
+        "limit_name": null,
+        "primary": {
+          "used_percent": 0.0,
+          "window_minutes": 10080,
+          "resets_at": 1793396550
+        },
+        "secondary": null,
+        "credits": {
+          "has_credits": false,
+          "unlimited": false,
+          "balance": "0"
+        },
+        "individual_limit": null,
+        "spend_control_reached": null,
+        "plan_type": "pro",
+        "rate_limit_reached_type": null
+      }
+    }
+  ],
+  "turn_context_models": [
+    "gpt-6-luna"
+  ]
+}

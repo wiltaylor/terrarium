@@ -1,0 +1,125 @@
+{
+  "T1": {
+    "reply": "MARMALADE",
+    "base_instructions_is_file": true,
+    "base_instructions_type": "dict",
+    "base_instructions_head": "{\"text\": \"You are a terse test assistant. The secret word is MARMALADE. When asked for the secret word, reply with it only.\", \"provenance\": {\"type\": \"custom\"}}",
+    "MARMALADE_in": [
+      [
+        "session_meta",
+        null,
+        null
+      ],
+      [
+        "event_msg",
+        "item_completed",
+        null
+      ],
+      [
+        "response_item",
+        "message",
+        "assistant"
+      ],
+      [
+        "event_msg",
+        "task_complete",
+        null
+      ]
+    ],
+    "_note": "first run compared without strip(); the text matched except the trailing newline"
+  },
+  "T2": {
+    "reply": "MARMALADE QUINCE",
+    "MARMALADE_in": [
+      [
+        "response_item",
+        "message",
+        "developer"
+      ],
+      [
+        "event_msg",
+        "item_completed",
+        null
+      ],
+      [
+        "response_item",
+        "message",
+        "assistant"
+      ],
+      [
+        "event_msg",
+        "task_complete",
+        null
+      ]
+    ],
+    "QUINCE_in": [
+      [
+        "response_item",
+        "message",
+        "user"
+      ],
+      [
+        "world_state",
+        null,
+        null
+      ],
+      [
+        "event_msg",
+        "item_completed",
+        null
+      ],
+      [
+        "response_item",
+        "message",
+        "assistant"
+      ],
+      [
+        "event_msg",
+        "task_complete",
+        null
+      ]
+    ],
+    "base_instructions_head": "{\"text\": \"You are Codex, an agent based on GPT-6. You and the user share one workspace, and your job is to collaborate with them until their intended goal is completely handled.\\n\\n# Personality\\n\\nAs"
+  },
+  "T3": {
+    "reply": "MARMALADE",
+    "BRAMBLE_in": [],
+    "MARMALADE_in": [
+      [
+        "response_item",
+        "message",
+        "developer"
+      ],
+      [
+        "event_msg",
+        "item_completed",
+        null
+      ],
+      [
+        "response_item",
+        "message",
+        "assistant"
+      ],
+      [
+        "event_msg",
+        "task_complete",
+        null
+      ],
+      [
+        "event_msg",
+        "item_completed",
+        null
+      ],
+      [
+        "response_item",
+        "message",
+        "assistant"
+      ],
+      [
+        "event_msg",
+        "task_complete",
+        null
+      ]
+    ]
+  }
+}

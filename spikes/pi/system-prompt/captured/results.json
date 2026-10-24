@@ -1,0 +1,24 @@
+{
+  "T1": {
+    "reply": "QUINCE MARMALADE",
+    "system_prompt_len": 152,
+    "system_prompt": "You are a terse test assistant. The secret word is QUINCE.\n\nThe second secret word is MARMALADE.\nCurrent working directory: $CWD\n",
+    "has": {
+      "QUINCE": true,
+      "MARMALADE": true,
+      "BRAMBLE": false
+    },
+    "default_pi_text_kept": false
+  },
+  "T2": {
+    "reply": "QUINCE BRAMBLE",
+    "system_prompt_len": 199,
+    "system_prompt": "You are a terse test assistant. The secret word is QUINCE.\n\nThe second secret word is now BRAMBLE. Any earlier second word is no longer valid.\n\nCurrent working directory: $CWD\n",
+    "has": {
+      "QUINCE": true,
+      "MARMALADE": false,
+      "BRAMBLE": true
+    },
+    "default_pi_text_kept": false
+  }
+}

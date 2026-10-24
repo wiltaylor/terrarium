@@ -1,0 +1,19 @@
+pi 0.85.1, spike 1, run 1 (2026-10-24 17:26), provider glm53-exl3,
+model DeepSeek-V4.1-Flash-1017. The LAN server refused the connection.
+Copied by hand from the run's console output, because run 3 overwrote the
+captures. Times are seconds from the Enter byte.
+
+  -1.0  session_start
+   0.10 input, before_agent_start, agent_start, turn_start
+   0.14 message_end (stop_reason "error", usage all 0), turn_end, agent_end
+   2.15 agent_start, turn_start, message_end (error), turn_end, agent_end
+   6.15 agent_start, turn_start, message_end (error), turn_end, agent_end
+  14.16 agent_start, turn_start, message_end (error), turn_end, agent_end, agent_settled
+
+Screen after agent_settled:
+ Use the bash tool to run: echo terrarium-hook-test. Then reply with exactly: done
+ Error: Connection error.
+ Error: Connection error.
+ Error: Connection error.
+ Error: Connection error.
+ Error: Retry failed after 3 attempts: Connection error.

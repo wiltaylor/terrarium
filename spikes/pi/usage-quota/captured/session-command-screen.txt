@@ -1,0 +1,40 @@
+
+ pi v0.85.1
+ escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash · ctrl+o more
+ Press ctrl+o to show full startup help and loaded resources.
+
+ Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+
+ Session Info
+
+ File:
+ $HARNESS_HOME/sessions/<encoded-cwd>--/2026-10-24T07-32-59-364Z_01a16cd3-c163-7633-adce-4d
+ 1ee605eb09.jsonl
+ ID: 01a16cd3-c163-7633-adce-4d1ee605eb09
+
+ Messages
+ Total: 0
+ User: 0
+ Assistant: 0
+ Tools: 0 calls, 0 results
+
+ Tokens
+ Input: 0
+ Output: 0
+ Total: 0
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+$CWD
+$0.000 (sub) 0.0%/272k (auto)                                                 (openai-codex) gpt-5.6-luna • thinking off
+
+
+
+
+
+
+
+

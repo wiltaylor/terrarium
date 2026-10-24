@@ -1,0 +1,24 @@
+
+ pi v0.85.1
+ escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash · ctrl+o more
+ Press ctrl+o to show full startup help and loaded resources.
+
+ Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+[Skills]
+  ask-matt, batch-grill-me, claude-handoff, code-review, codebase-design, design-an-interface, diagnosing-bugs,
+domain-modeling, edit-article, find-skills, git-guardrails-claude-code, grill-me, grill-with-docs, grilling, handoff,
+implement, improve-codebase-architecture, loop-me, migrate-to-shoehorn, obsidian-vault, prototype, qa,
+request-refactor-plan, research, resolving-merge-conflicts, scaffold-exercises, setup-matt-pocock-skills,
+setup-pre-commit, setup-ts-deep-modules, tdd, teach, to-questionnaire, to-spec, to-tickets, triage, ubiquitous-language,
+wayfinder, wizard, writing-beats, writing-fragments, writing-great-skills, writing-shape
+
+[Extensions]
+  terrarium.ts
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+$CWD
+$0.000 (sub) 0.0%/272k (auto)                                                 (openai-codex) gpt-5.6-luna • thinking off

@@ -1,0 +1,18 @@
+
+ pi v0.85.1
+ escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash · ctrl+o more
+ Press ctrl+o to show full startup help and loaded resources.
+
+ Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+[Extensions]
+  terrarium.ts
+
+ This project is not trusted. Project .pi resources and packages are ignored. Use /trust to save a trust decision, then
+ restart pi.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+$CWD
+$0.000 (sub) 0.0%/272k (auto)                                                 (openai-codex) gpt-5.6-luna • thinking off

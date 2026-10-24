@@ -118,18 +118,78 @@ def read_hooks(logfile: Path) -> list[dict]:
     return [json.loads(l) for l in logfile.read_text().splitlines() if l.strip()]
 
 
+class _Screen(pyte.Screen):
+    """pyte.Screen that survives private CSI forms and keeps a dim flag.
+
+    - pyte 0.8 passes private=True to every CSI handler for "CSI ? ..." and
+      "CSI > ..." sequences. Most handlers do not take it and raise
+      TypeError, which drops the rest of the chunk. Copilot CLI sends
+      "CSI ? 6 n" and "CSI > 4;2 m". The wrappers below ignore a private
+      form that the handler does not support.
+    - pyte drops SGR 2 (dim). Codex and Copilot draw the composer placeholder
+      dim. The dim state is kept in the (otherwise unused) "blink" field of
+      each Char, so dim_text() can tell placeholder text from typed text.
+    """
+
+    _dim = False
+
+    def select_graphic_rendition(self, *attrs, **kwargs):
+        if kwargs.get("private"):
+            return  # e.g. XTMODKEYS "CSI > 4;2 m", not a colour change
+        for a in attrs or (0,):
+            if a in (0, 22):
+                self._dim = False
+            elif a == 2:
+                self._dim = True
+        keep = [a for a in attrs if a not in (2, 5, 6, 25)]
+        if attrs and not keep:
+            pass
+        else:
+            super().select_graphic_rendition(*keep)
+        self.cursor.attrs = self.cursor.attrs._replace(blink=self._dim)
+
+
+_CSI_GT_RX = re.compile(rb"\x1b\[>[0-9;]*[A-Za-z]")
+
+
+def _drop_private(fn):
+    import inspect
+    try:
+        takes = "private" in inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        takes = False
+    if takes:
+        return fn
+
+    def wrapper(self, *a, **kw):
+        if kw.pop("private", False):
+            return None
+        return fn(self, *a, **kw)
+    wrapper.__name__ = fn.__name__
+    return wrapper
+
+
+for _name in set(pyte.Stream.csi.values()):
+    if _name != "select_graphic_rendition" and hasattr(pyte.Screen, _name):
+        setattr(_Screen, _name, _drop_private(getattr(pyte.Screen, _name)))
+
+
 class Session:
     """claude in a PTY with a pyte screen kept current by a reader thread."""
 
     def __init__(self, args: list[str], cwd: Path, env: dict,
-                 cols: int = COLS, rows: int = ROWS, rawlog: Path | None = None):
-        self.screen = pyte.Screen(cols, rows)
+                 cols: int = COLS, rows: int = ROWS, rawlog: Path | None = None,
+                 binary: str | None = None):
+        self.screen = _Screen(cols, rows)
+        self.feed_errors = 0
         self.stream = pyte.ByteStream(self.screen)
         self.lock = threading.Lock()
         self.raw = bytearray()
         self.rawlog = rawlog
         self.t0 = time.time()
-        self.child = pexpect.spawn(CLAUDE, args, cwd=str(cwd), env=env,
+        # binary: run another harness (codex, copilot, pi). Default: claude.
+        self.binary = binary or CLAUDE
+        self.child = pexpect.spawn(self.binary, args, cwd=str(cwd), env=env,
                                    dimensions=(rows, cols), encoding=None,
                                    timeout=None)
         self.alive = True
@@ -148,17 +208,36 @@ class Session:
             with self.lock:
                 self.raw += data
                 # pyte does not know some private modes; it ignores them.
-                self.stream.feed(data)
+                try:
+                    # pyte skips the ">" of "CSI > Ps m" (XTMODKEYS) and
+                    # applies it as SGR. Drop "CSI > ..." sequences first.
+                    self.stream.feed(_CSI_GT_RX.sub(b"", data))
+                except Exception:  # never let one odd sequence stop the reader
+                    self.feed_errors += 1
             # Answer terminal queries the TUI sends, so it does not stall.
             if b"\x1b[6n" in data:  # cursor position report
                 y, x = self.screen.cursor.y + 1, self.screen.cursor.x + 1
                 self.child.write(f"\x1b[{y};{x}R".encode())
+            if b"\x1b[?6n" in data:  # DECXCPR (Copilot CLI)
+                y, x = self.screen.cursor.y + 1, self.screen.cursor.x + 1
+                self.child.write(f"\x1b[?{y};{x}R".encode())
             if b"\x1b[c" in data or b"\x1b[0c" in data:  # primary DA
                 self.child.write(b"\x1b[?62;22c")
 
     def text(self) -> str:
         with self.lock:
             return "\n".join(l.rstrip() for l in self.screen.display)
+
+    def dim_mask(self) -> list[str]:
+        """Per row: the row text with every dim character replaced by a
+        space. Placeholder text (drawn dim) vanishes; typed text stays."""
+        with self.lock:
+            out = []
+            for y in range(self.screen.lines):
+                row = self.screen.buffer[y]
+                out.append("".join(" " if row[x].blink else row[x].data
+                                   for x in range(self.screen.columns)).rstrip())
+            return out
 
     def lines(self) -> list[str]:
         with self.lock:
@@ -298,3 +377,95 @@ def make_cwd() -> Path:
     d = Path(tempfile.mkdtemp(prefix="terrarium-cwd-"))
     _CREATED.append(d)
     return d
+
+
+# ---------------------------------------------------------------------------
+# Generic helpers for the other harnesses (codex, copilot, pi). Additive: the
+# Claude spikes above do not use them.
+
+def make_home(prefix: str, copies: dict | None = None,
+              files: dict | None = None) -> Path:
+    """Temp harness home. copies = {src_path: name}, files = {name: text}.
+
+    Only the named files are copied. The directory is removed at exit
+    (unless KEEP_TMP is set).
+    """
+    d = Path(tempfile.mkdtemp(prefix=f"terrarium-{prefix}-"))
+    _CREATED.append(d)
+    for src, name in (copies or {}).items():
+        src = Path(src)
+        if src.exists():
+            (d / name).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, d / name)
+            os.chmod(d / name, 0o600)
+    for name, text in (files or {}).items():
+        (d / name).parent.mkdir(parents=True, exist_ok=True)
+        (d / name).write_text(text)
+    return d
+
+
+def harness_env(extra: dict | None = None) -> dict:
+    """Env for a non-Claude harness: no parent Claude session variables."""
+    env = {k: v for k, v in os.environ.items()
+           if not (k.startswith("CLAUDE") or k in ("AI_AGENT",)
+                   or k.startswith("ANTHROPIC") or k.startswith("CODEX")
+                   or k.startswith("COPILOT") or k.startswith("PI_"))}
+    env.update({"TERM": "xterm-256color", "COLORTERM": "truecolor",
+                "LANG": env.get("LANG", "C.UTF-8")})
+    if extra:
+        env.update(extra)
+    return env
+
+
+def hook_cmd(event: str, logfile: Path) -> str:
+    """Shell command that logs one hook payload (stdin JSON) to logfile."""
+    return f"{sys.executable} {HOOKLOG} {event} {logfile}"
+
+
+def wait_until(pred, timeout: float, poll: float = 0.05):
+    """Wait until pred() is truthy. Return elapsed seconds or None."""
+    t = time.time()
+    while time.time() - t < timeout:
+        if pred():
+            return time.time() - t
+        time.sleep(poll)
+    return None
+
+
+def wait_exit(sess: "Session", timeout: float = 10) -> float | None:
+    return wait_until(lambda: not sess.alive or not sess.child.isalive(), timeout)
+
+
+def kill_matching(fragment: str):
+    """SIGTERM every process of this user whose command line has fragment."""
+    import signal
+    for p in Path("/proc").iterdir():
+        if not p.name.isdigit() or int(p.name) == os.getpid():
+            continue
+        try:
+            if p.stat().st_uid != os.getuid():
+                continue
+            cmd = (p / "cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
+        except OSError:
+            continue
+        if fragment in cmd:
+            try:
+                os.kill(int(p.name), signal.SIGTERM)
+            except OSError:
+                pass
+
+
+SANITISE_EXTRA = [
+    (re.compile(r"(Signed in to \S+ as )[\w.-]+"), r"\1<login>"),
+    (re.compile(r"(The current user is @)[\w-]+"), r"\1<login>"),
+    (re.compile(r"[^\s\"']*/terrarium-(?:codex|copilot|pi|npm)-[A-Za-z0-9_]+"), "$HARNESS_HOME"),
+    (re.compile(r'("(?:access_token|refresh_token|id_token|account_id|token|apiKey|api_key|login|user_id|email|creator_user_id|creator_account_id|chatgpt_account_id|chatgpt_user_id|accountId|userId)"\s*:\s*)"[^"]*"'), r'\1"<redacted>"'),
+    (re.compile(r"\b(gh[opsu]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}|eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_.-]+)"), "<token>"),
+]
+
+
+def sanitise_all(s: str) -> str:
+    """sanitise() plus the rules for codex, copilot, and pi homes and tokens."""
+    for rx, rep in SANITISE_EXTRA:
+        s = rx.sub(rep, s)
+    return sanitise(s)

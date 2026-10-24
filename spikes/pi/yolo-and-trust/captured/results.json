@@ -1,0 +1,172 @@
+{
+  "dialog-project-trust": {
+    "first_ready_or_dialog_s": 0.26,
+    "ready": false,
+    "dialog": "\u2191\u2193 navigate  enter select  escape/ctrl+c cancel",
+    "events": [
+      "project_trust",
+      "session_start",
+      "session_shutdown"
+    ],
+    "project_trust_events": [
+      {
+        "project_cwd": "$CWD"
+      }
+    ],
+    "sections_on_screen": [],
+    "agent_dir_files": [
+      "auth.json",
+      "models-store.json",
+      "models.json",
+      "settings.json"
+    ],
+    "settings_after": {
+      "defaultThinkingLevel": "off",
+      "lastChangelogVersion": "0.85.1"
+    }
+  },
+  "idle-approve": {
+    "first_ready_or_dialog_s": 0.19,
+    "ready": true,
+    "dialog": null,
+    "events": [
+      "session_start",
+      "session_shutdown"
+    ],
+    "project_trust_events": [],
+    "sections_on_screen": [
+      "[Extensions]"
+    ],
+    "agent_dir_files": [
+      "auth.json",
+      "models-store.json",
+      "models.json",
+      "settings.json"
+    ],
+    "settings_after": {
+      "defaultThinkingLevel": "off",
+      "lastChangelogVersion": "0.85.1"
+    }
+  },
+  "idle-no-approve": {
+    "first_ready_or_dialog_s": 0.19,
+    "ready": true,
+    "dialog": null,
+    "events": [
+      "session_start",
+      "session_shutdown"
+    ],
+    "project_trust_events": [],
+    "sections_on_screen": [
+      "[Extensions]"
+    ],
+    "agent_dir_files": [
+      "auth.json",
+      "models-store.json",
+      "models.json",
+      "settings.json"
+    ],
+    "settings_after": {
+      "defaultThinkingLevel": "off",
+      "lastChangelogVersion": "0.85.1"
+    }
+  },
+  "idle-ext-trust": {
+    "first_ready_or_dialog_s": 0.16,
+    "ready": true,
+    "dialog": null,
+    "events": [
+      "project_trust",
+      "session_start",
+      "session_shutdown"
+    ],
+    "project_trust_events": [
+      {
+        "project_cwd": "$CWD"
+      }
+    ],
+    "sections_on_screen": [
+      "[Extensions]"
+    ],
+    "agent_dir_files": [
+      "auth.json",
+      "models-store.json",
+      "models.json",
+      "settings.json"
+    ],
+    "settings_after": {
+      "defaultThinkingLevel": "off",
+      "lastChangelogVersion": "0.85.1"
+    }
+  },
+  "idle-online": {
+    "first_ready_or_dialog_s": 0.16,
+    "ready": true,
+    "dialog": null,
+    "events": [
+      "session_start",
+      "session_shutdown"
+    ],
+    "project_trust_events": [],
+    "sections_on_screen": [
+      "[Extensions]"
+    ],
+    "agent_dir_files": [
+      "auth.json",
+      "models-store.json",
+      "models.json",
+      "settings.json"
+    ],
+    "settings_after": {
+      "defaultThinkingLevel": "off",
+      "lastChangelogVersion": "0.85.1"
+    }
+  },
+  "idle-offline-default": {
+    "first_ready_or_dialog_s": 0.19,
+    "ready": true,
+    "dialog": null,
+    "events": [
+      "session_start",
+      "session_shutdown"
+    ],
+    "project_trust_events": [],
+    "sections_on_screen": [
+      "[Skills]",
+      "[Extensions]"
+    ],
+    "agent_dir_files": [
+      "auth.json",
+      "models-store.json",
+      "models.json",
+      "settings.json"
+    ],
+    "settings_after": {
+      "defaultThinkingLevel": "off",
+      "lastChangelogVersion": "0.85.1"
+    }
+  },
+  "idle-offline-bare": {
+    "first_ready_or_dialog_s": 0.17,
+    "ready": true,
+    "dialog": null,
+    "events": [
+      "session_start",
+      "session_shutdown"
+    ],
+    "project_trust_events": [],
+    "sections_on_screen": [
+      "[Extensions]"
+    ],
+    "agent_dir_files": [
+      "auth.json",
+      "models-store.json",
+      "models.json",
+      "settings.json"
+    ],
+    "settings_after": {
+      "defaultThinkingLevel": "off",
+      "lastChangelogVersion": "0.85.1"
+    }
+  }
+}

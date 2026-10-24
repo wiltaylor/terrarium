@@ -1,0 +1,504 @@
+===== idle-start (t=1.6s) =====
+ [Current]  Sessions                            Gists
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ $CWD [⎇ main]
+
+❯
+
+ ◎ Loading: 13 hooks, 2 skills                                                                         claude-haiku-4.5
+
+===== lag-paste-not-drawn-at-0.2s (t=1.8s) =====
+ [Current]  Sessions                            Gists
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ $CWD [⎇ main]
+
+❯
+
+ ← open sidebar · Interactive · Allow All · / commands · ? help · tab next tab                         Claude Haiku 4.5
+
+===== busy-T1 (t=3.2s) =====
+ [Current]  Sessions                            Gists
+
+
+
+   ╭─╮╭─╮                                Getting started
+   ╰─╯╰─╯  Copilot v1.0.103 uses AI.     Use the tabs above to explore your sessions and pull requests
+   █ ▘▝ █  Check for mistakes.           /init — Initialize Copilot instructions for this repository
+    ▔▔▔▔                                 /model — Switch models across providers, or use Auto
+
+
+
+ ● No copilot-instructions.md found. Run /init to generate.
+
+ ● Tip: /app
+   └ Prefer a visual workspace? Try out the GitHub Copilot desktop app
+      https://github.com/features/ai/github-app
+
+ ❯ First line.                                                                                                   17:16
+   Second line.
+   Reply with exactly: two
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ $CWD [⎇ main]
+
+❯
+
+ ◉ Working esc esc edit prompt                                                                         Claude Haiku 4.5
+
+===== idle-after-T1 (t=5.1s) =====
+ [Current]  Sessions                            Gists
+
+   ╰─╯╰─╯  Copilot v1.0.103 uses AI.     Use the tabs above to explore your sessions and pull requests                 ┃
+   █ ▘▝ █  Check for mistakes.           /init — Initialize Copilot instructions for this repository                   ┃
+    ▔▔▔▔                                 /model — Switch models across providers, or use Auto                          ┃
+                                                                                                                       ┃
+                                                                                                                       ┃
+  Discover Auto                                                                                                        ┃
+  Let Copilot choose the best available model for each task, 10% off right now.                                        ┃
+  Click here or enter /model auto to switch                                                                            ┃
+  ctrl+x → m switch for this session                                                                                   ┃
+                                                                                                                       ┃
+                                                                                                                       ┃
+ ● No copilot-instructions.md found. Run /init to generate.                                                            ┃
+                                                                                                                       ┃
+ ● Tip: /app                                                                                                           ┃
+   └ Prefer a visual workspace? Try out the GitHub Copilot desktop app                                                 ┃
+      https://github.com/features/ai/github-app                                                                        ┃
+                                                                                                                       ┃
+ ❯ First line.                                                                                                   17:16 ┃
+   Second line.                                                                                                        ┃
+   Reply with exactly: two                                                                                             ┃
+                                                                                                                       ┃
+ ⌄ Thought for 1s                                                                                                      ┃
+   The user is giving me a test instruction. They're saying:                                                           ┃
+   - "First line."                                                                                                     ┃
+   - "Second line."                                                                                                    ┃
+   - "Reply with exactly: two"                                                                                         ┃
+                                                                                                                       ┃
+   This seems like a simple test to see if I follow instructions. They want me to reply with the word "two".           ┃
+                                                                                                                       ┃
+   I should reply with exactly that word as instructed.                                                                ┃
+                                                                                                                       ┃
+ ● two                                                                                                                 ┃
+                                                                                                                       ┃
+ $CWD [⎇ main]
+
+❯
+
+ ← open sidebar · Interactive · Allow All · / commands · ? help · tab next tab                         Claude Haiku 4.5
+
+===== typed-after-LF (t=7.1s) =====
+ [Current]  Sessions                            Gists
+
+   █ ▘▝ █  Check for mistakes.           /init — Initialize Copilot instructions for this repository                   ┃
+    ▔▔▔▔                                 /model — Switch models across providers, or use Auto                          ┃
+                                                                                                                       ┃
+                                                                                                                       ┃
+  Discover Auto                                                                                                        ┃
+  Let Copilot choose the best available model for each task, 10% off right now.                                        ┃
+  Click here or enter /model auto to switch                                                                            ┃
+  ctrl+x → m switch for this session                                                                                   ┃
+                                                                                                                       ┃
+                                                                                                                       ┃
+ ● No copilot-instructions.md found. Run /init to generate.                                                            ┃
+                                                                                                                       ┃
+ ● Tip: /app                                                                                                           ┃
+   └ Prefer a visual workspace? Try out the GitHub Copilot desktop app                                                 ┃
+      https://github.com/features/ai/github-app                                                                        ┃
+                                                                                                                       ┃
+ ❯ First line.                                                                                                   17:16 ┃
+   Second line.                                                                                                        ┃
+   Reply with exactly: two                                                                                             ┃
+                                                                                                                       ┃
+ ⌄ Thought for 1s                                                                                                      ┃
+   The user is giving me a test instruction. They're saying:                                                           ┃
+   - "First line."                                                                                                     ┃
+   - "Second line."                                                                                                    ┃
+   - "Reply with exactly: two"                                                                                         ┃
+                                                                                                                       ┃
+   This seems like a simple test to see if I follow instructions. They want me to reply with the word "two".           ┃
+                                                                                                                       ┃
+   I should reply with exactly that word as instructed.                                                                ┃
+                                                                                                                       ┃
+ ● two                                                                                                                 ┃
+                                                                                                                       ┃
+ $CWD [⎇ main]
+
+❯ Reply with exactly:
+
+
+ Interactive · Allow All · @ files · # issues                                                          Claude Haiku 4.5
+
+===== busy-T3-tool (t=12.7s) =====
+ [Current]  Sessions                            Gists
+
+                                                                                                                       ┃
+ ⌄ Thought for 1s                                                                                                      ┃
+   The user is giving me a test instruction. They're saying:                                                           ┃
+   - "First line."                                                                                                     ┃
+   - "Second line."                                                                                                    ┃
+   - "Reply with exactly: two"                                                                                         ┃
+                                                                                                                       ┃
+   This seems like a simple test to see if I follow instructions. They want me to reply with the word "two".           ┃
+                                                                                                                       ┃
+   I should reply with exactly that word as instructed.                                                                ┃
+                                                                                                                       ┃
+ ● two                                                                                                                 ┃
+                                                                                                                       ┃
+ ❯ Reply with exactly:                                                                                           17:16 ┃
+    plain                                                                                                              ┃
+                                                                                                                       ┃
+ ⌄ Thought for 1s                                                                                                      ┃
+   The user is asking me to reply with exactly "plain". I should respond with that exact word.                         ┃
+                                                                                                                       ┃
+ ● plain                                                                                                               ┃
+                                                                                                                       ┃
+ ❯ Run the shell command `sleep 5`, then reply with exactly: slept                                               17:16 ┃
+                                                                                                                       ┃
+ ⌄ Thought for 1s                                                                                                      ┃
+   The user wants me to:                                                                                               ┃
+   1. Run the shell command `sleep 5`                                                                                  ┃
+   2. Then reply with exactly: slept                                                                                   ┃
+                                                                                                                       ┃
+   I should use the bash tool to run the sleep command, and then reply with "slept" after it completes.                ┃
+                                                                                                                       ┃
+ $ Shell Sleep for 5 seconds                                                                                           ┃
+   sleep 5                                                                                                             ┃
+                                                                                                                       ┃
+ $CWD [⎇ main]
+
+❯
+
+ ◉ Working · 256 B esc esc interrupt                                                                   Claude Haiku 4.5
+
+===== busy-typed-T4 (t=13.0s) =====
+ [Current]  Sessions                            Gists
+
+                                                                                                                       ┃
+ ⌄ Thought for 1s                                                                                                      ┃
+   The user is giving me a test instruction. They're saying:                                                           ┃
+   - "First line."                                                                                                     ┃
+   - "Second line."                                                                                                    ┃
+   - "Reply with exactly: two"                                                                                         ┃
+                                                                                                                       ┃
+   This seems like a simple test to see if I follow instructions. They want me to reply with the word "two".           ┃
+                                                                                                                       ┃
+   I should reply with exactly that word as instructed.                                                                ┃
+                                                                                                                       ┃
+ ● two                                                                                                                 ┃
+                                                                                                                       ┃
+ ❯ Reply with exactly:                                                                                           17:16 ┃
+    plain                                                                                                              ┃
+                                                                                                                       ┃
+ ⌄ Thought for 1s                                                                                                      ┃
+   The user is asking me to reply with exactly "plain". I should respond with that exact word.                         ┃
+                                                                                                                       ┃
+ ● plain                                                                                                               ┃
+                                                                                                                       ┃
+ ❯ Run the shell command `sleep 5`, then reply with exactly: slept                                               17:16 ┃
+                                                                                                                       ┃
+ ⌄ Thought for 1s                                                                                                      ┃
+   The user wants me to:                                                                                               ┃
+   1. Run the shell command `sleep 5`                                                                                  ┃
+   2. Then reply with exactly: slept                                                                                   ┃
+                                                                                                                       ┃
+   I should use the bash tool to run the sleep command, and then reply with "slept" after it completes.                ┃
+                                                                                                                       ┃
+ $ Shell Sleep for 5 seconds                                                                                           ┃
+   sleep 5                                                                                                             ┃
+                                                                                                                       ┃
+ $CWD [⎇ main]
+
+❯ Also reply with the word: queued
+
+ ◎ Working · 256 B esc esc interrupt · ctrl+q enqueue                                                  Claude Haiku 4.5
+
+===== busy-after-T4-enter (t=14.1s) =====
+ [Current]  Sessions                            Gists
+
+   The user is giving me a test instruction. They're saying:                                                           ┃
+   - "First line."                                                                                                     ┃
+   - "Second line."                                                                                                    ┃
+   - "Reply with exactly: two"                                                                                         ┃
+                                                                                                                       ┃
+   This seems like a simple test to see if I follow instructions. They want me to reply with the word "two".           ┃
+                                                                                                                       ┃
+   I should reply with exactly that word as instructed.                                                                ┃
+                                                                                                                       ┃
+ ● two                                                                                                                 ┃
+                                                                                                                       ┃
+ ❯ Reply with exactly:                                                                                           17:16 ┃
+    plain                                                                                                              ┃
+                                                                                                                       ┃
+ ⌄ Thought for 1s                                                                                                      ┃
+   The user is asking me to reply with exactly "plain". I should respond with that exact word.                         ┃
+                                                                                                                       ┃
+ ● plain                                                                                                               ┃
+                                                                                                                       ┃
+ ❯ Run the shell command `sleep 5`, then reply with exactly: slept                                               17:16 ┃
+                                                                                                                       ┃
+ ⌄ Thought for 1s                                                                                                      ┃
+   The user wants me to:                                                                                               ┃
+   1. Run the shell command `sleep 5`                                                                                  ┃
+   2. Then reply with exactly: slept                                                                                   ┃
+                                                                                                                       ┃
+   I should use the bash tool to run the sleep command, and then reply with "slept" after it completes.                ┃
+                                                                                                                       ┃
+ $ Shell Sleep for 5 seconds 1 line…                                                                                   ┃
+   sleep 5                                                                                                             ┃
+                                                                                                                       ┃
+ ❯ Also reply with the word: queued                                                                              17:16 ┃
+                                                                                                                       ┃
+ $CWD [⎇ main]
+
+❯
+
+ ◎ Working · 256 B esc esc interrupt                                                                   Claude Haiku 4.5
+
+===== idle-after-T3-T4 (t=21.8s) =====
+ [Current]  Sessions                            Gists
+
+    plain                                                                                                              ┃
+                                                                                                                       ┃
+ ⌄ Thought for 1s                                                                                                      ┃
+   The user is asking me to reply with exactly "plain". I should respond with that exact word.                         ┃
+                                                                                                                       ┃
+ ● plain                                                                                                               ┃
+                                                                                                                       ┃
+ ❯ Run the shell command `sleep 5`, then reply with exactly: slept                                               17:16 ┃
+                                                                                                                       ┃
+ ⌄ Thought for 1s                                                                                                      ┃
+   The user wants me to:                                                                                               ┃
+   1. Run the shell command `sleep 5`                                                                                  ┃
+   2. Then reply with exactly: slept                                                                                   ┃
+                                                                                                                       ┃
+   I should use the bash tool to run the sleep command, and then reply with "slept" after it completes.                ┃
+                                                                                                                       ┃
+ $ Shell Sleep for 5 seconds 1 line…                                                                                   ┃
+   sleep 5                                                                                                             ┃
+                                                                                                                       ┃
+ ❯ Also reply with the word: queued                                                                              17:16 ┃
+                                                                                                                       ┃
+ ⌄ Thought for 1s                                                                                                      ┃
+   The user is asking me to reply with the word "queued". The sleep command is still running in the background. I      ┃
+   should just respond with "queued" as requested.                                                                     ┃
+                                                                                                                       ┃
+ ● queued                                                                                                              ┃
+                                                                                                                       ┃
+ ● Shell "Sleep for 5 seconds" completed                                                                               ┃
+                                                                                                                       ┃
+ ● Read shell output Reading command output 1 line…                                                                    ┃
+                                                                                                                       ┃
+ ● slept                                                                                                               ┃
+                                                                                                                       ┃
+ $CWD [⎇ main]
+
+❯
+
+ ← open sidebar · Interactive · Allow All · / commands · ? help · tab next tab                         Claude Haiku 4.5
+
+===== dialog-ask-user (t=83.0s) =====
+ [Current]  Sessions                            Gists
+
+ $ Shell Sleep for 5 seconds 1 line…                                                                                   ┃
+   sleep 5                                                                                                             ┃
+                                                                                                                       ┃
+ ❯ Also reply with the word: queued                                                                              17:16 ┃
+                                                                                                                       ┃
+ ⌄ Thought for 1s                                                                                                      ┃
+   The user is asking me to reply with the word "queued". The sleep command is still running in the background. I      ┃
+   should just respond with "queued" as requested.                                                                     ┃
+                                                                                                                       ┃
+ ● queued                                                                                                              ┃
+                                                                                                                       ┃
+ ● Shell "Sleep for 5 seconds" completed                                                                               ┃
+                                                                                                                       ┃
+ ● Read shell output Reading command output 1 line…                                                                    ┃
+                                                                                                                       ┃
+ ● slept                                                                                                               ┃
+                                                                                                                       ┃
+ ❯ Use the ask_user tool to ask me to pick one colour: red or blue. Then reply with exactly the colour I picked. 17:16 ┃
+                                                                                                                       ┃
+ ⌄ Thought for 1s                                                                                                      ┃
+   The user wants me to use the ask_user tool to ask them to pick between red or blue. Then I should reply with the    ┃
+   color they picked.                                                                                                  ┃
+                                                                                                                       ┃
+   I'll use the ask_user tool with a form that has a single field for choosing between red and blue.                   ┃
+                                                                                                                       ┃
+ ○ Asking user Waiting for response                                                                                57s ┃
+                                                                                                                       ┃
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Copilot needs information.
+ Please pick one colour: red or blue.
+
+ Colour:
+ ❯ red
+   blue
+   Other (type your answer)
+
+ ↑/↓ select · enter accept · ctrl+d decline · esc cancel
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+===== dialog-ask-user-down (t=83.4s) =====
+ [Current]  Sessions                            Gists
+
+ $ Shell Sleep for 5 seconds 1 line…                                                                                   ┃
+   sleep 5                                                                                                             ┃
+                                                                                                                       ┃
+ ❯ Also reply with the word: queued                                                                              17:16 ┃
+                                                                                                                       ┃
+ ⌄ Thought for 1s                                                                                                      ┃
+   The user is asking me to reply with the word "queued". The sleep command is still running in the background. I      ┃
+   should just respond with "queued" as requested.                                                                     ┃
+                                                                                                                       ┃
+ ● queued                                                                                                              ┃
+                                                                                                                       ┃
+ ● Shell "Sleep for 5 seconds" completed                                                                               ┃
+                                                                                                                       ┃
+ ● Read shell output Reading command output 1 line…                                                                    ┃
+                                                                                                                       ┃
+ ● slept                                                                                                               ┃
+                                                                                                                       ┃
+ ❯ Use the ask_user tool to ask me to pick one colour: red or blue. Then reply with exactly the colour I picked. 17:16 ┃
+                                                                                                                       ┃
+ ⌄ Thought for 1s                                                                                                      ┃
+   The user wants me to use the ask_user tool to ask them to pick between red or blue. Then I should reply with the    ┃
+   color they picked.                                                                                                  ┃
+                                                                                                                       ┃
+   I'll use the ask_user tool with a form that has a single field for choosing between red and blue.                   ┃
+                                                                                                                       ┃
+ ○ Asking user Waiting for response                                                                                58s ┃
+                                                                                                                       ┃
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Copilot needs information.
+ Please pick one colour: red or blue.
+
+ Colour:
+   red
+ ❯ blue
+   Other (type your answer)
+
+ ↑/↓ select · enter accept · ctrl+d decline · esc cancel
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+===== idle-after-T5 (t=87.7s) =====
+ [Current]  Sessions                            Gists
+
+                                                                                                                       ┃
+   I should use the bash tool to run the sleep command, and then reply with "slept" after it completes.                ┃
+                                                                                                                       ┃
+ $ Shell Sleep for 5 seconds 1 line…                                                                                   ┃
+   sleep 5                                                                                                             ┃
+                                                                                                                       ┃
+ ❯ Also reply with the word: queued                                                                              17:16 ┃
+                                                                                                                       ┃
+ ⌄ Thought for 1s                                                                                                      ┃
+   The user is asking me to reply with the word "queued". The sleep command is still running in the background. I      ┃
+   should just respond with "queued" as requested.                                                                     ┃
+                                                                                                                       ┃
+ ● queued                                                                                                              ┃
+                                                                                                                       ┃
+ ● Shell "Sleep for 5 seconds" completed                                                                               ┃
+                                                                                                                       ┃
+ ● Read shell output Reading command output 1 line…                                                                    ┃
+                                                                                                                       ┃
+ ● slept                                                                                                               ┃
+                                                                                                                       ┃
+ ❯ Use the ask_user tool to ask me to pick one colour: red or blue. Then reply with exactly the colour I picked. 17:16 ┃
+                                                                                                                       ┃
+ ⌄ Thought for 1s                                                                                                      ┃
+   The user wants me to use the ask_user tool to ask them to pick between red or blue. Then I should reply with the    ┃
+   color they picked.                                                                                                  ┃
+                                                                                                                       ┃
+   I'll use the ask_user tool with a form that has a single field for choosing between red and blue.                   ┃
+                                                                                                                       ┃
+ ● Asked user Please pick one colour: red or blue.                                                                 58s ┃
+   └ blue                                                                                                              ┃
+                                                                                                                       ┃
+ ● blue                                                                                                                ┃
+                                                                                                                       ┃
+ $CWD [⎇ main]
+
+❯
+
+ ← open sidebar · Interactive · Allow All · / commands · ? help · tab next tab                         Claude Haiku 4.5
+

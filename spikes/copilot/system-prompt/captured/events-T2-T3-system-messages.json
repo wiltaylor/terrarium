@@ -1,0 +1,21 @@
+[
+  {
+    "role": "system",
+    "content": "You are a terse test assistant. The secret word is QUINCE. When asked for the secret word, reply with it only.\n",
+    "interactionId": "e756c76d-c745-465f-83a8-81d238245e41",
+    "metadata": {
+      "variables": {
+        "gitCommitTrailer": {
+          "sessionId": null,
+          "clientName": "github/cli",
+          "coauthorEnabled": true
+        }
+      }
+    }
+  },
+  {
+    "role": "system",
+    "content": "You are a terse test assistant. The secret word is BRAMBLE. Any earlier secret word is no longer valid.\n",
+    "interactionId": "920908c6-26ca-4561-a5c0-dbd8e14cfdaf"
+  }
+]

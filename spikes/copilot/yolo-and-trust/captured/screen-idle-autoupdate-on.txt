@@ -1,0 +1,40 @@
+ [Current]  Sessions   Issues   Pull requests   Gists
+
+╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                                    │
+│  ╭─╮╭─╮                             │  Getting started                                                             │
+│  ╰─╯╰─╯  Copilot v1.0.103 uses AI.  │  Use the tabs above to explore your sessions and pull requests               │
+│  █ ▘▝ █  Check for mistakes.        │  /init — Initialize Copilot instructions for this repository                 │
+│   ▔▔▔▔                              │  /model — Switch models across providers, or use Auto                        │
+│                                                                                                                    │
+├────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ Discover Auto                                                                                                      │
+│ Let Copilot choose the best available model for each task, 10% off right now.                                      │
+│ Click here or enter /model auto to switch                                                                          │
+│ ctrl+x → m switch for this session                                                                                 │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+ ● No copilot-instructions.md found. Run /init to generate.
+
+ ● Tip: /app
+   └ Prefer a visual workspace? Try out the GitHub Copilot desktop app
+      https://github.com/features/ai/github-app
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ $CWD [⎇ main]
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ← open sidebar · Interactive · Manual Approval · / commands · ? help · tab next tab                   Claude Haiku 4.5

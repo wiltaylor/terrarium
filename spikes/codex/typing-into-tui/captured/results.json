@@ -1,0 +1,54 @@
+{
+  "first_ready_s": 0.28285908699035645,
+  "stable_ready_s": 0.0014586448669433594,
+  "T1": {
+    "submit_hook_s": 0.8608527183532715,
+    "prompt": "First line.\nSecond line.\nReply with exactly: two",
+    "reply": "two"
+  },
+  "T2": {
+    "lf_submitted": false,
+    "submit_hook_s": 0.04081082344055176,
+    "prompts": [
+      "Reply with exactly:\n plain"
+    ],
+    "reply": "plain"
+  },
+  "T3_T4": {
+    "user_prompt_submits": [
+      [
+        -1.85,
+        "Run the shell command `sleep 5`, then reply with exactly: slept",
+        "01a16cba-239f-7ed2-a05c-ce6f0a1a40fc"
+      ],
+      [
+        4.55,
+        "Also add the word: queued",
+        "01a16cba-239f-7ed2-a05c-ce6f0a1a40fc"
+      ]
+    ],
+    "stops": [
+      [
+        6.25,
+        "slept queued",
+        "01a16cba-239f-7ed2-a05c-ce6f0a1a40fc"
+      ]
+    ]
+  },
+  "R_tail": [
+    "\u203a Also add the word: queued",
+    "\u2022 slept queued",
+    "  Worked for 8s \u2022 5:05 PM",
+    "\u203a Ask Codex to do anything",
+    "  GPT-6-Luna low \u00b7 $CWD \u00b7 Reply with exactly two",
+    "  ? for shortcuts                                                                              \u26a0 1 warning \u00b7 f2 to view"
+  ],
+  "R_state": {
+    "input_box": true,
+    "input_text": "",
+    "busy": false,
+    "ready": true,
+    "dialog": null,
+    "footer": "  GPT-6-Luna low \u00b7 $CWD \u00b7 Reply with exactly two\n  ? for shortcuts                                                                              \u26a0 1 warning \u00b7 f2 to view"
+  }
+}
