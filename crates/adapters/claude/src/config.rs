@@ -13,7 +13,7 @@
 //!   time is not tested (`docs/compat.md`, "Not tested"). A per-agent copy
 //!   removes the question.
 //!
-//! Layout under the agent directory (`/state/agents/<ulid>/`):
+//! Layout under the harness directory (`/state/agents/<ulid>/harness/`):
 //!
 //! | File | Use |
 //! |---|---|
@@ -70,14 +70,23 @@ pub const MEMORY_DIR: &str = "memory";
 /// The rendered prompt in the agent directory (PLAN §11).
 pub const PROMPT_FILE: &str = "prompt.md";
 
-/// `/state/agents/<ulid>`: the parent of the workspace.
+/// `/state/agents/<ulid>/harness`: the directory of the per-agent harness
+/// files, next to the workspace. The sandbox binds it read-only at the
+/// same path (`docs/runner.md`, "Files"); only the overlays that the
+/// harness writes are read-write. The runner's own records are in the
+/// sibling `private/`, which the sandbox never binds.
 pub fn agent_dir(agent: &Agent) -> PathBuf {
     agent
         .workspace
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| agent.workspace.clone())
+        .join(HARNESS_DIR)
 }
+
+/// The name of the harness directory in the agent directory
+/// (`terrarium_runner::HARNESS_DIR`).
+pub const HARNESS_DIR: &str = "harness";
 
 /// `/state/agents/<ulid>/claude`.
 pub fn claude_dir(agent: &Agent) -> PathBuf {

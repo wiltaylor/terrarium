@@ -87,7 +87,6 @@ fi
 
 RUN_DIR="${TERRARIUM_RUNTIME_DIR:-${XDG_RUNTIME_DIR:+$XDG_RUNTIME_DIR/terrarium}}"
 RUN_DIR="${RUN_DIR:-/run/terrarium}"
-STATE_DIR="${TERRARIUM_STATE_DIR:-/state}"
 MAX_BACKOFF="${TERRARIUM_SUPERVISOR_MAX_BACKOFF:-30}"
 RESET_AFTER="${TERRARIUM_SUPERVISOR_RESET_AFTER:-300}"
 DAEMON_STOP_TIMEOUT="${TERRARIUM_DAEMON_STOP_TIMEOUT:-5}"
@@ -200,10 +199,9 @@ stop_runners() {
 			log "runner $pid (agent $agent) did not stop in ${SHUTDOWN_GRACE}s: sending SIGKILL"
 			kill -KILL "$pid" 2>/dev/null
 		else
-			# The container stopped this runner, not the harness or the
-			# operator. Remove the exit status it wrote, so the next
-			# container start launches the agent again with resume (PLAN §18).
-			rm -f "$STATE_DIR/agents/$agent/runner-exit.json"
+			# The runner wrote `"stopped_by": "container"` into its
+			# runner-exit.json, because SIGTERM stopped it. The next daemon
+			# launches the agent again with resume (PLAN §18).
 			log "runner $pid (agent $agent) stopped"
 		fi
 	done

@@ -17,7 +17,7 @@ terrarium-runner (one for each agent, its own session; parent: terrariumd, or ti
 
 `terrariumd` starts each `terrarium-runner` detached: the runner calls
 `setsid`, and its stdout and stderr go to
-`/state/agents/<ulid>/runner.log`. When `terrariumd` dies, the kernel gives
+`/state/agents/<ulid>/private/runner.log`. When `terrariumd` dies, the kernel gives
 its runners to PID 1. tini is PID 1, and it reaps them when they exit.
 
 ## The restart loop
@@ -59,10 +59,12 @@ to the entrypoint only (no `-g`). Then the entrypoint:
    idle harness, and stops a busy harness with SIGHUP.
 4. Waits `TERRARIUM_SHUTDOWN_GRACE` (20 s) for the runners. After that, it
    sends SIGKILL to each runner that is still live.
-5. Removes `runner-exit.json` of each runner that stopped. The container
-   stopped the agent, not the harness or the operator. So the next container
-   start launches the agent again with resume (PLAN §18), and the restart
-   policy does not see a normal exit.
+5. Each runner that SIGTERM stopped writes `"stopped_by": "container"` into
+   its `runner-exit.json`. The container stopped the agent, not the harness
+   or the operator. So the next container start launches the agent again
+   with resume (PLAN §18), whatever the exit code, and the restart policy
+   does not see a normal exit. A runner that needed SIGKILL writes no exit
+   record; the next start launches its agent again too.
 6. Exits 0.
 
 `compose.yaml` sets `stop_grace_period: 40s`. Keep it larger than

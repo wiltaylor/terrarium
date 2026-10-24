@@ -119,8 +119,10 @@ async fn review_flow_mails_and_comments_and_release_is_immutable() {
     assert_eq!(mail[0]["subject"], "Review version v0.1.0 of proj");
     assert_eq!(mail[0]["from"], "project:proj");
     let body = mail[0]["body"].as_str().unwrap();
+    // The link opens the version in the dashboard (TERRARIUM_PUBLIC_URL,
+    // default http://localhost:8080).
     assert!(
-        body.contains(&format!("/projects/proj/versions/{id}")),
+        body.contains(&format!("Open: http://localhost:8080/p/proj/versions/{id}")),
         "{body}"
     );
     assert!(body.contains("TER-1 Parser"), "{body}");

@@ -19,8 +19,8 @@ use tokio::task::{AbortHandle, JoinSet};
 
 use crate::control::{
     AnswerKeysParams, AnswerParams, CancelParams, ClientFrame, EventsParams, Hello, HelloParams,
-    PROTOCOL_VERSION, ResizeParams, ServerFrame, TypeTurnParams, WireDeliveryError, WireSnapshot,
-    WriteParams, codes, decode, encode,
+    PROTOCOL_VERSION, ResizeParams, ServerFrame, StoppedByParams, TypeTurnParams,
+    WireDeliveryError, WireSnapshot, WriteParams, codes, decode, encode,
 };
 use crate::error::RunnerError;
 use crate::events::read_since;
@@ -199,9 +199,18 @@ pub(crate) struct ServerCtx {
     pub(crate) runner: Runner,
     pub(crate) hub: Arc<Hub>,
     pub(crate) harness: HarnessId,
+    /// Set by the `set_stopped_by` call; goes into `runner-exit.json`.
+    pub(crate) stopped_by: std::sync::Mutex<Option<crate::process::StoppedBy>>,
 }
 
 impl ServerCtx {
+    pub(crate) fn stopped_by(&self) -> Option<crate::process::StoppedBy> {
+        *self
+            .stopped_by
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     fn hello(&self) -> Hello {
         let r = &self.runner;
         Hello {
@@ -427,6 +436,17 @@ impl Conn {
                 Err(e) => Err(e),
             },
             "kill" => runner.kill().map(|()| Value::Null).map_err(runner_err),
+            "set_stopped_by" => match params::<StoppedByParams>(p) {
+                Ok(b) => {
+                    *self
+                        .ctx
+                        .stopped_by
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(b.stopped_by);
+                    Ok(Value::Null)
+                }
+                Err(e) => Err(e),
+            },
             "wait" => {
                 self.tasks.spawn(async move {
                     let status = runner.wait().await;

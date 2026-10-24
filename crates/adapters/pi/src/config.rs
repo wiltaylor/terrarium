@@ -2,15 +2,17 @@
 //!
 //! All agents share one pi home (`/auth/pi`, seen as `PI_CODING_AGENT_DIR`)
 //! for the logins (`auth.json`) and the custom providers (`models.json`).
-//! Everything that is per agent lives in the agent directory
-//! (`/state/agents/<ulid>/`). The sandbox binds the agent directory at the
-//! same path, so these paths are the same for the daemon and for pi.
+//! Everything that is per agent lives in the harness directory
+//! (`/state/agents/<ulid>/harness/`). The sandbox binds that directory
+//! read-only at the same path, so these paths are the same for the daemon
+//! and for pi. The two places that pi writes, `pi/sessions/` and the
+//! settings overlay, get read-write binds of their own.
 //!
 //! | File | Use |
 //! |---|---|
 //! | `prompt.md` | the rendered system prompt (the daemon writes it); `launch` passes its path |
 //! | `pi/terrarium.ts` | the event extension ([`EXTENSION`]); `launch` loads it with `-e` |
-//! | `pi/sessions/` | the session files (`--session-dir`) |
+//! | `pi/sessions/` | the session files (`--session-dir`); bound read-write over itself |
 //! | `pi/settings.json` | bound over `$PI_CODING_AGENT_DIR/settings.json` |
 //!
 //! # What pi keeps in its home, and where it goes
@@ -26,9 +28,10 @@
 //! | `trust.json` | not written | `--no-approve` makes no trust decision. |
 //! | `models-store.json` | shared | written at start (seen in the live check). Not tested with many writers. |
 //!
-//! The extension file is also bound read-only over itself: the agent can
-//! write to its own agent directory, and it must not change the code that
-//! reports its state.
+//! The extension file is also bound read-only over itself. The harness
+//! directory is read-only already; the explicit bind keeps the extension
+//! safe if the bind of the directory ever changes, because the agent must
+//! not change the code that reports its state.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -52,14 +55,23 @@ pub const SESSIONS_DIR: &str = "sessions";
 /// The rendered prompt in the agent directory (PLAN §11).
 pub const PROMPT_FILE: &str = "prompt.md";
 
-/// `/state/agents/<ulid>`: the parent of the workspace.
+/// `/state/agents/<ulid>/harness`: the directory of the per-agent harness
+/// files, next to the workspace. The sandbox binds it read-only at the
+/// same path (`docs/runner.md`, "Files"); only the overlays that the
+/// harness writes are read-write. The runner's own records are in the
+/// sibling `private/`, which the sandbox never binds.
 pub fn agent_dir(agent: &Agent) -> PathBuf {
     agent
         .workspace
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| agent.workspace.clone())
+        .join(HARNESS_DIR)
 }
+
+/// The name of the harness directory in the agent directory
+/// (`terrarium_runner::HARNESS_DIR`).
+pub const HARNESS_DIR: &str = "harness";
 
 /// `/state/agents/<ulid>/pi`.
 pub fn pi_dir(agent: &Agent) -> PathBuf {
@@ -159,6 +171,13 @@ pub fn materialize(
             target: ext,
             writable: false,
         },
+        // pi writes its session files here; the rest of the harness
+        // directory is read-only.
+        FileOverlay {
+            source: sessions.clone(),
+            target: sessions,
+            writable: true,
+        },
     ])
 }
 
@@ -198,6 +217,11 @@ mod tests {
                     source: ext.clone(),
                     target: ext.clone(),
                     writable: false,
+                },
+                FileOverlay {
+                    source: sessions_dir(&agent),
+                    target: sessions_dir(&agent),
+                    writable: true,
                 },
             ]
         );

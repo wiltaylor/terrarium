@@ -10,14 +10,17 @@
 //! | `/proc`, `/dev`, `/tmp` | new, private | |
 //! | `$HOME` (`/home/agent`) | a new tmpfs | rw |
 //! | `$HOME/work` | `<state>/agents/<ulid>/workspace` | rw |
-//! | `<state>/agents/<ulid>` | the same path | rw |
+//! | `<state>/agents/<ulid>/harness` | the same path (`prompt.md`, the adapter's per-agent files) | ro |
 //! | `$HOME/.claude` (and the other harness homes) | the shared home, for example `/auth/claude` | rw |
-//! | each `FileOverlay` target | the per-agent file | rw or ro |
+//! | each `FileOverlay` target | the per-agent file (also a part of `harness/` that the harness writes, such as pi's `sessions/`) | rw or ro |
 //! | `/run/terrarium/agent.sock` | `<run>/agents/<ulid>.sock` | rw |
 //! | `/opt/terrarium/bin/terrarium` | the `terrarium` CLI | ro |
 //!
 //! Everything else is hidden: other agents, the database, the daemon socket,
-//! and the rest of the host. The network stays on. The child env starts
+//! the rest of the host, and `<state>/agents/<ulid>/private`, which holds
+//! the runner's records (`events.jsonl`, `pty.log`, `runner.json` with the
+//! injected keys, `runner-exit.json`). The agent cannot read or change
+//! them (`docs/security-review.md`, F1). The network stays on. The child env starts
 //! empty (see [`child_env`]).
 //!
 //! Mode `none` runs the harness with no sandbox. It is for development
@@ -157,8 +160,12 @@ pub struct HarnessHome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentLayout {
     pub agent: AgentId,
-    /// `<state>/agents/<ulid>`.
+    /// `<state>/agents/<ulid>`. Not bound.
     pub agent_dir: PathBuf,
+    /// `<state>/agents/<ulid>/harness`: bound read-only at the same path.
+    pub harness_dir: PathBuf,
+    /// `<state>/agents/<ulid>/private`: the runner's records. Never bound.
+    pub private_dir: PathBuf,
     /// `<state>/agents/<ulid>/workspace`.
     pub workspace: PathBuf,
     /// `<run>/agents/<ulid>.sock`.
@@ -330,7 +337,13 @@ impl SandboxConfig {
             &layout.workspace,
             &self.home.join("work"),
         );
-        push3(&mut args, "--bind", &layout.agent_dir, &layout.agent_dir);
+        // The harness files, read-only. `private/` next to it stays out.
+        push3(
+            &mut args,
+            "--ro-bind",
+            &layout.harness_dir,
+            &layout.harness_dir,
+        );
         for h in &layout.homes {
             push3(&mut args, "--bind", &h.host, &self.home_inside(h));
         }
@@ -527,17 +540,26 @@ mod tests {
         AgentLayout {
             agent,
             agent_dir: dir.clone(),
+            harness_dir: dir.join("harness"),
+            private_dir: dir.join("private"),
             workspace: dir.join("workspace"),
             socket: PathBuf::from("/run/terrarium/agents/01K8AGENT0000000000000000A.sock"),
             homes: vec![HarnessHome {
                 harness: HarnessId::Claude,
                 host: PathBuf::from("/auth/claude"),
             }],
-            overlays: vec![FileOverlay {
-                source: dir.join("claude/claude.json"),
-                target: PathBuf::from("/home/agent/.claude/.claude.json"),
-                writable: true,
-            }],
+            overlays: vec![
+                FileOverlay {
+                    source: dir.join("harness/claude/claude.json"),
+                    target: PathBuf::from("/home/agent/.claude/.claude.json"),
+                    writable: true,
+                },
+                FileOverlay {
+                    source: dir.join("harness/pi/sessions"),
+                    target: dir.join("harness/pi/sessions"),
+                    writable: true,
+                },
+            ],
         }
     }
 
@@ -592,9 +614,10 @@ TERRARIUM_AGENT=01K8AGENT0000000000000000A TERRARIUM_SOCKET=/run/terrarium/agent
 --ro-bind-try /etc/ld.so.conf.d /etc/ld.so.conf.d \
 --proc /proc --dev /dev --tmpfs /tmp --tmpfs /home/agent \
 --bind /state/agents/01K8AGENT0000000000000000A/workspace /home/agent/work \
---bind /state/agents/01K8AGENT0000000000000000A /state/agents/01K8AGENT0000000000000000A \
+--ro-bind /state/agents/01K8AGENT0000000000000000A/harness /state/agents/01K8AGENT0000000000000000A/harness \
 --bind /auth/claude /home/agent/.claude \
---bind /state/agents/01K8AGENT0000000000000000A/claude/claude.json /home/agent/.claude/.claude.json \
+--bind /state/agents/01K8AGENT0000000000000000A/harness/claude/claude.json /home/agent/.claude/.claude.json \
+--bind /state/agents/01K8AGENT0000000000000000A/harness/pi/sessions /state/agents/01K8AGENT0000000000000000A/harness/pi/sessions \
 --bind /run/terrarium/agents/01K8AGENT0000000000000000A.sock /run/terrarium/agent.sock \
 --ro-bind /usr/local/bin/terrarium /opt/terrarium/bin/terrarium \
 --chdir /home/agent/work -- /usr/bin/claude --dangerously-skip-permissions --model haiku";
@@ -606,6 +629,49 @@ TERRARIUM_AGENT=01K8AGENT0000000000000000A TERRARIUM_SOCKET=/run/terrarium/agent
         };
         let wrapped = cfg.wrap_with(spec(), &l, BTreeMap::new(), &symlink, &resolve);
         assert_eq!(wrapped.args[3], "--new-session");
+    }
+
+    /// F1 of `docs/security-review.md`: the runner's records stay out of
+    /// the sandbox. No bind of any kind names `private/` or a directory
+    /// above it, so the agent can neither read nor change them.
+    #[test]
+    fn the_sandbox_never_binds_the_private_dir() {
+        let cfg = config();
+        let l = layout();
+        let resolve = |p: &str| (p == "claude").then(|| PathBuf::from("/usr/bin/claude"));
+        let wrapped = cfg.wrap_with(spec(), &l, BTreeMap::new(), &|_| None, &resolve);
+        let a = &wrapped.args;
+        let mut binds = 0;
+        for (i, flag) in a.iter().enumerate() {
+            if !matches!(
+                flag.as_str(),
+                "--bind" | "--bind-try" | "--ro-bind" | "--ro-bind-try" | "--dev-bind"
+            ) {
+                continue;
+            }
+            binds += 1;
+            let source = Path::new(&a[i + 1]);
+            let target = Path::new(&a[i + 2]);
+            for p in [source, target] {
+                assert!(
+                    !l.private_dir.starts_with(p) && !p.starts_with(&l.private_dir),
+                    "{flag} {} {} exposes {}",
+                    source.display(),
+                    target.display(),
+                    l.private_dir.display()
+                );
+            }
+            if flag == "--bind" {
+                assert_ne!(source, l.agent_dir, "the agent dir is not bound read-write");
+            }
+        }
+        assert!(binds > 10, "{a:?}");
+        // The harness dir is read-only; only the overlays are writable.
+        let i = a
+            .iter()
+            .position(|x| x == &l.harness_dir.display().to_string())
+            .unwrap();
+        assert_eq!(a[i - 1], "--ro-bind");
     }
 
     #[test]

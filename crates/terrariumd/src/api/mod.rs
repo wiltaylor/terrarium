@@ -145,8 +145,24 @@ async fn api_method_not_allowed() -> ApiError {
     )
 }
 
-/// The routes, without auth or transport.
+/// The routes, without auth or transport, with the artifact serving routes
+/// (`/a/...`). The Unix socket and the agent RPC use it.
 pub fn router(state: Shared) -> Router {
+    router_with(state, true)
+}
+
+/// Does the dashboard port serve `/a/...`? Only when the artifact origin
+/// has no listener of its own (`TERRARIUM_ARTIFACT_LISTEN` set to empty).
+/// With a listener (the default), artifacts load from that origin only, so
+/// an uploaded page can never be same-origin with the dashboard
+/// (`docs/security-review.md`, F5).
+pub fn artifacts_on_dashboard() -> bool {
+    crate::settings::artifact_listen().is_empty()
+}
+
+/// The routes, without auth or transport. `serve_artifacts`: mount the
+/// artifact serving routes (`/a/...`).
+pub fn router_with(state: Shared, serve_artifacts: bool) -> Router {
     let api = Router::new()
         .route("/health", get(system::health))
         .merge(hosts::routes())
@@ -170,15 +186,16 @@ pub fn router(state: Shared) -> Router {
         .fallback(api_not_found)
         .method_not_allowed_fallback(api_method_not_allowed)
         .layer(middleware::from_fn_with_state(state.clone(), resolve_actor));
-    Router::new()
-        .nest("/api", api)
-        .merge(artifacts::serving_routes())
-        .route(
-            terrarium_host::protocol::CONNECT_PATH,
-            get(crate::hosts::connect),
-        )
-        .fallback(crate::assets::serve)
-        .with_state(state)
+    let mut app = Router::new().nest("/api", api);
+    if serve_artifacts {
+        app = app.merge(artifacts::serving_routes());
+    }
+    app.route(
+        terrarium_host::protocol::CONNECT_PATH,
+        get(crate::hosts::connect),
+    )
+    .fallback(crate::assets::serve)
+    .with_state(state)
 }
 
 /// The routes for the Unix socket.
@@ -186,15 +203,17 @@ pub fn unix_router(state: Shared) -> Router {
     router(state).layer(Extension(Transport::Unix))
 }
 
-/// Compare without an early exit, so timing does not leak the token.
+/// Compare two tokens in constant time, the length too: both sides are
+/// hashed to 32 bytes first, and the compare of the hashes has no early
+/// exit. So the timing leaks neither the bytes nor the length of the
+/// token (`docs/security-review.md`, F7).
 fn token_matches(given: &[u8], expected: &[u8]) -> bool {
-    if given.len() != expected.len() {
-        return false;
-    }
-    given
-        .iter()
-        .zip(expected)
-        .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+    use sha2::Digest;
+    let a = sha2::Sha256::digest(given);
+    let b = sha2::Sha256::digest(expected);
+    a.iter()
+        .zip(b.iter())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
         == 0
 }
 
@@ -205,7 +224,27 @@ fn is_websocket(req: &Request) -> bool {
         .is_some_and(|v| v.eq_ignore_ascii_case("websocket"))
 }
 
-/// The `token` query parameter, for WebSocket upgrades from a browser.
+/// The prefix of the WebSocket subprotocol that carries the bearer token:
+/// `Sec-WebSocket-Protocol: bearer.<token>`.
+pub const WS_BEARER_PREFIX: &str = "bearer.";
+
+/// The `bearer.<token>` entry of `Sec-WebSocket-Protocol`, if any. A
+/// browser cannot set `Authorization` on a WebSocket, but it can offer
+/// subprotocols. Returns the whole entry (to echo back) and the token.
+fn protocol_token(req: &Request) -> Option<(String, String)> {
+    req.headers()
+        .get_all(header::SEC_WEBSOCKET_PROTOCOL)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .map(str::trim)
+        .find_map(|p| {
+            let t = p.strip_prefix(WS_BEARER_PREFIX)?;
+            (!t.is_empty()).then(|| (p.to_owned(), t.to_owned()))
+        })
+}
+
+/// The `token` query parameter, for WebSocket upgrades from an old client.
 fn query_token(req: &Request) -> Option<String> {
     req.uri().query()?.split('&').find_map(|pair| {
         let (k, v) = pair.split_once('=')?;
@@ -245,7 +284,67 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-async fn require_token(State(token): State<Arc<str>>, mut req: Request, next: Next) -> Response {
+/// The most client addresses that get their own `?token=` warning; then
+/// the warnings stop, so the set does not grow without a bound.
+const MAX_WARNED_CLIENTS: usize = 4096;
+
+/// The bearer-token check of the TCP listener.
+pub struct TokenAuth {
+    token: String,
+    /// Take `?token=` on a WebSocket upgrade (deprecated). Off with
+    /// `TERRARIUM_WS_QUERY_TOKEN=0`.
+    allow_query: bool,
+    /// The client addresses that got the `?token=` warning.
+    warned: std::sync::Mutex<std::collections::HashSet<String>>,
+}
+
+impl TokenAuth {
+    pub fn new(token: String, allow_query: bool) -> Self {
+        Self {
+            token,
+            allow_query,
+            warned: std::sync::Mutex::default(),
+        }
+    }
+
+    /// The token, and `allow_query` from `TERRARIUM_WS_QUERY_TOKEN`.
+    pub fn from_env(token: String) -> Self {
+        Self::new(token, crate::settings::ws_query_token_allowed())
+    }
+
+    /// Log the `?token=` deprecation once per client address.
+    fn warn_query(&self, client: &str) {
+        let mut w = self
+            .warned
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if w.len() < MAX_WARNED_CLIENTS && w.insert(client.to_owned()) {
+            tracing::warn!(
+                client,
+                "a WebSocket upgrade sent the bearer token as `?token=`; the query string can \
+                 reach proxy logs and browser history. Send it as the subprotocol \
+                 `bearer.<token>` (Sec-WebSocket-Protocol) instead. TERRARIUM_WS_QUERY_TOKEN=0 \
+                 refuses `?token=`"
+            );
+        }
+    }
+}
+
+fn client_addr(req: &Request) -> String {
+    req.extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map_or_else(|| "unknown".to_owned(), |c| c.0.ip().to_string())
+}
+
+fn unauthorized(message: &str) -> Response {
+    ApiError::new(Code::Unauthorized, message).into_response()
+}
+
+async fn require_token(
+    State(auth): State<Arc<TokenAuth>>,
+    mut req: Request,
+    next: Next,
+) -> Response {
     if !req.uri().path().starts_with("/api") {
         return next.run(req).await;
     }
@@ -255,24 +354,66 @@ async fn require_token(State(token): State<Arc<str>>, mut req: Request, next: Ne
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .map(str::to_owned);
-    let given = header_token.or_else(|| is_websocket(&req).then(|| query_token(&req)).flatten());
+    // The subprotocol that carried the token: the answer must name it, or
+    // the browser drops the connection.
+    let mut echo = None;
+    let given = match header_token {
+        Some(t) => Some(t),
+        None if is_websocket(&req) => match protocol_token(&req) {
+            Some((proto, t)) => {
+                echo = Some(proto);
+                Some(t)
+            }
+            None => match query_token(&req) {
+                Some(_) if !auth.allow_query => {
+                    return unauthorized(
+                        "`?token=` is off (TERRARIUM_WS_QUERY_TOKEN=0); send the token as the \
+                         WebSocket subprotocol `bearer.<token>`",
+                    );
+                }
+                Some(t) => {
+                    auth.warn_query(&client_addr(&req));
+                    Some(t)
+                }
+                None => None,
+            },
+        },
+        None => None,
+    };
     match given {
-        Some(given) if token_matches(given.as_bytes(), token.as_bytes()) => {
+        Some(given) if token_matches(given.as_bytes(), auth.token.as_bytes()) => {
             req.extensions_mut().insert(Transport::Tcp);
-            next.run(req).await
+            let mut resp = next.run(req).await;
+            if let Some(proto) = echo
+                && resp.status() == axum::http::StatusCode::SWITCHING_PROTOCOLS
+                && !resp.headers().contains_key(header::SEC_WEBSOCKET_PROTOCOL)
+                && let Ok(v) = HeaderValue::from_str(&proto)
+            {
+                resp.headers_mut().insert(header::SEC_WEBSOCKET_PROTOCOL, v);
+            }
+            resp
         }
-        _ => ApiError::new(Code::Unauthorized, "missing or wrong bearer token").into_response(),
+        _ => unauthorized("missing or wrong bearer token"),
     }
 }
 
 /// The routes with bearer-token auth on `/api/*`. The dashboard assets stay
 /// public, because a browser cannot send a header on page load. A WebSocket
-/// upgrade may carry the token as `?token=`.
+/// upgrade carries the token as the subprotocol `bearer.<token>`, or (old
+/// clients, deprecated) as `?token=`. `/a/...` is here only when the
+/// artifact origin has no listener of its own ([`artifacts_on_dashboard`]).
 pub fn tcp_router(state: Shared, token: String) -> Router {
-    let token: Arc<str> = token.into();
-    router(state)
+    tcp_router_with(state, TokenAuth::from_env(token), artifacts_on_dashboard())
+}
+
+/// [`tcp_router`] with the settings given, for tests.
+pub fn tcp_router_with(state: Shared, auth: TokenAuth, serve_artifacts: bool) -> Router {
+    router_with(state, serve_artifacts)
         .layer(Extension(Transport::Tcp))
-        .layer(middleware::from_fn_with_state(token, require_token))
+        .layer(middleware::from_fn_with_state(
+            Arc::new(auth),
+            require_token,
+        ))
 }
 
 /// Bind the Unix socket and serve on it in the background.
@@ -312,7 +453,11 @@ pub async fn serve_tcp(
         .with_context(|| format!("cannot bind {addr}"))?;
     let local = listener.local_addr()?;
     info!(addr = %local, "API and dashboard listening on TCP");
-    let app = tcp_router(state, token);
+    if !artifacts_on_dashboard() {
+        info!("the dashboard port does not serve /a/...: artifacts load from their own origin");
+    }
+    let app =
+        tcp_router(state, token).into_make_service_with_connect_info::<std::net::SocketAddr>();
     Ok((
         tokio::spawn(async move {
             if let Err(e) = axum::serve(listener, app).await {
@@ -478,7 +623,138 @@ mod tests {
     fn token_compare() {
         assert!(token_matches(b"abc", b"abc"));
         assert!(!token_matches(b"abd", b"abc"));
+        // A length mismatch takes the same path as a byte mismatch: both
+        // sides become 32-byte hashes.
         assert!(!token_matches(b"ab", b"abc"));
+        assert!(!token_matches(b"", b"abc"));
+        assert!(!token_matches(
+            b"abcabcabcabcabcabcabcabcabcabcabcabc",
+            b"abc"
+        ));
+        assert!(token_matches(b"", b""));
+    }
+
+    /// A WebSocket upgrade request with `extra` headers.
+    async fn ws(app: Router, uri: &str, extra: &[(&str, &str)]) -> Response {
+        let mut req = Request::builder()
+            .uri(uri)
+            .header(header::HOST, "localhost")
+            .header(header::CONNECTION, "upgrade")
+            .header(header::UPGRADE, "websocket")
+            .header(header::SEC_WEBSOCKET_VERSION, "13")
+            .header(header::SEC_WEBSOCKET_KEY, "dGhlIHNhbXBsZSBub25jZQ==");
+        for (k, v) in extra {
+            req = req.header(*k, *v);
+        }
+        app.oneshot(req.body(Body::empty()).unwrap()).await.unwrap()
+    }
+
+    /// F4: the token rides in `Sec-WebSocket-Protocol`; the answer echoes
+    /// the chosen subprotocol. `?token=` still works, unless it is off.
+    #[tokio::test]
+    async fn websocket_token_in_the_subprotocol() {
+        let s = state();
+        let app = |q: bool| tcp_router_with(s.clone(), TokenAuth::new("secret".into(), q), false);
+        // An upgrade with no hyper connection behind it cannot switch, so
+        // the handler answers an error; the point is that auth passed (not
+        // 401). The echo is checked below on a 101 from a real server.
+        let r = ws(
+            app(true),
+            "/api/events",
+            &[("sec-websocket-protocol", "bearer.secret")],
+        )
+        .await;
+        assert_ne!(r.status(), StatusCode::UNAUTHORIZED);
+        let r = ws(
+            app(true),
+            "/api/events",
+            &[("sec-websocket-protocol", "terrarium, bearer.wrong")],
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+        // The deprecated query form.
+        let r = ws(app(true), "/api/events?token=secret", &[]).await;
+        assert_ne!(r.status(), StatusCode::UNAUTHORIZED);
+        // TERRARIUM_WS_QUERY_TOKEN=0.
+        let r = ws(app(false), "/api/events?token=secret", &[]).await;
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+        let body = r.into_body().collect().await.unwrap().to_bytes();
+        assert!(String::from_utf8_lossy(&body).contains("bearer.<token>"));
+        // The subprotocol counts on an upgrade only.
+        let resp = app(true)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/health")
+                    .header("sec-websocket-protocol", "bearer.secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn query_token_warns_once_per_client() {
+        let auth = TokenAuth::new("t".into(), true);
+        for ip in ["10.0.0.1", "10.0.0.1", "10.0.0.2", "10.0.0.1"] {
+            auth.warn_query(ip);
+        }
+        assert_eq!(auth.warned.lock().unwrap().len(), 2);
+    }
+
+    /// The echo needs a real upgrade: serve the TCP router on a port and
+    /// connect a WebSocket client that offers `bearer.<token>`.
+    #[tokio::test]
+    async fn websocket_upgrade_echoes_the_bearer_subprotocol() {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let s = state();
+        let app = tcp_router_with(s, TokenAuth::new("secret".into(), false), false)
+            .into_make_service_with_connect_info::<std::net::SocketAddr>();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+        let mut req = format!("ws://{addr}/api/events")
+            .into_client_request()
+            .unwrap();
+        req.headers_mut().insert(
+            "sec-websocket-protocol",
+            HeaderValue::from_static("bearer.secret"),
+        );
+        let (_ws, resp) = tokio_tungstenite::connect_async(req).await.unwrap();
+        assert_eq!(
+            resp.headers()
+                .get("sec-websocket-protocol")
+                .and_then(|v| v.to_str().ok()),
+            Some("bearer.secret")
+        );
+        // A wrong token never upgrades.
+        let mut bad = format!("ws://{addr}/api/events")
+            .into_client_request()
+            .unwrap();
+        bad.headers_mut().insert(
+            "sec-websocket-protocol",
+            HeaderValue::from_static("bearer.nope"),
+        );
+        assert!(tokio_tungstenite::connect_async(bad).await.is_err());
+        server.abort();
+    }
+
+    /// F5: with an artifact origin of its own, the dashboard port does not
+    /// serve `/a/...`; without one, it does. The Unix router always does.
+    #[tokio::test]
+    async fn artifacts_mount_on_the_dashboard_only_without_their_own_origin() {
+        let s = state();
+        let auth = || TokenAuth::new("secret".into(), true);
+        // The SPA fallback answers an unknown path with the page, so look
+        // at the body: a served route answers JSON or a file, not HTML.
+        let page = |b: &[u8]| String::from_utf8_lossy(b).contains("<html");
+        let (_, body) = get(tcp_router_with(s.clone(), auth(), false), "/a/ART-1/", None).await;
+        assert!(page(&body), "the dashboard must not serve /a/ here");
+        let (status, body) = get(tcp_router_with(s.clone(), auth(), true), "/a/ART-1/", None).await;
+        assert!(!page(&body), "{status}");
+        let (_, body) = get(router(s), "/a/ART-1/", None).await;
+        assert!(!page(&body));
     }
 
     #[test]

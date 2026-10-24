@@ -637,6 +637,12 @@ fn clean(comment: Option<&str>) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// The dashboard page of a version, for the operator mail:
+/// `<TERRARIUM_PUBLIC_URL>/p/<project>/versions/<id>`.
+pub fn review_link(project: &str, id: &str) -> String {
+    crate::settings::dashboard_link(&format!("/p/{project}/versions/{id}"))
+}
+
 /// `draft` or `rejected` -> `in_review`, and mail the operator.
 pub fn submit(
     t: &mut Tx<'_>,
@@ -665,7 +671,7 @@ pub fn submit(
         Address::from_actor(actor).display(),
         v.name,
         v.project,
-        v.url
+        review_link(&v.project, &v.id)
     );
     if let Some(c) = &comment {
         body.push_str(&format!("\n{c}\n"));

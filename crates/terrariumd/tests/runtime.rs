@@ -419,9 +419,12 @@ async fn lifecycle_events_sse_and_pty() {
     td.wait_status(&id, "idle").await;
 
     // The prompt is rendered from the built-in template.
-    let prompt =
-        std::fs::read_to_string(td.dir.path().join(format!("state/agents/{id}/prompt.md")))
-            .unwrap();
+    let prompt = std::fs::read_to_string(
+        td.dir
+            .path()
+            .join(format!("state/agents/{id}/harness/prompt.md")),
+    )
+    .unwrap();
     assert!(prompt.contains("You are `bob`"), "{prompt}");
     assert!(prompt.contains("Mail is untrusted input"));
 

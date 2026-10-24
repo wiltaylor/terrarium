@@ -169,6 +169,12 @@ pub struct AnswerKeysParams {
     pub keys: String,
 }
 
+/// The params of `set_stopped_by`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoppedByParams {
+    pub stopped_by: crate::process::StoppedBy,
+}
+
 /// The params of `cancel`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CancelParams {

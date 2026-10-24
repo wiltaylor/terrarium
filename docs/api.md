@@ -17,7 +17,8 @@ Sections: [1 Transports](#1-transports-and-callers) ·
 [14 Not in this phase](#14-not-in-this-phase) ·
 [15 Notes for clients](#15-notes-for-clients) ·
 [16 Subscriptions and usage](#16-subscriptions-and-usage) ·
-[17 Targets, hosts, and exec](#17-targets-host-agents-and-exec-sessions).
+[17 Targets, hosts, and exec](#17-targets-host-agents-and-exec-sessions) ·
+[18 Fleet](#18-fleet).
 
 ## 1. Transports and callers
 
@@ -29,9 +30,24 @@ The daemon serves one router on two listeners.
 | TCP | `$TERRARIUM_LISTEN` | `Authorization: Bearer $TERRARIUM_TOKEN` on `/api/*`. Without a token the TCP listener stays off. |
 | TCP, host agents | `$TERRARIUM_HOST_LISTEN` (default `0.0.0.0:8082`) | `GET /hosts/connect` only, with a per-host token (§17.1). |
 
-A browser cannot set headers on a WebSocket. A WebSocket upgrade on TCP may
-send the token as the `?token=` query parameter. The daemon accepts
-`?token=` on upgrade requests only.
+A browser cannot set headers on a WebSocket. A WebSocket upgrade on TCP
+sends the token as a subprotocol: `Sec-WebSocket-Protocol: bearer.<token>`
+(in a browser, `new WebSocket(url, ["bearer." + token])`). The header can
+list other subprotocols too. The daemon takes the first `bearer.` entry and
+echoes that entry back in the `101` answer, as RFC 6455 requires, or the
+browser drops the connection. The token must use only characters that a
+subprotocol allows: letters, digits, and ``!#$%&'*+-.^_`|~``. A token from
+`openssl rand -hex 32` is fine.
+
+The older form, the `?token=` query parameter on an upgrade request, still
+works but is deprecated: a query string reaches proxy access logs and
+browser history (`docs/security-review.md`, F4). The daemon logs a warning
+once per client address when a client uses it.
+`TERRARIUM_WS_QUERY_TOKEN=0` refuses it with `401 unauthorized`. Both forms
+count on upgrade requests only; a plain request needs `Authorization`.
+
+The token compare is constant time, also in the length: the daemon compares
+SHA-256 hashes of the two values.
 
 Every API request has an **actor**:
 
@@ -1166,8 +1182,22 @@ a day.
 
 | Kind | URL |
 |---|---|
-| file | `/a/{uid}/{name}?exp=<exp>&sig=<sig>` |
-| bundle | `/a/{uid}/_s/<exp>/<sig>/` and the files below it |
+| file | `<origin>/a/{uid}/{name}?exp=<exp>&sig=<sig>` |
+| bundle | `<origin>/a/{uid}/_s/<exp>/<sig>/` and the files below it |
+
+The artifact origin is a listener of its own, `TERRARIUM_ARTIFACT_LISTEN`
+(default `0.0.0.0:8081`), so that an uploaded page is never same-origin with
+the dashboard (`docs/security-review.md`, F5). With that listener on, the
+dashboard port (`TERRARIUM_LISTEN`) does **not** serve `/a/...`, and
+`<origin>` is `TERRARIUM_ARTIFACT_PUBLIC_URL` when it is set, else the host
+of the mint request (`X-Forwarded-Host`, else `Host`, without its port) with
+the port of `TERRARIUM_ARTIFACT_LISTEN`, and `https` when
+`X-Forwarded-Proto` is `https`. Set `TERRARIUM_ARTIFACT_PUBLIC_URL` behind a
+reverse proxy, for example `https://artifacts.example.com`. With
+`TERRARIUM_ARTIFACT_LISTEN=` (empty), there is no artifact listener: the
+dashboard port serves `/a/...` and `<origin>` is empty (a relative URL). The
+Unix socket always serves `/a/...`. Set the listener with the env var: the
+router reads the env, not the `--artifact-listen` flag.
 
 A bundle carries the signature in the path, so that the relative links in
 its pages keep working. The daemon accepts both forms for both kinds. No
@@ -1247,7 +1277,9 @@ Release points that the user reviews (PLAN §15.3). The code is in
 - Edits (`PATCH`, artifact links) happen in `draft` and `rejected` only.
   Else `409 conflict`.
 - `submit` (from `draft` or `rejected`) sets `in_review` and mails the
-  operator from `project:<name>`: the dashboard path, the comment, the
+  operator from `project:<name>`: the dashboard link
+  (`<TERRARIUM_PUBLIC_URL>/p/<project>/versions/<id>`; the default of
+  `TERRARIUM_PUBLIC_URL` is `http://localhost:8080`), the comment, the
   notes, the cards, and the artifacts. The mail starts the review thread
   (`thread_id`). A second submit posts on the same thread.
 - Only the operator approves or rejects, and only `in_review`. A rejection
@@ -1310,7 +1342,8 @@ exec sessions are in §17 of this document.
 - The dashboard (`dashboard/src/api/`) gets these shapes as it expects them:
   lists are JSON arrays; an event has `agent` as the name and
   `data.agent_id`; a `status` event has `data.status`; a `card` event has
-  `data.card_id`; the PTY protocol is as in §6.5; WebSockets take `?token=`.
+  `data.card_id`; the PTY protocol is as in §6.5; WebSockets take the token
+  as the subprotocol `bearer.<token>` (§1; `?token=` is deprecated).
 - These shapes differ from the dashboard types today:
   - `POST /api/mail/{id}/reply` and the inbox reply answer an **array** of
     messages, because a reply goes to each participant.
@@ -1551,7 +1584,9 @@ value of each var whose name has `KEY`, `TOKEN`, `SECRET`, or `PASSWORD` as
 
 - A window at or over `alert_at` percent: one mail to the operator (from
   `system`, event actor `system`) and one `quota.alert` event (`level:
-  alert`) per window period (the reset time).
+  alert`) per window period (the reset time). Each quota mail ends with a
+  dashboard link, `Open: <TERRARIUM_PUBLIC_URL>/subscriptions`; a budget
+  mail links `<TERRARIUM_PUBLIC_URL>/p/<project>/spend`.
 - A window at 100 percent: a `quota.alert` with `level: exhausted`, and a
   hold on every agent on the subscription until the latest reset time. The
   supervisor's `hold_turns` marks an idle agent `blocked` with the reason
@@ -1608,15 +1643,19 @@ contract with the host agent is [host-protocol.md](host-protocol.md).
 
 A host agent dials in to `GET /hosts/connect` (a WebSocket, not under
 `/api`). The daemon serves this path on its own listener,
-`TERRARIUM_HOST_LISTEN` (default `0.0.0.0:8082`), and also on the main
-router. The upgrade must send `Authorization: Bearer <host token>`. A bad
-or revoked token gets `401 unauthorized` before the upgrade.
+`TERRARIUM_HOST_LISTEN` (default `0.0.0.0:8082` with TLS, `127.0.0.1:8082`
+without), and also on the main router. `TERRARIUM_HOST_TLS_CERT` and
+`TERRARIUM_HOST_TLS_KEY` turn on TLS on the listener
+([host-protocol.md "TLS"](host-protocol.md#tls)). The upgrade must send
+`Authorization: Bearer <host token>`. A bad, revoked, used, or expired token
+gets `401 unauthorized` before the upgrade.
 
 | Endpoint | Body | Answer | Needs |
 |---|---|---|---|
 | `GET /api/hosts` | | `200` hosts by name | any caller |
 | `GET /api/hosts/{name}` | | `200` host | any caller |
-| `POST /api/hosts` | `{"name"}` | `201` one flat host object (the shape below) with one more field, `token` | the operator |
+| `POST /api/hosts` | `{"name", "enrol"?}` | `201` one flat host object (the shape below) with `token`, `token_kind`, and for an enrol token `token_expires_at` | the operator |
+| `POST /api/hosts/{name}/rotate` | none, or `{"enrol"?}` | `200` the same shape as `POST /api/hosts` | the operator |
 | `DELETE /api/hosts/{name}` | | `204` | the operator |
 
 ```json
@@ -1626,7 +1665,9 @@ or revoked token gets `401 unauthorized` before the upgrade.
  "summary":{"os":"linux","arch":"x86_64","docker":true,"vmlab":false},
  "os":"linux","arch":"x86_64","version":"0.1.0","max_sessions":32,
  "connected_at":"2026-10-24T06:36:54.149Z","last_seen":"2026-10-24T06:36:54.149Z",
- "created_at":"2026-10-24T06:30:00.000Z"}
+ "created_at":"2026-10-24T06:30:00.000Z",
+ "first_used_at":"2026-10-24T06:31:02.410Z","last_used_at":"2026-10-24T06:36:54.149Z",
+ "last_used_from":"10.0.0.7:51544","rotated_at":null,"enrol_expires_at":null}
 ```
 
 Rules:
@@ -1636,7 +1677,23 @@ Rules:
   host agent tokens" is operator-only). An agent, also a sysadmin agent,
   gets `403 forbidden`. Every caller can list and show hosts.
 - The answer of `POST` holds the token one time. The daemon keeps only the
-  SHA-256 of it. To get a new token, delete the host and make it again.
+  SHA-256 of it. `token_kind` is `host` (a long-lived `thk_` token) or
+  `enrol` (a one-time `the_` token).
+- `"enrol": true` gives an enrol token that works one time, for 10 minutes
+  (`token_expires_at`). The host agent dials with it, and the daemon sends
+  the new long-lived token in `welcome.token`. The host agent stores it in
+  its `token_file`. So the long-lived token never passes through the
+  operator. The swap writes the audit entry `host.enrol`, and
+  `host.connected` has `"enrolled": true`. `enrol_expires_at` is set while
+  an enrol token is open.
+- `rotate` makes a new token (with `"enrol": true`, a new enrol token) and
+  writes the audit entry `host.rotate`. The old token stops working for new
+  connections at once. A live link stays up until it ends; the host agent
+  must then dial with the new token. `rotated_at` records the time.
+- `first_used_at` is the first connect with the current token (a rotate
+  clears it). `last_used_at` and `last_used_from` are the last connect and
+  its TCP peer as the daemon sees it (a reverse proxy shows as itself).
+  `host.connected` carries the peer as `from`.
 - `status`, `online`, and `sessions` come from the live link.
   `capabilities` comes from the last `hello`, `{}` before the first one.
 - `DELETE` revokes the token. A live link gets `goodbye token_revoked` and
@@ -1869,3 +1926,152 @@ error. The supervisor calls `on_agent_stop` on a stop, on an exit that does
 not restart (also one that the daemon finds after its start), and when a
 start or a restart fails. A restart of the harness and a daemon shutdown
 leave the targets as they are.
+
+## 18. Fleet
+
+A fleet file declares projects, their repos, agents, and targets, global
+targets, and subscriptions in one TOML file. [fleet.md](fleet.md) has the
+file format (§1), the ownership rules (§2), the CLI (§3), the config dir
+(§4), and the policy (§5). This section is the HTTP contract.
+
+All routes take the usual auth (§1). The bodies are JSON.
+
+### 18.1 The `source` of a fleet object
+
+A project, agent, target, or subscription that a fleet owns shows
+`"source": "fleet:<name>"` in `GET /api/projects`, `/api/agents`,
+`/api/targets`, `/api/subscriptions`, and their single-object routes. The
+values of `source` are:
+
+| `source` | The object |
+|---|---|
+| `file` | Declared in a definition file. The API refuses to change it (`409 file_managed`). |
+| `api` | Made through the API, or released by a fleet or a definition file. |
+| `fleet:<name>` | Owned by fleet `<name>`. The API may change it; the next `plan` shows the change as drift, and the next `apply` writes the file values again. |
+
+An apply writes `fleet:<name>` on each object that it makes or adopts. A
+prune that releases a project or a subscription sets it back to `api`. A
+definition file that declares the same object wins: the row becomes
+`file`, and the fleet gets a `conflict`. `POST /api/reload` deletes and
+releases `file` objects only, never `fleet:<name>` objects.
+
+### 18.2 Shapes
+
+An issue of a fleet file:
+
+```json
+{"level": "warning", "at": "projects.terrarium.agents.lead", "message": "..."}
+```
+
+`level` is `error` or `warning`. `at` is the place in the file.
+
+A plan:
+
+```json
+{
+  "fleet": "terrarium",
+  "valid": true,
+  "errors": [],
+  "warnings": [],
+  "summary": {"create": 0, "update": 1, "unchanged": 4, "delete": 1, "release": 0, "conflict": 0, "drift": 1},
+  "entries": [
+    {"kind": "agent", "key": "terrarium/lead", "project": "terrarium", "action": "update",
+     "drift": ["prompt"],
+     "changes": [{"field": "prompt", "from": "default", "to": "project-lead"}]},
+    {"kind": "agent", "key": "terrarium/old", "project": "terrarium", "action": "delete", "live": true}
+  ]
+}
+```
+
+| Field of an entry | Meaning |
+|---|---|
+| `kind` | `subscription`, `project`, `target`, or `agent`. |
+| `key` | The name; `project/name` for an agent. |
+| `project` | The project of the object, when it has one. |
+| `action` | `create`, `update`, `unchanged`, `delete`, `release`, or `conflict`. |
+| `drift` | The fields that changed outside the fleet since the last apply, or `["(deleted)"]`. Absent when empty. |
+| `adopt` | `true` when the apply takes over an API object that no fleet owns. |
+| `changes` | `{field, from, to}` for each field that the apply changes. |
+| `reason` | Why the entry is a conflict, or a note. |
+| `live` | `true` for an agent with a live session. |
+| `result` | After an apply: `done` or `skipped`. |
+
+A fleet row:
+
+```json
+{"name": "terrarium", "description": "...", "origin": "api", "applied_at": "2026-10-24T06:36:54.149Z",
+ "applied_by": "operator", "objects": 5, "projects": ["terrarium"]}
+```
+
+`origin` is `api` or `file:<path in the config dir>`. `objects` counts the
+objects that the fleet owns. `projects` lists their projects.
+
+### 18.3 Endpoints
+
+| Method and path | Body | Answer |
+|---|---|---|
+| `POST /api/fleet/validate` | `{"content": "<toml>", "path"?}` | `200`, a validation (below). Any caller. |
+| `POST /api/fleet/plan` | `{"content", "path"?, "prune"?: false}` | `200`, a plan. |
+| `POST /api/fleet/apply` | `{"content", "path"?, "prune"?: false, "confirm"?: false, "start"?: false}` | `200`, the plan with `result` on each entry, and more (below). |
+| `GET /api/fleet` | | `200`, the fleet rows that the caller may see, by name. |
+| `GET /api/fleet/{name}` | | `200`, the fleet row with `content` and `plan`. |
+| `GET /api/fleet/export?project=P[&name=N]` | | `200`, `{"fleet": "N", "project": "P", "content": "<toml>"}`. |
+
+`path` is a file name. Its stem names a fleet that has no `name`.
+
+`POST /api/fleet/validate` answers:
+
+```json
+{
+  "fleet": "terrarium",
+  "valid": true,
+  "errors": [],
+  "warnings": [{"level": "warning", "at": "prompts", "message": "..."}],
+  "objects": [{"kind": "agent", "key": "terrarium/lead", "project": "terrarium"}],
+  "references": {"subscriptions": {}, "targets": {}, "prompts": {"project-lead": ["terrarium/lead"]}}
+}
+```
+
+A file that does not parse, or that has errors, is a `200` with
+`valid: false`. For `plan`, it is a `200` with `valid: false` and no
+entries.
+
+`POST /api/fleet/apply` adds these fields to the plan:
+
+- `prune`: the flag.
+- `checkout`: the clone results for the new agents, as `POST /api/agents`.
+  Absent when empty.
+- `started`: the agents that `start` started. Absent when empty.
+- `failures`: the starts and clones that failed. The apply itself stays.
+  Absent when empty.
+
+An apply is one transaction. When one object fails, nothing changes.
+Without `prune`, the `delete` and `release` entries get `result: skipped`.
+
+`GET /api/fleet/{name}` gives the last applied file as `content`, and the
+plan of that content against the store now as `plan`, so drift shows.
+
+`GET /api/fleet/export` writes a fleet file from a project as it is now.
+`name` defaults to the project name. An apply of the export adopts the
+project with no changes.
+
+### 18.4 Rules and errors
+
+The policy of [fleet.md](fleet.md) §5 applies to each entry of a plan.
+`plan` needs the same rights as `apply`. With `prune`, the removals count
+too.
+
+| Status | Code | When |
+|---|---|---|
+| 400 | `bad_request` | The body is not JSON, or has an unknown field. |
+| 403 | `forbidden` | `plan` or `apply`: the caller may not change an object of the plan. `export`: the caller may not read the project. |
+| 404 | `not_found` | `GET /api/fleet/{name}`: no such fleet, or the caller may not see it. `export`: no such project. |
+| 409 | `conflict` | `apply`: the plan has a conflict. `details` is the plan. |
+| 409 | `confirm_required` | `apply` with `prune` deletes an agent with a live session, and `confirm` is not `true`. `details.agents` names the agents. With `confirm`, the daemon stops them, then deletes them. |
+| 422 | `invalid` | `apply`: the file has errors (`details.errors`, `details.warnings`), or the store refuses an object. `export`: a bad or reserved fleet name. |
+
+The operator and sysadmins see every fleet in `GET /api/fleet`. An agent
+sees the fleets that own objects in its own project.
+
+The `errors` list of `POST /api/reload` also has the errors of the fleet
+files in the config dir, as `<path>: <message>`.

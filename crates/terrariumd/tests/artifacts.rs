@@ -127,18 +127,28 @@ fn evil_tar(name: &str) -> Vec<u8> {
     b.into_inner().unwrap()
 }
 
+/// Mint a signed URL. It names the artifact origin (a listener of its
+/// own is the default, `docs/security-review.md` F5); the test fetches the
+/// path through the Unix socket, which serves `/a/...` too.
 async fn mint(td: &TestDaemon, id: &str, body: Option<Value>) -> String {
-    td.req(
-        Method::POST,
-        &format!("/api/artifacts/{id}/url"),
-        body,
-        Some("proj/w1"),
-    )
-    .await
-    .ok()["url"]
+    let url = td
+        .req(
+            Method::POST,
+            &format!("/api/artifacts/{id}/url"),
+            body,
+            Some("proj/w1"),
+        )
+        .await
+        .ok()["url"]
         .as_str()
         .unwrap()
-        .to_owned()
+        .to_owned();
+    // The test sends `host: localhost`; with no TERRARIUM_ARTIFACT_* env,
+    // the origin is that host with the default artifact port.
+    let path = url
+        .strip_prefix("http://localhost:8081")
+        .unwrap_or_else(|| panic!("the URL names the artifact origin: {url}"));
+    path.to_owned()
 }
 
 async fn fetch(td: &TestDaemon, url: &str) -> Raw {

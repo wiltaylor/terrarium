@@ -13,11 +13,16 @@
 //!
 //! The session reads the raw PTY output, and per-kind patterns find the URL
 //! and the device code (see [`parse_output`]; the fixtures are in
-//! `tests/fixtures/login/`). When the command exits with code 0 (for pi:
+//! `tests/fixtures/login/`). The output stays in memory only: the runner of
+//! a login writes no `pty.log` (`log_max_bytes = 0`), so the device code
+//! never reaches the disk (`docs/security-review.md`, F6). When the command exits with code 0 (for pi:
 //! when `pi auth check` says the provider is ready), the session runs the
 //! status command, makes or updates the subscription definition, and runs
 //! its probe once. The session ends then, or after the login timeout (ten
-//! minutes), or on cancel; its runner files are deleted.
+//! minutes), or on cancel; its temp dir (`$TMPDIR/terrarium-login-<id>`,
+//! mode 0700, with the runner socket and `events.jsonl`) is deleted before
+//! the final state is stored. A dir that a daemon crash left behind is
+//! deleted at the next login start.
 //!
 //! Rules: only the operator starts, reads, types into, or attaches to a
 //! login session. A pasted code goes into the PTY and is never stored or
@@ -675,6 +680,39 @@ pub struct LoginSession {
     dir: PathBuf,
     view: Mutex<LoginRow>,
     cancelled: std::sync::atomic::AtomicBool,
+    /// The raw PTY output so far (the tail, at most [`MAX_LOGIN_OUTPUT`]).
+    /// In memory only.
+    output: Arc<Mutex<Vec<u8>>>,
+}
+
+/// The most PTY output that a login session keeps; a login screen is small.
+const MAX_LOGIN_OUTPUT: usize = 512 * 1024;
+
+/// The prefix of a login session's temp dir.
+const LOGIN_DIR_PREFIX: &str = "terrarium-login-";
+
+/// The temp dir of login session `id`.
+pub fn login_dir(id: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("{LOGIN_DIR_PREFIX}{id}"))
+}
+
+/// The last resort: a session that ends in any way (also a panic in its
+/// task) takes its temp dir with it.
+impl Drop for LoginSession {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn push_output(buf: &Mutex<Vec<u8>>, bytes: &[u8]) {
+    let mut b = buf
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    b.extend_from_slice(bytes);
+    if b.len() > MAX_LOGIN_OUTPUT {
+        let cut = b.len() - MAX_LOGIN_OUTPUT;
+        b.drain(..cut);
+    }
 }
 
 impl LoginSession {
@@ -694,15 +732,12 @@ impl LoginSession {
         g.clone()
     }
 
-    /// The pty.log of the runner: the whole raw output so far.
-    fn output(&self, agent: AgentId) -> Vec<u8> {
-        let path = terrarium_runner::agent_dir(&self.dir, agent).join("pty.log");
-        let mut bytes = std::fs::read(path).unwrap_or_default();
-        // Keep the tail; a login screen is small.
-        if bytes.len() > 512 * 1024 {
-            bytes.drain(..bytes.len() - 512 * 1024);
-        }
-        bytes
+    /// The raw PTY output so far, from memory.
+    fn output(&self) -> Vec<u8> {
+        self.output
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 }
 
@@ -805,11 +840,12 @@ pub async fn start(state: &Shared, req: StartLogin) -> ApiResult<LoginView> {
             "{MAX_LIVE_LOGINS} login sessions are open; finish or cancel one first"
         )));
     }
+    sweep_stale_login_dirs(state);
     let id = ulid::Ulid::new().to_string();
     let cfg = &state.usage.config;
     let harness = req.kind.harness();
     let home = cfg.home(harness);
-    let dir = std::env::temp_dir().join(format!("terrarium-login-{id}"));
+    let dir = login_dir(&id);
     std::fs::create_dir_all(&dir)
         .and_then(|()| std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)))
         .map_err(|e| ApiError::internal(format!("cannot make the login dir: {e}")))?;
@@ -826,6 +862,9 @@ pub async fn start(state: &Shared, req: StartLogin) -> ApiResult<LoginView> {
     let mut rc = RunnerConfig::new(agent, &dir, &dir);
     rc.name = format!("login-{}", req.kind.as_str());
     rc.project = "terrarium".into();
+    // No pty.log: the output holds the device code and the login URL. The
+    // session keeps it in memory only.
+    rc.log_max_bytes = 0;
     let runner = match Runner::spawn(
         rc,
         Arc::new(LoginAdapter { harness }),
@@ -844,6 +883,21 @@ pub async fn start(state: &Shared, req: StartLogin) -> ApiResult<LoginView> {
             )));
         }
     };
+    // Collect the output from the first byte: the snapshot draws what came
+    // before the attach, and the stream has no gap after it.
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let (snap, mut rx) = runner.attach();
+    push_output(&output, &snap.formatted);
+    let buf = output.clone();
+    tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(chunk) => push_output(&buf, &chunk),
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+            }
+        }
+    });
     let (i, k, p) = (id.clone(), req.kind, req.provider.clone());
     state
         .db
@@ -868,9 +922,10 @@ pub async fn start(state: &Shared, req: StartLogin) -> ApiResult<LoginView> {
         dir,
         view: Mutex::new(row),
         cancelled: std::sync::atomic::AtomicBool::new(false),
+        output,
     });
     state.usage.logins.insert(session.clone());
-    tokio::spawn(watch(state.clone(), session.clone(), agent));
+    tokio::spawn(watch(state.clone(), session.clone()));
     Ok(LoginView::new(session.view()))
 }
 
@@ -884,8 +939,40 @@ async fn persist(state: &Shared, row: LoginRow) {
     }
 }
 
+/// Remove the temp dirs of login sessions that are not live and older than
+/// the login timeout: a daemon crash leaves its dirs behind. The age check
+/// keeps the live sessions of another daemon on the same host.
+fn sweep_stale_login_dirs(state: &Shared) {
+    let max_age = state.usage.config.login_timeout + Duration::from_secs(60);
+    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let name = e.file_name();
+        let Some(id) = name.to_str().and_then(|n| n.strip_prefix(LOGIN_DIR_PREFIX)) else {
+            continue;
+        };
+        // Only our own dirs: the name of a ULID. A dir of another user
+        // (mode 0700 in a sticky temp dir) cannot be removed anyway.
+        if id.parse::<ulid::Ulid>().is_err() || state.usage.logins.get(id).is_some() {
+            continue;
+        }
+        let old = e.metadata().is_ok_and(|m| {
+            m.is_dir()
+                && m.modified()
+                    .ok()
+                    .and_then(|t| t.elapsed().ok())
+                    .is_some_and(|age| age > max_age)
+        });
+        if old {
+            info!(dir = %e.path().display(), "removing the temp dir of an old login session");
+            let _ = std::fs::remove_dir_all(e.path());
+        }
+    }
+}
+
 /// Follow a login session to its end.
-async fn watch(state: Shared, s: Arc<LoginSession>, agent: AgentId) {
+async fn watch(state: Shared, s: Arc<LoginSession>) {
     let timeout = state.usage.config.login_timeout;
     let started = Instant::now();
     let r = s.runner.clone();
@@ -897,7 +984,7 @@ async fn watch(state: Shared, s: Arc<LoginSession>, agent: AgentId) {
             st = &mut exited => Some(st),
             () = tokio::time::sleep(Duration::from_millis(250)) => None,
         };
-        let parsed = parse_output(s.kind, &s.output(agent));
+        let parsed = parse_output(s.kind, &s.output());
         if parsed != seen && (parsed.url.is_some() || parsed.device_code.is_some()) {
             seen = parsed.clone();
             let row = s.update(|v| {
@@ -943,6 +1030,15 @@ async fn watch(state: Shared, s: Arc<LoginSession>, agent: AgentId) {
         }
     };
     let _ = s.runner.kill();
+    // The command is gone (or killed) before its dir goes, and the dir is
+    // gone before the final state is stored: a client that sees `done`,
+    // `cancelled`, or `expired` finds nothing on disk.
+    let _ = tokio::time::timeout(Duration::from_secs(5), s.runner.wait()).await;
+    if let Err(e) = std::fs::remove_dir_all(&s.dir)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        warn!(login = %s.id, "cannot remove {}: {e}", s.dir.display());
+    }
     let row = s.update(|v| match &outcome {
         Ok(sub) => {
             v.state = "done".into();
@@ -971,7 +1067,6 @@ async fn watch(state: Shared, s: Arc<LoginSession>, agent: AgentId) {
         .await;
     info!(login = %s.id, state = %st, "login session ended");
     state.usage.logins.remove(&s.id);
-    let _ = std::fs::remove_dir_all(&s.dir);
 }
 
 /// The login command finished: verify, register, probe.

@@ -3,8 +3,10 @@
 //!
 //! The serving routes check a short-lived signed URL and need no token or
 //! actor. [`artifact_router`] serves them alone, for a listener on its own
-//! port (a separate origin from the dashboard). The main router mounts them
-//! too.
+//! port (a separate origin from the dashboard). The dashboard port mounts
+//! them only when that listener is off (`TERRARIUM_ARTIFACT_LISTEN` empty);
+//! the Unix socket always does. A signed URL then names the artifact
+//! origin ([`artifact_origin`]).
 
 use axum::body::{Body, Bytes};
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
@@ -369,10 +371,60 @@ fn encode_segment(s: &str) -> String {
     out
 }
 
+/// The origin that signed URLs point at, with no trailing `/`. Empty: the
+/// dashboard port serves `/a/...` itself, so the URL stays relative.
+/// Else `TERRARIUM_ARTIFACT_PUBLIC_URL`, or the host of the request with
+/// the port of `TERRARIUM_ARTIFACT_LISTEN` (default 8081), and `https`
+/// when a proxy says `X-Forwarded-Proto: https`.
+pub fn artifact_origin(headers: &HeaderMap) -> String {
+    origin_from(
+        &crate::settings::artifact_listen(),
+        crate::settings::artifact_public_url(),
+        headers,
+    )
+}
+
+/// [`artifact_origin`] with the settings given.
+fn origin_from(listen: &str, public: Option<String>, headers: &HeaderMap) -> String {
+    if listen.is_empty() {
+        return String::new();
+    }
+    if let Some(url) = public {
+        return url;
+    }
+    let port = listen.rsplit_once(':').map_or("8081", |(_, p)| p);
+    let host = headers
+        .get("x-forwarded-host")
+        .or_else(|| headers.get(header::HOST))
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .map(str::trim)
+        .filter(|h| !h.is_empty())
+        .unwrap_or("localhost");
+    let scheme = headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .filter(|p| p.trim().eq_ignore_ascii_case("https"))
+        .map_or("http", |_| "https");
+    format!("{scheme}://{}:{port}", host_without_port(host))
+}
+
+/// `example.com:8080` -> `example.com`; `[::1]:8080` -> `[::1]`.
+fn host_without_port(host: &str) -> &str {
+    if let Some(end) = host.find(']') {
+        return &host[..=end];
+    }
+    match host.rsplit_once(':') {
+        Some((h, p)) if p.bytes().all(|b| b.is_ascii_digit()) => h,
+        _ => host,
+    }
+}
+
 async fn mint_url(
     State(state): State<Shared>,
     actor: Actor,
     Path(id): Path<String>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> ApiResult<Json<SignedUrl>> {
     let b: MintBody = if body.is_empty() {
@@ -389,11 +441,12 @@ async fn mint_url(
     let ttl = b.ttl.unwrap_or(ctx.limits.url_ttl_secs).clamp(1, 24 * 3600);
     let exp = Utc::now().timestamp() + ttl;
     let sig = ctx.sign(&a.uid, exp);
+    let origin = artifact_origin(&headers);
     let url = if a.kind == "bundle" {
-        format!("/a/{}/_s/{exp}/{sig}/", a.uid)
+        format!("{origin}/a/{}/_s/{exp}/{sig}/", a.uid)
     } else {
         format!(
-            "/a/{}/{}?exp={exp}&sig={sig}",
+            "{origin}/a/{}/{}?exp={exp}&sig={sig}",
             a.uid,
             encode_segment(&a.name)
         )
@@ -594,4 +647,57 @@ async fn prune(
     Ok(Json(
         run_prune(&state, now, b.dry_run.unwrap_or(true), actor.label()).await?,
     ))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    fn headers(pairs: &[(&'static str, &'static str)]) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        for (k, v) in pairs {
+            h.insert(*k, HeaderValue::from_static(v));
+        }
+        h
+    }
+
+    /// F5: a signed URL names the artifact origin, not the dashboard.
+    #[test]
+    fn signed_urls_point_at_the_artifact_origin() {
+        let h = headers(&[("host", "terrarium.lan:8080")]);
+        assert_eq!(
+            origin_from("0.0.0.0:8081", None, &h),
+            "http://terrarium.lan:8081"
+        );
+        assert_eq!(
+            origin_from("127.0.0.1:9000", None, &h),
+            "http://terrarium.lan:9000"
+        );
+        // The explicit setting wins.
+        assert_eq!(
+            origin_from("0.0.0.0:8081", Some("https://art.example".into()), &h),
+            "https://art.example"
+        );
+        // No listener of its own: the dashboard serves /a/, the URL stays
+        // relative.
+        assert_eq!(origin_from("", Some("https://art.example".into()), &h), "");
+        // Behind a TLS proxy.
+        let h = headers(&[
+            ("host", "inner:8080"),
+            ("x-forwarded-host", "t.example.com"),
+            ("x-forwarded-proto", "https"),
+        ]);
+        assert_eq!(
+            origin_from("0.0.0.0:8081", None, &h),
+            "https://t.example.com:8081"
+        );
+        // IPv6 and no host.
+        let h = headers(&[("host", "[::1]:8080")]);
+        assert_eq!(origin_from(":8081", None, &h), "http://[::1]:8081");
+        assert_eq!(
+            origin_from("0.0.0.0:8081", None, &HeaderMap::new()),
+            "http://localhost:8081"
+        );
+    }
 }

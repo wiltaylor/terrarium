@@ -5,7 +5,7 @@
 //! login and the session files. Codex is made for many terminals on one
 //! home, so most of what it writes there is safe to share.
 //!
-//! Layout under the agent directory (`/state/agents/<ulid>/`):
+//! Layout under the harness directory (`/state/agents/<ulid>/harness/`):
 //!
 //! | File | Use |
 //! |---|---|
@@ -57,14 +57,23 @@ pub const PROMPT_FILE: &str = "prompt.md";
 /// A hook file with no hooks, in the format of the operator's file.
 pub const EMPTY_HOOKS: &str = "{\n  \"hooks\": {}\n}\n";
 
-/// `/state/agents/<ulid>`: the parent of the workspace.
+/// `/state/agents/<ulid>/harness`: the directory of the per-agent harness
+/// files, next to the workspace. The sandbox binds it read-only at the
+/// same path (`docs/runner.md`, "Files"); only the overlays that the
+/// harness writes are read-write. The runner's own records are in the
+/// sibling `private/`, which the sandbox never binds.
 pub fn agent_dir(agent: &Agent) -> PathBuf {
     agent
         .workspace
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| agent.workspace.clone())
+        .join(HARNESS_DIR)
 }
+
+/// The name of the harness directory in the agent directory
+/// (`terrarium_runner::HARNESS_DIR`).
+pub const HARNESS_DIR: &str = "harness";
 
 /// `/state/agents/<ulid>/codex`.
 pub fn codex_dir(agent: &Agent) -> PathBuf {

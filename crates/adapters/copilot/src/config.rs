@@ -17,9 +17,11 @@
 //! | `sidebar-sessions-state/` | the same | rw | Keyed by a hash; every agent has the same cwd, so the agents would share one file. |
 //! | `cache/` | `$HOME/.cache/copilot` (when [`CopilotOptions::cache_dir`] is set) | rw | Copilot writes outside its home (`COPILOT_CACHE_HOME`). |
 //!
-//! Not bound, but in the agent directory (visible at the same path inside
-//! the sandbox): `plugin/` (the hooks, `--plugin-dir`), `logs/`
-//! (`--log-dir`), `session-id` (the UUID of the last fresh start).
+//! Also in `<agent dir>/copilot/`, at the same path inside the sandbox
+//! (the harness directory is bound read-only): `plugin/` (the hooks,
+//! `--plugin-dir`), `session-id` (the UUID of the last fresh start; the
+//! daemon writes it), and `logs/` (`--log-dir`), which Copilot writes, so
+//! it gets a read-write bind over itself.
 //!
 //! Shared on purpose: `config.json` (the login and the plain-text token
 //! fallback; Copilot also writes `firstLaunchAt` there), `session-state/`
@@ -60,14 +62,23 @@ pub const CONFIG_FILE: &str = "config.json";
 /// The session files in the home: `session-state/<id>/events.jsonl`.
 pub const SESSION_STATE_DIR: &str = "session-state";
 
-/// `/state/agents/<ulid>`: the parent of the workspace.
+/// `/state/agents/<ulid>/harness`: the directory of the per-agent harness
+/// files, next to the workspace. The sandbox binds it read-only at the
+/// same path (`docs/runner.md`, "Files"); only the overlays that the
+/// harness writes are read-write. The runner's own records are in the
+/// sibling `private/`, which the sandbox never binds.
 pub fn agent_dir(agent: &Agent) -> PathBuf {
     agent
         .workspace
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| agent.workspace.clone())
+        .join(HARNESS_DIR)
 }
+
+/// The name of the harness directory in the agent directory
+/// (`terrarium_runner::HARNESS_DIR`).
+pub const HARNESS_DIR: &str = "harness";
 
 /// `/state/agents/<ulid>/copilot`.
 pub fn copilot_dir(agent: &Agent) -> PathBuf {
@@ -269,6 +280,15 @@ pub fn materialize(
         true,
     )?);
 
+    // Copilot writes its logs (`--log-dir`); the rest of the harness
+    // directory is read-only in the sandbox.
+    let logs = logs_dir(agent);
+    overlays.push(FileOverlay {
+        source: logs.clone(),
+        target: logs,
+        writable: true,
+    });
+
     if let Some(inside) = &opts.cache_dir {
         overlays.push(FileOverlay {
             source: cache_dir(agent),
@@ -348,6 +368,7 @@ mod tests {
         .iter()
         .map(|(n, w)| (own.join(n), inside.join(n), *w))
         .collect();
+        want.push((own.join("logs"), own.join("logs"), true));
         want.push((
             own.join("cache"),
             PathBuf::from("/home/agent/.cache/copilot"),

@@ -42,6 +42,12 @@ pub trait RunnerHandle: Send + Sync + 'static {
     fn answer_keys<'a>(&'a self, keys: &'a str) -> BoxFuture<'a, Result<()>>;
     /// Stop the harness on purpose.
     fn kill(&self) -> BoxFuture<'_, Result<()>>;
+    /// Record who stops the harness, before a `kill` or the exit keys. A
+    /// runner process writes it into `runner-exit.json`. An in-process
+    /// runner writes no exit file, so the default does nothing.
+    fn set_stopped_by(&self, _by: crate::process::StoppedBy) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
     /// Wait for the harness to exit.
     fn wait(&self) -> BoxFuture<'_, ExitStatus>;
 }

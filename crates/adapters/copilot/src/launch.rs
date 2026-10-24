@@ -176,7 +176,7 @@ mod tests {
                 "--secret-env-vars=COPILOT_GITHUB_TOKEN,GH_TOKEN,GITHUB_TOKEN",
             ]
         );
-        let agent_dir = agent.workspace.parent().expect("agent dir");
+        let agent_dir = crate::config::agent_dir(&agent);
         assert_eq!(
             value_after(&spec, "--plugin-dir").map(PathBuf::from),
             Some(agent_dir.join("copilot/plugin"))

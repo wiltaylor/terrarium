@@ -63,7 +63,7 @@ use terrarium_core::{
 use terrarium_runner::{
     AdapterKind, AdapterOptions, AttachEvent, ConnectOptions, ExitStatus, LOST_SIGNAL,
     ReadyDetector, ReadyDetectorSpec, RemoteRunner, RequestHandler, Runner, RunnerConfig,
-    RunnerHandle, RunnerSpec, SpawnOptions, live_runner_pid, read_exit_status,
+    RunnerHandle, RunnerSpec, SpawnOptions, StoppedBy, live_runner_pid, read_exit_record,
 };
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{broadcast, mpsc, watch};
@@ -315,7 +315,7 @@ fn sub_def(s: &Subscription) -> SubscriptionDef {
 const GRACEFUL_STOP: Duration = Duration::from_secs(5);
 
 /// The file that holds the SHA-256 of the prompt a harness session began
-/// with (`<agent dir>/session-prompt.sha256`).
+/// with (`<agent dir>/private/session-prompt.sha256`).
 const SESSION_PROMPT_HASH: &str = "session-prompt.sha256";
 
 fn sha256_hex(text: &str) -> String {
@@ -672,7 +672,9 @@ impl RunnerSupervisor {
         let agent_dir = terrarium_runner::agent_dir(&cfg.state_dir, agent.id);
         AgentLayout {
             agent: agent.id,
-            workspace: agent_dir.join("workspace"),
+            workspace: terrarium_runner::workspace_dir(&cfg.state_dir, agent.id),
+            harness_dir: terrarium_runner::harness_dir(&cfg.state_dir, agent.id),
+            private_dir: terrarium_runner::private_dir(&cfg.state_dir, agent.id),
             agent_dir,
             socket: terrarium_runner::socket_path(&cfg.runtime_dir, agent.id),
             homes: vec![HarnessHome {
@@ -786,7 +788,12 @@ impl RunnerSupervisor {
 
         let adapter = entry.adapter.clone();
         let home = cfg.home(agent.harness);
-        let dirs = (layout.agent_dir.clone(), layout.workspace.clone());
+        let dirs = (
+            layout.agent_dir.clone(),
+            layout.harness_dir.clone(),
+            layout.private_dir.clone(),
+            layout.workspace.clone(),
+        );
         let a = agent.clone();
         let state_dir = view.state_dir.clone();
         // A harness that keeps the prompt of a session gets a new session
@@ -796,19 +803,21 @@ impl RunnerSupervisor {
             && entry.adapter.prompt_frozen_on_resume();
         let fresh = resume.is_none();
         let (overlays, credentials, fresh_for_prompt) = tokio::task::spawn_blocking(move || {
-            for d in [&dirs.0, &dirs.1] {
+            migrate_dir(&dirs.0);
+            for d in [&dirs.1, &dirs.3] {
                 std::fs::create_dir_all(d)
                     .map_err(|e| format!("cannot create {}: {e}", d.display()))?;
             }
+            terrarium_runner::create_private_dir(&dirs.2).map_err(|e| e.to_string())?;
             let hash = sha256_hex(&text);
-            let hash_path = dirs.0.join(SESSION_PROMPT_HASH);
+            let hash_path = dirs.2.join(SESSION_PROMPT_HASH);
             let fresh_for_prompt =
                 check_prompt && std::fs::read_to_string(&hash_path).is_ok_and(|h| h.trim() != hash);
             if fresh || fresh_for_prompt {
                 std::fs::write(&hash_path, &hash)
                     .map_err(|e| format!("cannot write {}: {e}", hash_path.display()))?;
             }
-            let path = dirs.0.join("prompt.md");
+            let path = dirs.1.join("prompt.md");
             std::fs::write(&path, text)
                 .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
             if !home.is_dir() {
@@ -835,12 +844,14 @@ impl RunnerSupervisor {
         .map_err(other)?
         .map_err(SupervisorError::NotReady)?;
 
-        if cfg.sandbox.mode == SandboxMode::None && !overlays.is_empty() {
+        // An overlay of a path over itself (a writable part of `harness/`)
+        // changes nothing without a sandbox.
+        let over_home = overlays.iter().filter(|o| o.source != o.target).count();
+        if cfg.sandbox.mode == SandboxMode::None && over_home > 0 {
             warn!(
                 agent = %agent.id,
-                "sandbox mode `none` cannot bind {} per-agent file(s) over the shared home; \
-                 the harness uses the shared files",
-                overlays.len()
+                "sandbox mode `none` cannot bind {over_home} per-agent file(s) over the shared \
+                 home; the harness uses the shared files"
             );
         }
         layout.overlays = overlays;
@@ -927,7 +938,7 @@ impl RunnerSupervisor {
         // The seq before the launch: a runner process replays the events
         // from here, so the ones before the connect are not lost.
         let base =
-            events_seq(&terrarium_runner::agent_dir(&cfg.state_dir, id).join("events.jsonl"));
+            events_seq(&terrarium_runner::private_dir(&cfg.state_dir, id).join("events.jsonl"));
         self.clamp_seq(id, base).await;
         let (runner, local): (Arc<dyn RunnerHandle>, Option<Runner>) = match &cfg.mode {
             RunnerMode::InProcess => {
@@ -1323,7 +1334,7 @@ impl RunnerSupervisor {
                 }
             } else if resume_failed {
                 let old = slot.resume.take();
-                let dir = terrarium_runner::agent_dir(&self.inner.cfg.state_dir, id);
+                let dir = terrarium_runner::private_dir(&self.inner.cfg.state_dir, id);
                 slot.recap = Some(recap_turn(&dir, old.as_ref()));
                 slot.session = None;
                 Next::Relaunch {
@@ -1686,6 +1697,33 @@ fn events_seq(path: &Path) -> u64 {
     lines
 }
 
+/// Move the files of an agent dir from the layout before the split into
+/// `private/` and `harness/` (`terrarium_runner::migrate_legacy_layout`).
+/// Idempotent; an error is logged, not fatal.
+fn migrate_dir(dir: &Path) {
+    match terrarium_runner::migrate_legacy_layout(dir) {
+        Ok(0) => {}
+        Ok(n) => info!(
+            dir = %dir.display(),
+            moved = n,
+            "moved the agent files into private/ and harness/"
+        ),
+        Err(e) => warn!(dir = %dir.display(), "cannot move the agent files to the new layout: {e}"),
+    }
+}
+
+/// Migrate every agent dir under `<state>/agents` once (see [`migrate_dir`]).
+fn migrate_all(state_dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(state_dir.join("agents")) else {
+        return;
+    };
+    for e in entries.flatten() {
+        if e.file_type().is_ok_and(|t| t.is_dir()) {
+            migrate_dir(&e.path());
+        }
+    }
+}
+
 /// Queue `text` on the runner and log a failed delivery.
 fn type_detached(agent: AgentId, runner: &Arc<dyn RunnerHandle>, text: String) {
     let delivery = runner.type_turn(text);
@@ -1697,9 +1735,10 @@ fn type_detached(agent: AgentId, runner: &Arc<dyn RunnerHandle>, text: String) {
 }
 
 /// The recap turn after a resume failed: the last turns and tool calls of
-/// the old session, from `events.jsonl`, and the commands to pick up work.
-pub fn recap_turn(agent_dir: &Path, old: Option<&HarnessSessionId>) -> String {
-    let lines: Vec<String> = std::fs::read_to_string(agent_dir.join("events.jsonl"))
+/// the old session, from `events.jsonl` in `private_dir`, and the commands
+/// to pick up work.
+pub fn recap_turn(private_dir: &Path, old: Option<&HarnessSessionId>) -> String {
+    let lines: Vec<String> = std::fs::read_to_string(private_dir.join("events.jsonl"))
         .unwrap_or_default()
         .lines()
         .filter_map(|l| serde_json::from_str::<EventRecord>(l).ok())
@@ -1806,6 +1845,12 @@ impl Supervisor for RunnerSupervisor {
                 self.targets_down(&def);
                 return Ok(());
             };
+            // `runner-exit.json` records the operator stop, so a daemon
+            // that starts before this one sees the exit does not launch
+            // the agent again.
+            if let Err(e) = r.set_stopped_by(StoppedBy::Operator).await {
+                debug!(agent = %agent, "cannot record the stop reason: {e}");
+            }
             // A graceful stop: an idle harness with known exit keys gets
             // them, and a kill only when it has not exited in time.
             let keys = self
@@ -1841,7 +1886,10 @@ impl Supervisor for RunnerSupervisor {
                 }
             };
             match runner {
-                Some(r) => r.kill().await.map_err(other),
+                Some(r) => {
+                    let _ = r.set_stopped_by(StoppedBy::Policy).await;
+                    r.kill().await.map_err(other)
+                }
                 None => {
                     let resume = agent.session.clone();
                     self.start(agent, resume).await
@@ -2034,11 +2082,39 @@ impl Supervisor for RunnerSupervisor {
             let cfg = &self.inner.cfg;
             if live_runner_pid(&cfg.runtime_dir, id).is_none() {
                 // The runner ended while the daemon was down. Its exit
-                // status decides; with none (the container stopped, or
-                // an in-process runner), launch again.
-                let Some(status) = read_exit_status(&cfg.state_dir, id) else {
+                // record decides; with none (an in-process runner, or a
+                // runner that never wrote one), launch again.
+                migrate_dir(&terrarium_runner::agent_dir(&cfg.state_dir, id));
+                let Some(record) = read_exit_record(&cfg.state_dir, id) else {
                     return Ok(Recovery::Gone);
                 };
+                let status = record.status;
+                match record.stopped_by {
+                    // The container stopped (docker/entrypoint.sh sent
+                    // SIGTERM): the agent did not choose to end, so it
+                    // comes back with resume, whatever the exit code.
+                    Some(StoppedBy::Container) => {
+                        info!(
+                            agent = %id,
+                            exit = %exit_how(&status),
+                            "the container stopped the harness; launching it again with resume"
+                        );
+                        return Ok(Recovery::Gone);
+                    }
+                    // The operator stopped it: it stays stopped.
+                    Some(StoppedBy::Operator) => {
+                        let reason = "stopped by the operator".to_owned();
+                        lock(&self.inner.slots)
+                            .entry(id)
+                            .or_insert_with(|| Slot::new(agent.clone()))
+                            .phase = Phase::Down(AgentStatus::Stopped);
+                        info!(agent = %id, %reason, "agent ended");
+                        self.emit_status(id, AgentStatus::Stopped, reason);
+                        self.targets_down(&agent);
+                        return Ok(Recovery::Ended);
+                    }
+                    Some(StoppedBy::Policy) | None => {}
+                }
                 if wants_restart(agent.restart, status.success()) {
                     info!(
                         agent = %id,
@@ -2078,6 +2154,9 @@ impl Supervisor for RunnerSupervisor {
 
     fn bind(&self, state: &Shared) {
         if self.inner.state.set(Arc::downgrade(state)).is_ok() {
+            // Once per daemon start, before `recover` reads the exit
+            // records: the layout split of `docs/security-review.md` F1.
+            migrate_all(&self.inner.cfg.state_dir);
             self.spawn_hub_listener(state);
         }
     }

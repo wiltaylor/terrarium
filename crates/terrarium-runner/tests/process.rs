@@ -15,8 +15,8 @@ use terrarium_runner::events::read_since;
 use terrarium_runner::test_support::{RunnerProcessGuard, sweep_stale_runners_once};
 use terrarium_runner::{
     AdapterKind, AttachEvent, BoxFuture, ConnectOptions, RemoteRunner, RequestContext,
-    RequestHandler, RpcError, RunnerHandle, RunnerSpec, SpawnOptions, live_runner_pid,
-    read_exit_status,
+    RequestHandler, RpcError, RunnerHandle, RunnerSpec, SpawnOptions, StoppedBy, live_runner_pid,
+    read_exit_record, read_exit_status,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
@@ -131,7 +131,7 @@ impl Env {
         spec: RunnerSpec,
         opts: ConnectOptions,
     ) -> (tokio::process::Child, RemoteRunner) {
-        let dir = self.state().join("agents").join(self.agent.to_string());
+        let dir = terrarium_runner::private_dir(&self.state(), self.agent);
         std::fs::create_dir_all(&dir).expect("agent dir");
         let spec_path = dir.join("runner.json");
         spec.write(&spec_path).expect("spec");
@@ -162,11 +162,7 @@ impl Env {
     }
     /// Wait until `runner.log` holds `text`.
     async fn until_log(&self, text: &str) {
-        let log = self
-            .state()
-            .join("agents")
-            .join(self.agent.to_string())
-            .join("runner.log");
+        let log = terrarium_runner::private_dir(&self.state(), self.agent).join("runner.log");
         until(&format!("`{text}` in runner.log"), || {
             std::fs::read_to_string(&log)
                 .unwrap_or_default()
@@ -366,11 +362,7 @@ async fn the_runner_process_survives_a_daemon_disconnect() {
 async fn a_second_runner_for_the_agent_refuses_to_start() {
     let env = Env::new();
     let r = env.spawn().await;
-    let spec = env
-        .state()
-        .join("agents")
-        .join(env.agent.to_string())
-        .join("runner.json");
+    let spec = terrarium_runner::private_dir(&env.state(), env.agent).join("runner.json");
     let out = tokio::process::Command::new(bin())
         .arg("--agent")
         .arg(env.agent.to_string())
@@ -605,7 +597,12 @@ async fn check_ending(e: Ending) {
     }
     match e.how {
         How::Itself => {}
-        How::Kill => r.kill().await.expect("kill"),
+        How::Kill => {
+            r.set_stopped_by(StoppedBy::Operator)
+                .await
+                .expect("set_stopped_by");
+            r.kill().await.expect("kill");
+        }
         How::Sigterm => {
             let pid = i32::try_from(r.hello().runner_pid).expect("pid");
             kill(Pid::from_raw(pid), Signal::SIGTERM).expect("SIGTERM");
@@ -625,6 +622,20 @@ async fn check_ending(e: Ending) {
         "the runner exit code reflects the harness"
     );
     assert_eq!(read_exit_status(&env.state(), env.agent), Some(status));
+    // `runner-exit.json` says who stopped the harness: the container
+    // (SIGTERM), the daemon on behalf of the operator, or nobody.
+    let rec = read_exit_record(&env.state(), env.agent).expect("exit record");
+    let want = match e.how {
+        How::Itself => None,
+        How::Kill => Some(StoppedBy::Operator),
+        How::Sigterm => Some(StoppedBy::Container),
+    };
+    assert_eq!(rec.stopped_by, want);
+    assert!(
+        terrarium_runner::private_dir(&env.state(), env.agent)
+            .join("runner-exit.json")
+            .is_file()
+    );
     env.until_gone().await;
 }
 

@@ -15,11 +15,25 @@ The runner writes these files. `<state>` is `RunnerConfig::state_dir`, for
 example `/state`. `<run>` is `RunnerConfig::runtime_dir`, for example
 `/run/terrarium`.
 
+The agent directory `<state>/agents/<ulid>/` has three parts
+(`terrarium_runner::{private_dir, harness_dir, workspace_dir}`):
+
+| Directory | Content | In the sandbox |
+|---|---|---|
+| `private/` | The records of the runner and the daemon: the files below, and the daemon's `session-prompt.sha256`. Mode `0700`. | Not bound. The harness cannot read or change it (`docs/security-review.md`, F1). |
+| `harness/` | `prompt.md` and the per-agent files of the adapter (`claude/`, `codex/`, `copilot/`, `pi/`). | Read-only at the same path. The parts that the harness writes itself have read-write binds of their own: the adapter's `FileOverlay` entries with `writable: true`. |
+| `workspace/` | The agent's files. | Read-write at `$HOME/work`. |
+
+A daemon start moves an agent directory of the older flat layout (all files
+at the top) into `private/` and `harness/`, once
+(`terrarium_runner::migrate_legacy_layout`). An entry that is already at its
+new place stays; the old copy then stays too, with a warning.
+
 | Path | Content |
 |---|---|
-| `<state>/agents/<ulid>/pty.log` | The raw PTY bytes. The runner appends to it. |
-| `<state>/agents/<ulid>/pty.log.1` | The archive. When `pty.log` grows past `log_max_bytes` (default 8 MiB), it moves here and a new `pty.log` starts. The runner keeps one archive. |
-| `<state>/agents/<ulid>/events.jsonl` | One `EventRecord` as JSON on each line. The runner appends to it, so the history stays across restarts. Each record has a `seq`: its line number, from 1 (see "Event seq"). |
+| `<state>/agents/<ulid>/private/pty.log` | The raw PTY bytes. The runner appends to it. With `log_max_bytes = 0` the runner writes no `pty.log` at all (the login flow does this: its output has a device code). |
+| `<state>/agents/<ulid>/private/pty.log.1` | The archive. When `pty.log` grows past `log_max_bytes` (default 8 MiB), it moves here and a new `pty.log` starts. The runner keeps one archive. |
+| `<state>/agents/<ulid>/private/events.jsonl` | One `EventRecord` as JSON on each line. The runner appends to it, so the history stays across restarts. Each record has a `seq`: its line number, from 1 (see "Event seq"). |
 | `<run>/agents/<ulid>.sock` | The runner socket (hooks and agent RPC), mode `0600`. The runner removes a stale socket before it binds, and removes the socket after the child exits. |
 
 A runner process also uses these files:
@@ -28,10 +42,34 @@ A runner process also uses these files:
 |---|---|
 | `<run>/runners/<ulid>.sock` | The control socket for the daemon, mode `0600`. |
 | `<run>/runners/<ulid>.pid` | The pid of the runner process. The live runner holds an exclusive `flock` on the file. The file stays after the exit, empty. |
-| `<state>/agents/<ulid>/runner.json` | The spec file (mode `0600`). `RemoteRunner::spawn_process` writes it. |
-| `<state>/agents/<ulid>/runner-argv.json` | The sandbox argv, when the daemon gives one. |
-| `<state>/agents/<ulid>/runner.log` | The stdout and stderr of the runner process. The process appends to it. |
-| `<state>/agents/<ulid>/runner-exit.json` | The `ExitStatus` of the harness, as JSON. The runner writes it after each harness exit: a normal exit, a crash, a `kill`, and a SIGTERM. It writes a temp file and renames it, so a reader never sees half a file. It removes an old one at the start. |
+| `<state>/agents/<ulid>/private/runner.json` | The spec file (mode `0600`). `RemoteRunner::spawn_process` writes it. Its `launch.env` can hold the injected API key. |
+| `<state>/agents/<ulid>/private/runner-argv.json` | The sandbox argv, when the daemon gives one. |
+| `<state>/agents/<ulid>/private/runner.log` | The stdout and stderr of the runner process. The process appends to it. |
+| `<state>/agents/<ulid>/private/runner-exit.json` | The `ExitRecord` of the harness, as JSON: the `ExitStatus` fields (`code`, `signal`) and `stopped_by` (see "The exit record"). The runner writes it after each harness exit: a normal exit, a crash, a `kill`, and a SIGTERM. It writes a temp file and renames it, so a reader never sees half a file. It removes an old one at the start. |
+
+### The exit record
+
+`runner-exit.json` looks like this:
+
+```json
+{"code":0,"stopped_by":"container"}
+{"code":129,"signal":"Hangup","stopped_by":"operator"}
+{"code":7}
+```
+
+`stopped_by` says who stopped the harness on purpose. It is absent when the
+harness ended by itself (an exit or a crash).
+
+| `stopped_by` | Set by | `Supervisor::recover` after a daemon start |
+|---|---|---|
+| `container` | SIGTERM or SIGINT to the runner process: `docker/entrypoint.sh` stops the runners when the container stops. A signal wins over a value that the daemon set. | Launches the agent again with resume, whatever the exit code and the restart policy. |
+| `operator` | The daemon, through `set_stopped_by` before a stop (`POST /api/agents/{id}/stop`, a removed agent). | Reports `stopped`; no launch. |
+| `policy` | The daemon, through `set_stopped_by` before a restart that it kills for. | Applies the restart policy to the exit status. |
+| absent | | Applies the restart policy to the exit status. |
+
+`terrarium_runner::read_exit_record(state_dir, agent)` reads the whole
+record; `read_exit_status` reads the status only. A runner that SIGKILL
+ended writes no record; the next daemon then launches the agent again.
 
 ### Event seq
 
@@ -284,8 +322,8 @@ The process does these steps:
    daemon").
 5. It waits for the harness to exit. SIGTERM and SIGINT stop the harness
    with `Runner::stop`: the exit keys for an idle harness, else SIGHUP, and
-   SIGKILL after `kill_grace_ms`. The status becomes `stopped`. SIGHUP does
-   nothing.
+   SIGKILL after `kill_grace_ms`. The status becomes `stopped`, and the exit
+   record gets `"stopped_by": "container"`. SIGHUP does nothing.
 6. It writes `runner-exit.json`. When a daemon is connected, it waits up to
    `--linger-ms` for the daemon to disconnect. Then it removes the control
    socket, empties the pid file, and exits.
@@ -428,6 +466,7 @@ first connection get the error `unavailable`.
 | `answer` | `request_id`, `answer` (`{"kind":"allow"}`, `{"kind":"deny"}`, `{"kind":"choice","value":2}`) | `reply`: `null`. As `Runner::answer`. |
 | `answer_keys` | `keys` | `reply`: `null`. As `Runner::answer_keys`. |
 | `kill` | none | `reply`: `null`. As `Runner::kill`. The status becomes `stopped` when the harness exits, and then the runner process exits. |
+| `set_stopped_by` | `stopped_by` (`"container"`, `"operator"`, `"policy"`) | `reply`: `null`. The value goes into `runner-exit.json` at the harness exit (see "The exit record"). The daemon sends it before a `kill` or the exit keys. `RunnerHandle::set_stopped_by`; an in-process `Runner` writes no exit file and ignores it. |
 | `wait` | none | `reply` when the harness exits: `{"code":0}` or `{"code":1,"signal":"Killed"}`. |
 | `cancel` | `call` (the id of a stream call) | `reply`: `null`. The stream stops with an `end` frame with the error `cancelled`. |
 
@@ -541,7 +580,9 @@ process and the harness keep running.
 
 Helper functions: `control_socket_path`, `pid_path`, `runners_dir`,
 `live_runner_pid(runtime_dir, agent)` (the pid when a runner holds the
-lock), and `read_exit_status(state_dir, agent)`.
+lock), `read_exit_status(state_dir, agent)`, `read_exit_record(state_dir,
+agent)`, `private_dir`, `harness_dir`, `workspace_dir`, and
+`migrate_legacy_layout`.
 
 ## Reconnect after a daemon restart
 
@@ -549,8 +590,9 @@ PLAN §18 asks the daemon to reconnect to each runner and reconcile. For
 each agent that the database shows as live:
 
 1. Call `live_runner_pid(runtime_dir, agent)`. When it is `None`, the
-   runner is gone. Read `read_exit_status(state_dir, agent)` and the end of
-   `events.jsonl`, then apply the restart policy.
+   runner is gone. Read `read_exit_record(state_dir, agent)` and the end of
+   `events.jsonl`. `stopped_by` decides first (see "The exit record"); else
+   apply the restart policy.
 2. Else call `RemoteRunner::connect_with` with `events_since` set to the
    last seq that the daemon stored for the agent. The first
    `subscribe_events` receiver gets every event that the daemon missed, in

@@ -199,8 +199,13 @@ impl Td {
         self.dir.path().join("run")
     }
 
-    fn agent_dir(&self, id: &str) -> PathBuf {
-        self.dir.path().join("state/agents").join(id)
+    /// `<state>/agents/<ulid>/private`: the runner's records.
+    fn private_dir(&self, id: &str) -> PathBuf {
+        self.dir
+            .path()
+            .join("state/agents")
+            .join(id)
+            .join("private")
     }
 
     async fn req(&self, method: Method, path: &str, body: Option<Value>) -> (u16, Value) {
@@ -356,7 +361,7 @@ async fn lifecycle_through_the_api() {
     let pid = td.runner_pid(&id).expect("a live runner process");
     assert_ne!(pid, std::process::id());
     let spec: Value =
-        serde_json::from_slice(&std::fs::read(td.agent_dir(&id).join("runner.json")).unwrap())
+        serde_json::from_slice(&std::fs::read(td.private_dir(&id).join("runner.json")).unwrap())
             .unwrap();
     assert_eq!(spec["adapter"], "fake");
     assert_eq!(spec["launch"]["program"], "python3");
@@ -403,7 +408,7 @@ async fn lifecycle_through_the_api() {
     td.post(&format!("/api/agents/{id}/stop"), None).await;
     td.wait_status(&id, "stopped").await;
     td.wait_runner_gone(&id).await;
-    assert!(td.agent_dir(&id).join("runner-exit.json").is_file());
+    assert!(td.private_dir(&id).join("runner-exit.json").is_file());
     let end = timeout(WAIT, async {
         loop {
             match ws.next().await {
@@ -479,7 +484,7 @@ async fn the_agent_lives_through_a_daemon_restart() {
     assert_eq!(working, 3, "{statuses:?}");
 
     // The stored seq is the last line of events.jsonl.
-    let lines = std::fs::read_to_string(td.agent_dir(&id).join("events.jsonl"))
+    let lines = std::fs::read_to_string(td.private_dir(&id).join("events.jsonl"))
         .unwrap()
         .lines()
         .count() as i64;
@@ -521,7 +526,7 @@ async fn a_harness_that_ended_while_the_daemon_was_down() {
             .unwrap();
         assert!(status.success());
         td.wait_runner_gone(id).await;
-        assert!(td.agent_dir(id).join("runner-exit.json").is_file());
+        assert!(td.private_dir(id).join("runner-exit.json").is_file());
     }
 
     td.boot().await;
@@ -538,6 +543,111 @@ async fn a_harness_that_ended_while_the_daemon_was_down() {
     assert!(td.runner_pid(&again).is_some());
     td.post(&format!("/api/agents/{again}/stop"), None).await;
     td.wait_status(&again, "stopped").await;
+}
+
+/// The container stops: `docker/entrypoint.sh` stops the daemon, then
+/// sends SIGTERM to each runner. The runner stops the harness (a clean
+/// exit on the exit keys, or a signal) and writes `"stopped_by":
+/// "container"` into `runner-exit.json`. The next daemon launches the agent
+/// again with resume, whatever the exit code and the restart policy. The
+/// entrypoint no longer deletes the exit record for this.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_container_stop_relaunches_with_resume() {
+    let mut td = Td::start().await;
+    let plain = td.agent("plain", json!({})).await;
+    let never = td.agent("never", json!({"restart": "never"})).await;
+    for id in [&plain, &never] {
+        td.post(&format!("/api/agents/{id}/start"), None).await;
+        td.wait_status(id, "idle").await;
+    }
+    td.turn(&plain, "before the stop").await;
+    td.shutdown();
+    for id in [&plain, &never] {
+        let pid = td.runner_pid(id).expect("a live runner");
+        let status = std::process::Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        td.wait_runner_gone(id).await;
+        let rec =
+            terrarium_runner::read_exit_record(&td.dir.path().join("state"), id.parse().unwrap())
+                .expect("runner-exit.json");
+        assert_eq!(rec.stopped_by, Some(terrarium_runner::StoppedBy::Container));
+    }
+
+    td.boot().await;
+    for id in [&plain, &never] {
+        td.wait_events(id, "session_started", |e| e.len() == 2)
+            .await;
+        td.wait_status(id, "idle").await;
+        let started = td.events(id, "session_started").await;
+        assert_eq!(started[1]["data"]["source"], "resume", "{started:#?}");
+        assert!(td.runner_pid(id).is_some());
+    }
+    // An operator stop stays a stop across a daemon restart: the record
+    // says `operator`, and the next daemon does not launch it.
+    td.post(&format!("/api/agents/{plain}/stop"), None).await;
+    td.wait_status(&plain, "stopped").await;
+    td.wait_runner_gone(&plain).await;
+    let rec =
+        terrarium_runner::read_exit_record(&td.dir.path().join("state"), plain.parse().unwrap())
+            .unwrap();
+    assert_eq!(rec.stopped_by, Some(terrarium_runner::StoppedBy::Operator));
+    td.post(&format!("/api/agents/{never}/stop"), None).await;
+    td.wait_status(&never, "stopped").await;
+}
+
+/// F1: a state dir from before the layout split. The daemon moves the
+/// records into `private/` and the harness files into `harness/` once, and
+/// the agent starts with its old events.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_old_agent_dir_moves_to_the_new_layout() {
+    let mut td = Td::start().await;
+    let id = td.agent("old", json!({})).await;
+    td.post(&format!("/api/agents/{id}/start"), None).await;
+    td.wait_status(&id, "idle").await;
+    td.post(&format!("/api/agents/{id}/stop"), None).await;
+    td.wait_status(&id, "stopped").await;
+    td.wait_runner_gone(&id).await;
+    td.shutdown();
+    // Put the files back where the old layout had them.
+    let top = td.dir.path().join("state/agents").join(&id);
+    for name in [
+        "events.jsonl",
+        "runner.json",
+        "runner-exit.json",
+        "runner.log",
+    ] {
+        std::fs::rename(top.join("private").join(name), top.join(name)).unwrap();
+    }
+    std::fs::rename(top.join("harness/prompt.md"), top.join("prompt.md")).unwrap();
+    let lines = std::fs::read_to_string(top.join("events.jsonl"))
+        .unwrap()
+        .lines()
+        .count();
+    assert!(lines > 0);
+
+    td.boot().await;
+    for name in [
+        "events.jsonl",
+        "runner.json",
+        "runner-exit.json",
+        "prompt.md",
+    ] {
+        assert!(!top.join(name).exists(), "{name} is still at the top");
+    }
+    assert!(top.join("private/events.jsonl").is_file());
+    assert!(top.join("harness/prompt.md").is_file());
+    td.post(&format!("/api/agents/{id}/start"), None).await;
+    td.wait_status(&id, "idle").await;
+    let now = std::fs::read_to_string(top.join("private/events.jsonl"))
+        .unwrap()
+        .lines()
+        .count();
+    assert!(now > lines, "the old events stay, the new ones follow");
+    td.post(&format!("/api/agents/{id}/stop"), None).await;
+    td.wait_status(&id, "stopped").await;
 }
 
 /// A fake `docker` that records each call, as in `tests/hosts.rs`. It

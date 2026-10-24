@@ -1,6 +1,7 @@
 //! `pty.log`: the raw PTY bytes. The file keeps the newest bytes, up to a
 //! limit. When it grows past the limit, it moves to `pty.log.1` (the
-//! archive) and a new `pty.log` starts. One archive is kept.
+//! archive) and a new `pty.log` starts. One archive is kept. A limit of 0
+//! turns the log off: no file is made.
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -11,7 +12,8 @@ use crate::error::{Result, RunnerError};
 pub(crate) struct PtyLog {
     path: PathBuf,
     archive: PathBuf,
-    file: File,
+    /// `None`: the log is off.
+    file: Option<File>,
     size: u64,
     max: u64,
 }
@@ -20,6 +22,15 @@ impl PtyLog {
     pub(crate) fn open(dir: &Path, max: u64) -> Result<Self> {
         let path = dir.join("pty.log");
         let archive = dir.join("pty.log.1");
+        if max == 0 {
+            return Ok(Self {
+                path,
+                archive,
+                file: None,
+                size: 0,
+                max,
+            });
+        }
         let file = open_append(&path)?;
         let size = file
             .metadata()
@@ -28,18 +39,23 @@ impl PtyLog {
         Ok(Self {
             path,
             archive,
-            file,
+            file: Some(file),
             size,
-            max: max.max(1),
+            max,
         })
     }
 
     pub(crate) fn write(&mut self, bytes: &[u8]) -> Result<()> {
+        if self.file.is_none() {
+            return Ok(());
+        }
         if self.size > 0 && self.size + bytes.len() as u64 > self.max {
             self.rotate()?;
         }
-        self.file
-            .write_all(bytes)
+        let Some(file) = self.file.as_mut() else {
+            return Ok(());
+        };
+        file.write_all(bytes)
             .map_err(|e| RunnerError::io("write", &self.path, e))?;
         self.size += bytes.len() as u64;
         Ok(())
@@ -48,7 +64,7 @@ impl PtyLog {
     fn rotate(&mut self) -> Result<()> {
         std::fs::rename(&self.path, &self.archive)
             .map_err(|e| RunnerError::io("rotate", &self.path, e))?;
-        self.file = open_append(&self.path)?;
+        self.file = Some(open_append(&self.path)?);
         self.size = 0;
         Ok(())
     }
@@ -77,5 +93,14 @@ mod tests {
         let old = std::fs::read(dir.path().join("pty.log.1")).expect("read");
         assert_eq!(cur, b"cccccccc");
         assert_eq!(old, b"bbbbbbbb");
+    }
+
+    #[test]
+    fn a_zero_limit_writes_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut log = PtyLog::open(dir.path(), 0).expect("open");
+        log.write(b"device code ABCD-1234").expect("write");
+        assert!(!dir.path().join("pty.log").exists());
+        assert!(!dir.path().join("pty.log.1").exists());
     }
 }

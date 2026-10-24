@@ -31,7 +31,10 @@ pub struct Settings {
     pub config_dir: PathBuf,
 
     /// The TCP address of the artifact serving origin (PLAN §15.2). Empty:
-    /// no listener of its own.
+    /// no listener of its own, and the dashboard port serves `/a/...`
+    /// instead. With a listener (the default), the dashboard port does not
+    /// serve artifacts (`docs/security-review.md`, F5). Set it with the env
+    /// var: the API router reads the env (see [`artifact_listen`]).
     #[arg(
         long,
         env = "TERRARIUM_ARTIFACT_LISTEN",
@@ -168,4 +171,69 @@ impl Settings {
         }
         sibling_or_path("terrarium")
     }
+}
+
+// ---- settings that the daemon reads from the env where it needs them ----
+//
+// These are not `Settings` fields: the code that uses them (the API router,
+// the mail bodies) does not get the parsed `Settings`. Each one reads its
+// env var when it is called, so a test can pass a value in directly.
+
+/// `TERRARIUM_PUBLIC_URL`: the dashboard as the operator opens it, for the
+/// links in operator mail.
+pub const ENV_PUBLIC_URL: &str = "TERRARIUM_PUBLIC_URL";
+/// The default of [`ENV_PUBLIC_URL`].
+pub const DEFAULT_PUBLIC_URL: &str = "http://localhost:8080";
+/// `TERRARIUM_ARTIFACT_LISTEN`, also the `--artifact-listen` flag.
+pub const ENV_ARTIFACT_LISTEN: &str = "TERRARIUM_ARTIFACT_LISTEN";
+/// The default of [`ENV_ARTIFACT_LISTEN`].
+pub const DEFAULT_ARTIFACT_LISTEN: &str = "0.0.0.0:8081";
+/// `TERRARIUM_ARTIFACT_PUBLIC_URL`: the artifact origin as a browser opens
+/// it, for signed artifact URLs.
+pub const ENV_ARTIFACT_PUBLIC_URL: &str = "TERRARIUM_ARTIFACT_PUBLIC_URL";
+/// `TERRARIUM_WS_QUERY_TOKEN`: `0` refuses the bearer token in `?token=`.
+pub const ENV_WS_QUERY_TOKEN: &str = "TERRARIUM_WS_QUERY_TOKEN";
+
+fn env_nonempty(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .map(|v| v.trim().to_owned())
+        .filter(|v| !v.is_empty())
+}
+
+/// The dashboard URL for operator mail, with no trailing `/`.
+pub fn public_url() -> String {
+    env_nonempty(ENV_PUBLIC_URL)
+        .unwrap_or_else(|| DEFAULT_PUBLIC_URL.to_owned())
+        .trim_end_matches('/')
+        .to_owned()
+}
+
+/// A dashboard link: [`public_url`] and `path` (which starts with `/`).
+pub fn dashboard_link(path: &str) -> String {
+    format!("{}{path}", public_url())
+}
+
+/// The artifact listener address: the env value (empty is allowed and
+/// means "no listener of its own"), else the default.
+pub fn artifact_listen() -> String {
+    std::env::var(ENV_ARTIFACT_LISTEN)
+        .map(|v| v.trim().to_owned())
+        .unwrap_or_else(|_| DEFAULT_ARTIFACT_LISTEN.to_owned())
+}
+
+/// The explicit artifact origin URL, with no trailing `/`, when it is set.
+pub fn artifact_public_url() -> Option<String> {
+    env_nonempty(ENV_ARTIFACT_PUBLIC_URL).map(|u| u.trim_end_matches('/').to_owned())
+}
+
+/// May a WebSocket upgrade carry the bearer token in `?token=`? Yes,
+/// unless `TERRARIUM_WS_QUERY_TOKEN=0` (or `false`, `no`, `off`).
+pub fn ws_query_token_allowed() -> bool {
+    !matches!(
+        env_nonempty(ENV_WS_QUERY_TOKEN)
+            .map(|v| v.to_ascii_lowercase())
+            .as_deref(),
+        Some("0" | "false" | "no" | "off")
+    )
 }

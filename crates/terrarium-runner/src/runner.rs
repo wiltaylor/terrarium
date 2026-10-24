@@ -233,15 +233,15 @@ impl Runner {
         spec: LaunchSpec,
         handler: Arc<dyn RequestHandler>,
     ) -> Result<Self> {
-        let agent_dir = config.agent_dir();
-        std::fs::create_dir_all(&agent_dir)
-            .map_err(|e| RunnerError::io("create", &agent_dir, e))?;
+        // The records go to `private/`, which the sandbox never binds.
+        let private = config.private_dir();
+        crate::config::create_private_dir(&private)?;
         let socket_path = config.socket_path();
         let listener = socket::bind(&socket_path)?;
 
-        let events_path = agent_dir.join("events.jsonl");
+        let events_path = private.join("events.jsonl");
         let events_log = EventLog::open(&events_path)?;
-        let pty_log = PtyLog::open(&agent_dir, config.log_max_bytes)?;
+        let pty_log = PtyLog::open(&private, config.log_max_bytes)?;
 
         let size = PtySize {
             rows: config.rows,

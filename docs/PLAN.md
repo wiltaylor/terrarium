@@ -228,11 +228,11 @@ Storage layout inside the container:
                                        (boards, cards, memories, links, wiki pages, revisions, versions live in SQLite; FTS5 for search)
 /state/artifacts/<sha256>              artifact blobs and unpacked bundles, daemon-only
 /state/terrarium.db
-/state/agents/<ulid>/workspace/        the agent's files
-/state/agents/<ulid>/prompt.md         rendered system prompt
-/state/agents/<ulid>/hooks.json        rendered hook config
-/state/agents/<ulid>/pty.log           raw PTY bytes, ring + archive
-/state/agents/<ulid>/events.jsonl      normalised events
+/state/agents/<ulid>/workspace/        the agent's files (rw in the sandbox)
+/state/agents/<ulid>/harness/          prompt.md and the adapter's per-agent files (ro in the sandbox)
+/state/agents/<ulid>/private/          runner records, never in the sandbox:
+                                       events.jsonl, pty.log (ring + archive), runner.json,
+                                       runner-argv.json, runner-exit.json, runner.log
 /run/terrarium/api.sock
 /run/terrarium/agents/<ulid>.sock
 ```
@@ -533,14 +533,20 @@ passes straight through. Visible to the harness:
 |---|---|---|
 | `/usr`, `/lib`, `/bin`, `/etc` (subset), Node, harness binaries | ro | the harness must run |
 | `/state/agents/<ulid>/workspace` as `$HOME/work` | rw | the agent's files |
+| `/state/agents/<ulid>/harness` at the same path | ro | `prompt.md` and the adapter's per-agent files |
 | `/auth/claude` as `$HOME/.claude`, `/auth/pi` as `$HOME/.pi`, etc. | rw | shared login and sessions |
-| `/state/agents/<ulid>/prompt.md` over `$HOME/.copilot/SYSTEM.md` | ro | per-agent prompt on top of the shared Copilot home |
+| per-agent overlays from `harness/` (`FileOverlay`) | rw or ro | the files that the harness writes itself are rw (Claude's `.claude.json`, `sessions/`, `history.jsonl`, `backups/`, memory; Copilot's settings, history, state files, `logs/`, cache; pi's `settings.json` and `sessions/`; Codex's `history.jsonl`); the rest are ro (Copilot's `SYSTEM.md`, hook dirs, Codex's `hooks.json`, pi's extension) |
 | `/run/terrarium/agents/<ulid>.sock` | rw | hooks and the agent CLI |
 | `/usr/local/bin/terrarium` | ro | the CLI |
 | `/tmp`, `/proc`, `/dev/pts` | private | normal process needs |
 
 Hidden: other agents' workspaces, `/state/terrarium.db`, the daemon socket, the
-Docker socket, SSH keys, and the host filesystem. Network stays on; the harness
+Docker socket, SSH keys, the host filesystem, and the agent's own
+`/state/agents/<ulid>/private/`. That directory holds the runner's records: the
+event log (usage and audit), the PTY log, the launch spec with the injected
+keys, and the exit record (resume). A yolo agent can neither read nor change
+them (`docs/security-review.md`, F1). A daemon start moves an agent dir of the
+older flat layout into `private/` and `harness/` once. Network stays on; the harness
 must reach its model API.
 
 Requirement: `bwrap` needs user namespaces. The container must run with a

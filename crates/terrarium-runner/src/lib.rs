@@ -28,12 +28,13 @@ pub mod test_support;
 
 pub use attach::{AttachEvent, AttachStream};
 pub use config::{
-    DEFAULT_KILL_GRACE, DEFAULT_OUTPUT_CAPACITY, DEFAULT_STOP_GRACE, RunnerConfig, agent_dir,
-    control_socket_path, pid_path, runners_dir, socket_path,
+    DEFAULT_KILL_GRACE, DEFAULT_OUTPUT_CAPACITY, DEFAULT_STOP_GRACE, HARNESS_DIR, PRIVATE_DIR,
+    RunnerConfig, WORKSPACE_DIR, agent_dir, control_socket_path, create_private_dir, harness_dir,
+    migrate_legacy_layout, pid_path, private_dir, runners_dir, socket_path, workspace_dir,
 };
 pub use error::{DeliveryError, Result, RunnerError};
 pub use handle::RunnerHandle;
-pub use process::{live_runner_pid, read_exit_status};
+pub use process::{ExitRecord, StoppedBy, live_runner_pid, read_exit_record, read_exit_status};
 pub use protocol::{BoxFuture, Message, NoHandler, RequestContext, RequestHandler, RpcError};
 pub use ready::{DefaultReadyDetector, ReadyDetector};
 pub use remote::{ConnectOptions, LOST_SIGNAL, RemoteRunner, SpawnOptions};

@@ -11,7 +11,9 @@ use std::time::Duration;
 use nix::fcntl::{Flock, FlockArg};
 use terrarium_core::{Adapter, AgentId};
 
-use crate::config::{agent_dir, control_socket_path, pid_path, runners_dir};
+use serde::{Deserialize, Serialize};
+
+use crate::config::{control_socket_path, create_private_dir, pid_path, private_dir, runners_dir};
 use crate::error::{Result, RunnerError};
 use crate::runner::{ExitStatus, Runner};
 use crate::server::{ForwardHandler, Hub, ServerCtx, serve};
@@ -32,15 +34,57 @@ pub struct ProcessOptions {
     pub linger: Duration,
 }
 
-/// `<state>/agents/<ulid>/runner-exit.json`: the [`ExitStatus`] of the last
-/// harness, written by the runner process before it exits.
+/// Who stopped a harness on purpose. The runner process writes it into
+/// `runner-exit.json`, so that a daemon that starts later knows why the
+/// harness ended (PLAN §18).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StoppedBy {
+    /// SIGTERM or SIGINT to the runner process: the container stops
+    /// (`docker/entrypoint.sh`). The next daemon launches the agent again
+    /// with resume, whatever the exit code.
+    Container,
+    /// The operator stopped the agent. The next daemon does not launch it.
+    Operator,
+    /// The daemon stopped the harness for a policy (a restart, a quota or
+    /// budget hold). The next daemon applies the restart policy.
+    Policy,
+}
+
+impl StoppedBy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Container => "container",
+            Self::Operator => "operator",
+            Self::Policy => "policy",
+        }
+    }
+}
+
+/// The content of `runner-exit.json`: the [`ExitStatus`] of the last
+/// harness, and who stopped it, when someone did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExitRecord {
+    #[serde(flatten)]
+    pub status: ExitStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopped_by: Option<StoppedBy>,
+}
+
+/// `<state>/agents/<ulid>/private/runner-exit.json`: the [`ExitRecord`] of
+/// the last harness, written by the runner process before it exits.
 pub fn exit_status_path(state_dir: &Path, agent: AgentId) -> PathBuf {
-    agent_dir(state_dir, agent).join("runner-exit.json")
+    private_dir(state_dir, agent).join("runner-exit.json")
 }
 
 /// The exit status that the last runner process of `agent` wrote, if any.
 /// The daemon reads it when it finds no live runner for an agent.
 pub fn read_exit_status(state_dir: &Path, agent: AgentId) -> Option<ExitStatus> {
+    read_exit_record(state_dir, agent).map(|r| r.status)
+}
+
+/// The full `runner-exit.json` of `agent`, with `stopped_by`.
+pub fn read_exit_record(state_dir: &Path, agent: AgentId) -> Option<ExitRecord> {
     let text = std::fs::read_to_string(exit_status_path(state_dir, agent)).ok()?;
     serde_json::from_str(&text).ok()
 }
@@ -113,7 +157,7 @@ fn lock_pid_file(path: &Path, agent: AgentId) -> Result<Flock<File>> {
 ///    requests go to the daemon over the control socket.
 /// 4. Wait for the harness to exit (SIGTERM and SIGINT stop it first, with
 ///    [`Runner::stop`]).
-/// 5. Write `runner-exit.json`, give the daemon `linger` to read the last
+/// 5. Write `runner-exit.json` (with `stopped_by`), give the daemon `linger` to read the last
 ///    frames, and remove the socket and the pid file.
 pub async fn run(opts: ProcessOptions, adapter: Arc<dyn Adapter>) -> Result<ExitStatus> {
     let agent = opts.agent;
@@ -127,8 +171,7 @@ pub async fn run(opts: ProcessOptions, adapter: Arc<dyn Adapter>) -> Result<Exit
         control: control.clone(),
         lock,
     };
-    let agent_dir = agent_dir(&opts.state_dir, agent);
-    std::fs::create_dir_all(&agent_dir).map_err(|e| RunnerError::io("create", &agent_dir, e))?;
+    create_private_dir(&private_dir(&opts.state_dir, agent))?;
     let exit_path = exit_status_path(&opts.state_dir, agent);
     let _ = std::fs::remove_file(&exit_path);
 
@@ -151,12 +194,32 @@ pub async fn run(opts: ProcessOptions, adapter: Arc<dyn Adapter>) -> Result<Exit
         runner: runner.clone(),
         hub: hub.clone(),
         harness,
+        stopped_by: std::sync::Mutex::new(None),
     });
-    let server = tokio::spawn(serve(listener, ctx));
+    let server = tokio::spawn(serve(listener, ctx.clone()));
 
-    let status = wait_or_signal(&runner).await;
-    tracing::info!(agent = %agent, code = status.code, signal = ?status.signal, "harness exited");
-    write_exit_status(&exit_path, &status);
+    let (status, signalled) = wait_or_signal(&runner).await;
+    // A signal to the runner process comes from the container stop; it
+    // wins over what the daemon said before.
+    let stopped_by = if signalled {
+        Some(StoppedBy::Container)
+    } else {
+        ctx.stopped_by()
+    };
+    tracing::info!(
+        agent = %agent,
+        code = status.code,
+        signal = ?status.signal,
+        stopped_by = stopped_by.map(StoppedBy::as_str),
+        "harness exited"
+    );
+    write_exit_status(
+        &exit_path,
+        &ExitRecord {
+            status: status.clone(),
+            stopped_by,
+        },
+    );
     if hub.connected() {
         let _ = tokio::time::timeout(opts.linger, hub.disconnected()).await;
     }
@@ -167,7 +230,7 @@ pub async fn run(opts: ProcessOptions, adapter: Arc<dyn Adapter>) -> Result<Exit
 
 /// Write `runner-exit.json` through a temp file and a rename, so that a
 /// reader never sees half a file.
-fn write_exit_status(path: &Path, status: &ExitStatus) {
+fn write_exit_status(path: &Path, status: &ExitRecord) {
     let bytes = match serde_json::to_vec(status) {
         Ok(b) => b,
         Err(e) => {
@@ -183,8 +246,8 @@ fn write_exit_status(path: &Path, status: &ExitStatus) {
 
 /// Wait for the harness to exit. SIGTERM and SIGINT stop it with
 /// [`Runner::stop`]: the exit keys for an idle harness, else SIGHUP, and
-/// SIGKILL after the grace.
-async fn wait_or_signal(runner: &Runner) -> ExitStatus {
+/// SIGKILL after the grace. True: a signal stopped it.
+async fn wait_or_signal(runner: &Runner) -> (ExitStatus, bool) {
     use tokio::signal::unix::{SignalKind, signal};
     let (Ok(mut term), Ok(mut int), Ok(mut hup)) = (
         signal(SignalKind::terminate()),
@@ -192,11 +255,11 @@ async fn wait_or_signal(runner: &Runner) -> ExitStatus {
         signal(SignalKind::hangup()),
     ) else {
         tracing::warn!("cannot install the signal handlers");
-        return runner.wait().await;
+        return (runner.wait().await, false);
     };
     loop {
         tokio::select! {
-            s = runner.wait() => return s,
+            s = runner.wait() => return (s, false),
             _ = term.recv() => {
                 tracing::info!("SIGTERM: stopping the harness");
                 break;
@@ -209,5 +272,5 @@ async fn wait_or_signal(runner: &Runner) -> ExitStatus {
             _ = hup.recv() => tracing::debug!("SIGHUP ignored"),
         }
     }
-    runner.stop().await
+    (runner.stop().await, true)
 }

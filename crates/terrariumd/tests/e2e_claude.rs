@@ -258,12 +258,21 @@ async fn claude_in_bwrap_answers_one_turn() {
     // agent dir, not in the shared home.
     let own = root
         .path()
-        .join(format!("state/agents/{id}/claude/sessions"));
+        .join(format!("state/agents/{id}/harness/claude/sessions"));
     let names: Vec<String> = std::fs::read_dir(&own)
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
     println!("per-agent sessions dir: {names:?}");
+    // F1: the runner's records are in `private/`, which the sandbox does
+    // not bind; the command line names no part of it.
+    let private = root.path().join(format!("state/agents/{id}/private"));
+    assert!(private.join("events.jsonl").is_file());
+    assert!(
+        !sandbox::command_line(&spec).contains(&private.display().to_string()),
+        "the sandbox must not bind {}",
+        private.display()
+    );
 
     if std::env::var("TERRARIUM_E2E_NO_TURN").is_ok() {
         let (s, _) = req(&socket, Method::POST, &format!("{agent_path}/stop"), None).await;
@@ -619,7 +628,9 @@ async fn two_claude_agents_share_one_home() {
             .join("projects/-home-agent-work")
             .join(format!("{}.jsonl", first[i]));
         let answer = last_assistant_text(&transcript);
-        let own = root.path().join(format!("state/agents/{}/claude", p.id));
+        let own = root
+            .path()
+            .join(format!("state/agents/{}/harness/claude", p.id));
         let history = std::fs::read_to_string(own.join("history.jsonl")).unwrap_or_default();
         let list = |d: &str| -> Vec<String> {
             std::fs::read_dir(own.join(d))

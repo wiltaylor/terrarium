@@ -440,6 +440,13 @@ async fn quota_policy_alerts_holds_and_resumes() {
     // The daemon speaks as `system`.
     assert_eq!(alert["from"], "system");
     assert_eq!(alert["from_kind"], "system");
+    // The mail links the dashboard (TERRARIUM_PUBLIC_URL, by default
+    // http://localhost:8080).
+    let body = alert["body"].as_str().unwrap();
+    assert!(
+        body.contains("Open: http://localhost:8080/subscriptions"),
+        "{body}"
+    );
     // The same window period alerts once.
     td.post_empty("/api/subscriptions/anthropic-max/probe")
         .await
@@ -643,6 +650,22 @@ async fn collector_tails_a_growing_transcript() {
     assert_eq!(alerts.len(), 1, "{alerts:?}");
     assert_eq!(alerts[0]["data"]["window"], "tokens_per_day");
     assert_eq!(alerts[0]["project"], "p");
+    let mail = td.get("/api/mail?to=operator").await;
+    let budget = mail
+        .ok()
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["subject"].as_str().unwrap().starts_with("Budget:"))
+        .cloned()
+        .unwrap();
+    assert!(
+        budget["body"]
+            .as_str()
+            .unwrap()
+            .contains("Open: http://localhost:8080/p/p/spend"),
+        "{budget}"
+    );
 
     // The per-agent split and my share.
     let p = td.get_as(&id, "/api/usage/project").await;
@@ -894,6 +917,50 @@ async fn detect_lists_logins_without_a_definition() {
     assert_eq!(v.body["subscription"]["plan"], "Max 20x");
 }
 
+/// Every file under `dir`, recursively.
+fn all_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            out.extend(all_files(&p));
+        } else {
+            out.push(p);
+        }
+    }
+    out
+}
+
+/// F6 of `docs/security-review.md`: a live login session keeps its output
+/// in memory only. Its temp dir has no `pty.log`, and no file in it holds
+/// the device code.
+fn assert_no_login_output_on_disk(id: &str, code: &str) {
+    let dir = terrariumd::login_session::login_dir(id);
+    assert!(dir.is_dir(), "the live session has its dir");
+    for f in all_files(&dir) {
+        assert!(
+            !f.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("pty.log"),
+            "{}",
+            f.display()
+        );
+        let bytes = std::fs::read(&f).unwrap_or_default();
+        assert!(
+            !String::from_utf8_lossy(&bytes).contains(code),
+            "{} holds the device code",
+            f.display()
+        );
+    }
+}
+
+/// The temp dir of an ended login session is gone.
+fn assert_login_dir_gone(id: &str) {
+    let dir = terrariumd::login_session::login_dir(id);
+    assert!(!dir.exists(), "{} is left behind", dir.display());
+}
+
 async fn wait_login(td: &TestDaemon, id: &str, state: &str) -> Value {
     for _ in 0..400 {
         let r = td.get(&format!("/api/subscriptions/login/{id}")).await;
@@ -1059,14 +1126,24 @@ esac"#
     env.http
         .set(OPENAI, 200, &fixture("probes/openai_wham_usage.json"));
 
+    // A dir that a daemon crash left behind goes at the next start.
+    let stale = terrariumd::login_session::login_dir(&ulid::Ulid::new().to_string());
+    std::fs::create_dir_all(stale.join("agents")).unwrap();
+    std::fs::write(stale.join("agents/pty.log"), "device code").unwrap();
+    std::fs::File::open(&stale)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - Duration::from_secs(3600))
+        .unwrap();
     let r = td
         .post("/api/subscriptions/login", json!({"kind": "codex"}))
         .await;
+    assert!(!stale.exists(), "the stale login dir is removed");
     let id = r.ok()["id"].as_str().unwrap().to_owned();
     let done = wait_login(td, &id, "done").await;
     assert_eq!(done["url"], "https://auth.openai.com/codex/device");
     assert_eq!(done["device_code"], "ABCD-EF12G");
     assert_eq!(done["subscription"], "openai-pro");
+    assert_login_dir_gone(&id);
     let s = td.get("/api/subscriptions/openai-pro").await;
     assert_eq!(s.ok()["probe"], "openai-codex-usage");
     assert_eq!(s.body["windows"][0]["window"], "7d");
@@ -1078,8 +1155,10 @@ esac"#
     let id = r.ok()["id"].as_str().unwrap().to_owned();
     let w = wait_login(td, &id, "waiting").await;
     assert_eq!(w["device_code"], "WXYZ-1234");
+    assert_no_login_output_on_disk(&id, "WXYZ-1234");
     let e = wait_login(td, &id, "expired").await;
     assert!(e["error"].as_str().unwrap().contains("did not finish"));
+    assert_login_dir_gone(&id);
 
     // A command that fails.
     td.post("/api/subscriptions/login", json!({"kind": "pi"}))
@@ -1094,6 +1173,7 @@ esac"#
     let id = r.ok()["id"].as_str().unwrap().to_owned();
     let f = wait_login(td, &id, "failed").await;
     assert!(f["error"].as_str().unwrap().contains("code 3"), "{f}");
+    assert_login_dir_gone(&id);
 
     // Cancel.
     let r = td
@@ -1108,6 +1188,7 @@ esac"#
         202
     );
     wait_login(td, &id, "cancelled").await;
+    assert_login_dir_gone(&id);
     td.get("/api/subscriptions/login/01NOPE")
         .await
         .err(404, "not_found");

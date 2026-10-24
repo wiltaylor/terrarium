@@ -296,7 +296,7 @@ struct Ctx<'a> {
 
 impl Ctx<'_> {
     fn events_path(&self) -> PathBuf {
-        terrarium_runner::agent_dir(&self.dirs.state(), self.agent.id).join("events.jsonl")
+        terrarium_runner::private_dir(&self.dirs.state(), self.agent.id).join("events.jsonl")
     }
 
     fn events(&self) -> Vec<EventRecord> {
@@ -591,7 +591,7 @@ fn dry_run(h: &dyn Harness, report: &mut Report) {
         };
         let agent = make_agent(id, model, &tmp.path().join("state"))?;
         let overlays = h.materialize(&agent, &home, Some(PROMPT))?;
-        let prompt = std::fs::read_to_string(agent.workspace.with_file_name("prompt.md"))
+        let prompt = std::fs::read_to_string(agent.workspace.with_file_name("harness/prompt.md"))
             .map_err(|e| format!("prompt.md: {e}"))?;
         if !prompt.contains(SENTINEL) {
             return Err("prompt.md has no sentinel".into());

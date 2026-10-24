@@ -18,14 +18,15 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio::task::AbortHandle;
 
 use crate::attach::{AttachEvent, AttachStream};
-use crate::config::{agent_dir, control_socket_path};
+use crate::config::{control_socket_path, create_private_dir, private_dir};
 use crate::control::{
     AnswerKeysParams, AnswerParams, CancelParams, ClientFrame, EventsParams, Hello, HelloParams,
-    PROTOCOL_VERSION, ResizeParams, ServerFrame, TypeTurnParams, WireSnapshot, WriteParams, codes,
-    decode, encode,
+    PROTOCOL_VERSION, ResizeParams, ServerFrame, StoppedByParams, TypeTurnParams, WireSnapshot,
+    WriteParams, codes, decode, encode,
 };
 use crate::error::{DeliveryError, Result, RunnerError};
 use crate::handle::RunnerHandle;
+use crate::process::StoppedBy;
 use crate::process::live_runner_pid;
 use crate::protocol::{BoxFuture, NoHandler, RequestHandler, RpcError};
 use crate::runner::{Delivery, ExitStatus, ScreenSnapshot};
@@ -599,8 +600,9 @@ impl RemoteRunner {
     /// Start `bin` (the `terrarium-runner` binary) detached, wait for its
     /// control socket, and connect. The process runs in its own session
     /// (it calls `setsid`), with stdin from `/dev/null` and stdout and
-    /// stderr appended to `<state>/agents/<ulid>/runner.log`. The spec goes
-    /// to `<state>/agents/<ulid>/runner.json` (mode `0600`). A thread reaps
+    /// stderr appended to `<state>/agents/<ulid>/private/runner.log`. The
+    /// spec goes to `<state>/agents/<ulid>/private/runner.json` (mode
+    /// `0600`; the directory is `0700` and the sandbox never binds it). A thread reaps
     /// the process when it exits while this daemon runs.
     pub async fn spawn_process(bin: &Path, opts: SpawnOptions) -> Result<Self> {
         let agent = opts.agent;
@@ -610,8 +612,8 @@ impl RemoteRunner {
                 pid: pid.to_string(),
             });
         }
-        let dir = agent_dir(&opts.state_dir, agent);
-        std::fs::create_dir_all(&dir).map_err(|e| RunnerError::io("create", &dir, e))?;
+        let dir = private_dir(&opts.state_dir, agent);
+        create_private_dir(&dir)?;
         let spec_path = dir.join("runner.json");
         opts.spec.write(&spec_path)?;
         let log_path = dir.join("runner.log");
@@ -905,6 +907,13 @@ impl RunnerHandle for RemoteRunner {
 
     fn kill(&self) -> BoxFuture<'_, Result<()>> {
         Box::pin(self.call_unit("kill", json!({})))
+    }
+
+    fn set_stopped_by(&self, by: StoppedBy) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move {
+            let p = serde_json::to_value(StoppedByParams { stopped_by: by }).unwrap_or(Value::Null);
+            self.call_unit("set_stopped_by", p).await
+        })
     }
 
     /// When the connection closes before the runner reports the exit, the
