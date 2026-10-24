@@ -8,6 +8,7 @@ pub mod adapter;
 pub mod config;
 pub mod error;
 pub mod event;
+pub mod fleet;
 pub mod harness;
 pub mod hook;
 pub mod ids;

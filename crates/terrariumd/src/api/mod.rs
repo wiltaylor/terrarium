@@ -4,6 +4,7 @@
 mod agents;
 mod artifacts;
 mod board;
+mod fleet;
 mod hosts;
 mod longpoll;
 mod mail;
@@ -165,6 +166,7 @@ pub fn router(state: Shared) -> Router {
         .merge(versions::routes())
         .merge(subscriptions::routes())
         .merge(usage::routes())
+        .merge(fleet::routes())
         .fallback(api_not_found)
         .method_not_allowed_fallback(api_method_not_allowed)
         .layer(middleware::from_fn_with_state(state.clone(), resolve_actor));

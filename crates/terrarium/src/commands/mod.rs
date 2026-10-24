@@ -4,6 +4,7 @@
 pub mod agents;
 pub mod artifacts;
 pub mod board;
+pub mod fleet;
 pub mod knowledge;
 pub mod mail;
 pub mod projects;
@@ -58,6 +59,7 @@ pub async fn run(ctx: &Ctx, cmd: &Command) -> anyhow::Result<()> {
         }
         Command::Shell { target } => remote::shell(ctx, target).await,
         Command::Cp { src, dst } => remote::cp(ctx, src, dst).await,
+        Command::Fleet { command } => fleet::fleet(ctx, command).await,
         Command::Admin { command } => admin(ctx, command).await,
         Command::Audit(args) => system::audit(ctx, args).await,
         Command::Events(args) => system::events(ctx, args).await,
@@ -75,6 +77,7 @@ async fn admin(ctx: &Ctx, cmd: &AdminCmd) -> anyhow::Result<()> {
         AdminCmd::Role { command } => agents::role(ctx, command).await,
         AdminCmd::Target { command } => system::admin_target(ctx, command).await,
         AdminCmd::Host { command } => system::hosts(ctx, command).await,
+        AdminCmd::Fleet { command } => fleet::fleet(ctx, command).await,
         AdminCmd::Audit(args) => system::audit(ctx, args).await,
     }
 }

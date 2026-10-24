@@ -141,6 +141,11 @@ pub enum Command {
     Shell { target: String },
     /// Copy one file to or from a target: `cp <src> <target>:<dst>` or `cp <target>:<src> <dst>`
     Cp { src: String, dst: String },
+    /// Fleet files: many projects, agents, and targets in one file
+    Fleet {
+        #[command(subcommand)]
+        command: FleetCmd,
+    },
     /// Operator commands that an agent's role permits
     Admin {
         #[command(subcommand)]
@@ -868,8 +873,61 @@ pub enum AdminCmd {
         #[command(subcommand)]
         command: HostCmd,
     },
+    /// Fleet files, as `terrarium fleet`
+    Fleet {
+        #[command(subcommand)]
+        command: FleetCmd,
+    },
     /// The audit log
     Audit(AuditArgs),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum FleetCmd {
+    /// Check a fleet file and list its objects; exit 2 on errors
+    Validate {
+        /// The fleet file, or `-` for stdin
+        file: String,
+        /// Check the file only, without the daemon (no references, no prompts)
+        #[arg(long)]
+        offline: bool,
+    },
+    /// Show what an apply would create, update, and delete
+    Plan {
+        /// The fleet file, or `-` for stdin
+        file: String,
+        /// Plan the removal of objects that the file no longer declares
+        #[arg(long)]
+        prune: bool,
+    },
+    /// Make the daemon match the fleet file
+    Apply {
+        /// The fleet file, or `-` for stdin
+        file: String,
+        /// Delete the agents and targets that the file no longer declares
+        #[arg(long)]
+        prune: bool,
+        /// Needed when --prune deletes an agent with a live session
+        #[arg(long)]
+        confirm: bool,
+        /// Start the agents with `start = true` that do not run
+        #[arg(long)]
+        start: bool,
+    },
+    /// List the applied fleets
+    Ls,
+    /// Show a fleet, its last applied file, and its plan now (drift shows there)
+    Show { name: String },
+    /// Write a fleet file from a project as it is now
+    Export {
+        project: String,
+        /// The fleet name (default: the project name)
+        #[arg(long)]
+        name: Option<String>,
+        /// Write to this file, not stdout
+        #[arg(long, short = 'o')]
+        output: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]

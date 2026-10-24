@@ -1,0 +1,69 @@
+# A fleet file: one file declares a whole Terrarium set-up, as a vmlab lab
+# file declares a whole lab. See docs/fleet.md.
+#
+#   terrarium fleet validate examples/fleet/terrarium.fleet.toml
+#   terrarium fleet plan     examples/fleet/terrarium.fleet.toml
+#   terrarium fleet apply    examples/fleet/terrarium.fleet.toml
+#
+# No agent here has `start = true`, so `fleet apply --start` starts nothing.
+# Set `start = true` on an agent when it has a logged-in subscription.
+
+version = 1
+name = "terrarium"
+description = "The Terrarium project: a lead, two workers, and a build box"
+
+# Values for each agent that does not set them.
+[defaults]
+harness = "claude"
+prompt = "default"
+restart = "on-failure"
+start = false
+
+# Subscriptions that agents name must exist in the daemon, or be defined
+# here. This one is defined here, so the fleet applies on a fresh daemon.
+[[subscriptions]]
+name = "anthropic-max"
+provider = "anthropic"
+plan = "Max 20x"
+harnesses = ["claude", "pi"]
+alert_at = 80
+
+[[projects]]
+name = "terrarium"
+description = "The Terrarium tool itself"
+prefix = "TER"
+
+[[projects.repos]]
+name = "terrarium"
+url = "git@github.com:wiltaylor/terrarium.git"
+default_branch = "main"
+
+[projects.checkout]
+on_agent_create = []
+
+# The project lead: triages the inbox into cards and runs the workers.
+[[projects.agents]]
+name = "lead"
+subscription = "anthropic-max"
+prompt = "project-lead"
+roles = ["project_admin"]
+
+[[projects.agents]]
+name = "worker-1"
+subscription = "anthropic-max"
+[projects.agents.policy]
+targets = ["buildbox"]
+
+[[projects.agents]]
+name = "worker-2"
+harness = "pi"
+subscription = "anthropic-max"
+model = "anthropic/claude-opus-5-5"
+[projects.agents.policy]
+targets = ["buildbox"]
+
+# A project target: the workers run the build on it.
+[[projects.targets]]
+name = "buildbox"
+kind = "ssh"
+address = "build@buildbox.lan"

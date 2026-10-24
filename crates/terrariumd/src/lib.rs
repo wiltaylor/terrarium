@@ -11,6 +11,7 @@ pub mod db;
 pub mod error;
 pub mod events;
 pub mod executor;
+pub mod fleet;
 pub mod git;
 pub mod hosts;
 pub mod login_session;
@@ -279,6 +280,7 @@ pub async fn apply_definitions(
         })
         .await?;
     report.errors.extend(target_errors);
+    report.errors.extend(fleet::apply_config_dir(state).await);
     state.set_definitions(defs);
     for id in &report.removed_agent_ids {
         if let Ok(id) = id.parse() {

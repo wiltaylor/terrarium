@@ -307,6 +307,35 @@ requests only, so they work the same in both modes (agent-rpc.md,
   a partial file, and the CLI renames it only when the count and the
   SHA-256 match. To copy a directory, make a tar file first.
 
+### Fleet files
+
+A fleet file declares projects, agents, targets, and subscriptions in one
+file. [fleet.md](fleet.md) has the file format and the rules.
+
+```
+terrarium fleet validate <file|-> [--offline]   check the file; exit 2 on errors
+terrarium fleet plan <file|-> [--prune]         create, update, delete, unchanged per object; exit 2 on errors
+terrarium fleet apply <file|-> [--prune] [--confirm] [--start]
+terrarium fleet ls
+terrarium fleet show <name>                     the last applied file and its plan now (drift)
+terrarium fleet export <project> [--name n] [-o file]
+```
+
+- The CLI sends the file content to the daemon, so the commands work in
+  both modes. An agent needs `project_admin` of each project that the
+  fleet touches. A new project, a global target, or a subscription needs
+  `sysadmin`.
+- `plan` and `apply` mark each object: `+` create, `~` update, `-` delete
+  or release, `=` unchanged, `!` conflict. An update shows each changed
+  field as `field: old -> new`, and `drift: ...` when the object changed
+  outside the fleet.
+- `--prune` deletes the agents and targets that the file no longer
+  declares, and releases its projects and subscriptions. It needs
+  `--confirm` when an agent to delete has a live session.
+- `--start` starts each agent with `start = true` that does not run.
+- `validate --offline` checks the file without the daemon.
+- `export` writes the TOML to stdout, or to `-o file`.
+
 ## 5. Operator commands
 
 ```
@@ -354,6 +383,7 @@ terrarium admin host ls
 terrarium admin host new <name>                prints the token once, alone on stdout
 terrarium admin host rm <name>                 revokes the token
 terrarium admin audit [--since time] [--actor a] [--action a]
+terrarium admin fleet validate|plan|apply|ls|show|export ...
 ```
 
 `admin role grant` reads the roles, adds the role, and writes the whole set.
