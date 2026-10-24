@@ -1,0 +1,18 @@
+# Rust
+/target/
+**/target/
+# Node
+node_modules/
+dashboard/dist/
+# Terrarium runtime data (bind mounts)
+/config/*
+!/config/README.md
+/state/
+/.env
+# Editors
+.idea/
+.vscode/
+*.swp
+# Python
+__pycache__/
+.venv/
