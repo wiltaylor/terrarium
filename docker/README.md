@@ -93,3 +93,7 @@ provider, kills `terrariumd` with SIGKILL, and checks these items:
 - The daemon log shows a reconnect to the runner.
 
 Then it deletes the agent and the project, and prints PASS or FAIL.
+
+## Verified
+
+On 2026-10-24, commit `efd9663`: `just docker::image-build` (image 1.43 GB; claude 2.1.310, codex 0.160.0, copilot 1.0.103, pi 0.85.1), `just up`, the security headers on `/`, port 8082 loopback-only, `/a/` only on 8081, the cookie session flow (201, 200, 403, 204), and `just docker::crash-test` (daemon killed with SIGKILL, runner kept its pid, daemon reconnected, agent back to idle) all passed, twice. `just down` left no containers, and every file under `state/` and `config/` belongs to the host user.
