@@ -1,0 +1,38 @@
+{
+  "name": "terrarium-dashboard",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Terrarium operator dashboard (SolidJS + Vite). The daemon embeds dist/.",
+  "scripts": {
+    "dev": "vite",
+    "dev:mock": "VITE_MOCK=1 vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "check": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json && eslint ."
+  },
+  "engines": {
+    "node": ">=20.19"
+  },
+  "dependencies": {
+    "@solidjs/router": "^1.0.0",
+    "@xterm/addon-attach": "^0.12.0",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "marked": "^18.1.1",
+    "solid-js": "^1.9.17"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^24.19.2",
+    "eslint": "^10.13.0",
+    "eslint-plugin-solid": "^0.18.1",
+    "globals": "^17.13.0",
+    "typescript": "~6.0.3",
+    "typescript-eslint": "^8.72.0",
+    "vite": "^8.3.5",
+    "vite-plugin-solid": "^2.11.14",
+    "vitest": "^5.0.5"
+  }
+}
