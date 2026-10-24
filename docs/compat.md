@@ -367,6 +367,8 @@ Spike: `spikes/claude/concurrency/run.py` (4 haiku turns). Two sandboxed agents 
 | Other writes to the shared home | `projects/-home-agent-work/<uuid>.jsonl` (one per agent), `session-env/<uuid>/` (one per agent, empty), and one `shell-snapshots/snapshot-bash-<ms>-<random>.sh`. Each is keyed by the session UUID or has a unique name. No other new file. | verified |
 | Collisions not covered | None found. No new overlay was necessary. | verified |
 
+Auto memory: the adapter now passes `autoMemoryEnabled: false` in the `--settings` JSON. The 2.1.310 settings schema says this stops reads and writes of the auto-memory directory. No model turn has proved it yet, so the `projects/<cwd>/memory/` overlay stays until the compatibility suite confirms no writes. The env var `CLAUDE_CODE_DISABLE_AUTO_MEMORY` also exists and is not used.
+
 Per-agent overlays after this spike: `.claude.json`, `sessions/`, `history.jsonl`, `backups/`, `projects/<cwd>/memory/`. Shared: `.credentials.json`, transcripts, `session-env/`, `file-history/`, `todos/`, caches. Not tested: an OAuth token refresh with two agents, real writes to auto memory, more than two agents, Docker.
 
 ## Changes to the plan
