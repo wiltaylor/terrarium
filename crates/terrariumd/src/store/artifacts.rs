@@ -664,7 +664,8 @@ pub fn render(conn: &Connection, row: ArtRow) -> ApiResult<Artifact> {
     Ok(Artifact {
         id: short(row.num),
         key: target,
-        renders: renders(&row.content_type) && row.kind == "file",
+        // A bundle is a site: the viewer shows it in a sandboxed frame.
+        renders: row.kind == "bundle" || renders(&row.content_type),
         created_by_name: name_of(conn, &row.created_by)?,
         uid: row.uid,
         project: row.project,

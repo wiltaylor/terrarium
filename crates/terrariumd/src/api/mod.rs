@@ -4,6 +4,7 @@
 mod agents;
 mod artifacts;
 mod board;
+mod hosts;
 mod longpoll;
 mod mail;
 mod memory;
@@ -12,6 +13,7 @@ mod repos;
 mod streams;
 mod subscriptions;
 mod system;
+mod targets;
 mod usage;
 mod versions;
 mod wiki;
@@ -62,6 +64,8 @@ pub struct AppState {
     pub insecure_agent_header: bool,
     /// Usage accounting, quota probes, and login sessions (PLAN §16).
     pub usage: Arc<crate::usage_collector::UsageRuntime>,
+    /// Host agents, exec sessions, and target routing (PLAN §19).
+    pub executor: Arc<crate::executor::Executor>,
 }
 
 impl AppState {
@@ -144,11 +148,12 @@ async fn api_method_not_allowed() -> ApiError {
 pub fn router(state: Shared) -> Router {
     let api = Router::new()
         .route("/health", get(system::health))
-        .route("/hosts", get(system::hosts))
-        .route("/targets", get(system::targets))
+        .merge(hosts::routes())
+        .merge(targets::routes())
         .route("/reload", post(system::reload))
         .route("/audit", get(system::audit))
         .route("/events", get(streams::firehose))
+        .route("/events/latest", get(streams::latest))
         .merge(projects::routes())
         .merge(repos::routes())
         .merge(agents::routes())
@@ -166,6 +171,10 @@ pub fn router(state: Shared) -> Router {
     Router::new()
         .nest("/api", api)
         .merge(artifacts::serving_routes())
+        .route(
+            terrarium_host::protocol::CONNECT_PATH,
+            get(crate::hosts::connect),
+        )
         .fallback(crate::assets::serve)
         .with_state(state)
 }
@@ -339,6 +348,7 @@ mod tests {
             config_dir: PathBuf::from("/nonexistent"),
             insecure_agent_header: false,
             usage: Arc::default(),
+            executor: Arc::default(),
         })
     }
 

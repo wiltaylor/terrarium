@@ -73,6 +73,7 @@ fn base_row(r: &Row<'_>) -> rusqlite::Result<AgentView> {
             restart: restart_from(&r.get::<_, String>("restart")?),
             status: status_from(&r.get::<_, String>("status")?),
             session: None,
+            new_session_on_prompt_change: r.get("new_session_on_prompt_change")?,
         },
         source: r.get("source")?,
         current_card: None,
@@ -279,8 +280,9 @@ pub fn create(
     let at = now();
     t.execute(
         "INSERT INTO agents (id, name, project, harness, subscription, model, prompt, policy,
-                             restart, status, workspace, source, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'stopped', ?10, ?11, ?12, ?12)",
+                             restart, status, workspace, source, created_at, updated_at,
+                             new_session_on_prompt_change)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'stopped', ?10, ?11, ?12, ?12, ?13)",
         params![
             id,
             agent.name,
@@ -293,7 +295,8 @@ pub fn create(
             restart_str(agent.restart),
             agent.workspace.to_string_lossy(),
             source,
-            at
+            at,
+            agent.new_session_on_prompt_change
         ],
     )?;
     set_roles(t, &id, &def.project, &def.roles)?;
@@ -306,22 +309,35 @@ pub fn create(
     get(t, &id)
 }
 
-/// The body of `PATCH /api/agents/{id}`.
+/// The body of `PATCH /api/agents/{id}`. A field that is absent stays as
+/// it is. `subscription`, `model`, and `prompt` take `null` to clear them.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentPatch {
     #[serde(default)]
     pub harness: Option<HarnessId>,
-    #[serde(default)]
-    pub subscription: Option<String>,
-    #[serde(default)]
-    pub model: Option<String>,
-    #[serde(default)]
-    pub prompt: Option<String>,
+    #[serde(default, deserialize_with = "nullable")]
+    pub subscription: Option<Option<String>>,
+    #[serde(default, deserialize_with = "nullable")]
+    pub model: Option<Option<String>>,
+    #[serde(default, deserialize_with = "nullable")]
+    pub prompt: Option<Option<String>>,
     #[serde(default)]
     pub policy: Option<Policy>,
     #[serde(default)]
     pub restart: Option<RestartPolicy>,
+    #[serde(default)]
+    pub new_session_on_prompt_change: Option<bool>,
+}
+
+/// A field that is present: `Some(None)` for `null`, `Some(Some(v))` for a
+/// value. An absent field stays `None` through `#[serde(default)]`.
+fn nullable<'de, D, T>(d: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(d).map(Some)
 }
 
 /// Write the definition fields of an agent.
@@ -337,27 +353,34 @@ pub fn write_def(t: &mut Tx<'_>, id: &str, p: &AgentPatch) -> ApiResult<()> {
             roles: Vec::new(),
             policy: policy.clone(),
             restart: RestartPolicy::default(),
+            new_session_on_prompt_change: true,
         })?;
     }
+    // `?N IS NOT NULL` is the "field present" flag of each nullable column.
     t.execute(
         "UPDATE agents SET
             harness = coalesce(?2, harness),
-            subscription = coalesce(?3, subscription),
-            model = coalesce(?4, model),
-            prompt = coalesce(?5, prompt),
+            subscription = CASE WHEN ?9 THEN ?3 ELSE subscription END,
+            model = CASE WHEN ?10 THEN ?4 ELSE model END,
+            prompt = CASE WHEN ?11 THEN ?5 ELSE prompt END,
             policy = coalesce(?6, policy),
             restart = coalesce(?7, restart),
+            new_session_on_prompt_change = coalesce(?12, new_session_on_prompt_change),
             updated_at = ?8
          WHERE id = ?1",
         params![
             id,
             p.harness.map(HarnessId::as_str),
-            p.subscription,
-            p.model,
-            p.prompt,
+            p.subscription.clone().flatten(),
+            p.model.clone().flatten(),
+            p.prompt.clone().flatten(),
             p.policy.as_ref().map(serde_json::to_string).transpose()?,
             p.restart.map(restart_str),
-            now()
+            now(),
+            p.subscription.is_some(),
+            p.model.is_some(),
+            p.prompt.is_some(),
+            p.new_session_on_prompt_change,
         ],
     )?;
     Ok(())
@@ -506,7 +529,8 @@ pub fn sync_def(t: &mut Tx<'_>, id: &str, def: &AgentDef) -> ApiResult<bool> {
     if changed {
         t.execute(
             "UPDATE agents SET harness = ?2, subscription = ?3, model = ?4, prompt = ?5,
-                    policy = ?6, restart = ?7, source = 'file', updated_at = ?8
+                    policy = ?6, restart = ?7, source = 'file', updated_at = ?8,
+                    new_session_on_prompt_change = ?9
              WHERE id = ?1",
             params![
                 id,
@@ -516,7 +540,8 @@ pub fn sync_def(t: &mut Tx<'_>, id: &str, def: &AgentDef) -> ApiResult<bool> {
                 def.prompt,
                 serde_json::to_string(&def.policy)?,
                 restart_str(def.restart),
-                now()
+                now(),
+                def.new_session_on_prompt_change
             ],
         )?;
     }

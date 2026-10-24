@@ -65,7 +65,8 @@ async fn show(
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CheckoutBody {
-    /// A target name: the checkout runs on its host agent (later phase).
+    /// A target name: the checkout runs on the target (its host agent, or
+    /// ssh), not in a workspace.
     #[serde(default)]
     pub target: Option<String>,
     #[serde(default)]
@@ -272,19 +273,18 @@ async fn checkout(
     actor: Actor,
     Path(id): Path<String>,
     ApiJson(body): ApiJson<CheckoutBody>,
-) -> ApiResult<Json<CheckoutResult>> {
-    if body.target.is_some() {
-        return Err(ApiError::new(
-            Code::NotAvailable,
-            "checkout onto a target is not available yet: host agents arrive in a later phase",
-        ));
-    }
+) -> ApiResult<Response> {
     let context = actor.project().map(str::to_owned);
     let repo = state
         .db
         .read(move |c| repos::resolve(c, &id, context.as_deref()))
         .await?;
     policy::read_project(&actor, &repo.project)?;
+    if let Some(target) = body.target.clone() {
+        return Ok(
+            Json(checkout_target(&state, &actor, &repo, &target, &body).await?).into_response(),
+        );
+    }
     let key = match (&actor, &body.agent) {
         (_, Some(k)) => k.clone(),
         (Actor::Agent(a), None) => a.id.clone(),
@@ -305,9 +305,98 @@ async fn checkout(
         &agent.agent.id.to_string(),
         &agent.agent.project,
     )?;
-    Ok(Json(
-        run_checkout(&state, &actor, &repo, &agent, &body).await?,
-    ))
+    Ok(Json(run_checkout(&state, &actor, &repo, &agent, &body).await?).into_response())
+}
+
+/// Clone or update `repo` on a target (PLAN §9): the run happens on the
+/// host agent (or over ssh), with the repo credential in the env of that
+/// one run. The actor must be allowed to use the target, and the target
+/// is global or in the repo's project.
+async fn checkout_target(
+    state: &Shared,
+    actor: &Actor,
+    repo: &Repo,
+    target: &str,
+    body: &CheckoutBody,
+) -> ApiResult<serde_json::Value> {
+    let row = crate::executor::usable(state, actor, target).await?;
+    if let Some(p) = &row.def.project
+        && *p != repo.project
+    {
+        return Err(ApiError::forbidden(format!(
+            "target `{target}` belongs to project `{p}`; the repo is in `{}`",
+            repo.project
+        )));
+    }
+    let dir = body.path.clone().unwrap_or_else(|| repo.path.clone());
+    let secret = credentials::secret_of(&store(state), repo.credential.as_deref())?;
+    let branch = body.branch.clone().or_else(|| repo.default_branch.clone());
+    let event = |summary: String, data: serde_json::Value| {
+        let d = EventDraft::new("repo.checkout", summary, data).project(repo.project.clone());
+        match actor.agent() {
+            Some(a) => d.agent(a.id.clone(), a.name.clone()),
+            None => d,
+        }
+    };
+    let out = crate::executor::checkout_on_target(
+        state,
+        actor,
+        &row,
+        &repo.url,
+        &dir,
+        branch.as_deref(),
+        body.depth,
+        secret.as_ref().map(|(_, s)| s),
+    )
+    .await;
+    let out = match out {
+        Ok(v) => v,
+        Err(e) => {
+            let draft = event(
+                format!(
+                    "checkout of {} on {target} failed: {}",
+                    repo.name, e.message
+                ),
+                json!({"repo": repo.name, "target": target, "phase": "error",
+                       "error": e.message, "details": e.details}),
+            );
+            if let Err(w) = state.db.write("system", move |t| t.emit(draft)).await {
+                tracing::warn!("cannot record a checkout failure: {w}");
+            }
+            return Err(e);
+        }
+    };
+    let mut result = json!({
+        "repo": repo.name, "repo_id": repo.id, "project": repo.project, "target": target,
+        "path": dir, "remote_path": out["path"], "action": out["action"],
+        "head": out["head"], "branch": out["branch"],
+    });
+    if let Some(n) = out.get("note") {
+        result["note"] = n.clone();
+    }
+    let draft = event(
+        format!(
+            "{} {} on {target} at {}",
+            repo.name,
+            result["action"].as_str().unwrap_or("checked out"),
+            result["head"].as_str().unwrap_or("-")
+        ),
+        json!({"phase": "done", "result": result}),
+    );
+    let audit = json!({
+        "target": target, "path": dir, "action": result["action"], "head": result["head"],
+        "branch": result["branch"], "credential": secret.map(|(name, _)| name),
+    });
+    let audit_target = format!("{}/{}", repo.project, repo.name);
+    let project = repo.project.clone();
+    state
+        .db
+        .write(actor.label(), move |t| {
+            t.emit(draft)?;
+            t.audit("repo.checkout", &audit_target, Some(&project), audit)
+        })
+        .await?;
+    Ok(result)
 }
 
 /// The body of `POST /api/repos/credential`: what git sends to a

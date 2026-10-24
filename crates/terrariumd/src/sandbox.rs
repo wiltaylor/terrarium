@@ -485,8 +485,18 @@ fn shell_quote(s: &str) -> String {
     }
 }
 
+/// True for an env var whose value is a secret: an API key, a token, a
+/// password. [`command_line`] hides its value.
+pub fn secret_var(key: &str) -> bool {
+    let k = key.to_ascii_uppercase();
+    ["KEY", "TOKEN", "SECRET", "PASSWORD"]
+        .iter()
+        .any(|w| k.contains(w))
+}
+
 /// The spec as one shell command line: `cd <cwd> && env -i K=V ... prog args`.
-/// For `terrariumd sandbox-dry-run` and the start log.
+/// For `terrariumd sandbox-dry-run` and the start log. The value of each
+/// [`secret_var`] shows as `<redacted>`.
 pub fn command_line(spec: &LaunchSpec) -> String {
     let mut words = vec![
         "cd".to_owned(),
@@ -498,6 +508,7 @@ pub fn command_line(spec: &LaunchSpec) -> String {
         words.push("-i".into());
     }
     for (k, v) in &spec.env {
+        let v = if secret_var(k) { "<redacted>" } else { v };
         words.push(shell_quote(&format!("{k}={v}")));
     }
     words.push(shell_quote(&spec.program));
@@ -644,6 +655,18 @@ TERRARIUM_AGENT=01K8AGENT0000000000000000A TERRARIUM_SOCKET=/run/terrarium/agent
         assert_eq!(dir.as_deref(), real.parent());
         let (program, dir) = locate("x", &|_| Some(PathBuf::from("/usr/bin/x")));
         assert_eq!((program.as_str(), dir), ("/usr/bin/x", None));
+    }
+
+    #[test]
+    fn command_line_hides_secrets() {
+        let spec = LaunchSpec::new("pi", "/w")
+            .env("ANTHROPIC_API_KEY", "sk-secret")
+            .env("COPILOT_GITHUB_TOKEN", "ghp_secret")
+            .env("PI_MODEL", "x");
+        let line = command_line(&spec);
+        assert!(!line.contains("secret"), "{line}");
+        assert!(line.contains("'ANTHROPIC_API_KEY=<redacted>'"), "{line}");
+        assert!(line.contains("PI_MODEL=x"), "{line}");
     }
 
     #[test]

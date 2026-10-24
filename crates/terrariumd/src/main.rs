@@ -74,9 +74,23 @@ async fn main() -> anyhow::Result<()> {
         usage,
     )
     .await?;
+    // The dial-in listener of the host agents (docs/host-protocol.md). An
+    // empty TERRARIUM_HOST_LISTEN turns it off; the main router still
+    // serves /hosts/connect.
+    let host_listen =
+        std::env::var("TERRARIUM_HOST_LISTEN").unwrap_or_else(|_| "0.0.0.0:8082".into());
+    let host_task = if host_listen.is_empty() {
+        None
+    } else {
+        let (task, _) = terrariumd::hosts::serve(daemon.state.clone(), &host_listen).await?;
+        Some(task)
+    };
 
     shutdown_signal().await;
     info!("shutting down");
+    if let Some(t) = host_task {
+        t.abort();
+    }
     daemon.shutdown();
     Ok(())
 }

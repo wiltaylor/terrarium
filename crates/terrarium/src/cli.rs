@@ -116,17 +116,30 @@ pub enum Command {
         #[command(subcommand)]
         command: TargetsCmd,
     },
-    /// Run a command on a target (not available yet)
+    /// Run a command on a target; streams the output and exits with its code
     Exec {
         target: String,
+        /// The working directory on the target (an absolute path)
         #[arg(long)]
         cwd: Option<String>,
+        /// `KEY=VALUE` for the command's environment; repeat for more
+        #[arg(long = "env", short = 'e')]
+        env: Vec<String>,
+        /// Kill the command after this many seconds
+        #[arg(long)]
+        timeout: Option<u64>,
+        /// Send this CLI's stdin to the command
+        #[arg(long, short = 'i')]
+        stdin: bool,
+        /// Run the command in a PTY
+        #[arg(long, short = 't')]
+        tty: bool,
         #[arg(last = true)]
         cmd: Vec<String>,
     },
-    /// Open a shell on a target (not available yet)
+    /// Open an interactive shell on a target (Ctrl-] detaches)
     Shell { target: String },
-    /// Copy files to or from a target (not available yet)
+    /// Copy one file to or from a target: `cp <src> <target>:<dst>` or `cp <target>:<src> <dst>`
     Cp { src: String, dst: String },
     /// Operator commands that an agent's role permits
     Admin {
@@ -874,14 +887,53 @@ pub enum AdminTargetCmd {
     /// Define a target (sysadmin for a global target)
     New {
         name: String,
-        /// For example `ssh`
+        /// `host`, `ssh`, `docker`, or `vmlab`
         #[arg(long)]
         kind: String,
+        /// `ssh`: `user@host` or `host`
         #[arg(long)]
         address: Option<String>,
+        /// `ssh`: the port
+        #[arg(long)]
+        port: Option<u16>,
+        /// `ssh`: the ssh_key credential name
+        #[arg(long)]
+        credential: Option<String>,
+        /// The host agent, for `host`, `docker`, and `vmlab`
+        #[arg(long)]
+        host: Option<String>,
+        /// `docker`: the image to run
+        #[arg(long)]
+        image: Option<String>,
+        /// `docker`: an existing container
+        #[arg(long)]
+        container: Option<String>,
+        /// `vmlab`: the lab directory (holds `vmlab.wcl`)
+        #[arg(long)]
+        lab: Option<String>,
+        /// `vmlab`: the machine in the lab
+        #[arg(long)]
+        machine: Option<String>,
+        /// Made on agent start and removed on agent stop
+        #[arg(long)]
+        ephemeral: bool,
+        /// Keep an ephemeral target after the agent stops
+        #[arg(long)]
+        keep: bool,
         /// Make a global target instead of a project target
         #[arg(long)]
         global: bool,
+    },
+    /// Remove a target
+    Rm { name: String },
+    /// Run a lifecycle verb: up, down, snapshot, restore, or status
+    Verb {
+        name: String,
+        /// `up`, `down`, `snapshot`, `restore`, or `status`
+        verb: String,
+        /// The snapshot name for `snapshot` and `restore`
+        #[arg(long)]
+        snapshot: Option<String>,
     },
     /// List targets
     Ls,
@@ -891,6 +943,10 @@ pub enum AdminTargetCmd {
 pub enum HostCmd {
     /// List host agents
     Ls,
+    /// Register a host agent; prints its token once on stdout
+    New { name: String },
+    /// Revoke a host agent's token
+    Rm { name: String },
 }
 
 #[derive(Debug, Args)]

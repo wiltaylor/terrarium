@@ -302,6 +302,8 @@ async fn bundle_serves_index_through_a_signed_url_only() {
     .await;
     let a = r.ok().clone();
     assert_eq!(a["kind"], "bundle");
+    // A bundle renders: the viewer shows it in a sandboxed frame.
+    assert_eq!(a["renders"], true);
     let uid = a["uid"].as_str().unwrap().to_owned();
 
     let url = mint(&td, "ART-1", None).await;

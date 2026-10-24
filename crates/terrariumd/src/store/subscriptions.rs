@@ -22,6 +22,7 @@ pub const RESERVED_NAMES: [&str; 2] = ["login", "detect"];
 /// Login state words of the Subscriptions page.
 pub const LOGGED_IN: &str = "logged_in";
 pub const MISSING: &str = "missing";
+pub const EXPIRING: &str = "expiring";
 pub const EXPIRED: &str = "expired";
 
 /// Probe state words.
@@ -206,6 +207,69 @@ pub fn set_login_status(t: &mut Tx<'_>, name: &str, status: &str) -> ApiResult<(
         "UPDATE subscriptions SET login_status = ?2, verified_at = ?3, updated_at = ?3 WHERE name = ?1",
         params![name, status, at],
     )?;
+    Ok(())
+}
+
+/// Record what a harness status command said about the login of `name`
+/// (the verify path and the start-up check, PLAN §16.1). Logged in:
+/// `logged_in`. Logged out after a login was known (`logged_in`,
+/// `expiring`, `expired`): `expired`, see [`mark_expired`]. Logged out with
+/// no known login: `missing`. Returns true when this call mailed the
+/// operator.
+pub fn record_login_check(t: &mut Tx<'_>, name: &str, logged_in: bool) -> ApiResult<bool> {
+    if logged_in {
+        set_login_status(t, name, LOGGED_IN)?;
+        return Ok(false);
+    }
+    let current = get(t, name)?.login_status;
+    if matches!(current.as_str(), LOGGED_IN | EXPIRING | EXPIRED) {
+        return mark_expired(t, name, "the harness status command says it is logged out");
+    }
+    set_login_status(t, name, MISSING)?;
+    Ok(false)
+}
+
+/// Set `expired` on `name`. On the change into `expired` (and only then),
+/// mail the operator from `system` and emit a `subscription.expired`
+/// event. Returns true when it mailed.
+pub fn mark_expired(t: &mut Tx<'_>, name: &str, why: &str) -> ApiResult<bool> {
+    let sub = get(t, name)?;
+    set_login_status(t, name, EXPIRED)?;
+    if sub.login_status == EXPIRED {
+        return Ok(false);
+    }
+    let subject = format!("Login expired: {name}");
+    let body = format!(
+        "The login of subscription `{name}` ({}) expired: {why}.\n\nAgents on it cannot \
+         spend it until you log in again. Open Subscriptions in the dashboard and use \
+         Re-login, then Verify now.",
+        sub.provider
+    );
+    crate::store::mail::send(
+        t,
+        crate::store::mail::Outgoing {
+            from: &crate::store::mail::Address::System,
+            to: &crate::store::mail::Address::Operator,
+            subject: &subject,
+            body: &body,
+            thread: None,
+            in_reply_to: None,
+        },
+    )?;
+    t.emit(crate::events::EventDraft::new(
+        "subscription.expired",
+        format!("{name}: login expired"),
+        serde_json::json!({"subscription": name, "from": sub.login_status, "reason": why}),
+    ))?;
+    Ok(true)
+}
+
+/// A probe proved the login: an `expired` login is `logged_in` again.
+/// Other states stay, because a probe can use another credential.
+pub fn clear_expired(t: &mut Tx<'_>, name: &str) -> ApiResult<()> {
+    if get(t, name)?.login_status == EXPIRED {
+        set_login_status(t, name, LOGGED_IN)?;
+    }
     Ok(())
 }
 
@@ -520,6 +584,60 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(all.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn logout_after_login_expires_once_and_mails_once() {
+        let db = db();
+        let ops = |c: &Connection| {
+            let f = crate::store::mail::MailFilter {
+                to: Some("operator".into()),
+                ..Default::default()
+            };
+            crate::store::mail::list(c, &f, &crate::store::Page::default())
+        };
+        db.write("system", |t| {
+            upsert_def(t, &def("s1"), SOURCE_API)?;
+            // Never logged in: missing, no mail.
+            assert!(!record_login_check(t, "s1", false)?);
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            db.read(|c| get(c, "s1")).await.unwrap().login_status,
+            MISSING
+        );
+        assert!(db.read(ops).await.unwrap().items.is_empty());
+        db.write("system", |t| {
+            record_login_check(t, "s1", true)?;
+            // Logged out after a login: expired, one mail.
+            assert!(record_login_check(t, "s1", false)?);
+            assert!(!record_login_check(t, "s1", false)?);
+            // A refused probe on an expired login does not mail again.
+            assert!(!mark_expired(t, "s1", "HTTP 401")?);
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            db.read(|c| get(c, "s1")).await.unwrap().login_status,
+            EXPIRED
+        );
+        let mail = db.read(ops).await.unwrap().items;
+        assert_eq!(mail.len(), 1);
+        assert_eq!(mail[0].from, "system");
+        assert_eq!(mail[0].subject, "Login expired: s1");
+        // A good probe clears it; the next refusal mails again.
+        db.write("system", |t| {
+            clear_expired(t, "s1")?;
+            assert_eq!(get(t, "s1")?.login_status, LOGGED_IN);
+            assert!(mark_expired(t, "s1", "HTTP 401")?);
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(db.read(ops).await.unwrap().items.len(), 2);
     }
 
     #[tokio::test]

@@ -52,6 +52,10 @@ fn context(cli: &Cli, agent: Option<AgentEnv>) -> anyhow::Result<Ctx> {
 }
 
 fn report(err: &anyhow::Error, json: bool) {
+    // The remote command printed its own errors.
+    if matches!(err.downcast_ref(), Some(api::CliError::RemoteExit(_))) {
+        return;
+    }
     if let Some(se) = err.downcast_ref::<ServerError>() {
         if json {
             eprintln!("{}", se.body);

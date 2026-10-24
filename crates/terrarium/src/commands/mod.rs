@@ -7,6 +7,7 @@ pub mod board;
 pub mod knowledge;
 pub mod mail;
 pub mod projects;
+pub mod remote;
 pub mod system;
 
 #[cfg(test)]
@@ -14,13 +15,10 @@ mod tests;
 
 use serde_json::Value;
 
-use crate::api::CliError;
 use crate::cli::{AdminCmd, Command};
 use crate::ctx::Ctx;
 use crate::output::{Table, field, short_time};
 use crate::transport::encode;
-
-pub const NOT_YET_HOSTS: &str = "not available yet: host agents arrive in a later phase";
 
 pub async fn run(ctx: &Ctx, cmd: &Command) -> anyhow::Result<()> {
     match cmd {
@@ -40,9 +38,26 @@ pub async fn run(ctx: &Ctx, cmd: &Command) -> anyhow::Result<()> {
         Command::Usage { command } => system::usage(ctx, command.as_ref()).await,
         Command::Status { command } => agents::status(ctx, command).await,
         Command::Targets { .. } => system::targets(ctx).await,
-        Command::Exec { .. } | Command::Shell { .. } | Command::Cp { .. } => {
-            Err(CliError::not_available(NOT_YET_HOSTS))
+        Command::Exec {
+            target,
+            cwd,
+            env,
+            timeout,
+            stdin,
+            tty,
+            cmd,
+        } => {
+            let opts = remote::ExecOpts {
+                cwd: cwd.clone(),
+                env: env.clone(),
+                timeout: *timeout,
+                stdin: *stdin,
+                tty: *tty,
+            };
+            remote::exec(ctx, target, &opts, cmd).await
         }
+        Command::Shell { target } => remote::shell(ctx, target).await,
+        Command::Cp { src, dst } => remote::cp(ctx, src, dst).await,
         Command::Admin { command } => admin(ctx, command).await,
         Command::Audit(args) => system::audit(ctx, args).await,
         Command::Events(args) => system::events(ctx, args).await,
@@ -59,7 +74,7 @@ async fn admin(ctx: &Ctx, cmd: &AdminCmd) -> anyhow::Result<()> {
         AdminCmd::Project { command } => projects::project(ctx, command).await,
         AdminCmd::Role { command } => agents::role(ctx, command).await,
         AdminCmd::Target { command } => system::admin_target(ctx, command).await,
-        AdminCmd::Host { .. } => system::hosts(ctx).await,
+        AdminCmd::Host { command } => system::hosts(ctx, command).await,
         AdminCmd::Audit(args) => system::audit(ctx, args).await,
     }
 }

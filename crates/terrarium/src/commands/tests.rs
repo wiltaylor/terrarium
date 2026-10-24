@@ -380,7 +380,7 @@ async fn repo_checkout_prints_the_result() {
         out,
         "cloned terrarium in work/terrarium of worker\nHEAD abc123 (main)\n"
     );
-    // A target is a later phase: exit 2 with the daemon's message.
+    // A daemon that answers 501 not_available: exit 2 with its message.
     let r = exec(
         true,
         &["repo", "checkout", "terrarium", "--target", "box"],
@@ -1991,19 +1991,295 @@ async fn admin() {
     .await;
 }
 
+fn b64(b: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(b)
+}
+
 #[tokio::test]
-async fn host_commands_are_not_available() {
-    for args in [
-        &["exec", "box", "--", "ls"][..],
-        &["shell", "box"][..],
-        &["cp", "a", "box:/tmp/a"][..],
-    ] {
-        let r = exec(true, args, vec![], None).await;
-        let e = r.result.unwrap_err();
-        assert_eq!(e.to_string(), super::NOT_YET_HOSTS);
-        assert_eq!(exit_code_of(&e), exit::USAGE);
-        assert!(r.reqs.is_empty());
-    }
+async fn exec_streams_and_passes_the_exit_code() {
+    let poll = |since: &'static str| {
+        (
+            Get,
+            "/api/targets/box/sessions/S1/output",
+            vec![("since", since), ("wait", "25")],
+            None,
+        )
+    };
+    let r = exec(
+        true,
+        &[
+            "exec", "box", "--cwd", "/srv", "-e", "A=1", "--", "sh", "-c", "x",
+        ],
+        vec![
+            (201, json!({"session_id": "S1"})),
+            (200, json!({"accepted": true})),
+            (
+                200,
+                json!({"chunks": [{"stream": "stdout", "data": b64(b"hi\n")},
+                                    {"stream": "stderr", "data": b64(b"err")}],
+                         "next": 6, "done": false}),
+            ),
+            (
+                200,
+                json!({"chunks": [], "next": 6, "done": true,
+                         "end": {"type": "exit", "code": 3, "reason": "exited"}}),
+            ),
+        ],
+        None,
+    )
+    .await;
+    let e = r.result.unwrap_err();
+    assert_eq!(exit_code_of(&e), 3);
+    assert_eq!(r.out, "hi\nerr");
+    check(
+        &["exec"],
+        &r.reqs,
+        &[
+            (
+                Post,
+                "/api/targets/box/exec",
+                vec![],
+                Some(json!({"cmd": ["sh", "-c", "x"], "cwd": "/srv", "env": {"A": "1"}})),
+            ),
+            (
+                Post,
+                "/api/targets/box/sessions/S1/input",
+                vec![],
+                Some(json!({"eof": true})),
+            ),
+            poll("0"),
+            poll("6"),
+        ],
+    );
+    // Exit 0 is success; no command is a usage error.
+    ok(
+        true,
+        &["exec", "box", "--", "true"],
+        vec![
+            (201, json!({"session_id": "S1"})),
+            (200, json!({})),
+            (
+                200,
+                json!({"chunks": [], "next": 0, "done": true, "end": {"type": "exit", "code": 0}}),
+            ),
+        ],
+        vec![
+            (
+                Post,
+                "/api/targets/box/exec",
+                vec![],
+                Some(json!({"cmd": ["true"]})),
+            ),
+            (
+                Post,
+                "/api/targets/box/sessions/S1/input",
+                vec![],
+                Some(json!({"eof": true})),
+            ),
+            poll("0"),
+        ],
+    )
+    .await;
+    let r = exec(true, &["exec", "box"], vec![], None).await;
+    assert_eq!(exit_code_of(&r.result.unwrap_err()), exit::USAGE);
+    assert!(r.reqs.is_empty());
+    // A run that failed on the host is a server error.
+    let r = exec(
+        true,
+        &["exec", "box", "--", "nope"],
+        vec![
+            (201, json!({"session_id": "S1"})),
+            (200, json!({})),
+            (200, json!({"chunks": [], "next": 0, "done": true,
+                         "end": {"type": "error", "code": "spawn_failed", "message": "no such file"}})),
+        ],
+        None,
+    )
+    .await;
+    let e = r.result.unwrap_err();
+    assert!(e.to_string().contains("no such file"), "{e}");
+    assert_eq!(exit_code_of(&e), exit::SERVER);
+}
+
+#[tokio::test]
+async fn cp_pushes_and_pulls_in_chunks_with_sha256() {
+    use sha2::{Digest, Sha256};
+    let dir = std::env::temp_dir().join(format!("terrarium-cp-{}", ulid::Ulid::new()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = dir.join("in.bin");
+    let data: Vec<u8> = (0..(super::remote::CHUNK + 10))
+        .map(|i| (i % 251) as u8)
+        .collect();
+    std::fs::write(&src, &data).unwrap();
+    let digest: String = Sha256::digest(&data)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let src_s = src.to_str().unwrap().to_owned();
+    let r = exec(
+        true,
+        &["cp", &src_s, "box:/srv/out/"],
+        vec![
+            (201, json!({"session_id": "C1"})),
+            (200, json!({})),
+            (200, json!({})),
+            (200, json!({})),
+            (
+                200,
+                json!({"chunks": [], "next": 0, "done": true,
+                         "end": {"type": "cp", "bytes": data.len(), "sha256": digest}}),
+            ),
+        ],
+        None,
+    )
+    .await;
+    r.result.unwrap();
+    assert_eq!(r.reqs.len(), 5);
+    let open = r.reqs[0].body.clone().unwrap();
+    assert_eq!(open["direction"], "push");
+    assert_eq!(open["path"], "/srv/out/in.bin");
+    let first = r.reqs[1].body.as_ref().unwrap()["data"]
+        .as_str()
+        .unwrap()
+        .len();
+    assert_eq!(first, b64(&data[..super::remote::CHUNK]).len());
+    assert_eq!(
+        r.reqs[3].body,
+        Some(json!({"finish": {"bytes": data.len(), "sha256": digest}}))
+    );
+    assert!(r.out.contains("copied"), "{}", r.out);
+
+    // Pull: the bytes land in place only when the digest matches.
+    let dst = dir.join("back.bin");
+    let dst_s = dst.to_str().unwrap().to_owned();
+    let replies = |sha: &str| {
+        vec![
+            (201, json!({"session_id": "C2"})),
+            (
+                200,
+                json!({"chunks": [{"stream": "file", "data": b64(&data)}], "next": data.len(), "done": true,
+                         "end": {"type": "cp", "bytes": data.len(), "sha256": sha}}),
+            ),
+        ]
+    };
+    let r = exec(
+        true,
+        &["cp", "box:/srv/f.bin", &dst_s],
+        replies(&digest),
+        None,
+    )
+    .await;
+    r.result.unwrap();
+    assert_eq!(std::fs::read(&dst).unwrap(), data);
+    assert_eq!(
+        r.reqs[0].body,
+        Some(json!({"direction": "pull", "path": "/srv/f.bin"}))
+    );
+    let bad = dir.join("bad.bin");
+    let r = exec(
+        true,
+        &["cp", "box:/srv/f.bin", bad.to_str().unwrap()],
+        replies("00"),
+        None,
+    )
+    .await;
+    assert!(r.result.is_err());
+    assert!(!bad.exists());
+    // Both or neither side remote: a usage error.
+    let r = exec(true, &["cp", "a", "b"], vec![], None).await;
+    assert_eq!(exit_code_of(&r.result.unwrap_err()), exit::USAGE);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn remote_paths() {
+    use super::remote::split_remote;
+    assert_eq!(split_remote("box:/tmp/a"), Some(("box", "/tmp/a")));
+    assert_eq!(split_remote("./a:b"), None);
+    assert_eq!(split_remote("/tmp/x"), None);
+    assert_eq!(split_remote("box:"), None);
+}
+
+#[tokio::test]
+async fn agent_targets_and_hosts() {
+    let out = ok(
+        true,
+        &["targets", "ls"],
+        vec![(
+            200,
+            json!([{"name": "box", "kind": "host", "host": "lab1", "host_online": true}]),
+        )],
+        vec![(Get, "/api/targets", vec![("usable", "true")], None)],
+    )
+    .await;
+    assert!(out.contains("online"), "{out}");
+    let out = ok(
+        false,
+        &["admin", "host", "new", "lab1"],
+        vec![(201, json!({"name": "lab1", "token": "thk_abc"}))],
+        vec![(Post, "/api/hosts", vec![], Some(json!({"name": "lab1"})))],
+    )
+    .await;
+    assert_eq!(out, "thk_abc\n");
+    ok(
+        false,
+        &["admin", "host", "rm", "lab1"],
+        vec![(204, Value::Null)],
+        vec![req(Delete, "/api/hosts/lab1")],
+    )
+    .await;
+    ok(
+        false,
+        &[
+            "admin",
+            "target",
+            "verb",
+            "win",
+            "snapshot",
+            "--snapshot",
+            "clean",
+        ],
+        vec![(200, json!({"state": "running"}))],
+        vec![(
+            Post,
+            "/api/targets/win/snapshot",
+            vec![],
+            Some(json!({"name": "clean"})),
+        )],
+    )
+    .await;
+    ok(
+        true,
+        &[
+            "admin",
+            "target",
+            "new",
+            "d",
+            "--kind",
+            "docker",
+            "--host",
+            "lab1",
+            "--image",
+            "alpine",
+            "--ephemeral",
+        ],
+        vec![(201, json!({"name": "d"}))],
+        vec![(
+            Post,
+            "/api/targets",
+            vec![],
+            Some(
+                json!({"name": "d", "kind": "docker", "host": "lab1", "image": "alpine",
+                        "ephemeral": true, "project": "terra"}),
+            ),
+        )],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn agent_attach_is_not_available_through_the_tunnel() {
     // The tunnel does not carry the PTY WebSocket.
     let r = exec(true, &["admin", "agent", "attach", "w"], vec![], None).await;
     assert_eq!(exit_code_of(&r.result.unwrap_err()), exit::USAGE);

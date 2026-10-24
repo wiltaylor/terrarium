@@ -19,6 +19,10 @@ use crate::store::{Page, Paged, agents, projects};
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Address {
     Operator,
+    /// The daemon itself: quota alerts and board notices. It only sends.
+    /// No caller can send as `system` or to it; a reply on its thread goes
+    /// to the other participants.
+    System,
     /// The inbox of a project: `project:<name>`.
     Project(String),
     Agent {
@@ -33,6 +37,7 @@ impl Address {
     pub fn key(&self) -> String {
         match self {
             Self::Operator => "operator".into(),
+            Self::System => "system".into(),
             Self::Project(p) => format!("project:{p}"),
             Self::Agent { id, .. } => id.clone(),
         }
@@ -41,6 +46,7 @@ impl Address {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::Operator => "operator",
+            Self::System => "system",
             Self::Project(_) => "project",
             Self::Agent { .. } => "agent",
         }
@@ -57,7 +63,7 @@ impl Address {
     /// The project the address belongs to, if any.
     pub fn project(&self) -> Option<&str> {
         match self {
-            Self::Operator => None,
+            Self::Operator | Self::System => None,
             Self::Project(p) => Some(p),
             Self::Agent { project, .. } => Some(project),
         }
@@ -101,6 +107,8 @@ fn from_key(conn: &Connection, key: &str, cache: &mut HashMap<String, Address>) 
     }
     let a = if key == "operator" {
         Address::Operator
+    } else if key == "system" {
+        Address::System
     } else if let Some(p) = key.strip_prefix("project:") {
         Address::Project(p.to_owned())
     } else {
@@ -320,6 +328,9 @@ pub fn send(t: &mut Tx<'_>, m: Outgoing<'_>) -> ApiResult<Message> {
         .map(str::to_owned)
         .unwrap_or_else(|| ulid::Ulid::new().to_string());
     let at = now();
+    if *m.to == Address::System {
+        return Err(ApiError::invalid("`system` only sends mail"));
+    }
     let (state, delivered) = match m.to {
         Address::Agent { .. } => ("queued", None),
         _ => ("delivered", Some(at.clone())),
@@ -403,7 +414,7 @@ pub fn reply(
     };
     let recipients: Vec<Address> = participants(t, &original.thread_id)?
         .into_iter()
-        .filter(|p| p.key() != from.key())
+        .filter(|p| p.key() != from.key() && *p != Address::System)
         .collect();
     if recipients.is_empty() {
         return Err(ApiError::invalid("the thread has no other participant"));

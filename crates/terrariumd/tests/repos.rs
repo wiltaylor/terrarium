@@ -223,14 +223,15 @@ async fn agent_create_clones_and_checkout_updates() {
         .await;
     assert_eq!(r.ok()["action"], "up_to_date");
 
-    // A target is a later phase.
+    // A checkout on a target runs on the target (tests/hosts.rs); an
+    // unknown target is a 404.
     td.post_as(
         "terra/worker",
         &format!("/api/repos/{id}/checkout"),
         json!({"target": "buildbox"}),
     )
     .await
-    .err(501, "not_available");
+    .err(404, "not_found");
     // The operator names the agent.
     td.post(&format!("/api/repos/{id}/checkout"), json!({}))
         .await

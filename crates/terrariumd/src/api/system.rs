@@ -1,11 +1,12 @@
-//! Health, reload, audit, and the read-only target and host lists.
+//! Health, reload, and audit. Targets and hosts are in `targets.rs` and
+//! `hosts.rs`.
 
 use axum::Json;
 use axum::extract::State;
 use axum::response::Response;
 use serde::{Deserialize, Serialize};
 use terrarium_core::Role;
-use terrarium_core::config::{Definitions, TargetDef};
+use terrarium_core::config::Definitions;
 
 use super::{ApiQuery, Shared, paged};
 use crate::actor::Actor;
@@ -48,58 +49,6 @@ pub async fn health(State(state): State<Shared>) -> Json<Health> {
             subscriptions: d.subscriptions.len(),
         },
     })
-}
-
-/// Host agents (PLAN §19). None connect yet, so the list is empty.
-pub async fn hosts() -> Json<Vec<serde_json::Value>> {
-    Json(Vec::new())
-}
-
-/// A target definition with its live state. Executors come in a later
-/// phase, so `state` is `unknown`.
-#[derive(Debug, Clone, Serialize)]
-pub struct TargetView {
-    /// The target name. Targets have no other ID yet.
-    pub id: String,
-    #[serde(flatten)]
-    pub def: TargetDef,
-    /// `global` or `project`.
-    pub scope: &'static str,
-    pub state: &'static str,
-    pub snapshots: Vec<String>,
-}
-
-pub fn target_views(defs: &Definitions, project: Option<&str>, globals: bool) -> Vec<TargetView> {
-    defs.targets
-        .iter()
-        .filter(|t| match (&t.project, project) {
-            (None, _) => globals,
-            (Some(_), None) => true,
-            (Some(p), Some(want)) => p == want,
-        })
-        .map(|t| TargetView {
-            id: t.name.clone(),
-            def: t.clone(),
-            scope: if t.project.is_some() {
-                "project"
-            } else {
-                "global"
-            },
-            state: "unknown",
-            snapshots: Vec::new(),
-        })
-        .collect()
-}
-
-/// `GET /api/targets`: every target for the operator and sysadmins; for an
-/// agent, the global targets and those of its project.
-pub async fn targets(State(state): State<Shared>, actor: Actor) -> Json<Vec<TargetView>> {
-    let defs = state.definitions();
-    let project = match &actor {
-        Actor::Agent(a) if !a.is_sysadmin() => Some(a.project.as_str()),
-        _ => None,
-    };
-    Json(target_views(&defs, project, true))
 }
 
 /// `POST /api/reload`: read the definition files again and sync them.

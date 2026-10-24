@@ -303,15 +303,7 @@ async fn verify(
     state
         .db
         .write(actor.label(), move |t| {
-            subs::set_login_status(
-                t,
-                &n,
-                if logged_in {
-                    subs::LOGGED_IN
-                } else {
-                    subs::MISSING
-                },
-            )?;
+            subs::record_login_check(t, &n, logged_in)?;
             if let Some(p) = plan
                 && subs::get(t, &n)?.plan.is_none()
             {

@@ -17,11 +17,29 @@
 //!
 //! An update runs git in a repo that the agent controls. Its `.git/config`
 //! could name hooks, filters, or proxies that would run code in the daemon,
-//! or send the token to another host. So the update reads the config as a
-//! file first and refuses keys outside a short allowlist ([`config_allowed`]),
-//! runs every command with overrides that switch off hooks, fsmonitor,
-//! askpass, and dangerous transports ([`HARDEN`]), and fetches from the
-//! stored URL, not from `origin`.
+//! or send the token to another host. So the update:
+//!
+//! - copies `.git/config` (a regular file, not a symlink) to a 0600 file in
+//!   its own run dir, and checks **that copy** against a short allowlist
+//!   ([`config_allowed`]). A change during the check cannot slip past it.
+//! - checks a new copy again after the fetch, before the first command that
+//!   touches the work tree (`status`, `checkout`, `merge` can run filters).
+//! - runs every command with overrides that switch off hooks, fsmonitor,
+//!   askpass, and dangerous transports ([`HARDEN`]), with
+//!   `GIT_CONFIG_GLOBAL=/dev/null` and `GIT_CONFIG_NOSYSTEM=1`, so the
+//!   daemon user's and the system's config do not apply.
+//! - fetches from the stored URL, not from `origin`.
+//!
+//! What remains: git reads the live `.git/config` on each command, and the
+//! agent can write it at any time from its sandbox. An edit between the
+//! second check and a work tree command can still add a filter driver
+//! (`filter.<name>.smudge`, named by `.gitattributes`), an `include.path`,
+//! or a URL-scoped key (`http.<url>.proxy`) for that one command. git has
+//! no switch that ignores the local config, and `-c include.path=` is a
+//! parse error, so the `-c` overrides cannot cover names that the agent
+//! picks. The window is a few milliseconds per command. To close it, the
+//! daemon would have to update a clone of its own and copy the files, or
+//! stop the agent during the update.
 
 use std::collections::VecDeque;
 use std::io::Read;
@@ -375,6 +393,9 @@ impl Runner {
         }
         let env = vec![
             ("LC_ALL".to_owned(), "C".to_owned()),
+            // Only the repo's local config (checked) and the `-c` values.
+            ("GIT_CONFIG_GLOBAL".to_owned(), "/dev/null".to_owned()),
+            ("GIT_CONFIG_NOSYSTEM".to_owned(), "1".to_owned()),
             ("GIT_TERMINAL_PROMPT".to_owned(), "0".to_owned()),
             // An empty GIT_ASKPASS would fall back to core.askPass from
             // the repo config. `false` answers nothing.
@@ -553,10 +574,9 @@ impl Runner {
     }
 }
 
-/// The keys of the workspace repo's local config that are not in the
-/// allowlist. Reads the file without running anything from it.
-fn unsafe_config_keys(r: &Runner, dest: &Path) -> Result<Vec<String>, GitError> {
-    let file = dest.join(".git").join("config");
+/// The keys of a git config file that are not in the allowlist. Reads the
+/// file without running anything from it.
+fn unsafe_config_keys(r: &Runner, file: &Path) -> Result<Vec<String>, GitError> {
     let file = file.to_string_lossy();
     let out = r.git(
         None,
@@ -574,6 +594,35 @@ fn unsafe_config_keys(r: &Runner, dest: &Path) -> Result<Vec<String>, GitError> 
     bad.sort();
     bad.dedup();
     Ok(bad)
+}
+
+/// Copy `<dest>/.git/config` into a private run dir and check the copy
+/// against the allowlist. The copy, not the live file, is what the check
+/// reads, so an edit during the check does not pass half-read.
+fn check_config_snapshot(c: &Checkout, r: &Runner) -> Result<(), GitError> {
+    let live = c.dest.join(".git").join("config");
+    let meta = std::fs::symlink_metadata(&live).map_err(io)?;
+    if !meta.is_file() {
+        return Err(GitError::Refused(format!(
+            "{} is not a regular file; the daemon updates only its own clones",
+            live.display()
+        )));
+    }
+    let bytes = std::fs::read(&live).map_err(io)?;
+    let dir = c.store.run_dir().map_err(|e| io(e.message))?;
+    let copy = dir
+        .write_private("config", &bytes)
+        .map_err(|e| io(e.message))?;
+    let bad = unsafe_config_keys(r, &copy)?;
+    if !bad.is_empty() {
+        return Err(GitError::Refused(format!(
+            "the repo config at {} has keys the daemon does not run git with: {}; \
+             remove them, or fetch inside the sandbox",
+            c.dest.display(),
+            bad.join(", ")
+        )));
+    }
+    Ok(())
 }
 
 /// The checks before the daemon runs git in a repo the agent controls.
@@ -671,15 +720,7 @@ fn update(
 ) -> Result<Outcome, GitError> {
     check_workspace_repo(&c.dest)?;
     let r = Runner::new(c)?;
-    let bad = unsafe_config_keys(&r, &c.dest)?;
-    if !bad.is_empty() {
-        return Err(GitError::Refused(format!(
-            "the repo config at {} has keys the daemon does not run git with: {}; \
-             remove them, or fetch inside the sandbox",
-            c.dest.display(),
-            bad.join(", ")
-        )));
-    }
+    check_config_snapshot(c, &r)?;
     let dest = &c.dest;
     let current = r.branch(dest);
     let Some(branch) = c.branch.clone().or_else(|| current.clone()) else {
@@ -702,6 +743,9 @@ fn update(
     args.extend(["--", c.url.as_str(), refspec.as_str()]);
     r.git(Some(dest), &args, progress)?;
     r.write_local_config(dest)?;
+    // The agent may have edited the config during the fetch. Check again
+    // before the commands that touch the work tree (they can run filters).
+    check_config_snapshot(c, &r)?;
 
     let status = r.quiet(dest, &["status", "--porcelain", "--untracked-files=no"])?;
     let not_updated = |note: String| Outcome {
@@ -909,6 +953,61 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert!(!marker.exists());
+    }
+
+    /// An edit to `.git/config` while the fetch runs is caught before the
+    /// work tree commands, and its filter never runs.
+    #[test]
+    fn update_checks_the_config_again_after_the_fetch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let origin = bare_repo(tmp.path());
+        let dest = tmp.path().join("ws/proj");
+        let c = checkout(tmp.path(), &origin, &dest);
+        clone_or_update(&c, &mut |_| {}).unwrap();
+        let marker = tmp.path().join("pwned");
+        // Upstream: a file that the filter `x` would smudge.
+        sh(
+            &tmp.path().join("src"),
+            "echo '* filter=x' > .gitattributes && echo two > b.txt && git add . && \
+             git commit -q -m two && git push -q ../origin.git main",
+        );
+        let cfg = dest.join(".git/config");
+        let mut edited = false;
+        let result = clone_or_update(&c, &mut |_| {
+            if !edited {
+                edited = true;
+                let mut text = std::fs::read_to_string(&cfg).unwrap();
+                text.push_str(&format!(
+                    "[filter \"x\"]\n\tsmudge = touch {}\n",
+                    marker.display()
+                ));
+                std::fs::write(&cfg, text).unwrap();
+            }
+        });
+        assert!(edited, "the fetch printed no progress line");
+        match result {
+            Err(GitError::Refused(m)) => assert!(m.contains("filter.x.smudge"), "{m}"),
+            other => panic!("{other:?}"),
+        }
+        assert!(!marker.exists());
+        assert!(!dest.join("b.txt").exists());
+    }
+
+    #[test]
+    fn update_refuses_a_symlinked_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let origin = bare_repo(tmp.path());
+        let dest = tmp.path().join("ws/proj");
+        let c = checkout(tmp.path(), &origin, &dest);
+        clone_or_update(&c, &mut |_| {}).unwrap();
+        let cfg = dest.join(".git/config");
+        let elsewhere = tmp.path().join("other-config");
+        std::fs::rename(&cfg, &elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &cfg).unwrap();
+        match clone_or_update(&c, &mut |_| {}) {
+            Err(GitError::Refused(m)) => assert!(m.contains("not a regular file"), "{m}"),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

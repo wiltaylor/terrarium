@@ -348,7 +348,9 @@ async fn blocked_needs_a_comment_and_mails() {
     let ops = td.get("/api/mail?to=operator").await;
     let ops = ops.ok().as_array().unwrap().clone();
     assert_eq!(ops.len(), 1);
-    assert_eq!(ops[0]["from"], "project:proj");
+    assert_eq!(ops[0]["from"], "system");
+    assert_eq!(ops[0]["from_kind"], "system");
+    assert_eq!(ops[0]["from_name"], "system");
     assert!(
         ops[0]["subject"]
             .as_str()
@@ -359,6 +361,20 @@ async fn blocked_needs_a_comment_and_mails() {
     let w1 = td.mail_of("proj/w1").await;
     assert_eq!(w1.len(), 1);
     assert_eq!(w1[0]["thread_id"], ops[0]["thread_id"]);
+    // A reply on the thread goes to the people on it, not to `system`.
+    let r = td
+        .post(
+            &format!("/api/mail/{}/reply", ops[0]["id"].as_str().unwrap()),
+            json!({"body": "granted"}),
+        )
+        .await;
+    let r = r.ok().as_array().unwrap().clone();
+    assert_eq!(r.len(), 1, "{r:?}");
+    assert_eq!(r[0]["to_name"], "proj/w1");
+    // Nobody can send to `system` or as it.
+    td.post("/api/mail", json!({"to": "system", "body": "x"}))
+        .await
+        .err(404, "not_found");
 }
 
 #[tokio::test]

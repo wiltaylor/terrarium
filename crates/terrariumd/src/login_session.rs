@@ -551,15 +551,7 @@ pub async fn detect_on_start(state: &Shared) -> ApiResult<()> {
             state
                 .db
                 .write("system", move |t| {
-                    subs::set_login_status(
-                        t,
-                        &n,
-                        if status {
-                            subs::LOGGED_IN
-                        } else {
-                            subs::MISSING
-                        },
-                    )
+                    subs::record_login_check(t, &n, status).map(|_| ())
                 })
                 .await?;
         }
@@ -1213,9 +1205,8 @@ pub fn stored_key(state_dir: &Path, name: &str) -> Option<String> {
 ///
 /// Call site: the launch path of `RunnerSupervisor` (the agent's
 /// `LaunchSpec::env`, after the adapter's env and before the sandbox
-/// wraps it), for an agent whose `subscription` names `sub`. It is not
-/// wired in this change. The values are secrets: never log them or write
-/// them to a file the agent can read.
+/// wraps it), for an agent whose `subscription` names `sub`. The values
+/// are secrets: never log them or write them to a file the agent can read.
 pub fn credential_env_for(state_dir: &Path, sub: &Subscription) -> Vec<(String, String)> {
     let Some(var) = sub.env_var.as_deref() else {
         return Vec::new();

@@ -16,6 +16,7 @@ The daemon serves one router on two listeners.
 |---|---|---|
 | Unix socket | `$TERRARIUM_API_SOCKET` | None. The caller is the operator. |
 | TCP | `$TERRARIUM_LISTEN` | `Authorization: Bearer $TERRARIUM_TOKEN` on `/api/*`. Without a token the TCP listener stays off. |
+| TCP, host agents | `$TERRARIUM_HOST_LISTEN` (default `0.0.0.0:8082`) | `GET /hosts/connect` only, with a per-host token (§17.1). |
 
 A browser cannot set headers on a WebSocket. A WebSocket upgrade on TCP may
 send the token as the `?token=` query parameter. The daemon accepts
@@ -74,12 +75,14 @@ curl -s --unix-socket $S -H 'X-Terrarium-Agent: terrarium/worker' http://localho
 | Address | Meaning |
 |---|---|
 | `operator` | The human operator. |
+| `system` | The daemon: quota alerts, blocked-card notices, and expired logins. It only sends. No caller can send to it or as it. A reply on its thread goes to the other participants. |
 | `project:<name>` | The inbox of a project. |
 | `<ulid>`, `project/name`, `name` | An agent. A bare name looks in the sender's project first. |
 
 Responses carry the stored address (`from`, `to`: `operator`,
-`project:<name>`, or the agent ULID), its kind (`from_kind`, `to_kind`:
-`operator`, `project`, `agent`), and a readable name (`from_name`,
+`project:<name>`, `system`, or the agent ULID), its kind (`from_kind`:
+`operator`, `system`, `project`, `agent`; `to_kind`: the same without
+`system`), and a readable name (`from_name`,
 `to_name`: `operator`, `project:<name>`, `project/agent`).
 
 Card fields `assignee`, `created_by`, and comment `author` use the same
@@ -136,8 +139,8 @@ refused it. Do not parse the message; use `code`.
 | 409 | `already_running` | The agent is running already. |
 | 409 | `stale_base` | A wiki edit names a base revision that is not current. `details: {"base", "current", "diff"}`. |
 | 413 | `too_large` | An upload is over the per-file limit or the project quota. |
-| 429 | `rate_limited` | Too many calls of one kind; try again later. The credential helper (§5.1) has a limit per agent. |
-| 501 | `not_available` | The route exists, but this phase does not do the request: a checkout onto a target (§5.1). |
+| 429 | `rate_limited` | Too many calls of one kind; try again later. The credential helper (§5.1) has a limit per agent. An agent has too many live exec sessions (§17). A host agent runs its maximum of sessions. |
+| 501 | `not_available` | The route exists, but this phase does not do the request. |
 | 422 | `invalid` | Well-formed values that break a rule: a bad name, an empty title, a missing column. |
 | 422 | `comment_required` | A move to `blocked` without a comment; a version rejection or a wiki review comment without a comment. |
 | 500 | `internal` | A daemon bug or an I/O error. |
@@ -207,20 +210,9 @@ Sync rules:
   `project` and `name`.
 - `errors` lists files that do not parse and definitions the store refused.
 
-### `GET /api/targets`
+### `GET /api/targets` and `GET /api/hosts`
 
-The target definitions (PLAN §19). An agent sees the global targets and its
-project's targets. Executors come later, so `state` is `unknown`.
-
-```json
-[{"id":"buildbox","name":"buildbox","kind":"ssh","project":"terra","address":"build@host",
-  "ephemeral":false,"keep":false,"snapshot_before_task":false,
-  "scope":"project","state":"unknown","snapshots":[]}]
-```
-
-### `GET /api/hosts`
-
-Host agents (PLAN §19). None connect yet. The answer is `[]`.
+Targets and host agents are in §17.
 
 ### `GET /api/audit`
 
@@ -249,7 +241,10 @@ Rows oldest first. Cursor: `seq`.
 on a card that is not its own), `definitions.sync`, `memory.edit` and
 `memory.delete` (§10), `wiki.delete`, `wiki.move`, `wiki.undelete` (§11),
 `artifact.delete`, `artifact.prune_warning`, `artifact.prune` (§12),
-`version.approve`, `version.reject`, `version.release` (§13).
+`version.approve`, `version.reject`, `version.release` (§13),
+`host.create`, `host.revoke`, `target.create`, `target.update`,
+`target.delete`, `targets.sync`, `target.exec`, `target.cp`, `target.up`,
+`target.down`, `target.snapshot`, `target.restore`, `target.status` (§17).
 
 ## 5. Projects
 
@@ -331,7 +326,8 @@ its own project.
 **Checkout.** The body is `{"target"?, "branch"?, "path"?, "depth"?,
 "agent"?}`. All fields are optional.
 
-- `target`: `501 not_available`. Host agents arrive in a later phase.
+- `target`: the checkout runs on the target, not in a workspace (§17.5).
+  `agent` is ignored.
 - `agent`: the agent whose workspace gets the checkout. An agent caller
   defaults to itself. The operator must name one (`422 invalid` if not).
   The repo and the agent must be in the same project (`403`).
@@ -442,7 +438,7 @@ An agent is the core `Agent` with bookkeeping fields:
 | `GET /api/agents?project=` | | `200` agents by ID | read; an agent defaults to its project |
 | `POST /api/agents` | an agent definition | `201` agent | project_admin of `project` |
 | `GET /api/agents/{id}` | | `200` agent | read |
-| `PATCH /api/agents/{id}` | `{"harness"?, "subscription"?, "model"?, "prompt"?, "policy"?, "restart"?}` | `200` agent | project_admin |
+| `PATCH /api/agents/{id}` | `{"harness"?, "subscription"?, "model"?, "prompt"?, "policy"?, "restart"?, "new_session_on_prompt_change"?}` | `200` agent | project_admin |
 | `DELETE /api/agents/{id}` | `?confirm=true` when live | `204` | project_admin |
 
 The definition is the TOML agent definition as JSON:
@@ -451,6 +447,16 @@ The definition is the TOML agent definition as JSON:
 {"name":"worker","project":"terrarium","harness":"pi","model":"anthropic/claude-opus-5-5",
  "roles":[],"policy":{"targets":[],"mail_to":["*"],"cross_project":["ops/triage"]},"restart":"on-failure"}
 ```
+
+`new_session_on_prompt_change` (default `true`): when the rendered prompt
+changed since the harness session began, and the harness keeps the prompt
+of a session (Codex), `start` and a restart begin a new harness session
+instead of a resume. The status reason is `new session: the prompt
+changed`. The old session stays in the history.
+
+`PATCH` changes only the fields in the body. Send `null` for
+`subscription`, `model`, or `prompt` to clear it (`{"subscription": null}`).
+`null` for the other fields changes nothing.
 
 `roles` in the definition need the grant rights of §3. `policy.cross_project`
 entries are `project/agent`. The project must exist (`not_found`). A file
@@ -472,6 +478,9 @@ for the status changes.
 
 - `start` opens a new session and resumes the last harness session.
   A running agent gets `409 already_running`.
+- `stop` types the adapter's exit keys into an idle harness that has them
+  (pi: `/quit`), and kills it when it has not exited after 5 s. Other
+  harnesses are killed at once.
 - `stop` on an agent that is not running gets `409 not_running`. When the
   store says live and the supervisor says not running, `stop` sets `stopped`.
 - `restart` ends the current session with outcome `restarted` and starts a
@@ -479,9 +488,15 @@ for the status changes.
 - `send` types one turn through the runner: it waits until the agent is
   `idle` and the prompt is ready. A stopped agent, or one between an exit
   and its restart, gets `409 not_running`.
-- `start` of an agent whose harness adapter is a stub (`codex`, `copilot`,
-  `pi` in this phase), or whose prompt template or harness home is
-  missing, gets `422 invalid` with the reason.
+- `start` of an agent whose harness adapter is not registered, or whose
+  prompt template or harness home is missing, gets `422 invalid` with the
+  reason.
+- `start` of an agent whose subscription does not exist, or whose harness
+  is not in the subscription's `harnesses` (PLAN §16, policy hooks), gets
+  `422 invalid` with the reason. A `pi` agent on a Claude plan login (not an
+  API key) gets `422 invalid` too: pi cannot spend a Pro/Max plan. An agent with no subscription starts; the
+  daemon logs it. A restart and the relaunch after a daemon start apply the
+  same check.
 - `answer` answers a question (`Event::Question`). `answer` is
   `{"kind":"choice","value":0}`, `{"kind":"allow"}`, or `{"kind":"deny"}`.
   `{"text"}` types raw keys and Enter, for a dialog the adapter does not know.
@@ -702,7 +717,7 @@ A new board has the columns `backlog`, `ready`, `in_progress`, `review`,
 - **Blocked.** A move to `blocked` needs a non-blank `comment`
   (`422 comment_required`). The comment goes on the card. The daemon mails
   the operator and the card's creator (when that is not the mover) from
-  `project:<name>`, on one new thread. Subject: `<card> blocked: <title>`.
+  `system`, on one new thread. Subject: `<card> blocked: <title>`.
 - **Done.** `done` is terminal for members: a member cannot move a done card
   out, edit it, or reassign it (`403`). Only a project admin or the operator
   reopens a card; the reopen is audited. A member cannot make a card in
@@ -817,7 +832,8 @@ Kinds:
 | `wiki.created`, `wiki.saved`, `wiki.deleted`, `wiki.restored`, `wiki.moved`, `wiki.reviewed` | `{page_id, path, title, rev, ...}`: `summary`, `author`, `from_rev`, `from`, `decision`, `comment`. |
 | `artifact.created`, `artifact.linked`, `artifact.deleted`, `artifact.pruned` | `{artifact_id, key, uid, name, kind, ...}`: `size`, `content_type`, `sha256`, `link_kind`, `ref`. |
 | `version.created`, `version.updated`, `version.submitted`, `version.approved`, `version.rejected`, `version.released` | `{version_id, name, status, ...}`: `fields`, `comment`, `thread_id`, `cards`. |
-| `usage.sample`, `quota.sample`, `quota.alert`, `quota.blocked`, `quota.resumed`, `subscription.offer`, `self_report` | See §16.7. |
+| `usage.sample`, `quota.sample`, `quota.alert`, `quota.blocked`, `quota.resumed`, `subscription.offer`, `subscription.expired`, `self_report` | See §16.7. |
+| `host.connected`, `host.disconnected` | `{host, host_id, ...}`: `version`, `os`, `arch`, `capabilities`, `summary`, `resumed` (sessions taken back), `reason`. See §17. |
 
 ### 9.1 Streams
 
@@ -832,7 +848,8 @@ three ways:
 
 | Query | Meaning |
 |---|---|
-| `since` | A `seq`, or an event ID. Only later events come. Default: 0, the whole log. |
+| `since` | A `seq`, an event ID, or `latest`. Only later events come. Default: 0, the whole log. `latest` skips the backlog: only events after the newest `seq` at connect time come. |
+| `live` | `1`: the same as `since=latest`. It wins over `since`, a cursor, and `Last-Event-ID`. |
 | `kind` | One kind. |
 | `project` | Firehose only: one project. |
 | `agent` | Firehose only: an agent key or ULID. A ULID works after the agent is deleted. |
@@ -840,6 +857,11 @@ three ways:
 The firehose shows an agent (not a sysadmin) only the events of its project
 and its own events. To resume after a disconnect, reconnect with
 `since=<last seq>`.
+
+`GET /api/events/latest` answers `200 {"seq": 1234}`: the newest `seq` of the
+log, `0` when the log is empty. A client that shows recent activity reads a
+short JSON page (for example `?since=<seq - 50>`), then streams with
+`since=<seq>`. It does not replay the whole log.
 
 ```sh
 curl -s --unix-socket $S 'http://localhost/api/agents/terrarium%2Fworker/events?since=0&limit=3'
@@ -1031,7 +1053,7 @@ Files and static bundles (PLAN §15.2). The code is in
   `index.html` at its root. The daemon unpacks it and serves it from
   `index.html`. Its `content_type` is `text/html; charset=utf-8`.
 - `renders` is true when the viewer may show the file inline. Else the
-  viewer offers a download.
+  viewer offers a download. A bundle always renders, in a sandboxed frame.
 - `links` kinds: `page` (`ref` is the page ID, `label` the path), `card`,
   `version` (`label` is the name). `embedded_in` lists the live pages that
   embed the artifact (§11.1).
@@ -1249,12 +1271,9 @@ Compare:
 
 ## 14. Not in this phase
 
-These §17 endpoints are not in the daemon yet: checkout onto a target
-(`POST /api/repos/{id}/checkout` with `target` answers `501
-not_available`), and target
-actions (`POST /api/targets`, `.../up|down|snapshot|restore`). They answer
-`404 not_found`, or `405 method_not_allowed` where the path exists with
-another method (`POST /api/targets`).
+Every PLAN §17 endpoint is in the daemon now. Targets, host agents, and
+exec sessions are in §17 of this document. The supervisor does not call
+`ensure_up` and `maybe_down` yet (§17.6).
 
 ## 15. Notes for clients
 
@@ -1298,7 +1317,7 @@ A subscription:
 | Field | Meaning |
 |---|---|
 | `source` | `file` (`subscriptions/<name>.toml`) or `api` (the API, the login wizard, an API key). A file subscription whose file is gone becomes `api` on reload; its samples stay. |
-| `login_status` | `logged_in`, `expiring`, `expired`, `missing`, or `unknown` (not checked yet). |
+| `login_status` | `logged_in`, `expiring`, `expired`, `missing`, or `unknown` (not checked yet). See "Expired logins" in §16.2. |
 | `probe_status` | `ok`, `failed` (`probe_error` says why), or `none` (no probe, or not run yet). `last_success_at` stays when a probe fails. |
 | `windows` | The newest sample of each window. Window names: `5h`, `7d`, `7d_opus`, `7d_sonnet` (Anthropic); `<n>h` or `<n>d` from the window length (OpenAI); `monthly` (Copilot premium requests). |
 | `local_estimate_only` | `true` when there is no probe: local accounting is the only number. |
@@ -1333,6 +1352,13 @@ the agent's `turn_start` event at the time of the response).
   §16.1). Any agent gets `403 forbidden`.
 - `GET /api/usage`: an agent sees its own project only, unless it is a
   `sysadmin`.
+- Expired logins. A status check (verify, the start-up check) that says
+  "logged out" sets `expired` when the subscription had a login
+  (`logged_in`, `expiring`, `expired`), else `missing`. A probe answer of
+  HTTP 401 also sets `expired`. On each change into `expired`, the daemon
+  mails the operator once from `system` (subject `Login expired: <name>`)
+  and emits `subscription.expired`. A later successful probe or status
+  check sets `logged_in` again.
 
 ### 16.3 Endpoints
 
@@ -1447,26 +1473,32 @@ A new name makes an `api` subscription (harness `pi`, or `copilot` for
 `subscription.api_key` has the provider, the env var, `base_url`, and
 `models`.
 
-`terrariumd::login_session::credential_env_for(state_dir, &subscription)`
-gives the `(var, value)` pairs for an agent on the subscription. The agent
-launch path does not call it yet. The call site is the `LaunchSpec::env` of
-`RunnerSupervisor`, for an agent whose `subscription` has `env_var`.
+At each launch, `RunnerSupervisor` puts the stored key into the env of
+every agent whose `subscription` has `env_var`
+(`terrariumd::login_session::credential_env_for`). The key goes on top of
+the adapter's env. The start log and `terrariumd sandbox-dry-run` show the
+value of each var whose name has `KEY`, `TOKEN`, `SECRET`, or `PASSWORD` as
+`<redacted>`.
 
 ### 16.6 The quota policy
 
 - A window at or over `alert_at` percent: one mail to the operator (from
-  `operator`, event actor `system`) and one `quota.alert` event (`level:
+  `system`, event actor `system`) and one `quota.alert` event (`level:
   alert`) per window period (the reset time).
 - A window at 100 percent: a `quota.alert` with `level: exhausted`, and a
   hold on every agent on the subscription until the latest reset time. The
-  supervisor's `hold_turns` marks the agent `blocked` with the reason, and
-  new turns wait. The `quota.blocked` event has `{cause, until, reason,
-  enforced}`. `enforced: false` means the supervisor cannot hold turns
-  (the default of the `Supervisor` trait; `RunnerSupervisor` does not
-  implement it yet), so the hold is advice only.
+  supervisor's `hold_turns` marks an idle agent `blocked` with the reason
+  and the reset time (a working agent finishes its turn first). New turns
+  wait: `POST .../send` still answers `202`, and push pointers and the
+  recap turn stay pending. The `quota.blocked` event has `{cause, until,
+  reason, enforced}`. `enforced: false` means the supervisor cannot hold
+  turns (the default of the `Supervisor` trait), so the hold is advice
+  only. A hold on an agent that does not run applies when it starts.
 - The hold ends when a probe reads the window under 100 percent, or when its
   reset time passes (checked on each probe tick). The `quota.resumed` event
-  follows, and the waiting turns go out.
+  follows, the agent goes back to `idle`, and the waiting turns go out in
+  order, then the pending push pointer. Turns that wait when the agent
+  stops are dropped.
 - Daily project budgets come from the project file:
 
   ```toml
@@ -1495,4 +1527,268 @@ status that the runner reports. An agent may report for itself only.
 | `quota.blocked` | `{cause, until, reason, enforced}`. The `agent` is the held agent. |
 | `quota.resumed` | `{cause, holds_left}`. |
 | `subscription.offer` | `{login, suggested}`: a login found at daemon start that no subscription covers. |
+| `subscription.expired` | `{subscription, from, reason}`: the login changed into `expired`. |
 | `self_report` | `{status, note}`. |
+
+## 17. Targets, host agents, and exec sessions
+
+PLAN §19. The code is in `crates/terrariumd/src/hosts.rs` (the dial-in
+endpoint and the host registry), `src/executor.rs` (the routing), and
+`src/api/{hosts,targets}.rs`. The tests are in `tests/hosts.rs`. The wire
+contract with the host agent is [host-protocol.md](host-protocol.md).
+
+### 17.1 Host agents
+
+A host agent dials in to `GET /hosts/connect` (a WebSocket, not under
+`/api`). The daemon serves this path on its own listener,
+`TERRARIUM_HOST_LISTEN` (default `0.0.0.0:8082`), and also on the main
+router. The upgrade must send `Authorization: Bearer <host token>`. A bad
+or revoked token gets `401 unauthorized` before the upgrade.
+
+| Endpoint | Body | Answer | Needs |
+|---|---|---|---|
+| `GET /api/hosts` | | `200` hosts by name | any caller |
+| `GET /api/hosts/{name}` | | `200` host | any caller |
+| `POST /api/hosts` | `{"name"}` | `201` host with `token` | sysadmin |
+| `DELETE /api/hosts/{name}` | | `204` | sysadmin |
+
+```json
+{"name":"lab1","id":"01JB...","host_id":"01JB...","created_by":"operator",
+ "status":"online","online":true,"sessions":1,
+ "capabilities":{"docker":{"present":true,"version":"29.8.0"},"vmlab":{"present":false},"shell":"/bin/bash"},
+ "summary":{"os":"linux","arch":"x86_64","docker":true,"vmlab":false},
+ "os":"linux","arch":"x86_64","version":"0.1.0","max_sessions":32,
+ "connected_at":"2026-10-24T06:36:54.149Z","last_seen":"2026-10-24T06:36:54.149Z",
+ "created_at":"2026-10-24T06:30:00.000Z"}
+```
+
+Rules:
+
+- The answer of `POST` holds the token one time. The daemon keeps only the
+  SHA-256 of it. To get a new token, delete the host and make it again.
+- `status`, `online`, and `sessions` come from the live link.
+  `capabilities` comes from the last `hello`, `{}` before the first one.
+- `DELETE` revokes the token. A live link gets `goodbye token_revoked` and
+  closes. Its sessions end with the error `lost`.
+- A second link with the same token replaces the first. The first gets
+  `goodbye replaced`.
+- `hello.host` must be the name of the token's host. Else the daemon sends
+  `goodbye protocol`.
+- Each link writes the events `host.connected` and `host.disconnected`
+  (§9).
+
+### 17.2 Targets
+
+A target comes from `targets/<name>.toml` (`source: "file"`) or from
+`POST /api/targets` (`source: "api"`). Target names are one namespace for
+all projects.
+
+```json
+{"id":"box","name":"box","kind":"docker","project":"terra","host":"lab1","image":"alpine:3",
+ "ephemeral":true,"keep":false,"snapshot_before_task":false,
+ "scope":"project","source":"api","state":"running","state_at":"2026-10-24T06:40:00.000Z",
+ "snapshots":[],"host_online":true,"usable":true}
+```
+
+| Field | Meaning |
+|---|---|
+| `scope` | `global` (no `project`) or `project`. |
+| `state` | `running`, `stopped`, `absent`, or `unknown`: what the last lifecycle verb saw. |
+| `snapshots` | The snapshot names that `POST .../snapshot` took. |
+| `host_online` | The link of the target's host agent. `null` for `ssh`. |
+| `usable` | The caller may use the target (§17.4). |
+
+| Endpoint | Body | Answer | Needs |
+|---|---|---|---|
+| `GET /api/targets?usable=&project=` | | `200` targets by name | read |
+| `POST /api/targets` | target, as in a target file, with `name` | `201` target | project_admin of `project`; sysadmin for a global target |
+| `GET /api/targets/{name}` | | `200` target | read |
+| `PATCH /api/targets/{name}` | JSON merge patch; `null` removes a field | `200` target | as `POST` |
+| `DELETE /api/targets/{name}` | | `204` | as `POST` |
+| `GET /api/projects/{name}/targets` | | `200` the project's and the global targets | read |
+
+An agent reads the global targets and the targets of its own project. A
+sysadmin agent and the operator read all. `?usable=true` keeps only the
+targets the caller may use. `terrarium targets ls` sends it in agent mode.
+
+The fields that each kind needs:
+
+| `kind` | Needs | Optional |
+|---|---|---|
+| `host` | `host` | |
+| `ssh` | `address` | `port`, `credential` (an `ssh_key` in the credential store) |
+| `docker` | `host`, and `image` or `container` | `ephemeral`, `keep` |
+| `vmlab` | `host`, `lab` (an absolute path) | `machine`, `ephemeral`, `keep`, `snapshot_before_task` |
+
+An `ephemeral` target must be `docker` (with `image`) or `vmlab`. Values
+that go onto a command line (`host`, `address`, `image`, `container`,
+`machine`, `credential`) must not be empty, must not hold spaces, and must
+not start with `-`. A bad value is `422 invalid`.
+
+File sync, at start and on `POST /api/reload`: a file target is made or
+updated and becomes `file`. An API target with the same name becomes
+`file`. When the file is gone, the target is deleted. The API refuses to
+change a file target (`409 file_managed`).
+
+### 17.3 Lifecycle verbs
+
+`POST /api/targets/{name}/up|down|snapshot|restore|status`. The body is
+empty, or `{"name"?, "discard_guest_changes"?, "destroy"?}`. The caller
+may use the target (§17.4), or may define it (§17.2). The answer is
+`{"target", "verb", "state", "snapshot"?, "result"?}`. The daemon stores
+the state and writes a `target.<verb>` audit row.
+
+| Kind | `up` | `down` | `snapshot` / `restore` | `status` |
+|---|---|---|---|---|
+| `host`, `ssh` | no-op | no-op | `422 invalid` | `running` when the host agent is online, else `unknown` |
+| `docker` | `docker.inspect`; when absent, `docker.run -d --name <c> --label terrarium.target=<name> <image> sleep infinity` | `docker.stop`; an ephemeral target without `keep` (or `destroy: true`): `docker.rm -f -v` | `422 invalid` | `docker.inspect` |
+| `vmlab` | `vmlab.up [machine]` | `vmlab.down [machine]`; ephemeral without `keep` (or `destroy: true`): `vmlab.destroy` | `vmlab.snapshot_take` / `vmlab.snapshot_restore` with `--vm machine` | `vmlab.status`, the row of `machine` |
+
+The container `<c>` is `container`, else `terrarium-<name>`. The snapshot
+name is `name`, else `terrarium`. A verb on an offline host is `409
+conflict`. A verb that fails is `422 invalid` with `details: {verb, code,
+end, stderr, stdout}`.
+
+### 17.4 Exec sessions
+
+An exec session runs one command, one shell, or one file copy. It uses
+plain requests only, so it works through the agent tunnel too
+([agent-rpc.md](agent-rpc.md), "Streams over the tunnel").
+
+| Endpoint | Body or query | Answer |
+|---|---|---|
+| `POST /api/targets/{name}/exec` | `{"cmd": [..], "cwd"?, "env"?, "pty"?, "shell"?, "timeout_secs"?}` | `201` `{"session_id", "target", "kind"}` |
+| `POST /api/targets/{name}/cp` | `{"direction": "push"\|"pull", "path", "mode"?}` | `201` `{"session_id", "target", "kind"}` |
+| `POST /api/targets/{name}/sessions/{id}/input` | `{"data"?, "resize"?, "signal"?, "eof"?, "finish"?}` | `200` `{"session_id", "accepted"}` |
+| `GET /api/targets/{name}/sessions/{id}/output` | `?since=<offset>&wait=<s>&max=<bytes>` | `200` output, below |
+| `GET /api/targets/{name}/sessions/{id}` | | `200` `{"session_id", "kind", "acknowledged", "buffered", "done", "end"}` |
+| `DELETE /api/targets/{name}/sessions/{id}` | | `204`; the run is killed |
+| `GET /api/targets/{name}/sessions/{id}/ws` | WebSocket | the session as a terminal, with the frames of §6.5 |
+
+The exec body:
+
+- `cmd` is the program and its arguments. The target runs it directly,
+  not through a shell. Send `["sh", "-c", "..."]` for a shell line.
+- `cwd` is an absolute path. `env` names must match `[A-Za-z_][A-Za-z0-9_]*`.
+  Env values go into the process environment, never onto a command line.
+- `pty` is `true` (24 rows, 80 columns) or `{"rows", "cols"}`.
+- `shell: true` with no `cmd` starts a login shell in a PTY: the host
+  agent's `capabilities.shell` with `-l`, `/bin/sh -l` in a container,
+  `vmlab shell` on a vmlab target, `exec "${SHELL:-/bin/sh}" -l` over ssh.
+- A vmlab target takes no `cwd` and no `env`, and a PTY only for `shell`.
+
+The input body: `data` is base64, at most 1 MiB of bytes (`413
+too_large` above). In a push, `data` is file bytes. `resize` is
+`{"rows", "cols"}`. `signal` is a name such as `INT`. `eof` closes stdin.
+`finish` is `{"bytes", "sha256"}` and ends a push. An input to a session
+that has ended is `409 conflict`.
+
+The output answer:
+
+```json
+{"session_id":"01JC...","since":0,"next":10,
+ "chunks":[{"stream":"stdout","data":"b3V0Cg=="},{"stream":"stderr","data":"ZXJyCg=="}],
+ "done":true,"end":{"type":"exit","code":3,"reason":"exited"}}
+```
+
+- `since` is an offset in the output of the session: all streams
+  together, in order. A read acknowledges the bytes before its `since`.
+  The daemon drops them. A `since` before the acknowledged bytes is `409
+  conflict`. Read with the same `since` again to get the same bytes again.
+- `wait` holds the request up to that many seconds (at most 60) until
+  output or the end comes. `max` limits the bytes (at most 1 MiB, the
+  default).
+- `stream` is `stdout`, `stderr`, or `file` (a pull).
+- `done` is true when the session ended and `chunks` holds its last byte.
+  Then `end` is one of:
+  - `{"type": "exit", "code"?, "signal"?, "reason"}`, `reason` as in
+    host-protocol.md (`exited`, `signaled`, `timeout`, ...);
+  - `{"type": "cp", "bytes", "sha256"}` for a copy;
+  - `{"type": "error", "code", "message"}`, for example `spawn_failed`,
+    `path_denied`, `checksum_mismatch`, `lost`, `killed`.
+- Each session buffers at most 8 MiB of output that is not acknowledged.
+  At the limit, the daemon stops taking the host's output. The host stops
+  reading the process, and the process waits. Nothing is lost.
+
+Copies:
+
+- A push goes to the target's `path`. The daemon and the host agent check
+  the byte count and the SHA-256 of `finish`. On a mismatch the session
+  ends with `checksum_mismatch`, and the file at `path` does not change.
+  `mode` is the file mode (`420` for `0644`).
+- A pull sends the file as `file` chunks. The end holds the count and the
+  SHA-256. The daemon checks them against the bytes from the host.
+- `host` targets use `cp_push` and `cp_pull`. `docker` and `ssh` targets
+  run `cat` with stdin or stdout, into a partial file that a second
+  command checks and renames. `vmlab` targets copy through a staging file
+  under `<lab>/.terrarium-stage/` and `vmlab cp`.
+- A push does not survive a reconnect of the host agent: it ends with
+  `interrupted`. Send it again.
+
+Rules:
+
+- The operator may use every target. An agent may use a target that its
+  `policy.targets` lists, when the target is global or in the agent's
+  project. Else the answer is `403 forbidden`, and the message names the
+  rule. The role does not change this rule.
+- An agent holds at most 8 live sessions (`429 rate_limited`). A host
+  agent holds at most its `max_sessions` (`429 rate_limited`).
+- Only the agent that opened a session can drive it. To other agents it
+  is `404 not_found`. The operator can drive every session.
+- Each `exec` writes a `target.exec` audit row with the command (cut to
+  200 characters), `cwd`, `pty`, and the env names (not the values). Each
+  `cp` writes `target.cp`.
+- A target whose host agent is offline is `409 conflict`.
+- A finished session is forgotten after 5 minutes without a read. A
+  session that nobody reads for 30 minutes is killed.
+- When the host link drops, the sessions wait for the reconnect, and the
+  host replays the output that the daemon does not have. A session that
+  the host lost, or that has no link for 10 minutes, ends with `lost`.
+
+`ssh` targets need no host agent. The daemon runs the system `ssh` with
+`BatchMode=yes`, `StrictHostKeyChecking=accept-new`, and its own
+`<state>/ssh/known_hosts`. The key is the target's `credential` (an
+`ssh_key`, written to a 0600 run dir for the run), else the default keys
+of the daemon's user (a mounted `~/.ssh`). The env goes to the remote
+shell as one base64 line on stdin, so the remote side needs `base64`.
+`TERRARIUM_SSH` sets the `ssh` binary. A PTY on ssh cannot resize.
+
+### 17.5 Checkout on a target
+
+`POST /api/repos/{id}/checkout {"target", "branch"?, "path"?, "depth"?}`
+(PLAN §9). The caller must be able to use the target (§17.4), and the
+target is global or in the repo's project. The checkout runs as one exec
+of `sh -c <script>` on the target. The URL, the path, the branch, and the
+depth are arguments of the script. The credential of the repo goes in the
+env of that run only: `TERRARIUM_GIT_USERNAME` and
+`TERRARIUM_GIT_PASSWORD` for a token, which a `credential.helper` of `-c`
+reads, or `TERRARIUM_GIT_SSH_KEY` for an SSH key, which the script writes
+to a 0600 temp file for `GIT_SSH_COMMAND` and removes at exit. The secret
+is never on a command line. The target needs `git` and `sh`. A vmlab
+target is `422 invalid`.
+
+`path` is an absolute path on the target, or a path under
+`$HOME/work/`. The default is the repo's `path`. A clone that is there
+is fetched from the stored URL and fast-forwarded when the work tree is
+clean.
+
+```json
+{"repo":"app","repo_id":"01JC...","project":"terra","target":"box","path":"app",
+ "remote_path":"/home/build/work/app","action":"cloned","head":"3f2c1e0b9a...","branch":"main"}
+```
+
+`action` is `cloned`, `updated`, `up_to_date`, or `not_updated` (with
+`note`). A failure is `422 invalid` with `details: {command, status,
+stderr}`. Each checkout writes a `repo.checkout` event and audit row with
+`target`.
+
+### 17.6 Ephemeral targets
+
+`crate::executor::ensure_up(state, target)` brings an ephemeral target up
+(`up`). `crate::executor::maybe_down(state, target)` removes it, unless
+`keep = true`. Both do nothing for a permanent target.
+`executor::on_agent_start` and `executor::on_agent_stop` call them for each
+name in an agent's `policy.targets`. The supervisor does not call them yet.
+The call sites are `RunnerSupervisor::start`, before the harness launches,
+and the stop path of `RunnerSupervisor` (a stop, or an exit that does not
+restart).

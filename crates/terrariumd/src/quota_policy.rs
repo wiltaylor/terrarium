@@ -107,12 +107,13 @@ fn effective_pct(used: f64, resets_at: Option<&str>, now: DateTime<Utc>) -> f64 
     }
 }
 
-/// Mail the operator from the daemon (the event actor is `system`).
+/// Mail the operator from the daemon: the sender is `system`, and so is
+/// the event actor.
 fn mail_operator(t: &mut Tx<'_>, subject: &str, body: &str) -> ApiResult<()> {
     mail::send(
         t,
         Outgoing {
-            from: &Address::Operator,
+            from: &Address::System,
             to: &Address::Operator,
             subject,
             body,

@@ -45,12 +45,12 @@ fn parse_size(s: &str) -> Option<(u16, u16)> {
 }
 
 /// Raw mode while it lives; the old settings come back on drop.
-struct RawMode {
+pub(crate) struct RawMode {
     saved: String,
 }
 
 impl RawMode {
-    fn enter() -> anyhow::Result<Self> {
+    pub(crate) fn enter() -> anyhow::Result<Self> {
         let saved = stty(&["-g"]).context("attach needs a terminal (stty -g failed)")?;
         stty(&["raw", "-echo"]).context("cannot put the terminal in raw mode")?;
         Ok(Self { saved })

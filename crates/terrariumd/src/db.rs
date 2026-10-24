@@ -489,6 +489,75 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (scope, window, period, level)
     );
     "#,
+    // 5: host agents and targets (PLAN §19, docs/host-protocol.md).
+    r#"
+    -- Host agents. Only a hash of the per-host token is stored.
+    CREATE TABLE hosts (
+        name         TEXT PRIMARY KEY,
+        id           TEXT NOT NULL UNIQUE,            -- ULID, `host_id` in `welcome`
+        token_hash   TEXT NOT NULL UNIQUE,            -- SHA-256 hex of the token
+        created_by   TEXT NOT NULL,
+        capabilities TEXT NOT NULL DEFAULT '{}',      -- JSON HostCapabilities from `hello`
+        os           TEXT,
+        arch         TEXT,
+        version      TEXT,
+        status       TEXT NOT NULL DEFAULT 'offline' CHECK (status IN ('online', 'offline')),
+        last_seen    TEXT,
+        created_at   TEXT NOT NULL
+    );
+
+    -- Targets: from `targets/<name>.toml` (source `file`) or the API.
+    CREATE TABLE targets (
+        name       TEXT PRIMARY KEY,
+        project    TEXT,                              -- NULL: a global target
+        kind       TEXT NOT NULL CHECK (kind IN ('host', 'ssh', 'docker', 'vmlab')),
+        def        TEXT NOT NULL,                     -- JSON TargetDef
+        source     TEXT NOT NULL DEFAULT 'api' CHECK (source IN ('file', 'api')),
+        state      TEXT NOT NULL DEFAULT 'unknown',
+        snapshots  TEXT NOT NULL DEFAULT '[]',        -- JSON array of snapshot names
+        state_at   TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    CREATE INDEX targets_project ON targets(project);
+    "#,
+    // 6: mail from `system`, the daemon (quota alerts, board notices). A
+    // CHECK cannot change in place, so the messages table is rebuilt. And
+    // the agent flag `new_session_on_prompt_change`.
+    r#"
+    CREATE TABLE messages_v6 (
+        id           TEXT PRIMARY KEY,          -- ULID
+        thread_id    TEXT NOT NULL,
+        from_agent   TEXT NOT NULL,             -- agent id, `operator`, `system`, or `project:<name>`
+        to_agent     TEXT NOT NULL,             -- agent id, `operator`, or `project:<name>`
+        subject      TEXT,
+        body         TEXT NOT NULL,
+        state        TEXT NOT NULL DEFAULT 'queued'
+                     CHECK (state IN ('queued', 'delivered', 'read', 'replied')),
+        created_at   TEXT NOT NULL,
+        delivered_at TEXT,
+        read_at      TEXT,
+        from_kind    TEXT NOT NULL DEFAULT 'agent'
+                     CHECK (from_kind IN ('agent', 'project', 'operator', 'system')),
+        to_kind      TEXT NOT NULL DEFAULT 'agent'
+                     CHECK (to_kind IN ('agent', 'project', 'operator')),
+        in_reply_to  TEXT
+    );
+    INSERT INTO messages_v6 (id, thread_id, from_agent, to_agent, subject, body, state,
+                             created_at, delivered_at, read_at, from_kind, to_kind, in_reply_to)
+        SELECT id, thread_id, from_agent, to_agent, subject, body, state,
+               created_at, delivered_at, read_at, from_kind, to_kind, in_reply_to
+        FROM messages;
+    DROP TABLE messages;
+    ALTER TABLE messages_v6 RENAME TO messages;
+    CREATE INDEX messages_to ON messages(to_agent, state);
+    CREATE INDEX messages_thread ON messages(thread_id, created_at);
+    CREATE INDEX messages_from ON messages(from_agent);
+
+    -- A fresh session, not a resume, when the rendered prompt changed and
+    -- the harness keeps the prompt of a session (Codex).
+    ALTER TABLE agents ADD COLUMN new_session_on_prompt_change INTEGER NOT NULL DEFAULT 1;
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call
@@ -690,6 +759,8 @@ mod tests {
             "login_sessions",
             "quota_holds",
             "quota_alerts",
+            "hosts",
+            "targets",
         ] {
             let n: i64 = conn
                 .query_row(
@@ -721,6 +792,48 @@ mod tests {
             })
             .unwrap();
         assert_eq!((seq, kind.as_str()), (1, "turn_end"));
+    }
+
+    #[test]
+    fn migration_6_keeps_mail_and_allows_system() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        for sql in &MIGRATIONS[..5] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 5).unwrap();
+        conn.execute_batch(
+            "INSERT INTO messages (id, thread_id, from_agent, from_kind, to_agent, to_kind, body,
+                                   state, created_at, in_reply_to)
+               VALUES ('M1', 'T1', 'operator', 'operator', 'A1', 'agent', 'hi', 'read', 't', 'M0');",
+        )
+        .unwrap();
+        assert_eq!(migrate(&mut conn).unwrap(), MIGRATIONS.len() - 5);
+        let (body, state, reply): (String, String, String) = conn
+            .query_row(
+                "SELECT body, state, in_reply_to FROM messages WHERE id = 'M1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (body.as_str(), state.as_str(), reply.as_str()),
+            ("hi", "read", "M0")
+        );
+        conn.execute(
+            "INSERT INTO messages (id, thread_id, from_agent, from_kind, to_agent, to_kind, body,
+                                   created_at)
+               VALUES ('M2', 'T2', 'system', 'system', 'operator', 'operator', 'quota', 't')",
+            [],
+        )
+        .unwrap();
+        assert!(
+            conn.execute(
+                "INSERT INTO messages (id, thread_id, from_agent, to_agent, to_kind, body, created_at)
+                   VALUES ('M3', 'T3', 'operator', 'system', 'system', 'x', 't')",
+                [],
+            )
+            .is_err()
+        );
     }
 
     #[test]

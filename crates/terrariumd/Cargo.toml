@@ -14,6 +14,11 @@ fake-supervisor = []
 terrarium-core.workspace = true
 terrarium-runner.workspace = true
 terrarium-adapter-claude.workspace = true
+terrarium-adapter-codex.workspace = true
+terrarium-adapter-copilot.workspace = true
+terrarium-adapter-pi.workspace = true
+# The host agent wire protocol (docs/host-protocol.md); lib + bin crate.
+terrarium-host = { path = "../terrarium-host" }
 tower = { workspace = true, features = ["util"] }
 http-body-util.workspace = true
 tokio.workspace = true

@@ -7,6 +7,10 @@
 //!   `?since=` first, then live events;
 //! - `Accept: text/event-stream`: the same as Server-Sent Events;
 //! - anything else: one JSON page of the log after `?since=`.
+//!
+//! `?since=latest` or `?live=1` skips the backlog: only events after the
+//! newest `seq` at connect time come. `GET /api/events/latest` gives that
+//! `seq`, so a client can read a short page first and then stream.
 
 use std::collections::VecDeque;
 use std::convert::Infallible;
@@ -36,8 +40,10 @@ const BATCH: usize = 500;
 
 #[derive(Debug, Default, Deserialize)]
 pub struct StreamQuery {
-    /// A `seq`, or an event ID. Only later events come.
+    /// A `seq`, an event ID, or `latest`. Only later events come.
     since: Option<String>,
+    /// `1` or `true`: no backlog, live events only (`since=latest`).
+    live: Option<String>,
     kind: Option<String>,
     project: Option<String>,
     agent: Option<String>,
@@ -70,18 +76,42 @@ async fn mode(req: Request) -> ApiResult<(Mode, Option<String>)> {
     Ok((if sse { Mode::Sse } else { Mode::Json }, last_event_id))
 }
 
+/// The word of `?since=` for "from now on".
+const LATEST: &str = "latest";
+
+fn is_on(v: Option<&str>) -> ApiResult<bool> {
+    match v {
+        None | Some("" | "0" | "false") => Ok(false),
+        Some("1" | "true") => Ok(true),
+        Some(other) => Err(ApiError::bad_request(format!(
+            "bad live `{other}`: use 1 or 0"
+        ))),
+    }
+}
+
 async fn respond(
     state: Shared,
     filter: EventFilter,
     page: Page,
-    since: Option<String>,
+    q: StreamQuery,
     req: Request,
 ) -> ApiResult<Response> {
+    let live = is_on(q.live.as_deref())?;
     let (mode, last_event_id) = mode(req).await?;
-    let since_key = page.cursor().map(str::to_owned).or(since).or(last_event_id);
+    let since_key = if live {
+        Some(LATEST.to_owned())
+    } else {
+        page.cursor()
+            .map(str::to_owned)
+            .or(q.since)
+            .or(last_event_id)
+    };
     let since = state
         .db
-        .read(move |c| events::resolve_since(c, since_key.as_deref()))
+        .read(move |c| match since_key.as_deref() {
+            Some(LATEST) => events::last_seq(c),
+            key => events::resolve_since(c, key),
+        })
         .await?;
     Ok(match mode {
         Mode::Json => {
@@ -109,14 +139,14 @@ pub async fn firehose(
     req: Request,
 ) -> ApiResult<Response> {
     let mut filter = EventFilter {
-        kind: q.kind,
-        project: q.project,
+        kind: q.kind.clone(),
+        project: q.project.clone(),
         ..EventFilter::default()
     };
     if let Some(p) = &filter.project {
         policy::read_project(&actor, p)?;
     }
-    if let Some(agent) = q.agent {
+    if let Some(agent) = q.agent.clone() {
         // A ULID filters as is, so the log of a deleted agent stays readable.
         filter.agent = Some(if agent.parse::<terrarium_core::AgentId>().is_ok() {
             agent
@@ -129,7 +159,14 @@ pub async fn firehose(
     {
         filter.visible_to = Some((a.project.clone(), a.id.clone()));
     }
-    respond(state, filter, page, q.since, req).await
+    respond(state, filter, page, q, req).await
+}
+
+/// `GET /api/events/latest`: the newest `seq` of the log, 0 when it is
+/// empty. Stream from it with `?since=<seq>` to skip the backlog.
+pub async fn latest(State(state): State<Shared>, _actor: Actor) -> ApiResult<Response> {
+    let seq = state.db.read(events::last_seq).await?;
+    Ok(axum::Json(json!({ "seq": seq })).into_response())
 }
 
 /// `GET /api/agents/{id}/events`: the events of one agent.
@@ -144,10 +181,10 @@ pub async fn agent_events(
     let a = load(&state, &actor, id).await?;
     let filter = EventFilter {
         agent: Some(a.agent.id.to_string()),
-        kind: q.kind,
+        kind: q.kind.clone(),
         ..EventFilter::default()
     };
-    respond(state, filter, page, q.since, req).await
+    respond(state, filter, page, q, req).await
 }
 
 async fn backlog(state: &Shared, filter: &EventFilter, after: i64) -> ApiResult<Vec<StoredEvent>> {

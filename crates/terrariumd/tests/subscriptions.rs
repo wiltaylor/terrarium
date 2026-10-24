@@ -433,10 +433,13 @@ async fn quota_policy_alerts_holds_and_resumes() {
     assert_eq!(alerts[0]["actor"], "system");
     let mail = td.get("/api/mail?to=operator").await;
     let mail = mail.ok().as_array().unwrap().clone();
-    assert!(
-        mail.iter()
-            .any(|m| m["subject"].as_str().unwrap().contains("5h window at 85%"))
-    );
+    let alert = mail
+        .iter()
+        .find(|m| m["subject"].as_str().unwrap().contains("5h window at 85%"))
+        .unwrap();
+    // The daemon speaks as `system`.
+    assert_eq!(alert["from"], "system");
+    assert_eq!(alert["from_kind"], "system");
     // The same window period alerts once.
     td.post_empty("/api/subscriptions/anthropic-max/probe")
         .await

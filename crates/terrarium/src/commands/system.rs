@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 
 use super::{event_line, print_generic, print_table, set_opt};
 use crate::api::{ServerError, query};
-use crate::cli::{AdminTargetCmd, AuditArgs, DaemonCmd, EventsArgs, UsageCmd};
+use crate::cli::{AdminTargetCmd, AuditArgs, DaemonCmd, EventsArgs, HostCmd, UsageCmd};
 use crate::ctx::Ctx;
 use crate::output::field;
 use crate::transport::{ApiRequest, Method};
@@ -85,19 +85,49 @@ const TARGET_COLS: &[(&str, &str)] = &[
     ("KIND", "kind"),
     ("SCOPE", "scope"),
     ("PROJECT", "project"),
+    ("HOST", "host"),
     ("ADDRESS", "address"),
     ("STATE", "state"),
+    ("ONLINE", "online"),
 ];
 
+/// `host_online` as a word for the table: `online`, `offline`, or `-` (ssh).
+fn with_online(items: &[Value]) -> Vec<Value> {
+    items
+        .iter()
+        .map(|t| {
+            let mut t = t.clone();
+            t["online"] = match t["host_online"].as_bool() {
+                Some(true) => "online".into(),
+                Some(false) => "offline".into(),
+                None => "-".into(),
+            };
+            t
+        })
+        .collect()
+}
+
+/// `targets ls`: an agent sees the targets its policy lets it use; the
+/// operator sees all, or a project's with `-p`.
 pub async fn targets(ctx: &Ctx) -> anyhow::Result<()> {
-    let path = match &ctx.project {
-        Some(p) => format!("/api/projects/{}/targets", crate::transport::encode(p)),
-        None => "/api/targets".into(),
+    let (path, q) = if ctx.is_agent() {
+        (
+            "/api/targets".to_owned(),
+            query([("usable", Some("true".to_owned()))]),
+        )
+    } else {
+        match &ctx.project {
+            Some(p) => (
+                format!("/api/projects/{}/targets", crate::transport::encode(p)),
+                vec![],
+            ),
+            None => ("/api/targets".into(), vec![]),
+        }
     };
-    let items = ctx.api.list(&path, vec![], None).await?;
+    let items = ctx.api.list(&path, q, None).await?;
     let v = Value::Array(items);
     ctx.emit(&v, |c, v| {
-        print_table(c, as_items(v), TARGET_COLS, "no targets")
+        print_table(c, &with_online(as_items(v)), TARGET_COLS, "no targets")
     })
 }
 
@@ -108,10 +138,32 @@ pub async fn admin_target(ctx: &Ctx, cmd: &AdminTargetCmd) -> anyhow::Result<()>
             name,
             kind,
             address,
+            port,
+            credential,
+            host,
+            image,
+            container,
+            lab,
+            machine,
+            ephemeral,
+            keep,
             global,
         } => {
             let mut body = json!({"name": name, "kind": kind});
             set_opt(&mut body, "address", address.clone());
+            set_opt(&mut body, "port", *port);
+            set_opt(&mut body, "credential", credential.clone());
+            set_opt(&mut body, "host", host.clone());
+            set_opt(&mut body, "image", image.clone());
+            set_opt(&mut body, "container", container.clone());
+            set_opt(&mut body, "lab", lab.clone());
+            set_opt(&mut body, "machine", machine.clone());
+            if *ephemeral {
+                body["ephemeral"] = true.into();
+            }
+            if *keep {
+                body["keep"] = true.into();
+            }
             if !global {
                 body["project"] = ctx.project_or(None).await?.into();
             }
@@ -120,12 +172,66 @@ pub async fn admin_target(ctx: &Ctx, cmd: &AdminTargetCmd) -> anyhow::Result<()>
                 c.line(format!("created target {}", field(t, "name")));
             })
         }
+        AdminTargetCmd::Rm { name } => {
+            let path = format!("/api/targets/{}", crate::transport::encode(name));
+            let v = ctx.api.delete(&path, vec![]).await?;
+            ctx.emit(&v, |c, _| c.line(format!("removed target {name}")))
+        }
+        AdminTargetCmd::Verb {
+            name,
+            verb,
+            snapshot,
+        } => {
+            if !["up", "down", "snapshot", "restore", "status"].contains(&verb.as_str()) {
+                return Err(crate::api::CliError::usage(format!(
+                    "unknown verb `{verb}`: use up, down, snapshot, restore, or status"
+                )));
+            }
+            let path = format!("/api/targets/{}/{verb}", crate::transport::encode(name));
+            let body = snapshot.as_ref().map(|s| json!({"name": s}));
+            let v = ctx.api.post(&path, body).await?;
+            ctx.emit(&v, |c, v| {
+                c.line(format!("{name}: {verb}: {}", field(v, "state")));
+            })
+        }
     }
 }
 
-pub async fn hosts(ctx: &Ctx) -> anyhow::Result<()> {
-    let v = Value::Array(ctx.api.list("/api/hosts", vec![], None).await?);
-    ctx.emit(&v, |c, v| print_generic(c, v, "no host agents"))
+pub async fn hosts(ctx: &Ctx, cmd: &HostCmd) -> anyhow::Result<()> {
+    match cmd {
+        HostCmd::Ls => {
+            let v = Value::Array(ctx.api.list("/api/hosts", vec![], None).await?);
+            ctx.emit(&v, |c, v| {
+                print_table(
+                    c,
+                    as_items(v),
+                    &[
+                        ("NAME", "name"),
+                        ("STATUS", "status"),
+                        ("OS", "os"),
+                        ("ARCH", "arch"),
+                        ("VERSION", "version"),
+                        ("SESSIONS", "sessions"),
+                        ("LAST SEEN", "last_seen"),
+                    ],
+                    "no host agents",
+                )
+            })
+        }
+        HostCmd::New { name } => {
+            let v = ctx
+                .api
+                .post("/api/hosts", Some(json!({"name": name})))
+                .await?;
+            // The token alone on stdout, so it can go into a pipe.
+            ctx.emit(&v, |c, v| c.line(field(v, "token")))
+        }
+        HostCmd::Rm { name } => {
+            let path = format!("/api/hosts/{}", crate::transport::encode(name));
+            let v = ctx.api.delete(&path, vec![]).await?;
+            ctx.emit(&v, |c, _| c.line(format!("revoked host agent {name}")))
+        }
+    }
 }
 
 pub async fn usage(ctx: &Ctx, cmd: Option<&UsageCmd>) -> anyhow::Result<()> {

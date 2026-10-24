@@ -7,7 +7,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use serde::Deserialize;
 
-use super::system::{TargetView, target_views};
+use super::targets::TargetView;
 use super::{ApiJson, ApiQuery, Shared, paged};
 use crate::actor::Actor;
 use crate::error::{ApiError, ApiResult, Code};
@@ -151,7 +151,9 @@ async fn list_targets(
     policy::read_project(&actor, &name)?;
     let n = name.clone();
     state.db.read(move |c| projects::get(c, &n)).await?;
-    Ok(Json(target_views(&state.definitions(), Some(&name), true)))
+    Ok(Json(
+        super::targets::for_project(&state, &actor, &name).await?,
+    ))
 }
 
 async fn list_repos(

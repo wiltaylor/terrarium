@@ -41,6 +41,10 @@ fn fake_tui() -> PathBuf {
 struct FakeAdapter {
     /// Extra env for the next launches. A test changes it between starts.
     env: Mutex<BTreeMap<String, String>>,
+    /// `prompt_frozen_on_resume`, as Codex says.
+    frozen: std::sync::atomic::AtomicBool,
+    /// `exit_keys` for a graceful stop. Empty: kill.
+    exit_keys: Mutex<Vec<u8>>,
 }
 
 impl FakeAdapter {
@@ -76,6 +80,12 @@ impl Adapter for FakeAdapter {
             spec = spec.env(k, v);
         }
         spec
+    }
+    fn prompt_frozen_on_resume(&self) -> bool {
+        self.frozen.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    fn exit_keys(&self) -> Vec<u8> {
+        self.exit_keys.lock().unwrap().clone()
     }
     fn hook_event(&self, hook: &HookPayload) -> Vec<Event> {
         match hook.hook.as_str() {
@@ -300,6 +310,8 @@ fn supervisor(root: &Path, adapter: Arc<FakeAdapter>) -> RunnerSupervisor {
         pattern: None,
     }));
     cfg.adapters.clear();
+    // Also as `pi`, so a pi agent reaches the subscription checks.
+    cfg.adapters.insert(HarnessId::Pi, entry.clone());
     cfg.adapters.insert(HarnessId::Claude, entry);
     cfg.restart = RestartTuning {
         backoff_base: Duration::from_millis(50),
@@ -466,7 +478,7 @@ async fn lifecycle_events_sse_and_pty() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn stub_harness_is_not_ready() {
+async fn unregistered_harness_is_refused() {
     let td = Td::start().await;
     let id = td.agent("demo", "cx", json!({"harness": "codex"})).await;
     let (s, b) = td
@@ -477,7 +489,7 @@ async fn stub_harness_is_not_ready() {
         b["error"]["message"]
             .as_str()
             .unwrap()
-            .contains("not ready"),
+            .contains("not registered"),
         "{b}"
     );
     assert_eq!(td.status(&id).await, "stopped");
@@ -840,4 +852,216 @@ async fn artifact_origin_listens_on_its_own_port() {
     assert_ne!(get("/a/ART-404/").await, 200);
     assert_eq!(get("/api/health").await, 404);
     daemon.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn quota_hold_blocks_and_release_delivers() {
+    use terrariumd::supervisor::{Supervisor, TurnHold};
+    let td = Td::start().await;
+    let id = td.agent("demo", "bob", json!({})).await;
+    let agent: terrarium_core::AgentId = id.parse().unwrap();
+    td.post(&format!("/api/agents/{id}/start"), None).await;
+    td.wait_status(&id, "idle").await;
+
+    let until = chrono::DateTime::parse_from_rfc3339("2030-01-01T05:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    td.sup
+        .hold_turns(
+            agent,
+            Some(TurnHold {
+                until: Some(until),
+                reason: "the daily budget is used up".into(),
+            }),
+        )
+        .await
+        .unwrap();
+    td.wait_status(&id, "blocked").await;
+    let last = td.events(&id, "status").await.last().unwrap().clone();
+    let reason = last["data"]["reason"].as_str().unwrap();
+    assert!(reason.contains("2030-01-01T05:00:00Z"), "{reason}");
+
+    // An operator turn and a push pointer wait.
+    td.post(
+        &format!("/api/agents/{id}/send"),
+        Some(json!({"text": "held turn"})),
+    )
+    .await;
+    let m = td
+        .post("/api/mail", Some(json!({"to": "demo/bob", "body": "x"})))
+        .await;
+    let thread = m["thread_id"].as_str().unwrap().to_owned();
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert!(td.events(&id, "turn_start").await.is_empty());
+    assert_eq!(td.sup.waiting_turns(agent), ["held turn"]);
+    assert_eq!(td.status(&id).await, "blocked");
+
+    // The release sends the turn, then the pointer.
+    td.sup.hold_turns(agent, None).await.unwrap();
+    let starts = td.wait_events(&id, "turn_start", |e| e.len() >= 2).await;
+    assert_eq!(starts[0]["data"]["prompt"], "held turn");
+    assert!(
+        starts[1]["data"]["prompt"]
+            .as_str()
+            .unwrap()
+            .contains(&thread),
+        "{starts:#?}"
+    );
+    td.wait_status(&id, "idle").await;
+    assert!(td.sup.waiting_turns(agent).is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn subscription_gates_the_start_and_injects_its_key() {
+    let td = Td::start().await;
+    td.post(
+        "/api/subscriptions",
+        Some(json!({"name": "keyed", "provider": "anthropic", "harnesses": ["claude"]})),
+    )
+    .await;
+    td.post(
+        "/api/subscriptions/keyed/api-key",
+        Some(json!({"provider": "anthropic", "key": "sk-test-secret"})),
+    )
+    .await;
+    td.post(
+        "/api/subscriptions",
+        Some(json!({"name": "pionly", "provider": "anthropic", "harnesses": ["pi"]})),
+    )
+    .await;
+
+    // The key goes into the launch env; the command line hides it.
+    let id = td
+        .agent("demo", "bob", json!({"subscription": "keyed"}))
+        .await;
+    let state = td.daemon.as_ref().unwrap().state.clone();
+    let key = id.clone();
+    let view = state
+        .db
+        .read(move |c| terrariumd::store::agents::get(c, &key))
+        .await
+        .unwrap();
+    let spec = td.sup.launch_spec(&view.agent, None).await.unwrap();
+    assert_eq!(spec.env["ANTHROPIC_API_KEY"], "sk-test-secret");
+    let line = terrariumd::sandbox::command_line(&spec);
+    assert!(!line.contains("sk-test-secret"), "{line}");
+    td.post(&format!("/api/agents/{id}/start"), None).await;
+    td.wait_status(&id, "idle").await;
+
+    // A harness that cannot spend the subscription: 422, and it stays stopped.
+    for (name, sub, want) in [
+        ("carl", "pionly", "cannot spend subscription `pionly`"),
+        ("dora", "nosuch", "no such subscription"),
+    ] {
+        let id = td.agent("demo", name, json!({"subscription": sub})).await;
+        let (s, b) = td
+            .req(Method::POST, &format!("/api/agents/{id}/start"), None, None)
+            .await;
+        assert_eq!(s, 422, "{b}");
+        let msg = b["error"]["message"].as_str().unwrap();
+        assert!(msg.contains(want), "{msg}");
+        assert_eq!(td.status(&id).await, "stopped");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn frozen_prompt_change_starts_a_new_session() {
+    let td = Td::start().await;
+    td.adapter
+        .frozen
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let prompts = td.dir.path().join("prompts");
+    std::fs::create_dir_all(&prompts).unwrap();
+    std::fs::write(prompts.join("t.md"), "v1 {{agent.name}}").unwrap();
+    let id = td.agent("demo", "bob", json!({"prompt": "t"})).await;
+    let cycle = async |want: usize| {
+        td.post(&format!("/api/agents/{id}/start"), None).await;
+        td.wait_events(&id, "session_started", |e| e.len() == want)
+            .await;
+        td.wait_status(&id, "idle").await;
+        td.post(&format!("/api/agents/{id}/stop"), None).await;
+        td.wait_status(&id, "stopped").await;
+        td.events(&id, "session_started").await
+    };
+    cycle(1).await;
+    // The same prompt: a resume.
+    let started = cycle(2).await;
+    assert_eq!(started[1]["data"]["source"], "resume");
+    assert_eq!(
+        started[1]["data"]["harness_session"],
+        started[0]["data"]["harness_session"]
+    );
+    // A changed prompt: a new session, with the reason.
+    std::fs::write(prompts.join("t.md"), "v2 {{agent.name}}").unwrap();
+    let started = cycle(3).await;
+    assert_eq!(started[2]["data"]["source"], "startup");
+    assert_ne!(
+        started[2]["data"]["harness_session"],
+        started[0]["data"]["harness_session"]
+    );
+    let statuses = td.events(&id, "status").await;
+    assert!(
+        statuses
+            .iter()
+            .any(|e| e["data"]["reason"] == "new session: the prompt changed"),
+        "{statuses:#?}"
+    );
+    // The next start resumes the new session.
+    let started = cycle(4).await;
+    assert_eq!(started[3]["data"]["source"], "resume");
+    assert_eq!(
+        started[3]["data"]["harness_session"],
+        started[2]["data"]["harness_session"]
+    );
+    // The flag off: a changed prompt resumes.
+    td.req(
+        Method::PATCH,
+        &format!("/api/agents/{id}"),
+        Some(json!({"new_session_on_prompt_change": false})),
+        None,
+    )
+    .await;
+    std::fs::write(prompts.join("t.md"), "v3 {{agent.name}}").unwrap();
+    let started = cycle(5).await;
+    assert_eq!(started[4]["data"]["source"], "resume");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stop_types_the_exit_keys_first() {
+    let td = Td::start().await;
+    *td.adapter.exit_keys.lock().unwrap() = b"/exit 7\r".to_vec();
+    let id = td.agent("demo", "bob", json!({})).await;
+    td.post(&format!("/api/agents/{id}/start"), None).await;
+    td.wait_status(&id, "idle").await;
+    td.post(&format!("/api/agents/{id}/stop"), None).await;
+    td.wait_status(&id, "stopped").await;
+    // The harness exited on its keys (code 7), not on a kill.
+    let exits = td.wait_events(&id, "exit", |e| !e.is_empty()).await;
+    assert_eq!(exits[0]["data"]["code"], 7, "{exits:#?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pi_refuses_a_claude_plan() {
+    let td = Td::start().await;
+    td.post(
+        "/api/subscriptions",
+        Some(
+            json!({"name": "max", "provider": "anthropic", "plan": "Max 20x",
+                    "harnesses": ["claude", "pi"]}),
+        ),
+    )
+    .await;
+    let id = td
+        .agent(
+            "demo",
+            "p1",
+            json!({"harness": "pi", "subscription": "max"}),
+        )
+        .await;
+    let (s, b) = td
+        .req(Method::POST, &format!("/api/agents/{id}/start"), None, None)
+        .await;
+    assert_eq!(s, 422, "{b}");
+    let msg = b["error"]["message"].as_str().unwrap();
+    assert!(msg.contains("pi cannot spend a Claude plan"), "{msg}");
 }

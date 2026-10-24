@@ -74,6 +74,50 @@ In the daemon now: `GET /api/mail`, `GET /api/projects/{name}/inbox`, and
 cards) wakes the request, and the daemon runs the query again. A `wait`
 above 300 is cut to 300.
 
+## Streams over the tunnel
+
+The tunnel carries one request and one answer at a time. It carries no
+WebSocket and no SSE. A stream (a remote command, a shell, a file copy)
+is therefore a **session** that the CLI drives with plain requests. Use
+this pattern for each new stream:
+
+1. **Open.** One `POST` makes the session and answers
+   `{"session_id": ...}` with `201`.
+2. **Input.** `POST .../sessions/{id}/input` sends bytes as base64 in
+   `data`, with at most 1 MiB in one request. The same body carries the
+   controls: `resize`, `signal`, `eof`, and `finish`.
+3. **Output.** `GET .../sessions/{id}/output?since=<offset>&wait=<s>`
+   long-polls. The answer holds the chunks after `since`, as base64, and
+   `next`, the `since` of the next read. `done` and `end` come with the
+   last chunk.
+4. **Acknowledge by offset.** A read acknowledges every byte before its
+   `since`. The daemon drops those bytes and keeps the rest. A lost answer
+   is not a lost byte: read again with the same `since`.
+5. **Backpressure.** The daemon buffers a limit of bytes that are not
+   acknowledged (8 MiB for an exec session). At the limit it stops reading
+   the source. The source waits until the CLI reads again.
+6. **Close.** `DELETE .../sessions/{id}` ends the run. A session that
+   nobody reads for a long time ends by itself.
+
+The runner opens one socket connection for each request, so the input and
+the output requests of one session can run at the same time. `terrarium
+shell` sends keys while an output read waits.
+
+The exec sessions are the first use (`docs/api.md` §17.4):
+
+```json
+{"type":"request","id":9,"method":"http","params":{
+  "method":"POST","path":"/api/targets/buildbox/exec",
+  "body":{"cmd":["cargo","test"],"cwd":"/srv/build"}}}
+{"type":"request","id":10,"method":"http","params":{
+  "method":"GET","path":"/api/targets/buildbox/sessions/01JC.../output",
+  "query":{"since":0,"wait":25}}}
+```
+
+An output answer is at most 1 MiB of bytes, about 1.4 MiB as base64, so it
+fits in the 16 MiB answer of the tunnel. Over HTTP, the operator can open
+the same session as a WebSocket terminal at `GET .../sessions/{id}/ws`.
+
 ## Uploads: artifact bytes
 
 In v1 the CLI uploads an artifact through the `http` method, with the JSON

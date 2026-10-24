@@ -10,7 +10,9 @@ pub mod credentials;
 pub mod db;
 pub mod error;
 pub mod events;
+pub mod executor;
 pub mod git;
+pub mod hosts;
 pub mod login_session;
 pub mod policy;
 pub mod probes;
@@ -133,6 +135,7 @@ pub async fn start_with_usage(
         config_dir: cfg.config_dir.clone(),
         insecure_agent_header: cfg.insecure_agent_header,
         usage: Arc::new(usage_collector::UsageRuntime::new(usage)),
+        executor: Arc::default(),
     });
     if cfg.insecure_agent_header {
         warn!("--insecure-agent-header: any local caller can act as any agent");
@@ -264,6 +267,14 @@ pub async fn apply_definitions(
         })
         .await?;
     report.errors.extend(changes.errors);
+    let target_defs = defs.targets.clone();
+    let (_, target_errors) = state
+        .db
+        .write("system", move |t| {
+            store::targets::sync_files(t, &target_defs)
+        })
+        .await?;
+    report.errors.extend(target_errors);
     state.set_definitions(defs);
     for id in &report.removed_agent_ids {
         if let Ok(id) = id.parse() {

@@ -685,3 +685,76 @@ async fn tcp_needs_the_token_and_ignores_the_agent_header() {
         tokio_tungstenite::client_async(format!("ws://{addr}/api/events?token=no"), stream).await;
     assert!(bad.is_err());
 }
+
+#[tokio::test]
+async fn patch_clears_optional_fields_with_null() {
+    let td = TestDaemon::start().await;
+    td.project("p").await;
+    td.agent(
+        "p",
+        "w",
+        json!({"subscription": "s1", "model": "haiku", "prompt": "custom"}),
+    )
+    .await;
+    // An absent field stays; a value sets it.
+    let v = td
+        .patch("/api/agents/p%2Fw", json!({"model": "sonnet"}))
+        .await;
+    let v = v.ok();
+    assert_eq!(v["model"], "sonnet");
+    assert_eq!(v["subscription"], "s1");
+    assert_eq!(v["prompt"], "custom");
+    // `null` clears it.
+    let v = td
+        .patch(
+            "/api/agents/p%2Fw",
+            json!({"subscription": null, "model": null, "prompt": null}),
+        )
+        .await;
+    let v = v.ok();
+    for k in ["subscription", "model", "prompt"] {
+        assert!(v[k].is_null(), "{k}: {v}");
+    }
+}
+
+#[tokio::test]
+async fn events_live_and_latest_skip_the_backlog() {
+    let td = TestDaemon::start().await;
+    td.project("p").await;
+    let a = td.agent("p", "a", json!({})).await;
+    let id = a["id"].as_str().unwrap().to_owned();
+    td.post_empty(&format!("/api/agents/{id}/start")).await.ok();
+    td.wait_status(&id, "idle").await;
+
+    let latest = td.get("/api/events/latest").await.ok()["seq"]
+        .as_i64()
+        .unwrap();
+    assert!(latest > 0);
+    // JSON: no backlog after `latest`.
+    let page = td.get("/api/events?since=latest").await;
+    assert_eq!(page.ok(), &json!([]));
+    let page = td.get("/api/events?live=1").await;
+    assert_eq!(page.ok(), &json!([]));
+    td.get("/api/events?live=maybe")
+        .await
+        .err(400, "bad_request");
+    // `?since=<seq>` keeps its meaning.
+    let page = td.get(&format!("/api/events?since={}", latest - 1)).await;
+    assert_eq!(page.ok().as_array().unwrap().len(), 1);
+
+    // WebSocket: the first frame is a new event, not the backlog.
+    for path in ["/api/events?live=1", "/api/events?since=latest"] {
+        let mut ws = td.ws(path, None).await.unwrap();
+        td.post_empty(&format!("/api/agents/{id}/stop")).await.ok();
+        let msg = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let ev: Value = serde_json::from_str(msg.to_text().unwrap()).unwrap();
+        assert!(ev["seq"].as_i64().unwrap() > latest, "{path}: {ev}");
+        td.wait_status(&id, "stopped").await;
+        td.post_empty(&format!("/api/agents/{id}/start")).await.ok();
+        td.wait_status(&id, "idle").await;
+    }
+}

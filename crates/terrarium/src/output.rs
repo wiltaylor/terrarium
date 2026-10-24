@@ -32,6 +32,27 @@ impl Out {
         }
     }
 
+    /// Raw bytes, to stdout or (with `err`) stderr. Tests capture both.
+    pub fn write_bytes(&self, err: bool, bytes: &[u8]) {
+        match self {
+            Self::Stdout if err => {
+                let mut o = std::io::stderr().lock();
+                let _ = o.write_all(bytes);
+                let _ = o.flush();
+            }
+            Self::Stdout => {
+                let mut o = std::io::stdout().lock();
+                let _ = o.write_all(bytes);
+                let _ = o.flush();
+            }
+            Self::Buffer(b) => {
+                if let Ok(mut b) = b.lock() {
+                    b.extend_from_slice(bytes);
+                }
+            }
+        }
+    }
+
     pub fn line(&self, s: impl AsRef<str>) {
         let mut s = s.as_ref().to_owned();
         s.push('\n');

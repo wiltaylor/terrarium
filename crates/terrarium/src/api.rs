@@ -89,6 +89,9 @@ pub enum CliError {
     /// A command that this build or this daemon does not have yet.
     #[error("{0}")]
     NotAvailable(String),
+    /// `terrarium exec` passes on the exit code of the remote command.
+    #[error("the remote command exited with {0}")]
+    RemoteExit(u8),
 }
 
 impl CliError {
@@ -106,8 +109,10 @@ pub fn exit_code_of(err: &anyhow::Error) -> u8 {
     if let Some(e) = err.downcast_ref::<ServerError>() {
         return e.exit_code();
     }
-    if err.downcast_ref::<CliError>().is_some() {
-        return exit::USAGE;
+    match err.downcast_ref::<CliError>() {
+        Some(CliError::RemoteExit(code)) => return *code,
+        Some(_) => return exit::USAGE,
+        None => {}
     }
     exit::SERVER
 }

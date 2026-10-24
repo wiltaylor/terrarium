@@ -173,10 +173,10 @@ fn operator_mode_over_the_unix_socket() {
     assert!(text(&o.stderr).contains("no such API route [not_found]"));
     assert!(text(&o.stderr).contains("awaiting server"));
 
-    // Not available, and usage errors: exit 2.
-    let o = run(&socket, &["exec", "box", "--", "ls"]);
+    // Usage errors: exit 2.
+    let o = run(&socket, &["exec", "box"]);
     assert_eq!(o.status.code(), Some(2));
-    assert!(text(&o.stderr).contains("host agents arrive in a later phase"));
+    assert!(text(&o.stderr).contains("name the command after `--`"));
     let o = run(&socket, &["board"]);
     assert_eq!(o.status.code(), Some(2));
     let o = run(&socket, &["card", "frobnicate"]);

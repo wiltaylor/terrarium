@@ -26,6 +26,7 @@ mode, give the project with `--project` (or `-p`).
 The tunnel does not carry WebSockets or SSE. In agent mode:
 
 - `agent attach` is not available (exit 2).
+- `exec`, `shell`, and `cp` use long-poll sessions in both modes.
 - `events --follow` and `agent logs --follow` poll the list with `?since=`.
 
 ## 2. Global options
@@ -67,6 +68,9 @@ Mail bodies, card bodies, and memory bodies print between markers:
 | 1 | The daemon answered with an error, or the CLI cannot reach the daemon or the runner. |
 | 2 | A bad command line, or a command that is not available yet. |
 | 3 | The daemon refused the action by policy (`403 forbidden`) or by authentication (`401 unauthorized`). |
+
+`terrarium exec` and `terrarium shell` exit with the exit code of the
+remote command when it ran. Then the codes above do not apply.
 
 The CLI prints the daemon's error message without changes, then the error
 code in brackets. An agent learns the rule from the message:
@@ -276,11 +280,32 @@ terrarium usage                               my subscription and my share
 terrarium usage project                       the project, per agent
 terrarium usage subscriptions                 all plans
 terrarium status set <idle|working|blocked> [--note text]
-terrarium targets ls
-terrarium exec <target> [--cwd d] -- <cmd>    not available yet (exit 2)
-terrarium shell <target>                      not available yet (exit 2)
-terrarium cp <src> <target>:<dst>             not available yet (exit 2)
+terrarium targets ls                          an agent: the targets its policy allows, with host online/offline
+terrarium exec <target> [--cwd d] [-e K=V]... [--timeout s] [-i] [-t] -- <cmd>
+terrarium shell <target>                      a login shell in a PTY; Ctrl-] detaches
+terrarium cp <src> <target>:<dst>             one file to the target
+terrarium cp <target>:<src> <dst>             one file from the target
 ```
+
+These commands use the exec sessions of `api.md` §17.4. They send plain
+requests only, so they work the same in both modes (agent-rpc.md,
+"Streams over the tunnel").
+
+- `exec` streams the remote stdout and stderr to the CLI's stdout and
+  stderr. It exits with the exit code of the remote command (128 + the
+  signal when a signal ended it). A run that fails on the target (for
+  example a program that does not exist) is exit 1. `-i` sends the CLI's
+  stdin to the command; else the command gets an empty stdin. `-t` runs
+  the command in a PTY. `--json` prints `{session_id, stdout, stderr, end}`
+  at the end.
+- `shell` puts the terminal in raw mode, sends the keys, and follows
+  terminal resizes. Ctrl-] detaches and ends the remote shell. The CLI
+  exits with the shell's exit code.
+- `cp` copies one regular file. A `<dst>` that ends in `/` (on the target)
+  or that is a directory (local) gets the source file name. The CLI sends
+  the file in chunks of 256 KiB and the SHA-256 at the end. A pull goes to
+  a partial file, and the CLI renames it only when the count and the
+  SHA-256 match. To copy a directory, make a tar file first.
 
 ## 5. Operator commands
 
@@ -319,15 +344,23 @@ terrarium admin agent new|set|start|stop|restart|rm|send|answer|logs|sessions|ro
 terrarium admin project new|set|rm|repos|repo-add ...
 terrarium admin role grant|revoke <agent> <role>
 terrarium admin role ls <agent>
-terrarium admin target new <name> --kind ssh [--address a] [--global]
+terrarium admin target new <name> --kind host|ssh|docker|vmlab [--host h] [--address a] [--port n]
+                          [--credential c] [--image i] [--container c] [--lab dir] [--machine m]
+                          [--ephemeral] [--keep] [--global]
 terrarium admin target ls
+terrarium admin target rm <name>
+terrarium admin target verb <name> up|down|snapshot|restore|status [--snapshot name]
 terrarium admin host ls
+terrarium admin host new <name>                prints the token once, alone on stdout
+terrarium admin host rm <name>                 revokes the token
 terrarium admin audit [--since time] [--actor a] [--action a]
 ```
 
 `admin role grant` reads the roles, adds the role, and writes the whole set.
 `admin role revoke` removes the role in the same way. `admin target new`
 makes a project target. Use `--global` for a global target (sysadmin).
+`admin host new` and `admin host rm` need sysadmin; `just host::token` can
+use `admin host new` in a pipe.
 
 ## 7. Examples
 

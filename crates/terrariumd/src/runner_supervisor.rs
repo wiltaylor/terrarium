@@ -24,6 +24,10 @@
 //! - A hub listener sees new mail and card assignments. It types the push
 //!   pointer of PLAN §12 and §13 when the agent is idle, else after the next
 //!   turn ends. One pending pointer covers all new items.
+//! - A quota hold ([`Supervisor::hold_turns`]) shows an idle agent as
+//!   `blocked` with the reason and the reset time. Operator turns, push
+//!   pointers, and the recap turn wait. The release types the waiting turns
+//!   in order, then the pending pointer.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -33,7 +37,10 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use terrarium_adapter_claude::{ClaudeAdapter, ClaudeOptions};
-use terrarium_core::config::RestartPolicy;
+use terrarium_adapter_codex::{CodexAdapter, CodexOptions};
+use terrarium_adapter_copilot::{CopilotAdapter, CopilotOptions};
+use terrarium_adapter_pi::{PiAdapter, PiOptions};
+use terrarium_core::config::{RestartPolicy, SubscriptionDef};
 use terrarium_core::{
     Adapter, Agent, AgentId, AgentStatus, Event, EventRecord, HarnessId, HarnessSessionId,
     LaunchSpec,
@@ -47,9 +54,10 @@ use crate::agent_rpc::AgentRpc;
 use crate::api::{AppState, Shared};
 use crate::prompt::{self, Peer, PromptContext};
 use crate::sandbox::{self, AgentLayout, HarnessHome, SandboxConfig, SandboxMode};
+use crate::store::subscriptions::Subscription;
 use crate::supervisor::{
     AnswerInput, BoxFuture, PtyAttachment, PtyInput, Supervisor, SupervisorError, SupervisorEvent,
-    SupervisorEventKind,
+    SupervisorEventKind, TurnHold,
 };
 
 /// One harness adapter and its prompt-ready detector.
@@ -136,8 +144,8 @@ pub struct RunnerSupervisorConfig {
 }
 
 impl RunnerSupervisorConfig {
-    /// The config with the real adapters: Claude Code. The codex, copilot,
-    /// and pi adapters are stubs, so they are not registered.
+    /// The config with the real adapters: Claude Code, Codex, Copilot CLI,
+    /// and pi.
     pub fn new(
         state_dir: PathBuf,
         runtime_dir: PathBuf,
@@ -167,43 +175,108 @@ impl RunnerSupervisorConfig {
     }
 }
 
-/// The adapters that work in this phase, set up for the sandbox mode.
+/// Every adapter, set up for the sandbox mode: each harness sees its home
+/// at `$HOME/<rel>` in bwrap, or at the host path with no sandbox.
 pub fn default_adapters(
     sandbox: &SandboxConfig,
     homes: &HashMap<HarnessId, PathBuf>,
 ) -> HashMap<HarnessId, AdapterEntry> {
-    let host = homes
-        .get(&HarnessId::Claude)
-        .cloned()
-        .unwrap_or_else(|| PathBuf::from(HarnessId::Claude.auth_dir()));
-    let inside = sandbox.home_inside(&HarnessHome {
-        harness: HarnessId::Claude,
-        host: host.clone(),
-    });
-    let options = ClaudeOptions {
-        config_dir: inside,
-        host_config_dir: Some(host),
-        harness_workspace: match sandbox.mode {
-            SandboxMode::Bwrap => Some(sandbox.home.join("work")),
-            SandboxMode::None => None,
-        },
+    let host = |h: HarnessId| {
+        homes
+            .get(&h)
+            .cloned()
+            .unwrap_or_else(|| PathBuf::from(h.auth_dir()))
+    };
+    let inside = |h: HarnessId| {
+        sandbox.home_inside(&HarnessHome {
+            harness: h,
+            host: host(h),
+        })
+    };
+    let bwrap = sandbox.mode == SandboxMode::Bwrap;
+    let work = bwrap.then(|| sandbox.home.join("work"));
+
+    let claude = ClaudeOptions {
+        config_dir: inside(HarnessId::Claude),
+        host_config_dir: Some(host(HarnessId::Claude)),
+        harness_workspace: work.clone(),
         hook_program: sandbox.hook_program(),
         ..ClaudeOptions::default()
     };
+    let codex = CodexOptions {
+        codex_home: inside(HarnessId::Codex),
+        host_codex_home: Some(host(HarnessId::Codex)),
+        harness_workspace: work.clone(),
+        hook_program: sandbox.hook_program(),
+        ..CodexOptions::default()
+    };
+    let copilot = CopilotOptions {
+        config_dir: inside(HarnessId::Copilot),
+        host_config_dir: Some(host(HarnessId::Copilot)),
+        harness_workspace: work.clone(),
+        cache_dir: bwrap.then(|| sandbox.home.join(".cache/copilot")),
+        hook_program: sandbox.hook_program(),
+        ..CopilotOptions::default()
+    };
+    let pi = PiOptions {
+        agent_dir: inside(HarnessId::Pi),
+        host_agent_dir: Some(host(HarnessId::Pi)),
+        harness_workspace: work,
+        ..PiOptions::default()
+    };
     let mut map = HashMap::new();
-    map.insert(
-        HarnessId::Claude,
-        AdapterEntry::new(Arc::new(ClaudeAdapter::new(options))),
-    );
+    let entries: [(HarnessId, Arc<dyn Adapter>); 4] = [
+        (HarnessId::Claude, Arc::new(ClaudeAdapter::new(claude))),
+        (HarnessId::Codex, Arc::new(CodexAdapter::new(codex))),
+        (HarnessId::Copilot, Arc::new(CopilotAdapter::new(copilot))),
+        (HarnessId::Pi, Arc::new(PiAdapter::new(pi))),
+    ];
+    for (h, a) in entries {
+        map.insert(h, AdapterEntry::new(a));
+    }
     map
 }
 
-/// The message for a harness with no working adapter.
+/// The message for a harness with no registered adapter.
 pub fn not_ready(harness: HarnessId) -> SupervisorError {
     SupervisorError::NotReady(format!(
-        "the {harness} adapter is not ready yet: its hook mapping and launch flags are \
-         not verified (docs/compat.md). Only `claude` agents can start in this phase"
+        "the {harness} adapter is not registered in this daemon"
     ))
+}
+
+/// The definition of a stored subscription, for the adapter.
+fn sub_def(s: &Subscription) -> SubscriptionDef {
+    SubscriptionDef {
+        name: s.name.clone(),
+        provider: s.provider.clone(),
+        plan: s.plan.clone(),
+        harnesses: s.harnesses.clone(),
+        probe: s.probe.clone(),
+        alert_at: s.alert_at,
+    }
+}
+
+/// How long a graceful stop waits for the harness to exit on its exit
+/// keys before it kills the harness.
+const GRACEFUL_STOP: Duration = Duration::from_secs(5);
+
+/// The file that holds the SHA-256 of the prompt a harness session began
+/// with (`<agent dir>/session-prompt.sha256`).
+const SESSION_PROMPT_HASH: &str = "session-prompt.sha256";
+
+fn sha256_hex(text: &str) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(text.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// A launch spec, and whether the launch drops its resume because the
+/// prompt changed under a harness that freezes it.
+struct Built {
+    spec: LaunchSpec,
+    fresh_for_prompt: bool,
 }
 
 // ---- push pointers ----
@@ -351,9 +424,32 @@ impl Slot {
     }
 }
 
+/// A quota hold and the operator turns that wait for its end. It lives
+/// outside the slot, so a hold on an agent that does not run applies when
+/// it starts, and survives a restart of the harness.
+struct Held {
+    hold: TurnHold,
+    waiting: Vec<String>,
+}
+
+/// The `blocked` reason of a hold: its reason, with the reset time when the
+/// reason does not say it.
+fn hold_reason(h: &TurnHold) -> String {
+    match h.until {
+        Some(u) if !h.reason.contains(&u.to_rfc3339()) => format!(
+            "{}; turns wait until {}",
+            h.reason,
+            u.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        ),
+        _ => h.reason.clone(),
+    }
+}
+
 struct Inner {
     cfg: RunnerSupervisorConfig,
     slots: Mutex<HashMap<AgentId, Slot>>,
+    /// Never locked while `slots` is locked, and the other way round.
+    holds: Mutex<HashMap<AgentId, Held>>,
     tx: broadcast::Sender<SupervisorEvent>,
     state: OnceLock<Weak<AppState>>,
     shutting_down: AtomicBool,
@@ -378,6 +474,57 @@ fn other(e: impl std::fmt::Display) -> SupervisorError {
 struct StoreView {
     peers: Vec<Peer>,
     queued: Vec<MailItem>,
+    /// The agent's subscription row: `None` when the agent names none, or
+    /// when the supervisor has no store (unit tests).
+    subscription: Option<SubscriptionCheck>,
+    /// `<state>`: stored API keys are under `<state>/credentials`.
+    state_dir: Option<PathBuf>,
+}
+
+enum SubscriptionCheck {
+    Found(Box<Subscription>),
+    /// The agent names a subscription that does not exist.
+    Missing(String),
+}
+
+/// PLAN §16, policy hooks: the harness must be able to spend the agent's
+/// subscription. An agent with no subscription starts; the daemon logs it.
+fn check_subscription(
+    agent: &Agent,
+    sub: Option<&SubscriptionCheck>,
+) -> Result<Option<Subscription>, SupervisorError> {
+    match sub {
+        Some(SubscriptionCheck::Found(s)) if s.harnesses.contains(&agent.harness) => {
+            Ok(Some((**s).clone()))
+        }
+        Some(SubscriptionCheck::Found(s)) => {
+            let list: Vec<&str> = s.harnesses.iter().map(|h| h.as_str()).collect();
+            Err(SupervisorError::NotReady(format!(
+                "the {} harness cannot spend subscription `{}`: its harnesses are [{}]. Add `{}` \
+                 to `harnesses` in the subscription, or give the agent another subscription",
+                agent.harness,
+                s.name,
+                list.join(", "),
+                agent.harness
+            )))
+        }
+        Some(SubscriptionCheck::Missing(name)) => Err(SupervisorError::NotReady(format!(
+            "agent `{}` names subscription `{name}`, but there is no such subscription; \
+             define it, or clear it with PATCH /api/agents/{{id}} {{\"subscription\": null}}",
+            agent.name
+        ))),
+        None => {
+            if agent.subscription.is_none() {
+                info!(
+                    agent = %agent.id,
+                    harness = %agent.harness,
+                    "the agent has no subscription: no stored key goes into its env, \
+                     and its usage is not attributed to a plan"
+                );
+            }
+            Ok(None)
+        }
+    }
 }
 
 impl RunnerSupervisor {
@@ -387,6 +534,7 @@ impl RunnerSupervisor {
             inner: Arc::new(Inner {
                 cfg,
                 slots: Mutex::new(HashMap::new()),
+                holds: Mutex::new(HashMap::new()),
                 tx,
                 state: OnceLock::new(),
                 shutting_down: AtomicBool::new(false),
@@ -410,6 +558,19 @@ impl RunnerSupervisor {
                 reason: Some(reason.into()),
             },
         );
+    }
+
+    /// The quota hold of `agent`, if any.
+    fn held(&self, agent: AgentId) -> Option<TurnHold> {
+        lock(&self.inner.holds).get(&agent).map(|h| h.hold.clone())
+    }
+
+    /// The operator turns that wait for the end of a quota hold. For tests.
+    pub fn waiting_turns(&self, agent: AgentId) -> Vec<String> {
+        lock(&self.inner.holds)
+            .get(&agent)
+            .map(|h| h.waiting.clone())
+            .unwrap_or_default()
     }
 
     fn state(&self) -> Option<Shared> {
@@ -457,7 +618,7 @@ impl RunnerSupervisor {
         resume: Option<&HarnessSessionId>,
     ) -> Result<LaunchSpec, SupervisorError> {
         let view = self.store_view(agent).await;
-        self.build_spec(agent, resume, &view).await
+        Ok(self.build_spec(agent, resume, &view).await?.spec)
     }
 
     async fn store_view(&self, agent: &Agent) -> StoreView {
@@ -466,6 +627,8 @@ impl RunnerSupervisor {
         };
         let id = agent.id.to_string();
         let project = agent.project.clone();
+        let sub_name = agent.subscription.clone();
+        let state_dir = state.state_dir.clone();
         let result = state
             .db
             .read(move |c| {
@@ -498,7 +661,19 @@ impl RunnerSupervisor {
                         thread: m.thread_id,
                     })
                     .collect();
-                Ok(StoreView { peers, queued })
+                let subscription = match sub_name {
+                    Some(n) => Some(match crate::store::subscriptions::find(c, &n)? {
+                        Some(s) => SubscriptionCheck::Found(Box::new(s)),
+                        None => SubscriptionCheck::Missing(n),
+                    }),
+                    None => None,
+                };
+                Ok(StoreView {
+                    peers,
+                    queued,
+                    subscription,
+                    state_dir: Some(state_dir),
+                })
             })
             .await;
         result.unwrap_or_else(|e| {
@@ -512,8 +687,18 @@ impl RunnerSupervisor {
         agent: &Agent,
         resume: Option<&HarnessSessionId>,
         view: &StoreView,
-    ) -> Result<LaunchSpec, SupervisorError> {
+    ) -> Result<Built, SupervisorError> {
         let entry = self.entry(agent.harness)?;
+        let sub = check_subscription(agent, view.subscription.as_ref())?;
+        let def = sub.as_ref().map(sub_def);
+        if agent.harness == HarnessId::Pi
+            && let Some(reason) = def.as_ref().and_then(terrarium_adapter_pi::refusal)
+        {
+            return Err(SupervisorError::NotReady(format!(
+                "subscription `{}`: {reason}",
+                agent.subscription.as_deref().unwrap_or_default()
+            )));
+        }
         let cfg = &self.inner.cfg;
         let mut layout = self.layout(agent);
         // The adapters find the agent dir from the workspace path.
@@ -530,10 +715,25 @@ impl RunnerSupervisor {
         let home = cfg.home(agent.harness);
         let dirs = (layout.agent_dir.clone(), layout.workspace.clone());
         let a = agent.clone();
-        let overlays = tokio::task::spawn_blocking(move || {
+        let state_dir = view.state_dir.clone();
+        // A harness that keeps the prompt of a session gets a new session
+        // when the prompt changed since that session began.
+        let check_prompt = resume.is_some()
+            && agent.new_session_on_prompt_change
+            && entry.adapter.prompt_frozen_on_resume();
+        let fresh = resume.is_none();
+        let (overlays, credentials, fresh_for_prompt) = tokio::task::spawn_blocking(move || {
             for d in [&dirs.0, &dirs.1] {
                 std::fs::create_dir_all(d)
                     .map_err(|e| format!("cannot create {}: {e}", d.display()))?;
+            }
+            let hash = sha256_hex(&text);
+            let hash_path = dirs.0.join(SESSION_PROMPT_HASH);
+            let fresh_for_prompt =
+                check_prompt && std::fs::read_to_string(&hash_path).is_ok_and(|h| h.trim() != hash);
+            if fresh || fresh_for_prompt {
+                std::fs::write(&hash_path, &hash)
+                    .map_err(|e| format!("cannot write {}: {e}", hash_path.display()))?;
             }
             let path = dirs.0.join("prompt.md");
             std::fs::write(&path, text)
@@ -547,9 +747,16 @@ impl RunnerSupervisor {
                     a.harness
                 ));
             }
-            adapter
+            let overlays = adapter
                 .materialize_config(&a, &home)
-                .map_err(|e| format!("cannot write the {} config: {e}", a.harness))
+                .map_err(|e| format!("cannot write the {} config: {e}", a.harness))?;
+            // The stored API key of the subscription (pi providers, the
+            // Copilot PAT as `COPILOT_GITHUB_TOKEN`). Secrets: never logged.
+            let credentials = match (&sub, &state_dir) {
+                (Some(s), Some(dir)) => crate::login_session::credential_env_for(dir, s),
+                _ => Vec::new(),
+            };
+            Ok((overlays, credentials, fresh_for_prompt))
         })
         .await
         .map_err(other)?
@@ -565,11 +772,33 @@ impl RunnerSupervisor {
         }
         layout.overlays = overlays;
 
-        let spec = entry.adapter.launch(&agent, resume);
+        let resume = if fresh_for_prompt {
+            info!(
+                agent = %agent.id,
+                "the prompt changed and the {} harness keeps the prompt of a session; \
+                 starting a new session instead of a resume",
+                agent.harness
+            );
+            None
+        } else {
+            resume
+        };
+        let mut spec = entry.adapter.launch_for(&agent, resume, def.as_ref());
+        if !credentials.is_empty() {
+            debug!(
+                agent = %agent.id,
+                vars = ?credentials.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(),
+                "stored credentials go into the env"
+            );
+        }
+        spec.env.extend(credentials);
         let env = cfg
             .sandbox
             .child_env(&layout, &spec.env, &|k| std::env::var(k).ok());
-        Ok(cfg.sandbox.wrap(spec, &layout, env))
+        Ok(Built {
+            spec: cfg.sandbox.wrap(spec, &layout, env),
+            fresh_for_prompt,
+        })
     }
 
     /// Boxed, because a relaunch after an exit calls it again from the task
@@ -586,7 +815,21 @@ impl RunnerSupervisor {
         };
         let entry = self.entry(agent.harness)?;
         let view = self.store_view(&agent).await;
-        let spec = self.build_spec(&agent, resume.as_ref(), &view).await?;
+        let Built {
+            spec,
+            fresh_for_prompt,
+        } = self.build_spec(&agent, resume.as_ref(), &view).await?;
+        let resume = if fresh_for_prompt {
+            // The old session stays in the history; this launch begins a
+            // new one, and a later restart resumes that.
+            if let Some(slot) = lock(&self.inner.slots).get_mut(&id) {
+                slot.resume = None;
+                slot.session = None;
+            }
+            None
+        } else {
+            resume
+        };
         debug!(agent = %id, command = %sandbox::command_line(&spec), "launch");
 
         let cfg = &self.inner.cfg;
@@ -636,13 +879,19 @@ impl RunnerSupervisor {
         }
         let reason = match &resume {
             Some(s) => format!("resuming session {s}"),
+            None if fresh_for_prompt => "new session: the prompt changed".to_owned(),
             None => "new session".to_owned(),
         };
         info!(agent = %id, name = %agent.name, %reason, "agent started");
         self.emit_status(id, AgentStatus::Starting, reason);
         let now = runner.status();
         if now != AgentStatus::Starting {
-            self.emit_status(id, now, "caught up");
+            match self.held(id) {
+                Some(h) if now == AgentStatus::Idle => {
+                    self.emit_status(id, AgentStatus::Blocked, hold_reason(&h));
+                }
+                _ => self.emit_status(id, now, "caught up"),
+            }
             if now == AgentStatus::Idle {
                 self.on_idle(id, epoch);
             }
@@ -692,7 +941,11 @@ impl RunnerSupervisor {
                     ..
                 }
             );
-            self.emit(id, SupervisorEventKind::Harness(rec.event));
+            match self.held(id) {
+                // A held agent is `blocked`, not `idle`.
+                Some(h) if idle => self.emit_status(id, AgentStatus::Blocked, hold_reason(&h)),
+                _ => self.emit(id, SupervisorEventKind::Harness(rec.event)),
+            }
             if idle {
                 self.on_idle(id, epoch);
             }
@@ -705,13 +958,31 @@ impl RunnerSupervisor {
     }
 
     fn on_idle(&self, id: AgentId, epoch: u64) {
-        let recap = {
+        {
             let mut slots = lock(&self.inner.slots);
             let Some(slot) = slots.get_mut(&id).filter(|s| s.epoch == epoch) else {
                 return;
             };
             slot.reached_idle = true;
-            slot.recap.take().zip(slot.runner.clone())
+        }
+        self.deliver_pending(id);
+    }
+
+    /// Type the recap turn, else the pending pointer. Nothing goes out
+    /// while a quota hold lasts.
+    fn deliver_pending(&self, id: AgentId) {
+        if self.held(id).is_some() {
+            return;
+        }
+        let recap = {
+            let mut slots = lock(&self.inner.slots);
+            let Some(slot) = slots.get_mut(&id) else {
+                return;
+            };
+            match slot.runner.clone() {
+                Some(r) => slot.recap.take().map(|t| (t, r)),
+                None => None,
+            }
         };
         if let Some((text, runner)) = recap {
             let delivery = runner.type_turn(text);
@@ -879,6 +1150,9 @@ impl RunnerSupervisor {
     /// Type the pending pointer when the agent is idle and no pointer is on
     /// the way. A `working` agent gets it after its next stop hook.
     fn maybe_push(&self, id: AgentId) {
+        if self.held(id).is_some() {
+            return;
+        }
         let (runner, pointer) = {
             let mut slots = lock(&self.inner.slots);
             let Some(slot) = slots.get_mut(&id) else {
@@ -994,6 +1268,16 @@ impl RunnerSupervisor {
     }
 }
 
+/// Queue `text` on the runner and log a failed delivery.
+fn type_detached(agent: AgentId, runner: &Runner, text: String) {
+    let delivery = runner.type_turn(text);
+    tokio::spawn(async move {
+        if let Err(e) = delivery.wait().await {
+            debug!(agent = %agent, "a turn was not delivered: {e}");
+        }
+    });
+}
+
 /// The recap turn after a resume failed: the last turns and tool calls of
 /// the old session, from `events.jsonl`, and the commands to pick up work.
 pub fn recap_turn(agent_dir: &Path, old: Option<&HarnessSessionId>) -> String {
@@ -1082,31 +1366,47 @@ impl Supervisor for RunnerSupervisor {
 
     fn stop(&self, agent: AgentId) -> BoxFuture<'_, Result<(), SupervisorError>> {
         Box::pin(async move {
-            let runner = {
+            let (runner, harness) = {
                 let mut slots = lock(&self.inner.slots);
                 let slot = slots
                     .get_mut(&agent)
                     .filter(|s| s.live())
                     .ok_or(SupervisorError::NotRunning(agent))?;
                 slot.stop_requested = true;
+                let harness = slot.agent.harness;
                 match slot.runner.clone() {
-                    Some(r) => Some(r),
+                    Some(r) => (Some(r), harness),
                     None => {
                         // Waiting for a restart: cancel it.
                         slot.epoch += 1;
                         slot.phase = Phase::Down(AgentStatus::Stopped);
-                        None
+                        (None, harness)
                     }
                 }
             };
-            match runner {
-                Some(r) => tokio::task::spawn_blocking(move || r.kill())
-                    .await
-                    .map_err(other)?
-                    .map_err(other)?,
-                None => self.emit_status(agent, AgentStatus::Stopped, "stopped"),
+            let Some(r) = runner else {
+                self.emit_status(agent, AgentStatus::Stopped, "stopped");
+                return Ok(());
+            };
+            // A graceful stop: an idle harness with known exit keys gets
+            // them, and a kill only when it has not exited in time.
+            let keys = self
+                .entry(harness)
+                .map(|e| e.adapter.exit_keys())
+                .unwrap_or_default();
+            if !keys.is_empty() && r.status() == AgentStatus::Idle && r.write(&keys).await.is_ok() {
+                tokio::spawn(async move {
+                    if tokio::time::timeout(GRACEFUL_STOP, r.wait()).await.is_err() {
+                        debug!(agent = %agent, "the harness did not exit on its exit keys; killing it");
+                        let _ = tokio::task::spawn_blocking(move || r.kill()).await;
+                    }
+                });
+                return Ok(());
             }
-            Ok(())
+            tokio::task::spawn_blocking(move || r.kill())
+                .await
+                .map_err(other)?
+                .map_err(other)
         })
     }
 
@@ -1147,12 +1447,12 @@ impl Supervisor for RunnerSupervisor {
             let runner = self
                 .runner(agent)
                 .ok_or(SupervisorError::NotRunning(agent))?;
-            let delivery = runner.type_turn(text);
-            tokio::spawn(async move {
-                if let Err(e) = delivery.wait().await {
-                    debug!(agent = %agent, "a turn was not delivered: {e}");
-                }
-            });
+            if let Some(h) = lock(&self.inner.holds).get_mut(&agent) {
+                info!(agent = %agent, "a quota hold lasts; the turn waits");
+                h.waiting.push(text);
+                return Ok(());
+            }
+            type_detached(agent, &runner, text);
             Ok(())
         })
     }
@@ -1227,7 +1527,9 @@ impl Supervisor for RunnerSupervisor {
         Box::pin(async move {
             let slots = lock(&self.inner.slots);
             let slot = slots.get(&agent)?;
+            let held = || lock(&self.inner.holds).contains_key(&agent);
             Some(match (&slot.runner, slot.phase) {
+                (Some(r), _) if r.status() == AgentStatus::Idle && held() => AgentStatus::Blocked,
                 (Some(r), _) => r.status(),
                 (None, Phase::Restarting) => AgentStatus::Restarting,
                 (None, Phase::Down(s)) => s,
@@ -1238,6 +1540,65 @@ impl Supervisor for RunnerSupervisor {
 
     fn subscribe(&self) -> broadcast::Receiver<SupervisorEvent> {
         self.inner.tx.subscribe()
+    }
+
+    fn hold_turns(
+        &self,
+        agent: AgentId,
+        hold: Option<TurnHold>,
+    ) -> BoxFuture<'_, Result<(), SupervisorError>> {
+        Box::pin(async move {
+            let Some(hold) = hold else {
+                let Some(held) = lock(&self.inner.holds).remove(&agent) else {
+                    return Ok(());
+                };
+                let Some(runner) = self.runner(agent) else {
+                    if !held.waiting.is_empty() {
+                        warn!(
+                            agent = %agent,
+                            turns = held.waiting.len(),
+                            "the quota hold ended, but the agent does not run; its waiting turns are dropped"
+                        );
+                    }
+                    return Ok(());
+                };
+                info!(agent = %agent, turns = held.waiting.len(), "the quota hold ended");
+                if runner.status() == AgentStatus::Idle {
+                    self.emit_status(agent, AgentStatus::Idle, "quota hold ended");
+                }
+                for text in held.waiting {
+                    type_detached(agent, &runner, text);
+                }
+                self.deliver_pending(agent);
+                return Ok(());
+            };
+            let reason = hold_reason(&hold);
+            {
+                let mut holds = lock(&self.inner.holds);
+                match holds.get_mut(&agent) {
+                    Some(h) => h.hold = hold,
+                    None => {
+                        holds.insert(
+                            agent,
+                            Held {
+                                hold,
+                                waiting: Vec::new(),
+                            },
+                        );
+                    }
+                }
+            }
+            info!(agent = %agent, %reason, "quota hold");
+            // A working agent ends its turn first; its next idle shows
+            // `blocked`.
+            if self
+                .runner(agent)
+                .is_some_and(|r| r.status() == AgentStatus::Idle)
+            {
+                self.emit_status(agent, AgentStatus::Blocked, reason);
+            }
+            Ok(())
+        })
     }
 
     fn bind(&self, state: &Shared) {
@@ -1264,6 +1625,46 @@ impl Supervisor for RunnerSupervisor {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_harness_has_an_adapter() {
+        let homes = HashMap::new();
+        for mode in [SandboxMode::Bwrap, SandboxMode::None] {
+            let sandbox = SandboxConfig {
+                mode,
+                ..SandboxConfig::default()
+            };
+            let map = default_adapters(&sandbox, &homes);
+            for h in [
+                HarnessId::Claude,
+                HarnessId::Codex,
+                HarnessId::Copilot,
+                HarnessId::Pi,
+            ] {
+                assert_eq!(map.get(&h).map(|e| e.adapter.id()), Some(h), "{mode}");
+            }
+        }
+    }
+
+    #[test]
+    fn hold_reason_names_the_reset_once() {
+        let until = chrono::DateTime::parse_from_rfc3339("2030-01-01T05:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let h = TurnHold {
+            until: Some(until),
+            reason: "budget used up".into(),
+        };
+        assert_eq!(
+            hold_reason(&h),
+            "budget used up; turns wait until 2030-01-01T05:00:00Z"
+        );
+        let h = TurnHold {
+            until: Some(until),
+            reason: format!("resets at {}", until.to_rfc3339()),
+        };
+        assert_eq!(hold_reason(&h), h.reason);
+    }
 
     #[test]
     fn one_pointer_covers_many_items() {

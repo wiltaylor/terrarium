@@ -481,8 +481,9 @@ fn touch(t: &mut Tx<'_>, card: &str) -> ApiResult<()> {
     Ok(())
 }
 
+/// The daemon mails the blocked notice (PLAN §13): the sender is `system`.
 fn notify_blocked(t: &mut Tx<'_>, actor: &Actor, card: &CardRow, comment: &str) -> ApiResult<()> {
-    let from = Address::Project(card.project.clone());
+    let from = Address::System;
     let mut to = vec![Address::Operator];
     if card.created_by != "operator"
         && let Ok(Address::Agent { id, name, project }) =

@@ -28,8 +28,9 @@ pub enum SupervisorError {
     NotRunning(AgentId),
     #[error("agent {0} is running already")]
     AlreadyRunning(AgentId),
-    /// The agent cannot start: its adapter is a stub, or a file it needs
-    /// is missing. The message says what to do.
+    /// The agent cannot start: no adapter is registered for its harness, a
+    /// file it needs is missing, or a policy hook refuses it. The message
+    /// says what to do.
     #[error("{0}")]
     NotReady(String),
     #[error("{0}")]

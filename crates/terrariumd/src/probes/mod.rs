@@ -348,6 +348,7 @@ pub async fn run_subscription(state: &Shared, name: &str) -> ApiResult<ProbeOutc
                         )?;
                     }
                     subs::set_probe_result(t, &n, Ok(()))?;
+                    subs::clear_expired(t, &n)?;
                     let summary = w
                         .iter()
                         .map(|q| format!("{} {:.0}%", q.window, q.used_pct))
@@ -372,11 +373,19 @@ pub async fn run_subscription(state: &Shared, name: &str) -> ApiResult<ProbeOutc
         Err(e) => {
             let msg = e.to_string();
             warn!(subscription = %name, probe = %probe_name, "probe failed: {msg}");
+            // The provider refused the credential: the login expired.
+            let refused = matches!(e, ProbeError::Status { status: 401, .. });
             let n = name.clone();
             let m = msg.clone();
             state
                 .db
-                .write("system", move |t| subs::set_probe_result(t, &n, Err(&m)))
+                .write("system", move |t| {
+                    subs::set_probe_result(t, &n, Err(&m))?;
+                    if refused {
+                        subs::mark_expired(t, &n, &format!("the usage probe got {m}"))?;
+                    }
+                    Ok(())
+                })
                 .await?;
             ProbeOutcome {
                 subscription: name.clone(),

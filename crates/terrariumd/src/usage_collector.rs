@@ -16,8 +16,10 @@
 //! `sample_throttle`, with the totals since the last one, for the
 //! dashboard's Usage strip.
 //!
-//! Only Claude has a source in this phase. A Codex, Copilot, or pi source
-//! implements [`UsageSourceFactory`] and goes into [`default_sources`].
+//! Each harness has a source: Claude Code and Codex tail the session
+//! JSONL, Copilot tails its `events.jsonl`, and pi tails its session file.
+//! A new source implements [`UsageSourceFactory`] and goes into
+//! [`default_sources`].
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -248,9 +250,138 @@ impl UsageSourceFactory for ClaudeSourceFactory {
     }
 }
 
-/// The usage sources of this phase.
+/// Codex: tail the rollout JSONL with the adapter's tail. Each
+/// `token_count` response is one sample, keyed by its response id. Codex
+/// counts cached input inside `input_tokens`; the sample counts it once,
+/// as `cache_read`.
+pub struct CodexSource {
+    tail: terrarium_adapter_codex::usage::TranscriptTail,
+}
+
+impl UsageSource for CodexSource {
+    fn poll(&mut self) -> Result<Vec<SourceSample>, String> {
+        use terrarium_adapter_codex::usage::UsageRecord as R;
+        let records = self.tail.poll().map_err(|e| e.to_string())?;
+        Ok(records
+            .into_iter()
+            .filter_map(|r| match r {
+                R::Sample(s) => Some(SourceSample {
+                    model: s.model.clone(),
+                    input_tokens: s.usage.uncached_input_tokens(),
+                    output_tokens: s.usage.output_tokens,
+                    cache_read: s.usage.cached_input_tokens,
+                    cache_write: s.usage.cache_write_input_tokens,
+                    at: s.at,
+                    message_id: s.response_id,
+                }),
+                _ => None,
+            })
+            .collect())
+    }
+}
+
+/// Copilot CLI: tail the session `events.jsonl`. Each usage record is one
+/// sample, keyed by its `usage_id`.
+pub struct CopilotSource {
+    tail: terrarium_adapter_copilot::usage::TranscriptTail,
+}
+
+impl UsageSource for CopilotSource {
+    fn poll(&mut self) -> Result<Vec<SourceSample>, String> {
+        use terrarium_adapter_copilot::usage::UsageRecord as R;
+        let records = self.tail.poll().map_err(|e| e.to_string())?;
+        Ok(records
+            .into_iter()
+            .filter_map(|r| match r {
+                R::Sample(s) => Some(SourceSample {
+                    model: s.model.clone(),
+                    input_tokens: s.input_tokens,
+                    output_tokens: s.output_tokens,
+                    cache_read: s.cache_read_tokens,
+                    cache_write: s.cache_write_tokens,
+                    at: s.at,
+                    message_id: s.usage_id,
+                }),
+                _ => None,
+            })
+            .collect())
+    }
+}
+
+/// pi: tail the session file. A record id is unique in one file only, so
+/// the sample key is `<session>:<id>`.
+pub struct PiSource {
+    tail: terrarium_adapter_pi::usage::SessionTail,
+}
+
+impl UsageSource for PiSource {
+    fn poll(&mut self) -> Result<Vec<SourceSample>, String> {
+        let samples = self.tail.poll().map_err(|e| e.to_string())?;
+        Ok(samples
+            .into_iter()
+            .map(|s| SourceSample {
+                message_id: s.key(),
+                model: s.model.clone(),
+                input_tokens: s.input_tokens,
+                output_tokens: s.output_tokens,
+                cache_read: s.cache_read_tokens,
+                cache_write: s.cache_write_tokens,
+                at: s.at,
+            })
+            .collect())
+    }
+}
+
+/// A factory that tails the session file the hook reported, mapped from
+/// the sandbox into the shared home.
+pub struct TailFactory {
+    harness: HarnessId,
+    make: fn(PathBuf) -> Box<dyn UsageSource>,
+}
+
+impl UsageSourceFactory for TailFactory {
+    fn harness(&self) -> HarnessId {
+        self.harness
+    }
+
+    fn open(&self, session: &SessionInfo, home: &Path) -> Option<Box<dyn UsageSource>> {
+        let reported = session.transcript.as_ref()?;
+        let path = host_path(reported, self.harness, home);
+        debug!(agent = %session.agent, harness = %self.harness, path = %path.display(),
+               "tailing the session file");
+        Some((self.make)(path))
+    }
+}
+
+/// The usage sources of every harness.
 pub fn default_sources() -> Vec<Arc<dyn UsageSourceFactory>> {
-    vec![Arc::new(ClaudeSourceFactory)]
+    vec![
+        Arc::new(ClaudeSourceFactory),
+        Arc::new(TailFactory {
+            harness: HarnessId::Codex,
+            make: |p| {
+                Box::new(CodexSource {
+                    tail: terrarium_adapter_codex::usage::TranscriptTail::new(p),
+                })
+            },
+        }),
+        Arc::new(TailFactory {
+            harness: HarnessId::Copilot,
+            make: |p| {
+                Box::new(CopilotSource {
+                    tail: terrarium_adapter_copilot::usage::TranscriptTail::new(p),
+                })
+            },
+        }),
+        Arc::new(TailFactory {
+            harness: HarnessId::Pi,
+            make: |p| {
+                Box::new(PiSource {
+                    tail: terrarium_adapter_pi::usage::SessionTail::new(p),
+                })
+            },
+        }),
+    ]
 }
 
 struct Tracked {
@@ -535,6 +666,44 @@ mod tests {
             host_path(other, HarnessId::Claude, Path::new("/auth/claude")),
             other
         );
+    }
+
+    #[test]
+    fn other_harness_sources_read_their_fixtures() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../adapters");
+        for (harness, fixture) in [
+            (HarnessId::Codex, "codex/tests/fixtures/session.jsonl"),
+            (HarnessId::Copilot, "copilot/tests/fixtures/events.jsonl"),
+            (HarnessId::Pi, "pi/tests/fixtures/session.jsonl"),
+        ] {
+            let path = PathBuf::from(dir).join(fixture);
+            let factory = default_sources()
+                .into_iter()
+                .find(|f| f.harness() == harness)
+                .unwrap();
+            let info = SessionInfo {
+                agent: "A".into(),
+                name: "a".into(),
+                project: "p".into(),
+                harness,
+                subscription: None,
+                model: None,
+                session: "s".into(),
+                transcript: Some(path.clone()),
+            };
+            let mut src = factory.open(&info, Path::new("/nonexistent")).unwrap();
+            let samples = src.poll().unwrap();
+            assert!(!samples.is_empty(), "{harness}: no samples in {fixture}");
+            assert!(
+                samples.iter().all(|s| !s.message_id.is_empty()),
+                "{harness}"
+            );
+            assert!(
+                samples.iter().any(|s| s.input_tokens + s.output_tokens > 0),
+                "{harness}"
+            );
+            assert!(src.poll().unwrap().is_empty(), "{harness}: read twice");
+        }
     }
 
     #[test]

@@ -132,6 +132,46 @@ pub fn operator_only(actor: &Actor, what: &str) -> ApiResult<()> {
     }
 }
 
+/// Use a target: exec, shell, copy, and its lifecycle verbs (PLAN §9,
+/// §19). The operator may use every target. An agent may use a target that
+/// its `policy.targets` lists, when the target is global or in the agent's
+/// own project. The role does not widen this: a sysadmin agent also needs
+/// the name in its policy.
+pub fn use_target(actor: &Actor, target: &str, target_project: Option<&str>) -> ApiResult<()> {
+    let Actor::Agent(a) = actor else {
+        return Ok(());
+    };
+    if let Some(p) = target_project
+        && p != a.project
+    {
+        return Err(ApiError::forbidden(format!(
+            "target `{target}` belongs to project `{p}`; an agent uses global targets and those of its own project"
+        )));
+    }
+    if a.policy.targets.iter().any(|t| t == target) {
+        Ok(())
+    } else {
+        Err(ApiError::forbidden(format!(
+            "target `{target}` is not in your policy.targets; ask a project admin to add it"
+        )))
+    }
+}
+
+/// Define, change, or delete a target: a global target needs sysadmin; a
+/// project target needs project_admin of that project (PLAN §10).
+pub fn define_target(actor: &Actor, project: Option<&str>) -> ApiResult<()> {
+    match project {
+        None => sysadmin(actor, "defining a global target"),
+        Some(p) => admin_project(actor, p, "defining a project target"),
+    }
+}
+
+/// Register or revoke host agents: sysadmin or the operator (PLAN §10
+/// "register host agents").
+pub fn manage_hosts(actor: &Actor, what: &str) -> ApiResult<()> {
+    sysadmin(actor, what)
+}
+
 /// Read the project inbox and reply from it.
 pub fn read_inbox(actor: &Actor, project: &str) -> ApiResult<()> {
     admin_project(actor, project, "reading the project inbox")
@@ -165,6 +205,7 @@ pub fn change_role(actor: &Actor, target: &str, target_project: &str, role: Role
 pub fn mail_to(sender: &AgentActor, to: &Address) -> ApiResult<()> {
     let (id, name, project) = match to {
         Address::Operator | Address::Project(_) => return Ok(()),
+        Address::System => return Err(ApiError::invalid("`system` only sends mail")),
         Address::Agent { id, name, project } => (id, name, project),
     };
     if sender.is_sysadmin() || *id == sender.id {
