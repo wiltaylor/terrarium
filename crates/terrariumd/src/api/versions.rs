@@ -27,6 +27,14 @@ pub fn routes() -> Router<Shared> {
         .route("/versions/{id}/compare", get(compare))
 }
 
+/// `Version.url` as the dashboard opens it: absolute with
+/// `TERRARIUM_PUBLIC_URL`, else the path.
+fn absolute<V: std::borrow::BorrowMut<Version>>(state: &Shared, mut v: V) -> V {
+    let url = state.web.page_url(&v.borrow().url);
+    v.borrow_mut().url = url;
+    v
+}
+
 /// The event kinds that wake a `?wait=` list.
 const VERSION_KINDS: [&str; 6] = [
     "version.created",
@@ -52,6 +60,10 @@ async fn list(
         async move { db.read(move |c| versions::list(c, &n, &f2, &p2)).await }
     })
     .await?;
+    let mut rows = rows;
+    for v in &mut rows.items {
+        absolute(&state, v);
+    }
     Ok(paged(rows))
 }
 
@@ -67,7 +79,7 @@ async fn create(
             versions::create(t, &actor, &name, body)
         })
         .await?;
-    Ok((StatusCode::CREATED, Json(v)))
+    Ok((StatusCode::CREATED, Json(absolute(&state, v))))
 }
 
 async fn show(
@@ -75,12 +87,11 @@ async fn show(
     actor: Actor,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Version>> {
-    Ok(Json(
-        state
-            .db
-            .read(move |c| versions::get(c, &actor, &id))
-            .await?,
-    ))
+    let v = state
+        .db
+        .read(move |c| versions::get(c, &actor, &id))
+        .await?;
+    Ok(Json(absolute(&state, v)))
 }
 
 async fn update(
@@ -95,7 +106,7 @@ async fn update(
             versions::update(t, &actor, &id, patch)
         })
         .await?;
-    Ok(Json(v))
+    Ok(Json(absolute(&state, v)))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -122,13 +133,14 @@ async fn submit(
     body: Bytes,
 ) -> ApiResult<Json<Version>> {
     let c = comment_of(&body)?;
+    let base = state.web.mail_base().to_owned();
     let v = state
         .db
         .write(actor.label(), move |t| {
-            versions::submit(t, &actor, &id, c.as_deref())
+            versions::submit(t, &actor, &id, c.as_deref(), &base)
         })
         .await?;
-    Ok(Json(v))
+    Ok(Json(absolute(&state, v)))
 }
 
 async fn decide(
@@ -145,7 +157,7 @@ async fn decide(
             versions::decide(t, &actor, &id, approve, c.as_deref())
         })
         .await?;
-    Ok(Json(v))
+    Ok(Json(absolute(&state, v)))
 }
 
 async fn approve(
@@ -179,7 +191,7 @@ async fn release(
             versions::release(t, &actor, &id, c.as_deref())
         })
         .await?;
-    Ok(Json(v))
+    Ok(Json(absolute(&state, v)))
 }
 
 #[derive(Debug, Default, Deserialize)]

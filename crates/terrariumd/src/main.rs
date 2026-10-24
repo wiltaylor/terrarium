@@ -71,6 +71,9 @@ async fn main() -> anyhow::Result<()> {
         detect_on_start: true,
         ..UsageConfig::default()
     };
+    // The web settings, from the flags and the env, in one place.
+    let artifact_listen = settings.artifact_listen();
+    let web = settings.web();
     let daemon = start_with_usage(
         DaemonConfig {
             socket: settings.socket,
@@ -80,7 +83,8 @@ async fn main() -> anyhow::Result<()> {
             config_dir: settings.config_dir,
             supervisor,
             insecure_agent_header: settings.insecure_agent_header,
-            artifact_listen: Some(settings.artifact_listen),
+            artifact_listen,
+            web,
         },
         usage,
     )
@@ -89,7 +93,7 @@ async fn main() -> anyhow::Result<()> {
     // "TLS"). TERRARIUM_HOST_TLS_CERT and TERRARIUM_HOST_TLS_KEY turn on
     // TLS and bind 0.0.0.0:8082; without them it is plaintext on
     // 127.0.0.1:8082. TERRARIUM_HOST_LISTEN sets the address; empty turns
-    // it off. The main router still serves /hosts/connect.
+    // it off. The dashboard port does not serve /hosts/connect.
     let host_task = match terrariumd::hosts::HostListen::from_env()? {
         Some(listen) => {
             let (task, _) = listen.serve(daemon.state.clone()).await?;

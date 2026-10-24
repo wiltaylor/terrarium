@@ -27,7 +27,7 @@ The daemon serves one router on two listeners.
 | Listener | Address | Authentication |
 |---|---|---|
 | Unix socket | `$TERRARIUM_API_SOCKET` | None. The caller is the operator. |
-| TCP | `$TERRARIUM_LISTEN` | `Authorization: Bearer $TERRARIUM_TOKEN` on `/api/*`. Without a token the TCP listener stays off. |
+| TCP | `$TERRARIUM_LISTEN` | `Authorization: Bearer $TERRARIUM_TOKEN` on `/api/*`, or the session cookie of `POST /api/session` (§1.1). Without a token the TCP listener stays off. |
 | TCP, host agents | `$TERRARIUM_HOST_LISTEN` (default `auto`: `0.0.0.0:8082` with TLS, `127.0.0.1:8082` without) | `GET /hosts/connect` only, with a per-host token (§17.1). TLS when `TERRARIUM_HOST_TLS_CERT` and `TERRARIUM_HOST_TLS_KEY` are set. |
 
 A browser cannot set headers on a WebSocket. A WebSocket upgrade on TCP
@@ -39,15 +39,101 @@ browser drops the connection. The token must use only characters that a
 subprotocol allows: letters, digits, and ``!#$%&'*+-.^_`|~``. A token from
 `openssl rand -hex 32` is fine.
 
-The older form, the `?token=` query parameter on an upgrade request, still
-works but is deprecated: a query string reaches proxy access logs and
-browser history (`docs/security-review.md`, F4). The daemon logs a warning
-once per client address when a client uses it.
-`TERRARIUM_WS_QUERY_TOKEN=0` refuses it with `401 unauthorized`. Both forms
-count on upgrade requests only; a plain request needs `Authorization`.
+The older form, the `?token=` query parameter on an upgrade request, is
+deprecated and **off by default**: a query string reaches proxy access logs
+and browser history (`docs/security-review.md`, F4). A request with it gets
+`401 unauthorized`. `TERRARIUM_WS_QUERY_TOKEN=1` (or `--ws-query-token 1`)
+turns it back on for an old client; the daemon then logs a warning once per
+client address. The CLI (`agent attach`) sends `Authorization` on its
+upgrade. The subprotocol and `?token=` count on upgrade requests only; a
+plain request needs `Authorization` or the cookie.
 
 The token compare is constant time, also in the length: the daemon compares
 SHA-256 hashes of the two values.
+
+### 1.1 Dashboard sessions (cookie)
+
+The dashboard trades the token for a cookie once, so that no script on the
+page can read a credential (`docs/security-review.md`, F3). The CLI keeps
+the bearer token; nothing changes for it.
+
+| Endpoint | Auth | Answer |
+|---|---|---|
+| `POST /api/session` | `Authorization: Bearer <token>` only (not the cookie) | `201 {"csrf", "exp", "expires_at"}` and `Set-Cookie` |
+| `DELETE /api/session` | none | `204` and a `Set-Cookie` that clears the cookie |
+
+```
+Set-Cookie: terrarium_session=v1.<exp>.<nonce>.<sig>; Path=/; Max-Age=<ttl>; HttpOnly; SameSite=Strict[; Secure]
+```
+
+- `Secure` is set when the request is HTTPS or a proxy sends
+  `X-Forwarded-Proto: https`.
+- The life is `TERRARIUM_SESSION_TTL` (`--session-ttl`): seconds, or a
+  number with `s`, `m`, `h`, or `d`. The default is `12h`. `exp` is a Unix
+  time; `expires_at` is the same time in RFC 3339.
+- The cookie is stateless. `sig` is an HMAC-SHA256 of the version, `exp`,
+  and `nonce` with the key in `<state>/session.key` (32 random bytes as
+  hex, mode 0600; the daemon makes it at the first start). The `csrf`
+  value is an HMAC of the nonce with the same key. To end every session,
+  delete or replace `session.key` and restart the daemon. A session cannot
+  be ended alone before `exp`; `DELETE` clears the browser's copy.
+- The answers carry `Cache-Control: no-store`. The Unix socket has no
+  sessions (`404 not_found`).
+
+The cookie authenticates every `/api` route and WebSocket upgrade on TCP,
+as the token does. Order: `Authorization`, then (on an upgrade) the
+`bearer.` subprotocol, then the cookie, then (when on) `?token=`. A wrong
+token is `401` even with a good cookie. With the cookie:
+
+- `POST`, `PUT`, `PATCH`, and `DELETE` must send `X-CSRF-Token: <csrf>`.
+  No header or a wrong one: `403 forbidden`. `GET` needs no header.
+- A WebSocket upgrade must send an `Origin` that is the dashboard origin:
+  the origin of `TERRARIUM_PUBLIC_URL`, or `http(s)://<Host>` of the
+  request itself. No `Origin`, `null`, or another origin: `403 forbidden`.
+  The upgrade needs no subprotocol.
+- A cookie that is wrong, from another key, or past `exp`: `401
+  unauthorized`. The dashboard then calls `POST /api/session` again.
+
+### 1.2 Security headers
+
+Every answer on the TCP listener, except a served artifact (§12.4), has:
+
+```
+Content-Security-Policy: <policy>
+X-Content-Type-Options: nosniff
+Referrer-Policy: no-referrer
+X-Frame-Options: DENY
+```
+
+On `/api/*` the policy is `default-src 'none'; frame-ancestors 'none'`. On
+the dashboard pages and assets it is the policy of the dashboard's `<meta>`
+tag (`dashboard/vite.config.ts`, `dashboardCsp`) and `frame-ancestors
+'none'`:
+
+```
+default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline';
+img-src 'self' data: <art>; font-src 'self'; connect-src 'self' <art>;
+frame-src <art or 'self'>; worker-src 'none'; manifest-src 'self';
+media-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none';
+frame-ancestors 'none'
+```
+
+`<art>` is the artifact origin as the daemon knows it at run time, the same
+origin that signed URLs name (§12.4). Without an artifact listener it is
+absent and `frame-src` is `'self'`.
+
+### 1.3 Web settings
+
+The daemon reads these once, as a flag or an env var (`Settings::web`), and
+gives them to the routers and the mail code.
+
+| Env | Flag | Default | Use |
+|---|---|---|---|
+| `TERRARIUM_PUBLIC_URL` | `--public-url` | unset (mail: `http://localhost:8080`) | Mail links, `Version.url`, the cookie `Origin` check, CORS on `/a/...`. |
+| `TERRARIUM_ARTIFACT_LISTEN` | `--artifact-listen` | `0.0.0.0:8081` | The artifact origin listener. Empty: none, and the dashboard port serves `/a/...`. |
+| `TERRARIUM_ARTIFACT_PUBLIC_URL` | `--artifact-public-url` | unset | The artifact origin in signed URLs and the CSP. |
+| `TERRARIUM_WS_QUERY_TOKEN` | `--ws-query-token` | `0` | `1`: take `?token=` on an upgrade. |
+| `TERRARIUM_SESSION_TTL` | `--session-ttl` | `12h` | The life of a session cookie. |
 
 Every API request has an **actor**:
 
@@ -1194,10 +1280,10 @@ of the mint request (`X-Forwarded-Host`, else `Host`, without its port) with
 the port of `TERRARIUM_ARTIFACT_LISTEN`, and `https` when
 `X-Forwarded-Proto` is `https`. Set `TERRARIUM_ARTIFACT_PUBLIC_URL` behind a
 reverse proxy, for example `https://artifacts.example.com`. With
-`TERRARIUM_ARTIFACT_LISTEN=` (empty), there is no artifact listener: the
-dashboard port serves `/a/...` and `<origin>` is empty (a relative URL). The
-Unix socket always serves `/a/...`. Set the listener with the env var: the
-router reads the env, not the `--artifact-listen` flag.
+`TERRARIUM_ARTIFACT_LISTEN=` or `--artifact-listen ""` (empty), there is no
+artifact listener: the dashboard port serves `/a/...` and `<origin>` is
+empty (a relative URL). The flag and the env var are the same setting
+(§1.3). The Unix socket always serves `/a/...`.
 
 A bundle carries the signature in the path, so that the relative links in
 its pages keep working. The daemon accepts both forms for both kinds. No
@@ -1206,14 +1292,31 @@ signature, a wrong one, or an expired one: `403 forbidden`.
 Every answer has these headers, and no cookie:
 
 ```
-Content-Security-Policy: sandbox allow-scripts allow-forms allow-popups
+Content-Security-Policy: sandbox allow-scripts allow-forms allow-popups; connect-src 'none'
 X-Content-Type-Options: nosniff
 Referrer-Policy: no-referrer
 Cache-Control: private, max-age=60
+Access-Control-Allow-Origin: <dashboard origin>
+Vary: Origin
 ```
 
+The answer keeps its own `sandbox` CSP and has no `X-Frame-Options`, also
+on the dashboard port, so that the viewer can frame it (§1.2).
+
+CORS lets the dashboard `fetch` a text or markdown artifact from the
+artifact origin (no credentials, no preflight). `Access-Control-Allow-Origin`
+is the request's `Origin` when that is the origin of `TERRARIUM_PUBLIC_URL`,
+or an `http(s)` origin on the same host as the artifact request (the
+dashboard on another port of the same host, the default layout). Else it is
+the `TERRARIUM_PUBLIC_URL` origin, or the header is absent. It is never `*`
+or `null`, and there is no `Access-Control-Allow-Credentials`. A `403`
+answer has the header too, so that the viewer can read the error.
+
 The CSP sandbox gives the page an opaque origin. Scripts in a bundle run,
-but they cannot reach the dashboard or the API. A type that does not render
+but they cannot reach the dashboard or the API. `connect-src 'none'` stops
+`fetch`, XHR, WebSocket, and `sendBeacon` from the page, so a script cannot
+send data out that way; a bundle cannot load its own JSON with `fetch`
+either. A type that does not render
 also gets `Content-Disposition: attachment`.
 
 The main router serves `/a/...`. `terrariumd::api::artifact_router(state)`
@@ -1254,7 +1357,7 @@ Release points that the user reviews (PLAN §15.3). The code is in
  "notes":"Fixed arm64.","git_ref":"abc123","thread_id":"01M5PA1A...",
  "created_by":"...","created_by_name":"proj/lead","created_at":"...","updated_at":"...",
  "submitted_at":"...","submitted_by":"...","decided_at":"...","decided_by":"operator",
- "url":"/projects/proj/versions/01M5PA1A0K16V6G88P3SE78WAB",
+ "url":"https://terrarium.example.com/p/proj/versions/01M5PA1A0K16V6G88P3SE78WAB",
  "cards":[{"id":"TER-1","title":"Parser","column":"done"}],
  "artifacts":[{"id":"ART-1","uid":"...","name":"report.txt","kind":"file",
                "content_type":"text/plain; charset=utf-8","size":6}],
@@ -1268,12 +1371,10 @@ Release points that the user reviews (PLAN §15.3). The code is in
   letter or a digit. A name is unique in its project.
 - Statuses: `draft`, `in_review`, `approved`, `rejected`, `released`.
 - `reviews` decisions: `submitted`, `approved`, `rejected`, `released`.
-- `url` is the path of the version as the API names it:
-  `/projects/<project>/versions/<id>`. The dashboard route of the same
-  page is `/p/<project>/versions/<id>`, and operator mail links to that
-  route on `TERRARIUM_PUBLIC_URL` (§13.2). A client that opens the
-  dashboard page must build the `/p/...` path itself; `url` is not a
-  dashboard route.
+- `url` is the dashboard page of the version, `/p/<project>/versions/<id>`:
+  absolute on `TERRARIUM_PUBLIC_URL` when it is set (the same link as the
+  review mail, §13.2), else the path alone, which the dashboard opens on
+  its own origin.
 
 ### 13.2 Rules
 
@@ -1649,7 +1750,9 @@ contract with the host agent is [host-protocol.md](host-protocol.md).
 A host agent dials in to `GET /hosts/connect` (a WebSocket, not under
 `/api`). The daemon serves this path on its own listener,
 `TERRARIUM_HOST_LISTEN` (default `0.0.0.0:8082` with TLS, `127.0.0.1:8082`
-without), and also on the main router. `TERRARIUM_HOST_TLS_CERT` and
+without), and on the Unix socket. The dashboard port (`TERRARIUM_LISTEN`)
+does not serve it: that port is plaintext, and a host token sent to it would
+travel in clear (`docs/security-review.md`, F2). `TERRARIUM_HOST_TLS_CERT` and
 `TERRARIUM_HOST_TLS_KEY` turn on TLS on the listener
 ([host-protocol.md "TLS"](host-protocol.md#tls)). The upgrade must send
 `Authorization: Bearer <host token>`. A bad, revoked, used, or expired token

@@ -108,13 +108,13 @@ fn effective_pct(used: f64, resets_at: Option<&str>, now: DateTime<Utc>) -> f64 
 }
 
 /// The dashboard page of the subscriptions, for a quota alert mail.
-pub fn subscriptions_link() -> String {
-    crate::settings::dashboard_link("/subscriptions")
+pub fn subscriptions_link(web: &crate::settings::WebConfig) -> String {
+    web.dashboard_link("/subscriptions")
 }
 
 /// The dashboard page of a project's spend, for a budget alert mail.
-pub fn spend_link(project: &str) -> String {
-    crate::settings::dashboard_link(&format!("/p/{project}/spend"))
+pub fn spend_link(web: &crate::settings::WebConfig, project: &str) -> String {
+    web.dashboard_link(&format!("/p/{project}/spend"))
 }
 
 /// Mail the operator from the daemon: the sender is `system`, and so is
@@ -301,7 +301,7 @@ pub async fn evaluate_subscription(state: &Shared, name: &str) -> ApiResult<()> 
                 ),
                 body: format!(
                     "Subscription `{}` ({}) has used {pct:.0}% of its {} window. The alert level is {}%.\nThe window resets at {reset_txt}.\n\nMove agents to another subscription with `terrarium admin agent set <name> --subscription <other>`, or wait for the reset.\n\nOpen: {}\n",
-                    sub.name, sub.provider, w.window, sub.alert_at, subscriptions_link()
+                    sub.name, sub.provider, w.window, sub.alert_at, subscriptions_link(&state.web)
                 ),
                 data: json!({"subscription": sub.name, "window": w.window, "used_pct": pct,
                              "resets_at": w.resets_at, "level": "alert", "alert_at": sub.alert_at}),
@@ -326,7 +326,7 @@ pub async fn evaluate_subscription(state: &Shared, name: &str) -> ApiResult<()> 
                 subject: format!("Quota: {} {} window is used up", sub.name, w.window),
                 body: format!(
                     "Subscription `{}` has used all of its {} window. New turns of its {} agent(s) wait until {reset_txt}.\n\nOpen: {}\n",
-                    sub.name, w.window, on.len(), subscriptions_link()
+                    sub.name, w.window, on.len(), subscriptions_link(&state.web)
                 ),
                 data: json!({"subscription": sub.name, "window": w.window, "used_pct": pct,
                              "resets_at": w.resets_at, "level": "exhausted"}),
@@ -413,7 +413,7 @@ pub async fn check_budgets(state: &Shared, project: &str) -> ApiResult<()> {
                         } else {
                             ""
                         },
-                        spend_link(project)
+                        spend_link(&state.web, project)
                     ),
                     data: json!({"project": project, "subscription": b.subscription, "window": window,
                                  "used": used, "limit": limit, "used_pct": pct, "level": level}),

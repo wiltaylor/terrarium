@@ -33,14 +33,46 @@ pub struct Settings {
     /// The TCP address of the artifact serving origin (PLAN §15.2). Empty:
     /// no listener of its own, and the dashboard port serves `/a/...`
     /// instead. With a listener (the default), the dashboard port does not
-    /// serve artifacts (`docs/security-review.md`, F5). Set it with the env
-    /// var: the API router reads the env (see [`artifact_listen`]).
+    /// serve artifacts (`docs/security-review.md`, F5).
+    #[arg(long, env = ENV_ARTIFACT_LISTEN, default_value = DEFAULT_ARTIFACT_LISTEN)]
+    pub artifact_listen: String,
+
+    /// The dashboard URL as the operator opens it, for example
+    /// `https://terrarium.example.com`. It goes into mail links and
+    /// `Version.url`, the WebSocket `Origin` check of a cookie session, and
+    /// the CORS answer of the artifact origin.
+    #[arg(long, env = ENV_PUBLIC_URL)]
+    pub public_url: Option<String>,
+
+    /// The artifact origin as a browser opens it, for example
+    /// `https://artifacts.example.com`. Signed artifact URLs and the
+    /// dashboard CSP name it. Default: the request host with the port of
+    /// `--artifact-listen`.
+    #[arg(long, env = ENV_ARTIFACT_PUBLIC_URL)]
+    pub artifact_public_url: Option<String>,
+
+    /// Take the bearer token as `?token=` on a WebSocket upgrade
+    /// (deprecated: the query string reaches logs). `0` (the default)
+    /// refuses it; clients send `Authorization` or the subprotocol
+    /// `bearer.<token>`.
     #[arg(
         long,
-        env = "TERRARIUM_ARTIFACT_LISTEN",
-        default_value = "0.0.0.0:8081"
+        env = ENV_WS_QUERY_TOKEN,
+        default_value = "0",
+        action = clap::ArgAction::Set,
+        value_parser = parse_switch
     )]
-    pub artifact_listen: String,
+    pub ws_query_token: bool,
+
+    /// The life of a dashboard session cookie (`POST /api/session`):
+    /// seconds, or a number with `s`, `m`, `h`, or `d`.
+    #[arg(
+        long,
+        env = ENV_SESSION_TTL,
+        default_value = DEFAULT_SESSION_TTL,
+        value_parser = parse_duration
+    )]
+    pub session_ttl: std::time::Duration,
 
     /// Runner sockets go in `<dir>/agents/<ulid>.sock`.
     #[arg(long, env = "TERRARIUM_RUNTIME_DIR", default_value_os_t = default_runtime_dir())]
@@ -173,67 +205,219 @@ impl Settings {
     }
 }
 
-// ---- settings that the daemon reads from the env where it needs them ----
+// ---- the web settings: origins, WebSocket auth, sessions ----
 //
-// These are not `Settings` fields: the code that uses them (the API router,
-// the mail bodies) does not get the parsed `Settings`. Each one reads its
-// env var when it is called, so a test can pass a value in directly.
+// `Settings` parses them (flag or env) in one place; `Settings::web` turns
+// them into a `WebConfig`; `DaemonConfig` carries it to the routers and the
+// mail code. No other code reads these env vars.
 
 /// `TERRARIUM_PUBLIC_URL`: the dashboard as the operator opens it, for the
-/// links in operator mail.
+/// links in operator mail, `Version.url`, the WebSocket `Origin` check, and
+/// the CORS answer of the artifact origin.
 pub const ENV_PUBLIC_URL: &str = "TERRARIUM_PUBLIC_URL";
-/// The default of [`ENV_PUBLIC_URL`].
+/// The mail-link base when [`ENV_PUBLIC_URL`] is not set.
 pub const DEFAULT_PUBLIC_URL: &str = "http://localhost:8080";
 /// `TERRARIUM_ARTIFACT_LISTEN`, also the `--artifact-listen` flag.
 pub const ENV_ARTIFACT_LISTEN: &str = "TERRARIUM_ARTIFACT_LISTEN";
 /// The default of [`ENV_ARTIFACT_LISTEN`].
 pub const DEFAULT_ARTIFACT_LISTEN: &str = "0.0.0.0:8081";
 /// `TERRARIUM_ARTIFACT_PUBLIC_URL`: the artifact origin as a browser opens
-/// it, for signed artifact URLs.
+/// it, for signed artifact URLs and the dashboard CSP.
 pub const ENV_ARTIFACT_PUBLIC_URL: &str = "TERRARIUM_ARTIFACT_PUBLIC_URL";
-/// `TERRARIUM_WS_QUERY_TOKEN`: `0` refuses the bearer token in `?token=`.
+/// `TERRARIUM_WS_QUERY_TOKEN`: `1` takes the bearer token in `?token=` on a
+/// WebSocket upgrade (deprecated). The default `0` refuses it.
 pub const ENV_WS_QUERY_TOKEN: &str = "TERRARIUM_WS_QUERY_TOKEN";
+/// `TERRARIUM_SESSION_TTL`: the life of a dashboard session cookie.
+pub const ENV_SESSION_TTL: &str = "TERRARIUM_SESSION_TTL";
+/// The default of [`ENV_SESSION_TTL`].
+pub const DEFAULT_SESSION_TTL: &str = "12h";
 
-fn env_nonempty(key: &str) -> Option<String> {
-    std::env::var(key)
-        .ok()
-        .map(|v| v.trim().to_owned())
-        .filter(|v| !v.is_empty())
+/// The settings of the web side of the daemon. [`Settings::web`] makes it
+/// from the flags and the env; tests make it directly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebConfig {
+    /// [`ENV_PUBLIC_URL`], with no trailing `/`. `None`: not set.
+    pub public_url: Option<String>,
+    /// [`ENV_ARTIFACT_PUBLIC_URL`], with no trailing `/`. `None`: not set.
+    pub artifact_public_url: Option<String>,
+    /// Take `?token=` on a WebSocket upgrade ([`ENV_WS_QUERY_TOKEN`]).
+    pub ws_query_token: bool,
+    /// The life of a session cookie ([`ENV_SESSION_TTL`]).
+    pub session_ttl: std::time::Duration,
 }
 
-/// The dashboard URL for operator mail, with no trailing `/`.
-pub fn public_url() -> String {
-    env_nonempty(ENV_PUBLIC_URL)
-        .unwrap_or_else(|| DEFAULT_PUBLIC_URL.to_owned())
-        .trim_end_matches('/')
-        .to_owned()
+impl Default for WebConfig {
+    fn default() -> Self {
+        Self {
+            public_url: None,
+            artifact_public_url: None,
+            ws_query_token: false,
+            session_ttl: std::time::Duration::from_secs(12 * 3600),
+        }
+    }
 }
 
-/// A dashboard link: [`public_url`] and `path` (which starts with `/`).
-pub fn dashboard_link(path: &str) -> String {
-    format!("{}{path}", public_url())
+/// A URL setting: trimmed, no trailing `/`, `None` when empty.
+pub fn clean_url(v: Option<&str>) -> Option<String> {
+    v.map(|u| u.trim().trim_end_matches('/').to_owned())
+        .filter(|u| !u.is_empty())
 }
 
-/// The artifact listener address: the env value (empty is allowed and
-/// means "no listener of its own"), else the default.
-pub fn artifact_listen() -> String {
-    std::env::var(ENV_ARTIFACT_LISTEN)
-        .map(|v| v.trim().to_owned())
-        .unwrap_or_else(|_| DEFAULT_ARTIFACT_LISTEN.to_owned())
+impl WebConfig {
+    /// The base of the links in operator mail: [`Self::public_url`], else
+    /// [`DEFAULT_PUBLIC_URL`].
+    pub fn mail_base(&self) -> &str {
+        self.public_url.as_deref().unwrap_or(DEFAULT_PUBLIC_URL)
+    }
+
+    /// A dashboard link for a mail: [`Self::mail_base`] and `path` (which
+    /// starts with `/`). Always absolute.
+    pub fn dashboard_link(&self, path: &str) -> String {
+        format!("{}{path}", self.mail_base())
+    }
+
+    /// A dashboard link for an API answer: absolute when
+    /// [`Self::public_url`] is set, else the path alone (the dashboard
+    /// resolves it against its own origin).
+    pub fn page_url(&self, path: &str) -> String {
+        match &self.public_url {
+            Some(base) => format!("{base}{path}"),
+            None => path.to_owned(),
+        }
+    }
+
+    /// The origin (`scheme://host[:port]`) of [`Self::public_url`].
+    pub fn public_origin(&self) -> Option<String> {
+        self.public_url.as_deref().map(origin_of)
+    }
 }
 
-/// The explicit artifact origin URL, with no trailing `/`, when it is set.
-pub fn artifact_public_url() -> Option<String> {
-    env_nonempty(ENV_ARTIFACT_PUBLIC_URL).map(|u| u.trim_end_matches('/').to_owned())
+/// The origin of a URL: `https://t.example.com/x/` -> `https://t.example.com`.
+pub fn origin_of(url: &str) -> String {
+    match url.split_once("://") {
+        Some((scheme, rest)) => {
+            let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+            format!("{}://{}", scheme.to_ascii_lowercase(), authority)
+        }
+        None => url.to_owned(),
+    }
 }
 
-/// May a WebSocket upgrade carry the bearer token in `?token=`? Yes,
-/// unless `TERRARIUM_WS_QUERY_TOKEN=0` (or `false`, `no`, `off`).
-pub fn ws_query_token_allowed() -> bool {
-    !matches!(
-        env_nonempty(ENV_WS_QUERY_TOKEN)
-            .map(|v| v.to_ascii_lowercase())
-            .as_deref(),
-        Some("0" | "false" | "no" | "off")
-    )
+/// `1`, `true`, `yes`, `on` -> true; `0`, `false`, `no`, `off`, empty -> false.
+pub fn parse_switch(s: &str) -> Result<bool, String> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "" | "0" | "false" | "no" | "off" => Ok(false),
+        other => Err(format!("`{other}` is not 0 or 1")),
+    }
+}
+
+/// A duration: seconds (`3600`), or a number with `s`, `m`, `h`, or `d`
+/// (`90m`, `12h`, `1d`). It must be more than zero.
+pub fn parse_duration(s: &str) -> Result<std::time::Duration, String> {
+    let s = s.trim();
+    let (num, unit) = match s.char_indices().find(|(_, c)| !c.is_ascii_digit()) {
+        Some((i, _)) => s.split_at(i),
+        None => (s, "s"),
+    };
+    let n: u64 = num
+        .parse()
+        .map_err(|_| format!("`{s}` is not a duration such as 3600, 90m, 12h, or 1d"))?;
+    let mult = match unit.trim() {
+        "s" => 1,
+        "m" => 60,
+        "h" => 3600,
+        "d" => 86_400,
+        _ => return Err(format!("`{s}`: the unit must be s, m, h, or d")),
+    };
+    let secs = n.saturating_mul(mult);
+    if secs == 0 {
+        return Err("the duration must be more than zero".into());
+    }
+    Ok(std::time::Duration::from_secs(secs))
+}
+
+impl Settings {
+    /// The web settings from the flags and the env.
+    pub fn web(&self) -> WebConfig {
+        WebConfig {
+            public_url: clean_url(self.public_url.as_deref()),
+            artifact_public_url: clean_url(self.artifact_public_url.as_deref()),
+            ws_query_token: self.ws_query_token,
+            session_ttl: self.session_ttl,
+        }
+    }
+
+    /// The artifact listener: `None` when `--artifact-listen` is empty.
+    pub fn artifact_listen(&self) -> Option<String> {
+        Some(self.artifact_listen.trim().to_owned()).filter(|a| !a.is_empty())
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn durations() {
+        assert_eq!(parse_duration("3600").unwrap().as_secs(), 3600);
+        assert_eq!(parse_duration("90m").unwrap().as_secs(), 5400);
+        assert_eq!(parse_duration("12h").unwrap().as_secs(), 43_200);
+        assert_eq!(parse_duration("1d").unwrap().as_secs(), 86_400);
+        assert!(parse_duration("0").is_err());
+        assert!(parse_duration("12x").is_err());
+        assert!(parse_duration("h").is_err());
+    }
+
+    #[test]
+    fn switches_and_origins() {
+        assert!(parse_switch("1").unwrap());
+        assert!(!parse_switch("off").unwrap());
+        assert!(parse_switch("maybe").is_err());
+        assert_eq!(
+            origin_of("HTTPS://t.example.com:8443/terrarium/"),
+            "https://t.example.com:8443"
+        );
+        assert_eq!(
+            clean_url(Some(" https://x/ ")).as_deref(),
+            Some("https://x")
+        );
+        assert_eq!(clean_url(Some("")), None);
+    }
+
+    #[test]
+    fn flags_fill_the_web_config() {
+        let s = Settings::try_parse_from([
+            "terrariumd",
+            "--public-url",
+            "https://t.example.com/",
+            "--artifact-public-url",
+            "https://art.example.com",
+            "--ws-query-token",
+            "1",
+            "--session-ttl",
+            "30m",
+            "--artifact-listen",
+            "",
+        ])
+        .unwrap();
+        let w = s.web();
+        assert_eq!(w.public_url.as_deref(), Some("https://t.example.com"));
+        assert_eq!(
+            w.artifact_public_url.as_deref(),
+            Some("https://art.example.com")
+        );
+        assert!(w.ws_query_token);
+        assert_eq!(w.session_ttl.as_secs(), 1800);
+        assert_eq!(s.artifact_listen(), None);
+        assert_eq!(
+            w.dashboard_link("/subscriptions"),
+            "https://t.example.com/subscriptions"
+        );
+        let d = WebConfig::default();
+        assert_eq!(d.dashboard_link("/x"), "http://localhost:8080/x");
+        assert_eq!(d.page_url("/x"), "/x");
+        assert!(!d.ws_query_token);
+    }
 }

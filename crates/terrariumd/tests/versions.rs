@@ -397,3 +397,38 @@ async fn compare_reports_cards_pages_and_artifacts() {
         .await
         .err(400, "bad_request");
 }
+
+/// `Version.url` is the dashboard route `/p/<project>/versions/<id>`: a
+/// path by default, absolute with TERRARIUM_PUBLIC_URL, the same link as
+/// the review mail.
+#[tokio::test]
+async fn version_url_is_the_dashboard_route() {
+    let mut td = setup().await;
+    let v = td
+        .post_as(
+            "proj/lead",
+            "/api/projects/proj/versions",
+            json!({"name": "v1"}),
+        )
+        .await
+        .ok()
+        .clone();
+    let id = v["id"].as_str().unwrap().to_owned();
+    assert_eq!(v["url"], format!("/p/proj/versions/{id}"));
+
+    td.web.public_url = Some("https://t.example.com".into());
+    td.boot(None, None).await;
+    let want = format!("https://t.example.com/p/proj/versions/{id}");
+    let got = td.get(&format!("/api/versions/{id}")).await;
+    assert_eq!(got.ok()["url"], want);
+    let list = td.get("/api/projects/proj/versions").await;
+    assert_eq!(list.ok()[0]["url"], want);
+    let sub = td
+        .post_empty_as("proj/lead", &format!("/api/versions/{id}/submit"))
+        .await;
+    assert_eq!(sub.ok()["url"], want);
+    // The review mail names the same page.
+    let mail = td.get("/api/mail?to=operator").await;
+    let body = mail.ok()[0]["body"].as_str().unwrap().to_owned();
+    assert!(body.contains(&format!("Open: {want}")), "{body}");
+}

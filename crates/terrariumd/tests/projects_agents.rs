@@ -637,6 +637,7 @@ async fn pty_websocket_echoes_and_resizes() {
 
 #[tokio::test]
 async fn tcp_needs_the_token_and_ignores_the_agent_header() {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
     let mut td = TestDaemon::start().await;
     td.project("p").await;
     td.agent("p", "member", json!({})).await;
@@ -674,7 +675,25 @@ async fn tcp_needs_the_token_and_ignores_the_agent_header() {
     // read the audit log; the member could not.
     assert_eq!(get("/api/audit", Some("sekret"), true).await, 200);
 
-    // WebSocket upgrades may carry ?token=.
+    // A WebSocket upgrade with `Authorization` (the CLI's `agent attach`).
+    let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let mut req = format!("ws://{addr}/api/events")
+        .into_client_request()
+        .unwrap();
+    req.headers_mut()
+        .insert("authorization", "Bearer sekret".parse().unwrap());
+    assert!(tokio_tungstenite::client_async(req, stream).await.is_ok());
+    // `?token=` is off by default (TERRARIUM_WS_QUERY_TOKEN=0).
+    let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let off =
+        tokio_tungstenite::client_async(format!("ws://{addr}/api/events?token=sekret"), stream)
+            .await;
+    assert!(off.is_err());
+
+    // TERRARIUM_WS_QUERY_TOKEN=1: upgrades may carry ?token=.
+    td.web.ws_query_token = true;
+    td.boot(Some("127.0.0.1:0"), Some("sekret")).await;
+    let addr = td.daemon.as_ref().unwrap().tcp_addr.unwrap();
     let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
     let ok =
         tokio_tungstenite::client_async(format!("ws://{addr}/api/events?token=sekret"), stream)

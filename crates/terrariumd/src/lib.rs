@@ -61,9 +61,13 @@ pub struct DaemonConfig {
     /// only.
     pub insecure_agent_header: bool,
     /// The TCP address of the artifact serving origin (PLAN §15.2), for
-    /// example `0.0.0.0:8081`. `None`: no listener of its own; the main
-    /// router still serves `/a/...`.
+    /// example `0.0.0.0:8081`. `None` or empty: no listener of its own, and
+    /// the dashboard port serves `/a/...`.
     pub artifact_listen: Option<String>,
+    /// The origins, WebSocket auth, and sessions
+    /// ([`settings::Settings::web`]). The routers and the mail code read
+    /// these, not the env.
+    pub web: settings::WebConfig,
 }
 
 /// A running daemon.
@@ -141,6 +145,13 @@ pub async fn start_with_usage(
         insecure_agent_header: cfg.insecure_agent_header,
         usage: Arc::new(usage_collector::UsageRuntime::new(usage)),
         executor: Arc::default(),
+        web: cfg.web.clone(),
+        artifact_listen: cfg
+            .artifact_listen
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default()
+            .to_owned(),
     });
     if cfg.insecure_agent_header {
         warn!("--insecure-agent-header: any local caller can act as any agent");
@@ -178,7 +189,7 @@ pub async fn start_with_usage(
         _ => {}
     }
     let mut artifact_addr = None;
-    if let Some(addr) = cfg.artifact_listen.as_deref().filter(|a| !a.is_empty()) {
+    if let Some(addr) = Some(state.artifact_listen.as_str()).filter(|a| !a.is_empty()) {
         let listener = tokio::net::TcpListener::bind(addr)
             .await
             .with_context(|| format!("cannot bind the artifact origin {addr}"))?;

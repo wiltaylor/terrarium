@@ -127,9 +127,10 @@ fn evil_tar(name: &str) -> Vec<u8> {
     b.into_inner().unwrap()
 }
 
-/// Mint a signed URL. It names the artifact origin (a listener of its
-/// own is the default, `docs/security-review.md` F5); the test fetches the
-/// path through the Unix socket, which serves `/a/...` too.
+/// Mint a signed URL. The test daemon has no artifact listener of its own
+/// (`artifact_listen: None`), so the dashboard port serves `/a/...` and the
+/// URL is a path; the test fetches it through the Unix socket, which
+/// serves `/a/...` too. `artifact_origin_and_cors` covers the origin form.
 async fn mint(td: &TestDaemon, id: &str, body: Option<Value>) -> String {
     let url = td
         .req(
@@ -143,12 +144,8 @@ async fn mint(td: &TestDaemon, id: &str, body: Option<Value>) -> String {
         .as_str()
         .unwrap()
         .to_owned();
-    // The test sends `host: localhost`; with no TERRARIUM_ARTIFACT_* env,
-    // the origin is that host with the default artifact port.
-    let path = url
-        .strip_prefix("http://localhost:8081")
-        .unwrap_or_else(|| panic!("the URL names the artifact origin: {url}"));
-    path.to_owned()
+    assert!(url.starts_with("/a/"), "a relative URL: {url}");
+    url
 }
 
 async fn fetch(td: &TestDaemon, url: &str) -> Raw {
@@ -593,4 +590,124 @@ async fn attach_and_prune_keep_the_right_things() {
     assert_eq!(audit.ok().as_array().unwrap().len(), 2);
     let ev = td.get("/api/events?kind=artifact.pruned").await;
     assert_eq!(ev.ok().as_array().unwrap().len(), 2);
+}
+
+async fn oneshot(app: axum::Router, uri: &str, headers: &[(&str, &str)]) -> Raw {
+    let mut req = Request::builder().uri(uri);
+    for (k, v) in headers {
+        req = req.header(*k, *v);
+    }
+    let resp = tower::ServiceExt::oneshot(app, req.body(axum::body::Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status();
+    let headers = resp.headers().clone();
+    let body = resp
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes()
+        .to_vec();
+    Raw {
+        status,
+        headers,
+        body,
+    }
+}
+
+/// With an artifact origin of its own, a signed URL is absolute on
+/// TERRARIUM_ARTIFACT_PUBLIC_URL, and the serving routes answer CORS for
+/// the dashboard origin (TERRARIUM_PUBLIC_URL), never `*`. Without
+/// TERRARIUM_PUBLIC_URL, a dashboard Origin on the same host counts.
+#[tokio::test]
+async fn artifact_origin_and_cors() {
+    let mut td = setup().await;
+    upload(&td, "proj/w1", "notes.md", b"# Notes\n").await;
+    td.artifact_listen = Some("127.0.0.1:0".into());
+    td.web.public_url = Some("https://t.example.com".into());
+    td.web.artifact_public_url = Some("https://art.example.com".into());
+    td.boot(None, None).await;
+    assert!(td.daemon.as_ref().unwrap().artifact_addr.is_some());
+    let url = td
+        .post_empty_as("proj/w1", "/api/artifacts/ART-1/url")
+        .await
+        .ok()["url"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let path = url
+        .strip_prefix("https://art.example.com/a/")
+        .map(|p| format!("/a/{p}"))
+        .unwrap_or_else(|| panic!("absolute on the artifact origin: {url}"));
+    let state = td.daemon.as_ref().unwrap().state.clone();
+    let r = oneshot(
+        terrariumd::api::artifact_router(state.clone()),
+        &path,
+        &[("origin", "https://t.example.com")],
+    )
+    .await;
+    assert_eq!(r.status, 200);
+    assert_eq!(r.body, b"# Notes\n");
+    assert_eq!(
+        header(&r, "access-control-allow-origin"),
+        "https://t.example.com"
+    );
+    assert_eq!(
+        header(&r, "content-security-policy"),
+        "sandbox allow-scripts allow-forms allow-popups; connect-src 'none'"
+    );
+    assert!(r.headers.get("access-control-allow-credentials").is_none());
+    // A refused URL gets the CORS answer too, so the viewer sees the 403.
+    let r = oneshot(
+        terrariumd::api::artifact_router(state),
+        "/a/nope/x?exp=1&sig=00",
+        &[("origin", "https://t.example.com")],
+    )
+    .await;
+    assert_eq!(r.status, 403);
+    assert_eq!(
+        header(&r, "access-control-allow-origin"),
+        "https://t.example.com"
+    );
+
+    // No TERRARIUM_PUBLIC_URL, no listener: the dashboard port serves
+    // `/a/...`; the same-host Origin counts, another site does not.
+    td.artifact_listen = None;
+    td.web = Default::default();
+    td.boot(None, None).await;
+    let path = mint(&td, "ART-1", None).await;
+    let state = td.daemon.as_ref().unwrap().state.clone();
+    let dash = || {
+        terrariumd::api::tcp_router_with(
+            state.clone(),
+            terrariumd::api::TokenAuth::new("t".into(), false),
+            true,
+        )
+    };
+    let r = oneshot(
+        dash(),
+        &path,
+        &[("host", "t.lan:8081"), ("origin", "http://t.lan:8080")],
+    )
+    .await;
+    assert_eq!(r.status, 200);
+    assert_eq!(
+        header(&r, "access-control-allow-origin"),
+        "http://t.lan:8080"
+    );
+    // The artifact keeps its sandbox CSP on the dashboard port, and no
+    // X-Frame-Options: the viewer frames it.
+    assert!(header(&r, "content-security-policy").starts_with("sandbox"));
+    assert!(r.headers.get("x-frame-options").is_none());
+    let r = oneshot(
+        dash(),
+        &path,
+        &[("host", "t.lan:8081"), ("origin", "https://evil.example")],
+    )
+    .await;
+    assert_eq!(r.status, 200);
+    assert!(r.headers.get("access-control-allow-origin").is_none());
+    let r = oneshot(dash(), &path, &[("host", "t.lan:8081"), ("origin", "null")]).await;
+    assert!(r.headers.get("access-control-allow-origin").is_none());
 }

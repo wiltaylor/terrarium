@@ -237,7 +237,7 @@ fn render(conn: &Connection, row: VersionRow) -> ApiResult<Version> {
         });
     }
     Ok(Version {
-        url: format!("/projects/{}/versions/{}", row.project, row.id),
+        url: page_path(&row.project, &row.id),
         created_by_name: name_of(conn, &row.created_by)?,
         id: row.id,
         project: row.project,
@@ -637,10 +637,18 @@ fn clean(comment: Option<&str>) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// The dashboard route of a version: `/p/<project>/versions/<id>`. The
+/// store answers this path in `Version.url`; the API makes it absolute
+/// with `TERRARIUM_PUBLIC_URL` ([`crate::settings::WebConfig::page_url`]).
+pub fn page_path(project: &str, id: &str) -> String {
+    format!("/p/{project}/versions/{id}")
+}
+
 /// The dashboard page of a version, for the operator mail:
-/// `<TERRARIUM_PUBLIC_URL>/p/<project>/versions/<id>`.
-pub fn review_link(project: &str, id: &str) -> String {
-    crate::settings::dashboard_link(&format!("/p/{project}/versions/{id}"))
+/// `<base>/p/<project>/versions/<id>`, with `base` from
+/// [`crate::settings::WebConfig::mail_base`].
+pub fn review_link(base: &str, project: &str, id: &str) -> String {
+    format!("{base}{}", page_path(project, id))
 }
 
 /// `draft` or `rejected` -> `in_review`, and mail the operator.
@@ -649,6 +657,7 @@ pub fn submit(
     actor: &Actor,
     key: &str,
     comment: Option<&str>,
+    link_base: &str,
 ) -> ApiResult<Version> {
     let row = find_for(t, actor, key)?;
     editable(&row)?;
@@ -671,7 +680,7 @@ pub fn submit(
         Address::from_actor(actor).display(),
         v.name,
         v.project,
-        review_link(&v.project, &v.id)
+        review_link(link_base, &v.project, &v.id)
     );
     if let Some(c) = &comment {
         body.push_str(&format!("\n{c}\n"));

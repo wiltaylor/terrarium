@@ -27,6 +27,11 @@ pub struct TestDaemon {
     pub config: PathBuf,
     pub state: PathBuf,
     pub sup: Arc<InMemorySupervisor>,
+    /// The web settings of the next [`TestDaemon::boot`].
+    pub web: terrariumd::settings::WebConfig,
+    /// The artifact listener of the next boot. `None`: the dashboard
+    /// port serves `/a/...`.
+    pub artifact_listen: Option<String>,
 }
 
 pub struct Resp {
@@ -88,6 +93,8 @@ impl TestDaemon {
             config,
             state,
             sup,
+            web: Default::default(),
+            artifact_listen: None,
         };
         td.boot(None, None).await;
         td
@@ -107,7 +114,8 @@ impl TestDaemon {
             supervisor: self.sup.clone(),
             // The tests name the calling agent with the header.
             insecure_agent_header: true,
-            artifact_listen: None,
+            artifact_listen: self.artifact_listen.clone(),
+            web: self.web.clone(),
         })
         .await
         .unwrap();

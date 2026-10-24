@@ -11,6 +11,7 @@ mod mail;
 mod memory;
 mod projects;
 mod repos;
+pub mod session;
 mod streams;
 mod subscriptions;
 mod system;
@@ -67,6 +68,11 @@ pub struct AppState {
     pub usage: Arc<crate::usage_collector::UsageRuntime>,
     /// Host agents, exec sessions, and target routing (PLAN §19).
     pub executor: Arc<crate::executor::Executor>,
+    /// The origins, WebSocket auth, and sessions (`DaemonConfig::web`).
+    pub web: crate::settings::WebConfig,
+    /// The artifact listener address. Empty: no listener of its own, and
+    /// the dashboard port serves `/a/...`.
+    pub artifact_listen: String,
 }
 
 impl AppState {
@@ -146,23 +152,33 @@ async fn api_method_not_allowed() -> ApiError {
 }
 
 /// The routes, without auth or transport, with the artifact serving routes
-/// (`/a/...`). The Unix socket and the agent RPC use it.
+/// (`/a/...`) and `/hosts/connect`. The Unix socket and the agent RPC use
+/// it.
 pub fn router(state: Shared) -> Router {
-    router_with(state, true)
+    routes(state, true, true)
 }
 
 /// Does the dashboard port serve `/a/...`? Only when the artifact origin
-/// has no listener of its own (`TERRARIUM_ARTIFACT_LISTEN` set to empty).
-/// With a listener (the default), artifacts load from that origin only, so
-/// an uploaded page can never be same-origin with the dashboard
+/// has no listener of its own (`--artifact-listen ""`). With a listener
+/// (the default), artifacts load from that origin only, so an uploaded
+/// page can never be same-origin with the dashboard
 /// (`docs/security-review.md`, F5).
-pub fn artifacts_on_dashboard() -> bool {
-    crate::settings::artifact_listen().is_empty()
+pub fn artifacts_on_dashboard(state: &AppState) -> bool {
+    state.artifact_listen.is_empty()
 }
 
-/// The routes, without auth or transport. `serve_artifacts`: mount the
-/// artifact serving routes (`/a/...`).
+/// The routes, without auth or transport, and without `/hosts/connect`.
+/// `serve_artifacts`: mount the artifact serving routes (`/a/...`).
 pub fn router_with(state: Shared, serve_artifacts: bool) -> Router {
+    routes(state, serve_artifacts, false)
+}
+
+/// The routes. `host_connect`: mount `/hosts/connect`. The TCP dashboard
+/// port does not: it is plaintext, and a host agent that dials it would
+/// send its token in clear. Host agents dial the host listener
+/// (`TERRARIUM_HOST_LISTEN`, `crate::hosts::router`) only
+/// (`docs/security-review.md`, F2).
+fn routes(state: Shared, serve_artifacts: bool, host_connect: bool) -> Router {
     let api = Router::new()
         .route("/health", get(system::health))
         .merge(hosts::routes())
@@ -183,19 +199,21 @@ pub fn router_with(state: Shared, serve_artifacts: bool) -> Router {
         .merge(subscriptions::routes())
         .merge(usage::routes())
         .merge(fleet::routes())
+        .route("/session", post(session::create).delete(session::delete))
         .fallback(api_not_found)
         .method_not_allowed_fallback(api_method_not_allowed)
         .layer(middleware::from_fn_with_state(state.clone(), resolve_actor));
     let mut app = Router::new().nest("/api", api);
     if serve_artifacts {
-        app = app.merge(artifacts::serving_routes());
+        app = app.merge(artifacts::serving_routes(&state));
     }
-    app.route(
-        terrarium_host::protocol::CONNECT_PATH,
-        get(crate::hosts::connect),
-    )
-    .fallback(crate::assets::serve)
-    .with_state(state)
+    if host_connect {
+        app = app.route(
+            terrarium_host::protocol::CONNECT_PATH,
+            get(crate::hosts::connect),
+        );
+    }
+    app.fallback(crate::assets::serve).with_state(state)
 }
 
 /// The routes for the Unix socket.
@@ -207,7 +225,7 @@ pub fn unix_router(state: Shared) -> Router {
 /// hashed to 32 bytes first, and the compare of the hashes has no early
 /// exit. So the timing leaks neither the bytes nor the length of the
 /// token (`docs/security-review.md`, F7).
-fn token_matches(given: &[u8], expected: &[u8]) -> bool {
+pub(crate) fn token_matches(given: &[u8], expected: &[u8]) -> bool {
     use sha2::Digest;
     let a = sha2::Sha256::digest(given);
     let b = sha2::Sha256::digest(expected);
@@ -288,12 +306,18 @@ fn percent_decode(s: &str) -> String {
 /// the warnings stop, so the set does not grow without a bound.
 const MAX_WARNED_CLIENTS: usize = 4096;
 
-/// The bearer-token check of the TCP listener.
+/// The auth of the TCP listener: the bearer token, and (with
+/// [`TokenAuth::with_sessions`]) the session cookie.
 pub struct TokenAuth {
     token: String,
-    /// Take `?token=` on a WebSocket upgrade (deprecated). Off with
-    /// `TERRARIUM_WS_QUERY_TOKEN=0`.
+    /// Take `?token=` on a WebSocket upgrade (deprecated). On with
+    /// `TERRARIUM_WS_QUERY_TOKEN=1`.
     allow_query: bool,
+    /// The cookie sessions. `None`: the bearer token only.
+    sessions: Option<Arc<session::Sessions>>,
+    /// The dashboard origin from `TERRARIUM_PUBLIC_URL`, for the `Origin`
+    /// check of a cookie WebSocket upgrade.
+    public_origin: Option<String>,
     /// The client addresses that got the `?token=` warning.
     warned: std::sync::Mutex<std::collections::HashSet<String>>,
 }
@@ -303,13 +327,23 @@ impl TokenAuth {
         Self {
             token,
             allow_query,
+            sessions: None,
+            public_origin: None,
             warned: std::sync::Mutex::default(),
         }
     }
 
-    /// The token, and `allow_query` from `TERRARIUM_WS_QUERY_TOKEN`.
-    pub fn from_env(token: String) -> Self {
-        Self::new(token, crate::settings::ws_query_token_allowed())
+    /// Also take the session cookie. `public_origin`: the dashboard origin
+    /// that a cookie WebSocket upgrade may come from, besides its own host.
+    #[must_use]
+    pub fn with_sessions(
+        mut self,
+        sessions: session::Sessions,
+        public_origin: Option<String>,
+    ) -> Self {
+        self.sessions = Some(Arc::new(sessions));
+        self.public_origin = public_origin;
+        self
     }
 
     /// Log the `?token=` deprecation once per client address.
@@ -324,7 +358,7 @@ impl TokenAuth {
                 "a WebSocket upgrade sent the bearer token as `?token=`; the query string can \
                  reach proxy logs and browser history. Send it as the subprotocol \
                  `bearer.<token>` (Sec-WebSocket-Protocol) instead. TERRARIUM_WS_QUERY_TOKEN=0 \
-                 refuses `?token=`"
+                 (the default) refuses `?token=`"
             );
         }
     }
@@ -340,12 +374,60 @@ fn unauthorized(message: &str) -> Response {
     ApiError::new(Code::Unauthorized, message).into_response()
 }
 
+fn forbidden(message: &str) -> Response {
+    ApiError::new(Code::Forbidden, message).into_response()
+}
+
+/// Does the method change state? Those need `X-CSRF-Token` with a cookie.
+fn is_mutating(method: &axum::http::Method) -> bool {
+    use axum::http::Method;
+    [Method::POST, Method::PUT, Method::PATCH, Method::DELETE].contains(method)
+}
+
+/// The host that the request names: `X-Forwarded-Host`, else `Host`.
+fn request_host(headers: &axum::http::HeaderMap) -> Option<&str> {
+    headers
+        .get("x-forwarded-host")
+        .or_else(|| headers.get(header::HOST))
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .map(str::trim)
+        .filter(|h| !h.is_empty())
+}
+
+/// May a cookie WebSocket upgrade come from this `Origin`? Yes when it is
+/// the `TERRARIUM_PUBLIC_URL` origin, or an `http`/`https` origin whose
+/// host and port are the request's own `Host` (the dashboard's own page).
+/// No `Origin`, `null`, or another site: no. This stops cross-site
+/// WebSocket hijacking with the operator's cookie.
+pub fn ws_origin_allowed(headers: &axum::http::HeaderMap, public_origin: Option<&str>) -> bool {
+    let Some(origin) = headers
+        .get(header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .map(|o| o.trim().trim_end_matches('/'))
+    else {
+        return false;
+    };
+    if public_origin.is_some_and(|p| p.eq_ignore_ascii_case(origin)) {
+        return true;
+    }
+    let Some((scheme, authority)) = origin.split_once("://") else {
+        return false;
+    };
+    (scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https"))
+        && request_host(headers).is_some_and(|h| h.eq_ignore_ascii_case(authority))
+}
+
 async fn require_token(
     State(auth): State<Arc<TokenAuth>>,
     mut req: Request,
     next: Next,
 ) -> Response {
     if !req.uri().path().starts_with("/api") {
+        return next.run(req).await;
+    }
+    // Clearing the cookie needs no proof (session::delete).
+    if req.uri().path() == "/api/session" && req.method() == axum::http::Method::DELETE {
         return next.run(req).await;
     }
     let header_token = req
@@ -357,63 +439,196 @@ async fn require_token(
     // The subprotocol that carried the token: the answer must name it, or
     // the browser drops the connection.
     let mut echo = None;
+    let websocket = is_websocket(&req);
+    let mut query = None;
     let given = match header_token {
         Some(t) => Some(t),
-        None if is_websocket(&req) => match protocol_token(&req) {
+        None if websocket => match protocol_token(&req) {
             Some((proto, t)) => {
                 echo = Some(proto);
                 Some(t)
             }
-            None => match query_token(&req) {
-                Some(_) if !auth.allow_query => {
-                    return unauthorized(
-                        "`?token=` is off (TERRARIUM_WS_QUERY_TOKEN=0); send the token as the \
-                         WebSocket subprotocol `bearer.<token>`",
-                    );
-                }
-                Some(t) => {
-                    auth.warn_query(&client_addr(&req));
-                    Some(t)
-                }
-                None => None,
-            },
+            None => {
+                query = query_token(&req);
+                None
+            }
         },
         None => None,
     };
-    match given {
-        Some(given) if token_matches(given.as_bytes(), auth.token.as_bytes()) => {
-            req.extensions_mut().insert(Transport::Tcp);
-            let mut resp = next.run(req).await;
-            if let Some(proto) = echo
-                && resp.status() == axum::http::StatusCode::SWITCHING_PROTOCOLS
-                && !resp.headers().contains_key(header::SEC_WEBSOCKET_PROTOCOL)
-                && let Ok(v) = HeaderValue::from_str(&proto)
-            {
-                resp.headers_mut().insert(header::SEC_WEBSOCKET_PROTOCOL, v);
+    if let Some(given) = given {
+        if !token_matches(given.as_bytes(), auth.token.as_bytes()) {
+            return unauthorized("missing or wrong bearer token");
+        }
+        req.extensions_mut().insert(session::AuthVia::Bearer);
+        req.extensions_mut().insert(Transport::Tcp);
+        let mut resp = next.run(req).await;
+        if let Some(proto) = echo
+            && resp.status() == axum::http::StatusCode::SWITCHING_PROTOCOLS
+            && !resp.headers().contains_key(header::SEC_WEBSOCKET_PROTOCOL)
+            && let Ok(v) = HeaderValue::from_str(&proto)
+        {
+            resp.headers_mut().insert(header::SEC_WEBSOCKET_PROTOCOL, v);
+        }
+        return resp;
+    }
+    // The session cookie.
+    if let Some(sessions) = &auth.sessions
+        && let Some(cookie) = session::cookie_value(req.headers(), session::COOKIE)
+    {
+        let Some(s) = sessions.key.verify(cookie, chrono::Utc::now().timestamp()) else {
+            return unauthorized(
+                "the session cookie is wrong or has expired; POST /api/session again",
+            );
+        };
+        if websocket {
+            if !ws_origin_allowed(req.headers(), auth.public_origin.as_deref()) {
+                return forbidden(
+                    "a WebSocket upgrade with the session cookie must come from the dashboard \
+                     origin (the Origin header)",
+                );
             }
-            resp
+        } else if is_mutating(req.method()) {
+            let ok = req
+                .headers()
+                .get(session::CSRF_HEADER)
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|t| s.csrf_matches(t));
+            if !ok {
+                return forbidden(
+                    "a request with the session cookie must send X-CSRF-Token with the csrf \
+                     value of POST /api/session",
+                );
+            }
+        }
+        req.extensions_mut().insert(session::AuthVia::Cookie);
+        req.extensions_mut().insert(Transport::Tcp);
+        return next.run(req).await;
+    }
+    // The deprecated `?token=` on a WebSocket upgrade.
+    match query {
+        Some(_) if !auth.allow_query => unauthorized(
+            "`?token=` is off (TERRARIUM_WS_QUERY_TOKEN=0); send the token as the WebSocket \
+             subprotocol `bearer.<token>`",
+        ),
+        Some(t) if token_matches(t.as_bytes(), auth.token.as_bytes()) => {
+            auth.warn_query(&client_addr(&req));
+            req.extensions_mut().insert(session::AuthVia::Bearer);
+            req.extensions_mut().insert(Transport::Tcp);
+            next.run(req).await
         }
         _ => unauthorized("missing or wrong bearer token"),
     }
 }
 
-/// The routes with bearer-token auth on `/api/*`. The dashboard assets stay
-/// public, because a browser cannot send a header on page load. A WebSocket
-/// upgrade carries the token as the subprotocol `bearer.<token>`, or (old
-/// clients, deprecated) as `?token=`. `/a/...` is here only when the
-/// artifact origin has no listener of its own ([`artifacts_on_dashboard`]).
-pub fn tcp_router(state: Shared, token: String) -> Router {
-    tcp_router_with(state, TokenAuth::from_env(token), artifacts_on_dashboard())
+/// The CSP of an API answer: it loads nothing and is never framed.
+pub const API_CSP: &str = "default-src 'none'; frame-ancestors 'none'";
+
+/// The dashboard's Content-Security-Policy: the directives of its
+/// `<meta>` tag (`dashboard/vite.config.ts`, `dashboardCsp`) and
+/// `frame-ancestors 'none'`, which a `<meta>` tag cannot set.
+/// `artifact_origin`: the origin that signed artifact URLs name; empty when
+/// the dashboard port serves `/a/...` itself.
+pub fn dashboard_csp(artifact_origin: &str) -> String {
+    let art: Vec<&str> = Some(artifact_origin)
+        .filter(|a| !a.is_empty())
+        .into_iter()
+        .collect();
+    let join = |base: &[&str]| {
+        base.iter()
+            .chain(art.iter())
+            .copied()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let frame = if art.is_empty() {
+        "'self'".to_owned()
+    } else {
+        art.join(" ")
+    };
+    [
+        "default-src 'none'".to_owned(),
+        "script-src 'self'".to_owned(),
+        "style-src 'self' 'unsafe-inline'".to_owned(),
+        format!("img-src {}", join(&["'self'", "data:"])),
+        "font-src 'self'".to_owned(),
+        format!("connect-src {}", join(&["'self'"])),
+        format!("frame-src {frame}"),
+        "worker-src 'none'".to_owned(),
+        "manifest-src 'self'".to_owned(),
+        "media-src 'none'".to_owned(),
+        "object-src 'none'".to_owned(),
+        "base-uri 'none'".to_owned(),
+        "form-action 'none'".to_owned(),
+        "frame-ancestors 'none'".to_owned(),
+    ]
+    .join("; ")
 }
 
-/// [`tcp_router`] with the settings given, for tests.
+/// The security headers of the dashboard port: a CSP (the dashboard
+/// policy on pages and assets, [`API_CSP`] on `/api`), `nosniff`,
+/// `Referrer-Policy: no-referrer`, and `X-Frame-Options: DENY`. An answer
+/// that sets its own CSP (a served artifact, with its `sandbox`) keeps its
+/// own headers.
+async fn security_headers(State(state): State<Shared>, req: Request, next: Next) -> Response {
+    let csp = if req.uri().path().starts_with("/api") {
+        API_CSP.to_owned()
+    } else {
+        dashboard_csp(&artifacts::artifact_origin(&state, req.headers()))
+    };
+    let mut resp = next.run(req).await;
+    let h = resp.headers_mut();
+    if h.contains_key(header::CONTENT_SECURITY_POLICY) {
+        return resp;
+    }
+    if let Ok(v) = HeaderValue::from_str(&csp) {
+        h.insert(header::CONTENT_SECURITY_POLICY, v);
+    }
+    h.entry(header::X_CONTENT_TYPE_OPTIONS)
+        .or_insert(HeaderValue::from_static("nosniff"));
+    h.entry(header::REFERRER_POLICY)
+        .or_insert(HeaderValue::from_static("no-referrer"));
+    h.entry(header::X_FRAME_OPTIONS)
+        .or_insert(HeaderValue::from_static("DENY"));
+    resp
+}
+
+/// The routes of the TCP listener. `/api/*` needs the bearer token
+/// (`Authorization`; on a WebSocket upgrade also the subprotocol
+/// `bearer.<token>`, and `?token=` when `TERRARIUM_WS_QUERY_TOKEN=1`) or
+/// the session cookie of `POST /api/session`. The dashboard assets stay
+/// public, because a browser cannot send a header on page load. `/a/...` is
+/// here only when the artifact origin has no listener of its own
+/// ([`artifacts_on_dashboard`]). The settings come from `state.web`; the
+/// session key is `<state>/session.key`.
+pub fn tcp_router(state: Shared, token: String) -> anyhow::Result<Router> {
+    let key = session::SessionKey::load_or_create(&state.state_dir).with_context(|| {
+        format!(
+            "cannot read or make the session key {}",
+            state.state_dir.join(session::KEY_FILE).display()
+        )
+    })?;
+    let auth = TokenAuth::new(token, state.web.ws_query_token).with_sessions(
+        session::Sessions {
+            key,
+            ttl: state.web.session_ttl,
+        },
+        state.web.public_origin(),
+    );
+    let on_dashboard = artifacts_on_dashboard(&state);
+    Ok(tcp_router_with(state, auth, on_dashboard))
+}
+
+/// [`tcp_router`] with the auth given, for tests.
 pub fn tcp_router_with(state: Shared, auth: TokenAuth, serve_artifacts: bool) -> Router {
-    router_with(state, serve_artifacts)
-        .layer(Extension(Transport::Tcp))
-        .layer(middleware::from_fn_with_state(
-            Arc::new(auth),
-            require_token,
-        ))
+    let mut app = router_with(state.clone(), serve_artifacts).layer(Extension(Transport::Tcp));
+    if let Some(s) = &auth.sessions {
+        app = app.layer(Extension(s.clone()));
+    }
+    app.layer(middleware::from_fn_with_state(
+        Arc::new(auth),
+        require_token,
+    ))
+    .layer(middleware::from_fn_with_state(state, security_headers))
 }
 
 /// Bind the Unix socket and serve on it in the background.
@@ -453,11 +668,11 @@ pub async fn serve_tcp(
         .with_context(|| format!("cannot bind {addr}"))?;
     let local = listener.local_addr()?;
     info!(addr = %local, "API and dashboard listening on TCP");
-    if !artifacts_on_dashboard() {
+    if !artifacts_on_dashboard(&state) {
         info!("the dashboard port does not serve /a/...: artifacts load from their own origin");
     }
     let app =
-        tcp_router(state, token).into_make_service_with_connect_info::<std::net::SocketAddr>();
+        tcp_router(state, token)?.into_make_service_with_connect_info::<std::net::SocketAddr>();
     Ok((
         tokio::spawn(async move {
             if let Err(e) = axum::serve(listener, app).await {
@@ -496,6 +711,8 @@ mod tests {
             insecure_agent_header: false,
             usage: Arc::default(),
             executor: Arc::default(),
+            web: crate::settings::WebConfig::default(),
+            artifact_listen: String::new(),
         })
     }
 
@@ -567,7 +784,7 @@ mod tests {
     #[tokio::test]
     async fn tcp_router_needs_the_token_on_api_only() {
         let s = state();
-        let app = || tcp_router(s.clone(), "secret".into());
+        let app = || tcp_router_with(s.clone(), TokenAuth::new("secret".into(), false), false);
         assert_eq!(
             get(app(), "/api/health", None).await.0,
             StatusCode::UNAUTHORIZED
@@ -762,5 +979,430 @@ mod tests {
         assert_eq!(percent_decode("a%2Fb+c"), "a/b c");
         assert_eq!(percent_decode("100%"), "100%");
         assert_eq!(percent_decode("%zz"), "%zz");
+    }
+
+    // ---- cookie sessions ----
+
+    const KEY: [u8; 32] = [3; 32];
+
+    fn session_app(s: &Shared, key: [u8; 32], public: Option<&str>) -> Router {
+        let auth = TokenAuth::new("secret".into(), false).with_sessions(
+            session::Sessions {
+                key: session::SessionKey::from_bytes(key.to_vec()),
+                ttl: std::time::Duration::from_secs(3600),
+            },
+            public.map(str::to_owned),
+        );
+        tcp_router_with(s.clone(), auth, false)
+    }
+
+    async fn send(app: Router, method: &str, uri: &str, headers: &[(&str, &str)]) -> Response {
+        let mut req = Request::builder().method(method).uri(uri);
+        for (k, v) in headers {
+            req = req.header(*k, *v);
+        }
+        app.oneshot(req.body(Body::empty()).unwrap()).await.unwrap()
+    }
+
+    fn hdr(r: &Response, name: &str) -> String {
+        r.headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    /// Make a session; answer the `Cookie` header value and the csrf token.
+    async fn login(app: Router) -> (String, String) {
+        let r = send(
+            app,
+            "POST",
+            "/api/session",
+            &[("authorization", "Bearer secret")],
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::CREATED);
+        let set = hdr(&r, "set-cookie");
+        let cookie = set.split(';').next().unwrap().to_owned();
+        let body = r.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        (cookie, v["csrf"].as_str().unwrap().to_owned())
+    }
+
+    #[tokio::test]
+    async fn session_cookie_create_use_and_clear() {
+        let s = state();
+        let app = || session_app(&s, KEY, None);
+        // The bearer token buys the cookie.
+        let r = send(
+            app(),
+            "POST",
+            "/api/session",
+            &[("authorization", "Bearer secret")],
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::CREATED);
+        let set = hdr(&r, "set-cookie");
+        assert!(set.starts_with("terrarium_session=v1."), "{set}");
+        for part in ["Path=/", "Max-Age=3600", "HttpOnly", "SameSite=Strict"] {
+            assert!(set.contains(part), "{set}");
+        }
+        assert!(!set.contains("Secure"), "plain http: {set}");
+        assert_eq!(hdr(&r, "cache-control"), "no-store");
+        let body = r.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(v["csrf"].as_str().unwrap().len() >= 32);
+        assert!(v["exp"].is_i64() && v["expires_at"].is_string());
+        // Behind a TLS proxy the cookie is Secure.
+        let r = send(
+            app(),
+            "POST",
+            "/api/session",
+            &[
+                ("authorization", "Bearer secret"),
+                ("x-forwarded-proto", "https"),
+            ],
+        )
+        .await;
+        assert!(hdr(&r, "set-cookie").ends_with("; Secure"));
+        // No token, a wrong token: no cookie.
+        let r = send(app(), "POST", "/api/session", &[]).await;
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+        let r = send(
+            app(),
+            "POST",
+            "/api/session",
+            &[("authorization", "Bearer nope")],
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+
+        let (cookie, csrf) = login(app()).await;
+        // The cookie alone reads the API.
+        let r = send(app(), "GET", "/api/health", &[("cookie", &cookie)]).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        // A cookie cannot buy another cookie, even with the csrf token.
+        let r = send(
+            app(),
+            "POST",
+            "/api/session",
+            &[("cookie", &cookie), ("x-csrf-token", &csrf)],
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+        // DELETE clears it, with no auth.
+        let r = send(app(), "DELETE", "/api/session", &[]).await;
+        assert_eq!(r.status(), StatusCode::NO_CONTENT);
+        let set = hdr(&r, "set-cookie");
+        assert!(
+            set.starts_with("terrarium_session=;") && set.contains("Max-Age=0"),
+            "{set}"
+        );
+        // The Unix socket has no sessions.
+        let r = send(unix_router(s.clone()), "POST", "/api/session", &[]).await;
+        assert_eq!(r.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn session_cookie_needs_csrf_to_change_state() {
+        let s = state();
+        let app = || session_app(&s, KEY, None);
+        let (cookie, csrf) = login(app()).await;
+        // `DELETE /api/health` passes auth, then gets 405: the probe of a
+        // mutating method that changes nothing.
+        let r = send(app(), "DELETE", "/api/health", &[("cookie", &cookie)]).await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        let body = r.into_body().collect().await.unwrap().to_bytes();
+        assert!(String::from_utf8_lossy(&body).contains("X-CSRF-Token"));
+        let r = send(
+            app(),
+            "DELETE",
+            "/api/health",
+            &[("cookie", &cookie), ("x-csrf-token", "wrong")],
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        let r = send(
+            app(),
+            "DELETE",
+            "/api/health",
+            &[("cookie", &cookie), ("x-csrf-token", &csrf)],
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::METHOD_NOT_ALLOWED);
+        // The csrf token of another session does not count.
+        let (_, other) = login(app()).await;
+        let r = send(
+            app(),
+            "DELETE",
+            "/api/health",
+            &[("cookie", &cookie), ("x-csrf-token", &other)],
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        // The bearer token needs no csrf token, as before.
+        let r = send(
+            app(),
+            "DELETE",
+            "/api/health",
+            &[("authorization", "Bearer secret")],
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    #[tokio::test]
+    async fn session_cookie_expires_and_dies_with_the_key() {
+        let s = state();
+        let key = session::SessionKey::from_bytes(KEY.to_vec());
+        let old = key.mint(chrono::Utc::now().timestamp() - 1).unwrap();
+        let r = send(
+            session_app(&s, KEY, None),
+            "GET",
+            "/api/health",
+            &[("cookie", &format!("terrarium_session={}", old.cookie))],
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+        // A good cookie, then a new key (session.key replaced): refused.
+        let (cookie, _) = login(session_app(&s, KEY, None)).await;
+        let r = send(
+            session_app(&s, KEY, None),
+            "GET",
+            "/api/health",
+            &[("cookie", &cookie)],
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let r = send(
+            session_app(&s, [9; 32], None),
+            "GET",
+            "/api/health",
+            &[("cookie", &cookie)],
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+        // Without sessions (the bearer-only auth) the cookie is nothing.
+        let r = send(
+            tcp_router_with(s.clone(), TokenAuth::new("secret".into(), false), false),
+            "GET",
+            "/api/health",
+            &[("cookie", &cookie)],
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// The key file: made once, mode 0600, and a new file ends every session.
+    #[tokio::test]
+    async fn session_key_file_rotation() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut st = Arc::try_unwrap(state()).ok().unwrap();
+        st.state_dir = dir.path().to_owned();
+        let s = Arc::new(st);
+        let app = || tcp_router(s.clone(), "secret".into()).unwrap();
+        let (cookie, _) = login(app()).await;
+        let r = send(app(), "GET", "/api/health", &[("cookie", &cookie)]).await;
+        assert_eq!(r.status(), StatusCode::OK, "the key is kept");
+        std::fs::remove_file(dir.path().join(session::KEY_FILE)).unwrap();
+        let r = send(app(), "GET", "/api/health", &[("cookie", &cookie)]).await;
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "a new key");
+    }
+
+    #[test]
+    fn websocket_origin_check() {
+        let h = |pairs: &[(&'static str, &'static str)]| {
+            let mut m = axum::http::HeaderMap::new();
+            for (k, v) in pairs {
+                m.insert(*k, HeaderValue::from_static(v));
+            }
+            m
+        };
+        let same = h(&[("host", "t.lan:8080"), ("origin", "http://t.lan:8080")]);
+        assert!(ws_origin_allowed(&same, None));
+        assert!(!ws_origin_allowed(&h(&[("host", "t.lan:8080")]), None));
+        let evil = h(&[("host", "t.lan:8080"), ("origin", "https://evil.example")]);
+        assert!(!ws_origin_allowed(&evil, None));
+        let null = h(&[("host", "t.lan:8080"), ("origin", "null")]);
+        assert!(!ws_origin_allowed(&null, None));
+        // Behind a proxy that rewrites Host, TERRARIUM_PUBLIC_URL names it.
+        let proxied = h(&[("host", "inner:8080"), ("origin", "https://t.example.com")]);
+        assert!(!ws_origin_allowed(&proxied, None));
+        assert!(ws_origin_allowed(&proxied, Some("https://t.example.com")));
+        // Another port is another origin.
+        let port = h(&[("host", "t.lan:8080"), ("origin", "http://t.lan:8081")]);
+        assert!(!ws_origin_allowed(&port, None));
+    }
+
+    #[tokio::test]
+    async fn websocket_upgrade_with_the_cookie_checks_the_origin() {
+        let s = state();
+        let app = || session_app(&s, KEY, Some("https://t.example.com"));
+        let (cookie, _) = login(app()).await;
+        let c = ("cookie", cookie.as_str());
+        // `ws()` sends `host: localhost`. Auth passed: not 401 or 403.
+        let r = ws(app(), "/api/events", &[c, ("origin", "http://localhost")]).await;
+        assert!(
+            ![StatusCode::UNAUTHORIZED, StatusCode::FORBIDDEN].contains(&r.status()),
+            "{}",
+            r.status()
+        );
+        let r = ws(
+            app(),
+            "/api/events",
+            &[c, ("origin", "https://t.example.com")],
+        )
+        .await;
+        assert!(![StatusCode::UNAUTHORIZED, StatusCode::FORBIDDEN].contains(&r.status()));
+        let r = ws(app(), "/api/events", &[c]).await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        let r = ws(
+            app(),
+            "/api/events",
+            &[c, ("origin", "https://evil.example")],
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        // The bearer subprotocol needs no Origin (the CLI sends none).
+        let r = ws(
+            app(),
+            "/api/events",
+            &[("sec-websocket-protocol", "bearer.secret")],
+        )
+        .await;
+        assert_ne!(r.status(), StatusCode::UNAUTHORIZED);
+        assert_ne!(r.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// A real upgrade with the cookie and the page's Origin switches.
+    #[tokio::test]
+    async fn websocket_upgrade_with_the_cookie_on_a_real_server() {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let s = state();
+        let (cookie, _) = login(session_app(&s, KEY, None)).await;
+        let app = session_app(&s, KEY, None)
+            .into_make_service_with_connect_info::<std::net::SocketAddr>();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+        let request = |origin: Option<String>| {
+            let mut req = format!("ws://{addr}/api/events")
+                .into_client_request()
+                .unwrap();
+            req.headers_mut()
+                .insert("cookie", HeaderValue::from_str(&cookie).unwrap());
+            if let Some(o) = origin {
+                req.headers_mut()
+                    .insert("origin", HeaderValue::from_str(&o).unwrap());
+            }
+            req
+        };
+        assert!(
+            tokio_tungstenite::connect_async(request(Some(format!("http://{addr}"))))
+                .await
+                .is_ok()
+        );
+        assert!(
+            tokio_tungstenite::connect_async(request(None))
+                .await
+                .is_err()
+        );
+        assert!(
+            tokio_tungstenite::connect_async(request(Some("http://evil.example".into())))
+                .await
+                .is_err()
+        );
+        server.abort();
+    }
+
+    // ---- security headers ----
+
+    #[tokio::test]
+    async fn dashboard_and_api_answers_carry_security_headers() {
+        let s = state();
+        let app = || tcp_router_with(s.clone(), TokenAuth::new("secret".into(), false), true);
+        let r = send(app(), "GET", "/", &[("host", "t.lan:8080")]).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let csp = hdr(&r, "content-security-policy");
+        assert!(csp.contains("frame-ancestors 'none'"), "{csp}");
+        assert!(csp.contains("default-src 'none'") && csp.contains("script-src 'self'"));
+        // No artifact listener: the artifacts are on 'self'.
+        assert!(csp.contains("frame-src 'self'"), "{csp}");
+        assert_eq!(hdr(&r, "x-content-type-options"), "nosniff");
+        assert_eq!(hdr(&r, "referrer-policy"), "no-referrer");
+        assert_eq!(hdr(&r, "x-frame-options"), "DENY");
+        // The API, also a 401.
+        for auth in [Some("Bearer secret"), None] {
+            let mut h = vec![];
+            if let Some(a) = auth {
+                h.push(("authorization", a));
+            }
+            let r = send(app(), "GET", "/api/health", &h).await;
+            assert_eq!(hdr(&r, "content-security-policy"), API_CSP);
+            assert_eq!(hdr(&r, "x-frame-options"), "DENY");
+            assert_eq!(hdr(&r, "x-content-type-options"), "nosniff");
+        }
+        // tests/artifacts.rs: a served artifact keeps its own sandbox CSP
+        // and no X-Frame-Options on the dashboard port.
+    }
+
+    /// F2: the plaintext dashboard port does not take host agents; the
+    /// Unix socket router (tests) still does.
+    #[tokio::test]
+    async fn hosts_connect_is_not_on_the_dashboard_port() {
+        let s = state();
+        let tcp = tcp_router_with(s.clone(), TokenAuth::new("secret".into(), false), false);
+        let r = ws(
+            tcp,
+            terrarium_host::protocol::CONNECT_PATH,
+            &[("authorization", "Bearer host-token")],
+        )
+        .await;
+        // The SPA fallback: a page, not the host handler.
+        let body = r.into_body().collect().await.unwrap().to_bytes();
+        assert!(String::from_utf8_lossy(&body).contains("<html"));
+        let r = ws(
+            router(s),
+            terrarium_host::protocol::CONNECT_PATH,
+            &[("authorization", "Bearer host-token")],
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "the host handler");
+    }
+
+    #[tokio::test]
+    async fn dashboard_csp_names_the_artifact_origin() {
+        let mut st = Arc::try_unwrap(state()).ok().unwrap();
+        st.artifact_listen = "0.0.0.0:8081".into();
+        let s = Arc::new(st);
+        let app = tcp_router_with(s.clone(), TokenAuth::new("t".into(), false), false);
+        let r = send(app, "GET", "/", &[("host", "t.lan:8080")]).await;
+        let csp = hdr(&r, "content-security-policy");
+        assert!(csp.contains("frame-src http://t.lan:8081;"), "{csp}");
+        assert!(
+            csp.contains("img-src 'self' data: http://t.lan:8081;"),
+            "{csp}"
+        );
+        assert!(
+            csp.contains("connect-src 'self' http://t.lan:8081;"),
+            "{csp}"
+        );
+        let mut st = Arc::try_unwrap(s).ok().unwrap();
+        st.web.artifact_public_url = Some("https://art.example.com".into());
+        let app = tcp_router_with(Arc::new(st), TokenAuth::new("t".into(), false), false);
+        let r = send(app, "GET", "/agents", &[("host", "t.lan:8080")]).await;
+        let csp = hdr(&r, "content-security-policy");
+        assert!(csp.contains("frame-src https://art.example.com;"), "{csp}");
+    }
+
+    #[test]
+    fn dashboard_csp_matches_the_meta_policy() {
+        assert_eq!(
+            dashboard_csp(""),
+            "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
+             img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-src 'self'; \
+             worker-src 'none'; manifest-src 'self'; media-src 'none'; object-src 'none'; \
+             base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+        );
     }
 }

@@ -4,9 +4,11 @@
 //! The serving routes check a short-lived signed URL and need no token or
 //! actor. [`artifact_router`] serves them alone, for a listener on its own
 //! port (a separate origin from the dashboard). The dashboard port mounts
-//! them only when that listener is off (`TERRARIUM_ARTIFACT_LISTEN` empty);
-//! the Unix socket always does. A signed URL then names the artifact
-//! origin ([`artifact_origin`]).
+//! them only when that listener is off (`--artifact-listen ""`); the Unix
+//! socket always does. A signed URL then names the artifact origin
+//! ([`artifact_origin`]). The serving routes answer CORS for the dashboard
+//! origin ([`cors_origin`]), so the viewer can `fetch` a text or markdown
+//! artifact from the separate origin.
 
 use axum::body::{Body, Bytes};
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
@@ -32,8 +34,10 @@ use crate::store::artifacts::{
 pub const UPLOAD_BODY_LIMIT: usize = 48 * 1024 * 1024;
 
 /// The CSP of every served artifact: an opaque origin, so an uploaded page
-/// cannot reach the dashboard or the API. Scripts may run inside it.
-pub const ARTIFACT_CSP: &str = "sandbox allow-scripts allow-forms allow-popups";
+/// cannot reach the dashboard or the API. Scripts may run inside it, but
+/// `connect-src 'none'` stops `fetch`, XHR, WebSocket, and `sendBeacon`, so
+/// a script cannot send data out (`docs/security-review.md`, F5).
+pub const ARTIFACT_CSP: &str = "sandbox allow-scripts allow-forms allow-popups; connect-src 'none'";
 
 pub fn routes() -> Router<Shared> {
     Router::new()
@@ -50,17 +54,67 @@ pub fn routes() -> Router<Shared> {
         .route("/artifacts/{id}/url", post(mint_url))
 }
 
-/// The serving routes, to merge into a router that has the state.
-pub fn serving_routes() -> Router<Shared> {
+/// The serving routes, to merge into a router that has the state, with
+/// the CORS answer for the dashboard origin.
+pub fn serving_routes(state: &Shared) -> Router<Shared> {
     Router::new()
         .route("/a/{id}", get(serve_root))
         .route("/a/{id}/", get(serve_root))
         .route("/a/{id}/{*path}", get(serve_path))
+        .route_layer(axum::middleware::from_fn_with_state(state.clone(), cors))
 }
 
 /// The serving routes alone, for a listener of their own (port 8081).
 pub fn artifact_router(state: Shared) -> Router {
-    serving_routes().with_state(state)
+    serving_routes(&state).with_state(state)
+}
+
+/// The origin that may read an artifact answer with `fetch`: the
+/// dashboard. The request's `Origin` counts when it is the
+/// `TERRARIUM_PUBLIC_URL` origin, or an `http`/`https` origin on the host
+/// of the artifact request (the dashboard on the same host, on another
+/// port: the default layout). Else the answer names the
+/// `TERRARIUM_PUBLIC_URL` origin, or nothing. Never `*`, never `null`, and
+/// no credentials.
+pub fn cors_origin(public_origin: Option<&str>, headers: &HeaderMap) -> Option<String> {
+    let origin = headers
+        .get(header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .map(|o| o.trim().trim_end_matches('/'));
+    let same_host = |origin: &str| {
+        let Some((scheme, authority)) = origin.split_once("://") else {
+            return false;
+        };
+        let host = headers
+            .get(header::HOST)
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim);
+        (scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https"))
+            && host.is_some_and(|h| {
+                host_without_port(authority).eq_ignore_ascii_case(host_without_port(h))
+            })
+    };
+    match origin {
+        Some(o) if public_origin.is_some_and(|p| p.eq_ignore_ascii_case(o)) || same_host(o) => {
+            Some(o.to_owned())
+        }
+        _ => public_origin.map(str::to_owned),
+    }
+}
+
+async fn cors(
+    State(state): State<Shared>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let allow = cors_origin(state.web.public_origin().as_deref(), req.headers());
+    let mut resp = next.run(req).await;
+    let h = resp.headers_mut();
+    if let Some(v) = allow.and_then(|o| HeaderValue::from_str(&o).ok()) {
+        h.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, v);
+    }
+    h.insert(header::VARY, HeaderValue::from_static("Origin"));
+    resp
 }
 
 fn ctx(state: &Shared) -> ApiResult<std::sync::Arc<ArtifactCtx>> {
@@ -376,10 +430,10 @@ fn encode_segment(s: &str) -> String {
 /// Else `TERRARIUM_ARTIFACT_PUBLIC_URL`, or the host of the request with
 /// the port of `TERRARIUM_ARTIFACT_LISTEN` (default 8081), and `https`
 /// when a proxy says `X-Forwarded-Proto: https`.
-pub fn artifact_origin(headers: &HeaderMap) -> String {
+pub fn artifact_origin(state: &super::AppState, headers: &HeaderMap) -> String {
     origin_from(
-        &crate::settings::artifact_listen(),
-        crate::settings::artifact_public_url(),
+        &state.artifact_listen,
+        state.web.artifact_public_url.clone(),
         headers,
     )
 }
@@ -441,7 +495,7 @@ async fn mint_url(
     let ttl = b.ttl.unwrap_or(ctx.limits.url_ttl_secs).clamp(1, 24 * 3600);
     let exp = Utc::now().timestamp() + ttl;
     let sig = ctx.sign(&a.uid, exp);
-    let origin = artifact_origin(&headers);
+    let origin = artifact_origin(&state, &headers);
     let url = if a.kind == "bundle" {
         format!("{origin}/a/{}/_s/{exp}/{sig}/", a.uid)
     } else {
