@@ -7,6 +7,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 
+use super::longpoll::{self, WaitQuery};
 use super::{ApiJson, ApiQuery, Shared, paged};
 use crate::actor::Actor;
 use crate::error::ApiResult;
@@ -66,11 +67,12 @@ async fn list_cards(
     Path(name): Path<String>,
     ApiQuery(page): ApiQuery<Page>,
     ApiQuery(f): ApiQuery<CardFilter>,
+    ApiQuery(wait): ApiQuery<WaitQuery>,
 ) -> ApiResult<Response> {
     policy::read_project(&actor, &name)?;
-    let rows = state
-        .db
-        .read(move |c| {
+    let rows = longpoll::hold(&state, wait, &["card"], || {
+        let (actor, name, page, f) = (actor.clone(), name.clone(), page.clone(), f.clone());
+        state.db.read(move |c| {
             crate::store::projects::get(c, &name)?;
             let assignee = match f.assignee.as_deref() {
                 None => None,
@@ -79,7 +81,8 @@ async fn list_cards(
             };
             board::list_cards(c, &name, &f, assignee.as_deref(), &page)
         })
-        .await?;
+    })
+    .await?;
     Ok(paged(rows))
 }
 

@@ -222,6 +222,177 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX card_links_ref ON card_links(kind, ref);
     "#,
+    // 3: memory graph, wiki, artifacts, versions (PLAN §14, §15).
+    r#"
+    -- Project-local counters for short IDs (`MEM-17`, `ART-9`).
+    CREATE TABLE object_seq (
+        project TEXT NOT NULL REFERENCES projects(name) ON DELETE CASCADE,
+        kind    TEXT NOT NULL,                  -- `memory`, `artifact`
+        last    INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (project, kind)
+    );
+
+    -- The memory graph (PLAN §14).
+    CREATE TABLE memories (
+        pk            INTEGER PRIMARY KEY,
+        project       TEXT NOT NULL REFERENCES projects(name) ON DELETE CASCADE,
+        num           INTEGER NOT NULL,         -- `MEM-<num>`
+        title         TEXT NOT NULL,
+        body          TEXT NOT NULL DEFAULT '',
+        tags          TEXT NOT NULL DEFAULT '[]', -- JSON array
+        author        TEXT NOT NULL,            -- agent id or `operator`
+        created_at    TEXT NOT NULL,
+        updated_at    TEXT NOT NULL,
+        superseded_by INTEGER REFERENCES memories(pk) ON DELETE SET NULL,
+        UNIQUE (project, num)
+    );
+    CREATE TABLE memory_sources (
+        memory     INTEGER NOT NULL REFERENCES memories(pk) ON DELETE CASCADE,
+        kind       TEXT NOT NULL CHECK (kind IN ('card', 'thread', 'path', 'commit', 'url')),
+        ref        TEXT NOT NULL,
+        PRIMARY KEY (memory, kind, ref)
+    );
+    CREATE TABLE memory_links (
+        from_id    INTEGER NOT NULL REFERENCES memories(pk) ON DELETE CASCADE,
+        to_id      INTEGER NOT NULL REFERENCES memories(pk) ON DELETE CASCADE,
+        relation   TEXT NOT NULL CHECK (relation IN ('relates_to', 'supports', 'contradicts',
+                       'supersedes', 'derived_from', 'part_of', 'example_of')),
+        author     TEXT NOT NULL,
+        note       TEXT,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (from_id, to_id, relation)
+    );
+    CREATE INDEX memory_links_to ON memory_links(to_id);
+    CREATE VIRTUAL TABLE memories_fts USING fts5(
+        title, body, tags, content='memories', content_rowid='pk'
+    );
+    CREATE TRIGGER memories_ai AFTER INSERT ON memories BEGIN
+        INSERT INTO memories_fts (rowid, title, body, tags)
+        VALUES (new.pk, new.title, new.body, new.tags);
+    END;
+    CREATE TRIGGER memories_ad AFTER DELETE ON memories BEGIN
+        INSERT INTO memories_fts (memories_fts, rowid, title, body, tags)
+        VALUES ('delete', old.pk, old.title, old.body, old.tags);
+    END;
+    CREATE TRIGGER memories_au AFTER UPDATE OF title, body, tags ON memories BEGIN
+        INSERT INTO memories_fts (memories_fts, rowid, title, body, tags)
+        VALUES ('delete', old.pk, old.title, old.body, old.tags);
+        INSERT INTO memories_fts (rowid, title, body, tags)
+        VALUES (new.pk, new.title, new.body, new.tags);
+    END;
+
+    -- The wiki (PLAN §15.1). A path is unique among pages that are not deleted.
+    CREATE TABLE wiki_pages (
+        id          TEXT PRIMARY KEY,           -- ULID
+        project     TEXT NOT NULL REFERENCES projects(name) ON DELETE CASCADE,
+        path        TEXT NOT NULL,
+        title       TEXT NOT NULL,
+        current_rev INTEGER NOT NULL,
+        status      TEXT CHECK (status IN ('draft', 'ready_for_review', 'reviewed')),
+        reviewer    TEXT,
+        created_by  TEXT NOT NULL,
+        created_at  TEXT NOT NULL,
+        updated_at  TEXT NOT NULL,
+        deleted_at  TEXT
+    );
+    CREATE UNIQUE INDEX wiki_pages_path ON wiki_pages(project, path) WHERE deleted_at IS NULL;
+    CREATE TABLE wiki_revisions (
+        page       TEXT NOT NULL REFERENCES wiki_pages(id) ON DELETE CASCADE,
+        rev        INTEGER NOT NULL,
+        author     TEXT NOT NULL,
+        summary    TEXT NOT NULL,
+        body       TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (page, rev)
+    );
+    -- The links of the current revision of each page. `target` is
+    -- `project/path` for a page, the card ID, `project/MEM-n`,
+    -- `project/ART-n`, or `project/<version name>`.
+    CREATE TABLE wiki_links (
+        page   TEXT NOT NULL REFERENCES wiki_pages(id) ON DELETE CASCADE,
+        kind   TEXT NOT NULL CHECK (kind IN ('page', 'card', 'memory', 'version', 'artifact')),
+        target TEXT NOT NULL,
+        PRIMARY KEY (page, kind, target)
+    );
+    CREATE INDEX wiki_links_target ON wiki_links(kind, target);
+    -- Full text over the current revision. `page` is the page ID.
+    CREATE VIRTUAL TABLE wiki_fts USING fts5(page UNINDEXED, path, title, body);
+    CREATE TRIGGER wiki_pages_ad AFTER DELETE ON wiki_pages BEGIN
+        DELETE FROM wiki_fts WHERE page = old.id;
+    END;
+
+    -- Artifacts (PLAN §15.2). Blobs live in <state>/artifacts/<sha256>.
+    CREATE TABLE artifacts (
+        pk           INTEGER PRIMARY KEY,
+        id           TEXT NOT NULL UNIQUE,      -- ULID; the serving URL uses it
+        project      TEXT NOT NULL REFERENCES projects(name) ON DELETE CASCADE,
+        num          INTEGER NOT NULL,          -- `ART-<num>`
+        name         TEXT NOT NULL,
+        content_type TEXT NOT NULL,
+        size         INTEGER NOT NULL,
+        sha256       TEXT NOT NULL,
+        kind         TEXT NOT NULL CHECK (kind IN ('file', 'bundle')),
+        created_by   TEXT NOT NULL,
+        created_at   TEXT NOT NULL,
+        warned_at    TEXT,                      -- the prune warning
+        UNIQUE (project, num)
+    );
+    CREATE INDEX artifacts_sha ON artifacts(sha256);
+    CREATE TABLE artifact_links (
+        artifact   INTEGER NOT NULL REFERENCES artifacts(pk) ON DELETE CASCADE,
+        kind       TEXT NOT NULL CHECK (kind IN ('page', 'card')),
+        ref        TEXT NOT NULL,               -- page ID or card ID
+        created_by TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (artifact, kind, ref)
+    );
+    CREATE INDEX artifact_links_ref ON artifact_links(kind, ref);
+
+    -- Versions (PLAN §15.3).
+    CREATE TABLE versions (
+        id           TEXT PRIMARY KEY,          -- ULID
+        project      TEXT NOT NULL REFERENCES projects(name) ON DELETE CASCADE,
+        name         TEXT NOT NULL,
+        status       TEXT NOT NULL DEFAULT 'draft'
+                     CHECK (status IN ('draft', 'in_review', 'approved', 'rejected', 'released')),
+        notes        TEXT NOT NULL DEFAULT '',
+        repo         TEXT,
+        git_ref      TEXT,
+        thread_id    TEXT,                      -- the mail thread of the review
+        created_by   TEXT NOT NULL,
+        created_at   TEXT NOT NULL,
+        updated_at   TEXT NOT NULL,
+        submitted_at TEXT,
+        submitted_by TEXT,
+        decided_at   TEXT,
+        decided_by   TEXT,
+        released_at  TEXT,
+        released_by  TEXT,
+        UNIQUE (project, name)
+    );
+    CREATE TABLE version_cards (
+        version TEXT NOT NULL REFERENCES versions(id) ON DELETE CASCADE,
+        card    TEXT NOT NULL REFERENCES cards(id) ON DELETE CASCADE,
+        PRIMARY KEY (version, card)
+    );
+    CREATE TABLE version_artifacts (
+        version    TEXT NOT NULL REFERENCES versions(id) ON DELETE CASCADE,
+        artifact   INTEGER NOT NULL REFERENCES artifacts(pk) ON DELETE CASCADE,
+        created_by TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (version, artifact)
+    );
+    CREATE INDEX version_artifacts_artifact ON version_artifacts(artifact);
+    CREATE TABLE version_reviews (
+        id         TEXT PRIMARY KEY,            -- ULID
+        version    TEXT NOT NULL REFERENCES versions(id) ON DELETE CASCADE,
+        author     TEXT NOT NULL,
+        decision   TEXT NOT NULL CHECK (decision IN ('submitted', 'approved', 'rejected', 'released')),
+        comment    TEXT,
+        created_at TEXT NOT NULL
+    );
+    CREATE INDEX version_reviews_version ON version_reviews(version, created_at);
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call
@@ -403,6 +574,20 @@ mod tests {
             "card_deps",
             "card_comments",
             "card_links",
+            "memories",
+            "memory_sources",
+            "memory_links",
+            "memories_fts",
+            "wiki_pages",
+            "wiki_revisions",
+            "wiki_links",
+            "wiki_fts",
+            "artifacts",
+            "artifact_links",
+            "versions",
+            "version_cards",
+            "version_artifacts",
+            "version_reviews",
         ] {
             let n: i64 = conn
                 .query_row(

@@ -91,6 +91,15 @@ pub trait Adapter: Send + Sync {
         Vec::new()
     }
 
+    /// Keystrokes that empty the input line of the harness. The runner sends
+    /// them before it types a turn again after a delivery that got no
+    /// prompt-submit hook, so the old text does not stay in front of the new
+    /// text. They must not interrupt a running turn or exit the harness. The
+    /// default is Ctrl-U (kill to the start of the line).
+    fn clear_input_keys(&self) -> Vec<u8> {
+        vec![CTRL_U]
+    }
+
     /// Write the per-agent files that the harness reads from its home, and
     /// return the overlays that the sandbox must bind. `home` is the shared
     /// harness home on the host (for example `/auth/claude`). The default
@@ -99,6 +108,9 @@ pub trait Adapter: Send + Sync {
         Ok(Vec::new())
     }
 }
+
+/// Ctrl-U: kill the line before the cursor.
+pub const CTRL_U: u8 = 0x15;
 
 /// Wrap `text` in bracketed-paste markers and add a carriage return.
 pub fn bracketed_paste(text: &str) -> Vec<u8> {

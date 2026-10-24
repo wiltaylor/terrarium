@@ -15,6 +15,11 @@ pub struct LaunchSpec {
     /// Run the program in a PTY. Always true for interactive harnesses.
     #[serde(default = "default_true")]
     pub pty: bool,
+    /// Start from an empty environment: the child gets only `env` (and the
+    /// runner's own `TERRARIUM_*` and `TERM` values). When false, the child
+    /// also inherits the environment of the process that spawns it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub clear_env: bool,
 }
 
 fn default_true() -> bool {
@@ -29,6 +34,7 @@ impl LaunchSpec {
             env: BTreeMap::new(),
             cwd: cwd.into(),
             pty: true,
+            clear_env: false,
         }
     }
 
@@ -41,9 +47,15 @@ impl LaunchSpec {
         self.env.insert(key.into(), value.into());
         self
     }
+
+    /// Start the child from an empty environment (see [`Self::clear_env`]).
+    pub fn with_clear_env(mut self) -> Self {
+        self.clear_env = true;
+        self
+    }
 }
 
-/// A file that the sandbox binds over a path inside a shared home, so each
+/// A file (or a directory) that the sandbox binds over a path inside a shared home, so each
 /// agent sees its own copy (PLAN §8, §11). The sandbox makes the bind after
 /// it mounts the shared home.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

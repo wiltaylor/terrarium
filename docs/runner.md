@@ -22,7 +22,9 @@ The runner adds `TERRARIUM_SOCKET` (the socket path) and `TERRARIUM_AGENT`
 (the agent ULID) to the child env. When the `LaunchSpec` sets one of them, the
 runner keeps the value from the spec. A sandbox that shows the socket at a
 different path sets `TERRARIUM_SOCKET` in the spec. The runner also sets
-`TERM=xterm-256color` when the spec does not set `TERM`.
+`TERM=xterm-256color` when the spec does not set `TERM`. When
+`LaunchSpec::clear_env` is true, the child starts from an empty env: it
+gets only these values and `LaunchSpec::env`. The daemon always sets it.
 
 ## The socket protocol
 
@@ -66,7 +68,7 @@ methods itself:
 | Method | Result |
 |---|---|
 | `ping` | `"pong"` |
-| `whoami` | `agent`, `name`, `project`, `harness`, `status` |
+| `whoami` | `agent`, `name`, `project`, `harness`, `roles`, `status` |
 
 The runner sends every other method to the `RequestHandler` that the daemon
 gives to `Runner::spawn`. The handler gets a `RequestContext` with the agent
@@ -77,7 +79,7 @@ Error codes:
 
 | Code | Cause |
 |---|---|
-| `parse_error` | The line is not a valid message, or it is longer than 4 MiB. The `id` is `null`. |
+| `parse_error` | The line is not a valid message, or it is longer than 64 MiB. The `id` is `null`. |
 | `invalid_request` | The client sent a `response`. |
 | `method_not_found` | No one knows the method. |
 
@@ -96,7 +98,12 @@ Error codes:
 | `blocked` | A `ToolUse` or `ToolFinished` event. | `working` |
 | `blocked` | `Runner::answer` or `Runner::answer_keys`. | `working` when a turn is open, else `idle` |
 | any | The child exits after `Runner::kill`. | `stopped` |
-| any | The child exits and no one asked. | `error` |
+| any | The child exits with code 0 and no signal, and no one asked. | `stopped` (reason `exited`) |
+| any | The child exits with another code or a signal, and no one asked. | `error` |
+
+The daemon's supervisor applies the restart policy on top of this
+(PLAN §18). It does not pass the runner's final `stopped` or `error` on.
+It decides the final status itself.
 
 Each transition is an `Event::StatusChanged { from, to, reason }`. The runner
 appends every event to `events.jsonl` and publishes it on the channel of
@@ -113,8 +120,10 @@ runner types turns one at a time, in order:
    (`ESC[200~ text ESC[201~`) and then Enter.
 3. It waits `submit_timeout` (default 10 s) for the prompt-submit hook. The
    hook resolves the handle with `Ok(())`.
-4. When the hook does not arrive, the runner types the turn again when the
-   prompt is ready.
+4. When the hook does not arrive, the runner first writes
+   `Adapter::clear_input_keys` (default Ctrl-U), because the text of the
+   failed attempt can still be in the input box. Then it types the turn
+   again when the prompt is ready.
 5. After `submit_attempts` tries (default 2), the handle resolves with
    `DeliveryError::NoSubmitHook`, and the runner raises
    `Event::DeliveryFailed`.
@@ -152,6 +161,7 @@ methods:
 | `screen_hint` | Tells when the prompt is ready, and when a question shows. |
 | `type_turn` | The keystrokes for a turn. |
 | `answer` | The keystrokes for `Runner::answer`. |
+| `clear_input_keys` | The keystrokes that empty the input line before a retry. |
 
 The adapter's `launch` gives the `LaunchSpec`. The supervisor calls `launch`
 and gives the spec to `Runner::spawn`. When `screen_hint` cannot tell, set

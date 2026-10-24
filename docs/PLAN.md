@@ -566,6 +566,26 @@ Verified in Phase 0 (`docs/compat.md`, Docker 29.8.0, bwrap 0.8.0):
 - Claude Code refuses yolo as root. `IS_SANDBOX=1` removes the refusal.
   The adapter sets it only when the harness runs as root.
 
+Verified with Claude Code outside Docker (`docs/compat.md`, "Claude inside
+bwrap"; the code is `crates/terrariumd/src/sandbox.rs`):
+
+- The table above holds, with `/etc` limited to name lookup, TLS roots,
+  `passwd`/`group`, `localtime`, `alternatives`, and the linker cache. A
+  merged-`/usr` host gets `/lib`, `/lib64`, `/bin`, `/sbin` as symlinks.
+  `$HOME` is a tmpfs; the workspace is `$HOME/work`; the agent dir is bound
+  at its own path; the socket is `/run/terrarium/agent.sock`; the CLI is
+  `/opt/terrarium/bin/terrarium`. A harness binary outside `/usr` is bound
+  read-only at its real path.
+- The child env starts empty: `PATH`, `HOME`, `TERM`, `LANG`, the
+  config-dir var, `TERRARIUM_SOCKET`, `TERRARIUM_AGENT`, and the adapter's
+  env. Nothing from the daemon env leaks.
+- `--new-session` is off by default: with it, PTY resizes do not reach the
+  harness. Each sandbox has its own PTY, so `TIOCSTI` can only type into
+  the agent's own input.
+- Claude Code also needs a per-agent `$CLAUDE_CONFIG_DIR/sessions/`
+  directory over the shared one: its `sessions/<pid>.json` collides in the
+  PID namespace (every agent is pid 2).
+
 ---
 
 ## 12. Mailbox

@@ -429,6 +429,21 @@ pub fn reply(
     Ok(out)
 }
 
+/// Mark queued messages `delivered`: the runner typed the push pointer for
+/// them and the harness took the turn (PLAN §12). Other states stay.
+pub fn mark_delivered(t: &mut Tx<'_>, ids: &[String]) -> ApiResult<usize> {
+    let at = now();
+    let mut n = 0;
+    for id in ids {
+        n += t.execute(
+            "UPDATE messages SET state = 'delivered', delivered_at = coalesce(delivered_at, ?2)
+             WHERE id = ?1 AND state = 'queued'",
+            params![id, at],
+        )?;
+    }
+    Ok(n)
+}
+
 /// Mark a message `read`. A `replied` message stays `replied`.
 pub fn mark_read(t: &mut Tx<'_>, id: &str) -> ApiResult<Message> {
     get(t, id)?;

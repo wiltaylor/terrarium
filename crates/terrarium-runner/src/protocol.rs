@@ -87,6 +87,8 @@ pub struct RequestContext {
     pub agent: AgentId,
     pub name: String,
     pub project: String,
+    /// The roles above `member`, for `whoami`.
+    pub roles: Vec<String>,
     pub harness: HarnessId,
     pub status: AgentStatus,
 }

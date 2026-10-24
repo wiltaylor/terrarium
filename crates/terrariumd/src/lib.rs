@@ -3,12 +3,16 @@
 #![warn(clippy::unwrap_used, clippy::expect_used)]
 
 pub mod actor;
+pub mod agent_rpc;
 pub mod api;
 pub mod assets;
 pub mod db;
 pub mod error;
 pub mod events;
 pub mod policy;
+pub mod prompt;
+pub mod runner_supervisor;
+pub mod sandbox;
 pub mod settings;
 pub mod store;
 pub mod supervisor;
@@ -42,6 +46,13 @@ pub struct DaemonConfig {
     pub state_dir: PathBuf,
     pub config_dir: PathBuf,
     pub supervisor: Arc<dyn Supervisor>,
+    /// Trust `X-Terrarium-Agent` on the Unix socket. Tests and development
+    /// only.
+    pub insecure_agent_header: bool,
+    /// The TCP address of the artifact serving origin (PLAN §15.2), for
+    /// example `0.0.0.0:8081`. `None`: no listener of its own; the main
+    /// router still serves `/a/...`.
+    pub artifact_listen: Option<String>,
 }
 
 /// A running daemon.
@@ -49,15 +60,19 @@ pub struct Daemon {
     pub state: Shared,
     pub socket: PathBuf,
     pub tcp_addr: Option<std::net::SocketAddr>,
+    /// The bound address of the artifact origin, when it listens.
+    pub artifact_addr: Option<std::net::SocketAddr>,
     tasks: Vec<JoinHandle<()>>,
 }
 
 impl Daemon {
-    /// Stop serving and remove the socket.
+    /// Stop serving, end the harnesses, and remove the socket. The stored
+    /// status of each agent stays, so the next start launches it again.
     pub fn shutdown(self) {
         for t in &self.tasks {
             t.abort();
         }
+        self.state.supervisor.shutdown();
         if let Err(e) = std::fs::remove_file(&self.socket) {
             warn!(socket = %self.socket.display(), "cannot remove socket: {e}");
         }
@@ -99,10 +114,15 @@ pub async fn start(cfg: DaemonConfig) -> anyhow::Result<Daemon> {
         supervisor: cfg.supervisor.clone(),
         state_dir: cfg.state_dir.clone(),
         config_dir: cfg.config_dir.clone(),
+        insecure_agent_header: cfg.insecure_agent_header,
     });
+    if cfg.insecure_agent_header {
+        warn!("--insecure-agent-header: any local caller can act as any agent");
+    }
 
     let mut tasks = Vec::new();
     tasks.push(spawn_pump(state.clone()));
+    state.supervisor.bind(&state);
 
     let report = apply_definitions(&state, defs, errors, "system".into())
         .await
@@ -130,11 +150,48 @@ pub async fn start(cfg: DaemonConfig) -> anyhow::Result<Daemon> {
         ),
         _ => {}
     }
+    let mut artifact_addr = None;
+    if let Some(addr) = cfg.artifact_listen.as_deref().filter(|a| !a.is_empty()) {
+        let listener = tokio::net::TcpListener::bind(addr)
+            .await
+            .with_context(|| format!("cannot bind the artifact origin {addr}"))?;
+        let local = listener.local_addr()?;
+        info!(addr = %local, "artifact origin listening on TCP");
+        let app = api::artifact_router(state.clone());
+        tasks.push(tokio::spawn(async move {
+            if let Err(e) = axum::serve(listener, app).await {
+                error!("artifact origin failed: {e}");
+            }
+        }));
+        artifact_addr = Some(local);
+    }
+    tasks.push(spawn_prune_timer(state.clone()));
     Ok(Daemon {
         state,
         socket: cfg.socket,
         tcp_addr,
+        artifact_addr,
         tasks,
+    })
+}
+
+/// Run the artifact retention prune (PLAN §15.2): first one hour after the
+/// start, then every `[artifacts] prune_interval_hours` (default 24).
+fn spawn_prune_timer(state: Shared) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut wait = std::time::Duration::from_secs(3600);
+        loop {
+            tokio::time::sleep(wait).await;
+            match api::run_prune(&state, chrono::Utc::now(), false, "system".into()).await {
+                Ok(r) => info!(blobs = r.blobs.len(), "artifact prune done"),
+                Err(e) => warn!("artifact prune failed: {e}"),
+            }
+            let hours = store::artifacts::context(&state.state_dir, &state.config_dir)
+                .map(|c| c.limits.prune_interval_hours)
+                .unwrap_or(24)
+                .max(1);
+            wait = std::time::Duration::from_secs(hours * 3600);
+        }
     })
 }
 
@@ -229,6 +286,10 @@ fn record(t: &mut Tx<'_>, ev: &SupervisorEvent) -> ApiResult<()> {
         SupervisorEventKind::Harness(Event::StatusChanged { to, reason, .. }) => {
             return apply_status(t, &id, *to, reason.as_deref());
         }
+        SupervisorEventKind::NewSession { outcome } => {
+            agents::begin_session(t, &id, outcome)?;
+            return Ok(());
+        }
         SupervisorEventKind::Harness(e) => e,
     };
     let a = agents::get(t, &id)?;
@@ -275,12 +336,14 @@ fn spawn_pump(state: Shared) -> JoinHandle<()> {
     })
 }
 
-/// After a start, an agent the store thinks is live but the supervisor
-/// does not run is `stopped`.
+/// After a start, launch again every agent that the store thinks is live
+/// (or restarting) but the supervisor does not run, with `--resume` of its
+/// last harness session (PLAN §18). An agent that cannot start gets
+/// `error`, with the reason.
 async fn reconcile(state: &Shared) -> ApiResult<()> {
     let all = state.db.read(agents::all_statuses).await?;
     for (id, stored) in all {
-        if !stored.is_live() {
+        if !stored.is_live() && stored != AgentStatus::Restarting {
             continue;
         }
         let Ok(agent_id) = id.parse() else { continue };
@@ -288,17 +351,27 @@ async fn reconcile(state: &Shared) -> ApiResult<()> {
             .supervisor
             .status(agent_id)
             .await
-            .is_some_and(AgentStatus::is_live);
-        if !live {
+            .is_some_and(|s| s.is_live() || s == AgentStatus::Restarting);
+        if live {
+            continue;
+        }
+        let key = id.clone();
+        let (view, resume) = state
+            .db
+            .write("system", move |t| {
+                let resume = agents::last_harness_session(t, &key)?;
+                agents::begin_session(t, &key, "daemon_restart")?;
+                Ok((agents::get(t, &key)?, resume))
+            })
+            .await?;
+        info!(agent = %id, name = %view.agent.name, resume = ?resume, "launching again after daemon start");
+        if let Err(e) = state.supervisor.start(view.agent, resume).await {
+            warn!(agent = %id, "cannot launch again after daemon start: {e}");
+            let reason = format!("cannot launch again after daemon start: {e}");
             state
                 .db
                 .write("system", move |t| {
-                    apply_status(
-                        t,
-                        &id,
-                        AgentStatus::Stopped,
-                        Some("not running after daemon start"),
-                    )
+                    apply_status(t, &id, AgentStatus::Error, Some(&reason))
                 })
                 .await?;
         }

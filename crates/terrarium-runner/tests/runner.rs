@@ -48,6 +48,10 @@ impl Adapter for FakeAdapter {
             _ => vec![],
         }
     }
+    /// Visible keys, so a test can see that the retry path sends them.
+    fn clear_input_keys(&self) -> Vec<u8> {
+        b"cleared\r".to_vec()
+    }
     fn answer(&self, _request_id: &str, answer: &Answer) -> Vec<u8> {
         match answer {
             Answer::Allow => b"y\r".to_vec(),
@@ -288,9 +292,18 @@ async fn delivery_fails_after_one_retry() {
         .expect("time")
         .expect_err("fails");
     assert_eq!(err, DeliveryError::NoSubmitHook { attempts: 2 });
-    // The fake TUI saw the turn twice.
+    // The fake TUI saw the turn twice, and the clear keys before the retry.
     let text = h.runner.screen().text();
-    assert_eq!(text.matches("ignored").count(), 2, "{text}");
+    assert_eq!(text.matches("lost").count(), 2, "{text}");
+    let cleared = text.find("cleared").expect("clear keys before the retry");
+    assert!(
+        text.find("lost").is_some_and(|first| first < cleared),
+        "{text}"
+    );
+    assert!(
+        text.rfind("lost").is_some_and(|last| last > cleared),
+        "{text}"
+    );
     h.runner.kill().expect("kill");
     h.runner.wait().await;
     let all = read_events(h.runner.events_path());
@@ -330,7 +343,7 @@ async fn attach_sees_output() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn kill_stops_and_unasked_exit_is_error() {
+async fn kill_stops_and_exit_code_picks_stopped_or_error() {
     let mut h = start(Opts::default()).await;
     until_idle(&mut h).await;
     h.runner.kill().expect("kill");
@@ -349,6 +362,14 @@ async fn kill_stops_and_unasked_exit_is_error() {
     let status = timeout(WAIT, h.runner.wait()).await.expect("exit");
     assert!(status.success());
     assert_eq!(d.wait().await, Err(DeliveryError::Exited));
+    // An exit with code 0 that no one asked for is `stopped`, not `error`.
+    assert_eq!(h.runner.status(), AgentStatus::Stopped);
+
+    let mut h = start(Opts::default()).await;
+    until_idle(&mut h).await;
+    let _ = h.runner.type_turn("/exit 3");
+    let status = timeout(WAIT, h.runner.wait()).await.expect("exit");
+    assert_eq!(status.code, 3);
     assert_eq!(h.runner.status(), AgentStatus::Error);
 }
 

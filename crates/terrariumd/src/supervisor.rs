@@ -4,18 +4,21 @@
 //! supervisor reports what happens as [`SupervisorEvent`]s; the daemon
 //! writes each one to the event log and keeps `agents.status` in step.
 //!
-//! [`InMemorySupervisor`] is a fake for tests and for running the daemon
-//! before the real runner exists. The real runner plugs in behind the same
-//! trait.
+//! [`crate::runner_supervisor::RunnerSupervisor`] is the real one: one
+//! `terrarium_runner::Runner` per running agent. `InMemorySupervisor` is a
+//! fake for tests. It is built only for unit tests and with the
+//! `fake-supervisor` feature (the integration tests turn it on).
 
-use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use terrarium_core::{Agent, AgentId, AgentStatus, Answer, Event, HarnessSessionId};
 use tokio::sync::{broadcast, mpsc};
+
+use crate::api::Shared;
+
+#[cfg(any(test, feature = "fake-supervisor"))]
+pub use fake::InMemorySupervisor;
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -25,6 +28,10 @@ pub enum SupervisorError {
     NotRunning(AgentId),
     #[error("agent {0} is running already")]
     AlreadyRunning(AgentId),
+    /// The agent cannot start: its adapter is a stub, or a file it needs
+    /// is missing. The message says what to do.
+    #[error("{0}")]
+    NotReady(String),
     #[error("{0}")]
     Other(String),
 }
@@ -66,6 +73,10 @@ pub enum SupervisorEventKind {
     },
     /// A normalised harness event: hooks, session ID, exit.
     Harness(Event),
+    /// The supervisor started the harness again on its own (restart policy,
+    /// a failed resume). End the current session with `outcome` and open a
+    /// new one.
+    NewSession { outcome: String },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -99,259 +110,285 @@ pub trait Supervisor: Send + Sync + 'static {
     fn status(&self, agent: AgentId) -> BoxFuture<'_, Option<AgentStatus>>;
     /// Every event from now on.
     fn subscribe(&self) -> broadcast::Receiver<SupervisorEvent>;
+    /// The daemon calls this once, after it builds its state and before it
+    /// serves. A supervisor that needs the store, the event hub, or the
+    /// router keeps a weak reference.
+    fn bind(&self, _state: &Shared) {}
+    /// The daemon shuts down. End every harness, but keep the stored status,
+    /// so the next daemon start launches the agents again with resume
+    /// (PLAN §18).
+    fn shutdown(&self) {}
 }
 
-#[derive(Default)]
-struct FakeAgent {
-    status: AgentStatus,
-    /// Bumped on every start and stop, so a stale timer does nothing.
-    epoch: u64,
-    viewers: Vec<mpsc::Sender<Vec<u8>>>,
-    size: Option<(u16, u16)>,
-}
+#[cfg(any(test, feature = "fake-supervisor"))]
+mod fake {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
-#[derive(Default)]
-struct Inner {
-    agents: HashMap<AgentId, FakeAgent>,
-}
+    use terrarium_core::{Agent, AgentId, AgentStatus, Event, HarnessSessionId};
+    use tokio::sync::{broadcast, mpsc};
 
-/// A fake supervisor. `start` goes `starting` -> `idle` after `delay`.
-/// `send_turn` and `answer` go `working` -> `idle` after `delay`, with
-/// `turn_start` and `turn_end` events. The PTY echoes its input.
-#[derive(Clone)]
-pub struct InMemorySupervisor {
-    delay: Duration,
-    inner: Arc<Mutex<Inner>>,
-    tx: broadcast::Sender<SupervisorEvent>,
-}
+    use super::{
+        AnswerInput, BoxFuture, PtyAttachment, PtyInput, Supervisor, SupervisorError,
+        SupervisorEvent, SupervisorEventKind,
+    };
 
-impl InMemorySupervisor {
-    pub fn new(delay: Duration) -> Self {
-        let (tx, _) = broadcast::channel(1024);
-        Self {
-            delay,
-            inner: Arc::default(),
-            tx,
+    #[derive(Default)]
+    struct FakeAgent {
+        status: AgentStatus,
+        /// Bumped on every start and stop, so a stale timer does nothing.
+        epoch: u64,
+        viewers: Vec<mpsc::Sender<Vec<u8>>>,
+        size: Option<(u16, u16)>,
+    }
+
+    #[derive(Default)]
+    struct Inner {
+        agents: HashMap<AgentId, FakeAgent>,
+    }
+
+    /// A fake supervisor. `start` goes `starting` -> `idle` after `delay`.
+    /// `send_turn` and `answer` go `working` -> `idle` after `delay`, with
+    /// `turn_start` and `turn_end` events. The PTY echoes its input.
+    #[derive(Clone)]
+    pub struct InMemorySupervisor {
+        delay: Duration,
+        inner: Arc<Mutex<Inner>>,
+        tx: broadcast::Sender<SupervisorEvent>,
+    }
+
+    impl InMemorySupervisor {
+        pub fn new(delay: Duration) -> Self {
+            let (tx, _) = broadcast::channel(1024);
+            Self {
+                delay,
+                inner: Arc::default(),
+                tx,
+            }
         }
-    }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
-        match self.inner.lock() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
+        fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
+            match self.inner.lock() {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            }
         }
-    }
 
-    fn emit(&self, agent: AgentId, kind: SupervisorEventKind) {
-        let _ = self.tx.send(SupervisorEvent { agent, kind });
-    }
+        fn emit(&self, agent: AgentId, kind: SupervisorEventKind) {
+            let _ = self.tx.send(SupervisorEvent { agent, kind });
+        }
 
-    /// Set the status and emit the change. Returns the new epoch.
-    fn set_status(&self, agent: AgentId, status: AgentStatus, reason: Option<&str>) -> u64 {
-        let epoch = {
-            let mut inner = self.lock();
-            let a = inner.agents.entry(agent).or_default();
-            a.status = status;
-            if !status.is_live() {
-                a.viewers.clear();
-            }
-            a.epoch
-        };
-        self.emit(
-            agent,
-            SupervisorEventKind::Status {
-                status,
-                reason: reason.map(str::to_owned),
-            },
-        );
-        epoch
-    }
-
-    fn current(&self, agent: AgentId) -> Option<(AgentStatus, u64)> {
-        self.lock().agents.get(&agent).map(|a| (a.status, a.epoch))
-    }
-
-    /// After `delay`, if nothing restarted or stopped the agent meanwhile,
-    /// run `then`.
-    fn later(&self, agent: AgentId, epoch: u64, then: impl FnOnce(&Self) + Send + 'static) {
-        let me = self.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(me.delay).await;
-            if me
-                .current(agent)
-                .is_some_and(|(s, e)| e == epoch && s.is_live())
-            {
-                then(&me);
-            }
-        });
-    }
-
-    fn boot(&self, agent: AgentId, resume: Option<HarnessSessionId>) {
-        let epoch = {
-            let mut inner = self.lock();
-            let a = inner.agents.entry(agent).or_default();
-            a.epoch += 1;
-            a.epoch
-        };
-        self.set_status(agent, AgentStatus::Starting, None);
-        self.later(agent, epoch, move |me| {
-            let session =
-                resume.unwrap_or_else(|| HarnessSessionId(format!("fake-{}", AgentId::new())));
-            me.emit(
-                agent,
-                SupervisorEventKind::Harness(Event::SessionStarted {
-                    harness_session: session,
-                    transcript_path: None,
-                    source: Some("startup".into()),
-                }),
-            );
-            me.set_status(agent, AgentStatus::Idle, None);
-        });
-    }
-
-    fn turn(&self, agent: AgentId, prompt: String) -> Result<(), SupervisorError> {
-        let Some((_, epoch)) = self.current(agent).filter(|(s, _)| s.is_live()) else {
-            return Err(SupervisorError::NotRunning(agent));
-        };
-        self.emit(
-            agent,
-            SupervisorEventKind::Harness(Event::TurnStart {
-                prompt: Some(prompt),
-            }),
-        );
-        self.set_status(agent, AgentStatus::Working, None);
-        self.later(agent, epoch, move |me| {
-            me.emit(agent, SupervisorEventKind::Harness(Event::TurnEnd));
-            me.set_status(agent, AgentStatus::Idle, None);
-        });
-        Ok(())
-    }
-
-    /// The last size a PTY client reported. For tests.
-    pub fn pty_size(&self, agent: AgentId) -> Option<(u16, u16)> {
-        self.lock().agents.get(&agent).and_then(|a| a.size)
-    }
-}
-
-impl Supervisor for InMemorySupervisor {
-    fn start(
-        &self,
-        agent: Agent,
-        resume: Option<HarnessSessionId>,
-    ) -> BoxFuture<'_, Result<(), SupervisorError>> {
-        Box::pin(async move {
-            if self.current(agent.id).is_some_and(|(s, _)| s.is_live()) {
-                return Err(SupervisorError::AlreadyRunning(agent.id));
-            }
-            self.boot(agent.id, resume);
-            Ok(())
-        })
-    }
-
-    fn stop(&self, agent: AgentId) -> BoxFuture<'_, Result<(), SupervisorError>> {
-        Box::pin(async move {
-            if !self.current(agent).is_some_and(|(s, _)| s.is_live()) {
-                return Err(SupervisorError::NotRunning(agent));
-            }
-            {
+        /// Set the status and emit the change. Returns the new epoch.
+        fn set_status(&self, agent: AgentId, status: AgentStatus, reason: Option<&str>) -> u64 {
+            let epoch = {
                 let mut inner = self.lock();
-                if let Some(a) = inner.agents.get_mut(&agent) {
-                    a.epoch += 1;
-                }
-            }
-            self.emit(
-                agent,
-                SupervisorEventKind::Harness(Event::Exit { code: Some(0) }),
-            );
-            self.set_status(agent, AgentStatus::Stopped, Some("stopped"));
-            Ok(())
-        })
-    }
-
-    fn restart(&self, agent: Agent) -> BoxFuture<'_, Result<(), SupervisorError>> {
-        Box::pin(async move {
-            self.set_status(agent.id, AgentStatus::Restarting, Some("restart"));
-            {
-                let mut inner = self.lock();
-                if let Some(a) = inner.agents.get_mut(&agent.id) {
+                let a = inner.agents.entry(agent).or_default();
+                a.status = status;
+                if !status.is_live() {
                     a.viewers.clear();
                 }
-            }
-            self.boot(agent.id, agent.session.clone());
-            Ok(())
-        })
-    }
+                a.epoch
+            };
+            self.emit(
+                agent,
+                SupervisorEventKind::Status {
+                    status,
+                    reason: reason.map(str::to_owned),
+                },
+            );
+            epoch
+        }
 
-    fn send_turn(
-        &self,
-        agent: AgentId,
-        text: String,
-    ) -> BoxFuture<'_, Result<(), SupervisorError>> {
-        Box::pin(async move { self.turn(agent, text) })
-    }
+        fn current(&self, agent: AgentId) -> Option<(AgentStatus, u64)> {
+            self.lock().agents.get(&agent).map(|a| (a.status, a.epoch))
+        }
 
-    fn answer(
-        &self,
-        agent: AgentId,
-        answer: AnswerInput,
-    ) -> BoxFuture<'_, Result<(), SupervisorError>> {
-        let text = match answer {
-            AnswerInput::Answer { request_id, answer } => {
-                format!("answer {request_id}: {answer:?}")
-            }
-            AnswerInput::Keys(keys) => keys,
-        };
-        Box::pin(async move { self.turn(agent, text) })
-    }
-
-    fn attach_pty(&self, agent: AgentId) -> BoxFuture<'_, Result<PtyAttachment, SupervisorError>> {
-        Box::pin(async move {
-            let (out_tx, out_rx) = mpsc::channel(256);
-            {
-                let mut inner = self.lock();
-                match inner.agents.get_mut(&agent) {
-                    Some(a) if a.status.is_live() => a.viewers.push(out_tx),
-                    _ => return Err(SupervisorError::NotRunning(agent)),
-                }
-            }
-            let (in_tx, mut in_rx) = mpsc::channel::<PtyInput>(256);
+        /// After `delay`, if nothing restarted or stopped the agent meanwhile,
+        /// run `then`.
+        fn later(&self, agent: AgentId, epoch: u64, then: impl FnOnce(&Self) + Send + 'static) {
             let me = self.clone();
             tokio::spawn(async move {
-                while let Some(input) = in_rx.recv().await {
-                    match input {
-                        PtyInput::Bytes(bytes) => {
-                            let viewers = me
-                                .lock()
-                                .agents
-                                .get(&agent)
-                                .map(|a| a.viewers.clone())
-                                .unwrap_or_default();
-                            for v in viewers {
-                                let _ = v.send(bytes.clone()).await;
+                tokio::time::sleep(me.delay).await;
+                if me
+                    .current(agent)
+                    .is_some_and(|(s, e)| e == epoch && s.is_live())
+                {
+                    then(&me);
+                }
+            });
+        }
+
+        fn boot(&self, agent: AgentId, resume: Option<HarnessSessionId>) {
+            let epoch = {
+                let mut inner = self.lock();
+                let a = inner.agents.entry(agent).or_default();
+                a.epoch += 1;
+                a.epoch
+            };
+            self.set_status(agent, AgentStatus::Starting, None);
+            self.later(agent, epoch, move |me| {
+                let session =
+                    resume.unwrap_or_else(|| HarnessSessionId(format!("fake-{}", AgentId::new())));
+                me.emit(
+                    agent,
+                    SupervisorEventKind::Harness(Event::SessionStarted {
+                        harness_session: session,
+                        transcript_path: None,
+                        source: Some("startup".into()),
+                    }),
+                );
+                me.set_status(agent, AgentStatus::Idle, None);
+            });
+        }
+
+        fn turn(&self, agent: AgentId, prompt: String) -> Result<(), SupervisorError> {
+            let Some((_, epoch)) = self.current(agent).filter(|(s, _)| s.is_live()) else {
+                return Err(SupervisorError::NotRunning(agent));
+            };
+            self.emit(
+                agent,
+                SupervisorEventKind::Harness(Event::TurnStart {
+                    prompt: Some(prompt),
+                }),
+            );
+            self.set_status(agent, AgentStatus::Working, None);
+            self.later(agent, epoch, move |me| {
+                me.emit(agent, SupervisorEventKind::Harness(Event::TurnEnd));
+                me.set_status(agent, AgentStatus::Idle, None);
+            });
+            Ok(())
+        }
+
+        /// The last size a PTY client reported. For tests.
+        pub fn pty_size(&self, agent: AgentId) -> Option<(u16, u16)> {
+            self.lock().agents.get(&agent).and_then(|a| a.size)
+        }
+    }
+
+    impl Supervisor for InMemorySupervisor {
+        fn start(
+            &self,
+            agent: Agent,
+            resume: Option<HarnessSessionId>,
+        ) -> BoxFuture<'_, Result<(), SupervisorError>> {
+            Box::pin(async move {
+                if self.current(agent.id).is_some_and(|(s, _)| s.is_live()) {
+                    return Err(SupervisorError::AlreadyRunning(agent.id));
+                }
+                self.boot(agent.id, resume);
+                Ok(())
+            })
+        }
+
+        fn stop(&self, agent: AgentId) -> BoxFuture<'_, Result<(), SupervisorError>> {
+            Box::pin(async move {
+                if !self.current(agent).is_some_and(|(s, _)| s.is_live()) {
+                    return Err(SupervisorError::NotRunning(agent));
+                }
+                {
+                    let mut inner = self.lock();
+                    if let Some(a) = inner.agents.get_mut(&agent) {
+                        a.epoch += 1;
+                    }
+                }
+                self.emit(
+                    agent,
+                    SupervisorEventKind::Harness(Event::Exit { code: Some(0) }),
+                );
+                self.set_status(agent, AgentStatus::Stopped, Some("stopped"));
+                Ok(())
+            })
+        }
+
+        fn restart(&self, agent: Agent) -> BoxFuture<'_, Result<(), SupervisorError>> {
+            Box::pin(async move {
+                self.set_status(agent.id, AgentStatus::Restarting, Some("restart"));
+                {
+                    let mut inner = self.lock();
+                    if let Some(a) = inner.agents.get_mut(&agent.id) {
+                        a.viewers.clear();
+                    }
+                }
+                self.boot(agent.id, agent.session.clone());
+                Ok(())
+            })
+        }
+
+        fn send_turn(
+            &self,
+            agent: AgentId,
+            text: String,
+        ) -> BoxFuture<'_, Result<(), SupervisorError>> {
+            Box::pin(async move { self.turn(agent, text) })
+        }
+
+        fn answer(
+            &self,
+            agent: AgentId,
+            answer: AnswerInput,
+        ) -> BoxFuture<'_, Result<(), SupervisorError>> {
+            let text = match answer {
+                AnswerInput::Answer { request_id, answer } => {
+                    format!("answer {request_id}: {answer:?}")
+                }
+                AnswerInput::Keys(keys) => keys,
+            };
+            Box::pin(async move { self.turn(agent, text) })
+        }
+
+        fn attach_pty(
+            &self,
+            agent: AgentId,
+        ) -> BoxFuture<'_, Result<PtyAttachment, SupervisorError>> {
+            Box::pin(async move {
+                let (out_tx, out_rx) = mpsc::channel(256);
+                {
+                    let mut inner = self.lock();
+                    match inner.agents.get_mut(&agent) {
+                        Some(a) if a.status.is_live() => a.viewers.push(out_tx),
+                        _ => return Err(SupervisorError::NotRunning(agent)),
+                    }
+                }
+                let (in_tx, mut in_rx) = mpsc::channel::<PtyInput>(256);
+                let me = self.clone();
+                tokio::spawn(async move {
+                    while let Some(input) = in_rx.recv().await {
+                        match input {
+                            PtyInput::Bytes(bytes) => {
+                                let viewers = me
+                                    .lock()
+                                    .agents
+                                    .get(&agent)
+                                    .map(|a| a.viewers.clone())
+                                    .unwrap_or_default();
+                                for v in viewers {
+                                    let _ = v.send(bytes.clone()).await;
+                                }
                             }
-                        }
-                        PtyInput::Resize { rows, cols } => {
-                            if let Some(a) = me.lock().agents.get_mut(&agent) {
-                                a.size = Some((rows, cols));
+                            PtyInput::Resize { rows, cols } => {
+                                if let Some(a) = me.lock().agents.get_mut(&agent) {
+                                    a.size = Some((rows, cols));
+                                }
                             }
                         }
                     }
-                }
-            });
-            Ok(PtyAttachment {
-                snapshot: b"\x1b[2J\x1b[H".to_vec(),
-                output: out_rx,
-                input: in_tx,
+                });
+                Ok(PtyAttachment {
+                    snapshot: b"\x1b[2J\x1b[H".to_vec(),
+                    output: out_rx,
+                    input: in_tx,
+                })
             })
-        })
-    }
+        }
 
-    fn status(&self, agent: AgentId) -> BoxFuture<'_, Option<AgentStatus>> {
-        Box::pin(async move { self.current(agent).map(|(s, _)| s) })
-    }
+        fn status(&self, agent: AgentId) -> BoxFuture<'_, Option<AgentStatus>> {
+            Box::pin(async move { self.current(agent).map(|(s, _)| s) })
+        }
 
-    fn subscribe(&self) -> broadcast::Receiver<SupervisorEvent> {
-        self.tx.subscribe()
+        fn subscribe(&self) -> broadcast::Receiver<SupervisorEvent> {
+            self.tx.subscribe()
+        }
     }
 }
 
@@ -360,6 +397,7 @@ impl Supervisor for InMemorySupervisor {
 mod tests {
     use super::*;
     use std::path::Path;
+    use std::time::Duration;
     use terrarium_core::config::AgentDef;
 
     fn agent() -> Agent {

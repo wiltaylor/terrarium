@@ -20,6 +20,7 @@
 //! | `prompt.md` | the rendered system prompt; `launch` reads it |
 //! | `claude/claude.json` | bound over `$CLAUDE_CONFIG_DIR/.claude.json` |
 //! | `claude/settings.json` | the same JSON as `--settings`, for inspection |
+//! | `claude/sessions/` | bound over `$CLAUDE_CONFIG_DIR/sessions/` (a directory) |
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -32,6 +33,8 @@ use crate::{ClaudeOptions, launch};
 
 /// The name of the state file in the Claude home.
 pub const STATE_FILE: &str = ".claude.json";
+/// The live-process registry in the Claude home. A directory.
+pub const SESSIONS_DIR: &str = "sessions";
 /// The rendered prompt in the agent directory (PLAN §11).
 pub const PROMPT_FILE: &str = "prompt.md";
 
@@ -161,12 +164,29 @@ pub fn materialize(
         write_atomic(&shared, b"{}\n")?;
     }
 
-    Ok(vec![FileOverlay {
-        source: own,
-        target: opts.config_dir.join(STATE_FILE),
-        // Claude Code writes its state file (oauthAccount, project stats).
-        writable: true,
-    }])
+    // Claude Code registers each live process as `sessions/<pid>.json` in
+    // the home. In a sandbox with its own PID namespace every agent has the
+    // same pid (2), so the agents would overwrite one file, and each agent
+    // would see the operator's own sessions. A per-agent directory keeps
+    // them apart (`docs/compat.md`, "Claude inside bwrap").
+    let own_sessions = dir.join(SESSIONS_DIR);
+    fs::create_dir_all(&own_sessions).map_err(|e| ClaudeError::io(&own_sessions, e))?;
+    let shared_sessions = home.join(SESSIONS_DIR);
+    fs::create_dir_all(&shared_sessions).map_err(|e| ClaudeError::io(&shared_sessions, e))?;
+
+    Ok(vec![
+        FileOverlay {
+            source: own,
+            target: opts.config_dir.join(STATE_FILE),
+            // Claude Code writes its state file (oauthAccount, project stats).
+            writable: true,
+        },
+        FileOverlay {
+            source: own_sessions,
+            target: opts.config_dir.join(SESSIONS_DIR),
+            writable: true,
+        },
+    ])
 }
 
 #[cfg(test)]
@@ -205,7 +225,10 @@ mod tests {
         let opts = ClaudeOptions::default();
 
         let overlays = materialize(&opts, &agent, &home, Some("hello")).expect("materialize");
-        assert_eq!(overlays.len(), 1);
+        assert_eq!(overlays.len(), 2);
+        assert_eq!(overlays[1].target, Path::new("/auth/claude/sessions"));
+        assert!(overlays[1].source.is_dir());
+        assert!(home.join("sessions").is_dir());
         assert_eq!(overlays[0].target, Path::new("/auth/claude/.claude.json"));
         assert!(overlays[0].writable);
 

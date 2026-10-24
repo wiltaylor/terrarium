@@ -431,6 +431,9 @@ impl Runner {
 
 fn command(spec: &LaunchSpec, socket: &Path, agent: AgentId) -> CommandBuilder {
     let mut cmd = CommandBuilder::new(&spec.program);
+    if spec.clear_env {
+        cmd.env_clear();
+    }
     cmd.args(&spec.args);
     cmd.cwd(&spec.cwd);
     if !spec.env.contains_key("TERM") {
@@ -472,6 +475,7 @@ impl Inner {
             agent: self.config.agent,
             name: self.config.name.clone(),
             project: self.config.project.clone(),
+            roles: self.config.roles.clone(),
             harness: self.adapter.id(),
             status: lock(&self.state).status,
         }
@@ -629,6 +633,10 @@ impl Inner {
         });
         let (to, reason) = if state.stop_requested {
             (AgentStatus::Stopped, "stopped on request".to_owned())
+        } else if status.success() {
+            // The harness ended on its own and reported success, for
+            // example after `/exit`. That is not a failure (PLAN §18).
+            (AgentStatus::Stopped, "exited".to_owned())
         } else {
             (
                 AgentStatus::Error,
@@ -699,6 +707,7 @@ impl Inner {
         let (hint, ready) = self.probe(quiet_for);
 
         let mut to_type = None;
+        let mut clear = None;
         {
             let mut state = lock(&self.state);
             if state.exited {
@@ -731,6 +740,10 @@ impl Inner {
                         f.turn.id
                     );
                     state.queue.push_front(f.turn);
+                    // The text of the failed attempt can still be in the
+                    // input box. Empty it first, or the prompt never reads
+                    // as ready and the retry would join the old text.
+                    clear = Some(self.adapter.clear_input_keys());
                 } else {
                     let attempts = f.turn.attempts;
                     self.emit(Event::DeliveryFailed {
@@ -759,6 +772,11 @@ impl Inner {
             }
         }
 
+        if let Some(bytes) = clear.filter(|b| !b.is_empty())
+            && let Err(e) = self.write_bytes(bytes).await
+        {
+            tracing::debug!("cannot clear the input line: {e}");
+        }
         if let Some(bytes) = to_type
             && let Err(e) = self.write_bytes(bytes).await
         {

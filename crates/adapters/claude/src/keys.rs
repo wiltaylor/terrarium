@@ -41,6 +41,12 @@ pub fn answer(answer: &Answer) -> Vec<u8> {
     }
 }
 
+/// Empty the input box: Ctrl-U. Verified on 2.1.310 inside bwrap
+/// (`docs/compat.md`, "Claude inside bwrap"): "draft text" in the box went
+/// away, the prompt read as ready again, and the agent stayed up. Ctrl-C
+/// is not used: on an empty box it arms "Press Ctrl-C again to exit".
+pub const CLEAR_INPUT: &[u8] = &[0x15];
+
 /// The keys for a clean exit: `/exit` then CR. The process exits in about
 /// 0.5 s with `SessionEnd.reason` = `prompt_input_exit`.
 pub fn exit() -> Vec<u8> {
@@ -75,5 +81,6 @@ mod tests {
         assert_eq!(answer(&Answer::Allow), b"\r".to_vec());
         assert_eq!(answer(&Answer::Deny), b"\x1b".to_vec());
         assert_eq!(exit(), b"/exit\r".to_vec());
+        assert_eq!(CLEAR_INPUT, b"\x15");
     }
 }

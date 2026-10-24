@@ -7,6 +7,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 
+use super::longpoll::{self, WaitQuery};
 use super::{ApiJson, ApiQuery, Shared, paged};
 use crate::actor::Actor;
 use crate::db::Tx;
@@ -28,7 +29,7 @@ pub fn routes() -> Router<Shared> {
         .route("/projects/{name}/inbox/{id}/reply", post(inbox_reply))
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Clone, Deserialize)]
 struct ListQuery {
     to: Option<String>,
     from: Option<String>,
@@ -41,10 +42,11 @@ async fn list(
     actor: Actor,
     ApiQuery(page): ApiQuery<Page>,
     ApiQuery(q): ApiQuery<ListQuery>,
+    ApiQuery(wait): ApiQuery<WaitQuery>,
 ) -> ApiResult<Response> {
-    let rows = state
-        .db
-        .read(move |c| {
+    let rows = longpoll::hold(&state, wait, &["mail"], || {
+        let (actor, page, q) = (actor.clone(), page.clone(), q.clone());
+        state.db.read(move |c| {
             let context = actor.project();
             let key = |s: &Option<String>| -> ApiResult<Option<String>> {
                 s.as_deref()
@@ -66,7 +68,8 @@ async fn list(
             }
             mail::list(c, &f, &page)
         })
-        .await?;
+    })
+    .await?;
     Ok(paged(rows))
 }
 
@@ -280,25 +283,29 @@ async fn inbox_list(
     Path(name): Path<String>,
     ApiQuery(page): ApiQuery<Page>,
     ApiQuery(q): ApiQuery<InboxQuery>,
+    ApiQuery(wait): ApiQuery<WaitQuery>,
 ) -> ApiResult<Response> {
     policy::read_inbox(&actor, &name)?;
-    let rows = state
-        .db
-        .read(move |c| {
+    let rows = longpoll::hold(&state, wait, &["mail"], || {
+        let (name, page, unread, st, thread) = (
+            name.clone(),
+            page.clone(),
+            q.unread,
+            q.state.clone(),
+            q.thread.clone(),
+        );
+        state.db.read(move |c| {
             crate::store::projects::get(c, &name)?;
             let f = MailFilter {
                 to: Some(format!("project:{name}")),
-                state: if q.unread {
-                    Some("unread".into())
-                } else {
-                    q.state.clone()
-                },
-                thread: q.thread.clone(),
+                state: if unread { Some("unread".into()) } else { st },
+                thread,
                 ..MailFilter::default()
             };
             mail::list(c, &f, &page)
         })
-        .await?;
+    })
+    .await?;
     Ok(paged(rows))
 }
 

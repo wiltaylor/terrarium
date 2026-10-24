@@ -1,7 +1,9 @@
 use std::path::PathBuf;
 
-use clap::Parser;
-use terrarium_core::paths;
+use clap::{Parser, Subcommand};
+use terrarium_core::{HarnessId, paths};
+
+use crate::sandbox::SandboxMode;
 
 /// The Terrarium daemon. Every option also reads an env var.
 #[derive(Debug, Parser)]
@@ -27,13 +29,94 @@ pub struct Settings {
     #[arg(long, env = paths::ENV_CONFIG_DIR, default_value = paths::DEFAULT_CONFIG_DIR)]
     pub config_dir: PathBuf,
 
-    /// The step delay of the in-memory supervisor, in milliseconds. The fake
-    /// stands in for the agent runner until the runner is wired in.
+    /// The TCP address of the artifact serving origin (PLAN §15.2). Empty:
+    /// no listener of its own.
     #[arg(
         long,
-        env = "TERRARIUM_FAKE_DELAY_MS",
-        default_value_t = 300,
-        hide = true
+        env = "TERRARIUM_ARTIFACT_LISTEN",
+        default_value = "0.0.0.0:8081"
     )]
-    pub fake_delay_ms: u64,
+    pub artifact_listen: String,
+
+    /// Runner sockets go in `<dir>/agents/<ulid>.sock`.
+    #[arg(long, env = "TERRARIUM_RUNTIME_DIR", default_value_os_t = default_runtime_dir())]
+    pub runtime_dir: PathBuf,
+
+    /// The prompt templates, `<dir>/<name>.md`.
+    #[arg(long, env = "TERRARIUM_PROMPTS_DIR", default_value = "/prompts")]
+    pub prompts_dir: PathBuf,
+
+    /// How harnesses run: `bwrap` (the sandbox of PLAN §11) or `none`
+    /// (development and tests only).
+    #[arg(long, env = "TERRARIUM_SANDBOX", default_value = "bwrap")]
+    pub sandbox: SandboxMode,
+
+    /// Pass `--new-session` to bwrap. Off by default, because the harness
+    /// then misses terminal resizes (docs/compat.md).
+    #[arg(long, env = "TERRARIUM_SANDBOX_NEW_SESSION")]
+    pub sandbox_new_session: bool,
+
+    /// The shared home of a harness on this machine, as `<harness>=<dir>`.
+    /// The default is `/auth/<harness>`. Repeat it, or use commas.
+    #[arg(
+        long = "harness-home",
+        env = "TERRARIUM_HARNESS_HOME",
+        value_delimiter = ',',
+        value_parser = parse_home
+    )]
+    pub harness_homes: Vec<(HarnessId, PathBuf)>,
+
+    /// The `terrarium` CLI that the sandbox binds for hooks and agent
+    /// commands. The default is `terrarium` next to this binary, else on PATH.
+    #[arg(long, env = "TERRARIUM_CLI")]
+    pub cli: Option<PathBuf>,
+
+    /// Trust the `X-Terrarium-Agent` header on the Unix socket. Any local
+    /// caller can then act as any agent. For tests and development only.
+    #[arg(long, env = "TERRARIUM_INSECURE_AGENT_HEADER")]
+    pub insecure_agent_header: bool,
+
+    #[command(subcommand)]
+    pub command: Option<Command>,
+}
+
+/// Debug commands. Without one, the daemon serves.
+#[derive(Debug, Subcommand)]
+pub enum Command {
+    /// Print the full sandbox command for an agent, and exit. It writes the
+    /// agent's prompt and harness files, as a start does, but starts nothing.
+    SandboxDryRun {
+        /// The agent: a ULID, `project/name`, or a unique name.
+        agent: String,
+    },
+}
+
+fn default_runtime_dir() -> PathBuf {
+    std::env::var_os("XDG_RUNTIME_DIR")
+        .filter(|v| !v.is_empty())
+        .map(|d| PathBuf::from(d).join("terrarium"))
+        .unwrap_or_else(|| PathBuf::from("/run/terrarium"))
+}
+
+fn parse_home(s: &str) -> Result<(HarnessId, PathBuf), String> {
+    let (h, dir) = s
+        .split_once('=')
+        .ok_or_else(|| format!("`{s}` is not `<harness>=<dir>`"))?;
+    Ok((h.parse()?, PathBuf::from(dir)))
+}
+
+impl Settings {
+    /// The `terrarium` CLI to bind: `--cli`, else next to this binary, else
+    /// on PATH.
+    pub fn cli_path(&self) -> Option<PathBuf> {
+        if let Some(p) = &self.cli {
+            return Some(p.clone());
+        }
+        let sibling = std::env::current_exe()
+            .ok()
+            .and_then(|e| e.parent().map(|d| d.join("terrarium")))
+            .filter(|p| p.is_file());
+        sibling
+            .or_else(|| crate::sandbox::which("terrarium", std::env::var("PATH").ok().as_deref()))
+    }
 }

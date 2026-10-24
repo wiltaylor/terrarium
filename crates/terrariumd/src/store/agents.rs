@@ -247,7 +247,7 @@ fn check_def(def: &AgentDef) -> ApiResult<()> {
             .is_none_or(|(p, n)| p.is_empty() || n.is_empty())
     }) {
         return Err(ApiError::invalid(format!(
-            "policy.cross_project entry `{bad}` must be `project/agent`"
+            "policy.cross_project entry `{bad}` must be `project/agent` or `project/*`"
         )));
     }
     Ok(())

@@ -86,7 +86,7 @@ pub fn change_role(actor: &Actor, target: &str, target_project: &str, role: Role
 /// - `mail_to = ["*"]` means every agent in the sender's project; other
 ///   entries name agents of the project (`name` or `project/name`).
 /// - An agent of another project needs an explicit `project/name` entry in
-///   `cross_project`.
+///   `cross_project`, or `project/*` for every agent of that project.
 /// - A `sysadmin` may mail any agent.
 pub fn mail_to(sender: &AgentActor, to: &Address) -> ApiResult<()> {
     let (id, name, project) = match to {
@@ -110,7 +110,13 @@ pub fn mail_to(sender: &AgentActor, to: &Address) -> ApiResult<()> {
             "your policy.mail_to does not include `{name}`"
         )));
     }
-    if sender.policy.cross_project.contains(&full) {
+    let wildcard = format!("{project}/*");
+    if sender
+        .policy
+        .cross_project
+        .iter()
+        .any(|e| *e == full || *e == wildcard)
+    {
         return Ok(());
     }
     Err(ApiError::forbidden(format!(
@@ -118,6 +124,105 @@ pub fn mail_to(sender: &AgentActor, to: &Address) -> ApiResult<()> {
          or write to the project inbox `project:{project}`",
         sender.project
     )))
+}
+
+// ---- memory graph, wiki, artifacts, versions (PLAN §14, §15) ----
+//
+// Every member reads and writes its own project's memories, pages,
+// artifacts, and versions. The checks below are the exceptions.
+
+/// Edit the title, body, or sources of a memory: its author, or an admin of
+/// the project. Anyone may add tags and links.
+pub fn edit_memory(actor: &Actor, project: &str, author: &str, id: &str) -> ApiResult<()> {
+    if actor.address() == author || is_admin_of(actor, project) {
+        return Ok(());
+    }
+    Err(ApiError::forbidden(format!(
+        "{id} is not your memory; only its author, a project admin, or the operator edits it \
+         (you may add tags and links, or write a correction and supersede it)"
+    )))
+}
+
+/// Delete a memory. Agents supersede; admins and the operator delete.
+pub fn delete_memory(actor: &Actor, project: &str) -> ApiResult<()> {
+    if is_admin_of(actor, project) {
+        return Ok(());
+    }
+    Err(ApiError::forbidden(format!(
+        "deleting a memory needs project_admin of `{project}`, sysadmin, or the operator; \
+         agents supersede instead (POST /api/memories/{{id}}/supersede)"
+    )))
+}
+
+/// Remove a memory link: its author or an admin.
+pub fn unlink_memory(actor: &Actor, project: &str, author: &str) -> ApiResult<()> {
+    if actor.address() == author || is_admin_of(actor, project) {
+        return Ok(());
+    }
+    Err(ApiError::forbidden(
+        "only the author of a link, a project admin, or the operator removes it",
+    ))
+}
+
+/// Move, delete, or undelete a wiki page.
+pub fn admin_wiki(actor: &Actor, project: &str, what: &str) -> ApiResult<()> {
+    admin_project(actor, project, what)
+}
+
+/// Review a wiki page: the operator, an admin, or the agent named as the
+/// page's `reviewer`.
+pub fn review_page(actor: &Actor, project: &str, reviewer: Option<&str>) -> ApiResult<()> {
+    if is_admin_of(actor, project) {
+        return Ok(());
+    }
+    if let (Actor::Agent(a), Some(r)) = (actor, reviewer)
+        && (r == a.name || r == a.id || r == format!("{}/{}", a.project, a.name))
+    {
+        return Ok(());
+    }
+    Err(deny(
+        "reviewing a page",
+        &format!("the page's reviewer, project_admin of `{project}`, sysadmin, or the operator"),
+    ))
+}
+
+/// Delete an artifact: its author, or an admin.
+pub fn delete_artifact(actor: &Actor, project: &str, author: &str) -> ApiResult<()> {
+    if actor.address() == author || is_admin_of(actor, project) {
+        return Ok(());
+    }
+    Err(ApiError::forbidden(
+        "only the author of an artifact, a project admin, or the operator deletes it",
+    ))
+}
+
+/// Prune artifacts by the retention rule.
+pub fn prune_artifacts(actor: &Actor) -> ApiResult<()> {
+    sysadmin(actor, "pruning artifacts")
+}
+
+/// Edit or submit a version: its creator, or an admin.
+pub fn edit_version(actor: &Actor, project: &str, creator: &str, name: &str) -> ApiResult<()> {
+    if actor.address() == creator || is_admin_of(actor, project) {
+        return Ok(());
+    }
+    Err(ApiError::forbidden(format!(
+        "version `{name}` is not yours; only its creator, a project admin, or the operator changes it"
+    )))
+}
+
+/// Approve or reject a version: the user decides, so only the operator.
+pub fn decide_version(actor: &Actor) -> ApiResult<()> {
+    if actor.is_operator() {
+        Ok(())
+    } else {
+        Err(deny("approving or rejecting a version", "the operator"))
+    }
+}
+
+/// Release an approved version.
+pub fn release_version(actor: &Actor, project: &str) -> ApiResult<()> {
+    admin_project(actor, project, "releasing a version")
 }
 
 #[cfg(test)]
@@ -169,6 +274,19 @@ mod tests {
     }
 
     #[test]
+    fn cross_project_wildcard_covers_the_project() {
+        let policy = Policy {
+            targets: vec![],
+            mail_to: vec!["*".into()],
+            cross_project: vec!["q/*".into()],
+        };
+        let a = agent("p", &[], policy);
+        assert!(mail_to(&a, &peer("q", "x")).is_ok());
+        assert!(mail_to(&a, &peer("q", "y")).is_ok());
+        assert!(mail_to(&a, &peer("r", "x")).is_err());
+    }
+
+    #[test]
     fn sysadmin_mails_anyone() {
         let a = agent("p", &[Role::Sysadmin], Policy::default());
         assert!(mail_to(&a, &peer("q", "x")).is_ok());
@@ -195,5 +313,27 @@ mod tests {
         assert!(change_role(&sys, "other", "q", Role::Sysadmin).is_err());
         assert!(change_role(&Actor::Operator, "other", "q", Role::Sysadmin).is_ok());
         assert!(change_role(&admin, "p-id", "p", Role::ProjectAdmin).is_err());
+    }
+
+    #[test]
+    fn knowledge_rules() {
+        let member = Actor::Agent(agent("p", &[], Policy::default()));
+        let admin = Actor::Agent(agent("p", &[Role::ProjectAdmin], Policy::default()));
+        // Authors edit their own memories; admins edit any.
+        assert!(edit_memory(&member, "p", "p-id", "MEM-1").is_ok());
+        assert!(edit_memory(&member, "p", "someone", "MEM-1").is_err());
+        assert!(edit_memory(&admin, "p", "someone", "MEM-1").is_ok());
+        // Agents supersede; admins and the operator delete.
+        assert!(delete_memory(&member, "p").is_err());
+        assert!(delete_memory(&admin, "p").is_ok());
+        assert!(delete_memory(&Actor::Operator, "p").is_ok());
+        assert!(admin_wiki(&member, "p", "x").is_err());
+        assert!(review_page(&member, "p", Some("me")).is_ok());
+        assert!(review_page(&member, "p", Some("other")).is_err());
+        assert!(decide_version(&admin).is_err());
+        assert!(decide_version(&Actor::Operator).is_ok());
+        assert!(release_version(&member, "p").is_err());
+        assert!(release_version(&admin, "p").is_ok());
+        assert!(prune_artifacts(&admin).is_err());
     }
 }

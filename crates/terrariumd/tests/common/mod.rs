@@ -105,6 +105,9 @@ impl TestDaemon {
             state_dir: self.state.clone(),
             config_dir: self.config.clone(),
             supervisor: self.sup.clone(),
+            // The tests name the calling agent with the header.
+            insecure_agent_header: true,
+            artifact_listen: None,
         })
         .await
         .unwrap();

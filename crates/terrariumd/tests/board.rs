@@ -520,3 +520,26 @@ async fn edit_link_archive() {
     let arch = td.get("/api/projects/proj/cards?archived=true").await;
     assert_eq!(arch.ok().as_array().unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn member_may_assign_an_unassigned_card() {
+    let td = setup().await;
+    let id = card(&td, "proj/w1", json!({"title": "Free"})).await;
+    // A member assigns an unassigned card to a peer (PLAN §13).
+    let r = td
+        .post_as(
+            "proj/w1",
+            &format!("/api/cards/{id}/assign"),
+            json!({"assignee": "w2"}),
+        )
+        .await;
+    assert_eq!(r.ok()["assignee_name"], "proj/w2");
+    // Once it is w2's, w1 may not move it on.
+    td.post_as(
+        "proj/w1",
+        &format!("/api/cards/{id}/assign"),
+        json!({"assignee": "w1"}),
+    )
+    .await
+    .err(403, "forbidden");
+}

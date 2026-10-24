@@ -222,6 +222,10 @@ impl Adapter for ClaudeAdapter {
         keys::answer(answer)
     }
 
+    fn clear_input_keys(&self) -> Vec<u8> {
+        keys::CLEAR_INPUT.to_vec()
+    }
+
     /// Keeps an existing `prompt.md`. Use [`ClaudeAdapter::materialize`]
     /// to write a new one.
     fn materialize_config(&self, agent: &Agent, home: &Path) -> Result<Vec<FileOverlay>> {

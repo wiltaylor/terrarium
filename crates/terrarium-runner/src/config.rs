@@ -15,6 +15,8 @@ pub struct RunnerConfig {
     pub name: String,
     /// The project name, for `whoami`.
     pub project: String,
+    /// The roles above `member`, for `whoami`.
+    pub roles: Vec<String>,
     /// The state root, for example `/state`. The runner writes to
     /// `<state_dir>/agents/<ulid>/`.
     pub state_dir: PathBuf,
@@ -50,6 +52,7 @@ impl RunnerConfig {
             agent,
             name: String::new(),
             project: String::new(),
+            roles: Vec::new(),
             state_dir: state_dir.into(),
             runtime_dir: runtime_dir.into(),
             rows: 40,

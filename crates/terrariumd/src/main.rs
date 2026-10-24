@@ -1,12 +1,14 @@
 //! `terrariumd`: the Terrarium daemon.
 #![warn(clippy::unwrap_used, clippy::expect_used)]
 
+use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
 
+use anyhow::Context;
 use clap::Parser;
-use terrariumd::settings::Settings;
-use terrariumd::supervisor::InMemorySupervisor;
+use terrariumd::runner_supervisor::{RunnerSupervisor, RunnerSupervisorConfig};
+use terrariumd::sandbox::{self, SandboxConfig};
+use terrariumd::settings::{Command, Settings};
 use terrariumd::{DaemonConfig, start};
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
@@ -21,12 +23,37 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let settings = Settings::parse();
-    info!(version = terrarium_core::VERSION, "terrariumd starting");
+    let mut sandbox = SandboxConfig {
+        mode: settings.sandbox,
+        cli: settings.cli_path(),
+        new_session: settings.sandbox_new_session,
+        ..SandboxConfig::default()
+    };
+    let homes: HashMap<_, _> = settings.harness_homes.iter().cloned().collect();
+    let supervisor_config = |sandbox: SandboxConfig| {
+        RunnerSupervisorConfig::new(
+            settings.state_dir.clone(),
+            settings.runtime_dir.clone(),
+            settings.prompts_dir.clone(),
+            sandbox,
+            homes.clone(),
+        )
+    };
 
-    // The real runner plugs in here in the next phase.
-    let supervisor = Arc::new(InMemorySupervisor::new(Duration::from_millis(
-        settings.fake_delay_ms,
-    )));
+    if let Some(Command::SandboxDryRun { agent }) = &settings.command {
+        return dry_run(&settings, supervisor_config(sandbox), agent).await;
+    }
+
+    info!(version = terrarium_core::VERSION, sandbox = %sandbox.mode, "terrariumd starting");
+    let bwrap = sandbox.check().map_err(anyhow::Error::msg)?;
+    if sandbox.mode == sandbox::SandboxMode::Bwrap {
+        info!(bwrap = %bwrap.display(), "sandbox ready");
+        sandbox.bwrap = bwrap;
+        if sandbox.cli.is_none() {
+            error!("no `terrarium` CLI found: hooks inside the sandbox will fail; set --cli");
+        }
+    }
+    let supervisor = Arc::new(RunnerSupervisor::new(supervisor_config(sandbox)));
     let daemon = start(DaemonConfig {
         socket: settings.socket,
         listen: Some(settings.listen),
@@ -34,12 +61,37 @@ async fn main() -> anyhow::Result<()> {
         state_dir: settings.state_dir,
         config_dir: settings.config_dir,
         supervisor,
+        insecure_agent_header: settings.insecure_agent_header,
+        artifact_listen: Some(settings.artifact_listen),
     })
     .await?;
 
     shutdown_signal().await;
     info!("shutting down");
     daemon.shutdown();
+    Ok(())
+}
+
+/// `terrariumd sandbox-dry-run <agent>`: print the launch command.
+async fn dry_run(
+    settings: &Settings,
+    cfg: RunnerSupervisorConfig,
+    key: &str,
+) -> anyhow::Result<()> {
+    let conn = terrariumd::db::open(&settings.state_dir.join("terrarium.db"))?;
+    let view = terrariumd::store::agents::find(&conn, key, None)
+        .map_err(|e| anyhow::anyhow!("{}", e.message))?;
+    let resume = terrariumd::store::agents::last_harness_session(&conn, &view.agent.id.to_string())
+        .map_err(|e| anyhow::anyhow!("{}", e.message))?;
+    let sup = RunnerSupervisor::new(cfg);
+    let spec = sup
+        .launch_spec(&view.agent, resume.as_ref())
+        .await
+        .context("cannot build the launch command")?;
+    #[allow(clippy::print_stdout)]
+    {
+        println!("{}", sandbox::command_line(&spec));
+    }
     Ok(())
 }
 

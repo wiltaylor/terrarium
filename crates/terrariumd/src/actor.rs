@@ -2,9 +2,14 @@
 //! every API request; handlers take it as an extractor.
 //!
 //! - TCP with the bearer token: the operator.
-//! - The Unix socket: the operator, unless the request carries
-//!   `X-Terrarium-Agent`. Then it is that agent. The header is for tests and
-//!   for the runner socket of a later phase; TCP ignores it.
+//! - The Unix socket: the operator.
+//! - The runner socket of an agent (`agent_rpc`): that agent. The tunnel
+//!   puts the [`Actor`] on the request before the router sees it, and the
+//!   middleware keeps it. No client can set a request extension.
+//! - `X-Terrarium-Agent` on the Unix socket names an agent only when the
+//!   daemon runs with `--insecure-agent-header` (tests and development), or
+//!   in unit tests. Else the header gets `401 unauthorized`, so a caller does
+//!   not think it acts as an agent when it does not. TCP ignores it.
 
 use axum::extract::{FromRequestParts, Request, State};
 use axum::http::request::Parts;
@@ -104,6 +109,10 @@ impl<S: Send + Sync> FromRequestParts<S> for Actor {
 
 /// Set the [`Actor`] of an API request.
 pub async fn resolve_actor(State(state): State<Shared>, mut req: Request, next: Next) -> Response {
+    // The agent RPC tunnel set the actor from the runner socket.
+    if req.extensions().get::<Actor>().is_some() {
+        return next.run(req).await;
+    }
     let transport = req.extensions().get::<Transport>().copied();
     let header = req
         .headers()
@@ -111,6 +120,14 @@ pub async fn resolve_actor(State(state): State<Shared>, mut req: Request, next: 
         .and_then(|v| v.to_str().ok())
         .map(str::to_owned);
     let actor = match (transport, header) {
+        (Some(Transport::Unix), Some(_)) if !trust_header(&state) => {
+            return ApiError::new(
+                Code::Unauthorized,
+                "X-Terrarium-Agent is not trusted; an agent calls through its runner socket \
+                 (start the daemon with --insecure-agent-header for tests)",
+            )
+            .into_response();
+        }
         (Some(Transport::Unix), Some(key)) => {
             let found = state
                 .db
@@ -129,4 +146,9 @@ pub async fn resolve_actor(State(state): State<Shared>, mut req: Request, next: 
     };
     req.extensions_mut().insert(actor);
     next.run(req).await
+}
+
+/// Whether `X-Terrarium-Agent` names the caller. Always in unit tests.
+fn trust_header(state: &Shared) -> bool {
+    cfg!(test) || state.insecure_agent_header
 }

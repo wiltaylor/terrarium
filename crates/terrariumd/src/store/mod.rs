@@ -3,11 +3,15 @@
 //! through [`crate::db::Db`].
 
 pub mod agents;
+pub mod artifacts;
 pub mod audit;
 pub mod board;
 pub mod mail;
+pub mod memory;
 pub mod projects;
 pub mod sync;
+pub mod versions;
+pub mod wiki;
 
 use serde::Deserialize;
 

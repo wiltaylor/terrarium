@@ -77,6 +77,14 @@ a new token, when `.env` does not exist. The daemon reads:
 | `TERRARIUM_TOKEN`      | none. Without a token, the TCP listener stays off. |
 | `TERRARIUM_STATE_DIR`  | `/state`                                          |
 | `TERRARIUM_CONFIG_DIR` | `/etc/terrarium`                                  |
+| `TERRARIUM_RUNTIME_DIR` | `$XDG_RUNTIME_DIR/terrarium`, else `/run/terrarium`. Runner sockets: `<dir>/agents/<ulid>.sock` |
+| `TERRARIUM_PROMPTS_DIR` | `/prompts`                                       |
+| `TERRARIUM_SANDBOX`    | `bwrap`. `none` runs harnesses with no sandbox (development and tests only). |
+| `TERRARIUM_SANDBOX_NEW_SESSION` | off. On: pass `--new-session` to bwrap (the harness then misses PTY resizes). |
+| `TERRARIUM_HARNESS_HOME` | `/auth/<harness>`. Override as `claude=/path,codex=/path`. |
+| `TERRARIUM_CLI`        | `terrarium` next to `terrariumd`, else on `PATH`. The sandbox binds it at `/opt/terrarium/bin/terrarium`. |
+| `TERRARIUM_ARTIFACT_LISTEN` | `0.0.0.0:8081`. Empty: no artifact listener of its own. |
+| `TERRARIUM_INSECURE_AGENT_HEADER` | off. On: trust `X-Terrarium-Agent` on the Unix socket (tests only). |
 
 The CLI uses the Unix socket. Set `TERRARIUM_URL` and `TERRARIUM_TOKEN` to use
 TCP instead. The CLI supports `http://` only.

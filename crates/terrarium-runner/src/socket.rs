@@ -11,8 +11,10 @@ use crate::error::{Result, RunnerError};
 use crate::protocol::{Message, RpcError};
 use crate::runner::Inner;
 
-/// A line longer than this closes the connection.
-const MAX_LINE: usize = 4 * 1024 * 1024;
+/// A line longer than this closes the connection. An artifact upload
+/// through the `http` method carries up to 32 MiB as base64 in one line
+/// (`docs/agent-rpc.md`), so the limit is above 32 MiB * 4/3.
+const MAX_LINE: usize = 64 * 1024 * 1024;
 
 pub(crate) fn bind(path: &Path) -> Result<UnixListener> {
     if let Some(dir) = path.parent() {
@@ -113,6 +115,7 @@ async fn request(inner: &Inner, method: &str, params: Value) -> Result<Value, Rp
             "name": ctx.name,
             "project": ctx.project,
             "harness": ctx.harness,
+            "roles": ctx.roles,
             "status": ctx.status,
         })),
         _ => inner.handler().handle(&ctx, method, params).await,

@@ -43,6 +43,7 @@ pub fn supervisor_error(e: SupervisorError) -> ApiError {
             Code::AlreadyRunning,
             format!("agent {id} is running already"),
         ),
+        SupervisorError::NotReady(m) => ApiError::invalid(m),
         SupervisorError::Other(m) => ApiError::internal(m),
     }
 }
