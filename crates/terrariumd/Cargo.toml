@@ -45,6 +45,9 @@ similar.workspace = true
 toml.workspace = true
 reqwest.workspace = true
 semver.workspace = true
+# The TLS host listener (TERRARIUM_HOST_TLS_CERT, docs/host-protocol.md).
+rustls.workspace = true
+tokio-rustls.workspace = true
 
 [dev-dependencies]
 # The integration tests use the fake supervisor.

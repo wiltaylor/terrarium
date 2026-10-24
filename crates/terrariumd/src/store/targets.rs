@@ -1,5 +1,6 @@
-//! Target rows (PLAN §19): `targets/<name>.toml` files (source `file`) and
-//! targets made through the API (source `api`).
+//! Target rows (PLAN §19): `targets/<name>.toml` files (source `file`),
+//! targets made through the API (source `api`), and targets that a fleet
+//! owns (source `fleet:<name>`).
 //!
 //! Target names are one namespace across projects, as the file names are.
 //! The row keeps the definition as JSON, and the last state that a
@@ -20,6 +21,7 @@ use crate::store::{check_name, json_col};
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct TargetRow {
     pub def: TargetDef,
+    /// `file`, `api`, or `fleet:<name>` (owned by a fleet).
     pub source: String,
     /// `running`, `stopped`, `absent`, or `unknown`.
     pub state: String,

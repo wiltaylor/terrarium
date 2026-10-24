@@ -4,14 +4,14 @@
 //!
 //! A fleet owns the objects it made or took over. The ownership lives in
 //! the `fleet_objects` table, with the state of each object right after
-//! the last apply. The object rows keep `source = api`, so the API can
-//! still change them; `plan` then shows the change as drift, and the next
-//! apply writes the file values again (the file is the truth). An object
-//! with `source = file` belongs to its definition file, and a fleet that
+//! the last apply. The object rows show the owner as `source =
+//! fleet:<name>`. Such a row is not file-managed, so the API can still
+//! change it; `plan` then shows the change as drift, and the next apply
+//! writes the file values again (the file is the truth). An object with
+//! `source = file` belongs to its definition file, and a fleet that
 //! declares it gets a conflict.
 //!
-//! The tables are made here with `CREATE TABLE IF NOT EXISTS`, not by a
-//! migration in `db.rs`.
+//! Migration 9 in `db.rs` makes the tables.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -29,38 +29,13 @@ use crate::db::{Tx, now};
 use crate::error::{ApiError, ApiResult, Code};
 use crate::policy;
 use crate::store::agents::{self, AgentPatch, AgentView};
-use crate::store::projects::{self, NewProject, NewRepo, ProjectPatch, SOURCE_API, SOURCE_FILE};
+use crate::store::projects::{
+    self, NewProject, NewRepo, ProjectPatch, SOURCE_API, SOURCE_FILE, fleet_source,
+};
 use crate::store::{Page, repos, subscriptions, targets};
 
-/// The `source` word that the fleet API shows for an object a fleet owns.
-pub const SOURCE_PREFIX: &str = "fleet:";
-
-const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS fleets (
-    name        TEXT PRIMARY KEY,
-    description TEXT,
-    origin      TEXT NOT NULL,          -- `api` or `file:<path in the config dir>`
-    content     TEXT NOT NULL,          -- the fleet file as last applied
-    applied_at  TEXT NOT NULL,
-    applied_by  TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS fleet_objects (
-    kind       TEXT NOT NULL,           -- subscription, project, target, agent
-    key        TEXT NOT NULL,           -- the name; `project/name` for an agent
-    fleet      TEXT NOT NULL,
-    project    TEXT,
-    applied    TEXT NOT NULL,           -- JSON: the object right after the last apply
-    applied_at TEXT NOT NULL,
-    PRIMARY KEY (kind, key)
-);
-CREATE INDEX IF NOT EXISTS fleet_objects_fleet ON fleet_objects(fleet);
-";
-
-/// Make the fleet tables when they are not there.
-pub fn ensure_schema(conn: &Connection) -> ApiResult<()> {
-    conn.execute_batch(SCHEMA)?;
-    Ok(())
-}
+/// The `source` word of an object a fleet owns: `fleet:<name>`.
+pub use crate::store::projects::SOURCE_FLEET as SOURCE_PREFIX;
 
 /// What a plan does with one object.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -263,7 +238,7 @@ fn record(
             now()
         ],
     )?;
-    Ok(())
+    label(t, kind, key, Some(fleet))
 }
 
 fn forget(t: &Tx<'_>, kind: Kind, key: &str) -> ApiResult<()> {
@@ -271,13 +246,37 @@ fn forget(t: &Tx<'_>, kind: Kind, key: &str) -> ApiResult<()> {
         "DELETE FROM fleet_objects WHERE kind = ?1 AND key = ?2",
         params![kind.as_str(), key],
     )?;
+    label(t, kind, key, None)
+}
+
+/// Keep the `source` column of an object equal to its owner:
+/// `fleet:<name>` while `fleet` owns it, `api` when the fleet gives it up.
+/// A `file` row stays `file`: the definition file wins.
+fn label(t: &Tx<'_>, kind: Kind, key: &str, fleet: Option<&str>) -> ApiResult<()> {
+    let (table, key_expr) = match kind {
+        Kind::Project => ("projects", "name"),
+        Kind::Agent => ("agents", "project || '/' || name"),
+        Kind::Target => ("targets", "name"),
+        Kind::Subscription => ("subscriptions", "name"),
+    };
+    match fleet {
+        Some(f) => t.execute(
+            &format!("UPDATE {table} SET source = ?2 WHERE {key_expr} = ?1 AND source <> 'file'"),
+            params![key, fleet_source(f)],
+        )?,
+        None => t.execute(
+            &format!(
+                "UPDATE {table} SET source = ?2 WHERE {key_expr} = ?1 AND source GLOB 'fleet:*'"
+            ),
+            params![key, SOURCE_API],
+        )?,
+    };
     Ok(())
 }
 
 /// The fleet that owns an object, as a `source` word: `fleet:<name>`.
 pub fn source_of(conn: &Connection, kind: Kind, key: &str) -> ApiResult<Option<String>> {
-    ensure_schema(conn)?;
-    Ok(owner(conn, kind, key)?.map(|o| format!("{SOURCE_PREFIX}{}", o.fleet)))
+    Ok(owner(conn, kind, key)?.map(|o| fleet_source(&o.fleet)))
 }
 
 // ---- The comparable state of each kind ("spec") ----
@@ -536,7 +535,6 @@ fn classify(
 
 /// The plan of `fleet` against the store. The caller checked the file.
 pub fn plan(conn: &Connection, f: &Fleet) -> ApiResult<Plan> {
-    ensure_schema(conn)?;
     let all_owned = owned_rows(conn, None)?;
     let owner_of = |kind: Kind, key: &str| {
         all_owned
@@ -964,8 +962,9 @@ pub fn apply(
     let mut out = Applied::default();
     let name = f.name.clone();
 
+    let source = fleet_source(&name);
     for s in &f.subscriptions {
-        subscriptions::upsert_def(t, s, SOURCE_API)?;
+        subscriptions::upsert_def(t, s, &source)?;
         let live = subscriptions::get(t, &s.name)?;
         record(
             t,
@@ -999,7 +998,7 @@ pub fn apply(
                 v.agent.id.to_string()
             }
             None => {
-                let v = agents::create(t, &a.def, state_dir, SOURCE_API)?;
+                let v = agents::create(t, &a.def, state_dir, &source)?;
                 let id = v.agent.id.to_string();
                 out.created_agents.push((id.clone(), a.def.project.clone()));
                 id
@@ -1085,7 +1084,7 @@ fn apply_project(t: &mut Tx<'_>, fleet_name: &str, def: &ProjectDef) -> ApiResul
                     description: def.description.clone(),
                     card_prefix: def.prefix.clone(),
                 },
-                SOURCE_API,
+                &fleet_source(fleet_name),
             )?;
         }
         Some(p) => {
@@ -1234,7 +1233,6 @@ pub struct FleetRow {
 }
 
 pub fn list(conn: &Connection) -> ApiResult<Vec<FleetRow>> {
-    ensure_schema(conn)?;
     let owned = owned_rows(conn, None)?;
     let mut stmt = conn.prepare(
         "SELECT name, description, origin, applied_at, applied_by FROM fleets ORDER BY name",
@@ -1290,7 +1288,6 @@ pub fn export(
     name: &str,
     checkout: Vec<String>,
 ) -> ApiResult<Fleet> {
-    ensure_schema(conn)?;
     let p = projects::get(conn, project)?;
     let checkout = match owner(conn, Kind::Project, project)? {
         Some(o) if checkout.is_empty() => {

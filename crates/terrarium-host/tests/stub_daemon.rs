@@ -125,6 +125,7 @@ impl Conn {
             heartbeat_secs: 1,
             resume_token: "resume-1".into(),
             resume,
+            token: None,
         }))
         .await;
     }

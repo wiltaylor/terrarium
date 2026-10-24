@@ -31,3 +31,8 @@ install host: require-ssh
 [group('host')]
 token host: require-cargo
 	@cargo run -q -p terrarium -- admin host new {{quote(host)}}
+
+# Make a self-signed TLS certificate and key for the host agent listener in config/tls/, and print the SHA-256 to pin
+[group('host')]
+cert name *names: require-cargo
+	@cargo run -q -p terrarium-host -- cert --out config/tls {{quote(name)}} {{names}}

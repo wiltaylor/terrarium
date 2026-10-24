@@ -10,9 +10,17 @@ use crate::store::{Page, Paged, board, check_name};
 
 pub use crate::store::repos::{NewRepo, Repo, attach_repo, list_repos};
 
-/// Where a definition lives.
+/// Where a definition lives: a definition file, the API, or a fleet.
 pub const SOURCE_FILE: &str = "file";
 pub const SOURCE_API: &str = "api";
+/// The prefix of the `source` of an object a fleet owns: `fleet:<name>`.
+/// Such an object is not file-managed; the API may change it.
+pub const SOURCE_FLEET: &str = "fleet:";
+
+/// The `source` word of an object that fleet `name` owns.
+pub fn fleet_source(name: &str) -> String {
+    format!("{SOURCE_FLEET}{name}")
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Project {
@@ -20,7 +28,8 @@ pub struct Project {
     pub description: String,
     /// The card ID prefix: `TER` makes `TER-42`.
     pub card_prefix: String,
-    /// `file` (declared in `projects/<name>.toml`) or `api`.
+    /// `file` (declared in `projects/<name>.toml`), `api`, or
+    /// `fleet:<name>` (owned by a fleet).
     pub source: String,
     pub created_at: String,
     pub updated_at: String,

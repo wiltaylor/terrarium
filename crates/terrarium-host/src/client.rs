@@ -9,6 +9,7 @@
 
 use std::collections::HashMap;
 use std::hash::{BuildHasher, Hasher};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -56,7 +57,15 @@ pub struct ClientOptions {
     pub docker_bin: String,
     pub vmlab_bin: String,
     /// A TLS config for `wss://`. `None` uses the system roots.
+    /// [`crate::Config::transport`] builds it, with pinning and `ca_file`.
     pub tls: Option<Arc<rustls::ClientConfig>>,
+    /// Allow `ws://` to a host that is not loopback. Off by default: the
+    /// client refuses to send the token in clear text over a network.
+    pub allow_insecure: bool,
+    /// Where the token lives. When the daemon hands out a new long-lived
+    /// token (`welcome.token`, after an enrol token), the client writes it
+    /// here, so the next start uses it.
+    pub token_file: Option<PathBuf>,
 }
 
 impl ClientOptions {
@@ -76,6 +85,8 @@ impl ClientOptions {
             docker_bin: "docker".into(),
             vmlab_bin: "vmlab".into(),
             tls: None,
+            allow_insecure: false,
+            token_file: None,
         }
     }
 }
@@ -143,6 +154,8 @@ pub enum ClientError {
     Goodbye { reason: String },
     #[error("connection closed")]
     Closed,
+    #[error(transparent)]
+    Insecure(#[from] crate::tls::TlsError),
 }
 
 enum PushMsg {
@@ -162,6 +175,9 @@ struct Entry {
 struct Shared {
     sessions: Mutex<HashMap<SessionId, Entry>>,
     resume_token: Mutex<Option<String>>,
+    /// The bearer token for the next dial. It starts as the configured
+    /// token and changes when the daemon sends `welcome.token`.
+    bearer: Mutex<String>,
 }
 
 /// The host agent's client. Cheap to clone.
@@ -173,10 +189,59 @@ pub struct Client {
 
 impl Client {
     pub fn new(opts: ClientOptions) -> Self {
+        let shared = Shared {
+            bearer: Mutex::new(opts.token.clone()),
+            ..Shared::default()
+        };
         Self {
             opts: Arc::new(opts),
-            shared: Arc::default(),
+            shared: Arc::new(shared),
         }
+    }
+
+    /// The bearer token that the next dial sends.
+    pub fn bearer(&self) -> String {
+        self.shared
+            .bearer
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// The daemon swapped an enrol token for a long-lived one. Store it in
+    /// `token_file` first, then use it.
+    fn adopt_token(&self, token: &str) {
+        match &self.opts.token_file {
+            Some(path) => match crate::config::write_secret(path, token) {
+                Ok(()) => tracing::info!(
+                    path = %path.display(),
+                    "enrolled: stored the long-lived host token"
+                ),
+                Err(e) => tracing::error!(
+                    path = %path.display(),
+                    error = %e,
+                    "enrolled, but cannot store the long-lived host token; it lives in memory \
+                     only, and the next start fails: rotate the token on the daemon"
+                ),
+            },
+            None => tracing::error!(
+                "enrolled, but no token_file is set; the long-lived host token lives in memory \
+                 only, and the next start fails: set token_file and rotate the token"
+            ),
+        }
+        *self.shared.bearer.lock().unwrap_or_else(|e| e.into_inner()) = token.to_owned();
+    }
+
+    /// Refuse plaintext to a host that is not loopback, unless allowed.
+    fn check_transport(&self) -> Result<(), ClientError> {
+        let url = self.opts.url.to_ascii_lowercase();
+        if url.starts_with("ws://") || url.starts_with("http://") {
+            let host = crate::tls::url_host(&self.opts.url).unwrap_or_default();
+            if !crate::tls::is_loopback_host(&host) && !self.opts.allow_insecure {
+                return Err(crate::tls::TlsError::Insecure { host }.into());
+            }
+        }
+        Ok(())
     }
 
     fn sessions(&self) -> MutexGuard<'_, HashMap<SessionId, Entry>> {
@@ -205,6 +270,11 @@ impl Client {
         let mut backoff = Backoff::new(self.opts.backoff_min, self.opts.backoff_max);
         loop {
             match self.connect_once().await {
+                Err(ClientError::Insecure(e)) => {
+                    tracing::error!(error = %e, "not connecting");
+                    gc.abort();
+                    return;
+                }
                 Ok(()) => {
                     tracing::warn!("daemon connection ended");
                     backoff.reset();
@@ -249,13 +319,14 @@ impl Client {
 
     /// One connection, from dial to drop. `Ok` means the daemon welcomed us.
     pub async fn connect_once(&self) -> Result<(), ClientError> {
+        self.check_transport()?;
         let mut req = self
             .opts
             .url
             .as_str()
             .into_client_request()
             .map_err(|e| ClientError::Request(e.to_string()))?;
-        let auth = HeaderValue::from_str(&format!("Bearer {}", self.opts.token))
+        let auth = HeaderValue::from_str(&format!("Bearer {}", self.bearer()))
             .map_err(|e| ClientError::Request(e.to_string()))?;
         req.headers_mut().insert(AUTHORIZATION, auth);
         let connector = self
@@ -373,6 +444,9 @@ impl Client {
 
     fn apply_welcome(&self, welcome: &Welcome, tx: &Link) {
         *self.token() = Some(welcome.resume_token.clone());
+        if let Some(t) = welcome.token.as_deref().filter(|t| !t.is_empty()) {
+            self.adopt_token(t);
+        }
         let accepted: HashMap<SessionId, u64> = welcome
             .resume
             .iter()

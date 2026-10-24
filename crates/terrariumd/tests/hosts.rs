@@ -923,3 +923,329 @@ async fn operator_terminal_websocket() {
     }
     assert!(String::from_utf8_lossy(&seen).contains("ws:abc"));
 }
+
+// ------------------------------------------------- TLS, rotation, and enrol
+// (security review F2, docs/host-protocol.md "TLS" and "Tokens")
+
+/// A TLS dial-in listener on loopback with a fresh self-signed certificate.
+/// Returns its address and the certificate's SHA-256.
+async fn tls_listener(lab: &Lab) -> (SocketAddr, String, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let ss = terrarium_host::tls::self_signed(&["localhost".into(), "127.0.0.1".into()]).unwrap();
+    let (cert, key) = (dir.path().join("cert.pem"), dir.path().join("key.pem"));
+    std::fs::write(&cert, &ss.cert_pem).unwrap();
+    std::fs::write(&key, &ss.key_pem).unwrap();
+    let listen = terrariumd::hosts::HostListen {
+        addr: "127.0.0.1:0".into(),
+        tls: Some((cert, key)),
+    };
+    let (_task, addr) = listen.serve(lab.state()).await.unwrap();
+    (addr, ss.fingerprint, dir)
+}
+
+fn pinned_client(lab: &Lab, addr: SocketAddr, name: &str, token: &str, pin: &str) -> Client {
+    let url = format!("wss://localhost:{}/hosts/connect", addr.port());
+    let t = terrarium_host::tls::transport(
+        &url,
+        &terrarium_host::tls::TlsSettings {
+            server_fingerprint_sha256: Some(pin),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let mut o = ClientOptions::new(t.url, token, name);
+    o.tls = t.tls;
+    o.backoff_min = Duration::from_millis(50);
+    o.backoff_max = Duration::from_millis(200);
+    o.handshake_timeout = Duration::from_secs(5);
+    o.docker_bin = lab.bins.path().join("docker").display().to_string();
+    o.vmlab_bin = lab.bins.path().join("vmlab").display().to_string();
+    Client::new(o)
+}
+
+#[tokio::test]
+async fn tls_link_with_a_pinned_certificate() {
+    let lab = Lab::start().await;
+    let (addr, fp, _dir) = tls_listener(&lab).await;
+    let token = lab.register("lab1").await;
+    let task = tokio::spawn(pinned_client(&lab, addr, "lab1", &token, &fp).run());
+    lab.wait_online("lab1", true).await;
+    // An exec over the TLS link works end to end.
+    lab.target(json!({"name": "box", "kind": "host", "host": "lab1"}))
+        .await;
+    let sid = exec(
+        &lab.td,
+        "box",
+        json!({"cmd": ["sh", "-c", "echo over-tls"]}),
+    )
+    .await;
+    let d = drain(&lab.td, "box", &sid).await;
+    assert_eq!(String::from_utf8_lossy(&d.stdout), "over-tls\n");
+    // The daemon records where the token came from.
+    let h = lab.td.get("/api/hosts/lab1").await;
+    let h = h.ok();
+    assert!(h["first_used_at"].is_string(), "{h}");
+    assert!(
+        h["last_used_from"]
+            .as_str()
+            .is_some_and(|f| f.starts_with("127.0.0.1:")),
+        "{h}"
+    );
+    task.abort();
+
+    // A wrong pin fails the TLS handshake; no token is sent.
+    let token2 = lab.register("lab2").await;
+    let wrong = "00".repeat(32);
+    let err = pinned_client(&lab, addr, "lab2", &token2, &wrong)
+        .connect_once()
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains(&fp),
+        "the error names the seen fingerprint: {err}"
+    );
+    assert!(!lab.state().executor.hosts.is_online("lab2"));
+
+    // Plaintext to the TLS listener does not get through.
+    let mut o = ClientOptions::new(format!("ws://{addr}/hosts/connect"), &token2, "lab2");
+    o.handshake_timeout = Duration::from_secs(3);
+    assert!(Client::new(o).connect_once().await.is_err());
+    assert!(!lab.state().executor.hosts.is_online("lab2"));
+}
+
+#[tokio::test]
+async fn plaintext_to_a_remote_host_needs_allow_insecure() {
+    // No network: the client refuses before it dials.
+    let mut o = ClientOptions::new("ws://terrarium.invalid:8082/hosts/connect", "t", "lab1");
+    o.handshake_timeout = Duration::from_secs(3);
+    let err = Client::new(o.clone()).connect_once().await.unwrap_err();
+    assert!(
+        matches!(err, terrarium_host::client::ClientError::Insecure(_)),
+        "{err}"
+    );
+    assert!(err.to_string().contains("allow_insecure"), "{err}");
+    // `run` stops at once in place of retrying for ever.
+    tokio::time::timeout(Duration::from_secs(5), Client::new(o.clone()).run())
+        .await
+        .expect("run returns on an insecure transport");
+    // With allow_insecure the client dials (and fails on the name).
+    o.allow_insecure = true;
+    let err = Client::new(o).connect_once().await.unwrap_err();
+    assert!(
+        !matches!(err, terrarium_host::client::ClientError::Insecure(_)),
+        "{err}"
+    );
+    // The config path gives the same answer.
+    let cfg = terrarium_host::Config {
+        daemon_url: Some("ws://10.1.2.3:8082".into()),
+        ..Default::default()
+    };
+    assert!(cfg.transport().is_err());
+}
+
+#[test]
+fn host_listen_defaults_follow_tls() {
+    use terrariumd::hosts::HostListen;
+    let env = |pairs: &'static [(&'static str, &'static str)]| {
+        move |k: &str| {
+            pairs
+                .iter()
+                .find(|(n, _)| *n == k)
+                .map(|(_, v)| (*v).to_owned())
+        }
+    };
+    let plain = HostListen::from_vars(env(&[])).unwrap().unwrap();
+    assert_eq!(plain.addr, "127.0.0.1:8082");
+    assert!(plain.tls.is_none());
+    let tls = HostListen::from_vars(env(&[
+        ("TERRARIUM_HOST_TLS_CERT", "/tls/c.pem"),
+        ("TERRARIUM_HOST_TLS_KEY", "/tls/k.pem"),
+    ]))
+    .unwrap()
+    .unwrap();
+    assert_eq!(tls.addr, "0.0.0.0:8082");
+    assert!(tls.tls.is_some());
+    // Empty values (compose passes `${X:-}`) count as unset.
+    let empty = HostListen::from_vars(env(&[
+        ("TERRARIUM_HOST_TLS_CERT", ""),
+        ("TERRARIUM_HOST_TLS_KEY", ""),
+    ]))
+    .unwrap()
+    .unwrap();
+    assert_eq!(empty.addr, "127.0.0.1:8082");
+    let explicit =
+        HostListen::from_vars(env(&[("TERRARIUM_HOST_LISTEN", "0.0.0.0:9000")])).unwrap();
+    assert_eq!(explicit.unwrap().addr, "0.0.0.0:9000");
+    let auto = HostListen::from_vars(env(&[("TERRARIUM_HOST_LISTEN", "auto")])).unwrap();
+    assert_eq!(auto.unwrap().addr, "127.0.0.1:8082");
+    assert!(
+        HostListen::from_vars(env(&[("TERRARIUM_HOST_LISTEN", "")]))
+            .unwrap()
+            .is_none()
+    );
+    assert!(HostListen::from_vars(env(&[("TERRARIUM_HOST_TLS_CERT", "/c.pem")])).is_err());
+}
+
+async fn dial_status(lab: &Lab, token: &str) -> u16 {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let mut req = format!("ws://{}/hosts/connect", lab.addr)
+        .into_client_request()
+        .unwrap();
+    req.headers_mut()
+        .insert("authorization", format!("Bearer {token}").parse().unwrap());
+    match tokio_tungstenite::connect_async(req).await {
+        Ok(_) => 101,
+        Err(tokio_tungstenite::tungstenite::Error::Http(resp)) => resp.status().as_u16(),
+        Err(other) => panic!("dial: {other}"),
+    }
+}
+
+#[tokio::test]
+async fn rotation_keeps_the_live_link_and_retires_the_old_token() {
+    let lab = Lab::start().await;
+    let old = lab.register("lab1").await;
+    let task = tokio::spawn(lab.client("lab1", &old).run());
+    lab.wait_online("lab1", true).await;
+    let first_used = lab.td.get("/api/hosts/lab1").await.body["first_used_at"].clone();
+    assert!(first_used.is_string());
+
+    // Only the operator rotates.
+    lab.td.project("ops").await;
+    let sys = lab
+        .td
+        .agent("ops", "lead", json!({"roles": ["sysadmin"]}))
+        .await;
+    let sys = sys["id"].as_str().unwrap().to_owned();
+    lab.td
+        .post_as(&sys, "/api/hosts/lab1/rotate", json!({}))
+        .await
+        .err(403, "forbidden");
+
+    // An empty body is a plain rotation.
+    let r = lab
+        .td
+        .req(hyper::Method::POST, "/api/hosts/lab1/rotate", None, None)
+        .await;
+    let r = r.ok();
+    let new = r["token"].as_str().unwrap().to_owned();
+    assert!(new.starts_with("thk_"));
+    assert_ne!(new, old);
+    assert_eq!(r["token_kind"], "host");
+    assert!(r["rotated_at"].is_string());
+    // The token is shown once.
+    assert!(
+        lab.td
+            .get("/api/hosts/lab1")
+            .await
+            .body
+            .get("token")
+            .is_none()
+    );
+    let audit = lab.td.get("/api/audit?action=host.rotate").await;
+    assert_eq!(audit.ok().as_array().unwrap().len(), 1);
+
+    // The live link stays up on the old token...
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(lab.state().executor.hosts.is_online("lab1"));
+    // ...but a new dial with it gets 401, so after the link ends the host
+    // stays offline.
+    assert_eq!(dial_status(&lab, &old).await, 401);
+    assert!(lab.state().executor.hosts.drop_link("lab1"));
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(!lab.state().executor.hosts.is_online("lab1"));
+    task.abort();
+
+    // The new token works.
+    let task = tokio::spawn(lab.client("lab1", &new).run());
+    lab.wait_online("lab1", true).await;
+    task.abort();
+}
+
+#[tokio::test]
+async fn an_enrol_token_is_swapped_for_a_stored_long_lived_token() {
+    let lab = Lab::start().await;
+    let r = lab
+        .td
+        .post("/api/hosts", json!({"name": "lab1", "enrol": true}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let enrol = r.body["token"].as_str().unwrap().to_owned();
+    assert!(enrol.starts_with("the_"), "{enrol}");
+    assert_eq!(r.body["token_kind"], "enrol");
+    assert!(r.body["token_expires_at"].is_string());
+    assert!(r.body["enrol_expires_at"].is_string());
+
+    // The host agent's token_file holds the enrol token.
+    let dir = tempfile::tempdir().unwrap();
+    let token_file = dir.path().join("token");
+    std::fs::write(&token_file, format!("{enrol}\n")).unwrap();
+    let cfg = terrarium_host::Config {
+        token_file: Some(token_file.clone()),
+        ..Default::default()
+    };
+    let read = cfg.resolve_token().unwrap();
+    assert_eq!(read, enrol);
+    let mut o = ClientOptions::new(format!("ws://{}/hosts/connect", lab.addr), read, "lab1");
+    o.token_file = Some(token_file.clone());
+    o.backoff_min = Duration::from_millis(50);
+    o.backoff_max = Duration::from_millis(200);
+    let c = Client::new(o);
+    let task = tokio::spawn(c.clone().run());
+    lab.wait_online("lab1", true).await;
+
+    // The long-lived token is in the file now, mode 0600, and in use.
+    let stored = std::fs::read_to_string(&token_file).unwrap();
+    let stored = stored.trim().to_owned();
+    assert!(stored.starts_with("thk_"), "{stored}");
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(&token_file).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600);
+    assert_eq!(c.bearer(), stored);
+    let h = lab.td.get("/api/hosts/lab1").await;
+    assert!(h.body["enrol_expires_at"].is_null(), "{}", h.body);
+    let ev = events(&lab.td, "host.connected").await;
+    assert_eq!(ev[0]["data"]["enrolled"], true);
+    let audit = lab.td.get("/api/audit?action=host.enrol").await;
+    assert_eq!(audit.ok().as_array().unwrap().len(), 1);
+
+    // The enrol token is one time.
+    assert_eq!(dial_status(&lab, &enrol).await, 401);
+
+    // A reconnect uses the stored token.
+    assert!(lab.state().executor.hosts.drop_link("lab1"));
+    for _ in 0..300 {
+        if events(&lab.td, "host.connected").await.len() == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let ev = events(&lab.td, "host.connected").await;
+    assert_eq!(ev.len(), 2, "the host came back with the stored token");
+    assert_eq!(ev[1]["data"]["enrolled"], false);
+    task.abort();
+
+    // A rotation can hand out a new enrol token for a host that exists.
+    let r = lab
+        .td
+        .post("/api/hosts/lab1/rotate", json!({"enrol": true}))
+        .await;
+    let r = r.ok();
+    let enrol2 = r["token"].as_str().unwrap().to_owned();
+    assert!(enrol2.starts_with("the_"));
+    // The long-lived token stops working for new dials.
+    assert_eq!(dial_status(&lab, &stored).await, 401);
+    // An enrol token past its time gets 401.
+    lab.state()
+        .db
+        .write("test", |t| {
+            t.execute(
+                "UPDATE hosts SET enrol_expires_at = '2000-01-01T00:00:00.000Z'",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(dial_status(&lab, &enrol2).await, 401);
+}

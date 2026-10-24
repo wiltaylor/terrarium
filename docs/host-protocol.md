@@ -12,8 +12,9 @@ the tests in `crates/terrarium-host/tests/stub_daemon.rs`.
 
 ## Summary
 
-- The host agent dials **out** to `ws(s)://<daemon>:8082/hosts/connect`. It
-  sends `Authorization: Bearer <per-host token>`.
+- The host agent dials **out** to `wss://<daemon>:8082/hosts/connect`. It
+  sends `Authorization: Bearer <per-host token>`. Plaintext `ws://` is for
+  loopback only, unless the config sets `allow_insecure` (see [TLS](#tls)).
 - One WebSocket carries all the sessions of one host agent.
 - A **text** frame holds one JSON control frame. The `type` field names it.
 - A **binary** frame holds stream bytes. A 5-byte header comes first: a
@@ -28,11 +29,11 @@ the tests in `crates/terrarium-host/tests/stub_daemon.rs`.
 
 | Item | Value |
 |---|---|
-| URL | `ws://<daemon>:8082/hosts/connect`, or `wss://` with TLS |
+| URL | `wss://<daemon>:8082/hosts/connect`. `ws://` only to loopback, or with `allow_insecure`. |
 | Port | 8082 (`TERRARIUM_HOST_PORT` in `compose.yaml`) |
 | Auth | `Authorization: Bearer <token>` on the upgrade request |
 | Subprotocol | none. The protocol version is in `hello`. |
-| TLS | rustls with the ring provider. The system roots, or `ca_file` in the config. No OpenSSL. |
+| TLS | rustls with the ring provider, on both sides. The system roots, `ca_file`, or a pinned SHA-256 (`server_fingerprint_sha256`). No OpenSSL. See [TLS](#tls). |
 | Message size | A receiver accepts text frames up to 1 MiB and data payloads up to 1 MiB. |
 
 The daemon refuses a bad token with HTTP `401` on the upgrade. The host agent
@@ -42,6 +43,80 @@ because the operator can fix the token on the daemon side.
 The config accepts `http://` and `https://` too. The host agent changes them
 to `ws://` and `wss://`. When the URL has no path, the host agent adds
 `/hosts/connect`.
+
+## TLS
+
+The bearer token and all exec traffic (command lines, output, and file
+bytes) go over this link. Over a network that you do not trust, the link
+must use TLS. Else an attacker on the path can read the token and replay it
+(security review F2).
+
+### The daemon
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `TERRARIUM_HOST_TLS_CERT` | unset | A PEM file with the certificate chain, leaf first. |
+| `TERRARIUM_HOST_TLS_KEY` | unset | A PEM file with the private key (PKCS#8, PKCS#1, or SEC1). |
+| `TERRARIUM_HOST_LISTEN` | `auto` | The listen address. `auto` or unset: `0.0.0.0:8082` with TLS, `127.0.0.1:8082` without. Empty: no listener of its own. |
+
+- Set both TLS variables, or neither. One alone stops the daemon at start.
+  An empty value counts as unset.
+- With TLS, the daemon serves the listener with rustls (`TlsListener` in
+  `crates/terrariumd/src/hosts.rs`). Each handshake runs in its own task
+  and must end in 15 seconds. The start log shows the SHA-256 of the leaf
+  certificate.
+- Without TLS, the listener is plaintext and binds `127.0.0.1:8082`. A
+  plaintext bind to a non-loopback address logs a warning that starts with
+  `INSECURE`. Use this only behind a TLS reverse proxy, or for a host agent
+  on the same machine.
+- The main router (`TERRARIUM_LISTEN`, port 8080) also serves
+  `/hosts/connect`. Put TLS in front of it too when a remote host agent
+  uses it.
+
+`just host::cert <name> [more names...]` runs `terrarium-host cert` and
+writes a self-signed certificate (ECDSA P-256, made with rcgen) to
+`config/tls/host-cert.pem` and `config/tls/host-key.pem` (mode 0600). The
+names are the DNS names or IP addresses that host agents dial. The recipe
+prints the line to put in the host agent config:
+
+```
+server_fingerprint_sha256 = "A1:2F:...:1A"
+```
+
+The recipe does not replace existing files. Add `--force` to replace them.
+`terrarium-host fingerprint <cert.pem>` prints the SHA-256 of an existing
+certificate. Compose mounts `./config/tls` at `/etc/terrarium/tls`, so set
+`TERRARIUM_HOST_TLS_CERT=/etc/terrarium/tls/host-cert.pem` and
+`TERRARIUM_HOST_TLS_KEY=/etc/terrarium/tls/host-key.pem` in `.env`.
+
+### The host agent
+
+The host agent picks one TLS mode from `daemon_url` and the config:
+
+| Mode | When | Checks |
+|---|---|---|
+| `plain_loopback` | `ws://` to `localhost`, `*.localhost`, `127.0.0.0/8`, or `::1` | None. The bytes stay on the machine. |
+| `plain_insecure` | `ws://` to any other host, with `allow_insecure = true` | None. The host agent logs a warning at start. |
+| `system_roots` | `wss://` with no `ca_file` and no pin | The chain and the name, against the system roots. |
+| `ca_file` | `wss://` with `ca_file` | The chain and the name, against the CA certificates in the file. |
+| `pinned` | `wss://` with `server_fingerprint_sha256` | The SHA-256 of the leaf certificate must be the pin. The name and the expiry are not checked: the pin names one certificate. With `ca_file` too, the chain must also verify. |
+
+- `ws://` to a host that is not loopback, without `allow_insecure`, is
+  refused. `run` stops with an error that gives the reason, and the client
+  library returns `ClientError::Insecure` before it dials. The check does
+  not resolve names: a DNS name that points to `127.0.0.1` is not loopback.
+- `ca_file` or `server_fingerprint_sha256` with a `ws://` URL is a config
+  error, not a silent downgrade.
+- The pin is 64 hex digits. Colons, spaces, case, and a `sha256:` prefix do
+  not matter. A pin that does not match fails the handshake, so the token
+  is never sent. The error names the fingerprint that the server showed.
+
+`terrarium-host check` prints the TLS mode (`tls:`), or the reason why it
+refuses the URL. `terrarium-host check --probe` also dials the daemon and
+does the TCP connect and the TLS handshake. It sends no upgrade, no token,
+and no `hello`. It prints the TLS version, the cipher suite, and the
+server's SHA-256, and exits 1 when the probe fails. With `--json`, the
+fields are `tls`, `tls_error`, and `probe`.
 
 ## Framing
 
@@ -126,6 +201,10 @@ sends `welcome`:
   last one.
 - `resume` lists the sessions that the daemon takes back. `received` is the
   number of output bytes of the session that the daemon has.
+- `token` is present only when the host agent dialled with an enrol token
+  (see [Tokens](#tokens)). It is the new long-lived host token. The host
+  agent writes it to `token_file` (mode 0600, through a temporary file and a
+  rename) and uses it for every later dial.
 
 The host agent waits 15 seconds for `welcome`. If it gets no `welcome`, it
 closes the connection and retries.
@@ -136,9 +215,9 @@ Either side can send `goodbye` and then close:
 {"type": "goodbye", "reason": "token_revoked", "message": "revoked from the dashboard"}
 ```
 
-Known reasons: `token_revoked`, `replaced` (a new connection with the same
-token took over), `protocol` (a version the daemon does not support),
-`shutdown`.
+Known reasons: `token_revoked` (also: an enrol token that was used already
+or ran out), `replaced` (a new connection with the same token took over),
+`protocol` (a version the daemon does not support), `shutdown`.
 
 ## Heartbeat
 
@@ -492,16 +571,54 @@ The host agent has these local limits:
 - Commands run as the user of the host agent (the `User=` of the systemd
   unit). Do not run the host agent as root unless the targets need it.
 
-Token handling (PLAN §21, "Host agent token leaks"):
+## Tokens
 
-- One token for each host. The daemon stores only a hash of it and can
-  revoke it from the dashboard. On a revoke, the daemon sends `goodbye`
-  `token_revoked` and closes the connection.
+PLAN §21, "Host agent token leaks". The host token is a long-lived bearer
+token by design: the host agent must reconnect with no operator. These
+rules limit what a leaked token can do.
+
+- One token for each host (`thk_` and 64 hex digits). The daemon stores
+  only its SHA-256 and can revoke it from the dashboard. On a revoke, the
+  daemon sends `goodbye` `token_revoked` and closes the connection.
 - The host agent reads the token from `token_file` (mode 0600). It never
   logs the token. `terrarium-host token-file PATH` writes a token from stdin
   with mode 0600 in a directory with mode 0700.
 - A second connection with the same token replaces the first. The daemon
   sends `goodbye` `replaced` on the old one.
+- Each connect records `first_used_at` (the first connect with the current
+  token), `last_used_at`, and `last_used_from` (the TCP peer as the daemon
+  sees it; a reverse proxy shows as itself). `GET /api/hosts` shows them,
+  and `host.connected` carries `from`. A `first_used_at` that you do not
+  expect, or a strange `last_used_from`, is a sign of a leaked token.
+
+**Rotation.** `POST /api/hosts/{name}/rotate` makes a new token and shows it
+once. The old token stops working for new connections at once. A link that
+is up now stays up, because the daemon checks the token only on the
+upgrade. When that link ends, the host agent must dial with the new token.
+So write the new token to `token_file` on the host, then restart the host
+agent or wait for the next reconnect.
+
+**Enrol.** An enrol token keeps the long-lived token out of the operator's
+clipboard:
+
+1. `POST /api/hosts` with `{"name": "lab1", "enrol": true}` (or
+   `POST /api/hosts/{name}/rotate` with `{"enrol": true}`). The answer has
+   `token` (`the_` and 64 hex digits), `token_kind: "enrol"`, and
+   `token_expires_at`, 10 minutes from now. The long-lived token of the host
+   is now a random value that nobody knows.
+2. Put the enrol token in the host agent's `token_file`, and start the host
+   agent.
+3. The daemon accepts the enrol token on the upgrade, reads `hello`, and
+   then swaps the enrol token for a new long-lived token in one database
+   update. Only one dial can win the swap. The daemon writes the audit
+   entry `host.enrol`.
+4. `welcome.token` carries the new token. The host agent writes it over the
+   enrol token in `token_file`, and uses it from then on.
+
+An enrol token works one time, and only until `token_expires_at`. A dial
+with a used or expired enrol token gets `401`. When the host agent cannot
+write `token_file`, it logs an error and keeps the token in memory only:
+the next start then fails, so rotate again.
 
 ## Host agent configuration
 
@@ -514,6 +631,8 @@ name = "lab1"                               # default: the hostname
 max_sessions = 32
 allowed_cwd_roots = ["/home/wil/labs", "/srv/build"]   # optional; absent means any absolute path
 # ca_file = "/etc/terrarium-host/ca.pem"    # trust this CA for wss:// in place of the system roots
+# server_fingerprint_sha256 = "A1:2F:..."   # pin the daemon's certificate (just host::cert prints it)
+# allow_insecure = false                    # allow ws:// to a host that is not loopback
 # buffer_limit_bytes = 8388608              # replay buffer for each session
 # resume_grace_secs = 600                   # how long a session lives with no link
 # docker_bin = "docker"
@@ -529,8 +648,10 @@ Commands:
 | Command | Does |
 |---|---|
 | `terrarium-host run` | Connect and serve sessions. The default command. Stops on SIGTERM or Ctrl-C. |
-| `terrarium-host check [--json]` | Print the name, the daemon URL, whether a token is set, and the detected capabilities. Makes no connection. |
+| `terrarium-host check [--json] [--probe]` | Print the name, the daemon URL, whether a token is set, the TLS mode, and the detected capabilities. Makes no connection. With `--probe`: also do the TCP connect and the TLS handshake (no token is sent). |
 | `terrarium-host token-file PATH` | Read a token from stdin and write it to `PATH` with mode 0600. |
+| `terrarium-host cert NAME... [--out DIR] [--force]` | Write a self-signed `host-cert.pem` and `host-key.pem` for the daemon's host listener (default `config/tls`), and print the SHA-256. |
+| `terrarium-host fingerprint CERT` | Print the SHA-256 of the first certificate in a PEM file. |
 
 Logs go to stderr through `tracing`. `RUST_LOG` sets the level (default
 `info`).
@@ -563,14 +684,16 @@ it must do the steps under its heading below.
 2. Copy `target/host/terrarium-host` to `<host>:/usr/local/bin/` and
    `terrarium-host.service` to `<host>:/etc/systemd/system/` over ssh.
 3. If `/etc/terrarium-host/config.toml` does not exist on the host, write
-   one with `daemon_url` (from `TERRARIUM_PUBLIC_URL`, port 8082),
-   `token_file = "/etc/terrarium-host/token"`, and `name = "<host>"`.
+   one with `daemon_url` (`wss://`, the host of `TERRARIUM_PUBLIC_URL`, port
+   8082), `token_file = "/etc/terrarium-host/token"`, `name = "<host>"`, and,
+   for a self-signed daemon, `server_fingerprint_sha256` from
+   `terrarium-host fingerprint config/tls/host-cert.pem`.
 4. If `/etc/terrarium-host/token` does not exist, run
    `just host::token <host> | ssh <host> sudo terrarium-host token-file /etc/terrarium-host/token`,
    then `chown` the file to the service user.
 5. Make the service user if it does not exist, then run
    `systemctl daemon-reload` and `systemctl enable --now terrarium-host`.
-6. Run `terrarium-host check` on the host and print the result.
+6. Run `terrarium-host check --probe` on the host and print the result.
 
 ## What the daemon side must do
 
@@ -581,9 +704,14 @@ endpoint, the host registry, and the session multiplexer),
 Each item of the list is done:
 
 - [x] Serve `GET /hosts/connect` on the dial-in listener
-  (`TERRARIUM_HOST_LISTEN`, default `0.0.0.0:8082`, and also on the main
-  router). Check the bearer token against the host registry before the
-  upgrade. Answer `401` on a bad token. (`hosts::connect`)
+  (`TERRARIUM_HOST_LISTEN`; default `0.0.0.0:8082` with TLS, `127.0.0.1:8082`
+  without; and also on the main router). Check the bearer token against the
+  host registry before the upgrade. Answer `401` on a bad token.
+  (`hosts::connect`, `hosts::HostListen`)
+- [x] TLS on the dial-in listener with `TERRARIUM_HOST_TLS_CERT` and
+  `TERRARIUM_HOST_TLS_KEY` (`hosts::serve_tls`).
+- [x] Token rotation, the enrol swap, and the `first_used_at` and
+  `last_used_from` record ([Tokens](#tokens)).
 - [x] Read `hello`. Refuse an unknown `protocol` with `goodbye` `protocol`.
   Store the capabilities for the dashboard and for policy checks
   (`HostCapabilities::summary` gives the flat `Capabilities`). The
@@ -604,6 +732,7 @@ Each item of the list is done:
   Only the operator can do this, because PLAN §10 keeps host agent tokens
   for the operator. `just host::token <name>` runs
   `terrarium admin host new <name>` and prints the token alone on stdout.
+  `POST /api/hosts/{name}/rotate` rotates it.
 
 ## Decisions on PLAN §22 item 4
 
@@ -617,4 +746,4 @@ Each item of the list is done:
 | Reconnection | Exponential backoff with jitter, 1 s to 60 s. A resume token in `hello`. The daemon says which sessions it takes back and from which byte. |
 | Push over a reconnect | Not resumed. The session ends with `interrupted` and the daemon sends again. Pulls and exec output resume. |
 | Liveness | JSON `ping`/`pong` both ways every `heartbeat_secs`. Dead after 3 silent intervals. |
-| TLS | rustls with ring, system roots or `ca_file`. Static musl builds need no OpenSSL. |
+| TLS | rustls with ring on both sides: the daemon's listener with `TERRARIUM_HOST_TLS_CERT`/`_KEY`, and the host agent with the system roots, `ca_file`, or a pinned SHA-256. Static musl builds need no OpenSSL. `ws://` only to loopback unless `allow_insecure`. |

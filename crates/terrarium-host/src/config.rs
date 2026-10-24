@@ -8,6 +8,8 @@
 //! name = "lab1"
 //! max_sessions = 32
 //! allowed_cwd_roots = ["/home/wil/labs", "/srv/build"]
+//! # server_fingerprint_sha256 = "AB:CD:..."   # pin a self-signed daemon
+//! # allow_insecure = false                    # ws:// to a remote host
 //! ```
 
 use std::path::{Component, Path, PathBuf};
@@ -44,6 +46,14 @@ pub struct Config {
     /// system roots.
     #[serde(default)]
     pub ca_file: Option<PathBuf>,
+    /// Pin the daemon's certificate by its SHA-256 (`just host::cert`
+    /// prints it). For a daemon with a self-signed certificate.
+    #[serde(default)]
+    pub server_fingerprint_sha256: Option<String>,
+    /// Allow plaintext `ws://` to a host that is not loopback. The token
+    /// and all exec traffic then cross the network in clear text.
+    #[serde(default)]
+    pub allow_insecure: bool,
     /// The replay buffer limit for each session.
     #[serde(default = "default_buffer_limit")]
     pub buffer_limit_bytes: usize,
@@ -82,6 +92,8 @@ impl Default for Config {
             max_sessions: default_max_sessions(),
             allowed_cwd_roots: None,
             ca_file: None,
+            server_fingerprint_sha256: None,
+            allow_insecure: false,
             buffer_limit_bytes: default_buffer_limit(),
             resume_grace_secs: default_resume_grace(),
             docker_bin: default_docker(),
@@ -160,6 +172,24 @@ impl Config {
             .unwrap_or_else(|| "localhost".into())
     }
 
+    /// The transport to the daemon: the URL, the TLS mode, and the rustls
+    /// config. Refuses `ws://` to a host that is not loopback unless
+    /// `allow_insecure` is set.
+    pub fn transport(&self) -> Result<crate::tls::Transport, ConfigError> {
+        let raw = self.daemon_url.as_deref().ok_or_else(|| {
+            ConfigError::Invalid(
+                "no daemon_url: set it in the config file or with --daemon-url".into(),
+            )
+        })?;
+        let url = connect_url(raw)?;
+        let settings = crate::tls::TlsSettings {
+            allow_insecure: self.allow_insecure,
+            ca_file: self.ca_file.as_deref(),
+            server_fingerprint_sha256: self.server_fingerprint_sha256.as_deref(),
+        };
+        crate::tls::transport(&url, &settings).map_err(|e| ConfigError::Invalid(e.to_string()))
+    }
+
     pub fn policy(&self) -> PathPolicy {
         PathPolicy {
             roots: self.allowed_cwd_roots.clone(),
@@ -197,6 +227,33 @@ pub fn connect_url(raw: &str) -> Result<String, ConfigError> {
         path
     };
     Ok(format!("{scheme}://{authority}{path}"))
+}
+
+/// Write a secret (a token) to `path` with mode 0600, through a temporary
+/// file and a rename, so a reader never sees half a token. A missing
+/// parent directory is made with mode 0700.
+pub fn write_secret(path: &Path, secret: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(parent)?;
+    }
+    let mut name = path.file_name().unwrap_or_default().to_owned();
+    name.push(".tmp");
+    let tmp = path.with_file_name(name);
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&tmp)?;
+    writeln!(f, "{}", secret.trim())?;
+    f.sync_all()?;
+    drop(f);
+    std::fs::rename(&tmp, path)
 }
 
 /// The `allowed_cwd_roots` check. With no roots, every absolute path passes.
@@ -295,6 +352,46 @@ allowed_cwd_roots = ["/home/wil/labs", "/srv/build"]
         };
         assert_eq!(c.resolve_token().unwrap(), "abc");
         assert!(Config::default().resolve_token().is_err());
+    }
+
+    #[test]
+    fn transport_refuses_plaintext_to_a_remote_host() {
+        let mut c = Config {
+            daemon_url: Some("ws://terrarium.lan:8082".into()),
+            ..Default::default()
+        };
+        let e = c.transport().unwrap_err().to_string();
+        assert!(e.contains("allow_insecure"), "{e}");
+        c.allow_insecure = true;
+        assert_eq!(
+            c.transport().unwrap().mode,
+            crate::tls::TlsMode::PlainInsecure
+        );
+        c.daemon_url = Some("http://localhost:8082".into());
+        c.allow_insecure = false;
+        assert_eq!(
+            c.transport().unwrap().mode,
+            crate::tls::TlsMode::PlainLoopback
+        );
+        let c = Config::parse(
+            "daemon_url = \"wss://d:8082\"\nserver_fingerprint_sha256 = \"sha256:00\"",
+            Path::new("x"),
+        )
+        .unwrap();
+        assert!(c.transport().is_err(), "a short pin is an error");
+    }
+
+    #[test]
+    fn write_secret_is_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("sub/token");
+        write_secret(&p, "  abc\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "abc\n");
+        let mode = std::fs::metadata(&p).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        write_secret(&p, "def").unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "def\n");
     }
 
     #[test]

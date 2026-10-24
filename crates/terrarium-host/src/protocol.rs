@@ -206,6 +206,11 @@ pub struct Welcome {
     /// in this list.
     #[serde(default)]
     pub resume: Vec<ResumeAccept>,
+    /// A new long-lived host token, sent once when the host agent
+    /// connected with a short-lived enrol token. The host agent stores it
+    /// in its `token_file` and uses it for every later connection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -75,6 +75,11 @@ similar = "2.7"
 # process groups and signals
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 nix = { version = "0.30", features = ["signal", "process", "hostname", "fs"] }
+# TLS on the host agent link (docs/host-protocol.md "TLS"): the daemon's
+# rustls listener, the host agent's probe, and self-signed certificates.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls-native-certs = "0.8"
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
 
 # Tests
 tempfile = "3.20"

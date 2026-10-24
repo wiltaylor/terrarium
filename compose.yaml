@@ -19,6 +19,13 @@ services:
       TERRARIUM_TOKEN: ${TERRARIUM_TOKEN:?set TERRARIUM_TOKEN in .env (see .env.example)}
       TERRARIUM_PUBLIC_URL: ${TERRARIUM_PUBLIC_URL:-http://localhost:8080}
       RUST_LOG: ${RUST_LOG:-info}
+      # The host agent dial-in (docs/host-protocol.md "TLS"). With a cert
+      # and key it speaks TLS on 0.0.0.0:8082. Without them it is plaintext
+      # on 127.0.0.1:8082 in the container, which the published port cannot
+      # reach: set TERRARIUM_HOST_LISTEN in .env to open it (see .env.example).
+      TERRARIUM_HOST_LISTEN: ${TERRARIUM_HOST_LISTEN:-auto}
+      TERRARIUM_HOST_TLS_CERT: ${TERRARIUM_HOST_TLS_CERT:-}
+      TERRARIUM_HOST_TLS_KEY: ${TERRARIUM_HOST_TLS_KEY:-}
     volumes:
       - ./config/claude:/auth/claude
       - ./config/codex:/auth/codex
@@ -30,6 +37,7 @@ services:
       - ./projects:/etc/terrarium/projects
       - ./agents:/etc/terrarium/agents
       - ./targets:/etc/terrarium/targets
+      - ./config/tls:/etc/terrarium/tls:ro   # `just host::cert <name>` writes here
     security_opt:
       - seccomp:docker/seccomp-bwrap.json   # user namespaces for bwrap (§11)
       - apparmor:unconfined

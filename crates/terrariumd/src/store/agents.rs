@@ -18,7 +18,8 @@ use crate::store::{Page, Paged, check_name, json_col, projects};
 pub struct AgentView {
     #[serde(flatten)]
     pub agent: Agent,
-    /// `file` (declared in `agents/<name>.toml`) or `api`.
+    /// `file` (declared in `agents/<name>.toml`), `api`, or
+    /// `fleet:<name>` (owned by a fleet).
     pub source: String,
     /// The card the agent has in `in_progress`, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]

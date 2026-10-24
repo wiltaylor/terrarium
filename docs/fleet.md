@@ -105,9 +105,12 @@ owner and the state of each object after the last apply.
 | Owned by another fleet | `conflict` |
 | Owned by this fleet, no longer in the file | `delete` (agents, targets) or `release` (projects, subscriptions) |
 
-The API can change a fleet object, because its row keeps `source = api`.
-The next `plan` shows the change as drift, and the next `apply` writes the
-file values again. The file is the truth, as for `source = file` objects.
+A fleet object shows `source = fleet:<name>` in the API. The API can
+change it, because it is not file-managed. The next `plan` shows the
+change as drift, and the next `apply` writes the file values again. The
+file is the truth, as for `source = file` objects. `POST /api/reload`
+deletes and releases `source = file` objects only, so it keeps the fleet
+objects.
 
 `--prune` deletes the agents and targets that the fleet owns and the file
 no longer declares. It releases the projects and subscriptions: they stay
@@ -206,113 +209,31 @@ agent sees the fleets that own objects in its own project.
 
 ## 6. API
 
-All routes are under `/api` and take the usual auth. The bodies are JSON.
+The HTTP contract is [api.md §18 Fleet](api.md#18-fleet): the request and
+response shapes, the `source = fleet:<name>` value, and the error codes.
+The routes are:
 
-### `POST /api/fleet/validate`
+- `POST /api/fleet/validate`
+- `POST /api/fleet/plan`
+- `POST /api/fleet/apply`
+- `GET /api/fleet`
+- `GET /api/fleet/{name}`
+- `GET /api/fleet/export?project=P[&name=N]`
 
-Body: `{"content": "<toml>", "path"?: "file name"}`. `path` gives the stem
-for a fleet without `name`. Answer `200`:
-
-```json
-{
-  "fleet": "terrarium",
-  "valid": true,
-  "errors": [],
-  "warnings": [{"level": "warning", "at": "prompts", "message": "..."}],
-  "objects": [{"kind": "agent", "key": "terrarium/lead", "project": "terrarium"}],
-  "references": {"subscriptions": {}, "targets": {}, "prompts": {"project-lead": ["terrarium/lead"]}}
-}
-```
-
-An issue has `level` (`error` or `warning`), `at` (the place in the file,
-for example `projects.terrarium.agents.lead`), and `message`. A file that
-does not parse is a `200` with `valid: false`.
-
-### `POST /api/fleet/plan`
-
-Body: `{"content", "path"?, "prune"?: false}`. Answer `200`, a plan:
-
-```json
-{
-  "fleet": "terrarium",
-  "valid": true,
-  "errors": [],
-  "warnings": [],
-  "summary": {"create": 0, "update": 1, "unchanged": 4, "delete": 1, "release": 0, "conflict": 0, "drift": 1},
-  "entries": [
-    {"kind": "agent", "key": "terrarium/lead", "project": "terrarium", "action": "update",
-     "drift": ["prompt"],
-     "changes": [{"field": "prompt", "from": "default", "to": "project-lead"}]},
-    {"kind": "agent", "key": "terrarium/old", "project": "terrarium", "action": "delete", "live": true}
-  ]
-}
-```
-
-- `action`: `create`, `update`, `unchanged`, `delete`, `release`, or
-  `conflict`.
-- `drift`: the fields that changed outside the fleet since the last apply,
-  or `["(deleted)"]`.
-- `adopt`: `true` when the apply takes over an API object.
-- `reason`: why an entry is a conflict, or a note.
-- `live`: an agent with a live session.
-
-A file with errors is a `200` with `valid: false` and no entries. The plan
-needs the same rights as the apply (`403 forbidden`).
-
-### `POST /api/fleet/apply`
-
-Body: `{"content", "path"?, "prune"?: false, "confirm"?: false, "start"?:
-false}`. Answer `200`: the plan, with `result` (`done` or `skipped`) on each
-entry, and:
-
-- `prune`: the flag.
-- `checkout`: the clone results for new agents (as `POST /api/agents`).
-- `started`: the agents that `start` started.
-- `failures`: starts and clones that failed. The apply itself stays.
-
-Errors: `422 invalid` (the file has errors; `details.errors`), `409
-conflict` (`details` is the plan), `409 confirm_required` (`details.agents`
-names the live agents), `403 forbidden`.
-
-### `GET /api/fleet`
-
-The applied fleets, by name:
-
-```json
-[{"name": "terrarium", "description": "...", "origin": "api", "applied_at": "...",
-  "applied_by": "operator", "objects": 5, "projects": ["terrarium"]}]
-```
-
-`origin` is `api` or `file:<path in the config dir>`.
-
-### `GET /api/fleet/{name}`
-
-The row of `GET /api/fleet`, with `content` (the last applied file) and
-`plan` (the plan of that content now, so drift shows). `404` when the fleet
-does not exist or the caller may not see it.
-
-### `GET /api/fleet/export?project=P[&name=N]`
-
-Answer `200`: `{"fleet": "N", "project": "P", "content": "<toml>"}`. `name`
-defaults to the project name. Needs read access to the project.
-
-### `POST /api/reload`
-
-The `errors` list of the sync report also has the errors of the fleet files
-in the config dir, as `<path>: <message>`.
+The `errors` list of `POST /api/reload` also has the errors of the fleet
+files in the config dir.
 
 ## 7. Storage
 
-The daemon keeps two tables, made with `CREATE TABLE IF NOT EXISTS` when a
-fleet call runs (not by a migration in `db.rs`):
+Migration 9 in `crates/terrariumd/src/db.rs` makes two tables:
 
 - `fleets`: name, description, origin, the last applied content, and when
   and by whom.
 - `fleet_objects`: kind, key, owning fleet, project, and the state of the
   object after the last apply (JSON). An object has one owner at most.
 
-The object rows keep `source = api`. The `source` column of `projects`,
-`agents`, `targets`, and `subscriptions` has a `CHECK (source IN ('file',
-'api'))`, so a `fleet:<name>` value needs a migration that rebuilds those
-tables. Until then, the fleet API reports the owner, and
-`crate::fleet::source_of` gives `fleet:<name>` for an object.
+The `source` column of `projects`, `agents`, `targets`, and
+`subscriptions` accepts `file`, `api`, and `fleet:<name>`. An apply writes
+`fleet:<name>` on each object that it makes or adopts, and a release sets
+`api` again. A `file` row stays `file`. Migration 9 also writes
+`fleet:<name>` on the rows that `fleet_objects` already listed.

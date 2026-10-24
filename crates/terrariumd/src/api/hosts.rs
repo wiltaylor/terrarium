@@ -14,12 +14,13 @@ use crate::actor::Actor;
 use crate::error::ApiResult;
 use crate::events::EventDraft;
 use crate::policy;
-use crate::store::hosts::{self, Host};
+use crate::store::hosts::{self, Host, Issued};
 
 pub fn routes() -> Router<Shared> {
     Router::new()
         .route("/hosts", get(list).post(create))
         .route("/hosts/{name}", get(show).delete(revoke))
+        .route("/hosts/{name}/rotate", axum::routing::post(rotate))
 }
 
 /// A host row with its live link state.
@@ -64,27 +65,88 @@ async fn show(State(state): State<Shared>, Path(name): Path<String>) -> ApiResul
 #[serde(deny_unknown_fields)]
 struct NewHost {
     name: String,
+    /// Hand out a one-time enrol token (10 minutes) in place of the
+    /// long-lived token.
+    #[serde(default)]
+    enrol: bool,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Rotate {
+    #[serde(default)]
+    enrol: bool,
+}
+
+/// The host view with the token that the answer carries once.
+fn with_token(state: &Shared, host: Host, issued: Issued) -> Value {
+    let mut v = view(state, host);
+    v["token"] = issued.token.into();
+    v["token_kind"] = issued.kind.into();
+    if let Some(e) = issued.expires_at {
+        v["token_expires_at"] = e.into();
+    }
+    v
 }
 
 /// `POST /api/hosts`: register a host agent. The answer carries the token
-/// once; the daemon keeps only its hash.
+/// once; the daemon keeps only its hash. With `enrol`, the token is a
+/// one-time enrol token that the host agent swaps for its long-lived
+/// token on the first connect.
 async fn create(
     State(state): State<Shared>,
     actor: Actor,
     ApiJson(body): ApiJson<NewHost>,
 ) -> ApiResult<Response> {
     policy::manage_hosts(&actor, "registering a host agent")?;
-    let (host, token) = state
+    let (host, issued) = state
         .db
         .write(actor.label(), move |t| {
-            let (h, token) = hosts::create(t, &body.name)?;
-            t.audit("host.create", &h.name, None, json!({"host_id": h.id}))?;
-            Ok((h, token))
+            let (h, issued) = hosts::create(t, &body.name, body.enrol)?;
+            t.audit(
+                "host.create",
+                &h.name,
+                None,
+                json!({"host_id": h.id, "token_kind": issued.kind}),
+            )?;
+            Ok((h, issued))
         })
         .await?;
-    let mut v = view(&state, host);
-    v["token"] = token.into();
-    Ok((StatusCode::CREATED, Json(v)).into_response())
+    Ok((StatusCode::CREATED, Json(with_token(&state, host, issued))).into_response())
+}
+
+/// `POST /api/hosts/{name}/rotate`: a new token, shown once. The old
+/// token stops working for new connections now; a live link stays up
+/// until it ends. The body is optional: `{"enrol": true}` gives a one-time
+/// enrol token.
+async fn rotate(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(name): Path<String>,
+    body: axum::body::Bytes,
+) -> ApiResult<Json<Value>> {
+    policy::manage_hosts(&actor, "rotating a host agent token")?;
+    let body: Rotate = if body.iter().all(u8::is_ascii_whitespace) {
+        Rotate::default()
+    } else {
+        serde_json::from_slice(&body)
+            .map_err(|e| crate::error::ApiError::bad_request(e.to_string()))?
+    };
+    let online = state.executor.hosts.is_online(&name);
+    let (host, issued) = state
+        .db
+        .write(actor.label(), move |t| {
+            let (h, issued) = hosts::rotate(t, &name, body.enrol)?;
+            t.audit(
+                "host.rotate",
+                &h.name,
+                None,
+                json!({"host_id": h.id, "token_kind": issued.kind, "online": online}),
+            )?;
+            Ok((h, issued))
+        })
+        .await?;
+    Ok(Json(with_token(&state, host, issued)))
 }
 
 /// `DELETE /api/hosts/{name}`: revoke the token. A live link gets

@@ -572,6 +572,93 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE usage_samples ADD COLUMN card_id TEXT;
     CREATE INDEX usage_samples_card ON usage_samples(card_id, at);
     "#,
+    // 9: fleet files (docs/fleet.md). The fleet tables come into the
+    // schema; before, `fleet.rs` made them with `CREATE TABLE IF NOT
+    // EXISTS`, so a database can have them already. And `source` can be
+    // `fleet:<name>` on projects, agents, targets, and subscriptions.
+    //
+    // A CHECK cannot change in place. A table rebuild (as in migration 6)
+    // is not safe here: `DROP TABLE` deletes the rows first, and the
+    // `ON DELETE CASCADE` of boards, cards, wiki pages, repos, sessions,
+    // roles, and quota samples would delete theirs. A migration runs in a
+    // transaction, where `PRAGMA foreign_keys` has no effect. So each
+    // `source` column is replaced in place: add the new column, copy,
+    // drop the old one (its own CHECK goes with it), rename. The column
+    // moves to the end of the table; the store reads columns by name.
+    r#"
+    CREATE TABLE IF NOT EXISTS fleets (
+        name        TEXT PRIMARY KEY,
+        description TEXT,
+        origin      TEXT NOT NULL,          -- `api` or `file:<path in the config dir>`
+        content     TEXT NOT NULL,          -- the fleet file as last applied
+        applied_at  TEXT NOT NULL,
+        applied_by  TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS fleet_objects (
+        kind       TEXT NOT NULL,           -- subscription, project, target, agent
+        key        TEXT NOT NULL,           -- the name; `project/name` for an agent
+        fleet      TEXT NOT NULL,
+        project    TEXT,
+        applied    TEXT NOT NULL,           -- JSON: the object right after the last apply
+        applied_at TEXT NOT NULL,
+        PRIMARY KEY (kind, key)
+    );
+    CREATE INDEX IF NOT EXISTS fleet_objects_fleet ON fleet_objects(fleet);
+
+    ALTER TABLE projects ADD COLUMN source_v9 TEXT NOT NULL DEFAULT 'api'
+        CHECK (source_v9 IN ('file', 'api') OR source_v9 GLOB 'fleet:?*');
+    UPDATE projects SET source_v9 = source;
+    ALTER TABLE projects DROP COLUMN source;
+    ALTER TABLE projects RENAME COLUMN source_v9 TO source;
+
+    ALTER TABLE agents ADD COLUMN source_v9 TEXT NOT NULL DEFAULT 'api'
+        CHECK (source_v9 IN ('file', 'api') OR source_v9 GLOB 'fleet:?*');
+    UPDATE agents SET source_v9 = source;
+    ALTER TABLE agents DROP COLUMN source;
+    ALTER TABLE agents RENAME COLUMN source_v9 TO source;
+
+    ALTER TABLE targets ADD COLUMN source_v9 TEXT NOT NULL DEFAULT 'api'
+        CHECK (source_v9 IN ('file', 'api') OR source_v9 GLOB 'fleet:?*');
+    UPDATE targets SET source_v9 = source;
+    ALTER TABLE targets DROP COLUMN source;
+    ALTER TABLE targets RENAME COLUMN source_v9 TO source;
+
+    ALTER TABLE subscriptions ADD COLUMN source_v9 TEXT NOT NULL DEFAULT 'api'
+        CHECK (source_v9 IN ('file', 'api') OR source_v9 GLOB 'fleet:?*');
+    UPDATE subscriptions SET source_v9 = source;
+    ALTER TABLE subscriptions DROP COLUMN source;
+    ALTER TABLE subscriptions RENAME COLUMN source_v9 TO source;
+
+    -- The objects that a fleet owns show the fleet. A `file` row stays
+    -- `file`: a definition file took it over, and the file wins.
+    UPDATE projects SET source = 'fleet:' || o.fleet
+        FROM fleet_objects o
+        WHERE o.kind = 'project' AND o.key = projects.name AND projects.source = 'api';
+    UPDATE agents SET source = 'fleet:' || o.fleet
+        FROM fleet_objects o
+        WHERE o.kind = 'agent' AND o.key = agents.project || '/' || agents.name
+          AND agents.source = 'api';
+    UPDATE targets SET source = 'fleet:' || o.fleet
+        FROM fleet_objects o
+        WHERE o.kind = 'target' AND o.key = targets.name AND targets.source = 'api';
+    UPDATE subscriptions SET source = 'fleet:' || o.fleet
+        FROM fleet_objects o
+        WHERE o.kind = 'subscription' AND o.key = subscriptions.name
+          AND subscriptions.source = 'api';
+    "#,
+    // 10: host token hygiene (docs/host-protocol.md "Tokens", security
+    // review F2). Where and when the token was used, rotation, and the
+    // short-lived enrol token that a host agent swaps for its long-lived
+    // token on the first connect.
+    r#"
+    ALTER TABLE hosts ADD COLUMN first_used_at TEXT;
+    ALTER TABLE hosts ADD COLUMN last_used_at TEXT;
+    ALTER TABLE hosts ADD COLUMN last_used_from TEXT;
+    ALTER TABLE hosts ADD COLUMN rotated_at TEXT;
+    ALTER TABLE hosts ADD COLUMN enrol_token_hash TEXT;   -- SHA-256 hex; NULL when none is open
+    ALTER TABLE hosts ADD COLUMN enrol_expires_at TEXT;
+    CREATE UNIQUE INDEX hosts_enrol_token ON hosts(enrol_token_hash);
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call
@@ -775,6 +862,8 @@ mod tests {
             "quota_alerts",
             "hosts",
             "targets",
+            "fleets",
+            "fleet_objects",
         ] {
             let n: i64 = conn
                 .query_row(
@@ -888,6 +977,107 @@ mod tests {
             .query_row("SELECT card_id FROM usage_samples", [], |r| r.get(0))
             .unwrap();
         assert_eq!(card, None);
+    }
+
+    #[test]
+    fn migration_9_labels_fleet_objects_and_keeps_child_rows() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        for sql in &MIGRATIONS[..8] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 8).unwrap();
+        // The fleet tables as `fleet.rs` made them before migration 9.
+        conn.execute_batch(
+            "CREATE TABLE fleets (name TEXT PRIMARY KEY, description TEXT, origin TEXT NOT NULL,
+                                  content TEXT NOT NULL, applied_at TEXT NOT NULL,
+                                  applied_by TEXT NOT NULL);
+             CREATE TABLE fleet_objects (kind TEXT NOT NULL, key TEXT NOT NULL,
+                                         fleet TEXT NOT NULL, project TEXT,
+                                         applied TEXT NOT NULL, applied_at TEXT NOT NULL,
+                                         PRIMARY KEY (kind, key));
+             INSERT INTO fleets VALUES ('f', NULL, 'api', '', 't', 'operator');
+             INSERT INTO fleet_objects VALUES
+               ('project', 'p', 'f', 'p', '{}', 't'),
+               ('project', 'byfile', 'f', 'byfile', '{}', 't'),
+               ('agent', 'p/a', 'f', 'p', '{}', 't'),
+               ('target', 'box', 'f', 'p', '{}', 't'),
+               ('subscription', 's', 'f', NULL, '{}', 't');
+             INSERT INTO projects (name, created_at, updated_at, source)
+               VALUES ('p', 't', 't', 'api'), ('byfile', 't', 't', 'file'),
+                      ('own', 't', 't', 'api');
+             INSERT INTO repos (id, project, name, url, created_at)
+               VALUES ('R1', 'p', 'r', 'u', 't');
+             INSERT INTO boards (project, created_at) VALUES ('p', 't');
+             INSERT INTO agents (id, name, project, harness, workspace, created_at, updated_at)
+               VALUES ('A1', 'a', 'p', 'claude', '/w', 't', 't'),
+                      ('A2', 'b', 'p', 'claude', '/w', 't', 't');
+             INSERT INTO sessions (id, agent_id, started_at) VALUES ('S1', 'A1', 't');
+             INSERT INTO roles (agent_id, role, project, granted_by, granted_at)
+               VALUES ('A1', 'project_admin', 'p', 'operator', 't');
+             INSERT INTO targets (name, project, kind, def, created_at, updated_at)
+               VALUES ('box', 'p', 'ssh', '{}', 't', 't');
+             INSERT INTO subscriptions (name, provider, created_at, updated_at)
+               VALUES ('s', 'anthropic', 't', 't');
+             INSERT INTO quota_samples (subscription, window, used_pct, at)
+               VALUES ('s', '5h', 1.0, 't');",
+        )
+        .unwrap();
+        assert_eq!(migrate(&mut conn).unwrap(), MIGRATIONS.len() - 8);
+        let source = |sql: &str| -> String { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+        assert_eq!(
+            source("SELECT source FROM projects WHERE name = 'p'"),
+            "fleet:f"
+        );
+        assert_eq!(
+            source("SELECT source FROM projects WHERE name = 'byfile'"),
+            "file"
+        );
+        assert_eq!(
+            source("SELECT source FROM projects WHERE name = 'own'"),
+            "api"
+        );
+        assert_eq!(
+            source("SELECT source FROM agents WHERE id = 'A1'"),
+            "fleet:f"
+        );
+        assert_eq!(source("SELECT source FROM agents WHERE id = 'A2'"), "api");
+        assert_eq!(source("SELECT source FROM targets"), "fleet:f");
+        assert_eq!(source("SELECT source FROM subscriptions"), "fleet:f");
+        // No cascade: the child rows stay.
+        for table in ["repos", "boards", "sessions", "roles", "quota_samples"] {
+            let n: i64 = conn
+                .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(n, 1, "{table}");
+        }
+        let fleets: i64 = conn
+            .query_row("SELECT count(*) FROM fleets", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(fleets, 1);
+        // The new CHECK: `file`, `api`, and `fleet:<name>`.
+        conn.execute(
+            "INSERT INTO projects (name, created_at, updated_at, source) VALUES ('x', 't', 't', 'fleet:g')",
+            [],
+        )
+        .unwrap();
+        for bad in ["bogus", "fleet:"] {
+            assert!(
+                conn.execute(
+                    "INSERT INTO targets (name, kind, def, source, created_at, updated_at)
+                       VALUES ('t2', 'ssh', '{}', ?1, 't', 't')",
+                    [bad],
+                )
+                .is_err(),
+                "{bad}"
+            );
+        }
+        let fk: i64 = conn
+            .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(fk, 0);
     }
 
     #[test]

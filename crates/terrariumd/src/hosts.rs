@@ -16,11 +16,21 @@
 //! - A session the daemon started that is missing from a resumed `hello`,
 //!   or that stays without a link for the resume grace, ends with
 //!   [`SessionEvent::Lost`].
+//! - [`HostListen`] reads `TERRARIUM_HOST_LISTEN`, `TERRARIUM_HOST_TLS_CERT`,
+//!   and `TERRARIUM_HOST_TLS_KEY`. With a certificate the listener speaks
+//!   TLS ([`TlsListener`], rustls) on `0.0.0.0:8082`; without one it is
+//!   plaintext on `127.0.0.1:8082`, and a plaintext bind to another
+//!   address logs a warning (security review F2).
+//! - An enrol token is swapped for a long-lived token after `hello`; the
+//!   new token goes in `welcome.token` (docs/host-protocol.md "Tokens").
 
 use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+use axum::extract::connect_info::{ConnectInfo, Connected};
 use axum::extract::ws::{Message as WsMessage, WebSocket};
 use axum::extract::{FromRequestParts, Request, State, WebSocketUpgrade};
 use axum::http::header;
@@ -39,7 +49,7 @@ use tracing::{debug, info, warn};
 use crate::api::Shared;
 use crate::error::{ApiError, Code};
 use crate::events::EventDraft;
-use crate::store::hosts::{self, Host};
+use crate::store::hosts::{self, Auth, Host};
 
 /// The heartbeat interval in `welcome`.
 pub const HEARTBEAT: Duration = Duration::from_secs(15);
@@ -53,6 +63,12 @@ const HELLO_TIMEOUT: Duration = Duration::from_secs(15);
 const ACK_EVERY: u64 = 256 * 1024;
 /// The largest WebSocket message the daemon accepts from a host.
 const MAX_MESSAGE: usize = 2 * 1024 * 1024;
+/// How long a TLS handshake on the host listener may take.
+const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
+/// The default dial-in address with TLS: every interface.
+pub const DEFAULT_TLS_LISTEN: &str = "0.0.0.0:8082";
+/// The default dial-in address without TLS: loopback only.
+pub const DEFAULT_PLAIN_LISTEN: &str = "127.0.0.1:8082";
 
 /// What a session reports to its consumer.
 #[derive(Debug, Clone, PartialEq)]
@@ -338,6 +354,7 @@ impl HostRegistry {
                 heartbeat_secs: self.heartbeat.as_secs().max(1),
                 resume_token: token,
                 resume,
+                token: None,
             },
             old,
             n,
@@ -627,11 +644,21 @@ pub async fn connect(State(state): State<Shared>, req: Request) -> Response {
         return unauthorized("a host agent sends `Authorization: Bearer <token>`");
     };
     let hash = hosts::token_hash(&token);
-    let row = match state.db.read(move |c| hosts::by_token_hash(c, &hash)).await {
-        Ok(Some(r)) => r,
-        Ok(None) => return unauthorized("unknown or revoked host token"),
+    let lookup = hash.clone();
+    let (row, enrol) = match state
+        .db
+        .read(move |c| hosts::authenticate(c, &lookup))
+        .await
+    {
+        Ok(Auth::Host(r)) => (r, None),
+        Ok(Auth::Enrol(r)) => (r, Some(hash)),
+        Ok(Auth::Expired) => {
+            return unauthorized("the enrol token ran out; rotate the host token for a new one");
+        }
+        Ok(Auth::Unknown) => return unauthorized("unknown or revoked host token"),
         Err(e) => return e.into_response(),
     };
+    let peer = peer_addr(&req);
     let (mut parts, _) = req.into_parts();
     let ws = match WebSocketUpgrade::from_request_parts(&mut parts, &()).await {
         Ok(ws) => ws,
@@ -639,7 +666,185 @@ pub async fn connect(State(state): State<Shared>, req: Request) -> Response {
     };
     ws.max_message_size(MAX_MESSAGE)
         .max_frame_size(MAX_MESSAGE)
-        .on_upgrade(move |socket| serve_link(state, socket, row))
+        .on_upgrade(move |socket| serve_link(state, socket, row, enrol, peer))
+}
+
+/// The peer address of a request on the host listener, as `ip:port`.
+fn peer_addr(req: &Request) -> Option<String> {
+    req.extensions()
+        .get::<ConnectInfo<PeerAddr>>()
+        .map(|c| c.0.0.to_string())
+        .or_else(|| {
+            req.extensions()
+                .get::<ConnectInfo<SocketAddr>>()
+                .map(|c| c.0.to_string())
+        })
+}
+
+/// The connect info of the host listener: the TCP peer.
+#[derive(Debug, Clone, Copy)]
+pub struct PeerAddr(pub SocketAddr);
+
+impl Connected<axum::serve::IncomingStream<'_, tokio::net::TcpListener>> for PeerAddr {
+    fn connect_info(s: axum::serve::IncomingStream<'_, tokio::net::TcpListener>) -> Self {
+        Self(*s.remote_addr())
+    }
+}
+
+impl Connected<axum::serve::IncomingStream<'_, TlsListener>> for PeerAddr {
+    fn connect_info(s: axum::serve::IncomingStream<'_, TlsListener>) -> Self {
+        Self(*s.remote_addr())
+    }
+}
+
+/// A TCP listener that does the rustls handshake. Each handshake runs in
+/// its own task, so a slow or silent client cannot hold up the others.
+pub struct TlsListener {
+    rx: mpsc::Receiver<(
+        tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
+        SocketAddr,
+    )>,
+    local: SocketAddr,
+    task: JoinHandle<()>,
+}
+
+impl TlsListener {
+    pub fn new(
+        tcp: tokio::net::TcpListener,
+        config: Arc<rustls::ServerConfig>,
+    ) -> std::io::Result<Self> {
+        let local = tcp.local_addr()?;
+        let (tx, rx) = mpsc::channel(64);
+        let acceptor = tokio_rustls::TlsAcceptor::from(config);
+        let task = tokio::spawn(async move {
+            loop {
+                let (stream, peer) = match tcp.accept().await {
+                    Ok(x) => x,
+                    Err(e) => {
+                        debug!("host listener accept: {e}");
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        continue;
+                    }
+                };
+                if tx.is_closed() {
+                    break;
+                }
+                let (acceptor, tx) = (acceptor.clone(), tx.clone());
+                tokio::spawn(async move {
+                    match tokio::time::timeout(TLS_HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await
+                    {
+                        Ok(Ok(tls)) => {
+                            let _ = tx.send((tls, peer)).await;
+                        }
+                        Ok(Err(e)) => info!(%peer, "host listener: TLS handshake failed: {e}"),
+                        Err(_) => info!(%peer, "host listener: TLS handshake timed out"),
+                    }
+                });
+            }
+        });
+        Ok(Self { rx, local, task })
+    }
+}
+
+impl Drop for TlsListener {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+impl axum::serve::Listener for TlsListener {
+    type Io = tokio_rustls::server::TlsStream<tokio::net::TcpStream>;
+    type Addr = SocketAddr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        match self.rx.recv().await {
+            Some(x) => x,
+            None => std::future::pending().await,
+        }
+    }
+
+    fn local_addr(&self) -> std::io::Result<Self::Addr> {
+        Ok(self.local)
+    }
+}
+
+/// The dial-in listener settings, from the environment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostListen {
+    pub addr: String,
+    /// The PEM certificate chain and key: TLS on the listener.
+    pub tls: Option<(PathBuf, PathBuf)>,
+}
+
+impl HostListen {
+    /// `TERRARIUM_HOST_LISTEN`, `TERRARIUM_HOST_TLS_CERT`, and
+    /// `TERRARIUM_HOST_TLS_KEY`. `None`: the listener is off (an empty
+    /// `TERRARIUM_HOST_LISTEN`). Unset or `auto`: `0.0.0.0:8082` with TLS,
+    /// `127.0.0.1:8082` without.
+    pub fn from_env() -> anyhow::Result<Option<Self>> {
+        Self::from_vars(|k| std::env::var(k).ok())
+    }
+
+    /// [`Self::from_env`] with a lookup, for tests.
+    pub fn from_vars(var: impl Fn(&str) -> Option<String>) -> anyhow::Result<Option<Self>> {
+        let set = |k: &str| var(k).filter(|v| !v.trim().is_empty());
+        let tls = match (
+            set("TERRARIUM_HOST_TLS_CERT"),
+            set("TERRARIUM_HOST_TLS_KEY"),
+        ) {
+            (Some(c), Some(k)) => Some((PathBuf::from(c), PathBuf::from(k))),
+            (None, None) => None,
+            _ => anyhow::bail!(
+                "set both TERRARIUM_HOST_TLS_CERT and TERRARIUM_HOST_TLS_KEY, or neither"
+            ),
+        };
+        // `auto` (what compose passes when the variable is not set) and
+        // an unset variable pick the default for the TLS mode.
+        let addr = match var("TERRARIUM_HOST_LISTEN").map(|a| a.trim().to_owned()) {
+            Some(a) if a.is_empty() => return Ok(None),
+            Some(a) if a != "auto" => a,
+            _ if tls.is_some() => DEFAULT_TLS_LISTEN.to_owned(),
+            _ => DEFAULT_PLAIN_LISTEN.to_owned(),
+        };
+        Ok(Some(Self { addr, tls }))
+    }
+
+    /// Bind and serve: TLS when a certificate is set, else plaintext.
+    pub async fn serve(
+        &self,
+        state: Shared,
+    ) -> anyhow::Result<(JoinHandle<()>, std::net::SocketAddr)> {
+        match &self.tls {
+            Some((cert, key)) => {
+                let (config, fingerprint) = terrarium_host::tls::server_config(cert, key)?;
+                info!(
+                    cert = %cert.display(),
+                    sha256 = %fingerprint,
+                    "host agent dial-in uses TLS; pin with server_fingerprint_sha256"
+                );
+                serve_tls(state, &self.addr, config).await
+            }
+            None => {
+                let (task, local) = serve(state, &self.addr).await?;
+                if !local.ip().is_loopback() {
+                    warn!(
+                        addr = %local,
+                        "INSECURE: the host agent dial-in is plaintext on a non-loopback \
+                         address. Host tokens and all exec traffic cross the network in clear \
+                         text, and a captured token can be replayed. Set TERRARIUM_HOST_TLS_CERT \
+                         and TERRARIUM_HOST_TLS_KEY (just host::cert), or put a TLS proxy in \
+                         front and bind TERRARIUM_HOST_LISTEN to 127.0.0.1"
+                    );
+                } else {
+                    info!(
+                        "host agent dial-in is plaintext on loopback; set TERRARIUM_HOST_TLS_CERT \
+                         and TERRARIUM_HOST_TLS_KEY to accept remote host agents"
+                    );
+                }
+                Ok((task, local))
+            }
+        }
+    }
 }
 
 /// The router of the dial-in listener: only `/hosts/connect`.
@@ -652,8 +857,8 @@ pub fn router(state: Shared) -> axum::Router {
         .with_state(state)
 }
 
-/// Bind the dial-in listener (`TERRARIUM_HOST_LISTEN`, default
-/// `0.0.0.0:8082`) and serve on it in the background.
+/// Bind a plaintext dial-in listener and serve on it in the background.
+/// [`HostListen::serve`] picks this or [`serve_tls`].
 pub async fn serve(
     state: Shared,
     addr: &str,
@@ -663,8 +868,32 @@ pub async fn serve(
         .await
         .with_context(|| format!("cannot bind the host listener {addr}"))?;
     let local = listener.local_addr()?;
-    info!(addr = %local, "host agent dial-in listening on TCP");
-    let app = router(state);
+    info!(addr = %local, "host agent dial-in listening on TCP (plaintext)");
+    let app = router(state).into_make_service_with_connect_info::<PeerAddr>();
+    Ok((
+        tokio::spawn(async move {
+            if let Err(e) = axum::serve(listener, app).await {
+                tracing::error!("host listener failed: {e}");
+            }
+        }),
+        local,
+    ))
+}
+
+/// Bind a TLS dial-in listener and serve on it in the background.
+pub async fn serve_tls(
+    state: Shared,
+    addr: &str,
+    config: Arc<rustls::ServerConfig>,
+) -> anyhow::Result<(JoinHandle<()>, std::net::SocketAddr)> {
+    use anyhow::Context;
+    let tcp = tokio::net::TcpListener::bind(addr)
+        .await
+        .with_context(|| format!("cannot bind the host listener {addr}"))?;
+    let listener = TlsListener::new(tcp, config)?;
+    let local = listener.local;
+    info!(addr = %local, "host agent dial-in listening on TCP with TLS");
+    let app = router(state).into_make_service_with_connect_info::<PeerAddr>();
     Ok((
         tokio::spawn(async move {
             if let Err(e) = axum::serve(listener, app).await {
@@ -724,7 +953,13 @@ async fn goodbye(socket: &mut WebSocket, reason: &str, message: String) {
     let _ = socket.send(WsMessage::Close(None)).await;
 }
 
-async fn serve_link(state: Shared, mut socket: WebSocket, row: Host) {
+async fn serve_link(
+    state: Shared,
+    mut socket: WebSocket,
+    row: Host,
+    enrol: Option<String>,
+    peer: Option<String>,
+) {
     let reg = state.executor.hosts.clone();
     let hello = match read_hello(&mut socket).await {
         Ok(h) => h,
@@ -758,11 +993,54 @@ async fn serve_link(state: Shared, mut socket: WebSocket, row: Host) {
         .await;
         return;
     }
+    // An enrol token: swap it for the long-lived token now. Only one dial
+    // can win the swap.
+    let new_token = match enrol {
+        None => None,
+        Some(hash) => {
+            let name = row.name.clone();
+            let from = peer.clone();
+            let row_id_for_audit = row.id.clone();
+            let r = state
+                .db
+                .write("system", move |t| {
+                    let token = hosts::complete_enrol(t, &name, &hash)?;
+                    if token.is_some() {
+                        t.audit(
+                            "host.enrol",
+                            &name,
+                            None,
+                            json!({"host_id": row_id_for_audit, "from": from}),
+                        )?;
+                    }
+                    Ok(token)
+                })
+                .await;
+            match r {
+                Ok(Some(t)) => Some(t),
+                Ok(None) => {
+                    goodbye(
+                        &mut socket,
+                        "token_revoked",
+                        "the enrol token was used already or ran out".into(),
+                    )
+                    .await;
+                    return;
+                }
+                Err(e) => {
+                    warn!(host = %row.name, "cannot complete the enrol: {e}");
+                    goodbye(&mut socket, "shutdown", "cannot complete the enrol".into()).await;
+                    return;
+                }
+            }
+        }
+    };
+    let enrolled = new_token.is_some();
     let conn_id = reg
         .next_conn
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let (tx, mut rx) = mpsc::unbounded_channel::<Outgoing>();
-    let (welcome, old, resumed, _) = reg.attach(
+    let (mut welcome, old, resumed, _) = reg.attach(
         &row,
         &hello,
         Conn {
@@ -776,6 +1054,7 @@ async fn serve_link(state: Shared, mut socket: WebSocket, row: Host) {
             "a new connection with the same token took over".into(),
         ))));
     }
+    welcome.token = new_token;
     match encode_control(&DaemonFrame::Welcome(welcome.clone())) {
         Ok(t) => {
             if socket.send(WsMessage::Text(t.into())).await.is_err() {
@@ -788,7 +1067,7 @@ async fn serve_link(state: Shared, mut socket: WebSocket, row: Host) {
             return;
         }
     }
-    info!(host = %row.name, resumed, "host agent connected");
+    info!(host = %row.name, resumed, enrolled, peer = peer.as_deref().unwrap_or("-"), "host agent connected");
     let caps = serde_json::to_value(&hello.capabilities).unwrap_or(Value::Null);
     let summary = hello.capabilities.summary(&hello.os, &hello.arch);
     {
@@ -806,9 +1085,13 @@ async fn serve_link(state: Shared, mut socket: WebSocket, row: Host) {
                 format!("host {} connected", row.name),
                 json!({"host": row.name, "host_id": row.id, "version": hello.version,
                        "os": hello.os, "arch": hello.arch, "capabilities": caps,
-                       "summary": summary, "resumed": resumed}),
+                       "summary": summary, "resumed": resumed, "enrolled": enrolled,
+                       "from": peer}),
             ),
-            move |t| hosts::mark_online(t, &name, &caps2, &os, &arch, &version),
+            move |t| {
+                hosts::mark_online(t, &name, &caps2, &os, &arch, &version)?;
+                hosts::mark_used(t, &name, peer.as_deref())
+            },
         )
         .await;
     }

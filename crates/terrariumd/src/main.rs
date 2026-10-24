@@ -85,16 +85,17 @@ async fn main() -> anyhow::Result<()> {
         usage,
     )
     .await?;
-    // The dial-in listener of the host agents (docs/host-protocol.md). An
-    // empty TERRARIUM_HOST_LISTEN turns it off; the main router still
-    // serves /hosts/connect.
-    let host_listen =
-        std::env::var("TERRARIUM_HOST_LISTEN").unwrap_or_else(|_| "0.0.0.0:8082".into());
-    let host_task = if host_listen.is_empty() {
-        None
-    } else {
-        let (task, _) = terrariumd::hosts::serve(daemon.state.clone(), &host_listen).await?;
-        Some(task)
+    // The dial-in listener of the host agents (docs/host-protocol.md
+    // "TLS"). TERRARIUM_HOST_TLS_CERT and TERRARIUM_HOST_TLS_KEY turn on
+    // TLS and bind 0.0.0.0:8082; without them it is plaintext on
+    // 127.0.0.1:8082. TERRARIUM_HOST_LISTEN sets the address; empty turns
+    // it off. The main router still serves /hosts/connect.
+    let host_task = match terrariumd::hosts::HostListen::from_env()? {
+        Some(listen) => {
+            let (task, _) = listen.serve(daemon.state.clone()).await?;
+            Some(task)
+        }
+        None => None,
     };
 
     shutdown_signal().await;

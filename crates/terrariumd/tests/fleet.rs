@@ -29,6 +29,26 @@ async fn agent_by_key(td: &TestDaemon, key: &str) -> Value {
         .clone()
 }
 
+/// The `source` of each row of a list route, by `name` (`project/name`
+/// for an agent).
+async fn sources(td: &TestDaemon, path: &str) -> std::collections::BTreeMap<String, String> {
+    td.get(path)
+        .await
+        .ok()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            let name = r["name"].as_str().unwrap();
+            let key = match r["project"].as_str() {
+                Some(p) if path == "/api/agents" => format!("{p}/{name}"),
+                _ => name.to_owned(),
+            };
+            (key, r["source"].as_str().unwrap().to_owned())
+        })
+        .collect()
+}
+
 #[tokio::test]
 async fn apply_creates_and_a_second_apply_changes_nothing() {
     let td = TestDaemon::start().await;
@@ -49,7 +69,7 @@ async fn apply_creates_and_a_second_apply_changes_nothing() {
 
     let p = td.get("/api/projects/terrarium").await;
     assert_eq!(p.ok()["card_prefix"], "TER");
-    assert_eq!(p.body["source"], "api");
+    assert_eq!(p.body["source"], "fleet:terrarium");
     let repos = td.get("/api/projects/terrarium/repos").await;
     assert_eq!(repos.ok()[0]["name"], "terrarium");
     let lead = agent_by_key(&td, "terrarium/lead").await;
@@ -154,6 +174,15 @@ async fn an_api_edit_shows_as_drift_and_the_apply_restores_the_file() {
     td.patch("/api/targets/buildbox", json!({"port": 2222}))
         .await
         .ok();
+    // The fleet stays the owner.
+    assert_eq!(
+        agent_by_key(&td, "terrarium/lead").await["source"],
+        "fleet:terrarium"
+    );
+    assert_eq!(
+        td.get("/api/targets/buildbox").await.ok()["source"],
+        "fleet:terrarium"
+    );
 
     let plan = td.post("/api/fleet/plan", body(EXAMPLE)).await;
     assert_eq!(plan.ok()["summary"]["drift"], 2, "{}", plan.body);
@@ -273,6 +302,10 @@ name = "b"
     td.get("/api/agents/drop%2Fb").await.err(404, "not_found");
     // The project stays as an API project, with its board.
     assert_eq!(td.get("/api/projects/drop").await.ok()["source"], "api");
+    assert_eq!(
+        td.get("/api/projects/keep").await.ok()["source"],
+        "fleet:two"
+    );
     let row = &td.get("/api/fleet").await.body[0];
     assert_eq!(row["projects"], json!(["keep"]));
 }
@@ -396,9 +429,13 @@ async fn an_existing_api_project_is_adopted() {
     let p = entry(&plan.body, "project", "terrarium");
     assert_eq!(p["adopt"], true);
     td.post("/api/fleet/apply", body(EXAMPLE)).await.ok();
+    let p = td.get("/api/projects/terrarium").await;
+    assert_eq!(p.ok()["card_prefix"], "TER");
+    // The adopted objects show their new owner.
+    assert_eq!(p.body["source"], "fleet:terrarium");
     assert_eq!(
-        td.get("/api/projects/terrarium").await.ok()["card_prefix"],
-        "TER"
+        agent_by_key(&td, "terrarium/lead").await["source"],
+        "fleet:terrarium"
     );
     let plan = td.post("/api/fleet/plan", body(EXAMPLE)).await;
     assert_eq!(plan.ok()["summary"]["unchanged"], 6);
@@ -661,4 +698,60 @@ async fn export_captures_a_hand_built_project() {
     td.get("/api/fleet/export?project=hand&name=apply")
         .await
         .err(422, "invalid");
+}
+
+#[tokio::test]
+async fn the_lists_show_the_fleet_source_and_a_file_object_stays_file() {
+    let mut td = TestDaemon::with_config(|c| {
+        write(c, "projects/hand.toml", "description = \"file\"\n");
+        write(
+            c,
+            "agents/helper.toml",
+            "project = \"hand\"\nharness = \"claude\"\n",
+        );
+    })
+    .await;
+    td.post("/api/fleet/apply", body(EXAMPLE)).await.ok();
+
+    let fleet = "fleet:terrarium".to_owned();
+    let projects = sources(&td, "/api/projects").await;
+    assert_eq!(projects["terrarium"], fleet, "{projects:?}");
+    assert_eq!(projects["hand"], "file");
+    let agents = sources(&td, "/api/agents").await;
+    for a in ["terrarium/lead", "terrarium/worker-1", "terrarium/worker-2"] {
+        assert_eq!(agents[a], fleet, "{agents:?}");
+    }
+    assert_eq!(agents["hand/helper"], "file");
+    assert_eq!(sources(&td, "/api/targets").await["buildbox"], fleet);
+    assert_eq!(
+        sources(&td, "/api/subscriptions").await["anthropic-max"],
+        fleet
+    );
+
+    // A reload syncs the definition files. It does not take the fleet
+    // objects for file objects: it deletes and releases none of them.
+    td.post_empty("/api/reload").await.ok();
+    let agents = sources(&td, "/api/agents").await;
+    assert_eq!(agents.len(), 4, "{agents:?}");
+    assert_eq!(agents["terrarium/lead"], fleet);
+    assert_eq!(agents["hand/helper"], "file");
+    assert_eq!(sources(&td, "/api/projects").await["terrarium"], fleet);
+    assert_eq!(sources(&td, "/api/targets").await["buildbox"], fleet);
+    assert_eq!(
+        sources(&td, "/api/subscriptions").await["anthropic-max"],
+        fleet
+    );
+
+    // A file agent whose file is gone is deleted; the fleet agents stay.
+    std::fs::remove_file(td.config.join("agents/helper.toml")).unwrap();
+    td.post_empty("/api/reload").await.ok();
+    let agents = sources(&td, "/api/agents").await;
+    assert_eq!(agents.len(), 3, "{agents:?}");
+    assert!(agents.values().all(|s| *s == fleet), "{agents:?}");
+
+    // The labels survive a restart, and the plan stays clean.
+    td.boot(None, None).await;
+    assert_eq!(sources(&td, "/api/projects").await["terrarium"], fleet);
+    let plan = td.post("/api/fleet/plan", body(EXAMPLE)).await;
+    assert_eq!(plan.ok()["summary"]["unchanged"], 6, "{}", plan.body);
 }

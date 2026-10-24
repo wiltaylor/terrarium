@@ -41,7 +41,7 @@ pub struct Subscription {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub probe: Option<String>,
     pub alert_at: u8,
-    /// `file` or `api`.
+    /// `file`, `api`, or `fleet:<name>` (owned by a fleet).
     pub source: String,
     /// The env var that carries the stored API key into the agents on this
     /// subscription. The key itself is never in the API.
@@ -116,7 +116,9 @@ pub fn check_name(name: &str) -> ApiResult<()> {
 }
 
 /// Insert or update the definition columns of a subscription. A row from
-/// another source becomes `source`.
+/// another source becomes `source`, except that an `api` write keeps the
+/// `fleet:<name>` of a row a fleet owns (the fleet stays the owner, and
+/// the change shows as drift).
 pub fn upsert_def(t: &mut Tx<'_>, def: &SubscriptionDef, source: &str) -> ApiResult<Subscription> {
     check_name(&def.name)?;
     if def.provider.trim().is_empty() {
@@ -131,7 +133,9 @@ pub fn upsert_def(t: &mut Tx<'_>, def: &SubscriptionDef, source: &str) -> ApiRes
          ON CONFLICT (name) DO UPDATE SET
              provider = excluded.provider, plan = excluded.plan,
              harnesses = excluded.harnesses, probe = excluded.probe,
-             alert_at = excluded.alert_at, source = excluded.source,
+             alert_at = excluded.alert_at,
+             source = CASE WHEN excluded.source = 'api' AND subscriptions.source GLOB 'fleet:*'
+                           THEN subscriptions.source ELSE excluded.source END,
              updated_at = excluded.updated_at",
         params![
             def.name,

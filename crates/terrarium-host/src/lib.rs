@@ -15,6 +15,8 @@
 //! - [`verb`]: shared parts of the builders.
 //! - [`config`]: the config file and the path policy.
 //! - [`capabilities`]: tool detection for `hello` and `check`.
+//! - [`tls`]: the transport check, fingerprint pinning, the probe, and
+//!   self-signed certificates.
 
 pub mod capabilities;
 pub mod client;
@@ -23,6 +25,7 @@ pub mod docker;
 pub mod outbox;
 pub mod protocol;
 pub mod session;
+pub mod tls;
 pub mod transfer;
 pub mod verb;
 pub mod vmlab;
