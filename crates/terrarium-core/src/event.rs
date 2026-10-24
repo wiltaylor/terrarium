@@ -108,6 +108,13 @@ fn default_true() -> bool {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EventRecord {
     pub id: EventId,
+    /// The position of the record in the agent's `events.jsonl`, from 1.
+    /// The runner sets it; it goes on across runner restarts, so a reader
+    /// can ask for the records after a seq (`docs/runner.md`). `None` in
+    /// records from before the field existed, and in records that did not
+    /// come from a runner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq: Option<u64>,
     pub agent: AgentId,
     pub at: DateTime<Utc>,
     #[serde(flatten)]
@@ -118,6 +125,7 @@ impl EventRecord {
     pub fn now(agent: AgentId, event: Event) -> Self {
         Self {
             id: EventId::new(),
+            seq: None,
             agent,
             at: Utc::now(),
             event,
@@ -142,6 +150,18 @@ mod tests {
         );
         let json = serde_json::to_value(&rec).expect("serialise");
         assert_eq!(json["type"], "tool_use");
+        let back: EventRecord = serde_json::from_value(json).expect("deserialise");
+        assert_eq!(back, rec);
+    }
+
+    #[test]
+    fn seq_is_optional_on_the_wire() {
+        let mut rec = EventRecord::now(AgentId::new(), Event::TurnEnd);
+        let json = serde_json::to_value(&rec).expect("serialise");
+        assert!(json.get("seq").is_none());
+        rec.seq = Some(42);
+        let json = serde_json::to_value(&rec).expect("serialise");
+        assert_eq!(json["seq"], 42);
         let back: EventRecord = serde_json::from_value(json).expect("deserialise");
         assert_eq!(back, rec);
     }

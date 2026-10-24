@@ -72,6 +72,21 @@ pub struct AgentDef {
     pub policy: Policy,
     #[serde(default)]
     pub restart: RestartPolicy,
+    /// Start a fresh session, not a resume, when the rendered prompt
+    /// changed and the harness keeps the prompt of a session
+    /// (`Adapter::prompt_frozen_on_resume`, for example Codex). The old
+    /// session stays in the history. Default true.
+    #[serde(default = "yes", skip_serializing_if = "is_yes")]
+    pub new_session_on_prompt_change: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_yes(b: &bool) -> bool {
+    *b
 }
 
 /// A git remote attached to a project.

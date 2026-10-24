@@ -1,10 +1,14 @@
 [package]
 name = "terrarium-runner"
-description = "The Terrarium agent runner: the PTY, the status machine, and the runner socket"
+description = "The Terrarium agent runner: the PTY, the status machine, the runner socket, and the runner process"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+
+[[bin]]
+name = "terrarium-runner"
+path = "src/bin/terrarium-runner/main.rs"
 
 [dependencies]
 terrarium-core.workspace = true
@@ -16,10 +20,21 @@ tracing.workspace = true
 portable-pty.workspace = true
 vt100.workspace = true
 regex.workspace = true
+base64.workspace = true
+nix.workspace = true
+# The runner process (`src/bin`): the adapters map hooks, read the screen,
+# and give the keys. The daemon builds the launch spec itself.
+terrarium-adapter-claude.workspace = true
+terrarium-adapter-codex.workspace = true
+terrarium-adapter-copilot.workspace = true
+terrarium-adapter-pi.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+tracing-subscriber.workspace = true
+semver.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-semver.workspace = true
 
 [lints]
 workspace = true

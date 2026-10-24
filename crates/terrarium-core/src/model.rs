@@ -37,6 +37,13 @@ pub struct Agent {
     /// The current harness session, if one has started.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<HarnessSessionId>,
+    /// See [`AgentDef::new_session_on_prompt_change`].
+    #[serde(default = "yes")]
+    pub new_session_on_prompt_change: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 impl Agent {
@@ -61,6 +68,7 @@ impl Agent {
             restart: def.restart,
             status: AgentStatus::Stopped,
             session: None,
+            new_session_on_prompt_change: def.new_session_on_prompt_change,
         }
     }
 }

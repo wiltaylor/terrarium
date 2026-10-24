@@ -6,6 +6,7 @@ members = [
     "crates/terrarium",
     "crates/terrarium-host",
     "crates/terrarium-runner",
+    "crates/terrarium-compat",
     "crates/adapters/claude",
     "crates/adapters/codex",
     "crates/adapters/copilot",

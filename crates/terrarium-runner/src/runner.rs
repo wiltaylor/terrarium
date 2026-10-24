@@ -1,7 +1,6 @@
 //! The runner: one harness in a PTY, its status machine, and its socket.
 
 use std::collections::VecDeque;
-use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -13,13 +12,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use terrarium_core::paths::{ENV_AGENT, ENV_AGENT_SOCKET};
 use terrarium_core::{
-    Adapter, AgentId, AgentStatus, Answer, Event, EventRecord, HookPayload, LaunchSpec, ScreenHint,
+    Adapter, AgentId, AgentStatus, Answer, Event, EventRecord, HarnessSessionId, HookPayload,
+    LaunchSpec, ScreenHint,
 };
 use tokio::sync::{Notify, broadcast, oneshot, watch};
 use tokio::task::AbortHandle;
 
 use crate::config::RunnerConfig;
 use crate::error::{DeliveryError, Result, RunnerError};
+use crate::events::EventLog;
 use crate::protocol::{RequestContext, RequestHandler};
 use crate::ptylog::PtyLog;
 use crate::ready::{DefaultReadyDetector, ReadyDetector};
@@ -79,6 +80,10 @@ pub struct Delivery {
 }
 
 impl Delivery {
+    pub(crate) fn from_parts(id: u64, rx: oneshot::Receiver<Result<(), DeliveryError>>) -> Self {
+        Self { id, rx }
+    }
+
     pub fn id(&self) -> u64 {
         self.id
     }
@@ -132,8 +137,10 @@ pub(crate) struct Inner {
     parser: Mutex<vt100::Parser>,
     output_tx: broadcast::Sender<OutputChunk>,
     events_tx: broadcast::Sender<EventRecord>,
-    events_log: Mutex<File>,
+    events_log: Mutex<EventLog>,
     events_path: PathBuf,
+    harness_pid: Option<u32>,
+    session: Mutex<Option<HarnessSessionId>>,
     state: Mutex<State>,
     status_tx: watch::Sender<AgentStatus>,
     exit_tx: watch::Sender<Option<ExitStatus>>,
@@ -179,11 +186,7 @@ impl Runner {
         let listener = socket::bind(&socket_path)?;
 
         let events_path = agent_dir.join("events.jsonl");
-        let events_log = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&events_path)
-            .map_err(|e| RunnerError::io("open", &events_path, e))?;
+        let events_log = EventLog::open(&events_path)?;
         let pty_log = PtyLog::open(&agent_dir, config.log_max_bytes)?;
 
         let size = PtySize {
@@ -199,6 +202,7 @@ impl Runner {
         // reader sees EOF when the child exits.
         drop(pair.slave);
         let killer = child.clone_killer();
+        let harness_pid = child.process_id();
         let reader = pair.master.try_clone_reader().map_err(pty_err)?;
         let writer = pair.master.take_writer().map_err(pty_err)?;
 
@@ -222,6 +226,8 @@ impl Runner {
             events_tx,
             events_log: Mutex::new(events_log),
             events_path,
+            harness_pid,
+            session: Mutex::new(None),
             state: Mutex::new(State {
                 status: AgentStatus::Starting,
                 block: None,
@@ -297,6 +303,26 @@ impl Runner {
 
     pub fn status(&self) -> AgentStatus {
         lock(&self.inner.state).status
+    }
+
+    /// The process ID of the harness (for a sandbox: of `bwrap`).
+    pub fn harness_pid(&self) -> Option<u32> {
+        self.inner.harness_pid
+    }
+
+    /// The harness session ID from the last `SessionStarted` event.
+    pub fn session(&self) -> Option<HarnessSessionId> {
+        lock(&self.inner.session).clone()
+    }
+
+    /// The seq of the last line of `events.jsonl`.
+    pub fn last_seq(&self) -> u64 {
+        lock(&self.inner.events_log).seq()
+    }
+
+    /// The exit status, once the child has exited.
+    pub fn exit_status(&self) -> Option<ExitStatus> {
+        self.inner.exit_tx.borrow().clone()
     }
 
     /// A receiver that always holds the current status.
@@ -496,17 +522,20 @@ impl Inner {
         }
     }
 
-    /// Append the event to `events.jsonl` and publish it.
+    /// Give the event the next seq, append it to `events.jsonl`, and
+    /// publish it. The publish happens under the log lock, so subscribers
+    /// see the records in seq order.
     fn emit(&self, event: Event) {
-        let record = EventRecord::now(self.config.agent, event);
-        match serde_json::to_vec(&record) {
-            Ok(mut line) => {
-                line.push(b'\n');
-                if let Err(e) = lock(&self.events_log).write_all(&line) {
-                    tracing::warn!("write {}: {e}", self.events_path.display());
-                }
-            }
-            Err(e) => tracing::warn!("serialise an event: {e}"),
+        if let Event::SessionStarted {
+            harness_session, ..
+        } = &event
+        {
+            *lock(&self.session) = Some(harness_session.clone());
+        }
+        let mut record = EventRecord::now(self.config.agent, event);
+        let mut log = lock(&self.events_log);
+        if let Err(e) = log.append(&mut record) {
+            tracing::warn!("write {}: {e}", self.events_path.display());
         }
         let _ = self.events_tx.send(record);
     }

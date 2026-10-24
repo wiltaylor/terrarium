@@ -3,7 +3,11 @@
 The `terrarium-runner` crate holds one harness in a PTY. It keeps the parsed
 screen, records the raw output and the events, serves a Unix socket for hooks
 and the agent CLI, and runs the status machine of [PLAN §5](PLAN.md#5-domain-model).
-One `Runner` holds one agent.
+One `Runner` holds one agent. A runner runs in the daemon process
+(`Runner`), or in its own process, the `terrarium-runner` binary. A runner
+process keeps the harness alive when the daemon stops or restarts
+(PLAN §6, §18). The daemon talks to a runner process with `RemoteRunner`.
+Both types implement the `RunnerHandle` trait.
 
 ## Files
 
@@ -15,8 +19,30 @@ example `/state`. `<run>` is `RunnerConfig::runtime_dir`, for example
 |---|---|
 | `<state>/agents/<ulid>/pty.log` | The raw PTY bytes. The runner appends to it. |
 | `<state>/agents/<ulid>/pty.log.1` | The archive. When `pty.log` grows past `log_max_bytes` (default 8 MiB), it moves here and a new `pty.log` starts. The runner keeps one archive. |
-| `<state>/agents/<ulid>/events.jsonl` | One `EventRecord` as JSON on each line. The runner appends to it, so the history stays across restarts. |
-| `<run>/agents/<ulid>.sock` | The runner socket, mode `0600`. The runner removes a stale socket before it binds, and removes the socket after the child exits. |
+| `<state>/agents/<ulid>/events.jsonl` | One `EventRecord` as JSON on each line. The runner appends to it, so the history stays across restarts. Each record has a `seq`: its line number, from 1 (see "Event seq"). |
+| `<run>/agents/<ulid>.sock` | The runner socket (hooks and agent RPC), mode `0600`. The runner removes a stale socket before it binds, and removes the socket after the child exits. |
+
+A runner process also uses these files:
+
+| Path | Content |
+|---|---|
+| `<run>/runners/<ulid>.sock` | The control socket for the daemon, mode `0600`. |
+| `<run>/runners/<ulid>.pid` | The pid of the runner process. The live runner holds an exclusive `flock` on the file. The file stays after the exit, empty. |
+| `<state>/agents/<ulid>/runner.json` | The spec file (mode `0600`). `RemoteRunner::spawn_process` writes it. |
+| `<state>/agents/<ulid>/runner-argv.json` | The sandbox argv, when the daemon gives one. |
+| `<state>/agents/<ulid>/runner.log` | The stdout and stderr of the runner process. The process appends to it. |
+| `<state>/agents/<ulid>/runner-exit.json` | The `ExitStatus` of the harness, as JSON. The runner writes it after the harness exits, and removes an old one at the start. |
+
+### Event seq
+
+The `seq` of a record is its line number in `events.jsonl`, from 1. The
+runner appends to the file, so the seq goes on across runner restarts and
+daemon restarts. When the runner opens the file and the last line has no
+newline (a torn write), it adds the newline. The torn line keeps its seq,
+and readers skip it. `terrarium_runner::events::read_since(path, seq)`
+reads the records after a seq. `Runner::last_seq` gives the seq of the last
+line. A record from before this field has no `seq` in the JSON; the line
+number is still its seq.
 
 The runner adds `TERRARIUM_SOCKET` (the socket path) and `TERRARIUM_AGENT`
 (the agent ULID) to the child env. When the `LaunchSpec` sets one of them, the
@@ -186,6 +212,268 @@ the hook JSON on stdin. The adapter maps the names that it gets back.
 
 The background tasks hold the runner until the child exits. Drop the last
 `Runner` handle and the harness keeps running. Call `Runner::kill` to stop it,
-and `Runner::wait` to get the `ExitStatus`. PLAN §6 puts each runner in its
-own process, so that the agent lives through a daemon restart. This crate is
-the library. The process that hosts it is not in this crate.
+and `Runner::wait` to get the `ExitStatus`. An in-process runner ends with
+the daemon process. To keep the harness through a daemon restart, use a
+runner process.
+
+## The runner process
+
+```
+terrarium-runner --agent <ulid> --state-dir <dir> --runtime-dir <dir> \
+                 --spec <file> [--sandbox-argv-file <file>] [--linger-ms 2000]
+```
+
+The process does these steps:
+
+1. It calls `setsid`, so that a signal to the process group of the daemon
+   does not reach it.
+2. It locks `<run>/runners/<ulid>.pid` and writes its pid. When a live
+   runner holds the lock, it writes an error to stderr and exits with
+   code 3. It never takes over the sockets of a live runner.
+3. It binds the control socket `<run>/runners/<ulid>.sock`.
+4. It starts the harness with `Runner::spawn`. The hook socket is
+   `<run>/agents/<ulid>.sock`, as for an in-process runner. The runner
+   answers `ping` and `whoami` itself. It sends every other agent request
+   to the daemon over the control socket (see "Agent RPC through the
+   daemon").
+5. It waits for the harness to exit. SIGTERM and SIGINT stop the harness
+   first (the status becomes `stopped`). SIGHUP does nothing.
+6. It writes `runner-exit.json`. When a daemon is connected, it waits up to
+   `--linger-ms` for the daemon to disconnect. Then it removes the control
+   socket, empties the pid file, and exits with code 0. Code 1 means that
+   the runner itself failed, for example a bad spec or a launch error.
+
+The process runs while no daemon is connected. The harness keeps working,
+hooks keep coming in, and the events go to `events.jsonl` with their seq.
+
+The log level comes from `TERRARIUM_LOG` (default `info`).
+
+### The spec file
+
+The spec file is JSON. Only `harness` and `launch` are necessary. Each
+other field takes the default of `RunnerConfig::new`.
+
+```json
+{
+  "harness": "claude",
+  "adapter": "harness",
+  "adapter_options": {"config_dir": "/home/agent/.claude", "host_config_dir": "/auth/claude"},
+  "launch": {"program": "bwrap", "args": ["..."], "env": {}, "cwd": "/state/agents/01K.../workspace", "clear_env": true},
+  "name": "alice", "project": "demo", "roles": ["leader"],
+  "rows": 40, "cols": 120,
+  "stall_timeout_ms": 300000, "submit_timeout_ms": 10000, "submit_attempts": 2,
+  "log_max_bytes": 8388608, "tick_ms": 50,
+  "ready_detector": {"quiet_ms": 300, "pattern": "> $"},
+  "rpc_queue_timeout_ms": 10000
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `harness` | The harness ID. It selects the adapter, and `whoami` reports it. |
+| `adapter` | `harness` (default): the adapter of `harness`. `fake`: the test adapter for the fake TUI (Claude Code hook names, no screen hints). Use `fake` in tests only. |
+| `adapter_options` | The paths that the hook mapping reads: the harness home as the harness sees it (`config_dir`), and as the runner sees it (`host_config_dir`). |
+| `launch` | The `LaunchSpec`: the final command. For a sandbox, it is the full `bwrap` command. The runner does not call `Adapter::launch`. |
+| `ready_detector` | The settings of `DefaultReadyDetector`. Absent: the default detector. |
+| `rpc_queue_timeout_ms` | How long an agent request waits for a daemon connection. |
+
+`--sandbox-argv-file` names a JSON array of strings. The first string
+replaces `launch.program`, and the rest replace `launch.args`.
+
+`RunnerSpec` is the Rust type of the file. `RunnerSpec::from_config` makes
+one from a `RunnerConfig`. A `ready_detector` in a `RunnerConfig` is code,
+so set `RunnerSpec::ready_detector` yourself.
+
+The adapter selection is in one module:
+`crates/terrarium-runner/src/bin/terrarium-runner/adapters.rs`. The runner
+process uses the adapter for `hook_event`, `screen_hint`, `type_turn`,
+`clear_input_keys`, and `answer` only.
+
+## The control socket
+
+The control socket carries newline-delimited JSON, as the runner socket
+does. Each line is one frame. The `type` field names the kind of frame.
+
+### Frames
+
+The daemon sends two kinds of frame:
+
+```json
+{"type":"call","id":1,"method":"hello","params":{"client":"terrariumd","protocol":1}}
+{"type":"rpc_response","id":7,"result":{"status":200,"headers":{},"body":{}}}
+```
+
+The runner sends five kinds of frame:
+
+```json
+{"type":"reply","id":1,"result":{}}
+{"type":"reply","id":2,"error":{"code":"invalid_params","message":"..."}}
+{"type":"stream","id":3,"item":{}}
+{"type":"end","id":3}
+{"type":"delivery","delivery":4,"ok":false,"error":{"kind":"no_submit_hook","attempts":2}}
+{"type":"rpc_request","id":7,"method":"http","params":{},"context":{"agent":"01K...","name":"alice","project":"demo","roles":[],"harness":"claude","status":"idle"}}
+```
+
+- `id` in a `call` is a number that the daemon picks. Each `reply`,
+  `stream`, and `end` frame carries the `id` of its call.
+- A normal call gets one `reply`. A `reply` has `result` or `error`, never
+  both.
+- A stream call gets `stream` frames, then one `end` frame. An `end` with
+  an `error` tells why the stream stopped early.
+- The runner handles `write`, `resize`, `type_turn`, `answer`,
+  `answer_keys`, and `kill` in the order they arrive, so keystrokes stay in
+  order. Stream calls and `wait` run in parallel with the other calls.
+- A line that does not parse gets a `reply` with `id` 0 and the code
+  `parse_error`.
+
+### One daemon at a time
+
+The first call on a connection must be `hello`. Another call before
+`hello` gets the error `hello_required`. `hello` makes the connection the
+daemon connection. When a second connection sends `hello`, the runner
+closes the first connection. Agent requests that wait for an answer on the
+first connection get the error `unavailable`.
+
+### Methods
+
+| Method | Params | Answer |
+|---|---|---|
+| `hello` | `client`, `protocol` | `reply`: the `Hello` object (below). |
+| `status` | none | `reply`: `{"status":"idle"}`. |
+| `watch_status` | none | Stream. The first item is `{"status":...}` with the current status. Then one item for each change. The stream ends after the harness exits, with the final status as the last item. |
+| `events` | `since` (optional seq) | Stream. Each item is an `EventRecord` with its `seq`. With `since`, the runner first sends the records after `since` from `events.jsonl`, then the new records. With no `since`, only new records. The stream has no gap and no doubles: the runner skips each record with a seq at or below the last one that it sent. When the stream falls behind, the runner reads the missed records from the file. The stream ends after the harness exits and the last record is sent. |
+| `screen` | none | `reply`: a snapshot: `rows`, `cols`, `lines`, `cursor` (`[row, col]`), and `formatted` (base64 escape sequences that draw the screen). |
+| `attach` | none | Stream. The first item is `{"snapshot":{...}}`, as for `screen`. Each next item is `{"output":"<base64>"}`, a chunk of raw PTY output. The snapshot and the output have no gap and no overlap. When the client falls 1024 chunks behind, the stream ends with the error `lagged`; attach again. The stream ends after the harness exits. |
+| `write` | `data` (base64) | `reply`: `null`. The bytes go to the PTY as keystrokes. This is the attach input. |
+| `resize` | `rows`, `cols` | `reply`: `null`. |
+| `type_turn` | `text` | `reply`: `{"delivery":<id>}`. Later, one `delivery` frame with the same id gives the outcome (below). |
+| `answer` | `request_id`, `answer` (`{"kind":"allow"}`, `{"kind":"deny"}`, `{"kind":"choice","value":2}`) | `reply`: `null`. As `Runner::answer`. |
+| `answer_keys` | `keys` | `reply`: `null`. As `Runner::answer_keys`. |
+| `kill` | none | `reply`: `null`. As `Runner::kill`. The status becomes `stopped` when the harness exits, and then the runner process exits. |
+| `wait` | none | `reply` when the harness exits: `{"code":0}` or `{"code":1,"signal":"SIGKILL"}`. |
+| `cancel` | `call` (the id of a stream call) | `reply`: `null`. The stream stops with an `end` frame with the error `cancelled`. |
+
+The `Hello` object:
+
+| Field | Meaning |
+|---|---|
+| `protocol` | The protocol version, now `1`. |
+| `version` | The version of the runner binary. |
+| `agent`, `harness` | The agent ULID and the harness ID. |
+| `runner_pid` | The pid of the runner process. |
+| `harness_pid` | The pid of the harness (for a sandbox: of `bwrap`). |
+| `status` | The current status. |
+| `session` | The harness session ID from the last `session_started` event, if any. |
+| `seq` | The seq of the last line of `events.jsonl`. |
+| `exit` | Set when the harness has exited and the runner is about to exit. |
+| `hook_socket`, `events_path` | The paths of the hook socket and of `events.jsonl`. |
+
+The `delivery` frame:
+
+| `ok` | `error.kind` | Meaning |
+|---|---|---|
+| `true` | | The harness took the turn: the prompt-submit hook, or a busy screen. |
+| `false` | `no_submit_hook` | No sign after `error.attempts` attempts. |
+| `false` | `exited` | The harness exited before the turn went in. |
+| `false` | `write` | The write to the PTY failed. `error.message` tells why. |
+| `false` | `dropped` | The runner dropped the turn. |
+
+A delivery outcome goes only to the connection that typed the turn. When
+that connection closes first, the outcome is lost. A failed delivery is
+also an `Event::DeliveryFailed` in the events.
+
+Error codes of the control socket:
+
+| Code | Cause |
+|---|---|
+| `hello_required` | A call came before `hello`. |
+| `invalid_params` | The params do not match the method, or the base64 is bad. |
+| `method_not_found` | The method is not in the table. |
+| `parse_error` | The line is not a valid frame. |
+| `exited` | The harness has exited (from `write`, `answer`, `answer_keys`). |
+| `failed` | Another runner error. The message tells why. |
+| `lagged` | The attach client fell behind. |
+| `cancelled` | A `cancel` call stopped the stream. |
+
+### Agent RPC through the daemon
+
+The agent CLI sends requests on the hook socket. The runner answers `ping`
+and `whoami` itself. For every other method (`http` and the others in
+`docs/agent-rpc.md`), the runner sends an `rpc_request` frame to the daemon
+connection. The frame has the method, the params, and the
+`RequestContext` of the agent. The daemon runs its `RequestHandler` and
+sends an `rpc_response` with the same `id`. The runner gives the result or
+the error to the agent CLI.
+
+When no daemon is connected, the request waits for a daemon up to
+`rpc_queue_timeout_ms` (default 10 s). When a daemon connects in that time,
+the request goes to it. Else the agent gets this tunnel error:
+
+```json
+{"type":"response","id":2,"error":{"code":"unavailable","message":"the agent RPC tunnel is down: no daemon connected to the runner within 10000 ms; try again later"}}
+```
+
+When the daemon disconnects before it answers, the agent also gets
+`unavailable`. The runner does not send the request again, because the
+daemon can have done it already.
+
+## RemoteRunner and RunnerHandle
+
+`RunnerHandle` is the surface that the daemon uses. `Runner` and
+`RemoteRunner` implement it. The trait is object safe, so the daemon can
+hold an `Arc<dyn RunnerHandle>`.
+
+| Method | `Runner` | `RemoteRunner` |
+|---|---|---|
+| `agent`, `socket_path`, `events_path` | From the config. | From `hello`. |
+| `status`, `watch_status` | The live status. | The last status from the `watch_status` stream. |
+| `subscribe_events` | New events. | New events. The first call also gets the replay of `ConnectOptions::events_since`. |
+| `screen`, `attach` | Local, no wait. | One call, or one stream. |
+| `write`, `resize`, `answer`, `answer_keys`, `kill` | Local. | One call each. |
+| `type_turn` | A `Delivery` with the runner id. | A `Delivery` with a local id. The `delivery` frame resolves it. |
+| `wait` | The exit status. | The `wait` reply. When the connection closes first: `runner-exit.json`, else code 1 with the signal `RUNNER_LOST`. |
+
+`Runner` keeps its own methods with the same names (`Runner::kill` and
+`Runner::resize` stay sync). `Runner` also has `harness_pid`, `session`,
+`last_seq`, and `exit_status`.
+
+`RemoteRunner` functions:
+
+- `RemoteRunner::connect(runtime_dir, agent)` connects with no agent RPC
+  handler. `RemoteRunner::connect_with(runtime_dir, agent, ConnectOptions)`
+  sets the handler (the daemon passes its `AgentRpc`), `events_since`, the
+  client name, and the connect timeout. Both send `hello` and open the
+  `events`, `watch_status`, and `wait` calls.
+- `RemoteRunner::spawn_process(bin, SpawnOptions)` refuses when a live
+  runner holds the agent. Else it writes `runner.json`, starts `bin`
+  detached (stdin from `/dev/null`, stdout and stderr to `runner.log`),
+  waits up to `start_timeout` (default 10 s) for the control socket, and
+  connects. A thread reaps the process when it exits while the daemon
+  runs. When the process ends before it is ready, the error names
+  `runner.log`.
+- `hello()` gives the `Hello` from the connect. `last_seq()` gives the
+  highest seq that the connection got: keep it for the next
+  `events_since`. `is_connected()` is false after the connection closes.
+- After the `wait` reply and the end of the `events` stream, the client
+  closes the connection, so the runner process can exit at once.
+
+Drop the last `RemoteRunner` clone and the connection closes. The runner
+process and the harness keep running.
+
+Helper functions: `control_socket_path`, `pid_path`, `runners_dir`,
+`live_runner_pid(runtime_dir, agent)` (the pid when a runner holds the
+lock), and `read_exit_status(state_dir, agent)`.
+
+## Reconnect after a daemon restart
+
+PLAN §18 asks the daemon to reconnect to each runner and reconcile. For
+each agent that the database shows as live:
+
+1. Call `live_runner_pid(runtime_dir, agent)`. When it is `None`, the
+   runner is gone. Read `read_exit_status(state_dir, agent)` and the end of
+   `events.jsonl`, then apply the restart policy.
+2. Else call `RemoteRunner::connect_with` with `events_since` set to the
+   last seq that the daemon stored for the agent. The first
+   `subscribe_events` receiver gets every event that the daemon missed, in
+   order, with no gap.
+3. Take the status, the session ID, and the pids from `hello()`.

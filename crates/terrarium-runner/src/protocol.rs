@@ -81,13 +81,15 @@ impl RpcError {
 }
 
 /// Who sent a request. The runner knows the caller by the socket that the
-/// request arrived on: each agent has its own socket.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// request arrived on: each agent has its own socket. A runner process sends
+/// it to the daemon with each `rpc_request` frame.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequestContext {
     pub agent: AgentId,
     pub name: String,
     pub project: String,
     /// The roles above `member`, for `whoami`.
+    #[serde(default)]
     pub roles: Vec<String>,
     pub harness: HarnessId,
     pub status: AgentStatus,

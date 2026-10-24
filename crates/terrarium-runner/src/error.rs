@@ -16,6 +16,15 @@ pub enum RunnerError {
     Exited,
     #[error("{0}")]
     Other(String),
+    /// The runner process answered a control call with an error.
+    #[error("runner: {0}")]
+    Control(crate::protocol::RpcError),
+    /// The control connection to the runner process is closed.
+    #[error("the connection to the runner process is closed")]
+    Disconnected,
+    /// Another live runner process holds this agent.
+    #[error("a runner process (pid {pid}) already holds agent {agent}")]
+    AlreadyRunning { agent: String, pid: String },
 }
 
 impl RunnerError {

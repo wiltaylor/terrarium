@@ -1908,6 +1908,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "terrarium-compat"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "semver",
+ "serde_json",
+ "tempfile",
+ "terrarium-adapter-claude",
+ "terrarium-adapter-codex",
+ "terrarium-adapter-copilot",
+ "terrarium-adapter-pi",
+ "terrarium-core",
+ "terrarium-runner",
+ "tokio",
+]
+
+[[package]]
 name = "terrarium-core"
 version = "0.1.0"
 dependencies = [
@@ -1948,16 +1965,25 @@ dependencies = [
 name = "terrarium-runner"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "clap",
+ "nix 0.30.1",
  "portable-pty",
  "regex",
  "semver",
  "serde",
  "serde_json",
  "tempfile",
+ "terrarium-adapter-claude",
+ "terrarium-adapter-codex",
+ "terrarium-adapter-copilot",
+ "terrarium-adapter-pi",
  "terrarium-core",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "vt100",
 ]
 
@@ -1988,6 +2014,9 @@ dependencies = [
  "tar",
  "tempfile",
  "terrarium-adapter-claude",
+ "terrarium-adapter-codex",
+ "terrarium-adapter-copilot",
+ "terrarium-adapter-pi",
  "terrarium-core",
  "terrarium-host",
  "terrarium-runner",

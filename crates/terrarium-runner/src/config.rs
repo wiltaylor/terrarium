@@ -87,3 +87,20 @@ pub fn agent_dir(state_dir: &Path, agent: AgentId) -> PathBuf {
 pub fn socket_path(runtime_dir: &Path, agent: AgentId) -> PathBuf {
     runtime_dir.join("agents").join(format!("{agent}.sock"))
 }
+
+/// The directory of the runner process files: `<runtime_dir>/runners`.
+pub fn runners_dir(runtime_dir: &Path) -> PathBuf {
+    runtime_dir.join("runners")
+}
+
+/// The control socket of a runner process: `<runtime_dir>/runners/<ulid>.sock`.
+/// The daemon connects to it (`docs/runner.md`, "The control socket").
+pub fn control_socket_path(runtime_dir: &Path, agent: AgentId) -> PathBuf {
+    runners_dir(runtime_dir).join(format!("{agent}.sock"))
+}
+
+/// The pid file of a runner process: `<runtime_dir>/runners/<ulid>.pid`.
+/// The live runner holds an exclusive `flock` on it.
+pub fn pid_path(runtime_dir: &Path, agent: AgentId) -> PathBuf {
+    runners_dir(runtime_dir).join(format!("{agent}.pid"))
+}
