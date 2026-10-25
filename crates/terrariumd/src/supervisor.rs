@@ -136,6 +136,15 @@ pub trait Supervisor: Send + Sync + 'static {
     ) -> BoxFuture<'_, Result<(), SupervisorError>>;
     fn stop(&self, agent: AgentId) -> BoxFuture<'_, Result<(), SupervisorError>>;
     fn restart(&self, agent: Agent) -> BoxFuture<'_, Result<(), SupervisorError>>;
+    /// Clear an agent in `error` for an operator stop: end a stray runner
+    /// that still holds the agent, if one exists, and record the agent as
+    /// `stopped` in the supervisor. It does nothing to a live agent (stop
+    /// it with [`Supervisor::stop`]). It emits no status event: the daemon
+    /// writes the status. The default does nothing.
+    fn clear_error(&self, agent: AgentId) -> BoxFuture<'_, ()> {
+        let _ = agent;
+        Box::pin(async {})
+    }
     /// Type `text` into the harness as one turn.
     fn send_turn(&self, agent: AgentId, text: String)
     -> BoxFuture<'_, Result<(), SupervisorError>>;
@@ -392,6 +401,18 @@ mod fake {
                 );
                 self.set_status(agent, AgentStatus::Stopped, Some("stopped"));
                 Ok(())
+            })
+        }
+
+        fn clear_error(&self, agent: AgentId) -> BoxFuture<'_, ()> {
+            Box::pin(async move {
+                let mut inner = self.lock();
+                if let Some(a) = inner.agents.get_mut(&agent)
+                    && !a.status.is_live()
+                {
+                    a.epoch += 1;
+                    a.status = AgentStatus::Stopped;
+                }
             })
         }
 

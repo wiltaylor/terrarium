@@ -526,12 +526,16 @@ impl Runner {
     }
 
     /// Stop the harness gracefully. An idle harness gets the adapter's exit
-    /// keys and `RunnerConfig::stop_grace` to exit. A busy harness, a
+    /// keys (the final CR after `Adapter::exit_key_pause`) and
+    /// `RunnerConfig::stop_grace` to exit. A busy harness, a
     /// harness with no exit keys, or one that does not exit in time gets
     /// [`Runner::kill`]. No queued turn goes out after this call. Returns
     /// the exit status.
     pub async fn stop(&self) -> ExitStatus {
-        let keys = self.inner.adapter.exit_keys();
+        let writes = terrarium_core::adapter::exit_key_writes(
+            &self.inner.adapter.exit_keys(),
+            self.inner.adapter.exit_key_pause(),
+        );
         let (exited, idle) = {
             let mut state = lock(&self.inner.state);
             state.stop_requested = true;
@@ -543,8 +547,8 @@ impl Runner {
         if exited {
             return self.wait().await;
         }
-        if idle && !keys.is_empty() {
-            match self.inner.write_bytes(keys).await {
+        if idle && !writes.is_empty() {
+            match self.type_exit_keys(writes).await {
                 Ok(()) => {
                     if let Ok(status) =
                         tokio::time::timeout(self.inner.config.stop_grace, self.wait()).await
@@ -560,6 +564,19 @@ impl Runner {
             tracing::warn!("kill the harness: {e}");
         }
         self.wait().await
+    }
+
+    /// Type the writes of [`exit_key_writes`](terrarium_core::adapter::exit_key_writes),
+    /// with the adapter's exit-key pause between them.
+    async fn type_exit_keys(&self, writes: Vec<Vec<u8>>) -> Result<()> {
+        let pause = self.inner.adapter.exit_key_pause();
+        for (i, w) in writes.into_iter().enumerate() {
+            if i > 0 {
+                tokio::time::sleep(pause).await;
+            }
+            self.inner.write_bytes(w).await?;
+        }
+        Ok(())
     }
 
     /// Wait for the child to exit.

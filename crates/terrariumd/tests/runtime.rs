@@ -46,6 +46,8 @@ struct FakeAdapter {
     frozen: std::sync::atomic::AtomicBool,
     /// `exit_keys` for a graceful stop. Empty: kill.
     exit_keys: Mutex<Vec<u8>>,
+    /// `exit_key_pause`: the pause before the CR of the exit keys.
+    exit_pause: Mutex<Duration>,
 }
 
 impl FakeAdapter {
@@ -87,6 +89,9 @@ impl Adapter for FakeAdapter {
     }
     fn exit_keys(&self) -> Vec<u8> {
         self.exit_keys.lock().unwrap().clone()
+    }
+    fn exit_key_pause(&self) -> Duration {
+        *self.exit_pause.lock().unwrap()
     }
     fn hook_event(&self, hook: &HookPayload) -> Vec<Event> {
         match hook.hook.as_str() {
@@ -1187,6 +1192,77 @@ async fn stop_types_the_exit_keys_first() {
     // The harness exited on its keys (code 7), not on a kill.
     let exits = td.wait_events(&id, "exit", |e| !e.is_empty()).await;
     assert_eq!(exits[0]["data"]["code"], 7, "{exits:#?}");
+}
+
+/// A harness that submits a slash command only on a CR that comes after a
+/// pause (as Codex with `/exit`): the daemon's stop types the text, waits
+/// the adapter's `exit_key_pause`, then types the CR. The harness exits on
+/// its keys (code 7), not on the kill.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stop_types_the_exit_cr_after_the_exit_key_pause() {
+    let td = Td::start().await;
+    td.adapter.set_env("FAKE_TUI_SLASH_NEEDS_PAUSE", "1");
+    *td.adapter.exit_keys.lock().unwrap() = b"/exit 7\r".to_vec();
+    *td.adapter.exit_pause.lock().unwrap() = Duration::from_millis(300);
+    let id = td.agent("demo", "bob", json!({})).await;
+    td.post(&format!("/api/agents/{id}/start"), None).await;
+    td.wait_status(&id, "idle").await;
+    td.post(&format!("/api/agents/{id}/stop"), None).await;
+    td.wait_status(&id, "stopped").await;
+    let exits = td.wait_events(&id, "exit", |e| !e.is_empty()).await;
+    assert_eq!(exits[0]["data"]["code"], 7, "{exits:#?}");
+}
+
+/// An agent in `error` (here: a non-zero exit with restart `never`) can be
+/// stopped: the stop clears it to `stopped` with the reason "cleared by
+/// operator" and a status event. A second stop is `not_running`. A
+/// restart of an agent in `error` launches it again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stop_and_restart_clear_an_agent_in_error() {
+    let td = Td::start().await;
+    let id = td.agent("demo", "bad", json!({"restart": "never"})).await;
+    let to_error = || async {
+        td.post(&format!("/api/agents/{id}/start"), None).await;
+        td.wait_status(&id, "idle").await;
+        td.post(
+            &format!("/api/agents/{id}/send"),
+            Some(json!({"text": "/exit 1"})),
+        )
+        .await;
+        td.wait_status(&id, "error").await;
+    };
+    to_error().await;
+
+    let (s, b) = td
+        .req(Method::POST, &format!("/api/agents/{id}/stop"), None, None)
+        .await;
+    assert_eq!(s, 202, "{b}");
+    assert_eq!(b["status"], "stopped", "{b}");
+    assert_eq!(td.status(&id).await, "stopped");
+    let last = td.events(&id, "status").await.last().unwrap().clone();
+    assert_eq!(last["data"]["status"], "stopped", "{last}");
+    assert_eq!(last["data"]["from"], "error", "{last}");
+    assert_eq!(last["data"]["reason"], "cleared by operator", "{last}");
+    let (s, b) = td
+        .req(Method::POST, &format!("/api/agents/{id}/stop"), None, None)
+        .await;
+    assert_eq!(s, 409, "{b}");
+    assert_eq!(b["error"]["code"], "not_running", "{b}");
+
+    // Restart from `error`: a new launch.
+    to_error().await;
+    let (s, b) = td
+        .req(
+            Method::POST,
+            &format!("/api/agents/{id}/restart"),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(s, 202, "{b}");
+    td.wait_status(&id, "idle").await;
+    td.post(&format!("/api/agents/{id}/stop"), None).await;
+    td.wait_status(&id, "stopped").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

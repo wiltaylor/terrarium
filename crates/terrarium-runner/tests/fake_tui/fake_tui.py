@@ -34,6 +34,13 @@ Env:
   FAKE_TUI_IGNORE_HUP  when "1", ignore SIGHUP (only SIGKILL stops it)
   FAKE_TUI_ANSWER_HOLD when "1", /question waits for one more line after
                        the answer before Stop, so the turn stays open
+  FAKE_TUI_SLASH_NEEDS_PAUSE  when "1", read the terminal in cbreak mode
+                       and submit a slash command only when its CR comes
+                       at least 100 ms after the text, in a separate write
+                       (as Codex does with `/exit`). A CR that comes with
+                       the text stays unsubmitted: the text stays in the
+                       line, as in the Codex composer. Other lines submit
+                       on any CR.
 
 Signals: SIGTERM and SIGHUP end it at once (the Python default), unless
 FAKE_TUI_IGNORE_HUP is set. When its parent (the runner) dies, it exits
@@ -58,6 +65,35 @@ STALL = float(os.environ.get("FAKE_TUI_STALL_MS", "1500")) / 1000
 NO_SUBMIT = os.environ.get("FAKE_TUI_NO_SUBMIT") == "1"
 NO_SUBMIT_HOOK = os.environ.get("FAKE_TUI_NO_SUBMIT_HOOK") == "1"
 SUBMIT_GATE = os.environ.get("FAKE_TUI_SUBMIT_GATE")
+SLASH_NEEDS_PAUSE = os.environ.get("FAKE_TUI_SLASH_NEEDS_PAUSE") == "1"
+# The smallest gap between a slash command and its CR that submits it.
+SLASH_PAUSE = 0.1
+
+
+def read_line():
+    """One line of input. With FAKE_TUI_SLASH_NEEDS_PAUSE, a slash command
+    submits only on a CR that comes SLASH_PAUSE after the last other byte."""
+    if not SLASH_NEEDS_PAUSE:
+        return sys.stdin.readline()
+    fd = sys.stdin.fileno()
+    buf = b""
+    last = time.monotonic()
+    while True:
+        chunk = os.read(fd, 1024)
+        if not chunk:
+            return buf.decode(errors="replace")
+        now = time.monotonic()
+        for b in chunk:
+            c = bytes([b])
+            if c in (b"\r", b"\n"):
+                text = buf.replace(b"\x1b[200~", b"").replace(b"\x1b[201~", b"")
+                if text.strip().startswith(b"/") and now - last < SLASH_PAUSE:
+                    # A burst: keep the text, as Codex keeps it in the
+                    # composer.
+                    continue
+                return (buf + b"\n").decode(errors="replace")
+            buf += c
+            last = now
 
 
 def hook(name, payload):
@@ -106,6 +142,12 @@ def main():
     if os.environ.get("FAKE_TUI_IGNORE_HUP") == "1":
         signal.signal(signal.SIGHUP, signal.SIG_IGN)
     watch_parent()
+    if SLASH_NEEDS_PAUSE:
+        import tty
+
+        # No line discipline: the TUI sees each write when it comes. With
+        # ICRNL on, a CR still reads as NL; read_line takes both.
+        tty.setcbreak(sys.stdin.fileno())
     out("fake tui 1.0\n")
     resume = arg("--resume")
     session = resume or arg("--session")
@@ -128,12 +170,12 @@ def main():
         threading.Thread(target=die, daemon=True).start()
     while True:
         out("> ")
-        line = sys.stdin.readline()
+        line = read_line()
         if not line:
             return 0
         # A bracketed paste with newlines is one turn.
         while "\x1b[200~" in line and "\x1b[201~" not in line:
-            more = sys.stdin.readline()
+            more = read_line()
             if not more:
                 break
             line += more
@@ -161,17 +203,17 @@ def main():
             time.sleep(STALL)
         elif text == "/hold":
             out("holding...\n")
-            sys.stdin.readline()
+            read_line()
         elif text.startswith("/flood "):
             for i in range(int(text.split()[1])):
                 out(f"flood {i:06d} " + "x" * 50 + "\n")
         elif text == "/question":
             hook("Notification", {"message": "Allow the tool?"})
             out("Allow the tool? [y/n] ")
-            answer = sys.stdin.readline().strip()
+            answer = read_line().strip()
             out(f"answer: {answer}\n")
             if os.environ.get("FAKE_TUI_ANSWER_HOLD") == "1":
-                sys.stdin.readline()
+                read_line()
         else:
             time.sleep(DELAY)
         out(f"done: {text}\n")

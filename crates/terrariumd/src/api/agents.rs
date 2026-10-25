@@ -8,7 +8,7 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use terrarium_core::config::AgentDef;
-use terrarium_core::{AgentId, Answer, Role};
+use terrarium_core::{AgentId, AgentStatus, Answer, Role};
 
 use super::projects::Confirm;
 use super::{ApiJson, ApiQuery, Shared, paged, streams};
@@ -283,27 +283,33 @@ async fn stop(
 ) -> ApiResult<(StatusCode, Json<AgentView>)> {
     let a = load(&state, &actor, id).await?;
     policy::admin_project(&actor, &a.agent.project, "stopping an agent")?;
+    let errored = a.agent.status == AgentStatus::Error
+        || state.supervisor.status(agent_id(&a)).await == Some(AgentStatus::Error);
     let result = state.supervisor.stop(agent_id(&a)).await;
     let id = a.agent.id.to_string();
     let project = a.agent.project.clone();
+    let was_live = a.agent.status.is_live();
     match result {
         Ok(()) => {}
         // The store thinks it runs, the supervisor does not: reconcile.
-        Err(SupervisorError::NotRunning(_)) if a.agent.status.is_live() => {}
+        Err(SupervisorError::NotRunning(_)) if was_live => {}
+        // An agent in `error`: the operator clears it to `stopped`.
+        Err(SupervisorError::NotRunning(_)) if errored => {
+            state.supervisor.clear_error(agent_id(&a)).await;
+        }
         Err(e) => return Err(supervisor_error(e)),
     }
-    let was_live = a.agent.status.is_live();
     let v = state
         .db
         .write(actor.label(), move |t| {
             t.audit("agent.stop", &id, Some(&project), json!({}))?;
-            if result.is_err() && was_live {
-                crate::apply_status(
-                    t,
-                    &id,
-                    terrarium_core::AgentStatus::Stopped,
-                    Some("reconciled"),
-                )?;
+            if result.is_err() {
+                let reason = if was_live {
+                    "reconciled"
+                } else {
+                    "cleared by operator"
+                };
+                crate::apply_status(t, &id, AgentStatus::Stopped, Some(reason))?;
             }
             agents::get(t, &id)
         })

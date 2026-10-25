@@ -288,6 +288,7 @@ methods:
 | `clear_input_keys` | The keystrokes that empty the input line before a retry. The runner sends them only when no prompt-submit hook and no busy screen came. |
 | `is_system_prompt` | True for a prompt-submit hook of a prompt that the harness made itself. Such a hook does not confirm a delivery and is not a `TurnStart` (see "Typing a turn"). The default is false. Copilot implements it. |
 | `exit_keys` | The keystrokes that make an idle harness exit, for `Runner::stop`. |
+| `exit_key_pause` | The pause before the final CR of `exit_keys`. With a pause, `Runner::stop` and the daemon's stop type the keys without the CR, wait, then type the CR (`terrarium_core::adapter::exit_key_writes`). The default is zero (one write). Codex sets 300 ms. |
 
 The adapter's `launch` gives the `LaunchSpec`. The supervisor calls `launch`
 and gives the spec to `Runner::spawn`. When `screen_hint` cannot tell, set
@@ -306,7 +307,8 @@ and `Runner::wait` to get the `ExitStatus`.
   exited after `RunnerConfig::kill_grace` (default 3 s), the runner sends
   SIGKILL to the process group of the harness.
 - `Runner::stop` is the graceful stop. When the harness is `idle` and the
-  adapter has `exit_keys`, the runner types them and waits
+  adapter has `exit_keys`, the runner types them (the final CR after
+  `exit_key_pause`) and waits
   `RunnerConfig::stop_grace` (default 5 s). When the harness is busy, the
   adapter has no exit keys, or the harness does not exit in time, the
   runner calls `kill`. No queued turn goes out after `stop` or `kill`.
@@ -402,8 +404,8 @@ so set `RunnerSpec::ready_detector` yourself.
 The adapter selection is in one module:
 `crates/terrarium-runner/src/bin/terrarium-runner/adapters.rs`. The runner
 process uses the adapter for `hook_event`, `is_system_prompt`,
-`screen_hint`, `type_turn`, `clear_input_keys`, `exit_keys`, and `answer`
-only.
+`screen_hint`, `type_turn`, `clear_input_keys`, `exit_keys`,
+`exit_key_pause`, and `answer` only.
 
 ### The `bin` feature
 
@@ -642,4 +644,6 @@ a fixed time, and each wait has a limit of 30 s. Set
 each timing setting by 4, or `TERRARIUM_TEST_SLOW=<n>` to multiply by `n`.
 The fake TUI has commands that wait for the test (`/hold`, the
 `FAKE_TUI_SUBMIT_GATE` file, `FAKE_TUI_ANSWER_HOLD`), so that a test does not
-race a timer in the fake TUI.
+race a timer in the fake TUI. With `FAKE_TUI_SLASH_NEEDS_PAUSE=1`, the fake
+TUI submits a slash command only when its CR comes at least 100 ms after
+the text, as Codex does with `/exit`.

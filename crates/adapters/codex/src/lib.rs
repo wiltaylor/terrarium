@@ -214,6 +214,12 @@ impl Adapter for CodexAdapter {
         keys::exit()
     }
 
+    /// The CR of `/exit` goes 0.3 s after the text (`docs/compat.md`,
+    /// "Clean exit"). In one write, Codex does not submit it.
+    fn exit_key_pause(&self) -> std::time::Duration {
+        keys::EXIT_PAUSE
+    }
+
     fn clear_input_keys(&self) -> Vec<u8> {
         keys::clear_input()
     }
@@ -295,6 +301,7 @@ mod tests {
         assert_eq!(a.type_turn("hi"), b"\x1b[200~hi\x1b[201~\r".to_vec());
         assert!(a.clear_input_keys().starts_with(&[0x15]));
         assert_eq!(a.exit_keys(), b"/exit\r".to_vec());
+        assert_eq!(a.exit_key_pause(), std::time::Duration::from_millis(300));
     }
 
     /// Spawns the real binary. Run with `cargo test -- --ignored`.

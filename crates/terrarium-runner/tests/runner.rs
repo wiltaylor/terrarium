@@ -27,9 +27,10 @@ use tokio::time::timeout;
 /// `screen_hint` says `Busy` while the fake TUI shows `working...` or
 /// `holding...`, and it cannot tell otherwise. A `UserPromptSubmit` with a
 /// `<system_notification>` prompt is a system prompt, as for Copilot. The
-/// exit keys are `/quit`.
+/// exit keys are `/quit`, with `exit_pause` before the CR.
 struct FakeAdapter {
     busy_screen: bool,
+    exit_pause: Duration,
 }
 
 impl Adapter for FakeAdapter {
@@ -77,6 +78,9 @@ impl Adapter for FakeAdapter {
     fn exit_keys(&self) -> Vec<u8> {
         b"/quit\r".to_vec()
     }
+    fn exit_key_pause(&self) -> Duration {
+        self.exit_pause
+    }
     /// Visible keys, so a test can see that the retry path sends them.
     fn clear_input_keys(&self) -> Vec<u8> {
         b"cleared\r".to_vec()
@@ -118,6 +122,7 @@ struct Opts {
     output_capacity: Option<usize>,
     kill_grace: Option<Duration>,
     stop_grace: Option<Duration>,
+    exit_pause: Duration,
 }
 
 impl Default for Opts {
@@ -130,6 +135,7 @@ impl Default for Opts {
             output_capacity: None,
             kill_grace: None,
             stop_grace: None,
+            exit_pause: Duration::ZERO,
         }
     }
 }
@@ -175,6 +181,7 @@ async fn start_with(opts: Opts, handler: Arc<dyn RequestHandler>) -> Harness {
     }
     let adapter = Arc::new(FakeAdapter {
         busy_screen: opts.busy_screen,
+        exit_pause: opts.exit_pause,
     });
     let runner = Runner::spawn(config, adapter, spec, handler)
         .await
@@ -749,6 +756,39 @@ async fn stop_types_the_exit_keys_when_idle_and_kills_when_busy() {
     assert!(!h.runner.screen().text().contains("bye"));
 }
 
+/// A harness that submits a slash command only when its CR comes after a
+/// pause (as Codex with `/exit`): the exit keys in one write do not exit
+/// it, and `stop` falls back to the kill. With `exit_key_pause`, the CR
+/// goes in a second write after the pause, and the harness exits 0.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stop_types_the_exit_cr_after_the_exit_key_pause() {
+    // One write: the text stays in the line, so the kill ends it.
+    let mut h = start(Opts {
+        env: env(&[("FAKE_TUI_SLASH_NEEDS_PAUSE", "1")]),
+        stop_grace: Some(ms(500)),
+        ..Opts::default()
+    })
+    .await;
+    until_idle(&mut h).await;
+    let status = timeout(wait(), h.runner.stop()).await.expect("stop");
+    assert_eq!(status.signal_number(), Some(1), "{status:?}");
+    assert!(!h.runner.screen().text().contains("bye"));
+
+    // The CR after the pause: a clean exit.
+    let mut h = start(Opts {
+        env: env(&[("FAKE_TUI_SLASH_NEEDS_PAUSE", "1")]),
+        exit_pause: ms(300),
+        ..Opts::default()
+    })
+    .await;
+    until_idle(&mut h).await;
+    let status = timeout(wait(), h.runner.stop()).await.expect("stop");
+    assert!(status.success(), "{status:?}");
+    assert_eq!(status.exit_code(), 0);
+    assert_eq!(h.runner.status(), AgentStatus::Stopped);
+    until_screen(&h, "bye").await;
+}
+
 /// A runner config and a launch spec of the fake TUI in `dir`, for the
 /// tests of a planted symlink (`docs/security-review.md`, F11).
 fn planted_config(dir: &Path) -> (RunnerConfig, LaunchSpec) {
@@ -758,7 +798,10 @@ fn planted_config(dir: &Path) -> (RunnerConfig, LaunchSpec) {
 }
 
 async fn spawn_err(config: RunnerConfig, spec: LaunchSpec) -> terrarium_runner::RunnerError {
-    let adapter = Arc::new(FakeAdapter { busy_screen: false });
+    let adapter = Arc::new(FakeAdapter {
+        busy_screen: false,
+        exit_pause: Duration::ZERO,
+    });
     match Runner::spawn(config, adapter, spec, Arc::new(NoHandler)).await {
         Ok(runner) => {
             let _ = runner.kill();

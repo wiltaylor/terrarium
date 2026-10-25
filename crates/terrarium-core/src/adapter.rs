@@ -1,6 +1,7 @@
 //! The adapter interface. One adapter per harness. See PLAN §7.
 
 use std::path::Path;
+use std::time::Duration;
 
 use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
@@ -131,6 +132,15 @@ pub trait Adapter: Send + Sync {
         Vec::new()
     }
 
+    /// The pause between the exit text and its final CR. With a pause, the
+    /// caller types the exit keys without the CR, waits this long, and then
+    /// types the CR ([`exit_key_writes`]). A harness that takes a fast burst
+    /// as a paste needs it: Codex keeps `/exit\r` in one write in the
+    /// composer and does not submit it. The default is zero: one write.
+    fn exit_key_pause(&self) -> Duration {
+        Duration::ZERO
+    }
+
     /// True when the harness keeps the system prompt of a session from the
     /// moment it made the session, so a resume with a changed prompt still
     /// sends the old one. The supervisor then starts a fresh session (not a
@@ -145,6 +155,21 @@ pub trait Adapter: Send + Sync {
     /// writes nothing. This blocks.
     fn materialize_config(&self, _agent: &Agent, _home: &Path) -> Result<Vec<FileOverlay>> {
         Ok(Vec::new())
+    }
+}
+
+/// The writes of a graceful exit, from [`Adapter::exit_keys`] and
+/// [`Adapter::exit_key_pause`]. With no pause, or keys that do not end in
+/// a CR, it is one write of all the keys. Otherwise it is two writes: the
+/// keys without the final CR, then the CR. The caller waits `pause` between
+/// them.
+pub fn exit_key_writes(keys: &[u8], pause: Duration) -> Vec<Vec<u8>> {
+    match keys.split_last() {
+        Some((b'\r', text)) if !pause.is_zero() && !text.is_empty() => {
+            vec![text.to_vec(), b"\r".to_vec()]
+        }
+        _ if keys.is_empty() => Vec::new(),
+        _ => vec![keys.to_vec()],
     }
 }
 
@@ -185,6 +210,22 @@ mod tests {
     #[test]
     fn bracketed_paste_wraps_text() {
         assert_eq!(bracketed_paste("hi"), b"\x1b[200~hi\x1b[201~\r".to_vec());
+    }
+
+    #[test]
+    fn exit_key_writes_split_the_cr_only_with_a_pause() {
+        let pause = Duration::from_millis(300);
+        assert_eq!(
+            exit_key_writes(b"/exit\r", Duration::ZERO),
+            vec![b"/exit\r".to_vec()]
+        );
+        assert_eq!(
+            exit_key_writes(b"/exit\r", pause),
+            vec![b"/exit".to_vec(), b"\r".to_vec()]
+        );
+        assert_eq!(exit_key_writes(b"\x04", pause), vec![b"\x04".to_vec()]);
+        assert_eq!(exit_key_writes(b"\r", pause), vec![b"\r".to_vec()]);
+        assert!(exit_key_writes(b"", pause).is_empty());
     }
 
     #[test]

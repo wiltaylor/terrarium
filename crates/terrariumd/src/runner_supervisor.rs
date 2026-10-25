@@ -2045,13 +2045,30 @@ impl Supervisor for RunnerSupervisor {
                 debug!(agent = %agent, "cannot record the stop reason: {e}");
             }
             // A graceful stop: an idle harness with known exit keys gets
-            // them, and a kill only when it has not exited in time.
-            let keys = self
+            // them, and a kill only when it has not exited in time. With an
+            // exit-key pause, the final CR goes after the pause.
+            let (writes, pause) = self
                 .entry(harness)
-                .map(|e| e.adapter.exit_keys())
+                .map(|e| {
+                    let pause = e.adapter.exit_key_pause();
+                    (
+                        terrarium_core::adapter::exit_key_writes(&e.adapter.exit_keys(), pause),
+                        pause,
+                    )
+                })
                 .unwrap_or_default();
-            if !keys.is_empty() && r.status() == AgentStatus::Idle && r.write(&keys).await.is_ok() {
+            let mut writes = writes.into_iter();
+            if let Some(first) = writes.next()
+                && r.status() == AgentStatus::Idle
+                && r.write(&first).await.is_ok()
+            {
                 tokio::spawn(async move {
+                    for w in writes {
+                        tokio::time::sleep(pause).await;
+                        if let Err(e) = r.write(&w).await {
+                            debug!(agent = %agent, "cannot type the exit keys: {e}");
+                        }
+                    }
                     if tokio::time::timeout(GRACEFUL_STOP, r.wait()).await.is_err() {
                         debug!(agent = %agent, "the harness did not exit on its exit keys; killing it");
                         let _ = r.kill().await;
@@ -2060,6 +2077,39 @@ impl Supervisor for RunnerSupervisor {
                 return Ok(());
             }
             r.kill().await.map_err(other)
+        })
+    }
+
+    fn clear_error(&self, agent: AgentId) -> BoxFuture<'_, ()> {
+        Box::pin(async move {
+            {
+                let mut slots = lock(&self.inner.slots);
+                if let Some(slot) = slots.get_mut(&agent) {
+                    if slot.live() {
+                        return;
+                    }
+                    slot.epoch += 1;
+                    slot.phase = Phase::Down(AgentStatus::Stopped);
+                }
+            }
+            // A runner process that no slot holds (for example one that an
+            // earlier daemon started) still runs the agent: end it.
+            if self.is_process_mode()
+                && let Some(pid) = live_runner_pid(&self.inner.cfg.runtime_dir, agent)
+            {
+                warn!(agent = %agent, pid, "a stray runner holds the agent in error; killing it");
+                match self.connect_runner(agent, None).await {
+                    Ok(r) => {
+                        if let Err(e) = r.set_stopped_by(StoppedBy::Operator).await {
+                            debug!(agent = %agent, "cannot record the stop reason: {e}");
+                        }
+                        if let Err(e) = r.kill().await {
+                            warn!(agent = %agent, "cannot kill the stray runner: {e}");
+                        }
+                    }
+                    Err(e) => warn!(agent = %agent, "{e}"),
+                }
+            }
         })
     }
 

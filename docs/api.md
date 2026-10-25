@@ -612,8 +612,8 @@ agent refuses `PATCH`, `DELETE`, and `PUT .../roles` with `file_managed`.
 | Endpoint | Body | Answer |
 |---|---|---|
 | `POST /api/agents/{id}/start` | none | `202` agent |
-| `POST /api/agents/{id}/stop` | none | `202` agent |
-| `POST /api/agents/{id}/restart` | none | `202` agent |
+| `POST /api/agents/{id}/stop` | none | `202` agent. Also on an agent in `error`: it becomes `stopped`. |
+| `POST /api/agents/{id}/restart` | none | `202` agent. Also on an agent in `error`: a new launch. |
 | `POST /api/agents/{id}/send` | `{"text": "Run the tests"}` | `202 {"accepted": true}` |
 | `POST /api/agents/{id}/answer` | `{"request_id", "answer"}` or `{"text"}` | `202 {"accepted": true}` |
 
@@ -624,12 +624,19 @@ for the status changes.
 - `start` opens a new session and resumes the last harness session.
   A running agent gets `409 already_running`.
 - `stop` types the adapter's exit keys into an idle harness that has them
-  (pi: `/quit`), and kills it when it has not exited after 5 s. Other
-  harnesses are killed at once.
-- `stop` on an agent that is not running gets `409 not_running`. When the
-  store says live and the supervisor says not running, `stop` sets `stopped`.
+  (Claude, Codex, Copilot: `/exit`; pi: `/quit`), and kills it when it has
+  not exited after 5 s. A busy harness, or one with no exit keys, is killed
+  at once. For Codex, the CR goes 0.3 s after the text
+  (`Adapter::exit_key_pause`).
+- `stop` on an agent in `error` clears it: the status becomes `stopped`
+  with the reason "cleared by operator", and a status event goes out. A
+  stray runner process that still holds the agent is killed.
+- `stop` on an agent that is not running and not in `error` gets
+  `409 not_running`. When the store says live and the supervisor says not
+  running, `stop` sets `stopped` (reason "reconciled").
 - `restart` ends the current session with outcome `restarted` and starts a
-  new one. On a stopped agent it is the same as `start`.
+  new one. On a stopped agent, or an agent in `error`, it is the same as
+  `start`: a new launch.
 - `send` types one turn through the runner: it waits until the agent is
   `idle` and the prompt is ready. A stopped agent, or one between an exit
   and its restart, gets `409 not_running`.

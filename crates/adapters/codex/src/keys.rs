@@ -60,10 +60,16 @@ pub fn clear_input() -> Vec<u8> {
 }
 
 /// The keys for a clean exit: `/exit` then CR. The process exits after
-/// 0.05 to 5.1 s, with `SessionEnd.reason` = `other`.
+/// 0.05 to 5.1 s, with `SessionEnd.reason` = `other`. The CR must come
+/// [`EXIT_PAUSE`] after the text: in one write, Codex keeps `/exit` in the
+/// composer and does not submit it.
 pub fn exit() -> Vec<u8> {
     b"/exit\r".to_vec()
 }
+
+/// The pause between `/exit` and its CR. Every Codex spike waited 0.3 s
+/// (`spikes/codex/*/run.py`).
+pub const EXIT_PAUSE: std::time::Duration = std::time::Duration::from_millis(300);
 
 #[cfg(test)]
 mod tests {
