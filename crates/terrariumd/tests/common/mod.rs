@@ -67,6 +67,66 @@ impl Resp {
     }
 }
 
+/// Re-stamp a recorded Claude transcript so that it reads as "just now".
+///
+/// The trap: a usage sample takes the transcript's own `timestamp` (the
+/// correct behaviour), `GET /api/usage` defaults `since` to the last 24 h,
+/// and a daily budget counts only today's (UTC) samples. A fixture recorded
+/// on a fixed date passes on that day and fails from the next day on. So a
+/// test that feeds a fixture to the collector and reads the default window or
+/// a daily budget must re-stamp it first.
+///
+/// This moves every `timestamp` (RFC 3339) and every cost-state `startTime`
+/// (epoch ms) by one offset. The relative order and gaps stay the same. The
+/// last line lands one second before now. If that puts the first line before
+/// UTC midnight, the first line lands on midnight instead (so a run in the
+/// first seconds of a day can get stamps a few seconds in the future). Lines
+/// that are not JSON stay as they are. The source fixture file is not changed.
+pub fn restamp_transcript(text: &str) -> String {
+    use chrono::{DateTime, Utc};
+    let stamps: Vec<DateTime<Utc>> = text
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter_map(|v| {
+            DateTime::parse_from_rfc3339(v.get("timestamp")?.as_str()?)
+                .ok()
+                .map(|t| t.with_timezone(&Utc))
+        })
+        .collect();
+    let (Some(first), Some(last)) = (stamps.iter().min(), stamps.iter().max()) else {
+        return text.to_owned();
+    };
+    let now = Utc::now();
+    let midnight = now.date_naive().and_hms_opt(0, 0, 0).unwrap().and_utc();
+    let mut shift = (now - chrono::Duration::seconds(1)) - *last;
+    if *first + shift < midnight {
+        shift = midnight - *first;
+    }
+    let mut out = String::with_capacity(text.len());
+    for line in text.lines() {
+        match serde_json::from_str::<Value>(line) {
+            Ok(mut v) => {
+                if let Some(t) = v
+                    .get("timestamp")
+                    .and_then(Value::as_str)
+                    .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                {
+                    let t = (t.with_timezone(&Utc) + shift)
+                        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+                    v["timestamp"] = Value::String(t);
+                }
+                if let Some(ms) = v.get("startTime").and_then(Value::as_i64) {
+                    v["startTime"] = json!(ms + shift.num_milliseconds());
+                }
+                out.push_str(&v.to_string());
+            }
+            Err(_) => out.push_str(line),
+        }
+        out.push('\n');
+    }
+    out
+}
+
 pub fn write(dir: &Path, rel: &str, text: &str) {
     let p = dir.join(rel);
     std::fs::create_dir_all(p.parent().unwrap()).unwrap();

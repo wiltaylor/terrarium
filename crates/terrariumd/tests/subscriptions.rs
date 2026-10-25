@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use common::{TestDaemon, write};
+use common::{TestDaemon, restamp_transcript, write};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use terrarium_core::{AgentId, HarnessId};
@@ -574,6 +574,12 @@ async fn holds_end_at_their_reset_time() {
 
 const SESSION: &str = "/../adapters/claude/tests/fixtures/session.jsonl";
 
+/// The Claude session fixture, re-stamped to now (see `restamp_transcript`).
+fn session_now() -> String {
+    let path = format!("{}{SESSION}", env!("CARGO_MANIFEST_DIR"));
+    restamp_transcript(&std::fs::read_to_string(path).unwrap())
+}
+
 #[tokio::test]
 async fn collector_tails_a_growing_transcript() {
     let env = boot(
@@ -601,7 +607,7 @@ async fn collector_tails_a_growing_transcript() {
     let home = &env.homes[&HarnessId::Claude];
     let file = home.join("projects/-home-agent-work/s1.jsonl");
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-    let text = std::fs::read_to_string(format!("{}{SESSION}", env!("CARGO_MANIFEST_DIR"))).unwrap();
+    let text = session_now();
     let lines: Vec<&str> = text.lines().collect();
     let cut = lines
         .iter()
@@ -729,7 +735,7 @@ async fn budgets_hold_a_project() {
     td.wait_status(&id, "idle").await;
     let file = env.homes[&HarnessId::Claude].join("projects/-home-agent-work/s.jsonl");
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-    std::fs::copy(format!("{}{SESSION}", env!("CARGO_MANIFEST_DIR")), &file).unwrap();
+    std::fs::write(&file, session_now()).unwrap();
     emit(
         td,
         &a,
