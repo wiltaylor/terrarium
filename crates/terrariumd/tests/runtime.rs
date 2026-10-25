@@ -32,6 +32,8 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 const WAIT: Duration = Duration::from_secs(15);
+/// The lead nudge rate limit in these tests.
+const LEAD_NUDGE: Duration = Duration::from_secs(2);
 
 fn fake_tui() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../terrarium-runner/tests/fake_tui/fake_tui.py")
@@ -357,6 +359,7 @@ fn supervisor(root: &Path, adapter: Arc<FakeAdapter>) -> RunnerSupervisor {
         submit_timeout: Duration::from_secs(3),
         ..RunnerTuning::default()
     };
+    cfg.lead_nudge_interval = LEAD_NUDGE;
     RunnerSupervisor::new(cfg)
 }
 
@@ -736,6 +739,371 @@ async fn mail_and_cards_push_a_pointer() {
         .filter(|x| x["data"]["prompt"].as_str().unwrap_or("").contains(&t2))
         .count();
     assert_eq!(n, 1, "one pointer for both messages: {starts:#?}");
+}
+
+/// A local repo under the repos dir is bound read-write into the sandbox
+/// of each agent of its project, at the path of its URL. The agents of
+/// another project do not get it, and a file URL outside the repos dir is
+/// never bound. The launch also gives git an identity.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn local_repos_bind_into_the_sandbox_of_their_project_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let repos = dir.path().join("repos");
+    let outside = dir.path().join("outside");
+    for d in [
+        repos.join("app.git"),
+        repos.join("lib.git"),
+        outside.join("x.git"),
+    ] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let adapter = Arc::new(FakeAdapter::default());
+    let mut sup = supervisor(dir.path(), adapter.clone());
+    // `supervisor` makes a sandbox-mode `none` config; this test needs the
+    // bwrap argv, and starts no harness.
+    let mut cfg = sup.config().clone();
+    cfg.sandbox = SandboxConfig {
+        bwrap: PathBuf::from("/usr/bin/bwrap"),
+        repos_dir: repos.clone(),
+        ..SandboxConfig::default()
+    };
+    sup = RunnerSupervisor::new(cfg);
+    let mut td = Td {
+        _guard: RunnerProcessGuard::new(dir.path().join("run")),
+        socket: dir.path().join("api.sock"),
+        sup: Arc::new(sup),
+        dir,
+        adapter,
+        daemon: None,
+    };
+    td.boot(true).await;
+    let w = td.agent("demo", "w", json!({})).await;
+    let x = td.agent("other", "x", json!({})).await;
+    let url = |p: PathBuf| format!("file://{}", p.display());
+    for (project, u) in [
+        ("demo", url(repos.join("app.git"))),
+        ("demo", url(outside.join("x.git"))),
+        ("other", url(repos.join("lib.git"))),
+    ] {
+        td.post(
+            &format!("/api/projects/{project}/repos"),
+            Some(json!({"url": u})),
+        )
+        .await;
+    }
+    let state = td.daemon.as_ref().unwrap().state.clone();
+    let real = std::fs::canonicalize(&repos).unwrap();
+    for (id, mine, theirs) in [(&w, "app.git", "lib.git"), (&x, "lib.git", "app.git")] {
+        let key = id.clone();
+        let agent = state
+            .db
+            .read(move |c| terrariumd::store::agents::get(c, &key))
+            .await
+            .unwrap()
+            .agent;
+        let spec = td.sup.launch_spec(&agent, None).await.unwrap();
+        let a = &spec.args;
+        let bind = |name: &str| {
+            a.windows(3).any(|w| {
+                w[0] == "--bind"
+                    && w[1] == real.join(name).display().to_string()
+                    && w[2] == repos.join(name).display().to_string()
+            })
+        };
+        assert!(bind(mine), "{} has no bind of {mine}: {a:?}", agent.name);
+        assert!(
+            !bind(theirs),
+            "{} has a bind of {theirs}: {a:?}",
+            agent.name
+        );
+        let line = a.join(" ");
+        assert!(!line.contains(&outside.display().to_string()), "{line}");
+        assert_eq!(spec.env["GIT_AUTHOR_NAME"], agent.name);
+        assert_eq!(
+            spec.env["GIT_COMMITTER_EMAIL"],
+            format!("{}.{}@terrarium.invalid", agent.name, agent.project)
+        );
+    }
+}
+
+/// One API call through an agent's runner socket (the RPC tunnel).
+async fn tunnel(sock: &Path, method: &str, path: &str, body: Value) -> (u64, Value) {
+    let mut params = json!({"method": method, "path": path});
+    if let Some((p, q)) = path.split_once('?') {
+        params["path"] = p.into();
+        let (k, v) = q.split_once('=').unwrap();
+        params["query"] = json!({ k: v });
+    }
+    if !body.is_null() {
+        params["body"] = body;
+    }
+    let r = rpc(sock, "http", params).await;
+    (
+        r["result"]["status"].as_u64().unwrap_or(0),
+        r["result"]["body"].clone(),
+    )
+}
+
+/// The API calls of the leader/worker flow, through the RPC tunnel, as the
+/// CLI makes them (`leader_worker_flow_commands` in the CLI tests). A
+/// `project_admin` makes, starts, stops, and removes a worker of its own
+/// project, and assigns it a card. A `sysadmin` makes a project, attaches
+/// a local repo, and makes and starts the project's lead.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn lead_and_sysadmin_manage_agents_through_the_tunnel() {
+    let td = Td::start().await;
+    let prompts = td.dir.path().join("prompts");
+    std::fs::create_dir_all(&prompts).unwrap();
+    let repo_prompts = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../prompts");
+    for name in ["default", "project-lead", "system-lead"] {
+        std::fs::copy(
+            repo_prompts.join(format!("{name}.md")),
+            prompts.join(format!("{name}.md")),
+        )
+        .unwrap();
+    }
+    let lead = td
+        .agent("demo", "lead", json!({"roles": ["project_admin"]}))
+        .await;
+    let root = td
+        .agent("ops", "root", json!({"roles": ["sysadmin"]}))
+        .await;
+    for id in [&lead, &root] {
+        td.post(&format!("/api/agents/{id}/start"), None).await;
+        td.wait_status(id, "idle").await;
+    }
+    let card = td
+        .post(
+            "/api/projects/demo/cards",
+            Some(json!({"title": "T", "column": "ready"})),
+        )
+        .await;
+    let card = card["id"].as_str().unwrap().to_owned();
+    let ls = td.runner_socket(&lead);
+    let call = |m: &'static str, p: String, b: Value| {
+        let s = ls.clone();
+        async move { tunnel(&s, m, &p, b).await }
+    };
+
+    // Project lead: a worker in its own project.
+    let (s, b) = call(
+        "POST",
+        "/api/agents".into(),
+        json!({"name": "w-1", "project": "demo", "harness": "claude",
+               "model": "m", "prompt": "default"}),
+    )
+    .await;
+    assert_eq!(s, 201, "{b}");
+    let w = b["id"].as_str().unwrap().to_owned();
+    let (s, b) = call(
+        "POST",
+        format!("/api/cards/{card}/assign"),
+        json!({"assignee": "w-1"}),
+    )
+    .await;
+    assert_eq!((s, b["assignee"].as_str()), (200, Some(w.as_str())), "{b}");
+    let (s, b) = call("POST", "/api/agents/w-1/start".into(), Value::Null).await;
+    assert!((200..300).contains(&s), "{s} {b}");
+    td.wait_status(&w, "idle").await;
+    let (s, b) = call("POST", "/api/agents/w-1/stop".into(), Value::Null).await;
+    assert!((200..300).contains(&s), "{s} {b}");
+    td.wait_status(&w, "stopped").await;
+    let (s, b) = call("DELETE", "/api/agents/w-1?confirm=true".into(), Value::Null).await;
+    assert_eq!(s, 204, "{b}");
+    // Not in another project, and no project of its own.
+    let (s, _) = call(
+        "POST",
+        "/api/agents".into(),
+        json!({"name": "w-2", "project": "ops", "harness": "claude"}),
+    )
+    .await;
+    assert_eq!(s, 403);
+    let (s, _) = call("POST", "/api/projects".into(), json!({"name": "mine"})).await;
+    assert_eq!(s, 403);
+
+    // System lead: a project, its local repo, and its lead.
+    let rs = td.runner_socket(&root);
+    let (s, b) = tunnel(
+        &rs,
+        "POST",
+        "/api/projects",
+        json!({"name": "shop", "card_prefix": "SHP"}),
+    )
+    .await;
+    assert_eq!(s, 201, "{b}");
+    let (s, b) = tunnel(
+        &rs,
+        "POST",
+        "/api/projects/shop/repos",
+        json!({"url": "file:///repos/shop.git", "name": "app", "default_branch": "main"}),
+    )
+    .await;
+    assert_eq!(s, 201, "{b}");
+    let (s, b) = tunnel(
+        &rs,
+        "POST",
+        "/api/agents",
+        json!({"name": "lead", "project": "shop", "harness": "claude", "model": "m",
+               "prompt": "project-lead", "roles": ["project_admin"]}),
+    )
+    .await;
+    assert_eq!(s, 201, "{b}");
+    assert_eq!(b["roles"], json!(["project_admin"]));
+    let shop_lead = b["id"].as_str().unwrap().to_owned();
+    let (s, b) = tunnel(&rs, "POST", "/api/agents/shop%2Flead/start", Value::Null).await;
+    assert!((200..300).contains(&s), "{s} {b}");
+    td.wait_status(&shop_lead, "idle").await;
+    let prompt = std::fs::read_to_string(
+        td.dir
+            .path()
+            .join("state/agents")
+            .join(&shop_lead)
+            .join("harness/prompt.md"),
+    )
+    .unwrap();
+    assert!(
+        prompt.contains("ops/leader-log"),
+        "the project-lead template"
+    );
+}
+
+/// The prompts that the push path typed into an agent.
+async fn prompts(td: &Td, id: &str) -> Vec<String> {
+    td.events(id, "turn_start")
+        .await
+        .iter()
+        .map(|e| e["data"]["prompt"].as_str().unwrap_or("").to_owned())
+        .collect()
+}
+
+/// Lead nudges: a card with no assignee in `ready`, and a move to `review`
+/// or `blocked`, type a pointer into each idle `project_admin` of the
+/// project. The agent that made the change, the other members, and the
+/// leads of other projects get none. Changes inside the rate limit go out
+/// as one pointer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn board_changes_nudge_the_project_leads() {
+    let td = Td::start().await;
+    let lead = td
+        .agent("demo", "lead", json!({"roles": ["project_admin"]}))
+        .await;
+    let bob = td.agent("demo", "bob", json!({})).await;
+    let olead = td
+        .agent("other", "olead", json!({"roles": ["project_admin"]}))
+        .await;
+    for id in [&lead, &bob, &olead] {
+        td.post(&format!("/api/agents/{id}/start"), None).await;
+    }
+    for id in [&lead, &bob, &olead] {
+        td.wait_status(id, "idle").await;
+    }
+
+    // A new card in ready, from the operator: one pointer at once.
+    let c1 = td
+        .post(
+            "/api/projects/demo/cards",
+            Some(json!({"title": "Ship it\nnow", "column": "ready"})),
+        )
+        .await;
+    let c1 = c1["id"].as_str().unwrap().to_owned();
+    let starts = td.wait_events(&lead, "turn_start", |e| !e.is_empty()).await;
+    assert_eq!(
+        starts[0]["data"]["prompt"],
+        format!(
+            "New card {c1} in ready: Ship it…. Run `terrarium card ls --unassigned --column ready`."
+        )
+        .as_str()
+    );
+
+    // Inside the rate limit: bob moves his card to review, and the
+    // operator blocks another card. One pointer carries both, at the end
+    // of the interval.
+    let as_bob = |path: String, body: Value| {
+        let td = &td;
+        async move {
+            let (s, b) = td
+                .req(Method::POST, &path, Some(body), Some("demo/bob"))
+                .await;
+            assert!((200..300).contains(&s), "POST {path}: {s} {b}");
+        }
+    };
+    as_bob(format!("/api/cards/{c1}/claim"), json!({})).await;
+    as_bob(
+        format!("/api/cards/{c1}/move"),
+        json!({"column": "in_progress"}),
+    )
+    .await;
+    as_bob(format!("/api/cards/{c1}/move"), json!({"column": "review"})).await;
+    let c2 = td
+        .post("/api/projects/demo/cards", Some(json!({"title": "Two"})))
+        .await;
+    let c2 = c2["id"].as_str().unwrap().to_owned();
+    td.post(
+        &format!("/api/cards/{c2}/move"),
+        Some(json!({"column": "blocked", "comment": "needs the API key"})),
+    )
+    .await;
+    let batch = Instant::now();
+    let starts = td.wait_events(&lead, "turn_start", |e| e.len() >= 2).await;
+    assert!(
+        batch.elapsed() > LEAD_NUDGE / 2,
+        "the batch waited for the interval"
+    );
+    assert_eq!(
+        starts[1]["data"]["prompt"],
+        format!(
+            "{c1} moved to review by demo/bob. Run `terrarium card show {c1}`.\n\
+             {c2} moved to blocked by operator: needs the API key. Run `terrarium card show {c2}`."
+        )
+        .as_str()
+    );
+    td.wait_status(&lead, "idle").await;
+
+    // The lead's own change, a card in ready with an assignee, and a move
+    // to another column nudge nobody.
+    let (s, b) = td
+        .req(
+            Method::POST,
+            &format!("/api/cards/{c2}/move"),
+            Some(json!({"column": "review"})),
+            Some("demo/lead"),
+        )
+        .await;
+    assert_eq!(s, 200, "{b}");
+    let c3 = td
+        .post(
+            "/api/projects/demo/cards",
+            Some(json!({"title": "Three", "assignee": "demo/bob"})),
+        )
+        .await;
+    let c3 = c3["id"].as_str().unwrap().to_owned();
+    td.post(
+        &format!("/api/cards/{c3}/move"),
+        Some(json!({"column": "ready"})),
+    )
+    .await;
+    td.post(
+        &format!("/api/cards/{c3}/move"),
+        Some(json!({"column": "in_progress"})),
+    )
+    .await;
+    tokio::time::sleep(LEAD_NUDGE + Duration::from_millis(700)).await;
+    assert_eq!(
+        prompts(&td, &lead).await.len(),
+        2,
+        "{:#?}",
+        prompts(&td, &lead).await
+    );
+    // Bob (a member) and the lead of another project got no nudge. Bob
+    // got the pointer of the assignment only.
+    let bob_prompts = prompts(&td, &bob).await;
+    assert!(
+        bob_prompts
+            .iter()
+            .all(|p| p.contains("was assigned to you")),
+        "{bob_prompts:#?}"
+    );
+    assert!(prompts(&td, &olead).await.is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

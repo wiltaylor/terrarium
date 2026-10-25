@@ -2645,3 +2645,184 @@ async fn mail_read_marks_the_readers_mail_by_default() {
     .await;
     assert!(Cli::try_parse_from(["terrarium", "mail", "read", "--mark", "--no-mark"]).is_err());
 }
+
+/// The commands of the leader/worker flow in `prompts/project-lead.md` and
+/// `prompts/system-lead.md`, as an agent types them: the exact requests.
+/// The daemon side of the same calls is `tests/runtime.rs`,
+/// `lead_and_sysadmin_manage_agents_through_the_tunnel`.
+#[tokio::test]
+async fn leader_worker_flow_commands() {
+    // Project lead: create the worker, give it the repo and the card,
+    // start it; at the end stop and remove it.
+    ok(
+        true,
+        &[
+            "admin",
+            "agent",
+            "new",
+            "w-dem-3",
+            "--harness",
+            "claude",
+            "--model",
+            "sonnet",
+            "--project",
+            "terra",
+            "--prompt",
+            "default",
+        ],
+        vec![(201, json!({}))],
+        vec![(
+            Post,
+            "/api/agents",
+            vec![],
+            Some(
+                json!({"name": "w-dem-3", "project": "terra", "harness": "claude",
+                        "model": "sonnet", "prompt": "default"}),
+            ),
+        )],
+    )
+    .await;
+    ok(
+        true,
+        &["repo", "checkout", "app", "--agent", "w-dem-3"],
+        vec![
+            (200, json!([{"id": "R1", "name": "app"}])),
+            (200, json!({"action": "cloned"})),
+        ],
+        vec![
+            req(Get, "/api/projects/terra/repos"),
+            (
+                Post,
+                "/api/repos/R1/checkout",
+                vec![],
+                Some(json!({"agent": "w-dem-3"})),
+            ),
+        ],
+    )
+    .await;
+    ok(
+        true,
+        &["card", "assign", "DEM-3", "w-dem-3"],
+        vec![(200, json!({"id": "DEM-3"}))],
+        vec![(
+            Post,
+            "/api/cards/DEM-3/assign",
+            vec![],
+            Some(json!({"assignee": "w-dem-3"})),
+        )],
+    )
+    .await;
+    for verb in ["start", "stop"] {
+        let path: &'static str = if verb == "start" {
+            "/api/agents/w-dem-3/start"
+        } else {
+            "/api/agents/w-dem-3/stop"
+        };
+        ok(
+            true,
+            &["admin", "agent", verb, "w-dem-3"],
+            vec![(202, json!({}))],
+            vec![req(Post, path)],
+        )
+        .await;
+    }
+    ok(
+        true,
+        &["card", "move", "DEM-3", "done", "-m", "merged"],
+        vec![(200, json!({"id": "DEM-3"}))],
+        vec![(
+            Post,
+            "/api/cards/DEM-3/move",
+            vec![],
+            Some(json!({"column": "done", "comment": "merged"})),
+        )],
+    )
+    .await;
+    ok(
+        true,
+        &["admin", "agent", "rm", "w-dem-3", "--confirm"],
+        vec![(204, Value::Null)],
+        vec![(
+            Delete,
+            "/api/agents/w-dem-3",
+            vec![("confirm", "true")],
+            None,
+        )],
+    )
+    .await;
+
+    // System lead: the project, its repo, and its lead.
+    ok(
+        true,
+        &["admin", "project", "new", "shop", "--prefix", "SHP"],
+        vec![(201, json!({"name": "shop"}))],
+        vec![(
+            Post,
+            "/api/projects",
+            vec![],
+            Some(json!({"name": "shop", "card_prefix": "SHP"})),
+        )],
+    )
+    .await;
+    ok(
+        true,
+        &[
+            "admin",
+            "project",
+            "repo-add",
+            "file:///repos/shop.git",
+            "--project",
+            "shop",
+            "--name",
+            "app",
+            "--branch",
+            "main",
+        ],
+        vec![(201, json!({"name": "app", "project": "shop"}))],
+        vec![(
+            Post,
+            "/api/projects/shop/repos",
+            vec![],
+            Some(json!({"url": "file:///repos/shop.git", "name": "app", "default_branch": "main"})),
+        )],
+    )
+    .await;
+    ok(
+        true,
+        &[
+            "admin",
+            "agent",
+            "new",
+            "lead",
+            "--project",
+            "shop",
+            "--harness",
+            "claude",
+            "--model",
+            "sonnet",
+            "--prompt",
+            "project-lead",
+            "--role",
+            "project_admin",
+        ],
+        vec![(201, json!({}))],
+        vec![(
+            Post,
+            "/api/agents",
+            vec![],
+            Some(
+                json!({"name": "lead", "project": "shop", "harness": "claude",
+                        "model": "sonnet", "prompt": "project-lead",
+                        "roles": ["project_admin"]}),
+            ),
+        )],
+    )
+    .await;
+    ok(
+        true,
+        &["admin", "agent", "start", "shop/lead"],
+        vec![(202, json!({}))],
+        vec![req(Post, "/api/agents/shop%2Flead/start")],
+    )
+    .await;
+}

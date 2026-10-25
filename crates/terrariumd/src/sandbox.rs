@@ -15,6 +15,7 @@
 //! | each `FileOverlay` target | the per-agent file (also a part of `harness/` that the harness writes, such as pi's `sessions/`). The session files of Claude Code (`projects/<cwd>/`), Codex (`sessions/`), and Copilot (`session-state/`) are such overlays, so no agent sees the transcripts of another agent | rw or ro |
 //! | `/run/terrarium/agent.sock` | `<run>/agents/<ulid>.sock` | rw |
 //! | `/opt/terrarium/bin/terrarium` | the `terrarium` CLI | ro |
+//! | each local repo of the agent's project under `TERRARIUM_REPOS_DIR` (`/repos`) | the same path | rw |
 //!
 //! Everything else is hidden: other agents, the database, the daemon socket,
 //! the rest of the host, and `<state>/agents/<ulid>/private`, which holds
@@ -40,6 +41,9 @@ pub const SANDBOX_SOCKET: &str = "/run/terrarium/agent.sock";
 pub const SANDBOX_BIN_DIR: &str = "/opt/terrarium/bin";
 /// `$HOME` inside the sandbox.
 pub const SANDBOX_HOME: &str = "/home/agent";
+/// The default of `TERRARIUM_REPOS_DIR`: the local repos that the sandbox
+/// binds read-write into the agents of their project ([`local_repo_binds`]).
+pub const DEFAULT_REPOS_DIR: &str = "/repos";
 /// The `PATH` inside the sandbox, after [`SANDBOX_BIN_DIR`].
 const SANDBOX_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
 
@@ -133,6 +137,11 @@ pub struct SandboxConfig {
     /// sandbox shares with its parent. Here each sandbox has its own PTY,
     /// so an injection can only reach the agent's own input.
     pub new_session: bool,
+    /// `TERRARIUM_REPOS_DIR`. A project repo whose URL is a local path
+    /// under this dir is bound read-write, at the same path, into each agent
+    /// of that project, so `git push` works with no credential. Nothing
+    /// outside this dir is bound this way.
+    pub repos_dir: PathBuf,
 }
 
 impl Default for SandboxConfig {
@@ -144,6 +153,7 @@ impl Default for SandboxConfig {
             cli: None,
             ro_paths: Vec::new(),
             new_session: false,
+            repos_dir: PathBuf::from(DEFAULT_REPOS_DIR),
         }
     }
 }
@@ -172,6 +182,64 @@ pub struct AgentLayout {
     pub socket: PathBuf,
     pub homes: Vec<HarnessHome>,
     pub overlays: Vec<FileOverlay>,
+    /// The local repos of the agent's project, bound read-write
+    /// ([`local_repo_binds`]).
+    pub repos: Vec<RepoBind>,
+}
+
+/// One local repo bind: the real directory on the host, and the path of
+/// the repo URL, which is where the agent sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoBind {
+    pub source: PathBuf,
+    pub target: PathBuf,
+}
+
+/// The path of a local repo URL (`file:///repos/x.git` or `/repos/x.git`)
+/// when it is under `repos_dir`, else `None`. The check is lexical: a path
+/// with `.` or `..`, a `file://host/` URL, or `repos_dir` itself is `None`.
+pub fn local_repo_path(url: &str, repos_dir: &Path) -> Option<PathBuf> {
+    let raw = match url.strip_prefix("file://") {
+        Some(rest) if rest.starts_with('/') => rest,
+        Some(_) => return None,
+        None if url.starts_with('/') => url,
+        None => return None,
+    };
+    let path = Path::new(raw);
+    let plain = !raw.split('/').any(|seg| seg == "." || seg == "..");
+    if !plain || !repos_dir.is_absolute() || path == repos_dir || !path.starts_with(repos_dir) {
+        return None;
+    }
+    Some(path.to_path_buf())
+}
+
+/// The binds for the repo URLs of one project. A URL makes a bind when its
+/// path is under `repos_dir` ([`local_repo_path`]), and its real path (after
+/// symlinks) is a directory that is still under the real `repos_dir`. Each
+/// target is bound once.
+pub fn local_repo_binds<'a>(
+    urls: impl IntoIterator<Item = &'a str>,
+    repos_dir: &Path,
+) -> Vec<RepoBind> {
+    let Ok(real_dir) = std::fs::canonicalize(repos_dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<RepoBind> = Vec::new();
+    for url in urls {
+        let Some(target) = local_repo_path(url, repos_dir) else {
+            continue;
+        };
+        let Ok(source) = std::fs::canonicalize(&target) else {
+            continue;
+        };
+        if source == real_dir || !source.starts_with(&real_dir) || !source.is_dir() {
+            continue;
+        }
+        if !out.iter().any(|b| b.target == target) {
+            out.push(RepoBind { source, target });
+        }
+    }
+    out
 }
 
 /// The home of `harness` relative to `$HOME`, as the harness expects it.
@@ -350,6 +418,9 @@ impl SandboxConfig {
         for o in &layout.overlays {
             let flag = if o.writable { "--bind" } else { "--ro-bind" };
             push3(&mut args, flag, &o.source, &o.target);
+        }
+        for r in &layout.repos {
+            push3(&mut args, "--bind", &r.source, &r.target);
         }
         push3(
             &mut args,
@@ -566,6 +637,7 @@ mod tests {
                     writable: true,
                 },
             ],
+            repos: Vec::new(),
         }
     }
 
@@ -679,6 +751,86 @@ TERRARIUM_AGENT=01K8AGENT0000000000000000A TERRARIUM_SOCKET=/run/terrarium/agent
             .position(|x| x == &l.harness_dir.display().to_string())
             .unwrap();
         assert_eq!(a[i - 1], "--ro-bind");
+    }
+
+    /// The bind rule of the local repos: only a path under the repos dir
+    /// is bound, read-write, at the path of its URL. A file URL outside the
+    /// dir, a `..` escape, a symlink out of the dir, the dir itself, and a
+    /// missing repo are not bound.
+    #[test]
+    fn local_repos_bind_only_under_the_repos_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("repos");
+        let outside = tmp.path().join("elsewhere");
+        for d in [
+            dir.join("app.git"),
+            dir.join("team/lib.git"),
+            outside.join("x.git"),
+        ] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::os::unix::fs::symlink(outside.join("x.git"), dir.join("escape.git")).unwrap();
+        let d = dir.display();
+        let o = outside.display();
+        let urls = [
+            format!("file://{d}/app.git"),
+            format!("{d}/team/lib.git"),
+            format!("file://{d}/app.git"),
+            format!("file://{o}/x.git"),
+            format!("{o}/x.git"),
+            format!("file://{d}/../elsewhere/x.git"),
+            format!("file://{d}/escape.git"),
+            format!("file://{d}"),
+            format!("file://{d}/missing.git"),
+            format!("file://host{d}/app.git"),
+            format!("https://example.com{d}/app.git"),
+            "repos/app.git".to_owned(),
+        ];
+        let binds = local_repo_binds(urls.iter().map(String::as_str), &dir);
+        let real = std::fs::canonicalize(&dir).unwrap();
+        assert_eq!(
+            binds,
+            vec![
+                RepoBind {
+                    source: real.join("app.git"),
+                    target: dir.join("app.git"),
+                },
+                RepoBind {
+                    source: real.join("team/lib.git"),
+                    target: dir.join("team/lib.git"),
+                },
+            ]
+        );
+        assert_eq!(
+            local_repo_path("file:///repos/app.git", Path::new("/repos")),
+            Some(PathBuf::from("/repos/app.git"))
+        );
+        for url in [
+            "file:///srv/app.git",
+            "/repos2/app.git",
+            "file:///repos/./app.git",
+            "file:///repos/a/../../etc",
+        ] {
+            assert_eq!(local_repo_path(url, Path::new("/repos")), None, "{url}");
+        }
+        // No repos dir: no binds.
+        assert!(
+            local_repo_binds(urls.iter().map(String::as_str), &tmp.path().join("none")).is_empty()
+        );
+
+        // The binds go into the argv read-write, at the URL path.
+        let mut l = layout();
+        l.repos = binds;
+        let resolve = |p: &str| (p == "claude").then(|| PathBuf::from("/usr/bin/claude"));
+        let wrapped = config().wrap_with(spec(), &l, BTreeMap::new(), &|_| None, &resolve);
+        let line = command_line(&wrapped);
+        let want = format!(
+            "--bind {} {}",
+            real.join("app.git").display(),
+            dir.join("app.git").display()
+        );
+        assert!(line.contains(&want), "{line}");
+        assert!(!line.contains(&o.to_string()), "{line}");
     }
 
     #[test]

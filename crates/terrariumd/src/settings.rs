@@ -87,6 +87,12 @@ pub struct Settings {
     #[arg(long, env = "TERRARIUM_SANDBOX", default_value = "bwrap")]
     pub sandbox: SandboxMode,
 
+    /// The local repos. A project repo whose URL is a path under this dir
+    /// (`file:///repos/<name>.git`) is bound read-write into the sandbox of
+    /// each agent of that project, at the same path.
+    #[arg(long, env = "TERRARIUM_REPOS_DIR", default_value = crate::sandbox::DEFAULT_REPOS_DIR)]
+    pub repos_dir: PathBuf,
+
     /// Pass `--new-session` to bwrap. Off by default, because the harness
     /// then misses terminal resizes (docs/compat.md).
     #[arg(long, env = "TERRARIUM_SANDBOX_NEW_SESSION")]

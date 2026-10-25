@@ -91,6 +91,12 @@ pub fn attach_repo(t: &mut Tx<'_>, project: &str, r: &NewRepo, source: &str) -> 
     if r.url.trim().is_empty() {
         return Err(ApiError::invalid("the repo needs a url"));
     }
+    if crate::git::is_local_url(&r.url)
+        && let Some(id) = t.actor.strip_prefix("agent:")
+    {
+        let roles = crate::store::agents::get(t, id)?.agent.roles;
+        crate::policy::attach_local_repo(&roles)?;
+    }
     let name = r.name.clone().unwrap_or_else(|| name_from_url(&r.url));
     check_name("repo", &name)?;
     if let Some(path) = &r.path

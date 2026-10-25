@@ -434,6 +434,7 @@ fn card_event(t: &mut Tx<'_>, card: &CardRow, change: &str, mut extra: Value) ->
         map.insert("change".into(), json!(change));
         map.insert("title".into(), json!(card.title));
         map.insert("column".into(), json!(card.column));
+        map.insert("actor_name".into(), json!(actor_name));
     }
     let mut draft = EventDraft::new("card", summary, extra)
         .project(card.project.clone())
@@ -741,7 +742,7 @@ fn apply_move(
         t,
         &moved,
         "moved",
-        json!({"from": card.column, "to": to.name, "comment": comment}),
+        json!({"from": card.column, "to": to.name, "comment": comment, "assignee": moved.assignee}),
     )?;
     if card.column == DONE {
         t.audit(

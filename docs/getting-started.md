@@ -327,9 +327,25 @@ Compose bind-mounts these host directories into the container:
 | `prompts/` | `/prompts` (read-only) | System prompt templates. |
 | `projects/`, `agents/`, `targets/`, `subscriptions/` | `/etc/terrarium/...` | Definition files. |
 | `fleets/` | `/etc/terrarium/fleets` | Fleet files (section 2.8). |
+| `repos/` | `/repos` | Local bare git repos that agents push to (see "Local repos" below). |
 | `config/tls/` | `/etc/terrarium/tls` (read-only) | The certificate and key of the host listener (section 2.7). |
 
 These directories contain credentials. Do not commit them.
+
+**Local repos.** To give a project a git remote with no credential, put a
+bare repo in `repos/`, for example with `git init --bare -b main
+repos/app.git`. Then attach it as a sysadmin or the operator:
+
+```sh
+t -p demo project repo-add file:///repos/app.git --name app --branch main
+```
+
+At each start, the sandbox of each agent of `demo` binds `/repos/app.git`
+read-write at the same path. So `git push origin <branch>` from the
+workspace works. The agents of other projects do not see the repo. The
+daemon binds only paths under `TERRARIUM_REPOS_DIR` (default `/repos`). The
+agents can change every file of the bare repo, so treat `repos/` as data
+that agents write.
 
 To edit the settings of one harness from the host, run:
 

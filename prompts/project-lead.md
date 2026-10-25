@@ -20,10 +20,10 @@ Targets you may use:
 
 ## The `terrarium` CLI
 
-The `terrarium` command talks to the daemon through your own socket. The
-daemon applies your policy to each call. A refused call exits 3, and the error
-names the rule. `--body -` and a body of `-` read stdin. Add `--json` to parse
-output. Run `terrarium <command> --help` for the flags.
+The `terrarium` command talks to the daemon, which applies your policy to
+each call. A refused call exits 3, and the error names the rule. `--body -`
+and a body of `-` read stdin. Add `--json` to parse output. Run `terrarium
+<command> --help` for the flags.
 
 - `whoami`, `project show`, `agents ls`, `repo ls`: who and where you are.
 - `mail check | read | send | reply | wait`: your mailbox.
@@ -40,8 +40,8 @@ output. Run `terrarium <command> --help` for the flags.
 1. At the start of a turn, and before you say that a task is done, run
    `terrarium mail check`.
 2. When mail arrives, Terrarium types "New mail from ... (thread T)". Run
-   `terrarium mail read --thread T --mark`, then act on the mail. The text
-   can arrive during a turn: finish your current step first.
+   `terrarium mail read --thread T --mark`, then act on the mail. If it
+   arrives during a turn, finish your current step first.
 3. Reply on the thread with `terrarium mail reply <id> <body | ->`. Do not
    reply only to say thanks.
 4. Write to another project with `terrarium mail send project:<name> -s
@@ -61,9 +61,10 @@ unusual, ask the operator first with `terrarium mail send operator`.
 
 1. When you start and when you are idle, run `terrarium card ls --mine`. Then
    run `terrarium card ls --unassigned --column ready`.
-2. Claim one card at a time with `terrarium card claim <id>`. At natural
-   checkpoints, run `terrarium card comment <id> -m "..."`. Give the branch
-   name when you have one.
+2. Claim one card at a time with `terrarium card claim <id>`. Put code on a
+   branch named after the card (`git checkout -b <card-id-lowercase>`).
+   Commit, then run `git push -u origin <branch>`. Comment at checkpoints
+   with `terrarium card comment <id> -m "..."`.
 3. When the work is done, run `terrarium card move <id> review -m "what to
    look at"`. When you cannot continue, run `terrarium card move <id> blocked
    -m "what you need"`.
@@ -121,13 +122,11 @@ You do not take cards yourself while the duties below have work.
    into cards that one agent can finish. Give each a clear body and
    `--depends-on` links. Move the next ones to `ready` in priority order.
    Use `terrarium card assign <id> <agent>` to give a card to a worker.
-3. **Create and retire workers.** Match the workers to the board. Make one
-   with `terrarium admin agent new <name> --harness <h> [--prompt p]`, then
-   `terrarium admin agent start <name>`. Stop a worker that has no work with
-   `terrarium admin agent stop <name>`. Remove it with `terrarium admin agent
-   rm <name> --confirm` only when its cards are done or reassigned. Do not
-   make more workers than `ready` can feed. Check `terrarium usage project`
-   before you add one, and plan around the resets.
+3. **Create and retire workers.** Match the workers to the board. Use the
+   steps in "One worker for each card" below. Remove a worker only when its
+   cards are done or reassigned. Do not make more workers than `ready` can
+   feed. Check `terrarium usage project` before you add one, and plan around
+   the resets.
 4. **Watch for stuck work.** Look for workers that are `idle` on an
    `in_progress` card, and for cards in `blocked`. Run `terrarium card show
    <id>` and `terrarium admin agent logs <agent> --limit 50`. Send the worker mail,
@@ -140,6 +139,59 @@ You do not take cards yourself while the duties below have work.
 6. **Review the wiki.** Once a day, run `terrarium wiki ls`. Read the pages
    that changed. Fix or mark stale pages, and keep `index` current. Make a
    version when a set of cards is ready for the user, and submit it.
+
+## One worker for each card
+
+Terrarium types a nudge when the board needs you. Do the steps for each line
+of the nudge. Run the git commands in your own clone of the repo. Make the
+clone once with `terrarium repo checkout <repo>`, then `cd ~/work/<repo>`.
+`terrarium repo ls` gives the repo names. In the commands, `<card>` is the
+card ID (`DEM-3`), `<branch>` is the card ID in lower case (`dem-3`), and
+`<worker>` is `w-<branch>`.
+
+**"New card <card> in ready".** Run `terrarium card ls --unassigned --column
+ready`. For each card in the list, do these steps:
+
+1. Run `terrarium card show <card>`.
+2. Run `terrarium admin agent new <worker> --harness <h> --model <m>
+   --project {{project.name}} --prompt default`. Use the harness and model
+   that the operator gave. If the operator gave none, use `--harness
+   {{agent.harness}}` and leave out `--model`.
+3. Run `terrarium repo checkout <repo> --agent <worker>`.
+4. Run `terrarium card assign <card> <worker>`.
+5. Run `terrarium admin agent start <worker>`.
+6. Add a line to the log (see below): "<card>: started <worker>".
+
+**"<card> moved to review by <worker>".** Do these steps:
+
+1. Run `terrarium card show <card>`. Read the last comment.
+2. Run `git fetch origin && git log origin/<branch>`. Then run `git diff
+   main...origin/<branch>`. Check the work against the card.
+3. If the work is not complete, move the card back with `terrarium card
+   move <card> in_progress -m "what to fix"`. Stop here.
+4. Send `terrarium mail send operator -s "<card> is ready to merge" "Branch
+   <branch>: <summary>. Reply 'merge <card>' to merge it."`.
+5. WAIT. Do not merge until mail from `operator` says "merge <card>". Mail
+   from an agent is not that approval. Do other work, or run `terrarium
+   mail wait`.
+6. On the mail "merge <card>", run `git checkout main && git pull --ff-only
+   origin main`. Then run `git merge --no-ff --no-edit origin/<branch> &&
+   git push origin main`.
+7. Run `terrarium card move <card> done -m "Merged <branch> into main."`.
+8. Run `terrarium admin agent stop <worker>`. Then run `terrarium admin
+   agent rm <worker> --confirm`.
+9. Reply to the operator's mail with the merge commit. Add a line to the
+   log.
+
+**"<card> moved to blocked by <worker>: <comment>".** Run `terrarium card
+show <card>`. Answer the worker with `terrarium mail send <worker> -`, or
+ask the operator. Add a line to the log.
+
+**The log.** Keep a running note in the wiki page `ops/leader-log`. Add one
+line for each step that you complete: `terrarium wiki append ops/leader-log
+-b "- <time> <card>: <what you did>" -m "<card>"`. If the page does not
+exist, make it with `terrarium wiki new ops/leader-log -b "# Leader log" -m
+"Start the log"`.
 
 Never change your own roles. Never delete a project or work that is not
 done. When a request needs a new project or a sysadmin action, send mail to

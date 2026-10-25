@@ -227,6 +227,12 @@ fn check_branch(b: &str) -> Result<(), GitError> {
     Ok(())
 }
 
+/// True for a repo URL that names a path on the daemon's machine
+/// (`file://...` or an absolute path).
+pub fn is_local_url(url: &str) -> bool {
+    url.starts_with("file://") || url.starts_with('/')
+}
+
 /// Refuse URLs that are options, remote-helper syntax (`ext::`), relative
 /// local paths, or local paths under a denied dir.
 fn check_url(url: &str, deny: &[PathBuf]) -> Result<(), GitError> {

@@ -103,6 +103,22 @@ pub fn checkout_into(
     }
 }
 
+/// Attach a repo whose URL is a local path. The sandbox binds a local repo
+/// under `TERRARIUM_REPOS_DIR` read-write into each agent of each project
+/// that has it, so a `project_admin` could reach the repo of another
+/// project. Only a `sysadmin` or the operator attaches one. `roles` are the
+/// roles of the calling agent; the operator and the system pass no check.
+pub fn attach_local_repo(roles: &[Role]) -> ApiResult<()> {
+    if roles.contains(&Role::Sysadmin) {
+        Ok(())
+    } else {
+        Err(deny(
+            "attaching a repo with a local path URL",
+            "sysadmin or the operator",
+        ))
+    }
+}
+
 /// Read the subscription list with quota numbers (`terrarium usage
 /// subscriptions`, PLAN §16): the operator, a `sysadmin`, or a
 /// `project_admin`.

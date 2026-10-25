@@ -359,3 +359,101 @@ async fn checkout_refuses_paths_in_the_state_dir() {
     let ws = PathBuf::from(a["workspace"].as_str().unwrap());
     assert!(!ws.join("steal").exists());
 }
+
+/// A local repo under a repos dir (`file:///repos/<name>.git` in Docker):
+/// the daemon clones it on agent create, and a push from the workspace
+/// reaches it with no credential.
+#[tokio::test]
+async fn agent_create_clones_a_file_url_under_the_repos_dir() {
+    let root = tempfile::tempdir().unwrap();
+    let repos = root.path().join("repos");
+    bare_repo(&repos);
+    let origin = repos.join("origin.git");
+    let url = format!("file://{}", origin.display());
+    let td = TestDaemon::with_config(|c| {
+        write(
+            c,
+            "projects/demo.toml",
+            &format!(
+                r#"
+[[repos]]
+name = "app"
+url = "{url}"
+default_branch = "main"
+
+[checkout]
+on_agent_create = ["app"]
+"#
+            ),
+        );
+    })
+    .await;
+    let created = td
+        .post(
+            "/api/agents",
+            json!({"name": "w", "project": "demo", "harness": "claude"}),
+        )
+        .await;
+    let a = created.ok().clone();
+    let checkout = a["checkout"].as_array().unwrap();
+    assert_eq!(checkout[0]["action"], "cloned", "{a}");
+    assert_eq!(checkout[0]["head"], head_of(&origin));
+    let dest = PathBuf::from(a["workspace"].as_str().unwrap()).join("app");
+    assert!(dest.join("a.txt").is_file());
+    // A branch pushed from the workspace lands in the bare repo.
+    sh(
+        &dest,
+        "git checkout -q -b dem-1 && echo two > b.txt && git add b.txt && \
+         git commit -q -m two && git push -q origin dem-1",
+    );
+    let o = Command::new("git")
+        .arg("-C")
+        .arg(&origin)
+        .args(["rev-parse", "--verify", "dem-1"])
+        .output()
+        .unwrap();
+    assert!(o.status.success());
+}
+
+/// The sandbox binds a local repo read-write into each agent of each
+/// project that has it. So a `project_admin` cannot attach a local-path
+/// URL (it could name the repo of another project); a `sysadmin` and the
+/// operator can.
+#[tokio::test]
+async fn only_a_sysadmin_attaches_a_local_repo() {
+    let td = TestDaemon::start().await;
+    td.project("p").await;
+    td.project("ops").await;
+    td.agent("p", "lead", json!({"roles": ["project_admin"]}))
+        .await;
+    td.agent("ops", "root", json!({"roles": ["sysadmin"]}))
+        .await;
+    for url in ["file:///repos/other.git", "/repos/other.git"] {
+        let r = td
+            .post_as("p/lead", "/api/projects/p/repos", json!({"url": url}))
+            .await;
+        r.err(403, "forbidden");
+        assert!(r.body.to_string().contains("sysadmin"), "{}", r.body);
+    }
+    // A remote URL stays a project_admin action.
+    td.post_as(
+        "p/lead",
+        "/api/projects/p/repos",
+        json!({"url": "https://git.example.com/team/hub.git"}),
+    )
+    .await
+    .ok();
+    td.post_as(
+        "ops/root",
+        "/api/projects/p/repos",
+        json!({"url": "file:///repos/app.git", "default_branch": "main"}),
+    )
+    .await
+    .ok();
+    td.post(
+        "/api/projects/p/repos",
+        json!({"url": "file:///repos/lib.git"}),
+    )
+    .await
+    .ok();
+}

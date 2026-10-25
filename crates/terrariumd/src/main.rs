@@ -28,6 +28,7 @@ async fn main() -> anyhow::Result<()> {
         mode: settings.sandbox,
         cli: settings.cli_path(),
         new_session: settings.sandbox_new_session,
+        repos_dir: settings.repos_dir.clone(),
         ..SandboxConfig::default()
     };
     let homes: HashMap<_, _> = settings.harness_homes.iter().cloned().collect();

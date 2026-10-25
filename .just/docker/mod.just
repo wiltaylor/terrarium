@@ -51,10 +51,10 @@ shell: require-docker
 crash-test: up require-uv
 	uv run docker/crash-test.py
 
-# Create config/*, state/, and the definition directories, owned by you
+# Create config/*, state/, repos/, and the definition directories, owned by you
 [group('config')]
 volumes-init:
-	mkdir -p config/claude config/codex config/copilot config/pi state prompts projects agents targets subscriptions fleets config/tls
+	mkdir -p config/claude config/codex config/copilot config/pi state prompts projects agents targets subscriptions fleets repos config/tls
 
 # Open the bind-mounted home of one harness (claude, codex, copilot, pi) in $EDITOR
 [group('config')]

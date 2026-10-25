@@ -18,3 +18,5 @@ __pycache__/
 .venv/
 /fleets/*
 !/fleets/README.md
+# Local bare repos (bind mount at /repos)
+/repos/*

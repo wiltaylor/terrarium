@@ -39,6 +39,11 @@
 //! - A hub listener sees new mail and card assignments. It types the push
 //!   pointer of PLAN §12 and §13 when the agent is idle, else after the next
 //!   turn ends. One pending pointer covers all new items.
+//! - The same listener nudges the leads: a card with no assignee in
+//!   `ready`, or a move to `review` or `blocked`, adds a line to the pointer
+//!   of each `project_admin` agent of the project, except the agent that
+//!   made the change. Per project, one batch goes out in each
+//!   `lead_nudge_interval` (10 s); the changes in between go out together.
 //! - A quota hold ([`Supervisor::hold_turns`]) shows an idle agent as
 //!   `blocked` with the reason and the reset time. Operator turns, push
 //!   pointers, and the recap turn wait. The release types the waiting turns
@@ -188,7 +193,14 @@ pub struct RunnerSupervisorConfig {
     /// `InProcess` unless the caller sets it; the daemon binary sets it
     /// from its settings.
     pub mode: RunnerMode,
+    /// The shortest time between two lead nudges of one project
+    /// ([`DEFAULT_LEAD_NUDGE_INTERVAL`]). The nudges in between go out
+    /// together at the end of it.
+    pub lead_nudge_interval: Duration,
 }
+
+/// The default of [`RunnerSupervisorConfig::lead_nudge_interval`].
+pub const DEFAULT_LEAD_NUDGE_INTERVAL: Duration = Duration::from_secs(10);
 
 impl RunnerSupervisorConfig {
     /// The config with the real adapters: Claude Code, Codex, Copilot CLI,
@@ -211,6 +223,7 @@ impl RunnerSupervisorConfig {
             restart: RestartTuning::default(),
             runner: RunnerTuning::default(),
             mode: RunnerMode::InProcess,
+            lead_nudge_interval: DEFAULT_LEAD_NUDGE_INTERVAL,
         }
     }
 
@@ -377,16 +390,106 @@ struct CardItem {
     change: CardChange,
 }
 
+/// A board change that a project lead acts on (a lead nudge).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LeadChange {
+    /// A card with no assignee came into `ready`.
+    Ready,
+    Review,
+    Blocked,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LeadItem {
+    card: String,
+    change: LeadChange,
+    /// The card title, on one line.
+    title: String,
+    /// Who made the change.
+    by: String,
+    /// The comment of a move to `blocked`, on one line.
+    comment: String,
+}
+
+impl LeadItem {
+    fn line(&self) -> String {
+        let c = &self.card;
+        match self.change {
+            LeadChange::Ready => format!(
+                "New card {c} in ready: {}. Run `terrarium card ls --unassigned --column ready`.",
+                self.title
+            ),
+            LeadChange::Review => format!(
+                "{c} moved to review by {}. Run `terrarium card show {c}`.",
+                self.by
+            ),
+            LeadChange::Blocked => format!(
+                "{c} moved to blocked by {}: {}. Run `terrarium card show {c}`.",
+                self.by, self.comment
+            ),
+        }
+    }
+}
+
+/// The lead nudge of a card event, when the event is one: a card with no
+/// assignee moved into `ready` (also a card made in `ready`), or a card
+/// moved to `review` or `blocked`.
+fn lead_item(ev: &crate::events::StoredEvent) -> Option<LeadItem> {
+    let s = |k: &str| ev.data.get(k).and_then(Value::as_str).map(str::to_owned);
+    if ev.kind != "card" || s("change").as_deref() != Some("moved") {
+        return None;
+    }
+    let change = match s("to").as_deref()? {
+        "ready" if s("assignee").is_none() => LeadChange::Ready,
+        "review" => LeadChange::Review,
+        "blocked" => LeadChange::Blocked,
+        _ => return None,
+    };
+    Some(LeadItem {
+        card: ev.card.clone()?,
+        change,
+        title: one_line(&s("title").unwrap_or_default()),
+        by: s("actor_name")
+            .or_else(|| ev.actor.clone())
+            .unwrap_or_default(),
+        comment: one_line(&s("comment").unwrap_or_default()),
+    })
+}
+
+/// The lead nudges of one project that wait for the rate limit.
+#[derive(Default)]
+struct NudgeQueue {
+    /// When the last batch went to the leads.
+    last: Option<Instant>,
+    pending: Vec<(AgentId, LeadItem)>,
+    /// A task flushes `pending` at the end of the interval.
+    armed: bool,
+}
+
 /// The items one pointer turn covers.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct Pointer {
     mail: Vec<MailItem>,
     cards: Vec<CardItem>,
+    leads: Vec<LeadItem>,
 }
 
 impl Pointer {
     fn is_empty(&self) -> bool {
-        self.mail.is_empty() && self.cards.is_empty()
+        self.mail.is_empty() && self.cards.is_empty() && self.leads.is_empty()
+    }
+
+    /// One item for each card and change: a newer event of the same kind
+    /// replaces the text.
+    fn add_lead(&mut self, l: LeadItem) {
+        match self
+            .leads
+            .iter_mut()
+            .find(|x| x.card == l.card && x.change == l.change)
+        {
+            Some(x) => *x = l,
+            None => self.leads.push(l),
+        }
     }
 
     fn add_mail(&mut self, m: MailItem) {
@@ -407,6 +510,9 @@ impl Pointer {
         }
         for c in other.cards {
             self.add_card(c);
+        }
+        for l in other.leads {
+            self.add_lead(l);
         }
     }
 
@@ -438,6 +544,7 @@ impl Pointer {
                 ),
             });
         }
+        lines.extend(self.leads.iter().map(LeadItem::line));
         lines.join("\n")
     }
 
@@ -536,6 +643,8 @@ struct Inner {
     slots: Mutex<HashMap<AgentId, Slot>>,
     /// Never locked while `slots` is locked, and the other way round.
     holds: Mutex<HashMap<AgentId, Held>>,
+    /// The lead nudges of each project that wait for the rate limit.
+    nudges: Mutex<HashMap<String, NudgeQueue>>,
     tx: broadcast::Sender<SupervisorEvent>,
     state: OnceLock<Weak<AppState>>,
     shutting_down: AtomicBool,
@@ -568,6 +677,9 @@ struct StoreView {
     subscription: Option<SubscriptionCheck>,
     /// `<state>`: stored API keys are under `<state>/credentials`.
     state_dir: Option<PathBuf>,
+    /// The URLs of the project's repos. The local ones under the repos dir
+    /// are bound into the sandbox (`sandbox::local_repo_binds`).
+    repo_urls: Vec<String>,
 }
 
 enum SubscriptionCheck {
@@ -624,6 +736,7 @@ impl RunnerSupervisor {
                 cfg,
                 slots: Mutex::new(HashMap::new()),
                 holds: Mutex::new(HashMap::new()),
+                nudges: Mutex::new(HashMap::new()),
                 tx,
                 state: OnceLock::new(),
                 shutting_down: AtomicBool::new(false),
@@ -705,6 +818,7 @@ impl RunnerSupervisor {
                 host: cfg.home(agent.harness),
             }],
             overlays: Vec::new(),
+            repos: Vec::new(),
         }
     }
 
@@ -758,6 +872,10 @@ impl RunnerSupervisor {
                         thread: m.thread_id,
                     })
                     .collect();
+                let repo_urls = crate::store::repos::all_for_project(c, &project)?
+                    .into_iter()
+                    .map(|r| r.url)
+                    .collect();
                 let subscription = match sub_name {
                     Some(n) => Some(match crate::store::subscriptions::find(c, &n)? {
                         Some(s) => SubscriptionCheck::Found(Box::new(s)),
@@ -770,6 +888,7 @@ impl RunnerSupervisor {
                     queued,
                     subscription,
                     state_dir: Some(state_dir),
+                    repo_urls,
                 })
             })
             .await;
@@ -824,60 +943,68 @@ impl RunnerSupervisor {
             && agent.new_session_on_prompt_change
             && entry.adapter.prompt_frozen_on_resume();
         let fresh = resume.is_none();
-        let (overlays, credentials, fresh_for_prompt) = tokio::task::spawn_blocking(move || {
-            migrate_dir(&dirs.0);
-            for d in [&dirs.1, &dirs.3] {
-                std::fs::create_dir_all(d)
-                    .map_err(|e| format!("cannot create {}: {e}", d.display()))?;
-            }
-            terrarium_runner::create_private_dir(&dirs.2).map_err(|e| launch_fs_error(&e))?;
-            let hash = sha256_hex(&text);
-            let hash_path = dirs.2.join(SESSION_PROMPT_HASH);
-            // No symlink follow (F11): the daemon reads and writes in
-            // `private/` with the runner's no-follow opens.
-            let old = match safefs::read_to_string(&hash_path) {
-                Ok(h) => Some(h),
-                Err(e @ terrarium_runner::RunnerError::UnsafePath { .. }) => {
-                    return Err(launch_fs_error(&e));
+        let repo_urls = match cfg.sandbox.mode {
+            SandboxMode::Bwrap => view.repo_urls.clone(),
+            SandboxMode::None => Vec::new(),
+        };
+        let repos_dir = cfg.sandbox.repos_dir.clone();
+        let (overlays, credentials, fresh_for_prompt, repos) =
+            tokio::task::spawn_blocking(move || {
+                migrate_dir(&dirs.0);
+                for d in [&dirs.1, &dirs.3] {
+                    std::fs::create_dir_all(d)
+                        .map_err(|e| format!("cannot create {}: {e}", d.display()))?;
                 }
-                Err(_) => None,
-            };
-            let fresh_for_prompt = check_prompt && old.is_some_and(|h| h.trim() != hash);
-            if fresh || fresh_for_prompt {
-                safefs::write_private(&hash_path, hash.as_bytes()).map_err(|e| {
-                    format!(
-                        "cannot write {}: {}",
-                        hash_path.display(),
-                        launch_fs_error(&e)
-                    )
-                })?;
-            }
-            let path = dirs.1.join("prompt.md");
-            std::fs::write(&path, text)
-                .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
-            if !home.is_dir() {
-                return Err(format!(
-                    "the {} home {} does not exist; log in first, or point the daemon at it \
+                terrarium_runner::create_private_dir(&dirs.2).map_err(|e| launch_fs_error(&e))?;
+                let hash = sha256_hex(&text);
+                let hash_path = dirs.2.join(SESSION_PROMPT_HASH);
+                // No symlink follow (F11): the daemon reads and writes in
+                // `private/` with the runner's no-follow opens.
+                let old = match safefs::read_to_string(&hash_path) {
+                    Ok(h) => Some(h),
+                    Err(e @ terrarium_runner::RunnerError::UnsafePath { .. }) => {
+                        return Err(launch_fs_error(&e));
+                    }
+                    Err(_) => None,
+                };
+                let fresh_for_prompt = check_prompt && old.is_some_and(|h| h.trim() != hash);
+                if fresh || fresh_for_prompt {
+                    safefs::write_private(&hash_path, hash.as_bytes()).map_err(|e| {
+                        format!(
+                            "cannot write {}: {}",
+                            hash_path.display(),
+                            launch_fs_error(&e)
+                        )
+                    })?;
+                }
+                let path = dirs.1.join("prompt.md");
+                std::fs::write(&path, text)
+                    .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+                if !home.is_dir() {
+                    return Err(format!(
+                        "the {} home {} does not exist; log in first, or point the daemon at it \
                      with --harness-home {}=<dir>",
-                    a.harness,
-                    home.display(),
-                    a.harness
-                ));
-            }
-            let overlays = adapter
-                .materialize_config(&a, &home)
-                .map_err(|e| format!("cannot write the {} config: {e}", a.harness))?;
-            // The stored API key of the subscription (pi providers, the
-            // Copilot PAT as `COPILOT_GITHUB_TOKEN`). Secrets: never logged.
-            let credentials = match (&sub, &state_dir) {
-                (Some(s), Some(dir)) => crate::login_session::credential_env_for(dir, s),
-                _ => Vec::new(),
-            };
-            Ok((overlays, credentials, fresh_for_prompt))
-        })
-        .await
-        .map_err(other)?
-        .map_err(SupervisorError::NotReady)?;
+                        a.harness,
+                        home.display(),
+                        a.harness
+                    ));
+                }
+                let overlays = adapter
+                    .materialize_config(&a, &home)
+                    .map_err(|e| format!("cannot write the {} config: {e}", a.harness))?;
+                // The stored API key of the subscription (pi providers, the
+                // Copilot PAT as `COPILOT_GITHUB_TOKEN`). Secrets: never logged.
+                let credentials = match (&sub, &state_dir) {
+                    (Some(s), Some(dir)) => crate::login_session::credential_env_for(dir, s),
+                    _ => Vec::new(),
+                };
+                let repos =
+                    sandbox::local_repo_binds(repo_urls.iter().map(String::as_str), &repos_dir);
+                Ok((overlays, credentials, fresh_for_prompt, repos))
+            })
+            .await
+            .map_err(other)?
+            .map_err(SupervisorError::NotReady)?;
 
         // An overlay of a path over itself (a writable part of `harness/`)
         // changes nothing without a sandbox.
@@ -890,6 +1017,7 @@ impl RunnerSupervisor {
             );
         }
         layout.overlays = overlays;
+        layout.repos = repos;
 
         let resume = if fresh_for_prompt {
             info!(
@@ -911,6 +1039,17 @@ impl RunnerSupervisor {
             );
         }
         spec.env.extend(credentials);
+        // A commit in the sandbox needs an identity: the home has no
+        // `.gitconfig`, and the host name gives no mail domain.
+        let email = format!("{}.{}@terrarium.invalid", agent.name, agent.project);
+        for (k, v) in [
+            ("GIT_AUTHOR_NAME", agent.name.as_str()),
+            ("GIT_COMMITTER_NAME", agent.name.as_str()),
+            ("GIT_AUTHOR_EMAIL", email.as_str()),
+            ("GIT_COMMITTER_EMAIL", email.as_str()),
+        ] {
+            spec.env.entry(k.to_owned()).or_insert_with(|| v.to_owned());
+        }
         let env = cfg
             .sandbox
             .child_env(&layout, &spec.env, &|k| std::env::var(k).ok());
@@ -1620,6 +1759,98 @@ impl RunnerSupervisor {
         }
     }
 
+    /// Queue a lead nudge for each `project_admin` agent of the card's
+    /// project, except the agent that made the change. Not more than one
+    /// batch per project goes out in each `lead_nudge_interval`; the items
+    /// in between go out together at its end. Each batch joins the pending
+    /// pointer of the lead, which goes out when the lead is idle.
+    async fn nudge_leads(&self, ev: &crate::events::StoredEvent, item: LeadItem) {
+        let (Some(state), Some(project)) = (self.state(), ev.project.clone()) else {
+            return;
+        };
+        let cause = ev
+            .actor
+            .as_deref()
+            .and_then(|a| a.strip_prefix("agent:"))
+            .map(str::to_owned);
+        let p = project.clone();
+        let leads = state
+            .db
+            .read(move |c| {
+                let page = crate::store::Page {
+                    limit: Some(crate::store::Page::MAX),
+                    cursor: None,
+                };
+                Ok(crate::store::agents::list(c, Some(&p), &page)?
+                    .items
+                    .into_iter()
+                    .filter(|v| v.agent.roles.contains(&terrarium_core::Role::ProjectAdmin))
+                    .map(|v| v.agent.id)
+                    .filter(|id| cause.as_deref() != Some(id.to_string().as_str()))
+                    .collect::<Vec<AgentId>>())
+            })
+            .await;
+        let leads = match leads {
+            Ok(l) if !l.is_empty() => l,
+            Ok(_) => return,
+            Err(e) => {
+                warn!(project = %project, "cannot find the project leads: {e}");
+                return;
+            }
+        };
+        let interval = self.inner.cfg.lead_nudge_interval;
+        let wait = {
+            let mut all = lock(&self.inner.nudges);
+            let q = all.entry(project.clone()).or_default();
+            q.pending
+                .extend(leads.into_iter().map(|id| (id, item.clone())));
+            if q.armed {
+                return;
+            }
+            match q.last.map(|t| t.elapsed()) {
+                Some(e) if e < interval => {
+                    q.armed = true;
+                    interval - e
+                }
+                _ => Duration::ZERO,
+            }
+        };
+        if wait.is_zero() {
+            self.flush_nudges(&project);
+            return;
+        }
+        let me = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(wait).await;
+            me.flush_nudges(&project);
+        });
+    }
+
+    /// Put the waiting lead nudges of `project` into the leads' pointers.
+    fn flush_nudges(&self, project: &str) {
+        let pending = {
+            let mut all = lock(&self.inner.nudges);
+            let Some(q) = all.get_mut(project) else {
+                return;
+            };
+            q.armed = false;
+            q.last = Some(Instant::now());
+            std::mem::take(&mut q.pending)
+        };
+        // One add for each lead: an idle lead gets the whole batch in one
+        // pointer.
+        let mut by_lead: Vec<(AgentId, Vec<LeadItem>)> = Vec::new();
+        for (id, item) in pending {
+            match by_lead.iter_mut().find(|(a, _)| *a == id) {
+                Some((_, items)) => items.push(item),
+                None => by_lead.push((id, vec![item])),
+            }
+        }
+        for (id, items) in by_lead {
+            self.add_pointer(id, |p| items.into_iter().for_each(|i| p.add_lead(i)));
+        }
+    }
+
     /// Watch the event hub for new mail and card changes (PLAN §12, §13).
     fn spawn_hub_listener(&self, state: &Shared) {
         let mut rx = state.db.hub().subscribe();
@@ -1634,6 +1865,9 @@ impl RunnerSupervisor {
                     }
                     Err(RecvError::Closed) => return,
                 };
+                if let Some(item) = lead_item(&ev) {
+                    me.nudge_leads(&ev, item).await;
+                }
                 let Some(agent) = ev
                     .agent_id
                     .as_deref()
@@ -2735,6 +2969,60 @@ mod tests {
             "New mail from demo/alice (thread T1). Run `terrarium mail read --thread T1`.\n\
              Card TER-42 was assigned to you. Run `terrarium card show TER-42`."
         );
+    }
+
+    fn card_event(data: serde_json::Value) -> crate::events::StoredEvent {
+        serde_json::from_value(serde_json::json!({
+            "seq": 1, "id": "e1", "at": "2026-10-25T00:00:00Z", "kind": "card",
+            "actor": "agent:01K8AGENT0000000000000000A", "project": "demo",
+            "card": "DEM-3", "data": data
+        }))
+        .unwrap()
+    }
+
+    /// Which card events nudge a lead, and the words of the nudge. A
+    /// newer change of the same kind on the same card replaces the line.
+    #[test]
+    fn lead_nudges_name_the_card_and_the_command() {
+        let moved = |to: &str, extra: serde_json::Value| {
+            let mut d = serde_json::json!({"change": "moved", "to": to, "title": "Fix\nthe parser",
+                "actor_name": "demo/bob"});
+            for (k, v) in extra.as_object().unwrap() {
+                d[k] = v.clone();
+            }
+            lead_item(&card_event(d))
+        };
+        let ready = moved("ready", serde_json::json!({})).unwrap();
+        assert_eq!(
+            ready.line(),
+            "New card DEM-3 in ready: Fix…. Run `terrarium card ls --unassigned --column ready`."
+        );
+        assert!(moved("ready", serde_json::json!({"assignee": "01K8X"})).is_none());
+        assert!(moved("in_progress", serde_json::json!({})).is_none());
+        assert!(moved("done", serde_json::json!({})).is_none());
+        let created = card_event(serde_json::json!({"change": "created", "column": "ready"}));
+        assert!(lead_item(&created).is_none());
+        let review = moved("review", serde_json::json!({})).unwrap();
+        assert_eq!(
+            review.line(),
+            "DEM-3 moved to review by demo/bob. Run `terrarium card show DEM-3`."
+        );
+        let blocked = moved(
+            "blocked",
+            serde_json::json!({"comment": "needs a key\nand more"}),
+        )
+        .unwrap();
+        assert_eq!(
+            blocked.line(),
+            "DEM-3 moved to blocked by demo/bob: needs a key…. Run `terrarium card show DEM-3`."
+        );
+        let mut p = Pointer::default();
+        p.add_lead(review.clone());
+        p.add_lead(blocked);
+        p.add_lead(review);
+        assert_eq!(p.leads.len(), 2);
+        assert!(!p.is_empty());
+        assert_eq!(p.text().lines().count(), 2);
     }
 
     #[test]

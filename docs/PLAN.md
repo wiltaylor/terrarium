@@ -447,6 +447,10 @@ url = "https://github.com/wiltaylor/CopilotCustomSystemPrompt.git"
 on_agent_create = ["terrarium"]       # cloned into $HOME/work/terrarium when the agent is made
 ```
 
+A local repo (a URL under `TERRARIUM_REPOS_DIR`, default `/repos`, for
+example `file:///repos/app.git`) is bound read-write into the sandbox of
+each agent of its project at the same path, so a push needs no credential.
+
 Repository checkout on a target runs on the host agent, not in the sandbox.
 The daemon hands the credential to the host agent for that one clone or fetch.
 The agent never sees the token. In the agent's own workspace the daemon does
@@ -722,6 +726,12 @@ unblocked, the runner uses the same push path as mail (§12). If the agent is
 `terrarium card show TER-42`." If it is `working`, the pointer waits for the
 stop hook. `terrarium card wait` is the pull equivalent for an agent that
 prefers to block.
+
+Lead nudges use the same path. A card with no assignee in `ready`, or a
+move to `review` or `blocked`, types a pointer into each `project_admin` of
+the project, except the agent that made the change. Each project gets at
+most one batch of nudges in 10 s; the changes in that time go out as one
+pointer.
 
 Status link: the dashboard shows each agent's current `in_progress` card next
 to its status badge, so "working" always answers "on what".
@@ -1557,6 +1567,7 @@ services:
       - ./agents:/etc/terrarium/agents
       - ./targets:/etc/terrarium/targets
       - ./fleets:/etc/terrarium/fleets       # fleet files, applied at start and on reload
+      - ./repos:/repos                       # local bare repos (TERRARIUM_REPOS_DIR)
       - ./config/tls:/etc/terrarium/tls:ro   # `just host::cert` writes here
     security_opt:
       - seccomp:docker/seccomp-bwrap.json   # user namespaces for bwrap (§11)

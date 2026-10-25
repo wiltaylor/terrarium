@@ -504,6 +504,26 @@ is a `repo.checkout` error event; the agent is still created. Only a project
 file has a `[checkout]` table. Agents from files (`POST /api/reload`) do
 not get this clone.
 
+**Local repos.** A repo whose URL is a path under `TERRARIUM_REPOS_DIR`
+(default `/repos`), for example `file:///repos/app.git`, is a local repo.
+At each start, the sandbox binds each local repo of the agent's project
+read-write at the same path. So `git push origin` from the workspace works
+with no credential. The rules:
+
+- Only a URL whose path is under `TERRARIUM_REPOS_DIR` makes a bind. A file
+  URL outside the dir, a path with `.` or `..`, a `file://<host>/` URL, and
+  a path whose real path (after symlinks) leaves the dir make no bind.
+- The agents of other projects do not get the bind, unless their project
+  also has the repo.
+- Only a `sysadmin` or the operator attaches a repo with a local path URL
+  (`file://` or `/`). A `project_admin` gets `403 forbidden`, because the
+  repo could belong to another project.
+- An agent can change every file of the bare repo, its config and hooks
+  too. Treat `./repos` on the host as data that agents write.
+
+The daemon clone on agent create and on `checkout` works for a local repo
+as for any other local path.
+
 **Credential helper.** `POST /api/repos/credential` takes the fields that
 git sends to a credential helper. The caller must be an agent (`403` for
 the operator). The daemon answers only when a repo of the agent's own
@@ -702,6 +722,21 @@ agent is `idle`, else after the next stop hook. One pointer covers all the
 items that came in meanwhile. When the harness takes the turn, the mail
 becomes `delivered`. Mail that is `queued` when an agent starts goes into
 its first pointer.
+
+Lead nudges (PLAN §13): three board changes add a line to the pointer of
+each running `project_admin` agent of the card's project. The agent that
+made the change gets no nudge.
+
+| Change | Line |
+|---|---|
+| A card with no assignee moves into `ready`, also a new card made in `ready` | `New card DEM-3 in ready: <title>. Run `terrarium card ls --unassigned --column ready`.` |
+| A card moves to `review` | `DEM-3 moved to review by <who>. Run `terrarium card show DEM-3`.` |
+| A card moves to `blocked` | `DEM-3 moved to blocked by <who>: <comment>. Run `terrarium card show DEM-3`.` |
+
+The title and the comment are cut to their first line and 100 characters.
+In each project, the daemon sends not more than one batch of nudges in 10
+seconds. The changes in that time go out together, as one pointer for each
+lead. A second change of the same kind on the same card replaces the line.
 
 The loop guard (PLAN §12): a thread pauses when it has more than
 `TERRARIUM_MAIL_LOOP_LIMIT` (default 6) agent-to-agent messages since its
@@ -1006,7 +1041,7 @@ Kinds:
 | `turn_start`, `turn_end`, `notification`, `question`, `session_ended`, `exit`, `delivery_failed`, `system` | The fields of the core `Event` variant of the same name (`crates/terrarium-core/src/event.rs`). |
 | `tool_use`, `tool_finished` | `{tool, tool_id?, summary?, ...}`: `input` (`tool_use`), `ok` (`tool_finished`). `tool_id` is the harness's ID for the tool call (for Claude Code, `toolu_...`). It is not the event `id`. Older records used the key `id` for it; the `events.jsonl` reader still takes those. |
 | `mail` | `{message_id, thread_id, from, from_name, to, to_name, subject}`. The `agent` is the recipient. A message that the loop guard holds also has `held: true` and `thread_state: "paused"`, and names no agent. |
-| `card` | `{card_id, change, title, column, ...}`. `change` is `created`, `moved` (`from`, `to`, `comment`), `reordered`, `assigned` (`assignee`, `previous`), `claimed`, `edited` (`fields`), `commented` (`comment`), `linked` (`kind`, `ref`), `archived`, `unblocked` (`by`), or `thread_update` (`thread_id`, `done`). The `agent` is the assignee. |
+| `card` | `{card_id, change, title, column, ...}`. `change` is `created`, `moved` (`from`, `to`, `comment`, `assignee`), `reordered`, `assigned` (`assignee`, `previous`), `claimed`, `edited` (`fields`), `commented` (`comment`), `linked` (`kind`, `ref`), `archived`, `unblocked` (`by`), or `thread_update` (`thread_id`, `done`). `actor_name` names who made the change (`operator` or `project/name`). The `agent` is the assignee. |
 | `board` | `{columns}` after a column change. |
 | `memory.created`, `memory.updated`, `memory.deleted`, `memory.linked`, `memory.unlinked`, `memory.superseded` | `{memory_id, key, title, ...}`: `fields`, `to`, `relation`, `note`, `by`. |
 | `wiki.created`, `wiki.saved`, `wiki.deleted`, `wiki.restored`, `wiki.moved`, `wiki.reviewed` | `{page_id, path, title, rev, ...}`: `summary`, `author`, `from_rev`, `from`, `decision`, `comment`. |

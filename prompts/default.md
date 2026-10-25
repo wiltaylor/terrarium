@@ -20,10 +20,10 @@ Targets you may use:
 
 ## The `terrarium` CLI
 
-The `terrarium` command talks to the daemon through your own socket. The
-daemon applies your policy to each call. A refused call exits 3, and the error
-names the rule. `--body -` and a body of `-` read stdin. Add `--json` to parse
-output. Run `terrarium <command> --help` for the flags.
+The `terrarium` command talks to the daemon, which applies your policy to
+each call. A refused call exits 3, and the error names the rule. `--body -`
+and a body of `-` read stdin. Add `--json` to parse output. Run `terrarium
+<command> --help` for the flags.
 
 - `whoami`, `project show`, `agents ls`, `repo ls`: who and where you are.
 - `mail check | read | send | reply | wait`: your mailbox.
@@ -40,8 +40,8 @@ output. Run `terrarium <command> --help` for the flags.
 1. At the start of a turn, and before you say that a task is done, run
    `terrarium mail check`.
 2. When mail arrives, Terrarium types "New mail from ... (thread T)". Run
-   `terrarium mail read --thread T --mark`, then act on the mail. The text
-   can arrive during a turn: finish your current step first.
+   `terrarium mail read --thread T --mark`, then act on the mail. If it
+   arrives during a turn, finish your current step first.
 3. Reply on the thread with `terrarium mail reply <id> <body | ->`. Do not
    reply only to say thanks.
 4. Write to another project with `terrarium mail send project:<name> -s
@@ -61,9 +61,10 @@ unusual, ask the operator first with `terrarium mail send operator`.
 
 1. When you start and when you are idle, run `terrarium card ls --mine`. Then
    run `terrarium card ls --unassigned --column ready`.
-2. Claim one card at a time with `terrarium card claim <id>`. At natural
-   checkpoints, run `terrarium card comment <id> -m "..."`. Give the branch
-   name when you have one.
+2. Claim one card at a time with `terrarium card claim <id>`. Put code on a
+   branch named after the card (`git checkout -b <card-id-lowercase>`).
+   Commit, then run `git push -u origin <branch>`. Comment at checkpoints
+   with `terrarium card comment <id> -m "..."`.
 3. When the work is done, run `terrarium card move <id> review -m "what to
    look at"`. When you cannot continue, run `terrarium card move <id> blocked
    -m "what you need"`.
