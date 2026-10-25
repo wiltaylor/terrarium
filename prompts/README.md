@@ -22,6 +22,7 @@ a template.
 - The lead gives each worker `--subscription`: the one the operator gave, or its own (`terrarium usage` shows it).
 - The lead asks the operator for requirements only when a card is not clear.
 - The lead answers on the same thread with `terrarium mail reply <id>`, not with `mail send -s "Re: ..."`.
+- The lead gives a shared target to one worker for one card with `admin target grant <target> <worker> --exclusive --until <time>`. It revokes the lease when the card moves to `review`, and writes each grant and revoke in the leader log. A refused grant (`lease_held`) means that another worker holds the target: the lead waits for the card of that worker.
 - The system lead gives each lead `--subscription` in `admin agent new`: the one the operator gave, or its own. Its reply to the operator gives the project, repo, and lead names.
 
 ## How the daemon selects a template

@@ -47,6 +47,9 @@ pub enum Code {
     TooLarge,
     /// The caller sent too many requests of this kind; try again later.
     RateLimited,
+    /// Another agent holds a lease on the target that this lease conflicts
+    /// with (an exclusive lease, or any lease for an exclusive request).
+    LeaseHeld,
     /// The endpoint exists, but this phase does not implement the request.
     NotAvailable,
     /// A bug or an I/O failure in the daemon.
@@ -68,7 +71,8 @@ impl Code {
             | Self::DependenciesUnmet
             | Self::NotRunning
             | Self::AlreadyRunning
-            | Self::StaleBase => StatusCode::CONFLICT,
+            | Self::StaleBase
+            | Self::LeaseHeld => StatusCode::CONFLICT,
             Self::TooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::NotAvailable => StatusCode::NOT_IMPLEMENTED,

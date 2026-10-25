@@ -34,7 +34,9 @@ use crate::executor::{
     self, Control, CpBody, ExecSession, LifecycleOpts, MAX_INPUT, MAX_READ, MAX_WAIT_SECS,
     RemoteCmd,
 };
+use crate::leases as lease_rt;
 use crate::policy;
+use crate::store::leases::{self, LeaseRow, Standing};
 use crate::store::targets::{self, TargetRow};
 use crate::supervisor::{PtyAttachment, PtyInput};
 
@@ -56,6 +58,12 @@ pub fn routes() -> Router<Shared> {
         .route("/targets/{name}/sessions/{id}/input", post(session_input))
         .route("/targets/{name}/sessions/{id}/output", get(session_output))
         .route("/targets/{name}/sessions/{id}/ws", get(session_ws))
+        .route("/targets/{name}/leases", get(leases_of_target).post(grant))
+        .route(
+            "/targets/{name}/leases/{agent}",
+            axum::routing::patch(extend).delete(revoke),
+        )
+        .route("/agents/{id}/leases", get(leases_of_agent))
 }
 
 /// A target with its state, as the API shows it.
@@ -75,8 +83,13 @@ pub struct TargetView {
     pub snapshots: Vec<String>,
     /// Whether the target's host agent is connected; `null` for `ssh`.
     pub host_online: Option<bool>,
-    /// Whether the caller may exec on it (its policy lists it).
+    /// Whether the caller may exec on it (its policy lists it, or it holds
+    /// an active lease).
     pub usable: bool,
+    /// Why the caller may use it: `operator`, `policy`, `lease`, or `null`.
+    pub access: Option<&'static str>,
+    /// The caller's active lease on the target, if it holds one.
+    pub lease: Option<LeaseRow>,
 }
 
 fn visible(actor: &Actor, def: &TargetDef) -> bool {
@@ -86,7 +99,18 @@ fn visible(actor: &Actor, def: &TargetDef) -> bool {
     }
 }
 
-pub fn view(state: &Shared, actor: &Actor, r: TargetRow) -> TargetView {
+/// The active leases of the caller, to mark the targets they cover.
+pub async fn my_leases(state: &Shared, actor: &Actor) -> ApiResult<Vec<LeaseRow>> {
+    match actor.agent() {
+        None => Ok(Vec::new()),
+        Some(a) => {
+            let id = a.id.clone();
+            state.db.read(move |c| leases::active_of(c, &id)).await
+        }
+    }
+}
+
+pub fn view(state: &Shared, actor: &Actor, r: TargetRow, mine: &[LeaseRow]) -> TargetView {
     let host_online = match r.def.kind {
         TargetKind::Ssh => None,
         _ => Some(
@@ -96,7 +120,19 @@ pub fn view(state: &Shared, actor: &Actor, r: TargetRow) -> TargetView {
                 .is_some_and(|h| state.executor.hosts.is_online(h)),
         ),
     };
-    let usable = policy::use_target(actor, &r.def.name, r.def.project.as_deref()).is_ok();
+    let lease = mine.iter().find(|l| l.target == r.def.name).cloned();
+    let standing = if lease.is_some() {
+        Standing::Active
+    } else {
+        Standing::None
+    };
+    let usable = policy::use_target(actor, &r.def.name, r.def.project.as_deref(), standing).is_ok();
+    let access = match actor {
+        Actor::Operator => Some("operator"),
+        Actor::Agent(a) if usable && a.policy.targets.contains(&r.def.name) => Some("policy"),
+        Actor::Agent(_) if usable => Some("lease"),
+        Actor::Agent(_) => None,
+    };
     TargetView {
         id: r.def.name.clone(),
         scope: if r.def.project.is_some() {
@@ -111,6 +147,8 @@ pub fn view(state: &Shared, actor: &Actor, r: TargetRow) -> TargetView {
         snapshots: r.snapshots,
         host_online,
         usable,
+        access,
+        lease: if access == Some("lease") { lease } else { None },
     }
 }
 
@@ -122,10 +160,11 @@ pub async fn for_project(
     project: &str,
 ) -> ApiResult<Vec<TargetView>> {
     let rows = state.db.read(targets::list).await?;
+    let mine = my_leases(state, actor).await?;
     Ok(rows
         .into_iter()
         .filter(|r| r.def.project.as_deref().is_none_or(|p| p == project))
-        .map(|r| view(state, actor, r))
+        .map(|r| view(state, actor, r, &mine))
         .collect())
 }
 
@@ -146,6 +185,7 @@ async fn list(
     ApiQuery(q): ApiQuery<ListQuery>,
 ) -> ApiResult<Json<Vec<TargetView>>> {
     let rows = state.db.read(targets::list).await?;
+    let mine = my_leases(&state, &actor).await?;
     Ok(Json(
         rows.into_iter()
             .filter(|r| visible(&actor, &r.def))
@@ -154,7 +194,7 @@ async fn list(
                     .as_deref()
                     .is_none_or(|p| r.def.project.as_deref().is_none_or(|x| x == p))
             })
-            .map(|r| view(&state, &actor, r))
+            .map(|r| view(&state, &actor, r, &mine))
             .filter(|v| !q.usable.unwrap_or(false) || v.usable)
             .collect(),
     ))
@@ -175,7 +215,8 @@ async fn show(
     Path(name): Path<String>,
 ) -> ApiResult<Json<TargetView>> {
     let r = load(&state, &actor, name).await?;
-    Ok(Json(view(&state, &actor, r)))
+    let mine = my_leases(&state, &actor).await?;
+    Ok(Json(view(&state, &actor, r, &mine)))
 }
 
 /// `POST /api/targets`: a TargetDef as JSON.
@@ -198,7 +239,7 @@ async fn create(
             Ok(r)
         })
         .await?;
-    Ok((StatusCode::CREATED, Json(view(&state, &actor, r))).into_response())
+    Ok((StatusCode::CREATED, Json(view(&state, &actor, r, &[]))).into_response())
 }
 
 /// `PATCH /api/targets/{name}`: a JSON merge patch of the definition.
@@ -223,7 +264,7 @@ async fn update(
             Ok(r)
         })
         .await?;
-    Ok(Json(view(&state, &actor, r)))
+    Ok(Json(view(&state, &actor, r, &[])))
 }
 
 async fn remove(
@@ -237,6 +278,7 @@ async fn remove(
         .db
         .write(actor.label(), move |t| {
             let r = targets::delete(t, &name)?;
+            leases::end_all_on(t, &name)?;
             t.audit("target.delete", &name, r.def.project.as_deref(), json!({}))
         })
         .await?;
@@ -253,7 +295,7 @@ async fn run_verb(
     body: Option<LifecycleOpts>,
 ) -> ApiResult<Json<Value>> {
     let r = load(&state, &actor, name).await?;
-    if policy::use_target(&actor, &r.def.name, r.def.project.as_deref()).is_err() {
+    if executor::usable(&state, &actor, &r.def.name).await.is_err() {
         policy::define_target(&actor, r.def.project.as_deref()).map_err(|_| {
             ApiError::forbidden(format!(
                 "target `{}` is not in your policy.targets, and you may not define it",
@@ -612,4 +654,89 @@ async fn ws_bridge(socket: WebSocket, s: std::sync::Arc<ExecSession>) {
     .await;
     reader.abort();
     writer.abort();
+}
+
+// ------------------------------------------------------------------ leases
+
+#[derive(Debug, Default, Deserialize)]
+struct LeaseQuery {
+    /// Also the leases that ended (the last 100).
+    #[serde(default)]
+    all: Option<bool>,
+}
+
+/// `GET /api/targets/{name}/leases?all=`: who holds the target.
+async fn leases_of_target(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(name): Path<String>,
+    ApiQuery(q): ApiQuery<LeaseQuery>,
+) -> ApiResult<Json<Vec<LeaseRow>>> {
+    let r = load(&state, &actor, name).await?;
+    let all = q.all.unwrap_or(false);
+    let n = r.def.name.clone();
+    Ok(Json(
+        state
+            .db
+            .read(move |c| leases::on_target(c, &n, all))
+            .await?,
+    ))
+}
+
+/// `GET /api/agents/{id}/leases?all=`: what the agent holds.
+async fn leases_of_agent(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(id): Path<String>,
+    ApiQuery(q): ApiQuery<LeaseQuery>,
+) -> ApiResult<Json<Vec<LeaseRow>>> {
+    let a = super::agents::load(&state, &actor, id).await?;
+    let all = q.all.unwrap_or(false);
+    let id = a.agent.id.to_string();
+    Ok(Json(
+        state
+            .db
+            .read(move |c| leases::of_agent(c, &id, all))
+            .await?,
+    ))
+}
+
+/// `POST /api/targets/{name}/leases`.
+async fn grant(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(name): Path<String>,
+    ApiJson(b): ApiJson<lease_rt::GrantBody>,
+) -> ApiResult<Response> {
+    let out = lease_rt::grant(&state, &actor, &name, b).await?;
+    Ok((StatusCode::CREATED, Json(out)).into_response())
+}
+
+/// `DELETE /api/targets/{name}/leases/{agent}`: revoke.
+async fn revoke(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path((name, agent)): Path<(String, String)>,
+) -> ApiResult<Json<LeaseRow>> {
+    Ok(Json(lease_rt::revoke(&state, &actor, &name, &agent).await?))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExtendBody {
+    /// A new expiry: an RFC 3339 time or a duration from now; `null`: until
+    /// a revoke.
+    until: Option<String>,
+}
+
+/// `PATCH /api/targets/{name}/leases/{agent}`: a new `until`.
+async fn extend(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path((name, agent)): Path<(String, String)>,
+    ApiJson(b): ApiJson<ExtendBody>,
+) -> ApiResult<Json<LeaseRow>> {
+    Ok(Json(
+        lease_rt::extend(&state, &actor, &name, &agent, b.until).await?,
+    ))
 }

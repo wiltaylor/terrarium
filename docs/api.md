@@ -265,6 +265,7 @@ refused it. Do not parse the message; use `code`.
 | 409 | `not_running` | The agent is not running. |
 | 409 | `already_running` | The agent is running already. |
 | 409 | `stale_base` | A wiki edit names a base revision that is not current. `details: {"base", "current", "diff"}`. |
+| 409 | `lease_held` | Another agent holds a lease on the target that the new lease clashes with (§17.7). `details: {"target", "holder", "holder_id", "lease_id", "exclusive", "expires_at"}`. |
 | 413 | `too_large` | An upload is over the per-file limit or the project quota. |
 | 429 | `rate_limited` | Too many calls of one kind; try again later. The credential helper (§5.1) has a limit per agent. An agent has too many live exec sessions (§17). A host agent runs its maximum of sessions. |
 | 501 | `not_available` | The route exists, but this phase does not do the request. |
@@ -285,6 +286,7 @@ everything. Every privileged action writes an audit row (§9).
 | Create, change, start, stop, restart, delete agents; send turns; answer; attach the PTY | no | own project | any |
 | Assign, reassign, reopen any card; edit columns and WIP limits; archive any card | no | own project | any |
 | Attach repos; change the project | no | own project | any |
+| Grant, extend, or revoke a target lease (§17.7) | no | a target of own project, to an agent of own project | any |
 | Check out a repo into its own workspace; ask the credential helper (§5.1) | own project | own project | own project |
 | Check out a repo into another agent's workspace | no | own project | any |
 | Store, list, or delete credentials (write-only) | no | no | yes |
@@ -374,7 +376,9 @@ on a card that is not its own), `definitions.sync`, `memory.edit` and
 `version.approve`, `version.reject`, `version.release` (§13),
 `host.create`, `host.revoke`, `target.create`, `target.update`,
 `target.delete`, `targets.sync`, `target.exec`, `target.cp`, `target.up`,
-`target.down`, `target.snapshot`, `target.restore`, `target.status` (§17).
+`target.down`, `target.snapshot`, `target.restore`, `target.status`,
+`target.grant`, `target.revoke`, `target.lease_extend`, and
+`target.lease_expired` (actor `system`) (§17).
 
 ## 5. Projects
 
@@ -634,6 +638,10 @@ An entry that the policy has already may stay. Else the answer is
 `403 forbidden`, and the message names each entry. A fleet apply uses the
 same check (§18.4). The project must exist (`not_found`). A file
 agent refuses `PATCH`, `DELETE`, and `PUT .../roles` with `file_managed`.
+
+A target lease (§17.7) gives an agent a target at run time, without a
+`policy` write. It does not change `policy`. `GET /api/agents/{id}/leases`
+lists the leases that the agent holds.
 
 ### 6.2 Lifecycle and turns
 
@@ -1058,6 +1066,7 @@ Kinds:
 | `artifact.created`, `artifact.linked`, `artifact.deleted`, `artifact.pruned` | `{artifact_id, key, uid, name, kind, ...}`: `size`, `content_type`, `sha256`, `link_kind`, `ref`. |
 | `version.created`, `version.updated`, `version.submitted`, `version.approved`, `version.rejected`, `version.released` | `{version_id, name, status, ...}`: `fields`, `comment`, `thread_id`, `cards`. |
 | `usage.sample`, `usage.rejected_path`, `quota.sample`, `quota.alert`, `quota.blocked`, `quota.resumed`, `subscription.offer`, `subscription.expired`, `self_report` | See §16.7. |
+| `lease` | `{change, target, lease_id, expires_at, exclusive, state}`. `change` is `granted`, `extended`, or `ended` (a revoke or the expiry). The `agent` is the lease holder. The supervisor types a pointer from it (§17.7). |
 | `host.connected`, `host.disconnected` | `{host, host_id, ...}`: `version`, `os`, `arch`, `capabilities`, `summary`, `resumed` (sessions taken back), `reason`. See §17. |
 
 A `memory.*`, `wiki.*`, `artifact.*`, or `version.*` event that an agent
@@ -1940,6 +1949,8 @@ all projects.
 | `snapshots` | The snapshot names that `POST .../snapshot` or `snapshot_before_task` took. A destroy (the state `absent`) clears them. |
 | `host_online` | The link of the target's host agent. `null` for `ssh`. |
 | `usable` | The caller may use the target (§17.4). |
+| `access` | Why the caller may use it: `operator`, `policy`, `lease`, or `null`. |
+| `lease` | The caller's active lease on the target (§17.7), when `access` is `lease`; else `null`. |
 
 | Endpoint | Body | Answer | Needs |
 |---|---|---|---|
@@ -1995,7 +2006,8 @@ name is `name`, else `terrarium`.
 
 The daemon runs some verbs by itself, with the actor `system` and a
 `reason` in the audit detail. On an agent start, for each target in
-`policy.targets`:
+`policy.targets` and each target of an active lease (§17.7) that no other
+running agent holds:
 
 1. An ephemeral target gets `up` (`target.up`, reason `agent_start`).
 2. A target with `snapshot_before_task` on a kind with snapshots (vmlab)
@@ -2005,7 +2017,8 @@ The daemon runs some verbs by itself, with the actor `system` and a
    gets it on the first agent start that finds it `running`. A docker
    target has no snapshots, so the flag does nothing.
 
-On an agent stop, or an exit with no restart:
+On an agent stop, or an exit with no restart, for each such target that
+no other running agent holds:
 
 1. An ephemeral target without `keep` gets a destroy (`target.destroy`,
    reason `agent_stop`). The destroy clears `snapshots`, so the next start
@@ -2076,7 +2089,8 @@ The output answer:
     host-protocol.md (`exited`, `signaled`, `timeout`, ...);
   - `{"type": "cp", "bytes", "sha256"}` for a copy;
   - `{"type": "error", "code", "message"}`, for example `spawn_failed`,
-    `path_denied`, `checksum_mismatch`, `lost`, `killed`.
+    `path_denied`, `checksum_mismatch`, `lost`, `killed`, or
+    `lease_revoked` (the agent's lease on the target ended, §17.7).
 - Each session buffers at most 8 MiB of output that is not acknowledged.
   At the limit, the daemon stops taking the host's output. The host stops
   reading the process, and the process waits. Nothing is lost.
@@ -2099,9 +2113,11 @@ Copies:
 Rules:
 
 - The operator may use every target. An agent may use a target that its
-  `policy.targets` lists, when the target is global or in the agent's
-  project. Else the answer is `403 forbidden`, and the message names the
-  rule. The role does not change this rule.
+  `policy.targets` lists, or that it holds an active lease on (§17.7),
+  when the target is global or in the agent's project. Else the answer is
+  `403 forbidden`, and the message names the rule. After a lease ended,
+  the message is `your lease on <target> ended`. The role does not change
+  this rule.
 - An agent holds at most 8 live sessions (`429 rate_limited`). A host
   agent holds at most its `max_sessions` (`429 rate_limited`).
 - Only the agent that opened a session can drive it. To other agents it
@@ -2159,7 +2175,10 @@ stderr}`. Each checkout writes a `repo.checkout` event and audit row with
 (`up`). `crate::executor::maybe_down(state, target)` removes it, unless
 `keep = true`. Both do nothing for a permanent target.
 `executor::on_agent_start` and `executor::on_agent_stop` call them for each
-name in an agent's `policy.targets`. `RunnerSupervisor::start` calls
+target that an agent holds: the names in its `policy.targets` and the
+targets of its active leases (§17.7). They skip a target that another
+running agent holds (by policy or by lease): it is up already, and it must
+stay up. `RunnerSupervisor::start` calls
 `on_agent_start` before the harness launches. A target that does not come
 up does not stop the start: the agent gets a `notification` event with the
 error. The supervisor calls `on_agent_stop` on a stop, on an exit that does
@@ -2168,6 +2187,78 @@ start or a restart fails. A restart of the harness and a daemon shutdown
 leave the targets as they are. Each of these verbs writes an audit row
 with the actor `system`: `target.up` with `"reason": "agent_start"`, and
 `target.destroy` with `"reason": "agent_stop"`.
+
+### 17.7 Target leases
+
+A lease gives one agent one target at run time, for a time or until a
+revoke. A lead uses it to give a shared target (for example one VM) to a
+worker for one card, and to take it back. The daemon enforces it at once.
+
+```json
+{"id":"01JC...","target":"vm","agent":"01M5...","agent_name":"terra/w-ter-3","project":"terra",
+ "granted_by":"agent:01M4...","granted_at":"2026-10-25T09:00:00.000Z",
+ "expires_at":"2026-10-25T09:30:00.000Z","exclusive":true,
+ "revoked_at":null,"revoked_by":null,"reason":"TER-3","state":"active"}
+```
+
+| Field | Meaning |
+|---|---|
+| `agent`, `agent_name` | The holder: its ULID, and `project/name` (`null` after the agent is deleted). |
+| `project` | The holder's project. |
+| `granted_by`, `revoked_by` | `operator`, `agent:<ulid>`, or `system` (the expiry). |
+| `expires_at` | The end. `null`: until a revoke. |
+| `exclusive` | No other agent may hold a lease on the target at the same time. |
+| `state` | `active`, `revoked`, or `expired`. |
+
+| Endpoint | Body or query | Answer | Needs |
+|---|---|---|---|
+| `POST /api/targets/{name}/leases` | `{"agent", "until"?, "exclusive"?, "reason"?}` | `201` lease, with `lifecycle` or `lifecycle_error` when the grant ran a verb | below |
+| `GET /api/targets/{name}/leases` | `?all=true` also lists the ended leases (the last 100) | `200` leases, newest first | read the target |
+| `PATCH /api/targets/{name}/leases/{agent}` | `{"until"}`; `null`: until a revoke | `200` lease | below |
+| `DELETE /api/targets/{name}/leases/{agent}` | | `200` the ended lease | below, or the holder itself |
+| `GET /api/agents/{id}/leases` | `?all=true` | `200` leases | read the agent |
+
+`{agent}` and `agent` are an agent key (§2.2). `until` is an RFC 3339
+time in the future, or a duration from now: `90s`, `30m`, `2h`, `1d`.
+
+Rules:
+
+- The operator and a sysadmin may lease any target to any agent. A
+  project_admin may lease a target of its own project to an agent of its
+  own project. A global target needs a sysadmin or the operator, as a
+  global target in a `policy` does (F13). Else `403 forbidden`.
+- A project target goes only to an agent of its project (`422 invalid`).
+- An agent has at most one active lease on a target. A second grant is
+  `409 conflict`: extend it with `PATCH`, or revoke it first.
+- `exclusive`: a new exclusive lease, while another agent holds any active
+  lease on the target, is `409 lease_held`. So is any new lease while
+  another agent holds an active exclusive lease. The message and the
+  details name the holder and its `expires_at`. Several leases that are not
+  exclusive can be on one target. A `policy.targets` holder does not
+  count: a lease does not take a target from its policy holders.
+- A lease is active while it is not revoked and `expires_at` is later than
+  now. The policy check uses the time, so a lease ends at its time. The
+  expiry timer runs at each `expires_at`, and every 10 s.
+- When a lease ends (revoke or expiry), the daemon ends the holder's live
+  exec sessions on the target: each ends with `{"type": "error", "code":
+  "lease_revoked"}`. A new exec, shell, cp, checkout, or lifecycle verb is
+  `403 forbidden`, `your lease on <target> ended`. A holder whose
+  `policy.targets` lists the target keeps its sessions and its access.
+- Lifecycle: a grant to a running agent brings an ephemeral target up with
+  `ensure_up` (and `snapshot_before_task`), unless another running agent
+  holds it (`target.up`, reason `lease_grant`). The end of the lease of a
+  running agent that leaves no running holder calls `maybe_down`, with the
+  keep and restore rules of §17.3 (`target.destroy` or `target.restore`,
+  reason `lease_end`). A grant to a stopped agent runs no verb: its next
+  start brings the target up (§17.6).
+- Audit rows: `target.grant`, `target.revoke`, `target.lease_extend`, and
+  `target.lease_expired` (actor `system`). Deleting a target ends its
+  leases.
+- Each change writes a `lease` event (§9) to the holder's stream. The
+  supervisor types a pointer, or keeps it for the next start of a stopped
+  agent. On a grant or an extend: "You now have access to target <t>
+  until <time or 'revoked'>. Run `terrarium targets ls`." On a revoke or
+  the expiry: "Your access to target <t> ended."
 
 ## 18. Fleet
 

@@ -1460,3 +1460,380 @@ async fn an_enrol_token_is_swapped_for_a_stored_long_lived_token() {
         .unwrap();
     assert_eq!(dial_status(&lab, &enrol2).await, 401);
 }
+
+/// The ULID of an agent made with `TestDaemon::agent`.
+fn id_of(a: &Value) -> String {
+    a["id"].as_str().unwrap().to_owned()
+}
+
+/// The last audit row of `action`.
+async fn last_audit(td: &TestDaemon, action: &str) -> Value {
+    let a = td.get(&format!("/api/audit?action={action}")).await;
+    a.ok()
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap_or_else(|| panic!("no audit row {action}"))
+        .clone()
+}
+
+/// Target leases (docs/api.md §17.7): a lead grants a project target to a
+/// worker, the worker uses it, and a revoke ends the worker's live session
+/// with `lease_revoked`. The next exec is `403` and names the lease.
+#[tokio::test]
+async fn a_lease_grants_and_a_revoke_ends_the_sessions() {
+    let lab = Lab::start().await;
+    let _h = lab.host("lab1").await;
+    lab.td.project("terra").await;
+    let lead = id_of(
+        &lab.td
+            .agent("terra", "lead", json!({"roles": ["project_admin"]}))
+            .await,
+    );
+    let w = id_of(&lab.td.agent("terra", "worker", json!({})).await);
+    lab.target(json!({"name": "box", "kind": "host", "host": "lab1", "project": "terra"}))
+        .await;
+    let body = json!({"cmd": ["sleep", "30"]});
+    let r = lab
+        .td
+        .post_as(&w, "/api/targets/box/exec", body.clone())
+        .await;
+    r.err(403, "forbidden");
+    assert!(
+        r.body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("no lease"),
+        "{}",
+        r.body
+    );
+
+    let g = lab
+        .td
+        .post_as(
+            &lead,
+            "/api/targets/box/leases",
+            json!({"agent": "worker", "reason": "TER-1"}),
+        )
+        .await;
+    assert_eq!(g.status, 201, "{}", g.body);
+    assert_eq!(g.body["state"], "active");
+    assert_eq!(g.body["agent_name"], "terra/worker");
+    assert_eq!(g.body["expires_at"], Value::Null);
+    assert_eq!(g.body["granted_by"], format!("agent:{lead}"));
+    // `targets ls` for the worker shows the lease.
+    let mine = lab.td.get_as(&w, "/api/targets?usable=true").await;
+    let mine = mine.ok().as_array().unwrap().clone();
+    assert_eq!(mine.len(), 1, "{mine:?}");
+    assert_eq!(mine[0]["access"], "lease");
+    assert_eq!(mine[0]["lease"]["exclusive"], false);
+    let held = lab.td.get("/api/agents/terra%2Fworker/leases").await;
+    assert_eq!(held.ok().as_array().unwrap().len(), 1);
+
+    let r = lab
+        .td
+        .post_as(&w, "/api/targets/box/exec", body.clone())
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let sid = r.body["session_id"].as_str().unwrap().to_owned();
+    let r = lab
+        .td
+        .req(
+            hyper::Method::DELETE,
+            "/api/targets/box/leases/worker",
+            None,
+            Some(&lead),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(r.body["state"], "revoked");
+    let d = drain_as(&lab.td, Some(&w), "box", &sid).await;
+    assert_eq!(d.end["type"], "error", "{}", d.end);
+    assert_eq!(d.end["code"], "lease_revoked", "{}", d.end);
+    let r = lab.td.post_as(&w, "/api/targets/box/exec", body).await;
+    r.err(403, "forbidden");
+    assert!(
+        r.body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("your lease on box ended"),
+        "{}",
+        r.body
+    );
+    // A second revoke finds no lease.
+    lab.td
+        .delete("/api/targets/box/leases/worker")
+        .await
+        .err(404, "not_found");
+    let row = last_audit(&lab.td, "target.grant").await;
+    assert_eq!(row["actor"], format!("agent:{lead}"));
+    assert_eq!(row["detail"]["reason"], "TER-1");
+    let row = last_audit(&lab.td, "target.revoke").await;
+    assert_eq!(row["target"], "box");
+    let all = lab.td.get("/api/targets/box/leases?all=true").await;
+    assert_eq!(all.ok().as_array().unwrap().len(), 1);
+    assert_eq!(lab.td.get("/api/targets/box/leases").await.body, json!([]));
+    let ev = events(&lab.td, "lease").await;
+    let changes: Vec<&str> = ev
+        .iter()
+        .map(|e| e["data"]["change"].as_str().unwrap())
+        .collect();
+    assert_eq!(changes, ["granted", "ended"], "{ev:#?}");
+}
+
+/// A lease with a short `until` expires: the timer ends the session with
+/// `lease_revoked`, writes `target.lease_expired` as `system`, and the
+/// next exec is `403`.
+#[tokio::test]
+async fn an_expired_lease_ends_the_sessions() {
+    let lab = Lab::start().await;
+    let _h = lab.host("lab1").await;
+    lab.td.project("terra").await;
+    let w = id_of(&lab.td.agent("terra", "worker", json!({})).await);
+    lab.target(json!({"name": "box", "kind": "host", "host": "lab1"}))
+        .await;
+    let g = lab
+        .td
+        .post(
+            "/api/targets/box/leases",
+            json!({"agent": "terra/worker", "until": "2s"}),
+        )
+        .await;
+    assert_eq!(g.status, 201, "{}", g.body);
+    assert!(g.body["expires_at"].is_string(), "{}", g.body);
+    let r = lab
+        .td
+        .post_as(&w, "/api/targets/box/exec", json!({"cmd": ["sleep", "30"]}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let sid = r.body["session_id"].as_str().unwrap().to_owned();
+    let started = std::time::Instant::now();
+    let d = drain_as(&lab.td, Some(&w), "box", &sid).await;
+    assert_eq!(d.end["code"], "lease_revoked", "{}", d.end);
+    assert!(started.elapsed() < Duration::from_secs(15));
+    let row = last_audit(&lab.td, "target.lease_expired").await;
+    assert_eq!(row["actor"], "system");
+    assert_eq!(row["target"], "box");
+    lab.td
+        .post_as(&w, "/api/targets/box/exec", json!({"cmd": ["true"]}))
+        .await
+        .err(403, "forbidden");
+    let all = lab
+        .td
+        .get("/api/agents/terra%2Fworker/leases?all=true")
+        .await;
+    assert_eq!(all.ok()[0]["state"], "expired");
+    assert_eq!(all.ok()[0]["revoked_by"], "system");
+}
+
+/// An exclusive lease refuses a second lease and names the holder. A
+/// project_admin leases its project's targets to its project's agents; a
+/// global target, or an agent of another project, needs a sysadmin or the
+/// operator. A member cannot lease.
+#[tokio::test]
+async fn exclusive_leases_and_who_may_grant() {
+    let lab = Lab::start().await;
+    lab.td.project("terra").await;
+    lab.td.project("ops").await;
+    let lead = id_of(
+        &lab.td
+            .agent("terra", "lead", json!({"roles": ["project_admin"]}))
+            .await,
+    );
+    let w1 = id_of(&lab.td.agent("terra", "w1", json!({})).await);
+    lab.td.agent("terra", "w2", json!({})).await;
+    lab.td.agent("ops", "o1", json!({})).await;
+    let sys = id_of(
+        &lab.td
+            .agent("ops", "sys", json!({"roles": ["sysadmin"]}))
+            .await,
+    );
+    lab.target(json!({"name": "vm", "kind": "host", "host": "lab1", "project": "terra"}))
+        .await;
+    lab.target(json!({"name": "g", "kind": "host", "host": "lab1"}))
+        .await;
+    let grant = |who: String, target: &'static str, body: Value| {
+        let td = &lab.td;
+        async move {
+            td.post_as(&who, &format!("/api/targets/{target}/leases"), body)
+                .await
+        }
+    };
+    let r = grant(
+        lead.clone(),
+        "vm",
+        json!({"agent": "w1", "until": "30m", "exclusive": true}),
+    )
+    .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert_eq!(r.body["exclusive"], true);
+    let until = r.body["expires_at"].as_str().unwrap().to_owned();
+    let r = grant(lead.clone(), "vm", json!({"agent": "w2"})).await;
+    r.err(409, "lease_held");
+    let msg = r.body["error"]["message"].as_str().unwrap();
+    assert!(msg.contains("terra/w1") && msg.contains(&until), "{msg}");
+    assert_eq!(r.body["error"]["details"]["holder"], "terra/w1");
+    assert_eq!(r.body["error"]["details"]["expires_at"], until.as_str());
+    // The rights.
+    let r = grant(lead.clone(), "g", json!({"agent": "w1"})).await;
+    r.err(403, "forbidden");
+    assert!(
+        r.body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("sysadmin"),
+        "{}",
+        r.body
+    );
+    grant(lead.clone(), "vm", json!({"agent": "ops/o1"}))
+        .await
+        .err(403, "forbidden");
+    grant(w1.clone(), "vm", json!({"agent": "w2"}))
+        .await
+        .err(403, "forbidden");
+    let r = grant(sys.clone(), "g", json!({"agent": "terra/w2"})).await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let r = lab
+        .td
+        .post("/api/targets/g/leases", json!({"agent": "ops/o1"}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    // A project target goes only to an agent of its project.
+    lab.td
+        .post("/api/targets/vm/leases", json!({"agent": "ops/o1"}))
+        .await
+        .err(422, "invalid");
+    // Extend, then a holder gives its own lease back.
+    let r = lab
+        .td
+        .patch_as(&lead, "/api/targets/vm/leases/w1", json!({"until": "2h"}))
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert!(r.body["expires_at"].as_str().unwrap() > until.as_str());
+    assert_eq!(
+        last_audit(&lab.td, "target.lease_extend").await["actor"],
+        format!("agent:{lead}")
+    );
+    let r = lab
+        .td
+        .req(
+            hyper::Method::DELETE,
+            "/api/targets/vm/leases/w1",
+            None,
+            Some(&w1),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let r = grant(lead, "vm", json!({"agent": "w2", "exclusive": true})).await;
+    assert_eq!(r.status, 201, "{}", r.body);
+}
+
+/// A grant to a running agent brings an ephemeral target up (reason
+/// `lease_grant`); the revoke that leaves no running holder brings it down
+/// (reason `lease_end`). A grant to a stopped agent runs no verb.
+#[tokio::test]
+async fn a_grant_to_a_running_agent_brings_an_ephemeral_target_up() {
+    let lab = Lab::start().await;
+    let _h = lab.host("lab1").await;
+    lab.td.project("terra").await;
+    let w = id_of(&lab.td.agent("terra", "worker", json!({})).await);
+    lab.td.agent("terra", "idle", json!({})).await;
+    lab.target(
+        json!({"name": "dbox", "kind": "docker", "host": "lab1", "project": "terra",
+                      "image": "alpine:3", "ephemeral": true}),
+    )
+    .await;
+    // A stopped agent: the grant runs no verb.
+    let r = lab
+        .td
+        .post("/api/targets/dbox/leases", json!({"agent": "terra/idle"}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert!(r.body.get("lifecycle").is_none(), "{}", r.body);
+    assert!(!lab.log().contains("docker run"), "{}", lab.log());
+    lab.td
+        .delete("/api/targets/dbox/leases/terra%2Fidle")
+        .await
+        .ok();
+    assert!(!lab.log().contains("docker rm"), "{}", lab.log());
+
+    lab.td
+        .post_empty(&format!("/api/agents/{w}/start"))
+        .await
+        .ok();
+    lab.td.wait_status(&w, "idle").await;
+    let r = lab
+        .td
+        .post(
+            "/api/targets/dbox/leases",
+            json!({"agent": "terra/worker", "until": "1h"}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert_eq!(r.body["lifecycle"]["state"], "running", "{}", r.body);
+    assert!(
+        lab.log()
+            .contains("docker run -d --init --name terrarium-dbox")
+    );
+    let row = last_audit(&lab.td, "target.up").await;
+    assert_eq!(row["actor"], "system");
+    assert_eq!(row["detail"]["reason"], "lease_grant");
+    let r = lab
+        .td
+        .delete("/api/targets/dbox/leases/terra%2Fworker")
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert!(
+        lab.log().contains("docker rm -f -v terrarium-dbox"),
+        "{}",
+        lab.log()
+    );
+    let row = last_audit(&lab.td, "target.destroy").await;
+    assert_eq!(row["detail"]["reason"], "lease_end");
+    assert_eq!(
+        lab.td.get("/api/targets/dbox").await.ok()["state"],
+        "absent"
+    );
+}
+
+/// A running agent that holds the target in its policy keeps it up when
+/// another agent's lease ends: the grant runs no second `up`, and the
+/// revoke no destroy.
+#[tokio::test]
+async fn a_lease_end_leaves_a_target_that_a_policy_holder_uses() {
+    let lab = Lab::start().await;
+    let _h = lab.host("lab1").await;
+    lab.td.project("terra").await;
+    let owner = id_of(
+        &lab.td
+            .agent("terra", "owner", json!({"policy": {"targets": ["dbox"]}}))
+            .await,
+    );
+    let w = id_of(&lab.td.agent("terra", "worker", json!({})).await);
+    lab.target(
+        json!({"name": "dbox", "kind": "docker", "host": "lab1", "project": "terra",
+                      "image": "alpine:3", "ephemeral": true}),
+    )
+    .await;
+    for a in [&owner, &w] {
+        lab.td
+            .post_empty(&format!("/api/agents/{a}/start"))
+            .await
+            .ok();
+        lab.td.wait_status(a, "idle").await;
+    }
+    lab.td.post_empty("/api/targets/dbox/up").await.ok();
+    let runs = lab.log().matches("docker run").count();
+    let r = lab
+        .td
+        .post("/api/targets/dbox/leases", json!({"agent": "terra/worker"}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert!(r.body.get("lifecycle").is_none(), "up already: {}", r.body);
+    assert_eq!(lab.log().matches("docker run").count(), runs);
+    lab.td
+        .delete("/api/targets/dbox/leases/terra%2Fworker")
+        .await
+        .ok();
+    assert!(!lab.log().contains("docker rm"), "{}", lab.log());
+}

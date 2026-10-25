@@ -9,6 +9,7 @@ use terrarium_core::config::Policy;
 
 use crate::actor::{Actor, AgentActor};
 use crate::error::{ApiError, ApiResult};
+use crate::store::leases::Standing;
 use crate::store::mail::Address;
 
 fn deny(what: &str, need: &str) -> ApiError {
@@ -151,10 +152,17 @@ pub fn operator_only(actor: &Actor, what: &str) -> ApiResult<()> {
 
 /// Use a target: exec, shell, copy, and its lifecycle verbs (PLAN §9,
 /// §19). The operator may use every target. An agent may use a target that
-/// its `policy.targets` lists, when the target is global or in the agent's
-/// own project. The role does not widen this: a sysadmin agent also needs
-/// the name in its policy.
-pub fn use_target(actor: &Actor, target: &str, target_project: Option<&str>) -> ApiResult<()> {
+/// its `policy.targets` lists, or that it holds an active lease on
+/// (docs/api.md §17.7), when the target is global or in the agent's own
+/// project. The role does not widen this: a sysadmin agent also needs the
+/// name in its policy or a lease. `lease` is the agent's lease standing on
+/// the target.
+pub fn use_target(
+    actor: &Actor,
+    target: &str,
+    target_project: Option<&str>,
+    lease: Standing,
+) -> ApiResult<()> {
     let Actor::Agent(a) = actor else {
         return Ok(());
     };
@@ -166,12 +174,56 @@ pub fn use_target(actor: &Actor, target: &str, target_project: Option<&str>) -> 
         )));
     }
     if a.policy.targets.iter().any(|t| t == target) {
-        Ok(())
-    } else {
-        Err(ApiError::forbidden(format!(
-            "target `{target}` is not in your policy.targets; ask a project admin to add it"
-        )))
+        return Ok(());
     }
+    match lease {
+        Standing::Active => Ok(()),
+        Standing::Ended => Err(ApiError::forbidden(format!(
+            "your lease on {target} ended; ask your lead to grant it again"
+        ))),
+        Standing::None => Err(ApiError::forbidden(format!(
+            "target `{target}` is not in your policy.targets, and you hold no lease on it; \
+             ask a project admin to add it or to grant a lease"
+        ))),
+    }
+}
+
+/// Grant, extend, or revoke a lease on a target (docs/api.md §17.7). The
+/// operator and a sysadmin may lease any target to any agent. A
+/// project_admin may lease a target of its own project to an agent of its
+/// own project; a global target needs a sysadmin, as a global target in a
+/// policy does (F13).
+pub fn lease_target(
+    actor: &Actor,
+    target: &str,
+    target_project: Option<&str>,
+    agent_project: &str,
+) -> ApiResult<()> {
+    let Actor::Agent(a) = actor else {
+        return Ok(());
+    };
+    if a.is_sysadmin() {
+        return Ok(());
+    }
+    let Some(p) = target_project else {
+        return Err(deny(
+            &format!("leasing the global target `{target}`"),
+            "sysadmin or the operator",
+        ));
+    };
+    if !a.is_admin_of(p) {
+        return Err(deny(
+            &format!("leasing target `{target}`"),
+            &format!("project_admin of `{p}`, sysadmin, or the operator"),
+        ));
+    }
+    if agent_project != p {
+        return Err(deny(
+            &format!("leasing target `{target}` to an agent of project `{agent_project}`"),
+            "sysadmin or the operator",
+        ));
+    }
+    Ok(())
 }
 
 /// The entries that a policy write adds to the policy of an agent of
@@ -549,6 +601,36 @@ mod tests {
         let g = policy_grants("p", None, &policy(&["buildbox"], &[], &["ops/x"]), &local);
         assert_eq!(g.len(), 2, "{g:?}");
         assert!(admin_project(&member, "p", "x").is_err());
+    }
+
+    /// Leases: the policy or an active lease lets an agent use a target;
+    /// an ended lease names itself. A project_admin leases its project's
+    /// targets to its project's agents; a global target needs sysadmin.
+    #[test]
+    fn leases_widen_use_and_follow_the_roles() {
+        let worker = Actor::Agent(agent("p", &[], Policy::default()));
+        assert!(use_target(&worker, "vm", Some("p"), Standing::Active).is_ok());
+        assert!(use_target(&worker, "vm", None, Standing::Active).is_ok());
+        let e = use_target(&worker, "vm", Some("p"), Standing::Ended).unwrap_err();
+        assert!(
+            e.message.contains("your lease on vm ended"),
+            "{}",
+            e.message
+        );
+        let e = use_target(&worker, "vm", Some("p"), Standing::None).unwrap_err();
+        assert!(e.message.contains("policy.targets"), "{}", e.message);
+        // A lease does not cross projects.
+        assert!(use_target(&worker, "vm", Some("q"), Standing::Active).is_err());
+        let admin = Actor::Agent(agent("p", &[Role::ProjectAdmin], Policy::default()));
+        let sys = Actor::Agent(agent("q", &[Role::Sysadmin], Policy::default()));
+        assert!(lease_target(&admin, "vm", Some("p"), "p").is_ok());
+        let e = lease_target(&admin, "g", None, "p").unwrap_err();
+        assert!(e.message.contains("sysadmin"), "{}", e.message);
+        assert!(lease_target(&admin, "vm", Some("p"), "q").is_err());
+        assert!(lease_target(&admin, "vm", Some("q"), "q").is_err());
+        assert!(lease_target(&worker, "vm", Some("p"), "p").is_err());
+        assert!(lease_target(&sys, "g", None, "p").is_ok());
+        assert!(lease_target(&Actor::Operator, "g", None, "p").is_ok());
     }
 
     #[test]

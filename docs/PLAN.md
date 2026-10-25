@@ -477,6 +477,7 @@ to the audit log with the agent's ID.
 | Assign, reassign, reopen any card; edit columns and WIP limits | no | in project | anywhere |
 | Edit or delete any memory | no | in project | anywhere |
 | Attach repos, define project targets | no | in project | anywhere |
+| Lease a target to an agent at run time (§19; a global target needs sysadmin) | no | in project | anywhere |
 | Create and delete projects | no | no | yes |
 | Define global targets | no | no | yes |
 | List host agents | yes | yes | yes |
@@ -504,6 +505,7 @@ terrarium admin agent set <name> --prompt ... | --policy ...
 terrarium admin project new <name> | rm <name> --confirm        sysadmin
 terrarium admin role grant|revoke <agent> <role>
 terrarium admin target new ... | host ls                        sysadmin for global
+terrarium admin target grant|revoke <target> <agent> [--until 30m] [--exclusive]
 terrarium admin audit [--since ...]
 ```
 
@@ -679,6 +681,11 @@ terrarium card new --from-mail <id> [...]
 
 Humans use the same mailbox. `terrarium mail send <agent> ...` from the
 operator shell or the dashboard sends as `operator`.
+
+The push path also carries target lease changes (§19): "You now have access
+to target <t> until <time or 'revoked'>. Run `terrarium targets ls`." and
+"Your access to target <t> ended." A pointer for a stopped agent waits for
+its next start, as a card pointer does.
 
 ---
 
@@ -1217,6 +1224,19 @@ on agent stop unless `keep = true`.
 With `snapshot_before_task` (vmlab only), the daemon takes the snapshot
 `terrarium-clean` after `up` and before any exec, and restores a kept target
 to it on agent stop (docs/api.md §17.3).
+
+**Target leases.** `policy.targets` is static. A lead can also give a
+target to an agent at run time, and take it back: `terrarium admin target
+grant <target> <agent> [--until 30m] [--exclusive]` and `admin target
+revoke`. An agent may use a target that its policy lists or that it holds
+an active lease on. An exclusive lease keeps other agents off the target
+(`409 lease_held` names the holder and its expiry). On a revoke or the
+expiry, the daemon ends the agent's live sessions on the target
+(`lease_revoked`) at once. A grant to a running agent brings an ephemeral
+target up; the end of the last running holder brings it down, with the
+keep and restore rules. The rights follow the policy rule (F13): a
+project_admin leases its project's targets to its project's agents; a
+global target needs sysadmin (docs/api.md §17.7).
 
 The executor protocol is internal: `exec{target, cmd, cwd, env, timeout,
 pty}` with streamed output and exit code, plus `cp` and lifecycle verbs. The

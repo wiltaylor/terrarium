@@ -107,8 +107,49 @@ fn with_online(items: &[Value]) -> Vec<Value> {
         .collect()
 }
 
-/// `targets ls`: an agent sees the targets its policy lets it use; the
-/// operator sees all, or a project's with `-p`.
+/// The columns of `targets ls` in agent mode: also how the agent holds
+/// each target (`policy` or `lease`), and the lease's flag and end.
+const AGENT_TARGET_COLS: &[(&str, &str)] = &[
+    ("NAME", "name"),
+    ("KIND", "kind"),
+    ("SCOPE", "scope"),
+    ("HOST", "host"),
+    ("STATE", "state"),
+    ("ONLINE", "online"),
+    ("ACCESS", "access"),
+    ("EXCLUSIVE", "exclusive"),
+    ("EXPIRES", "expires"),
+];
+
+/// The lease fields of a target for the agent table.
+fn with_access(items: Vec<Value>) -> Vec<Value> {
+    items
+        .into_iter()
+        .map(|mut t| {
+            let lease = t["lease"].clone();
+            let leased = lease.is_object();
+            t["exclusive"] = if leased {
+                if lease["exclusive"] == true {
+                    "yes"
+                } else {
+                    "no"
+                }
+                .into()
+            } else {
+                "-".into()
+            };
+            t["expires"] = match lease["expires_at"].as_str() {
+                Some(e) => e.into(),
+                None if leased => "revoked".into(),
+                None => "-".into(),
+            };
+            t
+        })
+        .collect()
+}
+
+/// `targets ls`: an agent sees the targets its policy or a lease lets it
+/// use; the operator sees all, or a project's with `-p`.
 pub async fn targets(ctx: &Ctx) -> anyhow::Result<()> {
     let (path, q) = if ctx.is_agent() {
         (
@@ -126,9 +167,50 @@ pub async fn targets(ctx: &Ctx) -> anyhow::Result<()> {
     };
     let items = ctx.api.list(&path, q, None).await?;
     let v = Value::Array(items);
+    let agent = ctx.is_agent();
     ctx.emit(&v, |c, v| {
-        print_table(c, &with_online(as_items(v)), TARGET_COLS, "no targets")
+        let rows = with_online(as_items(v));
+        if agent {
+            print_table(c, &with_access(rows), AGENT_TARGET_COLS, "no targets");
+        } else {
+            print_table(c, &rows, TARGET_COLS, "no targets");
+        }
     })
+}
+
+const LEASE_COLS: &[(&str, &str)] = &[
+    ("TARGET", "target"),
+    ("AGENT", "agent_name"),
+    ("STATE", "state"),
+    ("EXCLUSIVE", "exclusive"),
+    ("EXPIRES", "expires_at"),
+    ("GRANTED BY", "granted_by"),
+    ("REASON", "reason"),
+];
+
+/// A lease list as a table.
+pub fn print_leases(ctx: &Ctx, v: &Value) {
+    print_table(ctx, as_items(v), LEASE_COLS, "no leases");
+}
+
+/// `until <time>` or `until revoked`, for a lease.
+fn until(l: &Value) -> String {
+    match l["expires_at"].as_str() {
+        Some(t) => format!("until {t}"),
+        None => "until revoked".into(),
+    }
+}
+
+fn lease_path(target: &str, agent: Option<&str>) -> String {
+    let base = format!("/api/targets/{}/leases", crate::transport::encode(target));
+    match agent {
+        Some(a) => format!("{base}/{}", crate::transport::encode(a)),
+        None => base,
+    }
+}
+
+fn all_query(all: bool) -> Vec<(String, String)> {
+    query([("all", all.then(|| "true".to_owned()))])
 }
 
 pub async fn admin_target(ctx: &Ctx, cmd: &AdminTargetCmd) -> anyhow::Result<()> {
@@ -193,6 +275,74 @@ pub async fn admin_target(ctx: &Ctx, cmd: &AdminTargetCmd) -> anyhow::Result<()>
             ctx.emit(&v, |c, v| {
                 c.line(format!("{name}: {verb}: {}", field(v, "state")));
             })
+        }
+        AdminTargetCmd::Grant {
+            target,
+            agent,
+            until: end,
+            exclusive,
+            reason,
+        } => {
+            let mut body = json!({"agent": agent});
+            set_opt(&mut body, "until", end.clone());
+            if *exclusive {
+                body["exclusive"] = true.into();
+            }
+            set_opt(&mut body, "reason", reason.clone());
+            let v = ctx.api.post(&lease_path(target, None), Some(body)).await?;
+            ctx.emit(&v, |c, v| {
+                c.line(format!(
+                    "granted {target} to {} {}{}",
+                    field(v, "agent_name"),
+                    until(v),
+                    if v["exclusive"] == true {
+                        " (exclusive)"
+                    } else {
+                        ""
+                    }
+                ));
+                if let Some(e) = v["lifecycle_error"].as_str() {
+                    c.line(format!("warning: the target did not come up: {e}"));
+                }
+            })
+        }
+        AdminTargetCmd::Revoke { target, agent } => {
+            let v = ctx
+                .api
+                .delete(&lease_path(target, Some(agent)), vec![])
+                .await?;
+            ctx.emit(&v, |c, v| {
+                c.line(format!(
+                    "revoked the lease of {} on {target}",
+                    field(v, "agent_name")
+                ));
+            })
+        }
+        AdminTargetCmd::Extend {
+            target,
+            agent,
+            until: end,
+        } => {
+            let end = Some(end.clone()).filter(|u| u != "none");
+            let v = ctx
+                .api
+                .patch(&lease_path(target, Some(agent)), json!({"until": end}))
+                .await?;
+            ctx.emit(&v, |c, v| {
+                c.line(format!(
+                    "the lease of {} on {target} lasts {}",
+                    field(v, "agent_name"),
+                    until(v)
+                ));
+            })
+        }
+        AdminTargetCmd::Leases { target, all } => {
+            let v = Value::Array(
+                ctx.api
+                    .list(&lease_path(target, None), all_query(*all), None)
+                    .await?,
+            );
+            ctx.emit(&v, print_leases)
         }
     }
 }

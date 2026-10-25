@@ -96,6 +96,15 @@ pub async fn agent(ctx: &Ctx, cmd: &AgentCmd) -> anyhow::Result<()> {
                 );
             })
         }
+        AgentCmd::Leases { agent, all } => {
+            let q = crate::api::query([("all", all.then(|| "true".to_owned()))]);
+            let v = Value::Array(
+                ctx.api
+                    .list(&format!("{}/leases", agent_path(agent)), q, None)
+                    .await?,
+            );
+            ctx.emit(&v, super::system::print_leases)
+        }
         AgentCmd::Roles { command } => match command {
             RolesCmd::Get { agent } => show_roles(ctx, agent).await,
             RolesCmd::Set { agent, roles } => put_roles(ctx, agent, roles.clone()).await,

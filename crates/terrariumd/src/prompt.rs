@@ -409,6 +409,23 @@ mod tests {
         }
     }
 
+    /// The project lead template tells the lead how to share one target
+    /// with leases (docs/api.md §17.7), with commands that exist.
+    #[test]
+    fn project_lead_template_shares_a_target_with_leases() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../prompts");
+        let t = load_template(&dir, Some("project-lead")).unwrap();
+        for needle in [
+            "## Shared target",
+            "terrarium admin target grant <target> <worker> --exclusive --until",
+            "terrarium admin target revoke",
+            "terrarium admin target leases <target>",
+            "`lease_held`",
+        ] {
+            assert!(t.contains(needle), "{needle}");
+        }
+    }
+
     /// `prompts/default.md` and the built-in template stay the same text.
     #[test]
     fn default_template_matches_prompts_default_md() {

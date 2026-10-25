@@ -683,6 +683,30 @@ const MIGRATIONS: &[&str] = &[
     );
     ALTER TABLE messages ADD COLUMN read_by TEXT;
     "#,
+    // 13: runtime target leases (docs/api.md §17.7). A lead gives a target
+    // to an agent for a time, and takes it back. A lease is active while
+    // `revoked_at` is NULL and `expires_at` is NULL or later than now.
+    // `end_reason` says how it ended: `revoked`, or `expired` (the expiry
+    // timer). `project` is the agent's project. No foreign keys: the
+    // history stays after an agent or a target is deleted.
+    r#"
+    CREATE TABLE target_leases (
+        id         TEXT PRIMARY KEY,            -- ULID
+        target     TEXT NOT NULL,
+        agent      TEXT NOT NULL,               -- agent ULID
+        project    TEXT NOT NULL,
+        granted_by TEXT NOT NULL,               -- `operator` or `agent:<ulid>`
+        granted_at TEXT NOT NULL,
+        expires_at TEXT,
+        exclusive  INTEGER NOT NULL DEFAULT 0,
+        revoked_at TEXT,
+        revoked_by TEXT,
+        end_reason TEXT CHECK (end_reason IN ('revoked', 'expired')),
+        reason     TEXT
+    );
+    CREATE INDEX target_leases_target ON target_leases(target, revoked_at);
+    CREATE INDEX target_leases_agent ON target_leases(agent, revoked_at);
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call
@@ -773,7 +797,17 @@ impl<'c> std::ops::Deref for Tx<'c> {
     }
 }
 
-impl Tx<'_> {
+impl<'c> Tx<'c> {
+    /// A transaction for unit tests: the events stay in it.
+    #[cfg(test)]
+    pub fn for_test(tx: rusqlite::Transaction<'c>, actor: &str) -> Self {
+        Self {
+            tx,
+            actor: actor.to_owned(),
+            events: Vec::new(),
+        }
+    }
+
     /// Append an event to the log. Subscribers get it after the commit.
     pub fn emit(&mut self, draft: EventDraft) -> ApiResult<StoredEvent> {
         let event = crate::events::insert(&self.tx, &self.actor, draft)?;
@@ -888,6 +922,7 @@ mod tests {
             "targets",
             "fleets",
             "fleet_objects",
+            "target_leases",
         ] {
             let n: i64 = conn
                 .query_row(

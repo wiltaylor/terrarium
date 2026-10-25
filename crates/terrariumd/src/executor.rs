@@ -51,6 +51,7 @@ use crate::credentials::{CredentialStore, Secret};
 use crate::error::{ApiError, ApiResult, Code};
 use crate::hosts::{HostRegistry, HostSession, SessionEvent};
 use crate::policy;
+use crate::store::leases;
 use crate::store::targets::{self, TargetRow};
 
 /// Live exec sessions an agent may hold at once.
@@ -1208,6 +1209,23 @@ impl Executor {
     pub fn session_count(&self) -> usize {
         self.table().len()
     }
+
+    /// End the live sessions of `agent` on `target`: each ends with the
+    /// error `code` and `message`, and its run is killed. For a lease that
+    /// ended (`lease_revoked`). Returns the number of sessions.
+    pub fn end_sessions(&self, target: &str, agent: &str, code: &str, message: &str) -> usize {
+        let live: Vec<Arc<ExecSession>> = self
+            .table()
+            .values()
+            .filter(|s| s.target == target && s.owner.as_deref() == Some(agent) && !s.is_done())
+            .cloned()
+            .collect();
+        for s in &live {
+            s.finish(End::error(code, message));
+            s.kill();
+        }
+        live.len()
+    }
 }
 
 fn known_hosts(state_dir: &Path) -> ApiResult<PathBuf> {
@@ -1322,11 +1340,23 @@ async fn verb_ok(
 
 // ----------------------------------------------------------------- policy
 
-/// Load a target and check that the actor may use it.
+/// Load a target and check that the actor may use it: its policy lists
+/// the target, or it holds an active lease on it (docs/api.md §17.7).
 pub async fn usable(state: &Shared, actor: &Actor, name: &str) -> ApiResult<TargetRow> {
     let n = name.to_owned();
-    let row = state.db.read(move |c| targets::get(c, &n)).await?;
-    policy::use_target(actor, &row.def.name, row.def.project.as_deref())?;
+    let agent = actor.agent().map(|a| a.id.clone());
+    let (row, lease) = state
+        .db
+        .read(move |c| {
+            let row = targets::get(c, &n)?;
+            let lease = match &agent {
+                Some(a) => leases::standing(c, &n, a)?,
+                None => leases::Standing::None,
+            };
+            Ok((row, lease))
+        })
+        .await?;
+    policy::use_target(actor, &row.def.name, row.def.project.as_deref(), lease)?;
     Ok(row)
 }
 
@@ -1979,9 +2009,16 @@ fn clean_opts() -> LifecycleOpts {
 /// ephemeral target without `keep` gets a new one on each start. A
 /// permanent target gets it on the first agent start that finds it running.
 ///
-/// Call site: `RunnerSupervisor::start`, for each name in the agent's
-/// `policy.targets`, before the harness launches.
+/// Call sites: `RunnerSupervisor::start` ([`on_agent_start`]), for each
+/// target the agent holds, before the harness launches; and a lease grant
+/// to a running agent (`crate::leases`).
 pub async fn ensure_up(state: &Shared, target: &str) -> ApiResult<Option<Value>> {
+    ensure_up_for(state, target, "agent_start").await
+}
+
+/// [`ensure_up`] with the `reason` of the `target.up` audit row
+/// (`agent_start`, or `lease_grant`).
+pub async fn ensure_up_for(state: &Shared, target: &str, reason: &str) -> ApiResult<Option<Value>> {
     let n = target.to_owned();
     let row = state.db.read(move |c| targets::get(c, &n)).await?;
     let wants_snapshot = row.def.snapshot_before_task
@@ -2012,7 +2049,7 @@ pub async fn ensure_up(state: &Shared, target: &str) -> ApiResult<Option<Value>>
         &LifecycleOpts::default(),
     )
     .await?;
-    audit_system(state, &row, "target.up", "agent_start", &out).await?;
+    audit_system(state, &row, "target.up", reason, &out).await?;
     if wants_snapshot {
         take_clean(state, &row).await?;
     }
@@ -2058,10 +2095,21 @@ async fn audit_system(
 /// it clean. It stays up, as a kept target does. A target that is
 /// destroyed needs no restore.
 ///
-/// Call site: the supervisor's stop path (`RunnerSupervisor::stop` and the
-/// exit of a harness that will not restart), for each name in the agent's
-/// `policy.targets`.
+/// Call sites: the supervisor's stop path ([`on_agent_stop`]:
+/// `RunnerSupervisor::stop` and the exit of a harness that will not
+/// restart), for each target the agent holds; and the end of a lease that
+/// leaves no running holder (`crate::leases`).
 pub async fn maybe_down(state: &Shared, target: &str) -> ApiResult<Option<Value>> {
+    maybe_down_for(state, target, "agent_stop").await
+}
+
+/// [`maybe_down`] with the `reason` of the audit row (`agent_stop`, or
+/// `lease_end`).
+pub async fn maybe_down_for(
+    state: &Shared,
+    target: &str,
+    reason: &str,
+) -> ApiResult<Option<Value>> {
     let n = target.to_owned();
     let row = state.db.read(move |c| targets::get(c, &n)).await?;
     if !row.def.ephemeral {
@@ -2075,7 +2123,7 @@ pub async fn maybe_down(state: &Shared, target: &str) -> ApiResult<Option<Value>
             return Ok(None);
         }
         let out = lifecycle(state, &row.def, LifecycleVerb::Restore, &clean_opts()).await?;
-        audit_system(state, &row, "target.restore", "agent_stop", &out).await?;
+        audit_system(state, &row, "target.restore", reason, &out).await?;
         return Ok(Some(out));
     }
     let out = lifecycle(
@@ -2085,16 +2133,99 @@ pub async fn maybe_down(state: &Shared, target: &str) -> ApiResult<Option<Value>
         &LifecycleOpts::default(),
     )
     .await?;
-    audit_system(state, &row, "target.destroy", "agent_stop", &out).await?;
+    audit_system(state, &row, "target.destroy", reason, &out).await?;
     Ok(Some(out))
 }
 
-/// [`ensure_up`] for every target in an agent's policy. Failures are
-/// logged and returned; they do not stop the others.
-pub async fn on_agent_start(state: &Shared, policy_targets: &[String]) -> Vec<(String, ApiError)> {
+/// The agents that hold `target` now and run: a running agent whose
+/// `policy.targets` lists it, or that holds an active lease on it. `except`
+/// is left out (the agent that starts or stops).
+pub async fn running_holders(
+    state: &Shared,
+    target: &str,
+    except: Option<&str>,
+) -> ApiResult<Vec<String>> {
+    let t = target.to_owned();
+    let ids = state
+        .db
+        .read(move |c| {
+            let mut stmt = c.prepare("SELECT id, policy FROM agents ORDER BY id")?;
+            let mut ids: Vec<String> = stmt
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .filter(|(_, p)| {
+                    crate::store::json_col::<terrarium_core::config::Policy>(p)
+                        .targets
+                        .contains(&t)
+                })
+                .map(|(id, _)| id)
+                .collect();
+            for l in leases::active_on(c, &t)? {
+                if !ids.contains(&l.agent) {
+                    ids.push(l.agent);
+                }
+            }
+            Ok(ids)
+        })
+        .await?;
+    let mut out = Vec::new();
+    for id in ids {
+        if Some(id.as_str()) == except {
+            continue;
+        }
+        let Ok(aid) = id.parse::<terrarium_core::AgentId>() else {
+            continue;
+        };
+        if state
+            .supervisor
+            .status(aid)
+            .await
+            .is_some_and(|s| s.is_live() || s == terrarium_core::AgentStatus::Restarting)
+        {
+            out.push(id);
+        }
+    }
+    Ok(out)
+}
+
+/// The targets an agent holds: its `policy.targets`, and the targets of
+/// its active leases.
+async fn held_targets(state: &Shared, agent: &str, policy_targets: &[String]) -> Vec<String> {
+    let mut out = policy_targets.to_vec();
+    let a = agent.to_owned();
+    match state.db.read(move |c| leases::active_of(c, &a)).await {
+        Ok(ls) => {
+            for l in ls {
+                if !out.contains(&l.target) {
+                    out.push(l.target);
+                }
+            }
+        }
+        Err(e) => warn!(agent = %agent, "cannot read the leases: {e}"),
+    }
+    out
+}
+
+/// [`ensure_up`] for every target the agent holds (its policy and its
+/// leases), unless another running agent holds it: then it is up already.
+/// Failures are logged and returned; they do not stop the others.
+pub async fn on_agent_start(
+    state: &Shared,
+    agent: &str,
+    policy_targets: &[String],
+) -> Vec<(String, ApiError)> {
     let mut errors = Vec::new();
-    for t in policy_targets {
-        if let Err(e) = ensure_up(state, t).await {
+    for t in held_targets(state, agent, policy_targets).await {
+        match running_holders(state, &t, Some(agent)).await {
+            Ok(h) if !h.is_empty() => continue,
+            Ok(_) => {}
+            Err(e) => {
+                errors.push((t.clone(), e));
+                continue;
+            }
+        }
+        if let Err(e) = ensure_up(state, &t).await {
             warn!(target = %t, "cannot bring an ephemeral target up: {e}");
             errors.push((t.clone(), e));
         }
@@ -2102,11 +2233,24 @@ pub async fn on_agent_start(state: &Shared, policy_targets: &[String]) -> Vec<(S
     errors
 }
 
-/// [`maybe_down`] for every target in an agent's policy.
-pub async fn on_agent_stop(state: &Shared, policy_targets: &[String]) -> Vec<(String, ApiError)> {
+/// [`maybe_down`] for every target the agent holds (its policy and its
+/// leases), unless another running agent still holds it.
+pub async fn on_agent_stop(
+    state: &Shared,
+    agent: &str,
+    policy_targets: &[String],
+) -> Vec<(String, ApiError)> {
     let mut errors = Vec::new();
-    for t in policy_targets {
-        if let Err(e) = maybe_down(state, t).await {
+    for t in held_targets(state, agent, policy_targets).await {
+        match running_holders(state, &t, Some(agent)).await {
+            Ok(h) if !h.is_empty() => continue,
+            Ok(_) => {}
+            Err(e) => {
+                errors.push((t.clone(), e));
+                continue;
+            }
+        }
+        if let Err(e) = maybe_down(state, &t).await {
             warn!(target = %t, "cannot remove an ephemeral target: {e}");
             errors.push((t.clone(), e));
         }

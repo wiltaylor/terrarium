@@ -36,9 +36,11 @@
 //! - When the harness exits, the supervisor applies the restart policy of
 //!   PLAN §18: exponential backoff, crash-loop detection, and a fresh session
 //!   with a recap turn when a resume fails.
-//! - A hub listener sees new mail and card assignments. It types the push
-//!   pointer of PLAN §12 and §13 when the agent is idle, else after the next
-//!   turn ends. One pending pointer covers all new items.
+//! - A hub listener sees new mail, card assignments, and target lease
+//!   changes (docs/api.md §17.7). It types the push pointer of PLAN §12 and
+//!   §13 when the agent is idle, else after the next turn ends. One pending
+//!   pointer covers all new items. A card or lease pointer for an agent that
+//!   does not run waits for its next launch.
 //! - The same listener nudges the leads: a card with no assignee in
 //!   `ready`, or a move to `review` or `blocked`, adds a line to the pointer
 //!   of each `project_admin` agent of the project, except the agent that
@@ -398,6 +400,34 @@ struct CardItem {
     change: CardChange,
 }
 
+/// A change of a target lease of the agent (docs/api.md §17.7).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LeaseChange {
+    /// Granted or extended: `until` is the expiry, `None` until a revoke.
+    Granted { until: Option<String> },
+    /// Revoked or expired.
+    Ended,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LeaseItem {
+    target: String,
+    change: LeaseChange,
+}
+
+impl LeaseItem {
+    fn line(&self) -> String {
+        let t = &self.target;
+        match &self.change {
+            LeaseChange::Granted { until } => format!(
+                "You now have access to target {t} until {}. Run `terrarium targets ls`.",
+                until.as_deref().unwrap_or("revoked")
+            ),
+            LeaseChange::Ended => format!("Your access to target {t} ended."),
+        }
+    }
+}
+
 /// A board change that a project lead acts on (a lead nudge).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LeadChange {
@@ -480,11 +510,24 @@ struct Pointer {
     mail: Vec<MailItem>,
     cards: Vec<CardItem>,
     leads: Vec<LeadItem>,
+    leases: Vec<LeaseItem>,
 }
 
 impl Pointer {
     fn is_empty(&self) -> bool {
-        self.mail.is_empty() && self.cards.is_empty() && self.leads.is_empty()
+        self.mail.is_empty()
+            && self.cards.is_empty()
+            && self.leads.is_empty()
+            && self.leases.is_empty()
+    }
+
+    /// One item for each target: the newest change replaces the text, so
+    /// a grant and a revoke before the push type only "ended".
+    fn add_lease(&mut self, l: LeaseItem) {
+        match self.leases.iter_mut().find(|x| x.target == l.target) {
+            Some(x) => *x = l,
+            None => self.leases.push(l),
+        }
     }
 
     /// One item for each card and change: a newer event of the same kind
@@ -522,6 +565,9 @@ impl Pointer {
         for l in other.leads {
             self.add_lead(l);
         }
+        for l in other.leases {
+            self.add_lease(l);
+        }
     }
 
     /// The pointer turn. One line per thread and per card, in the words of
@@ -553,6 +599,7 @@ impl Pointer {
             });
         }
         lines.extend(self.leads.iter().map(LeadItem::line));
+        lines.extend(self.leases.iter().map(LeaseItem::line));
         lines.join("\n")
     }
 
@@ -653,11 +700,12 @@ struct Inner {
     holds: Mutex<HashMap<AgentId, Held>>,
     /// The lead nudges of each project that wait for the rate limit.
     nudges: Mutex<HashMap<String, NudgeQueue>>,
-    /// The card pointers of agents that do not run: a card assigned (or
-    /// unblocked) before the start. The next launch puts them into the
-    /// pointer, which goes out at the first idle. Locked only inside
-    /// `slots`, never the other way round.
-    parked: Mutex<HashMap<AgentId, Vec<CardItem>>>,
+    /// The card and lease pointers of agents that do not run: a card
+    /// assigned (or unblocked), or a lease granted or ended, before the
+    /// start. The next launch puts them into the pointer, which goes out at
+    /// the first idle. Locked only inside `slots`, never the other way
+    /// round.
+    parked: Mutex<HashMap<AgentId, Pointer>>,
     tx: broadcast::Sender<SupervisorEvent>,
     state: OnceLock<Weak<AppState>>,
     shutting_down: AtomicBool,
@@ -1205,8 +1253,8 @@ impl RunnerSupervisor {
                     for m in view.queued {
                         slot.pointer.add_mail(m);
                     }
-                    for c in lock(&self.inner.parked).remove(&id).unwrap_or_default() {
-                        slot.pointer.add_card(c);
+                    if let Some(p) = lock(&self.inner.parked).remove(&id) {
+                        slot.pointer.merge(p);
                     }
                     true
                 }
@@ -1319,8 +1367,8 @@ impl RunnerSupervisor {
             slot.reached_idle = hello.status != AgentStatus::Starting;
             slot.seen = hello.status;
             slot.pointer_busy = false;
-            for c in lock(&self.inner.parked).remove(&id).unwrap_or_default() {
-                slot.pointer.add_card(c);
+            if let Some(p) = lock(&self.inner.parked).remove(&id) {
+                slot.pointer.merge(p);
             }
             if let Some(s) = &hello.session {
                 // A later crash restarts with resume of this session.
@@ -1660,15 +1708,13 @@ impl RunnerSupervisor {
         }
     }
 
-    /// Bring the ephemeral targets of the agent's policy up (PLAN §19). A
-    /// target that does not come up does not stop the start; the agent
-    /// gets a notification event.
+    /// Bring the ephemeral targets of the agent's policy and leases up
+    /// (PLAN §19). A target that does not come up does not stop the start;
+    /// the agent gets a notification event.
     async fn targets_up(&self, agent: &Agent) {
-        if agent.policy.targets.is_empty() {
-            return;
-        }
         let Some(state) = self.state() else { return };
-        for (t, e) in crate::executor::on_agent_start(&state, &agent.policy.targets).await {
+        let id = agent.id.to_string();
+        for (t, e) in crate::executor::on_agent_start(&state, &id, &agent.policy.targets).await {
             self.emit(
                 agent.id,
                 SupervisorEventKind::Harness(Event::Notification {
@@ -1679,16 +1725,15 @@ impl RunnerSupervisor {
         }
     }
 
-    /// Remove the ephemeral targets of the agent's policy, unless
-    /// `keep = true` (PLAN §19). In the background: a stop does not wait.
+    /// Remove the ephemeral targets of the agent's policy and leases,
+    /// unless `keep = true` or another running agent holds them (PLAN §19).
+    /// In the background: a stop does not wait.
     fn targets_down(&self, agent: &Agent) {
-        if agent.policy.targets.is_empty() {
-            return;
-        }
         let Some(state) = self.state() else { return };
         let targets = agent.policy.targets.clone();
+        let id = agent.id.to_string();
         tokio::spawn(async move {
-            crate::executor::on_agent_stop(&state, &targets).await;
+            crate::executor::on_agent_stop(&state, &id, &targets).await;
         });
     }
 
@@ -1744,16 +1789,18 @@ impl RunnerSupervisor {
     /// until its next launch (as queued mail waits in the store), so the
     /// order "assign, then start" still gives the agent its pointer.
     fn add_card_pointer(&self, id: AgentId, c: CardItem) {
+        self.add_parked_pointer(id, |p| p.add_card(c));
+    }
+
+    /// Queue a pointer item; an agent that does not run keeps it parked
+    /// until its next launch.
+    fn add_parked_pointer(&self, id: AgentId, add: impl FnOnce(&mut Pointer)) {
         {
             let mut slots = lock(&self.inner.slots);
             match slots.get_mut(&id).filter(|s| s.runner.is_some()) {
-                Some(slot) => slot.pointer.add_card(c),
+                Some(slot) => add(&mut slot.pointer),
                 None => {
-                    let mut parked = lock(&self.inner.parked);
-                    let cards = parked.entry(id).or_default();
-                    if !cards.contains(&c) {
-                        cards.push(c);
-                    }
+                    add(lock(&self.inner.parked).entry(id).or_default());
                     return;
                 }
             }
@@ -2045,6 +2092,19 @@ impl RunnerSupervisor {
                             _ => continue,
                         };
                         me.add_card_pointer(agent, CardItem { card, change });
+                    }
+                    "lease" => {
+                        let Some(target) = s("target") else {
+                            continue;
+                        };
+                        let change = match s("change").as_deref() {
+                            Some("granted" | "extended") => LeaseChange::Granted {
+                                until: s("expires_at"),
+                            },
+                            Some("ended") => LeaseChange::Ended,
+                            _ => continue,
+                        };
+                        me.add_parked_pointer(agent, |p| p.add_lease(LeaseItem { target, change }));
                     }
                     _ => {}
                 }
@@ -3117,6 +3177,33 @@ mod tests {
             "New mail from demo/alice (thread T1). Run `terrarium mail read --thread T1`.\n\
              Card TER-42 was assigned to you. Run `terrarium card show TER-42`."
         );
+    }
+
+    /// A lease line per target; the newest change wins.
+    #[test]
+    fn lease_lines_name_the_target_and_the_expiry() {
+        let mut p = Pointer::default();
+        p.add_lease(LeaseItem {
+            target: "vm".into(),
+            change: LeaseChange::Granted {
+                until: Some("2026-10-25T12:00:00.000Z".into()),
+            },
+        });
+        p.add_lease(LeaseItem {
+            target: "box".into(),
+            change: LeaseChange::Granted { until: None },
+        });
+        assert_eq!(
+            p.text(),
+            "You now have access to target vm until 2026-10-25T12:00:00.000Z. Run `terrarium targets ls`.\n\
+             You now have access to target box until revoked. Run `terrarium targets ls`."
+        );
+        p.add_lease(LeaseItem {
+            target: "vm".into(),
+            change: LeaseChange::Ended,
+        });
+        assert_eq!(p.leases.len(), 2);
+        assert!(p.text().starts_with("Your access to target vm ended.\n"));
     }
 
     fn card_event(data: serde_json::Value) -> crate::events::StoredEvent {

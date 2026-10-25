@@ -143,6 +143,7 @@ terrarium agent answer <agent> [--request-id id] (--choice N | --allow | --deny 
 terrarium agent logs <agent> [--since seq] [--kind k] [--limit n] [--follow]
 terrarium agent attach <agent>                operator mode only; Ctrl-] detaches
 terrarium agent sessions <agent>
+terrarium agent leases <agent> [--all]          the target leases it holds
 terrarium agent roles get <agent>
 terrarium agent roles set <agent> [role]...   no roles means member only
 ```
@@ -303,12 +304,16 @@ terrarium usage                               my subscription and my share
 terrarium usage project                       the project, per agent
 terrarium usage subscriptions                 all plans
 terrarium status set <idle|working|blocked> [--note text]
-terrarium targets ls                          an agent: the targets its policy allows, with host online/offline
+terrarium targets ls                          an agent: the targets its policy or a lease allows, with host online/offline
 terrarium exec <target> [--cwd d] [-e K=V]... [--timeout s] [-i] [-t] -- <cmd>
 terrarium shell <target>                      a login shell in a PTY; Ctrl-] detaches
 terrarium cp <src> <target>:<dst>             one file to the target
 terrarium cp <target>:<src> <dst>             one file from the target
 ```
+
+In agent mode, `targets ls` adds the columns `ACCESS` (`policy` or
+`lease`), `EXCLUSIVE` (`yes` or `no` for a lease, else `-`), and `EXPIRES`
+(the lease end, `revoked` for a lease with no end, else `-`).
 
 These commands use the exec sessions of `api.md` §17.4. They send plain
 requests only, so they work the same in both modes (agent-rpc.md,
@@ -402,6 +407,10 @@ terrarium admin target new <name> --kind host|ssh|docker|vmlab [--host h] [--add
 terrarium admin target ls
 terrarium admin target rm <name>
 terrarium admin target verb <name> up|down|snapshot|restore|status [--snapshot name]
+terrarium admin target grant <target> <agent> [--until 30m|time] [--exclusive] [--reason text]
+terrarium admin target revoke <target> <agent>
+terrarium admin target extend <target> <agent> --until 30m|time|none
+terrarium admin target leases <target> [--all]
 terrarium admin host ls
 terrarium admin host show <name>               the link, the capabilities, and the token use record
 terrarium admin host new <name> [--enrol]      prints the token once, alone on stdout
@@ -414,6 +423,25 @@ terrarium admin fleet validate|plan|apply|ls|show|export ...
 `admin role grant` reads the roles, adds the role, and writes the whole set.
 `admin role revoke` removes the role in the same way. `admin target new`
 makes a project target. Use `--global` for a global target (sysadmin).
+`admin target grant` gives an agent a lease on a target at run time
+([api.md §17.7](api.md#177-target-leases)). The agent may use the target at
+once, and gets a pointer turn. `--until` takes a duration (`90s`, `30m`,
+`2h`, `1d`) or an RFC 3339 time; without it the lease lasts until a revoke.
+`--exclusive` keeps other agents off the target. A refused grant (`409
+lease_held`, exit 1) names the holder and its end. `admin target revoke`
+ends the lease: the agent's live sessions on the target end with
+`lease_revoked`, and the agent gets a pointer turn. An agent may revoke
+its own lease. A project_admin leases the targets of its own project to
+the agents of its own project; a global target needs sysadmin.
+
+| Command | Request | Text output |
+|---|---|---|
+| `admin target grant <t> <a>` | `POST /api/targets/{t}/leases` `{"agent", "until"?, "exclusive"?, "reason"?}` | `granted <t> to <project/name> until <time or revoked>`, with ` (exclusive)`. A line `warning: the target did not come up: ...` when the grant could not bring an ephemeral target up. |
+| `admin target revoke <t> <a>` | `DELETE /api/targets/{t}/leases/{a}` | `revoked the lease of <project/name> on <t>` |
+| `admin target extend <t> <a> --until u` | `PATCH /api/targets/{t}/leases/{a}` `{"until"}` (`none` sends `null`) | `the lease of <project/name> on <t> lasts until <time or revoked>` |
+| `admin target leases <t> [--all]` | `GET /api/targets/{t}/leases[?all=true]` | A table: `TARGET`, `AGENT`, `STATE`, `EXCLUSIVE`, `EXPIRES`, `GRANTED BY`, `REASON`. |
+| `agent leases <a> [--all]` | `GET /api/agents/{a}/leases[?all=true]` | The same table. |
+
 `admin host new`, `admin host rotate`, and `admin host rm` are for the
 operator only (PLAN §10: host agent tokens are operator-only). An agent gets
 `403`. The API is [api.md §17.1](api.md#171-host-agents).

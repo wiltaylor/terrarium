@@ -2879,3 +2879,134 @@ async fn leader_worker_flow_commands() {
     )
     .await;
 }
+
+#[tokio::test]
+async fn target_leases() {
+    let lease = json!({"id": "L1", "target": "vm", "agent": "01W", "agent_name": "terra/w-ter-1",
+                       "state": "active", "exclusive": true,
+                       "expires_at": "2026-10-25T12:00:00.000Z", "granted_by": "agent:01L",
+                       "reason": "TER-1"});
+    let out = ok(
+        true,
+        &[
+            "admin",
+            "target",
+            "grant",
+            "vm",
+            "w-ter-1",
+            "--until",
+            "30m",
+            "--exclusive",
+            "--reason",
+            "TER-1",
+        ],
+        vec![(201, lease.clone())],
+        vec![(
+            Post,
+            "/api/targets/vm/leases",
+            vec![],
+            Some(json!({"agent": "w-ter-1", "until": "30m", "exclusive": true, "reason": "TER-1"})),
+        )],
+    )
+    .await;
+    assert_eq!(
+        out,
+        "granted vm to terra/w-ter-1 until 2026-10-25T12:00:00.000Z (exclusive)\n"
+    );
+    let out = ok(
+        false,
+        &["admin", "target", "grant", "vm", "terra/w"],
+        vec![(
+            201,
+            json!({"agent_name": "terra/w", "expires_at": null, "exclusive": false,
+                   "lifecycle_error": "host lab1 is offline"}),
+        )],
+        vec![(
+            Post,
+            "/api/targets/vm/leases",
+            vec![],
+            Some(json!({"agent": "terra/w"})),
+        )],
+    )
+    .await;
+    assert_eq!(
+        out,
+        "granted vm to terra/w until revoked\nwarning: the target did not come up: host lab1 is offline\n"
+    );
+    let out = ok(
+        true,
+        &["admin", "target", "revoke", "vm", "terra/w-ter-1"],
+        vec![(200, lease.clone())],
+        vec![req(Delete, "/api/targets/vm/leases/terra%2Fw-ter-1")],
+    )
+    .await;
+    assert_eq!(out, "revoked the lease of terra/w-ter-1 on vm\n");
+    let out = ok(
+        true,
+        &[
+            "admin", "target", "extend", "vm", "w-ter-1", "--until", "none",
+        ],
+        vec![(
+            200,
+            json!({"agent_name": "terra/w-ter-1", "expires_at": null}),
+        )],
+        vec![(
+            Patch,
+            "/api/targets/vm/leases/w-ter-1",
+            vec![],
+            Some(json!({"until": null})),
+        )],
+    )
+    .await;
+    assert_eq!(
+        out,
+        "the lease of terra/w-ter-1 on vm lasts until revoked\n"
+    );
+    let out = ok(
+        true,
+        &["admin", "target", "leases", "vm", "--all"],
+        vec![(200, json!([lease.clone()]))],
+        vec![(Get, "/api/targets/vm/leases", vec![("all", "true")], None)],
+    )
+    .await;
+    assert!(
+        out.contains("terra/w-ter-1") && out.contains("TER-1") && out.contains("EXPIRES"),
+        "{out}"
+    );
+    let out = ok(
+        false,
+        &["agent", "leases", "terra/w-ter-1"],
+        vec![(200, json!([]))],
+        vec![req(Get, "/api/agents/terra%2Fw-ter-1/leases")],
+    )
+    .await;
+    assert!(out.contains("no leases"), "{out}");
+    // `targets ls` in agent mode: how the agent holds each target.
+    let out = ok(
+        true,
+        &["targets", "ls"],
+        vec![(
+            200,
+            json!([
+                {"name": "box", "kind": "host", "host": "lab1", "host_online": true,
+                 "access": "policy", "lease": null},
+                {"name": "vm", "kind": "vmlab", "host": "lab1", "host_online": true,
+                 "access": "lease", "lease": lease},
+            ]),
+        )],
+        vec![(Get, "/api/targets", vec![("usable", "true")], None)],
+    )
+    .await;
+    let lines: Vec<&str> = out.lines().collect();
+    assert!(
+        lines[0].contains("ACCESS") && lines[0].contains("EXPIRES"),
+        "{out}"
+    );
+    assert!(lines[1].contains("policy"), "{out}");
+    assert!(
+        lines[2].contains("lease")
+            && lines[2].contains("yes")
+            && lines[2].contains("2026-10-25T12:00:00.000Z"),
+        "{out}"
+    );
+}

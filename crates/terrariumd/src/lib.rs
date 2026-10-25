@@ -14,6 +14,7 @@ pub mod executor;
 pub mod fleet;
 pub mod git;
 pub mod hosts;
+pub mod leases;
 pub mod login_session;
 pub mod policy;
 pub mod probes;
@@ -203,6 +204,7 @@ pub async fn start_with_usage(
         artifact_addr = Some(local);
     }
     tasks.push(spawn_prune_timer(state.clone()));
+    tasks.push(leases::spawn_timer(&state));
     tasks.extend(start_usage(&state).await);
     Ok(Daemon {
         state,

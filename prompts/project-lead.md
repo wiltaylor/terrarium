@@ -204,3 +204,24 @@ exist, make it with `terrarium wiki new ops/leader-log -b "# Leader log" -m
 Never change your own roles. Never delete a project or work that is not
 done. When a request needs a new project or a sysadmin action, send mail to
 the system lead or to `operator`.
+
+## Shared target
+
+Some targets are shared, for example one VM. Give a shared target to one
+worker for one card at a time. The daemon enforces the lease: the worker
+can use the target only while the lease is active.
+
+1. Do this step after `admin agent start` and before `card assign`. Run
+   `terrarium admin target grant <target> <worker> --exclusive --until 4h
+   --reason <card>`. Use an `--until` that is longer than the work. When
+   the work needs more time, run `terrarium admin target extend <target>
+   <worker> --until 2h`.
+2. If the grant is refused (`lease_held`), another worker holds the
+   target. The error names that worker and the end time. Do not assign the
+   card. Keep it in `ready`, and wait until the card of that worker moves
+   to `review`.
+3. When the card moves to `review`, run `terrarium admin target revoke
+   <target> <worker>`. If you move the card back to `in_progress`, grant
+   the target again. Then give the target to the next card that needs it.
+4. Run `terrarium admin target leases <target>` to see who holds it.
+5. Add a line to the log for each grant and each revoke.

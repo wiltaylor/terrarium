@@ -319,6 +319,13 @@ pub enum AgentCmd {
     Attach { agent: String },
     /// The agent's harness sessions, newest first
     Sessions { agent: String },
+    /// The target leases that the agent holds
+    Leases {
+        agent: String,
+        /// Also the leases that ended
+        #[arg(long)]
+        all: bool,
+    },
     /// The agent's roles
     Roles {
         #[command(subcommand)]
@@ -1027,6 +1034,38 @@ pub enum AdminTargetCmd {
     },
     /// List targets
     Ls,
+    /// Give an agent a lease on a target, now
+    Grant {
+        target: String,
+        agent: String,
+        /// The end: a duration (`30m`, `2h`, `1d`) or an RFC 3339 time.
+        /// Without it, the lease lasts until a revoke
+        #[arg(long)]
+        until: Option<String>,
+        /// No other agent may hold a lease on the target at the same time
+        #[arg(long)]
+        exclusive: bool,
+        /// Why, for the audit log (for example the card ID)
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Take a lease back; the agent's live sessions on the target end
+    Revoke { target: String, agent: String },
+    /// Set a new end on a lease
+    Extend {
+        target: String,
+        agent: String,
+        /// A duration (`30m`) or an RFC 3339 time; `none`: until a revoke
+        #[arg(long)]
+        until: String,
+    },
+    /// The leases on a target
+    Leases {
+        target: String,
+        /// Also the leases that ended
+        #[arg(long)]
+        all: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]

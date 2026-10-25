@@ -2010,3 +2010,60 @@ async fn a_stale_lead_nudge_is_dropped() {
     let all = prompts(&td, &lead).await;
     assert_eq!(all, vec!["long work".to_owned(), want], "{all:#?}");
 }
+
+/// Lease pointers (docs/api.md §17.7): a grant types "You now have access
+/// to target ..." into the idle agent, and a revoke types "Your access to
+/// target ... ended.". A grant to a stopped agent waits for its next start.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn lease_grant_and_revoke_push_a_pointer() {
+    let td = Td::start().await;
+    let id = td.agent("demo", "bob", json!({})).await;
+    td.post(
+        "/api/targets",
+        Some(json!({"name": "box", "kind": "host", "host": "lab1", "project": "demo"})),
+    )
+    .await;
+    // Stopped: the pointer is parked until the start.
+    let g = td
+        .post(
+            "/api/targets/box/leases",
+            Some(json!({"agent": "demo/bob"})),
+        )
+        .await;
+    assert_eq!(g["state"], "active", "{g}");
+    td.post(&format!("/api/agents/{id}/start"), None).await;
+    let granted = "You now have access to target box until revoked. Run `terrarium targets ls`.";
+    let starts = td.wait_events(&id, "turn_start", |e| !e.is_empty()).await;
+    assert_eq!(starts[0]["data"]["prompt"], granted);
+    td.wait_status(&id, "idle").await;
+    // Running and idle: the revoke types at once.
+    let (s, b) = td
+        .req(
+            Method::DELETE,
+            "/api/targets/box/leases/demo%2Fbob",
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(s, 200, "{b}");
+    let starts = td.wait_events(&id, "turn_start", |e| e.len() >= 2).await;
+    assert_eq!(
+        starts[1]["data"]["prompt"],
+        "Your access to target box ended."
+    );
+    td.wait_status(&id, "idle").await;
+    // A grant with an expiry names the time.
+    let g = td
+        .post(
+            "/api/targets/box/leases",
+            Some(json!({"agent": "demo/bob", "until": "1h", "exclusive": true})),
+        )
+        .await;
+    let until = g["expires_at"].as_str().unwrap().to_owned();
+    let starts = td.wait_events(&id, "turn_start", |e| e.len() >= 3).await;
+    assert_eq!(
+        starts[2]["data"]["prompt"],
+        format!("You now have access to target box until {until}. Run `terrarium targets ls`.")
+            .as_str()
+    );
+}

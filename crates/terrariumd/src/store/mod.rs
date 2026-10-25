@@ -7,6 +7,7 @@ pub mod artifacts;
 pub mod audit;
 pub mod board;
 pub mod hosts;
+pub mod leases;
 pub mod mail;
 pub mod memory;
 pub mod projects;
