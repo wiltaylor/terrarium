@@ -41,6 +41,9 @@ Env:
                        the text stays unsubmitted: the text stays in the
                        line, as in the Codex composer. Other lines submit
                        on any CR.
+  FAKE_TUI_INPUT_LOG   a path; with FAKE_TUI_SLASH_NEEDS_PAUSE, append one
+                       line for each read of the terminal: the bytes as
+                       hex. ICRNL is off then, so a CR stays a CR.
 
 Signals: SIGTERM and SIGHUP end it at once (the Python default), unless
 FAKE_TUI_IGNORE_HUP is set. When its parent (the runner) dies, it exits
@@ -66,6 +69,7 @@ NO_SUBMIT = os.environ.get("FAKE_TUI_NO_SUBMIT") == "1"
 NO_SUBMIT_HOOK = os.environ.get("FAKE_TUI_NO_SUBMIT_HOOK") == "1"
 SUBMIT_GATE = os.environ.get("FAKE_TUI_SUBMIT_GATE")
 SLASH_NEEDS_PAUSE = os.environ.get("FAKE_TUI_SLASH_NEEDS_PAUSE") == "1"
+INPUT_LOG = os.environ.get("FAKE_TUI_INPUT_LOG")
 # The smallest gap between a slash command and its CR that submits it.
 SLASH_PAUSE = 0.1
 
@@ -80,6 +84,9 @@ def read_line():
     last = time.monotonic()
     while True:
         chunk = os.read(fd, 1024)
+        if INPUT_LOG:
+            with open(INPUT_LOG, "a") as f:
+                f.write(chunk.hex() + "\n")
         if not chunk:
             return buf.decode(errors="replace")
         now = time.monotonic()
@@ -148,6 +155,12 @@ def main():
         # No line discipline: the TUI sees each write when it comes. With
         # ICRNL on, a CR still reads as NL; read_line takes both.
         tty.setcbreak(sys.stdin.fileno())
+        if INPUT_LOG:
+            import termios
+
+            attrs = termios.tcgetattr(sys.stdin.fileno())
+            attrs[0] &= ~termios.ICRNL
+            termios.tcsetattr(sys.stdin.fileno(), termios.TCSANOW, attrs)
     out("fake tui 1.0\n")
     resume = arg("--resume")
     session = resume or arg("--session")

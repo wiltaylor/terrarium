@@ -366,7 +366,8 @@ Rows oldest first. Cursor: `seq`.
 `agent.restart`, `agent.send`, `agent.answer`, `agent.attach`,
 `repo.checkout`, `repo.credential` (each answer of the credential helper),
 `credential.put`, `credential.delete` (§5.1),
-`board.columns`, `card.reassign`, `card.reopen`, `card.archive` (by an admin
+`mail.read` (the first read of a message; `detail` has `thread`, `from`,
+`to`, and `via`: `read` or `reply`), `board.columns`, `card.reassign`, `card.reopen`, `card.archive` (by an admin
 on a card that is not its own), `definitions.sync`, `memory.edit` and
 `memory.delete` (§10), `wiki.delete`, `wiki.move`, `wiki.undelete` (§11),
 `artifact.delete`, `artifact.prune_warning`, `artifact.prune` (§12),
@@ -808,7 +809,10 @@ A message:
 States: `queued`, `delivered`, `read`, `replied`. Mail to an agent waits in
 `queued` for the runner to deliver it. Mail to the operator or to a project
 inbox is `delivered` at once. `delivered_at` and `read_at` are absent until
-set.
+set. The first read (`POST .../read`, or a reply) sets `read_by`, the key of
+the reader (`operator` or an agent ULID), and `read_by_name`, and writes a
+`mail.read` audit row. A read again changes nothing. After `agent rm`, the
+`from_name` and `to_name` of the agent's mail keep its name.
 
 Each row has one recipient. The **participants** of a thread are the
 addresses that sent or received a message on it. A reply goes to every

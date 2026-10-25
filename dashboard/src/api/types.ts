@@ -247,6 +247,8 @@ export interface Message {
   created_at: string;
   delivered_at?: string;
   read_at?: string;
+  read_by?: string;
+  read_by_name?: string;
 }
 
 export interface NewMessage {

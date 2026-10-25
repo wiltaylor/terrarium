@@ -645,6 +645,11 @@ struct Inner {
     holds: Mutex<HashMap<AgentId, Held>>,
     /// The lead nudges of each project that wait for the rate limit.
     nudges: Mutex<HashMap<String, NudgeQueue>>,
+    /// The card pointers of agents that do not run: a card assigned (or
+    /// unblocked) before the start. The next launch puts them into the
+    /// pointer, which goes out at the first idle. Locked only inside
+    /// `slots`, never the other way round.
+    parked: Mutex<HashMap<AgentId, Vec<CardItem>>>,
     tx: broadcast::Sender<SupervisorEvent>,
     state: OnceLock<Weak<AppState>>,
     shutting_down: AtomicBool,
@@ -737,6 +742,7 @@ impl RunnerSupervisor {
                 slots: Mutex::new(HashMap::new()),
                 holds: Mutex::new(HashMap::new()),
                 nudges: Mutex::new(HashMap::new()),
+                parked: Mutex::new(HashMap::new()),
                 tx,
                 state: OnceLock::new(),
                 shutting_down: AtomicBool::new(false),
@@ -1179,6 +1185,9 @@ impl RunnerSupervisor {
                     for m in view.queued {
                         slot.pointer.add_mail(m);
                     }
+                    for c in lock(&self.inner.parked).remove(&id).unwrap_or_default() {
+                        slot.pointer.add_card(c);
+                    }
                     true
                 }
                 None => false,
@@ -1281,6 +1290,9 @@ impl RunnerSupervisor {
             slot.reached_idle = hello.status != AgentStatus::Starting;
             slot.seen = hello.status;
             slot.pointer_busy = false;
+            for c in lock(&self.inner.parked).remove(&id).unwrap_or_default() {
+                slot.pointer.add_card(c);
+            }
             if let Some(s) = &hello.session {
                 // A later crash restarts with resume of this session.
                 slot.session = Some(s.clone());
@@ -1699,6 +1711,27 @@ impl RunnerSupervisor {
         self.maybe_push(id);
     }
 
+    /// Queue a card pointer. An agent that does not run keeps it parked
+    /// until its next launch (as queued mail waits in the store), so the
+    /// order "assign, then start" still gives the agent its pointer.
+    fn add_card_pointer(&self, id: AgentId, c: CardItem) {
+        {
+            let mut slots = lock(&self.inner.slots);
+            match slots.get_mut(&id).filter(|s| s.runner.is_some()) {
+                Some(slot) => slot.pointer.add_card(c),
+                None => {
+                    let mut parked = lock(&self.inner.parked);
+                    let cards = parked.entry(id).or_default();
+                    if !cards.contains(&c) {
+                        cards.push(c);
+                    }
+                    return;
+                }
+            }
+        }
+        self.maybe_push(id);
+    }
+
     /// Type the pending pointer when the agent is idle and no pointer is on
     /// the way. A `working` agent gets it after its next stop hook.
     fn maybe_push(&self, id: AgentId) {
@@ -1723,9 +1756,20 @@ impl RunnerSupervisor {
             slot.pointer_busy = true;
             (runner, std::mem::take(&mut slot.pointer))
         };
-        let delivery = runner.type_turn(pointer.text());
         let me = self.clone();
         tokio::spawn(async move {
+            // The board can change between the event and the idle: drop
+            // the card lines that no longer apply.
+            let pointer = me.still_current(id, pointer).await;
+            if pointer.is_empty() {
+                if let Some(slot) = lock(&me.inner.slots).get_mut(&id) {
+                    slot.pointer_busy = false;
+                }
+                // Items that came in meanwhile go out now.
+                me.maybe_push(id);
+                return;
+            }
+            let delivery = runner.type_turn(pointer.text());
             let result = delivery.wait().await;
             match &result {
                 Ok(()) => me.mark_delivered(pointer.message_ids()).await,
@@ -1741,6 +1785,66 @@ impl RunnerSupervisor {
                 }
             }
         });
+    }
+
+    /// `pointer` without the card and lead lines that the board no longer
+    /// supports: a card in `ready` that has an assignee now, a card that
+    /// left `review` or `blocked`, a card assigned to another agent, or a
+    /// card that is gone. Mail lines stay. On a read error, all stay.
+    async fn still_current(&self, id: AgentId, mut pointer: Pointer) -> Pointer {
+        if pointer.cards.is_empty() && pointer.leads.is_empty() {
+            return pointer;
+        }
+        let Some(state) = self.state() else {
+            return pointer;
+        };
+        let mut keys: Vec<String> = pointer.cards.iter().map(|c| c.card.clone()).collect();
+        keys.extend(pointer.leads.iter().map(|l| l.card.clone()));
+        keys.sort();
+        keys.dedup();
+        let cards = state
+            .db
+            .read(move |c| {
+                let mut out = HashMap::new();
+                for k in keys {
+                    match crate::store::board::get_card(c, &k) {
+                        Ok(card) => {
+                            out.insert(k, Some((card.column, card.assignee, card.archived)));
+                        }
+                        Err(e) if e.code == crate::error::Code::NotFound => {
+                            out.insert(k, None);
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+                Ok(out)
+            })
+            .await;
+        let cards = match cards {
+            Ok(c) => c,
+            Err(e) => {
+                debug!(agent = %id, "cannot check the pointer cards: {e}");
+                return pointer;
+            }
+        };
+        let me = id.to_string();
+        let now = |k: &str| cards.get(k).cloned().flatten().filter(|c| !c.2);
+        pointer.cards.retain(|c| match now(&c.card) {
+            None => false,
+            Some((column, assignee, _)) => {
+                column != "done"
+                    && (c.change != CardChange::Assigned || assignee.as_deref() == Some(&me))
+            }
+        });
+        pointer.leads.retain(|l| match now(&l.card) {
+            None => false,
+            Some((column, assignee, _)) => match l.change {
+                LeadChange::Ready => column == "ready" && assignee.is_none(),
+                LeadChange::Review => column == "review",
+                LeadChange::Blocked => column == "blocked",
+            },
+        });
+        pointer
     }
 
     async fn mark_delivered(&self, ids: Vec<String>) {
@@ -1911,7 +2015,7 @@ impl RunnerSupervisor {
                             Some("unblocked") => CardChange::Unblocked,
                             _ => continue,
                         };
-                        me.add_pointer(agent, |p| p.add_card(CardItem { card, change }));
+                        me.add_card_pointer(agent, CardItem { card, change });
                     }
                     _ => {}
                 }
@@ -2258,6 +2362,13 @@ impl Supervisor for RunnerSupervisor {
                     .get_mut(&agent)
                     .filter(|s| s.live())
                     .ok_or(SupervisorError::NotRunning(agent))?;
+                // A stop is on the way already (for example `agent stop`,
+                // then `agent rm --confirm`, which stops again): it types
+                // the exit keys and kills on a timeout. A second set of
+                // keys in its exit-key pause gave Codex `/exit/exit`.
+                if slot.stop_requested && slot.runner.is_some() {
+                    return Ok(());
+                }
                 slot.stop_requested = true;
                 let def = slot.agent.clone();
                 match slot.runner.clone() {

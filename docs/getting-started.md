@@ -347,6 +347,12 @@ daemon binds only paths under `TERRARIUM_REPOS_DIR` (default `/repos`). The
 agents can change every file of the bare repo, so treat `repos/` as data
 that agents write.
 
+**Tools in the sandbox.** The sandbox uses the tools of the image: `git`,
+`ssh`, Node 22, and `python3` (Python 3.13, the Debian trixie package, with
+no `pip` and no `venv`). So an agent can run Python code and the tests of
+the standard library (`python3 -m unittest`). For other toolchains, extend
+the image.
+
 To edit the settings of one harness from the host, run:
 
 ```sh

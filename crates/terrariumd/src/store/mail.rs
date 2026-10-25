@@ -100,7 +100,7 @@ pub fn resolve(conn: &Connection, s: &str, context: Option<&str>) -> ApiResult<A
     })
 }
 
-/// Turn a stored key back into an address. A deleted agent keeps its ID.
+/// Turn a stored key back into an address.
 fn from_key(conn: &Connection, key: &str, cache: &mut HashMap<String, Address>) -> Address {
     if let Some(a) = cache.get(key) {
         return a.clone();
@@ -118,10 +118,18 @@ fn from_key(conn: &Connection, key: &str, cache: &mut HashMap<String, Address>) 
                 name: v.agent.name,
                 project: v.agent.project,
             },
-            Err(_) => Address::Agent {
-                id: key.to_owned(),
-                name: key.to_owned(),
-                project: String::new(),
+            // A deleted agent keeps its name (migration 12), else its ID.
+            Err(_) => match agents::removed(conn, key).ok().flatten() {
+                Some((project, name)) => Address::Agent {
+                    id: key.to_owned(),
+                    name,
+                    project,
+                },
+                None => Address::Agent {
+                    id: key.to_owned(),
+                    name: key.to_owned(),
+                    project: String::new(),
+                },
             },
         }
     };
@@ -152,6 +160,13 @@ pub struct Message {
     pub delivered_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub read_at: Option<String>,
+    /// Who read the message first: `operator`, `system`, or an agent ULID
+    /// (migration 12). A read before migration 12 has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_by: Option<String>,
+    /// `read_by` in readable form: `operator` or `project/agent`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_by_name: Option<String>,
     /// The thread is paused by the loop guard: it has more than
     /// [`mail_loop_limit`] agent-to-agent messages since the last operator
     /// or project-inbox message, so new agent mail on it types no pointer.
@@ -173,6 +188,7 @@ struct RawMessage {
     created_at: String,
     delivered_at: Option<String>,
     read_at: Option<String>,
+    read_by: Option<String>,
 }
 
 fn raw_row(r: &Row<'_>) -> rusqlite::Result<RawMessage> {
@@ -190,6 +206,7 @@ fn raw_row(r: &Row<'_>) -> rusqlite::Result<RawMessage> {
         created_at: r.get("created_at")?,
         delivered_at: r.get("delivered_at")?,
         read_at: r.get("read_at")?,
+        read_by: r.get("read_by")?,
     })
 }
 
@@ -202,6 +219,10 @@ struct RenderCache {
 fn render(conn: &Connection, raw: RawMessage, cache: &mut RenderCache) -> Message {
     let from_name = from_key(conn, &raw.from, &mut cache.addresses).display();
     let to_name = from_key(conn, &raw.to, &mut cache.addresses).display();
+    let read_by_name = raw
+        .read_by
+        .as_deref()
+        .map(|k| from_key(conn, k, &mut cache.addresses).display());
     let thread_paused = match cache.paused.get(&raw.thread_id) {
         Some(p) => *p,
         None => {
@@ -226,6 +247,8 @@ fn render(conn: &Connection, raw: RawMessage, cache: &mut RenderCache) -> Messag
         created_at: raw.created_at,
         delivered_at: raw.delivered_at,
         read_at: raw.read_at,
+        read_by: raw.read_by,
+        read_by_name,
         thread_paused,
     }
 }
@@ -546,10 +569,16 @@ pub fn reply(
             },
         )?);
     }
+    let first = original.read_at.is_none();
     t.execute(
-        "UPDATE messages SET state = 'replied', read_at = coalesce(read_at, ?2) WHERE id = ?1",
-        params![original.id, now()],
+        "UPDATE messages SET state = 'replied', read_at = coalesce(read_at, ?2),
+                read_by = CASE WHEN read_at IS NULL THEN ?3 ELSE read_by END
+         WHERE id = ?1",
+        params![original.id, now(), reader(t)],
     )?;
+    if first {
+        audit_read(t, original, "reply")?;
+    }
     Ok(out)
 }
 
@@ -568,15 +597,43 @@ pub fn mark_delivered(t: &mut Tx<'_>, ids: &[String]) -> ApiResult<usize> {
     Ok(n)
 }
 
-/// Mark a message `read`. A `replied` message stays `replied`.
+/// Mark a message `read`. A `replied` message stays `replied`. The first
+/// read records the reader (`read_by`) and writes a `mail.read` audit row;
+/// a read again changes nothing.
 pub fn mark_read(t: &mut Tx<'_>, id: &str) -> ApiResult<Message> {
-    get(t, id)?;
+    let before = get(t, id)?;
     t.execute(
         "UPDATE messages SET state = CASE WHEN state = 'replied' THEN state ELSE 'read' END,
+                read_by = CASE WHEN read_at IS NULL THEN ?3 ELSE read_by END,
                 read_at = coalesce(read_at, ?2),
                 delivered_at = coalesce(delivered_at, ?2)
          WHERE id = ?1",
-        params![id, now()],
+        params![id, now(), reader(t)],
     )?;
+    if before.read_at.is_none() {
+        audit_read(t, &before, "read")?;
+    }
     get(t, id)
+}
+
+/// The key of the reader of a transaction: `operator`, `system`, or an
+/// agent ULID.
+fn reader(t: &Tx<'_>) -> String {
+    t.actor
+        .strip_prefix("agent:")
+        .unwrap_or(&t.actor)
+        .to_owned()
+}
+
+/// The `mail.read` audit row of the first read of `m`. `via` is `read`
+/// (`POST .../read`: the CLI, the dashboard) or `reply`.
+fn audit_read(t: &Tx<'_>, m: &Message, via: &str) -> ApiResult<()> {
+    let to = from_key(t, &m.to, &mut HashMap::new());
+    let project = to.project().filter(|p| !p.is_empty());
+    t.audit(
+        "mail.read",
+        &m.id,
+        project,
+        json!({"thread": m.thread_id, "from": m.from, "to": m.to, "via": via}),
+    )
 }

@@ -11,7 +11,7 @@
 #                (terrariumd embeds the dashboard)
 #   host-build   static musl terrarium-host, for `just host::build` (not in the image)
 #   host-export  scratch stage that holds only the host binary, for `--output`
-#   runtime      Debian slim + Node, bubblewrap, git, ssh, and the harnesses
+#   runtime      Debian slim + Node, bubblewrap, git, ssh, python3, and the harnesses
 
 ARG RUST_IMAGE=rust:1.97-trixie
 # Node 22.19+ is needed: pi 0.85.1 needs >=22.19, Claude Code needs >=22,
@@ -78,6 +78,7 @@ RUN apt-get update \
         git \
         openssh-client \
         procps \
+        python3 \
         tini \
     && rm -rf /var/lib/apt/lists/*
 

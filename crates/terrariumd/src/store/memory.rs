@@ -46,7 +46,7 @@ pub fn name_of(conn: &Connection, key: &str) -> ApiResult<String> {
     if key == "operator" || key == "system" || key.starts_with("project:") {
         return Ok(key.to_owned());
     }
-    Ok(agents::display_name(conn, key)?.unwrap_or_else(|| key.to_owned()))
+    Ok(agents::known_name(conn, key)?.unwrap_or_else(|| key.to_owned()))
 }
 
 /// The next project-local number for `kind` (`memory`, `artifact`).

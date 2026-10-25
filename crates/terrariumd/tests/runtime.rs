@@ -1793,3 +1793,151 @@ async fn mail_loop_guard_pauses_a_chatty_thread() {
         tokio::time::sleep(Duration::from_millis(30)).await;
     }
 }
+
+/// `agent stop`, then `agent rm --confirm` at once, as a lead did with a
+/// Codex worker: the delete stops again while the first stop waits its
+/// exit-key pause. The harness gets the exit text once and the CR once,
+/// in a write of its own (the fake TUI logs each read of its terminal).
+/// Before the fix, both stops typed the text: `/exit 7/exit 7`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_second_stop_in_the_exit_key_pause_types_no_more_keys() {
+    let td = Td::start().await;
+    let log = td.dir.path().join("input.log");
+    td.adapter.set_env("FAKE_TUI_SLASH_NEEDS_PAUSE", "1");
+    td.adapter
+        .set_env("FAKE_TUI_INPUT_LOG", log.to_str().unwrap());
+    *td.adapter.exit_keys.lock().unwrap() = b"/exit 7\r".to_vec();
+    *td.adapter.exit_pause.lock().unwrap() = Duration::from_millis(300);
+    let id = td.agent("demo", "bob", json!({})).await;
+    td.post(&format!("/api/agents/{id}/start"), None).await;
+    td.wait_status(&id, "idle").await;
+    td.post(&format!("/api/agents/{id}/stop"), None).await;
+    td.post(&format!("/api/agents/{id}/stop"), None).await;
+    let (s, b) = td
+        .req(
+            Method::DELETE,
+            &format!("/api/agents/{id}?confirm=true"),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(s, 204, "{b}");
+    let reads: Vec<Vec<u8>> = std::fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| {
+            (0..l.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&l[i..i + 2], 16).unwrap())
+                .collect()
+        })
+        .collect();
+    let all: Vec<u8> = reads.concat();
+    assert_eq!(
+        String::from_utf8_lossy(&all),
+        "/exit 7\r",
+        "the terminal reads: {reads:?}"
+    );
+    assert_eq!(reads.last().unwrap(), b"\r", "{reads:?}");
+}
+
+/// A card assigned to an agent that does not run: the pointer waits, and
+/// the next start types it once, at the first idle. A card that went to
+/// another agent before the start types nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_card_assigned_while_stopped_points_at_the_next_start() {
+    let td = Td::start().await;
+    let id = td.agent("demo", "bob", json!({})).await;
+    td.agent("demo", "eve", json!({})).await;
+    let mk = |title: &'static str| {
+        let td = &td;
+        async move {
+            let c = td
+                .post("/api/projects/demo/cards", Some(json!({"title": title})))
+                .await;
+            c["id"].as_str().unwrap().to_owned()
+        }
+    };
+    let c1 = mk("Kept").await;
+    let c2 = mk("Moved away").await;
+    for c in [&c1, &c2] {
+        td.post(
+            &format!("/api/cards/{c}/assign"),
+            Some(json!({"assignee": "demo/bob"})),
+        )
+        .await;
+    }
+    td.post(
+        &format!("/api/cards/{c2}/assign"),
+        Some(json!({"assignee": "demo/eve"})),
+    )
+    .await;
+    td.post(&format!("/api/agents/{id}/start"), None).await;
+    let starts = td.wait_events(&id, "turn_start", |e| !e.is_empty()).await;
+    assert_eq!(
+        starts[0]["data"]["prompt"],
+        format!("Card {c1} was assigned to you. Run `terrarium card show {c1}`.").as_str()
+    );
+    td.wait_status(&id, "idle").await;
+    // A restart types it no more.
+    td.post(&format!("/api/agents/{id}/restart"), None).await;
+    td.wait_events(&id, "session_started", |e| e.len() == 2)
+        .await;
+    td.wait_status(&id, "idle").await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let all = prompts(&td, &id).await;
+    assert_eq!(all.len(), 1, "{all:#?}");
+}
+
+/// A lead nudge that no longer applies when the lead is idle again goes
+/// out no more: a card in `ready` that got an assignee while the lead
+/// worked. A nudge that still applies goes out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stale_lead_nudge_is_dropped() {
+    let td = Td::start().await;
+    td.adapter.set_env("FAKE_TUI_DELAY_MS", "3000");
+    let lead = td
+        .agent("demo", "lead", json!({"roles": ["project_admin"]}))
+        .await;
+    td.agent("demo", "w", json!({})).await;
+    td.post(&format!("/api/agents/{lead}/start"), None).await;
+    td.wait_status(&lead, "idle").await;
+    td.post(
+        &format!("/api/agents/{lead}/send"),
+        Some(json!({"text": "long work"})),
+    )
+    .await;
+    td.wait_status(&lead, "working").await;
+    let mk = |title: &'static str| {
+        let td = &td;
+        async move {
+            let c = td
+                .post(
+                    "/api/projects/demo/cards",
+                    Some(json!({"title": title, "column": "ready"})),
+                )
+                .await;
+            c["id"].as_str().unwrap().to_owned()
+        }
+    };
+    let a = mk("Taken").await;
+    let b = mk("Open").await;
+    td.post(
+        &format!("/api/cards/{a}/assign"),
+        Some(json!({"assignee": "demo/w"})),
+    )
+    .await;
+    let want = format!(
+        "New card {b} in ready: Open. Run `terrarium card ls --unassigned --column ready`."
+    );
+    let starts = td
+        .wait_events(&lead, "turn_start", |e| {
+            e.iter().any(|x| x["data"]["prompt"] == want.as_str())
+        })
+        .await;
+    assert_eq!(starts.len(), 2, "{starts:#?}");
+    tokio::time::sleep(LEAD_NUDGE + Duration::from_millis(500)).await;
+    let all = prompts(&td, &lead).await;
+    assert_eq!(all, vec!["long work".to_owned(), want], "{all:#?}");
+}

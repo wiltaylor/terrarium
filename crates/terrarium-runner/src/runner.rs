@@ -536,15 +536,20 @@ impl Runner {
             &self.inner.adapter.exit_keys(),
             self.inner.adapter.exit_key_pause(),
         );
-        let (exited, idle) = {
+        let (exited, idle, again) = {
             let mut state = lock(&self.inner.state);
+            let again = state.stop_requested;
             state.stop_requested = true;
             (
                 state.exited,
                 state.status == AgentStatus::Idle && state.in_flight.is_none() && !state.turn_open,
+                again,
             )
         };
-        if exited {
+        // An exit, or a stop that is on the way already: that stop types
+        // the exit keys once and kills on its timeout. A second set of keys
+        // in the exit-key pause would join the first (`/exit/exit`).
+        if exited || again {
             return self.wait().await;
         }
         if idle && !writes.is_empty() {

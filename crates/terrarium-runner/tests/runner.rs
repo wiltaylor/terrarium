@@ -789,6 +789,43 @@ async fn stop_types_the_exit_cr_after_the_exit_key_pause() {
     until_screen(&h, "bye").await;
 }
 
+/// Two stops at once (a stop, then a delete that stops again): only the
+/// first types the exit keys. The terminal reads `/quit` once and the CR
+/// once, in a read of its own, and the harness exits 0.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_second_stop_types_no_more_exit_keys() {
+    let logs = tempfile::tempdir().expect("tempdir");
+    let log = logs.path().join("input.log");
+    let mut h = start(Opts {
+        env: env(&[
+            ("FAKE_TUI_SLASH_NEEDS_PAUSE", "1"),
+            ("FAKE_TUI_INPUT_LOG", log.to_str().expect("utf-8")),
+        ]),
+        exit_pause: ms(300),
+        ..Opts::default()
+    })
+    .await;
+    until_idle(&mut h).await;
+    let (a, b) = timeout(wait(), async {
+        tokio::join!(h.runner.stop(), async {
+            tokio::time::sleep(ms(50)).await;
+            h.runner.stop().await
+        })
+    })
+    .await
+    .expect("stop");
+    assert!(a.success() && b.success(), "{a:?} {b:?}");
+    let reads: Vec<String> = std::fs::read_to_string(&log)
+        .expect("input log")
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(str::to_owned)
+        .collect();
+    // `/quit` and CR, as hex.
+    assert_eq!(reads.concat(), "2f717569740d", "{reads:?}");
+    assert_eq!(reads.last().map(String::as_str), Some("0d"), "{reads:?}");
+}
+
 /// A runner config and a launch spec of the fake TUI in `dir`, for the
 /// tests of a planted symlink (`docs/security-review.md`, F11).
 fn planted_config(dir: &Path) -> (RunnerConfig, LaunchSpec) {

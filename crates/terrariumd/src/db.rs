@@ -670,6 +670,19 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX revoked_sessions_exp ON revoked_sessions(exp);
     "#,
+    // 12: the names of deleted agents, and who read a message. Cards,
+    // comments, mail, and authors keep an agent ULID; after `agent rm`,
+    // the name resolvers find the name here. `read_by` is the reader's
+    // key (`operator`, `system`, or an agent ULID) of the first read.
+    r#"
+    CREATE TABLE agents_removed (
+        id         TEXT PRIMARY KEY,
+        project    TEXT NOT NULL,
+        name       TEXT NOT NULL,
+        removed_at TEXT NOT NULL
+    );
+    ALTER TABLE messages ADD COLUMN read_by TEXT;
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call

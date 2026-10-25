@@ -318,3 +318,62 @@ async fn project_inbox_flow() {
             .contains(&card_id)
     );
 }
+
+/// The first read of a message records the reader (`read_by`) and writes
+/// one `mail.read` audit row; a read again writes none. After `agent rm`,
+/// the mail keeps the agent's name (migration 12).
+#[tokio::test]
+async fn mail_reads_are_audited_and_names_stay_after_agent_rm() {
+    let td = two_projects().await;
+    // The operator (the CLI or the dashboard) reads mail from an agent.
+    let m = td
+        .post_as(
+            "a/worker",
+            "/api/mail",
+            json!({"to": "operator", "body": "done"}),
+        )
+        .await;
+    let m = m.ok()["id"].as_str().unwrap().to_owned();
+    let r = td.post_empty(&format!("/api/mail/{m}/read")).await;
+    assert_eq!(r.ok()["read_by"], "operator");
+    assert_eq!(r.ok()["read_by_name"], "operator");
+    td.post_empty(&format!("/api/mail/{m}/read")).await.ok();
+    let audit = td.get("/api/audit?action=mail.read").await;
+    let rows = audit.ok().as_array().unwrap().clone();
+    assert_eq!(rows.len(), 1, "{rows:#?}");
+    assert_eq!(rows[0]["actor"], "operator");
+    assert_eq!(rows[0]["target"], m.as_str());
+    assert_eq!(rows[0]["detail"]["via"], "read");
+    assert!(rows[0]["detail"]["thread"].is_string());
+
+    // An agent reads its mail.
+    let n = td
+        .post("/api/mail", json!({"to": "a/peer", "body": "hi"}))
+        .await;
+    let n = n.ok()["id"].as_str().unwrap().to_owned();
+    let peer = td.get("/api/agents/a%2Fpeer").await.ok()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let r = td
+        .post_empty_as("a/peer", &format!("/api/mail/{n}/read"))
+        .await;
+    assert_eq!(r.ok()["read_by"], peer.as_str());
+    assert_eq!(r.ok()["read_by_name"], "a/peer");
+    let audit = td.get("/api/audit?action=mail.read").await;
+    let rows = audit.ok().as_array().unwrap().clone();
+    assert_eq!(rows.len(), 2, "{rows:#?}");
+    assert_eq!(rows[1]["actor"], format!("agent:{peer}"));
+    assert_eq!(rows[1]["project"], "a");
+
+    // The worker goes; its mail keeps the name.
+    let worker = td.get("/api/agents/a%2Fworker").await.ok()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let r = td.delete(&format!("/api/agents/{worker}")).await;
+    assert_eq!(r.status, 204, "{}", r.body);
+    let got = td.get(&format!("/api/mail/{m}")).await;
+    assert_eq!(got.ok()["from"], worker.as_str());
+    assert_eq!(got.ok()["from_name"], "a/worker");
+}

@@ -559,3 +559,31 @@ async fn member_may_assign_an_unassigned_card() {
     .await
     .err(403, "forbidden");
 }
+
+/// After `agent rm`, the card keeps the name of its assignee and creator,
+/// and the comments keep the name of their author (migration 12).
+#[tokio::test]
+async fn names_stay_after_agent_rm() {
+    let td = setup().await;
+    let id = card(&td, "proj/w1", json!({"title": "Gone soon"})).await;
+    td.post_as("proj/w1", &format!("/api/cards/{id}/claim"), json!({}))
+        .await
+        .ok();
+    td.post_as(
+        "proj/w1",
+        &format!("/api/cards/{id}/comments"),
+        json!({"body": "on it"}),
+    )
+    .await
+    .ok();
+    let w1 = td.get("/api/agents/proj%2Fw1").await.ok().clone();
+    let w1_id = w1["id"].as_str().unwrap().to_owned();
+    let r = td.delete(&format!("/api/agents/{w1_id}")).await;
+    assert_eq!(r.status, 204, "{}", r.body);
+    td.get("/api/agents/proj%2Fw1").await.err(404, "not_found");
+    let c = td.get(&format!("/api/cards/{id}")).await.ok().clone();
+    assert_eq!(c["assignee"], w1_id.as_str());
+    assert_eq!(c["assignee_name"], "proj/w1");
+    assert_eq!(c["created_by_name"], "proj/w1");
+    assert_eq!(c["comments"][0]["author_name"], "proj/w1", "{c:#}");
+}

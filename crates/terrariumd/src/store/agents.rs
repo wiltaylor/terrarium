@@ -390,6 +390,12 @@ pub fn write_def(t: &mut Tx<'_>, id: &str, p: &AgentPatch) -> ApiResult<()> {
 pub fn delete(t: &mut Tx<'_>, id: &str) -> ApiResult<()> {
     let a = get(t, id)?;
     t.execute("DELETE FROM agents WHERE id = ?1", [id])?;
+    // The name stays for the cards, comments, and mail of the agent.
+    t.execute(
+        "INSERT OR REPLACE INTO agents_removed (id, project, name, removed_at)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![id, a.agent.project, a.agent.name, now()],
+    )?;
     t.audit(
         "agent.delete",
         id,
@@ -609,6 +615,27 @@ pub fn display_name(conn: &Connection, id: &str) -> ApiResult<Option<String>> {
             "SELECT project || '/' || name FROM agents WHERE id = ?1",
             [id],
             |r| r.get(0),
+        )
+        .optional()?)
+}
+
+/// The `project/name` of an agent, also of a deleted one (migration 12).
+/// The readers of stored authors and assignees use it; `None` for a key
+/// that never was an agent.
+pub fn known_name(conn: &Connection, id: &str) -> ApiResult<Option<String>> {
+    Ok(match display_name(conn, id)? {
+        Some(n) => Some(n),
+        None => removed(conn, id)?.map(|(p, n)| format!("{p}/{n}")),
+    })
+}
+
+/// The `(project, name)` of a deleted agent.
+pub fn removed(conn: &Connection, id: &str) -> ApiResult<Option<(String, String)>> {
+    Ok(conn
+        .query_row(
+            "SELECT project, name FROM agents_removed WHERE id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?)
 }

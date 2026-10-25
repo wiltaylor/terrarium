@@ -415,7 +415,7 @@ async fn card_usage(
             let agents = ustore::by_agent(c, &f)?
                 .into_iter()
                 .map(|(id, totals)| CardAgentUsage {
-                    name: crate::store::agents::display_name(c, &id)
+                    name: crate::store::agents::known_name(c, &id)
                         .ok()
                         .flatten()
                         .unwrap_or_else(|| id.clone()),
