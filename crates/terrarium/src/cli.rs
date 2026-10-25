@@ -974,6 +974,11 @@ pub enum AdminCmd {
         #[command(subcommand)]
         command: HostCmd,
     },
+    /// Harness versions: the pins, the tested ranges, the installed versions
+    Harness {
+        #[command(subcommand)]
+        command: HarnessCmd,
+    },
     /// Fleet files, as `terrarium fleet`
     Fleet {
         #[command(subcommand)]
@@ -1219,6 +1224,17 @@ pub enum HostCmd {
     },
     /// Revoke a host agent's token and remove the host agent
     Rm { name: String },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum HarnessCmd {
+    /// List each harness: the pin (harnesses.toml), the tested range, the
+    /// installed version, and whether it is in the range
+    Ls {
+        /// Run `<harness> --version` again in place of the cached answer
+        #[arg(long)]
+        refresh: bool,
+    },
 }
 
 #[derive(Debug, Args)]

@@ -36,6 +36,7 @@ import type {
   EventQuery,
   ExecOpened,
   ExecRequest,
+  HarnessReport,
   Health,
   Host,
   InboxQuery,
@@ -89,6 +90,8 @@ import type {
 
 export interface Api {
   health(): Promise<Health>;
+  /** `GET /api/harnesses`: each harness against its pin and tested range. `refresh` runs the binaries again. */
+  harnesses(refresh?: boolean): Promise<HarnessReport>;
 
   /** Dashboard sessions (docs/api.md §1.1). */
   session: {
@@ -368,6 +371,7 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
 
   return {
     health: () => get("/api/health"),
+    harnesses: (refresh) => get("/api/harnesses", refresh ? { refresh: true } : undefined),
 
     session: {
       create: async (token) => {

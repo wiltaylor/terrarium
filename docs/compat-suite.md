@@ -88,7 +88,7 @@ evidence.
 
 | Step | What it checks |
 |---|---|
-| `version` | `detect_version` is in `tested_version`. |
+| `version` | `detect_version` is in `tested_version`. The range and the pin come from `harnesses.toml`. |
 | `auth` | The adapter's auth check says "logged in". If not, the other steps are skipped. |
 | `user_hooks` | Only when the shared home has the operator's hooks (see "Safety rules"). |
 | `fresh_start` | `materialize` into the temp agent dir, `launch`, `Runner::spawn`. The status goes from `starting` to `idle` within 30 s. The adapter's screen hint never says `Question` (a dialog). No error line is on the screen. The time to the ready prompt is in the report. |
@@ -134,7 +134,13 @@ lists the home again and compares:
 `TERRARIUM_COMPAT_DRY_RUN=1` (and the test `dry_run`, which always runs)
 does these steps for every harness, pi too:
 
+- It checks that the adapter's `tested` range is the range in
+  `harnesses.toml` (step `pin`).
 - It checks the version (`<harness> --version`; a missing binary is a skip).
+  A host version outside the tested range is also a skip, not a failure:
+  the dry run checks the adapter code, and the host install belongs to the
+  operator. A real run fails on it. Thus `just harness::update` can run the
+  dry run before you install the new version on the host.
 - It materializes into a temp home, not the real home.
 - It builds the fresh and the resume `LaunchSpec`, and checks the program,
   the cwd, the model, the session ID on resume, and the clean env.

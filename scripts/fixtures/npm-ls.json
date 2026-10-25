@@ -1,0 +1,9 @@
+{
+  "name": "lib",
+  "dependencies": {
+    "copilot-custom-system-prompt": {
+      "version": "0.1.2",
+      "overridden": false
+    }
+  }
+}

@@ -10,6 +10,7 @@ pub mod error;
 pub mod event;
 pub mod fleet;
 pub mod harness;
+pub mod harnesses;
 pub mod hook;
 pub mod ids;
 pub mod launch;

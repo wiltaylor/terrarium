@@ -1,0 +1,67 @@
+# The harness pins: the one place to change a harness version
+# (docs/CONVENTIONS.md, docs/getting-started.md "Updating a harness").
+#
+# Three readers take their values from this file:
+#
+# - the image: `just docker::image-build` passes each value as a
+#   `--build-arg` (scripts/harness-versions.py build-args). The ARG defaults
+#   in docker/Dockerfile are a copy for a build by hand; `just ci::check`
+#   fails when they differ (scripts/harness-versions.py check).
+# - the adapters: crates/terrarium-core/build.rs turns this file into
+#   `terrarium_core::harnesses`, and each adapter's `flags.rs` takes
+#   `verified` (the pin) and `tested` (the range) from there. The build
+#   fails when `tested` does not match `version`.
+# - the compatibility suite and the daemon's start-time guard: both compare
+#   the installed version with the adapter's `tested` range.
+#
+# Change a version with `just harness::update <name> [version]`, not by
+# hand: it also widens `tested` where it is safe, syncs the Dockerfile, and
+# writes a row in docs/compat.md "Version history". To roll back, edit
+# `version` (and `tested` if needed) here and run `just up`.
+#
+# Keys of a [harness.<name>] table:
+#   package  the npm package
+#   version  the pinned version, installed in the image
+#   tested   the semver range the adapter accepts (Rust `semver::VersionReq`
+#            syntax: comma-separated `>=`, `>`, `<`, `<=`, `=`, `^`, `~`)
+#   binary   the command on PATH
+
+[node]
+# The base image of the dashboard and runtime stages. pi needs Node >= 22.19,
+# Claude Code >= 22, copilot-custom-system-prompt >= 20.19 or >= 22.12.
+image = "node:22.23.4-trixie-slim"
+
+[harness.claude]
+package = "@anthropic-ai/claude-code"
+version = "2.1.310"
+tested = ">=2.1.310, <2.2.0"
+binary = "claude"
+
+[harness.codex]
+package = "@openai/codex"
+version = "0.160.0"
+tested = ">=0.160.0, <0.161.0"
+binary = "codex"
+
+[harness.copilot]
+# Copilot ships patch releases often; the range accepts later 1.0 patches.
+package = "@github/copilot"
+version = "1.0.103"
+tested = ">=1.0.103, <1.1.0"
+binary = "copilot"
+
+[harness.pi]
+# pi moved from @mariozechner/pi-coding-agent (last 0.73.1) to this package.
+package = "@earendil-works/pi-coding-agent"
+version = "0.85.1"
+tested = ">=0.85.1, <0.86.0"
+binary = "pi"
+
+# npm packages that are not harnesses. `for` names the harness that uses it.
+[extension.copilot-prompt]
+# The Copilot system-prompt extension. The entrypoint reinstalls it when
+# this version or the Copilot version changes (docker/entrypoint.sh).
+package = "copilot-custom-system-prompt"
+version = "0.1.2"
+binary = "copilot-custom-system-prompt"
+for = "copilot"

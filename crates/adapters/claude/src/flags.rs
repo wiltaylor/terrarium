@@ -8,9 +8,11 @@
 /// The flags, env names, and hooks of one Claude Code version range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClaudeFlags {
-    /// The version that the spikes measured.
+    /// The pinned version, which the image installs. It comes from
+    /// `harnesses.toml` at compile time (`terrarium_core::harnesses`).
     pub verified: &'static str,
-    /// The version range that the adapter accepts (a `semver::VersionReq`).
+    /// The version range that the adapter accepts (a `semver::VersionReq`),
+    /// from `harnesses.toml`. `just harness::update` widens it.
     pub tested: &'static str,
     /// Yolo. Claude Code refuses it as root unless [`Self::root_env`] is set.
     pub yolo: &'static str,
@@ -44,8 +46,8 @@ pub struct ClaudeFlags {
 
 /// Claude Code 2.1.x. Measured on 2.1.310 (`docs/compat.md`).
 pub const CLAUDE_2_1: ClaudeFlags = ClaudeFlags {
-    verified: "2.1.310",
-    tested: ">=2.1.310, <2.2.0",
+    verified: terrarium_core::harnesses::claude::VERSION,
+    tested: terrarium_core::harnesses::claude::TESTED,
     yolo: "--dangerously-skip-permissions",
     settings: "--settings",
     setting_sources: "--setting-sources",

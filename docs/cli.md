@@ -442,6 +442,7 @@ terrarium admin host show <name>               the link, the capabilities, and t
 terrarium admin host new <name> [--enrol]      prints the token once, alone on stdout
 terrarium admin host rotate <name> [--enrol]   a new token, printed once, alone on stdout
 terrarium admin host rm <name>                 revokes the token
+terrarium admin harness ls [--refresh]         each harness: pin, tested range, installed, in range
 terrarium admin audit [--since time] [--actor a] [--action a]
 terrarium admin fleet validate|plan|apply|ls|show|export ...
 ```
@@ -495,6 +496,10 @@ the agents of its own project; a global target needs sysadmin.
 | `admin target extend <t> <a> --until u` | `PATCH /api/targets/{t}/leases/{a}` `{"until"}` (`none` sends `null`) | `the lease of <project/name> on <t> lasts until <time or revoked>` |
 | `admin target leases <t> [--all]` | `GET /api/targets/{t}/leases[?all=true]` | A table: `TARGET`, `AGENT`, `STATE`, `EXCLUSIVE`, `EXPIRES`, `GRANTED BY`, `REASON`. `EXCLUSIVE` and `EXPIRES` are as in `targets ls`: `yes` or `no`, and the RFC 3339 end or `until revoked` (no end). With `--all`, an ended lease shows `revoked` or `expired` in `EXPIRES`. |
 | `agent leases <a> [--all]` | `GET /api/agents/{a}/leases[?all=true]` | The same table. |
+
+| Command | Request | Text output |
+|---|---|---|
+| `admin harness ls [--refresh]` | `GET /api/harnesses[?refresh=true]` | A table: `HARNESS`, `PINNED`, `TESTED`, `INSTALLED`, `IN RANGE` (`yes`, `NO`, or `unknown`). Then `policy: warn` or `policy: refuse`, and one line for each harness out of its range (with the fix) or with an unknown version (with the reason). The pins come from `harnesses.toml` ([api.md §4](api.md)). |
 
 `admin host new`, `admin host rotate`, and `admin host rm` are for the
 operator only (PLAN §10: host agent tokens are operator-only). An agent gets

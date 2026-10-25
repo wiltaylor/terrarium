@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 
 use super::{event_line, print_generic, print_table, set_opt};
 use crate::api::{ServerError, query};
-use crate::cli::{AdminTargetCmd, AuditArgs, DaemonCmd, EventsArgs, HostCmd, UsageCmd};
+use crate::cli::{AdminTargetCmd, AuditArgs, DaemonCmd, EventsArgs, HarnessCmd, HostCmd, UsageCmd};
 use crate::ctx::Ctx;
 use crate::output::field;
 use crate::transport::{ApiRequest, Method};
@@ -496,6 +496,65 @@ pub async fn hosts(ctx: &Ctx, cmd: &HostCmd) -> anyhow::Result<()> {
             let path = format!("/api/hosts/{}", crate::transport::encode(name));
             let v = ctx.api.delete(&path, vec![]).await?;
             ctx.emit(&v, |c, _| c.line(format!("revoked host agent {name}")))
+        }
+    }
+}
+
+/// `admin harness ls`: `GET /api/harnesses`.
+pub async fn harnesses(ctx: &Ctx, cmd: &HarnessCmd) -> anyhow::Result<()> {
+    match cmd {
+        HarnessCmd::Ls { refresh } => {
+            let q = if *refresh {
+                vec![("refresh".to_owned(), "true".to_owned())]
+            } else {
+                vec![]
+            };
+            let v = ctx.api.get("/api/harnesses", q).await?;
+            ctx.emit(&v, print_harnesses)
+        }
+    }
+}
+
+/// The harness table, then the policy, then a note for each harness out of
+/// its range.
+fn print_harnesses(ctx: &Ctx, v: &Value) {
+    let items = v["harnesses"].as_array().cloned().unwrap_or_default();
+    let mut t =
+        crate::output::Table::new(&["HARNESS", "PINNED", "TESTED", "INSTALLED", "IN RANGE"]);
+    for h in &items {
+        let in_range = match h["in_range"].as_bool() {
+            Some(true) => "yes".to_owned(),
+            Some(false) => "NO".to_owned(),
+            None => "unknown".to_owned(),
+        };
+        t.row(vec![
+            field(h, "harness"),
+            field(h, "pinned"),
+            field(h, "tested"),
+            field(h, "installed"),
+            in_range,
+        ]);
+    }
+    if items.is_empty() {
+        ctx.line("no harness adapters");
+    } else {
+        ctx.out.write_str(&t.render(ctx.out.width()));
+    }
+    ctx.line(format!(
+        "policy: {} (TERRARIUM_HARNESS_VERSION_POLICY)",
+        field(v, "policy")
+    ));
+    for h in &items {
+        if h["in_range"] == false {
+            ctx.line(format!(
+                "{}: {} is outside {}; rebuild the image or run `just harness::update {}`",
+                field(h, "harness"),
+                field(h, "installed"),
+                field(h, "tested"),
+                field(h, "harness"),
+            ));
+        } else if h["in_range"].is_null() && !h["error"].is_null() {
+            ctx.line(format!("{}: {}", field(h, "harness"), field(h, "error")));
         }
     }
 }

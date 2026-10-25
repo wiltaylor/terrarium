@@ -8,7 +8,7 @@ main:
 
 # Everything a change must pass before it can merge
 [group('ci')]
-check: fmt-check lint test dashboard-check
+check: fmt-check lint test scripts-test dashboard-check
 
 # Check Rust formatting without changing files
 [group('ci')]
@@ -24,6 +24,11 @@ lint: require-cargo
 [group('ci')]
 test: require-cargo
 	cargo test --workspace
+
+# Run the Python tests under scripts/ (harnesses.toml, the Dockerfile pins, the host installer)
+[group('ci')]
+scripts-test: require-uv
+	uv run python -m unittest discover -s scripts -p 'test_*.py'
 
 # Run the dashboard's `npm run check` (typecheck and lint); skips when dashboard/ has no package.json
 [group('ci')]

@@ -2,6 +2,8 @@
 **
 !Cargo.toml
 !Cargo.lock
+# The harness pins: crates/terrarium-core/build.rs reads it.
+!harnesses.toml
 !crates/**
 !dashboard/**
 dashboard/node_modules

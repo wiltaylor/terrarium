@@ -11,7 +11,7 @@ use terrariumd::sandbox::{self, SandboxConfig};
 use terrariumd::settings::{Command, Settings};
 use terrariumd::usage_collector::UsageConfig;
 use terrariumd::{DaemonConfig, start_with_usage};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -66,6 +66,7 @@ async fn main() -> anyhow::Result<()> {
     }
     let mut cfg = supervisor_config(sandbox);
     cfg.mode = mode;
+    cfg.version_policy = settings.harness_version_policy;
     let supervisor = Arc::new(RunnerSupervisor::new(cfg));
     let usage = UsageConfig {
         homes: homes.clone(),
@@ -108,6 +109,30 @@ async fn main() -> anyhow::Result<()> {
         }
         None => None,
     };
+
+    // Check the installed harness versions once at start, in the
+    // background, so the log shows a harness outside its tested range
+    // before an agent starts on it.
+    let versions = daemon.state.supervisor.clone();
+    tokio::spawn(async move {
+        let report = versions.harness_versions(true).await;
+        for h in report.harnesses {
+            let installed = h.installed.as_deref().unwrap_or("not found");
+            match h.in_range {
+                Some(true) => {
+                    info!(harness = %h.harness, installed, tested = %h.tested, "harness version")
+                }
+                Some(false) => warn!(
+                    harness = %h.harness, installed, tested = %h.tested, pinned = %h.pinned,
+                    policy = %report.policy,
+                    "harness version outside the tested range: rebuild the image (`just up`) or update the pin (`just harness::update`)"
+                ),
+                None => {
+                    warn!(harness = %h.harness, error = h.error.as_deref().unwrap_or(""), "harness version not known")
+                }
+            }
+        }
+    });
 
     shutdown_signal().await;
     info!("shutting down");

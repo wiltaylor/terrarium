@@ -35,6 +35,30 @@ export interface Health {
   definitions?: { projects: number; agents: number; targets: number; subscriptions: number };
 }
 
+/** `GET /api/harnesses` (docs/api.md §4): one harness against its pin and tested range. */
+export interface HarnessVersion {
+  harness: Harness;
+  package: string;
+  /** The version the image installs (harnesses.toml). */
+  pinned: string;
+  /** The range the adapter accepts. */
+  tested: string;
+  /** What `<binary> --version` reported; null when it did not answer. */
+  installed: string | null;
+  /** Null when the installed version is not known. */
+  in_range: boolean | null;
+  error?: string;
+  checked_at: string | null;
+}
+
+/** What an agent start does outside the range (`TERRARIUM_HARNESS_VERSION_POLICY`). */
+export type HarnessVersionPolicy = "warn" | "refuse";
+
+export interface HarnessReport {
+  policy: HarnessVersionPolicy;
+  harnesses: HarnessVersion[];
+}
+
 /** docs/api.md §5. */
 export interface Project {
   name: string;
@@ -156,6 +180,7 @@ export const EVENT_KINDS = [
   "exit",
   "delivery_failed",
   "system",
+  "warning",
   "mail",
   "card",
   "board",

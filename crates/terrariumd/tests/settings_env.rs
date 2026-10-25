@@ -27,6 +27,7 @@ fn the_env_reaches_the_routers() {
         .env("TERRARIUM_ARTIFACT_LISTEN", "")
         .env("TERRARIUM_WS_QUERY_TOKEN", "1")
         .env("TERRARIUM_SESSION_TTL", "30m")
+        .env("TERRARIUM_HARNESS_VERSION_POLICY", "refuse")
         .output()
         .unwrap();
     let text = format!(
@@ -69,6 +70,10 @@ async fn child_reads_the_env() {
     assert_eq!(web.session_ttl.as_secs(), 1800);
     // `TERRARIUM_ARTIFACT_LISTEN=` (empty): no listener of its own.
     assert_eq!(s.artifact_listen(), None);
+    assert_eq!(
+        s.harness_version_policy,
+        terrariumd::harness_versions::VersionPolicy::Refuse
+    );
 
     let mut td = TestDaemon::start().await;
     td.web = web;
@@ -159,4 +164,22 @@ async fn child_reads_the_env() {
     .await;
     assert_ne!(r.status(), StatusCode::FORBIDDEN);
     assert_ne!(r.status(), StatusCode::UNAUTHORIZED);
+}
+
+/// Without the env var, the harness version policy is `warn`.
+#[test]
+fn the_harness_version_policy_defaults_to_warn() {
+    if std::env::var(CHILD).is_ok() || std::env::var("TERRARIUM_HARNESS_VERSION_POLICY").is_ok() {
+        return;
+    }
+    let s = Settings::try_parse_from(["terrariumd"]).unwrap();
+    assert_eq!(
+        s.harness_version_policy,
+        terrariumd::harness_versions::VersionPolicy::Warn
+    );
+    let s = Settings::try_parse_from(["terrariumd", "--harness-version-policy", "refuse"]).unwrap();
+    assert_eq!(
+        s.harness_version_policy,
+        terrariumd::harness_versions::VersionPolicy::Refuse
+    );
 }

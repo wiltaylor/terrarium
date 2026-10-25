@@ -102,6 +102,9 @@ pub enum Event {
     Card { card: String, change: String },
     /// A supervisor or daemon notice.
     System { message: String },
+    /// A supervisor or daemon notice that needs the operator's attention,
+    /// for example a harness version outside the adapter's tested range.
+    Warning { message: String },
     /// The agent status changed. The runner raises one per transition.
     StatusChanged {
         from: AgentStatus,
@@ -370,6 +373,7 @@ mod tests {
                 change: s("x"),
             },
             Event::System { message: s("m") },
+            Event::Warning { message: s("w") },
             Event::StatusChanged {
                 from: AgentStatus::Idle,
                 to: AgentStatus::Working,

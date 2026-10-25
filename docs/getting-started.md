@@ -562,7 +562,7 @@ login replaces your own login in that home.
 
 `just daemon::run` uses `TERRARIUM_SANDBOX=none`. The harness then runs in
 yolo mode with full access to your user account. Use it for development
-and tests only. See also section 7.4.
+and tests only. See also section 8.4.
 
 If your machine can run `bwrap`, turn the sandbox on:
 
@@ -610,13 +610,11 @@ just ci::check
 ```
 
 The gate runs `ci::fmt-check` (rustfmt), `ci::lint` (clippy with
-`-D warnings`), `ci::test` (`cargo test --workspace`), and
-`ci::dashboard-check` (TypeScript and ESLint). A change must pass it before
-it merges.
-
-The gate does not run the dashboard unit tests. Run them with
-`just dashboard::test`, or run `just test` for the Rust tests and the
-dashboard tests together.
+`-D warnings`), `ci::test` (`cargo test --workspace`), `ci::scripts-test`
+(the Python tests under `scripts/`, which also check that the Dockerfile is
+in step with `harnesses.toml`), and `ci::dashboard-check` (TypeScript,
+ESLint, and the dashboard unit tests). A change must pass it before it
+merges.
 
 ## 6. Run the real-harness tests
 
@@ -676,9 +674,131 @@ a comma list. The report goes to stdout and to `target/compat-report.md`.
 `cargo test -p terrarium-compat` without `--ignored` runs only the dry run.
 It starts no harness.
 
-## 7. Troubleshooting
+## 7. Updating a harness
 
-### 7.1 bwrap cannot make a sandbox
+`harnesses.toml` at the repo root pins each harness: the npm package, the
+version that the image installs, the `tested` range that the adapter
+accepts, and the binary. It also pins the Node image and the Copilot
+prompt extension. It is the only place to change a version
+([CONVENTIONS.md](CONVENTIONS.md)). Three readers use it:
+
+- The image. `just docker::image-build` passes each value as a
+  `--build-arg` (`scripts/harness-versions.py build-args`).
+- The adapters. `crates/terrarium-core/build.rs` reads the file at compile
+  time, and each adapter's `flags.rs` takes `verified` and `tested` from it.
+- The daemon and the compatibility suite. Both compare the installed
+  version with the adapter's `tested` range.
+
+### 7.1 Check
+
+```sh
+just harness::check           # a table
+just harness::check --json
+```
+
+For each harness, the table shows the pin, the tested range, the version
+in the running container, the version on the host, the latest version on
+npm with its publish date, and whether the latest version is in the tested
+range. The command changes nothing.
+
+### 7.2 Update
+
+```sh
+just harness::update claude --dry-run    # print the plan, change nothing
+just harness::update claude              # the latest version on npm
+just harness::update claude 2.1.320      # a given version
+```
+
+The command does these steps:
+
+1. It sets the new version in `harnesses.toml`.
+2. It widens the `tested` range when the new version is outside it. It
+   does this for a patch bump or a minor bump only. A minor bump moves the
+   upper bound to the next minor line (`<2.2.0` becomes `<2.3.0`).
+3. It sets the ARG defaults in `docker/Dockerfile`.
+4. It adds a row to the "Version history" table in
+   [compat.md](compat.md).
+5. It builds the image (`just docker::image-build`) and checks the version
+   in the image.
+6. It runs the dry compatibility suite (`cargo test -p terrarium-compat`).
+7. It prints the next steps.
+
+A major bump stops at step 1. Add `--allow-major` to continue. The command
+then resets the range to the new minor line and prints a warning: hooks,
+flags, and config keys can change in a major release. The command uses the
+semver rule for "major": the first part that is not zero. Thus, for a 0.x
+harness, 0.160.0 to 0.161.0 is a major bump, and 0.160.0 to 0.160.1 is a
+patch bump.
+
+### 7.3 Prove the new version
+
+The compatibility suite runs the harness binary on the host, with your
+real logins. Install the new version on the host first (with npm, or with
+the installer that you use for the harness). Then run the suite:
+
+```sh
+npm install -g @anthropic-ai/claude-code@2.1.320
+just ci::compat claude
+```
+
+Write the result in the "Compat" cell of the new row in
+[compat.md](compat.md), "Version history".
+
+When a step fails, compare the failure with the facts for the old version
+in [compat.md](compat.md). Look at these items:
+
+- The hook names and the hook payload fields ("Hooks"). An adapter maps
+  them in its `hooks.rs`.
+- The flags and the env vars ("Quiet start", "Summary"). They are in the
+  adapter's `flags.rs`.
+- The session file and the usage fields ("Session file and usage
+  accounting").
+- The screen text that the adapter reads ("Typing into the TUI").
+
+When a fact changes, add a section for the new version to
+[compat.md](compat.md), and change the adapter table in `flags.rs`.
+
+### 7.4 Roll out
+
+```sh
+just harness::rollout --dry-run    # list the live agents, change nothing
+just harness::rollout
+```
+
+The rollout runs `just up`. When the image changed, Docker Compose makes
+the container again. The entrypoint stops `terrariumd` and then each
+runner gracefully, and each runner records `stopped_by: container`. The
+new daemon starts each of those agents again with resume
+([docker/README.md](../docker/README.md), "The shutdown sequence"). Thus
+`just up` alone does the same rollout. The rollout command also lists the
+live agents before and after.
+
+At each agent start, the daemon compares the installed version with the
+tested range. Outside the range, the daemon logs a warning and writes a
+`warning` event for the agent, and the agent starts. Set
+`TERRARIUM_HARNESS_VERSION_POLICY=refuse` to refuse the start
+(`422 invalid`) in its place. `terrarium admin harness ls`,
+`GET /api/harnesses`, and the Subscriptions page of the dashboard show
+the installed version of each harness and its range.
+
+### 7.5 Roll back
+
+Edit `harnesses.toml`: set `version` back to the old value. If the update
+changed `tested`, set it back too. Then build and roll out:
+
+```sh
+just up
+```
+
+`just ci::check` fails when the Dockerfile ARG defaults differ from
+`harnesses.toml`. To fix them, run
+`uv run python scripts/harness-versions.py sync`. Before a commit,
+`git checkout harnesses.toml docker/Dockerfile docs/compat.md` also undoes
+an update.
+
+## 8. Troubleshooting
+
+### 8.1 bwrap cannot make a sandbox
 
 The daemon checks `bwrap` when it starts. When the check fails, the daemon
 stops with "bwrap cannot make a sandbox here".
@@ -705,7 +825,7 @@ It prints `bwrap ok` when the sandbox works. See
 Outside Docker, the host must allow unprivileged user namespaces. If it does
 not, use `TERRARIUM_SANDBOX=none` for development.
 
-### 7.2 Claude Code refuses yolo as root
+### 8.2 Claude Code refuses yolo as root
 
 Claude Code exits with "`--dangerously-skip-permissions` cannot be used with
 root/sudo privileges". The image runs as the `terrarium` user, so this does
@@ -720,7 +840,7 @@ If you see the message:
 - Check the user in the container with
   `docker compose exec terrarium id -u`.
 
-### 7.3 "Session ID ... is already in use"
+### 8.3 "Session ID ... is already in use"
 
 Claude Code exits at once with `Error: Session ID <uuid> is already in
 use.` when `--session-id` gets a UUID that it saw before. The daemon makes a
@@ -732,7 +852,7 @@ example the output of `terrariumd sandbox-dry-run <agent>`. Use
 `--resume <uuid>` to continue that session, or start the agent through the
 daemon with `terrarium agent start`.
 
-### 7.4 The trust dialog in sandbox mode `none`
+### 8.4 The trust dialog in sandbox mode `none`
 
 In mode `bwrap`, the sandbox binds a per-agent `.claude.json` over the
 shared one. That file marks the workspace as trusted and onboarding as
@@ -759,7 +879,7 @@ You can also accept the dialog by hand. Open the agent's terminal in the
 dashboard, select the input check box, and select "Yes, I trust this
 folder".
 
-### 7.5 Codex leaves a daemon behind
+### 8.5 Codex leaves a daemon behind
 
 A Codex start with no `-c` override starts a detached
 `codex app-server --managed-daemon`. It outlives the TUI, copies about
@@ -771,7 +891,7 @@ Add `--no-daemon` when you do. Stop a leftover `codex app-server
 --managed-daemon` process by hand. See [compat.md](compat.md), "Codex:
 facts that contradict the plan".
 
-### 7.6 Copilot is logged out in the sandbox
+### 8.6 Copilot is logged out in the sandbox
 
 On a host, `copilot login` puts the OAuth token in the system keychain
 (libsecret over D-Bus). A sandbox has no D-Bus, so Copilot starts logged
@@ -788,7 +908,7 @@ token into `COPILOT_GITHUB_TOKEN` for the agents on that subscription only.
 The API is `POST /api/subscriptions/{name}/api-key` with
 `{"provider":"github","key":"..."}` ([api.md](api.md) §16.5).
 
-### 7.7 pi refuses a Claude plan
+### 8.7 pi refuses a Claude plan
 
 The daemon refuses to start a pi agent on an Anthropic plan subscription:
 "pi cannot spend a Claude plan". Anthropic bills a Pro/Max login that pi
@@ -797,7 +917,7 @@ that contradict the plan"). Use the `claude` harness for the plan. To use
 Anthropic through pi, make an API-key subscription with an Anthropic API
 key.
 
-### 7.8 Other messages
+### 8.8 Other messages
 
 | Message | Fix |
 |---|---|

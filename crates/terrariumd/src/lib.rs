@@ -13,6 +13,7 @@ pub mod events;
 pub mod executor;
 pub mod fleet;
 pub mod git;
+pub mod harness_versions;
 pub mod hosts;
 pub mod leases;
 pub mod login_session;
@@ -401,7 +402,7 @@ fn summary(name: &str, kind: &str, data: &Value) -> String {
     match kind {
         "turn_start" => format!("{name}: turn: {}", short(&data["prompt"])),
         "tool_use" => format!("{name}: tool {}", short(&data["tool"])),
-        "notification" | "question" => {
+        "notification" | "question" | "warning" => {
             format!(
                 "{name}: {}",
                 short(data.get("message").unwrap_or(&data["question"]))

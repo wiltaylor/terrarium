@@ -3500,3 +3500,72 @@ async fn agent_rm_keep_workspace() {
     )
     .await;
 }
+
+#[tokio::test]
+async fn admin_harness_ls_shows_the_range_and_the_policy() {
+    let answer = json!({
+        "policy": "warn",
+        "harnesses": [
+            {"harness": "claude", "package": "@anthropic-ai/claude-code", "pinned": "2.1.310",
+             "tested": ">=2.1.310, <2.2.0", "installed": "2.1.310", "in_range": true,
+             "checked_at": "2026-10-25T10:00:00Z"},
+            {"harness": "codex", "package": "@openai/codex", "pinned": "0.160.0",
+             "tested": ">=0.160.0, <0.161.0", "installed": "0.164.0", "in_range": false,
+             "checked_at": "2026-10-25T10:00:00Z"},
+            {"harness": "pi", "package": "@earendil-works/pi-coding-agent", "pinned": "0.85.1",
+             "tested": ">=0.85.1, <0.86.0", "installed": null, "in_range": null,
+             "error": "cannot run pi: No such file or directory", "checked_at": null}
+        ]
+    });
+    let out = ok(
+        false,
+        &["admin", "harness", "ls"],
+        vec![(200, answer.clone())],
+        vec![req(Get, "/api/harnesses")],
+    )
+    .await;
+    let lines: Vec<&str> = out.lines().collect();
+    assert!(lines[0].starts_with("HARNESS"), "{out}");
+    assert!(lines[0].contains("IN RANGE"), "{out}");
+    assert!(out.contains("claude   2.1.310"), "{out}");
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("codex") && l.ends_with("NO")),
+        "{out}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("pi") && l.ends_with("unknown")),
+        "{out}"
+    );
+    assert!(
+        out.contains("policy: warn (TERRARIUM_HARNESS_VERSION_POLICY)"),
+        "{out}"
+    );
+    assert!(
+        out.contains("codex: 0.164.0 is outside >=0.160.0, <0.161.0; rebuild the image or run `just harness::update codex`"),
+        "{out}"
+    );
+    assert!(
+        out.contains("pi: cannot run pi: No such file or directory"),
+        "{out}"
+    );
+
+    ok(
+        false,
+        &["admin", "harness", "ls", "--refresh"],
+        vec![(200, answer.clone())],
+        vec![(Get, "/api/harnesses", vec![("refresh", "true")], None)],
+    )
+    .await;
+    let out = ok(
+        false,
+        &["--json", "admin", "harness", "ls"],
+        vec![(200, answer.clone())],
+        vec![req(Get, "/api/harnesses")],
+    )
+    .await;
+    assert_eq!(serde_json::from_str::<Value>(&out).unwrap(), answer);
+}

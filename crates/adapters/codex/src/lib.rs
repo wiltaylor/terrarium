@@ -47,7 +47,8 @@ pub use error::CodexError;
 pub use flags::{CODEX_0_160, CodexFlags};
 
 /// The Codex versions this adapter accepts. Only [`CodexFlags::verified`]
-/// (0.160.0) was measured. This is the one place for the version pin.
+/// (the pin in `harnesses.toml`, the one place for the version pin) was
+/// measured.
 pub const TESTED: &str = CODEX_0_160.tested;
 
 /// How the rendered prompt reaches Codex.
@@ -278,8 +279,16 @@ mod tests {
         let a = CodexAdapter::default();
         let req = a.tested_version();
         assert!(req.matches(&Version::parse(CODEX_0_160.verified).expect("v")));
-        assert!(!req.matches(&Version::new(0, 161, 0)));
-        assert!(!req.matches(&Version::new(0, 159, 9)));
+        // The pin and the range come from harnesses.toml.
+        assert_eq!(
+            CODEX_0_160.verified,
+            terrarium_core::harnesses::codex::VERSION
+        );
+        assert_eq!(CODEX_0_160.tested, terrarium_core::harnesses::codex::TESTED);
+        assert_eq!(
+            req,
+            VersionReq::parse(terrarium_core::harnesses::codex::TESTED).expect("req")
+        );
         assert_eq!(a.id(), HarnessId::Codex);
         assert!(a.prompt_frozen_on_resume());
     }

@@ -38,7 +38,7 @@ pub use flags::{COPILOT_1_0, CopilotFlags};
 pub use launch::SessionStart;
 
 /// The Copilot CLI versions this adapter accepts. Only
-/// [`CopilotFlags::verified`] (1.0.103) was measured.
+/// [`CopilotFlags::verified`] (the pin in `harnesses.toml`) was measured.
 pub const TESTED: &str = COPILOT_1_0.tested;
 
 /// The env var that carries the GitHub token into an agent. The daemon
@@ -355,10 +355,20 @@ mod tests {
         let a = CopilotAdapter::default();
         let req = a.tested_version();
         assert!(req.matches(&Version::parse(COPILOT_1_0.verified).expect("v")));
-        assert!(!req.matches(&Version::new(1, 0, 102)));
-        assert!(!req.matches(&Version::new(1, 1, 0)));
+        // The pin and the range come from harnesses.toml.
+        assert_eq!(
+            COPILOT_1_0.verified,
+            terrarium_core::harnesses::copilot::VERSION
+        );
+        assert_eq!(
+            COPILOT_1_0.tested,
+            terrarium_core::harnesses::copilot::TESTED
+        );
+        assert_eq!(
+            req,
+            VersionReq::parse(terrarium_core::harnesses::copilot::TESTED).expect("req")
+        );
         assert_eq!(a.id(), HarnessId::Copilot);
-        assert_eq!(TESTED, ">=1.0.103, <1.1.0");
     }
 
     #[test]

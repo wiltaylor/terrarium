@@ -17,6 +17,8 @@ mod docker '.just/docker'
 mod daemon '.just/daemon'
 # SolidJS dashboard
 mod dashboard '.just/dashboard'
+# Harness versions: check, update, roll out (harnesses.toml)
+mod harness '.just/harness'
 # Host agent build and install
 mod host '.just/host'
 # Phase 0 spike scripts

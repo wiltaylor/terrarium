@@ -1,8 +1,9 @@
 //! The command-line surface of one Copilot CLI version, as data.
 //!
 //! All version-specific names live in one table, [`COPILOT_1_0`]. The
-//! version pin is [`CopilotFlags::verified`] and [`CopilotFlags::tested`];
-//! nothing else in the crate names a version. When a Copilot release
+//! version pin is [`CopilotFlags::verified`] and [`CopilotFlags::tested`],
+//! which come from `harnesses.toml`; nothing else in the crate names a
+//! version. When a Copilot release
 //! changes a flag, add a new table and pick it in [`crate::CopilotOptions`].
 //! Every entry was checked by the Phase 0 spikes (`docs/compat.md`,
 //! "Copilot CLI 1.0.103") unless its doc comment says otherwise.
@@ -10,9 +11,11 @@
 /// The flags, env names, and hooks of one Copilot CLI version range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CopilotFlags {
-    /// The version that the spikes measured.
+    /// The pinned version, which the image installs. It comes from
+    /// `harnesses.toml` at compile time (`terrarium_core::harnesses`).
     pub verified: &'static str,
-    /// The version range that the adapter accepts (a `semver::VersionReq`).
+    /// The version range that the adapter accepts (a `semver::VersionReq`),
+    /// from `harnesses.toml`. `just harness::update` widens it.
     pub tested: &'static str,
     /// Experimental mode. The system-prompt extension loads only in it.
     /// The adapter does **not** pass this flag: with it, Copilot writes
@@ -79,8 +82,8 @@ pub struct CopilotFlags {
 /// ships patch releases often; the range accepts later 1.0 patches, but
 /// only 1.0.103 was measured.
 pub const COPILOT_1_0: CopilotFlags = CopilotFlags {
-    verified: "1.0.103",
-    tested: ">=1.0.103, <1.1.0",
+    verified: terrarium_core::harnesses::copilot::VERSION,
+    tested: terrarium_core::harnesses::copilot::TESTED,
     experimental: "--experimental",
     experimental_key: "experimental",
     yolo: "--yolo",

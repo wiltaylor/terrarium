@@ -1,0 +1,21 @@
+# A fixture for scripts/test_harness*.py. Not the real pins.
+[node]
+image = "node:22.0.0-slim"
+
+[harness.claude]
+package = "@anthropic-ai/claude-code"
+version = "2.1.310"
+tested = ">=2.1.310, <2.2.0"
+binary = "claude"
+
+[harness.codex]
+package = "@openai/codex"
+version = "0.160.0"
+tested = ">=0.160.0, <0.161.0" # trailing comment stays
+binary = "codex"
+
+[extension.copilot-prompt]
+package = "copilot-custom-system-prompt"
+version = "0.1.2"
+binary = "copilot-custom-system-prompt"
+for = "copilot"

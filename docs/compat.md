@@ -10,6 +10,22 @@ Status words:
 - **read**: found in `--help` or in the binary, but no spike ran it.
 - **not tested**: an open question.
 
+## Version history
+
+`harnesses.toml` at the repo root pins each harness. `just harness::update`
+adds a row here for each bump. The "Range" cell shows a change to the
+adapter's `tested` range. After `just ci::compat <harness>`, write the result
+in the "Compat" cell. When a bump changes a hook, a flag, or a config key,
+add a section for the new version below, as for the versions below.
+
+| Date | Harness | Version | Bump | Range | Compat |
+|---|---|---|---|---|---|
+| 2026-10-24 | claude | 2.1.310 | first pin | `>=2.1.310, <2.2.0` | pass (Phase 0 spikes, `ci::compat`) |
+| 2026-10-24 | codex | 0.160.0 | first pin | `>=0.160.0, <0.161.0` | pass (Phase 0 spikes) |
+| 2026-10-24 | copilot | 1.0.103 | first pin | `>=1.0.103, <1.1.0` | pass (Phase 0 spikes) |
+| 2026-10-24 | pi | 0.85.1 | first pin | `>=0.85.1, <0.86.0` | pass (Phase 0 spikes) |
+| 2026-10-24 | copilot-prompt | 0.1.2 | first pin | - | - |
+
 ---
 
 ## Claude Code 2.1.310

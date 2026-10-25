@@ -1,6 +1,7 @@
 // Subscriptions (PLAN §16.1, docs/api.md §16): every plan with its login and
 // probe status, the logins the daemon found with no definition, and the
-// actions: verify, probe, re-login, logout, delete.
+// actions: verify, probe, re-login, logout, delete. Above them, the harness
+// versions against their pins (./HarnessVersions.tsx).
 
 import { createSignal, For, onMount, Show } from "solid-js";
 import { ConfirmButton, Empty, ErrorBanner, PageHead, ProviderLogo, useNow } from "../../components/ui";
@@ -9,6 +10,7 @@ import type { DetectedLogin, Subscription } from "../../api/types";
 import { ago, humanize, timeUntil } from "../../lib/format";
 import { api, subscriptions } from "../../stores";
 import { AddSubscriptionWizard } from "./AddSubscriptionWizard";
+import { HarnessVersions } from "./HarnessVersions";
 import { reloginFor, type WizardPath, type WizardSetup } from "./wizard";
 
 /** The probe chip: `ok` with the last success, `failed` with why, or local only. */
@@ -66,6 +68,8 @@ export default function SubscriptionsPage() {
       <Show when={notice()}>
         <p class="notice small">{notice()}</p>
       </Show>
+
+      <HarnessVersions />
 
       <Show when={subscriptions.detected().length}>
         <div class="notice stack" style={{ gap: "6px", "margin-bottom": "14px" }} aria-label="Logins with no subscription">

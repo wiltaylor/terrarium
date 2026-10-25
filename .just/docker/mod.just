@@ -10,10 +10,14 @@ gid := env("TERRARIUM_GID", "1000")
 main:
 	@just --list docker
 
-# Build the Terrarium image (daemon, CLI, dashboard, harnesses)
+# Build the Terrarium image (daemon, CLI, dashboard, harnesses); the harness versions come from harnesses.toml
 [group('image')]
-image-build: require-docker
-	docker build -f docker/Dockerfile --build-arg UID={{uid}} --build-arg GID={{gid}} -t {{image}} .
+image-build: require-docker require-uv
+	#!/usr/bin/env bash
+	set -euo pipefail
+	pins="$(uv run python scripts/harness-versions.py build-args)"
+	set -x
+	docker build -f docker/Dockerfile $pins --build-arg UID={{uid}} --build-arg GID={{gid}} -t {{image}} .
 
 # Tag the image and push it to a registry, for example `just docker::image-push ghcr.io/me/terrarium:0.1.0`
 [group('image')]

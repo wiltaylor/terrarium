@@ -187,13 +187,15 @@ terrarium/
   justfile                  entry point: modules and the build, test, up, down aggregates
   .just/
     shared.just             require-* helpers (docker, cargo, node, uv, ssh)
-    ci/mod.just             the merge gate (check = fmt-check + lint + test + dashboard-check) and compat
+    ci/mod.just             the merge gate (check = fmt-check + lint + test + scripts-test + dashboard-check) and compat
     daemon/mod.just         cargo build, run, test, and the operator CLI
     dashboard/mod.just      npm install, dev, build, test, check
     docker/mod.just         image build and push, compose up/down/logs/shell, config dirs
+    harness/mod.just        harness versions: check, update, rollout (scripts/harness.py)
     host/mod.just           build, package, and register terrarium-host
     spikes/mod.just         Phase 0 spike scripts
   Cargo.toml  Cargo.lock    the Rust workspace
+  harnesses.toml            the harness pins: the one place to change a harness version
   crates/
     terrarium-core/         domain model, events, hook payloads, adapter trait, protocols
     terrariumd/             daemon (lib + bin): API, SQLite, supervisor, sandbox, executors, embedded dashboard
@@ -248,6 +250,7 @@ recipes of a module.
 | Run the Rust and dashboard tests | `just test` |
 | Run the merge gate | `just ci::check` |
 | Run the compatibility suite for one harness | `just ci::compat claude` |
+| Check, update, or roll out a harness version (pins in `harnesses.toml`) | `just harness::check`, `just harness::update claude`, `just harness::rollout` |
 | Run the daemon outside Docker | `just daemon::run` |
 | Run the CLI against a running daemon | `just daemon::cli daemon status` |
 | Run the dashboard dev server | `just dashboard::dev` |

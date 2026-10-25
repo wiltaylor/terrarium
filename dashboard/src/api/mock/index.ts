@@ -1129,6 +1129,21 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
         started_at: new Date(startedAt - 3600_000).toISOString(),
         definitions: { projects: 1, agents: 1, targets: 0, subscriptions: 0 },
       })),
+    harnesses: () =>
+      reply(() => {
+        const at = new Date(startedAt).toISOString();
+        const row = (harness: "claude" | "codex" | "copilot" | "pi", pkg: string, pinned: string, tested: string, installed: string, in_range: boolean) => ({ harness, package: pkg, pinned, tested, installed, in_range, checked_at: at });
+        return {
+          policy: "warn" as const,
+          harnesses: [
+            row("claude", "@anthropic-ai/claude-code", "2.1.310", ">=2.1.310, <2.2.0", "2.1.310", true),
+            row("codex", "@openai/codex", "0.160.0", ">=0.160.0, <0.161.0", "0.160.0", true),
+            row("copilot", "@github/copilot", "1.0.103", ">=1.0.103, <1.1.0", "1.0.103", true),
+            // Out of range, so mock mode shows the badge.
+            row("pi", "@earendil-works/pi-coding-agent", "0.85.1", ">=0.85.1, <0.86.0", "0.86.2", false),
+          ],
+        };
+      }),
 
     projects: {
       list: () => reply(() => w.projects.slice().sort((a, b) => a.name.localeCompare(b.name))),

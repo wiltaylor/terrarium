@@ -1,4 +1,4 @@
-//! Health, reload, and audit. Targets and hosts are in `targets.rs` and
+//! Health, harness versions, reload, and audit. Targets and hosts are in `targets.rs` and
 //! `hosts.rs`.
 
 use axum::Json;
@@ -49,6 +49,25 @@ pub async fn health(State(state): State<Shared>) -> Json<Health> {
             subscriptions: d.subscriptions.len(),
         },
     })
+}
+
+/// The query of `GET /api/harnesses`.
+#[derive(Debug, Default, Deserialize)]
+pub struct HarnessQuery {
+    /// Run `<binary> --version` again; else a cached answer (10 minutes).
+    #[serde(default)]
+    pub refresh: bool,
+}
+
+/// `GET /api/harnesses`: for each harness, the pin from `harnesses.toml`,
+/// the adapter's tested range, the installed version, and whether it is in
+/// the range; and the start policy (`TERRARIUM_HARNESS_VERSION_POLICY`).
+/// Every caller may read it.
+pub async fn harnesses(
+    State(state): State<Shared>,
+    ApiQuery(q): ApiQuery<HarnessQuery>,
+) -> Json<crate::harness_versions::HarnessReport> {
+    Json(state.supervisor.harness_versions(q.refresh).await)
 }
 
 /// `POST /api/reload`: read the definition files again and sync them.

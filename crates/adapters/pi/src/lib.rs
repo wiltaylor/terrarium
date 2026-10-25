@@ -44,7 +44,7 @@ pub use flags::{PI_0_85, PiFlags};
 pub use provider::{provider_for, refusal, required_env};
 
 /// The pi versions this adapter accepts. Only [`PiFlags::verified`]
-/// (0.85.1) was measured.
+/// (the pin in `harnesses.toml`) was measured.
 pub const TESTED: &str = PI_0_85.tested;
 
 /// How the rendered prompt reaches pi.
@@ -274,9 +274,13 @@ mod tests {
         let a = PiAdapter::default();
         let req = a.tested_version();
         assert!(req.matches(&Version::parse(PI_0_85.verified).expect("v")));
-        assert!(!req.matches(&Version::new(0, 86, 0)));
-        assert!(!req.matches(&Version::new(0, 85, 0)));
-        assert!(!req.matches(&Version::new(1, 4, 0)));
+        // The pin and the range come from harnesses.toml.
+        assert_eq!(PI_0_85.verified, terrarium_core::harnesses::pi::VERSION);
+        assert_eq!(PI_0_85.tested, terrarium_core::harnesses::pi::TESTED);
+        assert_eq!(
+            req,
+            VersionReq::parse(terrarium_core::harnesses::pi::TESTED).expect("req")
+        );
         assert_eq!(a.id(), HarnessId::Pi);
     }
 

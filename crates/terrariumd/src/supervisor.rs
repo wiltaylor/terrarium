@@ -189,6 +189,18 @@ pub trait Supervisor: Send + Sync + 'static {
             ))
         })
     }
+    /// The installed version of each harness against its tested range
+    /// (`GET /api/harnesses`). `refresh` runs the binaries again. The
+    /// default knows only the pins.
+    fn harness_versions(
+        &self,
+        refresh: bool,
+    ) -> BoxFuture<'_, crate::harness_versions::HarnessReport> {
+        let _ = refresh;
+        Box::pin(async {
+            crate::harness_versions::pins_only(crate::harness_versions::VersionPolicy::default())
+        })
+    }
     /// After a daemon start, find the runner of an agent that the store
     /// shows as live (PLAN §18). `events_since` is the last runner seq that
     /// the store recorded for it. The default finds nothing: [`Recovery::Gone`].

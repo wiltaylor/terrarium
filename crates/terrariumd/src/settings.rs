@@ -137,6 +137,17 @@ pub struct Settings {
     #[arg(long, env = "TERRARIUM_RUNNER")]
     pub runner: Option<PathBuf>,
 
+    /// What an agent start does with a harness whose installed version is
+    /// outside the adapter's tested range (`harnesses.toml`): `warn` (start,
+    /// with a log line and a `warning` event) or `refuse` (`422 invalid`).
+    #[arg(
+        long,
+        env = crate::harness_versions::ENV_POLICY,
+        value_enum,
+        default_value_t = crate::harness_versions::VersionPolicy::Warn
+    )]
+    pub harness_version_policy: crate::harness_versions::VersionPolicy,
+
     /// Trust the `X-Terrarium-Agent` header on the Unix socket. Any local
     /// caller can then act as any agent. For tests and development only.
     #[arg(long, env = "TERRARIUM_INSECURE_AGENT_HEADER")]

@@ -188,6 +188,7 @@ pub fn router_with(state: Shared, serve_artifacts: bool) -> Router {
 fn routes(state: Shared, serve_artifacts: bool, host_connect: bool) -> Router {
     let api = Router::new()
         .route("/health", get(system::health))
+        .route("/harnesses", get(system::harnesses))
         .merge(hosts::routes())
         .merge(targets::routes())
         .route("/reload", post(system::reload))

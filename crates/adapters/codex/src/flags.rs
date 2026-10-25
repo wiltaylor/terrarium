@@ -9,9 +9,11 @@
 /// The flags, config keys, and hooks of one Codex version range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CodexFlags {
-    /// The version that the spikes measured.
+    /// The pinned version, which the image installs. It comes from
+    /// `harnesses.toml` at compile time (`terrarium_core::harnesses`).
     pub verified: &'static str,
-    /// The version range that the adapter accepts (a `semver::VersionReq`).
+    /// The version range that the adapter accepts (a `semver::VersionReq`),
+    /// from `harnesses.toml`. `just harness::update` widens it.
     pub tested: &'static str,
     /// The subcommand that continues a session: `codex resume <id>`. The
     /// session ID stays the same. A missing ID exits at once with
@@ -64,8 +66,8 @@ pub struct CodexFlags {
 
 /// Codex 0.160.x. Measured on 0.160.0 (`docs/compat.md`).
 pub const CODEX_0_160: CodexFlags = CodexFlags {
-    verified: "0.160.0",
-    tested: ">=0.160.0, <0.161.0",
+    verified: terrarium_core::harnesses::codex::VERSION,
+    tested: terrarium_core::harnesses::codex::TESTED,
     resume: "resume",
     no_daemon: "--no-daemon",
     yolo: "--dangerously-bypass-approvals-and-sandbox",

@@ -10,9 +10,11 @@
 /// The flags and env names of one pi version range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PiFlags {
-    /// The version that the spikes measured.
+    /// The pinned version, which the image installs. It comes from
+    /// `harnesses.toml` at compile time (`terrarium_core::harnesses`).
     pub verified: &'static str,
-    /// The version range that the adapter accepts (a `semver::VersionReq`).
+    /// The version range that the adapter accepts (a `semver::VersionReq`),
+    /// from `harnesses.toml`. `just harness::update` widens it.
     pub tested: &'static str,
     /// The provider id, for example `openai-codex` (see [`crate::provider`]).
     pub provider: &'static str,
@@ -58,8 +60,8 @@ pub struct PiFlags {
 
 /// pi 0.85.x. Measured on 0.85.1 (`docs/compat.md`).
 pub const PI_0_85: PiFlags = PiFlags {
-    verified: "0.85.1",
-    tested: ">=0.85.1, <0.86.0",
+    verified: terrarium_core::harnesses::pi::VERSION,
+    tested: terrarium_core::harnesses::pi::TESTED,
     provider: "--provider",
     model: "--model",
     extension: "-e",

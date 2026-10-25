@@ -79,6 +79,9 @@ use tracing::{debug, info, warn};
 
 use crate::agent_rpc::AgentRpc;
 use crate::api::{AppState, Shared};
+use crate::harness_versions::{
+    HarnessReport, Verdict, VersionCache, VersionPolicy, judge, out_of_range_message,
+};
 use crate::prompt::{self, Peer, PromptContext};
 use crate::sandbox::{self, AgentLayout, HarnessHome, SandboxConfig, SandboxMode};
 use crate::store::subscriptions::Subscription;
@@ -199,6 +202,9 @@ pub struct RunnerSupervisorConfig {
     /// ([`DEFAULT_LEAD_NUDGE_INTERVAL`]). The nudges in between go out
     /// together at the end of it.
     pub lead_nudge_interval: Duration,
+    /// What a launch does with a harness outside its tested range
+    /// (`TERRARIUM_HARNESS_VERSION_POLICY`, [`crate::harness_versions`]).
+    pub version_policy: VersionPolicy,
 }
 
 /// The default of [`RunnerSupervisorConfig::lead_nudge_interval`].
@@ -226,6 +232,7 @@ impl RunnerSupervisorConfig {
             runner: RunnerTuning::default(),
             mode: RunnerMode::InProcess,
             lead_nudge_interval: DEFAULT_LEAD_NUDGE_INTERVAL,
+            version_policy: VersionPolicy::default(),
         }
     }
 
@@ -808,6 +815,8 @@ fn hold_reason(h: &TurnHold) -> String {
 
 struct Inner {
     cfg: RunnerSupervisorConfig,
+    /// The installed harness versions ([`crate::harness_versions`]).
+    versions: VersionCache,
     slots: Mutex<HashMap<AgentId, Slot>>,
     /// Never locked while `slots` is locked, and the other way round.
     holds: Mutex<HashMap<AgentId, Held>>,
@@ -912,6 +921,7 @@ impl RunnerSupervisor {
         Self {
             inner: Arc::new(Inner {
                 cfg,
+                versions: VersionCache::default(),
                 slots: Mutex::new(HashMap::new()),
                 holds: Mutex::new(HashMap::new()),
                 nudges: Mutex::new(HashMap::new()),
@@ -1278,6 +1288,7 @@ impl RunnerSupervisor {
             (slot.agent.clone(), slot.resume.clone())
         };
         let entry = self.entry(agent.harness)?;
+        let version_warning = self.check_version(&agent, &entry).await?;
         let view = self.store_view(&agent).await;
         let Built {
             spec,
@@ -1406,6 +1417,9 @@ impl RunnerSupervisor {
         };
         info!(agent = %id, name = %agent.name, %reason, "agent started");
         self.emit_status(id, AgentStatus::Starting, reason);
+        if let Some(message) = version_warning {
+            self.emit(id, SupervisorEventKind::Harness(Event::Warning { message }));
+        }
         if prompt_updated && resume.is_some() {
             info!(agent = %id, "{PROMPT_UPDATED}");
             self.emit(
@@ -1430,6 +1444,43 @@ impl RunnerSupervisor {
         let me = self.clone();
         tokio::spawn(async move { me.forward(id, epoch, runner, rx).await });
         Ok(())
+    }
+
+    /// Compare the installed harness version with the adapter's tested
+    /// range ([`crate::harness_versions`]). Outside it: with the policy
+    /// `warn`, a warning log and the text for a `warning` event; with
+    /// `refuse`, `NotReady` (`422 invalid`).
+    async fn check_version(
+        &self,
+        agent: &Agent,
+        entry: &AdapterEntry,
+    ) -> Result<Option<String>, SupervisorError> {
+        let tested = entry.adapter.tested_version();
+        let (installed, _) = self
+            .inner
+            .versions
+            .detect(agent.harness, entry.adapter.clone(), false)
+            .await;
+        match judge(&installed, &tested) {
+            Verdict::InRange(_) => Ok(None),
+            Verdict::Unknown(e) => {
+                debug!(agent = %agent.id, harness = %agent.harness, "no harness version: {e}");
+                Ok(None)
+            }
+            Verdict::OutOfRange(v) => {
+                let message = out_of_range_message(agent.harness, &v, &tested);
+                match self.inner.cfg.version_policy {
+                    VersionPolicy::Refuse => Err(SupervisorError::NotReady(format!(
+                        "{message}. {} is `refuse`, so the agent does not start",
+                        crate::harness_versions::ENV_POLICY
+                    ))),
+                    VersionPolicy::Warn => {
+                        warn!(agent = %agent.id, name = %agent.name, "{message}");
+                        Ok(Some(message))
+                    }
+                }
+            }
+        }
     }
 
     /// The handler for the agent RPC requests of a runner.
@@ -2729,6 +2780,26 @@ fn one_line(s: &str) -> String {
 }
 
 impl Supervisor for RunnerSupervisor {
+    fn harness_versions(&self, refresh: bool) -> BoxFuture<'_, HarnessReport> {
+        Box::pin(async move {
+            let mut harnesses = Vec::new();
+            for h in HarnessId::ALL {
+                if let Some(entry) = self.inner.cfg.adapters.get(&h) {
+                    harnesses.push(
+                        self.inner
+                            .versions
+                            .row(h, entry.adapter.clone(), refresh)
+                            .await,
+                    );
+                }
+            }
+            HarnessReport {
+                policy: self.inner.cfg.version_policy,
+                harnesses,
+            }
+        })
+    }
+
     fn start(
         &self,
         agent: Agent,

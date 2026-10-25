@@ -5,6 +5,13 @@
 #
 #   docker build -f docker/Dockerfile --build-arg UID=$(id -u) --build-arg GID=$(id -g) -t terrarium:dev .
 #
+# The harness versions and the Node image come from harnesses.toml at the
+# repo root. `just docker::image-build` passes them as build args
+# (scripts/harness-versions.py build-args). The ARG defaults below are a
+# copy for a build by hand; `just harness::update` rewrites them, and
+# `just ci::check` fails when they differ from harnesses.toml. Do not edit
+# a version here: edit harnesses.toml (docs/CONVENTIONS.md).
+#
 # Stages:
 #   dashboard    npm ci && npm run build for the SolidJS app
 #   rust         cargo build --release for terrariumd, terrarium, and terrarium-runner
@@ -14,8 +21,7 @@
 #   runtime      Debian slim + Node, bubblewrap, git, ssh, python3, and the harnesses
 
 ARG RUST_IMAGE=rust:1.97-trixie
-# Node 22.19+ is needed: pi 0.85.1 needs >=22.19, Claude Code needs >=22,
-# copilot-custom-system-prompt needs >=20.19 or >=22.12.
+# harnesses.toml [node] image.
 ARG NODE_IMAGE=node:22.23.4-trixie-slim
 
 # ---------------------------------------------------------------------------
@@ -29,7 +35,7 @@ RUN npm run build && test -d dist
 # ---------------------------------------------------------------------------
 FROM ${RUST_IMAGE} AS rust
 WORKDIR /src
-COPY Cargo.toml Cargo.lock ./
+COPY Cargo.toml Cargo.lock harnesses.toml ./
 COPY crates ./crates
 COPY --from=dashboard /src/dashboard/dist ./dashboard/dist
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
@@ -45,7 +51,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && rustup target add "$(uname -m)-unknown-linux-musl"
 WORKDIR /src
-COPY Cargo.toml Cargo.lock ./
+COPY Cargo.toml Cargo.lock harnesses.toml ./
 COPY crates ./crates
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target,id=terrarium-host-target \
@@ -62,13 +68,12 @@ FROM ${NODE_IMAGE} AS runtime
 
 ARG UID=1000
 ARG GID=1000
-# Pinned harness versions. Each adapter pins the same version (PLAN §4).
-ARG CLAUDE_CODE_VERSION=2.1.310
+# Pinned harness versions: harnesses.toml [harness.<name>] version, and
+# [extension.copilot-prompt] version. The adapters read the same file.
+ARG CLAUDE_VERSION=2.1.310
 ARG CODEX_VERSION=0.160.0
 ARG COPILOT_VERSION=1.0.103
-# pi moved from @mariozechner/pi-coding-agent (last 0.73.1) to @earendil-works/pi-coding-agent.
 ARG PI_VERSION=0.85.1
-# "latest" when this file was written was 0.1.2; pinned for repeatable builds.
 ARG COPILOT_PROMPT_VERSION=0.1.2
 
 RUN apt-get update \
@@ -84,7 +89,7 @@ RUN apt-get update \
 
 RUN --mount=type=cache,target=/root/.npm \
     npm install -g --no-audit --no-fund \
-        "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+        "@anthropic-ai/claude-code@${CLAUDE_VERSION}" \
         "@openai/codex@${CODEX_VERSION}" \
         "@github/copilot@${COPILOT_VERSION}" \
         "@earendil-works/pi-coding-agent@${PI_VERSION}" \

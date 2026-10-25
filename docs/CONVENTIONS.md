@@ -47,6 +47,22 @@ Rules for dependencies:
 - Test each TOML example from the plan with a round-trip test in
   `terrarium-core`.
 
+## Harness versions
+
+`harnesses.toml` at the repo root is the only place to change a harness
+version, the Node image, or the Copilot prompt extension version. Do not
+edit a version in `docker/Dockerfile` or in an adapter's `flags.rs`:
+
+- `just docker::image-build` passes the values as build args. The ARG
+  defaults in the Dockerfile are a copy, and `just ci::scripts-test` fails
+  when they differ.
+- `crates/terrarium-core/build.rs` makes `terrarium_core::harnesses` from
+  the file, and each adapter's `verified` and `tested` come from it. The
+  build fails when `tested` does not match `version`.
+
+Use `just harness::update <name>` to change a version
+([getting-started.md](getting-started.md), "Updating a harness").
+
 ## Run things with just
 
 Run `just` to see the modules. Run `just <module>` to see its recipes.
@@ -65,9 +81,11 @@ Run `just` to see the modules. Run `just <module>` to see its recipes.
 | Open a shell in the container          | `just docker::shell`            |
 | Check bwrap in the image               | `just spikes::bwrap-check`      |
 | Build the static host agent            | `just host::build`              |
+| Compare the harness pins with npm      | `just harness::check`           |
+| Bump a harness version                 | `just harness::update <name>`   |
 
 `just ci::check` must pass before a change merges. It runs `fmt-check`,
-`lint`, `test`, and `dashboard-check`. `ci::compat` is not in the gate, because
+`lint`, `test`, `scripts-test`, and `dashboard-check`. `ci::compat` is not in the gate, because
 it needs real logins.
 
 ## Environment
@@ -104,6 +122,7 @@ a new token, when `.env` does not exist. The daemon reads:
 | `TERRARIUM_SESSION_TTL` | `12h`. The life of a dashboard session cookie: seconds, or a number with `s`, `m`, `h`, or `d`. |
 | `TERRARIUM_SSH` | `ssh`. The ssh binary for `ssh` targets. |
 | `TERRARIUM_INSECURE_AGENT_HEADER` | off. On: trust `X-Terrarium-Agent` on the Unix socket (tests only). |
+| `TERRARIUM_HARNESS_VERSION_POLICY` | `warn`. An agent start on a harness whose installed version is outside the adapter's tested range (`harnesses.toml`) goes ahead, with a warning log and a `warning` event. `refuse`: the start is `422 invalid`. |
 
 ### The directories
 

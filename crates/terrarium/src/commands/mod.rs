@@ -79,6 +79,7 @@ async fn admin(ctx: &Ctx, cmd: &AdminCmd) -> anyhow::Result<()> {
         AdminCmd::Role { command } => agents::role(ctx, command).await,
         AdminCmd::Target { command } => system::admin_target(ctx, command).await,
         AdminCmd::Host { command } => system::hosts(ctx, command).await,
+        AdminCmd::Harness { command } => system::harnesses(ctx, command).await,
         AdminCmd::Fleet { command } => fleet::fleet(ctx, command).await,
         AdminCmd::Audit(args) => system::audit(ctx, args).await,
     }

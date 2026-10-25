@@ -327,6 +327,28 @@ Limits that always hold:
 `uptime` is in seconds. `definitions` counts the files loaded at the last
 start or reload.
 
+### `GET /api/harnesses`
+
+Every caller may read it. For each registered harness: the pin and the
+package from `harnesses.toml`, the range that the adapter accepts, the
+version that `<binary> --version` reports, and whether that version is in
+the range. `policy` is `TERRARIUM_HARNESS_VERSION_POLICY` (§6.2). The
+daemon caches each version for 10 minutes; `?refresh=true` runs the
+binaries again.
+
+```json
+{"policy":"warn",
+ "harnesses":[{"harness":"claude","package":"@anthropic-ai/claude-code","pinned":"2.1.310",
+   "tested":">=2.1.310, <2.2.0","installed":"2.1.310","in_range":true,
+   "checked_at":"2026-10-25T10:00:00Z"},
+  {"harness":"pi","package":"@earendil-works/pi-coding-agent","pinned":"0.85.1",
+   "tested":">=0.85.1, <0.86.0","installed":null,"in_range":null,
+   "error":"cannot run pi: No such file or directory","checked_at":"2026-10-25T10:00:00Z"}]}
+```
+
+`in_range` is `null` when the version is not known, and `error` says why.
+`terrarium admin harness ls` prints this table.
+
 ### `POST /api/reload`
 
 Reads the definition files in `$TERRARIUM_CONFIG_DIR` again and syncs them.
@@ -697,6 +719,13 @@ for the status changes.
 - `start` of an agent whose harness adapter is not registered, or whose
   prompt template or harness home is missing, gets `422 invalid` with the
   reason.
+- At each launch (`start`, `restart`, a restart by the policy, a relaunch
+  after a daemon start), the daemon compares the installed harness version
+  with the adapter's tested range (§4, `GET /api/harnesses`). Outside it,
+  with `TERRARIUM_HARNESS_VERSION_POLICY=warn` (the default), the agent
+  starts, and a `warning` event names the version and the range. With
+  `refuse`, the start gets `422 invalid` with the same text. A version that
+  cannot be read never refuses a start.
 - `start` of an agent whose subscription does not exist, or whose harness
   is not in the subscription's `harnesses` (PLAN §16, policy hooks), gets
   `422 invalid` with the reason. A `pi` agent on a Claude plan login (not an
@@ -1079,7 +1108,7 @@ Kinds:
 |---|---|
 | `status` | `{status, from, reason}`. `from` is never the same as `status`: a runner report of the status the agent already has (for example the runner's `spawned <program>` at start) goes in as a `system` event `{message, status}`. |
 | `session_started` | `{harness_session, transcript_path?, source?}` |
-| `turn_start`, `turn_end`, `notification`, `question`, `session_ended`, `exit`, `delivery_failed`, `system` | The fields of the core `Event` variant of the same name (`crates/terrarium-core/src/event.rs`). |
+| `turn_start`, `turn_end`, `notification`, `question`, `session_ended`, `exit`, `delivery_failed`, `system`, `warning` | The fields of the core `Event` variant of the same name (`crates/terrarium-core/src/event.rs`). A `warning` (`{message}`) needs the operator's attention, for example a harness version outside its tested range at a start (§6.2). |
 | `tool_use`, `tool_finished` | `{tool, tool_id?, summary?, ...}`: `input` (`tool_use`), `ok` (`tool_finished`). `tool_id` is the harness's ID for the tool call (for Claude Code, `toolu_...`). It is not the event `id`. Older records used the key `id` for it; the `events.jsonl` reader still takes those. |
 | `mail` | `{message_id, thread_id, from, from_name, to, to_name, subject}`. The `agent` is the recipient. A message that the loop guard holds also has `held: true` and `thread_state: "paused"`, and names no agent. |
 | `card` | `{card_id, change, title, column, ...}`. `change` is `created`, `moved` (`from`, `to`, `comment`, `assignee`), `reordered`, `assigned` (`assignee`, `previous`), `claimed`, `edited` (`fields`), `commented` (`comment`), `linked` (`kind`, `ref`), `archived`, `unblocked` (`by`), or `thread_update` (`thread_id`, `done`). `actor_name` names who made the change (`operator` or `project/name`). The `agent` is the assignee. |
