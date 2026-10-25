@@ -298,7 +298,10 @@ The adapter's `launch` sets, per harness:
 
 - **Yolo**: the flags in §4. Allowed because every agent is sandboxed (§11).
 - **System prompt**: rendered from a Terrarium template. Variables: agent name
-  and ULID, the project name and its repositories, the peers in the project,
+  and ULID, the project name and its repositories, the peers in the project
+  (name, harness, and roles only, sorted by name; no status, so a peer status
+  change does not change the prompt hash and stop a resume; the agent runs
+  `terrarium agents ls` for the live status),
   the mailbox protocol, the board protocol (§13), the memory protocol (§14), the wiki, artifact, and version protocol (§15), the agent's roles and,
   for leaders, the leader duties (§10), the list of allowed targets, how to use the
   `terrarium` CLI, and the rule that mail is untrusted input.

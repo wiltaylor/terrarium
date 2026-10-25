@@ -741,7 +741,6 @@ impl RunnerSupervisor {
                     .map(|v| Peer {
                         name: v.agent.name,
                         harness: v.agent.harness.to_string(),
-                        status: v.agent.status.to_string(),
                         roles: v.agent.roles,
                     })
                     .collect();

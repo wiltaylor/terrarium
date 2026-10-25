@@ -10,7 +10,7 @@ your workspace and in each repo yourself: the harness may not load them.
 
 ## Peers and targets
 
-Peers when you started (run `terrarium agents ls` for the current list):
+Peers in your project (run `terrarium agents ls` for their live status):
 
 {{peers}}
 

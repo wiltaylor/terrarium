@@ -13,22 +13,27 @@
 //! | `{{agent.id}}` | the agent ULID |
 //! | `{{agent.harness}}` | `claude`, `codex`, `copilot`, or `pi` |
 //! | `{{project.name}}` | the project name |
-//! | `{{peers}}` | one Markdown list line per other agent of the project |
+//! | `{{peers}}` | one Markdown list line per other agent of the project: name, harness, roles; sorted by name |
 //! | `{{targets}}` | one line per allowed target, or "none" |
 //! | `{{roles}}` | the roles, for example `member` or `project_admin` |
 //!
 //! An unknown variable stays in the text as it is.
+//!
+//! The rendered prompt holds only stable facts: no status and no times. The
+//! supervisor hashes it, and a harness that freezes the prompt of a session
+//! gets a new session when the hash changes. A live value in the prompt would
+//! defeat the resume.
 
 use std::path::Path;
 
 use terrarium_core::{Agent, Role};
 
-/// Another agent of the project, for `{{peers}}`.
+/// Another agent of the project, for `{{peers}}`. Only stable facts: the
+/// agent runs `terrarium agents ls` for the live status.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Peer {
     pub name: String,
     pub harness: String,
-    pub status: String,
     pub roles: Vec<Role>,
 }
 
@@ -76,7 +81,9 @@ impl PromptContext {
         if self.peers.is_empty() {
             return "- none: you are the only agent in this project".into();
         }
-        self.peers
+        let mut peers: Vec<&Peer> = self.peers.iter().collect();
+        peers.sort_by(|a, b| a.name.cmp(&b.name));
+        peers
             .iter()
             .map(|p| {
                 let roles = if p.roles.is_empty() {
@@ -84,7 +91,7 @@ impl PromptContext {
                 } else {
                     format!(", {}", role_list(&p.roles))
                 };
-                format!("- `{}` ({}, {}{roles})", p.name, p.harness, p.status)
+                format!("- `{}` ({}{roles})", p.name, p.harness)
             })
             .collect::<Vec<_>>()
             .join("\n")
@@ -185,7 +192,7 @@ your workspace and in each repo yourself: the harness may not load them.
 
 ## Peers and targets
 
-Peers when you started (run `terrarium agents ls` for the current list):
+Peers in your project (run `terrarium agents ls` for their live status):
 
 {{peers}}
 
@@ -289,7 +296,6 @@ mod tests {
             peers: vec![Peer {
                 name: "lead".into(),
                 harness: "claude".into(),
-                status: "idle".into(),
                 roles: vec![Role::ProjectAdmin],
             }],
             targets: vec![],
@@ -309,7 +315,7 @@ mod tests {
         );
         assert_eq!(
             render("{{peers}}\n{{targets}}", &ctx()),
-            "- `lead` (claude, idle, project_admin)\n- none"
+            "- `lead` (claude, project_admin)\n- none"
         );
     }
 
@@ -338,6 +344,44 @@ mod tests {
         }
         let words = DEFAULT_TEMPLATE.split_whitespace().count();
         assert!(words < 900, "{words} words");
+    }
+
+    /// The prompt holds only stable facts, so a change of peer status, or of
+    /// the order the store gives the peers in, does not change the text (and
+    /// does not defeat the resume of a harness that freezes its prompt).
+    #[test]
+    fn peers_render_stable_and_sorted() {
+        let peer = |name: &str| Peer {
+            name: name.into(),
+            harness: "codex".into(),
+            roles: vec![],
+        };
+        let mut a = ctx();
+        a.peers = vec![peer("zed"), peer("amy")];
+        a.targets = vec!["prod".into()];
+        let mut b = a.clone();
+        b.peers.reverse();
+        assert_eq!(
+            render("{{peers}}\n{{targets}}", &a),
+            "- `amy` (codex)\n- `zed` (codex)\n- `prod`"
+        );
+        assert_eq!(render(DEFAULT_TEMPLATE, &a), render(DEFAULT_TEMPLATE, &b));
+        assert!(DEFAULT_TEMPLATE.contains("`terrarium agents ls` for their live status"));
+    }
+
+    /// Each template in `prompts/` renders with no variable left.
+    #[test]
+    fn prompts_dir_templates_render_fully() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../prompts");
+        for name in ["default", "project-lead", "system-lead"] {
+            let template = load_template(&dir, Some(name)).unwrap();
+            let out = render(&template, &ctx());
+            assert!(!out.contains("{{"), "{name}: {out}");
+            assert!(
+                out.contains("`terrarium agents ls` for their live status"),
+                "{name}"
+            );
+        }
     }
 
     /// `prompts/default.md` and the built-in template stay the same text.

@@ -51,12 +51,15 @@ unknown variable stays in the text as it is, so check the spelling.
 | `{{agent.id}}` | The agent ULID. |
 | `{{agent.harness}}` | `claude`, `codex`, `copilot`, or `pi`. |
 | `{{project.name}}` | The project name. |
-| `{{peers}}` | One Markdown list line for each other agent of the project: name, harness, status at start, and roles. |
+| `{{peers}}` | One Markdown list line for each other agent of the project, sorted by name: name, harness, and roles. |
 | `{{targets}}` | One list line for each allowed target, or `- none`. |
 | `{{roles}}` | The roles, for example `member` or `project_admin`. |
 
-The peer status is the status at the start of the agent. The templates tell
-the agent to run `terrarium agents ls` for the current list.
+The rendered prompt holds only stable facts. It has no peer status and no
+times. The daemon keeps a hash of the prompt. A harness that keeps the prompt
+of a session (Codex) gets a new session when the hash changes, so a live value
+in the prompt would stop each resume. The templates tell the agent to run
+`terrarium agents ls` for the live status of the peers.
 
 ## How to add a template
 

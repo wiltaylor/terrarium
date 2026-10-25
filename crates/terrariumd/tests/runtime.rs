@@ -1126,8 +1126,9 @@ async fn frozen_prompt_change_starts_a_new_session() {
         .store(true, std::sync::atomic::Ordering::SeqCst);
     let prompts = td.dir.path().join("prompts");
     std::fs::create_dir_all(&prompts).unwrap();
-    std::fs::write(prompts.join("t.md"), "v1 {{agent.name}}").unwrap();
+    std::fs::write(prompts.join("t.md"), "v1 {{agent.name}}\n{{peers}}").unwrap();
     let id = td.agent("demo", "bob", json!({"prompt": "t"})).await;
+    let carl = td.agent("demo", "carl", json!({})).await;
     let cycle = async |want: usize| {
         td.post(&format!("/api/agents/{id}/start"), None).await;
         td.wait_events(&id, "session_started", |e| e.len() == want)
@@ -1145,12 +1146,22 @@ async fn frozen_prompt_change_starts_a_new_session() {
         started[1]["data"]["harness_session"],
         started[0]["data"]["harness_session"]
     );
+    // A peer status change alone (carl: stopped -> idle) is not in the
+    // prompt: a resume.
+    td.post(&format!("/api/agents/{carl}/start"), None).await;
+    td.wait_status(&carl, "idle").await;
+    let started = cycle(3).await;
+    assert_eq!(started[2]["data"]["source"], "resume");
+    assert_eq!(
+        started[2]["data"]["harness_session"],
+        started[0]["data"]["harness_session"]
+    );
     // A changed prompt: a new session, with the reason.
     std::fs::write(prompts.join("t.md"), "v2 {{agent.name}}").unwrap();
-    let started = cycle(3).await;
-    assert_eq!(started[2]["data"]["source"], "startup");
+    let started = cycle(4).await;
+    assert_eq!(started[3]["data"]["source"], "startup");
     assert_ne!(
-        started[2]["data"]["harness_session"],
+        started[3]["data"]["harness_session"],
         started[0]["data"]["harness_session"]
     );
     let statuses = td.events(&id, "status").await;
@@ -1161,11 +1172,11 @@ async fn frozen_prompt_change_starts_a_new_session() {
         "{statuses:#?}"
     );
     // The next start resumes the new session.
-    let started = cycle(4).await;
-    assert_eq!(started[3]["data"]["source"], "resume");
+    let started = cycle(5).await;
+    assert_eq!(started[4]["data"]["source"], "resume");
     assert_eq!(
-        started[3]["data"]["harness_session"],
-        started[2]["data"]["harness_session"]
+        started[4]["data"]["harness_session"],
+        started[3]["data"]["harness_session"]
     );
     // The flag off: a changed prompt resumes.
     td.req(
@@ -1176,8 +1187,8 @@ async fn frozen_prompt_change_starts_a_new_session() {
     )
     .await;
     std::fs::write(prompts.join("t.md"), "v3 {{agent.name}}").unwrap();
-    let started = cycle(5).await;
-    assert_eq!(started[4]["data"]["source"], "resume");
+    let started = cycle(6).await;
+    assert_eq!(started[5]["data"]["source"], "resume");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
