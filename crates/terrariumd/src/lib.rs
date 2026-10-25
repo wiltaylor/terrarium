@@ -397,6 +397,26 @@ fn record(t: &mut Tx<'_>, ev: &SupervisorEvent) -> ApiResult<()> {
             return apply_status(t, &id, *status, reason.as_deref());
         }
         SupervisorEventKind::Harness(Event::StatusChanged { to, reason, .. }) => {
+            // The runner's first record is `stopped -> starting` ("spawned
+            // <program>"), but the supervisor has already set `starting`.
+            // A change to the status the agent already has is no change: it
+            // goes in as a `system` notice, not as `starting -> starting`.
+            let a = agents::get(t, &id)?;
+            if a.agent.status == *to && !matches!(to, AgentStatus::Stopped | AgentStatus::Error) {
+                let message = reason.clone().unwrap_or_else(|| format!("status {to}"));
+                let session = agents::current_session(t, &id)?;
+                t.emit(
+                    EventDraft::new(
+                        "system",
+                        format!("{}: {message}", a.agent.name),
+                        json!({"message": message, "status": to}),
+                    )
+                    .agent(id, a.agent.name.clone())
+                    .project(a.agent.project.clone())
+                    .session(session),
+                )?;
+                return Ok(());
+            }
             return apply_status(t, &id, *to, reason.as_deref());
         }
         SupervisorEventKind::NewSession { outcome } => {

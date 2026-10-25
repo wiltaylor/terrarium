@@ -217,6 +217,13 @@ async fn samples_carry_the_in_progress_card() {
         .ok()
         .clone();
     assert!(by_model[0].get("title").is_none(), "{by_model}");
+    // An ungrouped point of two models names no model.
+    let all = td
+        .get(&format!("/api/usage?{SINCE}&bucket=day"))
+        .await
+        .ok()
+        .clone();
+    assert!(all[0].get("model").is_none(), "{all}");
 
     // `GET /api/cards/{id}/usage`: total, by model (biggest first), by agent.
     let u = td
@@ -561,4 +568,57 @@ async fn forged_transcript_paths_are_refused() {
     .await;
     wait_samples(&td, 2).await;
     assert_eq!(rejected(&td).await.len(), 6);
+}
+
+/// The model in `usage.sample` and in an ungrouped `GET /api/usage` point
+/// is the model of the session file (`claude-haiku-5-5`), not the alias of
+/// the agent definition (`haiku`).
+#[tokio::test]
+async fn usage_names_the_model_of_the_session_file() {
+    let td = start().await;
+    td.project("p").await;
+    let a = td.agent("p", "h", json!({"model": "haiku"})).await;
+    assert_eq!(a["model"], "haiku", "{a}");
+    let id = a["id"].as_str().unwrap().to_owned();
+    let file = sessions_dir(&td).join("sh.jsonl");
+    append(&file, &line("h1", "claude-haiku-5-5", 3, 4));
+    emit(
+        &td,
+        &a,
+        "session_started",
+        json!({"harness_session": "sh", "transcript_path": file}),
+    )
+    .await;
+    wait_samples(&td, 1).await;
+    let mut sample = Value::Null;
+    for _ in 0..400 {
+        let ev = td
+            .get("/api/events?kind=usage.sample&limit=100")
+            .await
+            .ok()
+            .clone();
+        if let Some(e) = ev.as_array().and_then(|a| a.first()) {
+            sample = e.clone();
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(sample["data"]["model"], "claude-haiku-5-5", "{sample}");
+
+    let points = td
+        .get(&format!("/api/usage?{SINCE}&bucket=day&agent={id}"))
+        .await
+        .ok()
+        .clone();
+    assert_eq!(points[0]["model"], "claude-haiku-5-5", "{points}");
+    // With `group=model` the model is the key.
+    let by_model = td
+        .get(&format!(
+            "/api/usage?{SINCE}&bucket=day&agent={id}&group=model"
+        ))
+        .await
+        .ok()
+        .clone();
+    assert_eq!(by_model[0]["key"], "claude-haiku-5-5");
+    assert!(by_model[0].get("model").is_none(), "{by_model}");
 }

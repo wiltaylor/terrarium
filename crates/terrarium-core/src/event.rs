@@ -22,8 +22,16 @@ pub enum Event {
         tool: String,
         #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
         input: serde_json::Value,
-        /// The harness's ID for this tool call, if it has one.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        /// The harness's ID for this tool call, if it has one. On the wire
+        /// it is `tool_id`: an `EventRecord` flattens the event, and the
+        /// record's own `id` (a ULID) owns the key `id`. A bare `Event`
+        /// with the older key `id` still parses.
+        #[serde(
+            default,
+            rename = "tool_id",
+            alias = "id",
+            skip_serializing_if = "Option::is_none"
+        )]
         id: Option<String>,
         /// One short line for the dashboard, for example the command.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -32,7 +40,14 @@ pub enum Event {
     /// A tool call finished.
     ToolFinished {
         tool: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        /// The harness's ID for the tool call. `tool_id` on the wire, as
+        /// for `ToolUse`.
+        #[serde(
+            default,
+            rename = "tool_id",
+            alias = "id",
+            skip_serializing_if = "Option::is_none"
+        )]
         id: Option<String>,
         /// One short line for the dashboard.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -105,7 +120,11 @@ fn default_true() -> bool {
 }
 
 /// An event with its identity, agent, and timestamp.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// The event is flattened into the record, so no `Event` field may use the
+/// keys `id`, `seq`, `agent`, `at`, or `type` (see the tests). Parsing is
+/// tolerant of a bad `id`: see the `Deserialize` impl.
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct EventRecord {
     pub id: EventId,
     /// The position of the record in the agent's `events.jsonl`, from 1.
@@ -119,6 +138,80 @@ pub struct EventRecord {
     pub at: DateTime<Utc>,
     #[serde(flatten)]
     pub event: Event,
+}
+
+/// Parse a record. A bad or missing `id` never drops the event: the parser
+/// makes a new ULID and logs a warning (once per process). Records from
+/// before the `tool_id` key could carry two `id` keys (the ULID and the tool
+/// call ID); the last one wins in JSON, so `id` holds the tool call ID. When
+/// the event is a tool event without a `tool_id`, the parser moves that
+/// value into the tool call ID.
+impl<'de> Deserialize<'de> for EventRecord {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+
+        let mut map = serde_json::Map::<String, serde_json::Value>::deserialize(d)?;
+        let raw_id = map.remove("id");
+        let seq = match map.remove("seq") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(v) => Some(serde_json::from_value::<u64>(v).map_err(D::Error::custom)?),
+        };
+        let agent: AgentId = serde_json::from_value(
+            map.remove("agent")
+                .ok_or_else(|| D::Error::missing_field("agent"))?,
+        )
+        .map_err(D::Error::custom)?;
+        let at: DateTime<Utc> = serde_json::from_value(
+            map.remove("at")
+                .ok_or_else(|| D::Error::missing_field("at"))?,
+        )
+        .map_err(D::Error::custom)?;
+        let mut event: Event =
+            serde_json::from_value(serde_json::Value::Object(map)).map_err(D::Error::custom)?;
+
+        let parsed = raw_id
+            .as_ref()
+            .and_then(|v| serde_json::from_value::<EventId>(v.clone()).ok());
+        let id = match parsed {
+            Some(id) => id,
+            None => {
+                let stray = raw_id.as_ref().and_then(|v| v.as_str()).map(str::to_owned);
+                if let (
+                    Some(stray),
+                    Event::ToolUse {
+                        id: tool_id @ None, ..
+                    }
+                    | Event::ToolFinished {
+                        id: tool_id @ None, ..
+                    },
+                ) = (stray, &mut event)
+                {
+                    *tool_id = Some(stray);
+                }
+                warn_bad_id_once(raw_id.as_ref());
+                EventId::new()
+            }
+        };
+        Ok(Self {
+            id,
+            seq,
+            agent,
+            at,
+            event,
+        })
+    }
+}
+
+fn warn_bad_id_once(raw: Option<&serde_json::Value>) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    if !WARNED.swap(true, Ordering::Relaxed) {
+        tracing::warn!(
+            "an event record has a bad or missing id ({}); a new id is used \
+             (this warning shows once)",
+            raw.map(|v| v.to_string()).unwrap_or_else(|| "none".into())
+        );
+    }
 }
 
 impl EventRecord {
@@ -152,6 +245,147 @@ mod tests {
         assert_eq!(json["type"], "tool_use");
         let back: EventRecord = serde_json::from_value(json).expect("deserialise");
         assert_eq!(back, rec);
+    }
+
+    /// Regression: a real tool call has an ID. It went out as a second `id`
+    /// key, which clobbered the record's ULID, and the reader dropped it.
+    #[test]
+    fn tool_event_with_a_real_id_round_trips() {
+        let mut rec = EventRecord::now(
+            AgentId::new(),
+            Event::ToolUse {
+                tool: "Bash".into(),
+                input: serde_json::json!({"command": "ls"}),
+                id: Some("toolu_01ABC".into()),
+                summary: Some("ls".into()),
+            },
+        );
+        rec.seq = Some(7);
+        let line = serde_json::to_string(&rec).expect("serialise");
+        assert_eq!(line.matches("\"id\"").count(), 1, "one id key: {line}");
+        assert!(line.contains("\"tool_id\":\"toolu_01ABC\""), "{line}");
+        let back: EventRecord = serde_json::from_str(&line).expect("deserialise");
+        assert_eq!(back, rec);
+
+        let fin = EventRecord::now(
+            AgentId::new(),
+            Event::ToolFinished {
+                tool: "Bash".into(),
+                id: Some("toolu_01ABC".into()),
+                summary: None,
+                ok: false,
+            },
+        );
+        let line = serde_json::to_string(&fin).expect("serialise");
+        let back: EventRecord = serde_json::from_str(&line).expect("deserialise");
+        assert_eq!(back, fin);
+    }
+
+    /// A line from before `tool_id`: two `id` keys, and the tool call ID
+    /// won. The record still parses, with a new ULID and the tool call ID.
+    #[test]
+    fn an_old_line_with_two_id_keys_still_parses() {
+        let agent = AgentId::new();
+        let line = format!(
+            "{{\"id\":\"{}\",\"agent\":\"{agent}\",\"at\":\"2026-10-25T00:00:00Z\",\
+             \"type\":\"tool_use\",\"tool\":\"Bash\",\"id\":\"toolu_01ABC\"}}",
+            EventId::new()
+        );
+        let rec: EventRecord = serde_json::from_str(&line).expect("parse");
+        assert_eq!(rec.agent, agent);
+        assert!(
+            matches!(&rec.event, Event::ToolUse { id: Some(t), .. } if t == "toolu_01ABC"),
+            "{rec:?}"
+        );
+    }
+
+    #[test]
+    fn a_bad_or_missing_record_id_does_not_drop_the_event() {
+        let agent = AgentId::new();
+        for id in [r#""id":"not-a-ulid","#, ""] {
+            let line = format!(
+                r#"{{{id}"agent":"{agent}","at":"2026-10-25T00:00:00Z","type":"turn_end"}}"#
+            );
+            let rec: EventRecord = serde_json::from_str(&line).expect("parse");
+            assert_eq!(rec.event, Event::TurnEnd);
+        }
+    }
+
+    #[test]
+    fn a_bare_event_takes_the_old_id_key() {
+        let ev: Event = serde_json::from_value(serde_json::json!({
+            "type": "tool_finished", "tool": "Bash", "id": "toolu_1"
+        }))
+        .expect("tool_finished");
+        assert!(matches!(ev, Event::ToolFinished { id: Some(ref t), .. } if t == "toolu_1"));
+    }
+
+    /// No flattened event field may reuse a key of the record.
+    #[test]
+    fn no_event_field_collides_with_a_record_key() {
+        let s = |v: &str| v.to_owned();
+        let all = [
+            Event::TurnStart {
+                prompt: Some(s("p")),
+            },
+            Event::TurnEnd,
+            Event::ToolUse {
+                tool: s("t"),
+                input: serde_json::json!({}),
+                id: Some(s("i")),
+                summary: Some(s("s")),
+            },
+            Event::ToolFinished {
+                tool: s("t"),
+                id: Some(s("i")),
+                summary: Some(s("s")),
+                ok: true,
+            },
+            Event::Notification {
+                message: s("m"),
+                question: true,
+            },
+            Event::Question {
+                request_id: s("r"),
+                tool: Some(s("t")),
+                question: s("q"),
+                options: vec![s("a")],
+            },
+            Event::SessionStarted {
+                harness_session: HarnessSessionId(s("h")),
+                transcript_path: Some(PathBuf::from("/t")),
+                source: Some(s("startup")),
+            },
+            Event::SessionEnded {
+                reason: Some(s("r")),
+            },
+            Event::Exit { code: Some(0) },
+            Event::Mail {
+                message: MessageId::new(),
+                from: s("f"),
+                thread: ThreadId::new(),
+            },
+            Event::Card {
+                card: s("c"),
+                change: s("x"),
+            },
+            Event::System { message: s("m") },
+            Event::StatusChanged {
+                from: AgentStatus::Idle,
+                to: AgentStatus::Working,
+                reason: Some(s("r")),
+            },
+            Event::DeliveryFailed {
+                text: s("t"),
+                reason: s("r"),
+            },
+        ];
+        for ev in all {
+            let v = serde_json::to_value(&ev).expect("serialise");
+            for key in ["id", "seq", "agent", "at"] {
+                assert!(v.get(key).is_none(), "{key} in {v}");
+            }
+        }
     }
 
     #[test]

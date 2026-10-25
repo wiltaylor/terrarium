@@ -358,6 +358,62 @@ async fn the_runner_process_survives_a_daemon_disconnect() {
     assert!(!hooks.exists(), "the hook socket is removed");
 }
 
+/// Regression: a tool call with a real ID went out with two `id` keys
+/// (the record ULID and the tool call ID), and `RemoteRunner` dropped it
+/// ("bad event from the runner: invalid length").
+#[tokio::test]
+async fn tool_events_with_a_real_id_reach_the_daemon() {
+    let env = Env::new();
+    let first = env.spawn().await;
+    let r: Arc<dyn RunnerHandle> = Arc::new(first.clone());
+    let mut events = r.subscribe_events();
+    until_status(&mut events, AgentStatus::Idle).await;
+    let hooks = r.socket_path().to_path_buf();
+    for hook in ["PreToolUse", "PostToolUse"] {
+        hook_socket(
+            &hooks,
+            json!({"type":"hook","hook":hook,"payload":{"tool_name":"Bash","tool_use_id":"toolu_01XYZ"}}),
+            false,
+        )
+        .await;
+    }
+    let mut seen = Vec::new();
+    timeout(wait(), async {
+        loop {
+            let rec = events.recv().await.expect("event");
+            let done =
+                matches!(&rec.event, Event::ToolFinished { id: Some(t), .. } if t == "toolu_01XYZ");
+            seen.push(rec);
+            if done {
+                return;
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("no tool_finished; saw {seen:?}"));
+    assert!(
+        seen.iter().any(
+            |rec| matches!(&rec.event, Event::ToolUse { id: Some(t), .. } if t == "toolu_01XYZ")
+        ),
+        "{seen:?}"
+    );
+    // The file has one `id` key per line, and the reader takes it back.
+    let text = std::fs::read_to_string(r.events_path()).expect("events.jsonl");
+    for line in text.lines().filter(|l| l.contains("toolu_01XYZ")) {
+        assert_eq!(line.matches("\"id\"").count(), 1, "{line}");
+    }
+    let back = read_since(r.events_path(), 0).expect("read");
+    assert_eq!(
+        back.iter()
+            .filter(|rec| matches!(
+                &rec.event,
+                Event::ToolUse { id: Some(_), .. } | Event::ToolFinished { id: Some(_), .. }
+            ))
+            .count(),
+        2
+    );
+}
+
 #[tokio::test]
 async fn a_second_runner_for_the_agent_refuses_to_start() {
     let env = Env::new();

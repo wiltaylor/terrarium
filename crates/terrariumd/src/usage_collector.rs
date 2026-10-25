@@ -520,6 +520,10 @@ struct Tracked {
     source: Box<dyn UsageSource>,
     turn_seq: Option<i64>,
     pending: Totals,
+    /// The model of the newest stored sample in `pending`, as the session
+    /// file names it (for example `claude-haiku-5-5`, not the alias
+    /// `haiku` of the agent definition).
+    pending_model: Option<String>,
     last_emit: Option<Instant>,
 }
 
@@ -720,6 +724,7 @@ impl Collector {
                 source,
                 turn_seq,
                 pending: Totals::default(),
+                pending_model: None,
                 last_emit: None,
             },
         );
@@ -816,6 +821,9 @@ impl Collector {
                 Ok(added) => {
                     for s in &added {
                         t.pending.add(s);
+                        if !s.model.is_empty() {
+                            t.pending_model = Some(s.model.clone());
+                        }
                     }
                     if !added.is_empty() {
                         let project = t.info.project.clone();
@@ -832,6 +840,7 @@ impl Collector {
         let due = t.last_emit.is_none_or(|at| at.elapsed() >= throttle);
         if t.pending.messages > 0 && (flush || due) {
             let totals = std::mem::take(&mut t.pending);
+            let model = t.pending_model.take().or_else(|| t.info.model.clone());
             t.last_emit = Some(Instant::now());
             let info = t.info.clone();
             let result = self
@@ -845,7 +854,7 @@ impl Collector {
                             json!({
                                 "subscription": info.subscription,
                                 "harness": info.harness,
-                                "model": info.model,
+                                "model": model,
                                 "input_tokens": totals.input_tokens,
                                 "output_tokens": totals.output_tokens,
                                 "cache_read": totals.cache_read,

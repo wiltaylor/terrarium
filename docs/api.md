@@ -983,9 +983,10 @@ Kinds:
 
 | `kind` | `data` |
 |---|---|
-| `status` | `{status, from, reason}` |
+| `status` | `{status, from, reason}`. `from` is never the same as `status`: a runner report of the status the agent already has (for example the runner's `spawned <program>` at start) goes in as a `system` event `{message, status}`. |
 | `session_started` | `{harness_session, transcript_path?, source?}` |
-| `turn_start`, `turn_end`, `tool_use`, `tool_finished`, `notification`, `question`, `session_ended`, `exit`, `delivery_failed`, `system` | The fields of the core `Event` variant of the same name (`crates/terrarium-core/src/event.rs`). |
+| `turn_start`, `turn_end`, `notification`, `question`, `session_ended`, `exit`, `delivery_failed`, `system` | The fields of the core `Event` variant of the same name (`crates/terrarium-core/src/event.rs`). |
+| `tool_use`, `tool_finished` | `{tool, tool_id?, summary?, ...}`: `input` (`tool_use`), `ok` (`tool_finished`). `tool_id` is the harness's ID for the tool call (for Claude Code, `toolu_...`). It is not the event `id`. Older records used the key `id` for it; the `events.jsonl` reader still takes those. |
 | `mail` | `{message_id, thread_id, from, from_name, to, to_name, subject}`. The `agent` is the recipient. |
 | `card` | `{card_id, change, title, column, ...}`. `change` is `created`, `moved` (`from`, `to`, `comment`), `reordered`, `assigned` (`assignee`, `previous`), `claimed`, `edited` (`fields`), `commented` (`comment`), `linked` (`kind`, `ref`), `archived`, `unblocked` (`by`), or `thread_update` (`thread_id`, `done`). The `agent` is the assignee. |
 | `board` | `{columns}` after a column change. |
@@ -1541,6 +1542,12 @@ value of that column: the subscription name, the project name, the agent
 model. `messages` counts API responses; `turns` counts distinct turns (the
 `seq` of the agent's `turn_start` event at the time of the response).
 
+Without `group=model`, a point also has `model` when all its samples have
+one model. A point of more than one model has no `model`; use
+`group=model` to split it. The model is the name in the session file (for
+example `claude-haiku-5-5`), not the alias in the agent definition
+(`haiku`).
+
 With `group=card`, `key` is the card ID and the point also has the card's
 `title`. Samples with no card make points with no `key` and no `title`:
 
@@ -1759,7 +1766,7 @@ status that the runner reports. An agent may report for itself only.
 
 | `kind` | `data` |
 |---|---|
-| `usage.sample` | `{subscription, harness, model, input_tokens, output_tokens, cache_read, cache_write, messages}`: the new usage of one agent since its last `usage.sample`, at most one each 10 s per agent. |
+| `usage.sample` | `{subscription, harness, model, input_tokens, output_tokens, cache_read, cache_write, messages}`: the new usage of one agent since its last `usage.sample`, at most one each 10 s per agent. `model` is the model of the newest response, as the session file names it (the usage store has the same name); the agent definition's model only when the file names none. |
 | `usage.rejected_path` | `{harness, harness_session, path, reason}`: the usage collector refused the session file that a `session_started` hook named. The file must be a regular file (not a symlink) under the session area of the harness, and another agent must not read it. A Claude Code, Codex, or Copilot file must also carry the session ID in its name (`docs/security-review.md` F12). The collector does not read a refused file. |
 | `quota.sample` | `{subscription, windows}` after each successful probe. |
 | `quota.alert` | `{subscription, window, used_pct, resets_at, level, alert_at}`, or for a budget `{project, subscription, window, used, limit, used_pct, level}`. |

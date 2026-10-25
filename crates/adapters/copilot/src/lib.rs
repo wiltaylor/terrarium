@@ -283,6 +283,12 @@ impl Adapter for CopilotAdapter {
         keys::answer(answer)
     }
 
+    /// `/exit` then CR (`docs/compat.md`). Without it the supervisor's
+    /// stop kills the harness, and no `SessionEnd` fires.
+    fn exit_keys(&self) -> Vec<u8> {
+        keys::exit()
+    }
+
     fn clear_input_keys(&self) -> Vec<u8> {
         keys::clear_input()
     }
@@ -392,6 +398,7 @@ mod tests {
         assert_eq!(a.answer("r", &Answer::Choice(1)), b"\x1b[B\r".to_vec());
         assert_eq!(a.type_turn("hi"), b"\x1b[200~hi\x1b[201~\r".to_vec());
         assert!(a.clear_input_keys().starts_with(&[0x15, 0x7f]));
+        assert_eq!(a.exit_keys(), b"/exit\r".to_vec());
         let ev = a.hook_event(&HookPayload {
             harness: HarnessId::Copilot,
             hook: "Stop".into(),

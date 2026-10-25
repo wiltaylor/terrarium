@@ -102,6 +102,11 @@ impl Adapter for FakeLaunch {
     fn hook_event(&self, _hook: &HookPayload) -> Vec<Event> {
         Vec::new()
     }
+    /// The fake TUI exits 0 on `/quit`. The supervisor's stop reads the
+    /// exit keys from the daemon-side adapter, as for Claude's `/exit`.
+    fn exit_keys(&self) -> Vec<u8> {
+        b"/quit\r".to_vec()
+    }
 }
 
 fn supervisor(root: &Path) -> Arc<RunnerSupervisor> {
@@ -369,6 +374,22 @@ async fn lifecycle_through_the_api() {
     assert_eq!(spec["name"], "bob");
     let started = td.events(&id, "session_started").await;
     assert_eq!(started.len(), 1, "{started:#?}");
+    // The runner's `stopped -> starting` ("spawned ...") comes after the
+    // supervisor's own `starting`: a `system` notice, not `starting -> starting`.
+    let statuses = td.events(&id, "status").await;
+    assert!(
+        statuses
+            .iter()
+            .all(|e| e["data"]["from"] != e["data"]["status"]),
+        "{statuses:#?}"
+    );
+    let notices = td.events(&id, "system").await;
+    assert!(
+        notices.iter().any(|e| e["data"]["message"]
+            .as_str()
+            .is_some_and(|m| m.starts_with("spawned "))),
+        "{notices:#?}"
+    );
 
     // A turn, and the status.
     td.turn(&id, "hello").await;
@@ -422,6 +443,10 @@ async fn lifecycle_through_the_api() {
     assert!(end.is_ok(), "the PTY socket closes when the agent stops");
     let sessions = td.get(&format!("/api/agents/{id}/sessions")).await;
     assert_eq!(sessions[0]["outcome"], "stopped");
+    // The stop was graceful: the idle harness got the exit keys and exited
+    // 0. A kill gives SIGHUP (code 129) or the code 1 of a lost harness.
+    let exits = td.wait_events(&id, "exit", |e| !e.is_empty()).await;
+    assert_eq!(exits[0]["data"]["code"], 0, "{exits:#?}");
 
     // A start again launches a new runner process.
     td.post(&format!("/api/agents/{id}/start"), None).await;

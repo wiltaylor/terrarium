@@ -92,6 +92,17 @@ describe("mock parity with docs/api.md", () => {
     expect(typeof audit.items[0]!.detail).toBe("object");
   });
 
+  it("names the tool call ID data.tool_id, not data.id (the event's own id)", async () => {
+    const api = mock();
+    const page = await api.events.history({ since: 0, limit: 1000 });
+    const tools = page.items.filter((e) => e.kind === "tool_use" || e.kind === "tool_finished");
+    expect(tools.length).toBeGreaterThan(0);
+    for (const e of tools) {
+      expect(typeof e.data.tool_id).toBe("string");
+      expect(e.data).not.toHaveProperty("id");
+    }
+  });
+
   it("takes an agent key as a ULID, project/name, or a unique name", async () => {
     const api = mock();
     const byKey = await api.agents.get("terrarium/lead");

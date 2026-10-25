@@ -236,6 +236,10 @@ pub struct UsagePoint {
     /// The card's title, with `group=card`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// The model of the point, when all its samples have one model. Not
+    /// set with `group=model`: there `key` is the model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     #[serde(flatten)]
     pub totals: Totals,
 }
@@ -255,8 +259,14 @@ pub fn series(
     } else {
         "NULL"
     };
+    let model = if group == Some(GroupBy::Model) {
+        "NULL"
+    } else {
+        "CASE WHEN count(DISTINCT model) = 1 THEN nullif(max(model), '') END"
+    };
     let sql = format!(
-        "SELECT {b} AS bucket, {key} AS key, {title} AS title, {SUMS} FROM usage_samples{filter}
+        "SELECT {b} AS bucket, {key} AS key, {title} AS title, {model} AS model, {SUMS}
+         FROM usage_samples{filter}
          GROUP BY 1, 2 ORDER BY 1, 2",
         b = bucket.expr()
     );
@@ -266,6 +276,7 @@ pub fn series(
             bucket: r.get("bucket")?,
             key: r.get("key")?,
             title: r.get("title")?,
+            model: r.get("model")?,
             totals: totals_row(r)?,
         })
     })?;

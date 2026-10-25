@@ -58,7 +58,8 @@ pub fn select(spec: &RunnerSpec) -> Arc<dyn Adapter> {
     }
 }
 
-/// `adapter: "fake"`: the hook names of Claude Code, no screen hints, and
+/// `adapter: "fake"`: the hook names of Claude Code (also `PreToolUse` and
+/// `PostToolUse` with `tool_name` and `tool_use_id`), no screen hints, and
 /// `/quit` as the exit keys. The runner tests drive the fake TUI with it.
 struct FakeAdapter {
     harness: HarnessId,
@@ -92,6 +93,18 @@ impl Adapter for FakeAdapter {
                 prompt: hook.str_field("prompt").map(str::to_owned),
             }],
             "Stop" => vec![Event::TurnEnd],
+            "PreToolUse" => vec![Event::ToolUse {
+                tool: hook.str_field("tool_name").unwrap_or_default().to_owned(),
+                input: serde_json::Value::Null,
+                id: hook.str_field("tool_use_id").map(str::to_owned),
+                summary: None,
+            }],
+            "PostToolUse" => vec![Event::ToolFinished {
+                tool: hook.str_field("tool_name").unwrap_or_default().to_owned(),
+                id: hook.str_field("tool_use_id").map(str::to_owned),
+                summary: None,
+                ok: true,
+            }],
             "Notification" => vec![Event::Notification {
                 message: hook.str_field("message").unwrap_or_default().to_owned(),
                 question: true,

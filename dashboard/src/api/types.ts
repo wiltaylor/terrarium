@@ -822,6 +822,8 @@ export interface UsagePoint extends UsageTotals {
   key?: string;
   /** With `group=card`: the card's title. */
   title?: string;
+  /** Without `group=model`: the model, when all samples of the point have one model. */
+  model?: string;
 }
 
 /** `GET /api/cards/{id}/usage` (docs/api.md §16.3): the samples attributed to one card. */

@@ -51,7 +51,7 @@ path.
 |---|---|
 | `<state>/agents/<ulid>/private/pty.log` | The raw PTY bytes. The runner appends to it. With `log_max_bytes = 0` the runner writes no `pty.log` at all (the login flow does this: its output has a device code). |
 | `<state>/agents/<ulid>/private/pty.log.1` | The archive. When `pty.log` grows past `log_max_bytes` (default 8 MiB), it moves here and a new `pty.log` starts. The runner keeps one archive. |
-| `<state>/agents/<ulid>/private/events.jsonl` | One `EventRecord` as JSON on each line. The runner appends to it, so the history stays across restarts. Each record has a `seq`: its line number, from 1 (see "Event seq"). |
+| `<state>/agents/<ulid>/private/events.jsonl` | One `EventRecord` as JSON on each line. The runner appends to it, so the history stays across restarts. Each record has a `seq`: its line number, from 1 (see "Event seq"). The event is flattened into the record, so a tool call ID goes as `tool_id`, not `id`. The reader keeps a record with a bad `id`: it makes a new ULID and logs one warning. |
 | `<run>/agents/<ulid>.sock` | The runner socket (hooks and agent RPC), mode `0600`. The runner removes a stale socket before it binds, and removes the socket after the child exits. |
 
 A runner process also uses these files:

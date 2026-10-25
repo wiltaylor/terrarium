@@ -20,7 +20,8 @@ pub enum AdapterKind {
     #[default]
     Harness,
     /// The test adapter: Claude Code hook names (`UserPromptSubmit`, `Stop`,
-    /// and `Notification` as a question), no screen hints. For the fake TUI
+    /// `PreToolUse`, `PostToolUse`, and `Notification` as a question), no
+    /// screen hints. For the fake TUI
     /// in the tests only.
     Fake,
 }

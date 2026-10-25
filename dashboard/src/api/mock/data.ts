@@ -201,9 +201,9 @@ export function seed(now: number = Date.now()): MockWorld {
   status(11, "adapter-codex", "working", "blocked", "needs a Codex login in the image");
   ev(6, "turn_start", "runner-dev", "terrarium", "Turn started: implement PTY resize");
   status(6, "runner-dev", "idle", "working");
-  ev(5, "tool_use", "runner-dev", "terrarium", "Read crates/terrariumd/src/pty.rs", { tool: "Read" });
+  ev(5, "tool_use", "runner-dev", "terrarium", "Read crates/terrariumd/src/pty.rs", { tool: "Read", tool_id: "toolu_mock1" });
   ev(3, "turn_end", "lead", "terrarium", "Turn ended after 41s");
-  ev(1, "tool_use", "shop-lead", "webshop", "Bash cargo test -p checkout", { tool: "Bash" });
+  ev(1, "tool_use", "shop-lead", "webshop", "Bash cargo test -p checkout", { tool: "Bash", tool_id: "toolu_mock2" });
   status(0.5, "reviewer", "stopped", "starting");
   ev(10, "self_report", "adapter-codex", "terrarium", "adapter-codex says: blocked (waiting for an operator Codex login)", { status: "blocked", note: "waiting for an operator Codex login" }, { actor: "agent:01JB0WRK200000000000000003" });
   seq++;
@@ -216,7 +216,7 @@ export function seed(now: number = Date.now()): MockWorld {
     summary: "chatgpt-pro: window 5h at 87% (alert at 80%)",
     data: { subscription: "chatgpt-pro", window: "5h", used_pct: 87, resets_at: ahead(41), level: "alert", alert_at: 80 },
   });
-  ev(0.2, "tool_use", "runner-dev", "terrarium", "Edit crates/terrariumd/src/runner.rs", { tool: "Edit" });
+  ev(0.2, "tool_use", "runner-dev", "terrarium", "Edit crates/terrariumd/src/runner.rs", { tool: "Edit", tool_id: "toolu_mock3" });
 
   let pos = 0;
   const card = (id: string, project: string, column: string, title: string, extra: Partial<Card> & { assigneeName?: string; comments?: Card["comments"] } = {}): Card => {

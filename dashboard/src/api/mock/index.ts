@@ -308,7 +308,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     if (a && tick % 5 !== 0) {
       const tool = TOOLS[tick % TOOLS.length]!;
       const target = tool === "Bash" ? "cargo test -p terrariumd" : FILES[tick % FILES.length]!;
-      agentEvent(a, "tool_use", `${tool} ${target}`, { tool, input: target });
+      agentEvent(a, "tool_use", `${tool} ${target}`, { tool, input: target, tool_id: `toolu_mock${tick}` });
     }
     if (tick % 5 === 0) {
       const lead = w.agents.find((x) => x.name === "lead");
