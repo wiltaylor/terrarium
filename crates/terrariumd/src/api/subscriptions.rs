@@ -248,11 +248,10 @@ async fn quota(
     ApiQuery(q): ApiQuery<QuotaQuery>,
 ) -> ApiResult<Json<Vec<QuotaSample>>> {
     policy::read_subscriptions(&actor)?;
-    let since = match q.since.as_deref().filter(|s| !s.is_empty()) {
-        Some(s) => ustore::check_time("since", s)?,
-        None => (chrono::Utc::now() - chrono::Duration::hours(24))
-            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-    };
+    let since =
+        crate::time_param::opt_time_param("since", q.since.as_deref())?.unwrap_or_else(|| {
+            crate::time_param::stored(chrono::Utc::now() - chrono::Duration::hours(24))
+        });
     let limit = q.limit.unwrap_or(1000).clamp(1, 10_000);
     let v = state
         .db

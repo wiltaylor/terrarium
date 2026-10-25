@@ -242,20 +242,39 @@ pub fn list(
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
-/// Turn a `?since=` value into a `seq`: a number is a `seq`; anything else
-/// is an event ID, and the result is that event's `seq`.
+/// Turn a `?since=` value into a `seq`: a number is a `seq`; a time
+/// (`time_param`: RFC 3339 with any offset, or a duration such as `30m`)
+/// gives the events at or after that time; anything else is an event ID,
+/// and the result is that event's `seq`. `latest` is the caller's to handle.
 pub fn resolve_since(conn: &Connection, since: Option<&str>) -> ApiResult<i64> {
-    let Some(since) = since.filter(|s| !s.is_empty()) else {
+    let Some(since) = since.map(str::trim).filter(|s| !s.is_empty()) else {
         return Ok(0);
     };
     if let Ok(n) = since.parse::<i64>() {
         return Ok(n);
     }
+    if let Some(t) = crate::time_param::parse_time(since) {
+        let first: Option<i64> = conn.query_row(
+            "SELECT min(seq) FROM events WHERE at >= ?1",
+            [crate::time_param::stored(t)],
+            |r| r.get(0),
+        )?;
+        return match first {
+            Some(seq) => Ok(seq - 1),
+            None => last_seq(conn),
+        };
+    }
     conn.query_row("SELECT seq FROM events WHERE id = ?1", [since], |r| {
         r.get(0)
     })
     .optional()?
-    .ok_or_else(|| crate::error::ApiError::bad_request(format!("no event `{since}` for since")))
+    .ok_or_else(|| {
+        crate::error::ApiError::bad_request(format!(
+            "bad `since` `{since}`: no such event; use a seq, an event ID, `latest` (streams), \
+             or {}",
+            crate::time_param::FORMS
+        ))
+    })
 }
 
 /// The newest `seq`, or 0 for an empty log.

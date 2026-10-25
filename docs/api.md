@@ -178,6 +178,17 @@ curl -s --unix-socket $S -H 'X-Terrarium-Agent: terrarium/worker' http://localho
   with a body. Endpoints without a body (for example `start`) take none.
 - Request bodies refuse unknown fields, except `POST /api/agents`.
 - Times are RFC 3339 strings in UTC, for example `2026-10-24T06:36:54.149Z`.
+- A time query value (`?since=`, `?until=`) takes these forms:
+  - an RFC 3339 time with any offset, for example
+    `2026-10-25T19:53:00+10:00` or `2026-10-25T09:53:00Z`. Encode `+` as
+    `%2B` in a URL. The daemon changes the time to UTC before it compares;
+  - a duration back from now: a number and the unit `s`, `m`, `h`, or `d`,
+    for example `90s`, `30m`, `2h`, or `1d`.
+
+  A bare clock time (`19:53`), a date without a time, and a number without
+  a unit are `400 bad_request`. The message gives the accepted forms. The
+  event endpoints (§8, §9) also take a `seq`, an event ID, and (on the
+  streams) `latest`.
 - Agents, sessions, messages, threads, comments, repos, events, and audit
   rows have ULID IDs (26 characters).
 - Cards have short IDs, `<card_prefix>-<number>`, for example `TER-42`. The
@@ -351,7 +362,7 @@ Rows oldest first. Cursor: `seq`.
 
 | Query | Meaning |
 |---|---|
-| `since` | Rows at or after this RFC 3339 time. |
+| `since` | Rows at or after this time (§2.1: RFC 3339 with any offset, or a duration such as `1h`). |
 | `actor` | `operator`, `system`, or `agent:<ulid>`. |
 | `action` | For example `agent.start`. |
 | `project` | Rows of one project. A project admin gets its own project only. |
@@ -974,7 +985,7 @@ A new board has the columns `backlog`, `ready`, `in_progress`, `review`,
 | `GET /api/cards/{id}/comments` | | `200` comments |
 | `POST /api/cards/{id}/comments` | `{"body"}` | `201` card |
 | `POST /api/cards/{id}/links` | `{"kind", "ref"}` | `201` card |
-| `GET /api/cards/{id}/events?since=` | | `200` card events, cursor: `seq` |
+| `GET /api/cards/{id}/events?since=` | | `200` card events, cursor: `seq`. `since` is a `seq`, an event ID, or a time (§2.1). |
 
 **Columns.** The `PATCH` list is the whole board, in order. Each column is
 `{"name", "wip_limit"?, "rename_from"?}`. A missing `wip_limit` means no
@@ -1088,7 +1099,7 @@ three ways:
 
 | Query | Meaning |
 |---|---|
-| `since` | A `seq`, an event ID, or `latest`. Only later events come. Default: 0, the whole log. `latest` skips the backlog: only events after the newest `seq` at connect time come. |
+| `since` | A `seq`, an event ID, `latest`, or a time (§2.1). Only later events come; a time gives the events at or after it. Default: 0, the whole log. `latest` skips the backlog: only events after the newest `seq` at connect time come. |
 | `live` | `1` or `true`: the same as `since=latest`. It wins over `since`, a cursor, and `Last-Event-ID`. `0`, `false`, or empty: off. Another value is `400`. |
 | `kind` | One kind. |
 | `project` | Firehose only: one project. |
@@ -1670,7 +1681,7 @@ keep their card.
 | `POST /api/subscriptions` | `{name, provider, plan?, harnesses?, probe?, alert_at?}` | `201` with the subscription (`source = api`). `409 conflict` when the name exists; `422 invalid` for an unknown probe. |
 | `GET /api/subscriptions/{name}` | | One subscription. |
 | `DELETE /api/subscriptions/{name}` | | `204`. `409 file_managed` for a file subscription. |
-| `GET /api/subscriptions/{name}/quota` | `?since=` (RFC 3339, default 24 h ago), `?window=`, `?limit=` (default 1000) | Array of samples, oldest first: `{subscription, window, used_pct, resets_at, raw, at}`. `raw` is the provider's window object. |
+| `GET /api/subscriptions/{name}/quota` | `?since=` (a time, §2.1; default 24 h ago), `?window=`, `?limit=` (default 1000) | Array of samples, oldest first: `{subscription, window, used_pct, resets_at, raw, at}`. `raw` is the provider's window object. |
 | `POST /api/subscriptions/{name}/probe` | | `{subscription, probe_status, error?, windows}`. Here `subscription` is the **name** only, not the object. A failed probe is still `200`. |
 | `POST /api/subscriptions/{name}/verify` | | `{subscription, status}`. Here `subscription` is the **full** subscription (§16.1), after the check. `status` is `{kind, harness, provider, pi_provider?, logged_in, plan?, detail?}`. The harness status command runs against the shared home and sets `login_status` (and `plan`, when the subscription has none). A stored API key counts as logged in: `status` is then `{logged_in: true, detail}`. |
 | `POST /api/subscriptions/{name}/logout` | | The subscription (§16.1), with `login_status` `missing`. Runs `claude auth logout`, `codex logout`, or `copilot logout` against the shared home. pi has no logout command: `422 invalid`. |
@@ -1681,7 +1692,7 @@ keep their card.
 | `DELETE /api/subscriptions/login/{id}` | | `202`; the session becomes `cancelled`. `409 not_running` when the session ended (also when it is `done`). |
 | `POST /api/subscriptions/login/{id}/input` | `{code}` | `204`. Types the code and Enter into the flow. `409 not_running` when the session ended. |
 | `GET /api/subscriptions/login/{id}/pty` | WebSocket | The login terminal, with the protocol of §6.5. |
-| `GET /api/usage` | `?subscription=&project=&agent=&model=&card=&since=&until=&bucket=hour\|day&group=subscription\|project\|agent\|model\|card` | Array of usage points, oldest first. `since` defaults to 24 h ago. `agent` is an agent key (§2.2). `card` is a card ID, in any case. |
+| `GET /api/usage` | `?subscription=&project=&agent=&model=&card=&since=&until=&bucket=hour\|day&group=subscription\|project\|agent\|model\|card` | Array of usage points, oldest first. `since` and `until` are times (§2.1). `since` defaults to 24 h ago. `agent` is an agent key (§2.2). `card` is a card ID, in any case. |
 | `GET /api/cards/{id}/usage` | `?since=&until=` (default: all time) | The usage of one card (below). The caller must be able to read the card's project. `404 not_found` for an unknown card. |
 | `GET /api/usage/me` | `?agent=` (the operator only) | The caller's subscription and its share today (below). |
 | `GET /api/usage/project` | `?project=` (default: the caller's), `?since=` (default: the start of the UTC day) | The per-agent split (below). |
@@ -1694,7 +1705,7 @@ keep their card.
  "subscription":{"name":"anthropic-max","provider":"anthropic","plan":"Max 20x",
    "probe_status":"ok","last_success_at":"...","local_estimate_only":false,
    "windows":[{"window":"5h","used_pct":16.0,"resets_at":"...","at":"..."}]},
- "today":{"since":"2026-10-24T00:00:00Z","mine":{"input_tokens":4,"output_tokens":55,"cache_read":36712,
+ "today":{"since":"2026-10-24T00:00:00.000Z","mine":{"input_tokens":4,"output_tokens":55,"cache_read":36712,
    "cache_write":36983,"messages":2,"turns":1},"subscription":{...},"share_pct":100.0},
  "holds":[]}
 ```

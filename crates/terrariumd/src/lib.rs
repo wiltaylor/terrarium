@@ -25,6 +25,7 @@ pub mod sandbox;
 pub mod settings;
 pub mod store;
 pub mod supervisor;
+pub mod time_param;
 pub mod trash;
 pub mod usage_collector;
 pub mod workspace;

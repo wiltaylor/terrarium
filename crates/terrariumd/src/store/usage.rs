@@ -13,7 +13,7 @@ use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
 use serde::{Deserialize, Serialize};
 
 use crate::db::{Tx, now};
-use crate::error::{ApiError, ApiResult};
+use crate::error::ApiResult;
 
 /// One usage sample to store.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -329,7 +329,7 @@ pub fn current_card(conn: &Connection, agent: &str) -> ApiResult<Option<String>>
 
 /// The start of the current UTC day, RFC 3339.
 pub fn today_start() -> String {
-    format!("{}T00:00:00Z", chrono::Utc::now().format("%Y-%m-%d"))
+    format!("{}T00:00:00.000Z", chrono::Utc::now().format("%Y-%m-%d"))
 }
 
 /// A hold on an agent's new turns.
@@ -451,15 +451,6 @@ pub fn last_turn_seq(conn: &Connection, agent: &str) -> ApiResult<Option<i64>> {
 }
 
 /// Parse an RFC 3339 query value, for a clear error.
-pub fn check_time(what: &str, v: &str) -> ApiResult<String> {
-    chrono::DateTime::parse_from_rfc3339(v)
-        .map(|t| {
-            t.with_timezone(&chrono::Utc)
-                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
-        })
-        .map_err(|_| ApiError::bad_request(format!("`{what}` is not an RFC 3339 time: `{v}`")))
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -599,10 +590,5 @@ mod tests {
                 .unwrap()
         );
         assert!(db.read(holds).await.unwrap().is_empty());
-        assert!(check_time("since", "nope").is_err());
-        assert_eq!(
-            check_time("since", "2026-10-24T10:00:00+10:00").unwrap(),
-            "2026-10-24T00:00:00.000Z"
-        );
     }
 }

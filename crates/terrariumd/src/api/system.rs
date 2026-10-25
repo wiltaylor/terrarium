@@ -88,6 +88,7 @@ pub async fn audit(
             ));
         }
     }
+    filter.since = crate::time_param::opt_time_param("since", filter.since.as_deref())?;
     let rows = state
         .db
         .read(move |c| audit::list(c, &filter, &page))

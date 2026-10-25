@@ -50,9 +50,7 @@ fn day_ago() -> String {
 }
 
 fn time_or(v: Option<&str>, what: &str) -> ApiResult<Option<String>> {
-    v.filter(|s| !s.is_empty())
-        .map(|s| ustore::check_time(what, s))
-        .transpose()
+    crate::time_param::opt_time_param(what, v)
 }
 
 /// `GET /api/usage`: a series of token sums, one point per bucket (and per

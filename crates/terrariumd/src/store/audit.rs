@@ -39,7 +39,8 @@ fn row(r: &Row<'_>) -> rusqlite::Result<AuditEntry> {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct AuditFilter {
-    /// Only rows at or after this RFC 3339 time.
+    /// Only rows at or after this time. The API normalises it with
+    /// `time_param::parse_time_param` to the stored form first.
     pub since: Option<String>,
     pub actor: Option<String>,
     pub action: Option<String>,
