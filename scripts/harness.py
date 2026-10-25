@@ -7,12 +7,22 @@ Stdlib only (Python 3.11+). The `harness` just module calls it:
         For each harness (and extension): the pin, the tested range, the
         version in the running container, on the host, and the latest on npm
         with its publish date, and whether the latest is in the tested range.
+        STATUS is `latest`, `update available`, or `update available (major)`.
         It changes nothing.
+
+    harness.py latest [--dry-run] [--no-rollout]
+        Bump every harness (and extension) with a newer release on npm to
+        that release, in one pass. A major bump is allowed and prints a
+        one-line warning. Then: the same file edits as `update`, one image
+        build, the version check in the image, one dry compatibility suite,
+        and `just up` (skip it with --no-rollout). It ends with a table of
+        the changes and the `just ci::compat <name>` runs that give the live
+        proof. --dry-run prints the plan and changes nothing.
 
     harness.py update <name> [version] [--allow-major] [--dry-run]
         Bump the pin (default: the latest on npm). A patch or minor bump
         widens `tested` when the new version is outside it. A major bump
-        needs --allow-major. Then: sync the Dockerfile ARG defaults, add a row
+        needs --allow-major (or use `latest`). Then: sync the Dockerfile ARG defaults, add a row
         to docs/compat.md "Version history", build the image
         (`just docker::image-build`), check the version in the image, and run
         the dry compatibility suite (`cargo test -p terrarium-compat`).
@@ -180,10 +190,7 @@ def next_range(tested: str, old: Version, new: Version, kind: str, allow_major: 
     """The `tested` range after a bump from `old` to `new`."""
     if kind == "major":
         if not allow_major:
-            raise PlanError(
-                f"{old} -> {new} is a major bump: hooks and flags may have changed. "
-                "Read the release notes, then run again with --allow-major"
-            )
+            raise PlanError(f"{old} -> {new} is a major bump: hooks and flags may have changed")
         return f">={new}, {upper_for(new)}"
     if matches(new, tested):
         return tested
@@ -332,11 +339,13 @@ def judge(entry: dict, container: str | None, host: str | None, latest: str | No
         except ValueError:
             newer = latest != pinned
         if not newer:
-            status = "current"
-        elif tested is None or in_range:
-            status = "update"
+            status = "latest"
         else:
-            status = "update (outside range)"
+            try:
+                major = bump_kind(parse_version(pinned), parse_version(latest)) == "major"
+            except ValueError:
+                major = False
+            status = "update available (major)" if major else "update available"
     return in_range, status, notes
 
 
@@ -371,7 +380,7 @@ def render_table(rows: list[Row], up: bool) -> str:
             return "NO"
         return str(v)
 
-    headers = ["HARNESS", "PINNED", "TESTED", "CONTAINER", "HOST", "LATEST", "PUBLISHED", "LATEST IN RANGE", "STATUS"]
+    headers = ["HARNESS", "PINNED", "TESTED", "CONTAINER", "HOST", "LATEST", "PUBLISHED", "LATEST IN TESTED RANGE", "STATUS"]
     body = [
         [
             r.name,
@@ -392,10 +401,11 @@ def render_table(rows: list[Row], up: bool) -> str:
     for r in rows:
         for n in r.notes:
             lines.append(f"{r.name}: {n}")
-    updates = [r.name for r in rows if r.status.startswith("update") and r.kind == "harness"]
+    updates = [r.name for r in rows if r.status.startswith("update")]
     if updates:
         lines.append("")
-        lines.append("Update one with `just harness::update <name>` (add --dry-run to see the plan).")
+        lines.append("`just harness::latest` pulls every harness to the latest; `just harness::update <name>` pulls one.")
+        lines.append("Add --dry-run to either to see the plan.")
     return "\n".join(lines)
 
 
@@ -425,6 +435,15 @@ class Plan:
     warnings: list[str] = field(default_factory=list)
 
 
+def major_refusal(name: str, old: Version, new: Version) -> str:
+    return (
+        f"{name} {old} -> {new} is a major bump: hooks and flags may have changed. "
+        "Read the release notes, then run one of:\n"
+        f"  just harness::update {name} --allow-major    this harness only\n"
+        "  just harness::latest                          every harness to the latest"
+    )
+
+
 def make_plan(cfg: dict, name: str, target: str, allow_major: bool) -> Plan:
     if name in cfg["harness"]:
         kind, table = "harness", cfg["harness"][name]
@@ -446,10 +465,7 @@ def make_plan(cfg: dict, name: str, target: str, allow_major: bool) -> Plan:
     warnings = []
     if bump == "major":
         if not allow_major:
-            raise PlanError(
-                f"{old} -> {new} is a major bump: hooks and flags may have changed. "
-                "Read the release notes, then run again with --allow-major"
-            )
+            raise PlanError(major_refusal(name, old, new))
         warnings.append(
             f"MAJOR bump {old} -> {new}: hooks, flags, and config keys may have changed. "
             f"Read the release notes, compare with docs/compat.md, and run `just ci::compat {name}` before rollout."
@@ -582,42 +598,198 @@ def cmd_update(args) -> int:
         print(f"harness: {e}", file=sys.stderr)
         return 1
     if plan.bump == "same":
-        print(f"{plan.name} is already pinned to {plan.new}; nothing to do.")
+        print(f"{plan.name} is at {plan.new}" + (", the latest on npm" if args.version is None else "") + "; nothing to do.")
         return 0
     print_plan(plan, image)
     if args.dry_run:
         print("\ndry run: nothing changed.")
         return 0
 
-    toml_path = hv.TOML
-    values = {"version": plan.new}
-    if plan.tested_new != plan.tested_old:
-        values["tested"] = plan.tested_new
-    toml_path.write_text(set_table_values(toml_path.read_text(), f"{plan.kind}.{plan.name}", values))
-    cfg = hv.load()
-    df = hv.DOCKERFILE
-    df.write_text(hv.sync_dockerfile(cfg, df.read_text()))
-    COMPAT_MD.write_text(add_history_row(COMPAT_MD.read_text(), compat_row(plan, dt.date.today().isoformat())))
-    print("\nupdated harnesses.toml, docker/Dockerfile, docs/compat.md")
-
-    rollback = "To undo: `git checkout harnesses.toml docker/Dockerfile docs/compat.md`."
+    write_files([plan])
     if args.no_build:
         print("--no-build: skipped the image build and the dry compatibility suite.")
-    else:
-        if not step("build the image", ["just", "docker::image-build"]):
-            print(f"\nthe image build failed. {rollback}", file=sys.stderr)
-            return 1
-        got = image_version(image, plan, cfg)
-        if got != plan.new:
-            print(f"\nthe image {image} has {plan.name} {got}, not {plan.new}. {rollback}", file=sys.stderr)
-            return 1
-        print(f"the image {image} has {plan.name} {got}")
-        if not step("dry compatibility suite", ["cargo", "test", "-p", "terrarium-compat"]):
-            print(f"\nthe dry compatibility suite failed (target/compat-report-dry.md). {rollback}", file=sys.stderr)
-            return 1
+    elif not build_and_verify([plan], image):
+        return 1
     print()
     print(next_steps(plan))
     return 0
+
+
+ROLLBACK = "To undo: `git checkout harnesses.toml docker/Dockerfile docs/compat.md`."
+
+
+def write_files(plans: list[Plan]) -> None:
+    """harnesses.toml, the Dockerfile ARG defaults, and one docs/compat.md
+    "Version history" row for each plan."""
+    toml_path = hv.TOML
+    text = toml_path.read_text()
+    for plan in plans:
+        values = {"version": plan.new}
+        if plan.tested_new != plan.tested_old:
+            values["tested"] = plan.tested_new
+        text = set_table_values(text, f"{plan.kind}.{plan.name}", values)
+    toml_path.write_text(text)
+    cfg = hv.load()
+    df = hv.DOCKERFILE
+    df.write_text(hv.sync_dockerfile(cfg, df.read_text()))
+    md = COMPAT_MD.read_text()
+    today = dt.date.today().isoformat()
+    for plan in plans:
+        md = add_history_row(md, compat_row(plan, today))
+    COMPAT_MD.write_text(md)
+    print("\nupdated harnesses.toml, docker/Dockerfile, docs/compat.md")
+
+
+def build_and_verify(plans: list[Plan], image: str) -> bool:
+    """One image build, the version of each plan in the image, and one dry
+    compatibility suite."""
+    cfg = hv.load()
+    if not step("build the image", ["just", "docker::image-build"]):
+        print(f"\nthe image build failed. {ROLLBACK}", file=sys.stderr)
+        return False
+    for plan in plans:
+        got = image_version(image, plan, cfg)
+        if got != plan.new:
+            print(f"\nthe image {image} has {plan.name} {got}, not {plan.new}. {ROLLBACK}", file=sys.stderr)
+            return False
+        print(f"the image {image} has {plan.name} {got}")
+    if not step("dry compatibility suite", ["cargo", "test", "-p", "terrarium-compat"]):
+        print(f"\nthe dry compatibility suite failed (target/compat-report-dry.md). {ROLLBACK}", file=sys.stderr)
+        return False
+    return True
+
+
+# ---------------------------------------------------------------- latest
+
+
+@dataclass
+class LatestItem:
+    name: str
+    kind: str
+    package: str
+    pinned: str
+    latest: str | None
+    plan: Plan | None
+    status: str  # latest | patch | minor | major | unknown | skipped
+    note: str = ""
+
+
+def plan_latest(cfg: dict, latest: dict[str, str | None]) -> list[LatestItem]:
+    """One item for each harness and extension: a plan to the latest npm
+    release, or the reason for no change. `latest` maps a name to the npm
+    version (None when npm did not answer)."""
+    out = []
+    for e in entries(cfg):
+        name, lv = e["name"], latest.get(e["name"])
+        item = LatestItem(name, e["kind"], e["package"], e["version"], lv, None, "unknown")
+        if lv is None:
+            item.note = "npm did not answer"
+            out.append(item)
+            continue
+        try:
+            if parse_version(lv) <= parse_version(e["version"]):
+                item.status = "latest"
+                if parse_version(lv) < parse_version(e["version"]):
+                    item.note = f"the pin is newer than the npm latest {lv}"
+                out.append(item)
+                continue
+            plan = make_plan(cfg, name, lv, allow_major=True)
+        except (PlanError, ValueError) as err:
+            item.status, item.note = "skipped", str(err)
+            out.append(item)
+            continue
+        item.plan, item.status = plan, plan.bump
+        out.append(item)
+    return out
+
+
+def major_warning(plan: Plan) -> str:
+    return f"WARNING: {plan.name} {plan.old} -> {plan.new} is a major bump: hooks and flags may have changed"
+
+
+def render_latest(items: list[LatestItem]) -> str:
+    headers = ["HARNESS", "FROM", "TO", "CHANGE", "TESTED RANGE"]
+    table = [headers]
+    for i in items:
+        p = i.plan
+        table.append(
+            [
+                i.name,
+                i.pinned,
+                p.new if p else (i.latest or "-"),
+                f"{i.status} bump" if p else i.status,
+                (p.tested_new or "-") if p else "-",
+            ]
+        )
+    widths = [max(len(row[c]) for row in table) for c in range(len(headers))]
+    lines = ["  ".join(c.ljust(widths[n]) for n, c in enumerate(row)).rstrip() for row in table]
+    lines += [f"{i.name}: {i.note}" for i in items if i.note]
+    return "\n".join(lines)
+
+
+def compat_suggestions(items: list[LatestItem]) -> str:
+    plans = [i.plan for i in items if i.plan]
+    lines = ["The live proof (not a gate; it runs the host binary on your real logins):"]
+    names = []
+    for p in plans:
+        harness = p.name if p.kind == "harness" else "copilot"
+        lines.append(f"  npm install -g {p.package}@{p.new}")
+        if harness not in names:
+            names.append(harness)
+    lines += [f"  just ci::compat {n}" for n in names]
+    lines.append('Then edit the "Compat" cell of each new docs/compat.md "Version history" row.')
+    return "\n".join(lines)
+
+
+def run_latest(cfg: dict, latest: dict[str, str | None], dry_run: bool, no_rollout: bool, image: str) -> int:
+    items = plan_latest(cfg, latest)
+    plans = [i.plan for i in items if i.plan]
+    for i in items:
+        if i.plan:
+            print(f"{i.name} ({i.package}): {i.pinned} -> {i.plan.new} ({i.status})")
+            if i.status == "major":
+                print(f"  {major_warning(i.plan)}")
+        else:
+            print(f"{i.name}: {i.status}" + (f" ({i.pinned})" if i.status == "latest" else f": {i.note}"))
+    failed = any(i.status in ("unknown", "skipped") for i in items)
+    if not plans:
+        print("\nnothing to update: every harness is at the latest on npm.")
+        return 1 if failed else 0
+    if dry_run:
+        print("\nplan (dry run: nothing changed):")
+        print(render_latest(items))
+        print()
+        print(compat_suggestions(items))
+        return 1 if failed else 0
+
+    write_files(plans)
+    if not build_and_verify(plans, image):
+        return 1
+    if no_rollout:
+        print("\n--no-rollout: the stack still runs the old image. Roll out with `just harness::rollout`.")
+    elif cmd_rollout(argparse.Namespace(dry_run=False)) != 0:
+        print(f"\nthe rollout failed. {ROLLBACK}", file=sys.stderr)
+        return 1
+    print("\nchanged:")
+    print(render_latest(items))
+    print()
+    print(compat_suggestions(items))
+    print("Roll back: set the old versions in harnesses.toml (and `tested`), then `just up`.")
+    return 1 if failed else 0
+
+
+def cmd_latest(args) -> int:
+    cfg = hv.load()
+    items = entries(cfg)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        answers = list(pool.map(lambda e: npm_latest(e["package"]), items))
+    latest = {}
+    for e, (v, _date, err) in zip(items, answers):
+        latest[e["name"]] = v
+        if err:
+            print(f"harness: {e['name']}: npm: {err}", file=sys.stderr)
+    image = os.environ.get("TERRARIUM_IMAGE", "terrarium:dev")
+    return run_latest(cfg, latest, args.dry_run, args.no_rollout, image)
 
 
 # ---------------------------------------------------------------- rollout
@@ -673,12 +845,15 @@ def main(argv: list[str] | None = None) -> int:
     u.add_argument("--allow-major", action="store_true", help="allow a major bump (resets the tested range)")
     u.add_argument("--dry-run", action="store_true", help="print the plan; change nothing")
     u.add_argument("--no-build", action="store_true", help="change the files only; skip the image build and the dry compat")
+    lt = sub.add_parser("latest", help="bump every harness to the latest, build once, run the dry compat, roll out")
+    lt.add_argument("--dry-run", action="store_true", help="print the plan; change nothing")
+    lt.add_argument("--no-rollout", action="store_true", help="skip `just up` at the end")
     r = sub.add_parser("rollout", help="just up: restart on the new image; the daemon resumes the agents")
     r.add_argument("--dry-run", action="store_true")
     a = p.parse_args(argv)
     sys.stdout.reconfigure(line_buffering=True)
     try:
-        return {"check": cmd_check, "update": cmd_update, "rollout": cmd_rollout}[a.command](a)
+        return {"check": cmd_check, "update": cmd_update, "latest": cmd_latest, "rollout": cmd_rollout}[a.command](a)
     except (hv.PinError, PlanError) as e:
         print(f"harness: {e}", file=sys.stderr)
         return 2

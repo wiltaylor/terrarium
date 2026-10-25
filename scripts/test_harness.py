@@ -2,7 +2,9 @@
 major guard), the file edits, and the parsing for `harness::check`.
 Run: uv run python -m unittest discover -s scripts -p 'test_harness*.py'"""
 
+import contextlib
 import importlib.util
+import io
 import sys
 import tomllib
 import unittest
@@ -72,6 +74,14 @@ class Plan(unittest.TestCase):
         self.assertIn("--allow-major", str(e.exception))
         with self.assertRaises(h.PlanError):
             h.make_plan(fixture_cfg(), "codex", "0.164.0", False)
+
+    def test_the_major_refusal_says_what_to_run(self):
+        with self.assertRaises(h.PlanError) as e:
+            h.make_plan(fixture_cfg(), "codex", "0.164.0", False)
+        msg = str(e.exception)
+        self.assertIn("codex 0.160.0 -> 0.164.0 is a major bump", msg)
+        self.assertIn("just harness::update codex --allow-major", msg)
+        self.assertIn("just harness::latest", msg)
 
     def test_an_allowed_major_bump_resets_the_range_and_warns(self):
         p = h.make_plan(fixture_cfg(), "codex", "0.164.0", True)
@@ -143,25 +153,98 @@ class CheckParsing(unittest.TestCase):
         self.assertEqual(h.parse_npm_ls(text, "copilot-custom-system-prompt"), "0.1.2")
         self.assertIsNone(h.parse_npm_ls("{}", "copilot-custom-system-prompt"))
 
-    def test_judge_flags_a_newer_version_outside_the_range(self):
+    def test_judge_flags_a_newer_major_version(self):
         e = {"version": "0.160.0", "tested": ">=0.160.0, <0.161.0"}
         in_range, status, notes = h.judge(e, "0.160.0", "0.159.0", "0.164.0", True)
-        self.assertEqual((in_range, status), (False, "update (outside range)"))
+        self.assertEqual((in_range, status), (False, "update available (major)"))
         self.assertEqual(len(notes), 1)
         self.assertIn("the host has 0.159.0", notes[0])
 
     def test_judge_flags_a_container_that_is_not_on_the_pin(self):
         e = {"version": "2.1.310", "tested": ">=2.1.310, <2.2.0"}
         in_range, status, notes = h.judge(e, "2.1.300", None, "2.1.320", True)
-        self.assertEqual((in_range, status), (True, "update"))
+        self.assertEqual((in_range, status), (True, "update available"))
         self.assertIn("run `just up`", notes[0])
 
+    def test_judge_status_words(self):
+        e = {"version": "2.1.310", "tested": ">=2.1.310, <2.2.0"}
+        self.assertEqual(h.judge(e, None, None, "2.1.310", False)[1], "latest")
+        # A minor bump outside the range is still on the same major.
+        self.assertEqual(h.judge(e, None, None, "2.2.4", False)[:2], (False, "update available"))
+        self.assertEqual(h.judge(e, None, None, "3.0.0", False)[1], "update available (major)")
+        self.assertEqual(h.judge(e, None, None, None, False)[1], "unknown")
+        ext = {"version": "0.1.2", "tested": None}
+        self.assertEqual(h.judge(ext, None, None, "0.1.3", False)[:2], (None, "update available"))
+
     def test_table_renders_every_row(self):
-        rows = [h.Row("claude", "harness", "p", "2.1.310", ">=2.1.310, <2.2.0", "2.1.310", None, "2.1.310", "2026-10-23T18:00:00Z", True, "current")]
+        rows = [h.Row("claude", "harness", "p", "2.1.310", ">=2.1.310, <2.2.0", "2.1.310", None, "2.1.310", "2026-10-23T18:00:00Z", True, "latest")]
         out = h.render_table(rows, True)
         self.assertIn("HARNESS", out.splitlines()[0])
+        self.assertIn("LATEST IN TESTED RANGE", out.splitlines()[0])
         self.assertIn("2026-10-23", out)
-        self.assertNotIn("Update one", out)
+        self.assertNotIn("harness::latest", out)
+
+    def test_table_footer_names_both_commands(self):
+        rows = [h.Row("codex", "harness", "p", "0.160.0", ">=0.160.0, <0.161.0", None, None, "0.164.0", None, False, "update available (major)")]
+        out = h.render_table(rows, False)
+        self.assertIn("update available (major)", out)
+        self.assertNotIn("outside range", out)
+        self.assertIn("`just harness::latest` pulls every harness", out)
+        self.assertIn("`just harness::update <name>` pulls one", out)
+
+
+class Latest(unittest.TestCase):
+    # The fixture: claude has a minor bump, codex a major bump, and the
+    # copilot-prompt extension is at the latest.
+    NPM = {"claude": "2.2.4", "codex": "0.164.0", "copilot-prompt": "0.1.2"}
+
+    def test_the_plan_bumps_each_harness_with_a_newer_release(self):
+        items = {i.name: i for i in h.plan_latest(fixture_cfg(), self.NPM)}
+        self.assertEqual(items["claude"].status, "minor")
+        self.assertEqual(items["claude"].plan.tested_new, ">=2.1.310, <2.3.0")
+        self.assertEqual(items["codex"].status, "major")
+        self.assertEqual(items["codex"].plan.tested_new, ">=0.164.0, <0.165.0")
+        self.assertEqual(items["copilot-prompt"].status, "latest")
+        self.assertIsNone(items["copilot-prompt"].plan)
+
+    def test_npm_without_an_answer_or_behind_the_pin(self):
+        items = {i.name: i for i in h.plan_latest(fixture_cfg(), {"claude": "2.1.300", "codex": None, "copilot-prompt": "0.1.2"})}
+        self.assertEqual(items["claude"].status, "latest")
+        self.assertIn("newer than the npm latest", items["claude"].note)
+        self.assertEqual(items["codex"].status, "unknown")
+
+    def run_dry(self, npm):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = h.run_latest(fixture_cfg(), npm, dry_run=True, no_rollout=False, image="terrarium:test")
+        return rc, out.getvalue()
+
+    def test_the_dry_run_prints_the_plan_table_and_changes_nothing(self):
+        before = (FIX / "harnesses.toml").read_text()
+        rc, out = self.run_dry(self.NPM)
+        self.assertEqual(rc, 0)
+        self.assertEqual((FIX / "harnesses.toml").read_text(), before)
+        lines = out.splitlines()
+        self.assertIn("copilot-prompt: latest (0.1.2)", lines)
+        self.assertIn("claude (@anthropic-ai/claude-code): 2.1.310 -> 2.2.4 (minor)", lines)
+        self.assertIn("  WARNING: codex 0.160.0 -> 0.164.0 is a major bump: hooks and flags may have changed", lines)
+        self.assertEqual(sum("WARNING" in l for l in lines), 1)
+        self.assertIn("dry run: nothing changed", out)
+        table = lines[lines.index("plan (dry run: nothing changed):") + 1 :]
+        self.assertEqual(table[0].split(), ["HARNESS", "FROM", "TO", "CHANGE", "TESTED", "RANGE"])
+        self.assertEqual(table[1].split()[:5], ["claude", "2.1.310", "2.2.4", "minor", "bump"])
+        self.assertEqual(table[2].split()[:5], ["codex", "0.160.0", "0.164.0", "major", "bump"])
+        self.assertEqual(table[3].split(), ["copilot-prompt", "0.1.2", "0.1.2", "latest", "-"])
+        self.assertIn("  just ci::compat claude", lines)
+        self.assertIn("  just ci::compat codex", lines)
+        self.assertNotIn("  just ci::compat copilot", lines)
+
+    def test_nothing_newer_means_nothing_to_do(self):
+        rc, out = self.run_dry({"claude": "2.1.310", "codex": "0.160.0", "copilot-prompt": "0.1.2"})
+        self.assertEqual(rc, 0)
+        self.assertIn("claude: latest (2.1.310)", out)
+        self.assertIn("nothing to update", out)
+        self.assertNotIn("ci::compat", out)
 
 
 if __name__ == "__main__":

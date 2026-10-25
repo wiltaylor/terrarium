@@ -60,7 +60,8 @@ edit a version in `docker/Dockerfile` or in an adapter's `flags.rs`:
   the file, and each adapter's `verified` and `tested` come from it. The
   build fails when `tested` does not match `version`.
 
-Use `just harness::update <name>` to change a version
+Use `just harness::latest` (every harness) or `just harness::update <name>`
+(one harness) to change a version
 ([getting-started.md](getting-started.md), "Updating a harness").
 
 ## Run things with just
@@ -82,6 +83,7 @@ Run `just` to see the modules. Run `just <module>` to see its recipes.
 | Check bwrap in the image               | `just spikes::bwrap-check`      |
 | Build the static host agent            | `just host::build`              |
 | Compare the harness pins with npm      | `just harness::check`           |
+| Bump every harness to the latest       | `just harness::latest`          |
 | Bump a harness version                 | `just harness::update <name>`   |
 
 `just ci::check` must pass before a change merges. It runs `fmt-check`,

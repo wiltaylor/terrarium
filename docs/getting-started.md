@@ -699,9 +699,35 @@ just harness::check --json
 For each harness, the table shows the pin, the tested range, the version
 in the running container, the version on the host, the latest version on
 npm with its publish date, and whether the latest version is in the tested
-range. The command changes nothing.
+range (`LATEST IN TESTED RANGE`). The `STATUS` column shows `latest`,
+`update available` (the same major version), or `update available (major)`.
+The command changes nothing.
 
-### 7.2 Update
+### 7.2 Update all harnesses to the latest
+
+```sh
+just harness::latest --dry-run       # print the plan, change nothing
+just harness::latest                 # bump, build, dry compat, roll out
+just harness::latest --no-rollout    # bump, build, dry compat; no `just up`
+```
+
+This is the usual path. The command reads the latest release of each
+harness and of the Copilot prompt extension on npm. It skips each one that
+is at the latest and prints `latest` for it. It bumps each of the other
+ones to the latest release. It allows a major bump, and it prints a
+one-line warning for each major bump: hooks and flags may have changed.
+
+Then the command does the file steps of 7.3 (steps 1 to 4) for all the
+bumps. It builds the image one time, checks each version in the image,
+and runs the dry compatibility suite one time. Then it runs `just up`
+(7.5), unless you add `--no-rollout`. At the end, it prints a table of the
+changes and one `just ci::compat <name>` command for each bumped harness.
+
+The live compatibility suite (7.4) is the proof that a new version works.
+It is not a gate for the update: run it after the update, and write the
+result in [compat.md](compat.md).
+
+### 7.3 Update one harness
 
 ```sh
 just harness::update claude --dry-run    # print the plan, change nothing
@@ -723,14 +749,16 @@ The command does these steps:
 6. It runs the dry compatibility suite (`cargo test -p terrarium-compat`).
 7. It prints the next steps.
 
-A major bump stops at step 1. Add `--allow-major` to continue. The command
+A major bump stops at step 1. The command prints the two commands that
+continue: `just harness::update <name> --allow-major` for this harness, or
+`just harness::latest` for all harnesses. With `--allow-major`, the command
 then resets the range to the new minor line and prints a warning: hooks,
 flags, and config keys can change in a major release. The command uses the
 semver rule for "major": the first part that is not zero. Thus, for a 0.x
 harness, 0.160.0 to 0.161.0 is a major bump, and 0.160.0 to 0.160.1 is a
 patch bump.
 
-### 7.3 Prove the new version
+### 7.4 Prove the new version
 
 The compatibility suite runs the harness binary on the host, with your
 real logins. Install the new version on the host first (with npm, or with
@@ -758,7 +786,7 @@ in [compat.md](compat.md). Look at these items:
 When a fact changes, add a section for the new version to
 [compat.md](compat.md), and change the adapter table in `flags.rs`.
 
-### 7.4 Roll out
+### 7.5 Roll out
 
 ```sh
 just harness::rollout --dry-run    # list the live agents, change nothing
@@ -781,7 +809,7 @@ tested range. Outside the range, the daemon logs a warning and writes a
 `GET /api/harnesses`, and the Subscriptions page of the dashboard show
 the installed version of each harness and its range.
 
-### 7.5 Roll back
+### 7.6 Roll back
 
 Edit `harnesses.toml`: set `version` back to the old value. If the update
 changed `tested`, set it back too. Then build and roll out:

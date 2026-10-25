@@ -12,11 +12,12 @@ Status words:
 
 ## Version history
 
-`harnesses.toml` at the repo root pins each harness. `just harness::update`
-adds a row here for each bump. The "Range" cell shows a change to the
-adapter's `tested` range. After `just ci::compat <harness>`, write the result
-in the "Compat" cell. When a bump changes a hook, a flag, or a config key,
-add a section for the new version below, as for the versions below.
+`harnesses.toml` at the repo root pins each harness. `just harness::latest`
+and `just harness::update` add a row here for each bump. The "Range" cell
+shows a change to the adapter's `tested` range. After
+`just ci::compat <harness>`, write the result in the "Compat" cell. When a
+bump changes a hook, a flag, or a config key, add a section for the new
+version below, as for the versions below.
 
 | Date | Harness | Version | Bump | Range | Compat |
 |---|---|---|---|---|---|

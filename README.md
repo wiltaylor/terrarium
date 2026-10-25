@@ -250,7 +250,7 @@ recipes of a module.
 | Run the Rust and dashboard tests | `just test` |
 | Run the merge gate | `just ci::check` |
 | Run the compatibility suite for one harness | `just ci::compat claude` |
-| Check, update, or roll out a harness version (pins in `harnesses.toml`) | `just harness::check`, `just harness::update claude`, `just harness::rollout` |
+| Check, update, or roll out a harness version (pins in `harnesses.toml`) | `just harness::check`, `just harness::latest`, `just harness::update claude`, `just harness::rollout` |
 | Run the daemon outside Docker | `just daemon::run` |
 | Run the CLI against a running daemon | `just daemon::cli daemon status` |
 | Run the dashboard dev server | `just dashboard::dev` |
