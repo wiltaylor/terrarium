@@ -869,7 +869,8 @@ export interface UsageMe {
 // and not yet in docs/api.md. The mock serves the same shapes.
 
 export type TargetKind = "host" | "ssh" | "docker" | "vmlab";
-export type TargetState = "up" | "down" | "starting" | "stopping" | "unknown";
+/** docs/api.md §17.2: what the last lifecycle verb saw. */
+export type TargetState = "running" | "stopped" | "absent" | "unknown";
 
 /** docs/api.md §4 `GET /api/targets`. */
 export interface Target {
@@ -880,6 +881,13 @@ export interface Target {
   project?: string;
   host?: string;
   address?: string;
+  /** The fields of a target file (docs/api.md §17.2), by kind. */
+  port?: number;
+  credential?: string;
+  image?: string;
+  container?: string;
+  lab?: string;
+  machine?: string;
   /** `global` or `project`. */
   scope?: "global" | "project";
   /** The state that the last lifecycle verb saw. */
@@ -959,6 +967,15 @@ export interface LeaseEventData {
   expires_at: string | null;
   exclusive: boolean;
   state: LeaseState;
+}
+
+/** The answer of a lifecycle verb (docs/api.md §17.3): the executor report, not the target. */
+export interface TargetReport {
+  target: string;
+  verb: string;
+  state: TargetState;
+  snapshot?: string;
+  result?: unknown;
 }
 
 /** `POST /api/targets/{name}/exec`. `shell` opens a login shell in a PTY. */

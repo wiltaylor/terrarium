@@ -318,7 +318,7 @@ A `status` event carries `data.status`. A `card` event carries `data.card_id`.
 | `/p/:project/artifacts/:id?` | Artifact viewer, upload, delete | `GET .../artifacts`, `.../artifacts/usage`, `POST .../artifacts` (multipart), `POST /api/artifacts/{id}/url` |
 | `/p/:project/versions/:id?` | Version timeline, review, new version | `GET`, `POST .../versions`, `POST /api/versions/{id}/submit|approve|reject|release`, `compare` |
 | `/p/:project/spend` | Usage by day, agent, model, and subscription | `GET /api/usage?project=&bucket=day&group=agent\|model\|subscription` |
-| `/targets` | Targets, lifecycle, exec console, leases (grant, extend, revoke, history) | `GET /api/targets`, `POST /api/targets/{name}/up\|down\|snapshot\|restore`, `POST .../exec`, `WS .../sessions/{id}/ws`, `DELETE .../sessions/{id}`, `GET`, `POST .../leases`, `PATCH`, `DELETE .../leases/{agent}` (docs/api.md §17.7) |
+| `/targets` | Targets, lifecycle, exec console, leases (grant, extend, revoke, history) | `GET /api/targets`, `POST /api/targets/{name}/up\|down\|snapshot\|restore\|status`, `POST .../exec`, `WS .../sessions/{id}/ws`, `DELETE .../sessions/{id}`, `GET`, `POST .../leases`, `PATCH`, `DELETE .../leases/{agent}` (docs/api.md §17.7) |
 | `/hosts` | Host agents: status, capabilities, add with a one-time token, revoke | `GET`, `POST /api/hosts`, `DELETE /api/hosts/{name}` (new API, not in docs/api.md yet) |
 | `/events` | Event log with history | `GET /api/events?since=&kind=&project=&agent=`, events socket |
 | `/audit` | Audit log | `GET /api/audit?actor=&action=&project=` |

@@ -662,9 +662,11 @@ ${XSS_DOCUMENT}
   ].sort((x, y) => x.created_at.localeCompare(y.created_at));
 
   const targets: Target[] = [
-    { id: "lab-win11", name: "lab-win11", kind: "vmlab", project: "terrarium", host: "lab1", scope: "project", state: "down", ephemeral: true, keep: false, snapshot_before_task: true, snapshots: ["clean"], source: "file", usable: true },
+    { id: "lab-win11", name: "lab-win11", kind: "vmlab", project: "terrarium", host: "lab1", scope: "project", state: "stopped", state_at: ago(60 * 2), ephemeral: true, keep: true, snapshot_before_task: true, snapshots: ["terrarium-clean"], source: "file", usable: true },
     { id: "build-box", name: "build-box", kind: "ssh", address: "build@buildbox.lan", scope: "global", state: "unknown", ephemeral: false, keep: false, snapshot_before_task: false, snapshots: [], source: "file", usable: true },
-    { id: "pg-test", name: "pg-test", kind: "docker", project: "webshop", host: "lab1", scope: "project", state: "up", ephemeral: true, keep: false, snapshot_before_task: false, snapshots: [], source: "api", usable: true },
+    { id: "pg-test", name: "pg-test", kind: "docker", project: "webshop", host: "lab1", scope: "project", state: "running", state_at: ago(60), ephemeral: true, keep: false, snapshot_before_task: false, snapshots: [], source: "api", usable: true },
+    { id: "dev-vm", name: "dev-vm", kind: "vmlab", host: "lab1", scope: "global", state: "running", state_at: ago(30), ephemeral: false, keep: false, snapshot_before_task: false, snapshots: ["terrarium"], source: "file", usable: true },
+    { id: "ci-box", name: "ci-box", kind: "docker", host: "lab1", image: "alpine:3", scope: "global", state: "absent", state_at: ago(60 * 5), ephemeral: true, keep: false, snapshot_before_task: false, snapshots: [], source: "api", usable: true },
     { id: "pi-runner", name: "pi-runner", kind: "host", host: "pi-cluster", scope: "global", state: "unknown", ephemeral: false, keep: false, snapshot_before_task: false, snapshots: [], source: "file", usable: true },
   ];
 

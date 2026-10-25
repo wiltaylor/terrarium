@@ -69,6 +69,7 @@ import type {
   StartLogin,
   Subscription,
   Target,
+  TargetReport,
   UsageMe,
   CardUsage,
   UsagePoint,
@@ -279,8 +280,8 @@ export interface Api {
   targets: {
     list(): Promise<Target[]>;
     create(t: Partial<Target>): Promise<Target>;
-    /** A lifecycle verb. The answer is the executor's report, not a target: refetch the list. */
-    action(id: string, action: TargetAction): Promise<unknown>;
+    /** A lifecycle verb (docs/api.md §17.3). It runs to its end; the answer is the executor's report, not a target: refetch the list. */
+    action(id: string, action: TargetAction): Promise<TargetReport>;
     /** Open an exec session. `{shell: true, pty}` gives an operator terminal. */
     exec(id: string, req: ExecRequest): Promise<ExecOpened>;
     /** The session terminal, with the PTY protocol of docs/api.md §6.5. */
@@ -320,7 +321,7 @@ export interface Api {
   };
 }
 
-export type TargetAction = "up" | "down" | "snapshot" | "restore";
+export type TargetAction = "up" | "down" | "snapshot" | "restore" | "status";
 
 /** Read the answer of `GET /api/events/latest`: a number, `{seq}`, `{latest}`, or an event. */
 export function parseLatest(data: unknown): number | null {

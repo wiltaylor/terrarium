@@ -46,6 +46,7 @@ import type {
   Subscription,
   Lease,
   Target,
+  TargetReport,
   UsagePoint,
   UsageQuery,
   UsageTotals,
@@ -2002,32 +2003,40 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
       // The mock caller is the operator: `access` is `operator`, and the operator holds no lease.
       list: () => reply(() => w.targets.map((t) => ({ ...t, host_online: t.kind === "ssh" ? null : w.hosts.some((h) => h.name === t.host && h.status === "online"), access: "operator" as const, lease: null }))),
       create: () => reply(() => fail(405, "method_not_allowed", "this route does not take this method")),
-      action: (id, action) =>
-        reply(() => {
+      // docs/api.md §17.3: each verb runs to its end and answers the executor report.
+      action: (id, verb) =>
+        reply((): TargetReport => {
           const t = target(id);
-          if (t.kind === "ssh" || t.kind === "host") fail(422, "invalid", `a ${t.kind} target has no lifecycle`);
-          const h = w.hosts.find((x) => x.name === t.host);
-          if (!h || h.status !== "online") fail(409, "host_offline", `host agent \`${t.host ?? "?"}\` is not connected`);
-          if (action === "snapshot" || action === "restore") {
-            if (t.kind !== "vmlab") fail(422, "invalid", "only vmlab targets have snapshots");
-            if (action === "snapshot") t.snapshots.push(`snap-${t.snapshots.length + 1}`);
-            else if (!t.snapshots.length) fail(409, "conflict", "the target has no snapshot");
-            else {
-              t.state = "starting";
-              later(() => (t.state = "up"), Math.max(step, 1) * 3);
-            }
-            return t;
+          const online = !!t.host && w.hosts.find((x) => x.name === t.host)?.status === "online";
+          const report = (snapshot?: string): TargetReport => {
+            t.state_at = iso();
+            const r: TargetReport = { target: t.name, verb, state: t.state, ...(snapshot ? { snapshot } : {}) };
+            audit(`target.${verb}`, t.name, t.project, { ...r });
+            return r;
+          };
+          if (t.kind === "ssh" || t.kind === "host") {
+            if (verb === "snapshot" || verb === "restore") fail(422, "invalid", `a \`${t.kind}\` target has no \`snapshot\``);
+            // up and down are no-ops; the state follows the host agent's link.
+            t.state = t.kind === "host" && online ? "running" : "unknown";
+            return report();
           }
-          if (action === "up") {
-            if (t.state === "up") fail(409, "conflict", "the target is up");
-            t.state = "starting";
-            later(() => (t.state = "up"), Math.max(step, 1) * 3);
-          } else {
-            if (t.state === "down") fail(409, "conflict", "the target is down");
-            t.state = "stopping";
-            later(() => (t.state = "down"), Math.max(step, 1) * 3);
+          if (!online) fail(409, "conflict", `host agent \`${t.host ?? "?"}\` of target \`${t.name}\` is offline`);
+          if (verb === "status") return report();
+          if (verb === "snapshot" || verb === "restore") {
+            if (t.kind !== "vmlab") fail(422, "invalid", `a \`${t.kind}\` target has no \`snapshot\``);
+            const name = "terrarium";
+            if (verb === "snapshot") {
+              if (!t.snapshots.includes(name)) t.snapshots.push(name);
+            } else if (!t.snapshots.includes(name)) fail(422, "invalid", `vmlab.snapshot_restore failed: no snapshot \`${name}\``, { verb: "vmlab.snapshot_restore", code: 1, end: "exited", stderr: `no snapshot ${name}`, stdout: "" });
+            return report(name);
           }
-          return t;
+          if (verb === "up") t.state = "running";
+          else if (t.ephemeral && !t.keep) {
+            // An ephemeral target without keep is destroyed; a destroy clears the snapshots.
+            t.state = "absent";
+            t.snapshots = [];
+          } else t.state = "stopped";
+          return report();
         }),
       exec: (id, req) =>
         reply(() => {
@@ -2098,10 +2107,10 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           armExpiry(l);
           // A grant to a running agent brings an ephemeral target up (`ensure_up`).
           const holders = w.leases.filter((x) => x.target === t.name && x.state === "active" && x.agent !== a.id).some((x) => LIVE.includes(w.agents.find((y) => y.id === x.agent)?.status ?? "stopped"));
-          if (t.ephemeral && LIVE.includes(a.status) && !holders && t.state === "down") {
+          if (t.ephemeral && LIVE.includes(a.status) && !holders && t.state !== "running") {
             if (w.hosts.find((h) => h.name === t.host)?.status !== "online") return { ...l, lifecycle_error: `host agent \`${t.host ?? "?"}\` is not connected` };
-            t.state = "starting";
-            later(() => (t.state = "up"), Math.max(step, 1) * 3);
+            t.state = "running";
+            t.state_at = iso();
             return { ...l, lifecycle: { target: t.name, verb: "up", state: "running" } };
           }
           return l;

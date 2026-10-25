@@ -9,24 +9,10 @@ import { GrantDialog, grantNotice, LeaseTable, useLeaseList } from "../../compon
 import { MockOnlyNote } from "../../components/MockOnly";
 import { Terminal } from "../../components/Terminal";
 import { Empty, ErrorBanner, PageHead } from "../../components/ui";
-import type { Target, TargetState } from "../../api/types";
+import type { Target } from "../../api/types";
 import type { TargetAction } from "../../api/client";
 import { api, leases as holds } from "../../stores";
-
-const STATE_CHIP: Record<TargetState, string> = { up: "ok", down: "", starting: "info", stopping: "info", unknown: "" };
-
-/** The verbs a target kind has (PLAN §19): `ssh` and `host` have no lifecycle; only vmlab snapshots. */
-export function targetActions(t: Pick<Target, "kind" | "state" | "snapshots">): TargetAction[] {
-  if (t.kind === "ssh" || t.kind === "host") return [];
-  const out: TargetAction[] = [];
-  if (t.state !== "up" && t.state !== "starting") out.push("up");
-  if (t.state !== "down" && t.state !== "stopping") out.push("down");
-  if (t.kind === "vmlab") {
-    out.push("snapshot");
-    if (t.snapshots.length) out.push("restore");
-  }
-  return out;
-}
+import { STATE_CHIP, targetActions } from "./actions";
 
 export default function TargetsPage() {
   const [targets, { refetch }] = createResource(() => api.targets.list());
@@ -34,19 +20,20 @@ export default function TargetsPage() {
   const [error, setError] = createSignal<unknown>(null);
   const [consoleFor, setConsole] = createSignal<string | null>(null);
   const [notice, setNotice] = createSignal<string | null>(null);
-  // Follow `starting` and `stopping` to the end.
-  const t = setInterval(() => {
-    if ((targets.latest ?? []).some((x) => x.state === "starting" || x.state === "stopping")) void refetch();
-  }, 1500);
-  onCleanup(() => clearInterval(t));
+  // `target:verb` of the verb that runs now. A verb runs to its end before the daemon answers.
+  const [busy, setBusy] = createSignal<string | null>(null);
 
   const act = async (id: string, action: TargetAction) => {
+    setBusy(`${id}:${action}`);
     try {
-      await api.targets.action(id, action);
+      const r = await api.targets.action(id, action);
       setError(null);
-      void refetch();
+      setNotice(`${r.target}: ${r.verb} → ${r.state}${r.snapshot ? ` (snapshot ${r.snapshot})` : ""}`);
     } catch (e) {
       setError(e);
+    } finally {
+      setBusy(null);
+      void refetch();
     }
   };
   const hostStatus = (t: Target) => {
@@ -110,15 +97,17 @@ export default function TargetsPage() {
                       </Show>
                     </td>
                     <td>
-                      <span class={`chip ${STATE_CHIP[t().state] ?? ""}`}>{t().state}</span>
+                      <span class={`chip ${STATE_CHIP[t().state] ?? ""}`} title={t().state_at ? `since ${new Date(t().state_at!).toLocaleString()}` : undefined}>
+                        {t().state}
+                      </span>
                     </td>
                     <td class="small">{t().snapshots.join(", ") || "—"}</td>
                     <td>
                       <span class="row" style={{ "flex-wrap": "wrap" }}>
                         <For each={targetActions(t())}>
                           {(a) => (
-                            <button class="small" onClick={() => act(t().id, a)}>
-                              {a[0]!.toUpperCase() + a.slice(1)}
+                            <button class="small" disabled={busy() !== null} onClick={() => act(t().id, a)}>
+                              {busy() === `${t().id}:${a}` ? `${a}…` : a[0]!.toUpperCase() + a.slice(1)}
                             </button>
                           )}
                         </For>
@@ -142,7 +131,7 @@ export default function TargetsPage() {
       </section>
       <Show when={consoleFor()}>{(name) => <ExecConsole target={name()} onClose={() => setConsole(null)} />}</Show>
       <MockOnlyNote label="new API">
-        <code>GET /api/targets</code> is in docs/api.md. <code>POST /api/targets/{"{name}"}/up|down|snapshot|restore</code>, <code>POST .../exec</code>, and the session WebSocket are new in the daemon and not in docs/api.md yet (§14 still says 404). Leases: <code>GET</code>, <code>POST /api/targets/{"{name}"}/leases</code>, <code>PATCH</code>, <code>DELETE .../leases/{"{agent}"}</code> (docs/api.md §17.7).
+        <code>GET /api/targets</code> is in docs/api.md. <code>POST /api/targets/{"{name}"}/up|down|snapshot|restore|status</code>, <code>POST .../exec</code>, and the session WebSocket are new in the daemon and not in docs/api.md yet (§14 still says 404). Leases: <code>GET</code>, <code>POST /api/targets/{"{name}"}/leases</code>, <code>PATCH</code>, <code>DELETE .../leases/{"{agent}"}</code> (docs/api.md §17.7).
       </MockOnlyNote>
     </>
   );

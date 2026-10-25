@@ -515,21 +515,42 @@ describe("mock parity with docs/api.md", () => {
     expect(lab1.capabilities).toMatchObject({ docker: { present: true, version: "29.8.0" }, vmlab: { present: true } });
   });
 
-  it("runs the target lifecycle in the mock", async () => {
+  it("runs the target lifecycle with the daemon's states, and answers each verb with the executor report", async () => {
     const api = mock();
-    await api.targets.action("lab-win11", "up");
-    expect((await api.targets.list()).find((x) => x.id === "lab-win11")!.state).toBe("starting");
-    await wait(10);
-    expect((await api.targets.list()).find((x) => x.id === "lab-win11")!.state).toBe("up");
-    await api.targets.action("lab-win11", "snapshot");
-    expect((await api.targets.list()).find((x) => x.id === "lab-win11")!.snapshots).toEqual(["clean", "snap-2"]);
+    const state = async (name: string) => (await api.targets.list()).find((x) => x.name === name)!;
+    const STATES = ["running", "stopped", "absent", "unknown"];
+    for (const x of await api.targets.list()) expect(STATES).toContain(x.state);
+    // lab-win11: a kept ephemeral vmlab target, stopped.
+    expect(await api.targets.action("lab-win11", "up")).toEqual({ target: "lab-win11", verb: "up", state: "running" });
+    expect((await state("lab-win11")).state).toBe("running");
+    expect(await api.targets.action("lab-win11", "snapshot")).toEqual({ target: "lab-win11", verb: "snapshot", state: "running", snapshot: "terrarium" });
+    expect((await state("lab-win11")).snapshots).toEqual(["terrarium-clean", "terrarium"]);
+    expect(await api.targets.action("lab-win11", "restore")).toMatchObject({ verb: "restore", state: "running", snapshot: "terrarium" });
+    expect(await api.targets.action("lab-win11", "down")).toMatchObject({ state: "stopped" });
+    // pg-test: ephemeral docker without keep; down destroys it.
+    expect(await api.targets.action("pg-test", "down")).toEqual({ target: "pg-test", verb: "down", state: "absent" });
+    expect(await api.targets.action("pg-test", "status")).toEqual({ target: "pg-test", verb: "status", state: "absent" });
+    expect((await api.audit({ action: "target.down" })).items.at(-1)).toMatchObject({ target: "pg-test", detail: { verb: "down", state: "absent" } });
+    // host and ssh: up and down are no-ops; status follows the host agent link.
+    expect(await api.targets.action("build-box", "up")).toMatchObject({ state: "unknown" });
+    expect(await api.targets.action("pi-runner", "status")).toMatchObject({ state: "unknown" });
+    await expect(api.targets.action("build-box", "snapshot")).rejects.toMatchObject({ status: 422, code: "invalid" });
+    await expect(api.targets.action("pg-test", "snapshot")).rejects.toMatchObject({ status: 422, code: "invalid" });
+    // A permanent vmlab target stops; it is not destroyed. A restore needs the snapshot.
+    await expect(api.targets.action("dev-vm", "down")).resolves.toMatchObject({ state: "stopped" });
+    await expect(api.targets.action("ci-box", "up")).resolves.toMatchObject({ state: "running" });
+    api.world.targets.find((x) => x.name === "lab-win11")!.snapshots = [];
+    await expect(api.targets.action("lab-win11", "restore")).rejects.toMatchObject({ status: 422, code: "invalid", details: { verb: "vmlab.snapshot_restore" } });
     const opened = await api.targets.exec("pg-test", { shell: true, pty: { rows: 24, cols: 80 } });
     expect(opened).toMatchObject({ target: "pg-test", kind: "shell" });
     await api.targets.closeSession("pg-test", opened.session_id);
     await expect(api.targets.closeSession("pg-test", opened.session_id)).rejects.toMatchObject({ status: 404 });
-    await expect(api.targets.action("build-box", "up")).rejects.toMatchObject({ code: "invalid" });
-    await expect(api.targets.action("pi-runner", "up")).rejects.toMatchObject({ code: "invalid" });
-    await expect(api.targets.action("pg-test", "snapshot")).rejects.toMatchObject({ code: "invalid" });
+  });
+
+  it("refuses a verb on a target whose host agent is offline with 409 conflict", async () => {
+    const api = mock();
+    api.world.targets.push({ id: "pi-box", name: "pi-box", kind: "docker", host: "pi-cluster", image: "alpine:3", scope: "global", state: "stopped", ephemeral: false, snapshots: [] });
+    await expect(api.targets.action("pi-box", "up")).rejects.toMatchObject({ status: 409, code: "conflict" });
   });
 });
 
