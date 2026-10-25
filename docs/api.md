@@ -143,6 +143,7 @@ gives them to the routers and the mail code.
 | Env | Flag | Default | Use |
 |---|---|---|---|
 | `TERRARIUM_PUBLIC_URL` | `--public-url` | unset (mail: `http://localhost:8080`) | Mail links, `Version.url`, the cookie `Origin` check, CORS on `/a/...`. |
+| `TERRARIUM_MAIL_LOOP_LIMIT` | none | `6` | The mail loop guard (§6, PLAN §12): the agent-to-agent messages a thread can have since the last operator or project-inbox message before new agent mail on it types no pointer. The daemon reads it once. |
 | `TERRARIUM_ARTIFACT_LISTEN` | `--artifact-listen` | `0.0.0.0:8081` | The artifact origin listener. Empty: none, and the dashboard port serves `/a/...`. |
 | `TERRARIUM_ARTIFACT_PUBLIC_URL` | `--artifact-public-url` | unset | The artifact origin in signed URLs and the CSP. |
 | `TERRARIUM_WS_QUERY_TOKEN` | `--ws-query-token` | `0` | `1`: take `?token=` on an upgrade. |
@@ -702,6 +703,16 @@ items that came in meanwhile. When the harness takes the turn, the mail
 becomes `delivered`. Mail that is `queued` when an agent starts goes into
 its first pointer.
 
+The loop guard (PLAN §12): a thread pauses when it has more than
+`TERRARIUM_MAIL_LOOP_LIMIT` (default 6) agent-to-agent messages since its
+last message from the operator or from or to a project inbox. New agent mail
+on a paused thread is `delivered` at once and types no pointer. Its `mail`
+event has `held: true` and `thread_state: "paused"`, and names no agent.
+The first held message also sends one notice from `system` to the operator
+on the thread: "thread T needs a human: N agent replies without operator
+input". A message from the operator on the thread ends the pause. Each
+message on a paused thread has `thread_paused: true`.
+
 `terrariumd sandbox-dry-run <agent>` prints the full sandbox command of an
 agent.
 
@@ -994,7 +1005,7 @@ Kinds:
 | `session_started` | `{harness_session, transcript_path?, source?}` |
 | `turn_start`, `turn_end`, `notification`, `question`, `session_ended`, `exit`, `delivery_failed`, `system` | The fields of the core `Event` variant of the same name (`crates/terrarium-core/src/event.rs`). |
 | `tool_use`, `tool_finished` | `{tool, tool_id?, summary?, ...}`: `input` (`tool_use`), `ok` (`tool_finished`). `tool_id` is the harness's ID for the tool call (for Claude Code, `toolu_...`). It is not the event `id`. Older records used the key `id` for it; the `events.jsonl` reader still takes those. |
-| `mail` | `{message_id, thread_id, from, from_name, to, to_name, subject}`. The `agent` is the recipient. |
+| `mail` | `{message_id, thread_id, from, from_name, to, to_name, subject}`. The `agent` is the recipient. A message that the loop guard holds also has `held: true` and `thread_state: "paused"`, and names no agent. |
 | `card` | `{card_id, change, title, column, ...}`. `change` is `created`, `moved` (`from`, `to`, `comment`), `reordered`, `assigned` (`assignee`, `previous`), `claimed`, `edited` (`fields`), `commented` (`comment`), `linked` (`kind`, `ref`), `archived`, `unblocked` (`by`), or `thread_update` (`thread_id`, `done`). The `agent` is the assignee. |
 | `board` | `{columns}` after a column change. |
 | `memory.created`, `memory.updated`, `memory.deleted`, `memory.linked`, `memory.unlinked`, `memory.superseded` | `{memory_id, key, title, ...}`: `fields`, `to`, `relation`, `note`, `by`. |
@@ -1003,6 +1014,11 @@ Kinds:
 | `version.created`, `version.updated`, `version.submitted`, `version.approved`, `version.rejected`, `version.released` | `{version_id, name, status, ...}`: `fields`, `comment`, `thread_id`, `cards`. |
 | `usage.sample`, `usage.rejected_path`, `quota.sample`, `quota.alert`, `quota.blocked`, `quota.resumed`, `subscription.offer`, `subscription.expired`, `self_report` | See §16.7. |
 | `host.connected`, `host.disconnected` | `{host, host_id, ...}`: `version`, `os`, `arch`, `capabilities`, `summary`, `resumed` (sessions taken back), `reason`. See §17. |
+
+A `memory.*`, `wiki.*`, `artifact.*`, or `version.*` event that an agent
+causes names that agent in `agent` and `agent_id`, so it is in
+`GET /api/agents/{id}/events`. When the operator or the daemon causes it,
+the event names no agent.
 
 ### 9.1 Streams
 

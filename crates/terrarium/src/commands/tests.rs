@@ -2503,3 +2503,145 @@ async fn host_show_prints_the_usage_record() {
     let v: Value = serde_json::from_str(&out).unwrap();
     assert_eq!(v, host);
 }
+
+/// `card comment` takes the text as a positional or with `-m`, as
+/// `card move` does; not both.
+#[tokio::test]
+async fn card_comment_takes_m_like_card_move() {
+    for args in [
+        &["card", "comment", "TER-1", "-m", "looks good"][..],
+        &["card", "comment", "TER-1", "--message", "looks good"][..],
+        &["card", "comment", "TER-1", "looks good"][..],
+    ] {
+        ok(
+            true,
+            args,
+            vec![(201, json!({"id": "TER-1"}))],
+            vec![(
+                Post,
+                "/api/cards/TER-1/comments",
+                vec![],
+                Some(json!({"body": "looks good"})),
+            )],
+        )
+        .await;
+    }
+    for bad in [
+        &["terrarium", "card", "comment", "TER-1"][..],
+        &["terrarium", "card", "comment", "TER-1", "a", "-m", "b"][..],
+    ] {
+        assert!(Cli::try_parse_from(bad).is_err(), "{bad:?}");
+    }
+}
+
+/// `artifact push` links to a page, a version, and a card in one call: the
+/// upload carries the first link, and one `links` call adds each other.
+#[tokio::test]
+async fn artifact_push_attaches_to_page_card_and_version() {
+    let dir = std::env::temp_dir().join(format!("terrarium-push-{}", ulid::Ulid::new()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("shot.png");
+    std::fs::write(&file, "png").unwrap();
+    let path = file.to_string_lossy().into_owned();
+    let art = json!({"id": "ART-2", "key": "terra/ART-2", "name": "shot.png", "kind": "file",
+                     "content_type": "image/png", "url": "http://a/x?sig=1"});
+    let r = exec(
+        true,
+        &[
+            "artifact",
+            "push",
+            &path,
+            "--page",
+            "plans/x",
+            "--card",
+            "TER-1",
+            "--version",
+            "v1",
+        ],
+        vec![
+            (201, art.clone()),
+            (
+                201,
+                json!({"links": [{"kind": "page"}, {"kind": "version"}]}),
+            ),
+            (
+                201,
+                json!({"links": [{"kind": "page"}, {"kind": "version"}, {"kind": "card"}]}),
+            ),
+        ],
+        None,
+    )
+    .await;
+    std::fs::remove_dir_all(&dir).ok();
+    r.result.unwrap();
+    assert_eq!(r.reqs.len(), 3, "{:#?}", r.reqs);
+    assert_eq!(r.reqs[0].path, "/api/projects/terra/artifacts");
+    assert_eq!(
+        r.reqs[0].body.as_ref().unwrap()["attach"],
+        json!({"kind": "page", "ref": "plans/x"})
+    );
+    assert_eq!(r.reqs[1].path, "/api/artifacts/terra%2FART-2/links");
+    assert_eq!(
+        r.reqs[1].body,
+        Some(json!({"kind": "version", "ref": "v1"}))
+    );
+    assert_eq!(r.reqs[2].path, "/api/artifacts/terra%2FART-2/links");
+    assert_eq!(
+        r.reqs[2].body,
+        Some(json!({"kind": "card", "ref": "TER-1"}))
+    );
+    // The output gives the embed first; the signed URL says it expires.
+    assert!(r.out.contains("![shot.png](artifact:ART-2)"), "{}", r.out);
+    assert!(
+        r.out
+            .contains("expires in 5 minutes; never paste it into a page"),
+        "{}",
+        r.out
+    );
+}
+
+/// `mail read` marks the unread mail to the reader read by default;
+/// `--no-mark` leaves it; mail to someone else stays unread.
+#[tokio::test]
+async fn mail_read_marks_the_readers_mail_by_default() {
+    let mine = json!({"id": "M1", "thread_id": "T1", "to": ME, "state": "delivered", "body": "a"});
+    let other =
+        json!({"id": "M2", "thread_id": "T1", "to": "01OTHER", "state": "delivered", "body": "b"});
+    let read = json!({"id": "M1", "thread_id": "T1", "to": ME, "state": "read", "body": "a"});
+    ok(
+        true,
+        &["mail", "read", "--thread", "T1"],
+        vec![
+            (200, json!([mine.clone(), other.clone()])),
+            (200, read.clone()),
+        ],
+        vec![
+            (Get, "/api/mail", vec![("thread", "T1")], None),
+            req(Post, "/api/mail/M1/read"),
+        ],
+    )
+    .await;
+    ok(
+        true,
+        &["mail", "read", "--thread", "T1", "--no-mark"],
+        vec![(200, json!([mine.clone(), other.clone()]))],
+        vec![(Get, "/api/mail", vec![("thread", "T1")], None)],
+    )
+    .await;
+    ok(
+        true,
+        &["mail", "read", "M1"],
+        vec![(200, mine.clone()), (200, read)],
+        vec![req(Get, "/api/mail/M1"), req(Post, "/api/mail/M1/read")],
+    )
+    .await;
+    // The operator reading an agent's message does not mark it.
+    ok(
+        false,
+        &["mail", "read", "M1"],
+        vec![(200, mine)],
+        vec![req(Get, "/api/mail/M1")],
+    )
+    .await;
+    assert!(Cli::try_parse_from(["terrarium", "mail", "read", "--mark", "--no-mark"]).is_err());
+}

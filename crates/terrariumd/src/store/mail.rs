@@ -152,6 +152,11 @@ pub struct Message {
     pub delivered_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub read_at: Option<String>,
+    /// The thread is paused by the loop guard: it has more than
+    /// [`mail_loop_limit`] agent-to-agent messages since the last operator
+    /// or project-inbox message, so new agent mail on it types no pointer.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub thread_paused: bool,
 }
 
 struct RawMessage {
@@ -188,9 +193,23 @@ fn raw_row(r: &Row<'_>) -> rusqlite::Result<RawMessage> {
     })
 }
 
-fn render(conn: &Connection, raw: RawMessage, cache: &mut HashMap<String, Address>) -> Message {
-    let from_name = from_key(conn, &raw.from, cache).display();
-    let to_name = from_key(conn, &raw.to, cache).display();
+#[derive(Default)]
+struct RenderCache {
+    addresses: HashMap<String, Address>,
+    paused: HashMap<String, bool>,
+}
+
+fn render(conn: &Connection, raw: RawMessage, cache: &mut RenderCache) -> Message {
+    let from_name = from_key(conn, &raw.from, &mut cache.addresses).display();
+    let to_name = from_key(conn, &raw.to, &mut cache.addresses).display();
+    let thread_paused = match cache.paused.get(&raw.thread_id) {
+        Some(p) => *p,
+        None => {
+            let p = thread_paused(conn, &raw.thread_id).unwrap_or(false);
+            cache.paused.insert(raw.thread_id.clone(), p);
+            p
+        }
+    };
     Message {
         id: raw.id,
         thread_id: raw.thread_id,
@@ -207,6 +226,7 @@ fn render(conn: &Connection, raw: RawMessage, cache: &mut HashMap<String, Addres
         created_at: raw.created_at,
         delivered_at: raw.delivered_at,
         read_at: raw.read_at,
+        thread_paused,
     }
 }
 
@@ -215,7 +235,7 @@ pub fn get(conn: &Connection, id: &str) -> ApiResult<Message> {
         .query_row("SELECT * FROM messages WHERE id = ?1", [id], raw_row)
         .optional()?
         .ok_or_else(|| ApiError::not_found(format!("no message `{id}`")))?;
-    Ok(render(conn, raw, &mut HashMap::new()))
+    Ok(render(conn, raw, &mut RenderCache::default()))
 }
 
 /// The filters of a mail list.
@@ -268,7 +288,7 @@ pub fn list(conn: &Connection, f: &MailFilter, page: &Page) -> ApiResult<Paged<M
     let raws = stmt
         .query_map(rusqlite::params_from_iter(args), raw_row)?
         .collect::<Result<Vec<_>, _>>()?;
-    let mut cache = HashMap::new();
+    let mut cache = RenderCache::default();
     let rows = raws
         .into_iter()
         .map(|r| render(conn, r, &mut cache))
@@ -331,8 +351,13 @@ pub fn send(t: &mut Tx<'_>, m: Outgoing<'_>) -> ApiResult<Message> {
     if *m.to == Address::System {
         return Err(ApiError::invalid("`system` only sends mail"));
     }
+    // The loop guard: agent mail past the limit types no pointer.
+    let held = matches!(
+        (m.from, m.to),
+        (Address::Agent { .. }, Address::Agent { .. })
+    ) && agent_run(t, &thread)? >= mail_loop_limit();
     let (state, delivered) = match m.to {
-        Address::Agent { .. } => ("queued", None),
+        Address::Agent { .. } if !held => ("queued", None),
         _ => ("delivered", Some(at.clone())),
     };
     t.execute(
@@ -360,7 +385,7 @@ pub fn send(t: &mut Tx<'_>, m: Outgoing<'_>) -> ApiResult<Message> {
         m.to.display(),
         m.subject
     );
-    let data = json!({
+    let mut data = json!({
         "message_id": id,
         "thread_id": thread,
         "from": m.from.key(),
@@ -369,15 +394,102 @@ pub fn send(t: &mut Tx<'_>, m: Outgoing<'_>) -> ApiResult<Message> {
         "to_name": m.to.display(),
         "subject": m.subject,
     });
+    if held {
+        data["held"] = json!(true);
+        data["thread_state"] = json!("paused");
+    }
     let mut draft = EventDraft::new("mail", summary, data);
-    if let Address::Agent { id, name, .. } = m.to {
+    // The push listener types a pointer for a `mail` event with an agent,
+    // so a held message names no agent.
+    if let (Address::Agent { id, name, .. }, false) = (m.to, held) {
         draft = draft.agent(id.clone(), name.clone());
     }
     if let Some(p) = m.to.project() {
         draft = draft.project(p);
     }
     t.emit(draft)?;
+    if held {
+        pause_notice(t, &thread)?;
+    }
     get(t, &id)
+}
+
+/// `TERRARIUM_MAIL_LOOP_LIMIT`: the agent-to-agent messages a thread may
+/// have since the last operator or project-inbox message before the loop
+/// guard pauses it (PLAN §12).
+pub const ENV_MAIL_LOOP_LIMIT: &str = "TERRARIUM_MAIL_LOOP_LIMIT";
+/// The default of [`ENV_MAIL_LOOP_LIMIT`].
+pub const DEFAULT_MAIL_LOOP_LIMIT: usize = 6;
+
+/// The loop limit: [`ENV_MAIL_LOOP_LIMIT`], else
+/// [`DEFAULT_MAIL_LOOP_LIMIT`]. Read once.
+pub fn mail_loop_limit() -> usize {
+    static LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *LIMIT.get_or_init(|| {
+        std::env::var(ENV_MAIL_LOOP_LIMIT)
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(DEFAULT_MAIL_LOOP_LIMIT)
+    })
+}
+
+/// The rowid of the last message on the thread that resets the loop guard:
+/// one from the operator, or one from or to a project inbox. 0 when none.
+fn last_reset(conn: &Connection, thread: &str) -> ApiResult<i64> {
+    Ok(conn.query_row(
+        "SELECT coalesce(max(rowid), 0) FROM messages WHERE thread_id = ?1
+           AND (from_kind IN ('operator', 'project') OR to_kind = 'project')",
+        [thread],
+        |r| r.get(0),
+    )?)
+}
+
+/// The agent-to-agent messages on the thread since the last reset.
+fn agent_run(conn: &Connection, thread: &str) -> ApiResult<usize> {
+    let n: i64 = conn.query_row(
+        "SELECT count(*) FROM messages WHERE thread_id = ?1
+           AND from_kind = 'agent' AND to_kind = 'agent' AND rowid > ?2",
+        params![thread, last_reset(conn, thread)?],
+        |r| r.get(0),
+    )?;
+    Ok(usize::try_from(n).unwrap_or(0))
+}
+
+/// Is the thread paused by the loop guard?
+pub fn thread_paused(conn: &Connection, thread: &str) -> ApiResult<bool> {
+    Ok(agent_run(conn, thread)? > mail_loop_limit())
+}
+
+/// Mail the operator once for each pause of a thread. The notice goes on
+/// the thread, so the operator can answer there and reset the guard.
+fn pause_notice(t: &mut Tx<'_>, thread: &str) -> ApiResult<()> {
+    let sent: i64 = t.query_row(
+        "SELECT count(*) FROM messages WHERE thread_id = ?1
+           AND from_kind = 'system' AND to_kind = 'operator' AND rowid > ?2
+           AND subject LIKE 'Thread % needs a human'",
+        params![thread, last_reset(t, thread)?],
+        |r| r.get(0),
+    )?;
+    if sent > 0 {
+        return Ok(());
+    }
+    let n = agent_run(t, thread)?;
+    send(
+        t,
+        Outgoing {
+            from: &Address::System,
+            to: &Address::Operator,
+            subject: &format!("Thread {thread} needs a human"),
+            body: &format!(
+                "thread {thread} needs a human: {n} agent replies without operator input. \
+                 The daemon types no more mail pointers for this thread. Reply on the \
+                 thread to resume it."
+            ),
+            thread: Some(thread),
+            in_reply_to: None,
+        },
+    )?;
+    Ok(())
 }
 
 /// Reply on the thread of `original`: one message to every other

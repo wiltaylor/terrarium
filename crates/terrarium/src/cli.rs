@@ -412,9 +412,12 @@ pub enum MailCmd {
         id: Option<String>,
         #[arg(long, short = 't')]
         thread: Option<String>,
-        /// Mark the messages read
-        #[arg(long)]
+        /// Mark the messages to me read (the default)
+        #[arg(long, conflicts_with = "no_mark")]
         mark: bool,
+        /// Leave the messages unread
+        #[arg(long)]
+        no_mark: bool,
     },
     /// Send mail
     Send {
@@ -519,11 +522,15 @@ pub enum CardCmd {
     },
     /// Assign a card: an agent, `operator`, `me`, or `none`
     Assign { id: String, agent: String },
-    /// Comment on a card
+    /// Comment on a card: `card comment <id> <text>` or `-m <text>`
     Comment {
         id: String,
         /// The text, or `-` for stdin
-        text: String,
+        #[arg(required_unless_present = "message", conflicts_with = "message")]
+        text: Option<String>,
+        /// The text, as `card move -m` takes it
+        #[arg(long = "message", short = 'm', value_name = "TEXT")]
+        message: Option<String>,
     },
     /// Link a mail thread, branch, card, or URL
     Link {
@@ -749,15 +756,21 @@ pub enum WikiCmd {
 #[derive(Debug, Subcommand)]
 pub enum ArtifactCmd {
     /// Upload a file, or a directory as a static bundle; prints the preview URL
+    ///
+    /// `--page`, `--version`, and `--card` go together: the artifact links
+    /// to each one that you give.
     Push {
         path: PathBuf,
         #[arg(long)]
         name: Option<String>,
-        #[arg(long, group = "attach")]
+        /// Link it to this page
+        #[arg(long)]
         page: Option<String>,
-        #[arg(long, group = "attach")]
+        /// Link it to this version
+        #[arg(long)]
         version: Option<String>,
-        #[arg(long, group = "attach")]
+        /// Link it to this card
+        #[arg(long)]
         card: Option<String>,
         #[arg(long)]
         note: Option<String>,

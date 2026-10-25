@@ -92,16 +92,31 @@ fn tar_dir(dir: &Path) -> anyhow::Result<Vec<u8>> {
     Ok(out.stdout)
 }
 
-fn attach_of(
+/// The links of a push, in the order page, version, card.
+pub fn attaches_of(
     page: &Option<String>,
     version: &Option<String>,
     card: &Option<String>,
-) -> Option<(&'static str, String)> {
-    match (page, version, card) {
-        (Some(p), ..) => Some(("page", p.clone())),
-        (_, Some(v), _) => Some(("version", v.clone())),
-        (.., Some(c)) => Some(("card", c.clone())),
-        _ => None,
+) -> Vec<(&'static str, String)> {
+    [("page", page), ("version", version), ("card", card)]
+        .into_iter()
+        .filter_map(|(k, v)| v.clone().map(|v| (k, v)))
+        .collect()
+}
+
+/// The Markdown that embeds the artifact in a wiki page (PLAN §15.1): an
+/// image for an image, a fenced `artifact` block for a bundle or an HTML
+/// file, else a link.
+pub fn embed_of(a: &Value) -> String {
+    let id = field(a, "id");
+    let name = field(a, "name");
+    let ctype = field(a, "content_type");
+    if field(a, "kind") == "bundle" || ctype.starts_with("text/html") {
+        format!("```artifact {id}\n```")
+    } else if ctype.starts_with("image/") {
+        format!("![{name}](artifact:{id})")
+    } else {
+        format!("[{name}](artifact:{id})")
     }
 }
 
@@ -170,11 +185,28 @@ pub async fn artifact(ctx: &Ctx, cmd: &ArtifactCmd) -> anyhow::Result<()> {
                     "terrarium: the daemon does not store artifact notes yet; --note is ignored"
                 );
             }
-            let body = push_body(path, name.as_deref(), attach_of(page, version, card))?;
+            // The upload takes the first link; the others follow it.
+            let mut links = attaches_of(page, version, card).into_iter();
+            let body = push_body(path, name.as_deref(), links.next())?;
             let mut a = ctx
                 .api
                 .post(&format!("{}/artifacts", project_path(&p)), Some(body))
                 .await?;
+            let key = a["key"]
+                .as_str()
+                .or(a["id"].as_str())
+                .unwrap_or_default()
+                .to_owned();
+            for (kind, r) in links {
+                let linked = ctx
+                    .api
+                    .post(
+                        &format!("/api/artifacts/{}/links", encode(&key)),
+                        Some(json!({"kind": kind, "ref": r})),
+                    )
+                    .await?;
+                a["links"] = linked["links"].clone();
+            }
             if a.get("url").is_none()
                 && let Some(id) = a["id"].as_str()
                 && let Ok(u) = mint_url(ctx, id).await
@@ -188,8 +220,12 @@ pub async fn artifact(ctx: &Ctx, cmd: &ArtifactCmd) -> anyhow::Result<()> {
                     field(a, "name"),
                     field(a, "kind")
                 ));
+                c.line("Embed it in a page with:");
+                c.line(embed_of(a));
                 if let Some(u) = a["url"].as_str() {
-                    c.line(u);
+                    c.line(format!(
+                        "Preview (expires in 5 minutes; never paste it into a page): {u}"
+                    ));
                 }
             })
         }
@@ -435,6 +471,42 @@ mod tests {
         assert_eq!(content_type(Path::new("a/report.HTML")), "text/html");
         assert_eq!(content_type(Path::new("shot.png")), "image/png");
         assert_eq!(content_type(Path::new("bin")), "application/octet-stream");
+    }
+
+    #[test]
+    fn push_links_to_every_target_given() {
+        let s = |v: &str| Some(v.to_owned());
+        assert_eq!(
+            attaches_of(&s("plans/x"), &s("v1"), &s("DEM-1")),
+            vec![
+                ("page", "plans/x".to_owned()),
+                ("version", "v1".to_owned()),
+                ("card", "DEM-1".to_owned())
+            ]
+        );
+        assert_eq!(
+            attaches_of(&None, &None, &s("DEM-1")),
+            vec![("card", "DEM-1".to_owned())]
+        );
+        assert!(attaches_of(&None, &None, &None).is_empty());
+    }
+
+    #[test]
+    fn embed_syntax_follows_the_kind() {
+        let a = |kind: &str, ct: &str| json!({"id": "ART-3", "name": "x.png", "kind": kind, "content_type": ct});
+        assert_eq!(
+            embed_of(&a("file", "image/png")),
+            "![x.png](artifact:ART-3)"
+        );
+        assert_eq!(
+            embed_of(&a("file", "text/markdown")),
+            "[x.png](artifact:ART-3)"
+        );
+        assert_eq!(embed_of(&a("file", "text/html")), "```artifact ART-3\n```");
+        assert_eq!(
+            embed_of(&a("bundle", "application/x-tar")),
+            "```artifact ART-3\n```"
+        );
     }
 
     #[test]

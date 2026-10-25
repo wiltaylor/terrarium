@@ -1301,3 +1301,117 @@ async fn pi_refuses_a_claude_plan() {
     let msg = b["error"]["message"].as_str().unwrap();
     assert!(msg.contains("pi cannot spend a Claude plan"), "{msg}");
 }
+
+/// The loop guard (PLAN §12): the 7th agent-to-agent message on a thread
+/// with no operator or project-inbox message types no pointer. The operator
+/// gets one notice on the thread, and the thread is `paused`. An operator
+/// message on the thread resets the count.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mail_loop_guard_pauses_a_chatty_thread() {
+    let td = Td::start().await;
+    let alice = td.agent("demo", "alice", json!({})).await;
+    let bob = td.agent("demo", "bob", json!({})).await;
+    td.post(&format!("/api/agents/{bob}/start"), None).await;
+    td.wait_status(&bob, "idle").await;
+
+    let send = |body: String, thread: Option<String>| {
+        let td = &td;
+        let alice = alice.clone();
+        async move {
+            let mut m = json!({"to": "demo/bob", "body": body});
+            if let Some(t) = thread {
+                m["thread_id"] = json!(t);
+            }
+            let (s, b) = td
+                .req(Method::POST, "/api/mail", Some(m), Some(&alice))
+                .await;
+            assert_eq!(s, 201, "{b}");
+            b
+        }
+    };
+    let pointers = |thread: String| {
+        let td = &td;
+        let bob = bob.clone();
+        async move {
+            td.events(&bob, "turn_start")
+                .await
+                .iter()
+                .filter(|e| e["data"]["prompt"].as_str().unwrap_or("").contains(&thread))
+                .count()
+        }
+    };
+
+    // Six agent messages: six pointers, one after the other.
+    let first = send("one".into(), None).await;
+    let thread = first["thread_id"].as_str().unwrap().to_owned();
+    for i in 1..=6 {
+        if i > 1 {
+            send(format!("msg {i}"), Some(thread.clone())).await;
+        }
+        let start = Instant::now();
+        while pointers(thread.clone()).await < i {
+            assert!(start.elapsed() < WAIT, "no pointer for message {i}");
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+        td.wait_status(&bob, "idle").await;
+    }
+
+    // The 7th is held: no pointer, a notice to the operator, and the thread
+    // is paused.
+    let held = send("msg 7".into(), Some(thread.clone())).await;
+    assert_eq!(held["state"], "delivered", "{held}");
+    assert_eq!(held["thread_paused"], true, "{held}");
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert_eq!(pointers(thread.clone()).await, 6, "the 7th typed a pointer");
+    let notice = td
+        .get(&format!("/api/mail?to=operator&thread={thread}"))
+        .await;
+    let notice = notice.as_array().unwrap();
+    assert_eq!(notice.len(), 1, "{notice:#?}");
+    assert_eq!(notice[0]["from"], "system");
+    assert_eq!(
+        notice[0]["body"]
+            .as_str()
+            .unwrap()
+            .split(". ")
+            .next()
+            .unwrap(),
+        format!("thread {thread} needs a human: 7 agent replies without operator input")
+    );
+    // An 8th agent message: still held, and no second notice.
+    send("msg 8".into(), Some(thread.clone())).await;
+    let notices = td
+        .get(&format!("/api/mail?to=operator&thread={thread}"))
+        .await;
+    let from_system = notices
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["from"] == "system")
+        .count();
+    assert_eq!(from_system, 1);
+    assert_eq!(pointers(thread.clone()).await, 6);
+
+    // The operator answers on the thread: that types a pointer, and the
+    // next agent message types one again.
+    td.wait_status(&bob, "idle").await;
+    td.post(
+        "/api/mail",
+        Some(json!({"to": "demo/bob", "body": "stop here", "thread_id": thread})),
+    )
+    .await;
+    let start = Instant::now();
+    while pointers(thread.clone()).await < 7 {
+        assert!(start.elapsed() < WAIT, "no pointer for the operator mail");
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    td.wait_status(&bob, "idle").await;
+    let after = send("msg 9".into(), Some(thread.clone())).await;
+    assert_eq!(after["state"], "queued", "{after}");
+    assert!(after.get("thread_paused").is_none(), "{after}");
+    let start = Instant::now();
+    while pointers(thread.clone()).await < 8 {
+        assert!(start.elapsed() < WAIT, "no pointer after the reset");
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+}

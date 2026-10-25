@@ -104,11 +104,23 @@ pub async fn mail(ctx: &Ctx, cmd: &MailCmd) -> anyhow::Result<()> {
                 ));
                 if !as_items(&v["messages"]).is_empty() {
                     print_table(c, as_items(&v["messages"]), MAIL_COLS, "");
-                    c.line("Run `terrarium mail read --mark` to read them.");
+                    c.line("Run `terrarium mail read` to read them.");
                 }
             })
         }
-        MailCmd::Read { id, thread, mark } => read(ctx, id.as_deref(), thread.clone(), *mark).await,
+        MailCmd::Read {
+            id,
+            thread,
+            mark,
+            no_mark,
+        } => {
+            let how = match (mark, no_mark) {
+                (_, true) => Mark::No,
+                (true, _) => Mark::Asked,
+                _ => Mark::Mine,
+            };
+            read(ctx, id.as_deref(), thread.clone(), how).await
+        }
         MailCmd::Send {
             to,
             body,
@@ -154,7 +166,7 @@ pub async fn mail(ctx: &Ctx, cmd: &MailCmd) -> anyhow::Result<()> {
                     let v = Value::Array(page.items);
                     return ctx.emit(&v, |c, v| {
                         print_table(c, as_items(v), MAIL_COLS, "");
-                        c.line("Run `terrarium mail read --mark` to read them.");
+                        c.line("Run `terrarium mail read` to read them.");
                     });
                 }
                 w.pause(started).await;
@@ -177,27 +189,40 @@ fn print_sent(ctx: &Ctx, v: &Value) {
     }
 }
 
+/// What `mail read` marks read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mark {
+    /// The default: the unread messages to the reader. The agents and the
+    /// dashboard take "read" as "seen".
+    Mine,
+    /// `--mark`: also one message named by ID, as the daemon allows.
+    Asked,
+    /// `--no-mark`: nothing.
+    No,
+}
+
 async fn read(
     ctx: &Ctx,
     id: Option<&str>,
     thread: Option<String>,
-    mark: bool,
+    how: Mark,
 ) -> anyhow::Result<()> {
+    let me = ctx.me().await?;
     if let Some(id) = id {
         let path = format!("/api/mail/{}", encode(id));
         let mut m = ctx.api.get(&path, vec![]).await?;
-        if mark && unread(&m) {
+        let mine = m["to"].as_str() == Some(me.as_str());
+        if unread(&m) && (how == Mark::Asked || (how == Mark::Mine && mine)) {
             m = ctx.api.post(&format!("{path}/read"), None).await?;
         }
         return ctx.emit(&m, print_message);
     }
-    let me = ctx.me().await?;
     let q = match &thread {
         Some(t) => query([("thread", Some(t.clone()))]),
         None => query([("to", Some(me.clone())), ("state", Some("unread".into()))]),
     };
     let mut items = ctx.api.list("/api/mail", q, None).await?;
-    if mark {
+    if how != Mark::No {
         for m in &mut items {
             if unread(m) && m["to"].as_str() == Some(me.as_str()) {
                 let path = format!("/api/mail/{}/read", encode(&field(m, "id")));

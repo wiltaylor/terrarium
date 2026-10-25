@@ -161,7 +161,7 @@ The agent continues to run.
 ```
 terrarium mail ls [--to a] [--from a] [-t thread] [--state s] [--unread]
 terrarium mail check                          my unread count, total count, unread list
-terrarium mail read [id] [-t thread] [--mark]
+terrarium mail read [id] [-t thread] [--mark | --no-mark]
 terrarium mail send <to> <body | -> [-s subject] [-t thread] [--from project:<name>]
 terrarium mail reply <id> <body | -> [-s subject]
 terrarium mail wait [--timeout 300]
@@ -172,8 +172,11 @@ terrarium inbox send <body | -> [-s subject] [-t thread]
 ```
 
 `mail read` without an ID shows my unread mail. With `-t`, it shows the
-thread. `--mark` marks my messages read. "My" means the agent ULID in agent
-mode, and `operator` in operator mode.
+thread. By default it marks the unread messages to me read, because the
+agents and the dashboard take "read" as "seen". Messages to another address
+stay as they are. `--no-mark` leaves my messages unread. With an ID,
+`--mark` also marks a message to another address, if the daemon lets me.
+"Me" means the agent ULID in agent mode, and `operator` in operator mode.
 
 `<to>` is an agent, `operator`, or `project:<name>`.
 
@@ -190,12 +193,15 @@ terrarium card edit <id> [--title t] [-b body] [--label l]... [--depends-on id].
 terrarium card claim <id>
 terrarium card move <id> <column> [--position n] [-m comment]
 terrarium card assign <id> <agent | operator | me | none>
-terrarium card comment <id> <text | ->
+terrarium card comment <id> (<text | -> | -m text)
 terrarium card link <id> (--thread T | --branch b | --card id | --link-url u)
 terrarium card rm <id>                        archives the card
 terrarium card events <id>
 terrarium card wait [--mine] [--timeout 300]
 ```
+
+`card comment` takes the text as the last argument or with `-m`, as
+`card move` does. Give only one of them.
 
 A move to `blocked` needs `-m`. A card with unmet dependencies cannot
 enter `in_progress`; the error lists the blocking cards.
@@ -250,7 +256,7 @@ the CLI prints the diff since the base, then the error.
 ### Artifacts and versions
 
 ```
-terrarium artifact push <file | dir> [--name n] [--page p | --version v | --card c]
+terrarium artifact push <file | dir> [--name n] [--page p] [--version v] [--card c]
 terrarium artifact ls
 terrarium artifact url <id>                   a signed preview URL
 terrarium artifact rm <id>
@@ -266,8 +272,15 @@ terrarium version approve|reject <name> [-m comment]      operator
 
 `artifact push` sends the file as base64 in JSON. A directory becomes a tar
 archive with `kind: "bundle"`; the CLI runs the system `tar`. The limit is
-32 MiB. The CLI refuses a larger file before it sends it. After the
-upload, the CLI prints a signed preview URL.
+32 MiB. The CLI refuses a larger file before it sends it.
+`--page`, `--version`, and `--card` go together: the upload carries the
+first link, and the CLI adds each other one with
+`POST /api/artifacts/{id}/links`. After the upload, the CLI prints the
+Markdown that embeds the artifact in a page (PLAN §15.1):
+`![name](artifact:ART-n)` for an image, a fenced `artifact ART-n` block for
+a bundle or an HTML file, and `[name](artifact:ART-n)` for other files. Then
+it prints a signed preview URL. The URL expires (by default after 5
+minutes), so a page must use the embed, not the URL.
 
 `version wait` long-polls the version list for `approved`, in rounds of 30
 seconds. Between rounds, it reads the version, so that a rejection also
@@ -446,7 +459,7 @@ Send mail and read the answer (operator):
 ```sh
 terrarium mail send terra/worker -s "first task" "Run the tests."
 terrarium mail ls --to operator --unread
-terrarium mail read 01M5PBHBENTR0FDJCFCEQEZ3YN --mark
+terrarium mail read 01M5PBHBENTR0FDJCFCEQEZ3YN
 ```
 
 Report a bug to another project from inside a sandbox (agent):
@@ -461,7 +474,7 @@ Work a card (agent):
 ```sh
 terrarium card ls --mine
 terrarium card claim TER-42
-terrarium card comment TER-42 "Branch feat/parser is up."
+terrarium card comment TER-42 -m "Branch feat/parser is up."
 terrarium card move TER-42 review -m "Look at src/parser.rs."
 terrarium card wait --mine --timeout 600
 ```
@@ -469,7 +482,7 @@ terrarium card wait --mine --timeout 600
 Hand a result to the user (agent):
 
 ```sh
-terrarium artifact push target/coverage --page reports/coverage
+terrarium artifact push target/coverage --page reports/coverage --card TER-42
 terrarium wiki new reports/coverage -m "Coverage for TER-42" --body - < report.md
 terrarium version new v0.3.0 --card TER-42 --notes "Parser and coverage."
 terrarium version submit v0.3.0

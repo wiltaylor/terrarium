@@ -87,8 +87,35 @@ impl EventDraft {
     }
 }
 
+/// The event kinds that name the agent that did them when the draft names
+/// no agent, so they show in `GET /api/agents/{id}/events`. Mail and card
+/// events name their subject (the recipient, the assignee) on their own:
+/// the push listener reads that as the agent to point at.
+const ACTOR_ATTRIBUTED: &[&str] = &["wiki.", "artifact.", "memory.", "version."];
+
+/// Name the acting agent on a draft of an [`ACTOR_ATTRIBUTED`] kind.
+fn attribute_actor(conn: &Connection, actor: &str, d: &mut EventDraft) -> ApiResult<()> {
+    let Some(agent) = actor.strip_prefix("agent:") else {
+        return Ok(());
+    };
+    if d.agent_id.is_some() || !ACTOR_ATTRIBUTED.iter().any(|p| d.kind.starts_with(p)) {
+        return Ok(());
+    }
+    let name: Option<String> = conn
+        .query_row("SELECT name FROM agents WHERE id = ?1", [agent], |r| {
+            r.get(0)
+        })
+        .optional()?;
+    if let Some(name) = name {
+        d.agent_id = Some(agent.to_owned());
+        d.agent_name = Some(name);
+    }
+    Ok(())
+}
+
 /// Append one event.
 pub fn insert(conn: &Connection, actor: &str, mut d: EventDraft) -> ApiResult<StoredEvent> {
+    attribute_actor(conn, actor, &mut d)?;
     let id = ulid::Ulid::new().to_string();
     let at = now();
     if let Value::Object(map) = &mut d.data {

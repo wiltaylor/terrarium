@@ -432,3 +432,72 @@ async fn version_url_is_the_dashboard_route() {
     let body = mail.ok()[0]["body"].as_str().unwrap().to_owned();
     assert!(body.contains(&format!("Open: {want}")), "{body}");
 }
+
+/// A wiki, artifact, memory, or version change that an agent makes names
+/// that agent, so it shows in `GET /api/agents/{id}/events`. An operator
+/// change names no agent.
+#[tokio::test]
+async fn agent_changes_show_in_the_agent_event_stream() {
+    let td = setup().await;
+    let w1 = td.get("/api/agents/proj%2Fw1").await.ok()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    td.post_as(
+        "proj/w1",
+        "/api/projects/proj/wiki",
+        json!({"path": "plans/a", "body": "# A\n", "summary": "First"}),
+    )
+    .await
+    .ok();
+    let data = base64::engine::general_purpose::STANDARD.encode(b"report");
+    td.post_as(
+        "proj/w1",
+        "/api/projects/proj/artifacts",
+        json!({"name": "r.txt", "data_base64": data}),
+    )
+    .await
+    .ok();
+    td.post_as(
+        "proj/w1",
+        "/api/projects/proj/memories",
+        json!({"title": "The parser is a PEG", "body": "See grammar.peg."}),
+    )
+    .await
+    .ok();
+    td.post_as(
+        "proj/w1",
+        "/api/projects/proj/versions",
+        json!({"name": "v1", "notes": "n"}),
+    )
+    .await
+    .ok();
+    // The operator's change stays out of the stream.
+    td.post(
+        "/api/projects/proj/wiki",
+        json!({"path": "plans/op", "body": "# Op\n", "summary": "First"}),
+    )
+    .await
+    .ok();
+    let events = td
+        .get(&format!("/api/agents/{w1}/events?limit=1000"))
+        .await
+        .ok()
+        .as_array()
+        .unwrap()
+        .clone();
+    for kind in ["wiki.", "artifact.", "memory.", "version."] {
+        let e = events
+            .iter()
+            .find(|e| e["kind"].as_str().unwrap().starts_with(kind))
+            .unwrap_or_else(|| panic!("no {kind} event in {events:#?}"));
+        assert_eq!(e["agent"], "w1", "{e}");
+        assert_eq!(e["agent_id"], w1.as_str(), "{e}");
+        assert_eq!(e["actor"], format!("agent:{w1}"), "{e}");
+    }
+    assert!(
+        !events.iter().any(|e| e["data"]["path"] == "plans/op"
+            || e["summary"].as_str().unwrap_or("").contains("plans/op")),
+        "{events:#?}"
+    );
+}
