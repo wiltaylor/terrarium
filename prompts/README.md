@@ -10,6 +10,20 @@ at `/prompts`. The daemon option `--prompts-dir` (env
 | `project-lead.md` | `project_admin` | The default content, plus the lead duties of PLAN §10: triage the inbox, keep `ready` stocked, run workers. |
 | `system-lead.md` | `sysadmin` | The default content, plus the system duties: make projects, appoint leads, watch hosts, agents, and usage. |
 
+## Protocol rules
+
+These rules come from a live leader and worker run. Keep them when you edit
+a template.
+
+- A worker does not mail the lead when it runs `card move <id> review`. The move tells the lead. A worker mails the lead only when it is blocked or has a question.
+- A worker writes the branch and what to look at in the `card move ... -m` comment. It runs the tests if the tools exist, and it says in the comment if they do not.
+- An agent does not run `terrarium mail wait` in a turn, because it holds the turn open. It ends the turn, and the daemon wakes it when mail or a card change arrives.
+- The lead does these steps in this order: `admin agent new`, `repo checkout --agent`, `admin agent start`, `card assign`. The card pointer starts the worker, so the lead sends no start mail.
+- The lead gives each worker `--subscription`: the one the operator gave, or its own (`terrarium usage` shows it).
+- The lead asks the operator for requirements only when a card is not clear.
+- The lead answers on the same thread with `terrarium mail reply <id>`, not with `mail send -s "Re: ..."`.
+- The system lead gives each lead `--subscription` in `admin agent new`: the one the operator gave, or its own. Its reply to the operator gives the project, repo, and lead names.
+
 ## How the daemon selects a template
 
 An agent definition names its template with `prompt`:
