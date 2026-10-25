@@ -11,11 +11,24 @@
 //! | `SYSTEM.md` | `SYSTEM.md` | ro | The system-prompt extension reads it. With [`PromptMode::Replace`] it holds the prompt; else it is empty. An empty file counts as absent (the extension trims it). |
 //! | `APPEND_SYSTEM.md` | `APPEND_SYSTEM.md` | ro | The same, for [`PromptMode::Append`] (the default). The operator's own prompt files stay out. |
 //! | `hooks/` (empty) | `hooks/` | ro | Every `hooks/*.json` in the home runs in every agent (on this host `orca.json`). An empty directory keeps them out. |
-//! | `settings.json` | `settings.json` | rw | A copy of the shared file without `hooks` (that route also fires) and `disableAllHooks`. Copilot writes it (`/model`, `/theme`). |
+//! | `settings.json` | `settings.json` | rw | A copy of the shared file without `hooks` (that route also fires) and `disableAllHooks`, with `"experimental": true` (the extension needs experimental mode; see below). |
 //! | `command-history-state.json` | the same | rw | The prompt history (the up-arrow list). Shared, each agent would see the turns (mail text) of the others and of the operator. |
 //! | `open-sessions-state.json` | the same | rw | One map that every process rewrites. Per agent, there is no lost update. |
 //! | `sidebar-sessions-state/` | the same | rw | Keyed by a hash; every agent has the same cwd, so the agents would share one file. |
 //! | `cache/` | `$HOME/.cache/copilot` (when [`CopilotOptions::cache_dir`] is set) | rw | Copilot writes outside its home (`COPILOT_CACHE_HOME`). |
+//!
+//! Copilot writes `settings.json`, `command-history-state.json`,
+//! `open-sessions-state.json`, and `config.json` by a rename over the
+//! file (verified in the container on 2026-10-25: the inode changes). A
+//! rename over a file bind fails with `EBUSY`. For the history and the
+//! open-sessions map, Copilot ignores the error: the per-agent file keeps
+//! its seed, and the write is lost. With `--experimental`, Copilot
+//! writes `settings.json` at each start, and that `EBUSY` is fatal: exit
+//! code 1 after about 0.5 s, with no output and no log. So the adapter
+//! does not pass the flag. It writes the key into the per-agent copy, and
+//! Copilot does not write the file at start. A later write (`/model`,
+//! `/theme`, `/experimental`) is lost in the same way; whether Copilot
+//! survives it is not tested.
 //!
 //! Also in `<agent dir>/copilot/`, at the same path inside the sandbox
 //! (the harness directory is bound read-only): `plugin/` (the hooks,
@@ -140,14 +153,16 @@ fn read_jsonc(path: &Path) -> Result<Option<Value>> {
 }
 
 /// The per-agent settings: `base` without the keys that would add or stop
-/// hooks. Other keys (model, theme) stay.
-pub fn agent_settings(base: Option<Value>) -> Value {
+/// hooks, and with `experimental_key` set to `true`. Other keys (model,
+/// theme) stay.
+pub fn agent_settings(base: Option<Value>, experimental_key: &str) -> Value {
     let mut root = match base {
         Some(Value::Object(m)) => m,
         _ => Map::new(),
     };
     root.remove("hooks");
     root.remove("disableAllHooks");
+    root.insert(experimental_key.to_owned(), Value::Bool(true));
     Value::Object(root)
 }
 
@@ -250,7 +265,10 @@ pub fn materialize(
         Some(v) => Some(v),
         None => read_jsonc(&home.join(SETTINGS_FILE))?,
     };
-    write_atomic(&own_settings, &pretty(&agent_settings(base))?)?;
+    write_atomic(
+        &own_settings,
+        &pretty(&agent_settings(base, opts.flags.experimental_key))?,
+    )?;
     ensure_file(&home.join(SETTINGS_FILE), b"{}\n")?;
     overlays.push(FileOverlay {
         source: own_settings,
@@ -420,7 +438,10 @@ mod tests {
         assert!(home.join("hooks/orca.json").is_file());
         let s: Value =
             serde_json::from_slice(&fs::read(own.join(SETTINGS_FILE)).expect("own")).expect("json");
-        assert_eq!(s, json!({"model": "claude-haiku-4.5"}));
+        assert_eq!(
+            s,
+            json!({"model": "claude-haiku-4.5", "experimental": true})
+        );
         // The plugin.
         let hooks: Value =
             serde_json::from_slice(&fs::read(plugin_dir(&agent).join("hooks.json")).expect("h"))
@@ -459,7 +480,7 @@ mod tests {
         assert_eq!(fs::read_to_string(own.join(SYSTEM_FILE)).expect("s"), "P2");
         let s: Value =
             serde_json::from_slice(&fs::read(own.join(SETTINGS_FILE)).expect("own")).expect("json");
-        assert_eq!(s, json!({"theme": "dark"}));
+        assert_eq!(s, json!({"theme": "dark", "experimental": true}));
         assert!(
             fs::read_to_string(own.join(HISTORY_FILE))
                 .expect("h")
@@ -494,6 +515,14 @@ mod tests {
         );
         assert_eq!(v, Some(json!({"a": 1})));
         assert_eq!(parse_jsonc("not json"), None);
-        assert_eq!(agent_settings(Some(json!([1]))), json!({}));
+        assert_eq!(
+            agent_settings(Some(json!([1])), "experimental"),
+            json!({"experimental": true})
+        );
+        // An operator `false` does not turn the prompt extension off.
+        assert_eq!(
+            agent_settings(Some(json!({"experimental": false})), "experimental"),
+            json!({"experimental": true})
+        );
     }
 }

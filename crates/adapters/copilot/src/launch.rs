@@ -58,7 +58,8 @@ pub fn hooks_json(opts: &CopilotOptions) -> Value {
 ///
 /// The flags, in order:
 ///
-/// - `--experimental`: the system-prompt extension loads only with it.
+/// - No `--experimental`: the per-agent `settings.json` turns experimental
+///   mode on (see [`crate::flags::CopilotFlags::experimental`]).
 /// - `--yolo`: Allow All mode. With `COPILOT_ALLOW_ALL=true` (env, below)
 ///   there is no trust dialog; each alone is not enough.
 /// - `--no-auto-update`, `--disable-client-telemetry`: quiet start.
@@ -82,7 +83,6 @@ pub fn build(opts: &CopilotOptions, agent: &Agent, session: SessionStart<'_>) ->
     let f = &opts.flags;
     let cwd = opts.harness_cwd(agent);
     let mut spec = LaunchSpec::new(opts.program.as_str(), &cwd)
-        .arg(f.experimental)
         .arg(f.yolo)
         .arg(f.no_auto_update)
         .arg(f.disable_telemetry)
@@ -167,9 +167,8 @@ mod tests {
         assert_eq!(spec.cwd, agent.workspace);
         let a = args(&spec);
         assert_eq!(
-            &a[..5],
+            &a[..4],
             [
-                "--experimental",
                 "--yolo",
                 "--no-auto-update",
                 "--disable-client-telemetry",
@@ -194,6 +193,9 @@ mod tests {
             Some("11111111-2222-4333-8444-555555555555")
         );
         assert!(!a.contains(&"--resume"));
+        // The flag makes Copilot rename over the bound settings.json, which
+        // fails with EBUSY: experimental mode comes from the settings copy.
+        assert!(!a.contains(&"--experimental"));
         assert_eq!(value_after(&spec, "--model"), Some("claude-haiku-4.5"));
         assert_eq!(a.iter().filter(|x| **x == "--plugin-dir").count(), 1);
 

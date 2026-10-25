@@ -478,7 +478,7 @@ copies only `~/.codex/auth.json` into a temp `CODEX_HOME`.
 | Resume a missing ID | Exits at once: `ERROR: No saved session found with ID <id>.` | verified | 3 |
 | Resume from another cwd | A "Working directory · resume" dialog asks which cwd to use. `-c tui.resume_cwd="session"` removes it. | verified | 3, 5 |
 | Two resumes of one ID | The second shows "This conversation is open in another app … r retry f fork esc/ctrl+c/q exit" and waits. | verified | 3 |
-| Clean exit | `/exit` then CR. The process exits after 0.05 to 5.1 s. `SessionEnd.reason` = `other`. The exit text has the token usage and `codex resume <id>`. | verified | 1, 3 |
+| Clean exit | `/exit`, a pause of 0.3 s, then CR, in two writes. The process exits after 0.05 to 5.1 s. `SessionEnd.reason` = `other`. The exit text has the token usage and `codex resume <id>`. `/exit\r` in one write does not submit: `/exit` stays in the composer, and the stop falls back to the kill (the Codex smoke test in Docker, 2026-10-25). Every spike sent `/exit`, waited 0.3 s, then sent CR. The adapter sets `exit_key_pause` = 300 ms. | verified | 1, 3 |
 | Session file | `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<local time>-<id>.jsonl`, plus `$CODEX_HOME/session_index.jsonl` (`id`, `thread_name`, `updated_at`). The hook `transcript_path` gives the exact path. | verified | 3 |
 | Usage in the session file | `token_usage_record` and `event_msg/token_count` records. `token_count` also carries `rate_limits` with the plan. See "Usage accounting". | verified | 3 |
 | `model_instructions_file` | Replaces the whole base prompt. `session_meta.base_instructions` = the file text, `provenance.type` = `custom`. A missing file stops the start: `failed to read model instructions file`. | verified | 4 |
@@ -686,6 +686,8 @@ is in the system keychain, so no file is copied.
 | Topic | Fact | Status | Spike |
 |---|---|---|---|
 | Recommended launch | `COPILOT_HOME=<home> COPILOT_ALLOW_ALL=true COPILOT_AUTO_UPDATE=false copilot --yolo --no-auto-update --disable-client-telemetry --model <m> --plugin-dir <terrarium plugin> [--experimental --plugin-dir <prompt extension>] [--session-id <uuid>]` | verified | 1, 2, 4 |
+| `--experimental` in the sandbox | Do **not** pass it. With the flag, Copilot writes `"experimental": true` to `settings.json` at **each** start by a rename, also when the key is there. In the sandbox `settings.json` is a per-agent file bind, and a rename over a bind mount fails with `EBUSY` (`rename '/home/agent/.copilot/settings.json.t' -> '/home/agent/.copilot/settings.json'`: `EBUSY: resource busy or locked`, from Node in the same sandbox). Copilot then exits with code 1 about 0.5 s after spawn, with no PTY output, no stderr, and no log file. The adapter writes `"experimental": true` into the per-agent `settings.json` instead. With the key and no flag, Copilot does not write the file at start, the banner shows `/experimental`, and the log says "Installed 1 native extension(s)" (0 with no key and no flag). | verified (2026-10-25, container) | — |
+| Rename-over writes | Copilot replaces `settings.json`, `command-history-state.json`, `open-sessions-state.json`, and `config.json` by a rename (the inode changes). On a file bind the history and open-sessions writes fail and Copilot goes on: the log has `[cli_persistence::open_sessions] Failed to record an open session: ... Device or resource busy (os error 16)`, and the per-agent history stays `[]` after `/help`. So those two overlays keep private data out of the shared home, but their content is never updated. A `settings.json` write after start (`/model`, `/theme`) is lost in the same way; whether Copilot survives it is not tested. | verified (2026-10-25, container) | — |
 | Hook routes | Four routes fire: `$COPILOT_HOME/hooks/*.json`, `hooks` in `$COPILOT_HOME/settings.json`, `--plugin-dir <dir>` with `hooks.json` at the plugin root, and `<cwd>/.github/hooks/*.json` (trusted folder). A plugin's `hooks/hooks.json` did **not** fire. | verified | 1 |
 | Hook injection by flag | `--plugin-dir <dir>` with `plugin.json` and `hooks.json`. Nothing in `COPILOT_HOME` changes. There is no `--additional-mcp-config`-style flag for hooks. | verified | 1 |
 | Hook format | `{"version": 1, "hooks": {"<Event>": [{"type": "command", "bash": "<cmd>", "timeoutSec": 10}]}}` | verified | 1 |
@@ -708,7 +710,7 @@ is in the system keychain, so no file is copied.
 | Clean exit | `/exit` then CR: exits in 1.0 to 1.5 s, `SessionEnd.reason` = `user_exit`. Ctrl-C shows "ctrl+c again to exit"; a second Ctrl-C exits in 0.1 s. The exit screen has the AI credits, tokens, and `copilot --resume=<id>`. | verified | 1, 2, 3 |
 | Session file | `$COPILOT_HOME/session-state/<id>/events.jsonl` plus `workspace.yaml`, `checkpoints/`, `rewind-file-snapshots/`. Also `$COPILOT_HOME/session-store.db`. | verified | 3 |
 | Usage in the session file | `session.usage_record` per model call, `session.usage_checkpoint` and `session.shutdown` with totals. See "Usage accounting". | verified | 3 |
-| System prompt extension | `copilot-custom-system-prompt` 0.1.2 loads only with `--experimental`. It loads from `$COPILOT_HOME/extensions/` after `install`, **or** from `--plugin-dir <package dir>` with no install. | verified | 4 |
+| System prompt extension | `copilot-custom-system-prompt` 0.1.2 loads only in experimental mode: `--experimental`, or `"experimental": true` in `settings.json` (the sandbox uses the key, see above). It loads from `$COPILOT_HOME/extensions/` after `install`, **or** from `--plugin-dir <package dir>` with no install. | verified | 4 |
 | `APPEND_SYSTEM.md` | Appends to the default prompt (31 475 chars, starts "You are GitHub Copilot"). Sentinel answered. | verified | 4 |
 | `SYSTEM.md` | Replaces the whole prompt (111 chars, no default text). Sentinel answered. | verified | 4 |
 | Prompt on resume | The extension reads the files at each start. `--resume` with a changed `SYSTEM.md` used the new text (a second `system.message` record). | verified | 4 |
@@ -883,8 +885,13 @@ after it was sent) was not drawn yet; it is labelled `lag-`.
 
 - `disableAllHooks` with the `--plugin-dir` route.
 - Hooks without folder trust.
-- The keychain-less start inside a container (the plain-text login file
-  is verified, see "Plain-text login"; a TUI start that reads it is not).
+- A model turn inside the container sandbox. The keychain-less start is
+  verified (2026-10-25): with the sandbox argv of the daemon and no
+  `--experimental`, Copilot reads the plain-text login, shows the prompt
+  (`❯`, "Loading: 1 plugin, 13 hooks, 2 skills, 1 MCP server", the model
+  `claude-haiku-4.5`), loads the extension, and exits with code 0 on
+  `/exit`. That the model sees the prompt from `APPEND_SYSTEM.md` with the
+  key instead of the flag is not tested.
 - `--sync-session` and what `mc_task_id` sends to GitHub.
 - Concurrent writes to one `session-state/<id>/` from two processes.
 

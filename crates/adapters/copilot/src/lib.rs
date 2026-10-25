@@ -46,7 +46,8 @@ pub const TESTED: &str = COPILOT_1_0.tested;
 pub const TOKEN_ENV: &str = COPILOT_1_0.token_env[0];
 
 /// How the rendered prompt reaches Copilot. Both go through the
-/// CopilotCustomSystemPrompt extension, which needs `--experimental`.
+/// CopilotCustomSystemPrompt extension, which needs experimental mode
+/// (`"experimental": true` in the per-agent `settings.json`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PromptMode {
     /// `APPEND_SYSTEM.md`: the text goes after Copilot's default prompt

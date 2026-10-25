@@ -14,9 +14,20 @@ pub struct CopilotFlags {
     pub verified: &'static str,
     /// The version range that the adapter accepts (a `semver::VersionReq`).
     pub tested: &'static str,
-    /// Needed for the system-prompt extension: without it, the extension
-    /// does not load.
+    /// Experimental mode. The system-prompt extension loads only in it.
+    /// The adapter does **not** pass this flag: with it, Copilot writes
+    /// `experimental: true` to `settings.json` at each start by a rename.
+    /// The per-agent `settings.json` is a file bind, so the rename fails
+    /// with `EBUSY`, and Copilot exits with code 1 and no output (verified
+    /// in the container on 2026-10-25). The adapter sets
+    /// [`Self::experimental_key`] in that file instead. Kept here for the
+    /// `--help` check.
     pub experimental: &'static str,
+    /// The `settings.json` key that `--experimental` persists. With
+    /// `true` there, the extension loads with no flag (verified: the log
+    /// says "Installed 1 native extension(s)"; with no key and no flag it
+    /// does not), and Copilot does not rewrite the file at start.
+    pub experimental_key: &'static str,
     /// Allow All mode. It does not skip the folder-trust dialog; see
     /// [`Self::allow_all_env`].
     pub yolo: &'static str,
@@ -71,6 +82,7 @@ pub const COPILOT_1_0: CopilotFlags = CopilotFlags {
     verified: "1.0.103",
     tested: ">=1.0.103, <1.1.0",
     experimental: "--experimental",
+    experimental_key: "experimental",
     yolo: "--yolo",
     plugin_dir: "--plugin-dir",
     session_id: "--session-id",
