@@ -3,7 +3,7 @@
 Terrarium wraps AI coding harnesses (Claude Code, Codex, Copilot CLI) so that
 one API, one CLI, one dashboard, and one status model apply to all of them.
 
-Status: draft v0.18, 2026-10-24. Phases 0 to 5 largely built; Phase 6 partly (the fleet file is done). The security review fixes F1 to F7 and F10 to F14 are in, with cookie sessions and the CSP header (`docs/security-review.md`). See §20, "Build status", and README.md.
+Status: draft v0.19, 2026-10-25. Phases 0 to 5 largely built; Phase 6 partly (the fleet file is done). Target leases and mode 1 (workspaces on the host, attached into targets) are built and verified live. The security review fixes F1 to F7 and F10 to F14 are in, with cookie sessions and the CSP header (`docs/security-review.md`). See §20, "Build status", and README.md.
 
 ---
 
@@ -695,7 +695,7 @@ The push path also carries target lease changes (§19): "You now have access
 to target <t> (<state>) until <time or 'revoked'>. Run `terrarium targets
 ls`." after the lifecycle step of the grant, and "Your access to target <t>
 ended." An extend types nothing. A pointer for a stopped agent waits for its
-next start, as a card pointer does.
+next start, as a card pointer does, also across a daemon restart.
 
 ---
 
@@ -741,8 +741,10 @@ Push: when a card is assigned to an agent, or one of its blocked cards becomes
 unblocked, the runner uses the same push path as mail (§12). If the agent is
 `idle` it types a pointer turn: "Card TER-42 was assigned to you. Run
 `terrarium card show TER-42`." If it is `working`, the pointer waits for the
-stop hook. `terrarium card wait` is the pull equivalent for an agent that
-prefers to block.
+stop hook. If the agent does not run, the pointer waits for its next start,
+also across a daemon restart (`pending_pointers`), and the daemon checks
+the card again before it types the line. `terrarium card wait` is the pull
+equivalent for an agent that prefers to block.
 
 Lead nudges use the same path. A card with no assignee in `ready`, or a
 move to `review` or `blocked`, types a pointer into each `project_admin` of
@@ -1230,7 +1232,8 @@ snapshot_before_task = true
 ```
 
 Ephemeral targets: the host agent creates them on agent start and destroys them
-on agent stop unless `keep = true`.
+on agent stop unless `keep = true`. With a lease, the grant to a running
+agent creates them, and the end of the last running holder destroys them.
 
 Workspaces on targets ("mode 1", §11): the host agent binds each holder's
 workspace into a docker target at `/work/<project>/<agent>` (`docker run
@@ -1238,11 +1241,16 @@ workspace into a docker target at `/work/<project>/<agent>` (`docker run
 file of the instance. A vmlab target can also take its lab from a repo of
 the project (`lab_repo`, a git worktree on the host for each target) or
 from each holder's workspace (`lab_from_workspace`, one instance for each
-holder). The host agent checks such a lab against an allowlist, because an
-agent can write it (docs/host-protocol.md, "The lab allowlist"). Caps:
-`TERRARIUM_MAX_TARGETS_PER_PROJECT` (8) and the host agent's
-`max_running_targets` (4). An API project target is named
-`<project>-<name>`.
+holder, named `<target>.<agent ULID>`). For `lab_from_workspace`,
+`lab_path` is relative to the workspace root `<project>/<agent>`, so a lab
+at the root of repo `app` is `lab_path = "app"`. The host agent checks such
+a lab against an allowlist, because an agent can write it
+(docs/host-protocol.md, "The lab allowlist"). vmlab 0.33.3-alpha keys a
+running lab by its name, so two holders of one `lab_from_workspace` target
+cannot run at the same time (§21). Caps:
+`TERRARIUM_MAX_TARGETS_PER_PROJECT` (8, `409`) and the host agent's
+`max_running_targets` (4, `429`). A target has a scope: global, or one
+project. A project target is named `<project>-<name>`.
 With `snapshot_before_task` (vmlab only), the daemon takes the snapshot
 `terrarium-clean` after `up` and before any exec, and restores a kept target
 to it on agent stop (docs/api.md §17.3).
@@ -1256,7 +1264,12 @@ an active lease on. An exclusive lease keeps other agents off the target
 expiry, the daemon ends the agent's live sessions on the target
 (`lease_revoked`) at once. A grant to a running agent brings an ephemeral
 target up; the end of the last running holder brings it down, with the
-keep and restore rules. The rights follow the policy rule (F13): a
+keep and restore rules. The grant answers after the lifecycle verb, and
+`terrarium admin target grant` exits 1 when the target did not come up
+(the lease stays). The daemon types a pointer to the holder after the
+grant's lifecycle and at the end of the lease, not on an extend. The lead
+grants a target before it assigns the card, and revokes it after the
+merge. The rights follow the policy rule (F13): a
 project_admin leases its project's targets to its project's agents; a
 global target needs sysadmin (docs/api.md §17.7).
 
@@ -1348,7 +1361,7 @@ dashboard.
 **Phase 6 — Polish.** Mail and event views. Fleet definition file that
 declares many agents and targets at once. Sibling-container sandbox fallback.
 
-### Build status (2026-10-24, v0.18)
+### Build status (2026-10-25, v0.19)
 
 From README.md and the tree. "Done" means built and in the tree. The
 end-to-end scenarios of each phase are not scripted yet (no `spikes/e2e/`).
@@ -1357,16 +1370,21 @@ end-to-end scenarios of each phase are not scripted yet (no `spikes/e2e/`).
 |---|---|---|
 | 0 | Spikes for Claude Code, Codex, Copilot CLI, and pi (`spikes/<harness>/`), and the usage probes and login flows. The facts are in `docs/compat.md`. | `just spikes::login`, `spikes::usage-probe`, and `spikes::compat-matrix` are not wired. Only Claude has `just` recipes for its spikes. |
 | 1 | Container, justfile, compose, `terrariumd` with SQLite and the API, Claude adapter, operator CLI, dashboard with agents and xterm.js terminals. | — |
-| 2 | Projects, `bwrap` sandbox, agent mode of the CLI with policy, mailbox with pull and push, three prompt templates (`default`, `project-lead`, `system-lead`). Repo clone on agent create and on `repo checkout`, with the daemon's credential helper. | Claude Code inside `bwrap` inside Docker is not tested (verified outside Docker only). |
+| 2 | Projects, `bwrap` sandbox, agent mode of the CLI with policy, mailbox with pull and push, three prompt templates (`default`, `project-lead`, `system-lead`). Repo clone on agent create and on `repo checkout`, with the daemon's credential helper. Local bare repos under `TERRARIUM_REPOS_DIR` bind into the sandboxes of their project. Claude Code, Codex, and Copilot CLI run logged in, in `bwrap`, in Docker, with per-agent session files (verified live on 2026-10-25). | — |
 | 2b, 2c | Board and memory graph: tables, rules, CLI, dashboard views. | — |
-| 2d | Project inboxes, roles, `terrarium admin`, audit log, lead templates. | The lead templates are not tried end to end. |
+| 2d | Project inboxes, roles, `terrarium admin`, audit log, lead templates. Leader and worker orchestration verified live on 2026-10-25: system lead, project and lead, one worker for each card, review, merge on the operator's mail, and teardown. | — |
 | 2e | Wiki, artifacts with the separate serving origin, versions with review. | — |
 | 2f | Subscriptions with file and API definitions, verified probes (Anthropic, OpenAI Codex, GitHub Copilot), local accounting from session files, the quota policy (alerts and holds), daily project budgets, API keys, expired-login mail, and the login wizard (embedded terminal, URL and device-code extraction). `terrarium usage`. Dashboard Subscriptions and Spend pages. | — |
-| 3 | Codex, Copilot, and pi adapters, registered in the daemon. `just ci::compat` (crate `terrarium-compat`). Claude passes every step of the suite. | Codex, Copilot, and pi are built against the Phase 0 captures. They have not run live through the daemon. On this host the suite skips Codex and Copilot (operator hooks in the shared home), and pi runs only on opt-in. |
+| 3 | Codex, Copilot, and pi adapters, registered in the daemon. `just ci::compat` (crate `terrarium-compat`). Claude passes every step of the suite. Codex and Copilot run live through the daemon (2026-10-25): turns, usage, clean stop, and per-agent sessions. | pi has not run live through the daemon (no login on this host). On this host the suite skips Codex and Copilot (operator hooks in the shared home), and pi runs only on opt-in. |
 | 4 | One `terrarium-runner` process per agent (the default runner mode): the agents live through a daemon restart. Reconcile on daemon start (`Supervisor::recover`), reconnect on a dropped control connection, restart policies with backoff and crash-loop detection, resume of the same session, recap turn. The entrypoint supervisor loop starts `terrariumd` again after a crash in Docker, and the runners keep running (verified with `just docker::crash-test`, `docker/README.md`). The `stopped_by` mark in `runner-exit.json` gives resume after a container stop. | — |
 | 5 | `terrarium-host` with dial-out, token auth, and the executor protocol. `host`, `ssh`, `docker`, and `vmlab` targets. `terrarium exec`, `shell`, `cp`. Lifecycle verbs, ephemeral targets, snapshots. `repo checkout --target` through the host agent. Hosts and Targets views in the dashboard. TLS on the host link with certificate pinning (`just host::cert`), token rotation and one-time enrol tokens (`terrarium admin host new\|rotate --enrol`), and `just host::install <user@host> <name>` (`scripts/host-install.py`, with `--dry-run`). | `just host::install` over ssh is not tried on a real remote host. |
 | 5 · docker | Verified live on 2026-10-25 (`docs/host-protocol.md`, "Verified live"): TLS with a pin, enrol, `up`, `exec` (stdin, PTY, 20 MB of output, timeout), `cp` both ways, ephemeral `down`, and an agent's `exec` through the tunnel. Fixed: `up` keeps a permanent container (`docker.start`), `--init` for a fast `down`, a late `eof` is not an error, and audit rows for the `up` and `down` of ephemeral targets. | — |
 | 5 · vmlab | Verified live on 2026-10-25 with vmlab 0.33.3-alpha and an idle container machine (`labs/terrarium-test`): `up`, `status`, `exec`, `cp` both ways, `snapshot` and `restore`, ephemeral `down` (`vmlab destroy`), the `up` on an agent start and the `destroy` on its stop. The status and snapshot parsers pass on fixtures of the real output. | A VM machine (a template) is not tried live. `status` after `destroy` reports `stopped`, not `absent`. |
+| 5 · leases | Runtime target leases (§19, `docs/api.md` §17.7): `admin target grant`, `extend`, `revoke`, `leases`; exclusive holders (`409 lease_held`); the end of live sessions at a revoke or an expiry (`lease_revoked`); the lifecycle on a grant and at the lease end; pointer turns after the lifecycle; the leases panel in the dashboard. Verified live on 2026-10-25, with the expiry of a lease of a running holder. | — |
+| 5 · mode 1 | Workspaces under `TERRARIUM_WORK_DIR` (`<project>/<agent>`), bound in the sandbox at `$HOME/work` and `/work/<project>/<agent>`, and attached into targets at the same path (a docker bind, a vmlab `@dev` sync). `agent rm` moves the workspace to the trash. The templates split the work: git in the sandbox, builds and tests on the target. Verified live on 2026-10-25: two cards, each worker with its own vmlab instance, edits in the sandbox, tests on the target, merge, and teardown. | Two workers on one `lab_from_workspace` target at the same time (§21). |
+| 5 · lab repos | `lab_repo` (a git worktree of a project repo on the host, `lab_ref`, `lab_path`) and `lab_from_workspace` (one instance for each holder), with the lab allowlist in the host agent (`labcheck.rs`). `admin target edit` (`PATCH /api/targets/{name}`). The dashboard shows the lab source and the instances. Verified live on 2026-10-25. | — |
+| 5 · caps | `TERRARIUM_MAX_TARGETS_PER_PROJECT` (8, `409 conflict`) and the host agent's `max_running_targets` (4, `429 rate_limited`). The dashboard shows the cap errors and the running count of each host. | — |
+| 5 · scope | A target is global or belongs to one project (the `scope` field). A project target gets the prefix `<project>-`. A project_admin makes and leases the targets of its project; a global target needs sysadmin. The dashboard has scope chips and filters, and a targets panel on each project. | — |
 | 6 | Mail and event views in the dashboard. The fleet file (`docs/fleet.md`): `terrarium fleet validate`, `plan`, `apply` (with `--prune`), `ls`, `show`, and `export`, ownership as `source: "fleet:<name>"`, and the auto-apply of `fleets/*.toml` at start and on reload. | The sibling-container sandbox fallback is not started. |
 | Security | The fixes for findings F1 to F7 of `docs/security-review.md`: the `private/` and `harness/` split of the agent dir (F1, §11); TLS on the host link with a loopback-only plaintext default, pinning, rotation, and enrol (F2, §19); DOMPurify as the one HTML sink, an ESLint guard, adversarial payload tests, and a page CSP in the dashboard (F3); the WebSocket token in the `bearer.<token>` subprotocol, with `TERRARIUM_WS_QUERY_TOKEN=0` to refuse `?token=` (F4); artifacts off the dashboard origin by default, with an origin badge in the viewer (F5); no PTY log for the login flow (F6); a constant-time token compare (F7). Signed `HttpOnly` session cookies for the dashboard, with a CSRF header on mutating calls and an `Origin` check on WebSocket upgrades (`docs/api.md` §1.1); the CSP and other security headers from the daemon (§1.2); `?token=` refused by default. The fixes for F10 to F14 of §9: fleet ownership and overwrite checks (F10); quarantine of an old agent dir with a symlink (F11); transcript path checks with the `usage.rejected_path` event (F12); sysadmin for global targets, `cross_project`, and outside `mail_to` in a policy (F13); a wider ESLint sink rule with a fixture test, and the CSP as a header with `frame-ancestors 'none'` (F14). `DELETE /api/session` needs the CSRF token when a cookie is present. | — |
 
@@ -1382,10 +1400,12 @@ end-to-end scenarios of each phase are not scripted yet (no `spikes/e2e/`).
 | Shared harness home under concurrent writers | **Mitigated** for the files that collide: each agent gets per-agent overlays for them (next row, §11). Two Claude agents at once are verified; a test under load is not done. |
 | Harnesses that write a per-agent file by rename (Copilot `settings.json`, `command-history-state.json`, `open-sessions-state.json`) get EBUSY on a file bind, and the write is lost | Copilot start fixed by the settings key instead of the flag. Lost state writes are harmless but a per-agent `COPILOT_HOME` with symlinks to the shared `config.json`, `session-state/`, and `extensions/` would remove the file binds; open item. |
 | Shared Claude home: `history.jsonl`, `sessions/<pid>.json`, `backups/`, and auto memory are written by every agent | **Mitigated.** Per-agent overlays for all four, verified with two agents at once and a real `--resume` (spikes/claude/concurrency). The overlays live in the agent's `harness/` dir and are its only writable binds there (§11). |
-| Shared session files: every agent could read, and write into, the transcripts of every other agent in every project (Claude `projects/<cwd>/`, Codex `sessions/` and its SQLite files, Copilot `session-state/` and `session-store.db`), a path for prompt injection | **Fixed** in the code: per-agent overlays for all of them (§11); the usage collector reads only the agent's own session dir (F12). A resume by each harness finds the file in the agent's own dir; a real resume on the new binds is not run yet. Transcripts from before the change stay in the shared home, where no agent sees them. |
+| Shared session files: every agent could read, and write into, the transcripts of every other agent in every project (Claude `projects/<cwd>/`, Codex `sessions/` and its SQLite files, Copilot `session-state/` and `session-store.db`), a path for prompt injection | **Fixed**: per-agent overlays for all of them (§11); the usage collector reads only the agent's own session dir (F12). Verified live on 2026-10-25 for Claude, Codex, and Copilot: a turn on the new binds writes only to the agent's own dir. Transcripts from before the change stay in the shared home, where no agent sees them. |
 | Agent-to-agent prompt injection | Mail is untrusted. Push only a pointer, not the body. Delimit on read. Say so in the prompt. |
 | Runaway cost with yolo and `always` restart | Per-agent turn and time budgets. Crash-loop detection. Dashboard shows turn counts. |
 | Yolo agent escapes through `terrarium exec` | Policy limits targets per agent. Ephemeral targets by default for risky work. |
+| An agent writes a lab file (`lab_repo`, `lab_from_workspace`) that reaches the host: a `provision` wscript, a host path, a host port, a host device, raw QEMU flags | **Mitigated** by the allowlist in the host agent (`labcheck.rs`, `docs/host-protocol.md` "The lab allowlist"). The check runs before `vmlab validate`, refuses all that is not in the list, and names each line. The only host paths are the attached workspace and a relative `@dev(workspace)` in the lab's own directory. A lab that needs more is a pre-provisioned `lab` target that the operator writes. |
+| vmlab 0.33.3-alpha keys a running lab by the name in its `lab` block, so a second instance of one lab file fails (`exit 5`, "already registered"). Two holders of one `lab_from_workspace` target cannot run at the same time. | Open, until vmlab runs one instance for each directory. Until then, the lead gives such a target to one worker at a time, or the labs use two names. |
 | Agents fight over cards or thrash the board | Claim is atomic and one card at a time. Agents move only their own cards. WIP limits. Every change is attributed in the event log. |
 | A leader agent runs amok (spawns many agents, deletes work) | Roles are least-privilege. Destructive actions need `--confirm` and are audited. Per-project caps on agent count and on spawns per hour. Dashboard banner on deletes. |
 | Cross-project spam through inboxes | Rate limit per sender. Admins can mute a project. Every message is attributed. |
@@ -1483,6 +1503,9 @@ terrarium/
   config/                       bind-mounted harness homes (gitignored, except README)
     claude/  codex/  copilot/  pi/
   state/                        bind-mounted daemon state (gitignored)
+  work/                         agent workspaces <project>/<agent>/, bound at /work (gitignored)
+  repos/                        local bare repos, bound at /repos (gitignored)
+  labs/                         vmlab test labs for a host agent on this machine
   prompts/                      system prompt templates, mounted read-only
   projects/  agents/  targets/  subscriptions/
                                 definition files, bind-mounted under /etc/terrarium (§23.4);
@@ -1615,6 +1638,7 @@ services:
       - ./targets:/etc/terrarium/targets
       - ./fleets:/etc/terrarium/fleets       # fleet files, applied at start and on reload
       - ./repos:/repos                       # local bare repos (TERRARIUM_REPOS_DIR)
+      - ./work:/work                         # agent workspaces (TERRARIUM_WORK_DIR); a host agent's work_dir
       - ./config/tls:/etc/terrarium/tls:ro   # `just host::cert` writes here
     security_opt:
       - seccomp:docker/seccomp-bwrap.json   # user namespaces for bwrap (§11)

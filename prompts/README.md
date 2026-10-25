@@ -12,17 +12,22 @@ at `/prompts`. The daemon option `--prompts-dir` (env
 
 ## Protocol rules
 
-These rules come from a live leader and worker run. Keep them when you edit
-a template.
+These rules come from the live leader and worker runs of 2026-10-25,
+including the mode 1 run. Keep them when you edit a template.
 
+- An agent edits files and runs `git` (commit, push) in its sandbox. It runs builds and tests on a target with `terrarium exec <target> -- sh -c 'cd /work/<project>/<agent>/<repo> && <command>'`. It does not run `git` on the target. A worker with no target moves the card to `blocked` with "need a target".
 - A worker does not mail the lead when it runs `card move <id> review`. The move tells the lead. A worker mails the lead only when it is blocked or has a question.
-- A worker writes the branch and what to look at in the `card move ... -m` comment. It runs the tests if the tools exist, and it says in the comment if they do not.
+- A worker writes the branch, the test result, and what to look at in the `card move ... -m` comment.
 - An agent does not run `terrarium mail wait` in a turn, because it holds the turn open. It ends the turn, and the daemon wakes it when mail or a card change arrives.
-- The lead does these steps in this order: `admin agent new`, `repo checkout --agent`, `admin agent start`, `card assign`. The card pointer starts the worker, so the lead sends no start mail.
+- The lead does these steps in this order: `admin agent new`, `repo checkout --agent`, `admin agent start`, `admin target grant`, `card assign`. The grant comes before the assign. The card pointer starts the worker, so the lead sends no start mail.
+- A grant whose target does not come up exits 1. The lead then does not assign the card. It fixes the target with `admin target edit`, revokes the lease, and grants again.
 - The lead gives each worker `--subscription`: the one the operator gave, or its own (`terrarium usage` shows it).
 - The lead asks the operator for requirements only when a card is not clear.
 - The lead answers on the same thread with `terrarium mail reply <id>`, not with `mail send -s "Re: ..."`.
-- The lead gives a shared target to one worker for one card with `admin target grant <target> <worker> --exclusive --until <time>`. It revokes the lease when the card moves to `review`, and writes each grant and revoke in the leader log. A refused grant (`lease_held`) means that another worker holds the target: the lead waits for the card of that worker.
+- The lead gives a shared target to one worker for one card with `admin target grant <target> <worker> --exclusive --until <time>`. It keeps the lease while the card is in `review`, and revokes it after the merge. It writes each grant and revoke in the leader log. A refused grant (`lease_held`) means that another worker holds the target: the lead waits for the card of that worker.
+- To test a branch at review, the lead grants itself the target, runs the tests with `terrarium exec`, and revokes its own lease.
+- The lead makes targets at project scope. For `--lab-from-workspace`, `--lab-path` is relative to the workspace root, so a lab at the root of a repo is `--lab-path <repo>`, never `.`.
+- A lab file does not use `provision`: the lab allowlist refuses it. The lab image must have the tools already.
 - The system lead gives each lead `--subscription` in `admin agent new`: the one the operator gave, or its own. Its reply to the operator gives the project, repo, and lead names.
 
 ## How the daemon selects a template
@@ -42,7 +47,7 @@ The CLI does the same with `terrarium agent new <name> --prompt
 project-lead`, or `terrarium agent set <agent> --prompt project-lead`.
 
 Before each start, the daemon reads `<prompts dir>/<prompt>.md`, fills in
-the variables, and writes the result to `/state/agents/<ulid>/prompt.md`.
+the variables, and writes the result to `/state/agents/<ulid>/harness/prompt.md`.
 The adapter gives that file to the harness. A change to a template applies
 at the next start or restart of the agent.
 

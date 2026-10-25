@@ -19,7 +19,53 @@ Terrarium is early work. Phases 0 to 5 of PLAN §20 are largely built, and
 Phase 6 is in part. PLAN §20, "Build status", gives the details. The code
 changes every day, and the interfaces can change without notice.
 
-What works today:
+### Verified live (2026-10-25)
+
+These runs used the real stack in Docker, with real harness logins:
+
+- **Three harnesses in the container.** Claude Code, Codex, and Copilot CLI
+  run logged in, inside `bwrap`, inside the container. Each agent has its
+  own session files (transcripts, session databases, history) over the
+  shared harness home. An agent cannot read the sessions of another agent.
+- **Leader and worker orchestration, end to end, two times.** A system
+  lead (`ops/meta`) makes the project and starts its lead. The lead makes
+  one worker for each card. Each worker claims its card, works on a
+  branch, and moves the card to `review`. The lead reviews the diff and
+  merges only after the operator mails "merge <card>". Then the lead stops
+  and removes the worker. The second run used mode 1: the workspaces stay
+  on the host, and each worker has its own vmlab instance.
+- **A host agent on this machine.** `terrarium-host` dials in over TLS with
+  a pinned certificate. It runs Docker and vmlab targets: lifecycle verbs,
+  `exec`, `cp`, snapshots, and ephemeral targets.
+- **Runtime target leases.** Grant, extend, revoke, and expiry. A revoke
+  or an expiry ends the live sessions of the holder at once. A grant to a
+  running holder brings an ephemeral target up, and the end of the last
+  holder brings it down.
+- **The dashboard** shows the target scope (global or project), the
+  leases panel of each target, and the targets panel of each project.
+
+Not verified live:
+
+- pi through the daemon. pi has no login on this machine yet.
+- Two concurrent instances of one vmlab lab. vmlab 0.33.3-alpha keys a
+  running lab by its name, so a second instance of the same lab file
+  fails. Until vmlab changes, give a `lab_from_workspace` target to one
+  worker at a time.
+- The sibling-container sandbox fallback (Phase 6). It is not started.
+
+### How the pieces fit (mode 1)
+
+The sandbox holds the harness and the `terrarium` CLI, with no project
+toolchain. The workspace of each agent is a directory on the host,
+`./work/<project>/<agent>`. The sandbox binds it at `$HOME/work` and at
+`/work/<project>/<agent>`. A target carries the toolchain. The host agent
+attaches the workspace into the target at the same `/work/<project>/<agent>`
+path: a bind for Docker, an `@dev` sync for vmlab. So an agent edits files
+and runs `git` in the sandbox, and runs builds and tests on the target with
+`terrarium exec`. A lease decides which agent may use a shared target, and
+for how long. PLAN §11 and §19 give the details.
+
+### What is built
 
 - `terrariumd`, the daemon: SQLite, the HTTP and WebSocket API on a Unix
   socket and on TCP with a bearer token, and the embedded dashboard.
@@ -33,12 +79,9 @@ What works today:
   their harnesses keep running. `just docker::crash-test` verifies this
   ([docker/README.md](docker/README.md)).
 - Four adapters: Claude Code, Codex, Copilot CLI, and pi. The daemon
-  registers all four.
-  - Claude Code is verified end to end inside `bwrap`, with the external
-    runner, outside Docker. A restart resumes the same session.
-  - Codex, Copilot CLI, and pi are built against the Phase 0 captures
-    (`spikes/<harness>/`, [docs/compat.md](docs/compat.md)). They have not
-    run live through the daemon yet.
+  registers all four. Claude Code, Codex, and Copilot CLI are verified
+  live in the container (see above). pi is built against the Phase 0
+  captures (`spikes/pi/`, [docs/compat.md](docs/compat.md)).
 - The adapter compatibility suite, `just ci::compat`
   ([docs/compat-suite.md](docs/compat-suite.md)). Claude passes every
   step.
@@ -48,7 +91,8 @@ What works today:
   serving origin), and versions with review.
 - Repository checkout: a clone on agent create and on
   `terrarium repo checkout`, in the workspace or on a target. The daemon
-  holds the git credentials and answers the credential helper.
+  holds the git credentials and answers the credential helper. A local
+  bare repo under `./repos` binds into the sandboxes of its project.
 - Subscriptions and usage: file and API definitions, verified quota probes
   for Anthropic, OpenAI Codex, and GitHub Copilot, local accounting from
   the session files, alerts and holds, daily project budgets, and API keys.
@@ -57,8 +101,18 @@ What works today:
 - Host agents and targets: `terrarium-host` dials in to the daemon with a
   per-host token. `host`, `ssh`, `docker`, and `vmlab` targets have
   lifecycle verbs, snapshots, and ephemeral targets. `terrarium exec`,
-  `shell`, and `cp` work. The vmlab verbs are verified only against the
-  reference output of the vmlab CLI.
+  `shell`, and `cp` work.
+- Targets at global or project scope. A project target gets the project
+  name as a prefix (`<project>-<name>`). A project has at most
+  `TERRARIUM_MAX_TARGETS_PER_PROJECT` targets (8), and a host runs at most
+  its `max_running_targets` (4) at one time.
+- Target leases: `terrarium admin target grant`, `extend`, `revoke`, and
+  `leases`, with exclusive holders and expiry.
+- Mode 1 workspaces: workspaces under `./work`, attached into docker and
+  vmlab targets. A vmlab target can take its lab from a repo of the project
+  (`--lab-repo`, a git worktree on the host) or from each holder's
+  workspace (`--lab-from-workspace`, one instance for each holder). The
+  host agent checks such a lab file against an allowlist.
 - Host agent onboarding: `just host::install <user@host> <name>` installs
   the binary, the systemd unit, the config with the certificate pin, and a
   one-time enrol token, then probes the link. `--dry-run` prints the plan
@@ -71,15 +125,16 @@ What works today:
 - Three prompt templates in `prompts/`: `default`, `project-lead`, and
   `system-lead`.
 - The dashboard: home, projects, agents, terminals, mail, inbox, board,
-  memory, wiki, artifacts, versions, subscriptions, spend, hosts, targets,
-  events, and audit.
+  memory, wiki, artifacts, versions, subscriptions, spend, hosts, targets
+  (with scope, leases, and lab instances), events, and audit.
 - The `terrarium` CLI in operator mode and in agent mode.
 
 Security fixes from the review ([docs/security-review.md](docs/security-review.md)):
 
-- The sandbox split (F1). The agent directory has `private/`, `harness/`,
-  and `workspace/`. The sandbox never binds `private/`, so an agent cannot
-  change its event log, PTY log, launch spec, or exit record.
+- The sandbox split (F1). The agent directory has `private/` and
+  `harness/`, and the workspace is under `./work`. The sandbox never binds
+  `private/`, so an agent cannot change its event log, PTY log, launch
+  spec, or exit record.
 - TLS on the host link (F2). With `TERRARIUM_HOST_TLS_CERT` and
   `TERRARIUM_HOST_TLS_KEY`, the host listener speaks TLS, and a host agent
   can pin the certificate. Without them, the listener is plaintext on loopback
@@ -99,16 +154,6 @@ Security fixes from the review ([docs/security-review.md](docs/security-review.m
   turns it back on.
 - Artifacts off the dashboard origin (F5), no login PTY log (F6), and a
   constant-time token compare (F7).
-
-What does not work yet:
-
-- The sibling-container sandbox fallback (Phase 6). It is not started.
-- The vmlab verbs against a live lab. They are verified only against the
-  reference output of the vmlab CLI.
-
-Claude Code inside `bwrap` is verified outside Docker. Claude Code inside
-`bwrap` inside Docker is not tested yet ([docs/compat.md](docs/compat.md),
-"Not tested").
 
 ## Architecture
 
@@ -169,6 +214,9 @@ terrarium/
   .env.example              every environment variable, documented
   config/                   bind-mounted harness homes and config/tls (gitignored, except README.md)
   fleets/                   fleet files that the daemon applies at start and on reload
+  labs/                     vmlab test labs (labs/terrarium-test), for a host agent on this machine
+  repos/                    local bare git repos, bound at /repos (gitignored)
+  work/                     agent workspaces, <project>/<agent>/, bound at /work (gitignored)
   examples/fleet/           an example fleet file
   scripts/                  host-install.py (just host::install) and its tests
   prompts/                  system prompt templates (default, project-lead, system-lead), mounted read-only
@@ -181,6 +229,8 @@ terrarium/
 `projects/`, `agents/`, `targets/`, `subscriptions/`, and `fleets/`. Git
 ignores `config/*`, `state/`, `work/*`, `repos/*`, and `fleets/*` (except the
 README files). `work/` holds the agent workspaces, `<project>/<agent>/`.
+A host agent on this machine attaches them to targets: its `work_dir` is
+this `./work`.
 
 ## Commands
 

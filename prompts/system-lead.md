@@ -64,10 +64,9 @@ unusual, ask the operator first with `terrarium mail send operator`.
    branch named after the card (`git checkout -b <card-id-lowercase>`).
    Commit, then run `git push -u origin <branch>`. Comment at checkpoints
    with `terrarium card comment <id> -m "..."`.
-3. Run the tests if the tools exist (`python3` can be there). When the work
-   is done, run `terrarium card move <id> review -m "..."`. Give the branch
-   and what to look at. Say if the test tools do not exist. When you
-   cannot continue, run `terrarium card move <id> blocked
+3. Test on the target. When the work is done, run `terrarium card move <id>
+   review -m "..."` with the branch, the test result, and what to look at.
+   When you cannot continue, run `terrarium card move <id> blocked
    -m "what you need"`.
 4. A move tells the lead: do not also mail the lead. Mail the lead only when
    you are blocked or have a question.

@@ -89,6 +89,10 @@ a new token, when `.env` does not exist. The daemon reads:
 | `TERRARIUM_SANDBOX`    | `bwrap`. `none` runs harnesses with no sandbox (development and tests only). |
 | `TERRARIUM_SANDBOX_NEW_SESSION` | off. On: pass `--new-session` to bwrap (the harness then misses PTY resizes). |
 | `TERRARIUM_REPOS_DIR` | `/repos`. A project repo whose URL is a path under it is bound read-write into the sandbox of each agent of that project (`docs/api.md` §5.1). |
+| `TERRARIUM_WORK_DIR` | `/work`. The work root: the workspace of each agent is `<dir>/<project>/<agent>`. Compose binds `./work` here. A host agent on the same machine attaches the workspaces to targets: its `work_dir` is the host path of this dir. |
+| `TERRARIUM_MAX_TARGETS_PER_PROJECT` | `8`. The most targets in one project. A create past it is `409 conflict`. |
+| `TERRARIUM_MAIL_LOOP_LIMIT` | `6`. The agent-to-agent messages that a thread may have after the last operator or project-inbox message. Then the loop guard pauses the thread (PLAN §12). |
+| `TERRARIUM_TRASH_DAYS` | `7`. The days that a deleted agent stays in `<state>/trash/`, with its workspace. |
 | `TERRARIUM_HARNESS_HOME` | `/auth/<harness>`. Override as `claude=/path,codex=/path`. |
 | `TERRARIUM_CLI`        | `terrarium` next to `terrariumd`, else on `PATH`. The sandbox binds it at `/opt/terrarium/bin/terrarium`. |
 | `TERRARIUM_ARTIFACT_LISTEN` | `0.0.0.0:8081`. Empty: no artifact listener of its own, and the dashboard port serves `/a/...`. With a listener, the dashboard port does not serve artifacts. |
@@ -100,6 +104,32 @@ a new token, when `.env` does not exist. The daemon reads:
 | `TERRARIUM_SESSION_TTL` | `12h`. The life of a dashboard session cookie: seconds, or a number with `s`, `m`, `h`, or `d`. |
 | `TERRARIUM_SSH` | `ssh`. The ssh binary for `ssh` targets. |
 | `TERRARIUM_INSECURE_AGENT_HEADER` | off. On: trust `X-Terrarium-Agent` on the Unix socket (tests only). |
+
+### The directories
+
+Compose binds these directories of the repo into the container
+(`just docker::volumes-init` makes them). Git ignores the ones that hold
+data.
+
+| Repo path | Container path | Content |
+|---|---|---|
+| `config/<harness>/` | `/auth/<harness>` | The shared harness homes and logins. Gitignored. |
+| `config/tls/` | `/etc/terrarium/tls` (ro) | The certificate and key of the host listener. Gitignored. |
+| `state/` | `/state` (`TERRARIUM_STATE_DIR`) | SQLite, the agent dirs `agents/<ulid>/`, the trash, artifacts, and credentials. Gitignored. |
+| `work/` | `/work` (`TERRARIUM_WORK_DIR`) | The agent workspaces, `<project>/<agent>/`. A host agent on this machine attaches them to targets (its `work_dir`). Gitignored. |
+| `repos/` | `/repos` (`TERRARIUM_REPOS_DIR`) | Local bare repos, `<name>.git`, bound into the sandboxes of their project. A host agent reads them for a local `lab_repo` (its `repos_dir`). Gitignored. |
+| `labs/` | not bound | vmlab test labs (`labs/terrarium-test/vmlab.wcl`) for a host agent on this machine. In git. |
+| `prompts/` | `/prompts` (ro) | The prompt templates. In git. |
+| `projects/`, `agents/`, `targets/`, `subscriptions/` | `/etc/terrarium/...` | Definition files. |
+| `fleets/` | `/etc/terrarium/fleets` | Fleet files. Gitignored, except `README.md`. |
+
+A host agent has three directories of its own (`docs/host-protocol.md`,
+"Host agent configuration"): `work_dir` (default `./work`), `repos_dir`
+(default `./repos`), and `instances_dir` (default
+`$XDG_DATA_HOME/terrarium-host/instances`, one directory for each lab
+instance). A relative path is relative to the working directory of the host
+agent. `max_running_targets` (default `4`) limits the docker and vmlab
+targets that run on the host at one time (`429 rate_limited`).
 
 ### The runtime directory
 
@@ -115,19 +145,19 @@ through a reboot.
 
 ### The agent directory
 
-Each agent has `<state>/agents/<ulid>/` with three parts
-([runner.md](runner.md), "Files"; PLAN §11). Keep each file in the right
-part. A file that the harness must not change never goes in `harness/` or
-`workspace/`.
+Each agent has `<state>/agents/<ulid>/` with `private/` and `harness/`,
+and a workspace under the work root ([runner.md](runner.md), "Files";
+PLAN §11). Keep each file in the right part. A file that the harness must
+not change never goes in `harness/` or the workspace.
 
 | Directory | Content | May write | In the sandbox |
 |---|---|---|---|
 | `private/` | `events.jsonl`, `pty.log`, `pty.log.1`, `runner.json` (the launch spec with the injected keys), `runner-argv.json`, `runner-exit.json`, `runner.log`, `session-prompt.sha256`. Mode `0700`. | The daemon and the runner only. | Not bound. The harness cannot read or change it. |
 | `harness/` | `prompt.md` and the per-agent files of each adapter (`claude/`, `codex/`, `copilot/`, `pi/`). | The daemon (through the adapter) when it builds the launch. The harness writes only the files that an adapter declares as a `FileOverlay` with `writable: true`. | Read-only at its own path. Each writable overlay has its own read-write bind. |
-| `workspace/` | The agent's files and repository checkouts. | The harness, and the daemon for clones. | Read-write at `$HOME/work`. |
+| `<work>/<project>/<agent>/` | The agent's files and repository checkouts. An agent dir of the older layout has `workspace/`; the next start moves it here once. | The harness, the daemon for clones, and a target that has the workspace attached. | Read-write at `$HOME/work` and at `/work/<project>/<agent>`. A host agent attaches it to the agent's targets at `/work/<project>/<agent>`. `agent rm` moves it to `<state>/trash/` with the agent dir. |
 
-Use `terrarium_runner::{private_dir, harness_dir, workspace_dir}` for the
-paths. A daemon start moves an agent directory of the older flat layout
+Use `terrarium_runner::{private_dir, harness_dir}` and
+`terrariumd::workspace::dir` for the paths. A daemon start moves an agent directory of the older flat layout
 into `private/` and `harness/` once (`migrate_legacy_layout`). The test
 `the_sandbox_never_binds_the_private_dir` in `sandbox.rs` checks that no
 bind names `private/`.

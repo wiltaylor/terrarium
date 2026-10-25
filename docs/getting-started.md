@@ -254,7 +254,120 @@ logs a warning that starts with `INSECURE` for a plaintext bind to a
 non-loopback address. The warning is correct here, because the port is
 published on loopback only.
 
-### 2.8 Declare a fleet
+### 2.8 Mode 1 workflow
+
+In mode 1, the workspaces stay on the host and the targets carry the
+toolchain (PLAN §11 and §19). The sandbox holds the harness, the CLI, and
+`git`. An agent edits files and runs `git` in the sandbox. It runs builds
+and tests on a target with `terrarium exec`. The host agent attaches the
+workspace `./work/<project>/<agent>` into the target at
+`/work/<project>/<agent>`.
+
+These steps come from the live run of 2026-10-25 (project `svc`, repo
+`hello-svc`, host agent `local`). The lead does steps 4 to 7 itself when it
+runs the `project-lead` template. You can also do them by hand.
+
+1. Run the host agent on the Docker host, and give it the host path of
+   `./work`. A host agent that runs from the repo root uses `./work` by
+   default. Otherwise, set `work_dir` in its config:
+
+   ```sh
+   terrarium-host --config state/host-local/config.toml check
+   terrarium-host --config state/host-local/config.toml run
+   ```
+
+   `check` prints `work_dir`, `instances_dir`, and `repos_dir`, and marks a
+   missing path. Run `t admin host ls` to see the host online.
+
+2. Put the lab file at the root of the repo, as `vmlab.wcl`, and commit it
+   to `main`. Use an image that has every tool of the build and the tests,
+   because a lab file may not use `provision` (see the rules below).
+
+3. Make the project, attach the repo, and start the lead:
+
+   ```sh
+   t project new svc --prefix SVC
+   t -p svc project repo-add file:///repos/hello-svc.git --name hello-svc --branch main
+   t -p svc admin agent new lead --harness claude --model sonnet \
+     --prompt project-lead --role project_admin --subscription anthropic-max-20x
+   t agent start svc/lead
+   ```
+
+4. Make a project target. A project target gets the project name as a
+   prefix, so `dev` becomes `svc-dev`:
+
+   ```sh
+   t -p svc admin target new dev --kind vmlab --lab-from-workspace \
+     --lab-path hello-svc --machine box --host local --ephemeral
+   ```
+
+   `--lab-path` is relative to the workspace root `work/<project>/<agent>`,
+   and `repo checkout` puts the repo in `<repo>` under that root. So for a
+   lab file at the root of the repo, use `--lab-path <repo>`. Never use
+   `--lab-path .`. To fix a target, use `t admin target edit <target>
+   --lab-path <dir>`. A running target takes only `--keep`, `--no-keep`,
+   and `--snapshot-before-task`.
+
+5. Grant the target to the worker before you assign the card:
+
+   ```sh
+   t admin target grant svc-dev w-svc-1 --until 4h --reason SVC-1 && \
+     t card assign SVC-1 w-svc-1
+   ```
+
+   The grant brings the worker's own lab instance up
+   (`svc-dev.<agent ULID>`). When the target does not come up, the grant
+   exits 1, so the `&&` chain stops before the assign. The lease is made
+   all the same: fix the target, revoke the lease, and grant again. Do not
+   use `--exclusive` on a `lab_from_workspace` target (`422`).
+
+6. Give the target to one worker at a time. vmlab 0.33.3-alpha keys a
+   running lab by the name in its `lab` block. Each checkout has the same
+   lab file, so a second instance fails ("lab ... is already
+   registered"). Keep this rule until vmlab runs two instances of one lab.
+
+7. Revoke the lease after the merge, not at `review`: the worker can need
+   the target for a fix. The revoke destroys the worker's instance. Then
+   `t admin agent rm <worker> --confirm` moves the agent dir and its
+   workspace to `state/trash`.
+
+**Settings for mode 1.**
+
+| Setting | Where | Default | Content |
+|---|---|---|---|
+| `TERRARIUM_WORK_DIR` | daemon (`.env`) | `/work` | The work root. Each workspace is `<dir>/<project>/<agent>`. Compose binds `./work` here. |
+| `TERRARIUM_MAX_TARGETS_PER_PROJECT` | daemon (`.env`) | `8` | The most targets in one project. A create past it is `409 conflict`. |
+| `work_dir` | host agent config | `./work` in the working directory of the host agent | The host path of the daemon's work root. On the Docker host, set it to the `./work` of the stack. |
+| `instances_dir` | host agent config | `$XDG_DATA_HOME/terrarium-host/instances` | Where `vmlab.prepare` makes the lab instances. |
+| `repos_dir` | host agent config | `./repos` in the working directory of the host agent | The local bare repos, for a `--lab-repo` with a `file://` URL. |
+| `max_running_targets` | host agent config | `4` | The most docker and vmlab targets that run on the host at one time. An `up` past it is `429 rate_limited`. |
+
+**Lab file rules.** A `--lab-repo` or `--lab-from-workspace` lab is a file
+that an agent can write. The host agent checks it against an allowlist
+before `vmlab validate` ([host-protocol.md](host-protocol.md), "The lab
+allowlist"). A refused lab gives `422` with `details.code` `refused`, and
+the message names each line. The file must start with `import <vmlab.wcl>`
+and hold one `lab` block. A lab file may not contain:
+
+- another `import`;
+- `provision` or `on` (a wscript runs on the host);
+- `playbook`;
+- a `template` block;
+- a host path: `share`, `volume { host }`, `media`, `disk { from }`,
+  `cdrom`, or `floppy`;
+- `qemu_args` or `gpu`;
+- a host port: `forward` or `port`;
+- `connect` or `global`;
+- `gui`;
+- an `@dev(workspace)` that is absolute, has `..`, or leaves the lab's
+  directory;
+- a value that is not a literal, or a string with `${`;
+- any other block, attribute, or decorator that is not in the allowlist.
+
+A lab that needs more (an ISO, a share, a provision script) is a
+pre-provisioned lab. Give it to the operator as a target with `--lab`.
+
+### 2.9 Declare a fleet
 
 A fleet file declares projects, repos, agents, targets, and subscriptions
 in one TOML file ([fleet.md](fleet.md)). The example is
@@ -285,7 +398,7 @@ each `*.toml` file there at start and on `t daemon reload`. This
 auto-apply does not prune, does not start agents, and does not clone
 repos. Use `t fleet apply --prune` and `--start` for that.
 
-### 2.9 Write your own API client
+### 2.10 Write your own API client
 
 A script uses the bearer token. Send `Authorization: Bearer <token>` on
 each request to `/api/*`. A browser cannot set this header on a WebSocket.
@@ -327,7 +440,7 @@ Compose bind-mounts these host directories into the container:
 | `work/` | `/work` | Agent workspaces, `<project>/<agent>/` (`TERRARIUM_WORK_DIR`). A host agent on this machine attaches them to targets: set its `work_dir` to this directory (docs/host-protocol.md, "Workspaces"). |
 | `prompts/` | `/prompts` (read-only) | System prompt templates. |
 | `projects/`, `agents/`, `targets/`, `subscriptions/` | `/etc/terrarium/...` | Definition files. |
-| `fleets/` | `/etc/terrarium/fleets` | Fleet files (section 2.8). |
+| `fleets/` | `/etc/terrarium/fleets` | Fleet files (section 2.9). |
 | `repos/` | `/repos` | Local bare git repos that agents push to (see "Local repos" below). |
 | `config/tls/` | `/etc/terrarium/tls` (read-only) | The certificate and key of the host listener (section 2.7). |
 
@@ -350,9 +463,9 @@ that agents write.
 
 **Tools in the sandbox.** The sandbox uses the tools of the image: `git`,
 `ssh`, Node 22, and `python3` (Python 3.13, the Debian trixie package, with
-no `pip` and no `venv`). So an agent can run Python code and the tests of
-the standard library (`python3 -m unittest`). For other toolchains, extend
-the image.
+no `pip` and no `venv`). The sandbox has no project toolchain. Run builds
+and tests on a target (section 2.8), and keep the toolchain in the image
+of the target.
 
 To edit the settings of one harness from the host, run:
 
