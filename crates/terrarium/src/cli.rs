@@ -272,12 +272,27 @@ pub enum AgentCmd {
         #[arg(long)]
         confirm: bool,
     },
-    /// Start an agent
-    Start { agent: String },
-    /// Stop an agent
-    Stop { agent: String },
-    /// Restart an agent
-    Restart { agent: String },
+    /// Start an agent; wait up to 10 s for its new status
+    Start {
+        agent: String,
+        /// Print the status before the start and do not wait
+        #[arg(long)]
+        no_wait: bool,
+    },
+    /// Stop an agent; wait up to 10 s for its new status
+    Stop {
+        agent: String,
+        /// Print the status before the stop and do not wait
+        #[arg(long)]
+        no_wait: bool,
+    },
+    /// Restart an agent; wait up to 10 s for its new status
+    Restart {
+        agent: String,
+        /// Print the status before the restart and do not wait
+        #[arg(long)]
+        no_wait: bool,
+    },
     /// Type one turn into the agent
     Send {
         agent: String,

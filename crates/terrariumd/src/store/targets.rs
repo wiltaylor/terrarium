@@ -258,6 +258,7 @@ pub fn delete(t: &mut Tx<'_>, name: &str) -> ApiResult<TargetRow> {
 }
 
 /// Record the state that a lifecycle verb saw, and a snapshot name to add.
+/// The state `absent` clears the snapshots: a destroyed target has none.
 pub fn set_state(
     t: &mut Tx<'_>,
     name: &str,
@@ -266,6 +267,9 @@ pub fn set_state(
 ) -> ApiResult<()> {
     let current = get(t, name)?;
     let mut snaps = current.snapshots;
+    if state == "absent" {
+        snaps.clear();
+    }
     if let Some(s) = add_snapshot
         && !snaps.iter().any(|x| x == s)
     {

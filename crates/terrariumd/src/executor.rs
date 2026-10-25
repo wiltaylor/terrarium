@@ -1953,15 +1953,56 @@ fn host_online(state: &Shared, def: &TargetDef) -> ApiResult<()> {
     }
 }
 
+/// The snapshot that `snapshot_before_task` takes after `up` and restores
+/// on an agent stop (PLAN §19).
+pub const CLEAN_SNAPSHOT: &str = "terrarium-clean";
+
+/// The target kinds that can take a snapshot. Only vmlab can.
+fn snapshots_supported(def: &TargetDef) -> bool {
+    def.kind == TargetKind::Vmlab
+}
+
+fn clean_opts() -> LifecycleOpts {
+    LifecycleOpts {
+        name: Some(CLEAN_SNAPSHOT.into()),
+        ..LifecycleOpts::default()
+    }
+}
+
 /// Bring an ephemeral target up before an agent starts (PLAN §19). A
-/// permanent target is not touched.
+/// permanent target is not brought up.
+///
+/// With `snapshot_before_task` on a kind that has snapshots (vmlab), the
+/// daemon takes the snapshot [`CLEAN_SNAPSHOT`] after `up` and before any
+/// exec, when the target has none yet. A kept target keeps its snapshot
+/// over a stop, so it is taken one time. A destroy clears it, so an
+/// ephemeral target without `keep` gets a new one on each start. A
+/// permanent target gets it on the first agent start that finds it running.
 ///
 /// Call site: `RunnerSupervisor::start`, for each name in the agent's
 /// `policy.targets`, before the harness launches.
 pub async fn ensure_up(state: &Shared, target: &str) -> ApiResult<Option<Value>> {
     let n = target.to_owned();
     let row = state.db.read(move |c| targets::get(c, &n)).await?;
+    let wants_snapshot = row.def.snapshot_before_task
+        && snapshots_supported(&row.def)
+        && !row.snapshots.iter().any(|s| s == CLEAN_SNAPSHOT);
     if !row.def.ephemeral {
+        if wants_snapshot {
+            let st = lifecycle(
+                state,
+                &row.def,
+                LifecycleVerb::Status,
+                &LifecycleOpts::default(),
+            )
+            .await?;
+            if st["state"] == "running" {
+                take_clean(state, &row).await?;
+            } else {
+                warn!(target = %row.def.name, state = %st["state"],
+                      "snapshot_before_task: the permanent target is not running; no snapshot");
+            }
+        }
         return Ok(None);
     }
     let out = lifecycle(
@@ -1972,7 +2013,16 @@ pub async fn ensure_up(state: &Shared, target: &str) -> ApiResult<Option<Value>>
     )
     .await?;
     audit_system(state, &row, "target.up", "agent_start", &out).await?;
+    if wants_snapshot {
+        take_clean(state, &row).await?;
+    }
     Ok(Some(out))
+}
+
+async fn take_clean(state: &Shared, row: &TargetRow) -> ApiResult<Value> {
+    let out = lifecycle(state, &row.def, LifecycleVerb::Snapshot, &clean_opts()).await?;
+    audit_system(state, row, "target.snapshot", "snapshot_before_task", &out).await?;
+    Ok(out)
 }
 
 /// The audit row of a lifecycle verb that the daemon runs by itself (an
@@ -2003,14 +2053,30 @@ async fn audit_system(
 /// Remove an ephemeral target after its agent stops, unless `keep = true`
 /// (PLAN §19). A permanent target is not touched.
 ///
+/// A kept target with `snapshot_before_task` and the snapshot
+/// [`CLEAN_SNAPSHOT`] is restored to it instead, so the next agent finds
+/// it clean. It stays up, as a kept target does. A target that is
+/// destroyed needs no restore.
+///
 /// Call site: the supervisor's stop path (`RunnerSupervisor::stop` and the
 /// exit of a harness that will not restart), for each name in the agent's
 /// `policy.targets`.
 pub async fn maybe_down(state: &Shared, target: &str) -> ApiResult<Option<Value>> {
     let n = target.to_owned();
     let row = state.db.read(move |c| targets::get(c, &n)).await?;
-    if !row.def.ephemeral || row.def.keep {
+    if !row.def.ephemeral {
         return Ok(None);
+    }
+    if row.def.keep {
+        let restore = row.def.snapshot_before_task
+            && snapshots_supported(&row.def)
+            && row.snapshots.iter().any(|s| s == CLEAN_SNAPSHOT);
+        if !restore {
+            return Ok(None);
+        }
+        let out = lifecycle(state, &row.def, LifecycleVerb::Restore, &clean_opts()).await?;
+        audit_system(state, &row, "target.restore", "agent_stop", &out).await?;
+        return Ok(Some(out));
     }
     let out = lifecycle(
         state,

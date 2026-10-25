@@ -17,7 +17,7 @@ use base64::Engine;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use crate::api::{CliError, query};
+use crate::api::{CliError, ServerError, query};
 use crate::ctx::Ctx;
 use crate::transport::encode;
 
@@ -55,6 +55,23 @@ async fn send(ctx: &Ctx, target: &str, sid: &str, body: Value) -> anyhow::Result
         .post(&format!("{}/input", session_path(target, sid)), Some(body))
         .await?;
     Ok(())
+}
+
+/// Send stdin bytes. False when the daemon answers `409`: the command has
+/// ended before the bytes came (a fast command, or one that reads no
+/// input). That is not an error; the end comes from the output stream, as
+/// for a late `eof` (docs/api.md §17.4).
+async fn send_stdin(ctx: &Ctx, target: &str, sid: &str, bytes: &[u8]) -> anyhow::Result<bool> {
+    match send(ctx, target, sid, json!({"data": B64.encode(bytes)})).await {
+        Ok(()) => Ok(true),
+        Err(e)
+            if e.downcast_ref::<ServerError>()
+                .is_some_and(|s| s.status == 409) =>
+        {
+            Ok(false)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// One output poll: the chunks as `(stream, bytes)`, the next offset, and
@@ -146,13 +163,17 @@ pub async fn exec(ctx: &Ctx, target: &str, o: &ExecOpts, cmd: &[String]) -> anyh
         body["pty"] = json!({"rows": rows, "cols": cols});
     }
     let sid = open(ctx, target, "exec", body).await?;
+    let mut ended = false;
     if o.stdin {
         let input = ctx.text("-")?;
         for chunk in input.as_bytes().chunks(CHUNK) {
-            send(ctx, target, &sid, json!({"data": B64.encode(chunk)})).await?;
+            if !send_stdin(ctx, target, &sid, chunk).await? {
+                ended = true;
+                break;
+            }
         }
     }
-    if !o.tty {
+    if !o.tty && !ended {
         send(ctx, target, &sid, json!({"eof": true})).await?;
     }
     let mut since = 0;
@@ -246,8 +267,10 @@ pub async fn shell(ctx: &Ctx, target: &str) -> anyhow::Result<()> {
                             Some(n) => (&bytes[..n], true),
                             None => (&bytes[..], false),
                         };
+                        // A 409 means the shell has ended; the output
+                        // loop reads the end.
                         if !data.is_empty() {
-                            send(ctx, target, &sid, json!({"data": B64.encode(data)})).await?;
+                            send_stdin(ctx, target, &sid, data).await?;
                         }
                         if detach {
                             return Ok::<_, anyhow::Error>(());

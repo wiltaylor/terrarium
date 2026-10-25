@@ -777,6 +777,121 @@ async fn lifecycle_verbs_map_to_docker_and_vmlab() {
     assert!(audit.ok().as_array().unwrap().len() >= 2);
 }
 
+/// `snapshot_before_task` (PLAN §19): a vmlab target gets the snapshot
+/// `terrarium-clean` after `up` on an agent start, one time; a kept target
+/// is restored to it on the stop; a destroy clears it; a permanent target
+/// gets it once when it runs; a docker target gets nothing.
+#[tokio::test]
+async fn snapshot_before_task_takes_and_restores_terrarium_clean() {
+    use terrariumd::executor::{ensure_up, maybe_down};
+    let lab = Lab::start().await;
+    let _h = lab.host("lab1").await;
+    let state = lab.state();
+    let labdir = tempfile::tempdir().unwrap();
+    std::fs::write(labdir.path().join("vmlab.wcl"), "lab \"win\" {}\n").unwrap();
+    lab.target(json!({"name": "win", "kind": "vmlab", "host": "lab1",
+                      "lab": labdir.path(), "machine": "win11",
+                      "ephemeral": true, "keep": true, "snapshot_before_task": true}))
+        .await;
+    let take = "vmlab snapshot create --vm win11 terrarium-clean";
+    let restore = "vmlab snapshot restore --vm win11 terrarium-clean";
+
+    // The first start: up, then the snapshot, in that order.
+    ensure_up(&state, "win").await.unwrap().unwrap();
+    let log = lab.log();
+    let (up_at, take_at) = (log.find("vmlab up win11").unwrap(), log.find(take).unwrap());
+    assert!(up_at < take_at, "{log}");
+    assert_eq!(
+        lab.td.get("/api/targets/win").await.ok()["snapshots"],
+        json!(["terrarium-clean"])
+    );
+    let a = lab.td.get("/api/audit?action=target.snapshot").await;
+    let a = a.ok();
+    let row = a.as_array().unwrap().last().unwrap();
+    assert_eq!(row["actor"], "system", "{row}");
+    assert_eq!(row["target"], "win");
+    assert_eq!(row["detail"]["reason"], "snapshot_before_task");
+    assert_eq!(row["detail"]["snapshot"], "terrarium-clean");
+
+    // The stop of a kept target restores the snapshot and does not destroy.
+    let r = maybe_down(&state, "win").await.unwrap().unwrap();
+    assert_eq!(r["verb"], "restore");
+    let log = lab.log();
+    assert_eq!(log.matches(restore).count(), 1, "{log}");
+    assert!(!log.contains("vmlab destroy"), "{log}");
+    let a = lab.td.get("/api/audit?action=target.restore").await;
+    let a = a.ok();
+    let row = a.as_array().unwrap().last().unwrap();
+    assert_eq!(row["actor"], "system", "{row}");
+    assert_eq!(row["detail"]["reason"], "agent_stop");
+
+    // The next start finds the snapshot and takes no second one.
+    ensure_up(&state, "win").await.unwrap().unwrap();
+    maybe_down(&state, "win").await.unwrap().unwrap();
+    let log = lab.log();
+    assert_eq!(log.matches(take).count(), 1, "{log}");
+    assert_eq!(log.matches(restore).count(), 2, "{log}");
+
+    // Without keep: the stop destroys (no restore) and clears the snapshot,
+    // so the next start takes a new one.
+    lab.td
+        .patch("/api/targets/win", json!({"keep": false}))
+        .await
+        .ok();
+    let d = maybe_down(&state, "win").await.unwrap().unwrap();
+    assert_eq!(d["state"], "absent");
+    assert_eq!(
+        lab.td.get("/api/targets/win").await.ok()["snapshots"],
+        json!([])
+    );
+    let log = lab.log();
+    assert_eq!(log.matches(restore).count(), 2, "{log}");
+    ensure_up(&state, "win").await.unwrap().unwrap();
+    assert_eq!(lab.log().matches(take).count(), 2);
+    maybe_down(&state, "win").await.unwrap().unwrap();
+
+    // A permanent target: no up; the snapshot only when it runs, one time.
+    lab.td
+        .patch("/api/targets/win", json!({"ephemeral": false}))
+        .await
+        .ok();
+    assert!(ensure_up(&state, "win").await.unwrap().is_none());
+    assert_eq!(lab.log().matches(take).count(), 2, "stopped: no snapshot");
+    lab.td.post_empty("/api/targets/win/up").await.ok();
+    assert!(ensure_up(&state, "win").await.unwrap().is_none());
+    assert!(ensure_up(&state, "win").await.unwrap().is_none());
+    let log = lab.log();
+    assert_eq!(log.matches(take).count(), 3, "{log}");
+    assert!(maybe_down(&state, "win").await.unwrap().is_none());
+    assert_eq!(lab.log().matches(restore).count(), 2);
+
+    // A docker target has no snapshots: the flag does nothing.
+    lab.target(json!({"name": "dbox", "kind": "docker", "host": "lab1",
+                      "image": "alpine:3", "ephemeral": true, "keep": true,
+                      "snapshot_before_task": true}))
+        .await;
+    ensure_up(&state, "dbox").await.unwrap().unwrap();
+    assert!(maybe_down(&state, "dbox").await.unwrap().is_none());
+    assert_eq!(
+        lab.td.get("/api/targets/dbox").await.ok()["snapshots"],
+        json!([])
+    );
+    let log = lab.log();
+    assert!(
+        !log.contains("docker commit") && !log.contains("docker checkpoint"),
+        "{log}"
+    );
+    let a = lab.td.get("/api/audit?action=target.snapshot").await;
+    assert!(
+        a.ok()
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["target"] == "win"),
+        "no snapshot row for dbox"
+    );
+}
+
 /// A permanent Docker target keeps its container over `down` and `up`:
 /// `down` stops it, and `up` starts the same container again (`docker
 /// start`), so the files in it stay. An ephemeral target starts fresh.

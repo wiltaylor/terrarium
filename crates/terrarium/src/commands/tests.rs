@@ -595,24 +595,77 @@ async fn agents() {
         vec![(Delete, "/api/agents/w", vec![("confirm", "true")], None)],
     )
     .await;
-    for action in ["start", "stop", "restart"] {
+    // The daemon answers 202 with the status before the verb; the CLI
+    // polls until the status settles and prints the new one.
+    for (action, was, mid, end) in [
+        ("start", "stopped", "starting", "idle"),
+        ("stop", "idle", "idle", "stopped"),
+        ("restart", "idle", "restarting", "working"),
+    ] {
         let path: &'static str = match action {
             "start" => "/api/agents/w/start",
             "stop" => "/api/agents/w/stop",
             _ => "/api/agents/w/restart",
         };
+        let view = |st: &str| json!({"name": "w", "project": "terra", "status": st});
         let out = ok(
             false,
             &["agent", action, "w"],
-            vec![(
-                202,
-                json!({"name": "w", "project": "terra", "status": "starting"}),
-            )],
+            vec![(202, view(was)), (200, view(mid)), (200, view(end))],
+            vec![
+                req(Post, path),
+                req(Get, "/api/agents/w"),
+                req(Get, "/api/agents/w"),
+            ],
+        )
+        .await;
+        assert_eq!(out, format!("{action}: terra/w is {end} (was {was})\n"));
+        // --no-wait: one request, and the status before the verb.
+        let out = ok(
+            false,
+            &["agent", action, "w", "--no-wait"],
+            vec![(202, view(was))],
             vec![req(Post, path)],
         )
         .await;
-        assert_eq!(out, format!("{action}: terra/w is starting\n"));
+        assert_eq!(out, format!("{action} requested; was {was}\n"));
     }
+    // A restart of a live agent: the answer and the first poll show the old
+    // status; the CLI waits for the restart to show.
+    let view = |st: &str| json!({"name": "w", "project": "terra", "status": st});
+    let out = ok(
+        false,
+        &["agent", "restart", "w"],
+        vec![
+            (202, view("idle")),
+            (200, view("idle")),
+            (200, view("starting")),
+            (200, view("idle")),
+        ],
+        vec![
+            req(Post, "/api/agents/w/restart"),
+            req(Get, "/api/agents/w"),
+            req(Get, "/api/agents/w"),
+            req(Get, "/api/agents/w"),
+        ],
+    )
+    .await;
+    assert_eq!(out, "restart: terra/w is idle\n");
+    // An answer that is already settled needs no poll; JSON keeps `was`.
+    let out = ok(
+        false,
+        &["--json", "agent", "stop", "w"],
+        vec![(
+            202,
+            json!({"name": "w", "project": "terra", "status": "stopped"}),
+        )],
+        vec![req(Post, "/api/agents/w/stop")],
+    )
+    .await;
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["status"], "stopped");
+    assert_eq!(v["was"], "stopped");
+    assert_eq!(v["settled"], true);
     ok(
         false,
         &["agent", "send", "w", "run the tests"],

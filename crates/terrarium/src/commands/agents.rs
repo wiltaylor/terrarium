@@ -1,5 +1,7 @@
 //! `agent` (also `admin agent`), `admin role`, and `status`.
 
+use std::time::{Duration, Instant};
+
 use serde_json::{Value, json};
 
 use super::{agent_path, print_object, print_table, set_opt};
@@ -30,9 +32,9 @@ pub async fn agent(ctx: &Ctx, cmd: &AgentCmd) -> anyhow::Result<()> {
                 c.line(format!("deleted agent {agent}"));
             })
         }
-        AgentCmd::Start { agent } => lifecycle(ctx, agent, "start").await,
-        AgentCmd::Stop { agent } => lifecycle(ctx, agent, "stop").await,
-        AgentCmd::Restart { agent } => lifecycle(ctx, agent, "restart").await,
+        AgentCmd::Start { agent, no_wait } => lifecycle(ctx, agent, "start", *no_wait).await,
+        AgentCmd::Stop { agent, no_wait } => lifecycle(ctx, agent, "stop", *no_wait).await,
+        AgentCmd::Restart { agent, no_wait } => lifecycle(ctx, agent, "restart", *no_wait).await,
         AgentCmd::Send { agent, text } => {
             let text = ctx.text(text)?;
             let r = ctx
@@ -219,18 +221,80 @@ async fn set(ctx: &Ctx, a: &AgentSetArgs) -> anyhow::Result<()> {
     })
 }
 
-async fn lifecycle(ctx: &Ctx, agent: &str, action: &str) -> anyhow::Result<()> {
+/// How long `agent start|stop|restart` waits for the new status.
+const LIFECYCLE_WAIT: Duration = Duration::from_secs(10);
+
+/// True when `status` is where `action` leads: a live, settled status
+/// after a start or a restart, `stopped` after a stop. `error` ends both.
+fn settled(action: &str, status: &str) -> bool {
+    match action {
+        "stop" => matches!(status, "stopped" | "error"),
+        _ => matches!(status, "idle" | "working" | "blocked" | "error"),
+    }
+}
+
+/// The daemon answers `202` with the status it had when the request came
+/// (the start or stop goes on after the answer). So the CLI polls the
+/// agent until the status settles, for at most [`LIFECYCLE_WAIT`].
+async fn lifecycle(ctx: &Ctx, agent: &str, action: &str, no_wait: bool) -> anyhow::Result<()> {
     let r = ctx
         .api
         .post(&format!("{}/{action}", agent_path(agent)), None)
         .await?;
-    ctx.emit(&r, |c, r| {
-        c.line(format!(
-            "{action}: {}/{} is {}",
-            field(r, "project"),
-            field(r, "name"),
-            field(r, "status")
-        ));
+    let was = r.get("status").and_then(Value::as_str).map(str::to_owned);
+    let Some(was) = was else {
+        // No status in the answer: there is nothing to compare.
+        return ctx.emit(&r, |c, _| c.line(format!("{action} requested for {agent}")));
+    };
+    let mut out = r.clone();
+    out["was"] = json!(was);
+    if no_wait {
+        out["waited"] = json!(false);
+        return ctx.emit(&out, |c, _| {
+            c.line(format!("{action} requested; was {was}"));
+        });
+    }
+    let deadline = Instant::now() + LIFECYCLE_WAIT;
+    let interval = ctx.poll_floor.min(Duration::from_millis(250));
+    let mut now = r;
+    // A restart answers before the old harness ends, so its answer can show
+    // the old live status. It is done after a status that is not settled.
+    let mut moved = action != "restart" || !settled(action, &was);
+    let mut done = moved && settled(action, &was);
+    while !done && Instant::now() < deadline {
+        tokio::time::sleep(interval).await;
+        let v = ctx.api.get(&agent_path(agent), vec![]).await?;
+        let Some(st) = v.get("status").and_then(Value::as_str) else {
+            break;
+        };
+        if !settled(action, st) {
+            moved = true;
+        }
+        done = moved && settled(action, st);
+        now = v;
+    }
+    let mut out = now;
+    out["was"] = json!(was);
+    out["waited"] = json!(true);
+    out["settled"] = json!(done);
+    ctx.emit(&out, |c, r| {
+        let (who, st) = (
+            format!("{}/{}", field(r, "project"), field(r, "name")),
+            field(r, "status"),
+        );
+        let tail = if st == was {
+            String::new()
+        } else {
+            format!(" (was {was})")
+        };
+        if done {
+            c.line(format!("{action}: {who} is {st}{tail}"));
+        } else {
+            c.line(format!(
+                "{action} requested; {who} is {st} after {} s{tail}",
+                LIFECYCLE_WAIT.as_secs()
+            ));
+        }
     })
 }
 

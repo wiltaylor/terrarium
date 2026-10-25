@@ -192,6 +192,87 @@ fn operator_mode_over_the_unix_socket() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// `exec -i` against a stub daemon whose command ends before the stdin
+/// comes: the `data` input gets `409 conflict`, the late `eof` is a no-op.
+/// The CLI does not fail on the 409; the exit code and the output come
+/// from the output stream.
+#[test]
+fn exec_stdin_after_the_command_ended_is_not_an_error() {
+    let inputs: Arc<Mutex<Vec<Value>>> = Arc::default();
+    let seen = inputs.clone();
+    let app = axum::Router::new()
+        .route(
+            "/api/targets/box/exec",
+            post(|| async {
+                (
+                    StatusCode::CREATED,
+                    Json(json!({"session_id": "S1", "target": "box", "kind": "exec"})),
+                )
+            }),
+        )
+        .route(
+            "/api/targets/box/sessions/S1/input",
+            post(move |Json(b): Json<Value>| {
+                let seen = seen.clone();
+                async move {
+                    seen.lock().unwrap().push(b.clone());
+                    if b.get("data").is_some() {
+                        return (
+                            StatusCode::CONFLICT,
+                            Json(json!({"error": {"code": "conflict",
+                                "message": "the session has ended; read its output for the end"}})),
+                        )
+                            .into_response();
+                    }
+                    Json(json!({"session_id": "S1", "accepted": false})).into_response()
+                }
+            }),
+        )
+        .route(
+            "/api/targets/box/sessions/S1/output",
+            get(|| async {
+                Json(json!({"session_id": "S1", "since": 0, "next": 5,
+                    "chunks": [{"stream": "stdout", "data": "ZmFzdAo="}],
+                    "done": true, "end": {"type": "exit", "code": 4, "reason": "exited"}}))
+            }),
+        );
+    let dir = temp_dir("exec409");
+    let socket = dir.join("api.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async move {
+            let l = tokio::net::UnixListener::from_std(listener).unwrap();
+            axum::serve(l, app).await.unwrap();
+        });
+    });
+    let mut child = bin()
+        .arg("--socket")
+        .arg(&socket)
+        .args(["exec", "-i", "box", "--", "true"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"input that nobody reads\n")
+        .unwrap();
+    let o = child.wait_with_output().unwrap();
+    assert_eq!(o.status.code(), Some(4), "{}", text(&o.stderr));
+    assert_eq!(text(&o.stdout), "fast\n");
+    assert!(!text(&o.stderr).contains("conflict"), "{}", text(&o.stderr));
+    // One `data` (refused); no input after it: the session has ended.
+    let got = inputs.lock().unwrap().clone();
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert!(got[0].get("data").is_some());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn operator_mode_over_tcp_sends_the_token() {
     let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();

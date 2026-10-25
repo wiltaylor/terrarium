@@ -1937,7 +1937,7 @@ all projects.
 |---|---|
 | `scope` | `global` (no `project`) or `project`. |
 | `state` | `running`, `stopped`, `absent`, or `unknown`: what the last lifecycle verb saw. |
-| `snapshots` | The snapshot names that `POST .../snapshot` took. |
+| `snapshots` | The snapshot names that `POST .../snapshot` or `snapshot_before_task` took. A destroy (the state `absent`) clears them. |
 | `host_online` | The link of the target's host agent. `null` for `ssh`. |
 | `usable` | The caller may use the target (§17.4). |
 
@@ -1991,7 +1991,29 @@ a `target.<verb>` audit row with the same report.
 | `vmlab` | `vmlab.up [machine]` | `vmlab.down [machine]`; ephemeral without `keep` (or `destroy: true`): `vmlab.destroy` | `vmlab.snapshot_take` / `vmlab.snapshot_restore` with `--vm machine` | `vmlab.status`, the row of `machine` |
 
 The container `<c>` is `container`, else `terrarium-<name>`. The snapshot
-name is `name`, else `terrarium`. A verb on an offline host is `409
+name is `name`, else `terrarium`.
+
+The daemon runs some verbs by itself, with the actor `system` and a
+`reason` in the audit detail. On an agent start, for each target in
+`policy.targets`:
+
+1. An ephemeral target gets `up` (`target.up`, reason `agent_start`).
+2. A target with `snapshot_before_task` on a kind with snapshots (vmlab)
+   gets the snapshot `terrarium-clean` after `up` and before any exec
+   (`target.snapshot`, reason `snapshot_before_task`). The daemon takes it
+   only when `snapshots` does not hold `terrarium-clean`. A permanent target
+   gets it on the first agent start that finds it `running`. A docker
+   target has no snapshots, so the flag does nothing.
+
+On an agent stop, or an exit with no restart:
+
+1. An ephemeral target without `keep` gets a destroy (`target.destroy`,
+   reason `agent_stop`). The destroy clears `snapshots`, so the next start
+   takes a new `terrarium-clean`.
+2. An ephemeral target with `keep` and `snapshot_before_task` gets a
+   restore of `terrarium-clean` (`target.restore`, reason `agent_stop`). It
+   stays up, as a kept target does, and the next agent finds it clean.
+3. A permanent target is not touched. A verb on an offline host is `409
 conflict`. A verb that fails is `422 invalid` with `details: {verb, code,
 end, stderr, stdout}`.
 
@@ -2029,7 +2051,8 @@ too_large` above). In a push, `data` is file bytes. `resize` is
 `finish` is `{"bytes", "sha256"}` and ends a push. An input to a session
 that has ended is `409 conflict`, except `eof` alone: it is a no-op with
 `"accepted": false`. A fast command can end before the client closes its
-stdin.
+stdin. `terrarium exec -i` and `shell` treat a `409` for `data` in the
+same way: they stop the input, and the exit code comes from the output.
 
 The output answer:
 

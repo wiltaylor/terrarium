@@ -921,6 +921,9 @@ The stop of `tester` ran `vmlab destroy` for `vlab`.
 | `down` of a Docker target took 10.2 s: `sleep infinity` as PID 1 ignores SIGTERM, so `docker stop` waited for the grace. | `docker.run` takes `init`; the daemon sets it (`--init`). `down` then took 0.24 s. | `docker::tests::run_golden`, `hosts::lifecycle_verbs_map_to_docker_and_vmlab` |
 | `terrarium exec vlab -- uname -a` failed one time in seven with `the session has ended; read its output for the end [conflict]`. The command ended before the CLI sent `eof`, and the daemon refused the late `eof`. | A late `eof` is a no-op (`"accepted": false`). Data after the end is still `409`. After the fix: 30 of 30 runs passed. | `hosts::exec_streams_output_and_the_exit_code` |
 | The `up` on an agent start and the `destroy` on an agent stop wrote no audit row. | `ensure_up` and `maybe_down` write `target.up` and `target.destroy` with the actor `system` and a `reason`. | `hosts::lifecycle_verbs_map_to_docker_and_vmlab` |
+| `snapshot_before_task` was stored, but the daemon did not use it. | On an agent start, a vmlab target with the flag gets the snapshot `terrarium-clean` after `up` and before any exec, when it has none. On a stop, a kept target is restored to it. A destroy clears it. A permanent target gets it one time, when it runs. Docker: nothing. Audit rows `target.snapshot` and `target.restore`, actor `system`. | `hosts::snapshot_before_task_takes_and_restores_terrarium_clean` |
+| `terrarium agent start` printed `start: lab/tester is stopped`: the daemon answers `202` with the status before the start. | The CLI polls the agent for up to 10 s and prints the new status with the old one (`start: lab/tester is idle (was stopped)`). `--no-wait` prints `start requested; was stopped`. The same for `stop` and `restart`. | `commands::tests::agents` |
+| `terrarium exec -i` failed with `409 conflict` when the command ended before its stdin was sent. | The CLI stops the input on a `409` for `data`, and takes the exit code from the output stream, as for a late `eof`. | `exec_stdin_after_the_command_ended_is_not_an_error` (`crates/terrarium/tests/cli.rs`) |
 
 The fixes were verified live on a second daemon outside Docker, with a
 second host agent. The stack image still has the old code until the next
@@ -928,10 +931,8 @@ second host agent. The stack image still has the old code until the next
 
 ### Open
 
-- `snapshot_before_task` is stored, but the daemon does not use it. No
-  snapshot is taken before a turn.
-- `terrarium agent start` printed `start: lab/tester is stopped`, the
-  status before the start ended.
+- The `snapshot_before_task` and CLI fixes above have unit tests only.
+  They were not tried on the live stack.
 - In a PTY, `docker exec -t` sets `TERM=xterm` in the container. The
   `TERM=xterm-256color` of the host agent goes to the `docker` process
   only.

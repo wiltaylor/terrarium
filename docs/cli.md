@@ -137,7 +137,7 @@ terrarium agent new --from-file agents/lead.toml [flags that override the file]
 terrarium agent set <agent> [--harness h] [--subscription s] [--model m] [--prompt p]
                     [--restart r] [--policy JSON] [--new-session-on-prompt-change true|false]
 terrarium agent rm <agent> [--confirm]
-terrarium agent start|stop|restart <agent>
+terrarium agent start|stop|restart <agent> [--no-wait]
 terrarium agent send <agent> <text | ->
 terrarium agent answer <agent> [--request-id id] (--choice N | --allow | --deny | --text T)
 terrarium agent logs <agent> [--since seq] [--kind k] [--limit n] [--follow]
@@ -151,6 +151,16 @@ terrarium agent roles set <agent> [role]...   no roles means member only
 
 `agent ls` in agent mode shows the agent's own project. With
 `--all-projects`, it lists each project that the agent can read.
+
+`agent start`, `stop`, and `restart` wait up to 10 s for the new status,
+because the daemon answers `202` with the status before the verb. The CLI
+prints `start: terra/worker is idle (was stopped)`. When the status does
+not settle in time, it prints `start requested; terra/worker is starting
+after 10 s (was stopped)`. With `--no-wait`, it prints `start requested;
+was stopped` and does not poll. With `--json`, the agent object has `was`,
+`waited`, and `settled` too. A settled status is `idle`, `working`,
+`blocked`, or `error` after a start or a restart, and `stopped` or `error`
+after a stop.
 
 `agent attach` puts the terminal in raw mode, sends each key to the PTY,
 and sends a resize when the window changes size. Press Ctrl-] to detach.
