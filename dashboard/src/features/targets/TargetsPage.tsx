@@ -1,7 +1,10 @@
 // Targets (docs/api.md §17): kind, scope, host, state, the lifecycle verbs,
 // the leases, and an exec console. A target is global, or one project owns
 // it (§17.2). `POST .../up|down|snapshot|restore|status` (§17.3), `POST
-// .../exec` with `{shell, pty}` and the session WebSocket (§17.4).
+// .../exec` with `{shell, pty}` and the session WebSocket (§17.4). Mode 1
+// (§17.8): the lab source of a vmlab target, the attached workspaces, the
+// lab instance of each holder of a `lab_from_workspace` target with its own
+// verbs, and the two caps (`409` project cap, `429` host cap) inline.
 
 import { useSearchParams } from "@solidjs/router";
 import { createEffect, createResource, createSignal, For, Index, onCleanup, Show } from "solid-js";
@@ -9,10 +12,11 @@ import { GrantDialog, grantNotice, LeaseTable, useLeaseList } from "../../compon
 import { MockOnlyNote } from "../../components/MockOnly";
 import { Terminal } from "../../components/Terminal";
 import { Empty, ErrorBanner, PageHead, Tabs } from "../../components/ui";
-import type { Target } from "../../api/types";
+import type { Target, TargetReport, TargetVerbBody } from "../../api/types";
 import type { TargetAction } from "../../api/client";
-import { api, leases as holds, projects } from "../../stores";
+import { agents, api, leases as holds, projects } from "../../stores";
 import { filterByScope, groupByScope, SCOPE_FILTERS, scopeLabel, type ScopeFilter } from "../../lib/target-scope";
+import { capError, capSentence, holderRows, instanceActions, labSource, sourceLabel, workspacePath, type CapError } from "../../lib/target-runtime";
 import { STATE_CHIP, targetActions } from "./actions";
 import { CreateTargetDialog } from "./CreateTargetDialog";
 import { ScopeChip } from "./ScopeChip";
@@ -50,8 +54,10 @@ export default function TargetsPage() {
   const [consoleFor, setConsole] = createSignal<string | null>(null);
   const [notice, setNotice] = createSignal<string | null>(null);
   const [creating, setCreating] = createSignal(false);
-  // `target:verb` of the verb that runs now. A verb runs to its end before the daemon answers.
+  // `target:verb[:agent]` of the verb that runs now. A verb runs to its end before the daemon answers.
   const [busy, setBusy] = createSignal<string | null>(null);
+  // A cap refusal of a verb, shown on the row of its target.
+  const [capFor, setCapFor] = createSignal<{ target: string; cap: CapError } | null>(null);
 
   const groups = () => {
     const list = targets.latest ?? [];
@@ -61,14 +67,19 @@ export default function TargetsPage() {
   };
   const count = () => groups().reduce((n, g) => n + g.targets.length, 0);
 
-  const act = async (id: string, action: TargetAction) => {
-    setBusy(`${id}:${action}`);
+  const act = async (id: string, action: TargetAction, body?: TargetVerbBody, who?: string) => {
+    setBusy(`${id}:${action}${body?.agent ? `:${body.agent}` : ""}`);
     try {
-      const r = await api.targets.action(id, action);
+      const r = await api.targets.action(id, action, body);
       setError(null);
-      setNotice(`${r.target}: ${r.verb} → ${r.state}${r.snapshot ? ` (snapshot ${r.snapshot})` : ""}`);
+      setCapFor(null);
+      setNotice(reportNotice(r, who));
     } catch (e) {
-      setError(e);
+      const cap = capError(e);
+      if (cap) {
+        setCapFor({ target: id, cap });
+        setError(null);
+      } else setError(e);
     } finally {
       setBusy(null);
       void refetch();
@@ -156,6 +167,14 @@ export default function TargetsPage() {
                                   snapshot per task
                                 </span>
                               </Show>
+                              <Show when={sourceLabel(t())}>
+                                {(src) => (
+                                  <div class="small muted" aria-label="Lab source">
+                                    <span class="chip">{SOURCE_CHIP[labSource(t())!]}</span> <span class="mono">{src()}</span>
+                                    <Show when={t().runtime?.head}>{(h) => <span class="mono" title={h()}> · {h().slice(0, 10)}</span>}</Show>
+                                  </div>
+                                )}
+                              </Show>
                             </td>
                             <td>{t().kind}</td>
                             <td>
@@ -178,16 +197,43 @@ export default function TargetsPage() {
                                 <For each={targetActions(t())}>
                                   {(a) => (
                                     <button class="small" disabled={busy() !== null} onClick={() => act(t().id, a)}>
-                                      {busy() === `${t().id}:${a}` ? `${a}…` : a[0]!.toUpperCase() + a.slice(1)}
+                                      {busy() === `${t().id}:${a}` ? `${a}…` : verbLabel(a)}
                                     </button>
                                   )}
                                 </For>
+                                <Show when={t().lab_from_workspace}>
+                                  <span class="small muted">verbs per holder, below</span>
+                                </Show>
                                 <button class="small" onClick={() => setConsole(t().name)}>
                                   Console
                                 </button>
                               </span>
                             </td>
                           </tr>
+                          <Show when={capFor()?.target === t().id ? capFor()!.cap : null}>
+                            {(c) => (
+                              <tr class="cap-row">
+                                <td colSpan={COLS}>
+                                  <div class="error-banner spread" role="alert" aria-label={`Cap on ${t().name}`}>
+                                    <div class="stack" style={{ gap: "2px" }}>
+                                      <strong>Refused ({c().cap === "host" ? "429, host cap" : "409, project cap"}): {capSentence(c())}</strong>
+                                      <span class="small">{c().message}</span>
+                                    </div>
+                                    <button class="ghost small" onClick={() => setCapFor(null)} aria-label="Dismiss">
+                                      ✕
+                                    </button>
+                                  </div>
+                                </td>
+                              </tr>
+                            )}
+                          </Show>
+                          <Show when={hasRuntime(t())}>
+                            <tr class="runtime-row">
+                              <td colSpan={COLS}>
+                                <TargetRuntimePanel target={t()} busy={busy()} act={act} />
+                              </td>
+                            </tr>
+                          </Show>
                           <tr class="lease-row">
                             <td colSpan={COLS}>
                               <TargetLeases target={t()} onNotice={setNotice} />
@@ -219,6 +265,100 @@ export default function TargetsPage() {
         <code>GET /api/targets</code>, <code>GET /api/projects/{"{name}"}/targets</code>, and <code>POST /api/targets</code> are in docs/api.md §17.2. <code>POST /api/targets/{"{name}"}/up|down|snapshot|restore|status</code> is §17.3, exec sessions §17.4. Leases: <code>GET</code>, <code>POST /api/targets/{"{name}"}/leases</code>, <code>PATCH</code>, <code>DELETE .../leases/{"{agent}"}</code> (docs/api.md §17.7).
       </MockOnlyNote>
     </>
+  );
+}
+
+const SOURCE_CHIP = { dir: "lab dir", repo: "lab repo", workspace: "lab from workspace" } as const;
+
+const verbLabel = (a: string) => a[0]!.toUpperCase() + a.slice(1);
+
+/** The notice of a verb report, with the holder of an instance and an `attach_error`. */
+const reportNotice = (r: TargetReport, who?: string) =>
+  `${r.target}${who ? ` (${who})` : ""}: ${r.verb} → ${r.state}${r.snapshot ? ` (snapshot ${r.snapshot})` : ""}${r.attach_error ? `. ${r.attach_error}` : ""}`;
+
+/** A target with something to show in the runtime panel: attached workspaces, a lab instance, or holders. */
+const hasRuntime = (t: Target) => !!t.lab_from_workspace || !!t.runtime?.attached?.length || !!t.runtime?.lab;
+
+/**
+ * What runs on the target (docs/api.md §17.8): the attached workspaces and
+ * their paths in the target, the lab dir of a `lab_repo` instance, and for a
+ * `lab_from_workspace` target each holder with its instance and its verbs.
+ */
+function TargetRuntimePanel(props: { target: Target; busy: string | null; act: (id: string, a: TargetAction, body?: TargetVerbBody, who?: string) => void }) {
+  const holderIds = () =>
+    Object.entries(holds.holds())
+      .filter(([, byTarget]) => byTarget[props.target.name])
+      .map(([agent]) => agent);
+  const nameOf = (id: string) => {
+    const a = agents.byId(id);
+    return a ? `${a.project}/${a.name}` : undefined;
+  };
+  const rows = () => holderRows(props.target, holderIds(), nameOf);
+  return (
+    <div class="stack" style={{ gap: "4px" }} aria-label={`Runtime of ${props.target.name}`}>
+      <Show when={props.target.runtime?.attached?.length}>
+        <span class="small">
+          <strong>Workspaces</strong>{" "}
+          <For each={props.target.runtime!.attached}>
+            {(w) => (
+              <span class="chip mono" title={`The workspace of ${w}, at ${workspacePath(w)} in the target`}>
+                {workspacePath(w)}
+              </span>
+            )}
+          </For>
+        </span>
+      </Show>
+      <Show when={props.target.runtime?.lab}>
+        {(lab) => (
+          <span class="small">
+            <strong>Instance</strong> <span class="mono">{lab()}</span>
+          </span>
+        )}
+      </Show>
+      <Show when={props.target.lab_from_workspace}>
+        <span class="small">
+          <strong>Instances</strong> <span class="muted">· one per holder, from the lab in the holder's workspace</span>
+        </span>
+        <Show when={rows().length} fallback={<span class="small muted">No holder has an instance. A holder's instance comes up when the agent starts or gets its lease.</span>}>
+          <table class="small" aria-label={`Instances of ${props.target.name}`}>
+            <thead>
+              <tr>
+                <th>Holder</th>
+                <th>State</th>
+                <th>Workspace</th>
+                <th>Lab dir</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              <For each={rows()}>
+                {(r) => (
+                  <tr>
+                    <td class="mono">{r.agent_name ?? r.agent}</td>
+                    <td>
+                      <span class={`chip ${STATE_CHIP[r.instance?.state ?? "absent"] ?? ""}`}>{r.instance?.state ?? "no instance"}</span>
+                    </td>
+                    <td class="mono">{(r.instance?.attached ?? []).map(workspacePath).join(", ") || "—"}</td>
+                    <td class="mono">{r.instance?.lab ?? "—"}</td>
+                    <td>
+                      <span class="row" style={{ "flex-wrap": "wrap" }}>
+                        <For each={instanceActions(r.instance?.state)}>
+                          {(a) => (
+                            <button class="small" disabled={props.busy !== null} onClick={() => props.act(props.target.id, a, { agent: r.agent }, r.agent_name ?? r.agent)}>
+                              {props.busy === `${props.target.id}:${a}:${r.agent}` ? `${a}…` : verbLabel(a)}
+                            </button>
+                          )}
+                        </For>
+                      </span>
+                    </td>
+                  </tr>
+                )}
+              </For>
+            </tbody>
+          </table>
+        </Show>
+      </Show>
+    </div>
   );
 }
 

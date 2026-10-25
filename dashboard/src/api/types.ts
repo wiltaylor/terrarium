@@ -888,8 +888,17 @@ export interface Target {
   credential?: string;
   image?: string;
   container?: string;
+  /** `vmlab`: a lab dir on the host that the operator wrote (docs/api.md §17.2). */
   lab?: string;
   machine?: string;
+  /** `vmlab`: a repo of the target's project; the host makes a git worktree of it on `up`. */
+  lab_repo?: string;
+  /** `vmlab` with `lab_repo`: a branch, a tag, or a commit. Default: the repo's default branch, else `main`. */
+  lab_ref?: string;
+  /** `vmlab` with `lab_repo` or `lab_from_workspace`: the relative dir that holds `vmlab.wcl`. Default: the root. */
+  lab_path?: string;
+  /** `vmlab`: the lab is in the workspace of each holder; each holder runs its own instance. */
+  lab_from_workspace?: boolean;
   /**
    * `global` or `project`. The client sets it on every target it reads: a
    * daemon without the field gets it from `project` (no project: global).
@@ -911,6 +920,37 @@ export interface Target {
   access?: "operator" | "policy" | "lease" | null;
   /** The caller's active lease on the target, when `access` is `lease`; else `null`. */
   lease?: Lease | null;
+  /** What runs now (docs/api.md §17.8). `{}` when nothing runs; absent on a daemon from before mode 1. */
+  runtime?: TargetRuntime;
+}
+
+/** docs/api.md §17.8: what runs on a target now. */
+export interface TargetRuntime {
+  /** The agent workspaces (`<project>/<agent>`) in the container or the lab instance. Each is at `/work/<project>/<agent>`. */
+  attached?: string[];
+  /** A `lab_repo` target: the lab dir of its instance on the host. */
+  lab?: string;
+  /** A `lab_repo` target: the commit of its worktree. */
+  head?: string;
+  /** A `lab_from_workspace` target: one instance for each holder, by the agent ULID. */
+  instances?: Record<string, LabInstance>;
+}
+
+/** One lab instance of a `lab_from_workspace` target (docs/api.md §17.8). */
+export interface LabInstance {
+  /** `project/name` of the holder. */
+  agent_name: string;
+  /** The lab dir of the instance on the host. */
+  lab?: string;
+  state: TargetState;
+  attached?: string[];
+}
+
+/** `details` of the `409 conflict` of `POST /api/targets` past `TERRARIUM_MAX_TARGETS_PER_PROJECT` (docs/api.md §17.2). */
+export interface ProjectCapDetails {
+  project: string;
+  targets: number;
+  max: number;
 }
 
 /**
@@ -929,6 +969,10 @@ export interface NewTarget {
   container?: string;
   lab?: string;
   machine?: string;
+  lab_repo?: string;
+  lab_ref?: string;
+  lab_path?: string;
+  lab_from_workspace?: boolean;
   ephemeral?: boolean;
   keep?: boolean;
   snapshot_before_task?: boolean;
@@ -1002,6 +1046,16 @@ export interface TargetReport {
   state: TargetState;
   snapshot?: string;
   result?: unknown;
+  /** docs/api.md §17.3: an `up` of a running target that could not attach a holder's workspace. */
+  attach_error?: string;
+}
+
+/** The body of a lifecycle verb (docs/api.md §17.3). */
+export interface TargetVerbBody {
+  /** A `lab_from_workspace` target: the holder (an agent key) whose instance the verb acts on. */
+  agent?: string;
+  name?: string;
+  destroy?: boolean;
 }
 
 /** `POST /api/targets/{name}/exec`. `shell` opens a login shell in a PTY. */
@@ -1053,6 +1107,12 @@ export interface Host {
   arch?: string | null;
   version?: string | null;
   max_sessions?: number;
+  /** docs/api.md §17.3: the docker and vmlab targets (and lab instances) that may run at one time. Absent: an older host agent, no limit. */
+  max_running_targets?: number;
+  /** The host path of the work root, when the daemon reports it (it does not yet). */
+  work_dir?: string;
+  /** The host dir of the lab instances, when the daemon reports it (it does not yet). */
+  instances_dir?: string;
   connected_at?: string;
   created_at?: string;
   created_by?: string;

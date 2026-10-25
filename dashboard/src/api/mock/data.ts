@@ -328,6 +328,7 @@ export function seed(now: number = Date.now()): MockWorld {
     lease(2, "lab-win11", "adapter-codex", "lead", 60 * 3, { expires_at: ago(60 * 2), revoked_at: ago(60 * 2), revoked_by: "system", exclusive: true, reason: "TER-9", state: "expired" }),
     lease(3, "build-box", "adapter-codex", "operator", 60 * 2, { reason: "release build" }),
     lease(4, "lab-win11", "runner-dev", "lead", 5, { expires_at: ahead(25), exclusive: true, reason: "TER-12" }),
+    lease(5, "terrarium-ws-lab", "runner-dev", "lead", 4, { reason: "TER-12" }),
   ];
   for (const l of leases) {
     const holder = l.agent_name!.split("/")[1]!;
@@ -661,18 +662,27 @@ ${XSS_DOCUMENT}
     msg(fakeUlid("msg", 7), fakeUlid("th", 6), "runner-dev", "operator", "Mock: hostile mail body", `This body must show as text. ${hostile}`, "read", 90),
   ].sort((x, y) => x.created_at.localeCompare(y.created_at));
 
+  // Mode 1 (docs/api.md §17.8): `runtime` holds the attached workspaces, the
+  // instance of a `lab_repo` target, and the instances of a
+  // `lab_from_workspace` target. Project targets made through the API carry
+  // the project prefix (§17.2).
   const targets: Target[] = [
-    { id: "lab-win11", name: "lab-win11", kind: "vmlab", project: "terrarium", host: "lab1", scope: "project", state: "stopped", state_at: ago(60 * 2), ephemeral: true, keep: true, snapshot_before_task: true, snapshots: ["terrarium-clean"], source: "file", usable: true },
-    { id: "build-box", name: "build-box", kind: "ssh", address: "build@buildbox.lan", scope: "global", state: "unknown", ephemeral: false, keep: false, snapshot_before_task: false, snapshots: [], source: "file", usable: true },
-    { id: "pg-test", name: "pg-test", kind: "docker", project: "webshop", host: "lab1", scope: "project", state: "running", state_at: ago(60), ephemeral: true, keep: false, snapshot_before_task: false, snapshots: [], source: "api", usable: true },
-    { id: "dev-vm", name: "dev-vm", kind: "vmlab", host: "lab1", scope: "global", state: "running", state_at: ago(30), ephemeral: false, keep: false, snapshot_before_task: false, snapshots: ["terrarium"], source: "file", usable: true },
-    { id: "ci-box", name: "ci-box", kind: "docker", host: "lab1", image: "alpine:3", scope: "global", state: "absent", state_at: ago(60 * 5), ephemeral: true, keep: false, snapshot_before_task: false, snapshots: [], source: "api", usable: true },
-    { id: "pi-runner", name: "pi-runner", kind: "host", host: "pi-cluster", scope: "global", state: "unknown", ephemeral: false, keep: false, snapshot_before_task: false, snapshots: [], source: "file", usable: true },
+    { id: "lab-win11", name: "lab-win11", kind: "vmlab", project: "terrarium", host: "lab1", lab: "/labs/win11", machine: "win11", scope: "project", state: "stopped", state_at: ago(60 * 2), ephemeral: true, keep: true, snapshot_before_task: true, snapshots: ["terrarium-clean"], source: "file", usable: true, runtime: {} },
+    { id: "build-box", name: "build-box", kind: "ssh", address: "build@buildbox.lan", scope: "global", state: "unknown", ephemeral: false, keep: false, snapshot_before_task: false, snapshots: [], source: "file", usable: true, runtime: {} },
+    { id: "pg-test", name: "pg-test", kind: "docker", project: "webshop", host: "lab1", image: "postgres:17", scope: "project", state: "running", state_at: ago(60), ephemeral: true, keep: false, snapshot_before_task: false, snapshots: [], source: "api", usable: true, runtime: { attached: ["webshop/shop-lead"] } },
+    { id: "dev-vm", name: "dev-vm", kind: "vmlab", host: "lab1", lab: "/labs/dev", scope: "global", state: "running", state_at: ago(30), ephemeral: false, keep: false, snapshot_before_task: false, snapshots: ["terrarium"], source: "file", usable: true, runtime: {} },
+    { id: "ci-box", name: "ci-box", kind: "docker", host: "lab1", image: "alpine:3", scope: "global", state: "absent", state_at: ago(60 * 5), ephemeral: true, keep: false, snapshot_before_task: false, snapshots: [], source: "api", usable: true, runtime: {} },
+    { id: "pi-runner", name: "pi-runner", kind: "host", host: "pi-cluster", scope: "global", state: "unknown", ephemeral: false, keep: false, snapshot_before_task: false, snapshots: [], source: "file", usable: true, runtime: {} },
+    { id: "terrarium-net-lab", name: "terrarium-net-lab", kind: "vmlab", project: "terrarium", host: "lab1", lab_repo: "terrarium", lab_ref: "main", lab_path: "labs/net", machine: "router", scope: "project", state: "stopped", state_at: ago(60 * 3), ephemeral: true, keep: false, snapshot_before_task: false, snapshots: [], source: "api", usable: true, runtime: {} },
+    {
+      id: "terrarium-ws-lab", name: "terrarium-ws-lab", kind: "vmlab", project: "terrarium", host: "lab1", lab_from_workspace: true, lab_path: "lab", machine: "dev", scope: "project", state: "unknown", state_at: ago(4), ephemeral: true, keep: false, snapshot_before_task: false, snapshots: [], source: "api", usable: true,
+      runtime: { instances: { [byName("runner-dev").id]: { agent_name: "terrarium/runner-dev", lab: `/var/lib/terrarium-host/instances/terrarium-ws-lab.${byName("runner-dev").id}/lab`, state: "running", attached: ["terrarium/runner-dev"] } } },
+    },
   ];
 
   const hosts: Host[] = [
     {
-      name: "lab1", id: fakeUlid("host", 1), host_id: fakeUlid("host", 1), status: "online", online: true, sessions: 1, max_sessions: 32, connected_at: ago(60), os: "linux", arch: "x86_64", version: "0.1.0", last_seen: ago(0.1),
+      name: "lab1", id: fakeUlid("host", 1), host_id: fakeUlid("host", 1), status: "online", online: true, sessions: 1, max_sessions: 32, max_running_targets: 4, connected_at: ago(60), os: "linux", arch: "x86_64", version: "0.1.0", last_seen: ago(0.1),
       capabilities: { docker: { present: true, version: "29.8.0" }, vmlab: { present: true, version: "0.30.0-alpha" }, shell: "/bin/bash" },
     },
     {

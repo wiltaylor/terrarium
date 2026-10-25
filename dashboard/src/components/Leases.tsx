@@ -8,7 +8,7 @@ import type { Agent, Lease, LeaseEventData, LeaseGranted, Target } from "../api/
 import { scopeLabel, targetScope } from "../lib/target-scope";
 import { actorLabel, applyLeaseEvent, countdown, holderLabel, shownState, untilValue, type UntilMode } from "../lib/leases";
 import { agents, api, events, leases as holds } from "../stores";
-import { createGrantDialog, eligibleAgents, eligibleTargets, grantTitle } from "../features/targets/grant";
+import { createGrantDialog, eligibleAgents, eligibleTargets, grantTitle, NO_EXCLUSIVE_REASON } from "../features/targets/grant";
 import { ConfirmButton, Empty, ErrorBanner, Modal, useNow } from "./ui";
 
 const STATE_CHIP: Record<string, string> = { active: "ok", revoked: "", expired: "warn" };
@@ -286,9 +286,10 @@ function ExtendForm(props: { lease: Lease; onDone: (l: Lease) => void; onCancel:
  */
 export function GrantDialog(props: { target?: Target; agent?: Agent; targets?: Target[]; onClose: () => void; onGranted: (l: LeaseGranted) => void }) {
   const now = useNow(1000);
-  const dlg = createGrantDialog(api, { target: props.target?.name ?? "", agent: props.agent?.id ?? "" });
+  const targetOf = (name: string) => (props.target?.name === name ? props.target : props.targets?.find((t) => t.name === name));
+  const dlg = createGrantDialog(api, { target: props.target?.name ?? "", agent: props.agent?.id ?? "" }, Date.now, targetOf);
   const f = dlg.form;
-  const target = () => props.target ?? props.targets?.find((t) => t.name === f().target);
+  const target = () => targetOf(f().target);
   const agentChoices = () => eligibleAgents(agents.state.agents, target());
   const targetChoices = () => eligibleTargets(props.targets ?? [], props.agent);
   onMount(() => {
@@ -350,10 +351,19 @@ export function GrantDialog(props: { target?: Target; agent?: Agent; targets?: T
             onTime={(v) => dlg.set("time", v)}
           />
         </div>
-        <label class="row small" style={{ "flex-wrap": "nowrap", "align-items": "flex-start" }}>
-          <input type="checkbox" checked={f().exclusive} onChange={(e) => dlg.set("exclusive", e.currentTarget.checked)} />
-          <span>Exclusive: no other agent may hold a lease on the target at the same time</span>
-        </label>
+        <Show
+          when={dlg.exclusiveAllowed()}
+          fallback={
+            <p class="small muted" aria-label="No exclusive lease" style={{ margin: 0 }}>
+              {NO_EXCLUSIVE_REASON}
+            </p>
+          }
+        >
+          <label class="row small" style={{ "flex-wrap": "nowrap", "align-items": "flex-start" }}>
+            <input type="checkbox" checked={f().exclusive} onChange={(e) => dlg.set("exclusive", e.currentTarget.checked)} />
+            <span>Exclusive: no other agent may hold a lease on the target at the same time</span>
+          </label>
+        </Show>
         <label>
           Reason
           <input value={f().reason} placeholder="TER-3" onInput={(e) => dlg.set("reason", e.currentTarget.value)} />

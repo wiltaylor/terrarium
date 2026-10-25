@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createMockApi } from "../../api/mock";
 import type { Agent, Target } from "../../api/types";
-import { createGrantDialog, eligibleAgents, eligibleTargets, emptyGrantForm, grantBody, grantTitle } from "./grant";
+import { canBeExclusive, createGrantDialog, eligibleAgents, eligibleTargets, emptyGrantForm, grantBody, grantTitle } from "./grant";
 
 const mock = () => createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 0 });
 const NOW = Date.parse("2026-10-25T09:00:00.000Z");
@@ -91,5 +91,27 @@ describe("the grant dialog and the target scope", () => {
     expect(grantTitle({ name: "vm", project: "lab", scope: "project" })).toBe("Grant vm · project lab");
     expect(grantTitle({ name: "dbox", scope: "global" })).toBe("Grant dbox · global target");
     expect(grantTitle({ name: "vlab" })).toBe("Grant vlab · global target");
+  });
+});
+
+describe("no exclusive lease on a lab_from_workspace target (docs/api.md §17.7)", () => {
+  it("never sends exclusive for such a target", () => {
+    expect(canBeExclusive({ lab_from_workspace: true })).toBe(false);
+    expect(canBeExclusive({})).toBe(true);
+    expect(canBeExclusive(undefined)).toBe(true);
+    const f = emptyGrantForm({ target: "ws", agent: "01A", exclusive: true });
+    expect(grantBody(f, NOW, { lab_from_workspace: true })).toEqual({ body: { agent: "01A", until: "30m", exclusive: false } });
+    expect(grantBody(f, NOW, {})).toMatchObject({ body: { exclusive: true } });
+  });
+
+  it("hides the choice in the dialog state, and the grant goes through without exclusive", async () => {
+    const api = mock();
+    const ws = api.world.targets.find((t) => t.name === "terrarium-ws-lab")!;
+    const d = createGrantDialog(api, { target: ws.name, agent: "terrarium/lead", exclusive: true }, Date.now, (n) => api.world.targets.find((t) => t.name === n));
+    expect(d.exclusiveAllowed()).toBe(false);
+    const l = await d.submit();
+    expect(l).toMatchObject({ target: "terrarium-ws-lab", exclusive: false, state: "active" });
+    const other = createGrantDialog(api, { target: "build-box" }, Date.now, (n) => api.world.targets.find((t) => t.name === n));
+    expect(other.exclusiveAllowed()).toBe(true);
   });
 });

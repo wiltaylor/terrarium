@@ -72,6 +72,7 @@ import type {
   NewTarget,
   Target,
   TargetReport,
+  TargetVerbBody,
   UsageMe,
   CardUsage,
   UsagePoint,
@@ -284,7 +285,7 @@ export interface Api {
     /** `POST /api/targets`. No `project`: a global target, which needs a sysadmin (`403 forbidden`). */
     create(t: NewTarget): Promise<Target>;
     /** A lifecycle verb (docs/api.md §17.3). It runs to its end; the answer is the executor's report, not a target: refetch the list. */
-    action(id: string, action: TargetAction): Promise<TargetReport>;
+    action(id: string, action: TargetAction, body?: TargetVerbBody): Promise<TargetReport>;
     /** Open an exec session. `{shell: true, pty}` gives an operator terminal. */
     exec(id: string, req: ExecRequest): Promise<ExecOpened>;
     /** The session terminal, with the PTY protocol of docs/api.md §6.5. */
@@ -543,7 +544,7 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
     targets: {
       list: async () => (await all<Target>("/api/targets")).map(withScope),
       create: async (target) => withScope(await post<Target>("/api/targets", target)),
-      action: (id, action) => post(`/api/targets/${seg(id)}/${action}`),
+      action: (id, action, body) => post(`/api/targets/${seg(id)}/${action}`, body),
       exec: (id, req) => post(`/api/targets/${seg(id)}/exec`, req),
       sessionPty: (id, session) => socket(`/api/targets/${seg(id)}/sessions/${seg(session)}/ws`),
       closeSession: (id, session) => del(`/api/targets/${seg(id)}/sessions/${seg(session)}`),

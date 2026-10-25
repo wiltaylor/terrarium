@@ -32,13 +32,27 @@ export type GrantOutcome =
   | { kind: "error"; error: unknown }
   | { kind: "done"; lease: LeaseGranted };
 
-/** The body of `POST /api/targets/{name}/leases` from the form, or the reason the form is not complete. */
-export function grantBody(f: GrantForm, now = Date.now()): { body: LeaseGrant } | { error: string } {
+/**
+ * Whether a lease on the target can be exclusive. A `lab_from_workspace`
+ * target gives each holder its own lab instance, so the daemon refuses an
+ * exclusive grant on it (`422 invalid`, docs/api.md §17.7).
+ */
+export const canBeExclusive = (t: Pick<Target, "lab_from_workspace"> | undefined): boolean => !t?.lab_from_workspace;
+
+/** Why the Grant dialog has no exclusive choice for a `lab_from_workspace` target. */
+export const NO_EXCLUSIVE_REASON = "No exclusive lease: this target gives each holder its own lab instance from the holder's workspace, so holders do not share a lab.";
+
+/**
+ * The body of `POST /api/targets/{name}/leases` from the form, or the reason
+ * the form is not complete. `target`: a `lab_from_workspace` target never
+ * gets `exclusive: true`.
+ */
+export function grantBody(f: GrantForm, now = Date.now(), target?: Pick<Target, "lab_from_workspace">): { body: LeaseGrant } | { error: string } {
   if (!f.target) return { error: "Choose a target." };
   if (!f.agent) return { error: "Choose an agent." };
   const u = untilValue(f.untilMode, f.untilMode === "duration" ? f.duration : f.time, now);
   if ("error" in u) return u;
-  const body: LeaseGrant = { agent: f.agent, exclusive: f.exclusive };
+  const body: LeaseGrant = { agent: f.agent, exclusive: f.exclusive && canBeExclusive(target) };
   if (u.until !== null) body.until = u.until;
   const reason = f.reason.trim();
   if (reason) body.reason = reason;
@@ -73,12 +87,20 @@ export const emptyGrantForm = (init: Partial<GrantForm> = {}): GrantForm => ({
   ...init,
 });
 
-export function createGrantDialog(api: Pick<Api, "targets">, init: Partial<GrantForm> = {}, now: () => number = Date.now) {
+export function createGrantDialog(
+  api: Pick<Api, "targets">,
+  init: Partial<GrantForm> = {},
+  now: () => number = Date.now,
+  /** The target of a name, for the exclusive rule. */
+  targetOf: (name: string) => Pick<Target, "lab_from_workspace"> | undefined = () => undefined,
+) {
   const [form, setForm] = createSignal<GrantForm>(emptyGrantForm(init));
   const [outcome, setOutcome] = createSignal<GrantOutcome>({ kind: "idle" });
   return {
     form,
     outcome,
+    /** Whether the form offers an exclusive lease on its target. */
+    exclusiveAllowed: () => canBeExclusive(targetOf(form().target)),
     /** Change one field. A change clears a refusal: the next send is a new try. */
     set<K extends keyof GrantForm>(key: K, value: GrantForm[K]) {
       setForm((f) => ({ ...f, [key]: value }));
@@ -87,7 +109,7 @@ export function createGrantDialog(api: Pick<Api, "targets">, init: Partial<Grant
     /** Send the grant. Answers the lease, or null on a refusal (see `outcome`). */
     async submit(): Promise<LeaseGranted | null> {
       if (outcome().kind === "sending") return null;
-      const b = grantBody(form(), now());
+      const b = grantBody(form(), now(), targetOf(form().target));
       if ("error" in b) {
         setOutcome({ kind: "invalid", message: b.error });
         return null;

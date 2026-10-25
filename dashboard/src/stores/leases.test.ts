@@ -56,12 +56,12 @@ describe("lease holds (the 'holds <target>' chips)", () => {
     await store.loadAll();
     const runner = api.world.agents.find((a) => a.name === "runner-dev")!;
     const codex = api.world.agents.find((a) => a.name === "adapter-codex")!;
-    expect(store.holdsFor(runner.id).map((h) => h.target)).toEqual(["lab-win11"]);
+    expect(store.holdsFor(runner.id).map((h) => h.target)).toEqual(["lab-win11", "terrarium-ws-lab"]);
     expect(store.holdsFor(codex.id).map((h) => h.target)).toEqual(["build-box"]);
     fn!(granted(runner.id, "build-box", "LX", null));
-    expect(store.holdsFor(runner.id).map((h) => h.target)).toEqual(["build-box", "lab-win11"]);
+    expect(store.holdsFor(runner.id).map((h) => h.target)).toEqual(["build-box", "lab-win11", "terrarium-ws-lab"]);
     fn!(ended(runner.id, "build-box", "LX"));
-    expect(store.holdsFor(runner.id).map((h) => h.target)).toEqual(["lab-win11"]);
+    expect(store.holdsFor(runner.id).map((h) => h.target)).toEqual(["lab-win11", "terrarium-ws-lab"]);
     store.dispose();
     expect(fn).toBeNull();
   });

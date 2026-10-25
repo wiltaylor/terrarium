@@ -1,20 +1,35 @@
 // Define a target (docs/api.md §17.2): `POST /api/targets`. The scope is
 // the selected project by default; "global" is an explicit choice. The
 // daemon answers `403 forbidden` when the viewer may not define a target in
-// that scope (§10): a global target needs a sysadmin.
+// that scope (§10): a global target needs a sysadmin. A project target
+// gets the name `<project>-<name>`, and a project holds at most
+// TERRARIUM_MAX_TARGETS_PER_PROJECT targets (`409`). A vmlab target takes a
+// lab dir, a lab repo of the project, or the lab in each holder's workspace.
 
-import { For, Show } from "solid-js";
+import { createResource, For, Show } from "solid-js";
 import { ErrorBanner, Modal } from "../../components/ui";
 import type { Target, TargetKind } from "../../api/types";
 import { api, projects } from "../../stores";
-import { createCreateTargetDialog, GLOBAL, showsField, type CreateOutcome } from "./create";
+import { capSentence } from "../../lib/target-runtime";
+import { createCreateTargetDialog, GLOBAL, LAB_SOURCES, showsField, type CreateOutcome } from "./create";
 
 const KINDS: readonly TargetKind[] = ["docker", "vmlab", "host", "ssh"];
 
 export function CreateTargetDialog(props: { project: string | null; onClose: () => void; onCreated: (t: Target) => void }) {
   const dlg = createCreateTargetDialog(api, props.project);
   const f = dlg.form;
-  const shows = (k: Parameters<typeof showsField>[1]) => showsField(f().kind, k);
+  const shows = (k: Parameters<typeof showsField>[1]) => showsField(f().kind, k, f().labSource);
+  const projectScope = () => (f().scope && f().scope !== GLOBAL ? f().scope : null);
+  // The lab repo picker: the repos of the project of the scope.
+  const [repos] = createResource(
+    () => (f().kind === "vmlab" && f().labSource === "repo" ? projectScope() : null),
+    (p) => api.projects.repos(p).catch(() => []),
+  );
+  const source = () => LAB_SOURCES.find((x) => x.id === f().labSource)!;
+  const cap = () => {
+    const o = dlg.outcome();
+    return o.kind === "cap" ? (o as Extract<CreateOutcome, { kind: "cap" }>).cap : null;
+  };
   const forbidden = () => {
     const o = dlg.outcome();
     return o.kind === "forbidden" ? (o as Extract<CreateOutcome, { kind: "forbidden" }>) : null;
@@ -24,7 +39,7 @@ export function CreateTargetDialog(props: { project: string | null; onClose: () 
     const t = await dlg.submit();
     if (t) props.onCreated(t);
   };
-  const text = (key: "host" | "address" | "port" | "credential" | "image" | "container" | "lab" | "machine", label: string, placeholder = "") => (
+  const text = (key: "host" | "address" | "port" | "credential" | "image" | "container" | "lab" | "machine" | "lab_ref" | "lab_path", label: string, placeholder = "") => (
     <Show when={shows(key)}>
       <label>
         {label}
@@ -76,9 +91,55 @@ export function CreateTargetDialog(props: { project: string | null; onClose: () 
           {text("credential", "Credential (an ssh_key name)", "buildbox-key")}
           {text("image", "Image", "alpine:3")}
           {text("container", "Container (an existing one)", "")}
-          {text("lab", "Lab (an absolute path)", "/labs/win11/vmlab.wcl")}
-          {text("machine", "Machine", "win11")}
+          <Show when={shows("labSource")}>
+            <label>
+              Lab source
+              <select aria-label="Lab source" value={f().labSource} onChange={(e) => dlg.set("labSource", e.currentTarget.value as typeof LAB_SOURCES[number]["id"])}>
+                <For each={LAB_SOURCES}>
+                  {(x) => (
+                    <option value={x.id} selected={x.id === f().labSource}>
+                      {x.label}
+                    </option>
+                  )}
+                </For>
+              </select>
+            </label>
+          </Show>
+          {text("lab", "Lab directory (an absolute path on the host)", "/labs/win11")}
+          <Show when={shows("lab_repo")}>
+            <label>
+              Lab repo
+              <select aria-label="Lab repo" value={f().lab_repo} onChange={(e) => dlg.set("lab_repo", e.currentTarget.value)} disabled={!projectScope()}>
+                <option value="" disabled selected={!f().lab_repo}>
+                  {!projectScope() ? "Needs a project scope" : repos.loading ? "Loading…" : repos()?.length ? "Pick a repo of the project" : "The project has no repos"}
+                </option>
+                <For each={repos() ?? []}>
+                  {(r) => (
+                    <option value={r.name} selected={r.name === f().lab_repo}>
+                      {r.name}
+                      {r.default_branch ? ` (default ${r.default_branch})` : ""}
+                    </option>
+                  )}
+                </For>
+              </select>
+            </label>
+          </Show>
+          {text("lab_ref", "Ref (a branch, a tag, or a commit)", repos()?.find((r) => r.name === f().lab_repo)?.default_branch ?? "default branch")}
+          {text("lab_path", "Lab path (the dir that holds vmlab.wcl)", "the root")}
+          {text("machine", f().kind === "vmlab" && f().labSource !== "dir" ? "Machine (gets the workspace)" : "Machine", "win11")}
         </div>
+        <Show when={projectScope() && f().name.trim()}>
+          <p class="small muted" aria-label="Full name" style={{ margin: 0 }}>
+            The target name is <strong class="mono">{dlg.fullName()}</strong>
+            {dlg.fullName() !== f().name.trim() ? ` (a project target gets the prefix ${projectScope()}-)` : ""}.
+          </p>
+        </Show>
+        <Show when={shows("labSource")}>
+          <p class="small muted" aria-label="Lab source help" style={{ margin: 0 }}>
+            {source().help}
+            {f().labSource !== "dir" && f().scope === GLOBAL ? " It needs a project scope." : ""}
+          </p>
+        </Show>
         <Show when={shows("ephemeral")}>
           <div class="row" style={{ "flex-wrap": "wrap", gap: "12px" }}>
             <label class="row small">
@@ -111,6 +172,17 @@ export function CreateTargetDialog(props: { project: string | null; onClose: () 
                 <strong>Refused: you may not define a {o().scope === GLOBAL ? "global target" : `target of project ${o().scope}`}.</strong>
                 <span class="small">{o().message}</span>
                 <span class="small muted">{o().scope === GLOBAL ? "A global target needs the sysadmin role. Choose a project." : `It needs project_admin of ${o().scope}.`}</span>
+              </div>
+            </div>
+          )}
+        </Show>
+        <Show when={cap()}>
+          {(c) => (
+            <div class="error-banner" role="alert" aria-label="Project cap">
+              <div class="stack" style={{ gap: "2px" }}>
+                <strong>Refused: {capSentence(c())}</strong>
+                <span class="small">{c().message}</span>
+                <span class="small muted">The cap is TERRARIUM_MAX_TARGETS_PER_PROJECT on the daemon.</span>
               </div>
             </div>
           )}

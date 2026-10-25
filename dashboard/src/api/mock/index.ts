@@ -94,6 +94,8 @@ export interface MockOptions {
    * caller is the operator, who may define every target.
    */
   denyGlobalTargets?: boolean;
+  /** `TERRARIUM_MAX_TARGETS_PER_PROJECT` (docs/api.md §17.2). Default 8. */
+  maxTargetsPerProject?: number;
 }
 
 /** What the mock reads from the client: the headers that the HTTP transport would send. */
@@ -172,15 +174,19 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     host_online: t.kind === "ssh" ? null : w.hosts.some((h) => h.name === t.host && h.status === "online"),
     access: "operator",
     lease: null,
+    runtime: t.runtime ?? {},
   });
   // The checks of the daemon's `store/targets.rs` validate (docs/api.md §17.2): a bad value is `422 invalid`.
   const targetDef = (b: NewTarget): NewTarget => {
     if (!b || typeof b.name !== "string" || !/^[a-z0-9][a-z0-9._-]*$/i.test(b.name)) fail(422, "invalid", "bad target name");
     if (!["host", "ssh", "docker", "vmlab"].includes(b.kind)) fail(422, "invalid", "`kind` must be host, ssh, docker, or vmlab");
-    for (const f of ["host", "address", "credential", "image", "container", "machine"] as const) {
+    for (const f of ["host", "address", "credential", "image", "container", "machine", "lab_ref"] as const) {
       const v = b[f];
       if (v !== undefined && (typeof v !== "string" || !v || /\s/.test(v) || v.startsWith("-"))) fail(422, "invalid", `bad \`${f}\` \`${String(v)}\`: not empty, no spaces, no leading \`-\``);
     }
+    const p = b.lab_path;
+    if (p !== undefined && (typeof p !== "string" || p.startsWith("/") || p.split("/").some((x) => x === ".." || x.startsWith("-")) || /\s/.test(p)))
+      fail(422, "invalid", `bad \`lab_path\` \`${String(p)}\`: a relative directory with no \`..\``);
     const need = (f: string, ok: boolean) => ok || fail(422, "invalid", `a \`${b.kind}\` target needs \`${f}\``);
     if (b.kind === "host") need("host", !!b.host);
     if (b.kind === "ssh") need("address", !!b.address);
@@ -190,13 +196,64 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     }
     if (b.kind === "vmlab") {
       need("host", !!b.host);
-      need("lab", !!b.lab);
-      if (!b.lab!.startsWith("/")) fail(422, "invalid", "`lab` must be an absolute path");
+      // docs/api.md §17.2: one of `lab`, `lab_repo`, and `lab_from_workspace`.
+      if ([!!b.lab, !!b.lab_repo, !!b.lab_from_workspace].filter(Boolean).length !== 1)
+        fail(422, "invalid", "a `vmlab` target needs one of `lab` (a lab dir on the host), `lab_repo` (a repo of the project), and `lab_from_workspace = true`");
+      if ((b.lab_repo || b.lab_from_workspace) && !b.project) fail(422, "invalid", "`lab_repo` and `lab_from_workspace` need a project target");
+      if (b.lab_from_workspace && b.snapshot_before_task) fail(422, "invalid", "`snapshot_before_task` does not work with `lab_from_workspace`: each holder has its own instance");
+      if (!b.lab && !b.machine) fail(422, "invalid", "`lab_repo` and `lab_from_workspace` need `machine`: the machine that runs the commands and gets the workspace");
+      if (b.lab && (b.lab_ref || b.lab_path)) fail(422, "invalid", "`lab_ref` and `lab_path` go with `lab_repo` or `lab_from_workspace`");
+      if (b.lab && !b.lab.startsWith("/")) fail(422, "invalid", "`lab` must be an absolute path");
+    } else if (b.lab_repo || b.lab_ref || b.lab_path || b.lab_from_workspace) {
+      fail(422, "invalid", `\`lab_repo\`, \`lab_ref\`, \`lab_path\`, and \`lab_from_workspace\` are for a vmlab target, not \`${b.kind}\``);
     }
     if (b.ephemeral && !(b.kind === "vmlab" || (b.kind === "docker" && b.image))) fail(422, "invalid", "an ephemeral target must be docker with `image`, or vmlab");
     const def: NewTarget = { name: b.name, kind: b.kind };
-    for (const [k, v] of Object.entries(b) as [keyof NewTarget, unknown][]) if (v !== undefined && v !== null && v !== "") (def as unknown as Record<string, unknown>)[k] = v;
+    for (const [k, v] of Object.entries(b) as [keyof NewTarget, unknown][]) if (v !== undefined && v !== null && v !== "" && v !== false) (def as unknown as Record<string, unknown>)[k] = v;
     return def;
+  };
+  // docs/api.md §17.3, §17.8: a verb on a `lab_from_workspace` target acts on the instance of one holder (`agent`).
+  const instanceVerb = (t: Target, verb: string, key: string | undefined, online: boolean): TargetReport => {
+    if (!key) fail(422, "invalid", `\`${t.name}\` gives each holder its own lab instance: name the holder with \`agent\``);
+    const a = agent(key!);
+    if (!online) fail(409, "conflict", `host agent \`${t.host ?? "?"}\` of target \`${t.name}\` is offline`);
+    const instances = { ...(t.runtime?.instances ?? {}) };
+    const cur = instances[a.id];
+    if (verb === "snapshot" || verb === "restore") {
+      if (!cur || cur.state !== "running") fail(409, "conflict", `\`${t.name}\` has no instance of \`${a.project}/${a.name}\` on the host: bring it up first`);
+      fail(422, "invalid", "the mock has no snapshots of a lab instance");
+    }
+    if (verb === "up" && cur?.state !== "running") {
+      checkRunningCap(t, a.id);
+      const ws = `${a.project}/${a.name}`;
+      instances[a.id] = { agent_name: ws, lab: `/var/lib/terrarium-host/instances/${t.name}.${a.id}/lab`, state: "running", attached: [ws] };
+    } else if (verb === "down" && cur) {
+      if (t.ephemeral && !t.keep) delete instances[a.id];
+      else instances[a.id] = { ...cur, state: "stopped" };
+    }
+    t.runtime = { ...t.runtime, instances };
+    t.state_at = iso();
+    const state = instances[a.id]?.state ?? "absent";
+    const r: TargetReport = { target: t.name, verb, state };
+    audit(`target.${verb}`, t.name, t.project, { ...r, agent: a.id });
+    return r;
+  };
+  // docs/api.md §17.3: the docker and vmlab targets (and lab instances) that run on a host, without the one that starts.
+  const runningOn = (host: string, except: { target: string; agent?: string }) => {
+    let n = 0;
+    for (const t of w.targets) {
+      if (t.host !== host || (t.kind !== "docker" && t.kind !== "vmlab")) continue;
+      if (t.lab_from_workspace) n += Object.entries(t.runtime?.instances ?? {}).filter(([k, i]) => i.state === "running" && !(t.name === except.target && k === except.agent)).length;
+      else if (t.state === "running" && t.name !== except.target) n += 1;
+    }
+    return n;
+  };
+  const checkRunningCap = (t: Target, agent?: string) => {
+    const h = w.hosts.find((x) => x.name === t.host);
+    const max = h?.max_running_targets;
+    if (!h || max === undefined) return;
+    const running = runningOn(h.name, { target: t.name, agent });
+    if (running >= max) fail(429, "rate_limited", `host \`${h.name}\` runs ${running} targets, and its max_running_targets is ${max}; bring one down first`);
   };
 
   /** An agent key: a ULID, `project/name`, or a unique bare name (docs/api.md §2.2). */
@@ -2048,18 +2105,26 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
         reply(() => {
           const def = targetDef(body);
           if (!def.project && opts.denyGlobalTargets) fail(403, "forbidden", "defining a global target needs the sysadmin role");
-          if (def.project) project(def.project);
+          if (def.project) {
+            project(def.project);
+            // docs/api.md §17.2: a project target is `<project>-<name>`; a project holds at most TERRARIUM_MAX_TARGETS_PER_PROJECT.
+            if (!def.name.startsWith(`${def.project}-`)) def.name = `${def.project}-${def.name}`;
+            const max = opts.maxTargetsPerProject ?? 8;
+            const n = w.targets.filter((t) => t.project === def.project).length;
+            if (n >= max) fail(409, "conflict", `project \`${def.project}\` has ${n} targets, the most it may have (TERRARIUM_MAX_TARGETS_PER_PROJECT = ${max}); delete one first`, { project: def.project, targets: n, max });
+          }
           if (w.targets.some((t) => t.name === def.name)) fail(409, "conflict", `target \`${def.name}\` exists`);
-          const t: Target = { ...def, id: def.name, scope: def.project ? "project" : "global", ephemeral: !!def.ephemeral, keep: !!def.keep, snapshot_before_task: !!def.snapshot_before_task, source: "api", state: "unknown", state_at: null, snapshots: [], usable: true };
+          const t: Target = { ...def, id: def.name, scope: def.project ? "project" : "global", ephemeral: !!def.ephemeral, keep: !!def.keep, snapshot_before_task: !!def.snapshot_before_task, source: "api", state: "unknown", state_at: null, snapshots: [], usable: true, runtime: {} };
           w.targets.push(t);
           audit("target.create", t.name, t.project, { ...def });
           return targetView(t);
         }),
       // docs/api.md §17.3: each verb runs to its end and answers the executor report.
-      action: (id, verb) =>
+      action: (id, verb, body) =>
         reply((): TargetReport => {
           const t = target(id);
           const online = !!t.host && w.hosts.find((x) => x.name === t.host)?.status === "online";
+          if (t.lab_from_workspace) return instanceVerb(t, verb, body?.agent, online);
           const report = (snapshot?: string): TargetReport => {
             t.state_at = iso();
             const r: TargetReport = { target: t.name, verb, state: t.state, ...(snapshot ? { snapshot } : {}) };
@@ -2082,12 +2147,22 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
             } else if (!t.snapshots.includes(name)) fail(422, "invalid", `vmlab.snapshot_restore failed: no snapshot \`${name}\``, { verb: "vmlab.snapshot_restore", code: 1, end: "exited", stderr: `no snapshot ${name}`, stdout: "" });
             return report(name);
           }
-          if (verb === "up") t.state = "running";
-          else if (t.ephemeral && !t.keep) {
-            // An ephemeral target without keep is destroyed; a destroy clears the snapshots.
-            t.state = "absent";
-            t.snapshots = [];
-          } else t.state = "stopped";
+          if (verb === "up") {
+            if (t.state !== "running" && !t.container) checkRunningCap(t);
+            if (t.lab_repo) {
+              // docs/api.md §17.8: a worktree of the project's repo at `lab_ref`.
+              if (!w.repos.some((r) => r.project === t.project && r.name === t.lab_repo)) fail(422, "invalid", `\`lab_repo\` \`${t.lab_repo}\` is not a repo of project \`${t.project}\``);
+              t.runtime = { ...t.runtime, lab: `/var/lib/terrarium-host/instances/${t.name}/lab`, head: "3f2c1e0b9a8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b" };
+            }
+            t.state = "running";
+          } else {
+            if (t.ephemeral && !t.keep) {
+              // An ephemeral target without keep is destroyed; a destroy clears the snapshots.
+              t.state = "absent";
+              t.snapshots = [];
+            } else t.state = "stopped";
+            t.runtime = {};
+          }
           return report();
         }),
       exec: (id, req) =>
@@ -2127,6 +2202,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           if (typeof body?.agent !== "string" || !body.agent.trim()) fail(422, "invalid", "a lease needs `agent`");
           const a = agent(body.agent);
           if (t.project && t.project !== a.project) fail(422, "invalid", `target \`${t.name}\` belongs to project \`${t.project}\`; lease it to an agent of \`${t.project}\``);
+          if (body.exclusive && t.lab_from_workspace) fail(422, "invalid", `\`${t.name}\` gives each holder its own lab instance, so an exclusive lease does not apply; grant it without \`exclusive\``);
           const expires_at = parseUntil(body.until);
           sweepLeases();
           const active = w.leases.filter((l) => l.target === t.name && l.state === "active");

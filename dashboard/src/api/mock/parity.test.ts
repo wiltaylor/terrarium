@@ -562,7 +562,7 @@ describe("target scope (docs/api.md §17.2)", () => {
   it("lists the project's targets and the global ones on GET /api/projects/{name}/targets, in the target shape", async () => {
     const api = mock();
     const list = await api.projects.targets("terrarium");
-    expect(list.map((t) => `${t.name}:${t.scope}`).sort()).toEqual(["build-box:global", "ci-box:global", "dev-vm:global", "lab-win11:project", "pi-runner:global"]);
+    expect(list.map((t) => `${t.name}:${t.scope}`).sort()).toEqual(["build-box:global", "ci-box:global", "dev-vm:global", "lab-win11:project", "pi-runner:global", "terrarium-net-lab:project", "terrarium-ws-lab:project"]);
     expect(list.every((t) => !t.project || t.project === "terrarium")).toBe(true);
     expect(list[0]).toHaveProperty("access", "operator");
     expect(list[0]).toHaveProperty("host_online");
@@ -572,12 +572,13 @@ describe("target scope (docs/api.md §17.2)", () => {
   it("creates a project target and a global target with 201 shapes, source api", async () => {
     const api = mock();
     const p = await api.targets.create({ name: "pg2", kind: "docker", project: "webshop", host: "lab1", image: "postgres:17", ephemeral: true });
-    expect(p).toMatchObject({ id: "pg2", name: "pg2", scope: "project", project: "webshop", source: "api", ephemeral: true, keep: false, snapshots: [], access: "operator" });
+    expect(p).toMatchObject({ id: "webshop-pg2", name: "webshop-pg2", scope: "project", project: "webshop", source: "api", ephemeral: true, keep: false, snapshots: [], access: "operator", runtime: {} });
     const g = await api.targets.create({ name: "vm2", kind: "vmlab", host: "lab1", lab: "/labs/x/vmlab.wcl", snapshot_before_task: true });
     expect(g).toMatchObject({ scope: "global", snapshot_before_task: true });
     expect(g).not.toHaveProperty("project");
-    expect((await api.projects.targets("webshop")).map((t) => t.name)).toEqual(expect.arrayContaining(["pg2", "vm2"]));
-    expect((await api.projects.targets("terrarium")).map((t) => t.name)).not.toContain("pg2");
+    expect(g.name).toBe("vm2");
+    expect((await api.projects.targets("webshop")).map((t) => t.name)).toEqual(expect.arrayContaining(["webshop-pg2", "vm2"]));
+    expect((await api.projects.targets("terrarium")).map((t) => t.name)).not.toContain("webshop-pg2");
     expect((await api.audit({ action: "target.create" })).items.at(-1)).toMatchObject({ target: "vm2" });
   });
 
@@ -594,6 +595,99 @@ describe("target scope (docs/api.md §17.2)", () => {
     const api = createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 0, denyGlobalTargets: true });
     await expect(api.targets.create({ name: "g", kind: "host", host: "lab1" })).rejects.toMatchObject({ status: 403, code: "forbidden" });
     await expect(api.targets.create({ name: "p", kind: "host", host: "lab1", project: "terrarium" })).resolves.toMatchObject({ scope: "project" });
+  });
+});
+
+describe("mode 1 targets (docs/api.md §17.2, §17.3, §17.7, §17.8)", () => {
+  const runner = (api: ReturnType<typeof mock>) => api.world.agents.find((a) => a.name === "runner-dev")!;
+  const lead = (api: ReturnType<typeof mock>) => api.world.agents.find((a) => a.name === "lead")!;
+
+  it("shows runtime on every target, and the lab fields of each source", async () => {
+    const api = mock();
+    const list = await api.targets.list();
+    for (const t of list) expect(t).toHaveProperty("runtime");
+    const by = (n: string) => list.find((t) => t.name === n)!;
+    expect(by("pg-test").runtime).toEqual({ attached: ["webshop/shop-lead"] });
+    expect(by("terrarium-net-lab")).toMatchObject({ kind: "vmlab", lab_repo: "terrarium", lab_ref: "main", lab_path: "labs/net", machine: "router", runtime: {} });
+    expect(by("terrarium-ws-lab")).toMatchObject({ lab_from_workspace: true, lab_path: "lab" });
+    expect(by("terrarium-ws-lab").runtime!.instances![runner(api).id]).toMatchObject({ agent_name: "terrarium/runner-dev", state: "running", attached: ["terrarium/runner-dev"] });
+    expect(by("terrarium-ws-lab").runtime!.instances![runner(api).id]!.lab).toMatch(/\/terrarium-ws-lab\.[^/]+\/lab$/);
+  });
+
+  it("validates the vmlab sources as the daemon does, with 422 invalid", async () => {
+    const api = mock();
+    const bad = [
+      { name: "x", kind: "vmlab" as const, host: "lab1", project: "terrarium" },
+      { name: "x", kind: "vmlab" as const, host: "lab1", project: "terrarium", lab: "/l", lab_repo: "terrarium", machine: "m" },
+      { name: "x", kind: "vmlab" as const, host: "lab1", lab_repo: "terrarium", machine: "m" },
+      { name: "x", kind: "vmlab" as const, host: "lab1", project: "terrarium", lab_from_workspace: true },
+      { name: "x", kind: "vmlab" as const, host: "lab1", project: "terrarium", lab_from_workspace: true, machine: "m", snapshot_before_task: true },
+      { name: "x", kind: "vmlab" as const, host: "lab1", project: "terrarium", lab: "/l", lab_path: "a" },
+      { name: "x", kind: "vmlab" as const, host: "lab1", project: "terrarium", lab_repo: "terrarium", machine: "m", lab_path: "../up" },
+      { name: "x", kind: "vmlab" as const, host: "lab1", project: "terrarium", lab_repo: "terrarium", machine: "m", lab_ref: "-x" },
+      { name: "x", kind: "docker" as const, host: "lab1", image: "a", project: "terrarium", lab_repo: "terrarium" },
+    ];
+    for (const b of bad) await expect(api.targets.create(b)).rejects.toMatchObject({ status: 422, code: "invalid" });
+  });
+
+  it("prefixes a project target made through the API, keeps a prefixed name, and keeps a global name", async () => {
+    const api = mock();
+    expect((await api.targets.create({ name: "box", kind: "host", host: "lab1", project: "terrarium" })).name).toBe("terrarium-box");
+    expect((await api.targets.create({ name: "terrarium-box2", kind: "host", host: "lab1", project: "terrarium" })).name).toBe("terrarium-box2");
+    expect((await api.targets.create({ name: "box", kind: "host", host: "lab1" })).name).toBe("box");
+    await expect(api.targets.create({ name: "box", kind: "host", host: "lab1", project: "terrarium" })).rejects.toMatchObject({ status: 409, code: "conflict" });
+  });
+
+  it("refuses a target past TERRARIUM_MAX_TARGETS_PER_PROJECT with 409 conflict and {project, targets, max}", async () => {
+    const api = createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 0, maxTargetsPerProject: 4 });
+    // terrarium has lab-win11, terrarium-net-lab, terrarium-ws-lab.
+    await api.targets.create({ name: "a", kind: "host", host: "lab1", project: "terrarium" });
+    const e = await api.targets.create({ name: "b", kind: "host", host: "lab1", project: "terrarium" }).catch((x: unknown) => x as ApiError);
+    expect(e).toMatchObject({ status: 409, code: "conflict", details: { project: "terrarium", targets: 4, max: 4 } });
+    await expect(api.targets.create({ name: "g", kind: "host", host: "lab1" })).resolves.toMatchObject({ scope: "global" });
+  });
+
+  it("shows max_running_targets on a host, and refuses an up past it with 429 rate_limited", async () => {
+    const api = mock();
+    expect((await api.hosts.list()).find((h) => h.name === "lab1")).toHaveProperty("max_running_targets", 4);
+    // lab1 runs pg-test, dev-vm, and one instance of terrarium-ws-lab: 3 of 4.
+    await expect(api.targets.action("ci-box", "up")).resolves.toMatchObject({ state: "running" });
+    const e = (await api.targets.action("lab-win11", "up").catch((x: unknown) => x)) as ApiError;
+    expect(e).toMatchObject({ status: 429, code: "rate_limited" });
+    expect(e.message).toBe("host `lab1` runs 4 targets, and its max_running_targets is 4; bring one down first");
+    // An up of a target that runs already does not count against the cap.
+    await expect(api.targets.action("ci-box", "up")).resolves.toMatchObject({ state: "running" });
+    await api.targets.action("pg-test", "down");
+    await expect(api.targets.action("lab-win11", "up")).resolves.toMatchObject({ state: "running" });
+  });
+
+  it("brings a lab_repo target up in a worktree: runtime.lab and runtime.head", async () => {
+    const api = mock();
+    await api.targets.action("terrarium-net-lab", "up");
+    const t = (await api.targets.list()).find((x) => x.name === "terrarium-net-lab")!;
+    expect(t.state).toBe("running");
+    expect(t.runtime).toMatchObject({ lab: expect.stringMatching(/terrarium-net-lab\/lab$/), head: expect.stringMatching(/^[0-9a-f]{40}$/) });
+    await api.targets.action("terrarium-net-lab", "down");
+    expect((await api.targets.list()).find((x) => x.name === "terrarium-net-lab")!.runtime).toEqual({});
+  });
+
+  it("runs a verb on a lab_from_workspace target on one holder's instance, and needs agent", async () => {
+    const api = mock();
+    await expect(api.targets.action("terrarium-ws-lab", "up")).rejects.toMatchObject({ status: 422, code: "invalid" });
+    const r = await api.targets.action("terrarium-ws-lab", "up", { agent: "terrarium/lead" });
+    expect(r).toEqual({ target: "terrarium-ws-lab", verb: "up", state: "running" });
+    const inst = (await api.targets.list()).find((x) => x.name === "terrarium-ws-lab")!.runtime!.instances!;
+    expect(Object.keys(inst).sort()).toEqual([lead(api).id, runner(api).id].sort());
+    expect(inst[lead(api).id]).toMatchObject({ agent_name: "terrarium/lead", state: "running", attached: ["terrarium/lead"] });
+    // An ephemeral target without keep: down removes the holder's instance.
+    expect(await api.targets.action("terrarium-ws-lab", "down", { agent: lead(api).id })).toMatchObject({ state: "absent" });
+    expect((await api.audit({ action: "target.down" })).items.at(-1)).toMatchObject({ target: "terrarium-ws-lab", detail: { agent: lead(api).id } });
+  });
+
+  it("refuses an exclusive lease on a lab_from_workspace target with 422 invalid", async () => {
+    const api = mock();
+    await expect(api.targets.grant("terrarium-ws-lab", { agent: "terrarium/lead", exclusive: true })).rejects.toMatchObject({ status: 422, code: "invalid" });
+    await expect(api.targets.grant("terrarium-ws-lab", { agent: "terrarium/lead" })).resolves.toMatchObject({ exclusive: false, state: "active" });
   });
 });
 

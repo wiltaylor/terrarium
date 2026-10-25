@@ -1,6 +1,8 @@
 // Host agents (PLAN §19, docs/host-protocol.md): online or offline, the
 // capabilities each host reported in `hello`, last seen, add with a token
-// that shows once, and revoke.
+// that shows once, and revoke. The running targets of each host against
+// its `max_running_targets` (docs/api.md §17.3), counted as the daemon
+// counts them, and `work_dir` and `instances_dir` when the API reports them.
 //
 // `GET`, `POST /api/hosts` and `DELETE /api/hosts/{name}` (the daemon's
 // `api/hosts.rs`). They are new and not in docs/api.md yet.
@@ -10,6 +12,7 @@ import { MockOnlyNote } from "../../components/MockOnly";
 import { ConfirmButton, CopyButton, Empty, ErrorBanner, Modal, PageHead, useNow } from "../../components/ui";
 import type { Host, NewHostToken } from "../../api/types";
 import { ago } from "../../lib/format";
+import { runningLabel, runningOnHost } from "../../lib/target-runtime";
 import { api } from "../../stores";
 
 /** The chips of a host's capabilities: `docker 29.8.0`, `vmlab 0.30.0-alpha`. */
@@ -25,17 +28,23 @@ export function capabilityChips(h: Pick<Host, "capabilities">): { label: string;
 
 export default function HostsPage() {
   const now = useNow(15_000);
-  const [hosts, { refetch }] = createResource(() => api.hosts.list());
+  const [hosts, { refetch: refetchHosts }] = createResource(() => api.hosts.list());
+  // The targets, for the running count of each host. A caller that cannot list them sees no count.
+  const [targets, { refetch: refetchTargets }] = createResource(() => api.targets.list().catch(() => null));
+  const refetch = () => {
+    void refetchHosts();
+    void refetchTargets();
+  };
   const [error, setError] = createSignal<unknown>(null);
   const [adding, setAdding] = createSignal(false);
-  const t = setInterval(() => void refetch(), 15_000);
+  const t = setInterval(() => refetch(), 15_000);
   onCleanup(() => clearInterval(t));
 
   const revoke = async (name: string) => {
     try {
       await api.hosts.revoke(name);
       setError(null);
-      void refetch();
+      refetch();
     } catch (e) {
       setError(e);
     }
@@ -44,7 +53,7 @@ export default function HostsPage() {
   return (
     <>
       <PageHead title="Hosts">
-        <button onClick={() => void refetch()}>Refresh</button>
+        <button onClick={() => refetch()}>Refresh</button>
         <button class="primary" onClick={() => setAdding(true)}>
           Add host
         </button>
@@ -59,17 +68,28 @@ export default function HostsPage() {
                 <th>Status</th>
                 <th>Platform</th>
                 <th>Capabilities</th>
+                <th title="Docker and vmlab targets (and lab instances) that run now, against max_running_targets">Running targets</th>
                 <th>Agent version</th>
                 <th>Last seen</th>
                 <th />
               </tr>
             </thead>
             <tbody>
-              <For each={hosts.latest} fallback={<tr><td colSpan={7}><Empty>{hosts.loading ? "Loading…" : "No host agents. Add one, then install terrarium-host on the machine."}</Empty></td></tr>}>
+              <For each={hosts.latest} fallback={<tr><td colSpan={8}><Empty>{hosts.loading ? "Loading…" : "No host agents. Add one, then install terrarium-host on the machine."}</Empty></td></tr>}>
                 {(h) => (
                   <tr>
                     <td>
                       <strong>{h.name}</strong>
+                      <Show when={h.work_dir}>
+                        <div class="small muted">
+                          work <span class="mono">{h.work_dir}</span>
+                        </div>
+                      </Show>
+                      <Show when={h.instances_dir}>
+                        <div class="small muted">
+                          instances <span class="mono">{h.instances_dir}</span>
+                        </div>
+                      </Show>
                     </td>
                     <td>
                       <span class={`chip ${h.status === "online" ? "ok" : "bad"}`}>{h.status}</span>
@@ -84,6 +104,19 @@ export default function HostsPage() {
                           <span class="chip mono">{h.capabilities!.shell}</span>
                         </Show>
                       </span>
+                    </td>
+                    <td class="small" aria-label={`Running targets on ${h.name}`}>
+                      <Show when={targets()} fallback={<span class="muted">{h.max_running_targets !== undefined ? `max ${h.max_running_targets}` : "—"}</span>}>
+                        {(list) => {
+                          const n = () => runningOnHost(list(), h.name);
+                          const full = () => h.max_running_targets !== undefined && n() >= h.max_running_targets;
+                          return (
+                            <span class={`chip ${full() ? "warn" : ""}`} title={full() ? "At the cap: an up of another target is 429" : undefined}>
+                              {runningLabel(n(), h)}
+                            </span>
+                          );
+                        }}
+                      </Show>
                     </td>
                     <td class="mono small">{h.version ?? "—"}</td>
                     <td>
@@ -110,7 +143,7 @@ export default function HostsPage() {
         <AddHostDialog
           onClose={() => {
             setAdding(false);
-            void refetch();
+            refetch();
           }}
         />
       </Show>

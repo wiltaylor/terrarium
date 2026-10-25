@@ -30,4 +30,9 @@ describe("targetActions (docs/api.md §17.3)", () => {
     expect(Object.keys(STATE_CHIP).sort()).toEqual(["absent", "running", "stopped", "unknown"]);
     expect(STATE_CHIP.running).toBe("ok");
   });
+
+  it("offers no target verbs on a lab_from_workspace target: each verb acts on one holder's instance", () => {
+    expect(targetActions({ ...t("vmlab", "unknown"), lab_from_workspace: true })).toEqual([]);
+    expect(targetActions({ ...t("vmlab", "running", ["terrarium"]), lab_from_workspace: true })).toEqual([]);
+  });
 });
