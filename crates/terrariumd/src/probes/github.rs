@@ -13,7 +13,8 @@
 //! `<copilot home>/config.json` (Copilot keeps the token in the system
 //! credential store when it has one, which a container does not), else
 //! `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`, or `GITHUB_TOKEN` in the daemon env.
-//! The key names of the plain-text fallback are not verified.
+//! The plain-text fallback keeps the token in `authTokens.<key>.token`
+//! (verified 2026-10-25 with a container login, docs/compat.md).
 
 use std::path::Path;
 
@@ -39,8 +40,13 @@ pub fn strip_line_comments(text: &str) -> String {
         .join("\n")
 }
 
-/// A token in the JSON of Copilot's `config.json`, if it has one.
+/// A token in the JSON of Copilot's `config.json`, if it has one. The
+/// real file keeps it in `authTokens.<key>.token` (the adapter reads
+/// that); the snake-case keys after it are older guesses.
 pub fn token_in_config(v: &Value) -> Option<String> {
+    if let Some(t) = terrarium_adapter_copilot::auth::token_in_config(v) {
+        return Some(t);
+    }
     let first_str = |v: &Value| -> Option<String> {
         match v {
             Value::String(s) if !s.is_empty() => Some(s.clone()),
@@ -201,6 +207,16 @@ mod tests {
         assert_eq!(config_token(tmp.path()).unwrap().as_deref(), Some("gho_x"));
         let c = CopilotQuota.credentials(tmp.path()).unwrap();
         assert_eq!(c.token(), "gho_x");
+        // The shape of a real container login.
+        std::fs::write(
+            tmp.path().join("config.json"),
+            "// User settings belong in settings.json.\n// This file is managed automatically.\n{\n  \"authTokens\": {\n    \"https://github.com:octo:github\": {\"token\": \"gho_real\"},\n    \"https://github.com:octo\": {\"token\": \"gho_real\"}\n  },\n  \"lastLoggedInUser\": {\"host\": \"https://github.com\", \"login\": \"octo\"}\n}\n",
+        )
+        .unwrap();
+        assert_eq!(
+            config_token(tmp.path()).unwrap().as_deref(),
+            Some("gho_real")
+        );
     }
 
     #[tokio::test]

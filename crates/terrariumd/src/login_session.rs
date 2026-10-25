@@ -284,13 +284,32 @@ fn child_env(kind: LoginKind, home: &Path) -> BTreeMap<String, String> {
     env
 }
 
-/// Run a short command with the harness env. `(exit code, stdout)`.
+/// The result of a short command. Both streams are kept: `codex login
+/// status` prints its line to stderr and nothing to stdout.
+struct CmdOut {
+    code: i32,
+    stdout: String,
+    stderr: String,
+}
+
+impl CmdOut {
+    /// The first non-empty line of stdout, else of stderr.
+    fn first_line(&self) -> String {
+        [&self.stdout, &self.stderr]
+            .iter()
+            .find_map(|t| t.lines().map(str::trim).find(|l| !l.is_empty()))
+            .unwrap_or_default()
+            .to_owned()
+    }
+}
+
+/// Run a short command with the harness env.
 async fn run_cmd(
     program: &str,
     args: &[&str],
     kind: LoginKind,
     home: &Path,
-) -> Result<(i32, String), String> {
+) -> Result<CmdOut, String> {
     let mut cmd = Command::new(program);
     cmd.args(args)
         .env_clear()
@@ -301,10 +320,11 @@ async fn run_cmd(
         .await
         .map_err(|_| format!("`{program} {}` took longer than 30 s", args.join(" ")))?
         .map_err(|e| format!("cannot run `{program}`: {e}"))?;
-    Ok((
-        out.status.code().unwrap_or(-1),
-        String::from_utf8_lossy(&out.stdout).into_owned(),
-    ))
+    Ok(CmdOut {
+        code: out.status.code().unwrap_or(-1),
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+    })
 }
 
 /// `Max 20x` from `default_claude_max_20x`, else the subscription type.
@@ -361,7 +381,7 @@ pub async fn check_status(
     };
     match kind {
         LoginKind::Claude => match run_cmd(&program, &["auth", "status"], kind, &home).await {
-            Ok((_, out)) => match terrarium_adapter_claude::auth::parse_auth_status(&out) {
+            Ok(out) => match terrarium_adapter_claude::auth::parse_auth_status(&out.stdout) {
                 Ok(a) => {
                     st.logged_in = a.logged_in;
                     let h = home.clone();
@@ -381,9 +401,13 @@ pub async fn check_status(
             Err(e) => st.detail = Some(e),
         },
         LoginKind::Codex => match run_cmd(&program, &["login", "status"], kind, &home).await {
-            Ok((code, out)) => {
-                let line = out.lines().next().unwrap_or_default().trim().to_owned();
-                st.logged_in = code == 0 && line.starts_with("Logged in");
+            Ok(out) => {
+                let a = terrarium_adapter_codex::auth::parse_auth_status(
+                    Some(out.code),
+                    &out.stdout,
+                    &out.stderr,
+                );
+                st.logged_in = a.logged_in;
                 if st.logged_in {
                     let p = home.join("auth.json");
                     st.plan = tokio::task::spawn_blocking(move || {
@@ -396,40 +420,59 @@ pub async fn check_status(
                     .ok()
                     .flatten();
                 }
-                st.detail = Some(line).filter(|l| !l.is_empty());
+                // The status line, else the last line (a warning or an
+                // error). The output has no token.
+                let line = a
+                    .message
+                    .lines()
+                    .rev()
+                    .find(|l| l.trim_start().starts_with("Logged in"))
+                    .or_else(|| a.message.lines().rev().find(|l| !l.trim().is_empty()))
+                    .unwrap_or_default()
+                    .trim()
+                    .to_owned();
+                st.detail = Some(line)
+                    .filter(|l| !l.is_empty())
+                    .or_else(|| Some(format!("no output, exit code {}", out.code)));
             }
             Err(e) => st.detail = Some(e),
         },
         LoginKind::Copilot => {
             // Copilot has no status command. A token in the plain-text
-            // fallback, or a logged-in user in config.json, counts.
+            // fallback of config.json (JSON with `//` comment lines,
+            // `authTokens`) counts. Env tokens do not: the login commands
+            // run without them.
             let h = home.clone();
             let found = tokio::task::spawn_blocking(move || {
-                let token = crate::probes::github::config_token(&h)
-                    .ok()
-                    .flatten()
-                    .is_some();
-                let users = std::fs::read_to_string(h.join("config.json"))
-                    .ok()
-                    .and_then(|t| {
-                        serde_json::from_str::<Value>(&crate::probes::github::strip_line_comments(
-                            &t,
-                        ))
-                        .ok()
-                    })
-                    .and_then(|v| v.get("logged_in_users").cloned())
-                    .is_some_and(|u| u.as_array().is_some_and(|a| !a.is_empty()));
-                token || users
+                terrarium_adapter_copilot::auth::auth_status(&h, &[], &|_| None)
             })
             .await
-            .unwrap_or(false);
-            st.logged_in = found;
-            st.detail = Some(if found {
-                "a stored Copilot login is in config.json".into()
-            } else {
-                "no stored Copilot login in config.json (the system credential store is not read)"
-                    .into()
-            });
+            .map_err(|e| e.to_string())
+            .and_then(|r| r.map_err(|e| e.to_string()));
+            use terrarium_adapter_copilot::auth::CredentialSource;
+            match found {
+                Ok(a) => {
+                    st.logged_in = a.source == CredentialSource::PlainTextConfig;
+                    let who = a
+                        .login
+                        .as_deref()
+                        .map(|l| format!(" for {l}"))
+                        .unwrap_or_default();
+                    st.detail = Some(match a.source {
+                        CredentialSource::PlainTextConfig => {
+                            format!("a stored Copilot login{who} is in config.json")
+                        }
+                        CredentialSource::Keychain => format!(
+                            "config.json names a Copilot login{who}, but its token is in the \
+                             system credential store, which the daemon does not read"
+                        ),
+                        _ => "no stored Copilot login in config.json (the system credential \
+                              store is not read)"
+                            .into(),
+                    });
+                }
+                Err(e) => st.detail = Some(e),
+            }
         }
         LoginKind::Pi => {
             let provider = pi_provider.unwrap_or("anthropic");
@@ -442,8 +485,8 @@ pub async fn check_status(
                 provider,
             ];
             match run_cmd(&program, &args, kind, &home).await {
-                Ok((_, out)) => {
-                    let v: Value = serde_json::from_str(out.trim()).unwrap_or(Value::Null);
+                Ok(out) => {
+                    let v: Value = serde_json::from_str(out.stdout.trim()).unwrap_or(Value::Null);
                     let status = v.get("status").and_then(Value::as_str).unwrap_or_default();
                     st.logged_in = matches!(status, "ready" | "ok" | "valid")
                         || v.get("logged_in").and_then(Value::as_bool) == Some(true);
@@ -1199,9 +1242,10 @@ pub async fn logout(state: &Shared, kind: LoginKind) -> ApiResult<String> {
     };
     let cfg = &state.usage.config;
     let home = cfg.home(kind.harness());
-    let (code, out) = run_cmd(&cfg.program(kind.harness()), args, kind, &home)
+    let out = run_cmd(&cfg.program(kind.harness()), args, kind, &home)
         .await
         .map_err(ApiError::internal)?;
+    let code = out.code;
     if code != 0 {
         return Err(ApiError::internal(format!(
             "`{} {}` exited with code {code}",
@@ -1209,7 +1253,7 @@ pub async fn logout(state: &Shared, kind: LoginKind) -> ApiResult<String> {
             args.join(" ")
         )));
     }
-    Ok(out.lines().next().unwrap_or_default().to_owned())
+    Ok(out.first_line())
 }
 
 /// The login kind that checks a subscription: its first harness.

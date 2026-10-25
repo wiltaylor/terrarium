@@ -488,7 +488,7 @@ copies only `~/.codex/auth.json` into a temp `CODEX_HOME`.
 | Submit a turn | Bracketed paste, then CR at once. Newlines stay in the prompt. | verified | 5 |
 | Bare LF | Adds a new line. It does not submit. | verified | 5 |
 | Type while busy | The text **steers** the running turn: the same `turn_id`, one `Stop` for both prompts. `UserPromptSubmit` for the second prompt came 4.5 s after its CR, at the next model request. | verified | 5 |
-| Auth status | `codex login status`: stderr `Logged in using ChatGPT`, exit 0. No login: `Not logged in`, exit 1. | verified | 7 |
+| Auth status | `codex login status`: stderr `Logged in using ChatGPT`, exit 0. No login: `Not logged in`, exit 1. **stdout is empty in both cases.** A reader of stdout alone sees no login. Seen again in the container (codex-cli 0.160.0, 2026-10-25) after `codex login --device-auth`, the same with and without `CODEX_HOME` set (fixture `crates/adapters/codex/tests/fixtures/auth/login-status.json`). | verified | 7 |
 | Plan | `id_token` claim `https://api.openai.com/auth.chatgpt_plan_type` (`pro`). `/status` shows `Account: Pro 200`. `token_count.rate_limits.plan_type` = `pro`. | verified | 7, 8 |
 | Quota | `/status` shows `Weekly limit: [███…] 100% left (resets 7:42 AM on 31 Oct)` with no turn sent. | verified | 8 |
 | `exec --json` names | `thread.started`, `turn.started`, `turn.completed`, `turn.failed`, `item.started`, `item.completed`, `error` | read (binary) | — |
@@ -717,6 +717,7 @@ is in the system keychain, so no file is copied.
 | Type while busy | Enter **steers**: the text joins the running work, and **no** `UserPromptSubmit` fires for it. The footer offers "ctrl+q enqueue" for a queued message. | verified | 5 |
 | Answer a question | `ask_user` shows a list: "↑/↓ select · enter accept · ctrl+d decline · esc cancel". Down (`ESC [B`) then CR picked option 2. | verified | 5 |
 | Auth status | No `auth status` command. `/user` prints "Signed in to https://github.com as <login> (GitHub.com)". With no token the TUI prints "Please use /login to sign in to use Copilot". | verified | 7 |
+| Plain-text login | `copilot login --device-code` in the container (no credential store) writes `$COPILOT_HOME/config.json`: two `//` comment lines, then JSON with `authTokens: {"https://github.com:<login>:github": {"token": "gho_…"}, "https://github.com:<login>": {"token": "gho_…"}}` (the same token twice), `loggedInUsers: [{host, login, kind: "githubDotCom"}]`, and `lastLoggedInUser: {host, login}`. A strict JSON parser refuses the file. The daemon strips the comment lines and counts a non-empty `authTokens.<key>.token` as a login (fixture `crates/adapters/copilot/tests/fixtures/auth/config-plaintext-login.json`). | verified (2026-10-25) | 7 |
 | Quota | `/usage` shows "Requests 0 Premium" and "Weekly ■■■… 0% used • resets on Oct 26 at 10 AM", with no turn sent. | verified | 8 |
 
 ### Hooks
@@ -882,8 +883,8 @@ after it was sent) was not drawn yet; it is labelled `lag-`.
 
 - `disableAllHooks` with the `--plugin-dir` route.
 - Hooks without folder trust.
-- The keychain-less start inside a container, and the plain-text token
-  fallback.
+- The keychain-less start inside a container (the plain-text login file
+  is verified, see "Plain-text login"; a TUI start that reads it is not).
 - `--sync-session` and what `mc_task_id` sends to GitHub.
 - Concurrent writes to one `session-state/<id>/` from two processes.
 
@@ -1118,9 +1119,10 @@ Answer (sanitised):
 - **The token.** Copilot keeps its login in the system credential store.
   On this host `~/.copilot/config.json` holds no token (it is JSON with
   `//` comment lines at the top: strip them before parsing). In a
-  container without a credential store, Copilot writes a plain-text token
-  under `~/.copilot/`; the key name is not verified (the probe tries
-  `copilot_tokens`, `github_token`, `oauth_token`, `token`). The probe
+  container without a credential store, Copilot writes the token to
+  `config.json` as `authTokens.<host>:<login>[:github].token` (verified
+  2026-10-25, see "Plain-text login"). The probe reads that, then the
+  older guesses `copilot_tokens`, `github_token`, `oauth_token`, `token`. The probe
   also takes a stored PAT (`POST /api/subscriptions/{name}/api-key` with
   `provider = "github"`) and `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`,
   `GITHUB_TOKEN` from the daemon env.
@@ -1130,8 +1132,8 @@ Answer (sanitised):
 | Harness | Command | Output | Status |
 |---|---|---|---|
 | Claude | `claude auth status` | JSON (see "Auth status"). Exit 0 logged in. | verified |
-| Codex | `codex login status` | `Logged in using ChatGPT`, exit 0. Logged out: not seen (the parser wants exit 0 and a line that starts with `Logged in`). | verified (logged in) |
-| Copilot | none | There is no status command. The wizard checks the plain-text fallback in `config.json`. | read |
+| Codex | `codex login status` | stderr `Logged in using ChatGPT`, exit 0; stdout is empty. The daemon reads both streams (the adapter's `parse_auth_status`: exit 0 and a line that starts with `Logged in`). Logged out: `Not logged in`, exit 1 (spike). | verified (logged in, 2026-10-25) |
+| Copilot | none | There is no status command. The wizard reads the plain-text fallback in `config.json` with the adapter's `auth_status`: a non-empty `authTokens.<key>.token` is a login. A login that names a user but has no token (keychain) is not. | verified (2026-10-25) |
 | pi | `pi auth check --json --no-refresh --provider <p>` | `{"status":"not_ready","provider":"anthropic","reason":"credentials_not_configured"}` with no login. The ready value is not seen; the daemon accepts `ready`, `ok`, `valid`. | partly verified |
 
 - `pi auth check` without `--provider` or `--model` prints `Error: Auth

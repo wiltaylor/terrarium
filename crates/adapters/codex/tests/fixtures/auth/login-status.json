@@ -1,0 +1,4 @@
+{
+  "source": "`codex login status` in the terrarium container, codex-cli 0.160.0, 2026-10-25, CODEX_HOME=/auth/codex after `codex login --device-auth`",
+  "logged_in": {"exit_code": 0, "stdout": "", "stderr": "Logged in using ChatGPT\n"}
+}

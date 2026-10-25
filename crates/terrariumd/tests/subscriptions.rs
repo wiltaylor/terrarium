@@ -943,6 +943,65 @@ async fn detect_lists_logins_without_a_definition() {
     assert_eq!(v.body["subscription"]["plan"], "Max 20x");
 }
 
+/// The real outputs of a container login: `codex login status` prints its
+/// line to stderr only, and Copilot's `config.json` is JSON with comment
+/// lines that keeps the token in `authTokens`. Both are logins.
+#[tokio::test]
+async fn detect_reads_the_real_codex_and_copilot_outputs() {
+    let fixture = |rel: &str| {
+        std::fs::read_to_string(format!("{}/../adapters/{rel}", env!("CARGO_MANIFEST_DIR")))
+            .unwrap()
+    };
+    let codex: serde_json::Value =
+        serde_json::from_str(&fixture("codex/tests/fixtures/auth/login-status.json")).unwrap();
+    let stderr = codex["logged_in"]["stderr"]
+        .as_str()
+        .unwrap()
+        .trim()
+        .to_owned();
+    assert_eq!(codex["logged_in"]["stdout"], "");
+    let env = boot(
+        |_| {},
+        |u, bin| {
+            u.programs.insert(
+                HarnessId::Codex,
+                script(
+                    bin,
+                    "codex-real",
+                    &format!(r#"[ "$1 $2" = "login status" ] && echo '{stderr}' >&2"#),
+                ),
+            );
+        },
+    )
+    .await;
+    let td = &env.td;
+    let claims = base64_url(
+        &json!({"https://api.openai.com/auth": {"chatgpt_plan_type": "pro"}}).to_string(),
+    );
+    std::fs::write(
+        env.homes[&HarnessId::Codex].join("auth.json"),
+        json!({"tokens": {"id_token": format!("h.{claims}.s")}}).to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        env.homes[&HarnessId::Copilot].join("config.json"),
+        fixture("copilot/tests/fixtures/auth/config-plaintext-login.json"),
+    )
+    .unwrap();
+    let d = td.get("/api/subscriptions/detect").await;
+    let d = d.ok().as_array().unwrap().clone();
+    let kinds: Vec<_> = d.iter().map(|x| x["kind"].as_str().unwrap()).collect();
+    assert_eq!(kinds, ["codex", "copilot"], "{d:?}");
+    assert_eq!(d[0]["detail"], "Logged in using ChatGPT");
+    assert_eq!(d[0]["suggested"]["name"], "openai-pro");
+    assert_eq!(d[1]["suggested"]["name"], "github-copilot");
+    assert!(
+        d[1]["detail"].as_str().unwrap().contains("for octo"),
+        "{d:?}"
+    );
+    assert!(!d[1].to_string().contains("gho_"), "no token in the answer");
+}
+
 /// Every file under `dir`, recursively.
 fn all_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
@@ -1126,7 +1185,7 @@ async fn codex_device_login_and_failures() {
                     &format!(
                         r#"case "$1 $2" in
 "login --device-auth") cat '{fixture_path}'; sleep 0.5; exit 0;;
-"login status") echo 'Logged in using ChatGPT';;
+"login status") echo 'Logged in using ChatGPT' >&2;;
 esac"#
                     ),
                 ),

@@ -184,6 +184,27 @@ mod tests {
         assert_eq!(warned.method.as_deref(), Some("an API key"));
     }
 
+    #[test]
+    fn captured_container_login_is_on_stderr() {
+        // The real output after a device login in the container: stdout
+        // is empty, the line is on stderr. A reader of stdout alone sees
+        // no login.
+        let path = format!(
+            "{}/tests/fixtures/auth/login-status.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let v: Value =
+            serde_json::from_str(&std::fs::read_to_string(path).expect("fixture")).expect("json");
+        let c = &v["logged_in"];
+        let (stdout, stderr) = (c["stdout"].as_str().unwrap(), c["stderr"].as_str().unwrap());
+        assert_eq!(stdout, "");
+        let code = c["exit_code"].as_i64().map(|n| n as i32);
+        let st = parse_auth_status(code, stdout, stderr);
+        assert!(st.logged_in);
+        assert_eq!(st.method.as_deref(), Some("ChatGPT"));
+        assert_eq!(st.message, "Logged in using ChatGPT");
+    }
+
     fn jwt(claims: &Value) -> String {
         let e = base64::engine::general_purpose::URL_SAFE_NO_PAD;
         format!(

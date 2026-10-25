@@ -12,9 +12,26 @@
 //! 3. The plain-text fallback in `$COPILOT_HOME/config.json`, which
 //!    `copilot login` offers when there is no keychain ("Store token in
 //!    plain text config file?"). This is the normal case in the container.
-//!    The key names (`copilotTokens`, `authTokens`, `loggedInUsers`,
-//!    `lastLoggedInUser`) are read from the binary; the file layout is not
-//!    tested.
+//!
+//! `config.json` is JSON with `//` comment lines at the top, so a strict
+//! JSON parser refuses it. A real container login (2026-10-25,
+//! `tests/fixtures/auth/config-plaintext-login.json`, sanitised) wrote:
+//!
+//! ```text
+//! // User settings belong in settings.json.
+//! // This file is managed automatically.
+//! {
+//!   "authTokens": {
+//!     "https://github.com:<login>:github": {"token": "gho_…"},
+//!     "https://github.com:<login>": {"token": "gho_…"}
+//!   },
+//!   "loggedInUsers": [{"host": "https://github.com", "login": "<login>", "kind": "…"}],
+//!   "lastLoggedInUser": {"host": "https://github.com", "login": "<login>"}
+//! }
+//! ```
+//!
+//! The two `authTokens` entries held the same token. `copilotTokens` (a
+//! map of key to token string) is read from the binary and is not seen.
 //!
 //! [`auth_status`] checks 1 and 3 from files and env. The screen check
 //! [`screen_auth`] reads what the TUI says at start (or after `/user`).
@@ -73,19 +90,10 @@ impl AuthStatus {
 /// What `config.json` says about the login.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ConfigAuth {
-    /// A non-empty `copilotTokens` or `authTokens`.
+    /// An entry with a non-empty token in `authTokens` or `copilotTokens`.
     pub has_token: bool,
     pub login: Option<String>,
     pub host: Option<String>,
-}
-
-fn non_empty(v: Option<&Value>) -> bool {
-    match v {
-        Some(Value::Object(m)) => !m.is_empty(),
-        Some(Value::Array(a)) => !a.is_empty(),
-        Some(Value::String(s)) => !s.is_empty(),
-        _ => false,
-    }
 }
 
 fn user(v: &Value) -> (Option<String>, Option<String>) {
@@ -93,11 +101,64 @@ fn user(v: &Value) -> (Option<String>, Option<String>) {
     (s("login"), s("host"))
 }
 
+/// The keys of the token maps in `config.json`.
+const TOKEN_MAPS: [&str; 2] = ["authTokens", "copilotTokens"];
+
+/// The token string of one token map entry: `{"token": "…"}` (seen) or a
+/// bare string (`copilotTokens`, not seen).
+fn entry_token(v: &Value) -> Option<&str> {
+    match v {
+        Value::String(s) => Some(s.as_str()),
+        Value::Object(m) => m.get("token").and_then(Value::as_str),
+        _ => None,
+    }
+    .filter(|t| !t.trim().is_empty())
+}
+
+/// `(host, login)` from a token map key, `https://github.com:<login>` or
+/// `https://github.com:<login>:github`.
+fn key_user(key: &str) -> Option<(String, String)> {
+    let (scheme, rest) = key.split_once("://")?;
+    let mut parts = rest.split(':');
+    let host = parts.next().filter(|h| !h.is_empty())?;
+    let login = parts.next().filter(|l| !l.is_empty())?;
+    Some((format!("{scheme}://{host}"), login.to_owned()))
+}
+
+/// The token in the plain-text fallback of a parsed `config.json`. The
+/// entry of `lastLoggedInUser` wins; else the first entry with a token.
+pub fn token_in_config(v: &Value) -> Option<String> {
+    let want = v.get("lastLoggedInUser").map(user);
+    let entries = || {
+        TOKEN_MAPS
+            .iter()
+            .filter_map(|k| v.get(*k).and_then(Value::as_object))
+            .flat_map(|m| m.iter())
+    };
+    let wanted = |key: &str| match (&want, key_user(key)) {
+        (Some((Some(l), Some(h))), Some((kh, kl))) => *l == kl && *h == kh,
+        _ => false,
+    };
+    entries()
+        .find(|(k, e)| wanted(k) && entry_token(e).is_some())
+        .or_else(|| entries().find(|(_, e)| entry_token(e).is_some()))
+        .and_then(|(_, e)| entry_token(e))
+        .map(str::to_owned)
+}
+
 /// Read the login fields of a `config.json` text. A file that does not
 /// parse gives the default (no token, no login).
 pub fn parse_config(text: &str) -> ConfigAuth {
     let Some(v) = parse_jsonc(text) else {
         return ConfigAuth::default();
+    };
+    let from_key = || {
+        TOKEN_MAPS
+            .iter()
+            .filter_map(|k| v.get(*k).and_then(Value::as_object))
+            .flat_map(|m| m.keys())
+            .find_map(|k| key_user(k))
+            .map(|(h, l)| (Some(l), Some(h)))
     };
     let (login, host) = v
         .get("lastLoggedInUser")
@@ -108,9 +169,11 @@ pub fn parse_config(text: &str) -> ConfigAuth {
                 .and_then(|a| a.first())
                 .map(user)
         })
+        .filter(|(l, _)| l.is_some())
+        .or_else(from_key)
         .unwrap_or((None, None));
     ConfigAuth {
-        has_token: non_empty(v.get("copilotTokens")) || non_empty(v.get("authTokens")),
+        has_token: token_in_config(&v).is_some(),
         login,
         host,
     }
@@ -209,6 +272,48 @@ mod tests {
             Some(ScreenAuth::LoginRequired)
         );
         assert_eq!(screen_auth(&fixture("screen-idle-nongit.txt")), None);
+    }
+
+    #[test]
+    fn captured_plaintext_login() {
+        // A real `copilot login` in the container, tokens and login
+        // replaced. Comment lines first, then `authTokens` entries of
+        // `{"token": …}`.
+        let path = format!(
+            "{}/tests/fixtures/auth/config-plaintext-login.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let text = std::fs::read_to_string(&path).expect("fixture");
+        assert!(
+            serde_json::from_str::<Value>(&text).is_err(),
+            "not strict JSON"
+        );
+        let cfg = parse_config(&text);
+        assert!(cfg.has_token);
+        assert_eq!(cfg.login.as_deref(), Some("octo"));
+        assert_eq!(cfg.host.as_deref(), Some("https://github.com"));
+        let v = parse_jsonc(&text).expect("jsonc");
+        assert_eq!(token_in_config(&v).as_deref(), Some("gho_REDACTED"));
+
+        let tmp = tempfile::tempdir().expect("tmp");
+        std::fs::write(tmp.path().join(CONFIG_FILE), &text).expect("w");
+        let st = auth_status(tmp.path(), VARS, &|_| None).expect("s");
+        assert_eq!(st.source, CredentialSource::PlainTextConfig);
+        assert!(st.usable_in_sandbox());
+
+        // Empty tokens are not a login; the key still names the user.
+        let empty = r#"{"authTokens": {"https://github.com:octo": {"token": ""}}}"#;
+        let cfg = parse_config(empty);
+        assert!(!cfg.has_token);
+        assert_eq!(cfg.login.as_deref(), Some("octo"));
+        // The entry of `lastLoggedInUser` wins over the others.
+        let two = r#"{"authTokens": {"https://github.com:a": {"token": "ta"},
+            "https://github.com:b": {"token": "tb"}},
+            "lastLoggedInUser": {"host": "https://github.com", "login": "b"}}"#;
+        assert_eq!(
+            token_in_config(&parse_jsonc(two).expect("j")).as_deref(),
+            Some("tb")
+        );
     }
 
     #[test]
