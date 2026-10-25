@@ -148,6 +148,7 @@ export function seed(now: number = Date.now()): MockWorld {
   /** The stored address and the readable name of an agent, `operator`, or `project:<name>`. */
   const who = (name: string): { addr: string; kind: Message["from_kind"]; label: string } => {
     if (name === "operator") return { addr: "operator", kind: "operator", label: "operator" };
+    if (name === "system") return { addr: "system", kind: "system", label: "system" };
     if (name.startsWith("project:")) return { addr: name, kind: "project", label: name };
     const a = byName(name);
     return { addr: a.id, kind: "agent", label: `${a.project}/${a.name}` };
@@ -193,7 +194,7 @@ export function seed(now: number = Date.now()): MockWorld {
   ev(20, "turn_start", "shop-lead", "webshop", "Turn started: checkout flow");
   status(20, "shop-lead", "idle", "working");
   ev(9, "mail", "adapter-codex", "terrarium", "Mail from terrarium/lead to terrarium/adapter-codex: Re: TER-15 blocked", {
-    message_id: fakeUlid("msg", 2),
+    message_id: fakeUlid("msg", 15),
     thread_id: fakeUlid("th", 1),
     from: "01JB0LEAD00000000000000001",
     from_name: "terrarium/lead",
@@ -652,15 +653,37 @@ ${XSS_DOCUMENT}
     };
   };
 
+  // In time order: the IDs sort the way the daemon's ULIDs do, and the list
+  // and its cursor go by ID (docs/api.md §7.2).
+  const readBy = (name: string): Partial<Message> => {
+    const r = who(name);
+    return { read_by: r.addr, read_by_name: r.label };
+  };
+  const loop = fakeUlid("th", 7);
+  const loopMsg = (n: number, min: number, from: string, to: string, body: string, state: Message["state"]) =>
+    msg(fakeUlid("msg", n), loop, from, to, "Re: Flaky runner test", body, state, min, state === "read" || state === "replied" ? readBy(to) : {});
+  const blocked = "Card TER-15 \"Codex adapter: resume by session id\" moved to blocked by terrarium/adapter-codex.\n\nComment:\n`codex login status` fails in the image. Needs an operator login.\n\nRun `terrarium card show TER-15`.";
   const mail: Message[] = [
-    msg(fakeUlid("msg", 1), fakeUlid("th", 1), "project:terrarium", "operator", "TER-15 blocked: Codex adapter: resume by session id", "Card TER-15 moved to blocked.\n\n`codex login status` fails in the image. Needs an operator login.", "delivered", 11),
-    msg(fakeUlid("msg", 2), fakeUlid("th", 1), "lead", "adapter-codex", "Re: TER-15 blocked: Codex adapter: resume by session id", "Pick up TER-13 while we wait for the login.", "read", 9, { in_reply_to: fakeUlid("msg", 1) }),
+    msg(fakeUlid("msg", 1), fakeUlid("th", 6), "runner-dev", "operator", "Mock: hostile mail body", `This body must show as text. ${hostile}`, "read", 90, readBy("operator")),
+    msg(fakeUlid("msg", 2), fakeUlid("th", 3), "shop-lead", "project:terrarium", "bug: terrarium card ls ignores --column", "Running `terrarium card ls --column ready` lists every card. Seen from webshop.", "delivered", 70),
     msg(fakeUlid("msg", 3), fakeUlid("th", 2), "lead", "operator", "v0.1.0 ready for review", "Version v0.1.0 is in review. Open Versions in the dashboard.", "delivered", 50),
-    msg(fakeUlid("msg", 4), fakeUlid("th", 3), "shop-lead", "project:terrarium", "bug: terrarium card ls ignores --column", "Running `terrarium card ls --column ready` lists every card. Seen from webshop.", "delivered", 70),
-    msg(fakeUlid("msg", 5), fakeUlid("th", 4), "runner-dev", "lead", "PTY resize approach", "Going with SIGWINCH via portable-pty. Shout if you disagree.", "replied", 45),
-    msg(fakeUlid("msg", 6), fakeUlid("th", 5), "lead", "project:webshop", "Shared CSS tokens?", "Can webshop reuse the dashboard CSS variables?", "delivered", 5),
-    msg(fakeUlid("msg", 7), fakeUlid("th", 6), "runner-dev", "operator", "Mock: hostile mail body", `This body must show as text. ${hostile}`, "read", 90),
-  ].sort((x, y) => x.created_at.localeCompare(y.created_at));
+    msg(fakeUlid("msg", 4), fakeUlid("th", 4), "runner-dev", "lead", "PTY resize approach", "Going with SIGWINCH via portable-pty. Shout if you disagree.", "replied", 45, readBy("lead")),
+    // A loop: seven agent replies with no operator input. The seventh is held,
+    // and the daemon tells the operator (docs/api.md §6.2, limit 6).
+    loopMsg(5, 40, "lead", "runner-dev", "The runner test flakes on CI. Can you look?", "replied"),
+    loopMsg(6, 39, "runner-dev", "lead", "Passes here. Which job?", "replied"),
+    loopMsg(7, 38, "lead", "runner-dev", "runner-pty on the arm runner.", "replied"),
+    loopMsg(8, 37, "runner-dev", "lead", "Still passes. Can you rerun it?", "replied"),
+    loopMsg(9, 36, "lead", "runner-dev", "Reran. It failed again.", "replied"),
+    loopMsg(10, 35, "runner-dev", "lead", "Cannot reproduce. Can you rerun it?", "replied"),
+    loopMsg(11, 34, "lead", "runner-dev", "Reran. It failed again.", "delivered"),
+    msg(fakeUlid("msg", 12), loop, "system", "operator", `Thread ${loop} needs a human`, `thread ${loop} needs a human: 7 agent replies without operator input. The daemon types no more mail pointers for this thread. Reply on the thread to resume it.`, "delivered", 34),
+    msg(fakeUlid("msg", 13), fakeUlid("th", 1), "system", "operator", "TER-15 blocked: Codex adapter: resume by session id", blocked, "delivered", 11),
+    msg(fakeUlid("msg", 14), fakeUlid("th", 1), "system", "lead", "TER-15 blocked: Codex adapter: resume by session id", blocked, "read", 11, readBy("lead")),
+    msg(fakeUlid("msg", 15), fakeUlid("th", 1), "lead", "adapter-codex", "Re: TER-15 blocked: Codex adapter: resume by session id", "Pick up TER-13 while we wait for the login.", "read", 9, { in_reply_to: fakeUlid("msg", 14), ...readBy("adapter-codex") }),
+    msg(fakeUlid("msg", 16), fakeUlid("th", 8), "system", "operator", "Quota: anthropic-max 5h window at 85%", "Subscription `anthropic-max` (anthropic) has used 85% of its 5h window. The alert level is 80%.\n\nOpen: /subscriptions", "delivered", 8),
+    msg(fakeUlid("msg", 17), fakeUlid("th", 5), "lead", "project:webshop", "Shared CSS tokens?", "Can webshop reuse the dashboard CSS variables?", "delivered", 5),
+  ];
 
   // Mode 1 (docs/api.md §17.8): `runtime` holds the attached workspaces, the
   // instance of a `lab_repo` target, and the instances of a

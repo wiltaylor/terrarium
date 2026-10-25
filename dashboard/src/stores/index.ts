@@ -3,6 +3,7 @@
 
 import { createApi } from "../api";
 import { createAgentsStore } from "./agents";
+import { createAttentionStore } from "./attention";
 import { createAuthStore, signIn, signOut, upgradeToSession } from "./auth";
 import { createEventsStore } from "./events";
 import { createLeasesStore } from "./leases";
@@ -36,6 +37,7 @@ export const agents = createAgentsStore(api, events);
 export const subscriptions = createSubscriptionsStore(api, events);
 export const quota = createQuotaStore(events);
 export const unread = createUnreadStore(api, events);
+export const attention = createAttentionStore(api, events, { prefixes: () => projects.prefixes() });
 export const leases = createLeasesStore(api, events);
 
 // A token from an older build, or from a daemon that had no sessions:

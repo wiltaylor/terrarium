@@ -6,32 +6,9 @@ import { isMock } from "../api";
 import { QuotaBanner } from "../components/QuotaBanner";
 import { ErrorBanner, useNow } from "../components/ui";
 import { duration } from "../lib/format";
-import { agents, api, auth, events, projects, signOutNow, subscriptions, theme, unread } from "../stores";
+import { agents, api, attention, auth, events, projects, signOutNow, subscriptions, theme, unread } from "../stores";
+import { GLOBAL_ITEMS, PROJECT_ITEMS } from "./nav";
 import { TokenScreen } from "./TokenScreen";
-
-const PROJECT_ITEMS = [
-  { path: "board", label: "Board" },
-  { path: "inbox", label: "Inbox" },
-  { path: "wiki", label: "Wiki" },
-  { path: "memory", label: "Memory" },
-  { path: "versions", label: "Versions" },
-  { path: "artifacts", label: "Artifacts" },
-  { path: "spend", label: "Spend" },
-  { path: "settings", label: "Settings & repos" },
-] as const;
-
-const GLOBAL_ITEMS = [
-  { href: "/", label: "Home", end: true },
-  { href: "/projects", label: "Projects" },
-  { href: "/agents", label: "Agents" },
-  { href: "/subscriptions", label: "Subscriptions" },
-  { href: "/mail", label: "Mail" },
-  { href: "/targets", label: "Targets" },
-  { href: "/hosts", label: "Hosts" },
-  { href: "/events", label: "Event log" },
-  { href: "/audit", label: "Audit" },
-  { href: "/settings", label: "Settings" },
-] as const;
 
 export function Layout(props: RouteSectionProps) {
   const location = useLocation();
@@ -40,9 +17,12 @@ export function Layout(props: RouteSectionProps) {
   const [health, { refetch }] = createResource(() => api.health().catch(() => null));
 
   onMount(() => {
-    void projects.refresh().catch(() => undefined);
+    // The attention rule names blocked notices by card prefix: load the projects first.
+    void projects
+      .refresh()
+      .catch(() => undefined)
+      .then(() => attention.refresh());
     void agents.refresh();
-    void unread.refresh();
     subscriptions.poll(isMock ? 5000 : 30_000);
     events.start();
     const t = setInterval(refetch, 30_000);
@@ -75,7 +55,6 @@ export function Layout(props: RouteSectionProps) {
   });
 
   const inboxCount = () => unread.inbox(projects.selected());
-  const mailCount = () => unread.operator();
   const countText = (c: { n: number; more: boolean } | undefined) => (c ? `${c.n}${c.more ? "+" : ""}` : "");
 
   const blockedCount = () => agents.inProject(projects.selected()).filter((a) => a.status === "blocked" || a.status === "error").length;
@@ -140,9 +119,9 @@ export function Layout(props: RouteSectionProps) {
                     {blockedCount()}
                   </span>
                 </Show>
-                <Show when={item.href === "/mail" && mailCount().n > 0}>
-                  <span class="nav-count info" title="Unread mail to the operator">
-                    {countText(mailCount())}
+                <Show when={item.href === "/mail" && attention.count() > 0}>
+                  <span class="nav-count info" title="Mail that needs you: unread mail to you, held mail, paused threads">
+                    {attention.count()}
                   </span>
                 </Show>
               </A>

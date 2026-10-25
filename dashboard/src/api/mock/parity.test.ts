@@ -1010,3 +1010,93 @@ describe("session contract (docs/api.md §1.1)", () => {
   });
 });
 
+
+describe("mail parity with docs/api.md §7 (the mail log's filters)", () => {
+  it("lists oldest first by ID, and the cursor asks for IDs after it", async () => {
+    const api = mock();
+    const all = (await api.mail.list({ limit: 1000 })).items;
+    expect(all.map((m) => m.id)).toEqual(all.map((m) => m.id).sort());
+    const first = await api.mail.list({ limit: 4 });
+    expect(first.next).toBe(first.items.at(-1)!.id);
+    const second = await api.mail.list({ limit: 4, cursor: first.next! });
+    expect(second.items[0]!.id > first.next!).toBe(true);
+    // A cursor that is not a row still means "after this ID", as `id > ?` does.
+    const after = await api.mail.list({ cursor: `${all[2]!.id}0` });
+    expect(after.items.map((m) => m.id)).toEqual(all.slice(3).map((m) => m.id));
+    expect((await api.mail.list({ cursor: all.at(-1)!.id })).items).toEqual([]);
+  });
+
+  it("filters by to, from, thread, and state; `system` is no filter (404); a bad state is 400", async () => {
+    const api = mock();
+    const to = (await api.mail.list({ to: "operator" })).items;
+    expect(to.length).toBeGreaterThan(0);
+    expect(to.every((m) => m.to === "operator" && m.to_kind === "operator")).toBe(true);
+    const from = (await api.mail.list({ from: "operator" })).items;
+    expect(from.every((m) => m.from === "operator" && m.from_kind === "operator")).toBe(true);
+    // The daemon answers 404 "no agent `system`"; the log filters `system` in the browser.
+    await expect(api.mail.list({ from: "system" })).rejects.toMatchObject({ status: 404 });
+    const sys = (await api.mail.list({ limit: 1000 })).items.filter((m) => m.from === "system");
+    expect(sys.length).toBeGreaterThan(0);
+    expect(sys.every((m) => m.from_kind === "system" && m.from_name === "system")).toBe(true);
+    const unread = (await api.mail.list({ state: "unread" })).items;
+    expect(unread.every((m) => m.state === "queued" || m.state === "delivered")).toBe(true);
+    const th = (await api.mail.list({ thread: to[0]!.thread_id })).items;
+    expect(th.every((m) => m.thread_id === to[0]!.thread_id)).toBe(true);
+    await expect(api.mail.list({ state: "bogus" as "read" })).rejects.toMatchObject({ status: 400 });
+  });
+
+  it("sets read_by on the first read and on a reply", async () => {
+    const api = mock();
+    const m = (await api.mail.list({ to: "operator", state: "unread" })).items[0]!;
+    expect(m.read_by).toBeUndefined();
+    const read = await api.mail.markRead(m.id);
+    expect(read).toMatchObject({ state: "read", read_by: "operator", read_by_name: "operator" });
+    expect(read.read_at).toBeTruthy();
+    const again = (await api.mail.list({ to: "operator", state: "unread" })).items[0]!;
+    await api.mail.reply(again.id, "Seen.");
+    expect(await api.mail.get(again.id)).toMatchObject({ state: "replied", read_by: "operator" });
+  });
+
+  it("refuses mail to `system` and mail as `system`", async () => {
+    const api = mock();
+    await expect(api.mail.send({ to: "system", body: "hi" })).rejects.toMatchObject({ status: 422 });
+    await expect(api.mail.send({ from: "system", to: "operator", body: "hi" })).rejects.toMatchObject({ status: 403 });
+  });
+
+  it("holds agent mail past the loop limit, flags the event, marks the thread paused, and notices the operator once", async () => {
+    const api = mock();
+    const frames: AgentEvent[] = [];
+    const s = api.events.stream({ since: api.world.seq });
+    s.subscribe((e) => frames.push(e));
+    await wait();
+    const a = await api.mail.send({ from: "terrarium/lead", to: "terrarium/runner-dev", subject: "loop", body: "1" });
+    for (let i = 2; i <= 6; i++) await api.mail.send({ from: i % 2 ? "terrarium/lead" : "terrarium/runner-dev", to: i % 2 ? "terrarium/runner-dev" : "terrarium/lead", thread_id: a.thread_id, body: String(i) });
+    expect((await api.mail.list({ thread: a.thread_id })).items.every((m) => !m.thread_paused && m.state === "queued")).toBe(true);
+    const held = await api.mail.send({ from: "terrarium/lead", to: "terrarium/runner-dev", thread_id: a.thread_id, body: "7" });
+    await api.mail.send({ from: "terrarium/runner-dev", to: "terrarium/lead", thread_id: a.thread_id, body: "8" });
+    await wait();
+    expect(held).toMatchObject({ state: "delivered", thread_paused: true });
+    const ev = frames.find((e) => e.kind === "mail" && e.data.message_id === held.id)!;
+    expect(ev.data).toMatchObject({ held: true, thread_state: "paused" });
+    expect(Object.keys(ev.data).sort()).toEqual(["agent_id", "from", "from_name", "held", "message_id", "subject", "thread_id", "thread_state", "to", "to_name"]);
+    const thread = (await api.mail.list({ thread: a.thread_id })).items;
+    expect(thread.every((m) => m.thread_paused === true)).toBe(true);
+    const notices = thread.filter((m) => m.from === "system");
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toMatchObject({ to: "operator", subject: `Thread ${a.thread_id} needs a human`, state: "delivered" });
+    // An operator message ends the pause; `thread_paused` is absent when false.
+    await api.mail.reply(held.id, "Stop here.");
+    expect((await api.mail.list({ thread: a.thread_id })).items.some((m) => "thread_paused" in m)).toBe(false);
+    s.close();
+  });
+
+  it("sends the blocked-card notice and the quota alert from `system` to the operator", async () => {
+    const api = mock();
+    await api.cards.move("TER-13", { column: "blocked", comment: "Needs a login." });
+    const sys = (await api.mail.list({ to: "operator", limit: 1000 })).items.filter((m) => m.from === "system");
+    expect(sys.some((m) => m.subject.startsWith("TER-13 blocked: ") && m.body.includes("Needs a login."))).toBe(true);
+    api.sim.setWindow("anthropic-max", "5h", 85);
+    const after = (await api.mail.list({ limit: 1000 })).items.filter((m) => m.from === "system");
+    expect(after.some((m) => m.subject === "Quota: anthropic-max 5h window at 85%" && m.to === "operator")).toBe(true);
+  });
+});

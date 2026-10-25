@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { UsagePoint } from "../../api/types";
-import { bucketStarts, cardProject, cardRows, tokenSeries, toPercent, totalsByKey } from "./split";
+import { bucketStarts, cardProject, cardRows, tokenSeries, toPercent, totalsByKey } from "./usage";
 
 const p = (bucket: string, key: string, input: number, output: number): UsagePoint => ({ bucket, key, input_tokens: input, output_tokens: output, cache_read: 2, cache_write: 1, messages: 1, turns: 1 });
 
-describe("spend split", () => {
+describe("usage split (Home tile detail)", () => {
   const rows = [p("2026-10-24T05:00:00Z", "lead", 100, 10), p("2026-10-24T06:00:00Z", "lead", 50, 5), p("2026-10-24T06:00:00Z", "dev", 300, 30)];
 
   it("sums by key, biggest first, and names keys", () => {

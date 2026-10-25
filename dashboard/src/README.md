@@ -253,8 +253,8 @@ While the socket is down, the layout shows a **Disconnected** strip with a
 
 Every view listens through `events.on(...)`: agent status badges, the
 current card, and the self-report (`applyAgentEvent`), the board (`card` and
-`board` events), the mail and inbox counts in the sidebar
-(`stores/unread.ts`), the quota banner and the hold badges
+`board` events), the Mail attention count and the inbox counts in the sidebar
+(`stores/attention.ts`, `stores/unread.ts`), the mail log (`features/mail/feed.ts`), the quota banner and the hold badges
 (`stores/quota.ts`), the subscription list (`quota.*` events) and the detect
 banner (`subscription.offer`), the home queue and usage strip, the Event
 log, and the agent's Events tab. `lease` events keep the lease lists on the
@@ -300,24 +300,80 @@ Event sockets (`/api/events`): the server sends one JSON `AgentEvent` in each
 text frame. `agent` is the agent name. `data.agent_id` carries the ID.
 A `status` event carries `data.status`. A `card` event carries `data.card_id`.
 
+## The mail log
+
+The operator reads mail only when something needs them. `/mail` is a log of
+every message (agent to agent, agent to operator, operator to agent, `system`,
+project inboxes), newest first. A row shows the time, from and to, the
+projects, the subject, the first line, and chips: unread (by the recipient),
+the state (`queued`, `delivered`, `read`, `replied`), read by, the notice
+kind, held, and thread paused. A click opens the thread under the row. The
+filter state is in the URL (`?project=&kind=&q=&range=&attention=0&thread=`),
+so Home links to `/mail?thread=<id>`. A row to a project inbox links to
+`/p/<project>/inbox?id=`.
+
+**The attention rule** (`features/mail/log.ts`, `attentionReasons`). A message
+needs the operator when:
+
+- it goes to the operator and is `queued` or `delivered` (`unread`). A
+  `system` notice adds its kind, from the daemon's subjects: `<CARD> blocked:`
+  (`blocked`), `Quota:` or `Budget:` (`quota`), `Thread <id> needs a human`
+  (`needs_human`);
+- the loop guard held it, and the thread is still paused (`held`);
+- it is the newest message of a paused thread (`paused`).
+
+A read (`POST /api/mail/{id}/read`, which sets `read_by`) ends `unread`. A
+reply from the operator on the thread ends the pause. The "Needs attention"
+toggle (on by default), the sidebar count on Mail, and the mail items of the
+Home queue use this one rule. Unread project-inbox mail is not in the rule:
+the Inbox count in the sidebar shows it.
+
+A message row does not say that the loop guard held it. The `mail` event
+does (`held: true`); `stores/attention.ts` keeps those IDs. For older rows,
+`heldIds` finds them: the daemon sends its "needs a human" notice right after
+the first held message, and holds every later agent-to-agent message on the
+thread until the operator or a project inbox writes on it.
+
+**Server or browser.** `GET /api/mail` answers oldest first, so a newest-first
+log reads the full list (`collectAll`, pages of 1000, at most 20 pages), and
+the view shows 50 rows at a time (**Load more**). A `mail` event asks only for
+the messages after the newest ID (`?cursor=<id>`, the list is `id > cursor`)
+and reads the event's thread again (`?thread=`).
+
+| Filter | Where |
+|---|---|
+| To operator | Server: `?to=operator` |
+| From operator | Server: `?from=operator` |
+| System | Browser. The daemon answers `?from=system` with `404 no agent \`system\`` (`store/mail.rs` `resolve`). |
+| Agent to agent, project inbox | Browser: the daemon has no kind filter. |
+| Project | Browser: a message has no project field. The project comes from `project/agent` and `project:<name>`, and from the card prefix or budget scope in a `system` subject. |
+| Text search, time range | Browser |
+| Needs attention | Browser: held and paused need the whole thread. |
+| Thread (an open row) | Server: `?thread=` |
+
+The browser filter also repeats the server part, so a thread read for a live
+update cannot put other rows in the view. The mock answers the same params
+(`api/mock/index.ts` `listMail`): `id > cursor`, `to`, `from`, `thread`,
+`state`, and the 404 for `system`.
+
 ## Pages and the API
 
 | Route | View | API calls |
 |---|---|---|
-| `/` | Home: usage strip, waiting-on-you queue | `GET /api/subscriptions`, `GET /api/usage?bucket=hour&group=subscription`; tile detail: `GET /api/usage?subscription=&group=project\|agent\|model`, `GET .../quota`; per project: `versions?status=in_review`, `wiki?status=ready_for_review`, `board`, `inbox?unread=true` |
+| `/` | Home: usage strip, waiting-on-you queue; the tile detail has the usage split by project, agent, model, and card | `GET /api/subscriptions`, `GET /api/usage?bucket=hour&group=subscription`; tile detail: `GET /api/usage?subscription=&group=project\|agent\|model\|card`, `GET .../quota`; per project: `versions?status=in_review`, `wiki?status=ready_for_review`, `board`; mail items: the attention store (see "The mail log") |
 | `/projects` | Projects: list, create | `GET`, `POST /api/projects` |
 | `/p/:project/settings` | Project edit and delete, Repos panel | `GET`, `PATCH`, `DELETE /api/projects/{name}?confirm=true`, `GET`, `POST .../repos`, `POST /api/repos/{id}/checkout` |
 | `/agents` | Agents grid, new agent | `GET`, `POST /api/agents`, events socket |
 | `/agents/:id` | Agent detail: edit, delete, roles, quota, leases, terminal, events, sessions | `GET`, `PATCH`, `DELETE /api/agents/{id}`, `start/stop/restart/send`, `GET`, `PUT .../roles`, `GET /api/usage/me?agent=`, `GET .../leases?all=`, `WS .../pty`, `GET .../events?since=`, `GET .../sessions` |
 | `/subscriptions` | Subscriptions, detect banner, add wizard | `GET`, `POST`, `DELETE /api/subscriptions[/{name}]`, `GET .../detect`, `POST .../{name}/probe\|verify\|logout\|api-key`, `POST /api/subscriptions/login`, `GET`, `DELETE .../login/{id}`, `POST .../login/{id}/input`, `WS .../login/{id}/pty` |
-| `/mail` | Threads, compose and reply as operator | `GET /api/mail`, `POST /api/mail`, `POST /api/mail/{id}/read`, `POST /api/mail/{id}/reply` |
+| `/mail` | Mail log: every message, newest first, filters, the attention view (default), the thread inline, mark read, reply, compose | `GET /api/mail?to=&from=&thread=&cursor=`, `POST /api/mail`, `POST /api/mail/{id}/read`, `POST /api/mail/{id}/reply` |
 | `/p/:project/inbox` | Project inbox, make card | `GET .../inbox`, `POST .../inbox/{id}/read`, `POST .../inbox/{id}/reply`, `POST .../cards` (`from_mail`) |
 | `/p/:project/board` | Board, drag and drop, card drawer | `GET .../board`, `PATCH /api/cards/{id}`, `POST .../comments`, `GET .../events`, `DELETE /api/cards/{id}` |
 | `/p/:project/memory` | Memory list, detail, graph | `GET .../memories`, `GET /api/memories/{project/MEM-n}/graph` |
 | `/p/:project/wiki/*path` | Page tree, render, edit, history, create | `GET .../wiki`, `GET`, `PUT /api/wiki/{project/path}`, `revisions`, `diff`, `restore`, `backlinks`, `review` |
 | `/p/:project/artifacts/:id?` | Artifact viewer, upload, delete | `GET .../artifacts`, `.../artifacts/usage`, `POST .../artifacts` (multipart), `POST /api/artifacts/{id}/url` |
 | `/p/:project/versions/:id?` | Version timeline, review, new version | `GET`, `POST .../versions`, `POST /api/versions/{id}/submit|approve|reject|release`, `compare` |
-| `/p/:project/spend` | Usage by day, agent, model, and subscription | `GET /api/usage?project=&bucket=day&group=agent\|model\|subscription` |
+| `/p/:project/spend` | Gone: redirects to `/` (`app/nav.ts` `MOVED_ROUTES`). The daemon's budget alert mail still links it. | none |
 | `/targets` | Targets, lifecycle, exec console, leases (grant, extend, revoke, history) | `GET /api/targets`, `POST /api/targets/{name}/up\|down\|snapshot\|restore\|status`, `POST .../exec`, `WS .../sessions/{id}/ws`, `DELETE .../sessions/{id}`, `GET`, `POST .../leases`, `PATCH`, `DELETE .../leases/{agent}` (docs/api.md §17.7) |
 | `/hosts` | Host agents: status, capabilities, add with a one-time token, revoke | `GET`, `POST /api/hosts`, `DELETE /api/hosts/{name}` (new API, not in docs/api.md yet) |
 | `/events` | Event log with history | `GET /api/events?since=&kind=&project=&agent=`, events socket |
@@ -449,3 +505,15 @@ These need changes in `terrariumd`. The dashboard cannot do them alone.
    artifacts from the artifact origin.
 5. **Refuse `?token=`.** The daemon refuses it by default now
    (`TERRARIUM_WS_QUERY_TOKEN=1` turns it on).
+6. **`?from=system` and `?to=system` on `GET /api/mail`.** `store/mail.rs`
+   `resolve` does not know `system`, so the filter is `404 no agent
+   \`system\``. The mail log filters `system` in the browser now.
+7. **Spend link in budget alerts.** `quota_policy.rs` `spend_link` still
+   writes `/p/<project>/spend` into the budget alert mail. The dashboard
+   redirects that route to `/`. Point the link at `/` or `/subscriptions`.
+8. **`held` on the message row.** Only the `mail` event says that the loop
+   guard held a message. The log finds older held rows from the "needs a
+   human" notice (`heldIds`). A `held` column would make that exact.
+9. **Names of deleted agents.** On the real daemon, mail to an agent that
+   `agent rm` deleted shows `to_name` as `/<ULID>`, not `project/name`
+   (docs/api.md §7 says the name stays).

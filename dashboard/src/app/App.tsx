@@ -1,8 +1,9 @@
 import { Navigate, Route, Router, useParams } from "@solidjs/router";
-import { lazy, Show } from "solid-js";
+import { For, lazy, Show } from "solid-js";
 import { isMock } from "../api";
 import { auth } from "../stores";
 import { Layout } from "./Layout";
+import { MOVED_ROUTES } from "./nav";
 import { TokenScreen } from "./TokenScreen";
 import { Home } from "../features/home/Home";
 import { AgentsPage } from "../features/agents/AgentsPage";
@@ -23,7 +24,6 @@ const EventsPage = lazy(() => import("../features/events/EventsPage"));
 const ProjectsPage = lazy(() => import("../features/projects/ProjectsPage"));
 const ProjectSettings = lazy(() => import("../features/projects/ProjectSettings"));
 const SettingsPage = lazy(() => import("../features/settings/SettingsPage"));
-const SpendPage = lazy(() => import("../features/spend/SpendPage"));
 // Mock only: the hostile payloads, to eyeball that the sanitizer keeps them inert.
 const XssPage = lazy(() => import("../features/devxss/XssPage"));
 
@@ -61,7 +61,6 @@ export function App() {
         <Route path="/p/:project/board" component={BoardPage} />
         <Route path="/p/:project/inbox" component={InboxPage} />
         <Route path="/p/:project/settings" component={ProjectSettings} />
-        <Route path="/p/:project/spend" component={SpendPage} />
         <Route path="/p/:project/memory" component={MemoryPage} />
         <Route path="/p/:project/wiki/*path" component={WikiPage} />
         <Route path="/p/:project/artifacts/:id?" component={ArtifactsPage} />
@@ -69,6 +68,7 @@ export function App() {
         <Show when={isMock}>
           <Route path="/dev/xss" component={XssPage} />
         </Show>
+        <For each={MOVED_ROUTES}>{(r) => <Route path={r.path} component={() => <Navigate href={r.to} />} />}</For>
         <Route path="*" component={NotFound} />
       </Router>
     </Show>

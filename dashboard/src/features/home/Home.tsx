@@ -1,14 +1,14 @@
 import { A } from "@solidjs/router";
-import { createResource, createSignal, For, Match, onCleanup, onMount, Show, Switch } from "solid-js";
+import { createMemo, createResource, createSignal, For, Match, onCleanup, onMount, Show, Switch } from "solid-js";
 import { isLocalOnly, Sparkline, UsageTile } from "../../components/UsageTile";
 import { Empty, ErrorBanner, Modal, PageHead, Tabs, useNow } from "../../components/ui";
 import type { Subscription, UsageGroup, UsagePoint } from "../../api/types";
 import { isMissingEndpoint } from "../../api/http";
 import { ago, compact } from "../../lib/format";
-import { collectAll } from "../../lib/paging";
-import { api, events, projects, subscriptions } from "../../stores";
-import { usageLabel } from "../spend/labels";
-import { bucketStarts, cardProject, cardRows, tokenSeries, toPercent, totalsByKey } from "../spend/split";
+import { api, attention, events, projects, subscriptions } from "../../stores";
+import { REASON_LABELS } from "../mail/log";
+import { usageLabel } from "./labels";
+import { bucketStarts, cardProject, cardRows, tokenSeries, toPercent, totalsByKey } from "./usage";
 import { buildQueue, type ProjectSnapshot } from "./queue";
 
 const HOUR = 3_600_000;
@@ -61,32 +61,33 @@ async function loadQueue(missing: Set<string>) {
   };
   const snaps: ProjectSnapshot[] = await Promise.all(
     list.map(async (p) => {
-      const [versions, pages, board, inbox] = await Promise.all([
+      const [versions, pages, board] = await Promise.all([
         optional("versions", () => api.versions.list(p.name, { status: "in_review" })),
         optional("wiki", () => api.wiki.tree(p.name, { status: "ready_for_review" })),
         api.board.get(p.name),
-        collectAll((cursor) => api.inbox.list(p.name, { unread: true, cursor, limit: 1000 }), 5),
       ]);
-      return { project: p.name, versions, pages, board, inbox };
+      return { project: p.name, versions, pages, board };
     }),
   );
-  return buildQueue(snaps);
+  return snaps;
 }
 
-const KIND_LABEL = { version: "version", page: "review", card: "blocked", inbox: "inbox" } as const;
-const KIND_CHIP = { version: "info", page: "warn", card: "bad", inbox: "" } as const;
+const KIND_LABEL = { version: "version", page: "review", card: "blocked", mail: "mail" } as const;
+const KIND_CHIP = { version: "info", page: "warn", card: "bad", mail: "" } as const;
 
 export function Home() {
   const now = useNow(15_000);
   const missing = new Set<string>();
-  const [queue, { refetch }] = createResource(() => loadQueue(missing));
+  const [snaps, { refetch }] = createResource(() => loadQueue(missing));
+  // The mail items come from the attention store, which a `mail` event refreshes.
+  const queue = createMemo(() => (snaps() ? buildQueue(snaps()!, attention.items()) : undefined));
   const [detail, setDetail] = createSignal<string | null>(null);
   const strip = useStripUsage(now);
 
   onMount(() => {
     let t: ReturnType<typeof setTimeout> | undefined;
     const off = events.on((e) => {
-      if (["card", "board", "mail"].includes(e.kind) || /^(version|wiki)\./.test(e.kind)) {
+      if (["card", "board"].includes(e.kind) || /^(version|wiki)\./.test(e.kind)) {
         clearTimeout(t);
         t = setTimeout(refetch, 400);
       }
@@ -131,12 +132,12 @@ export function Home() {
       <section class="card-box">
         <div class="spread">
           <h2 style={{ margin: 0 }}>Waiting on you</h2>
-          <button class="small" onClick={refetch}>
+          <button class="small" onClick={() => (void refetch(), void attention.refresh())}>
             Refresh
           </button>
         </div>
-        <Show when={!queue.error} fallback={<p class="muted">Could not load: {String(queue.error)}</p>}>
-          <Show when={queue()?.length} fallback={<p class="muted">{queue.loading ? "Loading…" : "Nothing needs you. Good."}</p>}>
+        <Show when={!snaps.error} fallback={<p class="muted">Could not load: {String(snaps.error)}</p>}>
+          <Show when={queue()?.length} fallback={<p class="muted">{snaps.loading ? "Loading…" : "Nothing needs you. Good."}</p>}>
             <div>
               <For each={queue()}>
                 {(item) => (
@@ -176,20 +177,26 @@ export function Home() {
                             </>
                           )}
                         </Match>
-                        <Match when={item.kind === "inbox" && item}>
+                        <Match when={item.kind === "mail" && item}>
                           {(m) => (
                             <>
-                              <A href={`/p/${m().project}/inbox?id=${m().message.id}`}>
-                                <strong>{m().message.subject}</strong>
+                              <A href={`/mail?thread=${m().entry.message.thread_id}`}>
+                                <strong>{m().entry.message.subject || "(no subject)"}</strong>
                               </A>{" "}
-                              <span class="muted">from {m().message.from_name}</span>
+                              <span class="muted">
+                                {m().entry.message.from_name} → {m().entry.message.to_name}
+                              </span>{" "}
+                              <span class="chips">
+                                <For each={m().entry.reasons}>{(r) => <span class="chip warn">{REASON_LABELS[r]}</span>}</For>
+                              </span>
                             </>
                           )}
                         </Match>
                       </Switch>
                     </div>
                     <span class="muted small" style={{ "white-space": "nowrap" }}>
-                      {item.project} · {ago(item.at, now())}
+                      {item.project ? `${item.project} · ` : ""}
+                      {ago(item.at, now())}
                     </span>
                   </div>
                 )}

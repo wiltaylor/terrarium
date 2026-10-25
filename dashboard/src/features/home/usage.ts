@@ -2,7 +2,7 @@
 
 import type { UsagePoint } from "../../api/types";
 
-export interface SpendRow {
+export interface UsageRow {
   /** The group key: a subscription, project, model, or agent ULID. */
   key: string;
   /** What to show. For agents, the name when it is known. */
@@ -18,8 +18,8 @@ export interface SpendRow {
 }
 
 /** Sum a grouped series by `key`, biggest first. `label` turns a key into a name. */
-export function totalsByKey(points: UsagePoint[], label: (key: string) => string = (k) => k): SpendRow[] {
-  const m = new Map<string, SpendRow>();
+export function totalsByKey(points: UsagePoint[], label: (key: string) => string = (k) => k): UsageRow[] {
+  const m = new Map<string, UsageRow>();
   for (const p of points) {
     const key = p.key ?? "";
     const r = m.get(key) ?? { key, name: key ? label(key) : "unknown", input: 0, output: 0, cache: 0, messages: 0, turns: 0, tokens: 0 };
@@ -39,7 +39,7 @@ export function totalsByKey(points: UsagePoint[], label: (key: string) => string
  * The rows of a `group=card` series, biggest first, named `TER-42 Title`.
  * Points with no key (samples with no card) are left out.
  */
-export function cardRows(points: UsagePoint[], limit = Infinity): SpendRow[] {
+export function cardRows(points: UsagePoint[], limit = Infinity): UsageRow[] {
   const titles = new Map<string, string>();
   for (const p of points) if (p.key && p.title) titles.set(p.key, p.title);
   const label = (k: string) => (titles.has(k) ? `${k} ${titles.get(k)}` : k);

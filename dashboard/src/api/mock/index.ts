@@ -276,6 +276,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
   type Addr = { addr: string; kind: Message["from_kind"]; label: string; project?: string };
   const address = (raw: string, senderProject?: string): Addr => {
     if (raw === "operator") return { addr: "operator", kind: "operator", label: "operator" };
+    if (raw === "system") return { addr: "system", kind: "system", label: "system" };
     if (raw.startsWith("project:")) {
       const p = project(raw.slice(8));
       return { addr: `project:${p.name}`, kind: "project", label: `project:${p.name}`, project: p.name };
@@ -499,8 +500,8 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     if (from !== column) {
       cardEvent(c, "moved", `operator moved ${c.id} to ${column}`, { from, to: column, comment: note ?? null });
       if (column === "blocked") {
-        const thread = ulid("th");
-        sendMail(`project:${c.project}`, "operator", `${c.id} blocked: ${c.title}`, `${c.id} moved to blocked.\n\n${note ?? ""}`, thread);
+        // The daemon's notice (store/board.rs notify_blocked): from `system` to the operator.
+        sendMail("operator", "system", `${c.id} blocked: ${c.title}`, `Card ${c.id} "${c.title}" moved to blocked by operator.\n\nComment:\n${note ?? ""}\n\nRun \`terrarium card show ${c.id}\`.`);
       }
       if (column === "done") {
         for (const d of w.cards.filter((x) => x.depends_on.includes(c.id) && blockedBy(x).length === 0)) cardEvent(d, "unblocked", `${d.id} unblocked by ${c.id}`, { by: c.id });
@@ -526,12 +527,29 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
   };
 
   // ----- mail (docs/api.md §7) -----
+  /** The loop guard limit (`TERRARIUM_MAIL_LOOP_LIMIT`, default 6). */
+  const LOOP_LIMIT = 6;
+  const byId = (a: Message, b: Message) => a.id.localeCompare(b.id);
+  /** Agent-to-agent messages on the thread since its last operator or project-inbox message. */
+  const agentRun = (thread: string): number => {
+    let n = 0;
+    for (const m of w.mail.filter((x) => x.thread_id === thread).sort(byId)) {
+      if (m.from_kind === "operator" || m.from_kind === "project" || m.to_kind === "project") n = 0;
+      else if (m.from_kind === "agent" && m.to_kind === "agent") n++;
+    }
+    return n;
+  };
+  /** The row as the daemon renders it: `thread_paused` only when true. */
+  const render = (m: Message): Message => (agentRun(m.thread_id) > LOOP_LIMIT ? { ...m, thread_paused: true } : m);
   const sendMail = (to: string, from: string, subject: string, body: string, thread?: string, inReplyTo?: string): Message => {
+    if (to === "system") fail(422, "invalid", "`system` only sends mail");
     const t = address(to);
     const f = address(from);
+    const threadId = thread ?? ulid("th");
+    const held = f.kind === "agent" && t.kind === "agent" && agentRun(threadId) >= LOOP_LIMIT;
     const m: Message = {
       id: ulid("msg"),
-      thread_id: thread ?? ulid("th"),
+      thread_id: threadId,
       from: f.addr,
       from_kind: f.kind,
       from_name: f.label,
@@ -540,54 +558,77 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
       to_name: t.label,
       subject,
       body,
-      state: t.kind === "agent" ? "queued" : "delivered",
+      state: t.kind === "agent" && !held ? "queued" : "delivered",
       ...(inReplyTo ? { in_reply_to: inReplyTo } : {}),
       created_at: iso(),
-      ...(t.kind === "agent" ? {} : { delivered_at: iso() }),
+      ...(t.kind === "agent" && !held ? {} : { delivered_at: iso() }),
     };
     w.mail.push(m);
     const recipient = t.kind === "agent" ? w.agents.find((a) => a.id === t.addr) : undefined;
     emit({
       kind: "mail",
-      actor: "operator",
+      actor: f.kind === "agent" ? `agent:${f.addr}` : f.kind === "system" ? "system" : "operator",
       ...(recipient ? { agent: recipient.name, agent_id: recipient.id } : {}),
       project: t.project,
       summary: `Mail from ${m.from_name} to ${m.to_name}: ${subject}`,
-      data: { message_id: m.id, thread_id: m.thread_id, from: m.from, from_name: m.from_name, to: m.to, to_name: m.to_name, subject },
+      data: { message_id: m.id, thread_id: m.thread_id, from: m.from, from_name: m.from_name, to: m.to, to_name: m.to_name, subject, ...(held ? { held: true, thread_state: "paused" } : {}) },
     });
-    return m;
+    if (held) {
+      // One notice for each pause (store/mail.rs pause_notice).
+      const reset = w.mail.filter((x) => x.thread_id === threadId && (x.from_kind === "operator" || x.from_kind === "project" || x.to_kind === "project")).sort(byId).at(-1)?.id ?? "";
+      const sent = w.mail.some((x) => x.thread_id === threadId && x.from_kind === "system" && x.id > reset && /^Thread \S+ needs a human/.test(x.subject));
+      if (!sent) {
+        sendMail("operator", "system", `Thread ${threadId} needs a human`, `thread ${threadId} needs a human: ${agentRun(threadId)} agent replies without operator input. The daemon types no more mail pointers for this thread. Reply on the thread to resume it.`, threadId);
+      }
+    }
+    return render(m);
+  };
+  /** The first read sets `read_by` (docs/api.md §7). */
+  const readBy = (m: Message, reader: string) => {
+    if (m.read_by) return;
+    const r = address(reader);
+    m.read_by = r.addr;
+    m.read_by_name = r.label;
   };
   const replyTo = (id: string, body: string, subject: string | undefined, as?: string): Message[] => {
     const orig = find(w.mail, (m) => m.id === id, `message ${id}`);
     if (!body.trim()) fail(422, "invalid", "the body is empty");
     // The operator answers for `operator` and every project inbox.
     const from = as ?? (orig.to_kind === "agent" ? "operator" : orig.to);
-    const participants = [...new Set(w.mail.filter((m) => m.thread_id === orig.thread_id).flatMap((m) => [m.from, m.to]))].filter((p) => p !== from);
+    const participants = [...new Set(w.mail.filter((m) => m.thread_id === orig.thread_id).flatMap((m) => [m.from, m.to]))].filter((p) => p !== from && p !== "system");
     const first = w.mail.find((m) => m.thread_id === orig.thread_id);
     const subj = subject ?? (orig.subject || first?.subject ? `Re: ${(orig.subject || first!.subject).replace(/^Re:\s*/i, "")}` : "");
     const out = participants.map((p) => sendMail(p, from, subj, body, orig.thread_id, orig.id));
     orig.state = "replied";
-    return out;
+    orig.read_at ??= iso();
+    readBy(orig, "operator");
+    return out.map(render);
   };
-  const listMail = (pred: (m: Message) => boolean, q: { state?: string; thread?: string; unread?: boolean } & PageQuery): Page<Message> =>
-    paginate(
-      w.mail.filter(
+  /** Oldest first by ID; the cursor is a message ID and the next page is `id > cursor`, as in store/mail.rs. */
+  const listMail = (pred: (m: Message) => boolean, q: { state?: string; thread?: string; unread?: boolean } & PageQuery): Page<Message> => {
+    if (q.state && !["queued", "delivered", "read", "replied", "unread", "all"].includes(q.state)) fail(400, "bad_request", `bad state \`${q.state}\`: use queued, delivered, read, replied, or unread`);
+    const limit = Math.max(1, Math.min(q.limit ?? 100, 1000));
+    const rows = w.mail
+      .filter(
         (m) =>
           pred(m) &&
+          (!q.cursor || m.id > q.cursor) &&
           (!q.thread || m.thread_id === q.thread) &&
           (!q.unread || m.state === "queued" || m.state === "delivered") &&
-          (!q.state || (q.state === "unread" ? m.state === "queued" || m.state === "delivered" : m.state === q.state)),
-      ),
-      q,
-      (m) => m.id,
-    );
+          (!q.state || q.state === "all" || (q.state === "unread" ? m.state === "queued" || m.state === "delivered" : m.state === q.state)),
+      )
+      .sort(byId);
+    const items = rows.slice(0, limit).map(render);
+    return { items, next: rows.length > limit ? items.at(-1)!.id : null };
+  };
   const markRead = (id: string) => {
     const m = find(w.mail, (x) => x.id === id, `message ${id}`);
     if (m.state === "queued" || m.state === "delivered") {
       m.state = "read";
       m.read_at = iso();
     }
-    return m;
+    readBy(m, "operator");
+    return render(m);
   };
 
   // ----- artifact upload -----
@@ -638,8 +679,9 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     const alert = (level: "alert" | "exhausted") => {
       if (alerted.has(`${period}/${level}`)) return;
       alerted.add(`${period}/${level}`);
-      const subject = level === "alert" ? `${s.name}: window ${win.window} at ${win.used_pct}% (alert at ${s.alert_at}%)` : `${s.name}: window ${win.window} is used up`;
-      sendMail("operator", "operator", subject, `${subject}. Resets at ${win.resets_at ?? "an unknown time"}.`);
+      // The daemon's subjects (quota_policy.rs): the sender is `system`.
+      const subject = level === "alert" ? `Quota: ${s.name} ${win.window} window at ${win.used_pct}%` : `Quota: ${s.name} ${win.window} window is used up`;
+      sendMail("operator", "system", subject, `Subscription \`${s.name}\` (${s.provider}) has used ${win.used_pct}% of its ${win.window} window. The alert level is ${s.alert_at}%.\nThe window resets at ${win.resets_at ?? "an unknown time"}.`);
       emit({ kind: "quota.alert", actor: "system", summary: subject, data: { subscription: s.name, window: win.window, used_pct: win.used_pct, resets_at: win.resets_at ?? null, level, alert_at: s.alert_at } });
     };
     if (win.used_pct >= s.alert_at) alert("alert");
@@ -2075,11 +2117,17 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     },
 
     mail: {
-      list: (q = {}) => reply(() => listMail((m) => (!q.to || m.to === q.to || m.to_name === q.to) && (!q.from || m.from === q.from || m.from_name === q.from), q)),
-      get: (id) => reply(() => find(w.mail, (m) => m.id === id, `message ${id}`)),
+      list: (q = {}) =>
+        reply(() => {
+          // The daemon resolves `to` and `from` as addresses, and `system` is not one it resolves (store/mail.rs `resolve`).
+          for (const v of [q.to, q.from]) if (v?.trim() === "system") notFound("agent `system`");
+          return listMail((m) => (!q.to || m.to === q.to || m.to_name === q.to) && (!q.from || m.from === q.from || m.from_name === q.from), q);
+        }),
+      get: (id) => reply(() => render(find(w.mail, (m) => m.id === id, `message ${id}`))),
       send: (m) =>
         reply(() => {
           if (!m.body.trim()) fail(422, "invalid", "the body is empty");
+          if (m.from === "system") fail(403, "forbidden", "you cannot send as `system`");
           if (m.thread_id && !w.mail.some((x) => x.thread_id === m.thread_id)) notFound(`thread ${m.thread_id}`);
           return sendMail(m.to, m.from ?? "operator", m.subject ?? "", m.body, m.thread_id);
         }),

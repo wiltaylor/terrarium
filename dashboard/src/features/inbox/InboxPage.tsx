@@ -5,7 +5,7 @@ import { Empty, ErrorBanner, LoadMore, PageHead } from "../../components/ui";
 import type { Card, Message } from "../../api/types";
 import { ago } from "../../lib/format";
 import { api, events, unread } from "../../stores";
-import { MessageView } from "../mail/MailPage";
+import { MessageView } from "../mail/parts";
 
 const isUnread = (m: Message) => m.state === "delivered" || m.state === "queued";
 

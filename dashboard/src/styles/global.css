@@ -899,6 +899,88 @@ th {
   border-radius: var(--radius-sm);
   padding: 10px 12px;
 }
+/* Mail log */
+.log-filters {
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.log-filters input[type="search"] {
+  flex: 1 1 200px;
+  min-width: 0;
+}
+.attention-toggle {
+  gap: 6px;
+  font-weight: 600;
+}
+.mail-log {
+  display: grid;
+}
+.log-row {
+  border-bottom: 1px solid var(--border);
+  border-left: 3px solid transparent;
+}
+.log-row:last-child {
+  border-bottom: none;
+}
+.log-row.attn {
+  border-left-color: var(--warn);
+}
+.log-row.open {
+  background: var(--accent-soft);
+}
+.log-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 6px 10px;
+  padding: 8px 10px;
+}
+.log-main {
+  flex: 1 1 320px;
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  justify-items: start;
+  text-align: left;
+  white-space: normal;
+  border: none;
+  background: none;
+  padding: 0;
+  border-radius: 0;
+}
+.log-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+}
+.log-subject {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.log-subject .strong {
+  font-weight: 700;
+}
+.log-side {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+}
+.chips {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.log-thread {
+  padding: 4px 12px 12px 16px;
+}
+.log-thread .current .message {
+  border-color: var(--accent);
+}
 .message pre {
   white-space: pre-wrap;
   background: none;
@@ -1145,46 +1227,9 @@ th {
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 12px;
 }
-.bar-track {
-  background: var(--border);
-  border-radius: 4px;
-  height: 8px;
-  min-width: 60px;
-  overflow: hidden;
-}
-.bar-fill {
-  background: var(--accent);
-  height: 100%;
-}
-.bar-fill.alt {
-  background: var(--info);
-}
 .nav-count.info {
   background: var(--info-soft);
   color: var(--info);
-}
-
-/* Spend: tokens per day */
-.day-bars {
-  display: flex;
-  align-items: flex-end;
-  gap: 4px;
-  height: 120px;
-  overflow-x: auto;
-}
-.day-bar {
-  flex: 1 0 22px;
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-  justify-content: flex-end;
-  align-items: center;
-  gap: 2px;
-}
-.day-bar .bar-fill {
-  width: 100%;
-  min-height: 1px;
-  border-radius: 3px 3px 0 0;
 }
 
 /* Quota banner (PLAN §16.2) */

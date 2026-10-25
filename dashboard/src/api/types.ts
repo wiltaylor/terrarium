@@ -254,12 +254,13 @@ export interface EventQuery {
 // ----- Mail (§12, docs/api.md §7) -----
 
 export type MessageState = "queued" | "delivered" | "read" | "replied";
-export type AddressKind = "operator" | "project" | "agent";
+/** `system` is the daemon (quota alerts, blocked-card notices, loop-guard notices). It only sends: `to_kind` is never `system`. */
+export type AddressKind = "operator" | "system" | "project" | "agent";
 
 export interface Message {
   id: string;
   thread_id: string;
-  /** Stored address: `operator`, `project:<name>`, or the agent ULID. */
+  /** Stored address: `operator`, `system`, `project:<name>`, or the agent ULID. */
   from: string;
   from_kind: AddressKind;
   /** Readable: `operator`, `project:<name>`, or `project/agent`. */
@@ -274,8 +275,11 @@ export interface Message {
   created_at: string;
   delivered_at?: string;
   read_at?: string;
+  /** Who read the message first: `operator`, or an agent ULID. Absent until the first read or reply. */
   read_by?: string;
   read_by_name?: string;
+  /** The loop guard paused the thread (docs/api.md §6.2). Absent when false. */
+  thread_paused?: boolean;
 }
 
 export interface NewMessage {
