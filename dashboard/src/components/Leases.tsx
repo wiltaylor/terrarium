@@ -5,9 +5,10 @@
 import { A } from "@solidjs/router";
 import { createEffect, createMemo, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
 import type { Agent, Lease, LeaseEventData, LeaseGranted, Target } from "../api/types";
+import { scopeLabel, targetScope } from "../lib/target-scope";
 import { actorLabel, applyLeaseEvent, countdown, holderLabel, shownState, untilValue, type UntilMode } from "../lib/leases";
 import { agents, api, events, leases as holds } from "../stores";
-import { createGrantDialog, eligibleAgents, eligibleTargets } from "../features/targets/grant";
+import { createGrantDialog, eligibleAgents, eligibleTargets, grantTitle } from "../features/targets/grant";
 import { ConfirmButton, Empty, ErrorBanner, Modal, useNow } from "./ui";
 
 const STATE_CHIP: Record<string, string> = { active: "ok", revoked: "", expired: "warn" };
@@ -299,7 +300,7 @@ export function GrantDialog(props: { target?: Target; agent?: Agent; targets?: T
     if (l) props.onGranted(l);
   };
   return (
-    <Modal title={props.target ? `Grant ${props.target.name}` : `Grant a target to ${props.agent?.name ?? "an agent"}`} onClose={() => props.onClose()}>
+    <Modal title={props.target ? grantTitle(props.target) : `Grant a target to ${props.agent?.name ?? "an agent"}`} onClose={() => props.onClose()}>
       <form class="stack" onSubmit={submit} aria-label="Grant a lease">
         <Show
           when={props.target}
@@ -313,7 +314,7 @@ export function GrantDialog(props: { target?: Target; agent?: Agent; targets?: T
                 <For each={targetChoices()}>
                   {(t) => (
                     <option value={t.name} selected={t.name === f().target}>
-                      {t.name} ({t.project ?? "global"})
+                      {t.name} ({scopeLabel(t)})
                     </option>
                   )}
                 </For>
@@ -322,7 +323,7 @@ export function GrantDialog(props: { target?: Target; agent?: Agent; targets?: T
           }
         >
           <label>
-            Agent <span class="small">{target()?.project ? `(agents of ${target()!.project})` : "(a global target: all agents)"}</span>
+            Agent <span class="small">{target() && targetScope(target()!) === "project" ? `(agents of ${target()!.project})` : "(a global target: all agents)"}</span>
             <select value={f().agent} onChange={(e) => dlg.set("agent", e.currentTarget.value)} required>
               <option value="" disabled>
                 Pick an agent

@@ -1,4 +1,4 @@
-import { useNavigate, useParams } from "@solidjs/router";
+import { A, useNavigate, useParams } from "@solidjs/router";
 import { createResource, createSignal, For, Show } from "solid-js";
 import { ConfirmButton, Empty, ErrorBanner, PageHead } from "../../components/ui";
 import { isMissingEndpoint } from "../../api/http";
@@ -6,6 +6,8 @@ import type { NewRepo, Repo, Target } from "../../api/types";
 import { ago } from "../../lib/format";
 import { agents, api, projects } from "../../stores";
 import { ProjectForm } from "./ProjectsPage";
+import { ScopeChip } from "../targets/ScopeChip";
+import { filterByScope, groupByScope } from "../../lib/target-scope";
 
 export default function ProjectSettings() {
   const params = useParams<{ project: string }>();
@@ -53,11 +55,65 @@ export default function ProjectSettings() {
           </div>
         )}
       </Show>
+      <TargetsPanel project={params.project} />
       <ReposPanel project={params.project} />
       <Show when={editing() && project()}>
         <ProjectForm project={project()!} onClose={() => setEditing(false)} onSaved={() => void refetch()} />
       </Show>
     </>
+  );
+}
+
+/**
+ * The Targets panel: the project's targets and the global ones (`GET
+ * /api/projects/{name}/targets`, docs/api.md §17.2), with a link to the
+ * Targets page for the project.
+ */
+export function TargetsPanel(props: { project: string }) {
+  const [targets] = createResource(() => props.project, (p) => api.projects.targets(p));
+  const own = () => filterByScope(targets() ?? [], "project", props.project).length;
+  const href = (scope?: "project" | "global") => `/targets?project=${encodeURIComponent(props.project)}${scope ? `&scope=${scope}` : ""}`;
+  return (
+    <section class="card-box stack" style={{ "margin-top": "16px" }} aria-label="Targets">
+      <div class="spread">
+        <h2 style={{ margin: 0 }}>Targets</h2>
+        <A href={href()}>Open in Targets</A>
+      </div>
+      <ErrorBanner error={targets.error} />
+      <Show when={targets()?.length} fallback={<Empty>{targets.loading ? "Loading…" : "No targets for this project, and no global ones."}</Empty>}>
+        <p class="small muted" style={{ margin: 0 }}>
+          <A href={href("project")}>{own()} of {props.project}</A> · <A href={href("global")}>{(targets()?.length ?? 0) - own()} global</A>
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Kind</th>
+                <th>Scope</th>
+                <th>State</th>
+              </tr>
+            </thead>
+            <tbody>
+              <For each={groupByScope(targets() ?? []).reverse().flatMap((g) => g.targets)}>
+                {(t) => (
+                  <tr>
+                    <td>
+                      <strong>{t.name}</strong>
+                    </td>
+                    <td>{t.kind}</td>
+                    <td>
+                      <ScopeChip target={t} />
+                    </td>
+                    <td class="small">{t.state}</td>
+                  </tr>
+                )}
+              </For>
+            </tbody>
+          </table>
+        </div>
+      </Show>
+    </section>
   );
 }
 

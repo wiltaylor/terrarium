@@ -11,6 +11,7 @@ import { ApiError, AuthError, seg, type Page, type Query, type Transport } from 
 import { collectAll, type PageQuery } from "../lib/paging";
 import { createWsEventStream, type EventStream, type PtySocket } from "./sockets";
 import { onArtifactOrigin } from "../lib/artifact-origin";
+import { withScope } from "../lib/target-scope";
 import type {
   Agent,
   AgentDef,
@@ -68,6 +69,7 @@ import type {
   SessionGrant,
   StartLogin,
   Subscription,
+  NewTarget,
   Target,
   TargetReport,
   UsageMe,
@@ -279,7 +281,8 @@ export interface Api {
   /** PLAN §17, §19, the daemon's `api/targets.rs`. */
   targets: {
     list(): Promise<Target[]>;
-    create(t: Partial<Target>): Promise<Target>;
+    /** `POST /api/targets`. No `project`: a global target, which needs a sysadmin (`403 forbidden`). */
+    create(t: NewTarget): Promise<Target>;
     /** A lifecycle verb (docs/api.md §17.3). It runs to its end; the answer is the executor's report, not a target: refetch the list. */
     action(id: string, action: TargetAction): Promise<TargetReport>;
     /** Open an exec session. `{shell: true, pty}` gives an operator terminal. */
@@ -392,7 +395,7 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       update: (name, body) => patch(p(name), body),
       remove: (name) => del(p(name), { confirm: true }),
       agents: (name) => all(`${p(name)}/agents`),
-      targets: (name) => all(`${p(name)}/targets`),
+      targets: async (name) => (await all<Target>(`${p(name)}/targets`)).map(withScope),
       repos: (name) => all(`${p(name)}/repos`),
       attachRepo: (name, repo) => post(`${p(name)}/repos`, repo),
     },
@@ -538,8 +541,8 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
     audit: (q = {}) => page("/api/audit", { ...q }),
 
     targets: {
-      list: () => all("/api/targets"),
-      create: (target) => post("/api/targets", target),
+      list: async () => (await all<Target>("/api/targets")).map(withScope),
+      create: async (target) => withScope(await post<Target>("/api/targets", target)),
       action: (id, action) => post(`/api/targets/${seg(id)}/${action}`),
       exec: (id, req) => post(`/api/targets/${seg(id)}/exec`, req),
       sessionPty: (id, session) => socket(`/api/targets/${seg(id)}/sessions/${seg(session)}/ws`),

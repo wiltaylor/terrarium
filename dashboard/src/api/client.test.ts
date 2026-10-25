@@ -33,6 +33,22 @@ function recorder(opts: HttpApiOptions = {}, answer: unknown = undefined) {
 }
 
 describe("createHttpApi", () => {
+  it("derives scope from project when the daemon sends no scope, and keeps a scope it sends", async () => {
+    const rows = [{ name: "dbox" }, { name: "vm", project: "lab" }, { name: "vlab", project: null, scope: "global" }];
+    const t = {
+      async request<T>() {
+        return { name: "new", project: "lab" } as T;
+      },
+      async page<T>() {
+        return { items: rows as T[], next: null };
+      },
+    } as unknown as Transport;
+    const api = createHttpApi(t);
+    expect((await api.targets.list()).map((x) => `${x.name}:${x.scope}`)).toEqual(["dbox:global", "vm:project", "vlab:global"]);
+    expect((await api.projects.targets("lab")).map((x) => x.scope)).toEqual(["global", "project", "global"]);
+    expect((await api.targets.create({ name: "new", kind: "host", host: "h", project: "lab" })).scope).toBe("project");
+  });
+
   it("maps calls onto the §17 routes", async () => {
     const { api, calls } = recorder();
     await api.health();

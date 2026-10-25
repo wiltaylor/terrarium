@@ -871,6 +871,8 @@ export interface UsageMe {
 export type TargetKind = "host" | "ssh" | "docker" | "vmlab";
 /** docs/api.md §17.2: what the last lifecycle verb saw. */
 export type TargetState = "running" | "stopped" | "absent" | "unknown";
+/** docs/api.md §17.2: `global` (no `project`) or `project`. */
+export type TargetScope = "global" | "project";
 
 /** docs/api.md §4 `GET /api/targets`. */
 export interface Target {
@@ -888,8 +890,11 @@ export interface Target {
   container?: string;
   lab?: string;
   machine?: string;
-  /** `global` or `project`. */
-  scope?: "global" | "project";
+  /**
+   * `global` or `project`. The client sets it on every target it reads: a
+   * daemon without the field gets it from `project` (no project: global).
+   */
+  scope?: TargetScope;
   /** The state that the last lifecycle verb saw. */
   state: TargetState;
   state_at?: string | null;
@@ -906,6 +911,27 @@ export interface Target {
   access?: "operator" | "policy" | "lease" | null;
   /** The caller's active lease on the target, when `access` is `lease`; else `null`. */
   lease?: Lease | null;
+}
+
+/**
+ * `POST /api/targets` (docs/api.md §17.2): a target as in a target file,
+ * with `name`. No `project`: a global target (sysadmin only).
+ */
+export interface NewTarget {
+  name: string;
+  kind: TargetKind;
+  project?: string;
+  host?: string;
+  address?: string;
+  port?: number;
+  credential?: string;
+  image?: string;
+  container?: string;
+  lab?: string;
+  machine?: string;
+  ephemeral?: boolean;
+  keep?: boolean;
+  snapshot_before_task?: boolean;
 }
 
 // ----- Target leases (docs/api.md §17.7) -----

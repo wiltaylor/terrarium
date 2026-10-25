@@ -6,6 +6,7 @@
 import { createSignal } from "solid-js";
 import type { Api } from "../../api/client";
 import type { Agent, LeaseGrant, LeaseGranted, LeaseHeldDetails, Target } from "../../api/types";
+import { targetScope } from "../../lib/target-scope";
 import { leaseHeld, untilValue, type UntilMode } from "../../lib/leases";
 
 export interface GrantForm {
@@ -48,12 +49,18 @@ export function grantBody(f: GrantForm, now = Date.now()): { body: LeaseGrant } 
  * The agents that may get a lease on the target: the agents of its project,
  * or all agents for a global target (docs/api.md §17.7).
  */
-export const eligibleAgents = (agents: Agent[], target: Pick<Target, "project"> | undefined): Agent[] =>
-  agents.filter((a) => !target?.project || a.project === target.project).sort((a, b) => `${a.project}/${a.name}`.localeCompare(`${b.project}/${b.name}`));
+export const eligibleAgents = (agents: Agent[], target: Pick<Target, "project" | "scope"> | undefined): Agent[] =>
+  agents
+    .filter((a) => !target || targetScope(target) === "global" || a.project === target.project)
+    .sort((a, b) => `${a.project}/${a.name}`.localeCompare(`${b.project}/${b.name}`));
 
 /** The targets that may go to the agent: the global ones and those of its project. */
 export const eligibleTargets = (targets: Target[], agent: Pick<Agent, "project"> | undefined): Target[] =>
-  targets.filter((t) => !t.project || !agent || t.project === agent.project).sort((a, b) => a.name.localeCompare(b.name));
+  targets.filter((t) => !agent || targetScope(t) === "global" || t.project === agent.project).sort((a, b) => a.name.localeCompare(b.name));
+
+/** The title of the Grant dialog from a target: its name and its scope. */
+export const grantTitle = (t: Pick<Target, "name" | "project" | "scope">): string =>
+  targetScope(t) === "global" ? `Grant ${t.name} · global target` : `Grant ${t.name} · project ${t.project}`;
 
 export const emptyGrantForm = (init: Partial<GrantForm> = {}): GrantForm => ({
   target: "",

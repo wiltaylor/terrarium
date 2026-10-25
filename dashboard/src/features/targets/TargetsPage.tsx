@@ -1,27 +1,65 @@
-// Targets (PLAN §17, §19): kind, host, state, the lifecycle verbs, and an
-// exec console. Coded to the daemon's `api/targets.rs`: `POST .../up|down|
-// snapshot|restore`, `POST .../exec` with `{shell, pty}`, and the session
-// WebSocket `.../sessions/{id}/ws` with the agent PTY protocol. These are
-// new and not in docs/api.md yet; the mock serves the same shapes.
+// Targets (docs/api.md §17): kind, scope, host, state, the lifecycle verbs,
+// the leases, and an exec console. A target is global, or one project owns
+// it (§17.2). `POST .../up|down|snapshot|restore|status` (§17.3), `POST
+// .../exec` with `{shell, pty}` and the session WebSocket (§17.4).
 
-import { createResource, createSignal, For, Index, onCleanup, Show } from "solid-js";
+import { useSearchParams } from "@solidjs/router";
+import { createEffect, createResource, createSignal, For, Index, onCleanup, Show } from "solid-js";
 import { GrantDialog, grantNotice, LeaseTable, useLeaseList } from "../../components/Leases";
 import { MockOnlyNote } from "../../components/MockOnly";
 import { Terminal } from "../../components/Terminal";
-import { Empty, ErrorBanner, PageHead } from "../../components/ui";
+import { Empty, ErrorBanner, PageHead, Tabs } from "../../components/ui";
 import type { Target } from "../../api/types";
 import type { TargetAction } from "../../api/client";
-import { api, leases as holds } from "../../stores";
+import { api, leases as holds, projects } from "../../stores";
+import { filterByScope, groupByScope, SCOPE_FILTERS, scopeLabel, type ScopeFilter } from "../../lib/target-scope";
 import { STATE_CHIP, targetActions } from "./actions";
+import { CreateTargetDialog } from "./CreateTargetDialog";
+import { ScopeChip } from "./ScopeChip";
 
+const COLS = 7;
+
+/**
+ * Two views. A project view (the project of the sidebar): `GET
+ * /api/projects/{name}/targets`, the project's targets and the global ones,
+ * with a scope filter. The view of all targets (`?all=1`, or no project):
+ * `GET /api/targets`, grouped by scope. `?project=<name>` selects that
+ * project in the sidebar; `?scope=project|global` sets the filter.
+ */
 export default function TargetsPage() {
-  const [targets, { refetch }] = createResource(() => api.targets.list());
+  const [search, setSearch] = useSearchParams<{ project?: string; all?: string; scope?: string }>();
+  // A link from a project page: select the project, then keep the URL short.
+  createEffect(() => {
+    const p = search.project;
+    if (p) {
+      if (projects.selected() !== p) projects.select(p);
+      setSearch({ project: undefined, all: undefined }, { replace: true });
+    }
+  });
+  const project = () => (search.all === "1" || search.project ? (search.project ?? null) : projects.selected());
+  const filter = (): ScopeFilter => (search.scope === "project" || search.scope === "global" ? search.scope : "all");
+  const setFilter = (f: ScopeFilter) => setSearch({ scope: f === "all" ? undefined : f }, { replace: true });
+  const setAll = (all: boolean) => setSearch({ all: all ? "1" : undefined, scope: undefined }, { replace: true });
+
+  const [targets, { refetch }] = createResource(
+    () => ({ project: project() }),
+    (v) => (v.project ? api.projects.targets(v.project) : api.targets.list()),
+  );
   const [hosts] = createResource(() => api.hosts.list().catch(() => []));
   const [error, setError] = createSignal<unknown>(null);
   const [consoleFor, setConsole] = createSignal<string | null>(null);
   const [notice, setNotice] = createSignal<string | null>(null);
+  const [creating, setCreating] = createSignal(false);
   // `target:verb` of the verb that runs now. A verb runs to its end before the daemon answers.
   const [busy, setBusy] = createSignal<string | null>(null);
+
+  const groups = () => {
+    const list = targets.latest ?? [];
+    const p = project();
+    if (p) return [{ key: p, label: "", targets: filterByScope(list, filter(), p) }];
+    return groupByScope(list);
+  };
+  const count = () => groups().reduce((n, g) => n + g.targets.length, 0);
 
   const act = async (id: string, action: TargetAction) => {
     setBusy(`${id}:${action}`);
@@ -41,12 +79,33 @@ export default function TargetsPage() {
     if (t.host_online === false) return "offline";
     return t.host ? hosts.latest?.find((h) => h.name === t.host)?.status : undefined;
   };
+  const empty = () => {
+    if (targets.loading) return "Loading…";
+    if (project() && filter() === "project") return `Project ${project()} has no targets of its own.`;
+    if (project() && filter() === "global") return "No global targets.";
+    return "No targets. Define one with New target, or in targets/<name>.toml.";
+  };
 
   return (
     <>
-      <PageHead title="Targets">
+      <PageHead title={project() ? `Targets · ${project()}` : "Targets · all"}>
+        <button class="primary" onClick={() => setCreating(true)}>
+          New target
+        </button>
         <button onClick={() => void refetch()}>Refresh</button>
       </PageHead>
+      <div class="spread" style={{ "margin-bottom": "12px", "flex-wrap": "wrap", gap: "8px" }}>
+        <div class="row" style={{ gap: "8px", "flex-wrap": "wrap" }}>
+          <Show when={project()} fallback={<span class="small muted">All targets, by scope.</span>}>
+            <span class="small muted">The targets of {project()} and the global ones.</span>
+            <Tabs tabs={SCOPE_FILTERS} active={filter()} onChange={setFilter} />
+          </Show>
+        </div>
+        <label class="row small">
+          <input type="checkbox" checked={!project()} disabled={!projects.selected() && !project()} onChange={(e) => setAll(e.currentTarget.checked)} />
+          all projects
+        </label>
+      </div>
       <ErrorBanner error={error() ?? targets.error} onDismiss={() => setError(null)} />
       <Show when={notice()}>
         <p class="notice small spread" role="status">
@@ -58,7 +117,7 @@ export default function TargetsPage() {
       </Show>
       <section class="card-box" style={{ "margin-bottom": "16px" }}>
         <div class="table-wrap">
-          <table>
+          <table aria-label="Targets">
             <thead>
               <tr>
                 <th>Name</th>
@@ -70,68 +129,94 @@ export default function TargetsPage() {
                 <th />
               </tr>
             </thead>
-            <tbody>
-              <Index each={targets.latest} fallback={<tr><td colSpan={7}><Empty>{targets.loading ? "Loading…" : "No targets. Define them in targets/<name>.toml."}</Empty></td></tr>}>
-                {(t) => (
-                  <>
-                  <tr>
-                    <td>
-                      <strong>{t().name}</strong>
-                      <Show when={t().ephemeral}>
-                        {" "}
-                        <span class="chip">ephemeral</span>
-                      </Show>
-                      <Show when={t().snapshot_before_task}>
-                        {" "}
-                        <span class="chip" title="Snapshot before each task">
-                          snapshot per task
-                        </span>
-                      </Show>
-                    </td>
-                    <td>{t().kind}</td>
-                    <td>{t().project ?? "global"}</td>
-                    <td class="small">
-                      <Show when={t().host} fallback={<span class="mono">{t().address ?? "—"}</span>}>
-                        <span class="mono">{t().host}</span>{" "}
-                        <Show when={hostStatus(t())}>{(s) => <span class={`chip ${s() === "online" ? "ok" : "bad"}`}>{s()}</span>}</Show>
-                      </Show>
-                    </td>
-                    <td>
-                      <span class={`chip ${STATE_CHIP[t().state] ?? ""}`} title={t().state_at ? `since ${new Date(t().state_at!).toLocaleString()}` : undefined}>
-                        {t().state}
-                      </span>
-                    </td>
-                    <td class="small">{t().snapshots.join(", ") || "—"}</td>
-                    <td>
-                      <span class="row" style={{ "flex-wrap": "wrap" }}>
-                        <For each={targetActions(t())}>
-                          {(a) => (
-                            <button class="small" disabled={busy() !== null} onClick={() => act(t().id, a)}>
-                              {busy() === `${t().id}:${a}` ? `${a}…` : a[0]!.toUpperCase() + a.slice(1)}
-                            </button>
-                          )}
-                        </For>
-                        <button class="small" onClick={() => setConsole(t().name)}>
-                          Console
-                        </button>
-                      </span>
-                    </td>
-                  </tr>
-                  <tr class="lease-row">
-                    <td colSpan={7}>
-                      <TargetLeases target={t()} onNotice={setNotice} />
-                    </td>
-                  </tr>
-                  </>
+            <Show when={count()} fallback={<tbody><tr><td colSpan={COLS}><Empty>{empty()}</Empty></td></tr></tbody>}>
+              <Index each={groups()}>
+                {(g) => (
+                  <tbody aria-label={g().label || undefined}>
+                    <Show when={g().label}>
+                      <tr class="group-row">
+                        <th colSpan={COLS} scope="colgroup">
+                          {g().label} <span class="muted small">· {g().targets.length}</span>
+                        </th>
+                      </tr>
+                    </Show>
+                    <Index each={g().targets}>
+                      {(t) => (
+                        <>
+                          <tr>
+                            <td>
+                              <strong>{t().name}</strong>
+                              <Show when={t().ephemeral}>
+                                {" "}
+                                <span class="chip">ephemeral</span>
+                              </Show>
+                              <Show when={t().snapshot_before_task}>
+                                {" "}
+                                <span class="chip" title="Snapshot before each task">
+                                  snapshot per task
+                                </span>
+                              </Show>
+                            </td>
+                            <td>{t().kind}</td>
+                            <td>
+                              <ScopeChip target={t()} />
+                            </td>
+                            <td class="small">
+                              <Show when={t().host} fallback={<span class="mono">{t().address ?? "—"}</span>}>
+                                <span class="mono">{t().host}</span>{" "}
+                                <Show when={hostStatus(t())}>{(s) => <span class={`chip ${s() === "online" ? "ok" : "bad"}`}>{s()}</span>}</Show>
+                              </Show>
+                            </td>
+                            <td>
+                              <span class={`chip ${STATE_CHIP[t().state] ?? ""}`} title={t().state_at ? `since ${new Date(t().state_at!).toLocaleString()}` : undefined}>
+                                {t().state}
+                              </span>
+                            </td>
+                            <td class="small">{t().snapshots.join(", ") || "—"}</td>
+                            <td>
+                              <span class="row" style={{ "flex-wrap": "wrap" }}>
+                                <For each={targetActions(t())}>
+                                  {(a) => (
+                                    <button class="small" disabled={busy() !== null} onClick={() => act(t().id, a)}>
+                                      {busy() === `${t().id}:${a}` ? `${a}…` : a[0]!.toUpperCase() + a.slice(1)}
+                                    </button>
+                                  )}
+                                </For>
+                                <button class="small" onClick={() => setConsole(t().name)}>
+                                  Console
+                                </button>
+                              </span>
+                            </td>
+                          </tr>
+                          <tr class="lease-row">
+                            <td colSpan={COLS}>
+                              <TargetLeases target={t()} onNotice={setNotice} />
+                            </td>
+                          </tr>
+                        </>
+                      )}
+                    </Index>
+                  </tbody>
                 )}
               </Index>
-            </tbody>
+            </Show>
           </table>
         </div>
       </section>
       <Show when={consoleFor()}>{(name) => <ExecConsole target={name()} onClose={() => setConsole(null)} />}</Show>
+      <Show when={creating()}>
+        <CreateTargetDialog
+          project={project() ?? projects.selected()}
+          onClose={() => setCreating(false)}
+          onCreated={(t) => {
+            setCreating(false);
+            setNotice(`Created ${t.name} (${scopeLabel(t)}).`);
+            void refetch();
+          }}
+        />
+      </Show>
       <MockOnlyNote label="new API">
-        <code>GET /api/targets</code> is in docs/api.md. <code>POST /api/targets/{"{name}"}/up|down|snapshot|restore|status</code>, <code>POST .../exec</code>, and the session WebSocket are new in the daemon and not in docs/api.md yet (§14 still says 404). Leases: <code>GET</code>, <code>POST /api/targets/{"{name}"}/leases</code>, <code>PATCH</code>, <code>DELETE .../leases/{"{agent}"}</code> (docs/api.md §17.7).
+        <code>GET /api/targets</code>, <code>GET /api/projects/{"{name}"}/targets</code>, and <code>POST /api/targets</code> are in docs/api.md §17.2. <code>POST /api/targets/{"{name}"}/up|down|snapshot|restore|status</code> is §17.3, exec sessions §17.4. Leases: <code>GET</code>, <code>POST /api/targets/{"{name}"}/leases</code>, <code>PATCH</code>, <code>DELETE .../leases/{"{agent}"}</code> (docs/api.md §17.7).
       </MockOnlyNote>
     </>
   );

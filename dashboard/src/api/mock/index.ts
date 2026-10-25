@@ -45,6 +45,7 @@ import type {
   Role,
   Subscription,
   Lease,
+  NewTarget,
   Target,
   TargetReport,
   UsagePoint,
@@ -86,6 +87,13 @@ export interface MockOptions {
    * a browser does. The browser mock passes sessionStorage. Default: memory only.
    */
   cookieJar?: { getItem(k: string): string | null; setItem(k: string, v: string): void; removeItem(k: string): void } | null;
+  /**
+   * Act as a caller that is not a sysadmin when it defines a target: a
+   * `POST /api/targets` without `project` is `403 forbidden`, as the daemon
+   * answers a project_admin (docs/api.md §17.2). Default false: the mock
+   * caller is the operator, who may define every target.
+   */
+  denyGlobalTargets?: boolean;
 }
 
 /** What the mock reads from the client: the headers that the HTTP transport would send. */
@@ -157,6 +165,39 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
   const noRoute = (): never => fail(404, "not_found", "no such API route");
   const find = <T>(list: T[], pred: (x: T) => boolean, what: string): T => list.find(pred) ?? notFound(what);
   const project = (name: string) => find(w.projects, (p) => p.name === name, `project \`${name}\``);
+  // The target as the API shows it (docs/api.md §17.2). The mock caller is the operator: `access` is `operator`, and the operator holds no lease.
+  const targetView = (t: Target): Target => ({
+    ...t,
+    scope: t.project ? "project" : "global",
+    host_online: t.kind === "ssh" ? null : w.hosts.some((h) => h.name === t.host && h.status === "online"),
+    access: "operator",
+    lease: null,
+  });
+  // The checks of the daemon's `store/targets.rs` validate (docs/api.md §17.2): a bad value is `422 invalid`.
+  const targetDef = (b: NewTarget): NewTarget => {
+    if (!b || typeof b.name !== "string" || !/^[a-z0-9][a-z0-9._-]*$/i.test(b.name)) fail(422, "invalid", "bad target name");
+    if (!["host", "ssh", "docker", "vmlab"].includes(b.kind)) fail(422, "invalid", "`kind` must be host, ssh, docker, or vmlab");
+    for (const f of ["host", "address", "credential", "image", "container", "machine"] as const) {
+      const v = b[f];
+      if (v !== undefined && (typeof v !== "string" || !v || /\s/.test(v) || v.startsWith("-"))) fail(422, "invalid", `bad \`${f}\` \`${String(v)}\`: not empty, no spaces, no leading \`-\``);
+    }
+    const need = (f: string, ok: boolean) => ok || fail(422, "invalid", `a \`${b.kind}\` target needs \`${f}\``);
+    if (b.kind === "host") need("host", !!b.host);
+    if (b.kind === "ssh") need("address", !!b.address);
+    if (b.kind === "docker") {
+      need("host", !!b.host);
+      need("image` or `container", !!(b.image || b.container));
+    }
+    if (b.kind === "vmlab") {
+      need("host", !!b.host);
+      need("lab", !!b.lab);
+      if (!b.lab!.startsWith("/")) fail(422, "invalid", "`lab` must be an absolute path");
+    }
+    if (b.ephemeral && !(b.kind === "vmlab" || (b.kind === "docker" && b.image))) fail(422, "invalid", "an ephemeral target must be docker with `image`, or vmlab");
+    const def: NewTarget = { name: b.name, kind: b.kind };
+    for (const [k, v] of Object.entries(b) as [keyof NewTarget, unknown][]) if (v !== undefined && v !== null && v !== "") (def as unknown as Record<string, unknown>)[k] = v;
+    return def;
+  };
 
   /** An agent key: a ULID, `project/name`, or a unique bare name (docs/api.md §2.2). */
   const agent = (key: string): Agent => {
@@ -1081,7 +1122,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           audit("project.delete", name, name, {});
         }),
       agents: (name) => reply(() => (project(name), w.agents.filter((a) => a.project === name).sort((a, b) => a.id.localeCompare(b.id)))),
-      targets: (name) => reply(() => (project(name), w.targets.filter((t) => !t.project || t.project === name))),
+      targets: (name) => reply(() => (project(name), w.targets.filter((t) => !t.project || t.project === name).map(targetView))),
       repos: (name) => reply(() => (project(name), w.repos.filter((r) => r.project === name).sort((a, b) => a.name.localeCompare(b.name)))),
       attachRepo: (name, r) =>
         reply(() => {
@@ -2001,8 +2042,19 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     // The daemon's `api/targets.rs` is new; the mock runs the same lifecycle.
     targets: {
       // The mock caller is the operator: `access` is `operator`, and the operator holds no lease.
-      list: () => reply(() => w.targets.map((t) => ({ ...t, host_online: t.kind === "ssh" ? null : w.hosts.some((h) => h.name === t.host && h.status === "online"), access: "operator" as const, lease: null }))),
-      create: () => reply(() => fail(405, "method_not_allowed", "this route does not take this method")),
+      list: () => reply(() => w.targets.map(targetView)),
+      // docs/api.md §17.2: the operator defines every target. `denyGlobalTargets` acts as a project_admin.
+      create: (body) =>
+        reply(() => {
+          const def = targetDef(body);
+          if (!def.project && opts.denyGlobalTargets) fail(403, "forbidden", "defining a global target needs the sysadmin role");
+          if (def.project) project(def.project);
+          if (w.targets.some((t) => t.name === def.name)) fail(409, "conflict", `target \`${def.name}\` exists`);
+          const t: Target = { ...def, id: def.name, scope: def.project ? "project" : "global", ephemeral: !!def.ephemeral, keep: !!def.keep, snapshot_before_task: !!def.snapshot_before_task, source: "api", state: "unknown", state_at: null, snapshots: [], usable: true };
+          w.targets.push(t);
+          audit("target.create", t.name, t.project, { ...def });
+          return targetView(t);
+        }),
       // docs/api.md §17.3: each verb runs to its end and answers the executor report.
       action: (id, verb) =>
         reply((): TargetReport => {

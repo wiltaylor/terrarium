@@ -137,7 +137,6 @@ describe("mock parity with docs/api.md", () => {
     const api = mock();
     const repo = (await api.projects.repos("terrarium"))[0]!;
     await expect(api.repos.checkout(repo.id, {})).rejects.toMatchObject({ status: 404, message: "no such API route" });
-    await expect(api.targets.create({ name: "x" })).rejects.toMatchObject({ status: 405 });
   });
 
   it("creates an agent from a full definition, stopped", async () => {
@@ -551,6 +550,50 @@ describe("mock parity with docs/api.md", () => {
     const api = mock();
     api.world.targets.push({ id: "pi-box", name: "pi-box", kind: "docker", host: "pi-cluster", image: "alpine:3", scope: "global", state: "stopped", ephemeral: false, snapshots: [] });
     await expect(api.targets.action("pi-box", "up")).rejects.toMatchObject({ status: 409, code: "conflict" });
+  });
+});
+
+describe("target scope (docs/api.md §17.2)", () => {
+  it("puts scope on every target: global without a project, project with one", async () => {
+    const api = mock();
+    for (const t of await api.targets.list()) expect(t.scope).toBe(t.project ? "project" : "global");
+  });
+
+  it("lists the project's targets and the global ones on GET /api/projects/{name}/targets, in the target shape", async () => {
+    const api = mock();
+    const list = await api.projects.targets("terrarium");
+    expect(list.map((t) => `${t.name}:${t.scope}`).sort()).toEqual(["build-box:global", "ci-box:global", "dev-vm:global", "lab-win11:project", "pi-runner:global"]);
+    expect(list.every((t) => !t.project || t.project === "terrarium")).toBe(true);
+    expect(list[0]).toHaveProperty("access", "operator");
+    expect(list[0]).toHaveProperty("host_online");
+    await expect(api.projects.targets("nope")).rejects.toMatchObject({ status: 404 });
+  });
+
+  it("creates a project target and a global target with 201 shapes, source api", async () => {
+    const api = mock();
+    const p = await api.targets.create({ name: "pg2", kind: "docker", project: "webshop", host: "lab1", image: "postgres:17", ephemeral: true });
+    expect(p).toMatchObject({ id: "pg2", name: "pg2", scope: "project", project: "webshop", source: "api", ephemeral: true, keep: false, snapshots: [], access: "operator" });
+    const g = await api.targets.create({ name: "vm2", kind: "vmlab", host: "lab1", lab: "/labs/x/vmlab.wcl", snapshot_before_task: true });
+    expect(g).toMatchObject({ scope: "global", snapshot_before_task: true });
+    expect(g).not.toHaveProperty("project");
+    expect((await api.projects.targets("webshop")).map((t) => t.name)).toEqual(expect.arrayContaining(["pg2", "vm2"]));
+    expect((await api.projects.targets("terrarium")).map((t) => t.name)).not.toContain("pg2");
+    expect((await api.audit({ action: "target.create" })).items.at(-1)).toMatchObject({ target: "vm2" });
+  });
+
+  it("refuses a bad definition, a taken name, and an unknown project", async () => {
+    const api = mock();
+    await expect(api.targets.create({ name: "x", kind: "docker", host: "lab1" })).rejects.toMatchObject({ status: 422, code: "invalid" });
+    await expect(api.targets.create({ name: "x", kind: "ssh", address: "-oProxy" })).rejects.toMatchObject({ status: 422, code: "invalid" });
+    await expect(api.targets.create({ name: "x", kind: "docker", host: "lab1", container: "c", ephemeral: true })).rejects.toMatchObject({ status: 422 });
+    await expect(api.targets.create({ name: "dev-vm", kind: "host", host: "lab1" })).rejects.toMatchObject({ status: 409, code: "conflict" });
+    await expect(api.targets.create({ name: "x", kind: "host", host: "lab1", project: "nope" })).rejects.toMatchObject({ status: 404 });
+  });
+
+  it("answers 403 forbidden for a global target when the caller is not a sysadmin, and still takes a project target", async () => {
+    const api = createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 0, denyGlobalTargets: true });
+    await expect(api.targets.create({ name: "g", kind: "host", host: "lab1" })).rejects.toMatchObject({ status: 403, code: "forbidden" });
+    await expect(api.targets.create({ name: "p", kind: "host", host: "lab1", project: "terrarium" })).resolves.toMatchObject({ scope: "project" });
   });
 });
 

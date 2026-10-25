@@ -1253,3 +1253,10 @@ th {
 .lease-chip {
   white-space: nowrap;
 }
+
+/* Targets: the scope group header rows of the "all" view. */
+tr.group-row th {
+  text-align: left;
+  background: var(--surface-2);
+  padding-top: 12px;
+}

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createMockApi } from "../../api/mock";
 import type { Agent, Target } from "../../api/types";
-import { createGrantDialog, eligibleAgents, eligibleTargets, emptyGrantForm, grantBody } from "./grant";
+import { createGrantDialog, eligibleAgents, eligibleTargets, emptyGrantForm, grantBody, grantTitle } from "./grant";
 
 const mock = () => createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 0 });
 const NOW = Date.parse("2026-10-25T09:00:00.000Z");
@@ -75,5 +75,21 @@ describe("createGrantDialog", () => {
     expect(l).toMatchObject({ target: "build-box", agent: lead.id, agent_name: "terrarium/lead", exclusive: false, state: "active", granted_by: "operator" });
     expect(dlg.outcome().kind).toBe("done");
     expect(Date.parse(l!.expires_at!) - Date.now()).toBeGreaterThan(119 * 60_000);
+  });
+});
+
+describe("the grant dialog and the target scope", () => {
+  const a = (name: string, project: string) => ({ id: name, name, project }) as Agent;
+  const list = [a("w1", "lab"), a("shop", "web")];
+  it("lists only the project's agents for a project target, and all agents for a global target, with or without scope", () => {
+    expect(eligibleAgents(list, { project: "lab", scope: "project" }).map((x) => x.name)).toEqual(["w1"]);
+    expect(eligibleAgents(list, { project: undefined, scope: "global" }).map((x) => x.name)).toEqual(["w1", "shop"]);
+    expect(eligibleAgents(list, { project: undefined }).map((x) => x.name)).toEqual(["w1", "shop"]);
+  });
+
+  it("shows the scope in the title", () => {
+    expect(grantTitle({ name: "vm", project: "lab", scope: "project" })).toBe("Grant vm · project lab");
+    expect(grantTitle({ name: "dbox", scope: "global" })).toBe("Grant dbox · global target");
+    expect(grantTitle({ name: "vlab" })).toBe("Grant vlab · global target");
   });
 });
