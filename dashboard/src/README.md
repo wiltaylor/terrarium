@@ -490,30 +490,16 @@ With `VITE_ARTIFACT_ORIGIN`, the artifact origin goes into `img-src` and
 
 ### Daemon follow-ups
 
-These need changes in `terrariumd`. The dashboard cannot do them alone.
+All of the earlier follow-ups are done in `terrariumd`:
 
-1. **Cookie sessions.** Done in the dashboard (see "Authentication"). The
-   daemon side is `crates/terrariumd/src/api/session.rs`.
-2. **CSP as a header.** Done (docs/api.md §1.2). The production build has no
-   `<meta>` policy now.
-3. **Absolute signed URLs.** Have `POST /api/artifacts/{id}/url` answer a URL
-   on the artifact origin (a `TERRARIUM_ARTIFACT_PUBLIC_URL` setting), and
-   stop serving `/a/...` on the dashboard port. Then `VITE_ARTIFACT_ORIGIN` is
-   needed only for the CSP.
-4. **CORS on the artifact routes.** `Access-Control-Allow-Origin: *` on
-   `/a/...` (no credentials) lets the viewer `fetch` text and markdown
-   artifacts from the artifact origin.
-5. **Refuse `?token=`.** The daemon refuses it by default now
-   (`TERRARIUM_WS_QUERY_TOKEN=1` turns it on).
-6. **`?from=system` and `?to=system` on `GET /api/mail`.** `store/mail.rs`
-   `resolve` does not know `system`, so the filter is `404 no agent
-   \`system\``. The mail log filters `system` in the browser now.
-7. **Spend link in budget alerts.** `quota_policy.rs` `spend_link` still
-   writes `/p/<project>/spend` into the budget alert mail. The dashboard
-   redirects that route to `/`. Point the link at `/` or `/subscriptions`.
-8. **`held` on the message row.** Only the `mail` event says that the loop
-   guard held a message. The log finds older held rows from the "needs a
-   human" notice (`heldIds`). A `held` column would make that exact.
-9. **Names of deleted agents.** On the real daemon, mail to an agent that
-   `agent rm` deleted shows `to_name` as `/<ULID>`, not `project/name`
-   (docs/api.md §7 says the name stays).
+1. **Cookie sessions**: `crates/terrariumd/src/api/session.rs` (see "Authentication").
+2. **CSP as a header**: docs/api.md §1.2; the production build has no `<meta>` policy.
+3. **Absolute signed URLs**: `POST /api/artifacts/{id}/url` answers a URL on the artifact origin (`TERRARIUM_ARTIFACT_PUBLIC_URL`); `/a/...` leaves the dashboard port when the artifact listener is set.
+4. **CORS on the artifact routes**: the artifact origin answers the dashboard origin, never `*`.
+5. **`?token=` refused by default** (`TERRARIUM_WS_QUERY_TOKEN=1` turns it on).
+6. **`?from=system` and `?to=system` on `GET /api/mail`** work; the log still filters agent-to-agent, inbox, project, text, and time in the browser (docs/api.md §7).
+7. **Budget alert links** go to `/p/<project>`; the old `/p/<project>/spend` route still redirects to Home for mail sent before that change.
+8. **`held` and `held_reason`** are on the message row (migration 16); the log reads them and keeps the notice-based fallback for older rows.
+9. **Names of removed agents** resolve through the tombstone table on mail as on cards.
+
+Still open: `GET /api/mail?to=<ULID>` for a removed agent answers 404.

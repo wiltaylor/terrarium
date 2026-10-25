@@ -26,8 +26,8 @@ export const GLOBAL_ITEMS = [
 /**
  * Routes that are gone, and where they go now. The Spend page is gone: the
  * usage split by project, agent, model, and card is in the Home tile detail.
- * The daemon's budget alert mail still links `/p/<project>/spend`
- * (quota_policy.rs `spend_link`), so the route redirects to Home and does
+ * Budget alert mail sent before 2026-10-25 links `/p/<project>/spend`
+ * (new mail links `/p/<project>`), so the route redirects to Home and does
  * not answer "Page not found".
  */
 export const MOVED_ROUTES = [{ path: "/p/:project/spend", to: "/" }] as const;
