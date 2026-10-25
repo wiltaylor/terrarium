@@ -1,5 +1,6 @@
 import { A, useNavigate, useParams } from "@solidjs/router";
 import { createEffect, createResource, createSignal, For, Match, on, onCleanup, onMount, Show, Switch } from "solid-js";
+import { GrantDialog, grantNotice, LeaseChips, LeaseTable, useLeaseList } from "../../components/Leases";
 import { HoldBadge } from "../../components/QuotaBanner";
 import { SelfReport } from "../../components/SelfReport";
 import { EventHistory } from "../../components/EventHistory";
@@ -9,7 +10,7 @@ import { Terminal } from "../../components/Terminal";
 import { ConfirmButton, ErrorBanner, LoadMore, PageHead, Tabs, useNow } from "../../components/ui";
 import { GRANTABLE_ROLES, type Agent, type AgentStatus, type Role } from "../../api/types";
 import { ago, compact, timeUntil } from "../../lib/format";
-import { agents, api, events, quota } from "../../stores";
+import { agents, api, events, leases as holds, quota } from "../../stores";
 import { describeCause } from "../../stores/quota";
 import { AgentForm } from "./AgentForm";
 import { RoleBadges } from "./AgentsPage";
@@ -73,7 +74,7 @@ export default function AgentDetail() {
           <PageHead
             title={
               <span class="row">
-                {a().name} <StatusBadge status={a().status} /> <HoldBadge agentId={a().id} long />
+                {a().name} <StatusBadge status={a().status} /> <HoldBadge agentId={a().id} long /> <LeaseChips agentId={a().id} />
               </span>
             }
           >
@@ -147,6 +148,8 @@ export default function AgentDetail() {
 
           <RolesPanel agent={a()} onError={setError} />
 
+          <LeasesPanel agent={a()} onNotice={(n) => setNotice(n)} />
+
           <form
             class="row"
             onSubmit={(e) => {
@@ -212,6 +215,52 @@ export default function AgentDetail() {
         </div>
       )}
     </Show>
+  );
+}
+
+/** The targets the agent holds by lease (`GET /api/agents/{id}/leases`, docs/api.md §17.7), kept live from `lease` events. */
+function LeasesPanel(props: { agent: Agent; onNotice: (s: string) => void }) {
+  const list = useLeaseList({
+    key: () => props.agent.id,
+    fetch: (id, all) => api.agents.leases(id, { all }),
+    match: (_d, agentId) => agentId === props.agent.id,
+    onLoaded: (id, rows) => holds.seedAgent(id, rows),
+  });
+  const [granting, setGranting] = createSignal(false);
+  const [targets] = createResource(granting, () => api.targets.list().catch(() => []));
+  return (
+    <section class="card-box stack" style={{ gap: "8px" }} aria-label="Leases">
+      <div class="spread">
+        <h3 style={{ margin: 0 }}>Leases</h3>
+        <span class="row" style={{ gap: "8px" }}>
+          <label class="row small">
+            <input type="checkbox" checked={list.all()} onChange={(e) => list.setAll(e.currentTarget.checked)} />
+            history
+          </label>
+          <button class="small" onClick={() => setGranting(true)}>
+            Grant a target…
+          </button>
+        </span>
+      </div>
+      <ErrorBanner error={list.error()} />
+      <Show when={!list.error()}>
+        <LeaseTable leases={list.list()} show="target" history={list.all()} loading={list.loading()} onChange={list.put} />
+      </Show>
+      <Show when={granting() && targets()}>
+        {(ts) => (
+          <GrantDialog
+            agent={props.agent}
+            targets={ts()}
+            onClose={() => setGranting(false)}
+            onGranted={(l) => {
+              setGranting(false);
+              list.put(l);
+              props.onNotice(grantNotice(l));
+            }}
+          />
+        )}
+      </Show>
+    </section>
   );
 }
 

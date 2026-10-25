@@ -4,13 +4,14 @@
 // WebSocket `.../sessions/{id}/ws` with the agent PTY protocol. These are
 // new and not in docs/api.md yet; the mock serves the same shapes.
 
-import { createResource, createSignal, For, onCleanup, Show } from "solid-js";
+import { createResource, createSignal, For, Index, onCleanup, Show } from "solid-js";
+import { GrantDialog, grantNotice, LeaseTable, useLeaseList } from "../../components/Leases";
 import { MockOnlyNote } from "../../components/MockOnly";
 import { Terminal } from "../../components/Terminal";
 import { Empty, ErrorBanner, PageHead } from "../../components/ui";
 import type { Target, TargetState } from "../../api/types";
 import type { TargetAction } from "../../api/client";
-import { api } from "../../stores";
+import { api, leases as holds } from "../../stores";
 
 const STATE_CHIP: Record<TargetState, string> = { up: "ok", down: "", starting: "info", stopping: "info", unknown: "" };
 
@@ -32,6 +33,7 @@ export default function TargetsPage() {
   const [hosts] = createResource(() => api.hosts.list().catch(() => []));
   const [error, setError] = createSignal<unknown>(null);
   const [consoleFor, setConsole] = createSignal<string | null>(null);
+  const [notice, setNotice] = createSignal<string | null>(null);
   // Follow `starting` and `stopping` to the end.
   const t = setInterval(() => {
     if ((targets.latest ?? []).some((x) => x.state === "starting" || x.state === "stopping")) void refetch();
@@ -59,6 +61,14 @@ export default function TargetsPage() {
         <button onClick={() => void refetch()}>Refresh</button>
       </PageHead>
       <ErrorBanner error={error() ?? targets.error} onDismiss={() => setError(null)} />
+      <Show when={notice()}>
+        <p class="notice small spread" role="status">
+          {notice()}
+          <button class="ghost small" onClick={() => setNotice(null)} aria-label="Dismiss">
+            ✕
+          </button>
+        </p>
+      </Show>
       <section class="card-box" style={{ "margin-bottom": "16px" }}>
         <div class="table-wrap">
           <table>
@@ -74,60 +84,112 @@ export default function TargetsPage() {
               </tr>
             </thead>
             <tbody>
-              <For each={targets.latest} fallback={<tr><td colSpan={7}><Empty>{targets.loading ? "Loading…" : "No targets. Define them in targets/<name>.toml."}</Empty></td></tr>}>
+              <Index each={targets.latest} fallback={<tr><td colSpan={7}><Empty>{targets.loading ? "Loading…" : "No targets. Define them in targets/<name>.toml."}</Empty></td></tr>}>
                 {(t) => (
+                  <>
                   <tr>
                     <td>
-                      <strong>{t.name}</strong>
-                      <Show when={t.ephemeral}>
+                      <strong>{t().name}</strong>
+                      <Show when={t().ephemeral}>
                         {" "}
                         <span class="chip">ephemeral</span>
                       </Show>
-                      <Show when={t.snapshot_before_task}>
+                      <Show when={t().snapshot_before_task}>
                         {" "}
                         <span class="chip" title="Snapshot before each task">
                           snapshot per task
                         </span>
                       </Show>
                     </td>
-                    <td>{t.kind}</td>
-                    <td>{t.project ?? "global"}</td>
+                    <td>{t().kind}</td>
+                    <td>{t().project ?? "global"}</td>
                     <td class="small">
-                      <Show when={t.host} fallback={<span class="mono">{t.address ?? "—"}</span>}>
-                        <span class="mono">{t.host}</span>{" "}
-                        <Show when={hostStatus(t)}>{(s) => <span class={`chip ${s() === "online" ? "ok" : "bad"}`}>{s()}</span>}</Show>
+                      <Show when={t().host} fallback={<span class="mono">{t().address ?? "—"}</span>}>
+                        <span class="mono">{t().host}</span>{" "}
+                        <Show when={hostStatus(t())}>{(s) => <span class={`chip ${s() === "online" ? "ok" : "bad"}`}>{s()}</span>}</Show>
                       </Show>
                     </td>
                     <td>
-                      <span class={`chip ${STATE_CHIP[t.state] ?? ""}`}>{t.state}</span>
+                      <span class={`chip ${STATE_CHIP[t().state] ?? ""}`}>{t().state}</span>
                     </td>
-                    <td class="small">{t.snapshots.join(", ") || "—"}</td>
+                    <td class="small">{t().snapshots.join(", ") || "—"}</td>
                     <td>
                       <span class="row" style={{ "flex-wrap": "wrap" }}>
-                        <For each={targetActions(t)}>
+                        <For each={targetActions(t())}>
                           {(a) => (
-                            <button class="small" onClick={() => act(t.id, a)}>
+                            <button class="small" onClick={() => act(t().id, a)}>
                               {a[0]!.toUpperCase() + a.slice(1)}
                             </button>
                           )}
                         </For>
-                        <button class="small" onClick={() => setConsole(t.name)}>
+                        <button class="small" onClick={() => setConsole(t().name)}>
                           Console
                         </button>
                       </span>
                     </td>
                   </tr>
+                  <tr class="lease-row">
+                    <td colSpan={7}>
+                      <TargetLeases target={t()} onNotice={setNotice} />
+                    </td>
+                  </tr>
+                  </>
                 )}
-              </For>
+              </Index>
             </tbody>
           </table>
         </div>
       </section>
       <Show when={consoleFor()}>{(name) => <ExecConsole target={name()} onClose={() => setConsole(null)} />}</Show>
       <MockOnlyNote label="new API">
-        <code>GET /api/targets</code> is in docs/api.md. <code>POST /api/targets/{"{name}"}/up|down|snapshot|restore</code>, <code>POST .../exec</code>, and the session WebSocket are new in the daemon and not in docs/api.md yet (§14 still says 404).
+        <code>GET /api/targets</code> is in docs/api.md. <code>POST /api/targets/{"{name}"}/up|down|snapshot|restore</code>, <code>POST .../exec</code>, and the session WebSocket are new in the daemon and not in docs/api.md yet (§14 still says 404). Leases: <code>GET</code>, <code>POST /api/targets/{"{name}"}/leases</code>, <code>PATCH</code>, <code>DELETE .../leases/{"{agent}"}</code> (docs/api.md §17.7).
       </MockOnlyNote>
     </>
+  );
+}
+
+/** The leases on one target (docs/api.md §17.7): the active ones, or the history; Grant, Extend, Revoke. */
+function TargetLeases(props: { target: Target; onNotice: (s: string) => void }) {
+  const list = useLeaseList({
+    key: () => props.target.name,
+    fetch: (name, all) => api.targets.leases(name, { all }),
+    match: (d) => d.target === props.target.name,
+    onLoaded: (name, rows) => holds.seedTarget(name, rows),
+  });
+  const [granting, setGranting] = createSignal(false);
+  const active = () => list.list().filter((l) => l.state === "active").length;
+  return (
+    <div class="stack lease-section" style={{ gap: "6px" }} aria-label={`Leases on ${props.target.name}`}>
+      <div class="spread">
+        <span class="small">
+          <strong>Leases</strong> <span class="muted">· {active()} active</span>
+        </span>
+        <span class="row" style={{ gap: "8px" }}>
+          <label class="row small">
+            <input type="checkbox" checked={list.all()} onChange={(e) => list.setAll(e.currentTarget.checked)} />
+            history
+          </label>
+          <button class="small" onClick={() => setGranting(true)}>
+            Grant…
+          </button>
+        </span>
+      </div>
+      <ErrorBanner error={list.error()} />
+      <Show when={!list.error()}>
+        <LeaseTable leases={list.list()} show="agent" history={list.all()} loading={list.loading()} onChange={list.put} />
+      </Show>
+      <Show when={granting()}>
+        <GrantDialog
+          target={props.target}
+          onClose={() => setGranting(false)}
+          onGranted={(l) => {
+            setGranting(false);
+            list.put(l);
+            props.onNotice(grantNotice(l));
+          }}
+        />
+      </Show>
+    </div>
   );
 }
 

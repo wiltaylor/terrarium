@@ -9,6 +9,7 @@ import type {
   Card,
   Column,
   Host,
+  Lease,
   Memory,
   MemoryEdge,
   Message,
@@ -52,6 +53,8 @@ export interface MockWorld {
   apiKeys: Record<string, { provider: string; key: string; base_url?: string; models?: string[] }>;
   mail: Message[];
   targets: Target[];
+  /** Target leases (docs/api.md §17.7), oldest first. */
+  leases: Lease[];
   hosts: Host[];
   /** Host tokens by host name. The API shows a token once, at create. */
   hostTokens: Record<string, string>;
@@ -299,6 +302,41 @@ export function seed(now: number = Date.now()): MockWorld {
   cardEvent(40, "TER-12", "claimed", "runner-dev claimed TER-12");
   cardEvent(11, "TER-15", "moved", "adapter-codex moved TER-15 to blocked", { from: "in_progress", to: "blocked", comment: "Needs an operator login." });
   cardEvent(8, "WEB-4", "claimed", "shop-lead claimed WEB-4");
+
+  // Target leases (docs/api.md §17.7): two active, two ended, with their events.
+  const lease = (n: number, target: string, holder: string, by: string, grantedMin: number, extra: Partial<Lease> = {}): Lease => {
+    const a = byName(holder);
+    return {
+      id: fakeUlid("lease", n),
+      target,
+      agent: a.id,
+      agent_name: `${a.project}/${a.name}`,
+      project: a.project,
+      granted_by: by === "operator" ? "operator" : `agent:${byName(by).id}`,
+      granted_at: ago(grantedMin),
+      expires_at: null,
+      exclusive: false,
+      revoked_at: null,
+      revoked_by: null,
+      reason: null,
+      state: "active",
+      ...extra,
+    };
+  };
+  const leases: Lease[] = [
+    lease(1, "pg-test", "css-worker", "shop-lead", 60 * 26, { expires_at: ago(60 * 25), revoked_at: ago(60 * 25.5), revoked_by: `agent:${byName("shop-lead").id}`, reason: "WEB-2", state: "revoked" }),
+    lease(2, "lab-win11", "adapter-codex", "lead", 60 * 3, { expires_at: ago(60 * 2), revoked_at: ago(60 * 2), revoked_by: "system", exclusive: true, reason: "TER-9", state: "expired" }),
+    lease(3, "build-box", "adapter-codex", "operator", 60 * 2, { reason: "release build" }),
+    lease(4, "lab-win11", "runner-dev", "lead", 5, { expires_at: ahead(25), exclusive: true, reason: "TER-12" }),
+  ];
+  for (const l of leases) {
+    const holder = l.agent_name!.split("/")[1]!;
+    const data = (change: string, state: string) => ({ change, target: l.target, lease_id: l.id, expires_at: l.expires_at, exclusive: l.exclusive, state });
+    const until = l.expires_at ? `until ${l.expires_at}` : "until revoked";
+    ev((now - Date.parse(l.granted_at)) / 60_000, "lease", holder, l.project, `${l.agent_name} granted target ${l.target} ${until}`, data("granted", "active"), { actor: l.granted_by });
+    if (l.state !== "active") ev((now - Date.parse(l.revoked_at!)) / 60_000, "lease", holder, l.project, `lease on ${l.target} ended for ${l.agent_name}`, data("ended", l.state), { actor: l.revoked_by! });
+  }
+
   events.sort((x, y) => x.at.localeCompare(y.at)).forEach((e, i) => {
     e.seq = i + 1;
     e.id = fakeUlid("ev", i + 1);
@@ -662,6 +700,6 @@ ${XSS_DOCUMENT}
 
   return {
     projects, repos, agents, sessions, events, columns: { terrarium: COLUMNS.map((c) => ({ ...c })), webshop: COLUMNS.map((c) => ({ ...c })) },
-    cards, memories, links, pages, revisions, artifacts, artifactBodies, versions, subscriptions, quota, usage, holds: [], apiKeys, mail, targets, hosts, hostTokens, audit, seq,
+    cards, memories, links, pages, revisions, artifacts, artifactBodies, versions, subscriptions, quota, usage, holds: [], apiKeys, mail, targets, leases, hosts, hostTokens, audit, seq,
   };
 }

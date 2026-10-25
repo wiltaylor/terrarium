@@ -1,12 +1,13 @@
 import { A, useNavigate } from "@solidjs/router";
-import { createSignal, For, Show } from "solid-js";
+import { createSignal, For, onMount, Show } from "solid-js";
+import { LeaseChips } from "../../components/Leases";
 import { HoldBadge } from "../../components/QuotaBanner";
 import { SelfReport } from "../../components/SelfReport";
 import { StatusBadge } from "../../components/StatusBadge";
 import { Empty, ErrorBanner, PageHead, useNow } from "../../components/ui";
 import { AGENT_STATUSES, type Agent, type AgentStatus } from "../../api/types";
 import { ago, duration } from "../../lib/format";
-import { agents, projects } from "../../stores";
+import { agents, leases, projects } from "../../stores";
 import { AgentForm } from "./AgentForm";
 
 export function RoleBadges(props: { agent: Agent }) {
@@ -25,7 +26,8 @@ export function AgentCard(props: { agent: Agent; now: number }) {
         <A class="name" href={`/agents/${encodeURIComponent(a().id)}`}>
           {a().name}
         </A>
-        <span class="row" style={{ gap: "4px" }}>
+        <span class="row" style={{ gap: "4px", "flex-wrap": "wrap", "justify-content": "flex-end" }}>
+          <LeaseChips agentId={a().id} now={props.now} />
           <HoldBadge agentId={a().id} now={props.now} />
           <StatusBadge status={a().status} />
         </span>
@@ -73,6 +75,8 @@ export function AgentsPage() {
   const now = useNow(1000);
   const navigate = useNavigate();
   const [creating, setCreating] = createSignal(false);
+  // The "holds <target>" chips: the leases older than the event backlog.
+  onMount(() => void leases.loadAll());
   const [scope, setScope] = createSignal<"project" | "all">("project");
   const [status, setStatus] = createSignal<AgentStatus | "">("");
   const shown = () =>

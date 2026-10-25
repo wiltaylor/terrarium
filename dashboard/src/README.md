@@ -257,7 +257,9 @@ current card, and the self-report (`applyAgentEvent`), the board (`card` and
 (`stores/unread.ts`), the quota banner and the hold badges
 (`stores/quota.ts`), the subscription list (`quota.*` events) and the detect
 banner (`subscription.offer`), the home queue and usage strip, the Event
-log, and the agent's Events tab.
+log, and the agent's Events tab. `lease` events keep the lease lists on the
+Targets and agent pages live, and the "holds <target>" chips next to the
+agent status badges (`stores/leases.ts`, `lib/leases.ts`).
 
 ## Quota alerts and holds
 
@@ -306,7 +308,7 @@ A `status` event carries `data.status`. A `card` event carries `data.card_id`.
 | `/projects` | Projects: list, create | `GET`, `POST /api/projects` |
 | `/p/:project/settings` | Project edit and delete, Repos panel | `GET`, `PATCH`, `DELETE /api/projects/{name}?confirm=true`, `GET`, `POST .../repos`, `POST /api/repos/{id}/checkout` |
 | `/agents` | Agents grid, new agent | `GET`, `POST /api/agents`, events socket |
-| `/agents/:id` | Agent detail: edit, delete, roles, quota, terminal, events, sessions | `GET`, `PATCH`, `DELETE /api/agents/{id}`, `start/stop/restart/send`, `GET`, `PUT .../roles`, `GET /api/usage/me?agent=`, `WS .../pty`, `GET .../events?since=`, `GET .../sessions` |
+| `/agents/:id` | Agent detail: edit, delete, roles, quota, leases, terminal, events, sessions | `GET`, `PATCH`, `DELETE /api/agents/{id}`, `start/stop/restart/send`, `GET`, `PUT .../roles`, `GET /api/usage/me?agent=`, `GET .../leases?all=`, `WS .../pty`, `GET .../events?since=`, `GET .../sessions` |
 | `/subscriptions` | Subscriptions, detect banner, add wizard | `GET`, `POST`, `DELETE /api/subscriptions[/{name}]`, `GET .../detect`, `POST .../{name}/probe\|verify\|logout\|api-key`, `POST /api/subscriptions/login`, `GET`, `DELETE .../login/{id}`, `POST .../login/{id}/input`, `WS .../login/{id}/pty` |
 | `/mail` | Threads, compose and reply as operator | `GET /api/mail`, `POST /api/mail`, `POST /api/mail/{id}/read`, `POST /api/mail/{id}/reply` |
 | `/p/:project/inbox` | Project inbox, make card | `GET .../inbox`, `POST .../inbox/{id}/read`, `POST .../inbox/{id}/reply`, `POST .../cards` (`from_mail`) |
@@ -316,7 +318,7 @@ A `status` event carries `data.status`. A `card` event carries `data.card_id`.
 | `/p/:project/artifacts/:id?` | Artifact viewer, upload, delete | `GET .../artifacts`, `.../artifacts/usage`, `POST .../artifacts` (multipart), `POST /api/artifacts/{id}/url` |
 | `/p/:project/versions/:id?` | Version timeline, review, new version | `GET`, `POST .../versions`, `POST /api/versions/{id}/submit|approve|reject|release`, `compare` |
 | `/p/:project/spend` | Usage by day, agent, model, and subscription | `GET /api/usage?project=&bucket=day&group=agent\|model\|subscription` |
-| `/targets` | Targets, lifecycle, exec console | `GET /api/targets`, `POST /api/targets/{name}/up\|down\|snapshot\|restore`, `POST .../exec`, `WS .../sessions/{id}/ws`, `DELETE .../sessions/{id}` (new API, not in docs/api.md yet) |
+| `/targets` | Targets, lifecycle, exec console, leases (grant, extend, revoke, history) | `GET /api/targets`, `POST /api/targets/{name}/up\|down\|snapshot\|restore`, `POST .../exec`, `WS .../sessions/{id}/ws`, `DELETE .../sessions/{id}`, `GET`, `POST .../leases`, `PATCH`, `DELETE .../leases/{agent}` (docs/api.md §17.7) |
 | `/hosts` | Host agents: status, capabilities, add with a one-time token, revoke | `GET`, `POST /api/hosts`, `DELETE /api/hosts/{name}` (new API, not in docs/api.md yet) |
 | `/events` | Event log with history | `GET /api/events?since=&kind=&project=&agent=`, events socket |
 | `/audit` | Audit log | `GET /api/audit?actor=&action=&project=` |

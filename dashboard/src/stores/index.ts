@@ -5,6 +5,7 @@ import { createApi } from "../api";
 import { createAgentsStore } from "./agents";
 import { createAuthStore, signIn, signOut, upgradeToSession } from "./auth";
 import { createEventsStore } from "./events";
+import { createLeasesStore } from "./leases";
 import { createProjectsStore } from "./projects";
 import { createQuotaStore } from "./quota";
 import { createSubscriptionsStore } from "./subscriptions";
@@ -35,6 +36,7 @@ export const agents = createAgentsStore(api, events);
 export const subscriptions = createSubscriptionsStore(api, events);
 export const quota = createQuotaStore(events);
 export const unread = createUnreadStore(api, events);
+export const leases = createLeasesStore(api, events);
 
 // A token from an older build, or from a daemon that had no sessions:
 // trade it for a cookie session now, so that it leaves the browser.

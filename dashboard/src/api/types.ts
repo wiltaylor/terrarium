@@ -189,6 +189,8 @@ export const EVENT_KINDS = [
   "quota.resumed",
   "subscription.offer",
   "self_report",
+  // docs/api.md §9, §17.7.
+  "lease",
 ] as const;
 export type EventKind = (typeof EVENT_KINDS)[number];
 
@@ -892,6 +894,71 @@ export interface Target {
   host_online?: boolean | null;
   /** Whether the caller may exec on it. */
   usable?: boolean;
+  /** Why the caller may use it (docs/api.md §17.2): `operator`, `policy`, `lease`, or `null`. */
+  access?: "operator" | "policy" | "lease" | null;
+  /** The caller's active lease on the target, when `access` is `lease`; else `null`. */
+  lease?: Lease | null;
+}
+
+// ----- Target leases (docs/api.md §17.7) -----
+
+export type LeaseState = "active" | "revoked" | "expired";
+
+/** One lease: one agent holds one target, for a time or until a revoke. */
+export interface Lease {
+  id: string;
+  target: string;
+  /** The holder's ULID. */
+  agent: string;
+  /** `project/name` of the holder; `null` after the agent is deleted. */
+  agent_name: string | null;
+  /** The holder's project. */
+  project: string;
+  /** `operator`, `agent:<ulid>`, or `system`. */
+  granted_by: string;
+  granted_at: string;
+  /** The end. `null`: until a revoke. */
+  expires_at: string | null;
+  /** No other agent may hold a lease on the target at the same time. */
+  exclusive: boolean;
+  revoked_at: string | null;
+  /** `operator`, `agent:<ulid>`, or `system` (the expiry). */
+  revoked_by: string | null;
+  reason: string | null;
+  state: LeaseState;
+}
+
+/** `POST /api/targets/{name}/leases`. `until`: an RFC 3339 time or a duration (`30m`); absent: until a revoke. */
+export interface LeaseGrant {
+  /** An agent key (§2.2). */
+  agent: string;
+  until?: string | null;
+  exclusive?: boolean;
+  reason?: string;
+}
+
+/** The `201` of a grant: the lease, and the lifecycle verb that the grant ran, if any. */
+export type LeaseGranted = Lease & { lifecycle?: unknown; lifecycle_error?: string };
+
+/** `details` of `409 lease_held` (docs/api.md §2.5). */
+export interface LeaseHeldDetails {
+  target: string;
+  /** `project/name`, else the ULID. */
+  holder: string;
+  holder_id: string;
+  lease_id: string;
+  exclusive: boolean;
+  expires_at: string | null;
+}
+
+/** `data` of a `lease` event (docs/api.md §9). The event's `agent_id` is the holder. */
+export interface LeaseEventData {
+  change: "granted" | "extended" | "ended";
+  target: string;
+  lease_id: string;
+  expires_at: string | null;
+  exclusive: boolean;
+  state: LeaseState;
 }
 
 /** `POST /api/targets/{name}/exec`. `shell` opens a login shell in a PTY. */

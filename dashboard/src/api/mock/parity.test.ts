@@ -545,6 +545,106 @@ const outcome = (s: AuthSocket | PtySocket) =>
     s.addEventListener("close", () => resolve("closed"));
   });
 
+describe("target leases (docs/api.md §17.7)", () => {
+  const LEASE_KEYS = ["agent", "agent_name", "exclusive", "expires_at", "granted_at", "granted_by", "id", "project", "reason", "revoked_at", "revoked_by", "state", "target"];
+  const byName = (api: ReturnType<typeof mock>, name: string) => api.world.agents.find((a) => a.name === name)!;
+  const frames = async (api: ReturnType<typeof mock>) => {
+    const out: AgentEvent[] = [];
+    const s = api.events.stream({ since: api.world.seq });
+    s.subscribe((e) => out.push(e));
+    await wait();
+    return { out, close: () => s.close() };
+  };
+
+  it("lists the active leases newest first in the documented shape; ?all=true adds the ended ones", async () => {
+    const api = mock();
+    const active = await api.targets.leases("lab-win11");
+    expect(active).toHaveLength(1);
+    expect(Object.keys(active[0]!).sort()).toEqual(LEASE_KEYS);
+    expect(active[0]).toMatchObject({ target: "lab-win11", agent_name: "terrarium/runner-dev", exclusive: true, state: "active", reason: "TER-12" });
+    expect(active[0]!.granted_by).toMatch(/^agent:/);
+    const all = await api.targets.leases("lab-win11", { all: true });
+    expect(all.map((l) => l.state)).toEqual(["active", "expired"]);
+    expect(all[1]).toMatchObject({ revoked_by: "system" });
+    const mine = await api.agents.leases("terrarium/adapter-codex", { all: true });
+    expect(mine.map((l) => `${l.target}:${l.state}`)).toEqual(["build-box:active", "lab-win11:expired"]);
+    expect((await api.agents.leases("terrarium/adapter-codex")).map((l) => l.target)).toEqual(["build-box"]);
+  });
+
+  it("marks each target with access and lease for the caller", async () => {
+    const t = (await mock().targets.list())[0]!;
+    expect(t).toHaveProperty("access", "operator");
+    expect(t).toHaveProperty("lease", null);
+  });
+
+  it("grants with 201 the lease, and writes a lease event {change, target, lease_id, expires_at, exclusive, state} to the holder", async () => {
+    const api = mock();
+    const lead = byName(api, "lead");
+    const f = await frames(api);
+    const l = await api.targets.grant("build-box", { agent: "terrarium/lead", until: "30m", reason: "TER-3" });
+    expect(l).toMatchObject({ target: "build-box", agent: lead.id, agent_name: "terrarium/lead", project: "terrarium", granted_by: "operator", exclusive: false, state: "active", reason: "TER-3", revoked_at: null });
+    expect(Date.parse(l.expires_at!) - Date.now()).toBeGreaterThan(29 * 60_000);
+    const e = f.out.find((x) => x.kind === "lease")!;
+    expect(e).toMatchObject({ kind: "lease", agent: "lead", agent_id: lead.id, project: "terrarium", actor: "operator" });
+    expect(e.data).toEqual({ agent_id: lead.id, change: "granted", target: "build-box", lease_id: l.id, expires_at: l.expires_at, exclusive: false, state: "active" });
+    expect((await api.audit({ action: "target.grant" })).items.at(-1)).toMatchObject({ target: "build-box", detail: { lease: l.id, agent: lead.id } });
+    f.close();
+  });
+
+  it("refuses a clash with 409 lease_held and the holder in details; a second lease of one agent is 409 conflict", async () => {
+    const api = mock();
+    const runner = byName(api, "runner-dev");
+    const held = api.world.leases.find((x) => x.target === "lab-win11" && x.state === "active")!;
+    const e = await api.targets.grant("lab-win11", { agent: "terrarium/lead" }).catch((x: unknown) => x as ApiError);
+    expect(e).toBeInstanceOf(ApiError);
+    expect(e).toMatchObject({ status: 409, code: "lease_held" });
+    expect((e as ApiError).details).toEqual({ target: "lab-win11", holder: "terrarium/runner-dev", holder_id: runner.id, lease_id: held.id, exclusive: true, expires_at: held.expires_at });
+    // A shared lease on build-box: an exclusive grant next to it is lease_held too.
+    await expect(api.targets.grant("build-box", { agent: "terrarium/lead", exclusive: true })).rejects.toMatchObject({ status: 409, code: "lease_held", details: { holder: "terrarium/adapter-codex", exclusive: false, expires_at: null } });
+    await expect(api.targets.grant("build-box", { agent: "terrarium/adapter-codex" })).rejects.toMatchObject({ status: 409, code: "conflict" });
+  });
+
+  it("refuses a project target for an agent of another project, and a bad or past until, with 422 invalid", async () => {
+    const api = mock();
+    await expect(api.targets.grant("pg-test", { agent: "terrarium/lead" })).rejects.toMatchObject({ status: 422, code: "invalid" });
+    await expect(api.targets.grant("build-box", { agent: "terrarium/lead", until: "soon" })).rejects.toMatchObject({ status: 422, code: "invalid" });
+    await expect(api.targets.grant("build-box", { agent: "terrarium/lead", until: "2020-01-01T00:00:00Z" })).rejects.toMatchObject({ status: 422, code: "invalid" });
+  });
+
+  it("extends with PATCH {until} and revokes with DELETE, each with a lease event; then the lease is gone from the active list", async () => {
+    const api = mock();
+    const runner = byName(api, "runner-dev");
+    const f = await frames(api);
+    const ext = await api.targets.extendLease("lab-win11", runner.id, null);
+    expect(ext).toMatchObject({ expires_at: null, state: "active" });
+    const end = await api.targets.revokeLease("lab-win11", "terrarium/runner-dev");
+    expect(end).toMatchObject({ id: ext.id, state: "revoked", revoked_by: "operator" });
+    expect(end.revoked_at).toEqual(expect.any(String));
+    expect(f.out.filter((x) => x.kind === "lease").map((x) => [x.data.change, x.data.state])).toEqual([
+      ["extended", "active"],
+      ["ended", "revoked"],
+    ]);
+    expect(await api.targets.leases("lab-win11")).toEqual([]);
+    await expect(api.targets.revokeLease("lab-win11", runner.id)).rejects.toMatchObject({ status: 404 });
+    // The exclusive holder is gone: a new grant works.
+    expect((await api.targets.grant("lab-win11", { agent: "terrarium/lead", exclusive: true })).exclusive).toBe(true);
+    f.close();
+  });
+
+  it("ends a lease at its time as system, with an ended event and state expired", async () => {
+    let clock = Date.now();
+    const api = createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 0, now: () => clock });
+    const l = await api.targets.grant("build-box", { agent: "terrarium/lead", until: "90s" });
+    const f = await frames(api);
+    clock += 91_000;
+    const all = await api.targets.leases("build-box", { all: true });
+    expect(all.find((x) => x.id === l.id)).toMatchObject({ state: "expired", revoked_by: "system" });
+    expect(f.out.find((x) => x.kind === "lease")?.data).toMatchObject({ change: "ended", lease_id: l.id, state: "expired" });
+    expect(f.out.find((x) => x.kind === "lease")?.actor).toBe("system");
+    f.close();
+  });
+});
+
 describe("WebSocket auth contract (docs/security-review.md F4)", () => {
   const transport = (make: MakeRawSocket, token: string | null, allowQueryToken = false) =>
     createHttpTransport({ getToken: () => token, location: { protocol: "http:", host: "d" }, makeSocket: make, allowQueryToken });

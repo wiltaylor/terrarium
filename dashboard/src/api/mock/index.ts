@@ -44,6 +44,7 @@ import type {
   Repo,
   Role,
   Subscription,
+  Lease,
   Target,
   UsagePoint,
   UsageQuery,
@@ -686,6 +687,53 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
   const execSessions = new Map<string, string>();
   const target = (id: string): Target => find(w.targets, (t) => t.id === id || t.name === id, `target \`${id}\``);
 
+  // ----- target leases (docs/api.md §17.7) -----
+  w.leases ??= [];
+  const leaseEvent = (l: Lease, change: "granted" | "extended" | "ended", actor: string) => {
+    const a = w.agents.find((x) => x.id === l.agent);
+    const holder = l.agent_name ?? l.agent;
+    const summary = change === "ended" ? `lease on ${l.target} ended for ${holder}` : `${holder} ${change} target ${l.target} ${l.expires_at ? `until ${l.expires_at}` : "until revoked"}`;
+    emit({ kind: "lease", actor, ...(a ? { agent: a.name } : {}), agent_id: l.agent, project: l.project, summary, data: { change, target: l.target, lease_id: l.id, expires_at: l.expires_at, exclusive: l.exclusive, state: l.state } });
+  };
+  /** The expiry timer: end each active lease past its `expires_at`, as `system`. */
+  const sweepLeases = () => {
+    for (const l of w.leases) {
+      if (l.state !== "active" || !l.expires_at || Date.parse(l.expires_at) > now()) continue;
+      l.state = "expired";
+      l.revoked_at = iso();
+      l.revoked_by = "system";
+      audit("target.lease_expired", l.target, l.project, { lease: l.id, agent: l.agent, agent_name: l.agent_name }, "system");
+      leaseEvent(l, "ended", "system");
+    }
+  };
+  const armExpiry = (l: Lease) => {
+    if (!l.expires_at) return;
+    const ms = Date.parse(l.expires_at) - now();
+    if (ms < 2 ** 31 - 1) later(sweepLeases, Math.max(0, ms) + 20);
+  };
+  w.leases.forEach(armExpiry);
+  /** `until`: an RFC 3339 time in the future, or a duration from now (`90s`, `30m`, `2h`, `1d`). */
+  const parseUntil = (u: string | null | undefined): string | null => {
+    const v = u?.trim();
+    if (!v) return null;
+    const d = /^(\d+)\s*(s|m|h|d)$/.exec(v);
+    const UNIT = { s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 } as const;
+    const at = d ? now() + Number(d[1]) * UNIT[d[2] as keyof typeof UNIT] : /^\d{4}-\d{2}-\d{2}T/.test(v) ? Date.parse(v) : NaN;
+    if (Number.isNaN(at)) fail(422, "invalid", `bad \`until\` \`${v}\`: an RFC 3339 time or a duration such as 30m`);
+    if (at <= now()) fail(422, "invalid", `\`until\` \`${v}\` is not in the future`);
+    return new Date(at).toISOString();
+  };
+  const leasesWhere = (pred: (l: Lease) => boolean, all?: boolean) => {
+    sweepLeases();
+    const rows = w.leases.filter(pred).reverse();
+    return all ? rows.filter((l) => l.state === "active").concat(rows.filter((l) => l.state !== "active").slice(0, 100)) : rows.filter((l) => l.state === "active");
+  };
+  const activeLease = (t: Target, a: Agent): Lease => {
+    sweepLeases();
+    return w.leases.find((l) => l.target === t.name && l.agent === a.id && l.state === "active") ?? notFound(`active lease of \`${a.project}/${a.name}\` on \`${t.name}\``);
+  };
+  const until = (l: Lease) => (l.expires_at ? `until ${l.expires_at}` : "until revoked");
+
   // ----- login sessions (docs/api.md §16.4) -----
   const logins = new Map<string, LoginSession & { name?: string }>();
   const LOGIN_URL: Record<LoginKind, string> = {
@@ -1192,6 +1240,11 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           audit("agent.roles", a.id, a.project, { from: a.roles, to: next });
           a.roles = next;
           return a.roles;
+        }),
+      leases: (id, o = {}) =>
+        reply(() => {
+          const a = agent(id);
+          return leasesWhere((l) => l.agent === a.id, o.all);
         }),
       pty: (id) => {
         const a = w.agents.find((x) => x.id === id || `${x.project}/${x.name}` === id || x.name === id);
@@ -1946,7 +1999,8 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
 
     // The daemon's `api/targets.rs` is new; the mock runs the same lifecycle.
     targets: {
-      list: () => reply(() => w.targets.map((t) => ({ ...t, host_online: t.kind === "ssh" ? null : w.hosts.some((h) => h.name === t.host && h.status === "online") }))),
+      // The mock caller is the operator: `access` is `operator`, and the operator holds no lease.
+      list: () => reply(() => w.targets.map((t) => ({ ...t, host_online: t.kind === "ssh" ? null : w.hosts.some((h) => h.name === t.host && h.status === "online"), access: "operator" as const, lease: null }))),
       create: () => reply(() => fail(405, "method_not_allowed", "this route does not take this method")),
       action: (id, action) =>
         reply(() => {
@@ -2000,6 +2054,76 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
         reply(() => {
           if (execSessions.get(session) !== id) fail(404, "not_found", `session \`${session}\` not found`);
           execSessions.delete(session);
+        }),
+      leases: (name, o = {}) =>
+        reply(() => {
+          const t = target(name);
+          return leasesWhere((l) => l.target === t.name, o.all);
+        }),
+      grant: (name, body) =>
+        reply(() => {
+          const t = target(name);
+          if (typeof body?.agent !== "string" || !body.agent.trim()) fail(422, "invalid", "a lease needs `agent`");
+          const a = agent(body.agent);
+          if (t.project && t.project !== a.project) fail(422, "invalid", `target \`${t.name}\` belongs to project \`${t.project}\`; lease it to an agent of \`${t.project}\``);
+          const expires_at = parseUntil(body.until);
+          sweepLeases();
+          const active = w.leases.filter((l) => l.target === t.name && l.state === "active");
+          const mine = active.find((l) => l.agent === a.id);
+          if (mine) fail(409, "conflict", `${mine.agent_name ?? mine.agent} holds a lease on \`${t.name}\` ${until(mine)} already; PATCH it to extend it, or revoke it first`);
+          const others = active.filter((l) => l.agent !== a.id);
+          const held = (x: Lease, message: string): never =>
+            fail(409, "lease_held", message, { target: t.name, holder: x.agent_name ?? x.agent, holder_id: x.agent, lease_id: x.id, exclusive: x.exclusive, expires_at: x.expires_at });
+          const ex = others.find((l) => l.exclusive);
+          if (ex) held(ex, `target \`${t.name}\` is held exclusively by ${ex.agent_name ?? ex.agent} ${until(ex)}`);
+          if (body.exclusive && others[0]) held(others[0], `target \`${t.name}\` is leased to ${others[0].agent_name ?? others[0].agent} ${until(others[0])}; an exclusive lease needs no other holder`);
+          const l: Lease = {
+            id: ulid("lease"),
+            target: t.name,
+            agent: a.id,
+            agent_name: `${a.project}/${a.name}`,
+            project: a.project,
+            granted_by: "operator",
+            granted_at: iso(),
+            expires_at,
+            exclusive: !!body.exclusive,
+            revoked_at: null,
+            revoked_by: null,
+            reason: body.reason?.trim() || null,
+            state: "active",
+          };
+          w.leases.push(l);
+          audit("target.grant", t.name, l.project, { lease: l.id, agent: l.agent, agent_name: l.agent_name, expires_at, exclusive: l.exclusive, reason: l.reason });
+          leaseEvent(l, "granted", "operator");
+          armExpiry(l);
+          // A grant to a running agent brings an ephemeral target up (`ensure_up`).
+          const holders = w.leases.filter((x) => x.target === t.name && x.state === "active" && x.agent !== a.id).some((x) => LIVE.includes(w.agents.find((y) => y.id === x.agent)?.status ?? "stopped"));
+          if (t.ephemeral && LIVE.includes(a.status) && !holders && t.state === "down") {
+            if (w.hosts.find((h) => h.name === t.host)?.status !== "online") return { ...l, lifecycle_error: `host agent \`${t.host ?? "?"}\` is not connected` };
+            t.state = "starting";
+            later(() => (t.state = "up"), Math.max(step, 1) * 3);
+            return { ...l, lifecycle: { target: t.name, verb: "up", state: "running" } };
+          }
+          return l;
+        }),
+      extendLease: (name, key, untilRaw) =>
+        reply(() => {
+          const l = activeLease(target(name), agent(key));
+          l.expires_at = parseUntil(untilRaw);
+          audit("target.lease_extend", l.target, l.project, { lease: l.id, agent: l.agent, expires_at: l.expires_at });
+          leaseEvent(l, "extended", "operator");
+          armExpiry(l);
+          return l;
+        }),
+      revokeLease: (name, key) =>
+        reply(() => {
+          const l = activeLease(target(name), agent(key));
+          l.state = "revoked";
+          l.revoked_at = iso();
+          l.revoked_by = "operator";
+          audit("target.revoke", l.target, l.project, { lease: l.id, agent: l.agent, agent_name: l.agent_name });
+          leaseEvent(l, "ended", "operator");
+          return l;
         }),
     },
 

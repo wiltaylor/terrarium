@@ -38,6 +38,9 @@ import type {
   Health,
   Host,
   InboxQuery,
+  Lease,
+  LeaseGrant,
+  LeaseGranted,
   LoginSession,
   MailQuery,
   Memory,
@@ -132,6 +135,8 @@ export interface Api {
     sessions(id: string, q?: PageQuery): Promise<Page<Session>>;
     roles(id: string): Promise<Role[]>;
     setRoles(id: string, roles: Role[]): Promise<Role[]>;
+    /** `GET /api/agents/{id}/leases` (docs/api.md §17.7). `all` also lists the ended leases. */
+    leases(id: string, opts?: { all?: boolean }): Promise<Lease[]>;
     /** Bidirectional PTY. See ./sockets for the protocol. */
     pty(id: string): PtySocket;
   };
@@ -282,6 +287,14 @@ export interface Api {
     sessionPty(id: string, session: string): PtySocket;
     /** Kill the run. */
     closeSession(id: string, session: string): Promise<void>;
+    /** `GET /api/targets/{name}/leases`, newest first. `all` also lists the ended leases (the last 100). */
+    leases(name: string, opts?: { all?: boolean }): Promise<Lease[]>;
+    /** `POST /api/targets/{name}/leases`. A clash is `409 lease_held` with the holder in `details`. */
+    grant(name: string, body: LeaseGrant): Promise<LeaseGranted>;
+    /** `PATCH /api/targets/{name}/leases/{agent}`: a new `until`; `null` is until a revoke. */
+    extendLease(name: string, agent: string, until: string | null): Promise<Lease>;
+    /** `DELETE /api/targets/{name}/leases/{agent}`: answers the ended lease. */
+    revokeLease(name: string, agent: string): Promise<Lease>;
   };
 
   /** docs/host-protocol.md, the daemon's `api/hosts.rs`. */
@@ -402,6 +415,7 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       sessions: (id, q = {}) => page(`${a(id)}/sessions`, { ...q }),
       roles: (id) => get(`${a(id)}/roles`),
       setRoles: (id, roles) => put(`${a(id)}/roles`, roles),
+      leases: (id, o = {}) => get(`${a(id)}/leases`, o.all ? { all: true } : undefined),
       pty: (id) => socket(`${a(id)}/pty`),
     },
 
@@ -529,6 +543,11 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       exec: (id, req) => post(`/api/targets/${seg(id)}/exec`, req),
       sessionPty: (id, session) => socket(`/api/targets/${seg(id)}/sessions/${seg(session)}/ws`),
       closeSession: (id, session) => del(`/api/targets/${seg(id)}/sessions/${seg(session)}`),
+      // A plain array, no cursor (docs/api.md §17.7).
+      leases: (name, o = {}) => get(`/api/targets/${seg(name)}/leases`, o.all ? { all: true } : undefined),
+      grant: (name, body) => post(`/api/targets/${seg(name)}/leases`, body),
+      extendLease: (name, agent, until) => patch(`/api/targets/${seg(name)}/leases/${seg(agent)}`, { until }),
+      revokeLease: (name, agent) => t.request("DELETE", `/api/targets/${seg(name)}/leases/${seg(agent)}`),
     },
 
     hosts: {
