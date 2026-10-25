@@ -26,8 +26,8 @@ version below, as for the versions below.
 | 2026-10-24 | copilot | 1.0.103 | first pin | `>=1.0.103, <1.1.0` | pass (Phase 0 spikes) |
 | 2026-10-24 | pi | 0.85.1 | first pin | `>=0.85.1, <0.86.0` | pass (Phase 0 spikes) |
 | 2026-10-24 | copilot-prompt | 0.1.2 | first pin | - | - |
-| 2026-10-26 | codex | 0.160.0 → 0.164.0 | major | `>=0.160.0, <0.161.0` → `>=0.164.0, <0.165.0` | not run yet |
-| 2026-10-26 | pi | 0.85.1 → 1.4.0 | major | `>=0.85.1, <0.86.0` → `>=1.4.0, <1.5.0` | not run yet |
+| 2026-10-26 | codex | 0.160.0 → 0.164.0 | major | `>=0.160.0, <0.161.0` → `>=0.164.0, <0.165.0` | verified live in the container 2026-10-26 (codex: 1 turn; pi: 0 turns, start only) |
+| 2026-10-26 | pi | 0.85.1 → 1.4.0 | major | `>=0.85.1, <0.86.0` → `>=1.4.0, <1.5.0` | verified live in the container 2026-10-26 (codex: 1 turn; pi: 0 turns, start only) |
 
 ---
 
@@ -731,6 +731,27 @@ one line; the detector reads only the first.
 
 ---
 
+## Codex 0.164.0
+
+Tested on 2026-10-25 and 2026-10-26 in the Docker stack (image with
+0.164.0), through the daemon: agent `smoke/probe-codex`, ChatGPT Pro
+subscription, model `gpt-6-luna`, 1 turn ("Reply with exactly: pong"). The
+adapter did not change, except the table name (`CODEX_PINNED`).
+
+| Topic | Fact | Status |
+|---|---|---|
+| Flags | `codex --help` adds one subcommand, `migrate-nfs-db`. No flag added or removed. `codex resume --help` is the same. | read |
+| Quiet start | starting → idle ("prompt ready") 0.31 s after spawn. The screen shows the idle composer, "permissions: YOLO mode", "⚠ 1 warning · f2 to view". No dialog. | verified |
+| Terminal modes | `?1049h`, `?1000h`/`?1003h`/`?1006h`, `?2004h`, `>7u`: the same counts per start as 0.160.0. | verified |
+| Hooks | The 11 registered names fire as on 0.160.0: `SessionStart` at the first prompt (source `startup`), then `UserPromptSubmit` → `turn_start`, `Stop` → `turn_end`, `SessionEnd` (reason `other`) after `/exit`. Tool hooks were not exercised (no tool call). | verified |
+| New hook `PreModelRequest` | In the hook enum of the binary. It runs before each model request, not once per turn. The adapter does **not** register it: the payload and the effect of the hook's output are not captured, and a hook process before each request adds delay. Register it (log only) after a spike. `Interrupt` is in the enum too (also in 0.160.0) and is not registered. | read |
+| Usage | `usage.sample` from the session file: input 3837, cache_read 7936, output 5. | verified |
+| Stop | `/exit` → `SessionEnd` → exit 0, no kill. | verified |
+| Session file | Same layout (`sessions/YYYY/MM/DD/rollout-<local time>-<id>.jsonl`, `session_index.jsonl`, `sqlite/`). `turn_context` lost `current_date`, `timezone`, `workspace_roots` and gained `cyber_access_program`; `task_started` gained `turn_attribution`; `task_complete` gained `root_turn_id`; `response_item/message` gained `status`; new `response_item/additional_tools`. `token_usage_record`, `token_count.rate_limits`, `session_meta`: no change. The adapter reads none of the removed keys. | verified |
+| Exit text | "Token usage: total=3,842 input=3,837 (+ 7,936 cached) output=5": input no longer includes the cache. The adapter does not parse it. | verified |
+
+---
+
 ## Copilot CLI 1.0.103
 
 Tested on 2026-10-24. Same host. GitHub Copilot subscription on the legacy
@@ -1087,6 +1108,42 @@ refused. `pi auth print-bearer-token` was not run (it prints the token).
 - Compaction events.
 - A Copilot subscription through pi (`github-copilot` provider).
 - `pi auth print-bearer-token` and the provider usage endpoints.
+
+---
+
+## pi 1.4.0
+
+Tested on 2026-10-25 and 2026-10-26 in the Docker stack (image with 1.4.0).
+0 model turns. The daemon check started `lab/pi-check` with no subscription
+on the old adapter. The adapter changes below were then checked by hand in
+the container: the exact argv of `launch::build`, run in a pty with a temp
+`PI_CODING_AGENT_DIR` (a copy of `/auth/pi` without `auth.json`). The
+daemon path with the changed adapter is not proven until the next image
+build.
+
+| Topic | Fact | Status |
+|---|---|---|
+| `--provider` | Now "Provider to search for --model (requires --model)". `--provider` alone is fatal: `Error: --provider requires --model (for example: --provider openai-codex --model <pattern>)`, and pi does not start. 0.85.1 started with the same argv. | verified |
+| Model without `--model` | pi takes `defaultProvider`/`defaultModel` from `settings.json` when that provider has a login, else the first logged-in provider in its own order (`anthropic` before `openai-codex`), from `defaultModelPerProvider` (`core/model-resolver.js`). Both can spend a different subscription than the agent's. | read (source) |
+| Adapter change | A subscription with no agent `model` gets `--provider <p> --model <cheap default>` (`flags::DEFAULT_MODELS`: `openai-codex`/`openai`/`github-copilot` → `gpt-6-luna`, `anthropic` → `claude-haiku-5-5`, `google` → `gemini-3.1-flash-lite`, `openrouter` → `openai/gpt-6-luna`, `xai` → `grok-4.3`, `groq` → `openai/gpt-oss-20b`, `deepseek` → `deepseek-flash`, `mistral` → `mistral-small-latest`). The agent's `model` overrides it. A provider with no row (a custom provider in `models.json`) and no `model`: the daemon refuses the start (`start_refusal`). `--provider` never goes alone. | verified (start only: the footer shows `gpt-6-luna`, the extension reports `openai-codex/gpt-6-luna`) |
+| `--tui-mode` | The default changed from `regular` to `fullscreen` (alternate screen and mouse tracking in `pty.log`). The adapter passes `--tui-mode regular`: no `?1049h`, no `?1000h`/`?1003h`/`?1006h`, one `?2004h`. The detector says `PromptReady` on that screen. Idle detection also worked in fullscreen; busy and dialog screens in fullscreen are not checked. | verified |
+| `--no-mcp` | New: built-in MCP. Without the flag, pi reads `mcp.json` in `PI_CODING_AGENT_DIR` (the shared `/auth/pi`). The adapter passes `--no-mcp`. | read (help); started with it |
+| `--no-extensions` | Now also turns off pi's built-in extensions. `-e` still loads an explicit path (the screen lists only `terrarium.ts`) and also takes `builtin:<name>`. | verified |
+| Other flags | `--model`, `--offline`, `PI_OFFLINE`, `PI_TELEMETRY`, `--no-skills`, `--no-prompt-templates`, `--no-context-files`, `--no-approve`, `--session-dir`, `--session-id`, `--append-system-prompt`, `--system-prompt`, `PI_CODING_AGENT_DIR`: help text unchanged. | read |
+| Changelog screen | At the first 1.4.0 start, pi shows the "What's new" entries above the editor, because the shared `settings.json` has `lastChangelogVersion` `0.85.1`. The adapter now sets `lastChangelogVersion` to the pinned version in the agent's `settings.json` copy at every start. With it, no changelog shows. | verified |
+| Extension events | All 17 events that `terrarium.ts` subscribes to are in `types.d.ts`. Additive changes only: `agent_settled.aborted`, `turn_end.messageEntryId`/`toolResultEntryIds`, `tool_execution_*.parentToolCallId`, `tool_execution_end.durationMs`. `before_agent_start` is now a union (the custom variant has `message`, no `prompt`). `on()` returns an unsubscribe function. `getSessionId`/`getSessionFile`, `isIdle`: no change. | read (types) |
+| Start and stop | starting → idle 0.41 s "prompt ready" (daemon, old adapter). By hand with the new argv: `session_start` with the `--session-id` UUID and a session file in `--session-dir`; `/quit` → `session_shutdown` → exit 0 in 0.06 s. | verified |
+| Session file | No file before the first message, as on 0.85.1. The start prints "Warning: No project session found with id '<id>'; creating a new session with that id." above the banner. | verified |
+| `pi auth check` | Same format: `{"status":"not_ready","provider":"openai-codex","reason":"credentials_not_configured"}` exit 1. New flag `--credentials` prints the secret: Terrarium must never pass it. | verified |
+
+### pi 1.4.0: not tested
+
+- A turn with the new argv (busy, tool, and `agent_settled` screens in
+  `regular` mode on 1.4.0).
+- The default models of `DEFAULT_MODELS` in a real turn. The ids come from
+  the 1.4.0 model catalog (`pi-ai/dist/providers/*.models.js`).
+- `google-gemini-cli` (in `provider.rs`) is not a provider in the 1.4.0
+  catalog.
 
 ---
 

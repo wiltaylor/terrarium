@@ -92,7 +92,7 @@ pub fn auth_check(
             cmd.env(key, v);
         }
     }
-    cmd.env(crate::PI_0_85.config_env, agent_dir)
+    cmd.env(crate::PI_PINNED.config_env, agent_dir)
         .env("PI_OFFLINE", "1")
         .env("PI_TELEMETRY", "0");
     for (k, v) in extra_env {

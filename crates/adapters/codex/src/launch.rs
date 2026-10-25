@@ -233,7 +233,7 @@ mod tests {
             .filter(|o| o.starts_with("hooks."))
             .collect();
         assert_eq!(hooks.len(), 11);
-        for (event, o) in crate::CODEX_0_160.hook_events.iter().zip(&hooks) {
+        for (event, o) in crate::CODEX_PINNED.hook_events.iter().zip(&hooks) {
             // The key is dotted; the value is TOML. Parse both as a document.
             let doc: toml::Table = toml::from_str(o).expect("toml");
             let cmd = &doc["hooks"][*event][0]["hooks"][0];

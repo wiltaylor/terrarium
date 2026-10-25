@@ -5,7 +5,7 @@ use std::path::Path;
 use terrarium_core::config::SubscriptionDef;
 use terrarium_core::{Agent, LaunchSpec};
 
-use crate::flags::PiFlags;
+use crate::flags::{self, PiFlags};
 use crate::{PiOptions, PromptMode, config, provider};
 
 /// The provider and model flags for an agent.
@@ -14,32 +14,47 @@ use crate::{PiOptions, PromptMode, config, provider};
 /// - The model comes from the agent. A model `<provider>/<id>` with the
 ///   same provider loses the prefix. Without a subscription, a model
 ///   `<provider>/<id>` goes to pi as it is: pi reads the provider from it.
-/// - Without both, pi uses `defaultProvider` and `defaultModel` from the
-///   agent's `settings.json`.
+/// - A subscription and no model: the provider's cheap default from
+///   [`flags::default_model`]. pi 1.4 refuses `--provider` without
+///   `--model`, and a start with neither flag can spend another
+///   subscription (see [`flags::DEFAULT_MODELS`]). The agent's `model`
+///   overrides the default.
+/// - A subscription whose provider has no default (a custom provider) and
+///   no model: no flags. The daemon refuses that start first
+///   ([`provider::start_refusal`]).
+/// - No subscription and no model: no flags. pi uses `defaultProvider` and
+///   `defaultModel` from the agent's `settings.json`.
+///
+/// `--provider` never goes alone.
 pub fn model_args(
     f: &PiFlags,
     agent: &Agent,
     subscription: Option<&SubscriptionDef>,
 ) -> Vec<String> {
     let provider = subscription.and_then(provider::provider_for);
-    let mut model = agent
+    let model = agent
         .model
         .as_deref()
         .map(str::trim)
         .filter(|m| !m.is_empty());
-    if let (Some(p), Some(m)) = (provider.as_deref(), model) {
-        model = Some(
-            m.strip_prefix(p)
-                .and_then(|r| r.strip_prefix('/'))
-                .unwrap_or(m),
-        );
-    }
     let mut out = Vec::new();
-    if let Some(p) = provider {
-        out.extend([f.provider.to_owned(), p]);
-    }
-    if let Some(m) = model {
-        out.extend([f.model.to_owned(), m.to_owned()]);
+    match (provider.as_deref(), model) {
+        (Some(p), Some(m)) => {
+            let m = m
+                .strip_prefix(p)
+                .and_then(|r| r.strip_prefix('/'))
+                .unwrap_or(m);
+            out.extend([f.provider.to_owned(), p.to_owned()]);
+            out.extend([f.model.to_owned(), m.to_owned()]);
+        }
+        (Some(p), None) => {
+            if let Some(m) = flags::default_model(p) {
+                out.extend([f.provider.to_owned(), p.to_owned()]);
+                out.extend([f.model.to_owned(), m.to_owned()]);
+            }
+        }
+        (None, Some(m)) => out.extend([f.model.to_owned(), m.to_owned()]),
+        (None, None) => {}
     }
     out
 }
@@ -58,9 +73,14 @@ pub fn model_args(
 /// The flags, in order:
 ///
 /// - `--provider <p> --model <m>`: see [`model_args`].
+/// - `--tui-mode regular`: pi 1.4 starts in `fullscreen` by default
+///   (alternate screen, mouse tracking). `regular` keeps the screen that
+///   the detector ([`crate::screen`]) was built on.
 /// - `--offline`: no update check.
 /// - `--no-extensions -e <agent dir>/pi/terrarium.ts`: only the Terrarium
-///   extension loads.
+///   extension loads. Since 1.4 the built-in extensions stay off too.
+/// - `--no-mcp`: no MCP servers. pi 1.4 would read `mcp.json` in the
+///   shared home, which is the operator's.
 /// - `--no-skills --no-prompt-templates`: no global skills (pi reads
 ///   `~/.agents/skills` outside its home) and no `/template` expansions.
 /// - `--no-context-files` (unless [`PiOptions::context_files`]): pi does
@@ -88,10 +108,13 @@ pub fn build(
         spec = spec.arg(a);
     }
     spec = spec
+        .arg(f.tui_mode.0)
+        .arg(f.tui_mode.1)
         .arg(f.offline)
         .arg(f.no_extensions)
         .arg(f.extension)
         .arg(path_str(&config::extension_path(agent)))
+        .arg(f.no_mcp)
         .arg(f.no_skills)
         .arg(f.no_prompt_templates);
     if !opts.context_files {
@@ -180,10 +203,13 @@ mod tests {
             "openai-codex",
             "--model",
             "gpt-5.6-luna",
+            "--tui-mode",
+            "regular",
             "--offline",
             "--no-extensions",
             "-e",
             &dir.join("terrarium.ts").to_string_lossy(),
+            "--no-mcp",
             "--no-skills",
             "--no-prompt-templates",
             "--no-context-files",
@@ -239,7 +265,7 @@ mod tests {
         let sub = codex_sub();
         assert_eq!(
             model_args(
-                &crate::PI_0_85,
+                &crate::PI_PINNED,
                 &test_agent(Some("openai-codex/gpt-5.6-luna")),
                 Some(&sub)
             ),
@@ -252,7 +278,7 @@ mod tests {
         };
         assert_eq!(
             model_args(
-                &crate::PI_0_85,
+                &crate::PI_PINNED,
                 &test_agent(Some("anthropic/claude-x:high")),
                 Some(&or)
             ),
@@ -266,17 +292,79 @@ mod tests {
         // No subscription: the model goes as it is.
         assert_eq!(
             model_args(
-                &crate::PI_0_85,
+                &crate::PI_PINNED,
                 &test_agent(Some("openai-codex/gpt-5.6-luna")),
                 None
             ),
             ["--model", "openai-codex/gpt-5.6-luna"]
         );
-        assert!(model_args(&crate::PI_0_85, &test_agent(Some(" ")), None).is_empty());
+        assert!(model_args(&crate::PI_PINNED, &test_agent(Some(" ")), None).is_empty());
+        assert!(model_args(&crate::PI_PINNED, &test_agent(None), None).is_empty());
+    }
+
+    /// pi 1.4 refuses `--provider` without `--model`. A subscription with
+    /// no model gets the provider's default, so the provider stays in force.
+    #[test]
+    fn subscription_without_model_gets_the_default_model() {
+        let f = &crate::PI_PINNED;
         assert_eq!(
-            model_args(&crate::PI_0_85, &test_agent(None), Some(&sub)),
-            ["--provider", "openai-codex"]
+            model_args(f, &test_agent(None), Some(&codex_sub())),
+            ["--provider", "openai-codex", "--model", "gpt-6-luna"]
         );
+        let key = SubscriptionDef {
+            provider: "anthropic".into(),
+            plan: Some("API key".into()),
+            ..codex_sub()
+        };
+        assert_eq!(
+            model_args(f, &test_agent(Some("  ")), Some(&key)),
+            ["--provider", "anthropic", "--model", "claude-haiku-5-5"]
+        );
+        // A custom provider has no default: no flags at all, never a lone
+        // `--provider` (the daemon refuses this start first).
+        let custom = SubscriptionDef {
+            provider: "glm53-exl3".into(),
+            ..codex_sub()
+        };
+        assert!(model_args(f, &test_agent(None), Some(&custom)).is_empty());
+    }
+
+    #[test]
+    fn subscription_and_model_use_the_agent_model() {
+        let f = &crate::PI_PINNED;
+        assert_eq!(
+            model_args(f, &test_agent(Some("gpt-6-sol")), Some(&codex_sub())),
+            ["--provider", "openai-codex", "--model", "gpt-6-sol"]
+        );
+        let custom = SubscriptionDef {
+            provider: "glm53-exl3".into(),
+            ..codex_sub()
+        };
+        assert_eq!(
+            model_args(f, &test_agent(Some("glm-5.3")), Some(&custom)),
+            ["--provider", "glm53-exl3", "--model", "glm-5.3"]
+        );
+    }
+
+    /// Whatever the inputs, `--provider` comes with `--model`.
+    #[test]
+    fn provider_never_goes_alone() {
+        let subs = [
+            None,
+            Some(codex_sub()),
+            Some(SubscriptionDef {
+                provider: "glm53-exl3".into(),
+                ..codex_sub()
+            }),
+        ];
+        for sub in &subs {
+            for model in [None, Some(""), Some("x"), Some("openai-codex/y")] {
+                let a = model_args(&crate::PI_PINNED, &test_agent(model), sub.as_ref());
+                if a.iter().any(|x| x == "--provider") {
+                    assert!(a.iter().any(|x| x == "--model"), "{a:?}");
+                }
+            }
+        }
     }
 
     #[test]

@@ -179,6 +179,26 @@ pub fn refusal(sub: &SubscriptionDef) -> Option<&'static str> {
     None
 }
 
+/// Why pi must not start this agent on this subscription, or `None` when
+/// it can. [`refusal`], and one more case: a provider with no default model
+/// ([`crate::flags::default_model`], for example a custom provider in the
+/// shared `models.json`) and an agent with no `model`. pi 1.4 needs
+/// `--model` with `--provider`, and a start with neither flag can spend
+/// another subscription.
+pub fn start_refusal(sub: &SubscriptionDef, model: Option<&str>) -> Option<String> {
+    if let Some(r) = refusal(sub) {
+        return Some(r.to_owned());
+    }
+    let has_model = model.is_some_and(|m| !m.trim().is_empty());
+    let provider = provider_for(sub)?;
+    if !has_model && crate::flags::default_model(&provider).is_none() {
+        return Some(format!(
+            "pi has no default model for provider `{provider}`: set the agent's `model`"
+        ));
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -244,6 +264,16 @@ mod tests {
         assert_eq!(refusal(&sub("anthropic", Some("API key"))), None);
         assert_eq!(refusal(&sub("openai", Some("Pro"))), None);
         assert!(refusal(&sub("openai-compatible", Some("API key"))).is_some());
+    }
+
+    #[test]
+    fn a_custom_provider_needs_a_model() {
+        let custom = sub("glm53-exl3", None);
+        assert!(start_refusal(&custom, None).is_some());
+        assert!(start_refusal(&custom, Some(" ")).is_some());
+        assert_eq!(start_refusal(&custom, Some("glm-5.3")), None);
+        assert_eq!(start_refusal(&sub("openai", Some("Pro")), None), None);
+        assert!(start_refusal(&sub("anthropic", Some("Max")), Some("x")).is_some());
     }
 
     #[test]

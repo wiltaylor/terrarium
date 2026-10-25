@@ -1108,7 +1108,9 @@ impl RunnerSupervisor {
         let sub = check_subscription(agent, view.subscription.as_ref())?;
         let def = sub.as_ref().map(sub_def);
         if agent.harness == HarnessId::Pi
-            && let Some(reason) = def.as_ref().and_then(terrarium_adapter_pi::refusal)
+            && let Some(reason) = def
+                .as_ref()
+                .and_then(|d| terrarium_adapter_pi::start_refusal(d, agent.model.as_deref()))
         {
             return Err(SupervisorError::NotReady(format!(
                 "subscription `{}`: {reason}",

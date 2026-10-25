@@ -1,10 +1,12 @@
-//! The command-line surface of one Codex version, as data.
+//! The command-line surface of the pinned Codex version, as data.
 //!
-//! All version-specific names live in one table, [`CODEX_0_160`]. When a new
-//! Codex release changes a flag or a config key, add a new table and pick it
-//! in [`crate::CodexOptions`]. Every entry was checked by the Phase 0 spikes
-//! (`docs/compat.md`, "Codex 0.160.0") unless its doc comment says
-//! otherwise.
+//! All version-specific names live in one table, [`CODEX_PINNED`]. The pin
+//! and the range come from `harnesses.toml`, so the name has no version in
+//! it. When a new Codex release changes a flag or a config key, change the
+//! table (or add a second one and pick it in [`crate::CodexOptions`]).
+//! Every entry was checked by the Phase 0 spikes (`docs/compat.md`,
+//! "Codex 0.160.0") and again on 0.164.0 ("Codex 0.164.0") unless its doc
+//! comment says otherwise.
 
 /// The flags, config keys, and hooks of one Codex version range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,8 +66,9 @@ pub struct CodexFlags {
     pub hook_events: &'static [&'static str],
 }
 
-/// Codex 0.160.x. Measured on 0.160.0 (`docs/compat.md`).
-pub const CODEX_0_160: CodexFlags = CodexFlags {
+/// The pinned Codex (`harnesses.toml`). Measured on 0.160.0 and checked
+/// again on 0.164.0 (`docs/compat.md`).
+pub const CODEX_PINNED: CodexFlags = CodexFlags {
     verified: terrarium_core::harnesses::codex::VERSION,
     tested: terrarium_core::harnesses::codex::TESTED,
     resume: "resume",
@@ -107,6 +110,12 @@ pub const CODEX_0_160: CodexFlags = CodexFlags {
         "SubagentStop",
         "PreCompact",
         "PostCompact",
+        // Not registered: `PreModelRequest` (new in 0.164.0) and
+        // `Interrupt`. `PreModelRequest` runs before every model request,
+        // not once per turn, so a hook process would delay each request,
+        // and its payload and the effect of its output are not captured.
+        // Register it for logging only after a spike (`docs/compat.md`,
+        // "Codex 0.164.0").
     ],
 };
 
@@ -116,10 +125,11 @@ mod tests {
 
     #[test]
     fn the_table_has_every_hook_that_the_binary_names() {
-        assert_eq!(CODEX_0_160.hook_events.len(), 11);
-        assert!(!CODEX_0_160.hook_events.contains(&"Notification"));
-        let v = semver::Version::parse(CODEX_0_160.verified).expect("v");
-        let req = semver::VersionReq::parse(CODEX_0_160.tested).expect("req");
+        assert_eq!(CODEX_PINNED.hook_events.len(), 11);
+        assert!(!CODEX_PINNED.hook_events.contains(&"Notification"));
+        assert!(!CODEX_PINNED.hook_events.contains(&"PreModelRequest"));
+        let v = semver::Version::parse(CODEX_PINNED.verified).expect("v");
+        let req = semver::VersionReq::parse(CODEX_PINNED.tested).expect("req");
         assert!(req.matches(&v));
     }
 }

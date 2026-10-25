@@ -21,7 +21,8 @@
 //! |---|---|---|
 //! | `auth.json` | shared | the logins. pi writes it under a file lock (`proper-lockfile`) and refreshes OAuth tokens in it, so a refresh by one agent reaches all of them. |
 //! | `models.json` | shared | custom providers (base URL, models, API key). Read only for pi. |
-//! | `settings.json` | per agent | the operator's own defaults (provider, model, theme, packages) stay out, and a `/model` change in one agent does not change the default of the others. The first start copies the shared file; later starts keep the agent's copy. |
+//! | `settings.json` | per agent | the operator's own defaults (provider, model, theme, packages) stay out, and a `/model` change in one agent does not change the default of the others. The first start copies the shared file; later starts keep the agent's copy. Every start sets `lastChangelogVersion` to the pinned version ([`LAST_CHANGELOG_KEY`]), so pi 1.4's "What's new" changelog does not show. |
+//! | `mcp.json` | not loaded | `--no-mcp` (pi 1.4 has built-in MCP). |
 //! | `sessions/` | not used | `--session-dir` puts the sessions in the agent directory. In the sandbox every agent has the cwd `$HOME/work`, so the default directory (`sessions/--home-…-work--/`) would be one directory for all agents, and `pi --resume` would list the sessions of every agent. Session IDs do not collide (each agent gets new UUIDs), but pi has **no lock on a session**: two processes with one `--session-id` both start and both append (`docs/compat.md`). The supervisor must run one pi per agent. |
 //! | `extensions/`, `skills/`, `prompts/` | not loaded | `--no-extensions`, `--no-skills`, `--no-prompt-templates`. |
 //! | `AGENTS.md`, `SYSTEM.md`, `APPEND_SYSTEM.md` | not loaded | `--no-context-files`; `--system-prompt`/`--append-system-prompt` replace the discovered files. The operator's personal instructions stay out of agents. |
@@ -48,6 +49,11 @@ pub const EXTENSION: &str = include_str!("../ext/terrarium.ts");
 pub const EXTENSION_FILE: &str = "terrarium.ts";
 /// The settings file in the pi home.
 pub const SETTINGS_FILE: &str = "settings.json";
+/// The settings key of the last version whose changelog pi showed. pi
+/// shows the "What's new" entries of every newer version at the start,
+/// above the editor. The per-agent copy always holds the pinned version,
+/// so the changelog never shows (the shared file can name an older one).
+pub const LAST_CHANGELOG_KEY: &str = "lastChangelogVersion";
 /// The logins in the pi home. Shared.
 pub const AUTH_FILE: &str = "auth.json";
 /// The session directory in the agent's pi directory.
@@ -147,13 +153,19 @@ pub fn materialize(
     let ext = extension_path(agent);
     write_atomic(&ext, EXTENSION.as_bytes())?;
 
-    // settings.json: a copy of the shared file on the first start.
+    // settings.json: a copy of the shared file on the first start. Every
+    // start sets `lastChangelogVersion` to the pinned version.
     let own = dir.join(SETTINGS_FILE);
     let shared = home.join(SETTINGS_FILE);
-    if read_json(&own)?.is_none() {
-        let base = read_json(&shared)?.unwrap_or_else(|| Value::Object(Default::default()));
+    let current = read_json(&own)?;
+    let mut settings = match &current {
+        Some(v) => v.clone(),
+        None => read_json(&shared)?.unwrap_or_else(|| Value::Object(Default::default())),
+    };
+    settings[LAST_CHANGELOG_KEY] = Value::String(opts.flags.verified.to_owned());
+    if current.as_ref() != Some(&settings) {
         let bytes =
-            serde_json::to_vec_pretty(&base).map_err(|e| PiError::json("settings.json", e))?;
+            serde_json::to_vec_pretty(&settings).map_err(|e| PiError::json("settings.json", e))?;
         write_atomic(&own, &bytes)?;
     }
     // bwrap needs a mount point. Otherwise it makes an empty file and
@@ -231,15 +243,21 @@ mod tests {
         let own: Value =
             serde_json::from_slice(&fs::read(&overlays[0].source).expect("own")).expect("json");
         assert_eq!(own["defaultThinkingLevel"], "off");
+        assert_eq!(own[LAST_CHANGELOG_KEY], opts.flags.verified);
 
         // A restart keeps the agent's settings, writes the extension again,
         // and keeps the prompt.
-        fs::write(&overlays[0].source, r#"{"defaultModel":"x"}"#).expect("write");
+        fs::write(
+            &overlays[0].source,
+            r#"{"defaultModel":"x","lastChangelogVersion":"0.85.1"}"#,
+        )
+        .expect("write");
         fs::write(&ext, "tampered").expect("tamper");
         materialize(&opts, &agent, &home, None).expect("again");
         let own: Value =
             serde_json::from_slice(&fs::read(&overlays[0].source).expect("own")).expect("json");
         assert_eq!(own["defaultModel"], "x");
+        assert_eq!(own[LAST_CHANGELOG_KEY], opts.flags.verified);
         assert_eq!(fs::read_to_string(&ext).expect("ext"), EXTENSION);
         assert_eq!(
             fs::read_to_string(prompt_path(&agent)).expect("prompt"),

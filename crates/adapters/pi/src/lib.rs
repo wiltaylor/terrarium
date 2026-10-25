@@ -1,7 +1,8 @@
 //! Adapter for pi (PLAN §4, §7, §8, §16). Every fact here comes from the
-//! Phase 0 spikes in `docs/compat.md` ("pi 0.85.1") or from the adapter's
-//! own live check on 0.85.1; a doc comment says so where a fact is only
-//! read from `pi --help` or the installed source, or not tested.
+//! Phase 0 spikes in `docs/compat.md` ("pi 0.85.1"), from the adapter's
+//! own live check on 0.85.1, or from the 1.4.0 check ("pi 1.4.0"); a doc
+//! comment says so where a fact is only read from `pi --help` or the
+//! installed source, or not tested.
 //!
 //! - [`launch`]: the command line and env (`PiAdapter::launch_with`).
 //! - [`provider`]: subscription to `--provider`, and the API-key env var.
@@ -40,12 +41,12 @@ use terrarium_core::{
 };
 
 pub use error::PiError;
-pub use flags::{PI_0_85, PiFlags};
-pub use provider::{provider_for, refusal, required_env};
+pub use flags::{PI_PINNED, PiFlags};
+pub use provider::{provider_for, refusal, required_env, start_refusal};
 
 /// The pi versions this adapter accepts. Only [`PiFlags::verified`]
 /// (the pin in `harnesses.toml`) was measured.
-pub const TESTED: &str = PI_0_85.tested;
+pub const TESTED: &str = PI_PINNED.tested;
 
 /// How the rendered prompt reaches pi.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -86,7 +87,7 @@ pub struct PiOptions {
 impl Default for PiOptions {
     fn default() -> Self {
         Self {
-            flags: PI_0_85,
+            flags: PI_PINNED,
             program: HarnessId::Pi.program().to_owned(),
             agent_dir: PathBuf::from(HarnessId::Pi.auth_dir()),
             host_agent_dir: None,
@@ -273,10 +274,10 @@ mod tests {
     fn tested_range_covers_the_verified_version() {
         let a = PiAdapter::default();
         let req = a.tested_version();
-        assert!(req.matches(&Version::parse(PI_0_85.verified).expect("v")));
+        assert!(req.matches(&Version::parse(PI_PINNED.verified).expect("v")));
         // The pin and the range come from harnesses.toml.
-        assert_eq!(PI_0_85.verified, terrarium_core::harnesses::pi::VERSION);
-        assert_eq!(PI_0_85.tested, terrarium_core::harnesses::pi::TESTED);
+        assert_eq!(PI_PINNED.verified, terrarium_core::harnesses::pi::VERSION);
+        assert_eq!(PI_PINNED.tested, terrarium_core::harnesses::pi::TESTED);
         assert_eq!(
             req,
             VersionReq::parse(terrarium_core::harnesses::pi::TESTED).expect("req")
@@ -411,11 +412,13 @@ mod tests {
             .output()
             .expect("pi --help");
         let help = String::from_utf8_lossy(&out.stdout);
-        let f = PI_0_85;
+        let f = PI_PINNED;
         for flag in [
             f.provider,
             f.model,
             f.no_extensions,
+            f.no_mcp,
+            f.tui_mode.0,
             f.no_skills,
             f.no_prompt_templates,
             f.no_context_files,

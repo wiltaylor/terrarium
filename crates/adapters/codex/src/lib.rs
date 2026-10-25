@@ -44,12 +44,12 @@ use terrarium_core::{
 };
 
 pub use error::CodexError;
-pub use flags::{CODEX_0_160, CodexFlags};
+pub use flags::{CODEX_PINNED, CodexFlags};
 
 /// The Codex versions this adapter accepts. Only [`CodexFlags::verified`]
 /// (the pin in `harnesses.toml`, the one place for the version pin) was
 /// measured.
-pub const TESTED: &str = CODEX_0_160.tested;
+pub const TESTED: &str = CODEX_PINNED.tested;
 
 /// How the rendered prompt reaches Codex.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -89,7 +89,7 @@ pub struct CodexOptions {
 impl Default for CodexOptions {
     fn default() -> Self {
         Self {
-            flags: CODEX_0_160,
+            flags: CODEX_PINNED,
             program: HarnessId::Codex.program().to_owned(),
             codex_home: PathBuf::from(HarnessId::Codex.auth_dir()),
             host_codex_home: None,
@@ -278,13 +278,16 @@ mod tests {
     fn tested_range_covers_the_verified_version() {
         let a = CodexAdapter::default();
         let req = a.tested_version();
-        assert!(req.matches(&Version::parse(CODEX_0_160.verified).expect("v")));
+        assert!(req.matches(&Version::parse(CODEX_PINNED.verified).expect("v")));
         // The pin and the range come from harnesses.toml.
         assert_eq!(
-            CODEX_0_160.verified,
+            CODEX_PINNED.verified,
             terrarium_core::harnesses::codex::VERSION
         );
-        assert_eq!(CODEX_0_160.tested, terrarium_core::harnesses::codex::TESTED);
+        assert_eq!(
+            CODEX_PINNED.tested,
+            terrarium_core::harnesses::codex::TESTED
+        );
         assert_eq!(
             req,
             VersionReq::parse(terrarium_core::harnesses::codex::TESTED).expect("req")
@@ -339,7 +342,7 @@ mod tests {
             .output()
             .expect("run codex --help");
         let help = String::from_utf8_lossy(&out.stdout);
-        let f = CODEX_0_160;
+        let f = CODEX_PINNED;
         for flag in [
             f.no_daemon,
             f.yolo,
