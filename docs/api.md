@@ -1987,7 +1987,7 @@ a `target.<verb>` audit row with the same report.
 | Kind | `up` | `down` | `snapshot` / `restore` | `status` |
 |---|---|---|---|---|
 | `host`, `ssh` | no-op | no-op | `422 invalid` | `running` when the host agent is online, else `unknown` |
-| `docker` | `docker.inspect`; when absent, `docker.run -d --name <c> --label terrarium.target=<name> <image> sleep infinity` | `docker.stop`; an ephemeral target without `keep` (or `destroy: true`): `docker.rm -f -v` | `422 invalid` | `docker.inspect` |
+| `docker` | `docker.inspect`; when absent, `docker.run -d --init --name <c> --label terrarium.target=<name> <image> sleep infinity`; when stopped, `docker.start` (an ephemeral target with `image`: `docker.rm -f -v` and a new `docker.run`) | `docker.stop`; an ephemeral target without `keep` (or `destroy: true`): `docker.rm -f -v` | `422 invalid` | `docker.inspect` |
 | `vmlab` | `vmlab.up [machine]` | `vmlab.down [machine]`; ephemeral without `keep` (or `destroy: true`): `vmlab.destroy` | `vmlab.snapshot_take` / `vmlab.snapshot_restore` with `--vm machine` | `vmlab.status`, the row of `machine` |
 
 The container `<c>` is `container`, else `terrarium-<name>`. The snapshot
@@ -2027,7 +2027,9 @@ The input body: `data` is base64, at most 1 MiB of bytes (`413
 too_large` above). In a push, `data` is file bytes. `resize` is
 `{"rows", "cols"}`. `signal` is a name such as `INT`. `eof` closes stdin.
 `finish` is `{"bytes", "sha256"}` and ends a push. An input to a session
-that has ended is `409 conflict`.
+that has ended is `409 conflict`, except `eof` alone: it is a no-op with
+`"accepted": false`. A fast command can end before the client closes its
+stdin.
 
 The output answer:
 
@@ -2140,7 +2142,9 @@ up does not stop the start: the agent gets a `notification` event with the
 error. The supervisor calls `on_agent_stop` on a stop, on an exit that does
 not restart (also one that the daemon finds after its start), and when a
 start or a restart fails. A restart of the harness and a daemon shutdown
-leave the targets as they are.
+leave the targets as they are. Each of these verbs writes an audit row
+with the actor `system`: `target.up` with `"reason": "agent_start"`, and
+`target.destroy` with `"reason": "agent_stop"`.
 
 ## 18. Fleet
 

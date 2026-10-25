@@ -1,0 +1,4 @@
+lab "terrarium-test"
+
+  NAME KIND      STATUS   IP TEMPLATE/IMAGE
+  box  container starting -  alpine:3.22

@@ -6,7 +6,7 @@
 //! | Kind | Exec | Copy | Lifecycle |
 //! |---|---|---|---|
 //! | `host` | `exec` on the host agent | `cp_push` / `cp_pull` | no-op |
-//! | `docker` | `docker.exec` | `docker.exec` of `cat` with stdin / stdout | `docker.inspect`, `docker.run`, `docker.stop`, `docker.rm` |
+//! | `docker` | `docker.exec` | `docker.exec` of `cat` with stdin / stdout | `docker.inspect`, `docker.run`, `docker.start`, `docker.stop`, `docker.rm` |
 //! | `vmlab` | `vmlab.exec`, `vmlab.shell` | `cp_*` to a staging file in the lab dir, then `vmlab.cp` | `vmlab.status`, `up`, `down`, `destroy`, `snapshot_*` |
 //! | `ssh` | the system `ssh` | `ssh` of `cat` with stdin / stdout | no-op |
 //!
@@ -37,9 +37,9 @@ use terrarium_core::config::{TargetDef, TargetKind};
 use terrarium_core::protocol::CpDirection;
 use terrarium_core::protocol::LifecycleVerb;
 use terrarium_host::protocol::{
-    CpPull, CpPush, DaemonFrame, DockerExec, DockerInspect, DockerRm, DockerRun, DockerStop,
-    ExecRequest, PtySize, StreamTag, VmlabCp, VmlabExec, VmlabLifecycle, VmlabShell, VmlabSnapshot,
-    VmlabStatus, hex,
+    CpPull, CpPush, DaemonFrame, DockerExec, DockerInspect, DockerRm, DockerRun, DockerStart,
+    DockerStop, ExecRequest, PtySize, StreamTag, VmlabCp, VmlabExec, VmlabLifecycle, VmlabShell,
+    VmlabSnapshot, VmlabStatus, hex,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{Notify, mpsc};
@@ -1696,6 +1696,9 @@ async fn docker_run(state: &Shared, def: &TargetDef) -> ApiResult<()> {
             name: Some(name),
             detach: true,
             rm: false,
+            // tini as PID 1 ends `sleep infinity` on SIGTERM, so `down`
+            // does not wait for the stop grace.
+            init: true,
             env: BTreeMap::new(),
             volumes: Vec::new(),
             workdir: None,
@@ -1705,6 +1708,19 @@ async fn docker_run(state: &Shared, def: &TargetDef) -> ApiResult<()> {
             command: vec!["sleep".into(), "infinity".into()],
             pty: None,
             timeout_secs: Some(VERB_TIMEOUT),
+        })
+    })
+    .await?;
+    Ok(())
+}
+
+async fn docker_start(state: &Shared, def: &TargetDef) -> ApiResult<()> {
+    let container = container_name(def);
+    verb_ok(state, def, "docker.start", move |session| {
+        DaemonFrame::DockerStart(DockerStart {
+            session,
+            container,
+            timeout_secs: Some(120),
         })
     })
     .await?;
@@ -1802,14 +1818,16 @@ pub async fn lifecycle(
             match verb_kind {
                 V::Status => docker_state(state, def).await?,
                 V::Up => {
-                    let owned = def.ephemeral || def.container.is_none();
                     match docker_state(state, def).await?.as_str() {
                         "running" => {}
                         "absent" => docker_run(state, def).await?,
-                        "stopped" if owned && def.image.is_some() => {
+                        // An ephemeral target starts fresh from its image.
+                        "stopped" if def.ephemeral && def.image.is_some() => {
                             docker_rm(state, def).await?;
                             docker_run(state, def).await?;
                         }
+                        // A permanent target keeps its files over down and up.
+                        "stopped" => docker_start(state, def).await?,
                         s => {
                             return Err(ApiError::conflict(format!(
                                 "container `{}` is {s}; start it on the host (`docker start`)",
@@ -1946,14 +1964,40 @@ pub async fn ensure_up(state: &Shared, target: &str) -> ApiResult<Option<Value>>
     if !row.def.ephemeral {
         return Ok(None);
     }
-    lifecycle(
+    let out = lifecycle(
         state,
         &row.def,
         LifecycleVerb::Up,
         &LifecycleOpts::default(),
     )
-    .await
-    .map(Some)
+    .await?;
+    audit_system(state, &row, "target.up", "agent_start", &out).await?;
+    Ok(Some(out))
+}
+
+/// The audit row of a lifecycle verb that the daemon runs by itself (an
+/// ephemeral target on an agent start or stop). The API handler writes the
+/// row of a verb that a caller sends.
+async fn audit_system(
+    state: &Shared,
+    row: &TargetRow,
+    action: &str,
+    reason: &str,
+    out: &Value,
+) -> ApiResult<()> {
+    let mut detail = out.clone();
+    detail["reason"] = reason.into();
+    let (target, project, action) = (
+        row.def.name.clone(),
+        row.def.project.clone(),
+        action.to_owned(),
+    );
+    state
+        .db
+        .write("system", move |t| {
+            t.audit(&action, &target, project.as_deref(), detail)
+        })
+        .await
 }
 
 /// Remove an ephemeral target after its agent stops, unless `keep = true`
@@ -1968,14 +2012,15 @@ pub async fn maybe_down(state: &Shared, target: &str) -> ApiResult<Option<Value>
     if !row.def.ephemeral || row.def.keep {
         return Ok(None);
     }
-    lifecycle(
+    let out = lifecycle(
         state,
         &row.def,
         LifecycleVerb::Destroy,
         &LifecycleOpts::default(),
     )
-    .await
-    .map(Some)
+    .await?;
+    audit_system(state, &row, "target.destroy", "agent_stop", &out).await?;
+    Ok(Some(out))
 }
 
 /// [`ensure_up`] for every target in an agent's policy. Failures are

@@ -629,6 +629,61 @@ mod tests {
         assert_eq!(parse_snapshot_list("no snapshots for dc01\n"), json!([]));
     }
 
+    // Recorded live from vmlab 0.33.3-alpha against
+    // labs/terrarium-test (one idle container) on 2026-10-25.
+    const LIVE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/vmlab-0.33.3/");
+
+    fn live(name: &str) -> String {
+        std::fs::read_to_string(format!("{LIVE}{name}")).unwrap()
+    }
+
+    #[test]
+    fn parses_live_vmlab_0_33_output() {
+        // Narrow columns: vmlab sizes each column to its widest cell.
+        let v = parse_status(&live("status-v-running.txt"));
+        assert_eq!(v["lab"], "terrarium-test");
+        assert_eq!(v["running"], true);
+        let m = &v["machines"][0];
+        assert_eq!(v["machines"].as_array().unwrap().len(), 1);
+        assert_eq!(m["name"], "box");
+        assert_eq!(m["kind"], "container");
+        assert_eq!(m["status"], "running");
+        assert_eq!(m["state"], "running");
+        assert_eq!(m["ip"], Value::Null);
+        assert_eq!(m["template"], "alpine:3.22");
+        assert_eq!(m["detail"]["ready"], "yes");
+        assert_eq!(m["detail"]["health"], "-");
+        assert!(
+            m["detail"]["digest"]
+                .as_str()
+                .unwrap()
+                .starts_with("sha256:")
+        );
+
+        // `vmlab up` returns while a container is still `starting`.
+        let v = parse_status(&live("status-starting.txt"));
+        assert_eq!(v["machines"][0]["status"], "starting");
+        assert_eq!(v["machines"][0]["state"], "running");
+        assert_eq!(v["machines"][0]["template"], "alpine:3.22");
+
+        let v = parse_status(&live("status-not-running.txt"));
+        assert_eq!(v["lab"], "terrarium-test");
+        assert_eq!(v["running"], false);
+        assert_eq!(v["machines"], json!([]));
+
+        assert_eq!(
+            parse_snapshot_list(&live("snapshot-list.txt")),
+            json!([{"name": "clean", "kind": "online",
+                    "taken": "2026-10-25T09:16:04.854844022Z"}])
+        );
+        assert_eq!(
+            parse_snapshot_list(&live("snapshot-list-empty.txt")),
+            json!([])
+        );
+        let cap = parse_version(&live("version.txt"));
+        assert_eq!(cap.version.as_deref(), Some("0.33.3-alpha"));
+    }
+
     #[test]
     fn parses_version() {
         // Recorded from `vmlab --version`.

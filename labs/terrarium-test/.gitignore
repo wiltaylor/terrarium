@@ -1,0 +1,3 @@
+# vmlab state and the staging files of Terrarium vmlab copies.
+.vmlab/
+.terrarium-stage/

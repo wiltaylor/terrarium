@@ -69,9 +69,8 @@ must use TLS. Else an attacker on the path can read the token and replay it
   plaintext bind to a non-loopback address logs a warning that starts with
   `INSECURE`. Use this only behind a TLS reverse proxy, or for a host agent
   on the same machine.
-- The main router (`TERRARIUM_LISTEN`, port 8080) also serves
-  `/hosts/connect`. Put TLS in front of it too when a remote host agent
-  uses it.
+- The dashboard port (`TERRARIUM_LISTEN`, port 8080) does not serve
+  `/hosts/connect`: it answers `404`. The Unix socket serves it.
 
 `just host::cert <name> [more names...]` runs `terrarium-host cert` and
 writes a self-signed certificate (ECDSA P-256, made with rcgen) to
@@ -372,8 +371,9 @@ in the environment of the `docker` process.
 
 | Frame | Fields | Command |
 |---|---|---|
-| `docker.run` | `image`, `name`, `detach` (default true), `rm`, `env`, `volumes` [`{source, target, read_only}`], `workdir`, `network`, `user`, `labels`, `command`, `pty`, `timeout_secs` | `docker run -d [--rm] [--name N] [-e K]... [-v S:T[:ro]]... [-w W] [--network N] [-u U] [--label K=V]... IMAGE [COMMAND...]`. With `detach: false`: `-i`, and `-t` with a `pty`. |
+| `docker.run` | `image`, `name`, `detach` (default true), `rm`, `init`, `env`, `volumes` [`{source, target, read_only}`], `workdir`, `network`, `user`, `labels`, `command`, `pty`, `timeout_secs` | `docker run -d [--rm] [--init] [--name N] [-e K]... [-v S:T[:ro]]... [-w W] [--network N] [-u U] [--label K=V]... IMAGE [COMMAND...]`. With `detach: false`: `-i`, and `-t` with a `pty`. |
 | `docker.exec` | `container`, `cmd`, `args`, `cwd`, `env`, `user`, `pty`, `timeout_secs` | `docker exec -i [-t] [-w CWD] [-e K]... [-u U] CONTAINER CMD ARGS...` |
+| `docker.start` | `container` | `docker start CONTAINER`. The container keeps its files. |
 | `docker.stop` | `container`, `grace_secs` | `docker stop [-t G] CONTAINER` |
 | `docker.rm` | `container`, `force`, `volumes` | `docker rm [-f] [-v] CONTAINER` |
 | `docker.inspect` | `container` | `docker inspect --type container CONTAINER` |
@@ -749,7 +749,7 @@ Each item of the list is done:
 
 - [x] Serve `GET /hosts/connect` on the dial-in listener
   (`TERRARIUM_HOST_LISTEN`; default `0.0.0.0:8082` with TLS, `127.0.0.1:8082`
-  without; and also on the main router). Check the bearer token against the
+  without; and on the Unix socket, not on the dashboard port). Check the bearer token against the
   host registry before the upgrade. Answer `401` on a bad token.
   (`hosts::connect`, `hosts::HostListen`)
 - [x] TLS on the dial-in listener with `TERRARIUM_HOST_TLS_CERT` and
@@ -791,3 +791,148 @@ Each item of the list is done:
 | Push over a reconnect | Not resumed. The session ends with `interrupted` and the daemon sends again. Pulls and exec output resume. |
 | Liveness | JSON `ping`/`pong` both ways every `heartbeat_secs`. Dead after 3 silent intervals. |
 | TLS | rustls with ring on both sides: the daemon's listener with `TERRARIUM_HOST_TLS_CERT`/`_KEY`, and the host agent with the system roots, `ca_file`, or a pinned SHA-256. Static musl builds need no OpenSSL. `ws://` only to loopback unless `allow_insecure`. |
+
+## Verified live
+
+Date: 2026-10-25. The Docker stack ran the daemon. One host agent ran
+on the same machine, without systemd, as the user `wil`. Docker was
+29.8.0 and vmlab was 0.33.3-alpha.
+
+### Set-up
+
+1. `just host::cert localhost 127.0.0.1` wrote the certificate and the key
+   in 3 s. `.env` got `TERRARIUM_HOST_TLS_CERT` and `TERRARIUM_HOST_TLS_KEY`,
+   and `TERRARIUM_HOST_LISTEN` stayed `auto`. After `just up`, the daemon
+   log showed `host agent dial-in listening on TCP with TLS
+   addr=0.0.0.0:8082` and the SHA-256 of the certificate. `openssl
+   s_client` got TLSv1.3 with `TLS_AES_256_GCM_SHA384`. A `curl -k` without
+   a token got `401`.
+2. The config was `state/host-local/config.toml`: `daemon_url =
+   "wss://localhost:8082"`, the pin from `terrarium-host fingerprint`,
+   `token_file`, `name = "local"`, `max_sessions = 8`, and
+   `allowed_cwd_roots`. The roots must hold each vmlab lab directory,
+   because the lab, its `.terrarium-stage/`, and the `rm` of a staging
+   file are checked against them.
+3. `terrarium admin host new local --enrol | terrarium-host token-file
+   <token_file>` wrote the enrol token (mode 0600). `terrarium-host run`
+   connected in 8 ms and logged `enrolled: stored the long-lived host
+   token`. The file then held a `thk_` token, mode 0600. `GET /api/hosts`
+   showed `local` online, with `docker 29.8.0` and `vmlab 0.33.3-alpha`.
+4. `terrarium-host check --probe`: `TLS ok (TLSv1_3,
+   TLS13_AES_256_GCM_SHA384) in 1 ms`, and the server SHA-256 was the pin.
+
+### Docker target
+
+A global target `dbox`: `kind = "docker"`, `host = "local"`, `image =
+"debian:bookworm-slim"`.
+
+| Check | Result |
+|---|---|
+| `up` (the image was in the cache) | `running` in 0.44 s |
+| `exec -- sh -c 'echo hello from $(hostname); id'` | the output, uid 0, exit 0, in 0.08 s |
+| `exec -- sh -c 'exit 7'` | CLI exit 7 |
+| `exec -i` with stdin, `exec -t` | stdin reached `cat`; `tty` gave `/dev/pts/0` |
+| `exec` of 20 MB to stdout | 20000000 bytes in 0.31 s (the ack path) |
+| `exec --timeout 2 -- sleep 10` | CLI exit 137 |
+| `exec -- nosuchprog` | the Docker message, CLI exit 127 |
+| `cp` of 300000 bytes both ways | the same SHA-256 both ways, 0.14 s and 0.12 s |
+| `ephemeral = true`, `keep = false`, then `down` | `absent`, the container is removed |
+
+### vmlab target
+
+The lab is `labs/terrarium-test/vmlab.wcl`: one `container "box"` with
+`image = "alpine:3.22"`, `profile = "container"`, and `mode = :idle`. It
+has no NIC. It is the cheapest vmlab machine: no template, only a 3.6 MB
+image (the squashfs). The global target `vlab` has `kind = "vmlab"`,
+`lab` (the directory), `machine = "box"`, `ephemeral = true`, and
+`snapshot_before_task = true`.
+
+| Check | Result |
+|---|---|
+| `vmlab validate` | `ok: lab "terrarium-test" — 0 vm(s), 1 container(s), 0 segment(s)` |
+| `status` before `up` | `stopped` (vmlab printed `lab "terrarium-test": not running`) |
+| `up`, with the first pull of `alpine:3.22` | `running` in 4.1 s |
+| `exec -- uname -a` | `Linux box 6.12.113-0-virt ... x86_64 Linux` |
+| `exec -- sh -c 'id; echo err >&2; exit 5'` | stdout, stderr, CLI exit 5 |
+| `cp` in and out (11 bytes) | the same SHA-256, 0.25 s and 0.10 s |
+| `snapshot --snapshot clean` | 0.47 s; `vmlab snapshot list box` shows `clean online` |
+| `restore --snapshot clean` | 0.59 s; a file made after the snapshot was gone |
+| `down` (ephemeral: `vmlab destroy`) | `absent` in 0.25 s; `.vmlab/` is removed |
+
+What vmlab printed (each exit 0):
+
+```
+$ vmlab up
+pull: alpine:3.22
+pull: alpine:3.22 done
+lab "terrarium-test" is up                       (2.8 s with the image cached)
+$ vmlab down
+lab "terrarium-test" is down (clones retained)    (0.54 s)
+$ vmlab destroy
+lab "terrarium-test" destroyed                    (0.18 s)
+$ vmlab status -v
+lab "terrarium-test"
+
+  NAME KIND      STATUS  IP TEMPLATE/IMAGE
+  box  container running -  alpine:3.22
+      state=running ready=yes cached=yes health=- exit=- digest=sha256:dc92...
+```
+
+The real outputs are fixtures in
+`crates/terrarium-host/tests/fixtures/vmlab-0.33.3/`. The test
+`vmlab::tests::parses_live_vmlab_0_33_output` reads them. The parser
+needed no change.
+
+Facts about vmlab 0.33.3 that the sections above do not give:
+
+- `vmlab up` returns before a container is ready. Right after it,
+  `status` shows `starting` and `ready=no`. `vmlab exec` works at once
+  all the same.
+- vmlab sizes each table column to its widest cell, so the columns are
+  narrow (`NAME KIND      STATUS  IP TEMPLATE/IMAGE`). The parser reads
+  the header positions, so this works.
+- `vmlab destroy` on a running lab stops it and removes it in one step.
+  On a lab that does not exist, it exits 0.
+- `vmlab exec` into a container takes 5 to 16 ms. It can end before the
+  client sends `eof`; see the fix below.
+- `status` cannot tell a destroyed lab from a stopped one: both print
+  `not running`. So a `status` after an ephemeral `down` reports `stopped`,
+  while the `down` stored `absent`.
+
+### Through an agent
+
+Project `lab` (prefix `LAB`). The agent `tester` (Claude, haiku, prompt
+`default`, `policy.targets = ["dbox", "vlab"]`) started. The start ran
+`vmlab up` for `vlab` because it is ephemeral. In one turn, the agent ran
+`terrarium targets ls`, `terrarium exec dbox -- uname -a`, and
+`terrarium exec vlab -- uname -a` through the runner tunnel and the
+long-poll session endpoints. It replied with the outputs verbatim. The
+audit has two `target.exec` rows with the actor
+`agent:01M5S5Q8FXH5AA1JSJ84JD65TZ`. The agent `outsider`
+(`policy.targets = []`) got `target `dbox` is not in your policy.targets;
+ask a project admin to add it [forbidden]`, CLI exit 3, and no audit row.
+The stop of `tester` ran `vmlab destroy` for `vlab`.
+
+### Bugs found and fixed
+
+| Bug | Fix | Test |
+|---|---|---|
+| A permanent Docker target lost its files on `down` and `up`: `up` removed the stopped container and ran a new one. | The new verb `docker.start`. `up` starts a stopped container. Only an ephemeral target with `image` starts fresh. | `hosts::a_permanent_docker_target_restarts_its_container_on_up`, `docker::tests::other_verbs_golden` |
+| `down` of a Docker target took 10.2 s: `sleep infinity` as PID 1 ignores SIGTERM, so `docker stop` waited for the grace. | `docker.run` takes `init`; the daemon sets it (`--init`). `down` then took 0.24 s. | `docker::tests::run_golden`, `hosts::lifecycle_verbs_map_to_docker_and_vmlab` |
+| `terrarium exec vlab -- uname -a` failed one time in seven with `the session has ended; read its output for the end [conflict]`. The command ended before the CLI sent `eof`, and the daemon refused the late `eof`. | A late `eof` is a no-op (`"accepted": false`). Data after the end is still `409`. After the fix: 30 of 30 runs passed. | `hosts::exec_streams_output_and_the_exit_code` |
+| The `up` on an agent start and the `destroy` on an agent stop wrote no audit row. | `ensure_up` and `maybe_down` write `target.up` and `target.destroy` with the actor `system` and a `reason`. | `hosts::lifecycle_verbs_map_to_docker_and_vmlab` |
+
+The fixes were verified live on a second daemon outside Docker, with a
+second host agent. The stack image still has the old code until the next
+`just up`.
+
+### Open
+
+- `snapshot_before_task` is stored, but the daemon does not use it. No
+  snapshot is taken before a turn.
+- `terrarium agent start` printed `start: lab/tester is stopped`, the
+  status before the start ended.
+- In a PTY, `docker exec -t` sets `TERM=xterm` in the container. The
+  `TERM=xterm-256color` of the host agent goes to the `docker` process
+  only.
+- `vmlab shell` and `terrarium shell` were not tried by hand.

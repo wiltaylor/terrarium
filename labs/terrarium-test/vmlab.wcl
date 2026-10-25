@@ -1,0 +1,18 @@
+# The vmlab lab for the live test of Terrarium's `vmlab` target kind
+# (docs/host-protocol.md, "Verified live"). One OCI container in an idle
+# micro-VM: the cheapest machine vmlab has. It needs no template download,
+# only the image, and no network: exec and cp go over the agent channel.
+#
+# The Terrarium target: kind = "vmlab", host = "local",
+# lab = "<repo>/labs/terrarium-test", machine = "box".
+import <vmlab.wcl>
+
+lab "terrarium-test" {
+  container "box" {
+    image   = "alpine:3.22"
+    profile = "container"
+    # :idle boots the micro-VM and the agent, and runs no entrypoint, so
+    # the machine stays up for exec, cp, and snapshots.
+    mode    = :idle
+  }
+}

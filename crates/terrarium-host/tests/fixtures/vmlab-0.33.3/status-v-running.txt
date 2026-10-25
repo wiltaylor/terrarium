@@ -1,0 +1,5 @@
+lab "terrarium-test"
+
+  NAME KIND      STATUS  IP TEMPLATE/IMAGE
+  box  container running -  alpine:3.22
+      state=running ready=yes cached=yes health=- exit=- digest=sha256:dc92f017beea8e7f43263073d717f7bc011228c95d5312e440deb4d035bb4eec

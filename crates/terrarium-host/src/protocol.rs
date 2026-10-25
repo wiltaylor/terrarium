@@ -285,6 +285,10 @@ pub struct DockerRun {
     /// `--rm`.
     #[serde(default)]
     pub rm: bool,
+    /// `--init`: an init process as PID 1 that forwards signals, so that a
+    /// command such as `sleep infinity` stops at once on `docker stop`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub init: bool,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -322,6 +326,15 @@ pub struct DockerExec {
     pub user: Option<String>,
     #[serde(default)]
     pub pty: Option<PtySize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+}
+
+/// `docker start CONTAINER`: start a stopped container. Its files stay.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DockerStart {
+    pub session: SessionId,
+    pub container: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
 }
@@ -547,6 +560,8 @@ pub enum DaemonFrame {
     DockerRun(DockerRun),
     #[serde(rename = "docker.exec")]
     DockerExec(DockerExec),
+    #[serde(rename = "docker.start")]
+    DockerStart(DockerStart),
     #[serde(rename = "docker.stop")]
     DockerStop(DockerStop),
     #[serde(rename = "docker.rm")]
@@ -598,6 +613,7 @@ impl DaemonFrame {
             F::CpPull(r) => r.session,
             F::DockerRun(r) => r.session,
             F::DockerExec(r) => r.session,
+            F::DockerStart(r) => r.session,
             F::DockerStop(r) => r.session,
             F::DockerRm(r) => r.session,
             F::DockerInspect(r) => r.session,

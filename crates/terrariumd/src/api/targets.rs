@@ -488,14 +488,24 @@ async fn session_input(
             sha256: f.sha256,
         });
     }
+    let mut accepted = true;
     for c in controls {
+        // An `eof` that comes after the end is a no-op, not an error: a
+        // command can end before the client closes its stdin (a fast
+        // failure, or a command that reads no input). host-protocol.md
+        // lets the daemon ignore a late `eof` in the same way.
+        let eof = matches!(c, Control::Eof);
         if !s.control(c) {
+            if eof {
+                accepted = false;
+                continue;
+            }
             return Err(ApiError::conflict(
                 "the session has ended; read its output for the end",
             ));
         }
     }
-    Ok(Json(json!({"session_id": s.id, "accepted": true})))
+    Ok(Json(json!({"session_id": s.id, "accepted": accepted})))
 }
 
 #[derive(Debug, Deserialize)]

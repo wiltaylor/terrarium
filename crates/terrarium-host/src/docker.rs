@@ -11,8 +11,8 @@ use serde_json::{Value, json};
 
 use crate::config::PathPolicy;
 use crate::protocol::{
-    DockerExec, DockerInspect, DockerPs, DockerRm, DockerRun, DockerStop, DockerVolumeCreate,
-    DockerVolumeRm, TargetState, ToolCapability,
+    DockerExec, DockerInspect, DockerPs, DockerRm, DockerRun, DockerStart, DockerStop,
+    DockerVolumeCreate, DockerVolumeRm, TargetState, ToolCapability,
 };
 use crate::session::ExecPlan;
 use crate::verb::{BuildError, ResultParser, VerbPlan, env_key, ident, secs};
@@ -73,6 +73,9 @@ pub fn plan_run(req: &DockerRun, bin: &str, policy: &PathPolicy) -> Result<VerbP
     }
     if req.rm {
         a.push(s("--rm"));
+    }
+    if req.init {
+        a.push(s("--init"));
     }
     if let Some(name) = &req.name {
         a.push(s("--name"));
@@ -153,6 +156,11 @@ pub fn plan_exec(req: &DockerExec, bin: &str) -> Result<VerbPlan, BuildError> {
     exec.env = env;
     exec.pty = req.pty;
     Ok(VerbPlan::plain(exec))
+}
+
+pub fn plan_start(req: &DockerStart, bin: &str) -> Result<VerbPlan, BuildError> {
+    let a = vec![s("start"), ident("container", &req.container)?.to_owned()];
+    Ok(VerbPlan::plain(base(bin, a, req.timeout_secs)))
 }
 
 pub fn plan_stop(req: &DockerStop, bin: &str) -> Result<VerbPlan, BuildError> {
@@ -331,6 +339,7 @@ mod tests {
         let mut r = run_req();
         r.name = Some("t-buildbox".into());
         r.rm = true;
+        r.init = true;
         r.env = BTreeMap::from([("TOKEN".into(), "secret".into())]);
         r.volumes = vec![
             VolumeMount {
@@ -352,7 +361,7 @@ mod tests {
         let plan = plan_run(&r, "docker", &PathPolicy::default()).unwrap();
         assert_eq!(
             plan.exec.args.join(" "),
-            "run -d --rm --name t-buildbox -e TOKEN -v /srv/work:/work -v cache:/cache:ro \
+            "run -d --rm --init --name t-buildbox -e TOKEN -v /srv/work:/work -v cache:/cache:ro \
              -w /work --network lab -u 1000:1000 --label terrarium.target=buildbox \
              alpine:3 sleep infinity"
         );
@@ -407,6 +416,15 @@ mod tests {
             plan_stop(&stop, "docker").unwrap().exec.args,
             ["stop", "-t", "5", "c1"]
         );
+        let start: DockerStart =
+            serde_json::from_value(json!({"session":1,"container":"c1"})).unwrap();
+        assert_eq!(
+            plan_start(&start, "docker").unwrap().exec.args,
+            ["start", "c1"]
+        );
+        let bad: DockerStart =
+            serde_json::from_value(json!({"session":1,"container":"-x"})).unwrap();
+        assert!(plan_start(&bad, "docker").is_err());
         let rm: DockerRm = serde_json::from_value(
             json!({"session":1,"container":"c1","force":true,"volumes":true}),
         )

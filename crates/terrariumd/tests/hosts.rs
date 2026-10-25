@@ -114,8 +114,10 @@ fn fake_tool(tool: &str, dir: &Path) -> String {
     let body = match tool {
         "docker" => format!(
             r#"case "$1" in
-  inspect) if [ -f '{s}' ]; then echo '[{{"Id":"abc","Name":"/terrarium-dbox","State":{{"Status":"running","Running":true}}}}]'; else echo '[]'; echo 'Error: No such object' >&2; exit 1; fi ;;
-  run) touch '{s}'; echo abc123 ;;
+  inspect) if [ -f '{s}' ]; then st=$(cat '{s}'); echo "[{{\"Id\":\"abc\",\"Name\":\"/terrarium-dbox\",\"State\":{{\"Status\":\"$st\"}}}}]"; else echo '[]'; echo 'Error: No such object' >&2; exit 1; fi ;;
+  run) echo running > '{s}'; echo abc123 ;;
+  start) echo running > '{s}'; echo "$2" ;;
+  stop) echo exited > '{s}'; echo "$4" ;;
   rm) rm -f '{s}' ;;
 esac"#,
             s = state.display()
@@ -265,6 +267,23 @@ async fn exec_streams_output_and_the_exit_code() {
     let d = drain(&lab.td, "box", &sid).await;
     assert_eq!(d.stdout.len(), 3_000_000);
     assert_eq!(d.end["code"], 0);
+    // After the end, an `eof` is a no-op (the CLI closes stdin after the
+    // open, and a fast command can end first), but data is a 409.
+    let r = lab
+        .td
+        .post(
+            &format!("/api/targets/box/sessions/{sid}/input"),
+            json!({"eof": true}),
+        )
+        .await;
+    assert_eq!(r.ok()["accepted"], false);
+    lab.td
+        .post(
+            &format!("/api/targets/box/sessions/{sid}/input"),
+            json!({"data": "aGk="}),
+        )
+        .await
+        .err(409, "conflict");
     // An unknown session is a 404.
     lab.td
         .get("/api/targets/box/sessions/nope/output")
@@ -665,17 +684,36 @@ async fn lifecycle_verbs_map_to_docker_and_vmlab() {
         lab.td.get("/api/targets/dbox").await.ok()["state"],
         "running"
     );
+    // The daemon's own verb on an agent start leaves an audit row too.
+    let a = lab.td.get("/api/audit?action=target.up").await;
+    let a = a.ok();
+    let row = a.as_array().unwrap().last().unwrap();
+    assert_eq!(row["actor"], "system", "{row}");
+    assert_eq!(row["target"], "dbox");
+    assert_eq!(row["detail"]["reason"], "agent_start");
     let r = lab.td.post_empty("/api/targets/dbox/up").await;
     assert_eq!(r.ok()["state"], "running");
     let r = lab.td.post_empty("/api/targets/dbox/down").await;
     assert_eq!(r.ok()["state"], "absent", "ephemeral: down removes it");
+    // maybe_down (an agent stop) removes it and writes target.destroy.
+    lab.td.post_empty("/api/targets/dbox/up").await.ok();
+    let down = terrariumd::executor::maybe_down(&lab.state(), "dbox")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(down["state"], "absent");
+    let a = lab.td.get("/api/audit?action=target.destroy").await;
+    let a = a.ok();
+    let row = a.as_array().unwrap().last().unwrap();
+    assert_eq!(row["actor"], "system", "{row}");
+    assert_eq!(row["detail"]["reason"], "agent_stop");
     lab.td
         .post_empty("/api/targets/dbox/snapshot")
         .await
         .err(422, "invalid");
     let log = lab.log();
     assert!(
-        log.contains("docker run -d --name terrarium-dbox --label terrarium.target=dbox alpine:3 sleep infinity"),
+        log.contains("docker run -d --init --name terrarium-dbox --label terrarium.target=dbox alpine:3 sleep infinity"),
         "{log}"
     );
     assert!(log.contains("docker rm -f -v terrarium-dbox"), "{log}");
@@ -737,6 +775,64 @@ async fn lifecycle_verbs_map_to_docker_and_vmlab() {
     );
     let audit = lab.td.get("/api/audit?action=target.up").await;
     assert!(audit.ok().as_array().unwrap().len() >= 2);
+}
+
+/// A permanent Docker target keeps its container over `down` and `up`:
+/// `down` stops it, and `up` starts the same container again (`docker
+/// start`), so the files in it stay. An ephemeral target starts fresh.
+#[tokio::test]
+async fn a_permanent_docker_target_restarts_its_container_on_up() {
+    let lab = Lab::start().await;
+    let _h = lab.host("lab1").await;
+    lab.target(json!({"name": "dbox", "kind": "docker", "host": "lab1",
+                      "image": "alpine:3"}))
+        .await;
+    assert_eq!(
+        lab.td.post_empty("/api/targets/dbox/up").await.ok()["state"],
+        "running"
+    );
+    assert_eq!(
+        lab.td.post_empty("/api/targets/dbox/down").await.ok()["state"],
+        "stopped"
+    );
+    assert_eq!(
+        lab.td.post_empty("/api/targets/dbox/status").await.ok()["state"],
+        "stopped"
+    );
+    assert_eq!(
+        lab.td.post_empty("/api/targets/dbox/up").await.ok()["state"],
+        "running"
+    );
+    let log = lab.log();
+    assert!(log.contains("docker stop -t 10 terrarium-dbox"), "{log}");
+    assert!(log.contains("docker start terrarium-dbox"), "{log}");
+    assert_eq!(
+        log.matches("docker run ").count(),
+        1,
+        "one run only:\n{log}"
+    );
+    assert!(!log.contains("docker rm"), "{log}");
+
+    // The same target as ephemeral with keep: down stops, up makes a new one.
+    let r = lab
+        .td
+        .patch(
+            "/api/targets/dbox",
+            json!({"ephemeral": true, "keep": true}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(
+        lab.td.post_empty("/api/targets/dbox/down").await.ok()["state"],
+        "stopped"
+    );
+    assert_eq!(
+        lab.td.post_empty("/api/targets/dbox/up").await.ok()["state"],
+        "running"
+    );
+    let log = lab.log();
+    assert!(log.contains("docker rm -f -v terrarium-dbox"), "{log}");
+    assert_eq!(log.matches("docker run ").count(), 2, "{log}");
 }
 
 const FILE_TARGET: &str = "kind = \"ssh\"\naddress = \"build@host\"\nproject = \"terra\"\n";

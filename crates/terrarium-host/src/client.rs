@@ -633,6 +633,11 @@ impl Client {
                 need(docker_ok, "docker").and_then(|_| docker::plan_exec(&r, db)),
                 tx,
             ),
+            F::DockerStart(r) => self.start(
+                r.session,
+                need(docker_ok, "docker").and_then(|_| docker::plan_start(&r, db)),
+                tx,
+            ),
             F::DockerStop(r) => self.start(
                 r.session,
                 need(docker_ok, "docker").and_then(|_| docker::plan_stop(&r, db)),
