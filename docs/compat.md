@@ -374,11 +374,37 @@ Auto memory: the adapter now passes `autoMemoryEnabled: false` in the `--setting
 
 Per-agent overlays after this spike: `.claude.json`, `sessions/`, `history.jsonl`, `backups/`, `projects/<cwd>/memory/`. Shared: `.credentials.json`, transcripts, `session-env/`, `file-history/`, `todos/`, caches. Not tested: an OAuth token refresh with two agents, real writes to auto memory, more than two agents, Docker.
 
+Per-agent overlays since 2026-10-25 (see "Per-agent session files" below): `.claude.json`, `sessions/`, `history.jsonl`, `backups/`, `projects/<cwd>/` (the transcripts, the subagent transcripts, and `memory/`), `file-history/`, `todos/`, `session-env/`. Shared: `.credentials.json`, `shell-snapshots/`, `security_warnings_state_<uuid>.json`, `paste-cache/`, caches. The old `harness/claude/memory/` moves to `harness/claude/projects/<cwd>/memory/` at the next start.
+
 ### Facts from the Docker smoke tests (2026-10-25)
 
 - Claude: `/exit` makes one small model call (about 5 tokens) after `SessionEnd`.
-- Claude: all agents share `projects/-home-agent-work/`, so an agent can read the transcripts of its peers. Accepted by design.
+- Claude: all agents share `projects/-home-agent-work/`, so an agent can read the transcripts of its peers. Codex (`sessions/`) and Copilot (`session-state/`) are the same. The live cross-harness run (2026-10-25) showed that this crosses projects too. Fixed: see "Per-agent session files" below.
 - bwrap leaves empty mount-point stubs in the shared homes (`config/copilot`, `config/codex`) for the per-agent overlays.
+
+### Per-agent session files (2026-10-25)
+
+Each agent's session files are now read-write overlays from its own `harness/<harness>/` dir, bound over the session area of the shared home. No agent sees the transcripts of another agent, in its project or in another project. The shared home keeps the login, the settings, and the caches.
+
+| Harness | Per-agent overlays (in `harness/<harness>/`, bound at the same path in the home) | How a resume finds the session |
+|---|---|---|
+| Claude Code | `projects/<encoded cwd>/`, `file-history/`, `todos/`, `session-env/` | `--resume <uuid>` reads `projects/<encoded cwd>/<uuid>.jsonl` ("Session file" above). It searches the project dirs of the home ("Resume from another cwd"); in the sandbox the cwd dir is the agent's own. Claude Code keeps no other index. |
+| Codex | `sessions/`, `session_index.jsonl`, `shell_snapshots/`, and a SQLite home `harness/codex/sqlite/` (bound over itself; `-c sqlite_home="<dir>"`) | `codex resume <id>` looks the ID up in the `threads` table of `state_5.sqlite` (`rollout_path`), else in `sessions/`. A new SQLite home backfills `threads` from `$CODEX_HOME/sessions/` at the start (verified: a copied rollout got a `threads` row and a `backfill_state` of `complete`, no model turn). Both are the agent's own. `session_index.jsonl` (the thread names) is needed only for a resume by name and for the picker. |
+| Copilot CLI | `session-state/`, `session-store.db`, `session-store.db-wal`, `session-store.db-shm` | `--resume <id>` reads `session-state/<id>/` ("Session file" in the Copilot section). The daemon finds the ID in `harness/copilot/session-id` and checks `harness/copilot/session-state/<id>/`. |
+| pi | none new: `sessions/` was per agent already | `--session <id>` in the agent's own `sessions/` |
+
+Facts behind the choice:
+
+- Codex `state_5.sqlite` `threads` holds the `title` and the `first_user_message` of every session, and `thread_history_1.sqlite` `thread_items` holds every item of every turn, for all agents. A per-agent `sessions/` alone does not close the gap. `-c sqlite_home="<dir>"` is accepted with `--strict-config` on 0.160.0 and puts all six SQLite databases (`state_5`, `logs_2`, `memories_1`, `goals_1`, `queue_1`, and later `thread_history_1`) in that directory; `CODEX_HOME` gets none (an unauthenticated start, no model turn). The env var `CODEX_SQLITE_HOME` also exists; the config key wins over it.
+- Codex `shell_snapshots/<id>.<ns>.sh` holds the exported env of the agent's shell (`declare -x`), with `TERRARIUM_AGENT` and any API key of the launch env.
+- Copilot `session-store.db` has a `turns` table with the user message and the reply of every turn of every session, and Copilot has a `session_store_sql` tool ("Querying past sessions") that reads it. Its path is not configurable (no env var found in `cli-main.js` 1.0.102), so the three files are file binds. SQLite on a file bind: the close cannot delete the `-wal` file (EBUSY), SQLite ignores that, and the next open reads the data. Verified in `bwrap` with Python `sqlite3` and with `node:sqlite` (Node 26), two opens each. A Copilot start on these binds is not tested yet.
+- Codex `session_index.jsonl` is appended to (one line per name, the newest wins). A rewrite by rename would fail with EBUSY on the file bind; the binary logs such a failure as "failed to index thread name". Not tested with a real rename of a thread.
+
+Migration: nothing moves. The transcripts from before the change stay in the shared home, where the binds hide them from every agent. An agent that resumes a session from before the change does not find it in its own dir. Codex and Copilot exit at once for a missing ID ("No saved session found with ID", "No session, task, or name matched"); for Claude Code this is not tested. The supervisor then starts a new session with the recap turn (`new_session: "resume_failed"`). Not tested with a real resume.
+
+The usage collector reads only the agent's own session dir in the sandbox (`docs/security-review.md`, F12). With sandbox mode `none`, no overlay is bound; the harness writes to the shared home, and the collector allows it there.
+
+Not tested: a real resume of each harness on the new binds, a Copilot start with the `session-store.db` binds, and a Codex thread rename on the `session_index.jsonl` bind.
 
 ## Changes to the plan
 

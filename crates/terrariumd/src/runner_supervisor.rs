@@ -1644,6 +1644,11 @@ impl RunnerSupervisor {
                 let s = |k: &str| ev.data.get(k).and_then(Value::as_str).map(str::to_owned);
                 match ev.kind.as_str() {
                     "mail" => {
+                        // The loop guard held the message (PLAN §12): it is
+                        // in the inbox, but it types no pointer.
+                        if ev.data.get("held").and_then(Value::as_bool) == Some(true) {
+                            continue;
+                        }
                         let (Some(message_id), Some(thread)) = (s("message_id"), s("thread_id"))
                         else {
                             continue;
@@ -2430,6 +2435,108 @@ impl Supervisor for RunnerSupervisor {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    /// The isolation gap of the cross-harness run: each agent's session
+    /// files (transcripts, session index, session store) come from its own
+    /// harness dir. The sandbox binds them read-write over the session
+    /// area of the shared home, after the bind of the home, so no agent
+    /// sees the session files of another agent. No bind puts the shared
+    /// session area at that path.
+    #[tokio::test]
+    async fn the_sandbox_binds_the_agent_session_dirs_over_the_shared_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let homes: HashMap<HarnessId, PathBuf> =
+            [HarnessId::Claude, HarnessId::Codex, HarnessId::Copilot]
+                .into_iter()
+                .map(|h| (h, tmp.path().join("auth").join(h.to_string())))
+                .collect();
+        for h in homes.values() {
+            std::fs::create_dir_all(h).unwrap();
+        }
+        let sandbox = SandboxConfig {
+            bwrap: PathBuf::from("/usr/bin/bwrap"),
+            cli: Some(PathBuf::from("/usr/local/bin/terrarium")),
+            ..SandboxConfig::default()
+        };
+        let sup = RunnerSupervisor::new(RunnerSupervisorConfig::new(
+            state.clone(),
+            tmp.path().join("run"),
+            tmp.path().join("prompts"),
+            sandbox,
+            homes.clone(),
+        ));
+        let cases: [(HarnessId, &[&str]); 3] = [
+            (
+                HarnessId::Claude,
+                &[
+                    "projects/-home-agent-work",
+                    "file-history",
+                    "todos",
+                    "session-env",
+                ],
+            ),
+            (
+                HarnessId::Codex,
+                &["sessions", "session_index.jsonl", "shell_snapshots"],
+            ),
+            (
+                HarnessId::Copilot,
+                &[
+                    "session-state",
+                    "session-store.db",
+                    "session-store.db-wal",
+                    "session-store.db-shm",
+                ],
+            ),
+        ];
+        for (harness, areas) in cases {
+            let def: terrarium_core::config::AgentDef = serde_json::from_value(serde_json::json!({
+                "name": format!("a-{harness}"), "project": "p", "harness": harness.to_string()
+            }))
+            .unwrap();
+            let agent = Agent::from_def(&def, &state);
+            let spec = sup.launch_spec(&agent, None).await.unwrap();
+            let a = &spec.args;
+            let binds: Vec<(usize, &str, &Path, &Path)> = a
+                .iter()
+                .enumerate()
+                .filter(|(_, f)| f.as_str() == "--bind" || f.as_str() == "--ro-bind")
+                .map(|(i, f)| (i, f.as_str(), Path::new(&a[i + 1]), Path::new(&a[i + 2])))
+                .collect();
+            let shared = &homes[&harness];
+            let inside = Path::new(sandbox::SANDBOX_HOME).join(sandbox::home_rel(harness));
+            let home_bind = binds
+                .iter()
+                .find(|b| b.2 == shared.as_path() && b.3 == inside.as_path())
+                .unwrap_or_else(|| panic!("{harness}: no bind of the shared home: {a:?}"));
+            let own = terrarium_runner::harness_dir(&state, agent.id).join(harness.to_string());
+            for area in areas {
+                let target = inside.join(area);
+                let hits: Vec<_> = binds.iter().filter(|b| b.3 == target).collect();
+                assert_eq!(hits.len(), 1, "{harness} {area}: {a:?}");
+                let (i, flag, source, _) = *hits[0];
+                assert_eq!(flag, "--bind", "{harness} {area}");
+                assert_eq!(source, own.join(area), "{harness} {area}");
+                assert!(i > home_bind.0, "{harness} {area}: bound before the home");
+                assert!(
+                    !binds.iter().any(|b| b.2 == shared.join(area)),
+                    "{harness} {area}: the shared one is bound"
+                );
+            }
+            if harness == HarnessId::Codex {
+                let sqlite = own.join("sqlite");
+                let want = format!("sqlite_home=\"{}\"", sqlite.display());
+                assert!(a.contains(&want), "{a:?}");
+                assert!(
+                    binds
+                        .iter()
+                        .any(|b| b.1 == "--bind" && b.2 == sqlite && b.3 == sqlite),
+                    "{a:?}"
+                );
+            }
+        }
+    }
 
     /// An old agent dir with the files at the top, as before the split.
     fn legacy_dir(state: &Path) -> PathBuf {

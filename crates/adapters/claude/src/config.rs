@@ -2,7 +2,8 @@
 //! (PLAN §8 and §11, the overlay trick).
 //!
 //! All agents share one Claude home (`/auth/claude`) for the login and the
-//! session files. Claude Code also keeps its state file `.claude.json` in
+//! caches. The session files are per agent (see the table below). Claude
+//! Code also keeps its state file `.claude.json` in
 //! that home (with `CLAUDE_CONFIG_DIR` set; without it, the file goes to
 //! `$HOME/.claude.json`, outside the home). Each agent gets its own copy of
 //! that file, for two reasons:
@@ -23,7 +24,10 @@
 //! | `claude/sessions/` | bound over `$CLAUDE_CONFIG_DIR/sessions/` (a directory) |
 //! | `claude/history.jsonl` | bound over `$CLAUDE_CONFIG_DIR/history.jsonl` |
 //! | `claude/backups/` | bound over `$CLAUDE_CONFIG_DIR/backups/` |
-//! | `claude/memory/` | bound over `$CLAUDE_CONFIG_DIR/projects/<cwd>/memory/` |
+//! | `claude/projects/<cwd>/` | bound over `$CLAUDE_CONFIG_DIR/projects/<cwd>/` (the transcripts, and `memory/`) |
+//! | `claude/file-history/` | bound over `$CLAUDE_CONFIG_DIR/file-history/` |
+//! | `claude/todos/` | bound over `$CLAUDE_CONFIG_DIR/todos/` |
+//! | `claude/session-env/` | bound over `$CLAUDE_CONFIG_DIR/session-env/` |
 //!
 //! # What Claude Code writes into its home, and where it goes
 //!
@@ -39,9 +43,11 @@
 //! | `sessions/` | per-agent | `sessions/<pid>.json` and `<pid>.<hash>.key`: pid 2 in every sandbox. |
 //! | `history.jsonl` | per-agent | the prompt history (the up-arrow list), keyed by cwd. Shared, each agent would see the typed turns (mail text) of every other agent and of the operator. |
 //! | `backups/` | per-agent | `.claude.json.backup.<ms>`: a copy of the agent's own `.claude.json` at each start. Claude Code restores from it after a broken state file, so a shared directory could give one agent another agent's state. |
-//! | `projects/<cwd>/memory/` | per-agent | Claude Code's auto memory (`MEMORY.md`) for the cwd. One cwd for all agents means one memory for all agents: a note that one agent writes goes into the prompt of the next. Terrarium has its own memory (PLAN §14). |
-//! | `projects/<cwd>/<uuid>.jsonl` | shared | the transcripts, one file per session UUID: no collision. `--resume` reads them, and the daemon's usage collector reads them through the shared home. An agent can read the transcripts of its peers. |
-//! | `session-env/<uuid>/`, `file-history/<uuid>/`, `todos/<uuid>-*.json`, `security_warnings_state_<uuid>.json` | shared | keyed by the session UUID. |
+//! | `projects/<cwd>/<uuid>.jsonl` (and `<uuid>/` for subagents) | per-agent | the transcripts. One file per session UUID does not collide, but a shared directory lets each agent read, and write into, the transcripts of every other agent in every project (a path for prompt injection). `--resume <uuid>` finds the file in the agent's own directory. The daemon's usage collector reads it from the agent's harness dir. |
+//! | `projects/<cwd>/memory/` | per-agent (inside the directory above) | Claude Code's auto memory (`MEMORY.md`) for the cwd. One cwd for all agents means one memory for all agents: a note that one agent writes goes into the prompt of the next. Terrarium has its own memory (PLAN §14). An old `claude/memory/` moves into the project directory at the next start. |
+//! | `file-history/<uuid>/` | per-agent | copies of the files that the agent edited (for the rewind). Shared, an agent could read the workspace files of other agents. |
+//! | `todos/<uuid>-*.json`, `session-env/<uuid>/` | per-agent | keyed by the session UUID; the todo lists hold turn text. |
+//! | `security_warnings_state_<uuid>.json` | shared | keyed by the session UUID; a file in the home root, so a directory bind cannot cover it. |
 //! | `shell-snapshots/snapshot-<shell>-<ms>-<random>.sh` | shared | unique names. They hold the sandbox shell setup, which is the same for every agent. |
 //! | `debug/` | shared | only with `--debug`. `debug/latest` is a symlink that the last writer wins; harmless. |
 //! | `cache/`, `statsig/`, `plugins/`, `paste-cache/`, `.last-cleanup` | shared | caches of public data (model catalog, change log, feature flags) and content-addressed pastes. |
@@ -67,6 +73,11 @@ pub const HISTORY_FILE: &str = "history.jsonl";
 pub const BACKUPS_DIR: &str = "backups";
 /// The auto-memory directory in a Claude project directory.
 pub const MEMORY_DIR: &str = "memory";
+/// The project directories (transcripts) in the Claude home.
+pub const PROJECTS_DIR: &str = "projects";
+/// The per-session directories in the Claude home that hold turn data,
+/// each bound per agent (see the table at the top).
+pub const SESSION_DIRS: &[&str] = &["file-history", "todos", "session-env"];
 /// The rendered prompt in the agent directory (PLAN §11).
 pub const PROMPT_FILE: &str = "prompt.md";
 
@@ -91,6 +102,14 @@ pub const HARNESS_DIR: &str = "harness";
 /// `/state/agents/<ulid>/claude`.
 pub fn claude_dir(agent: &Agent) -> PathBuf {
     agent_dir(agent).join("claude")
+}
+
+/// The agent's own project directory for `cwd` (the daemon's view):
+/// `claude/projects/<encoded cwd>/`. The sandbox binds it over
+/// `$CLAUDE_CONFIG_DIR/projects/<encoded cwd>/`, so the layout under
+/// [`claude_dir`] is the layout of a Claude home.
+pub fn own_project_dir(agent: &Agent, cwd: &Path) -> PathBuf {
+    session::project_dir(&claude_dir(agent), cwd)
 }
 
 /// The rendered prompt file of the agent.
@@ -235,19 +254,40 @@ pub fn materialize(
         &home.join(BACKUPS_DIR),
         opts.config_dir.join(BACKUPS_DIR),
     )?);
-    // The auto memory of the one cwd that all agents share. The bind goes
-    // on top of the shared `projects/` tree, so the transcripts next to it
-    // stay shared.
+    // The project directory of the one cwd that all agents share: the
+    // transcripts and the auto memory. Per agent, so no agent reads (or
+    // writes into) the transcripts of another agent.
     let cwd = opts.harness_cwd(agent);
-    let memory = Path::new("projects")
-        .join(session::encode_cwd(&cwd))
-        .join(MEMORY_DIR);
+    let project = Path::new(PROJECTS_DIR).join(session::encode_cwd(&cwd));
+    let own_project = own_project_dir(agent, &cwd);
+    migrate_memory(&dir.join(MEMORY_DIR), &own_project.join(MEMORY_DIR))?;
     overlays.push(dir_overlay(
-        &dir.join(MEMORY_DIR),
-        &home.join(&memory),
-        opts.config_dir.join(&memory),
+        &own_project,
+        &home.join(&project),
+        opts.config_dir.join(&project),
     )?);
+    // The per-session data next to the transcripts.
+    for name in SESSION_DIRS {
+        overlays.push(dir_overlay(
+            &dir.join(name),
+            &home.join(name),
+            opts.config_dir.join(name),
+        )?);
+    }
     Ok(overlays)
+}
+
+/// Move the auto memory of an older layout (`claude/memory/`, bound over
+/// `projects/<cwd>/memory/`) into the per-agent project directory. A
+/// memory that is there already wins; the old directory then stays.
+fn migrate_memory(old: &Path, new: &Path) -> Result<()> {
+    if !old.is_dir() || new.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = new.parent() {
+        fs::create_dir_all(parent).map_err(|e| ClaudeError::io(parent, e))?;
+    }
+    fs::rename(old, new).map_err(|e| ClaudeError::io(old, e))
 }
 
 /// A read-write per-agent directory over `target`. Both the agent's
@@ -381,7 +421,10 @@ mod tests {
             ("sessions", "sessions"),
             ("history.jsonl", "history.jsonl"),
             ("backups", "backups"),
-            ("memory", "projects/-home-agent-work/memory"),
+            ("projects/-home-agent-work", "projects/-home-agent-work"),
+            ("file-history", "file-history"),
+            ("todos", "todos"),
+            ("session-env", "session-env"),
         ]
         .iter()
         .map(|(s, t)| (own.join(s), Path::new("/auth/claude").join(t)))
@@ -401,14 +444,69 @@ mod tests {
         assert!(own.join("history.jsonl").is_file());
         assert_eq!(fs::read(own.join("history.jsonl")).expect("history"), b"");
 
-        // Credentials and transcripts stay shared: no overlay covers them.
-        for shared in [".credentials.json", "projects/-home-agent-work/x.jsonl"] {
+        // The credentials and the caches stay shared: no overlay covers them.
+        for shared in [
+            ".credentials.json",
+            "shell-snapshots/snapshot-bash-1-x.sh",
+            "plugins/x",
+            "projects/-other-cwd/x.jsonl",
+        ] {
             let p = Path::new("/auth/claude").join(shared);
             assert!(
                 !overlays.iter().any(|o| p.starts_with(&o.target)),
                 "{shared} must stay shared"
             );
         }
+        // The transcripts, the auto memory, and the per-session data are
+        // the agent's own: an overlay from the agent's directory covers
+        // each one.
+        for own_path in [
+            "projects/-home-agent-work/0b5c1d2e-0000-4000-8000-000000000001.jsonl",
+            "projects/-home-agent-work/0b5c1d2e-0000-4000-8000-000000000001/subagents/a.jsonl",
+            "projects/-home-agent-work/memory/MEMORY.md",
+            "file-history/0b5c1d2e-0000-4000-8000-000000000001/x@v1",
+            "todos/0b5c1d2e-0000-4000-8000-000000000001-agent-x.json",
+            "session-env/0b5c1d2e-0000-4000-8000-000000000001/x",
+        ] {
+            let p = Path::new("/auth/claude").join(own_path);
+            let o = overlays
+                .iter()
+                .filter(|o| p.starts_with(&o.target))
+                .max_by_key(|o| o.target.components().count())
+                .unwrap_or_else(|| panic!("{own_path} must be per agent"));
+            assert!(o.source.starts_with(&own), "{own_path}");
+        }
+        assert_eq!(
+            own_project_dir(&agent, Path::new("/home/agent/work")),
+            own.join("projects/-home-agent-work")
+        );
+    }
+
+    #[test]
+    fn old_memory_moves_into_the_project_dir() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let home = tmp.path().join("auth-claude");
+        fs::create_dir_all(&home).expect("home");
+        let agent = test_agent_in(tmp.path(), None);
+        let opts = ClaudeOptions {
+            harness_workspace: Some(PathBuf::from("/home/agent/work")),
+            ..ClaudeOptions::default()
+        };
+        // The layout before the per-agent project dir.
+        let old = claude_dir(&agent).join(MEMORY_DIR);
+        fs::create_dir_all(&old).expect("old");
+        fs::write(old.join("MEMORY.md"), "note").expect("memory");
+        materialize(&opts, &agent, &home, None).expect("materialize");
+        let new = own_project_dir(&agent, Path::new("/home/agent/work")).join(MEMORY_DIR);
+        assert_eq!(
+            fs::read_to_string(new.join("MEMORY.md")).expect("moved"),
+            "note"
+        );
+        assert!(!old.exists());
+        // No overlay names the old directory any more.
+        let overlays = materialize(&opts, &agent, &home, None).expect("again");
+        assert!(overlays.iter().all(|o| o.source != old));
+        assert!(new.join("MEMORY.md").is_file());
     }
 
     #[test]

@@ -72,6 +72,11 @@ pub struct UsageConfig {
     /// Run the harness status commands once after the start, and record
     /// the logins found (PLAN §16.1).
     pub detect_on_start: bool,
+    /// The harnesses run in the sandbox, so each agent's session files are
+    /// in its own harness dir (the per-agent overlays). `false` for
+    /// sandbox mode `none`: no overlay is bound, and the session files are
+    /// in the shared home. See [`transcript_roots`].
+    pub per_agent_sessions: bool,
     pub http: Arc<dyn HttpGet>,
 }
 
@@ -86,6 +91,7 @@ impl Default for UsageConfig {
             sample_throttle: Duration::from_secs(10),
             login_timeout: Duration::from_secs(600),
             detect_on_start: false,
+            per_agent_sessions: true,
             http: Arc::new(ReqwestHttp::new()),
         }
     }
@@ -188,37 +194,70 @@ pub trait UsageSource: Send {
 /// Makes a [`UsageSource`] for the sessions of one harness.
 pub trait UsageSourceFactory: Send + Sync {
     fn harness(&self) -> HarnessId;
-    /// `home` is the shared harness home on this machine. `None` when the
+    /// `home` is the shared harness home on this machine. The
+    /// `session.transcript` is the session file on this machine, mapped
+    /// ([`host_path`]) and checked ([`check_transcript`]). `None` when the
     /// session has nothing to read.
     fn open(&self, session: &SessionInfo, home: &Path) -> Option<Box<dyn UsageSource>>;
 }
 
+/// The session area of `harness` in its home, and the directory of the
+/// agent's own copy in the harness dir: `projects/` in `harness/claude/`
+/// (the sandbox binds `harness/claude/projects/<cwd>/` over
+/// `projects/<cwd>/`), `sessions/` in `harness/codex/`, and
+/// `session-state/` in `harness/copilot/` (the adapters' `materialize`).
+/// pi keeps its sessions in the harness dir itself, so it has none.
+fn own_session_area(harness: HarnessId) -> Option<(&'static str, &'static str)> {
+    match harness {
+        HarnessId::Claude => Some(("claude", "projects")),
+        HarnessId::Codex => Some(("codex", "sessions")),
+        HarnessId::Copilot => Some(("copilot", "session-state")),
+        HarnessId::Pi => None,
+    }
+}
+
 /// The path of a session file on this machine. A path that the harness
-/// reported from inside the sandbox (`/home/agent/.claude/...`) maps into
-/// the shared home.
-pub fn host_path(reported: &Path, harness: HarnessId, home: &Path) -> PathBuf {
+/// reported from inside the sandbox (`/home/agent/.claude/...`) maps to
+/// the host. A path in the session area of the home maps into the agent's
+/// own copy under `harness_dir` (the per-agent overlay); any other path in
+/// the home maps into the shared home. A path that exists on this machine
+/// (sandbox mode `none`) stays as it is.
+pub fn host_path(reported: &Path, harness: HarnessId, home: &Path, harness_dir: &Path) -> PathBuf {
     if reported.exists() {
         return reported.to_owned();
     }
     let inside = Path::new(SANDBOX_HOME).join(home_rel(harness));
-    match reported.strip_prefix(&inside) {
-        Ok(rest) => home.join(rest),
-        Err(_) => reported.to_owned(),
+    let Ok(rest) = reported.strip_prefix(&inside) else {
+        return reported.to_owned();
+    };
+    match own_session_area(harness) {
+        Some((dir, area)) if rest.starts_with(area) => harness_dir.join(dir).join(rest),
+        _ => home.join(rest),
     }
 }
 
 /// The directories where the session files of `harness` may be, for the
 /// agent whose harness dir is `harness_dir` (`docs/security-review.md`
-/// F12): the session area of the shared home for Claude Code
-/// (`projects/`), Codex (`sessions/`), and Copilot (`session-state/`), and
-/// the per-agent `harness/pi/sessions/` for pi.
-pub fn transcript_roots(harness: HarnessId, home: &Path, harness_dir: &Path) -> Vec<PathBuf> {
-    match harness {
-        HarnessId::Claude => vec![home.join("projects")],
-        HarnessId::Codex => vec![home.join("sessions")],
-        HarnessId::Copilot => vec![home.join("session-state")],
-        HarnessId::Pi => vec![harness_dir.join("pi").join("sessions")],
+/// F12). In the sandbox (`per_agent`): only the agent's own session area,
+/// `harness/claude/projects/`, `harness/codex/sessions/`, or
+/// `harness/copilot/session-state/`. The file of another agent is in that
+/// agent's harness dir, so it is refused. With no sandbox (`per_agent` is
+/// `false`) the harness writes into the shared home, so its session area
+/// is allowed too. pi: the per-agent `harness/pi/sessions/` in both modes.
+pub fn transcript_roots(
+    harness: HarnessId,
+    home: &Path,
+    harness_dir: &Path,
+    per_agent: bool,
+) -> Vec<PathBuf> {
+    let Some((dir, area)) = own_session_area(harness) else {
+        return vec![harness_dir.join("pi").join("sessions")];
+    };
+    let mut roots = vec![harness_dir.join(dir).join(area)];
+    if !per_agent {
+        roots.push(home.join(area));
     }
+    roots
 }
 
 /// `p` with every symlink resolved. A path that does not exist yet (the
@@ -373,9 +412,8 @@ impl UsageSourceFactory for ClaudeSourceFactory {
         HarnessId::Claude
     }
 
-    fn open(&self, session: &SessionInfo, home: &Path) -> Option<Box<dyn UsageSource>> {
-        let reported = session.transcript.as_ref()?;
-        let path = host_path(reported, HarnessId::Claude, home);
+    fn open(&self, session: &SessionInfo, _home: &Path) -> Option<Box<dyn UsageSource>> {
+        let path = session.transcript.clone()?;
         debug!(agent = %session.agent, path = %path.display(), "tailing the Claude session file");
         Some(Box::new(ClaudeSource::new(path)))
     }
@@ -463,8 +501,8 @@ impl UsageSource for PiSource {
     }
 }
 
-/// A factory that tails the session file the hook reported, mapped from
-/// the sandbox into the shared home.
+/// A factory that tails the session file the hook reported. The collector
+/// maps it to the host and checks it ([`check_transcript`]) first.
 pub struct TailFactory {
     harness: HarnessId,
     make: fn(PathBuf) -> Box<dyn UsageSource>,
@@ -475,9 +513,8 @@ impl UsageSourceFactory for TailFactory {
         self.harness
     }
 
-    fn open(&self, session: &SessionInfo, home: &Path) -> Option<Box<dyn UsageSource>> {
-        let reported = session.transcript.as_ref()?;
-        let path = host_path(reported, self.harness, home);
+    fn open(&self, session: &SessionInfo, _home: &Path) -> Option<Box<dyn UsageSource>> {
+        let path = session.transcript.clone()?;
         debug!(agent = %session.agent, harness = %self.harness, path = %path.display(),
                "tailing the session file");
         Some((self.make)(path))
@@ -666,12 +703,14 @@ impl Collector {
         let mut info = info;
         let mut guard = None;
         if let Some(reported) = info.transcript.clone() {
+            let harness_dir = terrarium_runner::harness_dir(&self.state.state_dir, a.id);
             let roots = transcript_roots(
                 info.harness,
                 &home,
-                &terrarium_runner::harness_dir(&self.state.state_dir, a.id),
+                &harness_dir,
+                self.state.usage.config.per_agent_sessions,
             );
-            let mapped = host_path(&reported, info.harness, &home);
+            let mapped = host_path(&reported, info.harness, &home, &harness_dir);
             let mut checked = self.check_owner(agent, &info, &mapped, &roots);
             if checked.is_ok() && info.harness != HarnessId::Pi {
                 let (me, session) = (agent.to_owned(), info.session.clone());
@@ -953,21 +992,111 @@ mod tests {
         assert_eq!(cfg.program(HarnessId::Codex), "codex");
     }
 
+    /// A session file that the harness reported from inside the sandbox
+    /// maps into the agent's own harness dir (the per-agent overlay), not
+    /// into the shared home.
     #[test]
-    fn sandbox_paths_map_into_the_home() {
-        let p = host_path(
-            Path::new("/home/agent/.claude/projects/-home-agent-work/s.jsonl"),
-            HarnessId::Claude,
-            Path::new("/auth/claude"),
-        );
-        assert_eq!(
-            p,
-            PathBuf::from("/auth/claude/projects/-home-agent-work/s.jsonl")
-        );
+    fn sandbox_paths_map_into_the_agent_dir() {
+        let dir = Path::new("/state/agents/A/harness");
+        for (harness, home, reported, want) in [
+            (
+                HarnessId::Claude,
+                "/auth/claude",
+                "/home/agent/.claude/projects/-home-agent-work/s.jsonl",
+                "/state/agents/A/harness/claude/projects/-home-agent-work/s.jsonl",
+            ),
+            (
+                HarnessId::Codex,
+                "/auth/codex",
+                "/home/agent/.codex/sessions/2026/10/25/rollout-x-s.jsonl",
+                "/state/agents/A/harness/codex/sessions/2026/10/25/rollout-x-s.jsonl",
+            ),
+            (
+                HarnessId::Copilot,
+                "/auth/copilot",
+                "/home/agent/.copilot/session-state/s/events.jsonl",
+                "/state/agents/A/harness/copilot/session-state/s/events.jsonl",
+            ),
+            // Not a session area: the shared home.
+            (
+                HarnessId::Claude,
+                "/auth/claude",
+                "/home/agent/.claude/other/s.jsonl",
+                "/auth/claude/other/s.jsonl",
+            ),
+            (
+                HarnessId::Pi,
+                "/auth/pi",
+                "/home/agent/.pi/agent/x.jsonl",
+                "/auth/pi/x.jsonl",
+            ),
+        ] {
+            assert_eq!(
+                host_path(Path::new(reported), harness, Path::new(home), dir),
+                PathBuf::from(want),
+                "{harness}"
+            );
+        }
         let other = Path::new("/elsewhere/s.jsonl");
         assert_eq!(
-            host_path(other, HarnessId::Claude, Path::new("/auth/claude")),
+            host_path(other, HarnessId::Claude, Path::new("/auth/claude"), dir),
             other
+        );
+    }
+
+    /// The roots in the sandbox are the agent's own session area only. A
+    /// session file in another agent's harness dir, or in the shared home,
+    /// is refused, even with the right session id in its name. With no
+    /// sandbox the shared home is allowed.
+    #[test]
+    fn a_transcript_of_another_agent_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state/agents");
+        let home = tmp.path().join("auth");
+        let mine = state.join("A/harness");
+        let theirs = state.join("B/harness");
+        let sid = "0b5c1d2e-0000-4000-8000-000000000001";
+        for (harness, rel) in [
+            (
+                HarnessId::Claude,
+                format!("claude/projects/-home-agent-work/{sid}.jsonl"),
+            ),
+            (
+                HarnessId::Codex,
+                format!("codex/sessions/2026/10/25/rollout-2026-10-25T07-23-17-{sid}.jsonl"),
+            ),
+            (
+                HarnessId::Copilot,
+                format!("copilot/session-state/{sid}/events.jsonl"),
+            ),
+        ] {
+            let shared_rel = rel.split_once('/').unwrap().1;
+            let files = [mine.join(&rel), theirs.join(&rel), home.join(shared_rel)];
+            for f in &files {
+                std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+                std::fs::write(f, "{}\n").unwrap();
+            }
+            let roots = transcript_roots(harness, &home, &mine, true);
+            assert_eq!(roots.len(), 1, "{harness}");
+            check_transcript(&files[0], harness, sid, &roots)
+                .unwrap_or_else(|e| panic!("{harness}: own file refused: {e}"));
+            for f in &files[1..] {
+                let e = check_transcript(f, harness, sid, &roots).unwrap_err();
+                assert!(e.contains("is not under"), "{harness}: {e}");
+            }
+            // The session id still has to match in the agent's own dir.
+            let e = check_transcript(&files[0], harness, "other", &roots).unwrap_err();
+            assert!(e.contains("does not name"), "{harness}: {e}");
+
+            // Sandbox mode `none`: the shared home is allowed, another
+            // agent's harness dir is not.
+            let roots = transcript_roots(harness, &home, &mine, false);
+            check_transcript(&files[2], harness, sid, &roots).unwrap();
+            assert!(check_transcript(&files[1], harness, sid, &roots).is_err());
+        }
+        assert_eq!(
+            transcript_roots(HarnessId::Pi, &home, &mine, true),
+            [mine.join("pi/sessions")]
         );
     }
 

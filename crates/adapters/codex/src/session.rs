@@ -13,8 +13,10 @@
 //! the first prompt.
 //!
 //! All agents in the sandbox have the same cwd, so the cwd in
-//! `session_meta` does not tell whose session a file is. The per-agent
-//! `history.jsonl` does ([`crate::config`]): each line has the
+//! `session_meta` does not tell whose session a file is. In the sandbox
+//! each agent has its own `sessions/` ([`crate::config`]), so every file
+//! there is the agent's. The per-agent `history.jsonl` also tells: each
+//! line has the
 //! `session_id` of a typed prompt. The fact that Codex writes one line for
 //! each prompt comes from an operator's home of the same version, not from
 //! a spike.
@@ -128,18 +130,15 @@ pub fn newest_session_for_cwd(home: &Path, cwd: &Path) -> Option<HarnessSessionI
 ///
 /// 1. The last `session_id` in the per-agent `history.jsonl` (the sandbox
 ///    binds it over the shared one).
-/// 2. Without a sandbox cwd (each agent runs in its own workspace): the
-///    newest session file with the agent's cwd. With a sandbox cwd this
-///    step is skipped, because every agent has that cwd, and the newest
-///    file can be another agent's.
+/// 2. The newest session file with the agent's cwd in
+///    [`CodexOptions::session_home`]: in the sandbox the agent's own
+///    `sessions/`, with no sandbox the shared one (there each agent runs
+///    in its own workspace, so the cwd tells).
 pub fn find_session_id(opts: &CodexOptions, agent: &Agent) -> Option<HarnessSessionId> {
     if let Some(id) = last_history_session(&config::history_path(agent)) {
         return Some(id);
     }
-    if opts.harness_workspace.is_some() {
-        return None;
-    }
-    newest_session_for_cwd(opts.host_codex_home(), &opts.harness_cwd(agent))
+    newest_session_for_cwd(&opts.session_home(agent), &opts.harness_cwd(agent))
 }
 
 #[cfg(test)]
@@ -206,7 +205,7 @@ mod tests {
     }
 
     #[test]
-    fn history_wins_and_sandbox_skips_the_cwd_scan() {
+    fn history_wins_and_sandbox_scans_only_the_agent_dir() {
         let tmp = tempfile::tempdir().expect("tmp");
         let home = tmp.path().join("auth-codex");
         let agent = test_agent_in(tmp.path(), None);
@@ -224,7 +223,21 @@ mod tests {
             harness_workspace: Some(PathBuf::from(&ws)),
             ..plain.clone()
         };
+        // In the sandbox the shared `sessions/` is not the agent's.
         assert_eq!(find_session_id(&sandbox, &agent), None);
+        // A file in the agent's own `sessions/` is.
+        let own = "01a16cb0-f46c-7ea2-a000-55803cbcdad6";
+        write_session(
+            &config::codex_dir(&agent),
+            "2026/10/25",
+            "2026-10-25T09-00-00",
+            own,
+            &ws,
+        );
+        assert_eq!(
+            find_session_id(&sandbox, &agent),
+            Some(HarnessSessionId(own.into()))
+        );
 
         let history = config::history_path(&agent);
         fs::create_dir_all(history.parent().expect("parent")).expect("dir");

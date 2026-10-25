@@ -104,6 +104,19 @@ impl ClaudeOptions {
     pub fn host_config_dir(&self) -> &Path {
         self.host_config_dir.as_deref().unwrap_or(&self.config_dir)
     }
+
+    /// The directory that holds the agent's `projects/<cwd>/` (the
+    /// daemon's view). In the sandbox (a `harness_workspace` is set) it is
+    /// the agent's own `harness/claude/`, which the sandbox binds over the
+    /// shared one ([`config`]). With no sandbox the overlays are not bound,
+    /// so it is the shared home.
+    pub fn session_home(&self, agent: &Agent) -> PathBuf {
+        if self.harness_workspace.is_some() {
+            config::claude_dir(agent)
+        } else {
+            self.host_config_dir().to_path_buf()
+        }
+    }
 }
 
 fn running_as_root() -> bool {
@@ -163,7 +176,7 @@ impl ClaudeAdapter {
     /// The session file of `id` for this agent (the daemon's view).
     pub fn session_file(&self, agent: &Agent, id: &HarnessSessionId) -> PathBuf {
         session::session_file(
-            self.options.host_config_dir(),
+            &self.options.session_home(agent),
             &self.options.harness_cwd(agent),
             id,
         )
@@ -209,7 +222,7 @@ impl Adapter for ClaudeAdapter {
 
     fn find_session_id(&self, agent: &Agent) -> Option<HarnessSessionId> {
         session::newest_session(
-            self.options.host_config_dir(),
+            &self.options.session_home(agent),
             &self.options.harness_cwd(agent),
         )
     }
@@ -300,23 +313,43 @@ mod tests {
     }
 
     #[test]
-    fn find_session_id_uses_host_dir_and_harness_cwd() {
+    fn find_session_id_uses_the_agent_dir_and_harness_cwd() {
         let tmp = tempfile::tempdir().expect("tmp");
+        let shared = tmp.path().join("auth-claude");
         let a = ClaudeAdapter::new(ClaudeOptions {
-            host_config_dir: Some(tmp.path().to_path_buf()),
+            host_config_dir: Some(shared.clone()),
             harness_workspace: Some(PathBuf::from("/home/agent/work")),
             ..ClaudeOptions::default()
         });
-        let agent = test_agent(None);
+        let agent = crate::test_agent_in(tmp.path(), None);
         assert_eq!(a.find_session_id(&agent), None);
+        // A session of another agent in the shared home is not this one's.
+        let other =
+            shared.join("projects/-home-agent-work/0b5c1d2e-0000-4000-8000-000000000001.jsonl");
+        std::fs::create_dir_all(other.parent().expect("parent")).expect("dir");
+        std::fs::write(&other, "{}\n").expect("write");
+        assert_eq!(a.find_session_id(&agent), None);
+
         let id = HarnessSessionId("aee36d42-3246-4e16-be9c-16dd97c85c57".into());
         let file = a.session_file(&agent, &id);
-        assert!(
-            file.ends_with("projects/-home-agent-work/aee36d42-3246-4e16-be9c-16dd97c85c57.jsonl")
+        assert_eq!(
+            file,
+            config::claude_dir(&agent)
+                .join("projects/-home-agent-work/aee36d42-3246-4e16-be9c-16dd97c85c57.jsonl")
         );
         std::fs::create_dir_all(file.parent().expect("parent")).expect("dir");
         std::fs::write(&file, "{}\n").expect("write");
         assert_eq!(a.find_session_id(&agent), Some(id));
+
+        // With no sandbox the harness writes into the shared home.
+        let none = ClaudeAdapter::new(ClaudeOptions {
+            host_config_dir: Some(shared.clone()),
+            ..ClaudeOptions::default()
+        });
+        assert!(
+            none.session_file(&agent, &HarnessSessionId("x".into()))
+                .starts_with(&shared)
+        );
     }
 
     #[test]

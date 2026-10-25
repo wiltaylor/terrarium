@@ -2,9 +2,9 @@
 //! (PLAN §8 and §11, the overlay trick).
 //!
 //! All agents share one Copilot home (`/auth/copilot`, `COPILOT_HOME`) for
-//! the login (`config.json`) and the session files (`session-state/`).
-//! Some files in that home are per agent. [`materialize`] writes them
-//! under `<agent dir>/copilot/` and returns the overlays.
+//! the login (`config.json`) and the extension. Some files in that home
+//! are per agent, the session files among them. [`materialize`] writes
+//! them under `<agent dir>/copilot/` and returns the overlays.
 //!
 //! | File in `<agent dir>/copilot/` | Bound over (in `COPILOT_HOME`) | Mode | Why |
 //! |---|---|---|---|
@@ -15,6 +15,8 @@
 //! | `command-history-state.json` | the same | rw | The prompt history (the up-arrow list). Shared, each agent would see the turns (mail text) of the others and of the operator. |
 //! | `open-sessions-state.json` | the same | rw | One map that every process rewrites. Per agent, there is no lost update. |
 //! | `sidebar-sessions-state/` | the same | rw | Keyed by a hash; every agent has the same cwd, so the agents would share one file. |
+//! | `session-state/` | the same | rw | The transcripts: `session-state/<id>/events.jsonl`, `workspace.yaml`, `checkpoints/`, `rewind-file-snapshots/`. One directory per session UUID does not collide, but a shared directory lets each agent read, and write into, the transcripts and file snapshots of every other agent in every project (a path for prompt injection). `--resume <id>` finds `session-state/<id>/` in the agent's own directory. The daemon's usage collector reads it from the agent's harness dir. |
+//! | `session-store.db`, `session-store.db-wal`, `session-store.db-shm` | the same | rw | SQLite in WAL mode. The `turns` table holds the user message and the reply of every turn, and the model can query it (the `session_store_sql` tool, "Querying past sessions"). Shared, each agent could read the turns of every other agent. All three files are bound, so the database stays with its `-wal` and `-shm`. SQLite cannot delete the `-wal` of a file bind at the close; it ignores that error, and the next open reads the file (verified with `bwrap`, Python `sqlite3`, and `node:sqlite` on 2026-10-25). A start of Copilot on these binds is not tested yet. |
 //! | `cache/` | `$HOME/.cache/copilot` (when [`CopilotOptions::cache_dir`] is set) | rw | Copilot writes outside its home (`COPILOT_CACHE_HOME`). |
 //!
 //! Copilot writes `settings.json`, `command-history-state.json`,
@@ -37,12 +39,12 @@
 //! it gets a read-write bind over itself.
 //!
 //! Shared on purpose: `config.json` (the login and the plain-text token
-//! fallback; Copilot also writes `firstLaunchAt` there), `session-state/`
-//! (one directory per session UUID; `--resume` and the usage collector read
-//! it), `session-store.db` (SQLite in WAL mode), `extensions/` (the
-//! system-prompt extension), `pkg/`, `plugin-data/`, `installed-plugins/`.
-//! Many processes on one `config.json` and one `session-store.db` is the
-//! normal multi-terminal case; it is not tested with many agents.
+//! fallback; Copilot also writes `firstLaunchAt` there), `extensions/`
+//! (the system-prompt extension), `pkg/`, `plugin-data/`,
+//! `installed-plugins/`. Many processes on one `config.json` is the normal
+//! multi-terminal case; it is not tested with many agents. The session
+//! files that an older version left in the shared `session-state/` and
+//! `session-store.db` stay there; no agent sees them.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -74,6 +76,13 @@ pub const SIDEBAR_DIR: &str = "sidebar-sessions-state";
 pub const CONFIG_FILE: &str = "config.json";
 /// The session files in the home: `session-state/<id>/events.jsonl`.
 pub const SESSION_STATE_DIR: &str = "session-state";
+/// The session store in the home: one SQLite database in WAL mode, as
+/// three files.
+pub const SESSION_STORE_FILES: &[&str] = &[
+    "session-store.db",
+    "session-store.db-wal",
+    "session-store.db-shm",
+];
 
 /// `/state/agents/<ulid>/harness`: the directory of the per-agent harness
 /// files, next to the workspace. The sandbox binds it read-only at the
@@ -298,6 +307,26 @@ pub fn materialize(
         true,
     )?);
 
+    // The agent's own transcripts and session store (see the table at the
+    // top). A new agent starts with none: an empty file is a new SQLite
+    // database.
+    overlays.push(dir_overlay(
+        &dir.join(SESSION_STATE_DIR),
+        &home.join(SESSION_STATE_DIR),
+        target(SESSION_STATE_DIR),
+        true,
+    )?);
+    for name in SESSION_STORE_FILES {
+        let own = dir.join(name);
+        ensure_file(&own, b"")?;
+        ensure_file(&home.join(name), b"")?;
+        overlays.push(FileOverlay {
+            source: own,
+            target: target(name),
+            writable: true,
+        });
+    }
+
     // Copilot writes its logs (`--log-dir`); the rest of the harness
     // directory is read-only in the sandbox.
     let logs = logs_dir(agent);
@@ -382,6 +411,10 @@ mod tests {
             ("command-history-state.json", true),
             ("open-sessions-state.json", true),
             ("sidebar-sessions-state", true),
+            ("session-state", true),
+            ("session-store.db", true),
+            ("session-store.db-wal", true),
+            ("session-store.db-shm", true),
         ]
         .iter()
         .map(|(n, w)| (own.join(n), inside.join(n), *w))
@@ -404,18 +437,31 @@ mod tests {
             assert_eq!(o.source.is_dir(), shared.is_dir(), "{}", rel.display());
         }
 
-        // Auth and sessions stay shared.
-        for shared in [
-            "config.json",
-            "session-state/x/events.jsonl",
-            "session-store.db",
-        ] {
+        // The login and the extension stay shared.
+        for shared in ["config.json", "extensions/x/extension.mjs", "pkg/x"] {
             let p = inside.join(shared);
             assert!(
                 !overlays.iter().any(|o| p.starts_with(&o.target)),
                 "{shared} must stay shared"
             );
         }
+        // The transcripts and the session store are the agent's own.
+        for own_path in [
+            "session-state/0b5c1d2e-0000-4000-8000-000000000001/events.jsonl",
+            "session-state/0b5c1d2e-0000-4000-8000-000000000001/rewind-file-snapshots/x",
+            "session-store.db",
+            "session-store.db-wal",
+            "session-store.db-shm",
+        ] {
+            let p = inside.join(own_path);
+            let o = overlays
+                .iter()
+                .find(|o| p.starts_with(&o.target))
+                .unwrap_or_else(|| panic!("{own_path} must be per agent"));
+            assert!(o.source.starts_with(&own), "{own_path}");
+        }
+        // A new session store starts empty, not as a copy of the shared one.
+        assert_eq!(fs::read(own.join("session-store.db")).expect("db"), b"");
     }
 
     #[test]

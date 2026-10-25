@@ -2,8 +2,10 @@
 //! (PLAN §8 and §11, the overlay trick).
 //!
 //! All agents share one Codex home (`/auth/codex`, `CODEX_HOME`) for the
-//! login and the session files. Codex is made for many terminals on one
-//! home, so most of what it writes there is safe to share.
+//! login, the settings, and the caches. Codex is made for many terminals
+//! on one home, so most of what it writes there is safe to share. The
+//! session files, the session index, and the SQLite files hold turn text,
+//! so they are per agent.
 //!
 //! Layout under the harness directory (`/state/agents/<ulid>/harness/`):
 //!
@@ -12,6 +14,10 @@
 //! | `prompt.md` | the rendered system prompt; `-c model_instructions_file` names it (the sandbox binds the agent directory at the same path) |
 //! | `codex/history.jsonl` | bound over `$CODEX_HOME/history.jsonl` |
 //! | `codex/hooks.json` | bound over `$CODEX_HOME/hooks.json`; holds no hooks |
+//! | `codex/sessions/` | bound over `$CODEX_HOME/sessions/` |
+//! | `codex/session_index.jsonl` | bound over `$CODEX_HOME/session_index.jsonl` |
+//! | `codex/shell_snapshots/` | bound over `$CODEX_HOME/shell_snapshots/` |
+//! | `codex/sqlite/` | bound over itself, read-write; `-c sqlite_home` names it (see [`crate::launch`]) |
 //!
 //! # What Codex writes into its home, and where it goes
 //!
@@ -27,12 +33,12 @@
 //! | `auth.json` | shared | the one login. A token refresh by one agent must reach all of them. Many instances on one home is not tested for refresh (`docs/compat.md`, "Codex: not tested"). |
 //! | `history.jsonl` | per-agent | the prompt history (`session_id`, `ts`, `text`), the up-arrow list. Shared, each agent would see the typed turns (mail text) of every other agent and of the operator. The per-agent copy also tells which sessions are this agent's (see [`crate::session`]). |
 //! | `hooks.json` | per-agent, empty | the operator's own hooks (`{"hooks": {...}}`). Shared, they would fire in every agent. The `-c` hooks replace the `hooks.<Event>` keys of `config.toml` already, because Terrarium sets all 11 events. |
-//! | `sessions/YYYY/MM/DD/rollout-<time>-<id>.jsonl` | shared | one file per session ID: no collision. `codex resume` reads them, and the daemon's usage collector reads them through the shared home. |
-//! | `session_index.jsonl` | shared | one line per session (`id`, `thread_name`, `updated_at`), appended. The `resume` picker reads it. |
+//! | `sessions/YYYY/MM/DD/rollout-<time>-<id>.jsonl` | per-agent | the transcripts. One file per session ID does not collide, but a shared directory lets each agent read, and write into, the transcripts of every other agent in every project (a path for prompt injection). `codex resume <id>` finds the file in the agent's own directory (through the agent's own `threads` table, which a new SQLite home backfills from `sessions/`). The daemon's usage collector reads it from the agent's harness dir. |
+//! | `session_index.jsonl` | per-agent | one line per session (`id`, `thread_name`, `updated_at`), appended; the newest line for an ID wins. The thread name is the start of the first turn. The `resume` picker and a resume by name read it. Codex appends to the file, so a file bind works; a failed write is a logged error ("failed to index thread name"), not tested. |
 //! | `thread-writer-locks/<id>.lock` | shared | keyed by the session ID. Shared on purpose: it stops two instances on one session ("This conversation is open in another app"). |
-//! | `shell_snapshots/<id>.<ns>.sh` | shared | keyed by the session ID. |
+//! | `shell_snapshots/<id>.<ns>.sh` | per-agent | keyed by the session ID, so no collision, but each file holds the exported env of the agent's shell (`declare -x`): `TERRARIUM_AGENT`, and an API key when the launch env has one. |
 //! | `tmp/arg0*/codex-arg0<random>/` | shared | random names. |
-//! | `state_5`, `logs_2`, `memories_1`, `goals_1`, `queue_1`, `thread_history_1` (`.sqlite`, `-wal`, `-shm`) | shared | SQLite in WAL mode, made for many processes. A per-file bind would split a database from its `-wal` and `-shm` files. The `memories` feature is off by default in 0.160.0 (`codex features list`), so no memory crosses agents. |
+//! | `state_5`, `logs_2`, `memories_1`, `goals_1`, `queue_1`, `thread_history_1` (`.sqlite`, `-wal`, `-shm`) | per-agent, in `codex/sqlite/` | SQLite in WAL mode. `threads` (in `state_5`) holds the first user message and the title of each session; `thread_items` (in `thread_history_1`) holds every item of each turn. Shared, each agent could read the turns of every other agent. `-c sqlite_home` moves all of them, so no file bind splits a database from its `-wal` and `-shm` files. The SQLite files that an older version left in the shared home stay there, unused by the agents. |
 //! | `config.toml` | shared | the operator's settings (model, providers). Codex writes `[tui]` keys into it on the first start. Trust comes from `-c`, so no agent writes a trust decision. |
 //! | `version.json`, `models_cache.json`, `installation_id`, `cache/`, `skills/`, `plugins/` | shared | caches of public data. The update check is off. |
 //! | `packages/`, `app-server-daemon/` | not used | only the app-server daemon writes them; `--no-daemon` keeps it off. |
@@ -52,6 +58,14 @@ use crate::error::{CodexError, Result};
 pub const HISTORY_FILE: &str = "history.jsonl";
 /// The hook file in the Codex home.
 pub const HOOKS_FILE: &str = "hooks.json";
+/// The session files in the Codex home. A directory.
+pub const SESSIONS_DIR: &str = crate::session::SESSIONS_DIR;
+/// The session index in the Codex home. A JSON-lines file.
+pub const SESSION_INDEX_FILE: &str = "session_index.jsonl";
+/// The shell snapshots in the Codex home. A directory.
+pub const SHELL_SNAPSHOTS_DIR: &str = "shell_snapshots";
+/// The per-agent SQLite home in [`codex_dir`].
+pub const SQLITE_DIR: &str = "sqlite";
 /// The rendered prompt in the agent directory (PLAN §11).
 pub const PROMPT_FILE: &str = "prompt.md";
 /// A hook file with no hooks, in the format of the operator's file.
@@ -88,6 +102,12 @@ pub fn prompt_path(agent: &Agent) -> PathBuf {
 /// The per-agent prompt history (the daemon's view).
 pub fn history_path(agent: &Agent) -> PathBuf {
     codex_dir(agent).join(HISTORY_FILE)
+}
+
+/// The per-agent SQLite home (`-c sqlite_home`). The sandbox binds the
+/// harness dir at the same path, so this path is the same inside.
+pub fn sqlite_dir(agent: &Agent) -> PathBuf {
+    codex_dir(agent).join(SQLITE_DIR)
 }
 
 /// Read the rendered prompt. A missing file means "no prompt".
@@ -148,7 +168,51 @@ pub fn materialize(
         opts.codex_home.join(HOOKS_FILE),
         false,
     )?;
-    Ok(vec![history, hooks])
+
+    // The agent's own transcripts and session index (see the table at the
+    // top). A new agent starts with none.
+    let sessions = dir_overlay(
+        &dir.join(SESSIONS_DIR),
+        &home.join(SESSIONS_DIR),
+        opts.codex_home.join(SESSIONS_DIR),
+    )?;
+    let index = file_overlay(
+        &dir.join(SESSION_INDEX_FILE),
+        &home.join(SESSION_INDEX_FILE),
+        "",
+        opts.codex_home.join(SESSION_INDEX_FILE),
+        true,
+    )?;
+    let snapshots = dir_overlay(
+        &dir.join(SHELL_SNAPSHOTS_DIR),
+        &home.join(SHELL_SNAPSHOTS_DIR),
+        opts.codex_home.join(SHELL_SNAPSHOTS_DIR),
+    )?;
+
+    // The agent's own SQLite home. The rest of the harness dir is
+    // read-only in the sandbox.
+    let sqlite = sqlite_dir(agent);
+    fs::create_dir_all(&sqlite).map_err(|e| CodexError::io(&sqlite, e))?;
+    let sqlite = FileOverlay {
+        source: sqlite.clone(),
+        target: sqlite,
+        writable: true,
+    };
+    Ok(vec![history, hooks, sessions, index, snapshots, sqlite])
+}
+
+/// A read-write per-agent directory over `target`. Both the agent's
+/// directory and the mount point in the shared home (`shared`) must exist:
+/// otherwise bwrap makes the mount point itself and leaves it behind.
+fn dir_overlay(own: &Path, shared: &Path, target: PathBuf) -> Result<FileOverlay> {
+    for d in [own, shared] {
+        fs::create_dir_all(d).map_err(|e| CodexError::io(d, e))?;
+    }
+    Ok(FileOverlay {
+        source: own.to_path_buf(),
+        target,
+        writable: true,
+    })
 }
 
 /// A per-agent file over `target`. A missing file (the agent's, or the
@@ -192,7 +256,7 @@ mod tests {
     }
 
     #[test]
-    fn overlays_cover_history_and_hooks_only() {
+    fn overlay_list() {
         let (_tmp, home, agent) = setup();
         let overlays =
             materialize(&CodexOptions::default(), &agent, &home, Some("hello")).expect("mat");
@@ -214,33 +278,68 @@ mod tests {
                     PathBuf::from("/auth/codex/hooks.json"),
                     false
                 ),
+                (
+                    own.join("sessions"),
+                    PathBuf::from("/auth/codex/sessions"),
+                    true
+                ),
+                (
+                    own.join("session_index.jsonl"),
+                    PathBuf::from("/auth/codex/session_index.jsonl"),
+                    true
+                ),
+                (
+                    own.join("shell_snapshots"),
+                    PathBuf::from("/auth/codex/shell_snapshots"),
+                    true
+                ),
+                (own.join("sqlite"), own.join("sqlite"), true),
             ]
         );
-        for o in &overlays {
+        // Each source and each mount point in the shared home exists, with
+        // the same kind (file or directory).
+        for o in overlays
+            .iter()
+            .filter(|o| o.target.starts_with("/auth/codex"))
+        {
             let rel = o.target.strip_prefix("/auth/codex").expect("in home");
-            assert!(o.source.is_file(), "{}", o.source.display());
-            assert!(home.join(rel).is_file(), "{}", rel.display());
+            let shared = home.join(rel);
+            assert!(o.source.exists(), "{}", o.source.display());
+            assert!(shared.exists(), "{}", rel.display());
+            assert_eq!(o.source.is_dir(), shared.is_dir(), "{}", rel.display());
         }
+        assert!(sqlite_dir(&agent).is_dir());
         let hooks: serde_json::Value =
             serde_json::from_slice(&fs::read(own.join("hooks.json")).expect("hooks"))
                 .expect("json");
         assert_eq!(hooks, serde_json::json!({"hooks": {}}));
         assert_eq!(read_prompt(&agent).expect("p").as_deref(), Some("hello"));
 
-        // The login, the session files, and the locks stay shared.
+        // The login, the settings, and the locks stay shared.
         for shared in [
             "auth.json",
-            "sessions/2026/10/24/rollout-x.jsonl",
-            "session_index.jsonl",
             "thread-writer-locks/x.lock",
-            "state_5.sqlite",
             "config.toml",
+            "models_cache.json",
         ] {
             let p = Path::new("/auth/codex").join(shared);
             assert!(
                 !overlays.iter().any(|o| p.starts_with(&o.target)),
                 "{shared} must stay shared"
             );
+        }
+        // The transcripts and the session index are the agent's own.
+        for own_path in [
+            "sessions/2026/10/24/rollout-x.jsonl",
+            "session_index.jsonl",
+            "shell_snapshots/x.1.sh",
+        ] {
+            let p = Path::new("/auth/codex").join(own_path);
+            let o = overlays
+                .iter()
+                .find(|o| p.starts_with(&o.target))
+                .unwrap_or_else(|| panic!("{own_path} must be per agent"));
+            assert!(o.source.starts_with(&own), "{own_path}");
         }
     }
 

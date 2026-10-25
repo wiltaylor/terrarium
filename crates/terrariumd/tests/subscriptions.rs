@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use common::{TestDaemon, restamp_transcript, write};
+use common::{TestDaemon, claude_project_dir, restamp_transcript, write};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use terrarium_core::{AgentId, HarnessId};
@@ -603,10 +603,9 @@ async fn collector_tails_a_growing_transcript() {
         )
         .await;
     let id = a["id"].as_str().unwrap().to_owned();
-    // The harness reports a sandbox path; the file is in the shared home.
-    let home = &env.homes[&HarnessId::Claude];
-    let file = home.join("projects/-home-agent-work/s1.jsonl");
-    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    // The harness reports a sandbox path; the file is in the agent's own
+    // project dir (the per-agent overlay), not in the shared home.
+    let file = claude_project_dir(&td.state, &id).join("s1.jsonl");
     let text = session_now();
     let lines: Vec<&str> = text.lines().collect();
     let cut = lines
@@ -733,8 +732,7 @@ async fn budgets_hold_a_project() {
     let id = a["id"].as_str().unwrap().to_owned();
     td.post_empty(&format!("/api/agents/{id}/start")).await.ok();
     td.wait_status(&id, "idle").await;
-    let file = env.homes[&HarnessId::Claude].join("projects/-home-agent-work/s.jsonl");
-    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    let file = claude_project_dir(&td.state, &id).join("s.jsonl");
     std::fs::write(&file, session_now()).unwrap();
     emit(
         td,

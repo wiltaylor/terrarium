@@ -49,6 +49,13 @@ pub struct CodexFlags {
     /// The config key that adds a `developer` message. The default prompt
     /// stays.
     pub developer_instructions: &'static str,
+    /// The config key for the directory of the SQLite files (`state_5`,
+    /// `logs_2`, `memories_1`, `goals_1`, `queue_1`, `thread_history_1`).
+    /// Default: `CODEX_HOME`. Verified on 0.160.0 with `--strict-config`:
+    /// all the SQLite files go to the named directory, and none to
+    /// `CODEX_HOME`. A new directory backfills its `threads` table from
+    /// `$CODEX_HOME/sessions/` at the start.
+    pub sqlite_home: &'static str,
     /// The hooks that Terrarium registers. Each runs `terrarium hook
     /// <name>`. The list comes from the binary: Codex counts 11 hooks when
     /// all 11 are passed. An unknown name is ignored without a message.
@@ -78,6 +85,7 @@ pub const CODEX_0_160: CodexFlags = CodexFlags {
     resume_config: &[("tui.resume_cwd", "\"session\"")],
     model_instructions_file: "model_instructions_file",
     developer_instructions: "developer_instructions",
+    sqlite_home: "sqlite_home",
     hook_events: &[
         // Fires at the first prompt, not at start-up (0.45 s after the
         // Enter byte). No session file exists before it.

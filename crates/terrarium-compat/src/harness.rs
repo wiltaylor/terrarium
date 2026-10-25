@@ -266,8 +266,8 @@ impl Harness for Codex {
             "model",
         ]
     }
-    fn transcript(&self, _agent: &Agent, sid: &HarnessSessionId) -> Option<PathBuf> {
-        self.adapter.session_file(sid)
+    fn transcript(&self, agent: &Agent, sid: &HarnessSessionId) -> Option<PathBuf> {
+        self.adapter.session_file(agent, sid)
     }
     /// The operator's `hooks.json`; the per-agent empty file covers it only
     /// under bwrap.
@@ -388,8 +388,8 @@ impl Harness for Copilot {
     fn payload_fields(&self) -> &'static [&'static str] {
         &["session_id", "cwd", "hook_event_name"]
     }
-    fn transcript(&self, _agent: &Agent, sid: &HarnessSessionId) -> Option<PathBuf> {
-        Some(self.adapter.session_file(sid)).filter(|p| p.is_file())
+    fn transcript(&self, agent: &Agent, sid: &HarnessSessionId) -> Option<PathBuf> {
+        Some(self.adapter.session_file(agent, sid)).filter(|p| p.is_file())
     }
     /// `hooks/*.json` and the `hooks` of `settings.json`: under bwrap an
     /// empty directory and a copy without hooks cover them.

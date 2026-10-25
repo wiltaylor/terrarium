@@ -69,6 +69,9 @@ async fn main() -> anyhow::Result<()> {
     let usage = UsageConfig {
         homes: homes.clone(),
         detect_on_start: true,
+        // Sandbox mode `none` binds no per-agent overlay, so the session
+        // files are in the shared home.
+        per_agent_sessions: settings.sandbox == sandbox::SandboxMode::Bwrap,
         ..UsageConfig::default()
     };
     // The web settings, from the flags and the env, in one place.

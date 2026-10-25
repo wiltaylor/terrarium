@@ -1363,6 +1363,16 @@ async fn mail_loop_guard_pauses_a_chatty_thread() {
     assert_eq!(held["thread_paused"], true, "{held}");
     tokio::time::sleep(Duration::from_millis(800)).await;
     assert_eq!(pointers(thread.clone()).await, 6, "the 7th typed a pointer");
+    // The `mail` event of the 7th names the recipient (it shows in bob's
+    // events), and carries `held`; the push listener skips it.
+    let held_id = held["id"].as_str().unwrap();
+    let mail_events = td.events(&bob, "mail").await;
+    let ev = mail_events
+        .iter()
+        .find(|e| e["data"]["message_id"] == held_id)
+        .unwrap_or_else(|| panic!("no mail event for the 7th in bob's events: {mail_events:#?}"));
+    assert_eq!(ev["agent_id"].as_str(), Some(bob.as_str()), "{ev}");
+    assert_eq!(ev["data"]["held"], true, "{ev}");
     let notice = td
         .get(&format!("/api/mail?to=operator&thread={thread}"))
         .await;

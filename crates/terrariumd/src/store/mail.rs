@@ -399,9 +399,10 @@ pub fn send(t: &mut Tx<'_>, m: Outgoing<'_>) -> ApiResult<Message> {
         data["thread_state"] = json!("paused");
     }
     let mut draft = EventDraft::new("mail", summary, data);
-    // The push listener types a pointer for a `mail` event with an agent,
-    // so a held message names no agent.
-    if let (Address::Agent { id, name, .. }, false) = (m.to, held) {
+    // The event names the recipient agent, also for a held message, so it
+    // shows in the agent's events. The push listener types no pointer for
+    // an event with `held: true`.
+    if let Address::Agent { id, name, .. } = m.to {
         draft = draft.agent(id.clone(), name.clone());
     }
     if let Some(p) = m.to.project() {

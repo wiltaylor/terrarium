@@ -65,6 +65,9 @@ pub fn trust_override(cwd: &Path) -> String {
 ///   `-c feedback.enabled=false`.
 /// - `-c hooks.<Event>=[...]` for each event of
 ///   [`crate::CodexFlags::hook_events`]. No file in `CODEX_HOME` changes.
+/// - In the sandbox (a `harness_workspace` is set):
+///   `-c sqlite_home="<agent dir>/codex/sqlite"`, the agent's own SQLite
+///   files ([`config`]). With no sandbox, Codex keeps them in `CODEX_HOME`.
 /// - On a resume, `-c tui.resume_cwd="session"`.
 /// - The prompt: `-c model_instructions_file="<agent dir>/prompt.md"`
 ///   (default) or `-c developer_instructions="<text>"` (see
@@ -104,6 +107,13 @@ pub fn build(
         spec = spec
             .arg(f.config)
             .arg(hook_override(&opts.hook_program, event));
+    }
+    if opts.harness_workspace.is_some() {
+        spec = spec.arg(f.config).arg(format!(
+            "{}={}",
+            f.sqlite_home,
+            toml_string(&path_str(&config::sqlite_dir(agent)))
+        ));
     }
     if resume.is_some() {
         for (key, value) in f.resume_config {
@@ -194,8 +204,25 @@ mod tests {
         );
         assert!(c.contains(&prompt.as_str()), "{c:?}");
         assert!(!c.iter().any(|o| o.starts_with("developer_instructions")));
+        let sqlite = format!(
+            "sqlite_home=\"{}\"",
+            config::codex_dir(&agent).join("sqlite").display()
+        );
+        assert!(c.contains(&sqlite.as_str()), "{c:?}");
         assert_eq!(spec.env["CODEX_HOME"], "/auth/codex");
         assert_eq!(spec.env.len(), 1);
+    }
+
+    /// With no sandbox the overlays are not bound, so the SQLite files stay
+    /// next to the shared `sessions/` in `CODEX_HOME`.
+    #[test]
+    fn no_sandbox_keeps_the_sqlite_home() {
+        let spec = build(&CodexOptions::default(), &test_agent(None), None, None);
+        assert!(
+            !overrides(&spec)
+                .iter()
+                .any(|o| o.starts_with("sqlite_home"))
+        );
     }
 
     #[test]

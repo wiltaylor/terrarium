@@ -111,6 +111,19 @@ impl CodexOptions {
     pub fn host_codex_home(&self) -> &Path {
         self.host_codex_home.as_deref().unwrap_or(&self.codex_home)
     }
+
+    /// The directory that holds the agent's `sessions/` (the daemon's
+    /// view). In the sandbox (a `harness_workspace` is set) it is the
+    /// agent's own `harness/codex/`, which the sandbox binds over the
+    /// shared one ([`config`]). With no sandbox the overlays are not bound,
+    /// so it is the shared home.
+    pub fn session_home(&self, agent: &Agent) -> PathBuf {
+        if self.harness_workspace.is_some() {
+            config::codex_dir(agent)
+        } else {
+            self.host_codex_home().to_path_buf()
+        }
+    }
 }
 
 /// The Codex adapter.
@@ -160,9 +173,10 @@ impl CodexAdapter {
         Ok(auth::plan(self.options.host_codex_home())?)
     }
 
-    /// The session file of `id` (the daemon's view), if it exists.
-    pub fn session_file(&self, id: &HarnessSessionId) -> Option<PathBuf> {
-        session::find_session_file(self.options.host_codex_home(), id)
+    /// The session file of `id` for this agent (the daemon's view), if it
+    /// exists.
+    pub fn session_file(&self, agent: &Agent, id: &HarnessSessionId) -> Option<PathBuf> {
+        session::find_session_file(&self.options.session_home(agent), id)
     }
 }
 

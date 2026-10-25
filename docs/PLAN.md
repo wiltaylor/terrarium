@@ -537,8 +537,8 @@ passes straight through. Visible to the harness:
 | `/usr`, `/lib`, `/bin`, `/etc` (subset), Node, harness binaries | ro | the harness must run |
 | `/state/agents/<ulid>/workspace` as `$HOME/work` | rw | the agent's files |
 | `/state/agents/<ulid>/harness` at the same path | ro | `prompt.md` and the adapter's per-agent files. The harness cannot change them. |
-| `/auth/claude` as `$HOME/.claude`, `/auth/pi` as `$HOME/.pi`, etc. | rw | shared login and sessions |
-| per-agent overlays from `harness/` (`FileOverlay`) | rw or ro | the files that the harness writes itself are rw (Claude's `.claude.json`, `sessions/`, `history.jsonl`, `backups/`, memory; Copilot's settings, history, state files, `logs/`, cache; pi's `settings.json` and `sessions/`; Codex's `history.jsonl`); the rest are ro (Copilot's `SYSTEM.md`, hook dirs, Codex's `hooks.json`, pi's extension) |
+| `/auth/claude` as `$HOME/.claude`, `/auth/pi` as `$HOME/.pi`, etc. | rw | shared login, settings, and caches |
+| per-agent overlays from `harness/` (`FileOverlay`) | rw or ro | the files that the harness writes itself are rw (Claude's `.claude.json`, `sessions/`, `history.jsonl`, `backups/`, `projects/<cwd>/` with the transcripts and memory, `file-history/`, `todos/`, `session-env/`; Codex's `history.jsonl`, `sessions/`, `session_index.jsonl`, `shell_snapshots/`, and its SQLite home (`-c sqlite_home`); Copilot's settings, history, state files, `session-state/`, `session-store.db` with its `-wal` and `-shm`, `logs/`, cache; pi's `settings.json` and `sessions/`); the rest are ro (Copilot's `SYSTEM.md`, hook dirs, Codex's `hooks.json`, pi's extension). The session files of each agent are its own, so no agent sees the transcripts of another agent, in its project or in another project |
 | `/run/terrarium/agents/<ulid>.sock` | rw | hooks and the agent CLI |
 | `/usr/local/bin/terrarium` | ro | the CLI |
 | `/tmp`, `/proc`, `/dev/pts` | private | normal process needs |
@@ -626,7 +626,13 @@ Two delivery paths. Both are needed. The board (§13) reuses the push path.
 2. **Push.** When a message arrives and the recipient is `idle`, the runner
    types a turn into the PTY: "New mail from <agent> (thread T). Run
    `terrarium mail read --thread T`." If the recipient is `working`, the
-   message waits for the stop hook, then push runs.
+   message waits for the stop hook, then push runs. Loop guard: when a
+   thread has more than `TERRARIUM_MAIL_LOOP_LIMIT` (default 6)
+   agent-to-agent messages with no operator or project-inbox message
+   between them, the daemon types no more pointers for it, marks it
+   `paused`, and mails the operator once on the thread ("thread T needs a
+   human: N agent replies without operator input"); an operator message on
+   the thread resets the count.
 
 Safety: mail from another agent is untrusted input. The pushed turn carries
 only the sender, thread, and the command to read it. The body is read through
@@ -1318,7 +1324,8 @@ end-to-end scenarios of each phase are not scripted yet (no `spikes/e2e/`).
 | `bwrap` blocked by Docker seccomp | Document the required `--security-opt`. Sibling-container fallback. |
 | Shared harness home under concurrent writers | **Mitigated** for the files that collide: each agent gets per-agent overlays for them (next row, §11). Two Claude agents at once are verified; a test under load is not done. |
 | Harnesses that write a per-agent file by rename (Copilot `settings.json`, `command-history-state.json`, `open-sessions-state.json`) get EBUSY on a file bind, and the write is lost | Copilot start fixed by the settings key instead of the flag. Lost state writes are harmless but a per-agent `COPILOT_HOME` with symlinks to the shared `config.json`, `session-state/`, and `extensions/` would remove the file binds; open item. |
-| Shared Claude home: `history.jsonl`, `sessions/<pid>.json`, `backups/`, and auto memory are written by every agent | **Mitigated.** Per-agent overlays for all four, verified with two agents at once and a real `--resume` (spikes/claude/concurrency). The overlays live in the agent's `harness/` dir and are its only writable binds there (§11). Transcripts stay shared and readable by peers. |
+| Shared Claude home: `history.jsonl`, `sessions/<pid>.json`, `backups/`, and auto memory are written by every agent | **Mitigated.** Per-agent overlays for all four, verified with two agents at once and a real `--resume` (spikes/claude/concurrency). The overlays live in the agent's `harness/` dir and are its only writable binds there (§11). |
+| Shared session files: every agent could read, and write into, the transcripts of every other agent in every project (Claude `projects/<cwd>/`, Codex `sessions/` and its SQLite files, Copilot `session-state/` and `session-store.db`), a path for prompt injection | **Fixed** in the code: per-agent overlays for all of them (§11); the usage collector reads only the agent's own session dir (F12). A resume by each harness finds the file in the agent's own dir; a real resume on the new binds is not run yet. Transcripts from before the change stay in the shared home, where no agent sees them. |
 | Agent-to-agent prompt injection | Mail is untrusted. Push only a pointer, not the body. Delimit on read. Say so in the prompt. |
 | Runaway cost with yolo and `always` restart | Per-agent turn and time budgets. Crash-loop detection. Dashboard shows turn counts. |
 | Yolo agent escapes through `terrarium exec` | Policy limits targets per agent. Ephemeral targets by default for risky work. |

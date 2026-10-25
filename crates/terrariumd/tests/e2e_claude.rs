@@ -626,13 +626,19 @@ async fn two_claude_agents_share_one_home() {
             .1;
         let other = &first[1 - i];
         let leaks = all.to_string().contains(other.as_str());
-        let transcript = home
-            .join("projects/-home-agent-work")
-            .join(format!("{}.jsonl", first[i]));
-        let answer = last_assistant_text(&transcript);
         let own = root
             .path()
             .join(format!("state/agents/{}/harness/claude", p.id));
+        // The transcript is in the agent's own project dir (the per-agent
+        // overlay), not in the shared home.
+        let transcript = own
+            .join("projects/-home-agent-work")
+            .join(format!("{}.jsonl", first[i]));
+        let answer = last_assistant_text(&transcript);
+        let in_shared_home = home
+            .join("projects/-home-agent-work")
+            .join(format!("{}.jsonl", first[i]))
+            .exists();
         let history = std::fs::read_to_string(own.join("history.jsonl")).unwrap_or_default();
         let list = |d: &str| -> Vec<String> {
             std::fs::read_dir(own.join(d))
@@ -671,7 +677,8 @@ async fn two_claude_agents_share_one_home() {
                 "history_has_other_token": history.contains(&pairs[1 - i].token),
                 "sessions_dir": list("sessions"),
                 "backups_dir": list("backups"),
-                "memory_dir": list("memory"),
+                "memory_dir": list("projects/-home-agent-work/memory"),
+                "transcript_in_shared_home": in_shared_home,
                 "state_num_startups": state["numStartups"],
                 "state_keys": state.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>()),
             }),

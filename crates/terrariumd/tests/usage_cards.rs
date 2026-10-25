@@ -60,8 +60,14 @@ async fn start() -> TestDaemon {
     }
 }
 
+/// The directory of the Claude transcripts of `agent`: its own project
+/// dir in its harness dir (the per-agent overlay of the sandbox).
+fn sessions_dir(td: &TestDaemon, agent: &Value) -> PathBuf {
+    common::claude_project_dir(&td.state, agent["id"].as_str().unwrap())
+}
+
 /// The directory of the Claude transcripts in the shared home.
-fn sessions_dir(td: &TestDaemon) -> PathBuf {
+fn shared_sessions_dir(td: &TestDaemon) -> PathBuf {
     let dir = td.dir.path().join("auth/claude/projects/-home-agent-work");
     std::fs::create_dir_all(&dir).unwrap();
     dir
@@ -176,8 +182,7 @@ async fn samples_carry_the_in_progress_card() {
     assert_eq!(claimed["column"], "in_progress");
 
     // Two responses on two models while the card is in progress.
-    let dir = sessions_dir(&td);
-    let file = dir.join("s.jsonl");
+    let file = sessions_dir(&td, &worker).join("s.jsonl");
     append(
         &file,
         &(line("m1", "claude-haiku-5-5", 10, 5) + &line("m2", "claude-opus-5", 20, 7)),
@@ -280,7 +285,7 @@ async fn samples_carry_the_in_progress_card() {
     assert_eq!(s[2], ("m3".to_owned(), None));
 
     // An agent with no card in progress: no card.
-    let other = dir.join("s2.jsonl");
+    let other = sessions_dir(&td, &idle).join("s2.jsonl");
     append(&other, &line("m4", "claude-opus-5", 1, 1));
     emit(
         &td,
@@ -357,9 +362,8 @@ async fn a_reassigned_card_follows_its_new_assignee() {
         .await
         .ok();
 
-    let dir = sessions_dir(&td);
-    let fa = dir.join("sa.jsonl");
-    let fb = dir.join("sb.jsonl");
+    let fa = sessions_dir(&td, &a).join("sa.jsonl");
+    let fb = sessions_dir(&td, &b).join("sb.jsonl");
     append(&fa, &line("a1", "claude-opus-5", 1, 1));
     std::fs::write(&fb, "").unwrap();
     emit(
@@ -432,8 +436,9 @@ async fn wait_rejected(td: &TestDaemon, n: usize) -> Vec<(String, String)> {
 }
 
 /// F12 (`docs/security-review.md`): a forged `session_started` cannot point
-/// the collector at a file outside the harness home, at a symlink, or at
-/// the transcript of another agent.
+/// the collector at a file outside the agent's own session dir (another
+/// agent's harness dir, the shared home, `/etc`), at a symlink, or at the
+/// transcript of another agent.
 #[tokio::test]
 async fn forged_transcript_paths_are_refused() {
     let td = start().await;
@@ -442,10 +447,10 @@ async fn forged_transcript_paths_are_refused() {
     let spy = td.agent("p", "spy", json!({})).await;
     let vid = victim["id"].as_str().unwrap().to_owned();
     let sid = spy["id"].as_str().unwrap().to_owned();
-    let dir = sessions_dir(&td);
+    let dir = sessions_dir(&td, &spy);
 
     // The victim's own session counts.
-    let vfile = dir.join("sv.jsonl");
+    let vfile = sessions_dir(&td, &victim).join("sv.jsonl");
     append(&vfile, &line("v1", "claude-opus-5", 10, 10));
     emit(
         &td,
@@ -467,7 +472,8 @@ async fn forged_transcript_paths_are_refused() {
     let r = wait_rejected(&td, 1).await;
     assert!(r[0].1.contains("not under"), "{r:?}");
 
-    // The victim's transcript while the victim reads it.
+    // The victim's transcript, with the right session id: it is in the
+    // victim's harness dir, outside the spy's own session dir.
     emit(
         &td,
         &spy,
@@ -476,7 +482,7 @@ async fn forged_transcript_paths_are_refused() {
     )
     .await;
     let r = wait_rejected(&td, 2).await;
-    assert!(r[1].1.contains("another agent"), "{r:?}");
+    assert!(r[1].1.contains("not under"), "{r:?}");
 
     // The same, by the sandbox path, after the victim's session ended:
     // the store gives `sv` to the victim.
@@ -508,18 +514,35 @@ async fn forged_transcript_paths_are_refused() {
     let r = wait_rejected(&td, 3).await;
     assert!(r[2].1.contains("belongs to the agent"), "{r:?}");
 
-    // Another session id with the victim's file: the name does not match.
+    // A file in the shared home (an older layout, or the operator's own
+    // sessions): not the spy's.
+    let shared = shared_sessions_dir(&td).join("sv.jsonl");
+    append(&shared, &line("x1", "claude-opus-5", 10, 10));
     emit(
         &td,
         &spy,
         "session_started",
-        json!({"harness_session": "mine", "transcript_path": vfile}),
+        json!({"harness_session": "sv", "transcript_path": shared}),
     )
     .await;
     let r = wait_rejected(&td, 4).await;
-    assert!(r[3].1.contains("does not name the session"), "{r:?}");
+    assert!(r[3].1.contains("not under"), "{r:?}");
 
-    // A symlink in the home, and a `..` out of it.
+    // A file in the spy's own dir with another session id: the name does
+    // not match.
+    let mine = dir.join("other.jsonl");
+    append(&mine, &line("o1", "claude-opus-5", 1, 1));
+    emit(
+        &td,
+        &spy,
+        "session_started",
+        json!({"harness_session": "mine", "transcript_path": mine}),
+    )
+    .await;
+    let r = wait_rejected(&td, 5).await;
+    assert!(r[4].1.contains("does not name the session"), "{r:?}");
+
+    // A symlink in the spy's dir, and a `..` out of it.
     let link = dir.join("sl.jsonl");
     std::os::unix::fs::symlink(&vfile, &link).unwrap();
     emit(
@@ -529,8 +552,8 @@ async fn forged_transcript_paths_are_refused() {
         json!({"harness_session": "sl", "transcript_path": link}),
     )
     .await;
-    let r = wait_rejected(&td, 5).await;
-    assert!(r[4].1.contains("symlink"), "{r:?}");
+    let r = wait_rejected(&td, 6).await;
+    assert!(r[5].1.contains("symlink"), "{r:?}");
     let dotdot = dir.join("../../../../../../etc/passwd");
     emit(
         &td,
@@ -539,8 +562,8 @@ async fn forged_transcript_paths_are_refused() {
         json!({"harness_session": "passwd", "transcript_path": dotdot}),
     )
     .await;
-    let r = wait_rejected(&td, 6).await;
-    assert!(r[5].1.contains(".."), "{r:?}");
+    let r = wait_rejected(&td, 7).await;
+    assert!(r[6].1.contains(".."), "{r:?}");
     assert!(r.iter().all(|(a, _)| a == &sid), "{r:?}");
 
     // The victim's usage stays the victim's: the spy got nothing.
@@ -556,7 +579,7 @@ async fn forged_transcript_paths_are_refused() {
         .clone();
     assert_eq!(spy_usage, json!([]), "{spy_usage}");
 
-    // The spy's own session file in the home is fine.
+    // The spy's own session file in its own dir is fine.
     let own = dir.join("ss.jsonl");
     append(&own, &line("s1", "claude-opus-5", 1, 1));
     emit(
@@ -567,7 +590,7 @@ async fn forged_transcript_paths_are_refused() {
     )
     .await;
     wait_samples(&td, 2).await;
-    assert_eq!(rejected(&td).await.len(), 6);
+    assert_eq!(rejected(&td).await.len(), 7);
 }
 
 /// The model in `usage.sample` and in an ungrouped `GET /api/usage` point
@@ -580,7 +603,7 @@ async fn usage_names_the_model_of_the_session_file() {
     let a = td.agent("p", "h", json!({"model": "haiku"})).await;
     assert_eq!(a["model"], "haiku", "{a}");
     let id = a["id"].as_str().unwrap().to_owned();
-    let file = sessions_dir(&td).join("sh.jsonl");
+    let file = sessions_dir(&td, &a).join("sh.jsonl");
     append(&file, &line("h1", "claude-haiku-5-5", 3, 4));
     emit(
         &td,

@@ -12,7 +12,7 @@
 //! | `$HOME/work` | `<state>/agents/<ulid>/workspace` | rw |
 //! | `<state>/agents/<ulid>/harness` | the same path (`prompt.md`, the adapter's per-agent files) | ro |
 //! | `$HOME/.claude` (and the other harness homes) | the shared home, for example `/auth/claude` | rw |
-//! | each `FileOverlay` target | the per-agent file (also a part of `harness/` that the harness writes, such as pi's `sessions/`) | rw or ro |
+//! | each `FileOverlay` target | the per-agent file (also a part of `harness/` that the harness writes, such as pi's `sessions/`). The session files of Claude Code (`projects/<cwd>/`), Codex (`sessions/`), and Copilot (`session-state/`) are such overlays, so no agent sees the transcripts of another agent | rw or ro |
 //! | `/run/terrarium/agent.sock` | `<run>/agents/<ulid>.sock` | rw |
 //! | `/opt/terrarium/bin/terrarium` | the `terrarium` CLI | ro |
 //!
@@ -554,6 +554,12 @@ mod tests {
                     target: PathBuf::from("/home/agent/.claude/.claude.json"),
                     writable: true,
                 },
+                // The agent's own transcripts over the shared project dir.
+                FileOverlay {
+                    source: dir.join("harness/claude/projects/-home-agent-work"),
+                    target: PathBuf::from("/home/agent/.claude/projects/-home-agent-work"),
+                    writable: true,
+                },
                 FileOverlay {
                     source: dir.join("harness/pi/sessions"),
                     target: dir.join("harness/pi/sessions"),
@@ -617,6 +623,7 @@ TERRARIUM_AGENT=01K8AGENT0000000000000000A TERRARIUM_SOCKET=/run/terrarium/agent
 --ro-bind /state/agents/01K8AGENT0000000000000000A/harness /state/agents/01K8AGENT0000000000000000A/harness \
 --bind /auth/claude /home/agent/.claude \
 --bind /state/agents/01K8AGENT0000000000000000A/harness/claude/claude.json /home/agent/.claude/.claude.json \
+--bind /state/agents/01K8AGENT0000000000000000A/harness/claude/projects/-home-agent-work /home/agent/.claude/projects/-home-agent-work \
 --bind /state/agents/01K8AGENT0000000000000000A/harness/pi/sessions /state/agents/01K8AGENT0000000000000000A/harness/pi/sessions \
 --bind /run/terrarium/agents/01K8AGENT0000000000000000A.sock /run/terrarium/agent.sock \
 --ro-bind /usr/local/bin/terrarium /opt/terrarium/bin/terrarium \

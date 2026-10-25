@@ -127,6 +127,18 @@ pub fn restamp_transcript(text: &str) -> String {
     out
 }
 
+/// The agent's own Claude project dir for the sandbox cwd, on the host:
+/// `<state>/agents/<ulid>/harness/claude/projects/-home-agent-work/`. The
+/// sandbox binds it over the shared home's `projects/-home-agent-work/`,
+/// so a session file that the harness reports there is in this dir.
+#[allow(dead_code)]
+pub fn claude_project_dir(state: &Path, agent: &str) -> PathBuf {
+    let dir = terrarium_runner::harness_dir(state, agent.parse().expect("agent id"))
+        .join("claude/projects/-home-agent-work");
+    std::fs::create_dir_all(&dir).expect("project dir");
+    dir
+}
+
 pub fn write(dir: &Path, rel: &str, text: &str) {
     let p = dir.join(rel);
     std::fs::create_dir_all(p.parent().unwrap()).unwrap();

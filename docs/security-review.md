@@ -364,9 +364,27 @@ These are known and documented trade-offs. The review confirms they are intentio
   proxy-only network namespace as a future hardening, but it is out of scope for v1.
 - **`--new-session` off by default; TIOCSTI reasoning.** Each sandbox has its own
   PTY, so an injection reaches only the agent's own input (PLAN §11).
-- **Transcripts shared and readable by peers.** `projects/<cwd>/<uuid>.jsonl` and the
-  Codex and Copilot session files stay shared, so the usage collector and `--resume`
-  can read them (adapter config headers).
+- **Transcripts per agent (no longer shared, 2026-10-25).** This entry used to accept
+  shared transcripts. The live cross-harness run showed that every agent could read,
+  and write into, the transcripts of every other agent in every project: one cwd
+  (`/home/agent/work`) for all agents means one Claude `projects/<cwd>/`, and Codex
+  and Copilot had one `sessions/` and one `session-state/`. That contradicts the
+  prompt line "You cannot see the files of other agents" and is a path for prompt
+  injection. Now each agent has its own session files as read-write overlays from its
+  `harness/` dir: Claude `projects/<cwd>/` (with the auto memory), `file-history/`,
+  `todos/`, `session-env/`; Codex `sessions/`, `session_index.jsonl`,
+  `shell_snapshots/` (each holds the exported env of the agent's shell), and its
+  SQLite home (`-c sqlite_home`; `thread_history_1` holds every turn item); Copilot
+  `session-state/` and `session-store.db` with `-wal` and `-shm` (its `turns` table
+  holds every turn, and the model can query it). The cross-project exposure is
+  closed. `--resume` finds each session in the agent's own dir, and the usage
+  collector reads only that dir (F12). Residuals: Claude
+  `security_warnings_state_<uuid>.json` (a file in the home root), `paste-cache/`,
+  and `shell-snapshots/` stay shared (the Claude snapshots hold `PATH` and shell
+  functions, the same for every agent); Codex `thread-writer-locks/` stays shared
+  (empty lock files keyed by the session ID); transcripts written before the
+  change stay in the shared home, hidden from agents by the binds. With sandbox mode
+  `none` (development only) nothing is bound, and the session files are shared.
 - **The embedded login terminal is operator-only, short-lived, and audited** (PLAN
   §16.1). The device-code and paste-code flows are used because a browser loopback
   callback cannot reach into the container.
@@ -796,6 +814,15 @@ accepts only a regular file under the session area of the harness. A Claude
 Code, Codex, or Copilot file must carry the session ID in its name. A file that
 another agent reads is refused. A refused file gives a warn log and a
 `usage.rejected_path` event (`docs/api.md` §16.7).
+
+**Narrowed (2026-10-25):** the session files are now per agent (§5). In the
+sandbox the only root is the agent's own session dir:
+`harness/claude/projects/`, `harness/codex/sessions/`, or
+`harness/copilot/session-state/`. A sandbox path (`/home/agent/.claude/projects/...`)
+maps into that dir, not into the shared home. A file in another agent's
+`harness/` dir, or in the shared home, is refused even with the right session ID.
+The session-ID match stays. With sandbox mode `none` the shared home's session
+area is allowed too, because no overlay is bound there.
 
 ### F13 — A `project_admin` can grant use of global targets (LOW)
 

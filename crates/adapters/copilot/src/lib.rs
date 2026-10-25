@@ -130,6 +130,19 @@ impl CopilotOptions {
         self.host_config_dir.as_deref().unwrap_or(&self.config_dir)
     }
 
+    /// The directory that holds the agent's `session-state/` (the daemon's
+    /// view). In the sandbox (a `harness_workspace` is set) it is the
+    /// agent's own `harness/copilot/`, which the sandbox binds over the
+    /// shared one ([`config`]). With no sandbox the overlays are not bound,
+    /// so it is the shared home.
+    pub fn session_home(&self, agent: &Agent) -> PathBuf {
+        if self.harness_workspace.is_some() {
+            config::copilot_dir(agent)
+        } else {
+            self.host_config_dir().to_path_buf()
+        }
+    }
+
     /// `COPILOT_CACHE_HOME` as the harness sees it.
     pub fn harness_cache_dir(&self, agent: &Agent) -> PathBuf {
         self.cache_dir
@@ -209,8 +222,8 @@ impl CopilotAdapter {
     }
 
     /// The session file of `id` (the daemon's view).
-    pub fn session_file(&self, id: &HarnessSessionId) -> PathBuf {
-        session::events_file(self.options.host_config_dir(), id)
+    pub fn session_file(&self, agent: &Agent, id: &HarnessSessionId) -> PathBuf {
+        session::events_file(&self.options.session_home(agent), id)
     }
 }
 
@@ -273,7 +286,7 @@ impl Adapter for CopilotAdapter {
     }
 
     fn find_session_id(&self, agent: &Agent) -> Option<HarnessSessionId> {
-        session::find_session_id(self.options.host_config_dir(), agent)
+        session::find_session_id(&self.options.session_home(agent), agent)
     }
 
     fn type_turn(&self, text: &str) -> Vec<u8> {
@@ -383,8 +396,28 @@ mod tests {
         // The last one is recorded; it counts once Copilot made its dir.
         assert_eq!(a.find_session_id(&agent), None);
         let id = HarnessSessionId(sid(&two));
-        std::fs::create_dir_all(a.session_file(&id).parent().expect("dir")).expect("mk");
+        let file = a.session_file(&agent, &id);
+        assert!(file.starts_with(&home));
+        std::fs::create_dir_all(file.parent().expect("dir")).expect("mk");
         assert_eq!(a.find_session_id(&agent), Some(id.clone()));
+        // In the sandbox the session is in the agent's own directory, and
+        // the one in the shared home does not count.
+        let boxed = CopilotAdapter::new(CopilotOptions {
+            host_config_dir: Some(home.clone()),
+            harness_workspace: Some(PathBuf::from("/home/agent/work")),
+            ..CopilotOptions::default()
+        });
+        assert_eq!(boxed.find_session_id(&agent), None);
+        let own = boxed.session_file(&agent, &id);
+        assert_eq!(
+            own,
+            config::copilot_dir(&agent)
+                .join("session-state")
+                .join(&id.0)
+                .join("events.jsonl")
+        );
+        std::fs::create_dir_all(own.parent().expect("dir")).expect("mk");
+        assert_eq!(boxed.find_session_id(&agent), Some(id.clone()));
         let r = a.launch(&agent, Some(&id));
         assert!(
             r.args
