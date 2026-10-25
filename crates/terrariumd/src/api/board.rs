@@ -77,7 +77,7 @@ async fn list_cards(
             let assignee = match f.assignee.as_deref() {
                 None => None,
                 Some("me") => Some(actor.address()),
-                Some(a) => Some(crate::store::mail::resolve(c, a, Some(&name))?.key()),
+                Some(a) => Some(crate::store::mail::resolve_known(c, a, Some(&name))?.key()),
             };
             board::list_cards(c, &name, &f, assignee.as_deref(), &page)
         })

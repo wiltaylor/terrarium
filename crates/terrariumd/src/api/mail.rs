@@ -50,7 +50,7 @@ async fn list(
             let context = actor.project();
             let key = |s: &Option<String>| -> ApiResult<Option<String>> {
                 s.as_deref()
-                    .map(|s| mail::resolve(c, s, context).map(|a| a.key()))
+                    .map(|s| mail::resolve_known(c, s, context).map(|a| a.key()))
                     .transpose()
             };
             let mut f = MailFilter {

@@ -593,4 +593,17 @@ async fn names_stay_after_agent_rm() {
     assert_eq!(c["assignee_name"], "proj/w1");
     assert_eq!(c["created_by_name"], "proj/w1");
     assert_eq!(c["comments"][0]["author_name"], "proj/w1", "{c:#}");
+    // The assignee filter still takes the removed agent (the tombstone);
+    // a name that never was an agent stays not found.
+    for key in [w1_id.as_str(), "proj/w1", "w1"] {
+        let l = td
+            .get(&format!("/api/projects/proj/cards?assignee={key}"))
+            .await;
+        let l = l.ok().as_array().unwrap().clone();
+        assert_eq!(l.len(), 1, "assignee={key}: {l:#?}");
+        assert_eq!(l[0]["id"], id.as_str());
+    }
+    td.get("/api/projects/proj/cards?assignee=proj/nobody")
+        .await
+        .err(404, "not_found");
 }

@@ -40,7 +40,7 @@ async fn list(
             let author = match f.author.as_deref() {
                 None => None,
                 Some("me") => Some(actor.address()),
-                Some(a) => Some(crate::store::mail::resolve(c, a, Some(&name))?.key()),
+                Some(a) => Some(crate::store::mail::resolve_known(c, a, Some(&name))?.key()),
             };
             memory::list(c, &name, &f, author.as_deref(), &page)
         })

@@ -924,6 +924,10 @@ For an agent sender:
 - `to` and `from` take every address kind of §2.3: `operator`, `system`,
   `project:<name>`, or an agent. Nothing goes to `system`, so `to=system`
   answers `[]`. An unknown project or agent is `404`.
+- The `to` and `from` filters also find an agent that `agent rm` removed,
+  through its tombstone (by ULID or by its old name). The `assignee` filter
+  of the cards and the `author` filter of the memories do the same. A send
+  to a removed agent stays `404`.
 - The operator sees all mail. An agent sees mail to it or from it. With
   `to=project:<name>`, an agent needs the inbox right.
 - `from` defaults to the actor. The operator may send as `project:<name>`.

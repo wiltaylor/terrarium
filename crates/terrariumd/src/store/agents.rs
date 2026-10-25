@@ -667,6 +667,53 @@ pub fn removed(conn: &Connection, id: &str) -> ApiResult<Option<(String, String)
         .optional()?)
 }
 
+/// Find a deleted agent (migration 12) by ULID, `project/name`, or a bare
+/// name, the same key forms as [`find`]. Returns `(id, project, name)`.
+/// Only the read-only list filters use it, so that the operator can still
+/// list what a removed agent did. A name that two tombstones share is an
+/// error; the ULID picks one.
+pub fn find_removed(
+    conn: &Connection,
+    key: &str,
+    context: Option<&str>,
+) -> ApiResult<Option<(String, String, String)>> {
+    if key.parse::<AgentId>().is_ok() {
+        return Ok(removed(conn, key)?.map(|(p, n)| (key.to_owned(), p, n)));
+    }
+    let query = |sql: &str, args: &[&str]| -> ApiResult<Vec<(String, String, String)>> {
+        let mut stmt = conn.prepare(sql)?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(args), |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    };
+    const BY_NAME: &str =
+        "SELECT id, project, name FROM agents_removed WHERE project = ?1 AND name = ?2";
+    let rows = if let Some((project, name)) = key.split_once('/') {
+        query(BY_NAME, &[project, name])?
+    } else {
+        let mut rows = match context {
+            Some(p) => query(BY_NAME, &[p, key])?,
+            None => Vec::new(),
+        };
+        if rows.is_empty() {
+            rows = query(
+                "SELECT id, project, name FROM agents_removed WHERE name = ?1",
+                &[key],
+            )?;
+        }
+        rows
+    };
+    if rows.len() > 1 {
+        return Err(ApiError::bad_request(format!(
+            "more than one removed agent was `{key}`; use the ID"
+        )));
+    }
+    Ok(rows.into_iter().next())
+}
+
 /// The seq of the last runner event recorded for `agent` (migration 7).
 pub fn runner_seq(conn: &Connection, agent: &str) -> ApiResult<u64> {
     let seq: i64 = conn

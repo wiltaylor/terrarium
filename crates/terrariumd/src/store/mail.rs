@@ -107,6 +107,23 @@ pub fn resolve(conn: &Connection, s: &str, context: Option<&str>) -> ApiResult<A
     })
 }
 
+/// [`resolve`] for the read-only list filters: an agent key that no live
+/// agent has falls back to the tombstone of a deleted agent (migration 12),
+/// so the mail, cards, and memories of a removed agent stay listable. A
+/// key that never was an agent is still not found. The write paths use
+/// [`resolve`], so mail to a removed agent stays refused.
+pub fn resolve_known(conn: &Connection, s: &str, context: Option<&str>) -> ApiResult<Address> {
+    match resolve(conn, s, context) {
+        Err(e) if e.code == crate::error::Code::NotFound && !s.trim().starts_with("project:") => {
+            match agents::find_removed(conn, s.trim(), context)? {
+                Some((id, project, name)) => Ok(Address::Agent { id, name, project }),
+                None => Err(e),
+            }
+        }
+        r => r,
+    }
+}
+
 /// Turn a stored key back into an address.
 fn from_key(conn: &Connection, key: &str, cache: &mut HashMap<String, Address>) -> Address {
     if let Some(a) = cache.get(key) {

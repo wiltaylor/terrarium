@@ -398,6 +398,42 @@ async fn mail_reads_are_audited_and_names_stay_after_agent_rm() {
         ))
         .await;
     assert_eq!(to.ok()[0]["to_name"], "a/worker");
+    // The list filters still take the removed agent, by ULID and by
+    // project/name, through the tombstone.
+    for key in [worker.as_str(), "a/worker", "a%2Fworker"] {
+        let by_to = td.get(&format!("/api/mail?to={key}")).await;
+        let by_to = by_to.ok().as_array().unwrap().clone();
+        assert_eq!(by_to.len(), 1, "to={key}: {by_to:#?}");
+        assert_eq!(by_to[0]["id"], to_worker.as_str());
+        assert_eq!(by_to[0]["to_name"], "a/worker");
+        let by_from = td.get(&format!("/api/mail?from={key}")).await;
+        let by_from = by_from.ok().as_array().unwrap().clone();
+        assert_eq!(by_from.len(), 1, "from={key}: {by_from:#?}");
+        assert_eq!(by_from[0]["id"], m.as_str());
+        assert_eq!(by_from[0]["from_name"], "a/worker");
+    }
+    // Mail to the removed agent stays refused.
+    let r = td
+        .post("/api/mail", json!({"to": worker, "body": "late"}))
+        .await;
+    assert_eq!(r.status, 404, "{}", r.body);
+}
+
+/// A list filter key that never was an agent is not found, also with the
+/// tombstone fallback of the list filters.
+#[tokio::test]
+async fn mail_list_filter_on_a_never_existing_agent_is_not_found() {
+    let td = two_projects().await;
+    for q in [
+        "to=a/nobody",
+        "from=a/nobody",
+        "to=nobody",
+        "to=01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "from=01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    ] {
+        let r = td.get(&format!("/api/mail?{q}")).await;
+        assert_eq!(r.status, 404, "{q}: {}", r.body);
+    }
 }
 
 /// The `from` and `to` filters of `GET /api/mail` take the same address
