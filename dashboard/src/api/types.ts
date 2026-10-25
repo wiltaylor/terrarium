@@ -49,6 +49,52 @@ export interface HarnessVersion {
   in_range: boolean | null;
   error?: string;
   checked_at: string | null;
+  /** `?latest=true` only: the latest release on npm; null when npm did not answer (`latest_error` says why). */
+  latest?: HarnessLatest | null;
+  /** `?latest=true` only: the bump from `pinned` to `latest` (`scripts/harness.py`); null when `latest` is null. */
+  update?: HarnessUpdateKind | null;
+  /** `?latest=true` only, when `latest` is null: why. */
+  latest_error?: string;
+}
+
+/** `dist-tags.latest` of the package on npm, and its time. */
+export interface HarnessLatest {
+  version: string;
+  published_at: string | null;
+}
+
+/** `none`: the pin is the latest. `major`: the first non-zero part changes (for 0.x, the second number). */
+export type HarnessUpdateKind = "none" | "minor" | "major";
+
+/** `POST /api/hosts/{name}/harness-update` (`201`). */
+export interface HarnessUpdateStarted {
+  session_id: string;
+  host: string;
+  /** `["all"]` or the one harness. */
+  names: string[];
+  /** The path of the output, `GET /api/hosts/{name}/sessions/{id}/output`. */
+  output: string;
+  /** What the operator runs after the update: the daemon cannot recreate its container. */
+  rollout: string;
+}
+
+/** One chunk of exec output (base64). */
+export interface OutputChunk {
+  stream: "stdout" | "stderr" | "file";
+  data: string;
+}
+
+/** `GET /api/hosts/{name}/sessions/{id}/output` (and the target form, docs/api.md §17). */
+export interface SessionOutput {
+  session_id: string;
+  since: number;
+  next: number;
+  chunks: OutputChunk[];
+  done: boolean;
+  end?: { type: "exit"; code?: number | null; signal?: number | null; reason: string } | { type: "error"; code: string; message: string } | { type: "cp"; bytes: number; sha256: string };
+  result?: unknown;
+  /** `harness.update` after an exit 0: the rollout to run on the host. */
+  rollout?: string;
 }
 
 /** What an agent start does outside the range (`TERRARIUM_HARNESS_VERSION_POLICY`). */
@@ -1115,6 +1161,8 @@ export interface HostCapabilities {
   docker?: ToolCapability;
   vmlab?: ToolCapability;
   shell?: string;
+  /** The host agent's config sets `terrarium_repo_dir`: it runs `harness.update`. */
+  can_update_harnesses?: boolean;
 }
 
 /** `GET /api/hosts`: a host agent in the daemon's registry, with its link state. */

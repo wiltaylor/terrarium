@@ -158,6 +158,11 @@ pub struct HostCapabilities {
     /// The shell that `terrarium shell` starts on a `host` target.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shell: Option<String>,
+    /// The host agent's config sets `terrarium_repo_dir` (a checkout of
+    /// Terrarium on the Docker host), so it runs the `harness.update` verb.
+    /// An older host agent sends none: false.
+    #[serde(default)]
+    pub can_update_harnesses: bool,
 }
 
 impl HostCapabilities {

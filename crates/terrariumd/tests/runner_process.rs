@@ -819,6 +819,7 @@ async fn ephemeral_targets_follow_the_agent() {
         },
         vmlab: ToolCapability::default(),
         shell: Some("/bin/sh".into()),
+        can_update_harnesses: false,
     };
     o.backoff_min = Duration::from_millis(50);
     o.backoff_max = Duration::from_millis(200);

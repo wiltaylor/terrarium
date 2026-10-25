@@ -159,6 +159,7 @@ pub async fn start_with_usage(
         insecure_agent_header: cfg.insecure_agent_header,
         usage: Arc::new(usage_collector::UsageRuntime::new(usage)),
         executor: Arc::default(),
+        harness_latest: Arc::default(),
         web: cfg.web.clone(),
         artifact_listen: cfg
             .artifact_listen

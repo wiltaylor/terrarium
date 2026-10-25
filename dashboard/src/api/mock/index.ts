@@ -36,6 +36,7 @@ import type {
   CardComment,
   ColumnEdit,
   EventQuery,
+  HarnessVersion,
   Host,
   LoginKind,
   LoginSession,
@@ -43,6 +44,7 @@ import type {
   Project,
   Repo,
   Role,
+  SessionOutput,
   Subscription,
   Lease,
   NewTarget,
@@ -56,6 +58,7 @@ import type {
 } from "../types";
 import { paginate, type PageQuery } from "../../lib/paging";
 import { fakeUlid, seed, type MockWorld, type UsageRow } from "./data";
+import { HARNESS_ROLLOUT, harnessUpdateKind } from "../../lib/harness-update";
 import { FakePty } from "./pty";
 
 export interface MockOptions {
@@ -149,6 +152,8 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
   const ulid = (tag: string) => fakeUlid(tag, ++counter);
   const startedAt = now();
   const later = (fn: () => void, ms = step) => setTimeout(fn, ms);
+  /** `harness.update` sessions: the scripted output, one chunk for each read. */
+  const hostSessions = new Map<string, { host: string; chunks: { stream: "stdout" | "stderr"; text: string }[]; sent: number; next: number }>();
 
   const reply = <T>(fn: () => T): Promise<T> =>
     new Promise<T>((resolve, reject) => {
@@ -1171,18 +1176,25 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
         started_at: new Date(startedAt - 3600_000).toISOString(),
         definitions: { projects: 1, agents: 1, targets: 0, subscriptions: 0 },
       })),
-    harnesses: () =>
+    harnesses: (_refresh, latest) =>
       reply(() => {
         const at = new Date(startedAt).toISOString();
-        const row = (harness: "claude" | "codex" | "copilot" | "pi", pkg: string, pinned: string, tested: string, installed: string, in_range: boolean) => ({ harness, package: pkg, pinned, tested, installed, in_range, checked_at: at });
+        type Npm = { version: string; days: number } | { error: string };
+        const row = (harness: "claude" | "codex" | "copilot" | "pi", pkg: string, pinned: string, tested: string, installed: string, in_range: boolean, npm: Npm): HarnessVersion => {
+          const base: HarnessVersion = { harness, package: pkg, pinned, tested, installed, in_range, checked_at: at };
+          if (!latest) return base;
+          if ("error" in npm) return { ...base, latest: null, update: null, latest_error: npm.error };
+          return { ...base, latest: { version: npm.version, published_at: new Date(startedAt - npm.days * 86_400_000).toISOString() }, update: harnessUpdateKind(pinned, npm.version) };
+        };
         return {
           policy: "warn" as const,
           harnesses: [
-            row("claude", "@anthropic-ai/claude-code", "2.1.310", ">=2.1.310, <2.2.0", "2.1.310", true),
-            row("codex", "@openai/codex", "0.160.0", ">=0.160.0, <0.161.0", "0.160.0", true),
-            row("copilot", "@github/copilot", "1.0.103", ">=1.0.103, <1.1.0", "1.0.103", true),
-            // Out of range, so mock mode shows the badge.
-            row("pi", "@earendil-works/pi-coding-agent", "0.85.1", ">=0.85.1, <0.86.0", "0.86.2", false),
+            row("claude", "@anthropic-ai/claude-code", "2.1.310", ">=2.1.310, <2.2.0", "2.1.310", true, { version: "2.1.310", days: 3 }),
+            // 0.x: the second number is the major.
+            row("codex", "@openai/codex", "0.164.0", ">=0.164.0, <0.165.0", "0.164.0", true, { version: "0.165.0", days: 1 }),
+            row("copilot", "@github/copilot", "1.0.103", ">=1.0.103, <1.1.0", "1.0.103", true, { version: "1.0.110", days: 2 }),
+            // Out of range, so mock mode shows the badge; npm does not answer for it.
+            row("pi", "@earendil-works/pi-coding-agent", "1.4.0", ">=1.4.0, <1.5.0", "1.5.1", false, { error: "cannot reach npm: connection refused" }),
           ],
         };
       }),
@@ -2347,6 +2359,53 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           w.hosts.splice(w.hosts.indexOf(h), 1);
           delete w.hostTokens[name];
           audit("host.revoke", name, undefined);
+        }),
+      harnessUpdate: (name, names) =>
+        reply(() => {
+          const h = find(w.hosts, (x) => x.name === name, `host \`${name}\``);
+          const known = ["claude", "codex", "copilot", "pi"];
+          if (names !== "all" && (!Array.isArray(names) || names.length !== 1 || !known.includes(names[0]!)))
+            fail(422, "invalid", `\`names\` must be "all" or a list of one harness (${known.join(", ")})`);
+          if (h.status !== "online") fail(409, "conflict", `host \`${name}\` is offline`);
+          if (!h.capabilities?.can_update_harnesses)
+            fail(422, "invalid", `host \`${name}\` does not update harnesses: set \`terrarium_repo_dir\` (the Terrarium checkout) in its config and restart it (docs/host-protocol.md, harness.update)`);
+          const checked = names === "all" ? ["all"] : names;
+          const id = ulid("hus");
+          const args = names === "all" ? "latest --no-rollout" : `update ${names[0]} --allow-major`;
+          hostSessions.set(id, {
+            host: name,
+            chunks: [
+              { stream: "stderr", text: `$ uv run python scripts/harness.py ${args}\n` },
+              { stream: "stdout", text: "codex: 0.164.0 -> 0.165.0 (major)\nWARNING: codex 0.164.0 -> 0.165.0 is a major bump: hooks and flags may have changed\n" },
+              { stream: "stdout", text: "build the image ... ok\ndry compat ... ok\n" },
+              { stream: "stdout", text: "\n--no-rollout: the stack still runs the old image. Roll out with `just harness::rollout`.\n" },
+            ],
+            sent: 0,
+            next: 0,
+          });
+          audit("harness.update", name, undefined, { session: id, host: name, names: checked });
+          return { session_id: id, host: name, names: checked, output: `/api/hosts/${name}/sessions/${id}/output`, rollout: HARNESS_ROLLOUT };
+        }),
+      sessionOutput: (name, session, since) =>
+        reply(() => {
+          const s = hostSessions.get(session);
+          if (!s || s.host !== name) fail(404, "not_found", `no exec session \`${session}\` on target \`host:${name}\``);
+          // One chunk for each read, as a slow build would give.
+          const c = s.chunks[s.sent];
+          const out: SessionOutput = { session_id: session, since, next: since, chunks: [], done: false };
+          if (c) {
+            const data = btoa(c.text);
+            s.sent += 1;
+            s.next = since + c.text.length;
+            out.chunks = [{ stream: c.stream, data }];
+            out.next = s.next;
+          }
+          if (s.sent >= s.chunks.length) {
+            out.done = true;
+            out.end = { type: "exit", code: 0, signal: null, reason: "exited" };
+            out.rollout = HARNESS_ROLLOUT;
+          }
+          return out;
         }),
     },
 

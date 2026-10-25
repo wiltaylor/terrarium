@@ -10,6 +10,7 @@
 //! allowed_cwd_roots = ["/home/wil/labs", "/srv/build"]
 //! # server_fingerprint_sha256 = "AB:CD:..."   # pin a self-signed daemon
 //! # allow_insecure = false                    # ws:// to a remote host
+//! # terrarium_repo_dir = "/home/wil/dev/terrarium"  # allow harness.update
 //! ```
 
 use std::path::{Component, Path, PathBuf};
@@ -84,6 +85,20 @@ pub struct Config {
     /// time. The daemon enforces it (`429 rate_limited`).
     #[serde(default = "default_max_running_targets")]
     pub max_running_targets: u32,
+    /// The checkout of Terrarium on this host: the dir of `compose.yaml`
+    /// and `harnesses.toml`. When set, the host agent runs the
+    /// `harness.update` verb there (`uv run python scripts/harness.py`) and
+    /// `hello` sends `can_update_harnesses: true`. Unset: it refuses the
+    /// verb. Set it only on the Docker host of the Terrarium container.
+    #[serde(default)]
+    pub terrarium_repo_dir: Option<PathBuf>,
+    /// The `uv` binary for `harness.update`.
+    #[serde(default = "default_uv")]
+    pub uv_bin: String,
+}
+
+fn default_uv() -> String {
+    "uv".into()
 }
 
 /// The default of `max_running_targets`.
@@ -181,6 +196,8 @@ impl Default for Config {
             instances_dir: None,
             repos_dir: None,
             max_running_targets: default_max_running_targets(),
+            terrarium_repo_dir: None,
+            uv_bin: default_uv(),
         }
     }
 }

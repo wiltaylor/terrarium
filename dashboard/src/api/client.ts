@@ -37,6 +37,8 @@ import type {
   ExecOpened,
   ExecRequest,
   HarnessReport,
+  HarnessUpdateStarted,
+  SessionOutput,
   Health,
   Host,
   InboxQuery,
@@ -90,8 +92,11 @@ import type {
 
 export interface Api {
   health(): Promise<Health>;
-  /** `GET /api/harnesses`: each harness against its pin and tested range. `refresh` runs the binaries again. */
-  harnesses(refresh?: boolean): Promise<HarnessReport>;
+  /**
+   * `GET /api/harnesses`: each harness against its pin and tested range. `refresh` runs the binaries
+   * again (and asks npm again); `latest` adds the latest npm release and the update kind.
+   */
+  harnesses(refresh?: boolean, latest?: boolean): Promise<HarnessReport>;
 
   /** Dashboard sessions (docs/api.md §1.1). */
   session: {
@@ -312,6 +317,10 @@ export interface Api {
     create(name: string): Promise<NewHostToken>;
     /** Revoke the token: the daemon sends `goodbye token_revoked` and closes the link. */
     revoke(name: string): Promise<void>;
+    /** `POST /api/hosts/{name}/harness-update`: run `scripts/harness.py` on the host (operator only). `names`: `"all"` or one harness. */
+    harnessUpdate(name: string, names: "all" | string[]): Promise<HarnessUpdateStarted>;
+    /** `GET /api/hosts/{name}/sessions/{id}/output`: long-poll a host session's output from `since`. */
+    sessionOutput(name: string, session: string, since: number, wait?: number): Promise<SessionOutput>;
   };
 
   events: {
@@ -371,7 +380,12 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
 
   return {
     health: () => get("/api/health"),
-    harnesses: (refresh) => get("/api/harnesses", refresh ? { refresh: true } : undefined),
+    harnesses: (refresh, latest) => {
+      const q: Query = {};
+      if (refresh) q.refresh = true;
+      if (latest) q.latest = true;
+      return get("/api/harnesses", Object.keys(q).length ? q : undefined);
+    },
 
     session: {
       create: async (token) => {
@@ -563,6 +577,8 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       list: () => all("/api/hosts"),
       create: (name) => post("/api/hosts", { name }),
       revoke: (name) => del(`/api/hosts/${seg(name)}`),
+      harnessUpdate: (name, names) => post(`/api/hosts/${seg(name)}/harness-update`, { names }),
+      sessionOutput: (name, session, since, wait = 20) => get(`/api/hosts/${seg(name)}/sessions/${seg(session)}/output`, { since, wait }),
     },
 
     events: {

@@ -689,6 +689,10 @@ prompt extension. It is the only place to change a version
 - The daemon and the compatibility suite. Both compare the installed
   version with the adapter's `tested` range.
 
+The dashboard's Subscriptions page shows the same status and the command
+to run, and can run it through a host agent with `terrarium_repo_dir`
+([api.md `GET /api/harnesses`](api.md#get-apiharnesses)).
+
 ### 7.1 Check
 
 ```sh

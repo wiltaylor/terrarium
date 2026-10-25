@@ -54,20 +54,30 @@ pub async fn health(State(state): State<Shared>) -> Json<Health> {
 /// The query of `GET /api/harnesses`.
 #[derive(Debug, Default, Deserialize)]
 pub struct HarnessQuery {
-    /// Run `<binary> --version` again; else a cached answer (10 minutes).
+    /// Run `<binary> --version` again, and ask npm again with `latest`;
+    /// else cached answers (10 minutes, and 1 hour for npm).
     #[serde(default)]
     pub refresh: bool,
+    /// Add the latest release on npm, and the update kind, to each row.
+    #[serde(default)]
+    pub latest: bool,
 }
 
 /// `GET /api/harnesses`: for each harness, the pin from `harnesses.toml`,
 /// the adapter's tested range, the installed version, and whether it is in
 /// the range; and the start policy (`TERRARIUM_HARNESS_VERSION_POLICY`).
-/// Every caller may read it.
+/// With `latest`, also the latest release on npm and the update kind; npm
+/// that does not answer gives `latest: null` and `latest_error`, never an
+/// error status. Every caller may read it.
 pub async fn harnesses(
     State(state): State<Shared>,
     ApiQuery(q): ApiQuery<HarnessQuery>,
 ) -> Json<crate::harness_versions::HarnessReport> {
-    Json(state.supervisor.harness_versions(q.refresh).await)
+    let mut report = state.supervisor.harness_versions(q.refresh).await;
+    if q.latest {
+        state.harness_latest.fill(&mut report, q.refresh).await;
+    }
+    Json(report)
 }
 
 /// `POST /api/reload`: read the definition files again and sync them.

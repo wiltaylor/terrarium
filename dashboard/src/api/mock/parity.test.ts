@@ -514,6 +514,30 @@ describe("mock parity with docs/api.md", () => {
     expect(lab1.capabilities).toMatchObject({ docker: { present: true, version: "29.8.0" }, vmlab: { present: true } });
   });
 
+  it("answers GET /api/harnesses?latest=true and the harness.update verb in the daemon's shapes", async () => {
+    const api = mock();
+    // The fields of `harness_versions::HarnessVersion` (docs/api.md GET /api/harnesses).
+    const ROW = ["harness", "package", "pinned", "tested", "installed", "in_range", "error", "checked_at", "latest", "update", "latest_error"];
+    const r = await api.harnesses(true, true);
+    for (const h of r.harnesses) {
+      for (const k of Object.keys(h)) expect(ROW).toContain(k);
+      expect(h).toHaveProperty("latest");
+      expect(h).toHaveProperty("update");
+      expect(["none", "minor", "major", null]).toContain(h.update);
+      if (h.latest === null) expect(typeof h.latest_error).toBe("string");
+      else expect(h.latest!.published_at === null || !Number.isNaN(Date.parse(h.latest!.published_at))).toBe(true);
+    }
+    // Without `latest`, no npm fields.
+    for (const h of (await api.harnesses()).harnesses) for (const k of ["latest", "update", "latest_error"]) expect(h).not.toHaveProperty(k);
+    const lab1 = (await api.hosts.list()).find((h) => h.name === "lab1")!;
+    expect(lab1.capabilities?.can_update_harnesses).toBe(true);
+    const s = await api.hosts.harnessUpdate("lab1", ["codex"]);
+    expect(s).toMatchObject({ host: "lab1", names: ["codex"], rollout: "rollout needed: run `just up` on the host" });
+    const o = await api.hosts.sessionOutput("lab1", s.session_id, 0);
+    expect(Object.keys(o).sort()).toEqual(["chunks", "done", "next", "session_id", "since"]);
+    await expect(api.hosts.sessionOutput("lab1", "nope", 0)).rejects.toMatchObject({ status: 404, code: "not_found" });
+  });
+
   it("runs the target lifecycle with the daemon's states, and answers each verb with the executor report", async () => {
     const api = mock();
     const state = async (name: string) => (await api.targets.list()).find((x) => x.name === name)!;

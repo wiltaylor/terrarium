@@ -149,8 +149,13 @@ pub struct ReqwestHttp {
 
 impl ReqwestHttp {
     pub fn new() -> Self {
+        Self::with_timeout(Duration::from_secs(20))
+    }
+
+    /// The same client with another request timeout.
+    pub fn with_timeout(timeout: Duration) -> Self {
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(20))
+            .timeout(timeout)
             .user_agent(concat!("terrarium/", env!("CARGO_PKG_VERSION")))
             .build()
             .unwrap_or_default();

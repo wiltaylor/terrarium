@@ -75,6 +75,8 @@ pub struct AppState {
     pub usage: Arc<crate::usage_collector::UsageRuntime>,
     /// Host agents, exec sessions, and target routing (PLAN §19).
     pub executor: Arc<crate::executor::Executor>,
+    /// The latest harness releases on npm (`GET /api/harnesses?latest=true`).
+    pub harness_latest: Arc<crate::harness_versions::LatestCache>,
     /// The origins, WebSocket auth, and sessions (`DaemonConfig::web`).
     pub web: crate::settings::WebConfig,
     /// The artifact listener address. Empty: no listener of its own, and
@@ -729,6 +731,7 @@ mod tests {
             insecure_agent_header: false,
             usage: Arc::default(),
             executor: Arc::default(),
+            harness_latest: Arc::default(),
             web: crate::settings::WebConfig::default(),
             artifact_listen: String::new(),
         })
