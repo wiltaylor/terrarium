@@ -17,6 +17,7 @@
 //! | `sidebar-sessions-state/` | the same | rw | Keyed by a hash; every agent has the same cwd, so the agents would share one file. |
 //! | `session-state/` | the same | rw | The transcripts: `session-state/<id>/events.jsonl`, `workspace.yaml`, `checkpoints/`, `rewind-file-snapshots/`. One directory per session UUID does not collide, but a shared directory lets each agent read, and write into, the transcripts and file snapshots of every other agent in every project (a path for prompt injection). `--resume <id>` finds `session-state/<id>/` in the agent's own directory. The daemon's usage collector reads it from the agent's harness dir. |
 //! | `session-store.db`, `session-store.db-wal`, `session-store.db-shm` | the same | rw | SQLite in WAL mode. The `turns` table holds the user message and the reply of every turn, and the model can query it (the `session_store_sql` tool, "Querying past sessions"). Shared, each agent could read the turns of every other agent. All three files are bound, so the database stays with its `-wal` and `-shm`. SQLite cannot delete the `-wal` of a file bind at the close; it ignores that error, and the next open reads the file (verified with `bwrap`, Python `sqlite3`, and `node:sqlite` on 2026-10-25). A start of Copilot on these binds is not tested yet. |
+//! | `logs/` | `logs/` | rw | The same directory as `--log-dir`. The system-prompt extension subprocess ignores `--log-dir` and writes `logs/process-<ts>-<pid>.log` in the home (one file for each start; it holds the session ID). With the bind, both logs land in the agent's own `logs/`. |
 //! | `cache/` | `$HOME/.cache/copilot` (when [`CopilotOptions::cache_dir`] is set) | rw | Copilot writes outside its home (`COPILOT_CACHE_HOME`). |
 //!
 //! Copilot writes `settings.json`, `command-history-state.json`,
@@ -76,6 +77,9 @@ pub const SIDEBAR_DIR: &str = "sidebar-sessions-state";
 pub const CONFIG_FILE: &str = "config.json";
 /// The session files in the home: `session-state/<id>/events.jsonl`.
 pub const SESSION_STATE_DIR: &str = "session-state";
+/// The log directory in the home. The extension subprocess writes there and
+/// ignores `--log-dir`.
+pub const LOGS_DIR: &str = "logs";
 /// The session store in the home: one SQLite database in WAL mode, as
 /// three files.
 pub const SESSION_STORE_FILES: &[&str] = &[
@@ -327,9 +331,18 @@ pub fn materialize(
         });
     }
 
+    // The extension subprocess writes its log to `$COPILOT_HOME/logs/` and
+    // ignores `--log-dir`. Bind the agent's own log directory there too.
+    let logs = logs_dir(agent);
+    overlays.push(dir_overlay(
+        &logs,
+        &home.join(LOGS_DIR),
+        target(LOGS_DIR),
+        true,
+    )?);
+
     // Copilot writes its logs (`--log-dir`); the rest of the harness
     // directory is read-only in the sandbox.
-    let logs = logs_dir(agent);
     overlays.push(FileOverlay {
         source: logs.clone(),
         target: logs,
@@ -415,6 +428,7 @@ mod tests {
             ("session-store.db", true),
             ("session-store.db-wal", true),
             ("session-store.db-shm", true),
+            ("logs", true),
         ]
         .iter()
         .map(|(n, w)| (own.join(n), inside.join(n), *w))

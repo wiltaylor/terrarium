@@ -390,7 +390,7 @@ Each agent's session files are now read-write overlays from its own `harness/<ha
 |---|---|---|
 | Claude Code | `projects/<encoded cwd>/`, `file-history/`, `todos/`, `session-env/` | `--resume <uuid>` reads `projects/<encoded cwd>/<uuid>.jsonl` ("Session file" above). It searches the project dirs of the home ("Resume from another cwd"); in the sandbox the cwd dir is the agent's own. Claude Code keeps no other index. |
 | Codex | `sessions/`, `session_index.jsonl`, `shell_snapshots/`, and a SQLite home `harness/codex/sqlite/` (bound over itself; `-c sqlite_home="<dir>"`) | `codex resume <id>` looks the ID up in the `threads` table of `state_5.sqlite` (`rollout_path`), else in `sessions/`. A new SQLite home backfills `threads` from `$CODEX_HOME/sessions/` at the start (verified: a copied rollout got a `threads` row and a `backfill_state` of `complete`, no model turn). Both are the agent's own. `session_index.jsonl` (the thread names) is needed only for a resume by name and for the picker. |
-| Copilot CLI | `session-state/`, `session-store.db`, `session-store.db-wal`, `session-store.db-shm` | `--resume <id>` reads `session-state/<id>/` ("Session file" in the Copilot section). The daemon finds the ID in `harness/copilot/session-id` and checks `harness/copilot/session-state/<id>/`. |
+| Copilot CLI | `session-state/`, `session-store.db`, `session-store.db-wal`, `session-store.db-shm`, `logs/` (the same dir as `--log-dir`; the extension subprocess writes `logs/process-<ts>-<pid>.log` in the home and ignores `--log-dir`) | `--resume <id>` reads `session-state/<id>/` ("Session file" in the Copilot section). The daemon finds the ID in `harness/copilot/session-id` and checks `harness/copilot/session-state/<id>/`. |
 | pi | none new: `sessions/` was per agent already | `--session <id>` in the agent's own `sessions/` |
 
 Facts behind the choice:
@@ -923,7 +923,7 @@ after it was sent) was not drawn yet; it is labelled `lag-`.
 - Docker re-check (2026-10-25): Copilot runs in the bwrap sandbox with `"experimental": true` in the per-agent `settings.json`; the agent prompt reaches the model through `APPEND_SYSTEM.md`, after Copilot's own prompt. Stop with `/exit\r` in one write exits 0 in 0.19 s with `SessionEnd` reason `user_exit`, so Copilot needs no `exit_key_pause`.
 - At the first prompt Copilot makes one extra model call to `gpt-4o-mini-2024-07-18` for the session title. The exit screen showed "AI Credits 0", so it appears free.
 
-- Live isolation check (2026-10-25): Copilot starts on the three `session-store.db*` file binds with no SQLite error; the `-wal` file stays after exit and the next open reads it. A hidden session on `--resume` exits 1 with "No session, task, or name matched", and the daemon starts a new session with the recap turn. The system-prompt extension subprocess writes its log to the shared `logs/`, not to `--log-dir`; it holds only the session ID.
+- Live isolation check (2026-10-25): Copilot starts on the three `session-store.db*` file binds with no SQLite error; the `-wal` file stays after exit and the next open reads it. A hidden session on `--resume` exits 1 with "No session, task, or name matched", and the daemon starts a new session with the recap turn. The system-prompt extension subprocess writes its log to the shared `logs/`, not to `--log-dir`; it holds only the session ID. Fixed: the per-agent `logs/` (the `--log-dir` dir) is bound over `$COPILOT_HOME/logs/` (not re-checked live).
 
 ## Copilot CLI: not tested
 

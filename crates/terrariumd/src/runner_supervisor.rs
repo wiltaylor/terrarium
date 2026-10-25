@@ -2487,6 +2487,7 @@ mod tests {
                     "session-store.db",
                     "session-store.db-wal",
                     "session-store.db-shm",
+                    "logs",
                 ],
             ),
         ];
