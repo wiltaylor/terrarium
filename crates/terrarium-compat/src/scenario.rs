@@ -7,10 +7,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
+use terrarium_core::adapter::exit_key_writes;
 use terrarium_core::config::AgentDef;
 use terrarium_core::{
-    Agent, AgentStatus, Event, EventRecord, FileOverlay, HarnessId, HarnessSessionId, LaunchSpec,
-    ScreenHint,
+    Adapter, Agent, AgentStatus, Event, EventRecord, FileOverlay, HarnessId, HarnessSessionId,
+    LaunchSpec, ScreenHint,
 };
 use terrarium_runner::{NoHandler, Runner, RunnerConfig};
 
@@ -390,8 +391,12 @@ impl Ctx<'_> {
     async fn stop(&self, live: &Live) -> String {
         let t = Instant::now();
         let keys = self.h.exit_keys();
+        let runner = &live.runner;
         if !keys.is_empty()
-            && live.runner.write(&keys).await.is_ok()
+            && type_exit_keys(&keys, live.rec.exit_key_pause(), |w| async move {
+                runner.write(&w).await.is_ok()
+            })
+            .await
             && let Ok(st) = tokio::time::timeout(EXIT_LIMIT, live.runner.wait()).await
         {
             return format!(
@@ -410,6 +415,24 @@ impl Ctx<'_> {
                 .unwrap_or_else(|_| "still running".into())
         )
     }
+}
+
+/// Type the exit keys as the runner's `stop` does: the writes of
+/// [`exit_key_writes`], with `pause` between them. False when a write fails.
+async fn type_exit_keys<F, Fut>(keys: &[u8], pause: Duration, mut write: F) -> bool
+where
+    F: FnMut(Vec<u8>) -> Fut,
+    Fut: Future<Output = bool>,
+{
+    for (i, w) in exit_key_writes(keys, pause).into_iter().enumerate() {
+        if i > 0 {
+            tokio::time::sleep(pause).await;
+        }
+        if !write(w).await {
+            return false;
+        }
+    }
+    true
 }
 
 struct Turn {
@@ -1350,5 +1373,86 @@ async fn codex_empty_hooks(h: &Codex, settings: &Settings, report: &mut Report) 
                 tail(&broken.2)
             ),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use semver::{Version, VersionReq};
+    use terrarium_core::HookPayload;
+
+    use super::*;
+
+    /// An adapter with `/exit` exit keys and a set exit-key pause.
+    struct FakeAdapter {
+        pause: Duration,
+    }
+
+    impl Adapter for FakeAdapter {
+        fn id(&self) -> HarnessId {
+            HarnessId::Codex
+        }
+        fn tested_version(&self) -> VersionReq {
+            VersionReq::STAR
+        }
+        fn detect_version(&self) -> terrarium_core::Result<Version> {
+            Ok(Version::new(1, 0, 0))
+        }
+        fn launch(&self, agent: &Agent, _resume: Option<&HarnessSessionId>) -> LaunchSpec {
+            LaunchSpec::new("true", &agent.workspace)
+        }
+        fn hook_event(&self, _hook: &HookPayload) -> Vec<Event> {
+            Vec::new()
+        }
+        fn exit_keys(&self) -> Vec<u8> {
+            b"/exit\r".to_vec()
+        }
+        fn exit_key_pause(&self) -> Duration {
+            self.pause
+        }
+    }
+
+    /// The writes of the suite's stop through the recording adapter, with
+    /// the time of each.
+    async fn stop_writes(pause: Duration) -> Vec<(Instant, Vec<u8>)> {
+        let rec = RecordingAdapter::new(Arc::new(FakeAdapter { pause }));
+        let log = Mutex::new(Vec::new());
+        let ok = type_exit_keys(&rec.exit_keys(), rec.exit_key_pause(), |w| {
+            log.lock().unwrap().push((Instant::now(), w));
+            async { true }
+        })
+        .await;
+        assert!(ok);
+        log.into_inner().unwrap()
+    }
+
+    #[tokio::test]
+    async fn stop_splits_the_cr_after_the_exit_key_pause() {
+        let pause = Duration::from_millis(300);
+        let writes = stop_writes(pause).await;
+        let bytes: Vec<&[u8]> = writes.iter().map(|(_, w)| w.as_slice()).collect();
+        assert_eq!(bytes, vec![b"/exit".as_slice(), b"\r".as_slice()]);
+        assert!(writes[1].0 - writes[0].0 >= pause);
+    }
+
+    #[tokio::test]
+    async fn stop_with_no_pause_is_one_write() {
+        let writes = stop_writes(Duration::ZERO).await;
+        let bytes: Vec<&[u8]> = writes.iter().map(|(_, w)| w.as_slice()).collect();
+        assert_eq!(bytes, vec![b"/exit\r".as_slice()]);
+    }
+
+    #[tokio::test]
+    async fn stop_ends_at_a_failed_write() {
+        let mut n = 0;
+        let ok = type_exit_keys(b"/exit\r", Duration::from_millis(1), |_| {
+            n += 1;
+            async { false }
+        })
+        .await;
+        assert!(!ok);
+        assert_eq!(n, 1);
     }
 }

@@ -4,7 +4,7 @@
 
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use semver::{Version, VersionReq};
 use serde_json::Value;
@@ -104,6 +104,10 @@ impl Adapter for RecordingAdapter {
         self.inner.launch_for(agent, resume, subscription)
     }
 
+    fn is_system_prompt(&self, hook: &HookPayload) -> bool {
+        self.inner.is_system_prompt(hook)
+    }
+
     fn hook_event(&self, hook: &HookPayload) -> Vec<Event> {
         lock(&self.hooks).push(Captured {
             at: Instant::now(),
@@ -140,6 +144,10 @@ impl Adapter for RecordingAdapter {
 
     fn exit_keys(&self) -> Vec<u8> {
         self.inner.exit_keys()
+    }
+
+    fn exit_key_pause(&self) -> Duration {
+        self.inner.exit_key_pause()
     }
 
     fn prompt_frozen_on_resume(&self) -> bool {
