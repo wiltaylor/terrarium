@@ -39,8 +39,8 @@ binary = "claude"
 
 [harness.codex]
 package = "@openai/codex"
-version = "0.160.0"
-tested = ">=0.160.0, <0.161.0"
+version = "0.164.0"
+tested = ">=0.164.0, <0.165.0"
 binary = "codex"
 
 [harness.copilot]
@@ -53,8 +53,8 @@ binary = "copilot"
 [harness.pi]
 # pi moved from @mariozechner/pi-coding-agent (last 0.73.1) to this package.
 package = "@earendil-works/pi-coding-agent"
-version = "0.85.1"
-tested = ">=0.85.1, <0.86.0"
+version = "1.4.0"
+tested = ">=1.4.0, <1.5.0"
 binary = "pi"
 
 # npm packages that are not harnesses. `for` names the harness that uses it.

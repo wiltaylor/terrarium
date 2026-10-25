@@ -71,9 +71,9 @@ ARG GID=1000
 # Pinned harness versions: harnesses.toml [harness.<name>] version, and
 # [extension.copilot-prompt] version. The adapters read the same file.
 ARG CLAUDE_VERSION=2.1.310
-ARG CODEX_VERSION=0.160.0
+ARG CODEX_VERSION=0.164.0
 ARG COPILOT_VERSION=1.0.103
-ARG PI_VERSION=0.85.1
+ARG PI_VERSION=1.4.0
 ARG COPILOT_PROMPT_VERSION=0.1.2
 
 RUN apt-get update \

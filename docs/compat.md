@@ -25,6 +25,8 @@ add a section for the new version below, as for the versions below.
 | 2026-10-24 | copilot | 1.0.103 | first pin | `>=1.0.103, <1.1.0` | pass (Phase 0 spikes) |
 | 2026-10-24 | pi | 0.85.1 | first pin | `>=0.85.1, <0.86.0` | pass (Phase 0 spikes) |
 | 2026-10-24 | copilot-prompt | 0.1.2 | first pin | - | - |
+| 2026-10-26 | codex | 0.160.0 → 0.164.0 | major | `>=0.160.0, <0.161.0` → `>=0.164.0, <0.165.0` | not run yet |
+| 2026-10-26 | pi | 0.85.1 → 1.4.0 | major | `>=0.85.1, <0.86.0` → `>=1.4.0, <1.5.0` | not run yet |
 
 ---
 
