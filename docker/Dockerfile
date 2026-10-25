@@ -104,7 +104,7 @@ RUN userdel --remove node 2>/dev/null || true \
 # Harness homes live on the /auth bind mounts. The symlinks serve harnesses
 # that read $HOME; the env vars serve harnesses that read them.
 RUN mkdir -p /auth/claude /auth/codex /auth/copilot /auth/pi \
-        /state /run/terrarium /prompts /usr/local/share/terrarium \
+        /state /work /run/terrarium /prompts /usr/local/share/terrarium \
         /etc/terrarium/projects /etc/terrarium/agents \
         /etc/terrarium/targets /etc/terrarium/subscriptions \
         /home/terrarium/.pi \
@@ -112,7 +112,7 @@ RUN mkdir -p /auth/claude /auth/codex /auth/copilot /auth/pi \
     && ln -s /auth/codex /home/terrarium/.codex \
     && ln -s /auth/copilot /home/terrarium/.copilot \
     && ln -s /auth/pi /home/terrarium/.pi/agent \
-    && chown -R "${UID}:${GID}" /auth /state /run/terrarium /etc/terrarium /home/terrarium
+    && chown -R "${UID}:${GID}" /auth /state /work /run/terrarium /etc/terrarium /home/terrarium
 
 ENV HOME=/home/terrarium \
     CLAUDE_CONFIG_DIR=/auth/claude \

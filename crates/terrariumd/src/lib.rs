@@ -27,6 +27,7 @@ pub mod store;
 pub mod supervisor;
 pub mod trash;
 pub mod usage_collector;
+pub mod workspace;
 
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -56,6 +57,14 @@ pub struct DaemonConfig {
     pub token: Option<String>,
     pub state_dir: PathBuf,
     pub config_dir: PathBuf,
+    /// The work root (`TERRARIUM_WORK_DIR`): agent workspaces are
+    /// `<work_dir>/<project>/<agent>`.
+    pub work_dir: PathBuf,
+    /// `TERRARIUM_MAX_TARGETS_PER_PROJECT`: the most targets of one project.
+    pub max_targets_per_project: usize,
+    /// `TERRARIUM_REPOS_DIR`: the local bare repos. A `lab_repo` with a URL
+    /// under it is a local repo for the host agent (its `repos_dir`).
+    pub repos_dir: PathBuf,
     pub supervisor: Arc<dyn Supervisor>,
     /// Trust `X-Terrarium-Agent` on the Unix socket. Tests and development
     /// only.
@@ -142,6 +151,9 @@ pub async fn start_with_usage(
         supervisor: cfg.supervisor.clone(),
         state_dir: cfg.state_dir.clone(),
         config_dir: cfg.config_dir.clone(),
+        work_dir: cfg.work_dir.clone(),
+        max_targets_per_project: cfg.max_targets_per_project,
+        repos_dir: cfg.repos_dir.clone(),
         insecure_agent_header: cfg.insecure_agent_header,
         usage: Arc::new(usage_collector::UsageRuntime::new(usage)),
         executor: Arc::default(),
@@ -171,6 +183,21 @@ pub async fn start_with_usage(
         agents_removed = report.agents.removed.len(),
         "definitions synced"
     );
+    let work_dir = state.work_dir.clone();
+    if let Err(e) = std::fs::create_dir_all(&work_dir) {
+        warn!(dir = %work_dir.display(), "cannot create the work root: {e}");
+    }
+    let moved = state
+        .db
+        .write("system", move |t| {
+            store::agents::set_workspaces(t, &work_dir)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("workspace paths: {e}"))?;
+    if moved > 0 {
+        info!(agents = moved, work_dir = %state.work_dir.display(),
+              "agent workspaces now live under the work root; each moves at its next start");
+    }
     reconcile(&state)
         .await
         .map_err(|e| anyhow::anyhow!("reconcile failed: {e}"))?;
@@ -296,11 +323,11 @@ pub async fn apply_definitions(
     errors: Vec<String>,
     actor: String,
 ) -> ApiResult<SyncReport> {
-    let state_dir = state.state_dir.clone();
+    let work_dir = state.work_dir.clone();
     let d = defs.clone();
     let mut report = state
         .db
-        .write(actor, move |t| store::sync::sync(t, &d, &state_dir))
+        .write(actor, move |t| store::sync::sync(t, &d, &work_dir))
         .await?;
     report.errors.splice(0..0, errors);
     let subscriptions = defs.subscriptions.clone();

@@ -134,6 +134,10 @@ pub enum Command {
         /// Run the command in a PTY
         #[arg(long, short = 't')]
         tty: bool,
+        /// A `lab_from_workspace` target: the holder whose lab instance
+        /// runs the command (the operator names one; an agent uses its own)
+        #[arg(long)]
+        agent: Option<String>,
         #[arg(last = true)]
         cmd: Vec<String>,
     },
@@ -1011,13 +1015,30 @@ pub enum AdminTargetCmd {
         /// `vmlab`: the machine in the lab
         #[arg(long)]
         machine: Option<String>,
+        /// `vmlab`: a repo of the project that holds the lab definition;
+        /// the host agent runs it in a git worktree
+        #[arg(long)]
+        lab_repo: Option<String>,
+        /// `vmlab` with `--lab-repo`: a branch, a tag, or a commit
+        #[arg(long)]
+        lab_ref: Option<String>,
+        /// `vmlab`: the directory in the repo (or the workspace) that holds
+        /// `vmlab.wcl`
+        #[arg(long)]
+        lab_path: Option<String>,
+        /// `vmlab`: the lab is in each holder's workspace; each holder gets
+        /// its own lab instance
+        #[arg(long)]
+        lab_from_workspace: bool,
         /// Made on agent start and removed on agent stop
         #[arg(long)]
         ephemeral: bool,
         /// Keep an ephemeral target after the agent stops
         #[arg(long)]
         keep: bool,
-        /// Make a global target instead of a project target
+        /// Make a global target instead of a project target (sysadmin). A
+        /// project target gets the project name as a prefix:
+        /// `<project>-<name>`
         #[arg(long)]
         global: bool,
     },
@@ -1031,8 +1052,12 @@ pub enum AdminTargetCmd {
         /// The snapshot name for `snapshot` and `restore`
         #[arg(long)]
         snapshot: Option<String>,
+        /// A `lab_from_workspace` target: the holder whose instance (an
+        /// agent calls for its own)
+        #[arg(long)]
+        agent: Option<String>,
     },
-    /// List targets
+    /// List targets: in agent mode, the project's and the global ones
     Ls,
     /// Give an agent a lease on a target, now
     Grant {

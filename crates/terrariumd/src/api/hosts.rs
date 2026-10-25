@@ -37,6 +37,9 @@ fn view(state: &Shared, h: Host) -> Value {
         v["arch"] = info.arch.clone().into();
         v["version"] = info.version.into();
         v["max_sessions"] = info.max_sessions.into();
+        if let Some(m) = info.max_running_targets {
+            v["max_running_targets"] = m.into();
+        }
         v["connected_at"] = info.connected_at.into();
     }
     // The flat summary for the dashboard and for policy checks.

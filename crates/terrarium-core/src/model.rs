@@ -21,8 +21,15 @@ pub struct Agent {
     pub subscription: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    /// The agent's files, `/state/agents/<ulid>/workspace`.
+    /// The agent's files: `<work>/<project>/<name>` (`TERRARIUM_WORK_DIR`,
+    /// default `/work`). An agent made before the work root has
+    /// `/state/agents/<ulid>/workspace`; its next start moves it.
     pub workspace: PathBuf,
+    /// The per-agent harness dir, `/state/agents/<ulid>/harness`. The
+    /// supervisor sets it before it calls the adapter. `None`: the
+    /// `harness` dir next to `workspace` (the layout before the work root).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_dir: Option<PathBuf>,
     /// The prompt template name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
@@ -62,6 +69,7 @@ impl Agent {
                 .join("agents")
                 .join(id.to_string())
                 .join("workspace"),
+            harness_dir: None,
             prompt: def.prompt.clone(),
             roles: def.roles.clone(),
             policy: def.policy.clone(),

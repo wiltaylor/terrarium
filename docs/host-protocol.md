@@ -164,6 +164,7 @@ The host agent sends `hello` as its first frame:
     "shell": "/bin/bash"
   },
   "max_sessions": 32,
+  "max_running_targets": 4,
   "resume": {
     "token": "r-01JB...",
     "sessions": [{"session": 7, "sent": 18234, "finished": false}]
@@ -176,6 +177,10 @@ The host agent sends `hello` as its first frame:
   `present` when `docker version --format json` gets an answer from the
   Docker server. vmlab is `present` when `vmlab --version` succeeds.
   `shell` is `$SHELL`, else `/bin/sh`.
+- `max_running_targets` is the `max_running_targets` of the config. The
+  daemon counts the docker and vmlab targets (and lab instances) on this
+  host that it shows as `running`, and refuses an `up` past the limit. An
+  older host agent sends none: no limit.
 - `resume` is absent on the first connection after the host agent starts.
   On a reconnect it holds the token from the last `welcome` and every
   session that the host agent still holds. `sent` is the number of output
@@ -371,7 +376,7 @@ in the environment of the `docker` process.
 
 | Frame | Fields | Command |
 |---|---|---|
-| `docker.run` | `image`, `name`, `detach` (default true), `rm`, `init`, `env`, `volumes` [`{source, target, read_only}`], `workdir`, `network`, `user`, `labels`, `command`, `pty`, `timeout_secs` | `docker run -d [--rm] [--init] [--name N] [-e K]... [-v S:T[:ro]]... [-w W] [--network N] [-u U] [--label K=V]... IMAGE [COMMAND...]`. With `detach: false`: `-i`, and `-t` with a `pty`. |
+| `docker.run` | `image`, `name`, `detach` (default true), `rm`, `init`, `env`, `volumes` [`{source, target, read_only}`], `workspaces` [`{path}`], `workdir`, `network`, `user`, `labels`, `command`, `pty`, `timeout_secs` | `docker run -d [--rm] [--init] [--name N] [-e K]... [-v S:T[:ro]]... [-v <work_dir>/<path>:/work/<path>]... [-w W] [--network N] [-u U] [--label K=V]... IMAGE [COMMAND...]`. With `detach: false`: `-i`, and `-t` with a `pty`. `workspaces`: see [Workspaces](#workspaces). |
 | `docker.exec` | `container`, `cmd`, `args`, `cwd`, `env`, `user`, `pty`, `timeout_secs` | `docker exec -i [-t] [-w CWD] [-e K]... [-u U] CONTAINER CMD ARGS...` |
 | `docker.start` | `container` | `docker start CONTAINER`. The container keeps its files. |
 | `docker.stop` | `container`, `grace_secs` | `docker stop [-t G] CONTAINER` |
@@ -456,6 +461,144 @@ error, 3 reboot still required, 4 not found, 5 conflict, 6 unsupported.
 
 When vmlab is not present, every `vmlab.*` frame gets `error` code
 `unsupported`.
+
+### `vmlab.prepare` and `vmlab.release`
+
+These two verbs run in the host agent as a task, not as one process. The
+session sends `started` (no `pid`), the steps as text on stderr (each
+command line with `$`, then its output), and then `result` and `exit` 0. A
+failure is one `error` frame. The daemon sends them for a vmlab target with
+`lab_repo` or `lab_from_workspace` (docs/api.md §17.8). A target with `lab`
+(a lab dir on the host) does not use them.
+
+A lab instance is the directory `<instances_dir>/<instance>/`:
+
+| Path | Holds |
+|---|---|
+| `src/` | The git worktree of a `repo` source, at the commit of `ref`. A `workspace` source has none. |
+| `lab/vmlab.wcl` | The lab file that vmlab runs: the source definition, after the allowlist check, with the attached workspace as an `@dev` decorator. vmlab keeps its state in `lab/.vmlab/`. |
+
+`vmlab.prepare`:
+
+```json
+{"type": "vmlab.prepare", "session": 21, "instance": "terra-vbox",
+ "source": {"kind": "repo", "local": "labs.git", "ref": "main", "path": "alpine-box"},
+ "machine": "box", "workspaces": [{"path": "terra/w1"}], "timeout_secs": 600}
+```
+
+| Field | Meaning |
+|---|---|
+| `instance` | 1 to 128 of `[A-Za-z0-9._-]`, not starting with `.` or `-`. The daemon sends the target name, or `<target>.<agent ULID>` for a `lab_from_workspace` target. |
+| `source` | `{"kind": "repo", "local"?, "url"?, "ref", "path"}` or `{"kind": "workspace", "workspace": "<project>/<agent>", "path"}`. |
+| `source.local` | A repo under `repos_dir`, for example `labs.git`. Its real path must stay under the real `repos_dir`. |
+| `source.url` | A repo URL. The host agent keeps a mirror in `<instances_dir>/.mirrors/<sha256 of the URL>.git`: `git clone --mirror` the first time, `git remote update --prune` after. The credential comes in `env`, as for a checkout on a target (docs/api.md §17.5). |
+| `source.ref` | A branch, a tag, or a commit: `[A-Za-z0-9._/+@-]`, not starting with `-`, no `..`. |
+| `source.path` | The directory in the repo or the workspace that holds `vmlab.wcl`. `""` or `.` is the root. No `..`. |
+| `machine` | The machine that gets the workspace. |
+| `workspaces` | At most one: a vmlab machine syncs one workspace. |
+
+The steps:
+
+1. A `repo` source: `git --git-dir <repo> rev-parse --verify <ref>^{commit}`,
+   then `git --git-dir <repo> worktree add --detach <instance>/src <sha>`.
+   A worktree that is there stays as it is: the next `vmlab.prepare` does not
+   move it to a new commit. A `workspace` source: the workspace itself (see
+   [Workspaces](#workspaces)); nothing is written into it.
+2. Read `<source>/<path>/vmlab.wcl`. It must be a regular file (not a
+   symbolic link) of at most 1 MiB. The real path of `<path>` must stay in
+   the source.
+3. Check the file against the [lab allowlist](#the-lab-allowlist). A refusal
+   is `error` code `refused`, with every problem in the message.
+4. Write `lab/vmlab.wcl`: each `@dev(workspace)` of the file as its real
+   absolute path, and the attached workspace as
+   `@dev(workspace = "<work_dir>/<project>/<agent>", workspace_guest = "/work/<project>/<agent>")`
+   on `machine`. When `machine` declares its own `@dev(workspace)`, that
+   mount stays and the attach adds nothing (`dev.own` is true). The file is
+   written only when its text changed: vmlab refuses a changed lab file
+   while a machine runs.
+5. `vmlab validate` in `lab/`. A failure is `error` code `refused`.
+
+`result`:
+
+```json
+{"lab": "/home/wil/.local/share/terrarium-host/instances/terra-vbox/lab",
+ "instance": "terra-vbox", "lab_name": "alpine-box",
+ "source": ".../instances/terra-vbox/src/alpine-box", "attached": ["terra/w1"],
+ "dev": {"machine": "box", "workspace": "/home/wil/dev/terrarium/work/terra/w1",
+         "guest": "/work/terra/w1", "own": false},
+ "changed": true, "head": "3f2c1e0b9a..."}
+```
+
+The daemon then sends the other `vmlab.*` verbs with `lab` set to the
+`lab` of the result.
+
+`vmlab.release` `{session, instance}`: when `src/` is a worktree, `git
+worktree remove --force` and `git worktree prune` in its repo; then remove
+the instance dir. A missing instance gives `{"released": false}`. The daemon
+sends it after `vmlab destroy`.
+
+### The lab allowlist
+
+A `lab_repo` or `lab_from_workspace` lab is a file that an agent can write.
+vmlab runs parts of a lab file on the host, and a lab file can name host
+resources. So the host agent checks the tokens of the file against an
+allowlist (`crates/terrarium-host/src/labcheck.rs`), before `vmlab
+validate`. Everything that is not in the list is refused, and the message
+names it and its line.
+
+| Allowed | |
+|---|---|
+| The file | `import <vmlab.wcl>` first, then one `lab "<name>"` block. No other import, no `template` block. |
+| `lab` | `agent_update`; blocks `segment`, `vm`, `container`, `record`, `sinkhole`. |
+| `segment` | `subnet`, `dhcp`, `nat`, `mtu`, `routes_to`; blocks `dns`, `route`, `record`, `block`, `redirect`, `sinkhole`. |
+| `vm` | `template`, `arch`, `profile`, `cpus`, `memory`, `disk`, `depends_on`, `nested`, `agent_update`, `display`, `cpu_model`, `accel`, `firmware`, `tpm`, `secure_boot`; blocks `nic`, `disk` (`size` only), `login`. |
+| `container` | `image`, `mode`, `entrypoint`, `command`, `workdir`, `user`, `profile`, `cpus`, `memory`, `depends_on`; blocks `nic`, `env`, `login`, `healthcheck`, `volume` (`name`, `target`, `read_only`: a named volume only). |
+| `nic`, `env`, `login`, `healthcheck`, `record`, `sinkhole`, `dns`, `route`, `block`, `redirect` | Their documented attributes. |
+| `@dev` | On a `vm` or a `container` in `lab`: `default`, `workspace_guest`, and `workspace` as a relative path with no `..` that stays in the lab's source directory (symbolic links resolved). |
+| Values | A string (no `${`, no escapes other than `\n`, `\t`, `\\`, `\"`), a number with an optional unit, `true` or `false`, a symbol (`:idle`), or a list of those. |
+
+| Refused | Why |
+|---|---|
+| `provision`, `on` | A wscript runs on the host. wscript reads and writes host files (`copy_to`, `copy_from`, screenshots) and host environment variables (`vmlab::env`). |
+| `playbook` | It reads a playbook folder on the host. |
+| `share`, `volume { host }`, `media`, `disk { from }`, `cdrom`, `floppy` | Host paths. `vmlab validate` accepts an absolute or `..` path in `@dev(workspace)`, so the host agent checks paths itself. |
+| `qemu_args` | Raw QEMU flags reach any host file or device. |
+| `gpu` | A host device. |
+| `forward`, `port` | A port on the host. |
+| `connect`, `global` | Another host, or a segment that other labs share. |
+| `gui` | A viewer on the host desktop. |
+| `template` | A template build reads host files and URLs. |
+| Any other block, attribute, decorator, or expression | Not in the allowlist. |
+
+The only host paths in an instance are the attached workspace (under
+`work_dir`) and the lab's own `@dev(workspace)` (in its source directory).
+A lab that needs more (an ISO, a share, a provision script) is a
+pre-provisioned lab: a target with `lab`, which the operator writes.
+
+## Workspaces
+
+PLAN §11, "mode 1". An agent's workspace is
+`<TERRARIUM_WORK_DIR>/<project>/<agent>` in the daemon (`/work` in the
+container). The daemon names it to the host agent as `<project>/<agent>`.
+The host agent finds it under its own `work_dir`, which must be the host
+path of the same directory. On the Docker host of the Terrarium container,
+that is the source of the `./work` bind mount (`compose.yaml`). The host
+agent checks that the workspace exists and that its real path is under the
+real `work_dir`, so a symbolic link cannot lead out. A missing workspace is
+`error` code `path_denied`, and the message says to check `work_dir`.
+
+A target sees the workspace at `/work/<project>/<agent>`, the same path as
+the sandbox, so a path in a compiler message is the same on both sides.
+
+| Kind | How | Limits |
+|---|---|---|
+| `docker` | `docker.run` with `workspaces`: a bind mount for each. With no `user` in the frame, the container runs as the owner of the first workspace (`-u <uid>:<gid>`, `HOME=/tmp`), so the files that a build writes stay the agent's (the sandbox runs as the same user). A command that needs root in the image does not work then. | A running container cannot get a new bind mount. The daemon runs a new container (`docker rm`, then `docker run`) when the target is ephemeral and no exec session is live on it. Else the answer says "attach needs a restart of the target". A target with `container` (a container that Terrarium did not make) gets no workspace. |
+| `vmlab` | `vmlab.prepare` with `workspaces`: an `@dev` decorator, so vmlab's workspace syncer keeps a copy in the guest in step with the host dir, both ways. | One workspace for each machine. A running lab cannot load a changed lab file, so the same restart rule applies. The guest path is a Linux path. A target with `lab` gets no workspace. See docs/compat.md, "vmlab workspace attach". |
+
+There is no separate detach verb: Docker and vmlab cannot remove a mount
+from a running container or lab. The daemon detaches a workspace by a new
+container or lab instance without it (ephemeral, no live session), or by the
+destroy when the last holder goes.
 
 ## Flow control and replay
 
@@ -548,6 +691,7 @@ The terminal `error` frame:
 | `io` | A file operation failed. |
 | `checksum_mismatch` | A pushed file's byte count or SHA-256 does not match `cp_end`. |
 | `interrupted` | The link dropped during a push. The partial file is removed. |
+| `refused` | `vmlab.prepare`: the lab definition uses a feature outside the [lab allowlist](#the-lab-allowlist), or `vmlab validate` refused it. |
 
 `unknown_session` can also come for a frame (`stdin`, `eof`, `cp_end`) after
 the session ended. The daemon can ignore it in that case.
@@ -565,6 +709,9 @@ The host agent has these local limits:
   directory, `vmlab.cp` host path, and Docker bind-mount source must be
   under one of the roots. The host agent resolves symbolic links in the
   existing part of the path, so a link cannot lead out of a root.
+  `work_dir` and `instances_dir` are roots too.
+- `max_running_targets` (default 4). `hello` sends it, and the daemon
+  refuses an `up` past it with `429 rate_limited` (docs/api.md §17.3).
 - `max_sessions` (default 32).
 - Positional values for Docker and vmlab cannot start with `-`, so they
   cannot become flags.
@@ -637,7 +784,16 @@ allowed_cwd_roots = ["/home/wil/labs", "/srv/build"]   # optional; absent means 
 # resume_grace_secs = 600                   # how long a session lives with no link
 # docker_bin = "docker"
 # vmlab_bin = "vmlab"
+# git_bin = "git"
+# work_dir = "/srv/terrarium/work"          # the host path of the daemon's TERRARIUM_WORK_DIR; default ./work
+# instances_dir = "/var/lib/terrarium-host/instances"   # lab instances; default $XDG_DATA_HOME/terrarium-host/instances
+# repos_dir = "/srv/terrarium/repos"        # the host path of TERRARIUM_REPOS_DIR, for a local lab_repo; default ./repos
+# max_running_targets = 4                   # docker and vmlab targets that may run at one time
 ```
+
+A relative `work_dir` or `repos_dir` is relative to the working directory of
+the host agent. `terrarium-host check` prints the three paths and says
+`(missing)` for a path that does not exist.
 
 The flags `--daemon-url`, `--token`, and `--name` (and the env variables
 `TERRARIUM_DAEMON_URL`, `TERRARIUM_HOST_TOKEN`, `TERRARIUM_HOST_NAME`)
@@ -928,6 +1084,50 @@ The stop of `tester` ran `vmlab destroy` for `vlab`.
 The fixes were verified live on a second daemon outside Docker, with a
 second host agent. The stack image still has the old code until the next
 `just up`.
+
+### Mode 1: workspaces on targets
+
+Date: 2026-10-25, after `just up` with the code of PLAN §11 "mode 1".
+A second host agent `mode1` ran on the same machine
+(`state/host-mode1/config.toml`: the pin of `state/host-local`, `work_dir =
+"<repo>/work"`, `repos_dir = "<repo>/repos"`, `instances_dir` under
+`state/host-mode1`), enrolled with `terrarium admin host new mode1
+--enrol`. The daemon log at the start: `agent workspaces now live under the
+work root; each moves at its next start agents=11 work_dir=/work`.
+
+Project `mode1`, repo `labs` = `file:///repos/labs.git` (the example repo:
+`alpine-box/vmlab.wcl`, and `vmlab.wcl` at the root). The project targets
+(the CLI printed `created target mode1-dk (a project target gets the
+project prefix)`):
+
+| Target | Definition |
+|---|---|
+| `mode1-dk` | `docker`, `debian:bookworm-slim`, ephemeral |
+| `mode1-vbox` | `vmlab`, `lab_repo = "labs"`, `lab_ref = "main"`, `lab_path = "alpine-box"`, `machine = "box"`, ephemeral |
+| `mode1-vws` | `vmlab`, `lab_from_workspace`, `lab_path = "labs"`, `machine = "box"`, ephemeral |
+
+The agent `mode1/w1` (Claude, haiku, `policy.targets = [mode1-dk,
+mode1-vbox]`) got `terrarium repo checkout labs`, then started:
+
+| Check | Result |
+|---|---|
+| The start | `mode1-dk` and `mode1-vbox` `running`. `docker inspect`: one bind, `/home/wil/dev/terrarium/work/mode1/w1` to `/work/mode1/w1`, user `1000:1000`. |
+| A file made on the host in `work/mode1/w1`, then `terrarium exec mode1-dk -- sh -c 'ls -la /work/mode1/w1; cat ...'` | The file and its text, exit 0, 0.15 s. |
+| The vmlab instance | `instances/mode1-vbox/src` is a detached worktree at `3230d5a` (`git worktree list` of `labs.git`), and `instances/mode1-vbox/lab/vmlab.wcl` has `@dev(workspace = ".../work/mode1/w1", workspace_guest = "/work/mode1/w1")` on `box`. `vmlab status -v` shows the `DEV` row. |
+| `terrarium exec mode1-vbox -- sh -c 'hostname; ls -la /work/mode1/w1; cat ...'` | `box`, the file and its text, exit 0, 0.13 s. |
+| A file written in the guest, and one in the container | On the host after about 400 ms (the syncer), and at once (the bind). |
+| `admin target grant mode1-vws w1` | The agent's own instance `mode1-vws.<ULID>` from `work/mode1/w1/labs/vmlab.wcl` (lab `labs-dev`), `running`. `git status` of the checkout: clean. |
+| `exec mode1-vws --agent mode1/w1`; the same without `--agent`; a grant with `--exclusive` | The output from `box`; `422 ... name the holder with agent`; `422 ... an exclusive lease does not apply`. |
+| A lab in the workspace with `@dev(workspace = "/home/wil/.ssh")` and a `provision` | `vmlab.prepare failed: ... refused:` with both lines named, `details.code` `refused`. Nothing ran. |
+| One haiku turn: write `loop.txt` with the file tool, then `terrarium exec mode1-dk -- sh -c 'cd /work/mode1/w1 && cat loop.txt && id -u && sha256sum loop.txt'` | The tool wrote `/work/mode1/w1/loop.txt` (the second path in the sandbox). The target printed `edited in the sandbox`, `1000`, and the SHA-256. The audit row `target.exec` has the actor `agent:<ULID>`. The lease grant before had typed one pointer turn, so 2 turns in all. |
+| `admin agent stop w1` | All three targets `absent`, `runtime` `{}`. The container is gone, both instance dirs are gone, and `labs.git` has no worktree left. `vmlab lab list` shows no lab of the test. |
+
+Found and fixed on the way: a container ran as root, so the files of a
+build in the workspace were root's (now `-u <owner>`); a refused prepare
+left an empty instance dir (now removed); `terrarium exec` had no
+`--agent`. Still open: `terrarium admin project repo-add <URL>` reads the
+URL as the daemon URL (the global `--url` flag), so the repo was attached
+with `POST /api/projects/mode1/repos`.
 
 ### Open
 

@@ -64,6 +64,84 @@ pub struct Config {
     pub docker_bin: String,
     #[serde(default = "default_vmlab")]
     pub vmlab_bin: String,
+    #[serde(default = "default_git")]
+    pub git_bin: String,
+    /// The host path of the daemon's work root (`TERRARIUM_WORK_DIR`): the
+    /// agent workspaces are `<work_dir>/<project>/<agent>`. On the Docker
+    /// host of the Terrarium container, it is the source of the `./work`
+    /// bind mount. Default: `./work` in the host agent's working directory.
+    #[serde(default)]
+    pub work_dir: Option<PathBuf>,
+    /// Where `vmlab.prepare` makes lab instances. Default:
+    /// `$XDG_DATA_HOME/terrarium-host/instances` (`~/.local/share/...`).
+    #[serde(default)]
+    pub instances_dir: Option<PathBuf>,
+    /// The local bare repos for a `lab_repo` with a local URL. Default:
+    /// `./repos` in the host agent's working directory.
+    #[serde(default)]
+    pub repos_dir: Option<PathBuf>,
+    /// The most docker and vmlab targets that may run on this host at one
+    /// time. The daemon enforces it (`429 rate_limited`).
+    #[serde(default = "default_max_running_targets")]
+    pub max_running_targets: u32,
+}
+
+/// The default of `max_running_targets`.
+pub const DEFAULT_MAX_RUNNING_TARGETS: u32 = 4;
+
+fn default_max_running_targets() -> u32 {
+    DEFAULT_MAX_RUNNING_TARGETS
+}
+fn default_git() -> String {
+    "git".into()
+}
+
+/// The directories of the host agent, as absolute paths.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostPaths {
+    pub work_dir: PathBuf,
+    pub instances_dir: PathBuf,
+    pub repos_dir: PathBuf,
+}
+
+impl Default for HostPaths {
+    fn default() -> Self {
+        Self::resolve(None, None, None)
+    }
+}
+
+fn absolute(p: PathBuf) -> PathBuf {
+    if p.is_absolute() {
+        p
+    } else {
+        std::env::current_dir().map(|d| d.join(&p)).unwrap_or(p)
+    }
+}
+
+impl HostPaths {
+    /// The configured values, or the defaults, made absolute against the
+    /// working directory.
+    pub fn resolve(
+        work_dir: Option<&Path>,
+        instances_dir: Option<&Path>,
+        repos_dir: Option<&Path>,
+    ) -> Self {
+        let data = std::env::var_os("XDG_DATA_HOME")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+            .unwrap_or_else(|| PathBuf::from("/var/lib"));
+        Self {
+            work_dir: absolute(work_dir.map_or_else(|| PathBuf::from("work"), Path::to_path_buf)),
+            instances_dir: absolute(instances_dir.map_or_else(
+                || data.join("terrarium-host").join("instances"),
+                Path::to_path_buf,
+            )),
+            repos_dir: absolute(
+                repos_dir.map_or_else(|| PathBuf::from("repos"), Path::to_path_buf),
+            ),
+        }
+    }
 }
 
 fn default_max_sessions() -> u32 {
@@ -98,6 +176,11 @@ impl Default for Config {
             resume_grace_secs: default_resume_grace(),
             docker_bin: default_docker(),
             vmlab_bin: default_vmlab(),
+            git_bin: default_git(),
+            work_dir: None,
+            instances_dir: None,
+            repos_dir: None,
+            max_running_targets: default_max_running_targets(),
         }
     }
 }
@@ -190,10 +273,30 @@ impl Config {
         crate::tls::transport(&url, &settings).map_err(|e| ConfigError::Invalid(e.to_string()))
     }
 
+    /// The path policy. With `allowed_cwd_roots`, the work dir and the
+    /// instances dir are roots too: the host agent makes the lab instances
+    /// there, and attaches the workspaces from there.
     pub fn policy(&self) -> PathPolicy {
+        let paths = self.paths();
         PathPolicy {
-            roots: self.allowed_cwd_roots.clone(),
+            roots: self.allowed_cwd_roots.clone().map(|mut r| {
+                for p in [paths.work_dir, paths.instances_dir] {
+                    if !r.contains(&p) {
+                        r.push(p);
+                    }
+                }
+                r
+            }),
         }
+    }
+
+    /// `work_dir`, `instances_dir`, and `repos_dir`, absolute.
+    pub fn paths(&self) -> HostPaths {
+        HostPaths::resolve(
+            self.work_dir.as_deref(),
+            self.instances_dir.as_deref(),
+            self.repos_dir.as_deref(),
+        )
     }
 }
 

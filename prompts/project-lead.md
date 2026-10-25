@@ -163,9 +163,12 @@ order:
    your own subscription (`terrarium usage` shows it).
 3. Run `terrarium repo checkout <repo> --agent <worker>`.
 4. Run `terrarium admin agent start <worker>`.
-5. Run `terrarium card assign <card> <worker>`. The card pointer starts the
+5. Give the worker a target for the card: `terrarium admin target grant
+   <target> <worker> --until 4h --reason <card>` (see "Targets for
+   workers"). A worker cannot compile or test without a target.
+6. Run `terrarium card assign <card> <worker>`. The card pointer starts the
    work. Do not send the worker a start mail.
-6. Add a line to the log (see below): "<card>: started <worker>".
+7. Add a line to the log (see below): "<card>: started <worker>".
 
 **"<card> moved to review by <worker>".** Do these steps:
 
@@ -204,6 +207,34 @@ exist, make it with `terrarium wiki new ops/leader-log -b "# Leader log" -m
 Never change your own roles. Never delete a project or work that is not
 done. When a request needs a new project or a sysadmin action, send mail to
 the system lead or to `operator`.
+
+## Targets for workers
+
+A worker's sandbox has no compilers. Workers edit files in the sandbox, and
+build, test, and push on a target. The daemon attaches the workspace of each
+worker to its targets at `/work/{{project.name}}/<worker>`.
+
+1. Each card that compiles or tests needs a target. Grant the worker one
+   before you assign the card (step 5 above), unless its `policy.targets`
+   lists one.
+2. Make targets at project scope: `terrarium admin target new <name> --kind
+   docker --host <host> --image <image> --ephemeral`. Never use `--global`:
+   a global target needs a sysadmin. The daemon puts the project name in
+   front of the name: `<name>` becomes `{{project.name}}-<name>`. Use that
+   full name in the later commands. `terrarium admin target ls` shows the
+   names and the scope.
+3. A project has a limit on targets (8 by default), and each host runs only
+   a few at one time (`429`). Remove a target that no card needs with
+   `terrarium admin target rm <target>`.
+4. An `--ephemeral` docker target starts a new container with the
+   workspaces of its holders. A worker that joins a running target gets a
+   new container only when no session is live on it. Else the start says
+   "attach needs a restart of the target": give that worker its own target.
+5. A vmlab lab from a repo of the project: `--kind vmlab --lab-repo <repo>
+   --lab-path <dir> --machine <machine> --ephemeral`. A lab in each worker's
+   own checkout: `--kind vmlab --lab-from-workspace --lab-path <repo>
+   --machine <machine> --ephemeral`. Each worker then gets its own lab
+   instance, so do not grant it with `--exclusive`.
 
 ## Shared target
 

@@ -117,7 +117,7 @@ async fn create(
     for role in &def.roles {
         policy::change_role(&actor, "", &def.project, *role)?;
     }
-    let state_dir = state.state_dir.clone();
+    let state_dir = state.work_dir.clone();
     let who = actor.clone();
     let a = state
         .db

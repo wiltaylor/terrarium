@@ -170,6 +170,25 @@ pub struct TargetDef {
     /// `vmlab`: the machine in the lab.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub machine: Option<String>,
+    /// `vmlab`: the name of a repo of the target's project that holds the
+    /// lab definition. On `up` the host agent makes a git worktree of it at
+    /// `lab_ref`, checks the lab against its allowlist, and runs it
+    /// (docs/api.md §17.2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lab_repo: Option<String>,
+    /// `vmlab` with `lab_repo`: a branch, a tag, or a commit. Default: the
+    /// repo's default branch, else `main`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lab_ref: Option<String>,
+    /// `vmlab` with `lab_repo` or `lab_from_workspace`: the directory in the
+    /// repo (or the workspace) that holds `vmlab.wcl`. Default: the root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lab_path: Option<String>,
+    /// `vmlab`: the lab definition is in the workspace of each holder
+    /// (`<work>/<project>/<agent>/<lab_path>`). Each holder gets its own
+    /// lab instance.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub lab_from_workspace: bool,
     /// Created on agent start and destroyed on agent stop.
     #[serde(default)]
     pub ephemeral: bool,

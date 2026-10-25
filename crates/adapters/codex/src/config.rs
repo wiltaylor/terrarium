@@ -77,6 +77,9 @@ pub const EMPTY_HOOKS: &str = "{\n  \"hooks\": {}\n}\n";
 /// harness writes are read-write. The runner's own records are in the
 /// sibling `private/`, which the sandbox never binds.
 pub fn agent_dir(agent: &Agent) -> PathBuf {
+    if let Some(d) = &agent.harness_dir {
+        return d.clone();
+    }
     agent
         .workspace
         .parent()

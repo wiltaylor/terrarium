@@ -1522,7 +1522,7 @@ pub async fn apply_config_dir(state: &Shared) -> Vec<String> {
             origin: format!("file:{rel}"),
             content: text,
         };
-        let state_dir = state.state_dir.clone();
+        let state_dir = state.work_dir.clone();
         let result = state
             .db
             .write("system", move |t| {

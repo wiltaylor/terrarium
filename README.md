@@ -177,9 +177,10 @@ terrarium/
 ```
 
 `just docker::volumes-init` makes the directories for the bind mounts:
-`config/<harness>/`, `config/tls/`, `state/`, `prompts/`, `projects/`,
-`agents/`, `targets/`, `subscriptions/`, and `fleets/`. Git ignores
-`config/*`, `state/`, and `fleets/*` (except the README files).
+`config/<harness>/`, `config/tls/`, `state/`, `work/`, `repos/`, `prompts/`,
+`projects/`, `agents/`, `targets/`, `subscriptions/`, and `fleets/`. Git
+ignores `config/*`, `state/`, `work/*`, `repos/*`, and `fleets/*` (except the
+README files). `work/` holds the agent workspaces, `<project>/<agent>/`.
 
 ## Commands
 

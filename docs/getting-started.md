@@ -323,7 +323,8 @@ Compose bind-mounts these host directories into the container:
 | `config/codex/` | `/auth/codex` | The Codex home (`CODEX_HOME`). |
 | `config/copilot/` | `/auth/copilot` | The Copilot CLI home (`COPILOT_HOME`) and the system-prompt extension. |
 | `config/pi/` | `/auth/pi` | The pi home (`PI_CODING_AGENT_DIR`). |
-| `state/` | `/state` | SQLite, agent workspaces and logs, artifacts, credentials. |
+| `state/` | `/state` | SQLite, agent logs and harness files, artifacts, credentials. |
+| `work/` | `/work` | Agent workspaces, `<project>/<agent>/` (`TERRARIUM_WORK_DIR`). A host agent on this machine attaches them to targets: set its `work_dir` to this directory (docs/host-protocol.md, "Workspaces"). |
 | `prompts/` | `/prompts` (read-only) | System prompt templates. |
 | `projects/`, `agents/`, `targets/`, `subscriptions/` | `/etc/terrarium/...` | Definition files. |
 | `fleets/` | `/etc/terrarium/fleets` | Fleet files (section 2.8). |

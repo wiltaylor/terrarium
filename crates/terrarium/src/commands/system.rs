@@ -178,6 +178,26 @@ pub async fn targets(ctx: &Ctx) -> anyhow::Result<()> {
     })
 }
 
+/// `admin target ls`: in agent mode, every target of the agent's project
+/// and the global ones (not only the usable ones), with the scope; else as
+/// `targets ls`.
+pub async fn admin_targets(ctx: &Ctx) -> anyhow::Result<()> {
+    if !ctx.is_agent() {
+        return targets(ctx).await;
+    }
+    let project = ctx.project_or(None).await?;
+    let path = format!(
+        "/api/projects/{}/targets",
+        crate::transport::encode(&project)
+    );
+    let items = ctx.api.list(&path, vec![], None).await?;
+    let v = Value::Array(items);
+    ctx.emit(&v, |c, v| {
+        let rows = with_access(with_online(as_items(v)));
+        print_table(c, &rows, AGENT_TARGET_COLS, "no targets");
+    })
+}
+
 const LEASE_COLS: &[(&str, &str)] = &[
     ("TARGET", "target"),
     ("AGENT", "agent_name"),
@@ -215,7 +235,7 @@ fn all_query(all: bool) -> Vec<(String, String)> {
 
 pub async fn admin_target(ctx: &Ctx, cmd: &AdminTargetCmd) -> anyhow::Result<()> {
     match cmd {
-        AdminTargetCmd::Ls => targets(ctx).await,
+        AdminTargetCmd::Ls => admin_targets(ctx).await,
         AdminTargetCmd::New {
             name,
             kind,
@@ -227,6 +247,10 @@ pub async fn admin_target(ctx: &Ctx, cmd: &AdminTargetCmd) -> anyhow::Result<()>
             container,
             lab,
             machine,
+            lab_repo,
+            lab_ref,
+            lab_path,
+            lab_from_workspace,
             ephemeral,
             keep,
             global,
@@ -240,6 +264,12 @@ pub async fn admin_target(ctx: &Ctx, cmd: &AdminTargetCmd) -> anyhow::Result<()>
             set_opt(&mut body, "container", container.clone());
             set_opt(&mut body, "lab", lab.clone());
             set_opt(&mut body, "machine", machine.clone());
+            set_opt(&mut body, "lab_repo", lab_repo.clone());
+            set_opt(&mut body, "lab_ref", lab_ref.clone());
+            set_opt(&mut body, "lab_path", lab_path.clone());
+            if *lab_from_workspace {
+                body["lab_from_workspace"] = true.into();
+            }
             if *ephemeral {
                 body["ephemeral"] = true.into();
             }
@@ -251,7 +281,14 @@ pub async fn admin_target(ctx: &Ctx, cmd: &AdminTargetCmd) -> anyhow::Result<()>
             }
             let t = ctx.api.post("/api/targets", Some(body)).await?;
             ctx.emit(&t, |c, t| {
-                c.line(format!("created target {}", field(t, "name")));
+                let made = field(t, "name");
+                if made == *name {
+                    c.line(format!("created target {made}"));
+                } else {
+                    c.line(format!(
+                        "created target {made} (a project target gets the project prefix)"
+                    ));
+                }
             })
         }
         AdminTargetCmd::Rm { name } => {
@@ -263,6 +300,7 @@ pub async fn admin_target(ctx: &Ctx, cmd: &AdminTargetCmd) -> anyhow::Result<()>
             name,
             verb,
             snapshot,
+            agent,
         } => {
             if !["up", "down", "snapshot", "restore", "status"].contains(&verb.as_str()) {
                 return Err(crate::api::CliError::usage(format!(
@@ -270,10 +308,16 @@ pub async fn admin_target(ctx: &Ctx, cmd: &AdminTargetCmd) -> anyhow::Result<()>
                 )));
             }
             let path = format!("/api/targets/{}/{verb}", crate::transport::encode(name));
-            let body = snapshot.as_ref().map(|s| json!({"name": s}));
+            let mut body = json!({});
+            set_opt(&mut body, "name", snapshot.clone());
+            set_opt(&mut body, "agent", agent.clone());
+            let body = (body != json!({})).then_some(body);
             let v = ctx.api.post(&path, body).await?;
             ctx.emit(&v, |c, v| {
                 c.line(format!("{name}: {verb}: {}", field(v, "state")));
+                if let Some(e) = v["attach_error"].as_str() {
+                    c.line(format!("warning: {e}"));
+                }
             })
         }
         AdminTargetCmd::Grant {

@@ -22,7 +22,7 @@ The agent directory `<state>/agents/<ulid>/` has three parts
 |---|---|---|
 | `private/` | The records of the runner and the daemon: the files below, and the daemon's `session-prompt.sha256`. Mode `0700`. | Not bound. The harness cannot read or change it (`docs/security-review.md`, F1). |
 | `harness/` | `prompt.md` and the per-agent files of the adapter (`claude/`, `codex/`, `copilot/`, `pi/`). | Read-only at the same path. The parts that the harness writes itself have read-write binds of their own: the adapter's `FileOverlay` entries with `writable: true`. |
-| `workspace/` | The agent's files. | Read-write at `$HOME/work`. |
+| `workspace/` | The agent's files, in the layout before the work root. The daemon now keeps them in `<work>/<project>/<agent>` (`TERRARIUM_WORK_DIR`), and moves this dir there once at the next start (`crates/terrariumd/src/workspace.rs`). | Read-write at `$HOME/work` and at `/work/<project>/<agent>`. |
 
 A daemon start moves an agent directory of the older flat layout (all files
 at the top) into `private/` and `harness/`, once

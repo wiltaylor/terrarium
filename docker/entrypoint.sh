@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Terrarium container entrypoint (PLAN §23.3).
 #
-# 1. Make missing directories under /auth, /state, and /run/terrarium.
+# 1. Make missing directories under /auth, /state, /work, and /run/terrarium.
 # 2. Fix ownership of empty bind mounts (only when started as root).
 # 3. Export TERRARIUM_RUNNER (the terrarium-runner binary) when it is not set.
 # 4. Install the Copilot system-prompt extension when it is missing, or when
@@ -13,7 +13,7 @@ set -euo pipefail
 
 TERRARIUM_USER="${TERRARIUM_USER:-terrarium}"
 AUTH_DIRS=(/auth/claude /auth/codex /auth/copilot /auth/pi)
-STATE_DIRS=(/state /state/agents /state/artifacts /state/credentials /run/terrarium)
+STATE_DIRS=(/state /state/agents /state/artifacts /state/credentials /work /run/terrarium)
 IMAGE_VERSION_FILE=/usr/local/share/terrarium/image-version
 EXTENSION_MARKER=/auth/copilot/.terrarium-extension-version
 

@@ -228,7 +228,7 @@ async fn apply(
         origin: "api".into(),
         content: body.content.clone(),
     };
-    let state_dir = state.state_dir.clone();
+    let state_dir = state.work_dir.clone();
     let (prune, confirm, a, fl) = (body.prune, body.confirm, actor.clone(), f.clone());
     let applied = state
         .db

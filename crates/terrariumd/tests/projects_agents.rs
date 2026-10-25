@@ -228,7 +228,11 @@ async fn agent_crud_and_roles() {
         .await;
     assert_eq!(a["status"], "stopped");
     assert_eq!(a["source"], "api");
-    assert!(a["workspace"].as_str().unwrap().ends_with("/workspace"));
+    // The workspace is under the work root (PLAN §11, "mode 1").
+    assert!(
+        a["workspace"].as_str().unwrap().ends_with("/work/p/lead"),
+        "{a}"
+    );
     td.agent("p", "worker", json!({})).await;
     td.agent("q", "other", json!({})).await;
     td.post(

@@ -20,7 +20,7 @@ use tokio_tungstenite::tungstenite::http::header::{AUTHORIZATION, HeaderValue};
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::{self, Message};
 
-use crate::config::PathPolicy;
+use crate::config::{HostPaths, PathPolicy};
 use crate::outbox::{Link, Outbox, Outgoing};
 use crate::protocol::{
     CpPull, CpPush, DaemonFrame, DataFrame, ErrorCode, ExitReason, Hello, HostCapabilities,
@@ -56,6 +56,12 @@ pub struct ClientOptions {
     pub policy: PathPolicy,
     pub docker_bin: String,
     pub vmlab_bin: String,
+    /// The `git` binary for `vmlab.prepare` and `vmlab.release`.
+    pub git_bin: String,
+    /// `work_dir`, `instances_dir`, and `repos_dir` of the config.
+    pub paths: HostPaths,
+    /// Sent in `hello`; the daemon enforces it.
+    pub max_running_targets: u32,
     /// A TLS config for `wss://`. `None` uses the system roots.
     /// [`crate::Config::transport`] builds it, with pinning and `ca_file`.
     pub tls: Option<Arc<rustls::ClientConfig>>,
@@ -84,6 +90,9 @@ impl ClientOptions {
             policy: PathPolicy::default(),
             docker_bin: "docker".into(),
             vmlab_bin: "vmlab".into(),
+            git_bin: "git".into(),
+            paths: HostPaths::default(),
+            max_running_targets: crate::config::DEFAULT_MAX_RUNNING_TARGETS,
             tls: None,
             allow_insecure: false,
             token_file: None,
@@ -313,6 +322,7 @@ impl Client {
             arch: std::env::consts::ARCH.to_owned(),
             capabilities: self.opts.capabilities.clone(),
             max_sessions: self.opts.max_sessions,
+            max_running_targets: Some(self.opts.max_running_targets),
             resume,
         }
     }
@@ -625,7 +635,8 @@ impl Client {
             }
             F::DockerRun(r) => self.start(
                 r.session,
-                need(docker_ok, "docker").and_then(|_| docker::plan_run(&r, db, p)),
+                need(docker_ok, "docker")
+                    .and_then(|_| docker::plan_run(&r, db, p, &o.paths.work_dir)),
                 tx,
             ),
             F::DockerExec(r) => self.start(
@@ -713,6 +724,33 @@ impl Client {
                 need(vmlab_ok, "vmlab").and_then(|_| vmlab::plan_snapshot_restore(&r, vb, p)),
                 tx,
             ),
+            F::VmlabPrepare(r) => {
+                let id = r.session;
+                let ctx = self.prepare_ctx();
+                if vmlab_ok {
+                    self.start_task(id, tx, async move {
+                        let mut log = Vec::new();
+                        let res = crate::prepare::prepare(&ctx, &r, &mut log).await;
+                        (log, res)
+                    });
+                } else {
+                    send_error(
+                        tx,
+                        id,
+                        ErrorCode::Unsupported,
+                        "vmlab is not on this host".into(),
+                    );
+                }
+            }
+            F::VmlabRelease(r) => {
+                let id = r.session;
+                let ctx = self.prepare_ctx();
+                self.start_task(id, tx, async move {
+                    let mut log = Vec::new();
+                    let res = crate::prepare::release(&ctx, &r, &mut log).await;
+                    (log, res)
+                });
+            }
             F::VmlabSnapshotList(r) => self.start(
                 r.session,
                 need(vmlab_ok, "vmlab").and_then(|_| vmlab::plan_snapshot_list(&r, vb, p)),
@@ -833,6 +871,76 @@ impl Client {
                 signal: info.signal,
                 reason: info.reason,
             });
+            outbox.finish(frames);
+        });
+    }
+
+    fn prepare_ctx(&self) -> crate::prepare::Ctx {
+        crate::prepare::Ctx {
+            paths: self.opts.paths.clone(),
+            git_bin: self.opts.git_bin.clone(),
+            vmlab_bin: self.opts.vmlab_bin.clone(),
+        }
+    }
+
+    /// A session that runs in the host agent, not as one process
+    /// (`vmlab.prepare`, `vmlab.release`). The log lines go to stderr; the
+    /// end is `result` and `exit` 0, or an `error` frame.
+    fn start_task<F>(&self, session: SessionId, tx: &Link, task: F)
+    where
+        F: std::future::Future<
+                Output = (
+                    Vec<String>,
+                    Result<serde_json::Value, crate::prepare::TaskError>,
+                ),
+            > + Send
+            + 'static,
+    {
+        if !self.admit(session, tx) {
+            return;
+        }
+        let outbox = self.new_outbox(session, tx);
+        outbox.send_now(HostFrame::Started { session, pid: None });
+        self.sessions().insert(
+            session,
+            Entry {
+                outbox: outbox.clone(),
+                input: None,
+                push: None,
+                detached_since: None,
+            },
+        );
+        tracing::info!(session, "task started");
+        tokio::spawn(async move {
+            let (log, res) = task.await;
+            let mut text = log.join("\n");
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            if let Err((_, m)) = &res {
+                text.push_str(m);
+                text.push('\n');
+            }
+            let _ = outbox.push(StreamTag::Stderr, text.into_bytes()).await;
+            let frames = match res {
+                Ok(value) => vec![
+                    HostFrame::Result { session, value },
+                    HostFrame::Exit {
+                        session,
+                        code: Some(0),
+                        signal: None,
+                        reason: ExitReason::Exited,
+                    },
+                ],
+                Err((code, message)) => {
+                    tracing::warn!(session, ?code, %message, "task failed");
+                    vec![HostFrame::Error {
+                        session,
+                        code,
+                        message,
+                    }]
+                }
+            };
             outbox.finish(frames);
         });
     }

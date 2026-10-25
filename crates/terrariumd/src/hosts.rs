@@ -166,6 +166,10 @@ pub struct LiveInfo {
     pub arch: String,
     pub capabilities: HostCapabilities,
     pub max_sessions: u32,
+    /// The `max_running_targets` of the host agent's config. `None`: an
+    /// older host agent, no limit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_running_targets: Option<u32>,
     pub connected_at: String,
 }
 
@@ -245,6 +249,13 @@ impl HostRegistry {
                 info: None,
             },
         }
+    }
+
+    /// The `max_running_targets` of a host from its last `hello`.
+    pub fn max_running_targets(&self, host: &str) -> Option<u32> {
+        self.lock()
+            .get(host)
+            .and_then(|e| e.info.as_ref().and_then(|i| i.max_running_targets))
     }
 
     /// The capabilities of a host from its last `hello`.
@@ -345,6 +356,7 @@ impl HostRegistry {
             arch: hello.arch.clone(),
             capabilities: hello.capabilities.clone(),
             max_sessions: hello.max_sessions,
+            max_running_targets: hello.max_running_targets,
             connected_at: crate::db::now(),
         });
         let n = resume.len();

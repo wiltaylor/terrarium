@@ -93,6 +93,19 @@ pub struct Settings {
     #[arg(long, env = "TERRARIUM_REPOS_DIR", default_value = crate::sandbox::DEFAULT_REPOS_DIR)]
     pub repos_dir: PathBuf,
 
+    /// The work root. The workspace of an agent is
+    /// `<dir>/<project>/<agent>`; the sandbox binds it at `$HOME/work` and
+    /// at `/work/<project>/<agent>`, and a host agent attaches it to a
+    /// target at `/work/<project>/<agent>`. The host agent's `work_dir` is
+    /// the host path of this dir.
+    #[arg(long, env = "TERRARIUM_WORK_DIR", default_value = crate::workspace::DEFAULT_WORK_DIR)]
+    pub work_dir: PathBuf,
+
+    /// The most targets one project may have. A `POST /api/targets` past
+    /// it is `409 conflict`.
+    #[arg(long, env = "TERRARIUM_MAX_TARGETS_PER_PROJECT", default_value_t = DEFAULT_MAX_TARGETS_PER_PROJECT)]
+    pub max_targets_per_project: usize,
+
     /// Pass `--new-session` to bwrap. Off by default, because the harness
     /// then misses terminal resizes (docs/compat.md).
     #[arg(long, env = "TERRARIUM_SANDBOX_NEW_SESSION")]
@@ -132,6 +145,9 @@ pub struct Settings {
     #[command(subcommand)]
     pub command: Option<Command>,
 }
+
+/// The default of `TERRARIUM_MAX_TARGETS_PER_PROJECT`.
+pub const DEFAULT_MAX_TARGETS_PER_PROJECT: usize = 8;
 
 /// The values of `--runner-mode`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

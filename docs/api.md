@@ -1933,24 +1933,37 @@ Rules:
 A target comes from `targets/<name>.toml` (`source: "file"`), from
 `POST /api/targets` (`source: "api"`), or from a fleet file
 (`source: "fleet:<name>"`, §18.1). Target names are one namespace for
-all projects.
+all projects. Targets are project targets by default: a global target
+(no `project`) needs a sysadmin or the operator.
 
 ```json
-{"id":"box","name":"box","kind":"docker","project":"terra","host":"lab1","image":"alpine:3",
+{"id":"terra-box","name":"terra-box","kind":"docker","project":"terra","host":"lab1","image":"alpine:3",
  "ephemeral":true,"keep":false,"snapshot_before_task":false,
  "scope":"project","source":"api","state":"running","state_at":"2026-10-24T06:40:00.000Z",
- "snapshots":[],"host_online":true,"usable":true}
+ "snapshots":[],"host_online":true,"usable":true,
+ "runtime":{"attached":["terra/w-ter-3"]}}
 ```
 
 | Field | Meaning |
 |---|---|
-| `scope` | `global` (no `project`) or `project`. |
+| `scope` | `global` (no `project`) or `project`. Every target view has it, also in `GET /api/projects/{name}/targets`. |
 | `state` | `running`, `stopped`, `absent`, or `unknown`: what the last lifecycle verb saw. |
 | `snapshots` | The snapshot names that `POST .../snapshot` or `snapshot_before_task` took. A destroy (the state `absent`) clears them. |
 | `host_online` | The link of the target's host agent. `null` for `ssh`. |
 | `usable` | The caller may use the target (§17.4). |
 | `access` | Why the caller may use it: `operator`, `policy`, `lease`, or `null`. |
 | `lease` | The caller's active lease on the target (§17.7), when `access` is `lease`; else `null`. |
+| `runtime` | What runs now (§17.8): `attached` (the agent workspaces, `<project>/<agent>`, in the container or the lab instance), `lab` and `head` (the instance dir on the host and the commit of a `lab_repo` target), `instances` (one for each holder of a `lab_from_workspace` target, by the agent ULID: `{agent_name, lab, state, attached}`). `{}` when nothing runs. |
+
+**The project prefix.** `POST /api/targets` with a `project` names the
+target `<project>-<name>`, unless `name` starts with `<project>-` already.
+So two leads cannot take the same name. The answer has the full name. A
+global target, a file target, and a fleet target keep their names.
+
+**The project cap.** A project has at most
+`TERRARIUM_MAX_TARGETS_PER_PROJECT` targets (default 8). A `POST
+/api/targets` past it is `409 conflict`, with `details: {project, targets,
+max}`.
 
 | Endpoint | Body | Answer | Needs |
 |---|---|---|---|
@@ -1959,11 +1972,14 @@ all projects.
 | `GET /api/targets/{name}` | | `200` target | read |
 | `PATCH /api/targets/{name}` | JSON merge patch; `null` removes a field | `200` target | as `POST` |
 | `DELETE /api/targets/{name}` | | `204` | as `POST` |
-| `GET /api/projects/{name}/targets` | | `200` the project's and the global targets | read |
+| `GET /api/projects/{name}/targets` | | `200` the project's and the global targets, each with `scope` | read |
 
 An agent reads the global targets and the targets of its own project. A
 sysadmin agent and the operator read all. `?usable=true` keeps only the
 targets the caller may use. `terrarium targets ls` sends it in agent mode.
+`terrarium admin target ls` in agent mode reads `GET
+/api/projects/<own>/targets`: every target of the project and the global
+ones, with the `SCOPE` column.
 
 The fields that each kind needs:
 
@@ -1972,7 +1988,19 @@ The fields that each kind needs:
 | `host` | `host` | |
 | `ssh` | `address` | `port`, `credential` (an `ssh_key` in the credential store) |
 | `docker` | `host`, and `image` or `container` | `ephemeral`, `keep` |
-| `vmlab` | `host`, `lab` (an absolute path) | `machine`, `ephemeral`, `keep`, `snapshot_before_task` |
+| `vmlab` | `host`, and one of: `lab` (an absolute path); `lab_repo` with `machine`; `lab_from_workspace = true` with `machine` | `machine`, `lab_ref`, `lab_path`, `ephemeral`, `keep`, `snapshot_before_task` |
+
+The three kinds of vmlab target (§17.8):
+
+| Field | The lab |
+|---|---|
+| `lab` | A lab dir on the host that the operator wrote. No workspace attach. |
+| `lab_repo` | The name of a repo of the target's project. On `up`, the host agent makes a git worktree of it at `lab_ref` (default: the repo's default branch, else `main`), with `vmlab.wcl` in `lab_path` (default: the root). One instance for the target. |
+| `lab_from_workspace` | The `vmlab.wcl` in the workspace of each holder, in `lab_path`. Each holder runs its own instance. No `snapshot_before_task`, and no `exclusive` lease (§17.7). |
+
+`lab_repo` and `lab_from_workspace` need a project target. `lab_path` is a
+relative directory with no `..`. `lab_ref` takes the rules of a positional
+value.
 
 An `ephemeral` target must be `docker` (with `image`) or `vmlab`. Values
 that go onto a command line (`host`, `address`, `image`, `container`,
@@ -1987,7 +2015,9 @@ change a file target (`409 file_managed`).
 ### 17.3 Lifecycle verbs
 
 `POST /api/targets/{name}/up|down|snapshot|restore|status`. The body is
-empty, or `{"name"?, "discard_guest_changes"?, "destroy"?}`. The caller
+empty, or `{"name"?, "discard_guest_changes"?, "destroy"?, "agent"?}`.
+`agent` names the holder whose instance of a `lab_from_workspace` target
+the verb acts on; an agent caller always acts on its own. The caller
 may use the target (§17.4), or may define it (§17.2). The answer is the
 executor report, not the target: `{"target", "verb", "state", "snapshot"?,
 "result"?}`. `target` is the name, `state` is the new state, `snapshot` is
@@ -2030,6 +2060,17 @@ no other running agent holds:
 conflict`. A verb that fails is `422 invalid` with `details: {verb, code,
 end, stderr, stdout}`.
 
+An `up` that starts a docker or vmlab target (or a lab instance) when its
+host runs `max_running_targets` of them already (the host agent's config,
+default 4; `GET /api/hosts/{name}` shows it) is `429 rate_limited`. The
+count is the targets and instances on the host that the store shows as
+`running`.
+
+An `up` of a docker target binds the workspaces of the running holders
+(§17.8). When the container runs already without one of them, the answer
+has `attach_error` (a sentence that starts "attach needs a restart of the
+target"), unless the daemon could run a new container.
+
 ### 17.4 Exec sessions
 
 An exec session runs one command, one shell, or one file copy. It uses
@@ -2038,8 +2079,8 @@ plain requests only, so it works through the agent tunnel too
 
 | Endpoint | Body or query | Answer |
 |---|---|---|
-| `POST /api/targets/{name}/exec` | `{"cmd": [..], "cwd"?, "env"?, "pty"?, "shell"?, "timeout_secs"?}` | `201` `{"session_id", "target", "kind"}` |
-| `POST /api/targets/{name}/cp` | `{"direction": "push"\|"pull", "path", "mode"?}` | `201` `{"session_id", "target", "kind"}` |
+| `POST /api/targets/{name}/exec` | `{"cmd": [..], "cwd"?, "env"?, "pty"?, "shell"?, "timeout_secs"?, "agent"?}` | `201` `{"session_id", "target", "kind"}` |
+| `POST /api/targets/{name}/cp` | `{"direction": "push"\|"pull", "path", "mode"?, "agent"?}` | `201` `{"session_id", "target", "kind"}` |
 | `POST /api/targets/{name}/sessions/{id}/input` | `{"data"?, "resize"?, "signal"?, "eof"?, "finish"?}` | `200` `{"session_id", "accepted"}` |
 | `GET /api/targets/{name}/sessions/{id}/output` | `?since=<offset>&wait=<s>&max=<bytes>` | `200` output, below |
 | `GET /api/targets/{name}/sessions/{id}` | | `200` `{"session_id", "kind", "acknowledged", "buffered", "done", "end"}` |
@@ -2057,6 +2098,10 @@ The exec body:
   agent's `capabilities.shell` with `-l`, `/bin/sh -l` in a container,
   `vmlab shell` on a vmlab target, `exec "${SHELL:-/bin/sh}" -l` over ssh.
 - A vmlab target takes no `cwd` and no `env`, and a PTY only for `shell`.
+- `agent`: on a `lab_from_workspace` target, the holder whose instance runs
+  the command. An agent caller uses its own; the operator must name one
+  (`422 invalid` without it). A `lab_repo` or `lab_from_workspace` target
+  with no instance on the host is `409 conflict`: bring it up first.
 
 The input body: `data` is base64, at most 1 MiB of bytes (`413
 too_large` above). In a push, `data` is file bytes. `resize` is
@@ -2178,7 +2223,9 @@ stderr}`. Each checkout writes a `repo.checkout` event and audit row with
 target that an agent holds: the names in its `policy.targets` and the
 targets of its active leases (§17.7). They skip a target that another
 running agent holds (by policy or by lease): it is up already, and it must
-stay up. `RunnerSupervisor::start` calls
+stay up. The agent's workspace joins or leaves it then (§17.8). A
+`lab_from_workspace` target is not skipped: each holder has its own
+instance. `RunnerSupervisor::start` calls
 `on_agent_start` before the harness launches. A target that does not come
 up does not stop the start: the agent gets a `notification` event with the
 error. The supervisor calls `on_agent_stop` on a stop, on an exit that does
@@ -2239,6 +2286,9 @@ Rules:
 - A lease is active while it is not revoked and `expires_at` is later than
   now. The policy check uses the time, so a lease ends at its time. The
   expiry timer runs at each `expires_at`, and every 10 s.
+- A `lab_from_workspace` target gives each holder its own lab instance, so
+  an `exclusive` grant on it is `422 invalid`. A grant to a running agent
+  brings up that agent's own instance; the end of its lease removes it.
 - When a lease ends (revoke or expiry), the daemon ends the holder's live
   exec sessions on the target: each ends with `{"type": "error", "code":
   "lease_revoked"}`. A new exec, shell, cp, checkout, or lifecycle verb is
@@ -2246,10 +2296,12 @@ Rules:
   `policy.targets` lists the target keeps its sessions and its access.
 - Lifecycle: a grant to a running agent brings an ephemeral target up with
   `ensure_up` (and `snapshot_before_task`), unless another running agent
-  holds it (`target.up`, reason `lease_grant`). The end of the lease of a
+  holds it (`target.up`, reason `lease_grant`); then the agent's workspace
+  joins it (`target.attach`, §17.8). The end of the lease of a
   running agent that leaves no running holder calls `maybe_down`, with the
   keep and restore rules of §17.3 (`target.destroy` or `target.restore`,
-  reason `lease_end`). A grant to a stopped agent runs no verb: its next
+  reason `lease_end`); with other running holders, its workspace leaves the
+  target (`target.detach`). A grant to a stopped agent runs no verb: its next
   start brings the target up (§17.6).
 - Audit rows: `target.grant`, `target.revoke`, `target.lease_extend`, and
   `target.lease_expired` (actor `system`). Deleting a target ends its
@@ -2259,6 +2311,64 @@ Rules:
   agent. On a grant or an extend: "You now have access to target <t>
   until <time or 'revoked'>. Run `terrarium targets ls`." On a revoke or
   the expiry: "Your access to target <t> ended."
+
+### 17.8 Workspaces and lab instances
+
+PLAN §11, "mode 1". The workspace of an agent lives on the host:
+`<TERRARIUM_WORK_DIR>/<project>/<agent>` (`/work` in the container, the
+`./work` bind mount). The ULID-keyed agent dir keeps `private/` and
+`harness/`. The sandbox shows the workspace at `$HOME/work` and at
+`/work/<project>/<agent>`. A host agent attaches it into the docker and
+vmlab targets that the agent holds at the same `/work/<project>/<agent>`,
+so the harness edits files in the sandbox, the compilers run on the target,
+and the paths in their messages are the same on both sides. The host
+agent's `work_dir` must be the host path of the work root
+([host-protocol.md "Workspaces"](host-protocol.md#workspaces)).
+
+**Attach.** When an agent starts with a target (by policy or by lease), or
+gets a lease while it runs, its workspace joins the target:
+
+| Case | What the daemon does |
+|---|---|
+| No other running holder | The ephemeral target comes up (§17.6) with the workspaces of its running holders: `docker run -v` for each, or `vmlab.prepare` with an `@dev` decorator (one workspace for each machine). |
+| The target runs, the workspace is attached | Nothing. |
+| The target runs without it, ephemeral, no live exec session | A new container (or lab instance) with the new set: `docker rm`, `docker run`; or `vmlab destroy`, `vmlab.prepare`, `vmlab up`. Audit row `target.attach`. |
+| The target runs without it, and it is permanent or a session is live | Nothing runs. The agent gets the notification "target `<t>`: attach needs a restart of the target: ...", and a grant answers it in `lifecycle_error`. |
+
+A docker target with `container` (an existing container) and a vmlab target
+with `lab` take no workspace.
+
+**Detach.** When a holder stops, or its lease ends, and other running agents
+still hold the target, a new container (or lab instance) without its
+workspace runs, with the same rule (ephemeral, no live session; audit row
+`target.detach`). Else the workspace stays attached until the target runs
+again. When the last holder goes, the destroy of §17.6 removes it all.
+
+**Lab instances.** A `lab_repo` target has one instance, named after the
+target, in a git worktree of the repo on the host. A `lab_from_workspace`
+target has one instance for each holder, named `<target>.<agent ULID>`,
+from the `vmlab.wcl` in the holder's workspace. Each instance is a
+directory `<instances_dir>/<instance>/lab` on the host, with the lab file
+that the host agent made after its allowlist check
+([host-protocol.md "The lab allowlist"](host-protocol.md#the-lab-allowlist)).
+`up` runs `vmlab.prepare` when the instance does not run, then `vmlab up`;
+a destroy runs `vmlab destroy` and `vmlab.release`, which also removes the
+worktree. `DELETE /api/targets/{name}` destroys the instances first. A
+refused lab is `422 invalid` with `details.code` `refused` and every
+problem in the message.
+
+vmlab 0.33.3-alpha keys a running lab by the name in its `lab` block: a
+second instance of the same lab file is `exit 5` ("lab ... is already
+registered"). So until vmlab runs one lab instance for each directory, two
+holders of a `lab_from_workspace` target need lab files with two names
+(docs/compat.md, "vmlab workspace attach").
+
+**Migration.** At its start, the daemon points each agent at
+`<work>/<project>/<agent>`. At the agent's next start (and before a
+checkout into its workspace while it does not run), the files of the old
+`<state>/agents/<ulid>/workspace` move there once. A new path that has files
+already is not touched, and the old files stay (a log line says so). The
+move is a rename, or a copy and a delete across file systems.
 
 ## 18. Fleet
 

@@ -58,7 +58,17 @@ fn push_labels(
     Ok(())
 }
 
-pub fn plan_run(req: &DockerRun, bin: &str, policy: &PathPolicy) -> Result<VerbPlan, BuildError> {
+/// `docker run`. Each entry of `workspaces` becomes
+/// `-v <work_dir>/<path>:/work/<path>` ([`crate::workspace::resolve`]).
+/// With a workspace and no `user`, the container runs as the owner of the
+/// first workspace (`-u <uid>:<gid>`, with `HOME=/tmp`), so the files that
+/// a build writes stay the agent's: the sandbox runs as that user too.
+pub fn plan_run(
+    req: &DockerRun,
+    bin: &str,
+    policy: &PathPolicy,
+    work_dir: &std::path::Path,
+) -> Result<VerbPlan, BuildError> {
     let mut a = vec![s("run")];
     if req.detach {
         a.push(s("-d"));
@@ -81,7 +91,24 @@ pub fn plan_run(req: &DockerRun, bin: &str, policy: &PathPolicy) -> Result<VerbP
         a.push(s("--name"));
         a.push(ident("name", name)?.to_owned());
     }
-    let env = push_env(&mut a, &req.env)?;
+    let mut sources = Vec::new();
+    for w in &req.workspaces {
+        sources.push(crate::workspace::resolve(work_dir, w)?);
+    }
+    let mut req_env = req.env.clone();
+    let mut user = req.user.clone();
+    if user.is_none()
+        && let Some(first) = sources.first()
+    {
+        use std::os::unix::fs::MetadataExt;
+        let m = std::fs::metadata(first)
+            .map_err(|e| BuildError::path(format!("cannot stat the workspace: {e}")))?;
+        user = Some(format!("{}:{}", m.uid(), m.gid()));
+        req_env
+            .entry("HOME".into())
+            .or_insert_with(|| "/tmp".into());
+    }
+    let env = push_env(&mut a, &req_env)?;
     for v in &req.volumes {
         if v.source.is_empty()
             || v.target.is_empty()
@@ -107,6 +134,15 @@ pub fn plan_run(req: &DockerRun, bin: &str, policy: &PathPolicy) -> Result<VerbP
             format!("{}:{}", v.source, v.target)
         });
     }
+    for (w, source) in req.workspaces.iter().zip(&sources) {
+        let source = source
+            .to_str()
+            .filter(|p| !p.contains(':'))
+            .ok_or_else(|| BuildError::bad("the workspace path is not UTF-8 or has ':'"))?
+            .to_owned();
+        a.push(s("-v"));
+        a.push(format!("{source}:{}", w.target()));
+    }
     if let Some(w) = &req.workdir {
         a.push(s("-w"));
         a.push(ident("workdir", w)?.to_owned());
@@ -115,7 +151,7 @@ pub fn plan_run(req: &DockerRun, bin: &str, policy: &PathPolicy) -> Result<VerbP
         a.push(s("--network"));
         a.push(ident("network", n)?.to_owned());
     }
-    if let Some(u) = &req.user {
+    if let Some(u) = &user {
         a.push(s("-u"));
         a.push(ident("user", u)?.to_owned());
     }
@@ -358,7 +394,13 @@ mod tests {
         r.user = Some("1000:1000".into());
         r.labels = BTreeMap::from([("terrarium.target".into(), "buildbox".into())]);
         r.command = vec!["sleep".into(), "infinity".into()];
-        let plan = plan_run(&r, "docker", &PathPolicy::default()).unwrap();
+        let plan = plan_run(
+            &r,
+            "docker",
+            &PathPolicy::default(),
+            std::path::Path::new("/nonexistent"),
+        )
+        .unwrap();
         assert_eq!(
             plan.exec.args.join(" "),
             "run -d --rm --init --name t-buildbox -e TOKEN -v /srv/work:/work -v cache:/cache:ro \
@@ -371,11 +413,65 @@ mod tests {
     }
 
     #[test]
+    fn run_binds_the_workspaces_at_the_same_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let work = dir.path().join("work");
+        std::fs::create_dir_all(work.join("terra/w1")).unwrap();
+        std::fs::create_dir_all(work.join("terra/w2")).unwrap();
+        let mut r = run_req();
+        r.workspaces = vec![
+            crate::protocol::WorkspaceMount {
+                path: "terra/w1".into(),
+            },
+            crate::protocol::WorkspaceMount {
+                path: "terra/w2".into(),
+            },
+        ];
+        let plan = plan_run(&r, "docker", &PathPolicy::default(), &work).unwrap();
+        let real = std::fs::canonicalize(&work).unwrap();
+        use std::os::unix::fs::MetadataExt;
+        let m = std::fs::metadata(work.join("terra/w1")).unwrap();
+        assert_eq!(
+            plan.exec.args.join(" "),
+            format!(
+                "run -d -e HOME -v {w}/terra/w1:/work/terra/w1 -v {w}/terra/w2:/work/terra/w2 \
+                 -u {u}:{g} alpine:3",
+                w = real.display(),
+                u = m.uid(),
+                g = m.gid()
+            )
+        );
+        assert_eq!(plan.exec.env["HOME"], "/tmp");
+        // A `user` of the frame wins.
+        r.user = Some("0:0".into());
+        let plan = plan_run(&r, "docker", &PathPolicy::default(), &work).unwrap();
+        assert!(plan.exec.args.join(" ").contains("-u 0:0 alpine:3"));
+        assert!(!plan.exec.args.contains(&"HOME".to_owned()));
+        r.user = None;
+        r.workspaces = vec![crate::protocol::WorkspaceMount {
+            path: "terra/nobody".into(),
+        }];
+        let err = plan_run(&r, "docker", &PathPolicy::default(), &work).unwrap_err();
+        assert_eq!(err.code, crate::protocol::ErrorCode::PathDenied);
+        assert!(
+            err.message.contains("TERRARIUM_WORK_DIR"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
     fn attached_run_with_pty() {
         let mut r = run_req();
         r.detach = false;
         r.pty = Some(Default::default());
-        let plan = plan_run(&r, "docker", &PathPolicy::default()).unwrap();
+        let plan = plan_run(
+            &r,
+            "docker",
+            &PathPolicy::default(),
+            std::path::Path::new("/nonexistent"),
+        )
+        .unwrap();
         assert_eq!(plan.exec.args, ["run", "-i", "-t", "alpine:3"]);
         assert!(plan.exec.pty.is_some());
         assert_eq!(plan.parser, None);
@@ -385,7 +481,15 @@ mod tests {
     fn run_refuses_flag_injection_and_bind_mounts_outside_roots() {
         let mut r = run_req();
         r.image = "--privileged".into();
-        assert!(plan_run(&r, "docker", &PathPolicy::default()).is_err());
+        assert!(
+            plan_run(
+                &r,
+                "docker",
+                &PathPolicy::default(),
+                std::path::Path::new("/nonexistent")
+            )
+            .is_err()
+        );
         let mut r = run_req();
         r.volumes = vec![VolumeMount {
             source: "/etc".into(),
@@ -395,7 +499,8 @@ mod tests {
         let policy = PathPolicy {
             roots: Some(vec![PathBuf::from("/srv/nothing-here")]),
         };
-        let err = plan_run(&r, "docker", &policy).unwrap_err();
+        let err =
+            plan_run(&r, "docker", &policy, std::path::Path::new("/nonexistent")).unwrap_err();
         assert_eq!(err.code, crate::protocol::ErrorCode::PathDenied);
     }
 

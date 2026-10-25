@@ -9,7 +9,8 @@
 //! | the harness install directory, when it is outside `/usr` | the same path | ro |
 //! | `/proc`, `/dev`, `/tmp` | new, private | |
 //! | `$HOME` (`/home/agent`) | a new tmpfs | rw |
-//! | `$HOME/work` | `<state>/agents/<ulid>/workspace` | rw |
+//! | `$HOME/work` | `<work>/<project>/<agent>` (`TERRARIUM_WORK_DIR`) | rw |
+//! | `/work/<project>/<agent>` | the same workspace again, at the path a target sees it at | rw |
 //! | `<state>/agents/<ulid>/harness` | the same path (`prompt.md`, the adapter's per-agent files) | ro |
 //! | `$HOME/.claude` (and the other harness homes) | the shared home, for example `/auth/claude` | rw |
 //! | each `FileOverlay` target | the per-agent file (also a part of `harness/` that the harness writes, such as pi's `sessions/`). The session files of Claude Code (`projects/<cwd>/`), Codex (`sessions/`), and Copilot (`session-state/`) are such overlays, so no agent sees the transcripts of another agent | rw or ro |
@@ -176,8 +177,12 @@ pub struct AgentLayout {
     pub harness_dir: PathBuf,
     /// `<state>/agents/<ulid>/private`: the runner's records. Never bound.
     pub private_dir: PathBuf,
-    /// `<state>/agents/<ulid>/workspace`.
+    /// `<work>/<project>/<agent>` (`crate::workspace`).
     pub workspace: PathBuf,
+    /// The second place the sandbox shows the workspace:
+    /// `/work/<project>/<agent>`, the path a target sees it at, so a path in
+    /// a compiler message on the target is a path in the sandbox too.
+    pub workspace_mount: Option<PathBuf>,
     /// `<run>/agents/<ulid>.sock`.
     pub socket: PathBuf,
     pub homes: Vec<HarnessHome>,
@@ -405,6 +410,9 @@ impl SandboxConfig {
             &layout.workspace,
             &self.home.join("work"),
         );
+        if let Some(m) = &layout.workspace_mount {
+            push3(&mut args, "--bind", &layout.workspace, m);
+        }
         // The harness files, read-only. `private/` next to it stays out.
         push3(
             &mut args,
@@ -613,7 +621,8 @@ mod tests {
             agent_dir: dir.clone(),
             harness_dir: dir.join("harness"),
             private_dir: dir.join("private"),
-            workspace: dir.join("workspace"),
+            workspace: PathBuf::from("/work/terra/a1"),
+            workspace_mount: Some(PathBuf::from("/work/terra/a1")),
             socket: PathBuf::from("/run/terrarium/agents/01K8AGENT0000000000000000A.sock"),
             homes: vec![HarnessHome {
                 harness: HarnessId::Claude,
@@ -675,7 +684,7 @@ mod tests {
         let symlink = |p: &Path| (p == Path::new("/lib64")).then(|| PathBuf::from("usr/lib"));
         let resolve = |p: &str| (p == "claude").then(|| PathBuf::from("/usr/bin/claude"));
         let wrapped = cfg.wrap_with(spec(), &l, env, &symlink, &resolve);
-        let golden = "cd /state/agents/01K8AGENT0000000000000000A/workspace && env -i \
+        let golden = "cd /work/terra/a1 && env -i \
 CLAUDE_CONFIG_DIR=/home/agent/.claude DISABLE_TELEMETRY=1 HOME=/home/agent LANG=en_US.UTF-8 \
 PATH=/opt/terrarium/bin:/usr/local/bin:/usr/bin:/bin TERM=xterm-256color \
 TERRARIUM_AGENT=01K8AGENT0000000000000000A TERRARIUM_SOCKET=/run/terrarium/agent.sock \
@@ -691,7 +700,7 @@ TERRARIUM_AGENT=01K8AGENT0000000000000000A TERRARIUM_SOCKET=/run/terrarium/agent
 --ro-bind-try /etc/ld.so.cache /etc/ld.so.cache --ro-bind-try /etc/ld.so.conf /etc/ld.so.conf \
 --ro-bind-try /etc/ld.so.conf.d /etc/ld.so.conf.d \
 --proc /proc --dev /dev --tmpfs /tmp --tmpfs /home/agent \
---bind /state/agents/01K8AGENT0000000000000000A/workspace /home/agent/work \
+--bind /work/terra/a1 /home/agent/work --bind /work/terra/a1 /work/terra/a1 \
 --ro-bind /state/agents/01K8AGENT0000000000000000A/harness /state/agents/01K8AGENT0000000000000000A/harness \
 --bind /auth/claude /home/agent/.claude \
 --bind /state/agents/01K8AGENT0000000000000000A/harness/claude/claude.json /home/agent/.claude/.claude.json \

@@ -78,6 +78,13 @@ impl Lab {
         o.backoff_max = Duration::from_millis(200);
         o.docker_bin = self.bins.path().join("docker").display().to_string();
         o.vmlab_bin = self.bins.path().join("vmlab").display().to_string();
+        // The daemon's work root is the host agent's `work_dir`, as on one
+        // machine.
+        o.paths = terrarium_host::HostPaths {
+            work_dir: self.td.state.with_file_name("work"),
+            instances_dir: self.bins.path().join("instances"),
+            repos_dir: self.bins.path().join("repos"),
+        };
         Client::new(o)
     }
 
@@ -113,12 +120,16 @@ fn fake_tool(tool: &str, dir: &Path) -> String {
     let state = dir.join(format!("{tool}.state"));
     let body = match tool {
         "docker" => format!(
-            r#"case "$1" in
-  inspect) if [ -f '{s}' ]; then st=$(cat '{s}'); echo "[{{\"Id\":\"abc\",\"Name\":\"/terrarium-dbox\",\"State\":{{\"Status\":\"$st\"}}}}]"; else echo '[]'; echo 'Error: No such object' >&2; exit 1; fi ;;
-  run) echo running > '{s}'; echo abc123 ;;
-  start) echo running > '{s}'; echo "$2" ;;
-  stop) echo exited > '{s}'; echo "$4" ;;
-  rm) rm -f '{s}' ;;
+            r#"for a in "$@"; do c=$a; done
+if [ "$1" = run ]; then prev=; for a in "$@"; do if [ "$prev" = --name ]; then c=$a; fi; prev=$a; done; fi
+f='{s}'.$c
+case "$1" in
+  inspect) if [ -f "$f" ]; then st=$(cat "$f"); echo "[{{\"Id\":\"abc\",\"Name\":\"/terrarium-dbox\",\"State\":{{\"Status\":\"$st\"}}}}]"; else echo '[]'; echo 'Error: No such object' >&2; exit 1; fi ;;
+  run) echo running > "$f"; echo abc123 ;;
+  start) echo running > "$f"; echo "$2" ;;
+  stop) echo exited > "$f"; echo "$4" ;;
+  rm) rm -f "$f" ;;
+  exec) for a in "$@"; do if [ "$a" = sleeper ]; then sleep 3; fi; done ;;
 esac"#,
             s = state.display()
         ),
@@ -523,7 +534,7 @@ async fn agent_policy_limits_the_targets() {
         .agent(
             "terra",
             "worker",
-            json!({"policy": {"targets": ["box", "opsbox"]}}),
+            json!({"policy": {"targets": ["terra-box", "ops-opsbox"]}}),
         )
         .await;
     let other = lab.td.agent("terra", "other", json!({})).await;
@@ -531,29 +542,32 @@ async fn agent_policy_limits_the_targets() {
         worker["id"].as_str().unwrap().to_owned(),
         other["id"].as_str().unwrap().to_owned(),
     );
-    lab.target(json!({"name": "box", "kind": "host", "host": "lab1", "project": "terra"}))
+    lab.target(json!({"name": "terra-box", "kind": "host", "host": "lab1", "project": "terra"}))
         .await;
-    lab.target(json!({"name": "opsbox", "kind": "host", "host": "lab1", "project": "ops"}))
+    lab.target(json!({"name": "ops-opsbox", "kind": "host", "host": "lab1", "project": "ops"}))
         .await;
     let body = json!({"cmd": ["true"]});
     lab.td
-        .post_as(&o, "/api/targets/box/exec", body.clone())
+        .post_as(&o, "/api/targets/terra-box/exec", body.clone())
         .await
         .err(403, "forbidden");
     // In the policy, but in another project.
     lab.td
-        .post_as(&w, "/api/targets/opsbox/exec", body.clone())
+        .post_as(&w, "/api/targets/ops-opsbox/exec", body.clone())
         .await
         .err(403, "forbidden");
-    let r = lab.td.post_as(&w, "/api/targets/box/exec", body).await;
+    let r = lab
+        .td
+        .post_as(&w, "/api/targets/terra-box/exec", body)
+        .await;
     assert_eq!(r.status, 201, "{}", r.body);
     let sid = r.body["session_id"].as_str().unwrap().to_owned();
     // Another agent cannot read the worker's session.
     lab.td
-        .get_as(&o, &format!("/api/targets/box/sessions/{sid}/output"))
+        .get_as(&o, &format!("/api/targets/terra-box/sessions/{sid}/output"))
         .await
         .err(404, "not_found");
-    let d = drain_as(&lab.td, Some(&w), "box", &sid).await;
+    let d = drain_as(&lab.td, Some(&w), "terra-box", &sid).await;
     assert_eq!(d.end["code"], 0);
     // `targets ls` for an agent: `usable` marks what its policy allows.
     let mine = lab.td.get_as(&w, "/api/targets?usable=true").await;
@@ -564,7 +578,7 @@ async fn agent_policy_limits_the_targets() {
         .iter()
         .map(|t| t["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, ["box"]);
+    assert_eq!(names, ["terra-box"]);
     assert_eq!(
         lab.td.get_as(&o, "/api/targets?usable=true").await.body,
         json!([])
@@ -583,20 +597,24 @@ async fn agent_policy_limits_the_targets() {
     for _ in 0..terrariumd::executor::MAX_SESSIONS_PER_AGENT {
         let r = lab
             .td
-            .post_as(&w, "/api/targets/box/exec", json!({"cmd": ["sleep", "5"]}))
+            .post_as(
+                &w,
+                "/api/targets/terra-box/exec",
+                json!({"cmd": ["sleep", "5"]}),
+            )
             .await;
         assert_eq!(r.status, 201, "{}", r.body);
         sessions.push(r.body["session_id"].as_str().unwrap().to_owned());
     }
     lab.td
-        .post_as(&w, "/api/targets/box/exec", json!({"cmd": ["true"]}))
+        .post_as(&w, "/api/targets/terra-box/exec", json!({"cmd": ["true"]}))
         .await
         .err(429, "rate_limited");
     let r = lab
         .td
         .req(
             hyper::Method::DELETE,
-            &format!("/api/targets/box/sessions/{}", sessions[0]),
+            &format!("/api/targets/terra-box/sessions/{}", sessions[0]),
             None,
             Some(&w),
         )
@@ -971,13 +989,22 @@ async fn target_files_sync_and_api_targets() {
         .delete("/api/targets/buildbox")
         .await
         .err(409, "file_managed");
-    // An API target: create, patch, show in the project, delete.
-    lab.target(json!({"name": "box", "kind": "host", "host": "lab1", "project": "terra"}))
+    // An API target: create, patch, show in the project, delete. A
+    // project target gets the project prefix.
+    let r = lab
+        .td
+        .post(
+            "/api/targets",
+            json!({"name": "box", "kind": "host", "host": "lab1", "project": "terra"}),
+        )
         .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert_eq!(r.body["name"], "terra-box");
+    assert_eq!(r.body["scope"], "project");
     lab.td
         .post(
             "/api/targets",
-            json!({"name": "box", "kind": "host", "host": "x"}),
+            json!({"name": "terra-box", "kind": "host", "host": "x"}),
         )
         .await
         .err(409, "conflict");
@@ -990,21 +1017,30 @@ async fn target_files_sync_and_api_targets() {
         .err(422, "invalid");
     let r = lab
         .td
-        .patch("/api/targets/box", json!({"host": "lab2"}))
+        .patch("/api/targets/terra-box", json!({"host": "lab2"}))
         .await;
     assert_eq!(r.ok()["host"], "lab2");
-    let names: Vec<String> = lab
-        .td
-        .get("/api/projects/terra/targets")
-        .await
+    let listed = lab.td.get("/api/projects/terra/targets").await;
+    let names: Vec<(String, String)> = listed
         .ok()
         .as_array()
         .unwrap()
         .iter()
-        .map(|t| t["name"].as_str().unwrap().to_owned())
+        .map(|t| {
+            (
+                t["name"].as_str().unwrap().to_owned(),
+                t["scope"].as_str().unwrap().to_owned(),
+            )
+        })
         .collect();
-    assert_eq!(names, ["box", "buildbox"]);
-    assert_eq!(lab.td.delete("/api/targets/box").await.status, 204);
+    assert_eq!(
+        names,
+        [
+            ("buildbox".to_owned(), "project".to_owned()),
+            ("terra-box".to_owned(), "project".to_owned())
+        ]
+    );
+    assert_eq!(lab.td.delete("/api/targets/terra-box").await.status, 204);
     // The file goes: the target goes on reload.
     std::fs::remove_file(lab.td.config.join("targets/buildbox.toml")).unwrap();
     lab.td.post_empty("/api/reload").await.ok();
@@ -1491,12 +1527,12 @@ async fn a_lease_grants_and_a_revoke_ends_the_sessions() {
             .await,
     );
     let w = id_of(&lab.td.agent("terra", "worker", json!({})).await);
-    lab.target(json!({"name": "box", "kind": "host", "host": "lab1", "project": "terra"}))
+    lab.target(json!({"name": "terra-box", "kind": "host", "host": "lab1", "project": "terra"}))
         .await;
     let body = json!({"cmd": ["sleep", "30"]});
     let r = lab
         .td
-        .post_as(&w, "/api/targets/box/exec", body.clone())
+        .post_as(&w, "/api/targets/terra-box/exec", body.clone())
         .await;
     r.err(403, "forbidden");
     assert!(
@@ -1512,7 +1548,7 @@ async fn a_lease_grants_and_a_revoke_ends_the_sessions() {
         .td
         .post_as(
             &lead,
-            "/api/targets/box/leases",
+            "/api/targets/terra-box/leases",
             json!({"agent": "worker", "reason": "TER-1"}),
         )
         .await;
@@ -1532,7 +1568,7 @@ async fn a_lease_grants_and_a_revoke_ends_the_sessions() {
 
     let r = lab
         .td
-        .post_as(&w, "/api/targets/box/exec", body.clone())
+        .post_as(&w, "/api/targets/terra-box/exec", body.clone())
         .await;
     assert_eq!(r.status, 201, "{}", r.body);
     let sid = r.body["session_id"].as_str().unwrap().to_owned();
@@ -1540,39 +1576,45 @@ async fn a_lease_grants_and_a_revoke_ends_the_sessions() {
         .td
         .req(
             hyper::Method::DELETE,
-            "/api/targets/box/leases/worker",
+            "/api/targets/terra-box/leases/worker",
             None,
             Some(&lead),
         )
         .await;
     assert_eq!(r.status, 200, "{}", r.body);
     assert_eq!(r.body["state"], "revoked");
-    let d = drain_as(&lab.td, Some(&w), "box", &sid).await;
+    let d = drain_as(&lab.td, Some(&w), "terra-box", &sid).await;
     assert_eq!(d.end["type"], "error", "{}", d.end);
     assert_eq!(d.end["code"], "lease_revoked", "{}", d.end);
-    let r = lab.td.post_as(&w, "/api/targets/box/exec", body).await;
+    let r = lab
+        .td
+        .post_as(&w, "/api/targets/terra-box/exec", body)
+        .await;
     r.err(403, "forbidden");
     assert!(
         r.body["error"]["message"]
             .as_str()
             .unwrap()
-            .contains("your lease on box ended"),
+            .contains("your lease on terra-box ended"),
         "{}",
         r.body
     );
     // A second revoke finds no lease.
     lab.td
-        .delete("/api/targets/box/leases/worker")
+        .delete("/api/targets/terra-box/leases/worker")
         .await
         .err(404, "not_found");
     let row = last_audit(&lab.td, "target.grant").await;
     assert_eq!(row["actor"], format!("agent:{lead}"));
     assert_eq!(row["detail"]["reason"], "TER-1");
     let row = last_audit(&lab.td, "target.revoke").await;
-    assert_eq!(row["target"], "box");
-    let all = lab.td.get("/api/targets/box/leases?all=true").await;
+    assert_eq!(row["target"], "terra-box");
+    let all = lab.td.get("/api/targets/terra-box/leases?all=true").await;
     assert_eq!(all.ok().as_array().unwrap().len(), 1);
-    assert_eq!(lab.td.get("/api/targets/box/leases").await.body, json!([]));
+    assert_eq!(
+        lab.td.get("/api/targets/terra-box/leases").await.body,
+        json!([])
+    );
     let ev = events(&lab.td, "lease").await;
     let changes: Vec<&str> = ev
         .iter()
@@ -1648,7 +1690,7 @@ async fn exclusive_leases_and_who_may_grant() {
             .agent("ops", "sys", json!({"roles": ["sysadmin"]}))
             .await,
     );
-    lab.target(json!({"name": "vm", "kind": "host", "host": "lab1", "project": "terra"}))
+    lab.target(json!({"name": "terra-vm", "kind": "host", "host": "lab1", "project": "terra"}))
         .await;
     lab.target(json!({"name": "g", "kind": "host", "host": "lab1"}))
         .await;
@@ -1661,14 +1703,14 @@ async fn exclusive_leases_and_who_may_grant() {
     };
     let r = grant(
         lead.clone(),
-        "vm",
+        "terra-vm",
         json!({"agent": "w1", "until": "30m", "exclusive": true}),
     )
     .await;
     assert_eq!(r.status, 201, "{}", r.body);
     assert_eq!(r.body["exclusive"], true);
     let until = r.body["expires_at"].as_str().unwrap().to_owned();
-    let r = grant(lead.clone(), "vm", json!({"agent": "w2"})).await;
+    let r = grant(lead.clone(), "terra-vm", json!({"agent": "w2"})).await;
     r.err(409, "lease_held");
     let msg = r.body["error"]["message"].as_str().unwrap();
     assert!(msg.contains("terra/w1") && msg.contains(&until), "{msg}");
@@ -1685,10 +1727,10 @@ async fn exclusive_leases_and_who_may_grant() {
         "{}",
         r.body
     );
-    grant(lead.clone(), "vm", json!({"agent": "ops/o1"}))
+    grant(lead.clone(), "terra-vm", json!({"agent": "ops/o1"}))
         .await
         .err(403, "forbidden");
-    grant(w1.clone(), "vm", json!({"agent": "w2"}))
+    grant(w1.clone(), "terra-vm", json!({"agent": "w2"}))
         .await
         .err(403, "forbidden");
     let r = grant(sys.clone(), "g", json!({"agent": "terra/w2"})).await;
@@ -1700,13 +1742,17 @@ async fn exclusive_leases_and_who_may_grant() {
     assert_eq!(r.status, 201, "{}", r.body);
     // A project target goes only to an agent of its project.
     lab.td
-        .post("/api/targets/vm/leases", json!({"agent": "ops/o1"}))
+        .post("/api/targets/terra-vm/leases", json!({"agent": "ops/o1"}))
         .await
         .err(422, "invalid");
     // Extend, then a holder gives its own lease back.
     let r = lab
         .td
-        .patch_as(&lead, "/api/targets/vm/leases/w1", json!({"until": "2h"}))
+        .patch_as(
+            &lead,
+            "/api/targets/terra-vm/leases/w1",
+            json!({"until": "2h"}),
+        )
         .await;
     assert_eq!(r.status, 200, "{}", r.body);
     assert!(r.body["expires_at"].as_str().unwrap() > until.as_str());
@@ -1718,13 +1764,13 @@ async fn exclusive_leases_and_who_may_grant() {
         .td
         .req(
             hyper::Method::DELETE,
-            "/api/targets/vm/leases/w1",
+            "/api/targets/terra-vm/leases/w1",
             None,
             Some(&w1),
         )
         .await;
     assert_eq!(r.status, 200, "{}", r.body);
-    let r = grant(lead, "vm", json!({"agent": "w2", "exclusive": true})).await;
+    let r = grant(lead, "terra-vm", json!({"agent": "w2", "exclusive": true})).await;
     assert_eq!(r.status, 201, "{}", r.body);
 }
 
@@ -1739,20 +1785,23 @@ async fn a_grant_to_a_running_agent_brings_an_ephemeral_target_up() {
     let w = id_of(&lab.td.agent("terra", "worker", json!({})).await);
     lab.td.agent("terra", "idle", json!({})).await;
     lab.target(
-        json!({"name": "dbox", "kind": "docker", "host": "lab1", "project": "terra",
+        json!({"name": "terra-dbox", "kind": "docker", "host": "lab1", "project": "terra",
                       "image": "alpine:3", "ephemeral": true}),
     )
     .await;
     // A stopped agent: the grant runs no verb.
     let r = lab
         .td
-        .post("/api/targets/dbox/leases", json!({"agent": "terra/idle"}))
+        .post(
+            "/api/targets/terra-dbox/leases",
+            json!({"agent": "terra/idle"}),
+        )
         .await;
     assert_eq!(r.status, 201, "{}", r.body);
     assert!(r.body.get("lifecycle").is_none(), "{}", r.body);
     assert!(!lab.log().contains("docker run"), "{}", lab.log());
     lab.td
-        .delete("/api/targets/dbox/leases/terra%2Fidle")
+        .delete("/api/targets/terra-dbox/leases/terra%2Fidle")
         .await
         .ok();
     assert!(!lab.log().contains("docker rm"), "{}", lab.log());
@@ -1765,7 +1814,7 @@ async fn a_grant_to_a_running_agent_brings_an_ephemeral_target_up() {
     let r = lab
         .td
         .post(
-            "/api/targets/dbox/leases",
+            "/api/targets/terra-dbox/leases",
             json!({"agent": "terra/worker", "until": "1h"}),
         )
         .await;
@@ -1773,32 +1822,36 @@ async fn a_grant_to_a_running_agent_brings_an_ephemeral_target_up() {
     assert_eq!(r.body["lifecycle"]["state"], "running", "{}", r.body);
     assert!(
         lab.log()
-            .contains("docker run -d --init --name terrarium-dbox")
+            .contains("docker run -d --init --name terrarium-terra-dbox"),
+        "{}",
+        lab.log()
     );
     let row = last_audit(&lab.td, "target.up").await;
     assert_eq!(row["actor"], "system");
     assert_eq!(row["detail"]["reason"], "lease_grant");
     let r = lab
         .td
-        .delete("/api/targets/dbox/leases/terra%2Fworker")
+        .delete("/api/targets/terra-dbox/leases/terra%2Fworker")
         .await;
     assert_eq!(r.status, 200, "{}", r.body);
     assert!(
-        lab.log().contains("docker rm -f -v terrarium-dbox"),
+        lab.log().contains("docker rm -f -v terrarium-terra-dbox"),
         "{}",
         lab.log()
     );
     let row = last_audit(&lab.td, "target.destroy").await;
     assert_eq!(row["detail"]["reason"], "lease_end");
     assert_eq!(
-        lab.td.get("/api/targets/dbox").await.ok()["state"],
+        lab.td.get("/api/targets/terra-dbox").await.ok()["state"],
         "absent"
     );
 }
 
 /// A running agent that holds the target in its policy keeps it up when
-/// another agent's lease ends: the grant runs no second `up`, and the
-/// revoke no destroy.
+/// another agent's lease ends. The lease to a running agent attaches its
+/// workspace: the ephemeral container, with no live session, runs again
+/// with both workspaces. The end of the lease detaches it the same way. The
+/// target is never down.
 #[tokio::test]
 async fn a_lease_end_leaves_a_target_that_a_policy_holder_uses() {
     let lab = Lab::start().await;
@@ -1806,12 +1859,16 @@ async fn a_lease_end_leaves_a_target_that_a_policy_holder_uses() {
     lab.td.project("terra").await;
     let owner = id_of(
         &lab.td
-            .agent("terra", "owner", json!({"policy": {"targets": ["dbox"]}}))
+            .agent(
+                "terra",
+                "owner",
+                json!({"policy": {"targets": ["terra-dbox"]}}),
+            )
             .await,
     );
     let w = id_of(&lab.td.agent("terra", "worker", json!({})).await);
     lab.target(
-        json!({"name": "dbox", "kind": "docker", "host": "lab1", "project": "terra",
+        json!({"name": "terra-dbox", "kind": "docker", "host": "lab1", "project": "terra",
                       "image": "alpine:3", "ephemeral": true}),
     )
     .await;
@@ -1822,18 +1879,603 @@ async fn a_lease_end_leaves_a_target_that_a_policy_holder_uses() {
             .ok();
         lab.td.wait_status(a, "idle").await;
     }
-    lab.td.post_empty("/api/targets/dbox/up").await.ok();
-    let runs = lab.log().matches("docker run").count();
+    lab.td.post_empty("/api/targets/terra-dbox/up").await.ok();
+    let t = lab.td.get("/api/targets/terra-dbox").await;
+    assert_eq!(
+        t.ok()["runtime"]["attached"],
+        json!(["terra/owner"]),
+        "{}",
+        t.body
+    );
     let r = lab
         .td
-        .post("/api/targets/dbox/leases", json!({"agent": "terra/worker"}))
+        .post(
+            "/api/targets/terra-dbox/leases",
+            json!({"agent": "terra/worker"}),
+        )
         .await;
     assert_eq!(r.status, 201, "{}", r.body);
-    assert!(r.body.get("lifecycle").is_none(), "up already: {}", r.body);
-    assert_eq!(lab.log().matches("docker run").count(), runs);
+    assert_eq!(r.body["lifecycle"]["state"], "running", "{}", r.body);
+    assert!(r.body.get("lifecycle_error").is_none(), "{}", r.body);
+    let log = lab.log();
+    let last_run = log.lines().rfind(|l| l.starts_with("docker run")).unwrap();
+    assert!(last_run.contains(":/work/terra/owner"), "{last_run}");
+    assert!(last_run.contains(":/work/terra/worker"), "{last_run}");
+    assert_eq!(
+        last_audit(&lab.td, "target.attach").await["detail"]["reason"],
+        "lease_grant"
+    );
     lab.td
-        .delete("/api/targets/dbox/leases/terra%2Fworker")
+        .delete("/api/targets/terra-dbox/leases/terra%2Fworker")
         .await
         .ok();
+    let log = lab.log();
+    let last_run = log.lines().rfind(|l| l.starts_with("docker run")).unwrap();
+    assert!(last_run.contains(":/work/terra/owner"), "{last_run}");
+    assert!(!last_run.contains("worker"), "{last_run}");
+    assert_eq!(
+        last_audit(&lab.td, "target.detach").await["detail"]["reason"],
+        "lease_end"
+    );
+    let t = lab.td.get("/api/targets/terra-dbox").await;
+    assert_eq!(t.ok()["state"], "running");
+    assert_eq!(t.body["runtime"]["attached"], json!(["terra/owner"]));
+    // No destroy for a lease end: the container ran again, it did not go.
+    assert!(!lab.log().contains("target.destroy"));
+}
+
+// ------------------------------------------------------------ mode 1
+
+/// The `docker run` lines of the fake's log.
+fn runs(lab: &Lab) -> Vec<String> {
+    lab.log()
+        .lines()
+        .filter(|l| l.starts_with("docker run"))
+        .map(str::to_owned)
+        .collect()
+}
+
+async fn start_agent(lab: &Lab, id: &str) {
+    lab.td
+        .post_empty(&format!("/api/agents/{id}/start"))
+        .await
+        .ok();
+    lab.td.wait_status(id, "idle").await;
+}
+
+async fn stop_agent(lab: &Lab, id: &str) {
+    lab.td
+        .post_empty(&format!("/api/agents/{id}/stop"))
+        .await
+        .ok();
+    lab.td.wait_status(id, "stopped").await;
+}
+
+/// PLAN §11 "mode 1": an agent's workspace is `<work>/<project>/<agent>`,
+/// and a docker target binds the workspaces of its running holders at the
+/// same path. A holder that joins a running ephemeral container with no
+/// live session gets a new container; with a live session the start says
+/// "attach needs a restart of the target". A holder that leaves is
+/// detached the same way.
+#[tokio::test]
+async fn docker_targets_attach_the_workspaces_of_their_holders() {
+    use terrariumd::executor::{on_agent_start, on_agent_stop};
+    let lab = Lab::start().await;
+    let _h = lab.host("lab1").await;
+    let state = lab.state();
+    lab.td.project("terra").await;
+    let pol = json!({"policy": {"targets": ["terra-dbox"]}});
+    let w1 = id_of(&lab.td.agent("terra", "w1", pol.clone()).await);
+    let w2 = id_of(&lab.td.agent("terra", "w2", pol.clone()).await);
+    let w3 = id_of(&lab.td.agent("terra", "w3", pol.clone()).await);
+    let a = lab.td.get(&format!("/api/agents/{w1}")).await;
+    let work = lab.td.state.with_file_name("work");
+    assert_eq!(
+        a.ok()["workspace"].as_str().unwrap(),
+        work.join("terra/w1").display().to_string()
+    );
+    lab.target(
+        json!({"name": "dbox", "kind": "docker", "host": "lab1", "project": "terra",
+                      "image": "alpine:3", "ephemeral": true}),
+    )
+    .await;
+    let ws = |n: &str| {
+        std::fs::canonicalize(work.join("terra").join(n))
+            .unwrap_or_else(|_| work.join("terra").join(n))
+    };
+
+    start_agent(&lab, &w1).await;
+    assert!(
+        on_agent_start(&state, &w1, &["terra-dbox".into()])
+            .await
+            .is_empty()
+    );
+    let r = runs(&lab);
+    assert_eq!(r.len(), 1, "{r:?}");
+    let v1 = format!("-v {}:/work/terra/w1", ws("w1").display());
+    assert!(
+        r[0].contains("--name terrarium-terra-dbox -e HOME") && r[0].contains(&v1),
+        "{}",
+        r[0]
+    );
+    // As the owner of the workspace, so a build's files stay the agent's.
+    assert!(r[0].contains(" -u "), "{}", r[0]);
+    assert!(work.join("terra/w1").is_dir());
+
+    // A second holder joins: no live session, so a new container with both.
+    start_agent(&lab, &w2).await;
+    assert!(
+        on_agent_start(&state, &w2, &["terra-dbox".into()])
+            .await
+            .is_empty()
+    );
+    let r = runs(&lab);
+    assert_eq!(r.len(), 2, "{r:?}");
+    assert!(lab.log().contains("docker rm -f -v terrarium-terra-dbox"));
+    assert!(r[1].contains(&v1), "{}", r[1]);
+    assert!(
+        r[1].contains(&format!("-v {}:/work/terra/w2", ws("w2").display())),
+        "{}",
+        r[1]
+    );
+    let t = lab.td.get("/api/targets/terra-dbox").await;
+    assert_eq!(
+        t.ok()["runtime"]["attached"],
+        json!(["terra/w1", "terra/w2"])
+    );
+
+    // A live session: the third holder cannot join.
+    let sid = exec(&lab.td, "terra-dbox", json!({"cmd": ["sleeper"]})).await;
+    start_agent(&lab, &w3).await;
+    let errs = on_agent_start(&state, &w3, &["terra-dbox".into()]).await;
+    assert_eq!(errs.len(), 1, "{errs:?}");
+    assert!(
+        errs[0]
+            .1
+            .message
+            .contains("attach needs a restart of the target"),
+        "{}",
+        errs[0].1.message
+    );
+    assert!(
+        errs[0].1.message.contains("exec session(s) are live"),
+        "{}",
+        errs[0].1.message
+    );
+    assert_eq!(runs(&lab).len(), 2, "no new container");
+    let _ = drain(&lab.td, "terra-dbox", &sid).await;
+    stop_agent(&lab, &w3).await;
+    assert!(
+        on_agent_stop(&state, &w3, &["terra-dbox".into()])
+            .await
+            .is_empty()
+    );
+    assert_eq!(
+        runs(&lab).len(),
+        2,
+        "w3 was not attached: nothing to detach"
+    );
+
+    // A holder leaves: a new container without its workspace.
+    stop_agent(&lab, &w2).await;
+    assert!(
+        on_agent_stop(&state, &w2, &["terra-dbox".into()])
+            .await
+            .is_empty()
+    );
+    let r = runs(&lab);
+    assert_eq!(r.len(), 3, "{r:?}");
+    assert!(r[2].contains(&v1) && !r[2].contains("w2"), "{}", r[2]);
+    // The last holder leaves: the ephemeral target goes.
+    stop_agent(&lab, &w1).await;
+    assert!(
+        on_agent_stop(&state, &w1, &["terra-dbox".into()])
+            .await
+            .is_empty()
+    );
+    let t = lab.td.get("/api/targets/terra-dbox").await;
+    assert_eq!(t.ok()["state"], "absent");
+    assert_eq!(t.body["runtime"], json!({}));
+}
+
+/// A permanent docker target keeps its container: a holder that joins it
+/// while it runs gets "attach needs a restart of the target", and no
+/// container goes.
+#[tokio::test]
+async fn a_permanent_docker_target_refuses_a_late_attach() {
+    use terrariumd::executor::on_agent_start;
+    let lab = Lab::start().await;
+    let _h = lab.host("lab1").await;
+    let state = lab.state();
+    lab.td.project("terra").await;
+    let pol = json!({"policy": {"targets": ["terra-keep"]}});
+    let w1 = id_of(&lab.td.agent("terra", "w1", pol.clone()).await);
+    let w2 = id_of(&lab.td.agent("terra", "w2", pol).await);
+    lab.target(
+        json!({"name": "keep", "kind": "docker", "host": "lab1", "project": "terra",
+                      "image": "alpine:3"}),
+    )
+    .await;
+    start_agent(&lab, &w1).await;
+    let up = lab.td.post_empty("/api/targets/terra-keep/up").await;
+    assert_eq!(up.ok()["state"], "running");
+    assert!(runs(&lab)[0].contains("/work/terra/w1"));
+    start_agent(&lab, &w2).await;
+    let errs = on_agent_start(&state, &w2, &["terra-keep".into()]).await;
+    assert_eq!(errs.len(), 1, "{errs:?}");
+    assert!(
+        errs[0]
+            .1
+            .message
+            .contains("attach needs a restart of the target")
+    );
+    assert!(errs[0].1.message.contains("it is permanent"));
     assert!(!lab.log().contains("docker rm"), "{}", lab.log());
+    // The only holder of a permanent target that runs without its
+    // workspace hears it too.
+    stop_agent(&lab, &w1).await;
+    stop_agent(&lab, &w2).await;
+    let w3 = id_of(
+        &lab.td
+            .agent(
+                "terra",
+                "w3",
+                json!({"policy": {"targets": ["terra-keep"]}}),
+            )
+            .await,
+    );
+    start_agent(&lab, &w3).await;
+    let errs = on_agent_start(&state, &w3, &["terra-keep".into()]).await;
+    assert_eq!(errs.len(), 1, "{errs:?}");
+    assert!(
+        errs[0]
+            .1
+            .message
+            .contains("attach needs a restart of the target")
+    );
+    assert!(
+        errs[0].1.message.contains("terra/w3"),
+        "{}",
+        errs[0].1.message
+    );
+}
+
+/// A bare git repo with `alpine-box/vmlab.wcl` (the allowlist passes) and
+/// `bad/vmlab.wcl` (a host path), as in `./repos/labs.git`.
+fn labs_repo(dir: &Path) -> PathBuf {
+    let seed = dir.join("seed");
+    let lab = "import <vmlab.wcl>\nlab \"alpine-box\" {\n  container \"box\" {\n    image = \"alpine:3.22\"\n    profile = \"container\"\n    mode = :idle\n  }\n}\n";
+    std::fs::create_dir_all(seed.join("alpine-box")).unwrap();
+    std::fs::create_dir_all(seed.join("bad")).unwrap();
+    std::fs::write(seed.join("alpine-box/vmlab.wcl"), lab).unwrap();
+    std::fs::write(
+        seed.join("bad/vmlab.wcl"),
+        lab.replace(
+            "mode = :idle",
+            "mode = :idle\n    volume { host = \"/home\" target = \"/h\" }",
+        ),
+    )
+    .unwrap();
+    git(&seed, &["init", "-q", "-b", "main"]);
+    git(&seed, &["add", "."]);
+    git(&seed, &["commit", "-q", "-m", "labs"]);
+    git(dir, &["clone", "-q", "--bare", "seed", "labs.git"]);
+    dir.join("labs.git")
+}
+
+/// A `lab_repo` target: on `up`, the host agent makes a git worktree of the
+/// repo at the ref, checks the lab against its allowlist, attaches the
+/// holder's workspace with `@dev`, `vmlab validate`s it, and runs `vmlab up`
+/// in the instance. The stop destroys the lab and removes the worktree. A
+/// lab with a host path is refused.
+#[tokio::test]
+async fn a_lab_repo_target_runs_in_a_worktree_with_the_workspace() {
+    use terrariumd::executor::{on_agent_start, on_agent_stop};
+    let lab = Lab::start().await;
+    let _h = lab.host("lab1").await;
+    let state = lab.state();
+    lab.td.project("terra").await;
+    let repos = tempfile::tempdir().unwrap();
+    let bare = labs_repo(repos.path());
+    let r = lab
+        .td
+        .post(
+            "/api/projects/terra/repos",
+            json!({"name": "labs", "url": format!("file://{}", bare.display())}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let w1 = id_of(
+        &lab.td
+            .agent(
+                "terra",
+                "w1",
+                json!({"policy": {"targets": ["terra-vbox"]}}),
+            )
+            .await,
+    );
+    lab.target(
+        json!({"name": "vbox", "kind": "vmlab", "host": "lab1", "project": "terra",
+                      "lab_repo": "labs", "lab_ref": "main", "lab_path": "alpine-box",
+                      "machine": "box", "ephemeral": true}),
+    )
+    .await;
+    start_agent(&lab, &w1).await;
+    let errs = on_agent_start(&state, &w1, &["terra-vbox".into()]).await;
+    assert!(errs.is_empty(), "{errs:?}");
+    let inst = lab.bins.path().join("instances/terra-vbox");
+    let labdir = inst.join("lab");
+    assert!(
+        inst.join("src/alpine-box/vmlab.wcl").is_file(),
+        "the worktree"
+    );
+    let wcl = std::fs::read_to_string(labdir.join("vmlab.wcl")).unwrap();
+    let work = std::fs::canonicalize(lab.td.state.with_file_name("work/terra/w1")).unwrap();
+    assert!(
+        wcl.contains(&format!(
+            "@dev(workspace = \"{}\", workspace_guest = \"/work/terra/w1\")",
+            work.display()
+        )),
+        "{wcl}"
+    );
+    let log = lab.log();
+    let v = log
+        .find(&format!("vmlab validate (in {})", labdir.display()))
+        .expect("validate");
+    let u = log
+        .find(&format!("vmlab up box (in {})", labdir.display()))
+        .expect("up");
+    assert!(v < u, "{log}");
+    let t = lab.td.get("/api/targets/terra-vbox").await;
+    assert_eq!(t.ok()["state"], "running");
+    assert_eq!(t.body["runtime"]["attached"], json!(["terra/w1"]));
+    assert_eq!(t.body["runtime"]["lab"], labdir.display().to_string());
+    assert_eq!(t.body["runtime"]["head"].as_str().unwrap().len(), 40);
+    // Exec goes to the instance.
+    let sid = exec(&lab.td, "terra-vbox", json!({"cmd": ["uname"]})).await;
+    let _ = drain(&lab.td, "terra-vbox", &sid).await;
+    assert!(lab.log().contains(&format!(
+        "vmlab exec box -- uname (in {})",
+        labdir.display()
+    )));
+    // The stop: destroy, then the worktree and the instance go.
+    stop_agent(&lab, &w1).await;
+    assert!(
+        on_agent_stop(&state, &w1, &["terra-vbox".into()])
+            .await
+            .is_empty()
+    );
+    assert!(
+        lab.log()
+            .contains(&format!("vmlab destroy (in {})", labdir.display()))
+    );
+    assert!(!inst.exists(), "the instance dir goes");
+    let t = lab.td.get("/api/targets/terra-vbox").await;
+    assert_eq!(t.ok()["state"], "absent");
+    assert_eq!(t.body["runtime"], json!({}));
+
+    // A lab with a host path is refused, and nothing runs.
+    lab.target(
+        json!({"name": "vbad", "kind": "vmlab", "host": "lab1", "project": "terra",
+                      "lab_repo": "labs", "lab_path": "bad", "machine": "box"}),
+    )
+    .await;
+    let r = lab.td.post_empty("/api/targets/terra-vbad/up").await;
+    r.err(422, "invalid");
+    assert_eq!(r.body["error"]["details"]["code"], "refused", "{}", r.body);
+    let msg = r.body["error"]["message"].as_str().unwrap();
+    assert!(msg.contains("binds a host directory"), "{msg}");
+    assert!(!lab.log().contains("vmlab up box (in") || lab.log().matches("vmlab up").count() == 1);
+}
+
+/// A `lab_from_workspace` target: each holder runs its own lab instance
+/// from the `vmlab.wcl` in its own workspace. An exclusive lease does not
+/// apply. The operator names the holder; an agent gets its own.
+#[tokio::test]
+async fn lab_from_workspace_gives_each_holder_its_own_instance() {
+    use terrariumd::executor::{on_agent_start, on_agent_stop};
+    let lab = Lab::start().await;
+    let _h = lab.host("lab1").await;
+    let state = lab.state();
+    lab.td.project("terra").await;
+    let pol = json!({"policy": {"targets": ["terra-vws"]}});
+    let w1 = id_of(&lab.td.agent("terra", "w1", pol.clone()).await);
+    let w2 = id_of(&lab.td.agent("terra", "w2", pol).await);
+    let w3 = id_of(&lab.td.agent("terra", "w3", json!({})).await);
+    let work = lab.td.state.with_file_name("work");
+    let wcl = "import <vmlab.wcl>\nlab \"dev\" {\n  container \"box\" {\n    image = \"alpine:3.22\"\n    profile = \"container\"\n    mode = :idle\n  }\n}\n";
+    for n in ["w1", "w2"] {
+        std::fs::create_dir_all(work.join("terra").join(n).join("app")).unwrap();
+        std::fs::write(work.join("terra").join(n).join("app/vmlab.wcl"), wcl).unwrap();
+    }
+    lab.target(
+        json!({"name": "vws", "kind": "vmlab", "host": "lab1", "project": "terra",
+                      "lab_from_workspace": true, "lab_path": "app", "machine": "box",
+                      "ephemeral": true}),
+    )
+    .await;
+    for w in [&w1, &w2] {
+        start_agent(&lab, w).await;
+        let errs = on_agent_start(&state, w, &["terra-vws".into()]).await;
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+    let t = lab.td.get("/api/targets/terra-vws").await;
+    let inst = t.ok()["runtime"]["instances"].as_object().unwrap().clone();
+    assert_eq!(inst.len(), 2, "{inst:?}");
+    let lab1 = lab
+        .bins
+        .path()
+        .join(format!("instances/terra-vws.{w1}/lab"));
+    let lab2 = lab
+        .bins
+        .path()
+        .join(format!("instances/terra-vws.{w2}/lab"));
+    assert_eq!(inst[&w1]["lab"], lab1.display().to_string());
+    assert_eq!(inst[&w1]["agent_name"], "terra/w1");
+    assert_eq!(inst[&w1]["attached"], json!(["terra/w1"]));
+    let gen1 = std::fs::read_to_string(lab1.join("vmlab.wcl")).unwrap();
+    assert!(
+        gen1.contains("workspace_guest = \"/work/terra/w1\""),
+        "{gen1}"
+    );
+    // Nothing is written into the workspace.
+    assert_eq!(
+        std::fs::read_dir(work.join("terra/w1/app"))
+            .unwrap()
+            .count(),
+        1
+    );
+    // An agent execs in its own instance; the operator names the holder.
+    let r = lab
+        .td
+        .post_as(&w2, "/api/targets/terra-vws/exec", json!({"cmd": ["id"]}))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let _ = drain_as(
+        &lab.td,
+        Some(&w2),
+        "terra-vws",
+        r.body["session_id"].as_str().unwrap(),
+    )
+    .await;
+    assert!(
+        lab.log()
+            .contains(&format!("vmlab exec box -- id (in {})", lab2.display()))
+    );
+    lab.td
+        .post("/api/targets/terra-vws/exec", json!({"cmd": ["id"]}))
+        .await
+        .err(422, "invalid");
+    let r = lab
+        .td
+        .post(
+            "/api/targets/terra-vws/exec",
+            json!({"cmd": ["hostname"], "agent": "terra/w1"}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let _ = drain(&lab.td, "terra-vws", r.body["session_id"].as_str().unwrap()).await;
+    assert!(lab.log().contains(&format!(
+        "vmlab exec box -- hostname (in {})",
+        lab1.display()
+    )));
+    // No exclusive lease on a per-holder target.
+    lab.td
+        .post(
+            "/api/targets/terra-vws/leases",
+            json!({"agent": "terra/w3", "exclusive": true}),
+        )
+        .await
+        .err(422, "invalid");
+    let _ = w3;
+    // The stop of w1 removes its instance only.
+    stop_agent(&lab, &w1).await;
+    assert!(
+        on_agent_stop(&state, &w1, &["terra-vws".into()])
+            .await
+            .is_empty()
+    );
+    assert!(
+        lab.log()
+            .contains(&format!("vmlab destroy (in {})", lab1.display()))
+    );
+    assert!(!lab1.exists());
+    assert!(lab2.join("vmlab.wcl").is_file());
+    let t = lab.td.get("/api/targets/terra-vws").await;
+    let inst = t.ok()["runtime"]["instances"].as_object().unwrap().clone();
+    assert_eq!(inst.keys().collect::<Vec<_>>(), [&w2]);
+}
+
+/// `TERRARIUM_MAX_TARGETS_PER_PROJECT` (8) and the host's
+/// `max_running_targets`, and the project prefix of an API target.
+#[tokio::test]
+async fn target_caps_and_the_project_prefix() {
+    let lab = Lab::start().await;
+    let token = lab.register("small").await;
+    let mut c = lab.client("small", &token);
+    let _ = &mut c;
+    let task = {
+        let mut o = ClientOptions::new(
+            format!("ws://{}/hosts/connect", lab.addr),
+            token.clone(),
+            "small",
+        );
+        o.capabilities = HostCapabilities {
+            docker: ToolCapability {
+                present: true,
+                version: Some("29.8.0".into()),
+            },
+            vmlab: ToolCapability::default(),
+            shell: Some("/bin/sh".into()),
+        };
+        o.docker_bin = lab.bins.path().join("docker").display().to_string();
+        o.max_running_targets = 1;
+        tokio::spawn(Client::new(o).run())
+    };
+    lab.wait_online("small", true).await;
+    let h = lab.td.get("/api/hosts/small").await;
+    assert_eq!(h.ok()["max_running_targets"], 1, "{}", h.body);
+    lab.td.project("terra").await;
+    for i in 0..8 {
+        let r = lab
+            .td
+            .post(
+                "/api/targets",
+                json!({"name": format!("t{i}"), "kind": "docker", "host": "small",
+                                        "project": "terra", "image": "alpine:3"}),
+            )
+            .await;
+        assert_eq!(r.status, 201, "{}", r.body);
+        assert_eq!(r.body["name"], format!("terra-t{i}"));
+    }
+    let r = lab
+        .td
+        .post(
+            "/api/targets",
+            json!({"name": "t8", "kind": "docker", "host": "small",
+                                    "project": "terra", "image": "alpine:3"}),
+        )
+        .await;
+    r.err(409, "conflict");
+    assert!(
+        r.body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("TERRARIUM_MAX_TARGETS_PER_PROJECT")
+    );
+    // A name with the prefix keeps it; a global target has none.
+    lab.td.delete("/api/targets/terra-t7").await;
+    let r = lab
+        .td
+        .post(
+            "/api/targets",
+            json!({"name": "terra-x", "kind": "host", "host": "small", "project": "terra"}),
+        )
+        .await;
+    assert_eq!(r.ok()["name"], "terra-x");
+    let r = lab
+        .td
+        .post(
+            "/api/targets",
+            json!({"name": "g", "kind": "host", "host": "small"}),
+        )
+        .await;
+    assert_eq!(r.ok()["name"], "g");
+    assert_eq!(r.body["scope"], "global");
+    // One running target on the host: the second `up` is 429.
+    lab.td.post_empty("/api/targets/terra-t0/up").await.ok();
+    let r = lab.td.post_empty("/api/targets/terra-t1/up").await;
+    r.err(429, "rate_limited");
+    assert!(
+        r.body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("max_running_targets is 1")
+    );
+    lab.td
+        .post("/api/targets/terra-t0/down", json!({"destroy": true}))
+        .await
+        .ok();
+    lab.td.post_empty("/api/targets/terra-t1/up").await.ok();
+    task.abort();
 }

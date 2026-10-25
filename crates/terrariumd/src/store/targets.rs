@@ -6,8 +6,10 @@
 //! The row keeps the definition as JSON, and the last state that a
 //! lifecycle verb saw.
 
+use std::collections::BTreeMap;
+
 use rusqlite::{Connection, OptionalExtension, Row, params};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use terrarium_core::config::{TargetDef, TargetKind};
 
@@ -29,9 +31,44 @@ pub struct TargetRow {
     pub state_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// What runs now: the attached workspaces and the lab instances.
+    pub runtime: Runtime,
 }
 
-const COLS: &str = "name, def, source, state, snapshots, state_at, created_at, updated_at";
+/// The runtime record of a target (docs/api.md §17.2, "Workspaces").
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Runtime {
+    /// The agent workspaces (`<project>/<agent>`) that the running
+    /// container or lab instance has attached.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attached: Vec<String>,
+    /// A `lab_repo` target: the lab dir of its instance on the host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lab: Option<String>,
+    /// A `lab_repo` target: the commit of its worktree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head: Option<String>,
+    /// A `lab_from_workspace` target: one instance for each holder, by the
+    /// agent ULID.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub instances: BTreeMap<String, Instance>,
+}
+
+/// One lab instance of a `lab_from_workspace` target.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Instance {
+    /// `project/name` of the holder.
+    pub agent_name: String,
+    /// The lab dir of the instance on the host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lab: Option<String>,
+    /// `running`, `stopped`, `absent`, or `unknown`.
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attached: Vec<String>,
+}
+
+const COLS: &str = "name, def, source, state, snapshots, state_at, created_at, updated_at, runtime";
 
 fn row(r: &Row<'_>) -> rusqlite::Result<TargetRow> {
     let name: String = r.get(0)?;
@@ -49,6 +86,7 @@ fn row(r: &Row<'_>) -> rusqlite::Result<TargetRow> {
         state_at: r.get(5)?,
         created_at: r.get(6)?,
         updated_at: r.get(7)?,
+        runtime: json_col(&r.get::<_, String>(8)?),
     })
 }
 
@@ -95,8 +133,18 @@ pub fn validate(def: &TargetDef) -> ApiResult<()> {
         ("image", &def.image),
         ("container", &def.container),
         ("machine", &def.machine),
+        ("lab_ref", &def.lab_ref),
     ] {
         positional(f, v)?;
+    }
+    if let Some(p) = &def.lab_path
+        && (p.starts_with('/')
+            || p.split('/').any(|s| s == ".." || s.starts_with('-'))
+            || p.chars().any(|c| c.is_whitespace() || c.is_control()))
+    {
+        return Err(ApiError::invalid(format!(
+            "bad `lab_path` `{p}`: a relative directory with no `..`"
+        )));
     }
     let k = kind_str(def.kind);
     match def.kind {
@@ -112,7 +160,42 @@ pub fn validate(def: &TargetDef) -> ApiResult<()> {
         }
         TargetKind::Vmlab => {
             need(k, "host", def.host.is_some())?;
-            need(k, "lab", def.lab.is_some())?;
+            let modes = [
+                def.lab.is_some(),
+                def.lab_repo.is_some(),
+                def.lab_from_workspace,
+            ]
+            .iter()
+            .filter(|m| **m)
+            .count();
+            if modes != 1 {
+                return Err(ApiError::invalid(
+                    "a `vmlab` target needs one of `lab` (a lab dir on the host), `lab_repo` \
+                     (a repo of the project), and `lab_from_workspace = true`",
+                ));
+            }
+            if (def.lab_repo.is_some() || def.lab_from_workspace) && def.project.is_none() {
+                return Err(ApiError::invalid(
+                    "`lab_repo` and `lab_from_workspace` need a project target",
+                ));
+            }
+            if def.lab_from_workspace && def.snapshot_before_task {
+                return Err(ApiError::invalid(
+                    "`snapshot_before_task` does not work with `lab_from_workspace`: each \
+                     holder has its own instance",
+                ));
+            }
+            if def.lab.is_none() && def.machine.is_none() {
+                return Err(ApiError::invalid(
+                    "`lab_repo` and `lab_from_workspace` need `machine`: the machine that \
+                     runs the commands and gets the workspace",
+                ));
+            }
+            if def.lab.is_some() && (def.lab_ref.is_some() || def.lab_path.is_some()) {
+                return Err(ApiError::invalid(
+                    "`lab_ref` and `lab_path` go with `lab_repo` or `lab_from_workspace`",
+                ));
+            }
             if let Some(lab) = &def.lab
                 && !lab.is_absolute()
             {
@@ -122,6 +205,16 @@ pub fn validate(def: &TargetDef) -> ApiResult<()> {
                 )));
             }
         }
+    }
+    if def.kind != TargetKind::Vmlab
+        && (def.lab_repo.is_some()
+            || def.lab_ref.is_some()
+            || def.lab_path.is_some()
+            || def.lab_from_workspace)
+    {
+        return Err(ApiError::invalid(format!(
+            "`lab_repo`, `lab_ref`, `lab_path`, and `lab_from_workspace` are for a vmlab target, not `{k}`"
+        )));
     }
     if def.ephemeral && matches!(def.kind, TargetKind::Host | TargetKind::Ssh) {
         return Err(ApiError::invalid(format!(
@@ -177,6 +270,25 @@ fn insert(t: &mut Tx<'_>, def: &TargetDef, source: &str) -> ApiResult<()> {
             source,
             at
         ],
+    )?;
+    Ok(())
+}
+
+/// The number of targets of `project`.
+pub fn count_in_project(conn: &Connection, project: &str) -> ApiResult<usize> {
+    let n: i64 = conn.query_row(
+        "SELECT count(*) FROM targets WHERE project = ?1",
+        [project],
+        |r| r.get(0),
+    )?;
+    Ok(usize::try_from(n).unwrap_or(0))
+}
+
+/// Store the runtime record of a target.
+pub fn set_runtime(t: &mut Tx<'_>, name: &str, rt: &Runtime) -> ApiResult<()> {
+    t.execute(
+        "UPDATE targets SET runtime = ?2 WHERE name = ?1",
+        params![name, serde_json::to_string(rt)?],
     )?;
     Ok(())
 }

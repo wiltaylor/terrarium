@@ -20,3 +20,5 @@ __pycache__/
 !/fleets/README.md
 # Local bare repos (bind mount at /repos)
 /repos/*
+# Agent workspaces (bind mount at /work)
+/work/*

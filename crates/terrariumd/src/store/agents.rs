@@ -68,6 +68,7 @@ fn base_row(r: &Row<'_>) -> rusqlite::Result<AgentView> {
             subscription: r.get("subscription")?,
             model: r.get("model")?,
             workspace: PathBuf::from(workspace),
+            harness_dir: None,
             prompt: r.get("prompt")?,
             roles: Vec::new(),
             policy: serde_json::from_str(&policy).unwrap_or_default(),
@@ -255,12 +256,37 @@ fn check_def(def: &AgentDef) -> ApiResult<()> {
     Ok(())
 }
 
+/// Point every agent at its workspace under the work root,
+/// `<work_dir>/<project>/<name>` (PLAN §11, "mode 1"). An agent made before
+/// the work root has `<state>/agents/<ulid>/workspace`; its files move at
+/// its next start (`crate::workspace::migrate`). Returns the agents that
+/// changed.
+pub fn set_workspaces(t: &mut Tx<'_>, work_dir: &Path) -> ApiResult<usize> {
+    let rows: Vec<(String, String, String, String)> = {
+        let mut stmt = t.prepare("SELECT id, project, name, workspace FROM agents")?;
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let mut n = 0;
+    for (id, project, name, ws) in rows {
+        let want = crate::workspace::dir(work_dir, &project, &name);
+        if std::path::Path::new(&ws) != want {
+            t.execute(
+                "UPDATE agents SET workspace = ?2 WHERE id = ?1",
+                params![id, want.to_string_lossy()],
+            )?;
+            n += 1;
+        }
+    }
+    Ok(n)
+}
+
 /// Make an agent. The project must exist. Roles in `def` are written as is;
 /// the caller checks that the actor may grant them.
 pub fn create(
     t: &mut Tx<'_>,
     def: &AgentDef,
-    state_dir: &Path,
+    work_dir: &Path,
     source: &str,
 ) -> ApiResult<AgentView> {
     check_def(def)?;
@@ -276,7 +302,8 @@ pub fn create(
             def.project, def.name
         )));
     }
-    let agent = Agent::from_def(def, state_dir);
+    let mut agent = Agent::from_def(def, work_dir);
+    agent.workspace = crate::workspace::dir(work_dir, &def.project, &def.name);
     let id = agent.id.to_string();
     let at = now();
     t.execute(

@@ -139,6 +139,12 @@ pub async fn grant(
         row.def.project.as_deref(),
         &agent.agent.project,
     )?;
+    if body.exclusive && row.def.lab_from_workspace {
+        return Err(ApiError::invalid(format!(
+            "`{target}` gives each holder its own lab instance, so an exclusive lease does \
+             not apply; grant it without `exclusive`"
+        )));
+    }
     let g = Grant {
         target: row.def.name.clone(),
         target_project: row.def.project.clone(),
@@ -160,22 +166,34 @@ pub async fn grant(
         lifecycle: None,
         lifecycle_error: None,
     };
-    // A running agent gets the target up now, as at its start.
+    // A running agent gets the target up now, as at its start: its own
+    // instance of a `lab_from_workspace` target; else the target, or its
+    // workspace joins the target that other holders run.
     let in_policy = agent.agent.policy.targets.contains(&row.def.name);
     if !in_policy && is_running(state, &agent).await {
         let id = agent.agent.id.to_string();
-        match executor::running_holders(state, target, Some(&id)).await {
-            Ok(h) if h.is_empty() => {
-                match executor::ensure_up_for(state, target, "lease_grant").await {
-                    Ok(v) => out.lifecycle = v,
-                    Err(e) => {
-                        warn!(target = %target, "the leased target did not come up: {e}");
-                        out.lifecycle_error = Some(e.message);
-                    }
+        let res = if row.def.lab_from_workspace {
+            executor::ensure_up_as(state, target, "lease_grant", Some(&id)).await
+        } else {
+            match executor::running_holders(state, target, Some(&id)).await {
+                Ok(h) if h.is_empty() => {
+                    executor::ensure_up_as(state, target, "lease_grant", Some(&id)).await
                 }
+                Ok(_) => executor::attach_join(state, target, &id, "lease_grant").await,
+                Err(e) => Err(e),
             }
-            Ok(_) => {}
-            Err(e) => out.lifecycle_error = Some(e.message),
+        };
+        match res {
+            Ok(v) => {
+                if let Some(e) = v.as_ref().and_then(|v| v["attach_error"].as_str()) {
+                    out.lifecycle_error = Some(e.to_owned());
+                }
+                out.lifecycle = v;
+            }
+            Err(e) => {
+                warn!(target = %target, "the leased target did not come up: {e}");
+                out.lifecycle_error = Some(e.message);
+            }
         }
     }
     Ok(out)
@@ -281,14 +299,25 @@ pub async fn after_end(state: &Shared, l: &LeaseRow) {
     if !ran {
         return;
     }
-    match executor::running_holders(state, &l.target, Some(&l.agent)).await {
-        Ok(h) if h.is_empty() => {
-            if let Err(e) = executor::maybe_down_for(state, &l.target, "lease_end").await {
-                warn!(target = %l.target, "cannot bring the target down after its lease: {e}");
+    let t = l.target.clone();
+    let per_holder = state
+        .db
+        .read(move |c| targets::get(c, &t))
+        .await
+        .is_ok_and(|r| r.def.lab_from_workspace);
+    let res = if per_holder {
+        executor::maybe_down_as(state, &l.target, "lease_end", Some(&l.agent)).await
+    } else {
+        match executor::running_holders(state, &l.target, Some(&l.agent)).await {
+            Ok(h) if h.is_empty() => {
+                executor::maybe_down_as(state, &l.target, "lease_end", Some(&l.agent)).await
             }
+            Ok(_) => executor::detach(state, &l.target, &l.agent, "lease_end").await,
+            Err(e) => Err(e),
         }
-        Ok(_) => {}
-        Err(e) => warn!(target = %l.target, "cannot count the holders: {e}"),
+    };
+    if let Err(e) = res {
+        warn!(target = %l.target, "cannot bring the target down after its lease: {e}");
     }
 }
 

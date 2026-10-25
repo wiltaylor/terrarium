@@ -90,6 +90,11 @@ pub struct TargetView {
     pub access: Option<&'static str>,
     /// The caller's active lease on the target, if it holds one.
     pub lease: Option<LeaseRow>,
+    /// What runs now: `attached` (the agent workspaces in the container or
+    /// the lab instance), `lab` and `head` (the instance of a `lab_repo`
+    /// target), `instances` (one for each holder of a `lab_from_workspace`
+    /// target). `{}` when nothing runs.
+    pub runtime: targets::Runtime,
 }
 
 fn visible(actor: &Actor, def: &TargetDef) -> bool {
@@ -149,6 +154,7 @@ pub fn view(state: &Shared, actor: &Actor, r: TargetRow, mine: &[LeaseRow]) -> T
         usable,
         access,
         lease: if access == Some("lease") { lease } else { None },
+        runtime: r.runtime,
     }
 }
 
@@ -219,16 +225,44 @@ async fn show(
     Ok(Json(view(&state, &actor, r, &mine)))
 }
 
-/// `POST /api/targets`: a TargetDef as JSON.
+/// The name of a project target made through the API: `<project>-<name>`,
+/// unless `name` has that prefix already. Target names are one namespace,
+/// so two leads cannot take the same name.
+pub fn prefixed(project: &str, name: &str) -> String {
+    let p = format!("{project}-");
+    if name.starts_with(&p) {
+        name.to_owned()
+    } else {
+        format!("{p}{name}")
+    }
+}
+
+/// `POST /api/targets`: a TargetDef as JSON. A project target gets the
+/// project name as a prefix (`<project>-<name>`). A project holds at most
+/// `TERRARIUM_MAX_TARGETS_PER_PROJECT` targets (`409 conflict`).
 async fn create(
     State(state): State<Shared>,
     actor: Actor,
-    ApiJson(def): ApiJson<TargetDef>,
+    ApiJson(mut def): ApiJson<TargetDef>,
 ) -> ApiResult<Response> {
     policy::define_target(&actor, def.project.as_deref())?;
+    if let Some(p) = &def.project {
+        def.name = prefixed(p, &def.name);
+    }
+    let max = state.max_targets_per_project;
     let r = state
         .db
         .write(actor.label(), move |t| {
+            if let Some(p) = &def.project {
+                let n = targets::count_in_project(t, p)?;
+                if n >= max {
+                    return Err(ApiError::conflict(format!(
+                        "project `{p}` has {n} targets, the most it may have \
+                         (TERRARIUM_MAX_TARGETS_PER_PROJECT = {max}); delete one first"
+                    ))
+                    .with_details(json!({"project": p, "targets": n, "max": max})));
+                }
+            }
             let r = targets::create(t, &def)?;
             t.audit(
                 "target.create",
@@ -274,6 +308,9 @@ async fn remove(
 ) -> ApiResult<StatusCode> {
     let current = load(&state, &actor, name.clone()).await?;
     policy::define_target(&actor, current.def.project.as_deref())?;
+    if current.source != crate::store::projects::SOURCE_FILE {
+        executor::teardown(&state, &current).await;
+    }
     state
         .db
         .write(actor.label(), move |t| {
@@ -303,7 +340,11 @@ async fn run_verb(
             ))
         })?;
     }
-    let opts = body.unwrap_or_default();
+    let mut opts = body.unwrap_or_default();
+    // An agent acts on its own instance of a `lab_from_workspace` target.
+    if let Some(a) = actor.agent() {
+        opts.agent = Some(a.id.clone());
+    }
     let out = executor::lifecycle(&state, &r.def, verb, &opts).await?;
     let (target, project) = (r.def.name.clone(), r.def.project.clone());
     let detail = out.clone();
@@ -381,6 +422,10 @@ struct ExecBody {
     shell: bool,
     #[serde(default)]
     timeout_secs: Option<u64>,
+    /// A `lab_from_workspace` target: the holder whose instance (the
+    /// operator names one; an agent uses its own).
+    #[serde(default)]
+    agent: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -424,6 +469,7 @@ async fn exec(
         },
         timeout_secs: b.timeout_secs,
         shell: b.shell,
+        agent: b.agent,
     };
     let s = executor::start_exec(&state, &actor, &name, cmd).await?;
     Ok(opened(&s))

@@ -46,6 +46,7 @@ pub async fn run(ctx: &Ctx, cmd: &Command) -> anyhow::Result<()> {
             timeout,
             stdin,
             tty,
+            agent,
             cmd,
         } => {
             let opts = remote::ExecOpts {
@@ -54,6 +55,7 @@ pub async fn run(ctx: &Ctx, cmd: &Command) -> anyhow::Result<()> {
                 timeout: *timeout,
                 stdin: *stdin,
                 tty: *tty,
+                agent: agent.clone(),
             };
             remote::exec(ctx, target, &opts, cmd).await
         }

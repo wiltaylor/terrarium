@@ -168,6 +168,11 @@ pub struct Hello {
     pub arch: String,
     pub capabilities: HostCapabilities,
     pub max_sessions: u32,
+    /// The most docker and vmlab targets that may run on this host at one
+    /// time (`max_running_targets` in the host config). The daemon enforces
+    /// it before an `up`. Absent from an older host agent: no limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_running_targets: Option<u32>,
     /// Present when the host agent reconnects and has a resume token.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume: Option<Resume>,
@@ -263,6 +268,46 @@ pub struct CpPull {
     pub path: PathBuf,
 }
 
+/// An agent workspace to attach to a target: `path` is `<project>/<agent>`,
+/// relative to the host agent's `work_dir`. The target sees it at
+/// `/work/<path>`, the same path as in the agent's sandbox
+/// ([`WORKSPACE_MOUNT_ROOT`]).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct WorkspaceMount {
+    pub path: String,
+}
+
+/// Where an attached workspace appears inside a target and in the sandbox.
+pub const WORKSPACE_MOUNT_ROOT: &str = "/work";
+
+impl WorkspaceMount {
+    /// The path inside the target: `/work/<project>/<agent>`.
+    pub fn target(&self) -> String {
+        format!("{WORKSPACE_MOUNT_ROOT}/{}", self.path)
+    }
+
+    /// Check the path: two or more plain segments of `[A-Za-z0-9._-]`, no
+    /// `.` or `..`, nothing absolute.
+    pub fn check(&self) -> Result<(), String> {
+        let segs: Vec<&str> = self.path.split('/').collect();
+        let plain = |s: &&str| {
+            !s.is_empty()
+                && *s != "."
+                && *s != ".."
+                && !s.starts_with('-')
+                && s.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        };
+        if segs.len() < 2 || !segs.iter().all(plain) {
+            return Err(format!(
+                "bad workspace path {:?}: use <project>/<agent>",
+                self.path
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// A bind mount or a named volume for `docker.run`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VolumeMount {
@@ -293,6 +338,10 @@ pub struct DockerRun {
     pub env: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub volumes: Vec<VolumeMount>,
+    /// Agent workspaces to bind: `-v <work_dir>/<path>:/work/<path>`. The
+    /// host agent resolves the source under its `work_dir`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workspaces: Vec<WorkspaceMount>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workdir: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -497,6 +546,70 @@ pub struct VmlabSnapshotList {
     pub timeout_secs: Option<u64>,
 }
 
+/// Where the lab definition of a `vmlab.prepare` comes from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LabSource {
+    /// A git repo: `git worktree add <instances>/<instance>/src <ref>`.
+    /// Exactly one of `local` (a repo under the host agent's `repos_dir`,
+    /// for example `labs.git`) and `url` (a mirror under the instances dir,
+    /// fetched with the credential in `env`).
+    Repo {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        local: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        url: Option<String>,
+        /// A branch, a tag, or a commit.
+        #[serde(rename = "ref")]
+        git_ref: String,
+        /// The directory in the repo that holds `vmlab.wcl`. `""` or `.`:
+        /// the root.
+        #[serde(default)]
+        path: String,
+    },
+    /// An agent workspace (`<project>/<agent>` under `work_dir`).
+    Workspace {
+        workspace: String,
+        /// The directory in the workspace that holds `vmlab.wcl`.
+        #[serde(default)]
+        path: String,
+    },
+}
+
+/// `vmlab.prepare`: make the lab instance `<instances>/<instance>/lab` from
+/// a source, check the definition against the allowlist, attach the
+/// workspaces, and `vmlab validate` it. The `result` is
+/// `{"lab", "instance", "source", "attached", "dev", "head"?}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VmlabPrepare {
+    pub session: SessionId,
+    /// The instance name, `[A-Za-z0-9._-]`, for example the target name.
+    pub instance: String,
+    pub source: LabSource,
+    /// The machine that gets the workspace (`@dev`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine: Option<String>,
+    /// At most one: a vmlab machine syncs one workspace.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workspaces: Vec<WorkspaceMount>,
+    /// The git credential for a `url` source: `TERRARIUM_GIT_USERNAME` and
+    /// `TERRARIUM_GIT_PASSWORD`, or `TERRARIUM_GIT_SSH_KEY`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+}
+
+/// `vmlab.release`: remove the instance dir `<instances>/<instance>`, and
+/// `git worktree remove` its `src` worktree. Run it after `vmlab destroy`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VmlabRelease {
+    pub session: SessionId,
+    pub instance: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+}
+
 fn yes() -> bool {
     true
 }
@@ -594,6 +707,10 @@ pub enum DaemonFrame {
     VmlabSnapshotRestore(VmlabSnapshot),
     #[serde(rename = "vmlab.snapshot_list")]
     VmlabSnapshotList(VmlabSnapshotList),
+    #[serde(rename = "vmlab.prepare")]
+    VmlabPrepare(VmlabPrepare),
+    #[serde(rename = "vmlab.release")]
+    VmlabRelease(VmlabRelease),
 }
 
 impl DaemonFrame {
@@ -627,6 +744,8 @@ impl DaemonFrame {
             F::VmlabCp(r) => r.session,
             F::VmlabSnapshotTake(r) | F::VmlabSnapshotRestore(r) => r.session,
             F::VmlabSnapshotList(r) => r.session,
+            F::VmlabPrepare(r) => r.session,
+            F::VmlabRelease(r) => r.session,
         })
     }
 }
@@ -655,6 +774,9 @@ pub enum ErrorCode {
     ChecksumMismatch,
     /// The connection dropped during a push. The partial file is removed.
     Interrupted,
+    /// A lab definition uses a feature outside the allowlist of
+    /// `vmlab.prepare` (a host path, a script, a host port, ...).
+    Refused,
 }
 
 /// Control frames from the host agent to the daemon.
@@ -842,6 +964,7 @@ mod tests {
                 shell: Some("/bin/bash".into()),
             },
             max_sessions: 32,
+            max_running_targets: Some(4),
             resume: Some(Resume {
                 token: "r1".into(),
                 sessions: vec![ResumeOffer {

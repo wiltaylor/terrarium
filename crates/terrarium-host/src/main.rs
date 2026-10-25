@@ -161,6 +161,7 @@ fn fingerprint(cert: &Path) -> anyhow::Result<()> {
 
 async fn check(cfg: &Config, json: bool, probe: bool) -> anyhow::Result<()> {
     let caps = capabilities::detect(&cfg.docker_bin, &cfg.vmlab_bin).await;
+    let paths = cfg.paths();
     let transport = cfg.daemon_url.as_ref().map(|_| cfg.transport());
     let (tls_mode, tls_error) = match &transport {
         Some(Ok(t)) => (Some(t.mode.clone()), None),
@@ -185,6 +186,10 @@ async fn check(cfg: &Config, json: bool, probe: bool) -> anyhow::Result<()> {
         "token": cfg.resolve_token().is_ok(),
         "max_sessions": cfg.max_sessions,
         "allowed_cwd_roots": cfg.allowed_cwd_roots,
+        "work_dir": paths.work_dir,
+        "instances_dir": paths.instances_dir,
+        "repos_dir": paths.repos_dir,
+        "max_running_targets": cfg.max_running_targets,
         "capabilities": caps,
         "tls": tls_mode,
         "tls_error": tls_error,
@@ -228,6 +233,26 @@ async fn check(cfg: &Config, json: bool, probe: bool) -> anyhow::Result<()> {
             Some(r) => writeln!(out, "cwd roots:  {r:?}")?,
             None => writeln!(out, "cwd roots:  any")?,
         }
+        let mark = |p: &std::path::Path| if p.is_dir() { "" } else { " (missing)" };
+        writeln!(
+            out,
+            "work dir:   {}{}",
+            paths.work_dir.display(),
+            mark(&paths.work_dir)
+        )?;
+        writeln!(
+            out,
+            "instances:  {}{}",
+            paths.instances_dir.display(),
+            mark(&paths.instances_dir)
+        )?;
+        writeln!(
+            out,
+            "repos dir:  {}{}",
+            paths.repos_dir.display(),
+            mark(&paths.repos_dir)
+        )?;
+        writeln!(out, "max running targets: {}", cfg.max_running_targets)?;
         match (&tls_mode, &tls_error) {
             (Some(m), _) => writeln!(out, "tls:        {}", m.describe())?,
             (None, Some(e)) => writeln!(out, "tls:        refused: {e}")?,
@@ -288,6 +313,10 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
     opts.policy = cfg.policy();
     opts.docker_bin = cfg.docker_bin.clone();
     opts.vmlab_bin = cfg.vmlab_bin.clone();
+    opts.git_bin = cfg.git_bin.clone();
+    opts.paths = cfg.paths();
+    opts.max_running_targets = cfg.max_running_targets;
+    tracing::info!(work_dir = %opts.paths.work_dir.display(), instances_dir = %opts.paths.instances_dir.display(), repos_dir = %opts.paths.repos_dir.display(), "workspace and lab paths");
     opts.tls = transport.tls.clone();
     opts.allow_insecure = transport.mode == tls::TlsMode::PlainInsecure;
     opts.token_file = cfg.token_file.clone();

@@ -541,7 +541,7 @@ passes straight through. Visible to the harness:
 | Path | Mode | Why |
 |---|---|---|
 | `/usr`, `/lib`, `/bin`, `/etc` (subset), Node, harness binaries | ro | the harness must run |
-| `/state/agents/<ulid>/workspace` as `$HOME/work` | rw | the agent's files |
+| `/work/<project>/<agent>` (`TERRARIUM_WORK_DIR`) as `$HOME/work`, and again at `/work/<project>/<agent>` | rw | the agent's files; the second path is where a target sees them ("mode 1", below) |
 | `/state/agents/<ulid>/harness` at the same path | ro | `prompt.md` and the adapter's per-agent files. The harness cannot change them. |
 | `/auth/claude` as `$HOME/.claude`, `/auth/pi` as `$HOME/.pi`, etc. | rw | shared login, settings, and caches |
 | per-agent overlays from `harness/` (`FileOverlay`) | rw or ro | the files that the harness writes itself are rw (Claude's `.claude.json`, `sessions/`, `history.jsonl`, `backups/`, `projects/<cwd>/` with the transcripts and memory, `file-history/`, `todos/`, `session-env/`; Codex's `history.jsonl`, `sessions/`, `session_index.jsonl`, `shell_snapshots/`, and its SQLite home (`-c sqlite_home`); Copilot's settings, history, state files, `session-state/`, `session-store.db` with its `-wal` and `-shm`, `logs/`, cache; pi's `settings.json` and `sessions/`); the rest are ro (Copilot's `SYSTEM.md`, hook dirs, Codex's `hooks.json`, pi's extension). The session files of each agent are its own, so no agent sees the transcripts of another agent, in its project or in another project |
@@ -557,7 +557,7 @@ The agent directory `/state/agents/<ulid>/` has three parts
 |---|---|---|---|
 | `private/` (mode 0700) | `events.jsonl`, `pty.log`, `runner.json`, `runner-argv.json`, `runner-exit.json`, `runner.log`, `session-prompt.sha256` | the daemon and the runner | not bound |
 | `harness/` | `prompt.md`, the adapter's per-agent dirs (`claude/`, `codex/`, `copilot/`, `pi/`) | the daemon (adapter) at launch; the harness only through the writable overlays | ro at its own path, with rw binds for the writable overlays |
-| `workspace/` | the agent's files and checkouts | the harness, and the daemon for clones | rw at `$HOME/work` |
+| `workspace/` | the layout before the work root: the next start moves it to `/work/<project>/<agent>` | | not bound |
 
 Hidden: other agents' workspaces, `/state/terrarium.db`, the daemon socket, the
 Docker socket, SSH keys, the host filesystem, and the agent's own
@@ -571,6 +571,15 @@ must reach its model API.
 Requirement: `bwrap` needs user namespaces. The container must run with a
 seccomp profile that allows `unshare`/`clone(CLONE_NEWUSER)`, for example
 `--security-opt seccomp=unconfined` or a custom profile. Phase 0 verifies this.
+
+**Mode 1: the workspace on the host.** The workspace of an agent is
+`<TERRARIUM_WORK_DIR>/<project>/<agent>` (`/work` in the container, the
+`./work` bind mount), not a dir in the ULID-keyed agent dir. The sandbox has
+no compilers: the harness edits files in the sandbox, and builds and tests
+run on a target. A host agent attaches the workspace into each docker or
+vmlab target that the agent holds, at the same `/work/<project>/<agent>`,
+so paths in error messages match (docs/api.md §17.8, docs/host-protocol.md
+"Workspaces").
 
 Fallback: one **sibling container** per agent, started through the mounted
 Docker socket, with the same volumes. Slower to start, but needs no namespace
@@ -1221,6 +1230,18 @@ snapshot_before_task = true
 
 Ephemeral targets: the host agent creates them on agent start and destroys them
 on agent stop unless `keep = true`.
+
+Workspaces on targets ("mode 1", §11): the host agent binds each holder's
+workspace into a docker target at `/work/<project>/<agent>` (`docker run
+-v`), and syncs it into a vmlab machine with an `@dev` decorator in the lab
+file of the instance. A vmlab target can also take its lab from a repo of
+the project (`lab_repo`, a git worktree on the host for each target) or
+from each holder's workspace (`lab_from_workspace`, one instance for each
+holder). The host agent checks such a lab against an allowlist, because an
+agent can write it (docs/host-protocol.md, "The lab allowlist"). Caps:
+`TERRARIUM_MAX_TARGETS_PER_PROJECT` (8) and the host agent's
+`max_running_targets` (4). An API project target is named
+`<project>-<name>`.
 With `snapshot_before_task` (vmlab only), the daemon takes the snapshot
 `terrarium-clean` after `up` and before any exec, and restores a kept target
 to it on agent stop (docs/api.md §17.3).

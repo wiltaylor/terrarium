@@ -61,6 +61,13 @@ pub struct AppState {
     pub supervisor: Arc<dyn Supervisor>,
     pub state_dir: PathBuf,
     pub config_dir: PathBuf,
+    /// The work root (`TERRARIUM_WORK_DIR`). An agent's workspace is
+    /// `<work_dir>/<project>/<agent>` (`crate::workspace`).
+    pub work_dir: PathBuf,
+    /// `TERRARIUM_MAX_TARGETS_PER_PROJECT`.
+    pub max_targets_per_project: usize,
+    /// `TERRARIUM_REPOS_DIR`.
+    pub repos_dir: PathBuf,
     /// Trust `X-Terrarium-Agent` on the Unix socket. Tests and development
     /// only: any local caller could act as any agent.
     pub insecure_agent_header: bool,
@@ -715,6 +722,9 @@ mod tests {
             )),
             state_dir: PathBuf::from("/state"),
             config_dir: PathBuf::from("/nonexistent"),
+            work_dir: PathBuf::from("/work"),
+            max_targets_per_project: crate::settings::DEFAULT_MAX_TARGETS_PER_PROJECT,
+            repos_dir: PathBuf::from("/repos"),
             insecure_agent_header: false,
             usage: Arc::default(),
             executor: Arc::default(),

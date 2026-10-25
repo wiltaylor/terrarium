@@ -868,9 +868,19 @@ impl RunnerSupervisor {
     pub fn layout(&self, agent: &Agent) -> AgentLayout {
         let cfg = &self.inner.cfg;
         let agent_dir = terrarium_runner::agent_dir(&cfg.state_dir, agent.id);
+        let workspace = if agent.workspace.as_os_str().is_empty() {
+            terrarium_runner::workspace_dir(&cfg.state_dir, agent.id)
+        } else {
+            agent.workspace.clone()
+        };
         AgentLayout {
             agent: agent.id,
-            workspace: terrarium_runner::workspace_dir(&cfg.state_dir, agent.id),
+            workspace,
+            workspace_mount: Some(
+                std::path::Path::new(crate::workspace::WORKSPACE_MOUNT_ROOT)
+                    .join(&agent.project)
+                    .join(&agent.name),
+            ),
             harness_dir: terrarium_runner::harness_dir(&cfg.state_dir, agent.id),
             private_dir: terrarium_runner::private_dir(&cfg.state_dir, agent.id),
             agent_dir,
@@ -979,9 +989,11 @@ impl RunnerSupervisor {
         }
         let cfg = &self.inner.cfg;
         let mut layout = self.layout(agent);
-        // The adapters find the agent dir from the workspace path.
+        // The adapters find the harness dir in `harness_dir`; the workspace
+        // is under the work root, not in the agent dir.
         let mut agent = agent.clone();
         agent.workspace = layout.workspace.clone();
+        agent.harness_dir = Some(layout.harness_dir.clone());
 
         let mut ctx = PromptContext::for_agent(&agent);
         ctx.peers = view.peers.clone();
@@ -1015,6 +1027,9 @@ impl RunnerSupervisor {
         let (overlays, credentials, fresh_for_prompt, prompt_updated, repos) =
             tokio::task::spawn_blocking(move || {
                 migrate_dir(&dirs.0);
+                // An agent made before the work root: its files move from
+                // `<agent dir>/workspace` once.
+                crate::workspace::migrate(&dirs.0.join(terrarium_runner::WORKSPACE_DIR), &dirs.3);
                 for d in [&dirs.1, &dirs.3] {
                     std::fs::create_dir_all(d)
                         .map_err(|e| format!("cannot create {}: {e}", d.display()))?;
@@ -1713,12 +1728,14 @@ impl RunnerSupervisor {
     /// the agent gets a notification event.
     async fn targets_up(&self, agent: &Agent) {
         let Some(state) = self.state() else { return };
+        // The workspace moves to the work root before a target binds it.
+        crate::workspace::ensure(&state.state_dir, &state.work_dir, agent, true);
         let id = agent.id.to_string();
         for (t, e) in crate::executor::on_agent_start(&state, &id, &agent.policy.targets).await {
             self.emit(
                 agent.id,
                 SupervisorEventKind::Harness(Event::Notification {
-                    message: format!("the ephemeral target `{t}` did not come up: {e}"),
+                    message: format!("target `{t}`: {e}"),
                     question: false,
                 }),
             );

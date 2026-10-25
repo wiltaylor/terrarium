@@ -183,6 +183,9 @@ impl TestDaemon {
             token: token.map(str::to_owned),
             state_dir: self.state.clone(),
             config_dir: self.config.clone(),
+            work_dir: self.state.clone().with_file_name("work"),
+            max_targets_per_project: terrariumd::settings::DEFAULT_MAX_TARGETS_PER_PROJECT,
+            repos_dir: std::path::PathBuf::from("/repos"),
             supervisor: self.sup.clone(),
             // The tests name the calling agent with the header.
             insecure_agent_header: true,

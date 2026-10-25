@@ -177,9 +177,17 @@ async fn checkout_inner(
     check_dir(&dir)?;
     let store = store(state);
     let secret = credentials::secret_of(&store, repo.credential.as_deref())?;
-    let workspace = agent.agent.workspace.clone();
-    std::fs::create_dir_all(&workspace)
-        .map_err(|e| ApiError::internal(format!("cannot create {}: {e}", workspace.display())))?;
+    // The workspace moves to the work root first (an agent made before it).
+    let live = state
+        .supervisor
+        .status(agent.agent.id)
+        .await
+        .is_some_and(terrarium_core::AgentStatus::is_live);
+    let workspace =
+        crate::workspace::ensure(&state.state_dir, &state.work_dir, &agent.agent, !live)
+            .ok_or_else(|| {
+                ApiError::internal(format!("cannot create {}", agent.agent.workspace.display()))
+            })?;
     let c = Checkout {
         url: repo.url.clone(),
         dest: workspace.join(&dir),
@@ -187,7 +195,7 @@ async fn checkout_inner(
         depth: body.depth,
         secret: secret.as_ref().map(|(_, s)| s.clone()),
         store,
-        deny_local_under: vec![state.state_dir.clone()],
+        deny_local_under: vec![state.state_dir.clone(), state.work_dir.clone()],
         timeout: git::DEFAULT_TIMEOUT,
     };
 

@@ -41,6 +41,7 @@ services:
       - ./targets:/etc/terrarium/targets
       - ./fleets:/etc/terrarium/fleets           # *.toml fleet files, auto-applied at start and on reload
       - ./repos:/repos                           # local bare repos, bound rw into the agents of their project (TERRARIUM_REPOS_DIR)
+      - ./work:/work                             # agent workspaces, <project>/<agent> (TERRARIUM_WORK_DIR); a host agent on this machine attaches them to targets (its work_dir is this ./work)
       - ./config/tls:/etc/terrarium/tls:ro   # `just host::cert <name>` writes here
     security_opt:
       - seccomp:docker/seccomp-bwrap.json   # user namespaces for bwrap (§11)

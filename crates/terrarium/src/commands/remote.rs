@@ -35,6 +35,8 @@ pub struct ExecOpts {
     pub timeout: Option<u64>,
     pub stdin: bool,
     pub tty: bool,
+    /// The holder of a `lab_from_workspace` target.
+    pub agent: Option<String>,
 }
 
 fn session_path(target: &str, sid: &str) -> String {
@@ -157,6 +159,9 @@ pub async fn exec(ctx: &Ctx, target: &str, o: &ExecOpts, cmd: &[String]) -> anyh
     }
     if let Some(t) = o.timeout {
         body["timeout_secs"] = t.into();
+    }
+    if let Some(a) = &o.agent {
+        body["agent"] = a.clone().into();
     }
     if o.tty {
         let (rows, cols) = crate::attach::terminal_size().unwrap_or((24, 80));

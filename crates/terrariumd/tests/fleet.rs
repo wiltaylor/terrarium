@@ -665,11 +665,12 @@ async fn export_captures_a_hand_built_project() {
     td.agent(
         "hand",
         "worker",
-        json!({"harness": "pi", "model": "m", "policy": {"targets": ["box"]}}),
+        json!({"harness": "pi", "model": "m", "policy": {"targets": ["hand-box"]}}),
     )
     .await;
     td.post(
         "/api/targets",
+        // An API project target gets the project prefix: `hand-box`.
         json!({"name": "box", "kind": "ssh", "project": "hand", "address": "u@h"}),
     )
     .await
@@ -917,7 +918,7 @@ async fn fleet_policy_grants_need_sysadmin() {
     td.project("side").await;
     td.post(
         "/api/targets",
-        json!({"name": "sidebox", "kind": "ssh", "project": "side", "address": "u@h"}),
+        json!({"name": "side-box", "kind": "ssh", "project": "side", "address": "u@h"}),
     )
     .await
     .ok();
@@ -943,7 +944,7 @@ harness = "claude"
 "#
         )
     };
-    let local = fleet("targets = [\"sidebox\"]\nmail_to = [\"lead\"]");
+    let local = fleet("targets = [\"side-box\"]\nmail_to = [\"lead\"]");
     let global = fleet("targets = [\"shared\"]");
     let cross = fleet("cross_project = [\"ops/*\"]");
     for f in [&global, &cross] {

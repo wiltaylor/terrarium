@@ -707,6 +707,13 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX target_leases_target ON target_leases(target, revoked_at);
     CREATE INDEX target_leases_agent ON target_leases(agent, revoked_at);
     "#,
+    // 14: the runtime record of a target (PLAN §11, "mode 1"): the agent
+    // workspaces attached to it, the lab instance dir of a `lab_repo`
+    // target on its host, and the instances of a `lab_from_workspace`
+    // target, one for each holder. JSON; `{}` when nothing runs.
+    r#"
+    ALTER TABLE targets ADD COLUMN runtime TEXT NOT NULL DEFAULT '{}';
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call

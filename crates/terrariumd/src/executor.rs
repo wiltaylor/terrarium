@@ -38,8 +38,8 @@ use terrarium_core::protocol::CpDirection;
 use terrarium_core::protocol::LifecycleVerb;
 use terrarium_host::protocol::{
     CpPull, CpPush, DaemonFrame, DockerExec, DockerInspect, DockerRm, DockerRun, DockerStart,
-    DockerStop, ExecRequest, PtySize, StreamTag, VmlabCp, VmlabExec, VmlabLifecycle, VmlabShell,
-    VmlabSnapshot, VmlabStatus, hex,
+    DockerStop, ExecRequest, LabSource, PtySize, StreamTag, VmlabCp, VmlabExec, VmlabLifecycle,
+    VmlabPrepare, VmlabRelease, VmlabShell, VmlabSnapshot, VmlabStatus, WorkspaceMount, hex,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{Notify, mpsc};
@@ -415,6 +415,9 @@ pub struct RemoteCmd {
     pub timeout_secs: Option<u64>,
     /// A login shell in place of `argv`.
     pub shell: bool,
+    /// A `lab_from_workspace` target: the holder whose instance runs the
+    /// command (an agent key). An agent caller uses its own.
+    pub agent: Option<String>,
 }
 
 fn valid_env_key(k: &str) -> bool {
@@ -1418,7 +1421,8 @@ pub async fn start_exec(
 ) -> ApiResult<Arc<ExecSession>> {
     let row = usable(state, actor, name).await?;
     check_cap(state, actor)?;
-    let run = start_cmd(state, &row.def, &cmd)?;
+    let def = resolved_def(state, &row, Some(actor), cmd.agent.as_deref()).await?;
+    let run = start_cmd(state, &def, &cmd)?;
     let kind = if cmd.shell { "shell" } else { "exec" };
     let (sess, ctl) = ExecSession::new(
         name,
@@ -1452,6 +1456,10 @@ pub struct CpBody {
     /// The file mode of a push, for example 420 for `0644`.
     #[serde(default)]
     pub mode: Option<u32>,
+    /// A `lab_from_workspace` target: the holder whose instance (an agent
+    /// key). An agent caller uses its own.
+    #[serde(default)]
+    pub agent: Option<String>,
 }
 
 /// `POST /api/targets/{name}/cp`: start a copy in a new session.
@@ -1469,7 +1477,7 @@ pub async fn start_cp(
         )));
     }
     check_cap(state, actor)?;
-    let def = row.def.clone();
+    let def = resolved_def(state, &row, Some(actor), body.agent.as_deref()).await?;
     let push = body.direction == CpDirection::Push;
     let (sess, ctl) = ExecSession::new(
         name,
@@ -1685,6 +1693,21 @@ pub struct LifecycleOpts {
     /// with `keep`.
     #[serde(default)]
     pub destroy: bool,
+    /// A `lab_from_workspace` target: the holder whose instance the verb
+    /// acts on (an agent key). An agent caller acts on its own instance.
+    #[serde(default)]
+    pub agent: Option<String>,
+    /// The agent (ULID) that starts now, or gets a lease: its workspace is
+    /// attached with those of the running holders. Not in the API body.
+    #[serde(skip)]
+    pub starting: Option<String>,
+    /// The agent (ULID) that leaves: its workspace is not attached.
+    #[serde(skip)]
+    pub leaving: Option<String>,
+    /// Internal: the verb runs on the lab dir of an instance; the caller
+    /// did the running-targets check.
+    #[serde(skip)]
+    pub inner: bool,
 }
 
 fn state_of(v: &Value) -> String {
@@ -1709,7 +1732,11 @@ async fn docker_state(state: &Shared, def: &TargetDef) -> ApiResult<String> {
     }
 }
 
-async fn docker_run(state: &Shared, def: &TargetDef) -> ApiResult<()> {
+async fn docker_run(state: &Shared, def: &TargetDef, workspaces: &[String]) -> ApiResult<()> {
+    let workspaces: Vec<WorkspaceMount> = workspaces
+        .iter()
+        .map(|p| WorkspaceMount { path: p.clone() })
+        .collect();
     let Some(image) = def.image.clone() else {
         return Err(ApiError::conflict(format!(
             "container `{}` does not exist and the target has no `image`",
@@ -1731,6 +1758,7 @@ async fn docker_run(state: &Shared, def: &TargetDef) -> ApiResult<()> {
             init: true,
             env: BTreeMap::new(),
             volumes: Vec::new(),
+            workspaces,
             workdir: None,
             network: None,
             user: None,
@@ -1829,8 +1857,14 @@ pub async fn lifecycle(
             targets::kind_str(def.kind)
         )))
     };
+    if is_instance_kind(def) && !opts.inner {
+        // Boxed: an instance verb runs `lifecycle` on the instance's lab dir.
+        return Box::pin(instance_lifecycle(state, def, verb_kind, opts)).await;
+    }
     let mut add_snapshot = None;
     let mut result = None;
+    let mut attach_error: Option<String> = None;
+    let mut attached: Option<Vec<String>> = None;
     let new_state: String = match def.kind {
         TargetKind::Host | TargetKind::Ssh => match verb_kind {
             V::Snapshot | V::Restore => return unsupported("snapshot"),
@@ -1848,16 +1882,59 @@ pub async fn lifecycle(
             match verb_kind {
                 V::Status => docker_state(state, def).await?,
                 V::Up => {
+                    // The workspaces of the running holders (and the agent
+                    // that starts), bound at `/work/<project>/<agent>`. An
+                    // existing container (`container`) gets none.
+                    let want = if def.container.is_none() {
+                        attach_set(
+                            state,
+                            &def.name,
+                            opts.starting.as_deref(),
+                            opts.leaving.as_deref(),
+                        )
+                        .await?
+                    } else {
+                        Vec::new()
+                    };
+                    let now = runtime_of(state, &def.name).await?.attached;
+                    let fits = want.iter().all(|w| now.contains(w));
                     match docker_state(state, def).await?.as_str() {
-                        "running" => {}
-                        "absent" => docker_run(state, def).await?,
+                        "running" if fits => {}
+                        "running" => match recreate_refusal(state, def) {
+                            None => {
+                                docker_rm(state, def).await?;
+                                docker_run(state, def, &want).await?;
+                                attached = Some(want);
+                            }
+                            Some(why) => {
+                                attach_error = Some(attach_refused(def, &now, &want, &why))
+                            }
+                        },
+                        "absent" => {
+                            check_running_cap(state, def, None).await?;
+                            docker_run(state, def, &want).await?;
+                            attached = Some(want);
+                        }
                         // An ephemeral target starts fresh from its image.
                         "stopped" if def.ephemeral && def.image.is_some() => {
+                            check_running_cap(state, def, None).await?;
                             docker_rm(state, def).await?;
-                            docker_run(state, def).await?;
+                            docker_run(state, def, &want).await?;
+                            attached = Some(want);
                         }
                         // A permanent target keeps its files over down and up.
-                        "stopped" => docker_start(state, def).await?,
+                        "stopped" => {
+                            check_running_cap(state, def, None).await?;
+                            docker_start(state, def).await?;
+                            if !fits && def.container.is_none() {
+                                attach_error = Some(attach_refused(
+                                    def,
+                                    &now,
+                                    &want,
+                                    "it is permanent: a new container would lose its files",
+                                ));
+                            }
+                        }
                         s => {
                             return Err(ApiError::conflict(format!(
                                 "container `{}` is {s}; start it on the host (`docker start`)",
@@ -1870,6 +1947,7 @@ pub async fn lifecycle(
                 V::Down | V::Destroy => {
                     if verb_kind == V::Destroy || opts.destroy || (def.ephemeral && !def.keep) {
                         docker_rm(state, def).await?;
+                        attached = Some(Vec::new());
                         "absent".into()
                     } else {
                         let container = container_name(def);
@@ -1893,6 +1971,19 @@ pub async fn lifecycle(
             match verb_kind {
                 V::Status => vmlab_state(state, def).await?,
                 V::Up => {
+                    if !opts.inner {
+                        let row_state = state
+                            .db
+                            .read({
+                                let n = def.name.clone();
+                                move |c| targets::get(c, &n)
+                            })
+                            .await?
+                            .state;
+                        if row_state != "running" {
+                            check_running_cap(state, def, None).await?;
+                        }
+                    }
                     let f = vmlab_lc(def, false);
                     verb_ok(state, def, "vmlab.up", move |s| DaemonFrame::VmlabUp(f(s))).await?;
                     "running".into()
@@ -1961,10 +2052,19 @@ pub async fn lifecycle(
     state
         .db
         .write("system", move |t| {
-            targets::set_state(t, &name, &st, snap.as_deref())
+            targets::set_state(t, &name, &st, snap.as_deref())?;
+            if let Some(a) = attached {
+                let mut rt = targets::get(t, &name)?.runtime;
+                rt.attached = a;
+                targets::set_runtime(t, &name, &rt)?;
+            }
+            Ok(())
         })
         .await?;
     let mut out = json!({"target": def.name, "verb": verb_kind, "state": new_state});
+    if let Some(e) = attach_error {
+        out["attach_error"] = e.into();
+    }
     if matches!(verb_kind, V::Snapshot | V::Restore) {
         out["snapshot"] = snapshot.into();
     }
@@ -1999,6 +2099,615 @@ fn clean_opts() -> LifecycleOpts {
     }
 }
 
+// ------------------------------------------------- workspaces and instances
+//
+// PLAN §11 and §19, "mode 1": an agent's workspace lives on the host under
+// the work root, and the host agent attaches it into the targets that the
+// agent holds, at `/work/<project>/<agent>`. A docker target binds it at
+// `docker run`; a vmlab target syncs it with an `@dev` decorator in the
+// lab file of its instance (`vmlab.prepare`). Neither can add a workspace
+// to a running container or lab, so a new holder of a running target
+// needs a new container (or lab instance): the daemon makes one when the
+// target is ephemeral and no session is live, else the answer says
+// "attach needs a restart of the target".
+
+/// A `lab_repo` or `lab_from_workspace` target: the daemon makes its lab
+/// instance on the host with `vmlab.prepare`.
+pub fn is_instance_kind(def: &TargetDef) -> bool {
+    def.kind == TargetKind::Vmlab && (def.lab_repo.is_some() || def.lab_from_workspace)
+}
+
+/// A target that takes workspaces: a docker target with `image` (not an
+/// existing `container`), and a vmlab instance target.
+pub fn attaches(def: &TargetDef) -> bool {
+    match def.kind {
+        TargetKind::Docker => def.container.is_none(),
+        TargetKind::Vmlab => is_instance_kind(def),
+        _ => false,
+    }
+}
+
+/// The live exec sessions on `target`, of any owner.
+impl Executor {
+    pub fn live_on(&self, target: &str) -> usize {
+        self.table()
+            .values()
+            .filter(|s| s.target == target && !s.is_done())
+            .count()
+    }
+}
+
+async fn runtime_of(state: &Shared, target: &str) -> ApiResult<targets::Runtime> {
+    let n = target.to_owned();
+    Ok(state.db.read(move |c| targets::get(c, &n)).await?.runtime)
+}
+
+async fn store_runtime(state: &Shared, target: &str, rt: targets::Runtime) -> ApiResult<()> {
+    let n = target.to_owned();
+    state
+        .db
+        .write("system", move |t| targets::set_runtime(t, &n, &rt))
+        .await
+}
+
+/// One agent as a holder of a target: its ULID, `project/name`, and its
+/// workspace relative to the work root (`None`: not under the work root).
+#[derive(Debug, Clone)]
+pub struct HolderInfo {
+    pub id: String,
+    pub name: String,
+    pub rel: Option<String>,
+}
+
+/// Load an agent by its ULID or key, move its workspace to the work root
+/// when it is still in the old place, and make the dir.
+async fn holder_info(state: &Shared, key: &str, context: Option<&str>) -> ApiResult<HolderInfo> {
+    let (k, ctx) = (key.to_owned(), context.map(str::to_owned));
+    let v = state
+        .db
+        .read(move |c| crate::store::agents::find(c, &k, ctx.as_deref()))
+        .await?;
+    let ws = crate::workspace::ensure(&state.state_dir, &state.work_dir, &v.agent, false);
+    Ok(HolderInfo {
+        id: v.agent.id.to_string(),
+        name: format!("{}/{}", v.agent.project, v.agent.name),
+        rel: ws.and_then(|w| crate::workspace::rel(&state.work_dir, &w)),
+    })
+}
+
+/// The workspaces to attach to `target`: those of its running holders and
+/// of `starting`, without `leaving`. Sorted and unique.
+async fn attach_set(
+    state: &Shared,
+    target: &str,
+    starting: Option<&str>,
+    leaving: Option<&str>,
+) -> ApiResult<Vec<String>> {
+    let mut ids = running_holders(state, target, None).await?;
+    if let Some(s) = starting
+        && !ids.iter().any(|i| i == s)
+    {
+        ids.push(s.to_owned());
+    }
+    ids.retain(|i| Some(i.as_str()) != leaving);
+    let mut out = Vec::new();
+    for id in ids {
+        match holder_info(state, &id, None).await {
+            Ok(HolderInfo { rel: Some(r), .. }) => out.push(r),
+            Ok(_) => {}
+            Err(e) => warn!(agent = %id, "a holder of {target}: {e}"),
+        }
+    }
+    out.sort();
+    out.dedup();
+    Ok(out)
+}
+
+/// Why the daemon may not make a new container (or lab instance) for a
+/// new set of workspaces, or `None` when it may: an ephemeral target with
+/// no live session.
+fn recreate_refusal(state: &Shared, def: &TargetDef) -> Option<String> {
+    if !def.ephemeral {
+        return Some("it is permanent: a new container would lose its files".into());
+    }
+    if def.kind == TargetKind::Docker && def.image.is_none() {
+        return Some("it has no `image` to run again".into());
+    }
+    let n = state.executor.live_on(&def.name);
+    (n > 0).then(|| format!("{n} exec session(s) are live on it"))
+}
+
+fn attach_refused(def: &TargetDef, now: &[String], want: &[String], why: &str) -> String {
+    let missing: Vec<&String> = want.iter().filter(|w| !now.contains(w)).collect();
+    format!(
+        "attach needs a restart of the target: `{}` runs with the workspaces [{}], and [{}] \
+         cannot join a running {}; {why}. Stop the other holders, or `down` and `up` the \
+         target, then start again",
+        def.name,
+        now.join(", "),
+        missing
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join(", "),
+        if def.kind == TargetKind::Docker {
+            "container"
+        } else {
+            "lab"
+        }
+    )
+}
+
+/// The `max_running_targets` check of the target's host, before a target
+/// (or a lab instance, `instance`: the holder ULID) starts. It counts the
+/// docker and vmlab targets (and instances) on the host that the store
+/// shows as running, without this one.
+async fn check_running_cap(
+    state: &Shared,
+    def: &TargetDef,
+    instance: Option<&str>,
+) -> ApiResult<()> {
+    let Some(host) = def.host.clone() else {
+        return Ok(());
+    };
+    let Some(max) = state.executor.hosts.max_running_targets(&host) else {
+        return Ok(());
+    };
+    let (me, inst) = (def.name.clone(), instance.map(str::to_owned));
+    let h = host.clone();
+    let running = state
+        .db
+        .read(move |c| {
+            let mut n = 0usize;
+            for r in targets::list(c)? {
+                if r.def.host.as_deref() != Some(h.as_str())
+                    || !matches!(r.def.kind, TargetKind::Docker | TargetKind::Vmlab)
+                {
+                    continue;
+                }
+                if r.def.lab_from_workspace {
+                    n += r
+                        .runtime
+                        .instances
+                        .iter()
+                        .filter(|(k, i)| {
+                            i.state == "running"
+                                && !(r.def.name == me && Some(k.as_str()) == inst.as_deref())
+                        })
+                        .count();
+                } else if r.state == "running" && r.def.name != me {
+                    n += 1;
+                }
+            }
+            Ok(n)
+        })
+        .await?;
+    if running >= max as usize {
+        return Err(ApiError::new(
+            Code::RateLimited,
+            format!(
+                "host `{host}` runs {running} targets, and its max_running_targets is {max}; \
+                 bring one down first"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// `def` with `lab` set to the lab dir of an instance, as the vmlab verbs
+/// take it.
+fn with_lab(def: &TargetDef, lab: &str) -> TargetDef {
+    let mut d = def.clone();
+    d.lab = Some(PathBuf::from(lab));
+    d.lab_repo = None;
+    d.lab_from_workspace = false;
+    d
+}
+
+/// The instance name on the host: the target, or `<target>.<agent ULID>`
+/// for a `lab_from_workspace` target.
+pub fn instance_name(def: &TargetDef, holder: Option<&str>) -> String {
+    match holder {
+        Some(h) if def.lab_from_workspace => format!("{}.{h}", def.name),
+        _ => def.name.clone(),
+    }
+}
+
+/// The holder whose instance a verb on a `lab_from_workspace` target acts
+/// on: the agent caller itself, else `agent` of the body.
+async fn instance_holder(
+    state: &Shared,
+    def: &TargetDef,
+    actor: Option<&Actor>,
+    agent: Option<&str>,
+) -> ApiResult<HolderInfo> {
+    let key = match (actor.and_then(Actor::agent), agent) {
+        (Some(a), _) => a.id.clone(),
+        (None, Some(k)) => k.to_owned(),
+        (None, None) => {
+            return Err(ApiError::invalid(format!(
+                "`{}` gives each holder its own lab instance: name the holder with `agent`",
+                def.name
+            )));
+        }
+    };
+    holder_info(state, &key, def.project.as_deref()).await
+}
+
+/// The definition that the exec, copy, and snapshot frames use: for a
+/// vmlab instance target, `lab` is the lab dir of the instance. A target
+/// that is not up has none: `409 conflict`.
+pub async fn resolved_def(
+    state: &Shared,
+    row: &TargetRow,
+    actor: Option<&Actor>,
+    agent: Option<&str>,
+) -> ApiResult<TargetDef> {
+    if !is_instance_kind(&row.def) {
+        return Ok(row.def.clone());
+    }
+    let lab = if row.def.lab_from_workspace {
+        let h = instance_holder(state, &row.def, actor, agent).await?;
+        row.runtime.instances.get(&h.id).and_then(|i| i.lab.clone())
+    } else {
+        row.runtime.lab.clone()
+    };
+    match lab {
+        Some(l) => Ok(with_lab(&row.def, &l)),
+        None => Err(ApiError::conflict(format!(
+            "target `{}` has no lab instance on its host; bring it up first \
+             (POST /api/targets/{}/up)",
+            row.def.name, row.def.name
+        ))),
+    }
+}
+
+/// The source of a `vmlab.prepare` for a target, and the credential env of
+/// a repo URL.
+async fn lab_source(
+    state: &Shared,
+    def: &TargetDef,
+    holder: Option<&HolderInfo>,
+) -> ApiResult<(LabSource, BTreeMap<String, String>)> {
+    let path = def.lab_path.clone().unwrap_or_default();
+    if def.lab_from_workspace {
+        let rel = holder.and_then(|h| h.rel.clone()).ok_or_else(|| {
+            ApiError::invalid(format!(
+                "`{}`: the holder's workspace is not under the work root",
+                def.name
+            ))
+        })?;
+        return Ok((
+            LabSource::Workspace {
+                workspace: rel,
+                path,
+            },
+            BTreeMap::new(),
+        ));
+    }
+    let (project, name) = (
+        def.project.clone().unwrap_or_default(),
+        def.lab_repo.clone().unwrap_or_default(),
+    );
+    let repo = state
+        .db
+        .read({
+            let (p, n) = (project.clone(), name.clone());
+            move |c| crate::store::repos::find_by_name(c, &p, &n)
+        })
+        .await?
+        .ok_or_else(|| {
+            ApiError::invalid(format!(
+                "`lab_repo` `{name}` is not a repo of project `{project}`"
+            ))
+        })?;
+    let git_ref = def
+        .lab_ref
+        .clone()
+        .or_else(|| repo.default_branch.clone())
+        .unwrap_or_else(|| "main".into());
+    let local = crate::sandbox::local_repo_path(&repo.url, &state.repos_dir).and_then(|p| {
+        p.strip_prefix(&state.repos_dir)
+            .ok()
+            .map(|r| r.to_string_lossy().into_owned())
+    });
+    let (url, env) = match &local {
+        Some(_) => (None, BTreeMap::new()),
+        None => {
+            let secret = match &repo.credential {
+                Some(c) => CredentialStore::new(&state.state_dir).load(c)?,
+                None => None,
+            };
+            (Some(repo.url.clone()), checkout_env(secret.as_ref()))
+        }
+    };
+    Ok((
+        LabSource::Repo {
+            local,
+            url,
+            git_ref,
+            path,
+        },
+        env,
+    ))
+}
+
+/// `vmlab.prepare`: the lab instance with `workspace` attached. Returns
+/// the `result` value (`lab`, `attached`, `head`, `dev`).
+async fn prepare_instance(
+    state: &Shared,
+    def: &TargetDef,
+    holder: Option<&HolderInfo>,
+    workspace: Option<&str>,
+) -> ApiResult<Value> {
+    let (source, env) = lab_source(state, def, holder).await?;
+    let instance = instance_name(def, holder.map(|h| h.id.as_str()));
+    let machine = def.machine.clone();
+    let workspaces: Vec<WorkspaceMount> = workspace
+        .map(|w| WorkspaceMount { path: w.to_owned() })
+        .into_iter()
+        .collect();
+    let c = verb_ok(state, def, "vmlab.prepare", move |session| {
+        DaemonFrame::VmlabPrepare(VmlabPrepare {
+            session,
+            instance,
+            source,
+            machine,
+            workspaces,
+            env,
+            timeout_secs: Some(VERB_TIMEOUT),
+        })
+    })
+    .await?;
+    c.result
+        .ok_or_else(|| ApiError::internal("vmlab.prepare gave no result"))
+}
+
+/// `vmlab.release` of an instance.
+async fn release_instance(state: &Shared, def: &TargetDef, instance: String) -> ApiResult<()> {
+    verb_ok(state, def, "vmlab.release", move |session| {
+        DaemonFrame::VmlabRelease(VmlabRelease {
+            session,
+            instance,
+            timeout_secs: Some(VERB_TIMEOUT),
+        })
+    })
+    .await?;
+    Ok(())
+}
+
+/// A lifecycle verb on a vmlab instance target (`lab_repo` or
+/// `lab_from_workspace`). `up` makes the instance with `vmlab.prepare` when
+/// it is not running, then runs `vmlab up` in it; a destroy runs `vmlab
+/// destroy` and `vmlab.release` (the worktree goes too). The other verbs go
+/// to the lab dir of the instance.
+async fn instance_lifecycle(
+    state: &Shared,
+    def: &TargetDef,
+    verb_kind: LifecycleVerb,
+    opts: &LifecycleOpts,
+) -> ApiResult<Value> {
+    use LifecycleVerb as V;
+    host_online(state, def)?;
+    let per_holder = def.lab_from_workspace;
+    let holder = if per_holder {
+        let key = opts
+            .agent
+            .as_deref()
+            .or(opts.starting.as_deref())
+            .or(opts.leaving.as_deref());
+        Some(instance_holder(state, def, None, key).await?)
+    } else {
+        None
+    };
+    let hid = holder.as_ref().map(|h| h.id.clone());
+    let mut rt = runtime_of(state, &def.name).await?;
+    let (lab_now, attached_now) = match &hid {
+        Some(h) => rt
+            .instances
+            .get(h)
+            .map(|i| (i.lab.clone(), i.attached.clone()))
+            .unwrap_or_default(),
+        None => (rt.lab.clone(), rt.attached.clone()),
+    };
+    let inner = LifecycleOpts {
+        inner: true,
+        ..opts.clone()
+    };
+    let instance = instance_name(def, hid.as_deref());
+    let mut extra = serde_json::Map::new();
+    let mut lab_after = lab_now.clone();
+    let mut attached_after = attached_now.clone();
+    let mut head_after = rt.head.clone();
+    let st = match (verb_kind, lab_now.as_deref()) {
+        (V::Status, None) => "absent".to_owned(),
+        (V::Status, Some(l)) => {
+            lifecycle(state, &with_lab(def, l), V::Status, &inner).await?["state"]
+                .as_str()
+                .unwrap_or("unknown")
+                .to_owned()
+        }
+        (V::Up, _) => {
+            let cur = match lab_now.as_deref() {
+                Some(l) => vmlab_state(state, &with_lab(def, l))
+                    .await
+                    .unwrap_or_else(|_| "unknown".into()),
+                None => "absent".into(),
+            };
+            // The workspace to sync: the holder's own for a per-holder
+            // instance; else the attached one while its agent holds the
+            // target, else the first of the holders.
+            let set = match &holder {
+                Some(h) => h.rel.iter().cloned().collect(),
+                None => {
+                    attach_set(
+                        state,
+                        &def.name,
+                        opts.starting.as_deref(),
+                        opts.leaving.as_deref(),
+                    )
+                    .await?
+                }
+            };
+            let want: Option<String> = attached_now
+                .iter()
+                .find(|a| set.contains(a))
+                .cloned()
+                .or_else(|| set.first().cloned());
+            let fits = want.as_ref().is_none_or(|w| attached_now.contains(w));
+            let mut fresh = cur != "running";
+            if cur == "running" && !fits {
+                match recreate_refusal(state, def) {
+                    None => {
+                        if let Some(l) = lab_now.as_deref() {
+                            let d = LifecycleOpts {
+                                destroy: true,
+                                ..inner.clone()
+                            };
+                            lifecycle(state, &with_lab(def, l), V::Destroy, &d).await?;
+                        }
+                        fresh = true;
+                    }
+                    Some(why) => {
+                        extra.insert(
+                            "attach_error".into(),
+                            attach_refused(def, &attached_now, &set, &why).into(),
+                        );
+                    }
+                }
+            }
+            if fresh {
+                check_running_cap(state, def, hid.as_deref()).await?;
+                let p = prepare_instance(state, def, holder.as_ref(), want.as_deref()).await?;
+                lab_after = p["lab"].as_str().map(str::to_owned);
+                attached_after = want.iter().cloned().collect();
+                if p.get("head").is_some_and(Value::is_string) {
+                    head_after = p["head"].as_str().map(str::to_owned);
+                }
+                extra.insert("prepare".into(), p);
+            }
+            let l = lab_after
+                .clone()
+                .ok_or_else(|| ApiError::internal("vmlab.prepare gave no lab dir"))?;
+            lifecycle(state, &with_lab(def, &l), V::Up, &inner).await?;
+            // The others of the set that the one workspace of a machine
+            // leaves out.
+            let left: Vec<String> = set
+                .iter()
+                .filter(|s| !attached_after.contains(s))
+                .cloned()
+                .collect();
+            if !left.is_empty() && !extra.contains_key("attach_error") {
+                extra.insert(
+                    "attach_error".into(),
+                    format!(
+                        "a vmlab machine syncs one workspace: `{}` has [{}]; [{}] is not attached",
+                        def.name,
+                        attached_after.join(", "),
+                        left.join(", ")
+                    )
+                    .into(),
+                );
+            }
+            "running".to_owned()
+        }
+        (V::Down | V::Destroy, None) => "absent".to_owned(),
+        (V::Down | V::Destroy, Some(l)) => {
+            let out = lifecycle(state, &with_lab(def, l), verb_kind, &inner).await?;
+            let s = out["state"].as_str().unwrap_or("unknown").to_owned();
+            if s == "absent" {
+                release_instance(state, def, instance.clone()).await?;
+                lab_after = None;
+                attached_after.clear();
+                head_after = None;
+            }
+            s
+        }
+        (V::Snapshot | V::Restore, None) => {
+            return Err(ApiError::conflict(format!(
+                "target `{}` has no lab instance; bring it up first",
+                def.name
+            )));
+        }
+        (V::Snapshot | V::Restore, Some(l)) => {
+            let out = lifecycle(state, &with_lab(def, l), verb_kind, &inner).await?;
+            for k in ["snapshot", "result"] {
+                if let Some(v) = out.get(k) {
+                    extra.insert(k.into(), v.clone());
+                }
+            }
+            out["state"].as_str().unwrap_or("unknown").to_owned()
+        }
+    };
+    match &hid {
+        Some(h) => {
+            if st == "absent" {
+                rt.instances.remove(h);
+            } else {
+                let i = rt.instances.entry(h.clone()).or_default();
+                i.agent_name = holder.as_ref().map(|x| x.name.clone()).unwrap_or_default();
+                i.lab = lab_after;
+                i.state = st.clone();
+                i.attached = attached_after;
+            }
+        }
+        None => {
+            rt.lab = lab_after;
+            rt.attached = attached_after;
+            rt.head = head_after;
+        }
+    }
+    let (name, s2) = (def.name.clone(), st.clone());
+    state
+        .db
+        .write("system", move |t| {
+            targets::set_runtime(t, &name, &rt)?;
+            targets::set_state(t, &name, &s2, None)
+        })
+        .await?;
+    let mut out = json!({"target": def.name, "verb": verb_kind, "state": st});
+    if let Some(h) = &holder {
+        out["agent"] = h.name.clone().into();
+    }
+    for (k, v) in extra {
+        out[k] = v;
+    }
+    Ok(out)
+}
+
+/// Remove what a target runs on its host before the target is deleted:
+/// the container of an ephemeral docker target, and the lab instances of a
+/// vmlab instance target. Best effort: a failure is logged.
+pub async fn teardown(state: &Shared, row: &TargetRow) {
+    if !is_instance_kind(&row.def)
+        || !row
+            .def
+            .host
+            .as_deref()
+            .is_some_and(|h| state.executor.hosts.is_online(h))
+    {
+        return;
+    }
+    let opts = LifecycleOpts {
+        destroy: true,
+        ..LifecycleOpts::default()
+    };
+    let holders: Vec<Option<String>> = if row.def.lab_from_workspace {
+        row.runtime.instances.keys().cloned().map(Some).collect()
+    } else {
+        vec![None]
+    };
+    for h in holders {
+        let o = LifecycleOpts {
+            agent: h.clone(),
+            ..opts.clone()
+        };
+        if let Err(e) = instance_lifecycle(state, &row.def, LifecycleVerb::Destroy, &o).await {
+            warn!(target = %row.def.name, holder = ?h, "cannot destroy the lab instance: {e}");
+        }
+    }
+}
+
 /// Bring an ephemeral target up before an agent starts (PLAN §19). A
 /// permanent target is not brought up.
 ///
@@ -2019,6 +2728,17 @@ pub async fn ensure_up(state: &Shared, target: &str) -> ApiResult<Option<Value>>
 /// [`ensure_up`] with the `reason` of the `target.up` audit row
 /// (`agent_start`, or `lease_grant`).
 pub async fn ensure_up_for(state: &Shared, target: &str, reason: &str) -> ApiResult<Option<Value>> {
+    ensure_up_as(state, target, reason, None).await
+}
+
+/// [`ensure_up_for`] for the agent `agent` (a ULID): its workspace is
+/// attached, and a `lab_from_workspace` target brings up its own instance.
+pub async fn ensure_up_as(
+    state: &Shared,
+    target: &str,
+    reason: &str,
+    agent: Option<&str>,
+) -> ApiResult<Option<Value>> {
     let n = target.to_owned();
     let row = state.db.read(move |c| targets::get(c, &n)).await?;
     let wants_snapshot = row.def.snapshot_before_task
@@ -2040,15 +2760,18 @@ pub async fn ensure_up_for(state: &Shared, target: &str, reason: &str) -> ApiRes
                       "snapshot_before_task: the permanent target is not running; no snapshot");
             }
         }
+        // A permanent target that runs already: the agent's workspace must
+        // be in it, or the answer says why not.
+        if let Some(a) = agent {
+            return attach_join(state, target, a, reason).await;
+        }
         return Ok(None);
     }
-    let out = lifecycle(
-        state,
-        &row.def,
-        LifecycleVerb::Up,
-        &LifecycleOpts::default(),
-    )
-    .await?;
+    let opts = LifecycleOpts {
+        starting: agent.map(str::to_owned),
+        ..LifecycleOpts::default()
+    };
+    let out = lifecycle(state, &row.def, LifecycleVerb::Up, &opts).await?;
     audit_system(state, &row, "target.up", reason, &out).await?;
     if wants_snapshot {
         take_clean(state, &row).await?;
@@ -2110,11 +2833,26 @@ pub async fn maybe_down_for(
     target: &str,
     reason: &str,
 ) -> ApiResult<Option<Value>> {
+    maybe_down_as(state, target, reason, None).await
+}
+
+/// [`maybe_down_for`] for the agent `agent` (a ULID): a
+/// `lab_from_workspace` target removes the agent's own instance.
+pub async fn maybe_down_as(
+    state: &Shared,
+    target: &str,
+    reason: &str,
+    agent: Option<&str>,
+) -> ApiResult<Option<Value>> {
     let n = target.to_owned();
     let row = state.db.read(move |c| targets::get(c, &n)).await?;
     if !row.def.ephemeral {
         return Ok(None);
     }
+    let opts = LifecycleOpts {
+        leaving: agent.map(str::to_owned),
+        ..LifecycleOpts::default()
+    };
     if row.def.keep {
         let restore = row.def.snapshot_before_task
             && snapshots_supported(&row.def)
@@ -2122,18 +2860,115 @@ pub async fn maybe_down_for(
         if !restore {
             return Ok(None);
         }
-        let out = lifecycle(state, &row.def, LifecycleVerb::Restore, &clean_opts()).await?;
+        let o = LifecycleOpts {
+            leaving: opts.leaving.clone(),
+            ..clean_opts()
+        };
+        let out = lifecycle(state, &row.def, LifecycleVerb::Restore, &o).await?;
         audit_system(state, &row, "target.restore", reason, &out).await?;
         return Ok(Some(out));
     }
-    let out = lifecycle(
-        state,
-        &row.def,
-        LifecycleVerb::Destroy,
-        &LifecycleOpts::default(),
-    )
-    .await?;
+    let out = lifecycle(state, &row.def, LifecycleVerb::Destroy, &opts).await?;
     audit_system(state, &row, "target.destroy", reason, &out).await?;
+    Ok(Some(out))
+}
+
+/// A holder joins a target that other running agents hold: its workspace
+/// must be attached. A running ephemeral target with no live session gets
+/// a new container (or lab instance) with it; else the answer has
+/// `attach_error`. A target that is not running, or takes no workspace, is
+/// not touched: the next `up` attaches it.
+pub async fn attach_join(
+    state: &Shared,
+    target: &str,
+    agent: &str,
+    reason: &str,
+) -> ApiResult<Option<Value>> {
+    let n = target.to_owned();
+    let row = state.db.read(move |c| targets::get(c, &n)).await?;
+    if !attaches(&row.def) || row.def.lab_from_workspace || row.state != "running" {
+        return Ok(None);
+    }
+    let h = holder_info(state, agent, None).await?;
+    let Some(rel) = h.rel else { return Ok(None) };
+    if row.runtime.attached.contains(&rel) {
+        return Ok(None);
+    }
+    if !row.def.ephemeral {
+        // A permanent target is not run again for a workspace.
+        let want: Vec<String> = row
+            .runtime
+            .attached
+            .iter()
+            .cloned()
+            .chain(std::iter::once(rel))
+            .collect();
+        return Ok(Some(json!({
+            "target": row.def.name, "verb": "up", "state": row.state,
+            "attach_error": attach_refused(&row.def, &row.runtime.attached, &want,
+                "it is permanent: a new container would lose its files"),
+        })));
+    }
+    let opts = LifecycleOpts {
+        starting: Some(agent.to_owned()),
+        ..LifecycleOpts::default()
+    };
+    let out = lifecycle(state, &row.def, LifecycleVerb::Up, &opts).await?;
+    audit_system(state, &row, "target.attach", reason, &out).await?;
+    Ok(Some(out))
+}
+
+/// A holder leaves a target that other running agents still hold: its
+/// workspace goes out of the target. Docker and vmlab cannot unmount from a
+/// running container or lab, so a running ephemeral target with no live
+/// session gets a new one without it. Else the workspace stays attached
+/// until the target runs again (a log line says so).
+pub async fn detach(
+    state: &Shared,
+    target: &str,
+    agent: &str,
+    reason: &str,
+) -> ApiResult<Option<Value>> {
+    let n = target.to_owned();
+    let row = state.db.read(move |c| targets::get(c, &n)).await?;
+    if !attaches(&row.def) || row.def.lab_from_workspace || row.state != "running" {
+        return Ok(None);
+    }
+    let h = holder_info(state, agent, None).await?;
+    let Some(rel) = h.rel else { return Ok(None) };
+    if !row.runtime.attached.contains(&rel) {
+        return Ok(None);
+    }
+    if let Some(why) = recreate_refusal(state, &row.def) {
+        warn!(target = %row.def.name, workspace = %rel,
+              "the workspace stays attached until the target runs again: {why}");
+        return Ok(None);
+    }
+    let want = attach_set(state, &row.def.name, None, Some(agent)).await?;
+    let out = match row.def.kind {
+        TargetKind::Docker => {
+            docker_rm(state, &row.def).await?;
+            docker_run(state, &row.def, &want).await?;
+            let mut rt = row.runtime.clone();
+            rt.attached = want.clone();
+            store_runtime(state, &row.def.name, rt).await?;
+            json!({"target": row.def.name, "verb": "up", "state": "running", "attached": want})
+        }
+        _ => {
+            let d = LifecycleOpts {
+                destroy: true,
+                leaving: Some(agent.to_owned()),
+                ..LifecycleOpts::default()
+            };
+            lifecycle(state, &row.def, LifecycleVerb::Destroy, &d).await?;
+            let u = LifecycleOpts {
+                leaving: Some(agent.to_owned()),
+                ..LifecycleOpts::default()
+            };
+            lifecycle(state, &row.def, LifecycleVerb::Up, &u).await?
+        }
+    };
+    audit_system(state, &row, "target.detach", reason, &out).await?;
     Ok(Some(out))
 }
 
@@ -2207,9 +3042,18 @@ async fn held_targets(state: &Shared, agent: &str, policy_targets: &[String]) ->
     out
 }
 
+/// A target that gives each holder its own instance.
+async fn per_holder(state: &Shared, target: &str) -> ApiResult<TargetRow> {
+    let n = target.to_owned();
+    state.db.read(move |c| targets::get(c, &n)).await
+}
+
 /// [`ensure_up`] for every target the agent holds (its policy and its
-/// leases), unless another running agent holds it: then it is up already.
-/// Failures are logged and returned; they do not stop the others.
+/// leases), unless another running agent holds it: then it is up already,
+/// and the agent's workspace joins it ([`attach_join`]). A
+/// `lab_from_workspace` target brings up the agent's own instance.
+/// Failures, and an `attach_error`, are logged and returned; they do not
+/// stop the others.
 pub async fn on_agent_start(
     state: &Shared,
     agent: &str,
@@ -2217,24 +3061,43 @@ pub async fn on_agent_start(
 ) -> Vec<(String, ApiError)> {
     let mut errors = Vec::new();
     for t in held_targets(state, agent, policy_targets).await {
-        match running_holders(state, &t, Some(agent)).await {
-            Ok(h) if !h.is_empty() => continue,
-            Ok(_) => {}
+        let row = match per_holder(state, &t).await {
+            Ok(r) => r,
             Err(e) => {
                 errors.push((t.clone(), e));
                 continue;
             }
-        }
-        if let Err(e) = ensure_up(state, &t).await {
-            warn!(target = %t, "cannot bring an ephemeral target up: {e}");
-            errors.push((t.clone(), e));
+        };
+        let res = if row.def.lab_from_workspace {
+            ensure_up_as(state, &t, "agent_start", Some(agent)).await
+        } else {
+            match running_holders(state, &t, Some(agent)).await {
+                Ok(h) if !h.is_empty() => attach_join(state, &t, agent, "agent_start").await,
+                Ok(_) => ensure_up_as(state, &t, "agent_start", Some(agent)).await,
+                Err(e) => Err(e),
+            }
+        };
+        match res {
+            Ok(Some(out)) => {
+                if let Some(msg) = out["attach_error"].as_str() {
+                    warn!(target = %t, "{msg}");
+                    errors.push((t.clone(), ApiError::conflict(msg)));
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                warn!(target = %t, "cannot bring an ephemeral target up: {e}");
+                errors.push((t.clone(), e));
+            }
         }
     }
     errors
 }
 
 /// [`maybe_down`] for every target the agent holds (its policy and its
-/// leases), unless another running agent still holds it.
+/// leases), unless another running agent still holds it: then the agent's
+/// workspace leaves it ([`detach`]). A `lab_from_workspace` target removes
+/// the agent's own instance.
 pub async fn on_agent_stop(
     state: &Shared,
     agent: &str,
@@ -2242,15 +3105,23 @@ pub async fn on_agent_stop(
 ) -> Vec<(String, ApiError)> {
     let mut errors = Vec::new();
     for t in held_targets(state, agent, policy_targets).await {
-        match running_holders(state, &t, Some(agent)).await {
-            Ok(h) if !h.is_empty() => continue,
-            Ok(_) => {}
+        let row = match per_holder(state, &t).await {
+            Ok(r) => r,
             Err(e) => {
                 errors.push((t.clone(), e));
                 continue;
             }
-        }
-        if let Err(e) = maybe_down(state, &t).await {
+        };
+        let res = if row.def.lab_from_workspace {
+            maybe_down_as(state, &t, "agent_stop", Some(agent)).await
+        } else {
+            match running_holders(state, &t, Some(agent)).await {
+                Ok(h) if !h.is_empty() => detach(state, &t, agent, "agent_stop").await,
+                Ok(_) => maybe_down_as(state, &t, "agent_stop", Some(agent)).await,
+                Err(e) => Err(e),
+            }
+        };
+        if let Err(e) = res {
             warn!(target = %t, "cannot remove an ephemeral target: {e}");
             errors.push((t.clone(), e));
         }

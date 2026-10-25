@@ -184,6 +184,9 @@ impl Td {
             token: None,
             state_dir: self.dir.path().join("state"),
             config_dir: self.dir.path().join("config"),
+            work_dir: self.dir.path().join("state").with_file_name("work"),
+            max_targets_per_project: terrariumd::settings::DEFAULT_MAX_TARGETS_PER_PROJECT,
+            repos_dir: std::path::PathBuf::from("/repos"),
             supervisor: supervisor(self.dir.path()),
             insecure_agent_header: true,
             artifact_listen: None,
@@ -820,6 +823,12 @@ async fn ephemeral_targets_follow_the_agent() {
     o.backoff_min = Duration::from_millis(50);
     o.backoff_max = Duration::from_millis(200);
     o.docker_bin = docker.display().to_string();
+    // The host agent's work_dir is the daemon's work root, as on one machine.
+    o.paths = terrarium_host::HostPaths {
+        work_dir: td.dir.path().join("work"),
+        instances_dir: bins.path().join("instances"),
+        repos_dir: bins.path().join("repos"),
+    };
     let host = tokio::spawn(terrarium_host::Client::new(o).run());
     let start = Instant::now();
     while td.get("/api/hosts/lab1").await["online"] != true {

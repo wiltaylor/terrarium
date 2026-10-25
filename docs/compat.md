@@ -1223,3 +1223,69 @@ raw output, with the PKCE values and the codes replaced, is in
   answer to `failed`).
 - Rate limits of the usage endpoints at the 5-minute interval.
 - `pi auth print-bearer-token` as the credential for a probe.
+
+## vmlab workspace attach
+
+vmlab 0.33.3-alpha, 2026-10-25. The question: how does a host agent put an
+agent workspace (a host directory) into a vmlab machine at
+`/work/<project>/<agent>` (PLAN §11, "mode 1")? The reference is the
+`vmlab` skill (`containers.md`, `vm.md`, `dev-machines.md`,
+`shares-media.md`, `lab-file.md`).
+
+### The options
+
+| Mechanism | From outside the lab file | Needs | Result |
+|---|---|---|---|
+| `container { volume { host = ... } }` | No: a lab file attribute. | The `host` path must be a directory under the lab root, and the container needs a NIC (the volume mounts from the segment gateway, over virtiofs or SMB). | Not used. The test lab has no NIC, and a path under the lab root cannot be the work root. |
+| `vm { share { host = ... } }` | No. | A NIC unless `transport = "virtiofs"`. VMs only. | Not used: containers are the cheap case. |
+| `@dev(workspace = ..., workspace_guest = ...)` with the workspace syncer | No: a decorator in the lab file. | The guest agent's `watch` and `fileops` (a container's agent has them). No NIC: the syncer uses the agent channel. | **Used.** |
+| `vmlab dev sync ...` | The verbs act on a declared `@dev` machine only. | A `@dev` machine. | Status and flush only; it does not attach a new dir. |
+
+vmlab has no overlay or include file, and no CLI flag that adds a mount
+to a lab. So the host agent writes the lab file of each instance itself:
+`vmlab.prepare` copies the checked definition to
+`<instances_dir>/<instance>/lab/vmlab.wcl` and adds
+`@dev(workspace = "<work_dir>/<project>/<agent>", workspace_guest = "/work/<project>/<agent>")`
+to the target's machine (docs/host-protocol.md, "`vmlab.prepare`"). The
+agent's own `vmlab.wcl` (in a worktree or in its workspace) does not
+change.
+
+### What the tests showed
+
+All with a scratch lab (`lab "mode1-exp"`, one `container "box"`,
+`alpine:3.22`, `mode = :idle`, no NIC):
+
+| Check | Result |
+|---|---|
+| `vmlab validate` with `@dev(workspace = "/abs/path")`, `"./link"` (a symbolic link out of the lab), and `"../hostwork"` | `ok` for all three. vmlab does not keep a `@dev` workspace in the lab root. So the host agent checks the paths of an agent-written lab itself (the allowlist). |
+| `vmlab up` with an absolute `@dev(workspace)` | Up in 2.3 s. `vmlab status -v` shows a `DEV` table with the host dir and `/work/p/a`. The first pass seeded the guest: `ls /work/p/a` showed the host file, owned by root (the container floor). |
+| A new file on the host | In the guest after about 400 ms. |
+| A file written in the guest (`vmlab exec box -- sh -c 'echo built > /work/p/a/out.txt'`) | On the host after about 400 ms, owned by the host user. `vmlab dev sync status`: `in step`. |
+| A changed `@dev` in the lab file of a running lab, then `vmlab up` | Refused, exit 1: `vmlab.wcl has changed since the lab daemon loaded it, and box is still running ... Run vmlab down`. So a workspace cannot join a running lab. |
+| The same lab file in two directories, `vmlab up` in each | The second is refused, exit 5: ``lab `mode1-twin` is already registered from <first dir>``. vmlab keys a lab by its name. |
+
+### Limits
+
+- One workspace for each machine: vmlab refuses a second `@dev` on one
+  machine. A `lab_repo` target attaches its first holder; the others get
+  "a vmlab machine syncs one workspace". A `lab_from_workspace` target
+  gives each holder its own instance, so each has its own.
+- A workspace cannot join or leave a running lab (the changed-file
+  refusal). The daemon makes a new instance when the target is ephemeral
+  and no exec session is live; else "attach needs a restart of the
+  target".
+- The syncer copies, it does not mount: there is a delay of about 400 ms
+  each way, a halt on a conflict (`.vmlab-sync-halt` in the guest; resolve
+  with `vmlab dev sync resolve` on the host), and a guard on a mass delete
+  from the guest. `.gitignore` and `.vmlabignore` paths are guest-owned and
+  do not sync: a `target/` in `.gitignore` stays in the guest. That is good
+  for build output, but a test report under an ignored path does not reach
+  the host.
+- `workspace_guest` is `/work/<project>/<agent>`, a Linux path. A Windows
+  guest needs another mapping (not done).
+- **Awaiting Wil's vmlab change:** two instances of one lab definition at
+  the same time (two holders of a `lab_from_workspace` target with the same
+  lab name, or a `lab_repo` target and a copy of its lab) are refused with
+  exit 5 until vmlab keys a lab instance by its directory. The code makes
+  one instance dir for each holder already (`<target>.<agent ULID>`), and
+  does not rename the lab.

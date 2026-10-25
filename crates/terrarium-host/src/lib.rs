@@ -13,6 +13,11 @@
 //! - [`transfer`]: `cp` in both directions.
 //! - [`docker`], [`vmlab`]: verb builders and output parsers.
 //! - [`verb`]: shared parts of the builders.
+//! - [`workspace`]: agent workspaces under `work_dir`.
+//! - [`labcheck`]: the allowlist check of a lab definition, and the
+//!   generated lab file of an instance.
+//! - [`prepare`]: `vmlab.prepare` and `vmlab.release` (worktrees and
+//!   lab instances).
 //! - [`config`]: the config file and the path policy.
 //! - [`capabilities`]: tool detection for `hello` and `check`.
 //! - [`tls`]: the transport check, fingerprint pinning, the probe, and
@@ -22,13 +27,16 @@ pub mod capabilities;
 pub mod client;
 pub mod config;
 pub mod docker;
+pub mod labcheck;
 pub mod outbox;
+pub mod prepare;
 pub mod protocol;
 pub mod session;
 pub mod tls;
 pub mod transfer;
 pub mod verb;
 pub mod vmlab;
+pub mod workspace;
 
 pub use client::{Client, ClientOptions};
-pub use config::Config;
+pub use config::{Config, HostPaths};

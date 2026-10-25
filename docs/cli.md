@@ -305,7 +305,7 @@ terrarium usage project                       the project, per agent
 terrarium usage subscriptions                 all plans
 terrarium status set <idle|working|blocked> [--note text]
 terrarium targets ls                          an agent: the targets its policy or a lease allows, with host online/offline
-terrarium exec <target> [--cwd d] [-e K=V]... [--timeout s] [-i] [-t] -- <cmd>
+terrarium exec <target> [--cwd d] [-e K=V]... [--timeout s] [-i] [-t] [--agent a] -- <cmd>
 terrarium shell <target>                      a login shell in a PTY; Ctrl-] detaches
 terrarium cp <src> <target>:<dst>             one file to the target
 terrarium cp <target>:<src> <dst>             one file from the target
@@ -403,10 +403,11 @@ terrarium admin role grant|revoke <agent> <role>
 terrarium admin role ls <agent>
 terrarium admin target new <name> --kind host|ssh|docker|vmlab [--host h] [--address a] [--port n]
                           [--credential c] [--image i] [--container c] [--lab dir] [--machine m]
+                          [--lab-repo r] [--lab-ref ref] [--lab-path dir] [--lab-from-workspace]
                           [--ephemeral] [--keep] [--global]
-terrarium admin target ls
+terrarium admin target ls                      agent mode: the project's and the global targets
 terrarium admin target rm <name>
-terrarium admin target verb <name> up|down|snapshot|restore|status [--snapshot name]
+terrarium admin target verb <name> up|down|snapshot|restore|status [--snapshot name] [--agent a]
 terrarium admin target grant <target> <agent> [--until 30m|time] [--exclusive] [--reason text]
 terrarium admin target revoke <target> <agent>
 terrarium admin target extend <target> <agent> --until 30m|time|none
@@ -422,7 +423,18 @@ terrarium admin fleet validate|plan|apply|ls|show|export ...
 
 `admin role grant` reads the roles, adds the role, and writes the whole set.
 `admin role revoke` removes the role in the same way. `admin target new`
-makes a project target. Use `--global` for a global target (sysadmin).
+makes a project target, named `<project>-<name>`: the daemon adds the
+project prefix, and the CLI prints the full name. Use `--global` for a
+global target (sysadmin). A project has at most
+`TERRARIUM_MAX_TARGETS_PER_PROJECT` targets (`409`). `--lab-repo` and
+`--lab-from-workspace` make a vmlab target whose lab is in a repo of the
+project or in each holder's workspace ([api.md
+§17.8](api.md#178-workspaces-and-lab-instances)). `admin target verb` prints
+`warning: attach needs a restart of the target ...` when a workspace could
+not join the running target; `--agent` names the holder's instance of a
+`lab_from_workspace` target. `admin target ls` in agent mode shows every
+target of the agent's project and the global ones, with the `SCOPE`
+column; `targets ls` shows only the usable ones.
 `admin target grant` gives an agent a lease on a target at run time
 ([api.md §17.7](api.md#177-target-leases)). The agent may use the target at
 once, and gets a pointer turn. `--until` takes a duration (`90s`, `30m`,

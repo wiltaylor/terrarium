@@ -156,6 +156,9 @@ impl Td {
             token: None,
             state_dir: self.dir.path().join("state"),
             config_dir: self.dir.path().join("config"),
+            work_dir: self.dir.path().join("state").with_file_name("work"),
+            max_targets_per_project: terrariumd::settings::DEFAULT_MAX_TARGETS_PER_PROJECT,
+            repos_dir: std::path::PathBuf::from("/repos"),
             supervisor: self.sup.clone(),
             insecure_agent_header: insecure,
             artifact_listen: None,
@@ -1349,6 +1352,9 @@ async fn artifact_origin_listens_on_its_own_port() {
         token: None,
         state_dir: dir.path().join("state"),
         config_dir: dir.path().join("config"),
+        work_dir: dir.path().join("state").with_file_name("work"),
+        max_targets_per_project: terrariumd::settings::DEFAULT_MAX_TARGETS_PER_PROJECT,
+        repos_dir: std::path::PathBuf::from("/repos"),
         supervisor: sup,
         insecure_agent_header: false,
         artifact_listen: Some("127.0.0.1:0".into()),
@@ -2020,19 +2026,20 @@ async fn lease_grant_and_revoke_push_a_pointer() {
     let id = td.agent("demo", "bob", json!({})).await;
     td.post(
         "/api/targets",
-        Some(json!({"name": "box", "kind": "host", "host": "lab1", "project": "demo"})),
+        Some(json!({"name": "demo-box", "kind": "host", "host": "lab1", "project": "demo"})),
     )
     .await;
     // Stopped: the pointer is parked until the start.
     let g = td
         .post(
-            "/api/targets/box/leases",
+            "/api/targets/demo-box/leases",
             Some(json!({"agent": "demo/bob"})),
         )
         .await;
     assert_eq!(g["state"], "active", "{g}");
     td.post(&format!("/api/agents/{id}/start"), None).await;
-    let granted = "You now have access to target box until revoked. Run `terrarium targets ls`.";
+    let granted =
+        "You now have access to target demo-box until revoked. Run `terrarium targets ls`.";
     let starts = td.wait_events(&id, "turn_start", |e| !e.is_empty()).await;
     assert_eq!(starts[0]["data"]["prompt"], granted);
     td.wait_status(&id, "idle").await;
@@ -2040,7 +2047,7 @@ async fn lease_grant_and_revoke_push_a_pointer() {
     let (s, b) = td
         .req(
             Method::DELETE,
-            "/api/targets/box/leases/demo%2Fbob",
+            "/api/targets/demo-box/leases/demo%2Fbob",
             None,
             None,
         )
@@ -2049,13 +2056,13 @@ async fn lease_grant_and_revoke_push_a_pointer() {
     let starts = td.wait_events(&id, "turn_start", |e| e.len() >= 2).await;
     assert_eq!(
         starts[1]["data"]["prompt"],
-        "Your access to target box ended."
+        "Your access to target demo-box ended."
     );
     td.wait_status(&id, "idle").await;
     // A grant with an expiry names the time.
     let g = td
         .post(
-            "/api/targets/box/leases",
+            "/api/targets/demo-box/leases",
             Some(json!({"agent": "demo/bob", "until": "1h", "exclusive": true})),
         )
         .await;
@@ -2063,7 +2070,92 @@ async fn lease_grant_and_revoke_push_a_pointer() {
     let starts = td.wait_events(&id, "turn_start", |e| e.len() >= 3).await;
     assert_eq!(
         starts[2]["data"]["prompt"],
-        format!("You now have access to target box until {until}. Run `terrarium targets ls`.")
-            .as_str()
+        format!(
+            "You now have access to target demo-box until {until}. Run `terrarium targets ls`."
+        )
+        .as_str()
+    );
+}
+
+/// PLAN §11 "mode 1": an agent made before the work root has its files in
+/// `<state>/agents/<ulid>/workspace`. The daemon start points the agent at
+/// `<work>/<project>/<agent>`, and the next agent start moves the files
+/// there once. The harness files stay in the agent dir. When the new place
+/// has files already, the move is skipped and the old files stay.
+#[tokio::test]
+async fn an_old_workspace_moves_to_the_work_root_at_the_next_start() {
+    let mut td = Td::start().await;
+    let bob = td.agent("demo", "bob", json!({})).await;
+    let amy = td.agent("demo", "amy", json!({})).await;
+    let old = |id: &str| td.dir.path().join(format!("state/agents/{id}/workspace"));
+    let (old_bob, old_amy) = (old(&bob), old(&amy));
+    for (dir, text) in [(&old_bob, "bob's"), (&old_amy, "amy's")] {
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/notes.txt"), text).unwrap();
+    }
+    let new_bob = td.dir.path().join("work/demo/bob");
+    let new_amy = td.dir.path().join("work/demo/amy");
+    std::fs::create_dir_all(&new_amy).unwrap();
+    std::fs::write(new_amy.join("already.txt"), "here").unwrap();
+    // The rows of agents from before the work root.
+    let state = td.daemon.as_ref().unwrap().state.clone();
+    for (id, dir) in [(&bob, &old_bob), (&amy, &old_amy)] {
+        let (i, o) = (id.clone(), dir.display().to_string());
+        state
+            .db
+            .write("system", move |t| {
+                t.execute(
+                    "UPDATE agents SET workspace = ?2 WHERE id = ?1",
+                    rusqlite::params![i, o],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+    td.restart_daemon().await;
+    let a = td.get(&format!("/api/agents/{bob}")).await;
+    assert_eq!(a["workspace"], new_bob.display().to_string(), "{a}");
+
+    td.post(&format!("/api/agents/{bob}/start"), None).await;
+    td.wait_status(&bob, "idle").await;
+    assert_eq!(
+        std::fs::read_to_string(new_bob.join("src/notes.txt")).unwrap(),
+        "bob's"
+    );
+    assert!(!old_bob.exists(), "the old workspace is gone");
+    assert!(
+        td.dir
+            .path()
+            .join(format!("state/agents/{bob}/harness/prompt.md"))
+            .is_file(),
+        "the harness files stay in the agent dir"
+    );
+    // The harness runs in the new place (sandbox mode `none`).
+    let argv = std::fs::read_to_string(
+        td.dir
+            .path()
+            .join(format!("state/agents/{bob}/private/runner-argv.json")),
+    )
+    .unwrap_or_default();
+    assert!(
+        argv.is_empty() || argv.contains(&new_bob.display().to_string()),
+        "{argv}"
+    );
+
+    td.post(&format!("/api/agents/{amy}/start"), None).await;
+    td.wait_status(&amy, "idle").await;
+    assert_eq!(
+        std::fs::read_to_string(new_amy.join("already.txt")).unwrap(),
+        "here"
+    );
+    assert!(
+        !new_amy.join("src").exists(),
+        "no merge into a full workspace"
+    );
+    assert_eq!(
+        std::fs::read_to_string(old_amy.join("src/notes.txt")).unwrap(),
+        "amy's",
+        "the old files stay"
     );
 }
