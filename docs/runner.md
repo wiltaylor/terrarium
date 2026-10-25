@@ -81,7 +81,8 @@ harness ended by itself (an exit or a crash).
 | `stopped_by` | Set by | `Supervisor::recover` after a daemon start |
 |---|---|---|
 | `container` | SIGTERM or SIGINT to the runner process: `docker/entrypoint.sh` stops the runners when the container stops. A signal wins over a value that the daemon set. | Launches the agent again with resume, whatever the exit code and the restart policy. |
-| `operator` | The daemon, through `set_stopped_by` before a stop (`POST /api/agents/{id}/stop`, a removed agent). | Reports `stopped`; no launch. |
+| `operator` | The daemon, through `set_stopped_by` before a stop (`POST /api/agents/{id}/stop` by the operator, a removed agent). | Reports `stopped`; no launch. |
+| `agent:<project>/<name>` | The daemon, through `set_stopped_by` before a stop that an agent asked for (`POST /api/agents/{id}/stop` from a project lead, for example). | The same as `operator`. The reason is `stopped by agent:<project>/<name>`. |
 | `policy` | The daemon, through `set_stopped_by` before a restart that it kills for. | Applies the restart policy to the exit status. |
 | absent | | Applies the restart policy to the exit status. |
 

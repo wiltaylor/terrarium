@@ -361,6 +361,10 @@ pub struct AgentSetArgs {
     /// The whole policy as JSON, for example `{"targets":[],"mail_to":["*"]}`
     #[arg(long)]
     pub policy: Option<String>,
+    /// A new session, not a resume, when the prompt changed and the
+    /// harness keeps the prompt of a session (Codex)
+    #[arg(long)]
+    pub new_session_on_prompt_change: Option<bool>,
 }
 
 #[derive(Debug, Args)]

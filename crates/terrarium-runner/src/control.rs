@@ -170,7 +170,7 @@ pub struct AnswerKeysParams {
 }
 
 /// The params of `set_stopped_by`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoppedByParams {
     pub stopped_by: crate::process::StoppedBy,
 }

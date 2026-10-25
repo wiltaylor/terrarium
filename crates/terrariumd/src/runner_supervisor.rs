@@ -362,12 +362,20 @@ fn sha256_hex(text: &str) -> String {
         .collect()
 }
 
-/// A launch spec, and whether the launch drops its resume because the
-/// prompt changed under a harness that freezes it.
+/// A launch spec, and what the launch does with a changed prompt.
 struct Built {
     spec: LaunchSpec,
+    /// The launch drops its resume: the prompt changed under a harness
+    /// that freezes it.
     fresh_for_prompt: bool,
+    /// The launch resumes with a changed prompt under a harness that
+    /// takes the new one on a resume (Claude with
+    /// `--system-prompt-snapshot off`, pi).
+    prompt_updated: bool,
 }
+
+/// The `system` event of a resume that sends a changed prompt.
+const PROMPT_UPDATED: &str = "prompt updated on resume";
 
 // ---- push pointers ----
 
@@ -945,16 +953,18 @@ impl RunnerSupervisor {
         let state_dir = view.state_dir.clone();
         // A harness that keeps the prompt of a session gets a new session
         // when the prompt changed since that session began.
-        let check_prompt = resume.is_some()
-            && agent.new_session_on_prompt_change
-            && entry.adapter.prompt_frozen_on_resume();
+        let frozen = entry.adapter.prompt_frozen_on_resume();
+        let check_prompt = resume.is_some() && agent.new_session_on_prompt_change && frozen;
+        // A harness that takes the new prompt on a resume: the session now
+        // has the new prompt, so the hash follows it.
+        let follow_prompt = resume.is_some() && !frozen;
         let fresh = resume.is_none();
         let repo_urls = match cfg.sandbox.mode {
             SandboxMode::Bwrap => view.repo_urls.clone(),
             SandboxMode::None => Vec::new(),
         };
         let repos_dir = cfg.sandbox.repos_dir.clone();
-        let (overlays, credentials, fresh_for_prompt, repos) =
+        let (overlays, credentials, fresh_for_prompt, prompt_updated, repos) =
             tokio::task::spawn_blocking(move || {
                 migrate_dir(&dirs.0);
                 for d in [&dirs.1, &dirs.3] {
@@ -973,8 +983,10 @@ impl RunnerSupervisor {
                     }
                     Err(_) => None,
                 };
-                let fresh_for_prompt = check_prompt && old.is_some_and(|h| h.trim() != hash);
-                if fresh || fresh_for_prompt {
+                let changed = old.as_deref().is_some_and(|h| h.trim() != hash);
+                let fresh_for_prompt = check_prompt && changed;
+                let prompt_updated = follow_prompt && changed;
+                if fresh || fresh_for_prompt || prompt_updated {
                     safefs::write_private(&hash_path, hash.as_bytes()).map_err(|e| {
                         format!(
                             "cannot write {}: {}",
@@ -1006,7 +1018,13 @@ impl RunnerSupervisor {
                 };
                 let repos =
                     sandbox::local_repo_binds(repo_urls.iter().map(String::as_str), &repos_dir);
-                Ok((overlays, credentials, fresh_for_prompt, repos))
+                Ok((
+                    overlays,
+                    credentials,
+                    fresh_for_prompt,
+                    prompt_updated,
+                    repos,
+                ))
             })
             .await
             .map_err(other)?
@@ -1062,6 +1080,7 @@ impl RunnerSupervisor {
         Ok(Built {
             spec: cfg.sandbox.wrap(spec, &layout, env),
             fresh_for_prompt,
+            prompt_updated,
         })
     }
 
@@ -1082,6 +1101,7 @@ impl RunnerSupervisor {
         let Built {
             spec,
             fresh_for_prompt,
+            prompt_updated,
         } = self.build_spec(&agent, resume.as_ref(), &view).await?;
         let resume = if fresh_for_prompt {
             // The old session stays in the history; this launch begins a
@@ -1205,6 +1225,15 @@ impl RunnerSupervisor {
         };
         info!(agent = %id, name = %agent.name, %reason, "agent started");
         self.emit_status(id, AgentStatus::Starting, reason);
+        if prompt_updated && resume.is_some() {
+            info!(agent = %id, "{PROMPT_UPDATED}");
+            self.emit(
+                id,
+                SupervisorEventKind::Harness(Event::System {
+                    message: PROMPT_UPDATED.to_owned(),
+                }),
+            );
+        }
         let now = runner.status();
         if now != AgentStatus::Starting {
             match self.held(id) {
@@ -2355,6 +2384,10 @@ impl Supervisor for RunnerSupervisor {
     }
 
     fn stop(&self, agent: AgentId) -> BoxFuture<'_, Result<(), SupervisorError>> {
+        self.stop_by(agent, StoppedBy::Operator)
+    }
+
+    fn stop_by(&self, agent: AgentId, by: StoppedBy) -> BoxFuture<'_, Result<(), SupervisorError>> {
         Box::pin(async move {
             let (runner, def) = {
                 let mut slots = lock(&self.inner.slots);
@@ -2387,10 +2420,10 @@ impl Supervisor for RunnerSupervisor {
                 self.targets_down(&def);
                 return Ok(());
             };
-            // `runner-exit.json` records the operator stop, so a daemon
-            // that starts before this one sees the exit does not launch
-            // the agent again.
-            if let Err(e) = r.set_stopped_by(StoppedBy::Operator).await {
+            // `runner-exit.json` records the stop and who asked for it
+            // (the operator, or an agent), so a daemon that starts before
+            // this one sees the exit does not launch the agent again.
+            if let Err(e) = r.set_stopped_by(by).await {
                 debug!(agent = %agent, "cannot record the stop reason: {e}");
             }
             // A graceful stop: an idle harness with known exit keys gets
@@ -2693,9 +2726,13 @@ impl Supervisor for RunnerSupervisor {
                         );
                         return Ok(Recovery::Gone);
                     }
-                    // The operator stopped it: it stays stopped.
-                    Some(StoppedBy::Operator) => {
-                        let reason = "stopped by the operator".to_owned();
+                    // The operator (or an agent through the API) stopped
+                    // it: it stays stopped.
+                    Some(by) if by.is_requested() => {
+                        let reason = match by {
+                            StoppedBy::Actor(a) => format!("stopped by {a}"),
+                            _ => "stopped by the operator".to_owned(),
+                        };
                         lock(&self.inner.slots)
                             .entry(id)
                             .or_insert_with(|| Slot::new(agent.clone()))
@@ -2705,7 +2742,7 @@ impl Supervisor for RunnerSupervisor {
                         self.targets_down(&agent);
                         return Ok(Recovery::Ended);
                     }
-                    Some(StoppedBy::Policy) | None => {}
+                    Some(_) | None => {}
                 }
                 if wants_restart(agent.restart, status.success()) {
                     info!(

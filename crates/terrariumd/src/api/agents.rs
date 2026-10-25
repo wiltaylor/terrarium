@@ -285,7 +285,17 @@ async fn stop(
     policy::admin_project(&actor, &a.agent.project, "stopping an agent")?;
     let errored = a.agent.status == AgentStatus::Error
         || state.supervisor.status(agent_id(&a)).await == Some(AgentStatus::Error);
-    let result = state.supervisor.stop(agent_id(&a)).await;
+    // `runner-exit.json` names the agent that asked for the stop.
+    let result = match actor.agent() {
+        Some(by) => {
+            let label = format!("agent:{}/{}", by.project, by.name);
+            state
+                .supervisor
+                .stop_by(agent_id(&a), terrarium_runner::StoppedBy::Actor(label))
+                .await
+        }
+        None => state.supervisor.stop(agent_id(&a)).await,
+    };
     let id = a.agent.id.to_string();
     let project = a.agent.project.clone();
     let was_live = a.agent.status.is_live();

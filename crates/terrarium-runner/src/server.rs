@@ -205,10 +205,10 @@ pub(crate) struct ServerCtx {
 
 impl ServerCtx {
     pub(crate) fn stopped_by(&self) -> Option<crate::process::StoppedBy> {
-        *self
-            .stopped_by
+        self.stopped_by
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     fn hello(&self) -> Hello {

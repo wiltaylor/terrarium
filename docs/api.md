@@ -608,7 +608,13 @@ The definition is the TOML agent definition as JSON:
 changed since the harness session began, and the harness keeps the prompt
 of a session (Codex), `start` and a restart begin a new harness session
 instead of a resume. The status reason is `new session: the prompt
-changed`. The old session stays in the history.
+changed`. The old session stays in the history. `POST /api/agents` without
+the field sets `true`, the same as an agent file.
+
+A harness that takes a changed prompt on a resume (Claude Code with
+`--system-prompt-snapshot off`, pi) resumes with the new prompt. The daemon
+then writes the new hash to `private/session-prompt.sha256` and records a
+`system` event with the message `prompt updated on resume`.
 
 `PATCH` changes only the fields in the body. Send `null` for
 `subscription`, `model`, or `prompt` to clear it (`{"subscription": null}`).

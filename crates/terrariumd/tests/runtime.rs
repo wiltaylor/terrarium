@@ -1559,6 +1559,75 @@ async fn frozen_prompt_change_starts_a_new_session() {
     assert_eq!(started[5]["data"]["source"], "resume");
 }
 
+/// A harness that takes a changed prompt on a resume (Claude Code with
+/// `--system-prompt-snapshot off`, pi): a changed template between a stop
+/// and a start still resumes the same session. The launch has the new
+/// prompt, `session-prompt.sha256` follows it, and a `system` event says
+/// so. The same prompt again: no event.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unfrozen_prompt_change_resumes_and_updates_the_hash() {
+    use sha2::Digest;
+    let td = Td::start().await;
+    let prompts = td.dir.path().join("prompts");
+    std::fs::create_dir_all(&prompts).unwrap();
+    std::fs::write(prompts.join("t.md"), "v1 {{agent.name}}").unwrap();
+    let id = td.agent("demo", "bob", json!({"prompt": "t"})).await;
+    let agent_dir = td.dir.path().join("state/agents").join(&id);
+    let hash_file = agent_dir.join("private/session-prompt.sha256");
+    let prompt_hash = || {
+        let text = std::fs::read_to_string(agent_dir.join("harness/prompt.md")).unwrap();
+        sha2::Sha256::digest(text.as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    };
+    let cycle = async |want: usize| {
+        td.post(&format!("/api/agents/{id}/start"), None).await;
+        td.wait_events(&id, "session_started", |e| e.len() == want)
+            .await;
+        td.wait_status(&id, "idle").await;
+        td.post(&format!("/api/agents/{id}/stop"), None).await;
+        td.wait_status(&id, "stopped").await;
+        td.events(&id, "session_started").await
+    };
+    let updated = async || {
+        td.events(&id, "system")
+            .await
+            .into_iter()
+            .filter(|e| e["data"]["message"] == "prompt updated on resume")
+            .count()
+    };
+    cycle(1).await;
+    let v1 = std::fs::read_to_string(&hash_file).unwrap();
+    assert_eq!(v1.trim(), prompt_hash());
+
+    std::fs::write(prompts.join("t.md"), "v2 {{agent.name}}").unwrap();
+    let started = cycle(2).await;
+    assert_eq!(started[1]["data"]["source"], "resume");
+    assert_eq!(
+        started[1]["data"]["harness_session"],
+        started[0]["data"]["harness_session"]
+    );
+    let prompt = std::fs::read_to_string(agent_dir.join("harness/prompt.md")).unwrap();
+    assert!(prompt.starts_with("v2 bob"), "{prompt}");
+    let v2 = std::fs::read_to_string(&hash_file).unwrap();
+    assert_ne!(v2, v1);
+    assert_eq!(v2.trim(), prompt_hash());
+    assert_eq!(updated().await, 1);
+    let statuses = td.events(&id, "status").await;
+    assert!(
+        !statuses
+            .iter()
+            .any(|e| e["data"]["reason"] == "new session: the prompt changed"),
+        "{statuses:#?}"
+    );
+
+    // The same prompt: a resume, and no new event.
+    let started = cycle(3).await;
+    assert_eq!(started[2]["data"]["source"], "resume");
+    assert_eq!(updated().await, 1);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stop_types_the_exit_keys_first() {
     let td = Td::start().await;

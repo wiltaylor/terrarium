@@ -135,6 +135,17 @@ pub trait Supervisor: Send + Sync + 'static {
         resume: Option<HarnessSessionId>,
     ) -> BoxFuture<'_, Result<(), SupervisorError>>;
     fn stop(&self, agent: AgentId) -> BoxFuture<'_, Result<(), SupervisorError>>;
+    /// [`Supervisor::stop`] for a caller that is not the operator: `by`
+    /// goes into `runner-exit.json` (`stopped_by`). The default ignores
+    /// `by`.
+    fn stop_by(
+        &self,
+        agent: AgentId,
+        by: terrarium_runner::StoppedBy,
+    ) -> BoxFuture<'_, Result<(), SupervisorError>> {
+        let _ = by;
+        self.stop(agent)
+    }
     fn restart(&self, agent: Agent) -> BoxFuture<'_, Result<(), SupervisorError>>;
     /// Clear an agent in `error` for an operator stop: end a stray runner
     /// that still holds the agent, if one exists, and record the agent as

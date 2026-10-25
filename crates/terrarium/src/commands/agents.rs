@@ -203,6 +203,9 @@ async fn set(ctx: &Ctx, a: &AgentSetArgs) -> anyhow::Result<()> {
             .map_err(|e| CliError::usage(format!("--policy is not JSON: {e}")))?;
         body["policy"] = p;
     }
+    if let Some(b) = a.new_session_on_prompt_change {
+        body["new_session_on_prompt_change"] = b.into();
+    }
     if body.as_object().is_some_and(serde_json::Map::is_empty) {
         return Err(CliError::usage("give at least one field to change"));
     }

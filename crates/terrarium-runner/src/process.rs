@@ -37,9 +37,10 @@ pub struct ProcessOptions {
 
 /// Who stopped a harness on purpose. The runner process writes it into
 /// `runner-exit.json`, so that a daemon that starts later knows why the
-/// harness ended (PLAN §18).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+/// harness ended (PLAN §18). On the wire and in the file it is one
+/// string: `container`, `operator`, `policy`, or the label of the agent
+/// that stopped it (`agent:<project>/<name>`).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StoppedBy {
     /// SIGTERM or SIGINT to the runner process: the container stops
     /// (`docker/entrypoint.sh`). The next daemon launches the agent again
@@ -50,15 +51,48 @@ pub enum StoppedBy {
     /// The daemon stopped the harness for a policy (a restart, a quota or
     /// budget hold). The next daemon applies the restart policy.
     Policy,
+    /// An agent stopped it through the API (for example a project lead):
+    /// the actor label, `agent:<project>/<name>`. The next daemon treats
+    /// it as [`StoppedBy::Operator`]: it does not launch the agent.
+    Actor(String),
 }
 
 impl StoppedBy {
-    pub fn as_str(self) -> &'static str {
+    pub fn as_str(&self) -> &str {
         match self {
             Self::Container => "container",
             Self::Operator => "operator",
             Self::Policy => "policy",
+            Self::Actor(a) => a,
         }
+    }
+
+    /// The value for a string: a known word, else an actor label.
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "container" => Self::Container,
+            "operator" => Self::Operator,
+            "policy" => Self::Policy,
+            other => Self::Actor(other.to_owned()),
+        }
+    }
+
+    /// A stop that the next daemon keeps: the operator, or an agent.
+    pub fn is_requested(&self) -> bool {
+        matches!(self, Self::Operator | Self::Actor(_))
+    }
+}
+
+impl Serialize for StoppedBy {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        s.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for StoppedBy {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        Ok(Self::parse(&s))
     }
 }
 
@@ -214,7 +248,7 @@ pub async fn run(opts: ProcessOptions, adapter: Arc<dyn Adapter>) -> Result<Exit
         agent = %agent,
         code = status.code,
         signal = ?status.signal,
-        stopped_by = stopped_by.map(StoppedBy::as_str),
+        stopped_by = stopped_by.as_ref().map(StoppedBy::as_str),
         "harness exited"
     );
     write_exit_status(
@@ -278,4 +312,29 @@ async fn wait_or_signal(runner: &Runner) -> (ExitStatus, bool) {
         }
     }
     (runner.stop().await, true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::StoppedBy;
+
+    /// One string on the wire: the known words, else an actor label. An
+    /// agent stop is a requested stop, as an operator stop is.
+    #[test]
+    fn stopped_by_is_one_string() {
+        for (v, s) in [
+            (StoppedBy::Container, "container"),
+            (StoppedBy::Operator, "operator"),
+            (StoppedBy::Policy, "policy"),
+            (StoppedBy::Actor("agent:p/lead".into()), "agent:p/lead"),
+        ] {
+            let j = serde_json::to_string(&v).unwrap();
+            assert_eq!(j, format!("\"{s}\""));
+            assert_eq!(serde_json::from_str::<StoppedBy>(&j).unwrap(), v);
+        }
+        assert!(StoppedBy::Operator.is_requested());
+        assert!(StoppedBy::Actor("agent:p/lead".into()).is_requested());
+        assert!(!StoppedBy::Container.is_requested());
+        assert!(!StoppedBy::Policy.is_requested());
+    }
 }

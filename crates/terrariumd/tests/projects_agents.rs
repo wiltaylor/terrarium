@@ -736,6 +736,44 @@ async fn patch_clears_optional_fields_with_null() {
     }
 }
 
+/// An agent made through the API without `new_session_on_prompt_change`
+/// gets `true`, the same as an agent file. PATCH sets it both ways.
+#[tokio::test]
+async fn api_agent_defaults_new_session_on_prompt_change_to_true() {
+    let td = TestDaemon::start().await;
+    td.project("p").await;
+    let v = td
+        .agent("p", "lead", json!({"prompt": "project-lead"}))
+        .await;
+    assert_eq!(v["new_session_on_prompt_change"], true, "{v}");
+    let v = td.get("/api/agents/p%2Flead").await;
+    assert_eq!(v.ok()["new_session_on_prompt_change"], true);
+    let v = td
+        .patch(
+            "/api/agents/p%2Flead",
+            json!({"new_session_on_prompt_change": false}),
+        )
+        .await;
+    assert_eq!(v.ok()["new_session_on_prompt_change"], false);
+    // Another field leaves it as it is.
+    let v = td
+        .patch("/api/agents/p%2Flead", json!({"model": "sonnet"}))
+        .await;
+    assert_eq!(v.ok()["new_session_on_prompt_change"], false);
+    let v = td
+        .patch(
+            "/api/agents/p%2Flead",
+            json!({"new_session_on_prompt_change": true}),
+        )
+        .await;
+    assert_eq!(v.ok()["new_session_on_prompt_change"], true);
+    // An explicit `false` at create stays.
+    let v = td
+        .agent("p", "w", json!({"new_session_on_prompt_change": false}))
+        .await;
+    assert_eq!(v["new_session_on_prompt_change"], false, "{v}");
+}
+
 #[tokio::test]
 async fn events_live_and_latest_skip_the_backlog() {
     let td = TestDaemon::start().await;

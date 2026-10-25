@@ -215,6 +215,18 @@ impl Td {
     }
 
     async fn req(&self, method: Method, path: &str, body: Option<Value>) -> (u16, Value) {
+        self.req_as(None, method, path, body).await
+    }
+
+    /// A request as the agent `as_agent` (`project/name`), through the
+    /// test-only agent header.
+    async fn req_as(
+        &self,
+        as_agent: Option<&str>,
+        method: Method,
+        path: &str,
+        body: Option<Value>,
+    ) -> (u16, Value) {
         let stream = UnixStream::connect(&self.socket).await.unwrap();
         let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
             .await
@@ -224,6 +236,9 @@ impl Td {
             .method(method)
             .uri(path)
             .header("host", "localhost");
+        if let Some(a) = as_agent {
+            req = req.header("x-terrarium-agent", a);
+        }
         let bytes = match body {
             Some(b) => {
                 req = req.header("content-type", "application/json");
@@ -622,6 +637,72 @@ async fn a_container_stop_relaunches_with_resume() {
     assert_eq!(rec.stopped_by, Some(terrarium_runner::StoppedBy::Operator));
     td.post(&format!("/api/agents/{never}/stop"), None).await;
     td.wait_status(&never, "stopped").await;
+}
+
+/// A stop that an agent (here a project lead) asks for: `runner-exit.json`
+/// names that agent, `agent:<project>/<name>`, not `operator`. The next
+/// daemon keeps it stopped, as for an operator stop.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_agent_stop_records_the_agent_in_stopped_by() {
+    let mut td = Td::start().await;
+    td.agent("lead", json!({"roles": ["project_admin"]})).await;
+    let w = td.agent("w", json!({})).await;
+    td.post(&format!("/api/agents/{w}/start"), None).await;
+    td.wait_status(&w, "idle").await;
+    let (s, b) = td
+        .req_as(
+            Some("demo/lead"),
+            Method::POST,
+            &format!("/api/agents/{w}/stop"),
+            None,
+        )
+        .await;
+    assert_eq!(s, 202, "{b}");
+    td.wait_status(&w, "stopped").await;
+    td.wait_runner_gone(&w).await;
+    let rec = terrarium_runner::read_exit_record(&td.dir.path().join("state"), w.parse().unwrap())
+        .expect("runner-exit.json");
+    assert_eq!(
+        rec.stopped_by,
+        Some(terrarium_runner::StoppedBy::Actor("agent:demo/lead".into()))
+    );
+    let raw = std::fs::read_to_string(td.private_dir(&w).join("runner-exit.json")).unwrap();
+    assert!(raw.contains(r#""stopped_by":"agent:demo/lead""#), "{raw}");
+
+    td.post(&format!("/api/agents/{w}/start"), None).await;
+    td.wait_status(&w, "idle").await;
+
+    // The daemon was down when the harness ended on that stop: the next
+    // daemon keeps it stopped and names the agent in the reason. (The
+    // runner ends on a SIGTERM; the record then gets the agent stop.)
+    td.shutdown();
+    let pid = td.runner_pid(&w).expect("a live runner");
+    let status = std::process::Command::new("kill")
+        .args(["-TERM", &pid.to_string()])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    td.wait_runner_gone(&w).await;
+    std::fs::write(
+        td.private_dir(&w).join("runner-exit.json"),
+        r#"{"code":0,"stopped_by":"agent:demo/lead"}"#,
+    )
+    .unwrap();
+    td.boot().await;
+    let start = Instant::now();
+    loop {
+        let statuses = td.events(&w, "status").await;
+        if statuses
+            .iter()
+            .any(|e| e["data"]["reason"] == "stopped by agent:demo/lead")
+        {
+            break;
+        }
+        assert!(start.elapsed() < WAIT, "{statuses:#?}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(td.status(&w).await, "stopped");
+    assert!(td.runner_pid(&w).is_none());
 }
 
 /// F1: a state dir from before the layout split. The daemon moves the

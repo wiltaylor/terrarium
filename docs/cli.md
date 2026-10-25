@@ -135,7 +135,7 @@ terrarium agent new <name> --harness <h> [--subscription s] [--model m] [--promp
                     [--restart always|on-failure|never]
 terrarium agent new --from-file agents/lead.toml [flags that override the file]
 terrarium agent set <agent> [--harness h] [--subscription s] [--model m] [--prompt p]
-                    [--restart r] [--policy JSON]
+                    [--restart r] [--policy JSON] [--new-session-on-prompt-change true|false]
 terrarium agent rm <agent> [--confirm]
 terrarium agent start|stop|restart <agent>
 terrarium agent send <agent> <text | ->
