@@ -52,9 +52,11 @@ impl Address {
         }
     }
 
-    /// A readable form: `operator`, `project:<name>`, `project/agent`.
+    /// A readable form: `operator`, `project:<name>`, `project/agent`. An
+    /// agent key that never was an agent shows as the key alone.
     pub fn display(&self) -> String {
         match self {
+            Self::Agent { name, project, .. } if project.is_empty() => name.clone(),
             Self::Agent { name, project, .. } => format!("{project}/{name}"),
             other => other.key(),
         }
@@ -81,12 +83,17 @@ impl Address {
     }
 }
 
-/// Parse an address: `operator`, `project:<name>`, an agent ULID,
-/// `project/agent`, or a bare agent name (looked up in `context` first).
+/// Parse an address: `operator`, `system`, `project:<name>`, an agent
+/// ULID, `project/agent`, or a bare agent name (looked up in `context`
+/// first). [`send`] refuses mail to `system`, and the API refuses a sender
+/// of `system`, so `system` is only useful as a list filter.
 pub fn resolve(conn: &Connection, s: &str, context: Option<&str>) -> ApiResult<Address> {
     let s = s.trim();
     if s == "operator" {
         return Ok(Address::Operator);
+    }
+    if s == "system" {
+        return Ok(Address::System);
     }
     if let Some(p) = s.strip_prefix("project:") {
         projects::get(conn, p)?;
@@ -112,24 +119,19 @@ fn from_key(conn: &Connection, key: &str, cache: &mut HashMap<String, Address>) 
     } else if let Some(p) = key.strip_prefix("project:") {
         Address::Project(p.to_owned())
     } else {
-        match agents::get(conn, key) {
-            Ok(v) => Address::Agent {
+        // The tombstone resolver, as the cards use: a live agent, else a
+        // deleted one (migration 12), else the key alone.
+        let known = agents::known_name(conn, key).ok().flatten();
+        match known.as_deref().and_then(|n| n.split_once('/')) {
+            Some((project, name)) => Address::Agent {
                 id: key.to_owned(),
-                name: v.agent.name,
-                project: v.agent.project,
+                name: name.to_owned(),
+                project: project.to_owned(),
             },
-            // A deleted agent keeps its name (migration 12), else its ID.
-            Err(_) => match agents::removed(conn, key).ok().flatten() {
-                Some((project, name)) => Address::Agent {
-                    id: key.to_owned(),
-                    name,
-                    project,
-                },
-                None => Address::Agent {
-                    id: key.to_owned(),
-                    name: key.to_owned(),
-                    project: String::new(),
-                },
+            None => Address::Agent {
+                id: key.to_owned(),
+                name: key.to_owned(),
+                project: String::new(),
             },
         }
     };
@@ -172,6 +174,13 @@ pub struct Message {
     /// or project-inbox message, so new agent mail on it types no pointer.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub thread_paused: bool,
+    /// The loop guard held this message when it was written: it typed no
+    /// push pointer (migration 16). Older messages have `false`.
+    #[serde(default)]
+    pub held: bool,
+    /// Why the loop guard held the message. Only for a held message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held_reason: Option<String>,
 }
 
 struct RawMessage {
@@ -189,6 +198,8 @@ struct RawMessage {
     delivered_at: Option<String>,
     read_at: Option<String>,
     read_by: Option<String>,
+    held: bool,
+    held_reason: Option<String>,
 }
 
 fn raw_row(r: &Row<'_>) -> rusqlite::Result<RawMessage> {
@@ -207,6 +218,8 @@ fn raw_row(r: &Row<'_>) -> rusqlite::Result<RawMessage> {
         delivered_at: r.get("delivered_at")?,
         read_at: r.get("read_at")?,
         read_by: r.get("read_by")?,
+        held: r.get("held")?,
+        held_reason: r.get("held_reason")?,
     })
 }
 
@@ -250,6 +263,8 @@ fn render(conn: &Connection, raw: RawMessage, cache: &mut RenderCache) -> Messag
         read_by: raw.read_by,
         read_by_name,
         thread_paused,
+        held: raw.held,
+        held_reason: raw.held_reason,
     }
 }
 
@@ -375,18 +390,32 @@ pub fn send(t: &mut Tx<'_>, m: Outgoing<'_>) -> ApiResult<Message> {
         return Err(ApiError::invalid("`system` only sends mail"));
     }
     // The loop guard: agent mail past the limit types no pointer.
-    let held = matches!(
+    let limit = mail_loop_limit();
+    let held_reason = if matches!(
         (m.from, m.to),
         (Address::Agent { .. }, Address::Agent { .. })
-    ) && agent_run(t, &thread)? >= mail_loop_limit();
+    ) {
+        let run = agent_run(t, &thread)?;
+        (run >= limit).then(|| {
+            format!(
+                "loop guard: message {} of agent-to-agent mail on thread {thread} since the \
+                 last operator or project-inbox message (limit {limit})",
+                run + 1
+            )
+        })
+    } else {
+        None
+    };
+    let held = held_reason.is_some();
     let (state, delivered) = match m.to {
         Address::Agent { .. } if !held => ("queued", None),
         _ => ("delivered", Some(at.clone())),
     };
     t.execute(
         "INSERT INTO messages (id, thread_id, from_agent, from_kind, to_agent, to_kind, subject,
-                               body, state, created_at, delivered_at, in_reply_to)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                               body, state, created_at, delivered_at, in_reply_to, held,
+                               held_reason)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         params![
             id,
             thread,
@@ -399,7 +428,9 @@ pub fn send(t: &mut Tx<'_>, m: Outgoing<'_>) -> ApiResult<Message> {
             state,
             at,
             delivered,
-            m.in_reply_to
+            m.in_reply_to,
+            held,
+            held_reason
         ],
     )?;
     let summary = format!(
@@ -417,8 +448,9 @@ pub fn send(t: &mut Tx<'_>, m: Outgoing<'_>) -> ApiResult<Message> {
         "to_name": m.to.display(),
         "subject": m.subject,
     });
-    if held {
+    if let Some(reason) = &held_reason {
         data["held"] = json!(true);
+        data["held_reason"] = json!(reason);
         data["thread_state"] = json!("paused");
     }
     let mut draft = EventDraft::new("mail", summary, data);
@@ -636,4 +668,31 @@ fn audit_read(t: &Tx<'_>, m: &Message, via: &str) -> ApiResult<()> {
         project,
         json!({"thread": m.thread_id, "from": m.from, "to": m.to, "via": via}),
     )
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    /// The name reader goes through the tombstone resolver: a deleted agent
+    /// shows as `project/name`, and a key that never was an agent shows as
+    /// the key alone, never as `/<ULID>`.
+    #[test]
+    fn names_resolve_through_the_tombstone() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::db::migrate(&mut conn).unwrap();
+        let gone = ulid::Ulid::new().to_string();
+        conn.execute(
+            "INSERT INTO agents_removed (id, project, name, removed_at) VALUES (?1, 'p', 'w', 't')",
+            [&gone],
+        )
+        .unwrap();
+        let mut cache = HashMap::new();
+        assert_eq!(from_key(&conn, &gone, &mut cache).display(), "p/w");
+        let never = ulid::Ulid::new().to_string();
+        assert_eq!(from_key(&conn, &never, &mut cache).display(), never);
+        assert_eq!(from_key(&conn, "system", &mut cache).display(), "system");
+        assert_eq!(resolve(&conn, "system", None).unwrap(), Address::System);
+    }
 }

@@ -1894,6 +1894,8 @@ async fn mail_loop_guard_pauses_a_chatty_thread() {
 
     // Six agent messages: six pointers, one after the other.
     let first = send("one".into(), None).await;
+    assert_eq!(first["held"], false, "{first}");
+    assert!(first.get("held_reason").is_none(), "{first}");
     let thread = first["thread_id"].as_str().unwrap().to_owned();
     for i in 1..=6 {
         if i > 1 {
@@ -1912,6 +1914,18 @@ async fn mail_loop_guard_pauses_a_chatty_thread() {
     let held = send("msg 7".into(), Some(thread.clone())).await;
     assert_eq!(held["state"], "delivered", "{held}");
     assert_eq!(held["thread_paused"], true, "{held}");
+    // The row records the hold (migration 16), also on a later read.
+    assert_eq!(held["held"], true, "{held}");
+    let reason = held["held_reason"].as_str().unwrap_or_default();
+    assert!(
+        reason.starts_with("loop guard: message 7 of agent-to-agent mail"),
+        "{held}"
+    );
+    let stored = td
+        .get(&format!("/api/mail/{}", held["id"].as_str().unwrap()))
+        .await;
+    assert_eq!(stored["held"], true, "{stored}");
+    assert_eq!(stored["held_reason"], held["held_reason"], "{stored}");
     tokio::time::sleep(Duration::from_millis(800)).await;
     assert_eq!(pointers(thread.clone()).await, 6, "the 7th typed a pointer");
     // The `mail` event of the 7th names the recipient (it shows in bob's
@@ -1969,6 +1983,7 @@ async fn mail_loop_guard_pauses_a_chatty_thread() {
     td.wait_status(&bob, "idle").await;
     let after = send("msg 9".into(), Some(thread.clone())).await;
     assert_eq!(after["state"], "queued", "{after}");
+    assert_eq!(after["held"], false, "{after}");
     assert!(after.get("thread_paused").is_none(), "{after}");
     let start = Instant::now();
     while pointers(thread.clone()).await < 8 {

@@ -167,6 +167,13 @@ async fn members_move_only_their_own_cards() {
     )
     .await
     .err(422, "invalid");
+    // `system` only sends mail; it takes no card.
+    td.post(
+        &format!("/api/cards/{id}/assign"),
+        json!({"assignee": "system"}),
+    )
+    .await
+    .err(422, "invalid");
     // The reassign is audited.
     let audit = td.get("/api/audit?action=card.reassign").await;
     assert_eq!(audit.ok().as_array().unwrap().len(), 1);
@@ -374,7 +381,7 @@ async fn blocked_needs_a_comment_and_mails() {
     // Nobody can send to `system` or as it.
     td.post("/api/mail", json!({"to": "system", "body": "x"}))
         .await
-        .err(404, "not_found");
+        .err(422, "invalid");
 }
 
 #[tokio::test]

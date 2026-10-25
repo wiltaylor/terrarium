@@ -734,6 +734,13 @@ const MIGRATIONS: &[&str] = &[
         UNIQUE (agent, kind, key)
     );
     "#,
+    // 16: the loop guard hold of a message (PLAN §12). `held` is 1 when the
+    // guard held the message at insert time (no push pointer), and
+    // `held_reason` says why. Messages from before migration 16 have 0.
+    r#"
+    ALTER TABLE messages ADD COLUMN held INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE messages ADD COLUMN held_reason TEXT;
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call

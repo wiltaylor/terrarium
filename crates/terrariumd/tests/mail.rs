@@ -366,6 +366,12 @@ async fn mail_reads_are_audited_and_names_stay_after_agent_rm() {
     assert_eq!(rows[1]["actor"], format!("agent:{peer}"));
     assert_eq!(rows[1]["project"], "a");
 
+    // Mail to the worker, before it goes.
+    let to_worker = td
+        .post("/api/mail", json!({"to": "a/worker", "body": "your turn"}))
+        .await;
+    let to_worker = to_worker.ok()["id"].as_str().unwrap().to_owned();
+
     // The worker goes; its mail keeps the name.
     let worker = td.get("/api/agents/a%2Fworker").await.ok()["id"]
         .as_str()
@@ -376,4 +382,97 @@ async fn mail_reads_are_audited_and_names_stay_after_agent_rm() {
     let got = td.get(&format!("/api/mail/{m}")).await;
     assert_eq!(got.ok()["from"], worker.as_str());
     assert_eq!(got.ok()["from_name"], "a/worker");
+    // The list shows the name too, for mail from and to the worker.
+    let all = td.get("/api/mail").await;
+    let all = all.ok().as_array().unwrap().clone();
+    let sent = all.iter().find(|x| x["id"] == m.as_str()).unwrap();
+    assert_eq!(sent["from_name"], "a/worker", "{sent}");
+    let got = all.iter().find(|x| x["id"] == to_worker.as_str()).unwrap();
+    assert_eq!(got["to"], worker.as_str(), "{got}");
+    assert_eq!(got["to_name"], "a/worker", "{got}");
+    // A thread read shows the name too.
+    let to = td
+        .get(&format!(
+            "/api/mail?thread={}",
+            got["thread_id"].as_str().unwrap()
+        ))
+        .await;
+    assert_eq!(to.ok()[0]["to_name"], "a/worker");
+}
+
+/// The `from` and `to` filters of `GET /api/mail` take the same address
+/// kinds as the send path: `operator`, `system`, `project:<name>`, and
+/// agents. Mail to `system` and mail as `system` stay refused.
+#[tokio::test]
+async fn mail_list_filters_take_operator_system_and_project() {
+    let td = two_projects().await;
+    // A blocked card: the daemon (`system`) mails the operator.
+    let card = td
+        .post_as(
+            "a/worker",
+            "/api/projects/a/cards",
+            json!({"title": "stuck"}),
+        )
+        .await
+        .ok()
+        .clone();
+    td.post_as(
+        "a/worker",
+        &format!("/api/cards/{}/move", card["id"].as_str().unwrap()),
+        json!({"column": "blocked", "comment": "need a key"}),
+    )
+    .await
+    .ok();
+    td.post_as(
+        "a/worker",
+        "/api/mail",
+        json!({"to": "project:b", "body": "for b"}),
+    )
+    .await
+    .ok();
+    td.post_as(
+        "a/worker",
+        "/api/mail",
+        json!({"to": "operator", "body": "hi"}),
+    )
+    .await
+    .ok();
+
+    let from_system = td.get("/api/mail?from=system").await;
+    let rows = from_system.ok().as_array().unwrap().clone();
+    assert!(!rows.is_empty(), "no mail from system");
+    assert!(rows.iter().all(|m| m["from"] == "system"), "{rows:#?}");
+    assert!(
+        rows.iter()
+            .any(|m| m["subject"].as_str().unwrap().contains("blocked")),
+        "{rows:#?}"
+    );
+    // Nothing goes to `system`: an empty list, not a 404.
+    let to_system = td.get("/api/mail?to=system").await;
+    assert_eq!(to_system.ok().as_array().unwrap().len(), 0);
+    let to_operator = td.get("/api/mail?to=operator").await;
+    let rows = to_operator.ok().as_array().unwrap().clone();
+    assert!(rows.iter().all(|m| m["to"] == "operator"), "{rows:#?}");
+    assert!(rows.iter().any(|m| m["from"] == "system"), "{rows:#?}");
+    assert!(rows.iter().any(|m| m["body"] == "hi"), "{rows:#?}");
+    let to_b = td.get("/api/mail?to=project:b").await;
+    let rows = to_b.ok().as_array().unwrap().clone();
+    assert_eq!(rows.len(), 1, "{rows:#?}");
+    assert_eq!(rows[0]["to"], "project:b");
+    let from_op = td.get("/api/mail?from=operator").await;
+    assert_eq!(from_op.ok().as_array().unwrap().len(), 0);
+    td.get("/api/mail?to=project:nope")
+        .await
+        .err(404, "not_found");
+
+    // The send path still refuses `system` both ways.
+    td.post("/api/mail", json!({"to": "system", "body": "x"}))
+        .await
+        .err(422, "invalid");
+    td.post(
+        "/api/mail",
+        json!({"from": "system", "to": "operator", "body": "x"}),
+    )
+    .await
+    .err(403, "forbidden");
 }

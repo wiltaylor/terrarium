@@ -808,12 +808,14 @@ lead. A second change of the same kind on the same card replaces the line.
 The loop guard (PLAN §12): a thread pauses when it has more than
 `TERRARIUM_MAIL_LOOP_LIMIT` (default 6) agent-to-agent messages since its
 last message from the operator or from or to a project inbox. New agent mail
-on a paused thread is `delivered` at once and types no pointer. Its `mail`
-event has `held: true` and `thread_state: "paused"`, and names no agent.
-The first held message also sends one notice from `system` to the operator
-on the thread: "thread T needs a human: N agent replies without operator
-input". A message from the operator on the thread ends the pause. Each
-message on a paused thread has `thread_paused: true`.
+on a paused thread is `delivered` at once and types no pointer. The message
+row records the hold: `held: true` and a `held_reason` (§7). Its `mail`
+event has `held: true`, `held_reason`, and `thread_state: "paused"`. The
+event names the recipient agent, and the push listener types no pointer
+for it. The first held message also sends one notice from `system` to the
+operator on the thread: "thread T needs a human: N agent replies without
+operator input". A message from the operator on the thread ends the pause.
+Each message on a paused thread has `thread_paused: true`.
 
 `terrariumd sandbox-dry-run <agent>` prints the full sandbox command of an
 agent.
@@ -869,7 +871,8 @@ A message:
  "from":"project:ops","from_kind":"project","from_name":"project:ops",
  "to":"01M5PA0T0Z0K16V6G88P3SE78W","to_kind":"agent","to_name":"terrarium/worker",
  "subject":"Re: bug: deploy fails","body":"Accepted as OPS-1.","state":"queued",
- "in_reply_to":"01M5PA0VBXS5RFGE6YBFNX33EG","created_at":"2026-10-24T06:37:10.317Z"}
+ "in_reply_to":"01M5PA0VBXS5RFGE6YBFNX33EG","created_at":"2026-10-24T06:37:10.317Z",
+ "held":false}
 ```
 
 States: `queued`, `delivered`, `read`, `replied`. Mail to an agent waits in
@@ -878,7 +881,16 @@ inbox is `delivered` at once. `delivered_at` and `read_at` are absent until
 set. The first read (`POST .../read`, or a reply) sets `read_by`, the key of
 the reader (`operator` or an agent ULID), and `read_by_name`, and writes a
 `mail.read` audit row. A read again changes nothing. After `agent rm`, the
-`from_name` and `to_name` of the agent's mail keep its name.
+`from_name` and `to_name` of the agent's mail keep its name, as the cards
+do. A stored agent key that never was an agent shows as the key alone.
+
+`held` is `true` when the loop guard held the message at the send (§6.2, the
+loop guard): the message is `delivered` at once and types no push pointer.
+A held message also has `held_reason`, for example `loop guard: message 7
+of agent-to-agent mail on thread T since the last operator or project-inbox
+message (limit 6)`. The daemon sets both at the send and does not change
+them. Messages from before migration 16 have `held: false`.
+`thread_paused` is about the thread now; `held` is about the message.
 
 Each row has one recipient. The **participants** of a thread are the
 addresses that sent or received a message on it. A reply goes to every
@@ -909,10 +921,14 @@ For an agent sender:
 | `POST /api/mail/{id}/reply` | `{"body", "subject"?}` | `201` **array** of messages, one for each recipient |
 
 - `state` is a state or `unread` (`queued` and `delivered`).
+- `to` and `from` take every address kind of §2.3: `operator`, `system`,
+  `project:<name>`, or an agent. Nothing goes to `system`, so `to=system`
+  answers `[]`. An unknown project or agent is `404`.
 - The operator sees all mail. An agent sees mail to it or from it. With
   `to=project:<name>`, an agent needs the inbox right.
 - `from` defaults to the actor. The operator may send as `project:<name>`.
-  An agent may send as the inbox of a project it administers.
+  An agent may send as the inbox of a project it administers. A send to
+  `system` is `422 invalid`; a send as `system` is `403 forbidden`.
 - Without `thread_id`, the message starts a new thread.
 - Only the recipient (or an inbox admin, or the operator) marks a message
   read. Others get `403`. An actor that may not read a message gets `404`.
@@ -1110,7 +1126,7 @@ Kinds:
 | `session_started` | `{harness_session, transcript_path?, source?}` |
 | `turn_start`, `turn_end`, `notification`, `question`, `session_ended`, `exit`, `delivery_failed`, `system`, `warning` | The fields of the core `Event` variant of the same name (`crates/terrarium-core/src/event.rs`). A `warning` (`{message}`) needs the operator's attention, for example a harness version outside its tested range at a start (§6.2). |
 | `tool_use`, `tool_finished` | `{tool, tool_id?, summary?, ...}`: `input` (`tool_use`), `ok` (`tool_finished`). `tool_id` is the harness's ID for the tool call (for Claude Code, `toolu_...`). It is not the event `id`. Older records used the key `id` for it; the `events.jsonl` reader still takes those. |
-| `mail` | `{message_id, thread_id, from, from_name, to, to_name, subject}`. The `agent` is the recipient. A message that the loop guard holds also has `held: true` and `thread_state: "paused"`, and names no agent. |
+| `mail` | `{message_id, thread_id, from, from_name, to, to_name, subject}`. The `agent` is the recipient. A message that the loop guard holds also has `held: true`, `held_reason`, and `thread_state: "paused"`. |
 | `card` | `{card_id, change, title, column, ...}`. `change` is `created`, `moved` (`from`, `to`, `comment`, `assignee`), `reordered`, `assigned` (`assignee`, `previous`), `claimed`, `edited` (`fields`), `commented` (`comment`), `linked` (`kind`, `ref`), `archived`, `unblocked` (`by`), or `thread_update` (`thread_id`, `done`). `actor_name` names who made the change (`operator` or `project/name`). The `agent` is the assignee. |
 | `board` | `{columns}` after a column change. |
 | `memory.created`, `memory.updated`, `memory.deleted`, `memory.linked`, `memory.unlinked`, `memory.superseded` | `{memory_id, key, title, ...}`: `fields`, `to`, `relation`, `note`, `by`. |
@@ -1859,7 +1875,7 @@ value of each var whose name has `KEY`, `TOKEN`, `SECRET`, or `PASSWORD` as
   `system`, event actor `system`) and one `quota.alert` event (`level:
   alert`) per window period (the reset time). Each quota mail ends with a
   dashboard link, `Open: <TERRARIUM_PUBLIC_URL>/subscriptions`; a budget
-  mail links `<TERRARIUM_PUBLIC_URL>/p/<project>/spend`.
+  mail links the project page, `<TERRARIUM_PUBLIC_URL>/p/<project>`.
 - A window at 100 percent: a `quota.alert` with `level: exhausted`, and a
   hold on every agent on the subscription until the latest reset time. The
   supervisor's `hold_turns` marks an idle agent `blocked` with the reason

@@ -696,8 +696,8 @@ async fn collector_tails_a_growing_transcript() {
         budget["body"]
             .as_str()
             .unwrap()
-            .contains("Open: http://localhost:8080/p/p/spend"),
-        "{budget}"
+            .contains("Open: http://localhost:8080/p/p\n"),
+        "the budget alert links the project page, not the old spend page: {budget}"
     );
 
     // The per-agent split and my share.

@@ -807,6 +807,7 @@ fn resolve_assignee(
         Address::Project(_) => Err(ApiError::invalid(
             "a card cannot be assigned to a project inbox",
         )),
+        Address::System => Err(ApiError::invalid("a card cannot be assigned to `system`")),
         Address::Agent {
             project: p, name, ..
         } if p != project => Err(ApiError::invalid(format!(

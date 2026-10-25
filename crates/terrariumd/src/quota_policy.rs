@@ -112,9 +112,11 @@ pub fn subscriptions_link(web: &crate::settings::WebConfig) -> String {
     web.dashboard_link("/subscriptions")
 }
 
-/// The dashboard page of a project's spend, for a budget alert mail.
+/// The dashboard page for a budget alert mail: the project page. The
+/// dashboard has no spend page now, and Home has no deep link to one usage
+/// tile.
 pub fn spend_link(web: &crate::settings::WebConfig, project: &str) -> String {
-    web.dashboard_link(&format!("/p/{project}/spend"))
+    web.dashboard_link(&format!("/p/{project}"))
 }
 
 /// Mail the operator from the daemon: the sender is `system`, and so is
