@@ -754,7 +754,12 @@ pending pointer turn, for example "New mail from operator (thread T). Run
 agent is `idle`, else after the next stop hook. One pointer covers all the
 items that came in meanwhile. When the harness takes the turn, the mail
 becomes `delivered`. Mail that is `queued` when an agent starts goes into
-its first pointer.
+its first pointer. A card line (and a lease line, §17.7) for an agent that
+does not run is kept for the next start, also across a daemon restart: the
+daemon stores it in the `pending_pointers` table. A newer line for the same
+card and change (or the same target) replaces the older line. Before the
+pointer goes out, the daemon checks each card line again and drops a line
+that no longer applies (for example, the card went to another agent).
 
 Lead nudges (PLAN §13): three board changes add a line to the pointer of
 each running `project_admin` agent of the card's project. The agent that
@@ -2354,7 +2359,8 @@ Rules:
   leases.
 - Each change writes a `lease` event (§9) to the holder's stream. The
   supervisor types a pointer, or keeps it for the next start of a stopped
-  agent. On a grant, the pointer goes out after the lifecycle step of the
+  agent, also across a daemon restart (the `pending_pointers` table). On a
+  grant, the pointer goes out after the lifecycle step of the
   grant (`ensure_up` and the snapshot), and it reads the target state and
   the expiry just before it goes out: "You now have access to target <t>
   (<state>) until <time or 'revoked'>. Run `terrarium targets ls`." The

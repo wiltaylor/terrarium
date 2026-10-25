@@ -53,7 +53,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
@@ -388,20 +388,22 @@ struct MailItem {
     thread: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 enum CardChange {
     Assigned,
     Unblocked,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct CardItem {
     card: String,
     change: CardChange,
 }
 
 /// A change of a target lease of the agent (docs/api.md §17.7).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 enum LeaseChange {
     /// Granted, and the lifecycle step of the grant is done.
     Granted,
@@ -409,7 +411,7 @@ enum LeaseChange {
     Ended,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct LeaseItem {
     target: String,
     /// The lease ULID.
@@ -417,6 +419,7 @@ struct LeaseItem {
     change: LeaseChange,
     /// The grant line, read just before the push: the target state and
     /// the expiry then ([`crate::leases::pointer_line`]).
+    #[serde(skip)]
     line: Option<String>,
 }
 
@@ -434,7 +437,8 @@ impl LeaseItem {
 }
 
 /// A board change that a project lead acts on (a lead nudge).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 enum LeadChange {
     /// A card with no assignee came into `ready`.
     Ready,
@@ -442,7 +446,7 @@ enum LeadChange {
     Blocked,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct LeadItem {
     card: String,
     change: LeadChange,
@@ -650,6 +654,71 @@ impl Pointer {
     fn message_ids(&self) -> Vec<String> {
         self.mail.iter().map(|m| m.message_id.clone()).collect()
     }
+
+    /// The items that `pending_pointers` keeps: all but the mail (queued
+    /// mail waits in the store).
+    fn stored_items(&self) -> Vec<StoredItem> {
+        let mut out = Vec::new();
+        for c in &self.cards {
+            out.push(StoredItem {
+                kind: "card",
+                key: format!("{}/{}", c.card, item_json(&c.change)),
+                line: Pointer {
+                    cards: vec![c.clone()],
+                    ..Pointer::default()
+                }
+                .text(),
+                data: item_json(c),
+            });
+        }
+        for l in &self.leads {
+            out.push(StoredItem {
+                kind: "lead",
+                key: format!("{}/{}", l.card, item_json(&l.change)),
+                line: l.line(),
+                data: item_json(l),
+            });
+        }
+        for l in &self.leases {
+            out.push(StoredItem {
+                kind: "lease",
+                key: l.target.clone(),
+                line: l.line(),
+                data: item_json(l),
+            });
+        }
+        out
+    }
+
+    /// Add one stored item. False: the row does not parse.
+    fn add_stored(&mut self, kind: &str, data: &str) -> bool {
+        match kind {
+            "card" => serde_json::from_str(data).map(|c| self.add_card(c)).is_ok(),
+            "lead" => serde_json::from_str(data).map(|l| self.add_lead(l)).is_ok(),
+            "lease" => serde_json::from_str(data)
+                .map(|l| self.add_lease(l))
+                .is_ok(),
+            _ => false,
+        }
+    }
+}
+
+/// A pointer item as `pending_pointers` keeps it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StoredItem {
+    kind: &'static str,
+    key: String,
+    line: String,
+    data: String,
+}
+
+/// Compact JSON of a pointer item; the bare name for a change.
+fn item_json(v: &impl serde::Serialize) -> String {
+    match serde_json::to_value(v) {
+        Ok(Value::String(s)) => s,
+        Ok(v) => v.to_string(),
+        Err(_) => String::new(),
+    }
 }
 
 // ---- per-agent state ----
@@ -748,8 +817,12 @@ struct Inner {
     /// assigned (or unblocked), or a lease granted or ended, before the
     /// start. The next launch puts them into the pointer, which goes out at
     /// the first idle. Locked only inside `slots`, never the other way
-    /// round.
+    /// round. `pending_pointers` keeps the same items, so they live through
+    /// a daemon restart ([`RunnerSupervisor::load_parked`]).
     parked: Mutex<HashMap<AgentId, Pointer>>,
+    /// The `id` of the last `pending_pointers` row: a newer item gets a
+    /// higher one.
+    pointer_seq: AtomicI64,
     tx: broadcast::Sender<SupervisorEvent>,
     state: OnceLock<Weak<AppState>>,
     shutting_down: AtomicBool,
@@ -843,6 +916,7 @@ impl RunnerSupervisor {
                 holds: Mutex::new(HashMap::new()),
                 nudges: Mutex::new(HashMap::new()),
                 parked: Mutex::new(HashMap::new()),
+                pointer_seq: AtomicI64::new(0),
                 tx,
                 state: OnceLock::new(),
                 shutting_down: AtomicBool::new(false),
@@ -1820,9 +1894,25 @@ impl RunnerSupervisor {
         slot.resume = resume;
         slot.session = None;
         slot.recap = None;
-        slot.pointer = Pointer::default();
+        // Items that did not go out in the last run wait for this one, as
+        // parked items do (their stored rows stay). Queued mail comes from
+        // the store again.
+        let mut old = std::mem::take(&mut slot.pointer);
+        old.mail.clear();
+        let mut rows = Vec::new();
+        if !old.is_empty() {
+            let mut parked = lock(&self.inner.parked);
+            if let Some(newer) = parked.remove(&agent.id) {
+                old.merge(newer);
+            }
+            rows = self.stored_rows(agent.id, old.stored_items());
+            parked.insert(agent.id, old);
+        }
         slot.phase = Phase::Running;
-        Ok(slot.epoch)
+        let epoch = slot.epoch;
+        drop(slots);
+        self.store_parked(rows);
+        Ok(epoch)
     }
 
     /// Set the slot of `id` down, when it is still at `epoch`.
@@ -1861,12 +1951,118 @@ impl RunnerSupervisor {
             match slots.get_mut(&id).filter(|s| s.runner.is_some()) {
                 Some(slot) => add(&mut slot.pointer),
                 None => {
-                    add(lock(&self.inner.parked).entry(id).or_default());
+                    let rows = {
+                        let mut parked = lock(&self.inner.parked);
+                        let p = parked.entry(id).or_default();
+                        let before = p.stored_items();
+                        add(p);
+                        let changed: Vec<StoredItem> = p
+                            .stored_items()
+                            .into_iter()
+                            .filter(|i| !before.contains(i))
+                            .collect();
+                        self.stored_rows(id, changed)
+                    };
+                    self.store_parked(rows);
                     return;
                 }
             }
         }
         self.maybe_push(id);
+    }
+
+    /// The `pending_pointers` rows of `items`, each with a new `id`. Called
+    /// with `parked` locked, so the ids follow the order of the changes.
+    fn stored_rows(
+        &self,
+        id: AgentId,
+        items: Vec<StoredItem>,
+    ) -> Vec<crate::store::pointers::PendingPointer> {
+        items
+            .into_iter()
+            .map(|i| crate::store::pointers::PendingPointer {
+                id: self.inner.pointer_seq.fetch_add(1, Ordering::SeqCst) + 1,
+                agent: id.to_string(),
+                kind: i.kind.to_owned(),
+                key: i.key,
+                line: i.line,
+                data: i.data,
+            })
+            .collect()
+    }
+
+    /// Write parked pointer items to `pending_pointers`. A row with a
+    /// lower `id` than the stored one changes nothing, so the order of the
+    /// writes does not matter.
+    fn store_parked(&self, rows: Vec<crate::store::pointers::PendingPointer>) {
+        if rows.is_empty() {
+            return;
+        }
+        let Some(state) = self.state() else { return };
+        tokio::spawn(async move {
+            let result = state
+                .db
+                .write("system", move |t| {
+                    rows.iter()
+                        .try_for_each(|r| crate::store::pointers::put(t, r))
+                })
+                .await;
+            if let Err(e) = result {
+                warn!("cannot keep the parked pointers: {e}");
+            }
+        });
+    }
+
+    /// Delete the `pending_pointers` rows of a pointer that went out, or
+    /// that no longer applies. A row newer than `upto` stays.
+    async fn forget_stored(&self, id: AgentId, items: Vec<(String, String)>, upto: i64) {
+        if items.is_empty() {
+            return;
+        }
+        let Some(state) = self.state() else { return };
+        let agent = id.to_string();
+        let result = state
+            .db
+            .write("system", move |t| {
+                crate::store::pointers::delete(t, &agent, &items, upto)
+            })
+            .await;
+        if let Err(e) = result {
+            warn!(agent = %id, "cannot delete the stored pointers: {e}");
+        }
+    }
+
+    /// Put the `pending_pointers` rows into `parked`, once at the daemon
+    /// start: the pointers of agents that did not run survive a restart.
+    /// They go out at the next start, after the same checks as before.
+    fn load_parked(&self, state: &Shared) {
+        let rows = match state.db.read_now(crate::store::pointers::load) {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("cannot read the parked pointers: {e}");
+                return;
+            }
+        };
+        let mut parked = lock(&self.inner.parked);
+        let mut max = 0;
+        for r in rows {
+            max = max.max(r.id);
+            let Ok(agent) = r.agent.parse::<AgentId>() else {
+                continue;
+            };
+            if !parked
+                .entry(agent)
+                .or_default()
+                .add_stored(&r.kind, &r.data)
+            {
+                warn!(agent = %agent, kind = %r.kind, key = %r.key, "a stored pointer does not parse");
+            }
+        }
+        parked.retain(|_, p| !p.is_empty());
+        self.inner.pointer_seq.fetch_max(max, Ordering::SeqCst);
+        if !parked.is_empty() {
+            info!(agents = parked.len(), "parked pointers loaded");
+        }
     }
 
     /// Type the pending pointer when the agent is idle and no pointer is on
@@ -1893,12 +2089,21 @@ impl RunnerSupervisor {
             slot.pointer_busy = true;
             (runner, std::mem::take(&mut slot.pointer))
         };
+        // The stored rows of these items: deleted when the pointer goes
+        // out or no longer applies. A newer row for the same key stays.
+        let stored: Vec<(String, String)> = pointer
+            .stored_items()
+            .into_iter()
+            .map(|i| (i.kind.to_owned(), i.key))
+            .collect();
+        let upto = self.inner.pointer_seq.load(Ordering::SeqCst);
         let me = self.clone();
         tokio::spawn(async move {
             // The board can change between the event and the idle: drop
             // the card lines that no longer apply.
             let pointer = me.still_current(id, pointer).await;
             if pointer.is_empty() {
+                me.forget_stored(id, stored, upto).await;
                 if let Some(slot) = lock(&me.inner.slots).get_mut(&id) {
                     slot.pointer_busy = false;
                 }
@@ -1909,7 +2114,10 @@ impl RunnerSupervisor {
             let delivery = runner.type_turn(pointer.text());
             let result = delivery.wait().await;
             match &result {
-                Ok(()) => me.mark_delivered(pointer.message_ids()).await,
+                Ok(()) => {
+                    me.mark_delivered(pointer.message_ids()).await;
+                    me.forget_stored(id, stored, upto).await;
+                }
                 Err(e) => debug!(agent = %id, "the push pointer was not delivered: {e}"),
             }
             let mut slots = lock(&me.inner.slots);
@@ -2974,6 +3182,7 @@ impl Supervisor for RunnerSupervisor {
             // Once per daemon start, before `recover` reads the exit
             // records: the layout split of `docs/security-review.md` F1.
             migrate_all(&self.inner.cfg.state_dir);
+            self.load_parked(state);
             self.spawn_hub_listener(state);
         }
     }

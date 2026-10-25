@@ -10,6 +10,7 @@ pub mod hosts;
 pub mod leases;
 pub mod mail;
 pub mod memory;
+pub mod pointers;
 pub mod projects;
 pub mod repos;
 pub mod subscriptions;

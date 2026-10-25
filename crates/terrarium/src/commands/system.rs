@@ -123,14 +123,21 @@ const AGENT_TARGET_COLS: &[(&str, &str)] = &[
 
 /// The EXCLUSIVE and EXPIRES cells of a lease, the same in every table
 /// (`targets ls` in agent mode, `admin target leases`, `agent leases`):
-/// `yes`/`no`, and the RFC 3339 expiry or `revoked` (the lease lasts until
-/// a revoke). No lease: `-` for both.
+/// `yes`/`no`, and for EXPIRES: `revoked` for a lease that a revoke
+/// ended, `expired` for one that expired, else the RFC 3339 expiry, or
+/// `until revoked` for an active lease with no end. No lease: `-` for both.
 pub fn lease_cells(lease: Option<&Value>) -> (String, String) {
     let Some(l) = lease.filter(|l| l.is_object()) else {
         return ("-".into(), "-".into());
     };
     let exclusive = if l["exclusive"] == true { "yes" } else { "no" };
-    let expires = l["expires_at"].as_str().unwrap_or("revoked");
+    let ended = l["end_reason"].as_str().or(l["state"].as_str());
+    let expires = match (ended, l["expires_at"].as_str()) {
+        (Some("revoked"), _) => "revoked",
+        (Some("expired"), _) => "expired",
+        (_, Some(t)) => t,
+        (_, None) => "until revoked",
+    };
     (exclusive.into(), expires.into())
 }
 

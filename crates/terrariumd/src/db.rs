@@ -714,6 +714,26 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE targets ADD COLUMN runtime TEXT NOT NULL DEFAULT '{}';
     "#,
+    // 15: the push pointers that wait for the next start of an agent that
+    // does not run (a card assigned or unblocked, a lease granted or
+    // ended), so that they live through a daemon restart. One row for each
+    // agent, kind, and key: a newer item for the same key replaces the row
+    // and gets a higher `id`. `line` is the text at the park (for a human
+    // who reads the table); `data` is the item as JSON. The supervisor
+    // deletes a row when it types the pointer, or drops it as no longer
+    // current.
+    r#"
+    CREATE TABLE pending_pointers (
+        id         INTEGER PRIMARY KEY,
+        agent      TEXT NOT NULL,               -- agent ULID
+        kind       TEXT NOT NULL CHECK (kind IN ('card', 'lead', 'lease')),
+        key        TEXT NOT NULL,
+        line       TEXT NOT NULL,
+        data       TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE (agent, kind, key)
+    );
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call
@@ -752,6 +772,16 @@ impl Db {
         })
         .await
         .map_err(|e| ApiError::internal(format!("database task failed: {e}")))?
+    }
+
+    /// Run a read on the calling thread. Only for a short read at the
+    /// daemon start, where the caller cannot wait on the blocking pool.
+    pub fn read_now<T>(&self, f: impl FnOnce(&Connection) -> ApiResult<T>) -> ApiResult<T> {
+        let guard = match self.conn.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        f(&guard)
     }
 
     /// Run a write in one transaction. `actor` labels the events and audit

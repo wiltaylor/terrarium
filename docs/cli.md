@@ -330,7 +330,7 @@ terrarium cp <target>:<src> <dst>             one file from the target
 
 In agent mode, `targets ls` adds the columns `ACCESS` (`policy` or
 `lease`), `EXCLUSIVE` (`yes` or `no` for a lease, else `-`), and `EXPIRES`
-(the lease end, `revoked` for a lease with no end, else `-`).
+(the RFC 3339 lease end, `until revoked` for a lease with no end, else `-`).
 
 These commands use the exec sessions of `api.md` §17.4. They send plain
 requests only, so they work the same in both modes (agent-rpc.md,
@@ -493,7 +493,7 @@ the agents of its own project; a global target needs sysadmin.
 | `admin target edit <t> ...` | `PATCH /api/targets/{t}` with the fields of the flags given: `lab_path`, `lab_ref`, `machine`, `image`, `host`, `ephemeral`, `keep`, `snapshot_before_task` | `changed target <t>: <fields>` |
 | `admin target revoke <t> <a>` | `DELETE /api/targets/{t}/leases/{a}` | `revoked the lease of <project/name> on <t>` |
 | `admin target extend <t> <a> --until u` | `PATCH /api/targets/{t}/leases/{a}` `{"until"}` (`none` sends `null`) | `the lease of <project/name> on <t> lasts until <time or revoked>` |
-| `admin target leases <t> [--all]` | `GET /api/targets/{t}/leases[?all=true]` | A table: `TARGET`, `AGENT`, `STATE`, `EXCLUSIVE`, `EXPIRES`, `GRANTED BY`, `REASON`. `EXCLUSIVE` and `EXPIRES` are as in `targets ls`: `yes` or `no`, and the RFC 3339 end or `revoked`. |
+| `admin target leases <t> [--all]` | `GET /api/targets/{t}/leases[?all=true]` | A table: `TARGET`, `AGENT`, `STATE`, `EXCLUSIVE`, `EXPIRES`, `GRANTED BY`, `REASON`. `EXCLUSIVE` and `EXPIRES` are as in `targets ls`: `yes` or `no`, and the RFC 3339 end or `until revoked` (no end). With `--all`, an ended lease shows `revoked` or `expired` in `EXPIRES`. |
 | `agent leases <a> [--all]` | `GET /api/agents/{a}/leases[?all=true]` | The same table. |
 
 `admin host new`, `admin host rotate`, and `admin host rm` are for the

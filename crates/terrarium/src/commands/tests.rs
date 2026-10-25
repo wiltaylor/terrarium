@@ -3078,7 +3078,7 @@ async fn target_leases() {
 
 /// `admin target leases`, `agent leases`, and `targets ls` in agent mode
 /// print EXCLUSIVE and EXPIRES with one formatter: `yes`/`no`, and the
-/// RFC 3339 expiry or `revoked`.
+/// RFC 3339 expiry or `until revoked` for an active lease with no end.
 #[tokio::test]
 async fn lease_tables_format_exclusive_and_expires_the_same_way() {
     let held = json!({"id": "L1", "target": "vm", "agent_name": "terra/w", "state": "active",
@@ -3099,7 +3099,10 @@ async fn lease_tables_format_exclusive_and_expires_the_same_way() {
             vm.contains(&"yes") && vm.contains(&"2026-10-25T12:00:00.000Z"),
             "{out}"
         );
-        assert!(b.contains(&"no") && b.contains(&"revoked"), "{out}");
+        assert!(
+            b.contains(&"no") && b.windows(2).any(|w| w == ["until", "revoked"]),
+            "{out}"
+        );
         assert!(
             !out.contains("true") && !out.contains("2026-10-25 12:00"),
             "{out}"
@@ -3144,6 +3147,41 @@ async fn lease_tables_format_exclusive_and_expires_the_same_way() {
         super::system::lease_cells(None),
         ("-".to_owned(), "-".to_owned())
     );
+}
+
+/// EXPIRES: `until revoked` for an active lease with no end, `revoked`
+/// only for a lease that a revoke ended, `expired` for an expired one,
+/// else the RFC 3339 expiry.
+#[test]
+fn lease_expires_cell_names_the_end() {
+    use super::system::lease_cells;
+    let at = "2026-10-25T12:00:00.000Z";
+    let cell = |v: Value| lease_cells(Some(&v)).1;
+    assert_eq!(
+        cell(json!({"state": "active", "expires_at": null})),
+        "until revoked"
+    );
+    assert_eq!(cell(json!({"state": "active", "expires_at": at})), at);
+    assert_eq!(
+        cell(json!({"state": "revoked", "end_reason": "revoked", "expires_at": null})),
+        "revoked"
+    );
+    assert_eq!(
+        cell(json!({"state": "revoked", "end_reason": "revoked", "expires_at": at})),
+        "revoked"
+    );
+    assert_eq!(
+        cell(json!({"state": "expired", "end_reason": "expired", "expires_at": at})),
+        "expired"
+    );
+    // An expiry that passed before the timer ended the lease.
+    assert_eq!(
+        cell(json!({"state": "expired", "expires_at": at})),
+        "expired"
+    );
+    // No state (an older daemon): the expiry, or `until revoked`.
+    assert_eq!(cell(json!({"expires_at": at})), at);
+    assert_eq!(cell(json!({"expires_at": null})), "until revoked");
 }
 
 /// `audit --since` takes RFC 3339, a bare `HH:MM[:SS]` (today, local

@@ -1987,6 +1987,57 @@ async fn a_card_assigned_while_stopped_points_at_the_next_start() {
     assert_eq!(all.len(), 1, "{all:#?}");
 }
 
+/// A parked pointer lives through a daemon restart: the next start types
+/// it once. A card pointer that no longer applies after the restart (the
+/// card went to another agent) is dropped, and its stored row with it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_parked_pointer_survives_a_daemon_restart() {
+    let mut td = Td::start().await;
+    let id = td.agent("demo", "bob", json!({})).await;
+    td.agent("demo", "eve", json!({})).await;
+    let mut cards = Vec::new();
+    for title in ["Kept", "Moved away"] {
+        let c = td
+            .post("/api/projects/demo/cards", Some(json!({"title": title})))
+            .await;
+        cards.push(c["id"].as_str().unwrap().to_owned());
+    }
+    let (c1, c2) = (&cards[0], &cards[1]);
+    for c in [c1, c2] {
+        td.post(
+            &format!("/api/cards/{c}/assign"),
+            Some(json!({"assignee": "demo/bob"})),
+        )
+        .await;
+    }
+    td.restart_daemon().await;
+    // Stale after the restart: the card goes to another agent.
+    td.post(
+        &format!("/api/cards/{c2}/assign"),
+        Some(json!({"assignee": "demo/eve"})),
+    )
+    .await;
+    td.post(&format!("/api/agents/{id}/start"), None).await;
+    let starts = td.wait_events(&id, "turn_start", |e| !e.is_empty()).await;
+    assert_eq!(
+        starts[0]["data"]["prompt"],
+        format!("Card {c1} was assigned to you. Run `terrarium card show {c1}`.").as_str()
+    );
+    td.wait_status(&id, "idle").await;
+    // Typed and dropped pointers are gone from the store: a stop, a daemon
+    // restart, and a start type nothing.
+    td.post(&format!("/api/agents/{id}/stop"), None).await;
+    td.wait_status(&id, "stopped").await;
+    td.restart_daemon().await;
+    td.post(&format!("/api/agents/{id}/start"), None).await;
+    td.wait_events(&id, "session_started", |e| e.len() == 2)
+        .await;
+    td.wait_status(&id, "idle").await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let all = prompts(&td, &id).await;
+    assert_eq!(all.len(), 1, "{all:#?}");
+}
+
 /// The "Card ... was assigned to you" pointer goes out only when the
 /// assignee has not claimed, moved, or commented on the card since the
 /// assignment (a worker that found the card with `card ls --mine` in an
