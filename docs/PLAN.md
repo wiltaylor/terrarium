@@ -84,7 +84,7 @@ These are settled. The rest of the plan follows from them.
 
 | | Claude Code 2.1.310 | Codex 0.160.0 | Copilot CLI 1.0.103 | pi 0.85.1 |
 |---|---|---|---|---|
-| Interactive start | `claude` | `codex --no-daemon` (always: without it, Codex starts a shared app-server daemon that outlives the TUI) | `copilot --experimental` (needed for the prompt extension) | `pi --provider <p> --model <m>` |
+| Interactive start | `claude` | `codex --no-daemon` (always: without it, Codex starts a shared app-server daemon that outlives the TUI) | `copilot` with `"experimental": true` in the per-agent `settings.json` (the `--experimental` flag rewrites that file by rename, which fails on a file bind) | `pi --provider <p> --model <m>` |
 | Yolo | `--dangerously-skip-permissions` (refuses as root; `--allow-dangerously-skip-permissions` to override) | `--dangerously-bypass-approvals-and-sandbox` or `-a never -s danger-full-access` | `--yolo`, plus `COPILOT_ALLOW_ALL=true` to trust the folder | tools run without approval by default (verified); `--no-approve` skips the trust dialog |
 | Set session ID on start | `--session-id <uuid>` | none seen (read it from the session file or hook event) | `--session-id <uuid>` | `--session-id <id>` |
 | Resume | `--resume <id>` | `codex resume <id>` | `--resume <id>` or `--session-id <id>` | `--session <id>` or `--session-id <id>` |
@@ -1314,6 +1314,7 @@ end-to-end scenarios of each phase are not scripted yet (no `spikes/e2e/`).
 | Hooks do not fire or change shape | Fall back to PTY silence heuristics. Pin versions. Compatibility suite. |
 | `bwrap` blocked by Docker seccomp | Document the required `--security-opt`. Sibling-container fallback. |
 | Shared harness home under concurrent writers | **Mitigated** for the files that collide: each agent gets per-agent overlays for them (next row, §11). Two Claude agents at once are verified; a test under load is not done. |
+| Harnesses that write a per-agent file by rename (Copilot `settings.json`, `command-history-state.json`, `open-sessions-state.json`) get EBUSY on a file bind, and the write is lost | Copilot start fixed by the settings key instead of the flag. Lost state writes are harmless but a per-agent `COPILOT_HOME` with symlinks to the shared `config.json`, `session-state/`, and `extensions/` would remove the file binds; open item. |
 | Shared Claude home: `history.jsonl`, `sessions/<pid>.json`, `backups/`, and auto memory are written by every agent | **Mitigated.** Per-agent overlays for all four, verified with two agents at once and a real `--resume` (spikes/claude/concurrency). The overlays live in the agent's `harness/` dir and are its only writable binds there (§11). Transcripts stay shared and readable by peers. |
 | Agent-to-agent prompt injection | Mail is untrusted. Push only a pointer, not the body. Delimit on read. Say so in the prompt. |
 | Runaway cost with yolo and `always` restart | Per-agent turn and time budgets. Crash-loop detection. Dashboard shows turn counts. |

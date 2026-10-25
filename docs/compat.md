@@ -374,6 +374,12 @@ Auto memory: the adapter now passes `autoMemoryEnabled: false` in the `--setting
 
 Per-agent overlays after this spike: `.claude.json`, `sessions/`, `history.jsonl`, `backups/`, `projects/<cwd>/memory/`. Shared: `.credentials.json`, transcripts, `session-env/`, `file-history/`, `todos/`, caches. Not tested: an OAuth token refresh with two agents, real writes to auto memory, more than two agents, Docker.
 
+### Facts from the Docker smoke tests (2026-10-25)
+
+- Claude: `/exit` makes one small model call (about 5 tokens) after `SessionEnd`.
+- Claude: all agents share `projects/-home-agent-work/`, so an agent can read the transcripts of its peers. Accepted by design.
+- bwrap leaves empty mount-point stubs in the shared homes (`config/copilot`, `config/codex`) for the per-agent overlays.
+
 ## Changes to the plan
 
 These facts contradict or change assumptions in `docs/PLAN.md`.
@@ -660,6 +666,9 @@ one line; the detector reads only the first.
 - The composer is drawn before the trust dialog, so a fast "ready" check
   can type into a screen that is about to change.
 - `/exit` took 5 s in some runs.
+
+- In the Docker smoke test the order of `turn_start` and `idle -> working` changed from turn to turn. Clients must not depend on it.
+- The Codex session file name carries the start-up time, but its content starts at the first prompt.
 
 ## Codex: not tested
 
