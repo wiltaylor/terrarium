@@ -135,13 +135,16 @@ esac"#,
         ),
         _ => format!(
             r#"case "$1" in
-  up) touch '{s}' ;;
+  up) if [ -f '{slow}' ]; then sleep 1; fi; touch '{s}' ;;
   down|destroy) rm -f '{s}' ;;
-  status) printf 'lab "win"\n\n  NAME     KIND      STATUS   IP           TEMPLATE/IMAGE\n'
+  status) if [ -f '{gone}' ]; then echo 'lab "win": not running'; exit 0; fi
+          printf 'lab "win"\n\n  NAME     KIND      STATUS   IP           TEMPLATE/IMAGE\n'
           if [ -f '{s}' ]; then st=running; else st=stopped; fi
           printf '  win11    vm        %s  10.0.0.9     x86_64/win11\n' "$st" ;;
 esac"#,
-            s = state.display()
+            s = state.display(),
+            slow = dir.join("slow").display(),
+            gone = dir.join("vmlab.gone").display()
         ),
     };
     format!(
@@ -1922,6 +1925,253 @@ async fn a_lease_end_leaves_a_target_that_a_policy_holder_uses() {
     assert_eq!(t.body["runtime"]["attached"], json!(["terra/owner"]));
     // No destroy for a lease end: the container ran again, it did not go.
     assert!(!lab.log().contains("target.destroy"));
+}
+
+/// The grant pointer (docs/api.md §17.7) comes after the lifecycle step of
+/// the grant: after the recorded `vmlab up` and the `terrarium-clean`
+/// snapshot, and it names the state. A permanent target that is stopped
+/// says so. An extend gives no pointer.
+#[tokio::test]
+async fn the_grant_pointer_follows_the_lifecycle_and_names_the_state() {
+    let lab = Lab::start().await;
+    let _h = lab.host("lab1").await;
+    lab.td.project("terra").await;
+    let w = id_of(&lab.td.agent("terra", "worker", json!({})).await);
+    let labdir = tempfile::tempdir().unwrap();
+    std::fs::write(labdir.path().join("vmlab.wcl"), "lab \"win\" {}\n").unwrap();
+    lab.target(json!({"name": "terra-win", "kind": "vmlab", "host": "lab1",
+                      "project": "terra", "lab": labdir.path(), "machine": "win11",
+                      "ephemeral": true, "snapshot_before_task": true}))
+        .await;
+    lab.target(
+        json!({"name": "terra-pbox", "kind": "docker", "host": "lab1",
+                      "project": "terra", "image": "alpine:3"}),
+    )
+    .await;
+    lab.td.post_empty("/api/targets/terra-pbox/up").await.ok();
+    lab.td.post_empty("/api/targets/terra-pbox/down").await.ok();
+    start_agent(&lab, &w).await;
+    // `vmlab up` takes a second.
+    std::fs::write(lab.bins.path().join("slow"), "").unwrap();
+    let agent: terrarium_core::AgentId = w.parse().unwrap();
+    let sup = lab.td.sup.clone();
+    let pointers = |n: usize| {
+        let sup = sup.clone();
+        async move {
+            for _ in 0..200 {
+                let p = sup.lease_pointers(agent);
+                if p.len() >= n {
+                    return p;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            panic!("no pointer {n}");
+        }
+    };
+    let r = lab
+        .td
+        .post(
+            "/api/targets/terra-win/leases",
+            json!({"agent": "terra/worker", "until": "1h"}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let until = r.body["expires_at"].as_str().unwrap().to_owned();
+    let p = pointers(1).await;
+    assert_eq!(
+        p[0].0,
+        format!(
+            "You now have access to target terra-win (running) until {until}. \
+             Run `terrarium targets ls`."
+        )
+    );
+    let t = |s: &str| chrono::DateTime::parse_from_rfc3339(s).unwrap();
+    let pointer_at = t(&p[0].1);
+    let up = last_audit(&lab.td, "target.up").await;
+    let snap = last_audit(&lab.td, "target.snapshot").await;
+    assert_eq!(up["detail"]["reason"], "lease_grant");
+    assert_eq!(snap["detail"]["reason"], "snapshot_before_task");
+    assert!(t(up["at"].as_str().unwrap()) <= pointer_at, "{up} {p:?}");
+    assert!(
+        t(snap["at"].as_str().unwrap()) <= pointer_at,
+        "{snap} {p:?}"
+    );
+    let log = lab.log();
+    assert!(log.contains("vmlab up win11"), "{log}");
+    assert!(
+        log.contains("vmlab snapshot create --vm win11 terrarium-clean"),
+        "{log}"
+    );
+
+    // A permanent target that is stopped: no verb, and the pointer says so.
+    let r = lab
+        .td
+        .post(
+            "/api/targets/terra-pbox/leases",
+            json!({"agent": "terra/worker"}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert!(r.body.get("lifecycle").is_none(), "{}", r.body);
+    let p = pointers(2).await;
+    assert_eq!(
+        p[1].0,
+        "You now have access to target terra-pbox (stopped: ask your lead to bring it up) \
+         until revoked. Run `terrarium targets ls`."
+    );
+    // An extend: no pointer.
+    let r = lab
+        .td
+        .patch(
+            "/api/targets/terra-win/leases/terra%2Fworker",
+            json!({"until": "2h"}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(lab.td.sup.lease_pointers(agent).len(), 2);
+}
+
+/// When a host agent connects, the daemon reconciles the stored state of
+/// its docker and vmlab targets with what runs there (a `status` of each):
+/// a container that is gone is `absent`, a lab that is not running (not
+/// in `vmlab lab list`) of an ephemeral target is `absent` with no
+/// snapshots. Each change writes `target.reconcile` and a `target` event;
+/// a target that matches writes nothing. A later `status` does the same.
+#[tokio::test]
+async fn a_host_connect_reconciles_the_target_states() {
+    let lab = Lab::start().await;
+    let token = lab.register("lab1").await;
+    let labdir = tempfile::tempdir().unwrap();
+    std::fs::write(labdir.path().join("vmlab.wcl"), "lab \"win\" {}\n").unwrap();
+    for (name, image) in [
+        ("dgone", true),
+        ("drun", true),
+        ("dstop", false),
+        ("dsame", true),
+    ] {
+        let mut def = json!({"name": name, "kind": "docker", "host": "lab1",
+                             "image": "alpine:3"});
+        if !image {
+            def["ephemeral"] = false.into();
+        }
+        lab.target(def).await;
+    }
+    lab.target(json!({"name": "vgone", "kind": "vmlab", "host": "lab1",
+                      "lab": labdir.path(), "machine": "win11", "ephemeral": true}))
+        .await;
+    lab.target(json!({"name": "vkept", "kind": "vmlab", "host": "lab1",
+                      "lab": labdir.path(), "machine": "win11"}))
+        .await;
+    // What the store says, and what runs.
+    let st = lab.state();
+    st.db
+        .write("system", |t| {
+            use terrariumd::store::targets::set_state;
+            set_state(t, "dgone", "running", None)?;
+            set_state(t, "drun", "stopped", None)?;
+            set_state(t, "dstop", "running", None)?;
+            set_state(t, "dsame", "running", None)?;
+            set_state(t, "vgone", "stopped", Some("terrarium-clean"))?;
+            set_state(t, "vkept", "stopped", Some("clean"))?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let docker = |c: &str, s: &str| {
+        std::fs::write(
+            lab.bins.path().join(format!("docker.state.terrarium-{c}")),
+            format!("{s}\n"),
+        )
+        .unwrap();
+    };
+    docker("drun", "running");
+    docker("dstop", "exited");
+    docker("dsame", "running");
+    std::fs::write(lab.bins.path().join("vmlab.gone"), "").unwrap();
+
+    let _h = tokio::spawn(lab.client("lab1", &token).run());
+    lab.wait_online("lab1", true).await;
+    // Wait for the six `status` calls and the four changes.
+    for i in 0..300 {
+        let n = lab
+            .td
+            .get("/api/audit?action=target.reconcile")
+            .await
+            .ok()
+            .as_array()
+            .unwrap()
+            .len();
+        let log = lab.log();
+        if n >= 4
+            && log.matches("docker inspect").count() >= 4
+            && log.matches("vmlab status").count() >= 2
+        {
+            break;
+        }
+        assert!(i < 299, "no reconcile:\n{log}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let state = |n: &'static str| {
+        let td = &lab.td;
+        async move { td.get(&format!("/api/targets/{n}")).await.ok().clone() }
+    };
+    assert_eq!(state("dgone").await["state"], "absent");
+    assert_eq!(state("drun").await["state"], "running");
+    assert_eq!(state("dstop").await["state"], "stopped");
+    assert_eq!(state("dsame").await["state"], "running");
+    let v = state("vgone").await;
+    assert_eq!(
+        (&v["state"], &v["snapshots"]),
+        (&json!("absent"), &json!([]))
+    );
+    // A permanent lab that is not running is down with its snapshots.
+    let v = state("vkept").await;
+    assert_eq!(
+        (&v["state"], &v["snapshots"]),
+        (&json!("stopped"), &json!(["clean"]))
+    );
+    let rows = lab
+        .td
+        .get("/api/audit?action=target.reconcile")
+        .await
+        .ok()
+        .as_array()
+        .unwrap()
+        .clone();
+    let mut changed: Vec<&str> = rows.iter().map(|r| r["target"].as_str().unwrap()).collect();
+    changed.sort_unstable();
+    assert_eq!(changed, ["dgone", "drun", "dstop", "vgone"], "{rows:#?}");
+    let vg = rows.iter().find(|r| r["target"] == "vgone").unwrap();
+    assert_eq!(vg["actor"], "system");
+    assert_eq!(vg["detail"]["from"], "stopped");
+    assert_eq!(
+        vg["detail"]["snapshots_cleared"],
+        json!(["terrarium-clean"])
+    );
+    let ev = events(&lab.td, "target").await;
+    assert_eq!(ev.len(), 4, "{ev:#?}");
+    assert!(ev.iter().all(|e| e["data"]["change"] == "reconciled"));
+    let log = lab.log();
+    assert!(
+        log.contains("docker inspect --type container terrarium-dsame"),
+        "{log}"
+    );
+
+    // A `status` that matches writes nothing; one that differs reconciles.
+    lab.td.post_empty("/api/targets/dsame/status").await.ok();
+    assert_eq!(events(&lab.td, "target").await.len(), 4);
+    std::fs::remove_file(lab.bins.path().join("docker.state.terrarium-dsame")).unwrap();
+    let r = lab.td.post_empty("/api/targets/dsame/status").await;
+    assert_eq!(r.ok()["state"], "absent");
+    let ev = events(&lab.td, "target").await;
+    assert_eq!(ev.len(), 5, "{ev:#?}");
+    assert_eq!(ev[4]["data"]["from"], "running");
+    assert_eq!(
+        last_audit(&lab.td, "target.reconcile").await["target"],
+        "dsame"
+    );
 }
 
 // ------------------------------------------------------------ mode 1

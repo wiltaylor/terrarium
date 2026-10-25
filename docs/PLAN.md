@@ -692,9 +692,10 @@ Humans use the same mailbox. `terrarium mail send <agent> ...` from the
 operator shell or the dashboard sends as `operator`.
 
 The push path also carries target lease changes (§19): "You now have access
-to target <t> until <time or 'revoked'>. Run `terrarium targets ls`." and
-"Your access to target <t> ended." A pointer for a stopped agent waits for
-its next start, as a card pointer does.
+to target <t> (<state>) until <time or 'revoked'>. Run `terrarium targets
+ls`." after the lifecycle step of the grant, and "Your access to target <t>
+ended." An extend types nothing. A pointer for a stopped agent waits for its
+next start, as a card pointer does.
 
 ---
 

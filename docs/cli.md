@@ -377,6 +377,11 @@ terrarium whoami                              prints `operator`
 `events --follow` and `agent logs --follow` read Server-Sent Events in
 operator mode. They print each event when it comes.
 
+`audit --since` (and `admin audit --since`) takes an RFC 3339 time, a
+bare `HH:MM` or `HH:MM:SS` (today, in local time), or a duration back from
+now (`90s`, `30m`, `2h`, `1d`). The CLI sends the API an RFC 3339 time in
+UTC.
+
 ## 6. Agent commands
 
 PLAN §9 lists the agent commands. Each one is in §4. These are for agents
@@ -451,7 +456,7 @@ the agents of its own project; a global target needs sysadmin.
 | `admin target grant <t> <a>` | `POST /api/targets/{t}/leases` `{"agent", "until"?, "exclusive"?, "reason"?}` | `granted <t> to <project/name> until <time or revoked>`, with ` (exclusive)`. A line `warning: the target did not come up: ...` when the grant could not bring an ephemeral target up. |
 | `admin target revoke <t> <a>` | `DELETE /api/targets/{t}/leases/{a}` | `revoked the lease of <project/name> on <t>` |
 | `admin target extend <t> <a> --until u` | `PATCH /api/targets/{t}/leases/{a}` `{"until"}` (`none` sends `null`) | `the lease of <project/name> on <t> lasts until <time or revoked>` |
-| `admin target leases <t> [--all]` | `GET /api/targets/{t}/leases[?all=true]` | A table: `TARGET`, `AGENT`, `STATE`, `EXCLUSIVE`, `EXPIRES`, `GRANTED BY`, `REASON`. |
+| `admin target leases <t> [--all]` | `GET /api/targets/{t}/leases[?all=true]` | A table: `TARGET`, `AGENT`, `STATE`, `EXCLUSIVE`, `EXPIRES`, `GRANTED BY`, `REASON`. `EXCLUSIVE` and `EXPIRES` are as in `targets ls`: `yes` or `no`, and the RFC 3339 end or `revoked`. |
 | `agent leases <a> [--all]` | `GET /api/agents/{a}/leases[?all=true]` | The same table. |
 
 `admin host new`, `admin host rotate`, and `admin host rm` are for the

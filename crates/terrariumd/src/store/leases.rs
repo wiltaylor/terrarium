@@ -187,7 +187,8 @@ pub fn standing(conn: &Connection, target: &str, agent: &str) -> ApiResult<Stand
     })
 }
 
-fn get(conn: &Connection, id: &str) -> ApiResult<LeaseRow> {
+/// The lease with `id`.
+pub fn get(conn: &Connection, id: &str) -> ApiResult<LeaseRow> {
     query(conn, "id = ?1", &[&id])?
         .into_iter()
         .next()

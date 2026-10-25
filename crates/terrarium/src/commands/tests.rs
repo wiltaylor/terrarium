@@ -2037,7 +2037,7 @@ async fn admin() {
         vec![(
             Get,
             "/api/audit",
-            vec![("since", "2026-10-24T00:00:00Z"), ("limit", "100")],
+            vec![("since", "2026-10-24T00:00:00.000Z"), ("limit", "100")],
             None,
         )],
     )
@@ -3009,4 +3009,127 @@ async fn target_leases() {
             && lines[2].contains("2026-10-25T12:00:00.000Z"),
         "{out}"
     );
+}
+
+/// `admin target leases`, `agent leases`, and `targets ls` in agent mode
+/// print EXCLUSIVE and EXPIRES with one formatter: `yes`/`no`, and the
+/// RFC 3339 expiry or `revoked`.
+#[tokio::test]
+async fn lease_tables_format_exclusive_and_expires_the_same_way() {
+    let held = json!({"id": "L1", "target": "vm", "agent_name": "terra/w", "state": "active",
+                      "exclusive": true, "expires_at": "2026-10-25T12:00:00.000Z",
+                      "granted_by": "operator"});
+    let open = json!({"id": "L2", "target": "box", "agent_name": "terra/w", "state": "active",
+                      "exclusive": false, "expires_at": null, "granted_by": "operator"});
+    let check_rows = |out: &str| {
+        let row = |t: &str| {
+            out.lines()
+                .find(|l| l.starts_with(t))
+                .unwrap_or_else(|| panic!("no row {t}:\n{out}"))
+                .split_whitespace()
+                .collect::<Vec<_>>()
+        };
+        let (vm, b) = (row("vm"), row("box"));
+        assert!(
+            vm.contains(&"yes") && vm.contains(&"2026-10-25T12:00:00.000Z"),
+            "{out}"
+        );
+        assert!(b.contains(&"no") && b.contains(&"revoked"), "{out}");
+        assert!(
+            !out.contains("true") && !out.contains("2026-10-25 12:00"),
+            "{out}"
+        );
+    };
+    let both = json!([held.clone(), open.clone()]);
+    let out = ok(
+        false,
+        &["admin", "target", "leases", "vm"],
+        vec![(200, both.clone())],
+        vec![req(Get, "/api/targets/vm/leases")],
+    )
+    .await;
+    check_rows(&out);
+    let out = ok(
+        false,
+        &["agent", "leases", "terra/w"],
+        vec![(200, both)],
+        vec![req(Get, "/api/agents/terra%2Fw/leases")],
+    )
+    .await;
+    check_rows(&out);
+    let out = ok(
+        true,
+        &["targets", "ls"],
+        vec![(
+            200,
+            json!([
+                {"name": "vm", "kind": "vmlab", "host": "lab1", "host_online": true,
+                 "access": "lease", "lease": held},
+                {"name": "box", "kind": "host", "host": "lab1", "host_online": true,
+                 "access": "lease", "lease": open},
+                {"name": "pol", "kind": "host", "host": "lab1", "host_online": true,
+                 "access": "policy", "lease": null},
+            ]),
+        )],
+        vec![(Get, "/api/targets", vec![("usable", "true")], None)],
+    )
+    .await;
+    check_rows(&out);
+    assert_eq!(
+        super::system::lease_cells(None),
+        ("-".to_owned(), "-".to_owned())
+    );
+}
+
+/// `audit --since` takes RFC 3339, a bare `HH:MM[:SS]` (today, local
+/// time), or a duration, and sends RFC 3339 (UTC, `Z`, milliseconds).
+#[test]
+fn audit_since_takes_a_time_a_clock_time_or_a_duration() {
+    use super::system::parse_since;
+    use chrono::{Local, TimeZone};
+    let now = Local.with_ymd_and_hms(2026, 10, 25, 10, 0, 0).unwrap();
+    let utc = |h, m, s| {
+        Local
+            .with_ymd_and_hms(2026, 10, 25, h, m, s)
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    };
+    assert_eq!(
+        parse_since("2026-10-25T09:53:00Z", now).unwrap(),
+        "2026-10-25T09:53:00.000Z"
+    );
+    assert_eq!(
+        parse_since("2026-10-25T19:53:00+10:00", now).unwrap(),
+        "2026-10-25T09:53:00.000Z"
+    );
+    assert_eq!(parse_since("09:53", now).unwrap(), utc(9, 53, 0));
+    assert_eq!(parse_since("09:53:30", now).unwrap(), utc(9, 53, 30));
+    assert_eq!(parse_since("30m", now).unwrap(), utc(9, 30, 0));
+    assert_eq!(parse_since("2h", now).unwrap(), utc(8, 0, 0));
+    for bad in ["soon", "30", "25:00", "30x", ""] {
+        assert!(parse_since(bad, now).is_err(), "{bad}");
+    }
+}
+
+/// The CLI sends the converted `since`.
+#[tokio::test]
+async fn audit_since_sends_rfc_3339() {
+    let r = exec(
+        false,
+        &["audit", "--since", "30m"],
+        vec![(200, json!([]))],
+        None,
+    )
+    .await;
+    r.result.unwrap();
+    let q = &r.reqs[0].query;
+    let since = &q.iter().find(|(k, _)| k == "since").unwrap().1;
+    let t = chrono::DateTime::parse_from_rfc3339(since).unwrap();
+    let ago = chrono::Utc::now() - t.with_timezone(&chrono::Utc);
+    assert!(
+        ago.num_seconds() >= 1799 && ago.num_seconds() <= 1801,
+        "{since}"
+    );
+    assert!(since.ends_with('Z'), "{since}");
 }

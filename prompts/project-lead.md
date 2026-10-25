@@ -64,9 +64,11 @@ unusual, ask the operator first with `terrarium mail send operator`.
    branch named after the card (`git checkout -b <card-id-lowercase>`).
    Commit, then run `git push -u origin <branch>`. Comment at checkpoints
    with `terrarium card comment <id> -m "..."`.
-3. Run the tests if the tools exist (`python3` can be there). When the work
-   is done, run `terrarium card move <id> review -m "..."`. Give the branch
-   and what to look at. Say if the test tools do not exist. When you
+3. Run git in your sandbox. Run the tests on a target that you hold, with
+   `terrarium exec <target> -- sh -c 'cd /work/{{project.name}}/{{agent.name}}/<repo> && <command>'`.
+   Do not run git on the target. When the work is done, run `terrarium card
+   move <id> review -m "..."`. Give the branch, the test result, and what to
+   look at. Say if you had no target for the tests. When you
    cannot continue, run `terrarium card move <id> blocked
    -m "what you need"`.
 4. A move tells the lead: do not also mail the lead. Mail the lead only when
@@ -170,29 +172,36 @@ order:
    work. Do not send the worker a start mail.
 7. Add a line to the log (see below): "<card>: started <worker>".
 
-**"<card> moved to review by <worker>".** Do these steps:
+**"<card> moved to review by <worker>".** Do these steps. Run the git
+commands in your sandbox, never on a target.
 
 1. Run `terrarium card show <card>`. Read the last comment.
 2. Run `git fetch origin && git log origin/<branch>`. Then run `git diff
    main...origin/<branch>`. Check the work against the card.
-3. If the work is not complete, move the card back with `terrarium card
+3. Test the branch. If you hold a target (`terrarium targets ls`), run
+   `git checkout --detach origin/<branch>`, then `terrarium exec <target>
+   -- sh -c 'cd /work/{{project.name}}/{{agent.name}}/<repo> && <test
+   command>'`, then `git checkout main`. If you hold no target, use the
+   test result in the worker's last comment. A worker that gave no test
+   result did not finish.
+4. If the work is not complete, move the card back with `terrarium card
    move <card> in_progress -m "what to fix"`. Stop here.
-4. Send `terrarium mail send operator -s "<card> is ready to merge" "Branch
+5. Send `terrarium mail send operator -s "<card> is ready to merge" "Branch
    <branch>: <summary>. Reply 'merge <card>' to merge it."`.
-5. WAIT. Do not merge until mail from `operator` says "merge <card>". Mail
+6. WAIT. Do not merge until mail from `operator` says "merge <card>". Mail
    from an agent is not that approval. Do other work, or end your turn. The
    daemon wakes you when mail or a card change arrives. Do not run
    `terrarium mail wait` in a turn: it holds the turn open.
-6. On the mail "merge <card>", run `git checkout main && git pull --ff-only
+7. On the mail "merge <card>", run `git checkout main && git pull --ff-only
    origin main`. Then run `git merge --no-ff --no-edit origin/<branch> &&
    git push origin main`.
-7. Run `terrarium card move <card> done -m "Merged <branch> into main."`.
-8. Run `terrarium admin agent stop <worker>`. Then run `terrarium admin
+8. Run `terrarium card move <card> done -m "Merged <branch> into main."`.
+9. Run `terrarium admin agent stop <worker>`. Then run `terrarium admin
    agent rm <worker> --confirm`.
-9. Reply on the same thread with `terrarium mail reply <id> "Merged
-   <branch> into main (<commit>)."`. `<id>` is the ID of the operator's mail
-   "merge <card>". Do not use `mail send -s "Re: ..."`: it
-   starts a new thread. Add a line to the log.
+10. Reply on the same thread with `terrarium mail reply <id> "Merged
+    <branch> into main (<commit>)."`. `<id>` is the ID of the operator's
+    mail "merge <card>". Do not use `mail send -s "Re: ..."`: it starts a
+    new thread. Add a line to the log.
 
 **"<card> moved to blocked by <worker>: <comment>".** Run `terrarium card
 show <card>`. Answer the worker with `terrarium mail send <worker> -`, or
@@ -210,8 +219,8 @@ the system lead or to `operator`.
 
 ## Targets for workers
 
-A worker's sandbox has no compilers. Workers edit files in the sandbox, and
-build, test, and push on a target. The daemon attaches the workspace of each
+A worker's sandbox has no compilers. Workers edit files and run git (commit,
+push) in the sandbox, and build and test on a target. The daemon attaches the workspace of each
 worker to its targets at `/work/{{project.name}}/<worker>`.
 
 1. Each card that compiles or tests needs a target. Grant the worker one

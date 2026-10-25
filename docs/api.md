@@ -1067,6 +1067,7 @@ Kinds:
 | `version.created`, `version.updated`, `version.submitted`, `version.approved`, `version.rejected`, `version.released` | `{version_id, name, status, ...}`: `fields`, `comment`, `thread_id`, `cards`. |
 | `usage.sample`, `usage.rejected_path`, `quota.sample`, `quota.alert`, `quota.blocked`, `quota.resumed`, `subscription.offer`, `subscription.expired`, `self_report` | See §16.7. |
 | `lease` | `{change, target, lease_id, expires_at, exclusive, state}`. `change` is `granted`, `extended`, or `ended` (a revoke or the expiry). The `agent` is the lease holder. The supervisor types a pointer from it (§17.7). |
+| `target` | `{change, target, from, state, snapshots_cleared}`. `change` is `reconciled`: a `status` found the target other than the store said (§17.3). |
 | `host.connected`, `host.disconnected` | `{host, host_id, ...}`: `version`, `os`, `arch`, `capabilities`, `summary`, `resumed` (sessions taken back), `reason`. See §17. |
 
 A `memory.*`, `wiki.*`, `artifact.*`, or `version.*` event that an agent
@@ -2029,10 +2030,20 @@ a `target.<verb>` audit row with the same report.
 |---|---|---|---|---|
 | `host`, `ssh` | no-op | no-op | `422 invalid` | `running` when the host agent is online, else `unknown` |
 | `docker` | `docker.inspect`; when absent, `docker.run -d --init --name <c> --label terrarium.target=<name> <image> sleep infinity`; when stopped, `docker.start` (an ephemeral target with `image`: `docker.rm -f -v` and a new `docker.run`) | `docker.stop`; an ephemeral target without `keep` (or `destroy: true`): `docker.rm -f -v` | `422 invalid` | `docker.inspect` |
-| `vmlab` | `vmlab.up [machine]` | `vmlab.down [machine]`; ephemeral without `keep` (or `destroy: true`): `vmlab.destroy` | `vmlab.snapshot_take` / `vmlab.snapshot_restore` with `--vm machine` | `vmlab.status`, the row of `machine` |
+| `vmlab` | `vmlab.up [machine]` | `vmlab.down [machine]`; ephemeral without `keep` (or `destroy: true`): `vmlab.destroy` | `vmlab.snapshot_take` / `vmlab.snapshot_restore` with `--vm machine` | `vmlab.status`, the row of `machine` (no row: `absent`). A lab that is not running (not in `vmlab lab list`): `absent` for an ephemeral target without `keep`, else `stopped` |
 
 The container `<c>` is `container`, else `terrarium-<name>`. The snapshot
 name is `name`, else `terrarium`.
+
+**Reconcile.** A `status` makes the stored state match the host. When the
+host agent connects (after `welcome`), the daemon runs `status` (actor
+`system`) on each docker and vmlab target of that host. A lab instance
+target (`lab_repo`, `lab_from_workspace`) is not part of this. A docker
+container that `docker.inspect` does not find is `absent`; an exited one
+is `stopped`. A target that becomes `absent` loses its `snapshots`. When
+the state or the snapshots change, the daemon writes the audit row
+`target.reconcile` (`{from, state, snapshots_cleared}`) and a `target`
+event (§9). A `status` that finds the stored state writes neither.
 
 The daemon runs some verbs by itself, with the actor `system` and a
 `reason` in the audit detail. On an agent start, for each target in
@@ -2308,9 +2319,15 @@ Rules:
   leases.
 - Each change writes a `lease` event (§9) to the holder's stream. The
   supervisor types a pointer, or keeps it for the next start of a stopped
-  agent. On a grant or an extend: "You now have access to target <t>
-  until <time or 'revoked'>. Run `terrarium targets ls`." On a revoke or
-  the expiry: "Your access to target <t> ended."
+  agent. On a grant, the pointer goes out after the lifecycle step of the
+  grant (`ensure_up` and the snapshot), and it reads the target state and
+  the expiry just before it goes out: "You now have access to target <t>
+  (<state>) until <time or 'revoked'>. Run `terrarium targets ls`." The
+  state is `running`, `stopped: ask your lead to bring it up` (also
+  `absent: ...`), or the stored state (`unknown`). On a revoke or the
+  expiry: "Your access to target <t> ended." An extend types no pointer. A
+  grant and a revoke before the pointer goes out type only the "ended"
+  line.
 
 ### 17.8 Workspaces and lab instances
 

@@ -212,6 +212,9 @@ pub enum ProjectCmd {
 
 #[derive(Debug, Args)]
 pub struct RepoAddArgs {
+    /// The clone URL. The arg id is not `url`: an id that equals the id of
+    /// the global `--url` flag sends the value to the daemon URL too.
+    #[arg(id = "repo_url", value_name = "URL")]
     pub url: String,
     #[arg(long)]
     pub name: Option<String>,
@@ -963,6 +966,8 @@ pub enum FleetCmd {
     Show { name: String },
     /// Write a fleet file from a project as it is now
     Export {
+        /// Not the id `project`: that is the id of the global `--project`.
+        #[arg(id = "export_project", value_name = "PROJECT")]
         project: String,
         /// The fleet name (default: the project name)
         #[arg(long)]
@@ -1119,7 +1124,8 @@ pub enum HostCmd {
 
 #[derive(Debug, Args)]
 pub struct AuditArgs {
-    /// Rows at or after this RFC 3339 time
+    /// Rows at or after this time: RFC 3339, `HH:MM[:SS]` (today, local
+    /// time), or a duration back from now (`30m`, `2h`, `1d`)
     #[arg(long)]
     pub since: Option<String>,
     /// `operator`, `system`, or `agent:<ulid>`
@@ -1159,4 +1165,207 @@ pub fn hide_for_mode(cmd: clap::Command, agent_mode: bool) -> clap::Command {
     hidden
         .iter()
         .fold(cmd, |c, name| c.mut_subcommand(*name, |s| s.hide(true)))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    fn parse(args: &[&str]) -> Cli {
+        Cli::try_parse_from(std::iter::once("terrarium").chain(args.iter().copied()))
+            .unwrap_or_else(|e| panic!("{args:?}: {e}"))
+    }
+
+    /// No argument of a subcommand has the id of a global flag: clap
+    /// copies the value of a global id up to the top, so a positional
+    /// `url` set the daemon URL (the `repo-add` bug).
+    #[test]
+    fn no_argument_shares_the_id_of_a_global_flag() {
+        fn walk(cmd: &clap::Command, globals: &[String], path: &str, bad: &mut Vec<String>) {
+            for a in cmd.get_arguments() {
+                if !a.is_global_set() && globals.iter().any(|g| g == a.get_id().as_str()) {
+                    bad.push(format!("{path}: {}", a.get_id()));
+                }
+            }
+            for s in cmd.get_subcommands() {
+                walk(s, globals, &format!("{path} {}", s.get_name()), bad);
+            }
+        }
+        let cmd = Cli::command();
+        let globals: Vec<String> = cmd
+            .get_arguments()
+            .filter(|a| a.is_global_set())
+            .map(|a| a.get_id().to_string())
+            .collect();
+        assert!(globals.contains(&"url".to_owned()));
+        let mut bad = Vec::new();
+        for s in cmd.get_subcommands() {
+            walk(s, &globals, s.get_name(), &mut bad);
+        }
+        assert!(bad.is_empty(), "{bad:?}");
+    }
+
+    /// `repo-add <URL>`: the positional is the repo URL before and after
+    /// the flags, and the daemon URL stays unset.
+    #[test]
+    fn repo_add_takes_the_url_in_either_order() {
+        let url = "https://git.example/terra.git";
+        for args in [
+            vec![
+                "admin",
+                "project",
+                "repo-add",
+                url,
+                "--project",
+                "terra",
+                "--name",
+                "app",
+                "--branch",
+                "main",
+            ],
+            vec![
+                "admin",
+                "project",
+                "repo-add",
+                "--project",
+                "terra",
+                "--name",
+                "app",
+                "--branch",
+                "main",
+                url,
+            ],
+        ] {
+            let cli = parse(&args);
+            assert_eq!(cli.url, None, "{args:?}");
+            assert_eq!(cli.project.as_deref(), Some("terra"));
+            let Command::Admin {
+                command:
+                    AdminCmd::Project {
+                        command: ProjectCmd::RepoAdd(a),
+                    },
+            } = cli.command
+            else {
+                panic!("{args:?}");
+            };
+            assert_eq!(a.url, url);
+            assert_eq!(a.name.as_deref(), Some("app"));
+            assert_eq!(a.branch.as_deref(), Some("main"));
+        }
+        // The global flag still works next to the positional.
+        let cli = parse(&[
+            "--url",
+            "http://localhost:8080",
+            "repo",
+            "add",
+            url,
+            "--name",
+            "app",
+        ]);
+        assert_eq!(cli.url.as_deref(), Some("http://localhost:8080"));
+        let Command::Repo {
+            command: RepoCmd::Add(a),
+        } = cli.command
+        else {
+            panic!()
+        };
+        assert_eq!(a.url, url);
+        // `fleet export <project>` does not set `--project`.
+        let cli = parse(&["fleet", "export", "terra"]);
+        assert_eq!(cli.project, None);
+    }
+
+    /// The same class of bug: `artifact push`, `wiki new --body -`, and
+    /// `card new` keep their positionals in either order.
+    #[test]
+    fn positionals_stay_in_place_in_either_order() {
+        for args in [
+            vec![
+                "artifact",
+                "push",
+                "out/report.html",
+                "--name",
+                "r",
+                "--card",
+                "TER-1",
+            ],
+            vec![
+                "artifact",
+                "push",
+                "--name",
+                "r",
+                "--card",
+                "TER-1",
+                "out/report.html",
+            ],
+        ] {
+            let cli = parse(&args);
+            assert_eq!(cli.url, None);
+            let Command::Artifact {
+                command:
+                    ArtifactCmd::Push {
+                        path, name, card, ..
+                    },
+            } = cli.command
+            else {
+                panic!("{args:?}");
+            };
+            assert_eq!(path, PathBuf::from("out/report.html"));
+            assert_eq!(
+                (name.as_deref(), card.as_deref()),
+                (Some("r"), Some("TER-1"))
+            );
+        }
+        for args in [
+            vec!["wiki", "new", "notes/plan", "--body", "-", "-m", "first"],
+            vec!["wiki", "new", "--body", "-", "-m", "first", "notes/plan"],
+        ] {
+            let Command::Wiki {
+                command:
+                    WikiCmd::New {
+                        page,
+                        body,
+                        summary,
+                        ..
+                    },
+            } = parse(&args).command
+            else {
+                panic!("{args:?}");
+            };
+            assert_eq!((page.as_str(), body.as_str()), ("notes/plan", "-"));
+            assert_eq!(summary.as_deref(), Some("first"));
+        }
+        for args in [
+            vec![
+                "card",
+                "new",
+                "Fix the build",
+                "--body",
+                "-",
+                "--column",
+                "ready",
+            ],
+            vec![
+                "card",
+                "new",
+                "--body",
+                "-",
+                "--column",
+                "ready",
+                "Fix the build",
+            ],
+        ] {
+            let Command::Card {
+                command: CardCmd::New(a),
+            } = parse(&args).command
+            else {
+                panic!("{args:?}");
+            };
+            assert_eq!(a.title.as_deref(), Some("Fix the build"));
+            assert_eq!(a.body.as_deref(), Some("-"));
+            assert_eq!(a.column.as_deref(), Some("ready"));
+        }
+    }
 }

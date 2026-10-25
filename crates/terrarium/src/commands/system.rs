@@ -121,28 +121,27 @@ const AGENT_TARGET_COLS: &[(&str, &str)] = &[
     ("EXPIRES", "expires"),
 ];
 
+/// The EXCLUSIVE and EXPIRES cells of a lease, the same in every table
+/// (`targets ls` in agent mode, `admin target leases`, `agent leases`):
+/// `yes`/`no`, and the RFC 3339 expiry or `revoked` (the lease lasts until
+/// a revoke). No lease: `-` for both.
+pub fn lease_cells(lease: Option<&Value>) -> (String, String) {
+    let Some(l) = lease.filter(|l| l.is_object()) else {
+        return ("-".into(), "-".into());
+    };
+    let exclusive = if l["exclusive"] == true { "yes" } else { "no" };
+    let expires = l["expires_at"].as_str().unwrap_or("revoked");
+    (exclusive.into(), expires.into())
+}
+
 /// The lease fields of a target for the agent table.
 fn with_access(items: Vec<Value>) -> Vec<Value> {
     items
         .into_iter()
         .map(|mut t| {
-            let lease = t["lease"].clone();
-            let leased = lease.is_object();
-            t["exclusive"] = if leased {
-                if lease["exclusive"] == true {
-                    "yes"
-                } else {
-                    "no"
-                }
-                .into()
-            } else {
-                "-".into()
-            };
-            t["expires"] = match lease["expires_at"].as_str() {
-                Some(e) => e.into(),
-                None if leased => "revoked".into(),
-                None => "-".into(),
-            };
+            let (exclusive, expires) = lease_cells(t.get("lease"));
+            t["exclusive"] = exclusive.into();
+            t["expires"] = expires.into();
             t
         })
         .collect()
@@ -203,14 +202,24 @@ const LEASE_COLS: &[(&str, &str)] = &[
     ("AGENT", "agent_name"),
     ("STATE", "state"),
     ("EXCLUSIVE", "exclusive"),
-    ("EXPIRES", "expires_at"),
+    ("EXPIRES", "expires"),
     ("GRANTED BY", "granted_by"),
     ("REASON", "reason"),
 ];
 
 /// A lease list as a table.
 pub fn print_leases(ctx: &Ctx, v: &Value) {
-    print_table(ctx, as_items(v), LEASE_COLS, "no leases");
+    let rows: Vec<Value> = as_items(v)
+        .iter()
+        .map(|l| {
+            let mut l = l.clone();
+            let (exclusive, expires) = lease_cells(Some(&l));
+            l["exclusive"] = exclusive.into();
+            l["expires"] = expires.into();
+            l
+        })
+        .collect();
+    print_table(ctx, &rows, LEASE_COLS, "no leases");
 }
 
 /// `until <time>` or `until revoked`, for a lease.
@@ -520,9 +529,54 @@ pub async fn usage(ctx: &Ctx, cmd: Option<&UsageCmd>) -> anyhow::Result<()> {
     ctx.emit(&v, |c, v| print_generic(c, v, "no usage"))
 }
 
+/// The `--since` of `audit`: an RFC 3339 time, a bare `HH:MM[:SS]` (today,
+/// in local time), or a duration back from now (`30m`, `2h`, `1d`, `90s`).
+/// The result is the RFC 3339 form that the API compares (UTC, `Z`,
+/// milliseconds).
+pub fn parse_since(s: &str, now: chrono::DateTime<chrono::Local>) -> anyhow::Result<String> {
+    use chrono::{NaiveTime, TimeZone, Utc};
+    let s = s.trim();
+    let utc = if let Ok(t) = chrono::DateTime::parse_from_rfc3339(s) {
+        t.with_timezone(&Utc)
+    } else if let Ok(t) =
+        NaiveTime::parse_from_str(s, "%H:%M:%S").or_else(|_| NaiveTime::parse_from_str(s, "%H:%M"))
+    {
+        let local = now.date_naive().and_time(t);
+        chrono::Local
+            .from_local_datetime(&local)
+            .earliest()
+            .ok_or_else(|| anyhow::anyhow!("`{s}` does not exist today in local time"))?
+            .with_timezone(&Utc)
+    } else {
+        let bad = || {
+            anyhow::anyhow!(
+                "bad --since `{s}`: an RFC 3339 time, HH:MM[:SS] (today, local time), \
+                 or a duration such as 30m, 2h, 1d"
+            )
+        };
+        let split = s.find(|c: char| !c.is_ascii_digit()).ok_or_else(bad)?;
+        let (num, unit) = s.split_at(split);
+        let n: i64 = num.parse().map_err(|_| bad())?;
+        let secs = match unit {
+            "s" => n,
+            "m" => n * 60,
+            "h" => n * 3600,
+            "d" => n * 86_400,
+            _ => return Err(bad()),
+        };
+        now.with_timezone(&Utc) - chrono::Duration::seconds(secs)
+    };
+    Ok(utc.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+}
+
 pub async fn audit(ctx: &Ctx, a: &AuditArgs) -> anyhow::Result<()> {
+    let since = a
+        .since
+        .as_deref()
+        .map(|s| parse_since(s, chrono::Local::now()))
+        .transpose()?;
     let q = query([
-        ("since", a.since.clone()),
+        ("since", since),
         ("actor", a.actor.clone()),
         ("action", a.action.clone()),
         ("project", ctx.project.clone()),

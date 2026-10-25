@@ -1108,6 +1108,14 @@ async fn serve_link(
         .await;
     }
 
+    // The stored target states can be stale (a lab destroyed by hand, a
+    // container removed while the link was down): check each target of
+    // the host, once the link serves the verbs.
+    {
+        let (state, host) = (state.clone(), row.name.clone());
+        tokio::spawn(async move { crate::executor::reconcile_host(&state, &host).await });
+    }
+
     let (mut sink, mut stream) = socket.split();
     let hb = reg.heartbeat.max(Duration::from_millis(10));
     let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + hb, hb);

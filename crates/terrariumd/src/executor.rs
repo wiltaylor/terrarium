@@ -1812,8 +1812,17 @@ async fn vmlab_state(state: &Shared, def: &TargetDef) -> ApiResult<String> {
     })
     .await?;
     let v = c.result.unwrap_or(Value::Null);
+    // `not running`: the lab is not in `vmlab lab list`. A full `down`
+    // and a `destroy` both unlist it. An ephemeral target without `keep`
+    // is destroyed on its down, so its lab is gone (`absent`); else the
+    // lab is down with its clones and snapshots (`stopped`).
     if v["running"] == false {
-        return Ok("stopped".into());
+        return Ok(if def.ephemeral && !def.keep {
+            "absent"
+        } else {
+            "stopped"
+        }
+        .into());
     }
     Ok(match &def.machine {
         Some(m) => v["machines"]
@@ -2049,10 +2058,16 @@ pub async fn lifecycle(
         }
     };
     let (name, st, snap) = (def.name.clone(), new_state.clone(), add_snapshot.clone());
+    let project = def.project.clone();
+    let reconcile = verb_kind == V::Status;
     state
         .db
         .write("system", move |t| {
+            let before = targets::get(t, &name)?;
             targets::set_state(t, &name, &st, snap.as_deref())?;
+            if reconcile {
+                reconciled(t, &before, &st, project.as_deref())?;
+            }
             if let Some(a) = attached {
                 let mut rt = targets::get(t, &name)?.runtime;
                 rt.attached = a;
@@ -2072,6 +2087,64 @@ pub async fn lifecycle(
         out["result"] = r;
     }
     Ok(out)
+}
+
+/// A `status` that found the target other than the row said: the audit
+/// row `target.reconcile` and a `target` event (docs/api.md §17.3). Nothing
+/// when the state is the same, and the snapshots did not go.
+fn reconciled(
+    t: &mut crate::db::Tx<'_>,
+    before: &TargetRow,
+    state: &str,
+    project: Option<&str>,
+) -> ApiResult<()> {
+    let cleared = state == "absent" && !before.snapshots.is_empty();
+    if before.state == state && !cleared {
+        return Ok(());
+    }
+    let name = &before.def.name;
+    let detail = json!({"from": before.state, "state": state,
+                        "snapshots_cleared": if cleared { json!(before.snapshots) } else { json!([]) }});
+    t.audit("target.reconcile", name, project, detail.clone())?;
+    let mut data = detail;
+    data["change"] = "reconciled".into();
+    data["target"] = name.clone().into();
+    let mut draft = crate::events::EventDraft::new(
+        "target",
+        format!("target {name}: {} -> {state}", before.state),
+        data,
+    );
+    if let Some(p) = project {
+        draft = draft.project(p.to_owned());
+    }
+    t.emit(draft)?;
+    Ok(())
+}
+
+/// Reconcile the docker and vmlab targets of `host` with what runs there
+/// (a `status` of each), after the host agent connects. A lab instance
+/// target (`lab_repo`, `lab_from_workspace`) keeps its runtime record: its
+/// instances come and go with their holders.
+pub async fn reconcile_host(state: &Shared, host: &str) {
+    let rows = match state.db.read(targets::list).await {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(host, "cannot list the targets to reconcile: {e}");
+            return;
+        }
+    };
+    for r in rows {
+        if r.def.host.as_deref() != Some(host)
+            || !matches!(r.def.kind, TargetKind::Docker | TargetKind::Vmlab)
+            || is_instance_kind(&r.def)
+        {
+            continue;
+        }
+        let opts = LifecycleOpts::default();
+        if let Err(e) = lifecycle(state, &r.def, LifecycleVerb::Status, &opts).await {
+            debug!(host, target = %r.def.name, "the reconcile status failed: {e}");
+        }
+    }
 }
 
 fn host_online(state: &Shared, def: &TargetDef) -> ApiResult<()> {

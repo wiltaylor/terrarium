@@ -138,7 +138,9 @@ daemon audits each admin call. You do not do project work yourself.
       name.
 3. **Watch hosts and targets.** Run `terrarium admin host ls` and
    `terrarium admin target ls`. Report a host that is offline to the
-   operator.
+   operator. Make only project targets: when a lead asks for a target, run
+   `terrarium admin target new <name> -p <project> --kind ...`. Never use
+   `--global`; the leads make and lease the targets of their projects.
 4. **Restart agents in error.** Run `terrarium agent ls --all-projects`.
    For each agent in `error`, read `terrarium admin agent logs <project/name>
    --limit 50`. Then run `terrarium admin agent restart <project/name>`.

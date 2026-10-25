@@ -200,6 +200,15 @@ pub trait Supervisor: Send + Sync + 'static {
         let _ = (agent, events_since);
         Box::pin(async { Ok(Recovery::Gone) })
     }
+    /// A lease of `agent` on `target` was granted, and the lifecycle step
+    /// of the grant is done (docs/api.md §17.7): queue the grant pointer.
+    /// An agent that does not run gets it after its next start. The
+    /// pointer reads the target state and the expiry when it goes out, and
+    /// is dropped when lease `lease` ended before then. The default does
+    /// nothing.
+    fn lease_granted(&self, agent: AgentId, target: String, lease: String) {
+        let _ = (agent, target, lease);
+    }
     /// The daemon calls this once, after it builds its state and before it
     /// serves. A supervisor that needs the store, the event hub, or the
     /// router keeps a weak reference.
@@ -240,6 +249,10 @@ mod fake {
     #[derive(Default)]
     struct Inner {
         agents: HashMap<AgentId, FakeAgent>,
+        /// The grant pointers, in order: the agent, the line, and when it
+        /// came (RFC 3339, microseconds).
+        lease_pointers: Vec<(AgentId, String, String)>,
+        state: Option<std::sync::Weak<crate::api::AppState>>,
     }
 
     /// A fake supervisor. `start` goes `starting` -> `idle` after `delay`.
@@ -374,6 +387,17 @@ mod fake {
             Ok(())
         }
 
+        /// The grant pointers of `agent`: the line and when it came. For
+        /// tests.
+        pub fn lease_pointers(&self, agent: AgentId) -> Vec<(String, String)> {
+            self.lock()
+                .lease_pointers
+                .iter()
+                .filter(|p| p.0 == agent)
+                .map(|p| (p.1.clone(), p.2.clone()))
+                .collect()
+        }
+
         /// The last size a PTY client reported. For tests.
         pub fn pty_size(&self, agent: AgentId) -> Option<(u16, u16)> {
             self.lock().agents.get(&agent).and_then(|a| a.size)
@@ -381,6 +405,34 @@ mod fake {
     }
 
     impl Supervisor for InMemorySupervisor {
+        fn bind(&self, state: &crate::api::Shared) {
+            self.lock().state = Some(Arc::downgrade(state));
+        }
+
+        /// Record the pointer line, as the real supervisor would type it.
+        fn lease_granted(&self, agent: AgentId, target: String, lease: String) {
+            let at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
+            let Some(state) = self
+                .lock()
+                .state
+                .as_ref()
+                .and_then(std::sync::Weak::upgrade)
+            else {
+                return;
+            };
+            let me = self.clone();
+            tokio::spawn(async move {
+                let line = state
+                    .db
+                    .read(move |c| crate::leases::pointer_line(c, &lease))
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| format!("(no pointer for {target})"));
+                me.lock().lease_pointers.push((agent, line, at));
+            });
+        }
+
         fn start(
             &self,
             agent: Agent,

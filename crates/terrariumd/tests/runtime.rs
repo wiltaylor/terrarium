@@ -2020,9 +2020,13 @@ async fn a_stale_lead_nudge_is_dropped() {
 /// Lease pointers (docs/api.md §17.7): a grant types "You now have access
 /// to target ..." into the idle agent, and a revoke types "Your access to
 /// target ... ended.". A grant to a stopped agent waits for its next start.
+/// An extend types nothing; a grant and a revoke within one turn type only
+/// "ended".
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn lease_grant_and_revoke_push_a_pointer() {
     let td = Td::start().await;
+    // Turns take a while, so a grant and a revoke fit into one.
+    td.adapter.set_env("FAKE_TUI_DELAY_MS", "1000");
     let id = td.agent("demo", "bob", json!({})).await;
     td.post(
         "/api/targets",
@@ -2038,8 +2042,7 @@ async fn lease_grant_and_revoke_push_a_pointer() {
         .await;
     assert_eq!(g["state"], "active", "{g}");
     td.post(&format!("/api/agents/{id}/start"), None).await;
-    let granted =
-        "You now have access to target demo-box until revoked. Run `terrarium targets ls`.";
+    let granted = "You now have access to target demo-box (unknown) until revoked. Run `terrarium targets ls`.";
     let starts = td.wait_events(&id, "turn_start", |e| !e.is_empty()).await;
     assert_eq!(starts[0]["data"]["prompt"], granted);
     td.wait_status(&id, "idle").await;
@@ -2071,10 +2074,58 @@ async fn lease_grant_and_revoke_push_a_pointer() {
     assert_eq!(
         starts[2]["data"]["prompt"],
         format!(
-            "You now have access to target demo-box until {until}. Run `terrarium targets ls`."
+            "You now have access to target demo-box (unknown) until {until}. Run `terrarium targets ls`."
         )
         .as_str()
     );
+    td.wait_status(&id, "idle").await;
+    // An extend types no pointer.
+    let (s, b) = td
+        .req(
+            Method::PATCH,
+            "/api/targets/demo-box/leases/demo%2Fbob",
+            Some(json!({"until": "2h"})),
+            None,
+        )
+        .await;
+    assert_eq!(s, 200, "{b}");
+    // A grant and a revoke while the agent works: only "ended" goes out.
+    td.req(
+        Method::DELETE,
+        "/api/targets/demo-box/leases/demo%2Fbob",
+        None,
+        None,
+    )
+    .await;
+    td.wait_events(&id, "turn_start", |e| e.len() >= 4).await;
+    td.wait_status(&id, "idle").await;
+    td.post(
+        &format!("/api/agents/{id}/send"),
+        Some(json!({"text": "busy"})),
+    )
+    .await;
+    td.wait_status(&id, "working").await;
+    td.post(
+        "/api/targets/demo-box/leases",
+        Some(json!({"agent": "demo/bob"})),
+    )
+    .await;
+    td.req(
+        Method::DELETE,
+        "/api/targets/demo-box/leases/demo%2Fbob",
+        None,
+        None,
+    )
+    .await;
+    let starts = td.wait_events(&id, "turn_start", |e| e.len() >= 6).await;
+    td.wait_status(&id, "idle").await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let all = prompts(&td, &id).await;
+    assert_eq!(
+        starts[5]["data"]["prompt"],
+        "Your access to target demo-box ended."
+    );
+    assert_eq!(all.len(), 6, "{all:#?}");
 }
 
 /// PLAN §11 "mode 1": an agent made before the work root has its files in

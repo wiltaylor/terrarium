@@ -401,10 +401,10 @@ struct CardItem {
 }
 
 /// A change of a target lease of the agent (docs/api.md §17.7).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LeaseChange {
-    /// Granted or extended: `until` is the expiry, `None` until a revoke.
-    Granted { until: Option<String> },
+    /// Granted, and the lifecycle step of the grant is done.
+    Granted,
     /// Revoked or expired.
     Ended,
 }
@@ -412,18 +412,23 @@ enum LeaseChange {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LeaseItem {
     target: String,
+    /// The lease ULID.
+    lease: String,
     change: LeaseChange,
+    /// The grant line, read just before the push: the target state and
+    /// the expiry then ([`crate::leases::pointer_line`]).
+    line: Option<String>,
 }
 
 impl LeaseItem {
     fn line(&self) -> String {
         let t = &self.target;
-        match &self.change {
-            LeaseChange::Granted { until } => format!(
-                "You now have access to target {t} until {}. Run `terrarium targets ls`.",
-                until.as_deref().unwrap_or("revoked")
-            ),
-            LeaseChange::Ended => format!("Your access to target {t} ended."),
+        match (&self.change, &self.line) {
+            (LeaseChange::Granted, Some(l)) => l.clone(),
+            (LeaseChange::Granted, None) => {
+                format!("You now have access to target {t}. Run `terrarium targets ls`.")
+            }
+            (LeaseChange::Ended, _) => crate::leases::ended_line(t),
         }
     }
 }
@@ -522,9 +527,15 @@ impl Pointer {
     }
 
     /// One item for each target: the newest change replaces the text, so
-    /// a grant and a revoke before the push type only "ended".
+    /// a grant and a revoke before the push type only "ended". A grant
+    /// pointer that comes after the end of the same lease (a revoke during
+    /// the lifecycle step) does not replace the "ended" line.
     fn add_lease(&mut self, l: LeaseItem) {
         match self.leases.iter_mut().find(|x| x.target == l.target) {
+            Some(x)
+                if x.change == LeaseChange::Ended
+                    && l.change == LeaseChange::Granted
+                    && x.lease == l.lease => {}
             Some(x) => *x = l,
             None => self.leases.push(l),
         }
@@ -1885,12 +1896,13 @@ impl RunnerSupervisor {
     /// left `review` or `blocked`, a card assigned to another agent, or a
     /// card that is gone. Mail lines stay. On a read error, all stay.
     async fn still_current(&self, id: AgentId, mut pointer: Pointer) -> Pointer {
-        if pointer.cards.is_empty() && pointer.leads.is_empty() {
-            return pointer;
-        }
         let Some(state) = self.state() else {
             return pointer;
         };
+        pointer = Self::current_leases(&state, id, pointer).await;
+        if pointer.cards.is_empty() && pointer.leads.is_empty() {
+            return pointer;
+        }
         let mut keys: Vec<String> = pointer.cards.iter().map(|c| c.card.clone()).collect();
         keys.extend(pointer.leads.iter().map(|l| l.card.clone()));
         keys.sort();
@@ -1938,6 +1950,52 @@ impl RunnerSupervisor {
             },
         });
         pointer
+    }
+
+    /// Read the grant lines now: the target state and the expiry. A grant
+    /// whose lease ended meanwhile is dropped (its "ended" line comes from
+    /// the end). On a read error, the line stays without the state.
+    async fn current_leases(state: &Shared, id: AgentId, mut pointer: Pointer) -> Pointer {
+        let ids: Vec<String> = pointer
+            .leases
+            .iter()
+            .filter(|l| l.change == LeaseChange::Granted)
+            .map(|l| l.lease.clone())
+            .collect();
+        if ids.is_empty() {
+            return pointer;
+        }
+        let lines = state
+            .db
+            .read(move |c| {
+                ids.into_iter()
+                    .map(|i| Ok((i.clone(), crate::leases::pointer_line(c, &i)?)))
+                    .collect::<crate::error::ApiResult<HashMap<_, _>>>()
+            })
+            .await;
+        match lines {
+            Ok(lines) => pointer.leases.retain_mut(|l| {
+                if l.change == LeaseChange::Ended {
+                    return true;
+                }
+                l.line = lines.get(&l.lease).cloned().flatten();
+                l.line.is_some()
+            }),
+            Err(e) => debug!(agent = %id, "cannot read the lease pointers: {e}"),
+        }
+        pointer
+    }
+
+    /// The grant pointer of a lease, after its lifecycle step.
+    fn queue_lease_pointer(&self, agent: AgentId, target: String, lease: String) {
+        self.add_parked_pointer(agent, |p| {
+            p.add_lease(LeaseItem {
+                target,
+                lease,
+                change: LeaseChange::Granted,
+                line: None,
+            });
+        });
     }
 
     async fn mark_delivered(&self, ids: Vec<String>) {
@@ -2110,18 +2168,20 @@ impl RunnerSupervisor {
                         };
                         me.add_card_pointer(agent, CardItem { card, change });
                     }
-                    "lease" => {
-                        let Some(target) = s("target") else {
+                    // The grant pointer comes from `lease_granted`, after
+                    // the lifecycle step; an extend types none.
+                    "lease" if s("change").as_deref() == Some("ended") => {
+                        let (Some(target), Some(lease)) = (s("target"), s("lease_id")) else {
                             continue;
                         };
-                        let change = match s("change").as_deref() {
-                            Some("granted" | "extended") => LeaseChange::Granted {
-                                until: s("expires_at"),
-                            },
-                            Some("ended") => LeaseChange::Ended,
-                            _ => continue,
-                        };
-                        me.add_parked_pointer(agent, |p| p.add_lease(LeaseItem { target, change }));
+                        me.add_parked_pointer(agent, |p| {
+                            p.add_lease(LeaseItem {
+                                target,
+                                lease,
+                                change: LeaseChange::Ended,
+                                line: None,
+                            });
+                        });
                     }
                     _ => {}
                 }
@@ -2858,6 +2918,10 @@ impl Supervisor for RunnerSupervisor {
         })
     }
 
+    fn lease_granted(&self, agent: AgentId, target: String, lease: String) {
+        self.queue_lease_pointer(agent, target, lease);
+    }
+
     fn bind(&self, state: &Shared) {
         if self.inner.state.set(Arc::downgrade(state)).is_ok() {
             // Once per daemon start, before `recover` reads the exit
@@ -3196,31 +3260,40 @@ mod tests {
         );
     }
 
-    /// A lease line per target; the newest change wins.
+    /// A lease line per target; the newest change wins, but a grant
+    /// pointer of a lease that ended already does not replace "ended".
     #[test]
-    fn lease_lines_name_the_target_and_the_expiry() {
+    fn lease_lines_name_the_target_and_the_state() {
+        let item = |target: &str, lease: &str, change, line: Option<&str>| LeaseItem {
+            target: target.into(),
+            lease: lease.into(),
+            change,
+            line: line.map(str::to_owned),
+        };
         let mut p = Pointer::default();
-        p.add_lease(LeaseItem {
-            target: "vm".into(),
-            change: LeaseChange::Granted {
-                until: Some("2026-10-25T12:00:00.000Z".into()),
-            },
-        });
-        p.add_lease(LeaseItem {
-            target: "box".into(),
-            change: LeaseChange::Granted { until: None },
-        });
+        let vm = crate::leases::granted_line("vm", "running", Some("2026-10-25T12:00:00.000Z"));
+        p.add_lease(item("vm", "L1", LeaseChange::Granted, Some(&vm)));
+        p.add_lease(item("box", "L2", LeaseChange::Granted, None));
         assert_eq!(
             p.text(),
-            "You now have access to target vm until 2026-10-25T12:00:00.000Z. Run `terrarium targets ls`.\n\
-             You now have access to target box until revoked. Run `terrarium targets ls`."
+            "You now have access to target vm (running) until 2026-10-25T12:00:00.000Z. \
+             Run `terrarium targets ls`.\n\
+             You now have access to target box. Run `terrarium targets ls`."
         );
-        p.add_lease(LeaseItem {
-            target: "vm".into(),
-            change: LeaseChange::Ended,
-        });
+        // A revoke before the push: only "ended".
+        p.add_lease(item("vm", "L1", LeaseChange::Ended, None));
         assert_eq!(p.leases.len(), 2);
         assert!(p.text().starts_with("Your access to target vm ended.\n"));
+        // The grant pointer of L1 after its end (a revoke during the
+        // lifecycle step) keeps "ended".
+        p.add_lease(item("vm", "L1", LeaseChange::Granted, None));
+        assert!(p.text().starts_with("Your access to target vm ended.\n"));
+        // A new lease after the end replaces it.
+        p.add_lease(item("vm", "L3", LeaseChange::Granted, Some(&vm)));
+        assert!(
+            p.text()
+                .starts_with("You now have access to target vm (running)")
+        );
     }
 
     fn card_event(data: serde_json::Value) -> crate::events::StoredEvent {

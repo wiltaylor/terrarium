@@ -11,7 +11,10 @@
 //!   running agent holds the target, the target goes down
 //!   ([`executor::maybe_down`], with the keep and restore rules).
 //! - Each change writes a `lease` event to the agent's stream. The
-//!   supervisor types a pointer from it, or parks it until the next start.
+//!   supervisor types the "ended" pointer from it. The grant pointer comes
+//!   from [`grant`] after the lifecycle step ([`crate::supervisor::Supervisor::lease_granted`]),
+//!   so the agent never sees a target that is still coming up. An extend
+//!   types no pointer.
 //! - The timer: one task for each lease with an expiry, at that time, and a
 //!   sweep every [`SWEEP`] that also catches leases that ended while the
 //!   daemon was down.
@@ -196,7 +199,64 @@ pub async fn grant(
             }
         }
     }
+    // The pointer, now that the target is up (or did not come up). A
+    // revoke during the lifecycle step leaves only its "ended" pointer.
+    let id = out.lease.id.clone();
+    let active = state
+        .db
+        .read(move |c| leases::get(c, &id))
+        .await
+        .is_ok_and(|l| l.is_active());
+    if active {
+        state
+            .supervisor
+            .lease_granted(agent.agent.id, row.def.name.clone(), out.lease.id.clone());
+    }
     Ok(out)
+}
+
+/// The grant pointer line (docs/api.md §17.7). `state` is the target state
+/// that the holder sees.
+pub fn granted_line(target: &str, state: &str, until: Option<&str>) -> String {
+    let state = match state {
+        "running" => "running".to_owned(),
+        "stopped" | "absent" => format!("{state}: ask your lead to bring it up"),
+        s => s.to_owned(),
+    };
+    format!(
+        "You now have access to target {target} ({state}) until {}. Run `terrarium targets ls`.",
+        until.unwrap_or("revoked")
+    )
+}
+
+/// The pointer line of a lease that ended.
+pub fn ended_line(target: &str) -> String {
+    format!("Your access to target {target} ended.")
+}
+
+/// The grant pointer line of lease `id` now: the target state (of the
+/// holder's own instance for a `lab_from_workspace` target) and the expiry
+/// now. `None` when the lease is no longer active.
+pub fn pointer_line(conn: &rusqlite::Connection, id: &str) -> ApiResult<Option<String>> {
+    let l = leases::get(conn, id)?;
+    if !l.is_active() {
+        return Ok(None);
+    }
+    let t = targets::get(conn, &l.target)?;
+    let state = if t.def.lab_from_workspace {
+        t.runtime
+            .instances
+            .get(&l.agent)
+            .map_or("absent", |i| i.state.as_str())
+            .to_owned()
+    } else {
+        t.state
+    };
+    Ok(Some(granted_line(
+        &l.target,
+        &state,
+        l.expires_at.as_deref(),
+    )))
 }
 
 /// `DELETE /api/targets/{name}/leases/{agent}`. A lease holder may give
@@ -376,5 +436,21 @@ mod tests {
         assert!(parse_until(Some("2000-01-01T00:00:00Z")).is_err());
         assert!(parse_until(Some("soon")).is_err());
         assert!(parse_until(Some("0m")).is_err());
+    }
+
+    #[test]
+    fn the_grant_line_names_the_state() {
+        assert_eq!(
+            granted_line("vlab", "running", Some("2026-10-25T10:13:44.170Z")),
+            "You now have access to target vlab (running) until 2026-10-25T10:13:44.170Z. \
+             Run `terrarium targets ls`."
+        );
+        assert_eq!(
+            granted_line("dbox", "stopped", None),
+            "You now have access to target dbox (stopped: ask your lead to bring it up) \
+             until revoked. Run `terrarium targets ls`."
+        );
+        assert!(granted_line("h", "unknown", None).contains("target h (unknown) until"));
+        assert_eq!(ended_line("vlab"), "Your access to target vlab ended.");
     }
 }
