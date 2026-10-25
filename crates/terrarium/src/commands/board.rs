@@ -204,8 +204,17 @@ pub async fn card(ctx: &Ctx, cmd: &CardCmd) -> anyhow::Result<()> {
                 ));
             })
         }
-        CardCmd::Comment { id, text, message } => {
-            let text = message.as_deref().or(text.as_deref()).unwrap_or_default();
+        CardCmd::Comment {
+            id,
+            text,
+            message,
+            body,
+        } => {
+            let text = message
+                .as_deref()
+                .or(body.as_deref())
+                .or(text.as_deref())
+                .unwrap_or_default();
             let k = ctx
                 .api
                 .post(

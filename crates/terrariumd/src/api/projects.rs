@@ -6,6 +6,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::Deserialize;
+use serde_json::Value;
 
 use super::targets::TargetView;
 use super::{ApiJson, ApiQuery, Shared, paged};
@@ -173,13 +174,31 @@ async fn list_repos(
     Ok(paged(rows))
 }
 
+/// The fields of a repo body, for the error of a bad one.
+const REPO_FIELDS: &str = "`url`, `name`, `default_branch` (or its alias `branch`), \
+                           `credential`, and `path`";
+
+/// Parse a repo body; the error names the fields, `branch` and
+/// `default_branch` both.
+fn new_repo(body: Value) -> ApiResult<NewRepo> {
+    if body.get("branch").is_some() && body.get("default_branch").is_some() {
+        return Err(ApiError::bad_request(
+            "give `default_branch` or its alias `branch`, not both",
+        ));
+    }
+    serde_json::from_value(body).map_err(|e| {
+        ApiError::bad_request(format!("bad repo body: {e}; the fields are {REPO_FIELDS}"))
+    })
+}
+
 async fn attach_repo(
     State(state): State<Shared>,
     actor: Actor,
     Path(name): Path<String>,
-    ApiJson(body): ApiJson<NewRepo>,
+    ApiJson(body): ApiJson<Value>,
 ) -> ApiResult<(StatusCode, Json<Repo>)> {
     policy::admin_project(&actor, &name, "attaching a repo")?;
+    let body = new_repo(body)?;
     let r = state
         .db
         .write(actor.label(), move |t| {

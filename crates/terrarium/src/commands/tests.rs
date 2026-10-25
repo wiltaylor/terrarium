@@ -2791,6 +2791,64 @@ async fn leader_worker_flow_commands() {
         )],
     )
     .await;
+    // Review: the lead grants itself the target for the tests, then
+    // revokes it; the worker's lease ends after the merge. A target fix is
+    // an edit, not a remove and a new.
+    ok(
+        true,
+        &[
+            "admin",
+            "target",
+            "grant",
+            "terra-dev",
+            "lead",
+            "--until",
+            "30m",
+            "--reason",
+            "DEM-3",
+        ],
+        vec![(201, json!({"agent_name": "terra/lead", "expires_at": null}))],
+        vec![(
+            Post,
+            "/api/targets/terra-dev/leases",
+            vec![],
+            Some(json!({"agent": "lead", "until": "30m", "reason": "DEM-3"})),
+        )],
+    )
+    .await;
+    for who in ["lead", "w-dem-3"] {
+        let path: &'static str = if who == "lead" {
+            "/api/targets/terra-dev/leases/lead"
+        } else {
+            "/api/targets/terra-dev/leases/w-dem-3"
+        };
+        ok(
+            true,
+            &["admin", "target", "revoke", "terra-dev", who],
+            vec![(200, json!({"agent_name": who}))],
+            vec![req(Delete, path)],
+        )
+        .await;
+    }
+    ok(
+        true,
+        &[
+            "admin",
+            "target",
+            "edit",
+            "terra-dev",
+            "--lab-path",
+            "hello-svc",
+        ],
+        vec![(200, json!({"name": "terra-dev"}))],
+        vec![(
+            Patch,
+            "/api/targets/terra-dev",
+            vec![],
+            Some(json!({"lab_path": "hello-svc"})),
+        )],
+    )
+    .await;
     ok(
         true,
         &["admin", "agent", "rm", "w-dem-3", "--confirm"],
@@ -2915,7 +2973,14 @@ async fn target_leases() {
     );
     let out = ok(
         false,
-        &["admin", "target", "grant", "vm", "terra/w"],
+        &[
+            "admin",
+            "target",
+            "grant",
+            "vm",
+            "terra/w",
+            "--no-lifecycle-check",
+        ],
         vec![(
             201,
             json!({"agent_name": "terra/w", "expires_at": null, "exclusive": false,
@@ -3132,4 +3197,268 @@ async fn audit_since_sends_rfc_3339() {
         "{since}"
     );
     assert!(since.ends_with('Z'), "{since}");
+}
+
+/// A grant whose target did not come up: the lease stands, but the exit
+/// is 1, so that `grant && card assign` stops. `--no-lifecycle-check`
+/// (in `target_leases`) keeps exit 0.
+#[tokio::test]
+async fn grant_with_a_lifecycle_error_exits_1() {
+    let r = exec(
+        true,
+        &[
+            "admin", "target", "grant", "vm", "w-ter-1", "--until", "30m",
+        ],
+        vec![(
+            201,
+            json!({"agent_name": "terra/w-ter-1", "expires_at": "2026-10-25T12:00:00.000Z",
+                   "exclusive": false,
+                   "lifecycle_error": "/work/terra/w-ter-1 has no vmlab.wcl"}),
+        )],
+        None,
+    )
+    .await;
+    let e = r.result.unwrap_err();
+    assert_eq!(exit_code_of(&e), exit::SERVER);
+    let msg = format!("{e:#}");
+    assert!(msg.contains("the lease on vm is granted"), "{msg}");
+    assert!(msg.contains("has no vmlab.wcl"), "{msg}");
+    assert!(
+        r.out.contains("warning: the target did not come up"),
+        "{}",
+        r.out
+    );
+    assert_eq!(r.reqs.len(), 1);
+}
+
+#[tokio::test]
+async fn target_edit_patches_only_the_flags_given() {
+    let out = ok(
+        true,
+        &[
+            "admin",
+            "target",
+            "edit",
+            "terra-dev",
+            "--lab-path",
+            "app",
+            "--machine",
+            "box",
+            "--permanent",
+            "--no-keep",
+            "--snapshot-before-task",
+            "true",
+        ],
+        vec![(200, json!({"name": "terra-dev"}))],
+        vec![(
+            Patch,
+            "/api/targets/terra-dev",
+            vec![],
+            Some(
+                json!({"lab_path": "app", "machine": "box", "ephemeral": false,
+                        "keep": false, "snapshot_before_task": true}),
+            ),
+        )],
+    )
+    .await;
+    assert_eq!(
+        out,
+        "changed target terra-dev: ephemeral, keep, lab_path, machine, snapshot_before_task\n"
+    );
+    ok(
+        true,
+        &[
+            "admin",
+            "target",
+            "edit",
+            "terra-dev",
+            "--image",
+            "python:3",
+            "--ephemeral",
+            "--keep",
+        ],
+        vec![(200, json!({"name": "terra-dev"}))],
+        vec![(
+            Patch,
+            "/api/targets/terra-dev",
+            vec![],
+            Some(json!({"image": "python:3", "ephemeral": true, "keep": true})),
+        )],
+    )
+    .await;
+    let r = exec(
+        true,
+        &["admin", "target", "edit", "terra-dev"],
+        vec![],
+        None,
+    )
+    .await;
+    assert_eq!(exit_code_of(&r.result.unwrap_err()), exit::USAGE);
+    assert!(r.reqs.is_empty());
+    for bad in [
+        vec!["admin", "target", "edit", "t", "--keep", "--no-keep"],
+        vec!["admin", "target", "edit", "t", "--ephemeral", "--permanent"],
+    ] {
+        assert!(Cli::try_parse_from(std::iter::once("terrarium").chain(bad)).is_err());
+    }
+}
+
+/// One body flag for every command with a body: `--body`/`-b`, `-` for
+/// stdin, and a value that starts with `-` (a log line `- 10:00 ...`).
+/// The positional stays where it was there before.
+#[tokio::test]
+async fn body_flag_is_the_same_on_every_command() {
+    let mail = |body: &'static str| {
+        (
+            Post,
+            "/api/mail",
+            vec![],
+            Some(json!({"to": "operator", "body": body, "subject": "s"})),
+        )
+    };
+    for (args, stdin, want) in [
+        (
+            vec!["mail", "send", "operator", "hi", "-s", "s"],
+            None,
+            "hi",
+        ),
+        (
+            vec!["mail", "send", "operator", "--body", "hi", "-s", "s"],
+            None,
+            "hi",
+        ),
+        (
+            vec!["mail", "send", "operator", "-s", "s", "-b", "- a list"],
+            None,
+            "- a list",
+        ),
+        (
+            vec!["mail", "send", "operator", "-b", "-", "-s", "s"],
+            Some("from stdin"),
+            "from stdin",
+        ),
+    ] {
+        ok_in(
+            true,
+            &args,
+            vec![(201, json!({"id": "M1"}))],
+            stdin,
+            vec![mail(want)],
+        )
+        .await;
+    }
+    assert!(
+        Cli::try_parse_from(["terrarium", "mail", "send", "operator", "a", "--body", "b"]).is_err()
+    );
+    assert!(Cli::try_parse_from(["terrarium", "mail", "send", "operator"]).is_err());
+    for args in [
+        vec!["mail", "reply", "M1", "ok"],
+        vec!["mail", "reply", "M1", "--body", "ok"],
+        vec!["mail", "reply", "M1", "-b", "ok"],
+    ] {
+        ok(
+            true,
+            &args,
+            vec![(201, json!([]))],
+            vec![(
+                Post,
+                "/api/mail/M1/reply",
+                vec![],
+                Some(json!({"body": "ok"})),
+            )],
+        )
+        .await;
+    }
+    for args in [
+        vec!["card", "comment", "TER-1", "done"],
+        vec!["card", "comment", "TER-1", "-m", "done"],
+        vec!["card", "comment", "TER-1", "--body", "done"],
+        vec!["card", "comment", "TER-1", "-b", "done"],
+    ] {
+        ok(
+            true,
+            &args,
+            vec![(201, json!({"id": "TER-1"}))],
+            vec![(
+                Post,
+                "/api/cards/TER-1/comments",
+                vec![],
+                Some(json!({"body": "done"})),
+            )],
+        )
+        .await;
+    }
+    assert!(
+        Cli::try_parse_from(["terrarium", "card", "comment", "TER-1", "a", "-b", "b"]).is_err()
+    );
+    // The log line of the lead prompt: a body that starts with `-`.
+    for args in [
+        vec![
+            "wiki",
+            "append",
+            "ops/leader-log",
+            "-b",
+            "- 10:00 TER-1: started",
+            "-m",
+            "TER-1",
+        ],
+        vec![
+            "wiki",
+            "append",
+            "ops/leader-log",
+            "--body",
+            "- 10:00 TER-1: started",
+            "-m",
+            "TER-1",
+        ],
+    ] {
+        ok(
+            true,
+            &args,
+            vec![(200, json!({"path": "ops/leader-log", "rev": 2}))],
+            vec![(
+                Post,
+                "/api/wiki/terra%2Fops%2Fleader-log/append",
+                vec![],
+                Some(json!({"body": "- 10:00 TER-1: started", "summary": "TER-1"})),
+            )],
+        )
+        .await;
+    }
+    for args in [
+        vec!["wiki", "new", "p", "-b", "- x"],
+        vec!["wiki", "section", "p", "H", "-b", "- x"],
+        vec!["mem", "new", "A claim", "-b", "- x"],
+        vec!["card", "new", "T", "-b", "- x"],
+        vec!["inbox", "send", "-b", "- x"],
+        vec!["inbox", "reply", "M1", "--body", "- x"],
+    ] {
+        assert!(
+            Cli::try_parse_from(std::iter::once("terrarium").chain(args.iter().copied())).is_ok(),
+            "{args:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn agent_rm_keep_workspace() {
+    ok(
+        true,
+        &[
+            "admin",
+            "agent",
+            "rm",
+            "w-ter-1",
+            "--confirm",
+            "--keep-workspace",
+        ],
+        vec![(204, Value::Null)],
+        vec![(
+            Delete,
+            "/api/agents/w-ter-1",
+            vec![("confirm", "true"), ("keep_workspace", "true")],
+            None,
+        )],
+    )
+    .await;
 }

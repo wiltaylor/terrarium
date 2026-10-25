@@ -457,3 +457,44 @@ async fn only_a_sysadmin_attaches_a_local_repo() {
     .await
     .ok();
 }
+
+/// `branch` is an alias of `default_branch` in the repo body; both at once
+/// is a `400` that names both, and so is an unknown field.
+#[tokio::test]
+async fn repo_body_takes_branch_as_an_alias_of_default_branch() {
+    let td = TestDaemon::start().await;
+    td.project("p").await;
+    let r = td
+        .post(
+            "/api/projects/p/repos",
+            json!({"url": "https://git.example.com/team/app.git", "branch": "dev"}),
+        )
+        .await;
+    assert_eq!(r.ok()["default_branch"], "dev");
+    let r = td
+        .post(
+            "/api/projects/p/repos",
+            json!({"url": "https://git.example.com/team/lib.git", "name": "lib",
+                   "branch": "dev", "default_branch": "main"}),
+        )
+        .await;
+    r.err(400, "bad_request");
+    let msg = r.body["error"]["message"].as_str().unwrap();
+    assert!(
+        msg.contains("`default_branch`") && msg.contains("`branch`"),
+        "{msg}"
+    );
+    let r = td
+        .post(
+            "/api/projects/p/repos",
+            json!({"url": "https://git.example.com/team/lib.git", "brnch": "dev"}),
+        )
+        .await;
+    r.err(400, "bad_request");
+    let msg = r.body["error"]["message"].as_str().unwrap();
+    assert!(msg.contains("brnch"), "{msg}");
+    assert!(
+        msg.contains("`default_branch` (or its alias `branch`)"),
+        "{msg}"
+    );
+}

@@ -627,6 +627,9 @@ async fn delete_moves_the_agent_dir_to_the_trash() {
     let state = td.dir.path().join("state");
     let agent_dir = state.join("agents").join(&id);
     assert!(agent_dir.join("private/events.jsonl").is_file());
+    let ws = td.dir.path().join("work/demo/gone");
+    std::fs::create_dir_all(ws.join("app")).unwrap();
+    std::fs::write(ws.join("app/main.py"), "print(1)\n").unwrap();
     let (s, b) = td
         .req(Method::DELETE, &format!("/api/agents/{id}"), None, None)
         .await;
@@ -649,9 +652,28 @@ async fn delete_moves_the_agent_dir_to_the_trash() {
     let name = trash[0].file_name().unwrap().to_string_lossy().into_owned();
     assert!(name.starts_with(&format!("{id}-")), "{name}");
     assert!(trash[0].join("private/events.jsonl").is_file());
+    // The workspace in the work root goes into the same trash entry.
+    assert!(!ws.exists());
+    assert!(trash[0].join("workspace/app/main.py").is_file());
     // The runner does not make the dir again after the move.
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(!agent_dir.exists());
+    assert!(!ws.exists());
+
+    // `?keep_workspace=true` leaves the workspace in place.
+    let kept = td.agent("demo", "kept", json!({})).await;
+    let kws = td.dir.path().join("work/demo/kept");
+    std::fs::create_dir_all(kws.join("app")).unwrap();
+    let (s, b) = td
+        .req(
+            Method::DELETE,
+            &format!("/api/agents/{kept}?keep_workspace=true"),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(s, 204, "{b}");
+    assert!(kws.join("app").is_dir());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1963,6 +1985,76 @@ async fn a_card_assigned_while_stopped_points_at_the_next_start() {
     tokio::time::sleep(Duration::from_millis(500)).await;
     let all = prompts(&td, &id).await;
     assert_eq!(all.len(), 1, "{all:#?}");
+}
+
+/// The "Card ... was assigned to you" pointer goes out only when the
+/// assignee has not claimed, moved, or commented on the card since the
+/// assignment (a worker that found the card with `card ls --mine` in an
+/// earlier turn). A later assignment to the agent again counts anew.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_assign_pointer_skips_a_card_that_the_assignee_took_up() {
+    let td = Td::start().await;
+    let id = td.agent("demo", "bob", json!({})).await;
+    td.agent("demo", "eve", json!({})).await;
+    let mk = |title: &'static str| {
+        let td = &td;
+        async move {
+            let c = td
+                .post("/api/projects/demo/cards", Some(json!({"title": title})))
+                .await;
+            c["id"].as_str().unwrap().to_owned()
+        }
+    };
+    let assign = |c: String, who: &'static str| {
+        let td = &td;
+        async move {
+            td.post(
+                &format!("/api/cards/{c}/assign"),
+                Some(json!({"assignee": who})),
+            )
+            .await;
+        }
+    };
+    let as_bob = |path: String, body: Option<Value>| {
+        let td = &td;
+        async move {
+            let (s, b) = td.req(Method::POST, &path, body, Some("demo/bob")).await;
+            assert!((200..300).contains(&s), "POST {path}: {s} {b}");
+        }
+    };
+    let untouched = mk("Untouched").await;
+    let claimed = mk("Claimed").await;
+    let commented = mk("Commented").await;
+    let again = mk("Assigned again").await;
+    for c in [&untouched, &claimed, &commented, &again] {
+        assign(c.clone(), "demo/bob").await;
+    }
+    as_bob(format!("/api/cards/{claimed}/claim"), None).await;
+    as_bob(
+        format!("/api/cards/{commented}/comments"),
+        Some(json!({"body": "on it"})),
+    )
+    .await;
+    as_bob(
+        format!("/api/cards/{again}/comments"),
+        Some(json!({"body": "a first look"})),
+    )
+    .await;
+    assign(again.clone(), "demo/eve").await;
+    assign(again.clone(), "demo/bob").await;
+    td.post(&format!("/api/agents/{id}/start"), None).await;
+    let starts = td.wait_events(&id, "turn_start", |e| !e.is_empty()).await;
+    assert_eq!(
+        starts[0]["data"]["prompt"],
+        format!(
+            "Card {untouched} was assigned to you. Run `terrarium card show {untouched}`.\n\
+             Card {again} was assigned to you. Run `terrarium card show {again}`."
+        )
+        .as_str()
+    );
+    td.wait_status(&id, "idle").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(prompts(&td, &id).await.len(), 1);
 }
 
 /// A lead nudge that no longer applies when the lead is idle again goes

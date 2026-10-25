@@ -274,6 +274,36 @@ fn credential(
     Ok((args, out, guard))
 }
 
+/// The advice for a workspace lab that is not where `lab_path` says:
+/// `lab_path` is relative to the workspace root, with the dirs one level
+/// down that hold a lab file (the repo checkouts).
+fn workspace_hint(ws: &Path) -> String {
+    let mut found: Vec<String> = std::fs::read_dir(ws)
+        .map(|rd| {
+            rd.flatten()
+                .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+                .filter(|e| e.path().join(LAB_FILE).is_file())
+                .filter_map(|e| e.file_name().to_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    found.sort();
+    let try_ = if found.is_empty() {
+        "--lab-path <repo-name>".to_owned()
+    } else {
+        found
+            .iter()
+            .map(|f| format!("--lab-path {f}"))
+            .collect::<Vec<_>>()
+            .join(" or ")
+    };
+    format!(
+        "lab_path is relative to the workspace root ({}); try {try_} \
+         (`terrarium admin target edit <target> --lab-path ...`)",
+        ws.display()
+    )
+}
+
 /// Read the lab file of `dir`: a regular file (not a link), at most 1 MiB.
 fn read_lab(dir: &Path) -> Result<String, TaskError> {
     let p = dir.join(LAB_FILE);
@@ -345,6 +375,7 @@ async fn prepare_in(
     std::fs::create_dir_all(&inst)
         .map_err(|e| io(format!("cannot create {}: {e}", inst.display())))?;
     let mut head = None;
+    let from_workspace = matches!(req.source, LabSource::Workspace { .. });
     let (base, sub) = match &req.source {
         LabSource::Repo {
             local,
@@ -418,12 +449,21 @@ async fn prepare_in(
     };
     let base_real = std::fs::canonicalize(&base)
         .map_err(|e| io(format!("cannot resolve {}: {e}", base.display())))?;
+    // A workspace lab: `lab_path` is relative to the workspace root, and a
+    // checkout is one level down, so name the dirs that hold a lab file.
+    let hint = |e: TaskError| -> TaskError {
+        if from_workspace && e.0 == ErrorCode::BadRequest {
+            (e.0, format!("{}; {}", e.1, workspace_hint(&base)))
+        } else {
+            e
+        }
+    };
     let source = std::fs::canonicalize(base.join(&sub)).map_err(|_| {
-        bad(format!(
+        hint(bad(format!(
             "{} has no directory {}",
             base.display(),
             sub.display()
-        ))
+        )))
     })?;
     if !source.starts_with(&base_real) {
         return Err((
@@ -431,7 +471,7 @@ async fn prepare_in(
             format!("the lab path {} leads out of its source", sub.display()),
         ));
     }
-    let text = read_lab(&source)?;
+    let text = read_lab(&source).map_err(hint)?;
     let lab = labcheck::check(&text).map_err(|errs| {
         (
             ErrorCode::Refused,
@@ -787,5 +827,42 @@ mod tests {
                 .is_file()
         );
         assert!(!ctx.paths.instances_dir.join("vws.p.a/src").exists());
+    }
+
+    /// A workspace lab with the lab file in a checkout one level down:
+    /// `lab_path` `.` (or none) fails, and the error says that `lab_path`
+    /// is relative to the workspace root and names the checkout.
+    #[tokio::test]
+    async fn a_workspace_lab_error_names_the_lab_path_to_try() {
+        let (dir, ctx) = fixture();
+        let ws = dir.path().join("work/p/a");
+        std::fs::create_dir_all(ws.join("hello-svc")).unwrap();
+        std::fs::write(ws.join("hello-svc/vmlab.wcl"), LAB).unwrap();
+        let mk = |path: &str, inst: &str| {
+            let mut r = req("", Some("p/a"));
+            r.instance = inst.into();
+            r.source = LabSource::Workspace {
+                workspace: "p/a".into(),
+                path: path.into(),
+            };
+            r
+        };
+        let mut log = Vec::new();
+        for (path, inst) in [(".", "v1"), ("nope", "v2")] {
+            let (code, msg) = prepare(&ctx, &mk(path, inst), &mut log).await.unwrap_err();
+            assert_eq!(code, ErrorCode::BadRequest, "{msg}");
+            assert!(
+                msg.contains("lab_path is relative to the workspace root"),
+                "{msg}"
+            );
+            assert!(msg.contains("try --lab-path hello-svc"), "{msg}");
+        }
+        prepare(&ctx, &mk("hello-svc", "v3"), &mut log)
+            .await
+            .unwrap();
+        // No checkout with a lab file: the generic advice.
+        std::fs::remove_file(ws.join("hello-svc/vmlab.wcl")).unwrap();
+        let (_, msg) = prepare(&ctx, &mk("", "v4"), &mut log).await.unwrap_err();
+        assert!(msg.contains("try --lab-path <repo-name>"), "{msg}");
     }
 }

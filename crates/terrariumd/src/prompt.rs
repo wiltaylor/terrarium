@@ -440,8 +440,23 @@ mod tests {
             // Review: git in the lead's sandbox, the tests on a target.
             "Run the git\ncommands in your sandbox, never on a target.",
             "git checkout --detach origin/<branch>",
-            "terrarium exec <target>\n   -- sh -c 'cd /work/{{project.name}}/{{agent.name}}/<repo> && <test",
-            "If you hold no target, use the\n   test result in the worker's last comment.",
+            "`terrarium exec <target> -- sh -c 'cd\n   /work/{{project.name}}/{{agent.name}}/<repo> && <test command>'`",
+            // The lead grants itself the target for the review tests, and
+            // revokes it after.
+            "`terrarium admin target grant <target> {{agent.name}} --until 30m",
+            "`terrarium admin target revoke <target>\n   {{agent.name}}`",
+            "Then use the test result in\n   the worker's last comment.",
+            // The worker's lease ends after the merge, not at review.
+            "8. Run `terrarium card move <card> done",
+            "9. Now revoke the worker's lease: `terrarium admin target revoke <target>\n   <worker>`. Do not revoke it before the merge",
+            "Keep the lease while the card is in `review`",
+            // A grant whose target did not come up exits non-zero.
+            "If the\n   grant exits with an error (\"the target did not come up\"), do not assign\n   the card.",
+            // `lab_path` is relative to the workspace root.
+            "`--lab-path` is relative to the workspace\n   root `/work/{{project.name}}/<worker>`, not to the repo.",
+            "use `--lab-path <repo>`, never `--lab-path .`",
+            "terrarium admin target edit <target> --lab-path\n   <repo>",
+            "A lab file must not use `provision`",
             "Workers edit files and run git (commit,\npush) in the sandbox, and build and test on a target.",
         ] {
             assert!(t.contains(needle), "{needle}");

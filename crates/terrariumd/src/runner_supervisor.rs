@@ -477,6 +477,39 @@ impl LeadItem {
 /// The lead nudge of a card event, when the event is one: a card with no
 /// assignee moved into `ready` (also a card made in `ready`), or a card
 /// moved to `review` or `blocked`.
+/// The most card events [`acted_since_assign`] reads for one card.
+const CARD_EVENTS_READ: usize = 5_000;
+
+/// The agent `who` (a ULID) changed card `card` after the last assignment
+/// to it: a claim, a move, a comment, or an edit. Then the agent knows the
+/// card (for example from `card ls --mine` in its start turn), and the
+/// "Card ... was assigned to you" pointer is one wasted turn.
+fn acted_since_assign(
+    conn: &rusqlite::Connection,
+    card: &str,
+    who: &str,
+) -> crate::error::ApiResult<bool> {
+    let filter = crate::events::EventFilter {
+        card: Some(card.to_owned()),
+        kind: Some("card".into()),
+        ..Default::default()
+    };
+    let actor = format!("agent:{who}");
+    let mut assigned = false;
+    let mut acted = false;
+    for ev in crate::events::list(conn, &filter, 0, CARD_EVENTS_READ)? {
+        let change = ev.data.get("change").and_then(Value::as_str);
+        let to = ev.data.get("assignee").and_then(Value::as_str);
+        if change == Some("assigned") && to == Some(who) {
+            assigned = true;
+            acted = false;
+        } else if assigned && ev.actor.as_deref() == Some(actor.as_str()) {
+            acted = true;
+        }
+    }
+    Ok(acted)
+}
+
 fn lead_item(ev: &crate::events::StoredEvent) -> Option<LeadItem> {
     let s = |k: &str| ev.data.get(k).and_then(Value::as_str).map(str::to_owned);
     if ev.kind != "card" || s("change").as_deref() != Some("moved") {
@@ -1907,7 +1940,15 @@ impl RunnerSupervisor {
         keys.extend(pointer.leads.iter().map(|l| l.card.clone()));
         keys.sort();
         keys.dedup();
-        let cards = state
+        let assigned: Vec<String> = pointer
+            .cards
+            .iter()
+            .filter(|c| c.change == CardChange::Assigned)
+            .map(|c| c.card.clone())
+            .collect();
+        let me = id.to_string();
+        let who = me.clone();
+        let read = state
             .db
             .read(move |c| {
                 let mut out = HashMap::new();
@@ -1922,23 +1963,29 @@ impl RunnerSupervisor {
                         Err(e) => return Err(e),
                     }
                 }
-                Ok(out)
+                let mut acted = Vec::new();
+                for k in assigned {
+                    if acted_since_assign(c, &k, &who)? {
+                        acted.push(k);
+                    }
+                }
+                Ok((out, acted))
             })
             .await;
-        let cards = match cards {
+        let (cards, acted) = match read {
             Ok(c) => c,
             Err(e) => {
                 debug!(agent = %id, "cannot check the pointer cards: {e}");
                 return pointer;
             }
         };
-        let me = id.to_string();
         let now = |k: &str| cards.get(k).cloned().flatten().filter(|c| !c.2);
         pointer.cards.retain(|c| match now(&c.card) {
             None => false,
             Some((column, assignee, _)) => {
                 column != "done"
-                    && (c.change != CardChange::Assigned || assignee.as_deref() == Some(&me))
+                    && (c.change != CardChange::Assigned
+                        || (assignee.as_deref() == Some(&me) && !acted.contains(&c.card)))
             }
         });
         pointer.leads.retain(|l| match now(&l.card) {

@@ -10,7 +10,6 @@ use serde_json::json;
 use terrarium_core::config::AgentDef;
 use terrarium_core::{AgentId, AgentStatus, Answer, Role};
 
-use super::projects::Confirm;
 use super::{ApiJson, ApiQuery, Shared, paged, streams};
 use crate::actor::Actor;
 use crate::error::{ApiError, ApiResult, Code};
@@ -186,11 +185,21 @@ async fn update(
     Ok(Json(v))
 }
 
+/// The query of `DELETE /api/agents/{id}`.
+#[derive(Debug, Default, Deserialize)]
+struct RemoveQuery {
+    #[serde(default)]
+    confirm: bool,
+    /// Leave the workspace in the work root.
+    #[serde(default)]
+    keep_workspace: bool,
+}
+
 async fn remove(
     State(state): State<Shared>,
     actor: Actor,
     Path(id): Path<String>,
-    ApiQuery(c): ApiQuery<Confirm>,
+    ApiQuery(c): ApiQuery<RemoveQuery>,
 ) -> ApiResult<Response> {
     let a = load(&state, &actor, id).await?;
     policy::admin_project(&actor, &a.agent.project, "deleting an agent")?;
@@ -229,8 +238,13 @@ async fn remove(
         .write(actor.label(), move |t| agents::delete(t, &key))
         .await?;
     // The agent dir goes to the trash, not away: the operator can still
-    // read the transcripts (`crate::trash`).
-    crate::trash::trash_agent(&state, agent_id(&a)).await;
+    // read the transcripts (`crate::trash`). The workspace in the work root
+    // goes with it; a workspace elsewhere (a definition with its own
+    // path) stays.
+    let ws = (!c.keep_workspace
+        && crate::workspace::rel(&state.work_dir, &a.agent.workspace).is_some())
+    .then(|| a.agent.workspace.clone());
+    crate::trash::trash_agent(&state, agent_id(&a), ws).await;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 

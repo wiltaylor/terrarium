@@ -167,7 +167,11 @@ order:
 4. Run `terrarium admin agent start <worker>`.
 5. Give the worker a target for the card: `terrarium admin target grant
    <target> <worker> --until 4h --reason <card>` (see "Targets for
-   workers"). A worker cannot compile or test without a target.
+   workers"). A worker cannot compile or test without a target. If the
+   grant exits with an error ("the target did not come up"), do not assign
+   the card. The lease is made, but the target is not up. Fix the target
+   with `terrarium admin target edit <target> ...`, run `terrarium admin
+   target revoke <target> <worker>`, and grant again.
 6. Run `terrarium card assign <card> <worker>`. The card pointer starts the
    work. Do not send the worker a start mail.
 7. Add a line to the log (see below): "<card>: started <worker>".
@@ -178,12 +182,16 @@ commands in your sandbox, never on a target.
 1. Run `terrarium card show <card>`. Read the last comment.
 2. Run `git fetch origin && git log origin/<branch>`. Then run `git diff
    main...origin/<branch>`. Check the work against the card.
-3. Test the branch. If you hold a target (`terrarium targets ls`), run
-   `git checkout --detach origin/<branch>`, then `terrarium exec <target>
-   -- sh -c 'cd /work/{{project.name}}/{{agent.name}}/<repo> && <test
-   command>'`, then `git checkout main`. If you hold no target, use the
-   test result in the worker's last comment. A worker that gave no test
-   result did not finish.
+3. Test the branch on the target of the card. Grant yourself the target:
+   `terrarium admin target grant <target> {{agent.name}} --until 30m
+   --reason <card>`. Then run `git checkout --detach origin/<branch>`,
+   `terrarium exec <target> -- sh -c 'cd
+   /work/{{project.name}}/{{agent.name}}/<repo> && <test command>'`, and
+   `git checkout main`. Then run `terrarium admin target revoke <target>
+   {{agent.name}}`. If the project has no target that you may use, or the
+   grant fails, revoke any lease that it made. Then use the test result in
+   the worker's last comment. A worker that gave no test result did not
+   finish.
 4. If the work is not complete, move the card back with `terrarium card
    move <card> in_progress -m "what to fix"`. Stop here.
 5. Send `terrarium mail send operator -s "<card> is ready to merge" "Branch
@@ -196,9 +204,13 @@ commands in your sandbox, never on a target.
    origin main`. Then run `git merge --no-ff --no-edit origin/<branch> &&
    git push origin main`.
 8. Run `terrarium card move <card> done -m "Merged <branch> into main."`.
-9. Run `terrarium admin agent stop <worker>`. Then run `terrarium admin
-   agent rm <worker> --confirm`.
-10. Reply on the same thread with `terrarium mail reply <id> "Merged
+9. Now revoke the worker's lease: `terrarium admin target revoke <target>
+   <worker>`. Do not revoke it before the merge: if the operator asks for a
+   change, the worker needs the target.
+10. Run `terrarium admin agent stop <worker>`. Then run `terrarium admin
+    agent rm <worker> --confirm`. The workspace of the worker goes to the
+    trash with it.
+11. Reply on the same thread with `terrarium mail reply <id> "Merged
     <branch> into main (<commit>)."`. `<id>` is the ID of the operator's
     mail "merge <card>". Do not use `mail send -s "Re: ..."`: it starts a
     new thread. Add a line to the log.
@@ -209,7 +221,8 @@ ask the operator. Add a line to the log.
 
 **The log.** Keep a running note in the wiki page `ops/leader-log`. Add one
 line for each step that you complete: `terrarium wiki append ops/leader-log
--b "- <time> <card>: <what you did>" -m "<card>"`. If the page does not
+-b "- <time> <card>: <what you did>" -m "<card>"`. `<time>` is the UTC date
+and time from `date -u +%Y-%m-%dT%H:%MZ`, not the date only. If the page does not
 exist, make it with `terrarium wiki new ops/leader-log -b "# Leader log" -m
 "Start the log"`.
 
@@ -240,10 +253,22 @@ worker to its targets at `/work/{{project.name}}/<worker>`.
    new container only when no session is live on it. Else the start says
    "attach needs a restart of the target": give that worker its own target.
 5. A vmlab lab from a repo of the project: `--kind vmlab --lab-repo <repo>
-   --lab-path <dir> --machine <machine> --ephemeral`. A lab in each worker's
-   own checkout: `--kind vmlab --lab-from-workspace --lab-path <repo>
-   --machine <machine> --ephemeral`. Each worker then gets its own lab
-   instance, so do not grant it with `--exclusive`.
+   --lab-path <dir> --machine <machine> --ephemeral`. Here `--lab-path` is
+   relative to the root of the repo. A lab in each worker's own checkout:
+   `--kind vmlab --lab-from-workspace --lab-path <repo> --machine <machine>
+   --ephemeral`. Each worker then gets its own lab instance, so do not
+   grant it with `--exclusive`.
+6. With `--lab-from-workspace`, `--lab-path` is relative to the workspace
+   root `/work/{{project.name}}/<worker>`, not to the repo. The checkout of
+   a repo is in `<repo>` under that root. So when `vmlab.wcl` is at the root
+   of the repo, use `--lab-path <repo>`, never `--lab-path .`.
+7. To fix a target, run `terrarium admin target edit <target> --lab-path
+   <repo>` (or `--machine`, `--image`, `--ephemeral`, `--keep`). Do not
+   remove the target and make it again. A running target takes only
+   `--keep`, `--no-keep`, and `--snapshot-before-task`; bring it down first
+   for other changes.
+8. A lab file must not use `provision`: the lab allowlist refuses it. The
+   lab image must have the tools (for example `make`) already.
 
 ## Shared target
 
@@ -258,10 +283,12 @@ can use the target only while the lease is active.
    <worker> --until 2h`.
 2. If the grant is refused (`lease_held`), another worker holds the
    target. The error names that worker and the end time. Do not assign the
-   card. Keep it in `ready`, and wait until the card of that worker moves
-   to `review`.
-3. When the card moves to `review`, run `terrarium admin target revoke
-   <target> <worker>`. If you move the card back to `in_progress`, grant
-   the target again. Then give the target to the next card that needs it.
+   card. Keep it in `ready`, and wait until the card of that worker is
+   merged.
+3. Keep the lease while the card is in `review`: the worker may need the
+   target for a fix. After the merge, run `terrarium admin target revoke
+   <target> <worker>`. Then give the target to the next card that needs
+   it. While a worker holds an exclusive lease, your own grant is refused
+   (`lease_held`): use the test result in the worker's last comment.
 4. Run `terrarium admin target leases <target>` to see who holds it.
 5. Add a line to the log for each grant and each revoke.

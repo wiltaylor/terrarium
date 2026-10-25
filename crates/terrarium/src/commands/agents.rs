@@ -21,12 +21,18 @@ pub async fn agent(ctx: &Ctx, cmd: &AgentCmd) -> anyhow::Result<()> {
         }
         AgentCmd::New(a) => new(ctx, a).await,
         AgentCmd::Set(a) => set(ctx, a).await,
-        AgentCmd::Rm { agent, confirm } => {
-            let q = if *confirm {
-                vec![("confirm".into(), "true".into())]
-            } else {
-                vec![]
-            };
+        AgentCmd::Rm {
+            agent,
+            confirm,
+            keep_workspace,
+        } => {
+            let mut q: Vec<(String, String)> = Vec::new();
+            if *confirm {
+                q.push(("confirm".into(), "true".into()));
+            }
+            if *keep_workspace {
+                q.push(("keep_workspace".into(), "true".into()));
+            }
             ctx.api.delete(&agent_path(agent), q).await?;
             ctx.emit(&json!({"deleted": agent}), |c, _| {
                 c.line(format!("deleted agent {agent}"));

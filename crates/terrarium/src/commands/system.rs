@@ -300,6 +300,40 @@ pub async fn admin_target(ctx: &Ctx, cmd: &AdminTargetCmd) -> anyhow::Result<()>
                 }
             })
         }
+        AdminTargetCmd::Edit(a) => {
+            let mut body = json!({});
+            set_opt(&mut body, "lab_path", a.lab_path.clone());
+            set_opt(&mut body, "lab_ref", a.lab_ref.clone());
+            set_opt(&mut body, "machine", a.machine.clone());
+            set_opt(&mut body, "image", a.image.clone());
+            set_opt(&mut body, "host", a.host.clone());
+            if a.ephemeral || a.permanent {
+                body["ephemeral"] = a.ephemeral.into();
+            }
+            if a.keep || a.no_keep {
+                body["keep"] = a.keep.into();
+            }
+            set_opt(&mut body, "snapshot_before_task", a.snapshot_before_task);
+            if body == json!({}) {
+                return Err(crate::api::CliError::usage(
+                    "give a change: --lab-path, --lab-ref, --machine, --image, --host, \
+                     --ephemeral, --permanent, --keep, --no-keep, or --snapshot-before-task",
+                ));
+            }
+            let path = format!("/api/targets/{}", crate::transport::encode(&a.name));
+            let t = ctx.api.patch(&path, body.clone()).await?;
+            ctx.emit(&t, |c, t| {
+                let keys: Vec<&str> = body
+                    .as_object()
+                    .map(|o| o.keys().map(String::as_str).collect())
+                    .unwrap_or_default();
+                c.line(format!(
+                    "changed target {}: {}",
+                    field(t, "name"),
+                    keys.join(", ")
+                ));
+            })
+        }
         AdminTargetCmd::Rm { name } => {
             let path = format!("/api/targets/{}", crate::transport::encode(name));
             let v = ctx.api.delete(&path, vec![]).await?;
@@ -335,6 +369,7 @@ pub async fn admin_target(ctx: &Ctx, cmd: &AdminTargetCmd) -> anyhow::Result<()>
             until: end,
             exclusive,
             reason,
+            no_lifecycle_check,
         } => {
             let mut body = json!({"agent": agent});
             set_opt(&mut body, "until", end.clone());
@@ -357,7 +392,17 @@ pub async fn admin_target(ctx: &Ctx, cmd: &AdminTargetCmd) -> anyhow::Result<()>
                 if let Some(e) = v["lifecycle_error"].as_str() {
                     c.line(format!("warning: the target did not come up: {e}"));
                 }
-            })
+            })?;
+            // The lease stands, but the target is not up: a non-zero exit
+            // stops an `&&` chain before the `card assign`.
+            match v["lifecycle_error"].as_str() {
+                Some(e) if !no_lifecycle_check => Err(anyhow::anyhow!(
+                    "the lease on {target} is granted, but the target did not come up: {e}. \
+                     Fix the target (`terrarium admin target edit`), then revoke the lease \
+                     and grant it again"
+                )),
+                _ => Ok(()),
+            }
         }
         AdminTargetCmd::Revoke { target, agent } => {
             let v = ctx

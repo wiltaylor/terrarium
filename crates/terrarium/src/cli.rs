@@ -272,12 +272,16 @@ pub enum AgentCmd {
     New(Box<AgentNewArgs>),
     /// Change an agent's definition
     Set(Box<AgentSetArgs>),
-    /// Delete an agent
+    /// Delete an agent. Its agent dir and its workspace
+    /// (`work/<project>/<agent>`) go to the trash.
     Rm {
         agent: String,
         /// Needed when the agent has a live session
         #[arg(long)]
         confirm: bool,
+        /// Leave the workspace in `work/<project>/<agent>`
+        #[arg(long)]
+        keep_workspace: bool,
     },
     /// Start an agent; wait up to 10 s for its new status
     Start {
@@ -456,8 +460,17 @@ pub enum MailCmd {
     Send {
         /// An agent, `operator`, or `project:<name>`
         to: String,
+        /// The body, or `-` for stdin (or `--body`)
+        #[arg(required_unless_present = "body_flag", conflicts_with = "body_flag")]
+        body: Option<String>,
         /// The body, or `-` for stdin
-        body: String,
+        #[arg(
+            long = "body",
+            short = 'b',
+            value_name = "TEXT",
+            allow_hyphen_values = true
+        )]
+        body_flag: Option<String>,
         #[arg(long, short = 's')]
         subject: Option<String>,
         /// Post on this thread
@@ -470,8 +483,17 @@ pub enum MailCmd {
     /// Reply to every participant of the message's thread
     Reply {
         id: String,
+        /// The body, or `-` for stdin (or `--body`)
+        #[arg(required_unless_present = "body_flag", conflicts_with = "body_flag")]
+        body: Option<String>,
         /// The body, or `-` for stdin
-        body: String,
+        #[arg(
+            long = "body",
+            short = 'b',
+            value_name = "TEXT",
+            allow_hyphen_values = true
+        )]
+        body_flag: Option<String>,
         #[arg(long, short = 's')]
         subject: Option<String>,
     },
@@ -502,14 +524,33 @@ pub enum InboxCmd {
     /// Reply from the project inbox
     Reply {
         id: String,
+        /// The body, or `-` for stdin (or `--body`)
+        #[arg(required_unless_present = "body_flag", conflicts_with = "body_flag")]
+        body: Option<String>,
         /// The body, or `-` for stdin
-        body: String,
+        #[arg(
+            long = "body",
+            short = 'b',
+            value_name = "TEXT",
+            allow_hyphen_values = true
+        )]
+        body_flag: Option<String>,
         #[arg(long, short = 's')]
         subject: Option<String>,
     },
     /// Send to the project inbox
     Send {
-        body: String,
+        /// The body, or `-` for stdin (or `--body`)
+        #[arg(required_unless_present = "body_flag", conflicts_with = "body_flag")]
+        body: Option<String>,
+        /// The body, or `-` for stdin
+        #[arg(
+            long = "body",
+            short = 'b',
+            value_name = "TEXT",
+            allow_hyphen_values = true
+        )]
+        body_flag: Option<String>,
         #[arg(long, short = 's')]
         subject: Option<String>,
         #[arg(long, short = 't')]
@@ -555,15 +596,29 @@ pub enum CardCmd {
     },
     /// Assign a card: an agent, `operator`, `me`, or `none`
     Assign { id: String, agent: String },
-    /// Comment on a card: `card comment <id> <text>` or `-m <text>`
+    /// Comment on a card: `card comment <id> <text>`, `-b <text>`, or `-m <text>`
     Comment {
         id: String,
         /// The text, or `-` for stdin
-        #[arg(required_unless_present = "message", conflicts_with = "message")]
+        #[arg(required_unless_present_any = ["message", "body"], conflicts_with_all = ["message", "body"])]
         text: Option<String>,
         /// The text, as `card move -m` takes it
-        #[arg(long = "message", short = 'm', value_name = "TEXT")]
+        #[arg(
+            long = "message",
+            short = 'm',
+            value_name = "TEXT",
+            allow_hyphen_values = true,
+            conflicts_with = "body"
+        )]
         message: Option<String>,
+        /// The text, or `-` for stdin
+        #[arg(
+            long = "body",
+            short = 'b',
+            value_name = "TEXT",
+            allow_hyphen_values = true
+        )]
+        body: Option<String>,
     },
     /// Link a mail thread, branch, card, or URL
     Link {
@@ -595,7 +650,7 @@ pub struct CardNewArgs {
     /// The title. `--from-mail` can give it.
     pub title: Option<String>,
     /// The body, or `-` for stdin
-    #[arg(long, short = 'b')]
+    #[arg(long, short = 'b', allow_hyphen_values = true)]
     pub body: Option<String>,
     #[arg(long, short = 'c')]
     pub column: Option<String>,
@@ -623,7 +678,7 @@ pub struct CardEditArgs {
     #[arg(long)]
     pub title: Option<String>,
     /// The body, or `-` for stdin
-    #[arg(long, short = 'b')]
+    #[arg(long, short = 'b', allow_hyphen_values = true)]
     pub body: Option<String>,
     /// Replace the labels; repeat for more
     #[arg(long = "label")]
@@ -675,7 +730,7 @@ pub enum MemCmd {
     /// Change one of your memories
     Edit {
         id: String,
-        #[arg(long, short = 'b')]
+        #[arg(long, short = 'b', allow_hyphen_values = true)]
         body: Option<String>,
         #[arg(long)]
         title: Option<String>,
@@ -709,7 +764,7 @@ pub struct MemNewArgs {
     /// Title it as a claim
     pub title: String,
     /// The body, or `-` for stdin
-    #[arg(long, short = 'b')]
+    #[arg(long, short = 'b', allow_hyphen_values = true)]
     pub body: Option<String>,
     #[arg(long = "tag")]
     pub tags: Vec<String>,
@@ -736,7 +791,7 @@ pub enum WikiCmd {
     /// Create a page; prints the preview URL
     New {
         page: String,
-        #[arg(long, short = 'b')]
+        #[arg(long, short = 'b', allow_hyphen_values = true)]
         body: String,
         #[arg(long)]
         title: Option<String>,
@@ -746,7 +801,7 @@ pub enum WikiCmd {
     /// Replace a page; refused if the base revision is stale
     Edit {
         page: String,
-        #[arg(long, short = 'b')]
+        #[arg(long, short = 'b', allow_hyphen_values = true)]
         body: String,
         #[arg(long)]
         base: u64,
@@ -757,7 +812,7 @@ pub enum WikiCmd {
     Section {
         page: String,
         heading: String,
-        #[arg(long, short = 'b')]
+        #[arg(long, short = 'b', allow_hyphen_values = true)]
         body: String,
         #[arg(long)]
         base: Option<u64>,
@@ -767,7 +822,7 @@ pub enum WikiCmd {
     /// Append to a page
     Append {
         page: String,
-        #[arg(long, short = 'b')]
+        #[arg(long, short = 'b', allow_hyphen_values = true)]
         body: String,
         #[arg(short = 'm', long = "summary")]
         summary: Option<String>,
@@ -1027,8 +1082,10 @@ pub enum AdminTargetCmd {
         /// `vmlab` with `--lab-repo`: a branch, a tag, or a commit
         #[arg(long)]
         lab_ref: Option<String>,
-        /// `vmlab`: the directory in the repo (or the workspace) that holds
-        /// `vmlab.wcl`
+        /// `vmlab`: the directory that holds `vmlab.wcl`, relative to the
+        /// root of the `--lab-repo` repo, or with `--lab-from-workspace`
+        /// relative to the workspace root `work/<project>/<agent>`: a lab
+        /// at the root of the checkout of repo `app` is `--lab-path app`
         #[arg(long)]
         lab_path: Option<String>,
         /// `vmlab`: the lab is in each holder's workspace; each holder gets
@@ -1047,6 +1104,9 @@ pub enum AdminTargetCmd {
         #[arg(long)]
         global: bool,
     },
+    /// Change a target (`PATCH /api/targets/{name}`). A running target
+    /// takes only `--keep`, `--no-keep`, and `--snapshot-before-task`
+    Edit(Box<AdminTargetEditArgs>),
     /// Remove a target
     Rm { name: String },
     /// Run a lifecycle verb: up, down, snapshot, restore, or status
@@ -1078,6 +1138,10 @@ pub enum AdminTargetCmd {
         /// Why, for the audit log (for example the card ID)
         #[arg(long)]
         reason: Option<String>,
+        /// Exit 0 when the lease is made but the target did not come up
+        /// (the default is exit 1, so that an `&&` chain stops)
+        #[arg(long)]
+        no_lifecycle_check: bool,
     },
     /// Take a lease back; the agent's live sessions on the target end
     Revoke { target: String, agent: String },
@@ -1096,6 +1160,41 @@ pub enum AdminTargetCmd {
         #[arg(long)]
         all: bool,
     },
+}
+
+/// `admin target edit`: only the flags given change.
+#[derive(Debug, Args)]
+pub struct AdminTargetEditArgs {
+    pub name: String,
+    /// `vmlab`: the directory that holds `vmlab.wcl` (see `target new`)
+    #[arg(long)]
+    pub lab_path: Option<String>,
+    /// `vmlab` with `--lab-repo`: a branch, a tag, or a commit
+    #[arg(long)]
+    pub lab_ref: Option<String>,
+    /// `vmlab`: the machine in the lab
+    #[arg(long)]
+    pub machine: Option<String>,
+    /// `docker`: the image to run
+    #[arg(long)]
+    pub image: Option<String>,
+    /// The host agent
+    #[arg(long)]
+    pub host: Option<String>,
+    /// Made on agent start and removed on agent stop
+    #[arg(long, conflicts_with = "permanent")]
+    pub ephemeral: bool,
+    /// Not made and removed with the agents
+    #[arg(long)]
+    pub permanent: bool,
+    /// Keep an ephemeral target after the agent stops
+    #[arg(long, conflicts_with = "no_keep")]
+    pub keep: bool,
+    #[arg(long)]
+    pub no_keep: bool,
+    /// `true` or `false`: take a snapshot before the first task
+    #[arg(long, value_name = "BOOL")]
+    pub snapshot_before_task: Option<bool>,
 }
 
 #[derive(Debug, Subcommand)]

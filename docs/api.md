@@ -438,6 +438,9 @@ POST /api/projects/ops/repos
 ```
 
 `credential` is a key name in `/state/credentials`, never the secret.
+`branch` is an alias of `default_branch`. A body with the two is `400
+bad_request`. A body with an unknown field is `400 bad_request`, and the
+message names the fields.
 
 ### 5.1 Repos, checkouts, and credentials
 
@@ -604,13 +607,17 @@ An agent is the core `Agent` with bookkeeping fields:
 | `POST /api/agents` | an agent definition | `201` agent | project_admin of `project`; some `policy` entries need sysadmin (below) |
 | `GET /api/agents/{id}` | | `200` agent | read |
 | `PATCH /api/agents/{id}` | `{"harness"?, "subscription"?, "model"?, "prompt"?, "policy"?, "restart"?, "new_session_on_prompt_change"?}` | `200` agent | project_admin; some `policy` entries need sysadmin (below) |
-| `DELETE /api/agents/{id}` | `?confirm=true` when live | `204` | project_admin |
+| `DELETE /api/agents/{id}` | `?confirm=true` when live; `?keep_workspace=true` | `204` | project_admin |
 
 `DELETE` stops a live agent, waits for it to end (up to 10 s), and moves
-its dir `<state>/agents/<ulid>/` to `<state>/trash/<ulid>-<ts>/`. The
-operator can still read the transcripts and the event log there. The daily
-prune timer removes a trash entry older than `TERRARIUM_TRASH_DAYS` days
-(default `7`).
+its dir `<state>/agents/<ulid>/` to `<state>/trash/<ulid>-<ts>/`. It also
+moves the workspace `<work>/<project>/<agent>` (§17.8) to
+`<state>/trash/<ulid>-<ts>/workspace`, unless `?keep_workspace=true`. A
+workspace outside the work root stays. The operator can still read the
+transcripts, the event log, and the files there. The daily prune timer
+removes a trash entry older than `TERRARIUM_TRASH_DAYS` days (default `7`),
+with its workspace. A reload that removes an agent file and a fleet prune
+move the agent dir only.
 
 The definition is the TOML agent definition as JSON:
 
@@ -1982,7 +1989,7 @@ max}`.
 | `GET /api/targets?usable=&project=` | | `200` targets by name | read |
 | `POST /api/targets` | target, as in a target file, with `name` | `201` target | project_admin of `project`; sysadmin for a global target |
 | `GET /api/targets/{name}` | | `200` target | read |
-| `PATCH /api/targets/{name}` | JSON merge patch; `null` removes a field | `200` target | as `POST` |
+| `PATCH /api/targets/{name}` | JSON merge patch; `null` removes a field | `200` target; `409 conflict` while it runs (below) | as `POST` |
 | `DELETE /api/targets/{name}` | | `204` | as `POST` |
 | `GET /api/projects/{name}/targets` | | `200` the project's and the global targets, each with `scope` | read |
 
@@ -2013,6 +2020,23 @@ The three kinds of vmlab target (§17.8):
 `lab_repo` and `lab_from_workspace` need a project target. `lab_path` is a
 relative directory with no `..`. `lab_ref` takes the rules of a positional
 value.
+
+**`lab_path` and the workspace root.** With `lab_repo`, `lab_path` is
+relative to the root of the repo. With `lab_from_workspace`, `lab_path` is
+relative to the workspace root `<work>/<project>/<agent>`, not to a repo.
+A checkout is one level down, in `<work>/<project>/<agent>/<repo>`. So a
+`vmlab.wcl` at the root of the repo `hello-svc` is `"lab_path":
+"hello-svc"` (`--lab-path hello-svc`), never `.`. When the host agent
+finds no lab file, the error says "lab_path is relative to the workspace
+root" and names the directories one level down that hold a `vmlab.wcl`:
+"try --lab-path hello-svc".
+
+**A change to a running target.** While the target runs (its `state`, or
+the state of one of its lab instances, is `running`), `PATCH` changes only
+`keep` and `snapshot_before_task`. A change to any other field is `409
+conflict`, with `details: {state, fields}`. Bring the target down first. A
+field with its current value is no change. `terrarium admin target edit`
+sends this `PATCH`.
 
 An `ephemeral` target must be `docker` (with `image`) or `vmlab`. Values
 that go onto a command line (`host`, `address`, `image`, `container`,
@@ -2281,7 +2305,7 @@ worker for one card, and to take it back. The daemon enforces it at once.
 
 | Endpoint | Body or query | Answer | Needs |
 |---|---|---|---|
-| `POST /api/targets/{name}/leases` | `{"agent", "until"?, "exclusive"?, "reason"?}` | `201` lease, with `lifecycle` or `lifecycle_error` when the grant ran a verb | below |
+| `POST /api/targets/{name}/leases` | `{"agent", "until"?, "exclusive"?, "reason"?}` | `201` lease, with `lifecycle` or `lifecycle_error` when the grant ran a verb. With `lifecycle_error`, the lease is made, but the target is not up; `terrarium admin target grant` then exits `1` | below |
 | `GET /api/targets/{name}/leases` | `?all=true` also lists the ended leases (the last 100) | `200` leases, newest first | read the target |
 | `PATCH /api/targets/{name}/leases/{agent}` | `{"until"}`; `null`: until a revoke | `200` lease | below |
 | `DELETE /api/targets/{name}/leases/{agent}` | | `200` the ended lease | below, or the holder itself |

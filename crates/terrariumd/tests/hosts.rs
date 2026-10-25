@@ -949,7 +949,16 @@ async fn a_permanent_docker_target_restarts_its_container_on_up() {
     );
     assert!(!log.contains("docker rm"), "{log}");
 
-    // The same target as ephemeral with keep: down stops, up makes a new one.
+    // The same target as ephemeral with keep: down stops, up makes a new
+    // one. A running target does not change `ephemeral`: down first.
+    lab.td
+        .patch("/api/targets/dbox", json!({"ephemeral": true}))
+        .await
+        .err(409, "conflict");
+    assert_eq!(
+        lab.td.post_empty("/api/targets/dbox/down").await.ok()["state"],
+        "stopped"
+    );
     let r = lab
         .td
         .patch(
@@ -959,16 +968,62 @@ async fn a_permanent_docker_target_restarts_its_container_on_up() {
         .await;
     assert_eq!(r.status, 200, "{}", r.body);
     assert_eq!(
-        lab.td.post_empty("/api/targets/dbox/down").await.ok()["state"],
-        "stopped"
-    );
-    assert_eq!(
         lab.td.post_empty("/api/targets/dbox/up").await.ok()["state"],
         "running"
+    );
+    assert_eq!(
+        lab.td.post_empty("/api/targets/dbox/down").await.ok()["state"],
+        "stopped"
     );
     let log = lab.log();
     assert!(log.contains("docker rm -f -v terrarium-dbox"), "{log}");
     assert_eq!(log.matches("docker run ").count(), 2, "{log}");
+}
+
+/// `PATCH /api/targets/{name}` (`admin target edit`) on a running target
+/// changes only `keep` and `snapshot_before_task`; the other fields wait
+/// until the target is down. A field given with its current value is no
+/// change.
+#[tokio::test]
+async fn a_running_target_takes_only_keep_and_snapshot_changes() {
+    let lab = Lab::start().await;
+    let _h = lab.host("lab1").await;
+    lab.target(json!({"name": "dbox", "kind": "docker", "host": "lab1",
+                      "image": "alpine:3"}))
+        .await;
+    lab.td.post_empty("/api/targets/dbox/up").await.ok();
+    let r = lab
+        .td
+        .patch(
+            "/api/targets/dbox",
+            json!({"keep": true, "snapshot_before_task": true, "image": "alpine:3"}),
+        )
+        .await;
+    assert_eq!(r.ok()["keep"], true);
+    assert_eq!(r.body["snapshot_before_task"], true);
+    let r = lab
+        .td
+        .patch(
+            "/api/targets/dbox",
+            json!({"image": "python:3", "keep": false}),
+        )
+        .await;
+    assert_eq!(r.status, 409, "{}", r.body);
+    let msg = r.body["error"]["message"].as_str().unwrap();
+    assert!(
+        msg.contains("is running") && msg.contains("`image`"),
+        "{msg}"
+    );
+    assert_eq!(r.body["error"]["details"]["fields"], json!(["image"]));
+    let t = lab.td.get("/api/targets/dbox").await;
+    assert_eq!(t.ok()["image"], "alpine:3");
+    assert_eq!(t.body["keep"], true, "a refused PATCH changes nothing");
+    lab.td.post_empty("/api/targets/dbox/down").await.ok();
+    let r = lab
+        .td
+        .patch("/api/targets/dbox", json!({"image": "python:3"}))
+        .await;
+    assert_eq!(r.ok()["image"], "python:3");
 }
 
 const FILE_TARGET: &str = "kind = \"ssh\"\naddress = \"build@host\"\nproject = \"terra\"\n";

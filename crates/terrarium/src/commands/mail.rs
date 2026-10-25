@@ -124,11 +124,12 @@ pub async fn mail(ctx: &Ctx, cmd: &MailCmd) -> anyhow::Result<()> {
         MailCmd::Send {
             to,
             body,
+            body_flag,
             subject,
             thread,
             from,
         } => {
-            let mut b = json!({"to": to, "body": ctx.text(body)?});
+            let mut b = json!({"to": to, "body": body_arg(ctx, body, body_flag)?});
             set_opt(&mut b, "subject", subject.clone());
             set_opt(&mut b, "thread_id", thread.clone());
             set_opt(&mut b, "from", from.clone());
@@ -142,8 +143,13 @@ pub async fn mail(ctx: &Ctx, cmd: &MailCmd) -> anyhow::Result<()> {
                 ));
             })
         }
-        MailCmd::Reply { id, body, subject } => {
-            let mut b = json!({"body": ctx.text(body)?});
+        MailCmd::Reply {
+            id,
+            body,
+            body_flag,
+            subject,
+        } => {
+            let mut b = json!({"body": body_arg(ctx, body, body_flag)?});
             set_opt(&mut b, "subject", subject.clone());
             let r = ctx
                 .api
@@ -175,6 +181,17 @@ pub async fn mail(ctx: &Ctx, cmd: &MailCmd) -> anyhow::Result<()> {
                 c.line(format!("no mail after {timeout}s"));
             })
         }
+    }
+}
+
+/// The body from the positional or from `--body`; `-` reads stdin. Clap
+/// makes sure that exactly one is there.
+fn body_arg(ctx: &Ctx, pos: &Option<String>, flag: &Option<String>) -> anyhow::Result<String> {
+    match pos.as_deref().or(flag.as_deref()) {
+        Some(b) => ctx.text(b),
+        None => Err(crate::api::CliError::usage(
+            "give the body, or `--body <text|->`",
+        )),
     }
 }
 
@@ -261,8 +278,13 @@ pub async fn inbox(ctx: &Ctx, cmd: &InboxCmd) -> anyhow::Result<()> {
             }
             ctx.emit(&m, print_message)
         }
-        InboxCmd::Reply { id, body, subject } => {
-            let mut b = json!({"body": ctx.text(body)?});
+        InboxCmd::Reply {
+            id,
+            body,
+            body_flag,
+            subject,
+        } => {
+            let mut b = json!({"body": body_arg(ctx, body, body_flag)?});
             set_opt(&mut b, "subject", subject.clone());
             let r = ctx
                 .api
@@ -272,10 +294,11 @@ pub async fn inbox(ctx: &Ctx, cmd: &InboxCmd) -> anyhow::Result<()> {
         }
         InboxCmd::Send {
             body,
+            body_flag,
             subject,
             thread,
         } => {
-            let mut b = json!({"body": ctx.text(body)?});
+            let mut b = json!({"body": body_arg(ctx, body, body_flag)?});
             set_opt(&mut b, "subject", subject.clone());
             set_opt(&mut b, "thread_id", thread.clone());
             let m = ctx.api.post(&base, Some(b)).await?;

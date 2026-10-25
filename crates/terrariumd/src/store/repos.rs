@@ -60,14 +60,15 @@ pub fn list_repos(conn: &Connection, project: &str, page: &Page) -> ApiResult<Pa
 }
 
 /// The body of `POST /api/projects/{name}/repos`. Without a name, the last
-/// part of the URL names the repo.
+/// part of the URL names the repo. `branch` is an alias of
+/// `default_branch`.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NewRepo {
     #[serde(default)]
     pub name: Option<String>,
     pub url: String,
-    #[serde(default)]
+    #[serde(default, alias = "branch")]
     pub default_branch: Option<String>,
     #[serde(default)]
     pub credential: Option<String>,

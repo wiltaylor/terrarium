@@ -331,6 +331,29 @@ pub fn update(t: &mut Tx<'_>, name: &str, patch: &Value) -> ApiResult<TargetRow>
     let Some(o) = v.as_object_mut() else {
         return Err(ApiError::internal("a target is not an object"));
     };
+    if is_running(&current) {
+        let mut changed: Vec<&str> = p
+            .iter()
+            .filter(|(k, val)| {
+                k.as_str() != "name" && o.get(k.as_str()).unwrap_or(&Value::Null) != *val
+            })
+            .map(|(k, _)| k.as_str())
+            .filter(|k| !RUNNING_PATCHABLE.contains(k))
+            .collect();
+        changed.sort_unstable();
+        if !changed.is_empty() {
+            return Err(ApiError::conflict(format!(
+                "target `{name}` is running: only `keep` and `snapshot_before_task` change \
+                 now; bring it down first to change {}",
+                changed
+                    .iter()
+                    .map(|k| format!("`{k}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+            .with_details(json!({"state": "running", "fields": changed})));
+        }
+    }
     for (k, val) in p {
         if k == "name" && val.as_str() != Some(name) {
             return Err(ApiError::invalid("a target cannot be renamed"));
@@ -359,6 +382,14 @@ pub fn update(t: &mut Tx<'_>, name: &str, patch: &Value) -> ApiResult<TargetRow>
         ],
     )?;
     get(t, name)
+}
+
+/// The fields that a PATCH may change while the target runs.
+const RUNNING_PATCHABLE: [&str; 2] = ["keep", "snapshot_before_task"];
+
+/// The target, or one of its lab instances, runs.
+fn is_running(r: &TargetRow) -> bool {
+    r.state == "running" || r.runtime.instances.values().any(|i| i.state == "running")
 }
 
 /// Delete an API target.

@@ -88,6 +88,16 @@ yet`.
 works for mail, inbox replies, turns, cards, comments, memories, wiki
 pages, and version notes.
 
+The body flag is the same on every command with a body: `--body <text|->`
+or `-b <text|->`. This applies to `mail send`, `mail reply`, `inbox send`,
+`inbox reply`, `card new`, `card edit`, `card comment`, `mem new`, `mem
+edit`, `wiki new`, `wiki edit`, `wiki section`, and `wiki append`. Where a
+command also takes the body as a positional argument (`mail send`, `mail
+reply`, `inbox send`, `inbox reply`, `card comment`), give one of the two,
+not both. The value of the flag can start with `-`: `-b "- 10:00 TER-1:
+started"` is a body, not a flag. A positional body that starts with `-`
+needs `--body` or `--body=`.
+
 ## 4. Commands for both modes
 
 ### Projects and repos
@@ -136,7 +146,7 @@ terrarium agent new <name> --harness <h> [--subscription s] [--model m] [--promp
 terrarium agent new --from-file agents/lead.toml [flags that override the file]
 terrarium agent set <agent> [--harness h] [--subscription s] [--model m] [--prompt p]
                     [--restart r] [--policy JSON] [--new-session-on-prompt-change true|false]
-terrarium agent rm <agent> [--confirm]
+terrarium agent rm <agent> [--confirm] [--keep-workspace]
 terrarium agent start|stop|restart <agent> [--no-wait]
 terrarium agent send <agent> <text | ->
 terrarium agent answer <agent> [--request-id id] (--choice N | --allow | --deny | --text T)
@@ -163,6 +173,13 @@ was stopped` and does not poll. With `--json`, the agent object has `was`,
 `blocked`, or `error` after a start or a restart, and `stopped` or `error`
 after a stop.
 
+`agent rm` deletes the agent. The daemon moves the agent dir and the
+workspace `work/<project>/<agent>` to `<state>/trash/<ulid>-<ts>/` (the
+workspace goes to `<that dir>/workspace`). The trash prune removes the
+entry after `TERRARIUM_TRASH_DAYS` days. `--keep-workspace` leaves the
+workspace in `work/<project>/<agent>`. A live agent needs `--confirm`
+([api.md §6.1](api.md#61-crud)).
+
 `agent attach` puts the terminal in raw mode, sends each key to the PTY,
 and sends a resize when the window changes size. Press Ctrl-] to detach.
 The agent continues to run.
@@ -173,13 +190,13 @@ The agent continues to run.
 terrarium mail ls [--to a] [--from a] [-t thread] [--state s] [--unread]
 terrarium mail check                          my unread count, total count, unread list
 terrarium mail read [id] [-t thread] [--mark | --no-mark]
-terrarium mail send <to> <body | -> [-s subject] [-t thread] [--from project:<name>]
-terrarium mail reply <id> <body | -> [-s subject]
+terrarium mail send <to> (<body | -> | -b body | -) [-s subject] [-t thread] [--from project:<name>]
+terrarium mail reply <id> (<body | -> | -b body | -) [-s subject]
 terrarium mail wait [--timeout 300]
 terrarium inbox ls [--unread] [--state s] [-t thread]
 terrarium inbox read <id> [--mark]
-terrarium inbox reply <id> <body | -> [-s subject]
-terrarium inbox send <body | -> [-s subject] [-t thread]
+terrarium inbox reply <id> (<body | -> | -b body | -) [-s subject]
+terrarium inbox send (<body | -> | -b body | -) [-s subject] [-t thread]
 ```
 
 `mail read` without an ID shows my unread mail. With `-t`, it shows the
@@ -204,15 +221,15 @@ terrarium card edit <id> [--title t] [-b body] [--label l]... [--depends-on id].
 terrarium card claim <id>
 terrarium card move <id> <column> [--position n] [-m comment]
 terrarium card assign <id> <agent | operator | me | none>
-terrarium card comment <id> (<text | -> | -m text)
+terrarium card comment <id> (<text | -> | -b text | - | -m text)
 terrarium card link <id> (--thread T | --branch b | --card id | --link-url u)
 terrarium card rm <id>                        archives the card
 terrarium card events <id>
 terrarium card wait [--mine] [--timeout 300]
 ```
 
-`card comment` takes the text as the last argument or with `-m`, as
-`card move` does. Give only one of them.
+`card comment` takes the text as the last argument, with `-b`/`--body`, or
+with `-m`, as `card move` does. Give only one of them.
 
 A move to `blocked` needs `-m`. A card with unmet dependencies cannot
 enter `in_progress`; the error lists the blocking cards.
@@ -410,10 +427,13 @@ terrarium admin target new <name> --kind host|ssh|docker|vmlab [--host h] [--add
                           [--credential c] [--image i] [--container c] [--lab dir] [--machine m]
                           [--lab-repo r] [--lab-ref ref] [--lab-path dir] [--lab-from-workspace]
                           [--ephemeral] [--keep] [--global]
+terrarium admin target edit <name> [--lab-path dir] [--lab-ref ref] [--machine m] [--image i] [--host h]
+                          [--ephemeral | --permanent] [--keep | --no-keep] [--snapshot-before-task true|false]
 terrarium admin target ls                      agent mode: the project's and the global targets
 terrarium admin target rm <name>
 terrarium admin target verb <name> up|down|snapshot|restore|status [--snapshot name] [--agent a]
 terrarium admin target grant <target> <agent> [--until 30m|time] [--exclusive] [--reason text]
+                          [--no-lifecycle-check]
 terrarium admin target revoke <target> <agent>
 terrarium admin target extend <target> <agent> --until 30m|time|none
 terrarium admin target leases <target> [--all]
@@ -434,7 +454,17 @@ global target (sysadmin). A project has at most
 `TERRARIUM_MAX_TARGETS_PER_PROJECT` targets (`409`). `--lab-repo` and
 `--lab-from-workspace` make a vmlab target whose lab is in a repo of the
 project or in each holder's workspace ([api.md
-§17.8](api.md#178-workspaces-and-lab-instances)). `admin target verb` prints
+§17.8](api.md#178-workspaces-and-lab-instances)). With `--lab-repo`,
+`--lab-path` is relative to the root of the repo. With
+`--lab-from-workspace`, `--lab-path` is relative to the workspace root
+`work/<project>/<agent>`, not to a repo. The checkout of a repo is one
+level down, so a `vmlab.wcl` at the root of the repo `hello-svc` is
+`--lab-path hello-svc`, never `.` ([api.md §17.2](api.md#172-targets)).
+`admin target edit` changes a target with `PATCH /api/targets/{name}`, and
+sends only the flags that you give. While the target runs, only `--keep`,
+`--no-keep`, and `--snapshot-before-task` apply; a change to another field
+is `409 conflict` (exit 1). Bring the target down first. Without a flag, it
+is a usage error (exit 2). `admin target verb` prints
 `warning: attach needs a restart of the target ...` when a workspace could
 not join the running target; `--agent` names the holder's instance of a
 `lab_from_workspace` target. `admin target ls` in agent mode shows every
@@ -445,7 +475,13 @@ column; `targets ls` shows only the usable ones.
 once, and gets a pointer turn. `--until` takes a duration (`90s`, `30m`,
 `2h`, `1d`) or an RFC 3339 time; without it the lease lasts until a revoke.
 `--exclusive` keeps other agents off the target. A refused grant (`409
-lease_held`, exit 1) names the holder and its end. `admin target revoke`
+lease_held`, exit 1) names the holder and its end. When the daemon answer
+has `lifecycle_error`, the lease is made but the target did not come up.
+Then the CLI prints the warning line, writes on stderr "the lease on <t>
+is granted, but the target did not come up: ...", and exits 1, so that
+`grant ... && card assign ...` stops before the assign. Fix the target
+(`admin target edit`), then revoke the lease and grant it again.
+`--no-lifecycle-check` keeps exit 0 in that case. `admin target revoke`
 ends the lease: the agent's live sessions on the target end with
 `lease_revoked`, and the agent gets a pointer turn. An agent may revoke
 its own lease. A project_admin leases the targets of its own project to
@@ -453,7 +489,8 @@ the agents of its own project; a global target needs sysadmin.
 
 | Command | Request | Text output |
 |---|---|---|
-| `admin target grant <t> <a>` | `POST /api/targets/{t}/leases` `{"agent", "until"?, "exclusive"?, "reason"?}` | `granted <t> to <project/name> until <time or revoked>`, with ` (exclusive)`. A line `warning: the target did not come up: ...` when the grant could not bring an ephemeral target up. |
+| `admin target grant <t> <a>` | `POST /api/targets/{t}/leases` `{"agent", "until"?, "exclusive"?, "reason"?}` | `granted <t> to <project/name> until <time or revoked>`, with ` (exclusive)`. A line `warning: the target did not come up: ...` when the grant could not bring an ephemeral target up; then exit 1, unless `--no-lifecycle-check`. |
+| `admin target edit <t> ...` | `PATCH /api/targets/{t}` with the fields of the flags given: `lab_path`, `lab_ref`, `machine`, `image`, `host`, `ephemeral`, `keep`, `snapshot_before_task` | `changed target <t>: <fields>` |
 | `admin target revoke <t> <a>` | `DELETE /api/targets/{t}/leases/{a}` | `revoked the lease of <project/name> on <t>` |
 | `admin target extend <t> <a> --until u` | `PATCH /api/targets/{t}/leases/{a}` `{"until"}` (`none` sends `null`) | `the lease of <project/name> on <t> lasts until <time or revoked>` |
 | `admin target leases <t> [--all]` | `GET /api/targets/{t}/leases[?all=true]` | A table: `TARGET`, `AGENT`, `STATE`, `EXCLUSIVE`, `EXPIRES`, `GRANTED BY`, `REASON`. `EXCLUSIVE` and `EXPIRES` are as in `targets ls`: `yes` or `no`, and the RFC 3339 end or `revoked`. |

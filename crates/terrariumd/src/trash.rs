@@ -3,8 +3,10 @@
 //! `<state>/trash/<ulid>-<ts>/`, so that the operator can still read the
 //! transcripts and the event log. The three deletes are
 //! `DELETE /api/agents/{id}`, a reload after the removal of a definition
-//! file, and a fleet prune. The prune timer removes a trash entry older than
-//! `TERRARIUM_TRASH_DAYS` (default 7).
+//! file, and a fleet prune. `DELETE /api/agents/{id}` also moves the
+//! workspace `<work>/<project>/<agent>` to `<trash entry>/workspace`
+//! (unless `?keep_workspace=true`). The prune timer removes a trash entry
+//! older than `TERRARIUM_TRASH_DAYS` (default 7).
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -56,12 +58,17 @@ pub async fn stop_agent(state: &Shared, agent: AgentId) -> Result<(), Supervisor
 }
 
 /// Move the agent dir of `agent` to the trash ([`trash_agent_dir`]) in a
-/// blocking task, and log the result. A failure is a warning only: the
-/// agent is gone from the store already.
-pub async fn trash_agent(state: &Shared, agent: AgentId) {
+/// blocking task, and log the result. With `workspace`, the workspace goes
+/// into the same trash entry. A failure is a warning only: the agent is
+/// gone from the store already.
+pub async fn trash_agent(state: &Shared, agent: AgentId, workspace: Option<PathBuf>) {
     let state_dir = state.state_dir.clone();
     let id = agent.to_string();
-    match tokio::task::spawn_blocking(move || trash_agent_dir(&state_dir, &id)).await {
+    match tokio::task::spawn_blocking(move || {
+        trash_agent_dir(&state_dir, &id, workspace.as_deref())
+    })
+    .await
+    {
         Ok(Ok(Some(to))) => {
             tracing::info!(agent = %agent, trash = %to.display(), "moved the agent dir to the trash");
         }
@@ -80,15 +87,26 @@ pub async fn retire_agent(state: &Shared, agent: AgentId) {
     if let Err(e) = stop_agent(state, agent).await {
         tracing::warn!(agent = %agent, "cannot stop a deleted agent: {e}");
     }
-    trash_agent(state, agent).await;
+    trash_agent(state, agent, None).await;
 }
 
-/// Move the agent dir of `agent` to `<state>/trash/<agent>-<ts>/`.
-/// `None`: the agent has no dir. `rename` moves a symlink itself, never
-/// its target.
-pub fn trash_agent_dir(state_dir: &Path, agent: &str) -> std::io::Result<Option<PathBuf>> {
+/// The name of the workspace in a trash entry.
+pub const TRASH_WORKSPACE: &str = "workspace";
+
+/// Move the agent dir of `agent` to `<state>/trash/<agent>-<ts>/`, and
+/// `workspace` (when given and there) to `<that entry>/workspace`. `None`:
+/// neither is there. `rename` moves a symlink itself, never its target.
+/// The work root is another file system in the container, so the
+/// workspace move can be a copy and a delete ([`crate::workspace::migrate`]).
+pub fn trash_agent_dir(
+    state_dir: &Path,
+    agent: &str,
+    workspace: Option<&Path>,
+) -> std::io::Result<Option<PathBuf>> {
     let dir = state_dir.join("agents").join(agent);
-    if std::fs::symlink_metadata(&dir).is_err() {
+    let has_dir = std::fs::symlink_metadata(&dir).is_ok();
+    let workspace = workspace.filter(|w| std::fs::symlink_metadata(w).is_ok());
+    if !has_dir && workspace.is_none() {
         return Ok(None);
     }
     let trash = state_dir.join(TRASH_DIR);
@@ -102,7 +120,26 @@ pub fn trash_agent_dir(state_dir: &Path, agent: &str) -> std::io::Result<Option<
         to = trash.join(format!("{agent}-{ts}-{n}"));
         n += 1;
     }
-    std::fs::rename(&dir, &to)?;
+    if has_dir {
+        std::fs::rename(&dir, &to)?;
+    } else {
+        std::fs::create_dir_all(&to)?;
+    }
+    if let Some(ws) = workspace {
+        // An old agent dir can hold a `workspace` dir of its own.
+        let mut into = to.join(TRASH_WORKSPACE);
+        if std::fs::symlink_metadata(&into).is_ok() {
+            into = to.join(format!("{TRASH_WORKSPACE}.work"));
+        }
+        if let crate::workspace::Migration::Skipped(why) = crate::workspace::migrate(ws, &into) {
+            return Err(std::io::Error::other(format!(
+                "the agent dir is in {}, but the workspace stays: {why}",
+                to.display()
+            )));
+        }
+        // An empty workspace: `migrate` removes it and moves nothing.
+        let _ = std::fs::remove_dir(ws);
+    }
     Ok(Some(to))
 }
 
@@ -166,11 +203,11 @@ mod tests {
     fn trash_and_prune() {
         let tmp = tempfile::tempdir().unwrap();
         let state = tmp.path();
-        assert!(trash_agent_dir(state, "01A").unwrap().is_none());
+        assert!(trash_agent_dir(state, "01A", None).unwrap().is_none());
         let dir = state.join("agents/01A/private");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("events.jsonl"), b"{}\n").unwrap();
-        let to = trash_agent_dir(state, "01A").unwrap().unwrap();
+        let to = trash_agent_dir(state, "01A", None).unwrap().unwrap();
         assert!(!state.join("agents/01A").exists());
         assert!(to.starts_with(state.join(TRASH_DIR)));
         assert_eq!(
@@ -179,7 +216,7 @@ mod tests {
         );
         // Twice in the same second: a second name.
         std::fs::create_dir_all(state.join("agents/01A")).unwrap();
-        let again = trash_agent_dir(state, "01A").unwrap().unwrap();
+        let again = trash_agent_dir(state, "01A", None).unwrap().unwrap();
         assert_ne!(again, to);
 
         let day = Duration::from_secs(86_400);
@@ -194,6 +231,36 @@ mod tests {
         assert!(to.exists());
         // Eight days on, all go.
         assert_eq!(prune_trash(state, now + 8 * day, 7 * day).unwrap().len(), 2);
+    }
+
+    /// The workspace goes into the trash entry of the agent dir, and the
+    /// prune of the entry removes both.
+    #[test]
+    fn the_workspace_goes_into_the_same_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let ws = tmp.path().join("work/p/w1");
+        std::fs::create_dir_all(state.join("agents/01A/private")).unwrap();
+        std::fs::create_dir_all(ws.join("app")).unwrap();
+        std::fs::write(ws.join("app/main.py"), b"print(1)\n").unwrap();
+        let to = trash_agent_dir(&state, "01A", Some(&ws)).unwrap().unwrap();
+        assert!(!ws.exists());
+        assert!(to.join("private").is_dir());
+        assert_eq!(
+            std::fs::read(to.join("workspace/app/main.py")).unwrap(),
+            b"print(1)\n"
+        );
+        // No agent dir, a workspace only: an entry all the same.
+        std::fs::create_dir_all(ws.join("x")).unwrap();
+        let only = trash_agent_dir(&state, "01B", Some(&ws)).unwrap().unwrap();
+        assert!(only.join("workspace/x").is_dir());
+        // No workspace there: the agent dir alone, no error.
+        std::fs::create_dir_all(state.join("agents/01C")).unwrap();
+        let c = trash_agent_dir(&state, "01C", Some(&ws)).unwrap().unwrap();
+        assert!(!c.join("workspace").exists());
+        let day = Duration::from_secs(86_400);
+        let later = SystemTime::now() + 8 * day;
+        assert_eq!(prune_trash(&state, later, 7 * day).unwrap().len(), 3);
     }
 
     #[test]
