@@ -467,7 +467,7 @@ copies only `~/.codex/auth.json` into a temp `CODEX_HOME`.
 | Hook trust | Hooks from `-c` show a "Hooks need review" dialog (default "Review hooks") unless `--dangerously-bypass-hook-trust` is given. The flag adds a start-up warning ("⚠ 1 warning · f2 to view"). | verified | 2 |
 | Hook events | `SessionStart`, `SessionEnd`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PermissionRequest`, `Stop`, `SubagentStart`, `SubagentStop`, `PreCompact`, `PostCompact`. There is no `Notification` event. An unknown event name is ignored without a message. | verified (list from the binary; codex counts 11) | 1, 2 |
 | Hooks that fire in one turn | `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`; `SessionEnd` at exit | verified | 1 |
-| `SessionStart` timing | It does **not** fire at start-up. It fires when the first prompt is submitted, 0.45 s after the Enter byte, just before `UserPromptSubmit`. No session file exists before the first prompt. | verified | 1 |
+| `SessionStart` timing | It does **not** fire at start-up. It fires when the first prompt is submitted, 0.45 s after the Enter byte, just before `UserPromptSubmit`. A session file with only `session_meta` can still appear: an exit before any prompt writes one, and `SessionEnd` then fires with no `SessionStart` before it (Docker re-check, 2026-10-25). | verified | 1 |
 | Hook payload IDs | Every payload has `session_id`, `transcript_path`, `cwd`, `hook_event_name`, `model`, `permission_mode` (except `SessionEnd`). Turn hooks also have `turn_id`. `Stop` has `last_assistant_message`. | verified | 1 |
 | "Turn ended" | `Stop` | verified | 1 |
 | "Needs input" | `PermissionRequest` is the only candidate. It did not fire in yolo mode. The `request_user_input` tool was not tried. | not tested | — |
@@ -889,6 +889,9 @@ after it was sent) was not drawn yet; it is labelled `lag-`.
   plugin-root `hooks.json` does.
 - The paste is drawn late (more than 0.2 s), but the CR right after it
   still submits the full text.
+
+- Docker re-check (2026-10-25): Copilot runs in the bwrap sandbox with `"experimental": true` in the per-agent `settings.json`; the agent prompt reaches the model through `APPEND_SYSTEM.md`, after Copilot's own prompt. Stop with `/exit\r` in one write exits 0 in 0.19 s with `SessionEnd` reason `user_exit`, so Copilot needs no `exit_key_pause`.
+- At the first prompt Copilot makes one extra model call to `gpt-4o-mini-2024-07-18` for the session title. The exit screen showed "AI Credits 0", so it appears free.
 
 ## Copilot CLI: not tested
 
