@@ -406,6 +406,8 @@ The usage collector reads only the agent's own session dir in the sandbox (`docs
 
 Not tested: a real resume of each harness on the new binds, a Copilot start with the `session-store.db` binds, and a Codex thread rename on the `session_index.jsonl` bind.
 
+- Claude `--resume` of a session hidden by the per-agent `projects/` overlay exits 1 with "No conversation found with session ID"; the daemon records `resume_failed` and starts a new session with the recap turn (verified 2026-10-25). The `/exit` call recorded no usage sample in that run.
+
 ## Changes to the plan
 
 These facts contradict or change assumptions in `docs/PLAN.md`.
@@ -696,6 +698,8 @@ one line; the detector reads only the first.
 - In the Docker smoke test the order of `turn_start` and `idle -> working` changed from turn to turn. Clients must not depend on it.
 - The Codex session file name carries the start-up time, but its content starts at the first prompt.
 
+- Live isolation check (2026-10-25): with `-c sqlite_home=<per-agent dir>` all six SQLite databases land in the agent's own dir and the shared home gains no new file; only the shared `thread-writer-locks/` mtime changes (Codex makes and deletes an empty lock per thread there).
+
 ## Codex: not tested
 
 - The user's `~/.codex/hooks.json` with a shared `CODEX_HOME` (it would
@@ -918,6 +922,8 @@ after it was sent) was not drawn yet; it is labelled `lag-`.
 
 - Docker re-check (2026-10-25): Copilot runs in the bwrap sandbox with `"experimental": true` in the per-agent `settings.json`; the agent prompt reaches the model through `APPEND_SYSTEM.md`, after Copilot's own prompt. Stop with `/exit\r` in one write exits 0 in 0.19 s with `SessionEnd` reason `user_exit`, so Copilot needs no `exit_key_pause`.
 - At the first prompt Copilot makes one extra model call to `gpt-4o-mini-2024-07-18` for the session title. The exit screen showed "AI Credits 0", so it appears free.
+
+- Live isolation check (2026-10-25): Copilot starts on the three `session-store.db*` file binds with no SQLite error; the `-wal` file stays after exit and the next open reads it. A hidden session on `--resume` exits 1 with "No session, task, or name matched", and the daemon starts a new session with the recap turn. The system-prompt extension subprocess writes its log to the shared `logs/`, not to `--log-dir`; it holds only the session ID.
 
 ## Copilot CLI: not tested
 
