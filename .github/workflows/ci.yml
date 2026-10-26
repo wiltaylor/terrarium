@@ -22,8 +22,11 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends bubblewrap git
-      - uses: dtolnay/rust-toolchain@stable
+      # Pinned to the Dockerfile's RUST_IMAGE (rust:1.97): a newer clippy
+      # adds lints that the local gate does not have.
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: 1.97.1
           components: rustfmt, clippy
       - uses: taiki-e/install-action@just
       - uses: Swatinem/rust-cache@v2
@@ -141,7 +144,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
       - name: Stamp version
         run: ./.github/stamp-version.sh "${{ needs.version.outputs.version }}"
       - uses: docker/setup-buildx-action@v4
@@ -209,7 +214,9 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
       - name: Stamp version
         run: ./.github/stamp-version.sh "${{ needs.version.outputs.version }}"
       - name: Image ref and tags

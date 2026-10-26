@@ -510,10 +510,8 @@ fn project(
     unknown_keys(&t, PROJECT_KEYS, at, issues);
     let agent_tables = tables(&mut t, "agents", at, issues);
     let target_tables = tables(&mut t, "targets", at, issues);
-    for (sub, keys) in [("checkout", CHECKOUT_KEYS)] {
-        if let Some(toml::Value::Table(s)) = t.get(sub) {
-            unknown_keys(s, keys, &format!("{at}.{sub}"), issues);
-        }
+    if let Some(toml::Value::Table(s)) = t.get("checkout") {
+        unknown_keys(s, CHECKOUT_KEYS, &format!("{at}.checkout"), issues);
     }
     if let Some(toml::Value::Array(repos)) = t.get("repos") {
         for (i, r) in repos.iter().enumerate() {
