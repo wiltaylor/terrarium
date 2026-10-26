@@ -2494,11 +2494,12 @@ Rules:
 - For the scope `lab`, the answer has `lab_running`. A lab that does not
   run has no machines in `vmlab status`. Then the list is empty, and it
   drops nothing.
-- The delete runs `vmlab snapshot delete <machine> <snap>`. For the scope
-  `lab`, it runs on each machine that has the snapshot. When no machine has
-  it, the answer is `404 not_found`; when the lab does not run, `409
-  conflict`. A machine without the snapshot fails in vmlab: `422 invalid`
-  with `details.verb` `vmlab.snapshot_delete`.
+- The delete reads the snapshot list first, then runs `vmlab snapshot
+  delete <machine> <snap>` on each machine (of the scope) that has the
+  snapshot. When no machine has it, the answer is `404 not_found`. For the
+  scope `lab`, a lab that does not run is `409 conflict`. The list comes
+  first because vmlab 0.34 answers "deleted" with exit 0 for a snapshot
+  that does not exist.
 - A delete of `terrarium-clean` on a target with `snapshot_before_task` is
   `409 conflict`, because the daemon restores that snapshot when an agent
   stops. Send `force=true` to delete it.

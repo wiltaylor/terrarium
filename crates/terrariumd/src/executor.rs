@@ -2459,42 +2459,43 @@ pub async fn delete_snapshot(
     check_snapshot_name(snap)?;
     if snap == CLEAN_SNAPSHOT && row.def.snapshot_before_task && !q.force {
         return Err(ApiError::conflict(format!(
-            "target `{}` has `snapshot_before_task`: the daemon restores `{CLEAN_SNAPSHOT}`              when an agent stops. Turn the flag off first, or delete with force=true",
+            "target `{}` has `snapshot_before_task`: the daemon restores `{CLEAN_SNAPSHOT}` \
+             when an agent stops. Turn the flag off first, or delete with force=true",
             row.def.name
         )));
     }
     let (def, holder) = snapshot_def(state, row, q.agent.as_deref()).await?;
     let scope = scope_of(&def, q.scope);
-    let machines = match scope {
+    // vmlab 0.34 answers "deleted" with exit 0 for a snapshot that does
+    // not exist, so only the machines whose list has it get the delete.
+    let all = match scope {
         SnapshotScope::Machine => scope_machines(state, &def, scope)
             .await?
             .unwrap_or_default(),
-        SnapshotScope::Lab => {
-            let all = lab_machines(state, &def).await?.ok_or_else(|| {
-                ApiError::conflict(format!(
-                    "the lab of target `{}` does not run, so vmlab names no machines:                      bring it up, or delete with the scope `machine`",
-                    row.def.name
-                ))
-            })?;
-            let mut have = Vec::new();
-            for m in all {
-                if machine_snapshots(state, &def, &m)
-                    .await?
-                    .iter()
-                    .any(|r| r["name"] == snap)
-                {
-                    have.push(m);
-                }
-            }
-            if have.is_empty() {
-                return Err(ApiError::not_found(format!(
-                    "no machine of the lab of target `{}` has the snapshot `{snap}`",
-                    row.def.name
-                )));
-            }
-            have
-        }
+        SnapshotScope::Lab => lab_machines(state, &def).await?.ok_or_else(|| {
+            ApiError::conflict(format!(
+                "the lab of target `{}` does not run, so vmlab names no machines: \
+                     bring it up, or delete with the scope `machine`",
+                row.def.name
+            ))
+        })?,
     };
+    let mut machines = Vec::new();
+    for m in all {
+        if machine_snapshots(state, &def, &m)
+            .await?
+            .iter()
+            .any(|r| r["name"] == snap)
+        {
+            machines.push(m);
+        }
+    }
+    if machines.is_empty() {
+        return Err(ApiError::not_found(format!(
+            "no machine of target `{}` has the snapshot `{snap}`",
+            row.def.name
+        )));
+    }
     for m in &machines {
         let (lab, machine, name) = (lab_of(&def)?, m.clone(), snap.to_owned());
         verb_ok(state, &def, "vmlab.snapshot_delete", move |session| {

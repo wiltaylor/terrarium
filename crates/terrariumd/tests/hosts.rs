@@ -965,18 +965,17 @@ async fn snapshots_list_delete_and_lab_scope() {
             .iter()
             .any(|e| e["data"]["change"] == "snapshot_deleted" && e["data"]["snapshot"] == "b")
     );
-    // A foreign snapshot can go too. A missing one: vmlab fails (422) on a
-    // machine, and no machine of the lab has it (404).
+    // A foreign snapshot can go too. A missing one is 404 for both scopes:
+    // the daemon checks the list first, because vmlab 0.34 answers
+    // "deleted" for a snapshot that does not exist.
     lab.td
         .delete("/api/targets/terra-win/snapshots/foreign")
         .await
         .ok();
-    let r = lab
-        .td
+    lab.td
         .delete("/api/targets/terra-win/snapshots/nosuch")
-        .await;
-    r.err(422, "invalid");
-    assert_eq!(r.body["error"]["details"]["verb"], "vmlab.snapshot_delete");
+        .await
+        .err(404, "not_found");
     lab.td
         .delete("/api/targets/terra-win/snapshots/nosuch?scope=lab")
         .await
