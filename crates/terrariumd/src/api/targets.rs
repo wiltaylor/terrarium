@@ -32,7 +32,7 @@ use crate::actor::Actor;
 use crate::error::{ApiError, ApiResult, Code};
 use crate::executor::{
     self, Control, CpBody, ExecSession, LifecycleOpts, MAX_INPUT, MAX_READ, MAX_WAIT_SECS,
-    RemoteCmd,
+    RemoteCmd, SnapshotQuery,
 };
 use crate::leases as lease_rt;
 use crate::policy;
@@ -49,6 +49,11 @@ pub fn routes() -> Router<Shared> {
         .route("/targets/{name}/snapshot", post(snapshot))
         .route("/targets/{name}/restore", post(restore))
         .route("/targets/{name}/status", post(status))
+        .route("/targets/{name}/snapshots", get(snapshots_list))
+        .route(
+            "/targets/{name}/snapshots/{snap}",
+            axum::routing::delete(snapshot_delete),
+        )
         .route("/targets/{name}/exec", post(exec))
         .route("/targets/{name}/cp", post(cp))
         .route(
@@ -322,6 +327,53 @@ async fn remove(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// The target of a lifecycle verb or a snapshot call: the actor may use
+/// it, or may define it (docs/api.md §17.3).
+async fn verb_target(state: &Shared, actor: &Actor, name: String) -> ApiResult<TargetRow> {
+    let r = load(state, actor, name).await?;
+    if executor::usable(state, actor, &r.def.name).await.is_err() {
+        policy::define_target(actor, r.def.project.as_deref()).map_err(|_| {
+            ApiError::forbidden(format!(
+                "target `{}` is not in your policy.targets, and you may not define it",
+                r.def.name
+            ))
+        })?;
+    }
+    Ok(r)
+}
+
+/// `GET /api/targets/{name}/snapshots`: the snapshots the host reports,
+/// with `managed`. An agent caller lists its own instance.
+async fn snapshots_list(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(name): Path<String>,
+    ApiQuery(mut q): ApiQuery<SnapshotQuery>,
+) -> ApiResult<Json<Value>> {
+    let r = verb_target(&state, &actor, name).await?;
+    if let Some(a) = actor.agent() {
+        q.agent = Some(a.id.clone());
+    }
+    Ok(Json(executor::list_snapshots(&state, &r, &q).await?))
+}
+
+/// `DELETE /api/targets/{name}/snapshots/{snap}`: delete a snapshot on
+/// the host. An agent caller acts on its own instance.
+async fn snapshot_delete(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path((name, snap)): Path<(String, String)>,
+    ApiQuery(mut q): ApiQuery<SnapshotQuery>,
+) -> ApiResult<Json<Value>> {
+    let r = verb_target(&state, &actor, name).await?;
+    if let Some(a) = actor.agent() {
+        q.agent = Some(a.id.clone());
+    }
+    Ok(Json(
+        executor::delete_snapshot(&state, &actor, &r, &snap, &q).await?,
+    ))
+}
+
 /// Lifecycle verbs: an actor that may use the target, or one that may
 /// define it.
 async fn run_verb(
@@ -331,15 +383,7 @@ async fn run_verb(
     verb: LifecycleVerb,
     body: Option<LifecycleOpts>,
 ) -> ApiResult<Json<Value>> {
-    let r = load(&state, &actor, name).await?;
-    if executor::usable(&state, &actor, &r.def.name).await.is_err() {
-        policy::define_target(&actor, r.def.project.as_deref()).map_err(|_| {
-            ApiError::forbidden(format!(
-                "target `{}` is not in your policy.targets, and you may not define it",
-                r.def.name
-            ))
-        })?;
-    }
+    let r = verb_target(&state, &actor, name).await?;
     let mut opts = body.unwrap_or_default();
     // An agent acts on its own instance of a `lab_from_workspace` target.
     if let Some(a) = actor.agent() {

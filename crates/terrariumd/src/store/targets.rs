@@ -425,6 +425,23 @@ pub fn set_state(
     Ok(())
 }
 
+/// Remove snapshot names from a target's `snapshots`. Returns the names
+/// that were there.
+pub fn remove_snapshots(t: &mut Tx<'_>, name: &str, gone: &[String]) -> ApiResult<Vec<String>> {
+    let current = get(t, name)?;
+    let (removed, kept): (Vec<String>, Vec<String>) = current
+        .snapshots
+        .into_iter()
+        .partition(|s| gone.contains(s));
+    if !removed.is_empty() {
+        t.execute(
+            "UPDATE targets SET snapshots = ?2 WHERE name = ?1",
+            params![name, json!(kept).to_string()],
+        )?;
+    }
+    Ok(removed)
+}
+
 /// Sync `targets/*.toml` into the table, as `store::sync` does for agents:
 /// a file target is made or updated and marked `file`; an API target with
 /// the same name becomes `file`; a file target whose file is gone is

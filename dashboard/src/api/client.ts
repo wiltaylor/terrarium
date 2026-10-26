@@ -88,6 +88,9 @@ import type {
   TargetReport,
   TranscriptPage,
   TargetVerbBody,
+  TargetSnapshotList,
+  SnapshotQuery,
+  SnapshotDeleted,
   UsageMe,
   CardUsage,
   UsagePoint,
@@ -322,6 +325,10 @@ export interface Api {
     sessionPty(id: string, session: string): PtySocket;
     /** Kill the run. */
     closeSession(id: string, session: string): Promise<void>;
+    /** `GET /api/targets/{name}/snapshots`: the snapshots the host reports, with `managed`; it drops the stored names the host lost. A docker target is `422 invalid`. */
+    snapshots(name: string, q?: SnapshotQuery): Promise<TargetSnapshotList>;
+    /** `DELETE /api/targets/{name}/snapshots/{snap}`. `terrarium-clean` with `snapshot_before_task` needs `force` (`409 conflict`). */
+    deleteSnapshot(name: string, snap: string, q?: SnapshotQuery): Promise<SnapshotDeleted>;
     /** `GET /api/targets/{name}/leases`, newest first. `all` also lists the ended leases (the last 100). */
     leases(name: string, opts?: { all?: boolean }): Promise<Lease[]>;
     /** `POST /api/targets/{name}/leases`. A clash is `409 lease_held` with the holder in `details`. */
@@ -626,6 +633,8 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       exec: (id, req) => post(`/api/targets/${seg(id)}/exec`, req),
       sessionPty: (id, session) => socket(`/api/targets/${seg(id)}/sessions/${seg(session)}/ws`),
       closeSession: (id, session) => del(`/api/targets/${seg(id)}/sessions/${seg(session)}`),
+      snapshots: (name, q = {}) => get(`/api/targets/${seg(name)}/snapshots`, { ...q }),
+      deleteSnapshot: (name, snap, q = {}) => t.request("DELETE", `/api/targets/${seg(name)}/snapshots/${seg(snap)}`, { query: { ...q } }),
       // A plain array, no cursor (docs/api.md §17.7).
       leases: (name, o = {}) => get(`/api/targets/${seg(name)}/leases`, o.all ? { all: true } : undefined),
       grant: (name, body) => post(`/api/targets/${seg(name)}/leases`, body),

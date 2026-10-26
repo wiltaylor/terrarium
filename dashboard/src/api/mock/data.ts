@@ -61,6 +61,12 @@ export interface MockWorld {
   apiKeys: Record<string, { provider: string; key: string; base_url?: string; models?: string[] }>;
   mail: Message[];
   targets: Target[];
+  /**
+   * The snapshots on the host (docs/api.md §17.3), by instance: the target
+   * name, or `<target>.<agent ULID>` for a holder's instance of a
+   * `lab_from_workspace` target. One row for each machine.
+   */
+  hostSnapshots: Record<string, MockHostSnapshot[]>;
   /** Target leases (docs/api.md §17.7), oldest first. */
   leases: Lease[];
   hosts: Host[];
@@ -111,6 +117,14 @@ const COLUMNS: Column[] = [
 
 /** A fake 26-character ULID with a readable tail. */
 export const fakeUlid = (tag: string, n: number): string => `01JB${tag.toUpperCase().replace(/[^0-9A-Z]/g, "").padEnd(6, "0").slice(0, 6)}${String(n).padStart(16, "0")}`;
+
+/** One snapshot of one machine, as `vmlab snapshot list <machine>` shows it. */
+export interface MockHostSnapshot {
+  name: string;
+  kind: "online" | "offline";
+  taken: string;
+  machine: string;
+}
 
 export function seed(now: number = Date.now()): MockWorld {
   const ago = (min: number) => new Date(now - min * 60_000).toISOString();
@@ -705,6 +719,15 @@ ${XSS_DOCUMENT}
     msg(fakeUlid("msg", 17), fakeUlid("th", 5), "lead", "project:webshop", "Shared CSS tokens?", "Can webshop reuse the dashboard CSS variables?", "delivered", 5),
   ];
 
+  // What vmlab has on the host: `pre-upgrade` on lab-win11 is not Terrarium's.
+  const hostSnapshots: Record<string, MockHostSnapshot[]> = {
+    "lab-win11": [
+      { name: "terrarium-clean", kind: "online", taken: ago(60 * 3), machine: "win11" },
+      { name: "pre-upgrade", kind: "offline", taken: ago(60 * 24), machine: "win11" },
+    ],
+    "dev-vm": [{ name: "terrarium", kind: "online", taken: ago(45), machine: "vm1" }],
+  };
+
   // Mode 1 (docs/api.md §17.8): `runtime` holds the attached workspaces, the
   // instance of a `lab_repo` target, and the instances of a
   // `lab_from_workspace` target. Project targets made through the API carry
@@ -758,6 +781,6 @@ ${XSS_DOCUMENT}
   return {
     schedules: sched.schedules, scheduleRuns: sched.runs, eventSources: seedEventSources(now), eventSourceSecrets: {},
     projects, repos, agents, sessions, transcripts: seedTranscripts(agents, sessions), events, columns: { terrarium: COLUMNS.map((c) => ({ ...c })), webshop: COLUMNS.map((c) => ({ ...c })) },
-    cards, memories, links, pages, revisions, artifacts, artifactBodies, versions, subscriptions, quota, usage, holds: [], apiKeys, mail, targets, leases, hosts, hostTokens, audit, seq,
+    cards, memories, links, pages, revisions, artifacts, artifactBodies, versions, subscriptions, quota, usage, holds: [], apiKeys, mail, targets, hostSnapshots, leases, hosts, hostTokens, audit, seq,
   };
 }

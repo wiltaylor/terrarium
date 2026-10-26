@@ -502,6 +502,7 @@ on a card that is not its own), `definitions.sync`, `memory.edit` and
 `host.create`, `host.revoke`, `target.create`, `target.update`,
 `target.delete`, `targets.sync`, `target.exec`, `target.cp`, `target.up`,
 `target.down`, `target.snapshot`, `target.restore`, `target.status`,
+`target.snapshot_delete`, `target.reconcile` (actor `system`),
 `target.grant`, `target.revoke`, `target.lease_extend`, and
 `target.lease_expired` (actor `system`) (§17).
 
@@ -1402,7 +1403,7 @@ Kinds:
 | `version.created`, `version.updated`, `version.submitted`, `version.approved`, `version.rejected`, `version.released` | `{version_id, name, status, ...}`: `fields`, `comment`, `thread_id`, `cards`. |
 | `usage.sample`, `usage.rejected_path`, `quota.sample`, `quota.alert`, `quota.blocked`, `quota.resumed`, `subscription.offer`, `subscription.expired`, `self_report` | See §16.7. |
 | `lease` | `{change, target, lease_id, expires_at, exclusive, state}`. `change` is `granted`, `extended`, or `ended` (a revoke or the expiry). The `agent` is the lease holder. The supervisor types a pointer from it (§17.7). |
-| `target` | `{change, target, from, state, snapshots_cleared}`. `change` is `reconciled`: a `status` found the target other than the store said (§17.3). |
+| `target` | `{change, target, ...}`. `change` is `reconciled` (`from`, `state`, `snapshots_cleared`): a `status` found the target other than the store said. `snapshots_dropped` (`snapshots_dropped`): a snapshot list found that the host lost stored names. `snapshot_deleted` (`snapshot`, `scope`, `machines`, `agent`?): a snapshot delete (§17.3). |
 | `schedule` | `{change, schedule, name, project, run?, status?, trigger?}`. `change` is `created`, `updated`, `deleted`, `enabled`, `disabled`, `run_started`, or `run_finished`. `schedule` is the schedule ULID. A run event has `run`, `status`, and `trigger` (§19). |
 | `harness` | `{change, harness, package, from, to, forced}`. `change` is `updated`: an update in the tools dir (§4, `POST /api/harnesses/{name}/update`). |
 | `host.connected`, `host.disconnected` | `{host, host_id, ...}`: `version`, `os`, `arch`, `capabilities`, `summary`, `resumed` (sessions taken back), `reason`. See §17. |
@@ -2346,7 +2347,7 @@ all projects. Targets are project targets by default: a global target
 |---|---|
 | `scope` | `global` (no `project`) or `project`. Every target view has it, also in `GET /api/projects/{name}/targets`. |
 | `state` | `running`, `stopped`, `absent`, or `unknown`: what the last lifecycle verb saw. |
-| `snapshots` | The snapshot names that `POST .../snapshot` or `snapshot_before_task` took. A destroy (the state `absent`) clears them. |
+| `snapshots` | The snapshot names that `POST .../snapshot` or `snapshot_before_task` took. A destroy (the state `absent`) clears them. A snapshot delete removes a name. A snapshot list removes the names that the host no longer has (§17.3, "Snapshots"). |
 | `host_online` | The link of the target's host agent. `null` for `ssh`. |
 | `usable` | The caller may use the target (§17.4). |
 | `access` | Why the caller may use it: `operator`, `policy`, `lease`, or `null`. |
@@ -2430,12 +2431,14 @@ change a file target (`409 file_managed`).
 ### 17.3 Lifecycle verbs
 
 `POST /api/targets/{name}/up|down|snapshot|restore|status`. The body is
-empty, or `{"name"?, "discard_guest_changes"?, "destroy"?, "agent"?}`.
+empty, or `{"name"?, "discard_guest_changes"?, "destroy"?, "scope"?,
+"agent"?}`. `scope` is `machine` or `lab`, for `snapshot` and `restore`
+("Snapshots", below).
 `agent` names the holder whose instance of a `lab_from_workspace` target
 the verb acts on; an agent caller always acts on its own. The caller
 may use the target (§17.4), or may define it (§17.2). The answer is the
 executor report, not the target: `{"target", "verb", "state", "snapshot"?,
-"result"?}`. `target` is the name, `state` is the new state, `snapshot` is
+"result"?}`. `target` is the name, `state` is the new state, `snapshot` and `scope` are
 there for `snapshot` and `restore`, and `result` is the result of the
 host agent verb when it gives one. The daemon stores the state and writes
 a `target.<verb>` audit row with the same report.
@@ -2444,10 +2447,72 @@ a `target.<verb>` audit row with the same report.
 |---|---|---|---|---|
 | `host`, `ssh` | no-op | no-op | `422 invalid` | `running` when the host agent is online, else `unknown` |
 | `docker` | `docker.inspect`; when absent, `docker.run -d --init --name <c> --label terrarium.target=<name> <image> sleep infinity`; when stopped, `docker.start` (an ephemeral target with `image`: `docker.rm -f -v` and a new `docker.run`) | `docker.stop`; an ephemeral target without `keep` (or `destroy: true`): `docker.rm -f -v` | `422 invalid` | `docker.inspect` |
-| `vmlab` | `vmlab.up [machine]` | `vmlab.down [machine]`; ephemeral without `keep` (or `destroy: true`): `vmlab.destroy` | `vmlab.snapshot_take` / `vmlab.snapshot_restore` with `--vm machine` | `vmlab.status`, the row of `machine` (no row: `absent`). A lab that is not running (not in `vmlab lab list`): `absent` for an ephemeral target without `keep`, else `stopped` |
+| `vmlab` | `vmlab.up [machine]` | `vmlab.down [machine]`; ephemeral without `keep` (or `destroy: true`): `vmlab.destroy` | `vmlab.snapshot_take` / `vmlab.snapshot_restore`: with `--vm machine` for the scope `machine`, without `--vm` (every machine of the lab) for the scope `lab` | `vmlab.status`, the row of `machine` (no row: `absent`). A lab that is not running (not in `vmlab lab list`): `absent` for an ephemeral target without `keep`, else `stopped` |
 
 The container `<c>` is `container`, else `terrarium-<name>`. The snapshot
 name is `name`, else `terrarium`.
+
+**Snapshots.** A vmlab target has snapshots. vmlab keeps each snapshot on
+one machine. A lab-wide snapshot is one snapshot with the same name on
+each machine.
+
+| Endpoint | Query | Answer |
+|---|---|---|
+| `GET /api/targets/{name}/snapshots` | `scope`?, `agent`? | `200` the list, below |
+| `DELETE /api/targets/{name}/snapshots/{snap}` | `scope`?, `agent`?, `force`? | `200` `{"target", "verb": "snapshot_delete", "snapshot", "scope", "machines", "agent"?}` |
+
+```json
+{"target":"win","scope":"machine","machines":["win11"],"dropped":[],
+ "snapshots":[{"name":"terrarium-clean","kind":"online","taken":"2026-10-26T08:00:00Z",
+               "machines":["win11"],"managed":true}]}
+```
+
+Rules:
+
+- The rights are those of the verbs: the caller may use the target
+  (§17.4), or may define it (§17.2). Else `403 forbidden`.
+- `scope` is `machine` (the target's `machine`) or `lab` (every machine of
+  the lab). The default is `machine` when the target has a `machine`, else
+  `lab`. The scope `machine` on a target with no `machine` is `422
+  invalid`. The same rule applies to the `snapshot` and `restore` verbs.
+- `agent`: on a `lab_from_workspace` target, the holder whose instance.
+  An agent caller always acts on its own instance, also when it sends
+  another `agent`. The operator must name one (`422 invalid`). A lab
+  instance target with no instance on the host is `409 conflict`.
+- The list runs `vmlab snapshot list <machine>` for each machine. For the
+  scope `lab`, the machines come from `vmlab status`. Each row is one name,
+  with `kind` and `taken` from the first machine that has it, and
+  `machines`: the machines that have it. `managed` is `true` when the name
+  is in the target's `snapshots`, so Terrarium took it. A snapshot that
+  Terrarium did not take shows with `managed: false`. The list does not
+  add it to `snapshots`.
+- The list reconciles the stored names: a name in `snapshots` that the
+  host does not report goes, and `dropped` holds it. Then the daemon writes
+  the audit row `target.reconcile` (`{snapshots_dropped}`, actor `system`)
+  and a `target` event. A `lab_from_workspace` target is not reconciled,
+  because its stored names cover the instances of all holders.
+- For the scope `lab`, the answer has `lab_running`. A lab that does not
+  run has no machines in `vmlab status`. Then the list is empty, and it
+  drops nothing.
+- The delete runs `vmlab snapshot delete <machine> <snap>`. For the scope
+  `lab`, it runs on each machine that has the snapshot. When no machine has
+  it, the answer is `404 not_found`; when the lab does not run, `409
+  conflict`. A machine without the snapshot fails in vmlab: `422 invalid`
+  with `details.verb` `vmlab.snapshot_delete`.
+- A delete of `terrarium-clean` on a target with `snapshot_before_task` is
+  `409 conflict`, because the daemon restores that snapshot when an agent
+  stops. Send `force=true` to delete it.
+- The delete removes the name from `snapshots`, and writes the audit row
+  `target.snapshot_delete` with the answer and a `target` event.
+- A snapshot name must not be empty, start with `-`, or hold a space or a
+  control character (`422 invalid`).
+- A docker, host, or ssh target is `422 invalid`. An offline host is `409
+  conflict`.
+- On a lab instance target, the snapshot verbs, the list, and the delete
+  run in the lab dir of the instance, as `up` and `exec` do (§17.8). No
+  vmlab verb of Terrarium sends `--instance`. So vmlab uses its default
+  instance (`$VMLAB_INSTANCE` of the host agent, else the git worktree of
+  the lab dir, else none), and it is the same for each verb.
 
 **Reconcile.** A `status` makes the stored state match the host. When the
 host agent connects (after `welcome`), the daemon runs `status` (actor

@@ -4,20 +4,23 @@
 // .../exec` with `{shell, pty}` and the session WebSocket (§17.4). Mode 1
 // (§17.8): the lab source of a vmlab target, the attached workspaces, the
 // lab instance of each holder of a `lab_from_workspace` target with its own
-// verbs, and the two caps (`409` project cap, `429` host cap) inline.
+// verbs, and the two caps (`409` project cap, `429` host cap) inline. A
+// vmlab target has a snapshot panel: `GET .../snapshots`, take, restore,
+// and `DELETE .../snapshots/{snap}` (§17.3).
 
 import { useSearchParams } from "@solidjs/router";
 import { createEffect, createResource, createSignal, For, Index, onCleanup, Show } from "solid-js";
 import { GrantDialog, grantNotice, LeaseTable, useLeaseList } from "../../components/Leases";
 import { MockOnlyNote } from "../../components/MockOnly";
 import { Terminal } from "../../components/Terminal";
-import { Empty, ErrorBanner, PageHead, Tabs } from "../../components/ui";
-import type { Target, TargetReport, TargetVerbBody } from "../../api/types";
+import { ConfirmButton, Empty, ErrorBanner, PageHead, Tabs } from "../../components/ui";
+import type { SnapshotScope, Target, TargetReport, TargetSnapshotList, TargetVerbBody } from "../../api/types";
 import type { TargetAction } from "../../api/client";
 import { agents, api, leases as holds, projects } from "../../stores";
 import { filterByScope, groupByScope, SCOPE_FILTERS, scopeLabel, type ScopeFilter } from "../../lib/target-scope";
 import { capError, capSentence, holderRows, instanceActions, labSource, sourceLabel, workspacePath, type CapError } from "../../lib/target-runtime";
 import { STATE_CHIP, targetActions } from "./actions";
+import { deleteNeedsForce, deleteNotice, hasSnapshots, listSummary, snapshotNameError, snapshotScopes, verbNotice } from "./snapshots";
 import { CreateTargetDialog } from "./CreateTargetDialog";
 import { ScopeChip } from "./ScopeChip";
 
@@ -58,6 +61,12 @@ export default function TargetsPage() {
   const [busy, setBusy] = createSignal<string | null>(null);
   // A cap refusal of a verb, shown on the row of its target.
   const [capFor, setCapFor] = createSignal<{ target: string; cap: CapError } | null>(null);
+  // The open snapshot panel: one target, and the holder of a `lab_from_workspace` instance.
+  const [snapsFor, setSnapsFor] = createSignal<{ target: string; agent?: string; who?: string } | null>(null);
+  const toggleSnaps = (target: string, agent?: string, who?: string) => {
+    const cur = snapsFor();
+    setSnapsFor(cur?.target === target && cur.agent === agent ? null : { target, agent, who });
+  };
 
   const groups = () => {
     const list = targets.latest ?? [];
@@ -201,6 +210,11 @@ export default function TargetsPage() {
                                     </button>
                                   )}
                                 </For>
+                                <Show when={hasSnapshots(t()) && !t().lab_from_workspace}>
+                                  <button class="small" aria-expanded={snapsFor()?.target === t().id} onClick={() => toggleSnaps(t().id)}>
+                                    Snapshots
+                                  </button>
+                                </Show>
                                 <Show when={t().lab_from_workspace}>
                                   <span class="small muted">verbs per holder, below</span>
                                 </Show>
@@ -230,9 +244,25 @@ export default function TargetsPage() {
                           <Show when={hasRuntime(t())}>
                             <tr class="runtime-row">
                               <td colSpan={COLS}>
-                                <TargetRuntimePanel target={t()} busy={busy()} act={act} />
+                                <TargetRuntimePanel target={t()} busy={busy()} act={act} onSnapshots={(agent, who) => toggleSnaps(t().id, agent, who)} />
                               </td>
                             </tr>
+                          </Show>
+                          <Show when={snapsFor()?.target === t().id ? snapsFor() : null}>
+                            {(s) => (
+                              <tr class="snapshot-row">
+                                <td colSpan={COLS}>
+                                  <TargetSnapshots
+                                    target={t()}
+                                    agent={s().agent}
+                                    who={s().who}
+                                    onNotice={setNotice}
+                                    onChanged={() => void refetch()}
+                                    onClose={() => setSnapsFor(null)}
+                                  />
+                                </td>
+                              </tr>
+                            )}
                           </Show>
                           <tr class="lease-row">
                             <td colSpan={COLS}>
@@ -262,7 +292,7 @@ export default function TargetsPage() {
         />
       </Show>
       <MockOnlyNote label="new API">
-        <code>GET /api/targets</code>, <code>GET /api/projects/{"{name}"}/targets</code>, and <code>POST /api/targets</code> are in docs/api.md §17.2. <code>POST /api/targets/{"{name}"}/up|down|snapshot|restore|status</code> is §17.3, exec sessions §17.4. Leases: <code>GET</code>, <code>POST /api/targets/{"{name}"}/leases</code>, <code>PATCH</code>, <code>DELETE .../leases/{"{agent}"}</code> (docs/api.md §17.7).
+        <code>GET /api/targets</code>, <code>GET /api/projects/{"{name}"}/targets</code>, and <code>POST /api/targets</code> are in docs/api.md §17.2. <code>POST /api/targets/{"{name}"}/up|down|snapshot|restore|status</code>, <code>GET .../snapshots</code>, and <code>DELETE .../snapshots/{"{snap}"}</code> are §17.3, exec sessions §17.4. Leases: <code>GET</code>, <code>POST /api/targets/{"{name}"}/leases</code>, <code>PATCH</code>, <code>DELETE .../leases/{"{agent}"}</code> (docs/api.md §17.7).
       </MockOnlyNote>
     </>
   );
@@ -284,7 +314,12 @@ const hasRuntime = (t: Target) => !!t.lab_from_workspace || !!t.runtime?.attache
  * their paths in the target, the lab dir of a `lab_repo` instance, and for a
  * `lab_from_workspace` target each holder with its instance and its verbs.
  */
-function TargetRuntimePanel(props: { target: Target; busy: string | null; act: (id: string, a: TargetAction, body?: TargetVerbBody, who?: string) => void }) {
+function TargetRuntimePanel(props: {
+  target: Target;
+  busy: string | null;
+  act: (id: string, a: TargetAction, body?: TargetVerbBody, who?: string) => void;
+  onSnapshots: (agent: string, who: string) => void;
+}) {
   const holderIds = () =>
     Object.entries(holds.holds())
       .filter(([, byTarget]) => byTarget[props.target.name])
@@ -349,6 +384,11 @@ function TargetRuntimePanel(props: { target: Target; busy: string | null; act: (
                             </button>
                           )}
                         </For>
+                        <Show when={r.instance?.lab}>
+                          <button class="small" onClick={() => props.onSnapshots(r.agent, r.agent_name ?? r.agent)}>
+                            Snapshots
+                          </button>
+                        </Show>
                       </span>
                     </td>
                   </tr>
@@ -357,6 +397,172 @@ function TargetRuntimePanel(props: { target: Target; busy: string | null; act: (
             </tbody>
           </table>
         </Show>
+      </Show>
+    </div>
+  );
+}
+
+/**
+ * The snapshots of a vmlab target, or of one holder's instance (docs/api.md
+ * §17.3): what the host has (`managed` marks the ones Terrarium took), with
+ * a refresh, a take with a name, a restore (in-page confirm, with the option
+ * to discard guest changes), and a delete (in-page confirm; `terrarium-clean`
+ * with `snapshot_before_task` sends `force`).
+ */
+function TargetSnapshots(props: { target: Target; agent?: string; who?: string; onNotice: (s: string) => void; onChanged: () => void; onClose: () => void }) {
+  const scopes = () => snapshotScopes(props.target);
+  const [scope, setScope] = createSignal<SnapshotScope>(scopes()[0]!);
+  const [error, setError] = createSignal<unknown>(null);
+  const [list, { refetch }] = createResource(
+    () => ({ name: props.target.name, agent: props.agent, scope: scope() }),
+    (k): Promise<TargetSnapshotList | null> =>
+      api.targets.snapshots(k.name, { scope: k.scope, agent: k.agent }).catch((e: unknown) => {
+        setError(e);
+        return null;
+      }),
+  );
+  const [name, setName] = createSignal("");
+  const [busy, setBusy] = createSignal<string | null>(null);
+  // The snapshot whose restore waits for the in-page confirm.
+  const [restoring, setRestoring] = createSignal<string | null>(null);
+  const [discard, setDiscard] = createSignal(false);
+  const nameError = () => snapshotNameError(name().trim());
+  const run = async (key: string, f: () => Promise<string>) => {
+    setBusy(key);
+    try {
+      props.onNotice(await f());
+      setError(null);
+    } catch (e) {
+      setError(e);
+    } finally {
+      setBusy(null);
+      void refetch();
+      props.onChanged();
+    }
+  };
+  const body = (extra: TargetVerbBody = {}): TargetVerbBody => ({ scope: scope(), ...(props.agent ? { agent: props.agent } : {}), ...extra });
+  const take = () =>
+    run("take", async () => {
+      const n = name().trim();
+      const r = await api.targets.action(props.target.id, "snapshot", body(n ? { name: n } : {}));
+      setName("");
+      return verbNotice(r, props.who);
+    });
+  const restore = (snap: string) =>
+    run(`restore:${snap}`, async () => {
+      const r = await api.targets.action(props.target.id, "restore", body({ name: snap, ...(discard() ? { discard_guest_changes: true } : {}) }));
+      setRestoring(null);
+      setDiscard(false);
+      return verbNotice(r, props.who);
+    });
+  const remove = (snap: string) =>
+    run(`delete:${snap}`, async () => {
+      const force = deleteNeedsForce(props.target, snap);
+      const d = await api.targets.deleteSnapshot(props.target.id, snap, { scope: scope(), ...(props.agent ? { agent: props.agent } : {}), ...(force ? { force: true } : {}) });
+      return deleteNotice(d, props.who);
+    });
+  return (
+    <div class="stack" style={{ gap: "6px" }} aria-label={`Snapshots of ${props.target.name}`}>
+      <div class="spread" style={{ "flex-wrap": "wrap", gap: "8px" }}>
+        <span class="small">
+          <strong>Snapshots</strong>
+          <Show when={props.who}>{(w) => <span class="muted"> · instance of {w()}</span>}</Show>
+          <Show when={list()}>{(l) => <span class="muted"> · {listSummary(l())}</span>}</Show>
+        </span>
+        <span class="row" style={{ gap: "8px", "flex-wrap": "wrap" }}>
+          <Show when={scopes().length > 1}>
+            <Tabs tabs={scopes().map((s) => ({ id: s, label: s === "lab" ? "whole lab" : `machine ${props.target.machine}` }))} active={scope()} onChange={setScope} />
+          </Show>
+          <button class="small" disabled={list.loading} onClick={() => void refetch()}>
+            {list.loading ? "Loading…" : "Refresh"}
+          </button>
+          <button class="ghost small" onClick={() => props.onClose()} aria-label="Close snapshots">
+            ✕
+          </button>
+        </span>
+      </div>
+      <ErrorBanner error={error()} onDismiss={() => setError(null)} />
+      <form
+        class="row small"
+        style={{ gap: "6px", "flex-wrap": "wrap" }}
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (!nameError()) void take();
+        }}
+      >
+        <label class="row small">
+          Name <input value={name()} placeholder="terrarium" aria-label="Snapshot name" onInput={(e) => setName(e.currentTarget.value)} />
+        </label>
+        <button type="submit" class="small" disabled={busy() !== null || !!nameError()}>
+          {busy() === "take" ? "Taking…" : scope() === "lab" ? "Take (whole lab)" : "Take"}
+        </button>
+        <Show when={nameError()}>{(m) => <span class="small" role="alert" style={{ color: "var(--danger)" }}>{m()}</span>}</Show>
+      </form>
+      <Show when={list()?.snapshots.length} fallback={<span class="small muted">{list.loading ? "Loading…" : list() ? "No snapshots." : ""}</span>}>
+        <table class="small" aria-label={`Snapshot list of ${props.target.name}`}>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Kind</th>
+              <th>Taken</th>
+              <th>Machines</th>
+              <th>Terrarium</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            <For each={list()!.snapshots}>
+              {(s) => (
+                <tr>
+                  <td class="mono">{s.name}</td>
+                  <td>{s.kind ?? "—"}</td>
+                  <td>{s.taken ? new Date(s.taken).toLocaleString() : "—"}</td>
+                  <td class="mono">{s.machines.join(", ")}</td>
+                  <td>{s.managed ? <span class="chip ok">managed</span> : <span class="muted">—</span>}</td>
+                  <td>
+                    <Show
+                      when={restoring() === s.name}
+                      fallback={
+                        <span class="row" style={{ gap: "6px", "flex-wrap": "wrap" }}>
+                          <button class="small" disabled={busy() !== null} onClick={() => setRestoring(s.name)}>
+                            {busy() === `restore:${s.name}` ? "Restoring…" : "Restore"}
+                          </button>
+                          <ConfirmButton
+                            class="small danger"
+                            label={busy() === `delete:${s.name}` ? "Deleting…" : "Delete"}
+                            confirmLabel={deleteNeedsForce(props.target, s.name) ? "Yes, delete (force: snapshot per task is on)" : "Yes, delete"}
+                            disabled={busy() !== null}
+                            onConfirm={() => remove(s.name)}
+                          />
+                        </span>
+                      }
+                    >
+                      <span class="row confirm" style={{ gap: "6px", "flex-wrap": "wrap" }} aria-label={`Restore ${s.name}`}>
+                        <span class="small">Roll back to {s.name}?</span>
+                        <label class="row small">
+                          <input type="checkbox" checked={discard()} onChange={(e) => setDiscard(e.currentTarget.checked)} />
+                          discard guest changes
+                        </label>
+                        <button class="danger small" disabled={busy() !== null} onClick={() => void restore(s.name)}>
+                          Yes, restore
+                        </button>
+                        <button
+                          class="small"
+                          onClick={() => {
+                            setRestoring(null);
+                            setDiscard(false);
+                          }}
+                        >
+                          Cancel
+                        </button>
+                      </span>
+                    </Show>
+                  </td>
+                </tr>
+              )}
+            </For>
+          </tbody>
+        </table>
       </Show>
     </div>
   );

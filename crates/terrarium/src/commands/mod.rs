@@ -40,7 +40,12 @@ pub async fn run(ctx: &Ctx, cmd: &Command) -> anyhow::Result<()> {
         Command::Version { command } => artifacts::version(ctx, command).await,
         Command::Usage { command } => system::usage(ctx, command.as_ref()).await,
         Command::Status { command } => agents::status(ctx, command).await,
-        Command::Targets { .. } => system::targets(ctx).await,
+        Command::Targets {
+            command: crate::cli::TargetsCmd::Ls,
+        } => system::targets(ctx).await,
+        Command::Targets {
+            command: crate::cli::TargetsCmd::Snapshot(c),
+        } => system::snapshot(ctx, c).await,
         Command::Exec {
             target,
             cwd,

@@ -1229,6 +1229,8 @@ export interface TargetReport {
   verb: string;
   state: TargetState;
   snapshot?: string;
+  /** `snapshot` and `restore`: the machine, or the whole lab. */
+  scope?: SnapshotScope;
   result?: unknown;
   /** docs/api.md §17.3: an `up` of a running target that could not attach a holder's workspace. */
   attach_error?: string;
@@ -1240,6 +1242,60 @@ export interface TargetVerbBody {
   agent?: string;
   name?: string;
   destroy?: boolean;
+  /** `snapshot` and `restore`: the target's machine, or the whole lab. Default: `machine` when the target has one. */
+  scope?: SnapshotScope;
+  /** `restore`: restore a dev machine whose workspace is halted, and drop the guest copies. */
+  discard_guest_changes?: boolean;
+}
+
+/** Which machines a snapshot verb acts on (docs/api.md §17.3): `--vm <machine>`, or the whole lab. */
+export type SnapshotScope = "machine" | "lab";
+
+/** One snapshot as the host reports it, merged over the machines (`GET /api/targets/{name}/snapshots`). */
+export interface TargetSnapshot {
+  name: string;
+  /** `online` or `offline`. */
+  kind?: string;
+  /** The capture time (UTC), as vmlab prints it. */
+  taken?: string;
+  /** The machines that have a snapshot with this name. */
+  machines: string[];
+  /** Terrarium took it: the name is in the target's `snapshots`. */
+  managed: boolean;
+}
+
+/** `GET /api/targets/{name}/snapshots` (docs/api.md §17.3). */
+export interface TargetSnapshotList {
+  target: string;
+  scope: SnapshotScope;
+  /** The machines the list read. */
+  machines: string[];
+  snapshots: TargetSnapshot[];
+  /** Stored names that the host no longer has; the list removed them from the target's `snapshots`. */
+  dropped: string[];
+  /** The `lab` scope only: false when the lab does not run (vmlab then names no machines). */
+  lab_running?: boolean;
+  /** A `lab_from_workspace` target: the holder (`project/name`) whose instance. */
+  agent?: string;
+}
+
+/** The query of the snapshot list and delete. */
+export interface SnapshotQuery {
+  scope?: SnapshotScope;
+  /** A `lab_from_workspace` target: the holder whose instance. */
+  agent?: string;
+  /** Delete: `terrarium-clean` while `snapshot_before_task` is on. */
+  force?: boolean;
+}
+
+/** `DELETE /api/targets/{name}/snapshots/{snap}` (docs/api.md §17.3). */
+export interface SnapshotDeleted {
+  target: string;
+  verb: "snapshot_delete";
+  snapshot: string;
+  scope: SnapshotScope;
+  machines: string[];
+  agent?: string;
 }
 
 /** `POST /api/targets/{name}/exec`. `shell` opens a login shell in a PTY. */

@@ -34,6 +34,7 @@ and a body of `-` read stdin. Add `--json` to parse output. Run `terrarium
 - `version new | attach | submit | wait`: ask the user to review a result.
 - `usage`: your subscription and your share of it.
 - `status set <idle|working|blocked> --note ...`: tell the operator your state.
+- `targets ls | snapshot | restore | snapshots | snapshot-rm`: your targets, and the snapshots of a vmlab target.
 
 ## Mailbox
 

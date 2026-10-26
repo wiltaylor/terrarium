@@ -226,6 +226,7 @@ output. Run `terrarium <command> --help` for the flags.
 - `version new | attach | submit | wait`: ask the user to review a result.
 - `usage`: your subscription use.
 - `status set <idle|working|blocked> --note ...`: tell the operator your state.
+- `target snapshot | restore | snapshots | snapshot-rm`: vmlab snapshots.
 
 ## Mailbox
 
@@ -369,7 +370,8 @@ mod tests {
             assert!(out.contains(needle), "{needle}");
         }
         let words = DEFAULT_TEMPLATE.split_whitespace().count();
-        assert!(words < 900, "{words} words");
+        // 910: the snapshot line of the CLI list (docs/api.md §17.3).
+        assert!(words < 910, "{words} words");
     }
 
     /// The prompt holds only stable facts, so a change of peer status, or of

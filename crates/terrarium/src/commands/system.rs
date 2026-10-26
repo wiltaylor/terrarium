@@ -7,7 +7,10 @@ use serde_json::{Value, json};
 
 use super::{event_line, print_generic, print_table, set_opt};
 use crate::api::{ServerError, query};
-use crate::cli::{AdminTargetCmd, AuditArgs, DaemonCmd, EventsArgs, HarnessCmd, HostCmd, UsageCmd};
+use crate::cli::{
+    AdminTargetCmd, AuditArgs, DaemonCmd, EventsArgs, HarnessCmd, HostCmd, SnapshotArgs,
+    SnapshotCmd, SnapshotOn, UsageCmd,
+};
 use crate::ctx::Ctx;
 use crate::output::field;
 use crate::transport::{ApiRequest, Method};
@@ -249,9 +252,142 @@ fn all_query(all: bool) -> Vec<(String, String)> {
     query([("all", all.then(|| "true".to_owned()))])
 }
 
+/// The snapshot commands of `targets` and `admin target` (docs/api.md
+/// §17.3).
+pub async fn snapshot(ctx: &Ctx, cmd: &SnapshotCmd) -> anyhow::Result<()> {
+    let base = |t: &str| format!("/api/targets/{}", crate::transport::encode(t));
+    let on_query =
+        |on: &SnapshotOn| query([("scope", on.scope.clone()), ("agent", on.agent.clone())]);
+    match cmd {
+        SnapshotCmd::Snapshot(a) => snapshot_verb(ctx, "snapshot", a, false).await,
+        SnapshotCmd::Restore {
+            snap,
+            discard_guest_changes,
+        } => snapshot_verb(ctx, "restore", snap, *discard_guest_changes).await,
+        SnapshotCmd::Snapshots { target, on } => {
+            let v = ctx
+                .api
+                .get(&format!("{}/snapshots", base(target)), on_query(on))
+                .await?;
+            ctx.emit(&v, |c, v| print_snapshots(c, target, v))
+        }
+        SnapshotCmd::SnapshotRm {
+            target,
+            name,
+            on,
+            force,
+        } => {
+            let mut q = on_query(on);
+            if *force {
+                q.push(("force".into(), "true".into()));
+            }
+            let path = format!(
+                "{}/snapshots/{}",
+                base(target),
+                crate::transport::encode(name)
+            );
+            let v = ctx.api.delete(&path, q).await?;
+            ctx.emit(&v, |c, v| {
+                c.line(format!(
+                    "{target}: deleted snapshot {name} on {}",
+                    v["machines"]
+                        .as_array()
+                        .map(|m| m
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .collect::<Vec<_>>()
+                            .join(", "))
+                        .unwrap_or_default()
+                ));
+            })
+        }
+    }
+}
+
+/// `POST /api/targets/{name}/snapshot|restore`.
+async fn snapshot_verb(
+    ctx: &Ctx,
+    verb: &str,
+    a: &SnapshotArgs,
+    discard: bool,
+) -> anyhow::Result<()> {
+    let mut body = json!({});
+    set_opt(&mut body, "name", a.name.clone());
+    set_opt(&mut body, "scope", a.on.scope.clone());
+    set_opt(&mut body, "agent", a.on.agent.clone());
+    if discard {
+        body["discard_guest_changes"] = true.into();
+    }
+    let body = (body != json!({})).then_some(body);
+    let path = format!(
+        "/api/targets/{}/{verb}",
+        crate::transport::encode(&a.target)
+    );
+    let v = ctx.api.post(&path, body).await?;
+    let done = if verb == "snapshot" {
+        "took"
+    } else {
+        "restored"
+    };
+    ctx.emit(&v, |c, v| {
+        c.line(format!(
+            "{}: {done} snapshot {} ({}): {}",
+            a.target,
+            field(v, "snapshot"),
+            field(v, "scope"),
+            field(v, "state")
+        ));
+    })
+}
+
+/// The table of `targets snapshots`.
+fn print_snapshots(c: &Ctx, target: &str, v: &Value) {
+    if v["lab_running"] == false {
+        c.line(format!(
+            "the lab of {target} does not run: vmlab names no machines"
+        ));
+        return;
+    }
+    let rows: Vec<Value> = v["snapshots"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|mut x| {
+            x["managed"] = if x["managed"] == true { "yes" } else { "-" }.into();
+            let ms: Vec<&str> = x["machines"]
+                .as_array()
+                .map(|m| m.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default();
+            x["machines"] = ms.join(",").into();
+            x
+        })
+        .collect();
+    print_table(
+        c,
+        &rows,
+        &[
+            ("NAME", "name"),
+            ("KIND", "kind"),
+            ("TAKEN", "taken"),
+            ("MACHINES", "machines"),
+            ("MANAGED", "managed"),
+        ],
+        &format!("no snapshots on {target}"),
+    );
+    if let Some(d) = v["dropped"].as_array().filter(|d| !d.is_empty()) {
+        let d: Vec<&str> = d.iter().filter_map(Value::as_str).collect();
+        c.line(format!(
+            "the host no longer has: {} (removed from the target's snapshots)",
+            d.join(", ")
+        ));
+    }
+}
+
 pub async fn admin_target(ctx: &Ctx, cmd: &AdminTargetCmd) -> anyhow::Result<()> {
     match cmd {
         AdminTargetCmd::Ls => admin_targets(ctx).await,
+        AdminTargetCmd::Snapshot(c) => snapshot(ctx, c).await,
         AdminTargetCmd::New {
             name,
             kind,

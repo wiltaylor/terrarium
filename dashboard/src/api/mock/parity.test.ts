@@ -566,7 +566,7 @@ describe("mock parity with docs/api.md", () => {
     // lab-win11: a kept ephemeral vmlab target, stopped.
     expect(await api.targets.action("lab-win11", "up")).toEqual({ target: "lab-win11", verb: "up", state: "running" });
     expect((await state("lab-win11")).state).toBe("running");
-    expect(await api.targets.action("lab-win11", "snapshot")).toEqual({ target: "lab-win11", verb: "snapshot", state: "running", snapshot: "terrarium" });
+    expect(await api.targets.action("lab-win11", "snapshot")).toEqual({ target: "lab-win11", verb: "snapshot", state: "running", snapshot: "terrarium", scope: "machine" });
     expect((await state("lab-win11")).snapshots).toEqual(["terrarium-clean", "terrarium"]);
     expect(await api.targets.action("lab-win11", "restore")).toMatchObject({ verb: "restore", state: "running", snapshot: "terrarium" });
     expect(await api.targets.action("lab-win11", "down")).toMatchObject({ state: "stopped" });
@@ -582,12 +582,52 @@ describe("mock parity with docs/api.md", () => {
     // A permanent vmlab target stops; it is not destroyed. A restore needs the snapshot.
     await expect(api.targets.action("dev-vm", "down")).resolves.toMatchObject({ state: "stopped" });
     await expect(api.targets.action("ci-box", "up")).resolves.toMatchObject({ state: "running" });
-    api.world.targets.find((x) => x.name === "lab-win11")!.snapshots = [];
+    api.world.hostSnapshots["lab-win11"] = [];
     await expect(api.targets.action("lab-win11", "restore")).rejects.toMatchObject({ status: 422, code: "invalid", details: { verb: "vmlab.snapshot_restore" } });
     const opened = await api.targets.exec("pg-test", { shell: true, pty: { rows: 24, cols: 80 } });
     expect(opened).toMatchObject({ target: "pg-test", kind: "shell" });
     await api.targets.closeSession("pg-test", opened.session_id);
     await expect(api.targets.closeSession("pg-test", opened.session_id)).rejects.toMatchObject({ status: 404 });
+  });
+
+  it("lists and deletes snapshots in the daemon's shapes (docs/api.md §17.3)", async () => {
+    const api = mock();
+    const LIST = ["target", "scope", "machines", "snapshots", "dropped"];
+    const ROW = ["name", "kind", "taken", "machines", "managed"].sort();
+    // lab-win11: terrarium-clean is Terrarium's, pre-upgrade is not.
+    const l = await api.targets.snapshots("lab-win11");
+    expect(Object.keys(l).sort()).toEqual([...LIST].sort());
+    expect(l).toMatchObject({ target: "lab-win11", scope: "machine", machines: ["win11"], dropped: [] });
+    for (const r of l.snapshots) expect(Object.keys(r).sort()).toEqual(ROW);
+    expect(l.snapshots.map((s) => [s.name, s.managed])).toEqual([["terrarium-clean", true], ["pre-upgrade", false]]);
+    // The lab scope says whether the lab runs.
+    expect(await api.targets.snapshots("lab-win11", { scope: "lab" })).toMatchObject({ scope: "lab", lab_running: true });
+    // A take with a name and the lab scope answers the scope; the list shows it as managed.
+    await api.targets.action("dev-vm", "snapshot", { name: "pre", scope: "lab" });
+    expect((await api.targets.snapshots("dev-vm")).snapshots.find((s) => s.name === "pre")).toMatchObject({ managed: true, machines: ["vm1"] });
+    await expect(api.targets.action("dev-vm", "snapshot", { name: "x", scope: "machine" })).rejects.toMatchObject({ status: 422, code: "invalid" });
+    await expect(api.targets.action("dev-vm", "snapshot", { name: "-x" })).rejects.toMatchObject({ status: 422, code: "invalid" });
+    // A stored name that the host lost goes, with target.reconcile.
+    api.world.hostSnapshots["dev-vm"] = api.world.hostSnapshots["dev-vm"]!.filter((r) => r.name !== "terrarium");
+    expect((await api.targets.snapshots("dev-vm")).dropped).toEqual(["terrarium"]);
+    expect((await api.targets.list()).find((t) => t.name === "dev-vm")!.snapshots).toEqual(["pre"]);
+    expect((await api.audit({ action: "target.reconcile" })).items.at(-1)).toMatchObject({ target: "dev-vm", detail: { snapshots_dropped: ["terrarium"] } });
+    // Delete: terrarium-clean with snapshot_before_task needs force.
+    await expect(api.targets.deleteSnapshot("lab-win11", "terrarium-clean")).rejects.toMatchObject({ status: 409, code: "conflict" });
+    const d = await api.targets.deleteSnapshot("lab-win11", "terrarium-clean", { force: true });
+    expect(d).toEqual({ target: "lab-win11", verb: "snapshot_delete", snapshot: "terrarium-clean", scope: "machine", machines: ["win11"] });
+    expect((await api.targets.list()).find((t) => t.name === "lab-win11")!.snapshots).toEqual([]);
+    expect((await api.audit({ action: "target.snapshot_delete" })).items.at(-1)).toMatchObject({ target: "lab-win11", detail: { snapshot: "terrarium-clean" } });
+    await api.targets.deleteSnapshot("lab-win11", "pre-upgrade");
+    await expect(api.targets.deleteSnapshot("lab-win11", "nosuch")).rejects.toMatchObject({ status: 422, details: { verb: "vmlab.snapshot_delete" } });
+    await expect(api.targets.deleteSnapshot("lab-win11", "nosuch", { scope: "lab" })).rejects.toMatchObject({ status: 404, code: "not_found" });
+    // A docker target has none; a lab_from_workspace target needs the holder.
+    await expect(api.targets.snapshots("pg-test")).rejects.toMatchObject({ status: 422, code: "invalid" });
+    await expect(api.targets.snapshots("terrarium-ws-lab")).rejects.toMatchObject({ status: 422, code: "invalid" });
+    const ws = await api.targets.snapshots("terrarium-ws-lab", { agent: "terrarium/runner-dev" });
+    expect(ws).toMatchObject({ agent: "terrarium/runner-dev", snapshots: [] });
+    await api.targets.action("terrarium-ws-lab", "snapshot", { agent: "terrarium/runner-dev", name: "s1" });
+    expect((await api.targets.snapshots("terrarium-ws-lab", { agent: "terrarium/runner-dev" })).snapshots.map((s) => s.name)).toEqual(["s1"]);
   });
 
   it("refuses a verb on a target whose host agent is offline with 409 conflict", async () => {

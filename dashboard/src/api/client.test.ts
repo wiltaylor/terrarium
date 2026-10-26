@@ -100,6 +100,8 @@ describe("createHttpApi", () => {
     await api.subscriptions.loginInput("LOGIN-1", "abc");
     await api.inbox.list("webshop");
     await api.targets.action("TGT-1", "snapshot");
+    await api.targets.snapshots("vm", { scope: "lab", agent: "terra/w1" });
+    await api.targets.deleteSnapshot("vm", "pre up", { force: true });
 
     expect(calls.map((c) => `${c.method} ${c.path}`)).toEqual([
       "GET /api/health",
@@ -113,7 +115,11 @@ describe("createHttpApi", () => {
       "POST /api/subscriptions/login/LOGIN-1/input",
       "GET /api/projects/webshop/inbox",
       "POST /api/targets/TGT-1/snapshot",
+      "GET /api/targets/vm/snapshots",
+      "DELETE /api/targets/vm/snapshots/pre%20up",
     ]);
+    expect(calls[11]!.opts?.query).toEqual({ scope: "lab", agent: "terra/w1" });
+    expect(calls[12]!.opts?.query).toEqual({ force: true });
     expect(calls[1]!.opts?.query).toMatchObject({ project: "terrarium", limit: 1000 });
     expect(calls[4]!.opts?.body).toEqual({ column: "review", position: 0 });
     expect(calls[5]!.opts?.query).toEqual({ depth: 1 });

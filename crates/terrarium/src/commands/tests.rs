@@ -4402,3 +4402,175 @@ async fn schedule_triggers() {
         assert!(r.reqs.is_empty(), "{args:?}");
     }
 }
+
+/// docs/api.md §17.3: the snapshot commands. Agent mode has them under
+/// `targets` (alias `target`); the operator under `admin target` too.
+#[tokio::test]
+async fn target_snapshot_commands() {
+    let out = ok(
+        true,
+        &["target", "snapshot", "win", "clean"],
+        vec![(
+            200,
+            json!({"target": "win", "verb": "snapshot", "state": "running",
+                   "snapshot": "clean", "scope": "machine"}),
+        )],
+        vec![(
+            Post,
+            "/api/targets/win/snapshot",
+            vec![],
+            Some(json!({"name": "clean"})),
+        )],
+    )
+    .await;
+    assert_eq!(out, "win: took snapshot clean (machine): running\n");
+    // No name: no body, and the daemon takes `terrarium`.
+    ok(
+        true,
+        &["targets", "snapshot", "win"],
+        vec![(200, json!({"state": "running"}))],
+        vec![req(Post, "/api/targets/win/snapshot")],
+    )
+    .await;
+    let out = ok(
+        true,
+        &[
+            "target",
+            "restore",
+            "win",
+            "clean",
+            "--discard-guest-changes",
+            "--scope",
+            "lab",
+        ],
+        vec![(
+            200,
+            json!({"state": "running", "snapshot": "clean", "scope": "lab"}),
+        )],
+        vec![(
+            Post,
+            "/api/targets/win/restore",
+            vec![],
+            Some(json!({"name": "clean", "scope": "lab", "discard_guest_changes": true})),
+        )],
+    )
+    .await;
+    assert_eq!(out, "win: restored snapshot clean (lab): running\n");
+    let out = ok(
+        true,
+        &["target", "snapshots", "win"],
+        vec![(
+            200,
+            json!({"target": "win", "scope": "machine", "machines": ["win11"], "dropped": ["old"],
+                   "snapshots": [
+                       {"name": "clean", "kind": "online", "taken": "2026-10-26T08:00:00Z",
+                        "machines": ["win11"], "managed": true},
+                       {"name": "hand", "kind": "offline", "taken": "2026-10-26T09:00:00Z",
+                        "machines": ["win11"], "managed": false}]}),
+        )],
+        vec![req(Get, "/api/targets/win/snapshots")],
+    )
+    .await;
+    assert!(out.starts_with("NAME"), "{out}");
+    assert!(out.contains("MANAGED"), "{out}");
+    let clean = out.lines().find(|l| l.starts_with("clean")).unwrap();
+    assert!(clean.contains("win11") && clean.ends_with("yes"), "{out}");
+    let hand = out.lines().find(|l| l.starts_with("hand")).unwrap();
+    assert!(hand.ends_with('-'), "{out}");
+    assert!(out.contains("the host no longer has: old"), "{out}");
+    let out = ok(
+        true,
+        &["target", "snapshots", "win", "--scope", "lab"],
+        vec![(
+            200,
+            json!({"scope": "lab", "lab_running": false, "machines": [], "snapshots": [], "dropped": []}),
+        )],
+        vec![(Get, "/api/targets/win/snapshots", vec![("scope", "lab")], None)],
+    )
+    .await;
+    assert!(out.contains("does not run"), "{out}");
+    let out = ok(
+        true,
+        &["target", "snapshot-rm", "win", "terrarium-clean", "--force"],
+        vec![(
+            200,
+            json!({"machines": ["win11"], "snapshot": "terrarium-clean"}),
+        )],
+        vec![(
+            Delete,
+            "/api/targets/win/snapshots/terrarium-clean",
+            vec![("force", "true")],
+            None,
+        )],
+    )
+    .await;
+    assert_eq!(out, "win: deleted snapshot terrarium-clean on win11\n");
+    // The operator: `admin target`, with the holder of an instance.
+    ok(
+        false,
+        &[
+            "admin",
+            "target",
+            "snapshots",
+            "terra-vws",
+            "--agent",
+            "terra/w1",
+            "--scope",
+            "machine",
+        ],
+        vec![(200, json!({"snapshots": []}))],
+        vec![(
+            Get,
+            "/api/targets/terra-vws/snapshots",
+            vec![("scope", "machine"), ("agent", "terra/w1")],
+            None,
+        )],
+    )
+    .await;
+    ok(
+        false,
+        &[
+            "admin", "target", "snapshot", "vm", "pre", "--agent", "terra/w1",
+        ],
+        vec![(200, json!({}))],
+        vec![(
+            Post,
+            "/api/targets/vm/snapshot",
+            vec![],
+            Some(json!({"name": "pre", "agent": "terra/w1"})),
+        )],
+    )
+    .await;
+    ok(
+        false,
+        &[
+            "admin",
+            "target",
+            "snapshot-rm",
+            "vm",
+            "pre",
+            "--scope",
+            "lab",
+        ],
+        vec![(200, json!({"machines": ["a", "b"]}))],
+        vec![(
+            Delete,
+            "/api/targets/vm/snapshots/pre",
+            vec![("scope", "lab")],
+            None,
+        )],
+    )
+    .await;
+    // A bad scope is a usage error before any request.
+    assert!(
+        crate::cli::Cli::try_parse_from([
+            "terrarium",
+            "target",
+            "snapshots",
+            "win",
+            "--scope",
+            "planet"
+        ])
+        .is_err()
+    );
+}

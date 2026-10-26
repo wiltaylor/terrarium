@@ -322,6 +322,10 @@ terrarium usage project                       the project, per agent
 terrarium usage subscriptions                 all plans
 terrarium status set <idle|working|blocked> [--note text]
 terrarium targets ls                          an agent: the targets its policy or a lease allows, with host online/offline
+terrarium targets snapshot <target> [name] [--scope machine|lab] [--agent a]
+terrarium targets restore <target> [name] [--discard-guest-changes] [--scope machine|lab] [--agent a]
+terrarium targets snapshots <target> [--scope machine|lab] [--agent a]
+terrarium targets snapshot-rm <target> <name> [--force] [--scope machine|lab] [--agent a]
 terrarium exec <target> [--cwd d] [-e K=V]... [--timeout s] [-i] [-t] [--agent a] -- <cmd>
 terrarium shell <target>                      a login shell in a PTY; Ctrl-] detaches
 terrarium cp <src> <target>:<dst>             one file to the target
@@ -332,9 +336,9 @@ In agent mode, `targets ls` adds the columns `ACCESS` (`policy` or
 `lease`), `EXCLUSIVE` (`yes` or `no` for a lease, else `-`), and `EXPIRES`
 (the RFC 3339 lease end, `until revoked` for a lease with no end, else `-`).
 
-These commands use the exec sessions of `api.md` §17.4. They send plain
-requests only, so they work the same in both modes (agent-rpc.md,
-"Streams over the tunnel").
+`exec`, `shell`, and `cp` use the exec sessions of `api.md` §17.4. They
+send plain requests only, so they work the same in both modes
+(agent-rpc.md, "Streams over the tunnel"). So do the snapshot commands.
 
 - `exec` streams the remote stdout and stderr to the CLI's stdout and
   stderr. It exits with the exit code of the remote command (128 + the
@@ -351,6 +355,25 @@ requests only, so they work the same in both modes (agent-rpc.md,
   the file in chunks of 256 KiB and the SHA-256 at the end. A pull goes to
   a partial file, and the CLI renames it only when the count and the
   SHA-256 match. To copy a directory, make a tar file first.
+
+`terrarium target` is the same command as `terrarium targets`.
+
+The snapshot commands work on a vmlab target only
+([api.md §17.3](api.md#173-lifecycle-verbs)). The caller must be able to
+use the target, or to define it. The default name is `terrarium`. The
+default scope is `machine` when the target has a machine, else `lab`.
+`--scope lab` acts on every machine of the lab. An agent always acts on
+its own lab instance of a `lab_from_workspace` target; the operator names
+the holder with `--agent`. `admin target snapshot`, `restore`,
+`snapshots`, and `snapshot-rm` are the same commands. `admin target verb`
+stays.
+
+| Command | Request | Text output |
+|---|---|---|
+| `targets snapshot <t> [n]` | `POST /api/targets/{t}/snapshot` `{"name"?, "scope"?, "agent"?}` | `<t>: took snapshot <n> (<scope>): <state>` |
+| `targets restore <t> [n]` | `POST /api/targets/{t}/restore` `{"name"?, "scope"?, "agent"?, "discard_guest_changes"?}` | `<t>: restored snapshot <n> (<scope>): <state>` |
+| `targets snapshots <t>` | `GET /api/targets/{t}/snapshots[?scope=&agent=]` | A table: `NAME`, `KIND`, `TAKEN`, `MACHINES`, `MANAGED` (`yes`: Terrarium took it). Then a line for the stored names that the host no longer has. A lab that does not run gives one line that says so. |
+| `targets snapshot-rm <t> <n>` | `DELETE /api/targets/{t}/snapshots/{n}[?scope=&agent=&force=true]` | `<t>: deleted snapshot <n> on <machines>`. `terrarium-clean` on a target with `snapshot_before_task` needs `--force` (else `409`, exit 1). |
 
 ### Fleet files
 
@@ -542,6 +565,10 @@ terrarium admin target edit <name> [--lab-path dir] [--lab-ref ref] [--machine m
 terrarium admin target ls                      agent mode: the project's and the global targets
 terrarium admin target rm <name>
 terrarium admin target verb <name> up|down|snapshot|restore|status [--snapshot name] [--agent a]
+terrarium admin target snapshot <name> [snap] [--scope machine|lab] [--agent a]
+terrarium admin target restore <name> [snap] [--discard-guest-changes] [--scope machine|lab] [--agent a]
+terrarium admin target snapshots <name> [--scope machine|lab] [--agent a]
+terrarium admin target snapshot-rm <name> <snap> [--force] [--scope machine|lab] [--agent a]
 terrarium admin target grant <target> <agent> [--until 30m|time] [--exclusive] [--reason text]
                           [--no-lifecycle-check]
 terrarium admin target revoke <target> <agent>

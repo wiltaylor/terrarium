@@ -140,11 +140,29 @@ esac"#,
   status) if [ -f '{gone}' ]; then echo 'lab "win": not running'; exit 0; fi
           printf 'lab "win"\n\n  NAME     KIND      STATUS   IP           TEMPLATE/IMAGE\n'
           if [ -f '{s}' ]; then st=running; else st=stopped; fi
-          printf '  win11    vm        %s  10.0.0.9     x86_64/win11\n' "$st" ;;
+          printf '  win11    vm        %s  10.0.0.9     x86_64/win11\n' "$st"
+          if [ -f '{two}' ]; then printf '  linux01  vm        %s  10.0.0.8     x86_64/ubuntu\n' "$st"; fi
+          if [ -f '{box}' ]; then printf '  box      container running  -            alpine:3.22\n'; fi ;;
+  snapshot) sub=$2; shift 2; vm=; pos=
+    while [ $# -gt 0 ]; do case "$1" in --vm) vm=$2; shift 2 ;; --*) shift ;; *) pos="$pos $1"; shift ;; esac; done
+    set -- $pos
+    touch '{snaps}'
+    case "$sub" in
+      create) ms=$vm; if [ -z "$ms" ]; then ms=win11; if [ -f '{two}' ]; then ms="win11 linux01"; fi; fi
+              for m in $ms; do grep -qx "$m $1" '{snaps}' || echo "$m $1" >> '{snaps}'; done ;;
+      list) if grep -q "^$1 " '{snaps}'; then echo 'NAME              KIND     TAKEN'
+              grep "^$1 " '{snaps}' | while read m n; do printf '%-17s online   2026-10-26T08:00:00Z\n' "$n"; done
+            else echo "no snapshots for $1"; fi ;;
+      delete) if grep -qx "$1 $2" '{snaps}'; then grep -vx "$1 $2" '{snaps}' > '{snaps}.tmp'; mv '{snaps}.tmp' '{snaps}'
+              else echo "\"$1\" has no snapshot \"$2\"" >&2; exit 1; fi ;;
+    esac ;;
 esac"#,
             s = state.display(),
             slow = dir.join("slow").display(),
-            gone = dir.join("vmlab.gone").display()
+            gone = dir.join("vmlab.gone").display(),
+            two = dir.join("two").display(),
+            box = dir.join("box").display(),
+            snaps = dir.join("vmlab.snaps").display()
         ),
     };
     format!(
@@ -796,6 +814,286 @@ async fn lifecycle_verbs_map_to_docker_and_vmlab() {
     );
     let audit = lab.td.get("/api/audit?action=target.up").await;
     assert!(audit.ok().as_array().unwrap().len() >= 2);
+}
+
+fn names(v: &Value) -> Vec<String> {
+    v["snapshots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x["name"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+async fn delete_as(td: &TestDaemon, agent: &str, path: &str) -> common::Resp {
+    td.req(hyper::Method::DELETE, path, None, Some(agent)).await
+}
+
+/// docs/api.md §17.3: `GET .../snapshots` lists what the host has, marks
+/// what Terrarium took (`managed`), and drops the stored names that the
+/// host lost; `DELETE .../snapshots/{snap}` deletes on the machine, or on
+/// each machine of the lab that has it. `scope` picks the machine or the
+/// lab. The rights are those of the verbs.
+#[tokio::test]
+async fn snapshots_list_delete_and_lab_scope() {
+    let lab = Lab::start().await;
+    let _h = lab.host("lab1").await;
+    lab.td.project("terra").await;
+    let user = id_of(
+        &lab.td
+            .agent(
+                "terra",
+                "user",
+                json!({"policy": {"targets": ["terra-win"]}}),
+            )
+            .await,
+    );
+    let other = id_of(&lab.td.agent("terra", "other", json!({})).await);
+    let labdir = tempfile::tempdir().unwrap();
+    std::fs::write(labdir.path().join("vmlab.wcl"), "lab \"win\" {}\n").unwrap();
+    lab.target(
+        json!({"name": "win", "kind": "vmlab", "host": "lab1", "project": "terra",
+                      "lab": labdir.path(), "machine": "win11"}),
+    )
+    .await;
+    std::fs::write(lab.bins.path().join("two"), "").unwrap();
+    lab.td.post_empty("/api/targets/terra-win/up").await.ok();
+
+    // Take: the machine by default; `scope: lab` drops `--vm`.
+    let r = lab
+        .td
+        .post("/api/targets/terra-win/snapshot", json!({"name": "a"}))
+        .await;
+    assert_eq!(r.ok()["scope"], "machine");
+    let r = lab
+        .td
+        .post(
+            "/api/targets/terra-win/snapshot",
+            json!({"name": "b", "scope": "lab"}),
+        )
+        .await;
+    assert_eq!(r.ok()["scope"], "lab");
+    let log = lab.log();
+    assert!(log.contains("vmlab snapshot create --vm win11 a"), "{log}");
+    assert!(log.contains("vmlab snapshot create b"), "{log}");
+    // A snapshot that Terrarium did not take.
+    let snaps = lab.bins.path().join("vmlab.snaps");
+    let mut text = std::fs::read_to_string(&snaps).unwrap();
+    text.push_str("win11 foreign\n");
+    std::fs::write(&snaps, &text).unwrap();
+
+    let v = lab.td.get("/api/targets/terra-win/snapshots").await;
+    let v = v.ok();
+    assert_eq!(v["scope"], "machine");
+    assert_eq!(v["machines"], json!(["win11"]));
+    assert_eq!(names(v), ["a", "b", "foreign"]);
+    let managed: Vec<bool> = v["snapshots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x["managed"].as_bool().unwrap())
+        .collect();
+    assert_eq!(managed, [true, true, false]);
+    assert_eq!(v["snapshots"][0]["kind"], "online");
+    assert_eq!(v["snapshots"][0]["taken"], "2026-10-26T08:00:00Z");
+    assert_eq!(v["dropped"], json!([]));
+    assert!(lab.log().contains("vmlab snapshot list win11"));
+    // The foreign one is not added to the stored names.
+    assert_eq!(
+        lab.td.get("/api/targets/terra-win").await.ok()["snapshots"],
+        json!(["a", "b"])
+    );
+
+    // The lab: every machine that `vmlab status` names.
+    let v = lab
+        .td
+        .get("/api/targets/terra-win/snapshots?scope=lab")
+        .await;
+    let v = v.ok();
+    assert_eq!(v["lab_running"], true);
+    assert_eq!(v["machines"], json!(["win11", "linux01"]));
+    let b = v["snapshots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["name"] == "b")
+        .unwrap();
+    assert_eq!(b["machines"], json!(["win11", "linux01"]));
+
+    // A name the host lost leaves the stored names, with an audit row and
+    // an event.
+    let text = std::fs::read_to_string(&snaps)
+        .unwrap()
+        .replace("win11 a\n", "");
+    std::fs::write(&snaps, text).unwrap();
+    let v = lab.td.get("/api/targets/terra-win/snapshots").await;
+    assert_eq!(v.ok()["dropped"], json!(["a"]));
+    assert_eq!(
+        lab.td.get("/api/targets/terra-win").await.ok()["snapshots"],
+        json!(["b"])
+    );
+    let row = last_audit(&lab.td, "target.reconcile").await;
+    assert_eq!(row["detail"]["snapshots_dropped"], json!(["a"]), "{row}");
+    assert!(
+        events(&lab.td, "target")
+            .await
+            .iter()
+            .any(|e| e["data"]["change"] == "snapshots_dropped")
+    );
+
+    // Delete lab-wide: each machine that has it.
+    let r = lab
+        .td
+        .delete("/api/targets/terra-win/snapshots/b?scope=lab")
+        .await;
+    let r = r.ok();
+    assert_eq!(r["machines"], json!(["win11", "linux01"]));
+    assert_eq!(r["verb"], "snapshot_delete");
+    let log = lab.log();
+    assert!(log.contains("vmlab snapshot delete win11 b"), "{log}");
+    assert!(log.contains("vmlab snapshot delete linux01 b"), "{log}");
+    assert_eq!(
+        lab.td.get("/api/targets/terra-win").await.ok()["snapshots"],
+        json!([])
+    );
+    let row = last_audit(&lab.td, "target.snapshot_delete").await;
+    assert_eq!(row["actor"], "operator");
+    assert_eq!(row["detail"]["snapshot"], "b");
+    assert!(
+        events(&lab.td, "target")
+            .await
+            .iter()
+            .any(|e| e["data"]["change"] == "snapshot_deleted" && e["data"]["snapshot"] == "b")
+    );
+    // A foreign snapshot can go too. A missing one: vmlab fails (422) on a
+    // machine, and no machine of the lab has it (404).
+    lab.td
+        .delete("/api/targets/terra-win/snapshots/foreign")
+        .await
+        .ok();
+    let r = lab
+        .td
+        .delete("/api/targets/terra-win/snapshots/nosuch")
+        .await;
+    r.err(422, "invalid");
+    assert_eq!(r.body["error"]["details"]["verb"], "vmlab.snapshot_delete");
+    lab.td
+        .delete("/api/targets/terra-win/snapshots/nosuch?scope=lab")
+        .await
+        .err(404, "not_found");
+    lab.td
+        .delete("/api/targets/terra-win/snapshots/-x")
+        .await
+        .err(422, "invalid");
+
+    // Rights: the agent that may use the target, not the other one.
+    lab.td
+        .get_as(&other, "/api/targets/terra-win/snapshots")
+        .await
+        .err(403, "forbidden");
+    delete_as(&lab.td, &other, "/api/targets/terra-win/snapshots/x")
+        .await
+        .err(403, "forbidden");
+    let v = lab
+        .td
+        .get_as(&user, "/api/targets/terra-win/snapshots")
+        .await;
+    assert_eq!(v.ok()["snapshots"], json!([]));
+    lab.td
+        .post_as(
+            &user,
+            "/api/targets/terra-win/snapshot",
+            json!({"name": "mine"}),
+        )
+        .await
+        .ok();
+    let r = delete_as(&lab.td, &user, "/api/targets/terra-win/snapshots/mine").await;
+    assert_eq!(r.ok()["machines"], json!(["win11"]));
+    let row = last_audit(&lab.td, "target.snapshot_delete").await;
+    assert_eq!(row["actor"], format!("agent:{user}"), "{row}");
+
+    // `terrarium-clean` with `snapshot_before_task` needs force.
+    lab.td
+        .patch(
+            "/api/targets/terra-win",
+            json!({"snapshot_before_task": true}),
+        )
+        .await
+        .ok();
+    lab.td
+        .post(
+            "/api/targets/terra-win/snapshot",
+            json!({"name": "terrarium-clean"}),
+        )
+        .await
+        .ok();
+    lab.td
+        .delete("/api/targets/terra-win/snapshots/terrarium-clean")
+        .await
+        .err(409, "conflict");
+    lab.td
+        .delete("/api/targets/terra-win/snapshots/terrarium-clean?force=true")
+        .await
+        .ok();
+    assert_eq!(
+        lab.td.get("/api/targets/terra-win").await.ok()["snapshots"],
+        json!([])
+    );
+
+    // A lab that does not run names no machines: a lab-wide list is empty
+    // and drops nothing; a lab-wide delete is refused.
+    lab.td
+        .post("/api/targets/terra-win/snapshot", json!({"name": "keep"}))
+        .await
+        .ok();
+    std::fs::write(lab.bins.path().join("vmlab.gone"), "").unwrap();
+    let v = lab
+        .td
+        .get("/api/targets/terra-win/snapshots?scope=lab")
+        .await;
+    let v = v.ok();
+    assert_eq!(v["lab_running"], false);
+    assert_eq!(v["snapshots"], json!([]));
+    assert_eq!(v["dropped"], json!([]));
+    assert_eq!(
+        lab.td.get("/api/targets/terra-win").await.ok()["snapshots"],
+        json!(["keep"])
+    );
+    lab.td
+        .delete("/api/targets/terra-win/snapshots/keep?scope=lab")
+        .await
+        .err(409, "conflict");
+    std::fs::remove_file(lab.bins.path().join("vmlab.gone")).unwrap();
+
+    // A target with no machine: the lab is the default scope, and
+    // `machine` is refused.
+    lab.target(json!({"name": "whole", "kind": "vmlab", "host": "lab1",
+                      "lab": labdir.path()}))
+        .await;
+    let v = lab.td.get("/api/targets/whole/snapshots").await;
+    assert_eq!(v.ok()["scope"], "lab");
+    lab.td
+        .get("/api/targets/whole/snapshots?scope=machine")
+        .await
+        .err(422, "invalid");
+    lab.td
+        .post(
+            "/api/targets/whole/snapshot",
+            json!({"name": "x", "scope": "machine"}),
+        )
+        .await
+        .err(422, "invalid");
+    lab.td
+        .get("/api/targets/whole/snapshots?scope=planet")
+        .await
+        .err(400, "bad_request");
+    // A docker target has no snapshots.
+    lab.target(json!({"name": "dbox", "kind": "docker", "host": "lab1", "image": "alpine:3"}))
+        .await;
+    lab.td
+        .get("/api/targets/dbox/snapshots")
+        .await
+        .err(422, "invalid");
 }
 
 /// `snapshot_before_task` (PLAN §19): a vmlab target gets the snapshot
@@ -2543,6 +2841,26 @@ async fn a_lab_repo_target_runs_in_a_worktree_with_the_workspace() {
         "vmlab exec box -- uname (in {})",
         labdir.display()
     )));
+    // Snapshots go to the instance, as the verbs do. (The fake status
+    // shows the machine `box` from now on.)
+    std::fs::write(lab.bins.path().join("box"), "").unwrap();
+    lab.td
+        .post("/api/targets/terra-vbox/snapshot", json!({"name": "s1"}))
+        .await
+        .ok();
+    let v = lab.td.get("/api/targets/terra-vbox/snapshots").await;
+    assert_eq!(names(v.ok()), ["s1"]);
+    assert_eq!(v.body["snapshots"][0]["managed"], true);
+    let log = lab.log();
+    for want in [
+        format!(
+            "vmlab snapshot create --vm box s1 (in {})",
+            labdir.display()
+        ),
+        format!("vmlab snapshot list box (in {})", labdir.display()),
+    ] {
+        assert!(log.contains(&want), "missing {want:?} in\n{log}");
+    }
     // The stop: destroy, then the worktree and the instance go.
     stop_agent(&lab, &w1).await;
     assert!(
@@ -2664,6 +2982,62 @@ async fn lab_from_workspace_gives_each_holder_its_own_instance() {
         "vmlab exec box -- hostname (in {})",
         lab1.display()
     )));
+    // Snapshots: an agent acts on its own instance, also when it names
+    // another holder; the operator names the holder. (The fake status
+    // shows the machine `box` from now on.)
+    std::fs::write(lab.bins.path().join("box"), "").unwrap();
+    lab.td
+        .post_as(
+            &w2,
+            "/api/targets/terra-vws/snapshot",
+            json!({"name": "s2"}),
+        )
+        .await
+        .ok();
+    assert!(lab.log().contains(&format!(
+        "vmlab snapshot create --vm box s2 (in {})",
+        lab2.display()
+    )));
+    let v = lab
+        .td
+        .get_as(&w2, "/api/targets/terra-vws/snapshots?agent=terra/w1")
+        .await;
+    let v = v.ok();
+    assert_eq!(v["agent"], "terra/w2");
+    assert_eq!(v["snapshots"][0]["name"], "s2");
+    assert!(
+        lab.log()
+            .contains(&format!("vmlab snapshot list box (in {})", lab2.display()))
+    );
+    lab.td
+        .get("/api/targets/terra-vws/snapshots")
+        .await
+        .err(422, "invalid");
+    let v = lab
+        .td
+        .get("/api/targets/terra-vws/snapshots?agent=terra/w1")
+        .await;
+    assert_eq!(v.ok()["agent"], "terra/w1");
+    assert!(
+        lab.log()
+            .contains(&format!("vmlab snapshot list box (in {})", lab1.display()))
+    );
+    let r = delete_as(
+        &lab.td,
+        &w2,
+        "/api/targets/terra-vws/snapshots/s2?agent=terra/w1",
+    )
+    .await;
+    assert_eq!(r.ok()["agent"], "terra/w2");
+    assert!(lab.log().contains(&format!(
+        "vmlab snapshot delete box s2 (in {})",
+        lab2.display()
+    )));
+    // w3 may not use the target.
+    lab.td
+        .get_as(&w3, "/api/targets/terra-vws/snapshots")
+        .await
+        .err(403, "forbidden");
     // No exclusive lease on a per-holder target.
     lab.td
         .post(

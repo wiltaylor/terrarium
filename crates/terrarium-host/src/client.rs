@@ -756,6 +756,11 @@ impl Client {
                 need(vmlab_ok, "vmlab").and_then(|_| vmlab::plan_snapshot_list(&r, vb, p)),
                 tx,
             ),
+            F::VmlabSnapshotDelete(r) => self.start(
+                r.session,
+                need(vmlab_ok, "vmlab").and_then(|_| vmlab::plan_snapshot_delete(&r, vb, p)),
+                tx,
+            ),
         }
         Ok(())
     }

@@ -44,6 +44,7 @@ output. Run `terrarium <command> --help` for the flags.
 - `version new | attach | submit | wait`: ask the user to review a result.
 - `usage`: your subscription use.
 - `status set <idle|working|blocked> --note ...`: tell the operator your state.
+- `target snapshot | restore | snapshots | snapshot-rm`: vmlab snapshots.
 
 ## Mailbox
 

@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use crate::config::PathPolicy;
 use crate::protocol::{
     CpDirection, TargetState, ToolCapability, VmlabCp, VmlabExec, VmlabLifecycle, VmlabShell,
-    VmlabSnapshot, VmlabSnapshotList, VmlabStatus,
+    VmlabSnapshot, VmlabSnapshotDelete, VmlabSnapshotList, VmlabStatus,
 };
 use crate::session::ExecPlan;
 use crate::verb::{BuildError, ResultParser, VerbPlan, ident, secs};
@@ -238,6 +238,23 @@ pub fn plan_snapshot_list(
         plan(bin, dir, a, req.timeout_secs),
         ResultParser::VmlabSnapshotList,
     ))
+}
+
+/// `vmlab snapshot delete MACHINE NAME`: vmlab takes both as positionals,
+/// and has no lab-wide form.
+pub fn plan_snapshot_delete(
+    req: &VmlabSnapshotDelete,
+    bin: &str,
+    policy: &PathPolicy,
+) -> Result<VerbPlan, BuildError> {
+    let dir = lab_dir(&req.lab, policy)?;
+    let a = vec![
+        s("snapshot"),
+        s("delete"),
+        ident("machine", &req.machine)?.to_owned(),
+        ident("snapshot name", &req.name)?.to_owned(),
+    ];
+    Ok(VerbPlan::plain(plan(bin, dir, a, req.timeout_secs)))
 }
 
 // ------------------------------------------------------------------ parsers
@@ -554,10 +571,67 @@ mod tests {
         );
         let list: VmlabSnapshotList =
             serde_json::from_value(json!({"session":1,"lab":"/labs/ad","machine":"dc01"})).unwrap();
+        let p = plan_snapshot_list(&list, "vmlab", &P).unwrap();
+        assert_eq!(p.exec.args, ["snapshot", "list", "dc01"]);
+        assert_eq!(p.parser, Some(ResultParser::VmlabSnapshotList));
+        assert_eq!(p.exec.cwd.as_deref(), Some(Path::new("/labs/ad")));
+    }
+
+    #[test]
+    fn snapshot_delete_golden_and_refusals() {
+        let del: VmlabSnapshotDelete = serde_json::from_value(
+            json!({"session":1,"lab":"/labs/ad/vmlab.wcl","machine":"dc01","name":"pre-upgrade"}),
+        )
+        .unwrap();
+        let p = plan_snapshot_delete(&del, "vmlab", &P).unwrap();
+        assert_eq!(p.exec.args, ["snapshot", "delete", "dc01", "pre-upgrade"]);
+        assert_eq!(p.exec.cwd.as_deref(), Some(Path::new("/labs/ad")));
+        assert_eq!(p.parser, None);
+        for (machine, name) in [
+            ("--force", "x"),
+            ("dc01", "--all"),
+            ("", "x"),
+            ("dc01", ""),
+            ("dc01", "a\nb"),
+        ] {
+            let mut bad = del.clone();
+            bad.machine = machine.into();
+            bad.name = name.into();
+            assert_eq!(
+                plan_snapshot_delete(&bad, "vmlab", &P).unwrap_err().code,
+                crate::protocol::ErrorCode::BadRequest,
+                "{machine:?} {name:?}"
+            );
+        }
+        // The path policy holds for the lab dir.
+        let policy = PathPolicy {
+            roots: Some(vec![PathBuf::from("/srv/labs")]),
+        };
         assert_eq!(
-            plan_snapshot_list(&list, "vmlab", &P).unwrap().exec.args,
-            ["snapshot", "list", "dc01"]
+            plan_snapshot_delete(&del, "vmlab", &policy)
+                .unwrap_err()
+                .code,
+            crate::protocol::ErrorCode::PathDenied
         );
+        let mut take: VmlabSnapshot =
+            serde_json::from_value(json!({"session":1,"lab":"/labs/ad","name":"--x"})).unwrap();
+        assert!(plan_snapshot_take(&take, "vmlab", &P).is_err());
+        take.name = "ok".into();
+        take.machine = Some("-m".into());
+        assert!(plan_snapshot_restore(&take, "vmlab", &P).is_err());
+    }
+
+    #[test]
+    fn parses_a_snapshot_list_with_several_rows() {
+        let text = "NAME              KIND     TAKEN\nterrarium-clean   online   2026-10-26T08:00:00Z\npre-upgrade       offline  2026-10-26T09:30:00.5Z\n";
+        assert_eq!(
+            parse_snapshot_list(text),
+            json!([
+                {"name": "terrarium-clean", "kind": "online", "taken": "2026-10-26T08:00:00Z"},
+                {"name": "pre-upgrade", "kind": "offline", "taken": "2026-10-26T09:30:00.5Z"}
+            ])
+        );
+        assert_eq!(parse_snapshot_list(""), json!([]));
     }
 
     // Recorded from the vmlab reference (cli-lab.md, `vmlab status`).

@@ -431,11 +431,18 @@ must become `lab = "/home/wil/labs/win11"` (a directory that holds
 | `vmlab.snapshot_take` | `lab`, `name`, `machine` | `vmlab snapshot create [--vm MACHINE] NAME` |
 | `vmlab.snapshot_restore` | `lab`, `name`, `machine`, `discard_guest_changes` | `vmlab snapshot restore [--vm MACHINE] [--discard-guest-changes] NAME` |
 | `vmlab.snapshot_list` | `lab`, `machine` | `vmlab snapshot list MACHINE` |
+| `vmlab.snapshot_delete` | `lab`, `machine`, `name` | `vmlab snapshot delete MACHINE NAME` |
 
 Every vmlab frame also takes `timeout_secs`. For `vmlab.exec` the host agent
 passes it to `--timeout` and kills the process 30 seconds after it, so vmlab
-reports its own timeout first. With no `machine`, the snapshot verbs act on
-every machine in the lab.
+reports its own timeout first. With no `machine`, `vmlab.snapshot_take` and
+`vmlab.snapshot_restore` act on every machine in the lab. `vmlab snapshot
+list` and `vmlab snapshot delete` take one machine only, so
+`vmlab.snapshot_list` and `vmlab.snapshot_delete` need `machine`. For a
+lab-wide list or delete, the daemon sends one frame for each machine that
+`vmlab.status` names. The host agent checks `machine` and `name` as
+positional values: not empty, no leading `-`, no control characters
+(`bad_request`).
 
 `vmlab cp` copies between a path on the host agent's machine and a guest.
 To copy from the agent's workspace to a guest, the daemon first sends a

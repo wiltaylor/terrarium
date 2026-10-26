@@ -12,10 +12,9 @@ describe("targetActions (docs/api.md §17.3)", () => {
     expect(targetActions(t("vmlab", "absent"))).toEqual(["up", "status"]);
   });
 
-  it("offers snapshot only on a running vmlab target, and restore when it has the snapshot terrarium", () => {
-    expect(targetActions(t("vmlab", "running"))).toEqual(["down", "snapshot", "status"]);
-    expect(targetActions(t("vmlab", "running", ["terrarium-clean"]))).toEqual(["down", "snapshot", "status"]);
-    expect(targetActions(t("vmlab", "running", ["terrarium"]))).toEqual(["down", "snapshot", "restore", "status"]);
+  it("offers no snapshot verbs on the row: the snapshot panel has them", () => {
+    expect(targetActions(t("vmlab", "running"))).toEqual(["down", "status"]);
+    expect(targetActions(t("vmlab", "running", ["terrarium"]))).toEqual(["down", "status"]);
     expect(targetActions(t("vmlab", "stopped", ["terrarium"]))).toEqual(["up", "status"]);
   });
 

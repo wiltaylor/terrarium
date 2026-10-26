@@ -16,6 +16,7 @@ These rules come from the live leader and worker runs of 2026-10-25,
 including the mode 1 run. Keep them when you edit a template.
 
 - An agent edits files and runs `git` (commit, push) in its sandbox. It runs builds and tests on a target with `terrarium exec <target> -- sh -c 'cd /work/<project>/<agent>/<repo> && <command>'`. It does not run `git` on the target. A worker with no target moves the card to `blocked` with "need a target".
+- On a vmlab target, an agent takes a snapshot before a risky change with `terrarium target snapshot <target> <name>`, and rolls back with `terrarium target restore <target> <name>`. `terrarium target snapshots <target>` lists them.
 - A worker does not mail the lead when it runs `card move <id> review`. The move tells the lead. A worker mails the lead only when it is blocked or has a question.
 - A worker writes the branch, the test result, and what to look at in the `card move ... -m` comment.
 - An agent does not run `terrarium mail wait` in a turn, because it holds the turn open. It ends the turn, and the daemon wakes it when mail or a card change arrives.

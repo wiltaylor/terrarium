@@ -54,8 +54,12 @@ import type {
   Subscription,
   Lease,
   NewTarget,
+  SnapshotQuery,
+  SnapshotScope,
   Target,
   TargetReport,
+  TargetSnapshot,
+  TargetVerbBody,
   UsagePoint,
   UsageQuery,
   UsageTotals,
@@ -287,8 +291,48 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     for (const [k, v] of Object.entries(b) as [keyof NewTarget, unknown][]) if (v !== undefined && v !== null && v !== "" && v !== false) (def as unknown as Record<string, unknown>)[k] = v;
     return def;
   };
+  // docs/api.md §17.3: the snapshot verbs. vmlab keeps each snapshot per machine; `scope` picks the target's
+  // machine, or every machine of the lab (the mock lab has the target's machine only, else `vm1`).
+  const CLEAN = "terrarium-clean";
+  const snapScope = (t: Target, s?: SnapshotScope): SnapshotScope => s ?? (t.machine ? "machine" : "lab");
+  const scopeMachines = (t: Target, scope: SnapshotScope): string[] => {
+    if (scope === "lab") return [t.machine ?? "vm1"];
+    if (!t.machine) fail(422, "invalid", `target \`${t.name}\` has no \`machine\`: use the scope \`lab\``);
+    return [t.machine!];
+  };
+  const checkSnapName = (n: string) => {
+    if (!n || n.startsWith("-") || /[\s\p{Cc}]/u.test(n)) fail(422, "invalid", `bad snapshot name \`${n}\``);
+  };
+  /** Take or restore on the host rows of one instance (`key`). Answers the snapshot name and the scope. */
+  const snapVerb = (t: Target, key: string, verb: "snapshot" | "restore", body?: TargetVerbBody): { name: string; scope: SnapshotScope } => {
+    if (body?.name !== undefined) checkSnapName(body.name);
+    const name = body?.name ?? "terrarium";
+    const scope = snapScope(t, body?.scope);
+    const machines = scopeMachines(t, scope);
+    const rows = (w.hostSnapshots[key] ??= []);
+    if (verb === "snapshot") {
+      for (const machine of machines) if (!rows.some((r) => r.name === name && r.machine === machine)) rows.push({ name, kind: t.state === "running" ? "online" : "offline", taken: iso(), machine });
+      if (!t.snapshots.includes(name)) t.snapshots.push(name);
+    } else {
+      const missing = machines.find((m) => !rows.some((r) => r.name === name && r.machine === m));
+      if (missing) fail(422, "invalid", `vmlab.snapshot_restore failed: exit 1`, { verb: "vmlab.snapshot_restore", code: "failed", end: { type: "exit", code: 1, reason: "exited" }, stderr: `"${missing}" has no snapshot "${name}"`, stdout: "" });
+    }
+    return { name, scope };
+  };
+  /** The target and instance of a snapshot list or delete: a vmlab target whose host is online; a `lab_from_workspace` target needs `agent`. */
+  const snapTarget = (id: string, q: SnapshotQuery): { t: Target; key: string; holder?: string } => {
+    const t = target(id);
+    if (t.kind !== "vmlab") fail(422, "invalid", `a \`${t.kind}\` target has no \`snapshot\``);
+    if (w.hosts.find((x) => x.name === t.host)?.status !== "online") fail(409, "conflict", `host agent \`${t.host ?? "?"}\` of target \`${t.name}\` is offline`);
+    if (!t.lab_from_workspace) return { t, key: t.name };
+    if (!q.agent) fail(422, "invalid", `\`${t.name}\` gives each holder its own lab instance: name the holder with \`agent\``);
+    const a = agent(q.agent!);
+    if (!t.runtime?.instances?.[a.id]) fail(409, "conflict", `target \`${t.name}\` has no lab instance on its host; bring it up first (POST /api/targets/${t.name}/up)`);
+    return { t, key: `${t.name}.${a.id}`, holder: `${a.project}/${a.name}` };
+  };
+
   // docs/api.md §17.3, §17.8: a verb on a `lab_from_workspace` target acts on the instance of one holder (`agent`).
-  const instanceVerb = (t: Target, verb: string, key: string | undefined, online: boolean): TargetReport => {
+  const instanceVerb = (t: Target, verb: string, key: string | undefined, online: boolean, body?: TargetVerbBody): TargetReport => {
     if (!key) fail(422, "invalid", `\`${t.name}\` gives each holder its own lab instance: name the holder with \`agent\``);
     const a = agent(key!);
     if (!online) fail(409, "conflict", `host agent \`${t.host ?? "?"}\` of target \`${t.name}\` is offline`);
@@ -296,7 +340,10 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     const cur = instances[a.id];
     if (verb === "snapshot" || verb === "restore") {
       if (!cur || cur.state !== "running") fail(409, "conflict", `\`${t.name}\` has no instance of \`${a.project}/${a.name}\` on the host: bring it up first`);
-      fail(422, "invalid", "the mock has no snapshots of a lab instance");
+      const s = snapVerb(t, `${t.name}.${a.id}`, verb, body);
+      const r: TargetReport = { target: t.name, verb, state: cur!.state, snapshot: s.name, scope: s.scope };
+      audit(`target.${verb}`, t.name, t.project, { ...r, agent: a.id });
+      return r;
     }
     if (verb === "up" && cur?.state !== "running") {
       checkRunningCap(t, a.id);
@@ -2451,10 +2498,10 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
         reply((): TargetReport => {
           const t = target(id);
           const online = !!t.host && w.hosts.find((x) => x.name === t.host)?.status === "online";
-          if (t.lab_from_workspace) return instanceVerb(t, verb, body?.agent, online);
-          const report = (snapshot?: string): TargetReport => {
+          if (t.lab_from_workspace) return instanceVerb(t, verb, body?.agent, online, body);
+          const report = (snapshot?: string, scope?: SnapshotScope): TargetReport => {
             t.state_at = iso();
-            const r: TargetReport = { target: t.name, verb, state: t.state, ...(snapshot ? { snapshot } : {}) };
+            const r: TargetReport = { target: t.name, verb, state: t.state, ...(snapshot ? { snapshot } : {}), ...(scope ? { scope } : {}) };
             audit(`target.${verb}`, t.name, t.project, { ...r });
             return r;
           };
@@ -2468,11 +2515,8 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           if (verb === "status") return report();
           if (verb === "snapshot" || verb === "restore") {
             if (t.kind !== "vmlab") fail(422, "invalid", `a \`${t.kind}\` target has no \`snapshot\``);
-            const name = "terrarium";
-            if (verb === "snapshot") {
-              if (!t.snapshots.includes(name)) t.snapshots.push(name);
-            } else if (!t.snapshots.includes(name)) fail(422, "invalid", `vmlab.snapshot_restore failed: no snapshot \`${name}\``, { verb: "vmlab.snapshot_restore", code: 1, end: "exited", stderr: `no snapshot ${name}`, stdout: "" });
-            return report(name);
+            const s = snapVerb(t, t.name, verb, body);
+            return report(s.name, s.scope);
           }
           if (verb === "up") {
             if (t.state !== "running" && !t.container) checkRunningCap(t);
@@ -2487,6 +2531,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
               // An ephemeral target without keep is destroyed; a destroy clears the snapshots.
               t.state = "absent";
               t.snapshots = [];
+              delete w.hostSnapshots[t.name];
             } else t.state = "stopped";
             t.runtime = {};
           }
@@ -2517,6 +2562,48 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
         reply(() => {
           if (execSessions.get(session) !== id) fail(404, "not_found", `session \`${session}\` not found`);
           execSessions.delete(session);
+        }),
+      // docs/api.md §17.3: what the host has, merged by name over the machines; the stored names the host lost go.
+      snapshots: (id, q = {}) =>
+        reply(() => {
+          const { t, key, holder } = snapTarget(id, q);
+          const scope = snapScope(t, q.scope);
+          const machines = scopeMachines(t, scope);
+          const snapshots: TargetSnapshot[] = [];
+          for (const r of w.hostSnapshots[key] ?? []) {
+            if (!machines.includes(r.machine)) continue;
+            const x = snapshots.find((s) => s.name === r.name);
+            if (x) x.machines.push(r.machine);
+            else snapshots.push({ name: r.name, kind: r.kind, taken: r.taken, machines: [r.machine], managed: t.snapshots.includes(r.name) });
+          }
+          const dropped = t.lab_from_workspace ? [] : t.snapshots.filter((n) => !snapshots.some((s) => s.name === n));
+          if (dropped.length) {
+            t.snapshots = t.snapshots.filter((n) => !dropped.includes(n));
+            audit("target.reconcile", t.name, t.project, { snapshots_dropped: dropped }, "system");
+          }
+          return { target: t.name, scope, machines, snapshots, dropped, ...(scope === "lab" ? { lab_running: true } : {}), ...(holder ? { agent: holder } : {}) };
+        }),
+      deleteSnapshot: (id, snap, q = {}) =>
+        reply(() => {
+          checkSnapName(snap);
+          const t0 = target(id);
+          if (snap === CLEAN && t0.snapshot_before_task && !q.force) fail(409, "conflict", `target \`${t0.name}\` has \`snapshot_before_task\`: the daemon restores \`${CLEAN}\` when an agent stops. Turn the flag off first, or delete with force=true`);
+          const { t, key, holder } = snapTarget(id, q);
+          const scope = snapScope(t, q.scope);
+          const rows = w.hostSnapshots[key] ?? [];
+          let machines = scopeMachines(t, scope);
+          if (scope === "lab") {
+            machines = machines.filter((m) => rows.some((r) => r.name === snap && r.machine === m));
+            if (!machines.length) fail(404, "not_found", `no machine of the lab of target \`${t.name}\` has the snapshot \`${snap}\``);
+          }
+          for (const m of machines)
+            if (!rows.some((r) => r.name === snap && r.machine === m))
+              fail(422, "invalid", "vmlab.snapshot_delete failed: exit 1", { verb: "vmlab.snapshot_delete", code: "failed", end: { type: "exit", code: 1, reason: "exited" }, stderr: `"${m}" has no snapshot "${snap}"`, stdout: "" });
+          w.hostSnapshots[key] = rows.filter((r) => !(r.name === snap && machines.includes(r.machine)));
+          t.snapshots = t.snapshots.filter((n) => n !== snap);
+          const out = { target: t.name, verb: "snapshot_delete" as const, snapshot: snap, scope, machines, ...(holder ? { agent: holder } : {}) };
+          audit("target.snapshot_delete", t.name, t.project, { ...out });
+          return out;
         }),
       leases: (name, o = {}) =>
         reply(() => {

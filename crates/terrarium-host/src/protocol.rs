@@ -546,6 +546,20 @@ pub struct VmlabSnapshotList {
     pub timeout_secs: Option<u64>,
 }
 
+/// `vmlab snapshot delete MACHINE NAME`. vmlab deletes the snapshot of one
+/// machine only; the daemon sends one frame for each machine of a lab-wide
+/// delete.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VmlabSnapshotDelete {
+    pub session: SessionId,
+    pub lab: PathBuf,
+    pub machine: String,
+    /// The snapshot name.
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+}
+
 /// Where the lab definition of a `vmlab.prepare` comes from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -707,6 +721,8 @@ pub enum DaemonFrame {
     VmlabSnapshotRestore(VmlabSnapshot),
     #[serde(rename = "vmlab.snapshot_list")]
     VmlabSnapshotList(VmlabSnapshotList),
+    #[serde(rename = "vmlab.snapshot_delete")]
+    VmlabSnapshotDelete(VmlabSnapshotDelete),
     #[serde(rename = "vmlab.prepare")]
     VmlabPrepare(VmlabPrepare),
     #[serde(rename = "vmlab.release")]
@@ -744,6 +760,7 @@ impl DaemonFrame {
             F::VmlabCp(r) => r.session,
             F::VmlabSnapshotTake(r) | F::VmlabSnapshotRestore(r) => r.session,
             F::VmlabSnapshotList(r) => r.session,
+            F::VmlabSnapshotDelete(r) => r.session,
             F::VmlabPrepare(r) => r.session,
             F::VmlabRelease(r) => r.session,
         })
@@ -938,6 +955,15 @@ mod tests {
         assert!(matches!(&frame, DaemonFrame::VmlabSnapshotTake(s) if s.name == "clean"));
         let v: serde_json::Value = serde_json::from_str(&encode_control(&frame).unwrap()).unwrap();
         assert_eq!(v["type"], "vmlab.snapshot_take");
+
+        let text = r#"{"type":"vmlab.snapshot_delete","session":5,"lab":"/labs/win","machine":"win11","name":"clean"}"#;
+        let frame: DaemonFrame = decode_control(text).unwrap();
+        assert_eq!(frame.session(), Some(5));
+        assert!(
+            matches!(&frame, DaemonFrame::VmlabSnapshotDelete(s) if s.machine == "win11" && s.name == "clean")
+        );
+        let v: serde_json::Value = serde_json::from_str(&encode_control(&frame).unwrap()).unwrap();
+        assert_eq!(v["type"], "vmlab.snapshot_delete");
 
         let run: DaemonFrame =
             decode_control(r#"{"type":"docker.run","session":4,"image":"alpine:3"}"#).unwrap();

@@ -39,7 +39,8 @@ use terrarium_core::protocol::LifecycleVerb;
 use terrarium_host::protocol::{
     CpPull, CpPush, DaemonFrame, DockerExec, DockerInspect, DockerRm, DockerRun, DockerStart,
     DockerStop, ExecRequest, LabSource, PtySize, StreamTag, VmlabCp, VmlabExec, VmlabLifecycle,
-    VmlabPrepare, VmlabRelease, VmlabShell, VmlabSnapshot, VmlabStatus, WorkspaceMount, hex,
+    VmlabPrepare, VmlabRelease, VmlabShell, VmlabSnapshot, VmlabSnapshotDelete, VmlabSnapshotList,
+    VmlabStatus, WorkspaceMount, hex,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{Notify, mpsc};
@@ -1689,6 +1690,10 @@ pub struct LifecycleOpts {
     /// `restore --discard-guest-changes` (vmlab).
     #[serde(default)]
     pub discard_guest_changes: bool,
+    /// `snapshot` and `restore`: the target's `machine`, or the whole lab.
+    /// Default: `machine` when the target has one, else `lab`.
+    #[serde(default)]
+    pub scope: Option<SnapshotScope>,
     /// `down` removes an ephemeral target (docker rm, vmlab destroy) even
     /// with `keep`.
     #[serde(default)]
@@ -1855,10 +1860,8 @@ pub async fn lifecycle(
 ) -> ApiResult<Value> {
     use LifecycleVerb as V;
     let snapshot = opts.name.clone().unwrap_or_else(|| "terrarium".into());
-    if let Some(n) = &opts.name
-        && (n.is_empty() || n.starts_with('-') || n.chars().any(char::is_whitespace))
-    {
-        return Err(ApiError::invalid(format!("bad snapshot name `{n}`")));
+    if let Some(n) = &opts.name {
+        check_snapshot_name(n)?;
     }
     let unsupported = |what: &str| {
         Err(ApiError::invalid(format!(
@@ -2017,8 +2020,11 @@ pub async fn lifecycle(
                     }
                 }
                 V::Snapshot | V::Restore => {
-                    let (lab, machine, name) =
-                        (lab_of(def)?, def.machine.clone(), snapshot.clone());
+                    let (lab, machine, name) = (
+                        lab_of(def)?,
+                        snapshot_machine(def, opts.scope)?,
+                        snapshot.clone(),
+                    );
                     let discard = opts.discard_guest_changes;
                     let take = verb_kind == V::Snapshot;
                     let c = verb_ok(
@@ -2082,6 +2088,7 @@ pub async fn lifecycle(
     }
     if matches!(verb_kind, V::Snapshot | V::Restore) {
         out["snapshot"] = snapshot.into();
+        out["scope"] = json!(scope_of(def, opts.scope));
     }
     if let Some(r) = result {
         out["result"] = r;
@@ -2170,6 +2177,374 @@ fn clean_opts() -> LifecycleOpts {
         name: Some(CLEAN_SNAPSHOT.into()),
         ..LifecycleOpts::default()
     }
+}
+
+// ---------------------------------------------------------------- snapshots
+
+/// Which machines a snapshot verb acts on (docs/api.md §17.3): the
+/// target's `machine` (`vmlab snapshot ... --vm <machine>`), or every
+/// machine of the lab (no `--vm`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotScope {
+    Machine,
+    Lab,
+}
+
+/// The scope of a snapshot verb: the one asked for, else `machine` when
+/// the target has one, else `lab`.
+pub fn scope_of(def: &TargetDef, asked: Option<SnapshotScope>) -> SnapshotScope {
+    asked.unwrap_or(if def.machine.is_some() {
+        SnapshotScope::Machine
+    } else {
+        SnapshotScope::Lab
+    })
+}
+
+/// `--vm` of a snapshot verb: the machine, or `None` for the whole lab.
+fn snapshot_machine(def: &TargetDef, asked: Option<SnapshotScope>) -> ApiResult<Option<String>> {
+    match scope_of(def, asked) {
+        SnapshotScope::Lab => Ok(None),
+        SnapshotScope::Machine => def.machine.clone().map(Some).ok_or_else(|| {
+            ApiError::invalid(format!(
+                "target `{}` has no `machine`: use the scope `lab`",
+                def.name
+            ))
+        }),
+    }
+}
+
+/// A snapshot name goes onto the vmlab command line as a positional.
+fn check_snapshot_name(n: &str) -> ApiResult<()> {
+    if n.is_empty() || n.starts_with('-') || n.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
+        return Err(ApiError::invalid(format!("bad snapshot name `{n}`")));
+    }
+    Ok(())
+}
+
+/// The query of `GET .../snapshots` and `DELETE .../snapshots/{snap}`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SnapshotQuery {
+    #[serde(default)]
+    pub scope: Option<SnapshotScope>,
+    /// A `lab_from_workspace` target: the holder whose instance. An agent
+    /// caller acts on its own instance.
+    #[serde(default)]
+    pub agent: Option<String>,
+    /// `DELETE`: delete `terrarium-clean` while `snapshot_before_task` is on.
+    #[serde(default)]
+    pub force: bool,
+}
+
+/// The vmlab definition of a snapshot list or delete: the instance lab dir
+/// for a lab instance target, and the holder for a `lab_from_workspace`
+/// target. A target without snapshots is `422 invalid`.
+async fn snapshot_def(
+    state: &Shared,
+    row: &TargetRow,
+    agent: Option<&str>,
+) -> ApiResult<(TargetDef, Option<HolderInfo>)> {
+    if !snapshots_supported(&row.def) {
+        return Err(ApiError::invalid(format!(
+            "a `{}` target has no `snapshot`",
+            targets::kind_str(row.def.kind)
+        )));
+    }
+    host_online(state, &row.def)?;
+    let holder = if row.def.lab_from_workspace {
+        Some(instance_holder(state, &row.def, None, agent).await?)
+    } else {
+        None
+    };
+    let def = resolved_def(state, row, None, holder.as_ref().map(|h| h.id.as_str())).await?;
+    Ok((def, holder))
+}
+
+/// The machines of a running lab, from `vmlab status`. `None`: the lab
+/// does not run, so vmlab names no machines.
+async fn lab_machines(state: &Shared, def: &TargetDef) -> ApiResult<Option<Vec<String>>> {
+    let lab = lab_of(def)?;
+    let c = verb_ok(state, def, "vmlab.status", move |session| {
+        DaemonFrame::VmlabStatus(VmlabStatus {
+            session,
+            lab,
+            verbose: false,
+            timeout_secs: Some(120),
+        })
+    })
+    .await?;
+    let v = c.result.unwrap_or(Value::Null);
+    if v["running"] == false {
+        return Ok(None);
+    }
+    Ok(Some(
+        v["machines"]
+            .as_array()
+            .map(|ms| {
+                ms.iter()
+                    .filter_map(|m| m["name"].as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default(),
+    ))
+}
+
+/// The snapshots of one machine: `vmlab snapshot list <machine>`.
+async fn machine_snapshots(
+    state: &Shared,
+    def: &TargetDef,
+    machine: &str,
+) -> ApiResult<Vec<Value>> {
+    let (lab, m) = (lab_of(def)?, machine.to_owned());
+    let c = verb_ok(state, def, "vmlab.snapshot_list", move |session| {
+        DaemonFrame::VmlabSnapshotList(VmlabSnapshotList {
+            session,
+            lab,
+            machine: m,
+            timeout_secs: Some(120),
+        })
+    })
+    .await?;
+    Ok(match c.result {
+        Some(Value::Array(rows)) => rows,
+        _ => Vec::new(),
+    })
+}
+
+/// The machines a snapshot list or delete reads: the target's machine, or
+/// every machine of the lab (`None` when the lab does not run).
+async fn scope_machines(
+    state: &Shared,
+    def: &TargetDef,
+    scope: SnapshotScope,
+) -> ApiResult<Option<Vec<String>>> {
+    match snapshot_machine(def, Some(scope))? {
+        Some(m) => Ok(Some(vec![m])),
+        None => lab_machines(state, def).await,
+    }
+}
+
+/// The snapshots on each machine, merged by name in the order the host
+/// gives them: `{name, kind, taken, machines}`. `kind` and `taken` come
+/// from the first machine that has the name.
+fn merge_snapshots(per_machine: &[(String, Vec<Value>)]) -> Vec<Value> {
+    let mut out: Vec<Value> = Vec::new();
+    for (machine, rows) in per_machine {
+        for r in rows {
+            let Some(name) = r["name"].as_str() else {
+                continue;
+            };
+            match out.iter_mut().find(|x| x["name"] == name) {
+                Some(x) => {
+                    if let Some(ms) = x["machines"].as_array_mut() {
+                        ms.push(machine.clone().into());
+                    }
+                }
+                None => {
+                    let mut x = r.clone();
+                    x["machines"] = json!([machine]);
+                    out.push(x);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// `GET /api/targets/{name}/snapshots` (docs/api.md §17.3): the snapshots
+/// that the host reports, each with `managed` (Terrarium took it: the name
+/// is in the target's `snapshots`). The list reconciles the stored names: a
+/// managed name that the host no longer has goes (`dropped`), with the
+/// audit row `target.reconcile` and a `target` event. A name that
+/// Terrarium did not take is not added. A `lab_from_workspace` target is
+/// not reconciled: its stored names cover every holder's instance. A lab
+/// that does not run names no machines, so a lab-wide list then is empty
+/// and drops nothing.
+pub async fn list_snapshots(
+    state: &Shared,
+    row: &TargetRow,
+    q: &SnapshotQuery,
+) -> ApiResult<Value> {
+    let (def, holder) = snapshot_def(state, row, q.agent.as_deref()).await?;
+    let scope = scope_of(&def, q.scope);
+    let machines = scope_machines(state, &def, scope).await?;
+    let mut per_machine = Vec::new();
+    for m in machines.iter().flatten() {
+        per_machine.push((m.clone(), machine_snapshots(state, &def, m).await?));
+    }
+    let mut snaps = merge_snapshots(&per_machine);
+    let authoritative = machines.as_ref().is_some_and(|m| !m.is_empty());
+    let dropped: Vec<String> = if authoritative && !row.def.lab_from_workspace {
+        row.snapshots
+            .iter()
+            .filter(|s| !snaps.iter().any(|x| x["name"] == s.as_str()))
+            .cloned()
+            .collect()
+    } else {
+        Vec::new()
+    };
+    if !dropped.is_empty() {
+        let (name, project, gone) = (
+            row.def.name.clone(),
+            row.def.project.clone(),
+            dropped.clone(),
+        );
+        state
+            .db
+            .write("system", move |t| {
+                targets::remove_snapshots(t, &name, &gone)?;
+                let detail = json!({"snapshots_dropped": gone});
+                t.audit(
+                    "target.reconcile",
+                    &name,
+                    project.as_deref(),
+                    detail.clone(),
+                )?;
+                let mut data = detail;
+                data["change"] = "snapshots_dropped".into();
+                data["target"] = name.clone().into();
+                let mut draft = crate::events::EventDraft::new(
+                    "target",
+                    format!(
+                        "target {name}: the host has no snapshot {}",
+                        gone.join(", ")
+                    ),
+                    data,
+                );
+                if let Some(p) = project {
+                    draft = draft.project(p);
+                }
+                t.emit(draft)?;
+                Ok(())
+            })
+            .await?;
+    }
+    for x in &mut snaps {
+        let managed = x["name"]
+            .as_str()
+            .is_some_and(|n| row.snapshots.iter().any(|s| s == n));
+        x["managed"] = managed.into();
+    }
+    let mut out = json!({
+        "target": row.def.name,
+        "scope": scope,
+        "machines": machines.clone().unwrap_or_default(),
+        "snapshots": snaps,
+        "dropped": dropped,
+    });
+    if scope == SnapshotScope::Lab {
+        out["lab_running"] = machines.is_some().into();
+    }
+    if let Some(h) = &holder {
+        out["agent"] = h.name.clone().into();
+    }
+    Ok(out)
+}
+
+/// `DELETE /api/targets/{name}/snapshots/{snap}` (docs/api.md §17.3):
+/// `vmlab snapshot delete <machine> <snap>` on the target's machine, or on
+/// each machine of the lab that has the snapshot. `terrarium-clean` of a
+/// target with `snapshot_before_task` needs `force`. The name leaves the
+/// stored `snapshots`. The audit row `target.snapshot_delete` and a
+/// `target` event record it.
+pub async fn delete_snapshot(
+    state: &Shared,
+    actor: &Actor,
+    row: &TargetRow,
+    snap: &str,
+    q: &SnapshotQuery,
+) -> ApiResult<Value> {
+    check_snapshot_name(snap)?;
+    if snap == CLEAN_SNAPSHOT && row.def.snapshot_before_task && !q.force {
+        return Err(ApiError::conflict(format!(
+            "target `{}` has `snapshot_before_task`: the daemon restores `{CLEAN_SNAPSHOT}`              when an agent stops. Turn the flag off first, or delete with force=true",
+            row.def.name
+        )));
+    }
+    let (def, holder) = snapshot_def(state, row, q.agent.as_deref()).await?;
+    let scope = scope_of(&def, q.scope);
+    let machines = match scope {
+        SnapshotScope::Machine => scope_machines(state, &def, scope)
+            .await?
+            .unwrap_or_default(),
+        SnapshotScope::Lab => {
+            let all = lab_machines(state, &def).await?.ok_or_else(|| {
+                ApiError::conflict(format!(
+                    "the lab of target `{}` does not run, so vmlab names no machines:                      bring it up, or delete with the scope `machine`",
+                    row.def.name
+                ))
+            })?;
+            let mut have = Vec::new();
+            for m in all {
+                if machine_snapshots(state, &def, &m)
+                    .await?
+                    .iter()
+                    .any(|r| r["name"] == snap)
+                {
+                    have.push(m);
+                }
+            }
+            if have.is_empty() {
+                return Err(ApiError::not_found(format!(
+                    "no machine of the lab of target `{}` has the snapshot `{snap}`",
+                    row.def.name
+                )));
+            }
+            have
+        }
+    };
+    for m in &machines {
+        let (lab, machine, name) = (lab_of(&def)?, m.clone(), snap.to_owned());
+        verb_ok(state, &def, "vmlab.snapshot_delete", move |session| {
+            DaemonFrame::VmlabSnapshotDelete(VmlabSnapshotDelete {
+                session,
+                lab,
+                machine,
+                name,
+                timeout_secs: Some(VERB_TIMEOUT),
+            })
+        })
+        .await?;
+    }
+    let mut out = json!({
+        "target": row.def.name,
+        "verb": "snapshot_delete",
+        "snapshot": snap,
+        "scope": scope,
+        "machines": machines,
+    });
+    if let Some(h) = &holder {
+        out["agent"] = h.name.clone().into();
+    }
+    let (name, project, detail) = (row.def.name.clone(), row.def.project.clone(), out.clone());
+    let snap = snap.to_owned();
+    state
+        .db
+        .write(actor.label(), move |t| {
+            targets::remove_snapshots(t, &name, std::slice::from_ref(&snap))?;
+            t.audit(
+                "target.snapshot_delete",
+                &name,
+                project.as_deref(),
+                detail.clone(),
+            )?;
+            let mut data = detail;
+            data["change"] = "snapshot_deleted".into();
+            let mut draft = crate::events::EventDraft::new(
+                "target",
+                format!("target {name}: snapshot {snap} deleted"),
+                data,
+            );
+            if let Some(p) = project {
+                draft = draft.project(p);
+            }
+            t.emit(draft)?;
+            Ok(())
+        })
+        .await?;
+    Ok(out)
 }
 
 // ------------------------------------------------- workspaces and instances
@@ -2704,7 +3079,7 @@ async fn instance_lifecycle(
         }
         (V::Snapshot | V::Restore, Some(l)) => {
             let out = lifecycle(state, &with_lab(def, l), verb_kind, &inner).await?;
-            for k in ["snapshot", "result"] {
+            for k in ["snapshot", "scope", "result"] {
                 if let Some(v) = out.get(k) {
                     extra.insert(k.into(), v.clone());
                 }
@@ -3378,6 +3753,48 @@ mod tests {
             toml::from_str("kind = \"ssh\"\naddress = \"build@box\"\nport = 2222\n").unwrap();
         d.name = "buildbox".into();
         d
+    }
+
+    #[test]
+    fn snapshot_scope_defaults_to_the_machine_and_merges_by_name() {
+        let mut d: TargetDef = toml::from_str(
+            "kind = \"vmlab\"\nhost = \"h\"\nlab = \"/labs/ad\"\nmachine = \"dc01\"\n",
+        )
+        .unwrap();
+        d.name = "ad".into();
+        assert_eq!(scope_of(&d, None), SnapshotScope::Machine);
+        assert_eq!(snapshot_machine(&d, None).unwrap().as_deref(), Some("dc01"));
+        assert_eq!(
+            snapshot_machine(&d, Some(SnapshotScope::Lab)).unwrap(),
+            None
+        );
+        d.machine = None;
+        assert_eq!(scope_of(&d, None), SnapshotScope::Lab);
+        assert!(snapshot_machine(&d, Some(SnapshotScope::Machine)).is_err());
+        for bad in ["", "-x", "a b", "a\tb", "a\u{7}"] {
+            assert!(check_snapshot_name(bad).is_err(), "{bad:?}");
+        }
+        assert!(check_snapshot_name("terrarium-clean").is_ok());
+        let merged = merge_snapshots(&[
+            (
+                "dc01".into(),
+                vec![
+                    json!({"name": "clean", "kind": "online", "taken": "t1"}),
+                    json!({"name": "pre", "kind": "offline", "taken": "t2"}),
+                ],
+            ),
+            (
+                "client01".into(),
+                vec![json!({"name": "clean", "kind": "offline", "taken": "t3"})],
+            ),
+        ]);
+        assert_eq!(
+            merged,
+            vec![
+                json!({"name": "clean", "kind": "online", "taken": "t1", "machines": ["dc01", "client01"]}),
+                json!({"name": "pre", "kind": "offline", "taken": "t2", "machines": ["dc01"]}),
+            ]
+        );
     }
 
     #[test]

@@ -111,7 +111,8 @@ pub enum Command {
         #[command(subcommand)]
         command: StatusCmd,
     },
-    /// Targets
+    /// Targets: list them, and take, restore, list, and delete snapshots
+    #[command(alias = "target")]
     Targets {
         #[command(subcommand)]
         command: TargetsCmd,
@@ -958,6 +959,65 @@ pub enum StatusCmd {
 pub enum TargetsCmd {
     /// Targets this caller may use
     Ls,
+    #[command(flatten)]
+    Snapshot(SnapshotCmd),
+}
+
+/// The snapshot commands of a vmlab target (docs/api.md §17.3), in
+/// `terrarium targets` and `terrarium admin target`.
+#[derive(Debug, Subcommand)]
+pub enum SnapshotCmd {
+    /// Take a snapshot of a vmlab target
+    Snapshot(SnapshotArgs),
+    /// Restore a snapshot of a vmlab target
+    Restore {
+        #[command(flatten)]
+        snap: SnapshotArgs,
+        /// Restore a dev machine whose workspace is halted, and throw the
+        /// guest copy of each conflicting path away
+        #[arg(long)]
+        discard_guest_changes: bool,
+    },
+    /// List the snapshots that the host has; MANAGED marks the ones
+    /// Terrarium took
+    Snapshots {
+        target: String,
+        #[command(flatten)]
+        on: SnapshotOn,
+    },
+    /// Delete a snapshot on the host
+    SnapshotRm {
+        target: String,
+        name: String,
+        #[command(flatten)]
+        on: SnapshotOn,
+        /// Delete `terrarium-clean` also while `snapshot_before_task` is on
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+/// A target and a snapshot name.
+#[derive(Debug, Args)]
+pub struct SnapshotArgs {
+    pub target: String,
+    /// The snapshot name. Default: `terrarium`
+    pub name: Option<String>,
+    #[command(flatten)]
+    pub on: SnapshotOn,
+}
+
+/// Where a snapshot command acts.
+#[derive(Debug, Args)]
+pub struct SnapshotOn {
+    /// `machine` (the target's machine) or `lab` (every machine of the
+    /// lab). Default: `machine` when the target has one, else `lab`
+    #[arg(long, value_parser = ["machine", "lab"])]
+    pub scope: Option<String>,
+    /// A `lab_from_workspace` target: the holder whose instance (the
+    /// operator names one; an agent always uses its own)
+    #[arg(long)]
+    pub agent: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1330,6 +1390,8 @@ pub enum AdminTargetCmd {
     },
     /// List targets: in agent mode, the project's and the global ones
     Ls,
+    #[command(flatten)]
+    Snapshot(SnapshotCmd),
     /// Give an agent a lease on a target, now
     Grant {
         target: String,
