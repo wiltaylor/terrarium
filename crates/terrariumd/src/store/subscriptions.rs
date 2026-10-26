@@ -67,15 +67,27 @@ pub struct Subscription {
     pub updated_at: String,
 }
 
+/// The probe of a subscription that names none: `zai-usage` for a Z.ai
+/// GLM Coding Plan (the `api` plan has no quota endpoint). Applied when a
+/// row is read, so rows written before the probe existed get it too.
+pub fn default_probe(provider: &str, plan: Option<&str>) -> Option<String> {
+    use terrarium_core::zai;
+    (zai::is_zai(provider) && zai::plan_or_default(plan) == zai::Plan::Coding)
+        .then(|| crate::probes::zai::NAME.to_owned())
+}
+
 fn row(r: &Row<'_>) -> rusqlite::Result<Subscription> {
     let harnesses: String = r.get("harnesses")?;
     let alert_at: i64 = r.get("alert_at")?;
+    let provider: String = r.get("provider")?;
+    let plan: Option<String> = r.get("plan")?;
+    let probe: Option<String> = r.get("probe")?;
     Ok(Subscription {
         name: r.get("name")?,
-        provider: r.get("provider")?,
-        plan: r.get("plan")?,
+        probe: probe.or_else(|| default_probe(&provider, plan.as_deref())),
+        provider,
+        plan,
         harnesses: json_col(&harnesses),
-        probe: r.get("probe")?,
         alert_at: u8::try_from(alert_at.clamp(0, 255)).unwrap_or(80),
         source: r.get("source")?,
         env_var: r.get("env_var")?,
@@ -696,6 +708,49 @@ mod tests {
             db.read(|c| get(c, "glm")).await.unwrap().login_status,
             API_KEY
         );
+    }
+
+    #[tokio::test]
+    async fn zai_coding_plan_gets_the_usage_probe() {
+        let db = db();
+        let zai = |name: &str, plan: Option<&str>, probe: Option<&str>| SubscriptionDef {
+            name: name.into(),
+            provider: "zai".into(),
+            plan: plan.map(str::to_owned),
+            harnesses: vec![HarnessId::Claude],
+            probe: probe.map(str::to_owned),
+            alert_at: 80,
+        };
+        db.write("t", move |t| {
+            upsert_def(t, &zai("zc", Some("coding"), None), "api")?;
+            upsert_def(t, &zai("zn", None, None), "api")?;
+            upsert_def(t, &zai("za", Some("api"), None), "api")?;
+            upsert_def(t, &zai("zx", Some("coding"), Some("other")), "api")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let probe = |n: &'static str| {
+            let db = db.clone();
+            async move { db.read(move |c| get(c, n)).await.unwrap().probe }
+        };
+        assert_eq!(probe("zc").await.as_deref(), Some("zai-usage"));
+        assert_eq!(probe("zn").await.as_deref(), Some("zai-usage"));
+        assert_eq!(probe("za").await, None);
+        assert_eq!(probe("zx").await.as_deref(), Some("other"));
+        // The stored column stays NULL: the default is applied on read.
+        let stored: Option<String> = db
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT probe FROM subscriptions WHERE name = 'zc'",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(stored, None);
+        assert_eq!(default_probe("anthropic", None), None);
     }
 
     #[tokio::test]

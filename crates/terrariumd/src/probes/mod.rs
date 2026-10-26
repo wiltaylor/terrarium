@@ -19,6 +19,7 @@
 pub mod anthropic;
 pub mod github;
 pub mod openai;
+pub mod zai;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -229,6 +230,7 @@ pub fn all() -> Vec<Arc<dyn QuotaProbe>> {
         Arc::new(anthropic::AnthropicOauthUsage),
         Arc::new(openai::OpenAiCodexUsage),
         Arc::new(github::CopilotQuota),
+        Arc::new(zai::ZaiUsage),
     ]
 }
 
@@ -525,6 +527,7 @@ pub(crate) mod tests {
         assert!(by_name("gemini").is_none());
         assert_eq!(for_provider("openai"), Some(openai::NAME));
         assert_eq!(for_provider("google"), None);
+        assert_eq!(by_name("zai-usage").unwrap().name(), zai::NAME);
     }
 
     #[tokio::test]
