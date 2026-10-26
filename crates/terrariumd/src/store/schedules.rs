@@ -1302,6 +1302,42 @@ fn set_last_run(t: &Tx<'_>, s: &Schedule, r: &Run, skips: i64) -> ApiResult<()> 
     Ok(())
 }
 
+/// Record a run that is `skipped` at once, with no action. It does not
+/// count as a refused run.
+#[allow(clippy::too_many_arguments)]
+fn insert_skipped(
+    t: &mut Tx<'_>,
+    s: &Schedule,
+    trigger: &str,
+    actor: &str,
+    event_seq: Option<i64>,
+    reason: &str,
+    error: Option<&str>,
+    now: DateTime<Utc>,
+) -> ApiResult<Run> {
+    let run_id = ulid::Ulid::new().to_string();
+    t.execute(
+        "INSERT INTO schedule_runs (id, schedule, trigger, status, started_at, finished_at,
+                                    summary, error, actor, event_seq)
+         VALUES (?1, ?2, ?3, 'skipped', ?4, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            run_id,
+            s.id,
+            trigger,
+            stamp(now),
+            format!("skipped: {reason}"),
+            error,
+            actor,
+            event_seq
+        ],
+    )?;
+    let r = get_run(t, &run_id)?;
+    set_last_run(t, s, &r, s.consecutive_skips)?;
+    let s = get(t, &s.id)?;
+    emit(t, "run_finished", &s, Some(&r))?;
+    Ok(r)
+}
+
 /// Start a run of `id`: `running`, or `skipped` when a run of the schedule
 /// is still running (`max_concurrency` is 1). One transaction, so two
 /// triggers cannot both start. `event_seq` is the event of a trigger run.
@@ -1322,16 +1358,7 @@ pub fn begin_run(
         |r| r.get(0),
     )?;
     if running > 0 {
-        t.execute(
-            "INSERT INTO schedule_runs (id, schedule, trigger, status, started_at, finished_at,
-                                        summary, actor, event_seq)
-             VALUES (?1, ?2, ?3, 'skipped', ?4, ?4, 'skipped: still running', ?5, ?6)",
-            params![run_id, id, trigger, at, actor, event_seq],
-        )?;
-        let r = get_run(t, &run_id)?;
-        set_last_run(t, &s, &r, s.consecutive_skips)?;
-        let s = get(t, id)?;
-        emit(t, "run_finished", &s, Some(&r))?;
+        let r = insert_skipped(t, &s, trigger, actor, event_seq, "still running", None, now)?;
         return Ok(Begin::Overlap(r));
     }
     t.execute(
@@ -1766,10 +1793,9 @@ pub fn record_trigger_skip(
     t.actor = run_label(&s.id);
     t.cause = Some(cause(&s.id, e));
     let by = e.actor.clone().unwrap_or_else(|| "system".into());
-    let result = begin_run(t, &s.id, "event", &by, Some(e.seq), now).and_then(|b| match b {
-        Begin::Overlap(r) => Ok(r),
-        Begin::Started(r, _) => finish_run(t, &r.id, &Outcome::skipped(reason), now),
-    });
+    // Not through `begin_run`: a run that is still running must not
+    // change the reason.
+    let result = insert_skipped(t, s, "event", &by, Some(e.seq), reason, Some(reason), now);
     t.actor = actor;
     t.cause = cause_was;
     result

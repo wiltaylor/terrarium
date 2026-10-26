@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createMockApi } from "../../api/mock";
 import type { ScheduleCaller } from "../../api/mock/schedules";
-import { agentOptions, createScheduleDialog, emptyScheduleForm, formFromSchedule, formPreview, GLOBAL, presetExpr, presetOf, recipientOptions, refusal, scheduleBody, targetOptions, timeZones } from "./form";
+import { actionTypesFor, agentOptions, createScheduleDialog, emptyScheduleForm, fieldOf, formFromSchedule, formPreview, GLOBAL, presetExpr, presetOf, recipientOptions, refusal, scheduleBody, targetOptions, timeZones } from "./form";
 import { ApiError } from "../../api/http";
 import type { Schedule } from "../../api/types";
 
@@ -256,5 +256,105 @@ describe("createScheduleDialog against the mock", () => {
   it("sorts other errors into a banner", () => {
     expect(refusal(new ApiError(500, "boom"), "p")).toMatchObject({ kind: "error" });
     expect(refusal(new ApiError(422, "bad", undefined, "invalid", { field: "spec.weird" }), "p")).toEqual({ kind: "rejected", message: "bad", field: undefined, daemonField: "spec.weird" });
+  });
+});
+
+describe("the card action", () => {
+  const base = emptyScheduleForm("terrarium", { name: "review", actionType: "card" });
+  it("is a choice of a time schedule too", () => {
+    expect(actionTypesFor("cron").map((a) => a.id)).toEqual(["mail", "turn", "exec", "agent", "probe", "card"]);
+  });
+
+  it("maps op and key; title, body, and column only when given", () => {
+    expect(scheduleBody({ ...base, cardKey: " weekly " })).toMatchObject({ body: { action: { type: "card", op: "open", key: "weekly" } } });
+    const b = scheduleBody({ ...base, cardKey: "weekly" });
+    expect("body" in b && Object.keys(b.body.action).sort()).toEqual(["key", "op", "type"]);
+    expect(scheduleBody({ ...base, cardOp: "close", cardKey: "k", cardBody: "Green again.", cardColumn: "review" })).toMatchObject({ body: { action: { type: "card", op: "close", key: "k", body: "Green again.", column: "review" } } });
+    expect(scheduleBody({ ...base, cardKey: "k", cardTitle: " Weekly review " })).toMatchObject({ body: { action: { title: "Weekly review" } } });
+  });
+
+  it("needs a key, a project, and does not open in done", () => {
+    expect(scheduleBody(base)).toMatchObject({ field: "cardKey" });
+    expect(scheduleBody({ ...base, cardKey: "k", scope: GLOBAL })).toMatchObject({ field: "actionType", error: expect.stringContaining("global") });
+    expect(scheduleBody({ ...base, cardKey: "k", cardColumn: "done" })).toEqual({ error: "A card does not open in done.", field: "cardColumn" });
+    expect(scheduleBody({ ...base, cardKey: "k", cardOp: "close", cardColumn: "done" })).toHaveProperty("body");
+  });
+
+  it("shows the daemon's action.body under the body of the action type", () => {
+    expect(fieldOf("action.body", "card")).toBe("cardBody");
+    expect(fieldOf("action.body", "mail")).toBe("mailBody");
+    expect(fieldOf("action.key")).toBe("cardKey");
+  });
+});
+
+describe("a trigger in the schedule form", () => {
+  const trig = emptyScheduleForm("terrarium", { name: "ci-failed", specKind: "on", kinds: "ci.run.failed", mailTo: "terrarium/lead", mailSubject: "CI failed: {{event.data.repo}}", mailBody: "Fix it." });
+
+  it("offers only mail, exec, and card", () => {
+    expect(actionTypesFor("on").map((a) => a.id)).toEqual(["mail", "exec", "card"]);
+  });
+
+  it("refuses turn, agent, and probe on the action field, before a request", () => {
+    for (const actionType of ["turn", "agent", "probe"] as const)
+      expect(scheduleBody({ ...trig, actionType, agent: "terrarium/lead", text: "x", subscription: "s" })).toEqual({ error: "A trigger runs only mail, exec, or card. To notify an agent, mail it.", field: "actionType" });
+  });
+
+  it("sends the spec on with the action", () => {
+    expect(scheduleBody(trig)).toEqual({
+      body: { name: "ci-failed", project: "terrarium", enabled: true, catch_up: "skip", spec: { kind: "on", kinds: ["ci.run.failed"] }, action: { type: "mail", to: "terrarium/lead", subject: "CI failed: {{event.data.repo}}", body: "Fix it." } },
+    });
+    expect(scheduleBody({ ...trig, actionType: "exec", target: "build-box", cmd: "notify {{event.data.repo}}" })).toMatchObject({ body: { action: { type: "exec", cmd: ["notify", "{{event.data.repo}}"] } } });
+  });
+
+  it("names the form field of each trigger field of the daemon", () => {
+    expect(fieldOf("spec.kinds")).toBe("kinds");
+    expect(fieldOf("spec.match")).toBe("rules");
+    expect(fieldOf("spec.match.1.value")).toBe("rules");
+    expect(fieldOf("spec.dedupe.window")).toBe("dedupeWindow");
+    expect(fieldOf("spec.escalate.reset_on")).toBe("escalateResetOn");
+    expect(fieldOf("spec.escalate.to")).toBe("escalateTo");
+    expect(fieldOf("spec.max_per_hour")).toBe("maxPerHour");
+  });
+
+  it("creates with the preset against the mock, and edits the rules", async () => {
+    const api = mock();
+    const d = createScheduleDialog(api, { project: "terrarium", init: { specKind: "on" } });
+    expect(d.isTrigger()).toBe(true);
+    d.set("name", "ci-main");
+    d.ciPreset("terrarium/lead");
+    d.addRule();
+    d.setRule(1, { path: "data.repo", op: "in", value: "wil/terrarium, wil/site" });
+    d.setRule(0, { op: "glob", value: "release/*" });
+    const s = await d.submit();
+    expect(s?.spec).toMatchObject({
+      kind: "on",
+      kinds: ["ci.run.failed"],
+      match: [
+        { path: "data.branch", op: "glob", value: "release/*" },
+        { path: "data.repo", op: "in", value: ["wil/terrarium", "wil/site"] },
+      ],
+      dedupe: { key: "{{event.data.repo}}", window: "10m" },
+      escalate: { after: 3, reset_on: ["ci.run.succeeded"] },
+    });
+    expect(s?.action).toMatchObject({ type: "mail", to: "terrarium/lead" });
+    d.removeRule(0);
+    expect(d.form().rules).toEqual([{ path: "data.repo", op: "in", value: "wil/terrarium, wil/site" }]);
+  });
+
+  it("shows a 422 of the daemon under the trigger field, and a bad placeholder under the subject", async () => {
+    const api = mock();
+    const d = createScheduleDialog(api, { project: "terrarium", init: { name: "t", specKind: "on", kinds: "ci.run.failed", mailTo: "operator", mailSubject: "{{event.nope}}" } });
+    expect(await d.submit()).toBeNull();
+    expect(d.outcome()).toMatchObject({ kind: "rejected", field: "mailSubject", daemonField: "action.subject" });
+    d.set("mailSubject", "ok");
+    d.set("escalate", true);
+    d.set("escalateTo", "nobody");
+    expect(await d.submit()).toBeNull();
+    expect(d.fieldError("escalateTo")).toContain("nobody");
+  });
+
+  it("refuses a trigger card on a global scope at the daemon too", async () => {
+    const e = refusal(new ApiError(422, "action: a card action needs a project schedule", undefined, "invalid", { field: "action" }), GLOBAL, "card");
+    expect(e).toMatchObject({ kind: "rejected", field: "actionType" });
   });
 });

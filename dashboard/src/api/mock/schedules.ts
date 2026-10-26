@@ -9,9 +9,13 @@
 // project_admin in its project, with an action that stays inside it; a
 // member reads its project only; the global schedules are for a sysadmin.
 // A `file` schedule changes only in its file (`409 file_managed`).
+// Triggers (spec `on`, §19.4) are rows of the same list; `?kind=time|trigger`
+// filters them. The mock checks a trigger as the daemon does (the kinds, the
+// match rules, dedupe, escalate, max_per_hour, and only mail, exec, or card),
+// but it does not run triggers on events: the seed has trigger runs.
 
 import type { Api } from "../client";
-import type { Agent, AgentEvent, Message, NewSchedule, Schedule, ScheduleAction, ScheduleRun, ScheduleSpec, Subscription, Target } from "../types";
+import type { Agent, AgentEvent, MatchRule, Message, NewSchedule, Schedule, ScheduleAction, ScheduleRun, ScheduleSpec, Subscription, Target, TriggerSpec } from "../types";
 import { nextRuns, parseCron, validTimeZone } from "../../lib/cron";
 import { paginate } from "../../lib/paging";
 import { parseEvery } from "../../lib/schedule";
@@ -48,6 +52,7 @@ export interface ScheduleMockContext {
 export function computeNext(s: Pick<Schedule, "enabled" | "spec" | "last_run">, from: number): string | null {
   if (!s.enabled) return null;
   const spec = s.spec;
+  if (spec.kind === "on") return null;
   if (spec.kind === "at") {
     const at = Date.parse(spec.at);
     return s.last_run || Number.isNaN(at) ? null : new Date(at).toISOString();
@@ -72,7 +77,7 @@ export function seedSchedules(now: number, agents: Agent[]): { schedules: Schedu
   const runs: ScheduleRun[] = [];
   let rn = 0;
   const run = (schedule: string, min: number, status: ScheduleRun["status"], summary: string, output: unknown = {}, error: string | null = null, trigger: ScheduleRun["trigger"] = "cron"): ScheduleRun => {
-    const r: ScheduleRun = { id: id("run", ++rn), schedule, started_at: ago(min), finished_at: ago(min - 0.2), status, trigger, summary, output, error, actor: "operator" };
+    const r: ScheduleRun = { id: id("run", ++rn), schedule, started_at: ago(min), finished_at: ago(min - 0.2), status, trigger, summary, output, error, actor: "operator", event_seq: null };
     runs.push(r);
     return r;
   };
@@ -134,7 +139,30 @@ export function seedSchedules(now: number, agents: Agent[]): { schedules: Schedu
   run(probe.id, 60 * 30, "ok", "probe anthropic-max: ok", { subscription: "anthropic-max", windows: [{ window: "5h", used_pct: 42 }, { window: "7d", used_pct: 18 }] });
   run(probe.id, 60 * 26, "skipped", "skipped: a probe ran 4 minutes ago", {}, null, "catch_up");
 
-  const schedules = [standup, tests, nudge, probe];
+  // A trigger (§19.4): CI failed on main mails the lead. Its runs name the event that started them.
+  const ci = base(
+    5,
+    "ci-failed",
+    "terrarium",
+    {
+      kind: "on",
+      kinds: ["ci.run.failed"],
+      match: [{ path: "data.branch", op: "eq", value: "main" }],
+      dedupe: { key: "{{event.data.repo}}", window: "10m" },
+      escalate: { key: "{{event.data.repo}}", after: 3, reset_on: ["ci.run.succeeded"], to: "operator" },
+      max_per_hour: 30,
+    },
+    { type: "mail", to: `terrarium/${lead?.name ?? "lead"}`, subject: "CI failed: {{event.data.repo}}", body: "Fix the build on {{event.data.branch}}. Run: {{event.data.run_url}}" },
+  );
+  const evRun = (min: number, seq: number, kind: string, summary: string, status: ScheduleRun["status"], runSummary: string, output: unknown = {}) => {
+    const r = run(ci.id, min, status, runSummary, output, null, "event");
+    Object.assign(r, { actor: "source:terrarium/gh", event_seq: seq, event: { seq, kind, summary } });
+  };
+  evRun(60 * 20, 41, "ci.run.failed", "CI failed: wil/terrarium on main (ci.yml)", "ok", "mail to terrarium/lead", { message_id: id("msg", 7), thread_id: id("th", 7), to: "terrarium/lead" });
+  evRun(60 * 2, 88, "ci.run.failed", "CI failed: wil/terrarium on main (ci.yml)", "ok", "mail to terrarium/lead", { message_id: id("msg", 8), thread_id: id("th", 8), to: "terrarium/lead" });
+  evRun(60 * 2 - 30, 90, "ci.run.failed", "CI failed: wil/terrarium on main (ci.yml)", "skipped", "skipped: rate limit");
+
+  const schedules = [standup, tests, nudge, probe, ci];
   for (const s of schedules) {
     const mine = runs.filter((r) => r.schedule === s.id);
     s.runs_count = mine.length;
@@ -178,7 +206,7 @@ export function createScheduleMock(c: ScheduleMockContext): Api["schedules"] {
   };
 
   /** `policy::manage_schedule`: a project_admin's action stays inside its project. */
-  const mayReach = (project: string | null, action: ScheduleAction) => {
+  const mayReach = (project: string | null, action: ScheduleAction, spec?: ScheduleSpec) => {
     const who = caller();
     if (who.role !== "project_admin" || !project) return;
     const outside = (what: string): never => fail(403, "forbidden", `a schedule of project \`${project}\` stays inside it: ${what}; that needs sysadmin or the operator`);
@@ -188,6 +216,8 @@ export function createScheduleMock(c: ScheduleMockContext): Api["schedules"] {
       const t = w.targets.find((x) => x.name === action.target);
       if (t?.project && t.project !== project) outside(`target \`${t.name}\` belongs to project \`${t.project}\``);
     }
+    const to = spec?.kind === "on" ? spec.escalate?.to : undefined;
+    if (to && to !== "operator" && to !== `project:${project}` && !to.startsWith(`${project}/`)) outside(`escalation to \`${to}\` leaves the project`);
   };
 
   const notFile = (s: Schedule) => {
@@ -216,7 +246,78 @@ export function createScheduleMock(c: ScheduleMockContext): Api["schedules"] {
       if (at <= c.now()) return invalid("spec.at", `\`${spec.at}\` is in the past`);
       return { kind: "at", at: new Date(at).toISOString() };
     }
-    return invalid("spec.kind", `\`${String((spec as { kind?: unknown }).kind)}\` is not cron, interval, or at`);
+    if (spec.kind === "on") return checkOn(spec);
+    return invalid("spec.kind", `\`${String((spec as { kind?: unknown }).kind)}\` is not cron, interval, at, or on`);
+  };
+
+  /** The daemon's `validate_on`, with its field names. */
+  const checkOn = (spec: TriggerSpec): TriggerSpec => {
+    const kinds = Array.isArray(spec.kinds) ? spec.kinds.map((k) => String(k).trim()) : [];
+    if (!kinds.length) return invalid("spec.kinds", 'name one or more event kinds, for example ["ci.run.failed"]');
+    if (kinds.some((k) => !k)) invalid("spec.kinds", "a kind glob is empty");
+    const rules: MatchRule[] = [];
+    for (const m of spec.match ?? []) {
+      const p = m.path;
+      const known = ["project", "kind", "actor", "summary"].includes(p) || (p.startsWith("data.") && p.slice(5).split(".").every((x) => x !== ""));
+      if (!known) invalid("spec.match", `bad path \`${p}\`: use project, kind, actor, summary, or data.<path>`);
+      const op = m.op ?? "eq";
+      if (op === "in" && !(Array.isArray(m.value) && m.value.length)) invalid("spec.match", `\`in\` on \`${p}\` needs a list of values`);
+      if (op === "glob" && !(typeof m.value === "string" && m.value)) invalid("spec.match", `\`glob\` on \`${p}\` needs a pattern`);
+      if (op !== "in" && Array.isArray(m.value)) invalid("spec.match", `\`${op}\` on \`${p}\` needs one value`);
+      rules.push({ path: p, op, value: m.value });
+    }
+    const out: TriggerSpec = { kind: "on", kinds, ...(rules.length ? { match: rules } : {}), max_per_hour: spec.max_per_hour ?? 30 };
+    if (spec.dedupe) {
+      if (!spec.dedupe.key?.trim()) invalid("spec.dedupe.key", "the dedupe key is empty");
+      template("spec.dedupe.key", spec.dedupe.key);
+      const sec = parseEvery(spec.dedupe.window ?? "");
+      if (sec === null) invalid("spec.dedupe.window", `\`${String(spec.dedupe.window)}\` is not a duration such as 10m`);
+      if (sec! < 1 || sec! > 7 * 86400) invalid("spec.dedupe.window", `\`${spec.dedupe.window}\` is not 1 s to 7 d`);
+      out.dedupe = { key: spec.dedupe.key, window: spec.dedupe.window };
+    }
+    if (spec.escalate) {
+      const e = spec.escalate;
+      if (!e.key?.trim()) invalid("spec.escalate.key", "the escalation key is empty");
+      template("spec.escalate.key", e.key);
+      if (!Number.isInteger(e.after) || e.after < 1) invalid("spec.escalate.after", "use 1 or more");
+      if ((e.reset_on ?? []).some((k) => !String(k).trim())) invalid("spec.escalate.reset_on", "a kind glob is empty");
+      const to = e.to ?? "operator";
+      if (!to.trim()) invalid("spec.escalate.to", "name an address");
+      out.escalate = { key: e.key, after: e.after, ...(e.reset_on?.length ? { reset_on: e.reset_on } : {}), to };
+    }
+    const mph = out.max_per_hour!;
+    if (!Number.isInteger(mph) || mph < 1 || mph > 600) invalid("spec.max_per_hour", `${String(mph)} is not 1-600`);
+    return out;
+  };
+
+  /** The daemon's `template::check`: only the `{{event.*}}` placeholders. */
+  const template = (field: string, text: string | undefined) => {
+    for (const m of (text ?? "").matchAll(/\{\{\s*([^}]*?)\s*\}\}/g)) {
+      const name = m[1]!;
+      if (!/^event\.(kind|summary|project|seq|actor|data\.[A-Za-z0-9_.-]+)$/.test(name)) invalid(field, `unknown placeholder \`{{${name}}}\`: use event.kind, event.summary, event.project, event.seq, event.actor, or event.data.<path>`);
+    }
+  };
+
+  /** A trigger runs only mail, exec, and card; its strings may use templates. */
+  const checkTrigger = (spec: ScheduleSpec, action: ScheduleAction) => {
+    if (spec.kind !== "on") return;
+    if (action.type !== "mail" && action.type !== "exec" && action.type !== "card") invalid("action", `a trigger runs only mail, exec, or card, not \`${action.type}\`: to notify an agent, mail it`);
+    if (action.type === "mail") {
+      template("action.subject", action.subject);
+      template("action.body", action.body);
+    } else if (action.type === "exec") action.cmd.forEach((a) => template("action.cmd", a));
+    else if (action.type === "card") {
+      template("action.key", action.key);
+      template("action.title", action.title);
+      template("action.body", action.body);
+    }
+    if (spec.escalate?.to && spec.escalate.to !== "operator" && !spec.escalate.to.startsWith("project:")) {
+      try {
+        agentIn(spec.escalate.to, null, "spec.escalate.to");
+      } catch {
+        invalid("spec.escalate.to", `no agent \`${spec.escalate.to}\``);
+      }
+    }
   };
 
   /** An agent the action names, as `project/name`. A bare name is an agent of the schedule's project. */
@@ -267,8 +368,20 @@ export function createScheduleMock(c: ScheduleMockContext): Api["schedules"] {
           return invalid("action.subscription", `no subscription \`${String(action.subscription)}\``);
         }
         return { type: "probe", subscription: action.subscription };
+      case "card": {
+        if (!project) return invalid("action", "a card action needs a project schedule: the card goes on its board");
+        if (action.op !== "open" && action.op !== "close") invalid("action.op", `\`${String(action.op)}\` is not open or close`);
+        if (!action.key?.trim()) invalid("action.key", "name the card key");
+        const column = action.column?.trim();
+        if (column) {
+          const cols = w.columns[project] ?? [];
+          if (!cols.some((x) => x.name === column)) invalid("action.column", `project \`${project}\` has no column \`${column}\``);
+          if (action.op === "open" && column === "done") invalid("action.column", "a card does not open in done");
+        }
+        return { type: "card", op: action.op, key: action.key, ...(action.title ? { title: action.title } : {}), ...(action.body ? { body: action.body } : {}), ...(column ? { column } : {}) };
+      }
       default:
-        return invalid("action.type", `\`${String((action as { type?: unknown }).type)}\` is not mail, turn, exec, agent, or probe`);
+        return invalid("action.type", `\`${String((action as { type?: unknown }).type)}\` is not mail, turn, exec, agent, probe, or card`);
     }
   };
 
@@ -322,6 +435,9 @@ export function createScheduleMock(c: ScheduleMockContext): Api["schedules"] {
           const ag = c.agent(a.agent);
           return { status: "ok", summary: `${a.verb} ${a.agent}`, output: { agent: a.agent, verb: a.verb, status: ag.status }, error: null };
         }
+        case "card":
+          // The mock does not touch the board: a run-now of a trigger fills each template with nothing.
+          return { status: "ok", summary: `card ${a.op} trigger:${a.key.replace(/\{\{[^}]*\}\}/g, "")}`, output: { card: null, op: a.op, ...(a.op === "close" ? { column: a.column ?? "done" } : {}) }, error: null };
         case "probe": {
           const sub = c.sub(a.subscription);
           return { status: "ok", summary: `probe ${sub.name}: ok`, output: { subscription: sub.name, windows: (sub.windows ?? []).map((x) => ({ window: x.window, used_pct: x.used_pct })) }, error: null };
@@ -343,8 +459,10 @@ export function createScheduleMock(c: ScheduleMockContext): Api["schedules"] {
           mayRead(q.project);
         }
         const enabled = q.enabled === undefined ? undefined : String(q.enabled) === "true";
+        const kind = q.kind as string | undefined;
+        if (kind !== undefined && kind !== "time" && kind !== "trigger") fail(400, "bad_request", `kind: \`${kind}\` is not time or trigger`);
         return w.schedules
-          .filter((s) => readable(s) && (!q.project || s.project === null || s.project === q.project) && (enabled === undefined || s.enabled === enabled))
+          .filter((s) => readable(s) && (!q.project || s.project === null || s.project === q.project) && (enabled === undefined || s.enabled === enabled) && (!kind || (s.spec.kind === "on") === (kind === "trigger")))
           .slice()
           .sort((a, b) => a.name.localeCompare(b.name))
           .map(view);
@@ -362,7 +480,8 @@ export function createScheduleMock(c: ScheduleMockContext): Api["schedules"] {
         checkName(body?.name, project);
         const spec = checkSpec(body.spec);
         const action = checkAction(body.action, project);
-        mayReach(project, action);
+        checkTrigger(spec, action);
+        mayReach(project, action, spec);
         const catchUp = body.catch_up ?? "skip";
         if (catchUp !== "skip" && catchUp !== "once") invalid("catch_up", `\`${String(catchUp)}\` is not skip or once`);
         const s: Schedule = {
@@ -403,7 +522,8 @@ export function createScheduleMock(c: ScheduleMockContext): Api["schedules"] {
         checkName(name, project, s.id);
         const spec = patch.spec ? checkSpec(patch.spec) : s.spec;
         const action = checkAction(patch.action ?? s.action, project);
-        mayReach(project, action);
+        checkTrigger(spec, action);
+        mayReach(project, action, spec);
         const catchUp = patch.catch_up ?? s.catch_up;
         if (catchUp !== "skip" && catchUp !== "once") invalid("catch_up", `\`${String(catchUp)}\` is not skip or once`);
         Object.assign(s, { name, spec, action, catch_up: catchUp, enabled: patch.enabled ?? s.enabled, updated_at: c.iso() } satisfies Partial<NewSchedule> & { updated_at: string });
@@ -433,7 +553,7 @@ export function createScheduleMock(c: ScheduleMockContext): Api["schedules"] {
           mayRead(s.project);
           mayWrite(s.project);
           mayReach(s.project, s.action);
-          const r: ScheduleRun = { id: c.ulid("run"), schedule: s.id, started_at: c.iso(), finished_at: null, status: "running", trigger: "manual", summary: "running", output: {}, error: null, actor: "operator" };
+          const r: ScheduleRun = { id: c.ulid("run"), schedule: s.id, started_at: c.iso(), finished_at: null, status: "running", trigger: "manual", summary: "running", output: {}, error: null, actor: "operator", event_seq: null };
           w.scheduleRuns.push(r);
           const max = s.max_concurrency ?? 1;
           if (w.scheduleRuns.filter((x) => x.schedule === s.id && x.status === "running").length > max) {

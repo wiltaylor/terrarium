@@ -5,14 +5,17 @@
 // needs a sysadmin (`403`). A `422` names the field in `details.field`; the
 // dialog shows it under that field. The client preview does not block a
 // cron expression: the daemon decides, and its `422` shows when it
-// disagrees. No JSX; the tests drive it with the mock API.
+// disagrees. A trigger (spec `on`) uses the same form: the trigger fields
+// and their mapping are in ./trigger. No JSX; the tests drive it with the
+// mock API.
 
 import { createSignal } from "solid-js";
 import type { Api } from "../../api/client";
 import { ApiError } from "../../api/http";
-import type { Agent, AgentVerb, CatchUp, NewSchedule, Project, Schedule, ScheduleAction, ScheduleActionType, ScheduleSpec, ScheduleSpecKind, Target } from "../../api/types";
+import type { Agent, AgentVerb, CardOp, CatchUp, NewSchedule, Project, Schedule, ScheduleAction, ScheduleActionType, ScheduleSpec, ScheduleSpecKind, Target } from "../../api/types";
 import { previewCron } from "../../lib/cron";
 import { commandLine, parseEvery, splitCommand } from "../../lib/schedule";
+import { buildTriggerSpec, ciFailurePreset, emptyRow, emptyTriggerFields, isTriggerAction, triggerFieldsFromSpec, type MatchRow, type TriggerFields } from "./trigger";
 
 export const GLOBAL = "global" as const;
 
@@ -34,9 +37,13 @@ export const ACTION_TYPES: readonly { id: ScheduleActionType; label: string }[] 
   { id: "exec", label: "Run a command on a target" },
   { id: "agent", label: "Start, stop, or restart an agent" },
   { id: "probe", label: "Probe a subscription" },
+  { id: "card", label: "Open or close a card on the board" },
 ];
 
-export interface ScheduleForm {
+/** The action choices of a spec kind: a trigger runs only mail, exec, or card. */
+export const actionTypesFor = (specKind: ScheduleSpecKind) => (specKind === "on" ? ACTION_TYPES.filter((a) => isTriggerAction(a.id)) : ACTION_TYPES);
+
+export interface ScheduleForm extends TriggerFields {
   name: string;
   /** A project name, `GLOBAL`, or "" (not chosen). */
   scope: string;
@@ -71,6 +78,13 @@ export interface ScheduleForm {
   cwd: string;
   timeout: string;
   subscription: string;
+  cardOp: CardOp;
+  /** The card key: one open card per key. A trigger may use templates. */
+  cardKey: string;
+  cardTitle: string;
+  cardBody: string;
+  /** Empty: the daemon's default (`backlog` to open, `done` to close). */
+  cardColumn: string;
 }
 
 export type FormKey = keyof ScheduleForm;
@@ -99,9 +113,31 @@ export const FIELD_OF: Record<string, FormKey> = {
   "action.cwd": "cwd",
   "action.timeout_secs": "timeout",
   "action.subscription": "subscription",
+  "action.op": "cardOp",
+  "action.key": "cardKey",
+  "action.title": "cardTitle",
+  "action.column": "cardColumn",
+  "spec.kinds": "kinds",
+  "spec.match": "rules",
+  "spec.dedupe": "dedupeKey",
+  "spec.dedupe.key": "dedupeKey",
+  "spec.dedupe.window": "dedupeWindow",
+  "spec.escalate": "escalateKey",
+  "spec.escalate.key": "escalateKey",
+  "spec.escalate.after": "escalateAfter",
+  "spec.escalate.reset_on": "escalateResetOn",
+  "spec.escalate.to": "escalateTo",
+  "spec.max_per_hour": "maxPerHour",
   catch_up: "catchUp",
   enabled: "enabled",
 };
+
+/** The form field of the daemon's `details.field`. `action.body` is the body of a mail or of a card. */
+export function fieldOf(daemonField: string, actionType?: ScheduleActionType): FormKey | undefined {
+  if (daemonField === "action.body") return actionType === "card" ? "cardBody" : "mailBody";
+  if (daemonField.startsWith("spec.match")) return "rules";
+  return FIELD_OF[daemonField];
+}
 
 export type ScheduleOutcome =
   | { kind: "idle" }
@@ -192,6 +228,12 @@ export const emptyScheduleForm = (selectedProject: string | null | undefined, in
   cwd: "",
   timeout: "",
   subscription: "",
+  cardOp: "open",
+  cardKey: "",
+  cardTitle: "",
+  cardBody: "",
+  cardColumn: "",
+  ...emptyTriggerFields(),
   ...init,
 });
 
@@ -200,19 +242,22 @@ export function formFromSchedule(s: Schedule): ScheduleForm {
   const f = emptyScheduleForm(s.project ?? GLOBAL, { name: s.name, enabled: s.enabled, catchUp: s.catch_up, specKind: s.spec.kind, actionType: s.action.type });
   if (s.spec.kind === "cron") Object.assign(f, { expr: s.spec.expr, tz: s.spec.tz || "UTC" }, presetOf(s.spec.expr));
   else if (s.spec.kind === "interval") f.every = s.spec.every;
-  else f.at = localInput(s.spec.at);
+  else if (s.spec.kind === "at") f.at = localInput(s.spec.at);
+  else Object.assign(f, triggerFieldsFromSpec(s.spec));
   const a = s.action;
   if (a.type === "mail") Object.assign(f, { mailTo: a.to, mailSubject: a.subject, mailBody: a.body });
   else if (a.type === "turn") Object.assign(f, { agent: a.agent, text: a.text, startIfStopped: !!a.start_if_stopped });
   else if (a.type === "exec") Object.assign(f, { target: a.target, cmd: commandLine(a.cmd), cwd: a.cwd ?? "", timeout: a.timeout_secs ? String(a.timeout_secs) : "" });
   else if (a.type === "agent") Object.assign(f, { agent: a.agent, verb: a.verb });
-  else f.subscription = a.subscription;
+  else if (a.type === "probe") f.subscription = a.subscription;
+  else Object.assign(f, { cardOp: a.op, cardKey: a.key, cardTitle: a.title ?? "", cardBody: a.body ?? "", cardColumn: a.column ?? "" });
   return f;
 }
 
 type Built<T> = { value: T } | { error: string; field: FormKey };
 
 function buildSpec(f: ScheduleForm): Built<ScheduleSpec> {
+  if (f.specKind === "on") return buildTriggerSpec(f);
   if (f.specKind === "cron") {
     const expr = f.expr.trim();
     if (!expr) return { error: "Give a cron expression.", field: "expr" };
@@ -257,6 +302,14 @@ function buildAction(f: ScheduleForm): Built<ScheduleAction> {
       return need(f.agent, "agent", "Choose the agent.") ?? { value: { type: "agent", agent: f.agent.trim(), verb: f.verb } };
     case "probe":
       return need(f.subscription, "subscription", "Choose the subscription.") ?? { value: { type: "probe", subscription: f.subscription.trim() } };
+    case "card": {
+      if (f.scope === GLOBAL) return { error: "A card goes on the board of a project: a global schedule cannot have a card action.", field: "actionType" };
+      const miss = need(f.cardKey, "cardKey", "Give the card key, for example ci:{{event.data.repo}}.");
+      if (miss) return miss;
+      if (f.cardOp === "open" && f.cardColumn.trim() === "done") return { error: "A card does not open in done.", field: "cardColumn" };
+      const opt = (k: "title" | "body" | "column", v: string) => (v.trim() ? { [k]: k === "body" ? v : v.trim() } : {});
+      return { value: { type: "card", op: f.cardOp, key: f.cardKey.trim(), ...opt("title", f.cardTitle), ...opt("body", f.cardBody), ...opt("column", f.cardColumn) } };
+    }
   }
 }
 
@@ -265,6 +318,7 @@ export function scheduleBody(f: ScheduleForm): { body: NewSchedule } | { error: 
   const name = f.name.trim();
   if (!name) return { error: "Give the schedule a name.", field: "name" };
   if (!f.scope) return { error: "Choose a scope: a project, or global.", field: "scope" };
+  if (f.specKind === "on" && !isTriggerAction(f.actionType)) return { error: "A trigger runs only mail, exec, or card. To notify an agent, mail it.", field: "actionType" };
   const spec = buildSpec(f);
   if ("error" in spec) return spec;
   const action = buildAction(f);
@@ -350,12 +404,23 @@ export function createScheduleDialog(api: Pick<Api, "schedules">, opts: { projec
     });
     if (outcome().kind !== "sending" && outcome().kind !== "done") setOutcome({ kind: "idle" });
   };
+  const setRules = (fn: (rows: MatchRow[]) => MatchRow[]) => set("rules", fn(form().rules));
 
   return {
     form,
     outcome,
     editing: () => editing,
     set,
+    /** Is it a trigger (spec `on`)? */
+    isTrigger: () => form().specKind === "on",
+    addRule: () => setRules((rows) => [...rows, emptyRow()]),
+    setRule: (i: number, patch: Partial<MatchRow>) => setRules((rows) => rows.map((r, j) => (j === i ? { ...r, ...patch } : r))),
+    removeRule: (i: number) => setRules((rows) => rows.filter((_, j) => j !== i)),
+    /** Fill the form with "CI failure → mail an agent". `agent` is the recipient when the form has none. */
+    ciPreset(agent?: string) {
+      setForm((f) => ({ ...f, ...ciFailurePreset(f, agent) }));
+      if (outcome().kind !== "sending" && outcome().kind !== "done") setOutcome({ kind: "idle" });
+    },
     /** The message under a field: the form's own check, or the daemon's `422`. */
     fieldError(key: FormKey): string | null {
       const o = outcome();
@@ -378,7 +443,7 @@ export function createScheduleDialog(api: Pick<Api, "schedules">, opts: { projec
         setOutcome({ kind: "done", schedule: s });
         return s;
       } catch (e) {
-        setOutcome(refusal(e, form().scope));
+        setOutcome(refusal(e, form().scope, form().actionType));
         return null;
       }
     },
@@ -386,12 +451,12 @@ export function createScheduleDialog(api: Pick<Api, "schedules">, opts: { projec
 }
 
 /** Sort a refusal: `403` and `422` show inline; any other error shows as a banner. */
-export function refusal(e: unknown, scope: string): ScheduleOutcome {
+export function refusal(e: unknown, scope: string, actionType?: ScheduleActionType): ScheduleOutcome {
   if (e instanceof ApiError && e.status === 403) return { kind: "forbidden", message: e.message, scope };
   if (e instanceof ApiError && (e.status === 422 || e.code === "invalid")) {
     const d = e.details as { field?: unknown } | undefined;
     const daemonField = typeof d?.field === "string" ? d.field : undefined;
-    return { kind: "rejected", message: e.message, field: daemonField ? FIELD_OF[daemonField] : undefined, daemonField };
+    return { kind: "rejected", message: e.message, field: daemonField ? fieldOf(daemonField, actionType) : undefined, daemonField };
   }
   return { kind: "error", error: e };
 }

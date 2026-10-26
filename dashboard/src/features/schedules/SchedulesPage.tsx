@@ -1,9 +1,12 @@
 // Schedules (docs/api.md §19). Two views: a project view
 // (`/p/:project/schedules`, `GET /api/schedules?project=`: the project's
 // schedules and the global ones, with a scope filter), and the view of all
-// schedules (`/schedules`, grouped by scope). A row opens to its run
-// history. `schedule` events keep the list live: `run_started` shows a
-// spinner on the row, `run_finished` sets the last run.
+// schedules (`/schedules`, grouped by scope). Two tabs, kept in the URL
+// (`?tab=triggers`): Schedules (the time specs, `?kind=time`) and Triggers
+// (the spec `on`, `?kind=trigger`, §19.4), with the event sources (§20)
+// under the triggers. A row opens to its run history; a trigger run shows
+// the event that started it. `schedule` events keep the list live:
+// `run_started` shows a spinner on the row, `run_finished` sets the last run.
 
 import { A, useParams, useSearchParams } from "@solidjs/router";
 import { createEffect, createSignal, For, Index, on, onCleanup, onMount, Show } from "solid-js";
@@ -12,19 +15,23 @@ import { ConfirmButton, Empty, ErrorBanner, LoadMore, PageHead, Tabs, useNow } f
 import type { Schedule } from "../../api/types";
 import { api, events } from "../../stores";
 import { SCOPE_FILTERS, type ScopeFilter } from "../../lib/target-scope";
-import { actionWords, nextRunWords, specWords } from "../../lib/schedule";
+import { actionWords, guardWords, matchesWords, nextRunWords, specWords } from "../../lib/schedule";
 import { ago } from "../../lib/format";
+import { EventSourcesSection } from "./EventSources";
 import { createRunHistory } from "./history";
-import { applyRunAnswer, applyScheduleEvent, eventRun, filterSchedules, groupSchedules, RUN_CHIP, runOutputText, runSeconds, scheduleScope, scheduleScopeLabel, sortSchedules, touchesRuns, upsertSchedule, type ScheduleListState } from "./model";
+import { applyRunAnswer, applyScheduleEvent, eventRun, filterSchedules, groupSchedules, RUN_CHIP, runOutputText, runSeconds, SCHEDULE_TABS, scheduleScope, scheduleScopeLabel, sortSchedules, tabOf, tabParam, touchesRuns, upsertSchedule, type ScheduleKind, type ScheduleListState } from "./model";
 import { ScheduleDialog } from "./ScheduleDialog";
 
 const COLS = 8;
 
 export default function SchedulesPage() {
   const params = useParams<{ project?: string }>();
-  const [search, setSearch] = useSearchParams<{ scope?: string; open?: string }>();
+  const [search, setSearch] = useSearchParams<{ scope?: string; open?: string; tab?: string }>();
   const project = () => params.project ?? null;
-  const view = () => ({ project: project() });
+  const kind = (): ScheduleKind => tabOf(search.tab);
+  const triggers = () => kind() === "trigger";
+  const setTab = (k: ScheduleKind) => setSearch({ tab: tabParam(k), open: undefined }, { replace: true });
+  const view = () => ({ project: project(), kind: kind() });
   const filter = (): ScopeFilter => (search.scope === "project" || search.scope === "global" ? search.scope : "all");
   const setFilter = (f: ScopeFilter) => setSearch({ scope: f === "all" ? undefined : f }, { replace: true });
 
@@ -43,7 +50,7 @@ export default function SchedulesPage() {
     const gen = ++generation;
     const p = project();
     try {
-      const items = await api.schedules.list(p ? { project: p } : {});
+      const items = await api.schedules.list({ ...(p ? { project: p } : {}), kind: kind() });
       if (gen !== generation) return;
       setState((s) => ({ items: sortSchedules(items), running: s.running }));
       setError(null);
@@ -55,7 +62,7 @@ export default function SchedulesPage() {
   };
 
   createEffect(
-    on(project, () => {
+    on([project, kind], () => {
       setLoading(true);
       setState({ items: [], running: {} });
       void load();
@@ -139,25 +146,31 @@ export default function SchedulesPage() {
     return groupSchedules(list);
   };
   const count = () => groups().reduce((n, g) => n + g.items.length, 0);
+  const noun = () => (triggers() ? "triggers" : "schedules");
   const empty = () => {
     if (loading()) return "Loading…";
-    if (project() && filter() === "project") return `Project ${project()} has no schedules of its own.`;
-    if (project() && filter() === "global") return "No global schedules.";
-    return "No schedules. Make one with New schedule.";
+    if (project() && filter() === "project") return `Project ${project()} has no ${noun()} of its own.`;
+    if (project() && filter() === "global") return `No global ${noun()}.`;
+    return triggers() ? "No triggers. Make one with New trigger, or start from the preset CI failure → mail an agent." : "No schedules. Make one with New schedule.";
   };
 
   return (
     <>
       <PageHead title={project() ? `Schedules · ${project()}` : "Schedules · all"}>
         <button class="primary" onClick={() => setDialog({})}>
-          New schedule
+          {triggers() ? "New trigger" : "New schedule"}
         </button>
         <button onClick={() => void load()}>Refresh</button>
       </PageHead>
+      <div style={{ "margin-bottom": "12px" }}>
+        <Tabs tabs={SCHEDULE_TABS} active={kind()} onChange={setTab} />
+      </div>
       <div class="spread" style={{ "margin-bottom": "12px", "flex-wrap": "wrap", gap: "8px" }}>
         <div class="row" style={{ gap: "8px", "flex-wrap": "wrap" }}>
-          <Show when={project()} fallback={<span class="small muted">All schedules, by scope.</span>}>
-            <span class="small muted">The schedules of {project()} and the global ones.</span>
+          <Show when={project()} fallback={<span class="small muted">All {noun()}, by scope.</span>}>
+            <span class="small muted">
+              The {noun()} of {project()} and the global ones.
+            </span>
             <Tabs tabs={SCOPE_FILTERS} active={filter()} onChange={setFilter} />
           </Show>
         </div>
@@ -178,14 +191,14 @@ export default function SchedulesPage() {
       </Show>
       <section class="card-box" style={{ "margin-bottom": "16px" }}>
         <div class="table-wrap">
-          <table aria-label="Schedules">
+          <table aria-label={triggers() ? "Triggers" : "Schedules"}>
             <thead>
               <tr>
                 <th>Name</th>
                 <th>Scope</th>
-                <th>When</th>
+                <th>{triggers() ? "On" : "When"}</th>
                 <th>Action</th>
-                <th>Next run</th>
+                <th>{triggers() ? "Guards" : "Next run"}</th>
                 <th>Last run</th>
                 <th>Enabled</th>
                 <th />
@@ -236,12 +249,15 @@ export default function SchedulesPage() {
                                   {scheduleScopeLabel(s)}
                                 </span>
                               </td>
-                              <td title={JSON.stringify(s.spec)}>{specWords(s.spec)}</td>
+                              <td title={JSON.stringify(s.spec)}>
+                                <div class={s.spec.kind === "on" ? "mono small" : undefined}>{specWords(s.spec)}</div>
+                                <Show when={s.spec.kind === "on" && matchesWords(s.spec)}>{(m) => <div class="small muted">where {m()}</div>}</Show>
+                              </td>
                               <td class="ellipsis" style={{ "max-width": "18rem" }} title={actionWords(s.action, s.project)}>
                                 {actionWords(s.action, s.project)}
                               </td>
                               <td class="small">
-                                <div>{nextRunWords(s, now())}</div>
+                                <Show when={s.spec.kind === "on" ? s.spec : null} fallback={<div>{nextRunWords(s, now())}</div>}>{(spec) => <div>{guardWords(spec())}</div>}</Show>
                                 <Show when={s.enabled && s.next_run_at}>{(at) => <div class="muted">{new Date(at()).toLocaleString()}</div>}</Show>
                               </td>
                               <td class="small">
@@ -321,6 +337,7 @@ export default function SchedulesPage() {
           <ScheduleDialog
             project={project()}
             schedule={d().schedule}
+            trigger={triggers()}
             onClose={() => setDialog(null)}
             onSaved={(s) => {
               // Read the dialog before it closes: its accessor goes stale after.
@@ -332,8 +349,11 @@ export default function SchedulesPage() {
           />
         )}
       </Show>
+      <Show when={triggers()}>
+        <EventSourcesSection project={project()} />
+      </Show>
       <MockOnlyNote label="new API">
-        <code>GET</code>, <code>POST /api/schedules</code>, <code>GET</code>, <code>PATCH</code>, <code>DELETE /api/schedules/{"{id}"}</code>, <code>POST .../run|enable|disable</code>, and <code>GET .../runs</code> are docs/api.md §19.
+        <code>GET</code>, <code>POST /api/schedules</code>, <code>GET</code>, <code>PATCH</code>, <code>DELETE /api/schedules/{"{id}"}</code>, <code>POST .../run|enable|disable</code>, and <code>GET .../runs</code> are docs/api.md §19; <code>/api/event-sources</code> is §20.
       </MockOnlyNote>
     </>
   );
@@ -343,6 +363,7 @@ export default function SchedulesPage() {
 function RunHistoryPanel(props: { schedule: Schedule }) {
   // The panel belongs to one schedule; a new schedule mounts a new panel.
   const h = createRunHistory(api, props.schedule.id);
+  const trigger = props.schedule.spec.kind === "on";
   onMount(() => {
     void h.reload();
     let t: ReturnType<typeof setTimeout> | undefined;
@@ -372,6 +393,9 @@ function RunHistoryPanel(props: { schedule: Schedule }) {
             <tr>
               <th>Started</th>
               <th>Trigger</th>
+              <Show when={trigger}>
+                <th>Event</th>
+              </Show>
               <th>Status</th>
               <th>Took</th>
               <th>Summary and output</th>
@@ -383,6 +407,20 @@ function RunHistoryPanel(props: { schedule: Schedule }) {
                 <tr>
                   <td title={r.started_at}>{new Date(r.started_at).toLocaleString()}</td>
                   <td>{r.trigger.replace("_", " ")}</td>
+                  <Show when={trigger}>
+                    <td>
+                      <Show when={r.event} fallback={<span class="muted">{r.event_seq ? `#${r.event_seq} (pruned)` : "—"}</span>}>
+                        {(ev) => (
+                          <>
+                            <span class="mono">#{ev().seq}</span> <span class="chip mono">{ev().kind}</span>
+                            <div class="muted ellipsis" style={{ "max-width": "18rem" }} title={ev().summary}>
+                              {ev().summary}
+                            </div>
+                          </>
+                        )}
+                      </Show>
+                    </td>
+                  </Show>
                   <td>
                     <span class={`chip ${RUN_CHIP[r.status] ?? ""}`}>
                       <Show when={r.status === "running"}>

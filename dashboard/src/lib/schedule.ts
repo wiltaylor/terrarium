@@ -4,7 +4,7 @@
 
 import { DAYS, expandMacro, parseCron } from "./cron";
 import { duration } from "./format";
-import type { Schedule, ScheduleAction, ScheduleSpec } from "../api/types";
+import type { MatchRule, Schedule, ScheduleAction, ScheduleSpec, TriggerSpec } from "../api/types";
 
 const pad = (n: number) => String(n).padStart(2, "0");
 
@@ -119,7 +119,28 @@ export function specWords(spec: ScheduleSpec): string {
       return `once at ${utcText(spec.at)}`;
     case "cron":
       return cronWords(spec.expr, spec.tz);
+    case "on":
+      return `on ${spec.kinds.join(", ")}`;
   }
+}
+
+/** One match rule in words: "data.branch = main", "data.repo in a, b", "kind ~ ci.*". */
+export function matchWords(m: MatchRule): string {
+  const v = Array.isArray(m.value) ? m.value.map(String).join(", ") : String(m.value);
+  const op = { eq: "=", ne: "≠", glob: "~", in: "in" }[m.op ?? "eq"];
+  return `${m.path} ${op} ${v}`;
+}
+
+/** The match rules of a trigger in words, joined with "and"; "" when it has none. */
+export const matchesWords = (spec: Pick<TriggerSpec, "match">): string => (spec.match ?? []).map(matchWords).join(" and ");
+
+/** The guards of a trigger in words: "dedupe 10m · escalate after 3 → operator · max 30/h". */
+export function guardWords(spec: TriggerSpec): string {
+  const parts: string[] = [];
+  if (spec.dedupe) parts.push(`dedupe ${spec.dedupe.window}`);
+  if (spec.escalate) parts.push(`escalate after ${spec.escalate.after} → ${spec.escalate.to ?? "operator"}`);
+  parts.push(`max ${spec.max_per_hour ?? 30}/h`);
+  return parts.join(" · ");
 }
 
 /**
@@ -191,12 +212,15 @@ export function actionWords(action: ScheduleAction, project: string | null): str
       return `${action.verb} → ${shortAddress(action.agent, project)}`;
     case "probe":
       return `probe ${action.subscription}`;
+    case "card":
+      return `card ${action.op} ${action.key}${action.title ? `: ${action.title}` : ""}`;
   }
 }
 
 /** The next run, relative: "in 14m", "due now", or why there is none. */
 export function nextRunWords(s: Pick<Schedule, "enabled" | "next_run_at" | "spec" | "last_run">, now = Date.now()): string {
   if (!s.enabled) return "disabled";
+  if (s.spec.kind === "on") return "on each match";
   if (!s.next_run_at) return s.spec.kind === "at" && s.last_run ? "done (ran once)" : "not planned";
   const ms = Date.parse(s.next_run_at) - now;
   return ms <= 0 ? "due now" : `in ${duration(ms)}`;

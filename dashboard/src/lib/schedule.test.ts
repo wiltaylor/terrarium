@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { actionWords, commandLine, cronWords, everyWords, nextRunWords, parseEvery, shortAddress, specWords, splitCommand } from "./schedule";
+import { actionWords, commandLine, cronWords, everyWords, guardWords, matchesWords, nextRunWords, parseEvery, shortAddress, specWords, splitCommand } from "./schedule";
 
 describe("specWords: interval", () => {
   it("reads the duration forms", () => {
@@ -124,5 +124,25 @@ describe("nextRunWords", () => {
     expect(nextRunWords({ ...base, enabled: false }, now)).toBe("disabled");
     expect(nextRunWords({ ...base, next_run_at: null, spec: { kind: "at", at: "2026-10-26T09:00:00Z" }, last_run: { at: "2026-10-26T09:00:00Z", status: "ok", summary: "", run_id: "r" } }, now)).toBe("done (ran once)");
     expect(nextRunWords({ ...base, next_run_at: null }, now)).toBe("not planned");
+  });
+});
+
+describe("a trigger in words", () => {
+  const spec = { kind: "on" as const, kinds: ["ci.run.failed", "ci.job.*"], match: [{ path: "data.branch", value: "main" }, { path: "data.repo", op: "in" as const, value: ["a", "b"] }] };
+  it("the kinds, the rules, and the guards", () => {
+    expect(specWords(spec)).toBe("on ci.run.failed, ci.job.*");
+    expect(matchesWords(spec)).toBe("data.branch = main and data.repo in a, b");
+    expect(guardWords(spec)).toBe("max 30/h");
+    expect(guardWords({ ...spec, dedupe: { key: "k", window: "10m" }, escalate: { key: "k", after: 3 }, max_per_hour: 5 })).toBe("dedupe 10m · escalate after 3 → operator · max 5/h");
+  });
+
+  it("has no next run: it runs on each match", () => {
+    expect(nextRunWords({ enabled: true, next_run_at: null, spec, last_run: null })).toBe("on each match");
+    expect(nextRunWords({ enabled: false, next_run_at: null, spec, last_run: null })).toBe("disabled");
+  });
+
+  it("the card action", () => {
+    expect(actionWords({ type: "card", op: "open", key: "ci:{{event.data.repo}}", title: "CI failed" }, "p")).toBe("card open ci:{{event.data.repo}}: CI failed");
+    expect(actionWords({ type: "card", op: "close", key: "ci" }, "p")).toBe("card close ci");
   });
 });

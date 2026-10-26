@@ -1147,7 +1147,7 @@ describe("mail parity with docs/api.md §7 (the mail log's filters)", () => {
 
 describe("schedules (docs/api.md §19, the daemon's api/schedules.rs)", () => {
   const SCHEDULE_KEYS = ["action", "catch_up", "consecutive_skips", "created_at", "created_by", "enabled", "id", "last_run", "max_concurrency", "name", "next_run_at", "project", "run_as", "runs_count", "source", "spec", "updated_at"];
-  const RUN_KEYS = ["actor", "error", "finished_at", "id", "output", "schedule", "started_at", "status", "summary", "trigger"];
+  const RUN_KEYS = ["actor", "error", "event_seq", "finished_at", "id", "output", "schedule", "started_at", "status", "summary", "trigger"];
   const stream = (api: ReturnType<typeof mock>) => {
     const frames: AgentEvent[] = [];
     const s = api.events.stream({ since: api.world.seq });
@@ -1159,7 +1159,7 @@ describe("schedules (docs/api.md §19, the daemon's api/schedules.rs)", () => {
 
   it("seeds three project schedules across two projects and one global, in the daemon's shape", async () => {
     const api = mock();
-    const all = await api.schedules.list();
+    const all = await api.schedules.list({ kind: "time" });
     expect(all.map((s) => s.project ?? "global").sort()).toEqual(["global", "terrarium", "terrarium", "webshop"]);
     for (const s of all) expect(Object.keys(s).sort()).toEqual(SCHEDULE_KEYS);
     const failed = all.find((s) => s.last_run?.status === "failed")!;
@@ -1373,5 +1373,133 @@ describe("schedules (docs/api.md §19, the daemon's api/schedules.rs)", () => {
     expect(fb.source).toBe("fallback");
     expect(fb.notes?.length).toBeGreaterThan(0);
     await expect(api.subscriptions.models("nope")).rejects.toMatchObject({ status: 404 });
+  });
+});
+
+describe("triggers (docs/api.md §19.4)", () => {
+  const on = { kind: "on" as const, kinds: ["ci.run.failed"] };
+  const mail = { type: "mail" as const, to: "terrarium/lead", subject: "CI failed: {{event.data.repo}}", body: "Run: {{event.data.run_url}}" };
+  const err = (p: Promise<unknown>) => p.then(() => null, (e: unknown) => e as ApiError);
+
+  it("filters ?kind=time|trigger and answers 400 for another kind", async () => {
+    const api = mock();
+    const t = await api.schedules.list({ kind: "trigger" });
+    expect(t.length).toBeGreaterThan(0);
+    expect(t.every((s) => s.spec.kind === "on" && s.next_run_at === null)).toBe(true);
+    expect((await api.schedules.list({ kind: "time" })).some((s) => s.spec.kind === "on")).toBe(false);
+    await expect(api.schedules.list({ kind: "weekly" as never })).rejects.toMatchObject({ status: 400 });
+  });
+
+  it("gives each trigger run its event, and every run event_seq", async () => {
+    const api = mock();
+    const t = (await api.schedules.list({ kind: "trigger" }))[0]!;
+    const runs = (await api.schedules.runs(t.id)).items;
+    expect(runs.every((r) => r.trigger === "event" && typeof r.event_seq === "number" && r.event?.seq === r.event_seq)).toBe(true);
+    expect(Object.keys(runs[0]!.event!).sort()).toEqual(["kind", "seq", "summary"]);
+    const time = (await api.schedules.list({ kind: "time" }))[0]!;
+    const r = (await api.schedules.runs(time.id)).items[0]!;
+    expect(r.event_seq).toBeNull();
+    expect(r).not.toHaveProperty("event");
+  });
+
+  it("creates a trigger with the default max_per_hour, and refuses turn, agent, and probe on the field action", async () => {
+    const api = mock();
+    const s = await api.schedules.create({ name: "t1", project: "terrarium", spec: on, action: mail });
+    expect(s.spec).toEqual({ kind: "on", kinds: ["ci.run.failed"], max_per_hour: 30 });
+    expect(s.next_run_at).toBeNull();
+    for (const action of [
+      { type: "turn" as const, agent: "terrarium/lead", text: "go" },
+      { type: "agent" as const, agent: "terrarium/lead", verb: "restart" as const },
+      { type: "probe" as const, subscription: "anthropic-max" },
+    ])
+      expect(await err(api.schedules.create({ name: "t2", project: "terrarium", spec: on, action }))).toMatchObject({ status: 422, details: { field: "action" } });
+  });
+
+  it("names the spec field of a bad trigger, and refuses an unknown placeholder", async () => {
+    const api = mock();
+    const bad = (spec: object, action: object = mail) => err(api.schedules.create({ name: "t", project: "terrarium", spec: { ...on, ...spec } as never, action: action as never }));
+    expect(await bad({ kinds: [] })).toMatchObject({ details: { field: "spec.kinds" } });
+    expect(await bad({ match: [{ path: "branch", op: "eq", value: "main" }] })).toMatchObject({ details: { field: "spec.match" } });
+    expect(await bad({ match: [{ path: "data.repo", op: "in", value: "x" }] })).toMatchObject({ details: { field: "spec.match" } });
+    expect(await bad({ dedupe: { key: "k", window: "8d" } })).toMatchObject({ details: { field: "spec.dedupe.window" } });
+    expect(await bad({ escalate: { key: "k", after: 0 } })).toMatchObject({ details: { field: "spec.escalate.after" } });
+    expect(await bad({ max_per_hour: 601 })).toMatchObject({ details: { field: "spec.max_per_hour" } });
+    expect(await bad({}, { ...mail, subject: "{{event.nope}}" })).toMatchObject({ details: { field: "action.subject" } });
+  });
+
+  it("takes a card action on a project, not on a global schedule", async () => {
+    const api = mock();
+    const card = { type: "card" as const, op: "open" as const, key: "ci:{{event.data.repo}}", title: "CI failed" };
+    expect((await api.schedules.create({ name: "c", project: "terrarium", spec: on, action: card })).action).toEqual(card);
+    expect(await err(api.schedules.create({ name: "c", project: null, spec: on, action: card }))).toMatchObject({ details: { field: "action" } });
+    expect(await err(api.schedules.create({ name: "c2", project: "terrarium", spec: on, action: { ...card, key: " " } }))).toMatchObject({ details: { field: "action.key" } });
+    expect(await err(api.schedules.create({ name: "c3", project: "terrarium", spec: on, action: { ...card, column: "done" } }))).toMatchObject({ details: { field: "action.column" } });
+    // A time schedule may use the card action too.
+    expect((await api.schedules.create({ name: "weekly", project: "terrarium", spec: { kind: "cron", expr: "0 9 * * 1", tz: "UTC" }, action: { type: "card", op: "open", key: "review" } })).action.type).toBe("card");
+  });
+});
+
+describe("event sources (docs/api.md §20)", () => {
+  const SOURCE_KEYS = ["created_at", "created_by", "enabled", "hook_note", "hook_path", "hook_url", "id", "kind", "last_error", "last_seen", "name", "project", "received", "setup", "updated_at"];
+
+  it("lists in the daemon's shape, with no secret", async () => {
+    const api = mock();
+    const all = await api.eventSources.list();
+    expect(all.length).toBeGreaterThan(0);
+    for (const s of all) {
+      expect(Object.keys(s).sort()).toEqual(SOURCE_KEYS);
+      expect(s.hook_path).toBe(`/hooks/${s.project ?? "_"}/${s.name}`);
+    }
+    expect((await api.eventSources.list({ project: "webshop" })).every((s) => s.project === null || s.project === "webshop")).toBe(true);
+  });
+
+  it("answers the secret only at create and rotate, with the setup steps of the kind", async () => {
+    const api = mock();
+    const s = await api.eventSources.create({ name: "fj", project: "terrarium", kind: "forgejo" });
+    expect(s.secret).toMatch(/^[0-9a-f]{64}$/);
+    expect(s.setup.join(" ")).toContain("application/json");
+    expect(await api.eventSources.get(s.id)).not.toHaveProperty("secret");
+    const r = await api.eventSources.rotate(s.id);
+    expect(r.secret).not.toBe(s.secret);
+    expect((await api.eventSources.list()).every((x) => !("secret" in x))).toBe(true);
+    expect((await api.eventSources.update(s.id, { enabled: false })).enabled).toBe(false);
+    await api.eventSources.remove(s.id);
+    await expect(api.eventSources.get(s.id)).rejects.toMatchObject({ status: 404 });
+  });
+
+  it("refuses a bad name, a taken name, a global source from a project_admin, and any write from a member", async () => {
+    const api = mock();
+    await expect(api.eventSources.create({ name: "Bad Name", project: "terrarium", kind: "github" })).rejects.toMatchObject({ status: 422, details: { field: "name" } });
+    await expect(api.eventSources.create({ name: "gh", project: "terrarium", kind: "github" })).rejects.toMatchObject({ status: 409 });
+    const admin = createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 0, scheduleCaller: { role: "project_admin", project: "terrarium" } });
+    await expect(admin.eventSources.create({ name: "g", project: null, kind: "generic" })).rejects.toMatchObject({ status: 403 });
+    expect((await admin.eventSources.create({ name: "g", project: "terrarium", kind: "generic" })).project).toBe("terrarium");
+    const member = createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 0, scheduleCaller: { role: "member", project: "terrarium" } });
+    const gh = (await member.eventSources.list({ project: "terrarium" })).find((x) => x.name === "gh")!;
+    await expect(member.eventSources.rotate(gh.id)).rejects.toMatchObject({ status: 403 });
+  });
+
+  it("the HTTP client sends the documented routes", async () => {
+    const calls: string[] = [];
+    const t = createHttpTransport({ baseUrl: "http://d", getToken: () => null, fetch: (async (url: string, init: RequestInit) => {
+      calls.push(`${init.method} ${String(url).replace("http://d", "")}`);
+      return new Response(init.method === "DELETE" ? null : "[]", { status: init.method === "DELETE" ? 204 : 200, headers: { "content-type": "application/json" } });
+    }) as unknown as typeof fetch });
+    const { createHttpApi } = await import("../client");
+    const api = createHttpApi(t);
+    await api.schedules.list({ project: "terrarium", kind: "trigger" });
+    await api.eventSources.list({ project: "terrarium" });
+    await api.eventSources.create({ name: "gh", kind: "github", project: "terrarium" });
+    await api.eventSources.update("S1", { enabled: false });
+    await api.eventSources.rotate("terrarium/gh");
+    await api.eventSources.remove("S1");
+    expect(calls).toEqual([
+      "GET /api/schedules?project=terrarium&kind=trigger&limit=1000",
+      "GET /api/event-sources?project=terrarium",
+      "POST /api/event-sources",
+      "PATCH /api/event-sources/S1",
+      "POST /api/event-sources/terrarium%2Fgh/rotate",
+      "DELETE /api/event-sources/S1",
+    ]);
   });
 });

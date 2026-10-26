@@ -277,6 +277,22 @@ the daemon decides, and its `422` shows under the field that
 ("every 15 min", "daily 09:00 UTC", "mail → lead: Standup") come from
 `lib/schedule.ts`.
 
+The page has two tabs, kept in the URL as `?tab=triggers`: Schedules
+(`GET /api/schedules?kind=time`) and Triggers (`?kind=trigger`, docs/api.md
+§19.4). A trigger uses the same dialog with the spec `on`: the kinds, the
+match rules, the optional dedupe and escalation, and `max_per_hour`
+(`features/schedules/trigger.ts`). A trigger offers only the actions `mail`,
+`exec`, and `card`; a time schedule offers all six. The preset "CI failure
+→ mail an agent" fills the example of docs/api.md §19.4. A trigger run shows
+the event (`seq`, `kind`, `summary`) that started it.
+
+The Triggers tab also lists the event sources (docs/api.md §20,
+`features/schedules/EventSources.tsx`). A create and a rotate answer with
+the secret. The secret shows one time in a panel, with the hook URL and the
+setup steps. The list never keeps the secret (`withoutSecret`), and the
+panel drops it when it closes. `event_source` events, and the events that a
+source adds to the log, read the list again.
+
 ## Quota alerts and holds
 
 `stores/quota.ts` keeps the state of docs/api.md §16.6 from the event
@@ -442,6 +458,7 @@ update cannot put other rows in the view. The mock answers the same params
 | `/p/:project/spend` | Gone: redirects to `/` (`app/nav.ts` `MOVED_ROUTES`). The daemon's budget alert mail still links it. | none |
 | `/p/:project/schedules` | Schedules of the project and the global ones, scope filter, run history, run now, enable, create, edit, delete | `GET /api/schedules?project=`, `POST /api/schedules`, `PATCH`, `DELETE /api/schedules/{id}`, `POST .../run\|enable\|disable`, `GET .../runs?limit=&cursor=` (docs/api.md §19) |
 | `/schedules` | All schedules, grouped by scope | `GET /api/schedules` and the calls above |
+| `/p/:project/schedules?tab=triggers`, `/schedules?tab=triggers` | Triggers (spec `on`) and their runs with the event; event sources: list, create, enable, rotate, delete, the one-time secret | `GET /api/schedules?kind=trigger`, `GET`, `POST /api/event-sources`, `PATCH`, `DELETE /api/event-sources/{id}`, `POST .../rotate` (docs/api.md §19.4, §20) |
 | `/targets` | Targets, lifecycle, exec console, leases (grant, extend, revoke, history) | `GET /api/targets`, `POST /api/targets/{name}/up\|down\|snapshot\|restore\|status`, `POST .../exec`, `WS .../sessions/{id}/ws`, `DELETE .../sessions/{id}`, `GET`, `POST .../leases`, `PATCH`, `DELETE .../leases/{agent}` (docs/api.md §17.7) |
 | `/hosts` | Host agents: status, capabilities, add with a one-time token, revoke | `GET`, `POST /api/hosts`, `DELETE /api/hosts/{name}` (new API, not in docs/api.md yet) |
 | `/events` | Event log with history | `GET /api/events?since=&kind=&project=&agent=`, events socket |

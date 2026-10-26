@@ -2,6 +2,7 @@
 
 import { XSS_DOCUMENT } from "../../lib/xss-payloads";
 import { seedSchedules } from "./schedules";
+import { seedEventSources, type EventSourceRow } from "./eventSources";
 import { seedTranscripts } from "./transcripts";
 import type {
   Agent,
@@ -69,6 +70,10 @@ export interface MockWorld {
   schedules: Schedule[];
   /** Schedule runs, oldest first. */
   scheduleRuns: ScheduleRun[];
+  /** Event sources (docs/api.md §20), without the hook fields. */
+  eventSources: EventSourceRow[];
+  /** The secret of each source by ID. The API shows it only at create and rotate. */
+  eventSourceSecrets: Record<string, string>;
   audit: AuditEntry[];
   /** The last `seq` handed out. */
   seq: number;
@@ -751,7 +756,7 @@ ${XSS_DOCUMENT}
   const sched = seedSchedules(now, agents);
 
   return {
-    schedules: sched.schedules, scheduleRuns: sched.runs,
+    schedules: sched.schedules, scheduleRuns: sched.runs, eventSources: seedEventSources(now), eventSourceSecrets: {},
     projects, repos, agents, sessions, transcripts: seedTranscripts(agents, sessions), events, columns: { terrarium: COLUMNS.map((c) => ({ ...c })), webshop: COLUMNS.map((c) => ({ ...c })) },
     cards, memories, links, pages, revisions, artifacts, artifactBodies, versions, subscriptions, quota, usage, holds: [], apiKeys, mail, targets, leases, hosts, hostTokens, audit, seq,
   };

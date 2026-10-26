@@ -189,8 +189,9 @@ fn setup_steps(kind: SourceKind, url: &str) -> Vec<String> {
             format!("Target URL: {url}"),
             "HTTP method: POST. POST content type: application/json.".into(),
             "Secret: the secret of this source (shown at create and at rotate only).".into(),
-            "Trigger on: custom events: Push, Pull request, and Commit status \
-             (Forgejo Actions sets a commit status for each job)."
+            "Trigger on: custom events: Push, Pull request, and the workflow \
+             run and workflow job events (Forgejo 17), or the action run \
+             events (Forgejo 12 to 16). Forgejo sends no commit status webhook."
                 .into(),
             "Use \"Test delivery\" to check it; the source shows it in last_seen.".into(),
         ],

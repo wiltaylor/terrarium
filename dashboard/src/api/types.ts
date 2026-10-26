@@ -341,6 +341,8 @@ export const EVENT_KINDS = [
   "harness",
   // docs/api.md §19: `{change, schedule, run?, status?}`.
   "schedule",
+  // docs/api.md §20: `{change, source, name, key, kind, enabled}`.
+  "event_source",
 ] as const;
 export type EventKind = (typeof EVENT_KINDS)[number];
 
@@ -1348,8 +1350,50 @@ export interface SessionGrant {
  * zone, default `UTC`). `interval`: a duration such as `15m`, `1h`, or
  * `1h30m`. `at`: once, at an RFC 3339 time.
  */
-export type ScheduleSpec = { kind: "cron"; expr: string; tz: string } | { kind: "interval"; every: string } | { kind: "at"; at: string };
+export type ScheduleSpec = { kind: "cron"; expr: string; tz: string } | { kind: "interval"; every: string } | { kind: "at"; at: string } | TriggerSpec;
 export type ScheduleSpecKind = ScheduleSpec["kind"];
+/** The specs of a time schedule; `on` is a trigger. */
+export type TimeSpec = Exclude<ScheduleSpec, TriggerSpec>;
+
+/** The compare of a `match` rule. `in` takes a list. */
+export type MatchOp = "eq" | "ne" | "glob" | "in";
+
+/** One `match` rule of a trigger (docs/api.md §19.4). */
+export interface MatchRule {
+  /** `project`, `kind`, `actor`, `summary`, or `data.<dotted path>`. */
+  path: string;
+  /** Default `eq`. */
+  op?: MatchOp;
+  /** A string for `eq`, `ne`, and `glob`; a list for `in`. A number compares as its JSON text. */
+  value: string | number | boolean | (string | number | boolean)[];
+}
+
+/** One run for each rendered `key` in `window` (`90s`, `10m`, `1h`; 1 s to 7 d). */
+export interface TriggerDedupe {
+  key: string;
+  window: string;
+}
+
+/** After `after` matches in a row for one key, mail `to` (default `operator`) once instead of the action. */
+export interface TriggerEscalate {
+  key: string;
+  after: number;
+  /** Kind globs whose events with the same key set the count to zero. */
+  reset_on?: string[];
+  to?: string;
+}
+
+/** A trigger: an event of the log that matches starts a run (docs/api.md §19.4). */
+export interface TriggerSpec {
+  kind: "on";
+  /** Kind globs: `*` any text, `?` one character. */
+  kinds: string[];
+  match?: MatchRule[];
+  dedupe?: TriggerDedupe;
+  escalate?: TriggerEscalate;
+  /** 1-600, default 30. */
+  max_per_hour?: number;
+}
 
 export type AgentVerb = "start" | "stop" | "restart";
 
@@ -1361,8 +1405,18 @@ export type ScheduleAction =
   /** `timeout_secs`: default 300, at most 3600. */
   | { type: "exec"; target: string; cmd: string[]; cwd?: string; timeout_secs?: number }
   | { type: "agent"; agent: string; verb: AgentVerb }
-  | { type: "probe"; subscription: string };
+  | { type: "probe"; subscription: string }
+  /**
+   * A card on the board of the schedule's project. `open`: a new card with
+   * the label `trigger:<key>` in `column` (default `backlog`), or a comment
+   * on the open card with that label. `close`: move it to `column`
+   * (default `done`). A global schedule cannot have it.
+   */
+  | { type: "card"; op: CardOp; key: string; title?: string; body?: string; column?: string };
 export type ScheduleActionType = ScheduleAction["type"];
+export type CardOp = "open" | "close";
+/** The actions a trigger may run. `turn`, `agent`, and `probe` on a trigger are `422`. */
+export type TriggerActionType = Extract<ScheduleActionType, "mail" | "exec" | "card">;
 
 export type CatchUp = "skip" | "once";
 
@@ -1421,9 +1475,19 @@ export type SchedulePatch = Partial<Omit<NewSchedule, "project">>;
 export interface ScheduleQuery {
   project?: string;
   enabled?: boolean;
+  /** `time`: only the time schedules; `trigger`: only the triggers (spec `on`). */
+  kind?: "time" | "trigger";
 }
 
-export type RunTrigger = "cron" | "manual" | "catch_up";
+/** `cron` is the timer (each time spec); `event` is a trigger run. */
+export type RunTrigger = "cron" | "manual" | "catch_up" | "event";
+
+/** The event that started a trigger run, while the log has it. */
+export interface RunEvent {
+  seq: number;
+  kind: string;
+  summary: string;
+}
 
 /** `GET /api/schedules/{id}/runs`: newest first. */
 export interface ScheduleRun {
@@ -1443,8 +1507,12 @@ export interface ScheduleRun {
    */
   output: unknown;
   error: string | null;
-  /** Who triggered the run: the `run_as`, or the caller of a run now. */
+  /** Who triggered the run: the `run_as`, the caller of a run now, or the actor of the event of a trigger run. */
   actor?: string;
+  /** The `seq` of the event that started a trigger run; null for the other runs. */
+  event_seq?: number | null;
+  /** That event, while the log has it. Absent for the other runs. */
+  event?: RunEvent;
 }
 
 export type ScheduleChange = "created" | "updated" | "deleted" | "enabled" | "disabled" | "run_started" | "run_finished";
@@ -1461,4 +1529,55 @@ export interface ScheduleEventData {
   run?: string;
   status?: RunStatus | "running";
   trigger?: RunTrigger;
+}
+
+// ----- Event sources (docs/api.md §20) -----
+
+/** The sender of a source: it sets the signature check and how a body becomes an event. */
+export type EventSourceKind = "github" | "forgejo" | "generic";
+
+/** One webhook sender. The secret is never in it, except in the answer of a create or a rotate. */
+export interface EventSource {
+  id: string;
+  name: string;
+  /** Null: a global source (sysadmin only); its events have no project. */
+  project: string | null;
+  kind: EventSourceKind;
+  enabled: boolean;
+  created_by: string;
+  /** The last request with a good signature. */
+  last_seen: string | null;
+  /** The time and the reason of the last failed request. A good request clears it. */
+  last_error: string | null;
+  /** The events that the source added to the log. */
+  received: number;
+  created_at: string;
+  updated_at: string;
+  /** `/hooks/{project}/{name}`; `_` is the project part of a global source. */
+  hook_path: string;
+  /** The URL to give the sender. Null when the ingest listener is off. */
+  hook_url: string | null;
+  /** Why `hook_url` may be wrong or is null. */
+  hook_note?: string;
+  /** Short setup steps for the sender: the content type, the secret, and which events to select. */
+  setup: string[];
+}
+
+/** The answer of `POST /api/event-sources` and `POST .../rotate`: the source and its secret, shown this one time. */
+export interface EventSourceWithSecret extends EventSource {
+  secret: string;
+}
+
+/** `POST /api/event-sources`. No `project` (or null): a global source. */
+export interface NewEventSource {
+  name: string;
+  kind: EventSourceKind;
+  project?: string | null;
+  enabled?: boolean;
+}
+
+/** `PATCH /api/event-sources/{id}`. A new name changes the hook URL. */
+export interface EventSourcePatch {
+  name?: string;
+  enabled?: boolean;
 }

@@ -71,6 +71,10 @@ import type {
   Revision,
   Role,
   NewSchedule,
+  EventSource,
+  EventSourcePatch,
+  EventSourceWithSecret,
+  NewEventSource,
   Schedule,
   SchedulePatch,
   ScheduleQuery,
@@ -348,6 +352,22 @@ export interface Api {
     runs(id: string, q?: PageQuery): Promise<Page<ScheduleRun>>;
   };
 
+  /**
+   * docs/api.md §20. Rights: the operator always; a project_admin within its
+   * project; a member reads only; a global source needs a sysadmin. The
+   * secret is only in the answers of `create` and `rotate`.
+   */
+  eventSources: {
+    /** `GET /api/event-sources?project=`: with `project`, the project's sources and the global ones when the caller may read them. */
+    list(q?: { project?: string }): Promise<EventSource[]>;
+    get(id: string): Promise<EventSource>;
+    create(s: NewEventSource): Promise<EventSourceWithSecret>;
+    update(id: string, patch: EventSourcePatch): Promise<EventSource>;
+    /** A new secret; the old one stops at once. */
+    rotate(id: string): Promise<EventSourceWithSecret>;
+    remove(id: string): Promise<void>;
+  };
+
   /** docs/host-protocol.md, the daemon's `api/hosts.rs`. */
   hosts: {
     list(): Promise<Host[]>;
@@ -623,6 +643,15 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       enable: (id) => post(`/api/schedules/${seg(id)}/enable`),
       disable: (id) => post(`/api/schedules/${seg(id)}/disable`),
       runs: (id, q = {}) => page(`/api/schedules/${seg(id)}/runs`, { ...q }),
+    },
+
+    eventSources: {
+      list: (q = {}) => get("/api/event-sources", { ...q }),
+      get: (id) => get(`/api/event-sources/${seg(id)}`),
+      create: (body) => post("/api/event-sources", body),
+      update: (id, body) => patch(`/api/event-sources/${seg(id)}`, body),
+      rotate: (id) => post(`/api/event-sources/${seg(id)}/rotate`),
+      remove: (id) => del(`/api/event-sources/${seg(id)}`),
     },
 
     hosts: {

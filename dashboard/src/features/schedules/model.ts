@@ -7,10 +7,26 @@
 import type { AgentEvent, RunStatus, Schedule, ScheduleRun } from "../../api/types";
 import type { ScopeFilter } from "../../lib/target-scope";
 
-/** The view: one project (its schedules and the global ones), or every schedule (`null`). */
+/** The view: one project (its schedules and the global ones), or every schedule (`null`); and the tab. */
 export interface ScheduleView {
   project: string | null;
+  /** `time`: the time schedules; `trigger`: the triggers (spec `on`). Absent: both. */
+  kind?: ScheduleKind;
 }
+
+/** The two tabs of the page, and the `kind` of `GET /api/schedules`. */
+export type ScheduleKind = "time" | "trigger";
+export const SCHEDULE_TABS: readonly { id: ScheduleKind; label: string }[] = [
+  { id: "time", label: "Schedules" },
+  { id: "trigger", label: "Triggers" },
+];
+
+/** The tab of the URL: `?tab=triggers` is the triggers; anything else is the time schedules. */
+export const tabOf = (tab: string | undefined): ScheduleKind => (tab === "triggers" ? "trigger" : "time");
+/** The `tab` query value of a tab; the time tab has none. */
+export const tabParam = (k: ScheduleKind): string | undefined => (k === "trigger" ? "triggers" : undefined);
+
+export const scheduleKind = (s: Pick<Schedule, "spec">): ScheduleKind => (s.spec.kind === "on" ? "trigger" : "time");
 
 export interface ScheduleListState {
   items: Schedule[];
@@ -22,7 +38,8 @@ export const scheduleScope = (s: Pick<Schedule, "project">): "global" | "project
 export const scheduleScopeLabel = (s: Pick<Schedule, "project">): string => s.project ?? "global";
 
 /** Does the schedule belong in the view? */
-export const inView = (s: Pick<Schedule, "project">, v: ScheduleView): boolean => v.project === null || s.project === null || s.project === v.project;
+export const inView = (s: Pick<Schedule, "project" | "spec">, v: ScheduleView): boolean =>
+  (v.project === null || s.project === null || s.project === v.project) && (!v.kind || scheduleKind(s) === v.kind);
 
 /** The schedules that the scope filter of a project view keeps. */
 export function filterSchedules<T extends Pick<Schedule, "project">>(list: T[], filter: ScopeFilter): T[] {
@@ -179,6 +196,8 @@ export function failedRecently(list: Schedule[], now = Date.now(), hours = 24): 
   return list.filter((s) => s.last_run?.status === "failed" && Date.parse(s.last_run.at) >= since);
 }
 
-/** The page of a schedule, with its row open. */
-export const scheduleHref = (s: Pick<Schedule, "id" | "project">): string =>
-  s.project ? `/p/${encodeURIComponent(s.project)}/schedules?open=${encodeURIComponent(s.id)}` : `/schedules?open=${encodeURIComponent(s.id)}`;
+/** The page of a schedule, with its row open, on the tab of its kind. */
+export const scheduleHref = (s: Pick<Schedule, "id" | "project"> & Partial<Pick<Schedule, "spec">>): string => {
+  const tab = s.spec?.kind === "on" ? "&tab=triggers" : "";
+  return `${s.project ? `/p/${encodeURIComponent(s.project)}/schedules` : "/schedules"}?open=${encodeURIComponent(s.id)}${tab}`;
+};

@@ -67,6 +67,7 @@ import { fakeUlid, seed, type MockWorld, type UsageRow } from "./data";
 import { harnessUpdateKind } from "../../lib/harness-update";
 import { FakePty } from "./pty";
 import { createScheduleMock, type ScheduleCaller } from "./schedules";
+import { createEventSourceMock } from "./eventSources";
 import { createTranscriptStream, encodeTranscriptFrame } from "../sse";
 import { appendBlock, fakeReply, mockModel, titleOf, type Draft as BlockDraft } from "./transcripts";
 
@@ -111,7 +112,8 @@ export interface MockOptions {
   /**
    * Who calls the schedule endpoints (docs/api.md §19). Default the
    * operator, who may do everything. A member reads only; a project_admin
-   * writes in its project; a global schedule needs a sysadmin.
+   * writes in its project; a global schedule needs a sysadmin. The event
+   * sources (§20) use the same caller.
    */
   scheduleCaller?: ScheduleCaller;
   /** How long a schedule run takes before `run_finished`. Default 1500 ms with latency, else the step. */
@@ -2606,6 +2608,9 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
       runMs: opts.scheduleRunMs ?? (latency > 0 ? 1500 : step),
       caller: opts.scheduleCaller,
     }),
+
+    // The same caller as the schedules: the rights of §20 follow those of §19.
+    eventSources: createEventSourceMock({ w, iso, ulid, reply, fail, emit, audit, caller: opts.scheduleCaller }),
 
     hosts: {
       list: () => reply(() => w.hosts),

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createMockApi } from "../../api/mock";
 import type { AgentEvent, Schedule, ScheduleRun } from "../../api/types";
-import { applyRunAnswer, applyScheduleEvent, failedRecently, filterSchedules, groupSchedules, readScheduleEvent, runOutputText, runSeconds, scheduleHref, touchesRuns, type ScheduleListState } from "./model";
+import { applyRunAnswer, applyScheduleEvent, failedRecently, filterSchedules, groupSchedules, inView, readScheduleEvent, runOutputText, runSeconds, scheduleHref, tabOf, tabParam, touchesRuns, type ScheduleListState } from "./model";
 import { createRunHistory } from "./history";
 
 const mock = () => createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 0 });
@@ -141,6 +141,7 @@ describe("Home attention: failed runs in the last 24 h", () => {
   it("links to the row", () => {
     expect(scheduleHref({ id: "S1", project: "terrarium" })).toBe("/p/terrarium/schedules?open=S1");
     expect(scheduleHref({ id: "S1", project: null })).toBe("/schedules?open=S1");
+    expect(scheduleHref({ id: "T1", project: "terrarium", spec: { kind: "on", kinds: ["ci.run.failed"] } })).toBe("/p/terrarium/schedules?open=T1&tab=triggers");
   });
 });
 
@@ -214,5 +215,24 @@ describe("run history", () => {
   it("measures a run", () => {
     expect(runSeconds(run("r", "a"))).toBe(5);
     expect(runSeconds(run("r", "a", { finished_at: null }))).toBeNull();
+  });
+});
+
+describe("the tabs", () => {
+  it("read and write ?tab=triggers; anything else is the time schedules", () => {
+    expect(tabOf("triggers")).toBe("trigger");
+    expect(tabOf(undefined)).toBe("time");
+    expect(tabOf("bogus")).toBe("time");
+    expect(tabParam("trigger")).toBe("triggers");
+    expect(tabParam("time")).toBeUndefined();
+  });
+
+  it("keep a trigger out of the time view, and a time schedule out of the trigger view", () => {
+    const trig = { project: "p", spec: { kind: "on" as const, kinds: ["git.push"] } };
+    const cron = { project: "p", spec: { kind: "cron" as const, expr: "* * * * *", tz: "UTC" } };
+    expect(inView(trig, { project: "p", kind: "trigger" })).toBe(true);
+    expect(inView(trig, { project: "p", kind: "time" })).toBe(false);
+    expect(inView(cron, { project: null, kind: "trigger" })).toBe(false);
+    expect(inView(cron, { project: null })).toBe(true);
   });
 });

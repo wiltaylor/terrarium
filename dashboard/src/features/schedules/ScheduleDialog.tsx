@@ -1,13 +1,17 @@
-// The create and edit dialog of a schedule (docs/api.md §19). The state is
-// in ./form; this file only draws it. A `403` and a `422` show inline: the
-// `422` under the field that the daemon names.
+// The create and edit dialog of a schedule or a trigger (docs/api.md §19,
+// §19.4). The state is in ./form; this file only draws it. A `403` and a
+// `422` show inline: the `422` under the field that the daemon names. A
+// trigger has the spec `on` (./TriggerFields) and runs only mail, exec, or
+// card.
 
-import { createMemo, createResource, For, Index, Show, type JSX } from "solid-js";
+import { createMemo, createResource, For, Index, Show } from "solid-js";
 import { ErrorBanner, Modal } from "../../components/ui";
-import type { AgentVerb, CatchUp, Schedule, ScheduleActionType, ScheduleSpecKind } from "../../api/types";
+import type { AgentVerb, CardOp, CatchUp, Schedule, ScheduleActionType, ScheduleSpecKind } from "../../api/types";
 import { agents, api, projects, subscriptions } from "../../stores";
 import { everyWords, parseEvery, utcText, WEEKDAYS } from "../../lib/schedule";
-import { ACTION_TYPES, agentOptions, CRON_PRESETS, createScheduleDialog, GLOBAL, recipientOptions, targetOptions, timeZones, type CronPreset, type FormKey, type ScheduleOutcome } from "./form";
+import { actionTypesFor, agentOptions, CRON_PRESETS, createScheduleDialog, GLOBAL, targetOptions, timeZones, type CronPreset, type ScheduleOutcome } from "./form";
+import { fieldKit } from "./fields";
+import { TemplateHelp, TriggerSpecFields } from "./TriggerFields";
 
 const SPEC_KINDS: readonly { id: ScheduleSpecKind; label: string }[] = [
   { id: "cron", label: "Cron" },
@@ -23,10 +27,12 @@ const localZone = (() => {
   }
 })();
 
-export function ScheduleDialog(props: { project: string | null; schedule?: Schedule; onClose: () => void; onSaved: (s: Schedule) => void }) {
+export function ScheduleDialog(props: { project: string | null; schedule?: Schedule; trigger?: boolean; onClose: () => void; onSaved: (s: Schedule) => void }) {
   // The dialog reads its props once: a new schedule needs a new dialog.
-  const dlg = createScheduleDialog(api, { project: props.project, schedule: props.schedule });
+  const dlg = createScheduleDialog(api, { project: props.project, schedule: props.schedule, init: !props.schedule && props.trigger ? { specKind: "on" } : undefined });
   const f = dlg.form;
+  const trigger = dlg.isTrigger();
+  const noun = trigger ? "trigger" : "schedule";
   const [targets] = createResource(() => api.targets.list().catch(() => []));
   const zones = timeZones(localZone);
   const preview = createMemo(() => (f().specKind === "cron" ? dlg.preview(Date.now()) : null));
@@ -45,26 +51,10 @@ export function ScheduleDialog(props: { project: string | null; schedule?: Sched
     if (s) props.onSaved(s);
   };
 
-  /** A labelled field with the message of a refusal under it. */
-  // The hint and the error stay out of the <label>, so the input's name is the label alone.
-  const field = (key: FormKey, label: string, input: JSX.Element, hint?: () => JSX.Element) => (
-    <div class="field" classList={{ "field-bad": !!dlg.fieldError(key) }}>
-      <label>
-        {label}
-        {input}
-      </label>
-      <Show when={hint?.()}>{(h) => <span class="small muted">{h()}</span>}</Show>
-      <Show when={dlg.fieldError(key)}>
-        {(m) => (
-          <span class="field-error small" role="alert" aria-label={`Error in ${label}`}>
-            {m()}
-          </span>
-        )}
-      </Show>
-    </div>
-  );
-  const text = (key: FormKey & keyof ReturnType<typeof f>, label: string, placeholder = "", hint?: () => JSX.Element) =>
-    field(key, label, <input value={String(f()[key] ?? "")} placeholder={placeholder} onInput={(e) => dlg.set(key, e.currentTarget.value as never)} />, hint);
+  const kit = fieldKit(dlg);
+  const { field, text, recipient } = kit;
+  /** The first agent of the scope's project, for the preset. */
+  const firstAgent = () => agentOptions(agents.state.agents, f().scope)[0]?.value;
 
   const agentPicker = () =>
     field(
@@ -85,14 +75,22 @@ export function ScheduleDialog(props: { project: string | null; schedule?: Sched
     );
 
   return (
-    <Modal title={props.schedule ? `Edit schedule ${props.schedule.name}` : "New schedule"} onClose={() => props.onClose()}>
-      <form class="stack" onSubmit={submit} aria-label={props.schedule ? "Edit schedule" : "New schedule"}>
+    <Modal title={props.schedule ? `Edit ${noun} ${props.schedule.name}` : `New ${noun}`} onClose={() => props.onClose()}>
+      <form class="stack" onSubmit={submit} aria-label={props.schedule ? `Edit ${noun}` : `New ${noun}`}>
+        <Show when={trigger}>
+          <div class="row small" style={{ gap: "8px", "flex-wrap": "wrap" }}>
+            <button type="button" class="small" onClick={() => dlg.ciPreset(firstAgent())} title="Kinds ci.run.failed on main; dedupe per repo in 10m; escalate to the operator after 3 in a row; mail an agent">
+              Preset: CI failure → mail an agent
+            </button>
+            <span class="muted">Fills the form; change any field before you save.</span>
+          </div>
+        </Show>
         <div class="form-grid">
-          {text("name", "Name", "standup")}
+          {text("name", "Name", trigger ? "ci-failed" : "standup")}
           {field(
             "scope",
             "Scope",
-            <select aria-label="Scope" value={f().scope} onChange={(e) => dlg.set("scope", e.currentTarget.value)} required disabled={!!props.schedule} title={props.schedule ? "The scope of a schedule does not change" : undefined}>
+            <select aria-label="Scope" value={f().scope} onChange={(e) => dlg.set("scope", e.currentTarget.value)} required disabled={!!props.schedule} title={props.schedule ? `The scope of a ${noun} does not change` : undefined}>
               <option value="" disabled selected={!f().scope}>
                 Pick a project, or global
               </option>
@@ -104,24 +102,29 @@ export function ScheduleDialog(props: { project: string | null; schedule?: Sched
                 )}
               </For>
               <option value={GLOBAL} selected={f().scope === GLOBAL}>
-                Global (needs sysadmin)
+                {trigger ? "Global: sees the events of every project (needs sysadmin)" : "Global (needs sysadmin)"}
               </option>
             </select>,
           )}
-          {field(
-            "specKind",
-            "When",
-            <select aria-label="When" value={f().specKind} onChange={(e) => dlg.set("specKind", e.currentTarget.value as ScheduleSpecKind)}>
-              <For each={SPEC_KINDS}>
-                {(k) => (
-                  <option value={k.id} selected={k.id === f().specKind}>
-                    {k.label}
-                  </option>
-                )}
-              </For>
-            </select>,
-          )}
+          <Show when={!trigger}>
+            {field(
+              "specKind",
+              "When",
+              <select aria-label="When" value={f().specKind} onChange={(e) => dlg.set("specKind", e.currentTarget.value as ScheduleSpecKind)}>
+                <For each={SPEC_KINDS}>
+                  {(k) => (
+                    <option value={k.id} selected={k.id === f().specKind}>
+                      {k.label}
+                    </option>
+                  )}
+                </For>
+              </select>,
+            )}
+          </Show>
         </div>
+        <Show when={trigger}>
+          <TriggerSpecFields dlg={dlg} kit={kit} />
+        </Show>
 
         <Show when={f().specKind === "cron"}>
           <fieldset class="stack cron-helper" aria-label="Cron helper">
@@ -213,7 +216,7 @@ export function ScheduleDialog(props: { project: string | null; schedule?: Sched
             "actionType",
             "Action",
             <select aria-label="Action" value={f().actionType} onChange={(e) => dlg.set("actionType", e.currentTarget.value as ScheduleActionType)}>
-              <For each={ACTION_TYPES}>
+              <For each={actionTypesFor(f().specKind)}>
                 {(a) => (
                   <option value={a.id} selected={a.id === f().actionType}>
                     {a.label}
@@ -223,29 +226,25 @@ export function ScheduleDialog(props: { project: string | null; schedule?: Sched
             </select>,
           )}
           <Show when={f().actionType === "mail"}>
+            {recipient("mailTo", "To", projects.projects(), agents.state.agents, "Pick a recipient")}
+            {text("mailSubject", "Subject", trigger ? "CI failed: {{event.data.repo}}" : "Standup")}
+          </Show>
+          <Show when={f().actionType === "card"}>
             {field(
-              "mailTo",
-              "To",
-              <select aria-label="To" value={f().mailTo} onChange={(e) => dlg.set("mailTo", e.currentTarget.value)}>
-                <option value="" disabled selected={!f().mailTo}>
-                  Pick a recipient
+              "cardOp",
+              "Card",
+              <select aria-label="Card" value={f().cardOp} onChange={(e) => dlg.set("cardOp", e.currentTarget.value as CardOp)}>
+                <option value="open" selected={f().cardOp === "open"}>
+                  open (or comment on the open card)
                 </option>
-                <For each={recipientOptions(projects.projects(), agents.state.agents, f().scope)}>
-                  {(g) => (
-                    <optgroup label={g.label}>
-                      <For each={g.options}>
-                        {(o) => (
-                          <option value={o.value} selected={o.value === f().mailTo}>
-                            {o.label}
-                          </option>
-                        )}
-                      </For>
-                    </optgroup>
-                  )}
-                </For>
+                <option value="close" selected={f().cardOp === "close"}>
+                  close (move the open card)
+                </option>
               </select>,
             )}
-            {text("mailSubject", "Subject", "Standup")}
+            {text("cardKey", "Key", trigger ? "ci:{{event.data.repo}}" : "weekly-review", () => "One open card per key; the card has the label trigger:<key>.")}
+            <Show when={f().cardOp === "open"}>{text("cardTitle", "Title", trigger ? "CI failed on {{event.data.repo}}" : "Weekly review")}</Show>
+            {text("cardColumn", "Column", f().cardOp === "open" ? "backlog" : "done", () => (f().cardOp === "open" ? "Empty: backlog" : "Empty: done"))}
           </Show>
           <Show when={f().actionType === "turn" || f().actionType === "agent"}>{agentPicker()}</Show>
           <Show when={f().actionType === "agent"}>
@@ -307,6 +306,12 @@ export function ScheduleDialog(props: { project: string | null; schedule?: Sched
         <Show when={f().actionType === "mail"}>
           {field("mailBody", "Body", <textarea rows={3} value={f().mailBody} onInput={(e) => dlg.set("mailBody", e.currentTarget.value)} />)}
         </Show>
+        <Show when={f().actionType === "card"}>
+          {field("cardBody", f().cardOp === "open" ? "Body (a comment when the card is open)" : "Comment", <textarea rows={3} value={f().cardBody} onInput={(e) => dlg.set("cardBody", e.currentTarget.value)} />)}
+        </Show>
+        <Show when={trigger}>
+          <TemplateHelp />
+        </Show>
         <Show when={f().actionType === "turn"}>
           {field("text", "Text of the turn", <textarea rows={3} value={f().text} onInput={(e) => dlg.set("text", e.currentTarget.value)} />)}
           <label class="row small">
@@ -317,13 +322,13 @@ export function ScheduleDialog(props: { project: string | null; schedule?: Sched
 
         <div class="row" style={{ "flex-wrap": "wrap", gap: "12px" }}>
           <label class="row small">
-            Missed runs
+            {trigger ? "Events while the daemon was down" : "Missed runs"}
             <select aria-label="Catch up" value={f().catchUp} onChange={(e) => dlg.set("catchUp", e.currentTarget.value as CatchUp)}>
               <option value="skip" selected={f().catchUp === "skip"}>
                 skip them
               </option>
               <option value="once" selected={f().catchUp === "once"}>
-                run once to catch up
+                {trigger ? "run each of them" : "run once to catch up"}
               </option>
             </select>
           </label>
@@ -338,9 +343,9 @@ export function ScheduleDialog(props: { project: string | null; schedule?: Sched
           {(o) => (
             <div class="error-banner" role="alert" aria-label="Refused">
               <div class="stack" style={{ gap: "2px" }}>
-                <strong>Refused: you may not write a {o().scope === GLOBAL ? "global schedule" : `schedule of project ${o().scope}`}.</strong>
+                <strong>Refused: you may not write a {o().scope === GLOBAL ? `global ${noun}` : `${noun} of project ${o().scope}`}.</strong>
                 <span class="small">{o().message}</span>
-                <span class="small muted">{o().scope === GLOBAL ? "A global schedule needs the sysadmin role. Choose a project." : `It needs project_admin of ${o().scope}; a member may only read.`}</span>
+                <span class="small muted">{o().scope === GLOBAL ? `A global ${noun} needs the sysadmin role. Choose a project.` : `It needs project_admin of ${o().scope}; a member may only read.`}</span>
               </div>
             </div>
           )}
