@@ -330,6 +330,31 @@ mod tests {
     }
 
     #[test]
+    fn zai_key_gets_the_glm_provider_and_model() {
+        let f = &crate::PI_PINNED;
+        let zai = |plan: &str| SubscriptionDef {
+            provider: "zai".into(),
+            plan: Some(plan.into()),
+            ..codex_sub()
+        };
+        assert_eq!(
+            model_args(f, &test_agent(None), Some(&zai("coding"))),
+            ["--provider", "zai", "--model", "glm-5.3-flash"]
+        );
+        assert_eq!(
+            model_args(f, &test_agent(None), Some(&zai("api"))),
+            ["--provider", "zai-api", "--model", "glm-5.3-flash"]
+        );
+        // The agent's model overrides the default; a `zai/` prefix goes.
+        assert_eq!(
+            model_args(f, &test_agent(Some("zai/glm-5.3")), Some(&zai("coding"))),
+            ["--provider", "zai", "--model", "glm-5.3"]
+        );
+        assert_eq!(crate::required_env(&zai("coding")), Some("ZAI_API_KEY"));
+        assert_eq!(crate::start_refusal(&zai("coding"), None), None);
+    }
+
+    #[test]
     fn subscription_and_model_use_the_agent_model() {
         let f = &crate::PI_PINNED;
         assert_eq!(

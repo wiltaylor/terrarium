@@ -11,7 +11,8 @@ import { ago, humanize, timeUntil } from "../../lib/format";
 import { api, subscriptions } from "../../stores";
 import { AddSubscriptionWizard } from "./AddSubscriptionWizard";
 import { HarnessVersions } from "./HarnessVersions";
-import { reloginFor, type WizardPath, type WizardSetup } from "./wizard";
+import { reloginFor, wizardFromQuery, type WizardPath, type WizardSetup } from "./wizard";
+import { useSearchParams } from "@solidjs/router";
 
 /** The probe chip: `ok` with the last success, `failed` with why, or local only. */
 export function probeChip(s: Subscription, now = Date.now()): { cls: string; text: string; title?: string } {
@@ -32,7 +33,13 @@ export default function SubscriptionsPage() {
   const [notice, setNotice] = createSignal<string | null>(null);
   const [busy, setBusy] = createSignal<string | null>(null);
 
-  onMount(() => void subscriptions.detect());
+  const [params, setParams] = useSearchParams<{ add?: string }>();
+  onMount(() => {
+    void subscriptions.detect();
+    // `?add=api_key` from the agent form: open the wizard at that step.
+    const w = wizardFromQuery(params.add);
+    if (w) setWizard(w);
+  });
 
   const act = async (name: string, fn: () => Promise<string | void>) => {
     setBusy(name);
@@ -205,6 +212,7 @@ export default function SubscriptionsPage() {
             setup={w().setup}
             onClose={() => {
               setWizard(null);
+              if (params.add) setParams({ add: undefined });
               void subscriptions.refresh();
             }}
           />

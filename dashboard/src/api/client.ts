@@ -59,6 +59,7 @@ import type {
   NewMessage,
   NewProject,
   NewRepo,
+  ModelList,
   NewSubscription,
   NewVersion,
   PageStatus,
@@ -257,6 +258,8 @@ export interface Api {
     remove(name: string): Promise<void>;
     /** Samples, oldest first. `since` defaults to 24 hours ago. */
     quota(name: string, q?: { since?: string; window?: string; limit?: number }): Promise<QuotaSample[]>;
+    /** The models the subscription can use. Cached for 6 h by the daemon; `refresh` reads the list again. */
+    models(name: string, q?: { refresh?: boolean }): Promise<ModelList>;
     /** A failed probe is still `200`, with `probe_status: failed`. */
     probe(name: string): Promise<ProbeOutcome>;
     verify(name: string): Promise<VerifyResult>;
@@ -560,6 +563,7 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       create: (def) => post("/api/subscriptions", def),
       remove: (name) => del(sub(name)),
       quota: (name, q = {}) => get(`${sub(name)}/quota`, { ...q }),
+      models: (name, q = {}) => get(`${sub(name)}/models`, q.refresh ? { refresh: true } : {}),
       probe: (name) => post(`${sub(name)}/probe`),
       verify: (name) => post(`${sub(name)}/verify`),
       logout: (name) => post(`${sub(name)}/logout`),

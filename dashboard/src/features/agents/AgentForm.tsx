@@ -5,6 +5,8 @@ import { ErrorBanner, Modal } from "../../components/ui";
 import { GRANTABLE_ROLES, HARNESSES, RESTART_POLICIES, type Agent, type Harness, type RestartPolicy, type Role } from "../../api/types";
 import { agents, api, projects, subscriptions } from "../../stores";
 import { agentToForm, emptyAgentForm, formToDef, formToPatch, validateAgentForm, type AgentFormValues } from "./form";
+import { reconcileSubscription } from "./subscription";
+import { defaultModelHint, ModelField, SubscriptionSelect } from "./SubscriptionFields";
 
 export function AgentForm(props: { agent?: Agent; project?: string | null; onClose: () => void; onSaved: (a: Agent) => void }) {
   const editing = () => !!props.agent;
@@ -17,6 +19,13 @@ export function AgentForm(props: { agent?: Agent; project?: string | null; onClo
     (p) => api.projects.targets(p).catch(() => []),
   );
   const problems = () => validateAgentForm(v());
+  const [subNote, setSubNote] = createSignal<string | null>(null);
+  /** A new harness keeps the subscription only when it can spend it. */
+  const setHarness = (h: Harness) => {
+    const r = reconcileSubscription(v().subscription, h, subscriptions.list());
+    setV({ ...v(), harness: h, subscription: r.subscription });
+    setSubNote(r.note);
+  };
 
   const submit = async (e: Event) => {
     e.preventDefault();
@@ -65,20 +74,38 @@ export function AgentForm(props: { agent?: Agent; project?: string | null; onClo
           </label>
           <label>
             Harness
-            <select value={v().harness} onChange={(e) => set("harness", e.currentTarget.value as Harness)}>
-              <For each={HARNESSES}>{(h) => <option value={h}>{h}</option>}</For>
+            <select value={v().harness} onChange={(e) => setHarness(e.currentTarget.value as Harness)}>
+              <For each={HARNESSES}>
+                {(h) => (
+                  <option value={h} selected={h === v().harness}>
+                    {h}
+                  </option>
+                )}
+              </For>
             </select>
           </label>
           <label>
             Subscription
-            <input list="agent-subscriptions" value={v().subscription} onInput={(e) => set("subscription", e.currentTarget.value)} placeholder="anthropic-max" />
-            <datalist id="agent-subscriptions">
-              <For each={subscriptions.list()}>{(s) => <option value={s.name}>{s.plan}</option>}</For>
-            </datalist>
+            <SubscriptionSelect
+              harness={v().harness}
+              value={v().subscription}
+              onChange={(name) => {
+                setSubNote(null);
+                set("subscription", name);
+              }}
+            />
+            <Show when={subNote()}>
+              <span class="notice small" role="status">
+                {subNote()}
+              </span>
+            </Show>
           </label>
           <label>
             Model
-            <input value={v().model} onInput={(e) => set("model", e.currentTarget.value)} placeholder="anthropic/claude-opus-5-5 (pi, codex)" />
+            <ModelField harness={v().harness} subscription={v().subscription} value={v().model} onChange={(m) => set("model", m)} />
+            <Show when={!v().model.trim() && defaultModelHint(v().harness, v().subscription)}>
+              {(hint) => <span class="muted small">{hint()}</span>}
+            </Show>
           </label>
           <label>
             Prompt template
@@ -94,7 +121,7 @@ export function AgentForm(props: { agent?: Agent; project?: string | null; onClo
 
         <Show
           when={!editing()}
-          fallback={<p class="muted small">Change roles in the Roles panel of the agent page. An emptied subscription, model, or prompt stays as it was: the daemon cannot clear them.</p>}
+          fallback={<p class="muted small">Change roles in the Roles panel of the agent page. An emptied model or prompt is cleared. A new subscription or model applies at the next start.</p>}
         >
           <fieldset class="row">
             <legend>Roles (above member)</legend>

@@ -935,6 +935,40 @@ async fn zai_key_is_a_claude_and_pi_subscription_with_no_probe() {
         )
         .await;
     assert_eq!(r.ok()["plan"], "coding");
+    // The model that each harness gets when the agent sets none: pi's
+    // built-in `zai` provider for the coding plan, the custom `zai-api`
+    // for the api plan, and Claude Code's mapped tier.
+    assert_eq!(
+        r.body["default_models"],
+        json!({"pi": "glm-5.3-flash", "claude": "glm-5.3"})
+    );
+    let list = td.get("/api/subscriptions").await;
+    let glm = list
+        .ok()
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "glm")
+        .unwrap();
+    assert_eq!(glm["default_models"]["pi"], "glm-5.3-flash");
+    // The agent page shows the subscription without a second request.
+    td.project("p").await;
+    let a = td
+        .agent("p", "est", json!({"harness": "pi", "subscription": "glm2"}))
+        .await;
+    let shown = td
+        .get(&format!("/api/agents/{}", a["id"].as_str().unwrap()))
+        .await;
+    assert_eq!(
+        shown.ok()["subscription_detail"],
+        json!({"name": "glm2", "provider": "zai", "plan": "coding", "login_status": "api_key",
+               "harnesses": ["claude", "pi"], "default_model": "glm-5.3-flash"})
+    );
+    let none = td.agent("p", "plain", json!({"harness": "pi"})).await;
+    let shown = td
+        .get(&format!("/api/agents/{}", none["id"].as_str().unwrap()))
+        .await;
+    assert!(shown.ok().get("subscription_detail").is_none());
     let sub = td
         .daemon
         .as_ref()
@@ -1411,4 +1445,119 @@ async fn live_probes_against_real_homes() {
             Err(e) => eprintln!("{probe}: {e}"),
         }
     }
+}
+
+#[tokio::test]
+async fn models_come_from_the_provider_then_pi_then_the_table() {
+    const ZAI_MODELS: &str = "https://api.z.ai/api/coding/paas/v4/models";
+    let env = boot(
+        |_| {},
+        |usage, bin| {
+            // pi lists the zai catalogue when the key var is set; it
+            // records the env it got, so the test can check that the key
+            // never reaches it.
+            let table = format!(
+                "{}/tests/fixtures/models/pi_list_zai.txt",
+                env!("CARGO_MANIFEST_DIR")
+            );
+            let seen = bin.join("pi-env");
+            usage.programs.insert(
+                HarnessId::Pi,
+                script(
+                    bin,
+                    "pi",
+                    &format!(
+                        "env >> '{}'\nif [ \"$2\" = --list-models ] && [ -n \"$ZAI_API_KEY\" ] && [ \"$3\" = zai ]; then cat '{table}'; fi",
+                        seen.display()
+                    ),
+                ),
+            );
+        },
+    )
+    .await;
+    let td = &env.td;
+    let secret = "zk-models-secret";
+    td.post(
+        "/api/subscriptions/glm/api-key",
+        json!({"provider": "zai", "key": secret}),
+    )
+    .await
+    .ok();
+    // (a) The provider's own list, with the stored key as a bearer token.
+    env.http
+        .set(ZAI_MODELS, 200, &fixture("models/zai_coding.json"));
+    let r = td.get("/api/subscriptions/glm/models").await;
+    let body = r.ok().clone();
+    assert_eq!(body["source"], "provider");
+    let ids: Vec<&str> = body["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["id"].as_str().unwrap())
+        .collect();
+    assert!(ids.contains(&"glm-5.3-flash"), "{ids:?}");
+    assert!(body["fetched_at"].is_string());
+    // Cached: a broken endpoint does not show until a refresh.
+    env.http.set(ZAI_MODELS, 500, "{}");
+    let calls = env.http.calls.lock().unwrap().len();
+    assert_eq!(
+        td.get("/api/subscriptions/glm/models").await.ok()["source"],
+        "provider"
+    );
+    assert_eq!(env.http.calls.lock().unwrap().len(), calls);
+    // (b) pi's catalogue, run with a placeholder key, never the key.
+    let r = td.get("/api/subscriptions/glm/models?refresh=true").await;
+    let body = r.ok().clone();
+    assert_eq!(body["source"], "pi", "{body}");
+    assert_eq!(
+        body["models"][0],
+        json!({"id": "glm-4.7", "context": 204_800})
+    );
+    assert!(body["notes"][0].as_str().unwrap().contains("status 500"));
+    let seen = std::fs::read_to_string(env.td.dir.path().join("bin/pi-env")).unwrap();
+    assert!(seen.contains("ZAI_API_KEY=terrarium-list-models"), "{seen}");
+    assert!(!seen.contains(secret));
+    assert!(!body.to_string().contains(secret));
+    // (c) The table: the `api` plan is pi's custom `zai-api`, which this
+    // pi does not list, and the endpoint fails.
+    td.post(
+        "/api/subscriptions/payg/api-key",
+        json!({"provider": "zai", "plan": "api", "key": secret}),
+    )
+    .await
+    .ok();
+    let r = td.get("/api/subscriptions/payg/models").await;
+    let body = r.ok().clone();
+    assert_eq!(body["source"], "fallback", "{body}");
+    assert_eq!(
+        body["models"],
+        json!([{"id": "glm-5.3"}, {"id": "glm-5.3-flash"}])
+    );
+    assert_eq!(body["notes"].as_array().unwrap().len(), 2, "{body}");
+    // Who may read it: not a member agent; a project_admin of a project
+    // with an agent on it.
+    td.project("p").await;
+    td.agent(
+        "p",
+        "worker",
+        json!({"harness": "pi", "subscription": "glm"}),
+    )
+    .await;
+    td.agent("p", "lead", json!({"roles": ["project_admin"]}))
+        .await;
+    td.get_as("p/worker", "/api/subscriptions/glm/models")
+        .await
+        .err(403, "forbidden");
+    assert_eq!(
+        td.get_as("p/lead", "/api/subscriptions/glm/models")
+            .await
+            .ok()["source"],
+        "pi"
+    );
+    td.get_as("p/lead", "/api/subscriptions/payg/models")
+        .await
+        .err(403, "forbidden");
+    td.get("/api/subscriptions/nope/models")
+        .await
+        .err(404, "not_found");
 }

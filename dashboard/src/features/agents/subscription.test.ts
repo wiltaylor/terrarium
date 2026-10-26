@@ -1,0 +1,117 @@
+import { describe, expect, it } from "vitest";
+import { createMockApi } from "../../api/mock";
+import type { ModelList, Subscription } from "../../api/types";
+import {
+  changeSubscription,
+  compatibleSubscriptions,
+  defaultModelFor,
+  modelOptions,
+  modelSelectValue,
+  OTHER_MODEL,
+  reconcileSubscription,
+  subscriptionLabel,
+  subscriptionOptions,
+} from "./subscription";
+
+const sub = (over: Partial<Subscription>): Subscription => ({
+  name: "s",
+  provider: "anthropic",
+  harnesses: ["claude"],
+  alert_at: 80,
+  source: "api",
+  login_status: "logged_in",
+  probe_status: "none",
+  created_at: "",
+  updated_at: "",
+  windows: [],
+  local_estimate_only: true,
+  has_api_key: false,
+  held_agents: 0,
+  default_models: {},
+  ...over,
+});
+
+const zai = sub({ name: "zai-key", provider: "zai", plan: "coding", harnesses: ["claude", "pi"], login_status: "api_key", has_api_key: true, default_models: { pi: "glm-5.3-flash", claude: "glm-5.3" } });
+const max = sub({ name: "anthropic-max", plan: "Max 20x" });
+const pro = sub({ name: "openai-pro", provider: "openai", plan: "pro", harnesses: ["codex"], login_status: "expired" });
+const all = [max, pro, zai];
+
+describe("subscription choice", () => {
+  it("lists only the subscriptions of the harness", () => {
+    expect(compatibleSubscriptions(all, "pi").map((s) => s.name)).toEqual(["zai-key"]);
+    expect(compatibleSubscriptions(all, "codex").map((s) => s.name)).toEqual(["openai-pro"]);
+    expect(compatibleSubscriptions(all, "claude").map((s) => s.name)).toEqual(["anthropic-max", "zai-key"]);
+    expect(compatibleSubscriptions(all, "copilot")).toEqual([]);
+  });
+
+  it("labels name, provider, plan, and status", () => {
+    expect(subscriptionLabel(zai)).toBe("zai-key — zai coding (API key)");
+    expect(subscriptionLabel(max)).toBe("anthropic-max — anthropic Max 20x (logged in)");
+    expect(subscriptionLabel(pro)).toBe("openai-pro — openai pro (expired)");
+    // A plan that says "API key" is not said twice.
+    expect(subscriptionLabel(sub({ name: "or", provider: "openrouter", plan: "API key", has_api_key: true }))).toBe("or — openrouter (API key)");
+  });
+
+  it("offers none and the compatible subscriptions, and keeps an incompatible current one visible", () => {
+    expect(subscriptionOptions(all, "pi", "").map((o) => o.value)).toEqual(["", "zai-key"]);
+    expect(subscriptionOptions(all, "codex", "").map((o) => o.value)).toEqual(["", "openai-pro"]);
+    const kept = subscriptionOptions(all, "pi", "anthropic-max");
+    expect(kept.at(-1)).toEqual({ value: "anthropic-max", label: "anthropic-max — anthropic Max 20x (logged in) — not for pi" });
+    expect(subscriptionOptions(all, "pi", "gone").at(-1)).toEqual({ value: "gone", label: "gone — not found" });
+  });
+
+  it("clears an incompatible choice on a harness change, with a note", () => {
+    expect(reconcileSubscription("zai-key", "pi", all)).toEqual({ subscription: "zai-key", note: null });
+    const r = reconcileSubscription("zai-key", "codex", all);
+    expect(r.subscription).toBe("");
+    expect(r.note).toContain("zai-key is not for codex");
+    expect(r.note).toContain("claude, pi");
+    // Not loaded yet, or no choice: nothing changes.
+    expect(reconcileSubscription("zai-key", "codex", [])).toEqual({ subscription: "zai-key", note: null });
+    expect(reconcileSubscription("", "codex", all)).toEqual({ subscription: "", note: null });
+  });
+
+  it("reads the default model of the harness", () => {
+    expect(defaultModelFor(zai, "pi")).toBe("glm-5.3-flash");
+    expect(defaultModelFor(zai, "claude")).toBe("glm-5.3");
+    expect(defaultModelFor(max, "claude")).toBeUndefined();
+    expect(defaultModelFor(undefined, "pi")).toBeUndefined();
+    // An older daemon sends no default_models.
+    expect(defaultModelFor({ ...zai, default_models: undefined }, "pi")).toBeNull();
+  });
+});
+
+describe("model choice", () => {
+  const list: ModelList = { source: "provider", fetched_at: "", models: [{ id: "glm-4.7", context: 204_800 }, { id: "glm-5.3" }, { id: "glm-5.3-flash", context: 1_000_000 }] };
+
+  it("puts the default first, then the list, then other", () => {
+    const o = modelOptions(list, "glm-5.3-flash");
+    expect(o[0]).toEqual({ value: "", label: "glm-5.3-flash (default)" });
+    expect(o.map((x) => x.value)).toEqual(["", "glm-4.7", "glm-5.3", OTHER_MODEL]);
+    expect(o[1]!.label).toBe("glm-4.7 · 204.8K context");
+    expect(modelOptions(list, "glm-9")[0]!.label).toBe("glm-9 (default, not in the list)");
+    expect(modelOptions(list, undefined)[0]).toEqual({ value: "", label: "the harness's default" });
+  });
+
+  it("selects the default, a listed model, or other", () => {
+    expect(modelSelectValue("", list, "glm-5.3-flash")).toBe("");
+    expect(modelSelectValue("glm-5.3-flash", list, "glm-5.3-flash")).toBe("");
+    expect(modelSelectValue("glm-5.3", list, "glm-5.3-flash")).toBe("glm-5.3");
+    expect(modelSelectValue("my-model", list, "glm-5.3-flash")).toBe(OTHER_MODEL);
+    expect(modelSelectValue("glm-5.3", undefined, undefined)).toBe(OTHER_MODEL);
+  });
+});
+
+describe("the agent page's subscription edit", () => {
+  it("patches the subscription, and null clears it", async () => {
+    const api = createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 0 });
+    const a = await api.agents.create({ name: "est", project: "terrarium", harness: "pi" });
+    const set = await changeSubscription(api, a.id, "zai-key");
+    expect(set.subscription).toBe("zai-key");
+    const shown = await api.agents.get(a.id);
+    expect(shown.subscription_detail).toEqual({ name: "zai-key", provider: "zai", plan: "coding", login_status: "api_key", harnesses: ["claude", "pi"], default_model: "glm-5.3-flash" });
+    const cleared = await changeSubscription(api, a.id, " ");
+    expect(cleared.subscription).toBeUndefined();
+    expect((await api.agents.get(a.id)).subscription_detail).toBeUndefined();
+  });
+});

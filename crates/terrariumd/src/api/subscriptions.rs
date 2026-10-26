@@ -8,6 +8,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use terrarium_core::HarnessId;
 use terrarium_core::config::SubscriptionDef;
 
@@ -34,6 +35,7 @@ pub fn routes() -> Router<Shared> {
         .route("/subscriptions/login/{id}/pty", get(login_pty))
         .route("/subscriptions/{name}", get(show).delete(remove))
         .route("/subscriptions/{name}/quota", get(quota))
+        .route("/subscriptions/{name}/models", get(models))
         .route("/subscriptions/{name}/probe", post(probe))
         .route("/subscriptions/{name}/verify", post(verify))
         .route("/subscriptions/{name}/logout", post(logout))
@@ -75,6 +77,14 @@ pub struct SubscriptionView {
     pub has_api_key: bool,
     /// Agents whose turns wait for a reset of this subscription.
     pub held_agents: usize,
+    /// The model each harness gets on this subscription when the agent
+    /// sets no `model`, by harness name. Only the harnesses where the
+    /// daemon picks the model: pi (the provider's default,
+    /// `terrarium_adapter_pi::flags::default_model`) and Claude Code on
+    /// Z.ai (`terrarium_core::zai::model_for`). No pi entry when pi
+    /// refuses the subscription. Empty (`{}`) when the harnesses keep their
+    /// own defaults; always present, so a client can tell an older daemon.
+    pub default_models: BTreeMap<String, String>,
 }
 
 fn view(
@@ -92,6 +102,7 @@ fn view(
         .filter(|h| h.cause == cause)
         .count();
     Ok(SubscriptionView {
+        default_models: crate::models::default_models(&sub),
         local_estimate_only: sub.probe.is_none(),
         has_api_key: sub.env_var.is_some() && login::stored_key(state_dir, &sub.name).is_some(),
         windows,
@@ -146,6 +157,49 @@ async fn show(
         }
     }
     Ok(Json(load(&state, name).await?))
+}
+
+/// The query of `GET /api/subscriptions/{name}/models`.
+#[derive(Debug, Default, Deserialize)]
+struct ModelsQuery {
+    /// Read the list again instead of the cached one.
+    #[serde(default)]
+    refresh: bool,
+}
+
+/// `GET /api/subscriptions/{name}/models`: the models the subscription can
+/// use, from the provider, from pi's catalogue, or from the default table
+/// (`crate::models`). Cached for six hours.
+async fn models(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(name): Path<String>,
+    ApiQuery(q): ApiQuery<ModelsQuery>,
+) -> ApiResult<Json<crate::models::ModelList>> {
+    let key = name.clone();
+    let (sub, projects) = state
+        .db
+        .read(move |c| {
+            let s = subs::get(c, &key)?;
+            let mut stmt =
+                c.prepare("SELECT DISTINCT project FROM agents WHERE subscription = ?1")?;
+            let projects = stmt
+                .query_map([&key], |r| r.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok((s, projects))
+        })
+        .await?;
+    policy::read_subscription_models(&actor, &projects)?;
+    let cfg = &state.usage.config;
+    let src = crate::models::Sources {
+        http: cfg.http.as_ref(),
+        state_dir: &state.state_dir,
+        pi: cfg.program(HarnessId::Pi),
+        pi_home: cfg.home(HarnessId::Pi),
+    };
+    Ok(Json(
+        crate::models::list(&state.usage.models, &src, &sub, q.refresh).await,
+    ))
 }
 
 /// `POST /api/subscriptions`: the fields of `subscriptions/<name>.toml`.

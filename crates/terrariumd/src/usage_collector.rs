@@ -140,6 +140,8 @@ pub fn parse_homes(v: &str) -> HashMap<HarnessId, PathBuf> {
 pub struct UsageRuntime {
     pub config: UsageConfig,
     pub logins: Logins,
+    /// The model lists of `GET /api/subscriptions/{name}/models`.
+    pub models: crate::models::ModelCache,
 }
 
 impl UsageRuntime {
@@ -147,6 +149,7 @@ impl UsageRuntime {
         Self {
             config,
             logins: Logins::default(),
+            models: crate::models::ModelCache::default(),
         }
     }
 }

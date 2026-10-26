@@ -1,0 +1,8 @@
+provider  model              context  max-out  thinking  images
+zai       glm-4.7            204.8K   131.1K   yes       no    
+zai       glm-5-turbo        200K     131.1K   yes       no    
+zai       glm-5.2            1M       131.1K   yes       no    
+zai       glm-5.2-highspeed  1M       131.1K   yes       no    
+zai       glm-5.3            1M       131.1K   yes       no    
+zai       glm-5.3-flash      1M       131.1K   yes       yes   
+zai       glm-5.3-highspeed  1M       131.1K   yes       no    

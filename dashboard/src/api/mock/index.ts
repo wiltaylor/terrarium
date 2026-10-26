@@ -22,6 +22,7 @@ import { createWsEventStream, type EventStream, type RawSocket, type SocketEvent
 import { MOCK_TOKEN, mockSocket, type MockSocketAuth } from "./ws";
 import { httpVerbs } from "./verbs";
 import { checkKeyPlan, isZai, zaiKeyDefaults, zaiPlan, ZAI_KEY_ENV } from "./zai";
+import { defaultModels, modelList, subscriptionDetail } from "./models";
 import { splitFrontMatter } from "../../lib/markdown";
 import type {
   Agent,
@@ -855,6 +856,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     local_estimate_only: !s.probe,
     has_api_key: !!s.env_var && !!w.apiKeys[s.name],
     held_agents: w.holds.filter((h) => h.cause === `quota:${s.name}`).length,
+    default_models: defaultModels(s),
   });
   const checkSubName = (name: string) => {
     if (!NAME_RE.test(name)) fail(422, "invalid", `\`${name}\` is not a valid name: lowercase letters, digits, - and _`);
@@ -1456,7 +1458,12 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
 
     agents: {
       list: (proj) => reply(() => w.agents.filter((a) => !proj || a.project === proj).sort((a, b) => a.id.localeCompare(b.id))),
-      get: (id) => reply(() => agent(id)),
+      get: (id) =>
+        reply(() => {
+          const a = agent(id);
+          const s = a.subscription ? w.subscriptions.find((x) => x.name === a.subscription) : undefined;
+          return s ? { ...a, subscription_detail: subscriptionDetail(s, a.harness) } : { ...a };
+        }),
       create: (def) =>
         reply(() => {
           project(def.project);
@@ -2224,6 +2231,11 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           sub(name);
           const since = q.since || new Date(now() - 24 * 3600_000).toISOString();
           return w.quota.filter((x) => x.subscription === name && x.at >= since && (!q.window || x.window === q.window)).slice(0, q.limit ?? 1000);
+        }),
+      models: (name) =>
+        reply(() => {
+          const s = sub(name);
+          return modelList(s, !!w.apiKeys[s.name], iso());
         }),
       probe: (name) =>
         reply(() => {

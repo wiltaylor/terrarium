@@ -76,18 +76,28 @@ export function formToDef(v: AgentFormValues): AgentDef {
 
 const sameList = (a: string[], b: string[]) => a.length === b.length && a.every((x, i) => x === b[i]);
 
+/** A changed optional field: the new value, `null` to clear it, or `undefined` for no change. */
+const changed = (now: string, before: string): string | null | undefined => {
+  const v = now.trim();
+  if (v === before) return undefined;
+  return v || null;
+};
+
 /**
  * Only the fields that changed. `PATCH` cannot change name, project, or
- * roles, and cannot clear subscription, model, or prompt (an absent field
- * means "no change"), so an emptied field is left out.
+ * roles. An emptied subscription, model, or prompt goes as `null`, which
+ * clears it (docs/api.md §6.1).
  */
 export function formToPatch(original: Agent, v: AgentFormValues): AgentPatch {
   const before = agentToForm(original);
   const patch: AgentPatch = {};
   if (v.harness !== before.harness) patch.harness = v.harness;
-  if (v.subscription.trim() && v.subscription.trim() !== before.subscription) patch.subscription = v.subscription.trim();
-  if (v.model.trim() && v.model.trim() !== before.model) patch.model = v.model.trim();
-  if (v.prompt.trim() && v.prompt.trim() !== before.prompt) patch.prompt = v.prompt.trim();
+  const subscription = changed(v.subscription, before.subscription);
+  const model = changed(v.model, before.model);
+  const prompt = changed(v.prompt, before.prompt);
+  if (subscription !== undefined) patch.subscription = subscription;
+  if (model !== undefined) patch.model = model;
+  if (prompt !== undefined) patch.prompt = prompt;
   if (v.restart !== before.restart) patch.restart = v.restart;
   const policy = { targets: v.targets, mail_to: parseList(v.mail_to), cross_project: parseList(v.cross_project) };
   const oldPolicy = { targets: before.targets, mail_to: parseList(before.mail_to), cross_project: parseList(before.cross_project) };

@@ -39,6 +39,13 @@ export type WizardAction =
 
 export const isLoginPath = (p: WizardPath): p is LoginKind => p !== "api_key" && p !== "define";
 
+/** The wizard that `?add=<path>` opens (the agent form links `?add=api_key`), or `null`. */
+export function wizardFromQuery(add: string | string[] | undefined): { path: WizardPath } | null {
+  const p = Array.isArray(add) ? add[0] : add;
+  const paths: WizardPath[] = ["api_key", "define", "claude", "codex", "copilot", "pi"];
+  return p && (paths as string[]).includes(p) ? { path: p as WizardPath } : null;
+}
+
 export function initialWizard(path?: WizardPath, setup: WizardSetup = {}): WizardState {
   return path ? { step: "setup", path, setup } : { step: "pick" };
 }

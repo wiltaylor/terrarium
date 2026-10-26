@@ -1301,6 +1301,40 @@ raw output, with the PKCE values and the codes replaced, is in
 - Rate limits of the usage endpoints at the 5-minute interval.
 - `pi auth print-bearer-token` as the credential for a probe.
 
+### Z.ai usage
+
+**Undocumented, verified live 2026-10-26** with the stored `zai-key` key
+(GLM Coding Plan, level `max`). One read-only `GET`; it answered `200` on
+the first request. The key was not printed or stored. The code is
+`crates/terrariumd/src/probes/zai.rs`; the sanitised answer is
+`crates/terrariumd/tests/fixtures/probes/zai_quota_limit.json`.
+
+| Fact | Value | Source |
+|---|---|---|
+| Request | `GET https://api.z.ai/api/monitor/usage/quota/limit` | verified |
+| Auth | `Authorization: Bearer <Z.ai API key>` (the key from `POST /api/subscriptions/{name}/api-key`). One plugin sends the bare key with no `Bearer`; Terrarium did not try that form. | verified; https://github.com/guyinwonder168/opencode-glm-quota |
+| Host | `api.z.ai`. Tools for mainland China use `open.bigmodel.cn`; not tried. | https://github.com/guyinwonder168/opencode-glm-quota |
+| Shape | `{code: 200, msg, success: true, data: {level, limits: [...]}}`. Each limit: `type`, `unit`, `number`, `percentage`; when the period has started, also `usage` (the limit), `currentValue` (used), `remaining`, `nextResetTime` (epoch ms). | verified |
+| Period | `number` x `unit`: unit 3 = hours, 5 = months, 6 = weeks. | verified (3, 5); https://github.com/getpaseo/paseo/issues/5057 (6), 2026-09-18 |
+| Windows on a Max plan | `TOKENS_LIMIT` unit 3 number 5: the 5-hour prompt window. It had only `percentage` (0) and no reset time, because no prompt ran in the window. `TIME_LIMIT` unit 5 number 1: the monthly MCP tool budget (4,000; `usageDetails` per tool: `search-prime`, `web-reader`, `zread`). No weekly window came back. | verified |
+| Other plans | Pro answers `CREDIT_LIMIT` entries (5-hour and weekly) in place of `TOKENS_LIMIT`. | https://github.com/getpaseo/paseo/issues/5057, 2026-09-18 |
+| Errors | An auth error can come back as `success: false` with a `code` and `msg`. | from tools, not verified |
+
+The probe maps each `TOKENS_LIMIT` or `CREDIT_LIMIT` entry to a window:
+`5h`, `7d`, `14d`, `monthly`, `<n>mo`, or `unit<u>x<n>` for an unknown
+unit. `used_pct` is `percentage`, and `resets_at` is `nextResetTime`. `raw`
+keeps the entry and `level`. A `TIME_LIMIT` entry is not a window: a used
+up tool budget does not stop chat, and the quota policy would hold the
+agents. The probe keeps it in the `raw` of the first window, under
+`other_limits`. An answer with `success: false` fails the probe with its
+`code` and `msg`; `code` 401 counts as an HTTP 401 (the login shows as
+expired). A failed probe sets `probe_status = failed`; local accounting
+continues.
+
+A Z.ai subscription with plan `coding` (or no plan) and no `probe` gets
+`zai-usage` when the row is read, so existing rows probe with no
+migration. The `api` plan (pay as you go) gets no probe.
+
 ### Z.ai (GLM): from docs, not verified live
 
 Read on 2026-10-26. No Z.ai key was available, so every fact below is
@@ -1322,7 +1356,7 @@ The code is `crates/terrarium-core/src/zai.rs`; the API is docs/api.md
 | Key header | `Authorization: Bearer <key>` | https://docs.z.ai/guides/overview/quick-start |
 | Where to get a key | `https://z.ai/manage-apikey/apikey-list` | https://docs.z.ai/guides/overview/quick-start |
 | Prices (USD per 1M tokens, in / cached in / out) | GLM-5.3 1.4 / 0.26 / 4.4; GLM-5.3-Flash 0.15 / 0.03 / 0.50; GLM-4.6 0.6 / 0.11 / 2.2; GLM-4.5-Air 0.2 / 0.03 / 1.1 | https://docs.z.ai/guides/overview/pricing |
-| Usage endpoint | **Not documented.** Third-party tools call `GET https://api.z.ai/api/monitor/usage/quota/limit` (bearer key; `data.limits[]` with 5-hour and weekly percentages, `data.level`), and say it is undocumented and can change. Terrarium has no `zai-usage` probe for that reason: a Z.ai subscription is local estimate only. | https://github.com/1larity/zai-quota, https://github.com/guyinwonder168/opencode-glm-quota |
+| Usage endpoint | **Not documented.** `GET https://api.z.ai/api/monitor/usage/quota/limit`. Verified live on 2026-10-26: see "Z.ai usage" below. The probe `zai-usage` reads it. | https://github.com/getpaseo/paseo/issues/5057, https://github.com/guyinwonder168/opencode-glm-quota |
 
 pi 1.4.0 (the installed `pi-ai`), **verified offline** on 2026-10-26 with
 `pi --offline --list-models zai` in an empty `PI_CODING_AGENT_DIR` (no
@@ -1347,6 +1381,36 @@ Claude Code shows an auth-conflict notice when `ANTHROPIC_AUTH_TOKEN` is
 set next to the shared Claude login; the `[1m]` model suffix. The live
 test is `cargo test -p terrarium-adapter-pi --test zai_live -- --ignored`
 with `ZAI_API_KEY` set (docs/getting-started.md §6.3).
+
+### Z.ai models
+
+**Verified live** on 2026-10-26 with the stored `zai-key` (GLM Coding
+Plan): one `GET https://api.z.ai/api/coding/paas/v4/models` with
+`Authorization: Bearer <key>`, no model turn. The answer is `200` in the
+OpenAI list shape (sanitised; the full body is the fixture
+`crates/terrariumd/tests/fixtures/models/zai_coding.json`):
+
+```json
+{"object":"list","data":[{"id":"glm-4.5","object":"model","created":1753632000,"owned_by":"z-ai"},
+  ...,{"id":"glm-5.3","object":"model","created":1786636800,"owned_by":"z-ai"},
+  {"id":"glm-5.3-flash","object":"model","created":1786636800,"owned_by":"z-ai"},
+  {"id":"glm-5.3-flashx","object":"model","created":1786636800,"owned_by":"z-ai"}]}
+```
+
+The ids: `glm-4.5`, `glm-4.5-air`, `glm-4.6`, `glm-4.7`, `glm-5`,
+`glm-5-turbo`, `glm-5.1`, `glm-5.2`, `glm-5.3`, `glm-5.3-flash`,
+`glm-5.3-flashx`. No name and no context window. The list differs from
+pi 1.4.0's `zai` catalogue (pi has the `-highspeed` models, Z.ai lists
+`glm-5.3-flashx` and the 4.5/4.6 models), so `GET
+/api/subscriptions/{name}/models` (docs/api.md §16.3) asks the provider
+first and pi second. The `api` plan endpoint
+(`https://api.z.ai/api/paas/v4/models`) is not tested.
+
+`pi --offline --list-models zai` (pi 1.4.0, in the container, with
+`ZAI_API_KEY` set to a placeholder in an empty `PI_CODING_AGENT_DIR`) prints
+a table `provider model context max-out thinking images`; the fixture is
+`crates/terrariumd/tests/fixtures/models/pi_list_zai.txt`. Without the key
+var it prints "No models available".
 
 ## vmlab workspace attach
 

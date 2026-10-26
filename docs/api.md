@@ -719,7 +719,7 @@ An agent is the core `Agent` with bookkeeping fields:
 |---|---|---|---|
 | `GET /api/agents?project=` | | `200` agents by ID | read; an agent defaults to its project |
 | `POST /api/agents` | an agent definition | `201` agent | project_admin of `project`; some `policy` entries need sysadmin (below) |
-| `GET /api/agents/{id}` | | `200` agent | read |
+| `GET /api/agents/{id}` | | `200` agent, with `subscription_detail` (below) | read |
 | `PATCH /api/agents/{id}` | `{"harness"?, "subscription"?, "model"?, "prompt"?, "policy"?, "restart"?, "new_session_on_prompt_change"?}` | `200` agent | project_admin; some `policy` entries need sysadmin (below) |
 | `DELETE /api/agents/{id}` | `?confirm=true` when live; `?keep_workspace=true` | `204` | project_admin |
 
@@ -751,6 +751,19 @@ A harness that takes a changed prompt on a resume (Claude Code with
 `--system-prompt-snapshot off`, pi) resumes with the new prompt. The daemon
 then writes the new hash to `private/session-prompt.sha256` and records a
 `system` event with the message `prompt updated on resume`.
+
+`GET /api/agents/{id}` (not the list) adds `subscription_detail` when the
+agent's subscription exists:
+
+```json
+"subscription_detail":{"name":"zai-key","provider":"zai","plan":"coding","login_status":"api_key",
+  "harnesses":["claude","pi"],"default_model":"glm-5.3-flash"}
+```
+
+`default_model` is the model that the agent's harness gets on the
+subscription when the agent sets no `model` (`default_models` in §16.1).
+It is absent when the harness keeps its own default. The field has no
+secret and no quota numbers (those are in `GET /api/usage/me`).
 
 `PATCH` changes only the fields in the body. Send `null` for
 `subscription`, `model`, or `prompt` to clear it (`{"subscription": null}`).
@@ -1911,7 +1924,7 @@ A subscription:
  "created_at":"...","updated_at":"...",
  "windows":[{"window":"5h","used_pct":16.0,"resets_at":"2026-10-24T10:59:59Z","at":"..."},
             {"window":"7d","used_pct":10.0,"resets_at":"2026-10-31T01:59:59Z","at":"..."}],
- "local_estimate_only":false,"has_api_key":false,"held_agents":0}
+ "local_estimate_only":false,"has_api_key":false,"held_agents":0,"default_models":{}}
 ```
 
 | Field | Meaning |
@@ -1923,13 +1936,15 @@ A subscription:
 | `local_estimate_only` | `true` when there is no probe: local accounting is the only number. |
 | `env_var` | Set when an API key is stored: the env var that carries it into the agents. The key is never in the API. |
 | `held_agents` | Agents whose turns wait for a reset of this subscription. |
+| `default_models` | The model that each harness gets on this subscription when the agent sets no `model`, by harness name, for example `{"pi":"glm-5.3-flash","claude":"glm-5.3"}` for a Z.ai key. Only the harnesses where the daemon picks the model: pi (the provider's default from the pi adapter's table; no entry when pi refuses the subscription) and Claude Code on Z.ai. `{}` when every harness keeps its own default. Always present. |
 
 Names follow the project name rules; `login` and `detect` are reserved.
 
 Probes: `anthropic-oauth-usage`, `openai-codex-usage` (alias
 `codex-rate-limits`), `github-copilot-quota` (alias
-`copilot-premium-requests`). `docs/compat.md`, "Usage probes", records
-each endpoint.
+`copilot-premium-requests`), `zai-usage` (the default of a `zai`
+subscription on the `coding` plan that names no probe). `docs/compat.md`,
+"Usage probes", records each endpoint.
 
 A usage point (`GET /api/usage`):
 
@@ -1973,6 +1988,8 @@ keep their card.
 - `GET /api/subscriptions`, `.../quota`: the operator, a `sysadmin`, or a
   `project_admin`. An agent may `GET /api/subscriptions/{name}` of its own
   subscription.
+- `GET /api/subscriptions/{name}/models`: the operator, a `sysadmin`, or a
+  `project_admin` of a project with an agent on the subscription.
 - Create, delete, probe, verify, detect: `sysadmin` or the operator.
 - Login sessions, logout, and API keys: the operator only (PLAN §10,
   §16.1). Any agent gets `403 forbidden`.
@@ -1995,6 +2012,7 @@ keep their card.
 | `GET /api/subscriptions/{name}` | | One subscription. |
 | `DELETE /api/subscriptions/{name}` | | `204`. `409 file_managed` for a file subscription. |
 | `GET /api/subscriptions/{name}/quota` | `?since=` (a time, §2.1; default 24 h ago), `?window=`, `?limit=` (default 1000) | Array of samples, oldest first: `{subscription, window, used_pct, resets_at, raw, at}`. `raw` is the provider's window object. |
+| `GET /api/subscriptions/{name}/models` | `?refresh=true` | The models the subscription can use (below). Cached for 6 h per subscription; `refresh` reads the list again. |
 | `POST /api/subscriptions/{name}/probe` | | `{subscription, probe_status, error?, windows}`. Here `subscription` is the **name** only, not the object. A failed probe is still `200`. |
 | `POST /api/subscriptions/{name}/verify` | | `{subscription, status}`. Here `subscription` is the **full** subscription (§16.1), after the check. `status` is `{kind, harness, provider, pi_provider?, logged_in, plan?, detail?}`. The harness status command runs against the shared home and sets `login_status` (and `plan`, when the subscription has none). A stored API key counts as logged in: `status` is then `{logged_in: true, detail}`. |
 | `POST /api/subscriptions/{name}/logout` | | The subscription (§16.1), with `login_status` `missing`. Runs `claude auth logout`, `codex logout`, or `copilot logout` against the shared home. pi has no logout command: `422 invalid`. A `zai` subscription has no logout either (`422 invalid`): the Claude logout would end the shared Claude login. |
@@ -2010,6 +2028,32 @@ keep their card.
 | `GET /api/usage/me` | `?agent=` (the operator only) | The caller's subscription and its share today (below). |
 | `GET /api/usage/project` | `?project=` (default: the caller's), `?since=` (default: the start of the UTC day) | The per-agent split (below). |
 | `POST /api/agents/{id}/status` | `{status, note?}` | The stored `self_report` event. §16.6. |
+
+`GET /api/subscriptions/{name}/models`:
+
+```json
+{"models":[{"id":"glm-4.7","context":204800},{"id":"glm-5.3-flash","context":1000000}],
+ "source":"pi","fetched_at":"2026-10-26T09:00:00.000Z",
+ "notes":["GET https://api.z.ai/api/coding/paas/v4/models: status 500"]}
+```
+
+The daemon tries three sources, in order, and answers with the first list
+that has a model:
+
+1. `provider`: `GET <base>/models` (the OpenAI list shape) with the stored
+   API key as a bearer token, for an API-key subscription of `zai` (the
+   plan's base URL: `coding` `https://api.z.ai/api/coding/paas/v4`, `api`
+   `https://api.z.ai/api/paas/v4`), `openai-compatible` (the stored
+   `base_url`), `openai`, or `openrouter`. The key stays in the daemon.
+2. `pi`: `pi --offline --list-models <pi provider>`, pi's own catalogue. For
+   an API key, pi runs in an empty pi dir with a placeholder in the key env
+   var (`--offline` sends no request); for a plan login, in the shared pi
+   home.
+3. `fallback`: the values of `default_models` (§16.1).
+
+`notes` (absent when empty) says why an earlier source gave no list.
+`name` and `context` (tokens) are in a model only when the source gives
+them. `docs/compat.md`, "Z.ai models", records the live answer.
 
 `GET /api/usage/me`:
 

@@ -135,6 +135,19 @@ pub fn read_subscriptions(actor: &Actor) -> ApiResult<()> {
     }
 }
 
+/// Read the model list of a subscription: the operator, a `sysadmin`, or
+/// a `project_admin` of a project with an agent on it (`projects`).
+pub fn read_subscription_models(actor: &Actor, projects: &[String]) -> ApiResult<()> {
+    match actor {
+        Actor::Operator => Ok(()),
+        Actor::Agent(a) if a.is_sysadmin() || projects.iter().any(|p| a.is_admin_of(p)) => Ok(()),
+        Actor::Agent(_) => Err(deny(
+            "reading the models of a subscription",
+            "project_admin of a project that uses it, sysadmin, or the operator",
+        )),
+    }
+}
+
 /// Define subscriptions, run a probe, verify a login: `sysadmin` or the
 /// operator.
 pub fn manage_subscriptions(actor: &Actor, what: &str) -> ApiResult<()> {

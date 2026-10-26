@@ -22,8 +22,12 @@ describe("agent form", () => {
     expect(formToPatch(agent, v)).toEqual({});
     expect(formToPatch(agent, { ...v, model: "m2", restart: "never", name: "x", roles: [] })).toEqual({ model: "m2", restart: "never" });
     expect(formToPatch(agent, { ...v, mail_to: "lead" })).toEqual({ policy: { targets: ["t1"], mail_to: ["lead"], cross_project: [] } });
-    // The daemon cannot clear a field, so an emptied one is left out.
-    expect(formToPatch(agent, { ...v, model: "" })).toEqual({});
+    // An emptied field goes as null, which clears it.
+    expect(formToPatch(agent, { ...v, model: "" })).toEqual({ model: null });
+    expect(formToPatch({ ...agent, subscription: "zai-key" }, { ...v, subscription: "" })).toEqual({ subscription: null });
+    expect(formToPatch(agent, { ...v, subscription: " zai-key " })).toEqual({ subscription: "zai-key" });
+    // A harness change that cleared an incompatible subscription.
+    expect(formToPatch({ ...agent, subscription: "zai-key" }, { ...v, harness: "codex", subscription: "" })).toEqual({ harness: "codex", subscription: null });
   });
 
   it("validates the name and cross-project entries", () => {

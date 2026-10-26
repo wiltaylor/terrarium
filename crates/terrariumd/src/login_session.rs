@@ -1345,7 +1345,9 @@ pub fn store_key(state_dir: &Path, name: &str, key: &ApiKey) -> std::io::Result<
     std::fs::rename(&tmp, &path)
 }
 
-fn read_key(state_dir: &Path, name: &str) -> Option<ApiKey> {
+/// The stored key of a subscription with its provider and base URL. A
+/// secret: never log or return it.
+pub fn read_key(state_dir: &Path, name: &str) -> Option<ApiKey> {
     let text = std::fs::read_to_string(key_path(state_dir, name)).ok()?;
     serde_json::from_str(&text).ok()
 }

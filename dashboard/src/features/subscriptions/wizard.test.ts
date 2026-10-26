@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { LoginSession } from "../../api/types";
-import { apiKeyBody, countdown, endMessage, initialWizard, KEY_HELP, KEY_PROVIDERS, reloginFor, sessionToCancel, shouldPoll, teardownLeft, TEARDOWN_MS, wizardReduce, ZAI_PLANS, type WizardAction, type WizardState } from "./wizard";
+import { apiKeyBody, countdown, endMessage, initialWizard, wizardFromQuery, KEY_HELP, KEY_PROVIDERS, reloginFor, sessionToCancel, shouldPoll, teardownLeft, TEARDOWN_MS, wizardReduce, ZAI_PLANS, type WizardAction, type WizardState } from "./wizard";
 
 const session = (over: Partial<LoginSession> = {}): LoginSession => ({
   id: "L1",
@@ -106,5 +106,14 @@ describe("Z.ai in the API-key path", () => {
     s = wizardReduce(s, { type: "saved", subscription: "zai-key" });
     expect(s).toEqual({ step: "done", subscription: "zai-key" });
     expect(reloginFor({ name: "zai-key", provider: "zai", harnesses: ["claude", "pi"], env_var: "ZAI_API_KEY", has_api_key: true })).toEqual({ path: "api_key", setup: { name: "zai-key", provider: "zai" } });
+  });
+});
+
+describe("wizardFromQuery", () => {
+  it("opens the step that ?add= names, and nothing else", () => {
+    expect(wizardFromQuery("api_key")).toEqual({ path: "api_key" });
+    expect(wizardFromQuery(["pi"])).toEqual({ path: "pi" });
+    expect(wizardFromQuery("nope")).toBeNull();
+    expect(wizardFromQuery(undefined)).toBeNull();
   });
 });

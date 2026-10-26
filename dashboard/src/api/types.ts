@@ -161,8 +161,23 @@ export interface AgentDef {
   restart?: RestartPolicy;
 }
 
-/** `PATCH /api/agents/{id}`. Name, project, and roles do not change here. */
-export type AgentPatch = Partial<Pick<AgentDef, "harness" | "subscription" | "model" | "prompt" | "policy" | "restart">>;
+/** `PATCH /api/agents/{id}`. Name, project, and roles do not change here. `null` clears subscription, model, or prompt; an absent field does not change. */
+export type AgentPatch = Partial<Pick<AgentDef, "harness" | "policy" | "restart">> & {
+  subscription?: string | null;
+  model?: string | null;
+  prompt?: string | null;
+};
+
+/** `subscription_detail` of `GET /api/agents/{id}`: the agent's subscription, when it exists. */
+export interface AgentSubscriptionDetail {
+  name: string;
+  provider: string;
+  plan?: string;
+  login_status: LoginStatus;
+  harnesses: Harness[];
+  /** The model the agent's harness gets when the agent sets no `model`. */
+  default_model?: string;
+}
 
 /** docs/api.md §6. */
 export interface Agent {
@@ -192,6 +207,8 @@ export interface Agent {
   last_event?: AgentEvent;
   /** Client-side: the agent's last `self_report` (`terrarium status set`). Not the runner status. */
   self_report?: { status: string; note?: string; at: string };
+  /** Only in `GET /api/agents/{id}`: the subscription, when it exists. */
+  subscription_detail?: AgentSubscriptionDetail;
 }
 
 /** docs/api.md §6.3. */
@@ -831,6 +848,31 @@ export interface Subscription {
   has_api_key: boolean;
   /** Agents whose turns wait for a reset of this subscription. */
   held_agents: number;
+  /**
+   * The model each harness gets on this subscription when the agent sets no
+   * `model`. Only harnesses where the daemon picks it (pi, Claude Code on
+   * Z.ai). Left out when there is none, and by older daemons.
+   */
+  default_models?: Partial<Record<Harness, string>>;
+}
+
+/** Where `GET /api/subscriptions/{name}/models` found the list: the provider's `/models`, pi's catalogue, or the default table. */
+export type ModelSource = "provider" | "pi" | "fallback";
+
+export interface ModelInfo {
+  id: string;
+  name?: string;
+  /** The context window in tokens. */
+  context?: number;
+}
+
+/** `GET /api/subscriptions/{name}/models` (docs/api.md §16.3). */
+export interface ModelList {
+  models: ModelInfo[];
+  source: ModelSource;
+  fetched_at: string;
+  /** Why an earlier source gave no list. */
+  notes?: string[];
 }
 
 /** `POST /api/subscriptions`, and the `suggested` definition of a detected login. */

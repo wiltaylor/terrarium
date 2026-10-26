@@ -10,11 +10,13 @@ import { Terminal } from "../../components/Terminal";
 import { ConfirmButton, ErrorBanner, LoadMore, PageHead, Tabs, useNow } from "../../components/ui";
 import { GRANTABLE_ROLES, type Agent, type AgentStatus, type Role } from "../../api/types";
 import { ago, compact, timeUntil } from "../../lib/format";
-import { agents, api, events, leases as holds, quota } from "../../stores";
+import { agents, api, events, leases as holds, quota, subscriptions } from "../../stores";
 import { describeCause } from "../../stores/quota";
 import { AgentForm } from "./AgentForm";
 import { Conversation } from "./conversation/Conversation";
 import { RoleBadges } from "./AgentsPage";
+import { changeSubscription, loginText } from "./subscription";
+import { SubscriptionSelect } from "./SubscriptionFields";
 
 const TABS = [
   { id: "conversation", label: "Conversation" },
@@ -114,9 +116,7 @@ export default function AgentDetail() {
               </dd>
               <dt>Subscription</dt>
               <dd>
-                <Show when={a().subscription} fallback={<span class="muted">none</span>}>
-                  {(s) => <A href="/subscriptions">{s()}</A>}
-                </Show>
+                <SubscriptionCell agent={a()} running={running()} onError={setError} />
               </dd>
               <dt>Prompt</dt>
               <dd>{a().prompt ?? <span class="muted">default</span>}</dd>
@@ -223,6 +223,122 @@ export default function AgentDetail() {
         </div>
       )}
     </Show>
+  );
+}
+
+/**
+ * The agent's subscription (`subscription_detail` of `GET /api/agents/{id}`)
+ * with its login status, and a control to change it with
+ * `PATCH /api/agents/{id}`. The change applies at the next start.
+ */
+export function SubscriptionCell(props: { agent: Agent; running: boolean; onError: (e: unknown) => void }) {
+  const [detail] = createResource(
+    () => [props.agent.id, props.agent.subscription ?? ""] as const,
+    async ([id, name]) => {
+      if (!name) return undefined;
+      const got = await api.agents.get(id).catch(() => null);
+      if (got?.subscription_detail?.name === name) return got.subscription_detail;
+      // An older daemon has no subscription_detail: use the list.
+      await subscriptions.ensureLoaded();
+      const s = subscriptions.byName(name);
+      return s ? { name: s.name, provider: s.provider, plan: s.plan, login_status: s.login_status, harnesses: s.harnesses, default_model: s.default_models?.[props.agent.harness] } : undefined;
+    },
+  );
+  const [editing, setEditing] = createSignal(false);
+  const [draft, setDraft] = createSignal("");
+  const [busy, setBusy] = createSignal(false);
+  const [saved, setSaved] = createSignal(false);
+  const fileManaged = () => props.agent.source === "file";
+
+  const save = async () => {
+    setBusy(true);
+    try {
+      const a = await changeSubscription(api, props.agent.id, draft());
+      agents.upsert(a);
+      setEditing(false);
+      setSaved(true);
+    } catch (e) {
+      props.onError(e);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const restart = async () => {
+    try {
+      await api.agents.restart(props.agent.id);
+      setSaved(false);
+    } catch (e) {
+      props.onError(e);
+    }
+  };
+
+  return (
+    <div class="stack" style={{ gap: "4px" }}>
+      <Show
+        when={!editing()}
+        fallback={
+          <span class="row" style={{ "flex-wrap": "wrap" }}>
+            <SubscriptionSelect harness={props.agent.harness} value={draft()} onChange={setDraft} label="New subscription" />
+            <button class="small primary" disabled={busy() || draft() === (props.agent.subscription ?? "")} onClick={save}>
+              Save
+            </button>
+            <button class="small" onClick={() => setEditing(false)}>
+              Cancel
+            </button>
+          </span>
+        }
+      >
+        <span class="row" style={{ "flex-wrap": "wrap" }}>
+          <Show when={props.agent.subscription} fallback={<span class="muted">none</span>}>
+            {(name) => (
+              <>
+                <A href="/subscriptions">{name()}</A>
+                <Show when={detail()} fallback={<Show when={!detail.loading}><span class="chip warn">not found</span></Show>}>
+                  {(d) => (
+                    <>
+                      <span class="muted small">
+                        {d().provider}
+                        {d().plan ? ` · ${d().plan}` : ""}
+                      </span>
+                      <span class={`chip ${d().login_status === "expired" || d().login_status === "missing" ? "warn" : "ok"}`}>{loginText(d().login_status)}</span>
+                      <Show when={!d().harnesses.includes(props.agent.harness)}>
+                        <span class="chip warn">not for {props.agent.harness}</span>
+                      </Show>
+                      <Show when={!props.agent.model && d().default_model}>
+                        <span class="muted small">model {d().default_model} (default)</span>
+                      </Show>
+                    </>
+                  )}
+                </Show>
+              </>
+            )}
+          </Show>
+          <button
+            class="small"
+            disabled={fileManaged()}
+            title={fileManaged() ? "A file agent: edit its definition file." : undefined}
+            onClick={() => {
+              setDraft(props.agent.subscription ?? "");
+              setSaved(false);
+              setEditing(true);
+            }}
+          >
+            Edit
+          </button>
+        </span>
+      </Show>
+      <Show when={editing() || saved()}>
+        <span class="muted small">
+          A new subscription applies at the next start.
+          <Show when={saved() && props.running}>
+            {" "}
+            <button class="small" onClick={restart}>
+              Restart now
+            </button>
+          </Show>
+        </span>
+      </Show>
+    </div>
   );
 }
 

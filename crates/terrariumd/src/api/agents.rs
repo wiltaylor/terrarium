@@ -131,12 +131,63 @@ async fn create(
     Ok((StatusCode::CREATED, Json(Created { view: a, checkout })))
 }
 
+/// The agent's subscription in `GET /api/agents/{id}`: no secret, no
+/// quota numbers (those are in `GET /api/usage/me`).
+#[derive(Debug, Serialize)]
+struct SubscriptionDetail {
+    name: String,
+    provider: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    plan: Option<String>,
+    login_status: String,
+    /// The harnesses that may spend it. The agent's harness is not always
+    /// one of them: then a start fails.
+    harnesses: Vec<terrarium_core::HarnessId>,
+    /// The model the agent's harness gets when the agent sets no `model`
+    /// (`crate::models::default_models`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    default_model: Option<String>,
+}
+
+/// `GET /api/agents/{id}`: the agent, and `subscription_detail` when its
+/// subscription exists.
+#[derive(Debug, Serialize)]
+struct Shown {
+    #[serde(flatten)]
+    view: AgentView,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    subscription_detail: Option<SubscriptionDetail>,
+}
+
 async fn show(
     State(state): State<Shared>,
     actor: Actor,
     Path(id): Path<String>,
-) -> ApiResult<Json<AgentView>> {
-    Ok(Json(load(&state, &actor, id).await?))
+) -> ApiResult<Json<Shown>> {
+    let view = load(&state, &actor, id).await?;
+    let subscription_detail = match view.agent.subscription.clone() {
+        Some(name) => {
+            let harness = view.agent.harness;
+            state
+                .db
+                .read(move |c| crate::store::subscriptions::get(c, &name))
+                .await
+                .ok()
+                .map(|s| SubscriptionDetail {
+                    default_model: crate::models::default_models(&s).remove(harness.as_str()),
+                    name: s.name,
+                    provider: s.provider,
+                    plan: s.plan,
+                    login_status: s.login_status,
+                    harnesses: s.harnesses,
+                })
+        }
+        None => None,
+    };
+    Ok(Json(Shown {
+        view,
+        subscription_detail,
+    }))
 }
 
 async fn update(

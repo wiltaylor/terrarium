@@ -604,11 +604,15 @@ ${XSS_DOCUMENT}
       login_status: "logged_in", verified_at: ago(60 * 3), probe_status: "none", windows: [], local_estimate_only: true,
     },
     {
+      ...subBase, name: "zai-key", provider: "zai", plan: "coding", harnesses: ["claude", "pi"], alert_at: 80, env_var: "ZAI_API_KEY", has_api_key: true,
+      login_status: "api_key", probe_status: "none", windows: [], local_estimate_only: true,
+    },
+    {
       ...subBase, name: "gemini", provider: "google", plan: "Gemini Code Assist", harnesses: ["pi"], alert_at: 80,
       login_status: "missing", probe_status: "none", windows: [], local_estimate_only: true,
     },
   ];
-  const apiKeys: MockWorld["apiKeys"] = { "openrouter-key": { provider: "openrouter", key: "sk-or-mock-never-shown" } };
+  const apiKeys: MockWorld["apiKeys"] = { "openrouter-key": { provider: "openrouter", key: "sk-or-mock-never-shown" }, "zai-key": { provider: "zai", key: "zk-mock-never-shown" } };
 
   // Quota samples: one per window per hour for a day, rising to the current value.
   const quota: QuotaSample[] = [];

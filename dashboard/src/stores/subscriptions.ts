@@ -22,7 +22,8 @@ export function createSubscriptionsStore(api: Pick<Api, "subscriptions">, events
   let timer: ReturnType<typeof setInterval> | undefined;
   let soon: ReturnType<typeof setTimeout> | undefined;
 
-  const refresh = async () => {
+  let inflight: Promise<void> | null = null;
+  const load = async () => {
     try {
       setList(await api.subscriptions.list());
       setError(null);
@@ -36,6 +37,15 @@ export function createSubscriptionsStore(api: Pick<Api, "subscriptions">, events
     } finally {
       setLoaded(true);
     }
+  };
+
+  /** Always a new request: a refresh after a change must not join an older one. */
+  const refresh = (): Promise<void> => {
+    const p = load().finally(() => {
+      if (inflight === p) inflight = null;
+    });
+    inflight = p;
+    return p;
   };
 
   /** `GET /api/subscriptions/detect` runs the harness status commands: call it on demand, not on a timer. */
@@ -66,6 +76,8 @@ export function createSubscriptionsStore(api: Pick<Api, "subscriptions">, events
     detected,
     detectError,
     refresh,
+    /** Load the list once, for a page that needs it but does not poll (the agent form). Joins a load in flight. */
+    ensureLoaded: (): Promise<void> => (loaded() && !error() ? Promise.resolve() : (inflight ?? refresh())),
     detect,
     byName: (name?: string) => (name ? list().find((s) => s.name === name) : undefined),
     /** Poll every `ms`. Safe to call twice. */

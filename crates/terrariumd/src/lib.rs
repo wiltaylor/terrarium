@@ -18,6 +18,7 @@ pub mod harness_versions;
 pub mod hosts;
 pub mod leases;
 pub mod login_session;
+pub mod models;
 pub mod policy;
 pub mod probes;
 pub mod prompt;

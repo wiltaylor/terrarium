@@ -231,7 +231,7 @@ describe("mock parity with docs/api.md", () => {
       for (const k of SUB_KEYS) expect(s).toHaveProperty(k);
       expect(s).not.toHaveProperty("status");
       expect(s).not.toHaveProperty("history");
-      expect(["logged_in", "expiring", "expired", "missing", "unknown"]).toContain(s.login_status);
+      expect(["logged_in", "expiring", "expired", "missing", "unknown", "api_key"]).toContain(s.login_status);
       expect(["ok", "failed", "none"]).toContain(s.probe_status);
       expect(["file", "api"]).toContain(s.source);
       expect(s.local_estimate_only).toBe(!s.probe);
@@ -1339,5 +1339,39 @@ describe("schedules (docs/api.md §19, the daemon's api/schedules.rs)", () => {
       "PATCH /api/schedules/S1",
       "DELETE /api/schedules/S1",
     ]);
+  });
+
+  it("gives each subscription default_models, as the daemon does", async () => {
+    const api = mock();
+    const subs = await api.subscriptions.list();
+    for (const s of subs) expect(s.default_models).toBeTypeOf("object");
+    const zai = subs.find((s) => s.name === "zai-key")!;
+    expect(zai.default_models).toEqual({ pi: "glm-5.3-flash", claude: "glm-5.3" });
+    // pi refuses a Claude plan: no pi default.
+    expect(subs.find((s) => s.name === "anthropic-max")!.default_models).toEqual({});
+  });
+
+  it("adds subscription_detail to GET /api/agents/{id} only", async () => {
+    const api = mock();
+    const a = await api.agents.create({ name: "est", project: "terrarium", harness: "pi", subscription: "zai-key" });
+    expect(a.subscription_detail).toBeUndefined();
+    const shown = await api.agents.get(a.id);
+    expect(Object.keys(shown.subscription_detail!).sort()).toEqual(["default_model", "harnesses", "login_status", "name", "plan", "provider"]);
+    expect((await api.agents.list()).every((x) => x.subscription_detail === undefined)).toBe(true);
+  });
+
+  it("answers GET /api/subscriptions/{name}/models in the daemon's shape", async () => {
+    const api = mock();
+    const zai = await api.subscriptions.models("zai-key");
+    expect(zai.source).toBe("provider");
+    expect(zai.models.map((m) => m.id)).toContain("glm-5.3-flash");
+    expect(typeof zai.fetched_at).toBe("string");
+    const pi = await api.subscriptions.models("openrouter-key", { refresh: true });
+    expect(pi.source).toBe("pi");
+    expect(pi.models[0]).toHaveProperty("context");
+    const fb = await api.subscriptions.models("copilot-pro");
+    expect(fb.source).toBe("fallback");
+    expect(fb.notes?.length).toBeGreaterThan(0);
+    await expect(api.subscriptions.models("nope")).rejects.toMatchObject({ status: 404 });
   });
 });

@@ -321,8 +321,8 @@ pub fn not_ready(harness: HarnessId) -> SupervisorError {
     ))
 }
 
-/// The definition of a stored subscription, for the adapter.
-fn sub_def(s: &Subscription) -> SubscriptionDef {
+/// The definition of a stored subscription, as the adapters take it.
+pub(crate) fn sub_def(s: &Subscription) -> SubscriptionDef {
     SubscriptionDef {
         name: s.name.clone(),
         provider: s.provider.clone(),
