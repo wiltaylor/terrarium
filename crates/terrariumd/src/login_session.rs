@@ -1111,10 +1111,12 @@ fn outcome_into(
         Err(e) if e == "cancelled" => v.state = "cancelled".into(),
         Err(e) if e == "expired" => {
             v.state = "expired".into();
-            v.error = Some(format!(
-                "the login did not finish in {} minutes",
-                timeout.as_secs() / 60
-            ));
+            let secs = timeout.as_secs();
+            v.error = Some(if secs >= 60 && secs % 60 == 0 {
+                format!("the login did not finish in {} minutes", secs / 60)
+            } else {
+                format!("the login did not finish in {secs} s")
+            });
         }
         Err(e) => {
             v.state = "failed".into();

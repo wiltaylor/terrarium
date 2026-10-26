@@ -1165,7 +1165,8 @@ fn assert_login_dir_gone(id: &str) {
 }
 
 async fn wait_login(td: &TestDaemon, id: &str, state: &str) -> Value {
-    for _ in 0..400 {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(40);
+    while tokio::time::Instant::now() < deadline {
         let r = td.get(&format!("/api/subscriptions/login/{id}")).await;
         if r.body["state"] == state {
             return r.body;
@@ -1294,7 +1295,9 @@ async fn codex_device_login_and_failures() {
     let env = boot(
         |_| {},
         |u, bin| {
-            u.login_timeout = Duration::from_secs(3);
+            // Long enough that a busy CI runner still sees `waiting`
+            // before the never-ending flow below expires.
+            u.login_timeout = Duration::from_secs(10);
             u.programs.insert(
                 HarnessId::Codex,
                 script(
