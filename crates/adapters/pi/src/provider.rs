@@ -105,6 +105,15 @@ const TABLE: &[Row] = &[
         oauth: None,
         api_key: Some(("mistral", "MISTRAL_API_KEY")),
     },
+    // Z.ai: pi's built-in `zai` provider is the GLM Coding Plan endpoint.
+    // The `api` plan (pay as you go) is the custom provider `zai-api` in
+    // the per-agent `models.json` ([`crate::config::zai_api_provider`]);
+    // [`provider_for`] picks it. A Z.ai plan is never a pi login.
+    Row {
+        names: &["zai"],
+        oauth: None,
+        api_key: Some(("zai", terrarium_core::zai::KEY_ENV)),
+    },
     // An OpenAI-compatible endpoint needs a provider entry in the shared
     // `models.json` (a base URL and a model list). pi does not read a base
     // URL from the env. Not supported yet: no provider flag.
@@ -131,6 +140,10 @@ pub fn provider_for(sub: &SubscriptionDef) -> Option<String> {
     let name = sub.provider.trim();
     if name.is_empty() {
         return None;
+    }
+    if terrarium_core::zai::is_zai(name) {
+        let plan = terrarium_core::zai::plan_or_default(sub.plan.as_deref());
+        return Some(plan.pi_provider().to_owned());
     }
     let Some(r) = row(name) else {
         return Some(name.to_owned());
@@ -274,6 +287,21 @@ mod tests {
         assert_eq!(start_refusal(&custom, Some("glm-5.3")), None);
         assert_eq!(start_refusal(&sub("openai", Some("Pro")), None), None);
         assert!(start_refusal(&sub("anthropic", Some("Max")), Some("x")).is_some());
+    }
+
+    #[test]
+    fn zai_plans_pick_the_builtin_or_the_custom_provider() {
+        for plan in [None, Some("coding"), Some("Coding")] {
+            let s = sub("zai", plan);
+            assert_eq!(provider_for(&s).as_deref(), Some("zai"), "{plan:?}");
+            assert_eq!(required_env(&s), Some("ZAI_API_KEY"));
+            assert_eq!(start_refusal(&s, None), None);
+        }
+        let api = sub("zai", Some("api"));
+        assert_eq!(provider_for(&api).as_deref(), Some("zai-api"));
+        assert_eq!(required_env(&api), Some("ZAI_API_KEY"));
+        assert_eq!(refusal(&api), None);
+        assert_eq!(start_refusal(&api, None), None);
     }
 
     #[test]

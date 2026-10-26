@@ -1232,6 +1232,7 @@ Kinds:
 | `usage.sample`, `usage.rejected_path`, `quota.sample`, `quota.alert`, `quota.blocked`, `quota.resumed`, `subscription.offer`, `subscription.expired`, `self_report` | See §16.7. |
 | `lease` | `{change, target, lease_id, expires_at, exclusive, state}`. `change` is `granted`, `extended`, or `ended` (a revoke or the expiry). The `agent` is the lease holder. The supervisor types a pointer from it (§17.7). |
 | `target` | `{change, target, from, state, snapshots_cleared}`. `change` is `reconciled`: a `status` found the target other than the store said (§17.3). |
+| `schedule` | `{change, schedule, name, project, run?, status?, trigger?}`. `change` is `created`, `updated`, `deleted`, `enabled`, `disabled`, `run_started`, or `run_finished`. `schedule` is the schedule ULID. A run event has `run`, `status`, and `trigger` (§19). |
 | `harness` | `{change, harness, package, from, to, forced}`. `change` is `updated`: an update in the tools dir (§4, `POST /api/harnesses/{name}/update`). |
 | `host.connected`, `host.disconnected` | `{host, host_id, ...}`: `version`, `os`, `arch`, `capabilities`, `summary`, `resumed` (sessions taken back), `reason`. See §17. |
 
@@ -1758,7 +1759,7 @@ A subscription:
 | Field | Meaning |
 |---|---|
 | `source` | `file` (`subscriptions/<name>.toml`), `api` (the API, the login wizard, an API key), or `fleet:<name>` (a fleet file, §18.1). A file subscription whose file is gone becomes `api` on reload; its samples stay. |
-| `login_status` | `logged_in`, `expiring`, `expired`, `missing`, or `unknown` (not checked yet). See "Expired logins" in §16.2. |
+| `login_status` | `logged_in`, `expiring`, `expired`, `missing`, `unknown` (not checked yet), or `api_key` (a stored Z.ai key: no harness status command can check it, §16.5). See "Expired logins" in §16.2. |
 | `probe_status` | `ok`, `failed` (`probe_error` says why), or `none` (no probe, or not run yet). `last_success_at` stays when a probe fails. |
 | `windows` | The newest sample of each window. Window names: `5h`, `7d`, `7d_opus`, `7d_sonnet` (Anthropic); `<n>h` or `<n>d` from the window length (OpenAI); `monthly` (Copilot premium requests). |
 | `local_estimate_only` | `true` when there is no probe: local accounting is the only number. |
@@ -1832,14 +1833,14 @@ keep their card.
 | Method and path | Body or query | Answer |
 |---|---|---|
 | `GET /api/subscriptions` | | Array of subscriptions. |
-| `POST /api/subscriptions` | `{name, provider, plan?, harnesses?, probe?, alert_at?}` | `201` with the subscription (`source = api`). `409 conflict` when the name exists; `422 invalid` for an unknown probe. |
+| `POST /api/subscriptions` | `{name, provider, plan?, harnesses?, probe?, alert_at?}` | `201` with the subscription (`source = api`). `409 conflict` when the name exists; `422 invalid` for an unknown probe, or for provider `zai` with a plan that is not `coding` or `api`. |
 | `GET /api/subscriptions/{name}` | | One subscription. |
 | `DELETE /api/subscriptions/{name}` | | `204`. `409 file_managed` for a file subscription. |
 | `GET /api/subscriptions/{name}/quota` | `?since=` (a time, §2.1; default 24 h ago), `?window=`, `?limit=` (default 1000) | Array of samples, oldest first: `{subscription, window, used_pct, resets_at, raw, at}`. `raw` is the provider's window object. |
 | `POST /api/subscriptions/{name}/probe` | | `{subscription, probe_status, error?, windows}`. Here `subscription` is the **name** only, not the object. A failed probe is still `200`. |
 | `POST /api/subscriptions/{name}/verify` | | `{subscription, status}`. Here `subscription` is the **full** subscription (§16.1), after the check. `status` is `{kind, harness, provider, pi_provider?, logged_in, plan?, detail?}`. The harness status command runs against the shared home and sets `login_status` (and `plan`, when the subscription has none). A stored API key counts as logged in: `status` is then `{logged_in: true, detail}`. |
-| `POST /api/subscriptions/{name}/logout` | | The subscription (§16.1), with `login_status` `missing`. Runs `claude auth logout`, `codex logout`, or `copilot logout` against the shared home. pi has no logout command: `422 invalid`. |
-| `POST /api/subscriptions/{name}/api-key` | `{provider, key, base_url?, models?}` | The subscription, without the key. See §16.5. |
+| `POST /api/subscriptions/{name}/logout` | | The subscription (§16.1), with `login_status` `missing`. Runs `claude auth logout`, `codex logout`, or `copilot logout` against the shared home. pi has no logout command: `422 invalid`. A `zai` subscription has no logout either (`422 invalid`): the Claude logout would end the shared Claude login. |
+| `POST /api/subscriptions/{name}/api-key` | `{provider, key, plan?, base_url?, models?}` | The subscription, without the key. `plan` is for `zai` only. See §16.5. |
 | `GET /api/subscriptions/detect` | | Logins found in the harness homes that no subscription covers (same provider, and the harness is in `harnesses`): `[{kind, harness, provider, pi_provider?, logged_in, plan?, detail?, suggested}]`. `suggested` is a subscription definition. |
 | `POST /api/subscriptions/login` | `{kind, provider?, name?}` | `201` with the login session (§16.4). |
 | `GET /api/subscriptions/login/{id}` | | The login session. |
@@ -1953,11 +1954,38 @@ directories are `0700`), and sets `env_var`:
 | `xai` | `XAI_API_KEY` |
 | `groq` | `GROQ_API_KEY` |
 | `github` | `COPILOT_GITHUB_TOKEN` (a fine-grained PAT with Copilot Requests; the Copilot probe uses it) |
+| `zai` (takes `plan`) | `ZAI_API_KEY`, and the Claude Code vars below |
 
 A new name makes an `api` subscription (harness `pi`, or `copilot` for
-`github`). No endpoint returns the key. The audit row
-`subscription.api_key` has the provider, the env var, `base_url`, and
-`models`.
+`github`, or `claude` and `pi` for `zai`). No endpoint returns the key. The
+audit row `subscription.api_key` has the provider, the plan, the env var,
+`base_url`, and `models`. A `plan` with another provider is `422 invalid`.
+
+**Z.ai (GLM).** `provider` `zai`, `plan` `coding` (the GLM Coding Plan,
+the default) or `api` (pay as you go). Another plan is `422 invalid`. The
+subscription gets `harnesses = ["claude", "pi"]`, no probe
+(`local_estimate_only` is true: Z.ai documents no usage endpoint, see
+`docs/compat.md`, "Z.ai"), and `login_status` `api_key`. Verify sets
+`api_key` again when the key is stored, else `missing`. It never runs
+`claude auth status`. The env of an agent on it:
+
+| Var | Value |
+|---|---|
+| `ZAI_API_KEY` | the key (pi) |
+| `ANTHROPIC_BASE_URL` | `https://api.z.ai/api/anthropic` |
+| `ANTHROPIC_AUTH_TOKEN` | the key (Claude Code sends it as a bearer token) |
+| `API_TIMEOUT_MS` | `3000000` |
+| `ANTHROPIC_DEFAULT_OPUS_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL` | `glm-5.3` |
+| `ANTHROPIC_DEFAULT_HAIKU_MODEL` | `glm-5.3-flash` |
+
+There is no `ANTHROPIC_API_KEY`. Claude Code gets `--model` with a GLM id:
+the agent's `model` as it is (`glm-4.6`), `glm-5.3-flash` for `haiku` or a
+Claude Haiku id, else `glm-5.3`. pi gets `--provider zai` (plan `coding`,
+pi's built-in provider, `https://api.z.ai/api/coding/paas/v4`) or
+`--provider zai-api` (plan `api`, `https://api.z.ai/api/paas/v4`), and
+`--model` with the agent's model or `glm-5.3-flash`. `zai-api` is a
+custom provider in the agent's `models.json`: every pi agent gets a
+read-only copy of the shared `models.json` with `zai-api` added.
 
 At each launch, `RunnerSupervisor` puts the stored key into the env of
 every agent whose `subscription` has `env_var`
@@ -2628,8 +2656,8 @@ A plan:
 
 | Field of an entry | Meaning |
 |---|---|
-| `kind` | `subscription`, `project`, `target`, or `agent`. |
-| `key` | The name; `project/name` for an agent. |
+| `kind` | `subscription`, `project`, `target`, `agent`, or `schedule`. |
+| `key` | The name; `project/name` for an agent and a schedule. |
 | `project` | The project of the object, when it has one. |
 | `action` | `create`, `update`, `unchanged`, `delete`, `release`, or `conflict`. |
 | `drift` | The fields that changed outside the fleet since the last apply, or `["(deleted)"]`. Absent when empty. |
@@ -2731,3 +2759,214 @@ sees the fleets that own objects in its own project.
 
 The `errors` list of `POST /api/reload` also has the errors of the fleet
 files in the config dir, as `<path>: <message>`.
+
+## 19. Schedules
+
+A schedule runs one action on a time spec: mail, a turn, an exec on a
+target, an agent verb, or a quota probe. The daemon runs it as the actor
+that made it (`run_as`). Before each run, the daemon checks the rights of
+that actor again. PLAN §12b has the design.
+
+### 19.1 Shapes
+
+A schedule:
+
+```json
+{
+  "id": "01MA0V7N6Q1Y3K2P4R5S6T7U8V",
+  "name": "standup",
+  "project": "terrarium",
+  "enabled": true,
+  "spec": {"kind": "cron", "expr": "0 9 * * MON-FRI", "tz": "Europe/London"},
+  "action": {"type": "mail", "to": "lead", "subject": "standup", "body": "Post your status."},
+  "catch_up": "skip",
+  "max_concurrency": 1,
+  "created_by": "agent:01M5PA0T0Z0K16V6G88P3SE78W",
+  "run_as": "agent:01M5PA0T0Z0K16V6G88P3SE78W",
+  "next_run_at": "2026-10-27T09:00:00.000Z",
+  "last_run": {"at": "2026-10-26T09:00:01.204Z", "status": "ok",
+               "summary": "mail 01MA... to terrarium/lead", "run_id": "01MA0V9..."},
+  "runs_count": 12,
+  "source": "api",
+  "consecutive_skips": 0,
+  "created_at": "2026-10-20T08:00:00.000Z",
+  "updated_at": "2026-10-20T08:00:00.000Z"
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `name` | 1-63 of `a-z`, `0-9`, `-`, `_`. Unique in its scope: the project, or the global scope. |
+| `project` | The project. `null` is a global schedule. |
+| `spec` | When it runs. See below. |
+| `action` | What it does. See below. |
+| `catch_up` | `skip` (the default) or `once`. What the daemon does at its start with a run that it missed while it was down. |
+| `max_concurrency` | Always `1`: one run at a time. |
+| `created_by` | `operator` or `agent:<ulid>`. |
+| `run_as` | The actor of the runs. It is `created_by`, until a caller changes the `action`: then it is that caller. |
+| `next_run_at` | The next run. `null` when the schedule is disabled, or when an `at` schedule has run. |
+| `last_run` | `{at, status, summary, run_id}` of the last run, or `null`. |
+| `runs_count` | The runs so far, the skipped runs too. |
+| `source` | `api`, `file` (`[[schedules]]` in `projects/<name>.toml`), or `fleet:<name>` (§18.1). |
+| `consecutive_skips` | The runs in a row that the rights check skipped. |
+| `disabled_reason` | Why the daemon disabled the schedule. Absent when it did not. |
+
+The specs:
+
+| `spec` | Meaning |
+|---|---|
+| `{"kind": "cron", "expr": "*/15 * * * *", "tz": "UTC"}` | Five fields: minute, hour, day of month, month, day of week. The day of week is `0`-`7` (`0` and `7` are Sunday) or `SUN`-`SAT`. `@hourly`, `@daily`, `@weekly`, `@monthly`, and `@yearly` are also valid. `tz` is `UTC` (the default) or an IANA zone, for example `Europe/London`. |
+| `{"kind": "interval", "every": "30m"}` | A number and a unit (`s`, `m`, `h`, `d`), or a sum, for example `1h30m`. The minimum is 60 s. The runs are at `start + k * every`; a new spec sets a new start. |
+| `{"kind": "at", "at": "2026-11-01T02:00:00Z"}` | One run at an RFC 3339 time in the future. |
+
+The actions:
+
+| `action` | Meaning |
+|---|---|
+| `{"type": "mail", "to": "<agent>\|project:<p>\|operator", "subject", "body", "thread"?}` | Send mail through the normal send path (§7) as `run_as`. The scope rules of §7.1 and the loop guard apply. With `thread`, each run posts on that thread, and the loop guard counts the messages. A bare agent name resolves in the schedule's project. An empty `subject` becomes `schedule <name>`. |
+| `{"type": "turn", "agent", "text", "start_if_stopped"?: false}` | Type a turn, as `POST /api/agents/{id}/send` (§6.2). When the agent does not run, the run is `skipped: agent not running`. With `start_if_stopped`, the run starts the agent, waits until it is ready (at most 120 s), then types the turn. |
+| `{"type": "exec", "target", "cmd": ["make", "test"], "cwd"?, "timeout_secs"?}` | Run a command on a target through the executor (§17.4), as `run_as`, with the same policy, leases, and `target.exec` audit row as any exec. `timeout_secs` is 300 by default, 3600 at most. |
+| `{"type": "agent", "agent", "verb": "start\|stop\|restart"}` | The agent verb of §6.2, as `run_as`. |
+| `{"type": "probe", "subscription"}` | Run the quota probe of the subscription (§16.3). |
+
+A run:
+
+```json
+{
+  "id": "01MA0V9...",
+  "schedule": "01MA0V7N6Q1Y3K2P4R5S6T7U8V",
+  "started_at": "2026-10-26T09:00:00.112Z",
+  "finished_at": "2026-10-26T09:00:01.204Z",
+  "status": "ok",
+  "trigger": "cron",
+  "summary": "exec on build-box: exit 0",
+  "output": {"target": "build-box", "cmd": "make test", "exit_code": 0,
+             "stdout": "...", "stderr": "", "end": {"type": "exit", "code": 0, "reason": "exited"}},
+  "error": null,
+  "actor": "agent:01M5PA0T0Z0K16V6G88P3SE78W"
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `status` | `running`, then `ok`, `failed`, or `skipped`. |
+| `trigger` | `cron` (the timer, for each spec kind), `manual` (`POST .../run`), or `catch_up`. |
+| `summary` | One line. A skip starts with `skipped:`. |
+| `output` | `exec`: `target`, `cmd`, `exit_code`, `end`, and the last 4000 bytes of `stdout` and `stderr`. `mail`: `message_id`, `thread_id`, `to`, `held`, `held_reason`. `turn`: `agent`, `started`, `delivery`, `status_before`. `agent`: `agent`, `verb`, `status`. `probe`: the probe outcome with `windows`. |
+| `error` | Why the run failed or was skipped. |
+| `actor` | Who triggered the run: `run_as` for a timed run, the caller for a run-now. |
+
+### 19.2 Endpoints
+
+| Method and path | Body | Answer |
+|---|---|---|
+| `GET /api/schedules?project=&enabled=` | | `200`, a list. With `project`: the project's schedules, and the global ones when the caller may read them. Without: all for the operator and a sysadmin; the caller's project for another agent. |
+| `POST /api/schedules` | `{name, project?, spec, action, enabled?: true, catch_up?: "skip"}` | `201`, the schedule. An absent `project` is the agent caller's project (the operator: global). `null` is global. |
+| `GET /api/schedules/{id}` | | `200`, the schedule. `{id}` is a ULID, `project/name` (encode the `/` as `%2F`), or a name. |
+| `PATCH /api/schedules/{id}` | `{name?, spec?, action?, enabled?, catch_up?}` | `200`, the schedule. A new `action` makes the caller the `run_as`. |
+| `DELETE /api/schedules/{id}` | | `204`. The runs go with it. |
+| `POST /api/schedules/{id}/run` | | `200`, the run when it ends. It runs as `run_as`. |
+| `POST /api/schedules/{id}/enable` | | `200`, the schedule, with a new `next_run_at`. An enable sets `consecutive_skips` to 0. |
+| `POST /api/schedules/{id}/disable` | | `200`, the schedule. |
+| `GET /api/schedules/{id}/runs?limit=&cursor=` | | `200`, the runs, newest first, with `X-Next-Cursor` (§2.4). |
+
+Errors:
+
+| Error | When |
+|---|---|
+| `422 invalid` | A field is not valid. The message starts with the field, and `details.field` names it: `name`, `spec`, `spec.expr`, `spec.tz`, `spec.every`, `spec.at`, `action`, `action.to`, `action.body`, `action.agent`, `action.text`, `action.target`, `action.cmd`, `action.cwd`, `action.timeout_secs`, `action.subscription`, `max_concurrency`, `project`. A cron error shows the expression: ``spec.expr: bad cron expression `*/15 * * *`: use five fields ...``. An interval under 60 s and an `at` in the past are `422`. |
+| `403 forbidden` | The rules of §19.3. |
+| `409 conflict` | The name is in use in the scope, or the project has `TERRARIUM_MAX_SCHEDULES_PER_PROJECT` (default 20) schedules. |
+| `409 file_managed` | A `PATCH`, `DELETE`, `enable`, or `disable` of a `file` schedule. Edit `projects/<name>.toml`, then `POST /api/reload`. A run-now is allowed. |
+
+Example: a lead reminds its worker every weekday at 09:00 London time.
+
+```sh
+curl --unix-socket "$SOCK" -H 'content-type: application/json' localhost/api/schedules -d '{
+  "name": "standup", "project": "terrarium",
+  "spec": {"kind": "cron", "expr": "0 9 * * MON-FRI", "tz": "Europe/London"},
+  "action": {"type": "mail", "to": "worker", "subject": "standup", "body": "Post your status on your card."}}'
+```
+
+Example: run the tests on a target every 30 minutes, and read the last run.
+
+```sh
+curl ... localhost/api/schedules -d '{"name": "tests", "project": "terrarium",
+  "spec": {"kind": "interval", "every": "30m"},
+  "action": {"type": "exec", "target": "terrarium-box", "cmd": ["make", "test"], "timeout_secs": 900}}'
+curl ... 'localhost/api/schedules/terrarium%2Ftests/runs?limit=1'
+```
+
+### 19.3 Rules
+
+| Caller | Read | Create, change, delete, run |
+|---|---|---|
+| operator | all | all |
+| `sysadmin` | all | all, global schedules too |
+| `project_admin` | its project's | its project's, when the action stays inside the project (below) |
+| `member` | its project's | no |
+
+"Inside the project" for a `project_admin`:
+
+- `mail`: to an agent of the project, to `project:<project>`, or to `operator`.
+- `turn` and `agent`: an agent of the project.
+- `exec`: a global target or a target of the project. At run time, the
+  executor checks the policy and the leases of `run_as`, as for any exec.
+  When `run_as` may not use the target, the run is `failed` with the
+  policy error.
+- `probe`: a subscription that an agent of the project uses.
+
+A global schedule needs a sysadmin. An enable and a run-now check the
+action again; a disable and a delete check only the scope. An agent that
+enables or runs a schedule whose `run_as` is another actor must also be
+able to do the action itself: use the target of an `exec` (its policy or
+a lease), and mail the recipient of a `mail` under its own §7.1 rules.
+Else it is `403`, so a run-now cannot borrow the rights of `run_as`.
+
+**The rights check at each run.** Before each run, the daemon reads the
+`run_as` actor from the store and applies the rules above to it. When the
+agent is gone (`agent rm`), lost its role, or the action names an object
+that is gone, the run is `skipped` with the reason, and
+`consecutive_skips` goes up by 1. At 3, the daemon disables the schedule,
+writes `disabled_reason`, and mails the operator from `system` ("Schedule
+`<project>/<name>` disabled"). Any other end of a run sets the count to 0.
+A skip for another reason (`still running`, `agent not running`) does not
+count.
+
+**Safety.**
+
+- One run at a time: a trigger while a run of the schedule is `running`
+  makes a `skipped: still running` run.
+- The minimum interval is 60 s. A cron expression has five fields, so it
+  cannot run more often than once a minute.
+- An exec run has a limit of 300 s by default, 3600 s at most. At the
+  limit, the daemon kills the command, and the run is `failed`.
+- Mail goes through the normal send path: the sender is `run_as`, so a
+  schedule that an agent made sends as that agent, with its
+  `policy.mail_to` and `cross_project`. The loop guard (PLAN §12) holds a
+  message on a paused thread; the run is `ok`, and its summary says that
+  the message is held.
+
+**The timer.** Every 10 s, the daemon starts the runs of the enabled
+schedules whose `next_run_at` has passed, and computes the next run of
+each (in the `tz` of a cron spec). At a daemon start, a run that the old
+daemon left `running` becomes `failed` ("the daemon stopped during the
+run"). A schedule whose next run passed more than one tick before the
+start computes its next run from now; with `catch_up: once`, it also
+runs one time, with the trigger `catch_up`.
+
+**Retention.** The daily prune timer keeps the newest 500 runs of each
+schedule.
+
+**Audit.** `schedule.create`, `schedule.update` (`enable` and `disable`
+too), `schedule.delete`, and `schedule.run` (`{id, run, trigger, status,
+summary, run_as}`), with the actor of the request, or `run_as` for a
+timed run. The actions write their own rows as well: `agent.send`,
+`agent.start`, `target.exec`, and so on, with the `run_as` actor.
+
+**Fleet and definition files.** `[[projects.schedules]]` in a fleet file
+(fleet.md §1) and `[[schedules]]` in `projects/<name>.toml` take the
+fields `name`, `spec`, `action`, `enabled`, and `catch_up`. A fleet
+schedule has the key `project/name` and the `source` `fleet:<name>`; an
+apply makes or updates it, and `--prune` deletes one that the file drops.
+A file schedule runs as `operator`.

@@ -354,8 +354,8 @@ requests only, so they work the same in both modes (agent-rpc.md,
 
 ### Fleet files
 
-A fleet file declares projects, agents, targets, and subscriptions in one
-file. [fleet.md](fleet.md) has the file format and the rules.
+A fleet file declares projects, agents, targets, schedules, and
+subscriptions in one file. [fleet.md](fleet.md) has the file format and the rules.
 
 ```
 terrarium fleet validate <file|-> [--offline]   check the file; exit 2 on errors
@@ -374,14 +374,50 @@ terrarium fleet export <project> [--name n] [-o file]
   or release, `=` unchanged, `!` conflict. An update shows each changed
   field as `field: old -> new`, and `drift: ...` when the object changed
   outside the fleet.
-- `--prune` deletes the agents and targets that the file no longer
-  declares, and releases its projects and subscriptions. It needs
+- `--prune` deletes the agents, targets, and schedules that the file no
+  longer declares, and releases its projects and subscriptions. It needs
   `--confirm` when an agent to delete has a live session.
 - `--start` starts each agent with `start = true` that does not run.
 - `validate --offline` checks the file without the daemon.
 - `export` writes the TOML to stdout, or to `-o file`.
 
-## 5. Operator commands
+### Schedules
+
+`schedule` has the alias `schedules`. A schedule runs one action on a
+cron expression, an interval, or one time. It runs as the actor that made
+it, and the daemon checks that actor's rights again at each run
+([api.md §19](api.md#19-schedules)).
+
+```
+terrarium schedule ls [--project p] [--all] [--enabled | --disabled]
+terrarium schedule show <id|project/name>
+terrarium schedule new <name> (--cron "*/15 * * * *" [--tz Europe/London] | --every 30m | --at <time|+2h>)
+                       (--mail <to> [-s subject] --body <text|-> [--thread T]
+                        | --turn <agent> --text <text|-> [--start-if-stopped]
+                        | --exec <target> [--cwd dir] [--timeout s] -- <cmd...>
+                        | --agent <agent> --verb start|stop|restart
+                        | --probe <subscription>)
+                       [--project p | --global] [--catch-up skip|once] [--disabled]
+terrarium schedule set <id> [--rename n] [a new time] [a new action] [--catch-up c] [--enabled | --disabled]
+terrarium schedule rm <id>
+terrarium schedule run <id>                   run now; prints the run; exit 1 when it failed
+terrarium schedule enable|disable <id>
+terrarium schedule runs <id> [--limit 20]     newest first
+```
+
+- `<id>` is the ULID, `project/name`, or a name in your project.
+- `new` needs one time and one action. The project is `--project`, or the
+  agent's own project. The operator names a project or gives `--global`
+  (a global schedule needs sysadmin or the operator).
+- `--at` takes an RFC 3339 time, or `+30m`, `+2h`, `+1d` from now.
+- A `project_admin` makes schedules of its own project whose action stays
+  inside the project: mail to the project's agents, its inbox, or the
+  operator; a turn or a verb on an agent of the project; an exec on a
+  global or project target that it may use at run time; a probe of a
+  subscription that the project uses. A member reads only.
+- `schedule run` prints the run line, and the tail of stdout and stderr of
+  an exec.
+
 
 ```
 terrarium daemon status                       exits non-zero when the daemon does not run
@@ -447,6 +483,7 @@ terrarium admin harness update <name> [--version v|latest] [--force]   npm insta
 terrarium admin harness update --all [--force]   every harness and the extension to the latest
 terrarium admin audit [--since time] [--actor a] [--action a]
 terrarium admin fleet validate|plan|apply|ls|show|export ...
+terrarium admin schedule ls|show|new|set|rm|run|enable|disable|runs ...
 ```
 
 `admin role grant` reads the roles, adds the role, and writes the whole set.

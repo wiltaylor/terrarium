@@ -888,6 +888,83 @@ async fn api_keys_are_write_only() {
 }
 
 #[tokio::test]
+async fn zai_key_is_a_claude_and_pi_subscription_with_no_probe() {
+    let env = boot(|_| {}, |_, _| {}).await;
+    let td = &env.td;
+    let secret = "zk-very-secret-value";
+    // A plan that Z.ai does not have, and a plan for another provider.
+    td.post(
+        "/api/subscriptions/glm/api-key",
+        json!({"provider": "zai", "plan": "Max 20x", "key": secret}),
+    )
+    .await
+    .err(422, "invalid");
+    td.post(
+        "/api/subscriptions/or/api-key",
+        json!({"provider": "openrouter", "plan": "api", "key": secret}),
+    )
+    .await
+    .err(422, "invalid");
+    td.post(
+        "/api/subscriptions",
+        json!({"name": "glm-def", "provider": "zai", "plan": "pro"}),
+    )
+    .await
+    .err(422, "invalid");
+    let r = td
+        .post(
+            "/api/subscriptions/glm/api-key",
+            json!({"provider": "zai", "plan": "api", "key": secret}),
+        )
+        .await;
+    let body = r.ok().to_string();
+    assert!(!body.contains(secret), "{body}");
+    assert_eq!(r.body["provider"], "zai");
+    assert_eq!(r.body["plan"], "api");
+    assert_eq!(r.body["harnesses"], json!(["claude", "pi"]));
+    assert_eq!(r.body["env_var"], "ZAI_API_KEY");
+    assert_eq!(r.body["login_status"], "api_key");
+    assert_eq!(r.body["local_estimate_only"], true);
+    assert_eq!(r.body["has_api_key"], true);
+    assert!(r.body.get("probe").is_none(), "{body}");
+    // No plan: the GLM Coding Plan.
+    let r = td
+        .post(
+            "/api/subscriptions/glm2/api-key",
+            json!({"provider": "zai", "key": secret}),
+        )
+        .await;
+    assert_eq!(r.ok()["plan"], "coding");
+    let sub = td
+        .daemon
+        .as_ref()
+        .unwrap()
+        .state
+        .db
+        .read(|c| terrariumd::store::subscriptions::get(c, "glm"))
+        .await
+        .unwrap();
+    let vars: std::collections::BTreeMap<String, String> =
+        terrariumd::login_session::credential_env_for(&td.state, &sub)
+            .into_iter()
+            .collect();
+    assert_eq!(vars["ZAI_API_KEY"], secret);
+    assert_eq!(vars["ANTHROPIC_AUTH_TOKEN"], secret);
+    assert_eq!(vars["ANTHROPIC_BASE_URL"], "https://api.z.ai/api/anthropic");
+    assert!(!vars.contains_key("ANTHROPIC_API_KEY"));
+    // Verify does not ask Claude Code; logout would end the shared login.
+    let v = td.post_empty("/api/subscriptions/glm/verify").await;
+    assert_eq!(v.ok()["subscription"]["login_status"], "api_key");
+    td.post_empty("/api/subscriptions/glm/logout")
+        .await
+        .err(422, "invalid");
+    for path in ["/api/subscriptions", "/api/audit", "/api/events"] {
+        let text = td.get(path).await.body.to_string();
+        assert!(!text.contains(secret), "{path}: {text}");
+    }
+}
+
+#[tokio::test]
 async fn copilot_probe_takes_a_stored_pat() {
     let env = boot(|_| {}, |_, _| {}).await;
     let td = &env.td;

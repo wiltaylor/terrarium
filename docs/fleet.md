@@ -1,7 +1,7 @@
 # Fleet files
 
 A fleet file declares a full Terrarium set-up in one file: projects, their
-repos, agents, and targets, global targets, and subscriptions. A vmlab lab
+repos, agents, targets, and schedules, global targets, and subscriptions. A vmlab lab
 file declares a full lab in the same way. PLAN §20 (Phase 6) asks for it.
 
 The example is [`examples/fleet/terrarium.fleet.toml`](../examples/fleet/terrarium.fleet.toml).
@@ -63,6 +63,23 @@ targets = ["buildbox", "shared-lab"]
 name = "buildbox"
 kind = "ssh"
 address = "build@buildbox.lan"
+
+[[projects.schedules]]           # a ScheduleDef (api.md §19), no `project`
+name = "standup"
+catch_up = "once"                # optional: `skip` (the default) or `once`
+enabled = true                   # optional
+spec = { kind = "cron", expr = "0 9 * * MON-FRI", tz = "Europe/London" }
+action = { type = "mail", to = "lead", subject = "standup", body = "Post your status." }
+
+[[projects.schedules]]
+name = "tests"
+[projects.schedules.spec]
+kind = "interval"
+every = "30m"
+[projects.schedules.action]
+type = "exec"
+target = "buildbox"
+cmd = ["make", "test"]
 ```
 
 Rules:
@@ -80,6 +97,12 @@ Rules:
 - `checkout.on_agent_create` names repos of the same project.
 - `policy.targets` names global targets and targets of the agent's own
   project.
+- A schedule takes its project from the enclosing `[[projects]]`. Its
+  key is `project/name`, and its name is unique in the project. Its
+  `spec` must be valid (a five-field cron expression, an interval of 60 s
+  or more, or an `at` in the future); `plan` reports an error at
+  `projects.<p>.schedules.<name>`. An agent or target that its `action`
+  names must exist after the apply.
 - The fleet names `validate`, `plan`, `apply`, and `export` are reserved.
 
 A subscription or a target that an agent names, and that the file does not
@@ -103,7 +126,7 @@ owner and the state of each object after the last apply.
 | An API object that no fleet owns | `update` or `unchanged`, with `adopt` |
 | Declared in a definition file (`source = file`) | `conflict`: the definition file wins |
 | Owned by another fleet | `conflict` |
-| Owned by this fleet, no longer in the file | `delete` (agents, targets) or `release` (projects, subscriptions) |
+| Owned by this fleet, no longer in the file | `delete` (agents, targets, schedules) or `release` (projects, subscriptions) |
 
 A fleet object shows `source = fleet:<name>` in the API. The API can
 change it, because it is not file-managed. The next `plan` shows the
@@ -112,8 +135,8 @@ file is the truth, as for `source = file` objects. `POST /api/reload`
 deletes and releases `source = file` objects only, so it keeps the fleet
 objects.
 
-`--prune` deletes the agents and targets that the fleet owns and the file
-no longer declares. It releases the projects and subscriptions: they stay
+`--prune` deletes the agents, targets, and schedules that the fleet owns
+and the file no longer declares. It releases the projects and subscriptions: they stay
 as API objects, with their board, cards, wiki, and quota samples. This is
 the same as a definition file that is removed. Without `--prune`, `apply`
 keeps them and reports them as `skipped`.
@@ -164,7 +187,8 @@ unchanged, and `!` conflict.
 - `apply` clones `checkout.on_agent_create` into the workspace of each new
   agent, as `agent new` does.
 - `export` captures a project that was made by hand. The fleet declares the
-  project, its repos, its agents, and its project targets. Subscriptions
+  project, its repos, its agents, its project targets, and its schedules
+  (not those of `projects/<name>.toml`). Subscriptions
   and global targets stay references. `start` is `false` for each agent.
   An apply of the export adopts the project with no changes.
 
@@ -200,6 +224,7 @@ PLAN §10 applies to each object of the plan:
 | A project target | project_admin of the project |
 | A global target | sysadmin |
 | A subscription | sysadmin |
+| A schedule | project_admin of its project, and an action inside the project (api.md §19.3) |
 
 So a project_admin may apply a fleet that touches only its own project. A
 member may not plan or apply (403). Anyone may validate. An agent cannot
@@ -246,7 +271,11 @@ Migration 9 in `crates/terrariumd/src/db.rs` makes two tables:
 - `fleet_objects`: kind, key, owning fleet, project, and the state of the
   object after the last apply (JSON). An object has one owner at most.
 
-The `source` column of `projects`, `agents`, `targets`, and
+A fleet schedule runs as the actor of the apply: `operator` for a fleet
+file in the config dir. A changed `action` makes the actor of the apply
+its `run_as` again (api.md §19.1).
+
+The `source` column of `projects`, `agents`, `targets`, `schedules`, and
 `subscriptions` accepts `file`, `api`, and `fleet:<name>`. An apply writes
 `fleet:<name>` on each object that it makes or adopts, and a release sets
 `api` again. A `file` row stays `file`. Migration 9 also writes

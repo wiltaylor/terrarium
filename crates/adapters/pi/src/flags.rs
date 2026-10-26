@@ -131,6 +131,10 @@ pub const DEFAULT_MODELS: &[(&str, &str)] = &[
     ("groq", "openai/gpt-oss-20b"),
     ("deepseek", "deepseek-flash"),
     ("mistral", "mistral-small-latest"),
+    // Z.ai: the GLM Coding Plan (built-in `zai`) and pay as you go (the
+    // custom `zai-api`). From pi 1.4.0's `zai` catalog and docs.z.ai.
+    ("zai", terrarium_core::zai::MODEL_FAST),
+    ("zai-api", terrarium_core::zai::MODEL_FAST),
 ];
 
 /// The default model id for a pi provider id, or `None` when the table
@@ -159,10 +163,13 @@ mod tests {
             "groq",
             "deepseek",
             "mistral",
+            "zai",
+            "zai-api",
         ] {
             assert!(default_model(p).is_some(), "{p}");
         }
         assert_eq!(default_model("openai-codex"), Some("gpt-6-luna"));
         assert_eq!(default_model("glm53-exl3"), None);
+        assert_eq!(default_model("zai"), Some("glm-5.3-flash"));
     }
 }

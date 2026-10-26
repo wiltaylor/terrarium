@@ -68,6 +68,11 @@ import type {
   Repo,
   Revision,
   Role,
+  NewSchedule,
+  Schedule,
+  SchedulePatch,
+  ScheduleQuery,
+  ScheduleRun,
   Session,
   SessionGrant,
   StartLogin,
@@ -312,6 +317,26 @@ export interface Api {
     extendLease(name: string, agent: string, until: string | null): Promise<Lease>;
     /** `DELETE /api/targets/{name}/leases/{agent}`: answers the ended lease. */
     revokeLease(name: string, agent: string): Promise<Lease>;
+  };
+
+  /**
+   * docs/api.md §19. Rights: the operator always; a project_admin within its
+   * project; a member reads only; a global schedule needs a sysadmin
+   * (`403 forbidden`). A bad field is `422 invalid` with `details.field`.
+   */
+  schedules: {
+    /** `GET /api/schedules?project=&enabled=`: with `project`, the global schedules and the project's. */
+    list(q?: ScheduleQuery): Promise<Schedule[]>;
+    get(id: string): Promise<Schedule>;
+    create(s: NewSchedule): Promise<Schedule>;
+    update(id: string, patch: SchedulePatch): Promise<Schedule>;
+    remove(id: string): Promise<void>;
+    /** `POST /api/schedules/{id}/run`: run now. The run ends later; watch the `schedule` events. */
+    run(id: string): Promise<ScheduleRun>;
+    enable(id: string): Promise<Schedule>;
+    disable(id: string): Promise<Schedule>;
+    /** `GET /api/schedules/{id}/runs?limit=&cursor=`, newest first. */
+    runs(id: string, q?: PageQuery): Promise<Page<ScheduleRun>>;
   };
 
   /** docs/host-protocol.md, the daemon's `api/hosts.rs`. */
@@ -573,6 +598,18 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       grant: (name, body) => post(`/api/targets/${seg(name)}/leases`, body),
       extendLease: (name, agent, until) => patch(`/api/targets/${seg(name)}/leases/${seg(agent)}`, { until }),
       revokeLease: (name, agent) => t.request("DELETE", `/api/targets/${seg(name)}/leases/${seg(agent)}`),
+    },
+
+    schedules: {
+      list: (q = {}) => all("/api/schedules", { ...q }),
+      get: (id) => get(`/api/schedules/${seg(id)}`),
+      create: (body) => post("/api/schedules", body),
+      update: (id, body) => patch(`/api/schedules/${seg(id)}`, body),
+      remove: (id) => del(`/api/schedules/${seg(id)}`),
+      run: (id) => post(`/api/schedules/${seg(id)}/run`),
+      enable: (id) => post(`/api/schedules/${seg(id)}/enable`),
+      disable: (id) => post(`/api/schedules/${seg(id)}/disable`),
+      runs: (id, q = {}) => page(`/api/schedules/${seg(id)}/runs`, { ...q }),
     },
 
     hosts: {

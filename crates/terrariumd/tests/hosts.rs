@@ -2784,3 +2784,142 @@ async fn target_caps_and_the_project_prefix() {
     lab.td.post_empty("/api/targets/terra-t1/up").await.ok();
     task.abort();
 }
+
+/// Schedules (docs/api.md §19): an `exec` action runs through the
+/// executor as the schedule's `run_as`, with the same policy and audit as
+/// any exec. The run keeps the tail of the output and the exit code.
+#[tokio::test]
+async fn scheduled_exec_runs_through_the_executor() {
+    let lab = Lab::start().await;
+    let _h = lab.host("lab1").await;
+    lab.target(json!({"name": "box", "kind": "host", "host": "lab1"}))
+        .await;
+    lab.target(json!({"name": "dbox", "kind": "docker", "host": "lab1",
+                      "image": "alpine:3"}))
+        .await;
+    lab.td.project("terra").await;
+    let lead = id_of(
+        &lab.td
+            .agent("terra", "lead", json!({"roles": ["project_admin"]}))
+            .await,
+    );
+    let exec = |name: &str, target: &str, cmd: Value| {
+        json!({"name": name, "project": "terra", "spec": {"kind": "interval", "every": "1h"},
+               "action": {"type": "exec", "target": target, "cmd": cmd, "timeout_secs": 30}})
+    };
+    let r = lab
+        .td
+        .post(
+            "/api/schedules",
+            exec(
+                "check",
+                "box",
+                json!(["sh", "-c", "echo out; echo err >&2"]),
+            ),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let run = lab.td.post_empty("/api/schedules/terra%2Fcheck/run").await;
+    let run = run.ok();
+    assert_eq!(run["status"], "ok", "{run}");
+    assert_eq!(run["output"]["exit_code"], 0);
+    assert_eq!(run["output"]["stdout"], "out\n");
+    assert_eq!(run["output"]["stderr"], "err\n");
+    let row = last_audit(&lab.td, "target.exec").await;
+    assert_eq!(row["actor"], "operator");
+    assert_eq!(row["target"], "box");
+    assert!(
+        row["detail"]["command"]
+            .as_str()
+            .unwrap()
+            .starts_with("sh -c echo out")
+    );
+    assert_eq!(
+        lab.state().executor.session_count(),
+        0,
+        "the run closes its session"
+    );
+
+    // A non-zero exit fails the run, with the code.
+    lab.td
+        .post(
+            "/api/schedules",
+            exec("bad", "box", json!(["sh", "-c", "exit 3"])),
+        )
+        .await
+        .ok();
+    let run = lab.td.post_empty("/api/schedules/terra%2Fbad/run").await;
+    assert_eq!(run.ok()["status"], "failed");
+    assert_eq!(run.body["error"], "exit code 3");
+    assert_eq!(run.body["output"]["exit_code"], 3);
+
+    // A docker target: the recording fake docker gets the exec.
+    lab.td.post_empty("/api/targets/dbox/up").await.ok();
+    lab.td
+        .post(
+            "/api/schedules",
+            exec("in-docker", "dbox", json!(["make", "test"])),
+        )
+        .await
+        .ok();
+    let runs = {
+        let mut out = Vec::new();
+        let at = chrono::Utc::now() + chrono::Duration::hours(2);
+        for h in terrariumd::scheduler::tick(&lab.state(), at).await {
+            out.push(h.await.unwrap().unwrap());
+        }
+        out
+    };
+    assert_eq!(runs.len(), 3, "{runs:?}");
+    let docker = runs.iter().find(|r| r.output["target"] == "dbox").unwrap();
+    assert_eq!(docker.status, "ok", "{docker:?}");
+    assert!(
+        lab.log().contains("docker exec") && lab.log().contains("terrarium-dbox make test"),
+        "{}",
+        lab.log()
+    );
+
+    // The lead may schedule an exec on a global target, but at run time
+    // the executor checks the lead's own policy and leases: the run
+    // fails with the policy error.
+    let r = lab
+        .td
+        .post_as(
+            &lead,
+            "/api/schedules",
+            exec("mine", "box", json!(["true"])),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    let run = lab.td.post_empty("/api/schedules/terra%2Fmine/run").await;
+    let run = run.ok();
+    assert_eq!(run["status"], "failed", "{run}");
+    assert!(
+        run["error"].as_str().unwrap().contains("policy.targets"),
+        "{run}"
+    );
+    // The lead cannot borrow the operator's rights: a run-now of the
+    // operator's exec on a target that the lead may not use is refused.
+    lab.td
+        .post_empty_as(&lead, "/api/schedules/terra%2Fcheck/run")
+        .await
+        .err(403, "forbidden");
+    // A lease lets it in.
+    lab.td
+        .post(
+            "/api/targets/box/leases",
+            json!({"agent": lead, "until": "30m"}),
+        )
+        .await
+        .ok();
+    let run = lab.td.post_empty("/api/schedules/terra%2Fmine/run").await;
+    assert_eq!(run.ok()["status"], "ok", "{}", run.body);
+    let row = last_audit(&lab.td, "target.exec").await;
+    assert_eq!(row["actor"], format!("agent:{lead}"));
+    let run = lab
+        .td
+        .post_empty_as(&lead, "/api/schedules/terra%2Fcheck/run")
+        .await;
+    assert_eq!(run.ok()["status"], "ok", "{}", run.body);
+    assert_eq!(run.body["actor"], format!("agent:{lead}"));
+}

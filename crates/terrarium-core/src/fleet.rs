@@ -65,6 +65,7 @@ const PROJECT_KEYS: &[&str] = &[
     "checkout",
     "agents",
     "targets",
+    "schedules",
 ];
 const AGENT_KEYS: &[&str] = &[
     "name",
@@ -98,6 +99,7 @@ const TARGET_KEYS: &[&str] = &[
     "snapshot_before_task",
 ];
 const SUBSCRIPTION_KEYS: &[&str] = &["name", "provider", "plan", "harnesses", "probe", "alert_at"];
+const SCHEDULE_KEYS: &[&str] = &["name", "enabled", "catch_up", "spec", "action"];
 
 /// Values for each agent that does not set them.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -222,6 +224,9 @@ pub enum Kind {
     Project,
     Target,
     Agent,
+    /// A schedule of a project (`[[projects.schedules]]`). Its key is
+    /// `project/name`.
+    Schedule,
 }
 
 impl Kind {
@@ -231,6 +236,7 @@ impl Kind {
             Self::Project => "project",
             Self::Target => "target",
             Self::Agent => "agent",
+            Self::Schedule => "schedule",
         }
     }
 }
@@ -516,6 +522,18 @@ fn project(
             }
         }
     }
+    if let Some(toml::Value::Array(list)) = t.get("schedules") {
+        for (i, r) in list.iter().enumerate() {
+            if let toml::Value::Table(r) = r {
+                let n = r.get("name").and_then(toml::Value::as_str);
+                let at = match n {
+                    Some(n) => format!("{at}.schedules.{n}"),
+                    None => format!("{at}.schedules[{i}]"),
+                };
+                unknown_keys(r, SCHEDULE_KEYS, &at, issues);
+            }
+        }
+    }
     let def: ProjectDef = def(t, at, issues)?;
     let agents = agent_tables
         .into_iter()
@@ -624,6 +642,13 @@ impl Fleet {
             key: agent_key(&a.def),
             project: Some(a.def.project.clone()),
         }));
+        out.extend(self.projects.iter().flat_map(|p| {
+            p.def.schedules.iter().map(|s| ObjectRef {
+                kind: Kind::Schedule,
+                key: format!("{}/{}", p.def.name, s.name),
+                project: Some(p.def.name.clone()),
+            })
+        }));
         out
     }
 
@@ -708,6 +733,7 @@ impl Fleet {
                 let what = match kind {
                     Kind::Target => "target names are one namespace across projects",
                     Kind::Agent => "agent names are unique in a project",
+                    Kind::Schedule => "schedule names are unique in a project",
                     _ => "names are unique",
                 };
                 issues.push(Issue::error(
@@ -813,6 +839,7 @@ impl Fleet {
             let mut t = table_of(&p.def);
             let repos = t.remove("repos");
             let checkout = t.remove("checkout");
+            t.remove("schedules");
             w.table(Some("[[projects]]"), &t, PROJECT_KEYS);
             if let Some(toml::Value::Array(repos)) = repos {
                 for r in repos.iter().filter_map(toml::Value::as_table) {
@@ -843,6 +870,18 @@ impl Fleet {
                 let mut tt = target_table(d);
                 tt.remove("project");
                 w.table(Some("[[projects.targets]]"), &tt, TARGET_KEYS);
+            }
+            for s in &p.def.schedules {
+                let mut st = table_of(s);
+                let spec = st.remove("spec");
+                let action = st.remove("action");
+                w.table(Some("[[projects.schedules]]"), &st, SCHEDULE_KEYS);
+                if let Some(toml::Value::Table(x)) = spec {
+                    w.table(Some("[projects.schedules.spec]"), &x, &["kind"]);
+                }
+                if let Some(toml::Value::Table(x)) = action {
+                    w.table(Some("[projects.schedules.action]"), &x, &["type"]);
+                }
             }
         }
         w.out
@@ -919,6 +958,10 @@ fn at_of(o: &ObjectRef) -> String {
             let (p, n) = o.key.split_once('/').unwrap_or(("", &o.key));
             format!("projects.{p}.agents.{n}")
         }
+        Kind::Schedule => {
+            let (p, n) = o.key.split_once('/').unwrap_or(("", &o.key));
+            format!("projects.{p}.schedules.{n}")
+        }
     }
 }
 
@@ -974,6 +1017,69 @@ mod tests {
             .ok()
             .unwrap_or_else(|e| panic!("{e:#?}\n{text}"));
         assert_eq!(f, again, "{text}");
+    }
+
+    #[test]
+    fn schedules_parse_check_and_round_trip() {
+        let text = r#"
+name = "sched"
+
+[[projects]]
+name = "terra"
+
+[[projects.agents]]
+name = "lead"
+harness = "claude"
+
+[[projects.schedules]]
+name = "standup"
+catch_up = "once"
+spec = { kind = "cron", expr = "0 9 * * MON-FRI", tz = "Europe/London" }
+action = { type = "mail", to = "lead", subject = "standup", body = "post your status" }
+
+[[projects.schedules]]
+name = "tests"
+enabled = false
+[projects.schedules.spec]
+kind = "interval"
+every = "30m"
+[projects.schedules.action]
+type = "exec"
+target = "terra-box"
+cmd = ["make", "test"]
+"#;
+        let f = parse(text, None).ok().unwrap();
+        let s = &f.projects[0].def.schedules;
+        assert_eq!(s.len(), 2);
+        assert!(!s[1].enabled);
+        let keys: Vec<String> = f
+            .objects()
+            .into_iter()
+            .filter(|o| o.kind == Kind::Schedule)
+            .map(|o| o.key)
+            .collect();
+        assert_eq!(keys, ["terra/standup", "terra/tests"]);
+        let out = f.to_toml();
+        assert!(out.contains("[[projects.schedules]]"), "{out}");
+        let again = parse(&out, None)
+            .ok()
+            .unwrap_or_else(|e| panic!("{e:#?}\n{out}"));
+        assert_eq!(f, again, "{out}");
+        // A typo and a duplicate name are errors.
+        let bad = text.replace("catch_up = \"once\"", "catchup = \"once\"");
+        let p = parse(&bad, None);
+        assert!(
+            errors(&p).iter().any(|e| e.contains("schedules.standup")),
+            "{:?}",
+            errors(&p)
+        );
+        let dup = text.replace("name = \"tests\"", "name = \"standup\"");
+        let p = parse(&dup, None);
+        assert!(
+            errors(&p).iter().any(|e| e.contains("declared 2 times")),
+            "{:?}",
+            errors(&p)
+        );
     }
 
     const SMALL: &str = r#"

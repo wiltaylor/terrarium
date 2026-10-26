@@ -1,0 +1,368 @@
+// The create and edit dialog of a schedule (docs/api.md §19). The state is
+// in ./form; this file only draws it. A `403` and a `422` show inline: the
+// `422` under the field that the daemon names.
+
+import { createMemo, createResource, For, Index, Show, type JSX } from "solid-js";
+import { ErrorBanner, Modal } from "../../components/ui";
+import type { AgentVerb, CatchUp, Schedule, ScheduleActionType, ScheduleSpecKind } from "../../api/types";
+import { agents, api, projects, subscriptions } from "../../stores";
+import { everyWords, parseEvery, utcText, WEEKDAYS } from "../../lib/schedule";
+import { ACTION_TYPES, agentOptions, CRON_PRESETS, createScheduleDialog, GLOBAL, recipientOptions, targetOptions, timeZones, type CronPreset, type FormKey, type ScheduleOutcome } from "./form";
+
+const SPEC_KINDS: readonly { id: ScheduleSpecKind; label: string }[] = [
+  { id: "cron", label: "Cron" },
+  { id: "interval", label: "Interval" },
+  { id: "at", label: "Once, at a time" },
+];
+
+const localZone = (() => {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone;
+  } catch {
+    return undefined;
+  }
+})();
+
+export function ScheduleDialog(props: { project: string | null; schedule?: Schedule; onClose: () => void; onSaved: (s: Schedule) => void }) {
+  // The dialog reads its props once: a new schedule needs a new dialog.
+  const dlg = createScheduleDialog(api, { project: props.project, schedule: props.schedule });
+  const f = dlg.form;
+  const [targets] = createResource(() => api.targets.list().catch(() => []));
+  const zones = timeZones(localZone);
+  const preview = createMemo(() => (f().specKind === "cron" ? dlg.preview(Date.now()) : null));
+  const forbidden = () => {
+    const o = dlg.outcome();
+    return o.kind === "forbidden" ? (o as Extract<ScheduleOutcome, { kind: "forbidden" }>) : null;
+  };
+  /** A refusal with no field of the form: a banner at the end. */
+  const loose = () => {
+    const o = dlg.outcome();
+    return (o.kind === "invalid" || o.kind === "rejected") && !o.field ? o : null;
+  };
+  const submit = async (e: Event) => {
+    e.preventDefault();
+    const s = await dlg.submit();
+    if (s) props.onSaved(s);
+  };
+
+  /** A labelled field with the message of a refusal under it. */
+  // The hint and the error stay out of the <label>, so the input's name is the label alone.
+  const field = (key: FormKey, label: string, input: JSX.Element, hint?: () => JSX.Element) => (
+    <div class="field" classList={{ "field-bad": !!dlg.fieldError(key) }}>
+      <label>
+        {label}
+        {input}
+      </label>
+      <Show when={hint?.()}>{(h) => <span class="small muted">{h()}</span>}</Show>
+      <Show when={dlg.fieldError(key)}>
+        {(m) => (
+          <span class="field-error small" role="alert" aria-label={`Error in ${label}`}>
+            {m()}
+          </span>
+        )}
+      </Show>
+    </div>
+  );
+  const text = (key: FormKey & keyof ReturnType<typeof f>, label: string, placeholder = "", hint?: () => JSX.Element) =>
+    field(key, label, <input value={String(f()[key] ?? "")} placeholder={placeholder} onInput={(e) => dlg.set(key, e.currentTarget.value as never)} />, hint);
+
+  const agentPicker = () =>
+    field(
+      "agent",
+      "Agent",
+      <select aria-label="Agent" value={f().agent} onChange={(e) => dlg.set("agent", e.currentTarget.value)}>
+        <option value="" disabled selected={!f().agent}>
+          {f().scope === GLOBAL ? "Pick any agent" : "Pick an agent of the project"}
+        </option>
+        <For each={agentOptions(agents.state.agents, f().scope)}>
+          {(o) => (
+            <option value={o.value} selected={o.value === f().agent}>
+              {o.label}
+            </option>
+          )}
+        </For>
+      </select>,
+    );
+
+  return (
+    <Modal title={props.schedule ? `Edit schedule ${props.schedule.name}` : "New schedule"} onClose={() => props.onClose()}>
+      <form class="stack" onSubmit={submit} aria-label={props.schedule ? "Edit schedule" : "New schedule"}>
+        <div class="form-grid">
+          {text("name", "Name", "standup")}
+          {field(
+            "scope",
+            "Scope",
+            <select aria-label="Scope" value={f().scope} onChange={(e) => dlg.set("scope", e.currentTarget.value)} required disabled={!!props.schedule} title={props.schedule ? "The scope of a schedule does not change" : undefined}>
+              <option value="" disabled selected={!f().scope}>
+                Pick a project, or global
+              </option>
+              <For each={projects.projects()}>
+                {(p) => (
+                  <option value={p.name} selected={p.name === f().scope}>
+                    Project {p.name}
+                  </option>
+                )}
+              </For>
+              <option value={GLOBAL} selected={f().scope === GLOBAL}>
+                Global (needs sysadmin)
+              </option>
+            </select>,
+          )}
+          {field(
+            "specKind",
+            "When",
+            <select aria-label="When" value={f().specKind} onChange={(e) => dlg.set("specKind", e.currentTarget.value as ScheduleSpecKind)}>
+              <For each={SPEC_KINDS}>
+                {(k) => (
+                  <option value={k.id} selected={k.id === f().specKind}>
+                    {k.label}
+                  </option>
+                )}
+              </For>
+            </select>,
+          )}
+        </div>
+
+        <Show when={f().specKind === "cron"}>
+          <fieldset class="stack cron-helper" aria-label="Cron helper">
+            <legend class="small">Cron</legend>
+            <div class="form-grid">
+              {field(
+                "preset",
+                "Preset",
+                <select aria-label="Preset" value={f().preset} onChange={(e) => dlg.set("preset", e.currentTarget.value as CronPreset)}>
+                  <For each={CRON_PRESETS}>
+                    {(p) => (
+                      <option value={p.id} selected={p.id === f().preset}>
+                        {p.label}
+                      </option>
+                    )}
+                  </For>
+                </select>,
+              )}
+              <Show when={f().preset === "hourly"}>
+                {field("minute", "Minute", <input type="number" min="0" max="59" value={f().minute} onInput={(e) => dlg.set("minute", Math.max(0, Math.min(59, Number(e.currentTarget.value) || 0)))} />)}
+              </Show>
+              <Show when={f().preset === "weekly"}>
+                {field(
+                  "weekday",
+                  "Day",
+                  <select aria-label="Day" value={String(f().weekday)} onChange={(e) => dlg.set("weekday", Number(e.currentTarget.value))}>
+                    <For each={WEEKDAYS}>
+                      {(d) => (
+                        <option value={String(d.value)} selected={d.value === f().weekday}>
+                          {d.label}
+                        </option>
+                      )}
+                    </For>
+                  </select>,
+                )}
+              </Show>
+              <Show when={f().preset === "daily" || f().preset === "weekly"}>
+                {field("time", "Time (HH:MM)", <input type="time" value={f().time} onInput={(e) => dlg.set("time", e.currentTarget.value)} />)}
+              </Show>
+              {field("expr", "Expression", <input class="mono" aria-label="Cron expression" value={f().expr} placeholder="*/15 * * * *" onInput={(e) => dlg.set("expr", e.currentTarget.value)} />, () => "minute hour day-of-month month day-of-week")}
+              {field(
+                "tz",
+                "Time zone",
+                <>
+                  <input aria-label="Time zone" list="schedule-tz" value={f().tz} onInput={(e) => dlg.set("tz", e.currentTarget.value)} />
+                  <datalist id="schedule-tz">
+                    <Index each={zones}>{(z) => <option value={z()} />}</Index>
+                  </datalist>
+                </>,
+              )}
+            </div>
+            <div class="small" aria-label="Next runs" aria-live="polite">
+              <Show
+                when={preview() && "runs" in preview()! ? (preview() as { runs: number[] }).runs : null}
+                fallback={<span class="chip warn" title="The client preview; the daemon has the last word">{(preview() as { error?: string } | null)?.error ?? ""}</span>}
+              >
+                {(runs) => (
+                  <>
+                    <strong>Next 3 runs</strong>{" "}
+                    <For each={runs()}>
+                      {(ms) => (
+                        <span class="chip mono" title={new Date(ms).toISOString()}>
+                          {new Date(ms).toLocaleString(undefined, { weekday: "short", year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", timeZone: f().tz || "UTC", timeZoneName: "short" })}
+                        </span>
+                      )}
+                    </For>
+                  </>
+                )}
+              </Show>
+            </div>
+          </fieldset>
+        </Show>
+        <Show when={f().specKind === "interval"}>
+          <div class="form-grid">
+            {text("every", "Every", "15m", () => {
+              const s = parseEvery(f().every);
+              return s === null ? "A duration: 15m, 1h, 1h30m, 2d" : `every ${everyWords(s)}`;
+            })}
+          </div>
+        </Show>
+        <Show when={f().specKind === "at"}>
+          <div class="form-grid">
+            {field("at", "At (your time)", <input type="datetime-local" aria-label="At" value={f().at} onInput={(e) => dlg.set("at", e.currentTarget.value)} />, () => (f().at && !Number.isNaN(new Date(f().at).getTime()) ? `sent as ${utcText(new Date(f().at).toISOString())}` : ""))}
+          </div>
+        </Show>
+
+        <div class="form-grid">
+          {field(
+            "actionType",
+            "Action",
+            <select aria-label="Action" value={f().actionType} onChange={(e) => dlg.set("actionType", e.currentTarget.value as ScheduleActionType)}>
+              <For each={ACTION_TYPES}>
+                {(a) => (
+                  <option value={a.id} selected={a.id === f().actionType}>
+                    {a.label}
+                  </option>
+                )}
+              </For>
+            </select>,
+          )}
+          <Show when={f().actionType === "mail"}>
+            {field(
+              "mailTo",
+              "To",
+              <select aria-label="To" value={f().mailTo} onChange={(e) => dlg.set("mailTo", e.currentTarget.value)}>
+                <option value="" disabled selected={!f().mailTo}>
+                  Pick a recipient
+                </option>
+                <For each={recipientOptions(projects.projects(), agents.state.agents, f().scope)}>
+                  {(g) => (
+                    <optgroup label={g.label}>
+                      <For each={g.options}>
+                        {(o) => (
+                          <option value={o.value} selected={o.value === f().mailTo}>
+                            {o.label}
+                          </option>
+                        )}
+                      </For>
+                    </optgroup>
+                  )}
+                </For>
+              </select>,
+            )}
+            {text("mailSubject", "Subject", "Standup")}
+          </Show>
+          <Show when={f().actionType === "turn" || f().actionType === "agent"}>{agentPicker()}</Show>
+          <Show when={f().actionType === "agent"}>
+            {field(
+              "verb",
+              "Verb",
+              <select aria-label="Verb" value={f().verb} onChange={(e) => dlg.set("verb", e.currentTarget.value as AgentVerb)}>
+                <For each={["start", "stop", "restart"] as const}>
+                  {(v) => (
+                    <option value={v} selected={v === f().verb}>
+                      {v}
+                    </option>
+                  )}
+                </For>
+              </select>,
+            )}
+          </Show>
+          <Show when={f().actionType === "exec"}>
+            {field(
+              "target",
+              "Target",
+              <select aria-label="Target" value={f().target} onChange={(e) => dlg.set("target", e.currentTarget.value)}>
+                <option value="" disabled selected={!f().target}>
+                  {targets.loading ? "Loading…" : "Pick a target"}
+                </option>
+                <For each={targetOptions(targets() ?? [], f().scope)}>
+                  {(o) => (
+                    <option value={o.value} selected={o.value === f().target}>
+                      {o.label}
+                    </option>
+                  )}
+                </For>
+              </select>,
+            )}
+            {field("cmd", "Command", <input class="mono" aria-label="Command" value={f().cmd} placeholder="make test" onInput={(e) => dlg.set("cmd", e.currentTarget.value)} />, () => "An argv: quotes group words; no shell unless you write sh -c '…'")}
+            {text("cwd", "Working directory", "optional")}
+            {text("timeout", "Timeout (seconds)", "optional")}
+          </Show>
+          <Show when={f().actionType === "probe"}>
+            {field(
+              "subscription",
+              "Subscription",
+              <select aria-label="Subscription" value={f().subscription} onChange={(e) => dlg.set("subscription", e.currentTarget.value)}>
+                <option value="" disabled selected={!f().subscription}>
+                  Pick a subscription
+                </option>
+                <For each={subscriptions.list()}>
+                  {(s) => (
+                    <option value={s.name} selected={s.name === f().subscription}>
+                      {s.name}
+                      {s.probe ? "" : " (no probe)"}
+                    </option>
+                  )}
+                </For>
+              </select>,
+            )}
+          </Show>
+        </div>
+        <Show when={f().actionType === "mail"}>
+          {field("mailBody", "Body", <textarea rows={3} value={f().mailBody} onInput={(e) => dlg.set("mailBody", e.currentTarget.value)} />)}
+        </Show>
+        <Show when={f().actionType === "turn"}>
+          {field("text", "Text of the turn", <textarea rows={3} value={f().text} onInput={(e) => dlg.set("text", e.currentTarget.value)} />)}
+          <label class="row small">
+            <input type="checkbox" checked={f().startIfStopped} onChange={(e) => dlg.set("startIfStopped", e.currentTarget.checked)} />
+            start the agent when it is stopped
+          </label>
+        </Show>
+
+        <div class="row" style={{ "flex-wrap": "wrap", gap: "12px" }}>
+          <label class="row small">
+            Missed runs
+            <select aria-label="Catch up" value={f().catchUp} onChange={(e) => dlg.set("catchUp", e.currentTarget.value as CatchUp)}>
+              <option value="skip" selected={f().catchUp === "skip"}>
+                skip them
+              </option>
+              <option value="once" selected={f().catchUp === "once"}>
+                run once to catch up
+              </option>
+            </select>
+          </label>
+          <label class="row small">
+            <input type="checkbox" checked={f().enabled} onChange={(e) => dlg.set("enabled", e.currentTarget.checked)} />
+            enabled
+          </label>
+        </div>
+        <Show when={dlg.fieldError("catchUp")}>{(m) => <span class="field-error small" role="alert">{m()}</span>}</Show>
+
+        <Show when={forbidden()}>
+          {(o) => (
+            <div class="error-banner" role="alert" aria-label="Refused">
+              <div class="stack" style={{ gap: "2px" }}>
+                <strong>Refused: you may not write a {o().scope === GLOBAL ? "global schedule" : `schedule of project ${o().scope}`}.</strong>
+                <span class="small">{o().message}</span>
+                <span class="small muted">{o().scope === GLOBAL ? "A global schedule needs the sysadmin role. Choose a project." : `It needs project_admin of ${o().scope}; a member may only read.`}</span>
+              </div>
+            </div>
+          )}
+        </Show>
+        <Show when={loose()}>
+          {(o) => (
+            <p class="error-banner small" role="alert">
+              {o().message}
+              <Show when={o().kind === "rejected" && (o() as { daemonField?: string }).daemonField}>{(fld) => <span class="mono muted"> ({fld()})</span>}</Show>
+            </p>
+          )}
+        </Show>
+        <ErrorBanner error={dlg.outcome().kind === "error" ? (dlg.outcome() as { error: unknown }).error : null} />
+        <div class="row" style={{ "justify-content": "flex-end" }}>
+          <button type="button" onClick={() => props.onClose()}>
+            Cancel
+          </button>
+          <button class="primary" type="submit" disabled={dlg.outcome().kind === "sending"}>
+            {dlg.outcome().kind === "sending" ? "Saving…" : props.schedule ? "Save" : "Create"}
+          </button>
+        </div>
+      </form>
+    </Modal>
+  );
+}

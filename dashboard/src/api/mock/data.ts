@@ -1,6 +1,7 @@
 // Seed data for mock mode. `seed(now)` returns a fresh, self-consistent world.
 
 import { XSS_DOCUMENT } from "../../lib/xss-payloads";
+import { seedSchedules } from "./schedules";
 import type {
   Agent,
   AgentEvent,
@@ -18,6 +19,8 @@ import type {
   QuotaSample,
   Repo,
   Revision,
+  Schedule,
+  ScheduleRun,
   Session,
   Subscription,
   Target,
@@ -58,6 +61,10 @@ export interface MockWorld {
   hosts: Host[];
   /** Host tokens by host name. The API shows a token once, at create. */
   hostTokens: Record<string, string>;
+  /** Schedules (docs/api.md §19). */
+  schedules: Schedule[];
+  /** Schedule runs, oldest first. */
+  scheduleRuns: ScheduleRun[];
   audit: AuditEntry[];
   /** The last `seq` handed out. */
   seq: number;
@@ -733,7 +740,10 @@ ${XSS_DOCUMENT}
     auditRow(5, 26, "system", "agent.restart", byName("css-worker").id, "webshop", { reason: "3 restarts in 10 minutes" }),
   ];
 
+  const sched = seedSchedules(now, agents);
+
   return {
+    schedules: sched.schedules, scheduleRuns: sched.runs,
     projects, repos, agents, sessions, events, columns: { terrarium: COLUMNS.map((c) => ({ ...c })), webshop: COLUMNS.map((c) => ({ ...c })) },
     cards, memories, links, pages, revisions, artifacts, artifactBodies, versions, subscriptions, quota, usage, holds: [], apiKeys, mail, targets, leases, hosts, hostTokens, audit, seq,
   };

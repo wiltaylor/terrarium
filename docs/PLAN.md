@@ -495,6 +495,8 @@ to the audit log with the agent's ID.
 | Edit or delete any memory | no | in project | anywhere |
 | Attach repos, define project targets | no | in project | anywhere |
 | Lease a target to an agent at run time (§19; a global target needs sysadmin) | no | in project | anywhere |
+| Read schedules (§12b) | own project | own project | all, global too |
+| Create, edit, delete, run schedules (§12b; the action stays inside the project; a global schedule needs sysadmin) | no | in project | anywhere |
 | Create and delete projects | no | no | yes |
 | Define global targets | no | no | yes |
 | List host agents | yes | yes | yes |
@@ -524,6 +526,7 @@ terrarium admin role grant|revoke <agent> <role>
 terrarium admin target new ... | host ls                        sysadmin for global
 terrarium admin target grant|revoke <target> <agent> [--until 30m] [--exclusive]
 terrarium admin audit [--since ...]
+terrarium admin schedule new|set|rm|run|enable|disable|ls|show|runs ...   §12b
 ```
 
 Leader agents are ordinary agents with a role and a leader prompt template.
@@ -714,6 +717,46 @@ to target <t> (<state>) until <time or 'revoked'>. Run `terrarium targets
 ls`." after the lifecycle step of the grant, and "Your access to target <t>
 ended." An extend types nothing. A pointer for a stopped agent waits for its
 next start, as a card pointer does, also across a daemon restart.
+
+---
+
+## 12b. Schedules
+
+A schedule runs one action on a time: a five-field cron expression in a
+zone, an interval (60 s or more), or one time (`at`). The actions are mail,
+a turn into an agent, an exec on a target, an agent verb (start, stop,
+restart), and a quota probe. A lead uses them for reminders ("post your
+status at 09:00"), for checks ("run the tests every 30 minutes"), and to
+wake a stopped worker. `docs/api.md` §19 is the contract.
+
+- **Who acts.** A schedule runs as the actor that made it (`run_as`). An
+  agent's scheduled mail is mail from that agent, with its `mail_to` and
+  `cross_project` rules and the loop guard. An exec goes through the
+  executor with the agent's own policy and leases. Before each run, the
+  daemon reads the actor from the store and checks its rights again. A run
+  that the check refuses is `skipped` with the reason; after 3 in a row,
+  the daemon disables the schedule and mails the operator. A caller that
+  changes the action becomes the `run_as`, so an edit cannot borrow the
+  rights of the creator.
+- **Rights.** The §10 table: a project_admin keeps the action inside its
+  project (mail to the project's agents, its inbox, or the operator; a
+  turn or a verb on the project's agents; an exec on a global or project
+  target; a probe of a subscription that the project's agents use).
+  Members read only. A global schedule needs a sysadmin.
+- **Safety.** One run at a time for each schedule (an overlapping trigger
+  is `skipped: still running`). An exec run stops at 300 s by default,
+  3600 s at most. A project has at most
+  `TERRARIUM_MAX_SCHEDULES_PER_PROJECT` (20) schedules.
+- **The timer.** The daemon ticks every 10 s next to the lease, prune, and
+  quota timers. A tick starts the due runs and computes the next run of
+  each, with the `cron` crate in the schedule's zone. At a start, the
+  daemon fails the runs that the old daemon left `running`, and applies
+  `catch_up` to a run that it missed while it was down: `skip` computes
+  the next run from now, `once` also runs one time.
+- **Storage.** Migration 17: `schedules` and `schedule_runs`. The daily
+  prune keeps the newest 500 runs of each schedule. A schedule comes from
+  the API, a project file (`[[schedules]]`, `source = file`), or a fleet
+  (`[[projects.schedules]]`, `source = fleet:<name>`).
 
 ---
 
@@ -1008,6 +1051,10 @@ Two sources of truth, combined:
    - GitHub Copilot: the premium-request quota snapshot behind `copilot`'s
      usage display.
    - Google: the quota the Gemini CLI shows in `/stats`.
+   - Z.ai (GLM): an API key (provider `zai`, plan `coding` or `api`) that
+     Claude Code spends through Z.ai's Anthropic-compatible endpoint and pi
+     through its OpenAI-compatible one; it has no documented usage
+     endpoint, so it is local estimate only (api.md §16.5).
    The probe uses the credential in the shared harness home, or
    `pi auth print-bearer-token --provider <p>` for providers pi is logged in
    to, so there is no second login.

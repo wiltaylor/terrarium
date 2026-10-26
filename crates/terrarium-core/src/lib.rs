@@ -18,7 +18,9 @@ pub mod model;
 pub mod paths;
 pub mod protocol;
 pub mod role;
+pub mod schedule;
 pub mod status;
+pub mod zai;
 
 pub use adapter::{Adapter, Answer, ScreenHint};
 pub use error::{Error, Result};

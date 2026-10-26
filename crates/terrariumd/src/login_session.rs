@@ -1275,6 +1275,10 @@ pub fn kind_of(sub: &Subscription) -> Option<(LoginKind, Option<String>)> {
 pub struct ApiKey {
     pub provider: String,
     pub key: String,
+    /// `zai` only: `coding` (the GLM Coding Plan, the default) or `api`
+    /// (pay as you go). It becomes the subscription's plan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1286,6 +1290,7 @@ impl std::fmt::Debug for ApiKey {
         f.debug_struct("ApiKey")
             .field("provider", &self.provider)
             .field("key", &"<redacted>")
+            .field("plan", &self.plan)
             .field("base_url", &self.base_url)
             .finish()
     }
@@ -1302,6 +1307,9 @@ pub fn env_var_for(provider: &str) -> Option<(&'static str, Option<&'static str>
         "xai" => ("XAI_API_KEY", None),
         "groq" => ("GROQ_API_KEY", None),
         "github" | "github-copilot" | "copilot" => ("COPILOT_GITHUB_TOKEN", None),
+        // The base URLs are fixed per plan (`terrarium_core::zai`); no
+        // base URL var.
+        "zai" => (terrarium_core::zai::KEY_ENV, None),
         _ => return None,
     })
 }
@@ -1353,6 +1361,13 @@ pub fn stored_key(state_dir: &Path, name: &str) -> Option<String> {
 /// provider's key var, and the base URL var for an OpenAI-compatible
 /// endpoint. Empty when the subscription has no stored key.
 ///
+/// A Z.ai key (`terrarium_core::zai`) also gives the Claude Code env
+/// ([`terrarium_core::zai::claude_env`]): `ANTHROPIC_BASE_URL`,
+/// `ANTHROPIC_AUTH_TOKEN` (the key), `API_TIMEOUT_MS`, and the
+/// `ANTHROPIC_DEFAULT_*_MODEL` GLM ids. Never `ANTHROPIC_API_KEY`. pi
+/// reads `ZAI_API_KEY` and ignores the Anthropic vars, because its
+/// `--provider` is `zai` or `zai-api`.
+///
 /// Call site: the launch path of `RunnerSupervisor` (the agent's
 /// `LaunchSpec::env`, after the adapter's env and before the sandbox
 /// wraps it), for an agent whose `subscription` names `sub`. The values
@@ -1365,6 +1380,10 @@ pub fn credential_env_for(state_dir: &Path, sub: &Subscription) -> Vec<(String, 
         return Vec::new();
     };
     let mut out = vec![(var.to_owned(), k.key.clone())];
+    if terrarium_core::zai::is_zai(&sub.provider) || terrarium_core::zai::is_zai(&k.provider) {
+        out.extend(terrarium_core::zai::claude_env(&k.key));
+        return out;
+    }
     if let (Some(url), Some((_, Some(url_var)))) = (k.base_url.as_ref(), env_var_for(&k.provider)) {
         out.push((url_var.to_owned(), url.clone()));
     }
@@ -1496,6 +1515,7 @@ mod tests {
         let key = ApiKey {
             provider: "openai-compatible".into(),
             key: "sk-test".into(),
+            plan: None,
             base_url: Some("https://llm.example/v1".into()),
             models: vec!["m".into()],
         };
@@ -1525,5 +1545,40 @@ mod tests {
         );
         assert_eq!(env_var_for("anthropic"), Some(("ANTHROPIC_API_KEY", None)));
         assert_eq!(env_var_for("nope"), None);
+    }
+
+    #[test]
+    fn zai_key_feeds_claude_and_pi_env() {
+        let tmp = tempfile::tempdir().unwrap();
+        let key = ApiKey {
+            provider: "zai".into(),
+            key: "zk-test".into(),
+            plan: Some("coding".into()),
+            base_url: None,
+            models: vec![],
+        };
+        store_key(tmp.path(), "glm", &key).unwrap();
+        let mut sub: Subscription = serde_json::from_value(json!({
+            "name": "glm", "provider": "zai", "plan": "coding", "harnesses": ["claude", "pi"],
+            "alert_at": 80, "source": "api", "login_status": "api_key", "probe_status": "none",
+            "created_at": "", "updated_at": ""
+        }))
+        .unwrap();
+        assert!(credential_env_for(tmp.path(), &sub).is_empty());
+        assert_eq!(env_var_for("zai"), Some(("ZAI_API_KEY", None)));
+        sub.env_var = Some("ZAI_API_KEY".into());
+        let env: std::collections::BTreeMap<String, String> =
+            credential_env_for(tmp.path(), &sub).into_iter().collect();
+        assert_eq!(env["ZAI_API_KEY"], "zk-test");
+        assert_eq!(env["ANTHROPIC_AUTH_TOKEN"], "zk-test");
+        assert_eq!(env["ANTHROPIC_BASE_URL"], "https://api.z.ai/api/anthropic");
+        assert_eq!(env["API_TIMEOUT_MS"], "3000000");
+        assert_eq!(env["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "glm-5.3-flash");
+        assert_eq!(env["ANTHROPIC_DEFAULT_SONNET_MODEL"], "glm-5.3");
+        assert_eq!(env["ANTHROPIC_DEFAULT_OPUS_MODEL"], "glm-5.3");
+        assert!(!env.contains_key("ANTHROPIC_API_KEY"));
+        assert!(!env.contains_key("OPENAI_BASE_URL"));
+        // The key never shows in the debug form.
+        assert!(!format!("{key:?}").contains("zk-test"));
     }
 }

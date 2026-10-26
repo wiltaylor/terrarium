@@ -49,6 +49,10 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 ulid = { version = "1.2", features = ["serde"] }
 chrono = { version = "0.4.41", features = ["serde"] }
 semver = { version = "1.0.26", features = ["serde"] }
+# Schedules (docs/api.md §19): cron expressions and IANA zones. Pinned:
+# the cron crate's day-of-week numbering is part of the expression contract.
+cron = "=0.17.0"
+chrono-tz = "=0.10.4"
 
 # CLI, logging, errors
 clap = { version = "4.5", features = ["derive", "env"] }

@@ -295,6 +295,23 @@ describe("mock parity with docs/api.md", () => {
     await expect(api.subscriptions.logout("openrouter-key")).rejects.toMatchObject({ status: 422, code: "invalid" });
   });
 
+  it("stores a Z.ai key as a claude+pi subscription with plan, api_key status, and no probe", async () => {
+    const api = mock();
+    const s = await api.subscriptions.setApiKey("glm", { provider: "zai", key: "zk-never-shown", plan: "api" });
+    expect(s).toMatchObject({
+      name: "glm", provider: "zai", plan: "api", harnesses: ["claude", "pi"], env_var: "ZAI_API_KEY", source: "api",
+      login_status: "api_key", probe_status: "none", windows: [], local_estimate_only: true, has_api_key: true, held_agents: 0,
+    });
+    expect(s).not.toHaveProperty("probe");
+    expect(JSON.stringify(s)).not.toContain("zk-never-shown");
+    expect((await api.subscriptions.setApiKey("glm2", { provider: "zai", key: "k" })).plan).toBe("coding");
+    await expect(api.subscriptions.setApiKey("glm3", { provider: "zai", key: "k", plan: "Max 20x" })).rejects.toMatchObject({ status: 422, code: "invalid" });
+    await expect(api.subscriptions.setApiKey("or2", { provider: "openrouter", key: "k", plan: "api" })).rejects.toMatchObject({ status: 422, code: "invalid" });
+    await expect(api.subscriptions.create({ name: "glm4", provider: "zai", plan: "pro" })).rejects.toMatchObject({ status: 422, code: "invalid" });
+    expect((await api.subscriptions.verify("glm")).subscription.login_status).toBe("api_key");
+    await expect(api.subscriptions.logout("glm")).rejects.toMatchObject({ status: 422, code: "invalid" });
+  });
+
   it("stores an API key write-only: no answer has the key", async () => {
     const api = mock();
     const secret = "sk-test-0123456789-secret";
@@ -1125,5 +1142,202 @@ describe("mail parity with docs/api.md §7 (the mail log's filters)", () => {
     api.sim.setWindow("anthropic-max", "5h", 85);
     const after = (await api.mail.list({ limit: 1000 })).items.filter((m) => m.from === "system");
     expect(after.some((m) => m.subject === "Quota: anthropic-max 5h window at 85%" && m.to === "operator")).toBe(true);
+  });
+});
+
+describe("schedules (docs/api.md §19, the daemon's api/schedules.rs)", () => {
+  const SCHEDULE_KEYS = ["action", "catch_up", "consecutive_skips", "created_at", "created_by", "enabled", "id", "last_run", "max_concurrency", "name", "next_run_at", "project", "run_as", "runs_count", "source", "spec", "updated_at"];
+  const RUN_KEYS = ["actor", "error", "finished_at", "id", "output", "schedule", "started_at", "status", "summary", "trigger"];
+  const stream = (api: ReturnType<typeof mock>) => {
+    const frames: AgentEvent[] = [];
+    const s = api.events.stream({ since: api.world.seq });
+    s.subscribe((e) => frames.push(e));
+    return { frames: () => frames.filter((e) => e.kind === "schedule"), close: () => s.close() };
+  };
+  const exec = { type: "exec" as const, target: "build-box", cmd: ["make", "test"] };
+  const err = (p: Promise<unknown>) => p.then(() => null, (e: unknown) => e as ApiError);
+
+  it("seeds three project schedules across two projects and one global, in the daemon's shape", async () => {
+    const api = mock();
+    const all = await api.schedules.list();
+    expect(all.map((s) => s.project ?? "global").sort()).toEqual(["global", "terrarium", "terrarium", "webshop"]);
+    for (const s of all) expect(Object.keys(s).sort()).toEqual(SCHEDULE_KEYS);
+    const failed = all.find((s) => s.last_run?.status === "failed")!;
+    expect(failed.project).toBe("webshop");
+    expect(Object.keys(failed.last_run!).sort()).toEqual(["at", "run_id", "status", "summary"]);
+    // A file schedule is in projects/<name>.toml, so it has a project.
+    expect(all.filter((s) => s.source === "file").every((s) => s.project)).toBe(true);
+  });
+
+  it("lists the global schedules and the project's for ?project=, and filters ?enabled=", async () => {
+    const api = mock();
+    const t = await api.schedules.list({ project: "terrarium" });
+    expect(t.every((s) => s.project === null || s.project === "terrarium")).toBe(true);
+    expect(t.some((s) => s.project === null)).toBe(true);
+    expect(t.some((s) => s.project === "webshop")).toBe(false);
+    expect((await api.schedules.list({ enabled: false })).map((s) => s.enabled)).toEqual([false]);
+    await expect(api.schedules.list({ project: "nope" })).rejects.toMatchObject({ status: 404 });
+  });
+
+  it("creates each action type with 201 shapes, resolves agent keys, computes next_run_at, and emits created with IDs", async () => {
+    const api = mock();
+    const ev = stream(api);
+    await wait();
+    const actions = [
+      { type: "mail" as const, to: "terrarium/lead", subject: "", body: "b" },
+      { type: "turn" as const, agent: "terrarium/lead", text: "go", start_if_stopped: true },
+      exec,
+      { type: "agent" as const, agent: "lead", verb: "restart" as const },
+      { type: "probe" as const, subscription: "anthropic-max" },
+    ];
+    for (const [i, action] of actions.entries()) {
+      const s = await api.schedules.create({ name: `s${i}`, project: "terrarium", spec: { kind: "cron", expr: "*/5 * * * *", tz: "UTC" }, action });
+      expect(s).toMatchObject({ project: "terrarium", enabled: true, catch_up: "skip", source: "api", runs_count: 0, last_run: null, max_concurrency: 1 });
+      expect(Date.parse(s.next_run_at!)).toBeGreaterThan(Date.now());
+      expect(s.action.type).toBe(action.type);
+    }
+    expect((await api.schedules.list()).find((s) => s.name === "s3")!.action).toEqual({ type: "agent", agent: "terrarium/lead", verb: "restart" });
+    const e = ev.frames().find((x) => x.data.change === "created")!;
+    expect(e).toMatchObject({ kind: "schedule", project: "terrarium", summary: "schedule terrarium/s0: created" });
+    expect(Object.keys(e.data).sort()).toEqual(["change", "name", "project", "schedule"]);
+    expect(typeof e.data.schedule).toBe("string");
+    const g = await api.schedules.create({ name: "once", project: null, spec: { kind: "at", at: new Date(Date.now() + 3_600_000).toISOString() }, action: { type: "mail", to: "operator", subject: "Hi", body: "" } });
+    expect(g.project).toBeNull();
+    expect((await api.schedules.create({ name: "iv", project: "webshop", spec: { kind: "interval", every: "1h30m" }, action: exec })).next_run_at).toBeTruthy();
+    expect(api.world.audit.at(-1)).toMatchObject({ action: "schedule.create", target: "iv" });
+    ev.close();
+  });
+
+  it("refuses bad fields with 422 invalid, details.field, and the message `<field>: ...`; a cron error quotes the expression", async () => {
+    const api = mock();
+    const ok = { name: "x", project: "terrarium", spec: { kind: "interval" as const, every: "15m" }, action: exec };
+    const bad = (patch: object) => err(api.schedules.create({ ...ok, ...patch } as never)).then((e) => e!);
+    const cron = await bad({ spec: { kind: "cron", expr: "61 * * * *", tz: "UTC" } });
+    expect(cron).toMatchObject({ status: 422, code: "invalid", details: { field: "spec.expr" } });
+    expect(cron.message).toMatch(/^spec\.expr: bad cron expression `61 \* \* \* \*`/);
+    expect(await bad({ spec: { kind: "cron", expr: "0 9 * * *", tz: "Mars/Base" } })).toMatchObject({ status: 422, details: { field: "spec.tz" } });
+    expect(await bad({ spec: { kind: "interval", every: "30s" } })).toMatchObject({ details: { field: "spec.every" } });
+    expect(await bad({ spec: { kind: "at", at: "2000-01-01T00:00:00Z" } })).toMatchObject({ details: { field: "spec.at" } });
+    expect(await bad({ name: "Bad Name" })).toMatchObject({ details: { field: "name" } });
+    expect(await bad({ action: { type: "turn", agent: "nobody", text: "x" } })).toMatchObject({ details: { field: "action.agent" } });
+    expect(await bad({ action: { type: "exec", target: "nope", cmd: ["ls"] } })).toMatchObject({ details: { field: "action.target" } });
+    expect(await bad({ action: { type: "exec", target: "build-box", cmd: [] } })).toMatchObject({ details: { field: "action.cmd" } });
+    expect(await bad({ action: { ...exec, timeout_secs: 4000 } })).toMatchObject({ details: { field: "action.timeout_secs" } });
+    expect(await bad({ action: { type: "probe", subscription: "nope" } })).toMatchObject({ details: { field: "action.subscription" } });
+    expect(await bad({ project: "nope" })).toMatchObject({ details: { field: "project" } });
+    await api.schedules.create(ok);
+    expect(await bad({})).toMatchObject({ status: 409, code: "conflict" });
+  });
+
+  it("answers 403 forbidden: a member writes nothing and sees no global schedule; a project_admin stays in its project; a global schedule needs a sysadmin", async () => {
+    const member = createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 0, scheduleCaller: { role: "member", project: "terrarium" } });
+    const list = await member.schedules.list({ project: "terrarium" });
+    expect(list.every((s) => s.project === "terrarium")).toBe(true);
+    const t = list.find((s) => s.name === "tests")!;
+    await expect(member.schedules.disable(t.id)).rejects.toMatchObject({ status: 403, code: "forbidden" });
+    await expect(member.schedules.run(t.id)).rejects.toMatchObject({ status: 403 });
+    await expect(member.schedules.create({ name: "m", project: "terrarium", spec: { kind: "interval", every: "1h" }, action: exec })).rejects.toMatchObject({ status: 403 });
+    await expect(member.schedules.list({ project: "webshop" })).rejects.toMatchObject({ status: 403 });
+    const admin = createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 0, scheduleCaller: { role: "project_admin", project: "terrarium" } });
+    const probe = { type: "probe" as const, subscription: "anthropic-max" };
+    await expect(admin.schedules.create({ name: "g", project: null, spec: { kind: "interval", every: "1h" }, action: probe })).rejects.toMatchObject({ status: 403, message: expect.stringContaining("sysadmin") });
+    await expect(admin.schedules.create({ name: "w", project: "webshop", spec: { kind: "interval", every: "1h" }, action: probe })).rejects.toMatchObject({ status: 403 });
+    await expect(admin.schedules.create({ name: "x", project: "terrarium", spec: { kind: "interval", every: "1h" }, action: { type: "mail", to: "webshop/shop-lead", subject: "", body: "x" } })).rejects.toMatchObject({ status: 403, message: expect.stringContaining("leaves the project") });
+    await expect(admin.schedules.create({ name: "y", project: "terrarium", spec: { kind: "interval", every: "1h" }, action: { type: "exec", target: "pg-test", cmd: ["ls"] } })).rejects.toMatchObject({ status: 403 });
+    expect((await admin.schedules.create({ name: "a", project: "terrarium", spec: { kind: "interval", every: "1h" }, action: exec })).project).toBe("terrarium");
+    // The operator may reach across projects.
+    const op = mock();
+    expect((await op.schedules.create({ name: "z", project: "terrarium", spec: { kind: "interval", every: "1h" }, action: { type: "exec", target: "pg-test", cmd: ["ls"] } })).action).toMatchObject({ target: "pg-test" });
+  });
+
+  it("patches (no project in the body), enables, disables (next_run_at null), and deletes, with an event for each", async () => {
+    const api = mock();
+    const ev = stream(api);
+    await wait();
+    const s = (await api.schedules.list()).find((x) => x.name === "tests")!;
+    const p = await api.schedules.update(s.id, { spec: { kind: "cron", expr: "0 9 * * *", tz: "UTC" } });
+    expect(p.spec).toEqual({ kind: "cron", expr: "0 9 * * *", tz: "UTC" });
+    expect(p.action).toEqual(s.action);
+    expect(new Date(p.next_run_at!).getUTCHours()).toBe(9);
+    await expect(api.schedules.update(s.id, { project: "webshop" } as never)).rejects.toMatchObject({ status: 422 });
+    expect(await api.schedules.disable(s.id)).toMatchObject({ enabled: false, next_run_at: null });
+    expect((await api.schedules.enable(s.id)).next_run_at).toBeTruthy();
+    await api.schedules.remove(s.id);
+    await expect(api.schedules.get(s.id)).rejects.toMatchObject({ status: 404 });
+    expect(ev.frames().map((e) => e.data.change)).toEqual(["updated", "disabled", "enabled", "deleted"]);
+    const file = (await api.schedules.list()).find((x) => x.source === "file")!;
+    for (const call of [api.schedules.remove(file.id), api.schedules.update(file.id, { enabled: false }), api.schedules.disable(file.id)])
+      await expect(call).rejects.toMatchObject({ status: 409, code: "file_managed", message: expect.stringContaining("projects/terrarium.toml") });
+    ev.close();
+  });
+
+  it("runs now: run_started at once, the answer is the run when it ends, then run_finished with {run, status, trigger}", async () => {
+    const api = createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 0, scheduleRunMs: 15 });
+    const ev = stream(api);
+    await wait();
+    const s = (await api.schedules.list()).find((x) => x.name === "tests")!;
+    const pending = api.schedules.run(s.id);
+    await wait(2);
+    expect(ev.frames().map((e) => e.data.change)).toEqual(["run_started"]);
+    expect(ev.frames()[0]!.data).toMatchObject({ schedule: s.id, status: "running", trigger: "manual" });
+    expect(typeof ev.frames()[0]!.data.run).toBe("string");
+    // A second run while one goes on is skipped at once.
+    const overlap = await api.schedules.run(s.id);
+    expect(overlap).toMatchObject({ status: "skipped", summary: expect.stringContaining("still running") });
+    const r = await pending;
+    expect(Object.keys(r).sort()).toEqual(RUN_KEYS);
+    expect(r).toMatchObject({ schedule: s.id, status: "ok", trigger: "manual", summary: "exec on build-box: exit 0" });
+    expect(r.finished_at).toBeTruthy();
+    expect(r.output).toMatchObject({ target: "build-box", exit_code: 0, stdout: expect.stringContaining("make test") });
+    const finished = ev.frames().filter((e) => e.data.change === "run_finished").at(-1)!;
+    expect(finished.data).toMatchObject({ schedule: s.id, run: r.id, status: "ok", trigger: "manual" });
+    expect(finished.summary).toBe("schedule terrarium/tests: ok (exec on build-box: exit 0)");
+    const after = await api.schedules.get(s.id);
+    expect(after.runs_count).toBe(s.runs_count + 2);
+    expect(after.last_run).toMatchObject({ run_id: r.id, status: "ok", at: r.finished_at });
+    const failing = await api.schedules.create({ name: "f", project: "terrarium", spec: { kind: "interval", every: "1h" }, action: { type: "exec", target: "build-box", cmd: ["false"] } });
+    expect(await api.schedules.run(failing.id)).toMatchObject({ status: "failed", error: "exit code 1" });
+    expect((await api.schedules.get(failing.id)).last_run).toMatchObject({ status: "failed" });
+    ev.close();
+  });
+
+  it("pages runs newest first with a cursor", async () => {
+    const api = mock();
+    const s = (await api.schedules.list()).find((x) => x.name === "tests")!;
+    const p1 = await api.schedules.runs(s.id, { limit: 10 });
+    expect(p1.items).toHaveLength(10);
+    expect(p1.items[0]!.started_at > p1.items[1]!.started_at).toBe(true);
+    expect(p1.next).toBe(p1.items.at(-1)!.id);
+    const p2 = await api.schedules.runs(s.id, { limit: 10, cursor: p1.next! });
+    const p3 = await api.schedules.runs(s.id, { limit: 10, cursor: p2.next! });
+    expect(p3.items).toHaveLength(5);
+    expect(p3.next).toBeNull();
+    expect(new Set([...p1.items, ...p2.items, ...p3.items].map((r) => r.id)).size).toBe(25);
+  });
+
+  it("the HTTP client sends the documented routes", async () => {
+    const calls: string[] = [];
+    const t = createHttpTransport({ baseUrl: "http://d", getToken: () => null, fetch: (async (url: string, init: RequestInit) => {
+      calls.push(`${init.method} ${String(url).replace("http://d", "")}`);
+      return new Response(init.method === "DELETE" ? null : "[]", { status: init.method === "DELETE" ? 204 : 200, headers: { "content-type": "application/json" } });
+    }) as unknown as typeof fetch });
+    const { createHttpApi } = await import("../client");
+    const api = createHttpApi(t);
+    await api.schedules.list({ project: "terrarium", enabled: true });
+    await api.schedules.runs("S1", { limit: 20, cursor: "R9" });
+    await api.schedules.run("S1");
+    await api.schedules.enable("S1");
+    await api.schedules.disable("S1");
+    await api.schedules.update("S1", { enabled: false });
+    await api.schedules.remove("S1");
+    expect(calls).toEqual([
+      "GET /api/schedules?project=terrarium&enabled=true&limit=1000",
+      "GET /api/schedules/S1/runs?limit=20&cursor=R9",
+      "POST /api/schedules/S1/run",
+      "POST /api/schedules/S1/enable",
+      "POST /api/schedules/S1/disable",
+      "PATCH /api/schedules/S1",
+      "DELETE /api/schedules/S1",
+    ]);
   });
 });

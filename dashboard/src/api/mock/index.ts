@@ -21,6 +21,7 @@ import { ApiError, AuthError, isMutating, type Page } from "../http";
 import { createWsEventStream, type EventStream, type RawSocket, type SocketEvent } from "../sockets";
 import { MOCK_TOKEN, mockSocket, type MockSocketAuth } from "./ws";
 import { httpVerbs } from "./verbs";
+import { checkKeyPlan, isZai, zaiKeyDefaults, zaiPlan, ZAI_KEY_ENV } from "./zai";
 import { splitFrontMatter } from "../../lib/markdown";
 import type {
   Agent,
@@ -61,6 +62,7 @@ import { paginate, type PageQuery } from "../../lib/paging";
 import { fakeUlid, seed, type MockWorld, type UsageRow } from "./data";
 import { harnessUpdateKind } from "../../lib/harness-update";
 import { FakePty } from "./pty";
+import { createScheduleMock, type ScheduleCaller } from "./schedules";
 
 export interface MockOptions {
   /** Artificial latency for every call. Default 120 ms; tests use 0. */
@@ -100,6 +102,14 @@ export interface MockOptions {
   denyGlobalTargets?: boolean;
   /** `TERRARIUM_MAX_TARGETS_PER_PROJECT` (docs/api.md §17.2). Default 8. */
   maxTargetsPerProject?: number;
+  /**
+   * Who calls the schedule endpoints (docs/api.md §19). Default the
+   * operator, who may do everything. A member reads only; a project_admin
+   * writes in its project; a global schedule needs a sysadmin.
+   */
+  scheduleCaller?: ScheduleCaller;
+  /** How long a schedule run takes before `run_finished`. Default 1500 ms with latency, else the step. */
+  scheduleRunMs?: number;
 }
 
 /** What the mock reads from the client: the headers that the HTTP transport would send. */
@@ -758,6 +768,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     xai: "XAI_API_KEY",
     groq: "GROQ_API_KEY",
     github: "COPILOT_GITHUB_TOKEN",
+    zai: ZAI_KEY_ENV,
   };
   /** The subscription as the API shows it (docs/api.md §16.1). */
   const subView = (s: Subscription): Subscription => ({
@@ -2066,6 +2077,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           if (w.subscriptions.some((x) => x.name === def.name)) fail(409, "conflict", `subscription \`${def.name}\` exists`);
           if (def.probe && !PROBES.includes(def.probe)) fail(422, "invalid", `unknown probe \`${def.probe}\``);
           if (!def.provider?.trim()) fail(422, "invalid", "the provider is empty");
+          if (isZai(def.provider)) { const p = zaiPlan(def.plan); if ("error" in p) fail(422, "invalid", p.error); }
           const s: Subscription = {
             name: def.name, provider: def.provider, ...(def.plan ? { plan: def.plan } : {}), harnesses: def.harnesses ?? [], ...(def.probe ? { probe: def.probe } : {}),
             alert_at: def.alert_at ?? 80, source: "api", login_status: "unknown", probe_status: "none", created_at: iso(), updated_at: iso(),
@@ -2107,7 +2119,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
         reply(() => {
           const s = sub(name);
           if (s.env_var && w.apiKeys[name]) {
-            s.login_status = "logged_in";
+            s.login_status = isZai(s.provider) ? "api_key" : "logged_in";
             return { subscription: subView(s), status: { logged_in: true, detail: "a stored API key" } };
           }
           const harness = s.harnesses[0];
@@ -2124,6 +2136,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           const harness = s.harnesses[0];
           if (!harness) fail(422, "invalid", `subscription \`${name}\` names no harness`);
           if (harness === "pi") fail(422, "invalid", "pi has no logout command");
+          if (isZai(s.provider)) fail(422, "invalid", `subscription \`${name}\` is a Z.ai API key and has no logout; store another key, or delete the subscription`);
           s.login_status = "missing";
           audit("subscription.logout", name, undefined, { kind: harness });
           return subView(s);
@@ -2132,17 +2145,21 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
         reply(() => {
           if (!input.key.trim()) fail(422, "invalid", "the key is empty");
           const env = KEY_ENV[input.provider];
-          if (!env) fail(422, "invalid", `unknown provider \`${input.provider}\`; use anthropic, openai, openai-compatible, google, openrouter, xai, groq, or github`);
+          if (!env) fail(422, "invalid", `unknown provider \`${input.provider}\`; use anthropic, openai, openai-compatible, google, openrouter, xai, groq, github, or zai`);
+          const planError = checkKeyPlan(input);
+          if (planError) fail(422, "invalid", planError);
+          const zai = isZai(input.provider) ? zaiKeyDefaults(input) : null;
           if (input.provider === "openai-compatible" && !input.base_url?.trim()) fail(422, "invalid", "openai-compatible needs base_url");
           let s = w.subscriptions.find((x) => x.name === name);
           if (!s) {
             checkSubName(name);
-            s = { name, provider: input.provider, plan: "API key", harnesses: [input.provider === "github" ? "copilot" : "pi"], alert_at: 80, source: "api", login_status: "logged_in", probe_status: "none", created_at: iso(), updated_at: iso(), windows: [], local_estimate_only: true, has_api_key: true, held_agents: 0 };
+            s = { name, provider: input.provider, plan: zai?.plan ?? "API key", harnesses: zai?.harnesses ?? [input.provider === "github" ? "copilot" : "pi"], alert_at: 80, source: "api", login_status: "logged_in", probe_status: "none", created_at: iso(), updated_at: iso(), windows: [], local_estimate_only: true, has_api_key: true, held_agents: 0 };
             w.subscriptions.push(s);
           }
           w.apiKeys[name] = { provider: input.provider, key: input.key, base_url: input.base_url, models: input.models };
+          if (zai && s.source === "api") s.plan = zai.plan;
           s.env_var = env;
-          s.login_status = "logged_in";
+          s.login_status = zai?.login_status ?? "logged_in";
           s.updated_at = iso();
           audit("subscription.api_key", name, undefined, { provider: input.provider, env_var: env, base_url: input.base_url ?? null, models: input.models ?? [] });
           return subView(s);
@@ -2436,6 +2453,24 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           return l;
         }),
     },
+
+    schedules: createScheduleMock({
+      w,
+      now,
+      iso,
+      ulid,
+      reply,
+      fail,
+      emit,
+      audit,
+      agent,
+      target,
+      sub,
+      project,
+      sendMail: (to, from, subject, body) => sendMail(to, from, subject, body),
+      runMs: opts.scheduleRunMs ?? (latency > 0 ? 1500 : step),
+      caller: opts.scheduleCaller,
+    }),
 
     hosts: {
       list: () => reply(() => w.hosts),

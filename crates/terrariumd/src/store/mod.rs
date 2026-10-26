@@ -13,6 +13,7 @@ pub mod memory;
 pub mod pointers;
 pub mod projects;
 pub mod repos;
+pub mod schedules;
 pub mod subscriptions;
 pub mod sync;
 pub mod targets;

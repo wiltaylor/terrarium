@@ -1301,6 +1301,53 @@ raw output, with the PKCE values and the codes replaced, is in
 - Rate limits of the usage endpoints at the 5-minute interval.
 - `pi auth print-bearer-token` as the credential for a probe.
 
+### Z.ai (GLM): from docs, not verified live
+
+Read on 2026-10-26. No Z.ai key was available, so every fact below is
+**from docs, not verified live**, unless the line says "verified offline".
+The code is `crates/terrarium-core/src/zai.rs`; the API is docs/api.md
+§16.5.
+
+| Fact | Value | Source |
+|---|---|---|
+| Plans | GLM Coding Plan: Lite, Pro, Max. Each has a 5-hour and a weekly credit limit (Lite 2,000 / 10,000; Pro 12,000 / 60,000; Max 28,000 / 140,000). Usage shows only on a web page (`z.ai/manage-apikey/billing`). | https://docs.z.ai/devpack/overview |
+| Models of the plan | GLM-5.3 and GLM-5.3-Flash. GLM-5.2 and GLM-5.1 requests go to GLM-5.3; GLM-4.7 requests go to GLM-5.3-Flash. | https://docs.z.ai/devpack/overview |
+| Claude Code base URL | `ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic` | https://docs.z.ai/devpack/tool/claude |
+| Claude Code key | `ANTHROPIC_AUTH_TOKEN=<Z.ai API key>` (not `ANTHROPIC_API_KEY`) | https://docs.z.ai/devpack/tool/claude |
+| Claude Code timeout | `API_TIMEOUT_MS=3000000` | https://docs.z.ai/devpack/tool/claude |
+| Claude Code models | `ANTHROPIC_DEFAULT_OPUS_MODEL` and `..._SONNET_MODEL` = `glm-5.3[1m]`, `..._HAIKU_MODEL` = `glm-5.3-flash[1m]` in the manual block; the page's default list says GLM-5.3-Flash for all three. Terrarium sets the ids without `[1m]`: `glm-5.3`, `glm-5.3-flash`. | https://docs.z.ai/devpack/tool/claude |
+| Claude Code version | "verified compatibility with Claude Code 2.0.14 and other versions" | https://docs.z.ai/devpack/tool/claude |
+| OpenAI-compatible, Coding Plan | `https://api.z.ai/api/coding/paas/v4` (Chat Completions). Another URL does not spend the plan quota. A Responses-protocol URL `https://api.z.ai/api/v1` also exists (not used). | https://docs.z.ai/devpack/tool/others |
+| OpenAI-compatible, pay as you go | `https://api.z.ai/api/paas/v4` (`.../chat/completions`) | https://docs.z.ai/guides/overview/quick-start |
+| Key header | `Authorization: Bearer <key>` | https://docs.z.ai/guides/overview/quick-start |
+| Where to get a key | `https://z.ai/manage-apikey/apikey-list` | https://docs.z.ai/guides/overview/quick-start |
+| Prices (USD per 1M tokens, in / cached in / out) | GLM-5.3 1.4 / 0.26 / 4.4; GLM-5.3-Flash 0.15 / 0.03 / 0.50; GLM-4.6 0.6 / 0.11 / 2.2; GLM-4.5-Air 0.2 / 0.03 / 1.1 | https://docs.z.ai/guides/overview/pricing |
+| Usage endpoint | **Not documented.** Third-party tools call `GET https://api.z.ai/api/monitor/usage/quota/limit` (bearer key; `data.limits[]` with 5-hour and weekly percentages, `data.level`), and say it is undocumented and can change. Terrarium has no `zai-usage` probe for that reason: a Z.ai subscription is local estimate only. | https://github.com/1larity/zai-quota, https://github.com/guyinwonder168/opencode-glm-quota |
+
+pi 1.4.0 (the installed `pi-ai`), **verified offline** on 2026-10-26 with
+`pi --offline --list-models zai` in an empty `PI_CODING_AGENT_DIR` (no
+network, no model turn):
+
+- pi has a built-in provider `zai`: base URL
+  `https://api.z.ai/api/coding/paas/v4`, key from `ZAI_API_KEY`, API
+  `openai-completions` (`pi-ai/dist/providers/zai.js`). Its catalog has
+  `glm-4.7`, `glm-5-turbo`, `glm-5.2`, `glm-5.3`, `glm-5.3-flash`, and the
+  `-highspeed` models.
+- The custom provider `zai-api` that Terrarium writes into the agent's
+  `models.json` (base URL `https://api.z.ai/api/paas/v4`, `apiKey`
+  `"$ZAI_API_KEY"`) loads: `--list-models` shows `zai-api glm-5.3` and
+  `zai-api glm-5.3-flash`.
+- pi turns on its Z.ai request format from the base URL
+  (`detectCompat`: `baseUrl.includes("api.z.ai")`), so the custom provider
+  needs no `compat` block.
+
+Not tested: a turn on either endpoint, through either harness; whether
+the Anthropic-compatible endpoint takes a pay-as-you-go key; whether
+Claude Code shows an auth-conflict notice when `ANTHROPIC_AUTH_TOKEN` is
+set next to the shared Claude login; the `[1m]` model suffix. The live
+test is `cargo test -p terrarium-adapter-pi --test zai_live -- --ignored`
+with `ZAI_API_KEY` set (docs/getting-started.md §6.3).
+
 ## vmlab workspace attach
 
 vmlab 0.33.3-alpha, 2026-10-25. The question: how does a host agent put an

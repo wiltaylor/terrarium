@@ -1305,3 +1305,67 @@ tr.group-row th {
   background: var(--surface-2);
   padding-top: 12px;
 }
+
+/* Schedules (docs/api.md §19). */
+.spinner {
+  display: inline-block;
+  width: 0.8em;
+  height: 0.8em;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  vertical-align: -0.1em;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .spinner { animation: none; border-right-color: currentColor; opacity: 0.6; }
+}
+button.link {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--link);
+  cursor: pointer;
+  text-decoration: underline;
+  display: block;
+}
+button.disclosure {
+  padding: 0 4px;
+  min-width: 1.6em;
+}
+.field-error {
+  color: var(--danger);
+}
+.field-bad input,
+.field-bad select,
+.field-bad textarea {
+  border-color: var(--danger);
+}
+.cron-helper {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 12px 12px;
+  margin: 0;
+}
+.cron-helper .chip {
+  margin: 2px 4px 2px 0;
+}
+pre.run-output {
+  max-height: 16rem;
+  overflow: auto;
+  margin: 4px 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+tr.row-open > td {
+  border-bottom: none;
+}
+.field {
+  display: grid;
+  gap: 2px;
+  align-content: start;
+  min-width: 0;
+}

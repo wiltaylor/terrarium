@@ -9,6 +9,13 @@ describe("navigation", () => {
     expect(GLOBAL_ITEMS.map((i) => i.href)).toContain("/mail");
   });
 
+  it("has Schedules under the project and in the global list, each with a route", () => {
+    expect(PROJECT_ITEMS.map((i) => i.path)).toContain("schedules");
+    expect(GLOBAL_ITEMS.map((i) => i.href)).toContain("/schedules");
+    expect(app).toMatch(/path="\/schedules"/);
+    expect(app).toMatch(/path="\/p\/:project\/schedules"/);
+  });
+
   it("redirects the old Spend route to Home, where the usage split lives", () => {
     expect(movedTo("/p/terrarium/spend")).toBe("/");
     expect(movedTo("/p/my-app/spend/")).toBe("/");

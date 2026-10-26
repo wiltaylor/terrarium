@@ -741,6 +741,63 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE messages ADD COLUMN held INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE messages ADD COLUMN held_reason TEXT;
     "#,
+    // 17: schedules (docs/api.md §19). A schedule runs one action on a
+    // cron, interval, or one-time spec, as the actor that made it
+    // (`run_as`). `scope` is the project, or '' for a global schedule, so
+    // that a name is unique within its scope. `anchor_at` is the start of
+    // an interval. `skips` counts the runs in a row that the rights check
+    // skipped; the third one disables the schedule. Each run is one row of
+    // `schedule_runs`; the daily timer keeps the newest 500 of each
+    // schedule.
+    r#"
+    CREATE TABLE schedules (
+        id              TEXT PRIMARY KEY,       -- ULID
+        name            TEXT NOT NULL,
+        project         TEXT REFERENCES projects(name) ON DELETE CASCADE,
+        scope           TEXT NOT NULL,          -- project, or '' when global
+        enabled         INTEGER NOT NULL DEFAULT 1,
+        spec            TEXT NOT NULL,          -- JSON
+        action          TEXT NOT NULL,          -- JSON
+        catch_up        TEXT NOT NULL DEFAULT 'skip' CHECK (catch_up IN ('skip', 'once')),
+        max_concurrency INTEGER NOT NULL DEFAULT 1,
+        created_by      TEXT NOT NULL,          -- `operator` or `agent:<ulid>`
+        run_as          TEXT NOT NULL,
+        anchor_at       TEXT NOT NULL,
+        next_run_at     TEXT,
+        last_run        TEXT,                   -- JSON
+        runs_count      INTEGER NOT NULL DEFAULT 0,
+        skips           INTEGER NOT NULL DEFAULT 0,
+        disabled_reason TEXT,
+        source          TEXT NOT NULL DEFAULT 'api',
+        created_at      TEXT NOT NULL,
+        updated_at      TEXT NOT NULL,
+        UNIQUE (scope, name)
+    );
+    CREATE INDEX schedules_due ON schedules(enabled, next_run_at);
+    CREATE TABLE schedule_runs (
+        id          TEXT PRIMARY KEY,           -- ULID
+        schedule    TEXT NOT NULL REFERENCES schedules(id) ON DELETE CASCADE,
+        trigger     TEXT NOT NULL CHECK (trigger IN ('cron', 'manual', 'catch_up')),
+        status      TEXT NOT NULL CHECK (status IN ('running', 'ok', 'failed', 'skipped')),
+        started_at  TEXT NOT NULL,
+        finished_at TEXT,
+        summary     TEXT NOT NULL DEFAULT '',
+        output      TEXT NOT NULL DEFAULT '{}', -- JSON
+        error       TEXT,
+        actor       TEXT NOT NULL               -- who triggered it: run_as, or the caller of run-now
+    );
+    CREATE INDEX schedule_runs_schedule ON schedule_runs(schedule, id);
+    "#,
+    // 18: the login state `api_key` (PLAN §16): a stored Z.ai key that no
+    // harness status command can check. SQLite cannot change a CHECK, so
+    // the column is made again, as migration 9 did for `source`.
+    r#"
+    ALTER TABLE subscriptions ADD COLUMN login_status_v18 TEXT NOT NULL DEFAULT 'unknown'
+        CHECK (login_status_v18 IN ('logged_in', 'expiring', 'expired', 'missing', 'unknown', 'api_key'));
+    UPDATE subscriptions SET login_status_v18 = login_status;
+    ALTER TABLE subscriptions DROP COLUMN login_status;
+    ALTER TABLE subscriptions RENAME COLUMN login_status_v18 TO login_status;
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call
@@ -967,6 +1024,8 @@ mod tests {
             "fleets",
             "fleet_objects",
             "target_leases",
+            "schedules",
+            "schedule_runs",
         ] {
             let n: i64 = conn
                 .query_row(

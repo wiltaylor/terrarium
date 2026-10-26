@@ -259,6 +259,8 @@ export const EVENT_KINDS = [
   "lease",
   // docs/api.md §4: a harness update in the container.
   "harness",
+  // docs/api.md §19: `{change, schedule, run?, status?}`.
+  "schedule",
 ] as const;
 export type EventKind = (typeof EVENT_KINDS)[number];
 
@@ -725,7 +727,8 @@ export interface VersionCompare {
 // ----- Subscriptions and usage (docs/api.md §16) -----
 
 /** `unknown`: not checked yet. */
-export type LoginStatus = "logged_in" | "expiring" | "expired" | "missing" | "unknown";
+/** `api_key`: a stored Z.ai key; no harness login to check. */
+export type LoginStatus = "logged_in" | "expiring" | "expired" | "missing" | "unknown" | "api_key";
 /** `none`: no probe, or not run yet. */
 export type ProbeStatus = "ok" | "failed" | "none";
 
@@ -858,6 +861,8 @@ export interface StartLogin {
 export interface ApiKeyInput {
   provider: string;
   key: string;
+  /** `zai` only: `coding` (GLM Coding Plan, the default) or `api` (pay as you go). */
+  plan?: string;
   base_url?: string;
   models?: string[];
 }
@@ -1229,4 +1234,126 @@ export interface SessionGrant {
   expires_at: string;
   /** The same time as a Unix time, in seconds. */
   exp?: number;
+}
+
+// ----- Schedules (docs/api.md §19) -----
+
+/**
+ * When a schedule fires. `cron`: a 5-field expression in `tz` (an IANA
+ * zone, default `UTC`). `interval`: a duration such as `15m`, `1h`, or
+ * `1h30m`. `at`: once, at an RFC 3339 time.
+ */
+export type ScheduleSpec = { kind: "cron"; expr: string; tz: string } | { kind: "interval"; every: string } | { kind: "at"; at: string };
+export type ScheduleSpecKind = ScheduleSpec["kind"];
+
+export type AgentVerb = "start" | "stop" | "restart";
+
+/** What a schedule does when it fires. */
+export type ScheduleAction =
+  /** `to`: `operator`, `project:<name>`, or `project/agent`. `thread`: post every run on this thread. */
+  | { type: "mail"; to: string; subject: string; body: string; thread?: string }
+  | { type: "turn"; agent: string; text: string; start_if_stopped?: boolean }
+  /** `timeout_secs`: default 300, at most 3600. */
+  | { type: "exec"; target: string; cmd: string[]; cwd?: string; timeout_secs?: number }
+  | { type: "agent"; agent: string; verb: AgentVerb }
+  | { type: "probe"; subscription: string };
+export type ScheduleActionType = ScheduleAction["type"];
+
+export type CatchUp = "skip" | "once";
+
+/** The end of a run. A run that has not ended yet is `running`. */
+export type RunStatus = "ok" | "failed" | "skipped";
+
+export interface ScheduleLastRun {
+  at: string;
+  status: RunStatus;
+  summary: string;
+  run_id: string;
+}
+
+export interface Schedule {
+  id: string;
+  name: string;
+  /** Null: a global schedule (sysadmin only). */
+  project: string | null;
+  enabled: boolean;
+  spec: ScheduleSpec;
+  action: ScheduleAction;
+  catch_up: CatchUp;
+  /** How many runs may go on at once. */
+  max_concurrency?: number;
+  /** `operator` or `agent:<ulid>`. */
+  created_by: string;
+  /** The actor the runs act as; the daemon checks its rights at each run. */
+  run_as: string;
+  /** Null when disabled, or when a one-shot `at` schedule has run. */
+  next_run_at: string | null;
+  last_run: ScheduleLastRun | null;
+  runs_count: number;
+  /** `api`, `file`, or `fleet:<name>`. A `file` schedule changes only in its file (`409 file_managed`). */
+  source: string;
+  /** Rights checks in a row that skipped a run. */
+  consecutive_skips?: number;
+  /** Why the daemon disabled the schedule, when it did. */
+  disabled_reason?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** `POST /api/schedules`. No `project` (or null): a global schedule. */
+export interface NewSchedule {
+  name: string;
+  project?: string | null;
+  enabled?: boolean;
+  spec: ScheduleSpec;
+  action: ScheduleAction;
+  catch_up?: CatchUp;
+}
+
+/** `PATCH /api/schedules/{id}`: a `spec` or an `action` replaces the whole object. The scope does not change. */
+export type SchedulePatch = Partial<Omit<NewSchedule, "project">>;
+
+export interface ScheduleQuery {
+  project?: string;
+  enabled?: boolean;
+}
+
+export type RunTrigger = "cron" | "manual" | "catch_up";
+
+/** `GET /api/schedules/{id}/runs`: newest first. */
+export interface ScheduleRun {
+  id: string;
+  schedule: string;
+  started_at: string;
+  /** Null while the run goes on. */
+  finished_at: string | null;
+  /** `running` until the run ends. */
+  status: RunStatus | "running";
+  trigger: RunTrigger;
+  summary: string;
+  /**
+   * A JSON value. Exec: `{target, cmd, exit_code, end, stdout, stderr}` (the
+   * tails). Mail: the message ID. Turn: the delivery. Agent: the new
+   * status. Probe: the windows.
+   */
+  output: unknown;
+  error: string | null;
+  /** Who triggered the run: the `run_as`, or the caller of a run now. */
+  actor?: string;
+}
+
+export type ScheduleChange = "created" | "updated" | "deleted" | "enabled" | "disabled" | "run_started" | "run_finished";
+
+/**
+ * The data of a `schedule` event. The daemon sends IDs: `schedule` is the
+ * schedule ID, `run` the run ID; the view reads the rest again.
+ */
+export interface ScheduleEventData {
+  change: ScheduleChange;
+  schedule: string;
+  name: string;
+  project: string | null;
+  run?: string;
+  status?: RunStatus | "running";
+  trigger?: RunTrigger;
 }

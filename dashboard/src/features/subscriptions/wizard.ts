@@ -7,7 +7,7 @@
 //
 // `api_key` and `define` are forms: setup ──saved──▶ done.
 
-import type { LoginKind, LoginSession, Subscription } from "../../api/types";
+import type { ApiKeyInput, LoginKind, LoginSession, Subscription } from "../../api/types";
 
 export type WizardPath = LoginKind | "api_key" | "define";
 
@@ -128,7 +128,37 @@ export const KEY_PROVIDERS: { id: string; env: string; label: string }[] = [
   { id: "xai", env: "XAI_API_KEY", label: "xAI" },
   { id: "groq", env: "GROQ_API_KEY", label: "Groq" },
   { id: "github", env: "COPILOT_GITHUB_TOKEN", label: "GitHub (fine-grained PAT with Copilot Requests)" },
+  { id: "zai", env: "ZAI_API_KEY (pi) and ANTHROPIC_AUTH_TOKEN (Claude Code)", label: "Z.ai (GLM)" },
 ];
+
+/** The plan that a Z.ai key gets when the form names none. */
+export const ZAI_DEFAULT_PLAN = "coding";
+
+/** The plans of a Z.ai key (docs/api.md §16.5). The first is the default. */
+export const ZAI_PLANS: { id: string; label: string }[] = [
+  { id: "coding", label: "GLM Coding Plan" },
+  { id: "api", label: "Pay as you go (API)" },
+];
+
+/** Where to get the key, for the providers that need a word of help. */
+export const KEY_HELP: Record<string, string> = {
+  zai: "Make a key at z.ai/manage-apikey/apikey-list. The GLM Coding Plan and pay as you go use the same key; the plan picks the endpoint. Agents run on Claude Code and pi.",
+};
+
+/** True when the provider takes a plan. */
+export const takesPlan = (provider: string): boolean => provider === "zai";
+
+/** The body of `POST /api/subscriptions/{name}/api-key` from the form fields. */
+export function apiKeyBody(f: { provider: string; key: string; plan?: string; baseUrl?: string; models?: string }): ApiKeyInput {
+  const models = (f.models ?? "").split(",").map((m) => m.trim()).filter(Boolean);
+  return {
+    provider: f.provider,
+    key: f.key,
+    ...(takesPlan(f.provider) ? { plan: f.plan || ZAI_DEFAULT_PLAN } : {}),
+    ...(f.provider === "openai-compatible" ? { base_url: (f.baseUrl ?? "").trim() } : {}),
+    ...(models.length ? { models } : {}),
+  };
+}
 
 /** The wizard path and setup for **Re-login** on a subscription. */
 export function reloginFor(s: Pick<Subscription, "name" | "provider" | "harnesses" | "env_var" | "has_api_key">): { path: WizardPath; setup: WizardSetup } {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { LoginSession } from "../../api/types";
-import { countdown, endMessage, initialWizard, reloginFor, sessionToCancel, shouldPoll, teardownLeft, TEARDOWN_MS, wizardReduce, type WizardAction, type WizardState } from "./wizard";
+import { apiKeyBody, countdown, endMessage, initialWizard, KEY_HELP, KEY_PROVIDERS, reloginFor, sessionToCancel, shouldPoll, teardownLeft, TEARDOWN_MS, wizardReduce, ZAI_PLANS, type WizardAction, type WizardState } from "./wizard";
 
 const session = (over: Partial<LoginSession> = {}): LoginSession => ({
   id: "L1",
@@ -83,5 +83,28 @@ describe("wizard state machine", () => {
     expect(reloginFor({ ...base, harnesses: ["claude", "pi"] })).toEqual({ path: "claude", setup: { name: "n" } });
     expect(reloginFor({ ...base, harnesses: ["pi"], provider: "openai-codex" })).toEqual({ path: "pi", setup: { name: "n", provider: "openai-codex" } });
     expect(reloginFor({ ...base, harnesses: ["pi"], provider: "groq", has_api_key: true, env_var: "GROQ_API_KEY" })).toEqual({ path: "api_key", setup: { name: "n", provider: "groq" } });
+  });
+});
+
+describe("Z.ai in the API-key path", () => {
+  it("lists zai with its plans and a help line", () => {
+    expect(KEY_PROVIDERS.map((p) => p.id)).toContain("zai");
+    expect(ZAI_PLANS.map((p) => p.id)).toEqual(["coding", "api"]);
+    expect(KEY_HELP.zai).toMatch(/z\.ai\/manage-apikey/);
+  });
+
+  it("sends the plan for zai only, coding by default", () => {
+    expect(apiKeyBody({ provider: "zai", key: "k" })).toEqual({ provider: "zai", key: "k", plan: "coding" });
+    expect(apiKeyBody({ provider: "zai", key: "k", plan: "api", models: " glm-5.3 , " })).toEqual({ provider: "zai", key: "k", plan: "api", models: ["glm-5.3"] });
+    expect(apiKeyBody({ provider: "openrouter", key: "k", plan: "api" })).toEqual({ provider: "openrouter", key: "k" });
+    expect(apiKeyBody({ provider: "openai-compatible", key: "k", baseUrl: " https://x/v1 " })).toEqual({ provider: "openai-compatible", key: "k", base_url: "https://x/v1" });
+  });
+
+  it("goes from setup to done on a saved zai key, and Re-login opens the key form", () => {
+    let s: WizardState = wizardReduce({ step: "pick" }, { type: "pick", path: "api_key", setup: { provider: "zai" } });
+    expect(s).toEqual({ step: "setup", path: "api_key", setup: { provider: "zai" } });
+    s = wizardReduce(s, { type: "saved", subscription: "zai-key" });
+    expect(s).toEqual({ step: "done", subscription: "zai-key" });
+    expect(reloginFor({ name: "zai-key", provider: "zai", harnesses: ["claude", "pi"], env_var: "ZAI_API_KEY", has_api_key: true })).toEqual({ path: "api_key", setup: { name: "zai-key", provider: "zai" } });
   });
 });

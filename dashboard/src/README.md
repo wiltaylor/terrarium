@@ -261,6 +261,22 @@ log, and the agent's Events tab. `lease` events keep the lease lists on the
 Targets and agent pages live, and the "holds <target>" chips next to the
 agent status badges (`stores/leases.ts`, `lib/leases.ts`).
 
+`schedule` events keep the Schedules page live
+(`features/schedules/model.ts`, `applyScheduleEvent`). The daemon sends IDs
+only: `{change, schedule, name, project, run?, status?, trigger?}`.
+`run_started` puts a spinner on the row. `run_finished` and the other
+changes read the list again, and an open run history reads its newest page
+again (`syncHead`). `POST .../run` answers with the run when it ends; that
+answer also sets the last run. The Home queue shows each schedule whose
+last run failed in the last 24 hours (`failedRecently`).
+
+The dialog previews the next 3 runs of a cron expression with
+`lib/cron.ts`, a small 5-field parser. The preview does not stop a send:
+the daemon decides, and its `422` shows under the field that
+`details.field` names. The words of a spec and an action
+("every 15 min", "daily 09:00 UTC", "mail → lead: Standup") come from
+`lib/schedule.ts`.
+
 ## Quota alerts and holds
 
 `stores/quota.ts` keeps the state of docs/api.md §16.6 from the event
@@ -374,6 +390,8 @@ update cannot put other rows in the view. The mock answers the same params
 | `/p/:project/artifacts/:id?` | Artifact viewer, upload, delete | `GET .../artifacts`, `.../artifacts/usage`, `POST .../artifacts` (multipart), `POST /api/artifacts/{id}/url` |
 | `/p/:project/versions/:id?` | Version timeline, review, new version | `GET`, `POST .../versions`, `POST /api/versions/{id}/submit|approve|reject|release`, `compare` |
 | `/p/:project/spend` | Gone: redirects to `/` (`app/nav.ts` `MOVED_ROUTES`). The daemon's budget alert mail still links it. | none |
+| `/p/:project/schedules` | Schedules of the project and the global ones, scope filter, run history, run now, enable, create, edit, delete | `GET /api/schedules?project=`, `POST /api/schedules`, `PATCH`, `DELETE /api/schedules/{id}`, `POST .../run\|enable\|disable`, `GET .../runs?limit=&cursor=` (docs/api.md §19) |
+| `/schedules` | All schedules, grouped by scope | `GET /api/schedules` and the calls above |
 | `/targets` | Targets, lifecycle, exec console, leases (grant, extend, revoke, history) | `GET /api/targets`, `POST /api/targets/{name}/up\|down\|snapshot\|restore\|status`, `POST .../exec`, `WS .../sessions/{id}/ws`, `DELETE .../sessions/{id}`, `GET`, `POST .../leases`, `PATCH`, `DELETE .../leases/{agent}` (docs/api.md §17.7) |
 | `/hosts` | Host agents: status, capabilities, add with a one-time token, revoke | `GET`, `POST /api/hosts`, `DELETE /api/hosts/{name}` (new API, not in docs/api.md yet) |
 | `/events` | Event log with history | `GET /api/events?since=&kind=&project=&agent=`, events socket |

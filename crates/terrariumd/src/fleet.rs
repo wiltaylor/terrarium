@@ -32,7 +32,7 @@ use crate::store::agents::{self, AgentPatch, AgentView};
 use crate::store::projects::{
     self, NewProject, NewRepo, ProjectPatch, SOURCE_API, SOURCE_FILE, fleet_source,
 };
-use crate::store::{Page, repos, subscriptions, targets};
+use crate::store::{Page, repos, schedules, subscriptions, targets};
 
 /// The `source` word of an object a fleet owns: `fleet:<name>`.
 pub use crate::store::projects::SOURCE_FLEET as SOURCE_PREFIX;
@@ -262,6 +262,7 @@ fn label(t: &Tx<'_>, kind: Kind, key: &str, fleet: Option<&str>) -> ApiResult<()
         Kind::Agent => ("agents", "project || '/' || name"),
         Kind::Target => ("targets", "name"),
         Kind::Subscription => ("subscriptions", "name"),
+        Kind::Schedule => ("schedules", "project || '/' || name"),
     };
     match fleet {
         Some(f) => t.execute(
@@ -420,6 +421,15 @@ fn subscription_spec(def: &SubscriptionDef) -> Value {
         "harnesses": def.harnesses,
         "probe": def.probe,
         "alert_at": def.alert_at,
+    })
+}
+
+fn schedule_spec(def: &terrarium_core::schedule::ScheduleDef) -> Value {
+    json!({
+        "spec": def.spec,
+        "action": def.action,
+        "enabled": def.enabled,
+        "catch_up": def.catch_up,
     })
 }
 
@@ -661,6 +671,26 @@ pub fn plan(conn: &Connection, f: &Fleet) -> ApiResult<Plan> {
         entries.push(e);
     }
 
+    for p in &f.projects {
+        for d in &p.def.schedules {
+            let key = format!("{}/{}", p.def.name, d.name);
+            let live = schedules::find_in(conn, Some(&p.def.name), &d.name)?.map(|l| Live {
+                spec: schedule_spec(&l.def()),
+                source: l.source,
+            });
+            let o = owner_of(Kind::Schedule, &key);
+            entries.push(classify(
+                &f.name,
+                Kind::Schedule,
+                &key,
+                Some(&p.def.name),
+                &schedule_spec(d),
+                live,
+                o.as_ref(),
+            ));
+        }
+    }
+
     // Objects the fleet owns and the file no longer declares.
     let declared: BTreeSet<(Kind, String)> =
         f.objects().into_iter().map(|o| (o.kind, o.key)).collect();
@@ -706,11 +736,20 @@ pub fn plan(conn: &Connection, f: &Fleet) -> ApiResult<Plan> {
                 Some(r) => (true, r.source, None, false),
                 None => (false, String::new(), None, false),
             },
+            Kind::Schedule => {
+                let (p, n) = o.key.split_once('/').unwrap_or(("", &o.key));
+                match schedules::find_in(conn, Some(p), n)? {
+                    Some(r) => (true, r.source, Some(r.id), false),
+                    None => (false, String::new(), None, false),
+                }
+            }
         };
         e.id = id;
         e.live = live;
         e.action = match o.kind {
-            Kind::Agent | Kind::Target if exists && source != SOURCE_FILE => Action::Delete,
+            Kind::Agent | Kind::Target | Kind::Schedule if exists && source != SOURCE_FILE => {
+                Action::Delete
+            }
             _ => Action::Release,
         };
         if !exists {
@@ -823,6 +862,23 @@ pub fn check_against(conn: &Connection, f: &Fleet, prompts: &Path) -> ApiResult<
             issues.push(Issue::error(at, e.message));
         }
     }
+    let now = chrono::Utc::now();
+    for p in &f.projects {
+        for d in &p.def.schedules {
+            // An `at` in the past is fine for a schedule that exists with
+            // the same spec: an apply leaves it as it is.
+            let same = schedules::find_in(conn, Some(&p.def.name), &d.name)?
+                .is_some_and(|l| l.spec == d.spec);
+            if let Err(e) = schedules::validate_spec(&d.spec, now)
+                && !same
+            {
+                issues.push(Issue::error(
+                    format!("projects.{}.schedules.{}", p.def.name, d.name),
+                    e.message,
+                ));
+            }
+        }
+    }
     for s in &f.subscriptions {
         if let Err(e) = subscriptions::check_name(&s.name) {
             issues.push(Issue::error(format!("subscriptions.{}", s.name), e.message));
@@ -913,6 +969,13 @@ pub fn authorize(actor: &Actor, plan: &Plan, prune: bool) -> ApiResult<()> {
                     policy::admin_project(actor, &e.key, "changing a project from a fleet")
                 }
                 Kind::Target => policy::define_target(actor, e.project.as_deref()),
+                // The action's reach is checked in the apply, where the
+                // agents and targets of the fleet exist.
+                Kind::Schedule => policy::admin_project(
+                    actor,
+                    e.project.as_deref().unwrap_or_default(),
+                    "managing schedules from a fleet",
+                ),
                 Kind::Agent => {
                     let project = e.project.as_deref().unwrap_or_default();
                     policy::admin_project(actor, project, "managing agents from a fleet")?;
@@ -1125,6 +1188,31 @@ pub fn apply(
             &agent_spec(&view_def(&live)),
         )?;
     }
+    let run_as = actor.label();
+    let at = chrono::Utc::now();
+    for p in &f.projects {
+        for d in &p.def.schedules {
+            let reach = schedules::resolve_reach(t, Some(&p.def.name), &d.action).map_err(|e| {
+                ApiError::new(
+                    e.code,
+                    format!(
+                        "projects.{}.schedules.{}: {}",
+                        p.def.name, d.name, e.message
+                    ),
+                )
+            })?;
+            policy::manage_schedule(actor, Some(&p.def.name), &reach)?;
+            let live = schedules::upsert_def(t, &p.def.name, d, &source, &run_as, at)?;
+            record(
+                t,
+                &name,
+                Kind::Schedule,
+                &live.key(),
+                Some(&p.def.name),
+                &schedule_spec(&live.def()),
+            )?;
+        }
+    }
     for e in plan.entries.iter_mut() {
         let removal = matches!(e.action, Action::Delete | Action::Release);
         if removal && !prune {
@@ -1141,6 +1229,11 @@ pub fn apply(
                 }
                 Kind::Target => {
                     targets::delete(t, &e.key)?;
+                }
+                Kind::Schedule => {
+                    if let Some(id) = &e.id {
+                        schedules::delete(t, id)?;
+                    }
                 }
                 _ => {}
             }
@@ -1437,6 +1530,12 @@ pub fn export(
         }
     }
     agent_views.sort_by(|a, b| a.agent.name.cmp(&b.agent.name));
+    // File schedules belong to the project file; the others go in.
+    let project_schedules = schedules::of_project(conn, project)?
+        .into_iter()
+        .filter(|s| s.source != SOURCE_FILE)
+        .map(|s| s.def())
+        .collect();
     let targets = targets::list(conn)?
         .into_iter()
         .filter(|r| r.def.project.as_deref() == Some(project))
@@ -1458,6 +1557,7 @@ pub fn export(
                 checkout: terrarium_core::config::CheckoutDef {
                     on_agent_create: checkout,
                 },
+                schedules: project_schedules,
             },
             agents: agent_views
                 .iter()

@@ -9,6 +9,7 @@ pub mod knowledge;
 pub mod mail;
 pub mod projects;
 pub mod remote;
+pub mod schedules;
 pub mod system;
 
 #[cfg(test)]
@@ -62,6 +63,7 @@ pub async fn run(ctx: &Ctx, cmd: &Command) -> anyhow::Result<()> {
         Command::Shell { target } => remote::shell(ctx, target).await,
         Command::Cp { src, dst } => remote::cp(ctx, src, dst).await,
         Command::Fleet { command } => fleet::fleet(ctx, command).await,
+        Command::Schedule { command } => schedules::schedule(ctx, command).await,
         Command::Admin { command } => admin(ctx, command).await,
         Command::Audit(args) => system::audit(ctx, args).await,
         Command::Events(args) => system::events(ctx, args).await,
@@ -81,6 +83,7 @@ async fn admin(ctx: &Ctx, cmd: &AdminCmd) -> anyhow::Result<()> {
         AdminCmd::Host { command } => system::hosts(ctx, command).await,
         AdminCmd::Harness { command } => system::harnesses(ctx, command).await,
         AdminCmd::Fleet { command } => fleet::fleet(ctx, command).await,
+        AdminCmd::Schedule { command } => schedules::schedule(ctx, command).await,
         AdminCmd::Audit(args) => system::audit(ctx, args).await,
     }
 }

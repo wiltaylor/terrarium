@@ -15,7 +15,7 @@ export function Sparkline(props: { values: number[]; label?: string; height?: nu
   );
 }
 
-export const LOGIN_CHIP: Record<LoginStatus, string> = { logged_in: "ok", expiring: "warn", expired: "bad", missing: "bad", unknown: "" };
+export const LOGIN_CHIP: Record<LoginStatus, string> = { logged_in: "ok", expiring: "warn", expired: "bad", missing: "bad", unknown: "", api_key: "ok" };
 
 /** No probe, or the probe has not run: local accounting is the only number. */
 export const isLocalOnly = (s: Pick<Subscription, "local_estimate_only" | "probe_status">): boolean => s.local_estimate_only || s.probe_status === "none";

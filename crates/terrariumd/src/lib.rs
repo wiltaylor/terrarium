@@ -24,6 +24,7 @@ pub mod prompt;
 pub mod quota_policy;
 pub mod runner_supervisor;
 pub mod sandbox;
+pub mod scheduler;
 pub mod settings;
 pub mod store;
 pub mod supervisor;
@@ -237,6 +238,7 @@ pub async fn start_with_usage(
     }
     tasks.push(spawn_prune_timer(state.clone()));
     tasks.push(leases::spawn_timer(&state));
+    tasks.push(scheduler::spawn(state.clone()));
     tasks.extend(start_usage(&state).await);
     Ok(Daemon {
         state,
@@ -276,7 +278,8 @@ async fn start_usage(state: &Shared) -> Vec<JoinHandle<()>> {
 /// Run the artifact retention prune (PLAN §15.2): first one hour after the
 /// start, then every `[artifacts] prune_interval_hours` (default 24). The
 /// same timer prunes the trash of deleted agents (`TERRARIUM_TRASH_DAYS`,
-/// [`trash::prune_trash`]) and the revoked sessions past their `exp`.
+/// [`trash::prune_trash`]), the revoked sessions past their `exp`, and the
+/// schedule runs past the newest 500 of each schedule.
 fn spawn_prune_timer(state: Shared) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut wait = std::time::Duration::from_secs(3600);
@@ -310,6 +313,17 @@ fn spawn_prune_timer(state: Shared) -> JoinHandle<()> {
                 .await
             {
                 warn!("cannot prune the revoked sessions: {e}");
+            }
+            match state
+                .db
+                .write("system", |t| {
+                    store::schedules::prune_runs(t, store::schedules::KEEP_RUNS)
+                })
+                .await
+            {
+                Ok(n) if n > 0 => info!(runs = n, "schedule run prune done"),
+                Ok(_) => {}
+                Err(e) => warn!("cannot prune the schedule runs: {e}"),
             }
             let hours = store::artifacts::context(&state.state_dir, &state.config_dir)
                 .map(|c| c.limits.prune_interval_hours)
@@ -351,6 +365,27 @@ pub async fn apply_definitions(
         })
         .await?;
     report.errors.extend(target_errors);
+    // Schedules of the project files, after the agents and targets that
+    // they name (docs/api.md §19).
+    let project_defs = defs.projects.clone();
+    let gone = report.projects.removed.clone();
+    let schedule_errors = state
+        .db
+        .write("system", move |t| {
+            let now = chrono::Utc::now();
+            let mut errors = Vec::new();
+            for p in &project_defs {
+                if store::projects::find(t, &p.name)?.is_some() {
+                    errors.extend(store::schedules::sync_file(t, &p.name, &p.schedules, now)?);
+                }
+            }
+            for p in &gone {
+                store::schedules::detach_file(t, p)?;
+            }
+            Ok(errors)
+        })
+        .await?;
+    report.errors.extend(schedule_errors);
     report.errors.extend(fleet::apply_config_dir(state).await);
     state.set_definitions(defs);
     // Like `DELETE /api/agents/{id}`: stop, then the dir to the trash.

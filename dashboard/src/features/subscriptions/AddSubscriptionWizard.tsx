@@ -12,17 +12,22 @@ import { CopyButton, ErrorBanner, Modal, useNow } from "../../components/ui";
 import { humanize } from "../../lib/format";
 import { api, subscriptions } from "../../stores";
 import {
+  apiKeyBody,
   countdown,
   initialWizard,
   isDeviceFlow,
   isLoginPath,
+  KEY_HELP,
   KEY_PROVIDERS,
   PI_PROVIDERS,
   sessionToCancel,
   shouldPoll,
   takesCode,
+  takesPlan,
   teardownLeft,
   wizardReduce,
+  ZAI_DEFAULT_PLAN,
+  ZAI_PLANS,
   type WizardAction,
   type WizardPath,
   type WizardSetup,
@@ -34,7 +39,7 @@ export const PATHS: { path: WizardPath; title: string; detail: string }[] = [
   { path: "codex", title: "Codex", detail: "ChatGPT plan. Device code with codex login --device-auth." },
   { path: "copilot", title: "Copilot", detail: "GitHub plan. Device code with copilot login --device-code." },
   { path: "pi", title: "pi, OAuth provider", detail: "Runs pi; type /login and pick the provider." },
-  { path: "api_key", title: "API key", detail: "Anthropic, OpenAI, Google, OpenRouter, xAI, Groq, an OpenAI-compatible endpoint, or a GitHub PAT." },
+  { path: "api_key", title: "API key", detail: "Anthropic, OpenAI, Google, OpenRouter, xAI, Groq, Z.ai (GLM), an OpenAI-compatible endpoint, or a GitHub PAT." },
   { path: "define", title: "Define only", detail: "Write the definition now; log in or add a key later." },
 ];
 
@@ -333,6 +338,7 @@ function ApiKeyForm(props: { setup: WizardSetup; onBack: () => void; onSaved: (n
   const [name, setName] = createSignal(props.setup.name ?? `${props.setup.provider ?? "openrouter"}-key`);
   const [key, setKey] = createSignal("");
   const [baseUrl, setBaseUrl] = createSignal("");
+  const [plan, setPlan] = createSignal(ZAI_DEFAULT_PLAN);
   const [models, setModels] = createSignal("");
   const [error, setError] = createSignal<unknown>(null);
   const [busy, setBusy] = createSignal(false);
@@ -343,12 +349,7 @@ function ApiKeyForm(props: { setup: WizardSetup; onBack: () => void; onSaved: (n
     setBusy(true);
     try {
       const n = name().trim();
-      await api.subscriptions.setApiKey(n, {
-        provider: provider(),
-        key: key(),
-        ...(provider() === "openai-compatible" ? { base_url: baseUrl().trim() } : {}),
-        ...(models().trim() ? { models: models().split(",").map((m) => m.trim()).filter(Boolean) } : {}),
-      });
+      await api.subscriptions.setApiKey(n, apiKeyBody({ provider: provider(), key: key(), plan: plan(), baseUrl: baseUrl(), models: models() }));
       setKey("");
       props.onSaved(n);
     } catch (err) {
@@ -391,6 +392,19 @@ function ApiKeyForm(props: { setup: WizardSetup; onBack: () => void; onSaved: (n
         {provider() === "github" ? "Fine-grained PAT (Copilot Requests permission)" : "API key"}
         <input type="password" value={key()} onInput={(e) => setKey(e.currentTarget.value)} autocomplete="off" required />
       </label>
+      <Show when={takesPlan(provider())}>
+        <label>
+          Plan
+          <select value={plan()} onChange={(e) => setPlan(e.currentTarget.value)}>
+            <For each={ZAI_PLANS}>{(p) => <option value={p.id}>{p.label}</option>}</For>
+          </select>
+        </label>
+      </Show>
+      <Show when={KEY_HELP[provider()]}>
+        <p class="muted small" style={{ margin: 0 }}>
+          {KEY_HELP[provider()]}
+        </p>
+      </Show>
       <Show when={provider() === "openai-compatible"}>
         <label>
           Base URL

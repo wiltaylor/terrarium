@@ -45,6 +45,8 @@ similar.workspace = true
 toml.workspace = true
 reqwest.workspace = true
 semver.workspace = true
+cron.workspace = true
+chrono-tz.workspace = true
 # The TLS host listener (TERRARIUM_HOST_TLS_CERT, docs/host-protocol.md).
 rustls.workspace = true
 tokio-rustls.workspace = true

@@ -280,16 +280,32 @@ async fn verify(
 ) -> ApiResult<Json<Value>> {
     policy::manage_subscriptions(&actor, "verifying a subscription login")?;
     let sub = load(&state, name.clone()).await?.sub;
+    let zai = terrarium_core::zai::is_zai(&sub.provider);
     if sub.env_var.is_some() && login::stored_key(&state.state_dir, &sub.name).is_some() {
         let n = name.clone();
+        let status = if zai { subs::API_KEY } else { subs::LOGGED_IN };
         state
             .db
             .write(actor.label(), move |t| {
-                subs::set_login_status(t, &n, subs::LOGGED_IN)
+                subs::set_login_status(t, &n, status)
             })
             .await?;
         return Ok(Json(
             json!({"subscription": load(&state, name).await?, "status": {"logged_in": true, "detail": "a stored API key"}}),
+        ));
+    }
+    // A Z.ai subscription is a key only. Its first harness (claude) would
+    // report the shared Claude login, which is not this subscription.
+    if zai {
+        let n = name.clone();
+        state
+            .db
+            .write(actor.label(), move |t| {
+                subs::set_login_status(t, &n, subs::MISSING)
+            })
+            .await?;
+        return Ok(Json(
+            json!({"subscription": load(&state, name).await?, "status": {"logged_in": false, "detail": "no stored Z.ai API key"}}),
         ));
     }
     let Some((kind, provider)) = login::kind_of(&sub) else {
@@ -328,6 +344,13 @@ async fn logout(
 ) -> ApiResult<Json<SubscriptionView>> {
     policy::operator_only(&actor, "logging a subscription out")?;
     let sub = load(&state, name.clone()).await?.sub;
+    // The harness logout would end the shared login of the harness, which
+    // an API-key subscription does not use.
+    if terrarium_core::zai::is_zai(&sub.provider) {
+        return Err(ApiError::invalid(format!(
+            "subscription `{name}` is a Z.ai API key and has no logout; store another key, or delete the subscription"
+        )));
+    }
     let Some((kind, _)) = login::kind_of(&sub) else {
         return Err(ApiError::invalid(format!(
             "subscription `{name}` names no harness"
@@ -363,9 +386,20 @@ async fn api_key(
     }
     let Some((var, url_var)) = login::env_var_for(&key.provider) else {
         return Err(ApiError::invalid(format!(
-            "unknown provider `{}`; use anthropic, openai, openai-compatible, google, openrouter, xai, groq, or github",
+            "unknown provider `{}`; use anthropic, openai, openai-compatible, google, openrouter, xai, groq, github, or zai",
             key.provider
         )));
+    };
+    let zai = terrarium_core::zai::is_zai(&key.provider);
+    let zai_plan = if zai {
+        Some(terrarium_core::zai::parse_plan(key.plan.as_deref()).map_err(ApiError::invalid)?)
+    } else if key.plan.is_some() {
+        return Err(ApiError::invalid(format!(
+            "`plan` is only for provider zai, not `{}`",
+            key.provider
+        )));
+    } else {
+        None
     };
     if url_var.is_some() && key.base_url.as_deref().is_none_or(str::is_empty) {
         return Err(ApiError::invalid(format!(
@@ -391,7 +425,23 @@ async fn api_key(
     state
         .db
         .write(actor.label(), move |t| {
-            if source.is_none() {
+            if let Some(plan) = zai_plan {
+                // Z.ai: Claude Code and pi. No probe: Z.ai documents no
+                // usage endpoint (`docs/compat.md`, "Z.ai").
+                if source.is_none() {
+                    let def = SubscriptionDef {
+                        name: n.clone(),
+                        provider: provider.clone(),
+                        plan: Some(plan.as_str().into()),
+                        harnesses: vec![HarnessId::Claude, HarnessId::Pi],
+                        probe: None,
+                        alert_at: 80,
+                    };
+                    subs::upsert_def(t, &def, SOURCE_API)?;
+                } else if source.as_deref() == Some(SOURCE_API) {
+                    subs::set_plan(t, &n, plan.as_str())?;
+                }
+            } else if source.is_none() {
                 let harness = if provider == "github" { HarnessId::Copilot } else { HarnessId::Pi };
                 let def = SubscriptionDef {
                     name: n.clone(),
@@ -410,12 +460,13 @@ async fn api_key(
             // A file subscription keeps its definition; the env var is
             // daemon state.
             subs::set_env_var(t, &n, Some(var))?;
-            subs::set_login_status(t, &n, subs::LOGGED_IN)?;
+            let status = if zai_plan.is_some() { subs::API_KEY } else { subs::LOGGED_IN };
+            subs::set_login_status(t, &n, status)?;
             t.audit(
                 "subscription.api_key",
                 &n,
                 None,
-                json!({"provider": provider, "env_var": var, "base_url": base_url, "models": models}),
+                json!({"provider": provider, "plan": zai_plan.map(|p| p.as_str()), "env_var": var, "base_url": base_url, "models": models}),
             )
         })
         .await?;

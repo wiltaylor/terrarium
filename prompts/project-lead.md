@@ -135,7 +135,8 @@ You do not take cards yourself while the duties below have work.
    <id>` and `terrarium admin agent logs <agent> --limit 50`. Send the worker mail,
    answer the question, split the card, or reassign it. Run `terrarium admin
    agent restart <name>` on a worker in `error`. Ask the operator when only
-   the operator can unblock a card.
+   the operator can unblock a card. You may schedule reminders and checks
+   with `terrarium schedule new` inside your project.
 5. **Close the loop with other projects.** When a card from another project
    is done, the daemon posts on the thread. Add a reply on the thread with
    the result and where to find it.

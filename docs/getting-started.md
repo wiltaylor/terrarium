@@ -127,6 +127,30 @@ docker compose exec terrarium claude auth status
 The command exits with 0 when you are logged in. The Subscriptions page
 finds the login and offers to make a subscription for it.
 
+#### Add a Z.ai (GLM) key
+
+Z.ai sells the GLM models with an API key. Claude Code and pi can both
+spend it. To add the key:
+
+1. Make a key at `https://z.ai/manage-apikey/apikey-list`.
+2. Open the **Subscriptions** page and click **Add subscription**.
+3. Click **API key**, and set **Provider** to **Z.ai (GLM)**.
+4. Set **Plan** to **GLM Coding Plan** or **Pay as you go (API)**.
+5. Paste the key, and click **Save key**.
+
+Or use the API:
+
+```sh
+curl -X POST http://localhost:8080/api/subscriptions/glm/api-key \
+  -H "Authorization: Bearer $TERRARIUM_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"provider": "zai", "plan": "coding", "key": "<your key>"}'
+```
+
+Then give an agent `subscription = "glm"`, with `harness = "claude"` or
+`harness = "pi"`. Set `model` to a GLM id, for example `glm-5.3`, or leave
+it empty. Z.ai has no usage probe, so the tile shows "Local estimate
+only". docs/api.md §16.5 lists the env that the agents get.
+
 ### 2.5 Make a project and an agent
 
 The CLI is in the container. Make a shell function so that the commands are
@@ -692,6 +716,19 @@ a comma list. The report goes to stdout and to `target/compat-report.md`.
 
 `cargo test -p terrarium-compat` without `--ignored` runs only the dry run.
 It starts no harness.
+
+### 6.3 The Z.ai test
+
+The Z.ai test runs one turn on `glm-5.3-flash` through pi. It spends a
+little of your Z.ai plan. Run it with your key:
+
+```sh
+ZAI_API_KEY=<key> cargo test -p terrarium-adapter-pi --test zai_live -- --ignored
+```
+
+Set `ZAI_PLAN=api` to use the pay-as-you-go endpoint. Set `PI_BIN` to
+choose the pi binary (default: `pi` on `PATH`, for example
+`./tools/bin/pi`). Without `ZAI_API_KEY`, the test does nothing.
 
 ## 7. Updating a harness
 

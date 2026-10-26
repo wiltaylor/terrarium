@@ -248,7 +248,7 @@ async fn remove(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
-async fn start(
+pub(super) async fn start(
     State(state): State<Shared>,
     actor: Actor,
     Path(id): Path<String>,
@@ -290,7 +290,7 @@ async fn start(
     Ok((StatusCode::ACCEPTED, Json(v)))
 }
 
-async fn stop(
+pub(super) async fn stop(
     State(state): State<Shared>,
     actor: Actor,
     Path(id): Path<String>,
@@ -341,7 +341,7 @@ async fn stop(
     Ok((StatusCode::ACCEPTED, Json(v)))
 }
 
-async fn restart(
+pub(super) async fn restart(
     State(state): State<Shared>,
     actor: Actor,
     Path(id): Path<String>,
@@ -384,11 +384,11 @@ async fn restart(
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SendBody {
-    text: String,
+pub(super) struct SendBody {
+    pub(super) text: String,
 }
 
-async fn send(
+pub(super) async fn send(
     State(state): State<Shared>,
     actor: Actor,
     Path(id): Path<String>,

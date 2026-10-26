@@ -3712,3 +3712,343 @@ async fn admin_harness_update_prints_npm_output_and_the_running_agents_on_failur
     assert!(se.details.is_some());
     assert!(!r.out.contains("running:"), "{}", r.out);
 }
+
+/// `schedule` (docs/api.md §19): every command, both modes.
+#[tokio::test]
+async fn schedules_every_command() {
+    let sched = json!({"id": "01SCHED", "name": "standup", "project": "terra", "enabled": true,
+        "spec": {"kind": "cron", "expr": "0 9 * * MON-FRI", "tz": "Europe/London"},
+        "action": {"type": "mail", "to": "lead", "subject": "s", "body": "b"},
+        "catch_up": "skip", "run_as": "operator", "created_by": "operator", "source": "api",
+        "next_run_at": "2026-10-27T09:00:00.000Z", "runs_count": 2,
+        "last_run": {"at": "2026-10-26T09:00:00.000Z", "status": "ok", "summary": "mail M1 to terra/lead", "run_id": "01RUN"}});
+    // ls: the operator sees all; --project and --enabled filter.
+    let out = ok(
+        false,
+        &["schedule", "ls"],
+        vec![(200, json!([sched]))],
+        vec![req(Get, "/api/schedules")],
+    )
+    .await;
+    assert!(out.contains("terra/standup"), "{out}");
+    assert!(
+        out.contains("cron 0 9 * * MON-FRI (Europe/London)"),
+        "{out}"
+    );
+    assert!(out.contains("mail lead"), "{out}");
+    ok(
+        false,
+        &["-p", "terra", "schedules", "ls", "--disabled"],
+        vec![],
+        vec![(
+            Get,
+            "/api/schedules",
+            vec![("project", "terra"), ("enabled", "false")],
+            None,
+        )],
+    )
+    .await;
+    ok(
+        false,
+        &["-p", "terra", "schedule", "ls", "--all", "--enabled"],
+        vec![],
+        vec![(Get, "/api/schedules", vec![("enabled", "true")], None)],
+    )
+    .await;
+    // show: by project/name, encoded.
+    let out = ok(
+        false,
+        &["schedule", "show", "terra/standup"],
+        vec![(200, sched.clone())],
+        vec![req(Get, "/api/schedules/terra%2Fstandup")],
+    )
+    .await;
+    assert!(out.contains("last run:  2026-10-26 09:00 ok"), "{out}");
+    assert!(out.contains("runs as:   operator"), "{out}");
+
+    // new: each action type.
+    let at = |body: Value| (Post, "/api/schedules", vec![], Some(body));
+    ok(
+        false,
+        &[
+            "-p",
+            "terra",
+            "schedule",
+            "new",
+            "standup",
+            "--cron",
+            "*/15 * * * *",
+            "--tz",
+            "Europe/London",
+            "--mail",
+            "lead",
+            "-s",
+            "standup",
+            "--body",
+            "post status",
+            "--catch-up",
+            "once",
+        ],
+        vec![(201, sched.clone())],
+        vec![at(json!({"name": "standup", "project": "terra",
+            "spec": {"kind": "cron", "expr": "*/15 * * * *", "tz": "Europe/London"},
+            "action": {"type": "mail", "to": "lead", "subject": "standup", "body": "post status"},
+            "catch_up": "once"}))],
+    )
+    .await;
+    ok_in(
+        false,
+        &[
+            "-p",
+            "terra",
+            "schedule",
+            "new",
+            "wake",
+            "--every",
+            "30m",
+            "--turn",
+            "worker",
+            "--text",
+            "-",
+            "--start-if-stopped",
+            "--disabled",
+        ],
+        vec![(201, sched.clone())],
+        Some("check the board"),
+        vec![at(json!({"name": "wake", "project": "terra",
+            "spec": {"kind": "interval", "every": "30m"},
+            "action": {"type": "turn", "agent": "worker", "text": "check the board",
+                       "start_if_stopped": true},
+            "enabled": false}))],
+    )
+    .await;
+    ok(
+        false,
+        &[
+            "-p",
+            "terra",
+            "schedule",
+            "new",
+            "tests",
+            "--every",
+            "1h",
+            "--exec",
+            "terra-box",
+            "--cwd",
+            "/work",
+            "--timeout",
+            "600",
+            "--",
+            "make",
+            "test",
+        ],
+        vec![(201, sched.clone())],
+        vec![at(json!({"name": "tests", "project": "terra",
+            "spec": {"kind": "interval", "every": "1h"},
+            "action": {"type": "exec", "target": "terra-box", "cmd": ["make", "test"],
+                       "cwd": "/work", "timeout_secs": 600}}))],
+    )
+    .await;
+    ok(
+        false,
+        &[
+            "schedule",
+            "new",
+            "nightly",
+            "--global",
+            "--at",
+            "2026-11-01T02:00:00Z",
+            "--agent",
+            "terra/worker",
+            "--verb",
+            "restart",
+        ],
+        vec![(201, sched.clone())],
+        vec![at(json!({"name": "nightly", "project": null,
+            "spec": {"kind": "at", "at": "2026-11-01T02:00:00Z"},
+            "action": {"type": "agent", "agent": "terra/worker", "verb": "restart"}}))],
+    )
+    .await;
+    // Agent mode: the project defaults to the agent's own, through the
+    // tunnel; `admin schedule` is the same command.
+    ok(
+        true,
+        &[
+            "admin",
+            "schedule",
+            "new",
+            "quota",
+            "--every",
+            "2h",
+            "--probe",
+            "anthropic-max",
+        ],
+        vec![(201, sched.clone())],
+        vec![at(json!({"name": "quota", "project": "terra",
+            "spec": {"kind": "interval", "every": "2h"},
+            "action": {"type": "probe", "subscription": "anthropic-max"}}))],
+    )
+    .await;
+    ok(
+        true,
+        &["schedule", "ls"],
+        vec![],
+        vec![(Get, "/api/schedules", vec![], None)],
+    )
+    .await;
+    // Usage errors: no time, no action, an operator with no project, a
+    // command without --exec, a bad verb.
+    for args in [
+        vec![
+            "-p", "terra", "schedule", "new", "x", "--mail", "lead", "--body", "b",
+        ],
+        vec!["-p", "terra", "schedule", "new", "x", "--every", "1h"],
+        vec!["schedule", "new", "x", "--every", "1h", "--probe", "s"],
+        vec![
+            "-p", "terra", "schedule", "new", "x", "--every", "1h", "--", "make",
+        ],
+        vec![
+            "-p", "terra", "schedule", "new", "x", "--every", "1h", "--agent", "w", "--verb",
+            "pause",
+        ],
+        vec!["schedule", "set", "01SCHED"],
+    ] {
+        let r = exec(false, &args, vec![], None).await;
+        let e = r.result.unwrap_err();
+        assert_eq!(exit_code_of(&e), exit::USAGE, "{args:?}: {e}");
+        assert!(r.reqs.is_empty(), "{args:?}");
+    }
+    // Two actions or two specs: clap refuses them.
+    assert!(
+        Cli::try_parse_from([
+            "terrarium",
+            "schedule",
+            "new",
+            "x",
+            "--every",
+            "1h",
+            "--cron",
+            "* * * * *",
+        ])
+        .is_err()
+    );
+    assert!(
+        Cli::try_parse_from([
+            "terrarium",
+            "schedule",
+            "new",
+            "x",
+            "--every",
+            "1h",
+            "--mail",
+            "a",
+            "--probe",
+            "s",
+        ])
+        .is_err()
+    );
+
+    // set: only the flags given.
+    ok(
+        false,
+        &[
+            "schedule",
+            "set",
+            "01SCHED",
+            "--every",
+            "2h",
+            "--rename",
+            "daily",
+            "--enabled",
+        ],
+        vec![(200, sched.clone())],
+        vec![(
+            Patch,
+            "/api/schedules/01SCHED",
+            vec![],
+            Some(
+                json!({"name": "daily", "spec": {"kind": "interval", "every": "2h"},
+                        "enabled": true}),
+            ),
+        )],
+    )
+    .await;
+    // rm, run, enable, disable, runs.
+    let out = ok(
+        false,
+        &["schedule", "rm", "terra/standup"],
+        vec![(204, Value::Null)],
+        vec![req(Delete, "/api/schedules/terra%2Fstandup")],
+    )
+    .await;
+    assert_eq!(out, "deleted schedule terra/standup\n");
+    let run = json!({"id": "01RUN", "schedule": "01SCHED", "trigger": "manual", "status": "ok",
+                     "summary": "exec on box: exit 0",
+                     "output": {"stdout": "all green\n", "stderr": "", "exit_code": 0}});
+    let out = ok(
+        false,
+        &["schedule", "run", "01SCHED"],
+        vec![(200, run.clone())],
+        vec![req(Post, "/api/schedules/01SCHED/run")],
+    )
+    .await;
+    assert!(
+        out.contains("run 01RUN  manual  ok: exec on box: exit 0"),
+        "{out}"
+    );
+    assert!(out.contains("all green"), "{out}");
+    let mut bad = run.clone();
+    bad["status"] = json!("failed");
+    let r = exec(
+        false,
+        &["schedule", "run", "01SCHED"],
+        vec![(200, bad)],
+        None,
+    )
+    .await;
+    assert_eq!(exit_code_of(&r.result.unwrap_err()), 1);
+    let out = ok(
+        false,
+        &["schedule", "enable", "01SCHED"],
+        vec![(200, sched.clone())],
+        vec![req(Post, "/api/schedules/01SCHED/enable")],
+    )
+    .await;
+    assert!(out.contains("terra/standup enabled"), "{out}");
+    let mut off = sched.clone();
+    off["enabled"] = json!(false);
+    let out = ok(
+        true,
+        &["schedule", "disable", "01SCHED"],
+        vec![(200, off)],
+        vec![req(Post, "/api/schedules/01SCHED/disable")],
+    )
+    .await;
+    assert!(out.contains("disabled"), "{out}");
+    let out = ok(
+        false,
+        &["schedule", "runs", "01SCHED", "--limit", "5"],
+        vec![(200, json!([run]))],
+        vec![(
+            Get,
+            "/api/schedules/01SCHED/runs",
+            vec![("limit", "5")],
+            None,
+        )],
+    )
+    .await;
+    assert!(out.contains("01RUN") && out.contains("manual"), "{out}");
+    // A refusal keeps the server's words and exit 3.
+    let r = exec(
+        true,
+        &["schedule", "new", "x", "--every", "1h", "--mail", "ops/dev", "--body", "b"],
+        vec![(
+            403,
+            json!({"error": {"code": "forbidden",
+                "message": "a schedule of project `terra` stays inside it: mail to `ops/dev` leaves the project; that needs sysadmin or the operator"}}),
+        )],
+        None,
+    )
+    .await;
+    assert_eq!(exit_code_of(&r.result.unwrap_err()), 3);
+}

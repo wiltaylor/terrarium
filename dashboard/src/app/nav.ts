@@ -7,6 +7,7 @@ export const PROJECT_ITEMS = [
   { path: "memory", label: "Memory" },
   { path: "versions", label: "Versions" },
   { path: "artifacts", label: "Artifacts" },
+  { path: "schedules", label: "Schedules" },
   { path: "settings", label: "Settings & repos" },
 ] as const;
 
@@ -17,6 +18,7 @@ export const GLOBAL_ITEMS = [
   { href: "/subscriptions", label: "Subscriptions" },
   { href: "/mail", label: "Mail" },
   { href: "/targets", label: "Targets" },
+  { href: "/schedules", label: "Schedules" },
   { href: "/hosts", label: "Hosts" },
   { href: "/events", label: "Event log" },
   { href: "/audit", label: "Audit" },

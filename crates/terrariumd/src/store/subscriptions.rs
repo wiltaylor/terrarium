@@ -24,6 +24,9 @@ pub const LOGGED_IN: &str = "logged_in";
 pub const MISSING: &str = "missing";
 pub const EXPIRING: &str = "expiring";
 pub const EXPIRED: &str = "expired";
+/// A stored API key that no harness status command can check (Z.ai). The
+/// key is there; whether the provider takes it shows on the first turn.
+pub const API_KEY: &str = "api_key";
 
 /// Probe state words.
 pub const PROBE_OK: &str = "ok";
@@ -47,7 +50,8 @@ pub struct Subscription {
     /// subscription. The key itself is never in the API.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env_var: Option<String>,
-    /// `logged_in`, `expiring`, `expired`, `missing`, or `unknown`.
+    /// `logged_in`, `expiring`, `expired`, `missing`, `unknown`, or
+    /// `api_key` (a stored Z.ai key; no harness login to check).
     pub login_status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verified_at: Option<String>,
@@ -123,6 +127,9 @@ pub fn upsert_def(t: &mut Tx<'_>, def: &SubscriptionDef, source: &str) -> ApiRes
     check_name(&def.name)?;
     if def.provider.trim().is_empty() {
         return Err(ApiError::invalid("the subscription needs a provider"));
+    }
+    if terrarium_core::zai::is_zai(&def.provider) {
+        terrarium_core::zai::parse_plan(def.plan.as_deref()).map_err(ApiError::invalid)?;
     }
     let at = now();
     let harnesses = serde_json::to_string(&def.harnesses)?;
@@ -655,6 +662,40 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(db.read(ops).await.unwrap().items.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn zai_plans_are_checked() {
+        let db = db();
+        let zai = |plan: Option<&str>| SubscriptionDef {
+            name: "glm".into(),
+            provider: "zai".into(),
+            plan: plan.map(str::to_owned),
+            harnesses: vec![HarnessId::Claude, HarnessId::Pi],
+            probe: None,
+            alert_at: 80,
+        };
+        for plan in [None, Some("coding"), Some("api")] {
+            let d = zai(plan);
+            db.write("system", move |t| upsert_def(t, &d, SOURCE_API))
+                .await
+                .unwrap();
+        }
+        let d = zai(Some("Max 20x"));
+        let err = db
+            .write("system", move |t| upsert_def(t, &d, SOURCE_API))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, crate::error::Code::Invalid);
+        assert!(err.message.contains("coding"), "{}", err.message);
+        // The new login state word is stored.
+        db.write("system", |t| set_login_status(t, "glm", API_KEY))
+            .await
+            .unwrap();
+        assert_eq!(
+            db.read(|c| get(c, "glm")).await.unwrap().login_status,
+            API_KEY
+        );
     }
 
     #[tokio::test]

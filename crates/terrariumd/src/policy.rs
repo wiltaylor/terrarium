@@ -11,6 +11,7 @@ use crate::actor::{Actor, AgentActor};
 use crate::error::{ApiError, ApiResult};
 use crate::store::leases::Standing;
 use crate::store::mail::Address;
+use crate::store::schedules::Reach;
 
 fn deny(what: &str, need: &str) -> ApiError {
     ApiError::forbidden(format!("{what} needs {need}"))
@@ -377,6 +378,92 @@ pub fn mail_to(sender: &AgentActor, to: &Address) -> ApiResult<()> {
     )))
 }
 
+// ---- schedules (docs/api.md §19) ----
+
+/// Read the schedules of `project`, or the global schedules (`None`):
+/// members read their own project's; a global schedule needs sysadmin.
+pub fn read_schedules(actor: &Actor, project: Option<&str>) -> ApiResult<()> {
+    match project {
+        Some(p) => read_project(actor, p),
+        None => sysadmin(actor, "reading the global schedules"),
+    }
+}
+
+/// The first half of [`manage_schedule`], without the action: the
+/// operator and a sysadmin anywhere, a project_admin in its project.
+pub fn schedule_scope(actor: &Actor, project: Option<&str>) -> ApiResult<()> {
+    let Actor::Agent(a) = actor else {
+        return Ok(());
+    };
+    if a.is_sysadmin() {
+        return Ok(());
+    }
+    let Some(p) = project else {
+        return Err(deny(
+            "managing a global schedule",
+            "sysadmin or the operator",
+        ));
+    };
+    if !a.is_admin_of(p) {
+        return Err(deny(
+            &format!("managing the schedules of project `{p}`"),
+            &format!("project_admin of `{p}`, sysadmin, or the operator"),
+        ));
+    }
+    Ok(())
+}
+
+/// Create, change, delete, or run a schedule of `project` (`None`:
+/// global) whose action touches `reach`. The daemon checks this for the
+/// caller of each write, and again for the schedule's `run_as` at each
+/// run.
+///
+/// - The operator and a sysadmin: any schedule.
+/// - A global schedule: sysadmin.
+/// - A project_admin of the project: the action stays inside it. Mail to
+///   an agent of the project, `project:<project>`, or `operator`; a turn
+///   or an agent verb on an agent of the project; an exec on a global
+///   target or one of the project (the executor checks the policy and the
+///   leases at run time); a probe of a subscription that an agent of the
+///   project uses.
+/// - A member: none (members read only).
+pub fn manage_schedule(actor: &Actor, project: Option<&str>, reach: &Reach) -> ApiResult<()> {
+    schedule_scope(actor, project)?;
+    let (Actor::Agent(a), Some(p)) = (actor, project) else {
+        return Ok(());
+    };
+    if a.is_sysadmin() {
+        return Ok(());
+    }
+    let outside = |what: String| {
+        Err(ApiError::forbidden(format!(
+            "a schedule of project `{p}` stays inside it: {what}; that needs sysadmin or the operator"
+        )))
+    };
+    match reach {
+        Reach::Mail(Address::Operator) => Ok(()),
+        Reach::Mail(Address::Project(q)) if q == p => Ok(()),
+        Reach::Mail(Address::Agent { project: q, .. }) if q == p => Ok(()),
+        Reach::Mail(to) => outside(format!("mail to `{}` leaves the project", to.display())),
+        Reach::Agent { project: q, .. } if q == p => Ok(()),
+        Reach::Agent {
+            name, project: q, ..
+        } => outside(format!("agent `{q}/{name}` is in another project")),
+        Reach::Target { project: None, .. } => Ok(()),
+        Reach::Target {
+            project: Some(q), ..
+        } if q == p => Ok(()),
+        Reach::Target {
+            name,
+            project: Some(q),
+        } => outside(format!("target `{name}` belongs to project `{q}`")),
+        Reach::Subscription { projects, .. } if projects.iter().any(|q| q == p) => Ok(()),
+        Reach::Subscription { name, .. } => outside(format!(
+            "no agent of the project uses subscription `{name}`"
+        )),
+    }
+}
+
 // ---- memory graph, wiki, artifacts, versions (PLAN §14, §15) ----
 //
 // Every member reads and writes its own project's memories, pages,
@@ -631,6 +718,78 @@ mod tests {
         assert!(lease_target(&worker, "vm", Some("p"), "p").is_err());
         assert!(lease_target(&sys, "g", None, "p").is_ok());
         assert!(lease_target(&Actor::Operator, "g", None, "p").is_ok());
+    }
+
+    /// Schedules: the operator and sysadmins anywhere; a project_admin
+    /// inside its project; a member reads only.
+    #[test]
+    fn schedule_rights_per_role_and_action() {
+        let member = Actor::Agent(agent("p", &[], Policy::default()));
+        let admin = Actor::Agent(agent("p", &[Role::ProjectAdmin], Policy::default()));
+        let sys = Actor::Agent(agent("q", &[Role::Sysadmin], Policy::default()));
+        let mine = Reach::Agent {
+            id: "p-w".into(),
+            name: "w".into(),
+            project: "p".into(),
+        };
+        let theirs = Reach::Agent {
+            id: "q-w".into(),
+            name: "w".into(),
+            project: "q".into(),
+        };
+        let reaches_in = [
+            Reach::Mail(Address::Operator),
+            Reach::Mail(Address::Project("p".into())),
+            Reach::Mail(peer("p", "w")),
+            mine.clone(),
+            Reach::Target {
+                name: "g".into(),
+                project: None,
+            },
+            Reach::Target {
+                name: "p-box".into(),
+                project: Some("p".into()),
+            },
+            Reach::Subscription {
+                name: "s".into(),
+                projects: vec!["o".into(), "p".into()],
+            },
+        ];
+        let reaches_out = [
+            Reach::Mail(peer("q", "w")),
+            Reach::Mail(Address::Project("q".into())),
+            theirs.clone(),
+            Reach::Target {
+                name: "q-box".into(),
+                project: Some("q".into()),
+            },
+            Reach::Subscription {
+                name: "s".into(),
+                projects: vec!["q".into()],
+            },
+        ];
+        for r in &reaches_in {
+            assert!(manage_schedule(&admin, Some("p"), r).is_ok(), "{r:?}");
+            assert!(manage_schedule(&member, Some("p"), r).is_err(), "{r:?}");
+            // Another project's admin rights do not count.
+            assert!(manage_schedule(&admin, Some("q"), r).is_err(), "{r:?}");
+        }
+        for r in &reaches_out {
+            let e = manage_schedule(&admin, Some("p"), r).unwrap_err();
+            assert_eq!(e.code, crate::error::Code::Forbidden, "{r:?}");
+            assert!(e.message.contains("stays inside"), "{}", e.message);
+            assert!(manage_schedule(&sys, Some("p"), r).is_ok(), "{r:?}");
+            assert!(manage_schedule(&Actor::Operator, Some("p"), r).is_ok());
+        }
+        // Global schedules: sysadmin or the operator.
+        assert!(manage_schedule(&admin, None, &mine).is_err());
+        assert!(manage_schedule(&sys, None, &theirs).is_ok());
+        assert!(manage_schedule(&Actor::Operator, None, &theirs).is_ok());
+        // Reads: members read their project; the global list needs sysadmin.
+        assert!(read_schedules(&member, Some("p")).is_ok());
+        assert!(read_schedules(&member, Some("q")).is_err());
+        assert!(read_schedules(&admin, None).is_err());
+        assert!(read_schedules(&sys, None).is_ok());
     }
 
     #[test]

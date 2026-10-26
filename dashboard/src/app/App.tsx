@@ -18,6 +18,7 @@ const WikiPage = lazy(() => import("../features/wiki/WikiPage"));
 const ArtifactsPage = lazy(() => import("../features/artifacts/ArtifactsPage"));
 const VersionsPage = lazy(() => import("../features/versions/VersionsPage"));
 const TargetsPage = lazy(() => import("../features/targets/TargetsPage"));
+const SchedulesPage = lazy(() => import("../features/schedules/SchedulesPage"));
 const HostsPage = lazy(() => import("../features/hosts/HostsPage"));
 const AuditPage = lazy(() => import("../features/audit/AuditPage"));
 const EventsPage = lazy(() => import("../features/events/EventsPage"));
@@ -53,6 +54,7 @@ export function App() {
         <Route path="/subscriptions" component={SubscriptionsPage} />
         <Route path="/mail" component={MailPage} />
         <Route path="/targets" component={TargetsPage} />
+        <Route path="/schedules" component={SchedulesPage} />
         <Route path="/hosts" component={HostsPage} />
         <Route path="/events" component={EventsPage} />
         <Route path="/audit" component={AuditPage} />
@@ -65,6 +67,7 @@ export function App() {
         <Route path="/p/:project/wiki/*path" component={WikiPage} />
         <Route path="/p/:project/artifacts/:id?" component={ArtifactsPage} />
         <Route path="/p/:project/versions/:id?" component={VersionsPage} />
+        <Route path="/p/:project/schedules" component={SchedulesPage} />
         <Show when={isMock}>
           <Route path="/dev/xss" component={XssPage} />
         </Show>

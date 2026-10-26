@@ -122,6 +122,7 @@ a new token, when `.env` does not exist. The daemon reads:
 | `TERRARIUM_REPOS_DIR` | `/repos`. A project repo whose URL is a path under it is bound read-write into the sandbox of each agent of that project (`docs/api.md` §5.1). |
 | `TERRARIUM_WORK_DIR` | `/work`. The work root: the workspace of each agent is `<dir>/<project>/<agent>`. Compose binds `./work` here. A host agent on the same machine attaches the workspaces to targets: its `work_dir` is the host path of this dir. |
 | `TERRARIUM_MAX_TARGETS_PER_PROJECT` | `8`. The most targets in one project. A create past it is `409 conflict`. |
+| `TERRARIUM_MAX_SCHEDULES_PER_PROJECT` | `20`. The most schedules in one project (docs/api.md §19). A create past it is `409 conflict`. |
 | `TERRARIUM_MAIL_LOOP_LIMIT` | `6`. The agent-to-agent messages that a thread may have after the last operator or project-inbox message. Then the loop guard pauses the thread (PLAN §12). |
 | `TERRARIUM_TRASH_DAYS` | `7`. The days that a deleted agent stays in `<state>/trash/`, with its workspace. |
 | `TERRARIUM_HARNESS_HOME` | `/auth/<harness>`. Override as `claude=/path,codex=/path`. |

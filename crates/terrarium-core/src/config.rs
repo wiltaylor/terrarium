@@ -126,6 +126,10 @@ pub struct ProjectDef {
     pub repos: Vec<RepoDef>,
     #[serde(default)]
     pub checkout: CheckoutDef,
+    /// The project's schedules (docs/api.md §19): `[[schedules]]` in a
+    /// project file, `[[projects.schedules]]` in a fleet file.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub schedules: Vec<crate::schedule::ScheduleDef>,
 }
 
 /// The kind of a target. See PLAN §19.

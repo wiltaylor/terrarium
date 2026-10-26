@@ -10,6 +10,9 @@ import { REASON_LABELS } from "../mail/log";
 import { usageLabel } from "./labels";
 import { bucketStarts, cardProject, cardRows, tokenSeries, toPercent, totalsByKey } from "./usage";
 import { buildQueue, type ProjectSnapshot } from "./queue";
+import { failedRecently, scheduleHref } from "../schedules/model";
+import { actionWords } from "../../lib/schedule";
+import type { Schedule } from "../../api/types";
 
 const HOUR = 3_600_000;
 
@@ -72,29 +75,48 @@ async function loadQueue(missing: Set<string>) {
   return snaps;
 }
 
-const KIND_LABEL = { version: "version", page: "review", card: "blocked", mail: "mail" } as const;
-const KIND_CHIP = { version: "info", page: "warn", card: "bad", mail: "" } as const;
+/** Every schedule the viewer may read, for the failed runs. A daemon without schedules gives none. */
+async function loadSchedules(missing: Set<string>): Promise<Schedule[]> {
+  if (missing.has("schedules")) return [];
+  try {
+    return await api.schedules.list();
+  } catch (e) {
+    if (isMissingEndpoint(e)) missing.add("schedules");
+    return [];
+  }
+}
+
+const KIND_LABEL = { version: "version", page: "review", card: "blocked", schedule: "run failed", mail: "mail" } as const;
+const KIND_CHIP = { version: "info", page: "warn", card: "bad", schedule: "bad", mail: "" } as const;
 
 export function Home() {
   const now = useNow(15_000);
   const missing = new Set<string>();
   const [snaps, { refetch }] = createResource(() => loadQueue(missing));
+  const [schedules, { refetch: refetchSchedules }] = createResource(() => loadSchedules(missing));
   // The mail items come from the attention store, which a `mail` event refreshes.
-  const queue = createMemo(() => (snaps() ? buildQueue(snaps()!, attention.items()) : undefined));
+  const queue = createMemo(() => (snaps() ? buildQueue(snaps()!, attention.items(), failedRecently(schedules.latest ?? [], now())) : undefined));
   const [detail, setDetail] = createSignal<string | null>(null);
   const strip = useStripUsage(now);
 
   onMount(() => {
     let t: ReturnType<typeof setTimeout> | undefined;
+    let ts: ReturnType<typeof setTimeout> | undefined;
     const off = events.on((e) => {
       if (["card", "board"].includes(e.kind) || /^(version|wiki)\./.test(e.kind)) {
         clearTimeout(t);
         t = setTimeout(refetch, 400);
       }
+      // A run ended, or a schedule changed: the failed runs may differ.
+      if (e.kind === "schedule" && e.data?.change !== "run_started") {
+        clearTimeout(ts);
+        ts = setTimeout(refetchSchedules, 400);
+      }
     });
     onCleanup(() => {
       off();
       clearTimeout(t);
+      clearTimeout(ts);
     });
   });
 
@@ -132,7 +154,7 @@ export function Home() {
       <section class="card-box">
         <div class="spread">
           <h2 style={{ margin: 0 }}>Waiting on you</h2>
-          <button class="small" onClick={() => (void refetch(), void attention.refresh())}>
+          <button class="small" onClick={() => (void refetch(), void refetchSchedules(), void attention.refresh())}>
             Refresh
           </button>
         </div>
@@ -177,6 +199,17 @@ export function Home() {
                             </>
                           )}
                         </Match>
+                        <Match when={item.kind === "schedule" && item}>
+                          {(x) => (
+                            <>
+                              <A href={scheduleHref(x().schedule)}>
+                                <strong>{x().schedule.name}</strong>
+                              </A>{" "}
+                              <span class="muted">{actionWords(x().schedule.action, x().schedule.project)}</span>
+                              <div class="muted small ellipsis">{x().schedule.last_run?.summary ?? "The run failed."}</div>
+                            </>
+                          )}
+                        </Match>
                         <Match when={item.kind === "mail" && item}>
                           {(m) => (
                             <>
@@ -195,7 +228,7 @@ export function Home() {
                       </Switch>
                     </div>
                     <span class="muted small" style={{ "white-space": "nowrap" }}>
-                      {item.project ? `${item.project} · ` : ""}
+                      {item.project ? `${item.project} · ` : item.kind === "schedule" ? "global · " : ""}
                       {ago(item.at, now())}
                     </span>
                   </div>

@@ -26,6 +26,7 @@ use std::path::{Path, PathBuf};
 
 use semver::{Version, VersionReq};
 use terrarium_core::adapter::{Screen, run_version};
+use terrarium_core::config::SubscriptionDef;
 use terrarium_core::{
     Adapter, Agent, Answer, Event, FileOverlay, HarnessId, HarnessSessionId, HookPayload,
     LaunchSpec, Result, ScreenHint,
@@ -212,6 +213,29 @@ impl Adapter for ClaudeAdapter {
         self.launch_with(agent, session, prompt.as_deref())
     }
 
+    /// [`Adapter::launch`], and for a Z.ai subscription
+    /// (`terrarium_core::zai`) a `--model` with a GLM id: the agent's
+    /// `model` maps to it ([`terrarium_core::zai::model_for`]). The daemon
+    /// adds the endpoint and the key to the env
+    /// (`ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`). The quiet flags and
+    /// the quiet env stay. The shared Claude login is not used: the token
+    /// in the env comes first.
+    fn launch_for(
+        &self,
+        agent: &Agent,
+        resume: Option<&HarnessSessionId>,
+        subscription: Option<&SubscriptionDef>,
+    ) -> LaunchSpec {
+        match subscription {
+            Some(s) if terrarium_core::zai::is_zai(&s.provider) => {
+                let mut a = agent.clone();
+                a.model = Some(terrarium_core::zai::model_for(agent.model.as_deref()));
+                self.launch(&a, resume)
+            }
+            _ => self.launch(agent, resume),
+        }
+    }
+
     fn hook_event(&self, hook: &HookPayload) -> Vec<Event> {
         hooks::hook_events(hook)
     }
@@ -294,6 +318,50 @@ mod tests {
             VersionReq::parse(terrarium_core::harnesses::claude::TESTED).expect("req")
         );
         assert_eq!(a.id(), HarnessId::Claude);
+    }
+
+    #[test]
+    fn zai_subscription_passes_a_glm_model_and_keeps_the_quiet_flags() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let a = ClaudeAdapter::new(ClaudeOptions {
+            run_as_root: Some(false),
+            ..ClaudeOptions::default()
+        });
+        let sub = |provider: &str, plan: Option<&str>| SubscriptionDef {
+            name: "z".into(),
+            provider: provider.into(),
+            plan: plan.map(str::to_owned),
+            harnesses: vec![HarnessId::Claude, HarnessId::Pi],
+            probe: None,
+            alert_at: 80,
+        };
+        let model = |spec: &LaunchSpec| {
+            let i = spec.args.iter().position(|x| x == "--model")?;
+            spec.args.get(i + 1).cloned()
+        };
+        let zai = sub("zai", Some("coding"));
+        for (agent_model, want) in [
+            (Some("haiku"), "glm-5.3-flash"),
+            (None, "glm-5.3"),
+            (Some("glm-4.6"), "glm-4.6"),
+        ] {
+            let agent = test_agent_in(tmp.path(), agent_model);
+            let spec = a.launch_for(&agent, None, Some(&zai));
+            assert_eq!(model(&spec).as_deref(), Some(want), "{agent_model:?}");
+            assert!(spec.args.iter().any(|x| x == CLAUDE_2_1.yolo));
+            assert_eq!(
+                spec.env
+                    .get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")
+                    .map(String::as_str),
+                Some("1")
+            );
+            // The adapter sets no credential; the daemon injects it.
+            assert!(!spec.env.keys().any(|k| k.starts_with("ANTHROPIC")));
+        }
+        // Another provider: the agent's model as it is.
+        let agent = test_agent_in(tmp.path(), Some("haiku"));
+        let spec = a.launch_for(&agent, None, Some(&sub("anthropic", Some("Max 20x"))));
+        assert_eq!(model(&spec).as_deref(), Some("haiku"));
     }
 
     #[test]

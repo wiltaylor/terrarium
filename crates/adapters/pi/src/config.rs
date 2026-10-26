@@ -14,13 +14,14 @@
 //! | `pi/terrarium.ts` | the event extension ([`EXTENSION`]); `launch` loads it with `-e` |
 //! | `pi/sessions/` | the session files (`--session-dir`); bound read-write over itself |
 //! | `pi/settings.json` | bound over `$PI_CODING_AGENT_DIR/settings.json` |
+//! | `pi/models.json` | bound read-only over `$PI_CODING_AGENT_DIR/models.json` |
 //!
 //! # What pi keeps in its home, and where it goes
 //!
 //! | Path in the home | Decision | Why |
 //! |---|---|---|
 //! | `auth.json` | shared | the logins. pi writes it under a file lock (`proper-lockfile`) and refreshes OAuth tokens in it, so a refresh by one agent reaches all of them. |
-//! | `models.json` | shared | custom providers (base URL, models, API key). Read only for pi. |
+//! | `models.json` | per agent, from the shared file | custom providers (base URL, models, API key). Read only for pi. Every start copies the shared file and adds the Terrarium providers ([`TERRARIUM_PROVIDERS`]: `zai-api`, the Z.ai pay-as-you-go endpoint). An edit of the shared file reaches an agent at its next start. |
 //! | `settings.json` | per agent | the operator's own defaults (provider, model, theme, packages) stay out, and a `/model` change in one agent does not change the default of the others. The first start copies the shared file; later starts keep the agent's copy. Every start sets `lastChangelogVersion` to the pinned version ([`LAST_CHANGELOG_KEY`]), so pi 1.4's "What's new" changelog does not show. |
 //! | `mcp.json` | not loaded | `--no-mcp` (pi 1.4 has built-in MCP). |
 //! | `sessions/` | not used | `--session-dir` puts the sessions in the agent directory. In the sandbox every agent has the cwd `$HOME/work`, so the default directory (`sessions/--home-…-work--/`) would be one directory for all agents, and `pi --resume` would list the sessions of every agent. Session IDs do not collide (each agent gets new UUIDs), but pi has **no lock on a session**: two processes with one `--session-id` both start and both append (`docs/compat.md`). The supervisor must run one pi per agent. |
@@ -37,7 +38,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use terrarium_core::{Agent, FileOverlay};
 
 use crate::PiOptions;
@@ -54,6 +55,12 @@ pub const SETTINGS_FILE: &str = "settings.json";
 /// above the editor. The per-agent copy always holds the pinned version,
 /// so the changelog never shows (the shared file can name an older one).
 pub const LAST_CHANGELOG_KEY: &str = "lastChangelogVersion";
+/// The custom providers in the pi home. The agent gets a copy with the
+/// Terrarium providers added.
+pub const MODELS_FILE: &str = "models.json";
+/// The providers that Terrarium adds to every agent's `models.json`. A
+/// provider of the same id in the shared file is replaced.
+pub const TERRARIUM_PROVIDERS: &[&str] = &[terrarium_core::zai::PI_API_PROVIDER];
 /// The logins in the pi home. Shared.
 pub const AUTH_FILE: &str = "auth.json";
 /// The session directory in the agent's pi directory.
@@ -127,6 +134,52 @@ fn read_json(path: &Path) -> Result<Option<Value>> {
     }
 }
 
+/// One GLM model entry for a custom pi provider. The values are pi
+/// 1.4.0's built-in `zai` catalog (`pi-ai/dist/providers/data/zai.json`);
+/// the prices agree with docs.z.ai/guides/overview/pricing.
+fn glm_model(id: &str, name: &str, cost: [f64; 3]) -> Value {
+    json!({
+        "id": id,
+        "name": name,
+        "reasoning": true,
+        "input": ["text"],
+        "cost": {"input": cost[0], "output": cost[1], "cacheRead": cost[2], "cacheWrite": 0},
+        "contextWindow": 1_000_000,
+        "maxTokens": 131_072,
+    })
+}
+
+/// The custom pi provider `zai-api`: the Z.ai general (pay as you go)
+/// endpoint, OpenAI-compatible, with the key from `$ZAI_API_KEY` (the
+/// daemon injects it for an agent on a Z.ai subscription). pi's built-in
+/// `zai` provider is the GLM Coding Plan endpoint and needs no entry.
+/// pi turns on its Z.ai compatibility (thinking format, tool stream) from
+/// the `api.z.ai` base URL.
+pub fn zai_api_provider() -> Value {
+    use terrarium_core::zai;
+    json!({
+        "name": "Z.AI (pay as you go)",
+        "baseUrl": zai::API_BASE_URL,
+        "api": "openai-completions",
+        "apiKey": format!("${}", zai::KEY_ENV),
+        "models": [
+            glm_model(zai::MODEL_FAST, "GLM-5.3-Flash", [0.15, 0.5, 0.03]),
+            glm_model(zai::MODEL_FLAGSHIP, "GLM-5.3", [1.4, 4.4, 0.26]),
+        ],
+    })
+}
+
+/// The agent's `models.json`: the shared file (or none) with the
+/// Terrarium providers set.
+pub fn agent_models(shared: Option<Value>) -> Value {
+    let mut models = shared.unwrap_or_else(|| json!({}));
+    if !models.get("providers").is_some_and(Value::is_object) {
+        models["providers"] = json!({});
+    }
+    models["providers"][terrarium_core::zai::PI_API_PROVIDER] = zai_api_provider();
+    models
+}
+
 /// Write the per-agent files and return the overlays.
 ///
 /// - `home` is the shared pi home on the host (the daemon's view).
@@ -174,12 +227,31 @@ pub fn materialize(
         write_atomic(&shared, b"{}\n")?;
     }
 
+    // models.json: the shared file and the Terrarium providers, on every
+    // start. pi needs `providers` in the file, also in the mount point.
+    let own_models = dir.join(MODELS_FILE);
+    let shared_models = home.join(MODELS_FILE);
+    let models = agent_models(read_json(&shared_models)?);
+    if read_json(&own_models)?.as_ref() != Some(&models) {
+        let bytes =
+            serde_json::to_vec_pretty(&models).map_err(|e| PiError::json("models.json", e))?;
+        write_atomic(&own_models, &bytes)?;
+    }
+    if !shared_models.exists() {
+        write_atomic(&shared_models, b"{\"providers\": {}}\n")?;
+    }
+
     Ok(vec![
         FileOverlay {
             source: own,
             target: opts.agent_dir.join(SETTINGS_FILE),
             // pi writes settings (for example after `/model`).
             writable: true,
+        },
+        FileOverlay {
+            source: own_models,
+            target: opts.agent_dir.join(MODELS_FILE),
+            writable: false,
         },
         FileOverlay {
             source: ext.clone(),
@@ -229,6 +301,11 @@ mod tests {
                     writable: true,
                 },
                 FileOverlay {
+                    source: pi_dir(&agent).join(MODELS_FILE),
+                    target: PathBuf::from("/auth/pi/models.json"),
+                    writable: false,
+                },
+                FileOverlay {
                     source: ext.clone(),
                     target: ext.clone(),
                     writable: false,
@@ -265,7 +342,7 @@ mod tests {
         );
 
         // Auth and the shared settings stay as they were. No overlay covers
-        // auth.json or models.json.
+        // auth.json. models.json is the agent's read-only copy.
         assert_eq!(
             fs::read_to_string(home.join(AUTH_FILE)).expect("auth"),
             "{}"
@@ -274,12 +351,51 @@ mod tests {
             fs::read_to_string(home.join(SETTINGS_FILE)).expect("shared"),
             r#"{"defaultThinkingLevel":"off"}"#
         );
-        for shared in ["auth.json", "models.json"] {
-            let p = Path::new("/auth/pi").join(shared);
-            assert!(
-                !overlays.iter().any(|o| p.starts_with(&o.target)),
-                "{shared}"
-            );
+        let auth = Path::new("/auth/pi").join(AUTH_FILE);
+        assert!(!overlays.iter().any(|o| auth.starts_with(&o.target)));
+    }
+
+    #[test]
+    fn models_overlay_keeps_shared_providers_and_adds_zai_api() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let home = tmp.path().join("auth-pi");
+        fs::create_dir_all(&home).expect("home");
+        let shared = r#"{"providers":{"local":{"baseUrl":"http://l/v1","api":"openai-completions","models":[{"id":"m"}]},"zai-api":{"baseUrl":"http://old"}}}"#;
+        fs::write(home.join(MODELS_FILE), shared).expect("shared");
+        let agent = test_agent_in(tmp.path(), None);
+        let opts = PiOptions::default();
+        let overlays = materialize(&opts, &agent, &home, None).expect("materialize");
+        let o = overlays
+            .iter()
+            .find(|o| o.target == opts.agent_dir.join(MODELS_FILE))
+            .expect("models overlay");
+        assert!(!o.writable);
+        let own: Value = serde_json::from_slice(&fs::read(&o.source).expect("own")).expect("json");
+        assert_eq!(own["providers"]["local"]["baseUrl"], "http://l/v1");
+        let z = &own["providers"]["zai-api"];
+        assert_eq!(z["baseUrl"], "https://api.z.ai/api/paas/v4");
+        assert_eq!(z["api"], "openai-completions");
+        assert_eq!(z["apiKey"], "$ZAI_API_KEY");
+        assert_eq!(z["models"][0]["id"], "glm-5.3-flash");
+        assert_eq!(z["models"][1]["id"], "glm-5.3");
+        // The shared file stays as it was.
+        assert_eq!(
+            fs::read_to_string(home.join(MODELS_FILE)).expect("shared"),
+            shared
+        );
+        // No shared file: the copy has only the Terrarium providers, and
+        // the mount point is a valid empty file for pi.
+        fs::remove_file(home.join(MODELS_FILE)).expect("rm");
+        materialize(&opts, &agent, &home, None).expect("again");
+        let own: Value = serde_json::from_slice(&fs::read(&o.source).expect("own")).expect("json");
+        let ids: Vec<&String> = own["providers"].as_object().expect("obj").keys().collect();
+        assert_eq!(ids, ["zai-api"]);
+        let mount: Value =
+            serde_json::from_slice(&fs::read(home.join(MODELS_FILE)).expect("mount"))
+                .expect("json");
+        assert_eq!(mount, json!({"providers": {}}));
+        for p in TERRARIUM_PROVIDERS {
+            assert!(own["providers"].get(*p).is_some(), "{p}");
         }
     }
 

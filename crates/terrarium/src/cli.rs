@@ -150,6 +150,13 @@ pub enum Command {
         #[command(subcommand)]
         command: FleetCmd,
     },
+    /// Schedules: mail, turns, execs, agent verbs, and probes on a cron,
+    /// an interval, or a time
+    #[command(visible_alias = "schedules")]
+    Schedule {
+        #[command(subcommand)]
+        command: ScheduleCmd,
+    },
     /// Operator commands that an agent's role permits
     Admin {
         #[command(subcommand)]
@@ -984,8 +991,138 @@ pub enum AdminCmd {
         #[command(subcommand)]
         command: FleetCmd,
     },
+    /// Schedules, as `terrarium schedule`
+    Schedule {
+        #[command(subcommand)]
+        command: ScheduleCmd,
+    },
     /// The audit log
     Audit(AuditArgs),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ScheduleCmd {
+    /// List schedules: an agent sees its project's; `--project` adds the
+    /// global ones that the caller may read
+    Ls {
+        /// Every schedule the caller may read, also with `--project`
+        #[arg(long)]
+        all: bool,
+        /// Only the enabled schedules
+        #[arg(long, conflicts_with = "disabled_only")]
+        enabled: bool,
+        /// Only the disabled schedules
+        #[arg(long = "disabled")]
+        disabled_only: bool,
+    },
+    /// Show one schedule: a ULID, `project/name`, or a name
+    Show { schedule: String },
+    /// Make a schedule: one time spec and one action
+    New {
+        name: String,
+        #[command(flatten)]
+        args: Box<ScheduleArgs>,
+    },
+    /// Change a schedule: only the flags given change
+    Set {
+        schedule: String,
+        /// A new name
+        #[arg(long)]
+        rename: Option<String>,
+        /// Enable it
+        #[arg(long, conflicts_with = "disabled")]
+        enabled: bool,
+        #[command(flatten)]
+        args: Box<ScheduleArgs>,
+    },
+    /// Delete a schedule
+    Rm { schedule: String },
+    /// Run a schedule now and print the run; exit 1 when it failed
+    Run { schedule: String },
+    /// Enable a schedule
+    Enable { schedule: String },
+    /// Disable a schedule
+    Disable { schedule: String },
+    /// The runs of a schedule, newest first
+    Runs {
+        schedule: String,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+}
+
+/// The time spec and the action of `schedule new` and `schedule set`.
+#[derive(Debug, Args)]
+pub struct ScheduleArgs {
+    /// A five-field cron expression, for example "*/15 * * * *", or @hourly, @daily
+    #[arg(long, conflicts_with_all = ["every", "at"])]
+    pub cron: Option<String>,
+    /// An interval: 90s, 30m, 2h, 1d, or 1h30m (60 s or more)
+    #[arg(long, conflicts_with = "at")]
+    pub every: Option<String>,
+    /// One run at an RFC 3339 time, or `+30m` from now
+    #[arg(long)]
+    pub at: Option<String>,
+    /// The zone of a cron expression: UTC (the default) or an IANA zone
+    #[arg(long, requires = "cron")]
+    pub tz: Option<String>,
+    /// Action: send mail to an agent, `project:<name>`, or `operator`
+    #[arg(long, value_name = "TO", conflicts_with_all = ["turn", "exec", "agent", "probe"])]
+    pub mail: Option<String>,
+    /// The mail subject
+    #[arg(long, short = 's', requires = "mail")]
+    pub subject: Option<String>,
+    /// The mail body, or `-` for stdin
+    #[arg(
+        long,
+        short = 'b',
+        value_name = "TEXT",
+        allow_hyphen_values = true,
+        requires = "mail"
+    )]
+    pub body: Option<String>,
+    /// Post each mail on this thread (the loop guard counts them)
+    #[arg(long, requires = "mail")]
+    pub thread: Option<String>,
+    /// Action: type a turn into this agent
+    #[arg(long, value_name = "AGENT", conflicts_with_all = ["exec", "agent", "probe"])]
+    pub turn: Option<String>,
+    /// The turn text, or `-` for stdin
+    #[arg(long, allow_hyphen_values = true, requires = "turn")]
+    pub text: Option<String>,
+    /// Start a stopped agent first (else the run is skipped)
+    #[arg(long, requires = "turn")]
+    pub start_if_stopped: bool,
+    /// Action: run the command after `--` on this target
+    #[arg(long, value_name = "TARGET", conflicts_with_all = ["agent", "probe"])]
+    pub exec: Option<String>,
+    /// The working directory on the target (an absolute path)
+    #[arg(long, requires = "exec")]
+    pub cwd: Option<String>,
+    /// The run limit in seconds (default 300, at most 3600)
+    #[arg(long, requires = "exec")]
+    pub timeout: Option<u64>,
+    /// Action: start, stop, or restart this agent (with --verb)
+    #[arg(long, value_name = "AGENT", conflicts_with = "probe")]
+    pub agent: Option<String>,
+    /// `start`, `stop`, or `restart`
+    #[arg(long, requires = "agent")]
+    pub verb: Option<String>,
+    /// Action: run the quota probe of this subscription
+    #[arg(long, value_name = "SUBSCRIPTION")]
+    pub probe: Option<String>,
+    /// A global schedule (sysadmin or the operator), not one of a project
+    #[arg(long)]
+    pub global: bool,
+    /// After a daemon stop: `skip` (the default) or `once`
+    #[arg(long, value_name = "skip|once")]
+    pub catch_up: Option<String>,
+    /// Make it disabled
+    #[arg(long)]
+    pub disabled: bool,
+    /// The command of `--exec`
+    #[arg(last = true)]
+    pub cmd: Vec<String>,
 }
 
 #[derive(Debug, Subcommand)]
