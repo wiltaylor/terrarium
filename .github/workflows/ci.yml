@@ -8,6 +8,11 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # A debug build of the workspace and its test binaries fills the runner's
+  # disk: no debug info and no incremental state in CI.
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
 
 jobs:
   # The merge bar: `just ci::check` (fmt, clippy, the Rust tests, the
@@ -17,6 +22,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      # The runner's preinstalled SDKs take most of its disk.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
       # The sandbox and git tests drive bwrap and git, as the image does.
       - name: Install runtime deps
         run: |
