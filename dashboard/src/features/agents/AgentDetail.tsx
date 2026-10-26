@@ -9,7 +9,7 @@ import { StatusBadge } from "../../components/StatusBadge";
 import { Terminal } from "../../components/Terminal";
 import { ConfirmButton, ErrorBanner, LoadMore, PageHead, Tabs, useNow } from "../../components/ui";
 import { GRANTABLE_ROLES, type Agent, type AgentStatus, type Role } from "../../api/types";
-import { ago, compact, timeUntil } from "../../lib/format";
+import { ago, compact, timeUntil, windowValue } from "../../lib/format";
 import { agents, api, events, leases as holds, quota, subscriptions } from "../../stores";
 import { describeCause } from "../../stores/quota";
 import { AgentForm } from "./AgentForm";
@@ -518,7 +518,7 @@ function QuotaPanel(props: { agent: Agent }) {
             <dd class="small">
               <Show when={m().subscription?.windows.length} fallback={<span class="muted">no samples</span>}>
                 {m()
-                  .subscription!.windows.map((w) => `${w.window} ${Math.round(w.used_pct)}%${w.resets_at ? ` (resets in ${timeUntil(w.resets_at, now())})` : ""}`)
+                  .subscription!.windows.map((w) => `${w.window} ${windowValue(w)}${w.resets_at ? ` (resets in ${timeUntil(w.resets_at, now())})` : ""}`)
                   .join(" · ")}
               </Show>
             </dd>

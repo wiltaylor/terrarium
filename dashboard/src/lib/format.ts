@@ -21,10 +21,19 @@ export function ago(iso: string | undefined, now = Date.now()): string {
   return `${duration(ms)} ago`;
 }
 
+/** `$10.65`, or `10.65 EUR` for another currency. */
+export function money(n: number, currency: string): string {
+  return currency === "USD" ? `$${n.toFixed(2)}` : `${n.toFixed(2)} ${currency}`;
+}
+
 /** `$10.65 left of $60.00` for a credit balance; other currencies by code. */
 export function balanceText(b: { total: number; remaining: number; currency: string }): string {
-  const money = (n: number) => (b.currency === "USD" ? `$${n.toFixed(2)}` : `${n.toFixed(2)} ${b.currency}`);
-  return `${money(b.remaining)} left of ${money(b.total)}`;
+  return `${money(b.remaining, b.currency)} left of ${money(b.total, b.currency)}`;
+}
+
+/** The short value of a window: the money left for a credit balance, else the percentage. */
+export function windowValue(w: { used_pct: number; balance?: { remaining: number; currency: string } }): string {
+  return w.balance ? `${money(w.balance.remaining, w.balance.currency)} left` : `${Math.round(w.used_pct)}%`;
 }
 
 /** Severity of a quota window against the subscription's alert threshold. */

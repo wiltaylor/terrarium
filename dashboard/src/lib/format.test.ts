@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { forceLayout } from "./force";
-import { ago, balanceText, bytes, duration, sparkPath, timeUntil, usageLevel } from "./format";
+import { ago, balanceText, bytes, windowValue, duration, sparkPath, timeUntil, usageLevel } from "./format";
 
 describe("format", () => {
   it("formats durations", () => {
@@ -53,5 +53,12 @@ describe("balanceText", () => {
   it("shows dollars, then other currencies by code", () => {
     expect(balanceText({ total: 60, remaining: 10.647, currency: "USD" })).toBe("$10.65 left of $60.00");
     expect(balanceText({ total: 5, remaining: 0, currency: "EUR" })).toBe("0.00 EUR left of 5.00 EUR");
+  });
+});
+
+describe("windowValue", () => {
+  it("shows money left for a balance, else the percentage", () => {
+    expect(windowValue({ used_pct: 82.3, balance: { remaining: 10.647, currency: "USD" } })).toBe("$10.65 left");
+    expect(windowValue({ used_pct: 42.4 })).toBe("42%");
   });
 });

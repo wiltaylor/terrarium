@@ -7,7 +7,7 @@ import { createSignal, For, onMount, Show } from "solid-js";
 import { ConfirmButton, Empty, ErrorBanner, PageHead, ProviderLogo, useNow } from "../../components/ui";
 import { isLocalOnly, LOGIN_CHIP } from "../../components/UsageTile";
 import type { DetectedLogin, Subscription } from "../../api/types";
-import { ago, balanceText, humanize, timeUntil } from "../../lib/format";
+import { ago, balanceText, humanize, timeUntil, windowValue } from "../../lib/format";
 import { api, subscriptions } from "../../stores";
 import { AddSubscriptionWizard } from "./AddSubscriptionWizard";
 import { HarnessVersions } from "./HarnessVersions";
@@ -146,7 +146,7 @@ export default function SubscriptionsPage() {
                     </Show>
                     <Show when={s.windows.length}>
                       <div class="muted small">
-                        {s.windows.map((w) => `${w.window} ${Math.round(w.used_pct)}%${w.balance ? ` (${balanceText(w.balance)})` : w.resets_at ? ` (resets in ${timeUntil(w.resets_at, now())})` : ""}`).join(" · ")}
+                        {s.windows.map((w) => `${w.window} ${w.balance ? balanceText(w.balance) : `${Math.round(w.used_pct)}%`}${w.balance ? "" : w.resets_at ? ` (resets in ${timeUntil(w.resets_at, now())})` : ""}`).join(" · ")}
                       </div>
                     </Show>
                   </div>
@@ -171,7 +171,7 @@ export default function SubscriptionsPage() {
                       onClick={() =>
                         act(s.name, async () => {
                           const r = await api.subscriptions.probe(s.name);
-                          return r.probe_status === "ok" ? `${s.name}: probe ok, ${r.windows.map((w) => `${w.window} ${Math.round(w.used_pct)}%`).join(", ") || "no windows"}.` : `${s.name}: probe ${r.probe_status}${r.error ? `: ${r.error}` : ""}.`;
+                          return r.probe_status === "ok" ? `${s.name}: probe ok, ${r.windows.map((w) => `${w.window} ${windowValue(w)}`).join(", ") || "no windows"}.` : `${s.name}: probe ${r.probe_status}${r.error ? `: ${r.error}` : ""}.`;
                         })
                       }
                     >

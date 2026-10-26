@@ -1959,7 +1959,7 @@ no probe). `docs/compat.md`, "Usage probes", records each endpoint.
 A window of `openrouter-credits` is `credits`: the share of the bought
 credits that is used, with no reset time. Its window in a list has
 `balance: {total, used, remaining, currency}` (US dollars). The dashboard
-shows "$10.65 left of $60.00". At 100 % the account has no money left, and
+shows "$10.65 left" and "$49.35 used of $60.00" in place of the percentage. At 100 % the account has no money left, and
 the quota policy acts as for a full window.
 
 A usage point (`GET /api/usage`):
