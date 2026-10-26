@@ -21,6 +21,12 @@ export function ago(iso: string | undefined, now = Date.now()): string {
   return `${duration(ms)} ago`;
 }
 
+/** `$10.65 left of $60.00` for a credit balance; other currencies by code. */
+export function balanceText(b: { total: number; remaining: number; currency: string }): string {
+  const money = (n: number) => (b.currency === "USD" ? `$${n.toFixed(2)}` : `${n.toFixed(2)} ${b.currency}`);
+  return `${money(b.remaining)} left of ${money(b.total)}`;
+}
+
 /** Severity of a quota window against the subscription's alert threshold. */
 export function usageLevel(pct: number, alertAt: number): "ok" | "warn" | "full" {
   if (pct >= 100) return "full";

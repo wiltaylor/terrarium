@@ -845,6 +845,8 @@ export interface QuotaWindow {
   resets_at?: string;
   /** When the probe read it. */
   at: string;
+  /** The money left, when the window is a credit balance (`openrouter-credits`). */
+  balance?: { total: number; used: number; remaining: number; currency: string };
 }
 
 /** docs/api.md §16.1. */

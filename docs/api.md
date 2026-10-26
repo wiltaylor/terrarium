@@ -1952,8 +1952,15 @@ Names follow the project name rules; `login` and `detect` are reserved.
 Probes: `anthropic-oauth-usage`, `openai-codex-usage` (alias
 `codex-rate-limits`), `github-copilot-quota` (alias
 `copilot-premium-requests`), `zai-usage` (the default of a `zai`
-subscription on the `coding` plan that names no probe). `docs/compat.md`,
-"Usage probes", records each endpoint.
+subscription on the `coding` plan that names no probe), and
+`openrouter-credits` (the default of an `openrouter` subscription that names
+no probe). `docs/compat.md`, "Usage probes", records each endpoint.
+
+A window of `openrouter-credits` is `credits`: the share of the bought
+credits that is used, with no reset time. Its window in a list has
+`balance: {total, used, remaining, currency}` (US dollars). The dashboard
+shows "$10.65 left of $60.00". At 100 % the account has no money left, and
+the quota policy acts as for a full window.
 
 A usage point (`GET /api/usage`):
 

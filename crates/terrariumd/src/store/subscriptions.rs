@@ -68,12 +68,18 @@ pub struct Subscription {
 }
 
 /// The probe of a subscription that names none: `zai-usage` for a Z.ai
-/// GLM Coding Plan (the `api` plan has no quota endpoint). Applied when a
-/// row is read, so rows written before the probe existed get it too.
+/// GLM Coding Plan (the `api` plan has no quota endpoint), and
+/// `openrouter-credits` for OpenRouter. Applied when a row is read, so rows
+/// written before the probe existed get it too.
 pub fn default_probe(provider: &str, plan: Option<&str>) -> Option<String> {
     use terrarium_core::zai;
-    (zai::is_zai(provider) && zai::plan_or_default(plan) == zai::Plan::Coding)
-        .then(|| crate::probes::zai::NAME.to_owned())
+    if zai::is_zai(provider) && zai::plan_or_default(plan) == zai::Plan::Coding {
+        return Some(crate::probes::zai::NAME.to_owned());
+    }
+    provider
+        .trim()
+        .eq_ignore_ascii_case("openrouter")
+        .then(|| crate::probes::openrouter::NAME.to_owned())
 }
 
 fn row(r: &Row<'_>) -> rusqlite::Result<Subscription> {

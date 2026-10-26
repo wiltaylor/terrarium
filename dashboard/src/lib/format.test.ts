@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { forceLayout } from "./force";
-import { ago, bytes, duration, sparkPath, timeUntil, usageLevel } from "./format";
+import { ago, balanceText, bytes, duration, sparkPath, timeUntil, usageLevel } from "./format";
 
 describe("format", () => {
   it("formats durations", () => {
@@ -46,5 +46,12 @@ describe("forceLayout", () => {
     // Linked nodes end up closer than the farthest pair.
     const dist = (p: string, q: string) => Math.hypot(one[p]!.x - one[q]!.x, one[p]!.y - one[q]!.y);
     expect(dist("c", "d")).toBeLessThan(dist("b", "d"));
+  });
+});
+
+describe("balanceText", () => {
+  it("shows dollars, then other currencies by code", () => {
+    expect(balanceText({ total: 60, remaining: 10.647, currency: "USD" })).toBe("$10.65 left of $60.00");
+    expect(balanceText({ total: 5, remaining: 0, currency: "EUR" })).toBe("0.00 EUR left of 5.00 EUR");
   });
 });

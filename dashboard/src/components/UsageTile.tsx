@@ -1,6 +1,6 @@
 import { For, Show } from "solid-js";
 import type { LoginStatus, Subscription } from "../api/types";
-import { ago, compact, humanize, sparkPath, timeUntil, usageLevel } from "../lib/format";
+import { ago, balanceText, compact, humanize, sparkPath, timeUntil, usageLevel } from "../lib/format";
 import { ProviderLogo } from "./ui";
 
 export function Sparkline(props: { values: number[]; label?: string; height?: number }) {
@@ -68,7 +68,7 @@ export function UsageTile(props: { sub: Subscription; now: number; spark: number
                   <span>
                     <strong style={{ color: "var(--text)" }}>{w.window}</strong> {Math.round(w.used_pct)}%
                   </span>
-                  <span>{w.resets_at ? `resets in ${timeUntil(w.resets_at, props.now)}` : "no reset time"}</span>
+                  <span>{w.balance ? balanceText(w.balance) : w.resets_at ? `resets in ${timeUntil(w.resets_at, props.now)}` : "no reset time"}</span>
                 </div>
                 <div class={`meter-bar ${level()}`} role="progressbar" aria-valuenow={w.used_pct} aria-valuemin={0} aria-valuemax={100} aria-label={`${w.window} window`}>
                   <span style={{ width: `${Math.min(100, w.used_pct)}%` }} />

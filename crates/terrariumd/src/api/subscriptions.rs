@@ -51,11 +51,41 @@ pub struct WindowView {
     pub resets_at: Option<String>,
     /// When the probe read it.
     pub at: String,
+    /// The money left, for a window that is a credit balance
+    /// (`openrouter-credits`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub balance: Option<Balance>,
+}
+
+/// A credit balance, from the `raw` of a credits window.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Balance {
+    pub total: f64,
+    pub used: f64,
+    pub remaining: f64,
+    pub currency: String,
+}
+
+impl Balance {
+    fn from_raw(raw: &serde_json::Value) -> Option<Self> {
+        let num = |k: &str| raw.get(k).and_then(serde_json::Value::as_f64);
+        Some(Self {
+            total: num("total_credits")?,
+            used: num("total_usage")?,
+            remaining: num("remaining")?,
+            currency: raw
+                .get("currency")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("USD")
+                .to_owned(),
+        })
+    }
 }
 
 impl From<QuotaSample> for WindowView {
     fn from(q: QuotaSample) -> Self {
         Self {
+            balance: Balance::from_raw(&q.raw),
             window: q.window,
             used_pct: q.used_pct,
             resets_at: q.resets_at,

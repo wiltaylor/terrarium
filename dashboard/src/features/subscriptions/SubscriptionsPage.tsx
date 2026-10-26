@@ -7,7 +7,7 @@ import { createSignal, For, onMount, Show } from "solid-js";
 import { ConfirmButton, Empty, ErrorBanner, PageHead, ProviderLogo, useNow } from "../../components/ui";
 import { isLocalOnly, LOGIN_CHIP } from "../../components/UsageTile";
 import type { DetectedLogin, Subscription } from "../../api/types";
-import { ago, humanize, timeUntil } from "../../lib/format";
+import { ago, balanceText, humanize, timeUntil } from "../../lib/format";
 import { api, subscriptions } from "../../stores";
 import { AddSubscriptionWizard } from "./AddSubscriptionWizard";
 import { HarnessVersions } from "./HarnessVersions";
@@ -146,7 +146,7 @@ export default function SubscriptionsPage() {
                     </Show>
                     <Show when={s.windows.length}>
                       <div class="muted small">
-                        {s.windows.map((w) => `${w.window} ${Math.round(w.used_pct)}%${w.resets_at ? ` (resets in ${timeUntil(w.resets_at, now())})` : ""}`).join(" · ")}
+                        {s.windows.map((w) => `${w.window} ${Math.round(w.used_pct)}%${w.balance ? ` (${balanceText(w.balance)})` : w.resets_at ? ` (resets in ${timeUntil(w.resets_at, now())})` : ""}`).join(" · ")}
                       </div>
                     </Show>
                   </div>

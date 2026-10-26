@@ -1335,6 +1335,25 @@ A Z.ai subscription with plan `coding` (or no plan) and no `probe` gets
 `zai-usage` when the row is read, so existing rows probe with no
 migration. The `api` plan (pay as you go) gets no probe.
 
+### OpenRouter credits
+
+**Verified live 2026-10-26** with the stored `openrouter-key` key (a normal
+key, not a management key). Read-only `GET`s; the key was not printed. The
+code is `crates/terrariumd/src/probes/openrouter.rs`.
+
+| Fact | Value | Source |
+|---|---|---|
+| Request | `GET https://openrouter.ai/api/v1/credits` | verified |
+| Auth | `Authorization: Bearer <OpenRouter key>`. A normal key may read it. | verified |
+| Shape | `{data: {total_credits, total_usage}}`, US dollars, for the account. | verified |
+| The key | `GET https://openrouter.ai/api/v1/key` answers the spend of the key: `usage`, `usage_daily`, `usage_weekly`, `usage_monthly`, `limit`, `limit_remaining`, `is_free_tier`, and BYOK totals. The probe does not read it. | verified |
+
+The probe `openrouter-credits` makes one window, `credits`: `used_pct` is
+`total_usage / total_credits` (100 when no credits and some usage; 0 when
+neither), with no reset time. `raw` has `total_credits`, `total_usage`,
+`remaining`, and `currency`. An `openrouter` subscription with no `probe`
+gets it when the row is read.
+
 ### Z.ai (GLM): from docs, not verified live
 
 Read on 2026-10-26. No Z.ai key was available, so every fact below is
