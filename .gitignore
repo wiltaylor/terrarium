@@ -24,3 +24,5 @@ __pycache__/
 /repos/*
 # Agent workspaces (bind mount at /work)
 /work/*
+# Claude Code agent worktrees
+/.claude/worktrees/
