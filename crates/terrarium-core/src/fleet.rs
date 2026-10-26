@@ -24,6 +24,14 @@
 //! name = "buildbox"
 //! kind = "ssh"
 //! address = "build@host"
+//!
+//! [[projects.templates]]     # an agent template of the project
+//! name = "worker"
+//! prompt = "worker"
+//!
+//! [[projects.agents]]        # an agent made from a template
+//! name = "w1"
+//! template = "worker"
 //! ```
 //!
 //! This module parses and checks a file without the daemon. The daemon
@@ -35,6 +43,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::agent_template::{self, Lookup, Spec, TemplateDef};
 use crate::config::{AgentDef, Policy, ProjectDef, RestartPolicy, SubscriptionDef, TargetDef};
 use crate::harness::HarnessId;
 use crate::role::Role;
@@ -55,6 +64,7 @@ const TOP_KEYS: &[&str] = &[
     "defaults",
     "subscriptions",
     "targets",
+    "templates",
     "projects",
 ];
 const PROJECT_KEYS: &[&str] = &[
@@ -66,9 +76,11 @@ const PROJECT_KEYS: &[&str] = &[
     "agents",
     "targets",
     "schedules",
+    "templates",
 ];
 const AGENT_KEYS: &[&str] = &[
     "name",
+    "template",
     "harness",
     "subscription",
     "model",
@@ -100,6 +112,23 @@ const TARGET_KEYS: &[&str] = &[
 ];
 const SUBSCRIPTION_KEYS: &[&str] = &["name", "provider", "plan", "harnesses", "probe", "alert_at"];
 const SCHEDULE_KEYS: &[&str] = &["name", "enabled", "catch_up", "spec", "action"];
+const TEMPLATE_KEYS: &[&str] = &[
+    "name",
+    "description",
+    "harness",
+    "subscription",
+    "model",
+    "prompt",
+    "roles",
+    "policy",
+    "restart",
+    "new_session_on_prompt_change",
+];
+
+/// Looks up a template that the fleet file does not declare: the daemon
+/// gives its stored templates. The arguments are the project (`None`:
+/// global) and the template name.
+pub type Resolver<'a> = dyn Fn(Option<&str>, &str) -> Option<Spec> + 'a;
 
 /// Values for each agent that does not set them.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -133,10 +162,17 @@ impl FleetDefaults {
 /// An agent of a fleet project: the agent definition and the start flag.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FleetAgent {
-    /// `project` is the enclosing project; the defaults are applied.
+    /// `project` is the enclosing project; the defaults (and the
+    /// template) are applied.
     pub def: AgentDef,
     /// Start the agent on `fleet apply --start`.
     pub start: bool,
+    /// The template that the entry names (`template = "worker"` or
+    /// `"global:worker"`), if any.
+    pub template: Option<String>,
+    /// With `template`: the keys that the entry sets itself, over the
+    /// template. Empty without `template`.
+    pub overrides: Spec,
 }
 
 /// A project of a fleet, with its agents and project targets.
@@ -160,6 +196,8 @@ pub struct Fleet {
     pub subscriptions: Vec<SubscriptionDef>,
     /// Global targets.
     pub targets: Vec<TargetDef>,
+    /// Global agent templates (`[[templates]]`).
+    pub templates: Vec<TemplateDef>,
     pub projects: Vec<FleetProject>,
 }
 
@@ -227,6 +265,9 @@ pub enum Kind {
     /// A schedule of a project (`[[projects.schedules]]`). Its key is
     /// `project/name`.
     Schedule,
+    /// An agent template: `project/name` (`[[projects.templates]]`), or
+    /// `_/name` for a global one (`[[templates]]`).
+    Template,
 }
 
 impl Kind {
@@ -237,6 +278,7 @@ impl Kind {
             Self::Target => "target",
             Self::Agent => "agent",
             Self::Schedule => "schedule",
+            Self::Template => "template",
         }
     }
 }
@@ -333,8 +375,20 @@ impl Parsed {
 /// has no `name` (the file stem, see [`name_from_path`]).
 ///
 /// The result has the issues of [`Fleet::check`] too. A definition that
-/// does not parse is left out of the fleet, with an error.
+/// does not parse is left out of the fleet, with an error. An agent whose
+/// template is not in the file is left out with a warning: only the
+/// daemon knows its stored templates ([`parse_with`]).
 pub fn parse(text: &str, fallback_name: Option<&str>) -> Parsed {
+    parse_with(text, fallback_name, None)
+}
+
+/// [`parse`], with the stored templates of the daemon. An agent whose
+/// template is neither in the file nor in `stored` is an error.
+pub fn parse_with(
+    text: &str,
+    fallback_name: Option<&str>,
+    stored: Option<&Resolver<'_>>,
+) -> Parsed {
     let mut issues = Vec::new();
     let mut top: toml::Table = match toml::from_str(text) {
         Ok(t) => t,
@@ -404,9 +458,27 @@ pub fn parse(text: &str, fallback_name: Option<&str>) -> Parsed {
             def::<TargetDef>(t, &at, &mut issues)
         })
         .collect();
+    let templates: Vec<TemplateDef> = tables(&mut top, "templates", "", &mut issues)
+        .into_iter()
+        .filter_map(|(at, t)| {
+            if t.contains_key("project") {
+                issues.push(Issue::error(
+                    &at,
+                    "a global template has no `project`; put a project template under its [[projects]] as [[projects.templates]]",
+                ));
+                return None;
+            }
+            template(t, &at, &mut issues)
+        })
+        .collect();
+    let context = Context {
+        defaults: &defaults_table,
+        globals: &templates,
+        stored,
+    };
     let projects = tables(&mut top, "projects", "", &mut issues)
         .into_iter()
-        .filter_map(|(at, t)| project(t, &at, &defaults_table, &mut issues))
+        .filter_map(|(at, t)| project(t, &at, &context, &mut issues))
         .collect();
 
     let fleet = Fleet {
@@ -416,6 +488,7 @@ pub fn parse(text: &str, fallback_name: Option<&str>) -> Parsed {
         defaults,
         subscriptions,
         targets,
+        templates,
         projects,
     };
     issues.extend(fleet.check());
@@ -501,12 +574,79 @@ fn def<T: for<'de> Deserialize<'de>>(
     }
 }
 
+/// One template table: its keys, then its spec as an agent definition.
+fn template(t: toml::Table, at: &str, issues: &mut Vec<Issue>) -> Option<TemplateDef> {
+    unknown_keys(&t, TEMPLATE_KEYS, at, issues);
+    if let Some(toml::Value::Table(p)) = t.get("policy") {
+        unknown_keys(p, POLICY_KEYS, &format!("{at}.policy"), issues);
+    }
+    let d: TemplateDef = def(t, at, issues)?;
+    check_template(&d, at, issues).then_some(d)
+}
+
+/// Is the spec of `d` a valid agent definition? An error when not.
+fn check_template(d: &TemplateDef, at: &str, issues: &mut Vec<Issue>) -> bool {
+    match agent_template::to_def(&d.spec, &d.name, "x") {
+        Ok(_) => true,
+        Err(e) => {
+            issues.push(Issue::error(at, e));
+            false
+        }
+    }
+}
+
+/// What the agents of a project read from the rest of the file.
+struct Context<'a, 'r> {
+    defaults: &'a toml::Table,
+    /// The global templates of the file.
+    globals: &'a [TemplateDef],
+    stored: Option<&'a Resolver<'r>>,
+}
+
+/// The spec of the template `key` for an agent of `project`: the
+/// project's template, else the global one (`global:` asks for the
+/// global one only); the file first, then the stored ones. When it is not
+/// found: `Err(true)` when the daemon was asked, `Err(false)` when only
+/// the daemon can tell.
+fn find_template(
+    key: &str,
+    project: &str,
+    local: &[TemplateDef],
+    cx: &Context<'_, '_>,
+) -> Result<Spec, bool> {
+    let (name, global_only) = match agent_template::lookup(key) {
+        Lookup::Global(n) => (n, true),
+        Lookup::Nearest(n) => (n, false),
+    };
+    let stored = |p: Option<&str>| cx.stored.and_then(|f| f(p, name));
+    if !global_only {
+        if let Some(t) = local.iter().find(|t| t.name == name) {
+            return Ok(t.spec.clone());
+        }
+        if let Some(s) = stored(Some(project)) {
+            return Ok(s);
+        }
+    }
+    if let Some(t) = cx.globals.iter().find(|t| t.name == name) {
+        return Ok(t.spec.clone());
+    }
+    stored(None).ok_or(cx.stored.is_some())
+}
+
+fn json_of(t: &toml::Table) -> Spec {
+    match serde_json::to_value(t) {
+        Ok(serde_json::Value::Object(m)) => m,
+        _ => Spec::new(),
+    }
+}
+
 fn project(
     mut t: toml::Table,
     at: &str,
-    defaults: &toml::Table,
+    cx: &Context<'_, '_>,
     issues: &mut Vec<Issue>,
 ) -> Option<FleetProject> {
+    let defaults = cx.defaults;
     unknown_keys(&t, PROJECT_KEYS, at, issues);
     let agent_tables = tables(&mut t, "agents", at, issues);
     let target_tables = tables(&mut t, "targets", at, issues);
@@ -532,7 +672,24 @@ fn project(
             }
         }
     }
-    let def: ProjectDef = def(t, at, issues)?;
+    if let Some(toml::Value::Array(list)) = t.get("templates") {
+        for (i, r) in list.iter().enumerate() {
+            if let toml::Value::Table(r) = r {
+                let n = r.get("name").and_then(toml::Value::as_str);
+                let at = match n {
+                    Some(n) => format!("{at}.templates.{n}"),
+                    None => format!("{at}.templates[{i}]"),
+                };
+                unknown_keys(r, TEMPLATE_KEYS, &at, issues);
+                if let Some(toml::Value::Table(p)) = r.get("policy") {
+                    unknown_keys(p, POLICY_KEYS, &format!("{at}.policy"), issues);
+                }
+            }
+        }
+    }
+    let mut def: ProjectDef = def(t, at, issues)?;
+    def.templates
+        .retain(|d| check_template(d, &format!("{at}.templates.{}", d.name), issues));
     let agents = agent_tables
         .into_iter()
         .filter_map(|(at, mut a)| {
@@ -547,12 +704,66 @@ fn project(
             if let Some(toml::Value::Table(p)) = a.get("policy") {
                 unknown_keys(p, POLICY_KEYS, &format!("{at}.policy"), issues);
             }
-            for (k, v) in defaults {
-                if !a.contains_key(k) {
-                    a.insert(k.clone(), v.clone());
+            let start_key = a.remove("start");
+            let template = match a.remove("template") {
+                None => None,
+                Some(toml::Value::String(s)) => Some(s),
+                Some(_) => {
+                    issues.push(Issue::error(&at, "`template` must be a string"));
+                    return None;
+                }
+            };
+            let mut overrides = Spec::new();
+            if let Some(key) = &template {
+                // The defaults, then the template, then the entry's own
+                // keys (`agent_template::merge`: `policy` key by key).
+                overrides = json_of(&a);
+                overrides.remove("name");
+                let spec = match find_template(key, &def.name, &def.templates, cx) {
+                    Ok(s) => s,
+                    Err(true) => {
+                        issues.push(Issue::error(
+                            &at,
+                            format!("template `{key}` is neither in the fleet nor in the daemon"),
+                        ));
+                        return None;
+                    }
+                    Err(false) => {
+                        issues.push(Issue::warning(
+                            &at,
+                            format!(
+                                "template `{key}` is not in this file; the daemon looks it up at validate and apply"
+                            ),
+                        ));
+                        return None;
+                    }
+                };
+                let mut base = json_of(defaults);
+                base.remove("start");
+                let merged = agent_template::merge(
+                    &agent_template::merge(&base, &spec),
+                    &overrides,
+                );
+                let name = a.get("name").cloned();
+                a = match toml::Table::try_from(serde_json::Value::Object(merged)) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        issues.push(Issue::error(&at, e.to_string()));
+                        return None;
+                    }
+                };
+                if let Some(n) = name {
+                    a.insert("name".into(), n);
+                }
+            } else {
+                for (k, v) in defaults {
+                    if !a.contains_key(k) {
+                        a.insert(k.clone(), v.clone());
+                    }
                 }
             }
-            let start = match a.remove("start") {
+            a.remove("start");
+            let start = match start_key.or_else(|| defaults.get("start").cloned()) {
                 None => false,
                 Some(toml::Value::Boolean(b)) => b,
                 Some(_) => {
@@ -569,7 +780,12 @@ fn project(
             }
             a.insert("project".into(), toml::Value::String(def.name.clone()));
             let def: AgentDef = self::def(a, &at, issues)?;
-            Some(FleetAgent { def, start })
+            Some(FleetAgent {
+                def,
+                start,
+                template,
+                overrides,
+            })
         })
         .collect();
     let targets = target_tables
@@ -613,8 +829,22 @@ impl Fleet {
             .chain(self.projects.iter().flat_map(|p| p.targets.iter()))
     }
 
+    /// Every template: the global ones, then each project's, with the
+    /// project (`None`: global).
+    pub fn all_templates(&self) -> impl Iterator<Item = (Option<&str>, &TemplateDef)> {
+        self.templates
+            .iter()
+            .map(|t| (None, t))
+            .chain(self.projects.iter().flat_map(|p| {
+                p.def
+                    .templates
+                    .iter()
+                    .map(|t| (Some(p.def.name.as_str()), t))
+            }))
+    }
+
     /// Every object, in apply order: subscriptions, projects, targets,
-    /// agents.
+    /// templates, agents, schedules.
     pub fn objects(&self) -> Vec<ObjectRef> {
         let mut out: Vec<ObjectRef> = self
             .subscriptions
@@ -634,6 +864,11 @@ impl Fleet {
             kind: Kind::Target,
             key: t.name.clone(),
             project: t.project.clone(),
+        }));
+        out.extend(self.all_templates().map(|(p, t)| ObjectRef {
+            kind: Kind::Template,
+            key: template_key(p, &t.name),
+            project: p.map(str::to_owned),
         }));
         out.extend(self.agents().map(|a| ObjectRef {
             kind: Kind::Agent,
@@ -732,6 +967,9 @@ impl Fleet {
                     Kind::Target => "target names are one namespace across projects",
                     Kind::Agent => "agent names are unique in a project",
                     Kind::Schedule => "schedule names are unique in a project",
+                    Kind::Template => {
+                        "template names are unique in a project, and among the global templates"
+                    }
                     _ => "names are unique",
                 };
                 issues.push(Issue::error(
@@ -824,6 +1062,14 @@ impl Fleet {
             head.insert("description".into(), toml::Value::String(d.clone()));
         }
         w.table(None, &head, &["version", "name", "description"]);
+        let write_template = |w: &mut Writer, d: &TemplateDef, header: &str| {
+            let mut t = table_of(d);
+            let policy = t.remove("policy");
+            w.table(Some(&format!("[[{header}]]")), &t, TEMPLATE_KEYS);
+            if let Some(toml::Value::Table(pt)) = policy {
+                w.table(Some(&format!("[{header}.policy]")), &pt, POLICY_KEYS);
+            }
+        };
         if !self.defaults.is_empty() {
             w.table(Some("[defaults]"), &table_of(&self.defaults), AGENT_KEYS);
         }
@@ -833,11 +1079,15 @@ impl Fleet {
         for t in &self.targets {
             w.table(Some("[[targets]]"), &target_table(t), TARGET_KEYS);
         }
+        for d in &self.templates {
+            write_template(&mut w, d, "templates");
+        }
         for p in &self.projects {
             let mut t = table_of(&p.def);
             let repos = t.remove("repos");
             let checkout = t.remove("checkout");
             t.remove("schedules");
+            t.remove("templates");
             w.table(Some("[[projects]]"), &t, PROJECT_KEYS);
             if let Some(toml::Value::Array(repos)) = repos {
                 for r in repos.iter().filter_map(toml::Value::as_table) {
@@ -849,12 +1099,30 @@ impl Fleet {
             {
                 w.table(Some("[projects.checkout]"), &c, CHECKOUT_KEYS);
             }
+            for d in &p.def.templates {
+                write_template(&mut w, d, "projects.templates");
+            }
             for a in &p.agents {
-                let mut at = table_of(&a.def);
-                at.remove("project");
-                if a.def.policy == Policy::default() {
-                    at.remove("policy");
-                }
+                // An agent of a template: the name, the template, and the
+                // keys that the entry sets itself.
+                let mut at = match &a.template {
+                    Some(key) => {
+                        let mut at =
+                            toml::Table::try_from(serde_json::Value::Object(a.overrides.clone()))
+                                .unwrap_or_default();
+                        at.insert("name".into(), toml::Value::String(a.def.name.clone()));
+                        at.insert("template".into(), toml::Value::String(key.clone()));
+                        at
+                    }
+                    None => {
+                        let mut at = table_of(&a.def);
+                        at.remove("project");
+                        if a.def.policy == Policy::default() {
+                            at.remove("policy");
+                        }
+                        at
+                    }
+                };
                 if a.start {
                     at.insert("start".into(), toml::Value::Boolean(true));
                 }
@@ -956,6 +1224,11 @@ pub fn agent_key(def: &AgentDef) -> String {
     format!("{}/{}", def.project, def.name)
 }
 
+/// The key of a template: `project/name`, or `_/name` for a global one.
+pub fn template_key(project: Option<&str>, name: &str) -> String {
+    format!("{}/{name}", project.unwrap_or("_"))
+}
+
 fn at_of(o: &ObjectRef) -> String {
     match o.kind {
         Kind::Subscription => format!("subscriptions.{}", o.key),
@@ -972,6 +1245,11 @@ fn at_of(o: &ObjectRef) -> String {
             let (p, n) = o.key.split_once('/').unwrap_or(("", &o.key));
             format!("projects.{p}.schedules.{n}")
         }
+        Kind::Template => match o.key.split_once('/') {
+            Some(("_", n)) => format!("templates.{n}"),
+            Some((p, n)) => format!("projects.{p}.templates.{n}"),
+            None => format!("templates.{}", o.key),
+        },
     }
 }
 
@@ -1329,5 +1607,147 @@ subscription = "codex-plan"
             .collect();
         assert_eq!(names, ["a.fleet.toml", "fleets/c.toml"]);
         assert!(files_in(Path::new("/nonexistent/terrarium")).is_empty());
+    }
+
+    #[test]
+    fn templates_resolve_merge_and_round_trip() {
+        let text = r#"
+name = "tpl"
+
+[defaults]
+restart = "never"
+model = "default-model"
+
+[[templates]]
+name = "worker"
+description = "A global worker"
+harness = "codex"
+prompt = "global-worker"
+
+[[templates]]
+name = "reviewer"
+harness = "pi"
+
+[[projects]]
+name = "terra"
+
+[[projects.templates]]
+name = "worker"
+harness = "claude"
+prompt = "worker"
+roles = ["project_admin"]
+[projects.templates.policy]
+targets = ["terra-box"]
+mail_to = ["lead"]
+
+[[projects.agents]]
+name = "w1"
+template = "worker"
+
+[[projects.agents]]
+name = "w2"
+template = "global:worker"
+start = true
+
+[[projects.agents]]
+name = "w3"
+template = "worker"
+model = "m3"
+roles = []
+[projects.agents.policy]
+targets = ["other"]
+
+[[projects.agents]]
+name = "r1"
+template = "reviewer"
+"#;
+        let f = parse(text, None).ok().unwrap_or_else(|e| panic!("{e:#?}"));
+        let agent = |n: &str| f.agents().find(|a| a.def.name == n).unwrap().clone();
+        // The project's template wins over the global one of that name.
+        let w1 = agent("w1");
+        assert_eq!(w1.template.as_deref(), Some("worker"));
+        assert_eq!(w1.def.harness, crate::HarnessId::Claude);
+        assert_eq!(w1.def.prompt.as_deref(), Some("worker"));
+        assert_eq!(w1.def.roles, [Role::ProjectAdmin]);
+        // [defaults] fill what the template does not set.
+        assert_eq!(w1.def.restart, RestartPolicy::Never);
+        assert_eq!(w1.def.model.as_deref(), Some("default-model"));
+        // `global:` asks for the global one.
+        let w2 = agent("w2");
+        assert_eq!(w2.def.harness, crate::HarnessId::Codex);
+        assert_eq!(w2.def.prompt.as_deref(), Some("global-worker"));
+        assert!(w2.start);
+        // The entry's keys win; `policy` merges key by key.
+        let w3 = agent("w3");
+        assert_eq!(w3.def.model.as_deref(), Some("m3"));
+        assert!(w3.def.roles.is_empty());
+        assert_eq!(w3.def.policy.targets, ["other"]);
+        assert_eq!(w3.def.policy.mail_to, ["lead"]);
+        // A project with no template of that name uses the global one.
+        assert_eq!(agent("r1").def.harness, crate::HarnessId::Pi);
+        let keys: Vec<String> = f
+            .objects()
+            .into_iter()
+            .filter(|o| o.kind == Kind::Template)
+            .map(|o| o.key)
+            .collect();
+        assert_eq!(keys, ["_/worker", "_/reviewer", "terra/worker"]);
+        // The file round-trips with the template references.
+        let out = f.to_toml();
+        assert!(out.contains("template = \"global:worker\""), "{out}");
+        assert!(out.contains("[[projects.templates]]"), "{out}");
+        let again = parse(&out, None)
+            .ok()
+            .unwrap_or_else(|e| panic!("{e:#?}\n{out}"));
+        assert_eq!(f, again, "{out}");
+
+        // A template that is not in the file: a warning offline, the
+        // stored one with the daemon, an error when the daemon has none.
+        let other = text.replace("template = \"reviewer\"", "template = \"stored\"");
+        let p = parse(&other, None);
+        assert!(!p.has_errors(), "{:#?}", p.issues);
+        assert!(
+            p.issues
+                .iter()
+                .any(|i| i.message.contains("template `stored`"))
+        );
+        let stored = |p: Option<&str>, n: &str| {
+            (p == Some("terra") && n == "stored").then(|| {
+                let mut m = Spec::new();
+                m.insert("harness".into(), serde_json::json!("copilot"));
+                m
+            })
+        };
+        let p = parse_with(&other, None, Some(&stored));
+        let f2 = p.ok().unwrap();
+        let r1 = f2.agents().find(|a| a.def.name == "r1").unwrap();
+        assert_eq!(r1.def.harness, crate::HarnessId::Copilot);
+        let none = |_: Option<&str>, _: &str| None;
+        let p = parse_with(&other, None, Some(&none));
+        assert!(
+            errors(&p).iter().any(|e| e.contains("template `stored`")),
+            "{:?}",
+            errors(&p)
+        );
+
+        // A bad template spec, a key the spec does not have, a duplicate.
+        let bad = text.replace("harness = \"pi\"", "model = \"x\"");
+        assert!(
+            errors(&parse(&bad, None))
+                .iter()
+                .any(|e| e.contains("templates.reviewer"))
+        );
+        let bad = text.replace("description = \"A global worker\"", "env = 1");
+        assert!(
+            errors(&parse(&bad, None))
+                .iter()
+                .any(|e| e.contains("unknown key `env`"))
+        );
+        let dup = text.replace("name = \"reviewer\"", "name = \"worker\"");
+        assert!(
+            errors(&parse(&dup, None))
+                .iter()
+                .any(|e| e.contains("template `_/worker`"))
+        );
     }
 }

@@ -19,6 +19,7 @@ const ArtifactsPage = lazy(() => import("../features/artifacts/ArtifactsPage"));
 const VersionsPage = lazy(() => import("../features/versions/VersionsPage"));
 const TargetsPage = lazy(() => import("../features/targets/TargetsPage"));
 const SchedulesPage = lazy(() => import("../features/schedules/SchedulesPage"));
+const TemplatesPage = lazy(() => import("../features/templates/TemplatesPage"));
 const HostsPage = lazy(() => import("../features/hosts/HostsPage"));
 const AuditPage = lazy(() => import("../features/audit/AuditPage"));
 const EventsPage = lazy(() => import("../features/events/EventsPage"));
@@ -51,6 +52,7 @@ export function App() {
         <Route path="/projects" component={ProjectsPage} />
         <Route path="/agents" component={AgentsPage} />
         <Route path="/agents/:id" component={AgentDetail} />
+        <Route path="/templates" component={TemplatesPage} />
         <Route path="/subscriptions" component={SubscriptionsPage} />
         <Route path="/mail" component={MailPage} />
         <Route path="/targets" component={TargetsPage} />

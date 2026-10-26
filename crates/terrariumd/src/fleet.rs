@@ -20,6 +20,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use terrarium_core::Role;
+use terrarium_core::agent_template::TemplateDef;
 use terrarium_core::config::{AgentDef, ProjectDef, RepoDef, SubscriptionDef, TargetDef};
 use terrarium_core::fleet::{self, Fleet, Issue, Kind};
 
@@ -32,7 +33,7 @@ use crate::store::agents::{self, AgentPatch, AgentView};
 use crate::store::projects::{
     self, NewProject, NewRepo, ProjectPatch, SOURCE_API, SOURCE_FILE, fleet_source,
 };
-use crate::store::{Page, repos, schedules, subscriptions, targets};
+use crate::store::{Page, repos, schedules, subscriptions, targets, templates};
 
 /// The `source` word of an object a fleet owns: `fleet:<name>`.
 pub use crate::store::projects::SOURCE_FLEET as SOURCE_PREFIX;
@@ -263,6 +264,10 @@ fn label(t: &Tx<'_>, kind: Kind, key: &str, fleet: Option<&str>) -> ApiResult<()
         Kind::Target => ("targets", "name"),
         Kind::Subscription => ("subscriptions", "name"),
         Kind::Schedule => ("schedules", "project || '/' || name"),
+        Kind::Template => (
+            "agent_templates",
+            "(CASE WHEN scope = '' THEN '_' ELSE scope END) || '/' || name",
+        ),
     };
     match fleet {
         Some(f) => t.execute(
@@ -431,6 +436,37 @@ fn schedule_spec(def: &terrarium_core::schedule::ScheduleDef) -> Value {
         "enabled": def.enabled,
         "catch_up": def.catch_up,
     })
+}
+
+/// A template as a plan compares it: the description and the spec in its
+/// normal form (the raw spec when it is not valid; the checks report it).
+fn template_spec(def: &TemplateDef) -> Value {
+    let spec = templates::normalize(&def.spec).unwrap_or_else(|_| def.spec.clone());
+    json!({
+        "description": def.description.clone().unwrap_or_default(),
+        "spec": spec,
+    })
+}
+
+/// A template key, `project/name` or `_/name`, as `(project, name)`.
+fn template_scope(key: &str) -> (Option<&str>, &str) {
+    match key.split_once('/') {
+        Some(("_", n)) => (None, n),
+        Some((p, n)) => (Some(p), n),
+        None => (None, key),
+    }
+}
+
+/// Parse a fleet file with the stored templates of the daemon: an agent
+/// entry may name a template that the file does not declare.
+pub fn parse_in(conn: &Connection, text: &str, fallback: Option<&str>) -> fleet::Parsed {
+    let stored = |project: Option<&str>, name: &str| {
+        templates::find_in(conn, project, name)
+            .ok()
+            .flatten()
+            .map(|t| t.spec)
+    };
+    fleet::parse_with(text, fallback, Some(&stored))
 }
 
 fn live_subscription(s: &subscriptions::Subscription) -> Value {
@@ -624,6 +660,23 @@ pub fn plan(conn: &Connection, f: &Fleet) -> ApiResult<Plan> {
             o.as_ref(),
         ));
     }
+    for (p, d) in f.all_templates() {
+        let key = fleet::template_key(p, &d.name);
+        let live = templates::find_in(conn, p, &d.name)?.map(|l| Live {
+            spec: template_spec(&l.def()),
+            source: l.source,
+        });
+        let o = owner_of(Kind::Template, &key);
+        entries.push(classify(
+            &f.name,
+            Kind::Template,
+            &key,
+            p,
+            &template_spec(d),
+            live,
+            o.as_ref(),
+        ));
+    }
     for a in f.agents() {
         let key = fleet::agent_key(&a.def);
         let view = find_agent(conn, &a.def.project, &a.def.name)?;
@@ -743,11 +796,20 @@ pub fn plan(conn: &Connection, f: &Fleet) -> ApiResult<Plan> {
                     None => (false, String::new(), None, false),
                 }
             }
+            Kind::Template => {
+                let (p, n) = template_scope(&o.key);
+                match templates::find_in(conn, p, n)? {
+                    Some(r) => (true, r.source, Some(r.id), false),
+                    None => (false, String::new(), None, false),
+                }
+            }
         };
         e.id = id;
         e.live = live;
         e.action = match o.kind {
-            Kind::Agent | Kind::Target | Kind::Schedule if exists && source != SOURCE_FILE => {
+            Kind::Agent | Kind::Target | Kind::Schedule | Kind::Template
+                if exists && source != SOURCE_FILE =>
+            {
                 Action::Delete
             }
             _ => Action::Release,
@@ -887,6 +949,15 @@ pub fn check_against(conn: &Connection, f: &Fleet, prompts: &Path) -> ApiResult<
             }
         }
     }
+    for (p, d) in f.all_templates() {
+        if let Err(e) = templates::normalize(&d.spec) {
+            let at = match p {
+                Some(p) => format!("projects.{p}.templates.{}", d.name),
+                None => format!("templates.{}", d.name),
+            };
+            issues.push(Issue::error(at, e.message));
+        }
+    }
     for s in &f.subscriptions {
         if let Err(e) = subscriptions::check_name(&s.name) {
             issues.push(Issue::error(format!("subscriptions.{}", s.name), e.message));
@@ -924,7 +995,7 @@ pub fn plan_text(
     text: &str,
     fallback: Option<&str>,
 ) -> ApiResult<(Option<Fleet>, Plan)> {
-    let parsed = fleet::parse(text, fallback);
+    let parsed = parse_in(conn, text, fallback);
     let mut issues = parsed.issues;
     let Some(f) = parsed.fleet else {
         return Ok((None, Plan::invalid(String::new(), issues)));
@@ -984,6 +1055,9 @@ pub fn authorize(actor: &Actor, plan: &Plan, prune: bool) -> ApiResult<()> {
                     e.project.as_deref().unwrap_or_default(),
                     "managing schedules from a fleet",
                 ),
+                Kind::Template => {
+                    policy::manage_templates(actor, e.project.as_deref(), "from a fleet")
+                }
                 Kind::Agent => {
                     let project = e.project.as_deref().unwrap_or_default();
                     policy::admin_project(actor, project, "managing agents from a fleet")?;
@@ -1172,15 +1246,36 @@ pub fn apply(
             &target_spec(&live.def),
         )?;
     }
+    for (p, d) in f.all_templates() {
+        let live = templates::upsert_def(t, p, d, &source, &actor.label())?;
+        record(
+            t,
+            &name,
+            Kind::Template,
+            &live.key(),
+            p,
+            &template_spec(&live.def()),
+        )?;
+    }
     for a in f.agents() {
         let key = fleet::agent_key(&a.def);
+        // The template is in the store now: the file's own ones were
+        // written above.
+        let template = match &a.template {
+            Some(k) => Some(templates::resolve(t, &a.def.project, k)?.reference()),
+            None => None,
+        };
         let id = match find_agent(t, &a.def.project, &a.def.name)? {
             Some(v) => {
                 apply_agent(t, &v, &a.def)?;
-                v.agent.id.to_string()
+                let id = v.agent.id.to_string();
+                if template.is_some() && template != v.template {
+                    agents::set_template(t, &id, template.as_ref())?;
+                }
+                id
             }
             None => {
-                let v = agents::create(t, &a.def, state_dir, &source)?;
+                let v = agents::create_from(t, &a.def, state_dir, &source, template.as_ref())?;
                 let id = v.agent.id.to_string();
                 out.created_agents.push((id.clone(), a.def.project.clone()));
                 id
@@ -1248,6 +1343,11 @@ pub fn apply(
                 Kind::Schedule => {
                     if let Some(id) = &e.id {
                         schedules::delete(t, id)?;
+                    }
+                }
+                Kind::Template => {
+                    if let Some(id) = &e.id {
+                        templates::delete(t, id)?;
                     }
                 }
                 _ => {}
@@ -1556,6 +1656,33 @@ pub fn export(
         .filter(|r| r.def.project.as_deref() == Some(project))
         .map(|r| r.def)
         .collect();
+    // File templates belong to the project file too.
+    let project_templates = templates::of_scope(conn, Some(project))?
+        .into_iter()
+        .filter(|t| t.source != SOURCE_FILE)
+        .map(|t| t.def())
+        .collect();
+    // An agent of a template names it when the template still exists and
+    // an entry can make the agent from it (`agent_template::overrides_for`).
+    let mut agents = Vec::new();
+    for v in &agent_views {
+        let def = view_def(v);
+        let mut a = fleet::FleetAgent {
+            def,
+            start: false,
+            template: None,
+            overrides: Default::default(),
+        };
+        if let Some(r) = &v.template
+            && let Ok(tpl) = templates::get(conn, &r.id)
+            && tpl.project.as_deref().is_none_or(|p| p == project)
+            && let Some(o) = terrarium_core::agent_template::overrides_for(&a.def, &tpl.spec)
+        {
+            a.template = Some(tpl.use_key());
+            a.overrides = o;
+        }
+        agents.push(a);
+    }
     Ok(Fleet {
         version: fleet::FLEET_VERSION,
         name: name.to_owned(),
@@ -1563,6 +1690,7 @@ pub fn export(
         defaults: fleet::FleetDefaults::default(),
         subscriptions: Vec::new(),
         targets: Vec::new(),
+        templates: Vec::new(),
         projects: vec![fleet::FleetProject {
             def: ProjectDef {
                 name: p.name.clone(),
@@ -1573,14 +1701,9 @@ pub fn export(
                     on_agent_create: checkout,
                 },
                 schedules: project_schedules,
+                templates: project_templates,
             },
-            agents: agent_views
-                .iter()
-                .map(|v| fleet::FleetAgent {
-                    def: view_def(v),
-                    start: false,
-                })
-                .collect(),
+            agents,
             targets,
         }],
     })
@@ -1611,7 +1734,18 @@ pub async fn apply_config_dir(state: &Shared) -> Vec<String> {
             }
         };
         let fallback = fleet::name_from_path(&path);
-        let parsed = fleet::parse(&text, fallback.as_deref());
+        let (body, name) = (text.clone(), fallback.clone());
+        let parsed = match state
+            .db
+            .read(move |c| Ok(parse_in(c, &body, name.as_deref())))
+            .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                errors.push(format!("{rel}: {}", e.message));
+                continue;
+            }
+        };
         let f = match parsed.ok() {
             Ok(f) => f,
             Err(issues) => {

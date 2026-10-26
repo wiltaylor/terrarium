@@ -15,8 +15,13 @@ import { onArtifactOrigin } from "../lib/artifact-origin";
 import { withScope } from "../lib/target-scope";
 import type {
   Agent,
-  AgentDef,
+  AgentCreate,
   AgentEvent,
+  AgentTemplate,
+  NewTemplate,
+  TemplateFromAgent,
+  TemplatePatch,
+  TemplateResolved,
   AgentPatch,
   ApiKeyInput,
   Artifact,
@@ -152,7 +157,8 @@ export interface Api {
     list(project?: string): Promise<Agent[]>;
     /** `id` is a ULID, `project/name`, or a unique name. */
     get(id: string): Promise<Agent>;
-    create(def: AgentDef): Promise<Agent>;
+    /** With `template`, the given fields override the template's (docs/api.md §21). */
+    create(def: AgentCreate): Promise<Agent>;
     update(id: string, patch: AgentPatch): Promise<Agent>;
     /** `confirm` adds `?confirm=true`, needed when the agent has a live session. */
     remove(id: string, confirm?: boolean): Promise<void>;
@@ -373,6 +379,26 @@ export interface Api {
     /** A new secret; the old one stops at once. */
     rotate(id: string): Promise<EventSourceWithSecret>;
     remove(id: string): Promise<void>;
+  };
+
+  /**
+   * docs/api.md §21. A key is a ULID, `project/name`, `_/name`, `global:name`,
+   * or a name (the caller's project first, then global). Rights: everyone
+   * reads the global templates; members read their project's; a
+   * project_admin manages its project's; a global template needs a
+   * sysadmin (`403 forbidden`).
+   */
+  templates: {
+    /** `GET /api/templates?project=&scope=global`: with `project`, the project's templates and the global ones. Global first. */
+    list(q?: { project?: string; scope?: "global" }): Promise<AgentTemplate[]>;
+    get(key: string): Promise<AgentTemplate>;
+    create(t: NewTemplate): Promise<AgentTemplate>;
+    update(key: string, patch: TemplatePatch): Promise<AgentTemplate>;
+    remove(key: string): Promise<void>;
+    /** `GET /api/templates/{key}/resolve?project=`: a name picks the project's template first, then the global one. */
+    resolve(key: string, project: string): Promise<TemplateResolved>;
+    /** `POST /api/templates/from-agent/{agent}`: a template from the agent's settings now. */
+    fromAgent(agent: string, body: TemplateFromAgent): Promise<AgentTemplate>;
   };
 
   /** docs/host-protocol.md, the daemon's `api/hosts.rs`. */
@@ -661,6 +687,16 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       update: (id, body) => patch(`/api/event-sources/${seg(id)}`, body),
       rotate: (id) => post(`/api/event-sources/${seg(id)}/rotate`),
       remove: (id) => del(`/api/event-sources/${seg(id)}`),
+    },
+
+    templates: {
+      list: (q = {}) => get("/api/templates", { ...q }),
+      get: (key) => get(`/api/templates/${seg(key)}`),
+      create: (body) => post("/api/templates", body),
+      update: (key, body) => patch(`/api/templates/${seg(key)}`, body),
+      remove: (key) => del(`/api/templates/${seg(key)}`),
+      resolve: (key, project) => get(`/api/templates/${seg(key)}/resolve`, { project }),
+      fromAgent: (agent, body) => post(`/api/templates/from-agent/${seg(agent)}`, body),
     },
 
     hosts: {

@@ -3,10 +3,12 @@
 import { XSS_DOCUMENT } from "../../lib/xss-payloads";
 import { seedSchedules } from "./schedules";
 import { seedEventSources, type EventSourceRow } from "./eventSources";
+import { seedTemplates } from "./templates";
 import { seedTranscripts } from "./transcripts";
 import type {
   Agent,
   AgentEvent,
+  AgentTemplate,
   Block,
   Artifact,
   AuditEntry,
@@ -80,6 +82,8 @@ export interface MockWorld {
   eventSources: EventSourceRow[];
   /** The secret of each source by ID. The API shows it only at create and rotate. */
   eventSourceSecrets: Record<string, string>;
+  /** Agent templates (docs/api.md §21). */
+  templates: AgentTemplate[];
   audit: AuditEntry[];
   /** The last `seq` handed out. */
   seq: number;
@@ -779,7 +783,7 @@ ${XSS_DOCUMENT}
   const sched = seedSchedules(now, agents);
 
   return {
-    schedules: sched.schedules, scheduleRuns: sched.runs, eventSources: seedEventSources(now), eventSourceSecrets: {},
+    schedules: sched.schedules, scheduleRuns: sched.runs, eventSources: seedEventSources(now), eventSourceSecrets: {}, templates: seedTemplates(now),
     projects, repos, agents, sessions, transcripts: seedTranscripts(agents, sessions), events, columns: { terrarium: COLUMNS.map((c) => ({ ...c })), webshop: COLUMNS.map((c) => ({ ...c })) },
     cards, memories, links, pages, revisions, artifacts, artifactBodies, versions, subscriptions, quota, usage, holds: [], apiKeys, mail, targets, hostSnapshots, leases, hosts, hostTokens, audit, seq,
   };

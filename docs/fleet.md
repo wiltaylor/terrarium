@@ -27,6 +27,11 @@ new_session_on_prompt_change = true
 start = false
 # [defaults.policy] is also possible; an agent with its own [policy] replaces it.
 
+[[templates]]                    # optional: a global agent template (api.md §21)
+name = "worker"
+harness = "claude"
+prompt = "default"
+
 [[subscriptions]]                # optional: a SubscriptionDef (PLAN §16)
 name = "anthropic-max"
 provider = "anthropic"
@@ -225,6 +230,8 @@ PLAN §10 applies to each object of the plan:
 | A global target | sysadmin |
 | A subscription | sysadmin |
 | A schedule | project_admin of its project, and an action inside the project (api.md §19.3) |
+| A project agent template | project_admin of its project |
+| A global agent template | sysadmin |
 
 So a project_admin may apply a fleet that touches only its own project. A
 member may not plan or apply (403). Anyone may validate. An agent cannot
@@ -245,6 +252,28 @@ rules apply too:
 
 `GET /api/fleet` shows every fleet to the operator and to sysadmins. An
 agent sees the fleets that own objects in its own project.
+
+### Agent templates
+
+`[[templates]]` declares a global agent template, and
+`[[projects.templates]]` a template of the project. The spec keys
+(`harness`, `subscription`, `model`, `prompt`, `roles`, `policy`,
+`restart`, `new_session_on_prompt_change`) sit next to `name` and
+`description`. An agent entry with `template = "worker"` gets the values
+in this order: `[defaults]`, then the template, then the keys of the entry.
+`policy` merges key by key. `worker` is the project's template, else the
+global one; `global:worker` is the global one. The template comes from the
+file first, then from the daemon. `fleet validate --offline` cannot read
+the daemon: an agent of a template that the file does not declare gets a
+warning and is left out of the check.
+
+The fleet owns its templates (kind `template`, key `project/name` or
+`_/name`). An apply writes them before the agents, and records the
+template on each agent. A change of a template in the file changes the
+agents of the fleet at the next apply, because the file is the truth.
+`--prune` deletes a template that the file no longer declares. Export
+writes the project's templates, and `template = "..."` with only the keys
+that differ for each agent that came from a template that still exists.
 
 ## 6. API
 
@@ -275,8 +304,9 @@ A fleet schedule runs as the actor of the apply: `operator` for a fleet
 file in the config dir. A changed `action` makes the actor of the apply
 its `run_as` again (api.md §19.1).
 
-The `source` column of `projects`, `agents`, `targets`, `schedules`, and
-`subscriptions` accepts `file`, `api`, and `fleet:<name>`. An apply writes
+The `source` column of `projects`, `agents`, `targets`, `schedules`,
+`agent_templates`, and `subscriptions` accepts `file`, `api`, and
+`fleet:<name>`. An apply writes
 `fleet:<name>` on each object that it makes or adopts, and a release sets
 `api` again. A `file` row stays `file`. Migration 9 also writes
 `fleet:<name>` on the rows that `fleet_objects` already listed.

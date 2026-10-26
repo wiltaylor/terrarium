@@ -391,6 +391,29 @@ pub fn mail_to(sender: &AgentActor, to: &Address) -> ApiResult<()> {
     )))
 }
 
+// ---- agent templates (docs/api.md §21) ----
+
+/// Read the templates of `project`, or the global templates (`None`):
+/// members read their own project's; every caller reads the global ones,
+/// because every caller that may create an agent may use them.
+pub fn read_templates(actor: &Actor, project: Option<&str>) -> ApiResult<()> {
+    match project {
+        Some(p) => read_project(actor, p),
+        None => Ok(()),
+    }
+}
+
+/// Create, change, or delete a template of `project` (`None`: global):
+/// the operator and a sysadmin any; a project_admin those of its
+/// project. A template grants nothing: an agent create from it checks
+/// the rights on the values it copies.
+pub fn manage_templates(actor: &Actor, project: Option<&str>, what: &str) -> ApiResult<()> {
+    match project {
+        Some(p) => admin_project(actor, p, &format!("managing the templates of `{p}` {what}")),
+        None => sysadmin(actor, &format!("managing a global template {what}")),
+    }
+}
+
 // ---- schedules (docs/api.md §19) ----
 
 /// Read the schedules of `project`, or the global schedules (`None`):

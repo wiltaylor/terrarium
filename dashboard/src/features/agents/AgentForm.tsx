@@ -1,12 +1,14 @@
-// Create or edit an agent: every AgentDef field (docs/api.md §6.1).
+// Create or edit an agent: every AgentDef field (docs/api.md §6.1). A new
+// agent can start from a template (§21): the pick fills the form, and the
+// user can change any field before the create.
 
 import { createResource, createSignal, For, Show } from "solid-js";
 import { ErrorBanner, Modal } from "../../components/ui";
-import { GRANTABLE_ROLES, HARNESSES, RESTART_POLICIES, type Agent, type Harness, type RestartPolicy, type Role } from "../../api/types";
-import { agents, api, projects, subscriptions } from "../../stores";
-import { agentToForm, emptyAgentForm, formToDef, formToPatch, validateAgentForm, type AgentFormValues } from "./form";
-import { reconcileSubscription } from "./subscription";
-import { defaultModelHint, ModelField, SubscriptionSelect } from "./SubscriptionFields";
+import type { Agent } from "../../api/types";
+import { agents, api, projects } from "../../stores";
+import { agentToForm, emptyAgentForm, formToPatch, validateAgentForm, type AgentFormValues } from "./form";
+import { AgentFields } from "./AgentFields";
+import { formToCreate, resolvedToForm, scopeLabel, selectable, useKey } from "../templates/model";
 
 export function AgentForm(props: { agent?: Agent; project?: string | null; onClose: () => void; onSaved: (a: Agent) => void }) {
   const editing = () => !!props.agent;
@@ -14,17 +16,33 @@ export function AgentForm(props: { agent?: Agent; project?: string | null; onClo
   const [error, setError] = createSignal<unknown>(null);
   const [busy, setBusy] = createSignal(false);
   const set = <K extends keyof AgentFormValues>(k: K, value: AgentFormValues[K]) => setV({ ...v(), [k]: value });
-  const [targets] = createResource(
-    () => v().project || null,
-    (p) => api.projects.targets(p).catch(() => []),
-  );
   const problems = () => validateAgentForm(v());
-  const [subNote, setSubNote] = createSignal<string | null>(null);
-  /** A new harness keeps the subscription only when it can spend it. */
-  const setHarness = (h: Harness) => {
-    const r = reconcileSubscription(v().subscription, h, subscriptions.list());
-    setV({ ...v(), harness: h, subscription: r.subscription });
-    setSubNote(r.note);
+
+  // The template key of the create, or "" for none.
+  const [template, setTemplate] = createSignal("");
+  const [templates] = createResource(
+    () => (editing() ? null : v().project || null),
+    (p) =>
+      api.templates
+        .list({ project: p })
+        .then((list) => selectable(list, p))
+        .catch(() => []),
+  );
+  const pickTemplate = async (key: string) => {
+    setTemplate(key);
+    if (!key) return;
+    try {
+      setV(resolvedToForm(await api.templates.resolve(key, v().project), v().name));
+      setError(null);
+    } catch (err) {
+      setTemplate("");
+      setError(err);
+    }
+  };
+  const setProject = (p: string) => {
+    // A template belongs to a project or is global: pick it again for the new project.
+    setTemplate("");
+    set("project", p);
   };
 
   const submit = async (e: Event) => {
@@ -32,7 +50,7 @@ export function AgentForm(props: { agent?: Agent; project?: string | null; onClo
     if (problems().length) return setError(problems().join(" "));
     setBusy(true);
     try {
-      const saved = props.agent ? await api.agents.update(props.agent.id, formToPatch(props.agent, v())) : await api.agents.create(formToDef(v()));
+      const saved = props.agent ? await api.agents.update(props.agent.id, formToPatch(props.agent, v())) : await api.agents.create(formToCreate(v(), template() || null));
       agents.upsert(saved);
       props.onSaved(saved);
       props.onClose();
@@ -42,8 +60,6 @@ export function AgentForm(props: { agent?: Agent; project?: string | null; onClo
       setBusy(false);
     }
   };
-
-  const toggle = <T,>(list: T[], x: T, on: boolean) => (on ? [...new Set([...list, x])] : list.filter((y) => y !== x));
 
   return (
     <Modal title={editing() ? `Edit ${props.agent!.project}/${props.agent!.name}` : "New agent"} onClose={() => props.onClose()}>
@@ -59,7 +75,7 @@ export function AgentForm(props: { agent?: Agent; project?: string | null; onClo
           </label>
           <label>
             Project
-            <select value={v().project} disabled={editing()} onChange={(e) => set("project", e.currentTarget.value)} required>
+            <select value={v().project} disabled={editing()} onChange={(e) => setProject(e.currentTarget.value)} required>
               <option value="" disabled>
                 Pick a project
               </option>
@@ -72,95 +88,32 @@ export function AgentForm(props: { agent?: Agent; project?: string | null; onClo
               </For>
             </select>
           </label>
-          <label>
-            Harness
-            <select value={v().harness} onChange={(e) => setHarness(e.currentTarget.value as Harness)}>
-              <For each={HARNESSES}>
-                {(h) => (
-                  <option value={h} selected={h === v().harness}>
-                    {h}
-                  </option>
-                )}
-              </For>
-            </select>
-          </label>
-          <label>
-            Subscription
-            <SubscriptionSelect
-              harness={v().harness}
-              value={v().subscription}
-              onChange={(name) => {
-                setSubNote(null);
-                set("subscription", name);
-              }}
-            />
-            <Show when={subNote()}>
-              <span class="notice small" role="status">
-                {subNote()}
-              </span>
-            </Show>
-          </label>
-          <label>
-            Model
-            <ModelField harness={v().harness} subscription={v().subscription} value={v().model} onChange={(m) => set("model", m)} />
-            <Show when={!v().model.trim() && defaultModelHint(v().harness, v().subscription)}>
-              {(hint) => <span class="muted small">{hint()}</span>}
-            </Show>
-          </label>
-          <label>
-            Prompt template
-            <input value={v().prompt} onInput={(e) => set("prompt", e.currentTarget.value)} placeholder="worker (a name under prompts/)" />
-          </label>
-          <label>
-            Restart policy
-            <select value={v().restart} onChange={(e) => set("restart", e.currentTarget.value as RestartPolicy)}>
-              <For each={RESTART_POLICIES}>{(r) => <option value={r}>{r}</option>}</For>
-            </select>
-          </label>
-        </div>
-
-        <Show
-          when={!editing()}
-          fallback={<p class="muted small">Change roles in the Roles panel of the agent page. An emptied model or prompt is cleared. A new subscription or model applies at the next start.</p>}
-        >
-          <fieldset class="row">
-            <legend>Roles (above member)</legend>
-            <For each={GRANTABLE_ROLES}>
-              {(r) => (
-                <label class="row small">
-                  <input type="checkbox" checked={v().roles.includes(r)} onChange={(e) => set("roles", toggle<Role>(v().roles, r, e.currentTarget.checked))} /> {r}
-                </label>
-              )}
-            </For>
-          </fieldset>
-        </Show>
-
-        <fieldset class="stack" style={{ gap: "8px" }}>
-          <legend>Policy</legend>
-          <div>
-            <div class="small">Targets</div>
-            <Show when={targets()?.length} fallback={<span class="muted small">This project has no targets.</span>}>
-              <div class="row" style={{ "flex-wrap": "wrap" }}>
-                <For each={targets()}>
+          <Show when={!editing()}>
+            <label>
+              Template
+              <select value={template()} onChange={(e) => void pickTemplate(e.currentTarget.value)} disabled={!v().project} aria-label="Template">
+                <option value="">None: set every field</option>
+                <For each={templates()}>
                   {(t) => (
-                    <label class="row small">
-                      <input type="checkbox" checked={v().targets.includes(t.name)} onChange={(e) => set("targets", toggle(v().targets, t.name, e.currentTarget.checked))} /> {t.name}
-                      <span class="muted">({t.scope ?? (t.project ? "project" : "global")})</span>
-                    </label>
+                    <option value={useKey(t)} selected={useKey(t) === template()}>
+                      {t.name} ({scopeLabel(t)})
+                    </option>
                   )}
                 </For>
-              </div>
-            </Show>
-          </div>
-          <label>
-            Mail to (agents of the project; * means all)
-            <input value={v().mail_to} onInput={(e) => set("mail_to", e.currentTarget.value)} placeholder="*" />
-          </label>
-          <label>
-            Cross-project (project/agent, comma separated)
-            <input value={v().cross_project} onInput={(e) => set("cross_project", e.currentTarget.value)} placeholder="ops/triage" />
-          </label>
-        </fieldset>
+              </select>
+              <Show when={template()}>
+                <span class="muted small">The template filled the fields. Change any of them; the values are copied, with no live link.</span>
+              </Show>
+            </label>
+          </Show>
+        </div>
+
+        <AgentFields
+          value={v()}
+          onChange={setV}
+          roles={!editing()}
+          rolesNote="Change roles in the Roles panel of the agent page. An emptied model or prompt is cleared. A new subscription or model applies at the next start."
+        />
 
         <Show when={problems().length && v().name}>
           <ul class="small" style={{ color: "var(--danger)", margin: 0 }}>

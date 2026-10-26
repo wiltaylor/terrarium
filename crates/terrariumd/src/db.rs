@@ -883,6 +883,29 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (source, delivery)
     );
     "#,
+    // 22: agent templates (PLAN §5b, docs/api.md §21). A template is the
+    // settings of an agent without its name and project; a create copies
+    // them. `scope` is the project, or '' for a global template.
+    // `revision` goes up at each change. `agents.template` is the
+    // template that a create used (JSON `{id, name, project, revision}`),
+    // for display only: the agent keeps no live link.
+    r#"
+    CREATE TABLE agent_templates (
+        id          TEXT PRIMARY KEY,           -- ULID
+        name        TEXT NOT NULL,
+        project     TEXT REFERENCES projects(name) ON DELETE CASCADE,
+        scope       TEXT NOT NULL,              -- project, or '' when global
+        description TEXT NOT NULL DEFAULT '',
+        spec        TEXT NOT NULL,              -- JSON: an agent definition without name and project
+        revision    INTEGER NOT NULL DEFAULT 1,
+        created_by  TEXT NOT NULL,
+        source      TEXT NOT NULL DEFAULT 'api', -- 'api', 'file', or 'fleet:<name>'
+        created_at  TEXT NOT NULL,
+        updated_at  TEXT NOT NULL,
+        UNIQUE (scope, name)
+    );
+    ALTER TABLE agents ADD COLUMN template TEXT;
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call

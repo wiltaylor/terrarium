@@ -1543,3 +1543,117 @@ describe("event sources (docs/api.md §20)", () => {
     ]);
   });
 });
+
+describe("agent templates (docs/api.md §21)", () => {
+  const TEMPLATE_KEYS = ["created_at", "created_by", "description", "id", "name", "project", "revision", "source", "spec", "updated_at"];
+
+  it("lists in the daemon's shape, global first, a project's with the global ones", async () => {
+    const api = mock();
+    const all = await api.templates.list();
+    expect(all.length).toBeGreaterThan(1);
+    for (const t of all) expect(Object.keys(t).sort()).toEqual(TEMPLATE_KEYS);
+    expect(all[0]!.project).toBeNull();
+    expect((await api.templates.list({ project: "webshop" })).every((t) => t.project === null || t.project === "webshop")).toBe(true);
+    expect((await api.templates.list({ scope: "global" })).every((t) => t.project === null)).toBe(true);
+  });
+
+  it("normalizes the spec, keeps the name unique in its scope, and counts revisions", async () => {
+    const api = mock();
+    const t = await api.templates.create({ name: "tester", project: "terrarium", spec: { harness: "pi", roles: [] } });
+    expect(t.spec).toEqual({ harness: "pi", policy: { targets: [], mail_to: ["*"] }, restart: "on-failure" });
+    expect(t.revision).toBe(1);
+    // The same name in another scope is fine; in the same scope it is a conflict.
+    expect((await api.templates.create({ name: "tester", project: null, spec: { harness: "claude" } })).project).toBeNull();
+    await expect(api.templates.create({ name: "tester", project: "terrarium", spec: { harness: "pi" } })).rejects.toMatchObject({ status: 409 });
+    await expect(api.templates.create({ name: "Bad", spec: { harness: "pi" } })).rejects.toMatchObject({ status: 422, details: { field: "name" } });
+    await expect(api.templates.create({ name: "x", spec: { harness: "nope" } as never })).rejects.toMatchObject({ status: 422, details: { field: "spec" } });
+    await expect(api.templates.create({ name: "x", spec: { harness: "pi", name: "w" } as never })).rejects.toMatchObject({ status: 422, details: { field: "spec" } });
+    const u = await api.templates.update("terrarium/tester", { description: "runs the tests" });
+    expect(u.revision).toBe(2);
+    expect((await api.templates.update(u.id, { description: "runs the tests" })).revision).toBe(2);
+    await api.templates.remove(u.id);
+    await expect(api.templates.get(u.id)).rejects.toMatchObject({ status: 404 });
+  });
+
+  it("resolves the project's template before the global one, and global: forces the global one", async () => {
+    const api = mock();
+    await api.templates.create({ name: "worker", project: "terrarium", spec: { harness: "pi" } });
+    expect((await api.templates.resolve("worker", "terrarium")).agent).toMatchObject({ project: "terrarium", harness: "pi" });
+    const g = await api.templates.resolve("global:worker", "terrarium");
+    expect(g.template.project).toBeNull();
+    expect(g.agent.harness).toBe("claude");
+    expect((await api.templates.resolve("worker", "webshop")).template.project).toBeNull();
+    await expect(api.templates.resolve("reviewer", "webshop")).rejects.toMatchObject({ status: 404 });
+    await expect(api.templates.resolve("terrarium/reviewer", "webshop")).rejects.toMatchObject({ status: 422, code: "invalid", details: { field: "template" } });
+  });
+
+  it("makes an agent from a template: the body wins per field, policy merges per key, null clears", async () => {
+    const api = mock();
+    const a = await api.agents.create({ name: "r1", project: "terrarium", template: "reviewer", model: null, policy: { mail_to: ["*"] } as never, restart: "never" });
+    expect(a).toMatchObject({ harness: "codex", prompt: "worker", restart: "never", policy: { targets: ["build-box"], mail_to: ["*"] } });
+    expect(a.model).toBeUndefined();
+    expect(a.template).toMatchObject({ name: "reviewer", project: "terrarium", revision: 1 });
+    await expect(api.agents.create({ name: "r2", project: "terrarium", template: "nope" })).rejects.toMatchObject({ status: 404 });
+  });
+
+  it("makes a template from an agent, in the agent's project by default", async () => {
+    const api = mock();
+    const t = await api.templates.fromAgent("terrarium/lead", { name: "lead-copy" });
+    const lead = await api.agents.get("terrarium/lead");
+    expect(t.project).toBe("terrarium");
+    expect(t.spec.harness).toBe(lead.harness);
+    expect((await api.templates.fromAgent("terrarium/lead", { name: "lead-copy", project: null })).project).toBeNull();
+  });
+
+  it("follows the rights: everyone reads global; a project_admin manages its project's; a member only reads", async () => {
+    const admin = createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 0, scheduleCaller: { role: "project_admin", project: "terrarium" } });
+    await expect(admin.templates.create({ name: "g", project: null, spec: { harness: "pi" } })).rejects.toMatchObject({ status: 403 });
+    await expect(admin.templates.create({ name: "w", project: "webshop", spec: { harness: "pi" } })).rejects.toMatchObject({ status: 403 });
+    expect((await admin.templates.create({ name: "w", spec: { harness: "pi" } })).project).toBe("terrarium");
+    const member = createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 0, scheduleCaller: { role: "member", project: "webshop" } });
+    const seen = await member.templates.list();
+    expect(seen.some((t) => t.project === null)).toBe(true);
+    expect(seen.some((t) => t.project === "terrarium")).toBe(false);
+    await expect(member.templates.update("global:worker", { description: "x" })).rejects.toMatchObject({ status: 403 });
+    await expect(member.templates.get("terrarium/reviewer")).rejects.toMatchObject({ status: 403 });
+  });
+
+  it("emits template events", async () => {
+    const api = mock();
+    const frames: AgentEvent[] = [];
+    const s = api.events.stream({ since: api.world.seq });
+    s.subscribe((e) => frames.push(e));
+    await wait();
+    const t = await api.templates.create({ name: "ev", project: "terrarium", spec: { harness: "pi" } });
+    await wait();
+    const e = frames.find((x) => x.kind === "template")!;
+    expect(e).toMatchObject({ project: "terrarium", data: { change: "created", template: t.id, name: "ev", key: "terrarium/ev", revision: 1 } });
+    s.close();
+  });
+
+  it("the HTTP client sends the documented routes", async () => {
+    const calls: string[] = [];
+    const t = createHttpTransport({ baseUrl: "http://d", getToken: () => null, fetch: (async (url: string, init: RequestInit) => {
+      calls.push(`${init.method} ${String(url).replace("http://d", "")}`);
+      return new Response(init.method === "DELETE" ? null : "[]", { status: init.method === "DELETE" ? 204 : 200, headers: { "content-type": "application/json" } });
+    }) as unknown as typeof fetch });
+    const { createHttpApi } = await import("../client");
+    const api = createHttpApi(t);
+    await api.templates.list({ scope: "global" });
+    await api.templates.create({ name: "w", spec: { harness: "pi" } });
+    await api.templates.get("global:worker");
+    await api.templates.update("terrarium/w", { description: "d" });
+    await api.templates.resolve("worker", "terrarium");
+    await api.templates.fromAgent("terrarium/lead", { name: "l" });
+    await api.templates.remove("T1");
+    expect(calls).toEqual([
+      "GET /api/templates?scope=global",
+      "POST /api/templates",
+      "GET /api/templates/global%3Aworker",
+      "PATCH /api/templates/terrarium%2Fw",
+      "GET /api/templates/worker/resolve?project=terrarium",
+      "POST /api/templates/from-agent/terrarium%2Flead",
+      "DELETE /api/templates/T1",
+    ]);
+  });
+});

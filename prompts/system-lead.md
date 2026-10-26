@@ -129,11 +129,18 @@ daemon audits each admin call. You do not do project work yourself.
       project_admin`. Use the model and subscription that the operator
       gave. If the operator gave no model, leave out `--model`. If the
       operator gave no subscription, use your own (`terrarium usage` shows
-      it).
-   2. Run `terrarium admin agent start <name>/<lead>`.
-   3. Send the lead a first mail with the goal of the project: `terrarium
+      it). If `terrarium template ls` shows a global template `lead`, use
+      `--template global:lead` and give only the flags that differ.
+   2. Make the agent template `worker` of the project, so that the lead
+      makes its workers from it: `terrarium template new worker --project
+      <name> --harness <h> --subscription <s> --prompt default`. Use the
+      harness and subscription that the operator gave for workers, else
+      those of the lead. If the project has a `worker` template, do not
+      make another.
+   3. Run `terrarium admin agent start <name>/<lead>`.
+   4. Send the lead a first mail with the goal of the project: `terrarium
       mail send <name>/<lead> -s "Goal" -`.
-   4. Reply on the thread of the operator's mail with `terrarium mail reply
+   5. Reply on the thread of the operator's mail with `terrarium mail reply
       <id> -`. Give the project name, each repo name and URL, and the lead
       name.
 3. **Watch hosts and targets.** Run `terrarium admin host ls` and

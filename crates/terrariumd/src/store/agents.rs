@@ -11,6 +11,7 @@ use terrarium_core::{Agent, AgentId, AgentStatus, HarnessId, HarnessSessionId, R
 use crate::actor::AgentActor;
 use crate::db::{Tx, now};
 use crate::error::{ApiError, ApiResult};
+use crate::store::templates::TemplateRef;
 use crate::store::{Page, Paged, check_name, json_col, projects};
 
 /// An agent as the API shows it: the core [`Agent`] and bookkeeping.
@@ -24,6 +25,10 @@ pub struct AgentView {
     /// The card the agent has in `in_progress`, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_card: Option<String>,
+    /// The template that the create copied (docs/api.md §21), if any.
+    /// For display: the agent keeps no live link to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<TemplateRef>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -79,6 +84,9 @@ fn base_row(r: &Row<'_>) -> rusqlite::Result<AgentView> {
         },
         source: r.get("source")?,
         current_card: None,
+        template: r
+            .get::<_, Option<String>>("template")?
+            .and_then(|s| serde_json::from_str(&s).ok()),
         created_at: r.get("created_at")?,
         updated_at: r.get("updated_at")?,
     })
@@ -289,6 +297,17 @@ pub fn create(
     work_dir: &Path,
     source: &str,
 ) -> ApiResult<AgentView> {
+    create_from(t, def, work_dir, source, None)
+}
+
+/// [`create`], and note the template that `def` came from.
+pub fn create_from(
+    t: &mut Tx<'_>,
+    def: &AgentDef,
+    work_dir: &Path,
+    source: &str,
+    template: Option<&TemplateRef>,
+) -> ApiResult<AgentView> {
     check_def(def)?;
     projects::get(t, &def.project)?;
     let exists: i64 = t.query_row(
@@ -309,8 +328,8 @@ pub fn create(
     t.execute(
         "INSERT INTO agents (id, name, project, harness, subscription, model, prompt, policy,
                              restart, status, workspace, source, created_at, updated_at,
-                             new_session_on_prompt_change)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'stopped', ?10, ?11, ?12, ?12, ?13)",
+                             new_session_on_prompt_change, template)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'stopped', ?10, ?11, ?12, ?12, ?13, ?14)",
         params![
             id,
             agent.name,
@@ -324,7 +343,8 @@ pub fn create(
             agent.workspace.to_string_lossy(),
             source,
             at,
-            agent.new_session_on_prompt_change
+            agent.new_session_on_prompt_change,
+            template.map(serde_json::to_string).transpose()?
         ],
     )?;
     set_roles(t, &id, &def.project, &def.roles)?;
@@ -332,9 +352,19 @@ pub fn create(
         "agent.create",
         &id,
         Some(&def.project),
-        json!({"name": def.name, "harness": def.harness, "source": source}),
+        json!({"name": def.name, "harness": def.harness, "source": source,
+               "template": template}),
     )?;
     get(t, &id)
+}
+
+/// Note the template that a fleet entry of the agent names.
+pub fn set_template(t: &Tx<'_>, id: &str, template: Option<&TemplateRef>) -> ApiResult<()> {
+    t.execute(
+        "UPDATE agents SET template = ?2 WHERE id = ?1",
+        params![id, template.map(serde_json::to_string).transpose()?],
+    )?;
+    Ok(())
 }
 
 /// The body of `PATCH /api/agents/{id}`. A field that is absent stays as

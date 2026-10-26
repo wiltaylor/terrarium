@@ -21,6 +21,7 @@ including the mode 1 run. Keep them when you edit a template.
 - A worker writes the branch, the test result, and what to look at in the `card move ... -m` comment.
 - An agent does not run `terrarium mail wait` in a turn, because it holds the turn open. It ends the turn, and the daemon wakes it when mail or a card change arrives.
 - The lead does these steps in this order: `admin agent new`, `repo checkout --agent`, `admin agent start`, `admin target grant`, `card assign`. The grant comes before the assign. The card pointer starts the worker, so the lead sends no start mail.
+- The lead makes each worker from the agent template `worker` of its project: `admin agent new w1 --template worker`. The template keeps the harness, the subscription, the prompt, and the policy in one place. A flag on `agent new` changes one field. When the project has no `worker` template, the lead makes one with `template new worker` before the first worker. The system lead makes it when it appoints the lead. (An agent template is not a prompt template: see docs/api.md §21.)
 - A grant whose target does not come up exits 1. The lead then does not assign the card. It fixes the target with `admin target edit`, revokes the lease, and grants again.
 - The lead gives each worker `--subscription`: the one the operator gave, or its own (`terrarium usage` shows it).
 - The lead asks the operator for requirements only when a card is not clear.

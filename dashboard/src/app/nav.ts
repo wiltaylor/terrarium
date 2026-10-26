@@ -15,6 +15,7 @@ export const GLOBAL_ITEMS = [
   { href: "/", label: "Home", end: true },
   { href: "/projects", label: "Projects" },
   { href: "/agents", label: "Agents" },
+  { href: "/templates", label: "Templates" },
   { href: "/subscriptions", label: "Subscriptions" },
   { href: "/mail", label: "Mail" },
   { href: "/targets", label: "Targets" },

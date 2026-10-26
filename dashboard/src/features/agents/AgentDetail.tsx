@@ -13,6 +13,7 @@ import { ago, compact, timeUntil } from "../../lib/format";
 import { agents, api, events, leases as holds, quota, subscriptions } from "../../stores";
 import { describeCause } from "../../stores/quota";
 import { AgentForm } from "./AgentForm";
+import { SaveAsTemplateDialog } from "../templates/TemplateDialog";
 import { Conversation } from "./conversation/Conversation";
 import { RoleBadges } from "./AgentsPage";
 import { changeSubscription, loginText } from "./subscription";
@@ -37,6 +38,7 @@ export default function AgentDetail() {
   const [notice, setNotice] = createSignal<string | null>(null);
   const [turn, setTurn] = createSignal("");
   const [editing, setEditing] = createSignal(false);
+  const [saving, setSaving] = createSignal(false);
   const [fetched] = createResource(id, (key) => api.agents.get(key).catch((e: unknown) => (setError(e), null)));
   const agent = (): Agent | undefined => agents.byId(id()) ?? agents.byId(fetched()?.id ?? "") ?? fetched() ?? undefined;
   const running = () => RUNNING.includes(agent()?.status ?? "stopped");
@@ -90,6 +92,7 @@ export default function AgentDetail() {
               Stop
             </button>
             <button onClick={() => setEditing(true)}>Edit</button>
+            <button onClick={() => setSaving(true)}>Save as template</button>
             <ConfirmButton label="Delete" confirmLabel={running() ? "Yes, stop and delete" : "Yes, delete"} onConfirm={() => remove(a())} />
           </PageHead>
           <ErrorBanner error={error()} onDismiss={() => setError(null)} />
@@ -122,6 +125,16 @@ export default function AgentDetail() {
               <dd>{a().prompt ?? <span class="muted">default</span>}</dd>
               <dt>Restart</dt>
               <dd>{a().restart ?? "on-failure"}</dd>
+              <Show when={a().template}>
+                {(t) => (
+                  <>
+                    <dt>Template</dt>
+                    <dd>
+                      <A href="/templates">{t().name}</A> <span class="chip">{t().project ?? "global"}</span> <span class="muted small">revision {t().revision} at the create; a copy, not a live link</span>
+                    </dd>
+                  </>
+                )}
+              </Show>
               <dt>Policy</dt>
               <dd class="small">
                 targets: {a().policy?.targets.join(", ") || "none"} · mail to: {a().policy?.mail_to.join(", ") || "none"} · cross-project:{" "}
@@ -219,6 +232,9 @@ export default function AgentDetail() {
 
           <Show when={editing()}>
             <AgentForm agent={a()} onClose={() => setEditing(false)} onSaved={() => setNotice("Saved.")} />
+          </Show>
+          <Show when={saving()}>
+            <SaveAsTemplateDialog agent={a()} onClose={() => setSaving(false)} onSaved={(t) => setNotice(`Saved template ${t.project ?? "global"}/${t.name}.`)} />
           </Show>
         </div>
       )}

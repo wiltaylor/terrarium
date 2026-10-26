@@ -479,6 +479,29 @@ mod tests {
         }
     }
 
+    /// The leads make workers from the agent template `worker`
+    /// (docs/api.md §21), with commands that exist.
+    #[test]
+    fn lead_templates_make_workers_from_an_agent_template() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../prompts");
+        let lead = load_template(&dir, Some("project-lead")).unwrap();
+        for needle in [
+            "`terrarium admin agent new <worker> --template worker\n   --project {{project.name}}`",
+            "**Worker templates.**",
+            "`terrarium template new worker --harness\n<h> --subscription <s> --prompt default`",
+            "`terrarium template edit worker ...`",
+        ] {
+            assert!(lead.contains(needle), "{needle}");
+        }
+        let sys = load_template(&dir, Some("system-lead")).unwrap();
+        for needle in [
+            "`terrarium template new worker --project\n      <name> --harness <h> --subscription <s> --prompt default`",
+            "`--template global:lead`",
+        ] {
+            assert!(sys.contains(needle), "{needle}");
+        }
+    }
+
     /// `prompts/default.md` and the built-in template stay the same text.
     #[test]
     fn default_template_matches_prompts_default_md() {
