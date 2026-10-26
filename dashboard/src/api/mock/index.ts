@@ -26,6 +26,7 @@ import { defaultModels, modelList, subscriptionDetail } from "./models";
 import { splitFrontMatter } from "../../lib/markdown";
 import type {
   Agent,
+  AgentDef,
   AgentEvent,
   AgentStatus,
   Artifact,
@@ -72,6 +73,7 @@ import { harnessUpdateKind } from "../../lib/harness-update";
 import { FakePty } from "./pty";
 import { createScheduleMock, type ScheduleCaller } from "./schedules";
 import { createEventSourceMock } from "./eventSources";
+import { applyTemplate, createTemplateMock, resolveTemplate, templateRef } from "./templates";
 import { createTranscriptStream, encodeTranscriptFrame } from "../sse";
 import { appendBlock, fakeReply, mockModel, titleOf, type Draft as BlockDraft } from "./transcripts";
 
@@ -1513,9 +1515,13 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           const s = a.subscription ? w.subscriptions.find((x) => x.name === a.subscription) : undefined;
           return s ? { ...a, subscription_detail: subscriptionDetail(s, a.harness) } : { ...a };
         }),
-      create: (def) =>
+      create: (body) =>
         reply(() => {
-          project(def.project);
+          project(body.project);
+          // docs/api.md §21: the template's fields, and the body's on top. The checks below see the result.
+          const tpl = "template" in body && body.template ? resolveTemplate(w.templates, body.template, body.project, fail) : undefined;
+          const def = tpl ? applyTemplate(tpl.spec, body) : (body as AgentDef);
+          if (!def.harness) fail(422, "invalid", "missing field `harness`");
           if (!NAME_RE.test(def.name)) fail(422, "invalid", `\`${def.name}\` is not a valid name`);
           if (w.agents.some((a) => a.project === def.project && a.name === def.name)) fail(409, "conflict", `agent \`${def.project}/${def.name}\` exists`);
           if (def.policy?.mail_to.some((m) => !m.trim())) fail(422, "invalid", "policy.mail_to has an empty entry");
@@ -1536,11 +1542,12 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
             restart: def.restart ?? "on-failure",
             status: "stopped",
             source: "api",
+            ...(tpl ? { template: templateRef(tpl) } : {}),
             created_at: iso(),
             updated_at: iso(),
           };
           w.agents.push(a);
-          audit("agent.create", a.id, a.project, { name: a.name, harness: a.harness });
+          audit("agent.create", a.id, a.project, { name: a.name, harness: a.harness, ...(tpl ? { template: templateRef(tpl) } : {}) });
           return a;
         }),
       update: (id, patch) =>
@@ -2698,6 +2705,9 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
 
     // The same caller as the schedules: the rights of §20 follow those of §19.
     eventSources: createEventSourceMock({ w, iso, ulid, reply, fail, emit, audit, caller: opts.scheduleCaller }),
+
+    // The rights of §21 follow those of §20, but every caller reads the global templates.
+    templates: createTemplateMock({ w, iso, ulid, reply, fail, emit, audit, agent, caller: opts.scheduleCaller }),
 
     hosts: {
       list: () => reply(() => w.hosts),

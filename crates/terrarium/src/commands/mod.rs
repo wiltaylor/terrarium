@@ -12,6 +12,7 @@ pub mod projects;
 pub mod remote;
 pub mod schedules;
 pub mod system;
+pub mod templates;
 
 #[cfg(test)]
 mod tests;
@@ -30,6 +31,7 @@ pub async fn run(ctx: &Ctx, cmd: &Command) -> anyhow::Result<()> {
         Command::Project { command } => projects::project(ctx, command).await,
         Command::Repo { command } => projects::repo(ctx, command).await,
         Command::Agent { command } => agents::agent(ctx, command).await,
+        Command::Template { command } => templates::template(ctx, command).await,
         Command::Mail { command } => mail::mail(ctx, command).await,
         Command::Inbox { command } => mail::inbox(ctx, command).await,
         Command::Board => board::board(ctx).await,
@@ -91,6 +93,7 @@ async fn admin(ctx: &Ctx, cmd: &AdminCmd) -> anyhow::Result<()> {
         AdminCmd::Harness { command } => system::harnesses(ctx, command).await,
         AdminCmd::Fleet { command } => fleet::fleet(ctx, command).await,
         AdminCmd::Schedule { command } => schedules::schedule(ctx, command).await,
+        AdminCmd::Template { command } => templates::template(ctx, command).await,
         AdminCmd::Audit(args) => system::audit(ctx, args).await,
     }
 }

@@ -159,14 +159,19 @@ pub async fn definition(ctx: &Ctx, a: &AgentNewArgs) -> anyhow::Result<Value> {
     set_opt(&mut def, "model", a.model.clone());
     set_opt(&mut def, "prompt", a.prompt.clone());
     set_opt(&mut def, "restart", a.restart.clone());
+    set_opt(&mut def, "template", a.template.clone());
     if !a.roles.is_empty() {
         def["roles"] = json!(a.roles);
     }
     if !(a.targets.is_empty() && a.mail_to.is_empty() && a.cross_project.is_empty()) {
-        let policy = def
-            .get("policy")
-            .cloned()
-            .unwrap_or_else(|| json!({"targets": [], "mail_to": ["*"]}));
+        // With a template, the daemon merges `policy` key by key: send
+        // only the keys that the flags give.
+        let empty = if a.template.is_some() {
+            json!({})
+        } else {
+            json!({"targets": [], "mail_to": ["*"]})
+        };
+        let policy = def.get("policy").cloned().unwrap_or(empty);
         let mut policy = policy;
         if !a.targets.is_empty() {
             policy["targets"] = json!(a.targets);
@@ -186,9 +191,9 @@ pub async fn definition(ctx: &Ctx, a: &AgentNewArgs) -> anyhow::Result<Value> {
     {
         return Err(CliError::usage("give the agent a name, or use --from-file"));
     }
-    if def.get("harness").is_none() {
+    if def.get("harness").is_none() && a.template.is_none() {
         return Err(CliError::usage(
-            "give --harness (claude, codex, copilot, or pi), or use --from-file",
+            "give --harness (claude, codex, copilot, or pi), --template, or --from-file",
         ));
     }
     Ok(def)
@@ -198,8 +203,15 @@ async fn new(ctx: &Ctx, a: &AgentNewArgs) -> anyhow::Result<()> {
     let def = definition(ctx, a).await?;
     let r = ctx.api.post("/api/agents", Some(def)).await?;
     ctx.emit(&r, |c, r| {
+        let from = match r["template"]["name"].as_str() {
+            Some(t) => format!(
+                " from template {t} (revision {})",
+                r["template"]["revision"]
+            ),
+            None => String::new(),
+        };
         c.line(format!(
-            "created agent {}/{} ({}) {}",
+            "created agent {}/{} ({}) {}{from}",
             field(r, "project"),
             field(r, "name"),
             field(r, "harness"),

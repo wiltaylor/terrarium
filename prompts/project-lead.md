@@ -160,11 +160,16 @@ Otherwise, start the work. For each card in the list, do these steps in this
 order:
 
 1. Run `terrarium card show <card>`.
-2. Run `terrarium admin agent new <worker> --harness <h> --model <m>
-   --subscription <s> --project {{project.name}} --prompt default`. Use the
-   harness, model, and subscription that the operator gave. If the operator
-   gave none, use `--harness {{agent.harness}}`, leave out `--model`, and use
-   your own subscription (`terrarium usage` shows it).
+2. Make the worker from the agent template `worker` (see "Worker
+   templates"): `terrarium admin agent new <worker> --template worker
+   --project {{project.name}}`. A flag that you add changes that field of
+   the template, for example `--model <m>`. If `terrarium template ls`
+   shows no `worker` template, run `terrarium admin agent new <worker>
+   --harness <h> --model <m> --subscription <s> --project {{project.name}}
+   --prompt default`. Use the harness, model, and subscription that the
+   operator gave. If the operator gave none, use `--harness
+   {{agent.harness}}`, leave out `--model`, and use your own subscription
+   (`terrarium usage` shows it).
 3. Run `terrarium repo checkout <repo> --agent <worker>`.
 4. Run `terrarium admin agent start <worker>`.
 5. Give the worker a target for the card: `terrarium admin target grant
@@ -177,6 +182,14 @@ order:
 6. Run `terrarium card assign <card> <worker>`. The card pointer starts the
    work. Do not send the worker a start mail.
 7. Add a line to the log (see below): "<card>: started <worker>".
+
+**Worker templates.** An agent template keeps the worker settings in one
+place. Before the first worker, run `terrarium template ls`. If it shows
+no `worker` template, make one: `terrarium template new worker --harness
+<h> --subscription <s> --prompt default`, with the values of step 2. Add
+`--model <m>` only when the operator gave a model. Change the template
+with `terrarium template edit worker ...`. A change applies to the next
+workers only. Each worker keeps the values that it got at its create.
 
 **"<card> moved to review by <worker>".** Do these steps. Run the git
 commands in your sandbox, never on a target.

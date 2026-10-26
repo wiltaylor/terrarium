@@ -144,6 +144,7 @@ terrarium agent new <name> --harness <h> [--subscription s] [--model m] [--promp
                     [--role r]... [--target t]... [--mail-to a]... [--cross-project p/a]...
                     [--restart always|on-failure|never]
 terrarium agent new --from-file agents/lead.toml [flags that override the file]
+terrarium agent new <name> --template <t> [flags that override the template]
 terrarium agent set <agent> [--harness h] [--subscription s] [--model m] [--prompt p]
                     [--restart r] [--policy JSON] [--new-session-on-prompt-change true|false]
 terrarium agent rm <agent> [--confirm] [--keep-workspace]
@@ -183,6 +184,45 @@ workspace in `work/<project>/<agent>`. A live agent needs `--confirm`
 `agent attach` puts the terminal in raw mode, sends each key to the PTY,
 and sends a resize when the window changes size. Press Ctrl-] to detach.
 The agent continues to run.
+
+`agent new --template <t>` copies the settings of an agent template
+([api.md §21](api.md#21-agent-templates)). `<t>` is the template of the
+project, else the global one; `global:<t>` is the global one. Each flag
+that you give changes that field. The policy flags change only the keys
+that they name: `--target` replaces `policy.targets` and keeps the
+template's `mail_to`. The CLI prints `created agent terra/w1 (claude) <id>
+from template worker (revision 2)`.
+
+### Agent templates
+
+`template` has the alias `templates`. A template keeps the settings of an
+agent without its name and project. A lead uses it to make workers with
+one command ([api.md §21](api.md#21-agent-templates)).
+
+```
+terrarium template ls [--global]
+terrarium template show <template>
+terrarium template new <name> [--global] [--description d] --harness <h> [--subscription s]
+                       [--model m] [--prompt p] [--role r]... [--target t]... [--mail-to a]...
+                       [--cross-project p/a]... [--restart r]
+terrarium template new <name> --from-file worker.toml [flags that override the file]
+terrarium template edit <template> [--rename n] [--description d] [spec flags as in new]
+terrarium template rm <template>
+terrarium template from-agent <agent> <name> [--global] [--description d]
+```
+
+`<template>` is a ULID, `project/name`, `global:name`, or a name (the
+project's first, then the global one).
+
+- The scope of `new` and `from-agent` is `--project`. Without it, an agent
+  makes a template of its own project, the operator a global one with
+  `new`, and `from-agent` uses the project of the agent. `--global` makes
+  a global template (sysadmin).
+- `edit` reads the template, puts the flags over its spec, and sends the
+  whole spec. `--from-file` replaces the spec. A change adds 1 to the
+  revision; the agents made from the template do not change.
+- `ls` shows the template key, the harness, the prompt, the revision, the
+  source, and the description.
 
 ### Mail and the project inbox
 
@@ -553,6 +593,7 @@ The shapes are the same as in §4 and §5.
 
 ```
 terrarium admin agent new|set|start|stop|restart|rm|send|answer|logs|sessions|roles ...
+terrarium admin template ls|show|new|edit|rm|from-agent ...
 terrarium admin project new|set|rm|repos|repo-add ...
 terrarium admin role grant|revoke <agent> <role>
 terrarium admin role ls <agent>

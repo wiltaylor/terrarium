@@ -18,7 +18,9 @@ Sections: [1 Transports](#1-transports-and-callers) ·
 [15 Notes for clients](#15-notes-for-clients) ·
 [16 Subscriptions and usage](#16-subscriptions-and-usage) ·
 [17 Targets, hosts, and exec](#17-targets-host-agents-and-exec-sessions) ·
-[18 Fleet](#18-fleet).
+[18 Fleet](#18-fleet) · [19 Schedules](#19-schedules) ·
+[20 Event sources](#20-event-sources-and-ingest) ·
+[21 Agent templates](#21-agent-templates).
 
 ## 1. Transports and callers
 
@@ -295,6 +297,8 @@ everything. Every privileged action writes an audit row (§9).
 | Mail (§7.1 scope rules) | own project | own project | any agent |
 | Read and reply from the project inbox | no | own project | any project |
 | Create, change, start, stop, restart, delete agents; send turns; answer; attach the PTY | no | own project | any |
+| Read agent templates (§21) | own project and global | own project and global | all |
+| Create, change, delete agent templates (§21) | no | own project | any, global too |
 | Assign, reassign, reopen any card; edit columns and WIP limits; archive any card | no | own project | any |
 | Attach repos; change the project | no | own project | any |
 | Grant, extend, or revoke a target lease (§17.7) | no | a target of own project, to an agent of own project | any |
@@ -713,13 +717,14 @@ An agent is the core `Agent` with bookkeeping fields:
 | `session` | The harness session ID of the current session, when known. |
 | `current_card` | The card the agent has in `in_progress`, if any. |
 | `source` | `file`, `api`, or `fleet:<name>` (§18.1). |
+| `template` | The agent template that the create copied: `{"id", "name", "project", "revision"}` (§21). Absent when the create named none. For display only. |
 
 ### 6.1 CRUD
 
 | Endpoint | Body | Answer | Needs |
 |---|---|---|---|
 | `GET /api/agents?project=` | | `200` agents by ID | read; an agent defaults to its project |
-| `POST /api/agents` | an agent definition | `201` agent | project_admin of `project`; some `policy` entries need sysadmin (below) |
+| `POST /api/agents` | an agent definition, or `template` and the fields that differ (§21.3) | `201` agent | project_admin of `project`; some `policy` entries need sysadmin (below) |
 | `GET /api/agents/{id}` | | `200` agent, with `subscription_detail` (below) | read |
 | `PATCH /api/agents/{id}` | `{"harness"?, "subscription"?, "model"?, "prompt"?, "policy"?, "restart"?, "new_session_on_prompt_change"?}` | `200` agent | project_admin; some `policy` entries need sysadmin (below) |
 | `DELETE /api/agents/{id}` | `?confirm=true` when live; `?keep_workspace=true` | `204` | project_admin |
@@ -2878,9 +2883,10 @@ All routes take the usual auth (§1). The bodies are JSON.
 
 ### 18.1 The `source` of a fleet object
 
-A project, agent, target, or subscription that a fleet owns shows
-`"source": "fleet:<name>"` in `GET /api/projects`, `/api/agents`,
-`/api/targets`, `/api/subscriptions`, and their single-object routes. The
+A project, agent, target, subscription, schedule, or agent template that
+a fleet owns shows `"source": "fleet:<name>"` in `GET /api/projects`,
+`/api/agents`, `/api/targets`, `/api/subscriptions`, `/api/schedules`,
+`/api/templates`, and their single-object routes. The
 values of `source` are:
 
 | `source` | The object |
@@ -2925,7 +2931,7 @@ A plan:
 
 | Field of an entry | Meaning |
 |---|---|
-| `kind` | `subscription`, `project`, `target`, `agent`, or `schedule`. |
+| `kind` | `subscription`, `project`, `target`, `template`, `agent`, or `schedule`. The key of a template is `project/name`, or `_/name` for a global one. |
 | `key` | The name; `project/name` for an agent and a schedule. |
 | `project` | The project of the object, when it has one. |
 | `action` | `create`, `update`, `unchanged`, `delete`, `release`, or `conflict`. |
@@ -3575,3 +3581,131 @@ terrarium event source add gh --kind github
 
 **Retention.** The daily prune timer deletes the delivery IDs that are
 older than 7 days.
+
+## 21. Agent templates
+
+An agent template is a named set of agent settings without a name and a
+project. A create copies them: `POST /api/agents` with `template`. A
+project_admin lead makes its workers from a template, so it gives each
+setting one time. PLAN §5b has the design. An agent template is not a
+prompt template (`prompt`, a file under `prompts/`).
+
+### 21.1 Shapes
+
+A template:
+
+```json
+{
+  "id": "01MA2T0K8V0Q6Y2W4E7R9T5U1P",
+  "name": "worker",
+  "project": "terrarium",
+  "description": "A board worker",
+  "spec": {"harness": "claude", "subscription": "anthropic-max", "prompt": "default",
+           "policy": {"targets": [], "mail_to": ["*"]}, "restart": "on-failure"},
+  "revision": 2,
+  "created_by": "agent:01M5PA0T0Z0K16V6G88P3SE78W",
+  "source": "api",
+  "created_at": "2026-10-26T08:00:00.000Z",
+  "updated_at": "2026-10-26T09:12:40.031Z"
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `name` | 1-63 of `a-z`, `0-9`, `-`, `_`. Unique in its scope: the project, or the global scope. A project template and a global template can have the same name. |
+| `project` | The project. `null` is a global template. |
+| `spec` | An agent definition (§6.1) without `name` and `project`: `harness` (required), `subscription`, `model`, `prompt`, `roles`, `policy`, `restart`, `new_session_on_prompt_change`. The daemon checks it with the rules of an agent definition and keeps it in a normal form: the defaults of `policy` and `restart` filled in, no empty `roles`, no `new_session_on_prompt_change` when it is `true`. Another key (`name`, `project`, `template`, or an unknown key) is `422 invalid` with `details.field = "spec"`. |
+| `revision` | `1` at the create. Each change of the name, the description, or the spec adds `1`. A `PATCH` with the same values changes nothing. |
+| `source` | `api`, `file` (a `[[templates]]` of `projects/<name>.toml`), or `fleet:<name>` (§18.1). A `file` template refuses `PATCH` and `DELETE` with `409 file_managed`. |
+
+A template key in a path is a ULID, `project/name`, `_/name` or
+`global:name` (a global template), or a name. A name finds the template of
+the caller's project first, then the global one. Encode `/` as `%2F`.
+
+### 21.2 Endpoints
+
+| Method and path | Body | Answer |
+|---|---|---|
+| `GET /api/templates?project=&scope=` | | `200`, a list (not paged): global first, then by project and name. `?project=P`: the templates of `P` and the global ones. `?scope=global`: the global ones only. Neither: all for the operator and a sysadmin; the caller's project and the global ones for another agent. |
+| `POST /api/templates` | `{name, spec, project?, description?}` | `201`, the template. An absent `project` is the agent caller's project (the operator: global). `null` or `""` is global. |
+| `GET /api/templates/{key}` | | `200`, the template. |
+| `PATCH /api/templates/{key}` | `{name?, description?, spec?}` | `200`, the template. `spec` replaces the whole spec. |
+| `DELETE /api/templates/{key}` | | `204`. The agents made from it stay as they are. |
+| `GET /api/templates/{key}/resolve?project=P` | | `200`, `{template: {id, name, project, revision}, agent: {...}}`: the template that a create of an agent in `P` with `template: "{key}"` uses, and its spec with `project: P`. Without `project`: the caller's project. The dashboard fills its agent form from `agent`. |
+| `POST /api/templates/from-agent/{agent}` | `{name, project?, description?}` | `201`, a template with the settings of the agent now. An absent `project` is the agent's project; `null` is global. The default description is `from agent <project>/<name>`. |
+
+Errors: `422 invalid` (a bad name or spec), `409 conflict` (the name is in
+use in the scope), `409 file_managed`, `404 not_found` (no such template or
+project), `403 forbidden` (the rules below).
+
+| Caller | Read | Create, change, delete |
+|---|---|---|
+| operator | all | all |
+| `sysadmin` | all | all, global templates too |
+| `project_admin` | its project's and the global ones | its project's |
+| `member` | its project's and the global ones | no |
+
+Each change writes an audit row (`template.create`, `.update`, `.delete`)
+and a `template` event: `{change, template, name, key, revision}`;
+`change` is `created`, `updated`, or `deleted`, and `key` is
+`project/name` or `_/name`. A project template's event has the project.
+Deleting a project deletes its templates.
+
+### 21.3 Create an agent from a template
+
+`POST /api/agents` takes `template`, a template name. `name` and `project`
+are required; each other field of the definition is optional.
+
+```json
+{"name": "w1", "project": "terrarium", "template": "worker", "model": "sonnet",
+ "policy": {"targets": ["terrarium-box"]}}
+```
+
+1. **Resolve.** A name picks the template of `project`, else the global
+   one. `global:<name>` (or `_/<name>`) picks the global one. A ULID
+   picks that template. A template of another project is `422 invalid`
+   (`details.field = "template"`); no template is `404 not_found`.
+2. **Merge.** The daemon puts the body over the spec. A field of the body
+   wins over the same field of the spec. `policy` merges one level deeper:
+   each of `targets`, `mail_to`, and `cross_project` in the body wins over
+   the same key of the spec. A list is not merged: the body's list
+   replaces the spec's list. `null` removes the field, so the agent gets
+   the default (`"model": null` clears the template's model;
+   `"policy": {"mail_to": null}` gives `["*"]`).
+3. **Check.** The result is an agent definition, and the create checks it
+   as it checks any definition (§6.1): project_admin of `project`, the
+   grant rights of each role (§3), and the `policy` rules of F13. A
+   template never lets a caller grant a role or a target that it could not
+   grant in the body itself.
+
+The answer is the agent with `template: {id, name, project, revision}`.
+The daemon copies the values: a later change or delete of the template
+does not change the agent. The audit row `agent.create` has the template.
+
+### 21.4 Files and fleets
+
+A project file has `[[templates]]` (`source = file`). A fleet has
+`[[templates]]` (global) and `[[projects.templates]]` (`source =
+fleet:<name>`). The spec keys sit next to `name` and `description`:
+
+```toml
+[[projects.templates]]
+name = "worker"
+description = "A board worker"
+harness = "claude"
+prompt = "default"
+[projects.templates.policy]
+mail_to = ["lead"]
+
+[[projects.agents]]
+name = "w1"
+template = "worker"     # or "global:worker"
+model = "sonnet"        # a key of the entry wins over the template
+```
+
+A fleet agent entry with `template` gets `[defaults]`, then the
+template, then its own keys, with the merge of §21.3. The template comes
+from the file first, then from the daemon. An apply writes the agent from
+the template again, as the file is the truth for a fleet (§18). A fleet
+export writes the project's templates, and `template = "..."` and the keys
+that differ for each agent of a template.

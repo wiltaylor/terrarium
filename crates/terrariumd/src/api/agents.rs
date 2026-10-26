@@ -7,7 +7,6 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use terrarium_core::config::AgentDef;
 use terrarium_core::{AgentId, AgentStatus, Answer, Role};
 
 use super::{ApiJson, ApiQuery, Shared, paged, streams};
@@ -106,11 +105,16 @@ struct Created {
     checkout: Vec<serde_json::Value>,
 }
 
+/// `POST /api/agents`: an agent definition, or a template and the fields
+/// that differ from it (docs/api.md §21). The rights checks run on the
+/// definition after the template step, so a template grants nothing that
+/// the caller could not grant itself.
 async fn create(
     State(state): State<Shared>,
     actor: Actor,
-    ApiJson(def): ApiJson<AgentDef>,
+    ApiJson(body): ApiJson<serde_json::Value>,
 ) -> ApiResult<(StatusCode, Json<Created>)> {
+    let (def, template) = super::templates::create_body(&state, &actor, body).await?;
     policy::admin_project(&actor, &def.project, "creating an agent")?;
     for role in &def.roles {
         policy::change_role(&actor, "", &def.project, *role)?;
@@ -121,7 +125,7 @@ async fn create(
         .db
         .write(actor.label(), move |t| {
             agents::check_policy(t, &who, &def.project, None, &def.policy)?;
-            agents::create(t, &def, &state_dir, projects::SOURCE_API)
+            agents::create_from(t, &def, &state_dir, projects::SOURCE_API, template.as_ref())
         })
         .await?;
     // PLAN §9: clone `checkout.on_agent_create` into the workspace before

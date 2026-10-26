@@ -382,7 +382,7 @@ pub async fn apply_definitions(
         .await?;
     report.errors.extend(target_errors);
     // Schedules of the project files, after the agents and targets that
-    // they name (docs/api.md §19).
+    // they name (docs/api.md §19), and the templates (§21).
     let project_defs = defs.projects.clone();
     let gone = report.projects.removed.clone();
     let schedule_errors = state
@@ -393,10 +393,12 @@ pub async fn apply_definitions(
             for p in &project_defs {
                 if store::projects::find(t, &p.name)?.is_some() {
                     errors.extend(store::schedules::sync_file(t, &p.name, &p.schedules, now)?);
+                    errors.extend(store::templates::sync_file(t, &p.name, &p.templates)?);
                 }
             }
             for p in &gone {
                 store::schedules::detach_file(t, p)?;
+                store::templates::detach_file(t, p)?;
             }
             Ok(errors)
         })

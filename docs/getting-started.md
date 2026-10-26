@@ -195,6 +195,22 @@ You can also do these steps in the dashboard. On the Projects page, click
 **New project**. On the Agents page, click **New agent**. Then open the
 agent and click **Start**.
 
+To make more agents with the same settings, use an agent template. Make
+the template one time, then give only the name of each agent:
+
+```sh
+t -p demo template new worker --harness claude --model haiku --prompt default
+t -p demo agent new w1 --template worker
+t -p demo agent new w2 --template worker --model sonnet
+```
+
+A flag on `agent new` changes that field of the template. `t template ls`
+lists the templates of the project and the global ones. The agent copies
+the values: a later `template edit` does not change `w1` or `w2`. In the
+dashboard, use the **Templates** page, the **Template** select of the
+**New agent** form, or **Save as template** on an agent page
+([api.md §21](api.md#21-agent-templates)).
+
 To use the CLI from the host over TCP, build it and set `TERRARIUM_URL`.
 `just` reads `TERRARIUM_TOKEN` from `.env`:
 

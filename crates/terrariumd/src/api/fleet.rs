@@ -78,7 +78,7 @@ async fn validate(
     let v = state
         .db
         .read(move |c| {
-            let parsed = fleet::parse(&body.content, fallback.as_deref());
+            let parsed = store::parse_in(c, &body.content, fallback.as_deref());
             let mut issues = parsed.issues;
             if let Some(f) = &parsed.fleet
                 && !issues.iter().any(Issue::is_error)

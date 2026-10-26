@@ -159,7 +159,26 @@ export interface AgentDef {
   roles?: Role[];
   policy?: AgentPolicy;
   restart?: RestartPolicy;
+  /** Start a new session, not a resume, when the prompt changed (Codex). The daemon leaves it out when true. */
+  new_session_on_prompt_change?: boolean;
 }
+
+/**
+ * The body of `POST /api/agents` (docs/api.md §6.1, §21). With `template`,
+ * only `name` and `project` are needed: each field given overrides the
+ * template's field, `policy` merges per key, and `null` clears
+ * `subscription`, `model`, or `prompt`.
+ */
+export type AgentCreate =
+  | AgentDef
+  | (Pick<AgentDef, "name" | "project"> &
+      Partial<Omit<AgentDef, "name" | "project" | "subscription" | "model" | "prompt">> & {
+        /** A template key: a name, `global:<name>`, `<project>/<name>`, or a ULID. */
+        template: string;
+        subscription?: string | null;
+        model?: string | null;
+        prompt?: string | null;
+      });
 
 /** `PATCH /api/agents/{id}`. Name, project, and roles do not change here. `null` clears subscription, model, or prompt; an absent field does not change. */
 export type AgentPatch = Partial<Pick<AgentDef, "harness" | "policy" | "restart">> & {
@@ -209,6 +228,8 @@ export interface Agent {
   self_report?: { status: string; note?: string; at: string };
   /** Only in `GET /api/agents/{id}`: the subscription, when it exists. */
   subscription_detail?: AgentSubscriptionDetail;
+  /** The template the agent was made from. The values were copied at the create; there is no live link. */
+  template?: TemplateRef;
 }
 
 /** docs/api.md §6.3. */
@@ -343,6 +364,8 @@ export const EVENT_KINDS = [
   "schedule",
   // docs/api.md §20: `{change, source, name, key, kind, enabled}`.
   "event_source",
+  // docs/api.md §21: `{change, template, name, key, revision}`.
+  "template",
 ] as const;
 export type EventKind = (typeof EVENT_KINDS)[number];
 
@@ -1636,4 +1659,63 @@ export interface NewEventSource {
 export interface EventSourcePatch {
   name?: string;
   enabled?: boolean;
+}
+
+// ----- Agent templates (docs/api.md §21) -----
+
+/** An agent definition without `name` and `project`. The daemon normalizes it: policy and restart get their defaults. */
+export type TemplateSpec = Omit<AgentDef, "name" | "project">;
+
+/** A stored agent template. */
+export interface AgentTemplate {
+  id: string;
+  name: string;
+  /** Null: a global template. */
+  project: string | null;
+  /** Empty when none. */
+  description: string;
+  spec: TemplateSpec;
+  /** 1 at the create; one more at each change. */
+  revision: number;
+  created_by: string;
+  /** `api`, `file` (a project file), or `fleet:<name>`. */
+  source: Source | `fleet:${string}`;
+  created_at: string;
+  updated_at: string;
+}
+
+/** The template of an agent, as the agent records it. */
+export interface TemplateRef {
+  id: string;
+  name: string;
+  project: string | null;
+  revision: number;
+}
+
+/** `POST /api/templates`. No `project`: the caller's project (the operator: global). `null`: global. */
+export interface NewTemplate {
+  name: string;
+  project?: string | null;
+  description?: string;
+  spec: TemplateSpec;
+}
+
+/** `PATCH /api/templates/{key}`. `spec` replaces the whole spec. */
+export interface TemplatePatch {
+  name?: string;
+  description?: string;
+  spec?: TemplateSpec;
+}
+
+/** `GET /api/templates/{key}/resolve?project=`: the template and the agent fields it gives in that project. */
+export interface TemplateResolved {
+  template: TemplateRef;
+  agent: Omit<AgentDef, "name">;
+}
+
+/** `POST /api/templates/from-agent/{agent}`. No `project`: the agent's project. `null`: global. */
+export interface TemplateFromAgent {
+  name: string;
+  project?: string | null;
+  description?: string;
 }

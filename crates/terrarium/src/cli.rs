@@ -64,6 +64,12 @@ pub enum Command {
         #[command(subcommand)]
         command: AgentCmd,
     },
+    /// Agent templates: named agent settings that `agent new --template` copies
+    #[command(visible_alias = "templates")]
+    Template {
+        #[command(subcommand)]
+        command: TemplateCmd,
+    },
     /// Mail
     Mail {
         #[command(subcommand)]
@@ -362,6 +368,11 @@ pub enum AgentCmd {
 pub struct AgentNewArgs {
     /// The agent name. The definition file can give it.
     pub name: Option<String>,
+    /// Copy the settings of this template; the flags given change them.
+    /// `name` is the project's template, else the global one;
+    /// `global:name` is the global one
+    #[arg(long)]
+    pub template: Option<String>,
     /// A TOML agent definition, as in `agents/<name>.toml`
     #[arg(long)]
     pub from_file: Option<PathBuf>,
@@ -1062,8 +1073,103 @@ pub enum AdminCmd {
         #[command(subcommand)]
         command: ScheduleCmd,
     },
+    /// Agent templates, as `terrarium template`
+    Template {
+        #[command(subcommand)]
+        command: TemplateCmd,
+    },
     /// The audit log
     Audit(AuditArgs),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TemplateCmd {
+    /// List templates: the project's and the global ones (the operator
+    /// without `--project`: all)
+    Ls {
+        /// Only the global templates
+        #[arg(long)]
+        global: bool,
+    },
+    /// Show one template: a ULID, `project/name`, `global:name`, or a
+    /// name (the project's first, then the global one)
+    Show { template: String },
+    /// Make a template from flags or from a TOML file. The scope is
+    /// `--project`, else the caller's project (the operator: global)
+    New(Box<TemplateNewArgs>),
+    /// Change a template: only the flags given change
+    Edit(Box<TemplateEditArgs>),
+    /// Delete a template. The agents made from it stay as they are
+    Rm { template: String },
+    /// Make a template from the settings of an agent. The scope is
+    /// `--project`, else the agent's project
+    FromAgent {
+        agent: String,
+        name: String,
+        /// Make a global template (sysadmin)
+        #[arg(long)]
+        global: bool,
+        #[arg(long)]
+        description: Option<String>,
+    },
+}
+
+#[derive(Debug, Args)]
+pub struct TemplateNewArgs {
+    pub name: String,
+    /// Make a global template (sysadmin)
+    #[arg(long)]
+    pub global: bool,
+    #[arg(long)]
+    pub description: Option<String>,
+    #[command(flatten)]
+    pub spec: TemplateSpecArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct TemplateEditArgs {
+    pub template: String,
+    /// A new name
+    #[arg(long)]
+    pub rename: Option<String>,
+    #[arg(long)]
+    pub description: Option<String>,
+    #[command(flatten)]
+    pub spec: TemplateSpecArgs,
+}
+
+/// The agent settings of a template: the fields of `agent new`.
+#[derive(Debug, Args)]
+pub struct TemplateSpecArgs {
+    /// A TOML agent definition without `name` and `project`; with
+    /// `template edit` it replaces the whole spec
+    #[arg(long)]
+    pub from_file: Option<PathBuf>,
+    /// `claude`, `codex`, `copilot`, or `pi`
+    #[arg(long)]
+    pub harness: Option<String>,
+    #[arg(long)]
+    pub subscription: Option<String>,
+    #[arg(long)]
+    pub model: Option<String>,
+    /// The prompt template name, for example `worker`
+    #[arg(long)]
+    pub prompt: Option<String>,
+    /// `project_admin` or `sysadmin`; repeat for more
+    #[arg(long = "role")]
+    pub roles: Vec<String>,
+    /// A target the agent may use; repeat for more
+    #[arg(long = "target")]
+    pub targets: Vec<String>,
+    /// A mail recipient; `*` is every agent of the project; repeat for more
+    #[arg(long = "mail-to")]
+    pub mail_to: Vec<String>,
+    /// A `project/agent` outside the project; repeat for more
+    #[arg(long = "cross-project")]
+    pub cross_project: Vec<String>,
+    /// `always`, `on-failure`, or `never`
+    #[arg(long)]
+    pub restart: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1725,6 +1831,52 @@ mod tests {
         // `fleet export <project>` does not set `--project`.
         let cli = parse(&["fleet", "export", "terra"]);
         assert_eq!(cli.project, None);
+    }
+
+    #[test]
+    fn template_commands_parse() {
+        let cli = parse(&[
+            "template",
+            "new",
+            "worker",
+            "--harness",
+            "claude",
+            "--prompt",
+            "worker",
+            "--target",
+            "box",
+            "--global",
+        ]);
+        let Command::Template {
+            command: TemplateCmd::New(a),
+        } = cli.command
+        else {
+            panic!()
+        };
+        assert_eq!(a.name, "worker");
+        assert!(a.global);
+        assert_eq!(a.spec.harness.as_deref(), Some("claude"));
+        assert_eq!(a.spec.targets, ["box"]);
+        let cli = parse(&["agent", "new", "w1", "--template", "worker", "--model", "m"]);
+        let Command::Agent {
+            command: AgentCmd::New(a),
+        } = cli.command
+        else {
+            panic!()
+        };
+        assert_eq!(a.template.as_deref(), Some("worker"));
+        assert_eq!(a.name.as_deref(), Some("w1"));
+        let cli = parse(&["admin", "template", "from-agent", "terra/lead", "lead-like"]);
+        let Command::Admin {
+            command:
+                AdminCmd::Template {
+                    command: TemplateCmd::FromAgent { agent, name, .. },
+                },
+        } = cli.command
+        else {
+            panic!()
+        };
+        assert_eq!((agent.as_str(), name.as_str()), ("terra/lead", "lead-like"));
     }
 
     /// The same class of bug: `artifact push`, `wiki new --body -`, and

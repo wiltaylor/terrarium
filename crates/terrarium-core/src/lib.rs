@@ -5,6 +5,7 @@
 //! the CLI, the host agent, and the adapters all depend on it.
 
 pub mod adapter;
+pub mod agent_template;
 pub mod ci;
 pub mod config;
 pub mod error;

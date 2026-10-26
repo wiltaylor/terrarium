@@ -130,6 +130,10 @@ pub struct ProjectDef {
     /// project file, `[[projects.schedules]]` in a fleet file.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub schedules: Vec<crate::schedule::ScheduleDef>,
+    /// The project's agent templates (PLAN §5b): `[[templates]]` in a
+    /// project file, `[[projects.templates]]` in a fleet file.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub templates: Vec<crate::agent_template::TemplateDef>,
 }
 
 /// The kind of a target. See PLAN §19.

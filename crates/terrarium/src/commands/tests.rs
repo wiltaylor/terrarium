@@ -2735,6 +2735,35 @@ async fn leader_worker_flow_commands() {
         )],
     )
     .await;
+    // The same worker from the agent template `worker`.
+    ok(
+        true,
+        &[
+            "admin",
+            "agent",
+            "new",
+            "w-dem-3",
+            "--template",
+            "worker",
+            "--project",
+            "terra",
+        ],
+        vec![(201, json!({}))],
+        vec![(
+            Post,
+            "/api/agents",
+            vec![],
+            Some(json!({"name": "w-dem-3", "project": "terra", "template": "worker"})),
+        )],
+    )
+    .await;
+    ok(
+        true,
+        &["template", "ls"],
+        vec![(200, json!([]))],
+        vec![req(Get, "/api/templates")],
+    )
+    .await;
     ok(
         true,
         &["repo", "checkout", "app", "--agent", "w-dem-3"],
@@ -4573,4 +4602,178 @@ async fn target_snapshot_commands() {
         ])
         .is_err()
     );
+}
+
+#[tokio::test]
+async fn templates_every_command() {
+    let tpl = json!({"id": "T1", "name": "worker", "project": "terra", "description": "",
+                     "spec": {"harness": "claude", "prompt": "worker"}, "revision": 2,
+                     "source": "api"});
+    // The operator: all; `--project` adds a filter; `--global` only the
+    // global ones.
+    let out = ok(
+        false,
+        &["template", "ls"],
+        vec![(200, json!([tpl]))],
+        vec![req(Get, "/api/templates")],
+    )
+    .await;
+    assert!(
+        out.contains("terra/worker") && out.contains("claude"),
+        "{out}"
+    );
+    ok(
+        false,
+        &["template", "ls", "--global"],
+        vec![(200, json!([]))],
+        vec![(Get, "/api/templates", vec![("scope", "global")], None)],
+    )
+    .await;
+    ok(
+        false,
+        &["-p", "terra", "template", "ls"],
+        vec![(200, json!([]))],
+        vec![(Get, "/api/templates", vec![("project", "terra")], None)],
+    )
+    .await;
+    ok(
+        false,
+        &["template", "show", "global:worker"],
+        vec![(200, tpl.clone())],
+        vec![req(Get, "/api/templates/global%3Aworker")],
+    )
+    .await;
+    // New: the scope is `--project`, `--global` (null), or absent.
+    ok(
+        false,
+        &[
+            "template",
+            "new",
+            "worker",
+            "--harness",
+            "claude",
+            "--prompt",
+            "worker",
+            "--target",
+            "box",
+            "--global",
+            "--description",
+            "d",
+        ],
+        vec![(201, tpl.clone())],
+        vec![(
+            Post,
+            "/api/templates",
+            vec![],
+            Some(
+                json!({"name": "worker", "project": null, "description": "d",
+                        "spec": {"harness": "claude", "prompt": "worker",
+                                 "policy": {"targets": ["box"]}}}),
+            ),
+        )],
+    )
+    .await;
+    // An agent: its project is the default scope (no `project` key).
+    ok(
+        true,
+        &["template", "new", "w", "--harness", "pi"],
+        vec![(201, tpl.clone())],
+        vec![(
+            Post,
+            "/api/templates",
+            vec![],
+            Some(json!({"name": "w", "spec": {"harness": "pi"}})),
+        )],
+    )
+    .await;
+    let r = exec(false, &["template", "new", "w"], vec![], None).await;
+    assert_eq!(exit_code_of(&r.result.unwrap_err()), exit::USAGE);
+    // Edit: the flags change the fields they name in the spec now.
+    ok(
+        false,
+        &[
+            "template",
+            "edit",
+            "terra/worker",
+            "--model",
+            "m",
+            "--mail-to",
+            "lead",
+        ],
+        vec![(200, tpl.clone()), (200, tpl.clone())],
+        vec![
+            req(Get, "/api/templates/terra%2Fworker"),
+            (
+                Patch,
+                "/api/templates/terra%2Fworker",
+                vec![],
+                Some(
+                    json!({"spec": {"harness": "claude", "prompt": "worker", "model": "m",
+                                     "policy": {"mail_to": ["lead"]}}}),
+                ),
+            ),
+        ],
+    )
+    .await;
+    ok(
+        false,
+        &["template", "edit", "worker", "--rename", "w2"],
+        vec![(200, tpl.clone())],
+        vec![(
+            Patch,
+            "/api/templates/worker",
+            vec![],
+            Some(json!({"name": "w2"})),
+        )],
+    )
+    .await;
+    ok(
+        false,
+        &["template", "rm", "worker"],
+        vec![(204, Value::Null)],
+        vec![req(Delete, "/api/templates/worker")],
+    )
+    .await;
+    ok(
+        true,
+        &["template", "from-agent", "lead", "lead-like"],
+        vec![(201, tpl.clone())],
+        vec![(
+            Post,
+            "/api/templates/from-agent/lead",
+            vec![],
+            Some(json!({"name": "lead-like"})),
+        )],
+    )
+    .await;
+    // `agent new --template`: no harness needed; the policy flags go as
+    // the keys they give, for the daemon's key-by-key merge.
+    let out = ok(
+        true,
+        &[
+            "agent",
+            "new",
+            "w1",
+            "--template",
+            "worker",
+            "--target",
+            "box",
+        ],
+        vec![(
+            201,
+            json!({"id": "A1", "name": "w1", "project": "terra", "harness": "claude",
+                   "template": {"name": "worker", "revision": 2}}),
+        )],
+        vec![(
+            Post,
+            "/api/agents",
+            vec![],
+            Some(
+                json!({"name": "w1", "project": "terra", "template": "worker",
+                        "policy": {"targets": ["box"]}}),
+            ),
+        )],
+    )
+    .await;
+    assert!(out.contains("from template worker (revision 2)"), "{out}");
 }

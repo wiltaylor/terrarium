@@ -138,6 +138,7 @@ Observations that shape the design:
 | **Artifact** | A file or a static bundle (a directory served as a site) stored by content hash. Has a name, content type, size, author. Attached to a wiki page, a version, or a card. Served at a stable preview URL. |
 | **Version** | A named release point in a project: notes, status (`draft`, `in_review`, `approved`, `rejected`, `released`), repo ref, linked cards, attached artifacts, review comments. |
 | **Agent** | A durable Terrarium identity. ULID, name, project, harness, workspace, system prompt, allowed targets, restart policy, status. Agent names are unique inside a project. |
+| **Agent template** | Named agent settings without a name and a project: harness, subscription, model, prompt, roles, policy, restart policy. Global or owned by one project. An agent create copies them (§5b). Not a prompt template. |
 | **Session** | One harness conversation bound to an agent. Holds the harness's session ID. An agent has one current session and a history. |
 | **Turn** | One prompt-to-completion cycle. Starts at a prompt-submit hook. Ends at a stop hook. |
 | **Event** | One normalised record: turn start, tool call, turn end, exit, mail. Produced from hooks, the PTY, and the supervisor. |
@@ -159,6 +160,49 @@ Status rules:
   with no hook and no PTY output for longer than the stall timeout.
 - `error`: the process exited non-zero, or the restart budget is exhausted.
 - `stopped`: a user or the API stopped the agent on purpose.
+
+## 5b. Agent templates
+
+An agent template keeps the settings of an agent in one place, so that a
+create does not give each value again. A lead makes its workers from a
+template: `terrarium agent new w1 --template worker`. `docs/api.md` §21
+is the contract.
+
+- **The spec.** A template has a name, a scope (one project, or global), a
+  description, and a spec. The spec is an agent definition without `name`
+  and `project`: `harness`, `subscription`, `model`, `prompt`, `roles`,
+  `policy`, `restart`, and `new_session_on_prompt_change`. The daemon
+  checks a spec with the agent definition rules and keeps it in a normal
+  form (the defaults filled in). There is no second schema.
+- **Create from a template.** `POST /api/agents` takes `template` and the
+  fields that differ. A name picks the template of the agent's project,
+  else the global one. `global:<name>` picks the global one. The daemon
+  copies the values; the agent keeps no live link. The agent records the
+  template (`{id, name, project, revision}`) for display. A later change
+  of the template does not change the agent.
+- **Merge rules.** A field of the create body wins over the same field of
+  the spec. `policy` merges one level deeper: each of `targets`,
+  `mail_to`, and `cross_project` in the body wins over the same key of the
+  spec. A list is not merged. `null` clears a field of the spec (the agent
+  gets the default).
+- **Rights.** A template grants nothing. The create checks the rights on
+  the values after the merge, with the normal agent rules (§10,
+  `docs/security-review.md` F13). A project_admin cannot use a template to
+  give `sysadmin` or a global target. Members of a project read its
+  templates; every caller reads the global ones. A project_admin manages
+  the templates of its project; a global template needs a sysadmin.
+- **Sources.** A template comes from the API, from a project file
+  (`[[templates]]`, `source = file`), or from a fleet (`[[templates]]` for
+  a global one, `[[projects.templates]]` for a project one,
+  `source = fleet:<name>`). A fleet agent entry can say `template =
+  "worker"`; a fleet apply then writes the agent from the template again
+  (the file is the truth). `POST /api/templates/from-agent/{agent}` makes
+  a template from an agent.
+- **Storage.** Migration 22: `agent_templates` (`UNIQUE (scope, name)`;
+  `scope` is `''` for a global template) and `agents.template`. Deleting a
+  project deletes its templates. Each change adds 1 to `revision`, writes
+  an audit row (`template.create`, `.update`, `.delete`), and a
+  `template` event.
 
 ---
 
@@ -1546,6 +1590,7 @@ end-to-end scenarios of each phase are not scripted yet (no `spikes/e2e/`).
 | 5 · caps | `TERRARIUM_MAX_TARGETS_PER_PROJECT` (8, `409 conflict`) and the host agent's `max_running_targets` (4, `429 rate_limited`). The dashboard shows the cap errors and the running count of each host. | — |
 | 5 · scope | A target is global or belongs to one project (the `scope` field). A project target gets the prefix `<project>-`. A project_admin makes and leases the targets of its project; a global target needs sysadmin. The dashboard has scope chips and filters, and a targets panel on each project. | — |
 | Harnesses | The image holds no harness (`just ci::check` fails when the Dockerfile installs one). `terrariumd harness install` at each start (the entrypoint, then the daemon) installs each missing pin of `harnesses.toml` into the tools dir (`./tools` at `/opt/terrarium/tools`, the npm prefix) and the Copilot prompt extension, and writes `terrarium-manifest.json`. In-place updates: `POST /api/harnesses/{name}/update` and `POST /api/harnesses/update`, `terrarium admin harness update` (`--version`, `--force`, `--all`), `just harness::update` and `just harness::latest` (with `--pin`), and the "Update" buttons of the dashboard. Sysadmin or the operator only, audited as `harness.update`, `409` while agents on the harness run. The sandbox binds the tools dir read-only. The version guard at each agent start (`TERRARIUM_HARNESS_VERSION_POLICY`). `docs/getting-started.md` §7. | — |
+| Templates | Agent templates (§5b, `docs/api.md` §21): global and project templates, `POST /api/agents` with `template` (project over global, `global:`, field and `policy` key overrides, the create rights on the merged values), `resolve`, `from-agent`, `[[templates]]` in project files and fleets, `template = "..."` on fleet agents and in export, `terrarium template` and `agent new --template`, the dashboard Templates page, the template select of the agent form, and "Save as template". The lead templates make workers from the `worker` template. | Agent files (`agents/<name>.toml`) cannot name a template. |
 | 6 | Mail and event views in the dashboard. The fleet file (`docs/fleet.md`): `terrarium fleet validate`, `plan`, `apply` (with `--prune`), `ls`, `show`, and `export`, ownership as `source: "fleet:<name>"`, and the auto-apply of `fleets/*.toml` at start and on reload. | The sibling-container sandbox fallback is not started. |
 | Security | The fixes for findings F1 to F7 of `docs/security-review.md`: the `private/` and `harness/` split of the agent dir (F1, §11); TLS on the host link with a loopback-only plaintext default, pinning, rotation, and enrol (F2, §19); DOMPurify as the one HTML sink, an ESLint guard, adversarial payload tests, and a page CSP in the dashboard (F3); the WebSocket token in the `bearer.<token>` subprotocol, with `TERRARIUM_WS_QUERY_TOKEN=0` to refuse `?token=` (F4); artifacts off the dashboard origin by default, with an origin badge in the viewer (F5); no PTY log for the login flow (F6); a constant-time token compare (F7). Signed `HttpOnly` session cookies for the dashboard, with a CSRF header on mutating calls and an `Origin` check on WebSocket upgrades (`docs/api.md` §1.1); the CSP and other security headers from the daemon (§1.2); `?token=` refused by default. The fixes for F10 to F14 of §9: fleet ownership and overwrite checks (F10); quarantine of an old agent dir with a symlink (F11); transcript path checks with the `usage.rejected_path` event (F12); sysadmin for global targets, `cross_project`, and outside `mail_to` in a policy (F13); a wider ESLint sink rule with a fixture test, and the CSP as a header with `frame-ancestors 'none'` (F14). `DELETE /api/session` needs the CSRF token when a cookie is present. | — |
 

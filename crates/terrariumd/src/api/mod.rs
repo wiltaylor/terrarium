@@ -18,6 +18,7 @@ mod streams;
 mod subscriptions;
 mod system;
 mod targets;
+mod templates;
 mod transcripts;
 mod usage;
 mod versions;
@@ -223,6 +224,7 @@ fn routes(state: Shared, serve_artifacts: bool, host_connect: bool) -> Router {
         .merge(fleet::routes())
         .merge(schedules::routes())
         .merge(event_sources::routes())
+        .merge(templates::routes())
         .route("/session", post(session::create).delete(session::delete))
         .fallback(api_not_found)
         .method_not_allowed_fallback(api_method_not_allowed)
