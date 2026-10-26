@@ -3,7 +3,7 @@
 Terrarium wraps AI coding harnesses (Claude Code, Codex, Copilot CLI) so that
 one API, one CLI, one dashboard, and one status model apply to all of them.
 
-Status: draft v0.19, 2026-10-25. Phases 0 to 5 largely built; Phase 6 partly (the fleet file is done). Target leases and mode 1 (workspaces on the host, attached into targets) are built and verified live. The security review fixes F1 to F7 and F10 to F14 are in, with cookie sessions and the CSP header (`docs/security-review.md`). See §20, "Build status", and README.md.
+Status: draft v0.20, 2026-10-26. Phases 0 to 5 largely built; Phase 6 partly (the fleet file is done). The image holds no harness: the daemon installs the harnesses at start into the tools volume and updates them in place (§6, §23.3). Target leases and mode 1 (workspaces on the host, attached into targets) are built and verified live. The security review fixes F1 to F7 and F10 to F14 are in, with cookie sessions and the CSP header (`docs/security-review.md`). See §20, "Build status", and README.md.
 
 ---
 
@@ -184,16 +184,30 @@ Status rules:
          +----------------------------------------------+
 ```
 
-Everything above runs inside **one Docker container**. The image contains the
-harness binaries (`claude`, `codex`, `copilot`, and `pi` from `@earendil-works/pi-coding-agent`), Node 22 (22.19+), the `copilot-custom-system-prompt` npm package,
-Rust-built Terrarium binaries, `bwrap`, and `ssh`. No Docker client and no vmlab: those run on outside hosts.
-On first start the entrypoint runs `copilot-custom-system-prompt install` so
-the extension lands in the Copilot home on the auth volume. On an image
-upgrade it runs again with `--force`. The container mounts:
+Everything above runs inside **one Docker container**. The image contains
+Node 22 (22.19+) and npm, `git`, `bwrap`, `python3`, the `ssh` client, and
+the Rust-built Terrarium binaries only. It holds no harness. No Docker
+client and no vmlab: those run on outside hosts.
+
+The harnesses (`claude`, `codex`, `copilot`, and `pi` from
+`@earendil-works/pi-coding-agent`) and the `copilot-custom-system-prompt`
+extension live in `./tools` on the Docker host. The container mounts that
+dir at `/opt/terrarium/tools` (`TERRARIUM_TOOLS_DIR`). It is the npm global
+prefix (`NPM_CONFIG_PREFIX`), and its `bin/` comes first on `PATH`. At each
+start, the entrypoint and then the daemon run `terrariumd harness install`.
+The step installs each pin of `harnesses.toml` that is missing, and leaves
+a present harness at its version. It installs the Copilot prompt extension
+into the Copilot home when the extension or the Copilot version changed.
+It writes the manifest `tools/terrarium-manifest.json`. An update runs
+`npm install -g <package>@<version>` in place through the daemon
+(`POST /api/harnesses/{name}/update`, `terrarium admin harness update`).
+It needs no image build and no restart (`docs/getting-started.md` §7).
+The sandbox binds the tools dir read-only (§11). The container mounts:
 
 | Mount | Purpose |
 |---|---|
 | `./config/claude`, `./config/codex`, `./config/copilot`, `./config/pi` bind-mounted under `/auth` | One host directory per harness home, so you can edit settings, hooks, and extensions from outside the container with your normal editor. Log in once from the dashboard's Subscriptions page (§16.1), or with `docker compose exec terrarium claude auth login` and the others. See §23. |
+| `./tools` bind-mounted at `/opt/terrarium/tools` | The harnesses: the npm global prefix (`TERRARIUM_TOOLS_DIR`), installed at start from the pins in `harnesses.toml`, updated in place through the daemon. Writable by the host user and the daemon; read-only in every sandbox. |
 | `./state` bind-mounted at `/state` | SQLite, per-agent workspaces and logs, artifacts, credentials. |
 | `~/.ssh` or a key volume (optional) | For `ssh` targets. |
 | `/var/run/docker.sock` (optional) | Only for the sibling-container sandbox fallback (§11). Never for targets. |
@@ -235,6 +249,9 @@ Storage layout inside the container:
                                        runner-argv.json, runner-exit.json, runner.log
 /run/terrarium/api.sock
 /run/terrarium/agents/<ulid>.sock
+/opt/terrarium/tools/                  the harnesses (npm prefix): lib/node_modules/, bin/,
+                                       terrarium-manifest.json (ro in the sandbox)
+/etc/terrarium/harnesses.toml          the pins of the first install (copied into the image)
 ```
 
 ---
@@ -540,7 +557,8 @@ passes straight through. Visible to the harness:
 
 | Path | Mode | Why |
 |---|---|---|
-| `/usr`, `/lib`, `/bin`, `/etc` (subset), Node, harness binaries | ro | the harness must run |
+| `/usr`, `/lib`, `/bin`, `/etc` (subset), Node | ro | the harness must run |
+| `/opt/terrarium/tools` (`TERRARIUM_TOOLS_DIR`) at the same path | ro | the harnesses and their `bin/` on `PATH`. An agent cannot change a harness. |
 | `/work/<project>/<agent>` (`TERRARIUM_WORK_DIR`) as `$HOME/work`, and again at `/work/<project>/<agent>` | rw | the agent's files; the second path is where a target sees them ("mode 1", below) |
 | `/state/agents/<ulid>/harness` at the same path | ro | `prompt.md` and the adapter's per-agent files. The harness cannot change them. |
 | `/auth/claude` as `$HOME/.claude`, `/auth/pi` as `$HOME/.pi`, etc. | rw | shared login, settings, and caches |
@@ -1361,7 +1379,7 @@ dashboard.
 **Phase 6 — Polish.** Mail and event views. Fleet definition file that
 declares many agents and targets at once. Sibling-container sandbox fallback.
 
-### Build status (2026-10-25, v0.19)
+### Build status (2026-10-26, v0.20)
 
 From README.md and the tree. "Done" means built and in the tree. The
 end-to-end scenarios of each phase are not scripted yet (no `spikes/e2e/`).
@@ -1385,6 +1403,7 @@ end-to-end scenarios of each phase are not scripted yet (no `spikes/e2e/`).
 | 5 · lab repos | `lab_repo` (a git worktree of a project repo on the host, `lab_ref`, `lab_path`) and `lab_from_workspace` (one instance for each holder), with the lab allowlist in the host agent (`labcheck.rs`). `admin target edit` (`PATCH /api/targets/{name}`). The dashboard shows the lab source and the instances. Verified live on 2026-10-25. | — |
 | 5 · caps | `TERRARIUM_MAX_TARGETS_PER_PROJECT` (8, `409 conflict`) and the host agent's `max_running_targets` (4, `429 rate_limited`). The dashboard shows the cap errors and the running count of each host. | — |
 | 5 · scope | A target is global or belongs to one project (the `scope` field). A project target gets the prefix `<project>-`. A project_admin makes and leases the targets of its project; a global target needs sysadmin. The dashboard has scope chips and filters, and a targets panel on each project. | — |
+| Harnesses | The image holds no harness (`just ci::check` fails when the Dockerfile installs one). `terrariumd harness install` at each start (the entrypoint, then the daemon) installs each missing pin of `harnesses.toml` into the tools dir (`./tools` at `/opt/terrarium/tools`, the npm prefix) and the Copilot prompt extension, and writes `terrarium-manifest.json`. In-place updates: `POST /api/harnesses/{name}/update` and `POST /api/harnesses/update`, `terrarium admin harness update` (`--version`, `--force`, `--all`), `just harness::update` and `just harness::latest` (with `--pin`), and the "Update" buttons of the dashboard. Sysadmin or the operator only, audited as `harness.update`, `409` while agents on the harness run. The sandbox binds the tools dir read-only. The version guard at each agent start (`TERRARIUM_HARNESS_VERSION_POLICY`). `docs/getting-started.md` §7. | — |
 | 6 | Mail and event views in the dashboard. The fleet file (`docs/fleet.md`): `terrarium fleet validate`, `plan`, `apply` (with `--prune`), `ls`, `show`, and `export`, ownership as `source: "fleet:<name>"`, and the auto-apply of `fleets/*.toml` at start and on reload. | The sibling-container sandbox fallback is not started. |
 | Security | The fixes for findings F1 to F7 of `docs/security-review.md`: the `private/` and `harness/` split of the agent dir (F1, §11); TLS on the host link with a loopback-only plaintext default, pinning, rotation, and enrol (F2, §19); DOMPurify as the one HTML sink, an ESLint guard, adversarial payload tests, and a page CSP in the dashboard (F3); the WebSocket token in the `bearer.<token>` subprotocol, with `TERRARIUM_WS_QUERY_TOKEN=0` to refuse `?token=` (F4); artifacts off the dashboard origin by default, with an origin badge in the viewer (F5); no PTY log for the login flow (F6); a constant-time token compare (F7). Signed `HttpOnly` session cookies for the dashboard, with a CSRF header on mutating calls and an `Origin` check on WebSocket upgrades (`docs/api.md` §1.1); the CSP and other security headers from the daemon (§1.2); `?token=` refused by default. The fixes for F10 to F14 of §9: fleet ownership and overwrite checks (F10); quarantine of an old agent dir with a symlink (F11); transcript path checks with the `usage.rejected_path` event (F12); sysadmin for global targets, `cross_project`, and outside `mail_to` in a policy (F13); a wider ESLint sink rule with a fixture test, and the CSP as a header with `frame-ancestors 'none'` (F14). `DELETE /api/session` needs the CSRF token when a cookie is present. | — |
 
@@ -1424,6 +1443,7 @@ end-to-end scenarios of each phase are not scripted yet (no `spikes/e2e/`).
 | Host agent token leaks or a host is compromised | One token per host, stored as a hash, revocable from the dashboard. Rotation (`admin host rotate`) and one-time enrol tokens (`--enrol`, 10 minutes). `first_used_at` and `last_used_from` show a strange use. TLS on the link (F2 below). The host agent only accepts calls for targets defined on it. |
 | Host agent connection drops mid-exec | Exec sessions have IDs. The host agent keeps output buffered until acknowledged. Reconnect resumes or reports the exit code. |
 | Harness flags change | One adapter per harness, pinned version, CI. |
+| npm runs at container start and on update, so the install trusts the npm registry at that moment | Pins in `harnesses.toml` for the first install; the manifest (`tools/terrarium-manifest.json`) records what was installed; the version guard at each agent start (§7.5 of `docs/getting-started.md`); updates are operator/sysadmin only and audited (`harness.update`). |
 | A daemon crash inside Docker stops every runner, because `terrariumd` is the only child of `tini`: when it exits, the container stops | **Mitigated.** The entrypoint is a supervisor loop: it starts `terrariumd` again after a crash, with backoff, and the runners keep running (`docker/README.md`, "The restart loop"; `just docker::crash-test`). Outside Docker, the runner processes live through a daemon restart. |
 | F1: a yolo agent rewrites its own event log, PTY log, launch spec, or exit record, and so defeats the budgets, the audit trail, and resume | **Fixed.** The agent dir has `private/`, `harness/`, and `workspace/`. The sandbox never binds `private/`, binds `harness/` read-only, and makes only the per-agent overlays writable (§11, `docs/runner.md` "Files"). A test checks that no bind names `private/`. |
 | F2: the host link is plaintext, so the host token and the exec traffic cross the network in clear text and the token replays | **Fixed.** TLS on the host listener with `TERRARIUM_HOST_TLS_CERT` and `TERRARIUM_HOST_TLS_KEY`, certificate pinning in the host agent, rotation, and enrol tokens (§19). Without a certificate, the host listener binds `127.0.0.1:8082` only (`TERRARIUM_HOST_LISTEN=auto`). A plaintext bind to another address logs an `INSECURE` warning. The host agent refuses `ws://` to a host that is not loopback without `allow_insecure`. |
@@ -1587,11 +1607,19 @@ Multi-stage, one image:
 2. `node` stage: `npm ci && npm run build` for the dashboard; the output is
    embedded into `terrariumd` at build time with `rust-embed`, so the Rust
    stage depends on it.
-3. Runtime stage, Debian slim: Node 22 (22.19+, which pi needs), `bubblewrap`, `git`, `openssh-
-   client`, `ca-certificates`, and the harnesses installed with pinned
-   versions: `@anthropic-ai/claude-code`, `@openai/codex`, `@github/copilot`,
+3. Runtime stage, the Node image (Debian slim, `[node] image` in
+   `harnesses.toml`): Node 22 (22.19+, which pi needs) and npm,
+   `bubblewrap`, `git`, `python3`, `openssh-client`, `ca-certificates`,
+   `procps`, `tini`, and the Terrarium binaries (`terrariumd`, `terrarium`,
+   `terrarium-runner`) only. **No harness.** The stage copies
+   `harnesses.toml` to `/etc/terrarium/harnesses.toml` and sets
+   `TERRARIUM_TOOLS_DIR` and `NPM_CONFIG_PREFIX` to `/opt/terrarium/tools`,
+   with its `bin/` first on `PATH`. The harnesses are installed at start
+   into that dir (the `./tools` mount) from the pins:
+   `@anthropic-ai/claude-code`, `@openai/codex`, `@github/copilot`,
    `@earendil-works/pi-coding-agent` (pi's package after `@mariozechner/pi-coding-agent` 0.73.1),
-   plus `copilot-custom-system-prompt`.
+   plus `copilot-custom-system-prompt`. `just ci::check` fails when the
+   Dockerfile installs a harness.
    A non-root user `terrarium` whose UID and GID are build args, so files in
    the bind mounts are owned by you on the host. `HOME=/home/terrarium`, with
    `~/.claude`, `~/.codex`, `~/.copilot`, `~/.pi/agent` as symlinks into
@@ -1599,10 +1627,17 @@ Multi-stage, one image:
    `PI_CODING_AGENT_DIR` set to the same paths for harnesses that prefer the
    env var.
 
-`entrypoint.sh`: create missing directories under `/auth` and `/state`, fix
-ownership if the mount is empty, run `copilot-custom-system-prompt install`
-when the extension is missing or the image version changed, then `exec
-terrariumd`.
+`entrypoint.sh`: create missing directories under `/auth`, `/state`,
+`/work`, `/run/terrarium`, and the tools dir; fix ownership if the mount
+is empty; run `terrariumd harness install` (install each missing pin into
+the tools dir, and the Copilot prompt extension when it changed;
+`TERRARIUM_HARNESS_INSTALL=0` skips it; a failure does not stop the
+start); then start `terrariumd` under the supervisor loop. The daemon runs
+the same install step at its own start. An update later changes the
+harness in place through the daemon (`POST /api/harnesses/{name}/update`,
+sysadmin or the operator, audited as `harness.update`). It refuses with
+`409` while agents on that harness run, unless forced. A new image does
+not change the installed harnesses.
 
 ### 23.4 compose.yaml
 
@@ -1631,6 +1666,7 @@ services:
       - ./config/copilot:/auth/copilot
       - ./config/pi:/auth/pi
       - ./state:/state
+      - ./tools:/opt/terrarium/tools         # the harnesses: npm prefix (TERRARIUM_TOOLS_DIR)
       - ./prompts:/prompts:ro
       - ./subscriptions:/etc/terrarium/subscriptions
       - ./projects:/etc/terrarium/projects

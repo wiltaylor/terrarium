@@ -3665,6 +3665,12 @@ async fn admin_harness_update_prints_npm_output_and_the_running_agents_on_failur
     let e = r.result.unwrap_err();
     assert_eq!(exit_code_of(&e), exit::SERVER);
     assert!(r.out.contains("npm error code ETARGET"), "{}", r.out);
+    // The `details:` line keeps only the keys that were not printed.
+    let se = e.downcast_ref::<ServerError>().unwrap();
+    assert_eq!(
+        se.details,
+        Some(json!({"package": "@openai/codex", "version": "99.0.0", "from": "0.164.0"}))
+    );
 
     let r = exec(
         false,
@@ -3677,11 +3683,32 @@ async fn admin_harness_update_prints_npm_output_and_the_running_agents_on_failur
         None,
     )
     .await;
-    assert!(r.result.is_err());
+    let e = r.result.unwrap_err();
     assert!(
         r.out
             .contains("running: terra/worker. Stop them, or add --force"),
         "{}",
         r.out
     );
+    // The agents print once: the `running:` line, with no `details:` line.
+    assert_eq!(r.out.matches("terra/worker").count(), 1, "{}", r.out);
+    let se = e.downcast_ref::<ServerError>().unwrap();
+    assert_eq!(se.code, "conflict");
+    assert_eq!(se.details, None);
+
+    // --json keeps the whole body and prints nothing of its own.
+    let body = json!({"error": {"code": "conflict", "message": "1 agent(s) run on codex",
+        "details": {"running": ["terra/worker"]}}});
+    let r = exec(
+        false,
+        &["--json", "admin", "harness", "update", "codex"],
+        vec![(409, body.clone())],
+        None,
+    )
+    .await;
+    let e = r.result.unwrap_err();
+    let se = e.downcast_ref::<ServerError>().unwrap();
+    assert_eq!(se.body, body);
+    assert!(se.details.is_some());
+    assert!(!r.out.contains("running:"), "{}", r.out);
 }

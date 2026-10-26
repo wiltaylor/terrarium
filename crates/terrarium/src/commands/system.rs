@@ -542,6 +542,11 @@ pub async fn harnesses(ctx: &Ctx, cmd: &HarnessCmd) -> anyhow::Result<()> {
                         && let Some(d) = &se.details
                     {
                         print_failed_update(ctx, d);
+                        // The generic `details:` line must not print the
+                        // same output and names again.
+                        let mut se = se.clone();
+                        se.details = without_printed_details(d);
+                        return Err(se.into());
                     }
                     Err(e)
                 }
@@ -592,6 +597,23 @@ fn print_failed_update(ctx: &Ctx, d: &Value) {
             names.join(", ")
         ));
     }
+}
+
+/// The keys of an update's `details` that [`print_failed_update`] prints.
+const PRINTED_UPDATE_DETAILS: [&str; 3] = ["output", "results", "running"];
+
+/// The `details` of a failed update without the keys that
+/// [`print_failed_update`] printed; `None` when nothing is left.
+fn without_printed_details(d: &Value) -> Option<Value> {
+    let Value::Object(map) = d else {
+        return Some(d.clone());
+    };
+    let rest: serde_json::Map<String, Value> = map
+        .iter()
+        .filter(|(k, _)| !PRINTED_UPDATE_DETAILS.contains(&k.as_str()))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    (!rest.is_empty()).then_some(Value::Object(rest))
 }
 
 /// The harness table, then the policy, then a note for each harness out of

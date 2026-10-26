@@ -332,13 +332,27 @@ added later. The firehose filters events by `visible_to` for a non-sysadmin agen
 (`UPLOAD_BODY_LIMIT`), though most JSON bodies use the axum default limit. SQL is
 clean (F8). The notes are F4 and F5.
 
-**Supply chain and build (axis 8).** The npm global installs pin exact versions
-(`docker/Dockerfile:84`), the dashboard uses `npm ci` with a lockfile (`:25`), the
-harness versions are pinned build args, and the seccomp profile documents its moby
-source commit and SHA-256 (`docker/seccomp-bwrap.README.md`). The Copilot extension
-installs at container start and keys on the image version. `systempaths=unconfined`
-plus the custom seccomp profile are required for bwrap and are documented. This area
-is careful.
+**Supply chain and build (axis 8).** The image holds no harness (since commit
+5cda78a, 2026-10-26). `just ci::check` fails when `docker/Dockerfile` installs one.
+The harnesses and the Copilot prompt extension live in the tools volume (`./tools` at
+`/opt/terrarium/tools`, the npm global prefix). `terrariumd harness install` runs at
+each container start (the entrypoint, then the daemon). It installs each missing
+package at the exact pin in `harnesses.toml` and leaves a present package at its
+version. It writes `tools/terrarium-manifest.json` with the package, version, and
+install time of each one. The Copilot extension installs into the Copilot home when
+its version or the Copilot version changes. An update runs `npm install -g
+<package>@<version>` in place through the daemon (`POST /api/harnesses/{name}/update`,
+`crates/terrariumd/src/harness_tools.rs`). Only a sysadmin or the operator can call it,
+and each call writes the audit row `harness.update` and a `harness` event. Thus npm
+reaches the registry at the first start and at each update, not at the image build:
+the install trusts the registry at that moment (PLAN §21). The pins limit the first
+install, the manifest records what came in, and the version guard warns (or, with
+`TERRARIUM_HARNESS_VERSION_POLICY=refuse`, refuses) an agent start on a version
+outside the tested range. The dashboard uses `npm ci` with a lockfile, the Node image
+is pinned in `harnesses.toml` (`[node] image`) and checked against the Dockerfile
+default, and the seccomp profile documents its moby source commit and SHA-256
+(`docker/seccomp-bwrap.README.md`). `systempaths=unconfined` plus the custom seccomp
+profile are required for bwrap and are documented. This area is careful.
 
 **Logging and privacy (axis 9).** The dry-run and start log redact secret env. The
 audit covers the privileged actions. The residual points are F1 (the agent can edit
@@ -390,6 +404,23 @@ These are known and documented trade-offs. The review confirms they are intentio
   callback cannot reach into the container.
 - **The operator Unix socket needs no token.** Access to the socket is the operator
   boundary (`api/mod.rs:277`). The socket is mode 0660.
+- **The harness tools volume is writable outside the sandbox.** `./tools`
+  (`/opt/terrarium/tools`) is writable by the host user and by the daemon, which runs
+  npm there. Each sandbox binds it read-only (`crates/terrariumd/src/sandbox.rs`), so
+  an agent cannot change a harness. A process with the host user's rights, or a
+  compromise of the daemon, can change every harness; that is the same trust as the
+  `./config` and `./state` mounts.
+- **Harness updates are an operator or sysadmin action.** `POST
+  /api/harnesses/{name}/update` and `POST /api/harnesses/update` need sysadmin or the
+  operator. Each update writes the audit row `harness.update` (`package`, `version`,
+  `from`, `to`, `force`, `ok`, `error`) and a `harness` event. A sysadmin agent can thus pick the version that every agent runs next;
+  that is in the sysadmin role by design.
+- **A running harness keeps its loaded files during an update.** npm replaces the
+  files under `lib/node_modules/` in place. A running harness has its code loaded,
+  but a late `require` in the middle of a turn can read a mix of old and new files.
+  For this reason the daemon refuses an update (`409 conflict`, with the running
+  agents in `details.running`) while an agent on that harness runs, unless the caller
+  sends `force`. A forced update shows `force: true` in the audit row.
 - **Remote `https:` images in agent-written markdown.** The sanitizer keeps them, so
   a wiki page can hold a tracking pixel. The page CSP `img-src` (`'self'`, `data:`,
   and the artifact origin) blocks the load, not the sanitizer. This is accepted
