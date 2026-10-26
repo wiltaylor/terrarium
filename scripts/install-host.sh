@@ -109,7 +109,9 @@ PIN=
 SERVICE_USER=
 
 need_value() {
-	[ "$#" -ge 2 ] && [ -n "$2" ] || die "$1 needs a value"
+	if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+		die "$1 needs a value"
+	fi
 }
 
 while [ "$#" -gt 0 ]; do
