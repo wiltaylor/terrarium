@@ -1084,6 +1084,9 @@ async fn watch(state: Shared, s: Arc<LoginSession>) {
         v.url = None;
         v.device_code = None;
         outcome_into(v, &outcome, timeout);
+        // With the final state, so that a reader never sees a final state
+        // without its end time.
+        v.finished_at = Some(crate::db::now());
     });
     let (id, st) = (row.id.clone(), row.state.clone());
     let detail =
