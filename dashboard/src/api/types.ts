@@ -881,8 +881,8 @@ export interface Subscription {
   default_models?: Partial<Record<Harness, string>>;
 }
 
-/** Where `GET /api/subscriptions/{name}/models` found the list: the provider's `/models`, pi's catalogue, or the default table. */
-export type ModelSource = "provider" | "pi" | "fallback";
+/** Where `GET /api/subscriptions/{name}/models` found the list: the provider's `/models`, the harness login's list, pi's catalogue, or the default table. */
+export type ModelSource = "provider" | "plan" | "pi" | "fallback";
 
 export interface ModelInfo {
   id: string;

@@ -1412,6 +1412,56 @@ a table `provider model context max-out thinking images`; the fixture is
 `crates/terrariumd/tests/fixtures/models/pi_list_zai.txt`. Without the key
 var it prints "No models available".
 
+### Model lists (plan logins)
+
+**Verified live** on 2026-10-26 against the operator's real logins: Claude
+Max (OAuth), ChatGPT Pro (Codex OAuth), and GitHub Copilot Individual (the
+token in `config.json`). Each request is one read-only `GET`, with no model
+turn. No token was printed or stored. The code is
+`crates/terrariumd/src/models/plan.rs` (the `plan` source of `GET
+/api/subscriptions/{name}/models`, docs/api.md §16.3). The sanitised
+answers are the fixtures `anthropic_models.json`, `codex_models.json`, and
+`copilot_models.json` in `crates/terrariumd/tests/fixtures/models/`. The
+credentials come from the same files as the usage probes (above).
+
+| Harness | Request | Filter and order |
+|---|---|---|
+| Claude Code | `GET https://api.anthropic.com/v1/models?limit=1000`, `Authorization: Bearer <claudeAiOauth.accessToken>`, `anthropic-version: 2023-06-01`, `anthropic-beta: oauth-2025-04-20`. A stored Anthropic key sends `x-api-key: <key>` and no beta header. | All rows, in the API order. `has_more: true` reads the next page with `after_id=<last_id>`. |
+| Codex | `GET https://chatgpt.com/backend-api/codex/models?client_version=<codex version>`, `Authorization: Bearer <tokens.access_token>`, `ChatGPT-Account-Id: <tokens.account_id>` | Only `visibility == "list"`, sorted by `priority` (low first). |
+| Copilot | `GET https://api.github.com/copilot_internal/user`, `Authorization: token <GitHub token>`, for `endpoints.api`. Then `GET <endpoints.api>/models`, `Authorization: Bearer <GitHub token>`, `Copilot-Integration-Id: copilot-developer-cli` | Only `model_picker_enabled == true`, `capabilities.type == "chat"`, and `policy.state` not `disabled`. In the API order. |
+
+**Claude Code.** The answer is `200` in Anthropic's list shape: `{data:
+[{type, id, display_name, created_at, max_input_tokens, max_tokens,
+capabilities, ...}], has_more, first_id, last_id}`. It had 14 models, from
+`claude-haiku-5-5`, `claude-sonnet-5-5`, `claude-opus-5-5`, and
+`claude-fable-5-1` to `claude-sonnet-4-5-20250929`, with `has_more: false`.
+The name is `display_name`. The context is `max_input_tokens`.
+
+**Codex.** The answer is `200` `{models: [{slug, display_name,
+visibility, supported_in_api, context_window, priority, ...}]}` with 9 rows.
+Two rows have `visibility: "hide"` (`gpt-reserve` and
+`codex-auto-review`), so the list has 7 models, from `gpt-6.1-sol`
+(priority 1) to `gpt-5.6-luna` (priority 9). The id is `slug`. The context
+is `context_window`. `client_version` is the installed Codex version from
+`GET /api/harnesses`, else the pin in `harnesses.toml`. A Codex
+subscription with an OpenAI API key does not use this request. It uses the
+`provider` source (`https://api.openai.com/v1/models`).
+
+**Copilot.** `endpoints.api` was `https://api.individual.githubcopilot.com`.
+When the user endpoint names no `https://` API, the daemon uses
+`https://api.githubcopilot.com`. The models answer is `200` `{data: [{id,
+name, model_picker_enabled, policy: {state}, capabilities: {type, limits:
+{max_context_window_tokens}}}], object}` with 24 rows. The filter keeps 4:
+`claude-sonnet-4.6`, `gpt-5.3-codex`, `mai-code-1.1-flash`, and
+`claude-haiku-4.5`. It drops `claude-opus-4.8`, because its
+`policy.state` is `disabled`. It also drops the models that are not in the
+picker and the embedding models. The ids have dots. Copilot's `--model`
+takes these ids, so the daemon does not change them.
+
+The token is not in an error note: the daemon replaces each token and the
+account id with `<redacted>`. An expired Claude token (`expiresAt`) fails
+before the request, as for the probe. The daemon never refreshes a token.
+
 ## vmlab workspace attach
 
 vmlab 0.33.3-alpha, 2026-10-25. The question: how does a host agent put an

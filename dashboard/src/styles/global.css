@@ -1600,3 +1600,54 @@ tr.row-open > td {
 .convo-compose-note {
   margin: 0;
 }
+
+/* The model combobox (components/ModelPicker.tsx). */
+.model-picker {
+  position: relative;
+  display: grid;
+  gap: 4px;
+}
+.model-picker > input {
+  width: 100%;
+  color: var(--text);
+}
+.model-picker-pop {
+  position: absolute;
+  top: calc(100% + 2px);
+  left: 0;
+  right: 0;
+  z-index: 50;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow);
+}
+.model-picker-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px 0;
+  max-height: 18rem;
+  overflow-y: auto;
+}
+.model-picker-list > li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 8px;
+  padding: 5px 10px;
+  color: var(--text);
+  cursor: pointer;
+}
+.model-picker-list > li.current {
+  font-weight: 600;
+}
+.model-picker-list > li.active {
+  background: var(--accent-soft);
+}
+.model-picker-ctx {
+  margin-left: auto;
+}
+.model-picker-note {
+  padding: 5px 10px;
+  border-top: 1px solid var(--border);
+}

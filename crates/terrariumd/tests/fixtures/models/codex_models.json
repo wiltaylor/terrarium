@@ -1,0 +1,85 @@
+{
+ "models": [
+  {
+   "slug": "gpt-6.1-sol",
+   "display_name": "GPT-6.1-Sol",
+   "description": "Latest workhorse model for coding and everyday work.",
+   "visibility": "list",
+   "supported_in_api": true,
+   "context_window": 500000,
+   "priority": 1
+  },
+  {
+   "slug": "gpt-6-astra",
+   "display_name": "GPT-6-Astra",
+   "description": "Frontier intelligence for the most demanding work.",
+   "visibility": "list",
+   "supported_in_api": true,
+   "context_window": 272000,
+   "priority": 2
+  },
+  {
+   "slug": "gpt-6-sol",
+   "display_name": "GPT-6-Sol",
+   "description": "Previous generation workhorse model.",
+   "visibility": "list",
+   "supported_in_api": true,
+   "context_window": 272000,
+   "priority": 4
+  },
+  {
+   "slug": "gpt-reserve",
+   "display_name": "GPT-Reserve",
+   "description": "Fast and affordable agentic coding model.",
+   "visibility": "hide",
+   "supported_in_api": true,
+   "context_window": 272000,
+   "priority": 4
+  },
+  {
+   "slug": "gpt-6-luna",
+   "display_name": "GPT-6-Luna",
+   "description": "Fast and affordable model for easier tasks.",
+   "visibility": "list",
+   "supported_in_api": true,
+   "context_window": 272000,
+   "priority": 5
+  },
+  {
+   "slug": "gpt-5.6-sol",
+   "display_name": "GPT-5.6-Sol",
+   "description": "Older generation workhorse model.",
+   "visibility": "list",
+   "supported_in_api": true,
+   "context_window": 272000,
+   "priority": 6
+  },
+  {
+   "slug": "gpt-5.6-terra",
+   "display_name": "GPT-5.6-Terra",
+   "description": "Older balanced model for straightforward work.",
+   "visibility": "list",
+   "supported_in_api": true,
+   "context_window": 272000,
+   "priority": 8
+  },
+  {
+   "slug": "gpt-5.6-luna",
+   "display_name": "GPT-5.6-Luna",
+   "description": "Older fast and efficient model.",
+   "visibility": "list",
+   "supported_in_api": true,
+   "context_window": 272000,
+   "priority": 9
+  },
+  {
+   "slug": "codex-auto-review",
+   "display_name": "Codex Auto Review",
+   "description": "Automatic approval review model for Codex.",
+   "visibility": "hide",
+   "supported_in_api": true,
+   "context_window": 272000,
+   "priority": 43
+  }
+ ]
+}

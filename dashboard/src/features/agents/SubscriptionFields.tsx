@@ -2,10 +2,11 @@
 // the agent page. The logic is in ./subscription.ts.
 
 import { A } from "@solidjs/router";
-import { createResource, createSignal, For, onMount, Show } from "solid-js";
+import { createMemo, createResource, createSignal, For, onMount, Show } from "solid-js";
 import type { Harness } from "../../api/types";
 import { api, subscriptions } from "../../stores";
-import { compatibleSubscriptions, defaultModelFor, modelOptions, modelSelectValue, modelSourceText, OTHER_MODEL, subscriptionOptions } from "./subscription";
+import { ModelPicker } from "../../components/ModelPicker";
+import { compatibleSubscriptions, defaultModelFor, modelSourceText, subscriptionOptions } from "./subscription";
 
 /** The Subscriptions page with the API-key step of the wizard open. */
 export const ADD_API_KEY_HREF = "/subscriptions?add=api_key";
@@ -44,61 +45,43 @@ export function SubscriptionSelect(props: { harness: Harness; value: string; onC
 }
 
 /**
- * The model: a select of the models the subscription can use
- * (`GET /api/subscriptions/{name}/models`), the daemon's default first, and
- * "other…" for free text. Without a subscription, or when the list does not
- * load, a text field.
+ * The model: a searchable combobox of the models the subscription can use
+ * (`GET /api/subscriptions/{name}/models`), the daemon's default first. The
+ * text is the value, so an id that is not in the list stays as typed.
+ * Without a subscription, or when the list does not load, a text field.
  */
 export function ModelField(props: { harness: Harness; subscription: string; value: string; onChange: (model: string) => void }) {
   const sub = () => subscriptions.byName(props.subscription.trim());
   const def = () => defaultModelFor(sub(), props.harness);
   // Each click on Refresh asks the daemon to read the list again.
   const [refreshes, setRefreshes] = createSignal(0);
-  const [list] = createResource(
-    () => (sub() ? ([sub()!.name, refreshes()] as const) : null),
-    ([name, n]) => api.subscriptions.models(name, n > 0 ? { refresh: true } : {}).catch(() => undefined),
-  );
-  const [other, setOther] = createSignal(false);
-  const selected = () => (other() ? OTHER_MODEL : modelSelectValue(props.value, list(), def()));
-  const text = () => (
-    <input
-      aria-label="Model"
-      value={props.value}
-      onInput={(e) => props.onChange(e.currentTarget.value)}
-      placeholder={def() ?? "anthropic/claude-opus-5-5 (pi, codex)"}
-    />
-  );
+  // A string key, so a form change that keeps the subscription does not
+  // load the list again (a new tuple each time would).
+  const key = createMemo(() => (sub() ? JSON.stringify([sub()!.name, refreshes()]) : null));
+  const [list] = createResource(key, (k) => {
+    const [name, n] = JSON.parse(k) as [string, number];
+    return api.subscriptions.models(name, n > 0 ? { refresh: true } : {}).catch(() => undefined);
+  });
   return (
-    <Show when={sub() && list()} fallback={text()}>
-      {(l) => (
-        <>
-          <select
-            aria-label="Model choice"
-            value={selected()}
-            onChange={(e) => {
-              const v = e.currentTarget.value;
-              setOther(v === OTHER_MODEL);
-              if (v !== OTHER_MODEL) props.onChange(v);
-            }}
-          >
-            <For each={modelOptions(l(), def())}>
-              {(o) => (
-                <option value={o.value} selected={o.value === selected()}>
-                  {o.label}
-                </option>
-              )}
-            </For>
-          </select>
-          <Show when={selected() === OTHER_MODEL}>{text()}</Show>
+    <>
+      <ModelPicker
+        value={props.value}
+        onChange={(m) => props.onChange(m)}
+        models={(sub() && list()?.models) || []}
+        defaultModel={def()}
+        placeholder="anthropic/claude-opus-5-5 (pi, codex)"
+      />
+      <Show when={sub() && list()}>
+        {(l) => (
           <span class="muted small">
             {l().models.length} models {modelSourceText(l())}.{" "}
             <button type="button" class="link small" onClick={() => setRefreshes((n) => n + 1)} disabled={list.loading}>
               Refresh
             </button>
           </span>
-        </>
-      )}
-    </Show>
+        )}
+      </Show>
+    </>
   );
 }
 

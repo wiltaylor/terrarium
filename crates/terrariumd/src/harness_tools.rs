@@ -367,7 +367,7 @@ impl ToolsConfig {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        let child = match cmd.spawn() {
+        let child = match spawn_retrying(&mut cmd).await {
             Ok(c) => c,
             Err(e) => {
                 return NpmRun {
@@ -737,6 +737,26 @@ done
 
 /// Write [`FAKE_NPM`] as `<dir>/npm`, executable, and answer its path.
 #[doc(hidden)]
+/// Spawn `cmd`, again up to 4 times on `ETXTBSY`. A program file that was
+/// just written (an npm update, or a test's fake npm) can still be open for
+/// writing in a child that another thread forked and that has not run
+/// `exec` yet; the error goes away within milliseconds.
+async fn spawn_retrying(
+    cmd: &mut tokio::process::Command,
+) -> std::io::Result<tokio::process::Child> {
+    const ETXTBSY: i32 = 26;
+    let mut tries = 0;
+    loop {
+        match cmd.spawn() {
+            Err(e) if e.raw_os_error() == Some(ETXTBSY) && tries < 4 => {
+                tries += 1;
+                tokio::time::sleep(Duration::from_millis(25 * tries)).await;
+            }
+            r => return r,
+        }
+    }
+}
+
 pub fn write_fake_npm(dir: &Path) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let npm = dir.join("npm");

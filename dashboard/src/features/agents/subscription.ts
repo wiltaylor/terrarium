@@ -2,7 +2,7 @@
 // Pure: AgentForm.tsx and the agent page call these.
 
 import type { Api } from "../../api/client";
-import type { Agent, Harness, LoginStatus, ModelInfo, ModelList, Subscription } from "../../api/types";
+import type { Agent, Harness, LoginStatus, ModelList, Subscription } from "../../api/types";
 
 /** The subscriptions whose `harnesses` include `harness`. The daemon refuses a start on any other. */
 export function compatibleSubscriptions(list: Subscription[], harness: Harness): Subscription[] {
@@ -82,44 +82,12 @@ export function subscriptionOptions(list: Subscription[], harness: Harness, curr
   return out;
 }
 
-/** The select value of the "other" choice: the free-text model field. */
-export const OTHER_MODEL = "\u0000other";
-
-/** `1000000` -> `1M`, `204800` -> `204.8K`. */
-export function tokens(n: number): string {
-  if (n >= 1_000_000) return `${+(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `${+(n / 1_000).toFixed(1)}K`;
-  return String(n);
-}
-
-const modelLabel = (m: ModelInfo) => `${m.name && m.name !== m.id ? `${m.id} (${m.name})` : m.id}${m.context ? ` · ${tokens(m.context)} context` : ""}`;
-
-/**
- * The options of the model select: the default first (value `""`, so the
- * daemon keeps choosing it), then the listed models, then "other". With no
- * default, `""` is the harness's own default.
- */
-export function modelOptions(list: ModelList | undefined, def: string | null | undefined): { value: string; label: string }[] {
-  const models = list?.models ?? [];
-  const first = def
-    ? { value: "", label: `${def} (default${list && !models.some((m) => m.id === def) ? ", not in the list" : ""})` }
-    : { value: "", label: "the harness's default" };
-  return [first, ...models.filter((m) => m.id !== def).map((m) => ({ value: m.id, label: modelLabel(m) })), { value: OTHER_MODEL, label: "other…" }];
-}
-
-/** The select value for a model: `""` for none, the id when the list has it, else "other". */
-export function modelSelectValue(model: string, list: ModelList | undefined, def: string | null | undefined): string {
-  const m = model.trim();
-  if (!m) return "";
-  if (m === def) return "";
-  return list?.models.some((x) => x.id === m) ? m : OTHER_MODEL;
-}
-
 /** Where a model list came from, for the hint under the field. */
 export function modelSourceText(list: ModelList): string {
   if (list.source === "provider") return "from the provider's model list";
+  if (list.source === "plan") return "from the harness login's model list";
   if (list.source === "pi") return "from pi's model catalogue";
-  return "from Terrarium's default table (the provider and pi listed none)";
+  return "from Terrarium's default table (the provider, the login, and pi listed none)";
 }
 
 /**

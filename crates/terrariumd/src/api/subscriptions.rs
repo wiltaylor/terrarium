@@ -168,8 +168,8 @@ struct ModelsQuery {
 }
 
 /// `GET /api/subscriptions/{name}/models`: the models the subscription can
-/// use, from the provider, from pi's catalogue, or from the default table
-/// (`crate::models`). Cached for six hours.
+/// use, from the provider, from the harness login, from pi's catalogue, or
+/// from the default table (`crate::models`). Cached for six hours.
 async fn models(
     State(state): State<Shared>,
     actor: Actor,
@@ -191,11 +191,30 @@ async fn models(
         .await?;
     policy::read_subscription_models(&actor, &projects)?;
     let cfg = &state.usage.config;
+    // The Codex list asks for the client version; ask only for a Codex
+    // subscription (the report runs the binaries at most once in 10 min).
+    let codex_version = if sub.harnesses.contains(&HarnessId::Codex) {
+        state
+            .supervisor
+            .harness_versions(false)
+            .await
+            .harnesses
+            .into_iter()
+            .find(|h| h.harness == HarnessId::Codex)
+            .and_then(|h| h.installed)
+    } else {
+        None
+    };
     let src = crate::models::Sources {
         http: cfg.http.as_ref(),
         state_dir: &state.state_dir,
         pi: cfg.program(HarnessId::Pi),
         pi_home: cfg.home(HarnessId::Pi),
+        homes: [HarnessId::Claude, HarnessId::Codex, HarnessId::Copilot]
+            .into_iter()
+            .map(|h| (h, cfg.home(h)))
+            .collect(),
+        codex_version,
     };
     Ok(Json(
         crate::models::list(&state.usage.models, &src, &sub, q.refresh).await,

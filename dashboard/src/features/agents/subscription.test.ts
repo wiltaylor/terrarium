@@ -5,9 +5,7 @@ import {
   changeSubscription,
   compatibleSubscriptions,
   defaultModelFor,
-  modelOptions,
-  modelSelectValue,
-  OTHER_MODEL,
+  modelSourceText,
   reconcileSubscription,
   subscriptionLabel,
   subscriptionOptions,
@@ -81,24 +79,13 @@ describe("subscription choice", () => {
   });
 });
 
-describe("model choice", () => {
-  const list: ModelList = { source: "provider", fetched_at: "", models: [{ id: "glm-4.7", context: 204_800 }, { id: "glm-5.3" }, { id: "glm-5.3-flash", context: 1_000_000 }] };
-
-  it("puts the default first, then the list, then other", () => {
-    const o = modelOptions(list, "glm-5.3-flash");
-    expect(o[0]).toEqual({ value: "", label: "glm-5.3-flash (default)" });
-    expect(o.map((x) => x.value)).toEqual(["", "glm-4.7", "glm-5.3", OTHER_MODEL]);
-    expect(o[1]!.label).toBe("glm-4.7 · 204.8K context");
-    expect(modelOptions(list, "glm-9")[0]!.label).toBe("glm-9 (default, not in the list)");
-    expect(modelOptions(list, undefined)[0]).toEqual({ value: "", label: "the harness's default" });
-  });
-
-  it("selects the default, a listed model, or other", () => {
-    expect(modelSelectValue("", list, "glm-5.3-flash")).toBe("");
-    expect(modelSelectValue("glm-5.3-flash", list, "glm-5.3-flash")).toBe("");
-    expect(modelSelectValue("glm-5.3", list, "glm-5.3-flash")).toBe("glm-5.3");
-    expect(modelSelectValue("my-model", list, "glm-5.3-flash")).toBe(OTHER_MODEL);
-    expect(modelSelectValue("glm-5.3", undefined, undefined)).toBe(OTHER_MODEL);
+describe("model source", () => {
+  it("names each source", () => {
+    const l = (source: ModelList["source"]): ModelList => ({ source, fetched_at: "", models: [] });
+    expect(modelSourceText(l("provider"))).toBe("from the provider's model list");
+    expect(modelSourceText(l("plan"))).toBe("from the harness login's model list");
+    expect(modelSourceText(l("pi"))).toBe("from pi's model catalogue");
+    expect(modelSourceText(l("fallback"))).toMatch(/default table/);
   });
 });
 

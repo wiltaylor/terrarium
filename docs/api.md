@@ -2046,7 +2046,7 @@ keep their card.
  "notes":["GET https://api.z.ai/api/coding/paas/v4/models: status 500"]}
 ```
 
-The daemon tries three sources, in order, and answers with the first list
+The daemon tries four sources, in order, and answers with the first list
 that has a model:
 
 1. `provider`: `GET <base>/models` (the OpenAI list shape) with the stored
@@ -2054,11 +2054,26 @@ that has a model:
    plan's base URL: `coding` `https://api.z.ai/api/coding/paas/v4`, `api`
    `https://api.z.ai/api/paas/v4`), `openai-compatible` (the stored
    `base_url`), `openai`, or `openrouter`. The key stays in the daemon.
-2. `pi`: `pi --offline --list-models <pi provider>`, pi's own catalogue. For
+2. `plan`: the model list of the harness login, with the credential of the
+   shared harness home. The usage probes read the same credentials.
+   - `anthropic` with `claude` in `harnesses`, or with a stored Anthropic
+     key: Anthropic's `GET /v1/models`, with the OAuth token, or with the
+     key in `x-api-key`. The API order stays.
+   - `openai` with `codex` in `harnesses` and no stored key: the ChatGPT
+     plan's Codex model list. Only the models that Codex shows, by
+     priority.
+   - `github` with `copilot` in `harnesses`: Copilot's `GET /models`, with
+     the stored token or the Copilot login. Only the chat models of the
+     model picker that the policy does not disable. The ids keep their
+     dots (`claude-sonnet-4.6`), as Copilot's `--model` takes them.
+
+   The token stays in the daemon. `docs/compat.md`, "Model lists (plan
+   logins)", records the requests.
+3. `pi`: `pi --offline --list-models <pi provider>`, pi's own catalogue. For
    an API key, pi runs in an empty pi dir with a placeholder in the key env
    var (`--offline` sends no request); for a plan login, in the shared pi
    home.
-3. `fallback`: the values of `default_models` (§16.1).
+4. `fallback`: the values of `default_models` (§16.1).
 
 `notes` (absent when empty) says why an earlier source gave no list.
 `name` and `context` (tokens) are in a model only when the source gives

@@ -294,21 +294,36 @@ pub struct ProbeOutcome {
     pub windows: Vec<QuotaWindow>,
 }
 
-/// The credential for a subscription's probe: a stored API key when the
-/// probe takes one, else the shared harness home.
+/// The credential of `probe` for `subscription`: a stored API key when the
+/// probe takes one, else the shared harness home `home`. This blocks (file
+/// reads). The model lists (`crate::models`) use it too.
+pub fn read_credentials(
+    probe: &dyn QuotaProbe,
+    state_dir: &Path,
+    subscription: &str,
+    home: &Path,
+) -> Result<Credentials, ProbeError> {
+    if probe.accepts_api_key()
+        && let Some(key) = crate::login_session::stored_key(state_dir, subscription)
+    {
+        return Ok(Credentials::new(key));
+    }
+    probe.credentials(home)
+}
+
+/// The credential for a subscription's probe, off the async threads.
 async fn credentials_for(
     state: &Shared,
     probe: &Arc<dyn QuotaProbe>,
     subscription: &str,
 ) -> Result<Credentials, ProbeError> {
-    if probe.accepts_api_key()
-        && let Some(key) = crate::login_session::stored_key(&state.state_dir, subscription)
-    {
-        return Ok(Credentials::new(key));
-    }
     let home = state.usage.config.home(probe.harness());
-    let p = probe.clone();
-    tokio::task::spawn_blocking(move || p.credentials(&home))
+    let (p, dir, name) = (
+        probe.clone(),
+        state.state_dir.clone(),
+        subscription.to_owned(),
+    );
+    tokio::task::spawn_blocking(move || read_credentials(p.as_ref(), &dir, &name, &home))
         .await
         .map_err(|e| ProbeError::NoCredential(format!("credential task failed: {e}")))?
 }

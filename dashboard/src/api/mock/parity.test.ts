@@ -1409,7 +1409,11 @@ describe("schedules (docs/api.md §19, the daemon's api/schedules.rs)", () => {
     const pi = await api.subscriptions.models("openrouter-key", { refresh: true });
     expect(pi.source).toBe("pi");
     expect(pi.models[0]).toHaveProperty("context");
-    const fb = await api.subscriptions.models("copilot-pro");
+    const plan = await api.subscriptions.models("copilot-pro");
+    expect(plan.source).toBe("plan");
+    expect(plan.models.map((m) => m.id)).toContain("claude-sonnet-4.6");
+    expect((await api.subscriptions.models("chatgpt-pro")).source).toBe("plan");
+    const fb = await api.subscriptions.models("gemini");
     expect(fb.source).toBe("fallback");
     expect(fb.notes?.length).toBeGreaterThan(0);
     await expect(api.subscriptions.models("nope")).rejects.toMatchObject({ status: 404 });

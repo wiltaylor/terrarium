@@ -8,12 +8,19 @@
 //!    subscription whose provider has such an endpoint ([`openai_base`]).
 //!    The key stays in the daemon: it is not returned, not logged, and not
 //!    in an error text.
-//! 2. `pi`: `pi --offline --list-models <pi provider>`. pi ships its own
+//! 2. `plan`: the model list of a harness login, read with the login's own
+//!    credential from the shared harness home ([`plan`]): Claude Code
+//!    (`api.anthropic.com/v1/models` with the OAuth token, or with a stored
+//!    Anthropic key), Codex (`chatgpt.com/backend-api/codex/models` with the
+//!    ChatGPT login), and Copilot (`<endpoints.api>/models` with the GitHub
+//!    token). Verified live 2026-10-26 (`docs/compat.md`, "Model lists
+//!    (plan logins)"). The token stays in the daemon, as for `provider`.
+//! 3. `pi`: `pi --offline --list-models <pi provider>`. pi ships its own
 //!    catalogue, which a harness update brings up to date. pi lists only the
 //!    providers that have a credential, so the command runs in an empty pi
 //!    dir with a placeholder in the key env var (never the key: `--offline`
 //!    sends no request). A plan login (OAuth) uses the shared pi home.
-//! 3. `fallback`: the default models of the adapters
+//! 4. `fallback`: the default models of the adapters
 //!    ([`default_models`]).
 //!
 //! A list is cached for [`CACHE_TTL`] per subscription; `?refresh=true`
@@ -31,6 +38,8 @@ use tokio::process::Command;
 use crate::login_session::{self as login, ApiKey};
 use crate::probes::{HttpGet, HttpRequest};
 use crate::store::subscriptions::Subscription;
+
+pub mod plan;
 
 /// How long a model list stays fresh.
 pub const CACHE_TTL: Duration = Duration::from_secs(6 * 3600);
@@ -68,6 +77,7 @@ impl ModelInfo {
 #[serde(rename_all = "lowercase")]
 pub enum ModelSource {
     Provider,
+    Plan,
     Pi,
     Fallback,
 }
@@ -140,6 +150,12 @@ pub struct Sources<'a> {
     pub pi: String,
     /// The shared pi home, for a plan login.
     pub pi_home: PathBuf,
+    /// The shared harness homes, for the `plan` source. A missing one is
+    /// `/auth/<harness>`.
+    pub homes: HashMap<HarnessId, PathBuf>,
+    /// The installed Codex version, for `client_version` of the Codex list.
+    /// `None`: the pin of `harnesses.toml`.
+    pub codex_version: Option<String>,
 }
 
 /// The model list of a subscription, from the cache unless `refresh`.
@@ -170,6 +186,12 @@ pub async fn fetch(src: &Sources<'_>, sub: &Subscription) -> ModelList {
             Ok(_) => notes.push(format!("{base}/models listed no model")),
             Err(e) => notes.push(e),
         }
+    }
+    match plan::fetch(src, sub, key.as_ref()).await {
+        Some(Ok(models)) if !models.is_empty() => return done(models, ModelSource::Plan, notes),
+        Some(Ok(_)) => notes.push("the plan login listed no model".into()),
+        Some(Err(e)) => notes.push(e),
+        None => {}
     }
     let def = crate::runner_supervisor::sub_def(sub);
     if let Some(provider) = terrarium_adapter_pi::provider_for(&def) {
@@ -465,6 +487,210 @@ zai-api   glm-5.3            1M       131.1K   yes       no    \n";
             None
         );
         assert_eq!(openai_base(&sub("xai", None), &key(None)), None);
+    }
+
+    mod sources {
+        use super::*;
+        use crate::probes::HttpResponse;
+        use crate::probes::tests::FakeHttp;
+        use crate::supervisor::BoxFuture;
+
+        /// Fails each request with its header values in the error text, as
+        /// a careless HTTP client could.
+        struct EchoHttp;
+
+        impl HttpGet for EchoHttp {
+            fn get(&self, req: HttpRequest) -> BoxFuture<'_, Result<HttpResponse, String>> {
+                let all: Vec<String> = req.headers.into_iter().map(|(_, v)| v).collect();
+                Box::pin(async move { Err(format!("refused: {}", all.join(" "))) })
+            }
+        }
+
+        const CLAUDE: &str = include_str!("../tests/fixtures/models/anthropic_models.json");
+        const CODEX: &str = include_str!("../tests/fixtures/models/codex_models.json");
+        const SECRET: &str = "tok-secret-123";
+
+        fn sub(provider: &str, h: HarnessId) -> Subscription {
+            Subscription {
+                name: "s".into(),
+                provider: provider.into(),
+                plan: None,
+                harnesses: vec![h],
+                probe: None,
+                alert_at: 80,
+                source: "api".into(),
+                env_var: None,
+                login_status: "logged_in".into(),
+                verified_at: None,
+                probe_status: "none".into(),
+                probe_error: None,
+                last_probe_at: None,
+                last_success_at: None,
+                created_at: String::new(),
+                updated_at: String::new(),
+            }
+        }
+
+        struct Env {
+            state: tempfile::TempDir,
+            home: tempfile::TempDir,
+        }
+
+        impl Env {
+            fn new() -> Self {
+                let e = Self {
+                    state: tempfile::tempdir().unwrap(),
+                    home: tempfile::tempdir().unwrap(),
+                };
+                std::fs::write(
+                    e.home.path().join(".credentials.json"),
+                    format!(r#"{{"claudeAiOauth":{{"accessToken":"{SECRET}","expiresAt":4102444800000}}}}"#),
+                )
+                .unwrap();
+                std::fs::write(
+                    e.home.path().join("auth.json"),
+                    format!(r#"{{"tokens":{{"access_token":"{SECRET}","account_id":"acct-9"}}}}"#),
+                )
+                .unwrap();
+                e
+            }
+
+            fn src<'a>(&'a self, http: &'a dyn HttpGet, codex: Option<&str>) -> Sources<'a> {
+                Sources {
+                    http,
+                    state_dir: self.state.path(),
+                    pi: "/nonexistent/pi".into(),
+                    pi_home: self.home.path().into(),
+                    homes: [HarnessId::Claude, HarnessId::Codex, HarnessId::Copilot]
+                        .into_iter()
+                        .map(|h| (h, self.home.path().to_owned()))
+                        .collect(),
+                    codex_version: codex.map(str::to_owned),
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn a_claude_login_lists_from_the_plan() {
+            let env = Env::new();
+            let http = FakeHttp::with(
+                &format!("{}?limit=1000", plan::ANTHROPIC_MODELS),
+                200,
+                CLAUDE,
+            );
+            let l = fetch(&env.src(&http, None), &sub("anthropic", HarnessId::Claude)).await;
+            assert_eq!(l.source, ModelSource::Plan);
+            assert_eq!(l.models.len(), 14);
+            assert!(l.notes.is_empty(), "{:?}", l.notes);
+            let seen = http.seen.lock().unwrap();
+            assert!(
+                seen[0]
+                    .headers
+                    .iter()
+                    .any(|(k, v)| k == "Authorization" && v == &format!("Bearer {SECRET}"))
+            );
+        }
+
+        #[tokio::test]
+        async fn a_refused_plan_falls_back_with_a_note() {
+            let env = Env::new();
+            let http = FakeHttp::with(&format!("{}?limit=1000", plan::ANTHROPIC_MODELS), 401, "{}");
+            let l = fetch(&env.src(&http, None), &sub("anthropic", HarnessId::Claude)).await;
+            assert_eq!(l.source, ModelSource::Fallback);
+            assert!(l.notes[0].contains("status 401"), "{:?}", l.notes);
+            assert!(l.notes.iter().all(|n| !n.contains(SECRET)));
+        }
+
+        #[tokio::test]
+        async fn no_token_in_the_notes() {
+            let env = Env::new();
+            for (provider, h) in [
+                ("anthropic", HarnessId::Claude),
+                ("openai", HarnessId::Codex),
+            ] {
+                let l = fetch(&env.src(&EchoHttp, None), &sub(provider, h)).await;
+                assert_eq!(l.source, ModelSource::Fallback);
+                assert!(l.notes[0].contains("<redacted>"), "{:?}", l.notes);
+                assert!(
+                    l.notes
+                        .iter()
+                        .all(|n| !n.contains(SECRET) && !n.contains("acct-9")),
+                    "{:?}",
+                    l.notes
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn codex_asks_with_the_installed_version_else_the_pin() {
+            let env = Env::new();
+            let url = |v: &str| format!("{}?client_version={v}", plan::CODEX_MODELS);
+            let http = FakeHttp::with(&url("0.165.2"), 200, CODEX);
+            let l = fetch(
+                &env.src(&http, Some("0.165.2")),
+                &sub("openai", HarnessId::Codex),
+            )
+            .await;
+            assert_eq!(l.source, ModelSource::Plan);
+            assert_eq!(l.models[0].id, "gpt-6.1-sol");
+            assert!(
+                http.seen.lock().unwrap()[0]
+                    .headers
+                    .iter()
+                    .any(|(k, v)| k == "ChatGPT-Account-Id" && v == "acct-9")
+            );
+            let pin = terrarium_core::harnesses::pin(HarnessId::Codex).version;
+            let http = FakeHttp::with(&url(pin), 200, CODEX);
+            let l = fetch(&env.src(&http, None), &sub("openai", HarnessId::Codex)).await;
+            assert_eq!(l.source, ModelSource::Plan);
+        }
+
+        #[tokio::test]
+        async fn a_key_goes_to_the_provider_first() {
+            let env = Env::new();
+            let key = ApiKey {
+                provider: "openai".into(),
+                key: SECRET.into(),
+                plan: None,
+                base_url: None,
+                models: vec![],
+            };
+            login::store_key(env.state.path(), "s", &key).unwrap();
+            let http = FakeHttp::with(
+                "https://api.openai.com/v1/models",
+                200,
+                r#"{"data":[{"id":"gpt-6-luna"}]}"#,
+            );
+            let l = fetch(&env.src(&http, None), &sub("openai", HarnessId::Codex)).await;
+            assert_eq!(l.source, ModelSource::Provider);
+            // A failed provider with a key does not try the ChatGPT login.
+            let http = FakeHttp::default();
+            let l = fetch(&env.src(&http, None), &sub("openai", HarnessId::Codex)).await;
+            assert_eq!(l.source, ModelSource::Fallback);
+            assert!(
+                http.seen
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .all(|r| !r.url.starts_with(plan::CODEX_MODELS))
+            );
+            // An Anthropic key lists Anthropic's models with x-api-key.
+            let http = FakeHttp::with(
+                &format!("{}?limit=1000", plan::ANTHROPIC_MODELS),
+                200,
+                CLAUDE,
+            );
+            let l = fetch(&env.src(&http, None), &sub("anthropic", HarnessId::Claude)).await;
+            assert_eq!(l.source, ModelSource::Plan);
+            let seen = http.seen.lock().unwrap();
+            assert!(
+                seen[0]
+                    .headers
+                    .iter()
+                    .any(|(k, v)| k == "x-api-key" && v == SECRET)
+            );
+            assert!(!seen[0].headers.iter().any(|(k, _)| k == "Authorization"));
+        }
     }
 
     #[test]
