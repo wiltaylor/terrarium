@@ -1,0 +1,6 @@
+{
+  "action": "opened",
+  "issue": {"number": 7, "title": "The build is slow", "html_url": "https://github.com/octo-org/hello-world/issues/7", "user": {"login": "mona"}},
+  "repository": {"id": 1296269, "name": "hello-world", "full_name": "octo-org/hello-world", "private": false, "html_url": "https://github.com/octo-org/hello-world", "default_branch": "main", "owner": {"login": "octo-org", "id": 6811672, "type": "Organization"}},
+  "sender": {"login": "octocat", "id": 1, "type": "User"}
+}

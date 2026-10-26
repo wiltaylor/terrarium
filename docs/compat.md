@@ -1477,3 +1477,110 @@ All with a scratch lab (`lab "mode1-exp"`, one `container "box"`,
   exit 5 until vmlab keys a lab instance by its directory. The code makes
   one instance dir for each holder already (`<target>.<agent ULID>`), and
   does not rename the lab.
+
+## Webhooks (GitHub, Forgejo)
+
+The ingest listener (docs/api.md §20) reads webhooks from GitHub and
+Forgejo. `crates/terrarium-core/src/ci.rs` turns them into events. The
+facts below come from the source and the docs on 2026-10-26, not from a
+live delivery. The fixtures in `crates/terrarium-core/tests/fixtures/ci/`
+are not recorded deliveries. We wrote them from the payload structs and
+the documented examples, and we trimmed them. A field that we could not
+confirm is not in them.
+
+### Sources
+
+| What | Version | Where |
+|---|---|---|
+| Forgejo source | `forgejo` branch at `627f15a` (2026-10-26); tag `v17.0.0` (2026-10-15); branches `v16.0/forgejo` and `v15.0/forgejo` | <https://codeberg.org/forgejo/forgejo>: `services/webhook/shared/payloader.go`, `modules/webhook/type.go`, `modules/structs/hook.go`, `modules/structs/action.go`, `services/convert/action.go`, `services/actions/run.go`, `models/actions/run.go`, `models/actions/status.go`, `services/actions/commit_status.go`, `routers/web/repo/setting/webhook.go` |
+| Forgejo release notes | 17.0.0 | `release-notes-published/17.0.0.md`: PR #14334 (webhooks for workflow jobs), #14351 (fine-grained workflow run events), #14356 (the `action_run_*` events are deprecated), #14504 (no `repository` in the job payload) |
+| GitHub docs | 2026-10-26 | <https://docs.github.com/en/webhooks/webhook-events-and-payloads>, <https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries>, and the `webhook-*` schemas in `github/rest-api-description` |
+| Gitea source, for comparison | `release/v1.23`, `v1.24`, `v1.25` | `modules/webhook/type.go` |
+
+### Headers
+
+| Header | GitHub | Forgejo |
+|---|---|---|
+| Event | `X-GitHub-Event` | `X-Forgejo-Event`, `X-Gitea-Event`, `X-Gogs-Event`, and also `X-GitHub-Event`. The value is the event, for example `pull_request`. |
+| Event type | none | `X-Forgejo-Event-Type` (and the Gitea, Gogs, and GitHub names): the raw type, for example `pull_request_sync`. Terrarium reads the event, not the type. |
+| Delivery ID | `X-GitHub-Delivery`, a GUID | `X-Forgejo-Delivery` (and the other names), a UUID (`models/webhook/hooktask.go`) |
+| Signature | `X-Hub-Signature-256: sha256=<hex>`, only when a secret is set | `X-Forgejo-Signature`, `X-Gitea-Signature`, `X-Gogs-Signature`: the hex with no prefix. Forgejo also sends `X-Hub-Signature-256: sha256=<hex>` and `X-Hub-Signature: sha1=<hex>`. With an empty secret, Forgejo still sends the headers: an empty string, and `sha256=`. |
+
+The signature is the HMAC-SHA256 of the body with the secret. The unit
+test `ingest::tests::signatures_per_provider` checks the GitHub example
+of "validating webhook deliveries" (secret `It's a Secret to Everybody`,
+body `Hello, World!`).
+
+**Content type.** Both forges can post `application/json` or
+`application/x-www-form-urlencoded` with the JSON in the form field
+`payload`. Forgejo signs the JSON string, not the form body
+(`services/webhook/default.go`). For GitHub we did not confirm which bytes
+it signs for a form body. Terrarium takes `application/json` only, and
+answers `415` to a form body.
+
+### Run and job events
+
+| Forge | Events | Payload |
+|---|---|---|
+| GitHub | `workflow_run`: `action` is `requested`, `in_progress`, or `completed`. `workflow_job`: `queued`, `in_progress`, `completed`, or `waiting`. | `workflow_run.{id, name, head_branch, head_sha, run_attempt, html_url, status, conclusion, display_title, event, pull_requests}`; `workflow_job.{id, run_id, name, workflow_name, head_branch, head_sha, run_attempt, html_url, conclusion}`. The run conclusions: `action_required`, `cancelled`, `failure`, `neutral`, `skipped`, `stale`, `success`, `timed_out`, `startup_failure`. |
+| Forgejo 17 | One event for each status, the same in the event header and the type: `workflow_run_{blocked,cancelled,failure,running,skipped,success,waiting}` and `workflow_job_{...}` with the same statuses. There is no plain `workflow_run` or `workflow_job` event. | `WorkflowRunPayload {action, run}`: `action` is `new_run_attempt`, `run_status_changed`, or `run_completed`. `WorkflowJobPayload {action, job, run}`: `new_job_attempt`, `job_status_changed`, or `job_completed`. `run` is an `ActionRun`: `id`, `title`, `repository`, `workflow_id` (the file name, for example `ci.yml`), `index_in_repo`, `trigger_user`, `prettyref`, `commit_sha`, `event`, `event_payload` (the whole trigger payload as a string), `trigger_event`, `status`, `started`, `stopped`, `created`, `updated`, `duration`, `html_url`. `job` is an `ActionRunJob`: `id`, `run_id`, `attempt`, `name`, `html_url`, `needs`, `runs_on`, `task_id`, `status`. |
+| Forgejo 12 to 16 (17 too, deprecated, to be removed after 19) | `action_run_failure`, `action_run_success`, and on 12 to 16 `action_run_recover` | `ActionPayload {action, run, prior_status}`: `action` is `failure`, `recover`, or `success`. |
+
+Facts that change the mapping:
+
+- **Forgejo has no conclusion field.** The status is in the event name and
+  in `run.status`: `unknown`, `waiting`, `running`, `success`, `failure`,
+  `cancelled`, `skipped`, `blocked`.
+- **Forgejo sends one run event for each change, not two.**
+  `services/actions/run.go` calls `WorkflowRunStatusChanged` while the run
+  is not done and `WorkflowRunCompleted` when it is. So the event name
+  alone decides the kind.
+- **`prettyref` is not always a branch.** For a pull request run it is
+  `#<number>` (`ActionRun.PrettyRef` in `models/actions/run.go`). Terrarium
+  then sets `branch` to `null` and `pr.number` to the number.
+- **Forgejo has no `head_branch`, `head_sha`, `run_attempt`, or
+  `display_title`.** Terrarium uses `prettyref`, `commit_sha`, the job's
+  `attempt`, and `title`.
+- **Not confirmed:** how `started` and `stopped` serialise (they are
+  `optional.Option[time.Time]`). Terrarium does not read them.
+
+### Commit status
+
+GitHub sends `status` (`state`: `pending`, `success`, `failure`,
+`error`; fields `sha`, `context`, `description`, `target_url`,
+`branches`, `commit`). Gitea sends `status` from 1.23.
+
+**Forgejo does not send a `status` webhook.** There is no such event in
+`HookEventType` on the `forgejo` branch, `v17.0.0`, v16, or v15. Forgejo
+Actions does set commit statuses (`services/actions/commit_status.go`,
+context `<workflow> / <job> (<event>)`, states `pending`, `success`,
+`error`, `failure`, `warning`, `skipped`), but they fire no webhook. Use
+the workflow run and job events instead.
+
+### Push and pull request
+
+| Field | GitHub | Forgejo |
+|---|---|---|
+| Compare link | `compare` | `compare_url` |
+| Pusher | `pusher {name, email}` | `pusher`, a full user (`login`) |
+| Commit count | `commits` (the list) | `commits` and `total_commits` |
+| Push to a pull request | `action: synchronize` | `action: synchronized`, event `pull_request`, type `pull_request_sync` |
+| Merge | `action: closed` with `pull_request.merged: true` | the same (`services/webhook/notifier.go`) |
+
+### Ping and test delivery
+
+GitHub sends `ping` (`zen`, `hook_id`, `hook`) when you make a webhook.
+Forgejo has no ping. Its "Test delivery" sends a `push` event: a
+`PushPayload` of the head of the default branch with `before` equal to
+`after` (`WebhookTest` in `routers/web/repo/setting/webhook.go`). An empty
+repository gets a fake commit with the message "This is a fake commit".
+
+### Not tested
+
+- No live delivery from GitHub or Forgejo. The next step is one
+  delivery of each kind to a running stack, and the recorded bodies as
+  new fixtures.
+- Gitea's own `workflow_run` and `workflow_job` events (1.24 and 1.25)
+  follow the GitHub shape. A `forgejo` source that is really a Gitea
+  server would send them with `X-Gitea-Event: workflow_run`; Terrarium
+  makes `ext.forgejo.workflow_run` from them today.

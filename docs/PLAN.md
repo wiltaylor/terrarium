@@ -760,6 +760,101 @@ wake a stopped worker. `docs/api.md` §19 is the contract.
 
 ---
 
+## 12c. Events and triggers
+
+An event source sends events into the log, and a trigger runs an action
+when an event matches. The first use is CI: a failed run on GitHub or
+Forgejo mails the agent that the project names, so the agent can fix it.
+`docs/api.md` §19 (triggers) and §20 (event sources) are the contract.
+Asked for on 2026-10-26.
+
+- **The event log is the bus.** An external event is one more row in
+  `events` (§17), with the same `seq`, streams, and dashboard. A trigger
+  engine reads the log from `trigger_cursor` (migration 20), not only the
+  live hub, so a restart or a lagged hub does not lose an event. At a start
+  the engine applies `catch_up` of each trigger: `skip` ignores the events
+  from while the daemon was down, `once` runs them.
+- **Event sources.** A source is one webhook sender: `github`, `forgejo`,
+  or `generic`. It belongs to a project (a project_admin manages it) or is
+  global (a sysadmin). The daemon makes a random secret; the API shows it
+  one time, at create and at rotate. Migration 21.
+- **The ingest listener.** A second listener on `TERRARIUM_INGEST_ADDR`
+  (compose: port `${TERRARIUM_INGEST_PORT:-8083}`; 8081 is the artifact
+  origin) serves only
+  `POST /hooks/{project}/{source}` (`_` for a global source) and
+  `GET /healthz`. The dashboard and API are not on it, so the operator can
+  expose this port to GitHub without the API. The body limit is 1 MiB.
+  - `github`: HMAC-SHA256 of the body in `X-Hub-Signature-256:
+    sha256=<hex>`; `X-GitHub-Event`; `X-GitHub-Delivery`.
+  - `forgejo`: HMAC-SHA256 hex in `X-Forgejo-Signature` (or
+    `X-Gitea-Signature`); `X-Forgejo-Event` / `X-Gitea-Event`; the
+    delivery id from `X-Forgejo-Delivery` / `X-Gitea-Delivery`.
+  - `generic`: `X-Terrarium-Signature: sha256=<hex>` or `Authorization:
+    Bearer <secret>`; the body is `{kind, summary?, data}`.
+  - The compare is constant-time. A bad or missing signature, an unknown
+    or disabled source: 401 with no detail. A delivery id seen before:
+    200 `duplicate`. A ping: 200 `pong`, no event.
+- **Standard CI events.** `terrarium-core` turns a webhook into one event
+  (pure functions, tested on recorded payloads):
+  - `ci.run.started`, `ci.run.succeeded`, `ci.run.failed`,
+    `ci.run.cancelled`, `ci.run.completed` (other conclusions), and
+    `ci.job.failed`, from GitHub `workflow_run` / `workflow_job` and from
+    the Forgejo run and job events (`workflow_run_<status>` and
+    `workflow_job_<status>` in Forgejo 17, `action_run_*` in 12 to 16).
+    Forgejo sends no webhook for a commit status (docs/compat.md).
+  - `git.push`, and `pr.opened`, `pr.closed`, `pr.merged`, `pr.updated`.
+  - Any other webhook: `ext.<provider>.<event>` with its `action`.
+  - `data`: `source`, `provider`, `repo` (`owner/name`), `repo_url`,
+    `branch`, `commit`, `run_id`, `run_url`, `workflow`, `job`,
+    `conclusion`, `attempt`, `sender`, and `pr` when there is one. The
+    actor is `source:<scope>/<name>`; the project is the source's project.
+  - Webhook text (branch names, commit messages, PR titles) comes from
+    whoever can push. A valid signature proves the forge sent it, not that
+    the text is safe. The daemon never puts it in a shell, and a mail
+    shows it as quoted data.
+- **Emit from the API.** `POST /api/events` and `terrarium event emit
+  <kind>`: the operator emits any kind; an agent emits into its own project
+  only, and not the daemon's own kinds (`status`, `mail`, `card`, ...).
+- **Triggers.** A trigger is a schedule (§12b) with the spec `on`: the
+  same table, rights (`run_as`, the check again before each run, 3 refused
+  runs disable it), run history, project file, and fleet. The spec:
+  - `kinds`: globs, for example `["ci.run.failed", "ci.job.*"]`.
+  - `match`: zero or more `{path, op, value}`. `path` is `project`,
+    `kind`, `actor`, or `data.<dotted path>`; `op` is `eq`, `ne`, `glob`,
+    or `in`.
+  - `dedupe`: `{key, window}`. One run per rendered key in the window,
+    for example `{{event.data.repo}}:{{event.data.branch}}` in `10m`.
+  - `escalate`: `{key, after, reset_on, to}`. After `after` matches in a
+    row for one key, the trigger does not run its action. It mails `to`
+    (default `operator`) one time with the event. An event that matches
+    `reset_on` (globs, for example `ci.run.succeeded`) with the same key
+    sets the count to zero.
+  - A project trigger sees only the events of its project. A global
+    trigger (sysadmin) sees all.
+- **Trigger actions.** `mail` (the way to notify an agent: no `turn`
+  action on a trigger), `exec` on a target (the way to run a script), and
+  `card` (`open` a card, or comment on the open card with the same `key`;
+  `close` it). Strings in the action can use `{{event.kind}}`,
+  `{{event.summary}}`, `{{event.project}}`, `{{event.seq}}`, and
+  `{{event.data.<path>}}`; a missing value is empty. An exec `cmd` is an
+  argv, so a value from an event is one argument and never shell text.
+- **Who gets the event.** The project decides: each trigger names its
+  `to` (an agent, `project:<name>`, or `operator`). There is no default
+  owner.
+- **Guards.** A trigger runs at most `max_per_hour` times (default 30);
+  more matches are `skipped: rate limit`. A trigger does not match an event
+  that its own runs made (the run's actor is `schedule:<id>`), and an
+  event chain stops at depth 4. One project has at most
+  `TERRARIUM_MAX_SCHEDULES_PER_PROJECT` schedules and triggers together.
+- **Dashboard.** The Schedules page has two tabs: Schedules (time) and
+  Triggers. The Triggers tab lists the triggers with their runs and the
+  event that started each run, and manages the event sources: create
+  shows the secret one time, the hook URL
+  (`TERRARIUM_INGEST_PUBLIC_URL` + path), and the setup steps for GitHub
+  and Forgejo.
+
+---
+
 ## 13. Kanban board
 
 One board per project. The operator and every agent in the project share it.

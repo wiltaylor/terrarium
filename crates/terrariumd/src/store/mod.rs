@@ -6,6 +6,7 @@ pub mod agents;
 pub mod artifacts;
 pub mod audit;
 pub mod board;
+pub mod event_sources;
 pub mod hosts;
 pub mod leases;
 pub mod mail;

@@ -5,6 +5,7 @@
 //! the CLI, the host agent, and the adapters all depend on it.
 
 pub mod adapter;
+pub mod ci;
 pub mod config;
 pub mod error;
 pub mod event;
@@ -21,6 +22,7 @@ pub mod role;
 pub mod schedule;
 pub mod status;
 pub mod tail;
+pub mod template;
 pub mod transcript;
 pub mod zai;
 

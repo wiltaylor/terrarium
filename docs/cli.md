@@ -384,21 +384,28 @@ terrarium fleet export <project> [--name n] [-o file]
 ### Schedules
 
 `schedule` has the alias `schedules`. A schedule runs one action on a
-cron expression, an interval, or one time. It runs as the actor that made
-it, and the daemon checks that actor's rights again at each run
-([api.md §19](api.md#19-schedules)).
+cron expression, an interval, or one time. A trigger is a schedule that
+runs its action when an event of the log matches (`--on`). A schedule runs
+as the actor that made it, and the daemon checks that actor's rights again
+at each run ([api.md §19](api.md#19-schedules)).
 
 ```
-terrarium schedule ls [--project p] [--all] [--enabled | --disabled]
+terrarium schedule ls [--project p] [--all] [--enabled | --disabled] [--triggers | --time]
 terrarium schedule show <id|project/name>
-terrarium schedule new <name> (--cron "*/15 * * * *" [--tz Europe/London] | --every 30m | --at <time|+2h>)
+terrarium schedule new <name> (--cron "*/15 * * * *" [--tz Europe/London] | --every 30m | --at <time|+2h>
+                        | --on <kind,...> [--match RULE]... [--dedupe KEY/WINDOW]
+                          [--escalate KEY --escalate-after N [--escalate-to TO] [--reset-on KIND,...]]
+                          [--max-per-hour N]
+                        | --spec-json '<json>')
                        (--mail <to> [-s subject] --body <text|-> [--thread T]
                         | --turn <agent> --text <text|-> [--start-if-stopped]
                         | --exec <target> [--cwd dir] [--timeout s] -- <cmd...>
                         | --agent <agent> --verb start|stop|restart
-                        | --probe <subscription>)
+                        | --probe <subscription>
+                        | --card open|close --key KEY [--title T] [--body <text|->] [--column C]
+                        | --action-json '<json>')
                        [--project p | --global] [--catch-up skip|once] [--disabled]
-terrarium schedule set <id> [--rename n] [a new time] [a new action] [--catch-up c] [--enabled | --disabled]
+terrarium schedule set <id> [--rename n] [a new time or trigger] [a new action] [--catch-up c] [--enabled | --disabled]
 terrarium schedule rm <id>
 terrarium schedule run <id>                   run now; prints the run; exit 1 when it failed
 terrarium schedule enable|disable <id>
@@ -417,6 +424,73 @@ terrarium schedule runs <id> [--limit 20]     newest first
   subscription that the project uses. A member reads only.
 - `schedule run` prints the run line, and the tail of stdout and stderr of
   an exec.
+- `--card open` makes a card on the project's board, or adds a comment to
+  the open card with the same `--key`. `--card close` moves that card to
+  `done`. A card action needs a project schedule.
+
+**Triggers.** `--on` makes a trigger: each event of a kind in the list
+(globs, for example `ci.job.*`) that passes every `--match` rule starts a
+run. A trigger runs only `--mail`, `--exec`, or `--card`. To notify an
+agent, mail it; a `--turn` on a trigger is an error.
+
+- `--match` rules: `PATH=VALUE`, `PATH!=VALUE`, `PATH=glob:PATTERN`, or
+  `PATH=in:A,B`. `PATH` is `project`, `kind`, `actor`, `summary`, or
+  `data.<path>`.
+- The text of the action can use `{{event.kind}}`, `{{event.summary}}`,
+  `{{event.project}}`, `{{event.seq}}`, `{{event.actor}}`, and
+  `{{event.data.<path>}}`. Put a template in single quotes, so that the
+  shell does not change it.
+- `--dedupe KEY/WINDOW` runs once for each key in the window. The text
+  after the last `/` is the window.
+- `--escalate KEY --escalate-after N`: after N matches in a row for one
+  key, the trigger mails `--escalate-to` (default `operator`) one time
+  and does not run its action. An event of `--reset-on` with the same key
+  sets the count to zero.
+- `--catch-up once` runs the events that came while the daemon was down;
+  `skip` (the default) ignores them.
+- `--spec-json` and `--action-json` take the JSON shapes of api.md §19.
+- `schedule runs` shows the event (`seq` and kind) of each trigger run.
+
+Example: mail the worker when CI fails on `main`, one time for each repo
+and branch in 10 minutes. After 3 failures in a row, mail the operator
+instead. A green run sets the count to zero.
+
+```sh
+terrarium -p terra schedule new ci-failed \
+  --on ci.run.failed --match 'data.branch=glob:main' \
+  --dedupe '{{event.data.repo}}:{{event.data.branch}}/10m' \
+  --escalate '{{event.data.repo}}:{{event.data.branch}}' --escalate-after 3 \
+  --reset-on ci.run.succeeded \
+  --mail worker -s 'CI failed: {{event.data.repo}}' \
+  --body 'Fix {{event.data.branch}}. Run: {{event.data.run_url}}'
+```
+
+
+### Events and event sources
+
+`event emit` adds one event to the log. `event source` manages the
+webhook senders of the ingest listener: GitHub, Forgejo, or a script
+([api.md §20](api.md#20-event-sources-and-ingest)). `source` has the
+alias `sources`.
+
+```
+terrarium event emit <kind> [-s summary] [-d '<json object>' | -d -] [--project p]
+terrarium event source ls                      the sources that you may read; `list` works too
+terrarium event source show <id|project/name|_/name>
+terrarium event source add <name> --kind github|forgejo|generic [--project p | --global] [--disabled]
+terrarium event source rotate <source>         a new secret; the old one stops at once
+terrarium event source enable|disable <source>
+terrarium event source rename <source> <name>  the hook URL changes
+terrarium event source rm <source>
+```
+
+- `emit`: the operator emits any kind, into any project or into none. An
+  agent emits into its own project only, and only the kinds that start
+  with `ci.`, `git.`, `pr.`, `ext.`, or `agent.`.
+- `add` and `rotate` print the secret, the hook URL, and the setup steps
+  for the sender. The secret shows this one time only. Keep it, or rotate.
+- A member reads the sources of its project. A `project_admin` manages
+  them. A global source (`_/name`) needs sysadmin or the operator.
 
 
 ```

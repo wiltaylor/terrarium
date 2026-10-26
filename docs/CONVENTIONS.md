@@ -136,6 +136,8 @@ a new token, when `.env` does not exist. The daemon reads:
 | `TERRARIUM_HOST_TLS_CERT`, `TERRARIUM_HOST_TLS_KEY` | unset. Both set: the host listener speaks TLS with this PEM certificate chain and key (`just host::cert`). One alone stops the daemon at start. |
 | `TERRARIUM_PUBLIC_URL` | unset (mail links use `http://localhost:8080`). The dashboard as the operator opens it, for the links in operator mail, `Version.url`, the cookie `Origin` check on WebSocket upgrades, and CORS on `/a/...`. `just host::install` also takes the host agent's `daemon_url` from its host. |
 | `TERRARIUM_ARTIFACT_PUBLIC_URL` | unset: the host of the request with the port of `TERRARIUM_ARTIFACT_LISTEN`. The artifact origin as a browser opens it, for signed artifact URLs and the dashboard CSP. |
+| `TERRARIUM_INGEST_ADDR` | unset: no ingest listener. The webhook listener of the event sources: only `POST /hooks/{project}/{source}` and `GET /healthz` ([api.md](api.md) §20). Compose sets `0.0.0.0:8083`. |
+| `TERRARIUM_INGEST_PUBLIC_URL` | unset: made from `TERRARIUM_INGEST_ADDR`. The ingest listener as a forge reaches it, for the `hook_url` of each event source. |
 | `TERRARIUM_WS_QUERY_TOKEN` | `0`: refuse the bearer token in `?token=` on a WebSocket upgrade (`401`). `1` (or `true`, `yes`, `on`): take it, with a warning in the log. Clients send the token as the subprotocol `bearer.<token>`. |
 | `TERRARIUM_SESSION_TTL` | `12h`. The life of a dashboard session cookie: seconds, or a number with `s`, `m`, `h`, or `d`. |
 | `TERRARIUM_SSH` | `ssh`. The ssh binary for `ssh` targets. |

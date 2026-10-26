@@ -455,6 +455,72 @@ proxy logs and browser history. The daemon refuses that form by default
 (`401`). `TERRARIUM_WS_QUERY_TOKEN=1` turns it back on for an old client,
 with a warning in the log. See [api.md](api.md), section 1.
 
+### 2.11 Send CI events from GitHub or Forgejo
+
+An event source lets a forge post webhooks to Terrarium. Each webhook
+becomes one event in the log, for example `ci.run.failed`. A trigger can
+then mail an agent (docs/api.md §19 and §20).
+
+The stack serves the webhooks on a port of their own: container port
+8083, published as `TERRARIUM_INGEST_PORT` (default `8083`). This port
+serves only `/hooks/...` and `/healthz`, not the API. Open this port to
+the forge. Keep the API port (8080) closed.
+
+1. Set the URL that the forge can reach in `.env`, and start the stack
+   again:
+
+   ```sh
+   TERRARIUM_INGEST_PUBLIC_URL=https://hooks.example.com
+   ```
+
+   Without it, the hook URL is `http://localhost:8083/...`. That URL is
+   correct only when the forge runs on the same machine.
+
+2. Make a source for the project. The command prints the secret one time,
+   the hook URL, and the setup steps:
+
+   ```sh
+   just daemon::cli event source add gh --kind github --project terrarium
+   ```
+
+   Keep the secret. When you lose it, run `event source rotate
+   terrarium/gh`, and give the forge the new one.
+
+3. **GitHub.** Open the repository, then Settings > Webhooks > Add
+   webhook.
+   - Payload URL: the hook URL, for example
+     `https://hooks.example.com/hooks/terrarium/gh`.
+   - Content type: `application/json`. The form type gets `415`.
+   - Secret: the secret from step 2.
+   - Events: "Let me select individual events". Select Workflow runs,
+     Workflow jobs, Pushes, and Pull requests.
+
+   GitHub sends a `ping` at once. Run `event source show terrarium/gh`:
+   `last seen` shows the time of the ping.
+
+4. **Forgejo.** Make a source with `--kind forgejo`. Open the repository,
+   then Settings > Webhooks > Add webhook > Forgejo.
+   - Target URL: the hook URL. HTTP method: `POST`. POST content type:
+     `application/json`.
+   - Secret: the secret from step 2.
+   - Trigger on: custom events. Select Push and Pull request. On Forgejo
+     17 and later, also select the workflow run and workflow job events.
+     On Forgejo 12 to 16, select the Action run events (failure, recover,
+     success). Do not select both kinds of run events on Forgejo 17: then
+     each run makes two events.
+
+   Forgejo has no ping. Click "Test delivery": Forgejo sends a `push`, and
+   the log shows a `git.push` event.
+
+5. Check the events:
+
+   ```sh
+   just daemon::cli events --kind ci.run.failed
+   ```
+
+A request with a bad signature gets `401` with no detail. The source
+keeps the reason: `event source show` prints it as `last error`.
+
 ## 3. Configuration directories
 
 Compose bind-mounts these host directories into the container:

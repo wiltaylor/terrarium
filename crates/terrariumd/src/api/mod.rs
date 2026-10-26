@@ -4,6 +4,7 @@
 mod agents;
 mod artifacts;
 mod board;
+mod event_sources;
 mod fleet;
 mod hosts;
 mod longpoll;
@@ -42,7 +43,7 @@ use tokio::task::JoinHandle;
 use tracing::{error, info};
 
 pub use artifacts::{artifact_router, run_prune};
-pub use schedules::run_schedule;
+pub use schedules::{run_schedule, run_triggered};
 pub use system::{DefinitionCounts, Health};
 
 use crate::actor::{Transport, resolve_actor};
@@ -205,7 +206,7 @@ fn routes(state: Shared, serve_artifacts: bool, host_connect: bool) -> Router {
         .merge(targets::routes())
         .route("/reload", post(system::reload))
         .route("/audit", get(system::audit))
-        .route("/events", get(streams::firehose))
+        .route("/events", get(streams::firehose).post(event_sources::emit))
         .route("/events/latest", get(streams::latest))
         .merge(projects::routes())
         .merge(repos::routes())
@@ -221,6 +222,7 @@ fn routes(state: Shared, serve_artifacts: bool, host_connect: bool) -> Router {
         .merge(usage::routes())
         .merge(fleet::routes())
         .merge(schedules::routes())
+        .merge(event_sources::routes())
         .route("/session", post(session::create).delete(session::delete))
         .fallback(api_not_found)
         .method_not_allowed_fallback(api_method_not_allowed)

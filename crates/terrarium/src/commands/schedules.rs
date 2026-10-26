@@ -31,8 +31,21 @@ fn spec_text(spec: &Value) -> String {
         },
         Some("interval") => format!("every {}", field(spec, "every")),
         Some("at") => format!("at {}", short_time(&field(spec, "at"))),
+        Some("on") => {
+            let mut t = format!("on {}", strings(&spec["kinds"]).join(","));
+            if let Some(n) = spec["match"].as_array().map(Vec::len).filter(|n| *n > 0) {
+                t.push_str(&format!(" ({n} rules)"));
+            }
+            t
+        }
         _ => spec.to_string(),
     }
+}
+
+fn strings(v: &Value) -> Vec<&str> {
+    v.as_array()
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default()
 }
 
 fn action_text(a: &Value) -> String {
@@ -54,6 +67,7 @@ fn action_text(a: &Value) -> String {
         ),
         Some("agent") => format!("{} {}", field(a, "verb"), field(a, "agent")),
         Some("probe") => format!("probe {}", field(a, "subscription")),
+        Some("card") => format!("card {} {}", field(a, "op"), field(a, "key")),
         _ => a.to_string(),
     }
 }
@@ -85,14 +99,56 @@ const RUN_COLS: &[(&str, &str)] = &[
     ("RUN", "id"),
     ("STARTED", "started_at"),
     ("TRIGGER", "trigger"),
+    ("EVENT", "event_text"),
     ("STATUS", "status"),
     ("SUMMARY", "summary"),
 ];
+
+/// A run with `event_text`: the `seq` and kind of a trigger run's event.
+fn run_row(r: &Value) -> Value {
+    let mut r = r.clone();
+    let text = match (r["event_seq"].as_i64(), r["event"]["kind"].as_str()) {
+        (Some(seq), Some(kind)) => format!("{seq} {kind}"),
+        (Some(seq), None) => seq.to_string(),
+        _ => String::new(),
+    };
+    r["event_text"] = json!(text);
+    r
+}
 
 fn print_schedule(ctx: &Ctx, s: &Value) {
     ctx.line(format!("schedule {}  {}", key_of(s), field(s, "id")));
     ctx.line(format!("when:      {}", spec_text(&s["spec"])));
     ctx.line(format!("action:    {}", action_text(&s["action"])));
+    let spec = &s["spec"];
+    if spec["kind"] == "on" {
+        for m in spec["match"].as_array().into_iter().flatten() {
+            ctx.line(format!(
+                "match:     {} {} {}",
+                field(m, "path"),
+                m["op"].as_str().unwrap_or("eq"),
+                m["value"]
+            ));
+        }
+        if spec["dedupe"].is_object() {
+            ctx.line(format!(
+                "dedupe:    {} in {}",
+                field(&spec["dedupe"], "key"),
+                field(&spec["dedupe"], "window")
+            ));
+        }
+        let e = &spec["escalate"];
+        if e.is_object() {
+            ctx.line(format!(
+                "escalate:  {} after {} to {} (reset on {})",
+                field(e, "key"),
+                field(e, "after"),
+                field(e, "to"),
+                strings(&e["reset_on"]).join(",")
+            ));
+        }
+        ctx.line(format!("max/hour:  {}", field(spec, "max_per_hour")));
+    }
     ctx.line(format!(
         "enabled:   {}{}",
         if s["enabled"] == true { "yes" } else { "no" },
@@ -136,6 +192,13 @@ fn print_run(ctx: &Ctx, r: &Value) {
         field(r, "status"),
         field(r, "summary")
     ));
+    if let Some(seq) = r["event_seq"].as_i64() {
+        ctx.line(format!(
+            "event {seq}: {} {}",
+            field(&r["event"], "kind"),
+            field(&r["event"], "summary")
+        ));
+    }
     let o = &r["output"];
     for (k, label) in [("stdout", "stdout"), ("stderr", "stderr")] {
         if let Some(t) = o[k].as_str().filter(|t| !t.is_empty()) {
@@ -186,8 +249,92 @@ fn at_time(s: &str) -> anyhow::Result<String> {
         .to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
 }
 
+fn json_arg(flag: &str, text: &str) -> anyhow::Result<Value> {
+    let v: Value =
+        serde_json::from_str(text).map_err(|e| CliError::usage(format!("bad {flag}: {e}")))?;
+    if !v.is_object() {
+        return Err(CliError::usage(format!("{flag} takes a JSON object")));
+    }
+    Ok(v)
+}
+
+/// One `--match` rule: `PATH=VALUE`, `PATH!=VALUE`, `PATH=glob:PATTERN`,
+/// or `PATH=in:A,B`.
+fn match_rule(rule: &str) -> anyhow::Result<Value> {
+    let bad = || {
+        CliError::usage(format!(
+            "bad --match `{rule}`: use PATH=VALUE, PATH!=VALUE, PATH=glob:PATTERN, or PATH=in:A,B"
+        ))
+    };
+    if let Some((path, value)) = rule.split_once("!=") {
+        return Ok(json!({"path": path.trim(), "op": "ne", "value": value}));
+    }
+    let (path, value) = rule.split_once('=').ok_or_else(bad)?;
+    let path = path.trim();
+    if path.is_empty() {
+        return Err(bad());
+    }
+    Ok(if let Some(p) = value.strip_prefix("glob:") {
+        json!({"path": path, "op": "glob", "value": p})
+    } else if let Some(list) = value.strip_prefix("in:") {
+        json!({"path": path, "op": "in", "value": list.split(',').collect::<Vec<_>>()})
+    } else {
+        json!({"path": path, "op": "eq", "value": value})
+    })
+}
+
+/// The `on` spec of the trigger flags.
+fn trigger_spec(a: &ScheduleArgs) -> anyhow::Result<Value> {
+    let mut spec = json!({"kind": "on", "kinds": a.on});
+    if !a.matches.is_empty() {
+        spec["match"] = a
+            .matches
+            .iter()
+            .map(|m| match_rule(m))
+            .collect::<anyhow::Result<Vec<_>>>()?
+            .into();
+    }
+    if let Some(d) = &a.dedupe {
+        let (key, window) = d.rsplit_once('/').ok_or_else(|| {
+            CliError::usage(format!(
+                "bad --dedupe `{d}`: use KEY/WINDOW, as '{{{{event.data.repo}}}}/10m'"
+            ))
+        })?;
+        spec["dedupe"] = json!({"key": key, "window": window});
+    }
+    if let Some(key) = &a.escalate {
+        let mut e = json!({"key": key, "after": a.escalate_after.unwrap_or_default()});
+        if !a.reset_on.is_empty() {
+            e["reset_on"] = json!(a.reset_on);
+        }
+        if let Some(to) = &a.escalate_to {
+            e["to"] = json!(to);
+        }
+        spec["escalate"] = e;
+    }
+    if let Some(n) = a.max_per_hour {
+        spec["max_per_hour"] = json!(n);
+    }
+    Ok(spec)
+}
+
 /// The spec of the flags, if any.
 fn spec_of(a: &ScheduleArgs) -> anyhow::Result<Option<Value>> {
+    if let Some(j) = &a.spec_json {
+        return json_arg("--spec-json", j).map(Some);
+    }
+    if !a.on.is_empty() {
+        return trigger_spec(a).map(Some);
+    }
+    if !a.matches.is_empty()
+        || a.dedupe.is_some()
+        || a.escalate.is_some()
+        || a.max_per_hour.is_some()
+    {
+        return Err(CliError::usage(
+            "--match, --dedupe, --escalate, and --max-per-hour go with --on <kind>",
+        ));
+    }
     Ok(match (&a.cron, &a.every, &a.at) {
         (Some(expr), _, _) => Some(json!({
             "kind": "cron", "expr": expr, "tz": a.tz.as_deref().unwrap_or("UTC"),
@@ -200,6 +347,30 @@ fn spec_of(a: &ScheduleArgs) -> anyhow::Result<Option<Value>> {
 
 /// The action of the flags, if any.
 fn action_of(ctx: &Ctx, a: &ScheduleArgs) -> anyhow::Result<Option<Value>> {
+    if let Some(j) = &a.action_json {
+        return json_arg("--action-json", j).map(Some);
+    }
+    if let Some(op) = &a.card {
+        if !matches!(op.as_str(), "open" | "close") {
+            return Err(CliError::usage(format!(
+                "bad --card `{op}`: use open or close"
+            )));
+        }
+        let mut v = json!({"type": "card", "op": op, "key": a.key.clone().unwrap_or_default()});
+        if let Some(t) = &a.title {
+            v["title"] = json!(t);
+        }
+        if let Some(b) = &a.body {
+            v["body"] = json!(ctx.text(b)?);
+        }
+        if let Some(c) = &a.column {
+            v["column"] = json!(c);
+        }
+        return Ok(Some(v));
+    }
+    if a.body.is_some() && a.mail.is_none() {
+        return Err(CliError::usage("--body goes with --mail or --card"));
+    }
     if let Some(to) = &a.mail {
         let body = a
             .body
@@ -282,6 +453,8 @@ pub async fn schedule(ctx: &Ctx, cmd: &ScheduleCmd) -> anyhow::Result<()> {
             all,
             enabled,
             disabled_only,
+            triggers,
+            time,
         } => {
             let project = if *all { None } else { ctx.project.clone() };
             let state = match (enabled, disabled_only) {
@@ -289,7 +462,12 @@ pub async fn schedule(ctx: &Ctx, cmd: &ScheduleCmd) -> anyhow::Result<()> {
                 (_, true) => Some("false".to_owned()),
                 _ => None,
             };
-            let q = query([("project", project), ("enabled", state)]);
+            let kind = match (triggers, time) {
+                (true, _) => Some("trigger".to_owned()),
+                (_, true) => Some("time".to_owned()),
+                _ => None,
+            };
+            let q = query([("project", project), ("enabled", state), ("kind", kind)]);
             let v = ctx.api.get("/api/schedules", q).await?;
             ctx.emit(&v, |c, v| {
                 let rows: Vec<Value> = as_items(v).iter().map(row).collect();
@@ -302,11 +480,15 @@ pub async fn schedule(ctx: &Ctx, cmd: &ScheduleCmd) -> anyhow::Result<()> {
         }
         ScheduleCmd::New { name, args } => {
             let spec = spec_of(args)?.ok_or_else(|| {
-                CliError::usage("give the time: --cron \"<expr>\", --every <dur>, or --at <time>")
+                CliError::usage(
+                    "give the time: --cron \"<expr>\", --every <dur>, or --at <time>; \
+                     or a trigger: --on <kind>",
+                )
             })?;
             let action = action_of(ctx, args)?.ok_or_else(|| {
                 CliError::usage(
-                    "give the action: --mail, --turn, --exec, --agent with --verb, or --probe",
+                    "give the action: --mail, --turn, --exec, --agent with --verb, --probe, \
+                     or --card",
                 )
             })?;
             let project = if args.global {
@@ -419,7 +601,10 @@ pub async fn schedule(ctx: &Ctx, cmd: &ScheduleCmd) -> anyhow::Result<()> {
                 )
                 .await?;
             let v = Value::Array(items);
-            ctx.emit(&v, |c, v| print_table(c, as_items(v), RUN_COLS, "no runs"))
+            ctx.emit(&v, |c, v| {
+                let rows: Vec<Value> = as_items(v).iter().map(run_row).collect();
+                print_table(c, &rows, RUN_COLS, "no runs");
+            })
         }
     }
 }

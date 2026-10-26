@@ -1,0 +1,27 @@
+{
+  "action": "queued",
+  "workflow_job": {
+    "id": 29679449,
+    "run_id": 30433642,
+    "workflow_name": "CI",
+    "head_branch": "feature/login",
+    "run_url": "https://api.github.com/repos/octo-org/hello-world/actions/runs/30433642",
+    "run_attempt": 1,
+    "node_id": "CR_kwDOAAA",
+    "head_sha": "acb5820ced9479c074f688cc328bf03f341a511d",
+    "url": "https://api.github.com/repos/octo-org/hello-world/actions/jobs/29679449",
+    "html_url": "https://github.com/octo-org/hello-world/actions/runs/30433642/job/29679449",
+    "status": "queued",
+    "conclusion": null,
+    "created_at": "2026-10-26T09:00:01Z",
+    "started_at": "2026-10-26T09:00:05Z",
+    "completed_at": "2026-10-26T09:03:58Z",
+    "name": "test (ubuntu-latest)",
+    "steps": [{"name": "Run tests", "status": "completed", "conclusion": null, "number": 3}],
+    "labels": ["ubuntu-latest"],
+    "runner_id": 1,
+    "runner_name": "GitHub Actions 1"
+  },
+  "repository": {"id": 1296269, "name": "hello-world", "full_name": "octo-org/hello-world", "private": false, "html_url": "https://github.com/octo-org/hello-world", "default_branch": "main", "owner": {"login": "octo-org", "id": 6811672, "type": "Organization"}},
+  "sender": {"login": "octocat", "id": 1, "type": "User"}
+}

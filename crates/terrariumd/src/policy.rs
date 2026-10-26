@@ -438,7 +438,7 @@ pub fn schedule_scope(actor: &Actor, project: Option<&str>) -> ApiResult<()> {
 ///   or an agent verb on an agent of the project; an exec on a global
 ///   target or one of the project (the executor checks the policy and the
 ///   leases at run time); a probe of a subscription that an agent of the
-///   project uses.
+///   project uses; a card on the project's board.
 /// - A member: none (members read only).
 pub fn manage_schedule(actor: &Actor, project: Option<&str>, reach: &Reach) -> ApiResult<()> {
     schedule_scope(actor, project)?;
@@ -474,6 +474,8 @@ pub fn manage_schedule(actor: &Actor, project: Option<&str>, reach: &Reach) -> A
         Reach::Subscription { name, .. } => outside(format!(
             "no agent of the project uses subscription `{name}`"
         )),
+        Reach::Card { project: q } if q == p => Ok(()),
+        Reach::Card { project: q } => outside(format!("the board of `{q}` is another project's")),
     }
 }
 

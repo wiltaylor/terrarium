@@ -6,6 +6,11 @@
 //! each run (`crate::api::schedules`). The tick that finds the due
 //! schedules is `crate::scheduler`.
 //!
+//! A trigger is a schedule whose spec is `on` (PLAN §12c): an event of the
+//! log starts its run. Its rows are the same; `trigger_state` keeps its
+//! dedupe, escalation, and rate counters, and `trigger_cursor` the last
+//! event that the trigger engine (`crate::scheduler`) read.
+//!
 //! Times are stored as RFC 3339 UTC with milliseconds ([`stamp`]), so a
 //! text compare orders them.
 
@@ -15,13 +20,16 @@ use chrono::{DateTime, SecondsFormat, TimeZone, Utc};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use terrarium_core::schedule::{CatchUp, ScheduleAction, ScheduleDef, ScheduleSpec};
+use terrarium_core::schedule::{
+    CardOp, CatchUp, Escalate, ScheduleAction, ScheduleDef, ScheduleSpec,
+};
+use terrarium_core::template;
 
 use crate::db::Tx;
 use crate::error::{ApiError, ApiResult, Code};
 use crate::events::EventDraft;
 use crate::store::mail::{self, Address, Outgoing};
-use crate::store::{Page, Paged, agents, projects, subscriptions, targets, valid_name};
+use crate::store::{Page, Paged, agents, board, projects, subscriptions, targets, valid_name};
 
 /// The shortest interval between two runs, in seconds. A five-field cron
 /// expression cannot go under it.
@@ -40,6 +48,10 @@ pub const MAX_SKIPS: i64 = 3;
 pub const ENV_MAX_SCHEDULES: &str = "TERRARIUM_MAX_SCHEDULES_PER_PROJECT";
 /// The default of [`ENV_MAX_SCHEDULES`].
 pub const DEFAULT_MAX_SCHEDULES: usize = 20;
+/// The highest `max_per_hour` of a trigger.
+pub const MAX_PER_HOUR_LIMIT: u32 = 600;
+/// The longest dedupe window of a trigger, in seconds (7 days).
+pub const MAX_DEDUPE_WINDOW: i64 = 7 * 86_400;
 
 /// The cap: [`ENV_MAX_SCHEDULES`], else [`DEFAULT_MAX_SCHEDULES`]. Read
 /// once.
@@ -226,8 +238,148 @@ pub fn validate_spec(spec: &ScheduleSpec, now: DateTime<Utc>) -> ApiResult<()> {
                 return Err(field_error("spec.at", format!("`{at}` is in the past")));
             }
         }
+        ScheduleSpec::On {
+            kinds,
+            matches,
+            dedupe,
+            escalate,
+            max_per_hour,
+        } => validate_on(
+            kinds,
+            matches,
+            dedupe.as_ref(),
+            escalate.as_ref(),
+            *max_per_hour,
+        )?,
     }
     Ok(())
+}
+
+fn check_globs(field: &str, globs: &[String]) -> ApiResult<()> {
+    for g in globs {
+        if g.trim().is_empty() || g.chars().any(char::is_whitespace) {
+            return Err(field_error(
+                field,
+                format!("bad kind glob `{g}`: use a kind such as `ci.run.failed` or `ci.job.*`"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn check_template(field: &str, text: &str) -> ApiResult<()> {
+    template::check(text).map_err(|e| field_error(field, e))
+}
+
+fn validate_on(
+    kinds: &[String],
+    matches: &[terrarium_core::schedule::MatchRule],
+    dedupe: Option<&terrarium_core::schedule::Dedupe>,
+    escalate: Option<&Escalate>,
+    max_per_hour: u32,
+) -> ApiResult<()> {
+    if kinds.is_empty() {
+        return Err(field_error(
+            "spec.kinds",
+            "name one or more event kinds, for example [\"ci.run.failed\"]",
+        ));
+    }
+    check_globs("spec.kinds", kinds)?;
+    for m in matches {
+        m.check().map_err(|e| field_error("spec.match", e))?;
+    }
+    if let Some(d) = dedupe {
+        if d.key.trim().is_empty() {
+            return Err(field_error("spec.dedupe.key", "the dedupe key is empty"));
+        }
+        check_template("spec.dedupe.key", &d.key)?;
+        let secs = parse_every(&d.window).map_err(|e| field_error("spec.dedupe.window", e))?;
+        if !(1..=MAX_DEDUPE_WINDOW).contains(&secs) {
+            return Err(field_error(
+                "spec.dedupe.window",
+                format!("`{}` is not 1 s to 7 d", d.window),
+            ));
+        }
+    }
+    if let Some(e) = escalate {
+        if e.key.trim().is_empty() {
+            return Err(field_error(
+                "spec.escalate.key",
+                "the escalation key is empty",
+            ));
+        }
+        check_template("spec.escalate.key", &e.key)?;
+        if e.after == 0 {
+            return Err(field_error("spec.escalate.after", "use 1 or more"));
+        }
+        check_globs("spec.escalate.reset_on", &e.reset_on)?;
+        if e.to.trim().is_empty() {
+            return Err(field_error("spec.escalate.to", "name an address"));
+        }
+    }
+    if max_per_hour == 0 || max_per_hour > MAX_PER_HOUR_LIMIT {
+        return Err(field_error(
+            "spec.max_per_hour",
+            format!("{max_per_hour} is not 1-{MAX_PER_HOUR_LIMIT}"),
+        ));
+    }
+    Ok(())
+}
+
+/// The checks of a spec with its action, at each write (the API, a
+/// project file, a fleet): a trigger takes only `mail`, `exec`, and
+/// `card` (no `turn`: a trigger notifies an agent by mail), its templates
+/// parse, and its escalation address resolves.
+pub fn check_trigger(
+    conn: &Connection,
+    project: Option<&str>,
+    spec: &ScheduleSpec,
+    action: &ScheduleAction,
+) -> ApiResult<()> {
+    check_trigger_shape(spec, action)?;
+    if let ScheduleSpec::On {
+        escalate: Some(e), ..
+    } = spec
+    {
+        escalation_reach(conn, project, e)?;
+    }
+    Ok(())
+}
+
+/// The part of [`check_trigger`] that reads no store: the action kind and
+/// the templates (a fleet check, before the fleet's agents exist).
+pub fn check_trigger_shape(spec: &ScheduleSpec, action: &ScheduleAction) -> ApiResult<()> {
+    if !spec.is_trigger() {
+        return Ok(());
+    }
+    if !action.allowed_on_trigger() {
+        return Err(field_error(
+            "action",
+            format!(
+                "a trigger (spec `on`) runs a mail, exec, or card action, not `{}`; \
+                 to notify an agent, mail it",
+                action.kind()
+            ),
+        ));
+    }
+    for (field, text) in action.templated() {
+        check_template(field, text)?;
+    }
+    Ok(())
+}
+
+/// The address of an escalation, as a mail reach.
+pub fn escalation_reach(
+    conn: &Connection,
+    project: Option<&str>,
+    e: &Escalate,
+) -> ApiResult<Reach> {
+    let a = mail::resolve(conn, &e.to, project)
+        .map_err(|err| not_found_as_field(err, "spec.escalate.to"))?;
+    if a == Address::System {
+        return Err(field_error("spec.escalate.to", "`system` only sends mail"));
+    }
+    Ok(Reach::Mail(a))
 }
 
 /// The first run of `spec` after `after`. `anchor` is the start of an
@@ -257,6 +409,8 @@ pub fn next_after(
             Ok(Some(anchor + chrono::Duration::milliseconds(k * step)))
         }
         ScheduleSpec::At { at } => Ok(parse_time(at).filter(|t| *t > after)),
+        // A trigger has no time: an event starts its runs.
+        ScheduleSpec::On { .. } => Ok(None),
     }
 }
 
@@ -436,6 +590,9 @@ pub struct ListFilter {
     /// The projects a caller may read; `None` means all.
     pub projects: Option<Vec<String>>,
     pub enabled: Option<bool>,
+    /// `Some(true)`: only triggers (spec `on`); `Some(false)`: only time
+    /// schedules.
+    pub trigger: Option<bool>,
 }
 
 /// Schedules, global first, then by project and name.
@@ -449,6 +606,7 @@ pub fn list(conn: &Connection, f: &ListFilter) -> ApiResult<Vec<Schedule>> {
             (Some(p), None) => f.projects.as_ref().is_none_or(|ps| ps.contains(p)),
         })
         .filter(|s| f.enabled.is_none_or(|e| e == s.enabled))
+        .filter(|s| f.trigger.is_none_or(|t| t == s.spec.is_trigger()))
         .collect())
 }
 
@@ -505,6 +663,10 @@ pub enum Reach {
         /// The projects whose agents use the subscription.
         projects: Vec<String>,
     },
+    /// The board of a project (a `card` action).
+    Card {
+        project: String,
+    },
 }
 
 impl Reach {
@@ -514,6 +676,7 @@ impl Reach {
             Self::Mail(a) => a.display(),
             Self::Agent { name, project, .. } => format!("{project}/{name}"),
             Self::Target { name, .. } | Self::Subscription { name, .. } => name.clone(),
+            Self::Card { project } => format!("the board of {project}"),
         }
     }
 }
@@ -616,6 +779,34 @@ pub fn resolve_reach(
                 projects,
             })
         }
+        ScheduleAction::Card {
+            op, key, column, ..
+        } => {
+            let Some(p) = project else {
+                return Err(field_error(
+                    "action",
+                    "a card action needs a project schedule: the card goes on its board",
+                ));
+            };
+            if key.trim().is_empty() {
+                return Err(field_error("action.key", "name the card key"));
+            }
+            if let Some(c) = column {
+                let b = board::get_board(conn, p)?;
+                if !b.columns.iter().any(|x| x.name == *c) {
+                    return Err(field_error(
+                        "action.column",
+                        format!("project `{p}` has no column `{c}`"),
+                    ));
+                }
+                if *op == CardOp::Open && c == board::DONE {
+                    return Err(field_error("action.column", "a card does not open in done"));
+                }
+            }
+            Ok(Reach::Card {
+                project: p.to_owned(),
+            })
+        }
     }
 }
 
@@ -678,6 +869,7 @@ pub fn check_name(name: &str) -> ApiResult<()> {
 pub fn create(t: &mut Tx<'_>, n: &NewSchedule, now: DateTime<Utc>) -> ApiResult<Schedule> {
     check_name(&n.name)?;
     validate_spec(&n.spec, now)?;
+    check_trigger(t, n.project.as_deref(), &n.spec, &n.action)?;
     if let Some(p) = &n.project {
         projects::get(t, p).map_err(|e| not_found_as_field(e, "project"))?;
         let count: i64 = t.query_row(
@@ -796,6 +988,9 @@ pub fn update(
     }
     if let Some(src) = &p.source {
         s.source = src.clone();
+    }
+    if changed.contains(&"spec") || changed.contains(&"action") {
+        check_trigger(t, s.project.as_deref(), &s.spec, &s.action)?;
     }
     if new_anchor {
         s.anchor_at = stamp(now);
@@ -995,7 +1190,7 @@ pub struct Run {
     pub finished_at: Option<String>,
     /// `running`, `ok`, `failed`, or `skipped`.
     pub status: String,
-    /// `cron`, `manual`, or `catch_up`.
+    /// `cron`, `manual`, `catch_up`, or `event`.
     pub trigger: String,
     pub summary: String,
     /// Exec: the tail of stdout and stderr and the exit code. Mail: the
@@ -1003,12 +1198,43 @@ pub struct Run {
     /// windows.
     pub output: Value,
     pub error: Option<String>,
-    /// Who triggered the run: the `run_as`, or the caller of a run-now.
+    /// Who triggered the run: the `run_as`, the caller of a run-now, or
+    /// the actor of the event of a trigger run.
     pub actor: String,
+    /// The `seq` of the event that started a trigger run.
+    pub event_seq: Option<i64>,
+    /// That event's `kind` and `summary`, while the log has it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event: Option<RunEvent>,
 }
+
+/// The event of a trigger run, on the run.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RunEvent {
+    pub seq: i64,
+    pub kind: String,
+    pub summary: String,
+}
+
+/// The run columns, with the kind and summary of the event of a trigger
+/// run.
+const RUN_SELECT: &str = "SELECT r.*, e.kind AS event_kind, e.summary AS event_summary
+     FROM schedule_runs r LEFT JOIN events e ON e.seq = r.event_seq";
 
 fn run_row(r: &Row<'_>) -> rusqlite::Result<Run> {
     let output: String = r.get("output")?;
+    let event_seq: Option<i64> = r.get("event_seq")?;
+    let event_kind: Option<String> = r.get("event_kind")?;
+    let event = match (event_seq, event_kind) {
+        (Some(seq), Some(kind)) => Some(RunEvent {
+            seq,
+            kind,
+            summary: r
+                .get::<_, Option<String>>("event_summary")?
+                .unwrap_or_default(),
+        }),
+        _ => None,
+    };
     Ok(Run {
         id: r.get("id")?,
         schedule: r.get("schedule")?,
@@ -1020,11 +1246,13 @@ fn run_row(r: &Row<'_>) -> rusqlite::Result<Run> {
         output: serde_json::from_str(&output).unwrap_or(Value::Null),
         error: r.get("error")?,
         actor: r.get("actor")?,
+        event_seq,
+        event,
     })
 }
 
 pub fn get_run(conn: &Connection, id: &str) -> ApiResult<Run> {
-    conn.query_row("SELECT * FROM schedule_runs WHERE id = ?1", [id], run_row)
+    conn.query_row(&format!("{RUN_SELECT} WHERE r.id = ?1"), [id], run_row)
         .optional()?
         .ok_or_else(|| ApiError::not_found(format!("no schedule run `{id}`")))
 }
@@ -1032,10 +1260,10 @@ pub fn get_run(conn: &Connection, id: &str) -> ApiResult<Run> {
 /// The runs of a schedule, newest first. The cursor is a run ID.
 pub fn list_runs(conn: &Connection, schedule: &str, page: &Page) -> ApiResult<Paged<Run>> {
     let limit = page.limit();
-    let mut stmt = conn.prepare(
-        "SELECT * FROM schedule_runs WHERE schedule = ?1 AND (?2 = '' OR id < ?2)
-         ORDER BY id DESC LIMIT ?3",
-    )?;
+    let mut stmt = conn.prepare(&format!(
+        "{RUN_SELECT} WHERE r.schedule = ?1 AND (?2 = '' OR r.id < ?2)
+         ORDER BY r.id DESC LIMIT ?3"
+    ))?;
     let rows = stmt
         .query_map(
             params![schedule, page.cursor().unwrap_or(""), (limit + 1) as i64],
@@ -1076,12 +1304,13 @@ fn set_last_run(t: &Tx<'_>, s: &Schedule, r: &Run, skips: i64) -> ApiResult<()> 
 
 /// Start a run of `id`: `running`, or `skipped` when a run of the schedule
 /// is still running (`max_concurrency` is 1). One transaction, so two
-/// triggers cannot both start.
+/// triggers cannot both start. `event_seq` is the event of a trigger run.
 pub fn begin_run(
     t: &mut Tx<'_>,
     id: &str,
     trigger: &str,
     actor: &str,
+    event_seq: Option<i64>,
     now: DateTime<Utc>,
 ) -> ApiResult<Begin> {
     let s = get(t, id)?;
@@ -1095,9 +1324,9 @@ pub fn begin_run(
     if running > 0 {
         t.execute(
             "INSERT INTO schedule_runs (id, schedule, trigger, status, started_at, finished_at,
-                                        summary, actor)
-             VALUES (?1, ?2, ?3, 'skipped', ?4, ?4, 'skipped: still running', ?5)",
-            params![run_id, id, trigger, at, actor],
+                                        summary, actor, event_seq)
+             VALUES (?1, ?2, ?3, 'skipped', ?4, ?4, 'skipped: still running', ?5, ?6)",
+            params![run_id, id, trigger, at, actor, event_seq],
         )?;
         let r = get_run(t, &run_id)?;
         set_last_run(t, &s, &r, s.consecutive_skips)?;
@@ -1106,9 +1335,9 @@ pub fn begin_run(
         return Ok(Begin::Overlap(r));
     }
     t.execute(
-        "INSERT INTO schedule_runs (id, schedule, trigger, status, started_at, actor)
-         VALUES (?1, ?2, ?3, 'running', ?4, ?5)",
-        params![run_id, id, trigger, at, actor],
+        "INSERT INTO schedule_runs (id, schedule, trigger, status, started_at, actor, event_seq)
+         VALUES (?1, ?2, ?3, 'running', ?4, ?5, ?6)",
+        params![run_id, id, trigger, at, actor, event_seq],
     )?;
     let r = get_run(t, &run_id)?;
     emit(t, "run_started", &s, Some(&r))?;
@@ -1252,6 +1481,308 @@ pub fn prune_runs(t: &mut Tx<'_>, keep: usize) -> ApiResult<usize> {
         [keep as i64],
     )?;
     Ok(n)
+}
+
+// ------------------------------------------------------ the trigger engine
+
+/// The deepest event chain: an event that trigger runs made through this
+/// many links starts no run (PLAN §12c, "Guards").
+pub const MAX_CHAIN_DEPTH: u64 = 4;
+/// `trigger_state` rows that did not change for this long go at the
+/// prune, except an open escalation.
+pub const TRIGGER_STATE_DAYS: i64 = 8;
+
+/// The actor of the writes of a trigger run: `schedule:<id>`. A trigger
+/// never matches an event with its own label.
+pub fn run_label(schedule: &str) -> String {
+    format!("schedule:{schedule}")
+}
+
+/// The last event `seq` that the trigger engine read; `None` before its
+/// first start.
+pub fn cursor(conn: &Connection) -> ApiResult<Option<i64>> {
+    Ok(conn
+        .query_row("SELECT seq FROM trigger_cursor WHERE id = 1", [], |r| {
+            r.get(0)
+        })
+        .optional()?)
+}
+
+pub fn set_cursor(t: &Tx<'_>, seq: i64) -> ApiResult<()> {
+    t.execute(
+        "INSERT INTO trigger_cursor (id, seq) VALUES (1, ?1)
+         ON CONFLICT (id) DO UPDATE SET seq = excluded.seq",
+        [seq],
+    )?;
+    Ok(())
+}
+
+/// The enabled triggers.
+pub fn triggers(conn: &Connection) -> ApiResult<Vec<Schedule>> {
+    Ok(query(
+        conn,
+        "SELECT * FROM schedules WHERE enabled = 1 ORDER BY scope, name",
+        &[],
+    )?
+    .into_iter()
+    .filter(|s| s.spec.is_trigger())
+    .collect())
+}
+
+/// The fields of a stored event that templates and rules read.
+pub fn event_view(e: &crate::events::StoredEvent) -> template::EventView<'_> {
+    template::EventView {
+        seq: e.seq,
+        kind: &e.kind,
+        summary: &e.summary,
+        project: e.project.as_deref(),
+        actor: e.actor.as_deref(),
+        data: &e.data,
+    }
+}
+
+/// The chain depth of an event: `data.cause.depth` of an event that a
+/// trigger run made (actor `schedule:<id>`), else 0. Only a schedule actor
+/// counts, so a webhook cannot claim a depth.
+pub fn depth_of(e: &crate::events::StoredEvent) -> u64 {
+    if !e
+        .actor
+        .as_deref()
+        .is_some_and(|a| a.starts_with("schedule:"))
+    {
+        return 0;
+    }
+    e.data["cause"]["depth"].as_u64().unwrap_or(0)
+}
+
+/// What a trigger does with one event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Decision {
+    /// Run the action.
+    Run,
+    /// The escalation threshold: mail the escalation address once, with
+    /// the count of matches in a row.
+    Escalate(i64),
+    /// Over `max_per_hour`: record a `skipped: rate limit` run.
+    RateLimited,
+}
+
+struct StateRow {
+    last_fired: Option<String>,
+    failures: i64,
+    escalated: bool,
+}
+
+fn state_row(conn: &Connection, schedule: &str, key: &str) -> ApiResult<Option<StateRow>> {
+    Ok(conn
+        .query_row(
+            "SELECT last_fired, failures, escalated FROM trigger_state
+             WHERE schedule = ?1 AND key = ?2",
+            params![schedule, key],
+            |r| {
+                Ok(StateRow {
+                    last_fired: r.get(0)?,
+                    failures: r.get(1)?,
+                    escalated: r.get(2)?,
+                })
+            },
+        )
+        .optional()?)
+}
+
+fn put_state(
+    t: &Tx<'_>,
+    schedule: &str,
+    key: &str,
+    row: &StateRow,
+    now: DateTime<Utc>,
+) -> ApiResult<()> {
+    t.execute(
+        "INSERT INTO trigger_state (schedule, key, last_fired, failures, escalated, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT (schedule, key) DO UPDATE SET last_fired = excluded.last_fired,
+             failures = excluded.failures, escalated = excluded.escalated,
+             updated_at = excluded.updated_at",
+        params![
+            schedule,
+            key,
+            row.last_fired,
+            row.failures,
+            row.escalated,
+            stamp(now)
+        ],
+    )?;
+    Ok(())
+}
+
+/// Decide what trigger `s` does with event `e`, and keep its counters:
+/// `None` when the event does not start a run. The checks, in order: the
+/// scope (a project trigger sees only its project's events), the loop
+/// guard (not an event of its own runs, not an event about itself), the
+/// time (not an event from before the trigger), the escalation reset,
+/// the kinds and `match`, the chain depth, the escalation count, the
+/// dedupe window, and the rate limit.
+pub fn decide(
+    t: &Tx<'_>,
+    s: &Schedule,
+    e: &crate::events::StoredEvent,
+    now: DateTime<Utc>,
+) -> ApiResult<Option<Decision>> {
+    let ScheduleSpec::On {
+        dedupe,
+        escalate,
+        max_per_hour,
+        ..
+    } = &s.spec
+    else {
+        return Ok(None);
+    };
+    if let Some(p) = &s.project
+        && e.project.as_deref() != Some(p.as_str())
+    {
+        return Ok(None);
+    }
+    if e.actor.as_deref() == Some(run_label(&s.id).as_str())
+        || (e.kind == "schedule" && e.data["schedule"].as_str() == Some(s.id.as_str()))
+    {
+        return Ok(None);
+    }
+    if e.at < s.created_at {
+        return Ok(None);
+    }
+    let view = event_view(e);
+    if let Some(esc) = escalate
+        && esc
+            .reset_on
+            .iter()
+            .any(|g| terrarium_core::schedule::glob(g, &e.kind))
+    {
+        let key = format!(
+            "escalate:{}",
+            template::render(&esc.key, Some(&view), template::Quote::Plain)
+        );
+        t.execute(
+            "UPDATE trigger_state SET failures = 0, escalated = 0, updated_at = ?3
+             WHERE schedule = ?1 AND key = ?2",
+            params![s.id, key, stamp(now)],
+        )?;
+    }
+    if !s.spec.matches_event(&view) {
+        return Ok(None);
+    }
+    let depth = depth_of(e);
+    if depth >= MAX_CHAIN_DEPTH {
+        tracing::warn!(schedule = %s.key(), event = e.seq, depth,
+                       "a trigger chain is too deep: the event starts no run");
+        return Ok(None);
+    }
+    if let Some(esc) = escalate {
+        let key = format!(
+            "escalate:{}",
+            template::render(&esc.key, Some(&view), template::Quote::Plain)
+        );
+        let mut row = state_row(t, &s.id, &key)?.unwrap_or(StateRow {
+            last_fired: None,
+            failures: 0,
+            escalated: false,
+        });
+        row.failures += 1;
+        if row.failures >= i64::from(esc.after) {
+            let first = !row.escalated;
+            row.escalated = true;
+            if first {
+                row.last_fired = Some(stamp(now));
+            }
+            put_state(t, &s.id, &key, &row, now)?;
+            // One mail for each streak; the action does not run.
+            return Ok(first.then_some(Decision::Escalate(row.failures)));
+        }
+        put_state(t, &s.id, &key, &row, now)?;
+    }
+    let mut dedupe_row = None;
+    if let Some(d) = dedupe {
+        let key = format!(
+            "dedupe:{}",
+            template::render(&d.key, Some(&view), template::Quote::Plain)
+        );
+        let window = chrono::Duration::seconds(parse_every(&d.window).unwrap_or(0));
+        let last = state_row(t, &s.id, &key)?
+            .and_then(|r| r.last_fired)
+            .and_then(|l| parse_time(&l));
+        if last.is_some_and(|l| now - l < window) {
+            return Ok(None);
+        }
+        dedupe_row = Some(key);
+    }
+    let hour = chrono::Duration::hours(1);
+    let mut rate = state_row(t, &s.id, "rate")?.unwrap_or(StateRow {
+        last_fired: None,
+        failures: 0,
+        escalated: false,
+    });
+    let start = rate.last_fired.as_deref().and_then(parse_time);
+    if start.is_none_or(|st| now - st >= hour) {
+        rate.last_fired = Some(stamp(now));
+        rate.failures = 0;
+    }
+    if rate.failures >= i64::from(*max_per_hour) {
+        return Ok(Some(Decision::RateLimited));
+    }
+    rate.failures += 1;
+    put_state(t, &s.id, "rate", &rate, now)?;
+    if let Some(key) = dedupe_row {
+        put_state(
+            t,
+            &s.id,
+            &key,
+            &StateRow {
+                last_fired: Some(stamp(now)),
+                failures: 0,
+                escalated: false,
+            },
+            now,
+        )?;
+    }
+    Ok(Some(Decision::Run))
+}
+
+/// The `data.cause` of the events of a trigger run: the trigger, the
+/// event, and the chain depth (the event's depth + 1).
+pub fn cause(schedule: &str, e: &crate::events::StoredEvent) -> Value {
+    json!({"schedule": schedule, "event": e.seq, "depth": depth_of(e) + 1})
+}
+
+/// Record a `skipped` trigger run for event `e` (the rate limit), in the
+/// engine's transaction. Its events carry the trigger's label and cause,
+/// so the loop guard sees them.
+pub fn record_trigger_skip(
+    t: &mut Tx<'_>,
+    s: &Schedule,
+    e: &crate::events::StoredEvent,
+    reason: &str,
+    now: DateTime<Utc>,
+) -> ApiResult<Run> {
+    let (actor, cause_was) = (t.actor.clone(), t.cause.clone());
+    t.actor = run_label(&s.id);
+    t.cause = Some(cause(&s.id, e));
+    let by = e.actor.clone().unwrap_or_else(|| "system".into());
+    let result = begin_run(t, &s.id, "event", &by, Some(e.seq), now).and_then(|b| match b {
+        Begin::Overlap(r) => Ok(r),
+        Begin::Started(r, _) => finish_run(t, &r.id, &Outcome::skipped(reason), now),
+    });
+    t.actor = actor;
+    t.cause = cause_was;
+    result
+}
+
+/// Drop the `trigger_state` rows that did not change for
+/// [`TRIGGER_STATE_DAYS`], except an open escalation.
+pub fn prune_trigger_state(t: &Tx<'_>, now: DateTime<Utc>) -> ApiResult<usize> {
+    let before = stamp(now - chrono::Duration::days(TRIGGER_STATE_DAYS));
+    Ok(t.execute(
+        "DELETE FROM trigger_state WHERE updated_at < ?1 AND escalated = 0",
+        [before],
+    )?)
 }
 
 #[cfg(test)]

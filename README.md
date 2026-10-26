@@ -260,6 +260,7 @@ recipes of a module.
 | Make the TLS certificate for the host listener | `just host::cert terrarium.lan` |
 | Install a host agent over ssh | `just host::install root@lab1 lab1` |
 | Register a host agent and print its token | `just host::token lab1` |
+| Make a webhook source for GitHub or Forgejo (prints the secret and the hook URL; [getting-started §2.11](docs/getting-started.md#211-send-ci-events-from-github-or-forgejo)) | `just daemon::cli event source add gh --kind github -p terrarium` |
 
 `just ci::check` must pass before a change merges.
 

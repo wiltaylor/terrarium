@@ -1,7 +1,13 @@
 //! `/api/schedules/...` (docs/api.md §19), and the run of one schedule:
 //! the rights check of its `run_as` actor, then the action through the
 //! normal paths (mail send, agent send and lifecycle, the executor, the
-//! quota probe).
+//! quota probe, the board).
+//!
+//! A trigger run ([`run_triggered`]) fills the `{{event.*}}` templates of
+//! its action from the event, and makes its writes with the actor
+//! `schedule:<id>` and `data.cause` on each event, so the trigger engine
+//! sees which events a trigger made (the loop guard and the chain depth).
+//! The rights stay those of `run_as`.
 
 use std::time::Duration;
 
@@ -14,20 +20,23 @@ use base64::Engine;
 use chrono::Utc;
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
-use terrarium_core::schedule::{AgentVerb, CatchUp, ScheduleAction, ScheduleSpec};
+use terrarium_core::schedule::{AgentVerb, CardOp, CatchUp, ScheduleAction, ScheduleSpec};
+use terrarium_core::template::{self, EventView, Quote};
 use terrarium_core::{AgentId, AgentStatus};
 
 use super::{ApiJson, ApiQuery, Shared, paged};
 use crate::actor::Actor;
 use crate::error::{ApiError, ApiResult, Code};
+use crate::events::StoredEvent;
 use crate::executor::{self, End, RemoteCmd, Stream};
 use crate::policy;
-use crate::store::Page;
 use crate::store::mail::Address;
 use crate::store::projects::SOURCE_FILE;
 use crate::store::schedules::{
-    self, Begin, ListFilter, NewSchedule, Outcome, Reach, Run, Schedule, SchedulePatch, field_error,
+    self, Begin, Decision, ListFilter, NewSchedule, Outcome, Reach, Run, Schedule, SchedulePatch,
+    field_error,
 };
+use crate::store::{Page, board};
 
 pub fn routes() -> Router<Shared> {
     Router::new()
@@ -48,6 +57,8 @@ const READY_WAIT: Duration = Duration::from_secs(120);
 struct ListQuery {
     project: Option<String>,
     enabled: Option<bool>,
+    /// `time` (cron, interval, at) or `trigger` (on).
+    kind: Option<String>,
 }
 
 async fn list(
@@ -56,6 +67,16 @@ async fn list(
     ApiQuery(q): ApiQuery<ListQuery>,
 ) -> ApiResult<Json<Vec<Schedule>>> {
     let global = policy::read_schedules(&actor, None).is_ok();
+    let trigger = match q.kind.as_deref().filter(|k| !k.is_empty()) {
+        None => None,
+        Some("time") => Some(false),
+        Some("trigger") => Some(true),
+        Some(other) => {
+            return Err(ApiError::bad_request(format!(
+                "bad `kind` `{other}`: use time or trigger"
+            )));
+        }
+    };
     let f = match q.project.filter(|p| !p.is_empty()) {
         Some(p) => {
             policy::read_schedules(&actor, Some(&p))?;
@@ -64,6 +85,7 @@ async fn list(
                 global,
                 projects: None,
                 enabled: q.enabled,
+                trigger,
             }
         }
         // The operator and a sysadmin see all; an agent sees its project.
@@ -72,12 +94,14 @@ async fn list(
             global: true,
             projects: None,
             enabled: q.enabled,
+            trigger,
         },
         None => ListFilter {
             project: actor.project().map(str::to_owned),
             global: false,
             projects: None,
             enabled: q.enabled,
+            trigger,
         },
     };
     Ok(Json(state.db.read(move |c| schedules::list(c, &f)).await?))
@@ -141,16 +165,26 @@ struct NewBody {
     max_concurrency: Option<u32>,
 }
 
-/// The project and the action rights of a schedule write, for `actor`.
+/// The project and the action rights of a schedule write, for `actor`. A
+/// trigger also checks its action kind and its escalation address.
 fn check_write(
     t: &rusqlite::Connection,
     actor: &Actor,
     project: Option<&str>,
+    spec: &ScheduleSpec,
     action: &ScheduleAction,
 ) -> ApiResult<Reach> {
     policy::schedule_scope(actor, project)?;
+    schedules::check_trigger(t, project, spec, action)?;
     let reach = schedules::resolve_reach(t, project, action)?;
     policy::manage_schedule(actor, project, &reach)?;
+    if let ScheduleSpec::On {
+        escalate: Some(e), ..
+    } = spec
+    {
+        let to = schedules::escalation_reach(t, project, e)?;
+        policy::manage_schedule(actor, project, &to)?;
+    }
     Ok(reach)
 }
 
@@ -187,7 +221,7 @@ async fn create(
     let s = state
         .db
         .write(actor.label(), move |t| {
-            check_write(t, &actor, new.project.as_deref(), &new.action)?;
+            check_write(t, &actor, new.project.as_deref(), &new.spec, &new.action)?;
             schedules::create(t, &new, Utc::now())
         })
         .await?;
@@ -244,7 +278,8 @@ async fn update(
         .db
         .write(actor.label(), move |t| {
             let action = patch.action.as_ref().unwrap_or(&s.action);
-            check_write(t, &actor, s.project.as_deref(), action)?;
+            let spec = patch.spec.as_ref().unwrap_or(&s.spec);
+            check_write(t, &actor, s.project.as_deref(), spec, action)?;
             schedules::update(t, &s.id, &patch, Utc::now())
         })
         .await?;
@@ -280,10 +315,10 @@ async fn set_enabled(
     }
     if enabled {
         let check = actor.clone();
-        let (project, action) = (s.project.clone(), s.action.clone());
+        let (project, spec, action) = (s.project.clone(), s.spec.clone(), s.action.clone());
         let reach = state
             .db
-            .read(move |c| check_write(c, &check, project.as_deref(), &action))
+            .read(move |c| check_write(c, &check, project.as_deref(), &spec, &action))
             .await?;
         caller_may_act(&state, &actor, &s, &reach).await?;
     }
@@ -291,7 +326,7 @@ async fn set_enabled(
         .db
         .write(actor.label(), move |t| {
             if enabled {
-                check_write(t, &actor, s.project.as_deref(), &s.action)?;
+                check_write(t, &actor, s.project.as_deref(), &s.spec, &s.action)?;
             } else {
                 policy::schedule_scope(&actor, s.project.as_deref())?;
             }
@@ -349,10 +384,10 @@ async fn run_now(
 ) -> ApiResult<Json<Run>> {
     let s = load(&state, &actor, id).await?;
     let check = actor.clone();
-    let (project, action) = (s.project.clone(), s.action.clone());
+    let (project, spec, action) = (s.project.clone(), s.spec.clone(), s.action.clone());
     let reach = state
         .db
-        .read(move |c| check_write(c, &check, project.as_deref(), &action))
+        .read(move |c| check_write(c, &check, project.as_deref(), &spec, &action))
         .await?;
     caller_may_act(&state, &actor, &s, &reach).await?;
     Ok(Json(
@@ -388,6 +423,26 @@ fn actor_of(conn: &rusqlite::Connection, run_as: &str) -> ApiResult<Option<Actor
     }
 }
 
+/// The context of one run: the event of a trigger run, and the label and
+/// cause of its writes.
+#[derive(Debug, Clone, Default)]
+struct RunCtx {
+    /// The actor of the run's writes. `None`: the `run_as` label.
+    label: Option<String>,
+    /// `data.cause` of the run's events.
+    cause: Option<Value>,
+    /// The event of a trigger run.
+    event: Option<StoredEvent>,
+    /// The escalation of a trigger run: the matches in a row.
+    escalate: Option<i64>,
+}
+
+impl RunCtx {
+    fn label(&self, actor: &Actor) -> String {
+        self.label.clone().unwrap_or_else(|| actor.label())
+    }
+}
+
 /// Run schedule `id` once. `trigger` is `cron`, `manual`, or `catch_up`;
 /// `by` labels the run's events and audit row (the `run_as` for a timed
 /// run, the caller for a run-now). A run while another run of the
@@ -398,37 +453,150 @@ pub async fn run_schedule(
     trigger: &'static str,
     by: String,
 ) -> ApiResult<Run> {
+    run_with(state, id, trigger, by.clone(), by, RunCtx::default()).await
+}
+
+/// Run trigger `id` for `event` (the trigger engine, `crate::scheduler`):
+/// its action with the templates filled from the event, or, for
+/// [`Decision::Escalate`], one mail to the escalation address. The run
+/// has the trigger `event` and the event's `seq`; its writes have the
+/// actor `schedule:<id>` and `data.cause`.
+pub async fn run_triggered(
+    state: &Shared,
+    id: &str,
+    event: StoredEvent,
+    decision: Decision,
+) -> ApiResult<Run> {
+    let label = schedules::run_label(id);
+    let by = event.actor.clone().unwrap_or_else(|| "system".into());
+    let ctx = RunCtx {
+        label: Some(label.clone()),
+        cause: Some(schedules::cause(id, &event)),
+        escalate: match decision {
+            Decision::Escalate(n) => Some(n),
+            _ => None,
+        },
+        event: Some(event),
+    };
+    run_with(state, id, "event", label, by, ctx).await
+}
+
+async fn run_with(
+    state: &Shared,
+    id: &str,
+    trigger: &'static str,
+    label: String,
+    by: String,
+    mut ctx: RunCtx,
+) -> ApiResult<Run> {
     let key = id.to_owned();
-    let who = by.clone();
+    let seq = ctx.event.as_ref().map(|e| e.seq);
+    let cause = ctx.cause.clone();
     let begin = state
         .db
-        .write(by.clone(), move |t| {
-            schedules::begin_run(t, &key, trigger, &who, Utc::now())
+        .write(label.clone(), move |t| {
+            t.cause = cause;
+            schedules::begin_run(t, &key, trigger, &by, seq, Utc::now())
         })
         .await?;
     let (run, s) = match begin {
         Begin::Overlap(r) => return Ok(r),
         Begin::Started(r, s) => (r, s),
     };
+    if let Some(Value::Object(c)) = &mut ctx.cause {
+        c.insert("run".into(), json!(run.id));
+    }
+    let cause = ctx.cause.clone();
     // The action runs in its own task: a panic in it fails the run, and
     // the run does not stay `running`.
     let st = state.clone();
-    let outcome = match tokio::spawn(async move { perform(&st, &s).await }).await {
+    let outcome = match tokio::spawn(async move { perform(&st, &s, &ctx).await }).await {
         Ok(o) => o,
         Err(e) => Outcome::failed("failed: the run task ended", e.to_string(), json!({})),
     };
     let run_id = run.id.clone();
     state
         .db
-        .write(by, move |t| {
+        .write(label, move |t| {
+            t.cause = cause;
             schedules::finish_run(t, &run_id, &outcome, Utc::now())
         })
         .await
 }
 
+/// The action of a trigger with its templates filled from the event. Text
+/// that an agent reads takes each value as quoted data, and a mail body or
+/// a card text ends with the event as a fenced block; an exec argv
+/// element and a key take the value as it is. A time schedule's action
+/// stays as it is.
+fn render_action(s: &Schedule, event: Option<&EventView<'_>>) -> ScheduleAction {
+    if !s.spec.is_trigger() {
+        return s.action.clone();
+    }
+    let data = |t: &str| template::render(t, event, Quote::Data);
+    let with_block = |text: String| match event {
+        Some(e) if text.trim().is_empty() => template::event_block(e),
+        Some(e) => format!("{text}\n\n{}", template::event_block(e)),
+        None => text,
+    };
+    match &s.action {
+        ScheduleAction::Mail {
+            to,
+            subject,
+            body,
+            thread,
+        } => ScheduleAction::Mail {
+            to: to.clone(),
+            subject: data(subject),
+            body: with_block(data(body)),
+            thread: thread.clone(),
+        },
+        ScheduleAction::Exec {
+            target,
+            cmd,
+            cwd,
+            timeout_secs,
+        } => ScheduleAction::Exec {
+            target: target.clone(),
+            cmd: cmd
+                .iter()
+                .map(|c| template::render(c, event, Quote::Plain))
+                .collect(),
+            cwd: cwd.clone(),
+            timeout_secs: *timeout_secs,
+        },
+        ScheduleAction::Card {
+            op,
+            key,
+            title,
+            body,
+            column,
+        } => ScheduleAction::Card {
+            op: *op,
+            key: template::render(key, event, Quote::Plain),
+            title: title.as_deref().map(data),
+            body: Some(with_block(body.as_deref().map(data).unwrap_or_default())),
+            column: column.clone(),
+        },
+        other => other.clone(),
+    }
+}
+
 /// Check the rights of the `run_as` actor again, then do the action.
-async fn perform(state: &Shared, s: &Schedule) -> Outcome {
-    let (run_as, project, action) = (s.run_as.clone(), s.project.clone(), s.action.clone());
+async fn perform(state: &Shared, s: &Schedule, ctx: &RunCtx) -> Outcome {
+    let view = ctx.event.as_ref().map(schedules::event_view);
+    let action = render_action(s, view.as_ref());
+    let escalate = match (&s.spec, ctx.escalate) {
+        (
+            ScheduleSpec::On {
+                escalate: Some(e), ..
+            },
+            Some(n),
+        ) => Some((e.clone(), n)),
+        _ => None,
+    };
+    let (run_as, project) = (s.run_as.clone(), s.project.clone());
+    let (checked_action, esc) = (action.clone(), escalate.clone());
     let checked = state
         .db
         .read(move |c| {
@@ -437,7 +605,11 @@ async fn perform(state: &Shared, s: &Schedule) -> Outcome {
                     "the schedule runs as `{run_as}`, which no longer exists"
                 )));
             };
-            let reach = match schedules::resolve_reach(c, project.as_deref(), &action) {
+            let reach = match &esc {
+                Some((e, _)) => schedules::escalation_reach(c, project.as_deref(), e),
+                None => schedules::resolve_reach(c, project.as_deref(), &checked_action),
+            };
+            let reach = match reach {
                 Ok(r) => r,
                 Err(e) if matches!(e.code, Code::Invalid | Code::NotFound) => {
                     return Ok(Err(e.message));
@@ -450,10 +622,30 @@ async fn perform(state: &Shared, s: &Schedule) -> Outcome {
             Ok(Ok((actor, reach)))
         })
         .await;
-    match checked {
-        Err(e) => Outcome::failed(format!("failed: {}", e.message), e.message, json!({})),
-        Ok(Err(reason)) => Outcome::refused(reason),
-        Ok(Ok((actor, reach))) => execute(state, s, actor, reach).await,
+    match (checked, escalate) {
+        (Err(e), _) => Outcome::failed(format!("failed: {}", e.message), e.message, json!({})),
+        (Ok(Err(reason)), _) => Outcome::refused(reason),
+        (Ok(Ok((actor, Reach::Mail(to)))), Some((e, n))) => {
+            let key = template::render(&e.key, view.as_ref(), Quote::Data);
+            let resets = if e.reset_on.is_empty() {
+                "an enable of the trigger".to_owned()
+            } else {
+                format!("an event of {}", e.reset_on.join(", "))
+            };
+            let body = format!(
+                "Trigger {} matched {n} events in a row for the key {key}. It does not run \
+                 its action for this key again until {resets} with the same key comes.\n\n{}",
+                s.key(),
+                view.as_ref().map(template::event_block).unwrap_or_default()
+            );
+            let subject = format!("Trigger {} escalated", s.key());
+            let mut o = mail(state, actor, to, subject, body, None, ctx).await;
+            if o.status == "ok" {
+                o.summary = format!("escalated after {n} in a row: {}", o.summary);
+            }
+            o
+        }
+        (Ok(Ok((actor, reach))), _) => execute(state, s, action, actor, reach, ctx).await,
     }
 }
 
@@ -461,8 +653,15 @@ fn failed(e: &ApiError, output: Value) -> Outcome {
     Outcome::failed(format!("failed: {}", e.message), e.message.clone(), output)
 }
 
-async fn execute(state: &Shared, s: &Schedule, actor: Actor, reach: Reach) -> Outcome {
-    match (s.action.clone(), reach) {
+async fn execute(
+    state: &Shared,
+    s: &Schedule,
+    action: ScheduleAction,
+    actor: Actor,
+    reach: Reach,
+    ctx: &RunCtx,
+) -> Outcome {
+    match (action, reach) {
         (
             ScheduleAction::Mail {
                 subject,
@@ -477,7 +676,7 @@ async fn execute(state: &Shared, s: &Schedule, actor: Actor, reach: Reach) -> Ou
             } else {
                 subject
             };
-            mail(state, actor, to, subject, body, thread).await
+            mail(state, actor, to, subject, body, thread, ctx).await
         }
         (
             ScheduleAction::Turn {
@@ -512,6 +711,29 @@ async fn execute(state: &Shared, s: &Schedule, actor: Actor, reach: Reach) -> Ou
         (ScheduleAction::Probe { .. }, Reach::Subscription { name, .. }) => {
             probe(state, &name).await
         }
+        (
+            ScheduleAction::Card {
+                op,
+                key,
+                title,
+                body,
+                column,
+            },
+            Reach::Card { project },
+        ) => {
+            let title = title
+                .filter(|t| !t.trim().is_empty())
+                .unwrap_or_else(|| format!("{}: {}", s.name, template::quote(&key)));
+            let card = CardWork {
+                project,
+                op,
+                key,
+                title,
+                body: body.unwrap_or_default(),
+                column,
+            };
+            card_action(state, actor, card, ctx).await
+        }
         _ => Outcome::failed(
             "failed: the action and its target do not match",
             "internal: the action and its reach do not match",
@@ -527,10 +749,13 @@ async fn mail(
     subject: String,
     body: String,
     thread: Option<String>,
+    ctx: &RunCtx,
 ) -> Outcome {
+    let cause = ctx.cause.clone();
     let result = state
         .db
-        .write(actor.label(), move |t| {
+        .write(ctx.label(&actor), move |t| {
+            t.cause = cause;
             let from = Address::from_actor(&actor);
             super::mail::send_checked(t, &actor, &from, &to, &subject, &body, thread.as_deref())
         })
@@ -547,6 +772,78 @@ async fn mail(
                        "held": m.held, "held_reason": m.held_reason}),
             )
         }
+        Err(e) => failed(&e, json!({})),
+    }
+}
+
+/// The rendered fields of a `card` action.
+struct CardWork {
+    project: String,
+    op: CardOp,
+    key: String,
+    title: String,
+    body: String,
+    column: Option<String>,
+}
+
+/// A `card` action, as `run_as`: `open` makes a card with the label
+/// `trigger:<key>`, or comments on the open card with that label; `close`
+/// moves the open card to `done` (or `column`), with the body as the
+/// comment. No open card to close is `ok`.
+async fn card_action(state: &Shared, actor: Actor, w: CardWork, ctx: &RunCtx) -> Outcome {
+    let cause = ctx.cause.clone();
+    let result = state
+        .db
+        .write(ctx.label(&actor), move |t| {
+            t.cause = cause;
+            let label = board::trigger_label(&w.key);
+            let open = board::find_open_by_label(t, &w.project, &label)?;
+            let body = w.body.trim().to_owned();
+            match (w.op, open) {
+                (CardOp::Open, Some(id)) => {
+                    let text = if body.is_empty() {
+                        format!("The trigger matched again: {}", template::quote(&w.key))
+                    } else {
+                        body
+                    };
+                    board::add_comment(t, &actor, &id, &text)?;
+                    Ok((
+                        format!("comment on {id}"),
+                        json!({"card": id, "op": "comment"}),
+                    ))
+                }
+                (CardOp::Open, None) => {
+                    let new = board::NewCard {
+                        title: Some(w.title),
+                        body: Some(body),
+                        column: w.column,
+                        labels: vec![label],
+                        ..Default::default()
+                    };
+                    let c = board::create_card(t, &actor, &w.project, new)?;
+                    Ok((
+                        format!("opened {}", c.id),
+                        json!({"card": c.id, "op": "open"}),
+                    ))
+                }
+                (CardOp::Close, Some(id)) => {
+                    let to = w.column.as_deref().unwrap_or(board::DONE);
+                    let comment = Some(body.as_str()).filter(|b| !b.is_empty());
+                    let c = board::move_card(t, &actor, &id, to, None, comment)?;
+                    Ok((
+                        format!("closed {} ({})", c.id, c.column),
+                        json!({"card": c.id, "op": "close", "column": c.column}),
+                    ))
+                }
+                (CardOp::Close, None) => Ok((
+                    format!("no open card for {}", template::quote(&w.key)),
+                    json!({"card": null, "op": "close"}),
+                )),
+            }
+        })
+        .await;
+    match result {
+        Ok((summary, output)) => Outcome::ok(summary, output),
         Err(e) => failed(&e, json!({})),
     }
 }
@@ -766,5 +1063,85 @@ async fn probe(state: &Shared, name: &str) -> Outcome {
             }
         }
         Err(e) => failed(&e, json!({"subscription": name})),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    fn trigger(action: ScheduleAction) -> Schedule {
+        Schedule {
+            id: "01MA0V7N6Q1Y3K2P4R5S6T7U8V".into(),
+            name: "ci".into(),
+            project: Some("terra".into()),
+            enabled: true,
+            spec: serde_json::from_value(json!({"kind": "on", "kinds": ["ci.*"]})).unwrap(),
+            action,
+            catch_up: CatchUp::Skip,
+            max_concurrency: 1,
+            created_by: "operator".into(),
+            run_as: "operator".into(),
+            next_run_at: None,
+            last_run: None,
+            runs_count: 0,
+            source: "api".into(),
+            consecutive_skips: 0,
+            disabled_reason: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+            anchor_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn an_exec_argv_takes_each_value_as_one_argument() {
+        let data = json!({"branch": "main; rm -rf / #", "repo": "wil/terrarium"});
+        let e = EventView {
+            seq: 5,
+            kind: "ci.run.failed",
+            summary: "CI failed",
+            project: Some("terra"),
+            actor: None,
+            data: &data,
+        };
+        let s = trigger(ScheduleAction::Exec {
+            target: "box".into(),
+            cmd: vec![
+                "./fix.sh".into(),
+                "--branch={{event.data.branch}}".into(),
+                "{{event.data.repo}}".into(),
+                "{{event.data.missing}}".into(),
+            ],
+            cwd: None,
+            timeout_secs: None,
+        });
+        let ScheduleAction::Exec { cmd, .. } = render_action(&s, Some(&e)) else {
+            panic!("not exec")
+        };
+        assert_eq!(
+            cmd,
+            ["./fix.sh", "--branch=main; rm -rf / #", "wil/terrarium", ""]
+        );
+        // A time schedule keeps its text as it is.
+        let mut t = s.clone();
+        t.spec = ScheduleSpec::Interval { every: "1h".into() };
+        assert_eq!(render_action(&t, Some(&e)), t.action);
+        // A mail body quotes the values and ends with the event block.
+        let m = trigger(ScheduleAction::Mail {
+            to: "worker".into(),
+            subject: "{{event.kind}}".into(),
+            body: "on {{event.data.branch}}".into(),
+            thread: None,
+        });
+        let ScheduleAction::Mail { subject, body, .. } = render_action(&m, Some(&e)) else {
+            panic!("not mail")
+        };
+        assert_eq!(subject, "`ci.run.failed`");
+        assert!(
+            body.starts_with("on `main; rm -rf / #`\n\nThe event"),
+            "{body}"
+        );
     }
 }

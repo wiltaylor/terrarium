@@ -4052,3 +4052,353 @@ async fn schedules_every_command() {
     .await;
     assert_eq!(exit_code_of(&r.result.unwrap_err()), 3);
 }
+
+/// `event emit` and `event source` (docs/api.md §20).
+#[tokio::test]
+async fn event_emit_and_sources() {
+    // emit: the operator without a project; an agent sends no project
+    // (the daemon uses its own); --project and --data pass through.
+    let ev = json!({"seq": 7, "kind": "ci.run.failed", "project": "terra"});
+    let out = ok(
+        false,
+        &["event", "emit", "ci.run.failed", "-s", "nightly failed"],
+        vec![(201, ev.clone())],
+        vec![(
+            Post,
+            "/api/events",
+            vec![],
+            Some(json!({"kind": "ci.run.failed", "summary": "nightly failed"})),
+        )],
+    )
+    .await;
+    assert_eq!(out, "event 7 ci.run.failed (terra)\n");
+    ok(
+        true,
+        &[
+            "-p",
+            "terra",
+            "event",
+            "emit",
+            "agent.note",
+            "--data",
+            r#"{"branch":"main"}"#,
+        ],
+        vec![(201, ev.clone())],
+        vec![(
+            Post,
+            "/api/events",
+            vec![],
+            Some(json!({"kind": "agent.note", "data": {"branch": "main"}, "project": "terra"})),
+        )],
+    )
+    .await;
+    let r = exec(
+        false,
+        &["event", "emit", "x", "--data", "[1]"],
+        vec![],
+        None,
+    )
+    .await;
+    assert_eq!(exit_code_of(&r.result.unwrap_err()), exit::USAGE);
+
+    // source add: the secret and the setup steps, one time.
+    let src = json!({"id": "01SRC", "name": "gh", "project": "terra", "kind": "github",
+        "enabled": true, "received": 0, "created_by": "operator",
+        "hook_path": "/hooks/terra/gh", "hook_url": "https://hooks.example.com/hooks/terra/gh",
+        "setup": ["Content type: application/json."], "secret": "s3cr3t"});
+    let out = ok(
+        false,
+        &[
+            "-p", "terra", "event", "source", "add", "gh", "--kind", "github",
+        ],
+        vec![(201, src.clone())],
+        vec![(
+            Post,
+            "/api/event-sources",
+            vec![],
+            Some(json!({"name": "gh", "project": "terra", "kind": "github"})),
+        )],
+    )
+    .await;
+    assert!(out.contains("secret:    s3cr3t"), "{out}");
+    assert!(
+        out.contains("hook URL:  https://hooks.example.com/hooks/terra/gh"),
+        "{out}"
+    );
+    assert!(out.contains("  - Content type: application/json."), "{out}");
+    ok(
+        false,
+        &[
+            "event",
+            "source",
+            "add",
+            "all",
+            "--kind",
+            "generic",
+            "--global",
+            "--disabled",
+        ],
+        vec![(201, src.clone())],
+        vec![(
+            Post,
+            "/api/event-sources",
+            vec![],
+            Some(json!({"name": "all", "project": null, "kind": "generic", "enabled": false})),
+        )],
+    )
+    .await;
+    let r = exec(
+        false,
+        &["event", "source", "add", "x", "--kind", "gitlab"],
+        vec![],
+        None,
+    )
+    .await;
+    assert_eq!(exit_code_of(&r.result.unwrap_err()), exit::USAGE);
+
+    // ls, show, enable, disable, rename, rotate, rm.
+    let out = ok(
+        false,
+        &["event", "sources", "list"],
+        vec![(200, json!([src]))],
+        vec![req(Get, "/api/event-sources")],
+    )
+    .await;
+    assert!(out.contains("terra/gh"), "{out}");
+    assert!(!out.contains("s3cr3t"), "{out}");
+    ok(
+        false,
+        &["event", "source", "show", "terra/gh"],
+        vec![(200, src.clone())],
+        vec![req(Get, "/api/event-sources/terra%2Fgh")],
+    )
+    .await;
+    for (verb, on) in [("enable", true), ("disable", false)] {
+        ok(
+            false,
+            &["event", "source", verb, "terra/gh"],
+            vec![(200, src.clone())],
+            vec![(
+                Patch,
+                "/api/event-sources/terra%2Fgh",
+                vec![],
+                Some(json!({"enabled": on})),
+            )],
+        )
+        .await;
+    }
+    ok(
+        false,
+        &["event", "source", "rename", "terra/gh", "github"],
+        vec![(200, src.clone())],
+        vec![(
+            Patch,
+            "/api/event-sources/terra%2Fgh",
+            vec![],
+            Some(json!({"name": "github"})),
+        )],
+    )
+    .await;
+    let out = ok(
+        true,
+        &["event", "source", "rotate", "gh"],
+        vec![(200, src.clone())],
+        vec![req(Post, "/api/event-sources/gh/rotate")],
+    )
+    .await;
+    assert!(out.contains("secret:    s3cr3t"), "{out}");
+    ok(
+        false,
+        &["event", "source", "rm", "_/all"],
+        vec![(204, Value::Null)],
+        vec![req(Delete, "/api/event-sources/_%2Fall")],
+    )
+    .await;
+}
+
+/// `schedule new --on ...`: a trigger (docs/api.md §19, PLAN §12c).
+#[tokio::test]
+async fn schedule_triggers() {
+    let trig = json!({"id": "01TRIG", "name": "ci", "project": "terra", "enabled": true,
+        "spec": {"kind": "on", "kinds": ["ci.run.failed", "ci.job.*"],
+                 "match": [{"path": "data.branch", "op": "glob", "value": "main"}],
+                 "dedupe": {"key": "{{event.data.repo}}", "window": "10m"},
+                 "max_per_hour": 30},
+        "action": {"type": "card", "op": "open", "key": "{{event.data.repo}}"},
+        "catch_up": "skip", "run_as": "operator", "created_by": "operator", "source": "api",
+        "next_run_at": null, "runs_count": 0, "last_run": null});
+    let at = |body: Value| (Post, "/api/schedules", vec![], Some(body));
+    ok(
+        false,
+        &[
+            "-p",
+            "terra",
+            "schedule",
+            "new",
+            "ci",
+            "--on",
+            "ci.run.failed,ci.job.*",
+            "--match",
+            "data.branch=glob:main",
+            "--match",
+            "data.sender!=bot",
+            "--match",
+            "data.attempt=in:1,2",
+            "--match",
+            "data.repo=wil/terrarium",
+            "--dedupe",
+            "{{event.data.repo}}:{{event.data.branch}}/10m",
+            "--escalate",
+            "{{event.data.repo}}",
+            "--escalate-after",
+            "3",
+            "--reset-on",
+            "ci.run.succeeded",
+            "--max-per-hour",
+            "10",
+            "--catch-up",
+            "once",
+            "--mail",
+            "worker",
+            "-s",
+            "CI failed: {{event.data.repo}}",
+            "--body",
+            "Fix {{event.data.branch}}",
+        ],
+        vec![(201, trig.clone())],
+        vec![at(json!({"name": "ci", "project": "terra",
+            "spec": {"kind": "on", "kinds": ["ci.run.failed", "ci.job.*"],
+                     "match": [
+                         {"path": "data.branch", "op": "glob", "value": "main"},
+                         {"path": "data.sender", "op": "ne", "value": "bot"},
+                         {"path": "data.attempt", "op": "in", "value": ["1", "2"]},
+                         {"path": "data.repo", "op": "eq", "value": "wil/terrarium"}],
+                     "dedupe": {"key": "{{event.data.repo}}:{{event.data.branch}}", "window": "10m"},
+                     "escalate": {"key": "{{event.data.repo}}", "after": 3,
+                                  "reset_on": ["ci.run.succeeded"]},
+                     "max_per_hour": 10},
+            "action": {"type": "mail", "to": "worker", "subject": "CI failed: {{event.data.repo}}",
+                       "body": "Fix {{event.data.branch}}"},
+            "catch_up": "once"}))],
+    )
+    .await;
+    // A card action, and JSON for the spec and the action.
+    ok(
+        false,
+        &[
+            "-p",
+            "terra",
+            "schedule",
+            "new",
+            "ci-card",
+            "--on",
+            "ci.run.succeeded",
+            "--card",
+            "close",
+            "--key",
+            "ci:{{event.data.repo}}",
+            "--body",
+            "green",
+        ],
+        vec![(201, trig.clone())],
+        vec![at(json!({"name": "ci-card", "project": "terra",
+            "spec": {"kind": "on", "kinds": ["ci.run.succeeded"]},
+            "action": {"type": "card", "op": "close", "key": "ci:{{event.data.repo}}",
+                       "body": "green"}}))],
+    )
+    .await;
+    ok(
+        false,
+        &[
+            "-p",
+            "terra",
+            "schedule",
+            "new",
+            "j",
+            "--spec-json",
+            r#"{"kind": "on", "kinds": ["git.push"]}"#,
+            "--action-json",
+            r#"{"type": "exec", "target": "box", "cmd": ["./ci.sh", "{{event.data.commit}}"]}"#,
+        ],
+        vec![(201, trig.clone())],
+        vec![at(json!({"name": "j", "project": "terra",
+            "spec": {"kind": "on", "kinds": ["git.push"]},
+            "action": {"type": "exec", "target": "box", "cmd": ["./ci.sh", "{{event.data.commit}}"]}}))],
+    )
+    .await;
+    // ls --triggers, show, and the runs with their events.
+    let out = ok(
+        false,
+        &["schedule", "ls", "--triggers"],
+        vec![(200, json!([trig]))],
+        vec![(Get, "/api/schedules", vec![("kind", "trigger")], None)],
+    )
+    .await;
+    assert!(out.contains("on ci.run.failed,ci.job.* (1 rules)"), "{out}");
+    assert!(out.contains("card open {{event.data.repo}}"), "{out}");
+    let out = ok(
+        false,
+        &["schedule", "show", "01TRIG"],
+        vec![(200, trig.clone())],
+        vec![req(Get, "/api/schedules/01TRIG")],
+    )
+    .await;
+    assert!(
+        out.contains("match:     data.branch glob \"main\""),
+        "{out}"
+    );
+    assert!(
+        out.contains("dedupe:    {{event.data.repo}} in 10m"),
+        "{out}"
+    );
+    let out = ok(
+        false,
+        &["schedule", "runs", "01TRIG"],
+        vec![(
+            200,
+            json!([{"id": "01RUN", "trigger": "event", "status": "ok", "summary": "opened TER-4",
+                    "started_at": "2026-10-26T09:00:00.000Z", "event_seq": 812,
+                    "event": {"seq": 812, "kind": "ci.run.failed", "summary": "CI failed"}}]),
+        )],
+        vec![(
+            Get,
+            "/api/schedules/01TRIG/runs",
+            vec![("limit", "20")],
+            None,
+        )],
+    )
+    .await;
+    assert!(out.contains("812 ci.run.failed"), "{out}");
+    // Usage errors: trigger flags without --on, a bad rule, a bad dedupe,
+    // a bad card op, a body with no mail or card.
+    for args in [
+        vec![
+            "-p", "terra", "schedule", "new", "x", "--every", "1h", "--match", "a=b", "--probe",
+            "s",
+        ],
+        vec![
+            "-p", "terra", "schedule", "new", "x", "--on", "k", "--match", "nobody", "--probe", "s",
+        ],
+        vec![
+            "-p", "terra", "schedule", "new", "x", "--on", "k", "--dedupe", "nowindow", "--probe",
+            "s",
+        ],
+        vec![
+            "-p", "terra", "schedule", "new", "x", "--on", "k", "--card", "reopen", "--key", "k",
+        ],
+        vec![
+            "-p", "terra", "schedule", "new", "x", "--on", "k", "--probe", "s", "--body", "b",
+        ],
+    ] {
+        let r = match Cli::try_parse_from(std::iter::once("terrarium").chain(args.iter().copied()))
+        {
+            Err(_) => continue,
+            Ok(_) => exec(false, &args, vec![], None).await,
+        };
+        let e = r
+            .result
+            .expect_err(&format!("{args:?} should fail: {:?}", r.reqs));
+        assert_eq!(exit_code_of(&e), exit::USAGE, "{args:?}: {e}");
+        assert!(r.reqs.is_empty(), "{args:?}");
+    }
+}

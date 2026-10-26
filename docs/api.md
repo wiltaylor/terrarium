@@ -1379,7 +1379,7 @@ The event log is append-only. `seq` orders it.
 | Field | Meaning |
 |---|---|
 | `seq` | The position in the log. Use it as `?since=`. |
-| `actor` | `operator`, `system`, or `agent:<ulid>`. |
+| `actor` | `operator`, `system`, or `agent:<ulid>`. An event of an event source has `source:<project>/<name>` (§20). |
 | `agent` | The agent **name**. `agent_id` and `data.agent_id` carry the ULID. Absent for project events. |
 | `project`, `card`, `session` | Absent when they do not apply. |
 | `summary` | A short line for lists. |
@@ -1406,6 +1406,8 @@ Kinds:
 | `schedule` | `{change, schedule, name, project, run?, status?, trigger?}`. `change` is `created`, `updated`, `deleted`, `enabled`, `disabled`, `run_started`, or `run_finished`. `schedule` is the schedule ULID. A run event has `run`, `status`, and `trigger` (§19). |
 | `harness` | `{change, harness, package, from, to, forced}`. `change` is `updated`: an update in the tools dir (§4, `POST /api/harnesses/{name}/update`). |
 | `host.connected`, `host.disconnected` | `{host, host_id, ...}`: `version`, `os`, `arch`, `capabilities`, `summary`, `resumed` (sessions taken back), `reason`. See §17. |
+| `event_source` | `{change, source, name, key, kind, enabled}` after a change of an event source (§20). |
+| `ci.run.*`, `ci.job.failed`, `git.push`, `pr.*`, `ext.*` | A webhook of an event source (§20.4), or `POST /api/events` (§20.5). The actor is `source:<project>/<name>`, or the caller of `POST /api/events`. |
 
 A `memory.*`, `wiki.*`, `artifact.*`, or `version.*` event that an agent
 causes names that agent in `agent` and `agent_id`, so it is in
@@ -2965,9 +2967,11 @@ files in the config dir, as `<path>: <message>`.
 ## 19. Schedules
 
 A schedule runs one action on a time spec: mail, a turn, an exec on a
-target, an agent verb, or a quota probe. The daemon runs it as the actor
-that made it (`run_as`). Before each run, the daemon checks the rights of
-that actor again. PLAN §12b has the design.
+target, an agent verb, a quota probe, or a card on the board. A trigger is
+a schedule whose spec is `on`: an event of the log (§9, §20) that matches
+starts its run (§19.4). The daemon runs a schedule as the actor that made
+it (`run_as`). Before each run, the daemon checks the rights of that
+actor again. PLAN §12b and §12c have the design.
 
 ### 19.1 Shapes
 
@@ -3002,11 +3006,11 @@ A schedule:
 | `project` | The project. `null` is a global schedule. |
 | `spec` | When it runs. See below. |
 | `action` | What it does. See below. |
-| `catch_up` | `skip` (the default) or `once`. What the daemon does at its start with a run that it missed while it was down. |
+| `catch_up` | `skip` (the default) or `once`. What the daemon does at its start with a run that it missed while it was down. For a trigger: `skip` ignores the events that came while the daemon was down; `once` runs them. |
 | `max_concurrency` | Always `1`: one run at a time. |
 | `created_by` | `operator` or `agent:<ulid>`. |
 | `run_as` | The actor of the runs. It is `created_by`, until a caller changes the `action`: then it is that caller. |
-| `next_run_at` | The next run. `null` when the schedule is disabled, or when an `at` schedule has run. |
+| `next_run_at` | The next run. `null` when the schedule is disabled, when an `at` schedule has run, and always for a trigger. |
 | `last_run` | `{at, status, summary, run_id}` of the last run, or `null`. |
 | `runs_count` | The runs so far, the skipped runs too. |
 | `source` | `api`, `file` (`[[schedules]]` in `projects/<name>.toml`), or `fleet:<name>` (§18.1). |
@@ -3020,6 +3024,7 @@ The specs:
 | `{"kind": "cron", "expr": "*/15 * * * *", "tz": "UTC"}` | Five fields: minute, hour, day of month, month, day of week. The day of week is `0`-`7` (`0` and `7` are Sunday) or `SUN`-`SAT`. `@hourly`, `@daily`, `@weekly`, `@monthly`, and `@yearly` are also valid. `tz` is `UTC` (the default) or an IANA zone, for example `Europe/London`. |
 | `{"kind": "interval", "every": "30m"}` | A number and a unit (`s`, `m`, `h`, `d`), or a sum, for example `1h30m`. The minimum is 60 s. The runs are at `start + k * every`; a new spec sets a new start. |
 | `{"kind": "at", "at": "2026-11-01T02:00:00Z"}` | One run at an RFC 3339 time in the future. |
+| `{"kind": "on", "kinds": ["ci.run.failed"], "match"?, "dedupe"?, "escalate"?, "max_per_hour"?: 30}` | A trigger: each matching event starts a run. See §19.4. |
 
 The actions:
 
@@ -3030,6 +3035,11 @@ The actions:
 | `{"type": "exec", "target", "cmd": ["make", "test"], "cwd"?, "timeout_secs"?}` | Run a command on a target through the executor (§17.4), as `run_as`, with the same policy, leases, and `target.exec` audit row as any exec. `timeout_secs` is 300 by default, 3600 at most. |
 | `{"type": "agent", "agent", "verb": "start\|stop\|restart"}` | The agent verb of §6.2, as `run_as`. |
 | `{"type": "probe", "subscription"}` | Run the quota probe of the subscription (§16.3). |
+| `{"type": "card", "op": "open\|close", "key", "title"?, "body"?, "column"?}` | A card on the board of the schedule's project (§8), as `run_as`. `open`: make a card with the label `trigger:<key>` in `column` (default `backlog`), or, when a card with that label is open (not in `done`, not archived), add `body` to it as a comment. `close`: move the open card with that label to `column` (default `done`), with `body` as the comment. No open card to close is `ok`. A global schedule cannot have a card action. |
+
+A trigger runs only `mail`, `exec`, and `card`. To notify an agent, a
+trigger mails it: `turn`, `agent`, and `probe` on a trigger are `422`
+(`details.field` is `action`).
 
 A run:
 
@@ -3052,17 +3062,19 @@ A run:
 | Field | Meaning |
 |---|---|
 | `status` | `running`, then `ok`, `failed`, or `skipped`. |
-| `trigger` | `cron` (the timer, for each spec kind), `manual` (`POST .../run`), or `catch_up`. |
+| `trigger` | `cron` (the timer, for each spec kind), `manual` (`POST .../run`), `catch_up`, or `event` (a trigger). |
 | `summary` | One line. A skip starts with `skipped:`. |
-| `output` | `exec`: `target`, `cmd`, `exit_code`, `end`, and the last 4000 bytes of `stdout` and `stderr`. `mail`: `message_id`, `thread_id`, `to`, `held`, `held_reason`. `turn`: `agent`, `started`, `delivery`, `status_before`. `agent`: `agent`, `verb`, `status`. `probe`: the probe outcome with `windows`. |
+| `output` | `exec`: `target`, `cmd`, `exit_code`, `end`, and the last 4000 bytes of `stdout` and `stderr`. `mail`: `message_id`, `thread_id`, `to`, `held`, `held_reason`. `turn`: `agent`, `started`, `delivery`, `status_before`. `agent`: `agent`, `verb`, `status`. `probe`: the probe outcome with `windows`. `card`: `card` (the ID, or `null`), `op` (`open`, `comment`, or `close`), and `column` for a close. |
 | `error` | Why the run failed or was skipped. |
-| `actor` | Who triggered the run: `run_as` for a timed run, the caller for a run-now. |
+| `actor` | Who triggered the run: `run_as` for a timed run, the caller for a run-now, the actor of the event for a trigger run (for example `source:terra/github`). |
+| `event_seq` | The `seq` of the event that started a trigger run. `null` for the other runs. |
+| `event` | `{seq, kind, summary}` of that event, while the log has it. Absent for the other runs. |
 
 ### 19.2 Endpoints
 
 | Method and path | Body | Answer |
 |---|---|---|
-| `GET /api/schedules?project=&enabled=` | | `200`, a list. With `project`: the project's schedules, and the global ones when the caller may read them. Without: all for the operator and a sysadmin; the caller's project for another agent. |
+| `GET /api/schedules?project=&enabled=&kind=` | | `200`, a list. With `project`: the project's schedules, and the global ones when the caller may read them. Without: all for the operator and a sysadmin; the caller's project for another agent. `kind=time` gives only the time schedules, `kind=trigger` only the triggers; another value is `400`. |
 | `POST /api/schedules` | `{name, project?, spec, action, enabled?: true, catch_up?: "skip"}` | `201`, the schedule. An absent `project` is the agent caller's project (the operator: global). `null` is global. |
 | `GET /api/schedules/{id}` | | `200`, the schedule. `{id}` is a ULID, `project/name` (encode the `/` as `%2F`), or a name. |
 | `PATCH /api/schedules/{id}` | `{name?, spec?, action?, enabled?, catch_up?}` | `200`, the schedule. A new `action` makes the caller the `run_as`. |
@@ -3076,7 +3088,7 @@ Errors:
 
 | Error | When |
 |---|---|
-| `422 invalid` | A field is not valid. The message starts with the field, and `details.field` names it: `name`, `spec`, `spec.expr`, `spec.tz`, `spec.every`, `spec.at`, `action`, `action.to`, `action.body`, `action.agent`, `action.text`, `action.target`, `action.cmd`, `action.cwd`, `action.timeout_secs`, `action.subscription`, `max_concurrency`, `project`. A cron error shows the expression: ``spec.expr: bad cron expression `*/15 * * *`: use five fields ...``. An interval under 60 s and an `at` in the past are `422`. |
+| `422 invalid` | A field is not valid. The message starts with the field, and `details.field` names it: `name`, `spec`, `spec.expr`, `spec.tz`, `spec.every`, `spec.at`, `action`, `action.to`, `action.body`, `action.agent`, `action.text`, `action.target`, `action.cmd`, `action.cwd`, `action.timeout_secs`, `action.subscription`, `action.subject`, `action.key`, `action.title`, `action.column`, `max_concurrency`, `project`, and for a trigger `spec.kinds`, `spec.match`, `spec.dedupe.key`, `spec.dedupe.window`, `spec.escalate.key`, `spec.escalate.after`, `spec.escalate.reset_on`, `spec.escalate.to`, `spec.max_per_hour`. A cron error shows the expression: ``spec.expr: bad cron expression `*/15 * * *`: use five fields ...``. An interval under 60 s and an `at` in the past are `422`. |
 | `403 forbidden` | The rules of §19.3. |
 | `409 conflict` | The name is in use in the scope, or the project has `TERRARIUM_MAX_SCHEDULES_PER_PROJECT` (default 20) schedules. |
 | `409 file_managed` | A `PATCH`, `DELETE`, `enable`, or `disable` of a `file` schedule. Edit `projects/<name>.toml`, then `POST /api/reload`. A run-now is allowed. |
@@ -3117,6 +3129,8 @@ curl ... 'localhost/api/schedules/terrarium%2Ftests/runs?limit=1'
   When `run_as` may not use the target, the run is `failed` with the
   policy error.
 - `probe`: a subscription that an agent of the project uses.
+- `card`: the board of the project.
+- A trigger's `escalate.to`: as for `mail`.
 
 A global schedule needs a sysadmin. An enable and a run-now check the
 action again; a disable and a delete check only the scope. An agent that
@@ -3171,4 +3185,328 @@ timed run. The actions write their own rows as well: `agent.send`,
 fields `name`, `spec`, `action`, `enabled`, and `catch_up`. A fleet
 schedule has the key `project/name` and the `source` `fleet:<name>`; an
 apply makes or updates it, and `--prune` deletes one that the file drops.
-A file schedule runs as `operator`.
+A file schedule runs as `operator`. A trigger in a file has the spec
+`on`, with the same fields as in JSON:
+
+```toml
+[[schedules]]
+name = "ci-failed"
+[schedules.spec]
+kind = "on"
+kinds = ["ci.run.failed"]
+match = [{ path = "data.branch", op = "glob", value = "main" }]
+dedupe = { key = "{{event.data.repo}}:{{event.data.branch}}", window = "10m" }
+[schedules.action]
+type = "mail"
+to = "worker"
+subject = "CI failed: {{event.data.repo}}"
+body = "Fix the build. Run: {{event.data.run_url}}"
+```
+
+### 19.4 Triggers
+
+A trigger is a schedule with the spec `on`. It has the same rows, rights
+(§19.3), run history, cap (`TERRARIUM_MAX_SCHEDULES_PER_PROJECT` counts
+schedules and triggers together), project files, and fleets.
+
+The spec:
+
+```json
+{
+  "kind": "on",
+  "kinds": ["ci.run.failed", "ci.job.*"],
+  "match": [
+    {"path": "data.branch", "op": "glob", "value": "main"},
+    {"path": "data.repo", "op": "in", "value": ["wil/terrarium", "wil/site"]}
+  ],
+  "dedupe": {"key": "{{event.data.repo}}:{{event.data.branch}}", "window": "10m"},
+  "escalate": {"key": "{{event.data.repo}}:{{event.data.branch}}", "after": 3,
+               "reset_on": ["ci.run.succeeded"], "to": "operator"},
+  "max_per_hour": 30
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `kinds` | One or more event kinds. `*` matches any text, `?` one character. |
+| `match` | Zero or more rules; every rule must hold. `path` is `project`, `kind`, `actor`, `summary`, or `data.<dotted path>` (a number indexes a list). `op` is `eq` (the default), `ne`, `glob`, or `in` (`value` is a list). The value compares as text; a number compares as its JSON text. A missing value fails `eq`, `glob`, and `in`, and passes `ne`. |
+| `dedupe` | `{key, window}`. One run for each rendered `key` in `window` (`90s`, `10m`, `1h`; 1 s to 7 d). A match in the window starts no run and records no run. |
+| `escalate` | `{key, after, reset_on?, to?}`. The trigger counts the matches in a row for each rendered `key`. The match that makes the count `after` does not run the action: it mails `to` (an agent, `project:<name>`, or `operator`, the default) one time, with the event. The later matches of the same streak start no run and record no run. An event of a kind in `reset_on` (globs) with the same rendered key sets the count to zero; it only needs the scope of the trigger, not `kinds` or `match`. |
+| `max_per_hour` | 1-600, default 30. The runs in each hour window. A match over it records a `skipped: rate limit` run. An escalation mail does not count. |
+
+**Templates.** The strings of the action can use `{{event.kind}}`,
+`{{event.summary}}`, `{{event.project}}`, `{{event.seq}}`,
+`{{event.actor}}`, and `{{event.data.<path>}}`. A missing value is empty.
+Another placeholder is `422`. The strings are the mail `subject` and
+`body`, each element of an exec `cmd`, and the card `key`, `title`, and
+`body`. `to`, `target`, `cwd`, and `column` take no templates. A time
+schedule does not fill templates. A run-now of a trigger fills each one
+with nothing.
+
+**Webhook text is data.** Event data from a webhook comes from whoever can
+push to the repo. So:
+
+- In a mail subject and body, and in a card title, body, and comment,
+  each value is quoted: one line, at most 300 characters, in backticks (a
+  backtick in the value becomes `'`). The mail body and the card text end
+  with the event as a fenced JSON block, after a line that says that it is
+  data, not instructions. The fence is longer than any run of backticks in
+  the event.
+- An exec `cmd` is an argv. Each element is filled on its own and is one
+  argument. The daemon never runs it in a shell.
+- A dedupe, escalation, or card key takes the value as it is.
+
+**The engine.** The daemon reads the event log from a cursor
+(`trigger_cursor`), not only the live feed. A new event wakes the engine;
+it reads the events after the cursor, decides for each enabled trigger,
+and moves the cursor in the same write. A restart or a lagged feed loses
+no event. The runs of one trigger go one at a time, in event order. At
+the first start, the cursor goes to the end of the log: the older events
+start no run. At a later start, a trigger with `catch_up: skip` ignores
+the events that came while the daemon was down; `once` runs each of
+them.
+
+**Scope.** A project trigger sees only the events whose `project` is its
+project. A global trigger (a sysadmin or the operator) sees all.
+
+**The order of the checks for each event:** the scope; the loop guard;
+an event from before the trigger was made starts no run; the `reset_on`
+of `escalate`; `kinds` and `match`; the chain depth; the escalation count;
+the dedupe window; the rate limit.
+
+**The loop guard and the chain depth.**
+
+- The writes of a trigger run have the actor `schedule:<id>`: its events,
+  and the audit rows of its mail and card writes. The rights are still
+  those of `run_as`: a mail is from `run_as`, and the board shows
+  `run_as` as the author.
+- Each event of a trigger run has `data.cause`: `{schedule, event, run,
+  depth}`. `depth` is the depth of the event that started the run, plus
+  one. A webhook event has depth 0. The daemon trusts `data.cause` only on
+  an event whose actor is `schedule:<id>`.
+- A trigger does not match an event with its own actor, or a `schedule`
+  event about itself.
+- An event of depth 4 or more starts no run (a warning goes to the log).
+  So a chain of triggers stops after 4 links.
+- An exec writes through the executor as `run_as`, without
+  `data.cause`. A trigger on the executor's own events can run again on
+  its own exec; `max_per_hour` stops it.
+
+**Counters.** `trigger_state` keeps the dedupe time, the escalation count,
+and the hour window of each trigger and key. At the daemon start and once
+a day, the engine drops a row that did not change for 8 days, except an
+open escalation.
+
+Example: when CI fails on `main`, open a card and mail the worker; when
+CI is green again, close the card.
+
+```sh
+curl ... localhost/api/schedules -d '{"name": "ci-failed", "project": "terrarium",
+  "spec": {"kind": "on", "kinds": ["ci.run.failed"],
+           "match": [{"path": "data.branch", "op": "eq", "value": "main"}],
+           "dedupe": {"key": "{{event.data.repo}}", "window": "10m"},
+           "escalate": {"key": "{{event.data.repo}}", "after": 3, "reset_on": ["ci.run.succeeded"]}},
+  "action": {"type": "mail", "to": "worker", "subject": "CI failed: {{event.data.repo}}",
+             "body": "Fix the build on {{event.data.branch}}. Run: {{event.data.run_url}}"}}'
+curl ... localhost/api/schedules -d '{"name": "ci-card", "project": "terrarium",
+  "spec": {"kind": "on", "kinds": ["ci.run.failed"]},
+  "action": {"type": "card", "op": "open", "key": "ci:{{event.data.repo}}",
+             "title": "CI failed on {{event.data.repo}}"}}'
+curl ... localhost/api/schedules -d '{"name": "ci-card-close", "project": "terrarium",
+  "spec": {"kind": "on", "kinds": ["ci.run.succeeded"]},
+  "action": {"type": "card", "op": "close", "key": "ci:{{event.data.repo}}", "body": "Green again."}}'
+curl ... 'localhost/api/schedules?kind=trigger'
+```
+
+## 20. Event sources and ingest
+
+An event source is one webhook sender: `github`, `forgejo`, or `generic`.
+It posts to the ingest listener, and each good request becomes one event
+in the log (§9). A trigger (§19) can then act on the event. PLAN §12c has
+the design.
+
+### 20.1 Shapes
+
+A source:
+
+```json
+{
+  "id": "01MA1C3K8V0Q6Y2W4E7R9T5U1P",
+  "name": "gh",
+  "project": "terrarium",
+  "kind": "github",
+  "enabled": true,
+  "created_by": "operator",
+  "last_seen": "2026-10-26T09:04:13.120Z",
+  "last_error": null,
+  "received": 12,
+  "created_at": "2026-10-26T08:00:00.000Z",
+  "updated_at": "2026-10-26T08:00:00.000Z",
+  "hook_path": "/hooks/terrarium/gh",
+  "hook_url": "https://hooks.example.com/hooks/terrarium/gh",
+  "setup": ["GitHub: the repository (or organisation) > Settings > Webhooks > Add webhook.", "..."]
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `name` | 1-63 of `a-z`, `0-9`, `-`, `_`. Unique in its scope: the project, or the global scope. |
+| `project` | The project. `null` is a global source. The events of the source go into this project; a global source makes events with no project. |
+| `kind` | `github`, `forgejo`, or `generic`. It sets the signature check and how the body becomes an event (§20.3). |
+| `last_seen` | The last request with a good signature. |
+| `last_error` | The time and the reason of the last failed request, for example `bad or missing signature`. A good request clears it. The sender gets no detail; the admin reads it here. |
+| `received` | The events that the source added to the log. |
+| `hook_path` | `/hooks/{project}/{name}`. `_` is the project part of a global source. |
+| `hook_url` | `TERRARIUM_INGEST_PUBLIC_URL` and `hook_path`. Without it, the daemon makes the URL from `TERRARIUM_INGEST_ADDR` (`0.0.0.0` becomes `localhost`), and `hook_note` says so. `null` when the ingest listener is off. |
+| `setup` | Short setup steps for the sender: the content type, the secret, and which events to select. |
+| `secret` | 32 random bytes in hex. **Only** in the answers of `POST /api/event-sources` and `POST .../rotate`. No list, show, event, or audit row has it. |
+
+### 20.2 Endpoints
+
+| Method and path | Body | Answer |
+|---|---|---|
+| `GET /api/event-sources?project=` | | `200`, a list. With `project`: that project's sources, and the global ones when the caller may read them. Without: all for the operator and a sysadmin; the caller's project for another agent. |
+| `POST /api/event-sources` | `{name, kind, project?, enabled?: true}` | `201`, the source with `secret`. An absent `project` is the agent caller's project (the operator: global). `null` is global. |
+| `GET /api/event-sources/{id}` | | `200`, the source. `{id}` is a ULID, `project/name`, `_/name` (encode the `/` as `%2F`), or a name. |
+| `PATCH /api/event-sources/{id}` | `{name?, enabled?}` | `200`, the source. A new name changes the hook URL. |
+| `POST /api/event-sources/{id}/rotate` | | `200`, the source with a new `secret`. The old secret stops at once. |
+| `DELETE /api/event-sources/{id}` | | `204`. |
+| `POST /api/events` | `{kind, summary?, data?, project?}` | `201`, the event (§9). See §20.5. |
+
+Errors: `422 invalid` (a bad name or kind), `409 conflict` (the name is
+in use in the scope), `404 not_found` (no such source or project), `403
+forbidden` (the rules below).
+
+| Caller | Read | Create, change, rotate, delete |
+|---|---|---|
+| operator | all | all |
+| `sysadmin` | all | all, global sources too |
+| `project_admin` | its project's | its project's |
+| `member` | its project's | no |
+
+Each change writes an audit row (`event_source.create`, `.update`,
+`.rotate`, `.delete`) and an `event_source` event (`{change, source, name,
+key, kind, enabled}`; `change` is `created`, `updated`, `enabled`,
+`disabled`, `rotated`, or `deleted`).
+
+### 20.3 The ingest listener
+
+The ingest listener is a TCP listener of its own on
+`TERRARIUM_INGEST_ADDR` (unset: off). Compose sets `0.0.0.0:8083` and
+publishes `${TERRARIUM_INGEST_PORT:-8083}`. The listener serves only two
+routes. The API and the dashboard are not on it, so you can open this
+port to a forge and keep the API closed.
+
+| Route | Answer |
+|---|---|
+| `GET /healthz` | `200 ok`. |
+| `POST /hooks/{project}/{source}` | See below. `_` as `{project}` names a global source. |
+
+The body limit is 1 MiB (`413` above it). The body must be
+`application/json`. A form body (`application/x-www-form-urlencoded`) gets
+`415`, with a hint to change the content type of the webhook.
+
+The signature check of each kind:
+
+| `kind` | Signature | Event | Delivery ID |
+|---|---|---|---|
+| `github` | `X-Hub-Signature-256: sha256=<hex>`, the HMAC-SHA256 of the body with the secret | `X-GitHub-Event` | `X-GitHub-Delivery` |
+| `forgejo` | `X-Forgejo-Signature: <hex>` or `X-Gitea-Signature: <hex>` (no prefix); else `X-Hub-Signature-256` | `X-Forgejo-Event`, else `X-Gitea-Event` | `X-Forgejo-Delivery`, else `X-Gitea-Delivery` |
+| `generic` | `X-Terrarium-Signature: sha256=<hex>`, or `Authorization: Bearer <secret>` | the `kind` of the body | `X-Terrarium-Delivery` (optional) |
+
+The compare is constant-time. The answers:
+
+| Status and body | When |
+|---|---|
+| `401` `{"error": {"code": "unauthorized", "message": "unauthorized"}}` | An unknown source, a source of another project, a disabled source, or a bad or missing signature. The answer is the same for each, with no detail. The source keeps the reason in `last_error`. |
+| `200 {"status": "accepted", "seq": 812, "kind": "ci.run.failed"}` | The event is in the log. |
+| `200 {"status": "duplicate"}` | The source saw this delivery ID before (the daemon keeps them for 7 days). No event. |
+| `200 {"status": "pong"}` | A GitHub `ping`. No event. |
+| `200 {"status": "ignored", "reason": "..."}` | A known webhook that makes no event, for example a job that succeeded or a run that waits. |
+| `400 {"status": "rejected", "error": "..."}` | A good signature, but the body is not JSON, the event header is missing, or a generic body is not valid. |
+
+A good request sets `last_seen`. The event has the actor
+`source:<project>/<name>` (`source:_/<name>` for a global source) and the
+project of the source.
+
+A generic body is `{kind, summary?, data?}`. The kind starts with `ci.`,
+`git.`, `pr.`, `ext.`, or `agent.`, so a script cannot pose as the daemon.
+`data` is a JSON object.
+
+### 20.4 Standard events
+
+`terrarium-core` (`ci.rs`) turns a GitHub or Forgejo webhook into one
+event. `docs/compat.md`, "Webhooks (GitHub, Forgejo)", records the payload
+shapes and the versions.
+
+| Webhook | Event |
+|---|---|
+| GitHub `workflow_run` `requested` | `ci.run.started` |
+| GitHub `workflow_run` `completed` | by `conclusion`: `success` `ci.run.succeeded`; `failure`, `timed_out`, `startup_failure` `ci.run.failed`; `cancelled` `ci.run.cancelled`; any other (`neutral`, `skipped`, `stale`, `action_required`) `ci.run.completed` |
+| GitHub `workflow_run` `in_progress` | ignored |
+| GitHub `workflow_job` `completed` with `failure` or `timed_out` | `ci.job.failed` |
+| GitHub `workflow_job`, any other | ignored |
+| Forgejo 17 `workflow_run_running`, `_success`, `_failure`, `_cancelled`, `_skipped` | `ci.run.started`, `.succeeded`, `.failed`, `.cancelled`, `.completed` |
+| Forgejo 17 `workflow_run_waiting`, `_blocked` | ignored |
+| Forgejo 17 `workflow_job_failure` | `ci.job.failed` |
+| Forgejo 17 `workflow_job_*`, any other | ignored |
+| Forgejo 12-16 `action_run_failure` | `ci.run.failed` |
+| Forgejo 12-16 `action_run_success`, `action_run_recover` | `ci.run.succeeded` |
+| `status` (GitHub; Gitea 1.23 and later. Forgejo does not send it) | by `state`: `pending` `ci.run.started`; `success` `ci.run.succeeded`; `failure`, `error` `ci.run.failed` |
+| `push` | `git.push` |
+| `pull_request` `opened`, `reopened` | `pr.opened` |
+| `pull_request` `closed` | `pr.merged` when `pull_request.merged` is true, else `pr.closed` |
+| `pull_request` `synchronize` (GitHub), `synchronized` (Forgejo), `edited`, `ready_for_review`, `converted_to_draft` | `pr.updated` |
+| GitHub `ping` | no event (`pong`) |
+| Any other webhook, and any other `pull_request` action | `ext.<provider>.<event>`, with `data.action` |
+
+`data` of each event:
+
+| Field | Meaning |
+|---|---|
+| `source` | The source key, `project/name` or `_/name`. |
+| `provider` | `github`, `forgejo`, or `generic`. |
+| `event`, `action`, `delivery` | The event header, the `action` of the payload, and the delivery ID. |
+| `repo`, `repo_url` | `owner/name` and its web URL. |
+| `branch`, `commit` | The branch (`null` for a tag or a Forgejo pull request run) and the commit SHA. |
+| `run_id`, `run_url` | The run, and the web page of the run (of the job, for `ci.job.failed`). |
+| `workflow`, `job` | The workflow name (Forgejo: the workflow file, for example `ci.yml`; `status`: the `context`), and the job name. |
+| `conclusion`, `attempt` | The conclusion or status, and the run attempt. |
+| `sender` | The login of the user who caused the webhook. |
+| `pr` | `{number, title, url, head, base, author, merged, merged_by, draft}` for `pr.*`; `{number, head, base}` for a run of a pull request; else `null`. |
+| `ref`, `tag`, `before`, `deleted`, `commits`, `message`, `pusher`, `compare_url` | `git.push` only. `message` is the first line of the head commit. |
+
+A field that the webhook does not have is `null`. All text from a payload
+is one line: the daemon changes control characters to spaces and cuts a
+field at 200 characters (a summary at 300). The text still comes from
+whoever can push to the repository. The daemon never puts it in a shell,
+and a mail shows it as quoted data.
+
+### 20.5 `POST /api/events`
+
+A client adds one event to the log. The answer is `201` with the event.
+
+| Caller | May emit |
+|---|---|
+| operator | Any kind, into any project (`project`), or into no project (absent or `null`). |
+| agent | Into its own project only (an absent `project` is its project; another is `403`). Only the kinds that start with `ci.`, `git.`, `pr.`, `ext.`, or `agent.`; a kind of the daemon (`status`, `mail`, `card`, `turn_start`, `schedule`, `memory.*`, ...) is `403`. The event names the agent in `agent` and `agent_id`. |
+
+`kind` is 1-100 of `a-z`, `0-9`, `_`, `-`, in segments split by `.`,
+starting with a letter (else `422`). `data` is a JSON object (default
+`{}`). `summary` is one line of at most 300 characters (default: the
+kind). The actor is the caller (`operator` or `agent:<ulid>`).
+
+```sh
+curl --unix-socket "$SOCK" -H 'content-type: application/json' localhost/api/events \
+  -d '{"kind": "ci.run.failed", "project": "terrarium", "summary": "nightly failed", "data": {"branch": "main"}}'
+```
+
+Example: a project_admin agent makes a GitHub source and gives the URL
+and the secret to the repository owner.
+
+```sh
+terrarium event source add gh --kind github
+```
+
+**Retention.** The daily prune timer deletes the delivery IDs that are
+older than 7 days.

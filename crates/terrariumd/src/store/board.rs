@@ -233,6 +233,31 @@ pub fn project_of(conn: &Connection, id: &str) -> ApiResult<String> {
     Ok(find_row(conn, id)?.project)
 }
 
+/// The label that marks the card a trigger keeps open for `key` (a `card`
+/// action, docs/api.md §19): `trigger:<key>`.
+pub fn trigger_label(key: &str) -> String {
+    format!("trigger:{key}")
+}
+
+/// The newest card of `project` with the label `label` that is not in
+/// `done` and not archived.
+pub fn find_open_by_label(
+    conn: &Connection,
+    project: &str,
+    label: &str,
+) -> ApiResult<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT c.id FROM cards c JOIN board_columns col ON col.id = c.column_id
+             WHERE c.project = ?1 AND c.archived = 0 AND col.name <> ?3
+               AND EXISTS (SELECT 1 FROM json_each(c.labels) WHERE value = ?2)
+             ORDER BY c.number DESC LIMIT 1",
+            params![project, label, DONE],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
 fn deps(conn: &Connection, id: &str) -> ApiResult<Vec<String>> {
     let mut stmt =
         conn.prepare("SELECT depends_on FROM card_deps WHERE card = ?1 ORDER BY depends_on")?;

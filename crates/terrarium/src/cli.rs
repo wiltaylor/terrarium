@@ -166,6 +166,12 @@ pub enum Command {
     Audit(AuditArgs),
     /// The event log
     Events(EventsArgs),
+    /// Emit an event; manage the event sources (webhooks from GitHub,
+    /// Forgejo, or a script)
+    Event {
+        #[command(subcommand)]
+        command: EventCmd,
+    },
     /// Forward a harness hook (JSON on stdin) to the runner socket
     Hook {
         /// The hook name, for example `Stop` or `UserPromptSubmit`
@@ -1014,10 +1020,17 @@ pub enum ScheduleCmd {
         /// Only the disabled schedules
         #[arg(long = "disabled")]
         disabled_only: bool,
+        /// Only the triggers (spec `on`)
+        #[arg(long, conflicts_with = "time")]
+        triggers: bool,
+        /// Only the time schedules (cron, interval, at)
+        #[arg(long)]
+        time: bool,
     },
     /// Show one schedule: a ULID, `project/name`, or a name
     Show { schedule: String },
-    /// Make a schedule: one time spec and one action
+    /// Make a schedule: one time spec (or `--on` for a trigger) and one
+    /// action
     New {
         name: String,
         #[command(flatten)]
@@ -1055,37 +1068,75 @@ pub enum ScheduleCmd {
 #[derive(Debug, Args)]
 pub struct ScheduleArgs {
     /// A five-field cron expression, for example "*/15 * * * *", or @hourly, @daily
-    #[arg(long, conflicts_with_all = ["every", "at"])]
+    #[arg(long, conflicts_with_all = ["every", "at", "on", "spec_json"])]
     pub cron: Option<String>,
     /// An interval: 90s, 30m, 2h, 1d, or 1h30m (60 s or more)
-    #[arg(long, conflicts_with = "at")]
+    #[arg(long, conflicts_with_all = ["at", "on", "spec_json"])]
     pub every: Option<String>,
     /// One run at an RFC 3339 time, or `+30m` from now
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["on", "spec_json"])]
     pub at: Option<String>,
+    /// A trigger: run on each event of these kinds (globs, for example
+    /// ci.run.failed or 'ci.job.*'; repeat or separate with commas)
+    #[arg(
+        long,
+        value_name = "KIND",
+        value_delimiter = ',',
+        conflicts_with = "spec_json"
+    )]
+    pub on: Vec<String>,
+    /// A trigger rule: PATH=VALUE, PATH!=VALUE, PATH=glob:PATTERN, or
+    /// PATH=in:A,B. PATH is project, kind, actor, summary, or data.<path>
+    #[arg(long = "match", value_name = "RULE", requires = "on")]
+    pub matches: Vec<String>,
+    /// One run per key in a window: KEY/WINDOW, for example
+    /// '{{event.data.repo}}:{{event.data.branch}}/10m'
+    #[arg(long, value_name = "KEY/WINDOW", requires = "on")]
+    pub dedupe: Option<String>,
+    /// Escalate per key: after --escalate-after matches in a row, mail
+    /// --escalate-to once instead of the action
+    #[arg(long, value_name = "KEY", requires_all = ["on", "escalate_after"])]
+    pub escalate: Option<String>,
+    /// The matches in a row that escalate
+    #[arg(long, value_name = "N", requires = "escalate")]
+    pub escalate_after: Option<u32>,
+    /// Who gets the escalation mail (default: operator)
+    #[arg(long, value_name = "TO", requires = "escalate")]
+    pub escalate_to: Option<String>,
+    /// Kinds whose events with the same key reset the escalation count
+    #[arg(
+        long,
+        value_name = "KIND",
+        value_delimiter = ',',
+        requires = "escalate"
+    )]
+    pub reset_on: Vec<String>,
+    /// The most runs of a trigger in an hour (default 30)
+    #[arg(long, value_name = "N", requires = "on")]
+    pub max_per_hour: Option<u32>,
+    /// The spec as JSON, for example '{"kind": "on", "kinds": ["ci.run.failed"]}'
+    #[arg(long, value_name = "JSON")]
+    pub spec_json: Option<String>,
+    /// The action as JSON (docs/api.md §19), in place of the action flags
+    #[arg(long, value_name = "JSON", conflicts_with_all = ["mail", "turn", "exec", "agent", "probe", "card"])]
+    pub action_json: Option<String>,
     /// The zone of a cron expression: UTC (the default) or an IANA zone
     #[arg(long, requires = "cron")]
     pub tz: Option<String>,
     /// Action: send mail to an agent, `project:<name>`, or `operator`
-    #[arg(long, value_name = "TO", conflicts_with_all = ["turn", "exec", "agent", "probe"])]
+    #[arg(long, value_name = "TO", conflicts_with_all = ["turn", "exec", "agent", "probe", "card"])]
     pub mail: Option<String>,
     /// The mail subject
     #[arg(long, short = 's', requires = "mail")]
     pub subject: Option<String>,
-    /// The mail body, or `-` for stdin
-    #[arg(
-        long,
-        short = 'b',
-        value_name = "TEXT",
-        allow_hyphen_values = true,
-        requires = "mail"
-    )]
+    /// The mail body or the card text, or `-` for stdin
+    #[arg(long, short = 'b', value_name = "TEXT", allow_hyphen_values = true)]
     pub body: Option<String>,
     /// Post each mail on this thread (the loop guard counts them)
     #[arg(long, requires = "mail")]
     pub thread: Option<String>,
-    /// Action: type a turn into this agent
-    #[arg(long, value_name = "AGENT", conflicts_with_all = ["exec", "agent", "probe"])]
+    /// Action: type a turn into this agent (not on a trigger)
+    #[arg(long, value_name = "AGENT", conflicts_with_all = ["exec", "agent", "probe", "card"])]
     pub turn: Option<String>,
     /// The turn text, or `-` for stdin
     #[arg(long, allow_hyphen_values = true, requires = "turn")]
@@ -1094,7 +1145,7 @@ pub struct ScheduleArgs {
     #[arg(long, requires = "turn")]
     pub start_if_stopped: bool,
     /// Action: run the command after `--` on this target
-    #[arg(long, value_name = "TARGET", conflicts_with_all = ["agent", "probe"])]
+    #[arg(long, value_name = "TARGET", conflicts_with_all = ["agent", "probe", "card"])]
     pub exec: Option<String>,
     /// The working directory on the target (an absolute path)
     #[arg(long, requires = "exec")]
@@ -1103,14 +1154,27 @@ pub struct ScheduleArgs {
     #[arg(long, requires = "exec")]
     pub timeout: Option<u64>,
     /// Action: start, stop, or restart this agent (with --verb)
-    #[arg(long, value_name = "AGENT", conflicts_with = "probe")]
+    #[arg(long, value_name = "AGENT", conflicts_with_all = ["probe", "card"])]
     pub agent: Option<String>,
     /// `start`, `stop`, or `restart`
     #[arg(long, requires = "agent")]
     pub verb: Option<String>,
     /// Action: run the quota probe of this subscription
-    #[arg(long, value_name = "SUBSCRIPTION")]
+    #[arg(long, value_name = "SUBSCRIPTION", conflicts_with = "card")]
     pub probe: Option<String>,
+    /// Action: `open` a card (or comment on the open card with the same
+    /// --key), or `close` it (move it to done)
+    #[arg(long, value_name = "open|close", requires = "key")]
+    pub card: Option<String>,
+    /// The card key: one open card per key (templates allowed)
+    #[arg(long, requires = "card")]
+    pub key: Option<String>,
+    /// The title of a new card
+    #[arg(long, requires = "card")]
+    pub title: Option<String>,
+    /// open: the column of a new card; close: the column to move to
+    #[arg(long, requires = "card")]
+    pub column: Option<String>,
     /// A global schedule (sysadmin or the operator), not one of a project
     #[arg(long)]
     pub global: bool,
@@ -1406,6 +1470,60 @@ pub struct AuditArgs {
     pub action: Option<String>,
     #[arg(long, default_value_t = 100)]
     pub limit: usize,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum EventCmd {
+    /// Add an event to the log. An agent emits into its own project, and
+    /// only the kinds ci.*, git.*, pr.*, ext.*, and agent.*
+    Emit {
+        /// For example `ci.run.failed`
+        kind: String,
+        /// A short line for lists (default: the kind)
+        #[arg(long, short = 's')]
+        summary: Option<String>,
+        /// The data: a JSON object, or `-` for stdin
+        #[arg(long, short = 'd', allow_hyphen_values = true)]
+        data: Option<String>,
+    },
+    /// Event sources: the webhook senders of the ingest listener
+    #[command(visible_alias = "sources")]
+    Source {
+        #[command(subcommand)]
+        command: SourceCmd,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SourceCmd {
+    /// List the sources that the caller may read
+    #[command(visible_alias = "list")]
+    Ls,
+    /// Show one source: a ULID, `project/name` (`_/name` when global), or a name
+    Show { source: String },
+    /// Make a source; prints its secret and hook URL one time
+    Add {
+        name: String,
+        /// `github`, `forgejo`, or `generic`
+        #[arg(long, value_name = "github|forgejo|generic")]
+        kind: String,
+        /// A global source (sysadmin or the operator), not one of a project
+        #[arg(long)]
+        global: bool,
+        /// Make it disabled
+        #[arg(long)]
+        disabled: bool,
+    },
+    /// Delete a source
+    Rm { source: String },
+    /// Make a new secret; the old one stops working at once
+    Rotate { source: String },
+    /// Enable a source
+    Enable { source: String },
+    /// Disable a source: its webhooks get 401
+    Disable { source: String },
+    /// Rename a source (the hook URL changes)
+    Rename { source: String, name: String },
 }
 
 #[derive(Debug, Args)]

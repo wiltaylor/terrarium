@@ -877,6 +877,14 @@ pub fn check_against(conn: &Connection, f: &Fleet, prompts: &Path) -> ApiResult<
                     e.message,
                 ));
             }
+            // A trigger: its action kind and templates. The apply checks
+            // the escalation address, when the fleet's agents exist.
+            if let Err(e) = schedules::check_trigger_shape(&d.spec, &d.action) {
+                issues.push(Issue::error(
+                    format!("projects.{}.schedules.{}", p.def.name, d.name),
+                    e.message,
+                ));
+            }
         }
     }
     for s in &f.subscriptions {
@@ -1202,6 +1210,13 @@ pub fn apply(
                 )
             })?;
             policy::manage_schedule(actor, Some(&p.def.name), &reach)?;
+            if let terrarium_core::schedule::ScheduleSpec::On {
+                escalate: Some(e), ..
+            } = &d.spec
+            {
+                let to = schedules::escalation_reach(t, Some(&p.def.name), e)?;
+                policy::manage_schedule(actor, Some(&p.def.name), &to)?;
+            }
             let live = schedules::upsert_def(t, &p.def.name, d, &source, &run_as, at)?;
             record(
                 t,

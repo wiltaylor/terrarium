@@ -15,6 +15,7 @@ services:
       - "${TERRARIUM_PORT:-8080}:8080"                 # dashboard and API
       - "${TERRARIUM_ARTIFACT_PORT:-8081}:8081"        # artifact serving origin (§15.2)
       - "${TERRARIUM_HOST_PORT:-8082}:8082"            # host agent dial-in (§19)
+      - "${TERRARIUM_INGEST_PORT:-8083}:8083"          # webhooks of the event sources (docs/api.md §20)
     environment:
       TERRARIUM_TOKEN: ${TERRARIUM_TOKEN:?set TERRARIUM_TOKEN in .env (see .env.example)}
       TERRARIUM_PUBLIC_URL: ${TERRARIUM_PUBLIC_URL:-http://localhost:8080}
@@ -25,6 +26,11 @@ services:
       # reach: set TERRARIUM_HOST_LISTEN in .env to open it (see .env.example).
       TERRARIUM_HOST_LISTEN: ${TERRARIUM_HOST_LISTEN:-auto}
       TERRARIUM_ARTIFACT_PUBLIC_URL: ${TERRARIUM_ARTIFACT_PUBLIC_URL:-}
+      # The webhook listener (docs/api.md §20): only /hooks/... and /healthz.
+      # TERRARIUM_INGEST_PUBLIC_URL is the URL that a forge reaches; the
+      # hook URL of each event source starts with it.
+      TERRARIUM_INGEST_ADDR: 0.0.0.0:8083
+      TERRARIUM_INGEST_PUBLIC_URL: ${TERRARIUM_INGEST_PUBLIC_URL:-}
       TERRARIUM_WS_QUERY_TOKEN: ${TERRARIUM_WS_QUERY_TOKEN:-}
       TERRARIUM_MAIL_LOOP_LIMIT: ${TERRARIUM_MAIL_LOOP_LIMIT:-}
       TERRARIUM_TRASH_DAYS: ${TERRARIUM_TRASH_DAYS:-}

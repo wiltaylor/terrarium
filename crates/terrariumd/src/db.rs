@@ -814,6 +814,75 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX deliveries_agent ON deliveries(agent_id, hash);
     "#,
+    // 20: event triggers (PLAN §12c, docs/api.md §19). A trigger is a
+    // schedule whose spec is `on`: an event from the log starts its run.
+    // `schedule_runs.trigger` gets 'event', and a run keeps the `seq` of
+    // its event. `trigger_state` holds the dedupe and escalation counters
+    // of each key. `trigger_cursor` (one row) is the last event `seq` that
+    // the trigger engine read, so a restart resumes from the log.
+    r#"
+    ALTER TABLE schedule_runs RENAME TO schedule_runs_v19;
+    CREATE TABLE schedule_runs (
+        id          TEXT PRIMARY KEY,           -- ULID
+        schedule    TEXT NOT NULL REFERENCES schedules(id) ON DELETE CASCADE,
+        trigger     TEXT NOT NULL CHECK (trigger IN ('cron', 'manual', 'catch_up', 'event')),
+        status      TEXT NOT NULL CHECK (status IN ('running', 'ok', 'failed', 'skipped')),
+        started_at  TEXT NOT NULL,
+        finished_at TEXT,
+        summary     TEXT NOT NULL DEFAULT '',
+        output      TEXT NOT NULL DEFAULT '{}', -- JSON
+        error       TEXT,
+        actor       TEXT NOT NULL,
+        event_seq   INTEGER                     -- the event of a 'event' run
+    );
+    INSERT INTO schedule_runs (id, schedule, trigger, status, started_at, finished_at, summary, output, error, actor)
+        SELECT id, schedule, trigger, status, started_at, finished_at, summary, output, error, actor FROM schedule_runs_v19;
+    DROP TABLE schedule_runs_v19;
+    CREATE INDEX schedule_runs_schedule ON schedule_runs(schedule, id);
+    CREATE TABLE trigger_state (
+        schedule    TEXT NOT NULL REFERENCES schedules(id) ON DELETE CASCADE,
+        key         TEXT NOT NULL,              -- the rendered dedupe or escalation key
+        last_fired  TEXT,                       -- the last run for this key (dedupe window)
+        failures    INTEGER NOT NULL DEFAULT 0, -- matches in a row (escalation)
+        escalated   INTEGER NOT NULL DEFAULT 0,
+        updated_at  TEXT NOT NULL,
+        PRIMARY KEY (schedule, key)
+    );
+    CREATE TABLE trigger_cursor (
+        id  INTEGER PRIMARY KEY CHECK (id = 1),
+        seq INTEGER NOT NULL
+    );
+    "#,
+    // 21: event sources (PLAN §12c, docs/api.md §20). A source is one
+    // webhook sender (GitHub, Forgejo, or a generic script) that posts to
+    // the ingest listener. `secret` is the HMAC secret; the API shows it
+    // once, at create and at rotate. `scope` is the project, or '' for a
+    // global source. `event_deliveries` drops a redelivered webhook; the
+    // daily prune keeps 7 days.
+    r#"
+    CREATE TABLE event_sources (
+        id          TEXT PRIMARY KEY,           -- ULID
+        name        TEXT NOT NULL,
+        project     TEXT REFERENCES projects(name) ON DELETE CASCADE,
+        scope       TEXT NOT NULL,              -- project, or '' when global
+        kind        TEXT NOT NULL CHECK (kind IN ('github', 'forgejo', 'generic')),
+        secret      TEXT NOT NULL,
+        enabled     INTEGER NOT NULL DEFAULT 1,
+        created_by  TEXT NOT NULL,
+        last_seen   TEXT,
+        last_error  TEXT,
+        received    INTEGER NOT NULL DEFAULT 0,
+        created_at  TEXT NOT NULL,
+        updated_at  TEXT NOT NULL,
+        UNIQUE (scope, name)
+    );
+    CREATE TABLE event_deliveries (
+        source      TEXT NOT NULL REFERENCES event_sources(id) ON DELETE CASCADE,
+        delivery    TEXT NOT NULL,
+        at          TEXT NOT NULL,
+        PRIMARY KEY (source, delivery)
+    );
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call
@@ -883,6 +952,7 @@ impl Db {
             let mut t = Tx {
                 tx,
                 actor,
+                cause: None,
                 events: Vec::new(),
             };
             let value = f(&mut t)?;
@@ -902,8 +972,12 @@ impl Db {
 /// A write transaction with the actor and the events it made.
 pub struct Tx<'c> {
     tx: rusqlite::Transaction<'c>,
-    /// `operator`, `agent:<ulid>`, or `system`.
+    /// `operator`, `agent:<ulid>`, `system`, or `schedule:<ulid>` (the
+    /// writes of a trigger run).
     pub actor: String,
+    /// When set, every event of the transaction gets it as `data.cause`
+    /// (a trigger run: `{schedule, run, event, depth}`).
+    pub cause: Option<serde_json::Value>,
     events: Vec<StoredEvent>,
 }
 
@@ -921,12 +995,16 @@ impl<'c> Tx<'c> {
         Self {
             tx,
             actor: actor.to_owned(),
+            cause: None,
             events: Vec::new(),
         }
     }
 
     /// Append an event to the log. Subscribers get it after the commit.
-    pub fn emit(&mut self, draft: EventDraft) -> ApiResult<StoredEvent> {
+    pub fn emit(&mut self, mut draft: EventDraft) -> ApiResult<StoredEvent> {
+        if let (Some(c), serde_json::Value::Object(m)) = (&self.cause, &mut draft.data) {
+            m.entry("cause").or_insert_with(|| c.clone());
+        }
         let event = crate::events::insert(&self.tx, &self.actor, draft)?;
         self.events.push(event.clone());
         Ok(event)

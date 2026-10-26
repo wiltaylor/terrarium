@@ -129,6 +129,11 @@ async fn main() -> anyhow::Result<()> {
         }
         None => None,
     };
+    // The webhook listener of the event sources (docs/api.md §20). Off
+    // when TERRARIUM_INGEST_ADDR is not set.
+    let ingest_task = terrariumd::ingest::serve_from_env(daemon.state.clone())
+        .await?
+        .map(|(task, _)| task);
 
     // Check the installed harness versions once at start, in the
     // background, so the log shows a harness outside its tested range
@@ -157,6 +162,9 @@ async fn main() -> anyhow::Result<()> {
     shutdown_signal().await;
     info!("shutting down");
     if let Some(t) = host_task {
+        t.abort();
+    }
+    if let Some(t) = ingest_task {
         t.abort();
     }
     daemon.shutdown();

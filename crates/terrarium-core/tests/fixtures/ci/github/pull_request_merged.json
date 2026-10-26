@@ -1,0 +1,31 @@
+{
+  "action": "closed",
+  "number": 42,
+  "pull_request": {
+    "url": "https://api.github.com/repos/octo-org/hello-world/pulls/42",
+    "id": 1,
+    "html_url": "https://github.com/octo-org/hello-world/pull/42",
+    "number": 42,
+    "state": "closed",
+    "locked": false,
+    "title": "Add the login form",
+    "user": {"login": "mona", "id": 2, "type": "User"},
+    "body": "Closes #41.",
+    "created_at": "2026-10-26T08:00:00Z",
+    "updated_at": "2026-10-26T10:00:00Z",
+    "closed_at": null,
+    "merged_at": null,
+    "merge_commit_sha": "e5bd3914e2e596debea16f433f57875b5b90bcd6",
+    "draft": false,
+    "head": {"label": "octo-org:feature/login", "ref": "feature/login", "sha": "acb5820ced9479c074f688cc328bf03f341a511d", "user": {"login": "octo-org", "id": 6811672}},
+    "base": {"label": "octo-org:main", "ref": "main", "sha": "6113728f27ae82c7b1a177c8d03f9e96e0adf246", "user": {"login": "octo-org", "id": 6811672}},
+    "merged": true,
+    "merged_by": {"login": "octocat", "id": 1},
+    "commits": 1,
+    "additions": 10,
+    "deletions": 0,
+    "changed_files": 1
+  },
+  "repository": {"id": 1296269, "name": "hello-world", "full_name": "octo-org/hello-world", "private": false, "html_url": "https://github.com/octo-org/hello-world", "default_branch": "main", "owner": {"login": "octo-org", "id": 6811672, "type": "Organization"}},
+  "sender": {"login": "octocat", "id": 1, "type": "User"}
+}

@@ -1,0 +1,31 @@
+{
+  "action": "completed",
+  "workflow_run": {
+    "id": 30433642,
+    "name": "CI",
+    "node_id": "WFR_kwLOAAA",
+    "head_branch": "feature/login",
+    "head_sha": "acb5820ced9479c074f688cc328bf03f341a511d",
+    "path": ".github/workflows/ci.yml",
+    "display_title": "Add the login form",
+    "run_number": 562,
+    "event": "push",
+    "status": "completed",
+    "conclusion": "success",
+    "workflow_id": 159038,
+    "check_suite_id": 414944374,
+    "url": "https://api.github.com/repos/octo-org/hello-world/actions/runs/30433642",
+    "html_url": "https://github.com/octo-org/hello-world/actions/runs/30433642",
+    "pull_requests": [],
+    "created_at": "2026-10-26T09:00:00Z",
+    "updated_at": "2026-10-26T09:04:12Z",
+    "run_attempt": 1,
+    "run_started_at": "2026-10-26T09:00:00Z",
+    "actor": {"login": "octocat", "id": 1, "type": "User"},
+    "triggering_actor": {"login": "octocat", "id": 1, "type": "User"},
+    "head_commit": {"id": "acb5820ced9479c074f688cc328bf03f341a511d", "message": "Add the login form\n\nAnd its tests.", "timestamp": "2026-10-26T08:59:30Z", "author": {"name": "Mona", "email": "mona@example.com"}}
+  },
+  "workflow": {"id": 159038, "name": "CI", "path": ".github/workflows/ci.yml", "state": "active"},
+  "repository": {"id": 1296269, "name": "hello-world", "full_name": "octo-org/hello-world", "private": false, "html_url": "https://github.com/octo-org/hello-world", "default_branch": "main", "owner": {"login": "octo-org", "id": 6811672, "type": "Organization"}},
+  "sender": {"login": "octocat", "id": 1, "type": "User"}
+}

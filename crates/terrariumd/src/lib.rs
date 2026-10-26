@@ -16,6 +16,7 @@ pub mod git;
 pub mod harness_tools;
 pub mod harness_versions;
 pub mod hosts;
+pub mod ingest;
 pub mod leases;
 pub mod login_session;
 pub mod models;
@@ -282,7 +283,8 @@ async fn start_usage(state: &Shared) -> Vec<JoinHandle<()>> {
 /// start, then every `[artifacts] prune_interval_hours` (default 24). The
 /// same timer prunes the trash of deleted agents (`TERRARIUM_TRASH_DAYS`,
 /// [`trash::prune_trash`]), the revoked sessions past their `exp`, and the
-/// schedule runs past the newest 500 of each schedule.
+/// schedule runs past the newest 500 of each schedule, and the webhook
+/// delivery IDs older than 7 days.
 fn spawn_prune_timer(state: Shared) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut wait = std::time::Duration::from_secs(3600);
@@ -327,6 +329,17 @@ fn spawn_prune_timer(state: Shared) -> JoinHandle<()> {
                 Ok(n) if n > 0 => info!(runs = n, "schedule run prune done"),
                 Ok(_) => {}
                 Err(e) => warn!("cannot prune the schedule runs: {e}"),
+            }
+            match state
+                .db
+                .write("system", |t| {
+                    store::event_sources::prune_deliveries(t, chrono::Utc::now())
+                })
+                .await
+            {
+                Ok(n) if n > 0 => info!(deliveries = n, "webhook delivery prune done"),
+                Ok(_) => {}
+                Err(e) => warn!("cannot prune the webhook deliveries: {e}"),
             }
             let hours = store::artifacts::context(&state.state_dir, &state.config_dir)
                 .map(|c| c.limits.prune_interval_hours)

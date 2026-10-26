@@ -4,6 +4,7 @@
 pub mod agents;
 pub mod artifacts;
 pub mod board;
+pub mod events;
 pub mod fleet;
 pub mod knowledge;
 pub mod mail;
@@ -67,6 +68,7 @@ pub async fn run(ctx: &Ctx, cmd: &Command) -> anyhow::Result<()> {
         Command::Admin { command } => admin(ctx, command).await,
         Command::Audit(args) => system::audit(ctx, args).await,
         Command::Events(args) => system::events(ctx, args).await,
+        Command::Event { command } => events::event(ctx, command).await,
         Command::Hook { event } => {
             crate::runner_socket::hook_main(event);
             Ok(())

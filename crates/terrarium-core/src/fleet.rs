@@ -876,8 +876,20 @@ impl Fleet {
                 let spec = st.remove("spec");
                 let action = st.remove("action");
                 w.table(Some("[[projects.schedules]]"), &st, SCHEDULE_KEYS);
-                if let Some(toml::Value::Table(x)) = spec {
+                if let Some(toml::Value::Table(mut x)) = spec {
+                    // A trigger's `dedupe` and `escalate` are tables:
+                    // they go under the spec as sub-tables.
+                    let nested: Vec<(String, toml::Table)> = x
+                        .iter()
+                        .filter_map(|(k, v)| v.as_table().map(|t| (k.clone(), t.clone())))
+                        .collect();
+                    for (k, _) in &nested {
+                        x.remove(k);
+                    }
                     w.table(Some("[projects.schedules.spec]"), &x, &["kind"]);
+                    for (k, t) in &nested {
+                        w.table(Some(&format!("[projects.schedules.spec.{k}]")), t, &["key"]);
+                    }
                 }
                 if let Some(toml::Value::Table(x)) = action {
                     w.table(Some("[projects.schedules.action]"), &x, &["type"]);
@@ -1061,6 +1073,32 @@ cmd = ["make", "test"]
         assert_eq!(keys, ["terra/standup", "terra/tests"]);
         let out = f.to_toml();
         assert!(out.contains("[[projects.schedules]]"), "{out}");
+        let again = parse(&out, None)
+            .ok()
+            .unwrap_or_else(|e| panic!("{e:#?}\n{out}"));
+        assert_eq!(f, again, "{out}");
+        // A trigger with nested tables in its spec round-trips too.
+        let trig = format!(
+            "{text}{}",
+            r#"
+[[projects.schedules]]
+name = "ci"
+catch_up = "once"
+[projects.schedules.spec]
+kind = "on"
+kinds = ["ci.run.failed"]
+match = [{ path = "data.branch", op = "glob", value = "main" }]
+dedupe = { key = "{{event.data.repo}}", window = "10m" }
+escalate = { key = "{{event.data.repo}}", after = 3, reset_on = ["ci.run.succeeded"] }
+[projects.schedules.action]
+type = "card"
+op = "open"
+key = "{{event.data.repo}}"
+"#
+        );
+        let f = parse(&trig, None).ok().unwrap();
+        assert!(f.projects[0].def.schedules[2].spec.is_trigger());
+        let out = f.to_toml();
         let again = parse(&out, None)
             .ok()
             .unwrap_or_else(|e| panic!("{e:#?}\n{out}"));
