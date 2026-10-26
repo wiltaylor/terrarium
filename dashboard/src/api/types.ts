@@ -39,7 +39,7 @@ export interface Health {
 export interface HarnessVersion {
   harness: Harness;
   package: string;
-  /** The version the image installs (harnesses.toml). */
+  /** The version of the first install (harnesses.toml). */
   pinned: string;
   /** The range the adapter accepts. */
   tested: string;
@@ -51,7 +51,7 @@ export interface HarnessVersion {
   checked_at: string | null;
   /** `?latest=true` only: the latest release on npm; null when npm did not answer (`latest_error` says why). */
   latest?: HarnessLatest | null;
-  /** `?latest=true` only: the bump from `pinned` to `latest` (`scripts/harness.py`); null when `latest` is null. */
+  /** `?latest=true` only: the bump from `installed` (else `pinned`) to `latest` (`scripts/harness.py`); null when `latest` is null. */
   update?: HarnessUpdateKind | null;
   /** `?latest=true` only, when `latest` is null: why. */
   latest_error?: string;
@@ -66,35 +66,30 @@ export interface HarnessLatest {
 /** `none`: the pin is the latest. `major`: the first non-zero part changes (for 0.x, the second number). */
 export type HarnessUpdateKind = "none" | "minor" | "major";
 
-/** `POST /api/hosts/{name}/harness-update` (`201`). */
-export interface HarnessUpdateStarted {
-  session_id: string;
-  host: string;
-  /** `["all"]` or the one harness. */
-  names: string[];
-  /** The path of the output, `GET /api/hosts/{name}/sessions/{id}/output`. */
+/** `POST /api/harnesses/{name}/update` (`200`), and one item of `POST /api/harnesses/update`. */
+export interface HarnessUpdateResult {
+  /** A harness, or the extension `copilot-prompt`. */
+  harness: string;
+  package: string;
+  /** The version before the update; null when it was not installed. */
+  from: string | null;
+  /** The version after the update; null when it is not known. */
+  to: string | null;
+  /** What npm printed. */
   output: string;
-  /** What the operator runs after the update: the daemon cannot recreate its container. */
-  rollout: string;
+  /** The adapter's tested range; null for the extension. */
+  tested: string | null;
+  /** Is `to` in `tested`? Null when it is not known. */
+  in_range: boolean | null;
+  /** `POST /api/harnesses/update` only: why this item failed. */
+  error?: string;
 }
 
-/** One chunk of exec output (base64). */
-export interface OutputChunk {
-  stream: "stdout" | "stderr" | "file";
-  data: string;
-}
-
-/** `GET /api/hosts/{name}/sessions/{id}/output` (and the target form, docs/api.md §17). */
-export interface SessionOutput {
-  session_id: string;
-  since: number;
-  next: number;
-  chunks: OutputChunk[];
-  done: boolean;
-  end?: { type: "exit"; code?: number | null; signal?: number | null; reason: string } | { type: "error"; code: string; message: string } | { type: "cp"; bytes: number; sha256: string };
-  result?: unknown;
-  /** `harness.update` after an exit 0: the rollout to run on the host. */
-  rollout?: string;
+/** The body of a harness update. `version`: `latest` (the default) or `x.y.z`. */
+export interface HarnessUpdateOptions {
+  version?: string;
+  /** Update also while agents on the harness run. */
+  force?: boolean;
 }
 
 /** What an agent start does outside the range (`TERRARIUM_HARNESS_VERSION_POLICY`). */
@@ -262,6 +257,8 @@ export const EVENT_KINDS = [
   "self_report",
   // docs/api.md §9, §17.7.
   "lease",
+  // docs/api.md §4: a harness update in the container.
+  "harness",
 ] as const;
 export type EventKind = (typeof EVENT_KINDS)[number];
 
@@ -1161,8 +1158,6 @@ export interface HostCapabilities {
   docker?: ToolCapability;
   vmlab?: ToolCapability;
   shell?: string;
-  /** The host agent's config sets `terrarium_repo_dir`: it runs `harness.update`. */
-  can_update_harnesses?: boolean;
 }
 
 /** `GET /api/hosts`: a host agent in the daemon's registry, with its link state. */

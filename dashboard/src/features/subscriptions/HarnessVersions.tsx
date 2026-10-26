@@ -1,52 +1,38 @@
 // The "Harness versions" table: the installed version, the tested range, the
 // latest release on npm, and a status chip (GET /api/harnesses?latest=true).
-// When npm has a newer release, the box under the table gives the command to
-// run on the Docker host, and an "Update on host" button for each online host
-// agent with `terrarium_repo_dir` (POST /api/hosts/{name}/harness-update).
+// A row with a newer release has an "Update" button, and "Update all" updates
+// every harness. The daemon runs npm in the container
+// (POST /api/harnesses/{name}/update); no host agent and no image rebuild.
+// A copyable `npm install -g` line under the table is the fallback.
 
-import { createResource, createSignal, For, onCleanup, Show } from "solid-js";
+import { createResource, createSignal, For, Show } from "solid-js";
 import { CopyButton, ErrorBanner } from "../../components/ui";
 import { api } from "../../stores";
-import type { HarnessReport } from "../../api/types";
-import { harnessStatus, offPin, outOfRange, policyNote, publishedDay, updateCommand, updateHosts, updateNames, withUpdate } from "./harnesses";
+import type { HarnessUpdateResult } from "../../api/types";
+import { harnessStatus, npmCommand, offPin, outOfRange, policyNote, publishedDay, resultLine, updateFailure, withUpdate, type UpdateFailure } from "./harnesses";
 
-const decoder = new TextDecoder();
-const decode = (b64: string) => decoder.decode(Uint8Array.from(atob(b64), (c) => c.charCodeAt(0)));
-
-/** One run of `harness.update` on a host, as the box shows it. */
-interface HostRun {
-  host: string;
-  log: string;
+/** One update call, as the box under the table shows it. `name` is a harness, or "all". */
+interface UpdateRun {
+  name: string;
   done: boolean;
-  ok: boolean | null;
-  rollout: string | null;
-  error: unknown;
+  results: HarnessUpdateResult[];
+  failure: UpdateFailure | null;
 }
 
 export function HarnessVersions() {
   const [report, { refetch }] = createResource((_: unknown, info: { refetching?: unknown }) => api.harnesses(info.refetching === true, true));
-  const [hosts] = createResource(() => api.hosts.list().catch(() => []));
-  const [run, setRun] = createSignal<HostRun | null>(null);
-  let stopped = false;
-  onCleanup(() => (stopped = true));
+  const [run, setRun] = createSignal<UpdateRun | null>(null);
+  const busy = () => !!run() && !run()!.done;
 
-  const startOnHost = async (host: string, r: HarnessReport) => {
-    const names = updateNames(r);
-    setRun({ host, log: "", done: false, ok: null, rollout: null, error: null });
+  const update = async (name: string, force = false) => {
+    setRun({ name, done: false, results: [], failure: null });
     try {
-      const s = await api.hosts.harnessUpdate(host, names);
-      let since = 0;
-      while (!stopped) {
-        const o = await api.hosts.sessionOutput(host, s.session_id, since, 20);
-        const text = o.chunks.map((c) => decode(c.data)).join("");
-        since = o.next;
-        const ok = o.done ? o.end?.type === "exit" && o.end.code === 0 : null;
-        setRun((x) => x && { ...x, log: x.log + text, done: o.done, ok, rollout: o.rollout ?? (ok ? s.rollout : null) });
-        if (o.done) break;
-      }
+      const results = name === "all" ? (await api.harnessUpdateAll({ force })).results : [await api.harnessUpdate(name, { version: "latest", force })];
+      setRun({ name, done: true, results, failure: null });
     } catch (e) {
-      setRun((x) => x && { ...x, done: true, ok: false, error: e });
+      setRun({ name, done: true, results: [], failure: updateFailure(e) });
     }
+    void refetch(true);
   };
 
   return (
@@ -78,6 +64,7 @@ export function HarnessVersions() {
                     <th>Tested range</th>
                     <th>Latest</th>
                     <th>Status</th>
+                    <th />
                   </tr>
                 </thead>
                 <tbody>
@@ -112,6 +99,13 @@ export function HarnessVersions() {
                               {s.status}
                             </span>
                           </td>
+                          <td>
+                            <Show when={h.update === "minor" || h.update === "major"}>
+                              <button class="small" disabled={busy()} title={`Update ${h.harness} to ${h.latest?.version ?? "the latest"} in the container`} onClick={() => void update(h.harness)}>
+                                Update
+                              </button>
+                            </Show>
+                          </td>
                         </tr>
                       );
                     }}
@@ -119,56 +113,60 @@ export function HarnessVersions() {
                 </tbody>
               </table>
             </div>
-            <Show when={updateCommand(r())}>
-              {(cmd) => (
-                <div class="card-box" aria-label="Update the harnesses" style={{ margin: "10px 0 0" }}>
-                  <div class="small">Run this on the Docker host, in the Terrarium checkout:</div>
-                  <div class="row" style={{ gap: "8px", "align-items": "center", margin: "6px 0", "flex-wrap": "wrap" }}>
-                    <code class="mono">{cmd()}</code>
-                    <CopyButton text={cmd()} label="Copy command" />
-                  </div>
-                  <div class="small muted">The update rebuilds the image and restarts the stack; the running agents stop gracefully and resume.</div>
-                  <Show when={updateHosts(hosts())}>
-                    {(hs) => (
-                      <Show when={hs().length > 0}>
-                        <div class="row" style={{ gap: "8px", "margin-top": "8px", "flex-wrap": "wrap" }}>
-                          <For each={hs()}>
-                            {(h) => (
-                              <button class="small" disabled={!!run() && !run()!.done} onClick={() => void startOnHost(h.name, r())}>
-                                Update on host {h.name}
-                              </button>
-                            )}
-                          </For>
-                        </div>
-                      </Show>
-                    )}
-                  </Show>
-                  <Show when={run()}>
-                    {(x) => (
-                      <div style={{ "margin-top": "8px" }} aria-label="Update output">
-                        <div class="small">
-                          {x().done ? (x().ok ? `The update on ${x().host} finished.` : `The update on ${x().host} failed.`) : `Updating on ${x().host}…`}
-                        </div>
-                        <ErrorBanner error={x().error} />
-                        <Show when={x().log}>
-                          <pre class="mono small" style={{ "max-height": "260px", overflow: "auto" }}>{x().log}</pre>
-                        </Show>
-                        <Show when={x().rollout}>
-                          {(msg) => (
+            <Show when={withUpdate(r()).length > 1}>
+              <div class="row" style={{ gap: "8px", "margin-top": "8px" }}>
+                <button class="small" disabled={busy()} onClick={() => void update("all")} title="Update every harness and the Copilot extension to the latest on npm">
+                  Update all
+                </button>
+              </div>
+            </Show>
+            <Show when={run()}>
+              {(x) => (
+                <div class="card-box" aria-label="Update output" style={{ margin: "10px 0 0" }}>
+                  <div class="small">{x().done ? (x().failure ? `The update of ${x().name} failed.` : `The update of ${x().name} finished.`) : `Updating ${x().name}…`}</div>
+                  <For each={x().results}>{(res) => <div class="small mono">{resultLine(res)}{res.error ? ` (${res.error})` : ""}</div>}</For>
+                  <Show when={x().failure}>
+                    {(f) => (
+                      <>
+                        <ErrorBanner error={new Error(f().message)} />
+                        <Show when={f().running}>
+                          {(names) => (
                             <div class="row" style={{ gap: "8px", "align-items": "center", "flex-wrap": "wrap" }}>
-                              <span class="chip warn">{msg()}</span>
-                              <CopyButton text="just up" label="Copy just up" />
+                              <span class="small">Running: {names().join(", ")}</span>
+                              <button class="small" disabled={busy()} onClick={() => void update(x().name, true)}>
+                                Update anyway
+                              </button>
                             </div>
                           )}
                         </Show>
-                      </div>
+                      </>
                     )}
+                  </Show>
+                  <Show when={x().results.map((res) => res.output).join("\n").trim() || x().failure?.output}>
+                    {(out) => <pre class="mono small" style={{ "max-height": "260px", overflow: "auto" }}>{out()}</pre>}
                   </Show>
                 </div>
               )}
             </Show>
+            <Show when={withUpdate(r()).length > 0}>
+              <div class="card-box" aria-label="Update by hand" style={{ margin: "10px 0 0" }}>
+                <div class="small">Or in a shell in the container (just docker::shell), also with the stack's daemon stopped:</div>
+                <For each={withUpdate(r())}>
+                  {(h) => (
+                    <Show when={npmCommand(h)}>
+                      {(cmd) => (
+                        <div class="row" style={{ gap: "8px", "align-items": "center", margin: "6px 0", "flex-wrap": "wrap" }}>
+                          <code class="mono">{cmd()}</code>
+                          <CopyButton text={cmd()} label="Copy command" />
+                        </div>
+                      )}
+                    </Show>
+                  )}
+                </For>
+              </div>
+            </Show>
             <p class="muted small" style={{ margin: "6px 0 0" }}>
-              {policyNote(r())} Pins live in harnesses.toml; see docs/getting-started.md, "Updating a harness".
+              {policyNote(r())} harnesses.toml gives the first install; see docs/getting-started.md, "Updating a harness".
             </p>
           </>
         )}

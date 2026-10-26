@@ -443,6 +443,8 @@ terrarium admin host new <name> [--enrol]      prints the token once, alone on s
 terrarium admin host rotate <name> [--enrol]   a new token, printed once, alone on stdout
 terrarium admin host rm <name>                 revokes the token
 terrarium admin harness ls [--refresh]         each harness: pin, tested range, installed, in range
+terrarium admin harness update <name> [--version v|latest] [--force]   npm install -g in the tools dir, in place
+terrarium admin harness update --all [--force]   every harness and the extension to the latest
 terrarium admin audit [--since time] [--actor a] [--action a]
 terrarium admin fleet validate|plan|apply|ls|show|export ...
 ```
@@ -500,6 +502,7 @@ the agents of its own project; a global target needs sysadmin.
 | Command | Request | Text output |
 |---|---|---|
 | `admin harness ls [--refresh]` | `GET /api/harnesses[?refresh=true]` | A table: `HARNESS`, `PINNED`, `TESTED`, `INSTALLED`, `IN RANGE` (`yes`, `NO`, or `unknown`). Then `policy: warn` or `policy: refuse`, and one line for each harness out of its range (with the fix) or with an unknown version (with the reason). The pins come from `harnesses.toml` ([api.md §4](api.md)). |
+| `admin harness update <name> [--version v] [--force]`, `admin harness update --all [--force]` | `POST /api/harnesses/{name}/update` `{version?, force?}`, or `POST /api/harnesses/update` | npm's output, then `<name>: <from> -> <to>`, with `(outside the tested range ...)` when `to` is outside it. On a failure: npm's output, or `running: <agents>. Stop them, or add --force` for a `409`, then the error. Needs sysadmin or the operator ([api.md §4](api.md)). |
 
 `admin host new`, `admin host rotate`, and `admin host rm` are for the
 operator only (PLAN §10: host agent tokens are operator-only). An agent gets

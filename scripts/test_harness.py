@@ -5,9 +5,14 @@ Run: uv run python -m unittest discover -s scripts -p 'test_harness*.py'"""
 import contextlib
 import importlib.util
 import io
+import json
+import shutil
+import subprocess
 import sys
+import tempfile
 import tomllib
 import unittest
+from unittest import mock
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -161,10 +166,17 @@ class CheckParsing(unittest.TestCase):
         self.assertIn("the host has 0.159.0", notes[0])
 
     def test_judge_flags_a_container_that_is_not_on_the_pin(self):
-        e = {"version": "2.1.310", "tested": ">=2.1.310, <2.2.0"}
+        e = {"name": "claude", "version": "2.1.310", "tested": ">=2.1.310, <2.2.0"}
         in_range, status, notes = h.judge(e, "2.1.300", None, "2.1.320", True)
+        # The status compares npm with the container, not with the pin.
         self.assertEqual((in_range, status), (True, "update available"))
-        self.assertIn("run `just up`", notes[0])
+        self.assertEqual(
+            notes[0],
+            "the container has 2.1.300, the pin is 2.1.310 (`just harness::update claude 2.1.310`, or update with `--pin`)",
+        )
+        e = {"name": "claude", "version": "2.1.310", "tested": ">=2.1.310, <2.2.0"}
+        self.assertEqual(h.judge(e, "2.1.320", None, "2.1.320", True)[1], "latest")
+        self.assertIn("not found in the container", h.judge(e, None, None, "2.1.320", True)[2][0])
 
     def test_judge_status_words(self):
         e = {"version": "2.1.310", "tested": ">=2.1.310, <2.2.0"}
@@ -189,8 +201,9 @@ class CheckParsing(unittest.TestCase):
         out = h.render_table(rows, False)
         self.assertIn("update available (major)", out)
         self.assertNotIn("outside range", out)
-        self.assertIn("`just harness::latest` pulls every harness", out)
-        self.assertIn("`just harness::update <name>` pulls one", out)
+        self.assertIn("`just harness::latest` updates every harness in place", out)
+        self.assertIn("`just harness::update <name>` updates one", out)
+        self.assertIn("Neither rebuilds the image", out)
 
 
 class Latest(unittest.TestCase):
@@ -216,7 +229,7 @@ class Latest(unittest.TestCase):
     def run_dry(self, npm):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            rc = h.run_latest(fixture_cfg(), npm, dry_run=True, no_rollout=False, image="terrarium:test")
+            rc = h.run_latest(fixture_cfg(), npm, dry_run=True)
         return rc, out.getvalue()
 
     def test_the_dry_run_prints_the_plan_table_and_changes_nothing(self):
@@ -245,6 +258,183 @@ class Latest(unittest.TestCase):
         self.assertIn("claude: latest (2.1.310)", out)
         self.assertIn("nothing to update", out)
         self.assertNotIn("ci::compat", out)
+
+
+class InstalledPlan(unittest.TestCase):
+    def test_the_bump_is_from_the_container_version(self):
+        # The container is already on 2.2.0; 2.2.4 is a patch from there.
+        p = h.make_plan(fixture_cfg(), "claude", "2.2.4", False, current="2.2.0")
+        self.assertEqual((p.old, p.pinned, p.bump), ("2.2.0", "2.1.310", "patch"))
+        self.assertEqual(p.tested_new, ">=2.1.310, <2.3.0")
+        row = h.compat_row(p, "2026-10-26")
+        self.assertIn("| claude | 2.1.310 → 2.2.4 | minor |", row)
+
+    def test_a_major_from_the_container_needs_allow_major(self):
+        with self.assertRaises(h.PlanError) as e:
+            h.make_plan(fixture_cfg(), "claude", "3.0.0", False, current="2.1.400")
+        self.assertIn("claude 2.1.400 -> 3.0.0 is a major bump", str(e.exception))
+
+    def test_without_pin_a_target_outside_the_range_is_a_warning(self):
+        p = h.make_plan(fixture_cfg(), "claude", "2.1.300", False, current="2.1.310", pin=False)
+        self.assertEqual(p.bump, "downgrade")
+        self.assertEqual(p.tested_new, p.tested_old)
+        self.assertTrue(any("outside the tested range" in w for w in p.warnings), p.warnings)
+
+
+class Manifest(unittest.TestCase):
+    def test_parse_manifest(self):
+        text = '{"claude": {"package": "@anthropic-ai/claude-code", "version": "2.1.310", "installed_at": "2026-10-26T00:00:00Z"}, "x": 1}'
+        self.assertEqual(h.parse_manifest(text), {"claude": "2.1.310"})
+        self.assertEqual(h.parse_manifest("not json"), {})
+        self.assertEqual(h.parse_manifest("[]"), {})
+
+    def test_check_reads_the_manifest_then_falls_back_to_version(self):
+        calls = []
+
+        def fake_run(cmd, timeout=60, **kw):
+            calls.append(cmd)
+            if cmd[-2:] == ["cat", h.MANIFEST]:
+                out = '{"claude": {"package": "p", "version": "2.1.320", "installed_at": "t"}}'
+            elif cmd[-2:] == ["codex", "--version"]:
+                out = "codex-cli 0.160.0\n"
+            else:
+                out = ""
+            return subprocess.CompletedProcess(cmd, 0, out, "")
+
+        with mock.patch.object(h, "run", fake_run):
+            found = h.container_versions(fixture_cfg())
+        self.assertEqual(found, {"claude": "2.1.320", "codex": "0.160.0"})
+        self.assertEqual(calls[0][:7], h.EXEC)
+        self.assertNotIn(["claude", "--version"], [c[-2:] for c in calls])
+
+
+class FakeContainer:
+    """Replaces the docker calls of harness.py: the stack is up, the
+    container has `versions`, and the CLI answers from `answers`."""
+
+    def __init__(self, versions, answers):
+        self.versions = versions
+        self.answers = list(answers)
+        self.calls = []
+
+    def cli(self, args):
+        self.calls.append(args)
+        code, body = self.answers.pop(0)
+        return code, json.dumps(body), ""
+
+    def __enter__(self):
+        self.stack = contextlib.ExitStack()
+        self.stack.enter_context(mock.patch.object(h, "container_running", lambda: True))
+        self.stack.enter_context(mock.patch.object(h, "container_versions", lambda cfg: dict(self.versions)))
+        self.stack.enter_context(mock.patch.object(h, "container_cli", self.cli))
+        return self
+
+    def __exit__(self, *a):
+        self.stack.close()
+
+
+class Update(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        d = Path(self.tmp.name)
+        self.toml = d / "harnesses.toml"
+        self.md = d / "compat.md"
+        shutil.copy(FIX / "harnesses.toml", self.toml)
+        shutil.copy(FIX / "compat.md", self.md)
+        self.patches = contextlib.ExitStack()
+        self.patches.enter_context(mock.patch.object(h.hv, "TOML", self.toml))
+        self.patches.enter_context(mock.patch.object(h, "COMPAT_MD", self.md))
+        self.patches.enter_context(mock.patch.object(h.hv, "load", lambda path=None: h.hv.validate(tomllib.loads(self.toml.read_text()))))
+        self.before = (self.toml.read_text(), self.md.read_text())
+
+    def tearDown(self):
+        self.patches.close()
+        self.tmp.cleanup()
+
+    def update(self, *argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = h.main(["update", *argv])
+        return rc, out.getvalue(), err.getvalue()
+
+    def ok(self, name, frm, to):
+        return 0, {"harness": name, "package": "p", "from": frm, "to": to, "output": "added 1 package", "tested": None, "in_range": True}
+
+    def test_update_calls_the_cli_in_the_container(self):
+        with FakeContainer({"claude": "2.1.310"}, [self.ok("claude", "2.1.310", "2.1.320")]) as c:
+            rc, out, _ = self.update("claude", "2.1.320")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(c.calls, [["admin", "harness", "update", "claude", "--version", "2.1.320"]])
+        self.assertIn("added 1 package", out)
+        self.assertIn("claude: 2.1.310 -> 2.1.320", out)
+        self.assertEqual((self.toml.read_text(), self.md.read_text()), self.before)
+
+    def test_force_goes_to_the_cli(self):
+        with FakeContainer({}, [self.ok("codex", "0.160.0", "0.160.2")]) as c:
+            rc, _, _ = self.update("codex", "0.160.2", "--force")
+        self.assertEqual(rc, 0)
+        self.assertEqual(c.calls[0][-1], "--force")
+
+    def test_pin_writes_the_toml_and_the_compat_row_after_success(self):
+        with FakeContainer({"claude": "2.1.310"}, [self.ok("claude", "2.1.310", "2.2.4")]):
+            rc, out, _ = self.update("claude", "2.2.4", "--pin")
+        self.assertEqual(rc, 0, out)
+        cfg = tomllib.loads(self.toml.read_text())
+        self.assertEqual(cfg["harness"]["claude"]["version"], "2.2.4")
+        self.assertEqual(cfg["harness"]["claude"]["tested"], ">=2.1.310, <2.3.0")
+        self.assertIn("| claude | 2.1.310 → 2.2.4 | minor |", self.md.read_text())
+        self.assertIn("next image build", out)
+
+    def test_a_409_prints_the_running_agents_and_changes_no_file(self):
+        busy = (1, {"error": {"code": "conflict", "message": "claude runs in 1 agent", "details": {"running": ["terra/worker"]}}})
+        with FakeContainer({"claude": "2.1.310"}, [busy]):
+            rc, _, err = self.update("claude", "2.1.320", "--pin")
+        self.assertEqual(rc, 1)
+        self.assertIn("running: terra/worker", err)
+        self.assertIn("pass --force", err)
+        self.assertEqual((self.toml.read_text(), self.md.read_text()), self.before)
+
+    def test_an_npm_failure_prints_the_output(self):
+        bad = (1, {"error": {"code": "invalid", "message": "npm install failed", "details": {"output": "npm error notarget"}}})
+        with FakeContainer({"claude": "2.1.310"}, [bad]):
+            rc, out, err = self.update("claude", "2.1.399", "--pin")
+        self.assertEqual(rc, 1)
+        self.assertIn("npm error notarget", out)
+        self.assertIn("npm install failed", err)
+        self.assertEqual((self.toml.read_text(), self.md.read_text()), self.before)
+
+    def test_dry_run_calls_nothing(self):
+        with FakeContainer({"claude": "2.1.310"}, []) as c:
+            rc, out, _ = self.update("claude", "2.1.320", "--dry-run", "--pin")
+        self.assertEqual(rc, 0)
+        self.assertEqual(c.calls, [])
+        self.assertIn("dry run: nothing changed", out)
+        self.assertEqual((self.toml.read_text(), self.md.read_text()), self.before)
+
+    def test_a_stopped_stack_is_an_error(self):
+        with mock.patch.object(h, "container_running", lambda: False):
+            rc, _, err = self.update("claude", "2.1.320")
+        self.assertEqual(rc, 1)
+        self.assertIn("run `just up`", err)
+
+    def test_latest_calls_once_per_planned_item_and_pins_the_successes(self):
+        npm = {"claude": "2.2.4", "codex": "0.164.0", "copilot-prompt": "0.1.2"}
+        answers = [self.ok("claude", "2.1.310", "2.2.4"), (1, {"error": {"code": "invalid", "message": "npm install failed"}})]
+        out = io.StringIO()
+        with FakeContainer({}, answers) as c, contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            rc = h.run_latest(fixture_cfg(), npm, dry_run=False, pin=True)
+        self.assertEqual(rc, 1)
+        self.assertEqual(
+            c.calls,
+            [
+                ["admin", "harness", "update", "claude", "--version", "2.2.4"],
+                ["admin", "harness", "update", "codex", "--version", "0.164.0"],
+            ],
+        )
+        cfg = tomllib.loads(self.toml.read_text())
+        self.assertEqual(cfg["harness"]["claude"]["version"], "2.2.4")
+        self.assertEqual(cfg["harness"]["codex"]["version"], "0.160.0")
+        self.assertIn("codex: npm install failed", out.getvalue())
 
 
 if __name__ == "__main__":

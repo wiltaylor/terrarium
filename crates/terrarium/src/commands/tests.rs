@@ -3545,7 +3545,7 @@ async fn admin_harness_ls_shows_the_range_and_the_policy() {
         "{out}"
     );
     assert!(
-        out.contains("codex: 0.164.0 is outside >=0.160.0, <0.161.0; rebuild the image or run `just harness::update codex`"),
+        out.contains("codex: 0.164.0 is outside >=0.160.0, <0.161.0; run `terrarium admin harness update codex` or `just harness::update codex`"),
         "{out}"
     );
     assert!(
@@ -3568,4 +3568,120 @@ async fn admin_harness_ls_shows_the_range_and_the_policy() {
     )
     .await;
     assert_eq!(serde_json::from_str::<Value>(&out).unwrap(), answer);
+}
+
+#[tokio::test]
+async fn admin_harness_update_posts_and_prints_from_and_to() {
+    let one = json!({"harness": "codex", "package": "@openai/codex", "from": "0.164.0",
+        "to": "0.165.0", "output": "changed 1 package in 3s\n", "tested": ">=0.164.0, <0.165.0",
+        "in_range": false});
+    let out = ok(
+        false,
+        &[
+            "admin",
+            "harness",
+            "update",
+            "codex",
+            "--version",
+            "0.165.0",
+            "--force",
+        ],
+        vec![(200, one.clone())],
+        vec![(
+            Post,
+            "/api/harnesses/codex/update",
+            vec![],
+            Some(json!({"version": "0.165.0", "force": true})),
+        )],
+    )
+    .await;
+    assert!(out.contains("changed 1 package in 3s"), "{out}");
+    assert!(
+        out.contains("codex: 0.164.0 -> 0.165.0 (outside the tested range >=0.164.0, <0.165.0)"),
+        "{out}"
+    );
+
+    // No flags: an empty body (the daemon takes `latest`).
+    ok(
+        false,
+        &["admin", "harness", "update", "pi"],
+        vec![(200, one.clone())],
+        vec![(Post, "/api/harnesses/pi/update", vec![], Some(json!({})))],
+    )
+    .await;
+
+    let all = json!({"results": [one.clone(), {"harness": "pi", "package": "p", "from": null,
+        "to": "1.5.0", "output": "", "tested": null, "in_range": null}]});
+    let out = ok(
+        false,
+        &["admin", "harness", "update", "--all"],
+        vec![(200, all.clone())],
+        vec![(Post, "/api/harnesses/update", vec![], Some(json!({})))],
+    )
+    .await;
+    assert!(out.contains("pi: (not installed) -> 1.5.0"), "{out}");
+    let out = ok(
+        false,
+        &["--json", "admin", "harness", "update", "--all"],
+        vec![(200, all.clone())],
+        vec![(Post, "/api/harnesses/update", vec![], Some(json!({})))],
+    )
+    .await;
+    assert_eq!(serde_json::from_str::<Value>(&out).unwrap(), all);
+
+    // A name or --all, not both and not neither.
+    for args in [
+        &["terrarium", "admin", "harness", "update"][..],
+        &["terrarium", "admin", "harness", "update", "codex", "--all"][..],
+        &[
+            "terrarium",
+            "admin",
+            "harness",
+            "update",
+            "--all",
+            "--version",
+            "1.0.0",
+        ][..],
+    ] {
+        assert!(Cli::try_parse_from(args).is_err(), "{args:?}");
+    }
+}
+
+#[tokio::test]
+async fn admin_harness_update_prints_npm_output_and_the_running_agents_on_failure() {
+    let r = exec(
+        false,
+        &["admin", "harness", "update", "codex", "--version", "99.0.0"],
+        vec![(
+            422,
+            json!({"error": {"code": "invalid",
+            "message": "npm install -g @openai/codex@99.0.0 failed (exit 1)",
+            "details": {"output": "npm error code ETARGET\n", "package": "@openai/codex",
+                "version": "99.0.0", "from": "0.164.0"}}}),
+        )],
+        None,
+    )
+    .await;
+    let e = r.result.unwrap_err();
+    assert_eq!(exit_code_of(&e), exit::SERVER);
+    assert!(r.out.contains("npm error code ETARGET"), "{}", r.out);
+
+    let r = exec(
+        false,
+        &["admin", "harness", "update", "codex"],
+        vec![(
+            409,
+            json!({"error": {"code": "conflict", "message": "1 agent(s) run on codex",
+            "details": {"running": ["terra/worker"]}}}),
+        )],
+        None,
+    )
+    .await;
+    assert!(r.result.is_err());
+    assert!(
+        r.out
+            .contains("running: terra/worker. Stop them, or add --force"),
+        "{}",
+        r.out
+    );
 }

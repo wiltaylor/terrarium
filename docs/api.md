@@ -365,23 +365,81 @@ for 5 minutes. `?latest=true&refresh=true` asks npm again.
 | Field | Meaning |
 |---|---|
 | `latest` | `{version, published_at}`. `published_at` is `null` when the registry gives no time. `latest` is `null` when npm did not answer. |
-| `update` | The bump from `pinned` to `latest`: `none`, `minor` (a patch or a minor), or `major`. `null` when `latest` is `null`. |
+| `update` | The bump from `installed` (when it is known, else `pinned`) to `latest`: `none`, `minor` (a patch or a minor), or `major`. `null` when `latest` is `null`. |
 | `latest_error` | Only when `latest` is `null`: why. For example `cannot reach npm: ...` or `npm answered 503 for ...`. |
 
 `update` follows `scripts/harness.py` (`just harness::check`). A release
-that is not newer than the pin is `none`. A newer release is `major` when
+that is not newer than the installed version is `none`. A newer release is `major` when
 the first non-zero part of the version changes: `2.1.x` to `3.0.0`, or
 `0.164.x` to `0.165.0` (for `0.x`, the second number is the major). Else
 it is `minor`. A failure to reach npm never fails the request: the answer
 is still `200`.
 
-The Subscriptions page shows these fields in its "Harness versions" table.
-To update, run `just harness::latest` (all harnesses) or
-`just harness::update <name>` on the Docker host
-([getting-started.md §7](getting-started.md#7-updating-a-harness)), or use
-`POST /api/hosts/{name}/harness-update` (§17) through a host agent with
-`terrarium_repo_dir`. Each path rebuilds the image. The stack runs the old
-image until `just up` recreates the container.
+The Subscriptions page shows these fields in its "Harness versions" table,
+with an "Update" button for each row that has a newer release. The button
+calls `POST /api/harnesses/{name}/update`.
+
+### `POST /api/harnesses/{name}/update` and `POST /api/harnesses/update`
+
+The harnesses are not in the image. They are in the tools dir
+(`TERRARIUM_TOOLS_DIR`, `/opt/terrarium/tools` in the container, `./tools`
+on the Docker host), which is the npm prefix. An update runs
+`npm install -g <package>@<version>` into that dir, in the running
+container. It needs no image build, no restart, and no host agent
+([getting-started.md §7](getting-started.md#7-updating-a-harness)). Needs
+sysadmin or the operator.
+
+| Endpoint | Body | Answer |
+|---|---|---|
+| `POST /api/harnesses/{name}/update` | none, or `{"version"?, "force"?}` | `200` one result |
+| `POST /api/harnesses/update` | none, or `{"version"?: "latest", "force"?}` | `200` `{"results": [...]}`: every harness and extension, one after another |
+
+`{name}` is a harness (`claude`, `codex`, `copilot`, `pi`) or the extension
+`copilot-prompt`. `version` is `latest` (the default) or a version such as
+`0.165.0`. The update of every harness takes `latest` only.
+
+```json
+{"harness":"codex","package":"@openai/codex","from":"0.164.0","to":"0.165.0",
+ "output":"\nchanged 2 packages in 2s\n","tested":">=0.164.0, <0.165.0","in_range":false}
+```
+
+| Field | Meaning |
+|---|---|
+| `from` | The version before; `null` when the package was not installed. |
+| `to` | The version after: `<binary> --version` for a harness, `package.json` for the extension. |
+| `output` | npm's output: stdout, then stderr. |
+| `tested`, `in_range` | The adapter's range, and whether `to` is in it (`null` for the extension). Outside the range, an agent start follows `TERRARIUM_HARNESS_VERSION_POLICY` (§6.2). |
+| `error` | `POST /api/harnesses/update` only, on a failed item: why. |
+
+Rules:
+
+- While an agent on the harness is live (`starting`, `idle`, `working`,
+  `blocked`, `restarting`), the answer is `409 conflict` with
+  `details.running` (`["project/name", ...]`). A running harness keeps the
+  files it loaded, but a swap in the middle of a turn is risky. Stop the
+  agents, or send `"force": true`. For `copilot-prompt`, the Copilot agents
+  count. The next start of an agent runs the new version.
+- One update runs at a time. A second one gets `409 conflict`.
+- A name that is not a pin, or a version that is not `latest` or semver,
+  is `422 invalid`. Nothing reaches npm.
+- When npm fails (for example a version that does not exist), the answer
+  is `422 invalid` with `details`: `{output, package, version, from}`.
+  Nothing changes. npm has 10 minutes; then the daemon kills it.
+- `POST /api/harnesses/update` goes on after a failed item. When any item
+  failed, the answer is `422 invalid` with `details.results`.
+- A Copilot update also reinstalls the Copilot prompt extension into the
+  Copilot home.
+- Each update writes the audit entry `harness.update` (`detail`: `package`,
+  `version`, `from`, `to`, `force`, `ok`, `error`). A done update also
+  writes the event `harness` (§9) and runs `<binary> --version` again, so
+  `GET /api/harnesses` shows the new version at once.
+- A daemon with no tools dir (`TERRARIUM_TOOLS_DIR` empty) answers
+  `501 not_available`.
+- The tools dir keeps the manifest `terrarium-manifest.json`:
+  `{"<name>": {"package", "version", "installed_at"}}`.
+
+`terrarium admin harness update <name> [--version <v>] [--force]` and
+`terrarium admin harness update --all [--force]` call these endpoints.
 
 ### `POST /api/reload`
 
@@ -1174,6 +1232,7 @@ Kinds:
 | `usage.sample`, `usage.rejected_path`, `quota.sample`, `quota.alert`, `quota.blocked`, `quota.resumed`, `subscription.offer`, `subscription.expired`, `self_report` | See §16.7. |
 | `lease` | `{change, target, lease_id, expires_at, exclusive, state}`. `change` is `granted`, `extended`, or `ended` (a revoke or the expiry). The `agent` is the lease holder. The supervisor types a pointer from it (§17.7). |
 | `target` | `{change, target, from, state, snapshots_cleared}`. `change` is `reconciled`: a `status` found the target other than the store said (§17.3). |
+| `harness` | `{change, harness, package, from, to, forced}`. `change` is `updated`: an update in the tools dir (§4, `POST /api/harnesses/{name}/update`). |
 | `host.connected`, `host.disconnected` | `{host, host_id, ...}`: `version`, `os`, `arch`, `capabilities`, `summary`, `resumed` (sessions taken back), `reason`. See §17. |
 
 A `memory.*`, `wiki.*`, `artifact.*`, or `version.*` event that an agent
@@ -1987,16 +2046,11 @@ gets `401 unauthorized` before the upgrade.
 | `POST /api/hosts` | `{"name", "enrol"?}` | `201` one flat host object (the shape below) with `token`, `token_kind`, and for an enrol token `token_expires_at` | the operator |
 | `POST /api/hosts/{name}/rotate` | none, or `{"enrol"?}` | `200` the same shape as `POST /api/hosts` | the operator |
 | `DELETE /api/hosts/{name}` | | `204` | the operator |
-| `POST /api/hosts/{name}/harness-update` | `{"names": "all"}` or `{"names": ["<harness>"]}` | `201` `{session_id, host, names, output, rollout}` | the operator |
-| `GET /api/hosts/{name}/sessions/{id}` | | `200` the session view, as for a target session | the operator |
-| `GET /api/hosts/{name}/sessions/{id}/output` | `?since=&wait=` | `200` the output, as `GET /api/targets/{name}/sessions/{id}/output`; with `rollout` after an exit 0 | the operator |
-| `DELETE /api/hosts/{name}/sessions/{id}` | | `204`: kill the run | the operator |
 
 ```json
 {"name":"lab1","id":"01JB...","host_id":"01JB...","created_by":"operator",
  "status":"online","online":true,"sessions":1,
- "capabilities":{"docker":{"present":true,"version":"29.8.0"},"vmlab":{"present":false},"shell":"/bin/bash",
-   "can_update_harnesses":false},
+ "capabilities":{"docker":{"present":true,"version":"29.8.0"},"vmlab":{"present":false},"shell":"/bin/bash"},
  "summary":{"os":"linux","arch":"x86_64","docker":true,"vmlab":false},
  "os":"linux","arch":"x86_64","version":"0.1.0","max_sessions":32,
  "connected_at":"2026-10-24T06:36:54.149Z","last_seen":"2026-10-24T06:36:54.149Z",
@@ -2021,18 +2075,6 @@ Rules:
   operator. The swap writes the audit entry `host.enrol`, and
   `host.connected` has `"enrolled": true`. `enrol_expires_at` is set while
   an enrol token is open.
-- `harness-update` sends the `harness.update` verb
-  ([host-protocol.md](host-protocol.md#harnessupdate)). The host agent runs
-  `uv run python scripts/harness.py latest --no-rollout` (for `"all"`) or
-  `uv run python scripts/harness.py update <name> --allow-major` in its
-  `terrarium_repo_dir`, with a limit of 1 hour. The output streams as an
-  exec session; read it at `output`. The daemon writes the audit entry
-  `harness.update` (`detail`: `session`, `host`, `names`). The host must be
-  online (else `409 conflict`), and its `hello` must have
-  `capabilities.can_update_harnesses` (else `422 invalid`). `names` is
-  `"all"` or a list of one known harness (else `422 invalid`). The script
-  builds the image, but the daemon runs in the container and cannot
-  recreate it: `rollout` is ``"rollout needed: run `just up` on the host"``.
 - `rotate` makes a new token (with `"enrol": true`, a new enrol token) and
   writes the audit entry `host.rotate`. The old token stops working for new
   connections at once. A live link stays up until it ends; the host agent

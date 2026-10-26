@@ -13,6 +13,7 @@ pub mod events;
 pub mod executor;
 pub mod fleet;
 pub mod git;
+pub mod harness_tools;
 pub mod harness_versions;
 pub mod hosts;
 pub mod leases;
@@ -160,6 +161,7 @@ pub async fn start_with_usage(
         usage: Arc::new(usage_collector::UsageRuntime::new(usage)),
         executor: Arc::default(),
         harness_latest: Arc::default(),
+        harness_tools: Arc::default(),
         web: cfg.web.clone(),
         artifact_listen: cfg
             .artifact_listen

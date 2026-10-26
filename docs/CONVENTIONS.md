@@ -50,18 +50,29 @@ Rules for dependencies:
 ## Harness versions
 
 `harnesses.toml` at the repo root is the only place to change a harness
-version, the Node image, or the Copilot prompt extension version. Do not
-edit a version in `docker/Dockerfile` or in an adapter's `flags.rs`:
+pin, a tested range, the Node image, or the Copilot prompt extension pin.
+Do not edit a version in `docker/Dockerfile` or in an adapter's `flags.rs`:
 
-- `just docker::image-build` passes the values as build args. The ARG
-  defaults in the Dockerfile are a copy, and `just ci::scripts-test` fails
-  when they differ.
+- The image installs no harness. It copies the file to
+  `/etc/terrarium/harnesses.toml`, and `terrariumd harness install` (the
+  entrypoint, and the daemon at each start) installs each missing pin into
+  the tools dir. `just ci::check` fails when the Dockerfile installs a
+  harness, or when its `NODE_IMAGE` default differs from `[node] image`.
 - `crates/terrarium-core/build.rs` makes `terrarium_core::harnesses` from
   the file, and each adapter's `verified` and `tested` come from it. The
   build fails when `tested` does not match `version`.
 
-Use `just harness::latest` (every harness) or `just harness::update <name>`
-(one harness) to change a version
+**The tools dir.** The harnesses live in the tools dir, not in the image:
+`TERRARIUM_TOOLS_DIR`, which is `/opt/terrarium/tools` in the container
+(compose binds `./tools`) and `./tools` for `just daemon::run`. It is the
+npm global prefix (`NPM_CONFIG_PREFIX`), its `bin/` is first on `PATH`,
+and the sandbox binds it read-only. The manifest
+`terrarium-manifest.json` in it records each installed package. Code finds
+a harness on `PATH`; it never names a path under the tools dir.
+
+Use `just harness::update <name>` (one harness) or `just harness::latest`
+(every harness) to update in place in the running container, with no image
+build. Add `--pin` to also change `harnesses.toml`
 ([getting-started.md](getting-started.md), "Updating a harness").
 
 ## Run things with just
@@ -83,8 +94,8 @@ Run `just` to see the modules. Run `just <module>` to see its recipes.
 | Check bwrap in the image               | `just spikes::bwrap-check`      |
 | Build the static host agent            | `just host::build`              |
 | Compare the harness pins with npm      | `just harness::check`           |
-| Bump every harness to the latest       | `just harness::latest`          |
-| Bump a harness version                 | `just harness::update <name>`   |
+| Update every harness to the latest     | `just harness::latest`          |
+| Update one harness in place            | `just harness::update <name>`   |
 
 `just ci::check` must pass before a change merges. It runs `fmt-check`,
 `lint`, `test`, `scripts-test`, and `dashboard-check`. `ci::compat` is not in the gate, because
@@ -114,6 +125,10 @@ a new token, when `.env` does not exist. The daemon reads:
 | `TERRARIUM_MAIL_LOOP_LIMIT` | `6`. The agent-to-agent messages that a thread may have after the last operator or project-inbox message. Then the loop guard pauses the thread (PLAN §12). |
 | `TERRARIUM_TRASH_DAYS` | `7`. The days that a deleted agent stays in `<state>/trash/`, with its workspace. |
 | `TERRARIUM_HARNESS_HOME` | `/auth/<harness>`. Override as `claude=/path,codex=/path`. |
+| `TERRARIUM_TOOLS_DIR` | `tools` (from the cwd). The image sets `/opt/terrarium/tools`; `just daemon::run` sets `<repo>/tools`. The npm prefix of the harnesses: the daemon installs the missing pins there at start, puts `<dir>/bin` first on `PATH`, and the sandbox binds it read-only. Empty: no tools dir; the harnesses come from `PATH`, and `POST /api/harnesses/{name}/update` answers `501`. |
+| `TERRARIUM_NO_HARNESS_INSTALL` | off. On (or `--no-harness-install`): the daemon does not install the missing pins at start. |
+| `TERRARIUM_NPM` | `npm`. The npm program for the tools dir. |
+| `TERRARIUM_HARNESS_INSTALL` | `1`. The entrypoint only: `0` skips its `terrariumd harness install`. |
 | `TERRARIUM_CLI`        | `terrarium` next to `terrariumd`, else on `PATH`. The sandbox binds it at `/opt/terrarium/bin/terrarium`. |
 | `TERRARIUM_ARTIFACT_LISTEN` | `0.0.0.0:8081`. Empty: no artifact listener of its own, and the dashboard port serves `/a/...`. With a listener, the dashboard port does not serve artifacts. |
 | `TERRARIUM_HOST_LISTEN` | `auto`, the host agent dial-in: `0.0.0.0:8082` with TLS, `127.0.0.1:8082` without. Empty: no listener of its own; the main router still serves `/hosts/connect`. A plaintext bind to a non-loopback address logs an `INSECURE` warning. |

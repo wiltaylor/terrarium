@@ -148,6 +148,22 @@ pub struct Settings {
     )]
     pub harness_version_policy: crate::harness_versions::VersionPolicy,
 
+    /// The tools dir: the npm prefix that holds the harnesses
+    /// (`<dir>/bin` first on `PATH`). At start the daemon installs each pin
+    /// of `<config dir>/harnesses.toml` that is missing there, and
+    /// `POST /api/harnesses/{name}/update` updates in place. A relative path
+    /// is from the cwd. Empty: no tools dir; the harnesses come from `PATH`.
+    #[arg(long, env = crate::harness_tools::ENV_TOOLS_DIR, default_value = crate::harness_tools::DEFAULT_TOOLS_DIR)]
+    pub tools_dir: String,
+
+    /// Do not install the missing pins into the tools dir at start.
+    #[arg(long, env = "TERRARIUM_NO_HARNESS_INSTALL")]
+    pub no_harness_install: bool,
+
+    /// The npm program for the tools dir.
+    #[arg(long, env = "TERRARIUM_NPM", default_value = "npm")]
+    pub npm: PathBuf,
+
     /// Trust the `X-Terrarium-Agent` header on the Unix socket. Any local
     /// caller can then act as any agent. For tests and development only.
     #[arg(long, env = "TERRARIUM_INSECURE_AGENT_HEADER")]
@@ -176,6 +192,30 @@ pub enum Command {
         /// The agent: a ULID, `project/name`, or a unique name.
         agent: String,
     },
+    /// The harnesses in the tools dir (`--tools-dir`), with no daemon.
+    Harness {
+        #[command(subcommand)]
+        command: HarnessCommand,
+    },
+}
+
+/// `terrariumd harness ...`.
+#[derive(Debug, Subcommand)]
+pub enum HarnessCommand {
+    /// Install each pin of harnesses.toml that is missing from the tools
+    /// dir, and the Copilot prompt extension when it changed. A present
+    /// package stays at its version. Exit 1 when an install fails.
+    Install {
+        /// Print the report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show each pin, the installed version, and the manifest row.
+    Status {
+        /// Print the status as JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn default_runtime_dir() -> PathBuf {
@@ -202,6 +242,29 @@ fn sibling_or_path(program: &str) -> Option<PathBuf> {
 }
 
 impl Settings {
+    /// The tools dir and its pins, or `None` when `--tools-dir` is empty.
+    /// The pins come from `<config dir>/harnesses.toml`, else from the
+    /// pins built into this binary.
+    pub fn tools_config(&self) -> Option<crate::harness_tools::ToolsConfig> {
+        let dir = self.tools_dir.trim();
+        if dir.is_empty() {
+            return None;
+        }
+        let dir = std::path::absolute(dir).unwrap_or_else(|_| PathBuf::from(dir));
+        let (pins, source) =
+            crate::harness_tools::load_pins(&self.config_dir.join(crate::harness_tools::PINS_FILE));
+        tracing::debug!(pins = %source, "harness pins");
+        let copilot_home = self
+            .harness_homes
+            .iter()
+            .find(|(h, _)| *h == HarnessId::Copilot)
+            .map(|(_, d)| d.clone())
+            .unwrap_or_else(|| PathBuf::from(HarnessId::Copilot.auth_dir()));
+        let mut cfg = crate::harness_tools::ToolsConfig::new(dir, pins, copilot_home);
+        cfg.npm = self.npm.clone();
+        Some(cfg)
+    }
+
     /// The runner mode. This is the one place that picks it
     /// (`TERRARIUM_RUNNER_MODE`, `TERRARIUM_RUNNER`).
     pub fn runner_mode(&self) -> Result<RunnerMode, String> {

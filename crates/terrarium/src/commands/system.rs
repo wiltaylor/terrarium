@@ -500,7 +500,8 @@ pub async fn hosts(ctx: &Ctx, cmd: &HostCmd) -> anyhow::Result<()> {
     }
 }
 
-/// `admin harness ls`: `GET /api/harnesses`.
+/// `admin harness ls`: `GET /api/harnesses`; `admin harness update`:
+/// `POST /api/harnesses/{name}/update` or `POST /api/harnesses/update`.
 pub async fn harnesses(ctx: &Ctx, cmd: &HarnessCmd) -> anyhow::Result<()> {
     match cmd {
         HarnessCmd::Ls { refresh } => {
@@ -512,6 +513,84 @@ pub async fn harnesses(ctx: &Ctx, cmd: &HarnessCmd) -> anyhow::Result<()> {
             let v = ctx.api.get("/api/harnesses", q).await?;
             ctx.emit(&v, print_harnesses)
         }
+        HarnessCmd::Update {
+            name,
+            all,
+            version,
+            force,
+        } => {
+            let mut body = serde_json::Map::new();
+            if let Some(v) = version {
+                body.insert("version".into(), Value::String(v.clone()));
+            }
+            if *force {
+                body.insert("force".into(), Value::Bool(true));
+            }
+            let path = match (name, all) {
+                (Some(n), false) => {
+                    format!("/api/harnesses/{}/update", crate::transport::encode(n))
+                }
+                _ => "/api/harnesses/update".to_owned(),
+            };
+            let r = ctx.api.post(&path, Some(Value::Object(body))).await;
+            match r {
+                Ok(v) => ctx.emit(&v, print_update),
+                Err(e) => {
+                    // npm's output of a failed install, before the error.
+                    if !ctx.json
+                        && let Some(se) = e.downcast_ref::<crate::api::ServerError>()
+                        && let Some(d) = &se.details
+                    {
+                        print_failed_update(ctx, d);
+                    }
+                    Err(e)
+                }
+            }
+        }
+    }
+}
+
+/// One update result: npm's output, then `name from -> to`.
+fn print_update_row(ctx: &Ctx, r: &Value) {
+    if let Some(out) = r["output"].as_str().filter(|s| !s.trim().is_empty()) {
+        ctx.line(out.trim_end());
+    }
+    let from = r["from"].as_str().unwrap_or("(not installed)");
+    match (r["to"].as_str(), r["error"].as_str()) {
+        (Some(to), _) => {
+            let range = match r["in_range"].as_bool() {
+                Some(false) => format!(" (outside the tested range {})", field(r, "tested")),
+                _ => String::new(),
+            };
+            ctx.line(format!("{}: {from} -> {to}{range}", field(r, "harness")));
+        }
+        (None, Some(e)) => ctx.line(format!("{}: failed: {e}", field(r, "harness"))),
+        (None, None) => ctx.line(format!("{}: failed", field(r, "harness"))),
+    }
+}
+
+fn print_update(ctx: &Ctx, v: &Value) {
+    match v["results"].as_array() {
+        Some(rows) => rows.iter().for_each(|r| print_update_row(ctx, r)),
+        None => print_update_row(ctx, v),
+    }
+}
+
+/// The `details` of a failed update: npm's output, each result of an
+/// update of all, or the running agents.
+fn print_failed_update(ctx: &Ctx, d: &Value) {
+    if let Some(out) = d["output"].as_str().filter(|s| !s.trim().is_empty()) {
+        ctx.line(out.trim_end());
+    }
+    if let Some(rows) = d["results"].as_array() {
+        rows.iter().for_each(|r| print_update_row(ctx, r));
+    }
+    if let Some(running) = d["running"].as_array() {
+        let names: Vec<&str> = running.iter().filter_map(Value::as_str).collect();
+        ctx.line(format!(
+            "running: {}. Stop them, or add --force",
+            names.join(", ")
+        ));
     }
 }
 
@@ -547,10 +626,11 @@ fn print_harnesses(ctx: &Ctx, v: &Value) {
     for h in &items {
         if h["in_range"] == false {
             ctx.line(format!(
-                "{}: {} is outside {}; rebuild the image or run `just harness::update {}`",
+                "{}: {} is outside {}; run `terrarium admin harness update {}` or `just harness::update {}`",
                 field(h, "harness"),
                 field(h, "installed"),
                 field(h, "tested"),
+                field(h, "harness"),
                 field(h, "harness"),
             ));
         } else if h["in_range"].is_null() && !h["error"].is_null() {

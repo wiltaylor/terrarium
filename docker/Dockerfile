@@ -1,16 +1,18 @@
 # syntax=docker/dockerfile:1.7
 #
 # Terrarium: one image with the daemon, the CLI, the embedded dashboard, and
-# the pinned harnesses (PLAN §23.3). Build from the repo root:
+# Node (PLAN §23.3). The image installs no harness: the entrypoint installs
+# the pins of harnesses.toml into the tools volume (/opt/terrarium/tools) at
+# the first start, and `POST /api/harnesses/{name}/update` updates them in
+# place (docs/getting-started.md §7). Build from the repo root:
 #
 #   docker build -f docker/Dockerfile --build-arg UID=$(id -u) --build-arg GID=$(id -g) -t terrarium:dev .
 #
-# The harness versions and the Node image come from harnesses.toml at the
-# repo root. `just docker::image-build` passes them as build args
-# (scripts/harness-versions.py build-args). The ARG defaults below are a
-# copy for a build by hand; `just harness::update` rewrites them, and
-# `just ci::check` fails when they differ from harnesses.toml. Do not edit
-# a version here: edit harnesses.toml (docs/CONVENTIONS.md).
+# The Node image comes from harnesses.toml [node] image. The NODE_IMAGE
+# default below is a copy; `just ci::check` fails when it differs
+# (scripts/harness-versions.py check). The image copies harnesses.toml to
+# /etc/terrarium/harnesses.toml: `terrariumd harness install` reads the pins
+# there (docs/CONVENTIONS.md).
 #
 # Stages:
 #   dashboard    npm ci && npm run build for the SolidJS app
@@ -18,7 +20,7 @@
 #                (terrariumd embeds the dashboard)
 #   host-build   static musl terrarium-host, for `just host::build` (not in the image)
 #   host-export  scratch stage that holds only the host binary, for `--output`
-#   runtime      Debian slim + Node, bubblewrap, git, ssh, python3, and the harnesses
+#   runtime      Debian slim + Node and npm, bubblewrap, git, ssh, python3 (no harness)
 
 ARG RUST_IMAGE=rust:1.97-trixie
 # harnesses.toml [node] image.
@@ -68,13 +70,6 @@ FROM ${NODE_IMAGE} AS runtime
 
 ARG UID=1000
 ARG GID=1000
-# Pinned harness versions: harnesses.toml [harness.<name>] version, and
-# [extension.copilot-prompt] version. The adapters read the same file.
-ARG CLAUDE_VERSION=2.1.310
-ARG CODEX_VERSION=0.164.0
-ARG COPILOT_VERSION=1.0.103
-ARG PI_VERSION=1.4.0
-ARG COPILOT_PROMPT_VERSION=0.1.2
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -87,17 +82,6 @@ RUN apt-get update \
         tini \
     && rm -rf /var/lib/apt/lists/*
 
-RUN --mount=type=cache,target=/root/.npm \
-    npm install -g --no-audit --no-fund \
-        "@anthropic-ai/claude-code@${CLAUDE_VERSION}" \
-        "@openai/codex@${CODEX_VERSION}" \
-        "@github/copilot@${COPILOT_VERSION}" \
-        "@earendil-works/pi-coding-agent@${PI_VERSION}" \
-        "copilot-custom-system-prompt@${COPILOT_PROMPT_VERSION}" \
-    && for bin in claude codex copilot pi copilot-custom-system-prompt; do \
-        command -v "$bin" > /dev/null || { echo "missing $bin" >&2; exit 1; }; \
-    done
-
 # The node image ships a `node` user with UID 1000. Replace it with
 # `terrarium`, whose UID and GID match the owner of the bind mounts.
 RUN userdel --remove node 2>/dev/null || true \
@@ -109,7 +93,7 @@ RUN userdel --remove node 2>/dev/null || true \
 # Harness homes live on the /auth bind mounts. The symlinks serve harnesses
 # that read $HOME; the env vars serve harnesses that read them.
 RUN mkdir -p /auth/claude /auth/codex /auth/copilot /auth/pi \
-        /state /work /run/terrarium /prompts /usr/local/share/terrarium \
+        /state /work /run/terrarium /prompts /opt/terrarium/tools \
         /etc/terrarium/projects /etc/terrarium/agents \
         /etc/terrarium/targets /etc/terrarium/subscriptions \
         /home/terrarium/.pi \
@@ -117,7 +101,19 @@ RUN mkdir -p /auth/claude /auth/codex /auth/copilot /auth/pi \
     && ln -s /auth/codex /home/terrarium/.codex \
     && ln -s /auth/copilot /home/terrarium/.copilot \
     && ln -s /auth/pi /home/terrarium/.pi/agent \
-    && chown -R "${UID}:${GID}" /auth /state /work /run/terrarium /etc/terrarium /home/terrarium
+    && chown -R "${UID}:${GID}" /auth /state /work /run/terrarium /etc/terrarium /home/terrarium \
+        /opt/terrarium/tools
+
+# The harnesses live in the tools volume, not in the image. npm installs
+# into it (NPM_CONFIG_PREFIX), and its bin/ comes first on PATH for the
+# daemon, the runners, and `docker compose exec`. The sandbox binds it
+# read-only (crates/terrariumd/src/sandbox.rs).
+ENV TERRARIUM_TOOLS_DIR=/opt/terrarium/tools \
+    NPM_CONFIG_PREFIX=/opt/terrarium/tools \
+    NPM_CONFIG_UPDATE_NOTIFIER=false \
+    NPM_CONFIG_FUND=false \
+    NPM_CONFIG_AUDIT=false \
+    PATH=/opt/terrarium/tools/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 ENV HOME=/home/terrarium \
     CLAUDE_CONFIG_DIR=/auth/claude \
@@ -135,10 +131,8 @@ ENV HOME=/home/terrarium \
 # lives through a restart of terrariumd.
 COPY --from=rust /out/terrariumd /out/terrarium /out/terrarium-runner /usr/local/bin/
 COPY docker/entrypoint.sh /usr/local/bin/terrarium-entrypoint
-
-# The entrypoint reinstalls the Copilot extension when this string changes.
-RUN echo "terrarium-$(terrariumd --version | cut -d' ' -f2) copilot-prompt-${COPILOT_PROMPT_VERSION} copilot-${COPILOT_VERSION}" \
-        > /usr/local/share/terrarium/image-version
+# The pins of the first install (`terrariumd harness install`).
+COPY harnesses.toml /etc/terrarium/harnesses.toml
 
 USER terrarium
 WORKDIR /home/terrarium

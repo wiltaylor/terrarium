@@ -16,7 +16,6 @@ pub async fn detect(docker_bin: &str, vmlab_bin: &str) -> HostCapabilities {
         docker,
         vmlab,
         shell: detect_shell(),
-        can_update_harnesses: false,
     }
 }
 

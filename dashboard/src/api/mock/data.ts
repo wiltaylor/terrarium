@@ -706,7 +706,7 @@ ${XSS_DOCUMENT}
   const hosts: Host[] = [
     {
       name: "lab1", id: fakeUlid("host", 1), host_id: fakeUlid("host", 1), status: "online", online: true, sessions: 1, max_sessions: 32, max_running_targets: 4, connected_at: ago(60), os: "linux", arch: "x86_64", version: "0.1.0", last_seen: ago(0.1),
-      capabilities: { docker: { present: true, version: "29.8.0" }, vmlab: { present: true, version: "0.30.0-alpha" }, shell: "/bin/bash", can_update_harnesses: true },
+      capabilities: { docker: { present: true, version: "29.8.0" }, vmlab: { present: true, version: "0.30.0-alpha" }, shell: "/bin/bash" },
     },
     {
       name: "pi-cluster", id: fakeUlid("host", 2), host_id: fakeUlid("host", 2), status: "offline", online: false, sessions: 0, os: "linux", arch: "aarch64", version: "0.0.9", last_seen: ago(60 * 7),

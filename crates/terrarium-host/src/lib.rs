@@ -18,8 +18,6 @@
 //!   generated lab file of an instance.
 //! - [`prepare`]: `vmlab.prepare` and `vmlab.release` (worktrees and
 //!   lab instances).
-//! - [`harness_update`]: the `harness.update` verb (`scripts/harness.py`
-//!   in `terrarium_repo_dir`).
 //! - [`config`]: the config file and the path policy.
 //! - [`capabilities`]: tool detection for `hello` and `check`.
 //! - [`tls`]: the transport check, fingerprint pinning, the probe, and
@@ -29,7 +27,6 @@ pub mod capabilities;
 pub mod client;
 pub mod config;
 pub mod docker;
-pub mod harness_update;
 pub mod labcheck;
 pub mod outbox;
 pub mod prepare;

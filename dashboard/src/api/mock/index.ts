@@ -36,6 +36,7 @@ import type {
   CardComment,
   ColumnEdit,
   EventQuery,
+  HarnessReport,
   HarnessVersion,
   Host,
   LoginKind,
@@ -44,7 +45,7 @@ import type {
   Project,
   Repo,
   Role,
-  SessionOutput,
+  HarnessUpdateResult,
   Subscription,
   Lease,
   NewTarget,
@@ -58,7 +59,7 @@ import type {
 } from "../types";
 import { paginate, type PageQuery } from "../../lib/paging";
 import { fakeUlid, seed, type MockWorld, type UsageRow } from "./data";
-import { HARNESS_ROLLOUT, harnessUpdateKind } from "../../lib/harness-update";
+import { harnessUpdateKind } from "../../lib/harness-update";
 import { FakePty } from "./pty";
 
 export interface MockOptions {
@@ -117,6 +118,56 @@ export const MOCK_COOKIE_KEY = "terrarium.mock.cookie";
 const clone = <T>(v: T): T => structuredClone(v);
 
 /** The daemon's error body and status (docs/api.md §2.5). */
+/** The harnesses and the extension of the mock, as harnesses.toml has them. `npm` is the latest on npm. */
+interface MockHarness {
+  name: string;
+  /** Null for the extension. */
+  harness: HarnessVersion["harness"] | null;
+  package: string;
+  pinned: string;
+  tested: string | null;
+  npm: { version: string; days: number } | { error: string };
+}
+
+const MOCK_HARNESSES: MockHarness[] = [
+  { name: "claude", harness: "claude", package: "@anthropic-ai/claude-code", pinned: "2.1.310", tested: ">=2.1.310, <2.2.0", npm: { version: "2.1.310", days: 3 } },
+  // 0.x: the second number is the major.
+  { name: "codex", harness: "codex", package: "@openai/codex", pinned: "0.164.0", tested: ">=0.164.0, <0.165.0", npm: { version: "0.165.0", days: 1 } },
+  { name: "copilot", harness: "copilot", package: "@github/copilot", pinned: "1.0.103", tested: ">=1.0.103, <1.1.0", npm: { version: "1.0.110", days: 2 } },
+  // Installed out of range, so mock mode shows the badge; npm does not answer for it.
+  { name: "pi", harness: "pi", package: "@earendil-works/pi-coding-agent", pinned: "1.4.0", tested: ">=1.4.0, <1.5.0", npm: { error: "cannot reach npm: connection refused" } },
+  { name: "copilot-prompt", harness: null, package: "copilot-custom-system-prompt", pinned: "0.1.2", tested: null, npm: { version: "0.1.2", days: 30 } },
+];
+
+const LIVE_STATUSES: string[] = ["starting", "idle", "working", "blocked", "restarting"];
+
+/** `latest`, or `x.y.z` with an optional pre-release; anything else is `422 invalid`. */
+function checkHarnessVersion(v: string | undefined): string {
+  const version = v ?? "latest";
+  if (version !== "latest" && !/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(version))
+    fail(422, "invalid", `version \`${version}\` is not \`latest\` or x.y.z`);
+  return version;
+}
+
+/** A `>=a, <b` range check, enough for the mock's ranges. */
+function inTested(version: string, tested: string): boolean {
+  const n = (s: string) => s.trim().replace(/^[<>=]+/, "").split(".").map(Number);
+  const cmp = (a: number[], b: number[]) => {
+    for (let i = 0; i < 3; i++) if ((a[i] ?? 0) !== (b[i] ?? 0)) return (a[i] ?? 0) - (b[i] ?? 0);
+    return 0;
+  };
+  const v = n(version);
+  return tested.split(",").every((part) => {
+    const p = part.trim();
+    const b = n(p);
+    if (p.startsWith(">=")) return cmp(v, b) >= 0;
+    if (p.startsWith("<=")) return cmp(v, b) <= 0;
+    if (p.startsWith(">")) return cmp(v, b) > 0;
+    if (p.startsWith("<")) return cmp(v, b) < 0;
+    return cmp(v, b) === 0;
+  });
+}
+
 export function fail(status: number, code: string, message: string, details?: unknown): never {
   const error = details === undefined ? { code, message } : { code, message, details };
   throw new ApiError(status, message, { error }, code, details);
@@ -153,7 +204,8 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
   const startedAt = now();
   const later = (fn: () => void, ms = step) => setTimeout(fn, ms);
   /** `harness.update` sessions: the scripted output, one chunk for each read. */
-  const hostSessions = new Map<string, { host: string; chunks: { stream: "stdout" | "stderr"; text: string }[]; sent: number; next: number }>();
+  // The installed harness versions. An update in the mock changes them.
+  const harnessInstalled: Record<string, string> = { claude: "2.1.310", codex: "0.164.0", copilot: "1.0.103", pi: "1.5.1", "copilot-prompt": "0.1.2" };
 
   const reply = <T>(fn: () => T): Promise<T> =>
     new Promise<T>((resolve, reject) => {
@@ -313,6 +365,49 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     hub.forEach((fn) => fn(clone(e)));
     return e;
   };
+  // ----- harness versions and in-place updates (docs/api.md §4) -----
+  const harnessReport = (latest: boolean): HarnessReport => {
+    const at = new Date(startedAt).toISOString();
+    const rows = MOCK_HARNESSES.filter((h): h is MockHarness & { harness: HarnessVersion["harness"] } => h.harness !== null).map((h) => {
+      const installed = harnessInstalled[h.name] ?? null;
+      const in_range = installed === null ? null : inTested(installed, h.tested!);
+      const base: HarnessVersion = { harness: h.harness, package: h.package, pinned: h.pinned, tested: h.tested!, installed, in_range, checked_at: at };
+      if (!latest) return base;
+      if ("error" in h.npm) return { ...base, latest: null, update: null, latest_error: h.npm.error };
+      return { ...base, latest: { version: h.npm.version, published_at: new Date(startedAt - h.npm.days * 86_400_000).toISOString() }, update: harnessUpdateKind(installed ?? h.pinned, h.npm.version) };
+    });
+    return { policy: "warn", harnesses: rows };
+  };
+  // 409 when a live agent runs on one of the harnesses (the extension counts as copilot).
+  const harnessRunning = (specs: MockHarness[], force: boolean) => {
+    if (force) return;
+    const uses = new Set(specs.map((s) => s.harness ?? "copilot"));
+    const running = w.agents.filter((a) => uses.has(a.harness) && LIVE_STATUSES.includes(a.status)).map((a) => `${a.project}/${a.name}`);
+    if (running.length)
+      fail(
+        409,
+        "conflict",
+        `${running.length} agent(s) run on ${[...uses].join(", ")} (${running.join(", ")}). A running harness keeps the files it loaded, but a swap in the middle of a turn is risky. Stop them, or send force: true`,
+        { running },
+      );
+  };
+  const updateHarness = (h: MockHarness, version: string, forced: boolean): HarnessUpdateResult => {
+    const target = version === "latest" ? ("error" in h.npm ? null : h.npm.version) : version;
+    const from = harnessInstalled[h.name] ?? null;
+    if (target === null) fail(422, "invalid", `npm install -g ${h.package}@latest failed`, { output: "npm error code ECONNREFUSED\nnpm error network request failed", package: h.package, version, from });
+    if (target.startsWith("99."))
+      fail(422, "invalid", `npm install -g ${h.package}@${target} failed (exit 1)`, {
+        output: `npm error code ETARGET\nnpm error notarget No matching version found for ${h.package}@${target}.\n`,
+        package: h.package,
+        version: target,
+        from,
+      });
+    harnessInstalled[h.name] = target;
+    audit("harness.update", h.name, undefined, { from, to: target, version, force: forced });
+    emit({ kind: "harness", actor: "operator", summary: `${h.name} ${from ?? "-"} -> ${target}`, data: { change: "updated", harness: h.name, package: h.package, from, to: target, forced } });
+    return { harness: h.name, package: h.package, from, to: target, output: `\nchanged 1 package in 3s\n`, tested: h.tested, in_range: h.tested ? inTested(target, h.tested) : null };
+  };
+
   const agentEvent = (a: Agent, kind: AgentEvent["kind"], summary: string, data: Record<string, unknown> = {}, actor = "system") =>
     emit({ kind, actor, agent: a.name, agent_id: a.id, project: a.project, session: w.sessions.find((s) => s.agent === a.id && s.current)?.id, summary, data });
   const setStatus = (a: Agent, status: AgentStatus, reason: string | null = null) => {
@@ -1176,27 +1271,30 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
         started_at: new Date(startedAt - 3600_000).toISOString(),
         definitions: { projects: 1, agents: 1, targets: 0, subscriptions: 0 },
       })),
-    harnesses: (_refresh, latest) =>
+    harnesses: (_refresh, latest) => reply(() => harnessReport(latest === true)),
+    harnessUpdate: (name, o = {}) =>
       reply(() => {
-        const at = new Date(startedAt).toISOString();
-        type Npm = { version: string; days: number } | { error: string };
-        const row = (harness: "claude" | "codex" | "copilot" | "pi", pkg: string, pinned: string, tested: string, installed: string, in_range: boolean, npm: Npm): HarnessVersion => {
-          const base: HarnessVersion = { harness, package: pkg, pinned, tested, installed, in_range, checked_at: at };
-          if (!latest) return base;
-          if ("error" in npm) return { ...base, latest: null, update: null, latest_error: npm.error };
-          return { ...base, latest: { version: npm.version, published_at: new Date(startedAt - npm.days * 86_400_000).toISOString() }, update: harnessUpdateKind(pinned, npm.version) };
-        };
-        return {
-          policy: "warn" as const,
-          harnesses: [
-            row("claude", "@anthropic-ai/claude-code", "2.1.310", ">=2.1.310, <2.2.0", "2.1.310", true, { version: "2.1.310", days: 3 }),
-            // 0.x: the second number is the major.
-            row("codex", "@openai/codex", "0.164.0", ">=0.164.0, <0.165.0", "0.164.0", true, { version: "0.165.0", days: 1 }),
-            row("copilot", "@github/copilot", "1.0.103", ">=1.0.103, <1.1.0", "1.0.103", true, { version: "1.0.110", days: 2 }),
-            // Out of range, so mock mode shows the badge; npm does not answer for it.
-            row("pi", "@earendil-works/pi-coding-agent", "1.4.0", ">=1.4.0, <1.5.0", "1.5.1", false, { error: "cannot reach npm: connection refused" }),
-          ],
-        };
+        const spec = MOCK_HARNESSES.find((h) => h.name === name);
+        if (!spec) fail(422, "invalid", `unknown harness \`${name}\`: use one of ${MOCK_HARNESSES.map((h) => h.name).join(", ")}`);
+        const version = checkHarnessVersion(o.version);
+        harnessRunning([spec], o.force === true);
+        return updateHarness(spec, version, o.force === true);
+      }),
+    harnessUpdateAll: (o = {}) =>
+      reply(() => {
+        harnessRunning(MOCK_HARNESSES, o.force === true);
+        // One after another; a failed item gets `error` and its npm output, and the rest go on.
+        const results = MOCK_HARNESSES.map((h): HarnessUpdateResult => {
+          try {
+            return updateHarness(h, "latest", o.force === true);
+          } catch (e) {
+            const d = (e as ApiError).details as { output?: string } | undefined;
+            return { harness: h.name, package: h.package, from: harnessInstalled[h.name] ?? null, to: null, output: d?.output ?? "", tested: h.tested, in_range: null, error: (e as Error).message };
+          }
+        });
+        const failed = results.filter((r) => r.error).length;
+        if (failed) fail(422, "invalid", `${failed} of ${results.length} updates failed`, { results });
+        return { results };
       }),
 
     projects: {
@@ -2359,53 +2457,6 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           w.hosts.splice(w.hosts.indexOf(h), 1);
           delete w.hostTokens[name];
           audit("host.revoke", name, undefined);
-        }),
-      harnessUpdate: (name, names) =>
-        reply(() => {
-          const h = find(w.hosts, (x) => x.name === name, `host \`${name}\``);
-          const known = ["claude", "codex", "copilot", "pi"];
-          if (names !== "all" && (!Array.isArray(names) || names.length !== 1 || !known.includes(names[0]!)))
-            fail(422, "invalid", `\`names\` must be "all" or a list of one harness (${known.join(", ")})`);
-          if (h.status !== "online") fail(409, "conflict", `host \`${name}\` is offline`);
-          if (!h.capabilities?.can_update_harnesses)
-            fail(422, "invalid", `host \`${name}\` does not update harnesses: set \`terrarium_repo_dir\` (the Terrarium checkout) in its config and restart it (docs/host-protocol.md, harness.update)`);
-          const checked = names === "all" ? ["all"] : names;
-          const id = ulid("hus");
-          const args = names === "all" ? "latest --no-rollout" : `update ${names[0]} --allow-major`;
-          hostSessions.set(id, {
-            host: name,
-            chunks: [
-              { stream: "stderr", text: `$ uv run python scripts/harness.py ${args}\n` },
-              { stream: "stdout", text: "codex: 0.164.0 -> 0.165.0 (major)\nWARNING: codex 0.164.0 -> 0.165.0 is a major bump: hooks and flags may have changed\n" },
-              { stream: "stdout", text: "build the image ... ok\ndry compat ... ok\n" },
-              { stream: "stdout", text: "\n--no-rollout: the stack still runs the old image. Roll out with `just harness::rollout`.\n" },
-            ],
-            sent: 0,
-            next: 0,
-          });
-          audit("harness.update", name, undefined, { session: id, host: name, names: checked });
-          return { session_id: id, host: name, names: checked, output: `/api/hosts/${name}/sessions/${id}/output`, rollout: HARNESS_ROLLOUT };
-        }),
-      sessionOutput: (name, session, since) =>
-        reply(() => {
-          const s = hostSessions.get(session);
-          if (!s || s.host !== name) fail(404, "not_found", `no exec session \`${session}\` on target \`host:${name}\``);
-          // One chunk for each read, as a slow build would give.
-          const c = s.chunks[s.sent];
-          const out: SessionOutput = { session_id: session, since, next: since, chunks: [], done: false };
-          if (c) {
-            const data = btoa(c.text);
-            s.sent += 1;
-            s.next = since + c.text.length;
-            out.chunks = [{ stream: c.stream, data }];
-            out.next = s.next;
-          }
-          if (s.sent >= s.chunks.length) {
-            out.done = true;
-            out.end = { type: "exit", code: 0, signal: null, reason: "exited" };
-            out.rollout = HARNESS_ROLLOUT;
-          }
-          return out;
         }),
     },
 

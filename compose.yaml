@@ -38,6 +38,7 @@ services:
       - ./config/codex:/auth/codex
       - ./config/copilot:/auth/copilot
       - ./config/pi:/auth/pi
+      - ./tools:/opt/terrarium/tools             # the harnesses: npm prefix, installed at the first start, updated in place (TERRARIUM_TOOLS_DIR)
       - ./state:/state
       - ./prompts:/prompts:ro
       - ./subscriptions:/etc/terrarium/subscriptions
@@ -57,5 +58,7 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 20s
+      # The first start installs the harnesses into ./tools (a minute or
+      # two); a check that passes ends the start period at once.
+      start_period: 600s
       start_interval: 2s

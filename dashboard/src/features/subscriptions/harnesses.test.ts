@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import type { HarnessReport, HarnessVersion, Host } from "../../api/types";
+import type { HarnessReport, HarnessVersion } from "../../api/types";
 import { createMockApi } from "../../api/mock";
 import { harnessUpdateKind } from "../../lib/harness-update";
-import { harnessStatus, HARNESS_ROLLOUT, offPin, outOfRange, policyNote, publishedDay, updateCommand, updateHosts, updateNames, withUpdate } from "./harnesses";
+import { harnessStatus, npmCommand, offPin, outOfRange, policyNote, publishedDay, resultLine, updateFailure, withUpdate } from "./harnesses";
 
 const row = (over: Partial<HarnessVersion>): HarnessVersion => ({
   harness: "claude",
@@ -28,7 +28,7 @@ describe("harness versions table", () => {
     // Outside the tested range wins over the npm status.
     const out = harnessStatus(row({ installed: "2.3.0", in_range: false, latest, update: "none" }));
     expect(out).toMatchObject({ status: "unsupported", cls: "bad" });
-    expect(out.title).toContain("just harness::update claude");
+    expect(out.title).toContain("Update it here, or run just harness::update claude");
     // npm did not answer: the range alone.
     const noNpm = harnessStatus(row({ latest: null, update: null, latest_error: "cannot reach npm: timeout" }));
     expect(noNpm).toMatchObject({ status: "in range", cls: "ok" });
@@ -38,28 +38,13 @@ describe("harness versions table", () => {
     expect(harnessStatus(row({ installed: null, in_range: null, error: "cannot run claude" }))).toEqual({ status: "unknown", cls: "warn", title: "cannot run claude" });
   });
 
-  it("gives the command to run on the Docker host", () => {
-    const none = row({ update: "none" });
-    expect(updateCommand(report(none))).toBeNull();
-    expect(updateCommand(undefined)).toBeNull();
-    expect(updateCommand(report(none, row({ harness: "copilot", update: "minor" })))).toBe("just harness::update copilot && just harness::rollout");
-    expect(updateCommand(report(row({ harness: "codex", update: "major" })))).toBe("just harness::update codex --allow-major && just harness::rollout");
+  it("gives the npm line for a row with a newer release", () => {
+    const latest = { version: "0.165.0", published_at: null };
+    expect(npmCommand(row({ update: "none", latest: { ...latest, version: "2.1.310" } }))).toBeNull();
+    expect(npmCommand(row({ update: null, latest: null }))).toBeNull();
+    expect(npmCommand(row({ harness: "codex", package: "@openai/codex", update: "major", latest }))).toBe("npm install -g @openai/codex@0.165.0");
     const two = report(row({ harness: "codex", update: "major" }), row({ harness: "pi", update: "minor" }), row({ update: null }));
-    expect(updateCommand(two)).toBe("just harness::latest");
     expect(withUpdate(two).map((h) => h.harness)).toEqual(["codex", "pi"]);
-    expect(updateNames(two)).toBe("all");
-    expect(updateNames(report(row({ harness: "pi", update: "minor" })))).toEqual(["pi"]);
-  });
-
-  it("offers the host button only for an online host with can_update_harnesses", () => {
-    const h = (name: string, over: Partial<Host>): Host => ({ name, status: "online", online: true, ...over });
-    const hosts = [
-      h("dock", { capabilities: { can_update_harnesses: true } }),
-      h("lab1", { capabilities: { docker: { present: true } } }),
-      h("old", { status: "offline", online: false, capabilities: { can_update_harnesses: true } }),
-    ];
-    expect(updateHosts(hosts).map((x) => x.name)).toEqual(["dock"]);
-    expect(updateHosts(undefined)).toEqual([]);
   });
 
   it("computes the update kind like scripts/harness.py", () => {
@@ -117,33 +102,42 @@ describe("harness versions table", () => {
       } else expect(h.update).toBeNull();
     }
     expect(r.harnesses.map((h) => harnessStatus(h).status)).toEqual(["latest", "update available (major)", "update available", "unsupported"]);
-    expect(updateCommand(r)).toBe("just harness::latest");
+    expect(r.harnesses.map(npmCommand)).toEqual([null, "npm install -g @openai/codex@0.165.0", "npm install -g @github/copilot@1.0.110", null]);
   });
 
-  it("the mock runs harness.update on a capable host and ends with the rollout", async () => {
+  it("the mock updates a harness in place: 422 for a bad version or an npm error, 409 while agents run, then force", async () => {
     const api = createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 0 });
-    const hosts = await api.hosts.list();
-    expect(updateHosts(hosts).map((h) => h.name)).toEqual(["lab1"]);
-    await expect(api.hosts.harnessUpdate("lab1", ["nope"])).rejects.toMatchObject({ status: 422, code: "invalid" });
-    await expect(api.hosts.harnessUpdate("pi-cluster", "all")).rejects.toMatchObject({ status: 409, code: "conflict" });
-    const s = await api.hosts.harnessUpdate("lab1", "all");
-    expect(Object.keys(s).sort()).toEqual(["host", "names", "output", "rollout", "session_id"]);
-    expect(s).toMatchObject({ host: "lab1", names: ["all"], rollout: HARNESS_ROLLOUT, output: `/api/hosts/lab1/sessions/${s.session_id}/output` });
-    let since = 0;
-    let text = "";
-    for (let i = 0; i < 20; i++) {
-      const o = await api.hosts.sessionOutput("lab1", s.session_id, since);
-      text += o.chunks.map((c) => atob(c.data)).join("");
-      since = o.next;
-      if (o.done) {
-        expect(o.end).toMatchObject({ type: "exit", code: 0 });
-        expect(o.rollout).toBe(HARNESS_ROLLOUT);
-        break;
-      }
-    }
-    expect(text).toContain("scripts/harness.py latest --no-rollout");
-    expect(since).toBe(text.length);
-    const audit = await api.audit({ action: "harness.update" });
-    expect(audit.items[0]).toMatchObject({ action: "harness.update", target: "lab1", detail: { names: ["all"], session: s.session_id } });
+    await expect(api.harnessUpdate("nope")).rejects.toMatchObject({ status: 422, code: "invalid" });
+    await expect(api.harnessUpdate("codex", { version: "1.2" })).rejects.toMatchObject({ status: 422, code: "invalid" });
+    const npm = await api.harnessUpdate("codex", { version: "99.0.0", force: true }).catch((e: unknown) => e);
+    expect(npm).toMatchObject({ status: 422, code: "invalid" });
+    const f = updateFailure(npm);
+    expect(f.output).toContain("notarget");
+    expect(f.running).toBeNull();
+
+    // The mock has live codex agents: 409 with their names.
+    const busy = await api.harnessUpdate("codex").catch((e: unknown) => e);
+    expect(busy).toMatchObject({ status: 409, code: "conflict" });
+    const b = updateFailure(busy);
+    expect(b.running).toContain("terrarium/adapter-codex");
+    expect(b.message).toContain("risky");
+
+    const res = await api.harnessUpdate("codex", { force: true });
+    expect(Object.keys(res).sort()).toEqual(["from", "harness", "in_range", "output", "package", "tested", "to"]);
+    expect(res).toMatchObject({ harness: "codex", from: "0.164.0", to: "0.165.0", in_range: false });
+    expect(resultLine(res)).toBe("codex 0.164.0 → 0.165.0");
+    const codex = (await api.harnesses(false, true)).harnesses.find((h) => h.harness === "codex")!;
+    expect(codex).toMatchObject({ installed: "0.165.0", update: "none", in_range: false });
+    const ev = await api.events.history({ kind: "harness" });
+    expect(ev.items.at(-1)?.data).toMatchObject({ change: "updated", harness: "codex", from: "0.164.0", to: "0.165.0", forced: true });
+
+    // All: 409 while agents run; with force, one result per harness and the extension.
+    await expect(api.harnessUpdateAll()).rejects.toMatchObject({ status: 409 });
+    const all = await api.harnessUpdateAll({ force: true }).catch((e: unknown) => e);
+    // pi's npm does not answer in the mock, so "all" is a 422 with the results.
+    expect(all).toMatchObject({ status: 422 });
+    const af = updateFailure(all);
+    expect(af.output).toContain("pi: npm install -g @earendil-works/pi-coding-agent@latest failed");
+    expect(af.output).toContain("copilot-prompt 0.1.2 → 0.1.2");
   });
 });

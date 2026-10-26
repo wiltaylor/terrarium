@@ -610,31 +610,6 @@ pub struct VmlabRelease {
     pub timeout_secs: Option<u64>,
 }
 
-/// The harnesses of a `harness.update`: the word `"all"`, or a list of one
-/// harness name.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum HarnessNames {
-    /// `["codex"]`: `harness.py update codex --allow-major`.
-    List(Vec<String>),
-    /// `"all"`: `harness.py latest --no-rollout`. Any other word is a
-    /// `bad_request`.
-    Word(String),
-}
-
-/// `harness.update`: run `scripts/harness.py` in the host agent's
-/// `terrarium_repo_dir` (a checkout of Terrarium on the Docker host). The
-/// session streams its output like `exec`. The host agent refuses it
-/// (`unsupported`) when the config has no `terrarium_repo_dir`. It never
-/// runs the rollout (`just up`): the operator does that.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HarnessUpdate {
-    pub session: SessionId,
-    pub names: HarnessNames,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timeout_secs: Option<u64>,
-}
-
 fn yes() -> bool {
     true
 }
@@ -736,8 +711,6 @@ pub enum DaemonFrame {
     VmlabPrepare(VmlabPrepare),
     #[serde(rename = "vmlab.release")]
     VmlabRelease(VmlabRelease),
-    #[serde(rename = "harness.update")]
-    HarnessUpdate(HarnessUpdate),
 }
 
 impl DaemonFrame {
@@ -773,7 +746,6 @@ impl DaemonFrame {
             F::VmlabSnapshotList(r) => r.session,
             F::VmlabPrepare(r) => r.session,
             F::VmlabRelease(r) => r.session,
-            F::HarnessUpdate(r) => r.session,
         })
     }
 }
@@ -990,7 +962,6 @@ mod tests {
                 },
                 vmlab: ToolCapability::default(),
                 shell: Some("/bin/bash".into()),
-                can_update_harnesses: false,
             },
             max_sessions: 32,
             max_running_targets: Some(4),

@@ -139,8 +139,9 @@ does these steps for every harness, pi too:
 - It checks the version (`<harness> --version`; a missing binary is a skip).
   A host version outside the tested range is also a skip, not a failure:
   the dry run checks the adapter code, and the host install belongs to the
-  operator. A real run fails on it. Thus `just harness::update` can run the
-  dry run before you install the new version on the host.
+  operator. A real run fails on it. Thus the dry run passes after
+  `just harness::update <name> --pin`, before you install the new version
+  on the host.
 - It materializes into a temp home, not the real home.
 - It builds the fresh and the resume `LaunchSpec`, and checks the program,
   the cwd, the model, the session ID on resume, and the clean env.

@@ -161,8 +161,7 @@ The host agent sends `hello` as its first frame:
   "capabilities": {
     "docker": {"present": true, "version": "29.8.0"},
     "vmlab": {"present": true, "version": "0.30.0-alpha"},
-    "shell": "/bin/bash",
-    "can_update_harnesses": false
+    "shell": "/bin/bash"
   },
   "max_sessions": 32,
   "max_running_targets": 4,
@@ -177,10 +176,7 @@ The host agent sends `hello` as its first frame:
 - `capabilities` is `terrarium_core::protocol::HostCapabilities`. Docker is
   `present` when `docker version --format json` gets an answer from the
   Docker server. vmlab is `present` when `vmlab --version` succeeds.
-  `shell` is `$SHELL`, else `/bin/sh`. `can_update_harnesses` is true
-  when the config sets `terrarium_repo_dir`: the host agent then runs
-  [`harness.update`](#harnessupdate). An older host agent sends none:
-  false.
+  `shell` is `$SHELL`, else `/bin/sh`.
 - `max_running_targets` is the `max_running_targets` of the config. The
   daemon counts the docker and vmlab targets (and lab instances) on this
   host that it shows as `running`, and refuses an `up` past the limit. An
@@ -244,7 +240,7 @@ for each host is enough.
 The life of a session:
 
 1. The daemon sends a start frame: `exec`, `cp_push`, `cp_pull`, a
-   `docker.*` verb, a `vmlab.*` verb, or `harness.update`.
+   `docker.*` verb, or a `vmlab.*` verb.
 2. The host agent sends `started` `{session, pid}` when the process (or the
    transfer) starts. `started` is not replayed after a reconnect.
 3. Data frames flow in both directions.
@@ -579,45 +575,6 @@ The only host paths in an instance are the attached workspace (under
 A lab that needs more (an ISO, a share, a provision script) is a
 pre-provisioned lab: a target with `lab`, which the operator writes.
 
-## `harness.update`
-
-The operator updates the harness pins from the dashboard
-(docs/api.md §17, `POST /api/hosts/{name}/harness-update`). The daemon
-runs in the Terrarium container, so it cannot build its own image. It
-sends this verb to a host agent on the Docker host, which runs
-`scripts/harness.py` in a checkout of Terrarium there.
-
-```json
-{"type": "harness.update", "session": 30, "names": "all", "timeout_secs": 3600}
-{"type": "harness.update", "session": 31, "names": ["codex"], "timeout_secs": 3600}
-```
-
-| `names` | Command (in `terrarium_repo_dir`) |
-|---|---|
-| `"all"` | `uv run python scripts/harness.py latest --no-rollout` |
-| `["<name>"]` | `uv run python scripts/harness.py update <name> --allow-major` |
-
-- The host agent runs the verb only when its config sets
-  `terrarium_repo_dir`. Without it, the answer is `error` code
-  `unsupported`, and the message names the key. A `terrarium_repo_dir`
-  with no `scripts/harness.py` is `unsupported` too.
-- `names` is `"all"` or a list of one name of `[a-z0-9-]`. Any other value
-  is `bad_request`. The daemon also checks the name against its harnesses.
-- The command runs with pipes (no PTY), as the user of the host agent,
-  and its output streams like `exec`. The session ends with `exit`.
-  `uv_bin` in the config names the `uv` binary (default `uv`).
-- The script edits `harnesses.toml`, builds the image, and runs the dry
-  compatibility suite. It never runs `just up`: `latest` gets
-  `--no-rollout`, and `update` has no rollout. The container cannot
-  recreate itself from inside, so the daemon answers ``rollout needed: run
-  `just up` on the host``, and the operator runs it.
-- `allowed_cwd_roots` does not apply: `terrarium_repo_dir` is in the
-  operator's config, not in the frame.
-
-Set `terrarium_repo_dir` only on the Docker host of the Terrarium
-container. The host agent user must be able to run `docker` and `uv`
-there.
-
 ## Workspaces
 
 PLAN §11, "mode 1". An agent's workspace is
@@ -728,7 +685,7 @@ The terminal `error` frame:
 | `busy` | `max_sessions` sessions are running. |
 | `duplicate_session` | The session ID is in use. The running session does not change. |
 | `unknown_session` | The frame names a session that the host agent does not hold. |
-| `unsupported` | The verb needs a tool (Docker, vmlab) that is not present, or a config key that is not set (`harness.update` needs `terrarium_repo_dir`). |
+| `unsupported` | The verb needs a tool (Docker, vmlab) that is not present. |
 | `path_denied` | A path is not absolute, has `..`, or is outside `allowed_cwd_roots`. |
 | `spawn_failed` | The process did not start (for example, the program does not exist). |
 | `io` | A file operation failed. |
@@ -832,14 +789,11 @@ allowed_cwd_roots = ["/home/wil/labs", "/srv/build"]   # optional; absent means 
 # instances_dir = "/var/lib/terrarium-host/instances"   # lab instances; default $XDG_DATA_HOME/terrarium-host/instances
 # repos_dir = "/srv/terrarium/repos"        # the host path of TERRARIUM_REPOS_DIR, for a local lab_repo; default ./repos
 # max_running_targets = 4                   # docker and vmlab targets that may run at one time
-# terrarium_repo_dir = "/home/wil/dev/terrarium"   # the Terrarium checkout on the Docker host; turns on harness.update
-# uv_bin = "uv"                             # the uv binary for harness.update
 ```
 
 A relative `work_dir` or `repos_dir` is relative to the working directory of
 the host agent. `terrarium-host check` prints the three paths and says
-`(missing)` for a path that does not exist. It also prints whether
-`harness.update` is on, and the `terrarium_repo_dir`.
+`(missing)` for a path that does not exist.
 
 The flags `--daemon-url`, `--token`, and `--name` (and the env variables
 `TERRARIUM_DAEMON_URL`, `TERRARIUM_HOST_TOKEN`, `TERRARIUM_HOST_NAME`)

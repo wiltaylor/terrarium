@@ -26,9 +26,9 @@ use terrarium_core::{Adapter, HarnessId};
 /// The env var of the policy.
 pub const ENV_POLICY: &str = "TERRARIUM_HARNESS_VERSION_POLICY";
 
-/// How long a detected version stays in the cache. A rebuilt image restarts
-/// the daemon; the TTL covers a harness that changed on the host in
-/// development (`just daemon::run`).
+/// How long a detected version stays in the cache. An update through the
+/// API refreshes it at once; the TTL covers an `npm install -g` by hand in
+/// the tools dir.
 pub const CACHE_TTL: Duration = Duration::from_secs(10 * 60);
 
 /// What a launch does with a harness outside its tested range.
@@ -57,7 +57,7 @@ pub struct HarnessVersion {
     pub harness: HarnessId,
     /// The npm package (`harnesses.toml`).
     pub package: String,
-    /// The version the image installs (`harnesses.toml`).
+    /// The version of the first install (`harnesses.toml`).
     pub pinned: String,
     /// The range the adapter accepts.
     pub tested: String,
@@ -79,8 +79,9 @@ pub struct HarnessVersion {
         deserialize_with = "present"
     )]
     pub latest: Option<Option<Latest>>,
-    /// `?latest=true` only: the bump from the pin to `latest`, `null` when
-    /// the latest is not known ([`update_kind`]).
+    /// `?latest=true` only: the bump from the installed version (else the
+    /// pin) to `latest`, `null` when the latest is not known
+    /// ([`update_kind`]).
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -301,7 +302,8 @@ impl LatestCache {
         for (h, r) in report.harnesses.iter_mut().zip(found) {
             match r {
                 Ok(l) => {
-                    h.update = Some(Some(update_kind(&h.pinned, &l.version)));
+                    let from = h.installed.as_deref().unwrap_or(&h.pinned);
+                    h.update = Some(Some(update_kind(from, &l.version)));
                     h.latest = Some(Some(l));
                     h.latest_error = None;
                 }
@@ -372,8 +374,9 @@ pub fn out_of_range_message(
     let pin = terrarium_core::harnesses::pin(harness).version;
     format!(
         "{harness} {installed} is outside the tested range {tested} (harnesses.toml pins {pin}); \
-         hooks and flags may differ. Rebuild the image (`just up`) or update the pin \
-         (`just harness::update {harness}`, docs/getting-started.md \"Updating a harness\")"
+         hooks and flags may differ. Update it in place (`terrarium admin harness update {harness} \
+         --version {pin}`, or `just harness::update {harness}`; docs/getting-started.md \
+         \"Updating a harness\")"
     )
 }
 
@@ -697,6 +700,25 @@ mod tests {
         assert_eq!(npm.calls.lock().unwrap().len(), 4);
         cache.fill(&mut r, true).await;
         assert_eq!(npm.calls.lock().unwrap().len(), 8);
+
+        // An installed version (an update in place) wins over the pin.
+        for h in &mut r.harnesses {
+            if h.harness == HarnessId::Codex {
+                h.installed = Some("0.165.0".into());
+            }
+        }
+        cache.fill(&mut r, false).await;
+        assert_eq!(
+            row_update(&r, HarnessId::Codex),
+            Some(Some(UpdateKind::None))
+        );
+    }
+
+    fn row_update(r: &HarnessReport, id: HarnessId) -> Option<Option<UpdateKind>> {
+        r.harnesses
+            .iter()
+            .find(|h| h.harness == id)
+            .and_then(|h| h.update)
     }
 
     #[test]

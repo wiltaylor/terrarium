@@ -191,7 +191,7 @@ terrarium/
     daemon/mod.just         cargo build, run, test, and the operator CLI
     dashboard/mod.just      npm install, dev, build, test, check
     docker/mod.just         image build and push, compose up/down/logs/shell, config dirs
-    harness/mod.just        harness versions: check, update, rollout (scripts/harness.py)
+    harness/mod.just        harness versions: check, update in place (scripts/harness.py)
     host/mod.just           build, package, and register terrarium-host
     spikes/mod.just         Phase 0 spike scripts
   Cargo.toml  Cargo.lock    the Rust workspace
@@ -208,7 +208,7 @@ terrarium/
   dashboard/                SolidJS + Vite app; the daemon embeds dashboard/dist
   docker/
     Dockerfile              multi-stage: dashboard, rust, host-build, runtime
-    entrypoint.sh           directory init, Copilot extension install, the terrariumd supervisor loop
+    entrypoint.sh           directory init, the harness install into ./tools, the terrariumd supervisor loop
     crash-test.py           kill terrariumd and check that the runners live (just docker::crash-test)
     seccomp-bwrap.json      Docker seccomp profile that lets bwrap make namespaces
     seccomp-bwrap.README.md what the profile changes, and why
@@ -217,6 +217,7 @@ terrarium/
   config/                   bind-mounted harness homes and config/tls (gitignored, except README.md)
   fleets/                   fleet files that the daemon applies at start and on reload
   labs/                     vmlab test labs (labs/terrarium-test), for a host agent on this machine
+  tools/                    the harnesses (npm prefix), bound at /opt/terrarium/tools (gitignored)
   repos/                    local bare git repos, bound at /repos (gitignored)
   work/                     agent workspaces, <project>/<agent>/, bound at /work (gitignored)
   examples/fleet/           an example fleet file
@@ -227,9 +228,9 @@ terrarium/
 ```
 
 `just docker::volumes-init` makes the directories for the bind mounts:
-`config/<harness>/`, `config/tls/`, `state/`, `work/`, `repos/`, `prompts/`,
+`config/<harness>/`, `config/tls/`, `state/`, `tools/`, `work/`, `repos/`, `prompts/`,
 `projects/`, `agents/`, `targets/`, `subscriptions/`, and `fleets/`. Git
-ignores `config/*`, `state/`, `work/*`, `repos/*`, and `fleets/*` (except the
+ignores `config/*`, `state/`, `tools/`, `work/*`, `repos/*`, and `fleets/*` (except the
 README files). `work/` holds the agent workspaces, `<project>/<agent>/`.
 A host agent on this machine attaches them to targets: its `work_dir` is
 this `./work`.
@@ -250,7 +251,7 @@ recipes of a module.
 | Run the Rust and dashboard tests | `just test` |
 | Run the merge gate | `just ci::check` |
 | Run the compatibility suite for one harness | `just ci::compat claude` |
-| Check, update, or roll out a harness version (pins in `harnesses.toml`) | `just harness::check`, `just harness::latest`, `just harness::update claude`, `just harness::rollout` |
+| Check or update a harness in place, in the running container (installed into `./tools`; pins in `harnesses.toml`) | `just harness::check`, `just harness::latest`, `just harness::update claude` |
 | Run the daemon outside Docker | `just daemon::run` |
 | Run the CLI against a running daemon | `just daemon::cli daemon status` |
 | Run the dashboard dev server | `just dashboard::dev` |

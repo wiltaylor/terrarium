@@ -12,6 +12,9 @@ dev_prompts := env("TERRARIUM_PROMPTS_DIR", justfile_directory() / "prompts")
 dev_artifact_listen := env("TERRARIUM_ARTIFACT_LISTEN", "127.0.0.1:8091")
 dev_home := env("HOME", "")
 dev_harness_home := env("TERRARIUM_HARNESS_HOME", "claude=" + dev_home / ".claude" + ",codex=" + dev_home / ".codex" + ",copilot=" + dev_home / ".copilot" + ",pi=" + dev_home / ".pi/agent")
+# The tools dir: the daemon installs the harness pins here at start and puts
+# its bin/ first on PATH. Empty: use the harnesses on your PATH as they are.
+dev_tools := env("TERRARIUM_TOOLS_DIR", justfile_directory() / "tools")
 
 [default, private]
 main:
@@ -22,10 +25,10 @@ main:
 build: require-cargo
 	cargo build --workspace
 
-# Run terrariumd on this machine, outside Docker, with no sandbox and your own harness logins
+# Run terrariumd on this machine, outside Docker, with no sandbox and your own harness logins; it installs the harness pins into ./tools first (flag: --no-harness-install)
 [group('daemon')]
-run: require-cargo runner-build
-	TERRARIUM_LISTEN={{dev_listen}} TERRARIUM_STATE_DIR={{quote(dev_state)}} TERRARIUM_CONFIG_DIR={{quote(justfile_directory())}} TERRARIUM_SANDBOX={{dev_sandbox}} TERRARIUM_PROMPTS_DIR={{quote(dev_prompts)}} TERRARIUM_ARTIFACT_LISTEN={{dev_artifact_listen}} TERRARIUM_HARNESS_HOME={{quote(dev_harness_home)}} cargo run -p terrariumd
+run *flags: require-cargo runner-build
+	TERRARIUM_LISTEN={{dev_listen}} TERRARIUM_STATE_DIR={{quote(dev_state)}} TERRARIUM_CONFIG_DIR={{quote(justfile_directory())}} TERRARIUM_SANDBOX={{dev_sandbox}} TERRARIUM_PROMPTS_DIR={{quote(dev_prompts)}} TERRARIUM_ARTIFACT_LISTEN={{dev_artifact_listen}} TERRARIUM_HARNESS_HOME={{quote(dev_harness_home)}} TERRARIUM_TOOLS_DIR={{quote(dev_tools)}} cargo run -p terrariumd -- {{flags}}
 
 # Build terrarium-runner next to terrariumd: the daemon runs each agent in one runner process
 [private]

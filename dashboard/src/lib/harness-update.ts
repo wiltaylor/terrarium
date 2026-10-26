@@ -1,12 +1,9 @@
-// The update kind of a harness pin, the same rule as scripts/harness.py and
+// The update kind of a harness (the installed version, else the pin), the same rule as scripts/harness.py and
 // the daemon (`harness_versions::update_kind`, docs/api.md GET /api/harnesses).
 // The mock uses it to answer `?latest=true`; the table reads `update` from
 // the daemon.
 
 import type { HarnessUpdateKind } from "../api/types";
-
-/** What the daemon says after a `harness.update`: the container cannot recreate itself. */
-export const HARNESS_ROLLOUT = "rollout needed: run `just up` on the host";
 
 const VERSION_RE = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/;
 

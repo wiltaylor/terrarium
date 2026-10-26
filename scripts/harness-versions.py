@@ -1,20 +1,18 @@
 #!/usr/bin/env python3
-"""Turn harnesses.toml into docker build args, and keep docker/Dockerfile in step.
+"""Read harnesses.toml, and keep docker/Dockerfile in step with it.
 
 harnesses.toml at the repo root is the one place for a harness version
-(docs/CONVENTIONS.md). This script is stdlib only (Python 3.11+, tomllib).
+(docs/CONVENTIONS.md). The image installs no harness: `terrariumd harness
+install` installs the pins into the tools volume at the first start. This
+script is stdlib only (Python 3.11+, tomllib).
 
-    harness-versions.py build-args   print `--build-arg K=V ...` for docker build
-    harness-versions.py check        exit 1 when the Dockerfile ARG defaults or
-                                     its install line differ from harnesses.toml
-    harness-versions.py sync         rewrite the Dockerfile ARG defaults
-    harness-versions.py json         print the pins as JSON
-
-Each value becomes one build arg:
-
-    [node] image                      NODE_IMAGE
-    [harness.<name>] version          <NAME>_VERSION      (CLAUDE_VERSION, ...)
-    [extension.<name>] version        <NAME>_VERSION      (COPILOT_PROMPT_VERSION)
+    harness-versions.py check   exit 1 when the Dockerfile is not in step:
+                                `ARG NODE_IMAGE` differs from [node] image,
+                                an `npm install -g` installs a pinned package,
+                                or harnesses.toml is not copied to
+                                /etc/terrarium/harnesses.toml
+    harness-versions.py sync    rewrite the NODE_IMAGE default
+    harness-versions.py json    print the pins as JSON
 """
 
 from __future__ import annotations
@@ -64,30 +62,16 @@ def validate(cfg: dict) -> dict:
     return cfg
 
 
-def arg_name(name: str) -> str:
-    """`copilot-prompt` -> `COPILOT_PROMPT_VERSION`."""
-    return re.sub(r"[^A-Za-z0-9]", "_", name).upper() + "_VERSION"
-
-
-def pins(cfg: dict) -> list[tuple[str, str, str | None]]:
-    """(build arg, value, npm package or None) in file order."""
-    out: list[tuple[str, str, str | None]] = [("NODE_IMAGE", cfg["node"]["image"], None)]
-    for name, h in cfg["harness"].items():
-        out.append((arg_name(name), h["version"], h["package"]))
-    for name, e in cfg.get("extension", {}).items():
-        out.append((arg_name(name), e["version"], e["package"]))
-    return out
-
-
-def build_args(cfg: dict) -> list[str]:
-    """The `docker build` arguments, as a list."""
-    args: list[str] = []
-    for key, value, _ in pins(cfg):
-        args += ["--build-arg", f"{key}={value}"]
-    return args
-
-
+NODE_ARG = "NODE_IMAGE"
+TOML_COPY_RE = re.compile(r"^COPY[ \t]+(?:--\S+[ \t]+)*harnesses\.toml[ \t]+/etc/terrarium/harnesses\.toml[ \t]*$", re.MULTILINE)
 ARG_RE = re.compile(r"^ARG[ \t]+([A-Za-z_][A-Za-z0-9_]*)(?:=(\S*))?[ \t]*$", re.MULTILINE)
+
+
+def packages(cfg: dict) -> list[str]:
+    """Every pinned npm package: the harnesses, then the extensions."""
+    out = [h["package"] for h in cfg["harness"].values()]
+    out += [e["package"] for e in cfg.get("extension", {}).values()]
+    return out
 
 
 def dockerfile_defaults(text: str) -> dict[str, str | None]:
@@ -98,33 +82,47 @@ def dockerfile_defaults(text: str) -> dict[str, str | None]:
     return found
 
 
+def npm_installs(text: str) -> str:
+    """The text of each `npm install -g` command, with its continued lines."""
+    joined = re.sub(r"\\\n", " ", text)
+    return "\n".join(
+        line for line in joined.splitlines() if re.search(r"\bnpm\s+(?:install|i)\b.*\s(?:-g|--global)\b", line)
+    )
+
+
 def check_dockerfile(cfg: dict, text: str) -> list[str]:
     """What differs between harnesses.toml and the Dockerfile. Empty: in step."""
     problems = []
-    defaults = dockerfile_defaults(text)
-    for key, value, package in pins(cfg):
-        if key not in defaults:
-            problems.append(f"docker/Dockerfile has no `ARG {key}` (harnesses.toml has {value})")
-        elif defaults[key] != value:
+    image = cfg["node"]["image"]
+    default = dockerfile_defaults(text).get(NODE_ARG, "")
+    if default == "":
+        problems.append(f"docker/Dockerfile has no `ARG {NODE_ARG}` default (harnesses.toml has {image})")
+    elif default != image:
+        problems.append(
+            f"docker/Dockerfile: ARG {NODE_ARG}={default}, harnesses.toml: {image}"
+            " (run `uv run python scripts/harness-versions.py sync`)"
+        )
+    installs = npm_installs(text)
+    for package in packages(cfg):
+        if re.search(re.escape(package) + r"(?:@|\b)", installs):
             problems.append(
-                f"docker/Dockerfile: ARG {key}={defaults[key]}, harnesses.toml: {value}"
-                " (run `uv run python scripts/harness-versions.py sync`)"
+                f"docker/Dockerfile installs {package} with `npm install -g`; the harnesses go in the tools "
+                "volume (`terrariumd harness install`), not in the image"
             )
-        if package and f'"{package}@${{{key}}}"' not in text:
-            problems.append(f'docker/Dockerfile does not install "{package}@${{{key}}}"')
+    if not TOML_COPY_RE.search(text):
+        problems.append("docker/Dockerfile does not copy harnesses.toml to /etc/terrarium/harnesses.toml")
     return problems
 
 
 def sync_dockerfile(cfg: dict, text: str) -> str:
-    """The Dockerfile with every pinned ARG default set from harnesses.toml."""
-    values = {key: value for key, value, _ in pins(cfg)}
-    done: set[str] = set()
+    """The Dockerfile with the NODE_IMAGE default set from harnesses.toml."""
+    done = False
 
     def repl(m: re.Match) -> str:
-        key = m.group(1)
-        if key in values and key not in done:
-            done.add(key)
-            return f"ARG {key}={values[key]}"
+        nonlocal done
+        if m.group(1) == NODE_ARG and not done:
+            done = True
+            return f"ARG {NODE_ARG}={cfg['node']['image']}"
         return m.group(0)
 
     return ARG_RE.sub(repl, text)
@@ -132,15 +130,13 @@ def sync_dockerfile(cfg: dict, text: str) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("command", choices=["build-args", "check", "sync", "json"])
+    p.add_argument("command", choices=["check", "sync", "json"])
     p.add_argument("--toml", type=Path, default=TOML, help="default: harnesses.toml at the repo root")
     p.add_argument("--dockerfile", type=Path, default=DOCKERFILE, help="default: docker/Dockerfile")
     a = p.parse_args(argv)
     try:
         cfg = load(a.toml)
-        if a.command == "build-args":
-            print(" ".join(build_args(cfg)))
-        elif a.command == "json":
+        if a.command == "json":
             print(json.dumps(cfg, indent=2))
         elif a.command == "check":
             problems = check_dockerfile(cfg, a.dockerfile.read_text())
@@ -154,7 +150,7 @@ def main(argv: list[str] | None = None) -> int:
             new = sync_dockerfile(cfg, text)
             if new != text:
                 a.dockerfile.write_text(new)
-                print(f"updated the ARG defaults in {a.dockerfile}")
+                print(f"updated the NODE_IMAGE default in {a.dockerfile}")
             else:
                 print(f"{a.dockerfile} is in step")
     except (PinError, OSError) as e:

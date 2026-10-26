@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 # Terrarium container entrypoint (PLAN §23.3).
 #
-# 1. Make missing directories under /auth, /state, /work, and /run/terrarium.
+# 1. Make missing directories under /auth, /state, /work, /run/terrarium,
+#    and the tools dir.
 # 2. Fix ownership of empty bind mounts (only when started as root).
 # 3. Export TERRARIUM_RUNNER (the terrarium-runner binary) when it is not set.
-# 4. Install the Copilot system-prompt extension when it is missing, or when
-#    the image version changed.
+# 4. `terrariumd harness install`: install each harness pin that is missing
+#    from the tools dir (/opt/terrarium/tools, the npm prefix), and the
+#    Copilot prompt extension when it changed. The first start installs;
+#    later starts find everything present. TERRARIUM_HARNESS_INSTALL=0
+#    skips it.
 # 5. Run the command (terrariumd by default) as the terrarium user. For
 #    terrariumd, this script stays as its parent and restarts it when it
 #    crashes, so the agent runners live on (see docker/README.md).
@@ -13,9 +17,8 @@ set -euo pipefail
 
 TERRARIUM_USER="${TERRARIUM_USER:-terrarium}"
 AUTH_DIRS=(/auth/claude /auth/codex /auth/copilot /auth/pi)
-STATE_DIRS=(/state /state/agents /state/artifacts /state/credentials /work /run/terrarium)
-IMAGE_VERSION_FILE=/usr/local/share/terrarium/image-version
-EXTENSION_MARKER=/auth/copilot/.terrarium-extension-version
+TOOLS_DIR="${TERRARIUM_TOOLS_DIR:-/opt/terrarium/tools}"
+STATE_DIRS=(/state /state/agents /state/artifacts /state/credentials /work /run/terrarium "$TOOLS_DIR")
 
 log() { echo "entrypoint: $*" >&2; }
 
@@ -55,26 +58,17 @@ if [ "${TERRARIUM_RUNNER_MODE:-process}" = "process" ] && [ -z "${TERRARIUM_RUNN
 	fi
 fi
 
-image_version="$(cat "$IMAGE_VERSION_FILE" 2>/dev/null || echo unknown)"
-installed_version="$(cat "$EXTENSION_MARKER" 2>/dev/null || true)"
-if command -v copilot-custom-system-prompt > /dev/null 2>&1; then
-	if [ -z "$installed_version" ]; then
-		log "installing the Copilot system-prompt extension"
-		if copilot-custom-system-prompt install; then
-			echo "$image_version" > "$EXTENSION_MARKER"
-		else
-			log "extension install failed; Copilot agents will not get the Terrarium prompt"
-		fi
-	elif [ "$installed_version" != "$image_version" ]; then
-		log "image changed ($installed_version -> $image_version): reinstalling the Copilot extension"
-		if copilot-custom-system-prompt install --force; then
-			echo "$image_version" > "$EXTENSION_MARKER"
-		else
-			log "extension reinstall failed; the old extension stays"
-		fi
+# The harnesses (docs/getting-started.md §7). A failure does not stop the
+# start: the daemon tries again at its own start, and the agents of a
+# missing harness fail to launch with a clear error.
+if [ "${TERRARIUM_HARNESS_INSTALL:-1}" != 0 ] && command -v terrariumd > /dev/null 2>&1; then
+	log "checking the harnesses in $TOOLS_DIR"
+	started="$(date +%s)"
+	if terrariumd harness install; then
+		log "harnesses ready in $(($(date +%s) - started))s"
+	else
+		log "a harness install failed (see above); the daemon tries again at its start"
 	fi
-else
-	log "copilot-custom-system-prompt is not installed; skipping the extension"
 fi
 
 # ---------------------------------------------------------------------------

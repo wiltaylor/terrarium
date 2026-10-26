@@ -1,12 +1,16 @@
-# The harness pins: the one place to change a harness version
-# (docs/CONVENTIONS.md, docs/getting-started.md "Updating a harness").
+# The harness pins: the versions of the first install, and the ranges the
+# adapters accept (docs/CONVENTIONS.md, docs/getting-started.md §7).
 #
-# Three readers take their values from this file:
+# The image installs no harness. These readers take their values from here:
 #
-# - the image: `just docker::image-build` passes each value as a
-#   `--build-arg` (scripts/harness-versions.py build-args). The ARG defaults
-#   in docker/Dockerfile are a copy for a build by hand; `just ci::check`
-#   fails when they differ (scripts/harness-versions.py check).
+# - the first install: the image copies this file to
+#   /etc/terrarium/harnesses.toml, and `terrariumd harness install` (the
+#   entrypoint, and the daemon at each start) installs each pin that is
+#   missing from the tools dir (./tools, /opt/terrarium/tools in the
+#   container). A harness that is there stays at its version.
+# - the Node image: [node] image is the NODE_IMAGE default in
+#   docker/Dockerfile; `just ci::check` fails when they differ
+#   (scripts/harness-versions.py check).
 # - the adapters: crates/terrarium-core/build.rs turns this file into
 #   `terrarium_core::harnesses`, and each adapter's `flags.rs` takes
 #   `verified` (the pin) and `tested` (the range) from there. The build
@@ -14,14 +18,16 @@
 # - the compatibility suite and the daemon's start-time guard: both compare
 #   the installed version with the adapter's `tested` range.
 #
-# Change a version with `just harness::update <name> [version]`, not by
-# hand: it also widens `tested` where it is safe, syncs the Dockerfile, and
-# writes a row in docs/compat.md "Version history". To roll back, edit
-# `version` (and `tested` if needed) here and run `just up`.
+# `just harness::update <name> [version]` updates the harness in place in
+# the running container (no image build). Add --pin to also write the new
+# version here (and widen `tested` where it is safe) and a row in
+# docs/compat.md "Version history", so a fresh install gets it. A new
+# `tested` range takes effect at the next image build (`just up`). To roll
+# back, run `just harness::update <name> <old version>`.
 #
 # Keys of a [harness.<name>] table:
 #   package  the npm package
-#   version  the pinned version, installed in the image
+#   version  the pinned version, of the first install
 #   tested   the semver range the adapter accepts (Rust `semver::VersionReq`
 #            syntax: comma-separated `>=`, `>`, `<`, `<=`, `=`, `^`, `~`)
 #   binary   the command on PATH
@@ -59,8 +65,9 @@ binary = "pi"
 
 # npm packages that are not harnesses. `for` names the harness that uses it.
 [extension.copilot-prompt]
-# The Copilot system-prompt extension. The entrypoint reinstalls it when
-# this version or the Copilot version changes (docker/entrypoint.sh).
+# The Copilot system-prompt extension. `terrariumd harness install`
+# reinstalls it into the Copilot home when its version or the Copilot
+# version in the tools dir changes (crates/terrariumd/src/harness_tools.rs).
 package = "copilot-custom-system-prompt"
 version = "0.1.2"
 binary = "copilot-custom-system-prompt"

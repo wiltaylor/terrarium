@@ -1,8 +1,8 @@
 //! Turn `harnesses.toml` (the repo root) into `terrarium_core::harnesses`.
 //!
-//! The file is the one source of truth for the harness pins: the image
-//! installs these versions (`scripts/harness-versions.py build-args`), and
-//! the adapters take their `verified` and `tested` values from the consts
+//! The file is the one source of truth for the harness pins: the first
+//! install into the tools dir uses these versions (`terrariumd harness
+//! install`), and the adapters take their `verified` and `tested` values from the consts
 //! that this script writes. The build fails when the file is missing, has
 //! a harness that Terrarium does not know, or has a `tested` range that
 //! does not match its `version`.

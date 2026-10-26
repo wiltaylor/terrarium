@@ -77,6 +77,9 @@ pub struct AppState {
     pub executor: Arc<crate::executor::Executor>,
     /// The latest harness releases on npm (`GET /api/harnesses?latest=true`).
     pub harness_latest: Arc<crate::harness_versions::LatestCache>,
+    /// The tools dir of the harnesses (`POST /api/harnesses/{name}/update`).
+    /// Not configured: the update answers `501 not_available`.
+    pub harness_tools: Arc<crate::harness_tools::HarnessTools>,
     /// The origins, WebSocket auth, and sessions (`DaemonConfig::web`).
     pub web: crate::settings::WebConfig,
     /// The artifact listener address. Empty: no listener of its own, and
@@ -191,6 +194,8 @@ fn routes(state: Shared, serve_artifacts: bool, host_connect: bool) -> Router {
     let api = Router::new()
         .route("/health", get(system::health))
         .route("/harnesses", get(system::harnesses))
+        .route("/harnesses/update", post(system::harness_update_all))
+        .route("/harnesses/{name}/update", post(system::harness_update))
         .merge(hosts::routes())
         .merge(targets::routes())
         .route("/reload", post(system::reload))
@@ -732,6 +737,7 @@ mod tests {
             usage: Arc::default(),
             executor: Arc::default(),
             harness_latest: Arc::default(),
+            harness_tools: Arc::default(),
             web: crate::settings::WebConfig::default(),
             artifact_listen: String::new(),
         })

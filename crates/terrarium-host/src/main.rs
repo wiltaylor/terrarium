@@ -160,8 +160,7 @@ fn fingerprint(cert: &Path) -> anyhow::Result<()> {
 }
 
 async fn check(cfg: &Config, json: bool, probe: bool) -> anyhow::Result<()> {
-    let mut caps = capabilities::detect(&cfg.docker_bin, &cfg.vmlab_bin).await;
-    caps.can_update_harnesses = cfg.terrarium_repo_dir.is_some();
+    let caps = capabilities::detect(&cfg.docker_bin, &cfg.vmlab_bin).await;
     let paths = cfg.paths();
     let transport = cfg.daemon_url.as_ref().map(|_| cfg.transport());
     let (tls_mode, tls_error) = match &transport {
@@ -191,7 +190,6 @@ async fn check(cfg: &Config, json: bool, probe: bool) -> anyhow::Result<()> {
         "instances_dir": paths.instances_dir,
         "repos_dir": paths.repos_dir,
         "max_running_targets": cfg.max_running_targets,
-        "terrarium_repo_dir": cfg.terrarium_repo_dir,
         "capabilities": caps,
         "tls": tls_mode,
         "tls_error": tls_error,
@@ -255,19 +253,6 @@ async fn check(cfg: &Config, json: bool, probe: bool) -> anyhow::Result<()> {
             mark(&paths.repos_dir)
         )?;
         writeln!(out, "max running targets: {}", cfg.max_running_targets)?;
-        match &cfg.terrarium_repo_dir {
-            Some(d) => writeln!(
-                out,
-                "harness.update: yes, in {}{}",
-                d.display(),
-                if d.join(terrarium_host::harness_update::SCRIPT).is_file() {
-                    ""
-                } else {
-                    " (no scripts/harness.py)"
-                }
-            )?,
-            None => writeln!(out, "harness.update: no (no terrarium_repo_dir)")?,
-        }
         match (&tls_mode, &tls_error) {
             (Some(m), _) => writeln!(out, "tls:        {}", m.describe())?,
             (None, Some(e)) => writeln!(out, "tls:        refused: {e}")?,
@@ -310,8 +295,7 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
     let transport = cfg.transport()?;
     let token = cfg.resolve_token()?;
     let name = cfg.resolve_name();
-    let mut caps = capabilities::detect(&cfg.docker_bin, &cfg.vmlab_bin).await;
-    caps.can_update_harnesses = cfg.terrarium_repo_dir.is_some();
+    let caps = capabilities::detect(&cfg.docker_bin, &cfg.vmlab_bin).await;
     let url = transport.url.clone();
     tracing::info!(%url, %name, tls = %transport.mode.describe(), docker = caps.docker.present, vmlab = caps.vmlab.present, "starting");
     if transport.mode == tls::TlsMode::PlainInsecure {
@@ -332,8 +316,6 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
     opts.git_bin = cfg.git_bin.clone();
     opts.paths = cfg.paths();
     opts.max_running_targets = cfg.max_running_targets;
-    opts.terrarium_repo_dir = cfg.terrarium_repo_dir.clone();
-    opts.uv_bin = cfg.uv_bin.clone();
     tracing::info!(work_dir = %opts.paths.work_dir.display(), instances_dir = %opts.paths.instances_dir.display(), repos_dir = %opts.paths.repos_dir.display(), "workspace and lab paths");
     opts.tls = transport.tls.clone();
     opts.allow_insecure = transport.mode == tls::TlsMode::PlainInsecure;

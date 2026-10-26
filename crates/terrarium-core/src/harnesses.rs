@@ -1,8 +1,10 @@
 //! The harness pins from `harnesses.toml` at the repo root, read at compile
-//! time by `build.rs`. The image installs the same versions (the
-//! `docker::image-build` recipe passes them as build args), so the adapters,
-//! the daemon's start-time guard, and the compatibility suite all agree with
-//! the image. Change a version with `just harness::update`, never here.
+//! time by `build.rs`. The first install into the tools dir uses the same
+//! versions (`terrariumd harness install`), so the adapters, the daemon's
+//! start-time guard, and the compatibility suite agree with a fresh
+//! install. An update in place may move a harness past its pin; the guard
+//! then compares it with `tested`. Change a pin with
+//! `just harness::update <name> --pin`, never here.
 
 use crate::harness::HarnessId;
 
@@ -12,7 +14,7 @@ pub struct HarnessPin {
     pub harness: HarnessId,
     /// The npm package.
     pub package: &'static str,
-    /// The pinned version: the one the image installs.
+    /// The pinned version: the one of the first install.
     pub version: &'static str,
     /// The range the adapter accepts (a `semver::VersionReq`).
     pub tested: &'static str,

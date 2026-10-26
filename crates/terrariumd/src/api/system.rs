@@ -1,4 +1,4 @@
-//! Health, harness versions, reload, and audit. Targets and hosts are in `targets.rs` and
+//! Health, harness versions and updates, reload, and audit. Targets and hosts are in `targets.rs` and
 //! `hosts.rs`.
 
 use axum::Json;
@@ -78,6 +78,275 @@ pub async fn harnesses(
         state.harness_latest.fill(&mut report, q.refresh).await;
     }
     Json(report)
+}
+
+/// The body of `POST /api/harnesses/{name}/update` and
+/// `POST /api/harnesses/update`. Both fields are optional; an empty body is
+/// `{"version": "latest"}`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HarnessUpdateBody {
+    /// `latest` (the default), or a version like `0.165.0`.
+    #[serde(default)]
+    pub version: Option<String>,
+    /// Update also while agents on the harness run.
+    #[serde(default)]
+    pub force: bool,
+}
+
+/// One harness in the answer of an update.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HarnessUpdateResult {
+    /// The harness, or the extension name (`copilot-prompt`).
+    pub harness: String,
+    pub package: String,
+    /// The version before; `null` when it was not installed.
+    pub from: Option<String>,
+    /// The version after; `null` when the update failed.
+    pub to: Option<String>,
+    /// npm's output (stdout, then stderr).
+    pub output: String,
+    /// The adapter's tested range; `null` for an extension.
+    pub tested: Option<String>,
+    /// Whether `to` is in `tested`; `null` when not known.
+    pub in_range: Option<bool>,
+    /// Only on a failure: why.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+fn update_body(body: &[u8]) -> ApiResult<HarnessUpdateBody> {
+    if body.iter().all(u8::is_ascii_whitespace) {
+        return Ok(HarnessUpdateBody::default());
+    }
+    serde_json::from_slice(body).map_err(|e| ApiError::bad_request(e.to_string()))
+}
+
+/// The live agents (`project/name`) on each harness.
+async fn live_agents(state: &Shared) -> ApiResult<Vec<(String, String)>> {
+    state
+        .db
+        .read(|c| {
+            let mut st = c.prepare(
+                "SELECT harness, project || '/' || name FROM agents
+                 WHERE status IN ('starting', 'idle', 'working', 'blocked', 'restarting')
+                 ORDER BY project, name",
+            )?;
+            let rows = st
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+        .await
+}
+
+/// The tools dir, or `501 not_available`.
+fn tools(state: &Shared) -> ApiResult<std::sync::Arc<crate::harness_tools::ToolsConfig>> {
+    state.harness_tools.config().ok_or_else(|| {
+        ApiError::new(
+            crate::error::Code::NotAvailable,
+            "this daemon has no tools dir (TERRARIUM_TOOLS_DIR): update the harnesses where they \
+             are installed",
+        )
+    })
+}
+
+/// `409 conflict` when agents run on the harnesses of `pins`, unless `force`.
+async fn refuse_while_running(
+    state: &Shared,
+    pins: &[&crate::harness_tools::Pin],
+    force: bool,
+) -> ApiResult<()> {
+    if force {
+        return Ok(());
+    }
+    let running: Vec<String> = live_agents(state)
+        .await?
+        .into_iter()
+        .filter(|(h, _)| pins.iter().any(|p| p.harness.as_str() == h))
+        .map(|(_, a)| a)
+        .collect();
+    if running.is_empty() {
+        return Ok(());
+    }
+    let names: Vec<&str> = pins.iter().map(|p| p.name.as_str()).collect();
+    Err(ApiError::conflict(format!(
+        "{} agent(s) run on {}: {}. A running harness keeps the files it loaded, but a swap \
+         in the middle of a turn is risky. Stop the agents, or send `\"force\": true`",
+        running.len(),
+        names.join(", "),
+        running.join(", ")
+    ))
+    .with_details(serde_json::json!({ "running": running })))
+}
+
+/// Run the update of one pin, then the audit row and the `harness` event.
+/// The version cache is not refreshed here.
+async fn update_one(
+    state: &Shared,
+    actor: &Actor,
+    cfg: &crate::harness_tools::ToolsConfig,
+    pin: &crate::harness_tools::Pin,
+    version: &str,
+    force: bool,
+) -> ApiResult<HarnessUpdateResult> {
+    let r = cfg.update(&pin.name, version).await;
+    let (from, to, output, error) = match &r {
+        Ok(u) => (u.from.clone(), Some(u.to.clone()), u.output.clone(), None),
+        Err(f) => (
+            f.from.clone(),
+            None,
+            f.output.clone(),
+            Some(f.message.clone()),
+        ),
+    };
+    let name = pin.name.clone();
+    let package = pin.package.clone();
+    let detail = serde_json::json!({
+        "package": package, "version": version, "from": from, "to": to,
+        "force": force, "ok": error.is_none(), "error": error,
+    });
+    let event = to.as_ref().map(|to| {
+        crate::events::EventDraft::new(
+            "harness",
+            format!(
+                "{name} {} -> {to}",
+                from.as_deref().unwrap_or("(not installed)")
+            ),
+            serde_json::json!({
+                "change": "updated", "harness": name, "package": package,
+                "from": from, "to": to, "forced": force,
+            }),
+        )
+    });
+    let target = pin.name.clone();
+    state
+        .db
+        .write(actor.label(), move |t| {
+            t.audit("harness.update", &target, None, detail)?;
+            if let Some(e) = event {
+                t.emit(e)?;
+            }
+            Ok(())
+        })
+        .await?;
+    Ok(HarnessUpdateResult {
+        harness: pin.name.clone(),
+        package: pin.package.clone(),
+        from,
+        to,
+        output,
+        tested: None,
+        in_range: None,
+        error,
+    })
+}
+
+/// Run `<binary> --version` again for each harness, and fill `tested` and
+/// `in_range` of the results.
+async fn refresh(state: &Shared, results: &mut [HarnessUpdateResult]) {
+    let report = state.supervisor.harness_versions(true).await;
+    for r in results {
+        if let Some(row) = report
+            .harnesses
+            .iter()
+            .find(|h| h.harness.as_str() == r.harness)
+        {
+            r.tested = Some(row.tested.clone());
+            r.in_range = if r.to.is_some() && r.to == row.installed {
+                row.in_range
+            } else {
+                None
+            };
+        }
+    }
+}
+
+/// `POST /api/harnesses/{name}/update`: `npm install -g <package>@<version>`
+/// into the tools dir, in the container, then the new `--version`. Needs
+/// sysadmin (or the operator). `409 conflict` while agents on the harness
+/// run (unless `force`) or while another update runs; `422 invalid` for a
+/// bad name or version, and for an npm failure (`details.output`).
+pub async fn harness_update(
+    State(state): State<Shared>,
+    actor: Actor,
+    axum::extract::Path(name): axum::extract::Path<String>,
+    body: axum::body::Bytes,
+) -> ApiResult<Json<HarnessUpdateResult>> {
+    policy::sysadmin(&actor, "updating a harness")?;
+    let body = update_body(&body)?;
+    let cfg = tools(&state)?;
+    let pin = cfg.pin(&name).cloned().ok_or_else(|| {
+        let known: Vec<&str> = cfg.pins.iter().map(|p| p.name.as_str()).collect();
+        ApiError::invalid(format!(
+            "unknown harness `{name}`: use one of {}",
+            known.join(", ")
+        ))
+    })?;
+    let version = body.version.as_deref().unwrap_or("latest");
+    if !crate::harness_tools::valid_version(version) {
+        return Err(ApiError::invalid(format!(
+            "`{version}` is not `latest` or a version like 1.2.3"
+        )));
+    }
+    let _busy = state.harness_tools.busy.try_lock().map_err(|_| {
+        ApiError::conflict("another harness update runs now; try again when it ends")
+    })?;
+    refuse_while_running(&state, &[&pin], body.force).await?;
+    let mut results = vec![update_one(&state, &actor, &cfg, &pin, version, body.force).await?];
+    refresh(&state, &mut results).await;
+    let r = results.remove(0);
+    if let Some(e) = &r.error {
+        return Err(
+            ApiError::invalid(e.clone()).with_details(serde_json::json!({
+                "output": r.output, "package": r.package, "version": version, "from": r.from,
+            })),
+        );
+    }
+    Ok(Json(r))
+}
+
+/// The answer of `POST /api/harnesses/update`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HarnessUpdateAll {
+    pub results: Vec<HarnessUpdateResult>,
+}
+
+/// `POST /api/harnesses/update`: every harness and extension to the latest
+/// release, one after another. A failure does not stop the others; any
+/// failure makes the answer `422 invalid` with `details.results`.
+pub async fn harness_update_all(
+    State(state): State<Shared>,
+    actor: Actor,
+    body: axum::body::Bytes,
+) -> ApiResult<Json<HarnessUpdateAll>> {
+    policy::sysadmin(&actor, "updating the harnesses")?;
+    let body = update_body(&body)?;
+    let version = body.version.as_deref().unwrap_or("latest");
+    if version != "latest" {
+        return Err(ApiError::invalid(
+            "`version` of an update of every harness can only be `latest`",
+        ));
+    }
+    let cfg = tools(&state)?;
+    let _busy = state.harness_tools.busy.try_lock().map_err(|_| {
+        ApiError::conflict("another harness update runs now; try again when it ends")
+    })?;
+    let pins: Vec<&crate::harness_tools::Pin> = cfg.pins.iter().collect();
+    refuse_while_running(&state, &pins, body.force).await?;
+    let mut results = Vec::new();
+    for pin in &pins {
+        results.push(update_one(&state, &actor, &cfg, pin, version, body.force).await?);
+    }
+    refresh(&state, &mut results).await;
+    let failed = results.iter().filter(|r| r.error.is_some()).count();
+    if failed > 0 {
+        return Err(
+            ApiError::invalid(format!("{failed} of {} updates failed", results.len()))
+                .with_details(serde_json::json!({ "results": results })),
+        );
+    }
+    Ok(Json(HarnessUpdateAll { results }))
 }
 
 /// `POST /api/reload`: read the definition files again and sync them.

@@ -6,9 +6,10 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use clap::Parser;
+use terrariumd::harness_tools::ToolsConfig;
 use terrariumd::runner_supervisor::{RunnerMode, RunnerSupervisor, RunnerSupervisorConfig};
 use terrariumd::sandbox::{self, SandboxConfig};
-use terrariumd::settings::{Command, Settings};
+use terrariumd::settings::{Command, HarnessCommand, Settings};
 use terrariumd::usage_collector::UsageConfig;
 use terrariumd::{DaemonConfig, start_with_usage};
 use tracing::{error, info, warn};
@@ -24,11 +25,20 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let settings = Settings::parse();
+    let tools = settings.tools_config();
+    if let Some(Command::Harness { command }) = &settings.command {
+        return harness_command(tools, command).await;
+    }
+    if let Some(t) = &tools {
+        // The adapters and the runners find the harnesses on PATH.
+        ensure_first_on_path(&t.bin_dir());
+    }
     let mut sandbox = SandboxConfig {
         mode: settings.sandbox,
         cli: settings.cli_path(),
         new_session: settings.sandbox_new_session,
         repos_dir: settings.repos_dir.clone(),
+        tools_dir: tools.as_ref().map(|t| t.dir.clone()),
         ..SandboxConfig::default()
     };
     let homes: HashMap<_, _> = settings.harness_homes.iter().cloned().collect();
@@ -62,6 +72,13 @@ async fn main() -> anyhow::Result<()> {
         }
         RunnerMode::InProcess => {
             info!("agents run in the daemon process: they end when the daemon stops");
+        }
+    }
+    if let Some(t) = &tools {
+        if settings.no_harness_install {
+            info!(tools = %t.dir.display(), "harness install skipped (--no-harness-install)");
+        } else {
+            log_install(&t.install().await);
         }
     }
     let mut cfg = supervisor_config(sandbox);
@@ -102,6 +119,9 @@ async fn main() -> anyhow::Result<()> {
     // TLS and bind 0.0.0.0:8082; without them it is plaintext on
     // 127.0.0.1:8082. TERRARIUM_HOST_LISTEN sets the address; empty turns
     // it off. The dashboard port does not serve /hosts/connect.
+    if let Some(t) = tools {
+        daemon.state.harness_tools.configure(t);
+    }
     let host_task = match terrariumd::hosts::HostListen::from_env()? {
         Some(listen) => {
             let (task, _) = listen.serve(daemon.state.clone()).await?;
@@ -125,7 +145,7 @@ async fn main() -> anyhow::Result<()> {
                 Some(false) => warn!(
                     harness = %h.harness, installed, tested = %h.tested, pinned = %h.pinned,
                     policy = %report.policy,
-                    "harness version outside the tested range: rebuild the image (`just up`) or update the pin (`just harness::update`)"
+                    "harness version outside the tested range: update it (`terrarium admin harness update <harness> --version <pinned>`)"
                 ),
                 None => {
                     warn!(harness = %h.harness, error = h.error.as_deref().unwrap_or(""), "harness version not known")
@@ -140,6 +160,126 @@ async fn main() -> anyhow::Result<()> {
         t.abort();
     }
     daemon.shutdown();
+    Ok(())
+}
+
+/// Run this binary again with `bin` first on `PATH`, when it is not, so
+/// the daemon, the adapters, and the runners find the harnesses of the
+/// tools dir (`just daemon::run`; the image sets `PATH` itself).
+fn ensure_first_on_path(bin: &std::path::Path) {
+    use std::os::unix::process::CommandExt;
+    let path = std::env::var("PATH").unwrap_or_default();
+    if path.split(':').next() == Some(bin.to_string_lossy().as_ref()) {
+        return;
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        warn!("cannot find this binary; the tools dir is not on PATH");
+        return;
+    };
+    let new = terrariumd::harness_tools::prepend_path(bin, &path);
+    info!(bin = %bin.display(), "starting again with the tools dir first on PATH");
+    let err = std::process::Command::new(exe)
+        .args(std::env::args_os().skip(1))
+        .env("PATH", new)
+        .exec();
+    warn!("cannot start again with the tools dir on PATH: {err}");
+}
+
+fn log_install(r: &terrariumd::harness_tools::InstallReport) {
+    for i in &r.items {
+        let version = i.version.as_deref().unwrap_or("-");
+        match &i.error {
+            None => {
+                info!(harness = %i.name, package = %i.package, version, action = %i.action, "harness tools")
+            }
+            Some(e) => {
+                error!(harness = %i.name, package = %i.package, "harness install failed: {e}");
+                if !i.output.is_empty() {
+                    error!("npm output:\n{}", i.output.trim_end());
+                }
+            }
+        }
+    }
+    info!(extension = %r.extension, tools = %r.tools_dir.display(), "Copilot prompt extension");
+}
+
+/// `terrariumd harness install|status`.
+async fn harness_command(
+    tools: Option<ToolsConfig>,
+    command: &HarnessCommand,
+) -> anyhow::Result<()> {
+    let Some(t) = tools else {
+        anyhow::bail!("no tools dir: set TERRARIUM_TOOLS_DIR (or --tools-dir)");
+    };
+    match command {
+        HarnessCommand::Install { json } => {
+            let started = std::time::Instant::now();
+            let r = t.install().await;
+            #[allow(clippy::print_stdout)]
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&r)?);
+            } else {
+                for i in &r.items {
+                    println!(
+                        "{:<16} {:<34} {:<10} {}{}",
+                        i.name,
+                        i.package,
+                        i.version.as_deref().unwrap_or("-"),
+                        i.action,
+                        i.error
+                            .as_deref()
+                            .map(|e| format!(": {e}"))
+                            .unwrap_or_default()
+                    );
+                    if i.error.is_some() && !i.output.is_empty() {
+                        println!("{}", i.output.trim_end());
+                    }
+                }
+                println!("extension: {}", r.extension);
+                println!(
+                    "tools dir: {} ({:.1} s)",
+                    r.tools_dir.display(),
+                    started.elapsed().as_secs_f64()
+                );
+            }
+            if r.failed() > 0 {
+                anyhow::bail!("{} of {} installs failed", r.failed(), r.items.len());
+            }
+        }
+        HarnessCommand::Status { json } => {
+            let manifest = t.read_manifest();
+            let rows: Vec<serde_json::Value> = t
+                .pins
+                .iter()
+                .map(|p| {
+                    serde_json::json!({
+                        "name": p.name, "package": p.package, "pinned": p.version,
+                        "installed": t.present(p), "manifest": manifest.get(&p.name),
+                    })
+                })
+                .collect();
+            #[allow(clippy::print_stdout)]
+            if *json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(
+                        &serde_json::json!({"tools_dir": t.dir, "harnesses": rows})
+                    )?
+                );
+            } else {
+                println!("tools dir: {}", t.dir.display());
+                for (p, r) in t.pins.iter().zip(&rows) {
+                    println!(
+                        "{:<16} {:<34} pinned {:<10} installed {}",
+                        p.name,
+                        p.package,
+                        p.version,
+                        r["installed"].as_str().unwrap_or("-")
+                    );
+                }
+            }
+        }
+    }
     Ok(())
 }
 

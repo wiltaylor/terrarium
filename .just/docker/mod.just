@@ -10,14 +10,10 @@ gid := env("TERRARIUM_GID", "1000")
 main:
 	@just --list docker
 
-# Build the Terrarium image (daemon, CLI, dashboard, harnesses); the harness versions come from harnesses.toml
+# Build the Terrarium image (daemon, CLI, dashboard, Node); the harnesses are not in it: the container installs them into ./tools
 [group('image')]
-image-build: require-docker require-uv
-	#!/usr/bin/env bash
-	set -euo pipefail
-	pins="$(uv run python scripts/harness-versions.py build-args)"
-	set -x
-	docker build -f docker/Dockerfile $pins --build-arg UID={{uid}} --build-arg GID={{gid}} -t {{image}} .
+image-build: require-docker
+	docker build -f docker/Dockerfile --build-arg UID={{uid}} --build-arg GID={{gid}} -t {{image}} .
 
 # Tag the image and push it to a registry, for example `just docker::image-push ghcr.io/me/terrarium:0.1.0`
 [group('image')]
@@ -55,10 +51,10 @@ shell: require-docker
 crash-test: up require-uv
 	uv run docker/crash-test.py
 
-# Create config/*, state/, repos/, work/, and the definition directories, owned by you
+# Create config/*, state/, tools/, repos/, work/, and the definition directories, owned by you
 [group('config')]
 volumes-init:
-	mkdir -p config/claude config/codex config/copilot config/pi state prompts projects agents targets subscriptions fleets repos work config/tls
+	mkdir -p config/claude config/codex config/copilot config/pi state tools prompts projects agents targets subscriptions fleets repos work config/tls
 
 # Open the bind-mounted home of one harness (claude, codex, copilot, pi) in $EDITOR
 [group('config')]

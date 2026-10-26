@@ -61,6 +61,11 @@ just up
 directories (`just docker::volumes-init`), and starts the stack. It waits
 until the health check passes. The first build takes some minutes.
 
+The image holds no harness. At the first start, the entrypoint installs
+the pinned harnesses (`harnesses.toml`) and the Copilot prompt extension
+into `tools/` (about 1.1 GB; 15 s on a fast line). Each later start finds
+them there and goes on at once. See section 7.
+
 To see the logs, run `just docker::logs`. To stop the stack, run `just down`.
 The bind-mounted data stays.
 
@@ -437,6 +442,7 @@ Compose bind-mounts these host directories into the container:
 | `config/copilot/` | `/auth/copilot` | The Copilot CLI home (`COPILOT_HOME`) and the system-prompt extension. |
 | `config/pi/` | `/auth/pi` | The pi home (`PI_CODING_AGENT_DIR`). |
 | `state/` | `/state` | SQLite, agent logs and harness files, artifacts, credentials. |
+| `tools/` | `/opt/terrarium/tools` | The harnesses: the npm global prefix (`TERRARIUM_TOOLS_DIR`, `NPM_CONFIG_PREFIX`). The entrypoint installs the pins here at the first start; updates go here in place (section 7). The sandbox binds it read-only. Delete it to reinstall the pins. |
 | `work/` | `/work` | Agent workspaces, `<project>/<agent>/` (`TERRARIUM_WORK_DIR`). A host agent on this machine attaches them to targets: set its `work_dir` to this directory (docs/host-protocol.md, "Workspaces"). |
 | `prompts/` | `/prompts` (read-only) | System prompt templates. |
 | `projects/`, `agents/`, `targets/`, `subscriptions/` | `/etc/terrarium/...` | Definition files. |
@@ -463,7 +469,8 @@ that agents write.
 
 **Tools in the sandbox.** The sandbox uses the tools of the image: `git`,
 `ssh`, Node 22, and `python3` (Python 3.13, the Debian trixie package, with
-no `pip` and no `venv`). The sandbox has no project toolchain. Run builds
+no `pip` and no `venv`). The harnesses come from `tools/`:
+`/opt/terrarium/tools/bin` is on `PATH`, and the dir is read-only. The sandbox has no project toolchain. Run builds
 and tests on a target (section 2.8), and keep the toolchain in the image
 of the target.
 
@@ -509,8 +516,20 @@ when you set it:
 | `TERRARIUM_PROMPTS_DIR` | `<repo>/prompts` |
 | `TERRARIUM_ARTIFACT_LISTEN` | `127.0.0.1:8091`, so that it does not collide with the Docker stack on 8081 |
 | `TERRARIUM_HARNESS_HOME` | `claude=$HOME/.claude,codex=$HOME/.codex,copilot=$HOME/.copilot,pi=$HOME/.pi/agent` |
+| `TERRARIUM_TOOLS_DIR` | `<repo>/tools` |
 
 To see the full command, run `just --dry-run daemon::run`.
+
+**The harnesses.** At start, the daemon installs each pin of
+`harnesses.toml` that is missing from `TERRARIUM_TOOLS_DIR` (with the
+`npm` on your `PATH`, or `TERRARIUM_NPM`). Then it starts again with
+`<tools>/bin` first on `PATH`. So a dev run uses the pinned versions, not
+the harnesses that you installed yourself. It also installs the Copilot
+prompt extension into the Copilot home of `TERRARIUM_HARNESS_HOME`. This is
+the same `tools/` dir that the Docker stack uses. To skip the install, run
+`just daemon::run --no-harness-install`. To use the harnesses on your
+`PATH` as they are, set `TERRARIUM_TOOLS_DIR=` (empty). To install with no
+daemon, run `cargo run -p terrariumd -- harness install`.
 
 The daemon runs each agent in its own `terrarium-runner` process
 (`TERRARIUM_RUNNER_MODE=process`, the default). The agents live through a
@@ -676,22 +695,33 @@ It starts no harness.
 
 ## 7. Updating a harness
 
-`harnesses.toml` at the repo root pins each harness: the npm package, the
-version that the image installs, the `tested` range that the adapter
-accepts, and the binary. It also pins the Node image and the Copilot
-prompt extension. It is the only place to change a version
-([CONVENTIONS.md](CONVENTIONS.md)). Three readers use it:
+The image holds no harness. The harnesses live in `tools/` on the Docker
+host, which is `/opt/terrarium/tools` in the container
+(`TERRARIUM_TOOLS_DIR`). That dir is the npm global prefix
+(`NPM_CONFIG_PREFIX`), and its `bin/` comes first on `PATH` for the
+daemon, the runners, and the sandbox. The sandbox binds it read-only, so
+an agent cannot change a harness.
 
-- The image. `just docker::image-build` passes each value as a
-  `--build-arg` (`scripts/harness-versions.py build-args`).
-- The adapters. `crates/terrarium-core/build.rs` reads the file at compile
-  time, and each adapter's `flags.rs` takes `verified` and `tested` from it.
-- The daemon and the compatibility suite. Both compare the installed
-  version with the adapter's `tested` range.
+`harnesses.toml` at the repo root has two jobs
+([CONVENTIONS.md](CONVENTIONS.md)):
 
-The dashboard's Subscriptions page shows the same status and the command
-to run, and can run it through a host agent with `terrarium_repo_dir`
-([api.md `GET /api/harnesses`](api.md#get-apiharnesses)).
+- It gives the versions of the **first install**. The image copies it to
+  `/etc/terrarium/harnesses.toml`. At each start, the entrypoint runs
+  `terrariumd harness install`, and the daemon runs the same step when it
+  starts. The step installs each pin that is missing from the tools dir,
+  checks `<binary> --version`, and installs the Copilot prompt extension
+  into the Copilot home when its version or the Copilot version changed.
+  A harness that is present stays at its version, also when it is not the
+  pin. So an update survives a restart and a new image. The step writes
+  the manifest `tools/terrarium-manifest.json`:
+  `{"<name>": {"package", "version", "installed_at"}}`.
+- It gives the **tested range** of each adapter. `crates/terrarium-core/build.rs`
+  reads the file at compile time, and each adapter's `flags.rs` takes
+  `verified` and `tested` from it. At each agent start, the daemon compares
+  the installed version with that range (section 7.5).
+
+An update runs `npm install -g <package>@<version>` in the running
+container. It needs no image build, no restart, and no host agent.
 
 ### 7.1 Check
 
@@ -700,67 +730,87 @@ just harness::check           # a table
 just harness::check --json
 ```
 
-For each harness, the table shows the pin, the tested range, the version
-in the running container, the version on the host, the latest version on
-npm with its publish date, and whether the latest version is in the tested
-range (`LATEST IN TESTED RANGE`). The `STATUS` column shows `latest`,
-`update available` (the same major version), or `update available (major)`.
-The command changes nothing.
+For each harness and the extension, the table shows the pin, the tested
+range, the version in the container (from the manifest), the version on
+the host, the latest version on npm with its publish date, and whether the
+latest version is in the tested range (`LATEST IN TESTED RANGE`). The
+`STATUS` column compares the version in the container with the latest:
+`latest`, `update available` (the same major version), or
+`update available (major)`. The command changes nothing.
 
-### 7.2 Update all harnesses to the latest
+The dashboard's Subscriptions page shows the same status. A row with a
+newer release has an "Update" button, and the page has "Update all" when
+more than one row has one. The buttons call
+[`POST /api/harnesses/{name}/update`](api.md#post-apiharnessesnameupdate-and-post-apiharnessesupdate),
+show npm's output, and refresh the table.
 
-```sh
-just harness::latest --dry-run       # print the plan, change nothing
-just harness::latest                 # bump, build, dry compat, roll out
-just harness::latest --no-rollout    # bump, build, dry compat; no `just up`
-```
-
-This is the usual path. The command reads the latest release of each
-harness and of the Copilot prompt extension on npm. It skips each one that
-is at the latest and prints `latest` for it. It bumps each of the other
-ones to the latest release. It allows a major bump, and it prints a
-one-line warning for each major bump: hooks and flags may have changed.
-
-Then the command does the file steps of 7.3 (steps 1 to 4) for all the
-bumps. It builds the image one time, checks each version in the image,
-and runs the dry compatibility suite one time. Then it runs `just up`
-(7.5), unless you add `--no-rollout`. At the end, it prints a table of the
-changes and one `just ci::compat <name>` command for each bumped harness.
-
-The live compatibility suite (7.4) is the proof that a new version works.
-It is not a gate for the update: run it after the update, and write the
-result in [compat.md](compat.md).
-
-### 7.3 Update one harness
+### 7.2 Update one harness
 
 ```sh
 just harness::update claude --dry-run    # print the plan, change nothing
 just harness::update claude              # the latest version on npm
 just harness::update claude 2.1.320      # a given version
+just harness::update claude --pin        # also write the new pin
 ```
 
-The command does these steps:
+The command needs the stack to run. It calls the daemon through the CLI
+in the container (`terrarium admin harness update`), so you can also run
+that command yourself:
 
-1. It sets the new version in `harnesses.toml`.
-2. It widens the `tested` range when the new version is outside it. It
-   does this for a patch bump or a minor bump only. A minor bump moves the
-   upper bound to the next minor line (`<2.2.0` becomes `<2.3.0`).
-3. It sets the ARG defaults in `docker/Dockerfile`.
-4. It adds a row to the "Version history" table in
-   [compat.md](compat.md).
-5. It builds the image (`just docker::image-build`) and checks the version
-   in the image.
-6. It runs the dry compatibility suite (`cargo test -p terrarium-compat`).
-7. It prints the next steps.
+```sh
+docker compose exec -u terrarium terrarium terrarium admin harness update claude --version 2.1.320
+```
 
-A major bump stops at step 1. The command prints the two commands that
-continue: `just harness::update <name> --allow-major` for this harness, or
-`just harness::latest` for all harnesses. With `--allow-major`, the command
-then resets the range to the new minor line and prints a warning: hooks,
-flags, and config keys can change in a major release. The command uses the
-semver rule for "major": the first part that is not zero. Thus, for a 0.x
-harness, 0.160.0 to 0.161.0 is a major bump, and 0.160.0 to 0.160.1 is a
-patch bump.
+The daemon runs npm, reads the new `--version`, refreshes its version
+cache, and writes the audit entry `harness.update` and a `harness` event.
+The command prints npm's output and `claude 2.1.310 -> 2.1.320`. The next
+start of each agent runs the new version.
+
+- **Running agents.** While an agent on the harness runs, the daemon
+  refuses the update (`409`) and names the agents. A running harness keeps
+  the files that it loaded, but a swap in the middle of a turn is risky.
+  Stop the agents, or add `--force`.
+- **A major bump.** From the version in the container, a major bump needs
+  `--allow-major`. The command uses the semver rule for "major": the first
+  part that is not zero. Thus, for a 0.x harness, 0.164.0 to 0.165.0 is a
+  major bump, and 0.164.0 to 0.164.1 is a patch bump.
+- **`--pin`.** After a done update, the command also sets the new version
+  in `harnesses.toml`, widens `tested` for a patch or minor bump (`<2.2.0`
+  becomes `<2.3.0`), and adds a row to the "Version history" table in
+  [compat.md](compat.md). So a fresh install (an empty `tools/`) gets the
+  same version. The adapters read the new `tested` range at the next image
+  build (`just up`). Commit the files.
+
+Without `--pin`, a version outside the tested range is a warning, not an
+error: the agents still start (section 7.5).
+
+### 7.3 Update every harness to the latest
+
+```sh
+just harness::latest --dry-run       # print the plan, change nothing
+just harness::latest                 # update each one with a newer release
+just harness::latest --pin           # and write the new pins
+```
+
+The command reads the latest release of each harness and of the Copilot
+prompt extension on npm. It skips each one that is at the latest. It
+updates each of the other ones, as in 7.2, with one call each. It allows a
+major bump, and it prints a one-line warning for each: hooks and flags may
+have changed. At the end, it prints a table of the changes and one
+`just ci::compat <name>` command for each updated harness.
+
+`terrarium admin harness update --all` updates every harness and the
+extension to the latest in one call, with no plan.
+
+**No rollout.** An update changes the files in `tools/` in place. The
+container does not restart, and no agent stops. There is no
+`just harness::rollout`.
+
+**With the daemon stopped.** The update needs the daemon. When the
+daemon does not run, open a shell in the container (`just docker::shell`)
+and run `npm install -g <package>@<version>`. `NPM_CONFIG_PREFIX` points
+npm at the tools dir. The dashboard shows this line for each row with a
+newer release.
 
 ### 7.4 Prove the new version
 
@@ -790,20 +840,7 @@ in [compat.md](compat.md). Look at these items:
 When a fact changes, add a section for the new version to
 [compat.md](compat.md), and change the adapter table in `flags.rs`.
 
-### 7.5 Roll out
-
-```sh
-just harness::rollout --dry-run    # list the live agents, change nothing
-just harness::rollout
-```
-
-The rollout runs `just up`. When the image changed, Docker Compose makes
-the container again. The entrypoint stops `terrariumd` and then each
-runner gracefully, and each runner records `stopped_by: container`. The
-new daemon starts each of those agents again with resume
-([docker/README.md](../docker/README.md), "The shutdown sequence"). Thus
-`just up` alone does the same rollout. The rollout command also lists the
-live agents before and after.
+### 7.5 The version guard
 
 At each agent start, the daemon compares the installed version with the
 tested range. Outside the range, the daemon logs a warning and writes a
@@ -815,18 +852,21 @@ the installed version of each harness and its range.
 
 ### 7.6 Roll back
 
-Edit `harnesses.toml`: set `version` back to the old value. If the update
-changed `tested`, set it back too. Then build and roll out:
+Update to the old version:
 
 ```sh
-just up
+just harness::update claude 2.1.310
 ```
 
-`just ci::check` fails when the Dockerfile ARG defaults differ from
-`harnesses.toml`. To fix them, run
-`uv run python scripts/harness-versions.py sync`. Before a commit,
-`git checkout harnesses.toml docker/Dockerfile docs/compat.md` also undoes
-an update.
+If you used `--pin`, `git checkout harnesses.toml docs/compat.md` undoes
+the file changes before a commit. To go back to the pins of
+`harnesses.toml` for every harness, stop the stack (`just down`), delete
+`tools/`, and start it (`just up`): the entrypoint installs the pins again.
+
+`just ci::check` fails when the `NODE_IMAGE` default in
+`docker/Dockerfile` differs from `[node] image` in `harnesses.toml`, or
+when the Dockerfile installs a harness. To fix the default, run
+`uv run python scripts/harness-versions.py sync`.
 
 ## 8. Troubleshooting
 

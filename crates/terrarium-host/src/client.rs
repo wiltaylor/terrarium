@@ -62,11 +62,6 @@ pub struct ClientOptions {
     pub paths: HostPaths,
     /// Sent in `hello`; the daemon enforces it.
     pub max_running_targets: u32,
-    /// The checkout of Terrarium for `harness.update`. `None` refuses the
-    /// verb.
-    pub terrarium_repo_dir: Option<PathBuf>,
-    /// The `uv` binary for `harness.update`.
-    pub uv_bin: String,
     /// A TLS config for `wss://`. `None` uses the system roots.
     /// [`crate::Config::transport`] builds it, with pinning and `ca_file`.
     pub tls: Option<Arc<rustls::ClientConfig>>,
@@ -98,8 +93,6 @@ impl ClientOptions {
             git_bin: "git".into(),
             paths: HostPaths::default(),
             max_running_targets: crate::config::DEFAULT_MAX_RUNNING_TARGETS,
-            terrarium_repo_dir: None,
-            uv_bin: "uv".into(),
             tls: None,
             allow_insecure: false,
             token_file: None,
@@ -761,11 +754,6 @@ impl Client {
             F::VmlabSnapshotList(r) => self.start(
                 r.session,
                 need(vmlab_ok, "vmlab").and_then(|_| vmlab::plan_snapshot_list(&r, vb, p)),
-                tx,
-            ),
-            F::HarnessUpdate(r) => self.start(
-                r.session,
-                crate::harness_update::plan(&r, o.terrarium_repo_dir.as_deref(), &o.uv_bin),
                 tx,
             ),
         }

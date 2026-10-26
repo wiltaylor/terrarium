@@ -186,11 +186,18 @@ pub fn bracketed_paste(text: &str) -> Vec<u8> {
     out
 }
 
-/// Parse the first `x.y.z` in the output of `<harness> --version`.
+/// Parse the first `x.y.z` in the output of `<harness> --version`. A full
+/// stop or comma after the version is not a part of it ("GitHub Copilot
+/// CLI 1.0.103.").
 pub fn parse_version_output(output: &str) -> Result<Version> {
     output
         .split(|c: char| c.is_whitespace() || c == '(' || c == ')' || c == 'v')
-        .find_map(|word| Version::parse(word.trim()).ok())
+        .find_map(|word| {
+            let w = word.trim();
+            Version::parse(w)
+                .or_else(|_| Version::parse(w.trim_end_matches(['.', ',', ';', ':'])))
+                .ok()
+        })
         .ok_or_else(|| crate::Error::Version(format!("no version in `{}`", output.trim())))
 }
 
@@ -237,6 +244,11 @@ mod tests {
         assert_eq!(
             parse_version_output("codex-cli 0.160.0").expect("codex"),
             Version::new(0, 160, 0)
+        );
+        assert_eq!(
+            parse_version_output("GitHub Copilot CLI 1.0.103.\nRun 'copilot update'.")
+                .expect("copilot"),
+            Version::new(1, 0, 103)
         );
         assert!(parse_version_output("nothing here").is_err());
     }

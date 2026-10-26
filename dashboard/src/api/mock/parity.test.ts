@@ -514,7 +514,7 @@ describe("mock parity with docs/api.md", () => {
     expect(lab1.capabilities).toMatchObject({ docker: { present: true, version: "29.8.0" }, vmlab: { present: true } });
   });
 
-  it("answers GET /api/harnesses?latest=true and the harness.update verb in the daemon's shapes", async () => {
+  it("answers GET /api/harnesses?latest=true and the harness update in the daemon's shapes", async () => {
     const api = mock();
     // The fields of `harness_versions::HarnessVersion` (docs/api.md GET /api/harnesses).
     const ROW = ["harness", "package", "pinned", "tested", "installed", "in_range", "error", "checked_at", "latest", "update", "latest_error"];
@@ -529,13 +529,16 @@ describe("mock parity with docs/api.md", () => {
     }
     // Without `latest`, no npm fields.
     for (const h of (await api.harnesses()).harnesses) for (const k of ["latest", "update", "latest_error"]) expect(h).not.toHaveProperty(k);
-    const lab1 = (await api.hosts.list()).find((h) => h.name === "lab1")!;
-    expect(lab1.capabilities?.can_update_harnesses).toBe(true);
-    const s = await api.hosts.harnessUpdate("lab1", ["codex"]);
-    expect(s).toMatchObject({ host: "lab1", names: ["codex"], rollout: "rollout needed: run `just up` on the host" });
-    const o = await api.hosts.sessionOutput("lab1", s.session_id, 0);
-    expect(Object.keys(o).sort()).toEqual(["chunks", "done", "next", "session_id", "since"]);
-    await expect(api.hosts.sessionOutput("lab1", "nope", 0)).rejects.toMatchObject({ status: 404, code: "not_found" });
+    // `harness_install::UpdateResult` (docs/api.md POST /api/harnesses/{name}/update).
+    const RESULT = ["harness", "package", "from", "to", "output", "tested", "in_range"].sort();
+    const one = await api.harnessUpdate("copilot-prompt", { force: true });
+    expect(Object.keys(one).sort()).toEqual(RESULT);
+    expect(one).toMatchObject({ harness: "copilot-prompt", package: "copilot-custom-system-prompt", tested: null, in_range: null });
+    const conflict = await api.harnessUpdate("claude").catch((e: unknown) => e);
+    expect(conflict).toMatchObject({ status: 409, code: "conflict", details: { running: expect.arrayContaining(["terrarium/lead"]) } });
+    const npm = await api.harnessUpdate("claude", { version: "99.1.0", force: true }).catch((e: unknown) => e);
+    expect(npm).toMatchObject({ status: 422, code: "invalid", details: { package: "@anthropic-ai/claude-code", version: "99.1.0", from: "2.1.310" } });
+    expect(Object.keys((npm as { details: object }).details).sort()).toEqual(["from", "output", "package", "version"]);
   });
 
   it("runs the target lifecycle with the daemon's states, and answers each verb with the executor report", async () => {

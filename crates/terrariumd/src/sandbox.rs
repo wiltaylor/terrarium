@@ -6,7 +6,8 @@
 //! |---|---|---|
 //! | `/usr`, `/lib`, `/lib64`, `/bin`, `/sbin` | the same paths (a symlink stays a symlink) | ro |
 //! | `/etc/{resolv.conf, hosts, ssl, passwd, group, localtime, alternatives, ...}` | the same paths, when they exist | ro |
-//! | the harness install directory, when it is outside `/usr` | the same path | ro |
+//! | the tools dir (`TERRARIUM_TOOLS_DIR`, `/opt/terrarium/tools`): the harnesses, their `bin/` on `PATH` | the same path | ro |
+//! | the harness install directory, when it is outside `/usr` and the tools dir | the same path | ro |
 //! | `/proc`, `/dev`, `/tmp` | new, private | |
 //! | `$HOME` (`/home/agent`) | a new tmpfs | rw |
 //! | `$HOME/work` | `<work>/<project>/<agent>` (`TERRARIUM_WORK_DIR`) | rw |
@@ -131,6 +132,10 @@ pub struct SandboxConfig {
     pub cli: Option<PathBuf>,
     /// More host paths to bind read-only at the same path.
     pub ro_paths: Vec<PathBuf>,
+    /// The tools dir (`TERRARIUM_TOOLS_DIR`), absolute: the npm prefix of
+    /// the harnesses. The sandbox binds it read-only at the same path and
+    /// puts its `bin/` on `PATH`, after [`SANDBOX_BIN_DIR`].
+    pub tools_dir: Option<PathBuf>,
     /// Pass `--new-session`. Off by default: with it, the harness has no
     /// controlling terminal, and a PTY resize does not reach it (Claude Code
     /// did not redraw; `docs/compat.md`, "Claude inside bwrap"). The flag
@@ -153,6 +158,7 @@ impl Default for SandboxConfig {
             home: PathBuf::from(SANDBOX_HOME),
             cli: None,
             ro_paths: Vec::new(),
+            tools_dir: None,
             new_session: false,
             repos_dir: PathBuf::from(DEFAULT_REPOS_DIR),
         }
@@ -385,7 +391,7 @@ impl SandboxConfig {
                 ..spec
             };
         }
-        let (program, install_dir) = locate(&spec.program, resolve);
+        let (program, install_dir) = locate(&spec.program, resolve, self.tools_dir.as_deref());
         let mut args = vec![
             "--unshare-all".to_owned(),
             "--share-net".to_owned(),
@@ -396,6 +402,9 @@ impl SandboxConfig {
         }
         args.extend(system_args(symlink));
         let mut ro: Vec<&Path> = self.ro_paths.iter().map(PathBuf::as_path).collect();
+        if let Some(dir) = self.tools_dir.as_deref() {
+            ro.push(dir);
+        }
         if let Some(dir) = install_dir.as_deref() {
             ro.push(dir);
         }
@@ -484,7 +493,14 @@ impl SandboxConfig {
         match self.mode {
             SandboxMode::Bwrap => {
                 env.insert("HOME".into(), self.home.display().to_string());
-                env.insert("PATH".into(), format!("{SANDBOX_BIN_DIR}:{SANDBOX_PATH}"));
+                let path = match &self.tools_dir {
+                    Some(t) => format!(
+                        "{SANDBOX_BIN_DIR}:{}:{SANDBOX_PATH}",
+                        t.join("bin").display()
+                    ),
+                    None => format!("{SANDBOX_BIN_DIR}:{SANDBOX_PATH}"),
+                };
+                env.insert("PATH".into(), path);
                 env.insert(ENV_AGENT_SOCKET.into(), SANDBOX_SOCKET.into());
             }
             SandboxMode::None => {
@@ -519,15 +535,20 @@ pub fn scrubbed(key: &str) -> bool {
 }
 
 /// The program path inside the sandbox and the host directory to bind for
-/// it. A program under the system dirs runs as it is. A program elsewhere
+/// it. A program under the system dirs or the tools dir (bound whole) runs
+/// as it is. A program elsewhere
 /// (for example `~/.local/bin/claude`, a symlink into
 /// `~/.local/share/claude/versions/`) runs by its real path, and the
 /// directory of that path is bound read-only.
-fn locate(program: &str, resolve: &dyn Fn(&str) -> Option<PathBuf>) -> (String, Option<PathBuf>) {
+fn locate(
+    program: &str,
+    resolve: &dyn Fn(&str) -> Option<PathBuf>,
+    tools: Option<&Path>,
+) -> (String, Option<PathBuf>) {
     let Some(found) = resolve(program) else {
         return (program.to_owned(), None);
     };
-    if under_system_dir(&found) {
+    if under_system_dir(&found) || tools.is_some_and(|t| found.starts_with(t)) {
         return (found.display().to_string(), None);
     }
     let real = std::fs::canonicalize(&found).unwrap_or(found);
@@ -668,10 +689,15 @@ mod tests {
     }
 
     /// The bwrap command for a sample agent, as in PLAN §11. A merged-`/usr`
-    /// host has `/lib64` as a symlink; the probe says so.
+    /// host has `/lib64` as a symlink; the probe says so. The harness comes
+    /// from the tools dir, which is bound read-only, with its `bin/` on
+    /// `PATH`.
     #[test]
     fn bwrap_argv_matches_the_golden_command() {
-        let cfg = config();
+        let cfg = SandboxConfig {
+            tools_dir: Some(PathBuf::from("/opt/terrarium/tools")),
+            ..config()
+        };
         let l = layout();
         let host_env = |k: &str| match k {
             "LANG" => Some("en_US.UTF-8".to_owned()),
@@ -682,11 +708,12 @@ mod tests {
         };
         let env = cfg.child_env(&l, &spec().env, &host_env);
         let symlink = |p: &Path| (p == Path::new("/lib64")).then(|| PathBuf::from("usr/lib"));
-        let resolve = |p: &str| (p == "claude").then(|| PathBuf::from("/usr/bin/claude"));
+        let resolve =
+            |p: &str| (p == "claude").then(|| PathBuf::from("/opt/terrarium/tools/bin/claude"));
         let wrapped = cfg.wrap_with(spec(), &l, env, &symlink, &resolve);
         let golden = "cd /work/terra/a1 && env -i \
 CLAUDE_CONFIG_DIR=/home/agent/.claude DISABLE_TELEMETRY=1 HOME=/home/agent LANG=en_US.UTF-8 \
-PATH=/opt/terrarium/bin:/usr/local/bin:/usr/bin:/bin TERM=xterm-256color \
+PATH=/opt/terrarium/bin:/opt/terrarium/tools/bin:/usr/local/bin:/usr/bin:/bin TERM=xterm-256color \
 TERRARIUM_AGENT=01K8AGENT0000000000000000A TERRARIUM_SOCKET=/run/terrarium/agent.sock \
 /usr/bin/bwrap --unshare-all --share-net --die-with-parent \
 --ro-bind-try /usr /usr --ro-bind-try /lib /lib --symlink usr/lib /lib64 \
@@ -699,6 +726,7 @@ TERRARIUM_AGENT=01K8AGENT0000000000000000A TERRARIUM_SOCKET=/run/terrarium/agent
 --ro-bind-try /etc/localtime /etc/localtime --ro-bind-try /etc/alternatives /etc/alternatives \
 --ro-bind-try /etc/ld.so.cache /etc/ld.so.cache --ro-bind-try /etc/ld.so.conf /etc/ld.so.conf \
 --ro-bind-try /etc/ld.so.conf.d /etc/ld.so.conf.d \
+--ro-bind /opt/terrarium/tools /opt/terrarium/tools \
 --proc /proc --dev /dev --tmpfs /tmp --tmpfs /home/agent \
 --bind /work/terra/a1 /home/agent/work --bind /work/terra/a1 /work/terra/a1 \
 --ro-bind /state/agents/01K8AGENT0000000000000000A/harness /state/agents/01K8AGENT0000000000000000A/harness \
@@ -708,12 +736,12 @@ TERRARIUM_AGENT=01K8AGENT0000000000000000A TERRARIUM_SOCKET=/run/terrarium/agent
 --bind /state/agents/01K8AGENT0000000000000000A/harness/pi/sessions /state/agents/01K8AGENT0000000000000000A/harness/pi/sessions \
 --bind /run/terrarium/agents/01K8AGENT0000000000000000A.sock /run/terrarium/agent.sock \
 --ro-bind /usr/local/bin/terrarium /opt/terrarium/bin/terrarium \
---chdir /home/agent/work -- /usr/bin/claude --dangerously-skip-permissions --model haiku";
+--chdir /home/agent/work -- /opt/terrarium/tools/bin/claude --dangerously-skip-permissions --model haiku";
         assert_eq!(command_line(&wrapped), golden);
 
         let cfg = SandboxConfig {
             new_session: true,
-            ..config()
+            ..cfg
         };
         let wrapped = cfg.wrap_with(spec(), &l, BTreeMap::new(), &symlink, &resolve);
         assert_eq!(wrapped.args[3], "--new-session");
@@ -883,12 +911,23 @@ TERRARIUM_AGENT=01K8AGENT0000000000000000A TERRARIUM_SOCKET=/run/terrarium/agent
         std::fs::create_dir_all(&bin).unwrap();
         std::os::unix::fs::symlink(&real, bin.join("claude")).unwrap();
         let link = bin.join("claude");
-        let (program, dir) = locate("claude", &|_| Some(link.clone()));
+        let (program, dir) = locate("claude", &|_| Some(link.clone()), None);
         let real = std::fs::canonicalize(&real).unwrap();
         assert_eq!(program, real.display().to_string());
         assert_eq!(dir.as_deref(), real.parent());
-        let (program, dir) = locate("x", &|_| Some(PathBuf::from("/usr/bin/x")));
+        let (program, dir) = locate("x", &|_| Some(PathBuf::from("/usr/bin/x")), None);
         assert_eq!((program.as_str(), dir), ("/usr/bin/x", None));
+        // A harness in the tools dir runs by its `bin/` path; the tools
+        // dir is bound whole, so no bind of its own.
+        let (program, dir) = locate(
+            "codex",
+            &|_| Some(PathBuf::from("/opt/terrarium/tools/bin/codex")),
+            Some(Path::new("/opt/terrarium/tools")),
+        );
+        assert_eq!(
+            (program.as_str(), dir),
+            ("/opt/terrarium/tools/bin/codex", None)
+        );
     }
 
     #[test]

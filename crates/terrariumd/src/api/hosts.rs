@@ -13,7 +13,6 @@ use super::{ApiJson, Shared};
 use crate::actor::Actor;
 use crate::error::ApiResult;
 use crate::events::EventDraft;
-use crate::executor;
 use crate::policy;
 use crate::store::hosts::{self, Host, Issued};
 
@@ -22,93 +21,6 @@ pub fn routes() -> Router<Shared> {
         .route("/hosts", get(list).post(create))
         .route("/hosts/{name}", get(show).delete(revoke))
         .route("/hosts/{name}/rotate", axum::routing::post(rotate))
-        .route(
-            "/hosts/{name}/harness-update",
-            axum::routing::post(harness_update),
-        )
-        .route(
-            "/hosts/{name}/sessions/{id}",
-            get(session_show).delete(session_close),
-        )
-        .route("/hosts/{name}/sessions/{id}/output", get(session_output))
-}
-
-/// The body of `POST /api/hosts/{name}/harness-update`.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct HarnessUpdateBody {
-    /// `"all"`, or a list of one harness.
-    names: terrarium_host::protocol::HarnessNames,
-}
-
-/// `POST /api/hosts/{name}/harness-update`: run `scripts/harness.py` on the
-/// host agent (`harness.update`). Operator only. `201` with the session;
-/// read its output at `output`. The stack still runs the old image after
-/// it: `rollout` says what to run.
-async fn harness_update(
-    State(state): State<Shared>,
-    actor: Actor,
-    Path(name): Path<String>,
-    ApiJson(b): ApiJson<HarnessUpdateBody>,
-) -> ApiResult<Response> {
-    let (s, names) = executor::start_harness_update(&state, &actor, &name, b.names).await?;
-    let body = json!({
-        "session_id": s.id,
-        "host": name,
-        "names": names,
-        "output": format!("/api/hosts/{name}/sessions/{}/output", s.id),
-        "rollout": executor::HARNESS_ROLLOUT,
-    });
-    Ok((StatusCode::CREATED, Json(body)).into_response())
-}
-
-async fn session_show(
-    State(state): State<Shared>,
-    actor: Actor,
-    Path((name, id)): Path<(String, String)>,
-) -> ApiResult<Json<Value>> {
-    let target = executor::host_session_target(&name);
-    Ok(Json(state.executor.session(&actor, &target, &id)?.view()))
-}
-
-async fn session_close(
-    State(state): State<Shared>,
-    actor: Actor,
-    Path((name, id)): Path<(String, String)>,
-) -> ApiResult<StatusCode> {
-    let target = executor::host_session_target(&name);
-    state.executor.close(&actor, &target, &id)?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-#[derive(Debug, Deserialize)]
-struct OutputQuery {
-    #[serde(default)]
-    since: u64,
-    /// Seconds to wait for output; at most 60.
-    #[serde(default)]
-    wait: Option<u64>,
-}
-
-/// `GET /api/hosts/{name}/sessions/{id}/output?since=&wait=`: the output of
-/// a host session, as `GET /api/targets/{name}/sessions/{id}/output`. The
-/// end of a `harness.update` that exits 0 carries `rollout`.
-async fn session_output(
-    State(state): State<Shared>,
-    actor: Actor,
-    Path((name, id)): Path<(String, String)>,
-    super::ApiQuery(q): super::ApiQuery<OutputQuery>,
-) -> ApiResult<Json<Value>> {
-    let target = executor::host_session_target(&name);
-    let s = state.executor.session(&actor, &target, &id)?;
-    let wait = std::time::Duration::from_secs(q.wait.unwrap_or(0).min(executor::MAX_WAIT_SECS));
-    let out = s.read(q.since, wait, executor::MAX_READ).await?;
-    let mut v = serde_json::to_value(&out).unwrap_or(Value::Null);
-    let ok = out.end.as_ref().is_some_and(executor::End::success);
-    if ok && s.kind == "harness_update" {
-        v["rollout"] = executor::HARNESS_ROLLOUT.into();
-    }
-    Ok(Json(v))
 }
 
 /// A host row with its live link state.
