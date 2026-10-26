@@ -265,23 +265,87 @@ the network in clear text. For a remote host agent, turn on TLS:
 3. Start the stack again with `just up`. The daemon now speaks TLS on
    `0.0.0.0:8082`. The start log shows the SHA-256 of the certificate.
 
-4. Install the host agent on the remote machine over ssh:
+4. Set `TERRARIUM_PUBLIC_URL` in `.env` to a name that the hosts can
+   reach, for example `http://terrarium.lan:8080`, and start the stack
+   again. The installer downloads from this URL. Its host, with port 8082,
+   is the `daemon_url` of the host agents. When the hosts dial another
+   name or port (a proxy, or another published port), also set
+   `TERRARIUM_HOST_DAEMON_URL`, for example `wss://terrarium.lan:9082`.
+
+#### Add a host
+
+Do these steps for each machine that runs `docker` or `vmlab` targets, for
+example a physical machine with Docker and vmlab. The machine needs Linux
+on x86_64, `sudo`, `curl` (or `wget`), and systemd for the service.
+
+1. Get the install command. Run this on the Docker host, or click
+   **Add host** on the Hosts page of the dashboard and give the name:
 
    ```sh
-   just host::install root@lab1.lan lab1
+   docker compose exec terrarium terrarium admin host new lab1 --enrol
    ```
 
-   The ssh user must be `root`, or must have `sudo` with no password
-   prompt. The recipe builds `terrarium-host`, copies the binary and the
-   systemd unit, and writes a config with `daemon_url` and the certificate
-   pin. Then it gets a one-time enrol token from the daemon, writes it to
-   the token file on the host, starts the service, and probes the link.
-   Add `--dry-run` to see each command first. Nothing runs then.
+   The command prints a one-time enrol token, and on the next lines the
+   install command:
 
-The recipe finds `daemon_url` in `--daemon-url`, then in
-`TERRARIUM_HOST_DAEMON_URL`, then in the host of `TERRARIUM_PUBLIC_URL`
-(port 8082). A `localhost` URL stops the install, because a remote machine
-cannot dial it.
+   ```sh
+   curl -fsSL http://terrarium.lan:8080/install/host.sh | sudo sh -s -- --token the_... --name lab1
+   ```
+
+2. On the machine, log in as the user who owns the labs, and run the
+   install command. Add `--dry-run` to see the plan first. Nothing changes
+   then.
+
+3. The script does these steps:
+   - It downloads `terrarium-host` from the daemon, checks its SHA-256, and
+     installs it as `/usr/local/bin/terrarium-host`.
+   - It writes `/etc/terrarium-host/config.toml` with `daemon_url`, the
+     name, and the certificate pin, and writes the enrol token to
+     `/etc/terrarium-host/token`.
+   - It finds Docker and vmlab. When Docker is on the machine, it adds the
+     service user to the group `docker`. This group is as strong as root on
+     the machine. When vmlab is on the machine, it adds the user to `kvm`.
+   - It installs, enables, and starts the systemd unit `terrarium-host`,
+     and probes the link to the daemon.
+   - It prints a summary: the name, the daemon, and `docker` and `vmlab`
+     (`yes` or `no`).
+
+4. Run `terrarium admin host ls`, or open the Hosts page. The host shows
+   `online`.
+
+The host agent runs as the user who ran `sudo`, not as root. vmlab runs as
+the user who owns the labs, and the host agent runs each command of a
+target as its own user. Use `--user <name>` to pick another user. When you
+log in as root with no `sudo`, the script makes the system user
+`terrarium`.
+
+To update the host agent, run the same command with `--upgrade` in place of
+`--token ...`. It replaces the binary, keeps the config and the token, and
+restarts the service. To remove the host agent, use `--uninstall`. It stops
+and removes the unit and the binary, and keeps `/etc/terrarium-host`. Add
+`--purge` to remove that too. Then run `terrarium admin host rm lab1` to
+revoke the token. A second run of the install is safe: it keeps the config,
+and it keeps the token file unless you give a new `--token`.
+
+Without systemd, the script prints the command that runs the host agent.
+Start it yourself, for example from your init system.
+
+#### Add a host over ssh
+
+From a checkout of the repo, `just host::install` builds `terrarium-host`
+locally, copies it to the machine over ssh, and does the same set-up. It
+gets its own enrol token from the daemon:
+
+```sh
+just host::install root@lab1.lan lab1
+```
+
+The ssh user must be `root`, or must have `sudo` with no password prompt.
+The default service user is `terrarium`; use `--user` to change it. Add
+`--dry-run` to see each command first. Nothing runs then. The recipe finds
+`daemon_url` in `--daemon-url`, then in `TERRARIUM_HOST_DAEMON_URL`, then
+in the host of `TERRARIUM_PUBLIC_URL` (port 8082). A `localhost` URL stops
+the install, because a remote machine cannot dial it.
 
 The enrol token works one time, for 10 minutes. At its first connect, the
 host agent swaps it for a long-lived token and writes that token to its

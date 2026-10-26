@@ -32,12 +32,12 @@ install host name='' *flags: require-ssh require-uv (install-build flags)
 install-build flags:
 	@{{ if flags =~ '(^|\s)--dry-run(\s|$)' { "echo '# dry run: skip host::build' >&2" } else { "(command -v docker > /dev/null 2>&1 || (echo 'docker is required' >&2; exit 1)) && echo '" + build_cmd + "' >&2 && " + build_cmd } }}
 
-# Test the host-install.py command construction (no host is contacted)
+# Test the two host installers: host-install.py (ssh) and install-host.sh (GET /install/host.sh), with fakes only
 [group('host')]
 install-test: require-uv
-	uv run python -m unittest discover -s scripts -p 'test_host_install.py'
+	uv run python -m unittest discover -s scripts -p 'test_*host*.py'
 
-# Register a host agent and print its token alone on stdout; `enrol` gives a one-time enrol token (operator only)
+# Register a host agent and print its token alone on stdout; `enrol` gives a one-time enrol token and prints the install command on stderr (operator only)
 [group('host')]
 token host mode='': require-cargo
 	@cargo run -q -p terrarium -- admin host new {{quote(host)}} {{ if mode == "enrol" { "--enrol" } else if mode == "" { "" } else { error("host::token: the second argument is `enrol` or nothing") } }}

@@ -144,18 +144,7 @@ fn write_cert(names: &[String], out: &Path, force: bool) -> anyhow::Result<()> {
 }
 
 fn fingerprint(cert: &Path) -> anyhow::Result<()> {
-    use rustls::pki_types::CertificateDer;
-    use rustls::pki_types::pem::PemObject;
-    let der = CertificateDer::pem_file_iter(cert)
-        .with_context(|| format!("read {}", cert.display()))?
-        .next()
-        .with_context(|| format!("{} holds no certificate", cert.display()))?
-        .with_context(|| format!("parse {}", cert.display()))?;
-    writeln!(
-        std::io::stdout(),
-        "{}",
-        tls::fingerprint_sha256(der.as_ref())
-    )?;
+    writeln!(std::io::stdout(), "{}", tls::cert_file_fingerprint(cert)?)?;
     Ok(())
 }
 

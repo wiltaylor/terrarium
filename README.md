@@ -113,11 +113,16 @@ for how long. PLAN §11 and §19 give the details.
   (`--lab-repo`, a git worktree on the host) or from each holder's
   workspace (`--lab-from-workspace`, one instance for each holder). The
   host agent checks such a lab file against an allowlist.
-- Host agent onboarding: `just host::install <user@host> <name>` installs
-  the binary, the systemd unit, the config with the certificate pin, and a
-  one-time enrol token, then probes the link. `--dry-run` prints the plan
-  and runs nothing. `terrarium admin host new|rotate --enrol` gives an
-  enrol token by hand ([docs/cli.md](docs/cli.md)).
+- Host agent onboarding: one command on the host. `terrarium admin host
+  new <name> --enrol`, or "Add host" on the Hosts page, prints
+  `curl -fsSL <daemon>/install/host.sh | sudo sh -s -- --token <token>`.
+  The script downloads `terrarium-host` from the daemon, checks its
+  SHA-256, writes the config with the certificate pin and the enrol
+  token, finds Docker and vmlab, starts the systemd unit, and probes the
+  link. It also takes `--dry-run`, `--upgrade`, and `--uninstall`
+  ([getting-started §2.7](docs/getting-started.md#27-connect-a-host-agent)).
+  From the repo, `just host::install <user@host> <name>` does the same
+  over ssh with a local build.
 - The fleet file: one TOML file declares projects, repos, agents, targets,
   and subscriptions. `terrarium fleet validate`, `plan`, `apply` (with
   `--prune`), `ls`, `show`, and `export` work. The daemon applies the
@@ -221,7 +226,7 @@ terrarium/
   repos/                    local bare git repos, bound at /repos (gitignored)
   work/                     agent workspaces, <project>/<agent>/, bound at /work (gitignored)
   examples/fleet/           an example fleet file
-  scripts/                  host-install.py (just host::install) and its tests
+  scripts/                  install-host.sh (served at /install/host.sh), host-install.py (just host::install), and their tests
   prompts/                  system prompt templates (default, project-lead, system-lead), mounted read-only
   docs/                     design, contracts, and facts (see below)
   spikes/                   Phase 0 scripts and their captures (claude, codex, copilot, pi)
@@ -258,6 +263,7 @@ recipes of a module.
 | Check bwrap in the image | `just spikes::bwrap-check` |
 | Build the static host agent | `just host::build` |
 | Make the TLS certificate for the host listener | `just host::cert terrarium.lan` |
+| Install a host agent on the host (prints the command) | `just daemon::cli admin host new lab1 --enrol` |
 | Install a host agent over ssh | `just host::install root@lab1 lab1` |
 | Register a host agent and print its token | `just host::token lab1` |
 | Make a webhook source for GitHub or Forgejo (prints the secret and the hook URL; [getting-started §2.11](docs/getting-started.md#211-send-ci-events-from-github-or-forgejo)) | `just daemon::cli event source add gh --kind github -p terrarium` |

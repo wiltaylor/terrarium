@@ -182,7 +182,7 @@ def toml_str(s: str) -> str:
 
 def render_config(s: Settings) -> str:
     lines = [
-        "# Written by `just host::install` (docs/host-protocol.md).",
+        "# Written by the Terrarium host installer (docs/host-protocol.md).",
         f"daemon_url = {toml_str(s.daemon_url)}",
         f"token_file = {toml_str(TOKEN_PATH)}",
         f"name = {toml_str(s.name)}",

@@ -95,7 +95,15 @@ async fn main() -> anyhow::Result<()> {
     };
     // The web settings, from the flags and the env, in one place.
     let artifact_listen = settings.artifact_listen();
-    let web = settings.web();
+    let mut web = settings.web();
+    // The dial-in listener of the host agents (docs/host-protocol.md
+    // "TLS"). TERRARIUM_HOST_TLS_CERT and TERRARIUM_HOST_TLS_KEY turn on
+    // TLS and bind 0.0.0.0:8082; without them it is plaintext on
+    // 127.0.0.1:8082. TERRARIUM_HOST_LISTEN sets the address; empty turns
+    // it off. The dashboard port does not serve /hosts/connect. The host
+    // installer (GET /install/host.sh) takes its URL and pin from it.
+    let host_listen = terrariumd::hosts::HostListen::from_env()?;
+    web.install.host_listen = host_listen.clone();
     let daemon = start_with_usage(
         DaemonConfig {
             socket: settings.socket,
@@ -114,15 +122,10 @@ async fn main() -> anyhow::Result<()> {
         usage,
     )
     .await?;
-    // The dial-in listener of the host agents (docs/host-protocol.md
-    // "TLS"). TERRARIUM_HOST_TLS_CERT and TERRARIUM_HOST_TLS_KEY turn on
-    // TLS and bind 0.0.0.0:8082; without them it is plaintext on
-    // 127.0.0.1:8082. TERRARIUM_HOST_LISTEN sets the address; empty turns
-    // it off. The dashboard port does not serve /hosts/connect.
     if let Some(t) = tools {
         daemon.state.harness_tools.configure(t);
     }
-    let host_task = match terrariumd::hosts::HostListen::from_env()? {
+    let host_task = match host_listen {
         Some(listen) => {
             let (task, _) = listen.serve(daemon.state.clone()).await?;
             Some(task)

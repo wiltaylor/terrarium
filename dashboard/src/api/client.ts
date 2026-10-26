@@ -404,8 +404,8 @@ export interface Api {
   /** docs/host-protocol.md, the daemon's `api/hosts.rs`. */
   hosts: {
     list(): Promise<Host[]>;
-    /** Mint a host and its token. The token shows once, in this answer only. */
-    create(name: string): Promise<NewHostToken>;
+    /** Mint a host and its token. The token shows once, in this answer only. `enrol`: a one-time enrol token, with `install_command`. */
+    create(name: string, opts?: { enrol?: boolean }): Promise<NewHostToken>;
     /** Revoke the token: the daemon sends `goodbye token_revoked` and closes the link. */
     revoke(name: string): Promise<void>;
   };
@@ -701,7 +701,7 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
 
     hosts: {
       list: () => all("/api/hosts"),
-      create: (name) => post("/api/hosts", { name }),
+      create: (name, opts) => post("/api/hosts", opts?.enrol ? { name, enrol: true } : { name }),
       revoke: (name) => del(`/api/hosts/${seg(name)}`),
     },
 

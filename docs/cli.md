@@ -691,9 +691,9 @@ operator only (PLAN §10: host agent tokens are operator-only). An agent gets
 |---|---|---|
 | `admin host show <name>` | `GET /api/hosts/{name}` | One `key value` line each for `host`, `id`, `status`, `online`, `sessions`, `os`, `version`, `connected_at`, `created_at`, `first_used_at`, `last_used_at`, `last_used_from`, `rotated_at`, `enrol_expires_at`, and `capabilities`. An empty value shows as `-`. |
 | `admin host new <name>` | `POST /api/hosts` `{"name"}` | The `thk_` token, alone on stdout. |
-| `admin host new <name> --enrol` | `POST /api/hosts` `{"name", "enrol": true}` | The `the_` enrol token, alone on stdout. A line on stderr gives the expiry (`token_expires_at`, 10 minutes). |
+| `admin host new <name> --enrol` | `POST /api/hosts` `{"name", "enrol": true}` | The `the_` enrol token, alone on stdout. Lines on stderr give the expiry (`token_expires_at`, 10 minutes) and the command that installs the host agent on the host (`install_command`, docs/api.md §17.9). Without `install_command`, a hint says to set `TERRARIUM_PUBLIC_URL` on the daemon. |
 | `admin host rotate <name>` | `POST /api/hosts/{name}/rotate`, no body | The new `thk_` token, alone on stdout. |
-| `admin host rotate <name> --enrol` | `POST /api/hosts/{name}/rotate` `{"enrol": true}` | The new enrol token on stdout, and its expiry on stderr. |
+| `admin host rotate <name> --enrol` | `POST /api/hosts/{name}/rotate` `{"enrol": true}` | The new enrol token on stdout, and its expiry and the install command on stderr. |
 | `admin host rm <name>` | `DELETE /api/hosts/{name}` | `revoked host agent <name>` |
 
 - The token is on stdout one time only. The daemon keeps only its SHA-256.
@@ -701,7 +701,7 @@ operator only (PLAN §10: host agent tokens are operator-only). An agent gets
   `terrarium admin host new lab1 | ssh lab1 sudo -u terrarium terrarium-host token-file /etc/terrarium-host/token`.
 - With `--json`, each command prints the daemon's answer. For `new` and
   `rotate`, the answer has `token`, `token_kind` (`host` or `enrol`), and,
-  for an enrol token, `token_expires_at`.
+  for an enrol token, `token_expires_at` and `install_command`.
 - After `rotate`, the old token does not work for new connections. A live
   link stays up until it ends. Write the new token to `token_file` on the
   host, then restart the host agent.

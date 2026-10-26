@@ -798,16 +798,26 @@ fn print_harnesses(ctx: &Ctx, v: &Value) {
 }
 
 /// The token alone on stdout, so it can go into a pipe. For an enrol
-/// token, the expiry goes to stderr.
+/// token, the expiry and the line that installs the host agent
+/// (`install_command`, `GET /install/host.sh`) go to stderr.
 fn print_token(ctx: &Ctx, v: &Value) {
     ctx.line(field(v, "token"));
     if v["token_kind"] == "enrol" {
-        let line = format!(
+        let mut text = format!(
             "enrol token for host {}: one use, expires {}\n",
             field(v, "name"),
             field(v, "token_expires_at"),
         );
-        ctx.out.write_bytes(true, line.as_bytes());
+        match v["install_command"].as_str() {
+            Some(cmd) => text.push_str(&format!(
+                "install on the host (needs sudo, systemd, x86_64):\n  {cmd}\n"
+            )),
+            None => text.push_str(
+                "install on the host: curl -fsSL <daemon URL>/install/host.sh | sudo sh -s -- \
+                 --token <token> (set TERRARIUM_PUBLIC_URL on the daemon to get the full line)\n",
+            ),
+        }
+        ctx.out.write_bytes(true, text.as_bytes());
     }
 }
 

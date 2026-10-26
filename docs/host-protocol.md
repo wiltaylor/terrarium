@@ -828,6 +828,66 @@ as the user `terrarium`, reads optional overrides from
 vmlab), and restarts on failure. `just host::install` sets `User=` and
 `Group=` from `--user`. Edit `SupplementaryGroups=` to match the host.
 
+There are two installers. Both make the same config and the same unit
+(`scripts/test_install_host.py` compares them):
+
+- `scripts/install-host.sh` runs on the host. The daemon serves it at
+  `GET /install/host.sh`, with the binary at `GET /install/terrarium-host`
+  ([api.md §17.9](api.md#179-the-host-installer)). It needs no checkout of
+  the repo and no ssh from the operator.
+- `scripts/host-install.py` (`just host::install`) runs on the operator's
+  machine. It builds the binary locally and uses ssh.
+
+**`curl -fsSL <daemon>/install/host.sh | sudo sh -s -- --token <enrol token>`**
+
+`terrarium admin host new <name> --enrol` and "Add host" on the Hosts page
+print this line with the token and `--name`. The script runs as root. Its
+flags:
+
+| Flag | Meaning |
+|---|---|
+| `--token TOKEN` | The enrol token. `TERRARIUM_ENROL_TOKEN` also works. A new host needs one. |
+| `--name NAME` | The host agent name. Default: the short host name. |
+| `--url URL` | The daemon URL for the downloads. Default: from the daemon. |
+| `--host-url URL` | `daemon_url`. Default: from the daemon. A bare name becomes `wss://NAME:8082`. |
+| `--fingerprint FP`, `--no-pin` | The pin, or no pin. Default: the pin from the daemon, for a `wss://` URL. |
+| `--user USER` | The service user. Default: `SUDO_USER` (or `DOAS_USER`), else `terrarium` (a new system user). |
+| `--dry-run` | Print the plan and change nothing. |
+| `--upgrade` | Replace the binary, keep the config and the token, restart. |
+| `--uninstall [--purge]` | Stop, disable, and remove the unit and the binary. `--purge` also removes `/etc/terrarium-host`. |
+
+The script does these steps:
+
+1. It checks each value (the name, the user, the URLs, the pin, the
+   token) before it changes anything. A new host with no `--token` stops
+   the script.
+2. It finds Docker and vmlab on the `PATH` of the unit
+   (`/usr/local/bin`, `/usr/bin`, `/bin`, and `~/.local/bin` of the
+   service user), and systemd (`/run/systemd/system`).
+3. It makes the service user when it does not exist (`useradd --system`,
+   as `host-install.py` does). With Docker, it adds the user to the group
+   `docker`; with vmlab, to `kvm`. systemd gives the unit the
+   supplementary groups of its `User=`.
+4. It downloads the binary and its SHA-256 for `uname -m`, checks the
+   hash, and installs the binary as `/usr/local/bin/terrarium-host`. A
+   wrong hash stops the script before it changes anything else.
+5. It makes `/etc/terrarium-host` (mode 0700, owned by the service user)
+   and, when it does not exist, `config.toml` (mode 0640, `root` and the
+   group of the service user) with `daemon_url`, `token_file`, `name`, and
+   the pin.
+6. With `--token`, it writes the token to the token file as the service
+   user (`terrarium-host token-file`, the token on stdin). The script
+   never prints the token.
+7. It writes the unit (`User=` and `Group=` set), runs
+   `systemctl daemon-reload`, `enable`, and `restart`. Without systemd, it
+   prints the command that runs the host agent.
+8. It runs `terrarium-host check --probe` as the service user. A failed
+   probe makes the script exit 1. Then it prints a summary.
+
+The token is in the command line of `sh` while the script runs. It works
+one time, for 10 minutes. `scripts/test_install_host.py` runs the script
+with fake programs in a temp root.
+
 **`just host::token <name> [enrol]`**
 
 1. It runs `terrarium admin host new <name>` against the daemon (the Unix

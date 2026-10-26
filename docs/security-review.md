@@ -402,6 +402,18 @@ These are known and documented trade-offs. The review confirms they are intentio
 - **The embedded login terminal is operator-only, short-lived, and audited** (PLAN
   §16.1). The device-code and paste-code flows are used because a browser loopback
   callback cannot reach into the container.
+- **The host installer needs no token (2026-10-26).** `GET /install/host.sh`,
+  `GET /install/terrarium-host`, and `GET /install/terrarium-host.sha256` are
+  outside `/api` on the dashboard port, so `require_token` lets them through, as it
+  does the dashboard assets (`api/install.rs`). They hold no secret: the public URLs,
+  the systemd unit, the SHA-256 of the host listener certificate (every TLS client
+  sees the certificate), and the binary. The enrol token comes only from
+  `POST /api/hosts`, which needs the operator. Values from the request (`Host`, the
+  `arch` query) go into the script only after a check of the characters; an unsafe
+  value is left out. The host listener and the ingest listener do not serve these
+  routes. Residual: the script and the binary come over the same link, so the
+  SHA-256 finds a broken download but not a changed one. On a network that you do
+  not trust, put the dashboard port behind HTTPS.
 - **The operator Unix socket needs no token.** Access to the socket is the operator
   boundary (`api/mod.rs:277`). The socket is mode 0660.
 - **The harness tools volume is writable outside the sandbox.** `./tools`

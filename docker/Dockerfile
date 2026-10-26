@@ -18,9 +18,11 @@
 #   dashboard    npm ci && npm run build for the SolidJS app
 #   rust         cargo build --release for terrariumd, terrarium, and terrarium-runner
 #                (terrariumd embeds the dashboard)
-#   host-build   static musl terrarium-host, for `just host::build` (not in the image)
+#   host-build   static musl terrarium-host, for `just host::build` and for the
+#                runtime's /opt/terrarium/dist (GET /install/terrarium-host)
 #   host-export  scratch stage that holds only the host binary, for `--output`
-#   runtime      Debian slim + Node and npm, bubblewrap, git, ssh, python3 (no harness)
+#   runtime      Debian slim + Node and npm, bubblewrap, git, ssh, python3 (no harness),
+#                and the static terrarium-host with its SHA-256 for the host installer
 
 ARG RUST_IMAGE=rust:1.97-trixie
 # harnesses.toml [node] image.
@@ -39,6 +41,8 @@ FROM ${RUST_IMAGE} AS rust
 WORKDIR /src
 COPY Cargo.toml Cargo.lock harnesses.toml ./
 COPY crates ./crates
+# terrariumd embeds the host installer (GET /install/host.sh).
+COPY scripts/install-host.sh ./scripts/install-host.sh
 COPY --from=dashboard /src/dashboard/dist ./dashboard/dist
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target,id=terrarium-target \
@@ -59,8 +63,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target,id=terrarium-host-target \
     target="$(uname -m)-unknown-linux-musl" \
     && cargo build --release --locked --target "$target" -p terrarium-host \
-    && mkdir -p /out \
-    && cp "target/$target/release/terrarium-host" /out/
+    && mkdir -p /out /dist \
+    && cp "target/$target/release/terrarium-host" /out/ \
+    && dist="terrarium-host-$(uname -m)-linux" \
+    && cp /out/terrarium-host "/dist/$dist" \
+    && (cd /dist && sha256sum "$dist" > "$dist.sha256")
 
 FROM scratch AS host-export
 COPY --from=host-build /out/terrarium-host /terrarium-host
@@ -130,6 +137,9 @@ ENV HOME=/home/terrarium \
 # One terrarium-runner process holds each agent (PLAN §6), so an agent
 # lives through a restart of terrariumd.
 COPY --from=rust /out/terrariumd /out/terrarium /out/terrarium-runner /usr/local/bin/
+# The host installer serves these (GET /install/terrarium-host?arch=<arch>,
+# TERRARIUM_HOST_DIST_DIR). One arch for now: the arch of the build.
+COPY --from=host-build /dist/ /opt/terrarium/dist/
 COPY docker/entrypoint.sh /usr/local/bin/terrarium-entrypoint
 # The pins of the first install (`terrariumd harness install`).
 COPY harnesses.toml /etc/terrarium/harnesses.toml

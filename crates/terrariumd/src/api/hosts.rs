@@ -2,14 +2,14 @@
 //! The dial-in WebSocket itself is `crate::hosts::connect`.
 
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{ApiJson, Shared};
+use super::{ApiJson, Shared, install};
 use crate::actor::Actor;
 use crate::error::ApiResult;
 use crate::events::EventDraft;
@@ -81,9 +81,19 @@ struct Rotate {
     enrol: bool,
 }
 
-/// The host view with the token that the answer carries once.
-fn with_token(state: &Shared, host: Host, issued: Issued) -> Value {
+/// The host view with the token that the answer carries once. An enrol
+/// token also gets `install_command`: the line that installs the host
+/// agent on the host (`GET /install/host.sh`), when the daemon knows its
+/// URL (`TERRARIUM_PUBLIC_URL`, else the `Host` of the request).
+fn with_token(state: &Shared, headers: &HeaderMap, host: Host, issued: Issued) -> Value {
+    let name = host.name.clone();
     let mut v = view(state, host);
+    if issued.kind == "enrol" {
+        let request_host = headers.get(header::HOST).and_then(|h| h.to_str().ok());
+        if let Some(base) = install::base_url(&state.web, request_host) {
+            v["install_command"] = install::install_command(&base, &issued.token, &name).into();
+        }
+    }
     v["token"] = issued.token.into();
     v["token_kind"] = issued.kind.into();
     if let Some(e) = issued.expires_at {
@@ -99,6 +109,7 @@ fn with_token(state: &Shared, host: Host, issued: Issued) -> Value {
 async fn create(
     State(state): State<Shared>,
     actor: Actor,
+    headers: HeaderMap,
     ApiJson(body): ApiJson<NewHost>,
 ) -> ApiResult<Response> {
     policy::manage_hosts(&actor, "registering a host agent")?;
@@ -115,7 +126,11 @@ async fn create(
             Ok((h, issued))
         })
         .await?;
-    Ok((StatusCode::CREATED, Json(with_token(&state, host, issued))).into_response())
+    Ok((
+        StatusCode::CREATED,
+        Json(with_token(&state, &headers, host, issued)),
+    )
+        .into_response())
 }
 
 /// `POST /api/hosts/{name}/rotate`: a new token, shown once. The old
@@ -126,6 +141,7 @@ async fn rotate(
     State(state): State<Shared>,
     actor: Actor,
     Path(name): Path<String>,
+    headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> ApiResult<Json<Value>> {
     policy::manage_hosts(&actor, "rotating a host agent token")?;
@@ -149,7 +165,7 @@ async fn rotate(
             Ok((h, issued))
         })
         .await?;
-    Ok(Json(with_token(&state, host, issued)))
+    Ok(Json(with_token(&state, &headers, host, issued)))
 }
 
 /// `DELETE /api/hosts/{name}`: revoke the token. A live link gets

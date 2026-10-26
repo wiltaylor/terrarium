@@ -7,6 +7,7 @@ mod board;
 mod event_sources;
 mod fleet;
 mod hosts;
+pub mod install;
 mod longpoll;
 mod mail;
 mod memory;
@@ -229,7 +230,8 @@ fn routes(state: Shared, serve_artifacts: bool, host_connect: bool) -> Router {
         .fallback(api_not_found)
         .method_not_allowed_fallback(api_method_not_allowed)
         .layer(middleware::from_fn_with_state(state.clone(), resolve_actor));
-    let mut app = Router::new().nest("/api", api);
+    // The host installer: outside /api, so no token (docs/api.md §17.9).
+    let mut app = Router::new().nest("/api", api).merge(install::routes());
     if serve_artifacts {
         app = app.merge(artifacts::serving_routes(&state));
     }
@@ -597,12 +599,13 @@ pub fn dashboard_csp(artifact_origin: &str) -> String {
 }
 
 /// The security headers of the dashboard port: a CSP (the dashboard
-/// policy on pages and assets, [`API_CSP`] on `/api`), `nosniff`,
+/// policy on pages and assets, [`API_CSP`] on `/api` and `/install/`), `nosniff`,
 /// `Referrer-Policy: no-referrer`, and `X-Frame-Options: DENY`. An answer
 /// that sets its own CSP (a served artifact, with its `sandbox`) keeps its
 /// own headers.
 async fn security_headers(State(state): State<Shared>, req: Request, next: Next) -> Response {
-    let csp = if req.uri().path().starts_with("/api") {
+    let path = req.uri().path();
+    let csp = if path.starts_with("/api") || path.starts_with("/install/") {
         API_CSP.to_owned()
     } else {
         dashboard_csp(&artifacts::artifact_origin(&state, req.headers()))
@@ -728,6 +731,10 @@ mod tests {
     use tower::ServiceExt;
 
     fn state() -> Shared {
+        state_with_web(crate::settings::WebConfig::default())
+    }
+
+    fn state_with_web(web: crate::settings::WebConfig) -> Shared {
         let mut conn = rusqlite::Connection::open_in_memory().unwrap();
         crate::db::migrate(&mut conn).unwrap();
         let hub = crate::events::EventHub::default();
@@ -749,7 +756,7 @@ mod tests {
             executor: Arc::default(),
             harness_latest: Arc::default(),
             harness_tools: Arc::default(),
-            web: crate::settings::WebConfig::default(),
+            web,
             artifact_listen: String::new(),
             transcripts: Arc::default(),
         })
@@ -1533,6 +1540,162 @@ mod tests {
         }
         // tests/artifacts.rs: a served artifact keeps its own sandbox CSP
         // and no X-Frame-Options on the dashboard port.
+    }
+
+    /// The host installer (docs/api.md §17.9): the script, the binary, and
+    /// its SHA-256 with no token; the API still needs one.
+    #[tokio::test]
+    async fn install_routes_need_no_token() {
+        use sha2::Digest;
+        let dist = tempfile::tempdir().unwrap();
+        let bin = b"\x7fELF fake terrarium-host";
+        std::fs::write(dist.path().join("terrarium-host-x86_64-linux"), bin).unwrap();
+        let mut web = crate::settings::WebConfig {
+            public_url: Some("http://terrarium.lan:8080".into()),
+            ..Default::default()
+        };
+        web.install.dist_dir = dist.path().to_owned();
+        web.install.host_daemon_url = Some("wss://terrarium.lan:8082".into());
+        let s = state_with_web(web);
+        let app = || tcp_router_with(s.clone(), TokenAuth::new("secret".into(), false), false);
+        let version = env!("CARGO_PKG_VERSION");
+
+        // The script, with the URLs filled in.
+        let r = send(
+            app(),
+            "GET",
+            "/install/host.sh",
+            &[("host", "10.0.0.2:8080")],
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(hdr(&r, "x-terrarium-version"), version);
+        assert_eq!(hdr(&r, "content-security-policy"), API_CSP);
+        assert_eq!(hdr(&r, "x-content-type-options"), "nosniff");
+        assert!(hdr(&r, "content-type").starts_with("text/plain"));
+        let body = r.into_body().collect().await.unwrap().to_bytes();
+        let script = String::from_utf8(body.to_vec()).unwrap();
+        assert!(script.starts_with("#!/bin/sh"));
+        assert!(script.contains("DEFAULT_URL='http://terrarium.lan:8080'"));
+        assert!(script.contains("DEFAULT_HOST_URL='wss://terrarium.lan:8082'"));
+        assert!(!script.contains("@TERRARIUM_"));
+
+        // The binary and its SHA-256 (no .sha256 file: the daemon hashes it).
+        let r = send(app(), "GET", "/install/terrarium-host?arch=x86_64", &[]).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(hdr(&r, "x-terrarium-version"), version);
+        assert_eq!(hdr(&r, "content-type"), "application/octet-stream");
+        assert_eq!(
+            r.into_body().collect().await.unwrap().to_bytes().as_ref(),
+            bin
+        );
+        let (status, body) = get(app(), "/install/terrarium-host.sha256?arch=x86_64", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let want: String = sha2::Sha256::digest(bin)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(
+            String::from_utf8(body).unwrap(),
+            format!("{want}  terrarium-host-x86_64-linux\n")
+        );
+        // A .sha256 file next to the binary wins.
+        std::fs::write(
+            dist.path().join("terrarium-host-x86_64-linux.sha256"),
+            format!("{}  terrarium-host\n", "AB".repeat(32)),
+        )
+        .unwrap();
+        let (_, body) = get(app(), "/install/terrarium-host.sha256?arch=x86_64", None).await;
+        assert!(
+            String::from_utf8(body)
+                .unwrap()
+                .starts_with(&"ab".repeat(32))
+        );
+
+        // An unknown arch is 404 with a message; no arch is 400.
+        for path in [
+            "/install/terrarium-host?arch=aarch64",
+            "/install/terrarium-host.sha256?arch=aarch64",
+        ] {
+            let (status, body) = get(app(), path, None).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+            let msg = String::from_utf8(body).unwrap();
+            assert!(
+                msg.contains("no terrarium-host for arch `aarch64`"),
+                "{msg}"
+            );
+            assert!(msg.contains("x86_64"), "{msg}");
+        }
+        let (status, _) = get(app(), "/install/terrarium-host", None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        // A known arch with no binary in the dist dir is 404 too.
+        std::fs::remove_file(dist.path().join("terrarium-host-x86_64-linux")).unwrap();
+        let (status, body) = get(app(), "/install/terrarium-host?arch=x86_64", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(
+            String::from_utf8(body)
+                .unwrap()
+                .contains("TERRARIUM_HOST_DIST_DIR")
+        );
+
+        // Nothing else opened: the API still needs the token, and a POST
+        // to the installer is not a route.
+        let (status, _) = get(app(), "/api/hosts", None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let r = send(app(), "POST", "/install/host.sh", &[]).await;
+        assert_eq!(r.status(), StatusCode::METHOD_NOT_ALLOWED);
+        // The host listener does not serve the installer.
+        let (status, _) = get(crate::hosts::router(s.clone()), "/install/host.sh", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        // Nor does the ingest listener (docs/api.md §20.3).
+        let (status, _) = get(crate::ingest::router(s.clone()), "/install/host.sh", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    /// An enrol token comes with the line that installs the host.
+    #[tokio::test]
+    async fn enrol_answer_has_the_install_command() {
+        let s = state();
+        let app = || tcp_router_with(s.clone(), TokenAuth::new("secret".into(), false), false);
+        let r = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/hosts")
+                    .header(header::AUTHORIZATION, "Bearer secret")
+                    .header(header::HOST, "terrarium.lan:8080")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"name":"lab1","enrol":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::CREATED);
+        let v: serde_json::Value =
+            serde_json::from_slice(&r.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        let token = v["token"].as_str().unwrap();
+        assert_eq!(
+            v["install_command"],
+            format!(
+                "curl -fsSL http://terrarium.lan:8080/install/host.sh | sudo sh -s -- --token {token} --name lab1"
+            )
+        );
+        // A long-lived token gets no install line.
+        let r = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/hosts")
+                    .header(header::AUTHORIZATION, "Bearer secret")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"name":"lab2"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let v: serde_json::Value =
+            serde_json::from_slice(&r.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        assert!(v.get("install_command").is_none());
     }
 
     /// F2: the plaintext dashboard port does not take host agents; the

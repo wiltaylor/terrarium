@@ -24,6 +24,7 @@ import { httpVerbs } from "./verbs";
 import { checkKeyPlan, isZai, zaiKeyDefaults, zaiPlan, ZAI_KEY_ENV } from "./zai";
 import { defaultModels, modelList, subscriptionDetail } from "./models";
 import { splitFrontMatter } from "../../lib/markdown";
+import { installCommand } from "../../lib/host-install";
 import type {
   Agent,
   AgentDef,
@@ -76,6 +77,9 @@ import { createEventSourceMock } from "./eventSources";
 import { applyTemplate, createTemplateMock, resolveTemplate, templateRef } from "./templates";
 import { createTranscriptStream, encodeTranscriptFrame } from "../sse";
 import { appendBlock, fakeReply, mockModel, titleOf, type Draft as BlockDraft } from "./transcripts";
+
+/** The daemon URL of the mock, for the host install line (the daemon uses TERRARIUM_PUBLIC_URL). */
+const MOCK_PUBLIC_URL = "http://localhost:8080";
 
 export interface MockOptions {
   /** Artificial latency for every call. Default 120 ms; tests use 0. */
@@ -2711,17 +2715,26 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
 
     hosts: {
       list: () => reply(() => w.hosts),
-      create: (name) =>
+      create: (name, opts) =>
         reply(() => {
           if (!NAME_RE.test(name)) fail(422, "invalid", `\`${name}\` is not a valid host name`);
           if (w.hosts.some((h) => h.name === name)) fail(409, "conflict", `host \`${name}\` exists`);
-          const token = `thk_${ulid("tok").toLowerCase()}`;
+          const enrol = !!opts?.enrol;
+          const token = `${enrol ? "the" : "thk"}_${ulid("tok").toLowerCase()}`;
           const id = ulid("host");
           const host: Host = { name, id, host_id: id, status: "offline", online: false, sessions: 0, capabilities: {}, summary: { os: "", arch: "", docker: false, vmlab: false }, last_seen: null, os: null, arch: null, version: null, created_at: iso(), created_by: "operator" };
           w.hosts.push(host);
           w.hostTokens[name] = token;
-          audit("host.create", name, undefined, { host_id: id });
-          return { ...host, token };
+          audit("host.create", name, undefined, { host_id: id, token_kind: enrol ? "enrol" : "host" });
+          if (!enrol) return { ...host, token, token_kind: "host" as const };
+          // As the daemon's api/hosts.rs: the install line from its public URL.
+          return {
+            ...host,
+            token,
+            token_kind: "enrol" as const,
+            token_expires_at: new Date(Date.now() + 10 * 60_000).toISOString(),
+            install_command: installCommand(MOCK_PUBLIC_URL, token, name),
+          };
         }),
       revoke: (name) =>
         reply(() => {

@@ -9,4 +9,6 @@
 dashboard/node_modules
 dashboard/dist
 !docker/entrypoint.sh
+# The host installer: terrariumd embeds it (GET /install/host.sh).
+!scripts/install-host.sh
 **/target

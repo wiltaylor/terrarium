@@ -2,7 +2,7 @@
 // F14): every way to put a string into the DOM as HTML outside lib/sanitize
 // must fail the lint.
 
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import { ESLint } from "eslint";
 
 const eslint = new ESLint({ cwd: new URL("../..", import.meta.url).pathname });
@@ -10,8 +10,18 @@ const eslint = new ESLint({ cwd: new URL("../..", import.meta.url).pathname });
 /** Lint `code` as if it were a file of the app. The path must be in tsconfig for the typed parser. */
 async function sinkErrors(code: string, filePath: string): Promise<string[]> {
   const [res] = await eslint.lintText(code, { filePath });
+  // A fatal message (a parse or project error) would hide the rule: fail with it.
+  const fatal = res!.messages.filter((m) => m.fatal);
+  if (fatal.length) throw new Error(`eslint could not lint ${filePath}: ${fatal.map((m) => m.message).join("; ")}`);
   return res!.messages.filter((m) => m.ruleId === "no-restricted-syntax").map((m) => m.message);
 }
+
+// The typed parser builds its project on the first lint of each file; on a
+// cold, busy CI runner that first lint found nothing. Warm both files up.
+beforeAll(async () => {
+  await eslint.lintText("export {};", { filePath: TS });
+  await eslint.lintText("export {};", { filePath: TSX });
+}, 120_000);
 
 const TS = "src/lib/format.ts";
 const TSX = "src/components/StatusBadge.tsx";

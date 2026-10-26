@@ -3,6 +3,8 @@
 // that shows once, and revoke. The running targets of each host against
 // its `max_running_targets` (docs/api.md §17.3), counted as the daemon
 // counts them, and `work_dir` and `instances_dir` when the API reports them.
+// "Add host" makes an enrol token and shows the one line that installs the
+// host agent on the machine (`GET /install/host.sh`, docs/api.md §17.9).
 //
 // `GET`, `POST /api/hosts` and `DELETE /api/hosts/{name}` (the daemon's
 // `api/hosts.rs`). They are new and not in docs/api.md yet.
@@ -12,6 +14,7 @@ import { MockOnlyNote } from "../../components/MockOnly";
 import { ConfirmButton, CopyButton, Empty, ErrorBanner, Modal, PageHead, useNow } from "../../components/ui";
 import type { Host, NewHostToken } from "../../api/types";
 import { ago } from "../../lib/format";
+import { INSTALL_NOTES, installLine } from "../../lib/host-install";
 import { runningLabel, runningOnHost } from "../../lib/target-runtime";
 import { api } from "../../stores";
 
@@ -160,7 +163,9 @@ function AddHostDialog(props: { onClose: () => void }) {
   const submit = async (e: Event) => {
     e.preventDefault();
     try {
-      setMade(await api.hosts.create(name().trim()));
+      // An enrol token: one use, 10 minutes. The host agent swaps it for its
+      // long-lived token, so that token never passes through the clipboard.
+      setMade(await api.hosts.create(name().trim(), { enrol: true }));
       setError(null);
     } catch (err) {
       setError(err);
@@ -178,39 +183,59 @@ function AddHostDialog(props: { onClose: () => void }) {
               Host name (the <code>host</code> of target definitions)
               <input value={name()} onInput={(e) => setName(e.currentTarget.value)} placeholder="lab1" required autocomplete="off" />
             </label>
+            <p class="small muted" style={{ margin: 0 }}>
+              The next step shows one command. Run it on the machine to install <code>terrarium-host</code>.
+            </p>
             <div>
               <button class="primary" type="submit" disabled={!name().trim()}>
-                Make token
+                Make install command
               </button>
             </div>
           </form>
         }
       >
-        {(m) => (
-          <div class="stack">
-            <p class="notice" style={{ margin: 0 }}>
-              Copy the token now. It shows <strong>once</strong>: the daemon keeps only a hash of it.
-            </p>
-            <div class="copy-row">
-              <code class="token-once" aria-label="Host token">
-                {m().token}
-              </code>
-              <CopyButton text={m().token} label="Copy token" />
+        {(m) => {
+          const line = () => installLine(m(), window.location.origin);
+          return (
+            <div class="stack">
+              <p class="notice" style={{ margin: 0 }}>
+                Run this on <strong>{m().name}</strong>. It shows <strong>once</strong>: the daemon keeps only a hash of the token.
+                <Show when={m().token_expires_at}>{(at) => <> The token works one time, until {new Date(at()).toLocaleTimeString()}.</>}</Show>
+              </p>
+              <div class="copy-row">
+                <code class="token-once" aria-label="Install command">
+                  {line()}
+                </code>
+                <CopyButton text={line()} label="Copy command" />
+              </div>
+              <ul class="small muted" style={{ margin: 0, "padding-left": "1.2em" }}>
+                <For each={INSTALL_NOTES}>{(n) => <li>{n}</li>}</For>
+              </ul>
+              <details class="small">
+                <summary>Other ways to install</summary>
+                <p style={{ margin: "0.5em 0" }}>
+                  From the repo, over ssh: <code>just host::install user@{m().name} {m().name}</code> (it gets its own token). By hand: store the token with
+                  mode 0600, then set <code>name = "{m().name}"</code> and the daemon URL in <code>/etc/terrarium-host/config.toml</code>, and start the unit.
+                </p>
+                <div class="copy-row">
+                  <code class="token-once" aria-label="Enrol token">
+                    {m().token}
+                  </code>
+                  <CopyButton text={m().token} label="Copy token" />
+                </div>
+                <pre class="small">{`echo '<token>' | sudo -u <user> terrarium-host token-file /etc/terrarium-host/token`}</pre>
+              </details>
+              <p class="small muted" style={{ margin: 0 }}>
+                The host shows online in this list when it connects.
+              </p>
+              <div>
+                <button class="primary" onClick={() => props.onClose()}>
+                  Done
+                </button>
+              </div>
             </div>
-            <p class="small muted" style={{ margin: 0 }}>
-              On <strong>{m().name}</strong>, store it with mode 0600:
-            </p>
-            <pre class="small">{`echo '<token>' | sudo terrarium-host token-file /etc/terrarium-host/token`}</pre>
-            <p class="small muted" style={{ margin: 0 }}>
-              Then set <code>name = "{m().name}"</code> and the daemon URL in <code>/etc/terrarium-host/config.toml</code>, and start the unit. The host shows online when it connects.
-            </p>
-            <div>
-              <button class="primary" onClick={() => props.onClose()}>
-                Done
-              </button>
-            </div>
-          </div>
-        )}
+          );
+        }}
       </Show>
     </Modal>
   );

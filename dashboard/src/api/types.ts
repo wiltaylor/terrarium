@@ -1382,7 +1382,15 @@ export interface Host {
 }
 
 /** `POST /api/hosts` (`201`): the host and its token. The token shows once, here only. */
-export type NewHostToken = Host & { token: string };
+export type NewHostToken = Host & {
+  token: string;
+  /** `host` (a long-lived `thk_` token) or `enrol` (a one-time `the_` token, 10 minutes). */
+  token_kind?: "host" | "enrol";
+  /** For an enrol token: when it stops working. */
+  token_expires_at?: string;
+  /** For an enrol token, when the daemon knows its URL: the line that installs the host agent (docs/api.md §17.9). */
+  install_command?: string;
+};
 
 // ----- Audit -----
 

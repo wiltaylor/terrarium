@@ -2398,7 +2398,8 @@ async fn host_tokens_enrol_rotate_and_revoke() {
         vec![(
             201,
             json!({"name": "lab1", "token": "the_abc", "token_kind": "enrol",
-                   "token_expires_at": "2026-10-24T06:40:00.000Z"}),
+                   "token_expires_at": "2026-10-24T06:40:00.000Z",
+                   "install_command": "curl -fsSL http://t.lan:8080/install/host.sh | sudo sh -s -- --token the_abc --name lab1"}),
         )],
         vec![(
             Post,
@@ -2410,7 +2411,9 @@ async fn host_tokens_enrol_rotate_and_revoke() {
     .await;
     assert_eq!(
         out,
-        "the_abc\nenrol token for host lab1: one use, expires 2026-10-24T06:40:00.000Z\n"
+        "the_abc\nenrol token for host lab1: one use, expires 2026-10-24T06:40:00.000Z\n\
+         install on the host (needs sudo, systemd, x86_64):\n  \
+         curl -fsSL http://t.lan:8080/install/host.sh | sudo sh -s -- --token the_abc --name lab1\n"
     );
     // `--json` gives the whole answer, so a script can read the expiry.
     let out = ok(
@@ -2463,6 +2466,9 @@ async fn host_tokens_enrol_rotate_and_revoke() {
     .await;
     assert!(out.starts_with("the_xyz\n"), "{out}");
     assert!(out.contains("expires 2026-10-24T07:00:00.000Z"), "{out}");
+    // No install_command (the daemon does not know its URL): a hint.
+    assert!(out.contains("/install/host.sh"), "{out}");
+    assert!(out.contains("TERRARIUM_PUBLIC_URL"), "{out}");
     // The name is a path segment: it is encoded.
     ok(
         false,

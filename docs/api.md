@@ -30,6 +30,7 @@ The daemon serves one router on two listeners.
 |---|---|---|
 | Unix socket | `$TERRARIUM_API_SOCKET` | None. The caller is the operator. |
 | TCP | `$TERRARIUM_LISTEN` | `Authorization: Bearer $TERRARIUM_TOKEN` on `/api/*`, or the session cookie of `POST /api/session` (§1.1). Without a token the TCP listener stays off. |
+| TCP, no auth | `$TERRARIUM_LISTEN` | `GET /install/host.sh`, `GET /install/terrarium-host`, and `GET /install/terrarium-host.sha256`: the host installer (§17.9). They hold no secret. |
 | TCP, host agents | `$TERRARIUM_HOST_LISTEN` (default `auto`: `0.0.0.0:8082` with TLS, `127.0.0.1:8082` without) | `GET /hosts/connect` only, with a per-host token (§17.1). TLS when `TERRARIUM_HOST_TLS_CERT` and `TERRARIUM_HOST_TLS_KEY` are set. |
 
 A browser cannot set headers on a WebSocket. A WebSocket upgrade on TCP
@@ -2281,7 +2282,7 @@ gets `401 unauthorized` before the upgrade.
 |---|---|---|---|
 | `GET /api/hosts` | | `200` hosts by name | any caller |
 | `GET /api/hosts/{name}` | | `200` host | any caller |
-| `POST /api/hosts` | `{"name", "enrol"?}` | `201` one flat host object (the shape below) with `token`, `token_kind`, and for an enrol token `token_expires_at` | the operator |
+| `POST /api/hosts` | `{"name", "enrol"?}` | `201` one flat host object (the shape below) with `token`, `token_kind`, and for an enrol token `token_expires_at` and `install_command` (§17.9) | the operator |
 | `POST /api/hosts/{name}/rotate` | none, or `{"enrol"?}` | `200` the same shape as `POST /api/hosts` | the operator |
 | `DELETE /api/hosts/{name}` | | `204` | the operator |
 
@@ -2313,6 +2314,12 @@ Rules:
   operator. The swap writes the audit entry `host.enrol`, and
   `host.connected` has `"enrolled": true`. `enrol_expires_at` is set while
   an enrol token is open.
+- An enrol answer also has `install_command`: the line that installs the
+  host agent on the host with this token,
+  `curl -fsSL <daemon>/install/host.sh | sudo sh -s -- --token <token> --name <name>`.
+  `<daemon>` is `TERRARIUM_PUBLIC_URL`, unless that names a loopback host;
+  then it is `http://` and the `Host` of the request. With neither (the
+  Unix socket and no public URL), the field is absent.
 - `rotate` makes a new token (with `"enrol": true`, a new enrol token) and
   writes the audit entry `host.rotate`. The old token stops working for new
   connections at once. A live link stays up until it ends; the host agent
@@ -2872,6 +2879,49 @@ checkout into its workspace while it does not run), the files of the old
 `<state>/agents/<ulid>/workspace` move there once. A new path that has files
 already is not touched, and the old files stay (a log line says so). The
 move is a rename, or a copy and a delete across file systems.
+
+### 17.9 The host installer
+
+The daemon serves the installer of the host agent on the dashboard port
+(`TERRARIUM_LISTEN`) and on the Unix socket. The routes are outside `/api`,
+so they need no token, as the dashboard assets need none. They hold no
+secret. The enrol token comes only from `POST /api/hosts` (§17.1). The host
+listener and the ingest listener do not serve these routes.
+
+| Endpoint | Answer |
+|---|---|
+| `GET /install/host.sh` | `200` `text/plain`: `scripts/install-host.sh` with the defaults filled in (below). |
+| `GET /install/terrarium-host?arch=<arch>` | `200` `application/octet-stream`: the static musl `terrarium-host` for the arch. |
+| `GET /install/terrarium-host.sha256?arch=<arch>` | `200` `text/plain`: `<sha256 hex>  terrarium-host-<arch>-linux`. |
+
+Rules:
+
+- Each answer has the header `X-Terrarium-Version` (the daemon version),
+  `Cache-Control: no-store`, and the API CSP (`default-src 'none'`).
+- `arch` is the name that the script makes from `uname -m`: `x86_64`
+  (also for `amd64`) or `aarch64` (also for `arm64`). Only `x86_64` has a
+  build now. Another arch gets `404` with a text message that names the
+  arches that the daemon serves. No `arch` gets `400`.
+- The binary comes from `TERRARIUM_HOST_DIST_DIR` (default
+  `/opt/terrarium/dist`): `terrarium-host-<arch>-linux`, else
+  `terrarium-host` when the arch is the daemon's own (the output of
+  `just host::build`). No binary gets `404`. The SHA-256 comes from the
+  `.sha256` file next to the binary, else the daemon hashes the binary.
+- The script gets these defaults. A value with a character outside
+  letters, digits, and `:/._-[]%~` is left out:
+  - The daemon URL for the downloads: `TERRARIUM_PUBLIC_URL`, unless it
+    names a loopback host; then `http://` and the `Host` of the request.
+  - The host listener URL (`daemon_url`): `TERRARIUM_HOST_DAEMON_URL`.
+    Else, with TLS on the host listener,
+    `wss://<host of the daemon URL>:<port of TERRARIUM_HOST_LISTEN>`.
+    Else, for a loopback daemon URL, `ws://<host>:<port>`. Else none, and
+    the script asks for `--host-url`.
+  - The pin: the SHA-256 of `TERRARIUM_HOST_TLS_CERT`, for a `wss://` URL.
+  - The systemd unit, `crates/terrarium-host/terrarium-host.service`.
+- The script downloads the binary over the same link as the script. The
+  SHA-256 finds a broken download; it does not prove where the binary
+  came from. Serve the dashboard port over HTTPS (a proxy) when the hosts
+  reach it over a network that you do not trust.
 
 ## 18. Fleet
 

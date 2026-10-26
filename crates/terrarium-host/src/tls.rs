@@ -535,6 +535,21 @@ pub fn self_signed(names: &[String]) -> Result<SelfSigned, TlsError> {
     })
 }
 
+/// The SHA-256 of the first (leaf) certificate in a PEM file: the value
+/// of `server_fingerprint_sha256` for a daemon that serves it.
+pub fn cert_file_fingerprint(cert: &Path) -> Result<String, TlsError> {
+    let file_err = |message: String| TlsError::File {
+        path: cert.to_owned(),
+        message,
+    };
+    let leaf = CertificateDer::pem_file_iter(cert)
+        .map_err(|e| file_err(e.to_string()))?
+        .next()
+        .ok_or_else(|| file_err("the file holds no certificates".into()))?
+        .map_err(|e| file_err(e.to_string()))?;
+    Ok(fingerprint_sha256(leaf.as_ref()))
+}
+
 /// The daemon's server config from PEM files, and the SHA-256 of the
 /// first (leaf) certificate.
 pub fn server_config(
@@ -673,6 +688,8 @@ mod tests {
         let (_, fp) = server_config(&c, &k).unwrap();
         assert_eq!(fp, ss.fingerprint);
         assert_eq!(parse_fingerprint(&fp).unwrap().len(), 32);
+        assert_eq!(cert_file_fingerprint(&c).unwrap(), ss.fingerprint);
+        assert!(cert_file_fingerprint(&k).is_err());
     }
 
     /// A one-shot TLS server on loopback with a fresh self-signed cert.

@@ -51,6 +51,20 @@ pub struct Settings {
     #[arg(long, env = ENV_ARTIFACT_PUBLIC_URL)]
     pub artifact_public_url: Option<String>,
 
+    /// The directory of the static host agent binaries that
+    /// `GET /install/terrarium-host` serves: `terrarium-host-<arch>-linux`
+    /// and its `.sha256` (the image puts them in `/opt/terrarium/dist`).
+    #[arg(long, env = ENV_HOST_DIST_DIR, default_value = DEFAULT_HOST_DIST_DIR)]
+    pub host_dist_dir: PathBuf,
+
+    /// The host listener as a host agent dials it, for example
+    /// `wss://terrarium.lan:8082`. The installer at `GET /install/host.sh`
+    /// writes it as `daemon_url`. Default: `wss://` with the host of the
+    /// public URL and the port of the host listener, when the listener
+    /// speaks TLS.
+    #[arg(long, env = ENV_HOST_DAEMON_URL)]
+    pub host_daemon_url: Option<String>,
+
     /// Take the bearer token as `?token=` on a WebSocket upgrade
     /// (deprecated: the query string reaches logs). `0` (the default)
     /// refuses it; clients send `Authorization` or the subprotocol
@@ -328,6 +342,37 @@ pub const ENV_SESSION_TTL: &str = "TERRARIUM_SESSION_TTL";
 /// The default of [`ENV_SESSION_TTL`].
 pub const DEFAULT_SESSION_TTL: &str = "12h";
 
+/// `TERRARIUM_HOST_DIST_DIR`: the host agent binaries for `/install/...`.
+pub const ENV_HOST_DIST_DIR: &str = "TERRARIUM_HOST_DIST_DIR";
+/// The image puts the static `terrarium-host` here (docker/Dockerfile).
+pub const DEFAULT_HOST_DIST_DIR: &str = "/opt/terrarium/dist";
+/// `TERRARIUM_HOST_DAEMON_URL`: the `daemon_url` that the host installer
+/// writes. `just host::install` reads the same variable.
+pub const ENV_HOST_DAEMON_URL: &str = "TERRARIUM_HOST_DAEMON_URL";
+
+/// The settings of the host installer (`GET /install/...`,
+/// `crate::api::install`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstallConfig {
+    /// [`ENV_HOST_DIST_DIR`].
+    pub dist_dir: PathBuf,
+    /// [`ENV_HOST_DAEMON_URL`], with no trailing `/`. `None`: not set.
+    pub host_daemon_url: Option<String>,
+    /// The host listener, for the default `daemon_url` and the pin. `None`:
+    /// the listener is off. `main` sets it from the env.
+    pub host_listen: Option<crate::hosts::HostListen>,
+}
+
+impl Default for InstallConfig {
+    fn default() -> Self {
+        Self {
+            dist_dir: PathBuf::from(DEFAULT_HOST_DIST_DIR),
+            host_daemon_url: None,
+            host_listen: None,
+        }
+    }
+}
+
 /// The settings of the web side of the daemon. [`Settings::web`] makes it
 /// from the flags and the env; tests make it directly.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -340,6 +385,8 @@ pub struct WebConfig {
     pub ws_query_token: bool,
     /// The life of a session cookie ([`ENV_SESSION_TTL`]).
     pub session_ttl: std::time::Duration,
+    /// The host installer.
+    pub install: InstallConfig,
 }
 
 impl Default for WebConfig {
@@ -349,6 +396,7 @@ impl Default for WebConfig {
             artifact_public_url: None,
             ws_query_token: false,
             session_ttl: std::time::Duration::from_secs(12 * 3600),
+            install: InstallConfig::default(),
         }
     }
 }
@@ -441,6 +489,11 @@ impl Settings {
             artifact_public_url: clean_url(self.artifact_public_url.as_deref()),
             ws_query_token: self.ws_query_token,
             session_ttl: self.session_ttl,
+            install: InstallConfig {
+                dist_dir: self.host_dist_dir.clone(),
+                host_daemon_url: clean_url(self.host_daemon_url.as_deref()),
+                host_listen: None,
+            },
         }
     }
 

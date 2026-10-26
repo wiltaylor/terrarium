@@ -1,5 +1,6 @@
 # systemd unit for the Terrarium host agent (docs/host-protocol.md).
-# `just host::install <host>` copies this to /etc/systemd/system/.
+# `just host::install <host>` and the host installer (GET /install/host.sh,
+# scripts/install-host.sh) copy this to /etc/systemd/system/.
 #
 # Commands from the daemon run as the User below. Set it to the account that
 # owns the labs and can use Docker (the `docker` group) and vmlab (`kvm`).
