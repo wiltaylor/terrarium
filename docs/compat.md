@@ -539,7 +539,7 @@ copies only `~/.codex/auth.json` into a temp `CODEX_HOME`.
 | `developer_instructions` | Adds a `developer` message. The default prompt stays. | verified | 4 |
 | `AGENTS.md` | Loaded from the workspace as a `user` message. Works beside `developer_instructions`. | verified | 4 |
 | Prompt on resume | **Frozen.** `codex resume` with a changed `developer_instructions` sent the old text. The new text is not in the session file. | verified | 4 |
-| Adapter default (2026-10-26) | An agent with no `system_prompt` gets `developer_instructions` (append; the Codex base prompt stays). An agent with a `system_prompt` gets `model_instructions_file` (replace). Before this date the adapter always replaced. An agent made before keeps its frozen session until the prompt hash changes. Not run live. | read | 4 |
+| Adapter default (2026-10-26) | An agent with no `system_prompt` gets `developer_instructions` (append; the Codex base prompt stays). An agent with a `system_prompt` gets `model_instructions_file` (replace). Before this date the adapter always replaced. An agent made before keeps its frozen session until the prompt hash changes. Replace verified live 2026-10-27 (gpt-5.6-luna: the reply followed the system prompt and named the Terrarium mail command). | verified | 4 |
 | Submit a turn | Bracketed paste, then CR at once. Newlines stay in the prompt. | verified | 5 |
 | Bare LF | Adds a new line. It does not submit. | verified | 5 |
 | Type while busy | The text **steers** the running turn: the same `turn_id`, one `Stop` for both prompts. `UserPromptSubmit` for the second prompt came 4.5 s after its CR, at the next model request. | verified | 5 |
@@ -795,7 +795,7 @@ is in the system keychain, so no file is copied.
 | `APPEND_SYSTEM.md` | Appends to the default prompt (31 475 chars, starts "You are GitHub Copilot"). Sentinel answered. | verified | 4 |
 | `SYSTEM.md` | Replaces the whole prompt (111 chars, no default text). Sentinel answered. | verified | 4 |
 | Prompt on resume | The extension reads the files at each start. `--resume` with a changed `SYSTEM.md` used the new text (a second `system.message` record). | verified | 4 |
-| Both files, empty files | Read from the installed package 0.1.2 (`dist/prompts.js`, 2026-10-26), not run live: a file that is missing or only white space counts as absent. With a non-empty `SYSTEM.md` the mode is `replace`; a non-empty `APPEND_SYSTEM.md` then goes after it, joined by a blank line. With only `APPEND_SYSTEM.md` the mode is `append`. With neither, the extension does not load. The adapter writes exactly one of the two files with text (the other is empty), so the mode follows the agent's `system_prompt` (PLAN §8). | read | 4 |
+| Both files, empty files | Read from the installed package 0.1.2 (`dist/prompts.js`, 2026-10-26); the replace path verified live 2026-10-27 (claude-haiku-4.5 followed `SYSTEM.md` and named the Terrarium mail command): a file that is missing or only white space counts as absent. With a non-empty `SYSTEM.md` the mode is `replace`; a non-empty `APPEND_SYSTEM.md` then goes after it, joined by a blank line. With only `APPEND_SYSTEM.md` the mode is `append`. With neither, the extension does not load. The adapter writes exactly one of the two files with text (the other is empty), so the mode follows the agent's `system_prompt` (PLAN §8). | verified | 4 |
 | Submit a turn | Bracketed paste, then CR at once. Newlines stay. The screen showed the paste only after more than 0.2 s. | verified | 5 |
 | Bare LF | Adds a new line. It does not submit. | verified | 5 |
 | Type while busy | Enter **steers**: the text joins the running work, and **no** `UserPromptSubmit` fires for it. The footer offers "ctrl+q enqueue" for a queued message. | verified | 5 |
@@ -1336,6 +1336,24 @@ continues.
 A Z.ai subscription with plan `coding` (or no plan) and no `probe` gets
 `zai-usage` when the row is read, so existing rows probe with no
 migration. The `api` plan (pay as you go) gets no probe.
+
+### Custom system prompt (all harnesses)
+
+**Verified live 2026-10-27.** One agent per harness had the `system_prompt`
+"begin every reply with the single word PINEAPPLE", plus a control agent
+with none. Each got one turn: "which terrarium CLI command lists your
+mail?".
+
+| Harness, model | Launch | Reply |
+|---|---|---|
+| Claude Code, claude-haiku-5-5 | `--system-prompt` | `PINEAPPLE. Run terrarium mail check ...` |
+| Codex, gpt-5.6-luna | `model_instructions_file` | `PINEAPPLE terrarium mail check ...` |
+| Copilot, claude-haiku-4.5 | `SYSTEM.md` (5,499 bytes), `APPEND_SYSTEM.md` empty | `PINEAPPLE terrarium mail check ...` |
+| pi, glm-5.3-flash (Z.ai) | `--system-prompt` | `PINEAPPLE terrarium mail check.` |
+| Claude Code, no `system_prompt` | `--append-system-prompt` | `terrarium mail check lists your mail.` |
+
+Each replaced prompt kept the Terrarium protocol prompt after the custom
+text: every agent named the mail command. `{{agent.name}}` was filled in.
 
 ### OpenRouter credits
 
