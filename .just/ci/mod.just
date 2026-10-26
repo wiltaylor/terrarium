@@ -51,4 +51,4 @@ dashboard-check:
 [group('ci')]
 compat harness='all': require-cargo
 	cargo build -p terrarium
-	TERRARIUM_COMPAT_HARNESSES={{quote(harness)}} cargo test -p terrarium-compat --test compat -- --ignored --exact real_harnesses --nocapture
+	PATH="{{justfile_directory()}}/tools/bin:$PATH" TERRARIUM_COMPAT_HARNESSES={{quote(harness)}} cargo test -p terrarium-compat --test compat -- --ignored --exact real_harnesses --nocapture
