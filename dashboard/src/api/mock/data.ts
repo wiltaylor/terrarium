@@ -2,9 +2,11 @@
 
 import { XSS_DOCUMENT } from "../../lib/xss-payloads";
 import { seedSchedules } from "./schedules";
+import { seedTranscripts } from "./transcripts";
 import type {
   Agent,
   AgentEvent,
+  Block,
   Artifact,
   AuditEntry,
   Card,
@@ -33,6 +35,8 @@ export interface MockWorld {
   repos: Repo[];
   agents: Agent[];
   sessions: Session[];
+  /** Transcript blocks by terrarium session ID, oldest first (docs/api.md §6, transcripts). */
+  transcripts: Record<string, Block[]>;
   /** The event log, oldest first, like the daemon's. */
   events: AgentEvent[];
   columns: Record<string, Column[]>;
@@ -744,7 +748,7 @@ ${XSS_DOCUMENT}
 
   return {
     schedules: sched.schedules, scheduleRuns: sched.runs,
-    projects, repos, agents, sessions, events, columns: { terrarium: COLUMNS.map((c) => ({ ...c })), webshop: COLUMNS.map((c) => ({ ...c })) },
+    projects, repos, agents, sessions, transcripts: seedTranscripts(agents, sessions), events, columns: { terrarium: COLUMNS.map((c) => ({ ...c })), webshop: COLUMNS.map((c) => ({ ...c })) },
     cards, memories, links, pages, revisions, artifacts, artifactBodies, versions, subscriptions, quota, usage, holds: [], apiKeys, mail, targets, leases, hosts, hostTokens, audit, seq,
   };
 }

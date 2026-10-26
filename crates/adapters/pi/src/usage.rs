@@ -17,13 +17,12 @@
 //! not verified (all captured calls had `reasoning` = 0).
 
 use std::collections::HashSet;
-use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use terrarium_core::tail::LineTail;
 
 use crate::error::{PiError, Result};
 
@@ -154,56 +153,30 @@ pub fn parse_session(text: &str) -> Vec<UsageSample> {
 /// reads the new complete lines.
 #[derive(Debug)]
 pub struct SessionTail {
-    path: PathBuf,
-    offset: u64,
-    partial: Vec<u8>,
+    tail: LineTail,
     parser: UsageParser,
 }
 
 impl SessionTail {
     pub fn new(path: impl Into<PathBuf>) -> Self {
         Self {
-            path: path.into(),
-            offset: 0,
-            partial: Vec::new(),
+            tail: LineTail::new(path),
             parser: UsageParser::new(),
         }
     }
 
     pub fn path(&self) -> &Path {
-        &self.path
+        self.tail.path()
     }
 
     /// Read the new lines. A missing file gives no samples: pi creates the
     /// file at the first message.
     pub fn poll(&mut self) -> Result<Vec<UsageSample>> {
-        let mut file = match File::open(&self.path) {
-            Ok(f) => f,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(e) => return Err(PiError::io(&self.path, e)),
-        };
-        let len = file
-            .metadata()
-            .map_err(|e| PiError::io(&self.path, e))?
-            .len();
-        if len < self.offset {
-            self.offset = 0;
-            self.partial.clear();
-        }
-        file.seek(SeekFrom::Start(self.offset))
-            .map_err(|e| PiError::io(&self.path, e))?;
-        let mut buf = Vec::new();
-        file.read_to_end(&mut buf)
-            .map_err(|e| PiError::io(&self.path, e))?;
-        self.offset += buf.len() as u64;
-        self.partial.extend_from_slice(&buf);
-
-        let Some(end) = self.partial.iter().rposition(|&b| b == b'\n') else {
-            return Ok(Vec::new());
-        };
-        let rest = self.partial.split_off(end + 1);
-        let complete = std::mem::replace(&mut self.partial, rest);
-        Ok(String::from_utf8_lossy(&complete)
+        let chunk = self
+            .tail
+            .poll()
+            .map_err(|e| PiError::io(self.tail.path(), e))?;
+        Ok(String::from_utf8_lossy(&chunk.lines)
             .lines()
             .filter_map(|l| self.parser.line(l))
             .collect())

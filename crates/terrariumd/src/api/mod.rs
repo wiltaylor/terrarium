@@ -17,6 +17,7 @@ mod streams;
 mod subscriptions;
 mod system;
 mod targets;
+mod transcripts;
 mod usage;
 mod versions;
 mod wiki;
@@ -87,6 +88,8 @@ pub struct AppState {
     /// The artifact listener address. Empty: no listener of its own, and
     /// the dashboard port serves `/a/...`.
     pub artifact_listen: String,
+    /// The parsed session transcripts (`GET .../transcript`).
+    pub transcripts: Arc<crate::transcripts::TranscriptCache>,
 }
 
 impl AppState {
@@ -207,6 +210,7 @@ fn routes(state: Shared, serve_artifacts: bool, host_connect: bool) -> Router {
         .merge(projects::routes())
         .merge(repos::routes())
         .merge(agents::routes())
+        .merge(transcripts::routes())
         .merge(mail::routes())
         .merge(board::routes())
         .merge(memory::routes())
@@ -743,6 +747,7 @@ mod tests {
             harness_tools: Arc::default(),
             web: crate::settings::WebConfig::default(),
             artifact_listen: String::new(),
+            transcripts: Arc::default(),
         })
     }
 

@@ -205,7 +205,70 @@ export interface Session {
   outcome?: string;
   turns: number;
   current: boolean;
+  /** docs/api.md §6 (transcripts): the harness transcript is readable (a path or true). Absent on an older daemon. */
+  transcript?: boolean | string | null;
+  /** docs/api.md §6 (transcripts): how many transcript blocks the session has. */
+  blocks?: number;
+  /** docs/api.md §6 (transcripts): a short title, from the first user turn. */
+  title?: string | null;
+  /** docs/api.md §6 (transcripts): the harness runs this session now, so a turn can go to it. */
+  active?: boolean;
 }
+
+// ----- Session transcripts (docs/api.md §6) -----
+
+export type BlockRole = "user" | "assistant" | "system";
+export type BlockKind = "text" | "thinking" | "tool_call" | "tool_result" | "system";
+/** Who wrote a user turn: the operator (dashboard or CLI), a mail pointer, the daemon, or keys typed in the terminal. */
+export type BlockOrigin = "operator" | "agent_mail_pointer" | "system" | "user";
+
+export interface BlockUsage {
+  input: number;
+  output: number;
+  cache_read: number;
+  cache_write: number;
+}
+
+/** One block of a harness conversation, read from the harness's own transcript file. */
+export interface Block {
+  /** Stable across `update` frames. */
+  id: string;
+  /** The terrarium session ID. */
+  session: string;
+  /** The position in the session's transcript, from 1, without gaps. `?after=` takes it. */
+  seq: number;
+  at: string | null;
+  role: BlockRole;
+  kind: BlockKind;
+  text?: string;
+  tool?: { id: string; name: string; input: unknown; summary: string };
+  result?: { tool_id: string; output: string; truncated?: boolean; is_error: boolean };
+  /** Thinking that the harness did not keep (only a signature). */
+  redacted?: boolean;
+  origin?: BlockOrigin;
+  model?: string;
+  usage?: BlockUsage;
+  source: { harness: Harness; file: string; line: number };
+}
+
+/** `GET /api/agents/{id}/sessions/{session}/transcript?after=&limit=`. */
+export interface TranscriptPage {
+  session: string;
+  harness: Harness;
+  active: boolean;
+  blocks: Block[];
+  /** Pass as `after` for the next page. */
+  next_after: number;
+  /** True when this page reaches the end of the transcript as it is now. */
+  complete: boolean;
+}
+
+/** One frame of `GET .../transcript/stream?after=` (SSE). */
+export type TranscriptFrame =
+  | { type: "block"; block: Block }
+  /** A block that grew (the same `seq` and `id`, more text). */
+  | { type: "update"; block: Block }
+  | { type: "status"; status: string };
 
 /** Event kinds of docs/api.md §9 and §16.7. */
 export const EVENT_KINDS = [

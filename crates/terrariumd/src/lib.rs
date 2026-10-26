@@ -29,6 +29,7 @@ pub mod settings;
 pub mod store;
 pub mod supervisor;
 pub mod time_param;
+pub mod transcripts;
 pub mod trash;
 pub mod usage_collector;
 pub mod workspace;
@@ -170,6 +171,7 @@ pub async fn start_with_usage(
             .map(str::trim)
             .unwrap_or_default()
             .to_owned(),
+        transcripts: Arc::default(),
     });
     if cfg.insecure_agent_header {
         warn!("--insecure-agent-header: any local caller can act as any agent");

@@ -496,6 +496,22 @@ pub fn sessions(conn: &Connection, agent: &str, page: &Page) -> ApiResult<Paged<
     Ok(Paged::from_rows(rows, limit, |s| s.id.clone()))
 }
 
+/// One session of `agent`, by its session ID or its harness session ID
+/// (the newest session with that harness session).
+pub fn session(conn: &Connection, agent: &str, key: &str) -> ApiResult<Option<Session>> {
+    Ok(conn
+        .query_row(
+            "SELECT s.*, (SELECT count(*) FROM events e
+                          WHERE e.session_id = s.id AND e.kind = 'turn_start') AS turns
+             FROM sessions s
+             WHERE s.agent_id = ?1 AND (s.id = ?2 OR s.harness_session_id = ?2)
+             ORDER BY s.id = ?2 DESC, s.id DESC LIMIT 1",
+            params![agent, key],
+            session_row,
+        )
+        .optional()?)
+}
+
 pub fn current_session(conn: &Connection, agent: &str) -> ApiResult<Option<String>> {
     Ok(conn
         .query_row(

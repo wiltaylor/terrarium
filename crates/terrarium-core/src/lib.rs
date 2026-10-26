@@ -20,6 +20,8 @@ pub mod protocol;
 pub mod role;
 pub mod schedule;
 pub mod status;
+pub mod tail;
+pub mod transcript;
 pub mod zai;
 
 pub use adapter::{Adapter, Answer, ScreenHint};
@@ -32,6 +34,7 @@ pub use launch::{FileOverlay, LaunchSpec};
 pub use model::Agent;
 pub use role::{Decision, Role};
 pub use status::AgentStatus;
+pub use transcript::{Block, Transcript, TranscriptLog};
 
 /// The version of the Terrarium crates, from `Cargo.toml`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

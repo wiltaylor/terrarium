@@ -28,6 +28,9 @@ import type {
   AgentEvent,
   AgentStatus,
   Artifact,
+  Block,
+  Session,
+  TranscriptFrame,
   ArtifactAttach,
   ArtifactLinkKind,
   Memory,
@@ -63,6 +66,8 @@ import { fakeUlid, seed, type MockWorld, type UsageRow } from "./data";
 import { harnessUpdateKind } from "../../lib/harness-update";
 import { FakePty } from "./pty";
 import { createScheduleMock, type ScheduleCaller } from "./schedules";
+import { createTranscriptStream, encodeTranscriptFrame } from "../sse";
+import { appendBlock, fakeReply, mockModel, titleOf, type Draft as BlockDraft } from "./transcripts";
 
 export interface MockOptions {
   /** Artificial latency for every call. Default 120 ms; tests use 0. */
@@ -375,6 +380,73 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     hub.forEach((fn) => fn(clone(e)));
     return e;
   };
+  // ----- session transcripts (docs/api.md §6, transcripts) -----
+  const transcriptHub = new Map<string, Set<(f: TranscriptFrame) => void>>();
+  const blocksOf = (sessionId: string): Block[] => (w.transcripts[sessionId] ??= []);
+  const frame = (sessionId: string, f: TranscriptFrame) => transcriptHub.get(sessionId)?.forEach((fn) => fn(clone(f)));
+  const currentSession = (a: Agent): Session | undefined => w.sessions.find((x) => x.agent === a.id && x.current);
+  /** The harness wrote a new line: a new block at the end of the transcript. */
+  const writeBlock = (a: Agent, d: BlockDraft): Block | undefined => {
+    const s = currentSession(a);
+    if (!s) return undefined;
+    const b = appendBlock(blocksOf(s.id), s, a.harness, d, iso());
+    frame(s.id, { type: "block", block: b });
+    return b;
+  };
+  /** The harness streamed more of a block: the same seq, more text. */
+  const growBlock = (sessionId: string, seq: number, text: string) => {
+    const b = blocksOf(sessionId).find((x) => x.seq === seq);
+    if (!b) return;
+    b.text = text;
+    frame(sessionId, { type: "update", block: b });
+  };
+  const sessionView = (s: Session): Session => {
+    const a = w.agents.find((x) => x.id === s.agent);
+    const list = w.transcripts[s.id];
+    return { ...s, transcript: list !== undefined, blocks: list?.length ?? 0, title: titleOf(list), active: s.current && !!a && LIVE.includes(a.status) };
+  };
+  /** A fake `text/event-stream` body: the blocks after `after`, then live frames until the client aborts. */
+  const transcriptBody = (sessionId: string, after: number | undefined, signal: AbortSignal): AsyncIterable<string> => {
+    const queue: string[] = [];
+    let wake: (() => void) | null = null;
+    let done = false;
+    const push = (chunk: string) => {
+      queue.push(chunk);
+      wake?.();
+    };
+    for (const b of blocksOf(sessionId).filter((x) => x.seq > (after ?? 0))) push(encodeTranscriptFrame({ type: "block", block: clone(b) }));
+    const fn = (f: TranscriptFrame) => push(encodeTranscriptFrame(f));
+    const subs = transcriptHub.get(sessionId) ?? new Set();
+    transcriptHub.set(sessionId, subs);
+    subs.add(fn);
+    const stop = () => {
+      done = true;
+      subs.delete(fn);
+      wake?.();
+    };
+    signal.addEventListener("abort", stop, { once: true });
+    return {
+      async *[Symbol.asyncIterator]() {
+        try {
+          while (!done) {
+            if (queue.length) {
+              // Split one frame in two, as a network would.
+              const chunk = queue.shift()!;
+              const cut = Math.floor(chunk.length / 2);
+              yield chunk.slice(0, cut);
+              yield chunk.slice(cut);
+              continue;
+            }
+            await new Promise<void>((r) => (wake = r));
+            wake = null;
+          }
+        } finally {
+          stop();
+        }
+      },
+    };
+  };
+
   // ----- harness versions and in-place updates (docs/api.md §4) -----
   const harnessReport = (latest: boolean): HarnessReport => {
     const at = new Date(startedAt).toISOString();
@@ -426,16 +498,22 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     a.status = status;
     a.updated_at = iso();
     agentEvent(a, "status", `${a.name}: ${from} -> ${status}`, { status, from, reason });
+    const cur = currentSession(a);
+    if (cur) frame(cur.id, { type: "status", status });
   };
   const openSession = (a: Agent) => {
     for (const s of w.sessions.filter((x) => x.agent === a.id && x.current)) {
       s.current = false;
       s.ended_at = iso();
       s.outcome = "restarted";
+      frame(s.id, { type: "status", status: "ended" });
     }
     const harness = `fake-${ulid("hs")}`;
-    w.sessions.unshift({ id: ulid("ses"), agent: a.id, harness_session_id: harness, started_at: iso(), turns: 0, current: true });
+    const fresh: Session = { id: ulid("ses"), agent: a.id, harness_session_id: harness, started_at: iso(), turns: 0, current: true };
+    w.sessions.unshift(fresh);
     a.session = harness;
+    w.transcripts[fresh.id] = [];
+    appendBlock(w.transcripts[fresh.id]!, fresh, a.harness, { role: "system", kind: "system", text: "Session started." }, iso());
     agentEvent(a, "session_started", `${a.name}: session started`, { harness_session: harness });
   };
   const endSession = (a: Agent, outcome: string) => {
@@ -443,6 +521,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
       s.current = false;
       s.ended_at = iso();
       s.outcome = outcome;
+      frame(s.id, { type: "status", status: "ended" });
     }
     delete a.session;
   };
@@ -1477,16 +1556,40 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           if (!LIVE.includes(a.status)) fail(409, "not_running", `agent \`${a.project}/${a.name}\` is not running`);
           if (!text.trim()) fail(422, "invalid", "the text is empty");
           audit("agent.send", a.id, a.project, { chars: text.length });
-          later(() => {
-            const s = w.sessions.find((x) => x.agent === a.id && x.current);
+          // The daemon queues the turn until the agent is idle; the fake harness then
+          // writes the user block, thinks, calls a tool, and streams a reply.
+          const s = currentSession(a);
+          const model = mockModel(a);
+          const r = fakeReply(text, model);
+          const pace = Math.max(step, latency > 0 ? 450 : 0);
+          const typeTurn = () => {
+            if (!LIVE.includes(a.status) || currentSession(a) !== s) return;
+            if (a.status !== "idle") return void later(typeTurn, Math.max(pace, 1));
             if (s) s.turns++;
+            writeBlock(a, { role: "user", kind: "text", text, origin: "operator" });
             agentEvent(a, "turn_start", `Turn typed by operator: ${text.slice(0, 60)}`, { text }, "operator");
             setStatus(a, "working");
-            later(() => {
-              agentEvent(a, "turn_end", "Turn ended");
-              setStatus(a, "idle");
-            });
-          }, 0);
+            const steps: (() => void)[] = [
+              () => void writeBlock(a, r.thinking),
+              () => void writeBlock(a, r.call),
+              () => void writeBlock(a, r.result),
+              () => {
+                const b = writeBlock(a, r.reply);
+                if (b && s) later(() => growBlock(s.id, b.seq, r.full), pace);
+              },
+              () => {
+                agentEvent(a, "turn_end", "Turn ended");
+                setStatus(a, "idle");
+              },
+            ];
+            const run = (i: number) => {
+              if (i >= steps.length || currentSession(a) !== s) return;
+              steps[i]!();
+              later(() => run(i + 1), i === 3 ? pace * 2 : pace);
+            };
+            later(() => run(0), pace);
+          };
+          later(typeTurn, 0);
           return { accepted: true };
         }),
       answer: (id) =>
@@ -1505,8 +1608,28 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
         reply(() => {
           const a = agent(id);
           const list = w.sessions.filter((s) => s.agent === a.id).sort((x, y) => y.started_at.localeCompare(x.started_at));
-          return paginate(list, q, (s) => s.id);
+          const pg = paginate(list, q, (s) => s.id);
+          return { ...pg, items: pg.items.map(sessionView) };
         }),
+      transcript: (id, session, q = {}) =>
+        reply(() => {
+          const a = agent(id);
+          const s = find(w.sessions, (x) => x.id === session && x.agent === a.id, `session \`${session}\``);
+          const after = Math.max(0, Number(q.after ?? 0) || 0);
+          const limit = Math.min(Math.max(1, Number(q.limit ?? 500) || 500), 1000);
+          const all = blocksOf(s.id).filter((b) => b.seq > after);
+          const blocks = all.slice(0, limit);
+          return { session: s.id, harness: a.harness, active: sessionView(s).active ?? false, blocks, next_after: blocks.at(-1)?.seq ?? after, complete: all.length <= limit };
+        }),
+      transcriptStream: (id, session, o = {}) =>
+        createTranscriptStream(async (after, signal) => {
+          // Like a socket, the stream checks auth when it opens (an SSE response, not a guarded call).
+          authorize("GET");
+          await (latency > 0 ? new Promise((r) => setTimeout(r, latency)) : Promise.resolve());
+          const a = agent(id);
+          const s = find(w.sessions, (x) => x.id === session && x.agent === a.id, `session \`${session}\``);
+          return transcriptBody(s.id, after, signal);
+        }, { after: o.after }),
       roles: (id) => reply(() => agent(id).roles),
       setRoles: (id, roles) =>
         reply(() => {
@@ -2535,7 +2658,7 @@ function guard(api: object, authorize: (verb: string) => void): void {
       const name = `${prefix}${key}`;
       if (typeof value === "function") {
         const verb = verbs.get(name);
-        if (!verb || verb === "WS" || name.startsWith("session.")) continue;
+        if (!verb || verb === "WS" || verb === "SSE" || name.startsWith("session.")) continue;
         const fn = value as (...a: unknown[]) => unknown;
         obj[key] = (...args: unknown[]) => {
           try {

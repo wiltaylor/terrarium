@@ -1,0 +1,89 @@
+[
+  {
+    "id": "3008f870-820a-4657-b633-c2be1072bec5:0",
+    "session": "",
+    "seq": 1,
+    "at": "2026-10-24T06:01:31.927Z",
+    "role": "user",
+    "kind": "text",
+    "text": "Remember the word PERIWINKLE. Reply with exactly: ok",
+    "origin": "user",
+    "source": {
+      "harness": "claude",
+      "file": "",
+      "line": 5
+    }
+  },
+  {
+    "id": "msg_011CgLZ4D8Uzva9rUiX7ME9A:0",
+    "session": "",
+    "seq": 2,
+    "at": "2026-10-24T06:01:33.413Z",
+    "role": "assistant",
+    "kind": "thinking",
+    "redacted": true,
+    "model": "claude-haiku-5-5",
+    "source": {
+      "harness": "claude",
+      "file": "",
+      "line": 28
+    }
+  },
+  {
+    "id": "msg_011CgLZ4D8Uzva9rUiX7ME9A:1",
+    "session": "",
+    "seq": 3,
+    "at": "2026-10-24T06:01:33.580Z",
+    "role": "assistant",
+    "kind": "text",
+    "text": "ok",
+    "model": "claude-haiku-5-5",
+    "usage": {
+      "input": 2,
+      "output": 45,
+      "cache_read": 0,
+      "cache_write": 36712
+    },
+    "source": {
+      "harness": "claude",
+      "file": "",
+      "line": 29
+    }
+  },
+  {
+    "id": "fc1c5183-12dd-4abc-b70f-852d4d5c2146:0",
+    "session": "",
+    "seq": 4,
+    "at": "2026-10-24T06:01:43.265Z",
+    "role": "user",
+    "kind": "text",
+    "text": "What word did I ask you to remember? Reply with only the word.",
+    "origin": "user",
+    "source": {
+      "harness": "claude",
+      "file": "",
+      "line": 44
+    }
+  },
+  {
+    "id": "msg_011CgLZ53e1NsQwFQGMNPpgf:0",
+    "session": "",
+    "seq": 5,
+    "at": "2026-10-24T06:01:44.856Z",
+    "role": "assistant",
+    "kind": "text",
+    "text": "PERIWINKLE",
+    "model": "claude-haiku-5-5",
+    "usage": {
+      "input": 2,
+      "output": 10,
+      "cache_read": 36712,
+      "cache_write": 271
+    },
+    "source": {
+      "harness": "claude",
+      "file": "",
+      "line": 50
+    }
+  }
+]

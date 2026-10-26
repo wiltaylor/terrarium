@@ -10,7 +10,7 @@ import { createHttpApi, type Api } from "../client";
 import type { Transport } from "../http";
 import { AuthSocket, type RawSocket } from "../sockets";
 
-/** `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, or `WS` for a socket. */
+/** `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `WS` for a socket, or `SSE` for an event stream (a GET that stays open). */
 export type Verb = string;
 
 /** Methods that do not go through the transport: `artifacts.text` fetches a signed URL with no credentials. */
@@ -46,6 +46,10 @@ export function httpVerbs(): Map<string, Verb> {
     },
     page: () => {
       last = "GET";
+      return pending();
+    },
+    stream: () => {
+      last = "SSE";
       return pending();
     },
     wsUrl: (path) => `ws://verbs${path}`,

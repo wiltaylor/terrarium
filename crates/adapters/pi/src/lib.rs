@@ -28,6 +28,7 @@ pub mod launch;
 pub mod provider;
 pub mod screen;
 pub mod session;
+pub mod transcript;
 pub mod usage;
 
 use std::path::{Path, PathBuf};

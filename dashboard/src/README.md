@@ -299,6 +299,56 @@ The terminal reconnects with backoff when its socket drops. It reconnects at
 once when the agent starts again. The daemon's first frame after a connect is
 a fresh snapshot of the screen; the terminal clears itself before it draws.
 
+## The conversation view
+
+The Conversation tab of the agent page shows the harness transcript as
+blocks (docs/api.md §6, transcripts). The raw terminal stays on its own tab.
+The code is in `features/agents/conversation/`. The logic is pure and in
+`model.ts`.
+
+- **Sessions.** The list on the left is `GET .../sessions`, newest first,
+  with `title`, `blocks`, and `active`. The view opens the active session
+  first. A new session or a start or stop reads the list again.
+- **Blocks.** A user turn is a bubble on the right, with a chip for its
+  origin: `you` (operator), `mail pointer`, `system`, or `terminal`.
+  Assistant text is markdown. Thinking is collapsed; with no text it shows
+  `redacted`. A `tool_call` is a card with the tool name and the summary,
+  and the JSON input opens below it. Its `tool_result` goes under the card
+  (`groupBlocks` pairs them by `tool.id`). A long output starts collapsed.
+  An error has the danger colour. A truncated output has a note. Each turn
+  ends with a quiet line: the model and the token usage. An equal usage on
+  the next block counts once.
+- **Paging.** The view loads the newest 500 blocks: `after = blocks - 500`,
+  and it follows `next_after` until `complete`. **Load earlier** reads the
+  500 before the window and keeps the scroll position. `mergeBlocks` keys
+  every block by `seq`, so a page and a live block never show twice.
+- **Live tail.** `GET .../transcript/stream?after=<newest seq>` is SSE.
+  `EventSource` cannot send `Authorization`, so `Transport.stream` reads it
+  with `fetch` and the normal credentials, and `api/sse.ts` parses it.
+  `block` adds a block, `update` replaces the block with the same `seq`, and
+  `status` with `ended` (or `inactive`, `stopped`, `closed`) ends the
+  session. The stream reconnects with backoff and resumes after the highest
+  `seq`. A `4xx` refusal (but `408` and `429`) does not retry.
+- **Auto-scroll.** The view follows new blocks while it is at the end. When
+  the operator scrolls up, it stops and counts the new blocks in a
+  "new messages" pill. The pill scrolls back to the end.
+- **Composer.** It is on only when the session is active and the agent is
+  `idle`, `working`, or `blocked`. Enter sends (`POST .../send`) and
+  Shift+Enter adds a line. When the agent is not idle, it says "queued —
+  the agent is working": the daemon queues the turn. Otherwise it is off
+  and gives the reason. The user block comes back through the stream when
+  the harness writes it.
+- **Safety.** Assistant text goes through `assistantHtml` and the
+  `Markdown` component, so DOMPurify cleans it (`setSafeHtml`). User text,
+  tool input, and tool output are text nodes only.
+
+The mock has a transcript for each session (`api/mock/transcripts.ts`): the
+four harnesses, a failed tool result, redacted thinking, a mail-pointer
+turn, a long session for paging, and an old `lead` session with hostile
+markdown. A send in the mock writes the user block, then thinking, a tool
+call and its result, and a reply that grows with an `update` frame.
+`api/mock/transcript-parity.test.ts` checks the shapes.
+
 ## Socket protocols
 
 PTY sockets (`/api/agents/{id}/pty`, `/api/subscriptions/login/{id}/pty`,
@@ -380,7 +430,7 @@ update cannot put other rows in the view. The mock answers the same params
 | `/projects` | Projects: list, create | `GET`, `POST /api/projects` |
 | `/p/:project/settings` | Project edit and delete, Repos panel | `GET`, `PATCH`, `DELETE /api/projects/{name}?confirm=true`, `GET`, `POST .../repos`, `POST /api/repos/{id}/checkout` |
 | `/agents` | Agents grid, new agent | `GET`, `POST /api/agents`, events socket |
-| `/agents/:id` | Agent detail: edit, delete, roles, quota, leases, terminal, events, sessions | `GET`, `PATCH`, `DELETE /api/agents/{id}`, `start/stop/restart/send`, `GET`, `PUT .../roles`, `GET /api/usage/me?agent=`, `GET .../leases?all=`, `WS .../pty`, `GET .../events?since=`, `GET .../sessions` |
+| `/agents/:id` | Agent detail: edit, delete, roles, quota, leases, conversation (the default tab), terminal, events, sessions | `GET`, `PATCH`, `DELETE /api/agents/{id}`, `start/stop/restart/send`, `GET`, `PUT .../roles`, `GET /api/usage/me?agent=`, `GET .../leases?all=`, `WS .../pty`, `GET .../events?since=`, `GET .../sessions`, `GET .../sessions/{session}/transcript?after=&limit=`, `GET .../transcript/stream?after=` (SSE) |
 | `/subscriptions` | Subscriptions, detect banner, add wizard | `GET`, `POST`, `DELETE /api/subscriptions[/{name}]`, `GET .../detect`, `POST .../{name}/probe\|verify\|logout\|api-key`, `POST /api/subscriptions/login`, `GET`, `DELETE .../login/{id}`, `POST .../login/{id}/input`, `WS .../login/{id}/pty` |
 | `/mail` | Mail log: every message, newest first, filters, the attention view (default), the thread inline, mark read, reply, compose | `GET /api/mail?to=&from=&thread=&cursor=`, `POST /api/mail`, `POST /api/mail/{id}/read`, `POST /api/mail/{id}/reply` |
 | `/p/:project/inbox` | Project inbox, make card | `GET .../inbox`, `POST .../inbox/{id}/read`, `POST .../inbox/{id}/reply`, `POST .../cards` (`from_mail`) |

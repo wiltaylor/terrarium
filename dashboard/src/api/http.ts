@@ -11,6 +11,7 @@
 //   never goes into a URL (see ./sockets).
 
 import { AuthSocket, browserSocket, type MakeRawSocket } from "./sockets";
+import { readBody } from "./sse";
 
 export type Query = Record<string, string | number | boolean | undefined | null>;
 
@@ -41,6 +42,11 @@ export interface Transport {
   request<T>(method: string, path: string, opts?: RequestOptions): Promise<T>;
   /** GET a list endpoint: the JSON array and the `X-Next-Cursor` header. */
   page<T>(path: string, query?: Query): Promise<Page<T>>;
+  /**
+   * GET a `text/event-stream` with the same credentials as `request`, and
+   * yield its text. A refusal throws as `request` does. `signal` ends it.
+   */
+  stream(path: string, query: Query | undefined, signal: AbortSignal): Promise<AsyncIterable<string>>;
   /** Absolute ws:// or wss:// URL for a socket path. It never carries the token. */
   wsUrl(path: string, query?: Query): string;
   /**
@@ -192,6 +198,28 @@ export function createHttpTransport(opts: HttpTransportOptions): Transport {
       const { data, res } = await send("GET", path, { query });
       if (!Array.isArray(data)) throw new ApiError(res.status, `GET ${path}: expected a JSON array`, data, "bad_shape");
       return { items: data as T[], next: res.headers.get(NEXT_CURSOR) || null };
+    },
+
+    async stream(path: string, query: Query | undefined, signal: AbortSignal): Promise<AsyncIterable<string>> {
+      const headers: Record<string, string> = { Accept: "text/event-stream" };
+      const token = opts.getToken();
+      if (token) headers.Authorization = `Bearer ${token}`;
+      const res = await doFetch(`${base}${path}${buildQuery(query)}`, { method: "GET", headers, credentials: "same-origin", signal });
+      if (!res.ok || !res.body) {
+        const text = await res.text().catch(() => "");
+        let data: unknown = text || undefined;
+        try {
+          data = text ? JSON.parse(text) : undefined;
+        } catch {
+          // keep the text
+        }
+        if (res.status === 401) {
+          opts.onUnauthorized?.();
+          throw new AuthError(data);
+        }
+        throw errorFrom(res.status, data, `GET ${path} failed with ${res.status}`);
+      }
+      return readBody(res.body);
     },
 
     wsUrl(path: string, query: Query = {}): string {

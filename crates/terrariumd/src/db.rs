@@ -798,6 +798,22 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE subscriptions DROP COLUMN login_status;
     ALTER TABLE subscriptions RENAME COLUMN login_status_v18 TO login_status;
     "#,
+    // 19: the delivery log of typed turns (docs/api.md §6.6). The daemon
+    // writes one row before it types a turn into a harness: an operator
+    // turn (`POST /api/agents/{id}/send`), a push pointer, or a recap. The
+    // transcript tags a user text whose hash is here with the row's origin.
+    // `hash` is the SHA-256 of the text with its whitespace collapsed, not
+    // the text. The store keeps the newest 2000 rows of each agent.
+    r#"
+    CREATE TABLE deliveries (
+        id       INTEGER PRIMARY KEY,
+        agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+        origin   TEXT NOT NULL CHECK (origin IN ('operator', 'agent_mail_pointer', 'system', 'user')),
+        hash     TEXT NOT NULL,
+        at       TEXT NOT NULL
+    );
+    CREATE INDEX deliveries_agent ON deliveries(agent_id, hash);
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call

@@ -1743,8 +1743,11 @@ impl RunnerSupervisor {
             }
         };
         if let Some((text, runner)) = recap {
-            let delivery = runner.type_turn(text);
+            let me = self.clone();
             tokio::spawn(async move {
+                me.log_delivery(id, terrarium_core::transcript::Origin::System, &text)
+                    .await;
+                let delivery = runner.type_turn(text);
                 if let Err(e) = delivery.wait().await {
                     warn!(agent = %id, "the recap turn was not delivered: {e}");
                 }
@@ -2164,7 +2167,14 @@ impl RunnerSupervisor {
                 me.maybe_push(id);
                 return;
             }
-            let delivery = runner.type_turn(pointer.text());
+            let text = pointer.text();
+            me.log_delivery(
+                id,
+                terrarium_core::transcript::Origin::AgentMailPointer,
+                &text,
+            )
+            .await;
+            let delivery = runner.type_turn(text);
             let result = delivery.wait().await;
             match &result {
                 Ok(()) => {
@@ -2304,6 +2314,27 @@ impl RunnerSupervisor {
                 line: None,
             });
         });
+    }
+
+    /// Write the delivery log row of a turn that the daemon types now
+    /// (`docs/api.md` §6.6), so the transcript can tag it.
+    async fn log_delivery(
+        &self,
+        id: AgentId,
+        origin: terrarium_core::transcript::Origin,
+        text: &str,
+    ) {
+        let Some(state) = self.state() else { return };
+        let (agent, text) = (id.to_string(), text.to_owned());
+        let result = state
+            .db
+            .write("system", move |t| {
+                crate::store::transcripts::record_delivery(t, &agent, origin, &text)
+            })
+            .await;
+        if let Err(e) = result {
+            warn!(agent = %id, "cannot log a turn delivery: {e}");
+        }
     }
 
     async fn mark_delivered(&self, ids: Vec<String>) {

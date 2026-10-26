@@ -13,9 +13,11 @@ import { ago, compact, timeUntil } from "../../lib/format";
 import { agents, api, events, leases as holds, quota } from "../../stores";
 import { describeCause } from "../../stores/quota";
 import { AgentForm } from "./AgentForm";
+import { Conversation } from "./conversation/Conversation";
 import { RoleBadges } from "./AgentsPage";
 
 const TABS = [
+  { id: "conversation", label: "Conversation" },
   { id: "terminal", label: "Terminal" },
   { id: "events", label: "Events" },
   { id: "sessions", label: "Sessions" },
@@ -28,7 +30,7 @@ export default function AgentDetail() {
   const params = useParams<{ id: string }>();
   const navigate = useNavigate();
   const id = () => decodeURIComponent(params.id);
-  const [tab, setTab] = createSignal<(typeof TABS)[number]["id"]>("terminal");
+  const [tab, setTab] = createSignal<(typeof TABS)[number]["id"]>("conversation");
   const [error, setError] = createSignal<unknown>(null);
   const [notice, setNotice] = createSignal<string | null>(null);
   const [turn, setTurn] = createSignal("");
@@ -150,24 +152,30 @@ export default function AgentDetail() {
 
           <LeasesPanel agent={a()} onNotice={(n) => setNotice(n)} />
 
-          <form
-            class="row"
-            onSubmit={(e) => {
-              e.preventDefault();
-              const text = turn().trim();
-              if (!text) return;
-              void act("Turn", () => api.agents.send(a().id, text)).then(() => setTurn(""));
-            }}
-          >
-            <input style={{ flex: 1 }} placeholder={running() ? "Type a turn for this agent…" : "Start the agent to send a turn"} value={turn()} onInput={(e) => setTurn(e.currentTarget.value)} aria-label="Turn text" />
-            <button class="primary" type="submit" disabled={!running()}>
-              Send turn
-            </button>
-          </form>
+          {/* The Conversation tab has its own composer. */}
+          <Show when={tab() !== "conversation"}>
+            <form
+              class="row"
+              onSubmit={(e) => {
+                e.preventDefault();
+                const text = turn().trim();
+                if (!text) return;
+                void act("Turn", () => api.agents.send(a().id, text)).then(() => setTurn(""));
+              }}
+            >
+              <input style={{ flex: 1 }} placeholder={running() ? "Type a turn for this agent…" : "Start the agent to send a turn"} value={turn()} onInput={(e) => setTurn(e.currentTarget.value)} aria-label="Turn text" />
+              <button class="primary" type="submit" disabled={!running()}>
+                Send turn
+              </button>
+            </form>
+          </Show>
 
           <div>
             <Tabs tabs={TABS} active={tab()} onChange={setTab} />
             <Switch>
+              <Match when={tab() === "conversation"}>
+                <Conversation agent={a()} onOpenTerminal={() => setTab("terminal")} />
+              </Match>
               <Match when={tab() === "terminal"}>
                 <Terminal connect={() => api.agents.pty(a().id)} available={running()} title={`${a().name} · ${a().harness}`} />
               </Match>

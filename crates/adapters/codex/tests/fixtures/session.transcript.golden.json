@@ -1,0 +1,179 @@
+[
+  {
+    "id": "msg_01a16cb2-1270-7be1-bf19-89e342a7f60a:0",
+    "session": "",
+    "seq": 1,
+    "at": "2026-10-24T06:56:11.888Z",
+    "role": "system",
+    "kind": "system",
+    "text": "<skills_instructions>\n## Skills\nA skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Be <trimmed>",
+    "raw_type": "message:developer",
+    "source": {
+      "harness": "codex",
+      "file": "",
+      "line": 3
+    }
+  },
+  {
+    "id": "msg_01a16cb2-1270-7be1-bf19-89e342a7f60a:1",
+    "session": "",
+    "seq": 2,
+    "at": "2026-10-24T06:56:11.888Z",
+    "role": "system",
+    "kind": "system",
+    "text": "<permissions instructions>\nFilesystem sandboxing defines which files can be read or written. `sandbox_mode` is `danger-f <trimmed>",
+    "raw_type": "message:developer",
+    "source": {
+      "harness": "codex",
+      "file": "",
+      "line": 3
+    }
+  },
+  {
+    "id": "msg_01a16cb2-1270-7be1-bf19-89e342a7f60a:2",
+    "session": "",
+    "seq": 3,
+    "at": "2026-10-24T06:56:11.888Z",
+    "role": "system",
+    "kind": "system",
+    "text": "<collaboration_mode># Collaboration Mode: Default\n\nYou are now in Default mode. Any previous instructions for other mode <trimmed>",
+    "raw_type": "message:developer",
+    "source": {
+      "harness": "codex",
+      "file": "",
+      "line": 3
+    }
+  },
+  {
+    "id": "msg_01a16cb2-1270-7be1-bf19-89f1ea9af097:0",
+    "session": "",
+    "seq": 4,
+    "at": "2026-10-24T06:56:11.889Z",
+    "role": "system",
+    "kind": "system",
+    "text": "<multi_agent_role>You are `/root`, the primary agent in a team of agents collaborating to fulfill the user's goals.\n\nAt  <trimmed>",
+    "raw_type": "message:developer",
+    "source": {
+      "harness": "codex",
+      "file": "",
+      "line": 4
+    }
+  },
+  {
+    "id": "msg_01a16cb2-1270-7be1-bf19-8a0983b5b9fb:0",
+    "session": "",
+    "seq": 5,
+    "at": "2026-10-24T06:56:11.889Z",
+    "role": "system",
+    "kind": "system",
+    "text": "<multi_agent_mode>Any earlier instruction enabling proactive multi-agent delegation no longer applies. Do not spawn sub- <trimmed>",
+    "raw_type": "message:developer",
+    "source": {
+      "harness": "codex",
+      "file": "",
+      "line": 5
+    }
+  },
+  {
+    "id": "msg_01a16cb2-1270-7be1-bf19-8a18c0f43f75:0",
+    "session": "",
+    "seq": 6,
+    "at": "2026-10-24T06:56:11.889Z",
+    "role": "user",
+    "kind": "text",
+    "text": "<environment_context>\n  $CWD</cwd>\n  <shell>bash</shell>\n  <current_date>2026-10-24</current_date>\n  <timezone>Australia <trimmed>",
+    "origin": "system",
+    "source": {
+      "harness": "codex",
+      "file": "",
+      "line": 6
+    }
+  },
+  {
+    "id": "msg_01a16cb2-12a0-7332-91dd-1905fd46d535:0",
+    "session": "",
+    "seq": 7,
+    "at": "2026-10-24T06:56:11.936Z",
+    "role": "user",
+    "kind": "text",
+    "text": "Reply with exactly: pong",
+    "origin": "user",
+    "source": {
+      "harness": "codex",
+      "file": "",
+      "line": 9
+    }
+  },
+  {
+    "id": "msg_0cd04408c12ec244016adc568d038081918942fe3dfe2100cb:0",
+    "session": "",
+    "seq": 8,
+    "at": "2026-10-24T06:56:13.121Z",
+    "role": "assistant",
+    "kind": "text",
+    "text": "pong",
+    "model": "gpt-6-luna",
+    "usage": {
+      "input": 2768,
+      "output": 5,
+      "cache_read": 11392,
+      "cache_write": 0
+    },
+    "source": {
+      "harness": "codex",
+      "file": "",
+      "line": 12
+    }
+  },
+  {
+    "id": "msg_01a16cb2-4374-7de0-b704-1cc7ba598d9e:0",
+    "session": "",
+    "seq": 9,
+    "at": "2026-10-24T06:56:24.436Z",
+    "role": "system",
+    "kind": "system",
+    "text": "<skills_instructions>\n## Skills\nA skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Be <trimmed>",
+    "raw_type": "message:developer",
+    "source": {
+      "harness": "codex",
+      "file": "",
+      "line": 19
+    }
+  },
+  {
+    "id": "msg_01a16cb2-43aa-75d0-ab55-026899658dc0:0",
+    "session": "",
+    "seq": 10,
+    "at": "2026-10-24T06:56:24.490Z",
+    "role": "user",
+    "kind": "text",
+    "text": "What exact word did you reply with in your previous message? Reply with that word only.",
+    "origin": "user",
+    "source": {
+      "harness": "codex",
+      "file": "",
+      "line": 22
+    }
+  },
+  {
+    "id": "msg_0cd04408c12ec244016adc5699b7b88191abc552af3fe2dfda:0",
+    "session": "",
+    "seq": 11,
+    "at": "2026-10-24T06:56:25.871Z",
+    "role": "assistant",
+    "kind": "text",
+    "text": "pong",
+    "model": "gpt-6-luna",
+    "usage": {
+      "input": 2748,
+      "output": 5,
+      "cache_read": 13952,
+      "cache_write": 0
+    },
+    "source": {
+      "harness": "codex",
+      "file": "",
+      "line": 25
+    }
+  }
+]

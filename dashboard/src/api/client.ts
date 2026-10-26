@@ -10,6 +10,7 @@
 import { ApiError, AuthError, seg, type Page, type Query, type Transport } from "./http";
 import { collectAll, type PageQuery } from "../lib/paging";
 import { createWsEventStream, type EventStream, type PtySocket } from "./sockets";
+import { createTranscriptStream, type TranscriptStream } from "./sse";
 import { onArtifactOrigin } from "../lib/artifact-origin";
 import { withScope } from "../lib/target-scope";
 import type {
@@ -80,6 +81,7 @@ import type {
   NewTarget,
   Target,
   TargetReport,
+  TranscriptPage,
   TargetVerbBody,
   UsageMe,
   CardUsage,
@@ -154,6 +156,10 @@ export interface Api {
     answer(id: string, body: { request_id: string; answer: unknown } | { text: string }): Promise<{ accepted: boolean }>;
     events(id: string, q?: EventQuery): Promise<Page<AgentEvent>>;
     sessions(id: string, q?: PageQuery): Promise<Page<Session>>;
+    /** `GET .../sessions/{session}/transcript?after=&limit=` (docs/api.md §6, transcripts): blocks with `seq > after`, oldest first. */
+    transcript(id: string, session: string, q?: { after?: number; limit?: number }): Promise<TranscriptPage>;
+    /** `GET .../sessions/{session}/transcript/stream?after=` (SSE): new and grown blocks, live. */
+    transcriptStream(id: string, session: string, opts?: { after?: number }): TranscriptStream;
     roles(id: string): Promise<Role[]>;
     setRoles(id: string, roles: Role[]): Promise<Role[]>;
     /** `GET /api/agents/{id}/leases` (docs/api.md §17.7). `all` also lists the ended leases. */
@@ -463,6 +469,9 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       answer: (id, body) => post(`${a(id)}/answer`, body),
       events: (id, q = {}) => page(`${a(id)}/events`, { ...q }),
       sessions: (id, q = {}) => page(`${a(id)}/sessions`, { ...q }),
+      transcript: (id, session, q = {}) => get(`${a(id)}/sessions/${seg(session)}/transcript`, { after: q.after, limit: q.limit }),
+      transcriptStream: (id, session, o = {}) =>
+        createTranscriptStream((after, signal) => t.stream(`${a(id)}/sessions/${seg(session)}/transcript/stream`, { after }, signal), { after: o.after }),
       roles: (id) => get(`${a(id)}/roles`),
       setRoles: (id, roles) => put(`${a(id)}/roles`, roles),
       leases: (id, o = {}) => get(`${a(id)}/leases`, o.all ? { all: true } : undefined),

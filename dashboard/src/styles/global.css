@@ -679,6 +679,8 @@ th {
 .kv dd {
   margin: 0;
   min-width: 0;
+  /* Long IDs and paths (the workspace) wrap at 400 px. */
+  overflow-wrap: anywhere;
 }
 
 /* Terminal */
@@ -1368,4 +1370,233 @@ tr.row-open > td {
   gap: 2px;
   align-content: start;
   min-width: 0;
+}
+
+/* ---------- Conversation (agent page) ---------- */
+
+.convo {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(180px, 250px) minmax(0, 1fr);
+  align-items: start;
+}
+@media (max-width: 760px) {
+  .convo {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .convo-sessions ul {
+    max-height: 168px;
+  }
+}
+.convo-sessions {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+.convo-sessions ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+  max-height: 70vh;
+  overflow-y: auto;
+}
+.convo-session {
+  display: grid;
+  gap: 2px;
+  width: 100%;
+  text-align: left;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 6px 8px;
+  min-width: 0;
+}
+.convo-session.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.convo-session-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  font-size: 0.88rem;
+}
+.convo-main {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+.convo-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+}
+.convo-strip button.link {
+  display: inline;
+}
+.convo-scroll {
+  height: min(68vh, 760px);
+  min-height: 280px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.convo-earlier,
+.convo-note {
+  text-align: center;
+}
+.convo-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.convo-user {
+  display: flex;
+  justify-content: flex-end;
+}
+.convo-bubble {
+  max-width: min(80%, 640px);
+  background: var(--accent-soft);
+  border: 1px solid var(--border);
+  border-radius: 12px 12px 2px 12px;
+  padding: 8px 12px;
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+.convo-meta {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  justify-content: flex-end;
+}
+.convo-assistant {
+  max-width: 100%;
+  min-width: 0;
+}
+.convo-assistant .prose > :first-child {
+  margin-top: 0;
+}
+.convo-assistant .prose > :last-child {
+  margin-bottom: 0;
+}
+.convo-thinking {
+  border-left: 2px solid var(--border);
+  padding: 2px 10px;
+}
+.convo-thinking summary {
+  cursor: pointer;
+  font-style: italic;
+}
+.convo-tool {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  padding: 6px 10px;
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+.convo-tool.error {
+  border-color: var(--danger);
+}
+.convo-tool-head {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  cursor: pointer;
+  min-width: 0;
+}
+.convo-tool-name {
+  font-weight: 600;
+  flex: none;
+}
+.convo-tool-summary {
+  color: var(--muted);
+  min-width: 0;
+  flex: 1;
+}
+.convo-pre {
+  margin: 4px 0 0;
+  padding: 8px;
+  background: var(--surface);
+  border-radius: var(--radius-sm);
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 420px;
+  overflow: auto;
+}
+.convo-preview {
+  max-height: none;
+  color: var(--muted);
+}
+.convo-output summary {
+  cursor: pointer;
+}
+.convo-output details[open] .convo-preview {
+  display: none;
+}
+.convo-output.error .convo-pre {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+.convo-truncated {
+  margin: 0;
+  font-style: italic;
+}
+.convo-system {
+  text-align: center;
+  align-self: center;
+  max-width: 90%;
+}
+.convo-footer {
+  text-align: right;
+  opacity: 0.8;
+  font-size: 0.75rem;
+}
+.convo-scroll-wrap {
+  position: relative;
+  min-width: 0;
+}
+.convo-pill {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: 12px;
+  border-radius: 99px;
+  background: var(--accent);
+  color: var(--accent-text);
+  border: none;
+  padding: 4px 12px;
+  box-shadow: var(--shadow);
+}
+.convo-composer {
+  display: grid;
+  gap: 4px;
+}
+.convo-compose-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+}
+.convo-compose-row textarea {
+  flex: 1;
+  min-width: 0;
+  resize: vertical;
+  font: inherit;
+}
+.convo-compose-note {
+  margin: 0;
 }

@@ -17,6 +17,10 @@ function recorder(opts: HttpApiOptions = {}, answer: unknown = undefined) {
       calls.push({ method: "GET", path, opts: { query: query as RequestOptions["query"] } });
       return { items: [] as T[], next: null };
     },
+    async stream(path: string, query: Record<string, unknown> | undefined) {
+      calls.push({ method: "SSE", path, opts: { query: query as RequestOptions["query"] } });
+      return (async function* () {})();
+    },
     wsUrl: (path, query) => `ws://test${path}${query?.since !== undefined ? `?since=${query.since}` : ""}`,
     openSocket: (url) => {
       sockets.push(url);
@@ -33,6 +37,40 @@ function recorder(opts: HttpApiOptions = {}, answer: unknown = undefined) {
 }
 
 describe("createHttpApi", () => {
+  it("maps the transcript calls (docs/api.md §6): a page with after and limit, and the SSE stream with after", async () => {
+    const { api, calls } = recorder();
+    await api.agents.transcript("terrarium/lead", "01SES", { after: 734, limit: 500 });
+    expect(calls.at(-1)).toMatchObject({ method: "GET", path: "/api/agents/terrarium%2Flead/sessions/01SES/transcript", opts: { query: { after: 734, limit: 500 } } });
+    const s = api.agents.transcriptStream("terrarium/lead", "01SES", { after: 9 });
+    expect(calls.at(-1)).toMatchObject({ method: "SSE", path: "/api/agents/terrarium%2Flead/sessions/01SES/transcript/stream", opts: { query: { after: 9 } } });
+    s.close();
+  });
+
+  it("reads the transcript stream with fetch: the credentials of a request, and Accept text/event-stream", async () => {
+    const seen: { url: string; init: RequestInit }[] = [];
+    const body = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(new TextEncoder().encode('event: status\ndata: {"status":"idle"}\n\n'));
+        c.close();
+      },
+    });
+    const t = createHttpTransport({
+      getToken: () => "tok",
+      fetch: async (url, init) => {
+        seen.push({ url: String(url), init: init ?? {} });
+        return new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+      },
+    });
+    const chunks: string[] = [];
+    for await (const c of await t.stream("/api/x/stream", { after: 3 }, new AbortController().signal)) chunks.push(c);
+    expect(chunks.join("")).toContain("event: status");
+    expect(seen[0]!.url).toBe("/api/x/stream?after=3");
+    expect(seen[0]!.init.headers).toMatchObject({ Accept: "text/event-stream", Authorization: "Bearer tok" });
+    expect(seen[0]!.init.credentials).toBe("same-origin");
+    const refused = createHttpTransport({ getToken: () => null, fetch: async () => new Response('{"error":{"code":"not_found","message":"no such API route"}}', { status: 404 }) });
+    await expect(refused.stream("/api/y", undefined, new AbortController().signal)).rejects.toMatchObject({ status: 404, code: "not_found" });
+  });
+
   it("derives scope from project when the daemon sends no scope, and keeps a scope it sends", async () => {
     const rows = [{ name: "dbox" }, { name: "vm", project: "lab" }, { name: "vlab", project: null, scope: "global" }];
     const t = {

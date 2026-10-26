@@ -785,7 +785,9 @@ lists the leases that the agent holds.
 | `POST /api/agents/{id}/send` | `{"text": "Run the tests"}` | `202 {"accepted": true}` |
 | `POST /api/agents/{id}/answer` | `{"request_id", "answer"}` or `{"text"}` | `202 {"accepted": true}` |
 
-All need project_admin. The work happens in the background. The answer
+All need project_admin. The work happens in the background. A `send` by
+the operator writes a row to the delivery log first, so the transcript tags
+the turn `origin: "operator"` when the harness writes it (§6.6). The answer
 shows the agent when the daemon accepted the call; watch the events (§8)
 for the status changes.
 
@@ -918,8 +920,10 @@ agent.
 
 ```json
 [{"id":"01M5PA0T1NSYX43DDK1M2KT8KR","agent":"01M5PA0T0Z0K16V6G88P3SE78W",
-  "harness_session_id":"fake-01M5PA0TB2294ZW89MNK4G26EZ","current":true,
-  "started_at":"2026-10-24T06:36:54.197Z","turns":1}]
+  "harness_session_id":"01a1727a-c74a-4775-b7e8-97ff4e4add64","current":true,
+  "started_at":"2026-10-24T06:36:54.197Z","turns":3,
+  "transcript":true,"blocks":17,"title":"You now have access to target vlab until 2026-10-25T10:13:44.170Z. Run `terrariu",
+  "active":true}]
 ```
 
 An ended session adds `ended_at` and `outcome`: `stopped`, `restarted`,
@@ -927,6 +931,18 @@ An ended session adds `ended_at` and `outcome`: `stopped`, `restarted`,
 an exit), `resume_failed`, `daemon_restart`, or the reason the supervisor
 gave.
 `turns` counts the `turn_start` events of the session.
+
+The transcript fields (§6.6):
+
+| Field | Meaning |
+|---|---|
+| `transcript` | The daemon found the session file, and the file passed the path rule of §6.6. |
+| `blocks` | The number of transcript blocks. `0` when there is no transcript. |
+| `title` | The first user text that the harness did not make, on one line, at most 80 characters. `null` when there is none. |
+| `active` | This is the agent's current session, and the agent runs. |
+
+Two sessions can share one harness session (a restart resumes it). They
+then show the same file.
 
 ### 6.4 Roles
 
@@ -953,6 +969,148 @@ agent that is not running gets `409 not_running` before the upgrade.
   The daemon also takes binary frames as keystrokes. It ignores text frames
   it does not know.
 - The server closes the socket when the agent stops.
+
+### 6.6 Transcript
+
+The daemon reads the session file of each harness and gives one block
+model for all harnesses. Each adapter has the parser for its harness
+(`crates/adapters/*/src/transcript.rs`); the module comment there gives the
+map of each record type.
+
+| Endpoint | Answer |
+|---|---|
+| `GET /api/agents/{id}/sessions/{session}/transcript?after=<seq>&limit=<n>` | `200` one page of blocks |
+| `GET /api/agents/{id}/sessions/{session}/transcript/stream?after=<seq>` | Server-Sent Events: new blocks, updates, and the status |
+
+Rights: the same as the agent's events (§9). A member of the agent's
+project reads; an agent of another project gets `403 forbidden`; the
+operator reads all.
+
+`{session}` is the session `id` of §6.3. The harness session ID
+(`harness_session_id`) also works; it names the newest session with that
+harness session.
+
+**Block**
+
+```json
+{"id":"msg_011CgNkaAdYdHCEbxuSH5HWk:0","session":"01M5PA0T1NSYX43DDK1M2KT8KR","seq":2,
+ "at":"2026-10-25T09:53:46.168Z","role":"assistant","kind":"tool_call",
+ "tool":{"id":"toolu_01TYKZi8migs8cqAkAYjEUBC","name":"Bash",
+         "input":{"command":"terrarium targets ls","description":"List targets available to this agent"},
+         "summary":"Bash: terrarium targets ls"},
+ "model":"claude-haiku-5-5","usage":{"input":2,"output":82,"cache_read":12572,"cache_write":12679},
+ "source":{"harness":"claude","file":"01a1727a-c74a-4775-b7e8-97ff4e4add64.jsonl","line":15}}
+```
+
+| Field | Meaning |
+|---|---|
+| `id` | Stable in the session: the harness's message or record ID and the index of the part (`msg_…:0`). |
+| `seq` | From 1 for each session, with no gaps, in the order the blocks first came. |
+| `at` | RFC 3339, or `null` when the record has no time. |
+| `role` | `user`, `assistant`, or `system`. A `tool_call` has `assistant`; a `tool_result` has `user`. |
+| `kind` | `text`, `thinking`, `tool_call`, `tool_result`, or `system`. |
+| `text` | Markdown or plain text: `text`, `thinking`, and `system` blocks. Cut at 64 KiB with `truncated: true`. |
+| `redacted` | `true` on a `thinking` block when the harness stores no thinking text (only a signature or encrypted content). |
+| `origin` | On a user `text`: `operator`, `agent_mail_pointer`, `system`, or `user`. See below. |
+| `tool` | On a `tool_call`: `id` (the harness's call ID), `name`, `input` (JSON; an input over 64 KiB becomes a cut string), and `summary` (one line). |
+| `result` | On a `tool_result`: `tool_id` (the `tool.id` of its call), `output` (a string, cut at 64 KiB with `truncated: true`), and `is_error`. |
+| `model` | The model of an assistant block, when the harness records it. |
+| `usage` | `{input, output, cache_read, cache_write}` of one model response, on the **last** block of that response only. `input` does not include the cache. A new block of the same response moves it (an `update` of the block before). |
+| `raw_type` | On a `system` block: the harness record type, for example `event_msg:turn_aborted`. A record that the parser does not know becomes a `system` block with `text` `[<raw type>]`, so nothing silently disappears. |
+| `source` | `harness`, `file` (the file name), and `line` (from 1). |
+
+An image or other binary content becomes a `system` block with the text
+`[image omitted]` (in a tool result: that text in `output`). Records with
+no conversation in them (usage counters, hook runs, title side calls, the
+context that a harness injects) are left out. Each adapter's module comment
+lists them.
+
+**Origin.** The parser sets `system` on a user text that the harness made
+(a `<task-notification>`, a `<system_notification>`, `<environment_context>`,
+a meta message) and `user` on a typed prompt. The daemon then tags the
+typed prompts that it typed itself: before it types a turn, it writes a row
+to its delivery log (the SHA-256 of the text with whitespace collapsed, not
+the text). `POST /api/agents/{id}/send` by the operator gives `operator`, a
+push pointer (mail, card, lead, lease) gives `agent_mail_pointer`, and the
+recap turn after a failed resume gives `system`. A send by an agent, and a
+prompt that someone typed into the terminal, stay `user`.
+
+**Page**
+
+```
+GET /api/agents/smoke%2Fprobe/sessions/01M5PA0T1NSYX43DDK1M2KT8KR/transcript?after=0&limit=2
+
+200
+{"session":"01M5PA0T1NSYX43DDK1M2KT8KR","harness":"claude","active":true,
+ "blocks":[
+  {"id":"248e9b6e-e0ec-49d1-b44c-6a9d2a7bf38b:0","session":"01M5PA0T1NSYX43DDK1M2KT8KR","seq":1,
+   "at":"2026-10-25T09:53:44.196Z","role":"user","kind":"text","origin":"operator",
+   "text":"Run `terrarium targets ls`.","source":{"harness":"claude","file":"01a1727a-….jsonl","line":5}},
+  {"id":"msg_011CgNkaAdYdHCEbxuSH5HWk:0","seq":2,"role":"assistant","kind":"tool_call", …}],
+ "next_after":2,"complete":false}
+```
+
+| Query | Meaning |
+|---|---|
+| `after` | Only blocks with a larger `seq` (exclusive). Default `0`: from the start. |
+| `limit` | At most this many blocks. Default 500, at most 5000. |
+
+`next_after` is the `seq` of the last block of the page (`after` when the
+page is empty): give it as `after` for the next page. `complete` is `true`
+when the page reaches the last block that the file has now. A page is at
+most 2 MB of block JSON; it then stops early, with `complete: false`, but
+it always has one block when one is left.
+
+`active` is `true` when this is the agent's current session and the agent
+runs. An active session whose file the harness has not written yet (Codex
+and pi write it at the first message) gives an empty page, `complete:
+true`. Another session with no file gives `404 not_found`.
+
+**Stream.** `GET …/transcript/stream` with `Accept: text/event-stream`.
+Frames:
+
+| `event:` | `data:` |
+|---|---|
+| `block` | A new block, with `id: <seq>`. The blocks after `after` come first, then each new block. |
+| `update` | A block that changed, with the same `id` and `seq`: for example the usage moved to a new last block, or Codex and Copilot wrote the usage after the message. Replace the block of that `seq`. No `id:` line. |
+| `status` | `{"status", "active", "agent_status"}`. `status` is the agent status (`idle`, `working`, `blocked`, …) while the session is active, and `ended` when it is no longer the active one (the agent stopped, or a restart opened a new session). One frame at the start, then one at each change. |
+| `error` | `{"code", "message"}`: the session file failed the path rule. The stream then ends. |
+
+To resume, reconnect with `?after=<last block seq>` (or `Last-Event-ID`).
+An `update` of a block at or before `after` that came while the client was
+away is not sent again: read the page to get it. The stream reads the file
+at each event of the agent and at least once a second. The stream does not
+end when the session ends; the client closes it.
+
+```sh
+curl -s --unix-socket $S 'http://localhost/api/agents/smoke%2Fprobe/sessions/01M5PA0T1NSYX43DDK1M2KT8KR/transcript?limit=50'
+curl -s -N --unix-socket $S -H 'Accept: text/event-stream' \
+  'http://localhost/api/agents/smoke%2Fprobe/sessions/01M5PA0T1NSYX43DDK1M2KT8KR/transcript/stream?after=50'
+```
+
+```
+event: status
+data: {"status":"working","active":true,"agent_status":"working"}
+
+id: 51
+event: block
+data: {"id":"msg_01…:0","seq":51,"role":"assistant","kind":"text","text":"done", …}
+```
+
+**Path rule.** The session file is the `transcript_path` of the session's
+`session_started` event, else the adapter's lookup by the harness session
+ID in the agent's own dirs. The rule of the usage collector applies
+(`docs/security-review.md` F12): the file must be a regular file (not a
+symlink) under the agent's own session area (`<state>/agents/<ulid>/harness/<harness>/…`;
+with sandbox mode `none` also the shared harness home), the file name must
+carry the harness session ID, and no other agent may have that harness
+session. A path that breaks the rule gives `403 forbidden` ("the session
+file is outside the agent's own dirs"), and the sessions list shows
+`transcript: false`.
+
+The daemon keeps the parsed blocks of the 16 newest files in memory. A read
+checks the file length and parses only the new bytes; a file that got
+shorter is parsed again from the top.
 
 ## 7. Mail
 

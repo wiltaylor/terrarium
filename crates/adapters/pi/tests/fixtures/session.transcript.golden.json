@@ -1,0 +1,74 @@
+[
+  {
+    "id": "f6642545:0",
+    "session": "",
+    "seq": 1,
+    "at": "2026-10-24T07:29:09.259Z",
+    "role": "user",
+    "kind": "text",
+    "text": "Reply with exactly: pong",
+    "origin": "user",
+    "source": {
+      "harness": "pi",
+      "file": "",
+      "line": 4
+    }
+  },
+  {
+    "id": "a90f1b60:0",
+    "session": "",
+    "seq": 2,
+    "at": "2026-10-24T07:29:10.440Z",
+    "role": "assistant",
+    "kind": "text",
+    "text": "pong",
+    "model": "gpt-5.6-luna",
+    "usage": {
+      "input": 1110,
+      "output": 5,
+      "cache_read": 0,
+      "cache_write": 0
+    },
+    "source": {
+      "harness": "pi",
+      "file": "",
+      "line": 5
+    }
+  },
+  {
+    "id": "d04c44c7:0",
+    "session": "",
+    "seq": 3,
+    "at": "2026-10-24T07:29:13.904Z",
+    "role": "user",
+    "kind": "text",
+    "text": "What exact word did you reply with in your previous message? Reply with that word only.",
+    "origin": "user",
+    "source": {
+      "harness": "pi",
+      "file": "",
+      "line": 6
+    }
+  },
+  {
+    "id": "442754d0:0",
+    "session": "",
+    "seq": 4,
+    "at": "2026-10-24T07:29:15.594Z",
+    "role": "assistant",
+    "kind": "text",
+    "text": "pong",
+    "model": "gpt-5.6-luna",
+    "usage": {
+      "input": 115,
+      "output": 5,
+      "cache_read": 1024,
+      "cache_write": 0
+    },
+    "source": {
+      "harness": "pi",
+      "file": "",
+      "line": 7
+    }
+  }
+]

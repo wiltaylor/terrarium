@@ -17,6 +17,7 @@ pub mod schedules;
 pub mod subscriptions;
 pub mod sync;
 pub mod targets;
+pub mod transcripts;
 pub mod usage;
 pub mod versions;
 pub mod wiki;

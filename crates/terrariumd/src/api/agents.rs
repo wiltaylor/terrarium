@@ -29,7 +29,6 @@ pub fn routes() -> Router<Shared> {
         .route("/agents/{id}/answer", post(answer))
         .route("/agents/{id}/events", get(streams::agent_events))
         .route("/agents/{id}/pty", get(streams::pty))
-        .route("/agents/{id}/sessions", get(sessions))
         .route("/agents/{id}/roles", get(roles).put(set_roles))
 }
 
@@ -399,6 +398,22 @@ pub(super) async fn send(
     if body.text.trim().is_empty() {
         return Err(ApiError::invalid("the turn text is empty"));
     }
+    // The delivery log tags the operator's turn in the transcript
+    // (`docs/api.md` §6.6). It goes in before the turn is typed.
+    if matches!(actor, Actor::Operator) {
+        let (id, text) = (a.agent.id.to_string(), body.text.clone());
+        state
+            .db
+            .write(actor.label(), move |t| {
+                crate::store::transcripts::record_delivery(
+                    t,
+                    &id,
+                    terrarium_core::transcript::Origin::Operator,
+                    &text,
+                )
+            })
+            .await?;
+    }
     state
         .supervisor
         .send_turn(agent_id(&a), body.text.clone())
@@ -467,21 +482,6 @@ async fn answer(
         })
         .await?;
     Ok((StatusCode::ACCEPTED, Json(json!({"accepted": true}))))
-}
-
-async fn sessions(
-    State(state): State<Shared>,
-    actor: Actor,
-    Path(id): Path<String>,
-    ApiQuery(page): ApiQuery<Page>,
-) -> ApiResult<Response> {
-    let a = load(&state, &actor, id).await?;
-    let id = a.agent.id.to_string();
-    let rows = state
-        .db
-        .read(move |c| agents::sessions(c, &id, &page))
-        .await?;
-    Ok(paged(rows))
 }
 
 async fn roles(

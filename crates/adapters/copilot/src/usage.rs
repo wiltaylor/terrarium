@@ -19,13 +19,12 @@
 //! subscription probe.
 
 use std::collections::{BTreeMap, HashSet};
-use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use terrarium_core::tail::LineTail;
 
 use crate::error::{CopilotError, Result};
 
@@ -257,59 +256,32 @@ pub fn read_transcript(path: &Path) -> Result<TranscriptUsage> {
 /// dedup state stays, so no call counts twice).
 #[derive(Debug)]
 pub struct TranscriptTail {
-    path: PathBuf,
-    offset: u64,
-    partial: Vec<u8>,
+    tail: LineTail,
     parser: UsageParser,
 }
 
 impl TranscriptTail {
     pub fn new(path: impl Into<PathBuf>) -> Self {
         Self {
-            path: path.into(),
-            offset: 0,
-            partial: Vec::new(),
+            tail: LineTail::new(path),
             parser: UsageParser::new(),
         }
     }
 
     pub fn path(&self) -> &Path {
-        &self.path
+        self.tail.path()
     }
 
     /// Read the new lines. A missing file gives no records.
     pub fn poll(&mut self) -> Result<Vec<UsageRecord>> {
-        let mut file = match File::open(&self.path) {
-            Ok(f) => f,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(e) => return Err(CopilotError::io(&self.path, e)),
-        };
-        let len = file
-            .metadata()
-            .map_err(|e| CopilotError::io(&self.path, e))?
-            .len();
-        if len < self.offset {
-            self.offset = 0;
-            self.partial.clear();
-        }
-        file.seek(SeekFrom::Start(self.offset))
-            .map_err(|e| CopilotError::io(&self.path, e))?;
-        let mut buf = Vec::new();
-        file.read_to_end(&mut buf)
-            .map_err(|e| CopilotError::io(&self.path, e))?;
-        self.offset += buf.len() as u64;
-        self.partial.extend_from_slice(&buf);
-
-        let mut out = Vec::new();
-        let Some(end) = self.partial.iter().rposition(|&b| b == b'\n') else {
-            return Ok(out);
-        };
-        let rest = self.partial.split_off(end + 1);
-        let complete = std::mem::replace(&mut self.partial, rest);
-        for line in String::from_utf8_lossy(&complete).lines() {
-            out.extend(self.parser.line(line));
-        }
-        Ok(out)
+        let chunk = self
+            .tail
+            .poll()
+            .map_err(|e| CopilotError::io(self.tail.path(), e))?;
+        Ok(String::from_utf8_lossy(&chunk.lines)
+            .lines()
+            .filter_map(|l| self.parser.line(l))
+            .collect())
     }
 
     pub fn total_premium_requests(&self) -> Option<f64> {
