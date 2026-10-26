@@ -22,6 +22,7 @@ harness = "claude"
 subscription = "anthropic-max"
 model = "anthropic/claude-opus-5-5"
 prompt = "default"
+# system_prompt = "..."          # the base system prompt (PLAN §8); see "Agent templates"
 restart = "on-failure"
 new_session_on_prompt_change = true
 start = false
@@ -253,12 +254,33 @@ rules apply too:
 `GET /api/fleet` shows every fleet to the operator and to sysadmins. An
 agent sees the fleets that own objects in its own project.
 
+### The base system prompt
+
+An agent, a template, or `[defaults]` can set `system_prompt`, the agent's
+base system prompt (PLAN §8, [api.md §6.1](api.md#61-crud)). When it is
+set, it replaces the harness's default system prompt, and Terrarium's
+protocol prompt (`prompt`) comes after it. Use a multi-line string:
+
+```toml
+[[projects.agents]]
+name = "reviewer"
+system_prompt = """
+You review code for {{project.name}}. You do not write features.
+"""
+```
+
+`system_prompt_file = "<path>"` reads the text from a file, relative to
+the fleet file. The CLI (`fleet validate`, `plan`, `apply`) and the config
+dir read the file. The API refuses `system_prompt_file`, because it does
+not know the path. An agent cannot set both keys. Export writes
+`system_prompt`.
+
 ### Agent templates
 
 `[[templates]]` declares a global agent template, and
 `[[projects.templates]]` a template of the project. The spec keys
-(`harness`, `subscription`, `model`, `prompt`, `roles`, `policy`,
-`restart`, `new_session_on_prompt_change`) sit next to `name` and
+(`harness`, `subscription`, `model`, `prompt`, `system_prompt`, `roles`,
+`policy`, `restart`, `new_session_on_prompt_change`) sit next to `name` and
 `description`. An agent entry with `template = "worker"` gets the values
 in this order: `[defaults]`, then the template, then the keys of the entry.
 `policy` merges key by key. `worker` is the project's template, else the

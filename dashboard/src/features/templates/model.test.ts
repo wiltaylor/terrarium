@@ -69,4 +69,34 @@ describe("template model", () => {
     expect(validateTemplateForm({ ...emptyTemplateForm(), name: "Bad" })).toHaveLength(1);
     expect(validateTemplateForm({ ...emptyTemplateForm(), name: "ok" })).toEqual([]);
   });
+
+  it("puts the system prompt in the spec only when set; an emptied one clears the key", () => {
+    const t = tpl("w", "p", { spec: { ...tpl("w", "p").spec, system_prompt: "Be brief." } });
+    const v = templateToForm(t);
+    expect(v.agent.system_prompt).toBe("Be brief.");
+    expect(formToSpec(v.agent).system_prompt).toBe("Be brief.");
+    expect(formToSpec({ ...v.agent, system_prompt: "" })).not.toHaveProperty("system_prompt");
+    expect(formToNewTemplate({ ...emptyTemplateForm(), name: "g" }).spec).not.toHaveProperty("system_prompt");
+    expect(formToTemplatePatch(t, v)).toEqual({});
+    const patch = formToTemplatePatch(t, { ...v, agent: { ...v.agent, system_prompt: "" } });
+    expect(patch.spec).toBeDefined();
+    expect(patch.spec).not.toHaveProperty("system_prompt");
+    expect(formToTemplatePatch(tpl("w", "p"), { ...templateToForm(tpl("w", "p")), agent: { ...templateToForm(tpl("w", "p")).agent, system_prompt: "New." } }).spec?.system_prompt).toBe("New.");
+    expect(validateTemplateForm({ ...v, agent: { ...v.agent, system_prompt: "a".repeat(32769) } })).toHaveLength(1);
+  });
+
+  it("fills the system prompt from a picked template, and the create body keeps or clears it", () => {
+    const spec = { ...tpl("w", "p").spec, system_prompt: "Be brief." };
+    const form = resolvedToForm({ template: { id: "T", name: "w", project: "p", revision: 1 }, agent: { project: "p", ...spec } }, "w1");
+    expect(form.system_prompt).toBe("Be brief.");
+    expect(formToCreate(form, "w")).toMatchObject({ system_prompt: "Be brief." });
+    // Emptied in the form: null, which clears the template's value.
+    const body = formToCreate({ ...form, system_prompt: "" }, "w");
+    expect(body).toMatchObject({ system_prompt: null });
+    expect(applyTemplate(spec, body)).not.toHaveProperty("system_prompt");
+    expect(applyTemplate(spec, { name: "w1", project: "p", template: "w", system_prompt: "Other." }).system_prompt).toBe("Other.");
+    expect(applyTemplate(spec, { name: "w1", project: "p", template: "w" }).system_prompt).toBe("Be brief.");
+    // Without a template, an empty one is left out.
+    expect(formToCreate({ ...form, system_prompt: "" }, null)).not.toHaveProperty("system_prompt");
+  });
 });

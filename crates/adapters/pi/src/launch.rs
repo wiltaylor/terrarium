@@ -127,7 +127,7 @@ pub fn build(
         .arg(f.session_id)
         .arg(session_id);
     if let Some(file) = prompt_file {
-        let flag = match opts.prompt_mode {
+        let flag = match opts.prompt_mode_for(agent) {
             PromptMode::Append => f.append_system_prompt,
             PromptMode::Replace => f.system_prompt,
         };
@@ -258,6 +258,21 @@ mod tests {
         );
         assert_eq!(spec.cwd, Path::new("/home/agent/work"));
         assert_eq!(spec.env["PI_CODING_AGENT_DIR"], "/home/agent/.pi/agent");
+    }
+
+    /// A base system prompt selects `--system-prompt <file>`; with none,
+    /// the file is appended to pi's own prompt (PLAN §8).
+    #[test]
+    fn a_base_system_prompt_selects_replace() {
+        let mut agent = test_agent(None);
+        let file = Some(Path::new("/p.md"));
+        let spec = build(&PiOptions::default(), &agent, "id", None, file);
+        assert_eq!(value_after(&spec, "--append-system-prompt"), Some("/p.md"));
+        assert!(!spec.args.iter().any(|a| a == "--system-prompt"));
+        agent.system_prompt = Some("You review code.".into());
+        let spec = build(&PiOptions::default(), &agent, "id", None, file);
+        assert_eq!(value_after(&spec, "--system-prompt"), Some("/p.md"));
+        assert!(!spec.args.iter().any(|a| a == "--append-system-prompt"));
     }
 
     #[test]

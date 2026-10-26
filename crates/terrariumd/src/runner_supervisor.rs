@@ -1129,7 +1129,10 @@ impl RunnerSupervisor {
         ctx.peers = view.peers.clone();
         let template = prompt::load_template(&cfg.prompts_dir, agent.prompt.as_deref())
             .map_err(SupervisorError::NotReady)?;
-        let text = prompt::render(&template, &ctx);
+        // The hash below covers the whole text, so a change of the base
+        // system prompt also starts a new session of a harness that keeps
+        // the prompt of a session.
+        let text = prompt::compose(agent.system_prompt.as_deref(), &template, &ctx);
 
         let adapter = entry.adapter.clone();
         let home = cfg.home(agent.harness);

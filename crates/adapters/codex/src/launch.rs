@@ -69,9 +69,11 @@ pub fn trust_override(cwd: &Path) -> String {
 ///   `-c sqlite_home="<agent dir>/codex/sqlite"`, the agent's own SQLite
 ///   files ([`config`]). With no sandbox, Codex keeps them in `CODEX_HOME`.
 /// - On a resume, `-c tui.resume_cwd="session"`.
-/// - The prompt: `-c model_instructions_file="<agent dir>/prompt.md"`
-///   (default) or `-c developer_instructions="<text>"` (see
-///   [`PromptMode`]). Codex reads both only when it makes the session.
+/// - The prompt: `-c developer_instructions="<text>"` (default) or, for an
+///   agent with its own base system prompt,
+///   `-c model_instructions_file="<agent dir>/prompt.md"` (see
+///   [`CodexOptions::prompt_mode_for`]). Codex reads both only when it
+///   makes the session.
 ///
 /// `--skip-git-repo-check` is not passed: it is an `exec` flag, and the
 /// TUI exits with "unexpected argument" when it gets it.
@@ -121,7 +123,7 @@ pub fn build(
         }
     }
     if let Some(text) = prompt.map(str::trim).filter(|t| !t.is_empty()) {
-        let value = match opts.prompt_mode {
+        let value = match opts.prompt_mode_for(agent) {
             PromptMode::Replace => format!(
                 "{}={}",
                 f.model_instructions_file,
@@ -198,12 +200,9 @@ mod tests {
         assert!(c.contains(&"analytics.enabled=false"));
         assert!(c.contains(&"feedback.enabled=false"));
         assert!(!c.iter().any(|o| o.starts_with("tui.resume_cwd")));
-        let prompt = format!(
-            "model_instructions_file=\"{}\"",
-            config::prompt_path(&agent).display()
-        );
-        assert!(c.contains(&prompt.as_str()), "{c:?}");
-        assert!(!c.iter().any(|o| o.starts_with("developer_instructions")));
+        // No base system prompt: Codex keeps its own prompt.
+        assert!(c.contains(&"developer_instructions=\"Be brief.\""), "{c:?}");
+        assert!(!c.iter().any(|o| o.starts_with("model_instructions_file")));
         let sqlite = format!(
             "sqlite_home=\"{}\"",
             config::codex_dir(&agent).join("sqlite").display()
@@ -286,6 +285,33 @@ mod tests {
                 .iter()
                 .any(|o| o.starts_with("model_instructions_file"))
         );
+    }
+
+    /// An agent with its own base system prompt replaces Codex's prompt
+    /// with `prompt.md`, whatever the option says (PLAN §8).
+    #[test]
+    fn a_base_system_prompt_replaces_the_codex_prompt() {
+        let mut agent = test_agent(None);
+        agent.system_prompt = Some("You are a reviewer.".into());
+        for mode in [PromptMode::Append, PromptMode::Replace] {
+            let opts = CodexOptions {
+                prompt_mode: mode,
+                ..sandbox_opts()
+            };
+            let text = "You are a reviewer.\n\n# Terrarium agent a";
+            let spec = build(&opts, &agent, None, Some(text));
+            let c = overrides(&spec);
+            let want = format!(
+                "model_instructions_file=\"{}\"",
+                config::prompt_path(&agent).display()
+            );
+            assert!(c.contains(&want.as_str()), "{c:?}");
+            assert!(!c.iter().any(|o| o.starts_with("developer_instructions")));
+        }
+        // An empty base prompt counts as none.
+        agent.system_prompt = Some(" \n".into());
+        let spec = build(&sandbox_opts(), &agent, None, Some("P"));
+        assert!(overrides(&spec).contains(&"developer_instructions=\"P\""));
     }
 
     #[test]

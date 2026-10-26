@@ -606,3 +606,193 @@ async fn fleets_declare_and_use_templates() {
         .await
         .err(404, "not_found");
 }
+
+/// An agent's base system prompt (PLAN §8): create, PATCH, clear, the
+/// limit, a template that sets it, a create that overrides or clears it,
+/// and from-agent.
+#[tokio::test]
+async fn system_prompt_through_the_api_and_templates() {
+    let td = TestDaemon::start().await;
+    td.project("p").await;
+    let a = td
+        .agent(
+            "p",
+            "a",
+            json!({"system_prompt": "You are {{agent.name}}."}),
+        )
+        .await;
+    assert_eq!(a["system_prompt"], "You are {{agent.name}}.");
+    let v = td
+        .patch("/api/agents/p%2Fa", json!({"system_prompt": "Two."}))
+        .await;
+    assert_eq!(v.ok()["system_prompt"], "Two.");
+    // Another field leaves it as it is.
+    let v = td.patch("/api/agents/p%2Fa", json!({"model": "m"})).await;
+    assert_eq!(v.ok()["system_prompt"], "Two.");
+    // An empty text and `null` clear it.
+    let v = td
+        .patch("/api/agents/p%2Fa", json!({"system_prompt": " "}))
+        .await;
+    assert!(v.ok().get("system_prompt").is_none(), "{}", v.body);
+    td.patch("/api/agents/p%2Fa", json!({"system_prompt": "Three."}))
+        .await
+        .ok();
+    let v = td
+        .patch("/api/agents/p%2Fa", json!({"system_prompt": null}))
+        .await;
+    assert!(v.ok().get("system_prompt").is_none(), "{}", v.body);
+    // The limit is 32 KiB.
+    let long = "x".repeat(32 * 1024 + 1);
+    td.patch("/api/agents/p%2Fa", json!({"system_prompt": long}))
+        .await
+        .err(422, "invalid");
+    td.post(
+        "/api/agents",
+        json!({"name": "b", "project": "p", "harness": "claude", "system_prompt": long}),
+    )
+    .await
+    .err(422, "invalid");
+    let at_limit = "x".repeat(32 * 1024);
+    td.patch("/api/agents/p%2Fa", json!({"system_prompt": at_limit}))
+        .await
+        .ok();
+
+    // A template copies it; the body wins; `null` clears it.
+    let t = td
+        .post(
+            "/api/templates",
+            tpl(
+                "rev",
+                json!("p"),
+                json!({"harness": "claude", "system_prompt": "Review only."}),
+            ),
+        )
+        .await;
+    assert_eq!(t.ok()["spec"]["system_prompt"], "Review only.");
+    let w = td
+        .post(
+            "/api/agents",
+            json!({"name": "w1", "project": "p", "template": "rev"}),
+        )
+        .await;
+    assert_eq!(w.ok()["system_prompt"], "Review only.");
+    let w = td
+        .post(
+            "/api/agents",
+            json!({"name": "w2", "project": "p", "template": "rev", "system_prompt": "Own."}),
+        )
+        .await;
+    assert_eq!(w.ok()["system_prompt"], "Own.");
+    let w = td
+        .post(
+            "/api/agents",
+            json!({"name": "w3", "project": "p", "template": "rev", "system_prompt": null}),
+        )
+        .await;
+    assert!(w.ok().get("system_prompt").is_none(), "{}", w.body);
+    // An empty text in a spec is no system prompt.
+    let t = td
+        .post(
+            "/api/templates",
+            tpl(
+                "empty",
+                json!("p"),
+                json!({"harness": "claude", "system_prompt": ""}),
+            ),
+        )
+        .await;
+    assert!(t.ok()["spec"].get("system_prompt").is_none(), "{}", t.body);
+    // from-agent copies it.
+    let t = td
+        .post(
+            "/api/templates/from-agent/p%2Fw2",
+            json!({"name": "like-w2"}),
+        )
+        .await;
+    assert_eq!(t.ok()["spec"]["system_prompt"], "Own.");
+}
+
+/// `system_prompt_file` in an agent file and in a project file template:
+/// the path is relative to the file.
+#[tokio::test]
+async fn system_prompt_file_in_definition_files() {
+    let td = TestDaemon::with_config(|c| {
+        write(c, "prompts-own/lead.md", "Lead {{agent.name}}.\n");
+        write(c, "projects/filed.toml", "[[templates]]\nname = \"worker\"\nharness = \"pi\"\nsystem_prompt_file = \"../prompts-own/lead.md\"\n");
+        write(c, "agents/lead.toml", "project = \"filed\"\nharness = \"claude\"\nsystem_prompt_file = \"../prompts-own/lead.md\"\n");
+    })
+    .await;
+    let a = td.get("/api/agents/filed%2Flead").await;
+    assert_eq!(a.ok()["system_prompt"], "Lead {{agent.name}}.\n");
+    let t = td.get("/api/templates/filed%2Fworker").await;
+    assert_eq!(t.ok()["spec"]["system_prompt"], "Lead {{agent.name}}.\n");
+}
+
+const FLEET_SP: &str = r#"
+name = "sp"
+
+[[projects]]
+name = "sp"
+
+[[projects.templates]]
+name = "worker"
+harness = "claude"
+system_prompt = """
+You are a careful worker.
+Write tests first.
+"""
+
+[[projects.agents]]
+name = "lead"
+harness = "codex"
+system_prompt = "You lead {{project.name}}."
+
+[[projects.agents]]
+name = "w1"
+template = "worker"
+"#;
+
+/// A fleet sets `system_prompt` on an agent and a template, and the
+/// export applies again with no change.
+#[tokio::test]
+async fn fleets_carry_the_system_prompt() {
+    let td = TestDaemon::start().await;
+    td.post("/api/fleet/apply", json!({"content": FLEET_SP}))
+        .await
+        .ok();
+    let lead = td.get("/api/agents/sp%2Flead").await;
+    assert_eq!(lead.ok()["system_prompt"], "You lead {{project.name}}.");
+    let w1 = td.get("/api/agents/sp%2Fw1").await;
+    assert_eq!(
+        w1.ok()["system_prompt"],
+        "You are a careful worker.\nWrite tests first.\n"
+    );
+    let e = td.get("/api/fleet/export?project=sp").await;
+    let content = e.ok()["content"].as_str().unwrap().to_owned();
+    assert!(content.contains("system_prompt"), "{content}");
+    let plan = td
+        .post("/api/fleet/plan", json!({"content": content}))
+        .await;
+    let s = &plan.ok()["summary"];
+    assert_eq!(s["create"], 0, "{}", plan.body);
+    assert_eq!(s["update"], 0, "{}", plan.body);
+    // A changed text is an update.
+    let changed = FLEET_SP.replace("You lead", "You run");
+    let plan = td
+        .post("/api/fleet/plan", json!({"content": changed}))
+        .await;
+    assert_eq!(plan.ok()["summary"]["update"], 1, "{}", plan.body);
+    // `system_prompt_file` needs the file path: the API refuses it.
+    let v = td
+        .post(
+            "/api/fleet/validate",
+            json!({"content": FLEET_SP.replace("system_prompt = \"You lead {{project.name}}.\"", "system_prompt_file = \"lead.md\"")}),
+        )
+        .await;
+    assert_eq!(v.ok()["valid"], false, "{}", v.body);
+    assert!(
+        v.body.to_string().contains("system_prompt_file"),
+        "{}",
+        v.body
+    );
+}

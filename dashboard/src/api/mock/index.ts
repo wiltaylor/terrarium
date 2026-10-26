@@ -74,7 +74,7 @@ import { harnessUpdateKind } from "../../lib/harness-update";
 import { FakePty } from "./pty";
 import { createScheduleMock, type ScheduleCaller } from "./schedules";
 import { createEventSourceMock } from "./eventSources";
-import { applyTemplate, createTemplateMock, resolveTemplate, templateRef } from "./templates";
+import { applyTemplate, createTemplateMock, resolveTemplate, systemPromptError, templateRef } from "./templates";
 import { createTranscriptStream, encodeTranscriptFrame } from "../sse";
 import { appendBlock, fakeReply, mockModel, titleOf, type Draft as BlockDraft } from "./transcripts";
 
@@ -1526,6 +1526,8 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           const tpl = "template" in body && body.template ? resolveTemplate(w.templates, body.template, body.project, fail) : undefined;
           const def = tpl ? applyTemplate(tpl.spec, body) : (body as AgentDef);
           if (!def.harness) fail(422, "invalid", "missing field `harness`");
+          const sp = systemPromptError(def.system_prompt);
+          if (sp) fail(422, "invalid", sp, { field: "system_prompt" });
           if (!NAME_RE.test(def.name)) fail(422, "invalid", `\`${def.name}\` is not a valid name`);
           if (w.agents.some((a) => a.project === def.project && a.name === def.name)) fail(409, "conflict", `agent \`${def.project}/${def.name}\` exists`);
           if (def.policy?.mail_to.some((m) => !m.trim())) fail(422, "invalid", "policy.mail_to has an empty entry");
@@ -1539,6 +1541,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
             ...(def.subscription ? { subscription: def.subscription } : {}),
             ...(def.model ? { model: def.model } : {}),
             ...(def.prompt ? { prompt: def.prompt } : {}),
+            ...(def.system_prompt ? { system_prompt: def.system_prompt } : {}),
             workspace: `/state/agents/${id}/workspace`,
             roles: (def.roles ?? []).filter((r): r is Role => r !== "member"),
             // Like the daemon: `cross_project` is left out when empty.
@@ -1558,10 +1561,14 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
         reply(() => {
           const a = agent(id);
           if (a.source === "file") fail(409, "file_managed", `agent \`${a.project}/${a.name}\` is declared in a definition file; edit the file, then POST /api/reload`);
+          const sp = systemPromptError(patch.system_prompt);
+          if (sp) fail(422, "invalid", sp, { field: "system_prompt" });
           if (patch.harness) a.harness = patch.harness;
           if (patch.subscription !== undefined) a.subscription = patch.subscription || undefined;
           if (patch.model !== undefined) a.model = patch.model || undefined;
           if (patch.prompt !== undefined) a.prompt = patch.prompt || undefined;
+          // Applies at the next start, like the daemon.
+          if (patch.system_prompt !== undefined) a.system_prompt = patch.system_prompt || undefined;
           if (patch.policy) a.policy = { targets: patch.policy.targets, mail_to: patch.policy.mail_to, ...(patch.policy.cross_project?.length ? { cross_project: patch.policy.cross_project } : {}) };
           if (patch.restart) a.restart = patch.restart;
           a.updated_at = iso();

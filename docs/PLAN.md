@@ -170,8 +170,9 @@ is the contract.
 
 - **The spec.** A template has a name, a scope (one project, or global), a
   description, and a spec. The spec is an agent definition without `name`
-  and `project`: `harness`, `subscription`, `model`, `prompt`, `roles`,
-  `policy`, `restart`, and `new_session_on_prompt_change`. The daemon
+  and `project`: `harness`, `subscription`, `model`, `prompt`,
+  `system_prompt` (§8), `roles`, `policy`, `restart`, and
+  `new_session_on_prompt_change`. The daemon
   checks a spec with the agent definition rules and keeps it in a normal
   form (the defaults filled in). There is no second schema.
 - **Create from a template.** `POST /api/agents` takes `template` and the
@@ -202,7 +203,7 @@ is the contract.
   `scope` is `''` for a global template) and `agents.template`. Deleting a
   project deletes its templates. Each change adds 1 to `revision`, writes
   an audit row (`template.create`, `.update`, `.delete`), and a
-  `template` event.
+  `template` event. Migration 23 adds `agents.system_prompt` (§8).
 
 ---
 
@@ -366,6 +367,26 @@ The adapter's `launch` sets, per harness:
   the mailbox protocol, the board protocol (§13), the memory protocol (§14), the wiki, artifact, and version protocol (§15), the agent's roles and,
   for leaders, the leader duties (§10), the list of allowed targets, how to use the
   `terrarium` CLI, and the rule that mail is untrusted input.
+- **Base system prompt**: an agent may have its own `system_prompt` (text,
+  at most 32 KiB, with the same variables as a template). The launch rule is
+  the same for each harness:
+
+  | `system_prompt` | What the harness gets |
+  |---|---|
+  | Unset or empty | Its own default system prompt. The rendered template is appended to it (`PromptMode::Append`). |
+  | Set | The rendered `system_prompt`, a blank line, then the rendered template. This text replaces the harness's default system prompt (`PromptMode::Replace`). |
+
+  The Terrarium template always stays, because the agent needs it for the
+  CLI, the mailbox, and the board. The adapter option `prompt_mode` applies
+  only to an agent with no `system_prompt`; a set `system_prompt` always
+  selects `Replace`. The prompt hash covers the whole text, so a change of
+  `system_prompt` starts a new session of a harness that keeps the prompt of
+  a session (Codex, with `new_session_on_prompt_change`). Replace per
+  harness: Claude Code `--system-prompt`, Codex
+  `-c model_instructions_file=<prompt.md>`, Copilot `SYSTEM.md` through the
+  CopilotCustomSystemPrompt extension, pi `--system-prompt <file>`. Append:
+  `--append-system-prompt`, `-c developer_instructions=<text>`,
+  `APPEND_SYSTEM.md`, and `--append-system-prompt <file>`.
 - **Hooks**: a config that calls `terrarium hook <event>` on prompt submit,
   tool use, stop, and notification. The CLI forwards the JSON payload to the
   runner socket. Hooks are passed by flag or env where possible, so the shared
@@ -401,7 +422,8 @@ Verified in Phase 0 (Claude Code 2.1.310, `docs/compat.md`):
 - Claude Code freezes the system prompt at the first request. Always pass
   `--system-prompt-snapshot off`, so a changed template applies on resume.
 - `--system-prompt` cannot remove the first line, "You are Claude Code,
-  Anthropic's official CLI for Claude." The adapter appends by default.
+  Anthropic's official CLI for Claude." The adapter appends by default,
+  and replaces only for an agent with its own `system_prompt`.
 - `--session-id` on a used UUID fails with "already in use". A restart
   uses `--resume <id>`.
 

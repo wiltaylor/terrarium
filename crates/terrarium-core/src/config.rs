@@ -66,6 +66,15 @@ pub struct AgentDef {
     /// The prompt template name under `prompts/`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
+    /// The base system prompt (PLAN §8), with the same `{{...}}`
+    /// variables as a prompt template. Set: it replaces the harness's
+    /// default system prompt, and the rendered `prompt` template comes
+    /// after it. Unset or empty: the harness keeps its default prompt, and
+    /// the rendered template is appended to it. At most
+    /// [`SYSTEM_PROMPT_MAX`] bytes. A file can give `system_prompt_file`
+    /// instead (see [`inline_system_prompt_file`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub roles: Vec<Role>,
     #[serde(default)]
@@ -82,6 +91,67 @@ pub struct AgentDef {
 
 fn yes() -> bool {
     true
+}
+
+/// The most bytes in an agent's `system_prompt`.
+pub const SYSTEM_PROMPT_MAX: usize = 32 * 1024;
+
+/// The key in a definition file that names a file with the system prompt.
+pub const SYSTEM_PROMPT_FILE_KEY: &str = "system_prompt_file";
+
+/// Is `text` a system prompt that the agent may have? An empty text is
+/// valid: it means "no system prompt".
+pub fn check_system_prompt(text: &str) -> std::result::Result<(), String> {
+    if text.len() > SYSTEM_PROMPT_MAX {
+        return Err(format!(
+            "`system_prompt` has {} bytes; the limit is {SYSTEM_PROMPT_MAX}",
+            text.len()
+        ));
+    }
+    Ok(())
+}
+
+/// A system prompt as an agent keeps it: checked, and `None` for a text
+/// that is empty or only white space.
+pub fn clean_system_prompt(text: Option<String>) -> std::result::Result<Option<String>, String> {
+    match text {
+        Some(t) if !t.trim().is_empty() => {
+            check_system_prompt(&t)?;
+            Ok(Some(t))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// Replace `system_prompt_file = "<path>"` in a definition table with
+/// `system_prompt = "<the file text>"`. A relative path is relative to
+/// `base`, the directory of the definition file. A table with both keys
+/// is an error.
+pub fn inline_system_prompt_file(
+    table: &mut toml::Table,
+    base: &Path,
+) -> std::result::Result<(), String> {
+    let Some(v) = table.remove(SYSTEM_PROMPT_FILE_KEY) else {
+        return Ok(());
+    };
+    let toml::Value::String(rel) = v else {
+        return Err(format!("`{SYSTEM_PROMPT_FILE_KEY}` must be a string"));
+    };
+    if table.contains_key("system_prompt") {
+        return Err(format!(
+            "set `system_prompt` or `{SYSTEM_PROMPT_FILE_KEY}`, not both"
+        ));
+    }
+    let path = base.join(&rel);
+    let text = std::fs::read_to_string(&path).map_err(|e| {
+        format!(
+            "cannot read `{SYSTEM_PROMPT_FILE_KEY}` {}: {e}",
+            path.display()
+        )
+    })?;
+    check_system_prompt(&text)?;
+    table.insert("system_prompt".into(), toml::Value::String(text));
+    Ok(())
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -233,6 +303,12 @@ fn default_alert_at() -> u8 {
 /// A definition that has a name, which can come from the file stem.
 pub trait Named {
     fn name_mut(&mut self) -> &mut String;
+
+    /// Change the file's table before it is read: for example, read the
+    /// files that it names. `base` is the directory of the file.
+    fn prepare(_table: &mut toml::Table, _base: &Path) -> std::result::Result<(), String> {
+        Ok(())
+    }
 }
 
 macro_rules! named {
@@ -244,7 +320,33 @@ macro_rules! named {
         }
     )*};
 }
-named!(AgentDef, ProjectDef, TargetDef, SubscriptionDef);
+named!(TargetDef, SubscriptionDef);
+
+impl Named for AgentDef {
+    fn name_mut(&mut self) -> &mut String {
+        &mut self.name
+    }
+
+    fn prepare(table: &mut toml::Table, base: &Path) -> std::result::Result<(), String> {
+        inline_system_prompt_file(table, base)
+    }
+}
+
+impl Named for ProjectDef {
+    fn name_mut(&mut self) -> &mut String {
+        &mut self.name
+    }
+
+    /// Each `[[templates]]` may name a `system_prompt_file`.
+    fn prepare(table: &mut toml::Table, base: &Path) -> std::result::Result<(), String> {
+        if let Some(toml::Value::Array(list)) = table.get_mut("templates") {
+            for t in list.iter_mut().filter_map(toml::Value::as_table_mut) {
+                inline_system_prompt_file(t, base)?;
+            }
+        }
+        Ok(())
+    }
+}
 
 /// Parse one definition file. The file stem fills in a missing name.
 pub fn load_file<T>(path: &Path) -> Result<T>
@@ -255,10 +357,14 @@ where
         path: path.to_owned(),
         source,
     })?;
-    let mut def: T = toml::from_str(&text).map_err(|source| Error::Toml {
+    let toml_error = |source| Error::Toml {
         path: path.to_owned(),
         source: Box::new(source),
-    })?;
+    };
+    let mut table: toml::Table = toml::from_str(&text).map_err(toml_error)?;
+    let base = path.parent().unwrap_or(Path::new("."));
+    T::prepare(&mut table, base).map_err(|e| Error::Other(format!("{}: {e}", path.display())))?;
+    let mut def: T = table.try_into().map_err(toml_error)?;
     let name = def.name_mut();
     if name.is_empty()
         && let Some(stem) = path.file_stem()
@@ -499,6 +605,85 @@ alert_at = 80                          # percent of any window
         assert_eq!(names, ["lead", "worker"]);
         assert_eq!(defs.targets[0].name, "lab-win11");
         assert!(defs.subscriptions.is_empty());
+    }
+
+    // PLAN §8, an agent with its own base system prompt.
+    const AGENT_SYSTEM_PROMPT: &str = r#"
+project = "terrarium"
+harness = "codex"
+prompt = "default"
+system_prompt = """
+You are a careful reviewer for {{project.name}}.
+"""
+"#;
+
+    #[test]
+    fn agent_system_prompt_example_round_trips() {
+        let def: AgentDef = round_trip(AGENT_SYSTEM_PROMPT);
+        assert_eq!(
+            def.system_prompt.as_deref(),
+            Some("You are a careful reviewer for {{project.name}}.\n")
+        );
+        let none: AgentDef = round_trip(AGENT_LEAD);
+        assert_eq!(none.system_prompt, None);
+        assert!(!toml::to_string(&none).unwrap().contains("system_prompt"));
+    }
+
+    #[test]
+    fn system_prompt_file_is_relative_to_the_definition_file() {
+        let dir = std::env::temp_dir().join(format!("terrarium-core-sp-{}", ulid::Ulid::new()));
+        std::fs::create_dir_all(dir.join("agents")).expect("mkdir");
+        std::fs::create_dir_all(dir.join("projects")).expect("mkdir");
+        std::fs::write(dir.join("agents/lead.md"), "Lead {{agent.name}}.\n").expect("write");
+        std::fs::write(
+            dir.join("agents/lead.toml"),
+            "project = \"p\"\nharness = \"pi\"\nsystem_prompt_file = \"lead.md\"\n",
+        )
+        .expect("write");
+        std::fs::write(
+            dir.join("agents/both.toml"),
+            "project = \"p\"\nharness = \"pi\"\nsystem_prompt = \"x\"\nsystem_prompt_file = \"lead.md\"\n",
+        )
+        .expect("write");
+        std::fs::write(
+            dir.join("agents/gone.toml"),
+            "project = \"p\"\nharness = \"pi\"\nsystem_prompt_file = \"nope.md\"\n",
+        )
+        .expect("write");
+        std::fs::write(
+            dir.join("projects/p.toml"),
+            "[[templates]]\nname = \"w\"\nharness = \"pi\"\nsystem_prompt_file = \"../agents/lead.md\"\n",
+        )
+        .expect("write");
+        let (defs, errors) = Definitions::load(&dir);
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        let all = errors
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(all.contains("not both"), "{all}");
+        assert!(all.contains("nope.md"), "{all}");
+        assert_eq!(defs.agents.len(), 1);
+        assert_eq!(
+            defs.agents[0].system_prompt.as_deref(),
+            Some("Lead {{agent.name}}.\n")
+        );
+        assert_eq!(
+            defs.projects[0].templates[0].spec["system_prompt"],
+            "Lead {{agent.name}}.\n"
+        );
+    }
+
+    #[test]
+    fn system_prompt_limit_and_empty_text() {
+        assert_eq!(clean_system_prompt(None), Ok(None));
+        assert_eq!(clean_system_prompt(Some(" \n".into())), Ok(None));
+        let max = "x".repeat(SYSTEM_PROMPT_MAX);
+        assert_eq!(clean_system_prompt(Some(max.clone())), Ok(Some(max)));
+        let e = clean_system_prompt(Some("x".repeat(SYSTEM_PROMPT_MAX + 1))).unwrap_err();
+        assert!(e.contains("32768"), "{e}");
     }
 
     #[test]

@@ -32,6 +32,7 @@ pub const SPEC_KEYS: &[&str] = &[
     "subscription",
     "model",
     "prompt",
+    "system_prompt",
     "roles",
     "policy",
     "restart",
@@ -112,7 +113,9 @@ pub fn to_def(spec: &Spec, name: &str, project: &str) -> Result<AgentDef, String
     let mut m = spec.clone();
     m.insert("name".into(), Value::String(name.to_owned()));
     m.insert("project".into(), Value::String(project.to_owned()));
-    serde_json::from_value(Value::Object(m)).map_err(|e| e.to_string())
+    let mut def: AgentDef = serde_json::from_value(Value::Object(m)).map_err(|e| e.to_string())?;
+    def.system_prompt = crate::config::clean_system_prompt(def.system_prompt)?;
+    Ok(def)
 }
 
 /// The spec of an agent definition: its fields without `name` and
@@ -139,6 +142,21 @@ pub fn normalize(spec: &Spec) -> Result<Spec, String> {
 /// back on its own.
 pub fn spec_from_toml(text: &str) -> Result<(Spec, Option<String>), String> {
     let table: toml::Table = toml::from_str(text).map_err(|e| e.message().trim().to_owned())?;
+    Ok(spec_from_table(table))
+}
+
+/// [`spec_from_toml`] for a file in `dir`: a `system_prompt_file` in it
+/// is read, relative to `dir`, into `system_prompt`.
+pub fn spec_from_toml_in(
+    text: &str,
+    dir: &std::path::Path,
+) -> Result<(Spec, Option<String>), String> {
+    let mut table: toml::Table = toml::from_str(text).map_err(|e| e.message().trim().to_owned())?;
+    crate::config::inline_system_prompt_file(&mut table, dir)?;
+    Ok(spec_from_table(table))
+}
+
+fn spec_from_table(table: toml::Table) -> (Spec, Option<String>) {
     let mut m = match serde_json::to_value(table) {
         Ok(Value::Object(m)) => m,
         _ => Map::new(),
@@ -148,7 +166,7 @@ pub fn spec_from_toml(text: &str) -> Result<(Spec, Option<String>), String> {
     let description = m
         .remove("description")
         .and_then(|d| d.as_str().map(str::to_owned));
-    Ok((m, description))
+    (m, description)
 }
 
 /// Put `over` over `base` (the rules are in the module docs).
@@ -187,6 +205,7 @@ fn full(def: &AgentDef) -> Spec {
     m.insert("subscription".into(), to(&def.subscription));
     m.insert("model".into(), to(&def.model));
     m.insert("prompt".into(), to(&def.prompt));
+    m.insert("system_prompt".into(), to(&def.system_prompt));
     m.insert("roles".into(), to(&def.roles));
     let mut p = Map::new();
     p.insert("targets".into(), to(&def.policy.targets));
@@ -203,8 +222,9 @@ fn full(def: &AgentDef) -> Spec {
 
 /// The fields of `def` that differ from the template `spec`: the keys an
 /// agent entry with `template` must set to make `def`. `None` when no
-/// entry can make it: the template sets `subscription`, `model`, or
-/// `prompt`, and `def` does not (a file has no `null`).
+/// entry can make it: the template sets `subscription`, `model`,
+/// `prompt`, or `system_prompt`, and `def` does not (a file has no
+/// `null`).
 pub fn overrides_for(def: &AgentDef, spec: &Spec) -> Option<Spec> {
     let base = full(&to_def(spec, &def.name, &def.project).ok()?);
     let want = full(def);
@@ -321,6 +341,34 @@ mod tests {
         assert_eq!(Value::Object(s), json!({"harness": "pi"}));
         assert_eq!(d.as_deref(), Some("x"));
         assert!(spec_from_toml("harness = ").is_err());
+    }
+
+    #[test]
+    fn system_prompt_is_a_spec_key() {
+        let t = spec(json!({"harness": "codex", "system_prompt": "Base."}));
+        let def = to_def(&t, "w", "p").unwrap();
+        assert_eq!(def.system_prompt.as_deref(), Some("Base."));
+        // An empty text is no system prompt; the normal form drops it.
+        let e = spec(json!({"harness": "codex", "system_prompt": " "}));
+        assert_eq!(
+            Value::Object(normalize(&e).unwrap()),
+            json!({"harness": "codex", "restart": "on-failure", "policy": {"targets": [], "mail_to": ["*"]}})
+        );
+        // A body `null` clears the template's text.
+        let m = merge(&t, &spec(json!({"system_prompt": null})));
+        assert_eq!(to_def(&m, "w", "p").unwrap().system_prompt, None);
+        // An agent without the template's text: no entry can say that.
+        let mut other = def.clone();
+        other.system_prompt = None;
+        assert_eq!(overrides_for(&other, &t), None);
+        other.system_prompt = Some("Own.".into());
+        assert_eq!(
+            Value::Object(overrides_for(&other, &t).unwrap()),
+            json!({"system_prompt": "Own."})
+        );
+        let long = spec(json!({"harness": "codex",
+                               "system_prompt": "x".repeat(crate::config::SYSTEM_PROMPT_MAX + 1)}));
+        assert!(normalize(&long).is_err());
     }
 
     #[test]

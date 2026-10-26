@@ -1600,6 +1600,28 @@ describe("agent templates (docs/api.md §21)", () => {
     await expect(api.agents.create({ name: "r2", project: "terrarium", template: "nope" })).rejects.toMatchObject({ status: 404 });
   });
 
+  it("keeps system_prompt: create, template override and clear, patch, from-agent, the 32 KiB limit", async () => {
+    const api = mock();
+    const a = await api.agents.create({ name: "sp1", project: "terrarium", harness: "claude", system_prompt: "Be brief." });
+    expect(a.system_prompt).toBe("Be brief.");
+    expect((await api.agents.create({ name: "sp2", project: "terrarium", harness: "claude", system_prompt: "" })).system_prompt).toBeUndefined();
+    await expect(api.agents.create({ name: "sp3", project: "terrarium", harness: "claude", system_prompt: "a".repeat(32769) })).rejects.toMatchObject({ status: 422, code: "invalid" });
+    // Patch: a new text, then null clears it.
+    expect((await api.agents.update(a.id, { system_prompt: "Be terse." })).system_prompt).toBe("Be terse.");
+    await expect(api.agents.update(a.id, { system_prompt: "a".repeat(32769) })).rejects.toMatchObject({ status: 422, code: "invalid" });
+    const t = await api.templates.fromAgent(a.id, { name: "sp-tpl" });
+    expect(t.spec.system_prompt).toBe("Be terse.");
+    expect((await api.agents.update(a.id, { system_prompt: null })).system_prompt).toBeUndefined();
+    // A template's system_prompt: copied at the create; the body wins; null clears.
+    expect((await api.templates.resolve("sp-tpl", "terrarium")).agent.system_prompt).toBe("Be terse.");
+    expect((await api.agents.create({ name: "sp4", project: "terrarium", template: "sp-tpl" })).system_prompt).toBe("Be terse.");
+    expect((await api.agents.create({ name: "sp5", project: "terrarium", template: "sp-tpl", system_prompt: "Mine." })).system_prompt).toBe("Mine.");
+    expect((await api.agents.create({ name: "sp6", project: "terrarium", template: "sp-tpl", system_prompt: null })).system_prompt).toBeUndefined();
+    await expect(api.templates.create({ name: "big", project: null, spec: { harness: "claude", system_prompt: "a".repeat(32769) } })).rejects.toMatchObject({ status: 422, details: { field: "spec" } });
+    // An empty one is left out of the spec.
+    expect((await api.templates.create({ name: "empty-sp", project: null, spec: { harness: "claude", system_prompt: "" } })).spec).not.toHaveProperty("system_prompt");
+  });
+
   it("makes a template from an agent, in the agent's project by default", async () => {
     const api = mock();
     const t = await api.templates.fromAgent("terrarium/lead", { name: "lead-copy" });

@@ -906,6 +906,11 @@ const MIGRATIONS: &[&str] = &[
     );
     ALTER TABLE agents ADD COLUMN template TEXT;
     "#,
+    // 23: the agent's own base system prompt (PLAN §8). NULL: the harness
+    // keeps its default prompt, and the rendered template is appended.
+    r#"
+    ALTER TABLE agents ADD COLUMN system_prompt TEXT;
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call

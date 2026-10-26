@@ -62,6 +62,31 @@ at the next start or restart of the agent.
   does not fall back to the default.
 - A name with `/` or `..` is not valid.
 
+## The base system prompt
+
+A template is not the whole system prompt. By default the harness keeps its
+own system prompt, and the adapter appends the rendered template to it.
+
+An agent can also have its own base system prompt: `system_prompt` in the
+agent definition (text, at most 32 KiB), `--system-prompt <text>` or
+`--system-prompt-file <path>` on `terrarium agent new|set` and
+`terrarium template new|edit`, or the "System prompt" field in the
+dashboard. `--no-system-prompt` clears it. When it is set:
+
+1. The daemon renders `system_prompt` with the variables below.
+2. `prompt.md` gets the rendered `system_prompt`, a blank line, then the
+   rendered template.
+3. The adapter gives that text to the harness in place of the harness's
+   default system prompt (`--system-prompt`, `model_instructions_file`,
+   Copilot `SYSTEM.md`, pi `--system-prompt`).
+
+The Terrarium template always stays after the base prompt. The agent needs
+it for the CLI, the mailbox, and the board. A base prompt replaces the
+harness's tool guidance too (Claude Code keeps only its first line, pi
+keeps only the working directory line), so tell the model how to work in
+the workspace. A change applies at the next start or restart. An agent or
+fleet file can give `system_prompt_file = "<path>"`, relative to the file.
+
 ## Variables
 
 Write a variable as `{{name}}`. Spaces inside the braces are allowed. An

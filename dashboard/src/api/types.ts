@@ -156,6 +156,8 @@ export interface AgentDef {
   model?: string;
   /** The prompt template name under `prompts/`. */
   prompt?: string;
+  /** Replaces the harness's default system prompt. Terrarium's protocol prompt is added after it. Absent: the harness default. At most 32 KiB. */
+  system_prompt?: string | null;
   roles?: Role[];
   policy?: AgentPolicy;
   restart?: RestartPolicy;
@@ -167,7 +169,7 @@ export interface AgentDef {
  * The body of `POST /api/agents` (docs/api.md §6.1, §21). With `template`,
  * only `name` and `project` are needed: each field given overrides the
  * template's field, `policy` merges per key, and `null` clears
- * `subscription`, `model`, or `prompt`.
+ * `subscription`, `model`, `prompt`, or `system_prompt`.
  */
 export type AgentCreate =
   | AgentDef
@@ -180,11 +182,12 @@ export type AgentCreate =
         prompt?: string | null;
       });
 
-/** `PATCH /api/agents/{id}`. Name, project, and roles do not change here. `null` clears subscription, model, or prompt; an absent field does not change. */
+/** `PATCH /api/agents/{id}`. Name, project, and roles do not change here. `null` clears subscription, model, prompt, or system_prompt; an absent field does not change. A new system_prompt applies at the next start. */
 export type AgentPatch = Partial<Pick<AgentDef, "harness" | "policy" | "restart">> & {
   subscription?: string | null;
   model?: string | null;
   prompt?: string | null;
+  system_prompt?: string | null;
 };
 
 /** `subscription_detail` of `GET /api/agents/{id}`: the agent's subscription, when it exists. */
@@ -207,6 +210,8 @@ export interface Agent {
   subscription?: string;
   model?: string;
   prompt?: string;
+  /** Replaces the harness's default system prompt. Absent or null: the harness default. */
+  system_prompt?: string | null;
   workspace: string;
   status: AgentStatus;
   /** Roles above `member`. */

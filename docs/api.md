@@ -713,6 +713,7 @@ An agent is the core `Agent` with bookkeeping fields:
 |---|---|
 | `harness` | `claude`, `codex`, `copilot`, `pi`. |
 | `subscription`, `model`, `prompt` | Absent when not set. |
+| `system_prompt` | The agent's base system prompt (below). Absent when not set. |
 | `roles` | Roles above `member`: `project_admin`, `sysadmin`. |
 | `status` | `starting`, `idle`, `working`, `blocked`, `error`, `stopped`, `restarting`. |
 | `session` | The harness session ID of the current session, when known. |
@@ -727,7 +728,7 @@ An agent is the core `Agent` with bookkeeping fields:
 | `GET /api/agents?project=` | | `200` agents by ID | read; an agent defaults to its project |
 | `POST /api/agents` | an agent definition, or `template` and the fields that differ (§21.3) | `201` agent | project_admin of `project`; some `policy` entries need sysadmin (below) |
 | `GET /api/agents/{id}` | | `200` agent, with `subscription_detail` (below) | read |
-| `PATCH /api/agents/{id}` | `{"harness"?, "subscription"?, "model"?, "prompt"?, "policy"?, "restart"?, "new_session_on_prompt_change"?}` | `200` agent | project_admin; some `policy` entries need sysadmin (below) |
+| `PATCH /api/agents/{id}` | `{"harness"?, "subscription"?, "model"?, "prompt"?, "system_prompt"?, "policy"?, "restart"?, "new_session_on_prompt_change"?}` | `200` agent | project_admin; some `policy` entries need sysadmin (below) |
 | `DELETE /api/agents/{id}` | `?confirm=true` when live; `?keep_workspace=true` | `204` | project_admin |
 
 `DELETE` stops a live agent, waits for it to end (up to 10 s), and moves
@@ -754,6 +755,23 @@ instead of a resume. The status reason is `new session: the prompt
 changed`. The old session stays in the history. `POST /api/agents` without
 the field sets `true`, the same as an agent file.
 
+`system_prompt` (optional, at most 32 KiB, else `422 invalid`): the
+agent's base system prompt (PLAN §8). It can use the variables of the
+prompt templates (`prompts/README.md`). An empty text is the same as no
+text.
+
+- Not set: the harness keeps its own default system prompt, and the
+  rendered `prompt` template is appended to it.
+- Set: the rendered `system_prompt`, a blank line, and the rendered
+  `prompt` template replace the harness's default system prompt. The
+  Terrarium template always stays.
+
+A change applies at the next start or restart. The prompt hash covers the
+whole text, so with `new_session_on_prompt_change` a changed
+`system_prompt` starts a new Codex session. The dashboard and the CLI
+show the text as plain text. The audit row of a `PATCH` says `set` or
+`cleared`, not the text.
+
 A harness that takes a changed prompt on a resume (Claude Code with
 `--system-prompt-snapshot off`, pi) resumes with the new prompt. The daemon
 then writes the new hash to `private/session-prompt.sha256` and records a
@@ -773,7 +791,8 @@ It is absent when the harness keeps its own default. The field has no
 secret and no quota numbers (those are in `GET /api/usage/me`).
 
 `PATCH` changes only the fields in the body. Send `null` for
-`subscription`, `model`, or `prompt` to clear it (`{"subscription": null}`).
+`subscription`, `model`, `prompt`, or `system_prompt` to clear it
+(`{"subscription": null}`). An empty `system_prompt` also clears it.
 `null` for the other fields changes nothing.
 
 `roles` in the definition need the grant rights of §3. `policy.cross_project`
@@ -3687,7 +3706,7 @@ A template:
 |---|---|
 | `name` | 1-63 of `a-z`, `0-9`, `-`, `_`. Unique in its scope: the project, or the global scope. A project template and a global template can have the same name. |
 | `project` | The project. `null` is a global template. |
-| `spec` | An agent definition (§6.1) without `name` and `project`: `harness` (required), `subscription`, `model`, `prompt`, `roles`, `policy`, `restart`, `new_session_on_prompt_change`. The daemon checks it with the rules of an agent definition and keeps it in a normal form: the defaults of `policy` and `restart` filled in, no empty `roles`, no `new_session_on_prompt_change` when it is `true`. Another key (`name`, `project`, `template`, or an unknown key) is `422 invalid` with `details.field = "spec"`. |
+| `spec` | An agent definition (§6.1) without `name` and `project`: `harness` (required), `subscription`, `model`, `prompt`, `system_prompt`, `roles`, `policy`, `restart`, `new_session_on_prompt_change`. The daemon checks it with the rules of an agent definition and keeps it in a normal form: the defaults of `policy` and `restart` filled in, no empty `roles`, no empty `system_prompt`, no `new_session_on_prompt_change` when it is `true`. A `system_prompt` over 32 KiB is `422 invalid`. Another key (`name`, `project`, `template`, or an unknown key) is `422 invalid` with `details.field = "spec"`. |
 | `revision` | `1` at the create. Each change of the name, the description, or the spec adds `1`. A `PATCH` with the same values changes nothing. |
 | `source` | `api`, `file` (a `[[templates]]` of `projects/<name>.toml`), or `fleet:<name>` (§18.1). A `file` template refuses `PATCH` and `DELETE` with `409 file_managed`. |
 
@@ -3743,7 +3762,8 @@ are required; each other field of the definition is optional.
    each of `targets`, `mail_to`, and `cross_project` in the body wins over
    the same key of the spec. A list is not merged: the body's list
    replaces the spec's list. `null` removes the field, so the agent gets
-   the default (`"model": null` clears the template's model;
+   the default (`"model": null` clears the template's model, and
+   `"system_prompt": null` gives the harness's default system prompt;
    `"policy": {"mail_to": null}` gives `["*"]`).
 3. **Check.** The result is an agent definition, and the create checks it
    as it checks any definition (§6.1): project_admin of `project`, the
@@ -3775,6 +3795,14 @@ name = "w1"
 template = "worker"     # or "global:worker"
 model = "sonnet"        # a key of the entry wins over the template
 ```
+
+A template or an agent entry can set `system_prompt = """..."""`. A fleet
+file or a project file read from disk can give `system_prompt_file =
+"<path>"` instead, relative to the file: the CLI (`fleet validate | plan |
+apply`) and the config dir read the file into `system_prompt`. A fleet
+text that the API gets with `system_prompt_file` is an error, because the
+daemon does not know the path. `GET /api/fleet/export` writes
+`system_prompt`.
 
 A fleet agent entry with `template` gets `[defaults]`, then the
 template, then its own keys, with the merge of §21.3. The template comes

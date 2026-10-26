@@ -211,6 +211,13 @@ dashboard, use the **Templates** page, the **Template** select of the
 **New agent** form, or **Save as template** on an agent page
 ([api.md §21](api.md#21-agent-templates)).
 
+Each harness keeps its own default system prompt, and Terrarium adds its
+protocol prompt after it. To replace the harness's default prompt, give
+the agent or the template a base system prompt: `--system-prompt <text>`
+or `--system-prompt-file <path>`, or the **System prompt** field in the
+dashboard. Terrarium's protocol prompt still comes after it. The change
+applies at the next start or restart (`prompts/README.md`).
+
 To use the CLI from the host over TCP, build it and set `TERRARIUM_URL`.
 `just` reads `TERRARIUM_TOKEN` from `.env`:
 

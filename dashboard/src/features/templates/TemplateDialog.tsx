@@ -126,7 +126,7 @@ export function SaveAsTemplateDialog(props: { agent: { id: string; name: string;
           Description
           <input value={description()} onInput={(e) => setDescription(e.currentTarget.value)} />
         </label>
-        <p class="muted small">The template copies the harness, subscription, model, prompt, roles, policy, and restart policy of the agent.</p>
+        <p class="muted small">The template copies the harness, subscription, model, prompt, system prompt, roles, policy, and restart policy of the agent.</p>
         <div class="row">
           <button class="primary" type="submit" disabled={busy()}>
             Save template

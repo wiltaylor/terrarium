@@ -44,7 +44,10 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::agent_template::{self, Lookup, Spec, TemplateDef};
-use crate::config::{AgentDef, Policy, ProjectDef, RestartPolicy, SubscriptionDef, TargetDef};
+use crate::config::{
+    AgentDef, Policy, ProjectDef, RestartPolicy, SYSTEM_PROMPT_FILE_KEY, SubscriptionDef,
+    TargetDef, clean_system_prompt, inline_system_prompt_file,
+};
 use crate::harness::HarnessId;
 use crate::role::Role;
 
@@ -85,6 +88,7 @@ const AGENT_KEYS: &[&str] = &[
     "subscription",
     "model",
     "prompt",
+    "system_prompt",
     "roles",
     "policy",
     "restart",
@@ -119,6 +123,7 @@ const TEMPLATE_KEYS: &[&str] = &[
     "subscription",
     "model",
     "prompt",
+    "system_prompt",
     "roles",
     "policy",
     "restart",
@@ -142,6 +147,8 @@ pub struct FleetDefaults {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restart: Option<RestartPolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -505,11 +512,72 @@ fn clean(e: &toml::de::Error) -> String {
 
 fn unknown_keys(t: &toml::Table, known: &[&str], at: &str, issues: &mut Vec<Issue>) {
     for k in t.keys().filter(|k| !known.contains(&k.as_str())) {
+        if k == SYSTEM_PROMPT_FILE_KEY && known.contains(&"system_prompt") {
+            issues.push(Issue::error(
+                at,
+                format!(
+                    "`{k}` needs the path of the fleet file: the CLI and the config dir read it \
+                     (`inline_prompt_files`); send `system_prompt` with the text instead"
+                ),
+            ));
+            continue;
+        }
         issues.push(Issue::error(
             at,
             format!("unknown key `{k}`; known keys: {}", known.join(", ")),
         ));
     }
+}
+
+/// Read each `system_prompt_file` of a fleet file into `system_prompt`
+/// (in `[defaults]`, `[[templates]]`, `[[projects.templates]]`, and
+/// `[[projects.agents]]`). A relative path is relative to `base`, the
+/// directory of the fleet file. A text with no `system_prompt_file`
+/// comes back as it is; else the answer is the TOML written again, with
+/// no comments.
+pub fn inline_prompt_files(text: &str, base: &Path) -> Result<String, String> {
+    if !text.contains(SYSTEM_PROMPT_FILE_KEY) {
+        return Ok(text.to_owned());
+    }
+    let Ok(mut top) = toml::from_str::<toml::Table>(text) else {
+        // `parse` reports the bad TOML.
+        return Ok(text.to_owned());
+    };
+    let inline = |t: &mut toml::Table, at: &str| {
+        inline_system_prompt_file(t, base).map_err(|e| format!("{at}: {e}"))
+    };
+    let each = |v: Option<&mut toml::Value>, at: &str| -> Result<(), String> {
+        if let Some(toml::Value::Array(list)) = v {
+            for t in list.iter_mut().filter_map(toml::Value::as_table_mut) {
+                let name = t
+                    .get("name")
+                    .and_then(toml::Value::as_str)
+                    .unwrap_or("?")
+                    .to_owned();
+                inline(t, &format!("{at}.{name}"))?;
+            }
+        }
+        Ok(())
+    };
+    if let Some(toml::Value::Table(d)) = top.get_mut("defaults") {
+        inline(d, "defaults")?;
+    }
+    each(top.get_mut("templates"), "templates")?;
+    if let Some(toml::Value::Array(projects)) = top.get_mut("projects") {
+        for p in projects.iter_mut().filter_map(toml::Value::as_table_mut) {
+            let name = p
+                .get("name")
+                .and_then(toml::Value::as_str)
+                .unwrap_or("?")
+                .to_owned();
+            each(
+                p.get_mut("templates"),
+                &format!("projects.{name}.templates"),
+            )?;
+            each(p.get_mut("agents"), &format!("projects.{name}.agents"))?;
+        }
+    }
+    toml::to_string(&top).map_err(|e| e.to_string())
 }
 
 /// The tables of the array `key` in `t`, each with its place in the file.
@@ -779,7 +847,15 @@ fn project(
                 return None;
             }
             a.insert("project".into(), toml::Value::String(def.name.clone()));
-            let def: AgentDef = self::def(a, &at, issues)?;
+            let mut def: AgentDef = self::def(a, &at, issues)?;
+            // An empty text is no system prompt, as in the store.
+            def.system_prompt = match clean_system_prompt(def.system_prompt) {
+                Ok(t) => t,
+                Err(e) => {
+                    issues.push(Issue::error(&at, e));
+                    return None;
+                }
+            };
             Some(FleetAgent {
                 def,
                 start,
@@ -1749,5 +1825,70 @@ template = "reviewer"
                 .iter()
                 .any(|e| e.contains("template `_/worker`"))
         );
+    }
+
+    #[test]
+    fn system_prompt_in_agents_templates_and_files() {
+        let text = r#"
+name = "sp"
+[defaults]
+harness = "claude"
+[[projects]]
+name = "sp"
+[[projects.templates]]
+name = "worker"
+harness = "pi"
+system_prompt_file = "worker.md"
+[[projects.agents]]
+name = "lead"
+system_prompt = "Lead."
+[[projects.agents]]
+name = "quiet"
+system_prompt = ""
+[[projects.agents]]
+name = "w1"
+template = "worker"
+"#;
+        // The API gets no path: `system_prompt_file` is an error there.
+        let p = parse(text, None);
+        assert!(p.has_errors());
+        assert!(
+            p.issues
+                .iter()
+                .any(|i| i.message.contains("system_prompt_file")),
+            "{:?}",
+            p.issues
+        );
+        let dir = std::env::temp_dir().join(format!("terrarium-fleet-sp-{}", ulid::Ulid::new()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("worker.md"), "Work {{agent.name}}.\n").unwrap();
+        let inlined = inline_prompt_files(text, &dir).unwrap();
+        let missing = inline_prompt_files(text, Path::new("/nonexistent"));
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(
+            missing
+                .unwrap_err()
+                .contains("projects.sp.templates.worker")
+        );
+        let f = parse(&inlined, None).ok().unwrap();
+        let by = |n: &str| f.agents().find(|a| a.def.name == n).unwrap().def.clone();
+        assert_eq!(by("lead").system_prompt.as_deref(), Some("Lead."));
+        // An empty text is no system prompt.
+        assert_eq!(by("quiet").system_prompt, None);
+        assert_eq!(
+            by("w1").system_prompt.as_deref(),
+            Some("Work {{agent.name}}.\n")
+        );
+        // A text with no `system_prompt_file` stays as it is.
+        assert_eq!(
+            inline_prompt_files("# c\nname = \"x\"\n", Path::new("/")).unwrap(),
+            "# c\nname = \"x\"\n"
+        );
+        // Over the limit: an error.
+        let long = format!(
+            "name = \"sp\"\n[[projects]]\nname = \"sp\"\n[[projects.agents]]\nname = \"a\"\nharness = \"pi\"\nsystem_prompt = \"{}\"\n",
+            "x".repeat(crate::config::SYSTEM_PROMPT_MAX + 1)
+        );
+        assert!(parse(&long, None).has_errors());
     }
 }

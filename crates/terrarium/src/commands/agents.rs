@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use super::{agent_path, print_object, print_table, set_opt};
+use super::{agent_path, print_object_with_text, print_table, set_opt, system_prompt_value};
 use crate::api::{CliError, query};
 use crate::cli::{AgentCmd, AgentNewArgs, AgentSetArgs, AnswerArgs, RoleCmd, RolesCmd, StatusCmd};
 use crate::commands::projects::{AGENT_COLS, project_path};
@@ -17,7 +17,7 @@ pub async fn agent(ctx: &Ctx, cmd: &AgentCmd) -> anyhow::Result<()> {
         AgentCmd::Ls { all_projects } => ls(ctx, *all_projects).await,
         AgentCmd::Show { agent } => {
             let a = ctx.api.get(&agent_path(agent), vec![]).await?;
-            ctx.emit(&a, print_object)
+            ctx.emit(&a, |c, v| print_object_with_text(c, v, "system_prompt"))
         }
         AgentCmd::New(a) => new(ctx, a).await,
         AgentCmd::Set(a) => set(ctx, a).await,
@@ -158,6 +158,11 @@ pub async fn definition(ctx: &Ctx, a: &AgentNewArgs) -> anyhow::Result<Value> {
     set_opt(&mut def, "subscription", a.subscription.clone());
     set_opt(&mut def, "model", a.model.clone());
     set_opt(&mut def, "prompt", a.prompt.clone());
+    set_opt(
+        &mut def,
+        "system_prompt",
+        system_prompt_value(ctx, &a.system_prompt)?,
+    );
     set_opt(&mut def, "restart", a.restart.clone());
     set_opt(&mut def, "template", a.template.clone());
     if !a.roles.is_empty() {
@@ -226,6 +231,11 @@ async fn set(ctx: &Ctx, a: &AgentSetArgs) -> anyhow::Result<()> {
     set_opt(&mut body, "subscription", a.subscription.clone());
     set_opt(&mut body, "model", a.model.clone());
     set_opt(&mut body, "prompt", a.prompt.clone());
+    set_opt(
+        &mut body,
+        "system_prompt",
+        system_prompt_value(ctx, &a.system_prompt)?,
+    );
     set_opt(&mut body, "restart", a.restart.clone());
     if let Some(p) = &a.policy {
         let p: Value = serde_json::from_str(p)

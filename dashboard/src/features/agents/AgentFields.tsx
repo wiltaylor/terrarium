@@ -1,5 +1,5 @@
 // The agent fields that an agent and a template share: harness,
-// subscription, model, prompt, restart, roles, and policy. No name and no
+// subscription, model, prompt, system prompt, restart, roles, and policy. No name and no
 // project: the agent form and the template form add those.
 
 import { createResource, createSignal, For, Show } from "solid-js";
@@ -8,6 +8,19 @@ import { api, subscriptions } from "../../stores";
 import type { AgentFormValues } from "./form";
 import { reconcileSubscription } from "./subscription";
 import { defaultModelHint, ModelField, SubscriptionSelect } from "./SubscriptionFields";
+
+export const SYSTEM_PROMPT_HELP = "Replaces the harness's default system prompt. Terrarium's protocol instructions are always added after it.";
+
+/** The system prompt textarea. The text is user content: it stays a textarea value. */
+export function SystemPromptField(props: { value: string; onChange: (s: string) => void; label?: string }) {
+  return (
+    <label>
+      {props.label ?? "System prompt"}
+      <textarea class="mono" rows={5} value={props.value} onInput={(e) => props.onChange(e.currentTarget.value)} placeholder="Empty: the harness's default system prompt" />
+      <span class="muted small">{SYSTEM_PROMPT_HELP}</span>
+    </label>
+  );
+}
 
 const toggle = <T,>(list: T[], x: T, on: boolean) => (on ? [...new Set([...list, x])] : list.filter((y) => y !== x));
 
@@ -89,6 +102,8 @@ export function AgentFields(props: {
           </select>
         </label>
       </div>
+
+      <SystemPromptField value={v().system_prompt} onChange={(s) => set("system_prompt", s)} />
 
       <Show when={props.roles} fallback={<Show when={props.rolesNote}>{(n) => <p class="muted small">{n()}</p>}</Show>}>
         <fieldset class="row">

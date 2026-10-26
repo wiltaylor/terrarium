@@ -4783,3 +4783,122 @@ async fn templates_every_command() {
     .await;
     assert!(out.contains("from template worker (revision 2)"), "{out}");
 }
+
+/// `--system-prompt`, `--system-prompt-file`, and `--no-system-prompt` on
+/// `agent new|set` and `template new|edit`; `agent show` prints the whole
+/// text after the other fields.
+#[tokio::test]
+async fn system_prompt_flags() {
+    let path = std::env::temp_dir().join(format!("terrarium-sp-{}.md", std::process::id()));
+    std::fs::write(&path, "From a file.\nLine two.\n").unwrap();
+    let file = path.to_string_lossy().into_owned();
+    ok(
+        false,
+        &[
+            "agent",
+            "new",
+            "w",
+            "-p",
+            "terra",
+            "--harness",
+            "pi",
+            "--system-prompt-file",
+            &file,
+        ],
+        vec![(201, json!({}))],
+        vec![(
+            Post,
+            "/api/agents",
+            vec![],
+            Some(json!({"name": "w", "project": "terra", "harness": "pi",
+                        "system_prompt": "From a file.\nLine two.\n"})),
+        )],
+    )
+    .await;
+    std::fs::remove_file(&path).unwrap();
+    ok_in(
+        false,
+        &["agent", "set", "w", "--system-prompt", "-"],
+        vec![(200, json!({}))],
+        Some("From stdin."),
+        vec![(
+            Patch,
+            "/api/agents/w",
+            vec![],
+            Some(json!({"system_prompt": "From stdin."})),
+        )],
+    )
+    .await;
+    ok(
+        false,
+        &["agent", "set", "w", "--no-system-prompt"],
+        vec![(200, json!({}))],
+        vec![(
+            Patch,
+            "/api/agents/w",
+            vec![],
+            Some(json!({"system_prompt": null})),
+        )],
+    )
+    .await;
+    // The flags exclude each other.
+    for flags in [
+        ["--system-prompt", "x", "--no-system-prompt"],
+        ["--system-prompt", "x", "--system-prompt-file=f"],
+    ] {
+        let mut args = vec!["terrarium", "agent", "set", "w"];
+        args.extend(flags);
+        assert!(Cli::try_parse_from(&args).is_err(), "{args:?}");
+    }
+    let out = ok(
+        false,
+        &["agent", "show", "w"],
+        vec![(
+            200,
+            json!({"name": "w", "system_prompt": "Line one.\nLine two."}),
+        )],
+        vec![req(Get, "/api/agents/w")],
+    )
+    .await;
+    assert_eq!(out, "name  w\nsystem_prompt:\nLine one.\nLine two.\n");
+
+    // Templates: the flag sets the key; `--no-system-prompt` removes it.
+    ok(
+        false,
+        &[
+            "template",
+            "new",
+            "rev",
+            "--harness",
+            "claude",
+            "--system-prompt",
+            "Review only.",
+        ],
+        vec![(201, json!({}))],
+        vec![(
+            Post,
+            "/api/templates",
+            vec![],
+            Some(json!({"name": "rev",
+                        "spec": {"harness": "claude", "system_prompt": "Review only."}})),
+        )],
+    )
+    .await;
+    let tpl = json!({"name": "rev", "project": "terra",
+                     "spec": {"harness": "claude", "system_prompt": "Review only."}});
+    ok(
+        false,
+        &["template", "edit", "terra/rev", "--no-system-prompt"],
+        vec![(200, tpl.clone()), (200, tpl)],
+        vec![
+            req(Get, "/api/templates/terra%2Frev"),
+            (
+                Patch,
+                "/api/templates/terra%2Frev",
+                vec![],
+                Some(json!({"spec": {"harness": "claude"}})),
+            ),
+        ],
+    )
+    .await;
+}

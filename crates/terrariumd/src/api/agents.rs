@@ -229,6 +229,14 @@ async fn update(
                     "subscription": patch.subscription,
                     "model": patch.model,
                     "prompt": patch.prompt,
+                    // Not the text: it can be long.
+                    "system_prompt": patch.system_prompt.as_ref().map(|v| {
+                        if v.as_deref().is_some_and(|t| !t.trim().is_empty()) {
+                            "set"
+                        } else {
+                            "cleared"
+                        }
+                    }),
                     "policy": patch.policy,
                     "restart": patch.restart,
                 }),

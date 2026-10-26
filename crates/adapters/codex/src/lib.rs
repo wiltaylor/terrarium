@@ -56,12 +56,12 @@ pub const TESTED: &str = CODEX_PINNED.tested;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PromptMode {
     /// `-c model_instructions_file=<agent dir>/prompt.md`: the file replaces
-    /// the whole base prompt of Codex. The tools stay. The template must
-    /// then also say how to work in the workspace.
-    #[default]
+    /// the whole base prompt of Codex. The tools stay. The agent's base
+    /// system prompt must then also say how to work in the workspace.
     Replace,
     /// `-c developer_instructions=<text>`: the text goes in a `developer`
     /// message. The default Codex prompt stays.
+    #[default]
     Append,
 }
 
@@ -82,6 +82,8 @@ pub struct CodexOptions {
     /// sandbox). `None`: the agent workspace. `-C` and the trust key use
     /// this path.
     pub harness_workspace: Option<PathBuf>,
+    /// The mode for an agent with no base system prompt. See
+    /// [`Self::prompt_mode_for`].
     pub prompt_mode: PromptMode,
     /// The CLI that the hooks run.
     pub hook_program: String,
@@ -95,13 +97,26 @@ impl Default for CodexOptions {
             codex_home: PathBuf::from(HarnessId::Codex.auth_dir()),
             host_codex_home: None,
             harness_workspace: None,
-            prompt_mode: PromptMode::Replace,
+            prompt_mode: PromptMode::Append,
             hook_program: "terrarium".to_owned(),
         }
     }
 }
 
 impl CodexOptions {
+    /// The prompt mode for `agent`. An agent with its own base system
+    /// prompt (`Agent::system_prompt`, PLAN §8) always gets
+    /// [`PromptMode::Replace`]: the rendered `prompt.md` then starts with
+    /// it. Else [`Self::prompt_mode`] (default [`PromptMode::Append`]), so
+    /// the harness keeps its default prompt.
+    pub fn prompt_mode_for(&self, agent: &Agent) -> PromptMode {
+        if agent.replaces_system_prompt() {
+            PromptMode::Replace
+        } else {
+            self.prompt_mode
+        }
+    }
+
     /// The cwd of the harness process.
     pub fn harness_cwd(&self, agent: &Agent) -> PathBuf {
         self.harness_workspace
@@ -313,12 +328,29 @@ mod tests {
         );
         a.materialize(&agent, &home, Some("Agent prompt."))
             .expect("materialize");
+        // No base system prompt: the text is appended to Codex's own.
         let with = a.launch(&agent, None);
+        assert!(
+            with.args
+                .contains(&"developer_instructions=\"Agent prompt.\"".to_owned()),
+            "{:?}",
+            with.args
+        );
+        // A base system prompt: `prompt.md` replaces Codex's own.
+        let mut own = agent.clone();
+        own.system_prompt = Some("Base.".into());
+        let with = a.launch(&own, None);
         let want = format!(
             "model_instructions_file={}",
             launch::toml_string(&config::prompt_path(&agent).to_string_lossy())
         );
         assert!(with.args.contains(&want), "{:?}", with.args);
+        assert!(
+            !with
+                .args
+                .iter()
+                .any(|x| x.starts_with("developer_instructions="))
+        );
     }
 
     #[test]

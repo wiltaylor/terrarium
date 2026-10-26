@@ -33,6 +33,9 @@ pub struct Agent {
     /// The prompt template name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
+    /// See [`AgentDef::system_prompt`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
     #[serde(default)]
     pub roles: Vec<Role>,
     #[serde(default)]
@@ -54,6 +57,15 @@ fn yes() -> bool {
 }
 
 impl Agent {
+    /// True when the agent has its own base system prompt: the adapter
+    /// then replaces the harness's default prompt (PLAN §8), else it
+    /// appends the Terrarium prompt to the default one.
+    pub fn replaces_system_prompt(&self) -> bool {
+        self.system_prompt
+            .as_deref()
+            .is_some_and(|t| !t.trim().is_empty())
+    }
+
     /// Make a new agent from a definition. The workspace lives under
     /// `state_dir/agents/<ulid>/workspace`.
     pub fn from_def(def: &AgentDef, state_dir: &std::path::Path) -> Self {
@@ -71,6 +83,7 @@ impl Agent {
                 .join("workspace"),
             harness_dir: None,
             prompt: def.prompt.clone(),
+            system_prompt: def.system_prompt.clone(),
             roles: def.roles.clone(),
             policy: def.policy.clone(),
             restart: def.restart,

@@ -18,6 +18,8 @@ import { Conversation } from "./conversation/Conversation";
 import { RoleBadges } from "./AgentsPage";
 import { changeSubscription, loginText } from "./subscription";
 import { SubscriptionSelect } from "./SubscriptionFields";
+import { SystemPromptField } from "./AgentFields";
+import { systemPromptProblem } from "./form";
 
 const TABS = [
   { id: "conversation", label: "Conversation" },
@@ -123,6 +125,10 @@ export default function AgentDetail() {
               </dd>
               <dt>Prompt</dt>
               <dd>{a().prompt ?? <span class="muted">default</span>}</dd>
+              <dt>System prompt</dt>
+              <dd>
+                <SystemPromptCell agent={a()} running={running()} onError={setError} />
+              </dd>
               <dt>Restart</dt>
               <dd>{a().restart ?? "on-failure"}</dd>
               <Show when={a().template}>
@@ -346,6 +352,97 @@ export function SubscriptionCell(props: { agent: Agent; running: boolean; onErro
       <Show when={editing() || saved()}>
         <span class="muted small">
           A new subscription applies at the next start.
+          <Show when={saved() && props.running}>
+            {" "}
+            <button class="small" onClick={restart}>
+              Restart now
+            </button>
+          </Show>
+        </span>
+      </Show>
+    </div>
+  );
+}
+
+/**
+ * The agent's system prompt, and a control to change it with
+ * `PATCH /api/agents/{id}` (empty sends `null`: the harness default). The
+ * change applies at the next start, as for the subscription.
+ */
+function SystemPromptCell(props: { agent: Agent; running: boolean; onError: (e: unknown) => void }) {
+  const [editing, setEditing] = createSignal(false);
+  const [draft, setDraft] = createSignal("");
+  const [busy, setBusy] = createSignal(false);
+  const [saved, setSaved] = createSignal(false);
+  const fileManaged = () => props.agent.source === "file";
+  const current = () => props.agent.system_prompt ?? "";
+  const next = () => (draft().trim() ? draft() : null);
+  const problem = () => systemPromptProblem(draft());
+
+  const save = async () => {
+    setBusy(true);
+    try {
+      const a = await api.agents.update(props.agent.id, { system_prompt: next() });
+      agents.upsert(a);
+      setEditing(false);
+      setSaved(true);
+    } catch (e) {
+      props.onError(e);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const restart = async () => {
+    try {
+      await api.agents.restart(props.agent.id);
+      setSaved(false);
+    } catch (e) {
+      props.onError(e);
+    }
+  };
+
+  return (
+    <div class="stack" style={{ gap: "4px" }}>
+      <Show
+        when={!editing()}
+        fallback={
+          <>
+            <SystemPromptField value={draft()} onChange={setDraft} label="New system prompt" />
+            <Show when={problem()}>{(p) => <span class="small" style={{ color: "var(--danger)" }}>{p()}</span>}</Show>
+            <span class="row">
+              <button class="small primary" disabled={busy() || !!problem() || (next() ?? "") === current()} onClick={save}>
+                Save
+              </button>
+              <button class="small" onClick={() => setEditing(false)}>
+                Cancel
+              </button>
+            </span>
+          </>
+        }
+      >
+        <span class="row" style={{ "flex-wrap": "wrap", "align-items": "flex-start" }}>
+          <Show when={current()} fallback={<span class="muted">harness default</span>}>
+            <pre class="mono small" style={{ margin: 0, "white-space": "pre-wrap", "max-height": "12em", overflow: "auto", flex: "1 1 20em" }}>
+              {current()}
+            </pre>
+          </Show>
+          <button
+            class="small"
+            disabled={fileManaged()}
+            title={fileManaged() ? "A file agent: edit its definition file." : undefined}
+            onClick={() => {
+              setDraft(current());
+              setSaved(false);
+              setEditing(true);
+            }}
+          >
+            Edit
+          </button>
+        </span>
+      </Show>
+      <Show when={editing() || saved()}>
+        <span class="muted small">
+          A new system prompt applies at the next start or restart.
           <Show when={saved() && props.running}>
             {" "}
             <button class="small" onClick={restart}>

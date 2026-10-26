@@ -71,6 +71,8 @@ pub struct ClaudeOptions {
     /// sandbox). `None`: the agent workspace. The trust key and the session
     /// directory name use this path.
     pub harness_workspace: Option<PathBuf>,
+    /// The mode for an agent with no base system prompt. See
+    /// [`Self::prompt_mode_for`].
     pub prompt_mode: PromptMode,
     /// The CLI that the hooks run.
     pub hook_program: String,
@@ -95,6 +97,19 @@ impl Default for ClaudeOptions {
 }
 
 impl ClaudeOptions {
+    /// The prompt mode for `agent`. An agent with its own base system
+    /// prompt (`Agent::system_prompt`, PLAN §8) always gets
+    /// [`PromptMode::Replace`]: the rendered `prompt.md` then starts with
+    /// it. Else [`Self::prompt_mode`] (default [`PromptMode::Append`]), so
+    /// the harness keeps its default prompt.
+    pub fn prompt_mode_for(&self, agent: &Agent) -> PromptMode {
+        if agent.replaces_system_prompt() {
+            PromptMode::Replace
+        } else {
+            self.prompt_mode
+        }
+    }
+
     /// The cwd of the harness process.
     pub fn harness_cwd(&self, agent: &Agent) -> PathBuf {
         self.harness_workspace

@@ -311,6 +311,7 @@ async fn from_agent(
         subscription: a.agent.subscription.clone(),
         model: a.agent.model.clone(),
         prompt: a.agent.prompt.clone(),
+        system_prompt: a.agent.system_prompt.clone(),
         roles: a.agent.roles.clone(),
         policy: a.agent.policy.clone(),
         restart: a.agent.restart,

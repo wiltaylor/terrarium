@@ -234,7 +234,7 @@ pub fn materialize(
         write_atomic(&prompt_path(agent), text.as_bytes())?;
     }
     let text = read_prompt(agent)?.unwrap_or_default();
-    let (system, append) = prompt_files(opts.prompt_mode, &text);
+    let (system, append) = prompt_files(opts.prompt_mode_for(agent), &text);
 
     // The Terrarium plugin and the agent's own directories.
     let plugin = plugin_dir(agent);
@@ -550,6 +550,32 @@ mod tests {
                 .contains("hi")
         );
         assert_eq!(fs::read_dir(own.join(HOOKS_DIR)).expect("hooks").count(), 0);
+    }
+
+    /// The CopilotCustomSystemPrompt extension: with no base system
+    /// prompt, `APPEND_SYSTEM.md` holds the Terrarium prompt and
+    /// `SYSTEM.md` is empty (the extension treats an empty file as absent).
+    /// With one, `SYSTEM.md` holds the composed text and `APPEND_SYSTEM.md`
+    /// is empty (PLAN §8).
+    #[test]
+    fn a_base_system_prompt_writes_system_md() {
+        let (_tmp, home, mut agent) = setup();
+        let own = copilot_dir(&agent);
+        let opts = CopilotOptions::default();
+        materialize(&opts, &agent, &home, Some("# Terrarium agent a")).expect("ok");
+        assert_eq!(fs::read_to_string(own.join(SYSTEM_FILE)).expect("s"), "");
+        assert_eq!(
+            fs::read_to_string(own.join(APPEND_SYSTEM_FILE)).expect("a"),
+            "# Terrarium agent a"
+        );
+        agent.system_prompt = Some("You review code.".into());
+        let text = "You review code.\n\n# Terrarium agent a";
+        materialize(&opts, &agent, &home, Some(text)).expect("ok");
+        assert_eq!(fs::read_to_string(own.join(SYSTEM_FILE)).expect("s"), text);
+        assert_eq!(
+            fs::read_to_string(own.join(APPEND_SYSTEM_FILE)).expect("a"),
+            ""
+        );
     }
 
     #[test]

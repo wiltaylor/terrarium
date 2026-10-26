@@ -87,7 +87,7 @@ pub fn build(
         spec = spec.arg(f.model).arg(model);
     }
     if let Some(text) = prompt.map(str::trim).filter(|t| !t.is_empty()) {
-        let flag = match opts.prompt_mode {
+        let flag = match opts.prompt_mode_for(agent) {
             PromptMode::Append => f.append_system_prompt,
             PromptMode::Replace => f.system_prompt,
         };
@@ -245,6 +245,39 @@ mod tests {
             Some("You are Terrarium agent a.")
         );
         assert_eq!(spec.env["IS_SANDBOX"], "1");
+    }
+
+    /// No base system prompt: `--append-system-prompt` with the Terrarium
+    /// prompt only. A base system prompt: `--system-prompt` with the
+    /// composed text (base, blank line, Terrarium prompt), and the snapshot
+    /// stays off so a change applies on resume (PLAN §8).
+    #[test]
+    fn a_base_system_prompt_selects_replace() {
+        let mut agent = test_agent(None);
+        let spec = build(
+            &ClaudeOptions::default(),
+            &agent,
+            SessionStart::Fresh("x"),
+            Some("# Terrarium agent a"),
+            false,
+        );
+        assert_eq!(
+            value_after(&spec, "--append-system-prompt"),
+            Some("# Terrarium agent a")
+        );
+        assert!(!args(&spec).contains(&"--system-prompt"));
+        agent.system_prompt = Some("You review code.".into());
+        let text = "You review code.\n\n# Terrarium agent a";
+        let spec = build(
+            &ClaudeOptions::default(),
+            &agent,
+            SessionStart::Resume(&HarnessSessionId("s".into())),
+            Some(text),
+            false,
+        );
+        assert_eq!(value_after(&spec, "--system-prompt"), Some(text));
+        assert!(!args(&spec).contains(&"--append-system-prompt"));
+        assert_eq!(value_after(&spec, "--system-prompt-snapshot"), Some("off"));
     }
 
     #[test]

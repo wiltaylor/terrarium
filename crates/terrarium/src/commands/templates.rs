@@ -4,7 +4,7 @@ use anyhow::Context as _;
 use serde_json::{Map, Value, json};
 use terrarium_core::agent_template;
 
-use super::{print_object, print_table, set_opt};
+use super::{print_object, print_object_with_text, print_table, set_opt, system_prompt_value};
 use crate::api::{CliError, query};
 use crate::cli::{TemplateCmd, TemplateSpecArgs};
 use crate::commands::system::as_items;
@@ -42,7 +42,7 @@ pub async fn template(ctx: &Ctx, cmd: &TemplateCmd) -> anyhow::Result<()> {
             ctx.emit(&v, print_one)
         }
         TemplateCmd::New(a) => {
-            let (spec, from_file) = spec_of(&a.spec, Map::new())?;
+            let (spec, from_file) = spec_of(ctx, &a.spec, Map::new())?;
             if !spec.contains_key("harness") {
                 return Err(CliError::usage(
                     "give --harness (claude, codex, copilot, or pi), or --from-file",
@@ -77,7 +77,7 @@ pub async fn template(ctx: &Ctx, cmd: &TemplateCmd) -> anyhow::Result<()> {
                     let now = ctx.api.get(&path(&a.template), vec![]).await?;
                     now["spec"].as_object().cloned().unwrap_or_default()
                 };
-                let (spec, _) = spec_of(&a.spec, base)?;
+                let (spec, _) = spec_of(ctx, &a.spec, base)?;
                 body["spec"] = Value::Object(spec);
             }
             if body.as_object().is_some_and(Map::is_empty) {
@@ -131,6 +131,9 @@ fn has_spec_flags(a: &TemplateSpecArgs) -> bool {
         || a.subscription.is_some()
         || a.model.is_some()
         || a.prompt.is_some()
+        || a.system_prompt.system_prompt.is_some()
+        || a.system_prompt.system_prompt_file.is_some()
+        || a.system_prompt.no_system_prompt
         || a.restart.is_some()
         || !a.roles.is_empty()
         || !a.targets.is_empty()
@@ -140,7 +143,9 @@ fn has_spec_flags(a: &TemplateSpecArgs) -> bool {
 
 /// The spec: `base` (or the file), then the flags over it. The second
 /// value is the file's `description`, if any.
+/// `--no-system-prompt` sends `null`, which removes the key.
 fn spec_of(
+    ctx: &Ctx,
     a: &TemplateSpecArgs,
     base: Map<String, Value>,
 ) -> anyhow::Result<(Map<String, Value>, Option<String>)> {
@@ -148,7 +153,8 @@ fn spec_of(
         Some(p) => {
             let text = std::fs::read_to_string(p)
                 .with_context(|| format!("cannot read {}", p.display()))?;
-            agent_template::spec_from_toml(&text)
+            let dir = p.parent().unwrap_or(std::path::Path::new(""));
+            agent_template::spec_from_toml_in(&text, dir)
                 .map_err(|e| CliError::usage(format!("{}: {e}", p.display())))?
         }
         None => (base, None),
@@ -164,6 +170,9 @@ fn spec_of(
         if let Some(v) = v {
             flags.insert(k.into(), v.clone().into());
         }
+    }
+    if let Some(v) = system_prompt_value(ctx, &a.system_prompt)? {
+        flags.insert("system_prompt".into(), v);
     }
     if !a.roles.is_empty() {
         flags.insert("roles".into(), json!(a.roles));
@@ -221,5 +230,5 @@ fn print_one(ctx: &Ctx, v: &Value) {
     }
     print_object(ctx, &head);
     ctx.line("spec:");
-    print_object(ctx, &v["spec"]);
+    print_object_with_text(ctx, &v["spec"], "system_prompt");
 }

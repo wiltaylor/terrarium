@@ -1,5 +1,7 @@
 //! The system prompt of an agent (PLAN §8): a template with `{{...}}`
 //! variables, rendered to `/state/agents/<ulid>/prompt.md` before each start.
+//! An agent with its own `system_prompt` gets that text (rendered with the
+//! same variables) first, then the template: see [`compose`].
 //!
 //! An agent definition names a template with `prompt = "<name>"`. The daemon
 //! reads `<prompts dir>/<name>.md`. Without a name, it uses
@@ -154,6 +156,25 @@ pub fn render(template: &str, ctx: &PromptContext) -> String {
     }
     out.push_str(rest);
     out
+}
+
+/// The text that the adapter gives the harness (`prompt.md`). With no
+/// base system prompt (`None` or empty) it is the rendered template, and
+/// the adapter appends it to the harness's default prompt. With one, it
+/// is the rendered base prompt, a blank line, then the rendered template,
+/// and the adapter replaces the harness's default prompt with it. The
+/// template always stays: the agent needs it for the CLI, the mailbox,
+/// and the board.
+pub fn compose(system_prompt: Option<&str>, template: &str, ctx: &PromptContext) -> String {
+    let protocol = render(template, ctx);
+    match system_prompt.filter(|t| !t.trim().is_empty()) {
+        None => protocol,
+        Some(base) => format!(
+            "{}\n\n{}",
+            render(base, ctx).trim_end(),
+            protocol.trim_start()
+        ),
+    }
 }
 
 /// The template text for `name`, or the default template. A named template
@@ -510,6 +531,21 @@ mod tests {
         assert!(
             file == DEFAULT_TEMPLATE,
             "copy prompts/default.md into DEFAULT_TEMPLATE in prompt.rs"
+        );
+    }
+
+    #[test]
+    fn compose_puts_the_base_prompt_first() {
+        let c = ctx();
+        assert_eq!(compose(None, "P {{agent.name}}", &c), "P worker");
+        assert_eq!(compose(Some(" \n"), "P {{agent.name}}", &c), "P worker");
+        assert_eq!(
+            compose(
+                Some("You are {{agent.name}}.\n"),
+                "\nP {{project.name}}",
+                &c
+            ),
+            "You are worker.\n\nP demo"
         );
     }
 

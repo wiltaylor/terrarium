@@ -34,4 +34,30 @@ describe("agent form", () => {
     expect(validateAgentForm({ ...emptyAgentForm("p"), name: "ok-1" })).toEqual([]);
     expect(validateAgentForm({ ...emptyAgentForm(""), name: "Bad Name", cross_project: "nope" })).toHaveLength(3);
   });
+
+  it("sends the system prompt as typed, and leaves a blank one out", () => {
+    const base = { ...emptyAgentForm("p"), name: "w" };
+    expect(formToDef({ ...base, system_prompt: "  You review code.\n" }).system_prompt).toBe("  You review code.\n");
+    expect(formToDef({ ...base, system_prompt: "" })).not.toHaveProperty("system_prompt");
+    expect(formToDef({ ...base, system_prompt: " \n " })).not.toHaveProperty("system_prompt");
+  });
+
+  it("patches the system prompt: a new text, null when cleared, nothing when the same", () => {
+    const withSp: Agent = { ...agent, system_prompt: "Be brief." };
+    expect(agentToForm(withSp).system_prompt).toBe("Be brief.");
+    expect(agentToForm(agent).system_prompt).toBe("");
+    expect(formToPatch(withSp, agentToForm(withSp))).toEqual({});
+    expect(formToPatch(withSp, { ...agentToForm(withSp), system_prompt: "" })).toEqual({ system_prompt: null });
+    expect(formToPatch(withSp, { ...agentToForm(withSp), system_prompt: "Be terse." })).toEqual({ system_prompt: "Be terse." });
+    expect(formToPatch(agent, { ...agentToForm(agent), system_prompt: "New." })).toEqual({ system_prompt: "New." });
+    expect(formToPatch(agent, { ...agentToForm(agent), system_prompt: "  " })).toEqual({});
+  });
+
+  it("refuses a system prompt over 32 KiB of UTF-8", () => {
+    const base = { ...emptyAgentForm("p"), name: "ok" };
+    expect(validateAgentForm({ ...base, system_prompt: "a".repeat(32768) })).toEqual([]);
+    expect(validateAgentForm({ ...base, system_prompt: "a".repeat(32769) })).toHaveLength(1);
+    // Bytes, not characters: "é" is 2 bytes.
+    expect(validateAgentForm({ ...base, system_prompt: "é".repeat(16385) })).toHaveLength(1);
+  });
 });

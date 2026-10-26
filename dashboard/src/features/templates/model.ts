@@ -3,7 +3,7 @@
 // picks a template for an agent, and the order of the template select. Pure.
 
 import type { AgentCreate, AgentDef, AgentTemplate, NewTemplate, TemplatePatch, TemplateResolved, TemplateSpec } from "../../api/types";
-import { emptyAgentForm, formToDef, type AgentFormValues } from "../agents/form";
+import { emptyAgentForm, formToDef, systemPromptProblem, type AgentFormValues } from "../agents/form";
 
 /** The template form: the template's own fields and the agent fields of its spec. */
 export interface TemplateFormValues {
@@ -25,6 +25,7 @@ export function specToForm(spec: TemplateSpec, project = "", name = ""): AgentFo
     subscription: spec.subscription ?? "",
     model: spec.model ?? "",
     prompt: spec.prompt ?? "",
+    system_prompt: spec.system_prompt ?? "",
     roles: (spec.roles ?? []).filter((r) => r !== "member"),
     targets: spec.policy?.targets ?? [],
     mail_to: (spec.policy?.mail_to ?? ["*"]).join(", "),
@@ -56,6 +57,8 @@ export function validateTemplateForm(v: TemplateFormValues): string[] {
   const out: string[] = [];
   if (!NAME_RE.test(v.name)) out.push("Name: 1 to 63 of a-z, 0-9, - and _, starting with a letter or a digit.");
   for (const x of v.agent.cross_project.split(/[,\n]/).map((s) => s.trim()).filter(Boolean)) if (!/^[^/\s]+\/[^/\s]+$/.test(x)) out.push(`Cross-project entry "${x}" is not project/agent.`);
+  const sp = systemPromptProblem(v.agent.system_prompt);
+  if (sp) out.push(sp);
   return out;
 }
 
@@ -113,5 +116,6 @@ export function formToCreate(v: AgentFormValues, template: string | null): Agent
     subscription: def.subscription ?? null,
     model: def.model ?? null,
     prompt: def.prompt ?? null,
+    system_prompt: def.system_prompt ?? null,
   };
 }

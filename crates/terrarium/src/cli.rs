@@ -386,6 +386,8 @@ pub struct AgentNewArgs {
     /// The prompt template name, for example `project-lead`
     #[arg(long)]
     pub prompt: Option<String>,
+    #[command(flatten)]
+    pub system_prompt: SystemPromptArgs,
     /// `project_admin` or `sysadmin`; repeat for more
     #[arg(long = "role")]
     pub roles: Vec<String>,
@@ -403,6 +405,24 @@ pub struct AgentNewArgs {
     pub restart: Option<String>,
 }
 
+/// The agent's base system prompt (PLAN §8). Set, it replaces the
+/// harness's default system prompt, and Terrarium's protocol prompt comes
+/// after it. Unset, the harness keeps its default prompt.
+#[derive(Debug, Default, Args)]
+pub struct SystemPromptArgs {
+    /// The base system prompt, with the `{{...}}` variables of the prompt
+    /// templates. It replaces the harness's default system prompt;
+    /// Terrarium's protocol prompt comes after it. `-` reads stdin
+    #[arg(long, conflicts_with_all = ["system_prompt_file", "no_system_prompt"])]
+    pub system_prompt: Option<String>,
+    /// Read the base system prompt from this file
+    #[arg(long, conflicts_with = "no_system_prompt")]
+    pub system_prompt_file: Option<PathBuf>,
+    /// Clear the base system prompt: the harness's default prompt again
+    #[arg(long)]
+    pub no_system_prompt: bool,
+}
+
 #[derive(Debug, Args)]
 pub struct AgentSetArgs {
     pub agent: String,
@@ -414,6 +434,8 @@ pub struct AgentSetArgs {
     pub model: Option<String>,
     #[arg(long)]
     pub prompt: Option<String>,
+    #[command(flatten)]
+    pub system_prompt: SystemPromptArgs,
     #[arg(long)]
     pub restart: Option<String>,
     /// The whole policy as JSON, for example `{"targets":[],"mail_to":["*"]}`
@@ -1155,6 +1177,8 @@ pub struct TemplateSpecArgs {
     /// The prompt template name, for example `worker`
     #[arg(long)]
     pub prompt: Option<String>,
+    #[command(flatten)]
+    pub system_prompt: SystemPromptArgs,
     /// `project_admin` or `sysadmin`; repeat for more
     #[arg(long = "role")]
     pub roles: Vec<String>,

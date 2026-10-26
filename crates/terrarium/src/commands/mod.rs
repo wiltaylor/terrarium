@@ -17,6 +17,7 @@ pub mod templates;
 #[cfg(test)]
 mod tests;
 
+use anyhow::Context as _;
 use serde_json::Value;
 
 use crate::cli::{AdminCmd, Command};
@@ -194,6 +195,44 @@ pub fn print_object(ctx: &Ctx, v: &Value) {
         };
         ctx.line(format!("{k:<width$}  {s}"));
     }
+}
+
+/// `v` as [`print_object`], with the long text field `key` (for example
+/// `system_prompt`) left out of the table and printed in full after it.
+pub fn print_object_with_text(ctx: &Ctx, v: &Value, key: &str) {
+    let mut head = v.clone();
+    let text = head
+        .as_object_mut()
+        .and_then(|o| o.remove(key))
+        .and_then(|t| t.as_str().map(str::to_owned));
+    print_object(ctx, &head);
+    if let Some(text) = text {
+        ctx.line(format!("{key}:"));
+        ctx.out.write_str(&text);
+        if !text.ends_with('\n') {
+            ctx.line("");
+        }
+    }
+}
+
+/// The JSON value of the system prompt flags: `Some(text)`, `Some(null)`
+/// for `--no-system-prompt`, or `None` when no flag is given.
+pub fn system_prompt_value(
+    ctx: &Ctx,
+    a: &crate::cli::SystemPromptArgs,
+) -> anyhow::Result<Option<Value>> {
+    if a.no_system_prompt {
+        return Ok(Some(Value::Null));
+    }
+    if let Some(text) = &a.system_prompt {
+        return Ok(Some(Value::String(ctx.text(text)?)));
+    }
+    if let Some(path) = &a.system_prompt_file {
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("cannot read {}", path.display()))?;
+        return Ok(Some(Value::String(text)));
+    }
+    Ok(None)
 }
 
 /// Text between clear markers, so that an agent reads it as data.

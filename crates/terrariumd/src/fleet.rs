@@ -388,6 +388,7 @@ fn agent_spec(def: &AgentDef) -> Value {
         "subscription": def.subscription,
         "model": def.model,
         "prompt": def.prompt,
+        "system_prompt": def.system_prompt.as_ref().filter(|t| !t.trim().is_empty()),
         "roles": role_list(&def.roles),
         "policy": def.policy,
         "restart": def.restart,
@@ -404,6 +405,7 @@ fn view_def(v: &AgentView) -> AgentDef {
         subscription: a.subscription.clone(),
         model: a.model.clone(),
         prompt: a.prompt.clone(),
+        system_prompt: a.system_prompt.clone(),
         roles: a.roles.clone(),
         policy: a.policy.clone(),
         restart: a.restart,
@@ -1521,6 +1523,7 @@ fn apply_agent(t: &mut Tx<'_>, v: &AgentView, def: &AgentDef) -> ApiResult<()> {
         subscription: Some(def.subscription.clone()),
         model: Some(def.model.clone()),
         prompt: Some(def.prompt.clone()),
+        system_prompt: Some(def.system_prompt.clone()),
         policy: Some(def.policy.clone()),
         restart: Some(def.restart),
         new_session_on_prompt_change: Some(def.new_session_on_prompt_change),
@@ -1730,6 +1733,15 @@ pub async fn apply_config_dir(state: &Shared) -> Vec<String> {
             Ok(t) => t,
             Err(e) => {
                 errors.push(format!("{rel}: cannot read: {e}"));
+                continue;
+            }
+        };
+        // `system_prompt_file` is relative to the fleet file.
+        let base = path.parent().unwrap_or(&dir);
+        let text = match fleet::inline_prompt_files(&text, base) {
+            Ok(t) => t,
+            Err(e) => {
+                errors.push(format!("{rel}: {e}"));
                 continue;
             }
         };

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use terrarium_core::config::{AgentDef, Policy, RestartPolicy};
+use terrarium_core::config::{AgentDef, Policy, RestartPolicy, check_system_prompt};
 use terrarium_core::{Agent, AgentId, AgentStatus, HarnessId, HarnessSessionId, Role};
 
 use crate::actor::AgentActor;
@@ -75,6 +75,7 @@ fn base_row(r: &Row<'_>) -> rusqlite::Result<AgentView> {
             workspace: PathBuf::from(workspace),
             harness_dir: None,
             prompt: r.get("prompt")?,
+            system_prompt: r.get("system_prompt")?,
             roles: Vec::new(),
             policy: serde_json::from_str(&policy).unwrap_or_default(),
             restart: restart_from(&r.get::<_, String>("restart")?),
@@ -261,7 +262,15 @@ fn check_def(def: &AgentDef) -> ApiResult<()> {
             "policy.cross_project entry `{bad}` must be `project/agent` or `project/*`"
         )));
     }
+    if let Some(text) = &def.system_prompt {
+        check_system_prompt(text).map_err(ApiError::invalid)?;
+    }
     Ok(())
+}
+
+/// The system prompt as the store keeps it: `None` for an empty text.
+fn stored_system_prompt(text: Option<&String>) -> Option<&String> {
+    text.filter(|t| !t.trim().is_empty())
 }
 
 /// Point every agent at its workspace under the work root,
@@ -323,13 +332,15 @@ pub fn create_from(
     }
     let mut agent = Agent::from_def(def, work_dir);
     agent.workspace = crate::workspace::dir(work_dir, &def.project, &def.name);
+    agent.system_prompt = stored_system_prompt(agent.system_prompt.as_ref()).cloned();
     let id = agent.id.to_string();
     let at = now();
     t.execute(
         "INSERT INTO agents (id, name, project, harness, subscription, model, prompt, policy,
                              restart, status, workspace, source, created_at, updated_at,
-                             new_session_on_prompt_change, template)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'stopped', ?10, ?11, ?12, ?12, ?13, ?14)",
+                             new_session_on_prompt_change, template, system_prompt)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'stopped', ?10, ?11, ?12, ?12, ?13, ?14,
+                 ?15)",
         params![
             id,
             agent.name,
@@ -344,7 +355,8 @@ pub fn create_from(
             source,
             at,
             agent.new_session_on_prompt_change,
-            template.map(serde_json::to_string).transpose()?
+            template.map(serde_json::to_string).transpose()?,
+            agent.system_prompt
         ],
     )?;
     set_roles(t, &id, &def.project, &def.roles)?;
@@ -368,7 +380,8 @@ pub fn set_template(t: &Tx<'_>, id: &str, template: Option<&TemplateRef>) -> Api
 }
 
 /// The body of `PATCH /api/agents/{id}`. A field that is absent stays as
-/// it is. `subscription`, `model`, and `prompt` take `null` to clear them.
+/// it is. `subscription`, `model`, `prompt`, and `system_prompt` take
+/// `null` to clear them; an empty `system_prompt` clears it too.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentPatch {
@@ -380,6 +393,8 @@ pub struct AgentPatch {
     pub model: Option<Option<String>>,
     #[serde(default, deserialize_with = "nullable")]
     pub prompt: Option<Option<String>>,
+    #[serde(default, deserialize_with = "nullable")]
+    pub system_prompt: Option<Option<String>>,
     #[serde(default)]
     pub policy: Option<Policy>,
     #[serde(default)]
@@ -408,11 +423,19 @@ pub fn write_def(t: &mut Tx<'_>, id: &str, p: &AgentPatch) -> ApiResult<()> {
             subscription: None,
             model: None,
             prompt: None,
+            system_prompt: None,
             roles: Vec::new(),
             policy: policy.clone(),
             restart: RestartPolicy::default(),
             new_session_on_prompt_change: true,
         })?;
+    }
+    let system_prompt = p
+        .system_prompt
+        .as_ref()
+        .map(|v| stored_system_prompt(v.as_ref()));
+    if let Some(Some(text)) = system_prompt {
+        check_system_prompt(text).map_err(ApiError::invalid)?;
     }
     // `?N IS NOT NULL` is the "field present" flag of each nullable column.
     t.execute(
@@ -424,6 +447,7 @@ pub fn write_def(t: &mut Tx<'_>, id: &str, p: &AgentPatch) -> ApiResult<()> {
             policy = coalesce(?6, policy),
             restart = coalesce(?7, restart),
             new_session_on_prompt_change = coalesce(?12, new_session_on_prompt_change),
+            system_prompt = CASE WHEN ?13 THEN ?14 ELSE system_prompt END,
             updated_at = ?8
          WHERE id = ?1",
         params![
@@ -439,6 +463,8 @@ pub fn write_def(t: &mut Tx<'_>, id: &str, p: &AgentPatch) -> ApiResult<()> {
             p.model.is_some(),
             p.prompt.is_some(),
             p.new_session_on_prompt_change,
+            system_prompt.is_some(),
+            system_prompt.flatten(),
         ],
     )?;
     Ok(())
@@ -640,18 +666,20 @@ pub fn set_harness_session(t: &mut Tx<'_>, agent: &str, harness: &str) -> ApiRes
 pub fn sync_def(t: &mut Tx<'_>, id: &str, def: &AgentDef) -> ApiResult<bool> {
     check_def(def)?;
     let before = get(t, id)?;
+    let system_prompt = stored_system_prompt(def.system_prompt.as_ref());
     let changed = before.source != projects::SOURCE_FILE
         || before.agent.harness != def.harness
         || before.agent.subscription != def.subscription
         || before.agent.model != def.model
         || before.agent.prompt != def.prompt
+        || before.agent.system_prompt.as_ref() != system_prompt
         || before.agent.policy != def.policy
         || before.agent.restart != def.restart;
     if changed {
         t.execute(
             "UPDATE agents SET harness = ?2, subscription = ?3, model = ?4, prompt = ?5,
                     policy = ?6, restart = ?7, source = 'file', updated_at = ?8,
-                    new_session_on_prompt_change = ?9
+                    new_session_on_prompt_change = ?9, system_prompt = ?10
              WHERE id = ?1",
             params![
                 id,
@@ -662,7 +690,8 @@ pub fn sync_def(t: &mut Tx<'_>, id: &str, def: &AgentDef) -> ApiResult<bool> {
                 serde_json::to_string(&def.policy)?,
                 restart_str(def.restart),
                 now(),
-                def.new_session_on_prompt_change
+                def.new_session_on_prompt_change,
+                system_prompt
             ],
         )?;
     }

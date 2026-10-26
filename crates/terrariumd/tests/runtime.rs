@@ -1673,6 +1673,74 @@ async fn frozen_prompt_change_starts_a_new_session() {
     assert_eq!(started[5]["data"]["source"], "resume");
 }
 
+/// The agent's base system prompt goes first in `prompt.md`, rendered with
+/// the same variables, then a blank line and the template. It is part of
+/// the prompt hash: a change starts a new session of a harness that keeps
+/// the prompt of a session (Codex), and a clear goes back to the template
+/// alone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn system_prompt_is_composed_and_in_the_prompt_hash() {
+    let td = Td::start().await;
+    td.adapter
+        .frozen
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let prompts = td.dir.path().join("prompts");
+    std::fs::create_dir_all(&prompts).unwrap();
+    std::fs::write(prompts.join("t.md"), "v1 {{agent.name}}").unwrap();
+    let id = td
+        .agent(
+            "demo",
+            "bob",
+            json!({"prompt": "t", "system_prompt": "Base {{agent.name}} in {{project.name}}.\n"}),
+        )
+        .await;
+    let prompt_file = td
+        .dir
+        .path()
+        .join("state/agents")
+        .join(&id)
+        .join("harness/prompt.md");
+    let cycle = async |want: usize| {
+        td.post(&format!("/api/agents/{id}/start"), None).await;
+        td.wait_events(&id, "session_started", |e| e.len() == want)
+            .await;
+        td.wait_status(&id, "idle").await;
+        td.post(&format!("/api/agents/{id}/stop"), None).await;
+        td.wait_status(&id, "stopped").await;
+        td.events(&id, "session_started").await
+    };
+    cycle(1).await;
+    assert_eq!(
+        std::fs::read_to_string(&prompt_file).unwrap(),
+        "Base bob in demo.\n\nv1 bob"
+    );
+    // The same text: a resume.
+    let started = cycle(2).await;
+    assert_eq!(started[1]["data"]["source"], "resume");
+    // A changed base prompt: a new session.
+    let patch = async |v: Value| {
+        td.req(
+            Method::PATCH,
+            &format!("/api/agents/{id}"),
+            Some(json!({"system_prompt": v})),
+            None,
+        )
+        .await
+    };
+    patch(json!("Base two.")).await;
+    let started = cycle(3).await;
+    assert_eq!(started[2]["data"]["source"], "startup");
+    assert_eq!(
+        std::fs::read_to_string(&prompt_file).unwrap(),
+        "Base two.\n\nv1 bob"
+    );
+    // Cleared: the template alone, and a new session again.
+    patch(Value::Null).await;
+    let started = cycle(4).await;
+    assert_eq!(started[3]["data"]["source"], "startup");
+    assert_eq!(std::fs::read_to_string(&prompt_file).unwrap(), "v1 bob");
+}
+
 /// A harness that takes a changed prompt on a resume (Claude Code with
 /// `--system-prompt-snapshot off`, pi): a changed template between a stop
 /// and a start still resumes the same session. The launch has the new

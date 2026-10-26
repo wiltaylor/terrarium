@@ -125,12 +125,21 @@ pub async fn fleet(ctx: &Ctx, cmd: &FleetCmd) -> anyhow::Result<()> {
     }
 }
 
-/// The file text: `-` reads stdin.
+/// The file text: `-` reads stdin. Each `system_prompt_file` goes into
+/// the text as `system_prompt`, relative to the file (stdin: the current
+/// directory).
 fn read(ctx: &Ctx, file: &str) -> anyhow::Result<String> {
-    if file == "-" {
-        return ctx.text("-");
-    }
-    std::fs::read_to_string(file).with_context(|| format!("cannot read {file}"))
+    let (text, base) = if file == "-" {
+        (ctx.text("-")?, std::path::PathBuf::from("."))
+    } else {
+        let text = std::fs::read_to_string(file).with_context(|| format!("cannot read {file}"))?;
+        let base = std::path::Path::new(file)
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_default();
+        (text, base)
+    };
+    terrarium_core::fleet::inline_prompt_files(&text, &base).map_err(CliError::usage)
 }
 
 fn request(content: &str, file: &str) -> Value {

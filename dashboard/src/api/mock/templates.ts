@@ -14,7 +14,17 @@ import type { ScheduleCaller } from "./schedules";
 
 const NAME_RE = /^[a-z0-9][a-z0-9_-]{0,62}$/;
 const ULID_RE = /^[0-9A-Z]{26}$/;
-const SPEC_KEYS = ["harness", "subscription", "model", "prompt", "roles", "policy", "restart", "new_session_on_prompt_change"] as const;
+const SPEC_KEYS = ["harness", "subscription", "model", "prompt", "system_prompt", "roles", "policy", "restart", "new_session_on_prompt_change"] as const;
+/** The daemon's limit on `system_prompt`: 32 KiB of UTF-8. */
+export const SYSTEM_PROMPT_MAX_BYTES = 32 * 1024;
+
+/** The daemon's check of `system_prompt`: a string of at most 32 KiB. A message on a bad one, else null. */
+export function systemPromptError(v: unknown, field = "system_prompt"): string | null {
+  if (v === undefined || v === null) return null;
+  if (typeof v !== "string") return `${field}: use a string`;
+  const bytes = new TextEncoder().encode(v).length;
+  return bytes > SYSTEM_PROMPT_MAX_BYTES ? `${field}: ${bytes} bytes; the limit is ${SYSTEM_PROMPT_MAX_BYTES}` : null;
+}
 
 type Fail = (status: number, code: string, message: string, details?: unknown) => never;
 
@@ -49,9 +59,11 @@ export function normalizeSpec(raw: unknown): TemplateSpec {
   const policy: AgentPolicy = { targets: p.targets ?? [], mail_to: p.mail_to ?? ["*"], ...(p.cross_project?.length ? { cross_project: p.cross_project } : {}) };
   if (policy.mail_to.some((m) => !m.trim())) throw new Error("spec: policy.mail_to has an empty entry");
   for (const x of policy.cross_project ?? []) if (!/^[^/]+\/[^/]+$/.test(x)) throw new Error(`spec: policy.cross_project entry \`${x}\` must be \`project/agent\` or \`project/*\``);
+  const sp = systemPromptError(o.system_prompt, "spec: system_prompt");
+  if (sp) throw new Error(sp);
   const roles = ((o.roles as string[] | undefined) ?? []).filter((r) => r !== "member");
   const spec: TemplateSpec = { harness: o.harness as TemplateSpec["harness"] };
-  for (const k of ["subscription", "model", "prompt"] as const) if (typeof o[k] === "string" && o[k]) spec[k] = o[k];
+  for (const k of ["subscription", "model", "prompt", "system_prompt"] as const) if (typeof o[k] === "string" && o[k]) spec[k] = o[k];
   if (roles.length) spec.roles = roles as TemplateSpec["roles"];
   spec.policy = policy;
   spec.restart = (o.restart as TemplateSpec["restart"]) ?? "on-failure";
@@ -61,14 +73,15 @@ export function normalizeSpec(raw: unknown): TemplateSpec {
 
 /**
  * The merge of `POST /api/agents` with `template` (docs/api.md §21): each
- * field of the body wins; `policy` merges per key; `null` clears
- * `subscription`, `model`, or `prompt`.
+ * field of the body wins; `policy` merges per key; `null` (or an empty
+ * `system_prompt`) clears `subscription`, `model`, `prompt`, or
+ * `system_prompt`.
  */
 export function applyTemplate(spec: TemplateSpec, body: AgentCreate): AgentDef {
   const out: Record<string, unknown> = { ...structuredClone(spec) };
   for (const [k, v] of Object.entries(body)) {
     if (k === "template" || v === undefined) continue;
-    if (v === null) delete out[k];
+    if (v === null || (k === "system_prompt" && v === "")) delete out[k];
     else if (k === "policy" && out.policy) out.policy = { ...(out.policy as AgentPolicy), ...(v as Partial<AgentPolicy>) };
     else out[k] = v;
   }
@@ -231,6 +244,7 @@ export function createTemplateMock(c: TemplateMockContext): Api["templates"] {
           ...(a.subscription ? { subscription: a.subscription } : {}),
           ...(a.model ? { model: a.model } : {}),
           ...(a.prompt ? { prompt: a.prompt } : {}),
+          ...(a.system_prompt ? { system_prompt: a.system_prompt } : {}),
           roles: a.roles,
           policy: a.policy,
           restart: a.restart,

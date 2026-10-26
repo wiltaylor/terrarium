@@ -141,11 +141,13 @@ no credential for the host and path. `store` and `erase` do nothing.
 terrarium agent ls [--all-projects]
 terrarium agent show <agent>
 terrarium agent new <name> --harness <h> [--subscription s] [--model m] [--prompt p]
+                    [--system-prompt <text | -> | --system-prompt-file path]
                     [--role r]... [--target t]... [--mail-to a]... [--cross-project p/a]...
                     [--restart always|on-failure|never]
 terrarium agent new --from-file agents/lead.toml [flags that override the file]
 terrarium agent new <name> --template <t> [flags that override the template]
 terrarium agent set <agent> [--harness h] [--subscription s] [--model m] [--prompt p]
+                    [--system-prompt <text | -> | --system-prompt-file path | --no-system-prompt]
                     [--restart r] [--policy JSON] [--new-session-on-prompt-change true|false]
 terrarium agent rm <agent> [--confirm] [--keep-workspace]
 terrarium agent start|stop|restart <agent> [--no-wait]
@@ -181,6 +183,16 @@ entry after `TERRARIUM_TRASH_DAYS` days. `--keep-workspace` leaves the
 workspace in `work/<project>/<agent>`. A live agent needs `--confirm`
 ([api.md §6.1](api.md#61-crud)).
 
+`--system-prompt` sets the agent's base system prompt (PLAN §8). It
+replaces the harness's default system prompt, and Terrarium's protocol
+prompt (`--prompt`) comes after it. It can use the variables of the
+prompt templates (`prompts/README.md`). `-` reads stdin, and
+`--system-prompt-file` reads a file. `--no-system-prompt` clears it: the
+harness keeps its default prompt again. The limit is 32 KiB. A change
+applies at the next start or restart. `agent show` prints the whole text
+after the other fields, under `system_prompt:`. `agent ls` does not show
+it.
+
 `agent attach` puts the terminal in raw mode, sends each key to the PTY,
 and sends a resize when the window changes size. Press Ctrl-] to detach.
 The agent continues to run.
@@ -205,6 +217,7 @@ terrarium template show <template>
 terrarium template new <name> [--global] [--description d] --harness <h> [--subscription s]
                        [--model m] [--prompt p] [--role r]... [--target t]... [--mail-to a]...
                        [--cross-project p/a]... [--restart r]
+                       [--system-prompt <text | -> | --system-prompt-file path]
 terrarium template new <name> --from-file worker.toml [flags that override the file]
 terrarium template edit <template> [--rename n] [--description d] [spec flags as in new]
 terrarium template rm <template>
@@ -223,6 +236,10 @@ project's first, then the global one).
   revision; the agents made from the template do not change.
 - `ls` shows the template key, the harness, the prompt, the revision, the
   source, and the description.
+- `--system-prompt`, `--system-prompt-file`, and (with `edit`)
+  `--no-system-prompt` work as with `agent new|set`. `show` prints the
+  whole `system_prompt` after the other spec fields. A `--from-file` can
+  give `system_prompt_file = "<path>"`, relative to the file.
 
 ### Mail and the project inbox
 
