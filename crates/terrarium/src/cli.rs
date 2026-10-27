@@ -1875,9 +1875,10 @@ pub enum HarnessCmd {
         #[arg(long)]
         refresh: bool,
     },
-    /// Update a harness in place in the container: `npm install -g` into
-    /// the tools dir, with no image build. Needs sysadmin or the operator.
-    /// Refused while agents on the harness run, unless --force
+    /// Update a harness in the container, with no image build: npm
+    /// installs the version into its own version dir in the tools dir, and
+    /// the daemon switches to it. Running agents keep their version until
+    /// their next restart. Needs sysadmin or the operator
     Update {
         /// The harness (claude, codex, copilot, pi) or `copilot-prompt`
         #[arg(required_unless_present = "all", conflicts_with = "all")]
@@ -1888,8 +1889,7 @@ pub enum HarnessCmd {
         /// `latest` (the default) or a version like 0.165.0
         #[arg(long, conflicts_with = "all")]
         version: Option<String>,
-        /// Update also while agents on the harness run. A running harness
-        /// keeps the files it loaded, but a swap in the middle of a turn is risky
+        /// Install the version again, also when its version dir is on disk
         #[arg(long)]
         force: bool,
     },

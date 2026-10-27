@@ -65,19 +65,35 @@ pub struct HarnessQuery {
 
 /// `GET /api/harnesses`: for each harness, the pin from `harnesses.toml`,
 /// the adapter's tested range, the installed version, and whether it is in
-/// the range; and the start policy (`TERRARIUM_HARNESS_VERSION_POLICY`).
-/// With `latest`, also the latest release on npm and the update kind; npm
-/// that does not answer gives `latest: null` and `latest_error`, never an
-/// error status. Every caller may read it.
+/// the range; with a tools dir, the active version dir, the version dirs
+/// on disk, and the live agents with the version each runs; and the start
+/// policy (`TERRARIUM_HARNESS_VERSION_POLICY`). With `latest`, also the
+/// latest release on npm and the update kind; npm that does not answer
+/// gives `latest: null` and `latest_error`, never an error status. Every
+/// caller may read it.
 pub async fn harnesses(
     State(state): State<Shared>,
     ApiQuery(q): ApiQuery<HarnessQuery>,
-) -> Json<crate::harness_versions::HarnessReport> {
+) -> ApiResult<Json<crate::harness_versions::HarnessReport>> {
     let mut report = state.supervisor.harness_versions(q.refresh).await;
     if q.latest {
         state.harness_latest.fill(&mut report, q.refresh).await;
     }
-    Json(report)
+    let agents = agent_versions(&state).await?;
+    let cfg = state.harness_tools.config();
+    for row in &mut report.harnesses {
+        if let Some(cfg) = &cfg {
+            row.active = crate::harness_tools::active_version(&cfg.dir, row.harness.as_str())
+                .map(|a| a.version);
+            row.versions = cfg.versions(row.harness.as_str());
+        }
+        row.agents = agents
+            .iter()
+            .filter(|(h, _)| *h == row.harness)
+            .map(|(_, a)| a.clone())
+            .collect();
+    }
+    Ok(Json(report))
 }
 
 /// The body of `POST /api/harnesses/{name}/update` and
@@ -89,7 +105,9 @@ pub struct HarnessUpdateBody {
     /// `latest` (the default), or a version like `0.165.0`.
     #[serde(default)]
     pub version: Option<String>,
-    /// Update also while agents on the harness run.
+    /// Install the version again even when its version dir is complete on
+    /// disk. Live agents never stop an update: each keeps the version it
+    /// runs until its next start.
     #[serde(default)]
     pub force: bool,
 }
@@ -110,6 +128,19 @@ pub struct HarnessUpdateResult {
     pub tested: Option<String>,
     /// Whether `to` is in `tested`; `null` when not known.
     pub in_range: Option<bool>,
+    /// True when the version dir was complete on disk, so npm did not run.
+    #[serde(default)]
+    pub reused: bool,
+    /// The live agents on the harness that run another version than `to`.
+    /// Each keeps its version until its next start.
+    #[serde(default)]
+    pub agents_on_old_version: Vec<crate::harness_versions::AgentOnVersion>,
+    /// What happens to `agents_on_old_version`, in one line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// The version dirs of this pin that the GC after the update removed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removed: Vec<String>,
     /// Only on a failure: why.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -122,22 +153,56 @@ fn update_body(body: &[u8]) -> ApiResult<HarnessUpdateBody> {
     serde_json::from_slice(body).map_err(|e| ApiError::bad_request(e.to_string()))
 }
 
-/// The live agents (`project/name`) on each harness.
-async fn live_agents(state: &Shared) -> ApiResult<Vec<(String, String)>> {
+/// The live agents (`project/name`, ID) on each harness.
+async fn live_agents(state: &Shared) -> ApiResult<Vec<(String, String, String)>> {
     state
         .db
         .read(|c| {
             let mut st = c.prepare(
-                "SELECT harness, project || '/' || name FROM agents
+                "SELECT harness, project || '/' || name, id FROM agents
                  WHERE status IN ('starting', 'idle', 'waiting', 'working', 'blocked', 'restarting')
                  ORDER BY project, name",
             )?;
             let rows = st
-                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                    ))
+                })?
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(rows)
         })
         .await
+}
+
+/// Each live agent with its harness and the version it runs: the store
+/// gives the live agents, the supervisor the versions.
+async fn agent_versions(
+    state: &Shared,
+) -> ApiResult<
+    Vec<(
+        terrarium_core::HarnessId,
+        crate::harness_versions::AgentOnVersion,
+    )>,
+> {
+    let runs = state.supervisor.harness_runs();
+    Ok(live_agents(state)
+        .await?
+        .into_iter()
+        .filter_map(|(h, agent, id)| {
+            let harness = h.parse().ok()?;
+            let version = runs
+                .iter()
+                .find(|r| r.agent.to_string() == id)
+                .and_then(|r| r.version.clone());
+            Some((
+                harness,
+                crate::harness_versions::AgentOnVersion { agent, id, version },
+            ))
+        })
+        .collect())
 }
 
 /// The tools dir, or `501 not_available`.
@@ -151,33 +216,37 @@ fn tools(state: &Shared) -> ApiResult<std::sync::Arc<crate::harness_tools::Tools
     })
 }
 
-/// `409 conflict` when agents run on the harnesses of `pins`, unless `force`.
-async fn refuse_while_running(
+/// Remove the version dirs of `cfg` that are not active and that no live
+/// agent runs ([`crate::harness_tools::ToolsConfig::gc`]). When no live
+/// agent started on the flat layout of before the version dirs, remove
+/// that too. The caller holds the update lock. Answers the removed
+/// versions (`<name> <version>`).
+pub async fn collect_garbage(
     state: &Shared,
-    pins: &[&crate::harness_tools::Pin],
-    force: bool,
-) -> ApiResult<()> {
-    if force {
-        return Ok(());
+    cfg: std::sync::Arc<crate::harness_tools::ToolsConfig>,
+) -> Vec<String> {
+    let mut in_use = crate::harness_tools::InUse::new();
+    let mut flat = false;
+    for r in state.supervisor.harness_runs() {
+        match r.version {
+            Some(v) => {
+                in_use.entry(r.harness.to_string()).or_default().insert(v);
+            }
+            None => flat = true,
+        }
     }
-    let running: Vec<String> = live_agents(state)
-        .await?
-        .into_iter()
-        .filter(|(h, _)| pins.iter().any(|p| p.harness.as_str() == h))
-        .map(|(_, a)| a)
-        .collect();
-    if running.is_empty() {
-        return Ok(());
-    }
-    let names: Vec<&str> = pins.iter().map(|p| p.name.as_str()).collect();
-    Err(ApiError::conflict(format!(
-        "{} agent(s) run on {}: {}. A running harness keeps the files it loaded, but a swap \
-         in the middle of a turn is risky. Stop the agents, or send `\"force\": true`",
-        running.len(),
-        names.join(", "),
-        running.join(", ")
-    ))
-    .with_details(serde_json::json!({ "running": running })))
+    let result = tokio::task::spawn_blocking(move || {
+        let removed = cfg.gc(Some(&in_use));
+        if !flat && let Err(e) = cfg.remove_flat() {
+            tracing::warn!("cannot remove the flat harness layout: {e}");
+        }
+        removed
+    })
+    .await;
+    result.unwrap_or_else(|e| {
+        tracing::warn!("the harness GC did not finish: {e}");
+        Vec::new()
+    })
 }
 
 /// Run the update of one pin, then the audit row and the `harness` event.
@@ -190,21 +259,51 @@ async fn update_one(
     version: &str,
     force: bool,
 ) -> ApiResult<HarnessUpdateResult> {
-    let r = cfg.update(&pin.name, version).await;
-    let (from, to, output, error) = match &r {
-        Ok(u) => (u.from.clone(), Some(u.to.clone()), u.output.clone(), None),
+    let r = cfg.update(&pin.name, version, force).await;
+    let (from, to, output, reused, error) = match &r {
+        Ok(u) => (
+            u.from.clone(),
+            Some(u.to.clone()),
+            u.output.clone(),
+            u.reused,
+            None,
+        ),
         Err(f) => (
             f.from.clone(),
             None,
             f.output.clone(),
+            false,
             Some(f.message.clone()),
         ),
     };
+    let old: Vec<crate::harness_versions::AgentOnVersion> = match &to {
+        Some(to) if !pin.extension => agent_versions(state)
+            .await?
+            .into_iter()
+            .filter(|(h, a)| *h == pin.harness && a.version.as_deref() != Some(to.as_str()))
+            .map(|(_, a)| a)
+            .collect(),
+        _ => Vec::new(),
+    };
+    let note = match (&to, old.len()) {
+        (Some(to), n) if n > 0 => Some(format!(
+            "{n} live agent(s) run another version of {}: {}. Each keeps its version and moves \
+             to {to} at its next restart",
+            pin.name,
+            old.iter()
+                .map(|a| a.agent.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+        _ => None,
+    };
     let name = pin.name.clone();
     let package = pin.package.clone();
+    let old_names: Vec<&str> = old.iter().map(|a| a.agent.as_str()).collect();
     let detail = serde_json::json!({
         "package": package, "version": version, "from": from, "to": to,
-        "force": force, "ok": error.is_none(), "error": error,
+        "force": force, "reused": reused, "ok": error.is_none(), "error": error,
+        "agents_on_old_version": old_names,
     });
     let event = to.as_ref().map(|to| {
         crate::events::EventDraft::new(
@@ -216,6 +315,7 @@ async fn update_one(
             serde_json::json!({
                 "change": "updated", "harness": name, "package": package,
                 "from": from, "to": to, "forced": force,
+                "agents_on_old_version": old_names,
             }),
         )
     });
@@ -238,6 +338,10 @@ async fn update_one(
         output,
         tested: None,
         in_range: None,
+        reused,
+        agents_on_old_version: old,
+        note,
+        removed: Vec::new(),
         error,
     })
 }
@@ -262,11 +366,31 @@ async fn refresh(state: &Shared, results: &mut [HarnessUpdateResult]) {
     }
 }
 
-/// `POST /api/harnesses/{name}/update`: `npm install -g <package>@<version>`
-/// into the tools dir, in the container, then the new `--version`. Needs
-/// sysadmin (or the operator). `409 conflict` while agents on the harness
-/// run (unless `force`) or while another update runs; `422 invalid` for a
-/// bad name or version, and for an npm failure (`details.output`).
+/// The GC after an update; each result gets the removed versions of its
+/// pin.
+async fn gc_after(
+    state: &Shared,
+    cfg: std::sync::Arc<crate::harness_tools::ToolsConfig>,
+    results: &mut [HarnessUpdateResult],
+) {
+    let removed = collect_garbage(state, cfg).await;
+    for r in results {
+        let prefix = format!("{} ", r.harness);
+        r.removed = removed
+            .iter()
+            .filter_map(|x| x.strip_prefix(&prefix).map(str::to_owned))
+            .collect();
+    }
+}
+
+/// `POST /api/harnesses/{name}/update`: install the version into its own
+/// version dir in the tools dir (`npm install -g` in the container; no npm
+/// run when the dir is complete on disk), check `--version`, and switch to
+/// it. Live agents keep the version they run; each moves to the new one at
+/// its next start (`agents_on_old_version`). Then the GC removes the
+/// version dirs that nothing uses. Needs sysadmin (or the operator).
+/// `409 conflict` while another update runs; `422 invalid` for a bad name
+/// or version, and for an npm failure (`details.output`).
 pub async fn harness_update(
     State(state): State<Shared>,
     actor: Actor,
@@ -292,9 +416,11 @@ pub async fn harness_update(
     let _busy = state.harness_tools.busy.try_lock().map_err(|_| {
         ApiError::conflict("another harness update runs now; try again when it ends")
     })?;
-    refuse_while_running(&state, &[&pin], body.force).await?;
     let mut results = vec![update_one(&state, &actor, &cfg, &pin, version, body.force).await?];
     refresh(&state, &mut results).await;
+    if results[0].error.is_none() {
+        gc_after(&state, cfg.clone(), &mut results).await;
+    }
     let r = results.remove(0);
     if let Some(e) = &r.error {
         return Err(
@@ -314,7 +440,8 @@ pub struct HarnessUpdateAll {
 
 /// `POST /api/harnesses/update`: every harness and extension to the latest
 /// release, one after another. A failure does not stop the others; any
-/// failure makes the answer `422 invalid` with `details.results`.
+/// failure makes the answer `422 invalid` with `details.results`. Live
+/// agents keep their versions, as for one update.
 pub async fn harness_update_all(
     State(state): State<Shared>,
     actor: Actor,
@@ -332,13 +459,12 @@ pub async fn harness_update_all(
     let _busy = state.harness_tools.busy.try_lock().map_err(|_| {
         ApiError::conflict("another harness update runs now; try again when it ends")
     })?;
-    let pins: Vec<&crate::harness_tools::Pin> = cfg.pins.iter().collect();
-    refuse_while_running(&state, &pins, body.force).await?;
     let mut results = Vec::new();
-    for pin in &pins {
+    for pin in &cfg.pins {
         results.push(update_one(&state, &actor, &cfg, pin, version, body.force).await?);
     }
     refresh(&state, &mut results).await;
+    gc_after(&state, cfg.clone(), &mut results).await;
     let failed = results.iter().filter(|r| r.error.is_some()).count();
     if failed > 0 {
         return Err(

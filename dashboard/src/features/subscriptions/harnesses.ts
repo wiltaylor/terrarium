@@ -2,10 +2,12 @@
 // ?latest=true, docs/api.md §4). harnesses.toml gives the version of the first
 // install; the daemon compares the installed version with the adapter's tested
 // range at every agent start, and reads the latest release of each package on
-// npm. An update runs npm in the container (POST /api/harnesses/{name}/update).
+// npm. An update runs npm in the container (POST /api/harnesses/{name}/update)
+// into a new version dir and switches to it. Running agents keep their version
+// until their next restart; the table names them.
 
 import { ApiError } from "../../api/http";
-import type { HarnessReport, HarnessUpdateResult, HarnessVersion } from "../../api/types";
+import type { HarnessAgent, HarnessReport, HarnessUpdateResult, HarnessVersion } from "../../api/types";
 
 /** The status chip of one row. */
 export type HarnessStatus = "unsupported" | "update available (major)" | "update available" | "latest" | "in range" | "unknown";
@@ -45,33 +47,50 @@ export const withUpdate = (r: HarnessReport | undefined) => (r?.harnesses ?? [])
 /** The version the update kind starts from: the installed one, else the pin (as the daemon does). */
 export const current = (h: HarnessVersion) => h.installed ?? h.pinned;
 
-/** The fallback line for a row with a newer release: npm in a shell in the container. Null when nothing is newer. */
-export function npmCommand(h: HarnessVersion): string | null {
+/**
+ * The fallback line for a row with a newer release: the CLI in a shell in the container. Null when nothing is
+ * newer. A bare `npm install -g` into the tools dir would bypass the version dirs, so the line uses the daemon.
+ */
+export function updateCommand(h: HarnessVersion): string | null {
   if ((h.update !== "minor" && h.update !== "major") || !h.latest) return null;
-  return `npm install -g ${h.package}@${h.latest.version}`;
+  return `terrarium admin harness update ${h.harness} --version ${h.latest.version}`;
 }
 
 /** One line for a finished update: `codex 0.164.0 → 0.165.0`. */
 export const resultLine = (r: HarnessUpdateResult) => `${r.harness} ${r.from ?? "(none)"} → ${r.to ?? "(unknown)"}`;
+
+/** The note lines of a finished update: the agents that keep an older version, and the removed version dirs. */
+export function resultNotes(r: HarnessUpdateResult): string[] {
+  const out: string[] = [];
+  if (r.note) out.push(r.note);
+  if (r.removed?.length) out.push(`${r.harness}: removed the unused version${r.removed.length > 1 ? "s" : ""} ${r.removed.join(", ")}`);
+  return out;
+}
+
+/** The live agents of a row that run another version than the active one. */
+export const oldAgents = (h: HarnessVersion): HarnessAgent[] => (h.active ? (h.agents ?? []).filter((a) => a.version !== h.active) : []);
+
+/** One agent on an older version: `terra/w runs 1.0.103; 1.0.110 at its next restart`. */
+export const oldAgentLine = (a: HarnessAgent, active: string) => `${a.agent} runs ${a.version ?? "an older install"}; ${active} at its next restart`;
+
+/** The version dirs on disk other than the active one (kept for a running agent, or for a quick switch back). */
+export const otherVersions = (h: HarnessVersion) => (h.versions ?? []).filter((v) => v !== h.active);
 
 /** What the box shows after an update call that failed. */
 export interface UpdateFailure {
   message: string;
   /** The npm output of a 422 npm failure, or of the failed items of an "update all". */
   output: string | null;
-  /** 409 with live agents: their names. The box then offers "Update anyway". */
-  running: string[] | null;
 }
 
 /** Read an error of `harnessUpdate` or `harnessUpdateAll`. */
 export function updateFailure(e: unknown): UpdateFailure {
-  if (!(e instanceof ApiError)) return { message: e instanceof Error ? e.message : String(e), output: null, running: null };
-  const d = (e.details ?? {}) as { output?: unknown; running?: unknown; results?: HarnessUpdateResult[] };
-  const running = e.status === 409 && Array.isArray(d.running) ? d.running.map(String) : null;
+  if (!(e instanceof ApiError)) return { message: e instanceof Error ? e.message : String(e), output: null };
+  const d = (e.details ?? {}) as { output?: unknown; results?: HarnessUpdateResult[] };
   let output: string | null = typeof d.output === "string" ? d.output : null;
   if (output === null && Array.isArray(d.results))
     output = d.results.map((r) => (r.error ? `${r.harness}: ${r.error}\n${r.output}` : `${resultLine(r)}\n${r.output}`)).join("\n") || null;
-  return { message: e.message, output, running };
+  return { message: e.message, output };
 }
 
 /** `2026-10-25T09:30:00Z` as `2026-10-25`. */

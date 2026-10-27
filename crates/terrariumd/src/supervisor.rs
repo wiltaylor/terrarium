@@ -121,6 +121,21 @@ pub enum Recovery {
     Gone,
 }
 
+/// The harness version that a live agent runs
+/// ([`Supervisor::harness_runs`]).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct HarnessRun {
+    pub agent: AgentId,
+    /// `project/name`.
+    pub name: String,
+    pub harness: terrarium_core::HarnessId,
+    /// The version dir that the launch resolved
+    /// (`crate::harness_tools::active_version`). `None`: the harness came
+    /// from `PATH` (no tools dir, or an agent that started before the
+    /// version dirs).
+    pub version: Option<String>,
+}
+
 /// Does `policy` start a harness again after an exit? `clean`: the exit
 /// code was 0, with no signal.
 pub fn wants_restart(policy: RestartPolicy, clean: bool) -> bool {
@@ -220,6 +235,12 @@ pub trait Supervisor: Send + Sync + 'static {
         Box::pin(async {
             crate::harness_versions::pins_only(crate::harness_versions::VersionPolicy::default())
         })
+    }
+    /// The harness version of each agent that runs or starts now. The
+    /// harness update lists the agents on an older version, and the GC of
+    /// the tools dir keeps their version dirs. The default knows none.
+    fn harness_runs(&self) -> Vec<HarnessRun> {
+        Vec::new()
     }
     /// After a daemon start, find the runner of an agent that the store
     /// shows as live (PLAN §18). `events_since` is the last runner seq that

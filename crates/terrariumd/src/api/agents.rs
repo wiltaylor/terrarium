@@ -89,11 +89,22 @@ async fn list(
     if let Some(p) = &project {
         policy::read_project(&actor, p)?;
     }
-    let rows = state
+    let mut rows = state
         .db
         .read(move |c| agents::list(c, project.as_deref(), &page))
         .await?;
+    let runs = state.supervisor.harness_runs();
+    for v in &mut rows.items {
+        v.harness_version = harness_version(&runs, v.agent.id);
+    }
     Ok(paged(rows))
+}
+
+/// The harness version that the live agent `id` runs.
+fn harness_version(runs: &[crate::supervisor::HarnessRun], id: AgentId) -> Option<String> {
+    runs.iter()
+        .find(|r| r.agent == id)
+        .and_then(|r| r.version.clone())
 }
 
 /// The answer of `POST /api/agents`: the agent, and the result of each
@@ -171,7 +182,8 @@ async fn show(
     actor: Actor,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Shown>> {
-    let view = load(&state, &actor, id).await?;
+    let mut view = load(&state, &actor, id).await?;
+    view.harness_version = harness_version(&state.supervisor.harness_runs(), view.agent.id);
     let subscription_detail = match view.agent.subscription.clone() {
         Some(name) => {
             let harness = view.agent.harness;

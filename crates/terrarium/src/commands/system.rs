@@ -704,6 +704,17 @@ fn print_update_row(ctx: &Ctx, r: &Value) {
                 _ => String::new(),
             };
             ctx.line(format!("{}: {from} -> {to}{range}", field(r, "harness")));
+            if let Some(note) = r["note"].as_str() {
+                ctx.line(note);
+            }
+            if let Some(removed) = r["removed"].as_array().filter(|a| !a.is_empty()) {
+                let v: Vec<&str> = removed.iter().filter_map(Value::as_str).collect();
+                ctx.line(format!(
+                    "{}: removed the unused version(s) {}",
+                    field(r, "harness"),
+                    v.join(", ")
+                ));
+            }
         }
         (None, Some(e)) => ctx.line(format!("{}: failed: {e}", field(r, "harness"))),
         (None, None) => ctx.line(format!("{}: failed", field(r, "harness"))),
@@ -717,8 +728,8 @@ fn print_update(ctx: &Ctx, v: &Value) {
     }
 }
 
-/// The `details` of a failed update: npm's output, each result of an
-/// update of all, or the running agents.
+/// The `details` of a failed update: npm's output, or each result of an
+/// update of all.
 fn print_failed_update(ctx: &Ctx, d: &Value) {
     if let Some(out) = d["output"].as_str().filter(|s| !s.trim().is_empty()) {
         ctx.line(out.trim_end());
@@ -726,17 +737,10 @@ fn print_failed_update(ctx: &Ctx, d: &Value) {
     if let Some(rows) = d["results"].as_array() {
         rows.iter().for_each(|r| print_update_row(ctx, r));
     }
-    if let Some(running) = d["running"].as_array() {
-        let names: Vec<&str> = running.iter().filter_map(Value::as_str).collect();
-        ctx.line(format!(
-            "running: {}. Stop them, or add --force",
-            names.join(", ")
-        ));
-    }
 }
 
 /// The keys of an update's `details` that [`print_failed_update`] prints.
-const PRINTED_UPDATE_DETAILS: [&str; 3] = ["output", "results", "running"];
+const PRINTED_UPDATE_DETAILS: [&str; 2] = ["output", "results"];
 
 /// The `details` of a failed update without the keys that
 /// [`print_failed_update`] printed; `None` when nothing is left.
@@ -756,20 +760,35 @@ fn without_printed_details(d: &Value) -> Option<Value> {
 /// its range.
 fn print_harnesses(ctx: &Ctx, v: &Value) {
     let items = v["harnesses"].as_array().cloned().unwrap_or_default();
-    let mut t =
-        crate::output::Table::new(&["HARNESS", "PINNED", "TESTED", "INSTALLED", "IN RANGE"]);
+    let mut t = crate::output::Table::new(&[
+        "HARNESS",
+        "PINNED",
+        "TESTED",
+        "INSTALLED",
+        "IN RANGE",
+        "ON DISK",
+    ]);
     for h in &items {
         let in_range = match h["in_range"].as_bool() {
             Some(true) => "yes".to_owned(),
             Some(false) => "NO".to_owned(),
             None => "unknown".to_owned(),
         };
+        let on_disk: Vec<&str> = h["versions"]
+            .as_array()
+            .map(|a| a.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
         t.row(vec![
             field(h, "harness"),
             field(h, "pinned"),
             field(h, "tested"),
             field(h, "installed"),
             in_range,
+            if on_disk.is_empty() {
+                "-".to_owned()
+            } else {
+                on_disk.join(" ")
+            },
         ]);
     }
     if items.is_empty() {
@@ -793,6 +812,21 @@ fn print_harnesses(ctx: &Ctx, v: &Value) {
             ));
         } else if h["in_range"].is_null() && !h["error"].is_null() {
             ctx.line(format!("{}: {}", field(h, "harness"), field(h, "error")));
+        }
+        // The live agents on another version than the active one.
+        let Some(active) = h["active"].as_str() else {
+            continue;
+        };
+        for a in h["agents"].as_array().into_iter().flatten() {
+            if a["version"].as_str() == Some(active) {
+                continue;
+            }
+            ctx.line(format!(
+                "{}: {} runs {}; it moves to {active} at its next restart",
+                field(h, "harness"),
+                field(a, "agent"),
+                a["version"].as_str().unwrap_or("an older install"),
+            ));
         }
     }
 }

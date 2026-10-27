@@ -3,7 +3,7 @@
 Terrarium wraps AI coding harnesses (Claude Code, Codex, Copilot CLI) so that
 one API, one CLI, one dashboard, and one status model apply to all of them.
 
-Status: draft v0.20, 2026-10-26. Phases 0 to 5 largely built; Phase 6 partly (the fleet file is done). The image holds no harness: the daemon installs the harnesses at start into the tools volume and updates them in place (§6, §23.3). Target leases and mode 1 (workspaces on the host, attached into targets) are built and verified live. The security review fixes F1 to F7 and F10 to F14 are in, with cookie sessions and the CSP header (`docs/security-review.md`). See §20, "Build status", and README.md.
+Status: draft v0.20, 2026-10-26. Phases 0 to 5 largely built; Phase 6 partly (the fleet file is done). The image holds no harness: the daemon installs the harnesses at start into the tools volume, one version dir each, and an update switches to a new version dir while running agents keep theirs (§6, §23.3). Target leases and mode 1 (workspaces on the host, attached into targets) are built and verified live. The security review fixes F1 to F7 and F10 to F14 are in, with cookie sessions and the CSP header (`docs/security-review.md`). See §20, "Build status", and README.md.
 
 ---
 
@@ -244,22 +244,27 @@ client and no vmlab: those run on outside hosts.
 The harnesses (`claude`, `codex`, `copilot`, and `pi` from
 `@earendil-works/pi-coding-agent`) and the `copilot-custom-system-prompt`
 extension live in `./tools` on the Docker host. The container mounts that
-dir at `/opt/terrarium/tools` (`TERRARIUM_TOOLS_DIR`). It is the npm global
-prefix (`NPM_CONFIG_PREFIX`), and its `bin/` comes first on `PATH`. At each
-start, the entrypoint and then the daemon run `terrariumd harness install`.
-The step installs each pin of `harnesses.toml` that is missing, and leaves
-a present harness at its version. It installs the Copilot prompt extension
-into the Copilot home when the extension or the Copilot version changed.
-It writes the manifest `tools/terrarium-manifest.json`. An update runs
-`npm install -g <package>@<version>` in place through the daemon
-(`POST /api/harnesses/{name}/update`, `terrarium admin harness update`).
-It needs no image build and no restart (`docs/getting-started.md` §7).
+dir at `/opt/terrarium/tools` (`TERRARIUM_TOOLS_DIR`). Each version of each
+harness is its own npm prefix, `versions/<name>/<version>/`; the links
+`current/<name>` and `bin/<binary>` point at the active one, and `bin/`
+comes first on `PATH`. At each start, the entrypoint and then the daemon
+run `terrariumd harness install`. The step installs each pin of
+`harnesses.toml` that has no active version, and leaves an active version
+as it is. It installs the Copilot prompt extension into the Copilot home
+when the extension or the Copilot version changed. It writes the manifest
+`tools/terrarium-manifest.json`. An update runs
+`npm install -g <package>@<version>` into a new version dir through the
+daemon (`POST /api/harnesses/{name}/update`, `terrarium admin harness
+update`) and switches the links. It needs no image build and no restart
+(`docs/getting-started.md` §7). Each agent launch runs the harness from
+the version dir that is active at the launch, so running agents keep
+their version until their next start.
 The sandbox binds the tools dir read-only (§11). The container mounts:
 
 | Mount | Purpose |
 |---|---|
 | `./config/claude`, `./config/codex`, `./config/copilot`, `./config/pi` bind-mounted under `/auth` | One host directory per harness home, so you can edit settings, hooks, and extensions from outside the container with your normal editor. Log in once from the dashboard's Subscriptions page (§16.1), or with `docker compose exec terrarium claude auth login` and the others. See §23. |
-| `./tools` bind-mounted at `/opt/terrarium/tools` | The harnesses: the npm global prefix (`TERRARIUM_TOOLS_DIR`), installed at start from the pins in `harnesses.toml`, updated in place through the daemon. Writable by the host user and the daemon; read-only in every sandbox. |
+| `./tools` bind-mounted at `/opt/terrarium/tools` | The harnesses: one npm prefix for each version (`TERRARIUM_TOOLS_DIR`), installed at start from the pins in `harnesses.toml`, updated through the daemon (a new version dir, then a switch). Writable by the host user and the daemon; read-only in every sandbox. |
 | `./state` bind-mounted at `/state` | SQLite, per-agent workspaces and logs, artifacts, credentials. |
 | `~/.ssh` or a key volume (optional) | For `ssh` targets. |
 | `/var/run/docker.sock` (optional) | Only for the sibling-container sandbox fallback (§11). Never for targets. |
@@ -301,7 +306,8 @@ Storage layout inside the container:
                                        runner-argv.json, runner-exit.json, runner.log
 /run/terrarium/api.sock
 /run/terrarium/agents/<ulid>.sock
-/opt/terrarium/tools/                  the harnesses (npm prefix): lib/node_modules/, bin/,
+/opt/terrarium/tools/                  the harnesses: versions/<name>/<version>/ (one npm
+                                       prefix each), current/<name>, bin/,
                                        terrarium-manifest.json (ro in the sandbox)
 /etc/terrarium/harnesses.toml          the pins of the first install (copied into the image)
 ```
@@ -1709,7 +1715,7 @@ end-to-end scenarios of each phase are not scripted yet (no `spikes/e2e/`).
 | 5 · lab repos | `lab_repo` (a git worktree of a project repo on the host, `lab_ref`, `lab_path`) and `lab_from_workspace` (one instance for each holder), with the lab allowlist in the host agent (`labcheck.rs`). `admin target edit` (`PATCH /api/targets/{name}`). The dashboard shows the lab source and the instances. Verified live on 2026-10-25. | — |
 | 5 · caps | `TERRARIUM_MAX_TARGETS_PER_PROJECT` (8, `409 conflict`) and the host agent's `max_running_targets` (4, `429 rate_limited`). The dashboard shows the cap errors and the running count of each host. | — |
 | 5 · scope | A target is global or belongs to one project (the `scope` field). A project target gets the prefix `<project>-`. A project_admin makes and leases the targets of its project; a global target needs sysadmin. The dashboard has scope chips and filters, and a targets panel on each project. | — |
-| Harnesses | The image holds no harness (`just ci::check` fails when the Dockerfile installs one). `terrariumd harness install` at each start (the entrypoint, then the daemon) installs each missing pin of `harnesses.toml` into the tools dir (`./tools` at `/opt/terrarium/tools`, the npm prefix) and the Copilot prompt extension, and writes `terrarium-manifest.json`. In-place updates: `POST /api/harnesses/{name}/update` and `POST /api/harnesses/update`, `terrarium admin harness update` (`--version`, `--force`, `--all`), `just harness::update` and `just harness::latest` (with `--pin`), and the "Update" buttons of the dashboard. Sysadmin or the operator only, audited as `harness.update`, `409` while agents on the harness run. The sandbox binds the tools dir read-only. The version guard at each agent start (`TERRARIUM_HARNESS_VERSION_POLICY`). `docs/getting-started.md` §7. | — |
+| Harnesses | The image holds no harness (`just ci::check` fails when the Dockerfile installs one). `terrariumd harness install` at each start (the entrypoint, then the daemon) installs each missing pin of `harnesses.toml` into the tools dir (`./tools` at `/opt/terrarium/tools`, one npm prefix for each version) and the Copilot prompt extension, and writes `terrarium-manifest.json`. Updates into version dirs: `POST /api/harnesses/{name}/update` and `POST /api/harnesses/update`, `terrarium admin harness update` (`--version`, `--force`, `--all`), `just harness::update` and `just harness::latest` (with `--pin`), and the "Update" buttons of the dashboard. Sysadmin or the operator only, audited as `harness.update`. Running agents keep their version dir until their next start; the GC removes the unused version dirs. The sandbox binds the tools dir read-only. The version guard at each agent start (`TERRARIUM_HARNESS_VERSION_POLICY`). `docs/getting-started.md` §7. | — |
 | Templates | Agent templates (§5b, `docs/api.md` §21): global and project templates, `POST /api/agents` with `template` (project over global, `global:`, field and `policy` key overrides, the create rights on the merged values), `resolve`, `from-agent`, `[[templates]]` in project files and fleets, `template = "..."` on fleet agents and in export, `terrarium template` and `agent new --template`, the dashboard Templates page, the template select of the agent form, and "Save as template". The lead templates make workers from the `worker` template. | Agent files (`agents/<name>.toml`) cannot name a template. |
 | Waits | Waits and watches (§12d, `docs/api.md` §6.7): the status `waiting`, `agent`, `process`, `time`, and `card` waits with timeouts, the cycle check, and the limits; `terrarium run` (a detached exec session with a `process` wait); one wake mail for each end (a 2 s batch); watches with debounce and `--once`; `terrarium wait`, `run`, `watch`; the `waiting` chip and the Waits and Watches sections of the agent page; the prompt text. Tests with the fake supervisor and a real host agent (`tests/waits.rs`). | Not run live with real harnesses yet. The queued watch changes of a debounce do not live through a daemon restart. |
 | 6 | Mail and event views in the dashboard. The fleet file (`docs/fleet.md`): `terrarium fleet validate`, `plan`, `apply` (with `--prune`), `ls`, `show`, and `export`, ownership as `source: "fleet:<name>"`, and the auto-apply of `fleets/*.toml` at start and on reload. | The sibling-container sandbox fallback is not started. |
@@ -1942,10 +1948,11 @@ the tools dir, and the Copilot prompt extension when it changed;
 `TERRARIUM_HARNESS_INSTALL=0` skips it; a failure does not stop the
 start); then start `terrariumd` under the supervisor loop. The daemon runs
 the same install step at its own start. An update later changes the
-harness in place through the daemon (`POST /api/harnesses/{name}/update`,
-sysadmin or the operator, audited as `harness.update`). It refuses with
-`409` while agents on that harness run, unless forced. A new image does
-not change the installed harnesses.
+harness through the daemon (`POST /api/harnesses/{name}/update`,
+sysadmin or the operator, audited as `harness.update`): a new version dir,
+then a switch. Running agents keep their version until their next start;
+the answer names them. A new image does not change the installed
+harnesses.
 
 ### 23.4 compose.yaml
 

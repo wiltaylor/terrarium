@@ -35,6 +35,12 @@ pub struct AgentView {
     /// What the agent waits on, in one short line. Absent when nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting_on: Option<String>,
+    /// The harness version that the live agent runs (its version dir in
+    /// the tools dir). It stays until the next start, also after an
+    /// update. Absent when the agent does not run or the version is not
+    /// known. The API fills it from the supervisor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_version: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -100,6 +106,7 @@ fn base_row(r: &Row<'_>) -> rusqlite::Result<AgentView> {
             .and_then(|s| serde_json::from_str(&s).ok()),
         waits: 0,
         waiting_on: None,
+        harness_version: None,
         created_at: r.get("created_at")?,
         updated_at: r.get("updated_at")?,
     })

@@ -200,7 +200,7 @@ terrarium/
     daemon/mod.just         cargo build, run, test, and the operator CLI
     dashboard/mod.just      npm install, dev, build, test, check
     docker/mod.just         image build and push, compose up/down/logs/shell, config dirs
-    harness/mod.just        harness versions: check, update in place (scripts/harness.py)
+    harness/mod.just        harness versions: check, update (scripts/harness.py)
     host/mod.just           build, package, and register terrarium-host
     spikes/mod.just         Phase 0 spike scripts
   Cargo.toml  Cargo.lock    the Rust workspace
@@ -226,7 +226,7 @@ terrarium/
   config/                   bind-mounted harness homes and config/tls (gitignored, except README.md)
   fleets/                   fleet files that the daemon applies at start and on reload
   labs/                     vmlab test labs (labs/terrarium-test), for a host agent on this machine
-  tools/                    the harnesses (npm prefix), bound at /opt/terrarium/tools (gitignored)
+  tools/                    the harnesses (one npm prefix per version), bound at /opt/terrarium/tools (gitignored)
   repos/                    local bare git repos, bound at /repos (gitignored)
   work/                     agent workspaces, <project>/<agent>/, bound at /work (gitignored)
   examples/fleet/           an example fleet file
@@ -260,7 +260,7 @@ recipes of a module.
 | Run the Rust and dashboard tests | `just test` |
 | Run the merge gate | `just ci::check` |
 | Run the compatibility suite for one harness | `just ci::compat claude` |
-| Check or update a harness in place, in the running container (installed into `./tools`; pins in `harnesses.toml`) | `just harness::check`, `just harness::latest`, `just harness::update claude` |
+| Check or update a harness in the running container (installed into `./tools`, one version dir each; running agents keep their version; pins in `harnesses.toml`) | `just harness::check`, `just harness::latest`, `just harness::update claude` |
 | Run the daemon outside Docker | `just daemon::run` |
 | Run the CLI against a running daemon | `just daemon::cli daemon status` |
 | Run the dashboard dev server | `just dashboard::dev` |

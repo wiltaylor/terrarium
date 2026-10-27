@@ -46,6 +46,7 @@ import type {
   CardComment,
   ColumnEdit,
   EventQuery,
+  HarnessAgent,
   HarnessReport,
   HarnessVersion,
   Host,
@@ -240,6 +241,11 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
   /** `harness.update` sessions: the scripted output, one chunk for each read. */
   // The installed harness versions. An update in the mock changes them.
   const harnessInstalled: Record<string, string> = { claude: "2.1.310", codex: "0.164.0", copilot: "1.0.103", pi: "1.5.1", "copilot-prompt": "0.1.2" };
+  // The version dirs on disk, and the version each agent's last start ran (an
+  // agent with none runs the version of the mock's start).
+  const harnessOnDisk: Record<string, string[]> = Object.fromEntries(Object.entries(harnessInstalled).map(([k, v]) => [k, [v]]));
+  const harnessAtStart: Record<string, string> = { ...harnessInstalled };
+  const harnessRuns: Record<string, string> = {};
 
   const reply = <T>(fn: () => T): Promise<T> =>
     new Promise<T>((resolve, reject) => {
@@ -509,31 +515,32 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     };
   };
 
-  // ----- harness versions and in-place updates (docs/api.md §4) -----
+  // ----- harness versions and updates into version dirs (docs/api.md §4) -----
+  /** The live agents on a harness and the version each runs. */
+  const harnessAgents = (harness: string): HarnessAgent[] =>
+    w.agents.filter((a) => a.harness === harness && LIVE_STATUSES.includes(a.status)).map((a) => ({ agent: `${a.project}/${a.name}`, id: a.id, version: harnessRuns[a.id] ?? harnessAtStart[harness] ?? null }));
   const harnessReport = (latest: boolean): HarnessReport => {
     const at = new Date(startedAt).toISOString();
     const rows = MOCK_HARNESSES.filter((h): h is MockHarness & { harness: HarnessVersion["harness"] } => h.harness !== null).map((h) => {
       const installed = harnessInstalled[h.name] ?? null;
       const in_range = installed === null ? null : inTested(installed, h.tested!);
-      const base: HarnessVersion = { harness: h.harness, package: h.package, pinned: h.pinned, tested: h.tested!, installed, in_range, checked_at: at };
+      const agents = harnessAgents(h.harness);
+      const base: HarnessVersion = {
+        harness: h.harness,
+        package: h.package,
+        pinned: h.pinned,
+        tested: h.tested!,
+        installed,
+        in_range,
+        checked_at: at,
+        ...(installed ? { active: installed, versions: [...(harnessOnDisk[h.name] ?? [])] } : {}),
+        ...(agents.length ? { agents } : {}),
+      };
       if (!latest) return base;
       if ("error" in h.npm) return { ...base, latest: null, update: null, latest_error: h.npm.error };
       return { ...base, latest: { version: h.npm.version, published_at: new Date(startedAt - h.npm.days * 86_400_000).toISOString() }, update: harnessUpdateKind(installed ?? h.pinned, h.npm.version) };
     });
     return { policy: "warn", harnesses: rows };
-  };
-  // 409 when a live agent runs on one of the harnesses (the extension counts as copilot).
-  const harnessRunning = (specs: MockHarness[], force: boolean) => {
-    if (force) return;
-    const uses = new Set(specs.map((s) => s.harness ?? "copilot"));
-    const running = w.agents.filter((a) => uses.has(a.harness) && LIVE_STATUSES.includes(a.status)).map((a) => `${a.project}/${a.name}`);
-    if (running.length)
-      fail(
-        409,
-        "conflict",
-        `${running.length} agent(s) run on ${[...uses].join(", ")} (${running.join(", ")}). A running harness keeps the files it loaded, but a swap in the middle of a turn is risky. Stop them, or send force: true`,
-        { running },
-      );
   };
   const updateHarness = (h: MockHarness, version: string, forced: boolean): HarnessUpdateResult => {
     const target = version === "latest" ? ("error" in h.npm ? null : h.npm.version) : version;
@@ -546,10 +553,31 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
         version: target,
         from,
       });
+    const disk = harnessOnDisk[h.name] ?? [];
+    const reused = disk.includes(target) && !forced;
     harnessInstalled[h.name] = target;
-    audit("harness.update", h.name, undefined, { from, to: target, version, force: forced });
-    emit({ kind: "harness", actor: "operator", summary: `${h.name} ${from ?? "-"} -> ${target}`, data: { change: "updated", harness: h.name, package: h.package, from, to: target, forced } });
-    return { harness: h.name, package: h.package, from, to: target, output: `\nchanged 1 package in 3s\n`, tested: h.tested, in_range: h.tested ? inTested(target, h.tested) : null };
+    // Running agents keep their version; the GC keeps the versions they run.
+    const old = h.harness ? harnessAgents(h.harness).filter((a) => a.version !== target) : [];
+    const used = new Set([target, ...old.map((a) => a.version).filter((v): v is string => v !== null)]);
+    const all = disk.includes(target) ? disk : [...disk, target];
+    const removed = all.filter((v) => !used.has(v));
+    harnessOnDisk[h.name] = all.filter((v) => used.has(v));
+    const names = old.map((a) => a.agent);
+    audit("harness.update", h.name, undefined, { from, to: target, version, force: forced, reused, agents_on_old_version: names });
+    emit({ kind: "harness", actor: "operator", summary: `${h.name} ${from ?? "-"} -> ${target}`, data: { change: "updated", harness: h.name, package: h.package, from, to: target, forced, agents_on_old_version: names } });
+    return {
+      harness: h.name,
+      package: h.package,
+      from,
+      to: target,
+      output: reused ? `${h.package}@${target} is complete on disk: no npm run\n` : `\nadded 1 package in 3s\n`,
+      tested: h.tested,
+      in_range: h.tested ? inTested(target, h.tested) : null,
+      reused,
+      agents_on_old_version: old,
+      ...(old.length ? { note: `${old.length} live agent(s) run another version of ${h.name}: ${names.join(", ")}. Each keeps its version and moves to ${target} at its next restart` } : {}),
+      ...(removed.length ? { removed } : {}),
+    };
   };
 
   const agentEvent = (a: Agent, kind: AgentEvent["kind"], summary: string, data: Record<string, unknown> = {}, actor = "system") =>
@@ -567,6 +595,9 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
   // ----- waits and watches -----
   const waitMock = createWaitMock({ w, iso, now, ulid, reply, fail, emit, agent, setStatus, sendMail: (to, from, subject, body) => sendMail(to, from, subject, body) });
   const openSession = (a: Agent) => {
+    // A start runs the active harness version.
+    const v = harnessInstalled[a.harness];
+    if (v) harnessRuns[a.id] = v;
     for (const s of w.sessions.filter((x) => x.agent === a.id && x.current)) {
       s.current = false;
       s.ended_at = iso();
@@ -1489,19 +1520,17 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
         const spec = MOCK_HARNESSES.find((h) => h.name === name);
         if (!spec) fail(422, "invalid", `unknown harness \`${name}\`: use one of ${MOCK_HARNESSES.map((h) => h.name).join(", ")}`);
         const version = checkHarnessVersion(o.version);
-        harnessRunning([spec], o.force === true);
         return updateHarness(spec, version, o.force === true);
       }),
     harnessUpdateAll: (o = {}) =>
       reply(() => {
-        harnessRunning(MOCK_HARNESSES, o.force === true);
         // One after another; a failed item gets `error` and its npm output, and the rest go on.
         const results = MOCK_HARNESSES.map((h): HarnessUpdateResult => {
           try {
             return updateHarness(h, "latest", o.force === true);
           } catch (e) {
             const d = (e as ApiError).details as { output?: string } | undefined;
-            return { harness: h.name, package: h.package, from: harnessInstalled[h.name] ?? null, to: null, output: d?.output ?? "", tested: h.tested, in_range: null, error: (e as Error).message };
+            return { harness: h.name, package: h.package, from: harnessInstalled[h.name] ?? null, to: null, output: d?.output ?? "", tested: h.tested, in_range: null, reused: false, agents_on_old_version: [], error: (e as Error).message };
           }
         });
         const failed = results.filter((r) => r.error).length;

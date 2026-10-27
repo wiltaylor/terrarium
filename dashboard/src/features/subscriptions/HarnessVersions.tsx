@@ -1,15 +1,18 @@
-// The "Harness versions" table: the installed version, the tested range, the
-// latest release on npm, and a status chip (GET /api/harnesses?latest=true).
+// The "Harness versions" table: the active version and the version dirs on
+// disk, the tested range, the latest release on npm, a status chip, and the
+// live agents that still run an older version (GET /api/harnesses?latest=true).
 // A row with a newer release has an "Update" button, and "Update all" updates
-// every harness. The daemon runs npm in the container
-// (POST /api/harnesses/{name}/update); no host agent and no image rebuild.
-// A copyable `npm install -g` line under the table is the fallback.
+// every harness. The daemon runs npm in the container into a new version dir
+// and switches to it (POST /api/harnesses/{name}/update); no host agent and no
+// image rebuild. Running agents keep their version until their next restart,
+// so nothing refuses the update. A copyable CLI line under the table is the
+// fallback.
 
 import { createResource, createSignal, For, Show } from "solid-js";
 import { CopyButton, ErrorBanner } from "../../components/ui";
 import { api } from "../../stores";
 import type { HarnessUpdateResult } from "../../api/types";
-import { harnessStatus, npmCommand, offPin, outOfRange, policyNote, publishedDay, resultLine, updateFailure, withUpdate, type UpdateFailure } from "./harnesses";
+import { harnessStatus, offPin, oldAgentLine, oldAgents, otherVersions, outOfRange, policyNote, publishedDay, resultLine, resultNotes, updateCommand, updateFailure, withUpdate, type UpdateFailure } from "./harnesses";
 
 /** One update call, as the box under the table shows it. `name` is a harness, or "all". */
 interface UpdateRun {
@@ -24,10 +27,10 @@ export function HarnessVersions() {
   const [run, setRun] = createSignal<UpdateRun | null>(null);
   const busy = () => !!run() && !run()!.done;
 
-  const update = async (name: string, force = false) => {
+  const update = async (name: string) => {
     setRun({ name, done: false, results: [], failure: null });
     try {
-      const results = name === "all" ? (await api.harnessUpdateAll({ force })).results : [await api.harnessUpdate(name, { version: "latest", force })];
+      const results = name === "all" ? (await api.harnessUpdateAll()).results : [await api.harnessUpdate(name, { version: "latest" })];
       setRun({ name, done: true, results, failure: null });
     } catch (e) {
       setRun({ name, done: true, results: [], failure: updateFailure(e) });
@@ -64,6 +67,7 @@ export function HarnessVersions() {
                     <th>Tested range</th>
                     <th>Latest</th>
                     <th>Status</th>
+                    <th>Agents</th>
                     <th />
                   </tr>
                 </thead>
@@ -82,6 +86,11 @@ export function HarnessVersions() {
                             <Show when={offPin(h)}>
                               <div class="small muted">pin {h.pinned}</div>
                             </Show>
+                            <Show when={otherVersions(h).length}>
+                              <div class="small muted" title="Version dirs on disk: kept while an agent runs them">
+                                also on disk: {otherVersions(h).join(", ")}
+                              </div>
+                            </Show>
                           </td>
                           <td class="mono">{h.tested}</td>
                           <td class="mono" title={h.latest_error}>
@@ -98,6 +107,12 @@ export function HarnessVersions() {
                             <span class={`chip ${s.cls}`} title={s.title} data-status={s.status}>
                               {s.status}
                             </span>
+                          </td>
+                          <td class="small" aria-label={`Agents on ${h.harness}`}>
+                            <Show when={(h.agents ?? []).length} fallback={<span class="muted">—</span>}>
+                              <div class="muted">{(h.agents ?? []).length} running</div>
+                            </Show>
+                            <For each={oldAgents(h)}>{(a) => <div class="chip warn mono" title="This agent keeps its version until its next restart">{oldAgentLine(a, h.active!)}</div>}</For>
                           </td>
                           <td>
                             <Show when={h.update === "minor" || h.update === "major"}>
@@ -124,24 +139,18 @@ export function HarnessVersions() {
               {(x) => (
                 <div class="card-box" aria-label="Update output" style={{ margin: "10px 0 0" }}>
                   <div class="small">{x().done ? (x().failure ? `The update of ${x().name} failed.` : `The update of ${x().name} finished.`) : `Updating ${x().name}…`}</div>
-                  <For each={x().results}>{(res) => <div class="small mono">{resultLine(res)}{res.error ? ` (${res.error})` : ""}</div>}</For>
-                  <Show when={x().failure}>
-                    {(f) => (
+                  <For each={x().results}>
+                    {(res) => (
                       <>
-                        <ErrorBanner error={new Error(f().message)} />
-                        <Show when={f().running}>
-                          {(names) => (
-                            <div class="row" style={{ gap: "8px", "align-items": "center", "flex-wrap": "wrap" }}>
-                              <span class="small">Running: {names().join(", ")}</span>
-                              <button class="small" disabled={busy()} onClick={() => void update(x().name, true)}>
-                                Update anyway
-                              </button>
-                            </div>
-                          )}
-                        </Show>
+                        <div class="small mono">
+                          {resultLine(res)}
+                          {res.error ? ` (${res.error})` : ""}
+                        </div>
+                        <For each={resultNotes(res)}>{(n) => <div class="small muted">{n}</div>}</For>
                       </>
                     )}
-                  </Show>
+                  </For>
+                  <Show when={x().failure}>{(f) => <ErrorBanner error={new Error(f().message)} />}</Show>
                   <Show when={x().results.map((res) => res.output).join("\n").trim() || x().failure?.output}>
                     {(out) => <pre class="mono small" style={{ "max-height": "260px", overflow: "auto" }}>{out()}</pre>}
                   </Show>
@@ -150,10 +159,10 @@ export function HarnessVersions() {
             </Show>
             <Show when={withUpdate(r()).length > 0}>
               <div class="card-box" aria-label="Update by hand" style={{ margin: "10px 0 0" }}>
-                <div class="small">Or in a shell in the container (just docker::shell), also with the stack's daemon stopped:</div>
+                <div class="small">Or in a shell in the container (just docker::shell):</div>
                 <For each={withUpdate(r())}>
                   {(h) => (
-                    <Show when={npmCommand(h)}>
+                    <Show when={updateCommand(h)}>
                       {(cmd) => (
                         <div class="row" style={{ gap: "8px", "align-items": "center", margin: "6px 0", "flex-wrap": "wrap" }}>
                           <code class="mono">{cmd()}</code>

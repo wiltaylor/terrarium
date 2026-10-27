@@ -57,6 +57,21 @@ export interface HarnessVersion {
   update?: HarnessUpdateKind | null;
   /** `?latest=true` only, when `latest` is null: why. */
   latest_error?: string;
+  /** The active version dir in the tools dir: the version the next agent start runs. Absent without a tools dir. */
+  active?: string;
+  /** The complete version dirs in the tools dir, oldest first. Absent without a tools dir. */
+  versions?: string[];
+  /** The live agents on the harness and the version each runs. Absent when none runs. */
+  agents?: HarnessAgent[];
+}
+
+/** A live agent and the harness version it runs (`GET /api/harnesses`, and the update answer). */
+export interface HarnessAgent {
+  /** `project/name`. */
+  agent: string;
+  id: string;
+  /** The version dir its launch resolved; null when not known (an agent that started before the version dirs). */
+  version: string | null;
 }
 
 /** `dist-tags.latest` of the package on npm, and its time. */
@@ -83,6 +98,14 @@ export interface HarnessUpdateResult {
   tested: string | null;
   /** Is `to` in `tested`? Null when it is not known. */
   in_range: boolean | null;
+  /** True when the version dir was complete on disk, so npm did not run. */
+  reused: boolean;
+  /** The live agents that run another version than `to`. Each keeps its version until its next restart. */
+  agents_on_old_version: HarnessAgent[];
+  /** What happens to `agents_on_old_version`, in one line. */
+  note?: string;
+  /** The version dirs of this harness that the GC after the update removed. */
+  removed?: string[];
   /** `POST /api/harnesses/update` only: why this item failed. */
   error?: string;
 }
@@ -90,7 +113,7 @@ export interface HarnessUpdateResult {
 /** The body of a harness update. `version`: `latest` (the default) or `x.y.z`. */
 export interface HarnessUpdateOptions {
   version?: string;
-  /** Update also while agents on the harness run. */
+  /** Install the version again, also when its version dir is on disk. Running agents never stop an update. */
   force?: boolean;
 }
 
@@ -241,6 +264,8 @@ export interface Agent {
   waits?: number;
   /** A short summary of the open waits, for example `agent demo/w1 (done); process build on box`. Absent when none. */
   waiting_on?: string;
+  /** The harness version the live agent runs. It stays until the next start, also after an update. Absent when not known. */
+  harness_version?: string;
   /** Only in `GET /api/agents/{id}`: the open waits. */
   open_waits?: Wait[];
 }

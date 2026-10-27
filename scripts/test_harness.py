@@ -385,14 +385,21 @@ class Update(unittest.TestCase):
         self.assertIn("| claude | 2.1.310 → 2.2.4 | minor |", self.md.read_text())
         self.assertIn("next image build", out)
 
-    def test_a_409_prints_the_running_agents_and_changes_no_file(self):
-        busy = (1, {"error": {"code": "conflict", "message": "claude runs in 1 agent", "details": {"running": ["terra/worker"]}}})
+    def test_a_conflict_prints_the_message_and_changes_no_file(self):
+        busy = (1, {"error": {"code": "conflict", "message": "another harness update runs now; try again when it ends"}})
         with FakeContainer({"claude": "2.1.310"}, [busy]):
             rc, _, err = self.update("claude", "2.1.320", "--pin")
         self.assertEqual(rc, 1)
-        self.assertIn("running: terra/worker", err)
-        self.assertIn("pass --force", err)
+        self.assertIn("another harness update runs now", err)
         self.assertEqual((self.toml.read_text(), self.md.read_text()), self.before)
+
+    def test_the_note_on_running_agents_prints(self):
+        note = "1 live agent(s) run another version of claude: terra/worker. Each keeps its version and moves to 2.1.320 at its next restart"
+        done = (0, {"harness": "claude", "from": "2.1.310", "to": "2.1.320", "output": "", "note": note})
+        with FakeContainer({"claude": "2.1.310"}, [done]):
+            rc, out, _ = self.update("claude", "2.1.320")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("moves to 2.1.320 at its next restart", out)
 
     def test_an_npm_failure_prints_the_output(self):
         bad = (1, {"error": {"code": "invalid", "message": "npm install failed", "details": {"output": "npm error notarget"}}})

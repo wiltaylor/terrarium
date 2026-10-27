@@ -3542,8 +3542,12 @@ async fn admin_harness_ls_shows_the_range_and_the_policy() {
         "policy": "warn",
         "harnesses": [
             {"harness": "claude", "package": "@anthropic-ai/claude-code", "pinned": "2.1.310",
-             "tested": ">=2.1.310, <2.2.0", "installed": "2.1.310", "in_range": true,
-             "checked_at": "2026-10-25T10:00:00Z"},
+             "tested": ">=2.1.310, <2.2.0", "installed": "2.1.311", "in_range": true,
+             "checked_at": "2026-10-25T10:00:00Z", "active": "2.1.311",
+             "versions": ["2.1.310", "2.1.311"],
+             "agents": [{"agent": "terra/a", "id": "01A", "version": "2.1.310"},
+                        {"agent": "terra/b", "id": "01B", "version": "2.1.311"},
+                        {"agent": "terra/c", "id": "01C", "version": null}]},
             {"harness": "codex", "package": "@openai/codex", "pinned": "0.160.0",
              "tested": ">=0.160.0, <0.161.0", "installed": "0.164.0", "in_range": false,
              "checked_at": "2026-10-25T10:00:00Z"},
@@ -3563,18 +3567,34 @@ async fn admin_harness_ls_shows_the_range_and_the_policy() {
     assert!(lines[0].starts_with("HARNESS"), "{out}");
     assert!(lines[0].contains("IN RANGE"), "{out}");
     assert!(out.contains("claude   2.1.310"), "{out}");
+    assert!(lines[0].ends_with("ON DISK"), "{out}");
     assert!(
         lines
             .iter()
-            .any(|l| l.starts_with("codex") && l.ends_with("NO")),
+            .any(|l| l.starts_with("claude") && l.ends_with("2.1.310 2.1.311")),
         "{out}"
     );
     assert!(
         lines
             .iter()
-            .any(|l| l.starts_with("pi") && l.ends_with("unknown")),
+            .any(|l| l.starts_with("codex") && l.contains(" NO ")),
         "{out}"
     );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("pi") && l.contains(" unknown ")),
+        "{out}"
+    );
+    assert!(
+        out.contains("claude: terra/a runs 2.1.310; it moves to 2.1.311 at its next restart"),
+        "{out}"
+    );
+    assert!(
+        out.contains("claude: terra/c runs an older install; it moves to 2.1.311"),
+        "{out}"
+    );
+    assert!(!out.contains("terra/b"), "{out}");
     assert!(
         out.contains("policy: warn (TERRARIUM_HARNESS_VERSION_POLICY)"),
         "{out}"
@@ -3683,7 +3703,7 @@ async fn admin_harness_update_posts_and_prints_from_and_to() {
 }
 
 #[tokio::test]
-async fn admin_harness_update_prints_npm_output_and_the_running_agents_on_failure() {
+async fn admin_harness_update_prints_npm_output_on_failure_and_the_old_agents() {
     let r = exec(
         false,
         &["admin", "harness", "update", "codex", "--version", "99.0.0"],
@@ -3707,45 +3727,31 @@ async fn admin_harness_update_prints_npm_output_and_the_running_agents_on_failur
         Some(json!({"package": "@openai/codex", "version": "99.0.0", "from": "0.164.0"}))
     );
 
-    let r = exec(
+    // A running agent does not stop an update: the note says when it
+    // moves.
+    let out = ok(
         false,
         &["admin", "harness", "update", "codex"],
         vec![(
-            409,
-            json!({"error": {"code": "conflict", "message": "1 agent(s) run on codex",
-            "details": {"running": ["terra/worker"]}}}),
+            200,
+            json!({"harness": "codex", "package": "@openai/codex", "from": "0.164.0",
+                "to": "0.165.0", "output": "", "tested": null, "in_range": null,
+                "agents_on_old_version": [{"agent": "terra/worker", "id": "01A", "version": "0.164.0"}],
+                "note": "1 live agent(s) run another version of codex: terra/worker. Each keeps its version and moves to 0.165.0 at its next restart",
+                "removed": ["0.163.0"]}),
         )],
-        None,
+        vec![(Post, "/api/harnesses/codex/update", vec![], Some(json!({})))],
     )
     .await;
-    let e = r.result.unwrap_err();
+    assert!(out.contains("codex: 0.164.0 -> 0.165.0"), "{out}");
     assert!(
-        r.out
-            .contains("running: terra/worker. Stop them, or add --force"),
-        "{}",
-        r.out
+        out.contains("moves to 0.165.0 at its next restart"),
+        "{out}"
     );
-    // The agents print once: the `running:` line, with no `details:` line.
-    assert_eq!(r.out.matches("terra/worker").count(), 1, "{}", r.out);
-    let se = e.downcast_ref::<ServerError>().unwrap();
-    assert_eq!(se.code, "conflict");
-    assert_eq!(se.details, None);
-
-    // --json keeps the whole body and prints nothing of its own.
-    let body = json!({"error": {"code": "conflict", "message": "1 agent(s) run on codex",
-        "details": {"running": ["terra/worker"]}}});
-    let r = exec(
-        false,
-        &["--json", "admin", "harness", "update", "codex"],
-        vec![(409, body.clone())],
-        None,
-    )
-    .await;
-    let e = r.result.unwrap_err();
-    let se = e.downcast_ref::<ServerError>().unwrap();
-    assert_eq!(se.body, body);
-    assert!(se.details.is_some());
-    assert!(!r.out.contains("running:"), "{}", r.out);
+    assert!(
+        out.contains("codex: removed the unused version(s) 0.163.0"),
+        "{out}"
+    );
 }
 
 /// `schedule` (docs/api.md §19): every command, both modes.

@@ -1,6 +1,7 @@
 //! `POST /api/harnesses/{name}/update` and `POST /api/harnesses/update`:
-//! the update in place in the tools dir, with a fake npm
-//! (`terrariumd::harness_tools::FAKE_NPM`).
+//! the update into a version dir of the tools dir and the switch to it,
+//! with a fake npm (`terrariumd::harness_tools::FAKE_NPM`). The update with
+//! a real runner and a running agent is in `runner_process.rs`.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod common;
@@ -37,11 +38,12 @@ fn npm_runs(cfg: &ToolsConfig) -> Vec<String> {
 }
 
 #[tokio::test]
-async fn an_update_runs_npm_in_place_and_answers_from_and_to() {
+async fn an_update_installs_a_version_dir_and_answers_from_and_to() {
     let (td, cfg) = daemon().await;
     let pin = cfg.pin("codex").unwrap().version.clone();
+    let runs = npm_runs(&cfg).len();
 
-    // The same version: npm runs, nothing changes.
+    // The same version: its dir is complete, so npm does not run.
     let r = td
         .post("/api/harnesses/codex/update", json!({"version": pin}))
         .await;
@@ -50,6 +52,18 @@ async fn an_update_runs_npm_in_place_and_answers_from_and_to() {
     assert_eq!(b["package"], "@openai/codex");
     assert_eq!(b["from"], pin.as_str());
     assert_eq!(b["to"], pin.as_str());
+    assert_eq!(b["reused"], true);
+    assert_eq!(b["agents_on_old_version"], json!([]));
+    assert_eq!(npm_runs(&cfg).len(), runs);
+    // `force` installs it again.
+    let r = td
+        .post(
+            "/api/harnesses/codex/update",
+            json!({"version": pin, "force": true}),
+        )
+        .await;
+    let b = r.ok();
+    assert_eq!(b["reused"], false);
     assert!(
         b["output"].as_str().unwrap().contains("added 1 package"),
         "{b}"
@@ -61,15 +75,26 @@ async fn an_update_runs_npm_in_place_and_answers_from_and_to() {
             .ends_with(&format!("@openai/codex@{pin}"))
     );
 
-    // An empty body is `latest`.
+    // An empty body is `latest`. No agent runs the old version, so the GC
+    // removes it.
     let r = td.post_empty("/api/harnesses/codex/update").await;
-    assert_eq!(r.ok()["to"], "9.0.0");
+    let b = r.ok();
+    assert_eq!(b["to"], "9.0.0");
+    assert_eq!(b["removed"], json!([pin]));
     assert_eq!(cfg.read_manifest()["codex"].version, "9.0.0");
+    assert_eq!(cfg.versions("codex"), ["9.0.0"]);
+
+    // The harness table shows the active version and the dirs on disk.
+    let h = td.get("/api/harnesses").await;
+    let rows = h.ok()["harnesses"].as_array().unwrap().clone();
+    let codex = rows.iter().find(|r| r["harness"] == "codex").unwrap();
+    assert_eq!(codex["active"], "9.0.0");
+    assert_eq!(codex["versions"], json!(["9.0.0"]));
 
     // The audit row and the `harness` event.
     let audit = td.get("/api/audit?action=harness.update").await;
     let rows = audit.ok().as_array().unwrap().clone();
-    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert_eq!(rows.len(), 3, "{rows:?}");
     let ev = td.get("/api/events?kind=harness").await;
     let ev = ev.ok().as_array().unwrap().clone();
     let last: &Value = ev.last().unwrap();
@@ -79,8 +104,12 @@ async fn an_update_runs_npm_in_place_and_answers_from_and_to() {
     assert_eq!(last["data"]["forced"], false);
 }
 
+/// A running agent does not stop an update: the answer lists it, with the
+/// note that it moves to the new version at its next restart. The version
+/// it may run stays on disk. (This supervisor reports no versions, so the
+/// version of the agent is not known.)
 #[tokio::test]
-async fn a_running_agent_refuses_the_update_unless_force() {
+async fn a_running_agent_does_not_stop_the_update() {
     let (td, cfg) = daemon().await;
     td.project("terra").await;
     let a = td
@@ -89,32 +118,34 @@ async fn a_running_agent_refuses_the_update_unless_force() {
     let id = a["id"].as_str().unwrap().to_owned();
     td.post_empty(&format!("/api/agents/{id}/start")).await.ok();
     td.wait_status(&id, "idle").await;
-    let runs = npm_runs(&cfg).len();
 
     let r = td.post("/api/harnesses/codex/update", json!({})).await;
-    r.err(409, "conflict");
+    let b = r.ok();
+    assert_eq!(b["to"], "9.0.0");
     assert_eq!(
-        r.body["error"]["details"]["running"],
-        json!(["terra/worker"])
+        b["agents_on_old_version"],
+        json!([{"agent": "terra/worker", "id": id, "version": null}])
     );
-    let msg = r.body["error"]["message"].as_str().unwrap();
-    assert!(msg.contains("in the middle of a turn"), "{msg}");
-    assert_eq!(npm_runs(&cfg).len(), runs, "no npm run");
-
-    // Another harness is free to update; `update all` is refused too.
-    td.post("/api/harnesses/pi/update", json!({})).await.ok();
-    td.post("/api/harnesses/update", json!({}))
-        .await
-        .err(409, "conflict");
-
-    let r = td
-        .post("/api/harnesses/codex/update", json!({"force": true}))
-        .await;
-    assert_eq!(r.ok()["to"], "9.0.0");
-    let ev = td.get("/api/events?kind=harness").await;
+    let note = b["note"].as_str().unwrap();
+    assert!(
+        note.contains("moves to 9.0.0 at its next restart"),
+        "{note}"
+    );
+    // Another harness has no agent on it.
+    let p = td.post("/api/harnesses/pi/update", json!({})).await;
+    assert_eq!(p.ok()["agents_on_old_version"], json!([]));
+    // `update all` goes ahead too.
+    let all = td.post("/api/harnesses/update", json!({})).await;
     assert_eq!(
-        ev.ok().as_array().unwrap().last().unwrap()["data"]["forced"],
-        true
+        all.ok()["results"].as_array().unwrap().len(),
+        cfg.pins.len()
+    );
+    let ev = td.get("/api/events?kind=harness").await;
+    let ev = ev.ok().as_array().unwrap().clone();
+    let codex = ev.iter().find(|e| e["data"]["harness"] == "codex").unwrap();
+    assert_eq!(
+        codex["data"]["agents_on_old_version"],
+        json!(["terra/worker"])
     );
 }
 

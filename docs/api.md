@@ -491,6 +491,17 @@ binaries again.
 `in_range` is `null` when the version is not known, and `error` says why.
 `terrarium admin harness ls` prints this table.
 
+With a tools dir, each row also has these fields:
+
+| Field | Meaning |
+|---|---|
+| `active` | The active version dir (`tools/current/<name>`): the version that the next agent start runs. |
+| `versions` | The complete version dirs on disk, oldest first. |
+| `agents` | The live agents on the harness: `[{"agent": "project/name", "id", "version"}]`. `version` is the version dir that the agent's launch resolved; `null` when it is not known (an agent that started before the version dirs). Absent when no agent runs. |
+
+An agent whose `version` differs from `active` keeps its version until
+its next start.
+
 `?latest=true` adds three fields to each row, from the npm registry
 (`https://registry.npmjs.org/<package>`: `dist-tags.latest` and its entry
 in `time`). The daemon caches each answer for 1 hour, and a failed lookup
@@ -525,9 +536,12 @@ calls `POST /api/harnesses/{name}/update`.
 
 The harnesses are not in the image. They are in the tools dir
 (`TERRARIUM_TOOLS_DIR`, `/opt/terrarium/tools` in the container, `./tools`
-on the Docker host), which is the npm prefix. An update runs
-`npm install -g <package>@<version>` into that dir, in the running
-container. It needs no image build, no restart, and no host agent
+on the Docker host), with one npm prefix for each version:
+`versions/<name>/<version>/`. An update runs
+`npm install -g <package>@<version>` into a new version dir, in the
+running container, checks `--version`, and switches `bin/<binary>` and
+`current/<name>` to it with an atomic `rename`. It needs no image build,
+no restart, and no host agent
 ([getting-started.md §7](getting-started.md#7-updating-a-harness)). Needs
 sysadmin or the operator.
 
@@ -542,43 +556,62 @@ sysadmin or the operator.
 
 ```json
 {"harness":"codex","package":"@openai/codex","from":"0.164.0","to":"0.165.0",
- "output":"\nchanged 2 packages in 2s\n","tested":">=0.164.0, <0.165.0","in_range":false}
+ "output":"\nadded 2 packages in 2s\n","tested":">=0.164.0, <0.165.0","in_range":false,
+ "reused":false,
+ "agents_on_old_version":[{"agent":"terra/worker","id":"01K8...","version":"0.164.0"}],
+ "note":"1 live agent(s) run another version of codex: terra/worker. Each keeps its version and moves to 0.165.0 at its next restart",
+ "removed":["0.163.0"]}
 ```
 
 | Field | Meaning |
 |---|---|
 | `from` | The version before; `null` when the package was not installed. |
-| `to` | The version after: `<binary> --version` for a harness, `package.json` for the extension. |
+| `to` | The version after: the `package.json` version of the new version dir. |
 | `output` | npm's output: stdout, then stderr. |
 | `tested`, `in_range` | The adapter's range, and whether `to` is in it (`null` for the extension). Outside the range, an agent start follows `TERRARIUM_HARNESS_VERSION_POLICY` (§6.2). |
+| `reused` | `true` when the version dir of `to` was complete on disk, so npm did not run (for example a switch back). |
+| `agents_on_old_version` | The live agents on the harness that run another version than `to`, each with the version it runs (`null`: not known). Empty for the extension. |
+| `note` | Only with `agents_on_old_version`: one line that names them and says that each moves to `to` at its next restart. |
+| `removed` | Only when the GC after the update removed a version dir of this pin: those versions. |
 | `error` | `POST /api/harnesses/update` only, on a failed item: why. |
 
 Rules:
 
-- While an agent on the harness is live (`starting`, `idle`, `waiting`, `working`,
-  `blocked`, `restarting`), the answer is `409 conflict` with
-  `details.running` (`["project/name", ...]`). A running harness keeps the
-  files it loaded, but a swap in the middle of a turn is risky. Stop the
-  agents, or send `"force": true`. For `copilot-prompt`, the Copilot agents
-  count. The next start of an agent runs the new version.
+- A live agent never stops an update. The launch of each agent runs the
+  harness from the version dir that was active at that launch, with that
+  `bin/` first on `PATH`. The agent keeps it until its next start (a
+  restart, or a relaunch after an exit). `GET /api/agents/{id}` shows it as
+  `harness_version`.
+- `force: true` installs the version again, also when its version dir is
+  complete on disk. Without it, a complete version dir is used as it is.
+  The field is accepted for compatibility; no live agent needs it.
+- After a done update, the daemon removes each version dir of the tools
+  dir that is not active and that no live agent runs. It also removes the
+  flat layout of before the version dirs (`tools/lib`) when no live agent
+  started on it. The daemon start does the same.
 - One update runs at a time. A second one gets `409 conflict`.
 - A name that is not a pin, or a version that is not `latest` or semver,
   is `422 invalid`. Nothing reaches npm.
 - When npm fails (for example a version that does not exist), the answer
   is `422 invalid` with `details`: `{output, package, version, from}`.
-  Nothing changes. npm has 10 minutes; then the daemon kills it.
+  Nothing changes: the daemon removes the temp dir, and the active version
+  and the links stay. npm has 10 minutes; then the daemon kills it.
 - `POST /api/harnesses/update` goes on after a failed item. When any item
   failed, the answer is `422 invalid` with `details.results`.
 - A Copilot update also reinstalls the Copilot prompt extension into the
   Copilot home.
 - Each update writes the audit entry `harness.update` (`detail`: `package`,
-  `version`, `from`, `to`, `force`, `ok`, `error`). A done update also
-  writes the event `harness` (§9) and runs `<binary> --version` again, so
-  `GET /api/harnesses` shows the new version at once.
+  `version`, `from`, `to`, `force`, `reused`, `ok`, `error`,
+  `agents_on_old_version`). A done update also writes the event `harness`
+  (§9; `data.agents_on_old_version` has the names) and runs
+  `<binary> --version` again, so `GET /api/harnesses` shows the new version
+  at once.
 - A daemon with no tools dir (`TERRARIUM_TOOLS_DIR` empty) answers
   `501 not_available`.
 - The tools dir keeps the manifest `terrarium-manifest.json`:
-  `{"<name>": {"package", "version", "installed_at"}}`.
+  `{"<name>": {"package", "version", "installed_at", "versions"}}`.
+  `version` is the active version; `versions` lists the version dirs on
+  disk.
 
 `terrarium admin harness update <name> [--version <v>] [--force]` and
 `terrarium admin harness update --all [--force]` call these endpoints.
@@ -860,6 +893,7 @@ An agent is the core `Agent` with bookkeeping fields:
 | `waits` | The number of open waits (§6.7). Absent when it is 0. |
 | `waiting_on` | What the agent waits on, in one short line: the summaries of the oldest 3 open waits and a count of the others. Absent when the agent has no open wait. |
 | `session` | The harness session ID of the current session, when known. |
+| `harness_version` | The harness version that the live agent runs: the version dir in the tools dir that its launch resolved (§4, `POST /api/harnesses/{name}/update`). It stays until the next start, also after an update. Absent when the agent does not run, or when the version is not known. |
 | `current_card` | The card the agent has in `in_progress`, if any. |
 | `source` | `file`, `api`, or `fleet:<name>` (§18.1). |
 | `template` | The agent template that the create copied: `{"id", "name", "project", "revision"}` (§21). Absent when the create named none. For display only. |

@@ -336,13 +336,13 @@ clean (F8). The notes are F4 and F5.
 **Supply chain and build (axis 8).** The image holds no harness (since commit
 5cda78a, 2026-10-26). `just ci::check` fails when `docker/Dockerfile` installs one.
 The harnesses and the Copilot prompt extension live in the tools volume (`./tools` at
-`/opt/terrarium/tools`, the npm global prefix). `terrariumd harness install` runs at
+`/opt/terrarium/tools`, one npm prefix for each version). `terrariumd harness install` runs at
 each container start (the entrypoint, then the daemon). It installs each missing
 package at the exact pin in `harnesses.toml` and leaves a present package at its
 version. It writes `tools/terrarium-manifest.json` with the package, version, and
 install time of each one. The Copilot extension installs into the Copilot home when
 its version or the Copilot version changes. An update runs `npm install -g
-<package>@<version>` in place through the daemon (`POST /api/harnesses/{name}/update`,
+<package>@<version>` into a new version dir through the daemon (`POST /api/harnesses/{name}/update`,
 `crates/terrariumd/src/harness_tools.rs`). Only a sysadmin or the operator can call it,
 and each call writes the audit row `harness.update` and a `harness` event. Thus npm
 reaches the registry at the first start and at each update, not at the image build:
@@ -428,12 +428,14 @@ These are known and documented trade-offs. The review confirms they are intentio
   operator. Each update writes the audit row `harness.update` (`package`, `version`,
   `from`, `to`, `force`, `ok`, `error`) and a `harness` event. A sysadmin agent can thus pick the version that every agent runs next;
   that is in the sysadmin role by design.
-- **A running harness keeps its loaded files during an update.** npm replaces the
-  files under `lib/node_modules/` in place. A running harness has its code loaded,
-  but a late `require` in the middle of a turn can read a mix of old and new files.
-  For this reason the daemon refuses an update (`409 conflict`, with the running
-  agents in `details.running`) while an agent on that harness runs, unless the caller
-  sends `force`. A forced update shows `force: true` in the audit row.
+- **A running harness keeps its files during an update.** Each harness version
+  is its own npm prefix (`tools/versions/<name>/<version>/`), and a version dir does
+  not change after it is complete. An update installs a new dir and switches the
+  links with an atomic `rename`. An agent launch runs the harness from the version
+  dir that was active at the launch, with that `bin/` first on `PATH`, so a late
+  `require` in the middle of a turn reads the files of its own version. The GC
+  never removes the version dir of a live agent. So the daemon does not refuse an
+  update while agents run; the answer lists them (`agents_on_old_version`).
 - **Remote `https:` images in agent-written markdown.** The sanitizer keeps them, so
   a wiki page can hold a tracking pixel. The page CSP `img-src` (`'self'`, `data:`,
   and the artifact origin) blocks the load, not the sanitizer. This is accepted

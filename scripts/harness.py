@@ -3,8 +3,9 @@
 
 Stdlib only (Python 3.11+). The `harness` just module calls it. The image
 installs no harness: the container installs the pins of harnesses.toml into
-/opt/terrarium/tools at the first start, and the daemon updates them in
-place (`terrarium admin harness update`). No command here builds an image.
+/opt/terrarium/tools at the first start, and the daemon updates them
+(`terrarium admin harness update`): each version goes into its own version
+dir, and the daemon switches to it. No command here builds an image.
 
     harness.py check [--json]
         For each harness (and extension): the pin, the tested range, the
@@ -16,9 +17,11 @@ place (`terrarium admin harness update`). No command here builds an image.
 
     harness.py update <name> [version] [--allow-major] [--force] [--pin] [--dry-run]
         Update one harness in the container to `version` (default: the latest
-        on npm), through the daemon (`npm install -g` into the tools volume).
-        A major bump from the installed version needs --allow-major. The
-        daemon refuses while an agent runs on the harness; --force goes on.
+        on npm), through the daemon (`npm install -g` into a version dir of
+        the tools volume, then the switch). A major bump from the installed
+        version needs --allow-major. Running agents keep their version until
+        their next restart; the daemon names them. --force installs the
+        version again when its version dir is on disk.
         --pin also writes the version (and a widened `tested` range) into
         harnesses.toml and a row into docs/compat.md "Version history", so a
         fresh install gets the same version. --dry-run prints the plan.
@@ -635,6 +638,8 @@ def apply(plan: Plan, force: bool) -> dict:
         if body.get("output"):
             print(body["output"].rstrip())
         print(f"{plan.name}: {body.get('from') or '-'} -> {body['to']}")
+        if body.get("note"):
+            print(f"  {body['note']}")
         return body
     e = body.get("error") if isinstance(body, dict) else None
     if not isinstance(e, dict):
@@ -643,9 +648,6 @@ def apply(plan: Plan, force: bool) -> dict:
     if isinstance(details, dict) and details.get("output"):
         print(str(details["output"]).rstrip())
     msg = e.get("message") or e.get("code") or "the update failed"
-    running = details.get("running") if isinstance(details, dict) else None
-    if e.get("code") == "conflict" and running:
-        msg += "\n  running: " + ", ".join(running) + "\n  Stop those agents, or pass --force."
     raise UpdateFailed(msg)
 
 
@@ -884,13 +886,13 @@ def main(argv: list[str] | None = None) -> int:
     u.add_argument("name")
     u.add_argument("version", nargs="?", help="default: the latest on npm")
     u.add_argument("--allow-major", action="store_true", help="allow a major bump")
-    u.add_argument("--force", action="store_true", help="update while agents run on the harness")
+    u.add_argument("--force", action="store_true", help="install the version again when its version dir is on disk")
     u.add_argument("--pin", action="store_true", help="also write harnesses.toml and docs/compat.md")
     u.add_argument("--dry-run", action="store_true", help="print the plan; change nothing")
     lt = sub.add_parser("latest", help="update every harness in the container to the latest")
     lt.add_argument("--dry-run", action="store_true", help="print the plan; change nothing")
     lt.add_argument("--pin", action="store_true", help="also write harnesses.toml and docs/compat.md")
-    lt.add_argument("--force", action="store_true", help="update while agents run on the harnesses")
+    lt.add_argument("--force", action="store_true", help="install each version again when its version dir is on disk")
     a = p.parse_args(argv)
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(line_buffering=True)

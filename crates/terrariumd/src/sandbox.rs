@@ -6,7 +6,7 @@
 //! |---|---|---|
 //! | `/usr`, `/lib`, `/lib64`, `/bin`, `/sbin` | the same paths (a symlink stays a symlink) | ro |
 //! | `/etc/{resolv.conf, hosts, ssl, passwd, group, localtime, alternatives, ...}` | the same paths, when they exist | ro |
-//! | the tools dir (`TERRARIUM_TOOLS_DIR`, `/opt/terrarium/tools`): the harnesses, their `bin/` on `PATH` | the same path | ro |
+//! | the tools dir (`TERRARIUM_TOOLS_DIR`, `/opt/terrarium/tools`): the harnesses, their `bin/` on `PATH`. The harness runs from the `bin/` of the version dir that was active at the launch (`AgentLayout::harness_bin`), and that dir comes first on `PATH`, so a later switch does not change a running agent | the same path | ro |
 //! | the harness install directory, when it is outside `/usr` and the tools dir | the same path | ro |
 //! | `/proc`, `/dev`, `/tmp` | new, private | |
 //! | `$HOME` (`/home/agent`) | a new tmpfs | rw |
@@ -196,6 +196,13 @@ pub struct AgentLayout {
     /// The local repos of the agent's project, bound read-write
     /// ([`local_repo_binds`]).
     pub repos: Vec<RepoBind>,
+    /// The `bin/` of the harness version dir that this launch runs
+    /// (`<tools>/versions/<name>/<version>/bin`,
+    /// `crate::harness_tools::active_version`). The program comes from it,
+    /// and it is first on `PATH` after the CLI dir, so a harness that runs
+    /// itself again through `PATH` gets the same version. `None`: the
+    /// program comes from `PATH`.
+    pub harness_bin: Option<PathBuf>,
 }
 
 /// One local repo bind: the real directory on the host, and the path of
@@ -370,8 +377,10 @@ impl SandboxConfig {
         layout: &AgentLayout,
         env: BTreeMap<String, String>,
     ) -> LaunchSpec {
+        let pinned = layout.harness_bin.clone();
         self.wrap_with(spec, layout, env, &real_symlink, &|p| {
-            which(p, std::env::var("PATH").ok().as_deref())
+            pinned_program(pinned.as_deref(), p, &is_executable)
+                .or_else(|| which(p, std::env::var("PATH").ok().as_deref()))
         })
     }
 
@@ -385,7 +394,15 @@ impl SandboxConfig {
         resolve: &dyn Fn(&str) -> Option<PathBuf>,
     ) -> LaunchSpec {
         if self.mode == SandboxMode::None {
+            // The pinned version runs by its path; any other program stays
+            // as it is, for `PATH`.
+            let program = layout
+                .harness_bin
+                .as_deref()
+                .and_then(|b| resolve(&spec.program).filter(|f| f.starts_with(b)))
+                .map_or(spec.program.clone(), |f| f.display().to_string());
             return LaunchSpec {
+                program,
                 env,
                 clear_env: true,
                 ..spec
@@ -493,25 +510,28 @@ impl SandboxConfig {
         match self.mode {
             SandboxMode::Bwrap => {
                 env.insert("HOME".into(), self.home.display().to_string());
-                let path = match &self.tools_dir {
-                    Some(t) => format!(
-                        "{SANDBOX_BIN_DIR}:{}:{SANDBOX_PATH}",
-                        t.join("bin").display()
-                    ),
-                    None => format!("{SANDBOX_BIN_DIR}:{SANDBOX_PATH}"),
-                };
-                env.insert("PATH".into(), path);
+                let mut parts = vec![SANDBOX_BIN_DIR.to_owned()];
+                parts.extend(layout.harness_bin.iter().map(|b| b.display().to_string()));
+                parts.extend(
+                    self.tools_dir
+                        .iter()
+                        .map(|t| t.join("bin").display().to_string()),
+                );
+                parts.push(SANDBOX_PATH.to_owned());
+                env.insert("PATH".into(), parts.join(":"));
                 env.insert(ENV_AGENT_SOCKET.into(), SANDBOX_SOCKET.into());
             }
             SandboxMode::None => {
                 if let Some(home) = inherited("HOME") {
                     env.insert("HOME".into(), home);
                 }
-                let base = inherited("PATH").unwrap_or_else(|| SANDBOX_PATH.to_owned());
-                let path = match self.cli.as_deref().and_then(Path::parent) {
-                    Some(dir) => format!("{}:{base}", dir.display()),
-                    None => base,
-                };
+                let mut path = inherited("PATH").unwrap_or_else(|| SANDBOX_PATH.to_owned());
+                if let Some(b) = &layout.harness_bin {
+                    path = crate::harness_tools::prepend_path(b, &path);
+                }
+                if let Some(dir) = self.cli.as_deref().and_then(Path::parent) {
+                    path = format!("{}:{path}", dir.display());
+                }
                 env.insert("PATH".into(), path);
                 env.insert(ENV_AGENT_SOCKET.into(), layout.socket.display().to_string());
             }
@@ -532,6 +552,17 @@ impl SandboxConfig {
 /// True for a var that must not pass from the daemon env.
 pub fn scrubbed(key: &str) -> bool {
     SCRUB_PREFIXES.iter().any(|p| key.starts_with(p))
+}
+
+/// `<bin>/<program>` when `bin` is given, `program` is a bare name, and
+/// `exists` says the file is there.
+fn pinned_program(
+    bin: Option<&Path>,
+    program: &str,
+    exists: &dyn Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    let found = bin?.join(program);
+    (!program.contains('/') && exists(&found)).then_some(found)
 }
 
 /// The program path inside the sandbox and the host directory to bind for
@@ -668,6 +699,7 @@ mod tests {
                 },
             ],
             repos: Vec::new(),
+            harness_bin: None,
         }
     }
 
@@ -927,6 +959,81 @@ TERRARIUM_AGENT=01K8AGENT0000000000000000A TERRARIUM_SOCKET=/run/terrarium/agent
         assert_eq!(
             (program.as_str(), dir),
             ("/opt/terrarium/tools/bin/codex", None)
+        );
+    }
+
+    /// An agent launched on a harness version runs the program from the
+    /// version dir, with that `bin/` first on `PATH` after the CLI dir. The
+    /// tools dir is bound once, read-only; the version dir needs no bind of
+    /// its own. A program that is not in the version dir comes from `PATH`.
+    #[test]
+    fn the_launch_runs_the_version_dir_of_the_agent() {
+        let tools = PathBuf::from("/opt/terrarium/tools");
+        let bin = tools.join("versions/claude/2.1.310/bin");
+        let cfg = SandboxConfig {
+            tools_dir: Some(tools.clone()),
+            ..config()
+        };
+        let mut l = layout();
+        l.harness_bin = Some(bin.clone());
+        let env = cfg.child_env(&l, &BTreeMap::new(), &|_| None);
+        assert_eq!(
+            env["PATH"],
+            "/opt/terrarium/bin:/opt/terrarium/tools/versions/claude/2.1.310/bin:\
+             /opt/terrarium/tools/bin:/usr/local/bin:/usr/bin:/bin"
+        );
+        let present = |p: &Path| p == bin.join("claude");
+        let resolve = |p: &str| {
+            pinned_program(Some(&bin), p, &present).or_else(|| Some(tools.join("bin").join(p)))
+        };
+        let wrapped = cfg.wrap_with(spec(), &l, env.clone(), &|_| None, &resolve);
+        let a = &wrapped.args;
+        let dash = a.iter().position(|x| x == "--").unwrap();
+        assert_eq!(a[dash + 1], bin.join("claude").display().to_string());
+        let ro: Vec<&str> = a
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| f.as_str() == "--ro-bind")
+            .map(|(i, _)| a[i + 1].as_str())
+            .collect();
+        assert_eq!(
+            ro.iter()
+                .filter(|s| s.starts_with("/opt/terrarium/tools"))
+                .count(),
+            1,
+            "{ro:?}"
+        );
+        assert!(ro.contains(&"/opt/terrarium/tools"), "{ro:?}");
+
+        // Another program: from the tools `bin/`, as before.
+        let other = LaunchSpec::new("codex", "/home/agent/work");
+        let wrapped = cfg.wrap_with(other, &l, env, &|_| None, &resolve);
+        let a = &wrapped.args;
+        let dash = a.iter().position(|x| x == "--").unwrap();
+        assert_eq!(a[dash + 1], "/opt/terrarium/tools/bin/codex");
+
+        // No sandbox: the same program path, and the same `PATH` order.
+        let none = SandboxConfig {
+            mode: SandboxMode::None,
+            cli: Some(PathBuf::from("/opt/t/bin/terrarium")),
+            ..cfg.clone()
+        };
+        let host = |k: &str| (k == "PATH").then(|| "/t/bin:/usr/bin".to_owned());
+        let env = none.child_env(&l, &BTreeMap::new(), &host);
+        assert_eq!(
+            env["PATH"],
+            format!("/opt/t/bin:{}:/t/bin:/usr/bin", bin.display())
+        );
+        let wrapped = none.wrap_with(spec(), &l, env, &|_| None, &resolve);
+        assert_eq!(wrapped.program, bin.join("claude").display().to_string());
+        // Without a version dir, the program stays a name for `PATH`.
+        l.harness_bin = None;
+        let wrapped = none.wrap_with(spec(), &l, BTreeMap::new(), &|_| None, &resolve);
+        assert_eq!(wrapped.program, "claude");
+        assert_eq!(
+            pinned_program(Some(&bin), "../claude", &|_| true),
+            None,
+            "a path is never pinned"
         );
     }
 

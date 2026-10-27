@@ -14,7 +14,7 @@ main:
 check *flags: require-uv
 	uv run python scripts/harness.py check {{flags}}
 
-# Update one harness in the running container to a version (default: the latest on npm) with npm, in place; no image build (flags: --dry-run, --allow-major, --force, --pin)
+# Update one harness in the running container to a version (default: the latest on npm): npm installs it into a new version dir and the daemon switches; running agents keep their version until a restart; no image build (flags: --dry-run, --allow-major, --force, --pin)
 [group('harness')]
 update name *args: require-uv require-docker
 	uv run python scripts/harness.py update {{quote(name)}} {{args}}

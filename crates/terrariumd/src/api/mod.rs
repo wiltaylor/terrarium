@@ -19,7 +19,7 @@ mod screen;
 pub mod session;
 mod streams;
 mod subscriptions;
-mod system;
+pub mod system;
 mod targets;
 mod templates;
 mod transcripts;

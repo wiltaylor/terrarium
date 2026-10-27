@@ -15,6 +15,32 @@ derives it from the runner's `idle` when the agent has an open wait. No
 adapter and no compat scenario sees it, so a harness bump cannot break it.
 The compat suite checks the runner statuses only.
 
+## The tools dir and the version dirs
+
+Each harness version is its own npm prefix in the tools dir:
+`tools/versions/<name>/<version>/` (`crates/terrariumd/src/harness_tools.rs`,
+[getting-started.md §7](getting-started.md#7-updating-a-harness)). The
+links `tools/bin/<binary>` and `tools/current/<name>` point at the active
+one. An agent launch runs the harness from the version dir that is active
+at the launch, so an update does not change a running agent.
+
+A move of a package dir to another prefix is safe for each pinned
+package. Read from the installed packages on 2026-10-27 (no package has
+an absolute path in a file or a link; each link is relative and stays in
+the package dir; npm puts each dependency in the package's own
+`node_modules/`):
+
+| Package | Version | Command | What it loads | Status |
+|---|---|---|---|---|
+| `@anthropic-ai/claude-code` | 2.1.310 | `bin/claude` → `bin/claude.exe` | One native binary. | read |
+| `@openai/codex` | 0.164.0 | `bin/codex` → `bin/codex.js` | A Node launcher that starts the native binary of `node_modules/@openai/codex-linux-x64`. | read |
+| `@github/copilot` | 1.0.103 | `bin/copilot` → `npm-loader.js` | A Node loader that starts `node_modules/@github/copilot-linux-x64/copilot`. | read |
+| `@earendil-works/pi-coding-agent` | 1.4.0 | `bin/pi` → `dist/bundle/cli.js` | A Node bundle, with its dependencies in `node_modules/` (relative `.bin` links). | read |
+| `copilot-custom-system-prompt` | 0.1.2 | `dist/install.js` | Copies `extensions/copilot-custom-system-prompt` into `$COPILOT_HOME/extensions/`. The copy does not refer to the tools dir. | read |
+
+So the migration of the flat layout (one prefix, `tools/lib/node_modules`)
+moves each package with hard links, with no npm run.
+
 ## Version history
 
 `harnesses.toml` at the repo root pins each harness (the version of the

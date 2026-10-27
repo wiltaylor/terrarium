@@ -668,7 +668,7 @@ Compose bind-mounts these host directories into the container:
 | `config/copilot/` | `/auth/copilot` | The Copilot CLI home (`COPILOT_HOME`) and the system-prompt extension. |
 | `config/pi/` | `/auth/pi` | The pi home (`PI_CODING_AGENT_DIR`). |
 | `state/` | `/state` | SQLite, agent logs and harness files, artifacts, credentials. |
-| `tools/` | `/opt/terrarium/tools` | The harnesses: the npm global prefix (`TERRARIUM_TOOLS_DIR`, `NPM_CONFIG_PREFIX`). The entrypoint installs the pins here at the first start; updates go here in place (section 7). The sandbox binds it read-only. Delete it to reinstall the pins. |
+| `tools/` | `/opt/terrarium/tools` | The harnesses (`TERRARIUM_TOOLS_DIR`): one npm prefix for each version, `versions/<name>/<version>/`, with `current/<name>` and `bin/<binary>` links to the active one. The entrypoint installs the pins here at the first start; an update adds a version dir and switches to it (section 7). The sandbox binds it read-only. Delete it (with no agent running) to reinstall the pins. |
 | `work/` | `/work` | Agent workspaces, `<project>/<agent>/` (`TERRARIUM_WORK_DIR`). A host agent on this machine attaches them to targets: set its `work_dir` to this directory (docs/host-protocol.md, "Workspaces"). |
 | `prompts/` | `/prompts` (read-only) | System prompt templates. |
 | `projects/`, `agents/`, `targets/`, `subscriptions/` | `/etc/terrarium/...` | Definition files. |
@@ -937,10 +937,30 @@ choose the pi binary (default: `pi` on `PATH`, for example
 
 The image holds no harness. The harnesses live in `tools/` on the Docker
 host, which is `/opt/terrarium/tools` in the container
-(`TERRARIUM_TOOLS_DIR`). That dir is the npm global prefix
-(`NPM_CONFIG_PREFIX`), and its `bin/` comes first on `PATH` for the
-daemon, the runners, and the sandbox. The sandbox binds it read-only, so
-an agent cannot change a harness.
+(`TERRARIUM_TOOLS_DIR`). Each version of each harness has its own npm
+prefix in that dir:
+
+```text
+tools/
+  versions/<name>/<version>/   one npm prefix: lib/node_modules/<package>, bin/<binary>, .complete
+  current/<name>               -> ../versions/<name>/<version>   (the active version)
+  bin/<binary>                 -> ../versions/<name>/<version>/bin/<binary>
+  terrarium-manifest.json
+```
+
+`bin/` comes first on `PATH` for the daemon, the runners, and the
+sandbox. The sandbox binds the tools dir read-only, so an agent cannot
+change a harness. A version dir does not change after it is complete: npm
+installs into a temp dir, the daemon checks `--version`, writes the
+marker `.complete`, and renames the dir into place. A switch to another
+version replaces the two symlinks with an atomic `rename`.
+
+**Each agent keeps its version.** At each agent start, the daemon reads
+`current/<name>` and runs the harness from that version dir, with its
+`bin/` first on `PATH`. A later switch does not change a running agent,
+also when the harness runs itself again through `PATH`. The next start of
+the agent (a restart, or a crash and a relaunch) runs the active version.
+`GET /api/agents/{id}` shows the version as `harness_version`.
 
 `harnesses.toml` at the repo root has two jobs
 ([CONVENTIONS.md](CONVENTIONS.md)):
@@ -948,20 +968,36 @@ an agent cannot change a harness.
 - It gives the versions of the **first install**. The image copies it to
   `/etc/terrarium/harnesses.toml`. At each start, the entrypoint runs
   `terrariumd harness install`, and the daemon runs the same step when it
-  starts. The step installs each pin that is missing from the tools dir,
+  starts. The step installs each pin that has no active version,
   checks `<binary> --version`, and installs the Copilot prompt extension
   into the Copilot home when its version or the Copilot version changed.
-  A harness that is present stays at its version, also when it is not the
-  pin. So an update survives a restart and a new image. The step writes
-  the manifest `tools/terrarium-manifest.json`:
-  `{"<name>": {"package", "version", "installed_at"}}`.
+  An active version stays, also when it is not the pin. So an update
+  survives a restart and a new image. The step writes the manifest
+  `tools/terrarium-manifest.json`:
+  `{"<name>": {"package", "version", "installed_at", "versions"}}`, where
+  `version` is the active version and `versions` the version dirs on disk.
 - It gives the **tested range** of each adapter. `crates/terrarium-core/build.rs`
   reads the file at compile time, and each adapter's `flags.rs` takes
   `verified` and `tested` from it. At each agent start, the daemon compares
   the installed version with that range (section 7.5).
 
 An update runs `npm install -g <package>@<version>` in the running
-container. It needs no image build, no restart, and no host agent.
+container, into a new version dir, and then switches to it. It needs no
+image build, no restart, and no host agent. Running agents do not stop
+it.
+
+**The older flat layout.** Before the version dirs, the tools dir was one
+npm prefix (`tools/lib/node_modules/<package>`). At the first start with
+version dirs, `terrariumd harness install` moves each package into
+`versions/<name>/<version>/` with hard links (no npm run, no download)
+and switches `bin/` to it. The flat files stay while an agent that
+started on them runs. The daemon removes `tools/lib` at a later start or
+after an update, when no live agent uses it.
+
+**Removal of old versions.** After each update, and at each daemon start,
+the daemon removes each version dir that is not active and that no live
+agent runs. `terrariumd harness install` (the entrypoint) does not know
+the live agents: it keeps the newest 3 versions of each harness.
 
 ### 7.1 Check
 
@@ -1001,15 +1037,21 @@ that command yourself:
 docker compose exec -u terrarium terrarium terrarium admin harness update claude --version 2.1.320
 ```
 
-The daemon runs npm, reads the new `--version`, refreshes its version
-cache, and writes the audit entry `harness.update` and a `harness` event.
-The command prints npm's output and `claude 2.1.310 -> 2.1.320`. The next
-start of each agent runs the new version.
+The daemon runs npm into a new version dir, reads the new `--version`,
+switches `bin/` and `current/` to it, refreshes its version cache, and
+writes the audit entry `harness.update` and a `harness` event. Then it
+removes the version dirs that nothing uses. The command prints npm's
+output and `claude 2.1.310 -> 2.1.320`. The next start of each agent runs
+the new version. When the version dir is complete on disk already (a
+switch back), npm does not run.
 
-- **Running agents.** While an agent on the harness runs, the daemon
-  refuses the update (`409`) and names the agents. A running harness keeps
-  the files that it loaded, but a swap in the middle of a turn is risky.
-  Stop the agents, or add `--force`.
+- **Running agents.** An agent on the harness that runs keeps its
+  version. The answer names each such agent
+  (`agents_on_old_version`), with the note that it moves to the new
+  version at its next restart. Restart an agent to move it now
+  (`terrarium agent restart <agent>`). The version dir of a running agent
+  stays on disk until the agent stops or restarts. `--force` installs the
+  version again, also when its version dir is on disk.
 - **A major bump.** From the version in the container, a major bump needs
   `--allow-major`. The command uses the semver rule for "major": the first
   part that is not zero. Thus, for a 0.x harness, 0.164.0 to 0.165.0 is a
@@ -1042,15 +1084,18 @@ have changed. At the end, it prints a table of the changes and one
 `terrarium admin harness update --all` updates every harness and the
 extension to the latest in one call, with no plan.
 
-**No rollout.** An update changes the files in `tools/` in place. The
-container does not restart, and no agent stops. There is no
-`just harness::rollout`.
+**No rollout.** An update adds a version dir and switches to it. The
+container does not restart, and no agent stops. Each agent moves to the
+new version at its next start. There is no `just harness::rollout`.
 
-**With the daemon stopped.** The update needs the daemon. When the
-daemon does not run, open a shell in the container (`just docker::shell`)
-and run `npm install -g <package>@<version>`. `NPM_CONFIG_PREFIX` points
-npm at the tools dir. The dashboard shows this line for each row with a
-newer release.
+**With the daemon stopped.** The update needs the daemon. Do not run
+`npm install -g` in the tools dir: it writes the flat layout and bypasses
+the version dirs. Start the stack, then run
+`terrarium admin harness update <name> --version <v>` in a shell in the
+container (`just docker::shell`). The dashboard shows this line for each
+row with a newer release. When a manual npm run replaced a link in
+`bin/`, the next `terrariumd harness install` points it back at the
+active version.
 
 ### 7.4 Prove the new version
 
@@ -1097,6 +1142,10 @@ Update to the old version:
 ```sh
 just harness::update claude 2.1.310
 ```
+
+When the old version dir is still on disk (an agent runs it), the switch
+needs no npm run. Agents on the newer version move back at their next
+restart.
 
 If you used `--pin`, `git checkout harnesses.toml docs/compat.md` undoes
 the file changes before a commit. To go back to the pins of

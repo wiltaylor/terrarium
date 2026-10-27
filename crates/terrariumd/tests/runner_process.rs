@@ -26,6 +26,7 @@ use terrarium_core::{Adapter, Agent, AgentId, Event, HarnessId, HarnessSessionId
 use terrarium_core::{LaunchSpec, SessionId};
 use terrarium_runner::test_support::{RunnerProcessGuard, sweep_stale_runners_once};
 use terrarium_runner::{AdapterKind, ReadyDetectorSpec, live_runner_pid};
+use terrariumd::harness_tools::{ToolsConfig, compiled_pins, write_fake_npm};
 use terrariumd::runner_supervisor::{
     AdapterEntry, RestartTuning, RunnerMode, RunnerSupervisor, RunnerSupervisorConfig, RunnerTuning,
 };
@@ -76,7 +77,12 @@ fn runner_bin() -> PathBuf {
 
 /// The daemon side of the fake TUI: only the launch spec. The runner
 /// process maps the hooks with its own fake adapter (`AdapterKind::Fake`).
-struct FakeLaunch;
+struct FakeLaunch {
+    /// Launch `claude <fake_tui.py> ...`, so the program comes from the
+    /// harness version dir of the tools dir ([`tui_wrapper`]); else
+    /// `python3 <fake_tui.py> ...`.
+    pinned: bool,
+}
 
 impl Adapter for FakeLaunch {
     fn id(&self) -> HarnessId {
@@ -89,7 +95,8 @@ impl Adapter for FakeLaunch {
         Ok(Version::new(1, 0, 0))
     }
     fn launch(&self, agent: &Agent, resume: Option<&HarnessSessionId>) -> LaunchSpec {
-        let spec = LaunchSpec::new("python3", &agent.workspace)
+        let program = if self.pinned { "claude" } else { "python3" };
+        let spec = LaunchSpec::new(program, &agent.workspace)
             .arg(fake_tui().display().to_string())
             .env("FAKE_TUI_DELAY_MS", "150");
         match resume {
@@ -109,7 +116,24 @@ impl Adapter for FakeLaunch {
     }
 }
 
-fn supervisor(root: &Path) -> Arc<RunnerSupervisor> {
+/// Make the harness command `bin` a wrapper that runs the fake TUI:
+/// `bin <fake_tui.py> ...` is `python3 <fake_tui.py> ...`.
+fn tui_wrapper(bin: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::remove_file(bin);
+    std::fs::write(bin, "#!/bin/sh\nexec python3 \"$@\"\n").unwrap();
+    std::fs::set_permissions(bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// The tools dir of a [`Td`] with harness version dirs, and its fake npm.
+fn tools_config(root: &Path) -> ToolsConfig {
+    std::fs::create_dir_all(root.join("copilot")).unwrap();
+    let mut cfg = ToolsConfig::new(root.join("tools"), compiled_pins(), root.join("copilot"));
+    cfg.npm = write_fake_npm(root);
+    cfg
+}
+
+fn supervisor(root: &Path, tools: Option<&Path>) -> Arc<RunnerSupervisor> {
     let home = root.join("auth/claude");
     std::fs::create_dir_all(&home).unwrap();
     let mut homes = HashMap::new();
@@ -120,11 +144,14 @@ fn supervisor(root: &Path) -> Arc<RunnerSupervisor> {
         root.join("prompts"),
         SandboxConfig {
             mode: SandboxMode::None,
+            tools_dir: tools.map(Path::to_path_buf),
             ..SandboxConfig::default()
         },
         homes,
     );
-    let mut entry = AdapterEntry::new(Arc::new(FakeLaunch));
+    let mut entry = AdapterEntry::new(Arc::new(FakeLaunch {
+        pinned: tools.is_some(),
+    }));
     entry.runner_adapter = AdapterKind::Fake;
     entry.ready_spec = Some(ReadyDetectorSpec {
         quiet_ms: 100,
@@ -155,10 +182,23 @@ struct Td {
     dir: tempfile::TempDir,
     daemon: Option<Daemon>,
     socket: PathBuf,
+    /// A tools dir with harness version dirs ([`Td::start_with_tools`]).
+    tools: Option<ToolsConfig>,
 }
 
 impl Td {
     async fn start() -> Self {
+        Self::start_with(false).await
+    }
+
+    /// A daemon whose agents run the harness from the version dirs of a
+    /// tools dir: the fake npm installs the pins, and the claude command
+    /// of the pinned version is the fake TUI.
+    async fn start_with_tools() -> Self {
+        Self::start_with(true).await
+    }
+
+    async fn start_with(tools: bool) -> Self {
         // Unix socket paths must stay short.
         let dir = tempfile::Builder::new()
             .prefix("trp")
@@ -166,11 +206,22 @@ impl Td {
             .unwrap();
         std::fs::create_dir_all(dir.path().join("config")).unwrap();
         sweep_stale_runners_once(&runner_bin());
+        let tools = match tools {
+            true => {
+                let cfg = tools_config(dir.path());
+                assert_eq!(cfg.install().await.failed(), 0);
+                let pin = cfg.pin("claude").unwrap().version.clone();
+                tui_wrapper(&cfg.version_dir("claude", &pin).join("bin/claude"));
+                Some(cfg)
+            }
+            false => None,
+        };
         let mut td = Self {
             _guard: RunnerProcessGuard::new(dir.path().join("run")),
             socket: dir.path().join("api.sock"),
             dir,
             daemon: None,
+            tools,
         };
         td.boot().await;
         td
@@ -187,13 +238,19 @@ impl Td {
             work_dir: self.dir.path().join("state").with_file_name("work"),
             max_targets_per_project: terrariumd::settings::DEFAULT_MAX_TARGETS_PER_PROJECT,
             repos_dir: std::path::PathBuf::from("/repos"),
-            supervisor: supervisor(self.dir.path()),
+            supervisor: supervisor(
+                self.dir.path(),
+                self.tools.as_ref().map(|t| t.dir.as_path()),
+            ),
             insecure_agent_header: true,
             artifact_listen: None,
             web: Default::default(),
         })
         .await
         .unwrap();
+        if let Some(t) = &self.tools {
+            daemon.state.harness_tools.configure(t.clone());
+        }
         self.daemon = Some(daemon);
     }
 
@@ -876,4 +933,119 @@ async fn ephemeral_targets_follow_the_agent() {
     assert_eq!(log().matches("docker rm").count(), 1, "{}", log());
     assert_eq!(td.get("/api/targets/kbox").await["state"], "running");
     host.abort();
+}
+
+/// The claude row of `GET /api/harnesses`.
+async fn claude_row(td: &Td) -> Value {
+    let h = td.get("/api/harnesses").await;
+    h["harnesses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["harness"] == "claude")
+        .unwrap()
+        .clone()
+}
+
+/// A harness update while an agent runs (the harness version dirs,
+/// `harness_tools`): the update goes ahead, the agent keeps the version it
+/// runs, and the answer lists it. A restart moves it to the new version.
+/// The GC keeps a version while an agent runs it, and removes it after.
+/// A daemon restart reads the version of a live runner back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_update_while_an_agent_runs_keeps_its_version_until_a_restart() {
+    let mut td = Td::start_with_tools().await;
+    let tools = td.tools.clone().unwrap();
+    let pin = tools.pin("claude").unwrap().version.clone();
+    let id = td.agent("w", json!({})).await;
+    td.post(&format!("/api/agents/{id}/start"), None).await;
+    td.wait_status(&id, "idle").await;
+    td.turn(&id, "one").await;
+    assert_eq!(
+        td.get(&format!("/api/agents/{id}")).await["harness_version"],
+        pin.as_str()
+    );
+    let row = claude_row(&td).await;
+    assert_eq!(row["active"], pin.as_str());
+    assert_eq!(
+        row["agents"],
+        json!([{"agent": "demo/w", "id": id, "version": pin}])
+    );
+    let rec = std::fs::read_to_string(td.private_dir(&id).join("harness-version.json")).unwrap();
+    assert!(rec.contains(&pin), "{rec}");
+    // The runner runs the command of the version dir, by its path.
+    let spec: Value = serde_json::from_str(
+        &std::fs::read_to_string(td.private_dir(&id).join("runner.json")).unwrap(),
+    )
+    .unwrap();
+    let program = tools.version_dir("claude", &pin).join("bin/claude");
+    assert_eq!(
+        spec["launch"]["program"],
+        program.display().to_string(),
+        "{spec}"
+    );
+
+    // The update: 200, the agent stays on its version, and its dir stays.
+    let r = td
+        .post(
+            "/api/harnesses/claude/update",
+            Some(json!({"version": "2.1.999"})),
+        )
+        .await;
+    assert_eq!(r["from"], pin.as_str());
+    assert_eq!(r["to"], "2.1.999");
+    assert_eq!(
+        r["agents_on_old_version"],
+        json!([{"agent": "demo/w", "id": id, "version": pin}])
+    );
+    assert!(r["note"].as_str().unwrap().contains("next restart"), "{r}");
+    assert_eq!(r.get("removed"), None, "{r}");
+    let old = tools.version_dir("claude", &pin);
+    assert!(old.join("bin/claude").is_file());
+    assert_eq!(
+        td.get(&format!("/api/agents/{id}")).await["harness_version"],
+        pin.as_str()
+    );
+    // The agent still works on its version.
+    td.turn(&id, "two").await;
+
+    // A restart moves it to the active version.
+    tui_wrapper(&tools.version_dir("claude", "2.1.999").join("bin/claude"));
+    td.post(&format!("/api/agents/{id}/restart"), None).await;
+    let start = Instant::now();
+    loop {
+        let v = td.get(&format!("/api/agents/{id}")).await;
+        if v["harness_version"] == "2.1.999" && v["status"] == "idle" {
+            break;
+        }
+        assert!(
+            start.elapsed() < WAIT,
+            "the restart did not take 2.1.999: {v}"
+        );
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+
+    // Nothing runs the old version now: the next GC removes it.
+    let r = td
+        .post(
+            "/api/harnesses/claude/update",
+            Some(json!({"version": "2.1.999"})),
+        )
+        .await;
+    assert_eq!(r["reused"], true);
+    assert_eq!(r["agents_on_old_version"], json!([]));
+    assert_eq!(r["removed"], json!([pin]));
+    assert!(!old.exists());
+
+    // A daemon restart: the runner lives on, and the new daemon reads its
+    // version back.
+    td.shutdown();
+    td.boot().await;
+    td.wait_status(&id, "idle").await;
+    let row = claude_row(&td).await;
+    assert_eq!(row["agents"][0]["version"], "2.1.999", "{row}");
+
+    td.post(&format!("/api/agents/{id}/stop"), None).await;
+    td.wait_status(&id, "stopped").await;
+    td.wait_runner_gone(&id).await;
 }

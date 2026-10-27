@@ -534,7 +534,7 @@ describe("mock parity with docs/api.md", () => {
   it("answers GET /api/harnesses?latest=true and the harness update in the daemon's shapes", async () => {
     const api = mock();
     // The fields of `harness_versions::HarnessVersion` (docs/api.md GET /api/harnesses).
-    const ROW = ["harness", "package", "pinned", "tested", "installed", "in_range", "error", "checked_at", "latest", "update", "latest_error"];
+    const ROW = ["harness", "package", "pinned", "tested", "installed", "in_range", "error", "checked_at", "latest", "update", "latest_error", "active", "versions", "agents"];
     const r = await api.harnesses(true, true);
     for (const h of r.harnesses) {
       for (const k of Object.keys(h)) expect(ROW).toContain(k);
@@ -547,14 +547,17 @@ describe("mock parity with docs/api.md", () => {
     // Without `latest`, no npm fields.
     for (const h of (await api.harnesses()).harnesses) for (const k of ["latest", "update", "latest_error"]) expect(h).not.toHaveProperty(k);
     // `harness_install::UpdateResult` (docs/api.md POST /api/harnesses/{name}/update).
-    const RESULT = ["harness", "package", "from", "to", "output", "tested", "in_range"].sort();
+    // `note` and `removed` are absent when empty.
+    const RESULT = ["harness", "package", "from", "to", "output", "tested", "in_range", "reused", "agents_on_old_version"].sort();
     const one = await api.harnessUpdate("copilot-prompt", { force: true });
     expect(Object.keys(one).sort()).toEqual(RESULT);
-    expect(one).toMatchObject({ harness: "copilot-prompt", package: "copilot-custom-system-prompt", tested: null, in_range: null });
-    const conflict = await api.harnessUpdate("claude").catch((e: unknown) => e);
-    expect(conflict).toMatchObject({ status: 409, code: "conflict", details: { running: expect.arrayContaining(["terrarium/lead"]) } });
-    const npm = await api.harnessUpdate("claude", { version: "99.1.0", force: true }).catch((e: unknown) => e);
-    expect(npm).toMatchObject({ status: 422, code: "invalid", details: { package: "@anthropic-ai/claude-code", version: "99.1.0", from: "2.1.310" } });
+    expect(one).toMatchObject({ harness: "copilot-prompt", package: "copilot-custom-system-prompt", tested: null, in_range: null, reused: false, agents_on_old_version: [] });
+    // A live agent on the harness does not refuse the update.
+    const claude = await api.harnessUpdate("claude", { version: "2.1.320" });
+    expect(claude.agents_on_old_version).toEqual(expect.arrayContaining([expect.objectContaining({ agent: "terrarium/lead", version: "2.1.310" })]));
+    for (const a of claude.agents_on_old_version) expect(Object.keys(a).sort()).toEqual(["agent", "id", "version"]);
+    const npm = await api.harnessUpdate("claude", { version: "99.1.0" }).catch((e: unknown) => e);
+    expect(npm).toMatchObject({ status: 422, code: "invalid", details: { package: "@anthropic-ai/claude-code", version: "99.1.0", from: "2.1.320" } });
     expect(Object.keys((npm as { details: object }).details).sort()).toEqual(["from", "output", "package", "version"]);
   });
 

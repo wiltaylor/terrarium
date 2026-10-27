@@ -129,6 +129,20 @@ async fn main() -> anyhow::Result<()> {
     .await?;
     if let Some(t) = tools {
         daemon.state.harness_tools.configure(t);
+        // The start reconciled the live agents, so the supervisor knows the
+        // version that each runs: remove the version dirs that nothing
+        // uses, and the flat layout when no agent started on it.
+        let state = daemon.state.clone();
+        tokio::spawn(async move {
+            let Some(cfg) = state.harness_tools.config() else {
+                return;
+            };
+            let _busy = state.harness_tools.busy.lock().await;
+            let removed = terrariumd::api::system::collect_garbage(&state, cfg).await;
+            if !removed.is_empty() {
+                info!(removed = ?removed, "removed unused harness versions");
+            }
+        });
     }
     let host_task = match host_listen {
         Some(listen) => {
@@ -249,7 +263,10 @@ async fn harness_command(
     match command {
         HarnessCommand::Install { json } => {
             let started = std::time::Instant::now();
-            let r = t.install().await;
+            let mut r = t.install().await;
+            // This command does not know the live agents: keep the newest
+            // versions (the daemon's GC at its start knows them).
+            r.removed = t.gc(None);
             #[allow(clippy::print_stdout)]
             if *json {
                 println!("{}", serde_json::to_string_pretty(&r)?);
@@ -271,6 +288,9 @@ async fn harness_command(
                     }
                 }
                 println!("extension: {}", r.extension);
+                if !r.removed.is_empty() {
+                    println!("removed: {}", r.removed.join(", "));
+                }
                 println!(
                     "tools dir: {} ({:.1} s)",
                     r.tools_dir.display(),
@@ -290,6 +310,7 @@ async fn harness_command(
                     serde_json::json!({
                         "name": p.name, "package": p.package, "pinned": p.version,
                         "installed": t.present(p), "manifest": manifest.get(&p.name),
+                        "versions": t.versions(&p.name),
                     })
                 })
                 .collect();
@@ -305,11 +326,12 @@ async fn harness_command(
                 println!("tools dir: {}", t.dir.display());
                 for (p, r) in t.pins.iter().zip(&rows) {
                     println!(
-                        "{:<16} {:<34} pinned {:<10} installed {}",
+                        "{:<16} {:<34} pinned {:<10} installed {:<10} on disk {}",
                         p.name,
                         p.package,
                         p.version,
-                        r["installed"].as_str().unwrap_or("-")
+                        r["installed"].as_str().unwrap_or("-"),
+                        t.versions(&p.name).join(" ")
                     );
                 }
             }

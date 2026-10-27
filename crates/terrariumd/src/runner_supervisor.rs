@@ -86,8 +86,8 @@ use crate::prompt::{self, Peer, PromptContext};
 use crate::sandbox::{self, AgentLayout, HarnessHome, SandboxConfig, SandboxMode};
 use crate::store::subscriptions::Subscription;
 use crate::supervisor::{
-    AnswerInput, BoxFuture, PtyAttachment, PtyInput, Recovery, Supervisor, SupervisorError,
-    SupervisorEvent, SupervisorEventKind, TurnHold, wants_restart,
+    AnswerInput, BoxFuture, HarnessRun, PtyAttachment, PtyInput, Recovery, Supervisor,
+    SupervisorError, SupervisorEvent, SupervisorEventKind, TurnHold, wants_restart,
 };
 
 /// One harness adapter and its prompt-ready detector.
@@ -341,6 +341,20 @@ const GRACEFUL_STOP: Duration = Duration::from_secs(5);
 /// with (`<agent dir>/private/session-prompt.sha256`).
 const SESSION_PROMPT_HASH: &str = "session-prompt.sha256";
 
+/// The file that records the harness version of the last launch
+/// (`<agent dir>/private/harness-version.json`): `{"harness", "version"}`.
+/// A daemon start reads it for an agent whose runner process still runs,
+/// so the GC of the tools dir keeps that version
+/// ([`Supervisor::harness_runs`]).
+pub const HARNESS_VERSION_FILE: &str = "harness-version.json";
+
+/// The content of [`HARNESS_VERSION_FILE`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct LaunchedVersion {
+    harness: HarnessId,
+    version: Option<String>,
+}
+
 /// The mark in the message of a launch that a symlink or a special file in
 /// the agent dir refuses (`terrarium_runner::RunnerError::UnsafePath`,
 /// `docs/security-review.md` F11). Such a launch ends in `error`, and the
@@ -381,6 +395,9 @@ struct Built {
     /// takes the new one on a resume (Claude with
     /// `--system-prompt-snapshot off`, pi).
     prompt_updated: bool,
+    /// The harness version dir that the launch runs, when the tools dir
+    /// has one ([`crate::harness_tools::active_version`]).
+    harness_version: Option<String>,
 }
 
 /// The `system` event of a resume that sends a changed prompt.
@@ -764,6 +781,9 @@ struct Slot {
     recap: Option<String>,
     pointer: Pointer,
     pointer_busy: bool,
+    /// The harness version that the last launch resolved; `None` when the
+    /// harness came from `PATH`.
+    harness_version: Option<String>,
 }
 
 impl Slot {
@@ -784,6 +804,7 @@ impl Slot {
             recap: None,
             pointer: Pointer::default(),
             pointer_busy: false,
+            harness_version: None,
         }
     }
 
@@ -1019,6 +1040,7 @@ impl RunnerSupervisor {
             }],
             overlays: Vec::new(),
             repos: Vec::new(),
+            harness_bin: None,
         }
     }
 
@@ -1030,7 +1052,7 @@ impl RunnerSupervisor {
         resume: Option<&HarnessSessionId>,
     ) -> Result<LaunchSpec, SupervisorError> {
         let view = self.store_view(agent).await;
-        Ok(self.build_spec(agent, resume, &view).await?.spec)
+        Ok(self.build_spec(agent, resume, &view, None).await?.spec)
     }
 
     async fn store_view(&self, agent: &Agent) -> StoreView {
@@ -1098,11 +1120,14 @@ impl RunnerSupervisor {
         })
     }
 
+    /// `epoch`: the launch of the slot at this epoch; it records the
+    /// harness version in the slot. `None` (a dry run) records nothing.
     async fn build_spec(
         &self,
         agent: &Agent,
         resume: Option<&HarnessSessionId>,
         view: &StoreView,
+        epoch: Option<u64>,
     ) -> Result<Built, SupervisorError> {
         let entry = self.entry(agent.harness)?;
         let sub = check_subscription(agent, view.subscription.as_ref())?;
@@ -1238,6 +1263,20 @@ impl RunnerSupervisor {
         }
         layout.overlays = overlays;
         layout.repos = repos;
+        // The active harness version dir, resolved and recorded under the
+        // slots lock: a GC after a switch reads the records under the same
+        // lock, so it never removes a version that a launch resolved.
+        let active = cfg.sandbox.tools_dir.as_deref().and_then(|tools| {
+            let mut slots = lock(&self.inner.slots);
+            let a = crate::harness_tools::active_version(tools, agent.harness.as_str());
+            if let Some(e) = epoch
+                && let Some(slot) = slots.get_mut(&agent.id).filter(|s| s.epoch == e)
+            {
+                slot.harness_version = a.as_ref().map(|a| a.version.clone());
+            }
+            a
+        });
+        layout.harness_bin = active.as_ref().map(|a| a.dir.join("bin"));
 
         let resume = if fresh_for_prompt {
             info!(
@@ -1277,6 +1316,7 @@ impl RunnerSupervisor {
             spec: cfg.sandbox.wrap(spec, &layout, env),
             fresh_for_prompt,
             prompt_updated,
+            harness_version: active.map(|a| a.version),
         })
     }
 
@@ -1299,7 +1339,11 @@ impl RunnerSupervisor {
             spec,
             fresh_for_prompt,
             prompt_updated,
-        } = self.build_spec(&agent, resume.as_ref(), &view).await?;
+            harness_version,
+        } = self
+            .build_spec(&agent, resume.as_ref(), &view, Some(epoch))
+            .await?;
+        self.record_version(id, agent.harness, harness_version);
         let resume = if fresh_for_prompt {
             // The old session stays in the history; this launch begins a
             // new one, and a later restart resumes that.
@@ -1449,6 +1493,29 @@ impl RunnerSupervisor {
         let me = self.clone();
         tokio::spawn(async move { me.forward(id, epoch, runner, rx).await });
         Ok(())
+    }
+
+    /// Write [`HARNESS_VERSION_FILE`] for the launch of `id`.
+    fn record_version(&self, id: AgentId, harness: HarnessId, version: Option<String>) {
+        let path =
+            terrarium_runner::private_dir(&self.inner.cfg.state_dir, id).join(HARNESS_VERSION_FILE);
+        let rec = LaunchedVersion { harness, version };
+        let text = serde_json::to_string(&rec).unwrap_or_default();
+        if let Err(e) = safefs::write_private(&path, text.as_bytes()) {
+            warn!(agent = %id, "cannot write {}: {}", path.display(), launch_fs_error(&e));
+        }
+    }
+
+    /// The harness version in [`HARNESS_VERSION_FILE`] of `id`; `None` when
+    /// the file is missing (a launch from before the version dirs).
+    fn recorded_version(&self, id: AgentId, harness: HarnessId) -> Option<String> {
+        let path =
+            terrarium_runner::private_dir(&self.inner.cfg.state_dir, id).join(HARNESS_VERSION_FILE);
+        safefs::read_to_string(&path)
+            .ok()
+            .and_then(|t| serde_json::from_str::<LaunchedVersion>(&t).ok())
+            .filter(|r| r.harness == harness)
+            .and_then(|r| r.version)
     }
 
     /// Compare the installed harness version with the adapter's tested
@@ -3299,12 +3366,29 @@ impl Supervisor for RunnerSupervisor {
                 }
             };
             self.adopt(id, epoch, remote, Some(events_since));
+            let version = self.recorded_version(id, agent.harness);
+            if let Some(slot) = lock(&self.inner.slots).get_mut(&id) {
+                slot.harness_version = version;
+            }
             Ok(Recovery::Attached)
         })
     }
 
     fn lease_granted(&self, agent: AgentId, target: String, lease: String) {
         self.queue_lease_pointer(agent, target, lease);
+    }
+
+    fn harness_runs(&self) -> Vec<HarnessRun> {
+        lock(&self.inner.slots)
+            .iter()
+            .filter(|(_, s)| !matches!(s.phase, Phase::Down(_)))
+            .map(|(id, s)| HarnessRun {
+                agent: *id,
+                name: format!("{}/{}", s.agent.project, s.agent.name),
+                harness: s.agent.harness,
+                version: s.harness_version.clone(),
+            })
+            .collect()
     }
 
     fn bind(&self, state: &Shared) {
@@ -3446,6 +3530,67 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A launch runs the harness from the active version dir of the tools
+    /// dir, with that `bin/` first on `PATH`. After an update, the next
+    /// launch (a restart or a new agent) takes the new version; the old
+    /// version dir keeps its files for the agent that runs it.
+    #[tokio::test]
+    async fn a_launch_runs_the_active_harness_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let home = tmp.path().join("auth/codex");
+        std::fs::create_dir_all(&home).unwrap();
+        let mut tools = crate::harness_tools::ToolsConfig::new(
+            tmp.path().join("tools"),
+            crate::harness_tools::compiled_pins(),
+            tmp.path().join("copilot-home"),
+        );
+        tools.npm = crate::harness_tools::write_fake_npm(tmp.path());
+        assert_eq!(tools.install().await.failed(), 0);
+        let pin = tools.pin("codex").unwrap().version.clone();
+        let sandbox = SandboxConfig {
+            bwrap: PathBuf::from("/usr/bin/bwrap"),
+            cli: Some(PathBuf::from("/usr/local/bin/terrarium")),
+            tools_dir: Some(tools.dir.clone()),
+            ..SandboxConfig::default()
+        };
+        let sup = RunnerSupervisor::new(RunnerSupervisorConfig::new(
+            state.clone(),
+            tmp.path().join("run"),
+            tmp.path().join("prompts"),
+            sandbox,
+            [(HarnessId::Codex, home)].into_iter().collect(),
+        ));
+        let def: terrarium_core::config::AgentDef = serde_json::from_value(serde_json::json!({
+            "name": "w", "project": "p", "harness": "codex"
+        }))
+        .unwrap();
+        let agent = Agent::from_def(&def, &state);
+        let program = |spec: &LaunchSpec| {
+            let dash = spec.args.iter().position(|a| a == "--").unwrap();
+            spec.args[dash + 1].clone()
+        };
+        let path = |spec: &LaunchSpec| spec.env["PATH"].clone();
+
+        let first = sup.launch_spec(&agent, None).await.unwrap();
+        let old_bin = tools.version_dir("codex", &pin).join("bin");
+        assert_eq!(program(&first), old_bin.join("codex").display().to_string());
+        assert!(
+            path(&first).starts_with(&format!("/opt/terrarium/bin:{}:", old_bin.display())),
+            "{}",
+            path(&first)
+        );
+
+        tools.update("codex", "0.170.1", false).await.unwrap();
+        let next = sup.launch_spec(&agent, None).await.unwrap();
+        let new_bin = tools.version_dir("codex", "0.170.1").join("bin");
+        assert_eq!(program(&next), new_bin.join("codex").display().to_string());
+        assert!(path(&next).contains(&new_bin.display().to_string()));
+        assert!(old_bin.join("codex").is_file(), "the old version stays");
+        // A dry run records nothing.
+        assert!(sup.harness_runs().is_empty());
     }
 
     /// An old agent dir with the files at the top, as before the split.

@@ -91,6 +91,30 @@ pub struct HarnessVersion {
     /// `?latest=true` only: why the latest is not known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latest_error: Option<String>,
+    /// The active version dir in the tools dir: the version that the next
+    /// launch runs. Absent without a tools dir.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active: Option<String>,
+    /// The complete version dirs in the tools dir, oldest first. Absent
+    /// without a tools dir.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub versions: Vec<String>,
+    /// The live agents on the harness and the version that each runs.
+    /// Absent when none runs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agents: Vec<AgentOnVersion>,
+}
+
+/// A live agent and the harness version it runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentOnVersion {
+    /// `project/name`.
+    pub agent: String,
+    pub id: String,
+    /// The version dir that its launch resolved; `null` when not known (an
+    /// agent that started before the version dirs, or a harness from
+    /// `PATH`).
+    pub version: Option<String>,
 }
 
 /// A field that is present (even as `null`) is `Some`.
@@ -343,6 +367,9 @@ pub fn pins_only(policy: VersionPolicy) -> HarnessReport {
                 latest: None,
                 update: None,
                 latest_error: None,
+                active: None,
+                versions: Vec::new(),
+                agents: Vec::new(),
             })
             .collect(),
     }
@@ -374,7 +401,7 @@ pub fn out_of_range_message(
     let pin = terrarium_core::harnesses::pin(harness).version;
     format!(
         "{harness} {installed} is outside the tested range {tested} (harnesses.toml pins {pin}); \
-         hooks and flags may differ. Update it in place (`terrarium admin harness update {harness} \
+         hooks and flags may differ. Update it (`terrarium admin harness update {harness} \
          --version {pin}`, or `just harness::update {harness}`; docs/getting-started.md \
          \"Updating a harness\")"
     )
@@ -460,6 +487,9 @@ impl VersionCache {
             latest: None,
             update: None,
             latest_error: None,
+            active: None,
+            versions: Vec::new(),
+            agents: Vec::new(),
         }
     }
 }
@@ -701,7 +731,7 @@ mod tests {
         cache.fill(&mut r, true).await;
         assert_eq!(npm.calls.lock().unwrap().len(), 8);
 
-        // An installed version (an update in place) wins over the pin.
+        // An installed version (after an update) wins over the pin.
         for h in &mut r.harnesses {
             if h.harness == HarnessId::Codex {
                 h.installed = Some("0.165.0".into());

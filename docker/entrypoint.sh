@@ -5,11 +5,12 @@
 #    and the tools dir.
 # 2. Fix ownership of empty bind mounts (only when started as root).
 # 3. Export TERRARIUM_RUNNER (the terrarium-runner binary) when it is not set.
-# 4. `terrariumd harness install`: install each harness pin that is missing
-#    from the tools dir (/opt/terrarium/tools, the npm prefix), and the
-#    Copilot prompt extension when it changed. The first start installs;
-#    later starts find everything present. TERRARIUM_HARNESS_INSTALL=0
-#    skips it.
+# 4. `terrariumd harness install`: install each harness pin that has no
+#    active version in the tools dir (/opt/terrarium/tools, one npm prefix
+#    for each version: versions/<name>/<version>), and the Copilot prompt
+#    extension when it changed. It moves the flat layout of older images
+#    into version dirs once. The first start installs; later starts find
+#    everything present. TERRARIUM_HARNESS_INSTALL=0 skips it.
 # 5. Run the command (terrariumd by default) as the terrarium user. For
 #    terrariumd, this script stays as its parent and restarts it when it
 #    crashes, so the agent runners live on (see docker/README.md).

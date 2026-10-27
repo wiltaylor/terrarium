@@ -64,15 +64,23 @@ Do not edit a version in `docker/Dockerfile` or in an adapter's `flags.rs`:
 
 **The tools dir.** The harnesses live in the tools dir, not in the image:
 `TERRARIUM_TOOLS_DIR`, which is `/opt/terrarium/tools` in the container
-(compose binds `./tools`) and `./tools` for `just daemon::run`. It is the
-npm global prefix (`NPM_CONFIG_PREFIX`), its `bin/` is first on `PATH`,
-and the sandbox binds it read-only. The manifest
-`terrarium-manifest.json` in it records each installed package. Code finds
-a harness on `PATH`; it never names a path under the tools dir.
+(compose binds `./tools`) and `./tools` for `just daemon::run`. Each
+version of each harness is its own npm prefix,
+`versions/<name>/<version>/`, and does not change after it is complete.
+`current/<name>` and `bin/<binary>` are symlinks to the active version;
+an update switches them with an atomic `rename`. `bin/` is first on
+`PATH`, and the sandbox binds the dir read-only. The manifest
+`terrarium-manifest.json` records the active version and the version
+dirs of each package. Only `crate::harness_tools` knows the layout:
+other code finds a harness on `PATH`, or asks
+`harness_tools::active_version`. An agent launch resolves the active
+version dir and runs the harness from it, so an update never changes a
+running agent (`sandbox::AgentLayout::harness_bin`).
 
 Use `just harness::update <name>` (one harness) or `just harness::latest`
-(every harness) to update in place in the running container, with no image
-build. Add `--pin` to also change `harnesses.toml`
+(every harness) to update in the running container, with no image build.
+Running agents keep their version until their next restart. Add `--pin`
+to also change `harnesses.toml`
 ([getting-started.md](getting-started.md), "Updating a harness").
 
 ## Run things with just
@@ -95,7 +103,7 @@ Run `just` to see the modules. Run `just <module>` to see its recipes.
 | Build the static host agent            | `just host::build`              |
 | Compare the harness pins with npm      | `just harness::check`           |
 | Update every harness to the latest     | `just harness::latest`          |
-| Update one harness in place            | `just harness::update <name>`   |
+| Update one harness in the container    | `just harness::update <name>`   |
 
 `just ci::check` must pass before a change merges. It runs `fmt-check`,
 `lint`, `test`, `scripts-test`, and `dashboard-check`. `ci::compat` is not in the gate, because
@@ -128,7 +136,7 @@ a new token, when `.env` does not exist. The daemon reads:
 | `TERRARIUM_WAIT_MAX_TIMEOUT` | `7d`. The longest timeout of a wait or a run, and the longest `time` wait. A longer one is `422 invalid`. |
 | `TERRARIUM_TRASH_DAYS` | `7`. The days that a deleted agent stays in `<state>/trash/`, with its workspace. |
 | `TERRARIUM_HARNESS_HOME` | `/auth/<harness>`. Override as `claude=/path,codex=/path`. |
-| `TERRARIUM_TOOLS_DIR` | `tools` (from the cwd). The image sets `/opt/terrarium/tools`; `just daemon::run` sets `<repo>/tools`. The npm prefix of the harnesses: the daemon installs the missing pins there at start, puts `<dir>/bin` first on `PATH`, and the sandbox binds it read-only. Empty: no tools dir; the harnesses come from `PATH`, and `POST /api/harnesses/{name}/update` answers `501`. |
+| `TERRARIUM_TOOLS_DIR` | `tools` (from the cwd). The image sets `/opt/terrarium/tools`; `just daemon::run` sets `<repo>/tools`. The harnesses, one npm prefix for each version (`versions/<name>/<version>`): the daemon installs the pins with no active version there at start, puts `<dir>/bin` first on `PATH`, and the sandbox binds it read-only. Empty: no tools dir; the harnesses come from `PATH`, and `POST /api/harnesses/{name}/update` answers `501`. |
 | `TERRARIUM_NO_HARNESS_INSTALL` | off. On (or `--no-harness-install`): the daemon does not install the missing pins at start. |
 | `TERRARIUM_NPM` | `npm`. The npm program for the tools dir. |
 | `TERRARIUM_HARNESS_INSTALL` | `1`. The entrypoint only: `0` skips its `terrariumd harness install`. |
@@ -198,7 +206,7 @@ not change never goes in `harness/` or the workspace.
 
 | Directory | Content | May write | In the sandbox |
 |---|---|---|---|
-| `private/` | `events.jsonl`, `pty.log`, `pty.log.1`, `runner.json` (the launch spec with the injected keys), `runner-argv.json`, `runner-exit.json`, `runner.log`, `session-prompt.sha256`. Mode `0700`. | The daemon and the runner only. | Not bound. The harness cannot read or change it. |
+| `private/` | `events.jsonl`, `pty.log`, `pty.log.1`, `runner.json` (the launch spec with the injected keys), `runner-argv.json`, `runner-exit.json`, `runner.log`, `session-prompt.sha256`, `harness-version.json` (the harness version of the last launch). Mode `0700`. | The daemon and the runner only. | Not bound. The harness cannot read or change it. |
 | `harness/` | `prompt.md` and the per-agent files of each adapter (`claude/`, `codex/`, `copilot/`, `pi/`). | The daemon (through the adapter) when it builds the launch. The harness writes only the files that an adapter declares as a `FileOverlay` with `writable: true`. | Read-only at its own path. Each writable overlay has its own read-write bind. |
 | `<work>/<project>/<agent>/` | The agent's files and repository checkouts. An agent dir of the older layout has `workspace/`; the next start moves it here once. | The harness, the daemon for clones, and a target that has the workspace attached. | Read-write at `$HOME/work` and at `/work/<project>/<agent>`. A host agent attaches it to the agent's targets at `/work/<project>/<agent>`. `agent rm` moves it to `<state>/trash/` with the agent dir. |
 
