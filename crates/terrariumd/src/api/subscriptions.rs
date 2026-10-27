@@ -115,6 +115,37 @@ pub struct SubscriptionView {
     /// refuses the subscription. Empty (`{}`) when the harnesses keep their
     /// own defaults; always present, so a client can tell an older daemon.
     pub default_models: BTreeMap<String, String>,
+    /// The plan account of the subscription (PLAN §16.3), when it has one.
+    /// No secret.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account: Option<AccountView>,
+    /// The agents whose current subscription this is.
+    pub agents: Vec<AgentOn>,
+}
+
+/// The plan account of a subscription, as the API shows it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct AccountView {
+    /// The harness whose login the account holds.
+    pub harness: terrarium_core::HarnessId,
+    /// The account has the credential file.
+    pub has_login: bool,
+    /// The login name, when the harness says it (Copilot), or the email of
+    /// a Claude login.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub login: Option<String>,
+    /// `migration` (the shared login moved here at a start) or `login`.
+    pub source: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// An agent on a subscription.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct AgentOn {
+    pub id: String,
+    pub name: String,
+    pub project: String,
 }
 
 fn view(
@@ -131,7 +162,27 @@ fn view(
         .iter()
         .filter(|h| h.cause == cause)
         .count();
+    let account = crate::accounts::read_meta(state_dir, &sub.name).map(|m| AccountView {
+        harness: m.harness,
+        has_login: crate::accounts::has_credential(state_dir, &sub.name, m.harness),
+        login: m.login.clone().or_else(|| {
+            m.oauth_account
+                .as_ref()
+                .and_then(|a| a.get("emailAddress"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        }),
+        source: m.source,
+        created_at: m.created_at,
+        updated_at: m.updated_at,
+    });
+    let agents = ustore::agents_on(c, &sub.name)?
+        .into_iter()
+        .map(|(id, name, project)| AgentOn { id, name, project })
+        .collect();
     Ok(SubscriptionView {
+        account,
+        agents,
         default_models: crate::models::default_models(&sub),
         local_estimate_only: sub.probe.is_none(),
         has_api_key: sub.env_var.is_some() && login::stored_key(state_dir, &sub.name).is_some(),
@@ -325,14 +376,47 @@ async fn remove(
     Path(name): Path<String>,
 ) -> ApiResult<StatusCode> {
     policy::manage_subscriptions(&actor, "deleting a subscription")?;
+    let account = crate::accounts::exists(&state.state_dir, &name);
+    if account {
+        refuse_if_used(&state, &name, "delete it").await?;
+    }
+    let n = name.clone();
     state
         .db
         .write(actor.label(), move |t| {
-            subs::delete(t, &name)?;
-            t.audit("subscription.delete", &name, None, json!({}))
+            subs::delete(t, &n)?;
+            t.audit(
+                "subscription.delete",
+                &n,
+                None,
+                json!({"account_removed": account}),
+            )
         })
         .await?;
+    if account {
+        let dir = state.state_dir.clone();
+        tokio::task::spawn_blocking(move || crate::accounts::remove(&dir, &name))
+            .await
+            .map_err(|e| ApiError::internal(e.to_string()))?
+            .map_err(|e| ApiError::internal(format!("cannot remove the account: {e}")))?;
+    }
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `409 conflict` while an agent runs on the account of `name`: swap it
+/// first (`POST /api/agents/{id}/subscription`).
+async fn refuse_if_used(state: &Shared, name: &str, what: &str) -> ApiResult<()> {
+    let key = name.to_owned();
+    let on = state.db.read(move |c| ustore::agents_on(c, &key)).await?;
+    if on.is_empty() {
+        return Ok(());
+    }
+    let names: Vec<String> = on.iter().map(|(_, n, p)| format!("{p}/{n}")).collect();
+    Err(ApiError::conflict(format!(
+        "agents {} use the account of `{name}`; move them to another account \
+         (terrarium admin agent swap <agent> <subscription>) before you {what}",
+        names.join(", ")
+    )))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -411,12 +495,28 @@ async fn verify(
             json!({"subscription": load(&state, name).await?, "status": {"logged_in": false, "detail": "no stored Z.ai API key"}}),
         ));
     }
-    let Some((kind, provider)) = login::kind_of(&sub) else {
-        return Err(ApiError::invalid(format!(
-            "subscription `{name}` names no harness to check"
-        )));
+    let st = match crate::accounts::read_meta(&state.state_dir, &sub.name) {
+        // A plan account (PLAN §16.3): check the account itself.
+        Some(meta) => {
+            let kind = login::kind_for(meta.harness);
+            let pi = (kind == login::LoginKind::Pi).then(|| sub.provider.clone());
+            login::check_status_in(
+                &state,
+                kind,
+                pi.as_deref(),
+                &login::CheckHome::Account(sub.name.clone()),
+            )
+            .await
+        }
+        None => {
+            let Some((kind, provider)) = login::kind_of(&sub) else {
+                return Err(ApiError::invalid(format!(
+                    "subscription `{name}` names no harness to check"
+                )));
+            };
+            login::check_status(&state, kind, provider.as_deref()).await
+        }
     };
-    let st = login::check_status(&state, kind, provider.as_deref()).await;
     let (n, logged_in, plan) = (name.clone(), st.logged_in, st.plan.clone());
     state
         .db
@@ -453,6 +553,31 @@ async fn logout(
         return Err(ApiError::invalid(format!(
             "subscription `{name}` is a Z.ai API key and has no logout; store another key, or delete the subscription"
         )));
+    }
+    // A plan account: its logout removes the account dir, and nothing
+    // else. No harness logout runs, so no other account and no shared file
+    // changes (PLAN §16.3).
+    if crate::accounts::exists(&state.state_dir, &sub.name) {
+        refuse_if_used(&state, &sub.name, "log it out").await?;
+        let (dir, n) = (state.state_dir.clone(), sub.name.clone());
+        tokio::task::spawn_blocking(move || crate::accounts::remove(&dir, &n))
+            .await
+            .map_err(|e| ApiError::internal(e.to_string()))?
+            .map_err(|e| ApiError::internal(format!("cannot remove the account: {e}")))?;
+        let n = name.clone();
+        state
+            .db
+            .write(actor.label(), move |t| {
+                subs::set_login_status(t, &n, subs::MISSING)?;
+                t.audit(
+                    "subscription.logout",
+                    &n,
+                    None,
+                    json!({"account_removed": true}),
+                )
+            })
+            .await?;
+        return Ok(Json(load(&state, name).await?));
     }
     let Some((kind, _)) = login::kind_of(&sub) else {
         return Err(ApiError::invalid(format!(

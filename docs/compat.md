@@ -530,6 +530,44 @@ These facts contradict or change assumptions in `docs/PLAN.md`.
 
 ---
 
+## Plan accounts (PLAN §16.3)
+
+The account design rests on these facts of the pinned versions. The sources
+and the excerpts are in `docs/research/credential-sharing.md` (static
+analysis, 2026-10-27). **[V]** is read in the code; **[I]** is inferred and
+needs a live check.
+
+| Harness | Fact | Status |
+|---|---|---|
+| Claude Code 2.1.310 | `CLAUDE_SECURESTORAGE_CONFIG_DIR` moves the credential dir away from `CLAUDE_CONFIG_DIR` (`O0()`). Not in the public docs. | [V] code |
+| Claude Code 2.1.310 | It stats `.credentials.json` before each model request and reads it again on an mtime change; on a 401 it reads the file again and takes a newer token. | [V] code |
+| Claude Code 2.1.310 | Locks: `proper-lockfile` dirs `<dir>/.oauth_refresh.lock` (`realpath: false`, `stale: 60000`, `update: 5000`), `<realpath(dir)>.lock` (legacy; a failure other than `ELOCKED` is ignored), and `<dir>/.storage-write.lock` (`stale: 15000`) around every save. The dead-holder takeover needs an owner file `.oauth_refresh.lock.owner`; with none it answers `no_owner_record` and waits. | [V] code |
+| Claude Code 2.1.310 | Writes `.credentials.json` by a temp file in the same dir and a rename (an in-place fallback with `O_NOFOLLOW` on `EBUSY`). Through a **dir** symlink both stay in the target dir. | [V] code |
+| Claude Code 2.1.310 | `oauthAccount` in `.claude.json`: the profile call, the org UUID of remote settings and some caches, and the display. The bootstrap at start updates it from the server. Model requests send the token only. | [V] code; the effect of a stale value after a live swap is [I] |
+| pi 1.4.0 | `auth.json` is `<PI_CODING_AGENT_DIR>/auth.json`; no env var moves it alone. pi stats it (following links) before each read and reloads on a change of dev, inode, size, or times. It writes in place (following links). Its lock is `proper-lockfile` on the auth path with `realpath: false`: `<path>.lock`. | [V] code |
+| Codex 0.164.0 | `auth.json` is fixed at `$CODEX_HOME/auth.json`; it writes in place and follows links; no cross-process lock; it refuses to load another account id while it runs ("account guard"). | [V] code |
+| Copilot CLI 1.0.103 | `COPILOT_GITHUB_TOKEN` wins over the keychain and `config.json`. The `gho_` token of the device flow does not expire and is not refreshed. | [V] docs and strings; the closed runtime is [I] |
+
+Live checks to do before the first second account (do them with a copied
+test login, never with Wil's logins):
+
+1. Claude Code honours `CLAUDE_SECURESTORAGE_CONFIG_DIR` for read, write,
+   and `claude auth status` through the `cred/account` dir symlink.
+2. A forced refresh (a copied, expired test login) writes through the dir
+   symlink, takes `.oauth_refresh.lock` in the account, and makes
+   `claude.lock` in the store.
+3. A live swap reaches the next request (a turn after the swap is billed to
+   the new account: check its usage window).
+4. A stale `oauthAccount` after a live swap breaks nothing until the next
+   start.
+5. pi: a login link through `/run/terrarium/cred/account/auth.json` reads
+   and refreshes; a swap reaches the next request.
+6. Copilot: `COPILOT_GITHUB_TOKEN` with a `gho_` token works with no login
+   in `config.json`, and Copilot does not write the token into the shared
+   `config.json`.
+7. Codex: `codex resume` after a swap keeps the conversation on the new
+   account.
+
 ## Codex 0.160.0
 
 Tested on 2026-10-24. Same host. ChatGPT Pro login (OAuth, `auth_mode`

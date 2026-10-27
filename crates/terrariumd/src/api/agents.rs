@@ -29,6 +29,7 @@ pub fn routes() -> Router<Shared> {
         .route("/agents/{id}/events", get(streams::agent_events))
         .route("/agents/{id}/pty", get(streams::pty))
         .route("/agents/{id}/roles", get(roles).put(set_roles))
+        .route("/agents/{id}/subscription", post(swap))
 }
 
 pub fn supervisor_error(e: SupervisorError) -> ApiError {
@@ -133,10 +134,17 @@ async fn create(
     }
     let state_dir = state.work_dir.clone();
     let who = actor.clone();
+    let mut def = def;
     let a = state
         .db
         .write(actor.label(), move |t| {
             agents::check_policy(t, &who, &def.project, None, &def.policy)?;
+            def.subscription_pool = agents::check_pool(
+                t,
+                def.harness,
+                def.subscription.as_deref(),
+                &def.subscription_pool,
+            )?;
             agents::create_from(t, &def, &state_dir, projects::SOURCE_API, template.as_ref())
         })
         .await?;
@@ -236,6 +244,25 @@ async fn update(
                 let old = agents::get(t, &id)?.agent.policy;
                 agents::check_policy(t, &who, &project, Some(&old), new)?;
             }
+            let mut patch = patch;
+            // The pool after the patch: each member exists, has the
+            // provider, and the harness can spend it (PLAN §16.3).
+            if patch.subscription_pool.is_some() || patch.subscription.is_some() {
+                let now = agents::get(t, &id)?.agent;
+                let harness = patch.harness.unwrap_or(now.harness);
+                let current = match &patch.subscription {
+                    Some(s) => s.clone(),
+                    None => now.subscription.clone(),
+                };
+                let pool = patch
+                    .subscription_pool
+                    .clone()
+                    .unwrap_or(now.subscription_pool);
+                let checked = agents::check_pool(t, harness, current.as_deref(), &pool)?;
+                if patch.subscription_pool.is_some() || checked != pool {
+                    patch.subscription_pool = Some(checked);
+                }
+            }
             agents::write_def(t, &id, &patch)?;
             t.audit(
                 "agent.update",
@@ -244,6 +271,7 @@ async fn update(
                 json!({
                     "harness": patch.harness,
                     "subscription": patch.subscription,
+                    "subscription_pool": patch.subscription_pool,
                     "model": patch.model,
                     "prompt": patch.prompt,
                     // Not the text: it can be long.
@@ -262,6 +290,40 @@ async fn update(
         })
         .await?;
     Ok(Json(v))
+}
+
+/// The body of `POST /api/agents/{id}/subscription`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SwapBody {
+    subscription: String,
+}
+
+/// `POST /api/agents/{id}/subscription`: move the agent to another plan
+/// account (PLAN §16.3). The answer says how it applied: `live`,
+/// `restart_scheduled`, `restarted`, or `next_start`. The same rights as
+/// a change of the agent's fields; an agent of a file definition may swap
+/// too, among the accounts of its pool.
+async fn swap(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(id): Path<String>,
+    ApiJson(body): ApiJson<SwapBody>,
+) -> ApiResult<Json<crate::account_swap::SwapOutcome>> {
+    let a = load(&state, &actor, id).await?;
+    policy::admin_project(
+        &actor,
+        &a.agent.project,
+        "moving an agent to another account",
+    )?;
+    if a.source == projects::SOURCE_FILE && !a.agent.subscription_pool.contains(&body.subscription)
+    {
+        return Err(file_managed(&a));
+    }
+    let to = body.subscription.trim().to_owned();
+    Ok(Json(
+        crate::account_swap::swap(&state, actor.label(), a, &to, None).await?,
+    ))
 }
 
 /// The query of `DELETE /api/agents/{id}`.

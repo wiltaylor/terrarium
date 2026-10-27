@@ -178,6 +178,8 @@ export interface AgentDef {
   project: string;
   harness: Harness;
   subscription?: string;
+  /** Subscriptions (same provider, the harness can spend each) that a swap may pick. The daemon leaves it out when empty. */
+  subscription_pool?: string[];
   model?: string;
   /** The prompt template name under `prompts/`. */
   prompt?: string;
@@ -210,6 +212,8 @@ export type AgentCreate =
 /** `PATCH /api/agents/{id}`. Name, project, and roles do not change here. `null` clears subscription, model, prompt, or system_prompt; an absent field does not change. A new system_prompt applies at the next start. */
 export type AgentPatch = Partial<Pick<AgentDef, "harness" | "policy" | "restart">> & {
   subscription?: string | null;
+  /** `[]` clears the pool. */
+  subscription_pool?: string[];
   model?: string | null;
   prompt?: string | null;
   system_prompt?: string | null;
@@ -233,6 +237,11 @@ export interface Agent {
   project: string;
   harness: Harness;
   subscription?: string;
+  /**
+   * The subscriptions a swap may pick (docs/api.md §16.4). The current
+   * `subscription` is always in it when it is not empty. Absent when empty.
+   */
+  subscription_pool?: string[];
   model?: string;
   prompt?: string;
   /** Replaces the harness's default system prompt. Absent or null: the harness default. */
@@ -268,6 +277,17 @@ export interface Agent {
   harness_version?: string;
   /** Only in `GET /api/agents/{id}`: the open waits. */
   open_waits?: Wait[];
+}
+
+/** How a subscription swap took effect (`POST /api/agents/{id}/subscription`). */
+export type SwapApplied = "live" | "restart_scheduled" | "restarted" | "next_start";
+
+/** `POST /api/agents/{id}/subscription`. 409 when the agent is already on it; 422 when the target is not in the pool. */
+export interface SwapResult {
+  agent: string;
+  from?: string;
+  to: string;
+  applied: SwapApplied;
 }
 
 // ----- Waits and watches -----
@@ -1023,6 +1043,25 @@ export interface QuotaWindow {
   balance?: { total: number; used: number; remaining: number; currency: string };
 }
 
+/** The plan account of a subscription (docs/api.md §16.4): one harness login of its own. */
+export interface PlanAccount {
+  harness: LoginKind;
+  has_login: boolean;
+  /** The login name (an email or a user name), when known. */
+  login?: string;
+  /** `migration`: moved from the shared harness home. `login`: made by the login wizard. */
+  source: "migration" | "login";
+  created_at: string;
+  updated_at: string;
+}
+
+/** An agent whose current subscription this is. */
+export interface SubscriptionAgentRef {
+  id: string;
+  name: string;
+  project: string;
+}
+
 /** docs/api.md §16.1. */
 export interface Subscription {
   name: string;
@@ -1055,6 +1094,10 @@ export interface Subscription {
    * Z.ai). Left out when there is none, and by older daemons.
    */
   default_models?: Partial<Record<Harness, string>>;
+  /** The plan account. Absent when the subscription has none (an API-key subscription). */
+  account?: PlanAccount;
+  /** The agents whose current subscription this is. */
+  agents: SubscriptionAgentRef[];
 }
 
 /** Where `GET /api/subscriptions/{name}/models` found the list: the provider's `/models`, the harness login's list, pi's catalogue, or the default table. */
@@ -1067,7 +1110,7 @@ export interface ModelInfo {
   context?: number;
 }
 
-/** `GET /api/subscriptions/{name}/models` (docs/api.md §16.3). */
+/** `GET /api/subscriptions/{name}/models` (docs/api.md §16.4). */
 export interface ModelList {
   models: ModelInfo[];
   source: ModelSource;
@@ -1213,7 +1256,7 @@ export interface UsagePoint extends UsageTotals {
   model?: string;
 }
 
-/** `GET /api/cards/{id}/usage` (docs/api.md §16.3): the samples attributed to one card. */
+/** `GET /api/cards/{id}/usage` (docs/api.md §16.4): the samples attributed to one card. */
 export interface CardUsage {
   card: string;
   title: string;

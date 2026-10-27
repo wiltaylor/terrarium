@@ -48,6 +48,11 @@ describe("template model", () => {
     const def = applyTemplate(t.spec, body);
     expect(def.model).toBeUndefined();
     expect(def.policy).toEqual({ targets: ["t1"], mail_to: ["lead"], cross_project: [] });
+    // The pool goes as an override too: `[]` clears the template's pool.
+    expect(body.subscription_pool).toEqual([]);
+    expect(formToCreate({ ...form, subscription: "a", subscription_pool: ["a", "b"] }, "w")).toMatchObject({ subscription: "a", subscription_pool: ["a", "b"] });
+    expect(specToForm({ harness: "claude", subscription: "a", subscription_pool: ["a", "b"] }).subscription_pool).toEqual(["a", "b"]);
+    expect(formToSpec({ ...form, subscription: "a", subscription_pool: ["a", "b"] }).subscription_pool).toEqual(["a", "b"]);
     // Without a template the body is the plain definition.
     expect(formToCreate(form, null)).not.toHaveProperty("template");
   });

@@ -3,8 +3,10 @@
 //! - When a window of a subscription passes its `alert_at` percent, the
 //!   daemon mails the operator and emits a `quota.alert` event (the
 //!   dashboard banner). Each window period alerts once.
-//! - At 100 percent the daemon holds new turns of every agent on that
-//!   subscription: [`Supervisor::hold_turns`] marks the agent `blocked`
+//! - At 100 percent an agent with an account pool moves to the next
+//!   member that is not full (`crate::account_swap`, PLAN §16.3;
+//!   `TERRARIUM_AUTO_SWAP=off` turns it off). The daemon holds new turns
+//!   of every other agent on that subscription: [`Supervisor::hold_turns`] marks the agent `blocked`
 //!   with the reset time, and turns wait. After the reset, the hold ends
 //!   and the waiting turns go out.
 //! - A project may set daily budgets on tokens or turns. The same alert
@@ -302,7 +304,7 @@ pub async fn evaluate_subscription(state: &Shared, name: &str) -> ApiResult<()> 
                     sub.name, w.window
                 ),
                 body: format!(
-                    "Subscription `{}` ({}) has used {pct:.0}% of its {} window. The alert level is {}%.\nThe window resets at {reset_txt}.\n\nMove agents to another subscription with `terrarium admin agent set <name> --subscription <other>`, or wait for the reset.\n\nOpen: {}\n",
+                    "Subscription `{}` ({}) has used {pct:.0}% of its {} window. The alert level is {}%.\nThe window resets at {reset_txt}.\n\nMove agents to another account with `terrarium admin agent swap <name> <subscription>`, give them an account pool for the auto-swap, or wait for the reset.\n\nOpen: {}\n",
                     sub.name, sub.provider, w.window, sub.alert_at, subscriptions_link(&state.web)
                 ),
                 data: json!({"subscription": sub.name, "window": w.window, "used_pct": pct,
@@ -345,7 +347,10 @@ pub async fn evaluate_subscription(state: &Shared, name: &str) -> ApiResult<()> 
                 sub.name,
                 until.map_or_else(|| "an unknown time".into(), |u| u.to_rfc3339())
             );
-            for (id, _, _) in &on {
+            // An agent with a pool moves to an account with room
+            // (PLAN §16.3); the others wait for the reset.
+            let stay = crate::account_swap::auto_swap(state, &sub.name, on).await?;
+            for (id, _, _) in &stay {
                 hold(state, id, &cause, until, &reason).await?;
             }
         }

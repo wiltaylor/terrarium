@@ -23,6 +23,7 @@ import type {
   TemplatePatch,
   TemplateResolved,
   AgentPatch,
+  SwapResult,
   ApiKeyInput,
   Artifact,
   ArtifactJsonUpload,
@@ -191,6 +192,8 @@ export interface Api {
     /** With `template`, the given fields override the template's (docs/api.md §21). */
     create(def: AgentCreate): Promise<Agent>;
     update(id: string, patch: AgentPatch): Promise<Agent>;
+    /** `POST /api/agents/{id}/subscription`: swap to another subscription of the pool. 409 when already on it; 422 when not in the pool. */
+    swapSubscription(id: string, subscription: string): Promise<SwapResult>;
     /** `confirm` adds `?confirm=true`, needed when the agent has a live session. */
     remove(id: string, confirm?: boolean): Promise<void>;
     /** 202: the body shows the agent when the daemon accepted the call. Watch the events for the change. */
@@ -592,6 +595,7 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       get: (id) => get(a(id)),
       create: (def) => post("/api/agents", def),
       update: (id, body) => patch(a(id), body),
+      swapSubscription: (id, subscription) => post(`${a(id)}/subscription`, { subscription }),
       remove: (id, confirm) => del(a(id), confirm ? { confirm: true } : undefined),
       start: (id) => post(`${a(id)}/start`),
       stop: (id) => post(`${a(id)}/stop`),

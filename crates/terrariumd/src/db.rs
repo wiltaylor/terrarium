@@ -977,6 +977,11 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE targets DROP COLUMN kind;
     ALTER TABLE targets RENAME COLUMN kind_v25 TO kind;
     "#,
+    // 26: the account pool of an agent (PLAN §16.3): a JSON array of
+    // subscription names that a swap may pick from.
+    r#"
+    ALTER TABLE agents ADD COLUMN subscription_pool TEXT NOT NULL DEFAULT '[]';
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call

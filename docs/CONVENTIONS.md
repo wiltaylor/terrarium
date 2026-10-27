@@ -157,6 +157,7 @@ a new token, when `.env` does not exist. The daemon reads:
 | `TERRARIUM_PASSWORD`, `TERRARIUM_PASSWORD_FILE` | unset. The first operator password, set at the start when none is set. The daemon then starts again without both variables, so no child process inherits them. Remove them after the first start; use `terrariumd password set`. |
 | `TERRARIUM_SSH` | `ssh`. The ssh binary for `ssh` targets. |
 | `TERRARIUM_INSECURE_AGENT_HEADER` | off. On: trust `X-Terrarium-Agent` on the Unix socket (tests only). |
+| `TERRARIUM_AUTO_SWAP` | `on`. When a probe finds a plan account at 100 percent, each agent with an account pool moves to the next account with room (PLAN §16.3). `off` (or `0`, `false`, `no`): the agents stay, with a hold until the reset. |
 | `TERRARIUM_HARNESS_VERSION_POLICY` | `warn`. An agent start on a harness whose installed version is outside the adapter's tested range (`harnesses.toml`) goes ahead, with a warning log and a `warning` event. `refuse`: the start is `422 invalid`. |
 
 ### The directories
@@ -167,9 +168,9 @@ data.
 
 | Repo path | Container path | Content |
 |---|---|---|
-| `config/<harness>/` | `/auth/<harness>` | The shared harness homes and logins. Gitignored. |
+| `config/<harness>/` | `/auth/<harness>` | The shared harness homes: settings and caches. The plan logins are per account in `state/credentials/accounts/` (PLAN §16.3). Gitignored. |
 | `config/tls/` | `/etc/terrarium/tls` (ro) | The certificate and key of the host listener. Gitignored. |
-| `state/` | `/state` (`TERRARIUM_STATE_DIR`) | SQLite, the agent dirs `agents/<ulid>/`, the trash, artifacts, credentials, the session key `session.key`, and the operator password hash `operator.password`. Gitignored. |
+| `state/` | `/state` (`TERRARIUM_STATE_DIR`) | SQLite, the agent dirs `agents/<ulid>/`, the trash, artifacts, credentials (git credentials, stored API keys in `credentials/subscriptions/`, the plan accounts in `credentials/accounts/<subscription>/`, and the migration backups in `credentials/backup/`), the session key `session.key`, and the operator password hash `operator.password`. Gitignored. |
 | `work/` | `/work` (`TERRARIUM_WORK_DIR`) | The agent workspaces, `<project>/<agent>/`. A host agent on this machine attaches them to targets (its `work_dir`). Gitignored. |
 | `repos/` | `/repos` (`TERRARIUM_REPOS_DIR`) | Local bare repos, `<name>.git`, bound into the sandboxes of their project. A host agent reads them for a local `lab_repo` (its `repos_dir`). Gitignored. |
 | `labs/` | not bound | vmlab test labs (`labs/terrarium-test/vmlab.wcl`) for a host agent on this machine. In git. |
@@ -206,8 +207,8 @@ not change never goes in `harness/` or the workspace.
 
 | Directory | Content | May write | In the sandbox |
 |---|---|---|---|
-| `private/` | `events.jsonl`, `pty.log`, `pty.log.1`, `runner.json` (the launch spec with the injected keys), `runner-argv.json`, `runner-exit.json`, `runner.log`, `session-prompt.sha256`, `harness-version.json` (the harness version of the last launch). Mode `0700`. | The daemon and the runner only. | Not bound. The harness cannot read or change it. |
-| `harness/` | `prompt.md` and the per-agent files of each adapter (`claude/`, `codex/`, `copilot/`, `pi/`). | The daemon (through the adapter) when it builds the launch. The harness writes only the files that an adapter declares as a `FileOverlay` with `writable: true`. | Read-only at its own path. Each writable overlay has its own read-write bind. |
+| `private/` | `events.jsonl`, `pty.log`, `pty.log.1`, `runner.json` (the launch spec with the injected keys), `runner-argv.json`, `runner-exit.json`, `runner.log`, `session-prompt.sha256`, `harness-version.json` (the harness version of the last launch), `accounts.json` (the plan account of the last launch). Mode `0700`. | The daemon and the runner only. | Not bound. The harness cannot read or change it. |
+| `harness/` | `prompt.md`, the per-agent files of each adapter (`claude/`, `codex/`, `copilot/`, `pi/`), and `cred/account`: the symlink to the store of the agent's plan account, which the daemon swaps (PLAN §16.3). | The daemon (through the adapter) when it builds the launch. The harness writes only the files that an adapter declares as a `FileOverlay` with `writable: true`. | Read-only at its own path. Each writable overlay has its own read-write bind. |
 | `<work>/<project>/<agent>/` | The agent's files and repository checkouts. An agent dir of the older layout has `workspace/`; the next start moves it here once. | The harness, the daemon for clones, and a target that has the workspace attached. | Read-write at `$HOME/work` and at `/work/<project>/<agent>`. A host agent attaches it to the agent's targets at `/work/<project>/<agent>`. `agent rm` moves it to `<state>/trash/` with the agent dir. |
 
 Use `terrarium_runner::{private_dir, harness_dir}` and

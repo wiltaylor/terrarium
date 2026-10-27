@@ -18,6 +18,8 @@
 //! | `/run/terrarium/agent.sock` | `<run>/agents/<ulid>.sock` | rw |
 //! | `/opt/terrarium/bin/terrarium` | the `terrarium` CLI | ro |
 //! | each local repo of the agent's project under `TERRARIUM_REPOS_DIR` (`/repos`) | the same path | rw |
+//! | the account store of each pool member with a login of the harness (Claude, pi; PLAN §16.3) | the same path, `<state>/credentials/accounts/<subscription>/store` | rw |
+//! | `/run/terrarium/cred` (pi on an account) | `<state>/agents/<ulid>/harness/cred`: the agent's account pointer | ro |
 //!
 //! Everything else is hidden: other agents, the database, the daemon socket,
 //! the rest of the host, and `<state>/agents/<ulid>/private`, which holds
@@ -196,6 +198,14 @@ pub struct AgentLayout {
     /// The local repos of the agent's project, bound read-write
     /// ([`local_repo_binds`]).
     pub repos: Vec<RepoBind>,
+    /// The account stores of the agent's pool (`crate::accounts`), each
+    /// bound read-write at its own path, so the agent's pointer resolves
+    /// inside. Only the pool's accounts: never another one.
+    pub accounts: Vec<PathBuf>,
+    /// The agent's pointer dir (`<harness dir>/cred`), bound read-only at
+    /// [`crate::accounts::SANDBOX_CRED`] too: pi's shared `auth.json` link
+    /// goes through it.
+    pub cred_alias: Option<PathBuf>,
     /// The `bin/` of the harness version dir that this launch runs
     /// (`<tools>/versions/<name>/<version>/bin`,
     /// `crate::harness_tools::active_version`). The program comes from it,
@@ -456,6 +466,17 @@ impl SandboxConfig {
         for r in &layout.repos {
             push3(&mut args, "--bind", &r.source, &r.target);
         }
+        for a in &layout.accounts {
+            push3(&mut args, "--bind", a, a);
+        }
+        if let Some(c) = &layout.cred_alias {
+            push3(
+                &mut args,
+                "--ro-bind",
+                c,
+                Path::new(crate::accounts::SANDBOX_CRED),
+            );
+        }
         push3(
             &mut args,
             "--bind",
@@ -699,6 +720,8 @@ mod tests {
                 },
             ],
             repos: Vec::new(),
+            accounts: Vec::new(),
+            cred_alias: None,
             harness_bin: None,
         }
     }
@@ -900,6 +923,121 @@ TERRARIUM_AGENT=01K8AGENT0000000000000000A TERRARIUM_SOCKET=/run/terrarium/agent
         );
         assert!(line.contains(&want), "{line}");
         assert!(!line.contains(&o.to_string()), "{line}");
+    }
+
+    /// The account stores of the pool are bound read-write at their own
+    /// path, and the pointer dir read-only at the fixed sandbox path. No
+    /// other account and no other part of `<state>/credentials` is bound.
+    #[test]
+    fn only_the_pool_accounts_are_bound() {
+        let mut l = layout();
+        let root = PathBuf::from("/state/credentials/accounts");
+        l.accounts = vec![root.join("max-a/store"), root.join("max-b/store")];
+        l.cred_alias = Some(l.harness_dir.join("cred"));
+        let resolve = |p: &str| (p == "claude").then(|| PathBuf::from("/usr/bin/claude"));
+        let wrapped = config().wrap_with(spec(), &l, BTreeMap::new(), &|_| None, &resolve);
+        let line = command_line(&wrapped);
+        for s in ["max-a", "max-b"] {
+            let p = root.join(s).join("store");
+            assert!(
+                line.contains(&format!("--bind {} {}", p.display(), p.display())),
+                "{line}"
+            );
+        }
+        let alias = format!(
+            "--ro-bind {}/cred {}",
+            l.harness_dir.display(),
+            crate::accounts::SANDBOX_CRED
+        );
+        assert!(line.contains(&alias), "{line}");
+        let a = &wrapped.args;
+        for (i, flag) in a.iter().enumerate() {
+            if flag.contains("bind") && a[i + 1].starts_with("/state/credentials") {
+                let src = Path::new(&a[i + 1]);
+                assert!(l.accounts.iter().any(|x| x == src), "{flag} {src:?}");
+            }
+        }
+    }
+
+    /// A process in a real bwrap sandbox sees only its pool's account dirs
+    /// under the accounts root. Skips when bwrap cannot make a sandbox on
+    /// this host.
+    #[test]
+    fn a_sandboxed_process_sees_only_its_pool() {
+        let cfg = SandboxConfig {
+            bwrap: PathBuf::from("bwrap"),
+            ..SandboxConfig::default()
+        };
+        let Ok(bwrap) = cfg.check() else {
+            eprintln!("skipped: bwrap cannot make a sandbox here");
+            return;
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let root = state.join("credentials/accounts");
+        for s in ["max-a", "max-b", "max-c"] {
+            let store = root.join(s).join("store");
+            std::fs::create_dir_all(store.join("claude")).unwrap();
+            std::fs::write(store.join("claude/.credentials.json"), s).unwrap();
+            std::fs::write(root.join(s).join("account.json"), "{}").unwrap();
+        }
+        let agent: AgentId = "01K8AGENT0000000000000000B".parse().unwrap();
+        let dir = state.join("agents").join(agent.to_string());
+        let harness_dir = dir.join("harness");
+        std::fs::create_dir_all(harness_dir.join("cred")).unwrap();
+        std::os::unix::fs::symlink(root.join("max-b/store"), harness_dir.join("cred/account"))
+            .unwrap();
+        let workspace = tmp.path().join("work");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let socket = tmp.path().join("agent.sock");
+        std::fs::write(&socket, "").unwrap();
+        let l = AgentLayout {
+            agent,
+            agent_dir: dir.clone(),
+            harness_dir: harness_dir.clone(),
+            private_dir: dir.join("private"),
+            workspace,
+            workspace_mount: None,
+            socket,
+            homes: Vec::new(),
+            overlays: Vec::new(),
+            repos: Vec::new(),
+            accounts: vec![root.join("max-a/store"), root.join("max-b/store")],
+            cred_alias: Some(harness_dir.join("cred")),
+            harness_bin: None,
+        };
+        let script = format!(
+            "ls {root}; echo ---; cat {link}/claude/.credentials.json; echo; \
+             cat {alias}/account/claude/.credentials.json; echo; \
+             cat {root}/max-c/store/claude/.credentials.json 2>&1 || echo hidden; \
+             cat {root}/max-a/account.json 2>&1 || echo meta-hidden",
+            root = root.display(),
+            link = harness_dir.join("cred/account").display(),
+            alias = crate::accounts::SANDBOX_CRED,
+        );
+        let spec = LaunchSpec::new("/bin/sh", "/home/agent/work")
+            .arg("-c")
+            .arg(script);
+        let cfg = SandboxConfig { bwrap, ..cfg };
+        let env = cfg.child_env(&l, &BTreeMap::new(), &|_| None);
+        let wrapped = cfg.wrap(spec, &l, env);
+        let out = std::process::Command::new(&wrapped.program)
+            .args(&wrapped.args)
+            .env_clear()
+            .envs(&wrapped.env)
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        let (list, rest) = text.split_once("---").unwrap();
+        let mut names: Vec<&str> = list.split_whitespace().collect();
+        names.sort_unstable();
+        assert_eq!(names, ["max-a", "max-b"], "{text}");
+        let lines: Vec<&str> = rest.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(lines[0], "max-b", "the pointer resolves inside: {text}");
+        assert_eq!(lines[1], "max-b", "the fixed alias resolves too: {text}");
+        assert_eq!(lines.last(), Some(&"meta-hidden"), "{text}");
+        assert!(text.contains("hidden"), "{text}");
+        assert!(!text.contains("max-c\n"), "{text}");
     }
 
     #[test]

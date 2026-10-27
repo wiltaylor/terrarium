@@ -11,6 +11,14 @@
 //! | `copilot` | `copilot login --device-code` (a URL and a device code) |
 //! | `pi` | `pi`; the operator types `/login` and picks the provider |
 //!
+//! The command runs in a scratch home (`<temp dir>/terrarium-login-<id>/home`,
+//! mode 0700), never in the shared home. When it succeeds, only the
+//! credential moves from the scratch home into the account of the
+//! subscription (`crate::accounts::import_login`, PLAN §16.3). A login with
+//! no `name` whose default subscription has an account already makes a
+//! second account (`anthropic-max-20x-2`). No other account and no shared
+//! file changes. The scratch home goes with the temp dir.
+//!
 //! The session reads the raw PTY output, and per-kind patterns find the URL
 //! and the device code (see [`parse_output`]; the fixtures are in
 //! `tests/fixtures/login/`). The output stays in memory only: the runner of
@@ -312,11 +320,13 @@ async fn run_cmd(
     args: &[&str],
     kind: LoginKind,
     home: &Path,
+    extra: &[(String, String)],
 ) -> Result<CmdOut, String> {
     let mut cmd = Command::new(program);
     cmd.args(args)
         .env_clear()
         .envs(child_env(kind, home))
+        .envs(extra.iter().cloned())
         .stdin(std::process::Stdio::null())
         .kill_on_drop(true);
     let out = tokio::time::timeout(Duration::from_secs(30), cmd.output())
@@ -364,15 +374,118 @@ pub fn codex_plan(auth: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// Which login a status check reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CheckHome {
+    /// The shared harness home (a login from before the migration).
+    Shared,
+    /// The plan account of a subscription (PLAN §16.3).
+    Account(String),
+    /// The scratch home of a login session.
+    Scratch(PathBuf),
+}
+
 /// Run the status check of one harness against its shared home.
 pub async fn check_status(
     state: &Shared,
     kind: LoginKind,
     pi_provider: Option<&str>,
 ) -> LoginStatus {
+    check_status_in(state, kind, pi_provider, &CheckHome::Shared).await
+}
+
+/// A temp dir that goes away with the value.
+struct TempHome(PathBuf);
+
+impl Drop for TempHome {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// The home for a status check of the account `sub`: a temp dir with the
+/// account's credential linked in (Codex, pi), or an env var that points
+/// at it (Claude). The status command reads the account and nothing else.
+fn account_home(state_dir: &Path, kind: LoginKind, sub: &str) -> Result<AccountCheck, String> {
+    let h = kind.harness();
+    let store = crate::accounts::store_dir(state_dir, sub);
+    let tmp = std::env::temp_dir().join(format!("terrarium-check-{}", ulid::Ulid::new()));
+    std::fs::create_dir_all(&tmp)
+        .and_then(|()| std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o700)))
+        .map_err(|e| format!("cannot make the check dir: {e}"))?;
+    let guard = TempHome(tmp.clone());
+    let mut env = Vec::new();
+    match h {
+        HarnessId::Claude => env.push((
+            crate::accounts::CLAUDE_CRED_ENV.to_owned(),
+            store
+                .join(crate::accounts::CLAUDE_DIR)
+                .display()
+                .to_string(),
+        )),
+        HarnessId::Codex | HarnessId::Pi => std::os::unix::fs::symlink(
+            store.join(crate::accounts::AUTH_FILE),
+            tmp.join(crate::accounts::AUTH_FILE),
+        )
+        .map_err(|e| format!("cannot link the account into the check dir: {e}"))?,
+        HarnessId::Copilot => {}
+    }
+    Ok(AccountCheck {
+        home: tmp,
+        env,
+        cred: crate::accounts::probe_home(&store, h),
+        _guard: guard,
+    })
+}
+
+/// The home of a status check of one account.
+struct AccountCheck {
+    /// The home for the status command.
+    home: PathBuf,
+    /// The extra env of the status command.
+    env: Vec<(String, String)>,
+    /// The dir that holds the credential file (for the plan).
+    cred: PathBuf,
+    /// Removes the temp dir.
+    _guard: TempHome,
+}
+
+/// Run the status check of one harness against `at`. The status commands
+/// only read: an expired login stays expired until the harness of an agent
+/// refreshes it.
+pub async fn check_status_in(
+    state: &Shared,
+    kind: LoginKind,
+    pi_provider: Option<&str>,
+    at: &CheckHome,
+) -> LoginStatus {
     let cfg = &state.usage.config;
-    let home = cfg.home(kind.harness());
     let program = cfg.program(kind.harness());
+    let mut extra: Vec<(String, String)> = Vec::new();
+    let mut _guard = None;
+    let (home, cred_home) = match at {
+        CheckHome::Shared => (cfg.home(kind.harness()), cfg.home(kind.harness())),
+        CheckHome::Scratch(p) => (p.clone(), p.clone()),
+        CheckHome::Account(sub) => match account_home(&state.state_dir, kind, sub) {
+            Ok(c) => {
+                extra = c.env.clone();
+                let r = (c.home.clone(), c.cred.clone());
+                _guard = Some(c);
+                r
+            }
+            Err(e) => {
+                return LoginStatus {
+                    kind,
+                    harness: kind.harness(),
+                    provider: kind.provider(pi_provider),
+                    pi_provider: pi_provider.map(str::to_owned),
+                    logged_in: false,
+                    plan: None,
+                    detail: Some(e),
+                };
+            }
+        },
+    };
     let mut st = LoginStatus {
         kind,
         harness: kind.harness(),
@@ -383,63 +496,92 @@ pub async fn check_status(
         detail: None,
     };
     match kind {
-        LoginKind::Claude => match run_cmd(&program, &["auth", "status"], kind, &home).await {
-            Ok(out) => match terrarium_adapter_claude::auth::parse_auth_status(&out.stdout) {
-                Ok(a) => {
-                    st.logged_in = a.logged_in;
-                    let h = home.clone();
-                    let tier = tokio::task::spawn_blocking(move || {
-                        terrarium_adapter_claude::auth::plan_tier(&h)
-                    })
-                    .await
-                    .ok()
-                    .and_then(Result::ok)
-                    .flatten()
-                    .and_then(|t| t.rate_limit_tier);
-                    st.plan = claude_plan(a.subscription_type.as_deref(), tier.as_deref());
-                    st.detail = a.auth_method;
-                }
-                Err(e) => st.detail = Some(e.to_string()),
-            },
-            Err(e) => st.detail = Some(e),
-        },
-        LoginKind::Codex => match run_cmd(&program, &["login", "status"], kind, &home).await {
-            Ok(out) => {
-                let a = terrarium_adapter_codex::auth::parse_auth_status(
-                    Some(out.code),
-                    &out.stdout,
-                    &out.stderr,
-                );
-                st.logged_in = a.logged_in;
-                if st.logged_in {
-                    let p = home.join("auth.json");
-                    st.plan = tokio::task::spawn_blocking(move || {
-                        std::fs::read_to_string(p)
-                            .ok()
-                            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
-                            .and_then(|v| codex_plan(&v))
-                    })
-                    .await
-                    .ok()
-                    .flatten();
-                }
-                // The status line, else the last line (a warning or an
-                // error). The output has no token.
-                let line = a
-                    .message
-                    .lines()
-                    .rev()
-                    .find(|l| l.trim_start().starts_with("Logged in"))
-                    .or_else(|| a.message.lines().rev().find(|l| !l.trim().is_empty()))
-                    .unwrap_or_default()
-                    .trim()
-                    .to_owned();
-                st.detail = Some(line)
-                    .filter(|l| !l.is_empty())
-                    .or_else(|| Some(format!("no output, exit code {}", out.code)));
+        LoginKind::Claude => {
+            match run_cmd(&program, &["auth", "status"], kind, &home, &extra).await {
+                Ok(out) => match terrarium_adapter_claude::auth::parse_auth_status(&out.stdout) {
+                    Ok(a) => {
+                        st.logged_in = a.logged_in;
+                        let h = cred_home.clone();
+                        let tier = tokio::task::spawn_blocking(move || {
+                            terrarium_adapter_claude::auth::plan_tier(&h)
+                        })
+                        .await
+                        .ok()
+                        .and_then(Result::ok)
+                        .flatten()
+                        .and_then(|t| t.rate_limit_tier);
+                        st.plan = claude_plan(a.subscription_type.as_deref(), tier.as_deref());
+                        st.detail = a.auth_method;
+                    }
+                    Err(e) => st.detail = Some(e.to_string()),
+                },
+                Err(e) => st.detail = Some(e),
             }
-            Err(e) => st.detail = Some(e),
-        },
+        }
+        LoginKind::Codex => {
+            match run_cmd(&program, &["login", "status"], kind, &home, &extra).await {
+                Ok(out) => {
+                    let a = terrarium_adapter_codex::auth::parse_auth_status(
+                        Some(out.code),
+                        &out.stdout,
+                        &out.stderr,
+                    );
+                    st.logged_in = a.logged_in;
+                    if st.logged_in {
+                        let p = cred_home.join("auth.json");
+                        st.plan = tokio::task::spawn_blocking(move || {
+                            std::fs::read_to_string(p)
+                                .ok()
+                                .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+                                .and_then(|v| codex_plan(&v))
+                        })
+                        .await
+                        .ok()
+                        .flatten();
+                    }
+                    // The status line, else the last line (a warning or an
+                    // error). The output has no token.
+                    let line = a
+                        .message
+                        .lines()
+                        .rev()
+                        .find(|l| l.trim_start().starts_with("Logged in"))
+                        .or_else(|| a.message.lines().rev().find(|l| !l.trim().is_empty()))
+                        .unwrap_or_default()
+                        .trim()
+                        .to_owned();
+                    st.detail = Some(line)
+                        .filter(|l| !l.is_empty())
+                        .or_else(|| Some(format!("no output, exit code {}", out.code)));
+                }
+                Err(e) => st.detail = Some(e),
+            }
+        }
+        LoginKind::Copilot if matches!(at, CheckHome::Account(_)) => {
+            // An account holds the token alone; the login name is in its
+            // record.
+            if let CheckHome::Account(sub) = at {
+                let (dir, name) = (state.state_dir.clone(), sub.clone());
+                let (token, meta) = tokio::task::spawn_blocking(move || {
+                    (
+                        crate::accounts::copilot_token(&dir, &name).is_some(),
+                        crate::accounts::read_meta(&dir, &name),
+                    )
+                })
+                .await
+                .unwrap_or((false, None));
+                st.logged_in = token;
+                let who = meta
+                    .and_then(|m| m.login)
+                    .map(|l| format!(" for {l}"))
+                    .unwrap_or_default();
+                st.detail = Some(if token {
+                    format!("a Copilot token{who} is in the account")
+                } else {
+                    "the account has no Copilot token".into()
+                });
+            }
+        }
         LoginKind::Copilot => {
             // Copilot has no status command. A token in the plain-text
             // fallback of config.json (JSON with `//` comment lines,
@@ -487,7 +629,7 @@ pub async fn check_status(
                 "--provider",
                 provider,
             ];
-            match run_cmd(&program, &args, kind, &home).await {
+            match run_cmd(&program, &args, kind, &home, &extra).await {
                 Ok(out) => {
                     let v: Value = serde_json::from_str(out.stdout.trim()).unwrap_or(Value::Null);
                     let status = v.get("status").and_then(Value::as_str).unwrap_or_default();
@@ -594,6 +736,26 @@ pub async fn detect_on_start(state: &Shared) -> ApiResult<()> {
     let found = detect_all(state).await?;
     let list = state.db.read(subs::list).await?;
     for sub in &list {
+        // A plan account: check the account itself (PLAN §16.3).
+        if let Some(meta) = crate::accounts::read_meta(&state.state_dir, &sub.name) {
+            let kind = kind_for(meta.harness);
+            let pi = (kind == LoginKind::Pi).then(|| sub.provider.clone());
+            let st = check_status_in(
+                state,
+                kind,
+                pi.as_deref(),
+                &CheckHome::Account(sub.name.clone()),
+            )
+            .await;
+            let (n, status) = (sub.name.clone(), st.logged_in);
+            state
+                .db
+                .write("system", move |t| {
+                    subs::record_login_check(t, &n, status).map(|_| ())
+                })
+                .await?;
+            continue;
+        }
         if let Some(d) = found
             .iter()
             .find(|d| d.subscription.as_deref() == Some(sub.name.as_str()))
@@ -736,6 +898,9 @@ const MAX_LOGIN_OUTPUT: usize = 512 * 1024;
 
 /// The prefix of a login session's temp dir.
 const LOGIN_DIR_PREFIX: &str = "terrarium-login-";
+
+/// The scratch home of a login session, in its temp dir.
+pub const SCRATCH_HOME: &str = "home";
 
 /// The temp dir of login session `id`.
 pub fn login_dir(id: &str) -> PathBuf {
@@ -887,10 +1052,13 @@ pub async fn start(state: &Shared, req: StartLogin) -> ApiResult<LoginView> {
     let id = ulid::Ulid::new().to_string();
     let cfg = &state.usage.config;
     let harness = req.kind.harness();
-    let home = cfg.home(harness);
     let dir = login_dir(&id);
-    std::fs::create_dir_all(&dir)
+    // The login runs in a scratch home: the shared home and the other
+    // accounts stay as they are (PLAN §16.3).
+    let home = dir.join(SCRATCH_HOME);
+    std::fs::create_dir_all(&home)
         .and_then(|()| std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)))
+        .and_then(|()| std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)))
         .map_err(|e| ApiError::internal(format!("cannot make the login dir: {e}")))?;
     let mut spec = LaunchSpec::new(cfg.program(harness), &dir);
     spec.args = req
@@ -1062,7 +1230,13 @@ async fn watch(state: Shared, s: Arc<LoginSession>) {
             && last_pi_check.elapsed() >= Duration::from_secs(5)
         {
             last_pi_check = Instant::now();
-            let st = check_status(&state, LoginKind::Pi, s.provider.as_deref()).await;
+            let st = check_status_in(
+                &state,
+                LoginKind::Pi,
+                s.provider.as_deref(),
+                &CheckHome::Scratch(s.dir.join(SCRATCH_HOME)),
+            )
+            .await;
             if st.logged_in {
                 let _ = s.runner.kill();
                 break finish(&state, &s).await.map(Some);
@@ -1135,14 +1309,39 @@ fn outcome_into(
 async fn finish(state: &Shared, s: &LoginSession) -> Result<subs::Subscription, String> {
     let row = s.update(|v| v.state = "verifying".into());
     persist(state, row).await;
-    let st = check_status(state, s.kind, s.provider.as_deref()).await;
+    let scratch = s.dir.join(SCRATCH_HOME);
+    let st = check_status_in(
+        state,
+        s.kind,
+        s.provider.as_deref(),
+        &CheckHome::Scratch(scratch.clone()),
+    )
+    .await;
     if !st.logged_in {
         return Err(format!(
             "the status check does not show a login: {}",
             st.detail.unwrap_or_default()
         ));
     }
-    let sub = register(state, &st, s.name.as_deref())
+    let list = state.db.read(subs::list).await.map_err(|e| e.message)?;
+    let name = login_name(&state.state_dir, &list, &st, s.name.as_deref());
+    subs::check_name(&name).map_err(|e| e.message)?;
+    // Only the credential leaves the scratch home, into the account of
+    // `name`.
+    let (dir, n, h, provider, pi) = (
+        state.state_dir.clone(),
+        name.clone(),
+        s.kind.harness(),
+        st.provider.clone(),
+        s.provider.clone(),
+    );
+    let shared = state.usage.config.home(h);
+    tokio::task::spawn_blocking(move || {
+        crate::accounts::import_login(&dir, &n, h, &provider, &scratch, pi.as_deref(), &shared)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    let sub = register(state, &st, Some(&name))
         .await
         .map_err(|e| e.message)?;
     if let Err(e) = crate::probes::run_subscription(state, &sub.name).await {
@@ -1250,7 +1449,7 @@ pub async fn logout(state: &Shared, kind: LoginKind) -> ApiResult<String> {
     };
     let cfg = &state.usage.config;
     let home = cfg.home(kind.harness());
-    let out = run_cmd(&cfg.program(kind.harness()), args, kind, &home)
+    let out = run_cmd(&cfg.program(kind.harness()), args, kind, &home, &[])
         .await
         .map_err(ApiError::internal)?;
     let code = out.code;
@@ -1262,6 +1461,52 @@ pub async fn logout(state: &Shared, kind: LoginKind) -> ApiResult<String> {
         )));
     }
     Ok(out.first_line())
+}
+
+/// The login kind of a harness.
+pub fn kind_for(h: HarnessId) -> LoginKind {
+    match h {
+        HarnessId::Claude => LoginKind::Claude,
+        HarnessId::Codex => LoginKind::Codex,
+        HarnessId::Copilot => LoginKind::Copilot,
+        HarnessId::Pi => LoginKind::Pi,
+    }
+}
+
+/// The name of the subscription that a new login makes or updates: the
+/// `name` the operator gave, else the default name (`anthropic-max-20x`).
+/// When the default subscription has a plan account already, the login is
+/// a second account of the provider: `<default>-2` (or the next free
+/// number).
+pub fn login_name(
+    state_dir: &Path,
+    list: &[Subscription],
+    st: &LoginStatus,
+    name: Option<&str>,
+) -> String {
+    if let Some(n) = name {
+        return n.to_owned();
+    }
+    let base = default_name(st);
+    // A subscription can take the login when it has no account yet and
+    // fits it (same provider, the harness can spend it).
+    let free = |n: &str| -> bool {
+        match list.iter().find(|s| s.name == n) {
+            None => !crate::accounts::exists(state_dir, n),
+            Some(s) => {
+                !crate::accounts::exists(state_dir, n)
+                    && s.provider == st.provider
+                    && s.harnesses.contains(&st.harness)
+            }
+        }
+    };
+    if free(&base) {
+        return base;
+    }
+    (2..1000)
+        .map(|i| format!("{base}-{i}"))
+        .find(|n| free(n))
+        .unwrap_or(base)
 }
 
 /// The login kind that checks a subscription: its first harness.

@@ -58,6 +58,7 @@ import type {
   Role,
   HarnessUpdateResult,
   Subscription,
+  SwapResult,
   Lease,
   NewTarget,
   SnapshotQuery,
@@ -982,7 +983,29 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     has_api_key: !!s.env_var && !!w.apiKeys[s.name],
     held_agents: w.holds.filter((h) => h.cause === `quota:${s.name}`).length,
     default_models: defaultModels(s),
+    agents: w.agents.filter((a) => a.subscription === s.name).map((a) => ({ id: a.id, name: a.name, project: a.project })),
   });
+  /** PLAN §16.3: a pool holds accounts of one provider, and the harness can spend each. The current subscription goes first. */
+  const checkPool = (harness: Agent["harness"], current: string | undefined, pool: string[]): string[] => {
+    const names = [...new Set(pool.map((n) => n.trim()).filter(Boolean))];
+    if (!names.length) return [];
+    if (current && !names.includes(current)) names.unshift(current);
+    let provider: string | undefined;
+    for (const n of names) {
+      const s = w.subscriptions.find((x) => x.name === n);
+      if (!s) fail(422, "invalid", `\`subscription_pool\` names \`${n}\`, but there is no such subscription`);
+      if (!s!.harnesses.includes(harness)) fail(422, "invalid", `the ${harness} harness cannot spend subscription \`${n}\` of the pool`);
+      if (provider && provider !== s!.provider) fail(422, "invalid", `the pool mixes providers: \`${n}\` is ${s!.provider}, the others are ${provider}; a pool holds accounts of one provider`);
+      provider ??= s!.provider;
+    }
+    return names;
+  };
+  /** Logout and delete wait until no live agent runs on the account. */
+  const refuseLiveAccount = (s: Subscription, verb: string) => {
+    if (!s.account) return;
+    const live = w.agents.filter((a) => a.subscription === s.name && LIVE.includes(a.status));
+    if (live.length) fail(409, "conflict", `${live.length} running agent(s) use account \`${s.name}\` (${live.map((a) => `${a.project}/${a.name}`).join(", ")}); move them to another account or stop them before you ${verb}`);
+  };
   const checkSubName = (name: string) => {
     if (!NAME_RE.test(name)) fail(422, "invalid", `\`${name}\` is not a valid name: lowercase letters, digits, - and _`);
     if (name === "login" || name === "detect") fail(422, "invalid", `\`${name}\` is a reserved name`);
@@ -1086,7 +1109,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
         suggested: { name: `pi-${l.provider}`, provider: l.provider, harnesses: [l.harness], alert_at: 80 },
       }));
 
-  // ----- local accounting (docs/api.md §16.3 `GET /api/usage`) -----
+  // ----- local accounting (docs/api.md §16.4 `GET /api/usage`) -----
   /** The attribution rule of docs/api.md §16.1: the agent's card in `in_progress`, newest `updated_at` first. */
   const currentCard = (agentId: string): string | undefined =>
     w.cards
@@ -1244,13 +1267,17 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     later(() => {
       if (s.done) return;
       const d = DEFAULTS[s.kind](s.provider);
-      const name = s.name ?? d.name;
+      // PLAN §16.3: with no name, a default that has an account already gets a second account, `<default>-2`, then -3.
+      let name = s.name ?? d.name;
+      for (let n = 2; !s.name && w.subscriptions.find((x) => x.name === name)?.account; n++) name = `${d.name}-${n}`;
       let row = w.subscriptions.find((x) => x.name === name);
       if (!row) {
-        row = { ...d, name, alert_at: 80, source: "api", login_status: "logged_in", probe_status: "none", created_at: iso(), updated_at: iso(), windows: [], local_estimate_only: !d.probe, has_api_key: false, held_agents: 0 };
+        row = { ...d, name, alert_at: 80, source: "api", login_status: "logged_in", probe_status: "none", created_at: iso(), updated_at: iso(), windows: [], local_estimate_only: !d.probe, has_api_key: false, held_agents: 0, agents: [] };
         w.subscriptions.push(row);
         audit("subscription.register", name, undefined, { kind: s.kind });
       }
+      // A re-login replaces the login of this account only.
+      row.account = { harness: s.kind, has_login: true, source: row.account?.source ?? "login", created_at: row.account?.created_at ?? iso(), updated_at: iso() };
       row.login_status = "logged_in";
       row.verified_at = iso();
       row.updated_at = iso();
@@ -1658,6 +1685,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           if (w.agents.some((a) => a.project === def.project && a.name === def.name)) fail(409, "conflict", `agent \`${def.project}/${def.name}\` exists`);
           if (def.policy?.mail_to.some((m) => !m.trim())) fail(422, "invalid", "policy.mail_to has an empty entry");
           for (const x of def.policy?.cross_project ?? []) if (!/^[^/]+\/[^/]+$/.test(x)) fail(422, "invalid", `policy.cross_project entry \`${x}\` is not project/agent`);
+          const pool = checkPool(def.harness, def.subscription, def.subscription_pool ?? []);
           const id = ulid("agt");
           const a: Agent = {
             id,
@@ -1665,6 +1693,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
             project: def.project,
             harness: def.harness,
             ...(def.subscription ? { subscription: def.subscription } : {}),
+            ...(pool.length ? { subscription_pool: pool } : {}),
             ...(def.model ? { model: def.model } : {}),
             ...(def.prompt ? { prompt: def.prompt } : {}),
             ...(def.system_prompt ? { system_prompt: def.system_prompt } : {}),
@@ -1689,6 +1718,12 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           if (a.source === "file") fail(409, "file_managed", `agent \`${a.project}/${a.name}\` is declared in a definition file; edit the file, then POST /api/reload`);
           const sp = systemPromptError(patch.system_prompt);
           if (sp) fail(422, "invalid", sp, { field: "system_prompt" });
+          if (patch.subscription_pool !== undefined || patch.subscription !== undefined) {
+            const current = patch.subscription !== undefined ? patch.subscription || undefined : a.subscription;
+            const pool = checkPool(patch.harness ?? a.harness, current, patch.subscription_pool ?? a.subscription_pool ?? []);
+            if (pool.length) a.subscription_pool = pool;
+            else delete a.subscription_pool;
+          }
           if (patch.harness) a.harness = patch.harness;
           if (patch.subscription !== undefined) a.subscription = patch.subscription || undefined;
           if (patch.model !== undefined) a.model = patch.model || undefined;
@@ -1700,6 +1735,26 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           a.updated_at = iso();
           audit("agent.update", a.id, a.project, { ...patch });
           return a;
+        }),
+      // PLAN §16.3: move the agent to another account of its pool.
+      swapSubscription: (id, to) =>
+        reply(() => {
+          const a = agent(id);
+          const pool = a.subscription_pool ?? [];
+          if (a.source === "file" && !pool.includes(to)) fail(409, "file_managed", `agent \`${a.project}/${a.name}\` is declared in a definition file; it may swap only among the accounts of its pool`);
+          if (a.subscription === to) fail(409, "conflict", `agent \`${a.project}/${a.name}\` is on \`${to}\` already`);
+          if (!pool.includes(to)) fail(422, "invalid", `\`${to}\` is not in the pool of agent \`${a.project}/${a.name}\``);
+          const target = sub(to);
+          const from = a.subscription ? w.subscriptions.find((x) => x.name === a.subscription) : undefined;
+          if (from && from.provider !== target.provider) fail(422, "invalid", `\`${to}\` is ${target.provider}, the agent's account is ${from.provider}`);
+          if (!target.account?.has_login || !target.harnesses.includes(a.harness)) fail(422, "invalid", `\`${to}\` has no ${a.harness} login`);
+          const live = LIVE.includes(a.status);
+          const applied: SwapResult["applied"] = !live ? "next_start" : a.harness === "claude" || a.harness === "pi" ? "live" : a.status === "working" ? "restart_scheduled" : "restarted";
+          const result: SwapResult = { agent: a.id, ...(a.subscription ? { from: a.subscription } : {}), to, applied };
+          a.subscription = to;
+          a.updated_at = iso();
+          audit("agent.swap", a.id, a.project, { from: result.from ?? null, to, applied });
+          return result;
         }),
       remove: (id, confirm) =>
         reply(() => {
@@ -2414,7 +2469,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           const s: Subscription = {
             name: def.name, provider: def.provider, ...(def.plan ? { plan: def.plan } : {}), harnesses: def.harnesses ?? [], ...(def.probe ? { probe: def.probe } : {}),
             alert_at: def.alert_at ?? 80, source: "api", login_status: "unknown", probe_status: "none", created_at: iso(), updated_at: iso(),
-            windows: [], local_estimate_only: !def.probe, has_api_key: false, held_agents: 0,
+            windows: [], local_estimate_only: !def.probe, has_api_key: false, held_agents: 0, agents: [],
           };
           w.subscriptions.push(s);
           audit("subscription.create", s.name, undefined, { provider: s.provider });
@@ -2424,6 +2479,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
         reply(() => {
           const s = sub(name);
           if (s.source === "file") fail(409, "file_managed", `subscription \`${name}\` comes from subscriptions/${name}.toml; edit or delete the file`);
+          refuseLiveAccount(s, "delete it");
           w.subscriptions.splice(w.subscriptions.indexOf(s), 1);
           delete w.apiKeys[name];
           w.quota = w.quota.filter((q) => q.subscription !== name);
@@ -2475,7 +2531,9 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           if (!harness) fail(422, "invalid", `subscription \`${name}\` names no harness`);
           if (harness === "pi") fail(422, "invalid", "pi has no logout command");
           if (isZai(s.provider)) fail(422, "invalid", `subscription \`${name}\` is a Z.ai API key and has no logout; store another key, or delete the subscription`);
+          refuseLiveAccount(s, "log it out");
           s.login_status = "missing";
+          if (s.account) s.account = { ...s.account, has_login: false, updated_at: iso() };
           audit("subscription.logout", name, undefined, { kind: harness });
           return subView(s);
         }),
@@ -2491,7 +2549,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           let s = w.subscriptions.find((x) => x.name === name);
           if (!s) {
             checkSubName(name);
-            s = { name, provider: input.provider, plan: zai?.plan ?? "API key", harnesses: zai?.harnesses ?? [input.provider === "github" ? "copilot" : "pi"], alert_at: 80, source: "api", login_status: "logged_in", probe_status: "none", created_at: iso(), updated_at: iso(), windows: [], local_estimate_only: true, has_api_key: true, held_agents: 0 };
+            s = { name, provider: input.provider, plan: zai?.plan ?? "API key", harnesses: zai?.harnesses ?? [input.provider === "github" ? "copilot" : "pi"], alert_at: 80, source: "api", login_status: "logged_in", probe_status: "none", created_at: iso(), updated_at: iso(), windows: [], local_estimate_only: true, has_api_key: true, held_agents: 0, agents: [] };
             w.subscriptions.push(s);
           }
           w.apiKeys[name] = { provider: input.provider, key: input.key, base_url: input.base_url, models: input.models };

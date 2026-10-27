@@ -77,6 +77,9 @@ pub struct UsageConfig {
     /// sandbox mode `none`: no overlay is bound, and the session files are
     /// in the shared home. See [`transcript_roots`].
     pub per_agent_sessions: bool,
+    /// Move the agents of a full subscription to the next account of their
+    /// pool (`TERRARIUM_AUTO_SWAP`, PLAN §16.3). Default on.
+    pub auto_swap: bool,
     pub http: Arc<dyn HttpGet>,
 }
 
@@ -92,6 +95,7 @@ impl Default for UsageConfig {
             login_timeout: Duration::from_secs(600),
             detect_on_start: false,
             per_agent_sessions: true,
+            auto_swap: true,
             http: Arc::new(ReqwestHttp::new()),
         }
     }

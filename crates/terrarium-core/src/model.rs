@@ -19,6 +19,9 @@ pub struct Agent {
     pub harness: HarnessId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subscription: Option<String>,
+    /// See [`AgentDef::subscription_pool`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subscription_pool: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     /// The agent's files: `<work>/<project>/<name>` (`TERRARIUM_WORK_DIR`,
@@ -76,6 +79,7 @@ impl Agent {
             project: def.project.clone(),
             harness: def.harness,
             subscription: def.subscription.clone(),
+            subscription_pool: def.subscription_pool.clone(),
             model: def.model.clone(),
             workspace: state_dir
                 .join("agents")

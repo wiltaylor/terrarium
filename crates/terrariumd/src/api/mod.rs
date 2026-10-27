@@ -2,7 +2,7 @@
 //! TCP listener (the bearer token, a session cookie, or a CLI session token
 //! on `/api/*`; see `session`). `docs/api.md` is the contract.
 
-mod agents;
+pub(crate) mod agents;
 mod artifacts;
 mod board;
 mod event_sources;

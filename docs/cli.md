@@ -183,15 +183,16 @@ no credential for the host and path. `store` and `erase` do nothing.
 ```
 terrarium agent ls [--all-projects]
 terrarium agent show <agent>
-terrarium agent new <name> --harness <h> [--subscription s] [--model m] [--prompt p]
+terrarium agent new <name> --harness <h> [--subscription s] [--pool s1,s2] [--model m] [--prompt p]
                     [--system-prompt <text | -> | --system-prompt-file path]
                     [--role r]... [--target t]... [--mail-to a]... [--cross-project p/a]...
                     [--restart always|on-failure|never]
 terrarium agent new --from-file agents/lead.toml [flags that override the file]
 terrarium agent new <name> --template <t> [flags that override the template]
-terrarium agent set <agent> [--harness h] [--subscription s] [--model m] [--prompt p]
+terrarium agent set <agent> [--harness h] [--subscription s] [--pool s1,s2] [--model m] [--prompt p]
                     [--system-prompt <text | -> | --system-prompt-file path | --no-system-prompt]
                     [--restart r] [--policy JSON] [--new-session-on-prompt-change true|false]
+terrarium agent swap <agent> <subscription>  move to another plan account of the pool
 terrarium agent rm <agent> [--confirm] [--keep-workspace]
 terrarium agent start|stop|restart <agent> [--no-wait]
 terrarium agent send <agent> <text | ->
@@ -223,6 +224,18 @@ or `error` after a stop.
 
 `agent ls` has the column `WAITING ON`: what a `waiting` agent waits on
 ([api.md §6.7](api.md#67-waits-runs-and-watches)).
+
+`--pool` sets the account pool (PLAN §16.3): subscriptions of one
+provider that a swap may pick, comma-separated. The current subscription
+is always a member. `agent set --pool ''` clears the pool.
+
+`agent swap` (also `admin agent swap`) moves the agent to another plan
+account ([api.md §6.2](api.md#62-lifecycle-and-turns)). The rights are the
+same as for `agent set`. The CLI prints how it applied, for example
+`terra/lead: anthropic-max-20x -> anthropic-max-20x-2 (live; the harness
+reads the new login at its next request)`. Claude Code and pi swap live.
+Codex and Copilot restart with resume, at once when the agent is idle, else
+when its turn ends. A stopped agent uses the new account at its next start.
 
 `agent rm` deletes the agent. The daemon moves the agent dir and the
 workspace `work/<project>/<agent>` to `<state>/trash/<ulid>-<ts>/` (the

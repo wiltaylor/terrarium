@@ -39,8 +39,11 @@
 //! daemon writes it), and `logs/` (`--log-dir`), which Copilot writes, so
 //! it gets a read-write bind over itself.
 //!
-//! Shared on purpose: `config.json` (the login and the plain-text token
-//! fallback; Copilot also writes `firstLaunchAt` there), `extensions/`
+//! Shared on purpose: `config.json` (trusted folders, flags; Copilot also
+//! writes `firstLaunchAt` there). The login token is per account
+//! (`terrariumd::accounts`, PLAN §16.3): the daemon moves it out of
+//! `authTokens` and gives each agent `COPILOT_GITHUB_TOKEN`, which wins over
+//! the file. Also shared: `extensions/`
 //! (the system-prompt extension), `pkg/`, `plugin-data/`,
 //! `installed-plugins/`. Many processes on one `config.json` is the normal
 //! multi-terminal case; it is not tested with many agents. The session

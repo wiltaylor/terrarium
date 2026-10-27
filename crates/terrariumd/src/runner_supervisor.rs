@@ -87,7 +87,7 @@ use crate::sandbox::{self, AgentLayout, HarnessHome, SandboxConfig, SandboxMode}
 use crate::store::subscriptions::Subscription;
 use crate::supervisor::{
     AnswerInput, BoxFuture, HarnessRun, PtyAttachment, PtyInput, Recovery, Supervisor,
-    SupervisorError, SupervisorEvent, SupervisorEventKind, TurnHold, wants_restart,
+    SupervisorError, SupervisorEvent, SupervisorEventKind, SwapApplied, TurnHold, wants_restart,
 };
 
 /// One harness adapter and its prompt-ready detector.
@@ -398,6 +398,24 @@ struct Built {
     /// The harness version dir that the launch runs, when the tools dir
     /// has one ([`crate::harness_tools::active_version`]).
     harness_version: Option<String>,
+    /// The account record of the launch ([`ACCOUNTS_FILE`]).
+    accounts: LaunchedAccounts,
+    /// A warning about the account of the launch.
+    account_warning: Option<String>,
+}
+
+/// The file that records the account of the last launch
+/// (`<agent dir>/private/accounts.json`): `{"account", "bound"}`. A daemon
+/// start reads it for an agent whose runner process still runs.
+pub const ACCOUNTS_FILE: &str = "accounts.json";
+
+/// The content of [`ACCOUNTS_FILE`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct LaunchedAccounts {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    account: Option<String>,
+    #[serde(default)]
+    bound: Vec<String>,
 }
 
 /// The `system` event of a resume that sends a changed prompt.
@@ -784,6 +802,14 @@ struct Slot {
     /// The harness version that the last launch resolved; `None` when the
     /// harness came from `PATH`.
     harness_version: Option<String>,
+    /// The account of the last launch (PLAN §16.3): the subscription whose
+    /// credential the harness reads now. `None`: no account.
+    account: Option<String>,
+    /// The accounts that the sandbox binds: a live swap may pick these.
+    bound: Vec<String>,
+    /// A swap waits for the end of the turn: then the agent restarts with
+    /// resume on `agent.subscription`.
+    swap_pending: bool,
 }
 
 impl Slot {
@@ -805,6 +831,9 @@ impl Slot {
             pointer: Pointer::default(),
             pointer_busy: false,
             harness_version: None,
+            account: None,
+            bound: Vec::new(),
+            swap_pending: false,
         }
     }
 
@@ -1040,6 +1069,8 @@ impl RunnerSupervisor {
             }],
             overlays: Vec::new(),
             repos: Vec::new(),
+            accounts: Vec::new(),
+            cred_alias: None,
             harness_bin: None,
         }
     }
@@ -1182,7 +1213,13 @@ impl RunnerSupervisor {
             SandboxMode::None => Vec::new(),
         };
         let repos_dir = cfg.sandbox.repos_dir.clone();
-        let (overlays, credentials, fresh_for_prompt, prompt_updated, repos) =
+        let accounts_state = cfg.state_dir.clone();
+        let home_inside = cfg.sandbox.home_inside(&HarnessHome {
+            harness: agent.harness,
+            host: home.clone(),
+        });
+        let sandboxed = cfg.sandbox.mode == SandboxMode::Bwrap;
+        let (overlays, credentials, fresh_for_prompt, prompt_updated, repos, accounts) =
             tokio::task::spawn_blocking(move || {
                 migrate_dir(&dirs.0);
                 // An agent made before the work root: its files move from
@@ -1239,12 +1276,36 @@ impl RunnerSupervisor {
                 };
                 let repos =
                     sandbox::local_repo_binds(repo_urls.iter().map(String::as_str), &repos_dir);
+                // The plan account (PLAN §16.3): the pointer, and the env,
+                // binds, and overlays that reach it.
+                let accounts = crate::accounts::prepare_launch(&crate::accounts::LaunchInput {
+                    state_dir: &accounts_state,
+                    harness: a.harness,
+                    subscription: a.subscription.as_deref(),
+                    pool: &a.subscription_pool,
+                    harness_dir: &dirs.1,
+                    shared_home: &home,
+                    home_inside: &home_inside,
+                    sandboxed,
+                })?;
+                if a.harness == HarnessId::Claude
+                    && let Some(sub) = &accounts.account
+                {
+                    let state_file =
+                        terrarium_adapter_claude::config::claude_dir(&a).join("claude.json");
+                    if let Err(e) =
+                        crate::accounts::set_oauth_account(&accounts_state, sub, &state_file)
+                    {
+                        warn!(agent = %a.id, "cannot set the account in .claude.json: {e}");
+                    }
+                }
                 Ok((
                     overlays,
                     credentials,
                     fresh_for_prompt,
                     prompt_updated,
                     repos,
+                    accounts,
                 ))
             })
             .await
@@ -1261,8 +1322,20 @@ impl RunnerSupervisor {
                  home; the harness uses the shared files"
             );
         }
+        let crate::accounts::LaunchAccounts {
+            account,
+            env: account_env,
+            overlays: account_overlays,
+            stores,
+            cred_alias,
+            bound,
+            warning: account_warning,
+        } = accounts;
         layout.overlays = overlays;
+        layout.overlays.extend(account_overlays);
         layout.repos = repos;
+        layout.accounts = stores;
+        layout.cred_alias = cred_alias;
         // The active harness version dir, resolved and recorded under the
         // slots lock: a GC after a switch reads the records under the same
         // lock, so it never removes a version that a launch resolved.
@@ -1290,6 +1363,17 @@ impl RunnerSupervisor {
             resume
         };
         let mut spec = entry.adapter.launch_for(&agent, resume, def.as_ref());
+        if let Some(acct) = &account {
+            info!(
+                agent = %agent.id,
+                account = %acct,
+                bound = ?bound,
+                vars = ?account_env.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(),
+                "the agent runs on its plan account"
+            );
+        }
+        // The account first: a stored API key of the subscription wins.
+        spec.env.extend(account_env);
         if !credentials.is_empty() {
             debug!(
                 agent = %agent.id,
@@ -1317,6 +1401,8 @@ impl RunnerSupervisor {
             fresh_for_prompt,
             prompt_updated,
             harness_version: active.map(|a| a.version),
+            accounts: LaunchedAccounts { account, bound },
+            account_warning,
         })
     }
 
@@ -1340,10 +1426,13 @@ impl RunnerSupervisor {
             fresh_for_prompt,
             prompt_updated,
             harness_version,
+            accounts,
+            account_warning,
         } = self
             .build_spec(&agent, resume.as_ref(), &view, Some(epoch))
             .await?;
         self.record_version(id, agent.harness, harness_version);
+        self.record_accounts(id, &accounts);
         let resume = if fresh_for_prompt {
             // The old session stays in the history; this launch begins a
             // new one, and a later restart resumes that.
@@ -1443,6 +1532,9 @@ impl RunnerSupervisor {
                     slot.reached_idle = false;
                     slot.seen = runner.status();
                     slot.pointer_busy = false;
+                    slot.account = accounts.account.clone();
+                    slot.bound = accounts.bound.clone();
+                    slot.swap_pending = false;
                     for m in view.queued {
                         slot.pointer.add_mail(m);
                     }
@@ -1469,6 +1561,10 @@ impl RunnerSupervisor {
         if let Some(message) = version_warning {
             self.emit(id, SupervisorEventKind::Harness(Event::Warning { message }));
         }
+        if let Some(message) = account_warning {
+            warn!(agent = %id, "{message}");
+            self.emit(id, SupervisorEventKind::Harness(Event::Warning { message }));
+        }
         if prompt_updated && resume.is_some() {
             info!(agent = %id, "{PROMPT_UPDATED}");
             self.emit(
@@ -1493,6 +1589,54 @@ impl RunnerSupervisor {
         let me = self.clone();
         tokio::spawn(async move { me.forward(id, epoch, runner, rx).await });
         Ok(())
+    }
+
+    /// Write [`ACCOUNTS_FILE`] for the launch of `id`.
+    fn record_accounts(&self, id: AgentId, accounts: &LaunchedAccounts) {
+        let path = terrarium_runner::private_dir(&self.inner.cfg.state_dir, id).join(ACCOUNTS_FILE);
+        let bytes = serde_json::to_vec(accounts).unwrap_or_default();
+        if let Err(e) = safefs::write_private(&path, &bytes) {
+            warn!(agent = %id, "cannot record the account of the launch: {e}");
+        }
+    }
+
+    /// The account record of the last launch of `id`.
+    fn recorded_accounts(&self, id: AgentId) -> LaunchedAccounts {
+        let path = terrarium_runner::private_dir(&self.inner.cfg.state_dir, id).join(ACCOUNTS_FILE);
+        safefs::read_to_string(&path)
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default()
+    }
+
+    /// The account swap that waited for the end of a turn: restart with
+    /// resume on the new account. True when it restarts.
+    fn take_pending_swap(&self, id: AgentId, epoch: u64) -> bool {
+        let agent = {
+            let mut slots = lock(&self.inner.slots);
+            match slots
+                .get_mut(&id)
+                .filter(|s| s.epoch == epoch && s.swap_pending)
+            {
+                Some(slot) => {
+                    slot.swap_pending = false;
+                    slot.agent.clone()
+                }
+                None => return false,
+            }
+        };
+        info!(
+            agent = %id,
+            account = agent.subscription.as_deref().unwrap_or_default(),
+            "the turn ended: restarting with resume on the new account"
+        );
+        let me = self.clone();
+        tokio::spawn(async move {
+            if let Err(e) = me.restart(agent).await {
+                warn!(agent = %id, "the restart for the account swap failed: {e}");
+            }
+        });
+        true
     }
 
     /// Write [`HARNESS_VERSION_FILE`] for the launch of `id`.
@@ -1687,6 +1831,14 @@ impl RunnerSupervisor {
                 ..
             }
         );
+        // Not in a turn: a swap that waited can restart the harness now.
+        let settled = matches!(
+            rec.event,
+            Event::StatusChanged {
+                to: AgentStatus::Idle | AgentStatus::Waiting | AgentStatus::Blocked,
+                ..
+            }
+        );
         match self.held(id) {
             // A held agent is `blocked`, not `idle`.
             Some(h) if idle => self.emit_seq(
@@ -1698,6 +1850,9 @@ impl RunnerSupervisor {
                 rec.seq,
             ),
             _ => self.emit_seq(id, SupervisorEventKind::Harness(rec.event), rec.seq),
+        }
+        if settled && self.take_pending_swap(id, epoch) {
+            return exit;
         }
         if idle {
             self.on_idle(id, epoch);
@@ -3367,8 +3522,28 @@ impl Supervisor for RunnerSupervisor {
             };
             self.adopt(id, epoch, remote, Some(events_since));
             let version = self.recorded_version(id, agent.harness);
-            if let Some(slot) = lock(&self.inner.slots).get_mut(&id) {
+            let launched = self.recorded_accounts(id);
+            let settled = if let Some(slot) = lock(&self.inner.slots).get_mut(&id) {
                 slot.harness_version = version;
+                // A swap that the stored agent names and that the harness
+                // does not run yet: it applies when the turn ends.
+                slot.swap_pending =
+                    launched.account.is_some() && launched.account != agent.subscription;
+                slot.account = launched.account;
+                slot.bound = launched.bound;
+                slot.swap_pending
+                    && matches!(
+                        slot.seen,
+                        AgentStatus::Idle | AgentStatus::Waiting | AgentStatus::Blocked
+                    )
+            } else {
+                false
+            };
+            if settled {
+                let epoch = lock(&self.inner.slots).get(&id).map(|s| s.epoch);
+                if let Some(e) = epoch {
+                    self.take_pending_swap(id, e);
+                }
             }
             Ok(Recovery::Attached)
         })
@@ -3376,6 +3551,124 @@ impl Supervisor for RunnerSupervisor {
 
     fn lease_granted(&self, agent: AgentId, target: String, lease: String) {
         self.queue_lease_pointer(agent, target, lease);
+    }
+
+    fn swap_subscription(
+        &self,
+        agent: Agent,
+    ) -> BoxFuture<'_, Result<SwapApplied, SupervisorError>> {
+        Box::pin(async move {
+            let id = agent.id;
+            let Some(to) = agent.subscription.clone() else {
+                return Err(SupervisorError::NotReady(
+                    "a swap needs the subscription to move to".into(),
+                ));
+            };
+            enum Plan {
+                Down,
+                Live,
+                Now,
+                Later,
+            }
+            let plan = {
+                let mut slots = lock(&self.inner.slots);
+                match slots.get_mut(&id) {
+                    Some(slot) if slot.live() => {
+                        let live = matches!(agent.harness, HarnessId::Claude | HarnessId::Pi)
+                            && slot.account.is_some()
+                            && slot.runner.is_some()
+                            && slot.bound.contains(&to);
+                        if live {
+                            Plan::Live
+                        } else {
+                            slot.agent = agent.clone();
+                            let busy =
+                                matches!(slot.seen, AgentStatus::Working | AgentStatus::Starting)
+                                    || slot.runner.is_none();
+                            if busy {
+                                slot.swap_pending = true;
+                                Plan::Later
+                            } else {
+                                Plan::Now
+                            }
+                        }
+                    }
+                    Some(slot) => {
+                        slot.agent = agent.clone();
+                        Plan::Down
+                    }
+                    None => Plan::Down,
+                }
+            };
+            match plan {
+                Plan::Down => Ok(SwapApplied::NextStart),
+                Plan::Later => Ok(SwapApplied::RestartScheduled),
+                Plan::Now => {
+                    self.restart(agent).await?;
+                    Ok(SwapApplied::Restarted)
+                }
+                Plan::Live => {
+                    let cfg = &self.inner.cfg;
+                    let (state_dir, harness) = (cfg.state_dir.clone(), agent.harness);
+                    let harness_dir = terrarium_runner::harness_dir(&cfg.state_dir, id);
+                    let home = cfg.home(harness);
+                    let target = to.clone();
+                    tokio::task::spawn_blocking(move || {
+                        crate::accounts::live_swap(
+                            &state_dir,
+                            harness,
+                            &harness_dir,
+                            &target,
+                            &home,
+                            crate::accounts::LOCK_TIMEOUT,
+                        )
+                    })
+                    .await
+                    .map_err(other)?
+                    .map_err(SupervisorError::Unsupported)?;
+                    let accounts = {
+                        let mut slots = lock(&self.inner.slots);
+                        slots.get_mut(&id).map(|slot| {
+                            slot.agent = agent.clone();
+                            slot.account = Some(to.clone());
+                            LaunchedAccounts {
+                                account: slot.account.clone(),
+                                bound: slot.bound.clone(),
+                            }
+                        })
+                    };
+                    if let Some(a) = accounts {
+                        self.record_accounts(id, &a);
+                    }
+                    info!(agent = %id, account = %to, "the agent swapped its account live");
+                    self.emit(
+                        id,
+                        SupervisorEventKind::Harness(Event::System {
+                            message: format!(
+                                "the agent now runs on subscription `{to}`; the harness reads \
+                                 the new login at its next request"
+                            ),
+                        }),
+                    );
+                    Ok(SwapApplied::Live)
+                }
+            }
+        })
+    }
+
+    fn with_quiet_harness(&self, harness: HarnessId, f: &mut dyn FnMut()) -> bool {
+        // A start claims its slot (phase `Running`) under this lock before
+        // it builds the launch, so no launch of the harness runs while `f`
+        // does.
+        let slots = lock(&self.inner.slots);
+        if slots
+            .values()
+            .any(|s| s.agent.harness == harness && !matches!(s.phase, Phase::Down(_)))
+        {
+            return false;
+        }
+        f();
+        true
     }
 
     fn harness_runs(&self) -> Vec<HarnessRun> {

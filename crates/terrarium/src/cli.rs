@@ -343,6 +343,14 @@ pub enum AgentCmd {
     New(Box<AgentNewArgs>),
     /// Change an agent's definition
     Set(Box<AgentSetArgs>),
+    /// Move an agent to another plan account of its pool (PLAN §16.3):
+    /// live for Claude Code and pi, a restart with resume for Codex and
+    /// Copilot (when the turn ends)
+    Swap {
+        agent: String,
+        /// The subscription to move to
+        subscription: String,
+    },
     /// Delete an agent. Its agent dir and its workspace
     /// (`work/<project>/<agent>`) go to the trash.
     Rm {
@@ -456,6 +464,10 @@ pub struct AgentNewArgs {
     pub harness: Option<String>,
     #[arg(long)]
     pub subscription: Option<String>,
+    /// The account pool: subscriptions of one provider that a swap may
+    /// pick (PLAN §16.3), comma-separated
+    #[arg(long, value_delimiter = ',')]
+    pub pool: Vec<String>,
     #[arg(long)]
     pub model: Option<String>,
     /// The prompt template name, for example `project-lead`
@@ -505,6 +517,9 @@ pub struct AgentSetArgs {
     pub harness: Option<String>,
     #[arg(long)]
     pub subscription: Option<String>,
+    /// The account pool, comma-separated; `--pool ''` clears it
+    #[arg(long, value_delimiter = ',')]
+    pub pool: Option<Vec<String>>,
     #[arg(long)]
     pub model: Option<String>,
     #[arg(long)]

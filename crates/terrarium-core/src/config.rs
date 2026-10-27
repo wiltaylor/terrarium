@@ -60,6 +60,13 @@ pub struct AgentDef {
     pub harness: HarnessId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subscription: Option<String>,
+    /// The plan accounts that the agent may move between (PLAN §16.3):
+    /// subscription names of the same provider that the harness can spend.
+    /// `subscription` is the account the agent starts on. A swap, by the
+    /// operator or by the quota policy, picks another member. Empty: no
+    /// swap.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subscription_pool: Vec<String>,
     /// pi and codex take a model flag.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,

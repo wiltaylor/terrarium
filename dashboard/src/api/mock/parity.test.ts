@@ -291,8 +291,47 @@ describe("mock parity with docs/api.md", () => {
     expect(v.status).toMatchObject({ logged_in: true, harness: "claude", provider: "anthropic" });
     const key = await api.subscriptions.verify("openrouter-key");
     expect(key.status).toEqual({ logged_in: true, detail: "a stored API key" });
-    expect((await api.subscriptions.logout("anthropic-max")).login_status).toBe("missing");
+    // PLAN §16.3: no logout while agents run on the account.
+    await expect(api.subscriptions.logout("anthropic-max")).rejects.toMatchObject({ status: 409 });
+    const out = await api.subscriptions.logout("anthropic-max-2");
+    expect(out.login_status).toBe("missing");
+    expect(out.account).toMatchObject({ harness: "claude", has_login: false });
     await expect(api.subscriptions.logout("openrouter-key")).rejects.toMatchObject({ status: 422, code: "invalid" });
+  });
+
+  it("shows each plan account with the agents on it (PLAN §16.3)", async () => {
+    const api = mock();
+    const list = await api.subscriptions.list();
+    for (const s of list) expect(Array.isArray(s.agents)).toBe(true);
+    const max = list.find((s) => s.name === "anthropic-max")!;
+    expect(max.account).toMatchObject({ harness: "claude", has_login: true, source: "migration" });
+    expect(max.agents.map((a) => a.name)).toContain("runner-dev");
+    expect(list.find((s) => s.name === "anthropic-max-2")!.account?.source).toBe("login");
+    expect(list.find((s) => s.name === "openrouter-key")).not.toHaveProperty("account");
+  });
+
+  it("edits the pool with PATCH and checks each member", async () => {
+    const api = mock();
+    const a = await api.agents.update("01JB0SYS000000000000000007", { subscription_pool: ["anthropic-max-2"] });
+    expect(a.subscription_pool).toEqual(["anthropic-max", "anthropic-max-2"]);
+    await expect(api.agents.update(a.id, { subscription_pool: ["chatgpt-pro"] })).rejects.toMatchObject({ status: 422 });
+    await expect(api.agents.update(a.id, { subscription_pool: ["nope"] })).rejects.toMatchObject({ status: 422 });
+    expect((await api.agents.update(a.id, { subscription_pool: [] })).subscription_pool).toBeUndefined();
+  });
+
+  it("swaps an agent to another account of its pool and says how it applied", async () => {
+    const api = mock();
+    const r = await api.agents.swapSubscription("01JB0WRK100000000000000002", "anthropic-max-2");
+    expect(r).toEqual({ agent: "01JB0WRK100000000000000002", from: "anthropic-max", to: "anthropic-max-2", applied: "live" });
+    expect((await api.agents.get(r.agent)).subscription).toBe("anthropic-max-2");
+    expect((await api.subscriptions.get("anthropic-max-2")).agents.map((a) => a.name)).toEqual(["runner-dev"]);
+    await expect(api.agents.swapSubscription(r.agent, "anthropic-max-2")).rejects.toMatchObject({ status: 409 });
+    await expect(api.agents.swapSubscription("01JB0SYS000000000000000007", "anthropic-max-2")).rejects.toMatchObject({ status: 422 });
+    // A file agent swaps inside its pool.
+    expect((await api.agents.swapSubscription("01JB0LEAD00000000000000001", "anthropic-max-2")).applied).toBe("live");
+    // A stopped agent: the next start uses the new account.
+    await api.agents.update("01JB0SYS000000000000000007", { subscription_pool: ["anthropic-max-2"] });
+    expect((await api.agents.swapSubscription("01JB0SYS000000000000000007", "anthropic-max-2")).applied).toBe("next_start");
   });
 
   it("stores a Z.ai key as a claude+pi subscription with plan, api_key status, and no probe", async () => {

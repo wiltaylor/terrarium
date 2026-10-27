@@ -17,7 +17,9 @@ use hyper::{Method, Request};
 use hyper_util::rt::TokioIo;
 use semver::{Version, VersionReq};
 use serde_json::{Value, json};
-use terrarium_core::{Adapter, Agent, Event, HarnessId, HarnessSessionId, HookPayload, LaunchSpec};
+use terrarium_core::{
+    Adapter, Agent, AgentId, Event, HarnessId, HarnessSessionId, HookPayload, LaunchSpec,
+};
 use terrarium_runner::DefaultReadyDetector;
 use terrarium_runner::test_support::{RunnerProcessGuard, sweep_stale_runners_once};
 use terrariumd::harness_versions::VersionPolicy;
@@ -2521,4 +2523,165 @@ async fn an_old_workspace_moves_to_the_work_root_at_the_next_start() {
         "amy's",
         "the old files stay"
     );
+}
+
+/// PLAN §16.3: a Claude agent on a plan account runs with
+/// `CLAUDE_SECURESTORAGE_CONFIG_DIR` through its pointer, and a swap to
+/// another account of its pool is live: the pointer moves, the harness
+/// keeps running. A subscription outside the pool is refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_claude_swap_inside_the_pool_is_live() {
+    let td = Td::start().await;
+    let state = td.daemon.as_ref().unwrap().state.state_dir.clone();
+    let home = td.dir.path().join("auth/claude");
+    for n in ["max-a", "max-b", "max-c"] {
+        td.post(
+            "/api/subscriptions",
+            Some(json!({"name": n, "provider": "anthropic", "harnesses": ["claude"]})),
+        )
+        .await;
+        let login = format!(
+            r#"{{"claudeAiOauth": {{"accessToken": "at-{n}", "refreshToken": "rt-{n}"}}}}"#
+        );
+        terrariumd::accounts::write_credential(
+            &state,
+            n,
+            HarnessId::Claude,
+            login.as_bytes(),
+            &home,
+        )
+        .unwrap();
+    }
+    let id = td
+        .agent(
+            "demo",
+            "swapper",
+            json!({"subscription": "max-a", "subscription_pool": ["max-a", "max-b"]}),
+        )
+        .await;
+    td.post(&format!("/api/agents/{id}/start"), None).await;
+    td.wait_status(&id, "idle").await;
+    let agent_id: AgentId = id.parse().unwrap();
+    let harness_dir = terrarium_runner::harness_dir(&state, agent_id);
+    assert_eq!(
+        terrariumd::accounts::pointed(&harness_dir),
+        Some(terrariumd::accounts::store_dir(&state, "max-a"))
+    );
+    let agent: Agent = serde_json::from_value(td.get(&format!("/api/agents/{id}")).await).unwrap();
+    let spec = td.sup.launch_spec(&agent, None).await.unwrap();
+    assert_eq!(
+        spec.env
+            .get("CLAUDE_SECURESTORAGE_CONFIG_DIR")
+            .map(PathBuf::from),
+        Some(terrariumd::accounts::claude_cred_dir(&harness_dir)),
+        "{:?}",
+        spec.env.keys().collect::<Vec<_>>()
+    );
+    let sessions = td.events(&id, "session_started").await.len();
+
+    let r = td
+        .post(
+            &format!("/api/agents/{id}/subscription"),
+            Some(json!({"subscription": "max-b"})),
+        )
+        .await;
+    assert_eq!(r["applied"], "live", "{r}");
+    assert_eq!(r["from"], "max-a");
+    assert_eq!(
+        terrariumd::accounts::pointed(&harness_dir),
+        Some(terrariumd::accounts::store_dir(&state, "max-b"))
+    );
+    assert_eq!(
+        td.get(&format!("/api/agents/{id}")).await["subscription"],
+        "max-b"
+    );
+    assert_eq!(td.status(&id).await, "idle", "no restart");
+    assert_eq!(td.events(&id, "session_started").await.len(), sessions);
+    let swapped = td.events(&id, "agent.swapped").await;
+    assert_eq!(swapped.len(), 1, "{swapped:#?}");
+    assert_eq!(swapped[0]["data"]["applied"], "live");
+
+    let (s, b) = td
+        .req(
+            Method::POST,
+            &format!("/api/agents/{id}/subscription"),
+            Some(json!({"subscription": "max-c"})),
+            None,
+        )
+        .await;
+    assert_eq!(s, 422, "{b}");
+    assert!(b.to_string().contains("not in the pool"), "{b}");
+    let audit = td.get("/api/audit?action=agent.swap").await.to_string();
+    assert!(audit.contains("max-b") && audit.contains("live"), "{audit}");
+}
+
+/// PLAN §16.3: a swap that cannot be live (here: no account is bound)
+/// waits for the end of the turn, then restarts the harness with resume.
+/// On an idle agent it restarts at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_swap_by_restart_waits_for_the_end_of_the_turn() {
+    let td = Td::start().await;
+    for n in ["max-x", "max-y"] {
+        td.post(
+            "/api/subscriptions",
+            Some(json!({"name": n, "provider": "anthropic", "harnesses": ["claude"]})),
+        )
+        .await;
+    }
+    let id = td
+        .agent(
+            "demo",
+            "busy",
+            json!({"subscription": "max-x", "subscription_pool": ["max-x", "max-y"]}),
+        )
+        .await;
+    td.adapter.set_env("FAKE_TUI_DELAY_MS", "1500");
+    td.post(&format!("/api/agents/{id}/start"), None).await;
+    td.wait_status(&id, "idle").await;
+    td.post(
+        &format!("/api/agents/{id}/send"),
+        Some(json!({"text": "long work"})),
+    )
+    .await;
+    td.wait_status(&id, "working").await;
+    let r = td
+        .post(
+            &format!("/api/agents/{id}/subscription"),
+            Some(json!({"subscription": "max-y"})),
+        )
+        .await;
+    assert_eq!(r["applied"], "restart_scheduled", "{r}");
+    assert_eq!(
+        td.get(&format!("/api/agents/{id}")).await["subscription"],
+        "max-y"
+    );
+    // The turn ends first; then the harness starts again with resume.
+    let starts = td
+        .wait_events(&id, "session_started", |e| e.len() == 2)
+        .await;
+    let ends = td.events(&id, "turn_end").await;
+    assert!(!ends.is_empty());
+    assert!(
+        ends[0]["seq"].as_u64() < starts[1]["seq"].as_u64(),
+        "the restart came after the turn: {ends:#?} {starts:#?}"
+    );
+    let statuses = td.events(&id, "status").await;
+    assert!(
+        statuses.iter().any(|s| s["data"]["reason"]
+            .as_str()
+            .is_some_and(|r| r.starts_with("resuming session"))),
+        "{statuses:#?}"
+    );
+    td.wait_status(&id, "idle").await;
+
+    // Idle: the restart is at once.
+    let r = td
+        .post(
+            &format!("/api/agents/{id}/subscription"),
+            Some(json!({"subscription": "max-x"})),
+        )
+        .await;
+    assert_eq!(r["applied"], "restarted", "{r}");
+    td.wait_events(&id, "session_started", |e| e.len() == 3)
+        .await;
 }

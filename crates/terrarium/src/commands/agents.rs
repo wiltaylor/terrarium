@@ -21,6 +21,31 @@ pub async fn agent(ctx: &Ctx, cmd: &AgentCmd) -> anyhow::Result<()> {
         }
         AgentCmd::New(a) => new(ctx, a).await,
         AgentCmd::Set(a) => set(ctx, a).await,
+        AgentCmd::Swap {
+            agent,
+            subscription,
+        } => {
+            let r = ctx
+                .api
+                .post(
+                    &format!("{}/subscription", agent_path(agent)),
+                    Some(json!({"subscription": subscription})),
+                )
+                .await?;
+            ctx.emit(&r, |c, r| {
+                let how = match r["applied"].as_str().unwrap_or_default() {
+                    "live" => "live; the harness reads the new login at its next request",
+                    "restart_scheduled" => "the agent restarts with resume when its turn ends",
+                    "restarted" => "the agent restarted with resume",
+                    _ => "the next start uses it",
+                };
+                c.line(format!(
+                    "{agent}: {} -> {} ({how})",
+                    r["from"].as_str().unwrap_or("none"),
+                    field(r, "to")
+                ));
+            })
+        }
         AgentCmd::Rm {
             agent,
             confirm,
@@ -158,6 +183,9 @@ pub async fn definition(ctx: &Ctx, a: &AgentNewArgs) -> anyhow::Result<Value> {
     }
     set_opt(&mut def, "harness", a.harness.clone());
     set_opt(&mut def, "subscription", a.subscription.clone());
+    if !a.pool.is_empty() {
+        def["subscription_pool"] = json!(a.pool);
+    }
     set_opt(&mut def, "model", a.model.clone());
     set_opt(&mut def, "prompt", a.prompt.clone());
     set_opt(
@@ -231,6 +259,10 @@ async fn set(ctx: &Ctx, a: &AgentSetArgs) -> anyhow::Result<()> {
     let mut body = json!({});
     set_opt(&mut body, "harness", a.harness.clone());
     set_opt(&mut body, "subscription", a.subscription.clone());
+    if let Some(p) = &a.pool {
+        let pool: Vec<&String> = p.iter().filter(|s| !s.trim().is_empty()).collect();
+        body["subscription_pool"] = json!(pool);
+    }
     set_opt(&mut body, "model", a.model.clone());
     set_opt(&mut body, "prompt", a.prompt.clone());
     set_opt(

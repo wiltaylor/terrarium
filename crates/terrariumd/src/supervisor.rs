@@ -14,7 +14,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use terrarium_core::config::RestartPolicy;
-use terrarium_core::{Agent, AgentId, AgentStatus, Answer, Event, HarnessSessionId};
+use terrarium_core::{Agent, AgentId, AgentStatus, Answer, Event, HarnessId, HarnessSessionId};
 use tokio::sync::{broadcast, mpsc};
 
 use crate::api::Shared;
@@ -146,6 +146,33 @@ pub fn wants_restart(policy: RestartPolicy, clean: bool) -> bool {
     }
 }
 
+/// How a swap of an agent's account applied (`POST
+/// /api/agents/{id}/subscription`, PLAN §16.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwapApplied {
+    /// The running harness reads the new account at its next request
+    /// (Claude Code, pi).
+    Live,
+    /// The agent is in a turn: it restarts with resume when the turn ends.
+    RestartScheduled,
+    /// The agent restarted with resume now.
+    Restarted,
+    /// The agent does not run: its next start uses the new account.
+    NextStart,
+}
+
+impl SwapApplied {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Live => "live",
+            Self::RestartScheduled => "restart_scheduled",
+            Self::Restarted => "restarted",
+            Self::NextStart => "next_start",
+        }
+    }
+}
+
 /// Runs agents. Every method returns quickly; the work happens in the
 /// background and shows up as events.
 pub trait Supervisor: Send + Sync + 'static {
@@ -261,6 +288,30 @@ pub trait Supervisor: Send + Sync + 'static {
     /// nothing.
     fn lease_granted(&self, agent: AgentId, target: String, lease: String) {
         let _ = (agent, target, lease);
+    }
+    /// Move the agent to the account of `agent.subscription` (PLAN §16.3).
+    /// `agent` is the stored agent with the new subscription. Claude Code
+    /// and pi swap live when the new account is bound in the sandbox; the
+    /// other harnesses, and an account that is not bound, restart with
+    /// resume, at once when the agent is not in a turn, else when the turn
+    /// ends. The default records nothing: the next start uses the new
+    /// account.
+    fn swap_subscription(
+        &self,
+        agent: Agent,
+    ) -> BoxFuture<'_, Result<SwapApplied, SupervisorError>> {
+        let _ = agent;
+        Box::pin(async { Ok(SwapApplied::NextStart) })
+    }
+    /// Run `f` while no agent of `harness` runs or starts, and keep every
+    /// start of that harness waiting until it returns. False: an agent of
+    /// the harness runs, and `f` did not run. The start-up migration of
+    /// the shared logins uses it (`crate::accounts::migrate`). It blocks:
+    /// call it off the async threads. The default runs `f`.
+    fn with_quiet_harness(&self, harness: HarnessId, f: &mut dyn FnMut()) -> bool {
+        let _ = harness;
+        f();
+        true
     }
     /// The daemon calls this once, after it builds its state and before it
     /// serves. A supervisor that needs the store, the event hub, or the

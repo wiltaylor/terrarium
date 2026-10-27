@@ -96,6 +96,7 @@ async fn main() -> anyhow::Result<()> {
         // Sandbox mode `none` binds no per-agent overlay, so the session
         // files are in the shared home.
         per_agent_sessions: settings.sandbox == sandbox::SandboxMode::Bwrap,
+        auto_swap: terrariumd::accounts::auto_swap_from_env(),
         ..UsageConfig::default()
     };
     // The web settings, from the flags and the env, in one place.

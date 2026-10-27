@@ -1,8 +1,9 @@
 //! Provider quota probes (PLAN §16.2).
 //!
 //! A [`QuotaProbe`] reads one provider's usage windows for a subscription.
-//! It reads the credential from the shared harness home (the same login the
-//! harness uses, so there is no second login), sends one read-only GET, and
+//! It reads the credential of the subscription's plan account (PLAN §16.3;
+//! before the migration, the shared harness home): the same login the
+//! harness uses, so there is no second login. It sends one read-only GET, and
 //! parses the answer into [`QuotaWindow`]s. The endpoints are undocumented,
 //! so each probe is best-effort: a failure sets `probe_status = failed` and
 //! keeps the last success time (PLAN §21). `docs/compat.md`, "Usage
@@ -59,7 +60,10 @@ pub struct QuotaWindow {
 pub enum ProbeError {
     #[error("no credential: {0}")]
     NoCredential(String),
-    #[error("the credential expired at {0}; the harness refreshes it on its next start")]
+    #[error(
+        "the credential expired at {0}; the harness of an agent on it refreshes it at its next \
+         request (the daemon never refreshes a token)"
+    )]
     Expired(String),
     #[error("HTTP {status} from {url}")]
     Status { status: u16, url: String },
@@ -297,8 +301,11 @@ pub struct ProbeOutcome {
 }
 
 /// The credential of `probe` for `subscription`: a stored API key when the
-/// probe takes one, else the shared harness home `home`. This blocks (file
-/// reads). The model lists (`crate::models`) use it too.
+/// probe takes one, else the plan account of the subscription (PLAN
+/// §16.3), else the shared harness home `home` (a login from before the
+/// migration). This blocks (file reads). The model lists
+/// (`crate::models`) use it too. It only reads: an expired token stays
+/// expired until an agent's harness refreshes it.
 pub fn read_credentials(
     probe: &dyn QuotaProbe,
     state_dir: &Path,
@@ -309,6 +316,11 @@ pub fn read_credentials(
         && let Some(key) = crate::login_session::stored_key(state_dir, subscription)
     {
         return Ok(Credentials::new(key));
+    }
+    let harness = probe.harness();
+    if crate::accounts::has_credential(state_dir, subscription, harness) {
+        let store = crate::accounts::store_dir(state_dir, subscription);
+        return probe.credentials(&crate::accounts::probe_home(&store, harness));
     }
     probe.credentials(home)
 }
@@ -501,6 +513,55 @@ pub(crate) mod tests {
             self.seen.lock().unwrap().push(req);
             Box::pin(async move { answer.ok_or_else(|| "connection refused".to_owned()) })
         }
+    }
+
+    /// A probe reads the account of its subscription (PLAN §16.3), not the
+    /// shared home, and only reads it.
+    #[test]
+    fn the_probe_reads_the_account() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let shared = tmp.path().join("shared");
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(
+            shared.join(".credentials.json"),
+            r#"{"claudeAiOauth": {"accessToken": "shared"}}"#,
+        )
+        .unwrap();
+        let p = anthropic::AnthropicOauthUsage;
+        let c = read_credentials(&p, &state, "max-b", &shared).unwrap();
+        assert_eq!(c.token(), "shared", "no account yet: the shared login");
+        let login = r#"{"claudeAiOauth": {"accessToken": "acct-b", "expiresAt": 1}}"#;
+        crate::accounts::write_credential(
+            &state,
+            "max-b",
+            HarnessId::Claude,
+            login.as_bytes(),
+            &shared,
+        )
+        .unwrap();
+        let path = crate::accounts::credential_path(
+            &crate::accounts::store_dir(&state, "max-b"),
+            HarnessId::Claude,
+        );
+        let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let c = read_credentials(&p, &state, "max-b", &shared).unwrap();
+        assert_eq!(c.token(), "acct-b");
+        // Expired: the probe stops before any request, and the file stays.
+        assert!(matches!(
+            c.check_fresh(Utc::now()),
+            Err(ProbeError::Expired(_))
+        ));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), login);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            before
+        );
+        // Copilot: the token file of the account.
+        crate::accounts::write_credential(&state, "gh", HarnessId::Copilot, b"gho_t\n", &shared)
+            .unwrap();
+        let c = read_credentials(&github::CopilotQuota, &state, "gh", &shared).unwrap();
+        assert_eq!(c.token(), "gho_t");
     }
 
     #[test]

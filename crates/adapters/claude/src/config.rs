@@ -38,7 +38,7 @@
 //!
 //! | Path in the home | Decision | Why |
 //! |---|---|---|
-//! | `.credentials.json` | shared | the one login. A token refresh by one agent must reach all of them; separate copies would break on refresh-token rotation. The home is a directory bind, so a rename-over write works. |
+//! | `.credentials.json` | per account | the plan login. The daemon moves it into the account of its subscription (`terrariumd::accounts`, PLAN §16.3) and points `CLAUDE_SECURESTORAGE_CONFIG_DIR` at the account through the agent's `cred/account` symlink, so every agent on one account shares one file and one set of locks. Before the migration it is shared here. Never per-agent copies: they would break on refresh-token rotation. |
 //! | `.claude.json` | per-agent | see above. Claude Code writes it on every start. |
 //! | `sessions/` | per-agent | `sessions/<pid>.json` and `<pid>.<hash>.key`: pid 2 in every sandbox. |
 //! | `history.jsonl` | per-agent | the prompt history (the up-arrow list), keyed by cwd. Shared, each agent would see the typed turns (mail text) of every other agent and of the operator. |

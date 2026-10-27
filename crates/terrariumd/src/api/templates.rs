@@ -309,6 +309,7 @@ async fn from_agent(
         project: a.agent.project.clone(),
         harness: a.agent.harness,
         subscription: a.agent.subscription.clone(),
+        subscription_pool: a.agent.subscription_pool.clone(),
         model: a.agent.model.clone(),
         prompt: a.agent.prompt.clone(),
         system_prompt: a.agent.system_prompt.clone(),

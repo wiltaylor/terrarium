@@ -72,6 +72,21 @@ describe("mock API", () => {
     expect((await api.subscriptions.list()).length).toBe(before + 1);
   });
 
+  it("makes a second account on a second login with no name, and a re-login keeps the account", async () => {
+    const api = mock();
+    const login = async (name?: string) => {
+      const s = await api.subscriptions.startLogin({ kind: "claude", ...(name ? { name } : {}) });
+      await tick();
+      await api.subscriptions.loginInput(s.id, "code-123");
+      await tick();
+      return (await api.subscriptions.loginState(s.id)).subscription;
+    };
+    expect(await login()).toBe("claude-pro");
+    expect(await login()).toBe("claude-pro-2");
+    expect(await login("claude-pro")).toBe("claude-pro");
+    expect((await api.subscriptions.get("claude-pro-2")).account).toMatchObject({ harness: "claude", has_login: true, source: "login" });
+  });
+
   it("returns the memory graph to depth 1", async () => {
     const api = mock();
     const g = await api.memories.graph("MEM-4", 1);

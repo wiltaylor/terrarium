@@ -11,11 +11,16 @@
 //! | `<state>/credentials/<name>.json` | 0600 | `{kind, username?, created_at}`, no secret |
 //! | `<state>/credentials/.run/<ulid>/` | 0700 | one-shot helper files of one git run, removed after it |
 //!
+//! The same directory also holds `subscriptions/` (stored API keys,
+//! `crate::login_session`), `accounts/` and `backup/` (the plan accounts,
+//! `crate::accounts`). A credential cannot take one of those names
+//! ([`RESERVED_NAMES`]).
+//!
 //! The API is write-only: no call returns a secret, except the credential
 //! helper answer of `POST /api/repos/credential`, which goes to git inside
 //! the agent's own sandbox for a repo of its own project. The sandbox never
-//! binds `<state>/credentials` (see `sandbox.rs`: only the agent dir is
-//! bound).
+//! binds this store. It binds only `accounts/<subscription>/store` of the
+//! plan accounts in the agent's pool (`crate::accounts`, PLAN §16.3).
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -33,6 +38,15 @@ use crate::store::{check_name, repos};
 pub const DEFAULT_TOKEN_USER: &str = "x-access-token";
 
 const RUN_DIR: &str = ".run";
+
+/// The directories of other stores in `<state>/credentials/`: the stored
+/// API keys (`subscriptions/`), the plan accounts, and the migration
+/// backups (`crate::accounts`). No credential takes their name.
+pub const RESERVED_NAMES: [&str; 3] = [
+    "subscriptions",
+    crate::accounts::ACCOUNTS_DIR,
+    crate::accounts::BACKUP_DIR,
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -200,6 +214,12 @@ impl CredentialStore {
     /// Store a credential. An existing one with the same name is replaced.
     pub fn put(&self, c: &NewCredential) -> ApiResult<CredentialInfo> {
         check_name("credential", &c.name)?;
+        if RESERVED_NAMES.contains(&c.name.as_str()) {
+            return Err(ApiError::invalid(format!(
+                "`{}` is the name of a directory in the store; pick another name",
+                c.name
+            )));
+        }
         let mut value = c.value.clone();
         let username = match c.kind {
             CredentialKind::Token => {

@@ -305,8 +305,17 @@ async fn file_subscriptions_list_and_probe() {
     // The windows of the last success stay on the tile.
     assert_eq!(s.body["windows"].as_array().unwrap().len(), 2);
 
-    // No credential: a clear failure, no request.
-    std::fs::remove_file(env.homes[&HarnessId::Claude].join(".credentials.json")).unwrap();
+    // No credential: a clear failure, no request. The start-up migration
+    // may have moved the shared login into the account (PLAN §16.3).
+    let state = td.daemon.as_ref().unwrap().state.state_dir.clone();
+    let account = terrariumd::accounts::credential_path(
+        &terrariumd::accounts::store_dir(&state, "anthropic-max"),
+        HarnessId::Claude,
+    );
+    let shared = env.homes[&HarnessId::Claude].join(".credentials.json");
+    assert!(account.exists() || shared.exists());
+    let _ = std::fs::remove_file(account);
+    let _ = std::fs::remove_file(shared);
     let n = env.http.calls.lock().unwrap().len();
     let out = td
         .post_empty("/api/subscriptions/anthropic-max/probe")
@@ -1189,6 +1198,11 @@ async fn claude_login_with_a_pasted_code() {
         |_| {},
         |u, bin| {
             let marker = bin.join("logged-in");
+            // The login writes its credential into the home it gets: the
+            // scratch home of the session (PLAN §16.3).
+            let creds = bin.join("claude-creds.json");
+            claude_creds(bin);
+            std::fs::rename(bin.join(".credentials.json"), &creds).unwrap();
             u.programs.insert(
                 HarnessId::Claude,
                 script(
@@ -1196,11 +1210,12 @@ async fn claude_login_with_a_pasted_code() {
                     "claude-login",
                     &format!(
                         r#"case "$1 $2" in
-"auth login") cat '{fixture_path}'; read code; if [ "$code" = "good-code" ]; then touch '{m}'; echo 'Login successful.'; exit 0; fi; echo 'bad code'; exit 1;;
+"auth login") cat '{fixture_path}'; read code; if [ "$code" = "good-code" ]; then touch '{m}'; cp '{c}' "$CLAUDE_CONFIG_DIR/.credentials.json"; echo 'Login successful.'; exit 0; fi; echo 'bad code'; exit 1;;
 "auth status") if [ -f '{m}' ]; then echo '{{"loggedIn": true, "authMethod": "claude.ai", "subscriptionType": "max"}}'; else echo '{{"loggedIn": false}}'; exit 1; fi;;
 "auth logout") rm -f '{m}'; echo 'Logged out.';;
 esac"#,
-                        m = marker.display()
+                        m = marker.display(),
+                        c = creds.display()
                     ),
                 ),
             );
@@ -1208,7 +1223,6 @@ esac"#,
     )
     .await;
     let td = &env.td;
-    claude_creds(&env.homes[&HarnessId::Claude]);
     env.http.set(
         ANTHROPIC,
         200,
@@ -1279,11 +1293,53 @@ esac"#,
     .await
     .err(409, "not_running");
 
-    // Logout runs the harness command.
+    // The login is in the account of the new subscription; the shared
+    // home has no credential.
+    let state = td.daemon.as_ref().unwrap().state.state_dir.clone();
+    assert!(terrariumd::accounts::has_credential(
+        &state,
+        "anthropic-max-20x",
+        HarnessId::Claude
+    ));
+    assert!(
+        !env.homes[&HarnessId::Claude]
+            .join(".credentials.json")
+            .exists()
+    );
+    assert_eq!(s["account"]["harness"], "claude", "{s}");
+    assert_eq!(s["account"]["has_login"], true, "{s}");
+
+    // A second login of the provider makes a second account.
+    let r = td
+        .post("/api/subscriptions/login", json!({"kind": "claude"}))
+        .await;
+    let id = r.ok()["id"].as_str().unwrap().to_owned();
+    wait_login(td, &id, "waiting").await;
+    td.post(
+        &format!("/api/subscriptions/login/{id}/input"),
+        json!({"code": "good-code"}),
+    )
+    .await
+    .ok();
+    let done = wait_login(td, &id, "done").await;
+    assert_eq!(done["subscription"], "anthropic-max-20x-2");
+    assert!(terrariumd::accounts::has_credential(
+        &state,
+        "anthropic-max-20x-2",
+        HarnessId::Claude
+    ));
+
+    // Logout removes the account, and nothing else.
     let out = td
         .post_empty("/api/subscriptions/anthropic-max-20x/logout")
         .await;
     assert_eq!(out.ok()["login_status"], "missing");
+    assert!(!terrariumd::accounts::exists(&state, "anthropic-max-20x"));
+    assert!(terrariumd::accounts::has_credential(
+        &state,
+        "anthropic-max-20x-2",
+        HarnessId::Claude
+    ));
 }
 
 #[tokio::test]
@@ -1305,9 +1361,10 @@ async fn codex_device_login_and_failures() {
                     "codex-login",
                     &format!(
                         r#"case "$1 $2" in
-"login --device-auth") cat '{fixture_path}'; sleep 0.5; exit 0;;
+"login --device-auth") cat '{fixture_path}'; cp '{auth}' "$CODEX_HOME/auth.json"; sleep 0.5; exit 0;;
 "login status") echo 'Logged in using ChatGPT' >&2;;
-esac"#
+esac"#,
+                        auth = bin.join("codex-auth.json").display()
                     ),
                 ),
             );
@@ -1324,8 +1381,13 @@ esac"#
     let claims = base64_url(
         &json!({"https://api.openai.com/auth": {"chatgpt_plan_type": "pro"}}).to_string(),
     );
+    // What the login writes into its scratch home.
+    let bin = env.homes[&HarnessId::Codex]
+        .parent()
+        .unwrap()
+        .with_file_name("bin");
     std::fs::write(
-        env.homes[&HarnessId::Codex].join("auth.json"),
+        bin.join("codex-auth.json"),
         json!({"tokens": {"id_token": format!("h.{claims}.s"), "access_token": "tok", "account_id": "acct"}}).to_string(),
     )
     .unwrap();
@@ -1563,4 +1625,138 @@ async fn models_come_from_the_provider_then_pi_then_the_table() {
     td.get("/api/subscriptions/nope/models")
         .await
         .err(404, "not_found");
+}
+
+/// PLAN §16.3: at the start, the shared Claude login moves into the
+/// account of the one subscription that uses it, with a backup and an
+/// audit row. A pool must hold accounts of one provider. When a probe
+/// finds an account full, an agent with a pool moves to the next account
+/// with room (auto-swap); an agent without a pool is held. An account
+/// that an agent runs on cannot be logged out.
+#[tokio::test]
+async fn shared_logins_migrate_and_full_accounts_swap() {
+    let max_a =
+        "provider = \"anthropic\"\nharnesses = [\"claude\"]\nprobe = \"anthropic-oauth-usage\"\n";
+    let env = boot(
+        |c| write(c, "subscriptions/max-a.toml", max_a),
+        |u, _| claude_creds(&u.homes[&HarnessId::Claude]),
+    )
+    .await;
+    let td = &env.td;
+    let state = td.daemon.as_ref().unwrap().state.state_dir.clone();
+    let shared = env.homes[&HarnessId::Claude].join(".credentials.json");
+    wait_for("the migration", || async {
+        terrariumd::accounts::has_credential(&state, "max-a", HarnessId::Claude) && !shared.exists()
+    })
+    .await;
+    let backups = std::fs::read_dir(state.join("credentials/backup"))
+        .unwrap()
+        .count();
+    assert_eq!(backups, 1);
+    let audit = td
+        .get("/api/audit?action=credentials.migrate")
+        .await
+        .body
+        .to_string();
+    assert!(audit.contains("max-a"), "{audit}");
+    let s = td.get("/api/subscriptions/max-a").await;
+    assert_eq!(s.ok()["account"]["source"], "migration", "{}", s.body);
+
+    // A second account, as the wizard makes it.
+    td.post(
+        "/api/subscriptions",
+        json!({"name": "max-b", "provider": "anthropic", "harnesses": ["claude"],
+               "probe": "anthropic-oauth-usage"}),
+    )
+    .await
+    .ok();
+    td.post(
+        "/api/subscriptions",
+        json!({"name": "glm", "provider": "zai", "plan": "coding", "harnesses": ["claude"]}),
+    )
+    .await
+    .ok();
+    let login = r#"{"claudeAiOauth": {"accessToken": "tok-b", "refreshToken": "rb", "expiresAt": 4102444800000}}"#;
+    terrariumd::accounts::write_credential(
+        &state,
+        "max-b",
+        HarnessId::Claude,
+        login.as_bytes(),
+        &env.homes[&HarnessId::Claude],
+    )
+    .unwrap();
+
+    td.post("/api/projects", json!({"name": "demo"})).await.ok();
+    let pooled = td
+        .post(
+            "/api/agents",
+            json!({"name": "a1", "project": "demo", "harness": "claude",
+                   "subscription": "max-a", "subscription_pool": ["max-b"]}),
+        )
+        .await;
+    // The current subscription joins the pool at the front.
+    assert_eq!(pooled.ok()["subscription_pool"], json!(["max-a", "max-b"]));
+    let a1 = pooled.body["id"].as_str().unwrap().to_owned();
+    let a2 = td
+        .post(
+            "/api/agents",
+            json!({"name": "a2", "project": "demo", "harness": "claude", "subscription": "max-a"}),
+        )
+        .await;
+    let a2 = a2.ok()["id"].as_str().unwrap().to_owned();
+    for (pool, why) in [
+        (json!(["max-a", "nope"]), "no such subscription"),
+        (json!(["max-a", "glm"]), "mixes providers"),
+    ] {
+        let r = td
+            .post(
+                "/api/agents",
+                json!({"name": "bad", "project": "demo", "harness": "claude",
+                       "subscription": "max-a", "subscription_pool": pool}),
+            )
+            .await;
+        assert_eq!(r.status.as_u16(), 422, "{}", r.body);
+        assert!(r.body.to_string().contains(why), "{}", r.body);
+    }
+    let r = td
+        .patch(
+            &format!("/api/agents/{a2}"),
+            json!({"subscription_pool": ["glm"]}),
+        )
+        .await;
+    assert_eq!(r.status.as_u16(), 422, "{}", r.body);
+
+    // max-a is full.
+    let reset = (chrono::Utc::now() + chrono::Duration::hours(2)).to_rfc3339();
+    env.http.set(
+        ANTHROPIC,
+        200,
+        &json!({"five_hour": {"utilization": 100.0, "resets_at": reset}}).to_string(),
+    );
+    td.post_empty("/api/subscriptions/max-a/probe").await.ok();
+    let a = td.get(&format!("/api/agents/{a1}")).await;
+    assert_eq!(a.ok()["subscription"], "max-b", "{}", a.body);
+    let b = td.get(&format!("/api/agents/{a2}")).await;
+    assert_eq!(b.ok()["subscription"], "max-a");
+    let s = td.get("/api/subscriptions/max-a").await;
+    assert_eq!(s.ok()["held_agents"], 1, "only a2 waits: {}", s.body);
+    assert_eq!(s.body["agents"][0]["name"], "a2");
+    let audit = td
+        .get("/api/audit?action=agent.swap")
+        .await
+        .body
+        .to_string();
+    assert!(
+        audit.contains("\"auto\":true") && audit.contains("max-b"),
+        "{audit}"
+    );
+    assert!(!events_of(td, "agent.swapped").await.is_empty());
+
+    // The account of a running agent cannot go.
+    let r = td.post_empty("/api/subscriptions/max-b/logout").await;
+    assert_eq!(r.status.as_u16(), 409, "{}", r.body);
+    assert!(terrariumd::accounts::exists(&state, "max-b"));
+    td.delete("/api/subscriptions/max-b")
+        .await
+        .err(409, "conflict");
 }

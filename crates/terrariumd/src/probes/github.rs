@@ -101,6 +101,14 @@ impl QuotaProbe for CopilotQuota {
     }
 
     fn credentials(&self, home: &Path) -> Result<Credentials, ProbeError> {
+        // A plan account's store (PLAN §16.3) holds the token alone.
+        let account = home.join(crate::accounts::TOKEN_FILE);
+        if let Ok(b) = crate::accounts::read_nofollow(&account)
+            && let Ok(t) = String::from_utf8(b)
+            && !t.trim().is_empty()
+        {
+            return Ok(Credentials::new(t.trim()));
+        }
         if let Some(t) = config_token(home)? {
             return Ok(Credentials::new(t));
         }

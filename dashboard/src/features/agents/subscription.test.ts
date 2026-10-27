@@ -2,13 +2,19 @@ import { describe, expect, it } from "vitest";
 import { createMockApi } from "../../api/mock";
 import type { ModelList, Subscription } from "../../api/types";
 import {
+  appliedText,
   changeSubscription,
   compatibleSubscriptions,
   defaultModelFor,
   modelSourceText,
+  normalizePool,
+  poolCandidates,
+  prunePool,
   reconcileSubscription,
+  samePool,
   subscriptionLabel,
   subscriptionOptions,
+  swapTargets,
 } from "./subscription";
 
 const sub = (over: Partial<Subscription>): Subscription => ({
@@ -26,6 +32,7 @@ const sub = (over: Partial<Subscription>): Subscription => ({
   has_api_key: false,
   held_agents: 0,
   default_models: {},
+  agents: [],
   ...over,
 });
 
@@ -100,5 +107,53 @@ describe("the agent page's subscription edit", () => {
     const cleared = await changeSubscription(api, a.id, " ");
     expect(cleared.subscription).toBeUndefined();
     expect((await api.agents.get(a.id)).subscription_detail).toBeUndefined();
+  });
+});
+
+describe("subscription pool", () => {
+  const max2 = sub({ name: "anthropic-max-2", plan: "Max 20x", harnesses: ["claude", "pi"] });
+  const key = sub({ name: "anthropic-key", harnesses: ["pi"], has_api_key: true });
+  const list = [max, max2, key, pro, zai];
+
+  it("offers the subscriptions of the same provider that the harness can spend", () => {
+    expect(poolCandidates(list, "claude", "anthropic-max").map((s) => s.name)).toEqual(["anthropic-max", "anthropic-max-2"]);
+    expect(poolCandidates(list, "pi", "anthropic-max-2").map((s) => s.name)).toEqual(["anthropic-max-2", "anthropic-key"]);
+    expect(poolCandidates(list, "claude", "")).toEqual([]);
+    expect(poolCandidates(list, "claude", "gone")).toEqual([]);
+  });
+
+  it("puts the current subscription first and drops repeats", () => {
+    expect(normalizePool(["anthropic-max-2", "anthropic-max-2", " "], "anthropic-max")).toEqual(["anthropic-max", "anthropic-max-2"]);
+    expect(normalizePool(["anthropic-max", "anthropic-max-2"], "anthropic-max-2")).toEqual(["anthropic-max-2", "anthropic-max"]);
+    // Only the current subscription: nothing to swap to, so no pool.
+    expect(normalizePool(["anthropic-max"], "anthropic-max")).toEqual([]);
+    expect(normalizePool([], "anthropic-max")).toEqual([]);
+  });
+
+  it("keeps only the candidates after a change of harness or subscription", () => {
+    const pool = ["anthropic-max", "anthropic-max-2"];
+    expect(prunePool(pool, list, "claude", "anthropic-max-2")).toEqual(["anthropic-max-2", "anthropic-max"]);
+    expect(prunePool(pool, list, "codex", "openai-pro")).toEqual([]);
+    expect(prunePool(pool, list, "claude", "")).toEqual([]);
+    // The list is not loaded yet: no change.
+    expect(prunePool(pool, [], "codex", "openai-pro")).toBe(pool);
+  });
+
+  it("compares pools in order", () => {
+    expect(samePool(["a", "b"], ["a", "b"])).toBe(true);
+    expect(samePool(["a", "b"], ["b", "a"])).toBe(false);
+    expect(samePool([], ["a"])).toBe(false);
+  });
+
+  it("lists the swap targets: the pool without the current subscription", () => {
+    expect(swapTargets({ subscription: "anthropic-max", subscription_pool: ["anthropic-max", "anthropic-max-2"] })).toEqual(["anthropic-max-2"]);
+    expect(swapTargets({ subscription: "anthropic-max" })).toEqual([]);
+  });
+
+  it("says how a swap applied", () => {
+    expect(appliedText({ to: "b", applied: "live" })).toBe("Moved to b. The harness uses the new login at its next request. No restart.");
+    expect(appliedText({ to: "b", applied: "restart_scheduled" })).toBe("Moved to b. The agent restarts with resume when the turn ends.");
+    expect(appliedText({ to: "b", applied: "restarted" })).toBe("Moved to b. The agent restarted with resume.");
+    expect(appliedText({ to: "b", applied: "next_start" })).toBe("Moved to b. The agent does not run. Its next start uses the new account.");
   });
 });

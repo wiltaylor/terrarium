@@ -6,7 +6,7 @@ import { createMemo, createResource, createSignal, For, onMount, Show } from "so
 import type { Harness } from "../../api/types";
 import { api, subscriptions } from "../../stores";
 import { ModelPicker } from "../../components/ModelPicker";
-import { compatibleSubscriptions, defaultModelFor, modelSourceText, subscriptionOptions } from "./subscription";
+import { compatibleSubscriptions, defaultModelFor, loginText, modelSourceText, normalizePool, poolCandidates, subscriptionOptions } from "./subscription";
 
 /** The Subscriptions page with the API-key step of the wizard open. */
 export const ADD_API_KEY_HREF = "/subscriptions?add=api_key";
@@ -41,6 +41,38 @@ export function SubscriptionSelect(props: { harness: Harness; value: string; onC
         </span>
       </Show>
     </>
+  );
+}
+
+/**
+ * The subscription pool (PLAN §16.3): a checkbox for each subscription of
+ * the same provider as `current` that `harness` can spend. The current
+ * subscription is always in a pool, so its box stays on.
+ */
+export function PoolPicker(props: { harness: Harness; current: string; value: string[]; onChange: (pool: string[]) => void; disabled?: boolean }) {
+  onMount(() => void subscriptions.ensureLoaded());
+  const candidates = () => poolCandidates(subscriptions.list(), props.harness, props.current);
+  const cur = () => props.current.trim();
+  const on = (name: string) => name === cur() || props.value.includes(name);
+  const toggle = (name: string, checked: boolean) => {
+    const next = checked ? [...props.value, name] : props.value.filter((n) => n !== name);
+    props.onChange(normalizePool(next, cur()));
+  };
+  return (
+    <Show when={cur()} fallback={<span class="muted small">Pick a subscription first.</span>}>
+      <Show when={candidates().length > 1} fallback={<span class="muted small">No other account of this provider is for {props.harness}.</span>}>
+        <div class="row" style={{ "flex-wrap": "wrap" }}>
+          <For each={candidates()}>
+            {(s) => (
+              <label class="row small">
+                <input type="checkbox" checked={on(s.name)} disabled={props.disabled || s.name === cur()} onChange={(e) => toggle(s.name, e.currentTarget.checked)} /> {s.name}
+                <span class="muted">({s.account?.login ?? loginText(s.login_status, s.has_api_key)})</span>
+              </label>
+            )}
+          </For>
+        </div>
+      </Show>
+    </Show>
   );
 }
 

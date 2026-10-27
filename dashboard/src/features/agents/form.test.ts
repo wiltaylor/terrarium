@@ -60,4 +60,16 @@ describe("agent form", () => {
     // Bytes, not characters: "é" is 2 bytes.
     expect(validateAgentForm({ ...base, system_prompt: "é".repeat(16385) })).toHaveLength(1);
   });
+
+  it("carries the subscription pool: in the definition when set, and in the patch when changed", () => {
+    const pooled: Agent = { ...agent, harness: "claude", subscription: "a", subscription_pool: ["a", "b"] };
+    const v = agentToForm(pooled);
+    expect(v.subscription_pool).toEqual(["a", "b"]);
+    expect(formToDef(v).subscription_pool).toEqual(["a", "b"]);
+    expect(formToDef({ ...v, subscription_pool: [] })).not.toHaveProperty("subscription_pool");
+    expect(formToPatch(pooled, v)).toEqual({});
+    // `[]` clears the pool.
+    expect(formToPatch(pooled, { ...v, subscription_pool: [] })).toEqual({ subscription_pool: [] });
+    expect(formToPatch(agent, { ...agentToForm(agent), subscription_pool: ["a", "c"] })).toEqual({ subscription_pool: ["a", "c"] });
+  });
 });

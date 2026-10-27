@@ -218,6 +218,9 @@ function LoginSetup(props: { kind: LoginKind; setup: WizardSetup; onSetup: (s: W
         <input value={props.setup.name ?? ""} onInput={(e) => props.onSetup({ name: e.currentTarget.value })} placeholder="from the status output" autocomplete="off" />
       </label>
       <p class="muted small" style={{ margin: 0 }}>
+        A second login of the same provider makes a second account: a new subscription, for example <code>anthropic-max-20x-2</code>. Re-login on a card replaces the login of that account only.
+      </p>
+      <p class="muted small" style={{ margin: 0 }}>
         The daemon runs the login command in a terminal as its own user, with no sandbox, against the shared harness home. It is open to the operator only and closes after ten minutes.
       </p>
       <Show when={props.kind === "claude"}>

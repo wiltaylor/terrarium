@@ -6,8 +6,8 @@ import { createResource, createSignal, For, Show } from "solid-js";
 import { GRANTABLE_ROLES, HARNESSES, RESTART_POLICIES, type Harness, type RestartPolicy, type Role } from "../../api/types";
 import { api, subscriptions } from "../../stores";
 import type { AgentFormValues } from "./form";
-import { reconcileSubscription } from "./subscription";
-import { defaultModelHint, ModelField, SubscriptionSelect } from "./SubscriptionFields";
+import { prunePool, reconcileSubscription } from "./subscription";
+import { defaultModelHint, ModelField, PoolPicker, SubscriptionSelect } from "./SubscriptionFields";
 
 export const SYSTEM_PROMPT_HELP = "Replaces the harness's default system prompt. Terrarium's protocol instructions are always added after it.";
 
@@ -43,7 +43,7 @@ export function AgentFields(props: {
   /** A new harness keeps the subscription only when it can spend it. */
   const setHarness = (h: Harness) => {
     const r = reconcileSubscription(v().subscription, h, subscriptions.list());
-    props.onChange({ ...v(), harness: h, subscription: r.subscription });
+    props.onChange({ ...v(), harness: h, subscription: r.subscription, subscription_pool: prunePool(v().subscription_pool, subscriptions.list(), h, r.subscription) });
     setSubNote(r.note);
   };
 
@@ -69,7 +69,7 @@ export function AgentFields(props: {
             value={v().subscription}
             onChange={(name) => {
               setSubNote(null);
-              set("subscription", name);
+              props.onChange({ ...v(), subscription: name, subscription_pool: prunePool(v().subscription_pool, subscriptions.list(), v().harness, name) });
             }}
           />
           <Show when={subNote()}>
@@ -102,6 +102,12 @@ export function AgentFields(props: {
           </select>
         </label>
       </div>
+
+      <fieldset class="stack" style={{ gap: "4px" }}>
+        <legend>Subscription pool</legend>
+        <PoolPicker harness={v().harness} current={v().subscription} value={v().subscription_pool} onChange={(p) => set("subscription_pool", p)} />
+        <span class="muted small">A swap moves the agent to another account of the pool. Same provider only.</span>
+      </fieldset>
 
       <SystemPromptField value={v().system_prompt} onChange={(s) => set("system_prompt", s)} />
 

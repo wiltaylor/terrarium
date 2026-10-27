@@ -12,7 +12,8 @@ import { api, subscriptions } from "../../stores";
 import { AddSubscriptionWizard } from "./AddSubscriptionWizard";
 import { HarnessVersions } from "./HarnessVersions";
 import { reloginFor, wizardFromQuery, type WizardPath, type WizardSetup } from "./wizard";
-import { useSearchParams } from "@solidjs/router";
+import { A, useSearchParams } from "@solidjs/router";
+import { accountText } from "./account";
 
 /** The probe chip: `ok` with the last success, `failed` with why, or local only. */
 export function probeChip(s: Subscription, now = Date.now()): { cls: string; text: string; title?: string } {
@@ -138,6 +139,24 @@ export default function SubscriptionsPage() {
                       Verified {s.verified_at ? ago(s.verified_at, now()) : "never"} · last probe {s.last_probe_at ? ago(s.last_probe_at, now()) : "never"} · last success{" "}
                       {s.last_success_at ? ago(s.last_success_at, now()) : "never"}
                       <Show when={isLocalOnly(s)}> · local estimate only</Show>
+                    </div>
+                    <Show when={s.account}>
+                      {(acct) => <div class="small">{accountText(acct())}</div>}
+                    </Show>
+                    <div class="small">
+                      Agents on it:{" "}
+                      <Show when={s.agents?.length} fallback={<span class="muted">none</span>}>
+                        <For each={s.agents}>
+                          {(a, i) => (
+                            <>
+                              {i() > 0 ? ", " : ""}
+                              <A href={`/agents/${encodeURIComponent(a.id)}`}>
+                                {a.project}/{a.name}
+                              </A>
+                            </>
+                          )}
+                        </For>
+                      </Show>
                     </div>
                     <Show when={s.probe_status === "failed" && s.probe_error}>
                       <div class="small" style={{ color: "var(--warn)" }}>

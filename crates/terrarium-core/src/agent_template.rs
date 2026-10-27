@@ -30,6 +30,7 @@ pub type Spec = Map<String, Value>;
 pub const SPEC_KEYS: &[&str] = &[
     "harness",
     "subscription",
+    "subscription_pool",
     "model",
     "prompt",
     "system_prompt",
@@ -203,6 +204,7 @@ fn full(def: &AgentDef) -> Spec {
     let mut m = Map::new();
     m.insert("harness".into(), to(&def.harness));
     m.insert("subscription".into(), to(&def.subscription));
+    m.insert("subscription_pool".into(), to(&def.subscription_pool));
     m.insert("model".into(), to(&def.model));
     m.insert("prompt".into(), to(&def.prompt));
     m.insert("system_prompt".into(), to(&def.system_prompt));

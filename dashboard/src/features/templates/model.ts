@@ -23,6 +23,7 @@ export function specToForm(spec: TemplateSpec, project = "", name = ""): AgentFo
     name,
     harness: spec.harness,
     subscription: spec.subscription ?? "",
+    subscription_pool: spec.subscription_pool ?? [],
     model: spec.model ?? "",
     prompt: spec.prompt ?? "",
     system_prompt: spec.system_prompt ?? "",
@@ -114,6 +115,8 @@ export function formToCreate(v: AgentFormValues, template: string | null): Agent
     ...def,
     template,
     subscription: def.subscription ?? null,
+    // `[]` clears the template's pool.
+    subscription_pool: def.subscription_pool ?? [],
     model: def.model ?? null,
     prompt: def.prompt ?? null,
     system_prompt: def.system_prompt ?? null,

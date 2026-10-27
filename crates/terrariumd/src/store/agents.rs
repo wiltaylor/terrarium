@@ -87,6 +87,7 @@ fn base_row(r: &Row<'_>) -> rusqlite::Result<AgentView> {
             project: r.get("project")?,
             harness: parse::<HarnessId>(&harness, "harness")?,
             subscription: r.get("subscription")?,
+            subscription_pool: json_col(&r.get::<_, String>("subscription_pool")?),
             model: r.get("model")?,
             workspace: PathBuf::from(workspace),
             harness_dir: None,
@@ -354,6 +355,7 @@ pub fn create_from(
         )));
     }
     let mut agent = Agent::from_def(def, work_dir);
+    agent.subscription_pool = clean_pool(&agent.subscription_pool);
     agent.workspace = crate::workspace::dir(work_dir, &def.project, &def.name);
     agent.system_prompt = stored_system_prompt(agent.system_prompt.as_ref()).cloned();
     let id = agent.id.to_string();
@@ -361,9 +363,10 @@ pub fn create_from(
     t.execute(
         "INSERT INTO agents (id, name, project, harness, subscription, model, prompt, policy,
                              restart, status, workspace, source, created_at, updated_at,
-                             new_session_on_prompt_change, template, system_prompt)
+                             new_session_on_prompt_change, template, system_prompt,
+                             subscription_pool)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'stopped', ?10, ?11, ?12, ?12, ?13, ?14,
-                 ?15)",
+                 ?15, ?16)",
         params![
             id,
             agent.name,
@@ -379,7 +382,8 @@ pub fn create_from(
             at,
             agent.new_session_on_prompt_change,
             template.map(serde_json::to_string).transpose()?,
-            agent.system_prompt
+            agent.system_prompt,
+            serde_json::to_string(&agent.subscription_pool)?
         ],
     )?;
     set_roles(t, &id, &def.project, &def.roles)?;
@@ -412,6 +416,9 @@ pub struct AgentPatch {
     pub harness: Option<HarnessId>,
     #[serde(default, deserialize_with = "nullable")]
     pub subscription: Option<Option<String>>,
+    /// The account pool (PLAN §16.3). `[]` clears it.
+    #[serde(default)]
+    pub subscription_pool: Option<Vec<String>>,
     #[serde(default, deserialize_with = "nullable")]
     pub model: Option<Option<String>>,
     #[serde(default, deserialize_with = "nullable")]
@@ -444,6 +451,7 @@ pub fn write_def(t: &mut Tx<'_>, id: &str, p: &AgentPatch) -> ApiResult<()> {
             project: String::new(),
             harness: HarnessId::Claude,
             subscription: None,
+            subscription_pool: Vec::new(),
             model: None,
             prompt: None,
             system_prompt: None,
@@ -471,6 +479,7 @@ pub fn write_def(t: &mut Tx<'_>, id: &str, p: &AgentPatch) -> ApiResult<()> {
             restart = coalesce(?7, restart),
             new_session_on_prompt_change = coalesce(?12, new_session_on_prompt_change),
             system_prompt = CASE WHEN ?13 THEN ?14 ELSE system_prompt END,
+            subscription_pool = coalesce(?15, subscription_pool),
             updated_at = ?8
          WHERE id = ?1",
         params![
@@ -488,7 +497,99 @@ pub fn write_def(t: &mut Tx<'_>, id: &str, p: &AgentPatch) -> ApiResult<()> {
             p.new_session_on_prompt_change,
             system_prompt.is_some(),
             system_prompt.flatten(),
+            p.subscription_pool
+                .as_ref()
+                .map(|v| serde_json::to_string(&clean_pool(v)))
+                .transpose()?,
         ],
+    )?;
+    Ok(())
+}
+
+/// Check an account pool for an agent on `harness` whose current
+/// subscription is `current` (PLAN §16.3), and give it as it is stored.
+/// Each member must exist, the harness must be able to spend it, and all
+/// members and the current subscription must have one provider. The
+/// current subscription joins the pool at the front when it is missing.
+/// An empty pool stays empty.
+pub fn check_pool(
+    conn: &Connection,
+    harness: HarnessId,
+    current: Option<&str>,
+    pool: &[String],
+) -> ApiResult<Vec<String>> {
+    let mut pool = clean_pool(pool);
+    if pool.is_empty() {
+        return Ok(pool);
+    }
+    if let Some(c) = current
+        && !pool.iter().any(|p| p == c)
+    {
+        pool.insert(0, c.to_owned());
+    }
+    let mut provider: Option<String> = None;
+    for name in &pool {
+        let Some(s) = crate::store::subscriptions::find(conn, name)? else {
+            return Err(ApiError::invalid(format!(
+                "`subscription_pool` names `{name}`, but there is no such subscription"
+            )));
+        };
+        if !s.harnesses.contains(&harness) {
+            return Err(ApiError::invalid(format!(
+                "the {harness} harness cannot spend subscription `{name}` of the pool"
+            )));
+        }
+        match &provider {
+            Some(p) if *p != s.provider => {
+                return Err(ApiError::invalid(format!(
+                    "the pool mixes providers: `{name}` is {}, the others are {p}; a pool \
+                     holds accounts of one provider",
+                    s.provider
+                )));
+            }
+            Some(_) => {}
+            None => provider = Some(s.provider.clone()),
+        }
+    }
+    Ok(pool)
+}
+
+/// A pool as it is stored: no empty names, no duplicates, in the given
+/// order.
+pub fn clean_pool(pool: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for n in pool.iter().map(|n| n.trim()).filter(|n| !n.is_empty()) {
+        if !out.iter().any(|o| o == n) {
+            out.push(n.to_owned());
+        }
+    }
+    out
+}
+
+/// The subscription that a file or fleet definition gives an agent whose
+/// current subscription is `current`. With a pool that holds both, the
+/// current one stays: the definition names the account that the agent
+/// starts on, and a swap picks among the pool (PLAN §16.3).
+pub fn synced_subscription(current: Option<&str>, def: &AgentDef) -> Option<String> {
+    match current {
+        Some(c)
+            if def.subscription_pool.iter().any(|p| p == c)
+                && def
+                    .subscription
+                    .as_deref()
+                    .is_none_or(|d| def.subscription_pool.iter().any(|p| p == d)) =>
+        {
+            Some(c.to_owned())
+        }
+        _ => def.subscription.clone(),
+    }
+}
+
+/// Set the current subscription of an agent (a swap, PLAN §16.3).
+pub fn set_subscription(t: &mut Tx<'_>, id: &str, subscription: &str) -> ApiResult<()> {
+    t.execute(
+        "UPDATE agents SET subscription = ?2, updated_at = ?3 WHERE id = ?1",
+        params![id, subscription, now()],
     )?;
     Ok(())
 }
@@ -691,9 +792,12 @@ pub fn sync_def(t: &mut Tx<'_>, id: &str, def: &AgentDef) -> ApiResult<bool> {
     check_def(def)?;
     let before = get(t, id)?;
     let system_prompt = stored_system_prompt(def.system_prompt.as_ref());
+    let subscription = synced_subscription(before.agent.subscription.as_deref(), def);
+    let pool = clean_pool(&def.subscription_pool);
     let changed = before.source != projects::SOURCE_FILE
         || before.agent.harness != def.harness
-        || before.agent.subscription != def.subscription
+        || before.agent.subscription != subscription
+        || before.agent.subscription_pool != pool
         || before.agent.model != def.model
         || before.agent.prompt != def.prompt
         || before.agent.system_prompt.as_ref() != system_prompt
@@ -703,19 +807,21 @@ pub fn sync_def(t: &mut Tx<'_>, id: &str, def: &AgentDef) -> ApiResult<bool> {
         t.execute(
             "UPDATE agents SET harness = ?2, subscription = ?3, model = ?4, prompt = ?5,
                     policy = ?6, restart = ?7, source = 'file', updated_at = ?8,
-                    new_session_on_prompt_change = ?9, system_prompt = ?10
+                    new_session_on_prompt_change = ?9, system_prompt = ?10,
+                    subscription_pool = ?11
              WHERE id = ?1",
             params![
                 id,
                 def.harness.as_str(),
-                def.subscription,
+                subscription,
                 def.model,
                 def.prompt,
                 serde_json::to_string(&def.policy)?,
                 restart_str(def.restart),
                 now(),
                 def.new_session_on_prompt_change,
-                system_prompt
+                system_prompt,
+                serde_json::to_string(&pool)?
             ],
         )?;
     }

@@ -2,7 +2,7 @@
 // Pure: AgentForm.tsx and the agent page call these.
 
 import type { Api } from "../../api/client";
-import type { Agent, Harness, LoginStatus, ModelList, Subscription } from "../../api/types";
+import type { Agent, Harness, LoginStatus, ModelList, Subscription, SwapResult } from "../../api/types";
 
 /** The subscriptions whose `harnesses` include `harness`. The daemon refuses a start on any other. */
 export function compatibleSubscriptions(list: Subscription[], harness: Harness): Subscription[] {
@@ -97,4 +97,60 @@ export function modelSourceText(list: ModelList): string {
 export function changeSubscription(api: Pick<Api, "agents">, id: string, name: string): Promise<Agent> {
   const next = name.trim();
   return api.agents.update(id, { subscription: next || null });
+}
+
+// ----- The subscription pool (PLAN §16.3) -----
+
+/**
+ * The subscriptions the pool of an agent may hold: the same provider as
+ * the current subscription, and `harness` can spend each. Empty when the
+ * current subscription is not in the list.
+ */
+export function poolCandidates(list: Subscription[], harness: Harness, current: string): Subscription[] {
+  const cur = list.find((s) => s.name === current.trim());
+  if (!cur) return [];
+  return list.filter((s) => s.provider === cur.provider && s.harnesses.includes(harness));
+}
+
+/**
+ * The pool to save: no repeats, the current subscription first. A pool
+ * with only the current subscription is empty: there is nothing to swap to.
+ */
+export function normalizePool(pool: string[], current: string): string[] {
+  const cur = current.trim();
+  const names = [...new Set(pool.map((n) => n.trim()).filter(Boolean))];
+  if (!names.some((n) => n !== cur)) return [];
+  return cur ? [cur, ...names.filter((n) => n !== cur)] : names;
+}
+
+/**
+ * The pool after a change of harness or subscription: keep only the
+ * candidates. An empty list (not loaded yet) keeps the pool as it is.
+ */
+export function prunePool(pool: string[], list: Subscription[], harness: Harness, current: string): string[] {
+  if (!list.length || !pool.length) return pool;
+  const fit = new Set(poolCandidates(list, harness, current).map((s) => s.name));
+  return normalizePool(pool.filter((n) => fit.has(n)), current);
+}
+
+/** The same pool: the same names in the same order. */
+export const samePool = (a: string[], b: string[]) => a.length === b.length && a.every((x, i) => x === b[i]);
+
+/** The pool members that a swap can go to: all but the current subscription. */
+export function swapTargets(agent: Pick<Agent, "subscription" | "subscription_pool">): string[] {
+  return (agent.subscription_pool ?? []).filter((n) => n !== agent.subscription);
+}
+
+/** What `POST /api/agents/{id}/subscription` did, in one short text. */
+export function appliedText(r: Pick<SwapResult, "to" | "applied">): string {
+  switch (r.applied) {
+    case "live":
+      return `Moved to ${r.to}. The harness uses the new login at its next request. No restart.`;
+    case "restart_scheduled":
+      return `Moved to ${r.to}. The agent restarts with resume when the turn ends.`;
+    case "restarted":
+      return `Moved to ${r.to}. The agent restarted with resume.`;
+    case "next_start":
+      return `Moved to ${r.to}. The agent does not run. Its next start uses the new account.`;
+  }
 }

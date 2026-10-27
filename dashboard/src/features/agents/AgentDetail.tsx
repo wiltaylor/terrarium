@@ -17,8 +17,8 @@ import { SaveAsTemplateDialog } from "../templates/TemplateDialog";
 import { Conversation } from "./conversation/Conversation";
 import { ScreenPanel } from "./ScreenPanel";
 import { RoleBadges } from "./AgentsPage";
-import { changeSubscription, loginText } from "./subscription";
-import { SubscriptionSelect } from "./SubscriptionFields";
+import { appliedText, changeSubscription, loginText, normalizePool, samePool, swapTargets } from "./subscription";
+import { PoolPicker, SubscriptionSelect } from "./SubscriptionFields";
 import { SystemPromptField } from "./AgentFields";
 import { systemPromptProblem } from "./form";
 import { WaitsPanel, WatchesPanel } from "./Waits";
@@ -125,6 +125,10 @@ export default function AgentDetail() {
               <dt>Subscription</dt>
               <dd>
                 <SubscriptionCell agent={a()} running={running()} onError={setError} />
+              </dd>
+              <dt>Pool</dt>
+              <dd>
+                <PoolCell agent={a()} onError={setError} />
               </dd>
               <dt>Prompt</dt>
               <dd>{a().prompt ?? <span class="muted">default</span>}</dd>
@@ -368,6 +372,113 @@ export function SubscriptionCell(props: { agent: Agent; running: boolean; onErro
               Restart now
             </button>
           </Show>
+        </span>
+      </Show>
+    </div>
+  );
+}
+
+/**
+ * The agent's subscription pool (PLAN §16.3): edit it with
+ * `PATCH /api/agents/{id}`, and swap to another account of it with
+ * `POST /api/agents/{id}/subscription`. A file agent cannot edit its pool
+ * here, but it can swap inside it.
+ */
+export function PoolCell(props: { agent: Agent; onError: (e: unknown) => void }) {
+  const [editing, setEditing] = createSignal(false);
+  const [draft, setDraft] = createSignal<string[]>([]);
+  const [target, setTarget] = createSignal("");
+  const [busy, setBusy] = createSignal(false);
+  const [result, setResult] = createSignal<string | null>(null);
+  const fileManaged = () => props.agent.source === "file";
+  const pool = () => props.agent.subscription_pool ?? [];
+  const targets = () => swapTargets(props.agent);
+  const current = () => props.agent.subscription ?? "";
+
+  const save = async () => {
+    setBusy(true);
+    try {
+      const a = await api.agents.update(props.agent.id, { subscription_pool: normalizePool(draft(), current()) });
+      agents.upsert(a);
+      setEditing(false);
+    } catch (e) {
+      props.onError(e);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const swap = async () => {
+    const to = target() || targets()[0];
+    if (!to) return;
+    setBusy(true);
+    try {
+      const r = await api.agents.swapSubscription(props.agent.id, to);
+      setResult(appliedText(r));
+      setTarget("");
+      agents.upsert(await api.agents.get(props.agent.id));
+    } catch (e) {
+      props.onError(e);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div class="stack" style={{ gap: "4px" }}>
+      <Show
+        when={!editing()}
+        fallback={
+          <>
+            <PoolPicker harness={props.agent.harness} current={current()} value={draft()} onChange={setDraft} />
+            <span class="row">
+              <button class="small primary" disabled={busy() || samePool(normalizePool(draft(), current()), pool())} onClick={save}>
+                Save
+              </button>
+              <button class="small" onClick={() => setEditing(false)}>
+                Cancel
+              </button>
+            </span>
+          </>
+        }
+      >
+        <span class="row" style={{ "flex-wrap": "wrap" }}>
+          <Show when={pool().length} fallback={<span class="muted">none</span>}>
+            <For each={pool()}>{(n) => <span class={`chip ${n === props.agent.subscription ? "ok" : ""}`}>{n}</span>}</For>
+          </Show>
+          <button
+            class="small"
+            disabled={fileManaged() || !props.agent.subscription}
+            title={fileManaged() ? "A file agent: edit its definition file." : !props.agent.subscription ? "Set a subscription first." : undefined}
+            onClick={() => {
+              setDraft(pool());
+              setResult(null);
+              setEditing(true);
+            }}
+          >
+            Edit
+          </button>
+        </span>
+      </Show>
+      <Show when={!editing() && targets().length}>
+        <span class="row" style={{ "flex-wrap": "wrap" }}>
+          <span class="small">Swap to</span>
+          <select aria-label="Swap to" value={target() || targets()[0]} onChange={(e) => setTarget(e.currentTarget.value)}>
+            <For each={targets()}>
+              {(n) => (
+                <option value={n} selected={n === (target() || targets()[0])}>
+                  {n}
+                </option>
+              )}
+            </For>
+          </select>
+          <button class="small" disabled={busy()} onClick={swap}>
+            Swap
+          </button>
+        </span>
+      </Show>
+      <Show when={result()}>
+        <span class="muted small" role="status">
+          {result()}
         </span>
       </Show>
     </div>

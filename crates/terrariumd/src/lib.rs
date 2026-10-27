@@ -2,6 +2,8 @@
 //! the integration tests start it the same way.
 #![warn(clippy::unwrap_used, clippy::expect_used)]
 
+pub mod account_swap;
+pub mod accounts;
 pub mod actor;
 pub mod agent_rpc;
 pub mod api;
@@ -270,19 +272,114 @@ async fn start_usage(state: &Shared) -> Vec<JoinHandle<()>> {
     {
         warn!("cannot expire old login sessions: {e}");
     }
-    let mut tasks = vec![
+    vec![
+        spawn_account_migration(state.clone()),
         probes::spawn_scheduler(state.clone()),
         quota_policy::spawn(state.clone()),
-    ];
-    if state.usage.config.detect_on_start {
-        let s = state.clone();
-        tasks.push(tokio::spawn(async move {
-            if let Err(e) = login_session::detect_on_start(&s).await {
-                warn!("start-up login check failed: {e}");
+    ]
+}
+
+/// Move the shared login of each harness into the account of its
+/// subscription (PLAN §16.3, "The migration"): at the start, and then on
+/// each probe tick while a harness still has one. A harness migrates only
+/// while none of its agents runs (`Supervisor::with_quiet_harness`): a
+/// running agent reads the shared file. Each change writes a
+/// `credentials.migrate` audit row and a `credentials.migrated` event; the
+/// same result logs once.
+///
+/// The start-up login check (`login_session::detect_on_start`) runs after
+/// the first pass, so it checks a moved login in its account and never
+/// sees the shared home between the two.
+fn spawn_account_migration(state: Shared) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut last: std::collections::HashMap<terrarium_core::HarnessId, String> =
+            std::collections::HashMap::new();
+        let mut first = true;
+        loop {
+            let subs = match state.db.read(store::subscriptions::list).await {
+                Ok(l) => l,
+                Err(e) => {
+                    warn!("the account migration cannot list subscriptions: {e}");
+                    tokio::time::sleep(state.usage.config.probe_tick).await;
+                    continue;
+                }
+            };
+            for h in accounts::harnesses() {
+                let home = state.usage.config.home(h);
+                let (dir, sup, list) = (
+                    state.state_dir.clone(),
+                    state.supervisor.clone(),
+                    subs.clone(),
+                );
+                let run = tokio::task::spawn_blocking(move || {
+                    if !accounts::migration_pending(&dir, h, &home) {
+                        return Ok(None);
+                    }
+                    let mut out = None;
+                    let ran = sup.with_quiet_harness(h, &mut || {
+                        out = Some(accounts::migrate(&dir, h, &home, &list));
+                    });
+                    if ran { Ok(out) } else { Err(()) }
+                })
+                .await;
+                let note = match &run {
+                    Ok(Ok(None)) => String::new(),
+                    Ok(Err(())) => "waiting".to_owned(),
+                    Ok(Ok(Some(m))) => serde_json::to_string(m).unwrap_or_default(),
+                    Err(e) => format!("failed: {e}"),
+                };
+                if last.get(&h) == Some(&note) {
+                    continue;
+                }
+                last.insert(h, note);
+                match run {
+                    Ok(Ok(Some(m))) if !m.is_empty() => {
+                        if m.moved.is_empty() && !m.pi_link {
+                            warn!(harness = %h, skipped = ?m.skipped, "the shared login stays in the shared home");
+                        } else {
+                            info!(harness = %h, moved = ?m.moved, pi_link = m.pi_link,
+                                  backups = m.backups.len(), "moved the shared login into its account");
+                        }
+                        let detail = serde_json::json!(m);
+                        let summary = format!(
+                            "{h}: shared login moved to {}",
+                            if m.moved.is_empty() {
+                                "no account".to_owned()
+                            } else {
+                                m.moved.join(", ")
+                            }
+                        );
+                        let _ = state
+                            .db
+                            .write("system", move |t| {
+                                t.audit("credentials.migrate", h.as_str(), None, detail.clone())?;
+                                t.emit(events::EventDraft::new(
+                                    "credentials.migrated",
+                                    summary,
+                                    detail,
+                                ))
+                            })
+                            .await;
+                    }
+                    Ok(Err(())) => info!(
+                        harness = %h,
+                        "the shared {h} login moves into its account when no {h} agent runs"
+                    ),
+                    Err(e) => warn!(harness = %h, "the account migration failed: {e}"),
+                    _ => {}
+                }
             }
-        }));
-    }
-    tasks
+            if std::mem::take(&mut first) && state.usage.config.detect_on_start {
+                let s = state.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = login_session::detect_on_start(&s).await {
+                        warn!("start-up login check failed: {e}");
+                    }
+                });
+            }
+            tokio::time::sleep(state.usage.config.probe_tick).await;
+        }
+    })
 }
 
 /// Run the artifact retention prune (PLAN §15.2): first one hour after the

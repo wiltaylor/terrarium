@@ -179,8 +179,8 @@ export function seed(now: number = Date.now()): MockWorld {
   });
 
   const agents: Agent[] = [
-    agentRow("01JB0LEAD00000000000000001", "lead", "terrarium", "claude", "anthropic-max", "idle", { roles: ["project_admin"], prompt: "lead", source: "file" }),
-    agentRow("01JB0WRK100000000000000002", "runner-dev", "terrarium", "claude", "anthropic-max", "working", { current_card: "TER-12", prompt: "worker" }),
+    agentRow("01JB0LEAD00000000000000001", "lead", "terrarium", "claude", "anthropic-max", "idle", { roles: ["project_admin"], prompt: "lead", source: "file", subscription_pool: ["anthropic-max", "anthropic-max-2"] }),
+    agentRow("01JB0WRK100000000000000002", "runner-dev", "terrarium", "claude", "anthropic-max", "working", { current_card: "TER-12", prompt: "worker", subscription_pool: ["anthropic-max", "anthropic-max-2"] }),
     agentRow("01JB0WRK200000000000000003", "adapter-codex", "terrarium", "codex", "chatgpt-pro", "blocked", { model: "gpt-5-codex", current_card: "TER-15" }),
     agentRow("01JB0WRK300000000000000004", "reviewer", "terrarium", "pi", "openrouter-key", "starting", { model: "anthropic/claude-sonnet", policy: { targets: [], mail_to: ["lead"], cross_project: ["webshop/shop-lead"] } }),
     agentRow("01JB0WEB100000000000000005", "shop-lead", "webshop", "copilot", "copilot-pro", "working", { roles: ["project_admin"], current_card: "WEB-4", policy: { targets: ["pg-test"], mail_to: ["*"] } }),
@@ -623,22 +623,32 @@ ${XSS_DOCUMENT}
   );
 
   const win = (window: string, used_pct: number, resets: number, readMin = 1) => ({ window, used_pct, resets_at: ahead(resets), at: ago(readMin) });
-  const subBase = { source: "api" as const, created_at: ago(60 * 24 * 9), updated_at: ago(60), has_api_key: false, held_agents: 0 };
+  const subBase = { source: "api" as const, created_at: ago(60 * 24 * 9), updated_at: ago(60), has_api_key: false, held_agents: 0, agents: [] };
+  // PLAN §16.3: a plan account per subscription with a harness login. The API-key subscriptions have none.
+  const account = (harness: NonNullable<Subscription["account"]>["harness"], source: "migration" | "login", login?: string, min = 60 * 24 * 9) => ({
+    harness, has_login: true, ...(login ? { login } : {}), source, created_at: ago(min), updated_at: ago(60),
+  });
   const subscriptions: Subscription[] = [
     {
       ...subBase, name: "anthropic-max", provider: "anthropic", plan: "Max 20x", harnesses: ["claude", "pi"], probe: "anthropic-oauth-usage", alert_at: 80, source: "file",
       login_status: "logged_in", verified_at: ago(4), probe_status: "ok", last_probe_at: ago(1), last_success_at: ago(1),
-      windows: [win("5h", 62, 97), win("7d", 38, 60 * 24 * 3 + 200)], local_estimate_only: false,
+      windows: [win("5h", 62, 97), win("7d", 38, 60 * 24 * 3 + 200)], local_estimate_only: false, account: account("claude", "migration", "wil@example.com"),
+    },
+    {
+      ...subBase, name: "anthropic-max-2", provider: "anthropic", plan: "Max 20x", harnesses: ["claude", "pi"], probe: "anthropic-oauth-usage", alert_at: 80,
+      login_status: "logged_in", verified_at: ago(6), probe_status: "ok", last_probe_at: ago(1), last_success_at: ago(1),
+      windows: [win("5h", 14, 180), win("7d", 21, 60 * 24 * 5)], local_estimate_only: false, account: account("claude", "login", "ops@example.com", 60 * 24 * 2),
     },
     {
       ...subBase, name: "chatgpt-pro", provider: "openai", plan: "ChatGPT Pro", harnesses: ["codex", "pi"], probe: "openai-codex-usage", alert_at: 80,
       login_status: "expiring", verified_at: ago(30), probe_status: "ok", last_probe_at: ago(5), last_success_at: ago(5),
-      windows: [win("5h", 87, 41, 5), win("7d", 54, 60 * 24 * 5, 5)], local_estimate_only: false,
+      windows: [win("5h", 87, 41, 5), win("7d", 54, 60 * 24 * 5, 5)], local_estimate_only: false, account: account("codex", "migration"),
     },
     {
       ...subBase, name: "copilot-pro", provider: "github", plan: "Copilot Pro+", harnesses: ["copilot"], probe: "github-copilot-quota", alert_at: 90,
       login_status: "logged_in", verified_at: ago(12), probe_status: "failed", probe_error: "the provider answered 401: the token has no Copilot Requests permission",
       last_probe_at: ago(2), last_success_at: ago(60 * 3), windows: [win("monthly", 23, 60 * 24 * 8, 60 * 3)], local_estimate_only: false,
+      account: account("copilot", "migration", "wil"),
     },
     {
       ...subBase, name: "openrouter-key", provider: "openrouter", plan: "API key", harnesses: ["pi"], alert_at: 80, env_var: "OPENROUTER_API_KEY", has_api_key: true,

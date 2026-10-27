@@ -14,7 +14,7 @@ import type { ScheduleCaller } from "./schedules";
 
 const NAME_RE = /^[a-z0-9][a-z0-9_-]{0,62}$/;
 const ULID_RE = /^[0-9A-Z]{26}$/;
-const SPEC_KEYS = ["harness", "subscription", "model", "prompt", "system_prompt", "roles", "policy", "restart", "new_session_on_prompt_change"] as const;
+const SPEC_KEYS = ["harness", "subscription", "subscription_pool", "model", "prompt", "system_prompt", "roles", "policy", "restart", "new_session_on_prompt_change"] as const;
 /** The daemon's limit on `system_prompt`: 32 KiB of UTF-8. */
 export const SYSTEM_PROMPT_MAX_BYTES = 32 * 1024;
 
@@ -64,6 +64,9 @@ export function normalizeSpec(raw: unknown): TemplateSpec {
   const roles = ((o.roles as string[] | undefined) ?? []).filter((r) => r !== "member");
   const spec: TemplateSpec = { harness: o.harness as TemplateSpec["harness"] };
   for (const k of ["subscription", "model", "prompt", "system_prompt"] as const) if (typeof o[k] === "string" && o[k]) spec[k] = o[k];
+  if (o.subscription_pool !== undefined && (!Array.isArray(o.subscription_pool) || o.subscription_pool.some((x) => typeof x !== "string"))) throw new Error("spec: subscription_pool: use a list of names");
+  const pool = (o.subscription_pool as string[] | undefined) ?? [];
+  if (pool.length) spec.subscription_pool = pool;
   if (roles.length) spec.roles = roles as TemplateSpec["roles"];
   spec.policy = policy;
   spec.restart = (o.restart as TemplateSpec["restart"]) ?? "on-failure";
@@ -242,6 +245,7 @@ export function createTemplateMock(c: TemplateMockContext): Api["templates"] {
         const s = spec({
           harness: a.harness,
           ...(a.subscription ? { subscription: a.subscription } : {}),
+          ...(a.subscription_pool?.length ? { subscription_pool: a.subscription_pool } : {}),
           ...(a.model ? { model: a.model } : {}),
           ...(a.prompt ? { prompt: a.prompt } : {}),
           ...(a.system_prompt ? { system_prompt: a.system_prompt } : {}),

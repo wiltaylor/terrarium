@@ -8,6 +8,8 @@ export interface AgentFormValues {
   project: string;
   harness: Harness;
   subscription: string;
+  /** The subscriptions a swap may pick. Empty: no pool. */
+  subscription_pool: string[];
   model: string;
   prompt: string;
   /** The text as typed. Empty: the harness's default system prompt. */
@@ -28,7 +30,7 @@ export const parseList = (s: string): string[] =>
     .filter(Boolean);
 
 export function emptyAgentForm(project = ""): AgentFormValues {
-  return { name: "", project, harness: "claude", subscription: "", model: "", prompt: "", system_prompt: "", roles: [], targets: [], mail_to: "*", cross_project: "", restart: "on-failure" };
+  return { name: "", project, harness: "claude", subscription: "", subscription_pool: [], model: "", prompt: "", system_prompt: "", roles: [], targets: [], mail_to: "*", cross_project: "", restart: "on-failure" };
 }
 
 export function agentToForm(a: Agent): AgentFormValues {
@@ -37,6 +39,7 @@ export function agentToForm(a: Agent): AgentFormValues {
     project: a.project,
     harness: a.harness,
     subscription: a.subscription ?? "",
+    subscription_pool: a.subscription_pool ?? [],
     model: a.model ?? "",
     prompt: a.prompt ?? "",
     system_prompt: a.system_prompt ?? "",
@@ -85,6 +88,7 @@ export function formToDef(v: AgentFormValues): AgentDef {
   const model = opt(v.model);
   const prompt = opt(v.prompt);
   if (subscription) def.subscription = subscription;
+  if (v.subscription_pool.length) def.subscription_pool = v.subscription_pool;
   if (model) def.model = model;
   if (prompt) def.prompt = prompt;
   const systemPrompt = optText(v.system_prompt);
@@ -114,6 +118,8 @@ export function formToPatch(original: Agent, v: AgentFormValues): AgentPatch {
   const model = changed(v.model, before.model);
   const prompt = changed(v.prompt, before.prompt);
   if (subscription !== undefined) patch.subscription = subscription;
+  // `[]` clears the pool.
+  if (!sameList(v.subscription_pool, before.subscription_pool)) patch.subscription_pool = v.subscription_pool;
   if (model !== undefined) patch.model = model;
   if (prompt !== undefined) patch.prompt = prompt;
   const systemPrompt = optText(v.system_prompt) ?? null;

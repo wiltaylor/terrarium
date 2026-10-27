@@ -889,6 +889,7 @@ An agent is the core `Agent` with bookkeeping fields:
 |---|---|
 | `harness` | `claude`, `codex`, `copilot`, `pi`. |
 | `subscription`, `model`, `prompt` | Absent when not set. |
+| `subscription_pool` | The account pool (PLAN §16.3): subscription names of one provider that the harness can spend, which a swap may pick (§6.2). The current `subscription` is always a member. Absent when empty. |
 | `system_prompt` | The agent's base system prompt (below). Absent when not set. |
 | `roles` | Roles above `member`: `project_admin`, `sysadmin`. |
 | `status` | `starting`, `idle`, `waiting`, `working`, `blocked`, `error`, `stopped`, `restarting`. `waiting`: the turn ended, and the agent has one or more open waits (§6.7). `idle`: the turn ended, and the agent has no open wait. |
@@ -907,7 +908,7 @@ An agent is the core `Agent` with bookkeeping fields:
 | `GET /api/agents?project=` | | `200` agents by ID | read; an agent defaults to its project |
 | `POST /api/agents` | an agent definition, or `template` and the fields that differ (§21.3) | `201` agent | project_admin of `project`; some `policy` entries need sysadmin (below) |
 | `GET /api/agents/{id}` | | `200` agent, with `subscription_detail` (below) | read |
-| `PATCH /api/agents/{id}` | `{"harness"?, "subscription"?, "model"?, "prompt"?, "system_prompt"?, "policy"?, "restart"?, "new_session_on_prompt_change"?}` | `200` agent | project_admin; some `policy` entries need sysadmin (below) |
+| `PATCH /api/agents/{id}` | `{"harness"?, "subscription"?, "subscription_pool"?, "model"?, "prompt"?, "system_prompt"?, "policy"?, "restart"?, "new_session_on_prompt_change"?}` | `200` agent | project_admin; some `policy` entries need sysadmin (below) |
 | `DELETE /api/agents/{id}` | `?confirm=true` when live; `?keep_workspace=true` | `204` | project_admin |
 
 `DELETE` stops a live agent, waits for it to end (up to 10 s), and moves
@@ -977,6 +978,15 @@ secret and no quota numbers (those are in `GET /api/usage/me`).
 (`{"subscription": null}`). An empty `system_prompt` also clears it.
 `null` for the other fields changes nothing.
 
+`subscription_pool` (in `POST` and `PATCH`): each member must exist, the
+agent's harness must be able to spend it, and all members and the current
+subscription must have one provider (`422 invalid`, the message names the
+member). The daemon puts the current subscription at the front when it is
+missing, and drops empty names and duplicates. `[]` clears the pool. A
+`PATCH` of `subscription` checks the stored pool again. A change of the
+pool reaches a running Claude Code or pi agent at its next start (the
+sandbox binds the pool's accounts at the launch).
+
 `roles` in the definition need the grant rights of §3. `policy.cross_project`
 entries are `project/agent`.
 
@@ -1005,6 +1015,7 @@ lists the leases that the agent holds.
 | `POST /api/agents/{id}/restart` | none | `202` agent. Also on an agent in `error`: a new launch. |
 | `POST /api/agents/{id}/send` | `{"text": "Run the tests"}` | `202 {"accepted": true}` |
 | `POST /api/agents/{id}/answer` | `{"request_id", "answer"}` or `{"text"}` | `202 {"accepted": true}` |
+| `POST /api/agents/{id}/subscription` | `{"subscription": "anthropic-max-20x-2"}` | `200 {"agent", "from"?, "to", "applied"}` (below) |
 
 All need project_admin. The work happens in the background. A `send` by
 the operator writes a row to the delivery log first, so the transcript tags
@@ -1025,6 +1036,26 @@ for the status changes.
 - `stop` on an agent that is not running and not in `error` gets
   `409 not_running`. When the store says live and the supervisor says not
   running, `stop` sets `stopped` (reason "reconciled").
+- `subscription` swaps the agent to another plan account (PLAN §16.3).
+  The new subscription must be in `subscription_pool` when the agent has a
+  pool (`422 invalid`, "not in the pool"), have the provider of the current
+  one, and have a login of the harness when the current one has
+  (`422 invalid`). The current one again: `409 conflict`. A file agent
+  may swap only among the members of its pool (else `409 file_managed`).
+  `applied` says how the swap took effect:
+
+  | `applied` | Meaning |
+  |---|---|
+  | `live` | Claude Code or pi on an account, and the new account is bound in the sandbox: the daemon took the harness's locks and moved the agent's pointer. The harness reads the new login at its next request. No restart. |
+  | `restart_scheduled` | The agent is in a turn (`working`, `starting`): it restarts with resume when the turn ends. Codex and Copilot, and a Claude or pi agent whose new account is not bound. |
+  | `restarted` | The agent was not in a turn (`idle`, `waiting`, `blocked`): it restarted with resume now. |
+  | `next_start` | The agent does not run: its next start uses the new account. |
+
+  The store names the new subscription at once. Each swap writes an
+  `agent.swap` audit row `{from, to, applied, auto, reason}` and an
+  `agent.swapped` event, and ends the agent's quota hold of the old
+  subscription. The quota policy uses the same swap for the auto-swap of a
+  full account (§16.6), with `auto: true` and the actor `system`.
 - `restart` ends the current session with outcome `restarted` and starts a
   new one. On a stopped agent, or an agent in `error`, it is the same as
   `start`: a new launch.
@@ -2302,8 +2333,11 @@ exec sessions are in §17 of this document.
 Plans, quota probes, local accounting, the quota policy, and the login
 wizard (PLAN §16). The code is in `crates/terrariumd/src/api/subscriptions.rs`,
 `api/usage.rs`, `store/subscriptions.rs`, `store/usage.rs`, `probes/`,
-`usage_collector.rs`, `quota_policy.rs`, and `login_session.rs`. The tests
-are in `crates/terrariumd/tests/subscriptions.rs` and `tests/usage_cards.rs`.
+`usage_collector.rs`, `quota_policy.rs`, `login_session.rs`, and for the
+plan accounts (PLAN §16.3) `accounts.rs` and `account_swap.rs`. The tests
+are in `crates/terrariumd/tests/subscriptions.rs`, `tests/usage_cards.rs`,
+`tests/runtime.rs` (the swaps), and `tests/no_token_endpoint.rs` (the
+refresh rule).
 
 ### 16.1 Shapes
 
@@ -2316,7 +2350,10 @@ A subscription:
  "created_at":"...","updated_at":"...",
  "windows":[{"window":"5h","used_pct":16.0,"resets_at":"2026-10-24T10:59:59Z","at":"..."},
             {"window":"7d","used_pct":10.0,"resets_at":"2026-10-31T01:59:59Z","at":"..."}],
- "local_estimate_only":false,"has_api_key":false,"held_agents":0,"default_models":{}}
+ "local_estimate_only":false,"has_api_key":false,"held_agents":0,"default_models":{},
+ "account":{"harness":"claude","has_login":true,"login":"wil@example.com","source":"migration",
+            "created_at":"...","updated_at":"..."},
+ "agents":[{"id":"01K8...","name":"lead","project":"terrarium"}]}
 ```
 
 | Field | Meaning |
@@ -2328,6 +2365,8 @@ A subscription:
 | `local_estimate_only` | `true` when there is no probe: local accounting is the only number. |
 | `env_var` | Set when an API key is stored: the env var that carries it into the agents. The key is never in the API. |
 | `held_agents` | Agents whose turns wait for a reset of this subscription. |
+| `account` | The plan account of the subscription (PLAN §16.3), when it has one: `harness` (whose login it holds), `has_login` (the credential file is there), `login` (the Copilot login name, or the email of a Claude login), `source` (`migration`: the shared login moved here at a daemon start; `login`: the login wizard), `created_at`, `updated_at`. Never a secret. |
+| `agents` | The agents whose current `subscription` this is: `[{id, name, project}]`. Always present. |
 | `default_models` | The model that each harness gets on this subscription when the agent sets no `model`, by harness name, for example `{"pi":"glm-5.3-flash","claude":"glm-5.3"}` for a Z.ai key. Only the harnesses where the daemon picks the model: pi (the provider's default from the pi adapter's table; no entry when pi refuses the subscription) and Claude Code on Z.ai. `{}` when every harness keeps its own default. Always present. |
 
 Names follow the project name rules; `login` and `detect` are reserved.
@@ -2394,6 +2433,11 @@ keep their card.
   §16.1). Any agent gets `403 forbidden`.
 - `GET /api/usage`: an agent sees its own project only, unless it is a
   `sysadmin`.
+- Plan accounts (PLAN §16.3). Each plan login is its own subscription with
+  its own account under `<state>/credentials/accounts/<name>/`. The status
+  checks, the probes, and the model lists read the account; before the
+  migration of a shared login, they read the shared home. None of them
+  refreshes a token.
 - Expired logins. A status check (verify, the start-up check) that says
   "logged out" sets `expired` when the subscription had a login
   (`logged_in`, `expiring`, `expired`), else `missing`. A probe answer of
@@ -2409,12 +2453,12 @@ keep their card.
 | `GET /api/subscriptions` | | Array of subscriptions. |
 | `POST /api/subscriptions` | `{name, provider, plan?, harnesses?, probe?, alert_at?}` | `201` with the subscription (`source = api`). `409 conflict` when the name exists; `422 invalid` for an unknown probe, or for provider `zai` with a plan that is not `coding` or `api`. |
 | `GET /api/subscriptions/{name}` | | One subscription. |
-| `DELETE /api/subscriptions/{name}` | | `204`. `409 file_managed` for a file subscription. |
+| `DELETE /api/subscriptions/{name}` | | `204`. `409 file_managed` for a file subscription. The plan account goes with it; `409 conflict` while an agent's current subscription is this one (swap it first, §6.2). |
 | `GET /api/subscriptions/{name}/quota` | `?since=` (a time, §2.1; default 24 h ago), `?window=`, `?limit=` (default 1000) | Array of samples, oldest first: `{subscription, window, used_pct, resets_at, raw, at}`. `raw` is the provider's window object. |
 | `GET /api/subscriptions/{name}/models` | `?refresh=true` | The models the subscription can use (below). Cached for 6 h per subscription; `refresh` reads the list again. |
 | `POST /api/subscriptions/{name}/probe` | | `{subscription, probe_status, error?, windows}`. Here `subscription` is the **name** only, not the object. A failed probe is still `200`. |
-| `POST /api/subscriptions/{name}/verify` | | `{subscription, status}`. Here `subscription` is the **full** subscription (§16.1), after the check. `status` is `{kind, harness, provider, pi_provider?, logged_in, plan?, detail?}`. The harness status command runs against the shared home and sets `login_status` (and `plan`, when the subscription has none). A stored API key counts as logged in: `status` is then `{logged_in: true, detail}`. |
-| `POST /api/subscriptions/{name}/logout` | | The subscription (§16.1), with `login_status` `missing`. Runs `claude auth logout`, `codex logout`, or `copilot logout` against the shared home. pi has no logout command: `422 invalid`. A `zai` subscription has no logout either (`422 invalid`): the Claude logout would end the shared Claude login. |
+| `POST /api/subscriptions/{name}/verify` | | `{subscription, status}`. Here `subscription` is the **full** subscription (§16.1), after the check. `status` is `{kind, harness, provider, pi_provider?, logged_in, plan?, detail?}`. The harness status command runs against the subscription's plan account (PLAN §16.3; before its migration, the shared home) and sets `login_status` (and `plan`, when the subscription has none). A stored API key counts as logged in: `status` is then `{logged_in: true, detail}`. |
+| `POST /api/subscriptions/{name}/logout` | | The subscription (§16.1), with `login_status` `missing`. A plan account: removes the account directory and nothing else; no harness command runs, so no other account and no shared file changes. `409 conflict` while an agent's current subscription is this one. A subscription with no account (a shared login before its migration): runs `claude auth logout`, `codex logout`, or `copilot logout` against the shared home. pi has no logout command: `422 invalid`. A `zai` subscription has no logout either (`422 invalid`): the Claude logout would end the shared Claude login. |
 | `POST /api/subscriptions/{name}/api-key` | `{provider, key, plan?, base_url?, models?}` | The subscription, without the key. `plan` is for `zai` only. See §16.5. |
 | `GET /api/subscriptions/detect` | | Logins found in the harness homes that no subscription covers (same provider, and the harness is in `harnesses`): `[{kind, harness, provider, pi_provider?, logged_in, plan?, detail?, suggested}]`. `suggested` is a subscription definition. |
 | `POST /api/subscriptions/login` | `{kind, provider?, name?}` | `201` with the login session (§16.4). |
@@ -2518,7 +2562,8 @@ CLI change.
 ### 16.4 Login sessions
 
 A login session runs the harness login command in a PTY, as the daemon
-user, with no sandbox, against the shared harness home:
+user, with no sandbox, in a scratch home (`<temp>/terrarium-login-<id>/home`,
+mode 0700), never in the shared harness home:
 
 | `kind` | Command | What the session finds |
 |---|---|---|
@@ -2543,9 +2588,19 @@ until they have a value.
 restart). `done` is `true` for the last four.
 
 When the command exits with code 0 (pi: when `pi auth check` says the
-provider is ready), the daemon runs the status command, makes or updates the
-subscription (name, provider, plan from the status output, the harness, the
-matching probe), sets `login_status = logged_in`, and runs the probe once. A
+provider is ready), the daemon runs the status command in the scratch home,
+moves only the credential into the plan account of the subscription (PLAN
+§16.3), makes or updates the subscription (name, provider, plan from the
+status output, the harness, the matching probe), sets `login_status =
+logged_in`, and runs the probe once. The scratch home goes with the
+session's temp dir.
+
+The subscription name: `name` when the request gives it (**Re-login** on a
+card gives it, and replaces the login of that account only). Else the
+default name (`anthropic-max-20x`, `openai-pro`, `github-copilot`,
+`pi-<provider>`). When the default subscription has an account already, or
+has another provider, the login is a **second account**: `<default>-2`, then
+`-3`. No other account and no shared file changes. A
 file subscription keeps its definition; only its login state changes.
 The session's runner files are deleted at the end. The pasted code is never
 stored, logged, or sent back; the audit row `login.input` has its length
@@ -2617,8 +2672,12 @@ value of each var whose name has `KEY`, `TOKEN`, `SECRET`, or `PASSWORD` as
   alert`) per window period (the reset time). Each quota mail ends with a
   dashboard link, `Open: <TERRARIUM_PUBLIC_URL>/subscriptions`; a budget
   mail links the project page, `<TERRARIUM_PUBLIC_URL>/p/<project>`.
-- A window at 100 percent: a `quota.alert` with `level: exhausted`, and a
-  hold on every agent on the subscription until the latest reset time. The
+- A window at 100 percent: a `quota.alert` with `level: exhausted`. Each
+  agent on the subscription with an account pool moves to the next member
+  of its pool, in pool order, that is not full, is not `expired` or
+  `missing`, and has a login of its harness (auto-swap, PLAN §16.3; §6.2).
+  `TERRARIUM_AUTO_SWAP=off` turns it off. Every other agent gets a hold
+  until the latest reset time. The
   supervisor's `hold_turns` marks an idle agent `blocked` with the reason
   and the reset time (a working agent finishes its turn first). New turns
   wait: `POST .../send` still answers `202`, and push pointers and the
@@ -2661,6 +2720,8 @@ status that the runner reports. An agent may report for itself only.
 | `quota.resumed` | `{cause, holds_left}`. |
 | `subscription.offer` | `{login, suggested}`: a login found at daemon start that no subscription covers. |
 | `subscription.expired` | `{subscription, from, reason}`: the login changed into `expired`. |
+| `credentials.migrated` | `{harness, moved, backups, skipped, pi_link}`: the start-up migration moved a shared login into an account (PLAN §16.3). The audit row is `credentials.migrate`. |
+| `agent.swapped` | `{from, to, applied, auto, reason}`: an agent moved to another account (§6.2). The audit row is `agent.swap`. |
 | `self_report` | `{status, note}`. |
 
 ## 17. Targets, host agents, and exec sessions
@@ -3592,6 +3653,10 @@ A plan:
 | `project` | The project of the object, when it has one. |
 | `action` | `create`, `update`, `unchanged`, `delete`, `release`, or `conflict`. |
 | `drift` | The fields that changed outside the fleet since the last apply, or `["(deleted)"]`. Absent when empty. |
+
+An agent with a `subscription_pool` that holds its `subscription`: the plan
+and the drift compare the pool, not the current member. A swap (§6.2) is
+not drift, and an `apply` keeps the current member (PLAN §16.3).
 | `adopt` | `true` when the apply takes over an API object that no fleet owns. |
 | `changes` | `{field, from, to}` for each field that the apply changes. |
 | `reason` | Why the entry is a conflict, or a note. |
@@ -4270,7 +4335,7 @@ A template:
 |---|---|
 | `name` | 1-63 of `a-z`, `0-9`, `-`, `_`. Unique in its scope: the project, or the global scope. A project template and a global template can have the same name. |
 | `project` | The project. `null` is a global template. |
-| `spec` | An agent definition (§6.1) without `name` and `project`: `harness` (required), `subscription`, `model`, `prompt`, `system_prompt`, `roles`, `policy`, `restart`, `new_session_on_prompt_change`. The daemon checks it with the rules of an agent definition and keeps it in a normal form: the defaults of `policy` and `restart` filled in, no empty `roles`, no empty `system_prompt`, no `new_session_on_prompt_change` when it is `true`. A `system_prompt` over 32 KiB is `422 invalid`. Another key (`name`, `project`, `template`, or an unknown key) is `422 invalid` with `details.field = "spec"`. |
+| `spec` | An agent definition (§6.1) without `name` and `project`: `harness` (required), `subscription`, `subscription_pool`, `model`, `prompt`, `system_prompt`, `roles`, `policy`, `restart`, `new_session_on_prompt_change`. The daemon checks it with the rules of an agent definition and keeps it in a normal form: the defaults of `policy` and `restart` filled in, no empty `roles`, no empty `system_prompt`, no `new_session_on_prompt_change` when it is `true`. A `system_prompt` over 32 KiB is `422 invalid`. Another key (`name`, `project`, `template`, or an unknown key) is `422 invalid` with `details.field = "spec"`. |
 | `revision` | `1` at the create. Each change of the name, the description, or the spec adds `1`. A `PATCH` with the same values changes nothing. |
 | `source` | `api`, `file` (a `[[templates]]` of `projects/<name>.toml`), or `fleet:<name>` (§18.1). A `file` template refuses `PATCH` and `DELETE` with `409 file_managed`. |
 

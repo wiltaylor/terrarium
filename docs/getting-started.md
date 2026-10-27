@@ -119,8 +119,10 @@ The daemon puts this URL in the links of operator mail (the default is
 
 ### 2.4 Log in to Claude
 
-All agents share one Claude home, so you log in once. Use the dashboard, or
-use a shell in the container.
+All agents share one Claude settings home (`config/claude`). Each plan
+login is an **account**: its own subscription, with its credential under
+`state/credentials/accounts/<subscription>/` (PLAN §16.3). Use the
+dashboard to log in. A shell login also works for the first account.
 
 To log in from the dashboard:
 
@@ -131,7 +133,8 @@ To log in from the dashboard:
    **Send code**.
 
 The wizard runs `claude auth login` in an embedded terminal, outside the
-sandbox. When the login is done, the daemon makes the subscription,
+sandbox, in a scratch home. When the login is done, the daemon moves the
+credential into the account of the subscription, makes the subscription,
 verifies the login, and runs the quota probe one time. The **Verify now**
 button checks the login again. The wizard has the same flow for Codex and
 Copilot (a device code), and for pi. To store an API key, click **API
@@ -151,7 +154,42 @@ docker compose exec terrarium claude auth status
 ```
 
 The command exits with 0 when you are logged in. The Subscriptions page
-finds the login and offers to make a subscription for it.
+finds the login and offers to make a subscription for it. A shell login
+goes into the shared home. The daemon moves it into the account of the
+one subscription that fits it, when no Claude agent runs (PLAN §16.3, "The
+migration").
+
+#### Add a second account
+
+You can have more than one login of a provider, for example two Claude Max
+logins. Each login is its own subscription. To add a second login:
+
+1. Open the **Subscriptions** page.
+2. Click **Add subscription**, then click **Claude Code** (or **Codex**,
+   **Copilot**, or **pi**).
+3. Keep the **Name** field empty, or type a name such as `max-work`.
+4. Sign in with the **other** account in the browser. Paste the code, or
+   enter the device code.
+
+When the default subscription (for example `anthropic-max-20x`) has an
+account, the daemon names the new one `anthropic-max-20x-2`. Each account
+has its own card, with its quota bars and the agents on it. **Re-login**
+on a card replaces the login of that account only.
+
+#### Move agents between accounts
+
+Give an agent a pool of accounts, then move it when an account is used up:
+
+```sh
+terrarium admin agent set terra/lead --pool anthropic-max-20x,anthropic-max-20x-2
+terrarium admin agent swap terra/lead anthropic-max-20x-2
+```
+
+Claude Code and pi move live, at their next request. Codex and Copilot
+restart with resume when the turn ends. When a probe finds an account at
+100 percent, the daemon moves each agent with a pool to the next account
+with room (`TERRARIUM_AUTO_SWAP=off` turns this off). The agent page of
+the dashboard has the pool editor and **Swap**.
 
 #### Add a Z.ai (GLM) key
 

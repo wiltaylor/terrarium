@@ -382,10 +382,18 @@ fn role_list(roles: &[Role]) -> Vec<Role> {
     r
 }
 
+/// The spec of an agent for the drift check. With a pool that holds the
+/// subscription, the current member is runtime state (a swap changes it,
+/// PLAN §16.3), so the spec shows the pool and not the member.
 fn agent_spec(def: &AgentDef) -> Value {
+    let pooled = def
+        .subscription
+        .as_ref()
+        .is_some_and(|s| def.subscription_pool.contains(s));
     json!({
         "harness": def.harness,
-        "subscription": def.subscription,
+        "subscription": if pooled { None } else { def.subscription.as_deref() },
+        "subscription_pool": def.subscription_pool,
         "model": def.model,
         "prompt": def.prompt,
         "system_prompt": def.system_prompt.as_ref().filter(|t| !t.trim().is_empty()),
@@ -403,6 +411,7 @@ fn view_def(v: &AgentView) -> AgentDef {
         project: a.project.clone(),
         harness: a.harness,
         subscription: a.subscription.clone(),
+        subscription_pool: a.subscription_pool.clone(),
         model: a.model.clone(),
         prompt: a.prompt.clone(),
         system_prompt: a.system_prompt.clone(),
@@ -1520,7 +1529,11 @@ fn apply_agent(t: &mut Tx<'_>, v: &AgentView, def: &AgentDef) -> ApiResult<()> {
     }
     let patch = AgentPatch {
         harness: Some(def.harness),
-        subscription: Some(def.subscription.clone()),
+        subscription: Some(agents::synced_subscription(
+            v.agent.subscription.as_deref(),
+            def,
+        )),
+        subscription_pool: Some(def.subscription_pool.clone()),
         model: Some(def.model.clone()),
         prompt: Some(def.prompt.clone()),
         system_prompt: Some(def.system_prompt.clone()),

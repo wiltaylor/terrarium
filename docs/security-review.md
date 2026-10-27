@@ -64,6 +64,7 @@ remote unauthenticated path to code execution or to another agent's secrets.
 | F13 | LOW | Policy | `policy.rs:140`, `api/agents.rs:141` | A `project_admin` adds global targets to `policy.targets`, its own too | Fixed: a global target, a `cross_project` entry, or a `mail_to` entry outside the project needs sysadmin (API and fleet) |
 | F14 | INFO | Dashboard | `eslint.config.js:24`, `lib/sanitize.ts:76` | The sink lint rule has gaps; the sanitizer keeps remote images (the CSP blocks them) | Fixed: the lint rule covers the gaps, with a fixture test; the daemon sends the CSP as a header. Remote images are accepted (§5) |
 | F15 | INFO | API auth | `password.rs`, `api/session.rs` | The new operator password login, JWT sessions, and the CLI session store: a design review of the change (2026-10-27) | Built with the controls of §10; the independent review findings R1 to R10 are fixed (§10); residuals in §10 |
+| F16 | INFO | Credentials | `accounts.rs`, `account_swap.rs`, `sandbox.rs` | Plan accounts: several plan logins per provider, per-account credentials, live swaps, and the refresh rule (2026-10-27) | Built with the controls of §11; a CI test keeps the token endpoints out of the code; residuals in §11 |
 
 ---
 
@@ -992,3 +993,73 @@ and `dashboard/src/stores/auth.ts`.
 - **The `v1.` cookies** of the older daemon are refused. The dashboard shows
   the login screen once after the update.
 
+## 11. Plan accounts and the refresh rule (F16, 2026-10-27)
+
+The change: each plan login is its own subscription with its own account,
+`<state>/credentials/accounts/<subscription>/` (PLAN §16.3). The shared
+harness homes keep the settings; the credentials move into the accounts.
+An agent moves between the accounts of its pool: live for Claude Code and
+pi, by a restart with resume for Codex and Copilot. The code is
+`crates/terrariumd/src/accounts.rs`, `account_swap.rs`, the launch in
+`runner_supervisor.rs`, and the binds in `sandbox.rs`.
+
+### The refresh rule
+
+The daemon never refreshes an OAuth token, never calls an OAuth token
+endpoint, and never writes a token that it got itself. Each harness
+refreshes its own token with its own code, under its own lock. The daemon
+may:
+
+- read a credential file (the probes read the access token for the usage
+  endpoints, as before);
+- copy or move a credential file when the operator adds or migrates an
+  account;
+- make directories and symlinks, and re-point an agent's symlink;
+- take a harness's own lock (a `proper-lockfile` directory) to keep a swap
+  atomic. Holding a lock is not a refresh;
+- restart agents.
+
+`crates/terrariumd/tests/no_token_endpoint.rs` scans the Rust sources of
+every crate for `oauth/token`, `auth.openai.com/oauth`,
+`platform.claude.com/v1/oauth`, `console.anthropic.com/v1/oauth`,
+`login/oauth/access_token`, `copilot_internal/v2/token`, and `grant_type`.
+`just ci::check` fails when it finds one. A probe that finds an expired
+token reports it, and waits for the harness of an agent to refresh it.
+
+### Threats and controls
+
+| Threat | Control | Test |
+|---|---|---|
+| An agent reads an account outside its pool | The sandbox binds only the stores of the agent's pool members that have a login of its harness (Claude Code, pi), each at its own path. `account.json`, the backups, the git credentials, and the stored API keys stay unbound. Codex gets a file bind of its current account only; Copilot gets the env token of its current account only. | `accounts::tests::a_launch_binds_only_the_pool`, `sandbox::tests::only_the_pool_accounts_are_bound`, and `a_sandboxed_process_sees_only_its_pool` (a real bwrap run) |
+| An agent re-points itself to another account | The pointer `harness/cred/account` is in the harness dir, which the sandbox binds read-only. Only the daemon changes it, by a new symlink and a rename. | `accounts::tests::the_pointer_swaps_atomically` |
+| A swap during a refresh loses a rotated refresh token | A live swap takes Claude's `.oauth_refresh.lock` and `.storage-write.lock` in the old and the new account (pi: the shared `auth.json.lock`) before it moves the pointer, and waits up to 45 s for a holder. Claude's dead-holder takeover answers `no_owner_record` for a lock without an owner file, so it waits for the daemon and does not take over. A lock older than its `stale` time is removed, as `proper-lockfile` does. | `locks_follow_proper_lockfile`, `a_claude_swap_takes_both_accounts_locks` |
+| Two copies of one rotating refresh token | The migration moves a shared login (a copy, a sync, then the removal of the shared file); it never leaves two live copies. It runs only while no agent of the harness runs, under the supervisor's slot lock, so no launch reads the shared file during the move. | `the_migration_moves_each_shared_login_once`, `the_migration_finishes_a_cut_move_and_refuses_a_guess`, `shared_logins_migrate_and_full_accounts_swap` |
+| A login touches another account | The login wizard runs in a scratch home (mode 0700) and moves only the credential into the account of its subscription. A second login of a provider makes a second account. A logout removes the account dir and runs no harness command. | `an_import_touches_only_its_account`, `claude_login_with_a_pasted_code` |
+| Symlink tricks in a store | A pool agent can change the files of a pool store. The daemon reads and writes credentials with `O_NOFOLLOW` on the last part, refuses a symlinked store dir, and writes new files by `create_new` and a rename. | `accounts.rs` (`read_nofollow`, `private_dir`) |
+| Secrets in logs | The launch logs the names of the env vars only; `command_line` hides `*TOKEN*` values; `account.json` holds no secret. | `command_line_hides_secrets` |
+
+### Residuals
+
+- **Pool members share their tokens.** A Claude Code or pi agent can read
+  and change the credential of each account of its pool. Give a pool only
+  to agents that may use all of its accounts.
+- **Codex has no cross-process lock.** All Codex agents on one account
+  refresh at about the same time. Codex reloads the file before a proactive
+  refresh, so the window is short, but a reuse of a refresh token can
+  revoke the token family (`refresh_token_reused`). Then each agent on the
+  account needs a new login. Keep few Codex agents on one account.
+- **pi's lock is global.** pi locks `/auth/pi/auth.json.lock` (`realpath:
+  false`), so refreshes of different accounts wait for each other. This is
+  safe, and only slower.
+- **Claude's `oauthAccount` is stale after a live swap** until the next
+  start of the agent. The daemon does not edit `.claude.json` while Claude
+  Code runs.
+- **An undocumented env var.** `CLAUDE_SECURESTORAGE_CONFIG_DIR` can change
+  in a later Claude Code release. The compat suite must check it.
+- **The backups.** `<state>/credentials/backup/` keeps a copy of each moved
+  shared login (mode 0600 in a 0700 dir). Its refresh token is old after the
+  first refresh; delete the backups after a good rollout.
+- **Copilot and the shared `config.json`.** Copilot's code is closed. With
+  `COPILOT_GITHUB_TOKEN` set, it is not known whether Copilot writes a token
+  into `config.json`. A launch warns (a `warning` event) when the shared file
+  holds a token again, and the next quiet migration moves it.
