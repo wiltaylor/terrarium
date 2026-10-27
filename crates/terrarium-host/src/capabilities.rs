@@ -3,19 +3,32 @@
 
 use std::path::Path;
 
+use crate::config::DisplayConfig;
 use crate::protocol::HostCapabilities;
 
 /// Detect Docker (`docker version --format json`), vmlab
-/// (`vmlab --version`), and the login shell.
+/// (`vmlab --version`), and the login shell. The desktop display is off.
 pub async fn detect(docker_bin: &str, vmlab_bin: &str) -> HostCapabilities {
+    detect_with(docker_bin, vmlab_bin, &DisplayConfig::default()).await
+}
+
+/// [`detect`], with the display part from the `[display]` config: the
+/// opt-in, `tesseract`, and the desktop tools.
+pub async fn detect_with(
+    docker_bin: &str,
+    vmlab_bin: &str,
+    display: &DisplayConfig,
+) -> HostCapabilities {
     let (docker, vmlab) = tokio::join!(
         crate::docker::detect(docker_bin),
         crate::vmlab::detect(vmlab_bin)
     );
+    let display = crate::display::detect(display, docker.present, vmlab.present);
     HostCapabilities {
         docker,
         vmlab,
         shell: detect_shell(),
+        display,
     }
 }
 

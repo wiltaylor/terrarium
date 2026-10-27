@@ -84,6 +84,56 @@ pub struct Config {
     /// time. The daemon enforces it (`429 rate_limited`).
     #[serde(default = "default_max_running_targets")]
     pub max_running_targets: u32,
+    /// Target displays (`[display]`): the opt-in for `desktop` targets.
+    #[serde(default)]
+    pub display: DisplayConfig,
+}
+
+/// `[display]` in the config (PLAN §19b). It opens the desktop of this
+/// machine to `desktop` targets: an agent with an exclusive lease can then
+/// see the screen and use the mouse and the keyboard as the host agent's
+/// user. Off by default. Only this file turns it on; the daemon cannot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DisplayConfig {
+    /// Open the desktop of this machine to `desktop` targets.
+    #[serde(default)]
+    pub enabled: bool,
+    /// The displays a `desktop` target may name, for example `[":0"]`.
+    /// Empty: any.
+    #[serde(default)]
+    pub allowed_displays: Vec<String>,
+    /// The display of a `desktop` target that names none. Default: `:0`
+    /// (X11) or `wayland-0` (Wayland).
+    #[serde(default)]
+    pub default_display: Option<String>,
+    /// `XAUTHORITY` for the X tools, for example `/home/wil/.Xauthority`.
+    /// A systemd service does not have the desktop session's environment.
+    #[serde(default)]
+    pub xauthority: Option<PathBuf>,
+    /// `XDG_RUNTIME_DIR` for the Wayland tools, for example `/run/user/1000`.
+    #[serde(default)]
+    pub runtime_dir: Option<PathBuf>,
+    /// The `tesseract` binary, for OCR on the backends that have none.
+    #[serde(default = "default_tesseract")]
+    pub tesseract_bin: String,
+}
+
+fn default_tesseract() -> String {
+    "tesseract".into()
+}
+
+impl Default for DisplayConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            allowed_displays: Vec::new(),
+            default_display: None,
+            xauthority: None,
+            runtime_dir: None,
+            tesseract_bin: default_tesseract(),
+        }
+    }
 }
 
 /// The default of `max_running_targets`.
@@ -181,6 +231,7 @@ impl Default for Config {
             instances_dir: None,
             repos_dir: None,
             max_running_targets: default_max_running_targets(),
+            display: DisplayConfig::default(),
         }
     }
 }

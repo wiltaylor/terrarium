@@ -257,7 +257,7 @@ output. Run `terrarium <command> --help` for the flags.
 - `version new | attach | submit | wait`: ask the user to review a result.
 - `usage`: your subscription use.
 - `status set <idle|working|blocked> --note ...`: tell the operator your state.
-- `target snapshot | restore | snapshots | snapshot-rm`: vmlab snapshots.
+- `target snapshot | restore | snapshots | snapshot-rm`, `screen`: vmlab snapshots, target screens.
 
 ## Mailbox
 
@@ -265,7 +265,7 @@ output. Run `terrarium <command> --help` for the flags.
 2. When mail arrives, Terrarium types "New mail from ... (thread T)". Run
    `terrarium mail read --thread T --mark`, then act on it.
 3. Reply on the thread with `terrarium mail reply <id> <body | ->`. Do not
-   reply only to say thanks.
+   reply only to thank.
 4. Write to another project with `terrarium mail send project:<name> -s
    "subject" -`. When a card and a thread belong together, run `terrarium
    card link <id> --thread T`.

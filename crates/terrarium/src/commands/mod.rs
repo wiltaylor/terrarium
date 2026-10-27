@@ -13,6 +13,7 @@ pub mod mail;
 pub mod projects;
 pub mod remote;
 pub mod schedules;
+pub mod screen;
 pub mod system;
 pub mod templates;
 pub mod waits;
@@ -82,6 +83,9 @@ pub async fn run(ctx: &Ctx, cmd: &Command) -> anyhow::Result<()> {
         Command::Watch { command, args } => waits::watch(ctx, command.as_ref(), args).await,
         Command::Shell { target } => remote::shell(ctx, target).await,
         Command::Cp { src, dst } => remote::cp(ctx, src, dst).await,
+        Command::Screen { target, agent, op } => {
+            screen::screen(ctx, target, agent.as_deref(), op).await
+        }
         Command::Fleet { command } => fleet::fleet(ctx, command).await,
         Command::Schedule { command } => schedules::schedule(ctx, command).await,
         Command::Admin { command } => admin(ctx, command).await,

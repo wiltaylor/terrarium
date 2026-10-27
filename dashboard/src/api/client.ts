@@ -98,6 +98,11 @@ import type {
   Subscription,
   NewTarget,
   Target,
+  DisplayInfo,
+  DisplayOpName,
+  DisplayOpResult,
+  DisplayShot,
+  ScreenshotOpts,
   TargetReport,
   TranscriptPage,
   TargetVerbBody,
@@ -393,6 +398,12 @@ export interface Api {
     extendLease(name: string, agent: string, until: string | null): Promise<Lease>;
     /** `DELETE /api/targets/{name}/leases/{agent}`: answers the ended lease. */
     revokeLease(name: string, agent: string): Promise<Lease>;
+    /** `GET /api/targets/{name}/display/info` (docs/api.md §17.10). */
+    displayInfo(name: string, agent?: string): Promise<DisplayInfo>;
+    /** `POST /api/targets/{name}/display/screenshot?format=json`. */
+    screenshot(name: string, opts?: ScreenshotOpts): Promise<DisplayShot>;
+    /** `POST /api/targets/{name}/display/{op}`. Input needs an exclusive lease, else `409`. */
+    displayOp(name: string, op: DisplayOpName, body?: Record<string, unknown>): Promise<DisplayOpResult>;
   };
 
   /**
@@ -751,6 +762,10 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       grant: (name, body) => post(`/api/targets/${seg(name)}/leases`, body),
       extendLease: (name, agent, until) => patch(`/api/targets/${seg(name)}/leases/${seg(agent)}`, { until }),
       revokeLease: (name, agent) => t.request("DELETE", `/api/targets/${seg(name)}/leases/${seg(agent)}`),
+      displayInfo: (name, agent) => get(`/api/targets/${seg(name)}/display/info`, agent ? { agent } : undefined),
+      screenshot: (name, opts = {}) =>
+        t.request("POST", `/api/targets/${seg(name)}/display/screenshot`, { query: { format: "json" }, body: opts }),
+      displayOp: (name, op, body = {}) => post(`/api/targets/${seg(name)}/display/${seg(op)}`, body),
     },
 
     schedules: {

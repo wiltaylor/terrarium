@@ -63,6 +63,10 @@ import type {
   SnapshotQuery,
   SnapshotScope,
   Target,
+  DisplayInfo,
+  DisplayOpName,
+  DisplayOpResult,
+  DisplayShot,
   TargetReport,
   TargetSnapshot,
   TargetVerbBody,
@@ -203,6 +207,13 @@ function inTested(version: string, tested: string): boolean {
   });
 }
 
+/** The screen of every mock display (docs/api.md §17.10). */
+export const MOCK_SCREEN = { width: 1280, height: 800 };
+/** A valid 1x1 PNG: the mock screenshot. The image stretches to the panel. */
+export const MOCK_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+const MOCK_PNG_BYTES = 70;
+const MOCK_OPS: DisplayOpName[] = ["info", "screenshot", "move", "click", "drag", "scroll", "keys", "type", "ocr", "find", "record"];
+
 export function fail(status: number, code: string, message: string, details?: unknown): never {
   const error = details === undefined ? { code, message } : { code, message, details };
   throw new ApiError(status, message, { error }, code, details);
@@ -265,8 +276,20 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
   const find = <T>(list: T[], pred: (x: T) => boolean, what: string): T => list.find(pred) ?? notFound(what);
   const project = (name: string) => find(w.projects, (p) => p.name === name, `project \`${name}\``);
   // The target as the API shows it (docs/api.md §17.2). The mock caller is the operator: `access` is `operator`, and the operator holds no lease.
+  // docs/api.md §17.10: a target has a screen when it is vnc, rdp, desktop, vmlab, or docker with `display`.
+  const hasDisplay = (t: Target): boolean =>
+    t.kind === "vnc" || t.kind === "rdp" || t.kind === "desktop" || t.kind === "vmlab" || (t.kind === "docker" && !!t.display);
+  const displayTarget = (id: string): Target => {
+    const t = target(id);
+    if (!hasDisplay(t)) fail(422, "invalid", `target \`${t.name}\` has no display`, { code: "bad_request" });
+    if (t.kind === "vnc" || t.kind === "rdp")
+      fail(422, "invalid", `the ${t.kind} display driver is not implemented yet (step 2)`, { code: "unsupported" });
+    if (w.hosts.find((h) => h.name === t.host)?.status !== "online") fail(409, "conflict", `host agent \`${t.host ?? "?"}\` of target \`${t.name}\` is offline`);
+    return t;
+  };
   const targetView = (t: Target): Target => ({
     ...t,
+    has_display: hasDisplay(t),
     scope: t.project ? "project" : "global",
     host_online: t.kind === "ssh" ? null : w.hosts.some((h) => h.name === t.host && h.status === "online"),
     access: "operator",
@@ -276,8 +299,8 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
   // The checks of the daemon's `store/targets.rs` validate (docs/api.md §17.2): a bad value is `422 invalid`.
   const targetDef = (b: NewTarget): NewTarget => {
     if (!b || typeof b.name !== "string" || !/^[a-z0-9][a-z0-9._-]*$/i.test(b.name)) fail(422, "invalid", "bad target name");
-    if (!["host", "ssh", "docker", "vmlab"].includes(b.kind)) fail(422, "invalid", "`kind` must be host, ssh, docker, or vmlab");
-    for (const f of ["host", "address", "credential", "image", "container", "machine", "lab_ref"] as const) {
+    if (!["host", "ssh", "docker", "vmlab", "vnc", "rdp", "desktop"].includes(b.kind)) fail(422, "invalid", "`kind` must be host, ssh, docker, vmlab, vnc, rdp, or desktop");
+    for (const f of ["host", "address", "credential", "image", "container", "machine", "lab_ref", "username", "domain"] as const) {
       const v = b[f];
       if (v !== undefined && (typeof v !== "string" || !v || /\s/.test(v) || v.startsWith("-"))) fail(422, "invalid", `bad \`${f}\` \`${String(v)}\`: not empty, no spaces, no leading \`-\``);
     }
@@ -287,6 +310,15 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     const need = (f: string, ok: boolean) => ok || fail(422, "invalid", `a \`${b.kind}\` target needs \`${f}\``);
     if (b.kind === "host") need("host", !!b.host);
     if (b.kind === "ssh") need("address", !!b.address);
+    if (b.kind === "vnc" || b.kind === "rdp") {
+      need("host", !!b.host);
+      need("address", !!b.address);
+    }
+    if (b.kind === "desktop") need("host", !!b.host);
+    if ((b.display || b.display_name) && b.kind !== "docker" && b.kind !== "desktop")
+      fail(422, "invalid", `\`display\` and \`display_name\` are for a docker or desktop target, not \`${b.kind}\``);
+    if (b.username && b.kind !== "vnc" && b.kind !== "rdp") fail(422, "invalid", `\`username\` is for a vnc or rdp target, not \`${b.kind}\``);
+    if (b.domain && b.kind !== "rdp") fail(422, "invalid", `\`domain\` is for an rdp target, not \`${b.kind}\``);
     if (b.kind === "docker") {
       need("host", !!b.host);
       need("image` or `container", !!(b.image || b.container));
@@ -2799,6 +2831,42 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           audit("target.revoke", l.target, l.project, { lease: l.id, agent: l.agent, agent_name: l.agent_name });
           leaseEvent(l, "ended", "operator");
           return l;
+        }),
+      // docs/api.md §17.10: the mock caller is the operator, so input is allowed.
+      displayInfo: (name) =>
+        reply((): DisplayInfo => {
+          const t = displayTarget(name);
+          const ops: DisplayOpName[] = t.kind === "vmlab"
+            ? ["info", "screenshot", "move", "click", "drag", "keys", "type", "ocr", "find", "record"]
+            : ["info", "screenshot", "move", "click", "drag", "scroll", "keys", "type"];
+          return { target: t.name, kind: t.kind, backend: t.kind, width: MOCK_SCREEN.width, height: MOCK_SCREEN.height, ops, ocr: t.kind === "vmlab" ? "vmlab" : null, input: { allowed: true, reason: null } };
+        }),
+      screenshot: (name, o = {}) =>
+        reply((): DisplayShot => {
+          const t = displayTarget(name);
+          const scale = o.scale ?? null;
+          if (scale !== null && !(scale >= 0.1 && scale <= 1)) fail(422, "invalid", `scale ${scale} is outside 0.1..=1`);
+          const r = o.region ?? null;
+          const w0 = r ? r.w : MOCK_SCREEN.width;
+          const h0 = r ? r.h : MOCK_SCREEN.height;
+          const f = scale ?? 1;
+          return {
+            target: t.name, op: "screenshot", format: "png",
+            width: Math.max(1, Math.round(w0 * f)), height: Math.max(1, Math.round(h0 * f)),
+            screen: { ...MOCK_SCREEN }, region: r, scale,
+            bytes: MOCK_PNG_BYTES, sha256: "0".repeat(64), png_base64: MOCK_PNG,
+          };
+        }),
+      displayOp: (name, op, body = {}) =>
+        reply((): DisplayOpResult => {
+          const t = displayTarget(name);
+          if (!MOCK_OPS.includes(op)) fail(404, "not_found", `no display operation \`${op}\``);
+          if (op === "scroll" && t.kind === "vmlab") fail(422, "invalid", "vmlab has no scroll input; use keys pagedown or pageup", { code: "unsupported" });
+          if (["move", "click", "drag", "scroll", "keys", "type", "record"].includes(op)) {
+            const detail = op === "type" ? { op, chars: String(body.text ?? "").length } : { op, ...body };
+            audit("target.display", t.name, t.project, detail);
+          }
+          return { target: t.name, op, ok: true, ...(op === "type" ? { chars: String(body.text ?? "").length } : body) };
         }),
     },
 

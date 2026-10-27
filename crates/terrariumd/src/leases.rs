@@ -252,11 +252,25 @@ pub fn pointer_line(conn: &rusqlite::Connection, id: &str) -> ApiResult<Option<S
     } else {
         t.state
     };
-    Ok(Some(granted_line(
-        &l.target,
-        &state,
-        l.expires_at.as_deref(),
-    )))
+    let mut line = granted_line(&l.target, &state, l.expires_at.as_deref());
+    if crate::display::has_display(&t.def) {
+        line.push(' ');
+        line.push_str(&display_hint(&l.target, l.exclusive));
+    }
+    Ok(Some(line))
+}
+
+/// The computer-use hint of a grant on a target with a screen
+/// (docs/api.md §17.10).
+pub fn display_hint(target: &str, exclusive: bool) -> String {
+    let input = if exclusive {
+        "then act with `click`, `keys`, or `type`, and take a new shot"
+    } else {
+        "input needs an exclusive lease"
+    };
+    format!(
+        "It has a screen: run `terrarium screen {target} shot`, open the PNG it prints, {input}. Keep the actions few."
+    )
 }
 
 /// `DELETE /api/targets/{name}/leases/{agent}`. A lease holder may give
@@ -452,5 +466,13 @@ mod tests {
         );
         assert!(granted_line("h", "unknown", None).contains("target h (unknown) until"));
         assert_eq!(ended_line("vlab"), "Your access to target vlab ended.");
+    }
+
+    #[test]
+    fn the_display_hint_names_the_loop_and_the_lease() {
+        let h = display_hint("win", true);
+        assert!(h.contains("terrarium screen win shot"), "{h}");
+        assert!(h.contains("`type`"), "{h}");
+        assert!(display_hint("win", false).contains("exclusive lease"));
     }
 }

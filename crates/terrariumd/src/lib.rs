@@ -8,6 +8,7 @@ pub mod api;
 pub mod assets;
 pub mod credentials;
 pub mod db;
+pub mod display;
 pub mod error;
 pub mod events;
 pub mod executor;

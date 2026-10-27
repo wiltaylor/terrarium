@@ -760,6 +760,8 @@ ${XSS_DOCUMENT}
     { id: "pg-test", name: "pg-test", kind: "docker", project: "webshop", host: "lab1", image: "postgres:17", scope: "project", state: "running", state_at: ago(60), ephemeral: true, keep: false, snapshot_before_task: false, snapshots: [], source: "api", usable: true, runtime: { attached: ["webshop/shop-lead"] } },
     { id: "dev-vm", name: "dev-vm", kind: "vmlab", host: "lab1", lab: "/labs/dev", scope: "global", state: "running", state_at: ago(30), ephemeral: false, keep: false, snapshot_before_task: false, snapshots: ["terrarium"], source: "file", usable: true, runtime: {} },
     { id: "ci-box", name: "ci-box", kind: "docker", host: "lab1", image: "alpine:3", scope: "global", state: "absent", state_at: ago(60 * 5), ephemeral: true, keep: false, snapshot_before_task: false, snapshots: [], source: "api", usable: true, runtime: {} },
+    { id: "desk-x11", name: "desk-x11", kind: "docker", host: "lab1", image: "terrarium/display-x11:dev", display: "x11", scope: "global", state: "stopped", state_at: ago(10), ephemeral: false, keep: false, snapshot_before_task: false, snapshots: [], source: "file", usable: true, runtime: {} },
+    { id: "win-vnc", name: "win-vnc", kind: "vnc", host: "lab1", address: "10.0.0.5:5900", credential: "win-vnc-pw", scope: "global", state: "unknown", ephemeral: false, keep: false, snapshot_before_task: false, snapshots: [], source: "file", usable: true, runtime: {} },
     { id: "pi-runner", name: "pi-runner", kind: "host", host: "pi-cluster", scope: "global", state: "unknown", ephemeral: false, keep: false, snapshot_before_task: false, snapshots: [], source: "file", usable: true, runtime: {} },
     { id: "terrarium-net-lab", name: "terrarium-net-lab", kind: "vmlab", project: "terrarium", host: "lab1", lab_repo: "terrarium", lab_ref: "main", lab_path: "labs/net", machine: "router", scope: "project", state: "stopped", state_at: ago(60 * 3), ephemeral: true, keep: false, snapshot_before_task: false, snapshots: [], source: "api", usable: true, runtime: {} },
     {
@@ -771,7 +773,11 @@ ${XSS_DOCUMENT}
   const hosts: Host[] = [
     {
       name: "lab1", id: fakeUlid("host", 1), host_id: fakeUlid("host", 1), status: "online", online: true, sessions: 1, max_sessions: 32, max_running_targets: 4, connected_at: ago(60), os: "linux", arch: "x86_64", version: "0.1.0", last_seen: ago(0.1),
-      capabilities: { docker: { present: true, version: "29.8.0" }, vmlab: { present: true, version: "0.30.0-alpha" }, shell: "/bin/bash" },
+      capabilities: {
+        docker: { present: true, version: "29.8.0" }, vmlab: { present: true, version: "0.30.0-alpha" }, shell: "/bin/bash",
+        display: { enabled: false, tesseract: true, tools: ["xdotool", "import"], drivers: ["vmlab", "docker"] },
+      },
+      summary: { os: "linux", arch: "x86_64", docker: true, vmlab: true, display: false },
     },
     {
       name: "pi-cluster", id: fakeUlid("host", 2), host_id: fakeUlid("host", 2), status: "offline", online: false, sessions: 0, os: "linux", arch: "aarch64", version: "0.0.9", last_seen: ago(60 * 7),

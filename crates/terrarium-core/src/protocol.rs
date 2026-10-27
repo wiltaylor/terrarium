@@ -133,6 +133,9 @@ pub struct Capabilities {
     pub docker: bool,
     #[serde(default)]
     pub vmlab: bool,
+    /// The host agent's own desktop is open to `desktop` targets.
+    #[serde(default)]
+    pub display: bool,
 }
 
 /// One external tool on a host agent's machine, as `terrarium-host`
@@ -158,6 +161,35 @@ pub struct HostCapabilities {
     /// The shell that `terrarium shell` starts on a `host` target.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shell: Option<String>,
+    /// Target displays (PLAN §19b). An older host agent sends none: the
+    /// default is "off".
+    #[serde(default)]
+    pub display: DisplayCapability,
+}
+
+/// What the host agent can do for target displays (docs/host-protocol.md,
+/// "`display`").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DisplayCapability {
+    /// The desktop of this machine (`desktop` targets): on only when the
+    /// host agent's own config has `[display] enabled = true`. The daemon
+    /// cannot turn it on.
+    #[serde(default)]
+    pub enabled: bool,
+    /// The displays that a `desktop` target may name. Empty: any.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_displays: Vec<String>,
+    /// `tesseract` is on the host: OCR for the backends that have none.
+    #[serde(default)]
+    pub tesseract: bool,
+    /// The X11 and Wayland tools on this machine, for a `desktop` target:
+    /// for example `xdotool`, `import`, `grim`, `wtype`, `ydotool`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<String>,
+    /// The display drivers this host agent has: `vmlab`, `docker`,
+    /// `desktop`, and (later) `vnc`, `rdp`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub drivers: Vec<String>,
 }
 
 impl HostCapabilities {
@@ -168,6 +200,7 @@ impl HostCapabilities {
             arch: arch.to_owned(),
             docker: self.docker.present,
             vmlab: self.vmlab.present,
+            display: self.display.enabled,
         }
     }
 }
@@ -278,6 +311,7 @@ mod tests {
                     arch: "x86_64".into(),
                     docker: true,
                     vmlab: true,
+                    display: false,
                 },
             },
             ExecutorResponse::Output {

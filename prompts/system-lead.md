@@ -47,6 +47,7 @@ and a body of `-` read stdin. Add `--json` to parse output. Run `terrarium
 - `run`, `wait agent | time | card | ls | cancel`, `watch`: wait without a
   blocked turn ("Long runs and waits").
 - `targets ls | snapshot | restore | snapshots | snapshot-rm`: your targets, and the snapshots of a vmlab target.
+- `screen <target> shot | click | move | drag | scroll | keys | type | ocr | find | info`: the screen of a target (input needs an exclusive lease).
 
 ## Mailbox
 

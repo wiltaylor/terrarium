@@ -228,6 +228,38 @@ class InstallHostScript(unittest.TestCase):
         self.assertEqual(block(r.stdout, "/etc/terrarium-host/config.toml"), hi.render_config(s))
         self.assertEqual(block(r.stdout, "/etc/systemd/system/terrarium-host.service"), hi.render_unit(UNIT.read_text(), "wil"))
 
+    def test_enable_display_matches_host_install_py(self):
+        for flag in (False, True):
+            args = ["--token", TOKEN, "--dry-run", "--name", "lab1"] + (["--enable-display"] if flag else [])
+            r = self.h.run(*args)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            s = hi.Settings(
+                target="wil@lab1", name="lab1", daemon_url="wss://terrarium.lan:8082",
+                fingerprint=PIN, service_user="wil", binary=Path("/x"),
+                unit_template=UNIT, terrarium=["terrarium"], enable_display=flag,
+            )
+            config = block(r.stdout, "/etc/terrarium-host/config.toml")
+            self.assertEqual(config, hi.render_config(s))
+            self.assertEqual("[display]\nenabled = true\n" in config, flag)
+            self.assertEqual("can see this machine's screen" in r.stderr, flag)
+
+    def test_enable_display_on_a_system_user_notes_the_session(self):
+        r = self.h.run("--token", TOKEN, "--dry-run", "--enable-display", "--user", "terrarium")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("no desktop session", r.stdout)
+        r = self.h.run("--token", TOKEN, "--dry-run", "--enable-display")
+        self.assertNotIn("no desktop session", r.stdout)
+
+    def test_enable_display_keeps_an_existing_config(self):
+        self.assertEqual(self.h.run("--token", TOKEN).returncode, 0)
+        cfg = self.h.file("/etc/terrarium-host/config.toml")
+        before = cfg.read_text()
+        self.assertNotIn("[display]", before)
+        r = self.h.run("--enable-display")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(cfg.read_text(), before)
+        self.assertIn("add `[display]` with `enabled = true` to it by hand", r.stdout)
+
     def test_ws_url_gets_no_pin_and_a_bare_name_gets_wss_and_8082(self):
         r = self.h.run("--token", TOKEN, "--dry-run", "--host-url", "ws://127.0.0.1:8082")
         self.assertIn('daemon_url = "ws://127.0.0.1:8082"', r.stdout)

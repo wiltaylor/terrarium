@@ -11,9 +11,9 @@ import { ErrorBanner, Modal } from "../../components/ui";
 import type { Target, TargetKind } from "../../api/types";
 import { api, projects } from "../../stores";
 import { capSentence } from "../../lib/target-runtime";
-import { createCreateTargetDialog, GLOBAL, LAB_SOURCES, showsField, type CreateOutcome } from "./create";
+import { createCreateTargetDialog, GLOBAL, LAB_SOURCES, showsField, type CreateOutcome, type CreateTargetForm } from "./create";
 
-const KINDS: readonly TargetKind[] = ["docker", "vmlab", "host", "ssh"];
+const KINDS: readonly TargetKind[] = ["docker", "vmlab", "host", "ssh", "vnc", "rdp", "desktop"];
 
 export function CreateTargetDialog(props: { project: string | null; onClose: () => void; onCreated: (t: Target) => void }) {
   const dlg = createCreateTargetDialog(api, props.project);
@@ -39,7 +39,12 @@ export function CreateTargetDialog(props: { project: string | null; onClose: () 
     const t = await dlg.submit();
     if (t) props.onCreated(t);
   };
-  const text = (key: "host" | "address" | "port" | "credential" | "image" | "container" | "lab" | "machine" | "lab_ref" | "lab_path", label: string, placeholder = "") => (
+  const remote = () => f().kind === "vnc" || f().kind === "rdp";
+  const text = (
+    key: "host" | "address" | "port" | "credential" | "image" | "container" | "lab" | "machine" | "lab_ref" | "lab_path" | "username" | "domain" | "display_name",
+    label: string,
+    placeholder = "",
+  ) => (
     <Show when={shows(key)}>
       <label>
         {label}
@@ -85,12 +90,32 @@ export function CreateTargetDialog(props: { project: string | null; onClose: () 
               </For>
             </select>
           </label>
-          {text("host", "Host agent", "lab1")}
-          {text("address", "Address", "build@buildbox.lan")}
+          {text("host", remote() ? "Host agent (it connects to the server)" : "Host agent", "lab1")}
+          {text("address", remote() ? "Address (host:port)" : "Address", f().kind === "vnc" ? "10.0.0.5:5900" : f().kind === "rdp" ? "win11.lan:3389" : "build@buildbox.lan")}
           {text("port", "Port", "22")}
-          {text("credential", "Credential (an ssh_key name)", "buildbox-key")}
+          {text("username", "User name", "Administrator")}
+          {text("domain", "Domain", "LAB")}
+          {text("credential", remote() ? "Credential (a password name)" : "Credential (an ssh_key name)", remote() ? "win-pw" : "buildbox-key")}
           {text("image", "Image", "alpine:3")}
           {text("container", "Container (an existing one)", "")}
+          <Show when={shows("display")}>
+            <label>
+              Display
+              <select aria-label="Display" value={f().display} onChange={(e) => dlg.set("display", e.currentTarget.value as CreateTargetForm["display"])}>
+                <option value="" selected={!f().display}>
+                  {f().kind === "desktop" ? "auto" : "none"}
+                </option>
+                <For each={["x11", "wayland", "auto"] as const}>
+                  {(d) => (
+                    <option value={d} selected={d === f().display}>
+                      {d}
+                    </option>
+                  )}
+                </For>
+              </select>
+            </label>
+          </Show>
+          {text("display_name", "Display name", ":0 or wayland-0")}
           <Show when={shows("labSource")}>
             <label>
               Lab source
@@ -138,6 +163,16 @@ export function CreateTargetDialog(props: { project: string | null; onClose: () 
           <p class="small muted" aria-label="Lab source help" style={{ margin: 0 }}>
             {source().help}
             {f().labSource !== "dir" && f().scope === GLOBAL ? " It needs a project scope." : ""}
+          </p>
+        </Show>
+        <Show when={f().kind === "desktop"}>
+          <p class="small muted" style={{ margin: 0 }}>
+            A desktop target shows the screen of the host agent's own machine. It works only when the host agent's config has [display] enabled = true.
+          </p>
+        </Show>
+        <Show when={remote()}>
+          <p class="small muted" style={{ margin: 0 }}>
+            A {f().kind} target has only a display. The password stays on the daemon; the host agent gets it only to connect.
           </p>
         </Show>
         <Show when={shows("ephemeral")}>

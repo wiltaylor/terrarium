@@ -30,6 +30,27 @@ describe("createBody", () => {
     expect(showsField("docker", "snapshot_before_task")).toBe(false);
   });
 
+  it("sends the fields of the display kinds (docs/api.md §17.10)", () => {
+    const vnc = emptyCreateForm("lab", { name: "v", kind: "vnc", host: "lab1", address: "10.0.0.5:5900", username: "bob", domain: "LAB", credential: "pw", image: "x", display: "x11" });
+    expect(createBody(vnc)).toEqual({ body: { name: "v", kind: "vnc", project: "lab", host: "lab1", address: "10.0.0.5:5900", username: "bob", credential: "pw" } });
+    const rdp = emptyCreateForm("lab", { name: "r", kind: "rdp", host: "lab1", address: "win:3389", username: "bob", domain: "LAB", credential: "pw" });
+    expect(createBody(rdp)).toEqual({ body: { name: "r", kind: "rdp", project: "lab", host: "lab1", address: "win:3389", username: "bob", domain: "LAB", credential: "pw" } });
+    expect(createBody(emptyCreateForm("lab", { name: "r", kind: "rdp", host: "lab1" }))).toEqual({ error: "A rdp target needs an address (host:port)." });
+    const desk = emptyCreateForm("lab", { name: "d", kind: "desktop", host: "lab1", display: "wayland", display_name: "wayland-1", address: "x" });
+    expect(createBody(desk)).toEqual({ body: { name: "d", kind: "desktop", project: "lab", host: "lab1", display: "wayland", display_name: "wayland-1" } });
+    const docker = emptyCreateForm("lab", { name: "x", kind: "docker", host: "lab1", image: "desk:1", display: "x11", display_name: ":1" });
+    expect(createBody(docker)).toEqual({ body: { name: "x", kind: "docker", project: "lab", host: "lab1", image: "desk:1", display: "x11", display_name: ":1" } });
+    expect(createBody(emptyCreateForm("lab", { name: "x", kind: "docker", host: "lab1", image: "desk:1", display_name: ":1" }))).toHaveProperty("error");
+    expect(showsField("vmlab", "display")).toBe(false);
+  });
+
+  it("creates a vnc target through the mock", async () => {
+    const api = mock();
+    const dlg = createCreateTargetDialog(api, "terrarium", { name: "win", kind: "vnc", host: "lab1", address: "10.0.0.9", credential: "pw" });
+    const t = await dlg.submit();
+    expect(t).toMatchObject({ name: "terrarium-win", kind: "vnc", has_display: true });
+  });
+
   it("says what is missing or bad", () => {
     expect(createBody(emptyCreateForm("lab", { kind: "host", host: "lab1" }))).toHaveProperty("error");
     expect(createBody(emptyCreateForm("lab", { name: "d", kind: "docker", host: "lab1" }))).toEqual({ error: "A docker target needs an image or a container." });

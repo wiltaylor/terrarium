@@ -968,6 +968,15 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX watches_agent ON watches(agent);
     CREATE INDEX watches_watcher ON watches(watcher);
     "#,
+    // 25: the target kinds `vnc`, `rdp`, and `desktop` (PLAN §19b). A CHECK
+    // cannot change in place, so the column is swapped, as in migration 9.
+    r#"
+    ALTER TABLE targets ADD COLUMN kind_v25 TEXT NOT NULL DEFAULT 'host'
+        CHECK (kind_v25 IN ('host', 'ssh', 'docker', 'vmlab', 'vnc', 'rdp', 'desktop'));
+    UPDATE targets SET kind_v25 = kind;
+    ALTER TABLE targets DROP COLUMN kind;
+    ALTER TABLE targets RENAME COLUMN kind_v25 TO kind;
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call
@@ -1489,6 +1498,55 @@ mod tests {
             )
             .unwrap();
         assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn migration_25_keeps_targets_and_allows_display_kinds() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        for sql in &MIGRATIONS[..23] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 23).unwrap();
+        conn.execute(
+            "INSERT INTO targets (name, project, kind, def, source, created_at, updated_at)
+               VALUES ('box', 'p', 'docker', '{}', 'fleet:f', 't', 't')",
+            [],
+        )
+        .unwrap();
+        assert!(
+            conn.execute(
+                "INSERT INTO targets (name, kind, def, created_at, updated_at)
+                   VALUES ('v0', 'vnc', '{}', 't', 't')",
+                [],
+            )
+            .is_err(),
+            "the old CHECK refuses vnc"
+        );
+        assert_eq!(migrate(&mut conn).unwrap(), MIGRATIONS.len() - 23);
+        let (kind, source): (String, String) = conn
+            .query_row(
+                "SELECT kind, source FROM targets WHERE name = 'box'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((kind.as_str(), source.as_str()), ("docker", "fleet:f"));
+        for k in ["vnc", "rdp", "desktop"] {
+            conn.execute(
+                "INSERT INTO targets (name, kind, def, created_at, updated_at)
+                   VALUES (?1, ?1, '{}', 't', 't')",
+                [k],
+            )
+            .unwrap();
+        }
+        assert!(
+            conn.execute(
+                "INSERT INTO targets (name, kind, def, created_at, updated_at)
+                   VALUES ('x', 'telnet', '{}', 't', 't')",
+                [],
+            )
+            .is_err()
+        );
     }
 
     #[test]

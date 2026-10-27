@@ -858,10 +858,12 @@ POST /api/repos/credential          (agent)
 **Credentials.** The store is `<state>/credentials/`, mode 0700. The secret
 is `<name>` (mode 0600). The metadata, without the secret, is `<name>.json`.
 No endpoint gives the secret back, except the credential helper above.
-`kind` is `token` or `ssh_key`. A token is one line. A token's `username`
-defaults to `x-access-token`. An `ssh_key` is a private key in OpenSSH or
-PEM format, and has no `username`. A `POST` with an existing name replaces
-the credential.
+`kind` is `token`, `ssh_key`, or `password`. A token is one line. A token's
+`username` defaults to `x-access-token`. An `ssh_key` is a private key in
+OpenSSH or PEM format, and has no `username`. A `password` (1 to 1024 bytes,
+one line, spaces kept) is for a `vnc` or `rdp` target, with an optional
+default `username` (§17.10); a repo cannot use it. A `POST` with an
+existing name replaces the credential.
 
 For one clone or fetch, the daemon puts the secret in a 0700 run dir under
 `<state>/credentials/.run/`, and removes the dir after the run. A token goes
@@ -2767,6 +2769,7 @@ all projects. Targets are project targets by default: a global target
 | `usable` | The caller may use the target (§17.4). |
 | `access` | Why the caller may use it: `operator`, `policy`, `lease`, or `null`. |
 | `lease` | The caller's active lease on the target (§17.7), when `access` is `lease`; else `null`. |
+| `has_display` | The target has a screen (§17.10): `vnc`, `rdp`, `desktop`, `vmlab` with a `machine` (or a lab instance kind), and a `docker` target with `display`. |
 | `runtime` | What runs now (§17.8): `attached` (the agent workspaces, `<project>/<agent>`, in the container or the lab instance), `lab` and `head` (the instance dir on the host and the commit of a `lab_repo` target), `instances` (one for each holder of a `lab_from_workspace` target, by the agent ULID: `{agent_name, lab, state, attached}`). `{}` when nothing runs. |
 
 **The project prefix.** `POST /api/targets` with a `project` names the
@@ -2801,8 +2804,16 @@ The fields that each kind needs:
 |---|---|---|
 | `host` | `host` | |
 | `ssh` | `address` | `port`, `credential` (an `ssh_key` in the credential store) |
-| `docker` | `host`, and `image` or `container` | `ephemeral`, `keep` |
+| `docker` | `host`, and `image` or `container` | `ephemeral`, `keep`, `display` (`x11`, `wayland`, `auto`), `display_name` (§17.10) |
 | `vmlab` | `host`, and one of: `lab` (an absolute path); `lab_repo` with `machine`; `lab_from_workspace = true` with `machine` | `machine`, `lab_ref`, `lab_path`, `ephemeral`, `keep`, `snapshot_before_task` |
+| `vnc` | `host` (the host agent that connects), `address` (`host:port`, port default 5900) | `username`, `credential` (a `password` in the credential store) |
+| `rdp` | `host`, `address` (port default 3389) | `username`, `domain`, `credential` (a `password`) |
+| `desktop` | `host` | `display` (default `auto`), `display_name` |
+
+`vnc`, `rdp`, and `desktop` targets have only a display (§17.10): exec,
+shell, cp, checkout, and snapshots are `422 invalid`. `display` and
+`display_name` go with `docker` and `desktop` only; `username` and
+`domain` with `vnc` and `rdp` only (`domain`: `rdp` only).
 
 The three kinds of vmlab target (§17.8):
 
@@ -2835,8 +2846,8 @@ sends this `PATCH`.
 
 An `ephemeral` target must be `docker` (with `image`) or `vmlab`. Values
 that go onto a command line (`host`, `address`, `image`, `container`,
-`machine`, `credential`) must not be empty, must not hold spaces, and must
-not start with `-`. A bad value is `422 invalid`.
+`machine`, `credential`, `username`, `domain`) must not be empty, must not
+hold spaces, and must not start with `-`. A bad value is `422 invalid`.
 
 File sync, at start and on `POST /api/reload`: a file target is made or
 updated and becomes `file`. An API target with the same name becomes
@@ -2861,6 +2872,8 @@ a `target.<verb>` audit row with the same report.
 | Kind | `up` | `down` | `snapshot` / `restore` | `status` |
 |---|---|---|---|---|
 | `host`, `ssh` | no-op | no-op | `422 invalid` | `running` when the host agent is online, else `unknown` |
+| `vnc`, `rdp` | no-op | no-op | `422 invalid` | a TCP connect from the host agent to `address` (the `probe` frame): `running` when it connects, else `unknown`, with `result: {reachable, error?, elapsed_ms}` |
+| `desktop` | no-op | no-op | `422 invalid` | `running` when the host agent is online and its desktop display is on, else `unknown` |
 | `docker` | `docker.inspect`; when absent, `docker.run -d --init --name <c> --label terrarium.target=<name> <image> sleep infinity`; when stopped, `docker.start` (an ephemeral target with `image`: `docker.rm -f -v` and a new `docker.run`) | `docker.stop`; an ephemeral target without `keep` (or `destroy: true`): `docker.rm -f -v` | `422 invalid` | `docker.inspect` |
 | `vmlab` | `vmlab.up [machine]` | `vmlab.down [machine]`; ephemeral without `keep` (or `destroy: true`): `vmlab.destroy` | `vmlab.snapshot_take` / `vmlab.snapshot_restore`: with `--vm machine` for the scope `machine`, without `--vm` (every machine of the lab) for the scope `lab` | `vmlab.status`, the row of `machine` (no row: `absent`). A lab that is not running (not in `vmlab lab list`): `absent` for an ephemeral target without `keep`, else `stopped` |
 
@@ -3325,6 +3338,158 @@ Rules:
   SHA-256 finds a broken download; it does not prove where the binary
   came from. Serve the dashboard port over HTTPS (a proxy) when the hosts
   reach it over a network that you do not trust.
+
+### 17.10 Target displays
+
+PLAN §19b. An agent uses the screen of a target: it takes a screenshot,
+looks at the PNG, moves and clicks the mouse, and types. The daemon sends
+each operation to the target's host agent in one `display` frame
+([host-protocol.md "`display`"](host-protocol.md#display)). The code is
+`crates/terrariumd/src/display.rs` (the daemon side) and
+`crates/terrarium-host/src/display/` (the drivers).
+
+| Kind | The screen | Backend |
+|---|---|---|
+| `vmlab` | The screen of `machine` | `vmlab vm screenshot`, `mouse-move`, `click`, `drag`, `sendkeys`, `ocr`, `find-image`; `vmlab record` |
+| `docker` with `display` | An X11 or Wayland session in the container | `docker exec` of the tools below |
+| `desktop` | The desktop of the host agent's machine | the tools below, on the host. Only when the host agent opts in (below) |
+| `vnc` | A VNC server at `address` | the host agent's VNC client (step 2; now `422` "not implemented yet") |
+| `rdp` | An RDP server at `address` | the host agent's RDP client (step 2; now `422` "not implemented yet") |
+
+The tools for `docker` and `desktop`:
+
+| `display` | Screenshot | Pointer | Keys and text |
+|---|---|---|---|
+| `x11` | `import -window root png:-` (ImageMagick), else `xwd \| convert`, else `scrot` | `xdotool` | `xdotool key`, `xdotool type --file -` |
+| `wayland` | `grim -` | `ydotool` (needs `ydotoold` and its socket) | `wtype` |
+| `auto` | `x11` when `xdotool` is in the container (or on the host), else `wayland` when `grim` is | | |
+
+`display_name` is the X display (default `:0`) or the Wayland socket
+(default `wayland-0`, or an absolute path when the image sets no
+`XDG_RUNTIME_DIR`). Wayland input works with wlroots compositors (sway,
+cage, labwc). GNOME and KDE on Wayland refuse synthetic input: use a
+`vnc` or `rdp` target for them. `examples/display/` has two test images.
+
+**Endpoints.**
+
+| Endpoint | Body or query | Answer |
+|---|---|---|
+| `GET /api/targets/{name}/display/info` | `?agent=` | `200` the info, below |
+| `POST /api/targets/{name}/display/screenshot` | `{"region"?, "scale"?, "agent"?}`; `?format=json` | `200` `image/png`, or JSON with `png_base64` |
+| `POST /api/targets/{name}/display/move` | `{"x", "y"}` | `200` `{"target", "op", "ok", ...}` |
+| `POST /api/targets/{name}/display/click` | `{"x"?, "y"?, "button"?, "double"?}` | `200` |
+| `POST /api/targets/{name}/display/drag` | `{"x1", "y1", "x2", "y2"}` | `200` |
+| `POST /api/targets/{name}/display/scroll` | `{"x"?, "y"?, "dx"?, "dy"?}` | `200` |
+| `POST /api/targets/{name}/display/keys` | `{"chord"}` | `200` `{..., "chord"}`, the chord in its canonical spelling |
+| `POST /api/targets/{name}/display/type` | `{"text"}` | `200` `{..., "chars"}` |
+| `POST /api/targets/{name}/display/ocr` | `{"region"?}` | `200` `{"target", "op", "engine", "text", "region"}` |
+| `POST /api/targets/{name}/display/find` | `{"image_base64", "threshold"?, "region"?}` | `200` `{"target", "op", "found", "x"?, "y"?, "w"?, "h"?, "score"?, "center"?}` |
+| `POST /api/targets/{name}/display/record` | `{"action": "start"\|"stop"}` | `200` `{"target", "op", "action", "recording", "output"}` |
+| `POST /api/targets/{name}/display/info` | `{}` | the same as the `GET` |
+
+Every body also takes `agent`: on a `lab_from_workspace` target, the
+holder whose instance (an agent caller always uses its own; the operator
+must name one), as for exec (§17.4).
+
+The values:
+
+- `x`, `y`, `x1`, `y1`, `x2`, `y2` are pixels from the top-left corner of
+  the full screen, `0` to `32767`. `click` and `scroll` take both `x` and
+  `y` or neither (neither: where the pointer is).
+- `button` is `left` (default), `right`, or `middle`. `double: true` clicks
+  two times.
+- `dx` and `dy` are wheel steps, at most 100. A positive `dy` scrolls down,
+  a positive `dx` scrolls right.
+- `chord` is key names joined with `-` or `+`: `ctrl-l`, `ctrl+alt+delete`,
+  `Return`, `shift-f10`. Modifiers: `ctrl`, `alt`, `shift`, `super`
+  (`win`, `meta`). Keys: a letter, a digit, `f1` to `f24`, `enter`
+  (`return`), `tab`, `escape` (`esc`), `space`, `backspace`, `delete`,
+  `insert`, `up`, `down`, `left`, `right`, `home`, `end`, `pageup`,
+  `pagedown`, `menu`, `print`, `pause`, `capslock`, `numlock`,
+  `scrolllock`, and the punctuation names `minus`, `equal`, `bracketleft`,
+  `bracketright`, `backslash`, `semicolon`, `apostrophe`, `comma`,
+  `period`, `slash`, `grave`. The names do not depend on case.
+- `text` is 1 to 2000 Unicode characters. Newline and tab are keys; other
+  control characters are `422`. The host agent sends the text on the
+  tool's stdin, never on a command line.
+- `region` is `{"x", "y", "w", "h"}`. `scale` is `0.1` to `1`: the host
+  agent crops first, then scales.
+- `image_base64` is a PNG of at most 512 KiB. `threshold` is `0` to `1`
+  (vmlab's default is `0.9`).
+
+The screenshot answer:
+
+- Without `format=json`: `image/png`, with the headers `X-Display-Width`,
+  `X-Display-Height` (the image), `X-Screen-Width`, `X-Screen-Height` (the
+  full screen), and `Cache-Control: no-store`.
+- With `?format=json`: `{"target", "op": "screenshot", "format": "png",
+  "width", "height", "screen": {"width", "height"}, "region", "scale",
+  "bytes", "sha256", "png_base64"}`. The CLI and the dashboard use this
+  form, because the agent tunnel carries JSON only.
+- The PNG is at most 8 MiB. Ask for a `region` or a smaller `scale` for a
+  larger screen. The daemon does not store a screenshot: the caller saves
+  it.
+
+The info answer:
+
+```json
+{"target":"win","kind":"vmlab","backend":"vmlab","width":1280,"height":800,
+ "ops":["info","screenshot","move","click","drag","keys","type","ocr","find","record"],
+ "ocr":"vmlab","input":{"allowed":false,"reason":"input on target `win` needs an exclusive lease ..."}}
+```
+
+`ops` lists what the backend does. `ocr` is the OCR engine: the backend's
+own (`vmlab`), `tesseract` on the host agent, or `null`. `input` says if
+the caller may send input now (the rules below). `info` takes a
+screenshot to read the size.
+
+**Rights.**
+
+- `info`, `screenshot`, `ocr`, and `find` read the screen. The caller may
+  use the target (§17.4: the operator, `policy.targets`, or an active
+  lease), or is an admin of it (a sysadmin, or the project_admin of the
+  target's project). Else `403 forbidden`.
+- `move`, `click`, `drag`, `scroll`, `keys`, `type`, and `record` are
+  input. The operator may always send input. An agent may send input when
+  it holds an active **exclusive** lease on the target, or when it is an
+  admin of the target. Else the answer is `409 conflict`, with a message
+  that names `terrarium admin target grant <target> <agent> --exclusive`.
+  While another agent holds an exclusive lease on the target, input from
+  any agent other than that holder is `409 lease_held` (the message and
+  the details name the holder and its `expires_at`).
+- A lead grants `--exclusive` for display work, so two agents do not move
+  one mouse.
+- Each input operation writes the audit row `target.display` with the
+  operation, the coordinates, the button, the chord, and for `type` only
+  the length (`chars`), never the text. A read writes no audit row.
+- Input is rate limited: at most 20 operations in one second on one
+  target (`429 rate_limited`).
+
+**Errors.**
+
+| Answer | When |
+|---|---|
+| `403 forbidden` | The caller may not use the target. Also a `desktop` target on a host agent whose config does not opt in: "the desktop display of host `<h>` is off". |
+| `404 not_found` | No target, or no such operation. |
+| `409 conflict` | Input without an exclusive lease (above). The host agent is offline. A lab instance target with no instance. |
+| `409 lease_held` | Another agent holds an exclusive lease on the target. |
+| `422 invalid` | A bad value, a target with no display, or a host agent that cannot do the operation: `details.code` is `bad_request`, `unsupported` (a missing tool, with the package to install; "not implemented yet (step 2)"; "no OCR"), or `failed` (the tool ran and failed, with its message). |
+| `429 rate_limited` | Over 20 input operations in one second on the target. |
+
+**The opt-in of a desktop.** The host agent's own config turns on its
+desktop: `[display] enabled = true`, and optional `allowed_displays`
+([host-protocol.md "Host agent configuration"](host-protocol.md#host-agent-configuration)).
+The daemon cannot turn it on. The host agent sends the state in `hello`
+(`capabilities.display.enabled`); `GET /api/hosts` shows it, and
+`summary.display`. The daemon refuses a `desktop` target on a host with
+the display off before it sends a frame, and the host agent refuses the
+frame too.
+
+**Secrets.** A `vnc` or `rdp` target names a `password` credential
+(`POST /api/credentials {"name", "kind": "password", "value",
+"username"?}`). The daemon reads it only to build the `display` frame,
+and sends it only to the target's host agent in that frame. No answer to
+an agent or to the dashboard holds it, and the audit rows do not.
 
 ## 18. Fleet
 

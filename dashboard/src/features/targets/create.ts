@@ -12,7 +12,7 @@
 import { createSignal } from "solid-js";
 import type { Api } from "../../api/client";
 import { ApiError } from "../../api/http";
-import type { NewTarget, Target, TargetKind } from "../../api/types";
+import type { DisplayProtocol, NewTarget, Target, TargetKind } from "../../api/types";
 import { capError, fullTargetName, type CapError, type LabSource } from "../../lib/target-runtime";
 
 /** The scope choice: a project name, or `GLOBAL`. Empty: not chosen yet. */
@@ -38,6 +38,14 @@ export interface CreateTargetForm {
   /** vmlab, source `repo` or `workspace`: the dir that holds `vmlab.wcl`. */
   lab_path: string;
   machine: string;
+  /** vnc and rdp: the user name to log in with. */
+  username: string;
+  /** rdp: the Windows domain. */
+  domain: string;
+  /** docker and desktop: the display server; "" is no display (docker) or `auto` (desktop). */
+  display: "" | DisplayProtocol;
+  /** docker and desktop: the X display or the Wayland socket. */
+  display_name: string;
   ephemeral: boolean;
   keep: boolean;
   snapshot_before_task: boolean;
@@ -58,9 +66,15 @@ export type CreateOutcome =
 export const KIND_FIELDS: Record<TargetKind, readonly (keyof CreateTargetForm)[]> = {
   host: ["host"],
   ssh: ["address", "port", "credential"],
-  docker: ["host", "image", "container", "ephemeral", "keep"],
+  docker: ["host", "image", "container", "ephemeral", "keep", "display", "display_name"],
   vmlab: ["host", "labSource", "lab", "lab_repo", "lab_ref", "lab_path", "machine", "ephemeral", "keep", "snapshot_before_task"],
+  vnc: ["host", "address", "username", "credential"],
+  rdp: ["host", "address", "username", "domain", "credential"],
+  desktop: ["host", "display", "display_name"],
 };
+
+/** The default port of a vnc or rdp address (docs/api.md §17.2). */
+export const DEFAULT_PORT: Partial<Record<TargetKind, number>> = { vnc: 5900, rdp: 3389 };
 
 /** The fields of each lab source (docs/api.md §17.2). */
 export const SOURCE_FIELDS: Record<LabSource, readonly (keyof CreateTargetForm)[]> = {
@@ -101,6 +115,10 @@ export const emptyCreateForm = (selectedProject: string | null | undefined, init
   lab_ref: "",
   lab_path: "",
   machine: "",
+  username: "",
+  domain: "",
+  display: "",
+  display_name: "",
   ephemeral: false,
   keep: false,
   snapshot_before_task: false,
@@ -121,7 +139,7 @@ export function createBody(f: CreateTargetForm): { body: NewTarget } | { error: 
   const body: NewTarget = { name, kind: f.kind };
   if (f.scope !== GLOBAL) body.project = f.scope;
   const shows = (k: keyof CreateTargetForm) => showsField(f.kind, k, f.labSource);
-  const text = ["host", "address", "credential", "image", "container", "lab", "machine", "lab_repo", "lab_ref", "lab_path"] as const;
+  const text = ["host", "address", "credential", "image", "container", "lab", "machine", "lab_repo", "lab_ref", "lab_path", "username", "domain", "display_name"] as const;
   for (const k of text) {
     const v = f[k].trim();
     if (!v || !shows(k)) continue;
@@ -130,6 +148,8 @@ export function createBody(f: CreateTargetForm): { body: NewTarget } | { error: 
     } else if (k !== "lab" && badArg(v)) return { error: `\`${k}\` must not hold spaces or start with "-".` };
     body[k] = v;
   }
+  if (shows("display") && f.display) body.display = f.display;
+  if (body.display_name && f.kind === "docker" && !body.display) return { error: "Choose the display server (x11, wayland, or auto) for a display name." };
   if (shows("port") && f.port.trim()) {
     const port = Number(f.port.trim());
     if (!Number.isInteger(port) || port < 1 || port > 65535) return { error: "The port must be a number from 1 to 65535." };
@@ -143,7 +163,9 @@ export function createBody(f: CreateTargetForm): { body: NewTarget } | { error: 
         ? (need("a host", !!body.host) ?? need("an image or a container", !!(body.image || body.container)))
         : f.kind === "vmlab"
           ? (need("a host", !!body.host) ?? vmlabMissing(f, body))
-          : need("a host", !!body.host);
+          : f.kind === "vnc" || f.kind === "rdp"
+            ? (need("a host", !!body.host) ?? need("an address (host:port)", !!body.address))
+            : need("a host", !!body.host);
   if (missing) return missing;
   if (body.lab && !body.lab.startsWith("/")) return { error: "The lab must be an absolute path." };
   if (shows("ephemeral") && f.ephemeral) {
