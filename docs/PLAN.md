@@ -1392,6 +1392,12 @@ for Codex and Copilot. The research is in
 [research/credential-sharing.md](research/credential-sharing.md); the code is
 `crates/terrariumd/src/accounts.rs` and `account_swap.rs`.
 
+A Claude Code, Codex, or Copilot agent with no subscription uses the one
+plan account of its harness,
+as it used the shared login before. When the harness has two or more
+accounts, its start fails with a message that names them: give the agent a
+subscription.
+
 **The refresh rule.** The daemon never refreshes an OAuth token, never calls
 an OAuth token endpoint, and never writes a token that it got itself. Each
 harness refreshes its own token with its own code, under its own lock. The

@@ -1080,14 +1080,48 @@ fn pool_with_logins(input: &LaunchInput<'_>, current: &str) -> Vec<String> {
         .collect()
 }
 
+/// The account of a Claude, Codex, or Copilot agent with no subscription:
+/// the one account of `harness`, as the shared login was before the
+/// migration. With two or
+/// more, the agent must name one. With none, nothing (an API key, or the
+/// shared login before the migration).
+fn default_account(state_dir: &Path, harness: HarnessId) -> Result<Option<String>, String> {
+    let mut names: Vec<String> = fs::read_dir(credentials_dir(state_dir).join(ACCOUNTS_DIR))
+        .map(|d| {
+            d.flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| has_credential(state_dir, n, harness))
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    match names.as_slice() {
+        [] => Ok(None),
+        [one] => Ok(Some(one.clone())),
+        many => Err(format!(
+            "the agent has no subscription, and {} {harness} accounts exist ({}): set one \
+             with `terrarium admin agent set <agent> --subscription <name>`",
+            many.len(),
+            many.join(", ")
+        )),
+    }
+}
+
 /// Point the agent at its account and give the env, the binds, and the
 /// overlays of the launch (PLAN §16.3). An agent whose subscription has
 /// no account of the harness gets nothing: it uses an API key, or the
 /// shared login before the migration.
 pub fn prepare_launch(input: &LaunchInput<'_>) -> Result<LaunchAccounts, String> {
     let mut out = LaunchAccounts::default();
+    // pi agents name their provider through a subscription (mostly API
+    // keys), so pi gets no default account.
+    let default = match input.subscription {
+        None if input.harness != HarnessId::Pi => default_account(input.state_dir, input.harness)?,
+        _ => None,
+    };
     let current = input
         .subscription
+        .or(default.as_deref())
         .filter(|s| has_credential(input.state_dir, s, input.harness));
     let fs_err = |e: io::Error| format!("cannot point the agent at its account: {e}");
     if input.harness == HarnessId::Pi && pi_link_installed(input.shared_home) {
@@ -1608,6 +1642,45 @@ mod tests {
             )]
         );
         assert_eq!(pointed(&h), Some(store_dir(&state, "max-b")));
+
+        // No subscription: the one account of the harness, as the shared
+        // login was. Three accounts here, so the agent must name one.
+        let e = prepare_launch(&LaunchInput {
+            subscription: None,
+            ..input
+        })
+        .unwrap_err();
+        assert!(
+            e.contains("3 claude accounts exist (max-a, max-b, max-c)"),
+            "{e}"
+        );
+        let solo = tmp.path().join("solo");
+        write_credential(
+            &solo,
+            "only",
+            HarnessId::Claude,
+            claude_login("only").as_bytes(),
+            &home,
+        )
+        .unwrap();
+        let h1 = tmp.path().join("agent1/harness");
+        let one = prepare_launch(&LaunchInput {
+            state_dir: &solo,
+            subscription: None,
+            harness_dir: &h1,
+            ..input
+        })
+        .unwrap();
+        assert_eq!(one.account.as_deref(), Some("only"));
+        assert_eq!(pointed(&h1), Some(store_dir(&solo, "only")));
+        let empty = tmp.path().join("empty");
+        let none = prepare_launch(&LaunchInput {
+            state_dir: &empty,
+            subscription: None,
+            ..input
+        })
+        .unwrap();
+        assert_eq!(none, LaunchAccounts::default());
 
         // No account for the subscription: nothing (an API key, or the
         // shared login before the migration).
