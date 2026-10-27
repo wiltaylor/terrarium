@@ -1355,6 +1355,14 @@ button.disclosure {
 .cron-helper .chip {
   margin: 2px 4px 2px 0;
 }
+/* The agent Screen panel: the terminal rows as they are, no wrap. */
+pre.screen-snapshot {
+  margin: 0;
+  white-space: pre;
+  line-height: 1.25;
+  max-height: 70vh;
+  overflow: auto;
+}
 pre.run-output {
   max-height: 16rem;
   overflow: auto;

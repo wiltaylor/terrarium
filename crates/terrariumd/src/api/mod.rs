@@ -15,6 +15,7 @@ mod memory;
 mod projects;
 mod repos;
 mod schedules;
+mod screen;
 pub mod session;
 mod streams;
 mod subscriptions;
@@ -218,6 +219,7 @@ fn routes(state: Shared, serve_artifacts: bool, host_connect: bool) -> Router {
         .merge(repos::routes())
         .merge(agents::routes())
         .merge(transcripts::routes())
+        .merge(screen::routes())
         .merge(mail::routes())
         .merge(board::routes())
         .merge(memory::routes())

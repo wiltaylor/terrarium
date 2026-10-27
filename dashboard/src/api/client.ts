@@ -85,6 +85,7 @@ import type {
   ScheduleQuery,
   ScheduleRun,
   Session,
+  AgentScreen,
   SessionGrant,
   SessionInfo,
   PasswordChange,
@@ -200,6 +201,8 @@ export interface Api {
     leases(id: string, opts?: { all?: boolean }): Promise<Lease[]>;
     /** Bidirectional PTY. See ./sockets for the protocol. */
     pty(id: string): PtySocket;
+    /** `GET /api/agents/{id}/screen` (docs/api.md §6.5): a read-only text snapshot of the harness screen. 409 when the agent is not running. */
+    screen(id: string): Promise<AgentScreen>;
   };
 
   board: {
@@ -566,6 +569,7 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       setRoles: (id, roles) => put(`${a(id)}/roles`, roles),
       leases: (id, o = {}) => get(`${a(id)}/leases`, o.all ? { all: true } : undefined),
       pty: (id) => socket(`${a(id)}/pty`),
+      screen: (id) => get(`${a(id)}/screen`),
     },
 
     board: {
