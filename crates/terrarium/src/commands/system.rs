@@ -388,29 +388,38 @@ pub async fn admin_target(ctx: &Ctx, cmd: &AdminTargetCmd) -> anyhow::Result<()>
     match cmd {
         AdminTargetCmd::Ls => admin_targets(ctx).await,
         AdminTargetCmd::Snapshot(c) => snapshot(ctx, c).await,
-        AdminTargetCmd::New {
-            name,
-            kind,
-            address,
-            port,
-            credential,
-            host,
-            image,
-            container,
-            lab,
-            machine,
-            lab_repo,
-            lab_ref,
-            lab_path,
-            lab_from_workspace,
-            ephemeral,
-            keep,
-            global,
-        } => {
+        AdminTargetCmd::New(a) => {
+            let crate::cli::AdminTargetNewArgs {
+                name,
+                kind,
+                address,
+                port,
+                credential,
+                username,
+                domain,
+                display,
+                display_name,
+                host,
+                image,
+                container,
+                lab,
+                machine,
+                lab_repo,
+                lab_ref,
+                lab_path,
+                lab_from_workspace,
+                ephemeral,
+                keep,
+                global,
+            } = &**a;
             let mut body = json!({"name": name, "kind": kind});
             set_opt(&mut body, "address", address.clone());
             set_opt(&mut body, "port", *port);
             set_opt(&mut body, "credential", credential.clone());
+            set_opt(&mut body, "username", username.clone());
+            set_opt(&mut body, "domain", domain.clone());
+            set_opt(&mut body, "display", display.clone());
+            set_opt(&mut body, "display_name", display_name.clone());
             set_opt(&mut body, "host", host.clone());
             set_opt(&mut body, "image", image.clone());
             set_opt(&mut body, "container", container.clone());

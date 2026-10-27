@@ -223,7 +223,9 @@ mod tests {
             .unwrap();
         assert_eq!(v["reachable"], true, "{v}");
         drop(l);
-        let v = tcp_probe(&addr, std::time::Duration::from_secs(2))
+        // Port 1 on loopback refuses at once. A freed port can be taken
+        // again by a parallel test.
+        let v = tcp_probe("127.0.0.1:1", std::time::Duration::from_secs(2))
             .await
             .unwrap();
         assert_eq!(v["reachable"], false, "{v}");

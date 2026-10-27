@@ -1444,6 +1444,9 @@ Target kinds:
 | `ssh` | any machine with SSH | permanent | zero install; no lifecycle features |
 | `docker` | a host agent with Docker | ephemeral or permanent | image or existing container |
 | `vmlab` | a host agent with vmlab | ephemeral or permanent | lab file or template; `snapshot` gives reset-to-clean |
+| `vnc` | a VNC server that a host agent reaches | permanent | display only (§19b) |
+| `rdp` | an RDP server that a host agent reaches | permanent | display only (§19b) |
+| `desktop` | the desktop of a host agent's machine | permanent | display only; the host agent must opt in (§19b) |
 
 A target definition names its host agent:
 
@@ -1504,6 +1507,76 @@ pty}` with streamed output and exit code, plus `cp` and lifecycle verbs. The
 daemon routes each call to the right host agent or SSH connection. `terrarium
 exec`, `shell`, and `cp` are thin clients of it. `shell` forwards the agent's
 PTY, so a harness can drive an interactive remote session.
+
+## 19b. Target displays (computer use)
+
+Some work has only a screen: a Windows installer, a desktop application,
+a web page in a browser, a BIOS menu. An agent does this work through the
+screen of a target. The loop is: take a screenshot, look at the PNG, do one
+or two actions, take a screenshot again.
+
+**The screens.**
+
+| Target | The screen | How the host agent reaches it |
+|---|---|---|
+| `vmlab` | the screen of `machine` | `vmlab vm screenshot`, `mouse-move`, `click`, `drag`, `sendkeys`, `ocr`, `find-image`, and `vmlab record` |
+| `docker` with `display = "x11"`, `"wayland"`, or `"auto"` | an X11 or Wayland session in the container | `docker exec` of `xdotool` and `import` (X11), or `grim`, `wtype`, and `ydotool` (wlroots Wayland) |
+| `desktop` | the desktop of the host agent's machine | the same tools, on the host. Off unless the host agent opts in |
+| `vnc` | a VNC server at `address` | the host agent's RFB client (step 2) |
+| `rdp` | an RDP server at `address` | the host agent's RDP client, IronRDP (step 2) |
+
+`vnc`, `rdp`, and `desktop` targets have only a display: no exec, no
+copy, no shell. Their `up` and `down` change nothing. Their `status` is a
+TCP connect from the host agent (`vnc`, `rdp`), or the host agent's
+opt-in (`desktop`). GNOME and KDE on Wayland refuse synthetic input from
+the tools: reach them through VNC or RDP.
+
+**The operations.** `info`, `screenshot` (a PNG, with an optional region
+and scale), `move`, `click`, `drag`, `scroll`, `keys` (one chord, such as
+`ctrl-l`), `type` (Unicode text), `ocr` (the backend's OCR, else
+`tesseract` on the host agent, else `422` "no OCR"), `find` (a template
+image; vmlab only now), and `record start|stop` (vmlab only). The API is
+`POST /api/targets/{name}/display/{op}` (docs/api.md §17.10). The CLI is
+`terrarium screen <target> shot|click|move|drag|scroll|keys|type|ocr|find|info|record`.
+`shot` writes `./screens/<target>-<time>.png` in the agent's workspace and
+prints the path, so the harness can open the image.
+
+**The driver seam.** The host agent has one `DisplayDriver` trait
+(`crates/terrarium-host/src/display/mod.rs`): a full-screen PNG, the
+pointer, the keys, and text. An engine does the same work for every
+driver: it checks the values, crops and scales the PNG, runs `tesseract`
+for a driver with no OCR, and makes the answer. A new backend implements
+the trait. The VNC and RDP drivers are stubs in step 1; step 2 fills them
+in.
+
+**Rights and safety.**
+
+- To read the screen (`info`, `screenshot`, `ocr`, `find`), an agent needs
+  the use right of the target (policy or lease), or it is an admin of the
+  target (sysadmin, or the project_admin of its project).
+- Input (`move`, `click`, `drag`, `scroll`, `keys`, `type`, `record`) needs
+  an **exclusive** lease, or an admin. The operator may always send input.
+  So two agents do not move one mouse. While an agent holds an exclusive
+  lease, input from another agent is `409 lease_held`. A lead grants
+  `--exclusive` for display work.
+- Each input writes the audit row `target.display`. For `type` the row
+  holds the length, never the text. The tools get the text on stdin, never
+  on a command line.
+- Input is rate limited to 20 operations in one second on one target.
+- The daemon stores no screenshot. A PNG is at most 8 MiB.
+- A `vnc` or `rdp` password is a `password` credential in the daemon's
+  credential store. The daemon sends it only to the target's host agent,
+  in the frame that opens the operation. No answer to an agent or to the
+  dashboard holds it.
+
+**The desktop opt-in.** A `desktop` target gives an agent the screen,
+the mouse, and the keyboard of a real machine, as the host agent's user.
+So it is off by default, and only the host agent's own config turns it
+on: `[display] enabled = true`, with an optional `allowed_displays`
+list. The daemon cannot turn it on. The host agent sends the state in
+`hello`, the dashboard shows "display: on" or "off" on the host, and the
+host agent refuses a `desktop` frame while it is off. The installers take
+`--enable-display` (default off) and print the risk.
 
 ---
 
@@ -1697,6 +1770,12 @@ end-to-end scenarios of each phase are not scripted yet (no `spikes/e2e/`).
 11. Large artifacts: chunked upload through the runner socket, and whether
    bundles over a size threshold should be served from disk directly rather
    than unpacked into the store.
+12. Target displays (§19b), step 2: the VNC (RFB) and RDP (IronRDP)
+    drivers of the host agent, which now answer "not implemented yet". Then:
+    a live check of the vmlab display ops on a lab VM with a screen (the
+    test lab has a container only, which has no display), a live check of
+    `examples/display/wayland.Dockerfile`, and `/dev/uinput` for `ydotool`
+    in a docker target, which Terrarium does not pass now.
 
 ## 23. Repository layout, build, run, and test
 

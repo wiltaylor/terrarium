@@ -767,6 +767,75 @@ mod tests {
         );
     }
 
+    /// The real tools in a container of `examples/display/x11.Dockerfile`.
+    /// Run with `TERRARIUM_X11_CONTAINER=<name> cargo test -p terrarium-host
+    /// live_x11 -- --ignored`.
+    #[tokio::test]
+    #[ignore = "needs a running examples/display/x11.Dockerfile container"]
+    async fn live_x11_container() {
+        let Ok(container) = std::env::var("TERRARIUM_X11_CONTAINER") else {
+            eprintln!("TERRARIUM_X11_CONTAINER is not set; skipped");
+            return;
+        };
+        let mut c = ctx(FakeRunner::ok());
+        c.runner = Arc::new(super::super::runner::SystemRunner);
+        c.timeout = Duration::from_secs(20);
+        let t = DisplayTarget::Docker {
+            container,
+            protocol: DisplayProtocol::Auto,
+            display: None,
+        };
+        let info = dispatch(&c, &t, &DisplayOp::Info).await.unwrap();
+        eprintln!("info: {}", info.value);
+        assert_eq!(info.value["width"], 1280);
+        let shot = dispatch(
+            &c,
+            &t,
+            &DisplayOp::Screenshot {
+                region: Some(terrarium_core::display::Region {
+                    x: 0,
+                    y: 0,
+                    w: 800,
+                    h: 600,
+                }),
+                scale: Some(0.5),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(shot.value["width"], 400);
+        for op in [
+            DisplayOp::Move { x: 200, y: 200 },
+            DisplayOp::Click {
+                x: Some(300),
+                y: Some(300),
+                button: Button::Left,
+                double: true,
+            },
+            DisplayOp::Type {
+                text: "echo 'hi there' && date\n".into(),
+            },
+            DisplayOp::Keys {
+                chord: "ctrl+l".into(),
+            },
+            DisplayOp::Drag {
+                x1: 100,
+                y1: 100,
+                x2: 150,
+                y2: 120,
+            },
+            DisplayOp::Scroll {
+                x: Some(400),
+                y: Some(300),
+                dx: 0,
+                dy: 2,
+            },
+        ] {
+            let out = dispatch(&c, &t, &op).await;
+            assert!(out.is_ok(), "{op:?}: {out:?}");
+        }
+    }
+
     #[tokio::test]
     async fn bad_names_are_refused() {
         let fake = FakeRunner::ok();

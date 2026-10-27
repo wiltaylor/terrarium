@@ -166,6 +166,17 @@ pub enum Command {
     Shell { target: String },
     /// Copy one file to or from a target: `cp <src> <target>:<dst>` or `cp <target>:<src> <dst>`
     Cp { src: String, dst: String },
+    /// The target display (computer use): screenshot, mouse, and keys on a
+    /// target's screen. Input needs an exclusive lease. Not `agent screen`
+    Screen {
+        target: String,
+        /// A `lab_from_workspace` target: the holder whose lab instance
+        /// (the operator names one; an agent uses its own)
+        #[arg(long, global = true)]
+        agent: Option<String>,
+        #[command(subcommand)]
+        op: crate::commands::screen::ScreenCmd,
+    },
     /// Fleet files: many projects, agents, and targets in one file
     Fleet {
         #[command(subcommand)]
@@ -1474,64 +1485,7 @@ pub enum RoleCmd {
 #[derive(Debug, Subcommand)]
 pub enum AdminTargetCmd {
     /// Define a target (sysadmin for a global target)
-    New {
-        name: String,
-        /// `host`, `ssh`, `docker`, or `vmlab`
-        #[arg(long)]
-        kind: String,
-        /// `ssh`: `user@host` or `host`
-        #[arg(long)]
-        address: Option<String>,
-        /// `ssh`: the port
-        #[arg(long)]
-        port: Option<u16>,
-        /// `ssh`: the ssh_key credential name
-        #[arg(long)]
-        credential: Option<String>,
-        /// The host agent, for `host`, `docker`, and `vmlab`
-        #[arg(long)]
-        host: Option<String>,
-        /// `docker`: the image to run
-        #[arg(long)]
-        image: Option<String>,
-        /// `docker`: an existing container
-        #[arg(long)]
-        container: Option<String>,
-        /// `vmlab`: the lab directory (holds `vmlab.wcl`)
-        #[arg(long)]
-        lab: Option<String>,
-        /// `vmlab`: the machine in the lab
-        #[arg(long)]
-        machine: Option<String>,
-        /// `vmlab`: a repo of the project that holds the lab definition;
-        /// the host agent runs it in a git worktree
-        #[arg(long)]
-        lab_repo: Option<String>,
-        /// `vmlab` with `--lab-repo`: a branch, a tag, or a commit
-        #[arg(long)]
-        lab_ref: Option<String>,
-        /// `vmlab`: the directory that holds `vmlab.wcl`, relative to the
-        /// root of the `--lab-repo` repo, or with `--lab-from-workspace`
-        /// relative to the workspace root `work/<project>/<agent>`: a lab
-        /// at the root of the checkout of repo `app` is `--lab-path app`
-        #[arg(long)]
-        lab_path: Option<String>,
-        /// `vmlab`: the lab is in each holder's workspace; each holder gets
-        /// its own lab instance
-        #[arg(long)]
-        lab_from_workspace: bool,
-        /// Made on agent start and removed on agent stop
-        #[arg(long)]
-        ephemeral: bool,
-        /// Keep an ephemeral target after the agent stops
-        #[arg(long)]
-        keep: bool,
-        /// Make a global target instead of a project target (sysadmin). A
-        /// project target gets the project name as a prefix:
-        /// `<project>-<name>`
-        #[arg(long)]
-        global: bool,
-    },
+    New(Box<AdminTargetNewArgs>),
     /// Change a target (`PATCH /api/targets/{name}`). A running target
     /// takes only `--keep`, `--no-keep`, and `--snapshot-before-task`
     Edit(Box<AdminTargetEditArgs>),
@@ -1590,6 +1544,81 @@ pub enum AdminTargetCmd {
         #[arg(long)]
         all: bool,
     },
+}
+
+/// `admin target new`: the definition of a new target.
+#[derive(Debug, Args)]
+pub struct AdminTargetNewArgs {
+    pub name: String,
+    /// `host`, `ssh`, `docker`, `vmlab`, `vnc`, `rdp`, or `desktop`
+    #[arg(long)]
+    pub kind: String,
+    /// `ssh`: `user@host` or `host`. `vnc`, `rdp`: `host:port`
+    #[arg(long)]
+    pub address: Option<String>,
+    /// `ssh`: the port
+    #[arg(long)]
+    pub port: Option<u16>,
+    /// `ssh`: the ssh_key credential name. `vnc`, `rdp`: a password
+    /// credential
+    #[arg(long)]
+    pub credential: Option<String>,
+    /// `vnc`, `rdp`: the user name
+    #[arg(long)]
+    pub username: Option<String>,
+    /// `rdp`: the Windows domain
+    #[arg(long)]
+    pub domain: Option<String>,
+    /// `docker`, `desktop`: the display server, `x11`, `wayland`, or
+    /// `auto` (a docker target with it has a screen)
+    #[arg(long)]
+    pub display: Option<String>,
+    /// `docker`, `desktop`: the X display (`:0`) or Wayland socket
+    #[arg(long)]
+    pub display_name: Option<String>,
+    /// The host agent, for `host`, `docker`, and `vmlab`
+    #[arg(long)]
+    pub host: Option<String>,
+    /// `docker`: the image to run
+    #[arg(long)]
+    pub image: Option<String>,
+    /// `docker`: an existing container
+    #[arg(long)]
+    pub container: Option<String>,
+    /// `vmlab`: the lab directory (holds `vmlab.wcl`)
+    #[arg(long)]
+    pub lab: Option<String>,
+    /// `vmlab`: the machine in the lab
+    #[arg(long)]
+    pub machine: Option<String>,
+    /// `vmlab`: a repo of the project that holds the lab definition;
+    /// the host agent runs it in a git worktree
+    #[arg(long)]
+    pub lab_repo: Option<String>,
+    /// `vmlab` with `--lab-repo`: a branch, a tag, or a commit
+    #[arg(long)]
+    pub lab_ref: Option<String>,
+    /// `vmlab`: the directory that holds `vmlab.wcl`, relative to the
+    /// root of the `--lab-repo` repo, or with `--lab-from-workspace`
+    /// relative to the workspace root `work/<project>/<agent>`: a lab
+    /// at the root of the checkout of repo `app` is `--lab-path app`
+    #[arg(long)]
+    pub lab_path: Option<String>,
+    /// `vmlab`: the lab is in each holder's workspace; each holder gets
+    /// its own lab instance
+    #[arg(long)]
+    pub lab_from_workspace: bool,
+    /// Made on agent start and removed on agent stop
+    #[arg(long)]
+    pub ephemeral: bool,
+    /// Keep an ephemeral target after the agent stops
+    #[arg(long)]
+    pub keep: bool,
+    /// Make a global target instead of a project target (sysadmin). A
+    /// project target gets the project name as a prefix:
+    /// `<project>-<name>`
+    #[arg(long)]
+    pub global: bool,
 }
 
 /// `admin target edit`: only the flags given change.

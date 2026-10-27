@@ -35,6 +35,7 @@ and a body of `-` read stdin. Add `--json` to parse output. Run `terrarium
 - `usage`: your subscription and your share of it.
 - `status set <idle|working|blocked> --note ...`: tell the operator your state.
 - `targets ls | snapshot | restore | snapshots | snapshot-rm`: your targets, and the snapshots of a vmlab target.
+- `screen <target> shot | click | move | drag | scroll | keys | type | ocr | find | info`: the screen of a target (input needs an exclusive lease).
 
 ## Mailbox
 
@@ -284,6 +285,16 @@ worker to its targets at `/work/{{project.name}}/<worker>`.
    for other changes.
 8. A lab file must not use `provision`: the lab allowlist refuses it. The
    lab image must have the tools (for example `make`) already.
+9. A card that needs a screen (an installer, a desktop app, a web page in a
+   browser) needs a target with a display: a vmlab target with
+   `--machine`, a docker target with `--display x11`, or a `vnc`, `rdp`,
+   or `desktop` target. Grant it with `--exclusive`: a click, a key, or a
+   typed text is refused without an exclusive lease, so two agents never
+   move one mouse. Tell the worker in the card to work in short loops:
+   `terrarium screen <target> shot`, open the PNG that it prints, do one or
+   two actions (`click X Y`, `keys ctrl-l`, `type <text>`), and take a new
+   shot. Use `terrarium screen <target> info` to see what the target can
+   do. Revoke the lease when the card is done.
 
 ## Shared target
 

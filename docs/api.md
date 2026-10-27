@@ -825,10 +825,12 @@ POST /api/repos/credential          (agent)
 **Credentials.** The store is `<state>/credentials/`, mode 0700. The secret
 is `<name>` (mode 0600). The metadata, without the secret, is `<name>.json`.
 No endpoint gives the secret back, except the credential helper above.
-`kind` is `token` or `ssh_key`. A token is one line. A token's `username`
-defaults to `x-access-token`. An `ssh_key` is a private key in OpenSSH or
-PEM format, and has no `username`. A `POST` with an existing name replaces
-the credential.
+`kind` is `token`, `ssh_key`, or `password`. A token is one line. A token's
+`username` defaults to `x-access-token`. An `ssh_key` is a private key in
+OpenSSH or PEM format, and has no `username`. A `password` (1 to 1024 bytes,
+one line, spaces kept) is for a `vnc` or `rdp` target, with an optional
+default `username` (§17.10); a repo cannot use it. A `POST` with an
+existing name replaces the credential.
 
 For one clone or fetch, the daemon puts the secret in a 0700 run dir under
 `<state>/credentials/.run/`, and removes the dir after the run. A token goes

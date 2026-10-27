@@ -2335,7 +2335,9 @@ async fn the_grant_pointer_follows_the_lifecycle_and_names_the_state() {
         p[0].0,
         format!(
             "You now have access to target terra-win (running) until {until}. \
-             Run `terrarium targets ls`."
+             Run `terrarium targets ls`. {}",
+            // A vmlab target with a machine has a screen (docs/api.md §17.10).
+            terrariumd::leases::display_hint("terra-win", false)
         )
     );
     let t = |s: &str| chrono::DateTime::parse_from_rfc3339(s).unwrap();

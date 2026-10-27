@@ -463,7 +463,12 @@ async fn vnc_status_is_a_tcp_probe_from_the_host_agent() {
     assert_eq!(r["state"], "running", "{r}");
     assert_eq!(r["result"]["reachable"], true);
     drop(l);
-    let r = lab.td.post_empty("/api/targets/probe-vnc/status").await;
+    // Port 1 on loopback refuses at once (a freed port can be reused).
+    lab.target(
+        json!({"name": "closed-vnc", "kind": "vnc", "host": "lab1", "address": "127.0.0.1:1"}),
+    )
+    .await;
+    let r = lab.td.post_empty("/api/targets/closed-vnc/status").await;
     assert_eq!(r.ok()["state"], "unknown");
     // up and down change nothing on the target.
     lab.td.post_empty("/api/targets/probe-vnc/up").await.ok();

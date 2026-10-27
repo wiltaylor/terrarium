@@ -475,6 +475,49 @@ stays.
 | `targets snapshots <t>` | `GET /api/targets/{t}/snapshots[?scope=&agent=]` | A table: `NAME`, `KIND`, `TAKEN`, `MACHINES`, `MANAGED` (`yes`: Terrarium took it). Then a line for the stored names that the host no longer has. A lab that does not run gives one line that says so. |
 | `targets snapshot-rm <t> <n>` | `DELETE /api/targets/{t}/snapshots/{n}[?scope=&agent=&force=true]` | `<t>: deleted snapshot <n> on <machines>`. `terrarium-clean` on a target with `snapshot_before_task` needs `--force` (else `409`, exit 1). |
 
+### Target displays
+
+`terrarium screen` uses the screen of a target: computer use
+([api.md §17.10](api.md#1710-target-displays)). It is not `terrarium agent
+screen`, which shows the terminal of an agent's own harness.
+
+```
+terrarium screen <target> shot [--out PATH] [--region x,y,w,h] [--scale 0.5]
+terrarium screen <target> click [X Y] [--button left|right|middle] [--double]
+terrarium screen <target> move X Y
+terrarium screen <target> drag X1 Y1 X2 Y2
+terrarium screen <target> scroll [X Y] DX DY  a positive DY scrolls down
+terrarium screen <target> keys <chord>        ctrl-l, ctrl+alt+delete, Return, shift-f10
+terrarium screen <target> type <text>         `-` reads stdin
+terrarium screen <target> ocr [--region x,y,w,h]
+terrarium screen <target> find <png> [--threshold 0.9] [--region x,y,w,h]
+terrarium screen <target> info
+terrarium screen <target> record start|stop   vmlab targets
+```
+
+`--agent <a>` (before or after the operation) names the holder of a
+`lab_from_workspace` target, as for `exec`.
+
+| Command | Text output |
+|---|---|
+| `shot` | `<absolute path> (<w>x<h>, screen <W>x<H>)`. The default file is `./screens/<target>-<UTC time>.png` in the current directory (the agent's workspace); the CLI makes `screens/`. A harness opens the image at that path. |
+| `click`, `move`, `drag`, `scroll`, `keys`, `type` | `<op> ok`; `keys` adds the canonical chord, `type` the character count. |
+| `ocr` | The text. |
+| `find` | `found at x= y= w= h= score= center=X,Y`, or `no match` and exit 1. |
+| `info` | The target, the backend, the screen size, the operations, the OCR engine, and whether the caller may send input now. |
+| `record` | The vmlab output. |
+
+`--json` prints the daemon's answer (`shot` adds `path` and drops the
+base64). The exit codes are those of §3: `409`, `422`, and `429` are exit
+1, and `403` is exit 3, each with the daemon's message. Input needs an exclusive lease: the `409`
+message names `terrarium admin target grant <target> <agent> --exclusive`.
+The CLI checks a chord and a region before it sends them.
+
+`admin target new` takes the display fields: `--kind vnc|rdp|desktop`,
+`--address host:port`, `--username`, `--domain` (rdp), `--credential` (a
+`password` credential), `--display x11|wayland|auto`, and
+`--display-name` (docker, desktop).
+
 ### Fleet files
 
 A fleet file declares projects, agents, targets, schedules, and

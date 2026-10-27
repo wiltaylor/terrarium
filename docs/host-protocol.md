@@ -161,7 +161,9 @@ The host agent sends `hello` as its first frame:
   "capabilities": {
     "docker": {"present": true, "version": "29.8.0"},
     "vmlab": {"present": true, "version": "0.30.0-alpha"},
-    "shell": "/bin/bash"
+    "shell": "/bin/bash",
+    "display": {"enabled": false, "tesseract": true,
+                "tools": ["xdotool", "import"], "drivers": ["vmlab", "docker"]}
   },
   "max_sessions": 32,
   "max_running_targets": 4,
@@ -176,7 +178,13 @@ The host agent sends `hello` as its first frame:
 - `capabilities` is `terrarium_core::protocol::HostCapabilities`. Docker is
   `present` when `docker version --format json` gets an answer from the
   Docker server. vmlab is `present` when `vmlab --version` succeeds.
-  `shell` is `$SHELL`, else `/bin/sh`.
+  `shell` is `$SHELL`, else `/bin/sh`. `display` is
+  `terrarium_core::protocol::DisplayCapability` (see [`display`](#display)):
+  `enabled` is the opt-in of the config (`[display] enabled`, default
+  false), `allowed_displays` comes from the config, `tesseract` is true when
+  `tesseract` is on `PATH`, `tools` lists the desktop tools on `PATH`, and
+  `drivers` lists the display backends this host agent can drive. An older
+  host agent sends no `display`: the daemon reads it as off.
 - `max_running_targets` is the `max_running_targets` of the config. The
   daemon counts the docker and vmlab targets (and lab instances) on this
   host that it shows as `running`, and refuses an `up` past the limit. An
@@ -240,7 +248,7 @@ for each host is enough.
 The life of a session:
 
 1. The daemon sends a start frame: `exec`, `cp_push`, `cp_pull`, a
-   `docker.*` verb, or a `vmlab.*` verb.
+   `docker.*` verb, a `vmlab.*` verb, `display`, or `probe`.
 2. The host agent sends `started` `{session, pid}` when the process (or the
    transfer) starts. `started` is not replayed after a reconnect.
 3. Data frames flow in both directions.
@@ -582,6 +590,88 @@ The only host paths in an instance are the attached workspace (under
 A lab that needs more (an ISO, a share, a provision script) is a
 pre-provisioned lab: a target with `lab`, which the operator writes.
 
+### `display`
+
+PLAN §19b, docs/api.md §17.10. One `display` frame is one operation on the
+screen of one target. It runs in the host agent as a task (no `pid`).
+
+```json
+{"type": "display", "session": 31,
+ "target": {"backend": "vmlab", "lab": "/home/wil/labs/win", "machine": "win11"},
+ "request": {"op": "click", "x": 10, "y": 20, "button": "right"},
+ "timeout_secs": 60}
+```
+
+`target` picks the driver (`backend`):
+
+| `backend` | Fields | The screen |
+|---|---|---|
+| `vmlab` | `lab`, `machine` | `vmlab vm ...` in the lab directory, with the lab and path rules of the other `vmlab.*` verbs |
+| `docker` | `container`, `protocol` (`x11`, `wayland`, `auto`), `display`? | the tools run with `docker exec [-i] -e DISPLAY=<d> <container> ...` (`WAYLAND_DISPLAY` for Wayland) |
+| `desktop` | `protocol`, `display`? | the tools run on this machine, with `DISPLAY` and `XAUTHORITY`, or `WAYLAND_DISPLAY` and `XDG_RUNTIME_DIR`, from `[display]`. Refused (`refused`) unless the config has `[display] enabled = true`, and the display is in `allowed_displays` when that list is set |
+| `vnc` | `address`, `username`?, `password`? | an RFB client (step 2: now `unsupported`, "not implemented yet (step 2)") |
+| `rdp` | `address`, `username`?, `domain`?, `password`? | an RDP client (step 2) |
+
+`request` is `terrarium_core::display::DisplayOp`, tagged by `op`: `info`,
+`screenshot {region?, scale?}`, `move {x, y}`, `click {x?, y?, button,
+double}`, `drag {x1, y1, x2, y2}`, `scroll {x?, y?, dx, dy}`, `keys
+{chord}`, `type {text}`, `ocr {region?}`, `find {image_base64, threshold?,
+region?}`, `record {action}`. The host agent checks every value again.
+
+The answer:
+
+- A screenshot sends its PNG as `stdout` data frames (32 KiB each), then
+  `result` and `exit` 0. The PNG is at most 8 MiB.
+- Every other operation sends `result` and `exit` 0. `result` is the answer
+  of docs/api.md §17.10 without `target`.
+- A failure is one `error` frame: `bad_request` (a bad value), `unsupported`
+  (the backend cannot do it, or a tool is missing; the message names the
+  package), `refused` (the desktop opt-in), or `failed` (the tool ran and
+  failed).
+
+The tools of each backend:
+
+| Operation | vmlab | X11 (`docker`, `desktop`) | Wayland, wlroots |
+|---|---|---|---|
+| `screenshot` | `vmlab vm screenshot <vm> <file>`, the file in `<lab>/.terrarium-stage/` | `sh -c` of a script: `import -window root png:-`, else `xwd -root \| convert xwd:- png:-`, else `scrot`; exit 127 names the packages | `grim -` |
+| `move` | `vmlab vm mouse-move <vm> X Y` | `xdotool mousemove X Y` | `ydotool mousemove --absolute -x X -y Y` |
+| `click` | `vmlab vm click [--button B] <vm> [X Y]`, two times for `double` | `xdotool [mousemove X Y] click [--repeat 2] N` | `ydotool click [--repeat 2] 0xC0` (`0xC1` right, `0xC2` middle) |
+| `drag` | `vmlab vm drag <vm> X1 Y1 X2 Y2` | `xdotool mousemove X1 Y1 mousedown 1 sleep 0.1 mousemove X2 Y2 sleep 0.1 mouseup 1` | `ydotool` move, `click 0x40`, move, `click 0x80` |
+| `scroll` | `unsupported` | `xdotool click --repeat N 4\|5\|6\|7` | `ydotool mousemove --wheel -x DX -y -DY` |
+| `keys` | `vmlab vm sendkeys <vm> <chord>` | `xdotool key ctrl+l` | `wtype -M ctrl -k l -m ctrl` |
+| `type` | one `sendkeys` for each character (below) | `xdotool type --delay 12 --file -`, the text on stdin | `wtype -`, the text on stdin |
+| `ocr` | `vmlab vm ocr [--region X Y W H] <vm>` | `tesseract stdin stdout` on a screenshot, when `tesseract` is on the host agent's `PATH` | the same |
+| `find` | `vmlab vm find-image [--threshold T] [--region ...] <vm> <file>`; exit 1 with "no match" is `found: false` | `unsupported` | `unsupported` |
+| `record` | `vmlab record start\|stop <vm>` | `unsupported` | `unsupported` |
+| `info` | a screenshot, for the size | the same | the same |
+
+Limits:
+
+- vmlab 0.34 has no text input on its CLI, and its chords take letters,
+  digits, `f1` to `f12`, and named keys only. So `type` on vmlab sends one
+  chord for each character (US layout: `shift-a` for `A`) and covers
+  letters, digits, space, Tab, newline, and `!@#$%^&*()`. Other characters
+  (`.`, `/`, `-`, ...) are `bad_request`. At most 500 characters at a time.
+- `display = "auto"` runs `sh -c` of a probe first: `x11` when `xdotool` is
+  there, else `wayland` when `grim` is there, else `unsupported`.
+- `ydotool` needs `ydotoold` running and its socket (`YDOTOOL_SOCKET`).
+  Absolute moves can be off with pointer acceleration on.
+- GNOME and KDE on Wayland refuse the synthetic input of `wtype` and
+  `ydotool`. Use a `vnc` or `rdp` target for them.
+- Crop (`region`) and scale run in the host agent on the PNG, for every
+  backend, so a driver gives the full screen only.
+
+The driver code is `crates/terrarium-host/src/display/`: the
+`DisplayDriver` trait and the engine in `mod.rs`, and one file for each
+backend. The VNC and RDP drivers (step 2) implement the same trait.
+
+### `probe`
+
+`{"type": "probe", "session", "address", "timeout_secs"?}`: a TCP connect
+from the host agent to `address` (`host:port`), for the `status` of a
+`vnc` or `rdp` target. The `result` is `{"address", "reachable",
+"elapsed_ms", "error"?}`, then `exit` 0. A bad address is `bad_request`.
+
 ## Workspaces
 
 PLAN §11, "mode 1". An agent's workspace is
@@ -698,7 +788,8 @@ The terminal `error` frame:
 | `io` | A file operation failed. |
 | `checksum_mismatch` | A pushed file's byte count or SHA-256 does not match `cp_end`. |
 | `interrupted` | The link dropped during a push. The partial file is removed. |
-| `refused` | `vmlab.prepare`: the lab definition uses a feature outside the [lab allowlist](#the-lab-allowlist), or `vmlab validate` refused it. |
+| `refused` | `vmlab.prepare`: the lab definition uses a feature outside the [lab allowlist](#the-lab-allowlist), or `vmlab validate` refused it. `display`: a `desktop` frame while the config does not opt in, or a display that is not in `allowed_displays`. The daemon answers `403`. |
+| `failed` | `display`: the tool ran and failed (for example, the VM does not run, or the X server does not answer). |
 
 `unknown_session` can also come for a frame (`stdin`, `eof`, `cp_end`) after
 the session ended. The daemon can ignore it in that case.
@@ -796,7 +887,26 @@ allowed_cwd_roots = ["/home/wil/labs", "/srv/build"]   # optional; absent means 
 # instances_dir = "/var/lib/terrarium-host/instances"   # lab instances; default $XDG_DATA_HOME/terrarium-host/instances
 # repos_dir = "/srv/terrarium/repos"        # the host path of TERRARIUM_REPOS_DIR, for a local lab_repo; default ./repos
 # max_running_targets = 4                   # docker and vmlab targets that may run at one time
+
+# [display]                                 # target displays (see "display"); all optional
+# enabled = false                           # open THIS machine's desktop to `desktop` targets
+# allowed_displays = [":0"]                 # the displays a desktop target may use; empty: any
+# default_display = ":0"                    # for a desktop target that names none
+# xauthority = "/home/wil/.Xauthority"      # XAUTHORITY for the X tools
+# runtime_dir = "/run/user/1000"            # XDG_RUNTIME_DIR for the Wayland tools
+# tesseract_bin = "tesseract"               # OCR for the backends that have none
 ```
+
+**`[display] enabled = true` is a risk.** An agent with an exclusive lease
+on a `desktop` target of this host can see the screen, move the mouse, and
+type, as the user of the host agent. It can then do anything that user can
+do in the desktop session, also outside Terrarium. Turn it on only for a
+machine that is there for agents (a test desktop, a kiosk VM), not for your
+own workstation. The daemon cannot turn it on, and the host agent logs a
+warning at start when it is on. A systemd service has no desktop session
+environment: set `xauthority` (X11) or `runtime_dir` (Wayland), and run the
+host agent as the user that owns the session, or give that user access (for
+example `xhost +SI:localuser:terrarium`).
 
 A relative `work_dir` or `repos_dir` is relative to the working directory of
 the host agent. `terrarium-host check` prints the three paths and says
