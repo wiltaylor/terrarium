@@ -106,6 +106,8 @@ describe("origin chips", () => {
 describe("composer rules", () => {
   it("is on for idle; on with a queued note for working and blocked", () => {
     expect(composerState({ agentStatus: "idle", sessionActive: true })).toEqual({ enabled: true });
+    // Waiting is idle with open waits: the turn goes at once.
+    expect(composerState({ agentStatus: "waiting", sessionActive: true })).toEqual({ enabled: true });
     expect(composerState({ agentStatus: "working", sessionActive: true })).toEqual({ enabled: true, note: "queued — the agent is working" });
     expect(composerState({ agentStatus: "blocked", sessionActive: true })).toMatchObject({ enabled: true, note: "queued — the agent is blocked" });
   });

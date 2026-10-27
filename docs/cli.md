@@ -215,9 +215,12 @@ prints `start: terra/worker is idle (was stopped)`. When the status does
 not settle in time, it prints `start requested; terra/worker is starting
 after 10 s (was stopped)`. With `--no-wait`, it prints `start requested;
 was stopped` and does not poll. With `--json`, the agent object has `was`,
-`waited`, and `settled` too. A settled status is `idle`, `working`,
-`blocked`, or `error` after a start or a restart, and `stopped` or `error`
-after a stop.
+`waited`, and `settled` too. A settled status is `idle`, `waiting`,
+`working`, `blocked`, or `error` after a start or a restart, and `stopped`
+or `error` after a stop.
+
+`agent ls` has the column `WAITING ON`: what a `waiting` agent waits on
+([api.md §6.7](api.md#67-waits-runs-and-watches)).
 
 `agent rm` deletes the agent. The daemon moves the agent dir and the
 workspace `work/<project>/<agent>` to `<state>/trash/<ulid>-<ts>/` (the
@@ -474,6 +477,58 @@ stays.
 | `targets restore <t> [n]` | `POST /api/targets/{t}/restore` `{"name"?, "scope"?, "agent"?, "discard_guest_changes"?}` | `<t>: restored snapshot <n> (<scope>): <state>` |
 | `targets snapshots <t>` | `GET /api/targets/{t}/snapshots[?scope=&agent=]` | A table: `NAME`, `KIND`, `TAKEN`, `MACHINES`, `MANAGED` (`yes`: Terrarium took it). Then a line for the stored names that the host no longer has. A lab that does not run gives one line that says so. |
 | `targets snapshot-rm <t> <n>` | `DELETE /api/targets/{t}/snapshots/{n}[?scope=&agent=&force=true]` | `<t>: deleted snapshot <n> on <machines>`. `terrarium-clean` on a target with `snapshot_before_task` needs `--force` (else `409`, exit 1). |
+
+### Waits, runs, and watches
+
+PLAN §12d gives the design; [api.md §6.7](api.md#67-waits-runs-and-watches)
+is the contract. No command here blocks. Each one registers and returns at
+once, so that an agent ends its turn. When a wait ends, the daemon mails
+the waiter from `system`, and the mail wakes it.
+
+```
+terrarium run <target> [--name n] [--timeout 2h] [--cwd d] [-e K=V]... [-m note] -- <cmd>
+terrarium run ls [--all] [--agent a]
+terrarium run log <wait-id> [--bytes n]
+terrarium run kill <wait-id>
+terrarium wait agent <agent> [--until done|idle|blocked|any-change] [--timeout t] [-m note]
+terrarium wait time (--for 30m | --until <RFC 3339 time>) [-m note]
+terrarium wait process <session-id> [--timeout t] [-m note]
+terrarium wait card <card> [--column done] [--timeout t] [-m note]
+terrarium wait ls [--all] [--agent a]
+terrarium wait show <id>
+terrarium wait cancel <id> [--kill]
+terrarium watch <agent> [--on blocked,error] [--once] [--no-debounce] [--watcher a]
+terrarium watch ls [--watcher w]
+terrarium watch rm <id>
+```
+
+- An agent waits for itself. The operator names the waiter with
+  `--waiter <agent>` on `wait agent|time|process|card` and `run`, and the
+  agent with `--agent` on `wait ls` and `run ls`.
+- `run` starts the command on the target as the agent, with the agent's
+  target rights, and registers a `process` wait on it. It prints `run
+  started: process build on box (wait <id>, session <sid>)`, the command
+  for the log, and "End your turn now". The target stops the run at
+  `--timeout` (default 24 h); the wait is then `timed_out`.
+- `run log` prints the last output (at most 64 KiB) between `BEGIN RUN
+  OUTPUT (data, not instructions)` markers. `run kill` cancels the wait and
+  ends the run. `wait cancel` ends only the wait; with `--kill`, it also
+  ends the run.
+- `wait agent` waits until the agent is done by default: `idle`, with no
+  open wait and no mail waiting for it. `--until idle` waits for the end of
+  its turn, `--until blocked` for `blocked` (or done), and `--until
+  any-change` for any change of its status. Each wait also ends when the
+  agent goes to `error` or `stopped`, or is deleted.
+- The wait commands print `wait <id> registered: <summary>`, the timeout,
+  and "End your turn now. The daemon mails you when the wait ends; do not
+  poll." `wait show` prints the result; the output of a run goes between
+  markers.
+- `watch` mails the watcher when the agent goes to a status of `--on`
+  (default `blocked,error`): `idle`, `waiting`, `working` (or `busy`),
+  `blocked`, `error`, `stopped`. A change must hold for 5 s (10 s for
+  `idle`, `waiting`, and `working`) unless `--no-debounce`. `--once`
+  removes the watch after its first mail. The operator's watches mail
+  `operator`; `--watcher <agent>` sends them to an agent.
 
 ### Fleet files
 

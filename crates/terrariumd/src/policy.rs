@@ -391,6 +391,59 @@ pub fn mail_to(sender: &AgentActor, to: &Address) -> ApiResult<()> {
     )))
 }
 
+// ---- waits and watches (PLAN §12d, docs/api.md §6.7) ----
+
+/// Create a wait or a watch for `owner` (an agent ULID): the agent itself
+/// or the operator.
+pub fn own_waits(actor: &Actor, owner: &str, what: &str) -> ApiResult<()> {
+    match actor {
+        Actor::Operator => Ok(()),
+        Actor::Agent(a) if a.id == owner => Ok(()),
+        Actor::Agent(_) => Err(ApiError::forbidden(format!(
+            "{what}: an agent manages only its own waits and watches"
+        ))),
+    }
+}
+
+/// See or cancel the waits and watches of `owner`, an agent of `project`:
+/// the agent itself, a project_admin of the project, a sysadmin, or the
+/// operator.
+pub fn manage_waits(actor: &Actor, owner: &str, project: &str, what: &str) -> ApiResult<()> {
+    match actor {
+        Actor::Operator => Ok(()),
+        Actor::Agent(a) if a.id == owner || a.is_admin_of(project) => Ok(()),
+        Actor::Agent(_) => Err(deny(
+            what,
+            &format!("the agent itself, project_admin of `{project}`, or the operator"),
+        )),
+    }
+}
+
+/// May the agent `waiter` wait on or watch the agent `name` of `project`?
+/// An agent of its own project, yes. Another project needs a
+/// `cross_project` entry (`project/name` or `project/*`), as mail does. A
+/// sysadmin reaches every agent.
+pub fn reach_agent(waiter: &AgentActor, name: &str, project: &str) -> ApiResult<()> {
+    if waiter.is_sysadmin() || waiter.project == project {
+        return Ok(());
+    }
+    let full = format!("{project}/{name}");
+    let wildcard = format!("{project}/*");
+    if waiter
+        .policy
+        .cross_project
+        .iter()
+        .any(|e| *e == full || *e == wildcard)
+    {
+        return Ok(());
+    }
+    Err(ApiError::forbidden(format!(
+        "`{full}` is outside project `{}`; waiting on or watching it needs \"{full}\" in \
+         policy.cross_project",
+        waiter.project
+    )))
+}
+
 // ---- agent templates (docs/api.md §21) ----
 
 /// Read the templates of `project`, or the global templates (`None`):
@@ -622,6 +675,34 @@ mod tests {
             name: name.into(),
             project: project.into(),
         }
+    }
+
+    #[test]
+    fn waits_reach_the_own_project_and_cross_project_entries() {
+        let a = agent("p", &[], Policy::default());
+        assert!(reach_agent(&a, "w1", "p").is_ok());
+        let e = reach_agent(&a, "w1", "q").unwrap_err();
+        assert!(e.message.contains("cross_project"), "{}", e.message);
+        let pol = Policy {
+            cross_project: vec!["q/w1".into(), "r/*".into()],
+            ..Policy::default()
+        };
+        let b = agent("p", &[], pol);
+        assert!(reach_agent(&b, "w1", "q").is_ok());
+        assert!(reach_agent(&b, "w2", "q").is_err());
+        assert!(reach_agent(&b, "any", "r").is_ok());
+        let sys = agent("p", &[Role::Sysadmin], Policy::default());
+        assert!(reach_agent(&sys, "x", "z").is_ok());
+        // Own waits: the agent itself or the operator; a project_admin
+        // sees and cancels those of its project.
+        let me = Actor::Agent(a.clone());
+        assert!(own_waits(&me, "p-id", "x").is_ok());
+        assert!(own_waits(&me, "other", "x").is_err());
+        assert!(own_waits(&Actor::Operator, "other", "x").is_ok());
+        let lead = Actor::Agent(agent("p", &[Role::ProjectAdmin], Policy::default()));
+        assert!(manage_waits(&lead, "w-id", "p", "x").is_ok());
+        assert!(manage_waits(&lead, "w-id", "q", "x").is_err());
+        assert!(manage_waits(&me, "w-id", "p", "x").is_err());
     }
 
     #[test]

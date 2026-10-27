@@ -183,8 +183,8 @@ export function outputPreview(s: string, lines = 4): string {
 
 // ----- the composer -----
 
-/** Statuses that take a turn. The daemon queues it until the agent is idle. */
-export const SENDABLE: AgentStatus[] = ["idle", "working", "blocked"];
+/** Statuses that take a turn. The daemon queues it until the agent is idle (or waiting). */
+export const SENDABLE: AgentStatus[] = ["idle", "waiting", "working", "blocked"];
 
 export interface ComposerState {
   enabled: boolean;
@@ -199,7 +199,7 @@ export function composerState(o: { agentStatus: AgentStatus | undefined; session
   if (st === "stopped" || st === "error") return { enabled: false, reason: `The agent is ${st}. Start it to send a turn.` };
   if (!SENDABLE.includes(st)) return { enabled: false, reason: `The agent is ${st}. Wait until it is ready.` };
   if (!o.sessionActive) return { enabled: false, reason: "This is not the active session. Pick the active session to send a turn." };
-  if (st !== "idle") return { enabled: true, note: `queued — the agent is ${st}` };
+  if (st !== "idle" && st !== "waiting") return { enabled: true, note: `queued — the agent is ${st}` };
   return { enabled: true };
 }
 

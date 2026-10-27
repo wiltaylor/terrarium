@@ -29,7 +29,7 @@ export function AgentCard(props: { agent: Agent; now: number }) {
         <span class="row" style={{ gap: "4px", "flex-wrap": "wrap", "justify-content": "flex-end" }}>
           <LeaseChips agentId={a().id} now={props.now} />
           <HoldBadge agentId={a().id} now={props.now} />
-          <StatusBadge status={a().status} />
+          <StatusBadge status={a().status} waitingOn={a().waiting_on} />
         </span>
       </div>
       <SelfReport report={a().self_report} now={props.now} />
@@ -48,6 +48,16 @@ export function AgentCard(props: { agent: Agent; now: number }) {
             {(c) => <A href={`/p/${a().project}/board?card=${c()}`}>{c()}</A>}
           </Show>
         </dd>
+        <Show when={a().waiting_on}>
+          {(w) => (
+            <>
+              <dt>Waiting on</dt>
+              <dd class="ellipsis" title={w()}>
+                {w()}
+              </dd>
+            </>
+          )}
+        </Show>
         <Show when={a().turn_started_at}>
           {(t) => (
             <>

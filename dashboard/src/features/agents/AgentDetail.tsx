@@ -20,6 +20,7 @@ import { changeSubscription, loginText } from "./subscription";
 import { SubscriptionSelect } from "./SubscriptionFields";
 import { SystemPromptField } from "./AgentFields";
 import { systemPromptProblem } from "./form";
+import { WaitsPanel, WatchesPanel } from "./Waits";
 
 const TABS = [
   { id: "conversation", label: "Conversation" },
@@ -29,7 +30,7 @@ const TABS = [
 ] as const;
 
 /** Statuses with a live session: the PTY can attach, `stop` works. */
-export const RUNNING: AgentStatus[] = ["starting", "idle", "working", "blocked", "restarting"];
+export const RUNNING: AgentStatus[] = ["starting", "idle", "waiting", "working", "blocked", "restarting"];
 
 export default function AgentDetail() {
   const params = useParams<{ id: string }>();
@@ -82,7 +83,7 @@ export default function AgentDetail() {
           <PageHead
             title={
               <span class="row">
-                {a().name} <StatusBadge status={a().status} /> <HoldBadge agentId={a().id} long /> <LeaseChips agentId={a().id} />
+                {a().name} <StatusBadge status={a().status} waitingOn={a().waiting_on} /> <HoldBadge agentId={a().id} long /> <LeaseChips agentId={a().id} />
               </span>
             }
           >
@@ -170,6 +171,10 @@ export default function AgentDetail() {
           <RolesPanel agent={a()} onError={setError} />
 
           <LeasesPanel agent={a()} onNotice={(n) => setNotice(n)} />
+
+          <WaitsPanel agent={a()} />
+
+          <WatchesPanel agent={a()} />
 
           {/* The Conversation tab has its own composer. */}
           <Show when={tab() !== "conversation"}>

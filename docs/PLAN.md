@@ -45,8 +45,10 @@ These are settled. The rest of the plan follows from them.
    resumes the same conversation.
 5. Quiet each harness: no trust dialogs, no update checks, no approval
    prompts, and a Terrarium-owned system prompt.
-6. Track agent status: `starting`, `idle`, `working`, `blocked`, `error`,
-   `stopped`, `restarting`.
+6. Track agent status: `starting`, `idle`, `waiting`, `working`, `blocked`,
+   `error`, `stopped`, `restarting`. Let an agent wait on another agent, a
+   long command, a time, or a card without a blocked turn, and watch the
+   status of its peers (§12d).
 7. Let an agent run commands on the machines it is allowed to reach, through
    the Terrarium CLI. Targets are permanent (a host with the host agent, an
    SSH host) or ephemeral (a Docker container or a vmlab VM that a host agent
@@ -149,13 +151,18 @@ Observations that shape the design:
 | **Sandbox** | The restricted view of the container that a harness runs in. |
 | **Target** | A machine the agent may run commands on: `host`, `ssh`, `docker`, `vmlab`. A target is either global or owned by one project. |
 | **Executor** | The daemon component that runs a command on a target for an agent. |
-| **Status** | `starting`, `idle`, `working`, `blocked`, `error`, `stopped`, `restarting`. |
+| **Status** | `starting`, `idle`, `waiting`, `working`, `blocked`, `error`, `stopped`, `restarting`. |
+| **Wait** | One thing an agent waits on: another agent, a process on a target, a time, or a card. Open until it resolves, times out, fails, or is cancelled (§12d). |
+| **Watch** | A subscription to the status changes of an agent. It mails its watcher (an agent or the operator) (§12d). |
 
 Status rules:
 
 - `working`: a turn is open (prompt-submit hook fired, stop hook has not).
-- `idle`: no turn is open and the process is alive. In yolo mode this is the
-  normal resting state.
+- `idle`: no turn is open, the process is alive, and the agent has no open
+  wait. In yolo mode this is the normal resting state. It means "done".
+- `waiting`: no turn is open, the process is alive, and the agent has one
+  or more open waits (§12d). The daemon derives it from `idle`; the runner
+  never reports it. It is not a stall.
 - `blocked`: the harness asked the user a question, or a turn has been open
   with no hook and no PTY output for longer than the stall timeout.
 - `error`: the process exited non-zero, or the restart budget is exhausted.
@@ -488,6 +495,14 @@ terrarium mail read [--thread T] [--mark]
 terrarium mail send <agent> [-s subject] [-t thread] <body | ->
 terrarium mail wait [--timeout 300]          block until mail arrives
 terrarium status set <idle|working|blocked> [--note ...]   optional self-report
+terrarium run <target> [--name n] [--timeout 2h] -- <cmd>  a long command; returns at once (§12d)
+terrarium run ls | log <id> | kill <id>
+terrarium wait agent <name> [--until done|idle|blocked|any-change] [--timeout 2h]
+terrarium wait time --for 30m | --until <time>
+terrarium wait process <session> | card <id> [--column done]
+terrarium wait ls [--all] | show <id> | cancel <id> [--kill]
+terrarium watch <agent> --on blocked,error [--once] [--no-debounce]
+terrarium watch ls | rm <id>
 terrarium targets ls                         targets this agent may use
 terrarium exec <target> [--cwd d] -- <cmd>   run a command, stream output
 terrarium shell <target>                     interactive shell (we have a PTY)
@@ -561,6 +576,8 @@ to the audit log with the agent's ID.
 | Edit or delete any memory | no | in project | anywhere |
 | Attach repos, define project targets | no | in project | anywhere |
 | Lease a target to an agent at run time (§19; a global target needs sysadmin) | no | in project | anywhere |
+| Wait on and watch agents (§12d; another project needs a `cross_project` entry) | own project | own project | anywhere |
+| See and cancel the waits and watches of other agents (§12d) | no | in project | anywhere |
 | Read schedules (§12b) | own project | own project | all, global too |
 | Create, edit, delete, run schedules (§12b; the action stays inside the project; a global schedule needs sysadmin) | no | in project | anywhere |
 | Create and delete projects | no | no | yes |
@@ -918,6 +935,87 @@ Asked for on 2026-10-26.
   shows the secret one time, the hook URL
   (`TERRARIUM_INGEST_PUBLIC_URL` + path), and the setup steps for GitHub
   and Forgejo.
+
+---
+
+## 12d. Waits and watches
+
+Asked for on 2026-10-27: an agent must know when another agent goes idle,
+blocked, or into error, and the operator must see the difference between an
+agent that waits on something and an agent that is done. `docs/api.md` §6.7
+is the contract.
+
+**Waits.** A wait is one thing that an agent (the waiter) waits on:
+
+| Kind | Resolves when |
+|---|---|
+| `agent` | The other agent is done (the default), idle, blocked, or changes status. "Done" is `idle` with no open wait, no mail queued for it, and no wake mail of its own still to go out. It also resolves when the agent goes to `error` or `stopped`, or is deleted, with that outcome. |
+| `process` | An exec session on a target ends. The result has the exit code, the duration, and the last 4000 bytes of stdout and stderr. |
+| `time` | A time comes (`--for 30m`, `--until <time>`). |
+| `card` | A card reaches a column. |
+
+- No call blocks. `terrarium wait ...` and `terrarium run ...` register the
+  wait and return. The agent ends its turn. When the wait ends, the waiter
+  gets one mail from `system`, and the mail wakes it as all mail does (the
+  push pointer of §12).
+- Every wait that ends gets a mail: resolved, timed out, failed, or
+  cancelled by another caller. A cancel by the waiter itself sends none.
+  Only the waits that end within 2 s of the first of them share one mail;
+  that mail lists each wait with its own result. The mail for a wait that
+  is not the last one also wakes the agent, so it can act (start the next
+  step).
+- Every wait has a timeout: default `TERRARIUM_WAIT_DEFAULT_TIMEOUT` (24 h)
+  for `agent`, `process`, and `card`, at most `TERRARIUM_WAIT_MAX_TIMEOUT`
+  (7 d). A timeout ends the wait as `timed_out`.
+- The daemon refuses an `agent` wait that closes a cycle (409, with the
+  path). An agent has at most 32 open waits.
+- Because done needs no open wait, waits chain: a lead that waits on `w1`,
+  while `w1` waits on its build, stays `waiting` until `w1` has the build
+  result and has ended its turn.
+
+**The status.** The runner knows nothing of waits. The daemon derives the
+stored status when it writes a status (`apply_status`):
+
+| Runner status | Open waits | Shown |
+|---|---|---|
+| `idle` | 0 | `idle` |
+| `idle` | 1 or more | `waiting` |
+| `working`, `blocked` (a question, a stall, a quota hold), `starting`, `restarting`, `error`, `stopped` | any | the same |
+
+A new wait on a resting agent sets `waiting`; the end of the last wait sets
+`idle`. Each `status` event carries `waits` and `waiting_on`. A `waiting`
+agent takes mail and turns as an `idle` one does. It is not stalled: the
+stall timer runs only in an open turn.
+
+**Runs.** `terrarium run <target> -- <cmd>` starts the command in a
+detached exec session with the agent's own target rights (policy and
+leases, §19), and registers a `process` wait. The daemon reads the output
+itself (it keeps a tail for `terrarium run log`), so the session never
+waits for a reader. The run is not part of a turn: it lives through the end
+of the turn and a stop or restart of the agent. A stop does not kill it:
+the result comes as mail at the next start. An ephemeral target that goes
+down with the agent ends it, and the wait fails (`lost`). A daemon restart
+loses the exec sessions (they live in the daemon's memory): at the next
+start, each open `process` wait fails with `lost`, and the command can
+still run on the target.
+
+**Watches.** `terrarium watch <agent> --on blocked,error` mails the watcher
+when the agent goes to one of the statuses. The operator watches from the
+agent page of the dashboard; the mail goes to the operator's mail log. By
+default a change waits 5 s (10 s for `idle`, `waiting`, and `working`) and
+goes out only when it still holds, so a flap sends nothing. `--no-debounce`
+sends each change. `--once` removes the watch after its first mail.
+
+**Rights.** An agent waits on and watches the agents of its own project.
+Another project needs a `cross_project` entry, as mail does. A sysadmin and
+the operator reach every agent. An agent manages only its own waits and
+watches; a project_admin sees and cancels those of its project; the
+operator all. A run uses the exec rights of the waiter on the target. Each
+create and cancel writes an audit row.
+
+**Storage.** Migration 24: the tables `waits` and `watches`, and the status
+column of `agents` again with `waiting` in its CHECK. The timer of the wait
+engine ticks each second next to the lease and schedule timers.
 
 ---
 
@@ -1613,6 +1711,7 @@ end-to-end scenarios of each phase are not scripted yet (no `spikes/e2e/`).
 | 5 · scope | A target is global or belongs to one project (the `scope` field). A project target gets the prefix `<project>-`. A project_admin makes and leases the targets of its project; a global target needs sysadmin. The dashboard has scope chips and filters, and a targets panel on each project. | — |
 | Harnesses | The image holds no harness (`just ci::check` fails when the Dockerfile installs one). `terrariumd harness install` at each start (the entrypoint, then the daemon) installs each missing pin of `harnesses.toml` into the tools dir (`./tools` at `/opt/terrarium/tools`, the npm prefix) and the Copilot prompt extension, and writes `terrarium-manifest.json`. In-place updates: `POST /api/harnesses/{name}/update` and `POST /api/harnesses/update`, `terrarium admin harness update` (`--version`, `--force`, `--all`), `just harness::update` and `just harness::latest` (with `--pin`), and the "Update" buttons of the dashboard. Sysadmin or the operator only, audited as `harness.update`, `409` while agents on the harness run. The sandbox binds the tools dir read-only. The version guard at each agent start (`TERRARIUM_HARNESS_VERSION_POLICY`). `docs/getting-started.md` §7. | — |
 | Templates | Agent templates (§5b, `docs/api.md` §21): global and project templates, `POST /api/agents` with `template` (project over global, `global:`, field and `policy` key overrides, the create rights on the merged values), `resolve`, `from-agent`, `[[templates]]` in project files and fleets, `template = "..."` on fleet agents and in export, `terrarium template` and `agent new --template`, the dashboard Templates page, the template select of the agent form, and "Save as template". The lead templates make workers from the `worker` template. | Agent files (`agents/<name>.toml`) cannot name a template. |
+| Waits | Waits and watches (§12d, `docs/api.md` §6.7): the status `waiting`, `agent`, `process`, `time`, and `card` waits with timeouts, the cycle check, and the limits; `terrarium run` (a detached exec session with a `process` wait); one wake mail for each end (a 2 s batch); watches with debounce and `--once`; `terrarium wait`, `run`, `watch`; the `waiting` chip and the Waits and Watches sections of the agent page; the prompt text. Tests with the fake supervisor and a real host agent (`tests/waits.rs`). | Not run live with real harnesses yet. The queued watch changes of a debounce do not live through a daemon restart. |
 | 6 | Mail and event views in the dashboard. The fleet file (`docs/fleet.md`): `terrarium fleet validate`, `plan`, `apply` (with `--prune`), `ls`, `show`, and `export`, ownership as `source: "fleet:<name>"`, and the auto-apply of `fleets/*.toml` at start and on reload. | The sibling-container sandbox fallback is not started. |
 | Security | The fixes for findings F1 to F7 of `docs/security-review.md`: the `private/` and `harness/` split of the agent dir (F1, §11); TLS on the host link with a loopback-only plaintext default, pinning, rotation, and enrol (F2, §19); DOMPurify as the one HTML sink, an ESLint guard, adversarial payload tests, and a page CSP in the dashboard (F3); the WebSocket token in the `bearer.<token>` subprotocol, with `TERRARIUM_WS_QUERY_TOKEN=0` to refuse `?token=` (F4); artifacts off the dashboard origin by default, with an origin badge in the viewer (F5); no PTY log for the login flow (F6); a constant-time token compare (F7). Signed `HttpOnly` session cookies for the dashboard, with a CSRF header on mutating calls and an `Origin` check on WebSocket upgrades (`docs/api.md` §1.1); the CSP and other security headers from the daemon (§1.2); `?token=` refused by default. The fixes for F10 to F14 of §9: fleet ownership and overwrite checks (F10); quarantine of an old agent dir with a symlink (F11); transcript path checks with the `usage.rejected_path` event (F12); sysadmin for global targets, `cross_project`, and outside `mail_to` in a policy (F13); a wider ESLint sink rule with a fixture test, and the CSP as a header with `frame-ancestors 'none'` (F14). `DELETE /api/session` needs the CSRF token when a cookie is present. | — |
 

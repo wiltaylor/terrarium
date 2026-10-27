@@ -161,6 +161,8 @@ struct Shown {
     view: AgentView,
     #[serde(skip_serializing_if = "Option::is_none")]
     subscription_detail: Option<SubscriptionDetail>,
+    /// The open waits of the agent (docs/api.md §6.7).
+    open_waits: Vec<serde_json::Value>,
 }
 
 async fn show(
@@ -188,9 +190,11 @@ async fn show(
         }
         None => None,
     };
+    let open_waits = super::waits::open_waits(&state, view.agent.id.to_string()).await?;
     Ok(Json(Shown {
         view,
         subscription_detail,
+        open_waits,
     }))
 }
 

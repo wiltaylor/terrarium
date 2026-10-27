@@ -27,6 +27,13 @@ export function applyAgentEvent(agents: Agent[], e: AgentEvent): Agent[] {
   const status = e.data?.status;
   if (e.kind === "status" && isStatus(status)) {
     a.status = status;
+    // The open waits come with the status (absent: none).
+    const waits = e.data?.waits;
+    const on = e.data?.waiting_on;
+    if (typeof waits === "number" && waits > 0) a.waits = waits;
+    else delete a.waits;
+    if (typeof on === "string" && on) a.waiting_on = on;
+    else delete a.waiting_on;
     if (status === "working") a.turn_started_at ??= e.at;
     else delete a.turn_started_at;
   }
@@ -36,7 +43,7 @@ export function applyAgentEvent(agents: Agent[], e: AgentEvent): Agent[] {
     a.turn_started_at = e.at;
   }
   if (e.kind === "turn_end") {
-    if (a.status === "working") a.status = "idle";
+    if (a.status === "working") a.status = a.waits ? "waiting" : "idle";
     delete a.turn_started_at;
   }
   if (e.kind === "exit") a.status = "error";
@@ -78,7 +85,7 @@ export function createAgentsStore(api: Pick<Api, "agents">, events?: Pick<Events
       // The list is the truth for status; the replay adds last events, turn start, and the card.
       const final = replayed.map((a, i) => {
         const fresh = merged[i]!;
-        return { ...a, status: fresh.status, current_card: fresh.current_card, turn_started_at: fresh.status === "working" ? a.turn_started_at : undefined };
+        return { ...a, status: fresh.status, current_card: fresh.current_card, waits: fresh.waits, waiting_on: fresh.waiting_on, turn_started_at: fresh.status === "working" ? a.turn_started_at : undefined };
       });
       setState("agents", reconcile(final, { key: "id" }));
       setState("error", null);

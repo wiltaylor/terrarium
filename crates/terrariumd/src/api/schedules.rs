@@ -848,13 +848,18 @@ async fn card_action(state: &Shared, actor: Actor, w: CardWork, ctx: &RunCtx) ->
     }
 }
 
-/// Wait until a started agent is ready for a turn: `idle`, `working`, or
-/// `blocked`. False when it stops or the wait ends.
+/// Wait until a started agent is ready for a turn: `idle`, `waiting`,
+/// `working`, or `blocked`. False when it stops or the wait ends.
 async fn wait_ready(state: &Shared, agent: AgentId) -> bool {
     let end = tokio::time::Instant::now() + READY_WAIT;
     while tokio::time::Instant::now() < end {
         match state.supervisor.status(agent).await {
-            Some(AgentStatus::Idle | AgentStatus::Working | AgentStatus::Blocked) => return true,
+            Some(
+                AgentStatus::Idle
+                | AgentStatus::Waiting
+                | AgentStatus::Working
+                | AgentStatus::Blocked,
+            ) => return true,
             Some(AgentStatus::Error | AgentStatus::Stopped) => return false,
             _ => tokio::time::sleep(Duration::from_millis(50)).await,
         }

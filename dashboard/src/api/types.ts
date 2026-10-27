@@ -6,6 +6,8 @@ export type Harness = "claude" | "codex" | "copilot" | "pi";
 export const AGENT_STATUSES = [
   "starting",
   "idle",
+  /** Idle, with one or more open waits (docs/api.md, waits). A live status: it takes turns and mail as `idle` does. */
+  "waiting",
   "working",
   "blocked",
   "error",
@@ -235,6 +237,129 @@ export interface Agent {
   subscription_detail?: AgentSubscriptionDetail;
   /** The template the agent was made from. The values were copied at the create; there is no live link. */
   template?: TemplateRef;
+  /** The number of open waits. Absent when 0. */
+  waits?: number;
+  /** A short summary of the open waits, for example `agent demo/w1 (done); process build on box`. Absent when none. */
+  waiting_on?: string;
+  /** Only in `GET /api/agents/{id}`: the open waits. */
+  open_waits?: Wait[];
+}
+
+// ----- Waits and watches -----
+
+export type WaitKind = "agent" | "process" | "time" | "card";
+export const WAIT_KINDS: WaitKind[] = ["agent", "process", "time", "card"];
+export type WaitState = "open" | "resolved" | "timed_out" | "cancelled" | "failed";
+/** What an agent wait waits for. `done` is idle with no open waits. */
+export type WaitUntil = "done" | "idle" | "blocked" | "any_change";
+
+export interface AgentWaitSpec {
+  agent: string;
+  agent_name?: string;
+  until: WaitUntil;
+  from_status?: string;
+}
+export interface ProcessWaitSpec {
+  target: string;
+  /** The exec session ID. */
+  session: string;
+  name?: string;
+  command?: string;
+}
+export interface TimeWaitSpec {
+  due_at: string;
+}
+export interface CardWaitSpec {
+  card: string;
+  column: string;
+}
+
+/** The end of a process run. `stdout_tail` and `stderr_tail` are untrusted text: show them as plain text only. */
+export interface ProcessWaitResult {
+  exit_code: number | null;
+  signal: string | null;
+  reason: string;
+  duration_secs?: number;
+  stdout_tail?: string;
+  stderr_tail?: string;
+}
+
+/** One wait of an agent: it holds the agent in `waiting` until it closes. */
+export interface Wait {
+  id: string;
+  /** The waiter's ULID. */
+  agent: string;
+  agent_name: string;
+  project: string;
+  kind: WaitKind;
+  spec: AgentWaitSpec | ProcessWaitSpec | TimeWaitSpec | CardWaitSpec | Record<string, unknown>;
+  summary: string;
+  state: WaitState;
+  reason?: string | null;
+  /** `operator` or `agent:<ulid>`. */
+  created_by: string;
+  created_at: string;
+  timeout_at?: string | null;
+  resolved_at?: string | null;
+  /** A process run: `ProcessWaitResult`. Other kinds: `{outcome}`. */
+  result?: ProcessWaitResult | { outcome?: string; [k: string]: unknown } | null;
+}
+
+/** `GET /api/waits/{id}/log`: the output tail of a process wait. `output` is untrusted text. */
+export interface WaitLog {
+  wait_id: string;
+  session_id: string;
+  target: string;
+  running: boolean;
+  output: string;
+  end?: Record<string, unknown> | null;
+}
+
+/** The statuses a watch can fire on. The API also takes `busy` for `working`. */
+export type WatchOn = "idle" | "waiting" | "working" | "blocked" | "error" | "stopped";
+export const WATCH_ON: WatchOn[] = ["idle", "waiting", "blocked", "error", "stopped", "working"];
+
+/** A watch: the watcher gets mail when the watched agent goes to one of the `on` statuses. */
+export interface Watch {
+  id: string;
+  /** A ULID, or `operator`. */
+  watcher: string;
+  watcher_name: string;
+  /** The watched agent's ULID. */
+  agent: string;
+  agent_name: string;
+  project: string;
+  on: WatchOn[];
+  once: boolean;
+  debounce: boolean;
+  created_by: string;
+  created_at: string;
+  fired: number;
+  last_fired_at?: string | null;
+}
+
+/** `POST /api/agents/{id}/watches`: `{id}` is the watched agent. */
+export interface NewWatch {
+  on: (WatchOn | "busy")[];
+  once?: boolean;
+  debounce?: boolean;
+}
+
+/** `data` of a `wait` event. */
+export interface WaitEventData {
+  wait_id: string;
+  change: "opened" | "resolved" | "timed_out" | "cancelled" | "failed";
+  kind: WaitKind;
+  summary: string;
+  state: WaitState;
+}
+
+/** `data` of a `watch` event. */
+export interface WatchEventData {
+  watch_id: string;
+  change: "created" | "fired" | "removed";
+  on: WatchOn[];
+  status?: string;
 }
 
 /** docs/api.md §6.3. */
@@ -363,6 +488,10 @@ export const EVENT_KINDS = [
   "self_report",
   // docs/api.md §9, §17.7.
   "lease",
+  // Waits: `{wait_id, change, kind, summary, state}`.
+  "wait",
+  // Watches: `{watch_id, change, on, status?}`.
+  "watch",
   // docs/api.md §4: a harness update in the container.
   "harness",
   // docs/api.md §19: `{change, schedule, run?, status?}`.
@@ -391,7 +520,7 @@ export interface AgentEvent {
   session?: string;
   /** Short human summary, for lists. */
   summary: string;
-  /** Kind-specific payload. `status`: `{status, from, reason}`. `card`: `{card_id, change, ...}`. */
+  /** Kind-specific payload. `status`: `{status, from, reason, waits?, waiting_on?}`. `card`: `{card_id, change, ...}`. */
   data: Record<string, unknown>;
 }
 

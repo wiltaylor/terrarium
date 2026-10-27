@@ -162,6 +162,32 @@ pub enum Command {
         #[arg(last = true)]
         cmd: Vec<String>,
     },
+    /// Start a long command on a target and wait on it without blocking
+    /// the turn: `run <target> -- <cmd>`, then end the turn. The daemon
+    /// mails the exit code and the output tail when it ends
+    #[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
+    Run {
+        #[command(subcommand)]
+        command: Option<RunCmd>,
+        #[command(flatten)]
+        args: RunArgs,
+    },
+    /// Register a wait: on an agent, a process, a time, or a card. The
+    /// command does not block: end the turn, and the daemon mails you when
+    /// the wait ends. While a wait is open, your status is `waiting`
+    Wait {
+        #[command(subcommand)]
+        command: WaitCmd,
+    },
+    /// Get a mail when an agent goes idle, waiting, blocked, error, or
+    /// stopped: `watch <agent> --on blocked,error`
+    #[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
+    Watch {
+        #[command(subcommand)]
+        command: Option<WatchCmd>,
+        #[command(flatten)]
+        args: WatchArgs,
+    },
     /// Open an interactive shell on a target (Ctrl-] detaches)
     Shell { target: String },
     /// Copy one file to or from a target: `cp <src> <target>:<dst>` or `cp <target>:<src> <dst>`
@@ -990,6 +1016,171 @@ pub enum UsageCmd {
     Project,
     /// All plans, remaining per window
     Subscriptions,
+}
+
+/// The waiter of a wait or a run: an agent uses itself; the operator names
+/// one.
+#[derive(Debug, Args, Clone, Default)]
+pub struct WaiterArg {
+    /// The operator only: the agent that waits (an agent waits for itself)
+    #[arg(long)]
+    pub waiter: Option<String>,
+}
+
+/// The timeout and the note of a wait.
+#[derive(Debug, Args, Clone, Default)]
+pub struct WaitOpts {
+    /// End the wait as `timed_out` after this time (`30m`, `2h`) or at
+    /// this RFC 3339 time. Default 24 h, at most 7 d
+    #[arg(long)]
+    pub timeout: Option<String>,
+    /// A note for yourself: why you wait. It comes back in the mail
+    #[arg(long, short = 'm')]
+    pub reason: Option<String>,
+    #[command(flatten)]
+    pub waiter: WaiterArg,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum WaitCmd {
+    /// Wait until another agent is done (idle, no open waits, no mail
+    /// waiting for it), or until it is idle, blocked, or changes status.
+    /// Also ends when it goes to error or stopped, or is deleted
+    Agent {
+        agent: String,
+        /// done, idle (its turn ended), blocked, or any-change
+        #[arg(long, default_value = "done")]
+        until: String,
+        #[command(flatten)]
+        opts: WaitOpts,
+    },
+    /// Wait for a time: `--for 30m` or `--until <RFC 3339 time>`
+    Time {
+        /// A duration from now, for example 30m or 2h
+        #[arg(long = "for", value_name = "DURATION")]
+        duration: Option<String>,
+        /// An RFC 3339 time
+        #[arg(long, value_name = "TIME")]
+        until: Option<String>,
+        /// A note for yourself: why you wait
+        #[arg(long, short = 'm')]
+        reason: Option<String>,
+        #[command(flatten)]
+        waiter: WaiterArg,
+    },
+    /// Wait until an exec session ends (from `terrarium exec` of another
+    /// process; `terrarium run` makes its own wait)
+    Process {
+        session: String,
+        #[command(flatten)]
+        opts: WaitOpts,
+    },
+    /// Wait until a card reaches a column
+    Card {
+        card: String,
+        #[arg(long, default_value = "done")]
+        column: String,
+        #[command(flatten)]
+        opts: WaitOpts,
+    },
+    /// List your open waits (`--all`: the recent closed ones too)
+    Ls {
+        #[arg(long)]
+        all: bool,
+        /// The agent whose waits to list (default: yourself)
+        #[arg(long)]
+        agent: Option<String>,
+    },
+    /// Show one wait with its result
+    Show { id: String },
+    /// Cancel an open wait. `--kill` also ends the run of a process wait
+    Cancel {
+        id: String,
+        #[arg(long)]
+        kill: bool,
+    },
+}
+
+/// `terrarium run <target> -- <cmd>`.
+#[derive(Debug, Args)]
+pub struct RunArgs {
+    #[arg(required = true)]
+    pub target: Option<String>,
+    /// A short name for the run, for example `build`
+    #[arg(long)]
+    pub name: Option<String>,
+    /// Stop the run after this time (`2h`). Default 24 h, at most 7 d
+    #[arg(long)]
+    pub timeout: Option<String>,
+    /// The working directory on the target (an absolute path)
+    #[arg(long)]
+    pub cwd: Option<String>,
+    /// `KEY=VALUE` for the command's environment; repeat for more
+    #[arg(long = "env", short = 'e')]
+    pub env: Vec<String>,
+    /// A note for yourself: why you run it
+    #[arg(long, short = 'm')]
+    pub reason: Option<String>,
+    #[command(flatten)]
+    pub waiter: WaiterArg,
+    #[arg(last = true)]
+    pub cmd: Vec<String>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum RunCmd {
+    /// List your runs (`--all`: the finished ones too)
+    Ls {
+        #[arg(long)]
+        all: bool,
+        /// The agent whose runs to list (default: yourself)
+        #[arg(long)]
+        agent: Option<String>,
+    },
+    /// Print the output of a run so far (the last 64 KiB at most)
+    Log {
+        /// The wait ID of the run
+        id: String,
+        /// Print at most this many bytes
+        #[arg(long)]
+        bytes: Option<usize>,
+    },
+    /// Kill a run; its wait is cancelled
+    Kill { id: String },
+}
+
+/// `terrarium watch <agent> --on <statuses>`.
+#[derive(Debug, Args)]
+pub struct WatchArgs {
+    #[arg(required = true)]
+    pub agent: Option<String>,
+    /// The statuses, comma-separated: idle, waiting, working (busy),
+    /// blocked, error, stopped
+    #[arg(long, default_value = "blocked,error")]
+    pub on: String,
+    /// Remove the watch after its first mail
+    #[arg(long)]
+    pub once: bool,
+    /// Mail each change at once. By default a change waits 5 s (10 s for
+    /// idle, waiting, and working) and goes out only when it holds
+    #[arg(long)]
+    pub no_debounce: bool,
+    /// The operator only: the agent that gets the mail (default: the
+    /// operator)
+    #[arg(long)]
+    pub watcher: Option<String>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum WatchCmd {
+    /// List your watches
+    Ls {
+        /// The watcher (default: yourself, or `operator`)
+        #[arg(long)]
+        watcher: Option<String>,
+    },
+    /// Remove a watch
+    Rm { id: String },
 }
 
 #[derive(Debug, Subcommand)]

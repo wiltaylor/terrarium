@@ -14,6 +14,7 @@ pub mod remote;
 pub mod schedules;
 pub mod system;
 pub mod templates;
+pub mod waits;
 
 #[cfg(test)]
 mod tests;
@@ -75,6 +76,9 @@ pub async fn run(ctx: &Ctx, cmd: &Command) -> anyhow::Result<()> {
             };
             remote::exec(ctx, target, &opts, cmd).await
         }
+        Command::Run { command, args } => waits::run(ctx, command.as_ref(), args).await,
+        Command::Wait { command } => waits::wait(ctx, command).await,
+        Command::Watch { command, args } => waits::watch(ctx, command.as_ref(), args).await,
         Command::Shell { target } => remote::shell(ctx, target).await,
         Command::Cp { src, dst } => remote::cp(ctx, src, dst).await,
         Command::Fleet { command } => fleet::fleet(ctx, command).await,

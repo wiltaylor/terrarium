@@ -22,6 +22,7 @@ pub mod templates;
 pub mod transcripts;
 pub mod usage;
 pub mod versions;
+pub mod waits;
 pub mod wiki;
 
 use serde::Deserialize;

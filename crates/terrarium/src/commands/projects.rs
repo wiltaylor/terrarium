@@ -37,6 +37,7 @@ pub const AGENT_COLS: &[(&str, &str)] = &[
     ("STATUS", "status"),
     ("ROLES", "roles"),
     ("CARD", "current_card"),
+    ("WAITING ON", "waiting_on"),
 ];
 
 pub async fn project(ctx: &Ctx, cmd: &ProjectCmd) -> anyhow::Result<()> {

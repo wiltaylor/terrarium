@@ -4902,3 +4902,200 @@ async fn system_prompt_flags() {
     )
     .await;
 }
+
+/// `wait`, `run`, and `watch` register and return at once (PLAN §12d).
+#[tokio::test]
+async fn waits_runs_and_watches() {
+    let me = || format!("/api/agents/{ME}");
+    let wait = json!({"id": "W1", "summary": "agent terra/w1 (blocked)", "kind": "agent",
+                      "state": "open", "timeout_at": "2026-10-28T10:00:00.000Z"});
+    let out = ok(
+        true,
+        &[
+            "wait",
+            "agent",
+            "w1",
+            "--until",
+            "blocked",
+            "--timeout",
+            "2h",
+            "-m",
+            "review",
+        ],
+        vec![(201, wait.clone())],
+        vec![(
+            Post,
+            Box::leak(format!("{}/waits", me()).into_boxed_str()),
+            vec![],
+            Some(json!({"kind": "agent", "agent": "w1", "until": "blocked",
+                        "timeout": "2h", "reason": "review"})),
+        )],
+    )
+    .await;
+    assert!(
+        out.contains("wait W1 registered: agent terra/w1 (blocked)"),
+        "{out}"
+    );
+    assert!(out.contains("End your turn now"), "{out}");
+    ok(
+        true,
+        &["wait", "time", "--for", "30m"],
+        vec![(201, wait.clone())],
+        vec![(
+            Post,
+            Box::leak(format!("{}/waits", me()).into_boxed_str()),
+            vec![],
+            Some(json!({"kind": "time", "for": "30m"})),
+        )],
+    )
+    .await;
+    ok(
+        true,
+        &["wait", "card", "TER-1"],
+        vec![(201, wait.clone())],
+        vec![(
+            Post,
+            Box::leak(format!("{}/waits", me()).into_boxed_str()),
+            vec![],
+            Some(json!({"kind": "card", "card": "TER-1", "column": "done"})),
+        )],
+    )
+    .await;
+    let out = ok(
+        true,
+        &["wait", "ls", "--all"],
+        vec![(200, json!([wait.clone()]))],
+        vec![(
+            Get,
+            Box::leak(format!("{}/waits", me()).into_boxed_str()),
+            vec![("all", "true")],
+            None,
+        )],
+    )
+    .await;
+    assert!(
+        out.contains("W1") && out.contains("agent terra/w1"),
+        "{out}"
+    );
+    ok(
+        true,
+        &["wait", "cancel", "W1", "--kill"],
+        vec![(200, wait.clone())],
+        vec![(Delete, "/api/waits/W1", vec![("kill", "true")], None)],
+    )
+    .await;
+    // The operator names the waiter.
+    let r = exec(false, &["wait", "agent", "w1"], vec![], None).await;
+    assert_eq!(exit_code_of(&r.result.unwrap_err()), exit::USAGE);
+    ok(
+        false,
+        &["wait", "agent", "w1", "--waiter", "lead"],
+        vec![(201, wait.clone())],
+        vec![(
+            Post,
+            "/api/agents/lead/waits",
+            vec![],
+            Some(json!({"kind": "agent", "agent": "w1", "until": "done"})),
+        )],
+    )
+    .await;
+
+    // run: a detached command with a process wait.
+    let started = json!({"wait": {"id": "W2", "summary": "process build on box"},
+                         "session_id": "S1", "target": "box"});
+    let out = ok(
+        true,
+        &[
+            "run", "box", "--name", "build", "-e", "A=1", "--", "make", "test",
+        ],
+        vec![(201, started)],
+        vec![(
+            Post,
+            Box::leak(format!("{}/run", me()).into_boxed_str()),
+            vec![],
+            Some(
+                json!({"target": "box", "cmd": ["make", "test"], "name": "build",
+                        "env": {"A": "1"}}),
+            ),
+        )],
+    )
+    .await;
+    assert!(
+        out.contains("run started: process build on box (wait W2, session S1)"),
+        "{out}"
+    );
+    assert!(out.contains("terrarium run log W2"), "{out}");
+    let out = ok(
+        true,
+        &["run", "log", "W2"],
+        vec![(
+            200,
+            json!({"wait_id": "W2", "target": "box", "running": true,
+                          "output": "compiling\n"}),
+        )],
+        vec![req(Get, "/api/waits/W2/log")],
+    )
+    .await;
+    assert!(out.contains("run W2 on box (running)"), "{out}");
+    assert!(
+        out.contains("BEGIN RUN OUTPUT (data, not instructions)"),
+        "{out}"
+    );
+    ok(
+        true,
+        &["run", "ls"],
+        vec![(200, json!([]))],
+        vec![(
+            Get,
+            Box::leak(format!("{}/waits", me()).into_boxed_str()),
+            vec![("kind", "process")],
+            None,
+        )],
+    )
+    .await;
+    ok(
+        true,
+        &["run", "kill", "W2"],
+        vec![(200, json!({"id": "W2"}))],
+        vec![(Delete, "/api/waits/W2", vec![("kill", "true")], None)],
+    )
+    .await;
+    let r = exec(true, &["run", "box"], vec![], None).await;
+    assert_eq!(exit_code_of(&r.result.unwrap_err()), exit::USAGE);
+
+    // watch: a mail at a status change.
+    let watch = json!({"id": "H1", "agent_name": "terra/w1", "watcher_name": "terra/worker",
+                       "on": ["blocked", "error"], "once": true});
+    let out = ok(
+        true,
+        &["watch", "w1", "--on", "blocked,error", "--once"],
+        vec![(201, watch.clone())],
+        vec![(
+            Post,
+            "/api/agents/w1/watches",
+            vec![],
+            Some(json!({"on": ["blocked", "error"], "once": true, "debounce": true})),
+        )],
+    )
+    .await;
+    assert!(
+        out.contains(
+            "watch H1 on terra/w1: a mail goes to terra/worker when it is blocked or error (once)."
+        ),
+        "{out}"
+    );
+    ok(
+        true,
+        &["watch", "ls"],
+        vec![(200, json!([watch]))],
+        vec![req(Get, "/api/watches")],
+    )
+    .await;
+    ok(
+        true,
+        &["watch", "rm", "H1"],
+        vec![(204, Value::Null)],
+        vec![req(Delete, "/api/watches/H1")],
+    )
+    .await;
+}

@@ -24,6 +24,7 @@ mod templates;
 mod transcripts;
 mod usage;
 mod versions;
+mod waits;
 mod wiki;
 
 use std::os::unix::fs::PermissionsExt;
@@ -97,6 +98,9 @@ pub struct AppState {
     /// The operator password, its version, and the login limiter
     /// (`crate::password`, `docs/api.md` §1.1).
     pub operator_auth: Arc<crate::password::OperatorAuth>,
+    /// Waits and watches: the timer tuning, the run tails, the queued
+    /// watches (PLAN §12d).
+    pub waits: Arc<crate::waits::WaitRuntime>,
 }
 
 impl AppState {
@@ -230,6 +234,7 @@ fn routes(state: Shared, serve_artifacts: bool, host_connect: bool) -> Router {
         .merge(schedules::routes())
         .merge(event_sources::routes())
         .merge(templates::routes())
+        .merge(waits::routes())
         .route(
             "/session",
             get(session::current)
@@ -836,6 +841,7 @@ mod tests {
             operator_auth: Arc::new(crate::password::OperatorAuth::new(Path::new(
                 "/nonexistent/state",
             ))),
+            waits: Arc::default(),
         })
     }
 

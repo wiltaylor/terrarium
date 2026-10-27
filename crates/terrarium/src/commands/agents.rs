@@ -266,7 +266,7 @@ const LIFECYCLE_WAIT: Duration = Duration::from_secs(10);
 fn settled(action: &str, status: &str) -> bool {
     match action {
         "stop" => matches!(status, "stopped" | "error"),
-        _ => matches!(status, "idle" | "working" | "blocked" | "error"),
+        _ => matches!(status, "idle" | "waiting" | "working" | "blocked" | "error"),
     }
 }
 
