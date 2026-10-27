@@ -721,6 +721,10 @@ fn spawn_pump(state: Shared) -> JoinHandle<()> {
 ///    last harness session. An agent that cannot start gets `error`, with
 ///    the reason.
 async fn reconcile(state: &Shared) -> ApiResult<()> {
+    // The default plan accounts first: an agent with no subscription
+    // launches on its harness's default (PLAN §16.3). Idempotent; the
+    // migration loop settles again after it moves a login.
+    api::settle_account_defaults(state, None).await;
     let all = state.db.read(agents::all_statuses).await?;
     for (id, stored) in all {
         if !stored.is_live() && stored != AgentStatus::Restarting {
