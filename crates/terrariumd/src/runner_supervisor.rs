@@ -3115,6 +3115,29 @@ impl Supervisor for RunnerSupervisor {
         })
     }
 
+    fn screen(
+        &self,
+        agent: AgentId,
+    ) -> BoxFuture<'_, Result<terrarium_runner::ScreenSnapshot, SupervisorError>> {
+        Box::pin(async move {
+            let runner = self
+                .runner(agent)
+                .ok_or(SupervisorError::NotRunning(agent))?;
+            // The control call `screen` reads the runner's parser. It takes
+            // no attachment, so a PTY viewer and the harness see nothing.
+            runner.screen().await.map_err(|e| match e {
+                terrarium_runner::RunnerError::Control(rpc)
+                    if rpc.code == terrarium_runner::control::codes::METHOD_NOT_FOUND =>
+                {
+                    SupervisorError::Unsupported(crate::supervisor::OLD_RUNNER.into())
+                }
+                terrarium_runner::RunnerError::Exited
+                | terrarium_runner::RunnerError::Disconnected => SupervisorError::NotRunning(agent),
+                e => other(e),
+            })
+        })
+    }
+
     fn status(&self, agent: AgentId) -> BoxFuture<'_, Option<AgentStatus>> {
         Box::pin(async move {
             let slots = lock(&self.inner.slots);

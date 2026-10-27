@@ -1155,6 +1155,37 @@ agent that is not running gets `409 not_running` before the upgrade.
   it does not know.
 - The server closes the socket when the agent stops.
 
+**Screen snapshot.** `GET /api/agents/{id}/screen` gives the harness screen
+as plain text. The rights are the rights of the PTY: the project_admin of
+the agent's project, a sysadmin, or the operator. A member gets
+`403 forbidden`. The call is read-only. The daemon asks the runner for its
+parsed screen (the control call `screen`, [runner.md](runner.md)). It does
+not attach to the PTY, and it types nothing.
+
+```json
+{"agent":"terrarium/worker","agent_id":"01M5PA0T0Z0K16V6G88P3SE78W","status":"blocked",
+ "rows":40,"cols":120,"text":"Do you want to make this edit to lib.rs?\n> 1. Yes\n  2. No",
+ "cursor":{"row":1,"col":2},"at":"2026-10-27T10:16:30.120Z"}
+```
+
+| Field | Meaning |
+|---|---|
+| `agent` | `project/name`. |
+| `status` | The live status of the agent. |
+| `rows`, `cols` | The size of the screen. |
+| `text` | The rows, joined with `\n`. There are no escape codes. The daemon removes the trailing blanks of each row and the blank rows at the end. |
+| `cursor` | The cursor position, from 0. |
+| `at` | RFC 3339: when the daemon took the snapshot. |
+
+| Query | Meaning |
+|---|---|
+| `ansi` | `true`: `text` is the escape sequences that draw the screen on an empty terminal. Default `false`. |
+
+An agent that is not running gives `409 not_running`. A runner that does
+not have the control call `screen` gives `409 conflict` with the message
+"runner too old; restart the agent". The runners of this version all have
+it.
+
 ### 6.6 Transcript
 
 The daemon reads the session file of each harness and gives one block

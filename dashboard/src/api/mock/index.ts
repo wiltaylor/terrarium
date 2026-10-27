@@ -33,6 +33,7 @@ import type {
   Artifact,
   Block,
   Session,
+  AgentScreen,
   SessionGrant,
   SessionInfo,
   TranscriptFrame,
@@ -1789,6 +1790,13 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
       waits: waitMock.agentWaits,
       watches: waitMock.agentWatches,
       watch: waitMock.agentWatch,
+      screen: (id) =>
+        reply((): AgentScreen => {
+          const a = agent(id);
+          if (!LIVE.includes(a.status)) fail(409, "not_running", `agent \`${a.project}/${a.name}\` is not running`);
+          const text = [`✻ ${a.harness}  (mock screen for ${a.name})`, `cwd: ${a.workspace}`, "", a.status === "working" ? "● Working…" : ">"].join("\n");
+          return { agent: `${a.project}/${a.name}`, agent_id: a.id, status: a.status, rows: 24, cols: 80, text, cursor: { row: 3, col: 2 }, at: iso() };
+        }),
       pty: (id) => {
         const a = w.agents.find((x) => x.id === id || `${x.project}/${x.name}` === id || x.name === id);
         const name = a?.name ?? id;

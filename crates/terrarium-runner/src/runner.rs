@@ -60,6 +60,14 @@ impl ScreenSnapshot {
     pub fn text(&self) -> String {
         self.lines.join("\n")
     }
+
+    /// Parse `bytes` on an empty `rows` x `cols` screen, and take the
+    /// snapshot on the runner's own path. For fakes and tests.
+    pub fn parse(rows: u16, cols: u16, bytes: &[u8]) -> Self {
+        let mut parser = vt100::Parser::new(rows, cols, 0);
+        parser.process(bytes);
+        snapshot(parser.screen())
+    }
 }
 
 /// How the harness process ended.
@@ -1031,5 +1039,27 @@ impl Inner {
             }
         }
         true
+    }
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::ScreenSnapshot;
+
+    #[test]
+    fn the_snapshot_text_has_no_escape_codes() {
+        let bytes = b"\x1b[2J\x1b[H\x1b[1;31mError:\x1b[0m disk full   \r\n\
+            \x1b[38;5;208m> \x1b[7mAllow?\x1b[27m [y/n]\x1b[0m\r\n\x1b[5;3Hlow\x1b]0;title\x07";
+        let s = ScreenSnapshot::parse(6, 30, bytes);
+        assert_eq!((s.rows, s.cols), (6, 30));
+        assert_eq!(s.lines[0], "Error: disk full");
+        assert_eq!(s.lines[1], "> Allow? [y/n]");
+        assert_eq!(s.lines[4], "  low");
+        assert_eq!(s.cursor, (4, 5));
+        let text = s.text();
+        assert!(!text.contains('\x1b'), "{text:?}");
+        assert!(text.lines().all(|l| l == l.trim_end()));
+        // The formatted copy keeps the escape codes for an attach.
+        assert!(s.formatted.contains(&0x1b));
     }
 }

@@ -362,6 +362,21 @@ export interface WatchEventData {
   status?: string;
 }
 
+/** `GET /api/agents/{id}/screen` (docs/api.md §6.5): the harness screen as plain text. */
+export interface AgentScreen {
+  /** `project/name`. */
+  agent: string;
+  agent_id: string;
+  status: AgentStatus;
+  rows: number;
+  cols: number;
+  /** The screen rows, no escape codes, no trailing blanks. */
+  text: string;
+  cursor?: { row: number; col: number };
+  /** RFC 3339: when the daemon took the snapshot. */
+  at: string;
+}
+
 /** docs/api.md §6.3. */
 export interface Session {
   id: string;

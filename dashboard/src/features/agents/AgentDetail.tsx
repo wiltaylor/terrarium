@@ -15,6 +15,7 @@ import { describeCause } from "../../stores/quota";
 import { AgentForm } from "./AgentForm";
 import { SaveAsTemplateDialog } from "../templates/TemplateDialog";
 import { Conversation } from "./conversation/Conversation";
+import { ScreenPanel } from "./ScreenPanel";
 import { RoleBadges } from "./AgentsPage";
 import { changeSubscription, loginText } from "./subscription";
 import { SubscriptionSelect } from "./SubscriptionFields";
@@ -25,6 +26,7 @@ import { WaitsPanel, WatchesPanel } from "./Waits";
 const TABS = [
   { id: "conversation", label: "Conversation" },
   { id: "terminal", label: "Terminal" },
+  { id: "screen", label: "Screen" },
   { id: "events", label: "Events" },
   { id: "sessions", label: "Sessions" },
 ] as const;
@@ -202,6 +204,9 @@ export default function AgentDetail() {
               </Match>
               <Match when={tab() === "terminal"}>
                 <Terminal connect={() => api.agents.pty(a().id)} available={running()} title={`${a().name} · ${a().harness}`} />
+              </Match>
+              <Match when={tab() === "screen"}>
+                <ScreenPanel agentId={a().id} running={running()} />
               </Match>
               <Match when={tab() === "events"}>
                 <EventHistory filterKey={a().id} fetch={(q) => api.agents.events(a().id, q)} match={(e) => e.agent_id === a().id || e.data?.agent_id === a().id} />

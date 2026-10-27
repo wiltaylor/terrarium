@@ -90,6 +90,7 @@ import type {
   ScheduleQuery,
   ScheduleRun,
   Session,
+  AgentScreen,
   SessionGrant,
   SessionInfo,
   PasswordChange,
@@ -211,6 +212,8 @@ export interface Api {
     watch(id: string, body: NewWatch): Promise<Watch>;
     /** Bidirectional PTY. See ./sockets for the protocol. */
     pty(id: string): PtySocket;
+    /** `GET /api/agents/{id}/screen` (docs/api.md §6.5): a read-only text snapshot of the harness screen. 409 when the agent is not running. */
+    screen(id: string): Promise<AgentScreen>;
   };
 
   waits: {
@@ -602,6 +605,7 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       watches: (id) => get(`${a(id)}/watches`),
       watch: (id, body) => post(`${a(id)}/watches`, body),
       pty: (id) => socket(`${a(id)}/pty`),
+      screen: (id) => get(`${a(id)}/screen`),
     },
 
     waits: {

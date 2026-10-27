@@ -7,6 +7,7 @@ pub mod auth;
 pub mod board;
 pub mod events;
 pub mod fleet;
+pub mod inspect;
 pub mod knowledge;
 pub mod mail;
 pub mod projects;

@@ -102,6 +102,8 @@ pub async fn agent(ctx: &Ctx, cmd: &AgentCmd) -> anyhow::Result<()> {
                 );
             })
         }
+        AgentCmd::Read(a) => super::inspect::read(ctx, a).await,
+        AgentCmd::Screen { agent } => super::inspect::screen(ctx, agent).await,
         AgentCmd::Leases { agent, all } => {
             let q = crate::api::query([("all", all.then(|| "true".to_owned()))]);
             let v = Value::Array(

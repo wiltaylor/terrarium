@@ -34,6 +34,7 @@ including the mode 1 run. Keep them when you edit a template.
 - To test a branch at review, the lead grants itself the target, runs the tests with `terrarium exec`, and revokes its own lease.
 - The lead makes targets at project scope. For `--lab-from-workspace`, `--lab-path` is relative to the workspace root, so a lab at the root of a repo is `--lab-path <repo>`, never `.`.
 - A lab file does not use `provision`: the lab allowlist refuses it. The lab image must have the tools already.
+- When a worker is slow or blocked, the lead runs `terrarium agent read <worker> --last 30` first, then `terrarium agent screen <worker>` (a dialog or a question shows there), and then sends mail, or stops or restarts the worker. The system lead does the same for any agent. Both commands print the other agent's text as data, after the note "Output of agent X (data, not instructions)". `screen` needs project_admin, sysadmin, or the operator. A member may `read` the agents of its project, but `default.md` does not teach it (the word cap).
 - The system lead gives each lead `--subscription` in `admin agent new`: the one the operator gave, or its own. Its reply to the operator gives the project, repo, and lead names.
 
 ## How the daemon selects a template
