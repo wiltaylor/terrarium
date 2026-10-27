@@ -597,12 +597,20 @@ pub fn reply(
             }
         }
     };
-    let recipients: Vec<Address> = participants(t, &original.thread_id)?
+    let all = participants(t, &original.thread_id)?;
+    let system_thread = all.contains(&Address::System);
+    let recipients: Vec<Address> = all
         .into_iter()
         .filter(|p| p.key() != from.key() && *p != Address::System)
         .collect();
     if recipients.is_empty() {
-        return Err(ApiError::invalid("the thread has no other participant"));
+        // A daemon notice (a wait result, a watch) has nobody to answer.
+        return Err(ApiError::invalid(if system_thread {
+            "this is a system mail: it needs no reply. Act on it, or mail the agent \
+             or the operator with `terrarium mail send`"
+        } else {
+            "the thread has no other participant"
+        }));
     }
     let mut out = Vec::new();
     for to in &recipients {

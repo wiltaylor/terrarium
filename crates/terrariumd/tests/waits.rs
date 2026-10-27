@@ -151,6 +151,20 @@ async fn an_open_wait_shows_as_waiting_and_the_end_mails_the_waiter() {
     let body = m["body"].as_str().unwrap();
     assert!(body.contains("your note: check the build later"), "{body}");
     assert!(body.contains("no open waits"), "{body}");
+    // A system mail has nobody to answer: the refusal says so.
+    let r = td
+        .post_as(
+            &lead,
+            &format!("/api/mail/{}/reply", m["id"].as_str().unwrap()),
+            json!({"body": "thanks"}),
+        )
+        .await;
+    assert_eq!(r.status, 422, "{}", r.body);
+    let msg = r.body["error"]["message"].as_str().unwrap();
+    assert!(
+        msg.starts_with("this is a system mail: it needs no reply"),
+        "{msg}"
+    );
     // A `wait` event for each change.
     let ev = td.get("/api/events?kind=wait").await;
     let changes: Vec<&str> = ev
