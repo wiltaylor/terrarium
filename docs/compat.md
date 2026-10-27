@@ -1704,3 +1704,56 @@ repository gets a fake commit with the message "This is a fake commit".
   follow the GitHub shape. A `forgejo` source that is really a Gitea
   server would send them with `X-Gitea-Event: workflow_run`; Terrarium
   makes `ext.forgejo.workflow_run` from them today.
+
+## Target displays: VNC and RDP
+
+Live checks of the host agent's VNC and RDP drivers (PLAN §19b, step 2)
+on 2026-10-27. Each server ran in a throwaway container from
+`examples/display/` on a random loopback port. The driver ran in the
+`display_live` example of `terrarium-host`
+(`crates/terrarium-host/examples/display_live.rs`), which runs the same
+`dispatch` as the host agent, with one kept connection for all the
+operations of a run. OCR was `tesseract` 5.5.3 on the host.
+
+### VNC: x11vnc on Xvfb
+
+Debian bookworm, x11vnc 0.9.16-9, Xvfb 1280 x 800 x 24, openbox, xterm
+(`vnc.Dockerfile`).
+
+| Item | Result |
+|---|---|
+| Version | RFB 3.8 |
+| Security | Type 2, VNC authentication, with a random 8-character password. A wrong password: `failed`, "authentication failed", with no password in the text. |
+| Encoding | x11vnc answered with ZRLE (the driver's trace log: one rectangle, encoding 16). A full screen was 22 to 35 KB of PNG; a screenshot took 140 to 180 ms on loopback. |
+| `info` | `width` 1280, `height` 800, `ops` with `scroll` and `ocr` (`tesseract`). |
+| `click`, `type`, `keys` | A click put the focus in the xterm. `type` "echo hello-from-vnc\n" and `printf "%s\n" tErRa_123` ran: the screen and the OCR showed the commands and their output, with the capitals and the symbols right. `keys ctrl-l` cleared bash's screen. |
+| `drag` | A drag of the title bar moved the window. |
+| `scroll`, double click | The server took them (no error); not checked on the screen. |
+| `screenshot` with `region` and `scale` | Right sizes. |
+| Text outside ASCII | `é` and `€` did not show in the xterm, with or without x11vnc `-add_keysyms`. The keysyms leave the client (the unit tests check them); the C locale of the xterm, or the X keymap, drops them. Not solved. |
+
+### RDP: xrdp
+
+Debian bookworm, xrdp 0.9.21.1, xorgxrdp 0.9.19, openbox, xterm
+(`rdp.Dockerfile`).
+
+| Item | Result |
+|---|---|
+| Security | xrdp offers SSL and RDP security only (its log: "configured [SSL\|RDP], requested [SSL\|HYBRID\|HYBRID_EX\|RDP], selected [SSL]"). So the driver used TLS (TLS 1.3, `TLS_AES_256_GCM_SHA384`) with the password in the Client Info PDU and auto logon. NLA was not checked: xrdp has none. |
+| Wrong password | With TLS alone, the connection does not fail: the screen shows xrdp's "login failed for user lab" dialog. The NLA path fails at the login instead. |
+| Pin | The first connection wrote the line `127.0.0.1:<port> B4:80:...` to the pin file. With a changed line, the next connection ended with `refused`, both fingerprints, and the `terrarium-host rdp-forget` hint; xrdp logged no login. |
+| Codecs | IronRDP offered RemoteFX, and xrdp used it. The screen was right, with faint marks at the 64-pixel tile corners (RemoteFX is lossy). With no RemoteFX (plain bitmaps, 32-bit colour), IronRDP drew xrdp's updates wrong (stripes and smeared text). So the driver keeps IronRDP's default codecs. |
+| Screen | 1280 x 800, the size the client asks for. A screenshot took 340 to 460 ms: it waits until the screen has no update for 250 ms. |
+| Input after login | xrdp dropped the input of the first moment after the login: the first click of a new connection did not arrive (checked with `xinput test-xi2` in the container). The driver now waits for the first screen updates after the login; then 12 key chords sent at once all arrived. At the first login of a new container, the desktop starts after the login: a click in the first second can come before the xterm is there. |
+| `click`, `type`, `keys` | A click put the focus in the xterm. `type` (Unicode key events) "seq 1 100\n" and `printf "%s\n" tErRa_RDP-9 "a\|b&c"` ran, with the capitals and the symbols right. F1 to F12 arrived as the right X keycodes (67 to 76, 95, 96 in `xinput test-xi2`). |
+| `scroll` | 10 wheel steps up scrolled the xterm back (the OCR read the old lines); over the root window, openbox changed the desktop. |
+| `drag`, right click | A drag of the title bar moved the window. A right click on the root window opened the openbox menu. |
+| A server that drops the session | Not checked live. A DeactivateAll (a resize) ends the connection, and the next operation connects again. |
+
+### Not tested
+
+- RDP with NLA (CredSSP) against Windows. The code path is IronRDP's
+  `connect_finalize` with NTLM; the unit tests do not reach it.
+- VeNCrypt or TLS for VNC: the client does not speak them.
+- A VNC server that changes the screen size (DesktopSize): the unit
+  tests do not cover it, and x11vnc on Xvfb does not resize.

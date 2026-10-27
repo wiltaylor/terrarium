@@ -37,6 +37,10 @@ nix.workspace = true
 tempfile.workspace = true
 png.workspace = true
 base64.workspace = true
+des.workspace = true
+flate2.workspace = true
+ironrdp.workspace = true
+ironrdp-tokio.workspace = true
 
 [dev-dependencies]
 

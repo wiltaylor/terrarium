@@ -661,7 +661,7 @@ describe("target displays (docs/api.md §17.10)", () => {
     await expect(api.targets.screenshot("desk-x11", { scale: 2 })).rejects.toMatchObject({ status: 422 });
   });
 
-  it("answers info and input, and 422 for vnc (step 2) and a target with no display", async () => {
+  it("answers info and input, a vnc screen, and 422 for a target with no display", async () => {
     const api = mock();
     const info = await api.targets.displayInfo("lab-win11");
     expect(info).toMatchObject({ target: "lab-win11", backend: "vmlab", width: 1280, height: 800, ocr: "vmlab", input: { allowed: true } });
@@ -669,7 +669,9 @@ describe("target displays (docs/api.md §17.10)", () => {
     expect(r).toMatchObject({ target: "desk-x11", op: "click", ok: true });
     const typed = await api.targets.displayOp("desk-x11", "type", { text: "secret" });
     expect(typed).toMatchObject({ chars: 6 });
-    await expect(api.targets.screenshot("win-vnc")).rejects.toMatchObject({ status: 422, code: "invalid" });
+    const vnc = await api.targets.displayInfo("win-vnc");
+    expect(vnc).toMatchObject({ target: "win-vnc", backend: "vnc", ops: expect.arrayContaining(["scroll"]) });
+    expect(await api.targets.screenshot("win-vnc")).toMatchObject({ target: "win-vnc", format: "png" });
     await expect(api.targets.screenshot("build-box")).rejects.toMatchObject({ status: 422 });
   });
 });

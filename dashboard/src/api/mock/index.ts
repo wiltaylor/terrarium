@@ -282,8 +282,6 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
   const displayTarget = (id: string): Target => {
     const t = target(id);
     if (!hasDisplay(t)) fail(422, "invalid", `target \`${t.name}\` has no display`, { code: "bad_request" });
-    if (t.kind === "vnc" || t.kind === "rdp")
-      fail(422, "invalid", `the ${t.kind} display driver is not implemented yet (step 2)`, { code: "unsupported" });
     if (w.hosts.find((h) => h.name === t.host)?.status !== "online") fail(409, "conflict", `host agent \`${t.host ?? "?"}\` of target \`${t.name}\` is offline`);
     return t;
   };

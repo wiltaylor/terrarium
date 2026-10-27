@@ -117,6 +117,24 @@ pub struct DisplayConfig {
     /// The `tesseract` binary, for OCR on the backends that have none.
     #[serde(default = "default_tesseract")]
     pub tesseract_bin: String,
+    /// The pinned TLS certificates of RDP targets (trust on first use):
+    /// one `<address> <sha256>` line for each server. Default:
+    /// `$XDG_DATA_HOME/terrarium-host/rdp-known-hosts`
+    /// (`~/.local/share/...`). `terrarium-host rdp-forget <address>`
+    /// removes a pin.
+    #[serde(default)]
+    pub rdp_known_hosts: Option<PathBuf>,
+}
+
+impl DisplayConfig {
+    /// `rdp_known_hosts`, or its default, as an absolute path.
+    pub fn rdp_known_hosts_path(&self) -> PathBuf {
+        absolute(
+            self.rdp_known_hosts
+                .clone()
+                .unwrap_or_else(|| data_dir().join("terrarium-host").join("rdp-known-hosts")),
+        )
+    }
 }
 
 fn default_tesseract() -> String {
@@ -132,6 +150,7 @@ impl Default for DisplayConfig {
             xauthority: None,
             runtime_dir: None,
             tesseract_bin: default_tesseract(),
+            rdp_known_hosts: None,
         }
     }
 }
@@ -160,6 +179,15 @@ impl Default for HostPaths {
     }
 }
 
+/// `$XDG_DATA_HOME`, else `~/.local/share`, else `/var/lib`.
+pub fn data_dir() -> PathBuf {
+    std::env::var_os("XDG_DATA_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+        .unwrap_or_else(|| PathBuf::from("/var/lib"))
+}
+
 fn absolute(p: PathBuf) -> PathBuf {
     if p.is_absolute() {
         p
@@ -176,11 +204,7 @@ impl HostPaths {
         instances_dir: Option<&Path>,
         repos_dir: Option<&Path>,
     ) -> Self {
-        let data = std::env::var_os("XDG_DATA_HOME")
-            .filter(|v| !v.is_empty())
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
-            .unwrap_or_else(|| PathBuf::from("/var/lib"));
+        let data = data_dir();
         Self {
             work_dir: absolute(work_dir.map_or_else(|| PathBuf::from("work"), Path::to_path_buf)),
             instances_dir: absolute(instances_dir.map_or_else(

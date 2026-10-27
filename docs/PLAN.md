@@ -1626,8 +1626,8 @@ or two actions, take a screenshot again.
 | `vmlab` | the screen of `machine` | `vmlab vm screenshot`, `mouse-move`, `click`, `drag`, `sendkeys`, `ocr`, `find-image`, and `vmlab record` |
 | `docker` with `display = "x11"`, `"wayland"`, or `"auto"` | an X11 or Wayland session in the container | `docker exec` of `xdotool` and `import` (X11), or `grim`, `wtype`, and `ydotool` (wlroots Wayland) |
 | `desktop` | the desktop of the host agent's machine | the same tools, on the host. Off unless the host agent opts in |
-| `vnc` | a VNC server at `address` | the host agent's RFB client (step 2) |
-| `rdp` | an RDP server at `address` | the host agent's RDP client, IronRDP (step 2) |
+| `vnc` | a VNC server at `address` | the host agent's RFB client: RFB 3.8 (also 3.7 and 3.3), VNC authentication or none, ZRLE, CopyRect, and Raw |
+| `rdp` | an RDP server at `address` | the host agent's RDP client on IronRDP: TLS, with NLA (CredSSP) when the server offers it |
 
 `vnc`, `rdp`, and `desktop` targets have only a display: no exec, no
 copy, no shell. Their `up` and `down` change nothing. Their `status` is a
@@ -1650,8 +1650,20 @@ prints the path, so the harness can open the image.
 pointer, the keys, and text. An engine does the same work for every
 driver: it checks the values, crops and scales the PNG, runs `tesseract`
 for a driver with no OCR, and makes the answer. A new backend implements
-the trait. The VNC and RDP drivers are stubs in step 1; step 2 fills them
-in.
+the trait.
+
+**VNC and RDP connections.** The VNC and RDP clients are in the host
+agent; they need no tool. The host agent keeps one connection for each
+target, because a live view takes a screenshot every 2.5 s. A new
+credential gets a new connection. Operations on one connection run one at
+a time. A connection with no operation for 60 s closes. When a kept
+connection fails, the host agent connects again and tries the operation
+once more. The VNC client has no TLS: keep a VNC link on a trusted
+network or in a tunnel. The RDP client accepts the server's self-signed
+certificate on the first connection and pins its SHA-256 in the host
+agent's state (trust on first use). A different certificate later stops
+the connection before the credentials go out; `terrarium-host rdp-forget
+<address>` removes the pin (docs/host-protocol.md "`display`").
 
 **Rights and safety.**
 
@@ -1671,7 +1683,8 @@ in.
 - A `vnc` or `rdp` password is a `password` credential in the daemon's
   credential store. The daemon sends it only to the target's host agent,
   in the frame that opens the operation. No answer to an agent or to the
-  dashboard holds it.
+  dashboard holds it. The host agent does not log it, and no error text
+  holds it.
 
 **The desktop opt-in.** A `desktop` target gives an agent the screen,
 the mouse, and the keyboard of a real machine, as the host agent's user.
@@ -1875,12 +1888,18 @@ end-to-end scenarios of each phase are not scripted yet (no `spikes/e2e/`).
 11. Large artifacts: chunked upload through the runner socket, and whether
    bundles over a size threshold should be served from disk directly rather
    than unpacked into the store.
-12. Target displays (§19b), step 2: the VNC (RFB) and RDP (IronRDP)
-    drivers of the host agent, which now answer "not implemented yet". Then:
-    a live check of the vmlab display ops on a lab VM with a screen (the
-    test lab has a container only, which has no display), a live check of
-    `examples/display/wayland.Dockerfile`, and `/dev/uinput` for `ydotool`
-    in a docker target, which Terrarium does not pass now.
+12. Target displays (§19b). Done in step 2: the VNC and RDP drivers of the
+    host agent, live-checked against x11vnc and xrdp (docs/compat.md,
+    "Target displays: VNC and RDP"). Open: a live check of RDP with NLA
+    against Windows; VeNCrypt (TLS) for VNC; the RDP plain-bitmap codec
+    (the client offers RemoteFX now, which is lossy); RDP resize (a server
+    that resets the session ends the connection, and the next operation
+    connects again); text outside Latin-1 on an X server whose keymap has
+    no keysym for it; a live check of the vmlab display ops on a lab VM
+    with a screen (the test lab has a container only, which has no
+    display), a live check of `examples/display/wayland.Dockerfile`, and
+    `/dev/uinput` for `ydotool` in a docker target, which Terrarium does
+    not pass now.
 
 ## 23. Repository layout, build, run, and test
 

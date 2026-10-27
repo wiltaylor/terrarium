@@ -3353,8 +3353,8 @@ each operation to the target's host agent in one `display` frame
 | `vmlab` | The screen of `machine` | `vmlab vm screenshot`, `mouse-move`, `click`, `drag`, `sendkeys`, `ocr`, `find-image`; `vmlab record` |
 | `docker` with `display` | An X11 or Wayland session in the container | `docker exec` of the tools below |
 | `desktop` | The desktop of the host agent's machine | the tools below, on the host. Only when the host agent opts in (below) |
-| `vnc` | A VNC server at `address` | the host agent's VNC client (step 2; now `422` "not implemented yet") |
-| `rdp` | An RDP server at `address` | the host agent's RDP client (step 2; now `422` "not implemented yet") |
+| `vnc` | A VNC server at `address` | the host agent's VNC client (RFB). No tool |
+| `rdp` | An RDP server at `address` | the host agent's RDP client (IronRDP). No tool |
 
 The tools for `docker` and `desktop`:
 
@@ -3368,7 +3368,43 @@ The tools for `docker` and `desktop`:
 (default `wayland-0`, or an absolute path when the image sets no
 `XDG_RUNTIME_DIR`). Wayland input works with wlroots compositors (sway,
 cage, labwc). GNOME and KDE on Wayland refuse synthetic input: use a
-`vnc` or `rdp` target for them. `examples/display/` has two test images.
+`vnc` or `rdp` target for them. `examples/display/` has test images for
+X11, Wayland, VNC, and RDP.
+
+**VNC and RDP.** The host agent has its own clients, so a `vnc` or `rdp`
+target needs no tool on the host. `ops` of both has `scroll`; `ocr` is
+`tesseract` on the host agent, when it is there.
+
+| | `vnc` | `rdp` |
+|---|---|---|
+| Protocol | RFB 3.8 (3.7 and 3.3 also) | RDP, IronRDP |
+| Login | VNC authentication (security type 2) with the credential's password, or none (type 1). The VNC protocol has no user name: `username` is not used | NLA (CredSSP, NTLM) with `username`, `domain`, and the password, when the server offers NLA. Else TLS, and the password goes in the RDP login packet |
+| Encryption | None. The screen and the keys cross the link in clear text: keep it on a trusted network or in a tunnel. No VeNCrypt or TLS | TLS. The host agent pins the server's certificate on the first connection (below) |
+| Screen | A full update for each screenshot: ZRLE, CopyRect, or Raw. The server may change the size (DesktopSize) | The server pushes updates; IronRDP decodes them (RemoteFX, bitmaps). The client asks for 1280 x 800 |
+| Keys | X keysyms | set-1 scancodes (US layout) for `keys`; `pause` has none (`422 unsupported`) |
+| Text | One keysym for each character: Latin-1 is the code point, other Unicode is `0x01000000` + the code point. The server must map the keysym | Unicode key events; newline and tab are keys |
+| Scroll | Buttons 4 and 5 (up, down), 6 and 7 (left, right), one press for each step | Wheel events of 120 units for each step |
+
+The host agent keeps one connection for each target and credential, so
+a live view does not log in each time. Operations on a target run one at
+a time. A connection with no operation for 60 s closes. When a kept
+connection fails (the server closed it), the host agent connects again
+and tries the operation once more. A login takes at most 20 s.
+
+**The RDP certificate pin.** An RDP server has a self-signed certificate,
+as a rule. On the first connection, the host agent accepts it and writes
+its SHA-256 to its pin file (trust on first use): `[display]
+rdp_known_hosts`, by default `~/.local/share/terrarium-host/rdp-known-hosts`
+of the host agent's user. Each later connection must show the same
+certificate, else the answer is `403 forbidden` (`details.code`
+`refused`), "the server's TLS certificate changed", and the host agent
+sends no credential. When the server has a new certificate on purpose,
+run `terrarium-host rdp-forget <address>` on the host agent's machine
+(with no address, it lists the pins), then connect again.
+
+**RDP with TLS and no NLA.** xrdp, for example, has no NLA. With TLS
+alone, a wrong password does not fail the connection: the server shows
+its own "login failed" screen, and a screenshot shows it.
 
 **Endpoints.**
 
@@ -3469,11 +3505,11 @@ screenshot to read the size.
 
 | Answer | When |
 |---|---|
-| `403 forbidden` | The caller may not use the target. Also a `desktop` target on a host agent whose config does not opt in: "the desktop display of host `<h>` is off". |
+| `403 forbidden` | The caller may not use the target. Also a `desktop` target on a host agent whose config does not opt in: "the desktop display of host `<h>` is off". Also an RDP server whose certificate is not the pinned one (`details.code` `refused`). |
 | `404 not_found` | No target, or no such operation. |
 | `409 conflict` | Input without an exclusive lease (above). The host agent is offline. A lab instance target with no instance. |
 | `409 lease_held` | Another agent holds an exclusive lease on the target. |
-| `422 invalid` | A bad value, a target with no display, or a host agent that cannot do the operation: `details.code` is `bad_request`, `unsupported` (a missing tool, with the package to install; "not implemented yet (step 2)"; "no OCR"), or `failed` (the tool ran and failed, with its message). |
+| `422 invalid` | A bad value, a target with no display, or a host agent that cannot do the operation: `details.code` is `bad_request`, `unsupported` (a missing tool, with the package to install; a key with no RDP scancode; "no OCR"), or `failed` (the tool ran and failed, or a VNC or RDP connection or login failed, with its message). |
 | `429 rate_limited` | Over 20 input operations in one second on the target. |
 
 **The opt-in of a desktop.** The host agent's own config turns on its
@@ -3489,7 +3525,8 @@ frame too.
 (`POST /api/credentials {"name", "kind": "password", "value",
 "username"?}`). The daemon reads it only to build the `display` frame,
 and sends it only to the target's host agent in that frame. No answer to
-an agent or to the dashboard holds it, and the audit rows do not.
+an agent or to the dashboard holds it, and the audit rows do not. The host
+agent does not log it, and its error texts do not hold it.
 
 ## 18. Fleet
 

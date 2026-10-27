@@ -183,13 +183,14 @@ struct Entry {
     detached_since: Option<Instant>,
 }
 
-#[derive(Default)]
 struct Shared {
     sessions: Mutex<HashMap<SessionId, Entry>>,
     resume_token: Mutex<Option<String>>,
     /// The bearer token for the next dial. It starts as the configured
     /// token and changes when the daemon sends `welcome.token`.
     bearer: Mutex<String>,
+    /// The kept VNC and RDP connections of `display` frames.
+    remotes: Arc<crate::display::remote::Remotes>,
 }
 
 /// The host agent's client. Cheap to clone.
@@ -202,8 +203,10 @@ pub struct Client {
 impl Client {
     pub fn new(opts: ClientOptions) -> Self {
         let shared = Shared {
+            sessions: Mutex::new(HashMap::new()),
+            resume_token: Mutex::new(None),
             bearer: Mutex::new(opts.token.clone()),
-            ..Shared::default()
+            remotes: crate::display::remote::Remotes::new(opts.display.rdp_known_hosts_path()),
         };
         Self {
             opts: Arc::new(opts),
@@ -790,6 +793,7 @@ impl Client {
             config: o.display.clone(),
             tesseract: o.capabilities.display.tesseract,
             timeout: crate::verb::secs(timeout).unwrap_or(crate::display::DEFAULT_TIMEOUT),
+            remotes: self.shared.remotes.clone(),
         }
     }
 

@@ -5,7 +5,8 @@
 //! also does a TLS handshake with the daemon. `token-file` writes a token
 //! from stdin to a file with mode 0600. `cert` makes a self-signed
 //! certificate for the daemon's host listener; `fingerprint` prints the
-//! SHA-256 of a certificate to pin.
+//! SHA-256 of a certificate to pin. `rdp-forget` removes the pinned
+//! certificate of an RDP target.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -85,6 +86,14 @@ enum Cmd {
         /// A PEM certificate, for example config/tls/host-cert.pem.
         cert: PathBuf,
     },
+    /// Remove the pinned TLS certificate of an RDP target, after the
+    /// server got a new certificate on purpose. The next connection pins
+    /// the new one. With no address: list the pins.
+    RdpForget {
+        /// The target's address as the pin shows it, for example
+        /// 10.0.0.5:3389.
+        address: Option<String>,
+    },
 }
 
 fn load_config(args: &Args) -> anyhow::Result<Config> {
@@ -143,6 +152,34 @@ fn write_cert(names: &[String], out: &Path, force: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn rdp_forget(cfg: &Config, address: Option<&str>) -> anyhow::Result<()> {
+    let store = terrarium_host::display::rdp::PinStore::new(cfg.display.rdp_known_hosts_path());
+    let path = store.path().display().to_string();
+    let mut o = std::io::stdout().lock();
+    let Some(address) = address else {
+        let pins = store.list().with_context(|| format!("read {path}"))?;
+        if pins.is_empty() {
+            writeln!(o, "no RDP certificate pins in {path}")?;
+        }
+        for (a, f) in pins {
+            writeln!(o, "{a} {f}")?;
+        }
+        return Ok(());
+    };
+    // The pins use the address with its port.
+    let address = terrarium_host::display::remote::address(address, 3389)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    if store
+        .forget(&address)
+        .with_context(|| format!("update {path}"))?
+    {
+        writeln!(o, "removed the pin of {address} from {path}")?;
+    } else {
+        writeln!(o, "{address} has no pin in {path}")?;
+    }
+    Ok(())
+}
+
 fn fingerprint(cert: &Path) -> anyhow::Result<()> {
     writeln!(std::io::stdout(), "{}", tls::cert_file_fingerprint(cert)?)?;
     Ok(())
@@ -179,6 +216,7 @@ async fn check(cfg: &Config, json: bool, probe: bool) -> anyhow::Result<()> {
         "instances_dir": paths.instances_dir,
         "repos_dir": paths.repos_dir,
         "max_running_targets": cfg.max_running_targets,
+        "rdp_known_hosts": cfg.display.rdp_known_hosts_path(),
         "capabilities": caps,
         "tls": tls_mode,
         "tls_error": tls_error,
@@ -259,6 +297,11 @@ async fn check(cfg: &Config, json: bool, probe: bool) -> anyhow::Result<()> {
             mark(&paths.repos_dir)
         )?;
         writeln!(out, "max running targets: {}", cfg.max_running_targets)?;
+        writeln!(
+            out,
+            "rdp pins:   {}",
+            cfg.display.rdp_known_hosts_path().display()
+        )?;
         match (&tls_mode, &tls_error) {
             (Some(m), _) => writeln!(out, "tls:        {}", m.describe())?,
             (None, Some(e)) => writeln!(out, "tls:        refused: {e}")?,
@@ -361,10 +404,18 @@ fn main() -> anyhow::Result<()> {
         _ => {}
     }
     let cfg = load_config(&args)?;
+    if let Some(Cmd::RdpForget { address }) = &args.command {
+        return rdp_forget(&cfg, address.as_deref());
+    }
     let rt = tokio::runtime::Runtime::new().context("start the runtime")?;
     match args.command {
         Some(Cmd::Check { json, probe }) => rt.block_on(check(&cfg, json, probe)),
         Some(Cmd::Run) | None => rt.block_on(run(cfg)),
-        Some(Cmd::TokenFile { .. } | Cmd::Cert { .. } | Cmd::Fingerprint { .. }) => Ok(()),
+        Some(
+            Cmd::TokenFile { .. }
+            | Cmd::Cert { .. }
+            | Cmd::Fingerprint { .. }
+            | Cmd::RdpForget { .. },
+        ) => Ok(()),
     }
 }

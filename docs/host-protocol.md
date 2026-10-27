@@ -183,7 +183,9 @@ The host agent sends `hello` as its first frame:
   `enabled` is the opt-in of the config (`[display] enabled`, default
   false), `allowed_displays` comes from the config, `tesseract` is true when
   `tesseract` is on `PATH`, `tools` lists the desktop tools on `PATH`, and
-  `drivers` lists the display backends this host agent can drive. An older
+  `drivers` lists the display backends this host agent can drive: `vmlab`
+  and `docker` when the tool is there, `desktop` when the opt-in is on,
+  and always `vnc` and `rdp` (the clients are in the host agent). An older
   host agent sends no `display`: the daemon reads it as off.
 - `max_running_targets` is the `max_running_targets` of the config. The
   daemon counts the docker and vmlab targets (and lab instances) on this
@@ -609,8 +611,8 @@ screen of one target. It runs in the host agent as a task (no `pid`).
 | `vmlab` | `lab`, `machine` | `vmlab vm ...` in the lab directory, with the lab and path rules of the other `vmlab.*` verbs |
 | `docker` | `container`, `protocol` (`x11`, `wayland`, `auto`), `display`? | the tools run with `docker exec [-i] -e DISPLAY=<d> <container> ...` (`WAYLAND_DISPLAY` for Wayland) |
 | `desktop` | `protocol`, `display`? | the tools run on this machine, with `DISPLAY` and `XAUTHORITY`, or `WAYLAND_DISPLAY` and `XDG_RUNTIME_DIR`, from `[display]`. Refused (`refused`) unless the config has `[display] enabled = true`, and the display is in `allowed_displays` when that list is set |
-| `vnc` | `address`, `username`?, `password`? | an RFB client (step 2: now `unsupported`, "not implemented yet (step 2)") |
-| `rdp` | `address`, `username`?, `domain`?, `password`? | an RDP client (step 2) |
+| `vnc` | `address`, `username`?, `password`? | the host agent's RFB client (`display/vnc.rs`). `username` is not used |
+| `rdp` | `address`, `username`, `domain`?, `password` | the host agent's RDP client on IronRDP (`display/rdp.rs`). With no `username` or `password`: `bad_request` |
 
 `request` is `terrarium_core::display::DisplayOp`, tagged by `op`: `info`,
 `screenshot {region?, scale?}`, `move {x, y}`, `click {x?, y?, button,
@@ -626,8 +628,9 @@ The answer:
   of docs/api.md §17.10 without `target`.
 - A failure is one `error` frame: `bad_request` (a bad value), `unsupported`
   (the backend cannot do it, or a tool is missing; the message names the
-  package), `refused` (the desktop opt-in), or `failed` (the tool ran and
-  failed).
+  package), `refused` (the desktop opt-in, or an RDP certificate that is
+  not the pinned one), or `failed` (the tool ran and failed, or a VNC or
+  RDP connection or login failed).
 
 The tools of each backend:
 
@@ -663,7 +666,55 @@ Limits:
 
 The driver code is `crates/terrarium-host/src/display/`: the
 `DisplayDriver` trait and the engine in `mod.rs`, and one file for each
-backend. The VNC and RDP drivers (step 2) implement the same trait.
+backend: `vmlab.rs`, `xtools.rs` (docker and desktop), `vnc.rs` and
+`rdp.rs` (the clients), and `remote.rs` (the VNC and RDP drivers and their
+connections).
+
+#### VNC and RDP
+
+The host agent speaks VNC and RDP itself; it runs no tool.
+
+| Operation | VNC (RFB) | RDP (IronRDP) |
+|---|---|---|
+| Login | RFB 3.8 (3.7, 3.3); security type 2 (VNC authentication: DES of the 16-byte challenge with the first 8 bytes of the password) when there is a password, else type 1 (none). Other types (TLS, VeNCrypt) are `failed`, with the types in the message | X.224 negotiation, TLS (rustls on ring), then NLA (CredSSP, NTLM) when the server picks it, else the password in the Client Info PDU (TLS alone). No standard RDP security (RC4). The server's certificate pin (below) comes before any credential |
+| `screenshot` | SetPixelFormat (32-bit true colour, BGRX) and SetEncodings (ZRLE, CopyRect, Raw, DesktopSize) once; then a FramebufferUpdateRequest for the full screen (not incremental), and the one update that answers it | A task reads the server's updates into a framebuffer all the time. The screenshot waits until the screen had no update for 250 ms (at most 1.5 s), then copies the framebuffer |
+| `move`, `click`, `drag` | PointerEvent with the button mask: bit 0 left, 1 middle, 2 right | fast-path mouse events: move, then button down and up |
+| `scroll` | a press and a release of bit 3 (up), 4 (down), 5 (left), or 6 (right) for each step | a wheel event of 120 units for each step (negative is down) |
+| `keys` | KeyEvent: the modifiers down in order, the key down and up, the modifiers up in reverse. X keysyms (`Modifier::x_keysym_value`, `Key::x_keysym_value`) | the same order, with set-1 scancodes (US layout, the E0 flag for the extended keys). `pause` has no scancode: `unsupported` |
+| `type` | a KeyEvent down and up for each character: Latin-1 is the code point, other Unicode is `0x01000000` + the code point, newline is Return, tab is Tab | a Unicode key event down and up for each character; newline and tab are scancodes |
+
+**Connections.** The host agent keeps one connection for each target
+(`remote::Remotes`). The key is the address and a SHA-256 of the user
+name, the domain, and the password; it holds no secret. One operation at
+a time runs on a connection: the driver holds its lock for the whole
+operation. A connection with no operation for 60 s closes (a task checks
+every 15 s). Before it uses a kept VNC connection, the driver reads the
+messages that wait on it, so a server that closed it shows. An operation
+that fails drops the connection; when the connection was a kept one, the
+driver connects again and tries the operation once more. A login (TCP,
+handshake, authentication) has at most 20 s, or the frame's
+`timeout_secs` when that is less. After an RDP login, the driver waits for
+the first screen updates (at most 4 s): xrdp drops the input that comes
+before the session draws.
+
+**The RDP certificate pin.** The TLS handshake accepts any certificate
+and checks the handshake signatures. Then the host agent reads its pin
+file, `[display] rdp_known_hosts` (default
+`$XDG_DATA_HOME/terrarium-host/rdp-known-hosts`, else
+`~/.local/share/terrarium-host/rdp-known-hosts`): one line
+`<address> <SHA-256 of the certificate>` for each server, with the
+address as the frame has it with its port. With no line for the address,
+the host agent adds one (trust on first use) and logs it. With a line
+that matches, it goes on. With a line that does not match, the frame ends
+with `refused` and a message with both fingerprints, before any
+credential goes out. To accept a new certificate, run `terrarium-host
+rdp-forget <address>` (or delete the line), then connect again.
+`terrarium-host rdp-forget` with no address lists the pins, and
+`terrarium-host check` prints the file.
+
+**Secrets.** The password is in the frame only. The host agent does not
+log a frame's target, and no error text of the VNC or RDP client holds
+the password.
 
 ### `probe`
 
@@ -788,7 +839,7 @@ The terminal `error` frame:
 | `io` | A file operation failed. |
 | `checksum_mismatch` | A pushed file's byte count or SHA-256 does not match `cp_end`. |
 | `interrupted` | The link dropped during a push. The partial file is removed. |
-| `refused` | `vmlab.prepare`: the lab definition uses a feature outside the [lab allowlist](#the-lab-allowlist), or `vmlab validate` refused it. `display`: a `desktop` frame while the config does not opt in, or a display that is not in `allowed_displays`. The daemon answers `403`. |
+| `refused` | `vmlab.prepare`: the lab definition uses a feature outside the [lab allowlist](#the-lab-allowlist), or `vmlab validate` refused it. `display`: a `desktop` frame while the config does not opt in, a display that is not in `allowed_displays`, or an RDP server whose certificate is not the pinned one. The daemon answers `403`. |
 | `failed` | `display`: the tool ran and failed (for example, the VM does not run, or the X server does not answer). |
 
 `unknown_session` can also come for a frame (`stdin`, `eof`, `cp_end`) after
@@ -895,6 +946,7 @@ allowed_cwd_roots = ["/home/wil/labs", "/srv/build"]   # optional; absent means 
 # xauthority = "/home/wil/.Xauthority"      # XAUTHORITY for the X tools
 # runtime_dir = "/run/user/1000"            # XDG_RUNTIME_DIR for the Wayland tools
 # tesseract_bin = "tesseract"               # OCR for the backends that have none
+# rdp_known_hosts = "/var/lib/terrarium-host/rdp-known-hosts"  # RDP certificate pins; default $XDG_DATA_HOME/terrarium-host/rdp-known-hosts
 ```
 
 **`[display] enabled = true` is a risk.** An agent with an exclusive lease

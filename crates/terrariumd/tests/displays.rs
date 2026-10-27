@@ -90,6 +90,7 @@ impl Lab {
         o.display.enabled = desktop;
         o.docker_bin = self.bins.path().join("docker").display().to_string();
         o.vmlab_bin = self.bins.path().join("vmlab").display().to_string();
+        o.display.rdp_known_hosts = Some(self.bins.path().join("rdp-known-hosts"));
         o.backoff_min = Duration::from_millis(50);
         o.backoff_max = Duration::from_millis(200);
         tokio::spawn(Client::new(o).run());
@@ -367,8 +368,75 @@ async fn input_is_rate_limited_on_each_target() {
         .ok();
 }
 
+/// A one-connection RFB 3.8 server: VNC authentication with `password`,
+/// a 4x3 screen, and a Raw update of blue pixels for each request. It
+/// counts the key events.
+async fn rfb_server(
+    password: &'static str,
+) -> (String, std::sync::Arc<std::sync::atomic::AtomicU32>) {
+    use std::sync::atomic::Ordering;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let keys = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let counter = keys.clone();
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap().to_string();
+    tokio::spawn(async move {
+        let (mut s, _) = l.accept().await.unwrap();
+        s.write_all(b"RFB 003.008\n").await.unwrap();
+        let mut v = [0u8; 12];
+        s.read_exact(&mut v).await.unwrap();
+        s.write_all(&[1, 2]).await.unwrap();
+        assert_eq!(s.read_u8().await.unwrap(), 2);
+        let challenge = *b"terrarium-chall!";
+        s.write_all(&challenge).await.unwrap();
+        let mut resp = [0u8; 16];
+        s.read_exact(&mut resp).await.unwrap();
+        let want = terrarium_host::display::vnc::vnc_auth_response(password.as_bytes(), &challenge);
+        assert_eq!(resp, want, "the host agent got the credential's password");
+        s.write_u32(0).await.unwrap();
+        s.read_u8().await.unwrap();
+        s.write_all(&[0, 4, 0, 3]).await.unwrap();
+        s.write_all(&[32, 24, 0, 1, 0, 255, 0, 255, 0, 255, 16, 8, 0, 0, 0, 0])
+            .await
+            .unwrap();
+        s.write_u32(0).await.unwrap();
+        loop {
+            let Ok(t) = s.read_u8().await else {
+                return;
+            };
+            let skip = match t {
+                0 => 19,
+                2 => {
+                    s.read_u8().await.unwrap();
+                    let n = s.read_u16().await.unwrap();
+                    usize::from(n) * 4
+                }
+                3 => {
+                    let mut m = [0u8; 9];
+                    s.read_exact(&mut m).await.unwrap();
+                    let mut out = vec![0u8, 0, 0, 1, 0, 0, 0, 0, 0, 4, 0, 3, 0, 0, 0, 0];
+                    for _ in 0..12 {
+                        out.extend_from_slice(&[255, 0, 0, 0]);
+                    }
+                    s.write_all(&out).await.unwrap();
+                    0
+                }
+                4 => {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    7
+                }
+                5 => 5,
+                t => panic!("client message {t}"),
+            };
+            let mut b = vec![0u8; skip];
+            s.read_exact(&mut b).await.unwrap();
+        }
+    });
+    (addr, keys)
+}
+
 #[tokio::test]
-async fn vnc_and_rdp_targets_keep_their_secret_and_say_step_2() {
+async fn vnc_and_rdp_targets_keep_their_secret_and_reach_the_server() {
     let (lab, ..) = setup().await;
     let r = lab
         .td
@@ -380,14 +448,16 @@ async fn vnc_and_rdp_targets_keep_their_secret_and_say_step_2() {
     assert_eq!(r.status, 201, "{}", r.body);
     assert!(!r.body.to_string().contains("s3cret"), "{}", r.body);
 
+    let (vnc_addr, vnc_keys) = rfb_server("s3cret pass").await;
     lab.target(
         json!({"name": "terra-vnc", "kind": "vnc", "host": "lab1", "project": "terra",
-                      "address": "10.0.0.5", "credential": "vncpw"}),
+                      "address": vnc_addr, "credential": "vncpw"}),
     )
     .await;
+    // Port 1 on loopback refuses at once.
     lab.target(
         json!({"name": "terra-rdp", "kind": "rdp", "host": "lab1", "project": "terra",
-                      "address": "win:3390", "username": "Bob Smith", "domain": "LAB",
+                      "address": "127.0.0.1:1", "username": "Bob Smith", "domain": "LAB",
                       "credential": "vncpw"}),
     )
     .await;
@@ -403,16 +473,44 @@ async fn vnc_and_rdp_targets_keep_their_secret_and_say_step_2() {
     let v = lab.td.get("/api/targets/terra-vnc").await;
     assert_eq!(v.ok()["has_display"], true);
 
+    // VNC: the host agent logs in with the credential and reads the screen.
+    let r = lab
+        .td
+        .post("/api/targets/terra-vnc/display/screenshot", json!({}))
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(r.headers["content-type"], "image/png");
+    assert_eq!(r.headers["x-display-width"], "4");
+    assert_eq!(r.headers["x-screen-height"], "3");
+    let r = lab
+        .td
+        .post(
+            "/api/targets/terra-vnc/display/keys",
+            json!({"chord": "ctrl-l"}),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    // The next screenshot is a round trip on the same connection: the
+    // keys are in by then (ctrl down, l down, l up, ctrl up).
+    let r = lab
+        .td
+        .post("/api/targets/terra-vnc/display/screenshot", json!({}))
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(vnc_keys.load(std::sync::atomic::Ordering::SeqCst), 4);
+
+    // RDP: no server, so `failed`, with no secret in the message.
+    let r = lab
+        .td
+        .post("/api/targets/terra-rdp/display/screenshot", json!({}))
+        .await;
+    r.err(422, "invalid");
+    assert_eq!(r.body["error"]["details"]["code"], "failed");
+    let m = r.body["error"]["message"].as_str().unwrap();
+    assert!(m.contains("rdp 127.0.0.1:1: connect"), "{m}");
+    assert!(!r.body.to_string().contains("s3cret"));
+
     for t in ["terra-vnc", "terra-rdp"] {
-        let r = lab
-            .td
-            .post(&format!("/api/targets/{t}/display/screenshot"), json!({}))
-            .await;
-        r.err(422, "invalid");
-        assert_eq!(r.body["error"]["details"]["code"], "unsupported");
-        let m = r.body["error"]["message"].as_str().unwrap();
-        assert!(m.contains("not implemented yet (step 2)"), "{m}");
-        assert!(!r.body.to_string().contains("s3cret"));
         // No exec on a display-only target.
         let r = lab
             .td

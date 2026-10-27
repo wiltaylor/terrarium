@@ -412,6 +412,72 @@ logs a warning that starts with `INSECURE` for a plaintext bind to a
 non-loopback address. The warning is correct here, because the port is
 published on loopback only.
 
+#### Add a screen target (VNC or RDP)
+
+A host agent can show an agent the screen of a machine that it reaches
+over VNC or RDP. The host agent has the VNC and RDP clients in it, so it
+needs no other program. Give each target a host agent that can reach the
+address. `local` below is the name of that host agent.
+
+1. Store the password as a `password` credential. The daemon keeps it, and
+   sends it only to the host agent, in the frame of each screen operation.
+   No answer shows it. Use the API with your token (`read -rs` keeps the
+   password out of the shell history):
+
+   ```sh
+   read -rs PW
+   curl -s -H "Authorization: Bearer $TERRARIUM_TOKEN" -H 'Content-Type: application/json' \
+     -d "{\"name\":\"win-pw\",\"kind\":\"password\",\"value\":\"$PW\"}" \
+     http://localhost:8080/api/credentials
+   unset PW
+   ```
+
+2. Make a VNC target. VNC has no user name: only the password counts, and
+   only its first 8 characters:
+
+   ```sh
+   terrarium admin target new vnc1 --kind vnc --host local --address 10.0.0.5:5900 --credential win-pw
+   ```
+
+   The VNC client has no TLS. The screen and the keys cross the link in
+   clear text. Keep the server on a trusted network, or use an SSH tunnel
+   or a VPN.
+
+3. Make an RDP target. It needs a user name, and a domain for a domain
+   account (or `--username 'LAB\bob'`):
+
+   ```sh
+   terrarium admin target new win1 --kind rdp --host local --address 10.0.0.6:3389 \
+     --username bob --domain LAB --credential win-pw
+   ```
+
+   The RDP client uses TLS, with NLA when the server offers it. On the
+   first connection, the host agent pins the server's certificate (trust
+   on first use). When the certificate changes later, the host agent
+   refuses the connection before it sends the password, and the message
+   says so. If the server has a new certificate on purpose, run this on
+   the host agent's machine, then try again:
+
+   ```sh
+   terrarium-host rdp-forget 10.0.0.6:3389
+   ```
+
+4. Grant the target to an agent with an exclusive lease, and try it:
+
+   ```sh
+   terrarium admin target grant win1 <agent> --exclusive --until 1h
+   terrarium screen win1 info
+   terrarium screen win1 shot
+   terrarium screen win1 click 300 200
+   terrarium screen win1 type "hello"
+   ```
+
+The dashboard shows the screen of the target too. It takes a screenshot
+every 2.5 s, and the host agent keeps the connection open between them
+(it closes after 60 s with no operation). `examples/display/` has test
+containers for both kinds: x11vnc (`vnc.Dockerfile`) and xrdp
+(`rdp.Dockerfile`). See [api.md](api.md) §17.10 for the details.
+
 ### 2.8 Mode 1 workflow
 
 In mode 1, the workspaces stay on the host and the targets carry the

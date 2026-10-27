@@ -10,7 +10,8 @@
 //! | `vmlab` | [`vmlab::VmlabDriver`] | `vmlab vm screenshot\|mouse-move\|click\|drag\|sendkeys\|ocr\|find-image`, `vmlab record` |
 //! | `docker` | [`xtools::ToolDriver`] over `docker exec` | X11: `xdotool`, and `import`, `xwd` with `convert`, or `scrot`. Wayland: `grim`, `wtype`, `ydotool` |
 //! | `desktop` | [`xtools::ToolDriver`] on this machine | the same tools; only with `[display] enabled = true` |
-//! | `vnc`, `rdp` | [`remote::VncDriver`], [`remote::RdpDriver`] | stubs in step 1 |
+//! | `vnc` | [`remote::VncDriver`] | none: an RFB client in the host agent ([`vnc`]) |
+//! | `rdp` | [`remote::RdpDriver`] | none: an RDP client on IronRDP in the host agent ([`rdp`]) |
 //!
 //! # Adding a driver
 //!
@@ -20,13 +21,15 @@
 //! ([`image`]), runs `tesseract` when the driver has no OCR of its own,
 //! and makes the `result` value. A driver overrides [`DisplayDriver::ocr`],
 //! [`DisplayDriver::find`], and [`DisplayDriver::record`] only when its
-//! backend has them. To add the VNC and RDP clients (step 2), replace the
-//! bodies in [`remote`]; [`dispatch`] already builds them from the frame.
+//! backend has them. The VNC and RDP drivers keep one connection for each
+//! target in [`remote::Remotes`] ([`DisplayCtx::remotes`]).
 
 pub mod image;
+pub mod rdp;
 pub mod remote;
 pub mod runner;
 pub mod vmlab;
+pub mod vnc;
 pub mod xtools;
 
 use std::future::Future;
@@ -206,6 +209,8 @@ pub struct DisplayCtx {
     /// `tesseract` on this machine, for OCR.
     pub tesseract: bool,
     pub timeout: Duration,
+    /// The kept VNC and RDP connections, and the RDP certificate pins.
+    pub remotes: Arc<remote::Remotes>,
 }
 
 fn no_ocr() -> DisplayError {
@@ -484,7 +489,8 @@ pub async fn dispatch(
             username,
             password,
         } => {
-            let d = remote::VncDriver::new(address, username.clone(), password.clone())?;
+            let d = remote::VncDriver::open(ctx, address, username.as_deref(), password.clone())
+                .await?;
             run_op(&d, op, ctx).await
         }
         DisplayTarget::Rdp {
@@ -493,12 +499,14 @@ pub async fn dispatch(
             domain,
             password,
         } => {
-            let d = remote::RdpDriver::new(
+            let d = remote::RdpDriver::open(
+                ctx,
                 address,
                 username.clone(),
                 domain.clone(),
                 password.clone(),
-            )?;
+            )
+            .await?;
             run_op(&d, op, ctx).await
         }
     }
@@ -522,7 +530,9 @@ pub fn detect(cfg: &DisplayConfig, docker: bool, vmlab: bool) -> DisplayCapabili
     if cfg.enabled {
         drivers.push("desktop".to_owned());
     }
-    // `vnc` and `rdp` join this list when their drivers exist (step 2).
+    // The VNC and RDP clients are in the host agent: no tool to look for.
+    drivers.push("vnc".to_owned());
+    drivers.push("rdp".to_owned());
     DisplayCapability {
         enabled: cfg.enabled,
         allowed_displays: cfg.allowed_displays.clone(),
@@ -558,6 +568,9 @@ pub(crate) mod testing {
             config: DisplayConfig::default(),
             tesseract: false,
             timeout: Duration::from_secs(5),
+            remotes: remote::Remotes::new(
+                std::env::temp_dir().join(format!("terrarium-test-pins-{}", std::process::id())),
+            ),
         }
     }
 
@@ -597,7 +610,7 @@ mod tests {
     fn hello_reports_the_opt_in() {
         let off = detect(&DisplayConfig::default(), true, true);
         assert!(!off.enabled);
-        assert_eq!(off.drivers, ["vmlab", "docker"]);
+        assert_eq!(off.drivers, ["vmlab", "docker", "vnc", "rdp"]);
         let on = detect(
             &DisplayConfig {
                 enabled: true,
@@ -607,7 +620,7 @@ mod tests {
             false,
         );
         assert!(on.enabled);
-        assert_eq!(on.drivers, ["desktop"]);
+        assert_eq!(on.drivers, ["desktop", "vnc", "rdp"]);
     }
 
     #[tokio::test]
