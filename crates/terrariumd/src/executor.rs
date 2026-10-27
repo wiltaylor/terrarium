@@ -38,9 +38,9 @@ use terrarium_core::protocol::CpDirection;
 use terrarium_core::protocol::LifecycleVerb;
 use terrarium_host::protocol::{
     CpPull, CpPush, DaemonFrame, DockerExec, DockerInspect, DockerRm, DockerRun, DockerStart,
-    DockerStop, ExecRequest, LabSource, PtySize, StreamTag, VmlabCp, VmlabExec, VmlabLifecycle,
-    VmlabPrepare, VmlabRelease, VmlabShell, VmlabSnapshot, VmlabSnapshotDelete, VmlabSnapshotList,
-    VmlabStatus, WorkspaceMount, hex,
+    DockerStop, ExecRequest, LabSource, Probe, PtySize, StreamTag, VmlabCp, VmlabExec,
+    VmlabLifecycle, VmlabPrepare, VmlabRelease, VmlabShell, VmlabSnapshot, VmlabSnapshotDelete,
+    VmlabSnapshotList, VmlabStatus, WorkspaceMount, hex,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{Notify, mpsc};
@@ -579,12 +579,27 @@ fn machine_of(def: &TargetDef) -> ApiResult<String> {
     })
 }
 
+/// Refuse exec, shell, copy, and checkout on a target that has only a
+/// display (`vnc`, `rdp`, `desktop`; docs/api.md §17.10).
+pub fn no_exec(def: &TargetDef) -> ApiResult<()> {
+    if def.kind.display_only() {
+        return Err(ApiError::invalid(format!(
+            "a `{}` target has only a display: use `terrarium screen {}` (POST /api/targets/{}/display/...)",
+            targets::kind_str(def.kind),
+            def.name,
+            def.name
+        )));
+    }
+    Ok(())
+}
+
 /// The host-agent frame for a command on a host, docker, or vmlab target.
 pub fn host_frame(
     def: &TargetDef,
     shell: Option<&str>,
     cmd: &RemoteCmd,
 ) -> ApiResult<impl FnOnce(u32) -> DaemonFrame + use<>> {
+    no_exec(def)?;
     cmd.check()?;
     let def = def.clone();
     let cmd = cmd.clone();
@@ -647,7 +662,12 @@ pub fn host_frame(
             user: None,
             timeout_secs: cmd.timeout_secs,
         }),
-        TargetKind::Host | TargetKind::Ssh => DaemonFrame::Exec(ExecRequest {
+        // `no_exec` refused the display-only kinds above.
+        TargetKind::Host
+        | TargetKind::Ssh
+        | TargetKind::Vnc
+        | TargetKind::Rdp
+        | TargetKind::Desktop => DaemonFrame::Exec(ExecRequest {
             session,
             cmd: program,
             args,
@@ -1124,6 +1144,8 @@ pub struct Executor {
     pub ssh_bin: String,
     pub buffer_limit: usize,
     reaper: AtomicBool,
+    /// The input rate limit of target displays (docs/api.md §17.10).
+    pub display_limiter: crate::display::Limiter,
 }
 
 impl Default for Executor {
@@ -1135,6 +1157,7 @@ impl Default for Executor {
             ssh_bin: std::env::var("TERRARIUM_SSH").unwrap_or_else(|_| "ssh".into()),
             buffer_limit: SESSION_BUFFER,
             reaper: AtomicBool::new(false),
+            display_limiter: crate::display::Limiter::default(),
         }
     }
 }
@@ -1243,6 +1266,7 @@ fn known_hosts(state_dir: &Path) -> ApiResult<PathBuf> {
 
 /// Start a command on a target.
 pub fn start_cmd(state: &Shared, def: &TargetDef, cmd: &RemoteCmd) -> ApiResult<Running> {
+    no_exec(def)?;
     let ex = &state.executor;
     match def.kind {
         TargetKind::Ssh => {
@@ -1259,9 +1283,9 @@ pub fn start_cmd(state: &Shared, def: &TargetDef, cmd: &RemoteCmd) -> ApiResult<
                         let p = run.write_private("id", &key)?;
                         (Some(p), Some(Box::new(run)))
                     }
-                    Some(Secret::Token { .. }) => {
+                    Some(Secret::Token { .. } | Secret::Password { .. }) => {
                         return Err(ApiError::invalid(format!(
-                            "credential `{name}` is a token; an ssh target needs an ssh_key"
+                            "credential `{name}` is not an ssh_key; an ssh target needs an ssh_key"
                         )));
                     }
                     None => {
@@ -1478,6 +1502,7 @@ pub async fn start_cp(
         )));
     }
     check_cap(state, actor)?;
+    no_exec(&row.def)?;
     let def = resolved_def(state, &row, Some(actor), body.agent.as_deref()).await?;
     let push = body.direction == CpDirection::Push;
     let (sess, ctl) = ExecSession::new(
@@ -1542,6 +1567,7 @@ pub async fn start_cp(
                 body.mode,
             ));
         }
+        TargetKind::Vnc | TargetKind::Rdp | TargetKind::Desktop => no_exec(&def)?,
     }
     state.executor.insert(sess.clone());
     audit(
@@ -1886,6 +1912,41 @@ pub async fn lifecycle(
                 }
                 _ => "unknown".into(),
             },
+        },
+        // Display-only targets: `up` and `down` change nothing; each verb
+        // reports what the host agent sees (docs/api.md §17.3).
+        TargetKind::Vnc | TargetKind::Rdp | TargetKind::Desktop => match verb_kind {
+            V::Snapshot | V::Restore => return unsupported("snapshot"),
+            _ => {
+                let online = def
+                    .host
+                    .as_deref()
+                    .is_some_and(|h| state.executor.hosts.is_online(h));
+                if !online {
+                    "unknown".into()
+                } else if def.kind == TargetKind::Desktop {
+                    let on = def
+                        .host
+                        .as_deref()
+                        .and_then(|h| state.executor.hosts.capabilities(h))
+                        .is_some_and(|c| c.display.enabled);
+                    if on { "running" } else { "unknown" }.into()
+                } else {
+                    let address = targets::display_address(def)?;
+                    let c = verb_ok(state, def, "probe", move |session| {
+                        DaemonFrame::Probe(Probe {
+                            session,
+                            address,
+                            timeout_secs: Some(5),
+                        })
+                    })
+                    .await?;
+                    let r = c.result.unwrap_or_default();
+                    let reachable = r["reachable"] == true;
+                    result = Some(r);
+                    if reachable { "running" } else { "unknown" }.into()
+                }
+            }
         },
         TargetKind::Docker => {
             if !matches!(verb_kind, V::Status) {
@@ -3641,7 +3702,8 @@ pub fn checkout_env(secret: Option<&Secret>) -> BTreeMap<String, String> {
         Some(Secret::SshKey(k)) => {
             env.insert("TERRARIUM_GIT_SSH_KEY".into(), k.trim_end().to_owned());
         }
-        None => {}
+        // A password is for vnc and rdp targets; git gets no credential.
+        Some(Secret::Password { .. }) | None => {}
     }
     env
 }
@@ -3727,6 +3789,7 @@ pub async fn checkout_on_target(
     secret: Option<&Secret>,
 ) -> ApiResult<Value> {
     let _ = actor;
+    no_exec(&row.def)?;
     if row.def.kind == TargetKind::Vmlab {
         return Err(ApiError::invalid(
             "a checkout on a vmlab target is not supported; vmlab exec takes no env for the credential",

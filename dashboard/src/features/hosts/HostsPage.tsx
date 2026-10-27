@@ -17,6 +17,7 @@ import { ago } from "../../lib/format";
 import { INSTALL_NOTES, installLine } from "../../lib/host-install";
 import { runningLabel, runningOnHost } from "../../lib/target-runtime";
 import { api } from "../../stores";
+import { hostDisplayLabel, hostDisplayOn } from "../targets/display";
 
 /** The chips of a host's capabilities: `docker 29.8.0`, `vmlab 0.30.0-alpha`. */
 export function capabilityChips(h: Pick<Host, "capabilities">): { label: string; present: boolean }[] {
@@ -105,6 +106,25 @@ export default function HostsPage() {
                         </For>
                         <Show when={h.capabilities?.shell}>
                           <span class="chip mono">{h.capabilities!.shell}</span>
+                        </Show>
+                        <span
+                          class={`chip ${hostDisplayOn(h) ? "warn" : ""}`}
+                          aria-label={`Desktop display of ${h.name}`}
+                          title={
+                            hostDisplayOn(h)
+                              ? "The host agent's config opens its own desktop to desktop targets ([display] enabled = true)"
+                              : "The desktop of this host is closed. Only the host agent's own config can open it"
+                          }
+                        >
+                          {hostDisplayLabel(h)}
+                        </span>
+                        <Show when={h.capabilities?.display?.tesseract}>
+                          <span class="chip ok" title="tesseract on the host: OCR for the displays that have none">ocr</span>
+                        </Show>
+                        <Show when={h.capabilities?.display?.tools?.length}>
+                          <span class="chip mono small" title="The desktop tools on the host">
+                            {h.capabilities!.display!.tools!.join(" ")}
+                          </span>
                         </Show>
                       </span>
                     </td>

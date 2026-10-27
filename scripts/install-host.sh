@@ -86,6 +86,8 @@ usage: install-host.sh --token <enrol token> [options]
   --fingerprint FP   the SHA-256 of the host listener certificate to pin
   --no-pin           write no pin: the system roots check the daemon
   --user USER        the service user (default: the user that ran sudo, else terrarium)
+  --enable-display   a new config gets [display] enabled = true: desktop targets may
+                     see this machine's screen and use its mouse and keyboard (default: off)
   --dry-run          print the plan; change nothing
   --upgrade          replace the binary; keep the config and the token; restart
   --uninstall        stop and remove the unit and the binary; keep the config
@@ -107,6 +109,8 @@ URL=
 HOST_URL=
 PIN=
 SERVICE_USER=
+ENABLE_DISPLAY=0
+DISPLAY_RISK="an agent with an exclusive lease on a desktop target can see this machine's screen and use its mouse and keyboard as the service user"
 
 need_value() {
 	if [ "$#" -lt 2 ] || [ -z "$2" ]; then
@@ -129,6 +133,7 @@ while [ "$#" -gt 0 ]; do
 	--no-pin) NO_PIN=1; shift ;;
 	--user) need_value "$@"; SERVICE_USER=$2; shift 2 ;;
 	--user=*) SERVICE_USER=${1#*=}; shift ;;
+	--enable-display) ENABLE_DISPLAY=1; shift ;;
 	--dry-run) DRY=1; shift ;;
 	--upgrade) MODE=upgrade; shift ;;
 	--uninstall) MODE=uninstall; shift ;;
@@ -289,6 +294,11 @@ render_config() {
 	say "name = \"$NAME\""
 	if [ -n "$PIN" ]; then
 		say "server_fingerprint_sha256 = \"$PIN\""
+	fi
+	if [ "$ENABLE_DISPLAY" = 1 ]; then
+		say ''
+		say '[display]'
+		say 'enabled = true'
 	fi
 }
 
@@ -545,6 +555,12 @@ note "docker     = $DOCKER, vmlab = $VMLAB, systemd = $SYSTEMD"
 if [ "$VMLAB" = no ]; then
 	note "no vmlab on the PATH of $SERVICE_USER (/usr/local/bin, /usr/bin, /bin, ~/.local/bin): vmlab targets stay off"
 fi
+if [ "$ENABLE_DISPLAY" = 1 ]; then
+	warn "--enable-display: $DISPLAY_RISK"
+	if ! user_exists "$SERVICE_USER" || [ "$SERVICE_HOME" = /var/lib/$UNIT_NAME ]; then
+		note "$SERVICE_USER is a system user with no desktop session: a desktop target needs it to own (or be allowed into) the X or Wayland session; set xauthority or runtime_dir in [display]"
+	fi
+fi
 [ "$DRY" = 1 ] && note "dry run: nothing changes"
 
 ensure_user
@@ -558,6 +574,9 @@ run chmod 0700 "$ROOT$CONFIG_DIR"
 run chown "$SERVICE_USER:$SERVICE_GROUP" "$ROOT$CONFIG_DIR"
 if [ "$HAVE_CONFIG" = yes ]; then
 	note "keep the existing $CONFIG_PATH"
+	if [ "$ENABLE_DISPLAY" = 1 ]; then
+		note "--enable-display: the existing $CONFIG_PATH does not change; add \`[display]\` with \`enabled = true\` to it by hand (the daemon cannot turn it on)"
+	fi
 else
 	render_config | write_file "$CONFIG_PATH" 0640 root "$SERVICE_GROUP"
 fi

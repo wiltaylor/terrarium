@@ -96,7 +96,34 @@ pub fn kind_str(k: TargetKind) -> &'static str {
         TargetKind::Ssh => "ssh",
         TargetKind::Docker => "docker",
         TargetKind::Vmlab => "vmlab",
+        TargetKind::Vnc => "vnc",
+        TargetKind::Rdp => "rdp",
+        TargetKind::Desktop => "desktop",
     }
+}
+
+/// The `address` of a `vnc` or `rdp` target with its port: `port` when
+/// set, else the port in `address`, else 5900 or 3389.
+pub fn display_address(def: &TargetDef) -> ApiResult<String> {
+    use terrarium_host::display::remote::{RDP_PORT, VNC_PORT, address};
+    let default = if def.kind == TargetKind::Rdp {
+        RDP_PORT
+    } else {
+        VNC_PORT
+    };
+    let raw = def
+        .address
+        .as_deref()
+        .ok_or_else(|| ApiError::invalid(format!("target `{}` has no `address`", def.name)))?;
+    // With a default port of 0, only an address with its own port passes.
+    if let Some(p) = def.port
+        && address(raw, 0).is_ok()
+    {
+        return Err(ApiError::invalid(format!(
+            "give the port in `address` ({raw}) or in `port` ({p}), not in both"
+        )));
+    }
+    address(raw, def.port.unwrap_or(default)).map_err(|e| ApiError::invalid(e.to_string()))
 }
 
 fn positional(field: &str, v: &Option<String>) -> ApiResult<()> {
@@ -136,6 +163,20 @@ pub fn validate(def: &TargetDef) -> ApiResult<()> {
         ("lab_ref", &def.lab_ref),
     ] {
         positional(f, v)?;
+    }
+    // A Windows user name can hold a space; it goes in a frame, never on
+    // a command line.
+    for (f, v) in [("username", &def.username), ("domain", &def.domain)] {
+        if let Some(v) = v
+            && (v.is_empty() || v.len() > 256 || v.chars().any(char::is_control))
+        {
+            return Err(ApiError::invalid(format!(
+                "bad `{f}`: 1 to 256 characters with no control characters"
+            )));
+        }
+    }
+    if let Some(n) = &def.display_name {
+        terrarium_core::display::check_display_name(n).map_err(ApiError::invalid)?;
     }
     if let Some(p) = &def.lab_path
         && (p.starts_with('/')
@@ -205,6 +246,49 @@ pub fn validate(def: &TargetDef) -> ApiResult<()> {
                 )));
             }
         }
+        TargetKind::Vnc | TargetKind::Rdp => {
+            need(k, "host` (the host agent that connects", def.host.is_some())?;
+            need(k, "address", def.address.is_some())?;
+            display_address(def)?;
+        }
+        TargetKind::Desktop => need(k, "host", def.host.is_some())?,
+    }
+    if (def.display.is_some() || def.display_name.is_some())
+        && !matches!(def.kind, TargetKind::Docker | TargetKind::Desktop)
+    {
+        return Err(ApiError::invalid(format!(
+            "`display` and `display_name` are for a docker or desktop target, not `{k}`"
+        )));
+    }
+    if def.display_name.is_some() && def.kind == TargetKind::Docker && def.display.is_none() {
+        return Err(ApiError::invalid(
+            "`display_name` needs `display` (x11, wayland, or auto) on a docker target",
+        ));
+    }
+    if def.username.is_some() && !matches!(def.kind, TargetKind::Vnc | TargetKind::Rdp) {
+        return Err(ApiError::invalid(format!(
+            "`username` is for a vnc or rdp target, not `{k}`"
+        )));
+    }
+    if def.domain.is_some() && def.kind != TargetKind::Rdp {
+        return Err(ApiError::invalid(format!(
+            "`domain` is for an rdp target, not `{k}`"
+        )));
+    }
+    if def.kind.display_only()
+        && (def.image.is_some()
+            || def.container.is_some()
+            || def.machine.is_some()
+            || def.lab.is_some())
+    {
+        return Err(ApiError::invalid(format!(
+            "a `{k}` target has only a display: no `image`, `container`, `machine`, or `lab`"
+        )));
+    }
+    if def.kind == TargetKind::Desktop && (def.address.is_some() || def.credential.is_some()) {
+        return Err(ApiError::invalid(
+            "a `desktop` target is the screen of its host agent: no `address` or `credential`",
+        ));
     }
     if def.kind != TargetKind::Vmlab
         && (def.lab_repo.is_some()
@@ -216,7 +300,16 @@ pub fn validate(def: &TargetDef) -> ApiResult<()> {
             "`lab_repo`, `lab_ref`, `lab_path`, and `lab_from_workspace` are for a vmlab target, not `{k}`"
         )));
     }
-    if def.ephemeral && matches!(def.kind, TargetKind::Host | TargetKind::Ssh) {
+    if def.ephemeral
+        && matches!(
+            def.kind,
+            TargetKind::Host
+                | TargetKind::Ssh
+                | TargetKind::Vnc
+                | TargetKind::Rdp
+                | TargetKind::Desktop
+        )
+    {
         return Err(ApiError::invalid(format!(
             "a `{k}` target is permanent; `ephemeral` needs a docker or vmlab target"
         )));

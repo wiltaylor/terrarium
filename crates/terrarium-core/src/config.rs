@@ -214,6 +214,21 @@ pub enum TargetKind {
     Ssh,
     Docker,
     Vmlab,
+    /// A VNC server that the host agent connects to: display only
+    /// (PLAN §19b).
+    Vnc,
+    /// An RDP server that the host agent connects to: display only.
+    Rdp,
+    /// The desktop of the host agent's own machine: display only, and only
+    /// when the host agent's config opts in (`[display] enabled = true`).
+    Desktop,
+}
+
+impl TargetKind {
+    /// The kinds that have only a display: no exec, no copy, no shell.
+    pub fn display_only(self) -> bool {
+        matches!(self, Self::Vnc | Self::Rdp | Self::Desktop)
+    }
 }
 
 /// A target definition, `targets/<name>.toml`.
@@ -225,17 +240,36 @@ pub struct TargetDef {
     /// The owning project. A target without one is global.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
-    /// The host agent name, for `host`, `docker`, and `vmlab`.
+    /// The host agent name, for `host`, `docker`, `vmlab`, `desktop`, and
+    /// the host agent that connects to a `vnc` or `rdp` server.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
-    /// `ssh`: the address, `user@host` or `host`.
+    /// `ssh`: the address, `user@host` or `host`. `vnc` and `rdp`:
+    /// `host:port` as the host agent reaches it (the port defaults to 5900
+    /// and 3389).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub address: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
-    /// `ssh`: the key name in `/state/credentials`.
+    /// `ssh`: the key name in `/state/credentials`. `vnc` and `rdp`: the
+    /// name of a `password` credential.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential: Option<String>,
+    /// `vnc` and `rdp`: the user name to log in with. Default: the
+    /// `username` of the credential.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    /// `rdp`: the Windows domain of the user.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain: Option<String>,
+    /// `docker` and `desktop`: the display server (`x11`, `wayland`, or
+    /// `auto`). A docker target with it has a display (PLAN §19b).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<crate::display::DisplayProtocol>,
+    /// `docker` and `desktop`: the X display (default `:0`) or the Wayland
+    /// socket (default `wayland-0`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
     /// `docker`: the image to run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,

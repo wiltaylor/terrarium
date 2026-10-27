@@ -14,8 +14,9 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+pub use terrarium_core::display::{DisplayOp, DisplayProtocol};
 pub use terrarium_core::protocol::{
-    CpDirection, ExitReason, HostCapabilities, TargetState, ToolCapability,
+    CpDirection, DisplayCapability, ExitReason, HostCapabilities, TargetState, ToolCapability,
 };
 
 /// The protocol version in `hello`. The daemon refuses versions it does not know.
@@ -624,6 +625,139 @@ pub struct VmlabRelease {
     pub timeout_secs: Option<u64>,
 }
 
+/// The screen that a `display` frame acts on (docs/host-protocol.md,
+/// "`display`"). The host agent picks its driver from `backend`.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "backend", rename_all = "snake_case")]
+pub enum DisplayTarget {
+    /// The screen of a vmlab machine: `vmlab vm screenshot|click|...` in
+    /// the lab directory.
+    Vmlab { lab: PathBuf, machine: String },
+    /// An X11 or Wayland session in a container: the tools run through
+    /// `docker exec`.
+    Docker {
+        container: String,
+        protocol: DisplayProtocol,
+        /// The X display or the Wayland socket. Default: `:0` or
+        /// `wayland-0`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display: Option<String>,
+    },
+    /// The desktop of the host agent's own machine. Refused unless the
+    /// host agent's config has `[display] enabled = true`.
+    Desktop {
+        protocol: DisplayProtocol,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display: Option<String>,
+    },
+    /// A VNC server, `host:port`. The daemon sends the password only in
+    /// this frame.
+    Vnc {
+        address: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        username: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        password: Option<String>,
+    },
+    /// An RDP server, `host:port`.
+    Rdp {
+        address: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        username: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        domain: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        password: Option<String>,
+    },
+}
+
+impl DisplayTarget {
+    /// The backend name: `vmlab`, `docker`, `desktop`, `vnc`, or `rdp`.
+    pub fn backend(&self) -> &'static str {
+        match self {
+            Self::Vmlab { .. } => "vmlab",
+            Self::Docker { .. } => "docker",
+            Self::Desktop { .. } => "desktop",
+            Self::Vnc { .. } => "vnc",
+            Self::Rdp { .. } => "rdp",
+        }
+    }
+}
+
+/// `Debug` never prints a password.
+impl std::fmt::Debug for DisplayTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let hidden = |p: &Option<String>| p.as_ref().map(|_| "***");
+        match self {
+            Self::Vmlab { lab, machine } => f
+                .debug_struct("Vmlab")
+                .field("lab", lab)
+                .field("machine", machine)
+                .finish(),
+            Self::Docker {
+                container,
+                protocol,
+                display,
+            } => f
+                .debug_struct("Docker")
+                .field("container", container)
+                .field("protocol", protocol)
+                .field("display", display)
+                .finish(),
+            Self::Desktop { protocol, display } => f
+                .debug_struct("Desktop")
+                .field("protocol", protocol)
+                .field("display", display)
+                .finish(),
+            Self::Vnc {
+                address,
+                username,
+                password,
+            } => f
+                .debug_struct("Vnc")
+                .field("address", address)
+                .field("username", username)
+                .field("password", &hidden(password))
+                .finish(),
+            Self::Rdp {
+                address,
+                username,
+                domain,
+                password,
+            } => f
+                .debug_struct("Rdp")
+                .field("address", address)
+                .field("username", username)
+                .field("domain", domain)
+                .field("password", &hidden(password))
+                .finish(),
+        }
+    }
+}
+
+/// `display`: one display operation on one screen. The `result` holds the
+/// answer of the operation; a screenshot also sends its PNG as `stdout`
+/// data frames before the `result`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DisplayRequest {
+    pub session: SessionId,
+    pub target: DisplayTarget,
+    pub request: DisplayOp,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+}
+
+/// `probe`: a TCP connect from the host agent to `address` (`host:port`),
+/// for the `status` of a `vnc` or `rdp` target. The `result` is
+/// `{"address", "reachable", "elapsed_ms", "error"?}`, then `exit` 0.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Probe {
+    pub session: SessionId,
+    pub address: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+}
+
 fn yes() -> bool {
     true
 }
@@ -631,7 +765,7 @@ fn yes() -> bool {
 // ---------------------------------------------------------------- frames
 
 /// Control frames from the daemon to the host agent.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DaemonFrame {
     Welcome(Welcome),
@@ -727,6 +861,11 @@ pub enum DaemonFrame {
     VmlabPrepare(VmlabPrepare),
     #[serde(rename = "vmlab.release")]
     VmlabRelease(VmlabRelease),
+    /// One display operation (PLAN §19b). Boxed: it is larger than the
+    /// other frames.
+    Display(Box<DisplayRequest>),
+    /// A TCP reachability check (the `status` of a `vnc` or `rdp` target).
+    Probe(Probe),
 }
 
 impl DaemonFrame {
@@ -763,6 +902,8 @@ impl DaemonFrame {
             F::VmlabSnapshotDelete(r) => r.session,
             F::VmlabPrepare(r) => r.session,
             F::VmlabRelease(r) => r.session,
+            F::Display(r) => r.session,
+            F::Probe(r) => r.session,
         })
     }
 }
@@ -792,8 +933,13 @@ pub enum ErrorCode {
     /// The connection dropped during a push. The partial file is removed.
     Interrupted,
     /// A lab definition uses a feature outside the allowlist of
-    /// `vmlab.prepare` (a host path, a script, a host port, ...).
+    /// `vmlab.prepare` (a host path, a script, a host port, ...). Also a
+    /// `display` frame for the desktop when the host agent's config does
+    /// not opt in (`[display] enabled = true`).
     Refused,
+    /// A `display` tool ran and failed (for example, the VM is not
+    /// running, or the X server does not answer).
+    Failed,
 }
 
 /// Control frames from the host agent to the daemon.
@@ -988,6 +1134,12 @@ mod tests {
                 },
                 vmlab: ToolCapability::default(),
                 shell: Some("/bin/bash".into()),
+                display: DisplayCapability {
+                    enabled: true,
+                    tesseract: true,
+                    drivers: vec!["docker".into(), "desktop".into()],
+                    ..DisplayCapability::default()
+                },
             },
             max_sessions: 32,
             max_running_targets: Some(4),
@@ -1038,6 +1190,38 @@ mod tests {
             v,
             serde_json::json!({"type":"exit","session":1,"signal":9,"reason":"timeout"})
         );
+    }
+
+    #[test]
+    fn display_frame_matches_the_documented_shape() {
+        let text = r#"{"type":"display","session":9,
+            "target":{"backend":"vmlab","lab":"/labs/win","machine":"win11"},
+            "request":{"op":"click","x":10,"y":20,"button":"right"},"timeout_secs":30}"#;
+        let frame: DaemonFrame = decode_control(text).unwrap();
+        assert_eq!(frame.session(), Some(9));
+        let DaemonFrame::Display(d) = &frame else {
+            panic!("not display: {frame:?}")
+        };
+        assert_eq!(d.target.backend(), "vmlab");
+        assert!(d.request.is_input());
+        let back: DaemonFrame = decode_control(&encode_control(&frame).unwrap()).unwrap();
+        assert_eq!(back, frame);
+
+        let rdp: DaemonFrame = decode_control(
+            r#"{"type":"display","session":2,"target":{"backend":"rdp","address":"win:3389",
+            "username":"bob","domain":"LAB","password":"hunter2"},"request":{"op":"info"}}"#,
+        )
+        .unwrap();
+        let shown = format!("{rdp:?}");
+        assert!(!shown.contains("hunter2"), "{shown}");
+        assert!(shown.contains("***"), "{shown}");
+        let docker: DaemonFrame = decode_control(
+            r#"{"type":"display","session":3,"target":{"backend":"docker","container":"c",
+            "protocol":"x11"},"request":{"op":"screenshot","scale":0.5}}"#,
+        )
+        .unwrap();
+        assert!(matches!(&docker, DaemonFrame::Display(d)
+            if matches!(d.target, DisplayTarget::Docker { display: None, .. })));
     }
 
     #[test]

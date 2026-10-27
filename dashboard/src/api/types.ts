@@ -1082,7 +1082,9 @@ export interface UsageMe {
 // Coded to the daemon's `api/hosts.rs` and `api/targets.rs`, which are new
 // and not yet in docs/api.md. The mock serves the same shapes.
 
-export type TargetKind = "host" | "ssh" | "docker" | "vmlab";
+export type TargetKind = "host" | "ssh" | "docker" | "vmlab" | "vnc" | "rdp" | "desktop";
+/** docs/api.md §17.10: the display server of a `docker` or `desktop` target. */
+export type DisplayProtocol = "x11" | "wayland" | "auto";
 /** docs/api.md §17.2: what the last lifecycle verb saw. */
 export type TargetState = "running" | "stopped" | "absent" | "unknown";
 /** docs/api.md §17.2: `global` (no `project`) or `project`. */
@@ -1113,6 +1115,16 @@ export interface Target {
   lab_path?: string;
   /** `vmlab`: the lab is in the workspace of each holder; each holder runs its own instance. */
   lab_from_workspace?: boolean;
+  /** `vnc` and `rdp`: the user name to log in with. */
+  username?: string;
+  /** `rdp`: the Windows domain of the user. */
+  domain?: string;
+  /** `docker` and `desktop`: the display server (docs/api.md §17.10). */
+  display?: DisplayProtocol;
+  /** `docker` and `desktop`: the X display or the Wayland socket. */
+  display_name?: string;
+  /** The target has a screen (docs/api.md §17.10). */
+  has_display?: boolean;
   /**
    * `global` or `project`. The client sets it on every target it reads: a
    * daemon without the field gets it from `project` (no project: global).
@@ -1187,9 +1199,80 @@ export interface NewTarget {
   lab_ref?: string;
   lab_path?: string;
   lab_from_workspace?: boolean;
+  username?: string;
+  domain?: string;
+  display?: DisplayProtocol;
+  display_name?: string;
   ephemeral?: boolean;
   keep?: boolean;
   snapshot_before_task?: boolean;
+}
+
+// ----- Target displays (docs/api.md §17.10) -----
+
+/** A display operation, as in the path `POST .../display/{op}`. */
+export type DisplayOpName =
+  | "info"
+  | "screenshot"
+  | "move"
+  | "click"
+  | "drag"
+  | "scroll"
+  | "keys"
+  | "type"
+  | "ocr"
+  | "find"
+  | "record";
+
+/** A rectangle on the screen, in pixels. */
+export interface DisplayRegion {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/** The body of `POST .../display/screenshot`. */
+export interface ScreenshotOpts {
+  scale?: number;
+  region?: DisplayRegion;
+  agent?: string;
+}
+
+/** `GET /api/targets/{name}/display/info`. */
+export interface DisplayInfo {
+  target: string;
+  kind: TargetKind;
+  backend: string;
+  width: number;
+  height: number;
+  ops: DisplayOpName[];
+  /** The OCR engine: the backend's own, `tesseract`, or `null`. */
+  ocr: string | null;
+  input: { allowed: boolean; reason?: string | null };
+}
+
+/** `POST .../display/screenshot?format=json`. */
+export interface DisplayShot {
+  target: string;
+  op: "screenshot";
+  format: "png";
+  width: number;
+  height: number;
+  screen: { width: number; height: number };
+  region?: DisplayRegion | null;
+  scale?: number | null;
+  bytes: number;
+  sha256: string;
+  png_base64: string;
+}
+
+/** The answer of an input operation. */
+export interface DisplayOpResult {
+  target: string;
+  op: DisplayOpName;
+  ok?: boolean;
+  [key: string]: unknown;
 }
 
 // ----- Target leases (docs/api.md §17.7) -----
@@ -1356,6 +1439,18 @@ export interface HostCapabilities {
   docker?: ToolCapability;
   vmlab?: ToolCapability;
   shell?: string;
+  /** Target displays (docs/api.md §17.10). Absent from an older host agent: off. */
+  display?: DisplayCapability;
+}
+
+/** `terrarium_core::protocol::DisplayCapability`. */
+export interface DisplayCapability {
+  /** The host agent's own config opts in its desktop (`[display] enabled = true`). */
+  enabled: boolean;
+  allowed_displays?: string[];
+  tesseract?: boolean;
+  tools?: string[];
+  drivers?: string[];
 }
 
 /** `GET /api/hosts`: a host agent in the daemon's registry, with its link state. */
@@ -1371,7 +1466,7 @@ export interface Host {
   /** From the last `hello`. `{}` before the first connect. */
   capabilities?: HostCapabilities;
   /** `HostCapabilities::summary`: the flat view for policy checks. */
-  summary?: { os: string; arch: string; docker: boolean; vmlab: boolean };
+  summary?: { os: string; arch: string; docker: boolean; vmlab: boolean; display?: boolean };
   last_seen?: string | null;
   os?: string | null;
   arch?: string | null;

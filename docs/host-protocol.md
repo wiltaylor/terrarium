@@ -852,6 +852,7 @@ flags:
 | `--host-url URL` | `daemon_url`. Default: from the daemon. A bare name becomes `wss://NAME:8082`. |
 | `--fingerprint FP`, `--no-pin` | The pin, or no pin. Default: the pin from the daemon, for a `wss://` URL. |
 | `--user USER` | The service user. Default: `SUDO_USER` (or `DOAS_USER`), else `terrarium` (a new system user). |
+| `--enable-display` | A new config gets `[display]` with `enabled = true`, so `desktop` targets can use the screen of this machine. Default: off. The script prints the risk. It does not change an existing config: it tells you to add the table by hand. |
 | `--dry-run` | Print the plan and change nothing. |
 | `--upgrade` | Replace the binary, keep the config and the token, restart. |
 | `--uninstall [--purge]` | Stop, disable, and remove the unit and the binary. `--purge` also removes `/etc/terrarium-host`. |
@@ -955,6 +956,10 @@ The script does these steps:
 
 A second run is safe. It replaces the binary and the unit, keeps the
 config, and asks before it replaces the token file.
+
+`just host::install <user@host> [name] --enable-display` writes
+`[display]` with `enabled = true` into a new config, as `install-host.sh`
+does (default: off; an existing config does not change).
 
 `just host::install <user@host> [name] --dry-run` skips `host::build`,
 prints each `ssh`, `scp`, and `terrarium` command and the generated unit

@@ -13,6 +13,7 @@ import shlex
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -98,6 +99,11 @@ class Files(unittest.TestCase):
         self.assertIn('name = "lab1"\n', text)
         self.assertIn('server_fingerprint_sha256 = "AA:BB"\n', text)
         self.assertNotIn("server_fingerprint", hi.render_config(settings(fingerprint=None)))
+
+    def test_config_display_opt_in(self):
+        self.assertNotIn("[display]", hi.render_config(settings()))
+        text = hi.render_config(settings(enable_display=True))
+        self.assertTrue(text.endswith("\n[display]\nenabled = true\n"), text)
 
     def test_unit_sets_the_user(self):
         unit = hi.render_unit((hi.REPO / "crates/terrarium-host/terrarium-host.service").read_text(), "wil")
@@ -194,6 +200,36 @@ class DryRun(unittest.TestCase):
         self.assertIn('#   daemon_url = "wss://terrarium.lan:8082"', out)
         self.assertIn('#   server_fingerprint_sha256 = "AA:BB"', out)
         self.assertNotIn("the_<enrol token>", "\n".join(lines))
+
+    def test_dry_run_enable_display(self):
+        base = ["example.local", "demo", "--dry-run", "--daemon-url", "terrarium.lan", "--fingerprint", "AA:BB"]
+        code, out = self.run_main(*base)
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("[display]", out)
+        code, out = self.run_main(*base, "--enable-display")
+        self.assertEqual(code, 0, out)
+        self.assertIn("#   [display]\n#   enabled = true", out)
+        self.assertIn("can see this machine's screen", out)
+
+    def test_existing_config_with_enable_display_gets_a_note(self):
+        class FakeRunner:
+            dry_run = False
+
+            def run(self, argv, capture=False, check=True, dry_out="", stdin=None, stdin_label=None):
+                import subprocess
+                out = "config\ntoken\nunit\nuser\n" if "test -e" in " ".join(argv) else "[]"
+                return subprocess.CompletedProcess(argv, 0, out, "")
+
+        with tempfile.TemporaryDirectory() as d:
+            binary = Path(d) / "terrarium-host"
+            binary.write_text("x")
+            s = settings(binary=binary, enable_display=True, yes=False)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf), unittest.mock.patch.object(hi, "confirm", return_value=False):
+                hi.install(s, FakeRunner())
+            out = buf.getvalue()
+        self.assertIn("keep the existing /etc/terrarium-host/config.toml", out)
+        self.assertIn("add `[display]` with `enabled = true` to it by hand", out)
 
     def test_bad_input_exits_2(self):
         code, out = self.run_main("example.local", "Bad.Name", "--dry-run", "--daemon-url", "t")

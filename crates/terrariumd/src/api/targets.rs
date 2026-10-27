@@ -63,6 +63,11 @@ pub fn routes() -> Router<Shared> {
         .route("/targets/{name}/sessions/{id}/input", post(session_input))
         .route("/targets/{name}/sessions/{id}/output", get(session_output))
         .route("/targets/{name}/sessions/{id}/ws", get(session_ws))
+        .route(
+            "/targets/{name}/display/info",
+            get(display_info).post(display_info_post),
+        )
+        .route("/targets/{name}/display/{op}", post(display_op))
         .route("/targets/{name}/leases", get(leases_of_target).post(grant))
         .route(
             "/targets/{name}/leases/{agent}",
@@ -95,6 +100,8 @@ pub struct TargetView {
     pub access: Option<&'static str>,
     /// The caller's active lease on the target, if it holds one.
     pub lease: Option<LeaseRow>,
+    /// The target has a screen (docs/api.md §17.10).
+    pub has_display: bool,
     /// What runs now: `attached` (the agent workspaces in the container or
     /// the lab instance), `lab` and `head` (the instance of a `lab_repo`
     /// target), `instances` (one for each holder of a `lab_from_workspace`
@@ -143,7 +150,9 @@ pub fn view(state: &Shared, actor: &Actor, r: TargetRow, mine: &[LeaseRow]) -> T
         Actor::Agent(_) if usable => Some("lease"),
         Actor::Agent(_) => None,
     };
+    let has_display = crate::display::has_display(&r.def);
     TargetView {
+        has_display,
         id: r.def.name.clone(),
         scope: if r.def.project.is_some() {
             "project"
@@ -527,6 +536,98 @@ async fn cp(
 ) -> ApiResult<Response> {
     let s = executor::start_cp(&state, &actor, &name, b).await?;
     Ok(opened(&s))
+}
+
+// ------------------------------------------------------------ displays
+
+#[derive(Debug, Default, Deserialize)]
+struct DisplayQuery {
+    /// `json`: a screenshot answers JSON with `png_base64`.
+    #[serde(default)]
+    format: Option<String>,
+    /// A `lab_from_workspace` target: the holder whose instance.
+    #[serde(default)]
+    agent: Option<String>,
+}
+
+/// `GET /api/targets/{name}/display/info` (docs/api.md §17.10).
+async fn display_info(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(name): Path<String>,
+    ApiQuery(q): ApiQuery<DisplayQuery>,
+) -> ApiResult<Json<Value>> {
+    Ok(Json(
+        crate::display::info(&state, &actor, &name, q.agent).await?,
+    ))
+}
+
+async fn display_info_post(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(name): Path<String>,
+    ApiQuery(q): ApiQuery<DisplayQuery>,
+    OptBody(body): OptBody<Value>,
+) -> ApiResult<Json<Value>> {
+    let agent = body
+        .as_ref()
+        .and_then(|b| b["agent"].as_str().map(str::to_owned))
+        .or(q.agent);
+    Ok(Json(
+        crate::display::info(&state, &actor, &name, agent).await?,
+    ))
+}
+
+/// `POST /api/targets/{name}/display/{op}`: one display operation. The
+/// body holds the fields of the operation and `agent`.
+async fn display_op(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path((name, op)): Path<(String, String)>,
+    ApiQuery(q): ApiQuery<DisplayQuery>,
+    OptBody(body): OptBody<Value>,
+) -> ApiResult<Response> {
+    let (op, agent) = crate::display::parse_op(&op, body.unwrap_or(json!({})))?;
+    let agent = agent.or(q.agent);
+    if matches!(op, terrarium_core::display::DisplayOp::Info) {
+        return Ok(Json(crate::display::info(&state, &actor, &name, agent).await?).into_response());
+    }
+    let a = crate::display::run(&state, &actor, &name, op, agent).await?;
+    let Some(png) = a.png else {
+        return Ok(Json(a.value).into_response());
+    };
+    if q.format.as_deref() == Some("json") {
+        let mut v = a.value;
+        v["png_base64"] = json!(base64::engine::general_purpose::STANDARD.encode(&png));
+        return Ok(Json(v).into_response());
+    }
+    let dim = |k: &str| a.value[k].as_u64().unwrap_or(0).to_string();
+    let screen = |k: &str| a.value["screen"][k].as_u64().unwrap_or(0).to_string();
+    Ok((
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "image/png".to_owned()),
+            (header::CACHE_CONTROL, "no-store".to_owned()),
+            (
+                header::HeaderName::from_static("x-display-width"),
+                dim("width"),
+            ),
+            (
+                header::HeaderName::from_static("x-display-height"),
+                dim("height"),
+            ),
+            (
+                header::HeaderName::from_static("x-screen-width"),
+                screen("width"),
+            ),
+            (
+                header::HeaderName::from_static("x-screen-height"),
+                screen("height"),
+            ),
+        ],
+        png,
+    )
+        .into_response())
 }
 
 async fn session_show(

@@ -23,6 +23,8 @@ import { STATE_CHIP, targetActions } from "./actions";
 import { deleteNeedsForce, deleteNotice, hasSnapshots, listSummary, snapshotNameError, snapshotScopes, verbNotice } from "./snapshots";
 import { CreateTargetDialog } from "./CreateTargetDialog";
 import { ScopeChip } from "./ScopeChip";
+import { ScreenPanel } from "./ScreenPanel";
+import { targetHasDisplay } from "./display";
 
 const COLS = 7;
 
@@ -55,6 +57,8 @@ export default function TargetsPage() {
   const [hosts] = createResource(() => api.hosts.list().catch(() => []));
   const [error, setError] = createSignal<unknown>(null);
   const [consoleFor, setConsole] = createSignal<string | null>(null);
+  // docs/api.md §17.10: the target whose live screen shows.
+  const [screenFor, setScreenFor] = createSignal<string | null>(null);
   const [notice, setNotice] = createSignal<string | null>(null);
   const [creating, setCreating] = createSignal(false);
   // `target:verb[:agent]` of the verb that runs now. A verb runs to its end before the daemon answers.
@@ -218,9 +222,16 @@ export default function TargetsPage() {
                                 <Show when={t().lab_from_workspace}>
                                   <span class="small muted">verbs per holder, below</span>
                                 </Show>
-                                <button class="small" onClick={() => setConsole(t().name)}>
-                                  Console
-                                </button>
+                                <Show when={!["vnc", "rdp", "desktop"].includes(t().kind)}>
+                                  <button class="small" onClick={() => setConsole(t().name)}>
+                                    Console
+                                  </button>
+                                </Show>
+                                <Show when={targetHasDisplay(t())}>
+                                  <button class="small" aria-expanded={screenFor() === t().id} onClick={() => setScreenFor(screenFor() === t().id ? null : t().id)}>
+                                    Screen
+                                  </button>
+                                </Show>
                               </span>
                             </td>
                           </tr>
@@ -263,6 +274,13 @@ export default function TargetsPage() {
                                 </td>
                               </tr>
                             )}
+                          </Show>
+                          <Show when={screenFor() === t().id}>
+                            <tr class="screen-row">
+                              <td colSpan={COLS}>
+                                <ScreenPanel target={t()} onClose={() => setScreenFor(null)} />
+                              </td>
+                            </tr>
                           </Show>
                           <tr class="lease-row">
                             <td colSpan={COLS}>

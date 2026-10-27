@@ -66,6 +66,7 @@ class Settings:
     terrarium: list[str]
     ssh_opts: list[str] = field(default_factory=list)
     yes: bool = False
+    enable_display: bool = False
 
     @property
     def sudo(self) -> list[str]:
@@ -180,6 +181,16 @@ def toml_str(s: str) -> str:
     return json.dumps(s)  # A JSON string is a valid TOML basic string.
 
 
+DISPLAY_RISK = (
+    "an agent with an exclusive lease on a desktop target can see this machine's "
+    "screen and use its mouse and keyboard as the service user"
+)
+DISPLAY_BY_HAND = (
+    f"# --enable-display: the existing {CONFIG_PATH} does not change; add "
+    "`[display]` with `enabled = true` to it by hand (the daemon cannot turn it on)"
+)
+
+
 def render_config(s: Settings) -> str:
     lines = [
         "# Written by the Terrarium host installer (docs/host-protocol.md).",
@@ -189,6 +200,8 @@ def render_config(s: Settings) -> str:
     ]
     if s.fingerprint:
         lines.append(f"server_fingerprint_sha256 = {toml_str(s.fingerprint)}")
+    if s.enable_display:
+        lines += ["", "[display]", "enabled = true"]
     return "\n".join(lines) + "\n"
 
 
@@ -377,6 +390,9 @@ def install(s: Settings, runner: Runner) -> int:
     elif is_tls(s.daemon_url):
         print("# pin        = none (the host checks the daemon against the system roots)")
 
+    if s.enable_display:
+        print(f"# warning: --enable-display: {DISPLAY_RISK}")
+
     # 1. What is on the host already. A dry run assumes a new host.
     out = runner.run(probe_cmd(s), capture=True).stdout
     state = parse_probe(out)
@@ -387,6 +403,8 @@ def install(s: Settings, runner: Runner) -> int:
     write_config = not state.config
     if state.config:
         print(f"# keep the existing {CONFIG_PATH}")
+        if s.enable_display:
+            print(DISPLAY_BY_HAND)
     unit = render_unit(s.unit_template.read_text(), s.service_user)
     config = render_config(s)
     if dry:
@@ -489,6 +507,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--binary", default="target/host/terrarium-host", help="the static binary (default: %(default)s)")
     p.add_argument("--ssh-opt", action="append", default=[], help="an extra ssh option, for example --ssh-opt=-p --ssh-opt=2222 (repeat)")
     p.add_argument("--yes", "-y", action="store_true", help="replace an existing token file without a question")
+    p.add_argument("--enable-display", action="store_true", help="a new config gets [display] enabled = true: desktop targets may use this machine's screen (default: off)")
     p.add_argument("--dry-run", action="store_true", help="print the commands and the generated files; run nothing")
     return p.parse_args(argv)
 
@@ -515,6 +534,7 @@ def settings_from(args: argparse.Namespace, env: dict[str, str]) -> Settings:
         terrarium=terrarium,
         ssh_opts=args.ssh_opt,
         yes=args.yes,
+        enable_display=args.enable_display,
     )
 
 

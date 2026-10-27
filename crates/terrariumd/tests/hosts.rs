@@ -73,6 +73,7 @@ impl Lab {
                 version: Some("0.30.0".into()),
             },
             shell: Some("/bin/sh".into()),
+            ..Default::default()
         };
         o.backoff_min = Duration::from_millis(50);
         o.backoff_max = Duration::from_millis(200);
@@ -3085,6 +3086,7 @@ async fn target_caps_and_the_project_prefix() {
             },
             vmlab: ToolCapability::default(),
             shell: Some("/bin/sh".into()),
+            ..Default::default()
         };
         o.docker_bin = lab.bins.path().join("docker").display().to_string();
         o.max_running_targets = 1;

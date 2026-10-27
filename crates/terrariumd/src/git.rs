@@ -395,6 +395,11 @@ impl Runner {
                 ));
                 run = Some(dir);
             }
+            Some(Secret::Password { .. }) => {
+                return Err(io(
+                    "the credential is a password, for vnc and rdp targets; a repo needs a token or an ssh_key",
+                ));
+            }
             None => {}
         }
         let env = vec![

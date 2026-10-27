@@ -637,6 +637,40 @@ describe("mock parity with docs/api.md", () => {
   });
 });
 
+describe("target displays (docs/api.md §17.10)", () => {
+  it("marks the targets with a screen as has_display", async () => {
+    const api = mock();
+    const by = new Map((await api.targets.list()).map((t) => [t.name, t]));
+    expect(by.get("desk-x11")?.has_display).toBe(true);
+    expect(by.get("lab-win11")?.has_display).toBe(true);
+    expect(by.get("win-vnc")?.has_display).toBe(true);
+    expect(by.get("build-box")?.has_display).toBe(false);
+    expect(by.get("pg-test")?.has_display).toBe(false);
+  });
+
+  it("answers a screenshot in the JSON shape with a PNG in png_base64", async () => {
+    const api = mock();
+    const s = await api.targets.screenshot("desk-x11", { scale: 0.5 });
+    expect(s).toMatchObject({ target: "desk-x11", op: "screenshot", format: "png", width: 640, height: 400, screen: { width: 1280, height: 800 }, scale: 0.5 });
+    expect(typeof s.bytes).toBe("number");
+    expect(s.sha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(atob(s.png_base64).slice(1, 4)).toBe("PNG");
+    await expect(api.targets.screenshot("desk-x11", { scale: 2 })).rejects.toMatchObject({ status: 422 });
+  });
+
+  it("answers info and input, and 422 for vnc (step 2) and a target with no display", async () => {
+    const api = mock();
+    const info = await api.targets.displayInfo("lab-win11");
+    expect(info).toMatchObject({ target: "lab-win11", backend: "vmlab", width: 1280, height: 800, ocr: "vmlab", input: { allowed: true } });
+    const r = await api.targets.displayOp("desk-x11", "click", { x: 10, y: 20 });
+    expect(r).toMatchObject({ target: "desk-x11", op: "click", ok: true });
+    const typed = await api.targets.displayOp("desk-x11", "type", { text: "secret" });
+    expect(typed).toMatchObject({ chars: 6 });
+    await expect(api.targets.screenshot("win-vnc")).rejects.toMatchObject({ status: 422, code: "invalid" });
+    await expect(api.targets.screenshot("build-box")).rejects.toMatchObject({ status: 422 });
+  });
+});
+
 describe("target scope (docs/api.md §17.2)", () => {
   it("puts scope on every target: global without a project, project with one", async () => {
     const api = mock();
@@ -646,7 +680,7 @@ describe("target scope (docs/api.md §17.2)", () => {
   it("lists the project's targets and the global ones on GET /api/projects/{name}/targets, in the target shape", async () => {
     const api = mock();
     const list = await api.projects.targets("terrarium");
-    expect(list.map((t) => `${t.name}:${t.scope}`).sort()).toEqual(["build-box:global", "ci-box:global", "dev-vm:global", "lab-win11:project", "pi-runner:global", "terrarium-net-lab:project", "terrarium-ws-lab:project"]);
+    expect(list.map((t) => `${t.name}:${t.scope}`).sort()).toEqual(["build-box:global", "ci-box:global", "desk-x11:global", "dev-vm:global", "lab-win11:project", "pi-runner:global", "terrarium-net-lab:project", "terrarium-ws-lab:project", "win-vnc:global"]);
     expect(list.every((t) => !t.project || t.project === "terrarium")).toBe(true);
     expect(list[0]).toHaveProperty("access", "operator");
     expect(list[0]).toHaveProperty("host_online");

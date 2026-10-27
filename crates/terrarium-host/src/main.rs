@@ -149,7 +149,7 @@ fn fingerprint(cert: &Path) -> anyhow::Result<()> {
 }
 
 async fn check(cfg: &Config, json: bool, probe: bool) -> anyhow::Result<()> {
-    let caps = capabilities::detect(&cfg.docker_bin, &cfg.vmlab_bin).await;
+    let caps = capabilities::detect_with(&cfg.docker_bin, &cfg.vmlab_bin, &cfg.display).await;
     let paths = cfg.paths();
     let transport = cfg.daemon_url.as_ref().map(|_| cfg.transport());
     let (tls_mode, tls_error) = match &transport {
@@ -218,6 +218,23 @@ async fn check(cfg: &Config, json: bool, probe: bool) -> anyhow::Result<()> {
             "shell:      {}",
             caps.shell.as_deref().unwrap_or("none")
         )?;
+        let d = &caps.display;
+        writeln!(
+            out,
+            "display:    desktop {}{}; ocr {}; tools {}",
+            if d.enabled { "on" } else { "off" },
+            if d.allowed_displays.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", d.allowed_displays.join(", "))
+            },
+            if d.tesseract { "tesseract" } else { "none" },
+            if d.tools.is_empty() {
+                "none".to_owned()
+            } else {
+                d.tools.join(" ")
+            }
+        )?;
         match &cfg.allowed_cwd_roots {
             Some(r) => writeln!(out, "cwd roots:  {r:?}")?,
             None => writeln!(out, "cwd roots:  any")?,
@@ -284,9 +301,15 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
     let transport = cfg.transport()?;
     let token = cfg.resolve_token()?;
     let name = cfg.resolve_name();
-    let caps = capabilities::detect(&cfg.docker_bin, &cfg.vmlab_bin).await;
+    let caps = capabilities::detect_with(&cfg.docker_bin, &cfg.vmlab_bin, &cfg.display).await;
     let url = transport.url.clone();
-    tracing::info!(%url, %name, tls = %transport.mode.describe(), docker = caps.docker.present, vmlab = caps.vmlab.present, "starting");
+    tracing::info!(%url, %name, tls = %transport.mode.describe(), docker = caps.docker.present, vmlab = caps.vmlab.present, desktop_display = caps.display.enabled, "starting");
+    if caps.display.enabled {
+        tracing::warn!(
+            "[display] enabled = true: an agent with an exclusive lease on a desktop target \
+             can see this machine's screen and use its mouse and keyboard as this user"
+        );
+    }
     if transport.mode == tls::TlsMode::PlainInsecure {
         tracing::warn!(
             %url,
@@ -309,6 +332,7 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
     opts.tls = transport.tls.clone();
     opts.allow_insecure = transport.mode == tls::TlsMode::PlainInsecure;
     opts.token_file = cfg.token_file.clone();
+    opts.display = cfg.display.clone();
     let client = Client::new(opts);
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .context("install the SIGTERM handler")?;

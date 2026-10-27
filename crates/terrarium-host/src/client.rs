@@ -72,6 +72,8 @@ pub struct ClientOptions {
     /// token (`welcome.token`, after an enrol token), the client writes it
     /// here, so the next start uses it.
     pub token_file: Option<PathBuf>,
+    /// `[display]` of the config: the opt-in for `desktop` targets.
+    pub display: crate::config::DisplayConfig,
 }
 
 impl ClientOptions {
@@ -96,6 +98,7 @@ impl ClientOptions {
             tls: None,
             allow_insecure: false,
             token_file: None,
+            display: crate::config::DisplayConfig::default(),
         }
     }
 }
@@ -761,8 +764,123 @@ impl Client {
                 need(vmlab_ok, "vmlab").and_then(|_| vmlab::plan_snapshot_delete(&r, vb, p)),
                 tx,
             ),
+            F::Display(r) => self.start_display(*r, tx),
+            F::Probe(r) => {
+                let timeout = crate::verb::secs(r.timeout_secs).unwrap_or(Duration::from_secs(5));
+                self.start_task(r.session, tx, async move {
+                    let res = crate::display::remote::tcp_probe(&r.address, timeout)
+                        .await
+                        .map_err(|e| (e.code(), e.to_string()));
+                    (Vec::new(), res)
+                });
+            }
         }
         Ok(())
+    }
+
+    fn display_ctx(&self, timeout: Option<u64>) -> crate::display::DisplayCtx {
+        let o = &self.opts;
+        crate::display::DisplayCtx {
+            runner: Arc::new(crate::display::runner::SystemRunner),
+            docker_bin: o.docker_bin.clone(),
+            docker_ok: o.capabilities.docker.present,
+            vmlab_bin: o.vmlab_bin.clone(),
+            vmlab_ok: o.capabilities.vmlab.present,
+            policy: o.policy.clone(),
+            config: o.display.clone(),
+            tesseract: o.capabilities.display.tesseract,
+            timeout: crate::verb::secs(timeout).unwrap_or(crate::display::DEFAULT_TIMEOUT),
+        }
+    }
+
+    /// A `display` frame: one operation as a task. A screenshot's PNG goes
+    /// out as `stdout` data, then `result` and `exit` 0; a failure is one
+    /// `error` frame.
+    fn start_display(&self, req: crate::protocol::DisplayRequest, tx: &Link) {
+        let session = req.session;
+        if !self.admit(session, tx) {
+            return;
+        }
+        let ctx = self.display_ctx(req.timeout_secs);
+        let outbox = self.new_outbox(session, tx);
+        outbox.send_now(HostFrame::Started { session, pid: None });
+        self.sessions().insert(
+            session,
+            Entry {
+                outbox: outbox.clone(),
+                input: None,
+                push: None,
+                detached_since: None,
+            },
+        );
+        tracing::info!(
+            session,
+            backend = req.target.backend(),
+            op = req.request.name(),
+            "display"
+        );
+        tokio::spawn(async move {
+            let limit = ctx.timeout + Duration::from_secs(5);
+            let res = match tokio::time::timeout(
+                limit,
+                crate::display::dispatch(&ctx, &req.target, &req.request),
+            )
+            .await
+            {
+                Ok(r) => r,
+                Err(_) => Err(crate::display::DisplayError::Failed(format!(
+                    "the display operation did not end in {} s",
+                    limit.as_secs()
+                ))),
+            };
+            let frames = match res {
+                Ok(out) => {
+                    let mut overflow = false;
+                    if let Some(png) = out.png {
+                        for chunk in png.chunks(crate::protocol::CHUNK_SIZE) {
+                            if outbox
+                                .push(StreamTag::Stdout, chunk.to_vec())
+                                .await
+                                .is_err()
+                            {
+                                overflow = true;
+                                break;
+                            }
+                        }
+                    }
+                    if overflow {
+                        vec![HostFrame::Error {
+                            session,
+                            code: ErrorCode::Io,
+                            message: "the link was down and the screenshot filled the buffer"
+                                .into(),
+                        }]
+                    } else {
+                        vec![
+                            HostFrame::Result {
+                                session,
+                                value: out.value,
+                            },
+                            HostFrame::Exit {
+                                session,
+                                code: Some(0),
+                                signal: None,
+                                reason: ExitReason::Exited,
+                            },
+                        ]
+                    }
+                }
+                Err(e) => {
+                    tracing::info!(session, error = %e, "display operation failed");
+                    vec![HostFrame::Error {
+                        session,
+                        code: e.code(),
+                        message: e.to_string(),
+                    }]
+                }
+            };
+            outbox.finish(frames);
+        });
     }
 
     fn input(&self, tx: &Link, session: SessionId, input: SessionInput) {

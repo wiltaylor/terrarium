@@ -12,6 +12,8 @@
 //! - [`session`]: the exec runner (pipes or a PTY).
 //! - [`transfer`]: `cp` in both directions.
 //! - [`docker`], [`vmlab`]: verb builders and output parsers.
+//! - [`display`]: target displays: the `DisplayDriver` trait, the engine,
+//!   and the vmlab, X11/Wayland, VNC, and RDP drivers.
 //! - [`verb`]: shared parts of the builders.
 //! - [`workspace`]: agent workspaces under `work_dir`.
 //! - [`labcheck`]: the allowlist check of a lab definition, and the
@@ -26,6 +28,7 @@
 pub mod capabilities;
 pub mod client;
 pub mod config;
+pub mod display;
 pub mod docker;
 pub mod labcheck;
 pub mod outbox;

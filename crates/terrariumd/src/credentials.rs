@@ -41,6 +41,10 @@ pub enum CredentialKind {
     Token,
     /// An SSH private key, OpenSSH or PEM format.
     SshKey,
+    /// A password for a `vnc` or `rdp` target (docs/api.md §17.10). The
+    /// daemon sends it only to the target's host agent, in the `display`
+    /// frame.
+    Password,
 }
 
 impl CredentialKind {
@@ -48,6 +52,7 @@ impl CredentialKind {
         match self {
             Self::Token => "token",
             Self::SshKey => "ssh_key",
+            Self::Password => "password",
         }
     }
 }
@@ -77,8 +82,16 @@ pub struct NewCredential {
 /// A secret, loaded for one git run. `Debug` does not print it.
 #[derive(Clone, PartialEq, Eq)]
 pub enum Secret {
-    Token { username: String, token: String },
+    Token {
+        username: String,
+        token: String,
+    },
     SshKey(String),
+    /// A `vnc` or `rdp` password, with the default user name.
+    Password {
+        username: Option<String>,
+        password: String,
+    },
 }
 
 impl std::fmt::Debug for Secret {
@@ -86,6 +99,7 @@ impl std::fmt::Debug for Secret {
         match self {
             Self::Token { username, .. } => write!(f, "Token({username}, ***)"),
             Self::SshKey(_) => write!(f, "SshKey(***)"),
+            Self::Password { username, .. } => write!(f, "Password({username:?}, ***)"),
         }
     }
 }
@@ -225,6 +239,23 @@ impl CredentialStore {
                 }
                 None
             }
+            CredentialKind::Password => {
+                // Keep the password as it is: spaces can be part of it.
+                if value.is_empty() || value.len() > 1024 {
+                    return Err(ApiError::invalid("a password is 1 to 1024 bytes"));
+                }
+                if value.contains(['\n', '\r', '\0']) {
+                    return Err(ApiError::invalid("a password is one line"));
+                }
+                match &c.username {
+                    Some(u)
+                        if u.is_empty() || u.len() > 256 || u.chars().any(|ch| ch.is_control()) =>
+                    {
+                        return Err(ApiError::invalid("bad username"));
+                    }
+                    u => u.clone(),
+                }
+            }
         };
         self.ensure_dir()?;
         let info = CredentialInfo {
@@ -307,6 +338,10 @@ impl CredentialStore {
                 token: value.trim().to_owned(),
             },
             CredentialKind::SshKey => Secret::SshKey(value),
+            CredentialKind::Password => Secret::Password {
+                username: info.username,
+                password: value,
+            },
         }))
     }
 
@@ -403,6 +438,35 @@ mod tests {
         assert!(store.delete("github-deploy").unwrap());
         assert!(!store.delete("github-deploy").unwrap());
         assert!(store.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_password_keeps_its_spaces_and_never_shows() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = CredentialStore::new(dir.path());
+        let pw = |value: &str, username: Option<&str>| NewCredential {
+            name: "vnc".into(),
+            kind: CredentialKind::Password,
+            value: value.into(),
+            username: username.map(Into::into),
+        };
+        let info = store.put(&pw(" pass word ", Some("Bob Smith"))).unwrap();
+        assert_eq!(info.kind, CredentialKind::Password);
+        assert_eq!(info.username.as_deref(), Some("Bob Smith"));
+        let list = serde_json::to_string(&store.list().unwrap()).unwrap();
+        assert!(!list.contains("pass word"), "{list}");
+        let s = store.load("vnc").unwrap().unwrap();
+        assert_eq!(
+            s,
+            Secret::Password {
+                username: Some("Bob Smith".into()),
+                password: " pass word ".into()
+            }
+        );
+        assert!(!format!("{s:?}").contains("pass word"));
+        assert!(store.put(&pw("", None)).is_err());
+        assert!(store.put(&pw("a\nb", None)).is_err());
+        assert!(store.put(&pw("ok", Some(""))).is_err());
     }
 
     #[test]
