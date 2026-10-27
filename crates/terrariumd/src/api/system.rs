@@ -129,7 +129,7 @@ async fn live_agents(state: &Shared) -> ApiResult<Vec<(String, String)>> {
         .read(|c| {
             let mut st = c.prepare(
                 "SELECT harness, project || '/' || name FROM agents
-                 WHERE status IN ('starting', 'idle', 'working', 'blocked', 'restarting')
+                 WHERE status IN ('starting', 'idle', 'waiting', 'working', 'blocked', 'restarting')
                  ORDER BY project, name",
             )?;
             let rows = st

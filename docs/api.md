@@ -555,7 +555,7 @@ sysadmin or the operator.
 
 Rules:
 
-- While an agent on the harness is live (`starting`, `idle`, `working`,
+- While an agent on the harness is live (`starting`, `idle`, `waiting`, `working`,
   `blocked`, `restarting`), the answer is `409 conflict` with
   `details.running` (`["project/name", ...]`). A running harness keeps the
   files it loaded, but a swap in the middle of a turn is risky. Stop the
@@ -858,7 +858,9 @@ An agent is the core `Agent` with bookkeeping fields:
 | `subscription`, `model`, `prompt` | Absent when not set. |
 | `system_prompt` | The agent's base system prompt (below). Absent when not set. |
 | `roles` | Roles above `member`: `project_admin`, `sysadmin`. |
-| `status` | `starting`, `idle`, `working`, `blocked`, `error`, `stopped`, `restarting`. |
+| `status` | `starting`, `idle`, `waiting`, `working`, `blocked`, `error`, `stopped`, `restarting`. `waiting`: the turn ended, and the agent has one or more open waits (§6.7). `idle`: the turn ended, and the agent has no open wait. |
+| `waits` | The number of open waits (§6.7). Absent when it is 0. |
+| `waiting_on` | What the agent waits on, in one short line: the summaries of the oldest 3 open waits and a count of the others. Absent when the agent has no open wait. |
 | `session` | The harness session ID of the current session, when known. |
 | `current_card` | The card the agent has in `in_progress`, if any. |
 | `source` | `file`, `api`, or `fleet:<name>` (§18.1). |
@@ -927,6 +929,9 @@ agent's subscription exists:
 "subscription_detail":{"name":"zai-key","provider":"zai","plan":"coding","login_status":"api_key",
   "harnesses":["claude","pi"],"default_model":"glm-5.3-flash"}
 ```
+
+`GET /api/agents/{id}` also adds `open_waits`: the open waits of the
+agent, oldest first, in the shape of §6.7.
 
 `default_model` is the model that the agent's harness gets on the
 subscription when the agent sets no `model` (`default_models` in §16.1).
@@ -1056,7 +1061,7 @@ Push delivery (PLAN §12, §13): new mail to an agent, a card assigned to it
 by someone else, and an unblocked card of its own each add one line to a
 pending pointer turn, for example "New mail from operator (thread T). Run
 `terrarium mail read --thread T`." The runner types the pointer when the
-agent is `idle`, else after the next stop hook. One pointer covers all the
+agent is `idle` or `waiting`, else after the next stop hook. One pointer covers all the
 items that came in meanwhile. When the harness takes the turn, the mail
 becomes `delivered`. Mail that is `queued` when an agent starts goes into
 its first pointer. A card line (and a lease line, §17.7) for an agent that
@@ -1151,6 +1156,37 @@ agent that is not running gets `409 not_running` before the upgrade.
   The daemon also takes binary frames as keystrokes. It ignores text frames
   it does not know.
 - The server closes the socket when the agent stops.
+
+**Screen snapshot.** `GET /api/agents/{id}/screen` gives the harness screen
+as plain text. The rights are the rights of the PTY: the project_admin of
+the agent's project, a sysadmin, or the operator. A member gets
+`403 forbidden`. The call is read-only. The daemon asks the runner for its
+parsed screen (the control call `screen`, [runner.md](runner.md)). It does
+not attach to the PTY, and it types nothing.
+
+```json
+{"agent":"terrarium/worker","agent_id":"01M5PA0T0Z0K16V6G88P3SE78W","status":"blocked",
+ "rows":40,"cols":120,"text":"Do you want to make this edit to lib.rs?\n> 1. Yes\n  2. No",
+ "cursor":{"row":1,"col":2},"at":"2026-10-27T10:16:30.120Z"}
+```
+
+| Field | Meaning |
+|---|---|
+| `agent` | `project/name`. |
+| `status` | The live status of the agent. |
+| `rows`, `cols` | The size of the screen. |
+| `text` | The rows, joined with `\n`. There are no escape codes. The daemon removes the trailing blanks of each row and the blank rows at the end. |
+| `cursor` | The cursor position, from 0. |
+| `at` | RFC 3339: when the daemon took the snapshot. |
+
+| Query | Meaning |
+|---|---|
+| `ansi` | `true`: `text` is the escape sequences that draw the screen on an empty terminal. Default `false`. |
+
+An agent that is not running gives `409 not_running`. A runner that does
+not have the control call `screen` gives `409 conflict` with the message
+"runner too old; restart the agent". The runners of this version all have
+it.
 
 ### 6.6 Transcript
 
@@ -1293,6 +1329,155 @@ file is outside the agent's own dirs"), and the sessions list shows
 The daemon keeps the parsed blocks of the 16 newest files in memory. A read
 checks the file length and parses only the new bytes; a file that got
 shorter is parsed again from the top.
+
+### 6.7 Waits, runs, and watches
+
+PLAN §12d gives the design. The code is in
+`crates/terrariumd/src/store/waits.rs` (the rows and the rules) and
+`crates/terrariumd/src/waits.rs` (the timer, the wake mail, the runs, and
+the watch dispatch).
+
+A **wait** is one thing that an agent (the waiter) waits on. No call
+blocks: the call registers the wait, and the agent ends its turn. When the
+wait ends, the waiter gets mail from `system`, and the mail wakes it.
+
+```json
+{"id":"01JD...","agent":"01M5...","agent_name":"demo/lead","project":"demo",
+ "kind":"agent","spec":{"agent":"01M6...","agent_name":"demo/w1","until":"done","from_status":"working"},
+ "summary":"agent demo/w1 (done)","state":"open","reason":"review TER-3 after it",
+ "created_by":"agent:01M5...","created_at":"2026-10-27T10:00:00.000Z",
+ "timeout_at":"2026-10-28T10:00:00.000Z"}
+```
+
+| Field | Meaning |
+|---|---|
+| `kind` | `agent`, `process`, `time`, or `card`. |
+| `spec` | `agent`: `{agent, agent_name, until, from_status}`. `process`: `{target, session, name?, command?, run}`; `run` is true when the daemon started the command (`POST .../run`) and reads its output. `time`: `{due_at}`. `card`: `{card, column}`. |
+| `state` | `open`, `resolved`, `timed_out`, `cancelled`, or `failed`. Only `open` changes. |
+| `reason` | The waiter's note, at most 500 characters. It comes back in the mail. |
+| `result` | After the end. `agent`: `{outcome, status}`. `process`: `{exit_code, signal, reason, duration_secs, stdout_tail, stderr_tail}`, or `{error, message}` for a run that the daemon lost. `time`: `{outcome: "due"}`. `card`: `{outcome: "reached", card, column}`. A timeout: `{outcome: "timed_out"}`. A cancel: `{outcome: "cancelled", by}`. |
+| `resolved_at`, `notified_at` | When the wait ended, and when its mail went out. |
+
+The kinds:
+
+| Kind | Resolves when |
+|---|---|
+| `agent` | `until` is `done` (the default): the agent is `idle` (so it has no open wait), no mail is `queued` for it, and no wake mail of its own is still to go out. `idle`: the agent ended its turn (`idle` or `waiting`). `blocked`: the agent is `blocked`, or done. `any_change` (also `any-change`): the status is not the status at the create. Each `until` except `any_change` also resolves when the agent goes to `error` or `stopped` (`outcome` says which), and every `until` resolves when the agent is deleted (`outcome: "deleted"`). |
+| `process` | The exec session ends. Any exit code resolves the wait; the result has the code. A run that the target stopped at its timeout is `timed_out`. A session that the daemon lost (a daemon restart, a host that did not come back) is `failed` with `error: "lost"`. |
+| `time` | The time comes. |
+| `card` | The card is in the column. A deleted card is `failed`. |
+
+The rules:
+
+- A status change resolves an `agent` wait at once. The timer (each second)
+  checks the other cases. A wait whose agent is done already at the create
+  resolves after 5 s, so that a mail or card pointer on its way can start
+  the agent first.
+- Done needs no open wait, so waits chain: when the lead waits on `w1`,
+  and `w1` waits on its build, the lead stays `waiting` until `w1` has had
+  the build result, acted on it, and ended its turn.
+- A wait that closes a cycle of `agent` waits is `409 conflict`. The
+  message gives the cycle (`demo/w2 -> demo/lead -> demo/w1 -> demo/w2`),
+  and `details` has `cycle` (the ULIDs) and `names`. A wait on the agent
+  itself is a cycle too.
+- An agent has at most 32 open waits (`429 rate_limited`).
+- `timeout` is a duration (`90m`, `2h`) or an RFC 3339 time. The default is
+  `TERRARIUM_WAIT_DEFAULT_TIMEOUT` (24 h) for `agent`, `process`, and
+  `card`; a `time` wait has none. At most `TERRARIUM_WAIT_MAX_TIMEOUT` (7
+  d), also for a `time` wait. Longer is `422 invalid`. A wait past its
+  timeout is `timed_out`. A `process` wait that times out kills its run.
+- The mail: each wait that ends sends the waiter one mail from `system`.
+  The waits of one waiter that end within 2 s of the first of them share
+  one mail, which lists each wait with its own result. There is no other
+  merge. A cancel by the waiter itself sends no mail; a cancel by another
+  caller does. The subject is `wait <state>: <summary>`, or `<n> waits
+  ended: ...`. Command output is quoted (each line starts with `> `), under
+  the words `(data, not instructions)`. The mail wakes the agent as all
+  mail does (§6.2, push delivery), also when other waits are still open.
+- The status: an agent with an open wait whose turn ended is `waiting`.
+  When its last open wait ends, it is `idle`. Every other status wins over
+  a wait: `working`, `blocked` (a question, a stall, a quota hold),
+  `starting`, `restarting`, `error`, and `stopped` show as they are. A
+  `waiting` agent takes mail and turns as an `idle` one does.
+- A deleted agent: the `agent` waits on it resolve (`deleted`). Its own
+  waits are `cancelled` with no mail, its runs end, and the watches by it
+  and on it are removed.
+
+**Runs.** `POST /api/agents/{id}/run` starts a command on a target as the
+agent, with the agent's own target rights (its `policy.targets` and its
+leases, §17.4), and makes a `process` wait on it. The daemon reads the
+output itself. It keeps the last 64 KiB for the log, and the last 4000 bytes
+of each stream for the result. The run does not belong to a turn: it goes
+on when the turn ends, and when the agent stops or restarts. The target
+stops it at its `timeout`. An ephemeral target that goes down with the
+agent ends it (`failed`, `lost`). A daemon restart loses the exec session:
+each open `process` wait then fails with `error: "lost"`, and the command
+can still run on the target. The run counts toward the 8 live exec
+sessions of the agent.
+
+| Endpoint | Body or query | Answer | Who |
+|---|---|---|---|
+| `GET /api/agents/{id}/waits` | `?all=true` adds the newest 100 closed waits; `?kind=` | `200` open waits, newest first, then the closed ones | the agent, a project_admin of its project, the operator |
+| `POST /api/agents/{id}/waits` | below | `201` the wait | the agent itself, the operator |
+| `POST /api/agents/{id}/run` | `{"target", "cmd": [..], "name"?, "cwd"?, "env"?, "timeout"?, "reason"?, "agent"?}` | `201 {"wait", "session_id", "target"}` | the agent itself, the operator; the run uses the agent's rights |
+| `GET /api/waits/{id}` | | `200` the wait | as for the list; else `404` |
+| `DELETE /api/waits/{id}` | `?kill=true` also ends the run of a `process` wait | `200` the cancelled wait; a wait that is not open is `409 conflict` | as for the list |
+| `GET /api/waits/{id}/log` | `?max=` bytes (at most 65536) | `200 {"wait_id", "session_id", "target", "running", "output", "end"?}` | as for the list; a wait that is not `process` is `422` |
+
+The create body:
+
+```json
+{"kind":"agent","agent":"w1","until":"done","timeout":"2h","reason":"merge after it"}
+{"kind":"time","for":"30m"}
+{"kind":"time","at":"2026-10-27T15:00:00Z"}
+{"kind":"process","session":"01JC..."}
+{"kind":"card","card":"TER-3","column":"done"}
+```
+
+- `agent` takes a ULID, `project/name`, or a name. An agent may wait on the
+  agents of its own project. Another project needs a `cross_project` entry
+  (`project/name` or `project/*`), as mail does (§7.1). A sysadmin and the
+  operator reach every agent.
+- `process` takes an exec session that the waiter opened (or, for the
+  operator, a session of the operator or the waiter). The daemon does not
+  read its output; whoever opened it reads it. The result has no tail.
+- `card`: the column must be a column of the card's board (`422`). The
+  waiter must be able to read the card's project.
+- Each create writes a `wait.create` audit row; each cancel writes
+  `wait.cancel`.
+
+A **watch** mails its watcher when the watched agent goes to one of its
+statuses. The watcher is an agent or `operator` (the mail log of the
+dashboard).
+
+```json
+{"id":"01JE...","watcher":"01M5...","watcher_name":"demo/lead","agent":"01M6...",
+ "agent_name":"demo/w1","project":"demo","on":["blocked","error"],"once":false,
+ "debounce":true,"created_by":"agent:01M5...","created_at":"...","fired":2,
+ "last_fired_at":"..."}
+```
+
+| Endpoint | Body or query | Answer | Who |
+|---|---|---|---|
+| `GET /api/agents/{id}/watches` | | `200` the watches on the agent and by it | the agent, a project_admin of its project, the operator |
+| `POST /api/agents/{id}/watches` | `{"on": ["blocked", "error"], "once"?, "debounce"?, "watcher"?}`; `{id}` is the watched agent | `201` the watch | an agent for itself, with the reach rule of waits; the operator for `operator` (the default) or an agent |
+| `GET /api/watches` | `?watcher=` (default: the caller, or `operator`) | `200` the watches of the watcher | the watcher, a project_admin of its project, the operator |
+| `DELETE /api/watches/{id}` | | `204` | the watcher, a project_admin of its project, the operator |
+
+- `on` takes `idle`, `waiting`, `working` (also `busy`), `blocked`, `error`,
+  `stopped`, `starting`, and `restarting`, as a list or as one
+  comma-separated string. A watcher has at most 32 watches.
+- With `debounce` (the default), a change waits 5 s (10 s for `idle`,
+  `waiting`, and `working`). Then the daemon mails only when the agent is
+  still in one of the statuses. Changes in the window go out as one mail,
+  so a flap sends nothing. `debounce: false` mails each change at once.
+- `once` removes the watch after its first mail.
+- The mail is from `system`: subject `<project/name> is now <status>`, and
+  the body gives the reason of the change, quoted.
+- The queued changes of a debounce live in memory: a daemon restart drops
+  them. The watches stay.
+- Each create writes a `watch.create` audit row; each remove writes
+  `watch.delete`.
 
 ## 7. Mail
 
@@ -1558,7 +1743,9 @@ Kinds:
 
 | `kind` | `data` |
 |---|---|
-| `status` | `{status, from, reason}`. `from` is never the same as `status`: a runner report of the status the agent already has (for example the runner's `spawned <program>` at start) goes in as a `system` event `{message, status}`. |
+| `status` | `{status, from, reason, waits, waiting_on?}`. `from` is never the same as `status`: a runner report of the status the agent already has (for example the runner's `spawned <program>` at start) goes in as a `system` event `{message, status}`. `waits` is the number of open waits; `waiting_on` is the line of §6.7. |
+| `wait` | `{wait_id, change, kind, summary, state, result?}`. `change` is `opened`, `resolved`, `timed_out`, `cancelled`, or `failed`. The `agent` is the waiter (§6.7). |
+| `watch` | `{watch_id, change, watcher, watcher_name, on, status?}`. `change` is `created`, `fired` (with `status`), or `removed`. The `agent` is the watched agent (§6.7). |
 | `session_started` | `{harness_session, transcript_path?, source?}` |
 | `turn_start`, `turn_end`, `notification`, `question`, `session_ended`, `exit`, `delivery_failed`, `system`, `warning` | The fields of the core `Event` variant of the same name (`crates/terrarium-core/src/event.rs`). A `warning` (`{message}`) needs the operator's attention, for example a harness version outside its tested range at a start (§6.2). |
 | `tool_use`, `tool_finished` | `{tool, tool_id?, summary?, ...}`: `input` (`tool_use`), `ok` (`tool_finished`). `tool_id` is the harness's ID for the tool call (for Claude Code, `toolu_...`). It is not the event `id`. Older records used the key `id` for it; the `events.jsonl` reader still takes those. |

@@ -5,6 +5,7 @@ import { seedSchedules } from "./schedules";
 import { seedEventSources, type EventSourceRow } from "./eventSources";
 import { seedTemplates } from "./templates";
 import { seedTranscripts } from "./transcripts";
+import { seedWaits, syncWaitFields } from "./waits";
 import type {
   Agent,
   AgentEvent,
@@ -30,6 +31,8 @@ import type {
   Subscription,
   Target,
   Version,
+  Wait,
+  Watch,
   WikiPage,
 } from "../types";
 
@@ -71,6 +74,12 @@ export interface MockWorld {
   hostSnapshots: Record<string, MockHostSnapshot[]>;
   /** Target leases (docs/api.md §17.7), oldest first. */
   leases: Lease[];
+  /** Waits of the agents, open and closed. */
+  waits: Wait[];
+  /** Watches on the agents. */
+  watches: Watch[];
+  /** The output of each process wait by wait ID (untrusted text). */
+  waitLogs: Record<string, string>;
   hosts: Host[];
   /** Host tokens by host name. The API shows a token once, at create. */
   hostTokens: Record<string, string>;
@@ -177,7 +186,11 @@ export function seed(now: number = Date.now()): MockWorld {
     agentRow("01JB0WEB100000000000000005", "shop-lead", "webshop", "copilot", "copilot-pro", "working", { roles: ["project_admin"], current_card: "WEB-4", policy: { targets: ["pg-test"], mail_to: ["*"] } }),
     agentRow("01JB0WEB200000000000000006", "css-worker", "webshop", "codex", "chatgpt-pro", "error", { restart: "never" }),
     agentRow("01JB0SYS000000000000000007", "sysadmin", "terrarium", "claude", "anthropic-max", "stopped", { roles: ["sysadmin"], restart: "always" }),
+    // Idle with open waits (./waits.ts).
+    agentRow("01JB0PLAN00000000000000008", "planner", "terrarium", "claude", "anthropic-max", "waiting", { prompt: "planner" }),
   ];
+  const waitSeed = seedWaits(now, agents);
+  for (const a of agents) syncWaitFields(waitSeed, a);
   const byName = (name: string) => agents.find((a) => a.name === name)!;
   /** The stored address and the readable name of an agent, `operator`, or `project:<name>`. */
   const who = (name: string): { addr: string; kind: Message["from_kind"]; label: string } => {
@@ -243,6 +256,11 @@ export function seed(now: number = Date.now()): MockWorld {
   ev(3, "turn_end", "lead", "terrarium", "Turn ended after 41s");
   ev(1, "tool_use", "shop-lead", "webshop", "Bash cargo test -p checkout", { tool: "Bash", tool_id: "toolu_mock2" });
   status(0.5, "reviewer", "stopped", "starting");
+  ev(12, "turn_end", "planner", "terrarium", "Turn ended after 20s");
+  ev(12, "status", "planner", "terrarium", "planner: idle -> waiting", { status: "waiting", from: "idle", reason: null, waits: 1, waiting_on: "agent terrarium/runner-dev (done)" });
+  for (const x of waitSeed.waits.filter((y) => y.state === "open")) {
+    ev((now - Date.parse(x.created_at)) / 60_000, "wait", "planner", "terrarium", `${x.agent_name} wait opened: ${x.summary}`, { wait_id: x.id, change: "opened", kind: x.kind, summary: x.summary, state: "open" }, { actor: x.created_by });
+  }
   ev(10, "self_report", "adapter-codex", "terrarium", "adapter-codex says: blocked (waiting for an operator Codex login)", { status: "blocked", note: "waiting for an operator Codex login" }, { actor: "agent:01JB0WRK200000000000000003" });
   seq++;
   events.push({
@@ -791,6 +809,6 @@ ${XSS_DOCUMENT}
   return {
     schedules: sched.schedules, scheduleRuns: sched.runs, eventSources: seedEventSources(now), eventSourceSecrets: {}, templates: seedTemplates(now),
     projects, repos, agents, sessions, transcripts: seedTranscripts(agents, sessions), events, columns: { terrarium: COLUMNS.map((c) => ({ ...c })), webshop: COLUMNS.map((c) => ({ ...c })) },
-    cards, memories, links, pages, revisions, artifacts, artifactBodies, versions, subscriptions, quota, usage, holds: [], apiKeys, mail, targets, hostSnapshots, leases, hosts, hostTokens, audit, seq,
+    cards, memories, links, pages, revisions, artifacts, artifactBodies, versions, subscriptions, quota, usage, holds: [], apiKeys, mail, targets, hostSnapshots, leases, ...waitSeed, hosts, hostTokens, audit, seq,
   };
 }

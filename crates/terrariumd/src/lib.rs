@@ -36,6 +36,7 @@ pub mod time_param;
 pub mod transcripts;
 pub mod trash;
 pub mod usage_collector;
+pub mod waits;
 pub mod workspace;
 
 use std::path::PathBuf;
@@ -177,6 +178,7 @@ pub async fn start_with_usage(
             .to_owned(),
         transcripts: Arc::default(),
         operator_auth: Arc::new(password::OperatorAuth::new(&cfg.state_dir)),
+        waits: Arc::default(),
     });
     if cfg.insecure_agent_header {
         warn!("--insecure-agent-header: any local caller can act as any agent");
@@ -246,6 +248,7 @@ pub async fn start_with_usage(
     tasks.push(spawn_prune_timer(state.clone()));
     tasks.push(leases::spawn_timer(&state));
     tasks.push(scheduler::spawn(state.clone()));
+    tasks.extend(waits::spawn(&state));
     tasks.extend(start_usage(&state).await);
     Ok(Daemon {
         state,
@@ -419,14 +422,45 @@ pub async fn apply_definitions(
 }
 
 /// Set an agent's status, with a `status` event. A stop or an error ends
-/// the current session.
+/// the current session. An `idle` agent with an open wait is `waiting`
+/// (PLAN §12d); the change then checks the waits on the agent.
 pub fn apply_status(
     t: &mut Tx<'_>,
     id: &str,
     status: AgentStatus,
     reason: Option<&str>,
 ) -> ApiResult<()> {
+    apply_status_at(t, id, status, reason, 0)
+}
+
+/// The status that the store shows for the runner status `status` of
+/// agent `id`: `idle` with an open wait is `waiting`.
+pub fn shown_status(
+    conn: &rusqlite::Connection,
+    id: &str,
+    status: AgentStatus,
+) -> ApiResult<AgentStatus> {
+    if !status.is_resting() {
+        return Ok(status);
+    }
+    Ok(status.with_waits(store::waits::open_count(conn, id)?))
+}
+
+/// [`apply_status`] in a chain of wait ends, `depth` deep.
+pub fn apply_status_at(
+    t: &mut Tx<'_>,
+    id: &str,
+    status: AgentStatus,
+    reason: Option<&str>,
+    depth: u8,
+) -> ApiResult<()> {
+    let status = shown_status(t, id, status)?;
     let a = agents::get(t, id)?;
+    // The runner says `idle` again for an agent that waits (the end of a
+    // quota hold, for example): no change.
+    if status == AgentStatus::Waiting && a.agent.status == AgentStatus::Waiting {
+        return Ok(());
+    }
     let from = agents::set_status(t, id, status)?;
     if matches!(status, AgentStatus::Stopped | AgentStatus::Error) {
         let outcome = match status {
@@ -436,16 +470,22 @@ pub fn apply_status(
         agents::end_session(t, id, outcome)?;
     }
     let session = agents::current_session(t, id)?;
+    let waits = store::waits::open_count(t, id)?;
+    let mut data = json!({"status": status, "from": from, "reason": reason, "waits": waits});
+    if let Some(on) = store::waits::waiting_on(t, id)? {
+        data["waiting_on"] = json!(on);
+    }
     t.emit(
         EventDraft::new(
             "status",
             format!("{}: {from} -> {status}", a.agent.name),
-            json!({"status": status, "from": from, "reason": reason}),
+            data,
         )
         .agent(id, a.agent.name.clone())
         .project(a.agent.project.clone())
         .session(session),
     )?;
+    store::waits::after_status(t, id, depth)?;
     Ok(())
 }
 
@@ -492,7 +532,8 @@ fn record(t: &mut Tx<'_>, ev: &SupervisorEvent) -> ApiResult<()> {
             // A change to the status the agent already has is no change: it
             // goes in as a `system` notice, not as `starting -> starting`.
             let a = agents::get(t, &id)?;
-            if a.agent.status == *to && !matches!(to, AgentStatus::Stopped | AgentStatus::Error) {
+            let shown = shown_status(t, &id, *to)?;
+            if a.agent.status == shown && !matches!(to, AgentStatus::Stopped | AgentStatus::Error) {
                 let message = reason.clone().unwrap_or_else(|| format!("status {to}"));
                 let session = agents::current_session(t, &id)?;
                 t.emit(

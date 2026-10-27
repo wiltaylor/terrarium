@@ -237,7 +237,7 @@ function KCard(props: {
             {(a) => (
               <>
                 <HoldBadge agentId={a().id} />
-                <StatusBadge status={a().status} />
+                <StatusBadge status={a().status} waitingOn={a().waiting_on} />
               </>
             )}
           </Show>

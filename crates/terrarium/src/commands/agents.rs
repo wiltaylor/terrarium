@@ -102,6 +102,8 @@ pub async fn agent(ctx: &Ctx, cmd: &AgentCmd) -> anyhow::Result<()> {
                 );
             })
         }
+        AgentCmd::Read(a) => super::inspect::read(ctx, a).await,
+        AgentCmd::Screen { agent } => super::inspect::screen(ctx, agent).await,
         AgentCmd::Leases { agent, all } => {
             let q = crate::api::query([("all", all.then(|| "true".to_owned()))]);
             let v = Value::Array(
@@ -266,7 +268,7 @@ const LIFECYCLE_WAIT: Duration = Duration::from_secs(10);
 fn settled(action: &str, status: &str) -> bool {
     match action {
         "stop" => matches!(status, "stopped" | "error"),
-        _ => matches!(status, "idle" | "working" | "blocked" | "error"),
+        _ => matches!(status, "idle" | "waiting" | "working" | "blocked" | "error"),
     }
 }
 

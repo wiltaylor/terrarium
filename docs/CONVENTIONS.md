@@ -124,6 +124,8 @@ a new token, when `.env` does not exist. The daemon reads:
 | `TERRARIUM_MAX_TARGETS_PER_PROJECT` | `8`. The most targets in one project. A create past it is `409 conflict`. |
 | `TERRARIUM_MAX_SCHEDULES_PER_PROJECT` | `20`. The most schedules in one project (docs/api.md §19). A create past it is `409 conflict`. |
 | `TERRARIUM_MAIL_LOOP_LIMIT` | `6`. The agent-to-agent messages that a thread may have after the last operator or project-inbox message. Then the loop guard pauses the thread (PLAN §12). |
+| `TERRARIUM_WAIT_DEFAULT_TIMEOUT` | `24h`. The timeout of an `agent`, `process`, or `card` wait, and of a `terrarium run`, that gives none (PLAN §12d): seconds, or a number with `s`, `m`, `h`, or `d`. |
+| `TERRARIUM_WAIT_MAX_TIMEOUT` | `7d`. The longest timeout of a wait or a run, and the longest `time` wait. A longer one is `422 invalid`. |
 | `TERRARIUM_TRASH_DAYS` | `7`. The days that a deleted agent stays in `<state>/trash/`, with its workspace. |
 | `TERRARIUM_HARNESS_HOME` | `/auth/<harness>`. Override as `claude=/path,codex=/path`. |
 | `TERRARIUM_TOOLS_DIR` | `tools` (from the cwd). The image sets `/opt/terrarium/tools`; `just daemon::run` sets `<repo>/tools`. The npm prefix of the harnesses: the daemon installs the missing pins there at start, puts `<dir>/bin` first on `PATH`, and the sandbox binds it read-only. Empty: no tools dir; the harnesses come from `PATH`, and `POST /api/harnesses/{name}/update` answers `501`. |

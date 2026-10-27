@@ -911,14 +911,71 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE agents ADD COLUMN system_prompt TEXT;
     "#,
-    // 24: the target kinds `vnc`, `rdp`, and `desktop` (PLAN §19b). A CHECK
+    // 24: waits and watches (PLAN §12d, docs/api.md §6.7). The status
+    // `waiting` is new: the column is made again with the new CHECK (the
+    // way of migration 9). A wait is one thing that an agent waits on:
+    // another agent, a process (an exec session), a time, or a card.
+    // `target_agent` is the agent of an `agent` wait, for the cycle check
+    // and the lookup at each status change. `notified_at` is set when the
+    // wake mail went out. A watch mails its watcher (an agent ULID or
+    // `operator`) when the watched agent goes to one of `statuses`. No
+    // foreign keys: the rows of a deleted agent are closed or removed in
+    // `store::waits::on_agent_deleted`.
+    r#"
+    ALTER TABLE agents ADD COLUMN status_v24 TEXT NOT NULL DEFAULT 'stopped'
+        CHECK (status_v24 IN ('starting', 'idle', 'waiting', 'working', 'blocked',
+                              'error', 'stopped', 'restarting'));
+    UPDATE agents SET status_v24 = status;
+    ALTER TABLE agents DROP COLUMN status;
+    ALTER TABLE agents RENAME COLUMN status_v24 TO status;
+
+    CREATE TABLE waits (
+        id           TEXT PRIMARY KEY,          -- ULID
+        agent        TEXT NOT NULL,             -- the waiter, an agent ULID
+        project      TEXT NOT NULL,             -- the waiter's project
+        kind         TEXT NOT NULL CHECK (kind IN ('agent', 'process', 'time', 'card')),
+        spec         TEXT NOT NULL,             -- JSON
+        target_agent TEXT,                      -- the agent of an `agent` wait
+        summary      TEXT NOT NULL,
+        state        TEXT NOT NULL DEFAULT 'open'
+                     CHECK (state IN ('open', 'resolved', 'timed_out', 'cancelled', 'failed')),
+        reason       TEXT,                      -- the caller's note
+        created_by   TEXT NOT NULL,
+        created_at   TEXT NOT NULL,
+        timeout_at   TEXT,
+        due_at       TEXT,                      -- a `time` wait
+        resolved_at  TEXT,
+        result       TEXT,                      -- JSON
+        notified_at  TEXT
+    );
+    CREATE INDEX waits_agent ON waits(agent, state);
+    CREATE INDEX waits_target ON waits(target_agent, state);
+    CREATE INDEX waits_open ON waits(state, kind);
+
+    CREATE TABLE watches (
+        id            TEXT PRIMARY KEY,         -- ULID
+        watcher       TEXT NOT NULL,            -- an agent ULID or `operator`
+        agent         TEXT NOT NULL,            -- the watched agent ULID
+        project       TEXT NOT NULL,            -- the watched agent's project
+        statuses      TEXT NOT NULL,            -- JSON array of statuses
+        once          INTEGER NOT NULL DEFAULT 0,
+        debounce      INTEGER NOT NULL DEFAULT 1,
+        created_by    TEXT NOT NULL,
+        created_at    TEXT NOT NULL,
+        fired         INTEGER NOT NULL DEFAULT 0,
+        last_fired_at TEXT
+    );
+    CREATE INDEX watches_agent ON watches(agent);
+    CREATE INDEX watches_watcher ON watches(watcher);
+    "#,
+    // 25: the target kinds `vnc`, `rdp`, and `desktop` (PLAN §19b). A CHECK
     // cannot change in place, so the column is swapped, as in migration 9.
     r#"
-    ALTER TABLE targets ADD COLUMN kind_v24 TEXT NOT NULL DEFAULT 'host'
-        CHECK (kind_v24 IN ('host', 'ssh', 'docker', 'vmlab', 'vnc', 'rdp', 'desktop'));
-    UPDATE targets SET kind_v24 = kind;
+    ALTER TABLE targets ADD COLUMN kind_v25 TEXT NOT NULL DEFAULT 'host'
+        CHECK (kind_v25 IN ('host', 'ssh', 'docker', 'vmlab', 'vnc', 'rdp', 'desktop'));
+    UPDATE targets SET kind_v25 = kind;
     ALTER TABLE targets DROP COLUMN kind;
-    ALTER TABLE targets RENAME COLUMN kind_v24 TO kind;
+    ALTER TABLE targets RENAME COLUMN kind_v25 TO kind;
     "#,
 ];
 
@@ -1186,6 +1243,8 @@ mod tests {
             "target_leases",
             "schedules",
             "schedule_runs",
+            "waits",
+            "watches",
         ] {
             let n: i64 = conn
                 .query_row(
@@ -1402,8 +1461,47 @@ mod tests {
         assert_eq!(fk, 0);
     }
 
+    /// Migration 24 makes the status column again with `waiting`, and
+    /// keeps each stored status and the rows that point at the agent.
     #[test]
-    fn migration_24_keeps_targets_and_allows_display_kinds() {
+    fn migration_24_keeps_the_status_and_takes_waiting() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        for (i, sql) in MIGRATIONS.iter().enumerate().take(23) {
+            conn.execute_batch(sql).unwrap();
+            conn.pragma_update(None, "user_version", i + 1).unwrap();
+        }
+        conn.execute_batch(
+            "INSERT INTO agents (id, name, project, harness, workspace, status, created_at, updated_at)
+               VALUES ('A1', 'a', 'p', 'claude', '/w', 'blocked', 't', 't');
+             INSERT INTO sessions (id, agent_id, current, started_at) VALUES ('S1', 'A1', 1, 't');",
+        )
+        .unwrap();
+        assert_eq!(migrate(&mut conn).unwrap(), MIGRATIONS.len() - 23);
+        let status: String = conn
+            .query_row("SELECT status FROM agents WHERE id = 'A1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(status, "blocked");
+        conn.execute("UPDATE agents SET status = 'waiting' WHERE id = 'A1'", [])
+            .unwrap();
+        assert!(
+            conn.execute("UPDATE agents SET status = 'bogus' WHERE id = 'A1'", [])
+                .is_err()
+        );
+        let n: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sessions WHERE agent_id = 'A1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn migration_25_keeps_targets_and_allows_display_kinds() {
         let mut conn = Connection::open_in_memory().unwrap();
         for sql in &MIGRATIONS[..23] {
             conn.execute_batch(sql).unwrap();

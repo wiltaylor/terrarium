@@ -327,6 +327,33 @@ The terminal reconnects with backoff when its socket drops. It reconnects at
 once when the agent starts again. The daemon's first frame after a connect is
 a fresh snapshot of the screen; the terminal clears itself before it draws.
 
+## Waits and watches
+
+An agent is `waiting` when its turn ended and it has one or more open waits.
+`idle` means that the agent has no open waits. `waiting` is a live status: the
+agent takes turns and mail as an `idle` agent does. It is not a stalled status,
+so the sidebar count of blocked agents does not include it.
+
+- The agent JSON has `waits` (the number of open waits) and `waiting_on` (a
+  short summary). The daemon leaves them out when there are no waits. A
+  `status` event carries the same two fields. The status badge shows
+  `waiting_on` in its title.
+- The agent page has a **Waits** panel (`features/agents/Waits.tsx`). It lists
+  the open waits with **Cancel**. A process wait also has **Log** and **Kill**
+  (`DELETE /api/waits/{id}?kill=true`). The **closed** box adds the closed
+  waits with their state and result. `wait` events read the list again.
+- The log (`GET /api/waits/{id}/log`) is untrusted text. The page shows it as
+  a text node in a `<pre>`, never as Markdown or HTML.
+- The **Watches** panel lists the watches on the agent and by the agent, with
+  **Remove**. Its form ("Notify me when <agent> is ...") sends
+  `POST /api/agents/{id}/watches` for the operator. `watch` events read the
+  list again.
+- The pure helpers are in `features/agents/waits.ts`. The mock is in
+  `api/mock/waits.ts`: the `planner` agent waits on `runner-dev`, a build, and
+  a card. The mock closes an agent wait when the watched status matches, and
+  it fires a watch (a `watch` event and a mail) on a status change. It does not
+  run timers for time waits.
+
 ## The conversation view
 
 The Conversation tab of the agent page shows the harness transcript as
@@ -361,8 +388,8 @@ The code is in `features/agents/conversation/`. The logic is pure and in
   the operator scrolls up, it stops and counts the new blocks in a
   "new messages" pill. The pill scrolls back to the end.
 - **Composer.** It is on only when the session is active and the agent is
-  `idle`, `working`, or `blocked`. Enter sends (`POST .../send`) and
-  Shift+Enter adds a line. When the agent is not idle, it says "queued —
+  `idle`, `waiting`, `working`, or `blocked`. Enter sends (`POST .../send`) and
+  Shift+Enter adds a line. When the agent is not idle or waiting, it says "queued —
   the agent is working": the daemon queues the turn. Otherwise it is off
   and gives the reason. The user block comes back through the stream when
   the harness writes it.

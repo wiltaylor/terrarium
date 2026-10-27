@@ -35,9 +35,15 @@ pub enum SupervisorError {
     /// says what to do.
     #[error("{0}")]
     NotReady(String),
+    /// The runner cannot do this call: it is older than the daemon.
+    #[error("{0}")]
+    Unsupported(String),
     #[error("{0}")]
     Other(String),
 }
+
+/// The message for a runner that has no `screen` control call.
+pub const OLD_RUNNER: &str = "runner too old; restart the agent";
 
 /// Input for a PTY.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -166,6 +172,20 @@ pub trait Supervisor: Send + Sync + 'static {
         answer: AnswerInput,
     ) -> BoxFuture<'_, Result<(), SupervisorError>>;
     fn attach_pty(&self, agent: AgentId) -> BoxFuture<'_, Result<PtyAttachment, SupervisorError>>;
+    /// A read-only copy of the agent's parsed screen
+    /// (`GET /api/agents/{id}/screen`). It does not attach and types
+    /// nothing. The default cannot read a screen.
+    fn screen(
+        &self,
+        agent: AgentId,
+    ) -> BoxFuture<'_, Result<terrarium_runner::ScreenSnapshot, SupervisorError>> {
+        let _ = agent;
+        Box::pin(async {
+            Err(SupervisorError::Unsupported(
+                "this supervisor cannot read the screen".into(),
+            ))
+        })
+    }
     /// The live status, or `None` when the supervisor does not run the agent.
     fn status(&self, agent: AgentId) -> BoxFuture<'_, Option<AgentStatus>>;
     /// Every event from now on.
@@ -242,7 +262,7 @@ mod fake {
     use tokio::sync::{broadcast, mpsc};
 
     use super::{
-        AnswerInput, BoxFuture, PtyAttachment, PtyInput, Supervisor, SupervisorError,
+        AnswerInput, BoxFuture, OLD_RUNNER, PtyAttachment, PtyInput, Supervisor, SupervisorError,
         SupervisorEvent, SupervisorEventKind, TurnHold,
     };
 
@@ -256,11 +276,19 @@ mod fake {
         /// The quota hold, and the turns that wait for its end.
         held: Option<TurnHold>,
         waiting: Vec<String>,
+        /// The bytes that the screen shows: the PTY echo and `feed_screen`.
+        screen: Vec<u8>,
+        /// `screen` answers as an old runner does.
+        old_runner: bool,
     }
 
     #[derive(Default)]
     struct Inner {
         agents: HashMap<AgentId, FakeAgent>,
+        /// With mail push on: the mail of each agent that waits for its
+        /// next idle (the message IDs).
+        mail: HashMap<AgentId, Vec<String>>,
+        mail_push: bool,
         /// The grant pointers, in order: the agent, the line, and when it
         /// came (RFC 3339, microseconds).
         lease_pointers: Vec<(AgentId, String, String)>,
@@ -365,6 +393,7 @@ mod fake {
                     Some(h) => me.set_status(agent, AgentStatus::Blocked, Some(&h.reason)),
                     None => me.set_status(agent, AgentStatus::Idle, None),
                 };
+                me.push_mail(agent);
             });
         }
 
@@ -395,8 +424,61 @@ mod fake {
             self.later(agent, epoch, move |me| {
                 me.emit(agent, SupervisorEventKind::Harness(Event::TurnEnd));
                 me.set_status(agent, AgentStatus::Idle, None);
+                me.push_mail(agent);
             });
             Ok(())
+        }
+
+        /// Type the push pointer of PLAN §12, as the real supervisor does,
+        /// for the tests of waits (PLAN §12d). Off by default, so that the
+        /// mail of other tests stays `queued`.
+        pub fn set_mail_push(&self, on: bool) {
+            self.lock().mail_push = on;
+        }
+
+        /// With mail push on: type one pointer turn for the queued mail of
+        /// an idle agent, and mark the mail `delivered`.
+        fn push_mail(&self, agent: AgentId) {
+            let (ids, state) = {
+                let mut inner = self.lock();
+                let idle = inner
+                    .agents
+                    .get(&agent)
+                    .is_some_and(|a| a.status == AgentStatus::Idle && a.held.is_none());
+                if !inner.mail_push || !idle {
+                    return;
+                }
+                let ids = inner.mail.remove(&agent).unwrap_or_default();
+                (ids, inner.state.as_ref().and_then(std::sync::Weak::upgrade))
+            };
+            if ids.is_empty() {
+                return;
+            }
+            let text = format!(
+                "New mail ({} messages). Run `terrarium mail read`.",
+                ids.len()
+            );
+            if self.turn(agent, text).is_err() {
+                self.lock().mail.entry(agent).or_default().extend(ids);
+                return;
+            }
+            if let Some(state) = state {
+                tokio::spawn(async move {
+                    let _ = state
+                        .db
+                        .write("system", move |t| {
+                            for id in &ids {
+                                t.execute(
+                                    "UPDATE messages SET state = 'delivered', delivered_at = ?2
+                                     WHERE id = ?1 AND state = 'queued'",
+                                    rusqlite::params![id, crate::db::now()],
+                                )?;
+                            }
+                            Ok(())
+                        })
+                        .await;
+                });
+            }
         }
 
         /// The grant pointers of `agent`: the line and when it came. For
@@ -410,6 +492,22 @@ mod fake {
                 .collect()
         }
 
+        /// Write `bytes` to the agent's fake screen, as harness output. For
+        /// tests.
+        pub fn feed_screen(&self, agent: AgentId, bytes: &[u8]) {
+            if let Some(a) = self.lock().agents.get_mut(&agent) {
+                a.screen.extend_from_slice(bytes);
+            }
+        }
+
+        /// Make `screen` answer as a runner without the `screen` call. For
+        /// tests.
+        pub fn set_old_runner(&self, agent: AgentId) {
+            if let Some(a) = self.lock().agents.get_mut(&agent) {
+                a.old_runner = true;
+            }
+        }
+
         /// The last size a PTY client reported. For tests.
         pub fn pty_size(&self, agent: AgentId) -> Option<(u16, u16)> {
             self.lock().agents.get(&agent).and_then(|a| a.size)
@@ -419,6 +517,33 @@ mod fake {
     impl Supervisor for InMemorySupervisor {
         fn bind(&self, state: &crate::api::Shared) {
             self.lock().state = Some(Arc::downgrade(state));
+            let mut rx = state.db.hub().subscribe();
+            let me = self.clone();
+            tokio::spawn(async move {
+                while let Ok(ev) = rx.recv().await {
+                    if ev.kind != "mail"
+                        || ev.data.get("held").and_then(|v| v.as_bool()) == Some(true)
+                    {
+                        continue;
+                    }
+                    let (Some(agent), Some(msg)) = (
+                        ev.agent_id
+                            .as_deref()
+                            .and_then(|a| a.parse::<AgentId>().ok()),
+                        ev.data.get("message_id").and_then(|v| v.as_str()),
+                    ) else {
+                        continue;
+                    };
+                    {
+                        let mut inner = me.lock();
+                        if !inner.mail_push {
+                            continue;
+                        }
+                        inner.mail.entry(agent).or_default().push(msg.to_owned());
+                    }
+                    me.push_mail(agent);
+                }
+            });
         }
 
         /// Record the pointer line, as the real supervisor would type it.
@@ -595,6 +720,7 @@ mod fake {
                     while let Some(input) = in_rx.recv().await {
                         match input {
                             PtyInput::Bytes(bytes) => {
+                                me.feed_screen(agent, &bytes);
                                 let viewers = me
                                     .lock()
                                     .agents
@@ -618,6 +744,27 @@ mod fake {
                     output: out_rx,
                     input: in_tx,
                 })
+            })
+        }
+
+        fn screen(
+            &self,
+            agent: AgentId,
+        ) -> BoxFuture<'_, Result<terrarium_runner::ScreenSnapshot, SupervisorError>> {
+            Box::pin(async move {
+                let inner = self.lock();
+                match inner.agents.get(&agent) {
+                    Some(a) if a.status.is_live() && a.old_runner => {
+                        Err(SupervisorError::Unsupported(OLD_RUNNER.into()))
+                    }
+                    Some(a) if a.status.is_live() => {
+                        let (rows, cols) = a.size.unwrap_or((24, 80));
+                        Ok(terrarium_runner::ScreenSnapshot::parse(
+                            rows, cols, &a.screen,
+                        ))
+                    }
+                    _ => Err(SupervisorError::NotRunning(agent)),
+                }
             })
         }
 

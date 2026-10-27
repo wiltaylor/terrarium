@@ -49,6 +49,11 @@ import type {
   Host,
   InboxQuery,
   Lease,
+  NewWatch,
+  Wait,
+  WaitKind,
+  WaitLog,
+  Watch,
   LeaseGrant,
   LeaseGranted,
   LoginSession,
@@ -85,6 +90,7 @@ import type {
   ScheduleQuery,
   ScheduleRun,
   Session,
+  AgentScreen,
   SessionGrant,
   SessionInfo,
   PasswordChange,
@@ -203,8 +209,32 @@ export interface Api {
     setRoles(id: string, roles: Role[]): Promise<Role[]>;
     /** `GET /api/agents/{id}/leases` (docs/api.md §17.7). `all` also lists the ended leases. */
     leases(id: string, opts?: { all?: boolean }): Promise<Lease[]>;
+    /** `GET /api/agents/{id}/waits`: the open waits. `all` adds the recent closed ones, newest first. A plain array. */
+    waits(id: string, opts?: { all?: boolean; kind?: WaitKind }): Promise<Wait[]>;
+    /** `GET /api/agents/{id}/watches`: the watches on this agent and the watches by it. */
+    watches(id: string): Promise<Watch[]>;
+    /** `POST /api/agents/{id}/watches`: the operator watches this agent (the mail goes to the operator). */
+    watch(id: string, body: NewWatch): Promise<Watch>;
     /** Bidirectional PTY. See ./sockets for the protocol. */
     pty(id: string): PtySocket;
+    /** `GET /api/agents/{id}/screen` (docs/api.md §6.5): a read-only text snapshot of the harness screen. 409 when the agent is not running. */
+    screen(id: string): Promise<AgentScreen>;
+  };
+
+  waits: {
+    /** `GET /api/waits/{id}`. */
+    get(id: string): Promise<Wait>;
+    /** `DELETE /api/waits/{id}`: answers the wait, `cancelled`. `kill` also kills the process run. */
+    cancel(id: string, opts?: { kill?: boolean }): Promise<Wait>;
+    /** `GET /api/waits/{id}/log`: the output tail of a process wait. The output is untrusted text. */
+    log(id: string, opts?: { max?: number }): Promise<WaitLog>;
+  };
+
+  watches: {
+    /** `GET /api/watches?watcher=`. */
+    list(q?: { watcher?: string }): Promise<Watch[]>;
+    /** `DELETE /api/watches/{id}`: 204. */
+    remove(id: string): Promise<void>;
   };
 
   board: {
@@ -576,7 +606,28 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       roles: (id) => get(`${a(id)}/roles`),
       setRoles: (id, roles) => put(`${a(id)}/roles`, roles),
       leases: (id, o = {}) => get(`${a(id)}/leases`, o.all ? { all: true } : undefined),
+      // Plain arrays, no cursor.
+      waits: (id, o = {}) => {
+        const q: Query = {};
+        if (o.all) q.all = true;
+        if (o.kind) q.kind = o.kind;
+        return get(`${a(id)}/waits`, Object.keys(q).length ? q : undefined);
+      },
+      watches: (id) => get(`${a(id)}/watches`),
+      watch: (id, body) => post(`${a(id)}/watches`, body),
       pty: (id) => socket(`${a(id)}/pty`),
+      screen: (id) => get(`${a(id)}/screen`),
+    },
+
+    waits: {
+      get: (id) => get(`/api/waits/${seg(id)}`),
+      cancel: (id, o = {}) => t.request<Wait>("DELETE", `/api/waits/${seg(id)}`, { query: o.kill ? { kill: true } : undefined }),
+      log: (id, o = {}) => get(`/api/waits/${seg(id)}/log`, o.max ? { max: o.max } : undefined),
+    },
+
+    watches: {
+      list: (q = {}) => get("/api/watches", q.watcher ? { watcher: q.watcher } : undefined),
+      remove: (id) => del(`/api/watches/${seg(id)}`),
     },
 
     board: {

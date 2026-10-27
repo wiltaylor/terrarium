@@ -265,6 +265,22 @@ docker compose exec terrarium terrarium agent attach demo/worker
 
 Press Ctrl-] to detach. The agent continues to run.
 
+The status chip of an agent tells you more than "busy or not". `idle` means
+that the agent ended its turn and waits on nothing: it is done. `waiting`
+means that the agent ended its turn but waits on a peer, a long build on a
+target (`terrarium run`), a time, or a card. Point at the chip to see what
+it waits on. The **Waits** section of the agent page lists the waits, with
+the log of each run. To get a mail when the agent needs you, use the
+**Watches** section: "Notify me when demo/worker is blocked or error". From
+a shell, run:
+
+```sh
+docker compose exec terrarium terrarium watch demo/worker --on blocked,error
+```
+
+The mail comes to the operator's mail log. See PLAN §12d and
+[cli.md](cli.md), "Waits, runs, and watches".
+
 ### 2.7 Connect a host agent
 
 A host agent (`terrarium-host`) runs on a machine outside the container. It

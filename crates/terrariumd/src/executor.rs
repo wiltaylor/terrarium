@@ -791,6 +791,11 @@ impl ExecSession {
         self.lock().end.is_some()
     }
 
+    /// How the run ended, once it has ended.
+    pub fn end(&self) -> Option<End> {
+        self.lock().end.clone()
+    }
+
     /// Store output; wait while the unacknowledged output is at the limit.
     async fn push(&self, stream: Stream, bytes: Vec<u8>) {
         if bytes.is_empty() {
@@ -1222,6 +1227,12 @@ impl Executor {
             )));
         }
         Ok(s)
+    }
+
+    /// A session by its ID alone, for the daemon's own readers (a process
+    /// wait, docs/api.md §6.7). No rights check.
+    pub fn find(&self, id: &str) -> Option<Arc<ExecSession>> {
+        self.table().get(id).cloned()
     }
 
     /// Close a session: kill its run and forget it.

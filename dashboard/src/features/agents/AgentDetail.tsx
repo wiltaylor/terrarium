@@ -15,21 +15,24 @@ import { describeCause } from "../../stores/quota";
 import { AgentForm } from "./AgentForm";
 import { SaveAsTemplateDialog } from "../templates/TemplateDialog";
 import { Conversation } from "./conversation/Conversation";
+import { ScreenPanel } from "./ScreenPanel";
 import { RoleBadges } from "./AgentsPage";
 import { changeSubscription, loginText } from "./subscription";
 import { SubscriptionSelect } from "./SubscriptionFields";
 import { SystemPromptField } from "./AgentFields";
 import { systemPromptProblem } from "./form";
+import { WaitsPanel, WatchesPanel } from "./Waits";
 
 const TABS = [
   { id: "conversation", label: "Conversation" },
   { id: "terminal", label: "Terminal" },
+  { id: "screen", label: "Screen" },
   { id: "events", label: "Events" },
   { id: "sessions", label: "Sessions" },
 ] as const;
 
 /** Statuses with a live session: the PTY can attach, `stop` works. */
-export const RUNNING: AgentStatus[] = ["starting", "idle", "working", "blocked", "restarting"];
+export const RUNNING: AgentStatus[] = ["starting", "idle", "waiting", "working", "blocked", "restarting"];
 
 export default function AgentDetail() {
   const params = useParams<{ id: string }>();
@@ -82,7 +85,7 @@ export default function AgentDetail() {
           <PageHead
             title={
               <span class="row">
-                {a().name} <StatusBadge status={a().status} /> <HoldBadge agentId={a().id} long /> <LeaseChips agentId={a().id} />
+                {a().name} <StatusBadge status={a().status} waitingOn={a().waiting_on} /> <HoldBadge agentId={a().id} long /> <LeaseChips agentId={a().id} />
               </span>
             }
           >
@@ -171,6 +174,10 @@ export default function AgentDetail() {
 
           <LeasesPanel agent={a()} onNotice={(n) => setNotice(n)} />
 
+          <WaitsPanel agent={a()} />
+
+          <WatchesPanel agent={a()} />
+
           {/* The Conversation tab has its own composer. */}
           <Show when={tab() !== "conversation"}>
             <form
@@ -197,6 +204,9 @@ export default function AgentDetail() {
               </Match>
               <Match when={tab() === "terminal"}>
                 <Terminal connect={() => api.agents.pty(a().id)} available={running()} title={`${a().name} · ${a().harness}`} />
+              </Match>
+              <Match when={tab() === "screen"}>
+                <ScreenPanel agentId={a().id} running={running()} />
               </Match>
               <Match when={tab() === "events"}>
                 <EventHistory filterKey={a().id} fetch={(q) => api.agents.events(a().id, q)} match={(e) => e.agent_id === a().id || e.data?.agent_id === a().id} />

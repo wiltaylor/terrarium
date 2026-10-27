@@ -29,8 +29,18 @@ pub struct AgentView {
     /// For display: the agent keeps no live link to it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template: Option<TemplateRef>,
+    /// The open waits of the agent (PLAN §12d). Absent when none.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub waits: usize,
+    /// What the agent waits on, in one short line. Absent when nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting_on: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 fn parse<T: std::str::FromStr>(s: &str, what: &str) -> rusqlite::Result<T> {
@@ -88,6 +98,8 @@ fn base_row(r: &Row<'_>) -> rusqlite::Result<AgentView> {
         template: r
             .get::<_, Option<String>>("template")?
             .and_then(|s| serde_json::from_str(&s).ok()),
+        waits: 0,
+        waiting_on: None,
         created_at: r.get("created_at")?,
         updated_at: r.get("updated_at")?,
     })
@@ -115,6 +127,10 @@ fn complete(conn: &Connection, mut v: AgentView) -> ApiResult<AgentView> {
             |r| r.get(0),
         )
         .optional()?;
+    v.waits = crate::store::waits::open_count(conn, &id)?;
+    if v.waits > 0 {
+        v.waiting_on = crate::store::waits::waiting_on(conn, &id)?;
+    }
     Ok(v)
 }
 
@@ -472,6 +488,7 @@ pub fn write_def(t: &mut Tx<'_>, id: &str, p: &AgentPatch) -> ApiResult<()> {
 
 pub fn delete(t: &mut Tx<'_>, id: &str) -> ApiResult<()> {
     let a = get(t, id)?;
+    crate::store::waits::on_agent_deleted(t, id)?;
     t.execute("DELETE FROM agents WHERE id = ?1", [id])?;
     // The name stays for the cards, comments, and mail of the agent.
     t.execute(

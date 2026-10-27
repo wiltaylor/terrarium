@@ -29,6 +29,19 @@ describe("applyAgentEvent", () => {
     expect(b!.turn_started_at).toBeUndefined();
   });
 
+  it("takes waits and waiting_on from a status event, and drops them when absent", () => {
+    const [a] = applyAgentEvent([agent()], ev({ data: { status: "waiting", from: "idle", reason: null, waits: 2, waiting_on: "agent p/w1 (done); time 10m" } }));
+    expect(a).toMatchObject({ status: "waiting", waits: 2, waiting_on: "agent p/w1 (done); time 10m" });
+    const [b] = applyAgentEvent([a!], ev({ data: { status: "working", from: "waiting", reason: null, waits: 2, waiting_on: "agent p/w1 (done); time 10m" } }));
+    // A turn_end of an agent with open waits rests in waiting, not idle.
+    const [c] = applyAgentEvent([b!], ev({ kind: "turn_end" }));
+    expect(c!.status).toBe("waiting");
+    const [d] = applyAgentEvent([c!], ev({ data: { status: "idle", from: "waiting", reason: null } }));
+    expect(d!.status).toBe("idle");
+    expect(d!.waits).toBeUndefined();
+    expect(d!.waiting_on).toBeUndefined();
+  });
+
   it("marks exit as error and records the last event", () => {
     const e = ev({ kind: "exit", summary: "exit 1" });
     const [a] = applyAgentEvent([agent()], e);

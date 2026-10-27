@@ -33,6 +33,7 @@ import type {
   Artifact,
   Block,
   Session,
+  AgentScreen,
   SessionGrant,
   SessionInfo,
   TranscriptFrame,
@@ -80,6 +81,7 @@ import { harnessUpdateKind } from "../../lib/harness-update";
 import { FakePty } from "./pty";
 import { createScheduleMock, type ScheduleCaller } from "./schedules";
 import { createEventSourceMock } from "./eventSources";
+import { createWaitMock } from "./waits";
 import { applyTemplate, createTemplateMock, resolveTemplate, systemPromptError, templateRef } from "./templates";
 import { createTranscriptStream, encodeTranscriptFrame } from "../sse";
 import { appendBlock, fakeReply, mockModel, titleOf, type Draft as BlockDraft } from "./transcripts";
@@ -175,7 +177,7 @@ const MOCK_HARNESSES: MockHarness[] = [
   { name: "copilot-prompt", harness: null, package: "copilot-custom-system-prompt", pinned: "0.1.2", tested: null, npm: { version: "0.1.2", days: 30 } },
 ];
 
-const LIVE_STATUSES: string[] = ["starting", "idle", "working", "blocked", "restarting"];
+const LIVE_STATUSES: string[] = ["starting", "idle", "waiting", "working", "blocked", "restarting"];
 
 /** `latest`, or `x.y.z` with an optional pre-release; anything else is `422 invalid`. */
 function checkHarnessVersion(v: string | undefined): string {
@@ -226,7 +228,7 @@ export function lineDiff(a: string, b: string): string {
 const NAME_RE = /^[a-z0-9][a-z0-9_-]{0,62}$/;
 const PREFIX_RE = /^[A-Z][A-Z0-9]{0,9}$/;
 const REQUIRED_COLUMNS = ["backlog", "in_progress", "blocked", "done"];
-const LIVE: AgentStatus[] = ["starting", "idle", "working", "blocked", "restarting"];
+const LIVE: AgentStatus[] = ["starting", "idle", "waiting", "working", "blocked", "restarting"];
 
 /** Test and demo hooks: drive the quota policy without a timer. */
 export interface MockSim {
@@ -589,10 +591,13 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     if (from === status) return;
     a.status = status;
     a.updated_at = iso();
-    agentEvent(a, "status", `${a.name}: ${from} -> ${status}`, { status, from, reason });
+    agentEvent(a, "status", `${a.name}: ${from} -> ${status}`, { status, from, reason, ...(a.waits ? { waits: a.waits, waiting_on: a.waiting_on } : {}) });
     const cur = currentSession(a);
     if (cur) frame(cur.id, { type: "status", status });
+    waitMock.statusChanged(a, status);
   };
+  // ----- waits and watches -----
+  const waitMock = createWaitMock({ w, iso, now, ulid, reply, fail, emit, agent, setStatus, sendMail: (to, from, subject, body) => sendMail(to, from, subject, body) });
   const openSession = (a: Agent) => {
     for (const s of w.sessions.filter((x) => x.agent === a.id && x.current)) {
       s.current = false;
@@ -699,12 +704,12 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
         setStatus(lead, "working");
       } else if (lead?.status === "working") {
         agentEvent(lead, "turn_end", "Turn ended after 12s");
-        setStatus(lead, "idle");
+        setStatus(lead, waitMock.restStatus(lead));
       }
     }
     if (tick % 7 === 0) {
       const reviewer = w.agents.find((x) => x.name === "reviewer");
-      if (reviewer?.status === "starting") setStatus(reviewer, "idle");
+      if (reviewer?.status === "starting") setStatus(reviewer, waitMock.restStatus(reviewer));
     }
     if (tick % 3 === 0) {
       for (const s of w.subscriptions) for (const win of s.windows) setWindow(s.name, win.window, Math.min(100, win.used_pct + 1));
@@ -1609,7 +1614,9 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
         reply(() => {
           const a = agent(id);
           const s = a.subscription ? w.subscriptions.find((x) => x.name === a.subscription) : undefined;
-          return s ? { ...a, subscription_detail: subscriptionDetail(s, a.harness) } : { ...a };
+          const open = waitMock.openWaits(a);
+          const detail = { ...a, ...(open.length ? { open_waits: open } : {}) };
+          return s ? { ...detail, subscription_detail: subscriptionDetail(s, a.harness) } : detail;
         }),
       create: (body) =>
         reply(() => {
@@ -1686,7 +1693,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           later(() => {
             openSession(a);
             setStatus(a, "starting");
-            later(() => setStatus(a, "idle"));
+            later(() => setStatus(a, waitMock.restStatus(a)));
           }, 0);
           return snap;
         }),
@@ -1712,7 +1719,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
             if (wasLive) setStatus(a, "restarting");
             openSession(a);
             setStatus(a, "starting");
-            later(() => setStatus(a, "idle"));
+            later(() => setStatus(a, waitMock.restStatus(a)));
           }, 0);
           return snap;
         }),
@@ -1730,7 +1737,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           const pace = Math.max(step, latency > 0 ? 450 : 0);
           const typeTurn = () => {
             if (!LIVE.includes(a.status) || currentSession(a) !== s) return;
-            if (a.status !== "idle") return void later(typeTurn, Math.max(pace, 1));
+            if (a.status !== "idle" && a.status !== "waiting") return void later(typeTurn, Math.max(pace, 1));
             if (s) s.turns++;
             writeBlock(a, { role: "user", kind: "text", text, origin: "operator" });
             agentEvent(a, "turn_start", `Turn typed by operator: ${text.slice(0, 60)}`, { text }, "operator");
@@ -1745,7 +1752,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
               },
               () => {
                 agentEvent(a, "turn_end", "Turn ended");
-                setStatus(a, "idle");
+                setStatus(a, waitMock.restStatus(a));
               },
             ];
             const run = (i: number) => {
@@ -1811,6 +1818,16 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
         reply(() => {
           const a = agent(id);
           return leasesWhere((l) => l.agent === a.id, o.all);
+        }),
+      waits: waitMock.agentWaits,
+      watches: waitMock.agentWatches,
+      watch: waitMock.agentWatch,
+      screen: (id) =>
+        reply((): AgentScreen => {
+          const a = agent(id);
+          if (!LIVE.includes(a.status)) fail(409, "not_running", `agent \`${a.project}/${a.name}\` is not running`);
+          const text = [`✻ ${a.harness}  (mock screen for ${a.name})`, `cwd: ${a.workspace}`, "", a.status === "working" ? "● Working…" : ">"].join("\n");
+          return { agent: `${a.project}/${a.name}`, agent_id: a.id, status: a.status, rows: 24, cols: 80, text, cursor: { row: 3, col: 2 }, at: iso() };
         }),
       pty: (id) => {
         const a = w.agents.find((x) => x.id === id || `${x.project}/${x.name}` === id || x.name === id);
@@ -2823,6 +2840,9 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           return { target: t.name, op, ok: true, ...(op === "type" ? { chars: String(body.text ?? "").length } : body) };
         }),
     },
+
+    waits: waitMock.waits,
+    watches: waitMock.watches,
 
     schedules: createScheduleMock({
       w,

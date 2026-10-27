@@ -10,6 +10,11 @@ Status words:
 - **read**: found in `--help` or in the binary, but no spike ran it.
 - **not tested**: an open question.
 
+The agent status `waiting` (PLAN §12d) is not a harness fact. The daemon
+derives it from the runner's `idle` when the agent has an open wait. No
+adapter and no compat scenario sees it, so a harness bump cannot break it.
+The compat suite checks the runner statuses only.
+
 ## Version history
 
 `harnesses.toml` at the repo root pins each harness (the version of the

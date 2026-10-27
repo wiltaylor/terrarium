@@ -29,7 +29,7 @@ import {
 } from "./model";
 import { createTranscript, type Change } from "./transcript";
 
-const LIVE = ["starting", "idle", "working", "blocked", "restarting"];
+const LIVE = ["starting", "idle", "waiting", "working", "blocked", "restarting"];
 
 const timeOf = (at: string | null | undefined) => (at ? new Date(at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "");
 const sessionLabel = (s: Session) => s.title?.trim() || s.harness_session_id || s.id;
@@ -167,7 +167,7 @@ export function Conversation(props: { agent: Agent; onOpenTerminal: () => void }
       <section class="convo-main" aria-label="Conversation">
         <div class="convo-strip">
           <span class="row" style={{ gap: "6px" }}>
-            <StatusBadge status={props.agent.status} />
+            <StatusBadge status={props.agent.status} waitingOn={props.agent.waiting_on} />
             <span class="muted small">
               {props.agent.harness}
               {props.agent.model ? ` · ${props.agent.model}` : ""}
