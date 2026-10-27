@@ -52,6 +52,10 @@ pub struct Ctx {
     identity: OnceCell<Value>,
     /// The shortest time between two polls of a wait loop.
     pub poll_floor: Duration,
+    /// The stored sessions of `terrarium login`. `None` in agent mode.
+    pub credentials: Option<crate::credentials::Store>,
+    /// Where the bearer token came from.
+    pub token_source: crate::credentials::TokenSource,
 }
 
 impl Ctx {
@@ -70,6 +74,8 @@ impl Ctx {
             stdin: None,
             identity: OnceCell::new(),
             poll_floor: Duration::from_secs(2),
+            credentials: None,
+            token_source: crate::credentials::TokenSource::None,
         }
     }
 

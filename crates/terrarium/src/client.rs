@@ -23,23 +23,52 @@ pub enum Endpoint {
         authority: String,
         /// A path prefix, without a trailing `/`.
         base: String,
+        /// `https://`: TLS, with the system roots and `TERRARIUM_CA_FILE`.
+        tls: bool,
     },
 }
 
 impl Endpoint {
-    /// Parse an `http://host[:port][/base]` URL.
+    /// Parse an `http://` or `https://host[:port][/base]` URL.
     pub fn from_url(url: &str) -> anyhow::Result<Self> {
-        let bad = || anyhow::anyhow!("bad daemon URL `{url}`: use http://host:port");
+        let bad = || {
+            anyhow::anyhow!("bad daemon URL `{url}`: use https://host[:port] or http://host:port")
+        };
         let uri: Uri = url.parse().map_err(|_| bad())?;
-        if uri.scheme_str() != Some("http") {
-            return Err(bad());
-        }
+        let tls = match uri.scheme_str() {
+            Some("http") => false,
+            Some("https") => true,
+            _ => return Err(bad()),
+        };
         let host = uri.host().ok_or_else(bad)?;
-        let port = uri.port_u16().unwrap_or(80);
+        let port = uri.port_u16().unwrap_or(if tls { 443 } else { 80 });
         Ok(Self::Tcp {
             authority: format!("{host}:{port}"),
             base: uri.path().trim_end_matches('/').to_owned(),
+            tls,
         })
+    }
+
+    /// The host name of a TCP endpoint, without the port.
+    pub fn host_name(&self) -> Option<&str> {
+        match self {
+            Self::Unix(_) => None,
+            Self::Tcp { authority, .. } => Some(
+                authority
+                    .rsplit_once(':')
+                    .map_or(authority.as_str(), |(h, _)| h),
+            ),
+        }
+    }
+
+    /// Does a request to this endpoint stay on this machine, or go over
+    /// TLS? A plain `http://` URL to another host sends the password and
+    /// the session token in clear.
+    pub fn is_private(&self) -> bool {
+        match self {
+            Self::Unix(_) | Self::Tcp { tls: true, .. } => true,
+            Self::Tcp { .. } => self.host_name().is_some_and(is_loopback_host),
+        }
     }
 
     fn host(&self) -> &str {
@@ -57,11 +86,26 @@ impl Endpoint {
     }
 }
 
+/// `localhost`, or a loopback IP address (`127.0.0.0/8`, `::1`).
+pub fn is_loopback_host(host: &str) -> bool {
+    let h = host.trim_matches(['[', ']']);
+    h.eq_ignore_ascii_case("localhost")
+        || h.parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
 impl std::fmt::Display for Endpoint {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Unix(path) => write!(f, "unix:{}", path.display()),
-            Self::Tcp { authority, base } => write!(f, "http://{authority}{base}"),
+            Self::Tcp {
+                authority,
+                base,
+                tls,
+            } => {
+                let scheme = if *tls { "https" } else { "http" };
+                write!(f, "{scheme}://{authority}{base}")
+            }
         }
     }
 }
@@ -89,11 +133,17 @@ impl HttpTransport {
                     .await
                     .with_context(ctx)?,
             ),
-            Endpoint::Tcp { authority, .. } => Box::new(
-                tokio::net::TcpStream::connect(authority.as_str())
+            Endpoint::Tcp { authority, tls, .. } => {
+                let tcp = tokio::net::TcpStream::connect(authority.as_str())
                     .await
-                    .with_context(ctx)?,
-            ),
+                    .with_context(ctx)?;
+                if *tls {
+                    let host = self.endpoint.host_name().unwrap_or(authority);
+                    crate::tls::connect(tcp, host).await.with_context(ctx)?
+                } else {
+                    Box::new(tcp)
+                }
+            }
         })
     }
 
@@ -271,18 +321,70 @@ mod tests {
             Endpoint::from_url("http://localhost:8080").unwrap(),
             Endpoint::Tcp {
                 authority: "localhost:8080".into(),
-                base: String::new()
+                base: String::new(),
+                tls: false,
             }
         );
         assert_eq!(
             Endpoint::from_url("http://box/terrarium/").unwrap(),
             Endpoint::Tcp {
                 authority: "box:80".into(),
-                base: "/terrarium".into()
+                base: "/terrarium".into(),
+                tls: false,
             }
         );
-        assert!(Endpoint::from_url("https://box").is_err());
+        let https = Endpoint::from_url("https://t.example.com/").unwrap();
+        assert_eq!(
+            https,
+            Endpoint::Tcp {
+                authority: "t.example.com:443".into(),
+                base: String::new(),
+                tls: true,
+            }
+        );
+        assert_eq!(https.to_string(), "https://t.example.com:443");
+        assert_eq!(https.host_name(), Some("t.example.com"));
+        assert!(Endpoint::from_url("ftp://box").is_err());
         assert!(Endpoint::from_url("not a url").is_err());
+    }
+
+    /// Only TLS or loopback is private: a plain URL to another host is not.
+    #[test]
+    fn private_endpoints() {
+        let p = |u: &str| Endpoint::from_url(u).unwrap().is_private();
+        assert!(p("http://localhost:8080"));
+        assert!(p("http://127.0.0.1:8080"));
+        assert!(p("http://127.9.9.9:8080"));
+        assert!(p("http://[::1]:8080"));
+        assert!(p("https://t.example.com"));
+        assert!(!p("http://t.lan:8080"));
+        assert!(!p("http://box.tail1234.ts.net:8080"));
+        assert!(!p("http://10.0.0.5:8080"));
+        assert!(Endpoint::Unix("/x.sock".into()).is_private());
+    }
+
+    /// An `https://` daemon with a certificate that no root trusts: the
+    /// handshake fails, and nothing is sent in clear.
+    #[tokio::test]
+    async fn https_checks_the_certificate() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // A server that speaks no TLS: the handshake must fail.
+        tokio::spawn(async move {
+            if let Ok((mut s, _)) = listener.accept().await {
+                use tokio::io::AsyncWriteExt;
+                let _ = s.write_all(b"HTTP/1.1 200 OK\r\n\r\n").await;
+            }
+        });
+        let t = HttpTransport::new(
+            Endpoint::from_url(&format!("https://localhost:{}", addr.port())).unwrap(),
+            Some("secret".into()),
+        );
+        let err = t
+            .send(ApiRequest::new(Method::Get, "/api/health"))
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("TLS"), "{err:#}");
     }
 
     #[test]

@@ -15,7 +15,7 @@ use terrarium_core::paths;
     after_help = "Exit codes: 0 ok, 1 server error, 2 usage or not available, 3 refused by policy."
 )]
 pub struct Cli {
-    /// The daemon URL, for example `http://localhost:8080`. Without it the CLI uses the Unix socket.
+    /// The daemon URL, for example `https://terrarium.example.com` or `http://localhost:8080`. Without it the CLI uses the Unix socket.
     #[arg(long, global = true, env = paths::ENV_URL)]
     pub url: Option<String>,
 
@@ -48,6 +48,20 @@ pub enum Command {
     },
     /// Show who this CLI acts as
     Whoami,
+    /// Log in to the daemon at --url (or TERRARIUM_URL) with the operator
+    /// password, and keep the session token for that URL
+    Login {
+        /// Read the password from the first line of stdin, for scripts
+        #[arg(long)]
+        password_stdin: bool,
+        /// Log in over plain http:// to a host that is not this machine.
+        /// The password and the session token then cross the network in
+        /// clear text
+        #[arg(long)]
+        insecure_http: bool,
+    },
+    /// End the stored session of the daemon at --url, and forget it
+    Logout,
     /// Projects
     Project {
         #[command(subcommand)]
@@ -1102,6 +1116,24 @@ pub enum AdminCmd {
     },
     /// The audit log
     Audit(AuditArgs),
+    /// The operator password of the dashboard and `terrarium login`
+    Password {
+        #[command(subcommand)]
+        command: PasswordCmd,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PasswordCmd {
+    /// Set the operator password (12 characters or more). Every session
+    /// ends. With a stored session (`terrarium login`), it asks for the
+    /// current password too
+    Set {
+        /// Read from stdin: the current password on the first line when a
+        /// stored session is in use, then the new password
+        #[arg(long)]
+        stdin: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1738,7 +1770,7 @@ pub struct EventsArgs {
 /// Commands to hide from the help of each mode. They still parse and run.
 pub fn hide_for_mode(cmd: clap::Command, agent_mode: bool) -> clap::Command {
     let hidden: &[&str] = if agent_mode {
-        &["daemon", "events", "audit", "hook"]
+        &["daemon", "events", "audit", "hook", "login", "logout"]
     } else {
         &["admin", "status", "exec", "shell", "cp", "hook"]
     };

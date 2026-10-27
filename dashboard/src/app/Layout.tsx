@@ -8,7 +8,7 @@ import { ErrorBanner, useNow } from "../components/ui";
 import { duration } from "../lib/format";
 import { agents, api, attention, auth, events, projects, signOutNow, subscriptions, theme, unread } from "../stores";
 import { GLOBAL_ITEMS, PROJECT_ITEMS } from "./nav";
-import { TokenScreen } from "./TokenScreen";
+import { LoginScreen } from "./LoginScreen";
 
 export function Layout(props: RouteSectionProps) {
   const location = useLocation();
@@ -63,7 +63,7 @@ export function Layout(props: RouteSectionProps) {
   return (
     <div class="shell">
       <Show when={auth.needsToken()}>
-        <TokenScreen overlay />
+        <LoginScreen overlay />
       </Show>
       <Show when={open()}>
         <div class="scrim" onClick={() => setOpen(false)} />
@@ -144,7 +144,7 @@ export function Layout(props: RouteSectionProps) {
             <button class="small ghost" onClick={() => theme.cycle()} title="Theme: system, light, dark">
               theme: {theme.pref()}
             </button>
-            <button class="small ghost" onClick={() => void signOutNow()} title="End the session (DELETE /api/session) and forget it in this tab and on this device">
+            <button class="small ghost" onClick={() => void signOutNow()} title="End this session (DELETE /api/session)">
               sign out
             </button>
           </div>

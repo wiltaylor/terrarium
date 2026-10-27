@@ -5,7 +5,7 @@ import { parseOrigin } from "../lib/artifact-origin";
 import { createHttpApi, type Api } from "./client";
 import { createHttpTransport } from "./http";
 import { createMockApi } from "./mock";
-import { MOCK_TOKEN } from "./mock/ws";
+import { MOCK_PASSWORD, MOCK_TOKEN } from "./mock/ws";
 
 export const isMock: boolean = import.meta.env.VITE_MOCK === "1";
 
@@ -17,7 +17,11 @@ export const allowQueryToken: boolean = import.meta.env.VITE_ALLOW_QUERY_TOKEN =
 
 /** Mock only: the token that the mock "daemon" takes. The token screen shows it. */
 export const mockToken: string | undefined = isMock ? MOCK_TOKEN : undefined;
+/** Mock only: the operator password of the mock "daemon". The login screen shows it. */
+export const mockPassword: string | undefined = isMock ? MOCK_PASSWORD : undefined;
 
+// The mock keeps its fake "cookie" in sessionStorage, so a reload keeps the
+// session as a browser does. Mock only: the real cookie is `HttpOnly`.
 const sessionStore = () => {
   try {
     return typeof sessionStorage === "undefined" ? null : sessionStorage;

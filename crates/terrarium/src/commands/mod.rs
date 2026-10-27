@@ -3,6 +3,7 @@
 
 pub mod agents;
 pub mod artifacts;
+pub mod auth;
 pub mod board;
 pub mod events;
 pub mod fleet;
@@ -29,6 +30,11 @@ pub async fn run(ctx: &Ctx, cmd: &Command) -> anyhow::Result<()> {
     match cmd {
         Command::Daemon { command } => system::daemon(ctx, command).await,
         Command::Whoami => system::whoami(ctx).await,
+        Command::Login {
+            password_stdin,
+            insecure_http,
+        } => auth::login(ctx, *password_stdin, *insecure_http).await,
+        Command::Logout => auth::logout(ctx).await,
         Command::Project { command } => projects::project(ctx, command).await,
         Command::Repo { command } => projects::repo(ctx, command).await,
         Command::Agent { command } => agents::agent(ctx, command).await,
@@ -96,6 +102,9 @@ async fn admin(ctx: &Ctx, cmd: &AdminCmd) -> anyhow::Result<()> {
         AdminCmd::Schedule { command } => schedules::schedule(ctx, command).await,
         AdminCmd::Template { command } => templates::template(ctx, command).await,
         AdminCmd::Audit(args) => system::audit(ctx, args).await,
+        AdminCmd::Password {
+            command: crate::cli::PasswordCmd::Set { stdin },
+        } => auth::password_set(ctx, *stdin).await,
     }
 }
 

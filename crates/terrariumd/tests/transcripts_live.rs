@@ -113,6 +113,9 @@ async fn live_transcripts() {
         web: Default::default(),
         artifact_listen: String::new(),
         transcripts: Arc::default(),
+        operator_auth: Arc::new(terrariumd::password::OperatorAuth::new(
+            std::path::Path::new("/nonexistent"),
+        )),
     });
     let agents = std::env::var("TERRARIUM_LIVE_AGENTS").unwrap_or_default();
     for key in agents.split(',').filter(|k| !k.is_empty()) {

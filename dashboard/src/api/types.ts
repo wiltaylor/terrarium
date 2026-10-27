@@ -1431,10 +1431,34 @@ export interface AuditQuery {
 export interface SessionGrant {
   /** Send it as `X-CSRF-Token` on every POST, PUT, PATCH, and DELETE. */
   csrf: string;
-  /** When the cookie ends, RFC 3339. */
+  /** When the cookie ends, RFC 3339. A request past half the life renews the cookie, so the session can last longer. */
   expires_at: string;
   /** The same time as a Unix time, in seconds. */
   exp?: number;
+  /** `browser` for the cookie. */
+  kind?: string;
+}
+
+/**
+ * The answer of `GET /api/session` (docs/api.md §1.1): the session of this
+ * request. The dashboard calls it at load, so it keeps no copy of the CSRF
+ * value. A renewed cookie keeps the same CSRF value.
+ */
+export interface SessionInfo {
+  /** `browser` (the cookie), `cli`, `token` (the static bearer token), or `local` (the Unix socket). */
+  kind: "browser" | "cli" | "token" | "local";
+  /** The CSRF value of the cookie session (`browser` only). */
+  csrf?: string;
+  exp?: number;
+  expires_at?: string;
+  /** Is an operator password set? */
+  password_set: boolean;
+}
+
+/** The body of `PUT /api/auth/password`. A session must send `current` when a password is set. */
+export interface PasswordChange {
+  current?: string;
+  new: string;
 }
 
 // ----- Schedules (docs/api.md §19) -----

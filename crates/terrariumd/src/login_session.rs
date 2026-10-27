@@ -260,13 +260,16 @@ pub struct LoginStatus {
 
 /// Env var prefixes that would change which login a child process reads.
 const STRIP_PREFIXES: [&str; 2] = ["CLAUDE", "ANTHROPIC"];
-/// Also the daemon's own bearer token: a login command does not need it.
-const STRIP_VARS: [&str; 5] = [
+/// Also the daemon's own bearer token and the first operator password: a
+/// login command needs neither.
+const STRIP_VARS: [&str; 7] = [
     "COPILOT_GITHUB_TOKEN",
     "GH_TOKEN",
     "GITHUB_TOKEN",
     "OPENAI_API_KEY",
     "TERRARIUM_TOKEN",
+    crate::password::ENV_PASSWORD,
+    crate::password::ENV_PASSWORD_FILE,
 ];
 
 /// The daemon's env without the variables that would pick another login,
@@ -1401,6 +1404,18 @@ pub fn credential_env_for(state_dir: &Path, sub: &Subscription) -> Vec<(String, 
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    /// A login command never gets the daemon's token or the first password.
+    #[test]
+    fn child_env_strips_the_daemon_secrets() {
+        for k in [
+            "TERRARIUM_TOKEN",
+            crate::password::ENV_PASSWORD,
+            crate::password::ENV_PASSWORD_FILE,
+        ] {
+            assert!(STRIP_VARS.contains(&k), "{k}");
+        }
+    }
 
     fn fixture(name: &str) -> Vec<u8> {
         std::fs::read(format!(

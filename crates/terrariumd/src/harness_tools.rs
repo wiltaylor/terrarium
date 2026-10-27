@@ -367,6 +367,13 @@ impl ToolsConfig {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        // npm runs package scripts: no secret of the daemon goes to them.
+        for k in crate::password::SECRET_ENV
+            .into_iter()
+            .chain(["TERRARIUM_TOKEN"])
+        {
+            cmd.env_remove(k);
+        }
         let child = match spawn_retrying(&mut cmd).await {
             Ok(c) => c,
             Err(e) => {

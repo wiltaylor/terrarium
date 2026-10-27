@@ -20,6 +20,7 @@ pub mod ingest;
 pub mod leases;
 pub mod login_session;
 pub mod models;
+pub mod password;
 pub mod policy;
 pub mod probes;
 pub mod prompt;
@@ -174,6 +175,7 @@ pub async fn start_with_usage(
             .unwrap_or_default()
             .to_owned(),
         transcripts: Arc::default(),
+        operator_auth: Arc::new(password::OperatorAuth::new(&cfg.state_dir)),
     });
     if cfg.insecure_agent_header {
         warn!("--insecure-agent-header: any local caller can act as any agent");

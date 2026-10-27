@@ -4,7 +4,7 @@
 import { createApi } from "../api";
 import { createAgentsStore } from "./agents";
 import { createAttentionStore } from "./attention";
-import { createAuthStore, signIn, signOut, upgradeToSession } from "./auth";
+import { changePassword, createAuthStore, restoreSession, signIn, signInWithPassword, signOut, signOutEverywhere } from "./auth";
 import { createEventsStore } from "./events";
 import { createLeasesStore } from "./leases";
 import { createProjectsStore } from "./projects";
@@ -31,7 +31,7 @@ const session = (() => {
 
 export const auth = createAuthStore({ session, local: storage });
 export const api = createApi(auth);
-export const events = createEventsStore(api, { ready: () => auth.mode() !== "none" });
+export const events = createEventsStore(api, { ready: () => auth.mode() === "session" || auth.mode() === "bearer" });
 export const projects = createProjectsStore(api, storage);
 export const agents = createAgentsStore(api, events);
 export const subscriptions = createSubscriptionsStore(api, events);
@@ -40,21 +40,45 @@ export const unread = createUnreadStore(api, events);
 export const attention = createAttentionStore(api, events, { prefixes: () => projects.prefixes() });
 export const leases = createLeasesStore(api, events);
 
-// A token from an older build, or from a daemon that had no sessions:
-// trade it for a cookie session now, so that it leaves the browser.
-void upgradeToSession(api, auth);
+// At load: the cookie is the cache. `GET /api/session` says whether it is a
+// session, and gives the CSRF value. A token from an older build (bearer
+// mode) is traded for a cookie session, so that it leaves the browser.
+void restoreSession(api, auth).then((ok) => {
+  if (ok) events.start();
+});
 
-/** Sign in with the token from the token screen. After an expiry, the event socket reconnects at once. */
-export async function signInWithToken(token: string, remember: boolean) {
-  const result = await signIn(api, auth, token, remember);
+/** Sign in with the token ("Use the token instead"). After an expiry, the event socket reconnects at once. */
+export async function signInWithToken(token: string) {
+  const result = await signIn(api, auth, token);
+  events.start();
   events.reconnect();
   return result;
+}
+
+/** Sign in with the operator password. */
+export async function signInPassword(password: string) {
+  await signInWithPassword(api, auth, password);
+  events.start();
+  events.reconnect();
 }
 
 /** Sign out: close the event socket, `DELETE /api/session`, and forget every local copy. */
 export async function signOutNow() {
   events.stop();
   await signOut(api, auth);
+}
+
+/** Log out everywhere: `DELETE /api/sessions` ends every browser and CLI session. */
+export async function signOutAll() {
+  events.stop();
+  await signOutEverywhere(api, auth);
+}
+
+/** Change the operator password. A cookie session signs in again with the new one. */
+export async function changePasswordNow(current: string, next: string) {
+  await changePassword(api, auth, current, next);
+  events.start();
+  events.reconnect();
 }
 
 export { createBoardStore } from "./board";

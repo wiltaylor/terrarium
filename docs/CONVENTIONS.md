@@ -141,7 +141,10 @@ a new token, when `.env` does not exist. The daemon reads:
 | `TERRARIUM_INGEST_ADDR` | unset: no ingest listener. The webhook listener of the event sources: only `POST /hooks/{project}/{source}` and `GET /healthz` ([api.md](api.md) §20). Compose sets `0.0.0.0:8083`. |
 | `TERRARIUM_INGEST_PUBLIC_URL` | unset: made from `TERRARIUM_INGEST_ADDR`. The ingest listener as a forge reaches it, for the `hook_url` of each event source. |
 | `TERRARIUM_WS_QUERY_TOKEN` | `0`: refuse the bearer token in `?token=` on a WebSocket upgrade (`401`). `1` (or `true`, `yes`, `on`): take it, with a warning in the log. Clients send the token as the subprotocol `bearer.<token>`. |
-| `TERRARIUM_SESSION_TTL` | `12h`. The life of a dashboard session cookie: seconds, or a number with `s`, `m`, `h`, or `d`. |
+| `TERRARIUM_SESSION_TTL` | `30d`. The life of a dashboard session cookie: seconds, or a number with `s`, `m`, `h`, or `d`. The daemon renews the cookie past half its life. |
+| `TERRARIUM_CLI_SESSION_TTL` | `90d`. The life of a CLI session token (`terrarium login`). |
+| `TERRARIUM_SESSION_MAX_AGE` | `90d`. The longest life of a dashboard session through its renewals, from the login. |
+| `TERRARIUM_PASSWORD`, `TERRARIUM_PASSWORD_FILE` | unset. The first operator password, set at the start when none is set. The daemon then starts again without both variables, so no child process inherits them. Remove them after the first start; use `terrariumd password set`. |
 | `TERRARIUM_SSH` | `ssh`. The ssh binary for `ssh` targets. |
 | `TERRARIUM_INSECURE_AGENT_HEADER` | off. On: trust `X-Terrarium-Agent` on the Unix socket (tests only). |
 | `TERRARIUM_HARNESS_VERSION_POLICY` | `warn`. An agent start on a harness whose installed version is outside the adapter's tested range (`harnesses.toml`) goes ahead, with a warning log and a `warning` event. `refuse`: the start is `422 invalid`. |
@@ -156,7 +159,7 @@ data.
 |---|---|---|
 | `config/<harness>/` | `/auth/<harness>` | The shared harness homes and logins. Gitignored. |
 | `config/tls/` | `/etc/terrarium/tls` (ro) | The certificate and key of the host listener. Gitignored. |
-| `state/` | `/state` (`TERRARIUM_STATE_DIR`) | SQLite, the agent dirs `agents/<ulid>/`, the trash, artifacts, and credentials. Gitignored. |
+| `state/` | `/state` (`TERRARIUM_STATE_DIR`) | SQLite, the agent dirs `agents/<ulid>/`, the trash, artifacts, credentials, the session key `session.key`, and the operator password hash `operator.password`. Gitignored. |
 | `work/` | `/work` (`TERRARIUM_WORK_DIR`) | The agent workspaces, `<project>/<agent>/`. A host agent on this machine attaches them to targets (its `work_dir`). Gitignored. |
 | `repos/` | `/repos` (`TERRARIUM_REPOS_DIR`) | Local bare repos, `<name>.git`, bound into the sandboxes of their project. A host agent reads them for a local `lab_repo` (its `repos_dir`). Gitignored. |
 | `labs/` | not bound | vmlab test labs (`labs/terrarium-test/vmlab.wcl`) for a host agent on this machine. In git. |
@@ -204,11 +207,17 @@ into `private/` and `harness/` once (`migrate_legacy_layout`). The test
 bind names `private/`.
 
 The CLI uses the Unix socket. Set `TERRARIUM_URL` and `TERRARIUM_TOKEN` to use
-TCP instead. The CLI supports `http://` only.
+TCP instead. The CLI takes `https://` (rustls, the system roots, and
+`TERRARIUM_CA_FILE`) and `http://`. `terrarium login` refuses a plain
+`http://` URL to another host unless `--insecure-http` is given.
 
 The TCP listener asks for the bearer token on `/api/*` only. The dashboard
 files are public, because a browser cannot send a header when it loads a page.
 A WebSocket upgrade sends the token as the subprotocol `bearer.<token>`
 (`Sec-WebSocket-Protocol`), not in the URL ([api.md](api.md) §1).
 The dashboard uses a session cookie instead: `POST /api/session` trades the
-token for a signed `HttpOnly` cookie and a CSRF value ([api.md](api.md) §1.1).
+operator password (or the token) for a signed `HttpOnly` cookie and a CSRF
+value ([api.md](api.md) §1.1). `terrarium login` trades the password for a
+CLI session token, which the CLI keeps per URL in
+`$XDG_CONFIG_HOME/terrarium/credentials.json`. `TERRARIUM_TOKEN` wins over
+it.

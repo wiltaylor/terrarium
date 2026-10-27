@@ -69,23 +69,49 @@ them there and goes on at once. See section 7.
 To see the logs, run `just docker::logs`. To stop the stack, run `just down`.
 The bind-mounted data stays.
 
-### 2.3 Open the dashboard
+### 2.3 Set the password and open the dashboard
 
-Open <http://localhost:8080>. If you changed `TERRARIUM_PORT` in `.env`, use
-that port. The dashboard shows a token screen. Paste the value of
-`TERRARIUM_TOKEN`.
+The dashboard and `terrarium login` use the operator password. Set it once:
 
-At sign-in, the dashboard trades the token for a session cookie
-(`POST /api/session`) and then drops the token. The cookie is `HttpOnly`,
-so no script on the page can read it. The dashboard keeps only the CSRF
-value, in memory and in the `sessionStorage` of the tab. A reload keeps the
-session. A new tab asks for the token again. If you select **Remember on this
-device**, the dashboard also puts the CSRF value in `localStorage`. Then a
-new tab stays signed in until the session ends. The CSRF value is not a
-credential without the cookie. The session ends after
-`TERRARIUM_SESSION_TTL` (default `12h`). **sign out** in the sidebar ends the
-session and removes every copy
+```sh
+docker compose exec terrarium terrariumd password set
+```
+
+The command asks for the password twice, with no echo. Use 12 characters or
+more. The daemon keeps only an Argon2id hash, in `state/operator.password`.
+A running daemon sees the new password at once. To change the password
+later, run the command again, or use the Settings page of the dashboard.
+Each change ends every session.
+
+For a first start with no prompt, put `TERRARIUM_PASSWORD=...` in `.env`.
+The daemon sets the password at the start when none is set. Then remove the
+line from `.env`: after the first start the daemon ignores it.
+
+Then open <http://localhost:8080>. If you changed `TERRARIUM_PORT` in `.env`, use
+that port. The dashboard shows a login screen. Enter the operator password.
+If you did not set a password, select **Use the token instead** and paste
+the value of `TERRARIUM_TOKEN`.
+
+At sign-in, the dashboard sends the password (or the token) to the daemon
+once (`POST /api/session`). The daemon answers with a session cookie and
+the dashboard drops the password. The cookie is `HttpOnly`, so no script on
+the page can read it. The cookie is the cache: it stays through a reload, a
+new tab, and a browser restart, so you do not log in again. It lives
+`TERRARIUM_SESSION_TTL` (default 30 days), and the daemon renews it while
+you use the dashboard. The dashboard keeps only the CSRF value, in memory.
+**sign out** in the sidebar ends the session. **Log out everywhere** on the
+Settings page ends every session, in each browser and each CLI
 ([../dashboard/src/README.md](../dashboard/src/README.md)).
+
+After five wrong passwords from one address, the daemon makes you wait:
+30 s, then twice as long after each more failure, up to 15 min. A session
+lives at most `TERRARIUM_SESSION_MAX_AGE` (default 90 days) from the login,
+however often it renews.
+
+To use the CLI from another machine, log in over `https://` (a TLS proxy in
+front of the daemon): `terrarium --url https://terrarium.example.com login`.
+`terrarium login` refuses plain `http://` to another host unless you add
+`--insecure-http` ([cli.md](cli.md) §2.1).
 
 Set `TERRARIUM_PUBLIC_URL` in `.env` to the dashboard URL as you open it.
 The daemon puts this URL in the links of operator mail (the default is
@@ -525,10 +551,12 @@ subprotocol in its `101` answer.
 
 A browser client uses a cookie session, as the dashboard does:
 
-1. Send `POST /api/session` with `Authorization: Bearer <token>`. The daemon
-   sets the `terrarium_session` cookie and answers
-   `{"csrf", "exp", "expires_at"}`.
-2. Drop the token. Keep the `csrf` value.
+1. Send `POST /api/session` with `{"password": "..."}` and no
+   `Authorization` (or with `Authorization: Bearer <token>` and no body).
+   The daemon sets the `terrarium_session` cookie and answers
+   `{"kind", "csrf", "exp", "expires_at"}`.
+2. Drop the password or the token. Keep the `csrf` value. After a reload,
+   `GET /api/session` gives it again while the cookie is good.
 3. Send `X-CSRF-Token: <csrf>` on each `POST`, `PUT`, `PATCH`, and `DELETE`.
    Without it, the daemon answers `403`.
 4. Open a WebSocket with no subprotocol. The browser sends the cookie and
@@ -536,6 +564,11 @@ A browser client uses a cookie session, as the dashboard does:
    dashboard origin.
 5. On a `401`, send `POST /api/session` again. `DELETE /api/session`
    ends the session.
+
+A script uses a CLI session: `POST /api/session` with
+`{"password": "...", "client": "cli"}` answers `{"token", "expires_at"}`.
+Send the token as `Authorization: Bearer <token>`. It needs no CSRF header.
+`terrarium login` does this for the CLI ([cli.md](cli.md) §2.1).
 
 Do not put the token in the `?token=` query string. A query string goes into
 proxy logs and browser history. The daemon refuses that form by default
@@ -782,8 +815,9 @@ TERRARIUM_DAEMON_URL=http://127.0.0.1:8090 just dashboard::dev
 
 Open <http://localhost:5173>. Vite sends `/api` and `/a/` to the daemon.
 Without `TERRARIUM_DAEMON_URL`, Vite uses `http://localhost:8080`, which is
-the Docker stack. The token screen needs the `TERRARIUM_TOKEN` of that
-daemon. `just daemon::run` reads it from `.env`. Without a token, the daemon
+the Docker stack. The login screen needs the operator password of that
+daemon (`terrariumd password set --state-dir <its state dir>`), or its
+`TERRARIUM_TOKEN` on **Use the token instead**. `just daemon::run` reads it from `.env`. Without a token, the daemon
 does not open its TCP listener.
 
 To work on the dashboard without a daemon, use the mock API:

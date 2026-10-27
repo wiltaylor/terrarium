@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { createHttpApi, type HttpApiOptions } from "./client";
 import { AuthSocket } from "./sockets";
-import { createHttpTransport, CSRF_HEADER, isMutating, type RequestOptions, type Transport } from "./http";
+import { AuthError, createHttpTransport, CSRF_HEADER, isMutating, type RequestOptions, type Transport } from "./http";
 import { eachMethod, httpVerbs, NOT_TRANSPORT } from "./mock/verbs";
 
 function recorder(opts: HttpApiOptions = {}, answer: unknown = undefined) {
@@ -282,6 +282,49 @@ describe("session endpoints", () => {
     const api = createHttpApi(createHttpTransport({ fetch: f, getToken: () => null, onUnauthorized }));
     await expect(api.session.create("bad")).rejects.toMatchObject({ status: 401 });
     expect(onUnauthorized).not.toHaveBeenCalled();
+  });
+
+  it("the password login posts {password} with no token, even in bearer mode, and does not call onUnauthorized", async () => {
+    const onUnauthorized = vi.fn();
+    const f = vi.fn(async (_u: string | URL | Request, _i?: RequestInit) => new Response(JSON.stringify({ csrf: "c", expires_at: "2026-11-25T00:00:00Z", kind: "browser" }), { status: 201 }));
+    const api = createHttpApi(createHttpTransport({ fetch: f, getToken: () => "static", onUnauthorized }));
+    expect((await api.session.login("pw")).csrf).toBe("c");
+    const [url, init] = f.mock.calls[0]!;
+    expect(`${init!.method} ${String(url)}`).toBe("POST /api/session");
+    expect((init!.headers as Record<string, string>).Authorization).toBeUndefined();
+    expect(JSON.parse(String(init!.body))).toEqual({ password: "pw" });
+    f.mockImplementation(async () => new Response(JSON.stringify({ error: { code: "unauthorized", message: "login failed" } }), { status: 401 }));
+    await expect(api.session.login("bad")).rejects.toBeInstanceOf(AuthError);
+    expect(onUnauthorized).not.toHaveBeenCalled();
+  });
+
+  it("a 429 keeps details.retry_after for the login screen", async () => {
+    const body = { error: { code: "rate_limited", message: "too many failed logins", details: { retry_after: 30 } } };
+    const f = vi.fn(async () => new Response(JSON.stringify(body), { status: 429, headers: { "Retry-After": "30" } }));
+    const api = createHttpApi(createHttpTransport({ fetch: f, getToken: () => null }));
+    await expect(api.session.login("x")).rejects.toMatchObject({ status: 429, code: "rate_limited", details: { retry_after: 30 } });
+  });
+
+  it("GET /api/session gives the CSRF value of the cookie, and null on 401 with no onUnauthorized", async () => {
+    const onUnauthorized = vi.fn();
+    const f = vi.fn(async () => new Response(JSON.stringify({ kind: "browser", csrf: "c7", password_set: true }), { status: 200 }));
+    const api = createHttpApi(createHttpTransport({ fetch: f, getToken: () => null, onUnauthorized }));
+    expect(await api.session.current()).toEqual({ kind: "browser", csrf: "c7", password_set: true });
+    f.mockImplementation(async () => new Response(JSON.stringify({ error: { code: "unauthorized", message: "no" } }), { status: 401 }));
+    expect(await api.session.current()).toBeNull();
+    expect(onUnauthorized).not.toHaveBeenCalled();
+  });
+
+  it("the account calls send the CSRF header: PUT /api/auth/password and DELETE /api/sessions", async () => {
+    const f = vi.fn(async (_u: string | URL | Request, _i?: RequestInit) => new Response(null, { status: 204 }));
+    const api = createHttpApi(createHttpTransport({ fetch: f, getToken: () => null, getCsrf: () => "c9" }));
+    await api.account.setPassword({ current: "a", new: "b" });
+    await api.account.logoutEverywhere();
+    const calls = f.mock.calls.map(([u, i]) => [`${i!.method} ${String(u)}`, (i!.headers as Record<string, string>)[CSRF_HEADER], i!.body]);
+    expect(calls).toEqual([
+      ["PUT /api/auth/password", "c9", JSON.stringify({ current: "a", new: "b" })],
+      ["DELETE /api/sessions", "c9", undefined],
+    ]);
   });
 
   it("sign-out sends DELETE /api/session with the CSRF header", async () => {

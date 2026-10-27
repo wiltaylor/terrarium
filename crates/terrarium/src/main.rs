@@ -13,9 +13,11 @@ mod attach;
 mod cli;
 mod client;
 mod commands;
+mod credentials;
 mod ctx;
 mod output;
 mod runner_socket;
+mod tls;
 mod transport;
 
 use std::process::ExitCode;
@@ -41,9 +43,16 @@ fn context(cli: &Cli, agent: Option<AgentEnv>) -> anyhow::Result<Ctx> {
                 Some(url) if !url.is_empty() => Endpoint::from_url(url)?,
                 _ => Endpoint::Unix(cli.socket.clone().unwrap_or_else(paths::api_socket)),
             };
-            let token = cli.token.clone().filter(|t| !t.is_empty());
+            // TERRARIUM_TOKEN (or --token) wins; else the stored session
+            // of `terrarium login` for this URL.
+            let store = credentials::Store::default_location();
+            let (token, source) =
+                credentials::resolve(cli.token.clone(), &endpoint, store.as_ref());
             let http = HttpTransport::new(endpoint, token);
-            Ctx::new(Arc::new(http.clone()), Some(http), None)
+            let mut ctx = Ctx::new(Arc::new(http.clone()), Some(http), None);
+            ctx.credentials = store;
+            ctx.token_source = source;
+            ctx
         }
     };
     ctx.json = cli.json;
@@ -51,7 +60,7 @@ fn context(cli: &Cli, agent: Option<AgentEnv>) -> anyhow::Result<Ctx> {
     Ok(ctx)
 }
 
-fn report(err: &anyhow::Error, json: bool) {
+fn report(err: &anyhow::Error, json: bool, source: credentials::TokenSource) {
     // The remote command printed its own errors.
     if matches!(err.downcast_ref(), Some(api::CliError::RemoteExit(_))) {
         return;
@@ -69,6 +78,9 @@ fn report(err: &anyhow::Error, json: bool) {
         }
         if se.is_missing_route() {
             eprintln!("terrarium: awaiting server: this daemon does not serve this endpoint yet");
+        }
+        if se.status == 401 && source == credentials::TokenSource::Stored {
+            eprintln!("terrarium: {}", credentials::EXPIRED_HINT);
         }
         return;
     }
@@ -103,8 +115,13 @@ fn main() -> ExitCode {
             return ExitCode::from(exit::SERVER);
         }
     };
+    let mut source = credentials::TokenSource::None;
     let result = runtime.block_on(async {
         let ctx = context(&cli, agent)?;
+        // A failed login is no expired session.
+        if !matches!(cli.command, Command::Login { .. }) {
+            source = ctx.token_source;
+        }
         commands::run(&ctx, &cli.command).await
     });
     // A blocked stdin read (attach) must not hold the exit.
@@ -112,7 +129,7 @@ fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::from(exit::OK),
         Err(e) => {
-            report(&e, cli.json);
+            report(&e, cli.json, source);
             ExitCode::from(exit_code_of(&e))
         }
     }
@@ -141,5 +158,6 @@ mod tests {
         assert!(op.contains(&"daemon".to_owned()) && !op.contains(&"admin".to_owned()));
         assert!(ag.contains(&"admin".to_owned()) && !ag.contains(&"daemon".to_owned()));
         assert!(!op.contains(&"hook".to_owned()) && !ag.contains(&"hook".to_owned()));
+        assert!(op.contains(&"login".to_owned()) && !ag.contains(&"login".to_owned()));
     }
 }

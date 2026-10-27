@@ -37,6 +37,11 @@ fn bin() -> Command {
     ] {
         c.env_remove(k);
     }
+    // Never the stored sessions of the user who runs the tests.
+    c.env(
+        "XDG_CONFIG_HOME",
+        std::env::temp_dir().join(format!("terrarium-cli-xdg-{}", std::process::id())),
+    );
     c
 }
 
@@ -321,11 +326,157 @@ fn operator_mode_over_tcp_sends_the_token() {
     assert_eq!(o.status.code(), Some(3));
     assert!(text(&o.stderr).contains("a bearer token is needed [unauthorized]"));
     let o = bin()
-        .args(["--url", "https://nope", "daemon", "status"])
+        .args(["--url", "ftp://nope", "daemon", "status"])
         .output()
         .unwrap();
     assert_eq!(o.status.code(), Some(1));
     assert!(text(&o.stderr).contains("bad daemon URL"));
+}
+
+/// `terrarium login` and `logout` against a stub daemon, with a temp
+/// `XDG_CONFIG_HOME`: the file modes, the stored token on later calls, the
+/// env first, and the hint on a `401` with a stored session.
+#[test]
+fn login_and_logout_with_a_temp_xdg_dir() {
+    use std::os::unix::fs::PermissionsExt;
+    let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    std_listener.set_nonblocking(true).unwrap();
+    let addr = std_listener.local_addr().unwrap();
+    // The token that the stub takes; logout clears it.
+    let live: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(Some("jwt-1".into())));
+    let deleted: Arc<Mutex<Vec<String>>> = Arc::default();
+    let (l1, l2, d1) = (live.clone(), live.clone(), deleted.clone());
+    let app = axum::Router::new()
+        .route(
+            "/api/session",
+            post(move |h: HeaderMap, Json(b): Json<Value>| {
+                let live = l1.clone();
+                async move {
+                    assert!(h.get("authorization").is_none(), "the login sends no token");
+                    if b["password"] != "the password" || b["client"] != "cli" {
+                        return (
+                            StatusCode::UNAUTHORIZED,
+                            Json(json!({"error": {"code": "unauthorized", "message": "login failed"}})),
+                        )
+                            .into_response();
+                    }
+                    *live.lock().unwrap() = Some("jwt-1".into());
+                    (
+                        StatusCode::CREATED,
+                        Json(json!({"kind": "cli", "token": "jwt-1", "exp": 1,
+                            "expires_at": "2027-01-25T10:00:00Z"})),
+                    )
+                        .into_response()
+                }
+            })
+            .delete(move |h: HeaderMap| {
+                let deleted = d1.clone();
+                async move {
+                    let a = h
+                        .get("authorization")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or_default()
+                        .to_owned();
+                    deleted.lock().unwrap().push(a);
+                    StatusCode::NO_CONTENT
+                }
+            }),
+        )
+        .route(
+            "/api/health",
+            get(move |h: HeaderMap| {
+                let live = l2.clone();
+                async move {
+                    let want = live.lock().unwrap().clone().map(|t| format!("Bearer {t}"));
+                    let got = h.get("authorization").and_then(|v| v.to_str().ok()).map(str::to_owned);
+                    if got.is_none() || got != want && got.as_deref() != Some("Bearer env-token") {
+                        return (
+                            StatusCode::UNAUTHORIZED,
+                            Json(json!({"error": {"code": "unauthorized", "message": "missing or wrong bearer token"}})),
+                        )
+                            .into_response();
+                    }
+                    Json(json!({"version": "9.9.9", "uptime": 5})).into_response()
+                }
+            }),
+        );
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async move {
+            let l = tokio::net::TcpListener::from_std(std_listener).unwrap();
+            axum::serve(l, app).await.unwrap();
+        });
+    });
+    let xdg = temp_dir("xdg");
+    let url = format!("http://{addr}");
+    let run = |args: &[&str], stdin: &str, env_token: Option<&str>| {
+        let mut c = bin();
+        c.env("XDG_CONFIG_HOME", &xdg).env("TERRARIUM_URL", &url);
+        if let Some(t) = env_token {
+            c.env("TERRARIUM_TOKEN", t);
+        }
+        let mut child = c
+            .args(args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(stdin.as_bytes())
+            .unwrap();
+        child.wait_with_output().unwrap()
+    };
+    // A wrong password: nothing stored, no expiry hint.
+    let o = run(&["login", "--password-stdin"], "nope\n", None);
+    assert_eq!(o.status.code(), Some(3));
+    assert!(text(&o.stderr).contains("login failed"));
+    assert!(!text(&o.stderr).contains("session expired"));
+    let file = xdg.join("terrarium").join("credentials.json");
+    assert!(!file.exists());
+    // Log in: the file and its dir are private.
+    let o = run(
+        &["login", "--password-stdin"],
+        "the password\n",
+        Some("ignored"),
+    );
+    assert!(o.status.success(), "{}", text(&o.stderr));
+    assert!(text(&o.stdout).contains("2027-01-25T10:00:00Z"));
+    let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&file), 0o600);
+    assert_eq!(mode(&xdg.join("terrarium")), 0o700);
+    let stored: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    assert_eq!(stored[&url]["token"], "jwt-1");
+    // A later call uses the stored token.
+    let o = run(&["daemon", "status"], "", None);
+    assert!(o.status.success(), "{}", text(&o.stderr));
+    // The env wins: a wrong env token fails, with no expiry hint.
+    let o = run(&["daemon", "status"], "", Some("wrong"));
+    assert_eq!(o.status.code(), Some(3));
+    assert!(!text(&o.stderr).contains("session expired"));
+    let o = run(&["daemon", "status"], "", Some("env-token"));
+    assert!(o.status.success(), "{}", text(&o.stderr));
+    // The daemon ends the session: a 401 with the hint.
+    *live.lock().unwrap() = None;
+    let o = run(&["daemon", "status"], "", None);
+    assert_eq!(o.status.code(), Some(3));
+    assert!(
+        text(&o.stderr).contains("session expired: run terrarium login"),
+        "{}",
+        text(&o.stderr)
+    );
+    // Log out: DELETE with the stored token, and the entry goes.
+    let o = run(&["logout"], "", None);
+    assert!(o.status.success(), "{}", text(&o.stderr));
+    assert_eq!(deleted.lock().unwrap().as_slice(), ["Bearer jwt-1"]);
+    let stored: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    assert!(stored.get(&url).is_none());
+    let o = run(&["logout"], "", None);
+    assert!(text(&o.stdout).contains("not logged in"));
+    std::fs::remove_dir_all(&xdg).ok();
 }
 
 /// A fake runner: answers `whoami` itself, answers `http` from `answer`,

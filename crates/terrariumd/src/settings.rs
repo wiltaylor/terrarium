@@ -79,7 +79,8 @@ pub struct Settings {
     pub ws_query_token: bool,
 
     /// The life of a dashboard session cookie (`POST /api/session`):
-    /// seconds, or a number with `s`, `m`, `h`, or `d`.
+    /// seconds, or a number with `s`, `m`, `h`, or `d`. A cookie past half
+    /// its life is renewed on the next request.
     #[arg(
         long,
         env = ENV_SESSION_TTL,
@@ -87,6 +88,31 @@ pub struct Settings {
         value_parser = parse_duration
     )]
     pub session_ttl: std::time::Duration,
+
+    /// The life of a CLI session token (`terrarium login`), as
+    /// `--session-ttl`. It is not renewed.
+    #[arg(
+        long,
+        env = ENV_CLI_SESSION_TTL,
+        default_value = DEFAULT_CLI_SESSION_TTL,
+        value_parser = parse_duration
+    )]
+    pub cli_session_ttl: std::time::Duration,
+
+    /// The longest life of a dashboard session through its renewals,
+    /// counted from the login, as `--session-ttl`.
+    #[arg(
+        long,
+        env = ENV_SESSION_MAX_AGE,
+        default_value = DEFAULT_SESSION_MAX_AGE,
+        value_parser = parse_duration
+    )]
+    pub session_max_age: std::time::Duration,
+
+    /// A file that holds the first operator password (its first line), as
+    /// `TERRARIUM_PASSWORD`.
+    #[arg(long, env = crate::password::ENV_PASSWORD_FILE)]
+    pub password_file: Option<PathBuf>,
 
     /// Runner sockets go in `<dir>/agents/<ulid>.sock`.
     #[arg(long, env = "TERRARIUM_RUNTIME_DIR", default_value_os_t = default_runtime_dir())]
@@ -210,6 +236,24 @@ pub enum Command {
     Harness {
         #[command(subcommand)]
         command: HarnessCommand,
+    },
+    /// The operator password in the state dir (`--state-dir`), with no
+    /// daemon. A running daemon sees the change at once.
+    Password {
+        #[command(subcommand)]
+        command: PasswordCommand,
+    },
+}
+
+/// `terrariumd password ...`.
+#[derive(Debug, Subcommand)]
+pub enum PasswordCommand {
+    /// Set the operator password (12 characters or more). It asks on the
+    /// terminal, twice, with no echo. Every session ends.
+    Set {
+        /// Read the password from the first line of stdin, for scripts.
+        #[arg(long)]
+        stdin: bool,
     },
 }
 
@@ -340,7 +384,16 @@ pub const ENV_WS_QUERY_TOKEN: &str = "TERRARIUM_WS_QUERY_TOKEN";
 /// `TERRARIUM_SESSION_TTL`: the life of a dashboard session cookie.
 pub const ENV_SESSION_TTL: &str = "TERRARIUM_SESSION_TTL";
 /// The default of [`ENV_SESSION_TTL`].
-pub const DEFAULT_SESSION_TTL: &str = "12h";
+pub const DEFAULT_SESSION_TTL: &str = "30d";
+/// `TERRARIUM_CLI_SESSION_TTL`: the life of a CLI session token.
+pub const ENV_CLI_SESSION_TTL: &str = "TERRARIUM_CLI_SESSION_TTL";
+/// The default of [`ENV_CLI_SESSION_TTL`].
+pub const DEFAULT_CLI_SESSION_TTL: &str = "90d";
+/// `TERRARIUM_SESSION_MAX_AGE`: the longest life of a dashboard session
+/// through its renewals, from the login.
+pub const ENV_SESSION_MAX_AGE: &str = "TERRARIUM_SESSION_MAX_AGE";
+/// The default of [`ENV_SESSION_MAX_AGE`].
+pub const DEFAULT_SESSION_MAX_AGE: &str = "90d";
 
 /// `TERRARIUM_HOST_DIST_DIR`: the host agent binaries for `/install/...`.
 pub const ENV_HOST_DIST_DIR: &str = "TERRARIUM_HOST_DIST_DIR";
@@ -385,6 +438,10 @@ pub struct WebConfig {
     pub ws_query_token: bool,
     /// The life of a session cookie ([`ENV_SESSION_TTL`]).
     pub session_ttl: std::time::Duration,
+    /// The life of a CLI session token ([`ENV_CLI_SESSION_TTL`]).
+    pub cli_session_ttl: std::time::Duration,
+    /// The longest life of a renewed session ([`ENV_SESSION_MAX_AGE`]).
+    pub session_max_age: std::time::Duration,
     /// The host installer.
     pub install: InstallConfig,
 }
@@ -395,7 +452,9 @@ impl Default for WebConfig {
             public_url: None,
             artifact_public_url: None,
             ws_query_token: false,
-            session_ttl: std::time::Duration::from_secs(12 * 3600),
+            session_ttl: std::time::Duration::from_secs(30 * 86_400),
+            cli_session_ttl: std::time::Duration::from_secs(90 * 86_400),
+            session_max_age: std::time::Duration::from_secs(90 * 86_400),
             install: InstallConfig::default(),
         }
     }
@@ -489,6 +548,8 @@ impl Settings {
             artifact_public_url: clean_url(self.artifact_public_url.as_deref()),
             ws_query_token: self.ws_query_token,
             session_ttl: self.session_ttl,
+            cli_session_ttl: self.cli_session_ttl,
+            session_max_age: self.session_max_age,
             install: InstallConfig {
                 dist_dir: self.host_dist_dir.clone(),
                 host_daemon_url: clean_url(self.host_daemon_url.as_deref()),
@@ -547,6 +608,8 @@ mod tests {
             "1",
             "--session-ttl",
             "30m",
+            "--cli-session-ttl",
+            "7d",
             "--artifact-listen",
             "",
         ])
@@ -559,6 +622,7 @@ mod tests {
         );
         assert!(w.ws_query_token);
         assert_eq!(w.session_ttl.as_secs(), 1800);
+        assert_eq!(w.cli_session_ttl.as_secs(), 7 * 86_400);
         assert_eq!(s.artifact_listen(), None);
         assert_eq!(
             w.dashboard_link("/subscriptions"),
@@ -568,5 +632,9 @@ mod tests {
         assert_eq!(d.dashboard_link("/x"), "http://localhost:8080/x");
         assert_eq!(d.page_url("/x"), "/x");
         assert!(!d.ws_query_token);
+        let defaults = Settings::try_parse_from(["terrariumd"]).unwrap().web();
+        assert_eq!(defaults.session_ttl.as_secs(), 30 * 86_400);
+        assert_eq!(defaults.cli_session_ttl.as_secs(), 90 * 86_400);
+        assert_eq!(defaults.session_max_age.as_secs(), 90 * 86_400);
     }
 }

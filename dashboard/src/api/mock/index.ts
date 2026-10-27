@@ -19,7 +19,7 @@
 import type { Api } from "../client";
 import { ApiError, AuthError, isMutating, type Page } from "../http";
 import { createWsEventStream, type EventStream, type RawSocket, type SocketEvent } from "../sockets";
-import { MOCK_TOKEN, mockSocket, type MockSocketAuth } from "./ws";
+import { MOCK_PASSWORD, MOCK_TOKEN, mockSocket, type MockSocketAuth } from "./ws";
 import { httpVerbs } from "./verbs";
 import { checkKeyPlan, isZai, zaiKeyDefaults, zaiPlan, ZAI_KEY_ENV } from "./zai";
 import { defaultModels, modelList, subscriptionDetail } from "./models";
@@ -33,6 +33,8 @@ import type {
   Artifact,
   Block,
   Session,
+  SessionGrant,
+  SessionInfo,
   TranscriptFrame,
   ArtifactAttach,
   ArtifactLinkKind,
@@ -103,8 +105,10 @@ export interface MockOptions {
   client?: MockClient;
   /** False: a daemon without sessions. `session.create` gets 404, so the client answers null. Default true. */
   sessions?: boolean;
-  /** How long a session lives. Default 12 hours. */
+  /** How long a session lives. Default 30 days. */
   sessionTtlMs?: number;
+  /** The operator password. Default `MOCK_PASSWORD`. Null: no password is set, so a password login is `409`. */
+  password?: string | null;
   /**
    * Where the mock keeps its "cookie", so that a reload keeps the session as
    * a browser does. The browser mock passes sessionStorage. Default: memory only.
@@ -1369,7 +1373,17 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     opts.client?.onUnauthorized?.();
     throw new AuthError({ error: { code: "unauthorized", message } });
   };
-  const CSRF_REFUSED = "a request with the session cookie must send X-CSRF-Token with the csrf value of POST /api/session";
+  const CSRF_REFUSED = "a request with the session cookie must send X-CSRF-Token with the csrf value of the session (POST or GET /api/session)";
+  let password: string | null = opts.password === undefined ? MOCK_PASSWORD : opts.password;
+  /** The failed password logins, as the daemon's limiter counts them (5 free, then 30 s and more). */
+  let failures = 0;
+  let lockedUntil = 0;
+  const newCookie = (): SessionGrant => {
+    const exp = Math.floor((now() + (opts.sessionTtlMs ?? 30 * 86_400_000)) / 1000);
+    cookie = { csrf: `csrf_${ulid("csrf").toLowerCase()}`, exp: exp * 1000 };
+    saveCookie();
+    return { csrf: cookie.csrf, exp, expires_at: new Date(exp * 1000).toISOString().replace(/\.\d{3}Z$/, "Z"), kind: "browser" };
+  };
   /** The TCP listener's check: the bearer token first, then the cookie (with CSRF on a mutating call). */
   const authorize = (verb: string) => {
     const c = opts.client;
@@ -1396,16 +1410,62 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           // The daemon answers 404; the HTTP client turns that into null.
           if (opts.sessions === false) return null;
           if (token !== MOCK_TOKEN) throw new AuthError({ error: { code: "unauthorized", message: "missing or wrong bearer token" } });
-          const exp = Math.floor((now() + (opts.sessionTtlMs ?? 12 * 3600_000)) / 1000);
-          cookie = { csrf: `csrf_${ulid("csrf").toLowerCase()}`, exp: exp * 1000 };
-          saveCookie();
-          return { csrf: cookie.csrf, exp, expires_at: new Date(exp * 1000).toISOString().replace(/\.\d{3}Z$/, "Z") };
+          const g = newCookie();
+          return { csrf: g.csrf, exp: g.exp, expires_at: g.expires_at };
+        }),
+      login: (pw) =>
+        reply(() => {
+          if (opts.sessions === false) fail(404, "not_found", "no such API route");
+          if (lockedUntil > now()) {
+            const wait = Math.ceil((lockedUntil - now()) / 1000);
+            fail(429, "rate_limited", `too many failed logins from this address; try again in ${wait} s`, { retry_after: wait });
+          }
+          if (password === null) fail(409, "conflict", "no password set; run terrariumd password set");
+          if (pw !== password) {
+            failures += 1;
+            if (failures >= 5) lockedUntil = now() + Math.min(30_000 * 2 ** (failures - 5), 900_000);
+            throw new AuthError({ error: { code: "unauthorized", message: "login failed" } });
+          }
+          failures = 0;
+          lockedUntil = 0;
+          return newCookie();
+        }),
+      current: () =>
+        reply((): SessionInfo | null => {
+          const c = opts.client;
+          if (!c) return { kind: "local", password_set: password !== null };
+          const bearer = c.token();
+          if (bearer !== null) return bearer === MOCK_TOKEN ? { kind: "token", password_set: password !== null } : null;
+          const ck = liveCookie();
+          if (!ck) return null;
+          return { kind: "browser", csrf: ck.csrf, exp: ck.exp / 1000, expires_at: new Date(ck.exp).toISOString().replace(/\.\d{3}Z$/, "Z"), password_set: password !== null };
         }),
       remove: () =>
         reply(() => {
           if (opts.sessions === false) return;
           const ck = liveCookie();
           if (ck && opts.client && opts.client.csrf() !== ck.csrf) fail(403, "forbidden", CSRF_REFUSED);
+          cookie = null;
+          saveCookie();
+        }),
+    },
+    account: {
+      setPassword: (change) =>
+        reply(() => {
+          authorize("PUT");
+          const viaCookie = opts.client !== undefined && opts.client.token() === null;
+          if (password !== null && (change.current !== undefined || viaCookie) && change.current !== password) {
+            fail(403, "forbidden", change.current === undefined ? "a session must send the current password as `current`" : "the current password is wrong");
+          }
+          if ([...(change.new ?? "")].length < 12) fail(422, "invalid", "the password must have at least 12 characters");
+          password = change.new;
+          // A new password version: every session ends.
+          cookie = null;
+          saveCookie();
+        }),
+      logoutEverywhere: () =>
+        reply(() => {
+          authorize("DELETE");
           cookie = null;
           saveCookie();
         }),

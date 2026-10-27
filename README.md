@@ -148,11 +148,15 @@ Security fixes from the review ([docs/security-review.md](docs/security-review.m
 - The dashboard sanitizer and CSP (F3). DOMPurify cleans every rendered
   HTML string. The daemon sends a Content-Security-Policy and other security
   headers on every answer.
-- Dashboard sessions (F3). The dashboard trades the token for a signed
-  `HttpOnly` cookie (`POST /api/session`) and keeps only the CSRF value.
-  Mutating calls send `X-CSRF-Token`, and a WebSocket upgrade with the
-  cookie must send the dashboard `Origin`. `TERRARIUM_SESSION_TTL` sets the
-  cookie life (default `12h`).
+- Operator password and sessions (F3, F15). The dashboard logs in with the
+  operator password (`terrariumd password set`; the daemon keeps only an
+  Argon2id hash) or the token, and gets a signed `HttpOnly` JWT cookie. The
+  page keeps only the CSRF value, in memory. The cookie lives
+  `TERRARIUM_SESSION_TTL` (default `30d`) and renews while in use, so you do
+  not log in again and again. `terrarium login` keeps a CLI session per
+  daemon URL. Failed logins back off per address. Mutating calls send
+  `X-CSRF-Token`, and a WebSocket upgrade with the cookie must send the
+  dashboard `Origin`.
 - WebSocket auth by subprotocol (F4). A client sends the token as
   `Sec-WebSocket-Protocol: bearer.<token>`, not in the URL. The daemon
   refuses the old `?token=` form by default. `TERRARIUM_WS_QUERY_TOKEN=1`

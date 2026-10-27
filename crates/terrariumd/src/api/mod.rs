@@ -1,5 +1,6 @@
 //! The HTTP API. The same router serves the Unix socket (no token) and the
-//! TCP listener (bearer token on `/api/*`). `docs/api.md` is the contract.
+//! TCP listener (the bearer token, a session cookie, or a CLI session token
+//! on `/api/*`; see `session`). `docs/api.md` is the contract.
 
 mod agents;
 mod artifacts;
@@ -93,6 +94,9 @@ pub struct AppState {
     pub artifact_listen: String,
     /// The parsed session transcripts (`GET .../transcript`).
     pub transcripts: Arc<crate::transcripts::TranscriptCache>,
+    /// The operator password, its version, and the login limiter
+    /// (`crate::password`, `docs/api.md` §1.1).
+    pub operator_auth: Arc<crate::password::OperatorAuth>,
 }
 
 impl AppState {
@@ -226,7 +230,14 @@ fn routes(state: Shared, serve_artifacts: bool, host_connect: bool) -> Router {
         .merge(schedules::routes())
         .merge(event_sources::routes())
         .merge(templates::routes())
-        .route("/session", post(session::create).delete(session::delete))
+        .route(
+            "/session",
+            get(session::current)
+                .post(session::create)
+                .delete(session::delete),
+        )
+        .route("/sessions", axum::routing::delete(session::delete_all))
+        .route("/auth/password", axum::routing::put(session::set_password))
         .fallback(api_not_found)
         .method_not_allowed_fallback(api_method_not_allowed)
         .layer(middleware::from_fn_with_state(state.clone(), resolve_actor));
@@ -335,7 +346,8 @@ fn percent_decode(s: &str) -> String {
 const MAX_WARNED_CLIENTS: usize = 4096;
 
 /// The auth of the TCP listener: the bearer token, and (with
-/// [`TokenAuth::with_sessions`]) the session cookie.
+/// [`TokenAuth::with_sessions`]) the session cookie and the CLI session
+/// tokens.
 pub struct TokenAuth {
     token: String,
     /// Take `?token=` on a WebSocket upgrade (deprecated). On with
@@ -392,7 +404,11 @@ impl TokenAuth {
     }
 }
 
-fn client_addr(req: &Request) -> String {
+/// The peer address of a request: the IP of the TCP connection, or
+/// `unknown` (the Unix socket, tests). The daemon trusts no proxy header
+/// for it, so behind a reverse proxy every client shares the proxy's
+/// address.
+pub(crate) fn client_addr(req: &Request) -> String {
     req.extensions()
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
         .map_or_else(|| "unknown".to_owned(), |c| c.0.ip().to_string())
@@ -454,17 +470,20 @@ async fn require_token(
     if !req.uri().path().starts_with("/api") {
         return next.run(req).await;
     }
-    // `session::delete` checks a cookie itself: with no cookie, a logout
-    // needs no proof; with a session cookie, it needs `X-CSRF-Token`.
-    if req.uri().path() == "/api/session" && req.method() == axum::http::Method::DELETE {
+    let session_path = req.uri().path() == "/api/session";
+    // `session::delete` checks a cookie and a CLI token itself: with no
+    // cookie, a logout needs no proof; with a session cookie, it needs
+    // `X-CSRF-Token`.
+    if session_path && req.method() == axum::http::Method::DELETE {
         return next.run(req).await;
     }
-    let header_token = req
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .map(str::to_owned);
+    let header_token = session::bearer_value(req.headers()).map(str::to_owned);
+    // A password login: `POST /api/session` with no `Authorization`.
+    // `session::create` checks the password, with the login limiter.
+    if session_path && req.method() == axum::http::Method::POST && header_token.is_none() {
+        req.extensions_mut().insert(Transport::Tcp);
+        return next.run(req).await;
+    }
     // The subprotocol that carried the token: the answer must name it, or
     // the browser drops the connection.
     let mut echo = None;
@@ -484,11 +503,26 @@ async fn require_token(
         },
         None => None,
     };
+    let now = chrono::Utc::now().timestamp();
     if let Some(given) = given {
-        if !token_matches(given.as_bytes(), auth.token.as_bytes()) {
-            return unauthorized("missing or wrong bearer token");
-        }
-        req.extensions_mut().insert(session::AuthVia::Bearer);
+        // The static token, else a CLI session token.
+        let via = if token_matches(given.as_bytes(), auth.token.as_bytes()) {
+            session::AuthVia::Bearer
+        } else {
+            let found = match &auth.sessions {
+                Some(s) => s.check(&given, session::TokenKind::Cli, now).await,
+                None => Ok(None),
+            };
+            match found {
+                Ok(Some(s)) => {
+                    req.extensions_mut().insert(session::CurrentSession(s));
+                    session::AuthVia::CliToken
+                }
+                Ok(None) => return unauthorized("missing or wrong bearer token"),
+                Err(e) => return e.into_response(),
+            }
+        };
+        req.extensions_mut().insert(via);
         req.extensions_mut().insert(Transport::Tcp);
         let mut resp = next.run(req).await;
         if let Some(proto) = echo
@@ -504,12 +538,15 @@ async fn require_token(
     if let Some(sessions) = &auth.sessions
         && let Some(cookie) = session::cookie_value(req.headers(), session::COOKIE)
     {
-        let s = match sessions.check(cookie, chrono::Utc::now().timestamp()).await {
+        let s = match sessions
+            .check(cookie, session::TokenKind::Browser, now)
+            .await
+        {
             Ok(Some(s)) => s,
             Ok(None) => {
                 return unauthorized(
                     "the session cookie is wrong, has expired, or ended with a logout; \
-                     POST /api/session again",
+                     log in again (POST /api/session)",
                 );
             }
             Err(e) => return e.into_response(),
@@ -530,15 +567,47 @@ async fn require_token(
             if !ok {
                 return forbidden(
                     "a request with the session cookie must send X-CSRF-Token with the csrf \
-                     value of POST /api/session",
+                     value of the session (POST or GET /api/session)",
                 );
             }
         }
+        // Sliding renewal: past half its life, the answer sets a new
+        // cookie with a new `jti` and the same `sid`, so the CSRF value
+        // stays. The old token stays good until its own `exp`.
+        // The renewal mints with the token's own `pv`, so a password change
+        // between the check and the mint gives no new token.
+        let renewed = if !websocket && s.needs_renewal(now) {
+            match sessions.mint(
+                session::TokenKind::Browser,
+                Some(&s.claims),
+                now,
+                s.claims.pv,
+            ) {
+                Ok(n) => Some(n),
+                Err(e) => {
+                    tracing::warn!("cannot renew a session: {}", e.message);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let secure = session::is_https(req.uri().scheme_str(), req.headers());
+        req.extensions_mut()
+            .insert(session::CurrentSession(renewed.clone().unwrap_or(s)));
         req.extensions_mut().insert(session::AuthVia::Cookie);
         req.extensions_mut().insert(Transport::Tcp);
-        return next.run(req).await;
+        let mut resp = next.run(req).await;
+        if let Some(n) = renewed
+            && resp.status() != axum::http::StatusCode::UNAUTHORIZED
+            && !resp.headers().contains_key(header::SET_COOKIE)
+        {
+            resp = session::with_cookie(resp, &session::session_cookie(&n, now, secure));
+        }
+        return resp;
     }
-    // The deprecated `?token=` on a WebSocket upgrade.
+    // The deprecated `?token=` on a WebSocket upgrade: the static token
+    // only.
     match query {
         Some(_) if !auth.allow_query => unauthorized(
             "`?token=` is off (TERRARIUM_WS_QUERY_TOKEN=0); send the token as the WebSocket \
@@ -629,8 +698,10 @@ async fn security_headers(State(state): State<Shared>, req: Request, next: Next)
 
 /// The routes of the TCP listener. `/api/*` needs the bearer token
 /// (`Authorization`; on a WebSocket upgrade also the subprotocol
-/// `bearer.<token>`, and `?token=` when `TERRARIUM_WS_QUERY_TOKEN=1`) or
-/// the session cookie of `POST /api/session`. The dashboard assets stay
+/// `bearer.<token>`, and `?token=` when `TERRARIUM_WS_QUERY_TOKEN=1`), a
+/// CLI session token in the same places (not `?token=`), or the session
+/// cookie of `POST /api/session`. `POST /api/session` with no
+/// `Authorization` is a password login. The dashboard assets stay
 /// public, because a browser cannot send a header on page load. `/a/...` is
 /// here only when the artifact origin has no listener of its own
 /// ([`artifacts_on_dashboard`]). The settings come from `state.web`; the
@@ -646,7 +717,10 @@ pub fn tcp_router(state: Shared, token: String) -> anyhow::Result<Router> {
         session::Sessions {
             key,
             ttl: state.web.session_ttl,
+            cli_ttl: state.web.cli_session_ttl,
+            max_age: state.web.session_max_age,
             db: state.db.clone(),
+            operator: state.operator_auth.clone(),
         },
         state.web.public_origin(),
     );
@@ -759,6 +833,9 @@ mod tests {
             web,
             artifact_listen: String::new(),
             transcripts: Arc::default(),
+            operator_auth: Arc::new(crate::password::OperatorAuth::new(Path::new(
+                "/nonexistent/state",
+            ))),
         })
     }
 
@@ -1042,7 +1119,10 @@ mod tests {
             session::Sessions {
                 key: session::SessionKey::from_bytes(key.to_vec()),
                 ttl: std::time::Duration::from_secs(3600),
+                cli_ttl: std::time::Duration::from_secs(7200),
+                max_age: std::time::Duration::from_secs(4 * 3600),
                 db: s.db.clone(),
+                operator: s.operator_auth.clone(),
             },
             public.map(str::to_owned),
         );
@@ -1096,7 +1176,7 @@ mod tests {
         .await;
         assert_eq!(r.status(), StatusCode::CREATED);
         let set = hdr(&r, "set-cookie");
-        assert!(set.starts_with("terrarium_session=v1."), "{set}");
+        assert!(set.starts_with("terrarium_session=eyJ"), "{set}");
         for part in ["Path=/", "Max-Age=3600", "HttpOnly", "SameSite=Strict"] {
             assert!(set.contains(part), "{set}");
         }
@@ -1351,12 +1431,15 @@ mod tests {
     async fn session_cookie_expires_and_dies_with_the_key() {
         let s = state();
         let key = session::SessionKey::from_bytes(KEY.to_vec());
-        let old = key.mint(chrono::Utc::now().timestamp() - 1).unwrap();
+        let now = chrono::Utc::now().timestamp();
+        let old = key
+            .mint(session::TokenKind::Browser, None, now - 100, 99, 0)
+            .unwrap();
         let r = send(
             session_app(&s, KEY, None),
             "GET",
             "/api/health",
-            &[("cookie", &format!("terrarium_session={}", old.cookie))],
+            &[("cookie", &format!("terrarium_session={}", old.token))],
         )
         .await;
         assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
@@ -1758,5 +1841,647 @@ mod tests {
              worker-src 'none'; manifest-src 'self'; media-src 'none'; object-src 'none'; \
              base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
         );
+    }
+
+    // ---- password login, JWT sessions, renewal ----
+
+    const PW: &str = "a long operator password";
+
+    /// A state whose state dir (and password file) is `dir`.
+    fn state_at(dir: &Path) -> Shared {
+        let mut st = Arc::try_unwrap(state()).ok().unwrap();
+        st.state_dir = dir.to_owned();
+        st.operator_auth = Arc::new(crate::password::OperatorAuth::new(dir));
+        Arc::new(st)
+    }
+
+    async fn send_body(
+        app: Router,
+        method: &str,
+        uri: &str,
+        headers: &[(&str, &str)],
+        body: &serde_json::Value,
+    ) -> Response {
+        let mut req = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("content-type", "application/json");
+        for (k, v) in headers {
+            req = req.header(*k, *v);
+        }
+        app.oneshot(req.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap()
+    }
+
+    async fn json_of(r: Response) -> serde_json::Value {
+        let body = r.into_body().collect().await.unwrap().to_bytes();
+        serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null)
+    }
+
+    /// A password login of `kind` (`None`: the browser).
+    async fn password_login(app: Router, pw: &str, client: Option<&str>) -> Response {
+        let mut body = serde_json::json!({ "password": pw });
+        if let Some(c) = client {
+            body["client"] = c.into();
+        }
+        send_body(app, "POST", "/api/session", &[], &body).await
+    }
+
+    /// The cookie and the csrf value of a good browser login.
+    async fn browser_login(app: Router, pw: &str) -> (String, String) {
+        let r = password_login(app, pw, None).await;
+        assert_eq!(r.status(), StatusCode::CREATED);
+        let cookie = hdr(&r, "set-cookie").split(';').next().unwrap().to_owned();
+        let v = json_of(r).await;
+        (cookie, v["csrf"].as_str().unwrap().to_owned())
+    }
+
+    async fn cli_login(app: Router, pw: &str) -> String {
+        let r = password_login(app, pw, Some("cli")).await;
+        assert_eq!(r.status(), StatusCode::CREATED);
+        assert!(r.headers().get("set-cookie").is_none());
+        let v = json_of(r).await;
+        assert_eq!(v["kind"], "cli");
+        assert!(v.get("csrf").is_none());
+        format!("Bearer {}", v["token"].as_str().unwrap())
+    }
+
+    async fn audit_rows(s: &Shared, action: &'static str) -> Vec<(String, String)> {
+        s.db.read(move |c| {
+            let mut st = c.prepare("SELECT actor, detail FROM audit WHERE action = ?1")?;
+            let rows = st.query_map([action], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            Ok(rows.collect::<Result<Vec<_>, _>>()?)
+        })
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn password_login_success_failure_and_no_password() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state_at(dir.path());
+        let app = || session_app(&s, KEY, None);
+        // No password set: 409 with the hint, and no audit failure.
+        let r = password_login(app(), PW, None).await;
+        assert_eq!(r.status(), StatusCode::CONFLICT);
+        let v = json_of(r).await;
+        assert!(
+            v["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("terrariumd password set")
+        );
+        s.operator_auth.store.set(PW).unwrap();
+        // A wrong password.
+        let r = password_login(app(), "not the password", None).await;
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+        assert!(r.headers().get("set-cookie").is_none());
+        assert_eq!(json_of(r).await["error"]["message"], "login failed");
+        // The right one: a JWT cookie and a csrf value.
+        let r = password_login(app(), PW, None).await;
+        assert_eq!(r.status(), StatusCode::CREATED);
+        let set = hdr(&r, "set-cookie");
+        assert!(set.starts_with("terrarium_session=eyJ"), "{set}");
+        for part in ["Path=/", "Max-Age=3600", "HttpOnly", "SameSite=Strict"] {
+            assert!(set.contains(part), "{set}");
+        }
+        let v = json_of(r).await;
+        assert_eq!(v["kind"], "browser");
+        assert!(v["csrf"].as_str().unwrap().len() >= 32);
+        assert!(
+            v.get("token").is_none(),
+            "the browser gets no token in the body"
+        );
+        let cookie = set.split(';').next().unwrap().to_owned();
+        let r = send(app(), "GET", "/api/health", &[("cookie", &cookie)]).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        // The audit rows: one failure, one success, with the IP and never
+        // the password.
+        let rows = audit_rows(&s, "auth.login").await;
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        let failed = audit_rows(&s, "auth.login_failed").await;
+        assert_eq!(failed.len(), 1, "{failed:?}");
+        assert!(failed[0].0 == "anonymous" && failed[0].1.contains("\"count\":1"));
+        assert!(!failed[0].1.contains(PW));
+        assert!(
+            rows.iter()
+                .any(|(a, d)| a == "operator" && d.contains("\"ok\":true"))
+        );
+        assert!(
+            rows.iter()
+                .all(|(_, d)| d.contains("\"ip\"") && !d.contains(PW))
+        );
+        // The static token still buys a cookie.
+        let r = send(
+            app(),
+            "POST",
+            "/api/session",
+            &[("authorization", "Bearer secret")],
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::CREATED);
+    }
+
+    /// Five failures, then `429` with `Retry-After`, also for the right
+    /// password. Each failure has the same text.
+    #[tokio::test]
+    async fn password_login_rate_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state_at(dir.path());
+        s.operator_auth.store.set(PW).unwrap();
+        let app = || session_app(&s, KEY, None);
+        let mut bodies = Vec::new();
+        for i in 0..crate::password::FREE_FAILURES {
+            let r = password_login(app(), &format!("wrong {i}"), None).await;
+            assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+            bodies.push(json_of(r).await);
+        }
+        assert!(bodies.windows(2).all(|w| w[0] == w[1]), "{bodies:?}");
+        for pw in ["wrong again", PW] {
+            let r = password_login(app(), pw, None).await;
+            assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
+            let retry: u64 = hdr(&r, "retry-after").parse().unwrap();
+            assert!((1..=30).contains(&retry), "{retry}");
+            let v = json_of(r).await;
+            assert_eq!(v["error"]["code"], "rate_limited");
+            assert_eq!(v["error"]["details"]["retry_after"], retry);
+        }
+    }
+
+    #[tokio::test]
+    async fn cli_token_is_a_bearer_with_no_csrf() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state_at(dir.path());
+        s.operator_auth.store.set(PW).unwrap();
+        let app = || session_app(&s, KEY, None);
+        let bearer = cli_login(app(), PW).await;
+        let auth = ("authorization", bearer.as_str());
+        let r = send(app(), "GET", "/api/health", &[auth]).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        // A mutating method passes auth with no csrf (405: the route has
+        // no DELETE).
+        let r = send(app(), "DELETE", "/api/health", &[auth]).await;
+        assert_eq!(r.status(), StatusCode::METHOD_NOT_ALLOWED);
+        // GET /api/session names the kind.
+        let v = json_of(send(app(), "GET", "/api/session", &[auth]).await).await;
+        assert_eq!(v["kind"], "cli");
+        assert_eq!(v["password_set"], true);
+        // A CLI token cannot buy another session.
+        let r = send(app(), "POST", "/api/session", &[auth]).await;
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+        // A CLI token on the cookie path, a browser token on the bearer path.
+        let jwt = bearer.strip_prefix("Bearer ").unwrap();
+        let r = send(
+            app(),
+            "GET",
+            "/api/health",
+            &[("cookie", &format!("terrarium_session={jwt}"))],
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+        let (cookie, _) = browser_login(app(), PW).await;
+        let browser_jwt = cookie.strip_prefix("terrarium_session=").unwrap();
+        let r = send(
+            app(),
+            "GET",
+            "/api/health",
+            &[("authorization", &format!("Bearer {browser_jwt}"))],
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+        // An unsigned token (alg none) as the bearer.
+        let parts: Vec<&str> = jwt.split('.').collect();
+        let none = format!(
+            "{}.{}.",
+            base64::Engine::encode(
+                &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+                r#"{"alg":"none"}"#
+            ),
+            parts[1]
+        );
+        let r = send(
+            app(),
+            "GET",
+            "/api/health",
+            &[("authorization", &format!("Bearer {none}"))],
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+        // The bearer subprotocol takes a CLI token too.
+        let r = ws(
+            app(),
+            "/api/events",
+            &[("sec-websocket-protocol", &format!("bearer.{jwt}"))],
+        )
+        .await;
+        assert_ne!(r.status(), StatusCode::UNAUTHORIZED);
+        // Logout with the token: revoked.
+        let r = send(app(), "DELETE", "/api/session", &[auth]).await;
+        assert_eq!(r.status(), StatusCode::NO_CONTENT);
+        let r = send(app(), "GET", "/api/health", &[auth]).await;
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+        // The static token still works.
+        let r = send(
+            app(),
+            "GET",
+            "/api/health",
+            &[("authorization", "Bearer secret")],
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+    }
+
+    /// `PUT /api/auth/password`: a session needs csrf and the current
+    /// password; the change ends every session (the `pv` claim).
+    #[tokio::test]
+    async fn password_change_ends_every_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state_at(dir.path());
+        s.operator_auth.store.set(PW).unwrap();
+        let app = || session_app(&s, KEY, None);
+        let (cookie, csrf) = browser_login(app(), PW).await;
+        let bearer = cli_login(app(), PW).await;
+        let c = ("cookie", cookie.as_str());
+        let x = ("x-csrf-token", csrf.as_str());
+        let new = "a brand new password";
+        let put = |h: Vec<(&'static str, String)>, body: serde_json::Value| {
+            let app = app();
+            async move {
+                let h: Vec<(&str, &str)> = h.iter().map(|(k, v)| (*k, v.as_str())).collect();
+                send_body(app, "PUT", "/api/auth/password", &h, &body).await
+            }
+        };
+        let ch = || vec![("cookie", cookie.clone()), ("x-csrf-token", csrf.clone())];
+        // No csrf.
+        let r = put(
+            vec![("cookie", cookie.clone())],
+            serde_json::json!({"current": PW, "new": new}),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        // No current password; a wrong one (403, not 401).
+        let r = put(ch(), serde_json::json!({"new": new})).await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        let r = put(ch(), serde_json::json!({"current": "wrong!", "new": new})).await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        // Too short.
+        let r = put(ch(), serde_json::json!({"current": PW, "new": "short"})).await;
+        assert_eq!(r.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        // The session still works.
+        let r = send(app(), "GET", "/api/health", &[c]).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let r = put(ch(), serde_json::json!({"current": PW, "new": new})).await;
+        assert_eq!(r.status(), StatusCode::NO_CONTENT);
+        assert!(clears_cookie(&r), "{}", hdr(&r, "set-cookie"));
+        // Every session ended: the old pv.
+        for h in [vec![c, x], vec![("authorization", bearer.as_str())]] {
+            let r = send(app(), "GET", "/api/health", &h).await;
+            assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+        }
+        // The old password fails; the new one works.
+        let r = password_login(app(), PW, None).await;
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+        browser_login(app(), new).await;
+        assert_eq!(audit_rows(&s, "auth.password_set").await.len(), 1);
+        // A form post (no JSON content type) is refused.
+        let r = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/session")
+                    .header("content-type", "text/plain")
+                    .body(Body::from(format!(r#"{{"password":"{new}"}}"#)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+        // The static token needs no current password.
+        let r = send_body(
+            app(),
+            "PUT",
+            "/api/auth/password",
+            &[("authorization", "Bearer secret")],
+            &serde_json::json!({"new": "a third password!"}),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::NO_CONTENT);
+        browser_login(app(), "a third password!").await;
+        // The Unix socket too.
+        let r = send_body(
+            unix_router(s.clone()),
+            "PUT",
+            "/api/auth/password",
+            &[],
+            &serde_json::json!({"new": "a fourth password"}),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn log_out_everywhere() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state_at(dir.path());
+        s.operator_auth.store.set(PW).unwrap();
+        let app = || session_app(&s, KEY, None);
+        let (cookie, csrf) = browser_login(app(), PW).await;
+        let (other, _) = browser_login(app(), PW).await;
+        let bearer = cli_login(app(), PW).await;
+        let c = ("cookie", cookie.as_str());
+        // CSRF is enforced.
+        let r = send(app(), "DELETE", "/api/sessions", &[c]).await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        let r = send(
+            app(),
+            "DELETE",
+            "/api/sessions",
+            &[c, ("x-csrf-token", &csrf)],
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::NO_CONTENT);
+        assert!(clears_cookie(&r));
+        for h in [
+            vec![c],
+            vec![("cookie", other.as_str())],
+            vec![("authorization", bearer.as_str())],
+        ] {
+            let r = send(app(), "GET", "/api/health", &h).await;
+            assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+        }
+        // The password and the static token stay good.
+        browser_login(app(), PW).await;
+        let r = send(
+            app(),
+            "GET",
+            "/api/health",
+            &[("authorization", "Bearer secret")],
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        // With no password set, it works too (the version alone).
+        let dir2 = tempfile::tempdir().unwrap();
+        let s2 = state_at(dir2.path());
+        let r = send(
+            session_app(&s2, KEY, None),
+            "DELETE",
+            "/api/sessions",
+            &[("authorization", "Bearer secret")],
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::NO_CONTENT);
+        assert_eq!(s2.operator_auth.store.current().unwrap().version, 1);
+    }
+
+    /// Past half its life, a cookie request gets a renewed cookie: a new
+    /// `jti`, the same `sid` and csrf value. The old cookie stays good.
+    #[tokio::test]
+    async fn sliding_renewal() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state_at(dir.path());
+        let app = || session_app(&s, KEY, None);
+        let key = session::SessionKey::from_bytes(KEY.to_vec());
+        let now = chrono::Utc::now().timestamp();
+        // Young: no renewal.
+        let young = key
+            .mint(session::TokenKind::Browser, None, now - 10, 100, 0)
+            .unwrap();
+        let r = send(
+            app(),
+            "GET",
+            "/api/health",
+            &[("cookie", &format!("terrarium_session={}", young.token))],
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        assert!(r.headers().get("set-cookie").is_none());
+        // Old: renewed.
+        let old = key
+            .mint(session::TokenKind::Browser, None, now - 60, 100, 0)
+            .unwrap();
+        let old_cookie = format!("terrarium_session={}", old.token);
+        let r = send(app(), "GET", "/api/session", &[("cookie", &old_cookie)]).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let set = hdr(&r, "set-cookie");
+        assert!(
+            set.contains("Max-Age=3600") && set.contains("HttpOnly"),
+            "{set}"
+        );
+        let token = set
+            .split(';')
+            .next()
+            .unwrap()
+            .strip_prefix("terrarium_session=")
+            .unwrap()
+            .to_owned();
+        let new = key.verify(&token, now).unwrap();
+        assert_ne!(new.claims.jti, old.claims.jti);
+        assert_eq!(new.claims.sid, old.claims.sid);
+        assert_eq!(new.csrf, old.csrf);
+        // GET /api/session shows the renewed end and the same csrf.
+        let v = json_of(r).await;
+        assert_eq!(v["kind"], "browser");
+        assert_eq!(v["exp"], new.claims.exp);
+        assert_eq!(v["csrf"].as_str(), old.csrf.as_deref());
+        // The old cookie still works, and the csrf value works with both.
+        for cookie in [old_cookie.clone(), format!("terrarium_session={token}")] {
+            let r = send(
+                app(),
+                "DELETE",
+                "/api/health",
+                &[
+                    ("cookie", &cookie),
+                    ("x-csrf-token", old.csrf.as_deref().unwrap()),
+                ],
+            )
+            .await;
+            assert_eq!(r.status(), StatusCode::METHOD_NOT_ALLOWED);
+        }
+        // A logout ends the renewed cookie too (the `sid`).
+        let r = send(
+            app(),
+            "DELETE",
+            "/api/session",
+            &[
+                ("cookie", &old_cookie),
+                ("x-csrf-token", old.csrf.as_deref().unwrap()),
+            ],
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::NO_CONTENT);
+        let r = send(
+            app(),
+            "GET",
+            "/api/health",
+            &[("cookie", &format!("terrarium_session={token}"))],
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn get_session_names_the_kind() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state_at(dir.path());
+        let app = || session_app(&s, KEY, None);
+        let r = send(app(), "GET", "/api/session", &[]).await;
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+        let v = json_of(
+            send(
+                app(),
+                "GET",
+                "/api/session",
+                &[("authorization", "Bearer secret")],
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(v["kind"], "token");
+        assert_eq!(v["password_set"], false);
+        let (cookie, csrf) = login(app()).await;
+        let v = json_of(send(app(), "GET", "/api/session", &[("cookie", &cookie)]).await).await;
+        assert_eq!(v["kind"], "browser");
+        assert_eq!(v["csrf"], csrf);
+        let v = json_of(send(unix_router(s.clone()), "GET", "/api/session", &[]).await).await;
+        assert_eq!(v["kind"], "local");
+    }
+
+    /// HIGH 1: a burst of parallel wrong logins from one address. The
+    /// guard takes a ticket before Argon2, so at most the free budget (in
+    /// fact the per-address cap) reaches Argon2, and the rest get `429` at
+    /// once.
+    #[tokio::test]
+    async fn a_burst_of_logins_cannot_pass_the_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state_at(dir.path());
+        s.operator_auth.store.set(PW).unwrap();
+        let calls = (0..50).map(|i| {
+            let app = session_app(&s, KEY, None);
+            async move {
+                password_login(app, &format!("wrong {i}"), None)
+                    .await
+                    .status()
+            }
+        });
+        let statuses = futures_util::future::join_all(calls).await;
+        let refused = statuses
+            .iter()
+            .filter(|c| **c == StatusCode::TOO_MANY_REQUESTS)
+            .count();
+        let failed = statuses
+            .iter()
+            .filter(|c| **c == StatusCode::UNAUTHORIZED)
+            .count();
+        let ran = s.operator_auth.verifications();
+        assert!(
+            ran <= crate::password::FREE_FAILURES as usize,
+            "{ran} Argon2 checks"
+        );
+        assert_eq!(failed, ran);
+        assert_eq!(refused + failed, 50, "{statuses:?}");
+        assert_eq!(s.operator_auth.limiter.in_flight(), 0);
+    }
+
+    /// LOW 10: one `auth.login_failed` row per address per window, with a
+    /// count, and an `auth.lockout` row when the lockout starts.
+    #[tokio::test]
+    async fn failed_logins_aggregate_in_the_audit_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state_at(dir.path());
+        s.operator_auth.store.set(PW).unwrap();
+        for i in 0..crate::password::FREE_FAILURES {
+            let r = password_login(session_app(&s, KEY, None), &format!("wrong {i}"), None).await;
+            assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+        }
+        let failed = audit_rows(&s, "auth.login_failed").await;
+        assert_eq!(failed.len(), 1, "{failed:?}");
+        assert!(failed[0].1.contains("\"count\":5"), "{failed:?}");
+        let lock = audit_rows(&s, "auth.lockout").await;
+        assert_eq!(lock.len(), 1, "{lock:?}");
+        assert!(lock[0].1.contains("\"scope\":\"address\""));
+    }
+
+    /// MEDIUM 2: a token is minted only for the password version that the
+    /// login checked. A change in between gives `409`, no token.
+    #[tokio::test]
+    async fn mint_needs_the_checked_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state_at(dir.path());
+        let v = s.operator_auth.store.set(PW).unwrap();
+        let sessions = session::Sessions {
+            key: session::SessionKey::from_bytes(KEY.to_vec()),
+            ttl: std::time::Duration::from_secs(3600),
+            cli_ttl: std::time::Duration::from_secs(7200),
+            max_age: std::time::Duration::from_secs(4 * 3600),
+            db: s.db.clone(),
+            operator: s.operator_auth.clone(),
+        };
+        let now = chrono::Utc::now().timestamp();
+        assert!(sessions.mint(session::TokenKind::Cli, None, now, v).is_ok());
+        s.operator_auth.store.bump().unwrap();
+        let err = sessions
+            .mint(session::TokenKind::Cli, None, now, v)
+            .unwrap_err();
+        assert_eq!(err.code, Code::Conflict);
+    }
+
+    /// LOW 7: a browser session never lives past `auth_time` + max age,
+    /// through any number of renewals.
+    #[tokio::test]
+    async fn renewal_has_an_absolute_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state_at(dir.path());
+        let app = || session_app(&s, KEY, None);
+        let key = session::SessionKey::from_bytes(KEY.to_vec());
+        let now = chrono::Utc::now().timestamp();
+        let max = 4 * 3600;
+        // Past the max age: refused, though the token itself is not past exp.
+        let old = key
+            .mint(
+                session::TokenKind::Browser,
+                Some(("sid-old", now - max - 1)),
+                now - 60,
+                3600,
+                0,
+            )
+            .unwrap();
+        let r = send(
+            app(),
+            "GET",
+            "/api/health",
+            &[("cookie", &format!("terrarium_session={}", old.token))],
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+        // Near the max age: the renewal keeps auth_time and ends at the cap.
+        let near = key
+            .mint(
+                session::TokenKind::Browser,
+                Some(("sid-near", now - max + 600)),
+                now - 3000,
+                3600,
+                0,
+            )
+            .unwrap();
+        let r = send(
+            app(),
+            "GET",
+            "/api/health",
+            &[("cookie", &format!("terrarium_session={}", near.token))],
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let set = hdr(&r, "set-cookie");
+        let token = set
+            .split(';')
+            .next()
+            .unwrap()
+            .strip_prefix("terrarium_session=")
+            .unwrap();
+        let renewed = key.verify(token, now).unwrap();
+        assert_eq!(renewed.claims.auth_time, now - max + 600);
+        assert_eq!(renewed.claims.exp, now - max + 600 + max);
+        assert_eq!(renewed.claims.sid, "sid-near");
     }
 }

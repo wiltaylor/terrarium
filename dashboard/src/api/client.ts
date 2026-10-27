@@ -86,6 +86,8 @@ import type {
   ScheduleRun,
   Session,
   SessionGrant,
+  SessionInfo,
+  PasswordChange,
   StartLogin,
   Subscription,
   NewTarget,
@@ -133,6 +135,24 @@ export interface Api {
     create(token: string): Promise<SessionGrant | null>;
     /** `DELETE /api/session`: the daemon clears the cookie. A daemon without sessions is not an error. */
     remove(): Promise<void>;
+    /**
+     * `POST /api/session` with `{"password"}` and no token: the password
+     * login. The daemon sets the `HttpOnly` cookie and answers the CSRF
+     * value. A wrong password is an `AuthError` ("login failed"); no password
+     * set is `409 conflict`; too many failures is `429 rate_limited` with
+     * `details.retry_after` (seconds).
+     */
+    login(password: string): Promise<SessionGrant>;
+    /** `GET /api/session`: the session of the cookie, with its CSRF value. Null: no session (401). */
+    current(): Promise<SessionInfo | null>;
+  };
+
+  /** The operator login (docs/api.md §1.1). */
+  account: {
+    /** `PUT /api/auth/password`. Every session ends, also this one. A wrong `current` is `403`. */
+    setPassword(change: PasswordChange): Promise<void>;
+    /** `DELETE /api/sessions`: log out everywhere. Every session ends; the static token stays good. */
+    logoutEverywhere(): Promise<void>;
   };
 
   projects: {
@@ -494,6 +514,20 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
           throw e;
         }
       },
+      login: (password) => t.request<SessionGrant>("POST", "/api/session", { body: { password }, anonymous: true, quiet401: true }),
+      current: async () => {
+        try {
+          return await t.request<SessionInfo>("GET", "/api/session", { quiet401: true });
+        } catch (e) {
+          if (e instanceof AuthError) return null;
+          throw e;
+        }
+      },
+    },
+
+    account: {
+      setPassword: (change) => t.request<void>("PUT", "/api/auth/password", { body: change }),
+      logoutEverywhere: () => t.request<void>("DELETE", "/api/sessions"),
     },
 
     projects: {

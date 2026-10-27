@@ -54,54 +54,67 @@ Other scripts:
 
 ## Authentication
 
-The token is `TERRARIUM_TOKEN` from `.env`. The dashboard sends it to the
-daemon once, at sign-in, and does not keep it (docs/api.md §1.1,
-docs/security-review.md F3).
+The operator signs in with the operator password, or with the token
+(`TERRARIUM_TOKEN` from `.env`) on **Use the token instead**. The dashboard
+sends either one to the daemon once, at sign-in, and does not keep it
+(docs/api.md §1.1, docs/security-review.md F3 and F15).
 
 ### Sign-in flow
 
-1. With no credentials, the app shows the token screen.
-2. **Sign in** sends `POST /api/session` with `Authorization: Bearer <token>`.
-3. The daemon sets the `terrarium_session` cookie (`HttpOnly`,
-   `SameSite=Strict`, `Path=/`, and `Secure` on HTTPS). It answers
-   `{"csrf", "expires_at"}`.
-4. The app keeps the `csrf` value and `expires_at`. It drops the token.
+1. On load, the app calls `GET /api/session` (mode `checking`). A `200`
+   gives the CSRF value of the cookie, so no login screen shows. A `401`
+   shows the login screen.
+2. **Sign in** sends `POST /api/session` with `{"password": "..."}` and no
+   `Authorization`. With the token, it sends `Authorization: Bearer <token>`
+   and no body.
+3. The daemon sets the `terrarium_session` cookie: a signed token (JWT),
+   `HttpOnly`, `SameSite=Strict`, `Path=/`, `Max-Age` (30 days by default),
+   and `Secure` on HTTPS. It answers `{"csrf", "exp", "expires_at"}`.
+4. The app keeps the `csrf` value in memory only. It drops the password or
+   the token.
 5. Each request after that goes with `credentials: "same-origin"`, so the
    browser sends the cookie. Each `POST`, `PUT`, `PATCH`, and `DELETE` also
    sends `X-CSRF-Token: <csrf>` (`api/http.ts`). No request carries
    `Authorization`.
-6. **sign out** (sidebar footer, or the Settings page) sends
-   `DELETE /api/session` with the CSRF header. Then the app removes every
-   local copy and shows the token screen.
+6. Past half its life, the daemon renews the cookie on a request. The new
+   cookie keeps the same CSRF value, so the app changes nothing.
+7. **Log out** (sidebar footer, or the Settings page) sends
+   `DELETE /api/session` with the CSRF header. **Log out everywhere**
+   (Settings) sends `DELETE /api/sessions`, which ends every browser and CLI
+   session. Then the app forgets the CSRF value and shows the login screen.
 
-The state machine is in `stores/auth.ts`. Its modes are `none`, `session`,
-and `bearer`:
+The login screen shows the daemon's answers: the same text for every wrong
+password, the `409` hint (no password set: run `terrariumd password set`, or
+use the token), and the `429` wait (`details.retry_after`), with a
+countdown. `loginError` in `stores/auth.ts` maps them.
 
-- A 401 in `session` mode means that the cookie ended. The token screen then
+The state machine is in `stores/auth.ts`. Its modes are `checking`, `none`,
+`session`, and `bearer`:
+
+- A 401 in `session` mode means that the cookie ended. The login screen then
   shows **over** the current page. The router stays mounted, so the route and
   the page state stay. After the sign-in, the event socket reconnects at
   once.
-- The store also ends the session by itself at `expires_at`. On load it drops
-  a stored session whose `expires_at` has passed.
 - The Settings page (`/settings`) shows the mode and the time the session
-  ends.
+  ends. It also changes the operator password (`PUT /api/auth/password`);
+  the change ends every session, so the page signs in again with the new
+  password.
 
 ### What is stored where
 
 | Mode | Memory | `sessionStorage` | `localStorage` |
 |---|---|---|---|
-| Session | CSRF value, `expires_at` | `terrarium.session`: `{"csrf", "expires_at"}` | `terrarium.session.remembered`, the same value, only on **Remember on this device** |
-| Bearer fallback | token | `terrarium.token` | `terrarium.token.remembered`, only on **Remember on this device** |
+| Session | CSRF value, `expires_at` | nothing | nothing |
+| Bearer fallback | token | `terrarium.token` | nothing |
 
-- The cookie is the browser's business. Script cannot read it. The daemon
-  sets its life (`Max-Age`), and the browser drops it at `expires_at`.
-- **Remember on this device** keeps the CSRF value in `localStorage`. A new
-  tab is then signed in until the session ends. Without the box, a new tab
-  asks again. (The cookie is still in the browser, but a tab without the CSRF
-  value cannot make a mutating call.)
+- The cookie is the cache. Script cannot read it. It stays through a browser
+  restart until its end, and the daemon renews it while it is in use.
+- The password and the session token never go into web storage. At load the
+  app deletes the keys of older builds (`terrarium.session`,
+  `terrarium.session.remembered`, `terrarium.token.remembered`).
 - The CSRF value alone is not a credential. Without the cookie it does
   nothing. Script on the page can still read it and make calls while the page
-  is open, but it cannot take the token or the cookie away.
+  is open, but it cannot take the cookie away.
 - A token that an older build left in storage starts the app in bearer mode.
   On load, `upgradeToSession` trades it for a session, and the token leaves
   the browser.
@@ -109,12 +122,11 @@ and `bearer`:
 ### Bearer fallback
 
 A daemon without sessions answers `POST /api/session` with `404` (or
-`405`). Then the app keeps the token as before: in memory and
-`sessionStorage`, and in `localStorage` on opt-in. The sidebar shows a
-**bearer mode** chip, and the Settings page says why. Each request sends
-`Authorization: Bearer`, and sockets offer the `bearer.<token>`
-subprotocol. Each load tries the session again, so an updated daemon moves
-the app to cookie mode without a new sign-in.
+`405`). Then the app keeps the token in memory and in this tab's
+`sessionStorage`. The sidebar shows a **bearer mode** chip, and the Settings
+page says why. Each request sends `Authorization: Bearer`, and sockets offer
+the `bearer.<token>` subprotocol. Each load tries the session again, so an
+updated daemon moves the app to cookie mode without a new sign-in.
 
 ### WebSocket authentication
 

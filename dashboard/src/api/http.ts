@@ -22,6 +22,8 @@ export interface RequestOptions {
   form?: FormData;
   /** Send this bearer token instead of the stored credentials. Only `POST /api/session` uses it. */
   bearer?: string;
+  /** Send no bearer token at all: the password login. */
+  anonymous?: boolean;
   /** Do not call `onUnauthorized` on a 401. The caller handles it (sign-in, sign-out). */
   quiet401?: boolean;
 }
@@ -159,7 +161,7 @@ export function createHttpTransport(opts: HttpTransportOptions): Transport {
 
   const send = async (method: string, path: string, ro: RequestOptions = {}): Promise<{ data: unknown; res: Response }> => {
     const headers: Record<string, string> = { Accept: "application/json" };
-    const token = ro.bearer ?? opts.getToken();
+    const token = ro.anonymous ? null : (ro.bearer ?? opts.getToken());
     if (token) headers.Authorization = `Bearer ${token}`;
     const csrf = opts.getCsrf?.() ?? null;
     if (csrf && isMutating(method)) headers[CSRF_HEADER] = csrf;

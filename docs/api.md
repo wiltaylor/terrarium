@@ -29,7 +29,7 @@ The daemon serves one router on two listeners.
 | Listener | Address | Authentication |
 |---|---|---|
 | Unix socket | `$TERRARIUM_API_SOCKET` | None. The caller is the operator. |
-| TCP | `$TERRARIUM_LISTEN` | `Authorization: Bearer $TERRARIUM_TOKEN` on `/api/*`, or the session cookie of `POST /api/session` (§1.1). Without a token the TCP listener stays off. |
+| TCP | `$TERRARIUM_LISTEN` | `Authorization: Bearer $TERRARIUM_TOKEN` on `/api/*`, a CLI session token in the same header, or the session cookie of `POST /api/session` (§1.1). Without a token the TCP listener stays off. |
 | TCP, no auth | `$TERRARIUM_LISTEN` | `GET /install/host.sh`, `GET /install/terrarium-host`, and `GET /install/terrarium-host.sha256`: the host installer (§17.9). They hold no secret. |
 | TCP, host agents | `$TERRARIUM_HOST_LISTEN` (default `auto`: `0.0.0.0:8082` with TLS, `127.0.0.1:8082` without) | `GET /hosts/connect` only, with a per-host token (§17.1). TLS when `TERRARIUM_HOST_TLS_CERT` and `TERRARIUM_HOST_TLS_KEY` are set. |
 
@@ -54,52 +54,184 @@ plain request needs `Authorization` or the cookie.
 The token compare is constant time, also in the length: the daemon compares
 SHA-256 hashes of the two values.
 
-### 1.1 Dashboard sessions (cookie)
+### 1.1 Operator login and sessions
 
-The dashboard trades the token for a cookie once, so that no script on the
-page can read a credential (`docs/security-review.md`, F3). The CLI keeps
-the bearer token; nothing changes for it.
+The operator logs in with the **operator password** or with the static
+token (`TERRARIUM_TOKEN`). A login gives a **session token**: a JWT in an
+`HttpOnly` cookie for the dashboard, or in the answer body for the CLI
+(`terrarium login`). So the dashboard keeps no credential that a script can
+read (`docs/security-review.md`, F3 and F15), and the operator does not
+paste the token again and again.
+
+**The password.** The daemon keeps only an Argon2id hash (a PHC string, the
+default parameters of the `argon2` crate: m = 19 MiB, t = 2, p = 1) and the
+password version in `<state>/operator.password` (JSON, mode 0600). The
+daemon never logs the password and never returns it. A password has 12
+characters or more. Each write takes a `flock` on
+`<state>/operator.password.lock` (the daemon and `terrariumd password set`
+can write at the same time), writes a unique temp file, fsyncs it, renames
+it over the file, and fsyncs the dir. A read that finds a looser mode sets
+0600 again, with a warning. Set the password in one of these ways:
+
+- `terrariumd password set` (asks twice on the terminal, with no echo;
+  `--stdin` reads the first line of stdin). It needs no daemon: it writes
+  the file in `--state-dir`. It refuses to run as another user than the
+  owner of the state dir (the daemon could then not read the file): run it
+  as the daemon's user, for example
+  `docker compose exec terrarium terrariumd password set`. A running daemon
+  reads the new file at the next request (it compares the inode, size, and
+  mtime).
+- `PUT /api/auth/password` (`terrarium admin password set`, or the
+  dashboard Settings page).
+- `TERRARIUM_PASSWORD` (or `TERRARIUM_PASSWORD_FILE`, its first line) at the
+  start, only when no password is set. The daemon logs a warning: remove the
+  variable from the env after the first start. The daemon reads the value
+  from the env only (there is no flag, so it is never in the process
+  arguments), then starts again without both variables, so no child
+  process (a harness, git, npm, a login command) inherits them. The login
+  commands and npm also strip them.
+
+A new password adds one to the password version, so every session ends.
 
 | Endpoint | Auth | Answer |
 |---|---|---|
-| `POST /api/session` | `Authorization: Bearer <token>` only (not the cookie) | `201 {"csrf", "exp", "expires_at"}` and `Set-Cookie` |
-| `DELETE /api/session` | none without a session cookie; with one, `X-CSRF-Token` of that session | `204` and a `Set-Cookie` that clears the cookie |
+| `POST /api/session` | `{"password": "..."}` and no `Authorization`; or `Authorization: Bearer <TERRARIUM_TOKEN>` | `201 {"kind", "csrf", "exp", "expires_at"}` and `Set-Cookie`. With `"client": "cli"` in the body: `201 {"kind": "cli", "token", "exp", "expires_at"}` and no cookie. |
+| `GET /api/session` | any | `200 {"kind", "csrf"?, "exp"?, "expires_at"?, "password_set"}`. `kind` is `browser` (the cookie, with its `csrf`), `cli`, `token` (the static token), or `local` (the Unix socket). |
+| `DELETE /api/session` | none; see below | `204` and a `Set-Cookie` that clears the cookie |
+| `DELETE /api/sessions` | the operator (CSRF with the cookie) | `204`. Log out everywhere: the password version goes up by one, so every browser and CLI session ends. The static token stays good. |
+| `PUT /api/auth/password` | the operator (CSRF with the cookie) | `{"current"?, "new"}`. `204`. See below. |
+
+**The password login.** `POST /api/session` with `{"password"}` and no
+`Authorization`:
+
+| Case | Answer |
+|---|---|
+| The right password | `201`, as above. An `auth.login` audit row with `ok: true` and the client IP. |
+| A wrong password | `401 unauthorized`, `"login failed"`. The same text for every wrong password. The audit log gets one `auth.login_failed` row per address per 10 min (actor `anonymous`, `detail`: `ip`, `last_ip`, `count`, `window_secs`); each more failure in the window adds one to `count`. A lockout that starts writes an `auth.lockout` row. Never the password. |
+| No password set | `409 conflict`, `"no password set; run terrariumd password set"`. Not a failure. |
+| Too many failures, or too many checks in flight | `429 rate_limited`, `Retry-After: <seconds>`, and `details.retry_after`. No Argon2 check runs. The right password gets `429` too until the wait ends. |
+| The password changed while the check ran | `409 conflict`. No token: log in again. |
+| No password and no `Authorization` | `401 unauthorized`. |
+| A CLI token or a cookie (not the static token) | `401 unauthorized`: a session cannot buy another session. |
+
+**The login limit.** The daemon counts the password checks per client
+address, in memory (a restart clears it). The address is the peer address
+of the TCP connection; an IPv6 address counts as its /64. The daemon trusts
+no `X-Forwarded-For`, so behind a reverse proxy every client shares the
+proxy's address and its limit.
+
+- A check takes a slot **before** the Argon2 check, and the checks in
+  flight count against the budget. One address may have at most 2 checks
+  in flight, and never more than the free failures it has left (one after a
+  lockout ends). So a burst of parallel requests cannot pass the limit: the
+  rest get `429` at once.
+- Five failures are free. The fifth starts a lockout of 30 s; each more
+  failure doubles it, up to 15 min. A good password clears the count; an
+  hour with no failure starts again from zero.
+- At most 16 checks are in flight from all addresses together, and at most
+  2 Argon2 checks run at one time. Past 16, a login gets `429` at once, so
+  one host cannot fill a queue in front of the operator.
+- 100 failures from all addresses in 10 min lock the password login for
+  every address until the window ends (`auth.lockout` with `scope:
+  global`). The static token still works.
+- The guard tracks at most 10,000 addresses, and prunes a full map at most
+  once a minute. A new address past the bound gets no entry of its own: the
+  lockout of another address never reaches it, and the global budget still
+  counts it.
+- After the wait for an Argon2 slot, the check looks at the lockouts again.
+- The wrong `current` of `PUT /api/auth/password` counts too.
+
+**The session token.** A compact JWT, HS256 only, with a fixed header:
 
 ```
-Set-Cookie: terrarium_session=v1.<exp>.<nonce>.<sig>; Path=/; Max-Age=<ttl>; HttpOnly; SameSite=Strict[; Secure]
+header  {"alg":"HS256","typ":"JWT"}
+claims  {"sub":"operator","iat","exp","jti","sid","pv","kind","auth_time"}
+key     HMAC-SHA256(<state>/session.key, "terrarium-jwt.v2")
+csrf    base64url(HMAC-SHA256(<state>/session.key, "terrarium-csrf.v2.<sid>"))
 ```
 
-- `Secure` is set when the request is HTTPS or a proxy sends
+- `jti` is 16 random bytes, new for each token. `sid` names the session: the
+  `jti` of its first token. The CSRF value is an HMAC of `sid`. `pv` is the
+  password version at the login. `kind` is `browser` or `cli`.
+  `auth_time` is the time of the login; a renewal copies it.
+- The daemon mints a token only for the password version that it checked:
+  the version of the hash that matched the password, or the `pv` of the
+  token it renews. When the version changed in between, there is no token.
+- The check is strict: three parts; a header with `alg` `HS256` (and `typ`
+  `JWT`, if any) and no other field, so `none`, `HS512`, and every other
+  algorithm fail; the signature, in constant time; `sub` `operator`;
+  `auth_time` not after `iat`; `exp` after now; `pv` equal to the current
+  password version; for a browser token, `auth_time` not older than
+  `TERRARIUM_SESSION_MAX_AGE`; and neither `jti` nor `sid` in
+  `revoked_sessions`.
+- A `browser` token works only as the cookie. A `cli` token works only as
+  `Authorization: Bearer <token>` (or the WebSocket subprotocol
+  `bearer.<token>`, not `?token=`) and needs no CSRF header.
+- `<state>/session.key` is 32 random bytes as hex, mode 0600. The daemon
+  makes it at the first start. A new key ends every session.
+- The `v1.` cookie of older daemons is not a token: it gets `401`, and the
+  dashboard shows the login screen once.
+
+```
+Set-Cookie: terrarium_session=<jwt>; Path=/; Max-Age=<seconds left>; HttpOnly; SameSite=Strict[; Secure]
+```
+
+- The cookie is persistent (`Max-Age`), so it stays through a browser
+  restart. `Secure` is set when the request is HTTPS or a proxy sends
   `X-Forwarded-Proto: https`.
-- The life is `TERRARIUM_SESSION_TTL` (`--session-ttl`): seconds, or a
-  number with `s`, `m`, `h`, or `d`. The default is `12h`. `exp` is a Unix
-  time; `expires_at` is the same time in RFC 3339.
-- The cookie is stateless. `sig` is an HMAC-SHA256 of the version, `exp`,
-  and `nonce` with the key in `<state>/session.key` (32 random bytes as
-  hex, mode 0600; the daemon makes it at the first start). The `csrf`
-  value is an HMAC of the nonce with the same key. To end every session,
-  delete or replace `session.key` and restart the daemon. A logout
-  (`DELETE` with the session cookie and its `X-CSRF-Token`) ends that one
-  session on the server too: the daemon keeps its nonce in
-  `revoked_sessions` until `exp`, and a copy of the cookie gets `401`.
-- `DELETE /api/session` does not use the auth of the other routes. It
-  looks at the cookie itself, so that a logout from another site (logout
-  CSRF) fails:
+- The life of a browser token is `TERRARIUM_SESSION_TTL`
+  (`--session-ttl`), default `30d`. The life of a CLI token is
+  `TERRARIUM_CLI_SESSION_TTL` (`--cli-session-ttl`), default `90d`. Each is
+  seconds, or a number with `s`, `m`, `h`, or `d`. `exp` is a Unix time;
+  `expires_at` is the same time in RFC 3339.
+- **Sliding renewal.** A request with a valid cookie past half its life gets
+  a new cookie on its answer: a new `jti` and `exp`, the same `sid`. So the
+  CSRF value does not change, and requests in flight with the old cookie and
+  the new one both pass the CSRF check. The old token stays valid until its
+  own `exp`. `GET /api/session` shows the renewed `exp`. A WebSocket upgrade
+  and an answer that sets its own cookie get no renewal. A CLI token is not
+  renewed: run `terrarium login` again.
+- **The absolute cap.** A renewal never sets `exp` past `auth_time` +
+  `TERRARIUM_SESSION_MAX_AGE` (`--session-max-age`, default `90d`), and a
+  browser token older than that gets `401`. So a stolen cookie that is in
+  use cannot live for ever. A CLI token's cap is its own life.
+- The server keeps no session rows, only the sessions that a logout ended
+  (`revoked_sessions`, keyed by `sid`), until the last token of the session
+  can end.
 
-  | Request | Answer |
-  |---|---|
-  | No `terrarium_session` cookie, with or without `Authorization: Bearer` | `204` and the clearing `Set-Cookie`. A client that lost its cookie can log out again. |
-  | A valid session cookie and the right `X-CSRF-Token` | `204` and the clearing `Set-Cookie`. The session is revoked. |
-  | A valid session cookie, and no `X-CSRF-Token` or a wrong one (the token of another session too) | `403 forbidden`, no `Set-Cookie`. The cookie stays. |
-  | A cookie that is wrong, from another key, revoked, or past `exp` | `204` and the clearing `Set-Cookie`. It is no session, so to clear it ends nothing. |
+**`DELETE /api/session`** does not use the auth of the other routes. It
+looks at the cookie and the bearer token itself, so that a logout from
+another site (logout CSRF) fails:
 
-- The answers carry `Cache-Control: no-store`. The Unix socket has no
-  sessions (`404 not_found`).
+| Request | Answer |
+|---|---|
+| A valid CLI token in `Authorization: Bearer` | `204`. The session is revoked. |
+| No `terrarium_session` cookie, with or without the static token | `204` and the clearing `Set-Cookie`. A client that lost its cookie can log out again. |
+| A valid session cookie and the right `X-CSRF-Token` | `204` and the clearing `Set-Cookie`. The session (its `sid`, so each renewed cookie too) is revoked. |
+| A valid session cookie, and no `X-CSRF-Token` or a wrong one (the token of another session too) | `403 forbidden`, no `Set-Cookie`. The cookie stays. |
+| A cookie that is wrong, from another key, revoked, or past `exp` | `204` and the clearing `Set-Cookie`. It is no session, so to clear it ends nothing. |
 
-The cookie authenticates every `/api` route and WebSocket upgrade on TCP,
-as the token does. Order: `Authorization`, then (on an upgrade) the
-`bearer.` subprotocol, then the cookie, then (when on) `?token=`. A wrong
-token is `401` even with a good cookie. With the cookie:
+**`PUT /api/auth/password`** takes `{"current"?, "new"}`. The operator
+only (an agent gets `403`).
+
+- With the static token or on the Unix socket, `current` is not needed. If
+  it is sent and a password is set, it must match.
+- With a session (the cookie or a CLI token), `current` must match when a
+  password is set. A missing or wrong `current` is `403 forbidden` (not
+  `401`: the session is still good), and the login limit counts a wrong one.
+- `new` with fewer than 12 characters: `422 invalid`.
+- The password version goes up by one, so every session ends, also the
+  caller's. With the cookie, the answer clears it. An `auth.password_set`
+  audit row records the change (never the password).
+
+The answers of `POST`, `GET`, and `DELETE` carry `Cache-Control:
+no-store`. The Unix socket has no `POST /api/session` (`404 not_found`).
+
+The session cookie authenticates every `/api` route and WebSocket upgrade
+on TCP, as the token does. Order: `Authorization` (the static token, then a
+CLI token), then (on an upgrade) the `bearer.` subprotocol, then the cookie,
+then (when on) `?token=` (the static token only). A wrong bearer value is
+`401` even with a good cookie. With the cookie:
 
 - `POST`, `PUT`, `PATCH`, and `DELETE` must send `X-CSRF-Token: <csrf>`.
   No header or a wrong one: `403 forbidden`. `GET` needs no header.
@@ -107,8 +239,9 @@ token is `401` even with a good cookie. With the cookie:
   the origin of `TERRARIUM_PUBLIC_URL`, or `http(s)://<Host>` of the
   request itself. No `Origin`, `null`, or another origin: `403 forbidden`.
   The upgrade needs no subprotocol.
-- A cookie that is wrong, from another key, revoked, or past `exp`: `401
-  unauthorized`. The dashboard then calls `POST /api/session` again.
+- A cookie that is wrong, from another key, revoked, past `exp`, or from an
+  older password version: `401 unauthorized`. The dashboard then shows the
+  login screen.
 
 ### 1.2 Security headers
 
@@ -150,11 +283,15 @@ gives them to the routers and the mail code.
 | `TERRARIUM_ARTIFACT_LISTEN` | `--artifact-listen` | `0.0.0.0:8081` | The artifact origin listener. Empty: none, and the dashboard port serves `/a/...`. |
 | `TERRARIUM_ARTIFACT_PUBLIC_URL` | `--artifact-public-url` | unset | The artifact origin in signed URLs and the CSP. |
 | `TERRARIUM_WS_QUERY_TOKEN` | `--ws-query-token` | `0` | `1`: take `?token=` on an upgrade. |
-| `TERRARIUM_SESSION_TTL` | `--session-ttl` | `12h` | The life of a session cookie. |
+| `TERRARIUM_SESSION_TTL` | `--session-ttl` | `30d` | The life of a session cookie. The daemon renews it past half its life. |
+| `TERRARIUM_CLI_SESSION_TTL` | `--cli-session-ttl` | `90d` | The life of a CLI session token (`terrarium login`). |
+| `TERRARIUM_SESSION_MAX_AGE` | `--session-max-age` | `90d` | The longest life of a dashboard session through its renewals, from the login. |
+| `TERRARIUM_PASSWORD`, `TERRARIUM_PASSWORD_FILE` | `--password-file` (no flag for the value) | unset | The first operator password, set at the start when none is set (§1.1). The daemon starts again without both variables. Remove them after the first start. |
 
 Every API request has an **actor**:
 
-- `operator`: a TCP caller with the token, or a Unix-socket caller.
+- `operator`: a TCP caller with the token, a session cookie, or a CLI
+  session token, or a Unix-socket caller.
 - `agent`: a call from the agent's runner socket, through the `http`
   tunnel of `docs/agent-rpc.md`. The socket names the agent.
 - `agent`, for tests and development only: a Unix-socket caller that sends
@@ -482,7 +619,7 @@ Rows oldest first. Cursor: `seq`.
 | Query | Meaning |
 |---|---|
 | `since` | Rows at or after this time (§2.1: RFC 3339 with any offset, or a duration such as `1h`). |
-| `actor` | `operator`, `system`, or `agent:<ulid>`. |
+| `actor` | `operator`, `system`, `anonymous` (a failed login), or `agent:<ulid>`. |
 | `action` | For example `agent.start`. |
 | `project` | Rows of one project. A project admin gets its own project only. |
 
@@ -509,7 +646,11 @@ on a card that is not its own), `definitions.sync`, `memory.edit` and
 `target.down`, `target.snapshot`, `target.restore`, `target.status`,
 `target.snapshot_delete`, `target.reconcile` (actor `system`),
 `target.grant`, `target.revoke`, `target.lease_extend`, and
-`target.lease_expired` (actor `system`) (§17).
+`target.lease_expired` (actor `system`) (§17). The login (§1.1):
+`auth.login` (a good login; `detail`: `ok`, `ip`, `method` (`password` or
+`token`), and `kind`), `auth.login_failed` (actor `anonymous`; one row per
+address per 10 min with a `count`), `auth.lockout` (`scope`: `address` or
+`global`, and `seconds`), `auth.password_set`, and `auth.logout_all`.
 
 ## 5. Projects
 

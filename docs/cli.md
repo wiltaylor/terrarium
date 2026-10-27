@@ -33,8 +33,8 @@ The tunnel does not carry WebSockets or SSE. In agent mode:
 
 | Option | Env | Meaning |
 |---|---|---|
-| `--url <url>` | `TERRARIUM_URL` | The daemon URL, `http://host:port`. Without it, the CLI uses the Unix socket. |
-| `--token <t>` | `TERRARIUM_TOKEN` | The bearer token for TCP. |
+| `--url <url>` | `TERRARIUM_URL` | The daemon URL, `https://host[:port]` or `http://host:port`. Without it, the CLI uses the Unix socket. |
+| `--token <t>` | `TERRARIUM_TOKEN` | The bearer token for TCP. It wins over a stored session of `terrarium login`. |
 | `--socket <path>` | `TERRARIUM_API_SOCKET` | The daemon's Unix socket. The default is `$XDG_RUNTIME_DIR/terrarium/api.sock`, else `/run/terrarium/api.sock`. |
 | `-p`, `--project <name>` | | The project. An agent defaults to its own project. |
 | `--json` | | Print the daemon's JSON answer. Errors go to stderr as the daemon's error JSON. |
@@ -46,6 +46,49 @@ Other environment variables:
 | `TERRARIUM_AGENT` | Agent mode: the agent ULID. The runner sets it. |
 | `TERRARIUM_SOCKET` | Agent mode: the runner socket. The runner sets it. |
 | `COLUMNS` | The table width. Without it, the CLI asks the terminal. Output to a pipe does not wrap. |
+| `TERRARIUM_CA_FILE` | More trusted CA certificates (PEM) for an `https://` daemon URL, for a proxy with a private CA. The CLI always trusts the system roots too. |
+| `XDG_CONFIG_HOME` | The config dir. `terrarium login` keeps its sessions in `$XDG_CONFIG_HOME/terrarium/credentials.json`, else in `~/.config/terrarium/credentials.json`. |
+
+### 2.1 Log in to a TCP daemon
+
+With the operator password ([api.md](api.md) §1.1), the CLI does not need
+`TERRARIUM_TOKEN`:
+
+```
+terrarium --url https://terrarium.example.com login [--password-stdin] [--insecure-http]
+terrarium --url https://terrarium.example.com logout
+```
+
+- `login` refuses a plain `http://` URL to another host (exit 2): the
+  password and then a 90-day token would cross the network in clear text.
+  Use `https://` (a TLS proxy in front of the daemon), or a loopback URL
+  (`http://localhost:8080`, `http://127.0.0.1:8080`, `http://[::1]:8080`).
+  On a network that encrypts by itself, add `--insecure-http`; the CLI then
+  prints a loud warning. A Tailscale tailnet (`*.ts.net`) is WireGuard, so
+  plain HTTP inside it is encrypted, but the flag is still needed.
+
+- `login` asks for the password on the terminal, with no echo.
+  `--password-stdin` reads the first line of stdin, for scripts. It sends
+  `POST /api/session` with `{"password", "client": "cli"}` and no token, and
+  keeps the session token for that URL in `credentials.json` (the dir has
+  mode 0700, the file 0600). It prints when the session ends: after
+  `TERRARIUM_CLI_SESSION_TTL` (default 90 days). The daemon does not renew a
+  CLI session.
+- Later commands with the same `--url` (or `TERRARIUM_URL`) send the stored
+  token as `Authorization: Bearer`. `--token` or `TERRARIUM_TOKEN` wins when
+  it is set.
+- When the daemon answers `401` to a stored token (the session ended, a
+  password change, or "log out everywhere"), the CLI prints
+  `session expired: run terrarium login`.
+- `logout` sends `DELETE /api/session` with the stored token, which ends the
+  session on the daemon, and removes the token from the file. The local copy
+  goes even when the daemon cannot be reached.
+- The Unix socket needs no login. Agent mode never reads the file and
+  refuses `login` and `logout` (exit 2): an agent talks to the daemon
+  through its runner socket.
+
+To set the password, use `terrarium admin password set` (below), or
+`terrariumd password set` on the daemon host.
 
 ## 3. Output and exit codes
 
@@ -641,9 +684,19 @@ terrarium admin harness ls [--refresh]         each harness: pin, tested range, 
 terrarium admin harness update <name> [--version v|latest] [--force]   npm install -g in the tools dir, in place
 terrarium admin harness update --all [--force]   every harness and the extension to the latest
 terrarium admin audit [--since time] [--actor a] [--action a]
+terrarium admin password set [--stdin]         the operator password; every session ends
 terrarium admin fleet validate|plan|apply|ls|show|export ...
 terrarium admin schedule ls|show|new|set|rm|run|enable|disable|runs ...
 ```
+
+`admin password set` asks for the new password twice, with no echo, and
+sends `PUT /api/auth/password`. With a stored session of `terrarium login`,
+the daemon wants the current password too, so the command asks for it
+first. With `--stdin`, the first line of stdin is the current password
+(only with a stored session) and the next line is the new one. The change
+ends every session; the command removes the stored session, so run
+`terrarium login` again. With `TERRARIUM_TOKEN` or the Unix socket, no
+current password is needed.
 
 `admin role grant` reads the roles, adds the role, and writes the whole set.
 `admin role revoke` removes the role in the same way. `admin target new`
@@ -748,6 +801,14 @@ Use TCP:
 
 ```sh
 TERRARIUM_URL=http://localhost:8080 TERRARIUM_TOKEN=... terrarium agent ls
+```
+
+Or log in once with the operator password, and use TCP with no token:
+
+```sh
+export TERRARIUM_URL=https://terrarium.example.com
+terrarium login
+terrarium agent ls
 ```
 
 Send mail and read the answer (operator):

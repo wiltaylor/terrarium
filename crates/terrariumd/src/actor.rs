@@ -1,7 +1,8 @@
 //! Who makes a request. The `resolve_actor` middleware sets an [`Actor`] on
 //! every API request; handlers take it as an extractor.
 //!
-//! - TCP with the bearer token: the operator.
+//! - TCP with the bearer token, a session cookie, or a CLI session token:
+//!   the operator.
 //! - The Unix socket: the operator.
 //! - The runner socket of an agent (`agent_rpc`): that agent. The tunnel
 //!   puts the [`Actor`] on the request before the router sees it, and the

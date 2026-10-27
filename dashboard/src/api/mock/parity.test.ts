@@ -6,7 +6,7 @@ import { createMockApi, type MockOptions } from ".";
 import type { AgentEvent } from "../types";
 import { bearerProtocol, type AuthSocket, type MakeRawSocket, type PtySocket } from "../sockets";
 import { FakePty } from "./pty";
-import { acceptHandshake, MOCK_ORIGIN, MOCK_RULES, MOCK_TOKEN, type HandshakeRules } from "./ws";
+import { acceptHandshake, MOCK_ORIGIN, MOCK_PASSWORD, MOCK_RULES, MOCK_TOKEN, type HandshakeRules } from "./ws";
 import { eachMethod, httpVerbs, NOT_TRANSPORT } from "./verbs";
 
 const mock = () => createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 0 });
@@ -959,6 +959,30 @@ describe("session contract (docs/api.md §1.1)", () => {
     return { api, c, signIn };
   };
 
+  it("the password login: a cookie for the right password, the same 401 for each wrong one, 409 with no password", async () => {
+    const { api, c } = browser();
+    const g = await api.session.login(MOCK_PASSWORD);
+    expect(g.csrf).toMatch(/^csrf_/);
+    c.csrf = g.csrf;
+    expect((await api.projects.list()).length).toBeGreaterThan(0);
+    const e1 = await api.session.login("wrong").catch((e: unknown) => e);
+    const e2 = await api.session.login("wrong 2").catch((e: unknown) => e);
+    expect(e1).toBeInstanceOf(AuthError);
+    expect((e1 as AuthError).message).toBe((e2 as AuthError).message);
+    const none = browser({ password: null });
+    await expect(none.api.session.login("x")).rejects.toMatchObject({ status: 409, code: "conflict" });
+  });
+
+  it("GET /api/session answers the cookie's CSRF value, or null with no session", async () => {
+    const { api, c, signIn } = browser();
+    expect(await api.session.current()).toBeNull();
+    const { csrf } = await signIn();
+    expect(await api.session.current()).toMatchObject({ kind: "browser", csrf, password_set: true });
+    c.csrf = null;
+    c.token = MOCK_TOKEN;
+    expect(await api.session.current()).toMatchObject({ kind: "token" });
+  });
+
   it("POST /api/session answers {csrf, exp, expires_at} for the right token, and 401 for a wrong one", async () => {
     const t = Date.parse("2026-10-24T10:00:00Z");
     const { api } = browser({ now: () => t, sessionTtlMs: 3600_000 });
@@ -1004,7 +1028,9 @@ describe("session contract (docs/api.md §1.1)", () => {
       );
     });
     await Promise.all(pending);
-    expect(checked.length).toBe([...verbs.values()].filter(isMutating).length - 2); // all but session.create and session.remove, which check themselves
+    // All but the session.* methods (the sign-in and the logout), which check themselves.
+    expect(checked.length).toBe([...verbs].filter(([k, v]) => isMutating(v) && !k.startsWith("session.")).length);
+    expect(checked).toEqual(expect.arrayContaining(["account.setPassword", "account.logoutEverywhere"]));
   });
 
   it("every method of the HTTP client has a verb, and the mock has every method", () => {

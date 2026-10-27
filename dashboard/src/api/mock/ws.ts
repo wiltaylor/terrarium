@@ -19,6 +19,8 @@ import { AuthSocket, BEARER_PREFIX, type RawSocket } from "../sockets";
 
 /** The token that the mock "daemon" takes. */
 export const MOCK_TOKEN = "mock-operator-token";
+/** The operator password of the mock "daemon" (`POST /api/session` with `{"password"}`). */
+export const MOCK_PASSWORD = "terrarium mock password";
 /** The dashboard origin that the mock "browser" sends on an upgrade. */
 export const MOCK_ORIGIN = "http://mock";
 

@@ -9,7 +9,7 @@ use clap::Parser;
 use terrariumd::harness_tools::ToolsConfig;
 use terrariumd::runner_supervisor::{RunnerMode, RunnerSupervisor, RunnerSupervisorConfig};
 use terrariumd::sandbox::{self, SandboxConfig};
-use terrariumd::settings::{Command, HarnessCommand, Settings};
+use terrariumd::settings::{Command, HarnessCommand, PasswordCommand, Settings};
 use terrariumd::usage_collector::UsageConfig;
 use terrariumd::{DaemonConfig, start_with_usage};
 use tracing::{error, info, warn};
@@ -29,10 +29,15 @@ async fn main() -> anyhow::Result<()> {
     if let Some(Command::Harness { command }) = &settings.command {
         return harness_command(tools, command).await;
     }
-    if let Some(t) = &tools {
-        // The adapters and the runners find the harnesses on PATH.
-        ensure_first_on_path(&t.bin_dir());
+    if let Some(Command::Password { command }) = &settings.command {
+        return password_command(&settings, command);
     }
+    // TERRARIUM_PASSWORD(_FILE): set the first password now, then start
+    // again without the two variables, so no child process (a harness, git,
+    // npm, a login) ever inherits them. The same restart puts the tools dir
+    // first on PATH: the adapters and the runners find the harnesses there.
+    initial_password(&settings)?;
+    restart_clean(tools.as_ref().map(ToolsConfig::bin_dir).as_deref());
     let mut sandbox = SandboxConfig {
         mode: settings.sandbox,
         cli: settings.cli_path(),
@@ -174,26 +179,45 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Run this binary again with `bin` first on `PATH`, when it is not, so
-/// the daemon, the adapters, and the runners find the harnesses of the
-/// tools dir (`just daemon::run`; the image sets `PATH` itself).
-fn ensure_first_on_path(bin: &std::path::Path) {
+/// Run this binary again when its env needs a change: `bin` (the tools
+/// dir) first on `PATH` (`just daemon::run`; the image sets `PATH`
+/// itself), and no `TERRARIUM_PASSWORD` or `TERRARIUM_PASSWORD_FILE`. The
+/// process cannot remove a variable from its own env (`unsafe` in Rust
+/// 2024), so it starts again without them.
+fn restart_clean(bin: Option<&std::path::Path>) {
     use std::os::unix::process::CommandExt;
     let path = std::env::var("PATH").unwrap_or_default();
-    if path.split(':').next() == Some(bin.to_string_lossy().as_ref()) {
+    let new_path = bin
+        .filter(|b| path.split(':').next() != Some(b.to_string_lossy().as_ref()))
+        .map(|b| terrariumd::harness_tools::prepend_path(b, &path));
+    let secrets: Vec<&str> = terrariumd::password::SECRET_ENV
+        .into_iter()
+        .filter(|k| std::env::var_os(k).is_some())
+        .collect();
+    if new_path.is_none() && secrets.is_empty() {
         return;
     }
     let Ok(exe) = std::env::current_exe() else {
-        warn!("cannot find this binary; the tools dir is not on PATH");
+        warn!("cannot find this binary to start again; the env stays as it is");
         return;
     };
-    let new = terrariumd::harness_tools::prepend_path(bin, &path);
-    info!(bin = %bin.display(), "starting again with the tools dir first on PATH");
-    let err = std::process::Command::new(exe)
-        .args(std::env::args_os().skip(1))
-        .env("PATH", new)
-        .exec();
-    warn!("cannot start again with the tools dir on PATH: {err}");
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(std::env::args_os().skip(1));
+    if let Some(p) = &new_path {
+        info!(path = %p, "starting again with the tools dir first on PATH");
+        cmd.env("PATH", p);
+    }
+    for k in &secrets {
+        cmd.env_remove(k);
+    }
+    if !secrets.is_empty() {
+        info!("starting again without TERRARIUM_PASSWORD(_FILE) in the env");
+    }
+    let err = cmd.exec();
+    warn!(
+        "cannot start again ({err}); the env stays as it is, and the child processes strip \
+         TERRARIUM_PASSWORD(_FILE) themselves"
+    );
 }
 
 fn log_install(r: &terrariumd::harness_tools::InstallReport) {
@@ -290,6 +314,63 @@ async fn harness_command(
                 }
             }
         }
+    }
+    Ok(())
+}
+
+/// `TERRARIUM_PASSWORD` or `TERRARIUM_PASSWORD_FILE`: set the operator
+/// password at the start, when none is set. The value never reaches the
+/// log.
+fn initial_password(settings: &Settings) -> anyhow::Result<()> {
+    match terrariumd::password::initial_password(
+        &settings.state_dir,
+        terrariumd::password::env_password().as_deref(),
+        settings.password_file.as_deref(),
+    )? {
+        Some(true) => warn!(
+            "set the operator password from TERRARIUM_PASSWORD(_FILE); remove the variable from \
+             the env now, and use `terrariumd password set` to change the password"
+        ),
+        Some(false) => warn!(
+            "TERRARIUM_PASSWORD(_FILE) is set, but a password exists already, so the daemon \
+             ignores it; remove the variable from the env"
+        ),
+        None => {}
+    }
+    Ok(())
+}
+
+/// `terrariumd password set [--stdin]`: write `<state>/operator.password`.
+fn password_command(settings: &Settings, command: &PasswordCommand) -> anyhow::Result<()> {
+    let PasswordCommand::Set { stdin } = command;
+    let password = if *stdin {
+        let mut line = String::new();
+        std::io::stdin()
+            .read_line(&mut line)
+            .context("cannot read the password from stdin")?;
+        line.trim_end_matches(['\r', '\n']).to_owned()
+    } else {
+        let first = rpassword::prompt_password("New operator password: ")
+            .context("cannot read the password from the terminal (use --stdin in a script)")?;
+        terrariumd::password::check_new(&first)?;
+        let again = rpassword::prompt_password("Again: ")
+            .context("cannot read the password from the terminal")?;
+        if first != again {
+            anyhow::bail!("the two passwords are not the same");
+        }
+        first
+    };
+    // The daemon reads the file as its own user: a file of another owner
+    // (root, from `docker compose exec -u root`) would lock it out.
+    terrariumd::password::check_owner(&settings.state_dir)?;
+    let store = terrariumd::password::PasswordStore::new(&settings.state_dir);
+    let version = store.set(&password)?;
+    #[allow(clippy::print_stdout)]
+    {
+        println!(
+            "password set in {} (version {version}); every session has ended",
+            store.path().display()
+        );
     }
     Ok(())
 }

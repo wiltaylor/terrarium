@@ -1046,11 +1046,40 @@ impl<'c> Tx<'c> {
         project: Option<&str>,
         detail: serde_json::Value,
     ) -> ApiResult<()> {
+        self.audit_with_id(
+            &ulid::Ulid::new().to_string(),
+            action,
+            target,
+            project,
+            detail,
+        )
+    }
+
+    /// Change the `detail` of the audit row `id` (an aggregate row, such
+    /// as the `auth.login_failed` count of one address and window).
+    pub fn audit_update(&self, id: &str, detail: serde_json::Value) -> ApiResult<()> {
+        self.tx.execute(
+            "UPDATE audit SET detail = ?2, at = ?3 WHERE id = ?1",
+            rusqlite::params![id, detail.to_string(), now()],
+        )?;
+        Ok(())
+    }
+
+    /// [`Self::audit`] with the row ID given (a ULID), so that a later
+    /// [`Self::audit_update`] can find the row.
+    pub fn audit_with_id(
+        &self,
+        id: &str,
+        action: &str,
+        target: &str,
+        project: Option<&str>,
+        detail: serde_json::Value,
+    ) -> ApiResult<()> {
         self.tx.execute(
             "INSERT INTO audit (id, actor, action, target, project, detail, at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             rusqlite::params![
-                ulid::Ulid::new().to_string(),
+                id,
                 self.actor,
                 action,
                 target,

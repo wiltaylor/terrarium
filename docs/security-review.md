@@ -63,6 +63,7 @@ remote unauthenticated path to code execution or to another agent's secrets.
 | F12 | LOW | Usage | `usage_collector.rs:199,530` | The collector tails any file that a forged `SessionStart` hook names | Fixed: only a regular file under the session area of the harness, that names its session, and that no other agent owns; else a `usage.rejected_path` event |
 | F13 | LOW | Policy | `policy.rs:140`, `api/agents.rs:141` | A `project_admin` adds global targets to `policy.targets`, its own too | Fixed: a global target, a `cross_project` entry, or a `mail_to` entry outside the project needs sysadmin (API and fleet) |
 | F14 | INFO | Dashboard | `eslint.config.js:24`, `lib/sanitize.ts:76` | The sink lint rule has gaps; the sanitizer keeps remote images (the CSP blocks them) | Fixed: the lint rule covers the gaps, with a fixture test; the daemon sends the CSP as a header. Remote images are accepted (§5) |
+| F15 | INFO | API auth | `password.rs`, `api/session.rs` | The new operator password login, JWT sessions, and the CLI session store: a design review of the change (2026-10-27) | Built with the controls of §10; the independent review findings R1 to R10 are fixed (§10); residuals in §10 |
 
 ---
 
@@ -920,3 +921,72 @@ it, because the CSP `img-src` blocks the load.
 **Also fixed (2026-10-24, `8853861`):** `DELETE /api/session` now needs the
 CSRF token when a session cookie is present. This closes a logout CSRF that
 the dashboard client work found (`api/session.rs`, `docs/api.md` §1.1).
+
+## 10. Operator password and JWT sessions (F15, 2026-10-27)
+
+The change: the operator logs in with a password, and a login gives a
+session token (a JWT) that lives for weeks, so the operator does not paste
+`TERRARIUM_TOKEN` again and again. The dashboard keeps the token in an
+`HttpOnly` cookie. The CLI keeps it per daemon URL in
+`$XDG_CONFIG_HOME/terrarium/credentials.json` (`terrarium login`). The
+static token still works everywhere. The contract is `docs/api.md` §1.1.
+The code is `crates/terrariumd/src/password.rs`,
+`crates/terrariumd/src/api/session.rs`, the middleware `require_token` in
+`crates/terrariumd/src/api/mod.rs`, `crates/terrarium/src/credentials.rs`,
+and `dashboard/src/stores/auth.ts`.
+
+### Threats and controls
+
+| Threat | Control | Test |
+|---|---|---|
+| Password storage | Only an Argon2id PHC hash (m = 19 MiB, t = 2, p = 1, a random salt) in `<state>/operator.password`, mode 0600 (set again at a read that finds a looser mode). Each write holds a `flock` on `operator.password.lock`, writes a unique temp file, fsyncs it, renames it, and fsyncs the dir. `terrariumd password set` refuses to run as another user than the owner of the state dir. The daemon never logs or returns the password; the audit rows hold the IP only. A broken file fails closed. `TERRARIUM_PASSWORD(_FILE)` is read from the env only (no flag, so never in argv), and the daemon starts again without both variables, so no child process inherits them. | `password::tests`, `tests/password_cli.rs` (`the_first_password_leaves_the_env`) |
+| Brute force | Per client address (an IPv6 address as its /64): a check takes a slot **before** Argon2, and the checks in flight use the budget (at most 2 per address, and never more than the free failures left), so a parallel burst cannot pass. 5 free failures, then a lockout of 30 s that doubles with each failure up to 15 min (`429` and `Retry-After`). At most 16 checks in flight from all addresses, at most 2 Argon2 checks at one time, so one host cannot queue in front of the operator. 100 failures from all addresses in 10 min lock the password login until the window ends (the static token still works). The map holds at most 10,000 addresses; a new address past that gets no entry, so another address's lockout never reaches it. Every wrong password gets the same `401 "login failed"`. A 12-character minimum. | `a_burst_of_logins_cannot_pass_the_limit`, `password_login_rate_limit`, `tickets_in_flight_count`, `global_budget_locks_password_logins`, `limiter_is_bounded`, `ipv6_keys_by_64` |
+| JWT algorithm confusion | The daemon makes one header, `{"alg":"HS256","typ":"JWT"}`, and takes only `alg` `HS256` with no other header field (`deny_unknown_fields`). `none`, `HS512`, `hs256`, and a `kid` all fail before the signature check. No JWT library: the code uses the `hmac` and `sha2` crates that it used before. The signature compare is constant time. | `verify_is_strict`, `cli_token_is_a_bearer_with_no_csrf` |
+| Token theft | The browser token is `HttpOnly` and `SameSite=Strict`, and `Secure` on HTTPS, so script cannot read it. The page keeps only the CSRF value, in memory; no password, token, or CSRF value goes into web storage, and the old copies are deleted at load. A token has a `kind`: a browser token works only as the cookie, a CLI token only as `Authorization: Bearer`. A logout revokes the session (`sid`) on the server; "log out everywhere" and a new password end every token (the `pv` claim), and a token is minted only for the password version that was checked. A renewed browser session never lives past `auth_time` + `TERRARIUM_SESSION_MAX_AGE` (90 days). The CLI speaks `https://` (rustls, system roots, `TERRARIUM_CA_FILE`), and `terrarium login` refuses plain `http://` to another host without `--insecure-http`. The CLI file is mode 0600 in a 0700 dir. | `password_change_ends_every_session`, `log_out_everywhere`, `mint_needs_the_checked_version`, `renewal_has_an_absolute_cap`, CLI `tls::tests`, `plain_http_login_needs_the_flag`, `login_and_logout_with_a_temp_xdg_dir` |
+| CSRF | Unchanged: a cookie `POST`, `PUT`, `PATCH`, or `DELETE` needs `X-CSRF-Token`, an HMAC of the session's `sid`. The renewal keeps the `sid`, so the CSRF value does not change and there is no race between two tabs. `DELETE /api/sessions` and `PUT /api/auth/password` go through the same check. A wrong `current` password answers `403`, not `401`, so the dashboard does not drop a good session. | `session_cookie_needs_csrf_to_change_state`, `sliding_renewal` |
+| Session fixation | The server makes each `jti` and `sid` from 16 random bytes at the login; a client cannot choose them. A login always starts a new `sid`. A session token cannot buy another session (`401`). A login with a cookie in the request ignores that cookie. | `session_cookie_create_use_and_clear` |
+| Login CSRF | A body needs `Content-Type: application/json`, which a cross-site form cannot send without a CORS preflight; the daemon answers no preflight on `/api`. The attacker would also need the password. | `password_change_ends_every_session` |
+| Replay after logout | The revocation table keys the session (`sid`), so a logout also ends each renewed cookie of that session, until the last one could end. | `sliding_renewal` |
+
+### Findings of the independent review (2026-10-27) and their fixes
+
+| # | Severity | Finding | Fix |
+|---|---|---|---|
+| R1 | HIGH | Parallel requests passed the limiter: the check ran before the wait for Argon2, and the count after. | A `Ticket` is taken before the wait and counts as in flight; at most 2 per address and never more than the free budget left; a second look at the lockouts after the wait. Test: 50 parallel wrong logins from one address, at most 5 Argon2 checks (in fact 2), the rest `429`. |
+| R2 | MEDIUM | The password version was read again at the mint (and at a renewal), after the check. | `OperatorAuth::check` answers the version of the hash that matched; the login mints with it, a renewal with the token's `pv`; a changed version gives `409` and no token. |
+| R3 | MEDIUM | An unbounded queue in front of Argon2 let one host starve the operator. | At most 16 checks in flight from all addresses; past it, `429` at once, before the queue. |
+| R4 | MEDIUM | IPv6 rotation in a /64, no global budget, a shared overflow bucket that locked out new addresses, and an O(n) prune at each failure. | /64 keys; 100 failures in 10 min lock the password login globally (the static token still works); no overflow bucket (an untracked address has no lockout of its own; the global budget counts it); a prune of a full map at most once a minute. |
+| R5 | MEDIUM | The CLI sent the password and a 90-day token over plain `http://`. | `https://` in the CLI client (rustls, system roots, `TERRARIUM_CA_FILE`); `terrarium login` refuses plain `http://` to a host that is not loopback without `--insecure-http`, and warns loudly with it. |
+| R6 | LOW | The password file write raced across processes, and did not fsync the dir. | A unique temp file, a `flock` on `operator.password.lock` around each read-modify-write, an fsync of the file and of the dir. Test: 8 threads with separate stores bump 80 times, no version lost. |
+| R7 | LOW | Sliding renewal had no absolute cap. | The `auth_time` claim; a renewal copies it and caps `exp` at `auth_time` + `TERRARIUM_SESSION_MAX_AGE` (default 90 days); an older browser token gets `401`. |
+| R8 | LOW | `TERRARIUM_PASSWORD` could reach child processes and argv. | No `--password` flag; the daemon starts again without both variables (a process cannot clear its own env without `unsafe`); the login commands and npm strip them too. Test: `/proc/<pid>/environ` of a running daemon. |
+| R9 | LOW | The mode of the password file was not checked on read; a root `password set` could lock the daemon out. | A read sets 0600 again, with a warning; `terrariumd password set` refuses to run as another user than the owner of the state dir. |
+| R10 | LOW | One audit row per failed login let an attacker flood the audit table. | One `auth.login_failed` row per address per 10 min with a `count`, and one `auth.lockout` row when a lockout starts; the success rows stay. |
+
+### Residuals
+
+- **The limiter is in memory, and the lockouts are a denial of service.**
+  Behind a reverse proxy, every client shares the proxy's address, so an
+  attacker can lock the operator's password login for up to 15 min; with
+  100 failures from many addresses, for up to 10 min for everyone. The
+  static token still works in both cases. The daemon does not trust
+  `X-Forwarded-For`, on purpose. A restart clears the counts.
+- **Long sessions.** A stolen cookie or CLI token works until it ends (30
+  and 90 days by default, and a browser session at most 90 days from the
+  login through its renewals) or until "log out everywhere". Shorten
+  `TERRARIUM_SESSION_TTL`, `TERRARIUM_SESSION_MAX_AGE`, and
+  `TERRARIUM_CLI_SESSION_TTL` on a shared machine.
+- **`TERRARIUM_PASSWORD` in `.env`.** The daemon process drops it, but it
+  stays in `.env` and in the container's configuration (`docker inspect`)
+  until the operator removes it. The daemon logs a warning at each start
+  while it is set. `terrariumd password set` is the better path.
+- **`--insecure-http`.** With the flag, the CLI sends the password in clear
+  text. It is for a network that encrypts by itself.
+- **The CLI token file.** It is a bearer credential on disk, protected only
+  by the file mode, like an SSH key with no passphrase.
+- **The key file.** `session.key` signs every token. Anyone who reads the
+  state dir can mint tokens; the state dir already holds the database and
+  the harness credentials.
+- **The `v1.` cookies** of the older daemon are refused. The dashboard shows
+  the login screen once after the update.
+

@@ -27,6 +27,7 @@ fn the_env_reaches_the_routers() {
         .env("TERRARIUM_ARTIFACT_LISTEN", "")
         .env("TERRARIUM_WS_QUERY_TOKEN", "1")
         .env("TERRARIUM_SESSION_TTL", "30m")
+        .env("TERRARIUM_CLI_SESSION_TTL", "2d")
         .env("TERRARIUM_HARNESS_VERSION_POLICY", "refuse")
         .output()
         .unwrap();
@@ -68,6 +69,7 @@ async fn child_reads_the_env() {
     );
     assert!(web.ws_query_token);
     assert_eq!(web.session_ttl.as_secs(), 1800);
+    assert_eq!(web.cli_session_ttl.as_secs(), 2 * 86_400);
     // `TERRARIUM_ARTIFACT_LISTEN=` (empty): no listener of its own.
     assert_eq!(s.artifact_listen(), None);
     assert_eq!(

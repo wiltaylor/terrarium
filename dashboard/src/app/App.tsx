@@ -1,10 +1,10 @@
 import { Navigate, Route, Router, useParams } from "@solidjs/router";
-import { For, lazy, Show } from "solid-js";
+import { For, lazy, Match, Show, Switch } from "solid-js";
 import { isMock } from "../api";
 import { auth } from "../stores";
 import { Layout } from "./Layout";
 import { MOVED_ROUTES } from "./nav";
-import { TokenScreen } from "./TokenScreen";
+import { LoginScreen } from "./LoginScreen";
 import { Home } from "../features/home/Home";
 import { AgentsPage } from "../features/agents/AgentsPage";
 import { BoardPage } from "../features/board/BoardPage";
@@ -44,9 +44,19 @@ function NotFound() {
 
 export function App() {
   return (
-    // Signed out: the token screen alone. A session that ended keeps the
-    // router mounted; the layout shows the token screen over the page.
-    <Show when={auth.mode() !== "none"} fallback={<TokenScreen />}>
+    // At load: wait for `GET /api/session` (the cookie is the cache).
+    // Signed out: the login screen alone. A session that ended keeps the
+    // router mounted; the layout shows the login screen over the page.
+    <Switch>
+      <Match when={auth.mode() === "checking"}>
+        <div class="empty" role="status">
+          Loading…
+        </div>
+      </Match>
+      <Match when={auth.mode() === "none"}>
+        <LoginScreen />
+      </Match>
+      <Match when={true}>
       <Router root={Layout}>
         <Route path="/" component={Home} />
         <Route path="/projects" component={ProjectsPage} />
@@ -76,6 +86,7 @@ export function App() {
         <For each={MOVED_ROUTES}>{(r) => <Route path={r.path} component={() => <Navigate href={r.to} />} />}</For>
         <Route path="*" component={NotFound} />
       </Router>
-    </Show>
+      </Match>
+    </Switch>
   );
 }
