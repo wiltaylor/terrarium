@@ -1063,3 +1063,53 @@ token reports it, and waits for the harness of an agent to refresh it.
   `COPILOT_GITHUB_TOKEN` set, it is not known whether Copilot writes a token
   into `config.json`. A launch warns (a `warning` event) when the shared file
   holds a token again, and the next quiet migration moves it.
+
+## 12. The config repo (F17, 2026-10-28)
+
+The change: the operator's prompts, harness settings, and an export of
+the declarative objects live in a git repo, `config/terrarium/`
+(`/config/terrarium`, PLAN §8.3), which Terrarium instances share through a
+remote. A repo that leaves the machine must never hold a secret. The code
+is `crates/terrariumd/src/config_repo.rs`, `api/config.rs`,
+`crates/terrarium-core/src/secret_scan.rs`, and `git.rs` (`GitRunner`).
+
+### What may go in, and what never does
+
+| In the repo | Never in the repo |
+|---|---|
+| `prompts/**/*.md`, `harness/**/*.{json,toml,yaml}`, `export/**/*.{toml,json,yaml,md}`, `README.md`, `.gitignore` | The harness homes (`config/<harness>`: logins, sessions, history), `state/` (the database, the credential store, the plan accounts, `session.key`, `operator.password`), `.env`, an API key, a login, a token, a password, a host token or enrol token, a TLS key, artifact data, session transcripts, `.terrarium-defaults.json`, the `.new` files |
+
+### Threats and controls
+
+| Threat | Control | Test |
+|---|---|---|
+| A credential file lands in the repo | The `.gitignore` is an allowlist: `/*` ignores everything, then only the known dirs and file types come back, then the credential file names (`.env*`, `auth.json`, `.credentials.json`, `credentials.json`, `hosts.yml`, `*.pem`, `*.key`, `id_*`) are ignored again. The daemon writes the file at each start and before each commit, so an edit does not stay. | `init_writes_the_allowlist_and_only_known_paths_are_committed` |
+| A secret in an allowed file (a token pasted into a prompt or a settings file) | The secret scan runs on each staged blob (the index, not the work tree) before each daemon commit. The rules: the token patterns (`sk-ant-`, `sk-or-`, `sk-proj-`, GitHub, AWS, Slack, private keys, JWTs, the host tokens `thk_` and `the_`), a credential-like key with a value of 16 characters or more (env references such as `$ZAI_API_KEY`, placeholders, and paths are not values), a run of 32 or more characters with an entropy over 4.0 bits, and the credential file names. A hit blocks the commit and unstages. | `the_scan_blocks_each_secret_pattern`, `secret_scan::tests` |
+| A secret in a commit made by hand with git | The daemon installs a `pre-commit` hook that runs `terrarium admin config scan --staged` (or `terrariumd config scan --staged`). With no Terrarium binary on `PATH`, the hook fails closed. | `the_hook_blocks_a_manual_commit_with_a_secret` |
+| The scan leaks what it finds | A finding holds the path, the line, and the rule, never the matched text. The API error, the CLI, and the hook print only these. | `findings_never_hold_the_value`, the value check in `the_scan_blocks_each_secret_pattern` |
+| The export copies a secret or an instance ID | The export names a credential or a subscription by its name only, drops the user part of each repo URL, drops the mail `thread` of a schedule, and holds no ULID. Event sources (webhook secrets), hosts, and subscriptions are not exported. | `the_export_has_no_secrets_and_no_instance_ids` |
+| The remote credential lands in `.git/config` or the repo | `remote set` keeps the URL and the credential name in `<state>/config-repo.json` (mode 0600). No `[remote]` is written: each fetch and push names the URL on the command line. The token reaches git through a one-shot credential helper in a 0700 run dir, the SSH key through `GIT_SSH_COMMAND` with a 0600 key copy, as for a workspace clone. A URL with a user or a password is refused. The status shows the URL without its user part. | `two_instances_sync_a_prompt_edit_both_ways`, `remote_urls_with_secrets_and_agents_are_refused`, `urls_show_no_credentials` |
+| A pull runs code from the remote | Each git command runs with the hardening of the workspace updates (`core.hooksPath=/dev/null`, no fsmonitor, the dangerous transports off, no global or system config, no askpass). The daemon makes its own commits with `--no-verify` after its own scan. Pulled prompts and settings are data; pulled `export/` files apply only with `pull --apply`, through the fleet checks and rights. | `git.rs` (`HARDEN`), `a_pulled_export_is_a_plan_until_apply` |
+| A sync loses local work | A merge is a fast-forward or a merge commit. A conflict stops the merge with the files listed; nothing is reset, and no push is forced. `abort` goes back to the last local commit. | `a_conflict_stops_with_no_data_loss` |
+| An agent changes the shared config | Every `/api/config/...` route needs the operator or a sysadmin; `remote set` needs the credential rights too. The sandbox does not bind the config repo. | `remote_urls_with_secrets_and_agents_are_refused` |
+
+### Residuals
+
+- **The scan is a pattern list.** A secret with no known prefix, a short
+  value, or low entropy (a dictionary password) can pass. The allowlist
+  and the review of each diff stay the main control. Read
+  `t admin config diff` before each commit.
+- **`git commit --no-verify` skips the hook.** A commit by hand can skip
+  the scan on purpose. A daemon sync then pushes it. Do not commit by hand
+  with `--no-verify`.
+- **The allow marker.** A line with `terrarium-scan: allow` skips the
+  `credential-key` and `high-entropy` rules (not the token patterns). A
+  reviewer must check each one.
+- **The history.** A secret that reached the remote before these controls,
+  or through `--no-verify`, stays in the history. Rotate the secret; a
+  history rewrite is a manual step.
+- **A pulled persona is a prompt.** A shared repo lets each instance
+  change the prompts and the harness settings of the others (for example
+  a Claude `permissions` block or a Codex `mcp_servers` entry). Give the
+  remote write access only to operators that you trust as much as your
+  own.

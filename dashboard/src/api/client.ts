@@ -119,6 +119,14 @@ import type {
   VersionCompare,
   VersionPatch,
   VersionStatus,
+  ConfigCommitBody,
+  ConfigCommitResult,
+  ConfigLogEntry,
+  ConfigPendingDefault,
+  ConfigPullResult,
+  ConfigRemoteBody,
+  ConfigStatus,
+  ConfigSyncResult,
   WikiDiff,
   WikiPage,
   WikiPageSummary,
@@ -335,6 +343,12 @@ export interface Api {
     probe(name: string): Promise<ProbeOutcome>;
     verify(name: string): Promise<VerifyResult>;
     logout(name: string): Promise<Subscription>;
+    /**
+     * Make the plan account the default account of its harness (PLAN §16.3).
+     * The old default stops being one. `422 invalid` for an API key or a
+     * subscription with no plan account of Claude Code, Codex, or Copilot.
+     */
+    makeDefault(name: string): Promise<Subscription>;
     /** Write-only. The answer never has the key. */
     setApiKey(name: string, input: ApiKeyInput): Promise<Subscription>;
     detect(): Promise<DetectedLogin[]>;
@@ -463,6 +477,35 @@ export interface Api {
     resolve(key: string, project: string): Promise<TemplateResolved>;
     /** `POST /api/templates/from-agent/{agent}`: a template from the agent's settings now. */
     fromAgent(agent: string, body: TemplateFromAgent): Promise<AgentTemplate>;
+  };
+
+  /**
+   * The config repo (PLAN §8.3, docs/api.md §25). The operator or a
+   * sysadmin only. A daemon with no config repo answers `501 not_available`.
+   * A scan block is `422 invalid` with `details.findings`; a merge conflict
+   * is `409 conflict` with `details.conflicts`.
+   */
+  config: {
+    status(): Promise<ConfigStatus>;
+    /** `GET /api/config/diff?path=`: the unified diff of one file, or of all changes. */
+    diff(path?: string): Promise<{ diff: string }>;
+    log(limit?: number): Promise<ConfigLogEntry[]>;
+    commit(body: ConfigCommitBody): Promise<ConfigCommitResult>;
+    /** Fetch and merge. With `apply`, apply the `export/` changes as fleets; else their plans wait. */
+    pull(body?: { apply?: boolean }): Promise<ConfigPullResult>;
+    push(): Promise<{ pushed: boolean }>;
+    /** Commit, fetch, merge, and push. */
+    sync(body?: { message?: string; apply?: boolean }): Promise<ConfigSyncResult>;
+    /** Leave a merge that stopped on a conflict. */
+    abort(): Promise<{ aborted: true }>;
+    setRemote(body: ConfigRemoteBody): Promise<ConfigStatus>;
+    clearRemote(): Promise<ConfigStatus>;
+    /** The new defaults that wait as `<file>.new`. */
+    defaults(): Promise<ConfigPendingDefault[]>;
+    /** Take the new default: `<file>.new` replaces the file. Answers the defaults that still wait. */
+    acceptDefault(path: string): Promise<ConfigPendingDefault[]>;
+    /** Keep the file: delete `<file>.new`. Answers the defaults that still wait. */
+    keepDefault(path: string): Promise<ConfigPendingDefault[]>;
   };
 
   /** docs/host-protocol.md, the daemon's `api/hosts.rs`. */
@@ -720,6 +763,7 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       probe: (name) => post(`${sub(name)}/probe`),
       verify: (name) => post(`${sub(name)}/verify`),
       logout: (name) => post(`${sub(name)}/logout`),
+      makeDefault: (name) => post(`${sub(name)}/default`),
       setApiKey: (name, input) => post(`${sub(name)}/api-key`, input),
       detect: () => get("/api/subscriptions/detect"),
       startLogin: (req) => post("/api/subscriptions/login", req),
@@ -801,6 +845,22 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       remove: (key) => del(`/api/templates/${seg(key)}`),
       resolve: (key, project) => get(`/api/templates/${seg(key)}/resolve`, { project }),
       fromAgent: (agent, body) => post(`/api/templates/from-agent/${seg(agent)}`, body),
+    },
+
+    config: {
+      status: () => get("/api/config/status"),
+      diff: (path) => get("/api/config/diff", { path }),
+      log: (limit) => get("/api/config/log", { limit }),
+      commit: (body) => post("/api/config/commit", body),
+      pull: (body = {}) => post("/api/config/pull", body),
+      push: () => post("/api/config/push"),
+      sync: (body = {}) => post("/api/config/sync", body),
+      abort: () => post("/api/config/abort"),
+      setRemote: (body) => put("/api/config/remote", body),
+      clearRemote: () => t.request<ConfigStatus>("DELETE", "/api/config/remote"),
+      defaults: () => get("/api/config/defaults"),
+      acceptDefault: (path) => post("/api/config/defaults/accept", { path }),
+      keepDefault: (path) => post("/api/config/defaults/keep", { path }),
     },
 
     hosts: {

@@ -18,25 +18,55 @@ pub enum SessionStart<'a> {
     Resume(&'a HarnessSessionId),
 }
 
-/// The `--settings` JSON: the Terrarium hooks and the keys that stop the
-/// start-up dialogs.
+/// The `--settings` JSON, in three layers (PLAN §8.2):
+///
+/// 1. The user settings file (`Agent::harness_settings`, from
+///    `<config repo>/harness/claude/settings.json`). With
+///    `--setting-sources ""`, Claude Code reads no other settings file,
+///    so this is the only place for the operator's own keys.
+/// 2. The per-agent options: none today (`--model` is a flag).
+/// 3. The forced keys, which always win:
+///    - `hooks`: the Terrarium hooks replace any `hooks` of the user
+///      file. The runner learns each turn, tool call, and question from
+///      them.
+///    - [`crate::ClaudeFlags::quiet_settings`]: the keys that keep the
+///      start free of dialogs.
+///    - [`crate::ClaudeFlags::removed_settings`]: removed (they would stop
+///      the hooks).
+///    - `env`: the names that the launch sets (`CLAUDE_CONFIG_DIR`, the
+///      quiet env, `IS_SANDBOX`) are removed from the user `env`, so the
+///      home and the quiet start stay as the sandbox needs them.
 ///
 /// Each hook runs `<hook_program> hook <Name>`. The CLI forwards the stdin
 /// JSON to `TERRARIUM_SOCKET`. The payload also names the event in
 /// `hook_event_name`, so the argument is only a convenience.
-pub fn settings_json(opts: &ClaudeOptions) -> Value {
+pub fn settings_json(opts: &ClaudeOptions, agent: &Agent) -> Value {
+    let f = &opts.flags;
+    let mut root = match &agent.harness_settings {
+        Some(Value::Object(m)) => m.clone(),
+        _ => Map::new(),
+    };
     let mut hooks = Map::new();
-    for name in opts.flags.hook_events {
+    for name in f.hook_events {
         let command = format!("{} hook {name}", opts.hook_program);
         hooks.insert(
             (*name).to_owned(),
             json!([{"matcher": "", "hooks": [{"type": "command", "command": command}]}]),
         );
     }
-    let mut root = Map::new();
     root.insert("hooks".into(), Value::Object(hooks));
-    for (key, value) in opts.flags.quiet_settings {
+    for (key, value) in f.quiet_settings {
         root.insert((*key).to_owned(), Value::Bool(*value));
+    }
+    for key in f.removed_settings {
+        root.remove(*key);
+    }
+    if let Some(Value::Object(env)) = root.get_mut("env") {
+        env.remove(f.config_env);
+        env.remove(f.root_env.0);
+        for (key, _) in f.quiet_env {
+            env.remove(*key);
+        }
     }
     Value::Object(root)
 }
@@ -53,7 +83,8 @@ pub fn settings_json(opts: &ClaudeOptions) -> Value {
 ///   `$CLAUDE_CONFIG_DIR/CLAUDE.md` either, so the operator's personal
 ///   instructions stay out of agents. Whether a `CLAUDE.md` in the
 ///   workspace still loads is not tested.
-/// - `--settings '<json>'`: see [`settings_json`].
+/// - `--settings '<json>'`: the user settings with the forced keys on top;
+///   see [`settings_json`].
 /// - `--system-prompt-snapshot off`: without it, Claude Code freezes the
 ///   system prompt at the first request, and a `--resume` with a changed
 ///   template still sends the old prompt.
@@ -70,7 +101,7 @@ pub fn build(
 ) -> LaunchSpec {
     let f = &opts.flags;
     let cwd = opts.harness_cwd(agent);
-    let settings = settings_json(opts).to_string();
+    let settings = settings_json(opts, agent).to_string();
     let mut spec = LaunchSpec::new(opts.program.as_str(), cwd)
         .arg(f.yolo)
         .arg(f.setting_sources)
@@ -188,7 +219,8 @@ mod tests {
         let s: Value = serde_json::from_str(value_after(&spec, "--settings").expect("settings"))
             .expect("json");
         assert_eq!(s["skipDangerousModePermissionPrompt"], true);
-        assert_eq!(s["autoMemoryEnabled"], false);
+        // Not forced: it comes from the user settings file.
+        assert!(s.get("autoMemoryEnabled").is_none());
         for name in [
             "SessionStart",
             "UserPromptSubmit",
@@ -207,6 +239,64 @@ mod tests {
             assert_eq!(s["hooks"][name][0]["hooks"][0]["type"], "command");
         }
         assert!(s["hooks"].get("WorktreeCreate").is_none());
+    }
+
+    /// The user settings come first; the forced keys win over them.
+    #[test]
+    fn user_settings_layer_under_the_forced_keys() {
+        let opts = ClaudeOptions::default();
+        let mut agent = test_agent(None);
+        agent.harness_settings = Some(json!({
+            "autoMemoryEnabled": false,
+            "theme": "dark",
+            "permissions": {"deny": ["WebFetch"]},
+            "skipDangerousModePermissionPrompt": false,
+            "disableAllHooks": true,
+            "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "evil"}]}],
+                      "WorktreeCreate": []},
+            "env": {"CLAUDE_CONFIG_DIR": "/elsewhere", "DISABLE_TELEMETRY": "0", "MY_VAR": "1"},
+        }));
+        let spec = build(&opts, &agent, SessionStart::Fresh("x"), None, false);
+        let s: Value = serde_json::from_str(value_after(&spec, "--settings").expect("settings"))
+            .expect("json");
+        // Tweakable keys pass through.
+        assert_eq!(s["autoMemoryEnabled"], false);
+        assert_eq!(s["theme"], "dark");
+        assert_eq!(s["permissions"]["deny"][0], "WebFetch");
+        assert_eq!(s["env"]["MY_VAR"], "1");
+        // Forced keys win.
+        assert_eq!(s["skipDangerousModePermissionPrompt"], true);
+        assert!(s.get("disableAllHooks").is_none());
+        assert_eq!(
+            s["hooks"]["Stop"][0]["hooks"][0]["command"],
+            "terrarium hook Stop"
+        );
+        assert!(s["hooks"].get("WorktreeCreate").is_none());
+        assert!(s["env"].get("CLAUDE_CONFIG_DIR").is_none());
+        assert!(s["env"].get("DISABLE_TELEMETRY").is_none());
+        // The launch env still sets them.
+        assert_eq!(spec.env["CLAUDE_CONFIG_DIR"], "/auth/claude");
+        assert_eq!(spec.env["DISABLE_TELEMETRY"], "1");
+    }
+
+    /// The packaged default settings file parses, and holds only keys
+    /// that Terrarium does not force.
+    #[test]
+    fn the_packaged_default_has_no_forced_key() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../defaults/harness/claude/settings.json");
+        let v = terrarium_core::harness_settings::load(&path, terrarium_core::HarnessId::Claude)
+            .expect("parses")
+            .expect("exists");
+        let f = ClaudeOptions::default().flags;
+        for key in v.as_object().expect("object").keys() {
+            assert!(key != "hooks", "hooks are forced");
+            assert!(
+                !f.quiet_settings.iter().any(|(k, _)| k == key),
+                "{key} is forced"
+            );
+            assert!(!f.removed_settings.contains(&key.as_str()), "{key}");
+        }
     }
 
     #[test]

@@ -891,6 +891,7 @@ An agent is the core `Agent` with bookkeeping fields:
 | `subscription`, `model`, `prompt` | Absent when not set. |
 | `subscription_pool` | The account pool (PLAN §16.3): subscription names of one provider that the harness can spend, which a swap may pick (§6.2). The current `subscription` is always a member. Absent when empty. |
 | `system_prompt` | The agent's base system prompt (below). Absent when not set. |
+| `persona` | The persona (below): `leader`, `worker`, `none`, or a prompt file name. Absent: by role. |
 | `roles` | Roles above `member`: `project_admin`, `sysadmin`. |
 | `status` | `starting`, `idle`, `waiting`, `working`, `blocked`, `error`, `stopped`, `restarting`. `waiting`: the turn ended, and the agent has one or more open waits (§6.7). `idle`: the turn ended, and the agent has no open wait. |
 | `waits` | The number of open waits (§6.7). Absent when it is 0. |
@@ -908,7 +909,7 @@ An agent is the core `Agent` with bookkeeping fields:
 | `GET /api/agents?project=` | | `200` agents by ID | read; an agent defaults to its project |
 | `POST /api/agents` | an agent definition, or `template` and the fields that differ (§21.3) | `201` agent | project_admin of `project`; some `policy` entries need sysadmin (below) |
 | `GET /api/agents/{id}` | | `200` agent, with `subscription_detail` (below) | read |
-| `PATCH /api/agents/{id}` | `{"harness"?, "subscription"?, "subscription_pool"?, "model"?, "prompt"?, "system_prompt"?, "policy"?, "restart"?, "new_session_on_prompt_change"?}` | `200` agent | project_admin; some `policy` entries need sysadmin (below) |
+| `PATCH /api/agents/{id}` | `{"harness"?, "subscription"?, "subscription_pool"?, "model"?, "prompt"?, "system_prompt"?, "persona"?, "policy"?, "restart"?, "new_session_on_prompt_change"?}` | `200` agent | project_admin; some `policy` entries need sysadmin (below) |
 | `DELETE /api/agents/{id}` | `?confirm=true` when live; `?keep_workspace=true` | `204` | project_admin |
 
 `DELETE` stops a live agent, waits for it to end (up to 10 s), and moves
@@ -937,7 +938,7 @@ the field sets `true`, the same as an agent file.
 
 `system_prompt` (optional, at most 32 KiB, else `422 invalid`): the
 agent's base system prompt (PLAN §8). It can use the variables of the
-prompt templates (`prompts/README.md`). An empty text is the same as no
+prompt templates (`defaults/prompts/README.md`). An empty text is the same as no
 text.
 
 - Not set: the harness keeps its own default system prompt, and the
@@ -945,6 +946,17 @@ text.
 - Set: the rendered `system_prompt`, a blank line, and the rendered
   `prompt` template replace the harness's default system prompt. The
   Terrarium template always stays.
+
+`persona` (optional): the persona prompt (PLAN §8.1), a file of the
+config repo's `prompts/`. `leader`, `worker`, `none`, or another file name
+(letters, digits, `-`, `_`; else `422 invalid`). Not set: by role,
+`leader.md` for an agent with `project_admin` or `sysadmin`, else
+`worker.md`. The persona replaces the harness's default system prompt,
+and the protocol template comes after it, as for a `system_prompt`. A set
+`system_prompt` wins over the persona. `none` keeps the harness's default
+prompt. A named persona with no file stops the start (`422`); the persona
+by role with no file, or with only HTML comments, is no persona. `PATCH`
+takes `null` or `""` to go back to by role.
 
 A change applies at the next start or restart. The prompt hash covers the
 whole text, so with `new_session_on_prompt_change` a changed
@@ -1821,7 +1833,7 @@ Kinds:
 | `wiki.created`, `wiki.saved`, `wiki.deleted`, `wiki.restored`, `wiki.moved`, `wiki.reviewed` | `{page_id, path, title, rev, ...}`: `summary`, `author`, `from_rev`, `from`, `decision`, `comment`. |
 | `artifact.created`, `artifact.linked`, `artifact.deleted`, `artifact.pruned` | `{artifact_id, key, uid, name, kind, ...}`: `size`, `content_type`, `sha256`, `link_kind`, `ref`. |
 | `version.created`, `version.updated`, `version.submitted`, `version.approved`, `version.rejected`, `version.released` | `{version_id, name, status, ...}`: `fields`, `comment`, `thread_id`, `cards`. |
-| `usage.sample`, `usage.rejected_path`, `quota.sample`, `quota.alert`, `quota.blocked`, `quota.resumed`, `subscription.offer`, `subscription.expired`, `self_report` | See §16.7. |
+| `usage.sample`, `usage.rejected_path`, `quota.sample`, `quota.alert`, `quota.blocked`, `quota.resumed`, `subscription.offer`, `subscription.expired`, `subscription`, `self_report` | See §16.7. |
 | `lease` | `{change, target, lease_id, expires_at, exclusive, state}`. `change` is `granted`, `extended`, or `ended` (a revoke or the expiry). The `agent` is the lease holder. The supervisor types a pointer from it (§17.7). |
 | `target` | `{change, target, ...}`. `change` is `reconciled` (`from`, `state`, `snapshots_cleared`): a `status` found the target other than the store said. `snapshots_dropped` (`snapshots_dropped`): a snapshot list found that the host lost stored names. `snapshot_deleted` (`snapshot`, `scope`, `machines`, `agent`?): a snapshot delete (§17.3). |
 | `schedule` | `{change, schedule, name, project, run?, status?, trigger?}`. `change` is `created`, `updated`, `deleted`, `enabled`, `disabled`, `run_started`, or `run_finished`. `schedule` is the schedule ULID. A run event has `run`, `status`, and `trigger` (§19). |
@@ -2353,7 +2365,7 @@ A subscription:
  "local_estimate_only":false,"has_api_key":false,"held_agents":0,"default_models":{},
  "account":{"harness":"claude","has_login":true,"login":"wil@example.com","source":"migration",
             "created_at":"...","updated_at":"..."},
- "agents":[{"id":"01K8...","name":"lead","project":"terrarium"}]}
+ "agents":[{"id":"01K8...","name":"lead","project":"terrarium"}],"default":true}
 ```
 
 | Field | Meaning |
@@ -2367,6 +2379,7 @@ A subscription:
 | `held_agents` | Agents whose turns wait for a reset of this subscription. |
 | `account` | The plan account of the subscription (PLAN §16.3), when it has one: `harness` (whose login it holds), `has_login` (the credential file is there), `login` (the Copilot login name, or the email of a Claude login), `source` (`migration`: the shared login moved here at a daemon start; `login`: the login wizard), `created_at`, `updated_at`. Never a secret. |
 | `agents` | The agents whose current `subscription` this is: `[{id, name, project}]`. Always present. |
+| `default` | `true` when the plan account is the default account of its harness (PLAN §16.3): a Claude Code, Codex, or Copilot agent with no subscription runs on it. Each harness has one default or none. Always present. |
 | `default_models` | The model that each harness gets on this subscription when the agent sets no `model`, by harness name, for example `{"pi":"glm-5.3-flash","claude":"glm-5.3"}` for a Z.ai key. Only the harnesses where the daemon picks the model: pi (the provider's default from the pi adapter's table; no entry when pi refuses the subscription) and Claude Code on Z.ai. `{}` when every harness keeps its own default. Always present. |
 
 Names follow the project name rules; `login` and `detect` are reserved.
@@ -2428,7 +2441,8 @@ keep their card.
   subscription.
 - `GET /api/subscriptions/{name}/models`: the operator, a `sysadmin`, or a
   `project_admin` of a project with an agent on the subscription.
-- Create, delete, probe, verify, detect: `sysadmin` or the operator.
+- Create, delete, probe, verify, detect, and the default account:
+  `sysadmin` or the operator.
 - Login sessions, logout, and API keys: the operator only (PLAN §10,
   §16.1). Any agent gets `403 forbidden`.
 - `GET /api/usage`: an agent sees its own project only, unless it is a
@@ -2438,6 +2452,13 @@ keep their card.
   checks, the probes, and the model lists read the account; before the
   migration of a shared login, they read the shared home. None of them
   refreshes a token.
+- The default account (PLAN §16.3). Each of Claude Code, Codex, and
+  Copilot has one default plan account or none. A daemon start makes the
+  oldest account of each harness with no default record its default (the
+  `created_at` of `account.json`, else of the subscription). The first
+  account that a login makes for a harness becomes its default. A second
+  account does not change the default. A delete or a logout of the default
+  makes the oldest account left the default (`reason: replaced`).
 - Expired logins. A status check (verify, the start-up check) that says
   "logged out" sets `expired` when the subscription had a login
   (`logged_in`, `expiring`, `expired`), else `missing`. A probe answer of
@@ -2459,6 +2480,7 @@ keep their card.
 | `POST /api/subscriptions/{name}/probe` | | `{subscription, probe_status, error?, windows}`. Here `subscription` is the **name** only, not the object. A failed probe is still `200`. |
 | `POST /api/subscriptions/{name}/verify` | | `{subscription, status}`. Here `subscription` is the **full** subscription (§16.1), after the check. `status` is `{kind, harness, provider, pi_provider?, logged_in, plan?, detail?}`. The harness status command runs against the subscription's plan account (PLAN §16.3; before its migration, the shared home) and sets `login_status` (and `plan`, when the subscription has none). A stored API key counts as logged in: `status` is then `{logged_in: true, detail}`. |
 | `POST /api/subscriptions/{name}/logout` | | The subscription (§16.1), with `login_status` `missing`. A plan account: removes the account directory and nothing else; no harness command runs, so no other account and no shared file changes. `409 conflict` while an agent's current subscription is this one. A subscription with no account (a shared login before its migration): runs `claude auth logout`, `codex logout`, or `copilot logout` against the shared home. pi has no logout command: `422 invalid`. A `zai` subscription has no logout either (`422 invalid`): the Claude logout would end the shared Claude login. |
+| `POST /api/subscriptions/{name}/default` | | The subscription (§16.1), with `default: true`. Its plan account becomes the default account of its harness; the old default stops being one, in the same transaction. The audit row is `subscription.default` (`{harness, from, to, reason}`), and a `subscription` event (§16.7) follows. `422 invalid` for an API-key subscription, a subscription with no plan account, and a pi account or a provider that is not the plan provider of the harness. `404 not_found` for an unknown name. |
 | `POST /api/subscriptions/{name}/api-key` | `{provider, key, plan?, base_url?, models?}` | The subscription, without the key. `plan` is for `zai` only. See §16.5. |
 | `GET /api/subscriptions/detect` | | Logins found in the harness homes that no subscription covers (same provider, and the harness is in `harnesses`): `[{kind, harness, provider, pi_provider?, logged_in, plan?, detail?, suggested}]`. `suggested` is a subscription definition. |
 | `POST /api/subscriptions/login` | `{kind, provider?, name?}` | `201` with the login session (§16.4). |
@@ -2720,6 +2742,7 @@ status that the runner reports. An agent may report for itself only.
 | `quota.resumed` | `{cause, holds_left}`. |
 | `subscription.offer` | `{login, suggested}`: a login found at daemon start that no subscription covers. |
 | `subscription.expired` | `{subscription, from, reason}`: the login changed into `expired`. |
+| `subscription` | `{change, harness, from, to, reason?}`. `change` is `default`: the default account of `harness` is now `to` (`reason` is `set` for the API, `backfill` for the oldest account at a start, `first_account` for the first login of the harness, `replaced` when the oldest account left takes over from a deleted or logged-out default). Or `default_cleared`: the default `from` was deleted or logged out; a `default` event with `replaced` follows when an account is left. The audit row of `default` is `subscription.default`. |
 | `credentials.migrated` | `{harness, moved, backups, skipped, pi_link}`: the start-up migration moved a shared login into an account (PLAN §16.3). The audit row is `credentials.migrate`. |
 | `agent.swapped` | `{from, to, applied, auto, reason}`: an agent moved to another account (§6.2). The audit row is `agent.swap`. |
 | `self_report` | `{status, note}`. |
@@ -4335,7 +4358,7 @@ A template:
 |---|---|
 | `name` | 1-63 of `a-z`, `0-9`, `-`, `_`. Unique in its scope: the project, or the global scope. A project template and a global template can have the same name. |
 | `project` | The project. `null` is a global template. |
-| `spec` | An agent definition (§6.1) without `name` and `project`: `harness` (required), `subscription`, `subscription_pool`, `model`, `prompt`, `system_prompt`, `roles`, `policy`, `restart`, `new_session_on_prompt_change`. The daemon checks it with the rules of an agent definition and keeps it in a normal form: the defaults of `policy` and `restart` filled in, no empty `roles`, no empty `system_prompt`, no `new_session_on_prompt_change` when it is `true`. A `system_prompt` over 32 KiB is `422 invalid`. Another key (`name`, `project`, `template`, or an unknown key) is `422 invalid` with `details.field = "spec"`. |
+| `spec` | An agent definition (§6.1) without `name` and `project`: `harness` (required), `subscription`, `subscription_pool`, `model`, `prompt`, `system_prompt`, `persona`, `roles`, `policy`, `restart`, `new_session_on_prompt_change`. The daemon checks it with the rules of an agent definition and keeps it in a normal form: the defaults of `policy` and `restart` filled in, no empty `roles`, no empty `system_prompt`, no `new_session_on_prompt_change` when it is `true`. A `system_prompt` over 32 KiB is `422 invalid`. Another key (`name`, `project`, `template`, or an unknown key) is `422 invalid` with `details.field = "spec"`. |
 | `revision` | `1` at the create. Each change of the name, the description, or the spec adds `1`. A `PATCH` with the same values changes nothing. |
 | `source` | `api`, `file` (a `[[templates]]` of `projects/<name>.toml`), or `fleet:<name>` (§18.1). A `file` template refuses `PATCH` and `DELETE` with `409 file_managed`. |
 
@@ -4439,3 +4462,108 @@ from the file first, then from the daemon. An apply writes the agent from
 the template again, as the file is the truth for a fleet (§18). A fleet
 export writes the project's templates, and `template = "..."` and the keys
 that differ for each agent of a template.
+
+## 25. Config repo
+
+The config repo (PLAN §8.3) holds the prompts, the harness settings, and
+an export of the declarative objects, in git. These routes need the
+operator or a sysadmin (`403 forbidden` for another agent). A daemon with
+no config repo answers `501 not_available`. One git operation runs at a
+time. No answer holds a secret: a remote URL shows without its user part
+(`https://host/...`), and a scan finding names the file, the line, and the
+rule, never the value.
+
+### 25.1 Shapes
+
+Status:
+
+```json
+{"dir":"/config/terrarium","initialized":true,"branch":"main","head":"5f1c…",
+ "remote":{"url":"https://git.example.com/ops/terrarium-config.git","credential":"config-deploy","branch":"main"},
+ "ahead":1,"behind":0,
+ "changes":[{"path":"prompts/leader.md","status":"modified"}],
+ "merging":false,"conflicts":[],
+ "pending_defaults":["prompts/worker.md"],"export_pending":false,"auto_sync":"off"}
+```
+
+| Field | Meaning |
+|---|---|
+| `changes[].status` | `added`, `modified`, `deleted`, `renamed`, `untracked`, or `conflict`. Only the paths that the `.gitignore` allowlist allows show. |
+| `ahead`, `behind` | Against the remote branch at the last fetch. |
+| `merging`, `conflicts` | A merge stopped on a conflict and waits: edit the files and commit, or abort. |
+| `pending_defaults` | New defaults that wait as `<file>.new` (§25.3). |
+| `export_pending` | A pull brought `export/` changes that are not applied. Until they are, a commit does not write `export/` from this instance. |
+| `auto_sync` | `TERRARIUM_CONFIG_SYNC`: `off`, `pull`, or `sync`. |
+
+A scan block is `422 invalid` with the findings:
+
+```json
+{"error":{"code":"invalid","message":"the secret scan blocked the commit (1 finding(s)): prompts/a.md:2: github-token. …",
+ "details":{"findings":[{"path":"prompts/a.md","line":2,"rule":"github-token"}]}}}
+```
+
+A merge conflict is `409 conflict` with `details.conflicts` (the paths).
+
+### 25.2 Endpoints
+
+| Endpoint | Body | Answer |
+|---|---|---|
+| `GET /api/config/status` | | `200` status |
+| `GET /api/config/diff?path=` | | `200 {"diff"}`: the unified diff of the work tree against the last commit (new files in full); `path` limits it to one file |
+| `GET /api/config/log?limit=` | | `200 [{"commit","author","at","subject"}]`, newest first; `limit` default 20, at most 500 |
+| `POST /api/config/commit` | `{"message", "export"?: true, "force_export"?: false}` | `200 {"commit","files","export"}`. `commit` is `null` when nothing changed. `export` lists the export files written first. `422` on a scan finding |
+| `POST /api/config/pull` | `{"apply"?: false}` | `200 {"fetched","updated","changed","conflicts","export"}`; `409` on a conflict |
+| `POST /api/config/push` | | `200 {"pushed"}`; `409` when the remote has commits that this repo does not have |
+| `POST /api/config/sync` | `{"message"?, "apply"?: false}` | `200 {"committed","fetched","updated","changed","conflicts","pushed","export"}`; `422` on a scan finding, `409` on a conflict |
+| `POST /api/config/abort` | | `200 {"aborted":true}`: leave a merge that waits; `409` when none waits |
+| `PUT /api/config/remote` | `{"url", "credential"?, "branch"?: "main"}` | `200` status. Needs a sysadmin or the operator (credential rights) |
+| `DELETE /api/config/remote` | | `200` status |
+| `GET /api/config/defaults` | | `200 [{"path","diff"}]`: each new default that waits, with the diff from the file to it |
+| `POST /api/config/defaults/accept` | `{"path"}` | `200` the defaults that still wait. The new default replaces the file |
+| `POST /api/config/defaults/keep` | `{"path"}` | `200` the defaults that still wait. The file stays; the next start does not offer this default again |
+
+### 25.3 Rules
+
+- **Commit.** The daemon writes `export/` from the store first (unless
+  `export` is `false`, or `export_pending` is set and `force_export` is
+  not), stages every change that the `.gitignore` allows, and scans each
+  staged file. A finding blocks the commit, unstages the files, and is
+  `422`. During a merge, a file that still has conflict markers is `409`.
+- **Export.** One fleet file per project,
+  `export/projects/<project>.fleet.toml` (its repos, agents, project
+  targets, schedules, and templates; the fleet name is the fleet that owns
+  the project, else the project name), and `export/global.fleet.toml`
+  (the global templates and targets, fleet `terrarium-global`). No ULID,
+  no mail `thread`, no `start`, no user part of a repo URL. A credential
+  or a subscription shows by its name only. The file objects of a
+  definition file (`source = file`) of a template or a global target stay
+  out.
+- **Pull.** Fetch the remote branch into `refs/remotes/terrarium/<branch>`
+  (the URL is not in `.git/config`), then merge: a fast-forward, else a
+  merge commit. Local changes that are not committed are `409`, except in
+  a repo with no commit yet: its files become the first commit, so a new
+  instance can join a shared repo. When `export/` changed, or
+  `export_pending` is set, the answer has a fleet plan of each export
+  file (`export[].plan`, the shape of `POST /api/fleet/plan`); with
+  `apply`, each file goes through `POST /api/fleet/apply` (no prune, no
+  start) and the answer has `export[].applied`. A file that fails has
+  `export[].error`, and `export_pending` stays.
+- **Push.** `git push <url> HEAD:refs/heads/<branch>`. Never forced.
+- **Sync.** Commit (with the export and the scan), pull, push.
+- **Conflict.** The merge stops, and the repo waits in it with conflict
+  markers in the files. Nothing is reset, and no local commit is lost.
+  Edit the files, then `commit`; or `abort` to go back to the last local
+  commit.
+- **Remote.** The URL must be `https://`, `http://`, `ssh://`, `git://`,
+  `file://`, `user@host:path`, or an absolute path. A URL with a user or a
+  password is `422`: give the token as `credential`, the name of a `token`
+  or `ssh_key` credential (§5.1). The URL and the credential name go to
+  `<state>/config-repo.json` (mode 0600), never to the repo or its
+  `.git/config`. The secret reaches git through a one-shot credential
+  helper or `GIT_SSH_COMMAND`, as for a workspace clone.
+- **Defaults.** At each start the daemon copies the packaged defaults
+  into the repo (PLAN §8.3). A file that the operator edited keeps its
+  text, and the new default waits as `<file>.new`.
+- **Audit.** `config.commit`, `config.pull`, `config.push`,
+  `config.sync`, `config.remote` (with the URL without its user part),
+  `config.defaults.accept`, and `config.defaults.keep`.

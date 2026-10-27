@@ -1308,6 +1308,9 @@ esac"#,
     );
     assert_eq!(s["account"]["harness"], "claude", "{s}");
     assert_eq!(s["account"]["has_login"], true, "{s}");
+    // The first Claude account is the default (PLAN §16.3).
+    let first = td.get("/api/subscriptions/anthropic-max-20x").await;
+    assert_eq!(first.ok()["default"], true, "{}", first.body);
 
     // A second login of the provider makes a second account.
     let r = td
@@ -1328,12 +1331,25 @@ esac"#,
         "anthropic-max-20x-2",
         HarnessId::Claude
     ));
+    // The second account keeps the default where it is.
+    let second = td.get("/api/subscriptions/anthropic-max-20x-2").await;
+    assert_eq!(second.ok()["default"], false, "{}", second.body);
+    assert_eq!(
+        td.get("/api/subscriptions/anthropic-max-20x").await.body["default"],
+        true
+    );
 
     // Logout removes the account, and nothing else.
     let out = td
         .post_empty("/api/subscriptions/anthropic-max-20x/logout")
         .await;
     assert_eq!(out.ok()["login_status"], "missing");
+    // The logout of the default makes the account left the default.
+    assert_eq!(out.body["default"], false);
+    assert_eq!(
+        td.get("/api/subscriptions/anthropic-max-20x-2").await.body["default"],
+        true
+    );
     assert!(!terrariumd::accounts::exists(&state, "anthropic-max-20x"));
     assert!(terrariumd::accounts::has_credential(
         &state,
@@ -1759,4 +1775,145 @@ async fn shared_logins_migrate_and_full_accounts_swap() {
     td.delete("/api/subscriptions/max-b")
         .await
         .err(409, "conflict");
+}
+
+/// PLAN §16.3: the default account. The start makes the first (oldest)
+/// account of a harness its default. The operator or a sysadmin moves it
+/// to another plan account, with an audit row and a `subscription` event.
+/// An API key or a subscription with no account cannot be the default. A
+/// delete of the default makes the oldest account left the default.
+#[tokio::test]
+async fn the_default_account_follows_the_operator() {
+    let max_a =
+        "provider = \"anthropic\"\nharnesses = [\"claude\"]\nprobe = \"anthropic-oauth-usage\"\n";
+    let env = boot(
+        |c| write(c, "subscriptions/max-a.toml", max_a),
+        |u, _| claude_creds(&u.homes[&HarnessId::Claude]),
+    )
+    .await;
+    let td = &env.td;
+    let state = td.daemon.as_ref().unwrap().state.state_dir.clone();
+    wait_for("the default after the migration", || async {
+        td.get("/api/subscriptions/max-a").await.body["default"] == json!(true)
+    })
+    .await;
+    let audit = td.get("/api/audit?action=subscription.default").await;
+    assert_eq!(
+        audit.ok()[0]["detail"]["reason"],
+        "backfill",
+        "{}",
+        audit.body
+    );
+
+    // A second account, as the wizard makes it: the default stays.
+    td.post(
+        "/api/subscriptions",
+        json!({"name": "max-b", "provider": "anthropic", "harnesses": ["claude"]}),
+    )
+    .await
+    .ok();
+    let scratch = td.dir.path().join("scratch-b");
+    std::fs::create_dir_all(&scratch).unwrap();
+    claude_creds(&scratch);
+    terrariumd::accounts::import_login(
+        &state,
+        "max-b",
+        HarnessId::Claude,
+        "anthropic",
+        &scratch,
+        None,
+        &env.homes[&HarnessId::Claude],
+    )
+    .unwrap();
+    let list = td.get("/api/subscriptions").await;
+    let row = |n: &str| {
+        list.body
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["name"] == n)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(row("max-a")["default"], true);
+    assert_eq!(row("max-b")["default"], false);
+
+    // Rights: the operator and a sysadmin; not a member or a project_admin.
+    td.project("p").await;
+    td.agent("p", "worker", json!({})).await;
+    td.agent("p", "lead", json!({"roles": ["project_admin"]}))
+        .await;
+    td.agent("p", "root", json!({"roles": ["sysadmin"]})).await;
+    for who in ["p/worker", "p/lead"] {
+        td.post_empty_as(who, "/api/subscriptions/max-b/default")
+            .await
+            .err(403, "forbidden");
+    }
+    let r = td
+        .post_empty_as("p/root", "/api/subscriptions/max-b/default")
+        .await;
+    assert_eq!(r.ok()["default"], true, "{}", r.body);
+    assert_eq!(
+        td.get("/api/subscriptions/max-a").await.body["default"],
+        false
+    );
+    let audit = td.get("/api/audit?action=subscription.default").await;
+    let last = audit.ok().as_array().unwrap().last().unwrap()["detail"].clone();
+    assert_eq!(
+        (&last["from"], &last["to"], &last["harness"]),
+        (&json!("max-a"), &json!("max-b"), &json!("claude")),
+        "{}",
+        audit.body
+    );
+    let ev = events_of(td, "subscription").await;
+    assert!(
+        ev.iter()
+            .any(|e| e["data"]["change"] == "default" && e["data"]["to"] == "max-b"),
+        "{ev:?}"
+    );
+
+    // Not a plan account: an API key, a subscription with no account, and
+    // an unknown name.
+    td.post(
+        "/api/subscriptions/glm/api-key",
+        json!({"provider": "zai", "plan": "coding", "key": "zk-secret"}),
+    )
+    .await
+    .ok();
+    td.post_empty("/api/subscriptions/glm/default")
+        .await
+        .err(422, "invalid");
+    td.post(
+        "/api/subscriptions",
+        json!({"name": "max-c", "provider": "anthropic", "harnesses": ["claude"]}),
+    )
+    .await
+    .ok();
+    td.post_empty("/api/subscriptions/max-c/default")
+        .await
+        .err(422, "invalid");
+    td.post_empty("/api/subscriptions/nope/default")
+        .await
+        .err(404, "not_found");
+
+    // Delete the default: the oldest account left takes over.
+    assert_eq!(
+        td.delete("/api/subscriptions/max-b").await.status.as_u16(),
+        204
+    );
+    let list = td.get("/api/subscriptions").await;
+    let defaults: Vec<&str> = list
+        .ok()
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|s| s["default"] == true)
+        .map(|s| s["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(defaults, ["max-a"], "{}", list.body);
+    let ev = events_of(td, "subscription").await;
+    assert!(
+        ev.iter().any(|e| e["data"]["change"] == "default_cleared"),
+        "{ev:?}"
+    );
 }

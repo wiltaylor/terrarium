@@ -84,7 +84,8 @@ import { FakePty } from "./pty";
 import { createScheduleMock, type ScheduleCaller } from "./schedules";
 import { createEventSourceMock } from "./eventSources";
 import { createWaitMock } from "./waits";
-import { applyTemplate, createTemplateMock, resolveTemplate, systemPromptError, templateRef } from "./templates";
+import { createConfigMock } from "./config";
+import { applyTemplate, createTemplateMock, personaError, resolveTemplate, systemPromptError, templateRef } from "./templates";
 import { createTranscriptStream, encodeTranscriptFrame } from "../sse";
 import { appendBlock, fakeReply, mockModel, titleOf, type Draft as BlockDraft } from "./transcripts";
 
@@ -138,6 +139,8 @@ export interface MockOptions {
    * sources (§20) use the same caller.
    */
   scheduleCaller?: ScheduleCaller;
+  /** False: a daemon with no config repo, so `/api/config/*` answers `501 not_available`. Default true. */
+  configRepo?: boolean;
   /** How long a schedule run takes before `run_finished`. Default 1500 ms with latency, else the step. */
   scheduleRunMs?: number;
 }
@@ -984,7 +987,26 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     held_agents: w.holds.filter((h) => h.cause === `quota:${s.name}`).length,
     default_models: defaultModels(s),
     agents: w.agents.filter((a) => a.subscription === s.name).map((a) => ({ id: a.id, name: a.name, project: a.project })),
+    default: !!s.default,
   });
+  /** PLAN §16.3: the harnesses with a default plan account. */
+  const DEFAULT_HARNESSES = ["claude", "codex", "copilot"];
+  /** The default of `s` goes away (its delete or logout). The daemon picks no new one. */
+  const clearDefault = (s: Subscription) => {
+    if (!s.default) return false;
+    s.default = false;
+    emit({ kind: "subscription", actor: "operator", summary: `${s.account?.harness ?? "the harness"} has no default account: ${s.name} is gone`, data: { change: "default_cleared", harness: s.account?.harness, from: s.name, to: null } });
+    return true;
+  };
+  /** Make `s` the default of `harness`, with the audit row and the `subscription` event. */
+  const setDefault = (s: Subscription, harness: string, reason: string, actor = "operator") => {
+    const old = w.subscriptions.find((x) => x.default && x.account?.harness === harness);
+    if (old) old.default = false;
+    s.default = true;
+    const detail = { harness, from: old?.name ?? null, to: s.name, reason };
+    audit("subscription.default", s.name, undefined, detail, actor);
+    emit({ kind: "subscription", actor, summary: `${s.name} is the default ${harness} account`, data: { change: "default", ...detail } });
+  };
   /** PLAN §16.3: a pool holds accounts of one provider, and the harness can spend each. The current subscription goes first. */
   const checkPool = (harness: Agent["harness"], current: string | undefined, pool: string[]): string[] => {
     const names = [...new Set(pool.map((n) => n.trim()).filter(Boolean))];
@@ -1278,6 +1300,9 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
       }
       // A re-login replaces the login of this account only.
       row.account = { harness: s.kind, has_login: true, source: row.account?.source ?? "login", created_at: row.account?.created_at ?? iso(), updated_at: iso() };
+      // PLAN §16.3: the first account of a harness becomes its default; a second keeps it.
+      const kin = w.subscriptions.filter((x) => x.account?.harness === s.kind);
+      if (DEFAULT_HARNESSES.includes(s.kind) && !kin.some((x) => x.default) && kin.every((x) => x === row)) setDefault(row, s.kind, "first_account", "system");
       row.login_status = "logged_in";
       row.verified_at = iso();
       row.updated_at = iso();
@@ -1681,6 +1706,8 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           if (!def.harness) fail(422, "invalid", "missing field `harness`");
           const sp = systemPromptError(def.system_prompt);
           if (sp) fail(422, "invalid", sp, { field: "system_prompt" });
+          const pe = personaError(def.persona);
+          if (pe) fail(422, "invalid", pe, { field: "persona" });
           if (!NAME_RE.test(def.name)) fail(422, "invalid", `\`${def.name}\` is not a valid name`);
           if (w.agents.some((a) => a.project === def.project && a.name === def.name)) fail(409, "conflict", `agent \`${def.project}/${def.name}\` exists`);
           if (def.policy?.mail_to.some((m) => !m.trim())) fail(422, "invalid", "policy.mail_to has an empty entry");
@@ -1697,6 +1724,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
             ...(def.model ? { model: def.model } : {}),
             ...(def.prompt ? { prompt: def.prompt } : {}),
             ...(def.system_prompt ? { system_prompt: def.system_prompt } : {}),
+            ...(def.persona?.trim() ? { persona: def.persona.trim() } : {}),
             workspace: `/state/agents/${id}/workspace`,
             roles: (def.roles ?? []).filter((r): r is Role => r !== "member"),
             // Like the daemon: `cross_project` is left out when empty.
@@ -1718,6 +1746,8 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           if (a.source === "file") fail(409, "file_managed", `agent \`${a.project}/${a.name}\` is declared in a definition file; edit the file, then POST /api/reload`);
           const sp = systemPromptError(patch.system_prompt);
           if (sp) fail(422, "invalid", sp, { field: "system_prompt" });
+          const pe = personaError(patch.persona);
+          if (pe) fail(422, "invalid", pe, { field: "persona" });
           if (patch.subscription_pool !== undefined || patch.subscription !== undefined) {
             const current = patch.subscription !== undefined ? patch.subscription || undefined : a.subscription;
             const pool = checkPool(patch.harness ?? a.harness, current, patch.subscription_pool ?? a.subscription_pool ?? []);
@@ -1730,6 +1760,8 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           if (patch.prompt !== undefined) a.prompt = patch.prompt || undefined;
           // Applies at the next start, like the daemon.
           if (patch.system_prompt !== undefined) a.system_prompt = patch.system_prompt || undefined;
+          // null or empty: by role.
+          if (patch.persona !== undefined) a.persona = patch.persona?.trim() || undefined;
           if (patch.policy) a.policy = { targets: patch.policy.targets, mail_to: patch.policy.mail_to, ...(patch.policy.cross_project?.length ? { cross_project: patch.policy.cross_project } : {}) };
           if (patch.restart) a.restart = patch.restart;
           a.updated_at = iso();
@@ -2480,6 +2512,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           const s = sub(name);
           if (s.source === "file") fail(409, "file_managed", `subscription \`${name}\` comes from subscriptions/${name}.toml; edit or delete the file`);
           refuseLiveAccount(s, "delete it");
+          clearDefault(s);
           w.subscriptions.splice(w.subscriptions.indexOf(s), 1);
           delete w.apiKeys[name];
           w.quota = w.quota.filter((q) => q.subscription !== name);
@@ -2534,7 +2567,18 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           refuseLiveAccount(s, "log it out");
           s.login_status = "missing";
           if (s.account) s.account = { ...s.account, has_login: false, updated_at: iso() };
-          audit("subscription.logout", name, undefined, { kind: harness });
+          const cleared = clearDefault(s);
+          audit("subscription.logout", name, undefined, { kind: harness, default_cleared: cleared });
+          return subView(s);
+        }),
+      makeDefault: (name) =>
+        reply(() => {
+          const s = sub(name);
+          if (s.env_var) fail(422, "invalid", `subscription \`${name}\` is an API key; only a plan account can be the default`);
+          if (!s.account) fail(422, "invalid", `subscription \`${name}\` has no plan account; log in with the wizard first`);
+          const harness = s.account!.harness;
+          if (!DEFAULT_HARNESSES.includes(harness)) fail(422, "invalid", `subscription \`${name}\` is not a plan account of Claude Code, Codex, or Copilot (harness ${harness}, provider ${s.provider}); only those have a default account`);
+          setDefault(s, harness, "set");
           return subView(s);
         }),
       setApiKey: (name, input) =>
@@ -2952,6 +2996,9 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
 
     // The rights of §21 follow those of §20, but every caller reads the global templates.
     templates: createTemplateMock({ w, iso, ulid, reply, fail, emit, audit, agent, caller: opts.scheduleCaller }),
+
+    // PLAN §8.3, docs/api.md §25: a small in-memory config repo.
+    config: createConfigMock({ iso, reply, fail, audit, available: opts.configRepo }),
 
     hosts: {
       list: () => reply(() => w.hosts),

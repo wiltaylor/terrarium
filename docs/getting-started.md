@@ -176,6 +176,17 @@ account, the daemon names the new one `anthropic-max-20x-2`. Each account
 has its own card, with its quota bars and the agents on it. **Re-login**
 on a card replaces the login of that account only.
 
+The first account of a harness stays the **default** account. Its card
+has the `default` badge. An agent with no subscription runs on the default
+account of its harness. To change the default:
+
+1. Find the card of the other account.
+2. Click **Make default**.
+
+You can also run `terrarium admin subscription default anthropic-max-20x-2`.
+When you delete or log out the default account, the oldest account left
+becomes the default. When one account is left, it becomes the default.
+
 #### Move agents between accounts
 
 Give an agent a pool of accounts, then move it when an account is used up:
@@ -280,7 +291,15 @@ protocol prompt after it. To replace the harness's default prompt, give
 the agent or the template a base system prompt: `--system-prompt <text>`
 or `--system-prompt-file <path>`, or the **System prompt** field in the
 dashboard. Terrarium's protocol prompt still comes after it. The change
-applies at the next start or restart (`prompts/README.md`).
+applies at the next start or restart (`defaults/prompts/README.md`).
+
+An agent also has a persona (PLAN §8.1): `config/terrarium/prompts/leader.md`
+for a lead (`project_admin` or `sysadmin`), `worker.md` for a member. A
+persona with text replaces the harness's default prompt, as a base system
+prompt does. The packaged personas hold only a comment, so the harness
+keeps its default prompt until you write text in them. `--persona <name>`
+picks another file, and `--persona none` keeps the harness's default
+prompt. A base system prompt wins over the persona.
 
 To use the CLI from the host over TCP, build it and set `TERRARIUM_URL`.
 `just` reads `TERRARIUM_TOKEN` from `.env`:
@@ -761,6 +780,102 @@ the forge. Keep the API port (8080) closed.
 A request with a bad signature gets `401` with no detail. The source
 keeps the reason: `event source show` prints it as `last error`.
 
+### 2.12 Config repo: share your prompts and settings between instances
+
+The config repo `config/terrarium/` holds what you tune for the agents:
+
+| Path | Content |
+|---|---|
+| `prompts/leader.md`, `prompts/worker.md` | The personas (PLAN §8.1). |
+| `prompts/default.md`, `project-lead.md`, `system-lead.md` | The protocol templates. |
+| `harness/claude/settings.json`, `harness/codex/config.toml`, `harness/copilot/settings.json`, `harness/pi/settings.json` | The settings of each harness for every agent (PLAN §8.2). Terrarium puts the keys that it needs (hooks, yolo, sandbox paths, telemetry off) on top. |
+| `export/` | The templates, schedules, and projects (agents, targets, repos) as fleet files. The daemon writes them at each commit. |
+
+**Defaults.** At each start the daemon copies the packaged defaults into
+the repo. It writes a missing file, and upgrades a file that you did not
+edit. A file that you edited stays, and the new default goes next to it as
+`<file>.new`. Open the **Config** page, or run `t admin config defaults`,
+to see the diff. Then accept the new default or keep your file:
+
+```sh
+t admin config defaults
+t admin config defaults accept prompts/worker.md
+t admin config defaults keep prompts/leader.md
+```
+
+A change to a prompt or a settings file applies at the next start or
+restart of each agent. A settings file that does not parse stops the start
+of the agent. The error names the file and the line.
+
+**Put the repo in git.** The daemon makes the directory a git repo. Commit
+your changes with a message:
+
+```sh
+t admin config status
+t admin config diff
+t admin config commit -m "Shorter worker persona"
+t admin config log
+```
+
+**Share it with another instance.**
+
+1. Make an empty repo on your git server (for example
+   `ops/terrarium-config`).
+2. Store a deploy key (or a token) as a credential. Never put a token in
+   the URL. Use the API with your token (`api.md` §5.1):
+
+   ```sh
+   KEY=$(jq -Rs . < ~/.ssh/terrarium-config-deploy)   # a deploy key with write access
+   curl -s -H "Authorization: Bearer $TERRARIUM_TOKEN" -H 'Content-Type: application/json' \
+     -d "{\"name\":\"config-deploy\",\"kind\":\"ssh_key\",\"value\":$KEY}" \
+     http://localhost:8080/api/credentials
+   unset KEY
+   ```
+
+   For an HTTPS remote, store a `token` credential instead (`"kind":"token"`,
+   and `"username"` when the server needs one).
+
+3. Set the remote, and sync:
+
+   ```sh
+   t admin config remote set git@git.example.com:ops/terrarium-config.git --credential config-deploy
+   t admin config sync -m "First sync"
+   ```
+
+4. On the other instance, set the same remote and run `t admin config
+   sync`. Its own files become its first commit, and the merge brings in
+   the files of the first instance.
+
+`sync` commits your changes, fetches, merges, and pushes. `pull` only
+fetches and merges. When the merge changes `export/`, the answer shows the
+fleet plan of each export file. Nothing changes in the store until you
+apply it:
+
+```sh
+t admin config pull --apply
+```
+
+When both instances changed the same lines, the merge stops and lists the
+files. Nothing is lost. Edit each file (remove the conflict markers), then
+commit and sync again. Or go back to your last commit with `t admin config
+abort`.
+
+To sync on a timer, set `TERRARIUM_CONFIG_SYNC=pull` (or `sync`) and
+`TERRARIUM_CONFIG_SYNC_INTERVAL` (default `15m`) in `.env`.
+
+**No secrets.** The `.gitignore` of the repo allows only the known paths
+and file types. The daemon scans each commit for tokens, keys, passwords,
+and other secrets, and the `pre-commit` hook scans a commit that you make
+by hand with git. A hit stops the commit and names the file, the line, and
+the rule. Remove the secret. For a false hit, add `terrarium-scan: allow`
+to the line. The remote URL and its credential stay in `state/`, never in
+the repo or its `.git/config`.
+
+**Development: start again from the defaults.** `just defaults::apply`
+backs the repo up to `state/backup/config-terrarium-<time>/`, then writes
+every packaged default over it. Your own extra files and `.git` stay.
+Restart the agents to use the defaults.
+
 ## 3. Configuration directories
 
 Compose bind-mounts these host directories into the container:
@@ -774,7 +889,7 @@ Compose bind-mounts these host directories into the container:
 | `state/` | `/state` | SQLite, agent logs and harness files, artifacts, credentials. |
 | `tools/` | `/opt/terrarium/tools` | The harnesses (`TERRARIUM_TOOLS_DIR`): one npm prefix for each version, `versions/<name>/<version>/`, with `current/<name>` and `bin/<binary>` links to the active one. The entrypoint installs the pins here at the first start; an update adds a version dir and switches to it (section 7). The sandbox binds it read-only. Delete it (with no agent running) to reinstall the pins. |
 | `work/` | `/work` | Agent workspaces, `<project>/<agent>/` (`TERRARIUM_WORK_DIR`). A host agent on this machine attaches them to targets: set its `work_dir` to this directory (docs/host-protocol.md, "Workspaces"). |
-| `prompts/` | `/prompts` (read-only) | System prompt templates. |
+| `config/terrarium/` | `/config/terrarium` | The config repo (section 2.12): the prompts (`prompts/`), the harness settings of the agents (`harness/<harness>/`), and the export (`export/`). Its own git repo. It never holds a secret. |
 | `projects/`, `agents/`, `targets/`, `subscriptions/` | `/etc/terrarium/...` | Definition files. |
 | `fleets/` | `/etc/terrarium/fleets` | Fleet files (section 2.9). |
 | `repos/` | `/repos` | Local bare git repos that agents push to (see "Local repos" below). |
@@ -815,8 +930,11 @@ The recipe opens `config/claude/` in `$EDITOR`. The argument is `claude`,
 
 Claude Code agents start with `--setting-sources ""`. They do not read
 `config/claude/settings.json` or `config/claude/CLAUDE.md`. Those files
-apply only when you start `claude` yourself in the container. Terrarium
-gives each agent its hooks and quiet settings with `--settings`.
+apply only when you start `claude` yourself in the container. To change
+the settings of every Claude agent, edit
+`config/terrarium/harness/claude/settings.json` (section 2.12). Terrarium
+puts its hooks and quiet settings on top of that file, and gives the
+result to each agent with `--settings`.
 
 After you change a definition file, tell the daemon to read the files again:
 

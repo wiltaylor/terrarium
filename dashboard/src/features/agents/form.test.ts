@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Agent } from "../../api/types";
-import { agentToForm, emptyAgentForm, formToDef, formToPatch, parseList, validateAgentForm } from "./form";
+import { agentToForm, effectivePersona, emptyAgentForm, formToDef, formToPatch, parseList, personaProblem, validateAgentForm } from "./form";
 
 const agent: Agent = {
   id: "A1", name: "worker", project: "p", harness: "pi", model: "m1", workspace: "/w", status: "idle", roles: ["project_admin"],
@@ -71,5 +71,29 @@ describe("agent form", () => {
     // `[]` clears the pool.
     expect(formToPatch(pooled, { ...v, subscription_pool: [] })).toEqual({ subscription_pool: [] });
     expect(formToPatch(agent, { ...agentToForm(agent), subscription_pool: ["a", "c"] })).toEqual({ subscription_pool: ["a", "c"] });
+  });
+
+  it("carries the persona: in the definition when set, null on a patch that clears it", () => {
+    const base = { ...emptyAgentForm("p"), name: "w" };
+    expect(formToDef({ ...base, persona: " leader " }).persona).toBe("leader");
+    expect(formToDef(base)).not.toHaveProperty("persona");
+    const withP: Agent = { ...agent, persona: "reviewer" };
+    expect(agentToForm(withP).persona).toBe("reviewer");
+    expect(agentToForm(agent).persona).toBe("");
+    expect(formToPatch(withP, agentToForm(withP))).toEqual({});
+    expect(formToPatch(withP, { ...agentToForm(withP), persona: "" })).toEqual({ persona: null });
+    expect(formToPatch(withP, { ...agentToForm(withP), persona: "none" })).toEqual({ persona: "none" });
+    expect(formToPatch(agent, { ...agentToForm(agent), persona: "worker" })).toEqual({ persona: "worker" });
+    expect(formToPatch(agent, { ...agentToForm(agent), persona: " " })).toEqual({});
+  });
+
+  it("checks the persona name, and names the persona by role when none is set", () => {
+    expect(personaProblem("")).toBeNull();
+    expect(personaProblem("my_persona-2")).toBeNull();
+    expect(personaProblem("../x")).not.toBeNull();
+    expect(validateAgentForm({ ...emptyAgentForm("p"), name: "ok", persona: "a b" })).toHaveLength(1);
+    expect(effectivePersona(agent)).toEqual({ persona: "leader", byRole: true });
+    expect(effectivePersona({ ...agent, roles: [] })).toEqual({ persona: "worker", byRole: true });
+    expect(effectivePersona({ ...agent, persona: "none" })).toEqual({ persona: "none", byRole: false });
   });
 });

@@ -275,11 +275,27 @@ dir read the file. The API refuses `system_prompt_file`, because it does
 not know the path. An agent cannot set both keys. Export writes
 `system_prompt`.
 
+An agent or a template can set `persona` (PLAN §8.1): `leader`, `worker`,
+`none`, or a prompt file name of the config repo. Not set: by role. The
+persona replaces the harness's default prompt when the agent has no
+`system_prompt`. `[defaults]` has no `persona`.
+
+```toml
+[[projects.agents]]
+name = "w1"
+persona = "none"        # the harness's own default prompt
+```
+
+The config repo (PLAN §8.3) keeps an export of each project as a fleet
+file in `export/projects/<project>.fleet.toml`. A pull from another
+instance shows its plan, and `terrarium admin config pull --apply` applies
+it as `fleet apply` does (no prune, no start).
+
 ### Agent templates
 
 `[[templates]]` declares a global agent template, and
 `[[projects.templates]]` a template of the project. The spec keys
-(`harness`, `subscription`, `model`, `prompt`, `system_prompt`, `roles`,
+(`harness`, `subscription`, `model`, `prompt`, `system_prompt`, `persona`, `roles`,
 `policy`, `restart`, `new_session_on_prompt_change`) sit next to `name` and
 `description`. An agent entry with `template = "worker"` gets the values
 in this order: `[defaults]`, then the template, then the keys of the entry.

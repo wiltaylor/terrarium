@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "files": {
+    "README.md": "032b0d191121759bd4c44bf0770b75d2b6800997735a82c2c2c28592981765e7",
+    "harness/claude/settings.json": "930912b39eb0312c2210e78d13c25de2565ecec3a44d702865fb16f2c0274c91",
+    "harness/codex/config.toml": "9f9647000f1c2397316fa27f8f98d6cb32d6ffbc081882563de415fdc0741d36",
+    "harness/copilot/settings.json": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+    "harness/pi/settings.json": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+    "prompts/README.md": "d0a87b8e499b8b89fd7d74093a75188cc6eb4d2d1873e11cb6146a743fc4f3f2",
+    "prompts/default.md": "12ea689e82f1a542ca29c9ec37eb0fc3545f10694641a108f7013344daf1081d",
+    "prompts/leader.md": "c24c2c312dd25eac6827042b18ac463341507b486cd57512ba5c2f2fa9f1d5c2",
+    "prompts/project-lead.md": "f02270c90ff17cbcf8389b16556d27f922a0265a0f55f4b1d991c76ae92df769",
+    "prompts/system-lead.md": "99634b5d01b926e3ba4285f86288d70d54c9204550981a881f474bd6c6e098d7",
+    "prompts/worker.md": "b416e55b3615bfde92e1287723f90f9890b222d9bcf719f812034a21186fd132"
+  }
+}

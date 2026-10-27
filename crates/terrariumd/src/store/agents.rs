@@ -93,12 +93,14 @@ fn base_row(r: &Row<'_>) -> rusqlite::Result<AgentView> {
             harness_dir: None,
             prompt: r.get("prompt")?,
             system_prompt: r.get("system_prompt")?,
+            persona: r.get("persona")?,
             roles: Vec::new(),
             policy: serde_json::from_str(&policy).unwrap_or_default(),
             restart: restart_from(&r.get::<_, String>("restart")?),
             status: status_from(&r.get::<_, String>("status")?),
             session: None,
             new_session_on_prompt_change: r.get("new_session_on_prompt_change")?,
+            harness_settings: None,
         },
         source: r.get("source")?,
         current_card: None,
@@ -289,7 +291,15 @@ fn check_def(def: &AgentDef) -> ApiResult<()> {
     if let Some(text) = &def.system_prompt {
         check_system_prompt(text).map_err(ApiError::invalid)?;
     }
+    if let Some(p) = &def.persona {
+        terrarium_core::config::check_persona(p.trim()).map_err(ApiError::invalid)?;
+    }
     Ok(())
+}
+
+/// The persona as the store keeps it: `None` for an empty name.
+fn stored_persona(name: Option<&String>) -> Option<String> {
+    name.map(|n| n.trim().to_owned()).filter(|n| !n.is_empty())
 }
 
 /// The system prompt as the store keeps it: `None` for an empty text.
@@ -358,15 +368,16 @@ pub fn create_from(
     agent.subscription_pool = clean_pool(&agent.subscription_pool);
     agent.workspace = crate::workspace::dir(work_dir, &def.project, &def.name);
     agent.system_prompt = stored_system_prompt(agent.system_prompt.as_ref()).cloned();
+    agent.persona = stored_persona(agent.persona.as_ref());
     let id = agent.id.to_string();
     let at = now();
     t.execute(
         "INSERT INTO agents (id, name, project, harness, subscription, model, prompt, policy,
                              restart, status, workspace, source, created_at, updated_at,
                              new_session_on_prompt_change, template, system_prompt,
-                             subscription_pool)
+                             subscription_pool, persona)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'stopped', ?10, ?11, ?12, ?12, ?13, ?14,
-                 ?15, ?16)",
+                 ?15, ?16, ?17)",
         params![
             id,
             agent.name,
@@ -383,7 +394,8 @@ pub fn create_from(
             agent.new_session_on_prompt_change,
             template.map(serde_json::to_string).transpose()?,
             agent.system_prompt,
-            serde_json::to_string(&agent.subscription_pool)?
+            serde_json::to_string(&agent.subscription_pool)?,
+            agent.persona
         ],
     )?;
     set_roles(t, &id, &def.project, &def.roles)?;
@@ -425,6 +437,9 @@ pub struct AgentPatch {
     pub prompt: Option<Option<String>>,
     #[serde(default, deserialize_with = "nullable")]
     pub system_prompt: Option<Option<String>>,
+    /// `null` or an empty name: by role (PLAN §8.1).
+    #[serde(default, deserialize_with = "nullable")]
+    pub persona: Option<Option<String>>,
     #[serde(default)]
     pub policy: Option<Policy>,
     #[serde(default)]
@@ -455,6 +470,7 @@ pub fn write_def(t: &mut Tx<'_>, id: &str, p: &AgentPatch) -> ApiResult<()> {
             model: None,
             prompt: None,
             system_prompt: None,
+            persona: None,
             roles: Vec::new(),
             policy: policy.clone(),
             restart: RestartPolicy::default(),
@@ -468,6 +484,10 @@ pub fn write_def(t: &mut Tx<'_>, id: &str, p: &AgentPatch) -> ApiResult<()> {
     if let Some(Some(text)) = system_prompt {
         check_system_prompt(text).map_err(ApiError::invalid)?;
     }
+    let persona = p.persona.as_ref().map(|v| stored_persona(v.as_ref()));
+    if let Some(Some(name)) = &persona {
+        terrarium_core::config::check_persona(name).map_err(ApiError::invalid)?;
+    }
     // `?N IS NOT NULL` is the "field present" flag of each nullable column.
     t.execute(
         "UPDATE agents SET
@@ -480,6 +500,7 @@ pub fn write_def(t: &mut Tx<'_>, id: &str, p: &AgentPatch) -> ApiResult<()> {
             new_session_on_prompt_change = coalesce(?12, new_session_on_prompt_change),
             system_prompt = CASE WHEN ?13 THEN ?14 ELSE system_prompt END,
             subscription_pool = coalesce(?15, subscription_pool),
+            persona = CASE WHEN ?16 THEN ?17 ELSE persona END,
             updated_at = ?8
          WHERE id = ?1",
         params![
@@ -501,6 +522,8 @@ pub fn write_def(t: &mut Tx<'_>, id: &str, p: &AgentPatch) -> ApiResult<()> {
                 .as_ref()
                 .map(|v| serde_json::to_string(&clean_pool(v)))
                 .transpose()?,
+            persona.is_some(),
+            persona.flatten(),
         ],
     )?;
     Ok(())
@@ -794,6 +817,7 @@ pub fn sync_def(t: &mut Tx<'_>, id: &str, def: &AgentDef) -> ApiResult<bool> {
     let system_prompt = stored_system_prompt(def.system_prompt.as_ref());
     let subscription = synced_subscription(before.agent.subscription.as_deref(), def);
     let pool = clean_pool(&def.subscription_pool);
+    let persona = stored_persona(def.persona.as_ref());
     let changed = before.source != projects::SOURCE_FILE
         || before.agent.harness != def.harness
         || before.agent.subscription != subscription
@@ -801,6 +825,7 @@ pub fn sync_def(t: &mut Tx<'_>, id: &str, def: &AgentDef) -> ApiResult<bool> {
         || before.agent.model != def.model
         || before.agent.prompt != def.prompt
         || before.agent.system_prompt.as_ref() != system_prompt
+        || before.agent.persona != persona
         || before.agent.policy != def.policy
         || before.agent.restart != def.restart;
     if changed {
@@ -808,7 +833,7 @@ pub fn sync_def(t: &mut Tx<'_>, id: &str, def: &AgentDef) -> ApiResult<bool> {
             "UPDATE agents SET harness = ?2, subscription = ?3, model = ?4, prompt = ?5,
                     policy = ?6, restart = ?7, source = 'file', updated_at = ?8,
                     new_session_on_prompt_change = ?9, system_prompt = ?10,
-                    subscription_pool = ?11
+                    subscription_pool = ?11, persona = ?12
              WHERE id = ?1",
             params![
                 id,
@@ -821,7 +846,8 @@ pub fn sync_def(t: &mut Tx<'_>, id: &str, def: &AgentDef) -> ApiResult<bool> {
                 now(),
                 def.new_session_on_prompt_change,
                 system_prompt,
-                serde_json::to_string(&pool)?
+                serde_json::to_string(&pool)?,
+                persona
             ],
         )?;
     }

@@ -440,6 +440,140 @@ Verified in Phase 0 (Claude Code 2.1.310, `docs/compat.md`):
 - `--session-id` on a used UUID fails with "already in use". A restart
   uses `--resume <id>`.
 
+### 8.1 Personas
+
+A persona is a prompt file that replaces the harness's default system
+prompt. The Terrarium protocol template comes after it, as after a
+`system_prompt`. The agent field `persona` selects the file:
+
+| `persona` | The base system prompt |
+|---|---|
+| Unset (default) | By role: `<prompts>/leader.md` for an agent with `project_admin` or `sysadmin`, else `<prompts>/worker.md`. A missing file is no persona. |
+| `leader`, `worker`, or another file name | `<prompts>/<name>.md`. A missing file stops the start with an error. |
+| `none` | No persona: the harness keeps its default prompt, and the protocol template is appended (the behaviour before personas). |
+
+The order of precedence: the agent's (or template's) `system_prompt`, then
+the persona, then the harness default. The daemon removes HTML comments
+(`<!-- ... -->`) from a persona. A persona with no text after that is no
+persona. The packaged `leader.md` and `worker.md` are placeholders that hold
+only a comment, so an agent keeps the harness's default prompt until the
+persona text lands. Templates and fleet files carry `persona` too. A name
+has letters, digits, `-`, and `_` only.
+
+`<prompts>` is the `prompts/` of the config repo (§8.3), unless
+`TERRARIUM_PROMPTS_DIR` names another dir. An agent with no `prompt`
+template reads `<prompts>/default.md`, and the built-in copy when that
+file is missing.
+
+### 8.2 Harness settings in layers
+
+Each harness gets its settings in three layers. A later layer wins:
+
+1. **The user file** of the harness in the config repo:
+   `harness/claude/settings.json`, `harness/codex/config.toml`,
+   `harness/copilot/settings.json`, `harness/pi/settings.json`. The
+   packaged default holds the keys that only tune the harness (for Claude
+   Code, `autoMemoryEnabled: false`).
+2. **The per-agent options** of the definition: `model`, the prompt.
+3. **The forced keys**. Terrarium needs them to run an agent unattended
+   and in the sandbox. They stay in Rust, each with a comment on why:
+
+| Harness | How the layers merge | Forced keys |
+|---|---|---|
+| Claude Code | A JSON object, then the forced keys on top; it goes to `--settings` (with `--setting-sources ""`, Claude Code reads no other settings file). | `hooks` (replaced), `skipDangerousModePermissionPrompt`, `disableAllHooks` (removed), and the `env` names that the launch sets (`CLAUDE_CONFIG_DIR`, the quiet env, `IS_SANDBOX`). The flags: yolo, `--setting-sources ""`, `--system-prompt-snapshot off`, the session flags. |
+| Codex | The TOML file becomes `-c key=value` overrides, flattened to dotted keys down to the leaves; a table with a key that is not bare goes as one inline table. They come before the forced `-c` values. | `hooks`, `projects` (trust), `sqlite_home`, `tui.resume_cwd`, `check_for_update_on_startup`, `analytics.enabled`, `feedback.enabled`, `sandbox_mode`, `approval_policy`, `model_instructions_file`, `developer_instructions`; `model` when the agent sets one. The adapter drops these from the file. |
+| Copilot CLI | A JSON deep merge over the agent's settings copy (on the first start a copy of the shared `settings.json`), then the forced keys. | `hooks` and `disableAllHooks` (removed), `experimental: true` (the prompt extension needs it). |
+| pi | A JSON deep merge over the agent's settings copy, then the forced key. | `lastChangelogVersion` (no changelog screen at start). The flags: `--offline`, `--no-extensions`, `--no-mcp`, the session dir. |
+
+A JSON deep merge merges two objects key by key at every depth; any other
+value (an array too) replaces the value under it, and `null` removes the
+key. A user file that does not parse stops the agent start with an error
+that names the file and the line (and the column for JSON). The daemon
+never falls back to no settings. A change applies at the next start or
+restart of each agent.
+
+### 8.3 Packaged defaults and the config repo
+
+**Packaged defaults.** The repo dir `defaults/` holds the default
+prompts (`prompts/leader.md`, `worker.md`, `default.md`,
+`project-lead.md`, `system-lead.md`, `README.md`), the default settings of
+each harness (`harness/<harness>/...`), the config repo `README.md`, and
+`manifest.json` with the SHA-256 of each file (`just defaults::manifest`
+writes it; a test checks it). The image copies the dir to
+`/opt/terrarium/defaults` (`TERRARIUM_DEFAULTS_DIR`).
+
+**The config repo.** Compose binds `./config/terrarium` at
+`/config/terrarium` (`TERRARIUM_CONFIG_REPO`). At each start the daemon
+copies the defaults into it, at the same relative paths:
+
+| The file in the config repo | What the start does |
+|---|---|
+| Missing | Writes the default. |
+| The same as the new default | Nothing. |
+| The default of the last start, not edited | Writes the new default. |
+| Edited | Keeps the file, and writes the new default as `<file>.new`. |
+| Edited, and the operator kept it against this default | Nothing. |
+
+`.terrarium-defaults.json` in the repo records the default that each file
+came from. It and the `.new` files stay out of git. The dashboard (Config
+page) and `terrarium admin config defaults` show each `.new` file with a
+diff; Accept takes the new default, Keep keeps the edit.
+`just defaults::apply` (development) backs the repo up to
+`state/backup/config-terrarium-<time>/` and writes every default over it.
+
+**Git.** The config repo is a git repo (the daemon runs `git init` on
+first use). It holds `prompts/`, `harness/`, `export/`, `README.md`, and
+`.gitignore`. `export/` is the declarative export of the store, written
+before each commit: one fleet file for each project
+(`export/projects/<project>.fleet.toml`: repos, agents, project targets,
+schedules, templates) and `export/global.fleet.toml` (global templates and
+targets). It has no runtime state and no ID of the instance: no ULID, no
+mail thread, no `start`. A project that a fleet owns is exported under
+that fleet's name.
+
+**Never in the repo**: the harness homes (`config/<harness>`: sessions,
+history), `state/` (credentials, keys, the database), `.env`, an API key,
+a login, a token, a password, a host enrol token, a TLS key, artifact data,
+and session transcripts. Three controls (`docs/security-review.md`,
+"Config repo"):
+
+1. The `.gitignore` is an allowlist: it ignores everything, allows only
+   `prompts/**/*.md`, `harness/**/*.{json,toml,yaml}`,
+   `export/**/*.{toml,json,yaml,md}`, `README.md`, and itself, then
+   ignores the credential file names again. The daemon writes it.
+2. A secret scan (`terrarium_core::secret_scan`) runs on the staged files
+   before each commit that the daemon makes, and in the `pre-commit` hook
+   that the daemon installs (`terrarium admin config scan --staged`, which
+   fails closed with no Terrarium binary on `PATH`). The rules: the known
+   token patterns (`sk-ant-`, `sk-or-`, `sk-proj-`, `ghp_`/`gho_`/
+   `github_pat_`, `AKIA`, `xox?-`, `-----BEGIN ... PRIVATE KEY-----`, a
+   JWT, the host tokens `thk_` and `the_`), a credential-like key name
+   (`token`, `secret`, `password`, `api_key`, `authorization`) with a value
+   of 16 characters or more, a run of 32 or more characters with a Shannon
+   entropy over 4.0, and the credential file names. A hit blocks the
+   commit and names the file, the line, and the rule, never the value.
+3. The export names a credential or a subscription by its name only, and
+   drops the user part of a repo URL.
+
+**Remote and sync.** `terrarium admin config remote set <url>
+[--credential <name>]` keeps the URL in `<state>/config-repo.json` and the
+token or deploy key in the credential store. Neither goes in the repo or
+in `.git/config`: each fetch and push names the URL on the command line,
+and the secret reaches git as for a workspace clone (a one-shot
+credential helper, or `GIT_SSH_COMMAND` with a key file). A URL with a
+user or a password is refused. `sync` commits the local changes (with the
+scan), fetches, merges, and pushes. A merge is a fast-forward when it can
+be, else a merge commit; two repos that began apart merge
+(`--allow-unrelated-histories`), and the same seeded files merge clean. A
+conflict stops the merge with the files listed, and the repo waits in the
+merge: edit the files and commit, or `abort`. No step discards a local
+commit: no `reset --hard`, no force push. `pull` applies the changes:
+prompts and harness settings at the next agent start; `export/` changes
+show as a fleet plan, and apply only with `--apply` (the fleet apply of
+§20, no prune). Until then a commit does not write `export/` over them.
+`TERRARIUM_CONFIG_SYNC` (`off`, `pull`, or `sync`; default `off`) runs a
+pull or a sync every `TERRARIUM_CONFIG_SYNC_INTERVAL` (default `15m`).
+
 ---
 
 ## 9. The `terrarium` CLI for agents
@@ -1392,11 +1526,36 @@ for Codex and Copilot. The research is in
 [research/credential-sharing.md](research/credential-sharing.md); the code is
 `crates/terrariumd/src/accounts.rs` and `account_swap.rs`.
 
-A Claude Code, Codex, or Copilot agent with no subscription uses the one
-plan account of its harness,
-as it used the shared login before. When the harness has two or more
-accounts, its start fails with a message that names them: give the agent a
+Each of Claude Code, Codex, and Copilot has one **default account** or
+none (the table `account_defaults`). A Claude Code, Codex, or Copilot agent
+with no subscription runs on an account in this order:
+
+1. The default account of its harness, when that account has a login.
+2. Else the one account of the harness, as the agent used the shared login
+   before.
+3. Else, with two or more accounts, the start fails: "the agent has no
+   subscription and the claude accounts (a, b) have no default: run
+   `terrarium admin subscription default <name>` or give the agent a
+   subscription".
+
+pi has no default account: a pi agent names its provider with a
 subscription.
+
+How an account becomes the default:
+
+- A daemon start gives each harness with plan accounts and no default
+  record its oldest account (the `created_at` of `account.json`, else of
+  the subscription). This is the backfill of the first start with
+  defaults. It runs once for each harness.
+- The first account that a login or the migration makes for a harness
+  becomes its default. A second account does not change the default.
+- The operator or a sysadmin moves the default:
+  `POST /api/subscriptions/{name}/default`, `terrarium admin subscription
+  default <name>`, or "Make default" on the Subscriptions page. The audit
+  row is `subscription.default`.
+- A delete or a logout of the default makes the oldest account left the
+  default (audit reason `replaced`). When one account is left, it becomes
+  the default. A harness has no default only when it has no account.
 
 **The refresh rule.** The daemon never refreshes an OAuth token, never calls
 an OAuth token endpoint, and never writes a token that it got itself. Each
@@ -2073,6 +2232,13 @@ end-to-end scenarios of each phase are not scripted yet (no `spikes/e2e/`).
     display), a live check of `examples/display/wayland.Dockerfile`, and
     `/dev/uinput` for `ydotool` in a docker target, which Terrarium does
     not pass now.
+13. Config repo (§8.1 to §8.3): the persona text of `leader.md` and
+    `worker.md` and the tuned harness settings values come from a separate
+    research task. Until then the personas are placeholders (only a
+    comment: the harness keeps its default prompt), and the settings files
+    hold today's values. Global schedules are not in the export (a fleet
+    has no place for them). No live run of a sync between two real
+    instances yet.
 
 ## 23. Repository layout, build, run, and test
 
@@ -2086,6 +2252,7 @@ terrarium/
     ci/mod.just                 the merge bar: check = fmt-check + lint + test + dashboard-check
     docker/mod.just             image build, compose up/down/logs/shell, volume init
     daemon/mod.just             cargo build/run/test for terrariumd and the CLI
+    defaults/mod.just           the packaged defaults: apply (back up and overwrite config/terrarium), manifest
     dashboard/mod.just          npm install/dev/build/test for the SolidJS app
     host/mod.just               build and package terrarium-host, install to a host over ssh
     spikes/mod.just             Phase 0 scripts: login flows, bwrap-in-docker, hook capture
@@ -2107,11 +2274,12 @@ terrarium/
   .env.example                  ports, token, UID/GID
   config/                       bind-mounted harness homes (gitignored, except README)
     claude/  codex/  copilot/  pi/
+    terrarium/                  the config repo (§8.3), bound at /config/terrarium: its own git repo
   state/                        bind-mounted daemon state (gitignored)
   work/                         agent workspaces <project>/<agent>/, bound at /work (gitignored)
   repos/                        local bare repos, bound at /repos (gitignored)
   labs/                         vmlab test labs for a host agent on this machine
-  prompts/                      system prompt templates, mounted read-only
+  defaults/                     packaged defaults: prompts/, harness/<harness>/, README.md, manifest.json (§8.3); the image copies it to /opt/terrarium/defaults
   projects/  agents/  targets/  subscriptions/
                                 definition files, bind-mounted under /etc/terrarium (§23.4);
                                 `just docker::volumes-init` creates them
@@ -2253,7 +2421,7 @@ services:
       - ./config/pi:/auth/pi
       - ./state:/state
       - ./tools:/opt/terrarium/tools         # the harnesses: npm prefix (TERRARIUM_TOOLS_DIR)
-      - ./prompts:/prompts:ro
+      - ./config/terrarium:/config/terrarium   # the config repo (§8.3)
       - ./subscriptions:/etc/terrarium/subscriptions
       - ./projects:/etc/terrarium/projects
       - ./agents:/etc/terrarium/agents
@@ -2282,8 +2450,10 @@ settings from outside. With `./config/<harness>` on the host, `config/claude/
 settings.json`, `config/codex/config.toml`, `config/copilot/`, and
 `config/pi/settings.json` are ordinary files you open in an editor. The same
 holds for the Terrarium definitions (`projects/`, `agents/`, `targets/`,
-`subscriptions/`, `prompts/`), so a project can be declared in a file and
-committed. The daemon watches those directories and reloads on change.
+`subscriptions/`), so a project can be declared in a file and
+committed. The prompts and the harness settings of the agents are in the
+config repo `config/terrarium/` (§8.3): its own git repo, which instances
+share. The daemon watches those directories and reloads on change.
 `config/` and `state/` are gitignored; `.env.example` documents every
 variable.
 

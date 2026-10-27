@@ -220,7 +220,7 @@ pub fn materialize(
 
     write_atomic(
         &dir.join("settings.json"),
-        &pretty(&launch::settings_json(opts))?,
+        &pretty(&launch::settings_json(opts, agent))?,
     )?;
 
     if !shared.exists() {

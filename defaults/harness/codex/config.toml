@@ -1,0 +1,18 @@
+# Codex settings for every Terrarium agent on Codex (PLAN §8.2).
+#
+# The daemon reads this file at each agent start and gives each key to
+# Codex as a `-c key=value` override, on top of the shared
+# $CODEX_HOME/config.toml. A per-agent option (the agent's `model`) and the
+# keys that Terrarium forces win over this file: the yolo flags, `hooks`,
+# `projects` (the workspace trust), `sqlite_home`, `tui.resume_cwd`,
+# `check_for_update_on_startup`, `analytics`, `feedback`, `sandbox_mode`,
+# `approval_policy`, `model_instructions_file`, and
+# `developer_instructions`. Terrarium drops those keys from this file.
+#
+# A file that does not parse stops the agent start with the line number.
+#
+# Examples (not active):
+#
+# model_reasoning_effort = "medium"
+# [tui]
+# notifications = false

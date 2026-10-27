@@ -184,14 +184,14 @@ no credential for the host and path. `store` and `erase` do nothing.
 terrarium agent ls [--all-projects]
 terrarium agent show <agent>
 terrarium agent new <name> --harness <h> [--subscription s] [--pool s1,s2] [--model m] [--prompt p]
-                    [--system-prompt <text | -> | --system-prompt-file path]
+                    [--system-prompt <text | -> | --system-prompt-file path] [--persona p]
                     [--role r]... [--target t]... [--mail-to a]... [--cross-project p/a]...
                     [--restart always|on-failure|never]
 terrarium agent new --from-file agents/lead.toml [flags that override the file]
 terrarium agent new <name> --template <t> [flags that override the template]
 terrarium agent set <agent> [--harness h] [--subscription s] [--pool s1,s2] [--model m] [--prompt p]
                     [--system-prompt <text | -> | --system-prompt-file path | --no-system-prompt]
-                    [--restart r] [--policy JSON] [--new-session-on-prompt-change true|false]
+                    [--persona p] [--restart r] [--policy JSON] [--new-session-on-prompt-change true|false]
 terrarium agent swap <agent> <subscription>  move to another plan account of the pool
 terrarium agent rm <agent> [--confirm] [--keep-workspace]
 terrarium agent start|stop|restart <agent> [--no-wait]
@@ -247,12 +247,20 @@ workspace in `work/<project>/<agent>`. A live agent needs `--confirm`
 `--system-prompt` sets the agent's base system prompt (PLAN §8). It
 replaces the harness's default system prompt, and Terrarium's protocol
 prompt (`--prompt`) comes after it. It can use the variables of the
-prompt templates (`prompts/README.md`). `-` reads stdin, and
+prompt templates (`defaults/prompts/README.md`). `-` reads stdin, and
 `--system-prompt-file` reads a file. `--no-system-prompt` clears it: the
 harness keeps its default prompt again. The limit is 32 KiB. A change
 applies at the next start or restart. `agent show` prints the whole text
 after the other fields, under `system_prompt:`. `agent ls` does not show
 it.
+
+`--persona` sets the persona (PLAN §8.1): `leader`, `worker`, `none`, or
+the name of a file in the config repo's `prompts/` (without `.md`). The
+persona replaces the harness's default system prompt, and the protocol
+prompt comes after it. `--system-prompt` wins over it. Without a persona,
+the agent gets one by role: `leader` for `project_admin` or `sysadmin`,
+else `worker`. `none` keeps the harness's default prompt. `--persona ''`
+sets it back to by role.
 
 `agent attach` puts the terminal in raw mode, sends each key to the PTY,
 and sends a resize when the window changes size. Press Ctrl-] to detach.
@@ -323,7 +331,7 @@ terrarium template show <template>
 terrarium template new <name> [--global] [--description d] --harness <h> [--subscription s]
                        [--model m] [--prompt p] [--role r]... [--target t]... [--mail-to a]...
                        [--cross-project p/a]... [--restart r]
-                       [--system-prompt <text | -> | --system-prompt-file path]
+                       [--system-prompt <text | -> | --system-prompt-file path] [--persona p]
 terrarium template new <name> --from-file worker.toml [flags that override the file]
 terrarium template edit <template> [--rename n] [--description d] [spec flags as in new]
 terrarium template rm <template>
@@ -838,6 +846,8 @@ terrarium admin host show <name>               the link, the capabilities, and t
 terrarium admin host new <name> [--enrol]      prints the token once, alone on stdout
 terrarium admin host rotate <name> [--enrol]   a new token, printed once, alone on stdout
 terrarium admin host rm <name>                 revokes the token
+terrarium admin subscription ls                each subscription: provider, plan, account, login, default
+terrarium admin subscription default <name>    the default account of its harness (PLAN §16.3)
 terrarium admin harness ls [--refresh]         each harness: pin, tested range, installed, in range, on disk
 terrarium admin harness update <name> [--version v|latest] [--force]   npm install -g into a new version dir, then the switch
 terrarium admin harness update --all [--force]   every harness and the extension to the latest
@@ -845,6 +855,14 @@ terrarium admin audit [--since time] [--actor a] [--action a]
 terrarium admin password set [--stdin]         the operator password; every session ends
 terrarium admin fleet validate|plan|apply|ls|show|export ...
 terrarium admin schedule ls|show|new|set|rm|run|enable|disable|runs ...
+terrarium admin config status|diff [path]|log [-n N]|push|abort
+terrarium admin config commit -m <message> [--no-export] [--force-export]
+terrarium admin config pull [--apply]
+terrarium admin config sync [-m <message>] [--apply]
+terrarium admin config remote set <url> [--credential c] [--branch b]
+terrarium admin config remote rm
+terrarium admin config defaults [ls|accept <path>|keep <path>]
+terrarium admin config scan [--staged] [--repo dir] [file]...   no daemon: the pre-commit hook
 ```
 
 `admin password set` asks for the new password twice, with no echo, and
@@ -908,6 +926,8 @@ the agents of its own project; a global target needs sysadmin.
 
 | Command | Request | Text output |
 |---|---|---|
+| `admin subscription ls` | `GET /api/subscriptions` | A table: `NAME`, `PROVIDER`, `PLAN`, `ACCOUNT` (the harness of the plan account, `API key`, or `-`), `LOGIN` (the `login_status`), `DEFAULT` (`*` on the default account of each harness), `AGENTS` (the number of agents on it). |
+| `admin subscription default <name>` | `POST /api/subscriptions/{name}/default` | `<name> is the default <harness> account`. A Claude Code, Codex, or Copilot agent with no subscription then runs on it; the old default stops being one. `422` for an API key, a subscription with no plan account, or a pi account. Needs sysadmin or the operator ([api.md §16.3](api.md)). |
 | `admin harness ls [--refresh]` | `GET /api/harnesses[?refresh=true]` | A table: `HARNESS`, `PINNED`, `TESTED`, `INSTALLED`, `IN RANGE` (`yes`, `NO`, or `unknown`), `ON DISK` (the version dirs in the tools dir). Then `policy: warn` or `policy: refuse`, one line for each harness out of its range (with the fix) or with an unknown version (with the reason), and one line for each live agent on another version than the active one (`<harness>: <agent> runs <v>; it moves to <active> at its next restart`). The pins come from `harnesses.toml` ([api.md §4](api.md)). |
 | `admin harness update <name> [--version v] [--force]`, `admin harness update --all [--force]` | `POST /api/harnesses/{name}/update` `{version?, force?}`, or `POST /api/harnesses/update` | npm's output, then `<name>: <from> -> <to>`, with `(outside the tested range ...)` when `to` is outside it. Then the `note` on the live agents that keep an older version until their next restart, and `<name>: removed the unused version(s) ...`. On a failure: npm's output, then the error. `--force` installs the version again when its version dir is on disk; running agents never stop an update. Needs sysadmin or the operator ([api.md §4](api.md)). |
 
@@ -937,6 +957,33 @@ operator only (PLAN §10: host agent tokens are operator-only). An agent gets
   `last_used_from` that you do not expect is a warning sign.
 - A host that exists gets `409` from `new`. Use `rotate` to give it a new
   token.
+
+`admin config` works on the config repo (PLAN §8.3, [api.md §25](api.md#25-config-repo)):
+the prompts, the harness settings, and the export, in git. It needs the
+operator or a sysadmin.
+
+| Command | Request | Text output |
+|---|---|---|
+| `admin config status` | `GET /api/config/status` | The repo dir, the branch and head, the remote (the URL without credentials, the credential name, ahead and behind at the last fetch), the auto-sync mode, a waiting merge, the changed files, the new defaults that wait, and a line when a pulled export waits for `pull --apply`. |
+| `admin config diff [path]` | `GET /api/config/diff[?path=]` | The unified diff, or `no changes`. |
+| `admin config commit -m m` | `POST /api/config/commit` `{"message", "export", "force_export"}` | `committed <commit> (<n> file(s)): <files>`, or `nothing to commit`. A scan finding exits 1 with the file, the line, and the rule of each one. |
+| `admin config log [-n N]` | `GET /api/config/log?limit=N` | One line per commit: the commit, the time, the author, the subject. |
+| `admin config push` | `POST /api/config/push` | `pushed` or `nothing to push`. |
+| `admin config pull [--apply]` | `POST /api/config/pull` `{"apply"}` | The merged files, then for each changed export file its fleet plan (`plan N create, N update, N unchanged`) and the entries that change, or `applied`. A conflict exits 1 with the files. |
+| `admin config sync [-m m] [--apply]` | `POST /api/config/sync` `{"message"?, "apply"}` | The commit line, the merge lines, and `pushed`. |
+| `admin config abort` | `POST /api/config/abort` | `merge aborted: the repo is back at your last commit` |
+| `admin config remote set <url> [--credential c] [--branch b]` | `PUT /api/config/remote` | The status. Put a token or a deploy key in a credential (`POST /api/credentials`), never in the URL: a URL with a user or a password is refused. |
+| `admin config remote rm` | `DELETE /api/config/remote` | The status. |
+| `admin config defaults [ls]`, `accept <path>`, `keep <path>` | `GET /api/config/defaults`, `POST /api/config/defaults/accept|keep` `{"path"}` | Each new default that waits, with its diff, or `no new defaults wait`. |
+
+`admin config scan` runs on this machine, with no daemon. `--staged` scans
+what the next commit of the repo in the current dir (or `--repo`) takes;
+the `pre-commit` hook of the config repo runs it. Files on the command
+line are scanned as they are. A finding prints `secret scan: <file>:<line>:
+<rule>` on stderr, never the value, and exits 1. For a false hit of the
+`credential-key` or `high-entropy` rule, add `terrarium-scan: allow` to
+the line. `terrariumd config scan --staged` does the same in the
+container.
 
 `just host::token <name> [enrol]` runs `admin host new <name>`, with
 `--enrol` when the second argument is `enrol`. `just host::install`

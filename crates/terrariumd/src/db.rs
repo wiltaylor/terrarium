@@ -982,6 +982,25 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE agents ADD COLUMN subscription_pool TEXT NOT NULL DEFAULT '[]';
     "#,
+    // 27: the default plan account of each harness (PLAN §16.3): the
+    // account of a Claude Code, Codex, or Copilot agent with no
+    // subscription. One row per harness, so one default per harness. A
+    // NULL `subscription` is a default that was deleted or logged out:
+    // the daemon picks no new one. No row: the daemon has not looked yet,
+    // and the next start makes the oldest account the default
+    // (`store::subscriptions::settle_defaults`).
+    r#"
+    CREATE TABLE account_defaults (
+        harness      TEXT PRIMARY KEY CHECK (harness IN ('claude', 'codex', 'copilot')),
+        subscription TEXT REFERENCES subscriptions(name) ON DELETE SET NULL,
+        updated_at   TEXT NOT NULL
+    );
+    "#,
+    // 28: the persona of an agent (PLAN §8.1): `leader`, `worker`, `none`,
+    // or a prompt file name. NULL: by role.
+    r#"
+    ALTER TABLE agents ADD COLUMN persona TEXT;
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call
@@ -1250,6 +1269,7 @@ mod tests {
             "schedule_runs",
             "waits",
             "watches",
+            "account_defaults",
         ] {
             let n: i64 = conn
                 .query_row(

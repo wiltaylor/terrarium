@@ -22,6 +22,12 @@ describe("navigation", () => {
     expect(app).toMatch(/path="\/templates"/);
   });
 
+  it("has Config before Settings in the global list, with a route", () => {
+    const hrefs = GLOBAL_ITEMS.map((i) => i.href);
+    expect(hrefs.indexOf("/config")).toBe(hrefs.indexOf("/settings") - 1);
+    expect(app).toMatch(/path="\/config"/);
+  });
+
   it("redirects the old Spend route to Home, where the usage split lives", () => {
     expect(movedTo("/p/terrarium/spend")).toBe("/");
     expect(movedTo("/p/my-app/spend/")).toBe("/");

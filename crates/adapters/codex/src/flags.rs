@@ -64,6 +64,11 @@ pub struct CodexFlags {
     /// <name>`. The list comes from the binary: Codex counts 11 hooks when
     /// all 11 are passed. An unknown name is ignored without a message.
     pub hook_events: &'static [&'static str],
+    /// The config keys that Terrarium forces (PLAN §8.2). The adapter
+    /// drops each of them, and each key under them, from the user
+    /// settings file, so the forced `-c` value is the only one. See
+    /// [`CODEX_PINNED`] for the reason of each.
+    pub forced_keys: &'static [&'static str],
 }
 
 /// The pinned Codex (`harnesses.toml`). Measured on 0.160.0 and checked
@@ -116,6 +121,27 @@ pub const CODEX_PINNED: CodexFlags = CodexFlags {
         // and its payload and the effect of its output are not captured.
         // Register it for logging only after a spike (`docs/compat.md`,
         // "Codex 0.164.0").
+    ],
+    forced_keys: &[
+        // The Terrarium hooks: the runner learns each turn and tool call
+        // from them.
+        "hooks",
+        // The workspace trust: no "Folder access" dialog.
+        "projects",
+        // The agent's own SQLite files (`sqlite_home`, `config.rs`).
+        "sqlite_home",
+        // No "Working directory" dialog on a resume.
+        "tui.resume_cwd",
+        // No update box; telemetry and feedback stay off.
+        "check_for_update_on_startup",
+        "analytics.enabled",
+        "feedback.enabled",
+        // The yolo flag holds these; a file value would fight it.
+        "sandbox_mode",
+        "approval_policy",
+        // The Terrarium prompt.
+        "model_instructions_file",
+        "developer_instructions",
     ],
 };
 

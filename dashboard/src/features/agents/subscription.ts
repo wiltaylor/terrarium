@@ -154,3 +154,29 @@ export function appliedText(r: Pick<SwapResult, "to" | "applied">): string {
       return `Moved to ${r.to}. The agent does not run. Its next start uses the new account.`;
   }
 }
+
+// ----- The account of an agent with no subscription (PLAN §16.3) -----
+
+export type NoSubscriptionAccount = { name: string; why: "default" | "only" } | { error: string } | null;
+
+/**
+ * The plan account that a `harness` agent with no subscription runs on, as
+ * the daemon picks it: the default account of the harness, else the one
+ * account. Two or more and no default: the start fails. `null`: no account
+ * (pi, or no plan account of the harness).
+ */
+export function noSubscriptionAccount(list: Subscription[], harness: Harness): NoSubscriptionAccount {
+  if (harness === "pi") return null;
+  const kin = list.filter((s) => s.account?.harness === harness && s.account.has_login && !s.has_api_key);
+  const def = kin.find((s) => s.default);
+  if (def) return { name: def.name, why: "default" };
+  if (kin.length === 1) return { name: kin[0]!.name, why: "only" };
+  if (kin.length > 1) return { error: `the ${harness} accounts (${kin.map((s) => s.name).join(", ")}) have no default: the agent cannot start` };
+  return null;
+}
+
+/** `account: anthropic-max-20x (default)`. */
+export function noSubscriptionAccountText(a: NonNullable<NoSubscriptionAccount>): string {
+  if ("error" in a) return a.error;
+  return `account: ${a.name} (${a.why === "default" ? "default" : "the only account"})`;
+}

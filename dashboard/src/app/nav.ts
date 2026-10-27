@@ -23,6 +23,8 @@ export const GLOBAL_ITEMS = [
   { href: "/hosts", label: "Hosts" },
   { href: "/events", label: "Event log" },
   { href: "/audit", label: "Audit" },
+  // The config repo: for the operator or a sysadmin.
+  { href: "/config", label: "Config" },
   { href: "/settings", label: "Settings" },
 ] as const;
 

@@ -118,9 +118,33 @@ pub struct Settings {
     #[arg(long, env = "TERRARIUM_RUNTIME_DIR", default_value_os_t = default_runtime_dir())]
     pub runtime_dir: PathBuf,
 
-    /// The prompt templates, `<dir>/<name>.md`.
-    #[arg(long, env = "TERRARIUM_PROMPTS_DIR", default_value = "/prompts")]
-    pub prompts_dir: PathBuf,
+    /// The prompt templates and personas, `<dir>/<name>.md`. Default: the
+    /// `prompts/` of the config repo.
+    #[arg(long, env = "TERRARIUM_PROMPTS_DIR")]
+    pub prompts_dir: Option<PathBuf>,
+
+    /// The config repo (PLAN §8.3): `prompts/`, `harness/<harness>/`, and
+    /// `export/`, in git. The daemon copies the packaged defaults into it
+    /// at each start, and makes it a git repo.
+    #[arg(long, env = "TERRARIUM_CONFIG_REPO", default_value = crate::config_repo::DEFAULT_DIR)]
+    pub config_repo: PathBuf,
+
+    /// The packaged defaults: `manifest.json` and the files it lists (the
+    /// image has them in `/opt/terrarium/defaults`). A dir with no
+    /// manifest: no seeding.
+    #[arg(long, env = "TERRARIUM_DEFAULTS_DIR", default_value = crate::defaults::DEFAULT_DEFAULTS_DIR)]
+    pub defaults_dir: PathBuf,
+
+    /// The time between two automatic runs of `TERRARIUM_CONFIG_SYNC`
+    /// (`pull` or `sync`; default `off`): seconds, or a number with `s`,
+    /// `m`, `h`, or `d`.
+    #[arg(
+        long,
+        env = crate::config_repo::ENV_SYNC_INTERVAL,
+        default_value = "15m",
+        value_parser = parse_duration
+    )]
+    pub config_sync_interval: std::time::Duration,
 
     /// How harnesses run: `bwrap` (the sandbox of PLAN §11) or `none`
     /// (development and tests only).
@@ -243,6 +267,51 @@ pub enum Command {
         #[command(subcommand)]
         command: PasswordCommand,
     },
+    /// The packaged defaults and the config repo (`--defaults-dir`,
+    /// `--config-repo`), with no daemon.
+    Defaults {
+        #[command(subcommand)]
+        command: DefaultsCommand,
+    },
+    /// The config repo, with no daemon.
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
+}
+
+/// `terrariumd defaults ...`.
+#[derive(Debug, Subcommand)]
+pub enum DefaultsCommand {
+    /// Copy the missing defaults into the config repo, upgrade the
+    /// unedited ones, and write `<file>.new` next to the edited ones (what
+    /// each start does).
+    Seed,
+    /// Back the config repo up to `<state>/backup/`, then write every
+    /// default over it (`just defaults::apply`). The operator's own files
+    /// and `.git` stay.
+    Apply,
+    /// Write `manifest.json` of a defaults dir (`just defaults::manifest`).
+    Manifest {
+        /// The defaults dir. Default: `--defaults-dir`.
+        dir: Option<PathBuf>,
+    },
+}
+
+/// `terrariumd config ...`.
+#[derive(Debug, Subcommand)]
+pub enum ConfigCommand {
+    /// The secret scan. `--staged`: what the next commit takes (the
+    /// `pre-commit` hook). Else the named files. Exit 1 on a finding; the
+    /// output names the file, the line, and the rule, never the value.
+    Scan {
+        #[arg(long)]
+        staged: bool,
+        /// The repo for `--staged`. Default: the current dir.
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        files: Vec<PathBuf>,
+    },
 }
 
 /// `terrariumd password ...`.
@@ -300,6 +369,13 @@ fn sibling_or_path(program: &str) -> Option<PathBuf> {
 }
 
 impl Settings {
+    /// The prompts dir: `--prompts-dir`, else `<config repo>/prompts`.
+    pub fn prompts_dir(&self) -> PathBuf {
+        self.prompts_dir
+            .clone()
+            .unwrap_or_else(|| self.config_repo.join("prompts"))
+    }
+
     /// The tools dir and its pins, or `None` when `--tools-dir` is empty.
     /// The pins come from `<config dir>/harnesses.toml`, else from the
     /// pins built into this binary.

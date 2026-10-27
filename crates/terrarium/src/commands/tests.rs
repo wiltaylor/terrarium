@@ -5105,3 +5105,320 @@ async fn waits_runs_and_watches() {
     )
     .await;
 }
+
+#[tokio::test]
+async fn admin_subscription_ls_marks_the_default_and_default_posts() {
+    let answer = json!([
+        {"name": "anthropic-max-20x", "provider": "anthropic", "plan": "Max 20x",
+         "login_status": "logged_in", "default": true, "has_api_key": false,
+         "account": {"harness": "claude"}, "agents": [{"id": "A", "name": "a", "project": "p"}]},
+        {"name": "anthropic-max-20x-2", "provider": "anthropic", "plan": "Max 20x",
+         "login_status": "logged_in", "default": false, "has_api_key": false,
+         "account": {"harness": "claude"}, "agents": []},
+        {"name": "glm", "provider": "zai", "plan": "coding", "login_status": "api_key",
+         "default": false, "has_api_key": true, "agents": []}
+    ]);
+    let out = ok(
+        false,
+        &["admin", "subscription", "ls"],
+        vec![(200, answer.clone())],
+        vec![req(Get, "/api/subscriptions")],
+    )
+    .await;
+    let lines: Vec<&str> = out.lines().collect();
+    assert!(lines[0].starts_with("NAME"), "{out}");
+    assert!(lines[0].contains("DEFAULT"), "{out}");
+    let col = lines[0].find("DEFAULT").unwrap();
+    let mark = |name: &str| {
+        let l = lines
+            .iter()
+            .find(|l| l.split_whitespace().next() == Some(name))
+            .unwrap();
+        l.get(col..col + 1).unwrap_or(" ").to_owned()
+    };
+    assert_eq!(mark("anthropic-max-20x"), "*", "{out}");
+    assert_eq!(mark("anthropic-max-20x-2"), " ", "{out}");
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("glm") && l.contains("API key")),
+        "{out}"
+    );
+    let out = ok(
+        false,
+        &["--json", "admin", "subscription", "ls"],
+        vec![(200, answer.clone())],
+        vec![req(Get, "/api/subscriptions")],
+    )
+    .await;
+    assert_eq!(serde_json::from_str::<Value>(&out).unwrap(), answer);
+
+    let out = ok(
+        false,
+        &["admin", "subscription", "default", "anthropic-max-20x-2"],
+        vec![(
+            200,
+            json!({"name": "anthropic-max-20x-2", "default": true, "account": {"harness": "claude"}}),
+        )],
+        vec![req(Post, "/api/subscriptions/anthropic-max-20x-2/default")],
+    )
+    .await;
+    assert_eq!(
+        out.trim(),
+        "anthropic-max-20x-2 is the default claude account"
+    );
+}
+
+/// `admin config ...` (docs/api.md §25): the exact requests, and the text.
+#[tokio::test]
+async fn admin_config_commands_map_onto_the_config_api() {
+    let status = json!({"dir": "/config/terrarium", "initialized": true, "branch": "main",
+        "head": "0123456789abcdef", "remote": {"url": "https://example.com/c.git",
+        "credential": "deploy", "branch": "main"}, "ahead": 1, "behind": 0,
+        "changes": [{"path": "prompts/leader.md", "status": "modified"}],
+        "merging": false, "conflicts": [], "pending_defaults": ["prompts/worker.md"],
+        "export_pending": true, "auto_sync": "off"});
+    let out = ok(
+        false,
+        &["admin", "config", "status"],
+        vec![(200, status.clone())],
+        vec![req(Get, "/api/config/status")],
+    )
+    .await;
+    for want in [
+        "branch:   main at 0123456789",
+        "remote:   https://example.com/c.git (credential deploy)",
+        "1 ahead, 0 behind",
+        "modified   prompts/leader.md",
+        "new defaults wait: prompts/worker.md",
+        "pull --apply",
+    ] {
+        assert!(out.contains(want), "{want}: {out}");
+    }
+    let out = ok(
+        false,
+        &["admin", "config", "commit", "-m", "tune leader"],
+        vec![(
+            200,
+            json!({"commit": "abcdef0123456", "files": ["prompts/leader.md"], "export": []}),
+        )],
+        vec![(
+            Post,
+            "/api/config/commit",
+            vec![],
+            Some(json!({"message": "tune leader", "export": true, "force_export": false})),
+        )],
+    )
+    .await;
+    assert!(
+        out.contains("committed abcdef0123 (1 file(s)): prompts/leader.md"),
+        "{out}"
+    );
+    ok(
+        false,
+        &[
+            "admin",
+            "config",
+            "commit",
+            "-m",
+            "x",
+            "--no-export",
+            "--force-export",
+        ],
+        vec![(200, json!({"commit": null, "files": [], "export": []}))],
+        vec![(
+            Post,
+            "/api/config/commit",
+            vec![],
+            Some(json!({"message": "x", "export": false, "force_export": true})),
+        )],
+    )
+    .await;
+    ok(
+        false,
+        &["admin", "config", "diff", "prompts/leader.md"],
+        vec![(200, json!({"diff": "--- a\n+++ b\n"}))],
+        vec![(
+            Get,
+            "/api/config/diff",
+            vec![("path", "prompts/leader.md")],
+            None,
+        )],
+    )
+    .await;
+    ok(
+        false,
+        &["admin", "config", "log", "-n", "5"],
+        vec![(200, json!([]))],
+        vec![(Get, "/api/config/log", vec![("limit", "5")], None)],
+    )
+    .await;
+    let pulled = json!({"fetched": true, "updated": true, "changed": ["export/projects/p.fleet.toml"],
+        "conflicts": [], "export": [{"path": "export/projects/p.fleet.toml",
+        "plan": {"summary": {"create": 1, "update": 0, "unchanged": 2},
+        "entries": [{"action": "create", "kind": "agent", "key": "p/w1"}]}}]});
+    let out = ok(
+        false,
+        &["admin", "config", "pull"],
+        vec![(200, pulled)],
+        vec![(
+            Post,
+            "/api/config/pull",
+            vec![],
+            Some(json!({"apply": false})),
+        )],
+    )
+    .await;
+    assert!(
+        out.contains("plan 1 create, 0 update, 2 unchanged (apply with --apply)"),
+        "{out}"
+    );
+    assert!(out.contains("create    agent p/w1"), "{out}");
+    ok(
+        false,
+        &["admin", "config", "sync", "-m", "s", "--apply"],
+        vec![(
+            200,
+            json!({"committed": {"commit": null, "files": []}, "fetched": true,
+            "updated": false, "changed": [], "conflicts": [], "pushed": true, "export": []}),
+        )],
+        vec![(
+            Post,
+            "/api/config/sync",
+            vec![],
+            Some(json!({"message": "s", "apply": true})),
+        )],
+    )
+    .await;
+    ok(
+        false,
+        &["admin", "config", "push"],
+        vec![(200, json!({"pushed": true}))],
+        vec![req(Post, "/api/config/push")],
+    )
+    .await;
+    ok(
+        false,
+        &[
+            "admin",
+            "config",
+            "remote",
+            "set",
+            "git@host:c.git",
+            "--credential",
+            "deploy",
+        ],
+        vec![(200, status.clone())],
+        vec![(
+            Put,
+            "/api/config/remote",
+            vec![],
+            Some(json!({"url": "git@host:c.git", "credential": "deploy"})),
+        )],
+    )
+    .await;
+    ok(
+        false,
+        &["admin", "config", "remote", "rm"],
+        vec![(200, status)],
+        vec![req(Delete, "/api/config/remote")],
+    )
+    .await;
+    ok(
+        false,
+        &["admin", "config", "defaults", "keep", "prompts/worker.md"],
+        vec![(200, json!([]))],
+        vec![(
+            Post,
+            "/api/config/defaults/keep",
+            vec![],
+            Some(json!({"path": "prompts/worker.md"})),
+        )],
+    )
+    .await;
+    let out = ok(
+        false,
+        &["admin", "config", "defaults"],
+        vec![(
+            200,
+            json!([{"path": "prompts/worker.md", "diff": "+new\n"}]),
+        )],
+        vec![req(Get, "/api/config/defaults")],
+    )
+    .await;
+    assert!(out.contains("+new"), "{out}");
+}
+
+/// `--persona` on `agent new|set` and `template new`.
+#[tokio::test]
+async fn persona_flags_go_into_the_definition() {
+    let agent = json!({"id": ME, "name": "w", "project": "p", "harness": "claude"});
+    ok(
+        false,
+        &[
+            "-p",
+            "p",
+            "agent",
+            "new",
+            "w",
+            "--harness",
+            "claude",
+            "--persona",
+            "reviewer",
+        ],
+        vec![(201, agent.clone())],
+        vec![(
+            Post,
+            "/api/agents",
+            vec![],
+            Some(json!({"name": "w", "project": "p", "harness": "claude", "persona": "reviewer"})),
+        )],
+    )
+    .await;
+    ok(
+        false,
+        &["agent", "set", "p/w", "--persona", ""],
+        vec![(200, agent)],
+        vec![(
+            Patch,
+            "/api/agents/p%2Fw",
+            vec![],
+            Some(json!({"persona": null})),
+        )],
+    )
+    .await;
+}
+
+/// `admin config scan` runs here, with no daemon: a fake secret exits 1
+/// and names the file, the line, and the rule, never the value.
+#[tokio::test]
+async fn admin_config_scan_runs_locally() {
+    let dir = tempfile::tempdir().unwrap();
+    let bad = dir.path().join("leak.md");
+    let secret = format!("sk-ant-api03-{}", "FAKEfake0123456789".repeat(2));
+    std::fs::write(&bad, format!("ok\n{secret}\n")).unwrap();
+    let good = dir.path().join("ok.md");
+    std::fs::write(&good, "fine\n").unwrap();
+    let r = exec(
+        false,
+        &["admin", "config", "scan", good.to_str().unwrap()],
+        vec![],
+        None,
+    )
+    .await;
+    assert!(r.result.is_ok());
+    assert!(r.reqs.is_empty());
+    let r = exec(
+        false,
+        &["--json", "admin", "config", "scan", bad.to_str().unwrap()],
+        vec![],
+        None,
+    )
+    .await;
+    assert!(r.result.is_err());
+    assert!(r.reqs.is_empty());
+    let v: Value = serde_json::from_str(r.out.trim()).unwrap();
+    assert_eq!(v["findings"][0]["line"], 2);
+    assert_eq!(v["findings"][0]["rule"], "anthropic-key");
+    assert!(!r.out.contains(&secret));
+}

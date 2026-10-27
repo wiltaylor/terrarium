@@ -8,8 +8,10 @@ pub mod actor;
 pub mod agent_rpc;
 pub mod api;
 pub mod assets;
+pub mod config_repo;
 pub mod credentials;
 pub mod db;
+pub mod defaults;
 pub mod display;
 pub mod error;
 pub mod events;
@@ -181,6 +183,7 @@ pub async fn start_with_usage(
         transcripts: Arc::default(),
         operator_auth: Arc::new(password::OperatorAuth::new(&cfg.state_dir)),
         waits: Arc::default(),
+        config_repo: Arc::default(),
     });
     if cfg.insecure_agent_header {
         warn!("--insecure-agent-header: any local caller can act as any agent");
@@ -304,6 +307,7 @@ fn spawn_account_migration(state: Shared) -> JoinHandle<()> {
                     continue;
                 }
             };
+            let mut moved = false;
             for h in accounts::harnesses() {
                 let home = state.usage.config.home(h);
                 let (dir, sup, list) = (
@@ -334,6 +338,7 @@ fn spawn_account_migration(state: Shared) -> JoinHandle<()> {
                 last.insert(h, note);
                 match run {
                     Ok(Ok(Some(m))) if !m.is_empty() => {
+                        moved |= !m.moved.is_empty();
                         if m.moved.is_empty() && !m.pi_link {
                             warn!(harness = %h, skipped = ?m.skipped, "the shared login stays in the shared home");
                         } else {
@@ -368,6 +373,12 @@ fn spawn_account_migration(state: Shared) -> JoinHandle<()> {
                     Err(e) => warn!(harness = %h, "the account migration failed: {e}"),
                     _ => {}
                 }
+            }
+            // The default account of each harness (PLAN §16.3): the
+            // backfill at the first pass, and the first account that the
+            // migration moves.
+            if first || moved {
+                api::settle_account_defaults(&state, None).await;
             }
             if std::mem::take(&mut first) && state.usage.config.detect_on_start {
                 let s = state.clone();

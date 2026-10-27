@@ -282,6 +282,7 @@ async fn update(
                             "cleared"
                         }
                     }),
+                    "persona": patch.persona,
                     "policy": patch.policy,
                     "restart": patch.restart,
                 }),

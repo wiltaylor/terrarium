@@ -39,6 +39,7 @@ pub fn routes() -> Router<Shared> {
         .route("/subscriptions/{name}/probe", post(probe))
         .route("/subscriptions/{name}/verify", post(verify))
         .route("/subscriptions/{name}/logout", post(logout))
+        .route("/subscriptions/{name}/default", post(make_default))
         .route("/subscriptions/{name}/api-key", post(api_key))
 }
 
@@ -121,6 +122,9 @@ pub struct SubscriptionView {
     pub account: Option<AccountView>,
     /// The agents whose current subscription this is.
     pub agents: Vec<AgentOn>,
+    /// The account is the default account of its harness (PLAN §16.3): an
+    /// agent of that harness with no subscription runs on it.
+    pub default: bool,
 }
 
 /// The plan account of a subscription, as the API shows it.
@@ -181,6 +185,7 @@ fn view(
         .map(|(id, name, project)| AgentOn { id, name, project })
         .collect();
     Ok(SubscriptionView {
+        default: subs::is_default(c, &sub.name)?,
         account,
         agents,
         default_models: crate::models::default_models(&sub),
@@ -384,12 +389,13 @@ async fn remove(
     state
         .db
         .write(actor.label(), move |t| {
+            let was_default = subs::is_default(t, &n)?;
             subs::delete(t, &n)?;
             t.audit(
                 "subscription.delete",
                 &n,
                 None,
-                json!({"account_removed": account}),
+                json!({"account_removed": account, "default_cleared": was_default}),
             )
         })
         .await?;
@@ -399,6 +405,7 @@ async fn remove(
             .await
             .map_err(|e| ApiError::internal(e.to_string()))?
             .map_err(|e| ApiError::internal(format!("cannot remove the account: {e}")))?;
+        settle_defaults(&state, None).await;
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -569,14 +576,17 @@ async fn logout(
             .db
             .write(actor.label(), move |t| {
                 subs::set_login_status(t, &n, subs::MISSING)?;
+                // `settle_defaults` below picks the new default.
+                let cleared = subs::clear_default(t, &n)?.is_some();
                 t.audit(
                     "subscription.logout",
                     &n,
                     None,
-                    json!({"account_removed": true}),
+                    json!({"account_removed": true, "default_cleared": cleared}),
                 )
             })
             .await?;
+        settle_defaults(&state, None).await;
         return Ok(Json(load(&state, name).await?));
     }
     let Some((kind, _)) = login::kind_of(&sub) else {
@@ -599,6 +609,77 @@ async fn logout(
         })
         .await?;
     Ok(Json(load(&state, name).await?))
+}
+
+/// `POST /api/subscriptions/{name}/default`: make the plan account of
+/// `name` the default account of its harness (PLAN §16.3). The old default
+/// stops being one. `422` for a subscription with no plan account (an API
+/// key, or no login yet), and for a pi account.
+async fn make_default(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(name): Path<String>,
+) -> ApiResult<Json<SubscriptionView>> {
+    policy::manage_subscriptions(&actor, "setting the default account")?;
+    let sub = load(&state, name.clone()).await?.sub;
+    if sub.env_var.is_some() {
+        return Err(ApiError::invalid(format!(
+            "subscription `{name}` is an API key; only a plan account can be the default"
+        )));
+    }
+    let Some(meta) = crate::accounts::read_meta(&state.state_dir, &name) else {
+        return Err(ApiError::invalid(format!(
+            "subscription `{name}` has no plan account; log in with the wizard first"
+        )));
+    };
+    let h = meta.harness;
+    if !subs::DEFAULT_HARNESSES.contains(&h) || !crate::accounts::plan_provider(h, &sub.provider) {
+        return Err(ApiError::invalid(format!(
+            "subscription `{name}` is not a plan account of Claude Code, Codex, or Copilot \
+             (harness {h}, provider {}); only those have a default account",
+            sub.provider
+        )));
+    }
+    let n = name.clone();
+    state
+        .db
+        .write(actor.label(), move |t| {
+            subs::set_default(t, h, &n).map(|_| ())
+        })
+        .await?;
+    Ok(Json(load(&state, name).await?))
+}
+
+/// Give each harness with plan accounts and no default its default
+/// (`subs::settle_defaults`): at the start, after the migration moves an
+/// account, and after a login (`fresh`). Logs a failure; never fails.
+pub async fn settle_defaults(state: &Shared, fresh: Option<String>) {
+    let dir = state.state_dir.clone();
+    let accounts = match tokio::task::spawn_blocking(move || {
+        crate::accounts::default_candidates(&dir)
+    })
+    .await
+    {
+        Ok(a) => a,
+        Err(e) => {
+            tracing::warn!("cannot list the plan accounts for the defaults: {e}");
+            return;
+        }
+    };
+    let r = state
+        .db
+        .write("system", move |t| {
+            subs::settle_defaults(t, &accounts, fresh.as_deref())
+        })
+        .await;
+    match r {
+        Ok(changes) => {
+            for c in changes {
+                tracing::info!(harness = %c.harness, to = ?c.to, "set the default plan account");
+            }
+        }
+        Err(e) => tracing::warn!("cannot set the default plan accounts: {e}"),
+    }
 }
 
 /// `POST /api/subscriptions/{name}/api-key`. The answer never has the key.

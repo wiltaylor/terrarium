@@ -9,7 +9,7 @@ import type { AgentEvent, DetectedLogin, Subscription } from "../api/types";
 import type { EventsStore } from "./events";
 
 /** Events after which the list is stale. */
-export const REFRESH_KINDS = ["quota.sample", "quota.blocked", "quota.resumed"];
+export const REFRESH_KINDS = ["quota.sample", "quota.blocked", "quota.resumed", "subscription"];
 
 export function createSubscriptionsStore(api: Pick<Api, "subscriptions">, events?: Pick<EventsStore, "on">) {
   const [list, setList] = createSignal<Subscription[]>([]);

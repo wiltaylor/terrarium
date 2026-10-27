@@ -1038,6 +1038,9 @@ pub struct LaunchInput<'a> {
     pub state_dir: &'a Path,
     pub harness: HarnessId,
     pub subscription: Option<&'a str>,
+    /// The default account of the harness (`account_defaults`), for an
+    /// agent with no subscription.
+    pub default: Option<&'a str>,
     pub pool: &'a [String],
     /// `<state>/agents/<ulid>/harness`.
     pub harness_dir: &'a Path,
@@ -1080,12 +1083,33 @@ fn pool_with_logins(input: &LaunchInput<'_>, current: &str) -> Vec<String> {
         .collect()
 }
 
-/// The account of a Claude, Codex, or Copilot agent with no subscription:
-/// the one account of `harness`, as the shared login was before the
-/// migration. With two or
-/// more, the agent must name one. With none, nothing (an API key, or the
-/// shared login before the migration).
-fn default_account(state_dir: &Path, harness: HarnessId) -> Result<Option<String>, String> {
+/// The plan accounts with a login, for the default of each harness
+/// (`store::subscriptions::settle_defaults`).
+pub fn default_candidates(state_dir: &Path) -> Vec<crate::store::subscriptions::AccountRef> {
+    list(state_dir)
+        .into_iter()
+        .filter(|(n, m)| has_credential(state_dir, n, m.harness))
+        .map(|(n, m)| crate::store::subscriptions::AccountRef {
+            subscription: n,
+            harness: m.harness,
+            created_at: Some(m.created_at).filter(|c| !c.is_empty()),
+        })
+        .collect()
+}
+
+/// The account of a Claude, Codex, or Copilot agent with no subscription
+/// (PLAN §16.3): the default account of `harness` when it has a login;
+/// else the one account of `harness`, as the shared login was before the
+/// migration. With two or more and no default, the start fails. With
+/// none, nothing (an API key, or the shared login before the migration).
+fn default_account(
+    state_dir: &Path,
+    harness: HarnessId,
+    default: Option<&str>,
+) -> Result<Option<String>, String> {
+    if let Some(d) = default.filter(|d| has_credential(state_dir, d, harness)) {
+        return Ok(Some(d.to_owned()));
+    }
     let mut names: Vec<String> = fs::read_dir(credentials_dir(state_dir).join(ACCOUNTS_DIR))
         .map(|d| {
             d.flatten()
@@ -1099,9 +1123,8 @@ fn default_account(state_dir: &Path, harness: HarnessId) -> Result<Option<String
         [] => Ok(None),
         [one] => Ok(Some(one.clone())),
         many => Err(format!(
-            "the agent has no subscription, and {} {harness} accounts exist ({}): set one \
-             with `terrarium admin agent set <agent> --subscription <name>`",
-            many.len(),
+            "the agent has no subscription and the {harness} accounts ({}) have no default: \
+             run `terrarium admin subscription default <name>` or give the agent a subscription",
             many.join(", ")
         )),
     }
@@ -1116,7 +1139,9 @@ pub fn prepare_launch(input: &LaunchInput<'_>) -> Result<LaunchAccounts, String>
     // pi agents name their provider through a subscription (mostly API
     // keys), so pi gets no default account.
     let default = match input.subscription {
-        None if input.harness != HarnessId::Pi => default_account(input.state_dir, input.harness)?,
+        None if input.harness != HarnessId::Pi => {
+            default_account(input.state_dir, input.harness, input.default)?
+        }
         _ => None,
     };
     let current = input
@@ -1620,6 +1645,7 @@ mod tests {
             state_dir: &state,
             harness: HarnessId::Claude,
             subscription: Some("max-b"),
+            default: None,
             pool: &pool,
             harness_dir: &h,
             shared_home: &home,
@@ -1643,17 +1669,52 @@ mod tests {
         );
         assert_eq!(pointed(&h), Some(store_dir(&state, "max-b")));
 
-        // No subscription: the one account of the harness, as the shared
-        // login was. Three accounts here, so the agent must name one.
-        let e = prepare_launch(&LaunchInput {
+        // No subscription: the default account of the harness first.
+        let d = tmp.path().join("agent-d/harness");
+        let l = prepare_launch(&LaunchInput {
             subscription: None,
+            default: Some("max-c"),
+            harness_dir: &d,
             ..input
         })
-        .unwrap_err();
+        .unwrap();
+        assert_eq!(l.account.as_deref(), Some("max-c"));
+        assert_eq!(pointed(&d), Some(store_dir(&state, "max-c")));
+        // A default with no login counts as no default. Three accounts and
+        // no default: the start fails and says what to do.
+        for default in [None, Some("no-login")] {
+            let e = prepare_launch(&LaunchInput {
+                subscription: None,
+                default,
+                ..input
+            })
+            .unwrap_err();
+            assert_eq!(
+                e,
+                "the agent has no subscription and the claude accounts (max-a, max-b, max-c) \
+                 have no default: run `terrarium admin subscription default <name>` or give \
+                 the agent a subscription"
+            );
+        }
+        // A default of another harness is not a Claude login.
+        let phome0 = tmp.path().join("auth/copilot0");
+        fs::create_dir_all(&phome0).unwrap();
+        write_credential(&state, "gh0", HarnessId::Copilot, b"gho_y\n", &phome0).unwrap();
         assert!(
-            e.contains("3 claude accounts exist (max-a, max-b, max-c)"),
-            "{e}"
+            prepare_launch(&LaunchInput {
+                subscription: None,
+                default: Some("gh0"),
+                ..input
+            })
+            .is_err()
         );
+        // The subscription wins over the default.
+        let l = prepare_launch(&LaunchInput {
+            default: Some("max-c"),
+            ..input
+        })
+        .unwrap();
+        assert_eq!(l.account.as_deref(), Some("max-b"));
         let solo = tmp.path().join("solo");
         write_credential(
             &solo,
@@ -1771,6 +1832,7 @@ mod tests {
             state_dir: &state,
             harness: HarnessId::Pi,
             subscription: Some("pi-a"),
+            default: None,
             pool: &[],
             harness_dir: &h,
             shared_home: &home,
@@ -1785,13 +1847,16 @@ mod tests {
         assert_eq!(l.cred_alias, Some(h.join(POINTER_DIR)));
         assert_eq!(l.stores, [store_dir(&state, "pi-a")]);
         let other = tmp.path().join("agent2/harness");
+        // pi gets no default account, also when one is given.
         let l = prepare_launch(&LaunchInput {
             subscription: None,
+            default: Some("pi-a"),
             harness_dir: &other,
             ..input
         })
         .unwrap();
         assert!(l.stores.is_empty() && l.cred_alias.is_some());
+        assert_eq!(l.account, None);
         let p = pointed(&other).unwrap();
         assert_eq!(fs::read_to_string(p.join(AUTH_FILE)).unwrap(), "{}");
         assert!(

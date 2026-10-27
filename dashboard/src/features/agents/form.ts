@@ -14,6 +14,8 @@ export interface AgentFormValues {
   prompt: string;
   /** The text as typed. Empty: the harness's default system prompt. */
   system_prompt: string;
+  /** `leader`, `worker`, `none`, or a prompt file name. Empty: by role. */
+  persona: string;
   roles: Role[];
   targets: string[];
   /** Comma or newline separated. */
@@ -30,7 +32,7 @@ export const parseList = (s: string): string[] =>
     .filter(Boolean);
 
 export function emptyAgentForm(project = ""): AgentFormValues {
-  return { name: "", project, harness: "claude", subscription: "", subscription_pool: [], model: "", prompt: "", system_prompt: "", roles: [], targets: [], mail_to: "*", cross_project: "", restart: "on-failure" };
+  return { name: "", project, harness: "claude", subscription: "", subscription_pool: [], model: "", prompt: "", system_prompt: "", persona: "", roles: [], targets: [], mail_to: "*", cross_project: "", restart: "on-failure" };
 }
 
 export function agentToForm(a: Agent): AgentFormValues {
@@ -43,6 +45,7 @@ export function agentToForm(a: Agent): AgentFormValues {
     model: a.model ?? "",
     prompt: a.prompt ?? "",
     system_prompt: a.system_prompt ?? "",
+    persona: a.persona ?? "",
     roles: a.roles.filter((r) => r !== "member"),
     targets: a.policy?.targets ?? [],
     mail_to: (a.policy?.mail_to ?? ["*"]).join(", "),
@@ -60,6 +63,22 @@ export function systemPromptProblem(s: string): string | null {
   return bytes > SYSTEM_PROMPT_MAX_BYTES ? `System prompt: ${bytes} bytes; the limit is ${SYSTEM_PROMPT_MAX_BYTES} (32 KiB).` : null;
 }
 
+/** The personas that every daemon has. A prompt file name is also a persona. */
+export const PERSONAS = ["leader", "worker", "none"] as const;
+
+/** The daemon's check of a persona: letters, digits, `-`, and `_`, at most 64 bytes. Empty is "by role". */
+export function personaProblem(s: string): string | null {
+  const v = s.trim();
+  return v && !/^[A-Za-z0-9_-]{1,64}$/.test(v) ? `Persona "${v}": use leader, worker, none, or a prompt file name (letters, digits, - and _).` : null;
+}
+
+/** The persona that the agent gets: its own, else the one of its roles. */
+export function effectivePersona(a: Pick<Agent, "persona" | "roles">): { persona: string; byRole: boolean } {
+  if (a.persona) return { persona: a.persona, byRole: false };
+  const leader = a.roles.some((r) => r === "project_admin" || r === "sysadmin");
+  return { persona: leader ? "leader" : "worker", byRole: true };
+}
+
 /** Problems the daemon would refuse with 422. Empty when the form is fine. */
 export function validateAgentForm(v: AgentFormValues): string[] {
   const out: string[] = [];
@@ -68,6 +87,8 @@ export function validateAgentForm(v: AgentFormValues): string[] {
   for (const x of parseList(v.cross_project)) if (!/^[^/\s]+\/[^/\s]+$/.test(x)) out.push(`Cross-project entry "${x}" is not project/agent.`);
   const sp = systemPromptProblem(v.system_prompt);
   if (sp) out.push(sp);
+  const pp = personaProblem(v.persona);
+  if (pp) out.push(pp);
   return out;
 }
 
@@ -93,6 +114,8 @@ export function formToDef(v: AgentFormValues): AgentDef {
   if (prompt) def.prompt = prompt;
   const systemPrompt = optText(v.system_prompt);
   if (systemPrompt) def.system_prompt = systemPrompt;
+  const persona = opt(v.persona);
+  if (persona) def.persona = persona;
   return def;
 }
 
@@ -107,7 +130,7 @@ const changed = (now: string, before: string): string | null | undefined => {
 
 /**
  * Only the fields that changed. `PATCH` cannot change name, project, or
- * roles. An emptied subscription, model, prompt, or system prompt goes as
+ * roles. An emptied subscription, model, prompt, system prompt, or persona goes as
  * `null`, which clears it (docs/api.md §6.1).
  */
 export function formToPatch(original: Agent, v: AgentFormValues): AgentPatch {
@@ -124,6 +147,9 @@ export function formToPatch(original: Agent, v: AgentFormValues): AgentPatch {
   if (prompt !== undefined) patch.prompt = prompt;
   const systemPrompt = optText(v.system_prompt) ?? null;
   if (systemPrompt !== (optText(before.system_prompt) ?? null)) patch.system_prompt = systemPrompt;
+  // An emptied persona goes as null: back to "by role".
+  const persona = changed(v.persona, before.persona);
+  if (persona !== undefined) patch.persona = persona;
   if (v.restart !== before.restart) patch.restart = v.restart;
   const policy = { targets: v.targets, mail_to: parseList(v.mail_to), cross_project: parseList(v.cross_project) };
   const oldPolicy = { targets: before.targets, mail_to: parseList(before.mail_to), cross_project: parseList(before.cross_project) };

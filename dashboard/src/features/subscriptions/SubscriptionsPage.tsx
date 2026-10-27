@@ -13,7 +13,7 @@ import { AddSubscriptionWizard } from "./AddSubscriptionWizard";
 import { HarnessVersions } from "./HarnessVersions";
 import { reloginFor, wizardFromQuery, type WizardPath, type WizardSetup } from "./wizard";
 import { A, useSearchParams } from "@solidjs/router";
-import { accountText } from "./account";
+import { accountText, defaultInfo } from "./account";
 
 /** The probe chip: `ok` with the last success, `failed` with why, or local only. */
 export function probeChip(s: Subscription, now = Date.now()): { cls: string; text: string; title?: string } {
@@ -105,6 +105,7 @@ export default function SubscriptionsPage() {
         <For each={subscriptions.list()} fallback={<Empty>{subscriptions.loaded() ? "No subscriptions yet. Add one, or create one from a login the daemon found." : "Loading…"}</Empty>}>
           {(s) => {
             const probe = () => probeChip(s, now());
+            const def = () => defaultInfo(subscriptions.list(), s);
             return (
               <div class="card-box spread" style={{ "align-items": "flex-start" }}>
                 <div class="row" style={{ "align-items": "flex-start", gap: "12px", "min-width": 0 }}>
@@ -112,6 +113,16 @@ export default function SubscriptionsPage() {
                   <div style={{ "min-width": 0 }}>
                     <div class="row" style={{ "flex-wrap": "wrap" }}>
                       <strong>{s.name}</strong>
+                      <Show when={def().isDefault}>
+                        <span class="chip ok" title={`Agents of ${s.account?.harness} with no subscription run on this account`}>
+                          default
+                        </span>
+                      </Show>
+                      <Show when={def().noDefault}>
+                        <span class="chip warn" title={`No ${s.account?.harness} account is the default: a ${s.account?.harness} agent with no subscription cannot start. Make one the default.`}>
+                          no default
+                        </span>
+                      </Show>
                       <span class={`chip ${LOGIN_CHIP[s.login_status]}`} title={s.verified_at ? `Verified ${ago(s.verified_at, now())}` : "Not verified yet"}>
                         {humanize(s.login_status)}
                       </span>
@@ -195,6 +206,21 @@ export default function SubscriptionsPage() {
                       }
                     >
                       Probe now
+                    </button>
+                  </Show>
+                  <Show when={def().canMakeDefault}>
+                    <button
+                      class="small"
+                      disabled={busy() === s.name}
+                      title={`Agents of ${s.account?.harness} with no subscription run on the default account`}
+                      onClick={() =>
+                        act(s.name, async () => {
+                          await api.subscriptions.makeDefault(s.name);
+                          return `${s.name} is the default ${s.account?.harness} account.`;
+                        })
+                      }
+                    >
+                      Make default
                     </button>
                   </Show>
                   <button class="small" onClick={() => setWizard(reloginFor(s))}>

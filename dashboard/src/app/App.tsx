@@ -26,6 +26,7 @@ const EventsPage = lazy(() => import("../features/events/EventsPage"));
 const ProjectsPage = lazy(() => import("../features/projects/ProjectsPage"));
 const ProjectSettings = lazy(() => import("../features/projects/ProjectSettings"));
 const SettingsPage = lazy(() => import("../features/settings/SettingsPage"));
+const ConfigPage = lazy(() => import("../features/config/ConfigPage"));
 // Mock only: the hostile payloads, to eyeball that the sanitizer keeps them inert.
 const XssPage = lazy(() => import("../features/devxss/XssPage"));
 
@@ -70,6 +71,7 @@ export function App() {
         <Route path="/hosts" component={HostsPage} />
         <Route path="/events" component={EventsPage} />
         <Route path="/audit" component={AuditPage} />
+        <Route path="/config" component={ConfigPage} />
         <Route path="/settings" component={SettingsPage} />
         <Route path="/p/:project" component={ProjectIndex} />
         <Route path="/p/:project/board" component={BoardPage} />

@@ -104,6 +104,8 @@ Run `just` to see the modules. Run `just <module>` to see its recipes.
 | Compare the harness pins with npm      | `just harness::check`           |
 | Update every harness to the latest     | `just harness::latest`          |
 | Update one harness in the container    | `just harness::update <name>`   |
+| Write the defaults manifest            | `just defaults::manifest`       |
+| Back up and reset the config repo (dev) | `just defaults::apply`         |
 
 `just ci::check` must pass before a change merges. It runs `fmt-check`,
 `lint`, `test`, `scripts-test`, and `dashboard-check`. `ci::compat` is not in the gate, because
@@ -124,7 +126,10 @@ a new token, when `.env` does not exist. The daemon reads:
 | `TERRARIUM_RUNTIME_DIR` | `$XDG_RUNTIME_DIR/terrarium`, else `/run/terrarium`. See "The runtime directory". |
 | `TERRARIUM_RUNNER_MODE` | `process`: one `terrarium-runner` process per agent; the agents live through a daemon restart. `inprocess`: the runners run in the daemon and end with it (tests and development only). |
 | `TERRARIUM_RUNNER`     | `terrarium-runner` next to `terrariumd`, else on `PATH`. The image sets `/usr/local/bin/terrarium-runner`. |
-| `TERRARIUM_PROMPTS_DIR` | `/prompts`                                       |
+| `TERRARIUM_PROMPTS_DIR` | `<config repo>/prompts`: the prompt templates and the personas. |
+| `TERRARIUM_CONFIG_REPO` | `/config/terrarium`. The config repo (PLAN §8.3): `prompts/`, `harness/<harness>/`, `export/`, in git. The daemon copies the packaged defaults into it at each start, and makes it a git repo. `just daemon::run` sets `target/dev-config-repo`. |
+| `TERRARIUM_DEFAULTS_DIR` | `/opt/terrarium/defaults`: the packaged defaults and `manifest.json`. `just daemon::run` sets `<repo>/defaults`. A dir with no manifest: no seeding. |
+| `TERRARIUM_CONFIG_SYNC` | `off`. `pull` or `sync`: the config repo pulls (or commits, pulls, and pushes) every `TERRARIUM_CONFIG_SYNC_INTERVAL` (default `15m`). |
 | `TERRARIUM_SANDBOX`    | `bwrap`. `none` runs harnesses with no sandbox (development and tests only). |
 | `TERRARIUM_SANDBOX_NEW_SESSION` | off. On: pass `--new-session` to bwrap (the harness then misses PTY resizes). |
 | `TERRARIUM_REPOS_DIR` | `/repos`. A project repo whose URL is a path under it is bound read-write into the sandbox of each agent of that project (`docs/api.md` §5.1). |
@@ -174,7 +179,8 @@ data.
 | `work/` | `/work` (`TERRARIUM_WORK_DIR`) | The agent workspaces, `<project>/<agent>/`. A host agent on this machine attaches them to targets (its `work_dir`). Gitignored. |
 | `repos/` | `/repos` (`TERRARIUM_REPOS_DIR`) | Local bare repos, `<name>.git`, bound into the sandboxes of their project. A host agent reads them for a local `lab_repo` (its `repos_dir`). Gitignored. |
 | `labs/` | not bound | vmlab test labs (`labs/terrarium-test/vmlab.wcl`) for a host agent on this machine. In git. |
-| `prompts/` | `/prompts` (ro) | The prompt templates. In git. |
+| `config/terrarium/` | `/config/terrarium` (`TERRARIUM_CONFIG_REPO`) | The config repo (PLAN §8.3): the personas and protocol templates, the harness settings of the agents, the export. Its own git repo, shared between instances; never a secret. Gitignored in this repo. |
+| `defaults/` | `/opt/terrarium/defaults` (in the image) | The packaged defaults of the config repo, with `manifest.json`. In git. After a change, run `just defaults::manifest`. |
 | `projects/`, `agents/`, `targets/`, `subscriptions/` | `/etc/terrarium/...` | Definition files. |
 | `fleets/` | `/etc/terrarium/fleets` | Fleet files. Gitignored, except `README.md`. |
 

@@ -226,6 +226,7 @@ pub fn delete(t: &mut Tx<'_>, name: &str) -> ApiResult<()> {
             ),
         ));
     }
+    clear_default(t, name)?;
     t.execute("DELETE FROM subscriptions WHERE name = ?1", [name])?;
     Ok(())
 }
@@ -415,6 +416,191 @@ pub fn samples(
     let limit = i64::try_from(limit).unwrap_or(i64::MAX);
     let rows = stmt.query_map(params![subscription, since, window, limit], sample_row)?;
     Ok(rows.collect::<Result<_, _>>()?)
+}
+
+// ---- Default plan accounts (PLAN §16.3) ----
+
+/// The harnesses that have a default plan account. A pi agent names its
+/// provider through a subscription, so pi has none.
+pub const DEFAULT_HARNESSES: [HarnessId; 3] =
+    [HarnessId::Claude, HarnessId::Codex, HarnessId::Copilot];
+
+/// One plan account with a login, for [`settle_defaults`]. The caller
+/// reads the account dirs (`crate::accounts::list`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountRef {
+    pub subscription: String,
+    pub harness: HarnessId,
+    /// `created_at` of `account.json`. `None`: the subscription's
+    /// `created_at` counts.
+    pub created_at: Option<String>,
+}
+
+/// A change of the default account of one harness.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DefaultChange {
+    pub harness: HarnessId,
+    pub from: Option<String>,
+    pub to: Option<String>,
+}
+
+/// The row of `harness`: `None` when there is no row (the daemon has not
+/// looked yet), `Some(None)` when the default went away.
+fn default_row(conn: &Connection, harness: HarnessId) -> ApiResult<Option<Option<String>>> {
+    Ok(conn
+        .query_row(
+            "SELECT subscription FROM account_defaults WHERE harness = ?1",
+            [harness.as_str()],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .optional()?)
+}
+
+/// The default account of `harness`, when it has one.
+pub fn default_for(conn: &Connection, harness: HarnessId) -> ApiResult<Option<String>> {
+    Ok(default_row(conn, harness)?.flatten())
+}
+
+/// True when `name` is the default account of a harness.
+pub fn is_default(conn: &Connection, name: &str) -> ApiResult<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM account_defaults WHERE subscription = ?1",
+            [name],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
+}
+
+/// Write the default of `harness`, audit it, and emit a `subscription`
+/// event. The caller checks that `name` is a plan account of `harness`.
+/// `reason`: `set` (the API), `first_account` (a login made the first
+/// account of the harness), or `backfill` (the oldest account, at a start).
+fn write_default(
+    t: &mut Tx<'_>,
+    harness: HarnessId,
+    name: &str,
+    reason: &str,
+) -> ApiResult<DefaultChange> {
+    let from = default_for(t, harness)?;
+    t.execute(
+        "INSERT INTO account_defaults (harness, subscription, updated_at) VALUES (?1, ?2, ?3)
+         ON CONFLICT (harness) DO UPDATE SET subscription = excluded.subscription,
+             updated_at = excluded.updated_at",
+        params![harness.as_str(), name, now()],
+    )?;
+    let change = DefaultChange {
+        harness,
+        from,
+        to: Some(name.to_owned()),
+    };
+    let detail = serde_json::json!({
+        "harness": harness, "from": change.from, "to": name, "reason": reason,
+    });
+    t.audit("subscription.default", name, None, detail.clone())?;
+    let mut data = detail;
+    data["change"] = "default".into();
+    t.emit(crate::events::EventDraft::new(
+        "subscription",
+        format!("{name} is the default {harness} account"),
+        data,
+    ))?;
+    Ok(change)
+}
+
+/// Make `name` the default account of `harness`. The old default stops
+/// being one in the same transaction.
+pub fn set_default(t: &mut Tx<'_>, harness: HarnessId, name: &str) -> ApiResult<DefaultChange> {
+    if !DEFAULT_HARNESSES.contains(&harness) {
+        return Err(ApiError::invalid(format!(
+            "{harness} has no default account: a {harness} agent names its provider with a subscription"
+        )));
+    }
+    get(t, name)?;
+    write_default(t, harness, name, "set")
+}
+
+/// `name` stops being a default (its delete or its logout). The caller
+/// then runs [`settle_defaults`], which makes the oldest account left the
+/// default.
+pub fn clear_default(t: &mut Tx<'_>, name: &str) -> ApiResult<Option<DefaultChange>> {
+    let harness: Option<String> = t
+        .query_row(
+            "SELECT harness FROM account_defaults WHERE subscription = ?1",
+            [name],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(harness) = harness.and_then(|h| h.parse::<HarnessId>().ok()) else {
+        return Ok(None);
+    };
+    t.execute(
+        "UPDATE account_defaults SET subscription = NULL, updated_at = ?2 WHERE harness = ?1",
+        params![harness.as_str(), now()],
+    )?;
+    t.emit(crate::events::EventDraft::new(
+        "subscription",
+        format!("{harness} has no default account: {name} is gone"),
+        serde_json::json!({"change": "default_cleared", "harness": harness, "from": name, "to": null}),
+    ))?;
+    Ok(Some(DefaultChange {
+        harness,
+        from: Some(name.to_owned()),
+        to: None,
+    }))
+}
+
+/// Give a default to each harness that needs one (PLAN §16.3). `accounts`
+/// are the plan accounts with a login.
+///
+/// - A harness with accounts and no row gets its oldest account (by the
+///   `created_at` of the account, else of the subscription; then by name).
+///   This is the backfill of the first start with defaults, and the first
+///   account that the migration moves.
+/// - A harness whose default went away (a NULL row, or a default with no
+///   account dir) gets its oldest account left, also when one is left
+///   (PLAN §16.3).
+///
+/// A second account never changes a default. Idempotent.
+pub fn settle_defaults(
+    t: &mut Tx<'_>,
+    accounts: &[AccountRef],
+    fresh: Option<&str>,
+) -> ApiResult<Vec<DefaultChange>> {
+    let mut out = Vec::new();
+    for h in DEFAULT_HARNESSES {
+        let mut mine: Vec<(String, &str)> = Vec::new();
+        for a in accounts.iter().filter(|a| a.harness == h) {
+            // An account dir with no subscription row cannot be a default.
+            let Some(sub) = find(t, &a.subscription)? else {
+                continue;
+            };
+            let at = a.created_at.clone().unwrap_or(sub.created_at);
+            mine.push((at, &a.subscription));
+        }
+        mine.sort();
+        let oldest = mine.first().map(|(_, n)| *n);
+        let pick = match default_row(t, h)? {
+            None => oldest.map(|n| (n, "backfill")),
+            // The default went away (a delete or a logout): the oldest
+            // account left takes over, also when it is the only one.
+            Some(None) => oldest.map(|n| {
+                if fresh == Some(n) && mine.len() == 1 {
+                    (n, "first_account")
+                } else {
+                    (n, "replaced")
+                }
+            }),
+            // A default whose account dir is gone counts as no default.
+            Some(Some(d)) if !mine.iter().any(|(_, n)| *n == d) => oldest.map(|n| (n, "replaced")),
+            Some(Some(_)) => None,
+        };
+        if let Some((name, reason)) = pick {
+            out.push(write_default(t, h, name, reason)?);
+        }
+    }
+    Ok(out)
 }
 
 /// A login session row.
@@ -771,5 +957,267 @@ mod tests {
                     .is_err()
             );
         }
+    }
+
+    fn acct(name: &str, harness: HarnessId, at: Option<&str>) -> AccountRef {
+        AccountRef {
+            subscription: name.into(),
+            harness,
+            created_at: at.map(str::to_owned),
+        }
+    }
+
+    async fn defaults(db: &Db) -> Vec<(String, Option<String>)> {
+        db.read(|c| {
+            let mut stmt =
+                c.prepare("SELECT harness, subscription FROM account_defaults ORDER BY harness")?;
+            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            Ok(rows.collect::<Result<Vec<_>, _>>()?)
+        })
+        .await
+        .unwrap()
+    }
+
+    async fn default_audits(db: &Db) -> Vec<Value> {
+        db.read(|c| {
+            let mut stmt = c.prepare(
+                "SELECT detail FROM audit WHERE action = 'subscription.default' ORDER BY rowid",
+            )?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            Ok(rows
+                .map(|r| r.map(|d| serde_json::from_str(&d).unwrap()))
+                .collect::<Result<Vec<_>, _>>()?)
+        })
+        .await
+        .unwrap()
+    }
+
+    /// PLAN §16.3: the first start with defaults makes the oldest account
+    /// of each harness its default, once. pi gets none.
+    #[tokio::test]
+    async fn the_backfill_picks_the_oldest_account_once() {
+        let db = db();
+        db.write("system", |t| {
+            for n in [
+                "max-new",
+                "max-old",
+                "max-nometa",
+                "pro",
+                "gh",
+                "pi-a",
+                "orphan",
+            ] {
+                upsert_def(t, &def(n), SOURCE_API)?;
+            }
+            // `orphan` has no row: its account cannot be a default.
+            delete(t, "orphan")
+        })
+        .await
+        .unwrap();
+        let accounts = vec![
+            acct(
+                "max-new",
+                HarnessId::Claude,
+                Some("2026-10-02T00:00:00.000Z"),
+            ),
+            acct(
+                "max-old",
+                HarnessId::Claude,
+                Some("2026-10-01T00:00:00.000Z"),
+            ),
+            // No `created_at`: the subscription's counts (now, the newest).
+            acct("max-nometa", HarnessId::Claude, None),
+            acct("orphan", HarnessId::Codex, Some("2000-01-01T00:00:00.000Z")),
+            acct("pro", HarnessId::Codex, Some("2026-10-05T00:00:00.000Z")),
+            acct("gh", HarnessId::Copilot, None),
+            acct("pi-a", HarnessId::Pi, Some("2000-01-01T00:00:00.000Z")),
+        ];
+        let a = accounts.clone();
+        let changes = db
+            .write("system", move |t| settle_defaults(t, &a, None))
+            .await
+            .unwrap();
+        assert_eq!(changes.len(), 3, "{changes:?}");
+        assert_eq!(
+            defaults(&db).await,
+            [
+                ("claude".to_owned(), Some("max-old".to_owned())),
+                ("codex".to_owned(), Some("pro".to_owned())),
+                ("copilot".to_owned(), Some("gh".to_owned())),
+            ]
+        );
+        let audits = default_audits(&db).await;
+        assert_eq!(audits.len(), 3);
+        assert_eq!(audits[0]["reason"], "backfill");
+        assert_eq!(audits[0]["from"], Value::Null);
+        // Idempotent: a second pass changes nothing.
+        let a = accounts.clone();
+        let again = db
+            .write("system", move |t| settle_defaults(t, &a, None))
+            .await
+            .unwrap();
+        assert!(again.is_empty());
+        assert_eq!(default_audits(&db).await.len(), 3);
+        assert!(db.read(|c| is_default(c, "max-old")).await.unwrap());
+        assert!(!db.read(|c| is_default(c, "max-new")).await.unwrap());
+        assert_eq!(
+            db.read(|c| default_for(c, HarnessId::Pi)).await.unwrap(),
+            None
+        );
+    }
+
+    /// The first login of a harness becomes its default; a second login
+    /// keeps it. The default of a deleted or logged-out account is not
+    /// replaced, also not by a later start.
+    #[tokio::test]
+    async fn the_first_account_is_the_default_and_the_oldest_replaces_a_gone_one() {
+        let db = db();
+        db.write("system", |t| {
+            for n in ["max-a", "max-b", "max-c"] {
+                upsert_def(t, &def(n), SOURCE_API)?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let first = vec![acct(
+            "max-a",
+            HarnessId::Claude,
+            Some("2026-10-01T00:00:00.000Z"),
+        )];
+        db.write("system", move |t| settle_defaults(t, &first, Some("max-a")))
+            .await
+            .unwrap();
+        assert_eq!(
+            db.read(|c| default_for(c, HarnessId::Claude))
+                .await
+                .unwrap(),
+            Some("max-a".into())
+        );
+        // A second and a third login: the default stays.
+        let three = vec![
+            acct("max-a", HarnessId::Claude, Some("2026-10-01T00:00:00.000Z")),
+            acct("max-b", HarnessId::Claude, Some("2026-09-01T00:00:00.000Z")),
+            acct("max-c", HarnessId::Claude, Some("2026-10-03T00:00:00.000Z")),
+        ];
+        let a = three.clone();
+        let changes = db
+            .write("system", move |t| settle_defaults(t, &a, Some("max-b")))
+            .await
+            .unwrap();
+        assert!(changes.is_empty());
+        assert_eq!(
+            db.read(|c| default_for(c, HarnessId::Claude))
+                .await
+                .unwrap(),
+            Some("max-a".into())
+        );
+
+        // Delete the default: the oldest account left (max-b, from
+        // September) takes over at the next settle.
+        db.write("operator", |t| delete(t, "max-a")).await.unwrap();
+        assert_eq!(defaults(&db).await, [("claude".to_owned(), None)]);
+        let rest = three[1..].to_vec();
+        let a = rest.clone();
+        let changes = db
+            .write("system", move |t| settle_defaults(t, &a, None))
+            .await
+            .unwrap();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(
+            db.read(|c| default_for(c, HarnessId::Claude))
+                .await
+                .unwrap(),
+            Some("max-b".into())
+        );
+        // A default whose account dir is gone counts as gone too.
+        let only_c = vec![three[2].clone()];
+        db.write("system", move |t| settle_defaults(t, &only_c, None))
+            .await
+            .unwrap();
+        assert_eq!(
+            db.read(|c| default_for(c, HarnessId::Claude))
+                .await
+                .unwrap(),
+            Some("max-c".into())
+        );
+
+        // clear_default empties the row; the caller then settles.
+        let change = db
+            .write("operator", |t| clear_default(t, "max-c"))
+            .await
+            .unwrap();
+        assert_eq!(
+            change,
+            Some(DefaultChange {
+                harness: HarnessId::Claude,
+                from: Some("max-c".into()),
+                to: None
+            })
+        );
+        // Not a default: nothing to clear.
+        assert_eq!(
+            db.write("operator", |t| clear_default(t, "max-b"))
+                .await
+                .unwrap(),
+            None
+        );
+        // One account left: it becomes the default.
+        let one = vec![acct("max-b", HarnessId::Claude, None)];
+        db.write("system", move |t| settle_defaults(t, &one, None))
+            .await
+            .unwrap();
+        assert_eq!(
+            db.read(|c| default_for(c, HarnessId::Claude))
+                .await
+                .unwrap(),
+            Some("max-b".into())
+        );
+    }
+
+    /// Setting a default replaces the old one in one transaction, with an
+    /// audit row (from, to) and a `subscription` event.
+    #[tokio::test]
+    async fn setting_a_default_replaces_the_old_one() {
+        let db = db();
+        db.write("system", |t| {
+            upsert_def(t, &def("max-a"), SOURCE_API)?;
+            upsert_def(t, &def("max-b"), SOURCE_API)?;
+            set_default(t, HarnessId::Claude, "max-a")?;
+            set_default(t, HarnessId::Claude, "max-b")
+        })
+        .await
+        .unwrap();
+        assert!(!db.read(|c| is_default(c, "max-a")).await.unwrap());
+        assert!(db.read(|c| is_default(c, "max-b")).await.unwrap());
+        let audits = default_audits(&db).await;
+        assert_eq!(audits[1]["from"], "max-a");
+        assert_eq!(audits[1]["to"], "max-b");
+        assert_eq!(audits[1]["harness"], "claude");
+        let kinds: Vec<(String, String)> = db
+            .read(|c| {
+                let mut stmt = c.prepare(
+                    "SELECT kind, payload FROM events WHERE kind = 'subscription' ORDER BY seq",
+                )?;
+                let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+                Ok(rows.collect::<Result<Vec<_>, _>>()?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(kinds.len(), 2);
+        let last: Value = serde_json::from_str(&kinds[1].1).unwrap();
+        assert_eq!(last["change"], "default");
+        assert_eq!(last["from"], "max-a");
+        // pi has no default; an unknown name is 404.
+        let e = db
+            .write("operator", |t| set_default(t, HarnessId::Pi, "max-a"))
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, crate::error::Code::Invalid);
+        let e = db
+            .write("operator", |t| set_default(t, HarnessId::Claude, "nope"))
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, crate::error::Code::NotFound);
     }
 }

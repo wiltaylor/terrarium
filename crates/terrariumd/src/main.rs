@@ -9,7 +9,9 @@ use clap::Parser;
 use terrariumd::harness_tools::ToolsConfig;
 use terrariumd::runner_supervisor::{RunnerMode, RunnerSupervisor, RunnerSupervisorConfig};
 use terrariumd::sandbox::{self, SandboxConfig};
-use terrariumd::settings::{Command, HarnessCommand, PasswordCommand, Settings};
+use terrariumd::settings::{
+    Command, ConfigCommand, DefaultsCommand, HarnessCommand, PasswordCommand, Settings,
+};
 use terrariumd::usage_collector::UsageConfig;
 use terrariumd::{DaemonConfig, start_with_usage};
 use tracing::{error, info, warn};
@@ -32,6 +34,12 @@ async fn main() -> anyhow::Result<()> {
     if let Some(Command::Password { command }) = &settings.command {
         return password_command(&settings, command);
     }
+    if let Some(Command::Defaults { command }) = &settings.command {
+        return defaults_command(&settings, command);
+    }
+    if let Some(Command::Config { command }) = &settings.command {
+        return config_command(command);
+    }
     // TERRARIUM_PASSWORD(_FILE): set the first password now, then start
     // again without the two variables, so no child process (a harness, git,
     // npm, a login) ever inherits them. The same restart puts the tools dir
@@ -48,13 +56,15 @@ async fn main() -> anyhow::Result<()> {
     };
     let homes: HashMap<_, _> = settings.harness_homes.iter().cloned().collect();
     let supervisor_config = |sandbox: SandboxConfig| {
-        RunnerSupervisorConfig::new(
+        let mut c = RunnerSupervisorConfig::new(
             settings.state_dir.clone(),
             settings.runtime_dir.clone(),
-            settings.prompts_dir.clone(),
+            settings.prompts_dir(),
             sandbox,
             homes.clone(),
-        )
+        );
+        c.config_repo = Some(settings.config_repo.clone());
+        c
     };
 
     if let Some(Command::SandboxDryRun { agent }) = &settings.command {
@@ -86,6 +96,10 @@ async fn main() -> anyhow::Result<()> {
             log_install(&t.install().await);
         }
     }
+    // The config repo (PLAN §8.3): the packaged defaults go in, and it is
+    // a git repo. A failure does not stop the start: the agents then run
+    // with what the repo has (or the built-in prompt).
+    seed_config_repo(&settings);
     let mut cfg = supervisor_config(sandbox);
     cfg.mode = mode;
     cfg.version_policy = settings.harness_version_policy;
@@ -145,6 +159,18 @@ async fn main() -> anyhow::Result<()> {
             }
         });
     }
+    let auto_sync = terrariumd::config_repo::AutoSync::from_env();
+    let mut repo = terrariumd::config_repo::ConfigRepo::new(
+        settings.config_repo.clone(),
+        daemon.state.state_dir.clone(),
+    );
+    repo.auto_sync = auto_sync.as_str().to_owned();
+    daemon.state.config_repo.configure(repo);
+    let sync_task = terrariumd::api::spawn_config_sync(
+        daemon.state.clone(),
+        auto_sync,
+        settings.config_sync_interval,
+    );
     let host_task = match host_listen {
         Some(listen) => {
             let (task, _) = listen.serve(daemon.state.clone()).await?;
@@ -188,6 +214,9 @@ async fn main() -> anyhow::Result<()> {
         t.abort();
     }
     if let Some(t) = ingest_task {
+        t.abort();
+    }
+    if let Some(t) = sync_task {
         t.abort();
     }
     daemon.shutdown();
@@ -251,6 +280,111 @@ fn log_install(r: &terrariumd::harness_tools::InstallReport) {
         }
     }
     info!(extension = %r.extension, tools = %r.tools_dir.display(), "Copilot prompt extension");
+}
+
+/// Copy the packaged defaults into the config repo, and make it a git
+/// repo. Each failure is a warning.
+fn seed_config_repo(settings: &Settings) {
+    use terrariumd::defaults::{self, SeedAction};
+    let target = &settings.config_repo;
+    if settings.defaults_dir.join(defaults::MANIFEST).is_file() {
+        match defaults::Defaults::load(&settings.defaults_dir)
+            .and_then(|d| defaults::seed(&d, target))
+        {
+            Ok(report) => {
+                let count = |a: SeedAction| report.iter().filter(|r| r.action == a).count();
+                info!(
+                    repo = %target.display(),
+                    seeded = count(SeedAction::Seeded),
+                    upgraded = count(SeedAction::Upgraded),
+                    pending = count(SeedAction::Pending),
+                    "config repo defaults"
+                );
+                for r in report.iter().filter(|r| r.action == SeedAction::Pending) {
+                    warn!(file = %r.path, "a new default waits as {}.new: accept or keep it (Config page, `terrarium admin config defaults`)", r.path);
+                }
+            }
+            Err(e) => error!("cannot copy the defaults into the config repo: {e}"),
+        }
+    } else {
+        info!(dir = %settings.defaults_dir.display(), "no packaged defaults: the config repo is not seeded");
+    }
+    let repo = terrariumd::config_repo::ConfigRepo::new(target.clone(), settings.state_dir.clone());
+    if let Err(e) = repo.ensure() {
+        warn!(repo = %target.display(), "cannot make the config repo a git repo: {}", e.message);
+    }
+}
+
+/// `terrariumd defaults seed|apply|manifest`.
+fn defaults_command(settings: &Settings, command: &DefaultsCommand) -> anyhow::Result<()> {
+    use terrariumd::defaults;
+    match command {
+        DefaultsCommand::Seed => {
+            let d = defaults::Defaults::load(&settings.defaults_dir).map_err(anyhow::Error::msg)?;
+            for r in defaults::seed(&d, &settings.config_repo).map_err(anyhow::Error::msg)? {
+                println!("{:<9} {}", format!("{:?}", r.action).to_lowercase(), r.path);
+            }
+        }
+        DefaultsCommand::Apply => {
+            let d = defaults::Defaults::load(&settings.defaults_dir).map_err(anyhow::Error::msg)?;
+            let backup = defaults::apply(
+                &d,
+                &settings.config_repo,
+                &settings.state_dir.join("backup"),
+            )
+            .map_err(anyhow::Error::msg)?;
+            println!("backup: {}", backup.display());
+            println!(
+                "wrote {} default file(s) into {}",
+                d.manifest.files.len(),
+                settings.config_repo.display()
+            );
+        }
+        DefaultsCommand::Manifest { dir } => {
+            let dir = dir.clone().unwrap_or_else(|| settings.defaults_dir.clone());
+            let m = defaults::make_manifest(&dir).map_err(anyhow::Error::msg)?;
+            let path = dir.join(defaults::MANIFEST);
+            std::fs::write(&path, defaults::manifest_text(&m))
+                .with_context(|| format!("cannot write {}", path.display()))?;
+            println!("{}: {} file(s)", path.display(), m.files.len());
+        }
+    }
+    Ok(())
+}
+
+/// `terrariumd config scan`.
+fn config_command(command: &ConfigCommand) -> anyhow::Result<()> {
+    let ConfigCommand::Scan {
+        staged,
+        repo,
+        files,
+    } = command;
+    let mut found = Vec::new();
+    if *staged {
+        let repo = repo
+            .clone()
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        found.extend(terrarium_core::secret_scan::scan_staged(&repo).map_err(anyhow::Error::msg)?);
+    }
+    for f in files {
+        let bytes = std::fs::read(f).with_context(|| format!("cannot read {}", f.display()))?;
+        found.extend(terrarium_core::secret_scan::scan(
+            &f.to_string_lossy(),
+            &bytes,
+        ));
+    }
+    if found.is_empty() {
+        return Ok(());
+    }
+    for f in &found {
+        eprintln!("secret scan: {f}");
+    }
+    eprintln!(
+        "secret scan: {} finding(s); the commit is blocked. Remove the secret, or for a false hit add `{}` to the line.",
+        found.len(),
+        terrarium_core::secret_scan::ALLOW_MARKER
+    );
+    std::process::exit(1);
 }
 
 /// `terrariumd harness install|status`.

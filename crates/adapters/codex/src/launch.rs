@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use serde_json::Value;
 use terrarium_core::{Agent, HarnessSessionId, LaunchSpec};
 
 use crate::{CodexOptions, PromptMode, config};
@@ -45,6 +46,97 @@ pub fn trust_override(cwd: &Path) -> String {
     }
 }
 
+/// A key part as TOML writes it: bare when it can be, else quoted.
+fn toml_key(k: &str) -> String {
+    if !k.is_empty()
+        && k.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        k.to_owned()
+    } else {
+        toml_string(k)
+    }
+}
+
+/// A JSON value (from the TOML user file) as an inline TOML value.
+pub fn toml_inline(v: &Value) -> String {
+    match v {
+        Value::Null => "\"\"".to_owned(),
+        Value::Bool(b) => b.to_string(),
+        Value::Number(n) => n.to_string(),
+        Value::String(s) => toml_string(s),
+        Value::Array(a) => format!(
+            "[{}]",
+            a.iter().map(toml_inline).collect::<Vec<_>>().join(",")
+        ),
+        Value::Object(m) => format!(
+            "{{{}}}",
+            m.iter()
+                .map(|(k, v)| format!("{}={}", toml_key(k), toml_inline(v)))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+    }
+}
+
+/// Is the dotted key `path` (or a key under it) one of `forced`?
+fn is_forced(path: &str, forced: &[&str]) -> bool {
+    forced.iter().any(|f| {
+        path == *f || path.starts_with(&format!("{f}.")) || f.starts_with(&format!("{path}."))
+    })
+}
+
+fn flatten(prefix: &str, v: &Value, forced: &[&str], out: &mut Vec<String>) {
+    if let Value::Object(m) = v
+        && !m.is_empty()
+        && m.keys().all(|k| toml_key(k) == *k)
+    {
+        for (k, child) in m {
+            let path = if prefix.is_empty() {
+                k.clone()
+            } else {
+                format!("{prefix}.{k}")
+            };
+            flatten(&path, child, forced, out);
+        }
+        return;
+    }
+    if prefix.is_empty() || is_forced(prefix, forced) {
+        return;
+    }
+    out.push(format!("{prefix}={}", toml_inline(v)));
+}
+
+/// The `-c` values of the user settings file (`Agent::harness_settings`,
+/// from `<config repo>/harness/codex/config.toml`, PLAN §8.2). Each table
+/// is flattened to dotted keys down to the leaves, so a key of the shared
+/// `config.toml` next to it stays. A table with a key that is not bare
+/// (a path, a dot) goes as one inline table: Codex splits a `-c` key on
+/// the dots. The keys of `forced` and the per-agent options (`model` when
+/// the agent sets one) are dropped: Terrarium's value wins.
+pub fn user_overrides(agent: &Agent, forced: &[&str]) -> Vec<String> {
+    let Some(settings) = &agent.harness_settings else {
+        return Vec::new();
+    };
+    let mut forced: Vec<&str> = forced.to_vec();
+    if agent.model.as_deref().is_some_and(|m| !m.is_empty()) {
+        forced.push("model");
+    }
+    let mut out = Vec::new();
+    if let Value::Object(m) = settings {
+        for (k, v) in m {
+            let mut one = serde_json::Map::new();
+            one.insert(k.clone(), v.clone());
+            if toml_key(k) == *k {
+                flatten("", &Value::Object(one), &forced, &mut out);
+            } else if !is_forced(k, &forced) {
+                out.push(format!("{}={}", toml_key(k), toml_inline(v)));
+            }
+        }
+    }
+    out
+}
+
 /// Build the launch spec. `prompt` is the rendered system prompt text, if
 /// the agent has one. This is pure: [`crate::CodexAdapter`] reads the
 /// prompt file, and then calls this.
@@ -60,6 +152,9 @@ pub fn trust_override(cwd: &Path) -> String {
 /// - `--dangerously-bypass-hook-trust`: the `-c` hooks run with no review
 ///   dialog.
 /// - `-C <cwd>`, then `-m <model>` when the agent sets one.
+/// - `-c <key>=<value>` for each key of the user settings file, without
+///   the forced keys ([`user_overrides`]). The forced `-c` values come
+///   after them.
 /// - `-c projects.<cwd>.trust_level="trusted"`: see [`trust_override`].
 /// - `-c check_for_update_on_startup=false`, `-c analytics.enabled=false`,
 ///   `-c feedback.enabled=false`.
@@ -100,6 +195,9 @@ pub fn build(
         .arg(path_str(&cwd));
     if let Some(model) = agent.model.as_deref().filter(|m| !m.is_empty()) {
         spec = spec.arg(f.model).arg(model);
+    }
+    for o in user_overrides(agent, f.forced_keys) {
+        spec = spec.arg(f.config).arg(o);
     }
     spec = spec.arg(f.config).arg(trust_override(&cwd));
     for (key, value) in f.quiet_config {
@@ -210,6 +308,91 @@ mod tests {
         assert!(c.contains(&sqlite.as_str()), "{c:?}");
         assert_eq!(spec.env["CODEX_HOME"], "/auth/codex");
         assert_eq!(spec.env.len(), 1);
+    }
+
+    /// The user file goes as `-c` values before the forced ones; the
+    /// forced keys and the agent's `model` are dropped from it.
+    #[test]
+    fn user_settings_become_overrides_without_the_forced_keys() {
+        let mut agent = test_agent(Some("gpt-6-luna"));
+        let toml = r#"
+model = "other"
+model_reasoning_effort = "high"
+check_for_update_on_startup = true
+approval_policy = "on-request"
+[tui]
+notifications = false
+resume_cwd = "ask"
+[analytics]
+enabled = true
+[hooks]
+Stop = [{ hooks = [{ type = "command", command = "evil" }] }]
+[projects."/home/agent/work"]
+trust_level = "untrusted"
+[mcp_servers.docs]
+command = "docs-mcp"
+args = ["--port", "1"]
+env = { "A.B" = "x" }
+"#;
+        agent.harness_settings = Some(
+            terrarium_core::harness_settings::parse(toml, terrarium_core::HarnessId::Codex)
+                .expect("toml"),
+        );
+        let spec = build(&sandbox_opts(), &agent, None, None);
+        let c = overrides(&spec);
+        for want in [
+            "model_reasoning_effort=\"high\"",
+            "tui.notifications=false",
+            "mcp_servers.docs.command=\"docs-mcp\"",
+            "mcp_servers.docs.args=[\"--port\",\"1\"]",
+            "mcp_servers.docs.env={\"A.B\"=\"x\"}",
+        ] {
+            assert!(c.contains(&want), "{want}: {c:?}");
+        }
+        for gone in [
+            "model=",
+            "check_for_update_on_startup=true",
+            "approval_policy",
+            "tui.resume_cwd=\"ask\"",
+            "analytics.enabled=true",
+            "evil",
+            "untrusted",
+        ] {
+            assert!(!c.iter().any(|o| o.contains(gone)), "{gone}: {c:?}");
+        }
+        // Each override parses as TOML.
+        for o in &c {
+            let (k, v) = o.split_once('=').expect("kv");
+            let _: toml::Table =
+                toml::from_str(&format!("x = {v}")).unwrap_or_else(|e| panic!("{k}: {e}"));
+        }
+        // The user values come before the forced ones.
+        let first_forced = c
+            .iter()
+            .position(|o| o.starts_with("projects"))
+            .expect("trust");
+        let user = c
+            .iter()
+            .position(|o| o.starts_with("model_reasoning_effort"))
+            .expect("user");
+        assert!(user < first_forced);
+        // With no model on the agent, the file's model goes through.
+        agent.model = None;
+        let spec = build(&sandbox_opts(), &agent, None, None);
+        assert!(overrides(&spec).contains(&"model=\"other\""));
+    }
+
+    /// The packaged default parses.
+    #[test]
+    fn the_packaged_default_parses() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../defaults/harness/codex/config.toml");
+        let v = terrarium_core::harness_settings::load(&path, terrarium_core::HarnessId::Codex)
+            .expect("parses")
+            .expect("exists");
+        let mut agent = test_agent(None);
+        agent.harness_settings = Some(v);
+        assert!(user_overrides(&agent, CodexOptions::default().flags.forced_keys).is_empty());
     }
 
     /// With no sandbox the overlays are not bound, so the SQLite files stay

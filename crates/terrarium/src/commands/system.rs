@@ -9,7 +9,7 @@ use super::{event_line, print_generic, print_table, set_opt};
 use crate::api::{ServerError, query};
 use crate::cli::{
     AdminTargetCmd, AuditArgs, DaemonCmd, EventsArgs, HarnessCmd, HostCmd, SnapshotArgs,
-    SnapshotCmd, SnapshotOn, UsageCmd,
+    SnapshotCmd, SnapshotOn, SubscriptionCmd, UsageCmd,
 };
 use crate::ctx::Ctx;
 use crate::output::field;
@@ -698,6 +698,64 @@ pub async fn harnesses(ctx: &Ctx, cmd: &HarnessCmd) -> anyhow::Result<()> {
             }
         }
     }
+}
+
+pub async fn subscriptions(ctx: &Ctx, cmd: &SubscriptionCmd) -> anyhow::Result<()> {
+    match cmd {
+        SubscriptionCmd::Ls => {
+            let v = ctx.api.get("/api/subscriptions", vec![]).await?;
+            ctx.emit(&v, print_subscriptions)
+        }
+        SubscriptionCmd::Default { name } => {
+            let path = format!(
+                "/api/subscriptions/{}/default",
+                crate::transport::encode(name)
+            );
+            let v = ctx.api.post(&path, None).await?;
+            ctx.emit(&v, |c, v| {
+                let harness = v["account"]["harness"].as_str().unwrap_or("its harness");
+                c.line(format!(
+                    "{} is the default {harness} account",
+                    field(v, "name")
+                ));
+            })
+        }
+    }
+}
+
+/// The subscriptions as a table. `DEFAULT` is `*` on the default account
+/// of each harness (PLAN §16.3).
+fn print_subscriptions(ctx: &Ctx, v: &Value) {
+    let items = v.as_array().cloned().unwrap_or_default();
+    if items.is_empty() {
+        ctx.line("no subscriptions");
+        return;
+    }
+    let mut t = crate::output::Table::new(&[
+        "NAME", "PROVIDER", "PLAN", "ACCOUNT", "LOGIN", "DEFAULT", "AGENTS",
+    ]);
+    for s in &items {
+        let account = match (s["account"]["harness"].as_str(), s["has_api_key"].as_bool()) {
+            (Some(h), _) => h.to_owned(),
+            (None, Some(true)) => "API key".to_owned(),
+            (None, _) => "-".to_owned(),
+        };
+        let agents = s["agents"].as_array().map_or(0, Vec::len);
+        t.row(vec![
+            field(s, "name"),
+            field(s, "provider"),
+            field(s, "plan"),
+            account,
+            field(s, "login_status"),
+            if s["default"].as_bool() == Some(true) {
+                "*".to_owned()
+            } else {
+                String::new()
+            },
+            agents.to_string(),
+        ]);
+    }
+    ctx.out.write_str(&t.render(ctx.out.width()));
 }
 
 /// One update result: npm's output, then `name from -> to`.

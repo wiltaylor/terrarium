@@ -90,6 +90,7 @@ const AGENT_KEYS: &[&str] = &[
     "model",
     "prompt",
     "system_prompt",
+    "persona",
     "roles",
     "policy",
     "restart",
@@ -126,6 +127,7 @@ const TEMPLATE_KEYS: &[&str] = &[
     "model",
     "prompt",
     "system_prompt",
+    "persona",
     "roles",
     "policy",
     "restart",
@@ -853,6 +855,13 @@ fn project(
             // An empty text is no system prompt, as in the store.
             def.system_prompt = match clean_system_prompt(def.system_prompt) {
                 Ok(t) => t,
+                Err(e) => {
+                    issues.push(Issue::error(&at, e));
+                    return None;
+                }
+            };
+            def.persona = match crate::config::clean_persona(def.persona) {
+                Ok(p) => p,
                 Err(e) => {
                     issues.push(Issue::error(&at, e));
                     return None;

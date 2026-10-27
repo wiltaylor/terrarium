@@ -206,8 +206,12 @@ pub fn materialize(
     let ext = extension_path(agent);
     write_atomic(&ext, EXTENSION.as_bytes())?;
 
-    // settings.json: a copy of the shared file on the first start. Every
-    // start sets `lastChangelogVersion` to the pinned version.
+    // settings.json, in layers (PLAN §8.2): the agent's copy (a copy of
+    // the shared file on the first start), then the user settings file
+    // (`<config repo>/harness/pi/settings.json`) merged over it, then the
+    // forced key: every start sets `lastChangelogVersion` to the pinned
+    // version, so the "What's new" changelog never stops the start. The
+    // per-agent options (provider, model, prompt) are flags.
     let own = dir.join(SETTINGS_FILE);
     let shared = home.join(SETTINGS_FILE);
     let current = read_json(&own)?;
@@ -215,6 +219,9 @@ pub fn materialize(
         Some(v) => v.clone(),
         None => read_json(&shared)?.unwrap_or_else(|| Value::Object(Default::default())),
     };
+    if let Some(user @ Value::Object(_)) = &agent.harness_settings {
+        terrarium_core::harness_settings::deep_merge(&mut settings, user);
+    }
     settings[LAST_CHANGELOG_KEY] = Value::String(opts.flags.verified.to_owned());
     if current.as_ref() != Some(&settings) {
         let bytes =
@@ -272,6 +279,30 @@ pub fn materialize(
 mod tests {
     use super::*;
     use crate::test_agent_in;
+
+    /// The user file merges over the agent's copy at each start; the
+    /// forced changelog key wins.
+    #[test]
+    fn user_settings_merge_under_the_forced_key() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let home = tmp.path().join("auth-pi");
+        fs::create_dir_all(&home).expect("home");
+        fs::write(
+            home.join(SETTINGS_FILE),
+            r#"{"defaultThinkingLevel":"off","theme":"light"}"#,
+        )
+        .expect("shared");
+        let mut agent = test_agent_in(tmp.path(), None);
+        agent.harness_settings = Some(json!({"theme": "dark", LAST_CHANGELOG_KEY: "0.0.1"}));
+        let opts = PiOptions::default();
+        materialize(&opts, &agent, &home, None).expect("materialize");
+        let v: Value =
+            serde_json::from_slice(&fs::read(pi_dir(&agent).join(SETTINGS_FILE)).expect("read"))
+                .expect("json");
+        assert_eq!(v["defaultThinkingLevel"], "off");
+        assert_eq!(v["theme"], "dark");
+        assert_eq!(v[LAST_CHANGELOG_KEY], opts.flags.verified);
+    }
 
     #[test]
     fn materialize_writes_extension_settings_and_overlays() {

@@ -2,7 +2,8 @@
 # Terrarium container entrypoint (PLAN §23.3).
 #
 # 1. Make missing directories under /auth, /state, /work, /run/terrarium,
-#    and the tools dir.
+#    the tools dir, and the config repo (/config/terrarium). terrariumd
+#    copies the packaged defaults into the config repo at its start.
 # 2. Fix ownership of empty bind mounts (only when started as root).
 # 3. Export TERRARIUM_RUNNER (the terrarium-runner binary) when it is not set.
 # 4. `terrariumd harness install`: install each harness pin that has no
@@ -19,7 +20,8 @@ set -euo pipefail
 TERRARIUM_USER="${TERRARIUM_USER:-terrarium}"
 AUTH_DIRS=(/auth/claude /auth/codex /auth/copilot /auth/pi)
 TOOLS_DIR="${TERRARIUM_TOOLS_DIR:-/opt/terrarium/tools}"
-STATE_DIRS=(/state /state/agents /state/artifacts /state/credentials /work /run/terrarium "$TOOLS_DIR")
+CONFIG_REPO="${TERRARIUM_CONFIG_REPO:-/config/terrarium}"
+STATE_DIRS=(/state /state/agents /state/artifacts /state/credentials /work /run/terrarium "$TOOLS_DIR" "$CONFIG_REPO")
 
 log() { echo "entrypoint: $*" >&2; }
 

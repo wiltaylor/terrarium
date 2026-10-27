@@ -1344,6 +1344,9 @@ async fn finish(state: &Shared, s: &LoginSession) -> Result<subs::Subscription, 
     let sub = register(state, &st, Some(&name))
         .await
         .map_err(|e| e.message)?;
+    // The first plan account of a harness becomes its default (PLAN
+    // §16.3). A second account keeps the default.
+    crate::api::settle_account_defaults(state, Some(sub.name.clone())).await;
     if let Err(e) = crate::probes::run_subscription(state, &sub.name).await {
         warn!(subscription = %sub.name, "first probe failed: {e}");
     }

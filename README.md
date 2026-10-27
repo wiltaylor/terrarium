@@ -198,6 +198,7 @@ terrarium/
     shared.just             require-* helpers (docker, cargo, node, uv, ssh)
     ci/mod.just             the merge gate (check = fmt-check + lint + test + scripts-test + dashboard-check) and compat
     daemon/mod.just         cargo build, run, test, and the operator CLI
+    defaults/mod.just       the packaged defaults: apply (back up, then overwrite config/terrarium) and manifest
     dashboard/mod.just      npm install, dev, build, test, check
     docker/mod.just         image build and push, compose up/down/logs/shell, config dirs
     harness/mod.just        harness versions: check, update (scripts/harness.py)
@@ -223,7 +224,7 @@ terrarium/
     seccomp-bwrap.README.md what the profile changes, and why
   compose.yaml              the stack
   .env.example              every environment variable, documented
-  config/                   bind-mounted harness homes and config/tls (gitignored, except README.md)
+  config/                   bind-mounted harness homes, config/tls, and the config repo config/terrarium (gitignored, except README.md)
   fleets/                   fleet files that the daemon applies at start and on reload
   labs/                     vmlab test labs (labs/terrarium-test), for a host agent on this machine
   tools/                    the harnesses (one npm prefix per version), bound at /opt/terrarium/tools (gitignored)
@@ -231,13 +232,13 @@ terrarium/
   work/                     agent workspaces, <project>/<agent>/, bound at /work (gitignored)
   examples/fleet/           an example fleet file
   scripts/                  install-host.sh (served at /install/host.sh), host-install.py (just host::install), and their tests
-  prompts/                  system prompt templates (default, project-lead, system-lead), mounted read-only
+  defaults/                 the packaged defaults: personas and protocol templates (prompts/), harness settings (harness/), manifest.json; copied into config/terrarium at each start
   docs/                     design, contracts, and facts (see below)
   spikes/                   Phase 0 scripts and their captures (claude, codex, copilot, pi)
 ```
 
 `just docker::volumes-init` makes the directories for the bind mounts:
-`config/<harness>/`, `config/tls/`, `state/`, `tools/`, `work/`, `repos/`, `prompts/`,
+`config/<harness>/`, `config/tls/`, `config/terrarium/`, `state/`, `tools/`, `work/`, `repos/`,
 `projects/`, `agents/`, `targets/`, `subscriptions/`, and `fleets/`. Git
 ignores `config/*`, `state/`, `tools/`, `work/*`, `repos/*`, and `fleets/*` (except the
 README files). `work/` holds the agent workspaces, `<project>/<agent>/`.
@@ -259,6 +260,8 @@ recipes of a module.
 | Build crates, dashboard, and image | `just build` |
 | Run the Rust and dashboard tests | `just test` |
 | Run the merge gate | `just ci::check` |
+| Show, commit, or sync the config repo (prompts, harness settings, export; [getting-started §2.12](docs/getting-started.md#212-config-repo-share-your-prompts-and-settings-between-instances)) | `just daemon::cli admin config status`, `... config commit -m "..."`, `... config sync` |
+| Back up the config repo and write the packaged defaults over it (development) | `just defaults::apply` |
 | Run the compatibility suite for one harness | `just ci::compat claude` |
 | Check or update a harness in the running container (installed into `./tools`, one version dir each; running agents keep their version; pins in `harnesses.toml`) | `just harness::check`, `just harness::latest`, `just harness::update claude` |
 | Run the daemon outside Docker | `just daemon::run` |
@@ -287,12 +290,13 @@ recipes of a module.
 | [docs/runner.md](docs/runner.md) | The agent runner: PTY, files, socket protocols, status machine, and reconnect. |
 | [docs/host-protocol.md](docs/host-protocol.md) | The wire contract between the daemon and `terrarium-host`, TLS, tokens, and install. |
 | [docs/fleet.md](docs/fleet.md) | The fleet file: format, ownership, commands, and the auto-apply from the config dir. |
-| [docs/security-review.md](docs/security-review.md) | The security review: findings F1 to F9 and their fixes. |
+| [docs/security-review.md](docs/security-review.md) | The security review: findings F1 to F17 and their fixes, with the secret controls of the config repo (§12). |
 | [docs/compat.md](docs/compat.md) | Verified facts about each harness, the usage probes, and the login flows, from the spikes. |
 | [docs/compat-suite.md](docs/compat-suite.md) | The adapter compatibility suite: how to run it, its safety rules, and its steps. |
 
 Other READMEs: [config/README.md](config/README.md) (harness homes and
-login), [prompts/README.md](prompts/README.md) (prompt templates),
+login), [defaults/prompts/README.md](defaults/prompts/README.md) (prompt templates and personas),
+[defaults/README.md](defaults/README.md) (the config repo),
 [dashboard/src/README.md](dashboard/src/README.md) (the dashboard),
 [spikes/README.md](spikes/README.md) (the spikes), and
 [docker/seccomp-bwrap.README.md](docker/seccomp-bwrap.README.md) (the
@@ -321,6 +325,12 @@ seccomp profile).
   reach its model API. It is the shared harness login, mounted read-write.
   For an API-key subscription, it is the key, in the env of the agents on
   that subscription only.
+- **No secret in the config repo.** The prompts and the harness settings
+  live in a git repo that instances share (`config/terrarium`, PLAN §8.3).
+  Its `.gitignore` allows only the known paths and file types, a secret
+  scan blocks each commit with a token, key, or password in it (also a
+  commit by hand, through the `pre-commit` hook), and the remote URL and
+  its credential stay in `state/`.
 - **Roles and audit.** Each agent is a `member` by default. `project_admin`
   and `sysadmin` give more rights. The daemon identifies an agent by its
   runner socket, not by a header, and checks each call against the agent's

@@ -397,6 +397,7 @@ fn agent_spec(def: &AgentDef) -> Value {
         "model": def.model,
         "prompt": def.prompt,
         "system_prompt": def.system_prompt.as_ref().filter(|t| !t.trim().is_empty()),
+        "persona": def.persona.as_deref().map(str::trim).filter(|p| !p.is_empty()),
         "roles": role_list(&def.roles),
         "policy": def.policy,
         "restart": def.restart,
@@ -415,6 +416,7 @@ fn view_def(v: &AgentView) -> AgentDef {
         model: a.model.clone(),
         prompt: a.prompt.clone(),
         system_prompt: a.system_prompt.clone(),
+        persona: a.persona.clone(),
         roles: a.roles.clone(),
         policy: a.policy.clone(),
         restart: a.restart,
@@ -850,11 +852,22 @@ pub fn plan(conn: &Connection, f: &Fleet) -> ApiResult<Plan> {
 
 // ---- Checks that need the store ----
 
-/// The prompt templates directory: `TERRARIUM_PROMPTS_DIR`, else `/prompts`.
+/// The prompt templates directory: `TERRARIUM_PROMPTS_DIR`, else the
+/// `prompts/` of the config repo (`TERRARIUM_CONFIG_REPO`, default
+/// `/config/terrarium`).
 pub fn prompts_dir() -> PathBuf {
-    std::env::var_os("TERRARIUM_PROMPTS_DIR")
-        .filter(|v| !v.is_empty())
-        .map_or_else(|| PathBuf::from("/prompts"), PathBuf::from)
+    let env = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty());
+    env("TERRARIUM_PROMPTS_DIR").map_or_else(
+        || {
+            env("TERRARIUM_CONFIG_REPO")
+                .map_or_else(
+                    || PathBuf::from(crate::config_repo::DEFAULT_DIR),
+                    PathBuf::from,
+                )
+                .join("prompts")
+        },
+        PathBuf::from,
+    )
 }
 
 /// The checks of a fleet against the store: the references to
@@ -1537,6 +1550,7 @@ fn apply_agent(t: &mut Tx<'_>, v: &AgentView, def: &AgentDef) -> ApiResult<()> {
         model: Some(def.model.clone()),
         prompt: Some(def.prompt.clone()),
         system_prompt: Some(def.system_prompt.clone()),
+        persona: Some(def.persona.clone()),
         policy: Some(def.policy.clone()),
         restart: Some(def.restart),
         new_session_on_prompt_change: Some(def.new_session_on_prompt_change),

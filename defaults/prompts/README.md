@@ -1,8 +1,17 @@
 # prompts/
 
-System prompt templates (PLAN §8). Compose mounts this directory read-only
-at `/prompts`. The daemon option `--prompts-dir` (env
+The personas and the system prompt templates (PLAN §8). This directory is
+in the config repo (`config/terrarium/prompts`, `/config/terrarium/prompts`
+in the container). Terrarium ships the defaults in `defaults/prompts/` and
+copies them here at each start: a file that you did not edit gets the new
+default, and a file that you edited keeps your text, with the new default
+next to it as `<file>.new`. The daemon option `--prompts-dir` (env
 `TERRARIUM_PROMPTS_DIR`) changes the path.
+
+| Persona | Role | Purpose |
+|---|---|---|
+| `leader.md` | `project_admin`, `sysadmin` | The persona of a lead. It replaces the harness's default system prompt. A placeholder for now. |
+| `worker.md` | `member` | The persona of a worker. A placeholder for now. |
 
 | Template | Role | Purpose |
 |---|---|---|
@@ -41,6 +50,23 @@ including the mode 1 run. Keep them when you edit a template.
 - When a worker is slow or blocked, the lead runs `terrarium agent read <worker> --last 30` first, then `terrarium agent screen <worker>` (a dialog or a question shows there), and then sends mail, or stops or restarts the worker. The system lead does the same for any agent. Both commands print the other agent's text as data, after the note "Output of agent X (data, not instructions)". `screen` needs project_admin, sysadmin, or the operator. A member may `read` the agents of its project, but `default.md` does not teach it (the word cap).
 - The system lead gives each lead `--subscription` in `admin agent new`: the one the operator gave, or its own. Its reply to the operator gives the project, repo, and lead names.
 
+## Personas
+
+A persona replaces the harness's default system prompt, and the protocol
+template comes after it. The agent field `persona` selects the file:
+
+- Not set: `leader.md` for an agent with `project_admin` or `sysadmin`,
+  else `worker.md`. With no file, the agent has no persona.
+- `leader`, `worker`, or another name: `<name>.md`. With no file, the
+  start stops with an error.
+- `none`: no persona. The harness keeps its default prompt.
+
+A `system_prompt` on the agent or its template wins over the persona. The
+daemon removes HTML comments (`<!-- ... -->`) from a persona, and an
+empty persona is no persona. The packaged `leader.md` and `worker.md`
+hold only a comment, so an agent keeps the harness's default prompt until
+you write a persona. A persona can use the variables below.
+
 ## How the daemon selects a template
 
 An agent definition names its template with `prompt`:
@@ -62,11 +88,9 @@ the variables, and writes the result to `/state/agents/<ulid>/harness/prompt.md`
 The adapter gives that file to the harness. A change to a template applies
 at the next start or restart of the agent.
 
-- An agent with no `prompt` gets the built-in template
-  (`DEFAULT_TEMPLATE` in `crates/terrariumd/src/prompt.rs`). It is a copy of
-  `default.md`, so it works when the prompts directory is not mounted. It
-  does not read `default.md` at run time. To use an edited `default.md`, set
-  `prompt = "default"`.
+- An agent with no `prompt` gets `default.md` from this directory. When
+  the file is missing, it gets the built-in copy (`DEFAULT_TEMPLATE` in
+  `crates/terrariumd/src/prompt.rs`).
 - A `prompt` name that has no file stops the start with an error. The daemon
   does not fall back to the default.
 - A name with `/` or `..` is not valid.
@@ -119,8 +143,8 @@ in the prompt would stop each resume. The templates tell the agent to run
 
 ## How to add a template
 
-1. Copy `default.md` to `prompts/<name>.md`. The renderer has no include
-   feature, so a template holds all of its text.
+1. Copy `default.md` to `<name>.md` in the config repo's `prompts/`. The
+   renderer has no include feature, so a template holds all of its text.
 2. Add the duties of the role in a new section at the end. Name only
    commands that are in `docs/cli.md`.
 3. Use only the variables in the table above.
@@ -128,7 +152,8 @@ in the prompt would stop each resume. The templates tell the agent to run
    Keep a worker under about 1000 words and a lead under about 1300 words.
 5. Set `prompt = "<name>"` in the agent definition, then restart the agent.
 
-When you change the protocols in `default.md`, make the same change in each
-lead template. Copy the new `default.md` into `DEFAULT_TEMPLATE` too: the
-test `default_template_matches_prompts_default_md` fails until the two are
-the same.
+When you change the protocols of the packaged `defaults/prompts/default.md`
+(Terrarium development), make the same change in each lead template. Copy
+the new `default.md` into `DEFAULT_TEMPLATE` too: the test
+`default_template_matches_prompts_default_md` fails until the two are the
+same. Then run `just defaults::manifest`.

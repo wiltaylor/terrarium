@@ -657,6 +657,42 @@ fn check_workspace_repo(dest: &Path) -> Result<(), GitError> {
     Ok(())
 }
 
+/// A git runner for the config repo (`crate::config_repo`), with the same
+/// hardening as a workspace update ([`HARDEN`], no global or system
+/// config, no askpass) and the same secret handling: a token through a
+/// one-shot credential helper, an SSH key through `GIT_SSH_COMMAND`. The
+/// secret never goes on the command line, in the env, or in
+/// `.git/config`. `url` is the remote that the token answers for. One
+/// runner serves one operation: its deadline starts at [`GitRunner::new`].
+pub struct GitRunner(Runner);
+
+impl GitRunner {
+    pub fn new(
+        url: &str,
+        secret: Option<Secret>,
+        store: CredentialStore,
+        timeout: Duration,
+    ) -> Result<Self, GitError> {
+        let c = Checkout {
+            url: url.to_owned(),
+            dest: PathBuf::new(),
+            branch: None,
+            depth: None,
+            secret,
+            store,
+            deny_local_under: Vec::new(),
+            timeout,
+        };
+        Runner::new(&c).map(Self)
+    }
+
+    /// Run `git -C <cwd> <args>`; the answer is stdout. A failure has the
+    /// last lines of stderr.
+    pub fn run(&self, cwd: &Path, args: &[&str]) -> Result<String, GitError> {
+        self.0.quiet(cwd, args)
+    }
+}
+
 /// Clone `c.url` into `c.dest`, or update the clone that is there.
 /// Blocking: call it on the blocking pool ([`clone_or_update_async`]).
 pub fn clone_or_update(c: &Checkout, progress: &mut dyn FnMut(&str)) -> Result<Outcome, GitError> {

@@ -4,8 +4,14 @@
 //! same variables) first, then the template: see [`compose`].
 //!
 //! An agent definition names a template with `prompt = "<name>"`. The daemon
-//! reads `<prompts dir>/<name>.md`. Without a name, it uses
-//! [`DEFAULT_TEMPLATE`].
+//! reads `<prompts dir>/<name>.md`. Without a name, it reads
+//! `<prompts dir>/default.md`, else it uses [`DEFAULT_TEMPLATE`].
+//!
+//! The base system prompt comes before the template ([`base_prompt`]): the
+//! agent's own `system_prompt`, else its persona (PLAN §8.1,
+//! [`load_persona`]): `leader.md` or `worker.md` by role, or the file that
+//! `persona` names. The prompts dir is the config repo's `prompts/`
+//! (`TERRARIUM_CONFIG_REPO`), unless `TERRARIUM_PROMPTS_DIR` names another.
 //!
 //! Variables:
 //!
@@ -177,12 +183,14 @@ pub fn compose(system_prompt: Option<&str>, template: &str, ctx: &PromptContext)
     }
 }
 
-/// The template text for `name`, or the default template. A named template
-/// that does not exist is an error, so a typo does not start an agent with
-/// the wrong prompt.
+/// The template text for `name`. A named template that does not exist is
+/// an error, so a typo does not start an agent with the wrong prompt.
+/// With no name: `<prompts dir>/default.md` (the config repo copy, which
+/// the operator may edit), else the built-in [`DEFAULT_TEMPLATE`].
 pub fn load_template(prompts_dir: &Path, name: Option<&str>) -> Result<String, String> {
     let Some(name) = name.filter(|n| !n.is_empty()) else {
-        return Ok(DEFAULT_TEMPLATE.to_owned());
+        return Ok(std::fs::read_to_string(prompts_dir.join("default.md"))
+            .unwrap_or_else(|_| DEFAULT_TEMPLATE.to_owned()));
     };
     if name.contains('/') || name.contains("..") {
         return Err(format!("the prompt template name `{name}` is not valid"));
@@ -196,7 +204,78 @@ pub fn load_template(prompts_dir: &Path, name: Option<&str>) -> Result<String, S
     })
 }
 
-/// The built-in template: the same text as `prompts/default.md` (a test
+/// Remove each HTML comment (`<!-- ... -->`) from a persona. A comment
+/// with no end runs to the end of the text.
+pub fn strip_comments(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("<!--") {
+        out.push_str(&rest[..start]);
+        match rest[start + 4..].find("-->") {
+            Some(end) => rest = &rest[start + 4 + end + 3..],
+            None => rest = "",
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The persona file name of `agent` (PLAN §8.1), and whether the agent
+/// named it. `None`: no persona (`persona = "none"`). Unset: `leader` for
+/// an agent with `project_admin` or `sysadmin`, else `worker`.
+pub fn persona_name(agent: &Agent) -> Option<(String, bool)> {
+    use terrarium_core::config::{PERSONA_LEADER, PERSONA_NONE, PERSONA_WORKER};
+    match agent.persona.as_deref().map(str::trim) {
+        Some(PERSONA_NONE) => None,
+        Some(name) if !name.is_empty() => Some((name.to_owned(), true)),
+        _ => {
+            let lead = agent
+                .roles
+                .iter()
+                .any(|r| matches!(r, Role::ProjectAdmin | Role::Sysadmin));
+            let name = if lead { PERSONA_LEADER } else { PERSONA_WORKER };
+            Some((name.to_owned(), false))
+        }
+    }
+}
+
+/// The persona text of `agent`, without HTML comments, or `None` (the
+/// harness keeps its default prompt). A persona that the agent names and
+/// that has no file is an error. The persona by role with no file is no
+/// persona: a prompts dir with no `leader.md` keeps the old behaviour.
+/// An empty persona (the packaged placeholder) is no persona too.
+pub fn load_persona(prompts_dir: &Path, agent: &Agent) -> Result<Option<String>, String> {
+    let Some((name, named)) = persona_name(agent) else {
+        return Ok(None);
+    };
+    terrarium_core::config::check_persona(&name)?;
+    let path = prompts_dir.join(format!("{name}.md"));
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if !named && e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(format!(
+                "cannot read the persona `{name}` ({}): {e}",
+                path.display()
+            ));
+        }
+    };
+    let text = strip_comments(&text);
+    Ok((!text.trim().is_empty()).then(|| text.trim().to_owned()))
+}
+
+/// The base system prompt of `agent`: its own `system_prompt` when it has
+/// one, else its persona ([`load_persona`]). `Some`: the adapter replaces
+/// the harness's default prompt with it, and the protocol template comes
+/// after it ([`compose`]). `None`: the harness keeps its default prompt.
+pub fn base_prompt(prompts_dir: &Path, agent: &Agent) -> Result<Option<String>, String> {
+    match agent.system_prompt.as_deref() {
+        Some(t) if !t.trim().is_empty() => Ok(Some(t.to_owned())),
+        _ => load_persona(prompts_dir, agent),
+    }
+}
+
+/// The built-in template: the same text as `defaults/prompts/default.md` (a test
 /// checks it). It tells the agent who it is, how to use the `terrarium`
 /// CLI, the mailbox, board, memory, and wiki protocols, and that mail is
 /// untrusted input. The Docker build does not copy `prompts/`, so the text
@@ -436,7 +515,7 @@ mod tests {
     /// Each template in `prompts/` renders with no variable left.
     #[test]
     fn prompts_dir_templates_render_fully() {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../prompts");
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../defaults/prompts");
         for name in ["default", "project-lead", "system-lead"] {
             let template = load_template(&dir, Some(name)).unwrap();
             let out = render(&template, &ctx());
@@ -462,7 +541,7 @@ mod tests {
     /// with leases (docs/api.md §17.7), with commands that exist.
     #[test]
     fn project_lead_template_shares_a_target_with_leases() {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../prompts");
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../defaults/prompts");
         let t = load_template(&dir, Some("project-lead")).unwrap();
         for needle in [
             "## Shared target",
@@ -504,7 +583,7 @@ mod tests {
     /// The system lead makes project targets only.
     #[test]
     fn system_lead_template_makes_project_targets_only() {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../prompts");
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../defaults/prompts");
         let t = load_template(&dir, Some("system-lead")).unwrap();
         for needle in [
             "Make only project targets",
@@ -519,7 +598,7 @@ mod tests {
     /// (docs/api.md §21), with commands that exist.
     #[test]
     fn lead_templates_make_workers_from_an_agent_template() {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../prompts");
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../defaults/prompts");
         let lead = load_template(&dir, Some("project-lead")).unwrap();
         for needle in [
             "`terrarium admin agent new <worker> --template worker\n   --project {{project.name}}`",
@@ -538,14 +617,14 @@ mod tests {
         }
     }
 
-    /// `prompts/default.md` and the built-in template stay the same text.
+    /// `defaults/prompts/default.md` and the built-in template stay the same text.
     #[test]
     fn default_template_matches_prompts_default_md() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../prompts/default.md");
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../defaults/prompts/default.md");
         let file = std::fs::read_to_string(&path).unwrap();
         assert!(
             file == DEFAULT_TEMPLATE,
-            "copy prompts/default.md into DEFAULT_TEMPLATE in prompt.rs"
+            "copy defaults/prompts/default.md into DEFAULT_TEMPLATE in prompt.rs"
         );
     }
 
@@ -564,6 +643,103 @@ mod tests {
         );
     }
 
+    fn agent(roles: Vec<Role>, persona: Option<&str>, system_prompt: Option<&str>) -> Agent {
+        let def = terrarium_core::config::AgentDef {
+            name: "a".into(),
+            project: "p".into(),
+            harness: terrarium_core::HarnessId::Claude,
+            subscription: None,
+            subscription_pool: vec![],
+            model: None,
+            prompt: None,
+            system_prompt: system_prompt.map(str::to_owned),
+            persona: persona.map(str::to_owned),
+            roles,
+            policy: Default::default(),
+            restart: Default::default(),
+            new_session_on_prompt_change: true,
+        };
+        Agent::from_def(&def, Path::new("/state"))
+    }
+
+    fn personas(dir: &Path) {
+        std::fs::write(
+            dir.join("leader.md"),
+            "<!-- note -->\nLead {{project.name}}.\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("worker.md"), "Work.").unwrap();
+        std::fs::write(dir.join("reviewer.md"), "Review.").unwrap();
+    }
+
+    /// Leads get `leader.md`, members `worker.md`; `persona` names another
+    /// file; `none` keeps the harness's default prompt.
+    #[test]
+    fn persona_by_role_by_name_and_none() {
+        let dir = tempfile::tempdir().unwrap();
+        personas(dir.path());
+        let d = dir.path();
+        assert_eq!(
+            load_persona(d, &agent(vec![Role::ProjectAdmin], None, None)).unwrap(),
+            Some("Lead {{project.name}}.".into())
+        );
+        assert_eq!(
+            load_persona(d, &agent(vec![Role::Sysadmin], None, None)).unwrap(),
+            Some("Lead {{project.name}}.".into())
+        );
+        assert_eq!(
+            load_persona(d, &agent(vec![], None, None)).unwrap(),
+            Some("Work.".into())
+        );
+        assert_eq!(
+            load_persona(d, &agent(vec![], Some("reviewer"), None)).unwrap(),
+            Some("Review.".into())
+        );
+        assert_eq!(
+            load_persona(d, &agent(vec![Role::ProjectAdmin], Some("none"), None)).unwrap(),
+            None
+        );
+        // A named persona with no file stops the start.
+        let e = load_persona(d, &agent(vec![], Some("missing"), None)).unwrap_err();
+        assert!(e.contains("persona `missing`"), "{e}");
+        assert!(load_persona(d, &agent(vec![], Some("../x"), None)).is_err());
+        // The persona by role with no file is no persona.
+        let empty = tempfile::tempdir().unwrap();
+        assert_eq!(
+            load_persona(empty.path(), &agent(vec![], None, None)).unwrap(),
+            None
+        );
+    }
+
+    /// `system_prompt` wins over the persona; the protocol template comes
+    /// after the base prompt in both cases.
+    #[test]
+    fn system_prompt_overrides_the_persona() {
+        let dir = tempfile::tempdir().unwrap();
+        personas(dir.path());
+        let a = agent(vec![], None, Some("Own {{agent.name}}."));
+        let base = base_prompt(dir.path(), &a).unwrap();
+        assert_eq!(base.as_deref(), Some("Own {{agent.name}}."));
+        assert_eq!(compose(base.as_deref(), "P", &ctx()), "Own worker.\n\nP");
+        let a = agent(vec![Role::ProjectAdmin], None, None);
+        let base = base_prompt(dir.path(), &a).unwrap();
+        assert_eq!(compose(base.as_deref(), "P", &ctx()), "Lead demo.\n\nP");
+        let a = agent(vec![], Some("none"), None);
+        assert_eq!(base_prompt(dir.path(), &a).unwrap(), None);
+        assert_eq!(compose(None, "P", &ctx()), "P");
+    }
+
+    /// The packaged personas are placeholders: only a comment, so an agent
+    /// keeps the harness's default prompt until the persona text lands.
+    #[test]
+    fn packaged_personas_keep_the_harness_prompt_for_now() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../defaults/prompts");
+        for roles in [vec![], vec![Role::ProjectAdmin]] {
+            assert_eq!(load_persona(&dir, &agent(roles, None, None)).unwrap(), None);
+        }
+        assert_eq!(strip_comments("a<!-- x -->b<!-- y"), "ab");
+    }
+
     #[test]
     fn named_templates_load_from_the_dir() {
         let dir = tempfile::tempdir().unwrap();
@@ -575,5 +751,8 @@ mod tests {
         assert!(load_template(dir.path(), Some("missing")).is_err());
         assert!(load_template(dir.path(), Some("../x")).is_err());
         assert_eq!(load_template(dir.path(), None).unwrap(), DEFAULT_TEMPLATE);
+        // The config repo copy of `default.md` wins over the built-in one.
+        std::fs::write(dir.path().join("default.md"), "Edited").unwrap();
+        assert_eq!(load_template(dir.path(), None).unwrap(), "Edited");
     }
 }

@@ -14,7 +14,7 @@ import type { ScheduleCaller } from "./schedules";
 
 const NAME_RE = /^[a-z0-9][a-z0-9_-]{0,62}$/;
 const ULID_RE = /^[0-9A-Z]{26}$/;
-const SPEC_KEYS = ["harness", "subscription", "subscription_pool", "model", "prompt", "system_prompt", "roles", "policy", "restart", "new_session_on_prompt_change"] as const;
+const SPEC_KEYS = ["harness", "subscription", "subscription_pool", "model", "prompt", "system_prompt", "persona", "roles", "policy", "restart", "new_session_on_prompt_change"] as const;
 /** The daemon's limit on `system_prompt`: 32 KiB of UTF-8. */
 export const SYSTEM_PROMPT_MAX_BYTES = 32 * 1024;
 
@@ -24,6 +24,14 @@ export function systemPromptError(v: unknown, field = "system_prompt"): string |
   if (typeof v !== "string") return `${field}: use a string`;
   const bytes = new TextEncoder().encode(v).length;
   return bytes > SYSTEM_PROMPT_MAX_BYTES ? `${field}: ${bytes} bytes; the limit is ${SYSTEM_PROMPT_MAX_BYTES}` : null;
+}
+
+/** The daemon's check of `persona` (`check_persona`): letters, digits, `-`, `_`, at most 64 bytes. Empty: by role. A message on a bad one, else null. */
+export function personaError(v: unknown, field = "persona"): string | null {
+  if (v === undefined || v === null) return null;
+  if (typeof v !== "string") return `${field}: use a string`;
+  const n = v.trim();
+  return n && !/^[A-Za-z0-9_-]{1,64}$/.test(n) ? `${field}: the persona \`${n}\` is not valid: use \`leader\`, \`worker\`, \`none\`, or a prompt file name (letters, digits, \`-\`, \`_\`)` : null;
 }
 
 type Fail = (status: number, code: string, message: string, details?: unknown) => never;
@@ -61,9 +69,12 @@ export function normalizeSpec(raw: unknown): TemplateSpec {
   for (const x of policy.cross_project ?? []) if (!/^[^/]+\/[^/]+$/.test(x)) throw new Error(`spec: policy.cross_project entry \`${x}\` must be \`project/agent\` or \`project/*\``);
   const sp = systemPromptError(o.system_prompt, "spec: system_prompt");
   if (sp) throw new Error(sp);
+  const pe = personaError(o.persona, "spec: persona");
+  if (pe) throw new Error(pe);
   const roles = ((o.roles as string[] | undefined) ?? []).filter((r) => r !== "member");
   const spec: TemplateSpec = { harness: o.harness as TemplateSpec["harness"] };
   for (const k of ["subscription", "model", "prompt", "system_prompt"] as const) if (typeof o[k] === "string" && o[k]) spec[k] = o[k];
+  if (typeof o.persona === "string" && o.persona.trim()) spec.persona = o.persona.trim();
   if (o.subscription_pool !== undefined && (!Array.isArray(o.subscription_pool) || o.subscription_pool.some((x) => typeof x !== "string"))) throw new Error("spec: subscription_pool: use a list of names");
   const pool = (o.subscription_pool as string[] | undefined) ?? [];
   if (pool.length) spec.subscription_pool = pool;
@@ -84,7 +95,7 @@ export function applyTemplate(spec: TemplateSpec, body: AgentCreate): AgentDef {
   const out: Record<string, unknown> = { ...structuredClone(spec) };
   for (const [k, v] of Object.entries(body)) {
     if (k === "template" || v === undefined) continue;
-    if (v === null || (k === "system_prompt" && v === "")) delete out[k];
+    if (v === null || ((k === "system_prompt" || k === "persona") && v === "")) delete out[k];
     else if (k === "policy" && out.policy) out.policy = { ...(out.policy as AgentPolicy), ...(v as Partial<AgentPolicy>) };
     else out[k] = v;
   }
@@ -249,6 +260,7 @@ export function createTemplateMock(c: TemplateMockContext): Api["templates"] {
           ...(a.model ? { model: a.model } : {}),
           ...(a.prompt ? { prompt: a.prompt } : {}),
           ...(a.system_prompt ? { system_prompt: a.system_prompt } : {}),
+          ...(a.persona ? { persona: a.persona } : {}),
           roles: a.roles,
           policy: a.policy,
           restart: a.restart,

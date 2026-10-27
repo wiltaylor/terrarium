@@ -967,7 +967,7 @@ async fn lead_and_sysadmin_manage_agents_through_the_tunnel() {
     let td = Td::start().await;
     let prompts = td.dir.path().join("prompts");
     std::fs::create_dir_all(&prompts).unwrap();
-    let repo_prompts = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../prompts");
+    let repo_prompts = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../defaults/prompts");
     for name in ["default", "project-lead", "system-lead"] {
         std::fs::copy(
             repo_prompts.join(format!("{name}.md")),

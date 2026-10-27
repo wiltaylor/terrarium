@@ -632,7 +632,7 @@ ${XSS_DOCUMENT}
     {
       ...subBase, name: "anthropic-max", provider: "anthropic", plan: "Max 20x", harnesses: ["claude", "pi"], probe: "anthropic-oauth-usage", alert_at: 80, source: "file",
       login_status: "logged_in", verified_at: ago(4), probe_status: "ok", last_probe_at: ago(1), last_success_at: ago(1),
-      windows: [win("5h", 62, 97), win("7d", 38, 60 * 24 * 3 + 200)], local_estimate_only: false, account: account("claude", "migration", "wil@example.com"),
+      windows: [win("5h", 62, 97), win("7d", 38, 60 * 24 * 3 + 200)], local_estimate_only: false, account: account("claude", "migration", "wil@example.com"), default: true,
     },
     {
       ...subBase, name: "anthropic-max-2", provider: "anthropic", plan: "Max 20x", harnesses: ["claude", "pi"], probe: "anthropic-oauth-usage", alert_at: 80,
@@ -642,13 +642,13 @@ ${XSS_DOCUMENT}
     {
       ...subBase, name: "chatgpt-pro", provider: "openai", plan: "ChatGPT Pro", harnesses: ["codex", "pi"], probe: "openai-codex-usage", alert_at: 80,
       login_status: "expiring", verified_at: ago(30), probe_status: "ok", last_probe_at: ago(5), last_success_at: ago(5),
-      windows: [win("5h", 87, 41, 5), win("7d", 54, 60 * 24 * 5, 5)], local_estimate_only: false, account: account("codex", "migration"),
+      windows: [win("5h", 87, 41, 5), win("7d", 54, 60 * 24 * 5, 5)], local_estimate_only: false, account: account("codex", "migration"), default: true,
     },
     {
       ...subBase, name: "copilot-pro", provider: "github", plan: "Copilot Pro+", harnesses: ["copilot"], probe: "github-copilot-quota", alert_at: 90,
       login_status: "logged_in", verified_at: ago(12), probe_status: "failed", probe_error: "the provider answered 401: the token has no Copilot Requests permission",
       last_probe_at: ago(2), last_success_at: ago(60 * 3), windows: [win("monthly", 23, 60 * 24 * 8, 60 * 3)], local_estimate_only: false,
-      account: account("copilot", "migration", "wil"),
+      account: account("copilot", "migration", "wil"), default: true,
     },
     {
       ...subBase, name: "openrouter-key", provider: "openrouter", plan: "API key", harnesses: ["pi"], alert_at: 80, env_var: "OPENROUTER_API_KEY", has_api_key: true,

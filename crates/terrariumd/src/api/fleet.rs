@@ -303,6 +303,45 @@ async fn apply(
     Ok(Json(result))
 }
 
+/// The plan of a fleet file, as `POST /api/fleet/plan` makes it, for the
+/// config repo's `export/` (`crate::config_repo`).
+pub(crate) async fn plan_file(
+    state: &Shared,
+    actor: &Actor,
+    content: String,
+    path: Option<String>,
+) -> ApiResult<Plan> {
+    let body = Body {
+        content,
+        path,
+        prune: false,
+        confirm: false,
+        start: false,
+    };
+    plan(State(state.clone()), actor.clone(), ApiJson(body))
+        .await
+        .map(|j| j.0)
+}
+
+/// The apply of a fleet file, as `POST /api/fleet/apply` makes it (no
+/// prune, no start), for the config repo's `export/`.
+pub(crate) async fn apply_file(
+    state: &Shared,
+    actor: &Actor,
+    content: String,
+    path: Option<String>,
+) -> ApiResult<Value> {
+    let body = Body {
+        content,
+        path,
+        prune: false,
+        confirm: false,
+        start: false,
+    };
+    let r = apply(State(state.clone()), actor.clone(), ApiJson(body)).await?;
+    Ok(serde_json::to_value(r.0)?)
+}
+
 /// Start an agent that does not run. False: it runs already.
 async fn start_agent(state: &Shared, actor: &Actor, project: &str, name: &str) -> ApiResult<bool> {
     policy::admin_project(actor, project, "starting an agent")?;

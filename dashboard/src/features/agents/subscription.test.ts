@@ -7,6 +7,8 @@ import {
   compatibleSubscriptions,
   defaultModelFor,
   modelSourceText,
+  noSubscriptionAccount,
+  noSubscriptionAccountText,
   normalizePool,
   poolCandidates,
   prunePool,
@@ -155,5 +157,36 @@ describe("subscription pool", () => {
     expect(appliedText({ to: "b", applied: "restart_scheduled" })).toBe("Moved to b. The agent restarts with resume when the turn ends.");
     expect(appliedText({ to: "b", applied: "restarted" })).toBe("Moved to b. The agent restarted with resume.");
     expect(appliedText({ to: "b", applied: "next_start" })).toBe("Moved to b. The agent does not run. Its next start uses the new account.");
+  });
+});
+
+describe("the account of an agent with no subscription (PLAN §16.3)", () => {
+  const acct = (harness: "claude" | "codex" | "copilot" | "pi", has_login = true) => ({ harness, has_login, source: "login" as const, created_at: "", updated_at: "" });
+  const a = sub({ name: "anthropic-max-20x", account: acct("claude"), default: true });
+  const b = sub({ name: "anthropic-max-20x-2", account: acct("claude"), default: false });
+
+  it("names the default account first", () => {
+    const r = noSubscriptionAccount([b, a], "claude");
+    expect(r).toEqual({ name: "anthropic-max-20x", why: "default" });
+    expect(noSubscriptionAccountText(r!)).toBe("account: anthropic-max-20x (default)");
+  });
+
+  it("uses the one account when there is no default", () => {
+    const r = noSubscriptionAccount([{ ...b }], "claude");
+    expect(r).toEqual({ name: "anthropic-max-20x-2", why: "only" });
+    expect(noSubscriptionAccountText(r!)).toBe("account: anthropic-max-20x-2 (the only account)");
+  });
+
+  it("says the start fails with two or more accounts and no default", () => {
+    const r = noSubscriptionAccount([{ ...a, default: false }, b], "claude");
+    expect(r).toEqual({ error: "the claude accounts (anthropic-max-20x, anthropic-max-20x-2) have no default: the agent cannot start" });
+  });
+
+  it("gives pi and a harness with no account nothing", () => {
+    const pi = sub({ name: "pi-a", harnesses: ["pi"], account: acct("pi"), default: true });
+    expect(noSubscriptionAccount([pi], "pi")).toBeNull();
+    expect(noSubscriptionAccount([a, b], "codex")).toBeNull();
+    // A logged-out account does not count.
+    expect(noSubscriptionAccount([sub({ name: "x", account: acct("copilot", false), default: true })], "copilot")).toBeNull();
   });
 });

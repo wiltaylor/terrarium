@@ -21,6 +21,8 @@ mod dashboard '.just/dashboard'
 mod harness '.just/harness'
 # Host agent build and install
 mod host '.just/host'
+# Packaged defaults: the prompts and harness settings of the config repo
+mod defaults '.just/defaults'
 # Phase 0 spike scripts
 mod spikes '.just/spikes'
 

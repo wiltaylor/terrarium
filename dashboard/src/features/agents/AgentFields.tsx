@@ -1,11 +1,11 @@
 // The agent fields that an agent and a template share: harness,
-// subscription, model, prompt, system prompt, restart, roles, and policy. No name and no
+// subscription, model, prompt, system prompt, persona, restart, roles, and policy. No name and no
 // project: the agent form and the template form add those.
 
-import { createResource, createSignal, For, Show } from "solid-js";
+import { createResource, createSignal, createUniqueId, For, Show } from "solid-js";
 import { GRANTABLE_ROLES, HARNESSES, RESTART_POLICIES, type Harness, type RestartPolicy, type Role } from "../../api/types";
 import { api, subscriptions } from "../../stores";
-import type { AgentFormValues } from "./form";
+import { PERSONAS, personaProblem, type AgentFormValues } from "./form";
 import { prunePool, reconcileSubscription } from "./subscription";
 import { defaultModelHint, ModelField, PoolPicker, SubscriptionSelect } from "./SubscriptionFields";
 
@@ -18,6 +18,29 @@ export function SystemPromptField(props: { value: string; onChange: (s: string) 
       {props.label ?? "System prompt"}
       <textarea class="mono" rows={5} value={props.value} onInput={(e) => props.onChange(e.currentTarget.value)} placeholder="Empty: the harness's default system prompt" />
       <span class="muted small">{SYSTEM_PROMPT_HELP}</span>
+    </label>
+  );
+}
+
+export const PERSONA_HELP = "Empty: by role (leader for project_admin or sysadmin, else worker). The persona replaces the harness's default system prompt. A system prompt wins over it. none keeps the harness default.";
+
+/** The persona: a text input with the known names. Empty is "by role". */
+export function PersonaField(props: { value: string; onChange: (s: string) => void }) {
+  const list = createUniqueId();
+  return (
+    <label>
+      Persona
+      <input value={props.value} list={list} onInput={(e) => props.onChange(e.currentTarget.value)} placeholder="by role" pattern="[A-Za-z0-9_\-]{0,64}" />
+      <datalist id={list}>
+        <For each={PERSONAS}>{(p) => <option value={p} />}</For>
+      </datalist>
+      <Show when={personaProblem(props.value)} fallback={<span class="muted small">{PERSONA_HELP}</span>}>
+        {(p) => (
+          <span class="small" style={{ color: "var(--danger)" }}>
+            {p()}
+          </span>
+        )}
+      </Show>
     </label>
   );
 }
@@ -110,6 +133,7 @@ export function AgentFields(props: {
       </fieldset>
 
       <SystemPromptField value={v().system_prompt} onChange={(s) => set("system_prompt", s)} />
+      <PersonaField value={v().persona} onChange={(s) => set("persona", s)} />
 
       <Show when={props.roles} fallback={<Show when={props.rolesNote}>{(n) => <p class="muted small">{n()}</p>}</Show>}>
         <fieldset class="row">

@@ -39,6 +39,9 @@ pub struct Agent {
     /// See [`AgentDef::system_prompt`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
+    /// See [`AgentDef::persona`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persona: Option<String>,
     #[serde(default)]
     pub roles: Vec<Role>,
     #[serde(default)]
@@ -53,6 +56,13 @@ pub struct Agent {
     /// See [`AgentDef::new_session_on_prompt_change`].
     #[serde(default = "yes")]
     pub new_session_on_prompt_change: bool,
+    /// The user settings of the harness from the config repo
+    /// (`<config repo>/harness/<harness>/<file>`, PLAN §8.2), parsed. A
+    /// TOML file (Codex) is here as the same tree in JSON. The supervisor
+    /// sets it before it calls the adapter; the adapter lays its forced
+    /// keys over it. Never stored.
+    #[serde(skip)]
+    pub harness_settings: Option<serde_json::Value>,
 }
 
 fn yes() -> bool {
@@ -88,12 +98,14 @@ impl Agent {
             harness_dir: None,
             prompt: def.prompt.clone(),
             system_prompt: def.system_prompt.clone(),
+            persona: def.persona.clone(),
             roles: def.roles.clone(),
             policy: def.policy.clone(),
             restart: def.restart,
             status: AgentStatus::Stopped,
             session: None,
             new_session_on_prompt_change: def.new_session_on_prompt_change,
+            harness_settings: None,
         }
     }
 }

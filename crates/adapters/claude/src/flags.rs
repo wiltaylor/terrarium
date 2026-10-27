@@ -39,9 +39,15 @@ pub struct ClaudeFlags {
     pub root_env: (&'static str, &'static str),
     /// The hooks that Terrarium registers. Each runs `terrarium hook <name>`.
     pub hook_events: &'static [&'static str],
-    /// The settings keys that stop start-up dialogs and switch off features
-    /// that Terrarium does itself (beside the hooks).
+    /// The settings keys that Terrarium forces (beside the hooks): they
+    /// win over the user settings file (PLAN §8.2). Only keys that an
+    /// agent needs to start and run unattended go here; a key that only
+    /// tunes the harness goes in the packaged default
+    /// `defaults/harness/claude/settings.json`.
     pub quiet_settings: &'static [(&'static str, bool)],
+    /// The settings keys that Terrarium removes from the user settings:
+    /// each one would stop the Terrarium hooks.
+    pub removed_settings: &'static [&'static str],
 }
 
 /// Claude Code 2.1.x. Measured on 2.1.310 (`docs/compat.md`).
@@ -86,12 +92,16 @@ pub const CLAUDE_2_1: ClaudeFlags = ClaudeFlags {
         "SessionEnd",
     ],
     quiet_settings: &[
+        // Forced: without it, yolo mode shows a dialog at each start, and
+        // no one is there to answer it.
         ("skipDangerousModePermissionPrompt", true),
-        // Read only: the settings schema in the 2.1.310 binary says "When
-        // false, Claude will not read from or write to the auto-memory
-        // directory". Terrarium has its own memory graph (PLAN §14). Not
-        // verified with a turn that would write memory, so the per-agent
-        // `projects/<cwd>/memory/` overlay stays (`config.rs`).
-        ("autoMemoryEnabled", false),
+        // `autoMemoryEnabled = false` is not forced any more: it is in the
+        // packaged default `defaults/harness/claude/settings.json`.
+        // Terrarium has its own memory graph (PLAN §14), and the
+        // per-agent `projects/<cwd>/memory/` overlay (`config.rs`) keeps
+        // an agent's auto memory its own when the operator turns it on.
     ],
+    // `disableAllHooks` would stop the Terrarium hooks, and so the status
+    // machine, the turns, and the usage.
+    removed_settings: &["disableAllHooks"],
 };

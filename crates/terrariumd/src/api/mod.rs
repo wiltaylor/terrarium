@@ -5,6 +5,7 @@
 pub(crate) mod agents;
 mod artifacts;
 mod board;
+mod config;
 mod event_sources;
 mod fleet;
 mod hosts;
@@ -48,7 +49,9 @@ use tokio::task::JoinHandle;
 use tracing::{error, info};
 
 pub use artifacts::{artifact_router, run_prune};
+pub use config::spawn_config_sync;
 pub use schedules::{run_schedule, run_triggered};
+pub use subscriptions::settle_defaults as settle_account_defaults;
 pub use system::{DefinitionCounts, Health};
 
 use crate::actor::{Transport, resolve_actor};
@@ -102,6 +105,9 @@ pub struct AppState {
     /// Waits and watches: the timer tuning, the run tails, the queued
     /// watches (PLAN §12d).
     pub waits: Arc<crate::waits::WaitRuntime>,
+    /// The config repo (PLAN §8.3, `/api/config/...`). Not configured: the
+    /// routes answer `501 not_available`.
+    pub config_repo: Arc<crate::config_repo::ConfigRepoRuntime>,
 }
 
 impl AppState {
@@ -237,6 +243,7 @@ fn routes(state: Shared, serve_artifacts: bool, host_connect: bool) -> Router {
         .merge(event_sources::routes())
         .merge(templates::routes())
         .merge(waits::routes())
+        .merge(config::routes())
         .route(
             "/session",
             get(session::current)
@@ -844,6 +851,7 @@ mod tests {
                 "/nonexistent/state",
             ))),
             waits: Arc::default(),
+            config_repo: Arc::default(),
         })
     }
 

@@ -34,6 +34,7 @@ pub const SPEC_KEYS: &[&str] = &[
     "model",
     "prompt",
     "system_prompt",
+    "persona",
     "roles",
     "policy",
     "restart",
@@ -116,6 +117,7 @@ pub fn to_def(spec: &Spec, name: &str, project: &str) -> Result<AgentDef, String
     m.insert("project".into(), Value::String(project.to_owned()));
     let mut def: AgentDef = serde_json::from_value(Value::Object(m)).map_err(|e| e.to_string())?;
     def.system_prompt = crate::config::clean_system_prompt(def.system_prompt)?;
+    def.persona = crate::config::clean_persona(def.persona)?;
     Ok(def)
 }
 
@@ -208,6 +210,7 @@ fn full(def: &AgentDef) -> Spec {
     m.insert("model".into(), to(&def.model));
     m.insert("prompt".into(), to(&def.prompt));
     m.insert("system_prompt".into(), to(&def.system_prompt));
+    m.insert("persona".into(), to(&def.persona));
     m.insert("roles".into(), to(&def.roles));
     let mut p = Map::new();
     p.insert("targets".into(), to(&def.policy.targets));

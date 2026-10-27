@@ -4,7 +4,9 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use super::{agent_path, print_object_with_text, print_table, set_opt, system_prompt_value};
+use super::{
+    agent_path, persona_value, print_object_with_text, print_table, set_opt, system_prompt_value,
+};
 use crate::api::{CliError, query};
 use crate::cli::{AgentCmd, AgentNewArgs, AgentSetArgs, AnswerArgs, RoleCmd, RolesCmd, StatusCmd};
 use crate::commands::projects::{AGENT_COLS, project_path};
@@ -193,6 +195,7 @@ pub async fn definition(ctx: &Ctx, a: &AgentNewArgs) -> anyhow::Result<Value> {
         "system_prompt",
         system_prompt_value(ctx, &a.system_prompt)?,
     );
+    set_opt(&mut def, "persona", persona_value(&a.system_prompt));
     set_opt(&mut def, "restart", a.restart.clone());
     set_opt(&mut def, "template", a.template.clone());
     if !a.roles.is_empty() {
@@ -270,6 +273,7 @@ async fn set(ctx: &Ctx, a: &AgentSetArgs) -> anyhow::Result<()> {
         "system_prompt",
         system_prompt_value(ctx, &a.system_prompt)?,
     );
+    set_opt(&mut body, "persona", persona_value(&a.system_prompt));
     set_opt(&mut body, "restart", a.restart.clone());
     if let Some(p) = &a.policy {
         let p: Value = serde_json::from_str(p)

@@ -310,6 +310,39 @@ describe("mock parity with docs/api.md", () => {
     expect(list.find((s) => s.name === "openrouter-key")).not.toHaveProperty("account");
   });
 
+  it("marks the default account of each harness and moves it with makeDefault (PLAN §16.3)", async () => {
+    const api = mock();
+    const list = await api.subscriptions.list();
+    for (const s of list) expect(typeof s.default).toBe("boolean");
+    const defaults = list.filter((s) => s.default).map((s) => `${s.account?.harness}:${s.name}`).sort();
+    expect(defaults).toEqual(["claude:anthropic-max", "codex:chatgpt-pro", "copilot:copilot-pro"]);
+
+    const frames: AgentEvent[] = [];
+    const st = api.events.stream({ since: api.world.seq });
+    st.subscribe((e) => frames.push(e));
+    await wait();
+    const made = await api.subscriptions.makeDefault("anthropic-max-2");
+    expect(made.default).toBe(true);
+    expect((await api.subscriptions.get("anthropic-max")).default).toBe(false);
+    await wait();
+    const e = frames.find((x) => x.kind === "subscription")!;
+    expect(e.data).toMatchObject({ change: "default", harness: "claude", from: "anthropic-max", to: "anthropic-max-2" });
+    const audit = (await api.audit({ action: "subscription.default" })).items.find((r) => r.target === "anthropic-max-2")!;
+    expect(audit.detail).toMatchObject({ harness: "claude", from: "anthropic-max", to: "anthropic-max-2" });
+
+    // Not a plan account of Claude Code, Codex, or Copilot.
+    await expect(api.subscriptions.makeDefault("openrouter-key")).rejects.toMatchObject({ status: 422, code: "invalid" });
+    await expect(api.subscriptions.makeDefault("zai-key")).rejects.toMatchObject({ status: 422, code: "invalid" });
+    await expect(api.subscriptions.makeDefault("nope")).rejects.toMatchObject({ status: 404 });
+
+    // The logout of the default picks no new default.
+    await api.subscriptions.logout("anthropic-max-2");
+    const after = await api.subscriptions.list();
+    expect(after.filter((s) => s.account?.harness === "claude" && s.default)).toEqual([]);
+    expect(frames.some((x) => x.kind === "subscription" && x.data.change === "default_cleared")).toBe(true);
+    st.close();
+  });
+
   it("edits the pool with PATCH and checks each member", async () => {
     const api = mock();
     const a = await api.agents.update("01JB0SYS000000000000000007", { subscription_pool: ["anthropic-max-2"] });
@@ -1724,6 +1757,63 @@ describe("agent templates (docs/api.md §21)", () => {
     await expect(api.templates.create({ name: "big", project: null, spec: { harness: "claude", system_prompt: "a".repeat(32769) } })).rejects.toMatchObject({ status: 422, details: { field: "spec" } });
     // An empty one is left out of the spec.
     expect((await api.templates.create({ name: "empty-sp", project: null, spec: { harness: "claude", system_prompt: "" } })).spec).not.toHaveProperty("system_prompt");
+  });
+
+  it("keeps persona: create, patch, null back to by role, templates, the name check", async () => {
+    const api = mock();
+    const a = await api.agents.create({ name: "pe1", project: "terrarium", harness: "claude", persona: "leader" });
+    expect(a.persona).toBe("leader");
+    expect((await api.agents.create({ name: "pe2", project: "terrarium", harness: "claude", persona: "" })).persona).toBeUndefined();
+    await expect(api.agents.create({ name: "pe3", project: "terrarium", harness: "claude", persona: "../x" })).rejects.toMatchObject({ status: 422, code: "invalid" });
+    expect((await api.agents.update(a.id, { persona: "none" })).persona).toBe("none");
+    const t = await api.templates.fromAgent(a.id, { name: "pe-tpl" });
+    expect(t.spec.persona).toBe("none");
+    expect((await api.agents.update(a.id, { persona: null })).persona).toBeUndefined();
+    expect((await api.agents.create({ name: "pe4", project: "terrarium", template: "pe-tpl" })).persona).toBe("none");
+    expect((await api.agents.create({ name: "pe5", project: "terrarium", template: "pe-tpl", persona: null })).persona).toBeUndefined();
+    await expect(api.templates.create({ name: "bad-pe", project: null, spec: { harness: "claude", persona: "a b" } })).rejects.toMatchObject({ status: 422 });
+  });
+
+  it("the HTTP client sends the documented config repo routes", async () => {
+    const calls: string[] = [];
+    const t = createHttpTransport({ baseUrl: "http://d", getToken: () => null, fetch: (async (url: string, init: RequestInit) => {
+      calls.push(`${init.method} ${String(url).replace("http://d", "")}${init.body ? ` ${String(init.body)}` : ""}`);
+      return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+    }) as unknown as typeof fetch });
+    const { createHttpApi } = await import("../client");
+    const api = createHttpApi(t);
+    await api.config.status();
+    await api.config.diff();
+    await api.config.diff("agents/a b.toml");
+    await api.config.log(5);
+    await api.config.commit({ message: "m" });
+    await api.config.pull();
+    await api.config.pull({ apply: true });
+    await api.config.push();
+    await api.config.sync({ message: "m" });
+    await api.config.abort();
+    await api.config.setRemote({ url: "git@h:c.git", branch: "main" });
+    await api.config.clearRemote();
+    await api.config.defaults();
+    await api.config.acceptDefault("prompts/leader.md");
+    await api.config.keepDefault("prompts/leader.md");
+    expect(calls).toEqual([
+      "GET /api/config/status",
+      "GET /api/config/diff",
+      "GET /api/config/diff?path=agents%2Fa+b.toml",
+      "GET /api/config/log?limit=5",
+      'POST /api/config/commit {"message":"m"}',
+      "POST /api/config/pull {}",
+      'POST /api/config/pull {"apply":true}',
+      "POST /api/config/push",
+      'POST /api/config/sync {"message":"m"}',
+      "POST /api/config/abort",
+      'PUT /api/config/remote {"url":"git@h:c.git","branch":"main"}',
+      "DELETE /api/config/remote",
+      "GET /api/config/defaults",
+      'POST /api/config/defaults/accept {"path":"prompts/leader.md"}',
+      'POST /api/config/defaults/keep {"path":"prompts/leader.md"}',
+    ]);
   });
 
   it("makes a template from an agent, in the agent's project by default", async () => {

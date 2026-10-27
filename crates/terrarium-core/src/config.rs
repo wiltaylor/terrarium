@@ -82,6 +82,14 @@ pub struct AgentDef {
     /// instead (see [`inline_system_prompt_file`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
+    /// The persona prompt (PLAN §8.1): `leader`, `worker`, `none`, or the
+    /// name of a file `<prompts dir>/<name>.md`. Unset: by role, `leader`
+    /// for an agent with `project_admin` or `sysadmin`, else `worker`.
+    /// The persona replaces the harness's default system prompt, as a
+    /// `system_prompt` does; `system_prompt` wins over it. `none` keeps the
+    /// harness's default prompt. See [`check_persona`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persona: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub roles: Vec<Role>,
     #[serde(default)]
@@ -102,6 +110,43 @@ fn yes() -> bool {
 
 /// The most bytes in an agent's `system_prompt`.
 pub const SYSTEM_PROMPT_MAX: usize = 32 * 1024;
+
+/// The persona that keeps the harness's default system prompt.
+pub const PERSONA_NONE: &str = "none";
+/// The persona of an agent with `project_admin` or `sysadmin`.
+pub const PERSONA_LEADER: &str = "leader";
+/// The persona of a member.
+pub const PERSONA_WORKER: &str = "worker";
+
+/// Is `name` a persona that an agent may have? A persona is a file name
+/// without `.md`: letters, digits, `-`, and `_`, at most 64 bytes. An
+/// empty name is valid: it means "by role".
+pub fn check_persona(name: &str) -> std::result::Result<(), String> {
+    let ok = name.len() <= 64
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    if ok {
+        Ok(())
+    } else {
+        Err(format!(
+            "the persona `{name}` is not valid: use `leader`, `worker`, `none`, or a prompt file name \
+             (letters, digits, `-`, `_`)"
+        ))
+    }
+}
+
+/// A persona as the store keeps it: an empty name is `None` (by role).
+pub fn clean_persona(name: Option<String>) -> std::result::Result<Option<String>, String> {
+    match name.map(|n| n.trim().to_owned()) {
+        Some(n) if n.is_empty() => Ok(None),
+        Some(n) => {
+            check_persona(&n)?;
+            Ok(Some(n))
+        }
+        None => Ok(None),
+    }
+}
 
 /// The key in a definition file that names a file with the system prompt.
 pub const SYSTEM_PROMPT_FILE_KEY: &str = "system_prompt_file";

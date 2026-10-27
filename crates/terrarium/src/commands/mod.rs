@@ -5,6 +5,7 @@ pub mod agents;
 pub mod artifacts;
 pub mod auth;
 pub mod board;
+pub mod config;
 pub mod events;
 pub mod fleet;
 pub mod inspect;
@@ -107,9 +108,11 @@ async fn admin(ctx: &Ctx, cmd: &AdminCmd) -> anyhow::Result<()> {
         AdminCmd::Target { command } => system::admin_target(ctx, command).await,
         AdminCmd::Host { command } => system::hosts(ctx, command).await,
         AdminCmd::Harness { command } => system::harnesses(ctx, command).await,
+        AdminCmd::Subscription { command } => system::subscriptions(ctx, command).await,
         AdminCmd::Fleet { command } => fleet::fleet(ctx, command).await,
         AdminCmd::Schedule { command } => schedules::schedule(ctx, command).await,
         AdminCmd::Template { command } => templates::template(ctx, command).await,
+        AdminCmd::Config { command } => config::config(ctx, command).await,
         AdminCmd::Audit(args) => system::audit(ctx, args).await,
         AdminCmd::Password {
             command: crate::cli::PasswordCmd::Set { stdin },
@@ -251,6 +254,19 @@ pub fn system_prompt_value(
         return Ok(Some(Value::String(text)));
     }
     Ok(None)
+}
+
+/// The JSON value of `--persona`: the name, `null` for `--persona ''`
+/// (by role), or `None` when the flag is not given.
+pub fn persona_value(a: &crate::cli::SystemPromptArgs) -> Option<Value> {
+    a.persona.as_ref().map(|p| {
+        let p = p.trim();
+        if p.is_empty() {
+            Value::Null
+        } else {
+            Value::String(p.to_owned())
+        }
+    })
 }
 
 /// Text between clear markers, so that an agent reads it as data.

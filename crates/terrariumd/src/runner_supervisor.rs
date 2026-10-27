@@ -205,6 +205,10 @@ pub struct RunnerSupervisorConfig {
     /// What a launch does with a harness outside its tested range
     /// (`TERRARIUM_HARNESS_VERSION_POLICY`, [`crate::harness_versions`]).
     pub version_policy: VersionPolicy,
+    /// The config repo (`TERRARIUM_CONFIG_REPO`, PLAN §8.3): each launch
+    /// reads the user settings of its harness from
+    /// `<repo>/harness/<harness>/`. `None`: no user settings.
+    pub config_repo: Option<PathBuf>,
 }
 
 /// The default of [`RunnerSupervisorConfig::lead_nudge_interval`].
@@ -233,6 +237,7 @@ impl RunnerSupervisorConfig {
             mode: RunnerMode::InProcess,
             lead_nudge_interval: DEFAULT_LEAD_NUDGE_INTERVAL,
             version_policy: VersionPolicy::default(),
+            config_repo: None,
         }
     }
 
@@ -912,6 +917,9 @@ struct StoreView {
     /// The agent's subscription row: `None` when the agent names none, or
     /// when the supervisor has no store (unit tests).
     subscription: Option<SubscriptionCheck>,
+    /// The default plan account of the agent's harness, for an agent with
+    /// no subscription (PLAN §16.3, `account_defaults`).
+    default_account: Option<String>,
     /// `<state>`: stored API keys are under `<state>/credentials`.
     state_dir: Option<PathBuf>,
     /// The URLs of the project's repos. The local ones under the repos dir
@@ -1093,6 +1101,7 @@ impl RunnerSupervisor {
         let id = agent.id.to_string();
         let project = agent.project.clone();
         let sub_name = agent.subscription.clone();
+        let harness = agent.harness;
         let state_dir = state.state_dir.clone();
         let result = state
             .db
@@ -1136,10 +1145,17 @@ impl RunnerSupervisor {
                     }),
                     None => None,
                 };
+                let default_account = match (&subscription, harness) {
+                    (None, h) if h != HarnessId::Pi => {
+                        crate::store::subscriptions::default_for(c, h)?
+                    }
+                    _ => None,
+                };
                 Ok(StoreView {
                     peers,
                     queued,
                     subscription,
+                    default_account,
                     state_dir: Some(state_dir),
                     repo_urls,
                 })
@@ -1185,10 +1201,26 @@ impl RunnerSupervisor {
         ctx.peers = view.peers.clone();
         let template = prompt::load_template(&cfg.prompts_dir, agent.prompt.as_deref())
             .map_err(SupervisorError::NotReady)?;
+        // The base prompt: the agent's `system_prompt`, else its persona
+        // (PLAN §8.1). The adapters replace the harness's default prompt
+        // when `system_prompt` is set, so the launch copy carries the
+        // persona there.
+        let base =
+            prompt::base_prompt(&cfg.prompts_dir, &agent).map_err(SupervisorError::NotReady)?;
+        agent.system_prompt = base.clone();
+        // The user settings of the harness (PLAN §8.2). A broken file
+        // stops the start, with the file and the line.
+        if let Some(root) = &cfg.config_repo {
+            let path = terrarium_core::harness_settings::path_in(root, agent.harness);
+            agent.harness_settings = terrarium_core::harness_settings::load(&path, agent.harness)
+                .map_err(|e| {
+                SupervisorError::NotReady(format!("the {} settings: {e}", agent.harness))
+            })?;
+        }
         // The hash below covers the whole text, so a change of the base
         // system prompt also starts a new session of a harness that keeps
         // the prompt of a session.
-        let text = prompt::compose(agent.system_prompt.as_deref(), &template, &ctx);
+        let text = prompt::compose(base.as_deref(), &template, &ctx);
 
         let adapter = entry.adapter.clone();
         let home = cfg.home(agent.harness);
@@ -1214,6 +1246,7 @@ impl RunnerSupervisor {
         };
         let repos_dir = cfg.sandbox.repos_dir.clone();
         let accounts_state = cfg.state_dir.clone();
+        let default_account = view.default_account.clone();
         let home_inside = cfg.sandbox.home_inside(&HarnessHome {
             harness: agent.harness,
             host: home.clone(),
@@ -1282,6 +1315,7 @@ impl RunnerSupervisor {
                     state_dir: &accounts_state,
                     harness: a.harness,
                     subscription: a.subscription.as_deref(),
+                    default: default_account.as_deref(),
                     pool: &a.subscription_pool,
                     harness_dir: &dirs.1,
                     shared_home: &home,
@@ -3823,6 +3857,98 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A launch layers the config repo's harness settings under the
+    /// forced keys, gives a lead its persona in place of the harness
+    /// prompt, and stops on a broken settings file with the file and the
+    /// line.
+    #[tokio::test]
+    async fn a_launch_takes_the_config_repo_settings_and_persona() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let home = tmp.path().join("auth/claude");
+        std::fs::create_dir_all(&home).unwrap();
+        let repo = tmp.path().join("config-terrarium");
+        let prompts = repo.join("prompts");
+        std::fs::create_dir_all(&prompts).unwrap();
+        std::fs::write(
+            prompts.join("leader.md"),
+            "<!-- c -->You lead {{project.name}}.",
+        )
+        .unwrap();
+        std::fs::write(prompts.join("worker.md"), "<!-- placeholder -->\n").unwrap();
+        let settings = repo.join("harness/claude/settings.json");
+        std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        std::fs::write(
+            &settings,
+            r#"{"autoMemoryEnabled": false, "theme": "dark", "hooks": {}, "skipDangerousModePermissionPrompt": false}"#,
+        )
+        .unwrap();
+        let mut cfg = RunnerSupervisorConfig::new(
+            state.clone(),
+            tmp.path().join("run"),
+            prompts.clone(),
+            SandboxConfig {
+                mode: SandboxMode::None,
+                ..SandboxConfig::default()
+            },
+            [(HarnessId::Claude, home)].into_iter().collect(),
+        );
+        cfg.config_repo = Some(repo.clone());
+        let sup = RunnerSupervisor::new(cfg);
+        let agent = |name: &str, roles: serde_json::Value, persona: Option<&str>| {
+            let mut v = serde_json::json!({"name": name, "project": "p", "harness": "claude",
+                                           "roles": roles});
+            if let Some(p) = persona {
+                v["persona"] = serde_json::json!(p);
+            }
+            let def: terrarium_core::config::AgentDef = serde_json::from_value(v).unwrap();
+            Agent::from_def(&def, &state)
+        };
+        let value_after = |spec: &LaunchSpec, flag: &str| {
+            let i = spec.args.iter().position(|a| a == flag)?;
+            spec.args.get(i + 1).cloned()
+        };
+
+        let lead = agent("lead", serde_json::json!(["project_admin"]), None);
+        let spec = sup.launch_spec(&lead, None).await.unwrap();
+        let s: serde_json::Value =
+            serde_json::from_str(&value_after(&spec, "--settings").unwrap()).unwrap();
+        assert_eq!(s["theme"], "dark");
+        assert_eq!(s["autoMemoryEnabled"], false);
+        assert_eq!(s["skipDangerousModePermissionPrompt"], true);
+        assert!(s["hooks"]["Stop"].is_array());
+        let prompt = value_after(&spec, "--system-prompt").expect("persona replaces");
+        assert!(
+            prompt.starts_with("You lead p.\n\n# Terrarium agent lead"),
+            "{prompt}"
+        );
+        assert!(value_after(&spec, "--append-system-prompt").is_none());
+
+        // A member with the placeholder persona keeps the harness prompt.
+        let member = agent("w", serde_json::json!([]), None);
+        let spec = sup.launch_spec(&member, None).await.unwrap();
+        assert!(value_after(&spec, "--system-prompt").is_none());
+        assert!(value_after(&spec, "--append-system-prompt").is_some());
+        // `none` keeps it for a lead too.
+        let none = agent("n", serde_json::json!(["project_admin"]), Some("none"));
+        let spec = sup.launch_spec(&none, None).await.unwrap();
+        assert!(value_after(&spec, "--system-prompt").is_none());
+        // A named persona with no file stops the start.
+        let missing = agent("m", serde_json::json!([]), Some("reviewer"));
+        let e = sup
+            .launch_spec(&missing, None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("persona `reviewer`"), "{e}");
+
+        // A broken settings file stops the start, with the file and line.
+        std::fs::write(&settings, "{\n  \"theme\": \"dark\",\n  oops\n}\n").unwrap();
+        let e = sup.launch_spec(&lead, None).await.unwrap_err().to_string();
+        assert!(e.contains("harness/claude/settings.json"), "{e}");
+        assert!(e.contains("line 3"), "{e}");
     }
 
     /// A launch runs the harness from the active version dir of the tools

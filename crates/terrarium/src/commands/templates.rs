@@ -4,7 +4,9 @@ use anyhow::Context as _;
 use serde_json::{Map, Value, json};
 use terrarium_core::agent_template;
 
-use super::{print_object, print_object_with_text, print_table, set_opt, system_prompt_value};
+use super::{
+    persona_value, print_object, print_object_with_text, print_table, set_opt, system_prompt_value,
+};
 use crate::api::{CliError, query};
 use crate::cli::{TemplateCmd, TemplateSpecArgs};
 use crate::commands::system::as_items;
@@ -134,6 +136,7 @@ fn has_spec_flags(a: &TemplateSpecArgs) -> bool {
         || a.system_prompt.system_prompt.is_some()
         || a.system_prompt.system_prompt_file.is_some()
         || a.system_prompt.no_system_prompt
+        || a.system_prompt.persona.is_some()
         || a.restart.is_some()
         || !a.roles.is_empty()
         || !a.targets.is_empty()
@@ -173,6 +176,9 @@ fn spec_of(
     }
     if let Some(v) = system_prompt_value(ctx, &a.system_prompt)? {
         flags.insert("system_prompt".into(), v);
+    }
+    if let Some(v) = persona_value(&a.system_prompt) {
+        flags.insert("persona".into(), v);
     }
     if !a.roles.is_empty() {
         flags.insert("roles".into(), json!(a.roles));

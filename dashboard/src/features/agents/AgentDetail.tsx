@@ -17,10 +17,10 @@ import { SaveAsTemplateDialog } from "../templates/TemplateDialog";
 import { Conversation } from "./conversation/Conversation";
 import { ScreenPanel } from "./ScreenPanel";
 import { RoleBadges } from "./AgentsPage";
-import { appliedText, changeSubscription, loginText, normalizePool, samePool, swapTargets } from "./subscription";
+import { appliedText, changeSubscription, loginText, noSubscriptionAccount, noSubscriptionAccountText, normalizePool, samePool, swapTargets } from "./subscription";
 import { PoolPicker, SubscriptionSelect } from "./SubscriptionFields";
 import { SystemPromptField } from "./AgentFields";
-import { systemPromptProblem } from "./form";
+import { effectivePersona, systemPromptProblem } from "./form";
 import { WaitsPanel, WatchesPanel } from "./Waits";
 
 const TABS = [
@@ -135,6 +135,16 @@ export default function AgentDetail() {
               <dt>System prompt</dt>
               <dd>
                 <SystemPromptCell agent={a()} running={running()} onError={setError} />
+              </dd>
+              <dt>Persona</dt>
+              <dd>
+                {effectivePersona(a()).persona}
+                <Show when={effectivePersona(a()).byRole}>
+                  <span class="muted"> (by role)</span>
+                </Show>
+                <Show when={a().system_prompt}>
+                  <span class="muted small"> · the system prompt wins</span>
+                </Show>
               </dd>
               <dt>Restart</dt>
               <dd>{a().restart ?? "on-failure"}</dd>
@@ -285,6 +295,14 @@ export function SubscriptionCell(props: { agent: Agent; running: boolean; onErro
   const [busy, setBusy] = createSignal(false);
   const [saved, setSaved] = createSignal(false);
   const fileManaged = () => props.agent.source === "file";
+  // PLAN §16.3: with no subscription, the default account of the harness.
+  const [fallback] = createResource(
+    () => (props.agent.subscription ? null : props.agent.harness),
+    async (harness) => {
+      await subscriptions.ensureLoaded();
+      return noSubscriptionAccount(subscriptions.list(), harness);
+    },
+  );
 
   const save = async () => {
     setBusy(true);
@@ -325,7 +343,17 @@ export function SubscriptionCell(props: { agent: Agent; running: boolean; onErro
         }
       >
         <span class="row" style={{ "flex-wrap": "wrap" }}>
-          <Show when={props.agent.subscription} fallback={<span class="muted">none</span>}>
+          <Show
+            when={props.agent.subscription}
+            fallback={
+              <>
+                <span class="muted">none</span>
+                <Show when={fallback()}>
+                  {(f) => <span class={"error" in f() ? "chip warn" : "muted small"}>{noSubscriptionAccountText(f())}</span>}
+                </Show>
+              </>
+            }
+          >
             {(name) => (
               <>
                 <A href="/subscriptions">{name()}</A>

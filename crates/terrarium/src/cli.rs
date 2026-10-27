@@ -508,6 +508,12 @@ pub struct SystemPromptArgs {
     /// Clear the base system prompt: the harness's default prompt again
     #[arg(long)]
     pub no_system_prompt: bool,
+    /// The persona (PLAN §8.1): `leader`, `worker`, `none` (the harness's
+    /// default prompt), or a prompt file name in the config repo. It
+    /// replaces the harness's default prompt; `--system-prompt` wins over
+    /// it. Default: by role. `--persona ''` sets it back to by role
+    #[arg(long)]
+    pub persona: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -1335,6 +1341,12 @@ pub enum AdminCmd {
         #[command(subcommand)]
         command: HostCmd,
     },
+    /// Subscriptions: the plans and their accounts, and the default
+    /// account of each harness
+    Subscription {
+        #[command(subcommand)]
+        command: SubscriptionCmd,
+    },
     /// Harness versions: the pins, the tested ranges, the installed versions
     Harness {
         #[command(subcommand)]
@@ -1355,6 +1367,12 @@ pub enum AdminCmd {
         #[command(subcommand)]
         command: TemplateCmd,
     },
+    /// The config repo: prompts, harness settings, and the export, in git
+    /// (PLAN §8.3)
+    Config {
+        #[command(subcommand)]
+        command: ConfigCmd,
+    },
     /// The audit log
     Audit(AuditArgs),
     /// The operator password of the dashboard and `terrarium login`
@@ -1362,6 +1380,110 @@ pub enum AdminCmd {
         #[command(subcommand)]
         command: PasswordCmd,
     },
+}
+
+/// `terrarium admin config ...` (docs/api.md §25). The operator or a
+/// sysadmin.
+#[derive(Debug, Subcommand)]
+pub enum ConfigCmd {
+    /// The state of the repo: branch, remote, ahead and behind, changed
+    /// files, a waiting merge, and the new defaults that wait
+    Status,
+    /// The diff of the changed files against the last commit
+    Diff {
+        /// One file, relative to the repo
+        path: Option<String>,
+    },
+    /// Write the export, scan the changes for secrets, and commit them
+    Commit {
+        #[arg(short, long)]
+        message: String,
+        /// Do not write `export/` from the store first
+        #[arg(long)]
+        no_export: bool,
+        /// Write `export/` from the store also when a pulled export waits
+        /// for `pull --apply` (the store wins)
+        #[arg(long)]
+        force_export: bool,
+    },
+    /// The last commits
+    Log {
+        #[arg(short = 'n', long, default_value_t = 20)]
+        limit: u32,
+    },
+    /// Push the commits to the remote (never forced)
+    Push,
+    /// Fetch and merge the remote. Prompts and harness settings apply at
+    /// the next agent start; `export/` changes print as a fleet plan
+    Pull {
+        /// Apply the `export/` changes as fleets
+        #[arg(long)]
+        apply: bool,
+    },
+    /// Commit the local changes (with the secret scan), fetch, merge, and
+    /// push. A conflict stops it, with the files listed
+    Sync {
+        #[arg(short, long)]
+        message: Option<String>,
+        /// Apply the `export/` changes as fleets
+        #[arg(long)]
+        apply: bool,
+    },
+    /// Leave a merge that stopped on a conflict (no local commit is lost)
+    Abort,
+    /// The remote of the repo
+    Remote {
+        #[command(subcommand)]
+        command: ConfigRemoteCmd,
+    },
+    /// The new defaults that wait as `<file>.new`
+    Defaults {
+        #[command(subcommand)]
+        command: Option<ConfigDefaultsCmd>,
+    },
+    /// The secret scan, on this machine (no daemon). `--staged`: what the
+    /// next commit of the repo in the current dir takes (the `pre-commit`
+    /// hook). Exit 1 on a finding
+    Scan {
+        #[arg(long)]
+        staged: bool,
+        /// The repo for `--staged`. Default: the current dir
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        /// Files to scan
+        files: Vec<PathBuf>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ConfigRemoteCmd {
+    /// Set the remote. The URL and the credential stay in the state dir,
+    /// never in the repo or its `.git/config`
+    Set {
+        /// The remote URL. The arg id is not `url`, the id of the global
+        /// `--url` flag
+        #[arg(id = "remote_url", value_name = "URL")]
+        url: String,
+        /// A `token` or `ssh_key` credential (`/api/credentials`) for the
+        /// remote. Never put a token in the URL
+        #[arg(long)]
+        credential: Option<String>,
+        /// The branch (default `main`)
+        #[arg(long)]
+        branch: Option<String>,
+    },
+    /// Remove the remote
+    Rm,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ConfigDefaultsCmd {
+    /// List the new defaults with a diff (the default)
+    Ls,
+    /// Take the new default: it replaces your file
+    Accept { path: String },
+    /// Keep your file against this new default
+    Keep { path: String },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1911,6 +2033,20 @@ pub enum HostCmd {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum SubscriptionCmd {
+    /// List the subscriptions: provider, plan, the harness of the plan
+    /// account, the login, and `*` on the default account of each harness
+    Ls,
+    /// Make the plan account of a subscription the default account of its
+    /// harness (Claude Code, Codex, Copilot). An agent of that harness with
+    /// no subscription runs on it. Needs sysadmin or the operator
+    Default {
+        /// The subscription
+        name: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 pub enum HarnessCmd {
     /// List each harness: the pin (harnesses.toml), the tested range, the
     /// installed version, and whether it is in the range
@@ -2284,5 +2420,29 @@ mod tests {
             assert_eq!(a.body.as_deref(), Some("-"));
             assert_eq!(a.column.as_deref(), Some("ready"));
         }
+    }
+
+    #[test]
+    fn admin_subscription_default_takes_a_name() {
+        let cli = parse(&["admin", "subscription", "default", "openai-pro"]);
+        let Command::Admin {
+            command:
+                AdminCmd::Subscription {
+                    command: SubscriptionCmd::Default { name },
+                },
+        } = cli.command
+        else {
+            panic!("not admin subscription default");
+        };
+        assert_eq!(name, "openai-pro");
+        assert!(matches!(
+            parse(&["admin", "subscription", "ls"]).command,
+            Command::Admin {
+                command: AdminCmd::Subscription {
+                    command: SubscriptionCmd::Ls
+                }
+            }
+        ));
+        assert!(Cli::try_parse_from(["terrarium", "admin", "subscription", "default"]).is_err());
     }
 }

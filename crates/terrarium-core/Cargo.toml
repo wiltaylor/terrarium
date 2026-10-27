@@ -16,6 +16,8 @@ semver.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 vt100.workspace = true
+# The secret scan of the config repo (`secret_scan`).
+regex.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -185,6 +185,13 @@ export interface AgentDef {
   prompt?: string;
   /** Replaces the harness's default system prompt. Terrarium's protocol prompt is added after it. Absent: the harness default. At most 32 KiB. */
   system_prompt?: string | null;
+  /**
+   * The persona prompt: `leader`, `worker`, `none`, or a prompt file name.
+   * It replaces the harness's default system prompt; `system_prompt` wins
+   * over it; `none` keeps the harness default. Absent or null: by role
+   * (`leader` for project_admin or sysadmin, else `worker`).
+   */
+  persona?: string | null;
   roles?: Role[];
   policy?: AgentPolicy;
   restart?: RestartPolicy;
@@ -217,6 +224,8 @@ export type AgentPatch = Partial<Pick<AgentDef, "harness" | "policy" | "restart"
   model?: string | null;
   prompt?: string | null;
   system_prompt?: string | null;
+  /** `null` goes back to "by role". */
+  persona?: string | null;
 };
 
 /** `subscription_detail` of `GET /api/agents/{id}`: the agent's subscription, when it exists. */
@@ -246,6 +255,8 @@ export interface Agent {
   prompt?: string;
   /** Replaces the harness's default system prompt. Absent or null: the harness default. */
   system_prompt?: string | null;
+  /** See `AgentDef.persona`. Absent or null: by role. */
+  persona?: string | null;
   workspace: string;
   status: AgentStatus;
   /** Roles above `member`. */
@@ -545,6 +556,8 @@ export const EVENT_KINDS = [
   "quota.blocked",
   "quota.resumed",
   "subscription.offer",
+  // docs/api.md §16.7: `{change, harness, from, to}`, the default plan account of a harness.
+  "subscription",
   "self_report",
   // docs/api.md §9, §17.7.
   "lease",
@@ -1098,6 +1111,12 @@ export interface Subscription {
   account?: PlanAccount;
   /** The agents whose current subscription this is. */
   agents: SubscriptionAgentRef[];
+  /**
+   * The account is the default account of its harness (PLAN §16.3): a
+   * Claude Code, Codex, or Copilot agent with no subscription runs on it.
+   * Absent from older daemons.
+   */
+  default?: boolean;
 }
 
 /** Where `GET /api/subscriptions/{name}/models` found the list: the provider's `/models`, the harness login's list, pi's catalogue, or the default table. */
@@ -2064,4 +2083,143 @@ export interface TemplateFromAgent {
   name: string;
   project?: string | null;
   description?: string;
+}
+
+// ----- The config repo (PLAN §8.3, docs/api.md §25) -----
+
+/** A problem in a fleet file. */
+export interface FleetIssue {
+  level: "error" | "warning";
+  /** Where in the file: `projects.terrarium.agents.lead`, for example. */
+  at: string;
+  message: string;
+}
+
+export type FleetAction = "create" | "update" | "unchanged" | "delete" | "release" | "conflict";
+
+/** One object of a fleet plan. */
+export interface FleetPlanEntry {
+  kind: "subscription" | "project" | "target" | "agent" | "schedule" | "template" | string;
+  key: string;
+  project?: string;
+  action: FleetAction;
+  /** The fields that changed outside the fleet since the last apply. */
+  drift?: string[];
+  adopt?: boolean;
+  changes?: { field: string; from: unknown; to: unknown }[];
+  reason?: string;
+  [extra: string]: unknown;
+}
+
+/** A fleet file against the store: what an apply does. */
+export interface FleetPlan {
+  fleet: string;
+  /** No errors: the plan can be applied (when it has no conflicts). */
+  valid: boolean;
+  errors: FleetIssue[];
+  warnings: FleetIssue[];
+  entries: FleetPlanEntry[];
+  summary: { create: number; update: number; unchanged: number; delete: number; release: number; conflict: number; drift: number };
+}
+
+export type ConfigChangeStatus = "added" | "modified" | "deleted" | "renamed" | "untracked" | "conflict";
+
+/** `GET /api/config/status`. */
+export interface ConfigStatus {
+  dir: string;
+  initialized: boolean;
+  branch: string;
+  head?: string;
+  /** `url` never holds a credential. `credential` is the name of a stored credential. */
+  remote?: { url: string; credential?: string; branch: string };
+  /** Commits that the remote does not have, after the last fetch. */
+  ahead: number;
+  /** Commits of the remote that this repo does not have, after the last fetch. */
+  behind: number;
+  changes: { path: string; status: ConfigChangeStatus }[];
+  /** A merge stopped on a conflict, and waits. */
+  merging: boolean;
+  conflicts: string[];
+  /** The new defaults that wait as `<file>.new`. */
+  pending_defaults: string[];
+  /** A pull brought `export/` changes that wait for a pull with `apply`. */
+  export_pending: boolean;
+  auto_sync: "off" | "pull" | "sync";
+}
+
+/** One commit of `GET /api/config/log`. */
+export interface ConfigLogEntry {
+  commit: string;
+  author: string;
+  at: string;
+  subject: string;
+}
+
+/** `POST /api/config/commit`. */
+export interface ConfigCommitBody {
+  message: string;
+  /** Write `export/` from the store first. Default true. */
+  export?: boolean;
+  /** Write `export/` also when a pulled export waits: the store wins. */
+  force_export?: boolean;
+}
+
+export interface ConfigCommitted {
+  /** Null: there was nothing to commit. */
+  commit: string | null;
+  files: string[];
+}
+
+export interface ConfigCommitResult extends ConfigCommitted {
+  /** The export files that the commit wrote first. */
+  export: string[];
+}
+
+/** The plan (or the apply) of one export file after a merge. */
+export interface ConfigExportPlan {
+  path: string;
+  plan?: FleetPlan;
+  applied?: Record<string, unknown>;
+  error?: string;
+}
+
+export interface ConfigMerged {
+  /** The remote has a branch to merge. */
+  fetched: boolean;
+  /** HEAD moved. */
+  updated: boolean;
+  changed: string[];
+  conflicts: string[];
+}
+
+/** `POST /api/config/pull`. */
+export interface ConfigPullResult extends ConfigMerged {
+  export: ConfigExportPlan[];
+}
+
+/** `POST /api/config/sync`: commit, fetch, merge, push. */
+export interface ConfigSyncResult extends ConfigMerged {
+  committed: ConfigCommitted;
+  pushed: boolean;
+  export: ConfigExportPlan[];
+}
+
+/** `PUT /api/config/remote`. A URL with a user or a password is refused (422). */
+export interface ConfigRemoteBody {
+  url: string;
+  credential?: string;
+  branch?: string;
+}
+
+/** A new default that waits as `<file>.new`, with its diff against the file. */
+export interface ConfigPendingDefault {
+  path: string;
+  diff: string;
+}
+
+/** One hit of the secret scan, in `details.findings` of a `422`. Never the value. */
+export interface ConfigScanFinding {
+  path: string;
+  line: number;
+  rule: string;
 }

@@ -171,12 +171,31 @@ fn read_jsonc(path: &Path) -> Result<Option<Value>> {
     }
 }
 
-/// The per-agent settings: `base` without the keys that would add or stop
-/// hooks, and with `experimental_key` set to `true`. Other keys (model,
-/// theme) stay.
-pub fn agent_settings(base: Option<Value>, experimental_key: &str) -> Value {
-    let mut root = match base {
-        Some(Value::Object(m)) => m,
+/// The per-agent settings, in layers (PLAN §8.2):
+///
+/// 1. `base`: the agent's own copy (what Copilot wrote into it), or on the
+///    first start the shared `settings.json` of the home.
+/// 2. `user`: the user settings file (`Agent::harness_settings`, from
+///    `<config repo>/harness/copilot/settings.json`), merged over it with
+///    [`terrarium_core::harness_settings::deep_merge`]. A key of the file
+///    wins over the copy at each start.
+/// 3. The forced keys: `hooks` and `disableAllHooks` go (Copilot would run
+///    the `hooks` of this file next to the Terrarium plugin, and
+///    `disableAllHooks` stops the plugin hooks), and `experimental_key` is
+///    `true` (the system-prompt extension loads only in experimental mode;
+///    see `CopilotFlags::experimental`).
+///
+/// The per-agent options (`--model`) are flags.
+pub fn agent_settings(base: Option<Value>, user: Option<&Value>, experimental_key: &str) -> Value {
+    let mut merged = match base {
+        Some(v @ Value::Object(_)) => v,
+        _ => Value::Object(Map::new()),
+    };
+    if let Some(u @ Value::Object(_)) = user {
+        terrarium_core::harness_settings::deep_merge(&mut merged, u);
+    }
+    let mut root = match merged {
+        Value::Object(m) => m,
         _ => Map::new(),
     };
     root.remove("hooks");
@@ -286,7 +305,11 @@ pub fn materialize(
     };
     write_atomic(
         &own_settings,
-        &pretty(&agent_settings(base, opts.flags.experimental_key))?,
+        &pretty(&agent_settings(
+            base,
+            agent.harness_settings.as_ref(),
+            opts.flags.experimental_key,
+        ))?,
     )?;
     ensure_file(&home.join(SETTINGS_FILE), b"{}\n")?;
     overlays.push(FileOverlay {
@@ -608,13 +631,46 @@ mod tests {
         assert_eq!(v, Some(json!({"a": 1})));
         assert_eq!(parse_jsonc("not json"), None);
         assert_eq!(
-            agent_settings(Some(json!([1])), "experimental"),
+            agent_settings(Some(json!([1])), None, "experimental"),
             json!({"experimental": true})
         );
         // An operator `false` does not turn the prompt extension off.
         assert_eq!(
-            agent_settings(Some(json!({"experimental": false})), "experimental"),
+            agent_settings(Some(json!({"experimental": false})), None, "experimental"),
             json!({"experimental": true})
         );
+    }
+
+    /// The user file merges over the agent's copy; the forced keys win.
+    #[test]
+    fn user_settings_merge_under_the_forced_keys() {
+        let base = json!({"model": "gpt-x", "theme": "light", "banner": {"a": 1}});
+        let user = json!({
+            "theme": "dark",
+            "banner": {"b": 2},
+            "experimental": false,
+            "disableAllHooks": true,
+            "hooks": {"Stop": []},
+        });
+        assert_eq!(
+            agent_settings(Some(base), Some(&user), "experimental"),
+            json!({"model": "gpt-x", "theme": "dark", "banner": {"a": 1, "b": 2},
+                   "experimental": true})
+        );
+    }
+
+    #[test]
+    fn materialize_writes_the_user_settings_into_the_copy() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let home = tmp.path().join("auth-copilot");
+        fs::create_dir_all(&home).expect("home");
+        let mut agent = test_agent_in(tmp.path(), None);
+        agent.harness_settings = Some(json!({"theme": "dark", "hooks": {}}));
+        materialize(&CopilotOptions::default(), &agent, &home, Some("p")).expect("m");
+        let v: Value = serde_json::from_slice(
+            &fs::read(copilot_dir(&agent).join(SETTINGS_FILE)).expect("read"),
+        )
+        .expect("json");
+        assert_eq!(v, json!({"theme": "dark", "experimental": true}));
     }
 }

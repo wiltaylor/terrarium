@@ -104,4 +104,22 @@ describe("template model", () => {
     // Without a template, an empty one is left out.
     expect(formToCreate({ ...form, system_prompt: "" }, null)).not.toHaveProperty("system_prompt");
   });
+
+  it("round-trips the persona: in the spec when set, cleared when emptied, null in a create with a template", () => {
+    const t = tpl("w", "p", { spec: { ...tpl("w", "p").spec, persona: "leader" } });
+    const v = templateToForm(t);
+    expect(v.agent.persona).toBe("leader");
+    expect(formToSpec(v.agent).persona).toBe("leader");
+    expect(formToTemplatePatch(t, v)).toEqual({});
+    const patch = formToTemplatePatch(t, { ...v, agent: { ...v.agent, persona: "" } });
+    expect(patch.spec).toBeDefined();
+    expect(patch.spec).not.toHaveProperty("persona");
+    expect(validateTemplateForm({ ...v, agent: { ...v.agent, persona: "bad name" } })).toHaveLength(1);
+    // A create with the template: the form's persona, or null for "by role".
+    expect(formToCreate(v.agent, "w")).toMatchObject({ persona: "leader" });
+    const body = formToCreate({ ...v.agent, persona: "" }, "w");
+    expect(body).toMatchObject({ persona: null });
+    expect(applyTemplate(t.spec, body)).not.toHaveProperty("persona");
+    expect(applyTemplate(t.spec, { name: "w1", project: "p", template: "w" }).persona).toBe("leader");
+  });
 });

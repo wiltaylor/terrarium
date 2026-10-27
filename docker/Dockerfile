@@ -100,7 +100,7 @@ RUN userdel --remove node 2>/dev/null || true \
 # Harness homes live on the /auth bind mounts. The symlinks serve harnesses
 # that read $HOME; the env vars serve harnesses that read them.
 RUN mkdir -p /auth/claude /auth/codex /auth/copilot /auth/pi \
-        /state /work /run/terrarium /prompts /opt/terrarium/tools \
+        /state /work /run/terrarium /config/terrarium /opt/terrarium/tools \
         /etc/terrarium/projects /etc/terrarium/agents \
         /etc/terrarium/targets /etc/terrarium/subscriptions \
         /home/terrarium/.pi \
@@ -109,7 +109,7 @@ RUN mkdir -p /auth/claude /auth/codex /auth/copilot /auth/pi \
     && ln -s /auth/copilot /home/terrarium/.copilot \
     && ln -s /auth/pi /home/terrarium/.pi/agent \
     && chown -R "${UID}:${GID}" /auth /state /work /run/terrarium /etc/terrarium /home/terrarium \
-        /opt/terrarium/tools
+        /opt/terrarium/tools /config
 
 # The harnesses live in the tools volume, not in the image. npm installs
 # into it (NPM_CONFIG_PREFIX), and its bin/ comes first on PATH for the
@@ -132,7 +132,9 @@ ENV HOME=/home/terrarium \
     TERRARIUM_API_SOCKET=/run/terrarium/api.sock \
     TERRARIUM_LISTEN=0.0.0.0:8080 \
     TERRARIUM_RUNNER_MODE=process \
-    TERRARIUM_RUNNER=/usr/local/bin/terrarium-runner
+    TERRARIUM_RUNNER=/usr/local/bin/terrarium-runner \
+    TERRARIUM_CONFIG_REPO=/config/terrarium \
+    TERRARIUM_DEFAULTS_DIR=/opt/terrarium/defaults
 
 # One terrarium-runner process holds each agent (PLAN §6), so an agent
 # lives through a restart of terrariumd.
@@ -143,6 +145,11 @@ COPY --from=host-build /dist/ /opt/terrarium/dist/
 COPY docker/entrypoint.sh /usr/local/bin/terrarium-entrypoint
 # The pins of the first install (`terrariumd harness install`).
 COPY harnesses.toml /etc/terrarium/harnesses.toml
+# The packaged defaults (PLAN §8.3): the prompts and the harness settings.
+# The daemon copies them into the config repo (/config/terrarium) at each
+# start: a missing file is written, an unedited one is upgraded, and an
+# edited one gets the new default as <file>.new.
+COPY defaults /opt/terrarium/defaults
 
 USER terrarium
 WORKDIR /home/terrarium

@@ -48,6 +48,9 @@ services:
       # A harness outside its tested range (harnesses.toml) at an agent start:
       # `warn` starts it with a warning event, `refuse` refuses the start.
       TERRARIUM_HARNESS_VERSION_POLICY: ${TERRARIUM_HARNESS_VERSION_POLICY:-warn}
+      # The config repo auto-sync (PLAN §8.3): off, pull, or sync, every interval.
+      TERRARIUM_CONFIG_SYNC: ${TERRARIUM_CONFIG_SYNC:-off}
+      TERRARIUM_CONFIG_SYNC_INTERVAL: ${TERRARIUM_CONFIG_SYNC_INTERVAL:-15m}
     volumes:
       - ./config/claude:/auth/claude
       - ./config/codex:/auth/codex
@@ -55,7 +58,7 @@ services:
       - ./config/pi:/auth/pi
       - ./tools:/opt/terrarium/tools             # the harnesses: npm prefix, installed at the first start, updated in place (TERRARIUM_TOOLS_DIR)
       - ./state:/state
-      - ./prompts:/prompts:ro
+      - ./config/terrarium:/config/terrarium     # the config repo: prompts, harness settings, export (PLAN §8.3); git, shareable, no secrets
       - ./subscriptions:/etc/terrarium/subscriptions
       - ./projects:/etc/terrarium/projects
       - ./agents:/etc/terrarium/agents
