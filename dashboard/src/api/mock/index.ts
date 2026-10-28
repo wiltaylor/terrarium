@@ -243,6 +243,23 @@ export interface MockSim {
   offerLogins(): void;
 }
 
+/** The audit name of a terminal key, as the daemon gives it (docs/api.md §6.5); 422 for a key it refuses. */
+function mockKeyName(k: string): string {
+  if (k.startsWith("text:")) {
+    if (k.length === 5) fail(422, "invalid", "`text:` needs the text after the colon");
+    return `text(${[...k.slice(5)].length})`;
+  }
+  const alias: Record<string, string> = { esc: "escape", return: "enter", pgup: "pageup", pgdn: "pagedown", del: "delete" };
+  const lower = k.toLowerCase().replace(/\+/g, "-");
+  const parts = lower.split("-");
+  const key = parts.pop()!;
+  const named = ["enter", "tab", "backspace", "space", "escape", "delete", "insert", "up", "down", "left", "right", "home", "end", "pageup", "pagedown"];
+  const canon = alias[key] ?? key;
+  const ok = named.includes(canon) || /^[a-z0-9]$/.test(canon) || /^f([1-9]|1[0-2])$/.test(canon);
+  if (!ok || parts.some((m) => !["ctrl", "alt", "shift"].includes(m))) fail(422, "invalid", `key ${JSON.stringify(k)}: a terminal has no key code for it`);
+  return [...parts, canon].join("-");
+}
+
 export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld; sim: MockSim } {
   const now = opts.now ?? Date.now;
   const latency = opts.latencyMs ?? 120;
@@ -1936,6 +1953,25 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
       waits: waitMock.agentWaits,
       watches: waitMock.agentWatches,
       watch: waitMock.agentWatch,
+      sendRaw: (id, text) =>
+        reply(() => {
+          const a = agent(id);
+          if (!text.trim()) fail(422, "invalid", "the turn text is empty");
+          if (!LIVE.includes(a.status)) fail(409, "not_running", `agent ${a.id} is not running`);
+          // The audit row has the length and the first word, never the text.
+          audit("agent.send_raw", a.id, a.project, { bytes: text.length, first_word: text.trim().split(/\s+/)[0]!.slice(0, 40) });
+          return { accepted: true, raw: true };
+        }),
+      keys: (id, keys) =>
+        reply(() => {
+          const a = agent(id);
+          if (keys.length === 0) fail(422, "invalid", "send at least one key");
+          if (keys.length > 20) fail(422, "invalid", "at most 20 keys in one request");
+          const names = keys.map((k) => mockKeyName(k));
+          if (!LIVE.includes(a.status)) fail(409, "not_running", `agent ${a.id} is not running`);
+          audit("agent.keys", a.id, a.project, { keys: names });
+          return { accepted: true, keys: names };
+        }),
       screen: (id) =>
         reply((): AgentScreen => {
           const a = agent(id);

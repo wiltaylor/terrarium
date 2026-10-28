@@ -196,11 +196,11 @@ pub fn build(
     if let Some(model) = agent.model.as_deref().filter(|m| !m.is_empty()) {
         spec = spec.arg(f.model).arg(model);
     }
-    for o in user_overrides(agent, f.forced_keys) {
+    for o in user_overrides(agent, &f.all_forced_keys()) {
         spec = spec.arg(f.config).arg(o);
     }
     spec = spec.arg(f.config).arg(trust_override(&cwd));
-    for (key, value) in f.quiet_config {
+    for (key, value) in f.quiet_config.iter().chain(f.hardening_config) {
         spec = spec.arg(f.config).arg(format!("{key}={value}"));
     }
     for event in f.hook_events {
@@ -391,8 +391,83 @@ env = { "A.B" = "x" }
             .expect("parses")
             .expect("exists");
         let mut agent = test_agent(None);
-        agent.harness_settings = Some(v);
-        assert!(user_overrides(&agent, CodexOptions::default().flags.forced_keys).is_empty());
+        agent.harness_settings = Some(v.clone());
+        let flags = CodexOptions::default().flags;
+        // No key of the file is forced: each one goes through.
+        let c = user_overrides(&agent, &flags.all_forced_keys());
+        let all = user_overrides(&agent, &[]);
+        assert_eq!(c, all);
+        for want in [
+            "web_search=\"disabled\"",
+            "features.image_generation=true",
+            "agents.enabled=false",
+            "skills.bundled.enabled=false",
+        ] {
+            assert!(c.iter().any(|o| o == want), "{want}: {c:?}");
+        }
+    }
+
+    /// D5 and the start-up dialogs: the forced keys go to every launch,
+    /// and a user file cannot turn the ask-user tools on again.
+    #[test]
+    fn a_user_file_cannot_turn_the_asking_tools_on() {
+        let mut agent = test_agent(None);
+        let toml = r#"
+include_collaboration_mode_instructions = true
+[tools.experimental_request_user_input]
+enabled = true
+[features]
+default_mode_request_user_input = true
+goals = true
+apps = true
+image_generation = false
+[notice]
+hide_rate_limit_model_nudge = false
+model_migrations = { "gpt-5.6-luna" = "gpt-5.6-luna" }
+"#;
+        agent.harness_settings = Some(
+            terrarium_core::harness_settings::parse(toml, terrarium_core::HarnessId::Codex)
+                .expect("toml"),
+        );
+        let spec = build(&sandbox_opts(), &agent, None, None);
+        let c = overrides(&spec);
+        for want in [
+            "tools.experimental_request_user_input.enabled=false",
+            "features.default_mode_request_user_input=false",
+            "include_collaboration_mode_instructions=false",
+            "features.goals=false",
+            "features.apps=false",
+            "notice.hide_rate_limit_model_nudge=true",
+            "tui.show_tooltips=false",
+            "features.hooks=true",
+        ] {
+            assert_eq!(c.iter().filter(|o| **o == want).count(), 1, "{want}: {c:?}");
+        }
+        for gone in [
+            "tools.experimental_request_user_input.enabled=true",
+            "features.default_mode_request_user_input=true",
+            "features.goals=true",
+            "include_collaboration_mode_instructions=true",
+            "hide_rate_limit_model_nudge=false",
+            "\"gpt-5.6-luna\"=\"gpt-5.6-luna\"",
+        ] {
+            assert!(!c.iter().any(|o| o.contains(gone)), "{gone}: {c:?}");
+        }
+        // A tweakable key passes: the operator may turn image generation off.
+        assert!(c.contains(&"features.image_generation=false"));
+        // Each override parses as TOML, the migration table too.
+        let m = c
+            .iter()
+            .find(|o| o.starts_with("notice.model_migrations="))
+            .expect("migrations");
+        let (_, v) = m.split_once('=').expect("kv");
+        let t: toml::Table = toml::from_str(&format!("x = {v}")).expect("inline table");
+        assert_eq!(t["x"]["gpt-5.6-luna"].as_str(), Some("gpt-6-luna"));
+        for o in &c {
+            let (k, v) = o.split_once('=').expect("kv");
+            let _: toml::Table =
+                toml::from_str(&format!("x = {v}")).unwrap_or_else(|e| panic!("{k}: {e}"));
+        }
     }
 
     /// With no sandbox the overlays are not bound, so the SQLite files stay
@@ -500,7 +575,9 @@ env = { "A.B" = "x" }
     #[test]
     fn empty_prompt_adds_nothing() {
         let spec = build(&sandbox_opts(), &test_agent(None), None, Some(" \n"));
-        assert!(!overrides(&spec).iter().any(|o| o.contains("instructions")));
+        assert!(!overrides(&spec).iter().any(
+            |o| o.starts_with("model_instructions") || o.starts_with("developer_instructions")
+        ));
     }
 
     #[test]

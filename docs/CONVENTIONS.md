@@ -163,6 +163,7 @@ a new token, when `.env` does not exist. The daemon reads:
 | `TERRARIUM_SSH` | `ssh`. The ssh binary for `ssh` targets. |
 | `TERRARIUM_INSECURE_AGENT_HEADER` | off. On: trust `X-Terrarium-Agent` on the Unix socket (tests only). |
 | `TERRARIUM_AUTO_SWAP` | `on`. When a probe finds a plan account at 100 percent, each agent with an account pool moves to the next account with room (PLAN §16.3). `off` (or `0`, `false`, `no`): the agents stay, with a hold until the reset. |
+| `TERRARIUM_QUESTION_GUARD` | `on`. A member whose turn ends with a question in plain text, and that reported nothing, becomes `blocked`, and its lead (or the operator) gets the question by mail (PLAN §8.4). `off` (or `0`, `false`, `no`): no check. |
 | `TERRARIUM_HARNESS_VERSION_POLICY` | `warn`. An agent start on a harness whose installed version is outside the adapter's tested range (`harnesses.toml`) goes ahead, with a warning log and a `warning` event. `refuse`: the start is `422 invalid`. |
 
 ### The directories

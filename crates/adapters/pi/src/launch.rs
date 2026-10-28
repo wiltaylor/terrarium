@@ -91,8 +91,10 @@ pub fn model_args(
 /// - `--no-approve`: ignore project-local `.pi/` files (no trust dialog),
 ///   as Claude Code's `--setting-sources ""` keeps repository settings out.
 /// - `--session-dir <agent dir>/pi/sessions --session-id <id>`.
-/// - `--append-system-prompt <file>` (default) or `--system-prompt <file>`
-///   (see [`PromptMode`]).
+/// - `--system-prompt <file | "">` and `--append-system-prompt <file | "">`:
+///   the prompt file goes to the flag of its [`PromptMode`] (append by
+///   default), and the other flag gets an empty value, so pi does not
+///   discover the operator's `SYSTEM.md` or `APPEND_SYSTEM.md` (B1).
 ///
 /// No yolo flag: pi never asks before a tool.
 pub fn build(
@@ -126,13 +128,24 @@ pub fn build(
         .arg(path_str(&config::sessions_dir(agent)))
         .arg(f.session_id)
         .arg(session_id);
-    if let Some(file) = prompt_file {
-        let flag = match opts.prompt_mode_for(agent) {
-            PromptMode::Append => f.append_system_prompt,
-            PromptMode::Replace => f.system_prompt,
-        };
-        spec = spec.arg(flag).arg(path_str(file));
-    }
+    // B1: each prompt flag replaces only its own discovered file
+    // (`SYSTEM.md` or `APPEND_SYSTEM.md` in the pi home). The other flag
+    // gets an empty value: pi then discovers no file for it, and an empty
+    // value gives no text (`resource-loader.js` `resolvePromptInput`). With
+    // no prompt, both are empty. The empty files that `config` binds over
+    // both are the second fix.
+    let (system, append) = match prompt_file {
+        Some(file) => match opts.prompt_mode_for(agent) {
+            PromptMode::Append => (String::new(), path_str(file)),
+            PromptMode::Replace => (path_str(file), String::new()),
+        },
+        None => (String::new(), String::new()),
+    };
+    spec = spec
+        .arg(f.system_prompt)
+        .arg(system)
+        .arg(f.append_system_prompt)
+        .arg(append);
     spec = spec.env(f.config_env, path_str(&opts.agent_dir));
     for (key, value) in f.quiet_env {
         spec = spec.env(*key, *value);
@@ -218,6 +231,8 @@ mod tests {
             &dir.join("sessions").to_string_lossy(),
             "--session-id",
             "11111111-2222-4333-8444-555555555555",
+            "--system-prompt",
+            "",
             "--append-system-prompt",
             "/state/agents/x/prompt.md",
         ]
@@ -248,7 +263,7 @@ mod tests {
             Some(Path::new("/p.md")),
         );
         assert_eq!(value_after(&spec, "--system-prompt"), Some("/p.md"));
-        assert!(!spec.args.iter().any(|a| a == "--append-system-prompt"));
+        assert_eq!(value_after(&spec, "--append-system-prompt"), Some(""));
         assert!(!spec.args.iter().any(|a| a == "--no-context-files"));
         assert!(
             !spec
@@ -268,11 +283,16 @@ mod tests {
         let file = Some(Path::new("/p.md"));
         let spec = build(&PiOptions::default(), &agent, "id", None, file);
         assert_eq!(value_after(&spec, "--append-system-prompt"), Some("/p.md"));
-        assert!(!spec.args.iter().any(|a| a == "--system-prompt"));
+        // B1: the other flag is empty, so pi discovers no SYSTEM.md.
+        assert_eq!(value_after(&spec, "--system-prompt"), Some(""));
         agent.system_prompt = Some("You review code.".into());
         let spec = build(&PiOptions::default(), &agent, "id", None, file);
         assert_eq!(value_after(&spec, "--system-prompt"), Some("/p.md"));
-        assert!(!spec.args.iter().any(|a| a == "--append-system-prompt"));
+        assert_eq!(value_after(&spec, "--append-system-prompt"), Some(""));
+        // No prompt: both empty, so neither file of the home loads.
+        let spec = build(&PiOptions::default(), &agent, "id", None, None);
+        assert_eq!(value_after(&spec, "--system-prompt"), Some(""));
+        assert_eq!(value_after(&spec, "--append-system-prompt"), Some(""));
     }
 
     #[test]

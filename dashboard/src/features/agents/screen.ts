@@ -35,3 +35,27 @@ export function screenTitle(s: AgentScreen): string {
 export function shouldAutoRefresh(o: { auto: boolean; pageVisible: boolean; running: boolean }): boolean {
   return o.auto && o.pageVisible && o.running;
 }
+
+/** One button of the key bar: the label on the button and the key name of `POST /api/agents/{id}/keys`. */
+export type KeyButton = { label: string; key: string; title: string };
+
+/**
+ * The key bar under the screen (D3): the keys that close a dialog or leave a wrong mode.
+ * The names are the chord names of the daemon (docs/api.md §6.5).
+ */
+export const KEY_BAR: readonly KeyButton[] = [
+  { label: "Esc", key: "esc", title: "Escape: close a dialog, or stop the turn" },
+  { label: "↑", key: "up", title: "Up arrow" },
+  { label: "↓", key: "down", title: "Down arrow" },
+  { label: "Enter", key: "enter", title: "Enter: pick the option under the cursor" },
+  { label: "Tab", key: "tab", title: "Tab" },
+  { label: "Ctrl-C", key: "ctrl-c", title: "Ctrl-C: interrupt" },
+];
+
+/** The text of a raw send, or null when there is nothing to send. Only an empty text is refused; the text goes as typed. */
+export function rawText(input: string): string | null {
+  return input.trim() ? input : null;
+}
+
+/** The delay before the panel reads the screen again after keys or a raw send, so the harness can draw. */
+export const AFTER_INPUT_MS = 400;

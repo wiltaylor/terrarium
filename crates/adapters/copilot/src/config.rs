@@ -10,6 +10,7 @@
 //! |---|---|---|---|
 //! | `SYSTEM.md` | `SYSTEM.md` | ro | The system-prompt extension reads it. With [`PromptMode::Replace`] it holds the prompt; else it is empty. An empty file counts as absent (the extension trims it). |
 //! | `APPEND_SYSTEM.md` | `APPEND_SYSTEM.md` | ro | The same, for [`PromptMode::Append`] (the default). The operator's own prompt files stay out. |
+//! | `copilot-instructions.md` (empty) | `copilot-instructions.md` | ro | The operator's global custom instructions stay out of agents (PLAN §8, the AGENTS.md rule). |
 //! | `hooks/` (empty) | `hooks/` | ro | Every `hooks/*.json` in the home runs in every agent (on this host `orca.json`). An empty directory keeps them out. |
 //! | `settings.json` | `settings.json` | rw | A copy of the shared file without `hooks` (that route also fires) and `disableAllHooks`, with `"experimental": true` (the extension needs experimental mode; see below). |
 //! | `command-history-state.json` | the same | rw | The prompt history (the up-arrow list). Shared, each agent would see the turns (mail text) of the others and of the operator. |
@@ -65,6 +66,9 @@ pub const PROMPT_FILE: &str = "prompt.md";
 pub const SYSTEM_FILE: &str = "SYSTEM.md";
 /// The appended prompt that the extension reads from `COPILOT_HOME`.
 pub const APPEND_SYSTEM_FILE: &str = "APPEND_SYSTEM.md";
+/// The operator's global custom instructions in the home. In append mode
+/// Copilot adds them to the system message.
+pub const INSTRUCTIONS_FILE: &str = "copilot-instructions.md";
 /// The user hook directory in the home.
 pub const HOOKS_DIR: &str = "hooks";
 /// The user settings in the home. JSON.
@@ -201,7 +205,42 @@ pub fn agent_settings(base: Option<Value>, user: Option<&Value>, experimental_ke
     root.remove("hooks");
     root.remove("disableAllHooks");
     root.insert(experimental_key.to_owned(), Value::Bool(true));
-    Value::Object(root)
+    let mut out = Value::Object(root);
+    terrarium_core::harness_settings::deep_merge(&mut out, &forced_settings());
+    out
+}
+
+/// The settings keys that Terrarium forces in each agent's copy, over the
+/// user file (`docs/research/harness-hardening.md`, Copilot CLI, 2c). Each
+/// key is in the 1.0.103 settings catalog.
+///
+/// - D5: `askUser: false` (with the flag `--no-ask-user`) removes the
+///   `ask_user` tool; `defaultMode: "interactive"`, `stayInAutopilot: false`
+///   keep the agent out of plan mode (its `exit_plan_mode` approval waits
+///   for a human) and autopilot.
+/// - No dialog: `defaultPermissionMode: "allow-all"` (with `--yolo`),
+///   `permissions.disableAssistedPermissionsMode` (an LLM judge that can
+///   ask), `shellShortcut: false` (a lone `$` opens a shell), `ide` (an IDE
+///   diff approval), `autoUpdate: false`.
+/// - No data out of the agent: `remoteExport` (the session export to
+///   GitHub, on by default), `remoteSessions` (another client could steer
+///   the agent), `memory` (Copilot Memory is shared by every agent of an
+///   account), `connectors`.
+pub fn forced_settings() -> Value {
+    json!({
+        "askUser": false,
+        "defaultMode": "interactive",
+        "stayInAutopilot": false,
+        "defaultPermissionMode": "allow-all",
+        "permissions": {"disableAssistedPermissionsMode": true},
+        "shellShortcut": false,
+        "ide": {"autoConnect": false, "openDiffOnEdit": false},
+        "autoUpdate": false,
+        "remoteExport": false,
+        "remoteSessions": false,
+        "memory": false,
+        "connectors": false,
+    })
 }
 
 /// Write `bytes` to `path` through a temporary file and a rename.
@@ -275,7 +314,13 @@ pub fn materialize(
     let target = |rel: &str| opts.config_dir.join(rel);
     let mut overlays = Vec::new();
 
-    for (name, body) in [(SYSTEM_FILE, system), (APPEND_SYSTEM_FILE, append)] {
+    // The operator's global custom instructions stay out (PLAN §8, the
+    // AGENTS.md rule): an empty file over the shared one.
+    for (name, body) in [
+        (SYSTEM_FILE, system),
+        (APPEND_SYSTEM_FILE, append),
+        (INSTRUCTIONS_FILE, String::new()),
+    ] {
         let own = dir.join(name);
         write_atomic(&own, body.as_bytes())?;
         ensure_file(&home.join(name), b"")?;
@@ -413,6 +458,52 @@ fn dir_overlay(own: &Path, shared: &Path, target: PathBuf, writable: bool) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `v` with the forced keys on top.
+    fn with_forced(mut v: Value) -> Value {
+        terrarium_core::harness_settings::deep_merge(&mut v, &forced_settings());
+        v
+    }
+
+    /// D5: a user file cannot turn `ask_user`, plan mode, or autopilot on
+    /// again; a tweakable key passes.
+    #[test]
+    fn a_user_file_cannot_turn_the_asking_tool_on() {
+        let user = json!({
+            "askUser": true,
+            "defaultMode": "plan",
+            "stayInAutopilot": true,
+            "remoteExport": true,
+            "permissions": {"disableAssistedPermissionsMode": false, "other": 1},
+            "banner": "always",
+        });
+        let v = agent_settings(None, Some(&user), "experimental");
+        assert_eq!(v["askUser"], false);
+        assert_eq!(v["defaultMode"], "interactive");
+        assert_eq!(v["stayInAutopilot"], false);
+        assert_eq!(v["remoteExport"], false);
+        assert_eq!(
+            v["permissions"],
+            json!({"disableAssistedPermissionsMode": true, "other": 1})
+        );
+        assert_eq!(v["banner"], "always");
+    }
+
+    /// The packaged default holds no forced key.
+    #[test]
+    fn the_packaged_default_has_no_forced_key() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../defaults/harness/copilot/settings.json");
+        let v = terrarium_core::harness_settings::load(&path, terrarium_core::HarnessId::Copilot)
+            .expect("parses")
+            .expect("exists");
+        let forced = forced_settings();
+        for key in v.as_object().expect("object").keys() {
+            assert!(forced.get(key).is_none(), "{key} is forced");
+            assert!(!["hooks", "disableAllHooks", "experimental"].contains(&key.as_str()));
+        }
+        assert_eq!(v["imageGeneration"], false);
+    }
     use crate::test_agent_in;
 
     fn setup() -> (tempfile::TempDir, PathBuf, Agent) {
@@ -448,6 +539,7 @@ mod tests {
         let mut want: Vec<(PathBuf, PathBuf, bool)> = [
             ("SYSTEM.md", false),
             ("APPEND_SYSTEM.md", false),
+            ("copilot-instructions.md", false),
             ("hooks", false),
             ("settings.json", true),
             ("command-history-state.json", true),
@@ -529,7 +621,7 @@ mod tests {
             serde_json::from_slice(&fs::read(own.join(SETTINGS_FILE)).expect("own")).expect("json");
         assert_eq!(
             s,
-            json!({"model": "claude-haiku-4.5", "experimental": true})
+            with_forced(json!({"model": "claude-haiku-4.5", "experimental": true}))
         );
         // The plugin.
         let hooks: Value =
@@ -569,7 +661,10 @@ mod tests {
         assert_eq!(fs::read_to_string(own.join(SYSTEM_FILE)).expect("s"), "P2");
         let s: Value =
             serde_json::from_slice(&fs::read(own.join(SETTINGS_FILE)).expect("own")).expect("json");
-        assert_eq!(s, json!({"theme": "dark", "experimental": true}));
+        assert_eq!(
+            s,
+            with_forced(json!({"theme": "dark", "experimental": true}))
+        );
         assert!(
             fs::read_to_string(own.join(HISTORY_FILE))
                 .expect("h")
@@ -632,12 +727,12 @@ mod tests {
         assert_eq!(parse_jsonc("not json"), None);
         assert_eq!(
             agent_settings(Some(json!([1])), None, "experimental"),
-            json!({"experimental": true})
+            with_forced(json!({"experimental": true}))
         );
         // An operator `false` does not turn the prompt extension off.
         assert_eq!(
             agent_settings(Some(json!({"experimental": false})), None, "experimental"),
-            json!({"experimental": true})
+            with_forced(json!({"experimental": true}))
         );
     }
 
@@ -654,8 +749,10 @@ mod tests {
         });
         assert_eq!(
             agent_settings(Some(base), Some(&user), "experimental"),
-            json!({"model": "gpt-x", "theme": "dark", "banner": {"a": 1, "b": 2},
+            with_forced(
+                json!({"model": "gpt-x", "theme": "dark", "banner": {"a": 1, "b": 2},
                    "experimental": true})
+            )
         );
     }
 
@@ -671,6 +768,9 @@ mod tests {
             &fs::read(copilot_dir(&agent).join(SETTINGS_FILE)).expect("read"),
         )
         .expect("json");
-        assert_eq!(v, json!({"theme": "dark", "experimental": true}));
+        assert_eq!(
+            v,
+            with_forced(json!({"theme": "dark", "experimental": true}))
+        );
     }
 }

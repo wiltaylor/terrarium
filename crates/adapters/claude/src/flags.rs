@@ -45,9 +45,21 @@ pub struct ClaudeFlags {
     /// tunes the harness goes in the packaged default
     /// `defaults/harness/claude/settings.json`.
     pub quiet_settings: &'static [(&'static str, bool)],
+    /// The settings keys with a string value that Terrarium forces, as
+    /// [`Self::quiet_settings`]. A dotted key (`permissions.disableAutoMode`)
+    /// names a key in an object.
+    pub forced_string_settings: &'static [(&'static str, &'static str)],
+    /// The tools that `permissions.deny` always holds (D5). A bare tool
+    /// name removes the tool from the model's context, in every permission
+    /// mode, and no other settings level can allow it again (Claude Code
+    /// docs, "permissions"). The deny rules of the user settings file stay:
+    /// the adapter adds these to them.
+    pub forced_deny: &'static [&'static str],
     /// The settings keys that Terrarium removes from the user settings:
     /// each one would stop the Terrarium hooks.
     pub removed_settings: &'static [&'static str],
+    /// Flags that every launch gets, after the yolo flag.
+    pub forced_args: &'static [&'static str],
 }
 
 /// Claude Code 2.1.x. Measured on 2.1.310 (`docs/compat.md`).
@@ -74,6 +86,39 @@ pub const CLAUDE_2_1: ClaudeFlags = ClaudeFlags {
         ("DISABLE_ERROR_REPORTING", "1"),
         // Read only. An agent must not log out the shared account.
         ("DISABLE_LOGOUT_COMMAND", "1"),
+        // The rest come from docs/research/harness-hardening.md (Claude
+        // Code, 2.2): read in the docs (env-vars page) and the 2.1.310
+        // bundle, not run. Each one keeps an unattended agent from a
+        // dialog, a login or update flow, a turn that nobody typed, or an
+        // outside service. The env wins over a settings file.
+        // No `claude update` from inside the agent.
+        ("DISABLE_UPDATES", "1"),
+        // No login flow from inside the agent.
+        ("DISABLE_LOGIN_COMMAND", "1"),
+        // No feedback upload, and no survey that eats typed digits.
+        ("DISABLE_FEEDBACK_COMMAND", "1"),
+        ("CLAUDE_CODE_SEND_FEEDBACK", "0"),
+        ("CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY", "1"),
+        // The operator's claude.ai connectors (mail, drives) stay out of
+        // agents; the settings key `disableClaudeAiConnectors` is forced too.
+        ("ENABLE_CLAUDEAI_MCP_SERVERS", "false"),
+        // No self-scheduled turns (`CronCreate`, `/loop`): Terrarium has its
+        // own schedules (PLAN §12b).
+        ("CLAUDE_CODE_DISABLE_CRON", "1"),
+        // No marketplace install at start.
+        ("CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL", "1"),
+        // Commands that start a flow with a human.
+        ("DISABLE_INSTALL_GITHUB_APP_COMMAND", "1"),
+        ("DISABLE_UPGRADE_COMMAND", "1"),
+        ("DISABLE_EXTRA_USAGE_COMMAND", "1"),
+        // No side request for a terminal title.
+        ("CLAUDE_CODE_DISABLE_TERMINAL_TITLE", "1"),
+        // No predicted prompt in the input box: the screen detector reads
+        // text in the box as "not ready", and a turn would not go in.
+        ("CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION", "false"),
+        // Never set `CLAUDE_CODE_DISABLE_DANGEROUS_RM_TIMEOUT`: it removes
+        // the 2-minute auto-deny of the critical-path `rm` prompt, so the
+        // prompt would wait forever.
     ],
     root_env: ("IS_SANDBOX", "1"),
     hook_events: &[
@@ -95,13 +140,58 @@ pub const CLAUDE_2_1: ClaudeFlags = ClaudeFlags {
         // Forced: without it, yolo mode shows a dialog at each start, and
         // no one is there to answer it.
         ("skipDangerousModePermissionPrompt", true),
+        // The usage-limit menu ("Stop and wait for limit to reset",
+        // "Upgrade your plan") waits for a key; with this key on, Claude
+        // Code waits for the reset by itself.
+        ("autoContinueAtUsageLimit", true),
+        // Outside services that an agent must not reach: the operator's
+        // claude.ai connectors, Remote Control (another client could type
+        // into the agent), and the upload of the sessions to claude.ai.
+        ("disableClaudeAiConnectors", true),
+        ("disableRemoteControl", true),
+        ("remoteControlAtStartup", false),
+        ("autoUploadSessions", false),
         // `autoMemoryEnabled = false` is not forced any more: it is in the
         // packaged default `defaults/harness/claude/settings.json`.
         // Terrarium has its own memory graph (PLAN §14), and the
         // per-agent `projects/<cwd>/memory/` overlay (`config.rs`) keeps
         // an agent's auto memory its own when the operator turns it on.
     ],
+    forced_string_settings: &[
+        // D5: no goal proposal with a one-key approval.
+        ("modelProposedGoals", "disabled"),
+        // No auto mode: its classifier can ask before an action. The
+        // 2.1.310 schema has the top-level key; the docs name the one in
+        // `permissions`. Both until one is tested.
+        ("disableAutoMode", "disable"),
+        ("permissions.disableAutoMode", "disable"),
+        // A safety net only: an `AskUserQuestion` that still shows goes on
+        // by itself after 60 s. The deny below removes the tool.
+        ("askUserQuestionTimeout", "60s"),
+        // A message from another local session is held for approval.
+        ("crossSessionInbound", "refuse"),
+    ],
+    forced_deny: &[
+        // D5: the tools that ask a human and wait. Plan mode ends with a
+        // plan approval that never resolves on its own.
+        "AskUserQuestion",
+        "EnterPlanMode",
+        "ExitPlanMode",
+        "ProposeGoal",
+        // A worktree changes the cwd under Terrarium: the workspace, the
+        // trust key, and the session dir are all keyed by the cwd.
+        "EnterWorktree",
+        "ExitWorktree",
+    ],
     // `disableAllHooks` would stop the Terrarium hooks, and so the status
     // machine, the turns, and the usage.
     removed_settings: &["disableAllHooks"],
+    forced_args: &[
+        // No Claude in Chrome (its setup is a dialog). In `--help`.
+        "--no-chrome",
+        // Only `--mcp-config` servers, and Terrarium passes none: no
+        // "New MCP server found in this project" dialog for a `.mcp.json`
+        // in a repo. In `--help`; the dialog part is not tested.
+        "--strict-mcp-config",
+    ],
 };

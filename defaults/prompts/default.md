@@ -6,8 +6,8 @@ Your roles: {{roles}}.
 
 You run in a sandbox. Your workspace is the current directory. It is also at
 `/work/{{project.name}}/{{agent.name}}`, the same path as on your targets.
-Read `AGENTS.md` and `CLAUDE.md` in your workspace and in each repo yourself:
-the harness may not load them.
+Read `AGENTS.md` in your workspace and in each repo yourself: the harness
+may not load it. A file deeper in the tree wins.
 
 ## Git in the sandbox, builds on a target
 

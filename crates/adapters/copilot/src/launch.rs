@@ -62,6 +62,8 @@ pub fn hooks_json(opts: &CopilotOptions) -> Value {
 ///   mode on (see [`crate::flags::CopilotFlags::experimental`]).
 /// - `--yolo`: Allow All mode. With `COPILOT_ALLOW_ALL=true` (env, below)
 ///   there is no trust dialog; each alone is not enough.
+/// - `--no-ask-user --mode interactive --disable-builtin-mcps
+///   --sync-session=off`: see [`crate::flags::CopilotFlags::forced_args`].
 /// - `--no-auto-update`, `--disable-client-telemetry`: quiet start.
 /// - `--secret-env-vars=COPILOT_GITHUB_TOKEN,GH_TOKEN,GITHUB_TOKEN`: keep
 ///   the token out of the agent's shell commands.
@@ -82,8 +84,11 @@ pub fn hooks_json(opts: &CopilotOptions) -> Value {
 pub fn build(opts: &CopilotOptions, agent: &Agent, session: SessionStart<'_>) -> LaunchSpec {
     let f = &opts.flags;
     let cwd = opts.harness_cwd(agent);
-    let mut spec = LaunchSpec::new(opts.program.as_str(), &cwd)
-        .arg(f.yolo)
+    let mut spec = LaunchSpec::new(opts.program.as_str(), &cwd).arg(f.yolo);
+    for a in f.forced_args {
+        spec = spec.arg(*a);
+    }
+    spec = spec
         .arg(f.no_auto_update)
         .arg(f.disable_telemetry)
         .arg(format!("{}={}", f.secret_env_vars, f.token_env.join(",")))
@@ -167,9 +172,14 @@ mod tests {
         assert_eq!(spec.cwd, agent.workspace);
         let a = args(&spec);
         assert_eq!(
-            &a[..4],
+            &a[..9],
             [
                 "--yolo",
+                "--no-ask-user",
+                "--mode",
+                "interactive",
+                "--disable-builtin-mcps",
+                "--sync-session=off",
                 "--no-auto-update",
                 "--disable-client-telemetry",
                 "--secret-env-vars=COPILOT_GITHUB_TOKEN,GH_TOKEN,GITHUB_TOKEN",
@@ -203,6 +213,7 @@ mod tests {
         assert_eq!(spec.env["COPILOT_ALLOW_ALL"], "true");
         assert_eq!(spec.env["COPILOT_AUTO_UPDATE"], "false");
         assert_eq!(spec.env["COPILOT_DISABLE_TERMINAL_TITLE"], "1");
+        assert_eq!(spec.env["COPILOT_DISABLE_DESKTOP_NOTIFICATIONS"], "1");
         assert_eq!(
             PathBuf::from(&spec.env["COPILOT_CACHE_HOME"]),
             agent_dir.join("copilot/cache")

@@ -26,7 +26,8 @@
 //! | `mcp.json` | not loaded | `--no-mcp` (pi 1.4 has built-in MCP). |
 //! | `sessions/` | not used | `--session-dir` puts the sessions in the agent directory. In the sandbox every agent has the cwd `$HOME/work`, so the default directory (`sessions/--home-…-work--/`) would be one directory for all agents, and `pi --resume` would list the sessions of every agent. Session IDs do not collide (each agent gets new UUIDs), but pi has **no lock on a session**: two processes with one `--session-id` both start and both append (`docs/compat.md`). The supervisor must run one pi per agent. |
 //! | `extensions/`, `skills/`, `prompts/` | not loaded | `--no-extensions`, `--no-skills`, `--no-prompt-templates`. |
-//! | `AGENTS.md`, `SYSTEM.md`, `APPEND_SYSTEM.md` | not loaded | `--no-context-files`; `--system-prompt`/`--append-system-prompt` replace the discovered files. The operator's personal instructions stay out of agents. |
+//! | `AGENTS.md` | not loaded | `--no-context-files`. The operator's personal instructions stay out of agents. |
+//! | `SYSTEM.md`, `APPEND_SYSTEM.md` | per agent, empty | pi reads both from the home whenever the matching flag is absent (`resource-loader.js` `discoverSystemPromptFile`, `discoverAppendSystemPromptFile`), and `--no-context-files` does not stop it. Each prompt flag replaces only its own file: in append mode pi would take the operator's `SYSTEM.md` instead of its default prompt, and in replace mode it would append the operator's `APPEND_SYSTEM.md` (B1). Two fixes, each enough alone: empty per-agent files bound read-only over both (an empty file gives no prompt text), and the other prompt flag with an empty value (an empty value stops the discovery; [`crate::launch`]). |
 //! | `trust.json` | not written | `--no-approve` makes no trust decision. |
 //! | `models-store.json` | shared | written at start (seen in the live check). Not tested with many writers. |
 //!
@@ -67,6 +68,27 @@ pub const AUTH_FILE: &str = "auth.json";
 pub const SESSIONS_DIR: &str = "sessions";
 /// The rendered prompt in the agent directory (PLAN §11).
 pub const PROMPT_FILE: &str = "prompt.md";
+/// The prompt files that pi discovers in its home (B1). Each agent gets
+/// empty ones over them.
+pub const DISCOVERED_PROMPT_FILES: &[&str] = &["SYSTEM.md", "APPEND_SYSTEM.md"];
+/// The settings keys that Terrarium forces in the agent's copy at each
+/// start, over the user file (`docs/research/harness-hardening.md`, pi,
+/// 2), beside [`LAST_CHANGELOG_KEY`]:
+///
+/// - `doubleEscapeAction: "none"`: two Esc keys on an empty editor open
+///   the tree selector, which waits for a key. Terrarium sends Esc for a
+///   deny and a leader can send it (`agent keys`).
+/// - `branchSummary.skipPrompt: true`: no "Summarize branch?" dialog.
+/// - `defaultProjectTrust: "never"`: no trust dialog, beside `--no-approve`.
+/// - `tuiMode: "regular"`: the screen the detector knows, beside the flag.
+pub fn forced_settings() -> Value {
+    json!({
+        "doubleEscapeAction": "none",
+        "branchSummary": {"skipPrompt": true},
+        "defaultProjectTrust": "never",
+        "tuiMode": "regular",
+    })
+}
 
 /// `/state/agents/<ulid>/harness`: the directory of the per-agent harness
 /// files, next to the workspace. The sandbox binds it read-only at the
@@ -223,6 +245,7 @@ pub fn materialize(
         terrarium_core::harness_settings::deep_merge(&mut settings, user);
     }
     settings[LAST_CHANGELOG_KEY] = Value::String(opts.flags.verified.to_owned());
+    terrarium_core::harness_settings::deep_merge(&mut settings, &forced_settings());
     if current.as_ref() != Some(&settings) {
         let bytes =
             serde_json::to_vec_pretty(&settings).map_err(|e| PiError::json("settings.json", e))?;
@@ -248,7 +271,24 @@ pub fn materialize(
         write_atomic(&shared_models, b"{\"providers\": {}}\n")?;
     }
 
-    Ok(vec![
+    // B1: empty prompt files over the operator's (and a mount point for
+    // each in the shared home). Written again at each start.
+    let mut prompt_overlays = Vec::new();
+    for name in DISCOVERED_PROMPT_FILES {
+        let own = dir.join(name);
+        write_atomic(&own, b"")?;
+        let shared = home.join(name);
+        if !shared.exists() {
+            write_atomic(&shared, b"")?;
+        }
+        prompt_overlays.push(FileOverlay {
+            source: own,
+            target: opts.agent_dir.join(name),
+            writable: false,
+        });
+    }
+
+    let mut overlays = vec![
         FileOverlay {
             source: own,
             target: opts.agent_dir.join(SETTINGS_FILE),
@@ -272,7 +312,9 @@ pub fn materialize(
             target: sessions,
             writable: true,
         },
-    ])
+    ];
+    overlays.extend(prompt_overlays);
+    Ok(overlays)
 }
 
 #[cfg(test)]
@@ -302,6 +344,83 @@ mod tests {
         assert_eq!(v["defaultThinkingLevel"], "off");
         assert_eq!(v["theme"], "dark");
         assert_eq!(v[LAST_CHANGELOG_KEY], opts.flags.verified);
+    }
+
+    /// B1: the operator's `SYSTEM.md` and `APPEND_SYSTEM.md` stay in the
+    /// shared home, and the agent sees empty files over them.
+    #[test]
+    fn the_shared_prompt_files_are_empty_for_the_agent() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let home = tmp.path().join("auth-pi");
+        fs::create_dir_all(&home).expect("home");
+        fs::write(home.join("SYSTEM.md"), "operator system").expect("w");
+        let agent = test_agent_in(tmp.path(), None);
+        let opts = PiOptions::default();
+        let overlays = materialize(&opts, &agent, &home, Some("p")).expect("m");
+        for name in ["SYSTEM.md", "APPEND_SYSTEM.md"] {
+            let o = overlays
+                .iter()
+                .find(|o| o.target == opts.agent_dir.join(name))
+                .unwrap_or_else(|| panic!("{name}"));
+            assert!(!o.writable, "{name}");
+            assert!(o.source.starts_with(pi_dir(&agent)), "{name}");
+            assert_eq!(fs::read(&o.source).expect("own"), b"", "{name}");
+            // A mount point in the shared home, with the operator's text kept.
+            assert!(home.join(name).is_file(), "{name}");
+        }
+        assert_eq!(
+            fs::read_to_string(home.join("SYSTEM.md")).expect("shared"),
+            "operator system"
+        );
+        // A stale text in the agent's file goes at the next start.
+        fs::write(pi_dir(&agent).join("SYSTEM.md"), "x").expect("w");
+        materialize(&opts, &agent, &home, None).expect("again");
+        assert_eq!(
+            fs::read(pi_dir(&agent).join("SYSTEM.md")).expect("own"),
+            b""
+        );
+    }
+
+    /// The forced keys win over the user file and the agent's copy.
+    #[test]
+    fn forced_settings_win() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let home = tmp.path().join("auth-pi");
+        fs::create_dir_all(&home).expect("home");
+        let mut agent = test_agent_in(tmp.path(), None);
+        agent.harness_settings = Some(json!({
+            "doubleEscapeAction": "tree",
+            "branchSummary": {"skipPrompt": false, "reserveTokens": 1},
+            "tuiMode": "fullscreen",
+            "cacheWarming": "idle",
+        }));
+        materialize(&PiOptions::default(), &agent, &home, None).expect("m");
+        let v: Value =
+            serde_json::from_slice(&fs::read(pi_dir(&agent).join(SETTINGS_FILE)).expect("r"))
+                .expect("json");
+        assert_eq!(v["doubleEscapeAction"], "none");
+        assert_eq!(
+            v["branchSummary"],
+            json!({"skipPrompt": true, "reserveTokens": 1})
+        );
+        assert_eq!(v["tuiMode"], "regular");
+        assert_eq!(v["defaultProjectTrust"], "never");
+        assert_eq!(v["cacheWarming"], "idle");
+    }
+
+    /// The packaged default holds no forced key.
+    #[test]
+    fn the_packaged_default_has_no_forced_key() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../defaults/harness/pi/settings.json");
+        let v = terrarium_core::harness_settings::load(&path, terrarium_core::HarnessId::Pi)
+            .expect("parses")
+            .expect("exists");
+        let forced = forced_settings();
+        for key in v.as_object().expect("object").keys() {
+            assert!(forced.get(key).is_none(), "{key} is forced");
+            assert_ne!(key, LAST_CHANGELOG_KEY);
+        }
     }
 
     #[test]
@@ -345,6 +464,16 @@ mod tests {
                     source: sessions_dir(&agent),
                     target: sessions_dir(&agent),
                     writable: true,
+                },
+                FileOverlay {
+                    source: pi_dir(&agent).join("SYSTEM.md"),
+                    target: PathBuf::from("/auth/pi/SYSTEM.md"),
+                    writable: false,
+                },
+                FileOverlay {
+                    source: pi_dir(&agent).join("APPEND_SYSTEM.md"),
+                    target: PathBuf::from("/auth/pi/APPEND_SYSTEM.md"),
+                    writable: false,
                 },
             ]
         );

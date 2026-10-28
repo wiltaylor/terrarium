@@ -715,6 +715,263 @@ fn split_keep_trailing(s: &str, sep: char) -> Vec<String> {
     s.split(sep).map(str::to_owned).collect()
 }
 
+// ------------------------------------------------------- terminal keys
+
+/// The most keys in one `POST /api/agents/{id}/keys` request.
+pub const MAX_TERMINAL_KEYS: usize = 20;
+/// Terminal keys to one agent in one second, at most.
+pub const TERMINAL_KEYS_PER_SEC: u32 = 20;
+/// The most characters of one `text:` key.
+pub const MAX_TERMINAL_TEXT: usize = 2000;
+/// The prefix of a literal text key: `text:abc` types `abc`.
+pub const TEXT_KEY_PREFIX: &str = "text:";
+
+/// One key press for the harness TUI of an agent (`POST
+/// /api/agents/{id}/keys`, `terrarium agent keys`): a [`KeyChord`] in the
+/// spelling of the display keys, or `text:<text>` for literal text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TerminalKey {
+    Chord(KeyChord),
+    Text(String),
+}
+
+impl TerminalKey {
+    /// Parse `esc`, `down`, `ctrl-c`, `shift-tab`, `f5`, or `text:abc`. A
+    /// chord that a terminal cannot send (for example `super-e`, `print`)
+    /// is an error.
+    pub fn parse(s: &str) -> Result<Self, String> {
+        if let Some(text) = s.strip_prefix(TEXT_KEY_PREFIX) {
+            if text.is_empty() {
+                return Err("`text:` needs the text after the colon".into());
+            }
+            if text.chars().count() > MAX_TERMINAL_TEXT {
+                return Err(format!(
+                    "a `text:` key has at most {MAX_TERMINAL_TEXT} characters"
+                ));
+            }
+            return Ok(Self::Text(text.to_owned()));
+        }
+        let chord = KeyChord::parse(s)?;
+        chord.terminal_bytes()?;
+        Ok(Self::Chord(chord))
+    }
+
+    /// The bytes to write to the PTY. A text key is written as-is, without
+    /// the bracketed-paste markers.
+    pub fn bytes(&self) -> Vec<u8> {
+        match self {
+            Self::Chord(c) => c.terminal_bytes().unwrap_or_default(),
+            Self::Text(t) => t
+                .replace("\x1b[200~", "")
+                .replace("\x1b[201~", "")
+                .into_bytes(),
+        }
+    }
+
+    /// The name for the audit log: the canonical chord, or `text` with
+    /// its length only (never the text).
+    pub fn audit_name(&self) -> String {
+        match self {
+            Self::Chord(c) => c.canonical(),
+            Self::Text(t) => format!("text({})", t.chars().count()),
+        }
+    }
+}
+
+/// The xterm modifier parameter of a CSI key: 1 + shift (1) + alt (2) +
+/// ctrl (4).
+fn xterm_modifier(mods: &[Modifier]) -> Option<u8> {
+    let mut m = 1;
+    for x in mods {
+        m += match x {
+            Modifier::Shift => 1,
+            Modifier::Alt => 2,
+            Modifier::Ctrl => 4,
+            Modifier::Super => return None,
+        };
+    }
+    Some(m)
+}
+
+impl KeyChord {
+    /// The bytes that an xterm-compatible terminal sends for the chord
+    /// (the `TERM=xterm-256color` of the agent PTY):
+    ///
+    /// | Key | Bytes |
+    /// |---|---|
+    /// | `enter`, `tab`, `shift-tab`, `backspace`, `escape`, `space` | CR, HT, `ESC [ Z`, DEL, ESC, space |
+    /// | `up`, `down`, `right`, `left` | `ESC [ A` .. `ESC [ D`; with modifiers `ESC [ 1 ; <m> A` |
+    /// | `home`, `end` | `ESC [ H`, `ESC [ F` (with modifiers as the arrows) |
+    /// | `insert`, `delete`, `pageup`, `pagedown` | `ESC [ 2 ~`, `3 ~`, `5 ~`, `6 ~`; with modifiers `ESC [ <n> ; <m> ~` |
+    /// | `f1` .. `f4` | `ESC O P` .. `ESC O S` |
+    /// | `f5` .. `f12` | `ESC [ 15 ~`, `17 ~`, `18 ~`, `19 ~`, `20 ~`, `21 ~`, `23 ~`, `24 ~` |
+    /// | `ctrl-<letter>` | the control code (`ctrl-c` is 0x03) |
+    /// | `ctrl-space`, `ctrl-[`, `ctrl-\`, `ctrl-]` | NUL, ESC, 0x1c, 0x1d |
+    /// | `alt-<key>` | ESC, then the key |
+    /// | a letter, a digit, punctuation | the character (`shift-a` is `A`) |
+    ///
+    /// `<m>` is 1 + shift (1) + alt (2) + ctrl (4). An error for `super`,
+    /// F13 to F24, and keys a terminal has no code for (`print`, `menu`,
+    /// `capslock`).
+    pub fn terminal_bytes(&self) -> Result<Vec<u8>, String> {
+        let mods = &self.modifiers;
+        let has = |m: Modifier| mods.contains(&m);
+        let no_terminal = || {
+            format!(
+                "a terminal has no key code for {:?}: use enter, tab, escape, backspace, \
+                 space, the arrows, home, end, pageup, pagedown, insert, delete, f1 to f12, \
+                 a letter, a digit, or ctrl-, alt-, shift- with them",
+                self.canonical()
+            )
+        };
+        if has(Modifier::Super) {
+            return Err(no_terminal());
+        }
+        let m = xterm_modifier(mods).ok_or_else(no_terminal)?;
+        let csi_letter = |c: char| -> Vec<u8> {
+            if m == 1 {
+                format!("\x1b[{c}").into_bytes()
+            } else {
+                format!("\x1b[1;{m}{c}").into_bytes()
+            }
+        };
+        let csi_tilde = |n: u8| -> Vec<u8> {
+            if m == 1 {
+                format!("\x1b[{n}~").into_bytes()
+            } else {
+                format!("\x1b[{n};{m}~").into_bytes()
+            }
+        };
+        let alt_prefix = |mut b: Vec<u8>| -> Vec<u8> {
+            if has(Modifier::Alt) {
+                b.insert(0, 0x1b);
+            }
+            b
+        };
+        match &self.key {
+            Key::F(n) => {
+                let ss3 = |c: char| -> Vec<u8> {
+                    if m == 1 {
+                        format!("\x1bO{c}").into_bytes()
+                    } else {
+                        format!("\x1b[1;{m}{c}").into_bytes()
+                    }
+                };
+                match n {
+                    1 => Ok(ss3('P')),
+                    2 => Ok(ss3('Q')),
+                    3 => Ok(ss3('R')),
+                    4 => Ok(ss3('S')),
+                    5 => Ok(csi_tilde(15)),
+                    6 => Ok(csi_tilde(17)),
+                    7 => Ok(csi_tilde(18)),
+                    8 => Ok(csi_tilde(19)),
+                    9 => Ok(csi_tilde(20)),
+                    10 => Ok(csi_tilde(21)),
+                    11 => Ok(csi_tilde(23)),
+                    12 => Ok(csi_tilde(24)),
+                    _ => Err(no_terminal()),
+                }
+            }
+            Key::Char(c) => {
+                let c = *c;
+                if has(Modifier::Ctrl) {
+                    let code = if c.is_ascii_lowercase() {
+                        (c as u8) & 0x1f
+                    } else {
+                        match c {
+                            '2' => 0x00,
+                            '3' => 0x1b,
+                            '4' => 0x1c,
+                            '5' => 0x1d,
+                            '6' => 0x1e,
+                            '7' => 0x1f,
+                            '8' => 0x7f,
+                            _ => return Err(no_terminal()),
+                        }
+                    };
+                    return Ok(alt_prefix(vec![code]));
+                }
+                let ch = if has(Modifier::Shift) {
+                    c.to_ascii_uppercase()
+                } else {
+                    c
+                };
+                Ok(alt_prefix(vec![ch as u8]))
+            }
+            Key::Named(name) => {
+                let ch_key = |plain: u8| -> Result<Vec<u8>, String> {
+                    if has(Modifier::Ctrl) {
+                        let code = match plain {
+                            b' ' => 0x00,
+                            b'[' => 0x1b,
+                            b'\\' => 0x1c,
+                            b']' => 0x1d,
+                            b'/' | b'-' => 0x1f,
+                            _ => return Err(no_terminal()),
+                        };
+                        return Ok(alt_prefix(vec![code]));
+                    }
+                    Ok(alt_prefix(vec![plain]))
+                };
+                match name.as_str() {
+                    "enter" => Ok(alt_prefix(vec![b'\r'])),
+                    "tab" if has(Modifier::Shift) => Ok(b"\x1b[Z".to_vec()),
+                    "tab" => Ok(alt_prefix(vec![b'\t'])),
+                    "backspace" if has(Modifier::Ctrl) => Ok(alt_prefix(vec![0x08])),
+                    "backspace" => Ok(alt_prefix(vec![0x7f])),
+                    "escape" => Ok(alt_prefix(vec![0x1b])),
+                    "space" => ch_key(b' '),
+                    "up" => Ok(csi_letter('A')),
+                    "down" => Ok(csi_letter('B')),
+                    "right" => Ok(csi_letter('C')),
+                    "left" => Ok(csi_letter('D')),
+                    "home" => Ok(csi_letter('H')),
+                    "end" => Ok(csi_letter('F')),
+                    "insert" => Ok(csi_tilde(2)),
+                    "delete" => Ok(csi_tilde(3)),
+                    "pageup" => Ok(csi_tilde(5)),
+                    "pagedown" => Ok(csi_tilde(6)),
+                    _ => {
+                        let entry = self.key.named().ok_or_else(no_terminal)?;
+                        // Punctuation: the X keysym value is the character.
+                        let v = entry.3;
+                        if (0x21..0x7f).contains(&v) {
+                            let b = u8::try_from(v).map_err(|_| no_terminal())?;
+                            let b = if has(Modifier::Shift) {
+                                us_shifted(b).ok_or_else(no_terminal)?
+                            } else {
+                                b
+                            };
+                            ch_key(b)
+                        } else {
+                            Err(no_terminal())
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The character that Shift gives on a US keyboard for punctuation `b`.
+fn us_shifted(b: u8) -> Option<u8> {
+    Some(match b {
+        b'-' => b'_',
+        b'=' => b'+',
+        b'[' => b'{',
+        b']' => b'}',
+        b'\\' => b'|',
+        b';' => b':',
+        b'\'' => b'"',
+        b',' => b'<',
+        b'.' => b'>',
+        b'/' => b'?',
+        b'`' => b'~',
+        _ => return None,
+    })
+}
+
 /// The chord that types one character on a US keyboard, for a backend
 /// that has no text input. `None` for a character that the US layout has
 /// no key for.
@@ -808,6 +1065,70 @@ mod tests {
             "ctrl+minus"
         );
         assert!(KeyChord::parse("ctrl++").is_err(), "+ has no key name");
+    }
+
+    /// The key map of `POST /api/agents/{id}/keys` (docs/api.md §6.5).
+    #[test]
+    fn terminal_key_map() {
+        let b = |s: &str| TerminalKey::parse(s).unwrap().bytes();
+        for (key, want) in [
+            ("esc", &b"\x1b"[..]),
+            ("escape", b"\x1b"),
+            ("enter", b"\r"),
+            ("Return", b"\r"),
+            ("tab", b"\t"),
+            ("shift-tab", b"\x1b[Z"),
+            ("backspace", b"\x7f"),
+            ("space", b" "),
+            ("up", b"\x1b[A"),
+            ("down", b"\x1b[B"),
+            ("right", b"\x1b[C"),
+            ("left", b"\x1b[D"),
+            ("ctrl-up", b"\x1b[1;5A"),
+            ("shift-right", b"\x1b[1;2C"),
+            ("home", b"\x1b[H"),
+            ("end", b"\x1b[F"),
+            ("pageup", b"\x1b[5~"),
+            ("pgdn", b"\x1b[6~"),
+            ("delete", b"\x1b[3~"),
+            ("insert", b"\x1b[2~"),
+            ("ctrl-delete", b"\x1b[3;5~"),
+            ("f1", b"\x1bOP"),
+            ("f4", b"\x1bOS"),
+            ("f5", b"\x1b[15~"),
+            ("f12", b"\x1b[24~"),
+            ("shift-f1", b"\x1b[1;2P"),
+            ("ctrl-c", b"\x03"),
+            ("ctrl-d", b"\x04"),
+            ("ctrl+l", b"\x0c"),
+            ("ctrl-space", b"\x00"),
+            ("ctrl-[", b"\x1b"),
+            ("ctrl-]", b"\x1d"),
+            ("alt-b", b"\x1bb"),
+            ("alt-enter", b"\x1b\r"),
+            ("a", b"a"),
+            ("shift-a", b"A"),
+            ("7", b"7"),
+            ("/", b"/"),
+            ("shift-/", b"?"),
+            ("text:/compact", b"/compact"),
+            ("text:a\x1b[201~b", b"ab"),
+        ] {
+            assert_eq!(b(key), want.to_vec(), "{key}");
+        }
+        for bad in [
+            "super-e", "f13", "print", "menu", "capslock", "text:", "hyper-x", "",
+        ] {
+            assert!(TerminalKey::parse(bad).is_err(), "{bad}");
+        }
+        let long = format!("text:{}", "x".repeat(MAX_TERMINAL_TEXT + 1));
+        assert!(TerminalKey::parse(&long).is_err());
+        assert_eq!(TerminalKey::parse("Esc").unwrap().audit_name(), "escape");
+        assert_eq!(TerminalKey::parse("ctrl+c").unwrap().audit_name(), "ctrl-c");
+        assert_eq!(
+            TerminalKey::parse("text:secret").unwrap().audit_name(),
+            "text(6)"
+        );
     }
 
     #[test]

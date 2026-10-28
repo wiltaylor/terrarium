@@ -1,1 +1,27 @@
-{}
+{
+  "banner": "never",
+  "showTipsOnStartup": false,
+  "notifications": false,
+  "beep": false,
+  "updateTerminalTitle": false,
+  "terminalProgress": false,
+  "voice": {
+    "enabled": false
+  },
+  "continueOnAutoMode": false,
+  "imageGeneration": false,
+  "builtInAgents": {
+    "rubberDuck": false,
+    "rubberDuckAutoInvoke": false
+  },
+  "subagents": {
+    "disabledSubagents": ["rubber-duck", "research", "security-review", "code-review"]
+  },
+  "customAgents": {
+    "defaultLocalOnly": true
+  },
+  "disabledSkills": ["customize-cloud-agent", "github-pr-media", "discover-resources"],
+  "contextManagementTools": false,
+  "enabledMcpServers": [],
+  "enabledPlugins": {}
+}

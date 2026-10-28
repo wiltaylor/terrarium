@@ -130,10 +130,25 @@ pub fn read_prompt(agent: &Agent) -> Result<Option<String>> {
     }
 }
 
+/// The global-config keys of `.claude.json` that each agent's copy gets
+/// (`docs/research/harness-hardening.md`, Claude Code 2.3): no IDE
+/// connect or extension install, no LSP plugin offer, no Claude in
+/// Chrome, no Remote Control, no session upload. The names are in the
+/// 2.1.310 global-config key list; their effect on a dialog is not tested.
+pub const QUIET_STATE: &[(&str, bool)] = &[
+    ("autoInstallIdeExtension", false),
+    ("autoConnectIde", false),
+    ("lspRecommendationDisabled", true),
+    ("claudeInChromeDefaultEnabled", false),
+    ("remoteControlAtStartup", false),
+    ("autoUploadSessions", false),
+];
+
 /// Add the quiet-start keys to a `.claude.json` value:
-/// `hasCompletedOnboarding` (no theme picker) and
-/// `projects[<cwd>].hasTrustDialogAccepted` (no trust dialog). The spikes
-/// found that nothing else is needed. Other keys stay as they are.
+/// `hasCompletedOnboarding` (no theme picker),
+/// `projects[<cwd>].hasTrustDialogAccepted` (no trust dialog; the spikes
+/// found that these two are needed), and [`QUIET_STATE`]. Other keys stay
+/// as they are.
 pub fn seed_state(mut state: Value, cwd: &Path) -> Value {
     if !state.is_object() {
         state = Value::Object(Map::new());
@@ -142,6 +157,9 @@ pub fn seed_state(mut state: Value, cwd: &Path) -> Value {
         return state;
     };
     root.insert("hasCompletedOnboarding".into(), Value::Bool(true));
+    for (key, value) in QUIET_STATE {
+        root.insert((*key).to_owned(), Value::Bool(*value));
+    }
     let projects = root
         .entry("projects")
         .or_insert_with(|| Value::Object(Map::new()));
@@ -342,6 +360,8 @@ mod tests {
         );
         assert_eq!(v["hasCompletedOnboarding"], true);
         assert_eq!(v["projects"]["/w"]["hasTrustDialogAccepted"], true);
+        assert_eq!(v["autoInstallIdeExtension"], false);
+        assert_eq!(v["lspRecommendationDisabled"], true);
         assert_eq!(v["projects"]["/w"]["lastCost"], 1);
         assert_eq!(v["oauthAccount"]["emailAddress"], "x");
         assert_eq!(

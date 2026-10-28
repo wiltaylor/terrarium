@@ -1219,6 +1219,75 @@ build.
 
 ---
 
+## Harness hardening (all harnesses)
+
+The source is `docs/research/harness-hardening.md` (2026-10-28: static
+analysis of the pinned versions, no model turn). Each setting below is
+**read**, not verified with a live run, unless it says so. The goal: no
+feature waits for a human, no plan mode, and no extra tool or
+integration, but the Codex image tool stays.
+
+Two classes:
+
+- **Forced**: Terrarium sets it at each launch (a flag, an env var, or a
+  settings key after the user file). A user file cannot change it. It is
+  forced when an unattended agent needs it: an ask-user tool, a plan mode,
+  a dialog that waits for a key, a trust prompt, or data that leaves the
+  agent (another client can steer it, a session export).
+- **Default**: the packaged file in `defaults/harness/<harness>/`, which
+  the config repo seeds (PLAN §8.3). The operator can change it.
+
+There is no option that turns an ask-user tool or a plan mode on again.
+An operator who needs one must change the adapter (`flags.rs`,
+`config.rs`) and its tests.
+
+| Harness | Forced | Default (tweakable) |
+|---|---|---|
+| Claude Code | `permissions.deny` always holds `AskUserQuestion`, `EnterPlanMode`, `ExitPlanMode`, `ProposeGoal`, `EnterWorktree`, `ExitWorktree` (added to the user's deny list); `modelProposedGoals: "disabled"`; `disableAutoMode: "disable"` (top level and in `permissions`); `askUserQuestionTimeout: "60s"`; `crossSessionInbound: "refuse"`; `autoContinueAtUsageLimit`; `disableClaudeAiConnectors`, `disableRemoteControl`, `remoteControlAtStartup: false`, `autoUploadSessions: false`; `skipDangerousModePermissionPrompt`; `hooks`. Flags `--no-chrome`, `--strict-mcp-config`. Env `DISABLE_UPDATES`, `DISABLE_LOGIN_COMMAND`, `DISABLE_FEEDBACK_COMMAND`, `CLAUDE_CODE_SEND_FEEDBACK=0`, `CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY`, `ENABLE_CLAUDEAI_MCP_SERVERS=false`, `CLAUDE_CODE_DISABLE_CRON`, `CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL`, `DISABLE_INSTALL_GITHUB_APP_COMMAND`, `DISABLE_UPGRADE_COMMAND`, `DISABLE_EXTRA_USAGE_COMMAND`, `CLAUDE_CODE_DISABLE_TERMINAL_TITLE`, `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false`. `.claude.json`: `autoInstallIdeExtension`, `autoConnectIde`, `lspRecommendationDisabled`, `claudeInChromeDefaultEnabled`, `remoteControlAtStartup`, `autoUploadSessions`. **Never** `CLAUDE_CODE_DISABLE_DANGEROUS_RM_TIMEOUT`: the `rm` prompt would wait forever. | The deny list of the other extra tools (`Workflow`, `Artifact`, `ReportFindings`, `SendFeedback`, `PushNotification`, `RemoteTrigger`, `Cron*`, `ScheduleWakeup`, `ClaudeDesign`, `Projects`, `ReadNotifications`, `ShareOnboardingGuide`, `SendUserFile`, `OfferChromeSetup`, `ShowOnboardingRolePicker`); `autoMemoryEnabled`, `autoDreamEnabled`, skill and plugin sync, `enableArtifact`, workflows, agent view, `isolatePeerMachines`, surveys and feedback drafts, prompt suggestions, away summary, notifications, voice, `switchModelsOnFlag: true`, spinner tips, `disableBundledSkills`, `fileCheckpointingEnabled: false`, `includeGitInstructions`, `fastMode`. |
+| Codex | `tools.experimental_request_user_input.enabled = false` (removes `request_user_input` and `request_user_input_async`); `features.default_mode_request_user_input = false`; `include_collaboration_mode_instructions = false`; `tools.update_plan.enabled = false`; `features.goals = false`; `notice.model_migrations` (one inline table, one entry per catalog `upgrade` row); `notice.hide_rate_limit_model_nudge`, `hide_full_access_warning`, `hide_gpt5_1_migration_prompt`; `tui.show_tooltips = false`; `features.apps`, `plugins`, `remote_plugin`, `plugin_sharing`, `tool_suggest`, `skill_mcp_dependency_install`, `memories`, `daemon_auto_start` = false; `features.hooks = true`; with the yolo, trust, hook, update, analytics, feedback, SQLite, and prompt keys of before. Empty `AGENTS.md` and `AGENTS.override.md` over `$CODEX_HOME`. `$CODEX_HOME/generated_images/` is the agent's `<workspace>/generated_images/` (D4). | `features.image_generation = true` (the `image_gen.imagegen` tool stays; it needs a ChatGPT plan login), `web_search = "disabled"`, `agents.enabled = false`, `features.sleep_tool = false`, `features.skill_search = false`, `skills.bundled.enabled = false`, `tui.notifications = false`, `otel.metrics_exporter = "none"`. |
+| Copilot CLI | Flags `--no-ask-user`, `--mode interactive`, `--disable-builtin-mcps` (no `github-mcp-server`, `githubiq`), `--sync-session=off`, with the yolo, update, and telemetry flags of before. Settings `askUser: false`, `defaultMode: "interactive"`, `stayInAutopilot: false`, `defaultPermissionMode: "allow-all"`, `permissions.disableAssistedPermissionsMode`, `shellShortcut: false`, `ide.autoConnect` and `ide.openDiffOnEdit` false, `autoUpdate: false`, `remoteExport: false`, `remoteSessions: false`, `memory: false`, `connectors: false`, `experimental: true`. Env `COPILOT_DISABLE_DESKTOP_NOTIFICATIONS=1`. An empty `copilot-instructions.md` over the shared one. | `banner: "never"`, tips, notifications, beep, terminal title and progress, voice, `continueOnAutoMode: false`, `imageGeneration: false`, the built-in agents and sub-agents, `customAgents.defaultLocalOnly`, the built-in skills, `contextManagementTools: false`, `enabledMcpServers`, `enabledPlugins`. |
+| pi | `lastChangelogVersion`; `doubleEscapeAction: "none"`, `branchSummary.skipPrompt`, `defaultProjectTrust: "never"`, `tuiMode: "regular"`; the flags of before (`--offline`, `--no-extensions`, `--no-mcp`, `--no-skills`, `--no-prompt-templates`, `--no-context-files`, `--no-approve`). B1: empty `SYSTEM.md` and `APPEND_SYSTEM.md` over the shared ones, and the other prompt flag with an empty value. | `enableInstallTelemetry`, `enableAnalytics`, `enableSkillCommands` false, `warnings.anthropicExtraUsage: false`, `cacheWarming: "off"`. |
+
+Not done, because the syntax is not known: the Copilot tool allowlist
+(`--available-tools`) and deny list (`--excluded-tools`). Open question 1
+of the Copilot section of the research.
+
+**Project instructions (D1).** Terrarium uses `AGENTS.md` only. The
+protocol template tells each agent to read `AGENTS.md` in its workspace
+and in each repo. Nothing loads `CLAUDE.md`. Per harness:
+
+| Harness | What loads by itself |
+|---|---|
+| Claude Code | Nothing: `--setting-sources ""` turns off the project source (read in the bundle). Claude Code does not know `AGENTS.md`. |
+| Codex | The `AGENTS.md` of the workspace root, as a user message (also in replace mode). That is the same file that the prompt names, so Terrarium lets it load. The global files of the shared home are empty for agents. A repo's `AGENTS.md` is in a subdirectory of the cwd, so Codex does not load it: the agent reads it. |
+| Copilot CLI | Very likely nothing in replace mode (the custom instructions are a section of the replaced system message; not tested). The global `copilot-instructions.md` is empty for agents. |
+| pi | Nothing: `--no-context-files` (it would also load the shared home's `AGENTS.md`). |
+
+**Turns that start with `/` or `!` (D3).** Each adapter puts U+200B (zero
+width space) in front of a turn whose text starts with `/` or `!` after
+white space; Copilot also for a lone `$`. The harnesses trim white space
+first (pi: `text.trim()` in `setupEditorSubmitHandler`), and U+200B is not
+white space for JavaScript or Rust, so the first character is no command
+prefix. The model reads the same words. The delivery log ignores the
+character when it matches a transcript block. Not tested live: whether a
+harness drops U+200B from a paste. A leader runs a command on purpose with
+a raw send (`terrarium agent send --raw`) or keys (`terrarium agent keys`).
+
+**Dialogs (B2).** The screen detectors also know these dialogs from the
+research. Each string comes from the bundle or the source; no screen was
+captured.
+
+| Harness | Dialog | Marker |
+|---|---|---|
+| Claude Code | usage-limit menu, spend limit, `.mcp.json` approval, Consumer Terms | `Stop and wait for limit to reset`, `Could not update your spend limit`, `Press Enter to retry`, `New MCP server found in this project`, `An update to our Consumer Terms` |
+| Codex | model migration at start, rate-limit popup, Plan-mode question | `enter/esc continue`, `enter/esc confirm`, `· ⌃c quit`, `press enter to confirm`, `Press enter to confirm or esc to go back`, `enter to submit answer` and `tab to add notes` anywhere in a line |
+| Copilot CLI | tool approval, auto-mode switch, folder trust, form | `approve once`, `approve for this session`, `needs approval`, `confirm folder trust`, `ctrl+d decline` |
+| pi | model, session, and tree selectors | `tab scope`, `enter save`, `Delete session?` |
+
+**A question in plain text (D5).** In all four harnesses, a question in
+plain text ends the turn, and the runner sets `idle`. The question guard
+of the daemon (PLAN §8.4) sets `blocked` and mails the lead.
+
 ## Usage probes and login flows
 
 Tested on 2026-10-24 on the same host, against the operator's real logins:

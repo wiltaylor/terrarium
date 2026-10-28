@@ -10,8 +10,24 @@
 //! The base system prompt comes before the template ([`base_prompt`]): the
 //! agent's own `system_prompt`, else its persona (PLAN §8.1,
 //! [`load_persona`]): `leader.md` or `worker.md` by role, or the file that
-//! `persona` names. The prompts dir is the config repo's `prompts/`
-//! (`TERRARIUM_CONFIG_REPO`), unless `TERRARIUM_PROMPTS_DIR` names another.
+//! `persona` names. The harness section (`<prompts dir>/harness/<harness>.md`,
+//! [`load_harness_section`]) comes after it: the tool details of the
+//! harness that a replaced system prompt loses. The prompts dir is the
+//! config repo's `prompts/` (`TERRARIUM_CONFIG_REPO`), unless
+//! `TERRARIUM_PROMPTS_DIR` names another.
+//!
+//! The composed text, in order (PLAN §8.1):
+//!
+//! | The agent | `prompt.md` | Mode |
+//! |---|---|---|
+//! | `system_prompt` set | `system_prompt`, the harness section, the protocol template | replace |
+//! | `system_prompt` set, `persona = "none"` | `system_prompt`, the protocol template | replace |
+//! | a persona (by role or by name) with text | the persona, the harness section, the protocol template | replace |
+//! | `persona = "none"`, or a persona with no text | the protocol template | append |
+//!
+//! The daemon removes HTML comments from the persona and the harness
+//! section. Each part is rendered with the variables below, and a blank
+//! line separates the parts.
 //!
 //! Variables:
 //!
@@ -264,15 +280,61 @@ pub fn load_persona(prompts_dir: &Path, agent: &Agent) -> Result<Option<String>,
     Ok((!text.trim().is_empty()).then(|| text.trim().to_owned()))
 }
 
-/// The base system prompt of `agent`: its own `system_prompt` when it has
-/// one, else its persona ([`load_persona`]). `Some`: the adapter replaces
-/// the harness's default prompt with it, and the protocol template comes
-/// after it ([`compose`]). `None`: the harness keeps its default prompt.
+/// The dir of the harness sections in the prompts dir.
+pub const HARNESS_DIR: &str = "harness";
+
+/// The harness section of `harness`: `<prompts dir>/harness/<harness>.md`
+/// without HTML comments, or `None` when the file is missing or has no
+/// text. It tells the model the tool details of the harness, which a
+/// replaced system prompt loses (`docs/research/harness-hardening.md`).
+pub fn load_harness_section(
+    prompts_dir: &Path,
+    harness: terrarium_core::HarnessId,
+) -> Result<Option<String>, String> {
+    let path = prompts_dir.join(HARNESS_DIR).join(format!("{harness}.md"));
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(format!(
+                "cannot read the harness section {}: {e}",
+                path.display()
+            ));
+        }
+    };
+    let text = strip_comments(&text);
+    Ok((!text.trim().is_empty()).then(|| text.trim().to_owned()))
+}
+
+/// True when the agent says `persona = "none"`.
+fn persona_is_none(agent: &Agent) -> bool {
+    agent.persona.as_deref().map(str::trim) == Some(terrarium_core::config::PERSONA_NONE)
+}
+
+/// The base system prompt of `agent` (the table at the top): its own
+/// `system_prompt` when it has one, else its persona ([`load_persona`]),
+/// then the harness section ([`load_harness_section`]). `persona = "none"`
+/// leaves the harness section out after a `system_prompt`, so a custom
+/// prompt can carry its own tool text. `Some`: the adapter replaces the
+/// harness's default prompt with it, and the protocol template comes after
+/// it ([`compose`]). `None`: the harness keeps its default prompt.
 pub fn base_prompt(prompts_dir: &Path, agent: &Agent) -> Result<Option<String>, String> {
-    match agent.system_prompt.as_deref() {
-        Some(t) if !t.trim().is_empty() => Ok(Some(t.to_owned())),
-        _ => load_persona(prompts_dir, agent),
-    }
+    let (base, with_harness) = match agent.system_prompt.as_deref() {
+        Some(t) if !t.trim().is_empty() => (t.trim_end().to_owned(), !persona_is_none(agent)),
+        _ => match load_persona(prompts_dir, agent)? {
+            Some(p) => (p, true),
+            None => return Ok(None),
+        },
+    };
+    let harness = if with_harness {
+        load_harness_section(prompts_dir, agent.harness)?
+    } else {
+        None
+    };
+    Ok(Some(match harness {
+        Some(h) => format!("{base}\n\n{h}"),
+        None => base,
+    }))
 }
 
 /// The built-in template: the same text as `defaults/prompts/default.md` (a test
@@ -288,8 +350,8 @@ Your roles: {{roles}}.
 
 You run in a sandbox. Your workspace is the current directory. It is also at
 `/work/{{project.name}}/{{agent.name}}`, the same path as on your targets.
-Read `AGENTS.md` and `CLAUDE.md` in your workspace and in each repo yourself:
-the harness may not load them.
+Read `AGENTS.md` in your workspace and in each repo yourself: the harness
+may not load it. A file deeper in the tree wins.
 
 ## Git in the sandbox, builds on a target
 
@@ -580,6 +642,40 @@ mod tests {
         }
     }
 
+    /// The lead templates teach `agent screen`, then `agent keys` and
+    /// `agent send --raw` (D3), with commands that exist.
+    #[test]
+    fn lead_templates_fix_a_stuck_harness() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../defaults/prompts");
+        for (name, who) in [
+            ("project-lead", "<worker>"),
+            ("system-lead", "<project/name>"),
+        ] {
+            let t = load_template(&dir, Some(name)).unwrap().replace('\n', " ");
+            let t = t.split_whitespace().collect::<Vec<_>>().join(" ");
+            for needle in [
+                format!("terrarium agent screen {who}"),
+                format!("`terrarium agent keys {who} esc`"),
+                format!("`terrarium agent send {who} --raw \"/compact\"`"),
+                "Run `agent screen` again after each step.".to_owned(),
+            ] {
+                assert!(t.contains(&needle), "{name}: {needle}");
+            }
+        }
+    }
+
+    /// D1: every template says to read `AGENTS.md`, and none names
+    /// `CLAUDE.md`.
+    #[test]
+    fn templates_name_agents_md_only() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../defaults/prompts");
+        for name in ["default", "project-lead", "system-lead"] {
+            let t = load_template(&dir, Some(name)).unwrap();
+            assert!(t.contains("Read `AGENTS.md` in your workspace"), "{name}");
+            assert!(!t.contains("CLAUDE.md"), "{name}");
+        }
+    }
+
     /// The system lead makes project targets only.
     #[test]
     fn system_lead_template_makes_project_targets_only() {
@@ -729,15 +825,104 @@ mod tests {
         assert_eq!(compose(None, "P", &ctx()), "P");
     }
 
-    /// The packaged personas are placeholders: only a comment, so an agent
-    /// keeps the harness's default prompt until the persona text lands.
+    /// The packaged personas have text: a leader gets `leader.md`, a member
+    /// `worker.md`, each without its comment, then the harness section of
+    /// its harness, then the protocol template.
     #[test]
-    fn packaged_personas_keep_the_harness_prompt_for_now() {
+    fn packaged_personas_are_used_by_role() {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../defaults/prompts");
-        for roles in [vec![], vec![Role::ProjectAdmin]] {
-            assert_eq!(load_persona(&dir, &agent(roles, None, None)).unwrap(), None);
+        let read = |name: &str| {
+            strip_comments(&std::fs::read_to_string(dir.join(name)).unwrap())
+                .trim()
+                .to_owned()
+        };
+        for (roles, file) in [
+            (vec![], "worker.md"),
+            (vec![Role::ProjectAdmin], "leader.md"),
+            (vec![Role::Sysadmin], "leader.md"),
+        ] {
+            let persona = read(file);
+            assert!(!persona.is_empty(), "{file}");
+            assert!(!persona.contains("<!--"), "{file}");
+            // A cap with room, so a persona stays a persona.
+            let words = persona.split_whitespace().count();
+            assert!(words < 900, "{file}: {words} words");
+            for harness in [
+                terrarium_core::HarnessId::Claude,
+                terrarium_core::HarnessId::Codex,
+                terrarium_core::HarnessId::Copilot,
+                terrarium_core::HarnessId::Pi,
+            ] {
+                let mut a = agent(roles.clone(), None, None);
+                a.harness = harness;
+                let base = base_prompt(&dir, &a).unwrap().expect("a persona");
+                let section = read(&format!("harness/{harness}.md"));
+                assert!(!section.is_empty(), "{harness}");
+                assert_eq!(base, format!("{persona}\n\n{section}"), "{harness}");
+                let text = compose(Some(&base), "PROTOCOL", &ctx());
+                assert!(text.ends_with("\n\nPROTOCOL"), "{harness}");
+                assert!(!text.contains("<!--"), "{harness}");
+            }
         }
         assert_eq!(strip_comments("a<!-- x -->b<!-- y"), "ab");
+    }
+
+    /// The composition order: the base (persona or `system_prompt`), the
+    /// harness section, the protocol template. `persona = "none"` drops the
+    /// harness section after a `system_prompt`, and drops the whole base
+    /// without one. The harness section loses its comments.
+    #[test]
+    fn harness_section_comes_between_the_base_and_the_protocol() {
+        let dir = tempfile::tempdir().unwrap();
+        personas(dir.path());
+        let h = dir.path().join(HARNESS_DIR);
+        std::fs::create_dir_all(&h).unwrap();
+        std::fs::write(
+            h.join("claude.md"),
+            "<!-- note -->\nClaude tools for {{agent.name}}.\n",
+        )
+        .unwrap();
+        std::fs::write(h.join("codex.md"), "<!-- only a comment -->\n").unwrap();
+        let d = dir.path();
+        // Persona by role.
+        let a = agent(vec![], None, None);
+        let base = base_prompt(d, &a).unwrap();
+        assert_eq!(
+            base.as_deref(),
+            Some("Work.\n\nClaude tools for {{agent.name}}.")
+        );
+        assert_eq!(
+            compose(base.as_deref(), "P {{project.name}}", &ctx()),
+            "Work.\n\nClaude tools for worker.\n\nP demo"
+        );
+        // The agent's own system_prompt wins over the persona, and keeps
+        // the harness section.
+        let a = agent(vec![Role::ProjectAdmin], None, Some("Own.\n"));
+        assert_eq!(
+            base_prompt(d, &a).unwrap().as_deref(),
+            Some("Own.\n\nClaude tools for {{agent.name}}.")
+        );
+        // `persona = "none"` with a system_prompt: no harness section.
+        let a = agent(vec![], Some("none"), Some("Own."));
+        assert_eq!(base_prompt(d, &a).unwrap().as_deref(), Some("Own."));
+        // `persona = "none"` alone: append mode, no base.
+        let a = agent(vec![], Some("none"), None);
+        assert_eq!(base_prompt(d, &a).unwrap(), None);
+        // A harness section with only a comment, or none: no section.
+        let mut a = agent(vec![], None, None);
+        a.harness = terrarium_core::HarnessId::Codex;
+        assert_eq!(base_prompt(d, &a).unwrap().as_deref(), Some("Work."));
+        a.harness = terrarium_core::HarnessId::Pi;
+        assert_eq!(base_prompt(d, &a).unwrap().as_deref(), Some("Work."));
+        // No persona file and no system_prompt: append mode, also with a
+        // harness section.
+        let empty = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(empty.path().join(HARNESS_DIR)).unwrap();
+        std::fs::write(empty.path().join("harness/claude.md"), "T").unwrap();
+        assert_eq!(
+            base_prompt(empty.path(), &agent(vec![], None, None)).unwrap(),
+            None
+        );
     }
 
     #[test]

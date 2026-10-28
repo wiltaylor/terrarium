@@ -903,7 +903,7 @@ async fn turn(
             );
         }
     }
-    let body = super::agents::SendBody { text };
+    let body = super::agents::SendBody { text, raw: false };
     match super::agents::send(
         State(state.clone()),
         actor,

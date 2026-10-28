@@ -76,6 +76,10 @@ pub struct CopilotFlags {
     pub hook_events: &'static [&'static str],
     /// The `timeoutSec` of each hook entry.
     pub hook_timeout_sec: u32,
+    /// Flags that every launch gets (`docs/research/harness-hardening.md`,
+    /// Copilot CLI, 2a). Each is in `copilot --help` of 1.0.103; a start
+    /// with them is not tested.
+    pub forced_args: &'static [&'static str],
 }
 
 /// Copilot CLI 1.0.x. Measured on 1.0.103 (`docs/compat.md`). Copilot
@@ -103,6 +107,9 @@ pub const COPILOT_1_0: CopilotFlags = CopilotFlags {
         ("COPILOT_AUTO_UPDATE", "false"),
         // Used in every spike run. Not tested alone.
         ("COPILOT_DISABLE_TERMINAL_TITLE", "1"),
+        // No desktop notification (there is no display in the sandbox).
+        // Read in the 1.0.103 bundle.
+        ("COPILOT_DISABLE_DESKTOP_NOTIFICATIONS", "1"),
     ],
     cache_env: "COPILOT_CACHE_HOME",
     pkg_cache_env: "COPILOT_PKG_CACHE_HOME",
@@ -127,4 +134,17 @@ pub const COPILOT_1_0: CopilotFlags = CopilotFlags {
         "ErrorOccurred",
     ],
     hook_timeout_sec: 10,
+    forced_args: &[
+        // D5: no `ask_user` tool (with `"askUser": false` in the settings).
+        "--no-ask-user",
+        // D5: the flag wins over `defaultMode` and, very likely, over the
+        // stored mode of a resumed session: no plan mode, no autopilot.
+        "--mode",
+        "interactive",
+        // No built-in MCP servers (`github-mcp-server`, `githubiq`): no
+        // GitHub API tools with the login token.
+        "--disable-builtin-mcps",
+        // No session export to GitHub for this run.
+        "--sync-session=off",
+    ],
 };

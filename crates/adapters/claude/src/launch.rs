@@ -58,6 +58,37 @@ pub fn settings_json(opts: &ClaudeOptions, agent: &Agent) -> Value {
     for (key, value) in f.quiet_settings {
         root.insert((*key).to_owned(), Value::Bool(*value));
     }
+    for (key, value) in f.forced_string_settings {
+        set_dotted(&mut root, key, Value::String((*value).to_owned()));
+    }
+    // The forced deny rules join the user's deny rules (D5). A user file
+    // cannot take one out: the adapter adds each one again at each start.
+    let permissions = root
+        .entry("permissions")
+        .or_insert_with(|| Value::Object(Map::new()));
+    if !permissions.is_object() {
+        *permissions = Value::Object(Map::new());
+    }
+    if let Value::Object(p) = permissions {
+        let deny = p.entry("deny").or_insert_with(|| Value::Array(Vec::new()));
+        if !deny.is_array() {
+            *deny = Value::Array(Vec::new());
+        }
+        if let Value::Array(list) = deny {
+            for tool in f.forced_deny {
+                if !list.iter().any(|v| v.as_str() == Some(tool)) {
+                    list.push(Value::String((*tool).to_owned()));
+                }
+            }
+        }
+        // An `allow` or `ask` rule for a forced tool would not win over the
+        // deny, but it says the wrong thing: remove it.
+        for kind in ["allow", "ask"] {
+            if let Some(Value::Array(list)) = p.get_mut(kind) {
+                list.retain(|v| !v.as_str().is_some_and(|r| f.forced_deny.contains(&r)));
+            }
+        }
+    }
     for key in f.removed_settings {
         root.remove(*key);
     }
@@ -69,6 +100,27 @@ pub fn settings_json(opts: &ClaudeOptions, agent: &Agent) -> Value {
         }
     }
     Value::Object(root)
+}
+
+/// Set `key` in `root`. A dotted key names a key in an object; a value
+/// on the way that is not an object becomes one.
+fn set_dotted(root: &mut Map<String, Value>, key: &str, value: Value) {
+    match key.split_once('.') {
+        None => {
+            root.insert(key.to_owned(), value);
+        }
+        Some((head, rest)) => {
+            let child = root
+                .entry(head)
+                .or_insert_with(|| Value::Object(Map::new()));
+            if !child.is_object() {
+                *child = Value::Object(Map::new());
+            }
+            if let Value::Object(m) = child {
+                set_dotted(m, rest, value);
+            }
+        }
+    }
 }
 
 /// Build the launch spec. `prompt` is the rendered system prompt text, if
@@ -102,8 +154,11 @@ pub fn build(
     let f = &opts.flags;
     let cwd = opts.harness_cwd(agent);
     let settings = settings_json(opts, agent).to_string();
-    let mut spec = LaunchSpec::new(opts.program.as_str(), cwd)
-        .arg(f.yolo)
+    let mut spec = LaunchSpec::new(opts.program.as_str(), cwd).arg(f.yolo);
+    for a in f.forced_args {
+        spec = spec.arg(*a);
+    }
+    spec = spec
         .arg(f.setting_sources)
         .arg("")
         .arg(f.settings)
@@ -296,7 +351,83 @@ mod tests {
                 "{key} is forced"
             );
             assert!(!f.removed_settings.contains(&key.as_str()), "{key}");
+            assert!(
+                !f.forced_string_settings.iter().any(|(k, _)| k == key),
+                "{key} is forced"
+            );
         }
+        // The packaged deny list holds the tweakable denies only.
+        let deny = v["permissions"]["deny"].as_array().expect("deny list");
+        for t in deny {
+            let t = t.as_str().expect("name");
+            assert!(!f.forced_deny.contains(&t), "{t} is forced");
+        }
+        assert!(deny.iter().any(|t| t == "Workflow"));
+        assert_eq!(v["autoMemoryEnabled"], false);
+    }
+
+    /// D5: the asking tools and plan mode stay off whatever the user file
+    /// says; the user's own deny rules stay.
+    #[test]
+    fn a_user_file_cannot_turn_the_asking_tools_on() {
+        let opts = ClaudeOptions::default();
+        let mut agent = test_agent(None);
+        agent.harness_settings = Some(json!({
+            "permissions": {
+                "deny": ["WebFetch", "AskUserQuestion"],
+                "allow": ["EnterPlanMode", "Bash(ls:*)"],
+                "disableAutoMode": "enable",
+            },
+            "modelProposedGoals": "auto",
+            "disableAutoMode": false,
+            "askUserQuestionTimeout": "never",
+            "autoContinueAtUsageLimit": false,
+            "disableRemoteControl": false,
+            "switchModelsOnFlag": false,
+        }));
+        let spec = build(&opts, &agent, SessionStart::Fresh("x"), None, false);
+        let s: Value = serde_json::from_str(value_after(&spec, "--settings").expect("settings"))
+            .expect("json");
+        let deny: Vec<&str> = s["permissions"]["deny"]
+            .as_array()
+            .expect("deny")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert_eq!(deny[0], "WebFetch");
+        for tool in [
+            "AskUserQuestion",
+            "EnterPlanMode",
+            "ExitPlanMode",
+            "ProposeGoal",
+            "EnterWorktree",
+            "ExitWorktree",
+        ] {
+            assert_eq!(deny.iter().filter(|t| **t == tool).count(), 1, "{tool}");
+        }
+        assert_eq!(s["permissions"]["allow"], json!(["Bash(ls:*)"]));
+        assert_eq!(s["permissions"]["disableAutoMode"], "disable");
+        assert_eq!(s["disableAutoMode"], "disable");
+        assert_eq!(s["modelProposedGoals"], "disabled");
+        assert_eq!(s["askUserQuestionTimeout"], "60s");
+        assert_eq!(s["crossSessionInbound"], "refuse");
+        assert_eq!(s["autoContinueAtUsageLimit"], true);
+        assert_eq!(s["disableRemoteControl"], true);
+        assert_eq!(s["disableClaudeAiConnectors"], true);
+        assert_eq!(s["autoUploadSessions"], false);
+        // A tweakable key passes through.
+        assert_eq!(s["switchModelsOnFlag"], false);
+        // The forced flags and env.
+        let a = args(&spec);
+        assert!(a.contains(&"--no-chrome") && a.contains(&"--strict-mcp-config"));
+        assert_eq!(spec.env["DISABLE_UPDATES"], "1");
+        assert_eq!(spec.env["CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION"], "false");
+        assert_eq!(spec.env["ENABLE_CLAUDEAI_MCP_SERVERS"], "false");
+        assert!(
+            !spec
+                .env
+                .contains_key("CLAUDE_CODE_DISABLE_DANGEROUS_RM_TIMEOUT")
+        );
     }
 
     #[test]

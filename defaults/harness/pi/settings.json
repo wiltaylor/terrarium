@@ -1,1 +1,9 @@
-{}
+{
+  "enableInstallTelemetry": false,
+  "enableAnalytics": false,
+  "enableSkillCommands": false,
+  "warnings": {
+    "anthropicExtraUsage": false
+  },
+  "cacheWarming": "off"
+}

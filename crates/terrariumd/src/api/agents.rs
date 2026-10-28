@@ -25,6 +25,7 @@ pub fn routes() -> Router<Shared> {
         .route("/agents/{id}/stop", post(stop))
         .route("/agents/{id}/restart", post(restart))
         .route("/agents/{id}/send", post(send))
+        .route("/agents/{id}/keys", post(keys))
         .route("/agents/{id}/answer", post(answer))
         .route("/agents/{id}/events", get(streams::agent_events))
         .route("/agents/{id}/pty", get(streams::pty))
@@ -528,6 +529,22 @@ pub(super) async fn restart(
 #[serde(deny_unknown_fields)]
 pub(super) struct SendBody {
     pub(super) text: String,
+    /// Type the text as-is, at once (D3): a leading `/` or `!` runs as a
+    /// harness command. Without it, the turn waits for `idle`, and the
+    /// adapter escapes such a text so that it stays a prompt.
+    #[serde(default)]
+    pub(super) raw: bool,
+}
+
+/// The first word of a raw text for the audit log (`/compact`): at most
+/// 40 characters, never the rest of the text.
+pub fn first_word(text: &str) -> String {
+    text.split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .take(40)
+        .collect()
 }
 
 pub(super) async fn send(
@@ -540,6 +557,9 @@ pub(super) async fn send(
     policy::admin_project(&actor, &a.agent.project, "typing a turn into an agent")?;
     if body.text.trim().is_empty() {
         return Err(ApiError::invalid("the turn text is empty"));
+    }
+    if body.raw {
+        return send_raw(&state, &actor, &a, body.text).await;
     }
     // The delivery log tags the operator's turn in the transcript
     // (`docs/api.md` §6.6). It goes in before the turn is typed.
@@ -572,6 +592,175 @@ pub(super) async fn send(
         })
         .await?;
     Ok((StatusCode::ACCEPTED, Json(json!({"accepted": true}))))
+}
+
+/// `send` with `raw: true`: the supervisor types the text at once, with
+/// no escape. The audit row has the length and the first word only.
+async fn send_raw(
+    state: &Shared,
+    actor: &Actor,
+    a: &AgentView,
+    text: String,
+) -> ApiResult<(StatusCode, Json<serde_json::Value>)> {
+    if text.chars().count() > terrarium_core::display::MAX_TERMINAL_TEXT {
+        return Err(ApiError::invalid(format!(
+            "a raw text has at most {} characters",
+            terrarium_core::display::MAX_TERMINAL_TEXT
+        )));
+    }
+    if !KEY_LIMITER.check(&a.agent.id.to_string(), 1) {
+        return Err(key_limit_error());
+    }
+    let (len, word) = (text.len(), first_word(&text));
+    state
+        .supervisor
+        .send_raw(agent_id(a), text)
+        .await
+        .map_err(supervisor_error)?;
+    let id = a.agent.id.to_string();
+    let project = a.agent.project.clone();
+    state
+        .db
+        .write(actor.label(), move |t| {
+            t.audit(
+                "agent.send_raw",
+                &id,
+                Some(&project),
+                json!({"bytes": len, "first_word": word}),
+            )
+        })
+        .await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({"accepted": true, "raw": true})),
+    ))
+}
+
+/// The pause between two keys of one request. Some TUIs read a lone Esc
+/// that comes right before another key as Alt with that key.
+const KEY_GAP: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// The rate limit of the keys and the raw sends of one agent: at most
+/// [`terrarium_core::display::TERMINAL_KEYS_PER_SEC`] in one second (a
+/// fixed window for each agent).
+#[derive(Debug, Default)]
+pub struct KeyLimiter {
+    windows: std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, u32)>>,
+}
+
+impl KeyLimiter {
+    /// Take `n` keys of `agent`'s window. False: the limit is reached, and
+    /// nothing is taken.
+    pub fn check(&self, agent: &str, n: u32) -> bool {
+        self.check_at(agent, n, std::time::Instant::now())
+    }
+
+    pub fn check_at(&self, agent: &str, n: u32, now: std::time::Instant) -> bool {
+        let second = std::time::Duration::from_secs(1);
+        let mut w = self
+            .windows
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if w.len() > 1024 {
+            w.retain(|_, (start, _)| now.duration_since(*start) < second);
+        }
+        let entry = w.entry(agent.to_owned()).or_insert((now, 0));
+        if now.duration_since(entry.0) >= second {
+            *entry = (now, 0);
+        }
+        if entry.1 + n > terrarium_core::display::TERMINAL_KEYS_PER_SEC {
+            return false;
+        }
+        entry.1 += n;
+        true
+    }
+}
+
+static KEY_LIMITER: std::sync::LazyLock<KeyLimiter> = std::sync::LazyLock::new(KeyLimiter::default);
+
+fn key_limit_error() -> ApiError {
+    ApiError::new(
+        Code::RateLimited,
+        format!(
+            "more than {} keys in one second to this agent; wait, and send fewer keys",
+            terrarium_core::display::TERMINAL_KEYS_PER_SEC
+        ),
+    )
+}
+
+/// `POST /api/agents/{id}/keys`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KeysBody {
+    keys: Vec<String>,
+}
+
+/// `POST /api/agents/{id}/keys` (D3): key presses for the harness TUI, at
+/// once, with no wait for `idle`: the chord names of the display keys
+/// (`esc`, `down`, `enter`, `ctrl-c`, `shift-tab`, `f5`), and `text:<text>`
+/// for literal text ([`terrarium_core::display::TerminalKey`]). The rights
+/// of the PTY attach: project_admin of the agent's project, sysadmin, or
+/// the operator. The audit row names the keys; a text key has its length
+/// only.
+async fn keys(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(id): Path<String>,
+    ApiJson(body): ApiJson<KeysBody>,
+) -> ApiResult<(StatusCode, Json<serde_json::Value>)> {
+    use terrarium_core::display::{MAX_TERMINAL_KEYS, TerminalKey};
+    let a = load(&state, &actor, id).await?;
+    policy::admin_project(
+        &actor,
+        &a.agent.project,
+        "sending keys to an agent terminal",
+    )?;
+    if body.keys.is_empty() {
+        return Err(ApiError::invalid("send at least one key"));
+    }
+    if body.keys.len() > MAX_TERMINAL_KEYS {
+        return Err(ApiError::invalid(format!(
+            "at most {MAX_TERMINAL_KEYS} keys in one request"
+        )));
+    }
+    let parsed = body
+        .keys
+        .iter()
+        .map(|k| TerminalKey::parse(k).map_err(|e| ApiError::invalid(format!("key {k:?}: {e}"))))
+        .collect::<ApiResult<Vec<_>>>()?;
+    let n = u32::try_from(parsed.len()).unwrap_or(u32::MAX);
+    if !KEY_LIMITER.check(&a.agent.id.to_string(), n) {
+        return Err(key_limit_error());
+    }
+    let names: Vec<String> = parsed.iter().map(TerminalKey::audit_name).collect();
+    for (i, k) in parsed.iter().enumerate() {
+        if i > 0 {
+            tokio::time::sleep(KEY_GAP).await;
+        }
+        state
+            .supervisor
+            .write_keys(agent_id(&a), k.bytes())
+            .await
+            .map_err(supervisor_error)?;
+    }
+    let id = a.agent.id.to_string();
+    let project = a.agent.project.clone();
+    let audit_names = names.clone();
+    state
+        .db
+        .write(actor.label(), move |t| {
+            t.audit(
+                "agent.keys",
+                &id,
+                Some(&project),
+                json!({"keys": audit_names}),
+            )
+        })
+        .await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({"accepted": true, "keys": names})),
+    ))
 }
 
 /// `{request_id, answer}` for a known question, or `{text}` for raw keys.
@@ -674,4 +863,32 @@ async fn set_roles(
         })
         .await?;
     Ok(Json(roles))
+}
+
+#[cfg(test)]
+mod key_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn the_key_limit_is_a_window_per_agent() {
+        let l = KeyLimiter::default();
+        let t0 = Instant::now();
+        assert!(l.check_at("a", 15, t0));
+        assert!(l.check_at("a", 5, t0 + Duration::from_millis(500)));
+        // The window is full: nothing is taken.
+        assert!(!l.check_at("a", 1, t0 + Duration::from_millis(900)));
+        // Another agent has its own window.
+        assert!(l.check_at("b", 20, t0));
+        // A new second, a new window.
+        assert!(l.check_at("a", 20, t0 + Duration::from_millis(1000)));
+        assert!(!l.check_at("a", 21, t0 + Duration::from_millis(2500)));
+    }
+
+    #[test]
+    fn the_first_word_is_short() {
+        assert_eq!(first_word("  /compact now please"), "/compact");
+        assert_eq!(first_word(""), "");
+        assert_eq!(first_word(&"x".repeat(100)).len(), 40);
+    }
 }

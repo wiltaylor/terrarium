@@ -110,6 +110,16 @@ pub trait Adapter: Send + Sync {
         bracketed_paste(text)
     }
 
+    /// Keystrokes that type `text` as-is and press Enter, for a leader's
+    /// raw send (`POST /api/agents/{id}/send` with `raw: true`): a slash
+    /// command or a bang command runs. No bracketed paste and no escape
+    /// ([`escape_turn`]). The caller splits the final CR off with
+    /// [`exit_key_writes`] and [`Adapter::exit_key_pause`], as for the exit
+    /// keys. The default is the text, then CR.
+    fn raw_turn_keys(&self, text: &str) -> Vec<u8> {
+        raw_text_keys(text)
+    }
+
     /// Keystrokes that answer the question `request_id`. Empty when the
     /// adapter has no answer path.
     fn answer(&self, _request_id: &str, _answer: &Answer) -> Vec<u8> {
@@ -176,6 +186,53 @@ pub fn exit_key_writes(keys: &[u8], pause: Duration) -> Vec<Vec<u8>> {
 /// Ctrl-U: kill the line before the cursor.
 pub const CTRL_U: u8 = 0x15;
 
+/// The character that [`escape_turn`] puts in front of a turn: U+200B ZERO
+/// WIDTH SPACE. It is not white space for JavaScript `trim()` or for Rust
+/// `char::is_whitespace`, so a harness that trims its input still sees a
+/// first character that is not `/` or `!`. A reader does not see it, and
+/// the words of the turn do not change.
+pub const TURN_ESCAPE: char = '\u{200B}';
+
+/// The first characters that make a harness run typed text as a command:
+/// `/` (a slash command, for example `/plan`) and `!` (a shell command in
+/// Claude Code, Codex, Copilot, and pi).
+pub const COMMAND_PREFIXES: &[char] = &['/', '!'];
+
+/// Escape a turn so that the harness takes it as plain text (D3,
+/// `docs/research/harness-hardening.md`, finding 1). When the text, after
+/// its leading white space, starts with one of `prefixes`, or is exactly one
+/// of `lone` (Copilot opens a shell on a lone `$`), the result is
+/// [`TURN_ESCAPE`] and the text. Other text does not change. The escape
+/// does not change the words that the model reads.
+pub fn escape_turn<'a>(
+    text: &'a str,
+    prefixes: &[char],
+    lone: &[&str],
+) -> std::borrow::Cow<'a, str> {
+    let t = text.trim_start();
+    let command = t.starts_with(prefixes) || lone.contains(&t.trim_end());
+    if command {
+        std::borrow::Cow::Owned(format!("{TURN_ESCAPE}{text}"))
+    } else {
+        std::borrow::Cow::Borrowed(text)
+    }
+}
+
+/// The text with each leading [`TURN_ESCAPE`] removed: the turn as the
+/// sender wrote it.
+pub fn unescape_turn(text: &str) -> &str {
+    text.trim_start_matches(TURN_ESCAPE)
+}
+
+/// The text as keystrokes, then CR. The bracketed-paste markers are
+/// removed: a raw text is typed, not pasted.
+pub fn raw_text_keys(text: &str) -> Vec<u8> {
+    let clean = text.replace("\x1b[200~", "").replace("\x1b[201~", "");
+    let mut out = clean.into_bytes();
+    out.push(b'\r');
+    out
+}
+
 /// Wrap `text` in bracketed-paste markers and add a carriage return.
 pub fn bracketed_paste(text: &str) -> Vec<u8> {
     let mut out = Vec::with_capacity(text.len() + 13);
@@ -217,6 +274,32 @@ mod tests {
     #[test]
     fn bracketed_paste_wraps_text() {
         assert_eq!(bracketed_paste("hi"), b"\x1b[200~hi\x1b[201~\r".to_vec());
+    }
+
+    #[test]
+    fn command_turns_get_the_escape() {
+        let esc = |t| escape_turn(t, COMMAND_PREFIXES, &[]).into_owned();
+        assert_eq!(esc("/plan now"), "\u{200B}/plan now");
+        assert_eq!(esc("  !rm -rf x"), "\u{200B}  !rm -rf x");
+        assert_eq!(esc("\n/compact"), "\u{200B}\n/compact");
+        // Other text does not change.
+        for t in ["New mail from lead (thread T)", "a /b", "", "$", "x!"] {
+            assert_eq!(esc(t), t);
+        }
+        // The lone `$` of Copilot.
+        assert_eq!(escape_turn(" $ ", COMMAND_PREFIXES, &["$"]), "\u{200B} $ ");
+        assert_eq!(escape_turn("$HOME", COMMAND_PREFIXES, &["$"]), "$HOME");
+        // The escape survives the trims of the harnesses.
+        let e = esc("/plan");
+        assert!(!e.trim().starts_with('/'));
+        assert_eq!(unescape_turn(&e), "/plan");
+        assert_eq!(unescape_turn("plain"), "plain");
+    }
+
+    #[test]
+    fn raw_text_is_typed_not_pasted() {
+        assert_eq!(raw_text_keys("/compact"), b"/compact\r".to_vec());
+        assert_eq!(raw_text_keys("a\x1b[201~b"), b"ab\r".to_vec());
     }
 
     #[test]

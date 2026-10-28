@@ -68,16 +68,38 @@ pub async fn agent(ctx: &Ctx, cmd: &AgentCmd) -> anyhow::Result<()> {
         AgentCmd::Start { agent, no_wait } => lifecycle(ctx, agent, "start", *no_wait).await,
         AgentCmd::Stop { agent, no_wait } => lifecycle(ctx, agent, "stop", *no_wait).await,
         AgentCmd::Restart { agent, no_wait } => lifecycle(ctx, agent, "restart", *no_wait).await,
-        AgentCmd::Send { agent, text } => {
+        AgentCmd::Send { agent, text, raw } => {
             let text = ctx.text(text)?;
+            let mut body = json!({"text": text});
+            if *raw {
+                body["raw"] = json!(true);
+            }
+            let r = ctx
+                .api
+                .post(&format!("{}/send", agent_path(agent)), Some(body))
+                .await?;
+            let what = if *raw {
+                "typed raw text into"
+            } else {
+                "sent a turn to"
+            };
+            ctx.emit(&r, |c, _| c.line(format!("{what} {agent}")))
+        }
+        AgentCmd::Keys { agent, keys } => {
             let r = ctx
                 .api
                 .post(
-                    &format!("{}/send", agent_path(agent)),
-                    Some(json!({"text": text})),
+                    &format!("{}/keys", agent_path(agent)),
+                    Some(json!({"keys": keys})),
                 )
                 .await?;
-            ctx.emit(&r, |c, _| c.line(format!("sent a turn to {agent}")))
+            ctx.emit(&r, |c, v| {
+                let names: Vec<&str> = v["keys"]
+                    .as_array()
+                    .map(|a| a.iter().filter_map(Value::as_str).collect())
+                    .unwrap_or_default();
+                c.line(format!("sent {} to {agent}", names.join(" ")))
+            })
         }
         AgentCmd::Answer(a) => answer(ctx, a).await,
         AgentCmd::Logs {

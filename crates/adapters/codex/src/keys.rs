@@ -24,7 +24,16 @@ pub const CLEAR_LINES: usize = 64;
 /// early and turn the rest of the text into keystrokes.
 pub fn type_turn(text: &str) -> Vec<u8> {
     let clean = text.replace(PASTE_START, "").replace(PASTE_END, "");
-    bracketed_paste(&clean)
+    bracketed_paste(&escape(&clean))
+}
+
+/// The turn as plain text (D3): Codex runs a text that starts with `/` as a slash command (`/plan`
+/// enters Plan mode) and a text that starts with `!` as a shell command. A turn that starts with one of them
+/// (after white space) gets [`terrarium_core::adapter::TURN_ESCAPE`] in
+/// front, so it stays a prompt for the model. A leader runs a command on
+/// purpose with a raw send (`terrarium agent send --raw`).
+pub fn escape(text: &str) -> std::borrow::Cow<'_, str> {
+    terrarium_core::adapter::escape_turn(text, terrarium_core::adapter::COMMAND_PREFIXES, &[])
 }
 
 /// Answer a dialog on the screen. Not tested on Codex: in yolo mode with
@@ -98,5 +107,22 @@ mod tests {
         assert_eq!(&clear[..2], &[0x15, 0x7f]);
         assert!(!clear.contains(&0x1b) && !clear.contains(&0x03));
         assert_eq!(exit(), b"/exit\r".to_vec());
+    }
+
+    /// D3: a turn that starts with a command prefix stays plain text.
+    #[test]
+    fn command_prefixes_are_escaped() {
+        for t in ["/plan now", "!ls", "  /exit"] {
+            let typed = type_turn(t);
+            let body = &typed[6..typed.len() - 7];
+            let text = std::str::from_utf8(body).expect("utf8");
+            assert!(text.starts_with('\u{200B}'), "{t}: {text:?}");
+            assert_eq!(&text['\u{200B}'.len_utf8()..], t);
+        }
+        assert_eq!(
+            type_turn("New mail"),
+            b"\x1b[200~New mail\x1b[201~\r".to_vec()
+        );
+        assert_eq!(escape("a /b"), "a /b");
     }
 }

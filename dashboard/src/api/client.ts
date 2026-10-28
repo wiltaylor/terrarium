@@ -209,6 +209,10 @@ export interface Api {
     stop(id: string): Promise<Agent>;
     restart(id: string): Promise<Agent>;
     send(id: string, text: string): Promise<{ accepted: boolean }>;
+    /** `POST /api/agents/{id}/send` with `raw: true` (docs/api.md §6.5): typed as-is, at once; a `/` or `!` command runs. project_admin, sysadmin, or the operator. */
+    sendRaw(id: string, text: string): Promise<{ accepted: boolean; raw: boolean }>;
+    /** `POST /api/agents/{id}/keys` (docs/api.md §6.5): key presses (`esc`, `down`, `enter`, `ctrl-c`, `text:<text>`), at most 20 a second. */
+    keys(id: string, keys: string[]): Promise<{ accepted: boolean; keys: string[] }>;
     answer(id: string, body: { request_id: string; answer: unknown } | { text: string }): Promise<{ accepted: boolean }>;
     events(id: string, q?: EventQuery): Promise<Page<AgentEvent>>;
     sessions(id: string, q?: PageQuery): Promise<Page<Session>>;
@@ -644,6 +648,8 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       stop: (id) => post(`${a(id)}/stop`),
       restart: (id) => post(`${a(id)}/restart`),
       send: (id, text) => post(`${a(id)}/send`, { text }),
+      sendRaw: (id, text) => post(`${a(id)}/send`, { text, raw: true }),
+      keys: (id, keys) => post(`${a(id)}/keys`, { keys }),
       answer: (id, body) => post(`${a(id)}/answer`, body),
       events: (id, q = {}) => page(`${a(id)}/events`, { ...q }),
       sessions: (id, q = {}) => page(`${a(id)}/sessions`, { ...q }),

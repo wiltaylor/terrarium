@@ -3297,6 +3297,57 @@ impl Supervisor for RunnerSupervisor {
         })
     }
 
+    fn send_raw(&self, agent: AgentId, text: String) -> BoxFuture<'_, Result<(), SupervisorError>> {
+        Box::pin(async move {
+            let (runner, harness) = {
+                let slots = lock(&self.inner.slots);
+                let slot = slots
+                    .get(&agent)
+                    .ok_or(SupervisorError::NotRunning(agent))?;
+                (
+                    slot.runner
+                        .clone()
+                        .ok_or(SupervisorError::NotRunning(agent))?,
+                    slot.agent.harness,
+                )
+            };
+            let adapter = self.entry(harness)?.adapter;
+            let pause = adapter.exit_key_pause();
+            let writes =
+                terrarium_core::adapter::exit_key_writes(&adapter.raw_turn_keys(&text), pause);
+            for (i, w) in writes.iter().enumerate() {
+                if i > 0 {
+                    tokio::time::sleep(pause).await;
+                }
+                runner.write(w).await.map_err(|e| match e {
+                    terrarium_runner::RunnerError::Exited
+                    | terrarium_runner::RunnerError::Disconnected => {
+                        SupervisorError::NotRunning(agent)
+                    }
+                    e => other(e),
+                })?;
+            }
+            Ok(())
+        })
+    }
+
+    fn write_keys(
+        &self,
+        agent: AgentId,
+        bytes: Vec<u8>,
+    ) -> BoxFuture<'_, Result<(), SupervisorError>> {
+        Box::pin(async move {
+            let runner = self
+                .runner(agent)
+                .ok_or(SupervisorError::NotRunning(agent))?;
+            runner.write(&bytes).await.map_err(|e| match e {
+                terrarium_runner::RunnerError::Exited
+                | terrarium_runner::RunnerError::Disconnected => SupervisorError::NotRunning(agent),
+                e => other(e),
+            })
+        })
+    }
+
     fn answer(
         &self,
         agent: AgentId,

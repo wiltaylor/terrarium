@@ -48,7 +48,13 @@ use terrarium_core::ScreenHint;
 use terrarium_core::adapter::Screen;
 
 /// Key hints of pi's dialogs and extension UI prompts.
-pub const DIALOG_MARKERS: [&str; 7] = [
+///
+/// The last three come from `docs/research/harness-hardening.md` (pi, 5),
+/// read in the 1.4.0 source, not captured (B2): the model and session
+/// selectors (`keyHint("tui.input.tab", "scope")`), the tree selector
+/// (`keyHint("tui.select.confirm", "save")`), and the delete question of
+/// the session selector.
+pub const DIALOG_MARKERS: [&str; 10] = [
     "↑↓ navigate",
     "enter select",
     "enter submit",
@@ -56,6 +62,9 @@ pub const DIALOG_MARKERS: [&str; 7] = [
     "escape/ctrl+c cancel",
     "[y/N]",
     "[Y/n]",
+    "tab scope",
+    "enter save",
+    "Delete session?",
 ];
 
 /// The default working message in the top rule.
@@ -373,6 +382,24 @@ mod tests {
             let mut parser = vt100::Parser::new(rows, 120, 0);
             parser.process(lines.join("\r\n").as_bytes());
             assert_eq!(screen_hint(parser.screen()), want, "{name}");
+        }
+    }
+
+    /// B2: the selectors that the research found are questions, in the box
+    /// and with no box.
+    #[test]
+    fn research_selectors_are_questions() {
+        let rule = "─".repeat(40);
+        for line in [
+            "tab scope (all/scoped)",
+            "tab scope · re:<pattern> regex · \"phrase\" exact",
+            "  enter save  escape/ctrl+c cancel",
+            "Delete session? enter confirm · escape cancel",
+        ] {
+            let in_box = [rule.as_str(), line, rule.as_str(), "~/work"];
+            assert_eq!(screen_state(&in_box).hint(), Question, "{line}");
+            let no_box = ["pi", line];
+            assert_eq!(screen_state(&no_box).hint(), Question, "{line}");
         }
     }
 }

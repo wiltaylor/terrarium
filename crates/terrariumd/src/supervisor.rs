@@ -207,6 +207,33 @@ pub trait Supervisor: Send + Sync + 'static {
     /// Type `text` into the harness as one turn.
     fn send_turn(&self, agent: AgentId, text: String)
     -> BoxFuture<'_, Result<(), SupervisorError>>;
+    /// Type `text` as-is into the harness, then Enter, at once (D3, a
+    /// leader's raw send): no escape of a leading `/` or `!`, no bracketed
+    /// paste, and no wait for `idle`. A slash command or a bang command
+    /// runs. The Enter goes after the adapter's exit-key pause
+    /// (`Adapter::raw_turn_keys`, `exit_key_writes`). The default cannot.
+    fn send_raw(&self, agent: AgentId, text: String) -> BoxFuture<'_, Result<(), SupervisorError>> {
+        let _ = (agent, text);
+        Box::pin(async {
+            Err(SupervisorError::Unsupported(
+                "this supervisor cannot type raw text".into(),
+            ))
+        })
+    }
+    /// Write `bytes` (key presses) to the agent's PTY at once (D3, `POST
+    /// /api/agents/{id}/keys`). The default cannot.
+    fn write_keys(
+        &self,
+        agent: AgentId,
+        bytes: Vec<u8>,
+    ) -> BoxFuture<'_, Result<(), SupervisorError>> {
+        let _ = (agent, bytes);
+        Box::pin(async {
+            Err(SupervisorError::Unsupported(
+                "this supervisor cannot send keys".into(),
+            ))
+        })
+    }
     /// Answer a question the harness asked (the agent is `blocked`).
     fn answer(
         &self,
@@ -352,6 +379,8 @@ mod fake {
         screen: Vec<u8>,
         /// `screen` answers as an old runner does.
         old_runner: bool,
+        /// The bytes of `send_raw` and `write_keys`, in order.
+        typed: Vec<u8>,
     }
 
     #[derive(Default)]
@@ -572,6 +601,33 @@ mod fake {
             }
         }
 
+        /// Emit a harness event of `agent`, as a runner does. For tests.
+        pub fn emit_harness(&self, agent: AgentId, event: Event) {
+            self.emit(agent, SupervisorEventKind::Harness(event));
+        }
+
+        /// The bytes that `send_raw` and `write_keys` wrote to the agent.
+        /// For tests.
+        pub fn typed(&self, agent: AgentId) -> Vec<u8> {
+            self.lock()
+                .agents
+                .get(&agent)
+                .map(|a| a.typed.clone())
+                .unwrap_or_default()
+        }
+
+        fn type_bytes(&self, agent: AgentId, bytes: &[u8]) -> Result<(), SupervisorError> {
+            let mut inner = self.lock();
+            match inner.agents.get_mut(&agent) {
+                Some(a) if a.status.is_live() => {
+                    a.typed.extend_from_slice(bytes);
+                    a.screen.extend_from_slice(bytes);
+                    Ok(())
+                }
+                _ => Err(SupervisorError::NotRunning(agent)),
+            }
+        }
+
         /// Make `screen` answer as a runner without the `screen` call. For
         /// tests.
         pub fn set_old_runner(&self, agent: AgentId) {
@@ -757,6 +813,24 @@ mod fake {
                 }
                 Ok(())
             })
+        }
+
+        /// The text as the default `Adapter::raw_turn_keys` types it.
+        fn send_raw(
+            &self,
+            agent: AgentId,
+            text: String,
+        ) -> BoxFuture<'_, Result<(), SupervisorError>> {
+            let bytes = terrarium_core::adapter::raw_text_keys(&text);
+            Box::pin(async move { self.type_bytes(agent, &bytes) })
+        }
+
+        fn write_keys(
+            &self,
+            agent: AgentId,
+            bytes: Vec<u8>,
+        ) -> BoxFuture<'_, Result<(), SupervisorError>> {
+            Box::pin(async move { self.type_bytes(agent, &bytes) })
         }
 
         fn answer(

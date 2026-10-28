@@ -21,7 +21,7 @@
 #   host-build   static musl terrarium-host, for `just host::build` and for the
 #                runtime's /opt/terrarium/dist (GET /install/terrarium-host)
 #   host-export  scratch stage that holds only the host binary, for `--output`
-#   runtime      Debian slim + Node and npm, bubblewrap, git, ssh, python3 (no harness),
+#   runtime      Debian slim + Node and npm, bubblewrap, git, ssh, python3, ripgrep (no harness),
 #                and the static terrarium-host with its SHA-256 for the host installer
 
 ARG RUST_IMAGE=rust:1.97-trixie
@@ -86,6 +86,7 @@ RUN apt-get update \
         openssh-client \
         procps \
         python3 \
+        ripgrep \
         tini \
     && rm -rf /var/lib/apt/lists/*
 

@@ -393,7 +393,10 @@ async fn fake_supervisor_status_flow() {
     td.post(&format!("/api/agents/{id}/send"), json!({"text": "do it"}))
         .await
         .ok();
-    td.wait_status(&id, "working").await;
+    // The fake turn is `working` only for the supervisor's short delay;
+    // under load a poll of the current status can miss it, so read the
+    // status events, which keep each change.
+    wait_status_event(&td, &id, "working").await;
     td.wait_status(&id, "idle").await;
     td.post(&format!("/api/agents/{id}/answer"), json!({"text": "y"}))
         .await
@@ -875,4 +878,22 @@ async fn removed_file_agent_is_stopped_and_trashed_on_reload() {
         std::fs::read(trash[0].join("private/events.jsonl")).unwrap(),
         b"{}\n"
     );
+}
+
+/// Poll the `status` events of `id` until one has `status`.
+async fn wait_status_event(td: &TestDaemon, id: &str, status: &str) {
+    for _ in 0..500 {
+        let ev = td
+            .get(&format!("/api/agents/{id}/events?kind=status"))
+            .await;
+        if ev
+            .body
+            .as_array()
+            .is_some_and(|a| a.iter().any(|e| e["data"]["status"] == status))
+        {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("agent {id} has no `{status}` status event");
 }

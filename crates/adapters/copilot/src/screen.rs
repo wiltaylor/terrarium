@@ -44,7 +44,13 @@ use terrarium_core::adapter::Screen;
 
 /// Key hints of dialogs, in lower case. A line matches when its lower-case
 /// text contains one.
-pub const DIALOG_MARKERS: [&str; 10] = [
+///
+/// The last five come from `docs/research/harness-hardening.md` (Copilot
+/// CLI, 1a and 5), read in the 1.0.103 bundle, not captured (B2): the tool
+/// approval ("Approve once / Approve for this session"), the auto-mode
+/// switch on a rate limit ("Needs approval"), the folder trust, and the
+/// decline key of a form.
+pub const DIALOG_MARKERS: [&str; 15] = [
     "↑/↓ to navigate",
     "↑/↓ navigate",
     "↑/↓ to select",
@@ -55,6 +61,11 @@ pub const DIALOG_MARKERS: [&str; 10] = [
     "enter accept",
     "enter to confirm",
     "enter confirm",
+    "approve once",
+    "approve for this session",
+    "needs approval",
+    "confirm folder trust",
+    "ctrl+d decline",
 ];
 
 /// The footer text that shows while a turn runs and a tool is active.
@@ -434,5 +445,22 @@ mod tests {
         let mut parser = parse(&lines, &[]);
         parser.process(b"\x1b[2;3H\x1b[2mAsk anything\x1b[22m");
         assert_eq!(screen_hint(parser.screen()), ScreenHint::PromptReady);
+    }
+
+    /// B2: the dialogs that the research found in the bundle are questions.
+    #[test]
+    fn research_dialogs_are_questions() {
+        for line in [
+            "  1. Approve once",
+            "  2. Approve for this session",
+            "  Rate limit reached · Needs approval to switch to Auto",
+            "Confirm folder trust",
+            " ↑/↓ select · enter accept · ctrl+d decline · esc cancel",
+        ] {
+            assert!(dialog_marker(line).is_some(), "{line}");
+            let st = screen_state(&["Copilot", line], None);
+            assert_eq!(st.hint(), ScreenHint::Question, "{line}");
+        }
+        assert!(dialog_marker("I approve of this plan").is_none());
     }
 }

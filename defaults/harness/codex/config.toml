@@ -3,16 +3,49 @@
 # The daemon reads this file at each agent start and gives each key to
 # Codex as a `-c key=value` override, on top of the shared
 # $CODEX_HOME/config.toml. A per-agent option (the agent's `model`) and the
-# keys that Terrarium forces win over this file: the yolo flags, `hooks`,
-# `projects` (the workspace trust), `sqlite_home`, `tui.resume_cwd`,
-# `check_for_update_on_startup`, `analytics`, `feedback`, `sandbox_mode`,
-# `approval_policy`, `model_instructions_file`, and
-# `developer_instructions`. Terrarium drops those keys from this file.
+# keys that Terrarium forces win over this file. Terrarium drops the
+# forced keys from this file:
+#
+# - the yolo flags, `hooks`, `projects` (the workspace trust),
+#   `sqlite_home`, `tui.resume_cwd`, `check_for_update_on_startup`,
+#   `analytics`, `feedback`, `sandbox_mode`, `approval_policy`,
+#   `model_instructions_file`, `developer_instructions`;
+# - the ask-user tools and the plan text (`tools.experimental_request_user_input`,
+#   `features.default_mode_request_user_input`,
+#   `include_collaboration_mode_instructions`, `tools.update_plan`),
+#   `features.goals`, the start-up notices (`notice.*`, `tui.show_tooltips`),
+#   apps, plugins, tool suggestions, MCP install prompts, memories, the
+#   app-server daemon, and `features.hooks`.
+#
+# docs/compat.md ("Harness hardening") lists them with the reason.
 #
 # A file that does not parse stops the agent start with the line number.
-#
-# Examples (not active):
-#
-# model_reasoning_effort = "medium"
-# [tui]
-# notifications = false
+# The keys below are defaults: change them here.
+
+# Web search. "cached" or "live" allows it.
+web_search = "disabled"
+
+[features]
+# The `image_gen.imagegen` tool. It needs a ChatGPT plan login (not Free,
+# not an API key). Each agent's images go to `generated_images/` in its
+# workspace.
+image_generation = true
+# The `sleep` tool of the gpt-6 models: no long sleeps in a worker.
+sleep_tool = false
+# Shadow-mode metrics only.
+skill_search = false
+
+[agents]
+# No sub-agent tools.
+enabled = false
+
+[skills.bundled]
+# No bundled skills (imagegen, openai-docs, review-agent, skill-creator,
+# skill-installer). The image tool stays.
+enabled = false
+
+[tui]
+notifications = false
+
+[otel]
+metrics_exporter = "none"

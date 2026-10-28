@@ -18,6 +18,8 @@
 //! | `codex/session_index.jsonl` | bound over `$CODEX_HOME/session_index.jsonl` |
 //! | `codex/shell_snapshots/` | bound over `$CODEX_HOME/shell_snapshots/` |
 //! | `codex/sqlite/` | bound over itself, read-write; `-c sqlite_home` names it (see [`crate::launch`]) |
+//! | `codex/AGENTS.md`, `codex/AGENTS.override.md` | empty; bound read-only over the same files in `$CODEX_HOME` |
+//! | `<workspace>/generated_images/` | bound read-write over `$CODEX_HOME/generated_images/` (D4) |
 //!
 //! # What Codex writes into its home, and where it goes
 //!
@@ -42,6 +44,9 @@
 //! | `config.toml` | shared | the operator's settings (model, providers). Codex writes `[tui]` keys into it on the first start. Trust comes from `-c`, so no agent writes a trust decision. |
 //! | `version.json`, `models_cache.json`, `installation_id`, `cache/`, `skills/`, `plugins/` | shared | caches of public data. The update check is off. |
 //! | `packages/`, `app-server-daemon/` | not used | only the app-server daemon writes them; `--no-daemon` keeps it off. |
+//!
+//! | `AGENTS.md`, `AGENTS.override.md` | per-agent, empty | the operator's global instructions. Codex loads them in every session, also with a Terrarium prompt in replace mode. They stay out of agents, as for the other harnesses (PLAN §8, the AGENTS.md rule). Codex still loads the `AGENTS.md` of the workspace root. |
+//! | `generated_images/<session>/<call>.png` | per-agent, in the workspace | the images of the `image_gen.imagegen` tool (save root `$CODEX_HOME`). Shared, the images of all agents mix, and an agent can read the images of the others. The bind puts them in `<workspace>/generated_images/`, where the agent and its targets find them as files. The workspace root is not a repository, so no `.gitignore` is needed; an image is often a result to keep. |
 //!
 //! Not handled: `notify` and other programs in the shared `config.toml`
 //! run in every agent.
@@ -70,6 +75,12 @@ pub const SQLITE_DIR: &str = "sqlite";
 pub const PROMPT_FILE: &str = "prompt.md";
 /// A hook file with no hooks, in the format of the operator's file.
 pub const EMPTY_HOOKS: &str = "{\n  \"hooks\": {}\n}\n";
+/// The global instruction files in the Codex home. Each agent gets empty
+/// ones.
+pub const GLOBAL_INSTRUCTION_FILES: &[&str] = &["AGENTS.md", "AGENTS.override.md"];
+/// The directory of the generated images, in the Codex home and in the
+/// agent's workspace (D4).
+pub const IMAGES_DIR: &str = "generated_images";
 
 /// `/state/agents/<ulid>/harness`: the directory of the per-agent harness
 /// files, next to the workspace. The sandbox binds it read-only at the
@@ -111,6 +122,11 @@ pub fn history_path(agent: &Agent) -> PathBuf {
 /// harness dir at the same path, so this path is the same inside.
 pub fn sqlite_dir(agent: &Agent) -> PathBuf {
     codex_dir(agent).join(SQLITE_DIR)
+}
+
+/// The agent's own image directory, in its workspace (the daemon's view).
+pub fn images_dir(agent: &Agent) -> PathBuf {
+    agent.workspace.join(IMAGES_DIR)
 }
 
 /// Read the rendered prompt. A missing file means "no prompt".
@@ -201,7 +217,28 @@ pub fn materialize(
         target: sqlite,
         writable: true,
     };
-    Ok(vec![history, hooks, sessions, index, snapshots, sqlite])
+    let mut overlays = vec![history, hooks, sessions, index, snapshots, sqlite];
+
+    // No global instructions of the operator: empty files, written again
+    // at each start.
+    for name in GLOBAL_INSTRUCTION_FILES {
+        write_atomic(&dir.join(name), b"")?;
+        overlays.push(file_overlay(
+            &dir.join(name),
+            &home.join(name),
+            "",
+            opts.codex_home.join(name),
+            false,
+        )?);
+    }
+
+    // D4: the generated images go to the agent's workspace.
+    overlays.push(dir_overlay(
+        &images_dir(agent),
+        &home.join(IMAGES_DIR),
+        opts.codex_home.join(IMAGES_DIR),
+    )?);
+    Ok(overlays)
 }
 
 /// A read-write per-agent directory over `target`. Both the agent's
@@ -297,8 +334,26 @@ mod tests {
                     true
                 ),
                 (own.join("sqlite"), own.join("sqlite"), true),
+                (
+                    own.join("AGENTS.md"),
+                    PathBuf::from("/auth/codex/AGENTS.md"),
+                    false
+                ),
+                (
+                    own.join("AGENTS.override.md"),
+                    PathBuf::from("/auth/codex/AGENTS.override.md"),
+                    false
+                ),
+                (
+                    agent.workspace.join("generated_images"),
+                    PathBuf::from("/auth/codex/generated_images"),
+                    true
+                ),
             ]
         );
+        // D4: the images dir is in the workspace, made at the start.
+        assert!(images_dir(&agent).is_dir());
+        assert_eq!(fs::read(own.join("AGENTS.md")).expect("agents"), b"");
         // Each source and each mount point in the shared home exists, with
         // the same kind (file or directory).
         for o in overlays
@@ -344,6 +399,27 @@ mod tests {
                 .unwrap_or_else(|| panic!("{own_path} must be per agent"));
             assert!(o.source.starts_with(&own), "{own_path}");
         }
+    }
+
+    /// The operator's global `AGENTS.md` stays in the shared home, and the
+    /// agent sees an empty file over it.
+    #[test]
+    fn the_global_agents_md_is_empty_for_the_agent() {
+        let (_tmp, home, agent) = setup();
+        fs::write(home.join("AGENTS.md"), "operator rules").expect("w");
+        let overlays = materialize(&CodexOptions::default(), &agent, &home, None).expect("mat");
+        let o = overlays
+            .iter()
+            .find(|o| o.target == Path::new("/auth/codex/AGENTS.md"))
+            .expect("overlay");
+        assert_eq!(fs::read(&o.source).expect("own"), b"");
+        assert!(!o.writable);
+        assert_eq!(
+            fs::read_to_string(home.join("AGENTS.md")).expect("shared"),
+            "operator rules"
+        );
+        assert!(home.join("AGENTS.override.md").is_file());
+        assert!(home.join("generated_images").is_dir());
     }
 
     #[test]

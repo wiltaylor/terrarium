@@ -383,11 +383,33 @@ pub enum AgentCmd {
         #[arg(long)]
         no_wait: bool,
     },
-    /// Type one turn into the agent
+    /// Type one turn into the agent. Without `--raw`, the turn waits for
+    /// the agent to be idle, and a text that starts with `/` or `!` stays
+    /// plain text for the model
     Send {
         agent: String,
         /// The text, or `-` for stdin
         text: String,
+        /// Type the text as-is, at once: a harness command such as
+        /// `/compact` runs. For leaders (project_admin of the agent's
+        /// project, sysadmin, or the operator) to run a harness command or
+        /// fix a stuck harness. Run `terrarium agent screen <agent>` first
+        /// and after
+        #[arg(long)]
+        raw: bool,
+    },
+    /// Send key presses to the agent's harness terminal, at once: `esc`,
+    /// `up`, `down`, `enter`, `tab`, `shift-tab`, `backspace`, `ctrl-c`,
+    /// `f1`..`f12`, `pageup`, `home`, a letter, or `text:<text>` for
+    /// literal text. For leaders (project_admin of the agent's project,
+    /// sysadmin, or the operator) to close a dialog or leave a wrong mode.
+    /// Run `terrarium agent screen <agent>` first and after. At most 20
+    /// keys in one second
+    Keys {
+        agent: String,
+        /// The keys, in order
+        #[arg(required = true, num_args = 1..)]
+        keys: Vec<String>,
     },
     /// Answer the agent's open question
     Answer(AnswerArgs),

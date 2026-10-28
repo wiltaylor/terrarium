@@ -284,7 +284,8 @@ methods:
 | `id` | The `harness` of each `HookPayload`, and `whoami`. |
 | `hook_event` | Turns each hook message into events. These events drive the status machine. |
 | `screen_hint` | Tells when the prompt is ready, when a question shows, and when a typed turn went in (`Busy`). |
-| `type_turn` | The keystrokes for a turn. |
+| `type_turn` | The keystrokes for a turn. Each adapter escapes a text that starts with `/` or `!` (`terrarium_core::adapter::escape_turn`, PLAN §8.4), so the harness does not run it as a command. |
+| `raw_turn_keys` | Not used by the runner. The daemon's raw send (`POST /api/agents/{id}/send` with `raw: true`) types these keys with `Runner::write`, with no escape and no paste. The final CR goes after `exit_key_pause`. |
 | `answer` | The keystrokes for `Runner::answer`. |
 | `clear_input_keys` | The keystrokes that empty the input line before a retry. The runner sends them only when no prompt-submit hook and no busy screen came. |
 | `is_system_prompt` | True for a prompt-submit hook of a prompt that the harness made itself. Such a hook does not confirm a delivery and is not a `TurnStart` (see "Typing a turn"). The default is false. Copilot implements it. |

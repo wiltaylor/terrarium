@@ -29,6 +29,7 @@ pub mod password;
 pub mod policy;
 pub mod probes;
 pub mod prompt;
+pub mod question_guard;
 pub mod quota_policy;
 pub mod runner_supervisor;
 pub mod sandbox;
@@ -192,6 +193,7 @@ pub async fn start_with_usage(
     let mut tasks = Vec::new();
     tasks.push(spawn_pump(state.clone()));
     tasks.push(usage_collector::spawn(state.clone()));
+    tasks.extend(question_guard::spawn(state.clone()));
     state.supervisor.bind(&state);
 
     let report = apply_definitions(&state, defs, errors, "system".into())

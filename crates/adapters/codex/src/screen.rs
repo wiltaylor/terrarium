@@ -85,6 +85,16 @@ fn starts_with_word(rest: &str, word: &str) -> bool {
 /// (trust), "enter confirm · esc skip" (hook review), "enter continue ·
 /// esc use session · ctrl+c quit" (resume cwd), "r retry f fork
 /// esc/ctrl+c/q exit" (open in another app).
+///
+/// And the footers that `docs/research/harness-hardening.md` (Codex, 5)
+/// read in the 0.164.0 source and snapshots (B2): the model-migration
+/// prompt at start ("enter/esc continue · ⌃c quit", or "enter/esc
+/// confirm"), the rate-limit switch popup ("Press enter to confirm or esc
+/// to go back"), and the Plan-mode question ("tab to add notes | enter to
+/// submit answer | ←/→ to navigate questions | esc to interrupt", and
+/// "enter to submit answer | esc to interrupt"). The question footer has
+/// "esc to interrupt" too, so it must win over the busy line: a dialog
+/// wins in [`ScreenState::hint`].
 pub fn dialog_hint(line: &str) -> bool {
     let l = line.to_lowercase();
     let t = l.trim_start();
@@ -93,6 +103,9 @@ pub fn dialog_hint(line: &str) -> bool {
         "enter confirm",
         "enter to select",
         "enter to submit",
+        "enter/esc continue",
+        "enter/esc confirm",
+        "press enter to confirm",
     ]
     .iter()
     .any(|w| starts_with_word(t, w))
@@ -101,6 +114,10 @@ pub fn dialog_hint(line: &str) -> bool {
             "· esc skip",
             "· esc cancel",
             "· esc use session",
+            "· ⌃c quit",
+            "enter to submit answer",
+            "tab to add notes",
+            "press enter to confirm or esc to go back",
         ]
         .iter()
         .any(|m| l.contains(m))
@@ -372,6 +389,35 @@ mod tests {
         let lines: Vec<&str> = status.lines().collect();
         let st = screen_state(&lines, None);
         assert!(st.input_box && !st.busy && st.dialog.is_none());
+    }
+
+    /// B2: the footers from the research, as the 0.164.0 snapshots draw
+    /// them, are questions, also with "esc to interrupt" in them.
+    #[test]
+    fn research_dialogs_are_questions() {
+        for footer in [
+            "  enter/esc continue · ⌃c quit",
+            "  enter/esc confirm",
+            "  Press enter to confirm or esc to go back",
+            "  tab to add notes | enter to submit answer | ←/→ to navigate questions | esc to interrupt",
+            "  enter to submit answer | esc to interrupt",
+        ] {
+            assert!(dialog_hint(footer), "{footer}");
+            let lines = [
+                "  >_ OpenAI Codex (v0.164.0)",
+                "",
+                "  Try the new model?",
+                "› 1. Use gpt-6-luna",
+                "  2. Keep gpt-5.6-luna",
+                "",
+                footer,
+            ];
+            let st = screen_state(&lines, None);
+            assert_eq!(st.hint(), ScreenHint::Question, "{footer}: {st:?}");
+        }
+        // The inline async question keeps the composer: not a dialog.
+        assert!(!dialog_hint("  enter submit   ⌃] skip   ⇧→ main prompt"));
+        assert!(!dialog_hint("  ? for shortcuts"));
     }
 
     #[test]

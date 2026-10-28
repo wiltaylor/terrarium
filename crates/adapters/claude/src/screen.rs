@@ -34,12 +34,21 @@ use terrarium_core::ScreenHint;
 use terrarium_core::adapter::Screen;
 
 /// Key hints that dialogs (trust, bypass warning, `AskUserQuestion`,
-/// permission prompts) show in their last line.
-pub const DIALOG_MARKERS: [&str; 4] = [
+/// permission prompts) show in their last line, and the text of the
+/// dialogs that `docs/research/harness-hardening.md` (Claude Code, 1a and
+/// 5) found in the 2.1.310 bundle with no known key hint (B2): the
+/// usage-limit menu, the spend-limit nudge, the `.mcp.json` approval, and
+/// the Consumer Terms notice. Their look on screen is not captured.
+pub const DIALOG_MARKERS: [&str; 9] = [
     "Enter to select",
     "Enter to confirm",
     "Esc to cancel",
     "to navigate",
+    "Stop and wait for limit to reset",
+    "Could not update your spend limit",
+    "Press Enter to retry",
+    "New MCP server found in this project",
+    "An update to our Consumer Terms",
 ];
 
 /// The footer text that shows while a turn runs.
@@ -264,6 +273,35 @@ mod tests {
                 _ => ScreenHint::NotReady,
             };
             assert_eq!(st.hint(), want, "{file}");
+        }
+    }
+
+    /// B2: the dialogs from the research, with the strings that it quotes
+    /// from the bundle, are questions.
+    #[test]
+    fn research_dialogs_are_questions() {
+        let rule = "─".repeat(40);
+        for tail in [
+            vec![
+                "You've hit your limit · resets 5pm",
+                "❯ 1. Stop and wait for limit to reset",
+                "  2. Upgrade your plan",
+            ],
+            vec!["Could not update your spend limit. Press Enter to retry."],
+            vec![
+                "New MCP server found in this project: db",
+                "❯ 1. Use this MCP server",
+                "  2. Continue without using this MCP server",
+            ],
+            vec![
+                "[ACTION REQUIRED] An update to our Consumer Terms and Privacy Policy",
+                "You must run `claude` to review the updated terms",
+            ],
+        ] {
+            let mut lines = vec!["✻ Welcome", rule.as_str(), "❯", rule.as_str(), ""];
+            lines.extend(tail.iter().copied());
+            let st = screen_state(&lines);
+            assert_eq!(st.hint(), ScreenHint::Question, "{tail:?}: {st:?}");
         }
     }
 

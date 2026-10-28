@@ -678,6 +678,38 @@ async fn agents() {
         )],
     )
     .await;
+    // D3: a raw send and keys, for the operator and for a lead agent.
+    for agent_mode in [false, true] {
+        let out = ok(
+            agent_mode,
+            &["agent", "send", "w", "--raw", "/compact"],
+            vec![(202, json!({"accepted": true, "raw": true}))],
+            vec![(
+                Post,
+                "/api/agents/w/send",
+                vec![],
+                Some(json!({"text": "/compact", "raw": true})),
+            )],
+        )
+        .await;
+        assert_eq!(out, "typed raw text into w\n");
+        let out = ok(
+            agent_mode,
+            &["agent", "keys", "w", "esc", "down", "enter", "text:hi"],
+            vec![(
+                202,
+                json!({"accepted": true, "keys": ["escape", "down", "enter", "text(2)"]}),
+            )],
+            vec![(
+                Post,
+                "/api/agents/w/keys",
+                vec![],
+                Some(json!({"keys": ["esc", "down", "enter", "text:hi"]})),
+            )],
+        )
+        .await;
+        assert_eq!(out, "sent escape down enter text(2) to w\n");
+    }
     ok_in(
         false,
         &["agent", "send", "w", "-"],

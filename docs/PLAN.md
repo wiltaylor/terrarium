@@ -237,7 +237,7 @@ is the contract.
 ```
 
 Everything above runs inside **one Docker container**. The image contains
-Node 22 (22.19+) and npm, `git`, `bwrap`, `python3`, the `ssh` client, and
+Node 22 (22.19+) and npm, `git`, `bwrap`, `python3`, `rg`, the `ssh` client, and
 the Rust-built Terrarium binaries only. It holds no harness. No Docker
 client and no vmlab: those run on outside hosts.
 
@@ -455,10 +455,39 @@ prompt. The Terrarium protocol template comes after it, as after a
 The order of precedence: the agent's (or template's) `system_prompt`, then
 the persona, then the harness default. The daemon removes HTML comments
 (`<!-- ... -->`) from a persona. A persona with no text after that is no
-persona. The packaged `leader.md` and `worker.md` are placeholders that hold
-only a comment, so an agent keeps the harness's default prompt until the
-persona text lands. Templates and fleet files carry `persona` too. A name
-has letters, digits, `-`, and `_` only.
+persona. Templates and fleet files carry `persona` too. A name has
+letters, digits, `-`, and `_` only.
+
+**The harness section.** A replaced system prompt loses the tool guidance
+of the harness (`docs/research/harness-hardening.md`). So
+`<prompts>/harness/<harness>.md` (`claude`, `codex`, `copilot`, `pi`)
+comes after the base prompt: the tools of that harness in the Terrarium
+setup, and how to use them. The composed `prompt.md`, with a blank line
+between the parts:
+
+| The agent | `prompt.md` | Mode |
+|---|---|---|
+| `system_prompt` set | `system_prompt`, harness section, protocol template | replace |
+| `system_prompt` set and `persona = "none"` | `system_prompt`, protocol template | replace |
+| A persona with text (by role or by name) | persona, harness section, protocol template | replace |
+| `persona = "none"`, or a persona with no text | protocol template | append |
+
+So a custom `system_prompt` keeps the tool text by default, and
+`persona = "none"` turns the harness section off for a prompt that has its
+own. The daemon removes HTML comments from the harness section too, and
+renders the variables in each part. A missing or empty harness section is
+left out. The packaged defaults hold the four sections, and the config
+repo seeds them (§8.3).
+
+**Project instructions (`AGENTS.md`).** Terrarium uses `AGENTS.md` only.
+The protocol template tells each agent to read `AGENTS.md` in its
+workspace and in each repo; a deeper file wins. Nothing loads `CLAUDE.md`.
+Codex loads the `AGENTS.md` of the workspace root by itself, and Terrarium
+lets it (it is the same file). The global instruction files of the shared
+homes (`$CODEX_HOME/AGENTS.md`, `$COPILOT_HOME/copilot-instructions.md`,
+pi's `AGENTS.md`) never reach an agent: the sandbox binds empty files
+over the first two, and pi gets `--no-context-files`. The table per
+harness is in `docs/compat.md`, "Harness hardening".
 
 `<prompts>` is the `prompts/` of the config repo (§8.3), unless
 `TERRARIUM_PROMPTS_DIR` names another dir. An agent with no `prompt`
@@ -480,10 +509,17 @@ Each harness gets its settings in three layers. A later layer wins:
 
 | Harness | How the layers merge | Forced keys |
 |---|---|---|
-| Claude Code | A JSON object, then the forced keys on top; it goes to `--settings` (with `--setting-sources ""`, Claude Code reads no other settings file). | `hooks` (replaced), `skipDangerousModePermissionPrompt`, `disableAllHooks` (removed), and the `env` names that the launch sets (`CLAUDE_CONFIG_DIR`, the quiet env, `IS_SANDBOX`). The flags: yolo, `--setting-sources ""`, `--system-prompt-snapshot off`, the session flags. |
-| Codex | The TOML file becomes `-c key=value` overrides, flattened to dotted keys down to the leaves; a table with a key that is not bare goes as one inline table. They come before the forced `-c` values. | `hooks`, `projects` (trust), `sqlite_home`, `tui.resume_cwd`, `check_for_update_on_startup`, `analytics.enabled`, `feedback.enabled`, `sandbox_mode`, `approval_policy`, `model_instructions_file`, `developer_instructions`; `model` when the agent sets one. The adapter drops these from the file. |
-| Copilot CLI | A JSON deep merge over the agent's settings copy (on the first start a copy of the shared `settings.json`), then the forced keys. | `hooks` and `disableAllHooks` (removed), `experimental: true` (the prompt extension needs it). |
-| pi | A JSON deep merge over the agent's settings copy, then the forced key. | `lastChangelogVersion` (no changelog screen at start). The flags: `--offline`, `--no-extensions`, `--no-mcp`, the session dir. |
+| Claude Code | A JSON object, then the forced keys on top; it goes to `--settings` (with `--setting-sources ""`, Claude Code reads no other settings file). | `hooks` (replaced), `skipDangerousModePermissionPrompt`, `disableAllHooks` (removed), and the `env` names that the launch sets (`CLAUDE_CONFIG_DIR`, the quiet env, `IS_SANDBOX`). The ask-user and plan tools in `permissions.deny` (added to the user's list), `modelProposedGoals`, `disableAutoMode`, `askUserQuestionTimeout`, `crossSessionInbound`, `autoContinueAtUsageLimit`, the connector, Remote Control, and upload keys. The flags: yolo, `--no-chrome`, `--strict-mcp-config`, `--setting-sources ""`, `--system-prompt-snapshot off`, the session flags. |
+| Codex | The TOML file becomes `-c key=value` overrides, flattened to dotted keys down to the leaves; a table with a key that is not bare goes as one inline table. They come before the forced `-c` values. | `hooks`, `projects` (trust), `sqlite_home`, `tui.resume_cwd`, `check_for_update_on_startup`, `analytics.enabled`, `feedback.enabled`, `sandbox_mode`, `approval_policy`, `model_instructions_file`, `developer_instructions`; `model` when the agent sets one. The ask-user tools, the plan text, goals, the start-up notices, apps, plugins, tool suggestions, memories, and `features.hooks` (`CodexFlags::hardening_config`). The adapter drops these from the file. |
+| Copilot CLI | A JSON deep merge over the agent's settings copy (on the first start a copy of the shared `settings.json`), then the forced keys. | `hooks` and `disableAllHooks` (removed), `experimental: true` (the prompt extension needs it), and `config::forced_settings`: `askUser`, `defaultMode`, `stayInAutopilot`, the permission and IDE keys, `shellShortcut`, `autoUpdate`, `remoteExport`, `remoteSessions`, `memory`, `connectors`. The flags `--no-ask-user`, `--mode interactive`, `--disable-builtin-mcps`, `--sync-session=off`. |
+| pi | A JSON deep merge over the agent's settings copy, then the forced keys. | `lastChangelogVersion` (no changelog screen at start), `doubleEscapeAction`, `branchSummary.skipPrompt`, `defaultProjectTrust`, `tuiMode`. The flags: `--offline`, `--no-extensions`, `--no-mcp`, the session dir, and both prompt flags (one empty). |
+
+A key is forced when an unattended agent needs it: an ask-user tool, a
+plan mode, a dialog that waits for a key, a trust prompt, or data that
+leaves the agent. All other hardening keys are packaged defaults in
+`defaults/harness/`. No option turns an ask-user tool or a plan mode on
+again. `docs/compat.md` ("Harness hardening") lists each key and the
+reason.
 
 A JSON deep merge merges two objects key by key at every depth; any other
 value (an array too) replaces the value under it, and `null` removes the
@@ -573,6 +609,48 @@ show as a fleet plan, and apply only with `--apply` (the fleet apply of
 §20, no prune). Until then a commit does not write `export/` over them.
 `TERRARIUM_CONFIG_SYNC` (`off`, `pull`, or `sync`; default `off`) runs a
 pull or a sync every `TERRARIUM_CONFIG_SYNC_INTERVAL` (default `15m`).
+
+### 8.4 Turns, keys, and questions
+
+**A turn is plain text.** A turn that the daemon types (a mail pointer,
+`POST /api/agents/{id}/send`, a recap turn, a schedule turn) can start with
+`/` or `!`. The harness would run it as a slash command (`/plan` enters
+plan mode) or a shell command. So each adapter puts U+200B (zero width
+space) in front of such a text (Copilot also before a lone `$`). The
+harnesses trim white space, but U+200B is not white space, and the model
+reads the same words (`terrarium_core::adapter::escape_turn`).
+
+**Leader controls.** A leader fixes a stuck harness (a dialog, a wrong
+mode) and runs harness commands on purpose:
+
+- `POST /api/agents/{id}/send` with `raw: true` (`terrarium agent send
+  --raw`): the text as it is, then Enter, at once.
+- `POST /api/agents/{id}/keys` (`terrarium agent keys`): key presses by
+  the chord names of the display keys (§19b), mapped to xterm sequences,
+  and `text:<text>`. At most 20 a second for each agent.
+
+The rights are the rights of the PTY attach: the project_admin of the
+agent's project, a sysadmin, or the operator. The audit rows
+`agent.send_raw` and `agent.keys` never hold a text: a raw send has its
+length and first word, a text key its length. The lead prompts teach the
+loop `agent screen`, then `agent keys` or `agent send --raw`, then
+`agent screen` again. The dashboard has a key bar and a raw field under
+the screen of the agent page.
+
+**The question guard.** The settings remove the ask-user tools, but a
+model can still end a turn with a question in plain text. The runner then
+sets `idle`, and nobody answers. When the turn of a member (an agent with
+no `project_admin` and no `sysadmin`) ends, and it sent no mail, did not
+set `blocked`, and moved no card to `blocked`, the daemon reads the last
+assistant text of the turn from the transcript. When its last paragraph
+ends with `?`, or asks for a decision ("should I", "do you want me to",
+"would you like", "please confirm", "please let me know"), the agent
+becomes `blocked` with the reason "asked a question in plain text: <the
+first 200 characters>". The leads of its project (or the operator, when
+there is no lead) get mail from `system` with the question as quoted data.
+The answer by mail wakes the agent. Leads are exempt: they talk to the
+operator. `TERRARIUM_QUESTION_GUARD=off` turns the guard off
+(`crates/terrariumd/src/question_guard.rs`).
 
 ---
 
@@ -2362,7 +2440,7 @@ Multi-stage, one image:
    stage depends on it.
 3. Runtime stage, the Node image (Debian slim, `[node] image` in
    `harnesses.toml`): Node 22 (22.19+, which pi needs) and npm,
-   `bubblewrap`, `git`, `python3`, `openssh-client`, `ca-certificates`,
+   `bubblewrap`, `git`, `python3`, `ripgrep`, `openssh-client`, `ca-certificates`,
    `procps`, `tini`, and the Terrarium binaries (`terrariumd`, `terrarium`,
    `terrarium-runner`) only. **No harness.** The stage copies
    `harnesses.toml` to `/etc/terrarium/harnesses.toml` and sets

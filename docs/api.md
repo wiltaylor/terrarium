@@ -665,7 +665,9 @@ Rows oldest first. Cursor: `seq`.
 `detail` is a JSON object. Actions: `project.create`, `project.update`,
 `project.delete`, `project.detach`, `repo.attach`, `agent.create`,
 `agent.update`, `agent.delete`, `agent.roles`, `agent.start`, `agent.stop`,
-`agent.restart`, `agent.send`, `agent.answer`, `agent.attach`,
+`agent.restart`, `agent.send`, `agent.send_raw` (`bytes`, `first_word`;
+never the text), `agent.keys` (`keys`: the key names; a text key as
+`text(<length>)`), `agent.answer`, `agent.attach`,
 `repo.checkout`, `repo.credential` (each answer of the credential helper),
 `credential.put`, `credential.delete` (§5.1),
 `mail.read` (the first read of a message; `detail` has `thread`, `from`,
@@ -1025,13 +1027,22 @@ lists the leases that the agent holds.
 | `POST /api/agents/{id}/start` | none | `202` agent |
 | `POST /api/agents/{id}/stop` | none | `202` agent. Also on an agent in `error`: it becomes `stopped`. |
 | `POST /api/agents/{id}/restart` | none | `202` agent. Also on an agent in `error`: a new launch. |
-| `POST /api/agents/{id}/send` | `{"text": "Run the tests"}` | `202 {"accepted": true}` |
+| `POST /api/agents/{id}/send` | `{"text": "Run the tests", "raw"?: false}` | `202 {"accepted": true}` (`"raw": true` with `raw`) |
+| `POST /api/agents/{id}/keys` | `{"keys": ["esc", "down", "enter"]}` | `202 {"accepted": true, "keys": [...]}` (§6.5) |
 | `POST /api/agents/{id}/answer` | `{"request_id", "answer"}` or `{"text"}` | `202 {"accepted": true}` |
 | `POST /api/agents/{id}/subscription` | `{"subscription": "anthropic-max-20x-2"}` | `200 {"agent", "from"?, "to", "applied"}` (below) |
 
 All need project_admin. The work happens in the background. A `send` by
 the operator writes a row to the delivery log first, so the transcript tags
-the turn `origin: "operator"` when the harness writes it (§6.6). The answer
+the turn `origin: "operator"` when the harness writes it (§6.6).
+
+**A turn is plain text.** A `send` waits until the agent is `idle`. When
+its text starts with `/` or `!` (after white space), the adapter puts the
+character U+200B (zero width space) in front of it, so the harness does not
+run it as a slash command or a shell command. Copilot also gets the escape
+for a text that is only `$`. A mail pointer, a recap turn, and a schedule
+turn go the same way. The escape does not change the words that the model
+reads. To run a harness command on purpose, use `raw` (§6.5). The answer
 shows the agent when the daemon accepted the call; watch the events (§8)
 for the status changes.
 
@@ -1264,6 +1275,47 @@ An agent that is not running gives `409 not_running`. A runner that does
 not have the control call `screen` gives `409 conflict` with the message
 "runner too old; restart the agent". The runners of this version all have
 it.
+
+**Keys and raw text.** A leader uses these calls to fix a stuck harness (a
+dialog, a wrong mode) and to run a harness command. Read the screen first
+and after. The rights are the rights of the PTY: the project_admin of the
+agent's project, a sysadmin, or the operator. A member, and the lead of
+another project, get `403 forbidden`. Both calls write to the terminal at
+once. They do not wait for `idle`.
+
+- `POST /api/agents/{id}/send` with `"raw": true`: the text is typed as
+  it is, then Enter. There is no escape and no bracketed paste, so
+  `/compact` runs as a command. For Codex, the Enter goes 0.3 s after the
+  text, as for the exit keys. At most 2000 characters. The audit row
+  `agent.send_raw` has the length (`bytes`) and the first word
+  (`first_word`, at most 40 characters), never the text.
+- `POST /api/agents/{id}/keys` with `{"keys": [...]}`: 1 to 20 keys, in
+  order, 50 ms apart. A key is a chord name of the display keys (§17.10:
+  `esc`, `ctrl-c`, `ctrl+alt+x`), or `text:<text>` for literal text (at
+  most 2000 characters, no bracketed paste). The audit row `agent.keys`
+  has the canonical key names; a text key is `text(<length>)`.
+
+The key map (xterm, the `TERM` of the agent PTY):
+
+| Key | Bytes |
+|---|---|
+| `enter`, `tab`, `shift-tab`, `backspace`, `escape` (`esc`), `space` | CR, HT, `ESC [ Z`, DEL, ESC, space |
+| `up`, `down`, `right`, `left` | `ESC [ A`, `B`, `C`, `D`; with modifiers `ESC [ 1 ; <m> A` |
+| `home`, `end` | `ESC [ H`, `ESC [ F` |
+| `insert`, `delete`, `pageup`, `pagedown` | `ESC [ 2 ~`, `3 ~`, `5 ~`, `6 ~`; with modifiers `ESC [ <n> ; <m> ~` |
+| `f1` to `f4`; `f5` to `f12` | `ESC O P` to `ESC O S`; `ESC [ 15 ~`, `17 ~`, `18 ~`, `19 ~`, `20 ~`, `21 ~`, `23 ~`, `24 ~` |
+| `ctrl-<letter>` | The control code: `ctrl-c` is 0x03 |
+| `ctrl-space`, `ctrl-[`, `ctrl-\`, `ctrl-]` | NUL, ESC, 0x1c, 0x1d |
+| `alt-<key>` | ESC, then the key |
+| A letter, a digit, punctuation (`slash`, `/`) | The character; `shift-a` is `A` |
+
+`<m>` is 1 + shift (1) + alt (2) + ctrl (4). A key that a terminal has no
+code for (`super-…`, `f13` to `f24`, `print`, `menu`, `capslock`), an
+empty list, or more than 20 keys gives `422 invalid`, and no key goes out.
+More than 20 keys and raw sends to one agent in one second give
+`429 rate_limited`. A stopped agent gives `409 not_running`. The status
+does not change: an agent that is `blocked` on a dialog goes back to
+`working` with its next tool call or turn.
 
 ### 6.6 Transcript
 
@@ -1829,6 +1881,7 @@ Kinds:
 | `mail` | `{message_id, thread_id, from, from_name, to, to_name, subject}`. The `agent` is the recipient. A message that the loop guard holds also has `held: true`, `held_reason`, and `thread_state: "paused"`. |
 | `card` | `{card_id, change, title, column, ...}`. `change` is `created`, `moved` (`from`, `to`, `comment`, `assignee`), `reordered`, `assigned` (`assignee`, `previous`), `claimed`, `edited` (`fields`), `commented` (`comment`), `linked` (`kind`, `ref`), `archived`, `unblocked` (`by`), or `thread_update` (`thread_id`, `done`). `actor_name` names who made the change (`operator` or `project/name`). The `agent` is the assignee. |
 | `board` | `{columns}` after a column change. |
+| `question_guard` | `{question, mailed}`: a member ended its turn with a question in plain text and reported nothing, so the daemon set `blocked` (reason "asked a question in plain text: ...") and mailed `mailed` (the leads, or `operator`). `question` is the first 200 characters. The actor is `system`. PLAN §8.4. |
 | `memory.created`, `memory.updated`, `memory.deleted`, `memory.linked`, `memory.unlinked`, `memory.superseded` | `{memory_id, key, title, ...}`: `fields`, `to`, `relation`, `note`, `by`. |
 | `wiki.created`, `wiki.saved`, `wiki.deleted`, `wiki.restored`, `wiki.moved`, `wiki.reviewed` | `{page_id, path, title, rev, ...}`: `summary`, `author`, `from_rev`, `from`, `decision`, `comment`. |
 | `artifact.created`, `artifact.linked`, `artifact.deleted`, `artifact.pruned` | `{artifact_id, key, uid, name, kind, ...}`: `size`, `content_type`, `sha256`, `link_kind`, `ref`. |

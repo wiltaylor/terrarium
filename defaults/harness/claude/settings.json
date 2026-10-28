@@ -1,3 +1,47 @@
 {
-  "autoMemoryEnabled": false
+  "autoMemoryEnabled": false,
+  "autoDreamEnabled": false,
+  "permissions": {
+    "deny": [
+      "Workflow",
+      "Artifact",
+      "ReportFindings",
+      "SendFeedback",
+      "PushNotification",
+      "RemoteTrigger",
+      "CronCreate",
+      "CronDelete",
+      "CronList",
+      "ScheduleWakeup",
+      "ClaudeDesign",
+      "Projects",
+      "ReadNotifications",
+      "ShareOnboardingGuide",
+      "SendUserFile",
+      "OfferChromeSetup",
+      "ShowOnboardingRolePicker"
+    ]
+  },
+  "syncClaudeAiSkills": false,
+  "syncClaudeAiPlugins": false,
+  "enableArtifact": false,
+  "disableWorkflows": true,
+  "workflowKeywordTriggerEnabled": false,
+  "disableAgentView": true,
+  "isolatePeerMachines": true,
+  "feedbackSurveyRate": 0,
+  "feedbackDrafts": "off",
+  "promptSuggestionEnabled": false,
+  "awaySummaryEnabled": false,
+  "inputNeededNotifEnabled": false,
+  "agentPushNotifEnabled": false,
+  "voice": {
+    "enabled": false
+  },
+  "switchModelsOnFlag": true,
+  "spinnerTipsEnabled": false,
+  "disableBundledSkills": true,
+  "fileCheckpointingEnabled": false,
+  "includeGitInstructions": true,
+  "fastMode": false
 }

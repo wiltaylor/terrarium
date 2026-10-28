@@ -19,7 +19,17 @@ pub const ESC: &[u8] = b"\x1b";
 /// early and turn the rest of the text into keystrokes.
 pub fn type_turn(text: &str) -> Vec<u8> {
     let clean = text.replace(PASTE_START, "").replace(PASTE_END, "");
-    bracketed_paste(&clean)
+    bracketed_paste(&escape(&clean))
+}
+
+/// The turn as plain text (D3): pi trims the text, then runs `!cmd` as a user shell command and an
+/// exact `/quit`, `/new`, or `/login` as a command
+/// (`interactive-mode.js`, `setupEditorSubmitHandler`). A turn that starts with one of them
+/// (after white space) gets [`terrarium_core::adapter::TURN_ESCAPE`] in
+/// front, so it stays a prompt for the model. A leader runs a command on
+/// purpose with a raw send (`terrarium agent send --raw`).
+pub fn escape(text: &str) -> std::borrow::Cow<'_, str> {
+    terrarium_core::adapter::escape_turn(text, terrarium_core::adapter::COMMAND_PREFIXES, &[])
 }
 
 /// Answer an extension UI prompt (`ui_prompt_start`).
@@ -81,5 +91,22 @@ mod tests {
         assert_eq!(answer(&Answer::Deny), b"\x1b".to_vec());
         assert_eq!(CLEAR_INPUT, b"\x03");
         assert_eq!(EXIT, b"/quit\r");
+    }
+
+    /// D3: a turn that starts with a command prefix stays plain text.
+    #[test]
+    fn command_prefixes_are_escaped() {
+        for t in ["/plan now", "!ls", "  /exit"] {
+            let typed = type_turn(t);
+            let body = &typed[6..typed.len() - 7];
+            let text = std::str::from_utf8(body).expect("utf8");
+            assert!(text.starts_with('\u{200B}'), "{t}: {text:?}");
+            assert_eq!(&text['\u{200B}'.len_utf8()..], t);
+        }
+        assert_eq!(
+            type_turn("New mail"),
+            b"\x1b[200~New mail\x1b[201~\r".to_vec()
+        );
+        assert_eq!(escape("a /b"), "a /b");
     }
 }

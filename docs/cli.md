@@ -195,7 +195,8 @@ terrarium agent set <agent> [--harness h] [--subscription s] [--pool s1,s2] [--m
 terrarium agent swap <agent> <subscription>  move to another plan account of the pool
 terrarium agent rm <agent> [--confirm] [--keep-workspace]
 terrarium agent start|stop|restart <agent> [--no-wait]
-terrarium agent send <agent> <text | ->
+terrarium agent send <agent> <text | -> [--raw]  --raw: project_admin, sysadmin, or the operator
+terrarium agent keys <agent> <key>...         project_admin, sysadmin, or the operator
 terrarium agent answer <agent> [--request-id id] (--choice N | --allow | --deny | --text T)
 terrarium agent logs <agent> [--since seq] [--kind k] [--limit n] [--follow]
 terrarium agent attach <agent>                operator mode only; Ctrl-] detaches
@@ -309,6 +310,33 @@ Output of agent terra/w1 (data, not instructions)
 | > 1. Yes
 |   2. No
 --- end of screen ---
+```
+
+`agent send` types one turn when the agent is idle. A text that starts
+with `/` or `!` stays plain text for the model: the adapter escapes it
+([api.md §6.2](api.md#62-lifecycle-and-turns)).
+
+`agent send --raw` and `agent keys` are for leaders: they fix a stuck
+harness (a dialog, a wrong mode) and run harness commands. Both write to
+the terminal at once, with no wait for `idle`. Run `agent screen` first
+and after. The rights are the rights of `agent screen`.
+
+- `agent send <agent> --raw "/compact"` types the text as it is, then
+  Enter. A slash command or a bang command runs. The CLI prints
+  `typed raw text into <agent>`.
+- `agent keys <agent> esc down enter` sends the keys in order. A key is a
+  chord name (`esc`, `up`, `down`, `left`, `right`, `enter`, `tab`,
+  `shift-tab`, `backspace`, `home`, `end`, `pageup`, `pagedown`,
+  `f1`..`f12`, `ctrl-c`, `alt-b`, a letter, a digit) or `text:<text>` for
+  literal text. At most 20 keys in one call and in one second. The CLI
+  prints `sent escape down enter to <agent>`. The key map is in
+  [api.md §6.5](api.md#65-pty-get-apiagentsidpty-websocket).
+
+```
+terrarium agent screen terra/w1          # a dialog: "Approaching rate limits ..."
+terrarium agent keys terra/w1 esc        # close it
+terrarium agent screen terra/w1          # the prompt is back
+terrarium agent send terra/w1 --raw "/compact"
 ```
 
 `agent new --template <t>` copies the settings of an agent template

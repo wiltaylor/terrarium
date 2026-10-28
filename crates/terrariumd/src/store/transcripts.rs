@@ -16,8 +16,12 @@ pub const KEEP_DELIVERIES: i64 = 2000;
 
 /// The hash of a typed text in the delivery log: SHA-256 (hex) of the text
 /// with each run of whitespace made one space, and no space at the ends.
-/// The harness can keep the text with other line ends.
+/// The harness can keep the text with other line ends. The escape of a
+/// turn that starts with `/` or `!` (`terrarium_core::adapter::TURN_ESCAPE`)
+/// does not count: the delivery log has the text as sent, and the
+/// transcript has the text as typed.
 pub fn text_hash(text: &str) -> String {
+    let text = text.trim_start_matches(terrarium_core::adapter::TURN_ESCAPE);
     let norm = text.split_whitespace().collect::<Vec<_>>().join(" ");
     let digest = Sha256::digest(norm.as_bytes());
     digest.iter().map(|b| format!("{b:02x}")).collect()
@@ -113,5 +117,7 @@ mod tests {
         assert_eq!(text_hash("a  b\r\nc "), text_hash("a b c"));
         assert_ne!(text_hash("a b"), text_hash("a c"));
         assert_eq!(text_hash("x").len(), 64);
+        // The escape of a command turn does not change the hash.
+        assert_eq!(text_hash("\u{200B}  /plan now"), text_hash("/plan now"));
     }
 }

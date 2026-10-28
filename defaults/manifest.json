@@ -2,15 +2,19 @@
   "version": 1,
   "files": {
     "README.md": "032b0d191121759bd4c44bf0770b75d2b6800997735a82c2c2c28592981765e7",
-    "harness/claude/settings.json": "930912b39eb0312c2210e78d13c25de2565ecec3a44d702865fb16f2c0274c91",
-    "harness/codex/config.toml": "9f9647000f1c2397316fa27f8f98d6cb32d6ffbc081882563de415fdc0741d36",
-    "harness/copilot/settings.json": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
-    "harness/pi/settings.json": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
-    "prompts/README.md": "d0a87b8e499b8b89fd7d74093a75188cc6eb4d2d1873e11cb6146a743fc4f3f2",
-    "prompts/default.md": "12ea689e82f1a542ca29c9ec37eb0fc3545f10694641a108f7013344daf1081d",
-    "prompts/leader.md": "c24c2c312dd25eac6827042b18ac463341507b486cd57512ba5c2f2fa9f1d5c2",
-    "prompts/project-lead.md": "f02270c90ff17cbcf8389b16556d27f922a0265a0f55f4b1d991c76ae92df769",
-    "prompts/system-lead.md": "99634b5d01b926e3ba4285f86288d70d54c9204550981a881f474bd6c6e098d7",
-    "prompts/worker.md": "b416e55b3615bfde92e1287723f90f9890b222d9bcf719f812034a21186fd132"
+    "harness/claude/settings.json": "0eae0d854d57af7d928677887e59bb8b758c6cae202bd42a496cbc7903b0f90e",
+    "harness/codex/config.toml": "006ff344f766eb0eade0a90ca5262b122dc843ec0ea7c831b1a91e772f1355a7",
+    "harness/copilot/settings.json": "5a7a5f96c478ca5efe40c0ad63bc262b55e553b6aa832ba3ad96891ca796bc59",
+    "harness/pi/settings.json": "5e94a6d2af918bda2d112f802eec14baf4529a44c12d16b74ee36ffe8abc177c",
+    "prompts/README.md": "4a57d282e9ad106a4795314e1edd83a53d7972bea6e1f764f010f46ab1d8874c",
+    "prompts/default.md": "9ecbb9eae388bb7a6149c69553e246fe9d0b4fc9bd4cf30fefba276a58710b18",
+    "prompts/harness/claude.md": "7624078aaf4ae4ddbfedba5576e8aef55fe0b6ec60c2c959b3c7238fe3af1067",
+    "prompts/harness/codex.md": "58ce55918fda68bd02ccaf61f8487039c9208a4fd52c89fad94d718c81bff495",
+    "prompts/harness/copilot.md": "3cff1fad3fb5216934baf085cd50bafbe964af2fe74c75ffd6df96bc169113cd",
+    "prompts/harness/pi.md": "198a4c294c96a6b8da0b4f2f32b6f508d1f57c9e6a5f939a6ecc8a36af259046",
+    "prompts/leader.md": "c177f918839f509a1a95c9d9fdd5058df1bbb57829fb8887eb9cffd15710bfe5",
+    "prompts/project-lead.md": "7df70044d5eb0a7000b77445cfc2bdcfa8f758494ee9285d725320aee54b7676",
+    "prompts/system-lead.md": "811170b9385635d6d5780fc59239051d3108fc571bf58dbfa851c59dba96e61d",
+    "prompts/worker.md": "80031fbe8101e53a5ba173c41b7d83aa1a8aac6c8061747d84f159da1c0423ee"
   }
 }
