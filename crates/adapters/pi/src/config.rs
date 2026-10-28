@@ -22,7 +22,7 @@
 //! | Path in the home | Decision | Why |
 //! |---|---|---|
 //! | `auth.json` | shared, `{}` | no login: pi uses API keys only (PLAN §16.3), and each agent gets its key in the env. An install from before had the pi plan accounts and made the file a symlink to `/run/terrarium/cred/account/auth.json`; the daemon makes it a plain `{}` file again (`terrariumd::accounts`). |
-//! | `models.json` | per agent, from the shared file | custom providers (base URL, models, API key). Read only for pi. Every start copies the shared file and adds the Terrarium providers ([`TERRARIUM_PROVIDERS`]: `zai-api`, the Z.ai pay-as-you-go endpoint). An edit of the shared file reaches an agent at its next start. |
+//! | `models.json` | per agent, from the shared file | custom providers (base URL, models, API key). Read only for pi. Every start copies the shared file and adds the Terrarium providers ([`TERRARIUM_PROVIDERS`]: `zai-api`, the Z.ai pay-as-you-go endpoint, and `kimi-coding-intl`, the overseas Kimi Code endpoint). An edit of the shared file reaches an agent at its next start. |
 //! | `settings.json` | per agent | the operator's own defaults (provider, model, theme, packages) stay out, and a `/model` change in one agent does not change the default of the others. The first start copies the shared file; later starts keep the agent's copy. Every start sets `lastChangelogVersion` to the pinned version ([`LAST_CHANGELOG_KEY`]), so pi 1.4's "What's new" changelog does not show. |
 //! | `mcp.json` | not loaded | `--no-mcp` (pi 1.4 has built-in MCP). |
 //! | `sessions/` | not used | `--session-dir` puts the sessions in the agent directory. In the sandbox every agent has the cwd `$HOME/work`, so the default directory (`sessions/--home-…-work--/`) would be one directory for all agents, and `pi --resume` would list the sessions of every agent. Session IDs do not collide (each agent gets new UUIDs), but pi has **no lock on a session**: two processes with one `--session-id` both start and both append (`docs/compat.md`). The supervisor must run one pi per agent. |
@@ -62,7 +62,10 @@ pub const LAST_CHANGELOG_KEY: &str = "lastChangelogVersion";
 pub const MODELS_FILE: &str = "models.json";
 /// The providers that Terrarium adds to every agent's `models.json`. A
 /// provider of the same id in the shared file is replaced.
-pub const TERRARIUM_PROVIDERS: &[&str] = &[terrarium_core::zai::PI_API_PROVIDER];
+pub const TERRARIUM_PROVIDERS: &[&str] = &[
+    terrarium_core::zai::PI_API_PROVIDER,
+    terrarium_core::moonshot::PI_CODING_PROVIDER,
+];
 /// The logins in the pi home. Shared.
 pub const AUTH_FILE: &str = "auth.json";
 /// The session directory in the agent's pi directory.
@@ -192,6 +195,65 @@ pub fn zai_api_provider() -> Value {
     })
 }
 
+/// One Kimi Code model entry for a custom pi provider. The values are pi
+/// 1.4.0's built-in `kimi-coding` catalog
+/// (`pi-ai/dist/providers/data/kimi-coding.json`), compat included, so the
+/// custom provider sends the same requests as the built-in one.
+fn kimi_model(
+    id: &str,
+    name: &str,
+    context: u64,
+    max_tokens: u64,
+    cost: [f64; 3],
+    levels: Value,
+) -> Value {
+    json!({
+        "id": id,
+        "name": name,
+        "reasoning": true,
+        "input": ["text", "image"],
+        "cost": {"input": cost[0], "output": cost[1], "cacheRead": cost[2], "cacheWrite": 0},
+        "contextWindow": context,
+        "maxTokens": max_tokens,
+        "thinkingLevelMap": levels,
+        "compat": {
+            "supportsStrictMode": false,
+            "supportsStore": false,
+            "supportsDeveloperRole": false,
+            "supportsReasoningEffort": true,
+            "maxTokensField": "max_tokens",
+            "thinkingFormat": "openai",
+            "requiresReasoningContentOnAssistantMessages": true,
+            "supportsMidConvoSystemMessages": true,
+            "supportsMidConvoToolAdditions": true,
+        },
+    })
+}
+
+/// The custom pi provider `kimi-coding-intl`: the overseas Kimi Code
+/// endpoint (`api.kimi.ai`), OpenAI-compatible, with the key from
+/// `$KIMI_API_KEY` (the daemon injects it for an agent on a Moonshot
+/// `coding` subscription). pi 1.4.0's built-in `kimi-coding` has the same
+/// models on the China host (`api.kimi.com`), which the `coding-cn` plan
+/// uses with no entry.
+pub fn kimi_coding_intl_provider() -> Value {
+    use terrarium_core::moonshot;
+    let levels = json!({"off": null, "minimal": null, "low": "low", "medium": null,
+                        "high": "high", "xhigh": null, "max": "max"});
+    json!({
+        "name": "Kimi For Coding (overseas)",
+        "baseUrl": moonshot::CODING_BASE_URL,
+        "api": "openai-completions",
+        "apiKey": format!("${}", moonshot::KIMI_KEY_ENV),
+        "models": [
+            kimi_model(moonshot::MODEL_CODING_DEFAULT, "kimi-for-coding", 1_048_576, 32_768, [0.95, 4.0, 0.19], levels.clone()),
+            kimi_model("k3", "Kimi K3", 1_048_576, 131_072, [3.0, 15.0, 0.3], levels.clone()),
+            kimi_model("k3-256k", "Kimi K3-256K", 262_144, 131_072, [0.0, 0.0, 0.0], levels),
+            kimi_model("kimi-for-coding-highspeed", "Kimi For Coding HighSpeed", 262_144, 32_768, [1.9, 8.0, 0.38], json!({"off": null})),
+        ],
+    })
+}
+
 /// The agent's `models.json`: the shared file (or none) with the
 /// Terrarium providers set.
 pub fn agent_models(shared: Option<Value>) -> Value {
@@ -200,6 +262,7 @@ pub fn agent_models(shared: Option<Value>) -> Value {
         models["providers"] = json!({});
     }
     models["providers"][terrarium_core::zai::PI_API_PROVIDER] = zai_api_provider();
+    models["providers"][terrarium_core::moonshot::PI_CODING_PROVIDER] = kimi_coding_intl_provider();
     models
 }
 
@@ -517,7 +580,7 @@ mod tests {
     }
 
     #[test]
-    fn models_overlay_keeps_shared_providers_and_adds_zai_api() {
+    fn models_overlay_keeps_shared_providers_and_adds_zai_api_and_kimi_intl() {
         let tmp = tempfile::tempdir().expect("tmp");
         let home = tmp.path().join("auth-pi");
         fs::create_dir_all(&home).expect("home");
@@ -539,6 +602,12 @@ mod tests {
         assert_eq!(z["apiKey"], "$ZAI_API_KEY");
         assert_eq!(z["models"][0]["id"], "glm-5.3-flash");
         assert_eq!(z["models"][1]["id"], "glm-5.3");
+        let k = &own["providers"]["kimi-coding-intl"];
+        assert_eq!(k["baseUrl"], "https://api.kimi.ai/coding/v1");
+        assert_eq!(k["api"], "openai-completions");
+        assert_eq!(k["apiKey"], "$KIMI_API_KEY");
+        assert_eq!(k["models"][0]["id"], "kimi-for-coding");
+        assert_eq!(k["models"][0]["compat"]["thinkingFormat"], "openai");
         // The shared file stays as it was.
         assert_eq!(
             fs::read_to_string(home.join(MODELS_FILE)).expect("shared"),
@@ -549,8 +618,9 @@ mod tests {
         fs::remove_file(home.join(MODELS_FILE)).expect("rm");
         materialize(&opts, &agent, &home, None).expect("again");
         let own: Value = serde_json::from_slice(&fs::read(&o.source).expect("own")).expect("json");
-        let ids: Vec<&String> = own["providers"].as_object().expect("obj").keys().collect();
-        assert_eq!(ids, ["zai-api"]);
+        let mut ids: Vec<&String> = own["providers"].as_object().expect("obj").keys().collect();
+        ids.sort();
+        assert_eq!(ids, ["kimi-coding-intl", "zai-api"]);
         let mount: Value =
             serde_json::from_slice(&fs::read(home.join(MODELS_FILE)).expect("mount"))
                 .expect("json");

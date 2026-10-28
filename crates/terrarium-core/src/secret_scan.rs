@@ -347,6 +347,7 @@ mod tests {
         }
         for line in [
             "\"apiKey\": \"$ZAI_API_KEY\"",
+            "\"apiKey\": \"$KIMI_API_KEY\"",
             "token = \"short\"",
             "password_file = \"/run/secrets/terrarium-password\"",
             "The bearer token for the API is in the env.",

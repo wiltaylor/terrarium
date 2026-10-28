@@ -111,6 +111,14 @@ const TABLE: &[Row] = &[
         plan: false,
         api_key: Some(("zai", terrarium_core::zai::KEY_ENV)),
     },
+    // Moonshot AI (Kimi), pi only: the plan picks the pi provider and its
+    // env var (`terrarium_core::moonshot::Plan`). [`provider_for`] and
+    // [`required_env`] read the plan; this row only marks an API key.
+    Row {
+        names: &["moonshot"],
+        plan: false,
+        api_key: Some(("moonshotai", terrarium_core::moonshot::KEY_ENV)),
+    },
     // An OpenAI-compatible endpoint needs a provider entry in the shared
     // `models.json` (a base URL and a model list). pi does not read a base
     // URL from the env. Not supported yet: no provider flag.
@@ -155,6 +163,10 @@ pub fn provider_for(sub: &SubscriptionDef) -> Option<String> {
         let plan = terrarium_core::zai::plan_or_default(sub.plan.as_deref());
         return Some(plan.pi_provider().to_owned());
     }
+    if terrarium_core::moonshot::is_moonshot(name) {
+        let plan = terrarium_core::moonshot::plan_or_default(sub.plan.as_deref());
+        return Some(plan.pi_provider().to_owned());
+    }
     let Some(r) = row(name) else {
         return Some(name.to_owned());
     };
@@ -171,6 +183,10 @@ pub fn provider_for(sub: &SubscriptionDef) -> Option<String> {
 pub fn required_env(sub: &SubscriptionDef) -> Option<&'static str> {
     if is_plan(sub) {
         return None;
+    }
+    if terrarium_core::moonshot::is_moonshot(&sub.provider) {
+        let plan = terrarium_core::moonshot::plan_or_default(sub.plan.as_deref());
+        return Some(plan.pi_key_env());
     }
     row(&sub.provider)?.api_key.map(|(_, var)| var)
 }
@@ -321,6 +337,22 @@ mod tests {
         assert_eq!(required_env(&api), Some("ZAI_API_KEY"));
         assert_eq!(refusal(&api), None);
         assert_eq!(start_refusal(&api, None), None);
+    }
+
+    #[test]
+    fn moonshot_plans_pick_the_builtin_or_the_custom_provider() {
+        for (plan, provider, var) in [
+            (None, "kimi-coding-intl", "KIMI_API_KEY"),
+            (Some("coding"), "kimi-coding-intl", "KIMI_API_KEY"),
+            (Some("coding-cn"), "kimi-coding", "KIMI_API_KEY"),
+            (Some("api"), "moonshotai", "MOONSHOT_API_KEY"),
+            (Some("api-cn"), "moonshotai-cn", "MOONSHOT_API_KEY"),
+        ] {
+            let s = sub("moonshot", plan);
+            assert_eq!(provider_for(&s).as_deref(), Some(provider), "{plan:?}");
+            assert_eq!(required_env(&s), Some(var), "{plan:?}");
+            assert_eq!(start_refusal(&s, None), None, "{plan:?}");
+        }
     }
 
     #[test]

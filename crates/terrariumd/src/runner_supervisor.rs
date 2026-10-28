@@ -3970,6 +3970,34 @@ impl Supervisor for RunnerSupervisor {
 mod tests {
     use super::*;
 
+    /// A Moonshot subscription is for pi only: the start of an agent of any
+    /// other harness on it is refused.
+    #[test]
+    fn a_moonshot_subscription_starts_pi_agents_only() {
+        let sub: Subscription = serde_json::from_value(serde_json::json!({
+            "name": "kimi", "provider": "moonshot", "plan": "coding", "harnesses": ["pi"],
+            "alert_at": 80, "source": "api", "login_status": "api_key", "probe_status": "none",
+            "created_at": "", "updated_at": ""
+        }))
+        .unwrap();
+        let check = SubscriptionCheck::Found(Box::new(sub));
+        let agent = |h: HarnessId| -> Agent {
+            serde_json::from_value(serde_json::json!({
+                "id": AgentId::new(), "name": "a", "project": "p", "harness": h,
+                "subscription": "kimi", "workspace": "/w"
+            }))
+            .unwrap()
+        };
+        assert!(check_subscription(&agent(HarnessId::Pi), Some(&check)).is_ok());
+        for h in [HarnessId::Claude, HarnessId::Codex, HarnessId::Copilot] {
+            let Err(SupervisorError::NotReady(msg)) = check_subscription(&agent(h), Some(&check))
+            else {
+                panic!("{h} started on a moonshot subscription");
+            };
+            assert!(msg.contains("cannot spend subscription `kimi`"), "{msg}");
+        }
+    }
+
     /// The isolation gap of the cross-harness run: each agent's session
     /// files (transcripts, session index, session store) come from its own
     /// harness dir. The sandbox binds them read-write over the session

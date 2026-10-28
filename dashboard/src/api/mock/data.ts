@@ -666,11 +666,15 @@ ${XSS_DOCUMENT}
       login_status: "api_key", probe_status: "none", windows: [], local_estimate_only: true,
     },
     {
+      ...subBase, name: "kimi-key", provider: "moonshot", plan: "coding", harnesses: ["pi"], alert_at: 80, env_var: "MOONSHOT_API_KEY", has_api_key: true,
+      login_status: "api_key", probe_status: "none", windows: [], local_estimate_only: true,
+    },
+    {
       ...subBase, name: "gemini", provider: "google", plan: "Gemini Code Assist", harnesses: ["pi"], alert_at: 80,
       login_status: "missing", probe_status: "none", windows: [], local_estimate_only: true,
     },
   ];
-  const apiKeys: MockWorld["apiKeys"] = { "openrouter-key": { provider: "openrouter", key: "sk-or-mock-never-shown" }, "zai-key": { provider: "zai", key: "zk-mock-never-shown" } };
+  const apiKeys: MockWorld["apiKeys"] = { "openrouter-key": { provider: "openrouter", key: "sk-or-mock-never-shown" }, "zai-key": { provider: "zai", key: "zk-mock-never-shown" }, "kimi-key": { provider: "moonshot", key: "sk-kimi-mock-never-shown" } };
 
   // Quota samples: one per window per hour for a day, rising to the current value.
   const quota: QuotaSample[] = [];

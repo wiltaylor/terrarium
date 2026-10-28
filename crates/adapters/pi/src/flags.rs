@@ -138,6 +138,26 @@ pub const DEFAULT_MODELS: &[(&str, &str)] = &[
     // custom `zai-api`). From pi 1.4.0's `zai` catalog and docs.z.ai.
     ("zai", terrarium_core::zai::MODEL_FAST),
     ("zai-api", terrarium_core::zai::MODEL_FAST),
+    // Moonshot AI (Kimi): Kimi Code (the custom `kimi-coding-intl` and the
+    // built-in `kimi-coding`) and the Open Platform (`moonshotai`,
+    // `moonshotai-cn`). From pi 1.4.0's catalogs and the Kimi docs
+    // (`terrarium_core::moonshot`).
+    (
+        terrarium_core::moonshot::PI_CODING_PROVIDER,
+        terrarium_core::moonshot::MODEL_CODING_DEFAULT,
+    ),
+    (
+        terrarium_core::moonshot::PI_CODING_CN_PROVIDER,
+        terrarium_core::moonshot::MODEL_CODING_DEFAULT,
+    ),
+    (
+        terrarium_core::moonshot::PI_API_PROVIDER,
+        terrarium_core::moonshot::MODEL_API_DEFAULT,
+    ),
+    (
+        terrarium_core::moonshot::PI_API_CN_PROVIDER,
+        terrarium_core::moonshot::MODEL_API_DEFAULT,
+    ),
 ];
 
 /// The default model id for a pi provider id, or `None` when the table
@@ -166,6 +186,10 @@ mod tests {
             "mistral",
             "zai",
             "zai-api",
+            "kimi-coding-intl",
+            "kimi-coding",
+            "moonshotai",
+            "moonshotai-cn",
         ] {
             assert!(default_model(p).is_some(), "{p}");
         }
@@ -173,5 +197,7 @@ mod tests {
         assert_eq!(default_model("openai-codex"), None);
         assert_eq!(default_model("glm53-exl3"), None);
         assert_eq!(default_model("zai"), Some("glm-5.3-flash"));
+        assert_eq!(default_model("kimi-coding-intl"), Some("kimi-for-coding"));
+        assert_eq!(default_model("moonshotai-cn"), Some("kimi-k2.7-code"));
     }
 }

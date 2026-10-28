@@ -1810,5 +1810,6 @@ mod tests {
     fn plan_providers() {
         assert!(plan_provider(HarnessId::Copilot, "github-copilot"));
         assert!(!plan_provider(HarnessId::Claude, "zai"));
+        assert!(!plan_provider(HarnessId::Claude, "moonshot"));
     }
 }

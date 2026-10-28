@@ -1883,6 +1883,16 @@ Two sources of truth, combined:
      Claude Code spends through Z.ai's Anthropic-compatible endpoint and pi
      through its OpenAI-compatible one; it has no documented usage
      endpoint, so it is local estimate only (api.md §16.5).
+   - Moonshot AI (Kimi): an API key (provider `moonshot`, plan `coding`,
+     `coding-cn`, `api`, or `api-cn`) that **only pi** spends, through
+     Moonshot's OpenAI-compatible endpoints. The operator decided this on
+     2026-10-28: Claude Code does not get the Anthropic-compatible
+     endpoints, and the daemon refuses any other harness on a `moonshot`
+     subscription. The Open Platform plans (`api`, `api-cn`) have a
+     documented balance endpoint (probe `moonshot-balance` or
+     `moonshot-cn-balance`). Kimi Code (`coding`, `coding-cn`) documents no
+     usage endpoint, so it is local estimate only (api.md §16.5,
+     compat.md "Moonshot").
    The probe reads the credential of the subscription's plan account
    (§16.3), so there is no second login. It only reads: it never refreshes
    a token, and an expired token is a failed probe until the harness of an

@@ -1007,6 +1007,196 @@ async fn zai_key_is_a_claude_and_pi_subscription_with_no_probe() {
     }
 }
 
+/// Moonshot (Kimi) is an API key for pi only. The plan picks the product
+/// and the region; an Open Platform plan gets the balance probe.
+#[tokio::test]
+async fn moonshot_key_is_a_pi_only_subscription() {
+    let env = boot(|_| {}, |_, _| {}).await;
+    let td = &env.td;
+    let secret = "sk-moonshot-very-secret-value";
+    // A plan that Moonshot does not have.
+    td.post(
+        "/api/subscriptions/kimi/api-key",
+        json!({"provider": "moonshot", "plan": "Allegretto", "key": secret}),
+    )
+    .await
+    .err(422, "invalid");
+    // A definition for any harness other than pi is refused.
+    for h in ["claude", "codex", "copilot"] {
+        td.post(
+            "/api/subscriptions",
+            json!({"name": "kimi-def", "provider": "moonshot", "plan": "api", "harnesses": [h]}),
+        )
+        .await
+        .err(422, "invalid");
+        td.post(
+            "/api/subscriptions",
+            json!({"name": "kimi-def", "provider": "moonshot", "harnesses": ["pi", h]}),
+        )
+        .await
+        .err(422, "invalid");
+    }
+    // A Moonshot key never lands on a subscription of another harness.
+    td.post(
+        "/api/subscriptions",
+        json!({"name": "claude-sub", "provider": "anthropic", "harnesses": ["claude"]}),
+    )
+    .await
+    .ok();
+    td.post(
+        "/api/subscriptions/claude-sub/api-key",
+        json!({"provider": "moonshot", "key": secret}),
+    )
+    .await
+    .err(422, "invalid");
+    // No plan: Kimi Code, overseas. pi only, no probe.
+    let r = td
+        .post(
+            "/api/subscriptions/kimi/api-key",
+            json!({"provider": "moonshot", "key": secret}),
+        )
+        .await;
+    let body = r.ok().to_string();
+    assert!(!body.contains(secret), "{body}");
+    assert_eq!(r.body["provider"], "moonshot");
+    assert_eq!(r.body["plan"], "coding");
+    assert_eq!(r.body["harnesses"], json!(["pi"]));
+    assert_eq!(r.body["env_var"], "MOONSHOT_API_KEY");
+    assert_eq!(r.body["login_status"], "api_key");
+    assert_eq!(r.body["local_estimate_only"], true);
+    assert!(r.body.get("probe").is_none(), "{body}");
+    assert_eq!(r.body["default_models"], json!({"pi": "kimi-for-coding"}));
+    // The Open Platform, China: pi's `moonshotai-cn` and the CN balance
+    // probe.
+    let r = td
+        .post(
+            "/api/subscriptions/kimi-api/api-key",
+            json!({"provider": "moonshot", "plan": "api-cn", "key": secret}),
+        )
+        .await;
+    assert_eq!(r.ok()["plan"], "api-cn");
+    assert_eq!(r.body["probe"], "moonshot-cn-balance");
+    assert_eq!(r.body["local_estimate_only"], false);
+    assert_eq!(r.body["default_models"], json!({"pi": "kimi-k2.7-code"}));
+    // The agent page shows the subscription.
+    td.project("p").await;
+    let a = td
+        .agent(
+            "p",
+            "kimi-worker",
+            json!({"harness": "pi", "subscription": "kimi"}),
+        )
+        .await;
+    let shown = td
+        .get(&format!("/api/agents/{}", a["id"].as_str().unwrap()))
+        .await;
+    assert_eq!(
+        shown.ok()["subscription_detail"],
+        json!({"name": "kimi", "provider": "moonshot", "plan": "coding", "login_status": "api_key",
+               "harnesses": ["pi"], "default_model": "kimi-for-coding"})
+    );
+    let sub = td
+        .daemon
+        .as_ref()
+        .unwrap()
+        .state
+        .db
+        .read(|c| terrariumd::store::subscriptions::get(c, "kimi"))
+        .await
+        .unwrap();
+    let vars: std::collections::BTreeMap<String, String> =
+        terrariumd::login_session::credential_env_for(&td.state, &sub)
+            .into_iter()
+            .collect();
+    assert_eq!(vars["MOONSHOT_API_KEY"], secret);
+    assert_eq!(vars["KIMI_API_KEY"], secret);
+    assert!(
+        !vars.keys().any(|k| k.starts_with("ANTHROPIC_")),
+        "{vars:?}"
+    );
+    // Verify does not ask a harness; there is no logout.
+    let v = td.post_empty("/api/subscriptions/kimi/verify").await;
+    assert_eq!(v.ok()["subscription"]["login_status"], "api_key");
+    td.post_empty("/api/subscriptions/kimi/logout")
+        .await
+        .err(422, "invalid");
+    for path in ["/api/subscriptions", "/api/audit", "/api/events"] {
+        let text = td.get(path).await.body.to_string();
+        assert!(!text.contains(secret), "{path}: {text}");
+    }
+}
+
+/// A Moonshot model list: the Open Platform's `GET /v1/models` with the
+/// stored key, else the plan's documented ids, the default first.
+#[tokio::test]
+async fn moonshot_models_come_from_the_provider_then_the_table() {
+    const MODELS: &str = "https://api.moonshot.ai/v1/models";
+    let env = boot(|_| {}, |_, _| {}).await;
+    let td = &env.td;
+    let secret = "sk-ms-models-secret";
+    td.post(
+        "/api/subscriptions/kimi-api/api-key",
+        json!({"provider": "moonshot", "plan": "api", "key": secret}),
+    )
+    .await
+    .ok();
+    env.http.set(
+        MODELS,
+        200,
+        r#"{"object":"list","data":[{"id":"kimi-k3.1-pro","object":"model","created":1,"owned_by":"moonshot","context_length":1048576,"supports_reasoning":true}]}"#,
+    );
+    let r = td.get("/api/subscriptions/kimi-api/models").await;
+    let body = r.ok().clone();
+    assert_eq!(body["source"], "provider", "{body}");
+    assert_eq!(
+        body["models"],
+        json!([{"id": "kimi-k3.1-pro", "context": 1_048_576}])
+    );
+    let asked = env.http.calls.lock().unwrap().iter().any(|c| c == MODELS);
+    assert!(asked);
+    // The endpoint fails and this pi lists nothing: the table.
+    env.http.set(MODELS, 500, "{}");
+    let r = td
+        .get("/api/subscriptions/kimi-api/models?refresh=true")
+        .await;
+    let body = r.ok().clone();
+    assert_eq!(body["source"], "fallback", "{body}");
+    let ids: Vec<&str> = body["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids[0], "kimi-k2.7-code");
+    assert!(ids.contains(&"kimi-k3"), "{ids:?}");
+    assert!(!body.to_string().contains(secret));
+}
+
+/// The balance probe of a Moonshot Open Platform key reads the stored key.
+#[tokio::test]
+async fn moonshot_balance_probe_takes_the_stored_key() {
+    let env = boot(|_| {}, |_, _| {}).await;
+    let td = &env.td;
+    td.post(
+        "/api/subscriptions/kimi-api/api-key",
+        json!({"provider": "moonshot", "plan": "api", "key": "sk-ms-probe"}),
+    )
+    .await
+    .ok();
+    env.http.set(
+        "https://api.moonshot.ai/v1/users/me/balance",
+        200,
+        r#"{"code":0,"data":{"available_balance":0,"voucher_balance":0,"cash_balance":0},"scode":"0x0","status":true}"#,
+    );
+    let p = td.post_empty("/api/subscriptions/kimi-api/probe").await;
+    let body = p.ok().to_string();
+    assert!(!body.contains("sk-ms-probe"), "{body}");
+    assert_eq!(p.body["probe_status"], "ok", "{body}");
+    // No money left: the one window is full.
+    assert_eq!(p.body["windows"][0]["window"], "balance");
+    assert_eq!(p.body["windows"][0]["used_pct"], 100.0);
+}
+
 #[tokio::test]
 async fn copilot_probe_takes_a_stored_pat() {
     let env = boot(|_| {}, |_, _| {}).await;

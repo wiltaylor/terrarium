@@ -2814,8 +2814,8 @@ A subscription:
 | Field | Meaning |
 |---|---|
 | `source` | `file` (`subscriptions/<name>.toml`), `api` (the API, the login wizard, an API key), or `fleet:<name>` (a fleet file, §18.1). A file subscription whose file is gone becomes `api` on reload; its samples stay. |
-| `login_status` | `logged_in`, `expiring`, `expired`, `missing`, `unknown` (not checked yet), or `api_key` (a stored Z.ai key: no harness status command can check it, §16.5). See "Expired logins" in §16.2. |
-| `harnesses` | The harnesses that may spend it. pi uses API keys only: a plan login (a provider that sells a plan, Claude, ChatGPT, Copilot, or any OAuth login, with no `plan` "API key") never lists `pi`. The daemon drops `pi` from such a definition when it stores it, and from an older row when it reads it. |
+| `login_status` | `logged_in`, `expiring`, `expired`, `missing`, `unknown` (not checked yet), or `api_key` (a stored Z.ai or Moonshot key: no harness status command can check it, §16.5). See "Expired logins" in §16.2. |
+| `harnesses` | The harnesses that may spend it. pi uses API keys only: a plan login (a provider that sells a plan, Claude, ChatGPT, Copilot, or any OAuth login, with no `plan` "API key") never lists `pi`. The daemon drops `pi` from such a definition when it stores it, and from an older row when it reads it. A `moonshot` subscription lists `pi` only (§16.5). |
 | `probe_status` | `ok`, `failed` (`probe_error` says why), or `none` (no probe, or not run yet). `last_success_at` stays when a probe fails. |
 | `windows` | The newest sample of each window. Window names: `5h`, `7d`, `7d_opus`, `7d_sonnet` (Anthropic); `<n>h` or `<n>d` from the window length (OpenAI); `monthly` (Copilot premium requests). |
 | `local_estimate_only` | `true` when there is no probe: local accounting is the only number. |
@@ -2824,14 +2824,16 @@ A subscription:
 | `account` | The plan account of the subscription (PLAN §16.3), when it has one: `harness` (whose login it holds), `has_login` (the credential file is there), `login` (the Copilot login name, or the email of a Claude login), `source` (`migration`: the shared login moved here at a daemon start; `login`: the login wizard), `created_at`, `updated_at`. Never a secret. |
 | `agents` | The agents whose current `subscription` this is: `[{id, name, project}]`. Always present. |
 | `default` | `true` when the plan account is the default account of its harness (PLAN §16.3): a Claude Code, Codex, or Copilot agent with no subscription runs on it. Each harness has one default or none. Always present. |
-| `default_models` | The model that each harness gets on this subscription when the agent sets no `model`, by harness name, for example `{"pi":"glm-5.3-flash","claude":"glm-5.3"}` for a Z.ai key. Only the harnesses where the daemon picks the model: pi (the provider's default from the pi adapter's table; no entry when pi refuses the subscription) and Claude Code on Z.ai. `{}` when every harness keeps its own default. Always present. |
+| `default_models` | The model that each harness gets on this subscription when the agent sets no `model`, by harness name, for example `{"pi":"glm-5.3-flash","claude":"glm-5.3"}` for a Z.ai key, or `{"pi":"kimi-for-coding"}` for a Moonshot `coding` key. Only the harnesses where the daemon picks the model: pi (the provider's default from the pi adapter's table; no entry when pi refuses the subscription) and Claude Code on Z.ai. `{}` when every harness keeps its own default. Always present. |
 
 Names follow the project name rules; `login` and `detect` are reserved.
 
 Probes: `anthropic-oauth-usage`, `openai-codex-usage` (alias
 `codex-rate-limits`), `github-copilot-quota` (alias
 `copilot-premium-requests`), `zai-usage` (the default of a `zai`
-subscription on the `coding` plan that names no probe), and
+subscription on the `coding` plan that names no probe), `moonshot-balance`
+and `moonshot-cn-balance` (the defaults of a `moonshot` subscription on the
+`api` or `api-cn` plan that names no probe), and
 `openrouter-credits` (the default of an `openrouter` subscription that names
 no probe). `docs/compat.md`, "Usage probes", records each endpoint.
 
@@ -2925,7 +2927,7 @@ keep their card.
 | `POST /api/subscriptions/{name}/verify` | | `{subscription, status}`. Here `subscription` is the **full** subscription (§16.1), after the check. `status` is `{kind, harness, provider, pi_provider?, logged_in, plan?, detail?}`. The harness status command runs against the subscription's plan account (PLAN §16.3; before its migration, the shared home) and sets `login_status` (and `plan`, when the subscription has none). A stored API key counts as logged in: `status` is then `{logged_in: true, detail}`. |
 | `POST /api/subscriptions/{name}/logout` | | The subscription (§16.1), with `login_status` `missing`. A plan account: removes the account directory and nothing else; no harness command runs, so no other account and no shared file changes. `409 conflict` while an agent's current subscription is this one. A subscription with no account (a shared login before its migration): runs `claude auth logout`, `codex logout`, or `copilot logout` against the shared home. pi has no logout command (it uses API keys only): `422 invalid`. An old pi plan account (from before pi took API keys only) logs out as any plan account: its directory goes. A `zai` subscription has no logout either (`422 invalid`): the Claude logout would end the shared Claude login. |
 | `POST /api/subscriptions/{name}/default` | | The subscription (§16.1), with `default: true`. Its plan account becomes the default account of its harness; the old default stops being one, in the same transaction. The audit row is `subscription.default` (`{harness, from, to, reason}`), and a `subscription` event (§16.7) follows. `422 invalid` for an API-key subscription, a subscription with no plan account, and a pi account or a provider that is not the plan provider of the harness. `404 not_found` for an unknown name. |
-| `POST /api/subscriptions/{name}/api-key` | `{provider, key, plan?, base_url?, models?}` | The subscription, without the key. `plan` is for `zai` only. See §16.5. |
+| `POST /api/subscriptions/{name}/api-key` | `{provider, key, plan?, base_url?, models?}` | The subscription, without the key. `plan` is for `zai` and `moonshot` only. See §16.5. |
 | `GET /api/subscriptions/detect` | | Logins found in the Claude Code, Codex, and Copilot homes that no subscription covers (same provider, and the harness is in `harnesses`): `[{kind, harness, provider, logged_in, plan?, detail?, suggested}]`. pi uses API keys only: no pi login is found. `suggested` is a subscription definition. |
 | `POST /api/subscriptions/login` | `{kind, provider?, name?}` | `201` with the login session (§16.4). |
 | `GET /api/subscriptions/login/{id}` | | The login session. |
@@ -2952,7 +2954,8 @@ that has a model:
 1. `provider`: `GET <base>/models` (the OpenAI list shape) with the stored
    API key as a bearer token, for an API-key subscription of `zai` (the
    plan's base URL: `coding` `https://api.z.ai/api/coding/paas/v4`, `api`
-   `https://api.z.ai/api/paas/v4`), `openai-compatible` (the stored
+   `https://api.z.ai/api/paas/v4`), `moonshot` (the plan's base URL, see
+   §16.5), `openai-compatible` (the stored
    `base_url`), `openai`, or `openrouter`. The key stays in the daemon.
 2. `plan`: the model list of the harness login, with the credential of the
    shared harness home. The usage probes read the same credentials.
@@ -2973,7 +2976,8 @@ that has a model:
    uses API keys only: pi runs in an empty pi dir with a placeholder in the
    key env var (`--offline` sends no request). A custom provider of the
    shared `models.json` lists in the shared pi home.
-4. `fallback`: the values of `default_models` (§16.1).
+4. `fallback`: the values of `default_models` (§16.1). For `moonshot`,
+   also the documented model ids of the plan, after the default.
 
 `notes` (absent when empty) says why an earlier source gave no list.
 `name` and `context` (tokens) are in a model only when the source gives
@@ -3094,11 +3098,13 @@ directories are `0700`), and sets `env_var`:
 | `groq` | `GROQ_API_KEY` |
 | `github` | `COPILOT_GITHUB_TOKEN` (a fine-grained PAT with Copilot Requests; the Copilot probe uses it) |
 | `zai` (takes `plan`) | `ZAI_API_KEY`, and the Claude Code vars below |
+| `moonshot` (takes `plan`; pi only) | `MOONSHOT_API_KEY`, and `KIMI_API_KEY` for a Kimi Code plan |
 
 A new name makes an `api` subscription (harness `pi`, or `copilot` for
 `github`, or `claude` and `pi` for `zai`). No endpoint returns the key. The
 audit row `subscription.api_key` has the provider, the plan, the env var,
-`base_url`, and `models`. A `plan` with another provider is `422 invalid`.
+`base_url`, and `models`. A `plan` with a provider other than `zai` and
+`moonshot` is `422 invalid`.
 
 **Z.ai (GLM).** `provider` `zai`, `plan` `coding` (the GLM Coding Plan,
 the default) or `api` (pay as you go). Another plan is `422 invalid`. The
@@ -3125,6 +3131,35 @@ pi's built-in provider, `https://api.z.ai/api/coding/paas/v4`) or
 `--model` with the agent's model or `glm-5.3-flash`. `zai-api` is a
 custom provider in the agent's `models.json`: every pi agent gets a
 read-only copy of the shared `models.json` with `zai-api` added.
+
+**Moonshot AI (Kimi), pi only.** `provider` `moonshot`. The operator
+decided that only pi spends a Moonshot key (PLAN §16): Claude Code does
+not get the Anthropic-compatible endpoints. The `plan` picks the product
+and the region. Moonshot keys work only for their own product and region:
+
+| `plan` | Product | Base URL | pi `--provider` | Default `--model` | Probe |
+|---|---|---|---|---|---|
+| `coding` (the default) | Kimi Code membership, overseas | `https://api.kimi.ai/coding/v1` | `kimi-coding-intl` | `kimi-for-coding` | none |
+| `coding-cn` | Kimi Code membership, China | `https://api.kimi.com/coding/v1` | `kimi-coding` | `kimi-for-coding` | none |
+| `api` | Open Platform, pay as you go | `https://api.moonshot.ai/v1` | `moonshotai` | `kimi-k2.7-code` | `moonshot-balance` |
+| `api-cn` | Open Platform, pay as you go, China | `https://api.moonshot.cn/v1` | `moonshotai-cn` | `kimi-k2.7-code` | `moonshot-cn-balance` |
+
+Another plan is `422 invalid`. A new name gets `harnesses = ["pi"]` and
+`login_status` `api_key`. `POST /api/subscriptions` and a subscription
+file with `provider = "moonshot"` and a harness other than `pi` are
+`422 invalid`. A Moonshot key on an existing subscription of another
+provider, or of another harness, is `422 invalid`. Verify and logout act
+as for Z.ai. The env of an agent on it is `MOONSHOT_API_KEY` (the key),
+and also `KIMI_API_KEY` (the same key) for a `coding` or `coding-cn` plan,
+because pi's `kimi-coding` reads that var. There is no Anthropic var.
+`kimi-coding-intl` is a custom provider in the agent's `models.json`, like
+`zai-api`. The other three are pi's built-in providers.
+
+A window of `moonshot-balance` or `moonshot-cn-balance` is `balance`: 0 %
+while the account has money, 100 % at an `available_balance` of 0 or less.
+It has no reset time. `raw` has `available_balance`, `voucher_balance`,
+`cash_balance`, and `currency` (`USD` or `CNY`). `docs/compat.md`,
+"Moonshot", has the sources. Nothing about Moonshot is verified live.
 
 At each launch, `RunnerSupervisor` puts the stored key into the env of
 every agent whose `subscription` has `env_var`

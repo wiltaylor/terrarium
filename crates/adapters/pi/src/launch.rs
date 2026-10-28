@@ -423,6 +423,53 @@ mod tests {
     }
 
     #[test]
+    fn moonshot_key_gets_the_kimi_provider_and_model() {
+        let f = &crate::PI_PINNED;
+        let ms = |plan: &str| SubscriptionDef {
+            provider: "moonshot".into(),
+            plan: Some(plan.into()),
+            ..key_sub()
+        };
+        for (plan, want) in [
+            (
+                "coding",
+                [
+                    "--provider",
+                    "kimi-coding-intl",
+                    "--model",
+                    "kimi-for-coding",
+                ],
+            ),
+            (
+                "coding-cn",
+                ["--provider", "kimi-coding", "--model", "kimi-for-coding"],
+            ),
+            (
+                "api",
+                ["--provider", "moonshotai", "--model", "kimi-k2.7-code"],
+            ),
+            (
+                "api-cn",
+                ["--provider", "moonshotai-cn", "--model", "kimi-k2.7-code"],
+            ),
+        ] {
+            assert_eq!(
+                model_args(f, &test_agent(None), Some(&ms(plan))),
+                want,
+                "{plan}"
+            );
+        }
+        // The agent's model overrides the default; a provider prefix goes.
+        assert_eq!(
+            model_args(f, &test_agent(Some("moonshotai/kimi-k3")), Some(&ms("api"))),
+            ["--provider", "moonshotai", "--model", "kimi-k3"]
+        );
+        assert_eq!(crate::required_env(&ms("coding")), Some("KIMI_API_KEY"));
+        assert_eq!(crate::required_env(&ms("api")), Some("MOONSHOT_API_KEY"));
+        assert_eq!(crate::start_refusal(&ms("coding"), None), None);
+    }
+
+    #[test]
     fn subscription_and_model_use_the_agent_model() {
         let f = &crate::PI_PINNED;
         assert_eq!(

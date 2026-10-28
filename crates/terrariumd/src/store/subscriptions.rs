@@ -112,13 +112,23 @@ pub fn plan_refusal(harness: HarnessId, sub: &Subscription) -> Option<String> {
 }
 
 /// The probe of a subscription that names none: `zai-usage` for a Z.ai
-/// GLM Coding Plan (the `api` plan has no quota endpoint), and
+/// GLM Coding Plan (the `api` plan has no quota endpoint),
+/// `moonshot-balance` or `moonshot-cn-balance` for a Moonshot Open
+/// Platform plan (Kimi Code documents no usage endpoint), and
 /// `openrouter-credits` for OpenRouter. Applied when a row is read, so rows
 /// written before the probe existed get it too.
 pub fn default_probe(provider: &str, plan: Option<&str>) -> Option<String> {
     use terrarium_core::zai;
     if zai::is_zai(provider) && zai::plan_or_default(plan) == zai::Plan::Coding {
         return Some(crate::probes::zai::NAME.to_owned());
+    }
+    if terrarium_core::moonshot::is_moonshot(provider) {
+        use terrarium_core::moonshot::{Plan, plan_or_default};
+        return match plan_or_default(plan) {
+            Plan::Api => Some(crate::probes::moonshot::NAME.to_owned()),
+            Plan::ApiCn => Some(crate::probes::moonshot::NAME_CN.to_owned()),
+            Plan::Coding | Plan::CodingCn => None,
+        };
     }
     provider
         .trim()
@@ -195,6 +205,16 @@ pub fn upsert_def(t: &mut Tx<'_>, def: &SubscriptionDef, source: &str) -> ApiRes
     }
     if terrarium_core::zai::is_zai(&def.provider) {
         terrarium_core::zai::parse_plan(def.plan.as_deref()).map_err(ApiError::invalid)?;
+    }
+    // Moonshot is for pi only (an operator decision; `docs/PLAN.md` §16).
+    if terrarium_core::moonshot::is_moonshot(&def.provider) {
+        terrarium_core::moonshot::parse_plan(def.plan.as_deref()).map_err(ApiError::invalid)?;
+        if let Some(why) = terrarium_core::moonshot::harness_refusal(&def.harnesses) {
+            return Err(ApiError::invalid(format!(
+                "subscription `{}`: {why}",
+                def.name
+            )));
+        }
     }
     let at = now();
     let harnesses = serde_json::to_string(&spendable_harnesses(def))?;
@@ -998,6 +1018,72 @@ mod tests {
             db.read(|c| get(c, "glm")).await.unwrap().login_status,
             API_KEY
         );
+    }
+
+    #[tokio::test]
+    async fn moonshot_plans_and_harnesses_are_checked() {
+        let db = db();
+        let ms = |plan: Option<&str>, harnesses: Vec<HarnessId>| SubscriptionDef {
+            name: "kimi".into(),
+            provider: "moonshot".into(),
+            plan: plan.map(str::to_owned),
+            harnesses,
+            probe: None,
+            alert_at: 80,
+        };
+        for plan in [
+            None,
+            Some("coding"),
+            Some("coding-cn"),
+            Some("api"),
+            Some("api-cn"),
+        ] {
+            let d = ms(plan, vec![HarnessId::Pi]);
+            db.write("system", move |t| upsert_def(t, &d, SOURCE_API))
+                .await
+                .unwrap();
+        }
+        let d = ms(Some("Allegretto"), vec![HarnessId::Pi]);
+        let err = db
+            .write("system", move |t| upsert_def(t, &d, SOURCE_API))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, crate::error::Code::Invalid);
+        assert!(err.message.contains("coding-cn"), "{}", err.message);
+        // pi only: Claude Code, Codex and Copilot are refused, alone or
+        // beside pi, from the API and from a file.
+        for h in [HarnessId::Claude, HarnessId::Codex, HarnessId::Copilot] {
+            for (harnesses, source) in [(vec![h], SOURCE_API), (vec![HarnessId::Pi, h], "file")] {
+                let d = ms(Some("api"), harnesses);
+                let err = db
+                    .write("system", move |t| upsert_def(t, &d, source))
+                    .await
+                    .unwrap_err();
+                assert_eq!(err.code, crate::error::Code::Invalid);
+                assert!(err.message.contains("pi harness only"), "{}", err.message);
+                assert!(err.message.contains(h.as_str()), "{}", err.message);
+            }
+        }
+        assert_eq!(
+            db.read(|c| get(c, "kimi")).await.unwrap().harnesses,
+            [HarnessId::Pi]
+        );
+    }
+
+    #[tokio::test]
+    async fn moonshot_open_platform_plans_get_the_balance_probe() {
+        assert_eq!(
+            default_probe("moonshot", Some("api")).as_deref(),
+            Some("moonshot-balance")
+        );
+        assert_eq!(
+            default_probe("Moonshot", Some("api-cn")).as_deref(),
+            Some("moonshot-cn-balance")
+        );
+        // Kimi Code documents no usage endpoint.
+        assert_eq!(default_probe("moonshot", Some("coding")), None);
+        assert_eq!(default_probe("moonshot", Some("coding-cn")), None);
+        assert_eq!(default_probe("moonshot", None), None);
     }
 
     #[tokio::test]

@@ -724,6 +724,7 @@ mod tests {
             Some(PlanKind::Copilot)
         );
         assert_eq!(kind(&sub("zai", HarnessId::Claude), None), None);
+        assert_eq!(kind(&sub("moonshot", HarnessId::Pi), None), None);
     }
 
     #[test]

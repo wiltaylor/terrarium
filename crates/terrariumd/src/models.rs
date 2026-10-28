@@ -204,6 +204,15 @@ pub async fn fetch(src: &Sources<'_>, sub: &Subscription) -> ModelList {
     }
     let mut ids: Vec<String> = default_models(sub).into_values().collect();
     ids.dedup();
+    // Moonshot: the plan's documented model ids, the default first.
+    if terrarium_core::moonshot::is_moonshot(&sub.provider) {
+        let plan = terrarium_core::moonshot::plan_or_default(sub.plan.as_deref());
+        for m in plan.fallback_models() {
+            if !ids.iter().any(|i| i == m) {
+                ids.push((*m).to_owned());
+            }
+        }
+    }
     done(
         ids.into_iter().map(ModelInfo::id).collect(),
         ModelSource::Fallback,
@@ -225,6 +234,10 @@ fn done(models: Vec<ModelInfo>, source: ModelSource, notes: Vec<String>) -> Mode
 ///
 /// - `zai`: the plan's endpoint (`terrarium_core::zai::Plan::openai_base_url`).
 ///   Checked live on the coding plan (`docs/compat.md`, "Z.ai models").
+/// - `moonshot`: the plan's endpoint
+///   (`terrarium_core::moonshot::Plan::openai_base_url`). The Open Platform
+///   documents `GET /v1/models`; Kimi Code does not, so a failure there
+///   falls through to pi's catalog and the table. Not verified live.
 /// - `openai-compatible`: the stored base URL.
 /// - `openai`: `https://api.openai.com/v1` (a key, not a ChatGPT plan).
 /// - `openrouter`: `https://openrouter.ai/api/v1`.
@@ -235,6 +248,10 @@ pub fn openai_base(sub: &Subscription, key: &ApiKey) -> Option<String> {
     let provider = sub.provider.trim().to_ascii_lowercase();
     let base = if terrarium_core::zai::is_zai(&provider) {
         terrarium_core::zai::plan_or_default(sub.plan.as_deref())
+            .openai_base_url()
+            .to_owned()
+    } else if terrarium_core::moonshot::is_moonshot(&provider) {
+        terrarium_core::moonshot::plan_or_default(sub.plan.as_deref())
             .openai_base_url()
             .to_owned()
     } else {
@@ -479,6 +496,18 @@ zai-api   glm-5.3            1M       131.1K   yes       no    \n";
             openai_base(&sub("zai", Some("api")), &key(None)).as_deref(),
             Some("https://api.z.ai/api/paas/v4")
         );
+        for (plan, want) in [
+            (None, "https://api.kimi.ai/coding/v1"),
+            (Some("coding-cn"), "https://api.kimi.com/coding/v1"),
+            (Some("api"), "https://api.moonshot.ai/v1"),
+            (Some("api-cn"), "https://api.moonshot.cn/v1"),
+        ] {
+            assert_eq!(
+                openai_base(&sub("moonshot", plan), &key(None)).as_deref(),
+                Some(want),
+                "{plan:?}"
+            );
+        }
         assert_eq!(
             openai_base(&sub("openai-compatible", None), &key(Some("http://l/v1/"))).as_deref(),
             Some("http://l/v1")

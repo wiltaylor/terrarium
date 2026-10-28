@@ -1675,6 +1675,77 @@ a table `provider model context max-out thinking images`; the fixture is
 `crates/terrariumd/tests/fixtures/models/pi_list_zai.txt`. Without the key
 var it prints "No models available".
 
+### Moonshot (Kimi): from docs, not verified live
+
+Read on 2026-10-28. No Moonshot key was available, so every fact below is
+**from docs, not verified live**, unless the line says "verified offline".
+The code is `crates/terrarium-core/src/moonshot.rs` and
+`crates/terrariumd/src/probes/moonshot.rs`; the API is docs/api.md §16.5.
+
+**Decision (operator, 2026-10-28): a Moonshot subscription is for pi
+only.** Claude Code does not get the Anthropic-compatible endpoints. The
+daemon refuses a `moonshot` subscription that lists another harness, and it
+refuses a start of a Claude Code, Codex, or Copilot agent on one.
+
+Moonshot sells two products. Each has its own keys, and each key works only
+in the region where it was made:
+
+| Fact | Value | Source |
+|---|---|---|
+| Kimi Code (membership) | Plans Plus, Pro, Pro+ (and the legacy Moderato, Allegretto, Andante). The Go plan has no coding quota. Keys come from the Kimi Code Console; up to 5 keys. | https://www.kimi.com/code/docs/en/ , https://www.kimi.com/code/docs/en/kimi-code/membership.html |
+| Kimi Code, OpenAI-compatible | Overseas `https://api.kimi.ai/coding/v1`; China `https://api.kimi.com/coding/v1` (Chat Completions and Responses) | https://www.kimi.com/code/docs/en/ |
+| Kimi Code, Anthropic-compatible | Overseas `https://api.kimi.ai/coding/`; China `https://api.kimi.com/coding/`. Not used (pi only). | https://www.kimi.com/code/docs/en/ , https://www.kimi.com/code/docs/en/third-party-tools/claude-code |
+| Kimi Code models | `k3.1-pro`, `k3.1-pro-highspeed`, `k3`, `k3-256k`, `kimi-for-coding`, `kimi-for-coding-highspeed`. The tier decides which ids work and the context (256K or 1M). | https://www.kimi.com/code/docs/en/kimi-code/models.html |
+| Kimi Code quota | A 5-hour rolling window, a monthly total, and (legacy plans only) a weekly window. All clients share it. | https://www.kimi.com/code/docs/en/kimi-code/membership.html |
+| Kimi Code usage endpoint | **Not documented.** The usage shows in the Kimi Code Console, the Kimi app, and the CLI `/usage` only. No probe. | https://www.kimi.com/code/docs/en/kimi-code/membership.html |
+| Open Platform (pay as you go) | Global `https://api.moonshot.ai/v1` (keys from platform.kimi.ai); China `https://api.moonshot.cn/v1` (keys from platform.kimi.com). Anthropic Messages at `/anthropic`; not used. | https://platform.kimi.ai/docs/api/overview , https://platform.kimi.com/docs/api/overview |
+| Open Platform model list | `GET /v1/models`, OpenAI list shape, with `context_length` per model | https://platform.kimi.ai/docs/api/list-models |
+| Open Platform balance | `GET /v1/users/me/balance` answers `{code, data: {available_balance, voucher_balance, cash_balance}, scode, status}`. US dollars (global) or yuan (China). At an `available_balance` of 0 or less, the inference API refuses calls. | https://platform.kimi.ai/docs/api/balance , https://platform.kimi.com/docs/api/balance |
+| Open Platform models | Kimi K3.1 Pro, K3, K2.7 Code, K2.6. The K2 series retires at the end of December 2026. | https://platform.kimi.ai/docs/pricing/chat |
+| Key header | `Authorization: Bearer <key>` | https://platform.kimi.ai/docs/api/overview |
+| Key format | **Not documented.** No secret-scan rule. | |
+
+The plan of a `moonshot` subscription picks the product and the region:
+
+| Plan | pi provider | Key var | Default model |
+|---|---|---|---|
+| `coding` (default) | `kimi-coding-intl` (custom, in the agent's `models.json`) | `KIMI_API_KEY` | `kimi-for-coding` |
+| `coding-cn` | `kimi-coding` (built-in) | `KIMI_API_KEY` | `kimi-for-coding` |
+| `api` | `moonshotai` (built-in) | `MOONSHOT_API_KEY` | `kimi-k2.7-code` |
+| `api-cn` | `moonshotai-cn` (built-in) | `MOONSHOT_API_KEY` | `kimi-k2.7-code` |
+
+**Verified offline** (pi 1.4.0 in `./tools`, the files only, no turn):
+
+- pi has three built-in providers: `kimi-coding` (base URL
+  `https://api.kimi.com/coding/v1`, key from `KIMI_API_KEY`, also an OAuth
+  login), `moonshotai` (`https://api.moonshot.ai/v1`, `MOONSHOT_API_KEY`),
+  and `moonshotai-cn` (`https://api.moonshot.cn/v1`, `MOONSHOT_API_KEY`)
+  (`pi-ai/dist/providers/`).
+- pi's `kimi-coding` has the China host only. The `coding` plan therefore
+  uses the custom provider `kimi-coding-intl` with the overseas host. Its
+  models copy the `kimi-coding` catalogue, `compat` block included.
+- pi's `kimi-coding` catalogue has `k3`, `k3-256k`, `kimi-for-coding`, and
+  `kimi-for-coding-highspeed`; no `k3.1-pro`. The `moonshotai` catalogue
+  has `kimi-k3`, `kimi-k2.7-code`, `kimi-k2.7-code-highspeed`, and
+  `kimi-k2.6`; no `kimi-k3.1-pro`. The default models are the cheapest
+  ids of each catalogue.
+- pi turns on its Moonshot request format from the provider id or from a
+  base URL with `api.moonshot.` (`detectCompat`). The Kimi Code models set
+  their `compat` block in the catalogue.
+
+The probe `moonshot-balance` (plan `api`) or `moonshot-cn-balance` (plan
+`api-cn`) makes one window, `balance`: 0 % while `available_balance` is
+over 0, else 100 %, with no reset time. `raw` has the three amounts and
+`currency`. A `moonshot` subscription with no `probe` gets the probe of its
+plan when the row is read. A Kimi Code plan has no probe.
+
+Not tested: a turn on any endpoint; whether the China Kimi Code host
+(`api.kimi.com`) also takes an overseas key; whether
+`https://api.kimi.ai/coding/v1/models` answers (the model list then falls
+back to pi's catalogue and the table); the balance answer; the key format.
+The live test is `cargo test -p terrarium-adapter-pi --test moonshot_live
+-- --ignored` with `MOONSHOT_API_KEY` set (docs/getting-started.md §6.4).
+
 ### Model lists (plan logins)
 
 **Verified live** on 2026-10-26 against the operator's real logins: Claude

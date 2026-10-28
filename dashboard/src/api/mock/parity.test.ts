@@ -367,6 +367,31 @@ describe("mock parity with docs/api.md", () => {
     expect((await api.agents.swapSubscription("01JB0SYS000000000000000007", "anthropic-max-2")).applied).toBe("next_start");
   });
 
+  it("stores a Moonshot key as a pi-only subscription; an Open Platform plan gets the balance probe", async () => {
+    const api = mock();
+    const s = await api.subscriptions.setApiKey("kimi", { provider: "moonshot", key: "sk-never-shown" });
+    expect(s).toMatchObject({
+      name: "kimi", provider: "moonshot", plan: "coding", harnesses: ["pi"], env_var: "MOONSHOT_API_KEY", source: "api",
+      login_status: "api_key", probe_status: "none", local_estimate_only: true, has_api_key: true, default_models: { pi: "kimi-for-coding" },
+    });
+    expect(s).not.toHaveProperty("probe");
+    expect(JSON.stringify(s)).not.toContain("sk-never-shown");
+    const cn = await api.subscriptions.setApiKey("kimi-cn", { provider: "moonshot", key: "k", plan: "api-cn" });
+    expect(cn).toMatchObject({ plan: "api-cn", probe: "moonshot-cn-balance", local_estimate_only: false, default_models: { pi: "kimi-k2.7-code" } });
+    await expect(api.subscriptions.setApiKey("kimi3", { provider: "moonshot", key: "k", plan: "Allegretto" })).rejects.toMatchObject({ status: 422, code: "invalid" });
+    // pi only: a definition for another harness, or a key on a subscription of another harness.
+    for (const h of ["claude", "codex", "copilot"] as const) {
+      await expect(api.subscriptions.create({ name: "kimi4", provider: "moonshot", plan: "api", harnesses: [h] })).rejects.toMatchObject({ status: 422, code: "invalid" });
+      await expect(api.subscriptions.create({ name: "kimi4", provider: "moonshot", harnesses: ["pi", h] })).rejects.toMatchObject({ status: 422, code: "invalid" });
+    }
+    await expect(api.subscriptions.setApiKey("anthropic-max", { provider: "moonshot", key: "k" })).rejects.toMatchObject({ status: 422, code: "invalid" });
+    expect((await api.subscriptions.verify("kimi")).subscription.login_status).toBe("api_key");
+    await expect(api.subscriptions.logout("kimi")).rejects.toMatchObject({ status: 422, code: "invalid" });
+    const models = await api.subscriptions.models("kimi");
+    expect(models.source).toBe("fallback");
+    expect(models.models[0]?.id).toBe("kimi-for-coding");
+  });
+
   it("stores a Z.ai key as a claude+pi subscription with plan, api_key status, and no probe", async () => {
     const api = mock();
     const s = await api.subscriptions.setApiKey("glm", { provider: "zai", key: "zk-never-shown", plan: "api" });
@@ -1563,6 +1588,7 @@ describe("schedules (docs/api.md §19, the daemon's api/schedules.rs)", () => {
     for (const s of subs) expect(s.default_models).toBeTypeOf("object");
     const zai = subs.find((s) => s.name === "zai-key")!;
     expect(zai.default_models).toEqual({ pi: "glm-5.3-flash", claude: "glm-5.3" });
+    expect(subs.find((s) => s.name === "kimi-key")!.default_models).toEqual({ pi: "kimi-for-coding" });
     // pi refuses a Claude plan: no pi default.
     expect(subs.find((s) => s.name === "anthropic-max")!.default_models).toEqual({});
   });

@@ -1426,7 +1426,11 @@ export interface StartLogin {
 export interface ApiKeyInput {
   provider: string;
   key: string;
-  /** `zai` only: `coding` (GLM Coding Plan, the default) or `api` (pay as you go). */
+  /**
+   * `zai`: `coding` (GLM Coding Plan, the default) or `api` (pay as you go).
+   * `moonshot` (pi only): `coding` (Kimi Code, the default), `coding-cn`, `api` (Open Platform), or `api-cn`.
+   * No other provider takes a plan.
+   */
   plan?: string;
   base_url?: string;
   models?: string[];

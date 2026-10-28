@@ -125,8 +125,11 @@ export function countdown(ms: number): string {
 export const isDeviceFlow = (k: WizardLogin): boolean => k === "codex" || k === "copilot";
 export const takesCode = (k: WizardLogin): boolean => k === "claude";
 
-/** The providers of `POST /api/subscriptions/{name}/api-key` and their env vars (docs/api.md §16.5). */
-export const KEY_PROVIDERS: { id: string; env: string; label: string }[] = [
+/**
+ * The providers of `POST /api/subscriptions/{name}/api-key` and their env vars (docs/api.md §16.5).
+ * `harnesses`: the harnesses the daemon gives the new subscription; the form shows them.
+ */
+export const KEY_PROVIDERS: { id: string; env: string; label: string; harnesses?: string[] }[] = [
   { id: "anthropic", env: "ANTHROPIC_API_KEY", label: "Anthropic" },
   { id: "openai", env: "OPENAI_API_KEY", label: "OpenAI" },
   { id: "openai-compatible", env: "OPENAI_API_KEY + OPENAI_BASE_URL", label: "OpenAI-compatible endpoint" },
@@ -135,7 +138,8 @@ export const KEY_PROVIDERS: { id: string; env: string; label: string }[] = [
   { id: "xai", env: "XAI_API_KEY", label: "xAI" },
   { id: "groq", env: "GROQ_API_KEY", label: "Groq" },
   { id: "github", env: "COPILOT_GITHUB_TOKEN", label: "GitHub (fine-grained PAT with Copilot Requests)" },
-  { id: "zai", env: "ZAI_API_KEY (pi) and ANTHROPIC_AUTH_TOKEN (Claude Code)", label: "Z.ai (GLM)" },
+  { id: "zai", env: "ZAI_API_KEY (pi) and ANTHROPIC_AUTH_TOKEN (Claude Code)", label: "Z.ai (GLM)", harnesses: ["claude", "pi"] },
+  { id: "moonshot", env: "MOONSHOT_API_KEY (and KIMI_API_KEY for Kimi Code)", label: "Moonshot AI / Kimi (pi only)", harnesses: ["pi"] },
 ];
 
 /** The plan that a Z.ai key gets when the form names none. */
@@ -147,13 +151,32 @@ export const ZAI_PLANS: { id: string; label: string }[] = [
   { id: "api", label: "Pay as you go (API)" },
 ];
 
+/** The plan that a Moonshot key gets when the form names none. */
+export const MOONSHOT_DEFAULT_PLAN = "coding";
+
+/** The plans of a Moonshot key (docs/api.md §16.5): the product and the region. The first is the default. */
+export const MOONSHOT_PLANS: { id: string; label: string }[] = [
+  { id: "coding", label: "Kimi Code membership (api.kimi.ai)" },
+  { id: "coding-cn", label: "Kimi Code membership, China (api.kimi.com)" },
+  { id: "api", label: "Open Platform, pay as you go (api.moonshot.ai)" },
+  { id: "api-cn", label: "Open Platform, pay as you go, China (api.moonshot.cn)" },
+];
+
+/** The plans of each provider that takes one. */
+export const KEY_PLANS: Record<string, { id: string; label: string }[]> = { zai: ZAI_PLANS, moonshot: MOONSHOT_PLANS };
+
+/** The default plan of a provider that takes one. */
+export const defaultPlan = (provider: string): string => KEY_PLANS[provider]?.[0]?.id ?? "";
+
 /** Where to get the key, for the providers that need a word of help. */
 export const KEY_HELP: Record<string, string> = {
   zai: "Make a key at z.ai/manage-apikey/apikey-list. The GLM Coding Plan and pay as you go use the same key; the plan picks the endpoint. Agents run on Claude Code and pi.",
+  moonshot:
+    "For pi agents only. A Kimi Code key comes from kimi.com/code/console; an Open Platform key comes from platform.kimi.ai (China: platform.kimi.com). The keys are different, and a key works only in its own region. The plan picks the endpoint.",
 };
 
 /** True when the provider takes a plan. */
-export const takesPlan = (provider: string): boolean => provider === "zai";
+export const takesPlan = (provider: string): boolean => provider in KEY_PLANS;
 
 /** The body of `POST /api/subscriptions/{name}/api-key` from the form fields. */
 export function apiKeyBody(f: { provider: string; key: string; plan?: string; baseUrl?: string; models?: string }): ApiKeyInput {
@@ -161,7 +184,7 @@ export function apiKeyBody(f: { provider: string; key: string; plan?: string; ba
   return {
     provider: f.provider,
     key: f.key,
-    ...(takesPlan(f.provider) ? { plan: f.plan || ZAI_DEFAULT_PLAN } : {}),
+    ...(takesPlan(f.provider) ? { plan: f.plan && KEY_PLANS[f.provider]?.some((p) => p.id === f.plan) ? f.plan : defaultPlan(f.provider) } : {}),
     ...(f.provider === "openai-compatible" ? { base_url: (f.baseUrl ?? "").trim() } : {}),
     ...(models.length ? { models } : {}),
   };

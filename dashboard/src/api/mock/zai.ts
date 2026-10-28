@@ -2,6 +2,7 @@
 // daemon side is `terrarium_core::zai` and `api/subscriptions.rs`.
 
 import type { ApiKeyInput, Harness, LoginStatus } from "../types";
+import { isMoonshot, moonshotPlan } from "./moonshot";
 
 export const ZAI_KEY_ENV = "ZAI_API_KEY";
 export const ZAI_PLANS = ["coding", "api"] as const;
@@ -21,14 +22,18 @@ export function zaiPlan(
   };
 }
 
-/** Check the plan of a key body: zai takes `coding` or `api`; other providers take none. Returns an error text. */
+/** Check the plan of a key body: zai takes `coding` or `api`; moonshot takes `coding`, `coding-cn`, `api` or `api-cn`; other providers take none. Returns an error text. */
 export function checkKeyPlan(input: ApiKeyInput): string | null {
   if (isZai(input.provider)) {
     const r = zaiPlan(input.plan);
     return "error" in r ? r.error : null;
   }
+  if (isMoonshot(input.provider)) {
+    const r = moonshotPlan(input.plan);
+    return "error" in r ? r.error : null;
+  }
   return input.plan !== undefined
-    ? `\`plan\` is only for provider zai, not \`${input.provider}\``
+    ? `\`plan\` is only for providers zai and moonshot, not \`${input.provider}\``
     : null;
 }
 

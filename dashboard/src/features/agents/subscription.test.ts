@@ -42,6 +42,22 @@ const zai = sub({ name: "zai-key", provider: "zai", plan: "coding", harnesses: [
 const max = sub({ name: "anthropic-max", plan: "Max 20x" });
 const pro = sub({ name: "openai-pro", provider: "openai", plan: "pro", harnesses: ["codex"], login_status: "expired" });
 const all = [max, pro, zai];
+const kimi = sub({ name: "kimi-key", provider: "moonshot", plan: "coding", harnesses: ["pi"], login_status: "api_key", has_api_key: true, default_models: { pi: "kimi-for-coding" } });
+
+describe("a Moonshot subscription in the agent form", () => {
+  it("shows only for pi agents", () => {
+    const list = [...all, kimi];
+    expect(compatibleSubscriptions(list, "pi").map((s) => s.name)).toEqual(["zai-key", "kimi-key"]);
+    for (const h of ["claude", "codex", "copilot"] as const) {
+      expect(compatibleSubscriptions(list, h).map((s) => s.name)).not.toContain("kimi-key");
+      expect(subscriptionOptions(list, h, "").map((o) => o.value)).not.toContain("kimi-key");
+      const r = reconcileSubscription("kimi-key", h, list);
+      expect(r.subscription).toBe("");
+      expect(r.note).toContain(`kimi-key is not for ${h}`);
+    }
+    expect(defaultModelFor(kimi, "pi")).toBe("kimi-for-coding");
+  });
+});
 
 describe("subscription choice", () => {
   it("lists only the subscriptions of the harness", () => {

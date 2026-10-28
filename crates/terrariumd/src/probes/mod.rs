@@ -19,6 +19,7 @@
 
 pub mod anthropic;
 pub mod github;
+pub mod moonshot;
 pub mod openai;
 pub mod openrouter;
 pub mod zai;
@@ -237,6 +238,8 @@ pub fn all() -> Vec<Arc<dyn QuotaProbe>> {
         Arc::new(github::CopilotQuota),
         Arc::new(zai::ZaiUsage),
         Arc::new(openrouter::OpenRouterCredits),
+        Arc::new(moonshot::GLOBAL),
+        Arc::new(moonshot::CHINA),
     ]
 }
 
@@ -599,6 +602,11 @@ pub(crate) mod tests {
         assert_eq!(for_provider("openai"), Some(openai::NAME));
         assert_eq!(for_provider("google"), None);
         assert_eq!(by_name("zai-usage").unwrap().name(), zai::NAME);
+        assert_eq!(by_name("moonshot-balance").unwrap().name(), moonshot::NAME);
+        assert_eq!(
+            by_name("moonshot-cn-balance").unwrap().name(),
+            moonshot::NAME_CN
+        );
         assert_eq!(
             by_name("openrouter-credits").unwrap().name(),
             openrouter::NAME

@@ -1488,8 +1488,10 @@ pub fn kind_of(sub: &Subscription) -> Option<(LoginKind, Option<String>)> {
 pub struct ApiKey {
     pub provider: String,
     pub key: String,
-    /// `zai` only: `coding` (the GLM Coding Plan, the default) or `api`
-    /// (pay as you go). It becomes the subscription's plan.
+    /// `zai`: `coding` (the GLM Coding Plan, the default) or `api` (pay
+    /// as you go). `moonshot`: `coding` (Kimi Code, the default),
+    /// `coding-cn`, `api` (Open Platform), or `api-cn`. It becomes the
+    /// subscription's plan.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1523,6 +1525,9 @@ pub fn env_var_for(provider: &str) -> Option<(&'static str, Option<&'static str>
         // The base URLs are fixed per plan (`terrarium_core::zai`); no
         // base URL var.
         "zai" => (terrarium_core::zai::KEY_ENV, None),
+        // pi only. The plan picks the base URL; a Kimi Code plan also gets
+        // `KIMI_API_KEY` ([`credential_env_for`]).
+        "moonshot" => (terrarium_core::moonshot::KEY_ENV, None),
         _ => return None,
     })
 }
@@ -1583,6 +1588,10 @@ pub fn stored_key(state_dir: &Path, name: &str) -> Option<String> {
 /// reads `ZAI_API_KEY` and ignores the Anthropic vars, because its
 /// `--provider` is `zai` or `zai-api`.
 ///
+/// A Moonshot key (`terrarium_core::moonshot`, pi only) also gives
+/// `KIMI_API_KEY` for a Kimi Code plan, because pi's `kimi-coding`
+/// provider reads that var. Never an Anthropic var.
+///
 /// Call site: the launch path of `RunnerSupervisor` (the agent's
 /// `LaunchSpec::env`, after the adapter's env and before the sandbox
 /// wraps it), for an agent whose `subscription` names `sub`. The values
@@ -1597,6 +1606,11 @@ pub fn credential_env_for(state_dir: &Path, sub: &Subscription) -> Vec<(String, 
     let mut out = vec![(var.to_owned(), k.key.clone())];
     if terrarium_core::zai::is_zai(&sub.provider) || terrarium_core::zai::is_zai(&k.provider) {
         out.extend(terrarium_core::zai::claude_env(&k.key));
+        return out;
+    }
+    if terrarium_core::moonshot::is_moonshot(&sub.provider) {
+        let plan = terrarium_core::moonshot::plan_or_default(sub.plan.as_deref());
+        out.extend(terrarium_core::moonshot::extra_env(plan, &k.key));
         return out;
     }
     if let (Some(url), Some((_, Some(url_var)))) = (k.base_url.as_ref(), env_var_for(&k.provider)) {
@@ -1785,5 +1799,41 @@ mod tests {
         assert!(!env.contains_key("OPENAI_BASE_URL"));
         // The key never shows in the debug form.
         assert!(!format!("{key:?}").contains("zk-test"));
+    }
+
+    #[test]
+    fn moonshot_key_feeds_pi_env_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let key = ApiKey {
+            provider: "moonshot".into(),
+            key: "sk-ms-test".into(),
+            plan: Some("coding".into()),
+            base_url: None,
+            models: vec![],
+        };
+        store_key(tmp.path(), "kimi", &key).unwrap();
+        let mut sub: Subscription = serde_json::from_value(json!({
+            "name": "kimi", "provider": "moonshot", "plan": "coding", "harnesses": ["pi"],
+            "alert_at": 80, "source": "api", "login_status": "api_key", "probe_status": "none",
+            "created_at": "", "updated_at": ""
+        }))
+        .unwrap();
+        assert!(credential_env_for(tmp.path(), &sub).is_empty());
+        assert_eq!(env_var_for("moonshot"), Some(("MOONSHOT_API_KEY", None)));
+        sub.env_var = Some("MOONSHOT_API_KEY".into());
+        let env = |sub: &Subscription| -> std::collections::BTreeMap<String, String> {
+            credential_env_for(tmp.path(), sub).into_iter().collect()
+        };
+        // A Kimi Code plan: pi's `kimi-coding` reads KIMI_API_KEY.
+        let e = env(&sub);
+        assert_eq!(e["MOONSHOT_API_KEY"], "sk-ms-test");
+        assert_eq!(e["KIMI_API_KEY"], "sk-ms-test");
+        assert_eq!(e.len(), 2, "{:?}", e.keys());
+        // An Open Platform plan: MOONSHOT_API_KEY only.
+        sub.plan = Some("api-cn".into());
+        let e = env(&sub);
+        assert_eq!(e.keys().collect::<Vec<_>>(), ["MOONSHOT_API_KEY"]);
+        // Never a Claude Code var.
+        assert!(!e.keys().any(|k| k.starts_with("ANTHROPIC_")));
     }
 }

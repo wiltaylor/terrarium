@@ -14,10 +14,12 @@ import { api, subscriptions } from "../../stores";
 import {
   apiKeyBody,
   countdown,
+  defaultPlan,
   initialWizard,
   isDeviceFlow,
   isLoginPath,
   KEY_HELP,
+  KEY_PLANS,
   KEY_PROVIDERS,
   sessionToCancel,
   shouldPoll,
@@ -25,8 +27,6 @@ import {
   takesPlan,
   teardownLeft,
   wizardReduce,
-  ZAI_DEFAULT_PLAN,
-  ZAI_PLANS,
   type WizardAction,
   type WizardLogin,
   type WizardPath,
@@ -331,7 +331,7 @@ function ApiKeyForm(props: { setup: WizardSetup; onBack: () => void; onSaved: (n
   const [name, setName] = createSignal(props.setup.name ?? `${props.setup.provider ?? "openrouter"}-key`);
   const [key, setKey] = createSignal("");
   const [baseUrl, setBaseUrl] = createSignal("");
-  const [plan, setPlan] = createSignal(ZAI_DEFAULT_PLAN);
+  const [plan, setPlan] = createSignal(defaultPlan(props.setup.provider ?? "openrouter"));
   const [models, setModels] = createSignal("");
   const [error, setError] = createSignal<unknown>(null);
   const [busy, setBusy] = createSignal(false);
@@ -353,6 +353,7 @@ function ApiKeyForm(props: { setup: WizardSetup; onBack: () => void; onSaved: (n
   };
 
   const env = () => KEY_PROVIDERS.find((p) => p.id === provider())?.env;
+  const harnesses = () => KEY_PROVIDERS.find((p) => p.id === provider())?.harnesses;
 
   return (
     <form class="stack" onSubmit={submit}>
@@ -370,6 +371,7 @@ function ApiKeyForm(props: { setup: WizardSetup; onBack: () => void; onSaved: (n
             value={provider()}
             onChange={(e) => {
               setProvider(e.currentTarget.value);
+              setPlan(defaultPlan(e.currentTarget.value));
               if (!fixedName) setName(`${e.currentTarget.value}-key`);
             }}
           >
@@ -389,7 +391,7 @@ function ApiKeyForm(props: { setup: WizardSetup; onBack: () => void; onSaved: (n
         <label>
           Plan
           <select value={plan()} onChange={(e) => setPlan(e.currentTarget.value)}>
-            <For each={ZAI_PLANS}>{(p) => <option value={p.id}>{p.label}</option>}</For>
+            <For each={KEY_PLANS[provider()] ?? []}>{(p) => <option value={p.id}>{p.label}</option>}</For>
           </select>
         </label>
       </Show>
@@ -411,6 +413,13 @@ function ApiKeyForm(props: { setup: WizardSetup; onBack: () => void; onSaved: (n
       <p class="muted small" style={{ margin: 0 }}>
         The daemon stores the key with mode 0600 and gives it to the agents on this subscription as <code>{env()}</code>. No endpoint returns it, and this page never shows it again.
       </p>
+      <Show when={harnesses()}>
+        {(h) => (
+          <p class="muted small" style={{ margin: 0 }}>
+            Harnesses: {h().join(", ")}. The daemon refuses an agent of another harness on this subscription.
+          </p>
+        )}
+      </Show>
       <div>
         <button class="primary" type="submit" disabled={busy() || !key() || !name().trim()}>
           Save key

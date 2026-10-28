@@ -235,6 +235,39 @@ Then give an agent `subscription = "glm"`, with `harness = "claude"` or
 it empty. Z.ai has no usage probe, so the tile shows "Local estimate
 only". docs/api.md §16.5 lists the env that the agents get.
 
+#### Add a Moonshot (Kimi) key
+
+Moonshot AI sells the Kimi models with an API key. Only pi agents can
+spend a Moonshot key. The daemon refuses a Claude Code, Codex, or Copilot
+agent on it. Moonshot has two products, and each has its own keys:
+
+- **Kimi Code**, a membership. Make a key in the Kimi Code Console at
+  `https://www.kimi.com/code/console`.
+- **Open Platform**, pay as you go. Make a key at `https://platform.kimi.ai`
+  (China: `https://platform.kimi.com`).
+
+A key works only in the region where you made it. To add the key:
+
+1. Open the **Subscriptions** page and click **Add subscription**.
+2. Click **API key**, and set **Provider** to **Moonshot AI / Kimi (pi
+   only)**.
+3. Set **Plan** to the product and the region of your key.
+4. Paste the key, and click **Save key**.
+
+Or use the API. The plans are `coding` (Kimi Code), `coding-cn` (Kimi
+Code, China), `api` (Open Platform), and `api-cn` (Open Platform, China):
+
+```sh
+curl -X POST http://localhost:8080/api/subscriptions/kimi/api-key \
+  -H "Authorization: Bearer $TERRARIUM_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"provider": "moonshot", "plan": "coding", "key": "<your key>"}'
+```
+
+Then give a pi agent `subscription = "kimi"`. Set `model` to a Kimi id,
+for example `k3`, or leave it empty. An Open Platform plan has a balance
+probe. A Kimi Code plan has no usage probe, so the tile shows "Local
+estimate only". docs/api.md §16.5 lists the env that the agents get.
+
 ### 2.5 Make a project and an agent
 
 The CLI is in the container. Make a shell function so that the commands are
@@ -1454,6 +1487,20 @@ ZAI_API_KEY=<key> cargo test -p terrarium-adapter-pi --test zai_live -- --ignore
 Set `ZAI_PLAN=api` to use the pay-as-you-go endpoint. Set `PI_BIN` to
 choose the pi binary (default: `pi` on `PATH`, for example
 `./tools/bin/pi`). Without `ZAI_API_KEY`, the test does nothing.
+
+### 6.4 The Moonshot test
+
+The Moonshot test runs one turn on the default Kimi model through pi. It
+spends a little of your Kimi Code quota or Open Platform balance. Run it
+with your key:
+
+```sh
+MOONSHOT_API_KEY=<key> cargo test -p terrarium-adapter-pi --test moonshot_live -- --ignored
+```
+
+Set `MOONSHOT_PLAN` to the plan of your key: `coding` (the default),
+`coding-cn`, `api`, or `api-cn`. Set `PI_BIN` to choose the pi binary.
+Without `MOONSHOT_API_KEY`, the test does nothing.
 
 ## 7. Updating a harness
 

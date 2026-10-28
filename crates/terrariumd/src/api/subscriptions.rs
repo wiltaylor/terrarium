@@ -111,8 +111,9 @@ pub struct SubscriptionView {
     /// The model each harness gets on this subscription when the agent
     /// sets no `model`, by harness name. Only the harnesses where the
     /// daemon picks the model: pi (the provider's default,
-    /// `terrarium_adapter_pi::flags::default_model`) and Claude Code on
-    /// Z.ai (`terrarium_core::zai::model_for`). No pi entry when pi
+    /// `terrarium_adapter_pi::flags::default_model`; for Moonshot, the
+    /// plan's model, `terrarium_core::moonshot::Plan::default_model`) and
+    /// Claude Code on Z.ai (`terrarium_core::zai::model_for`). No pi entry when pi
     /// refuses the subscription. Empty (`{}`) when the harnesses keep their
     /// own defaults; always present, so a client can tell an older daemon.
     pub default_models: BTreeMap<String, String>,
@@ -474,10 +475,14 @@ async fn verify(
 ) -> ApiResult<Json<Value>> {
     policy::manage_subscriptions(&actor, "verifying a subscription login")?;
     let sub = load(&state, name.clone()).await?.sub;
-    let zai = terrarium_core::zai::is_zai(&sub.provider);
+    let key_only = key_only_provider(&sub.provider);
     if sub.env_var.is_some() && login::stored_key(&state.state_dir, &sub.name).is_some() {
         let n = name.clone();
-        let status = if zai { subs::API_KEY } else { subs::LOGGED_IN };
+        let status = if key_only.is_some() {
+            subs::API_KEY
+        } else {
+            subs::LOGGED_IN
+        };
         state
             .db
             .write(actor.label(), move |t| {
@@ -488,9 +493,10 @@ async fn verify(
             json!({"subscription": load(&state, name).await?, "status": {"logged_in": true, "detail": "a stored API key"}}),
         ));
     }
-    // A Z.ai subscription is a key only. Its first harness (claude) would
-    // report the shared Claude login, which is not this subscription.
-    if zai {
+    // A Z.ai or Moonshot subscription is a key only. Its first harness
+    // would report the shared login of that harness, which is not this
+    // subscription.
+    if let Some(label) = key_only {
         let n = name.clone();
         state
             .db
@@ -499,7 +505,7 @@ async fn verify(
             })
             .await?;
         return Ok(Json(
-            json!({"subscription": load(&state, name).await?, "status": {"logged_in": false, "detail": "no stored Z.ai API key"}}),
+            json!({"subscription": load(&state, name).await?, "status": {"logged_in": false, "detail": format!("no stored {label} API key")}}),
         ));
     }
     let st = match crate::accounts::read_meta(&state.state_dir, &sub.name) {
@@ -556,9 +562,9 @@ async fn logout(
     let sub = load(&state, name.clone()).await?.sub;
     // The harness logout would end the shared login of the harness, which
     // an API-key subscription does not use.
-    if terrarium_core::zai::is_zai(&sub.provider) {
+    if let Some(label) = key_only_provider(&sub.provider) {
         return Err(ApiError::invalid(format!(
-            "subscription `{name}` is a Z.ai API key and has no logout; store another key, or delete the subscription"
+            "subscription `{name}` is a {label} API key and has no logout; store another key, or delete the subscription"
         )));
     }
     // A plan account: its logout removes the account dir, and nothing
@@ -695,16 +701,27 @@ async fn api_key(
     }
     let Some((var, url_var)) = login::env_var_for(&key.provider) else {
         return Err(ApiError::invalid(format!(
-            "unknown provider `{}`; use anthropic, openai, openai-compatible, google, openrouter, xai, groq, github, or zai",
+            "unknown provider `{}`; use anthropic, openai, openai-compatible, google, openrouter, xai, groq, github, zai, or moonshot",
             key.provider
         )));
     };
-    let zai = terrarium_core::zai::is_zai(&key.provider);
-    let zai_plan = if zai {
-        Some(terrarium_core::zai::parse_plan(key.plan.as_deref()).map_err(ApiError::invalid)?)
+    let moonshot = terrarium_core::moonshot::is_moonshot(&key.provider);
+    // The plan word of a provider with plans: Z.ai and Moonshot.
+    let key_plan: Option<&'static str> = if terrarium_core::zai::is_zai(&key.provider) {
+        Some(
+            terrarium_core::zai::parse_plan(key.plan.as_deref())
+                .map_err(ApiError::invalid)?
+                .as_str(),
+        )
+    } else if moonshot {
+        Some(
+            terrarium_core::moonshot::parse_plan(key.plan.as_deref())
+                .map_err(ApiError::invalid)?
+                .as_str(),
+        )
     } else if key.plan.is_some() {
         return Err(ApiError::invalid(format!(
-            "`plan` is only for provider zai, not `{}`",
+            "`plan` is only for providers zai and moonshot, not `{}`",
             key.provider
         )));
     } else {
@@ -718,6 +735,20 @@ async fn api_key(
     }
     let n = name.clone();
     let exists = state.db.read(move |c| subs::find(c, &n)).await?;
+    // A Moonshot key never goes to a harness other than pi: refuse it on a
+    // subscription of another provider or of another harness.
+    if moonshot && let Some(s) = &exists {
+        let why = if terrarium_core::moonshot::is_moonshot(&s.provider) {
+            terrarium_core::moonshot::harness_refusal(&s.harnesses)
+        } else {
+            Some(format!("it is a {} subscription", s.provider))
+        };
+        if let Some(why) = why {
+            return Err(ApiError::invalid(format!(
+                "cannot store a moonshot key on subscription `{name}`: {why}"
+            )));
+        }
+    }
     let source = exists.as_ref().map(|s| s.source.clone());
     let dir = state.state_dir.clone();
     let (n, k) = (name.clone(), key.clone());
@@ -734,21 +765,27 @@ async fn api_key(
     state
         .db
         .write(actor.label(), move |t| {
-            if let Some(plan) = zai_plan {
-                // Z.ai: Claude Code and pi. No probe: Z.ai documents no
-                // usage endpoint (`docs/compat.md`, "Z.ai").
+            if let Some(plan) = key_plan {
+                // Z.ai: Claude Code and pi. Moonshot: pi only. No probe in
+                // the definition: the read gives the default probe of the
+                // plan (`subs::default_probe`).
                 if source.is_none() {
+                    let harnesses = if moonshot {
+                        terrarium_core::moonshot::HARNESSES.to_vec()
+                    } else {
+                        vec![HarnessId::Claude, HarnessId::Pi]
+                    };
                     let def = SubscriptionDef {
                         name: n.clone(),
                         provider: provider.clone(),
-                        plan: Some(plan.as_str().into()),
-                        harnesses: vec![HarnessId::Claude, HarnessId::Pi],
+                        plan: Some(plan.into()),
+                        harnesses,
                         probe: None,
                         alert_at: 80,
                     };
                     subs::upsert_def(t, &def, SOURCE_API)?;
                 } else if source.as_deref() == Some(SOURCE_API) {
-                    subs::set_plan(t, &n, plan.as_str())?;
+                    subs::set_plan(t, &n, plan)?;
                 }
             } else if source.is_none() {
                 let harness = if provider == "github" { HarnessId::Copilot } else { HarnessId::Pi };
@@ -769,17 +806,29 @@ async fn api_key(
             // A file subscription keeps its definition; the env var is
             // daemon state.
             subs::set_env_var(t, &n, Some(var))?;
-            let status = if zai_plan.is_some() { subs::API_KEY } else { subs::LOGGED_IN };
+            let status = if key_plan.is_some() { subs::API_KEY } else { subs::LOGGED_IN };
             subs::set_login_status(t, &n, status)?;
             t.audit(
                 "subscription.api_key",
                 &n,
                 None,
-                json!({"provider": provider, "plan": zai_plan.map(|p| p.as_str()), "env_var": var, "base_url": base_url, "models": models}),
+                json!({"provider": provider, "plan": key_plan, "env_var": var, "base_url": base_url, "models": models}),
             )
         })
         .await?;
     Ok(Json(load(&state, name).await?))
+}
+
+/// The name of a provider whose subscription is an API key only (no
+/// harness login): Z.ai and Moonshot.
+fn key_only_provider(provider: &str) -> Option<&'static str> {
+    if terrarium_core::zai::is_zai(provider) {
+        Some("Z.ai")
+    } else if terrarium_core::moonshot::is_moonshot(provider) {
+        Some("Moonshot")
+    } else {
+        None
+    }
 }
 
 async fn detect(State(state): State<Shared>, actor: Actor) -> ApiResult<Json<Vec<Detected>>> {

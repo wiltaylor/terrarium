@@ -22,6 +22,7 @@ import { createWsEventStream, type EventStream, type RawSocket, type SocketEvent
 import { MOCK_PASSWORD, MOCK_TOKEN, mockSocket, type MockSocketAuth } from "./ws";
 import { httpVerbs } from "./verbs";
 import { checkKeyPlan, isZai, zaiKeyDefaults, zaiPlan, ZAI_KEY_ENV } from "./zai";
+import { isMoonshot, moonshotHarnessError, moonshotKeyDefaults, moonshotPlan, moonshotProbe, MOONSHOT_KEY_ENV } from "./moonshot";
 import { defaultModels, modelList, subscriptionDetail } from "./models";
 import { splitFrontMatter } from "../../lib/markdown";
 import { installCommand } from "../../lib/host-install";
@@ -1035,7 +1036,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
   };
 
   // ----- subscriptions and the quota policy (docs/api.md §16) -----
-  const PROBES = ["anthropic-oauth-usage", "openai-codex-usage", "codex-rate-limits", "github-copilot-quota", "copilot-premium-requests"];
+  const PROBES = ["anthropic-oauth-usage", "openai-codex-usage", "codex-rate-limits", "github-copilot-quota", "copilot-premium-requests", "moonshot-balance", "moonshot-cn-balance"];
   const KEY_ENV: Record<string, string> = {
     anthropic: "ANTHROPIC_API_KEY",
     openai: "OPENAI_API_KEY",
@@ -1047,6 +1048,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     groq: "GROQ_API_KEY",
     github: "COPILOT_GITHUB_TOKEN",
     zai: ZAI_KEY_ENV,
+    moonshot: MOONSHOT_KEY_ENV,
   };
   /** The subscription as the API shows it (docs/api.md §16.1). */
   const subView = (s: Subscription): Subscription => ({
@@ -2605,10 +2607,19 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           if (def.probe && !PROBES.includes(def.probe)) fail(422, "invalid", `unknown probe \`${def.probe}\``);
           if (!def.provider?.trim()) fail(422, "invalid", "the provider is empty");
           if (isZai(def.provider)) { const p = zaiPlan(def.plan); if ("error" in p) fail(422, "invalid", p.error); }
+          // Moonshot is for pi only; an Open Platform plan gets the balance probe.
+          let probe = def.probe;
+          if (isMoonshot(def.provider)) {
+            const p = moonshotPlan(def.plan);
+            if ("error" in p) fail(422, "invalid", p.error);
+            const h = moonshotHarnessError(def.name, def.harnesses ?? []);
+            if (h) fail(422, "invalid", h);
+            probe = probe ?? moonshotProbe(def.plan);
+          }
           const s: Subscription = {
-            name: def.name, provider: def.provider, ...(def.plan ? { plan: def.plan } : {}), harnesses: def.harnesses ?? [], ...(def.probe ? { probe: def.probe } : {}),
+            name: def.name, provider: def.provider, ...(def.plan ? { plan: def.plan } : {}), harnesses: def.harnesses ?? [], ...(probe ? { probe } : {}),
             alert_at: def.alert_at ?? 80, source: "api", login_status: "unknown", probe_status: "none", created_at: iso(), updated_at: iso(),
-            windows: [], local_estimate_only: !def.probe, has_api_key: false, held_agents: 0, agents: [],
+            windows: [], local_estimate_only: !probe, has_api_key: false, held_agents: 0, agents: [],
           };
           w.subscriptions.push(s);
           audit("subscription.create", s.name, undefined, { provider: s.provider });
@@ -2653,7 +2664,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
         reply(() => {
           const s = sub(name);
           if (s.env_var && w.apiKeys[name]) {
-            s.login_status = isZai(s.provider) ? "api_key" : "logged_in";
+            s.login_status = isZai(s.provider) || isMoonshot(s.provider) ? "api_key" : "logged_in";
             return { subscription: subView(s), status: { logged_in: true, detail: "a stored API key" } };
           }
           const harness = s.harnesses[0];
@@ -2671,6 +2682,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           if (!harness) fail(422, "invalid", `subscription \`${name}\` names no harness`);
           if (harness === "pi") fail(422, "invalid", "pi has no logout command");
           if (isZai(s.provider)) fail(422, "invalid", `subscription \`${name}\` is a Z.ai API key and has no logout; store another key, or delete the subscription`);
+          if (isMoonshot(s.provider)) fail(422, "invalid", `subscription \`${name}\` is a Moonshot API key and has no logout; store another key, or delete the subscription`);
           refuseLiveAccount(s, "log it out");
           s.login_status = "missing";
           if (s.account) s.account = { ...s.account, has_login: false, updated_at: iso() };
@@ -2692,19 +2704,26 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
         reply(() => {
           if (!input.key.trim()) fail(422, "invalid", "the key is empty");
           const env = KEY_ENV[input.provider];
-          if (!env) fail(422, "invalid", `unknown provider \`${input.provider}\`; use anthropic, openai, openai-compatible, google, openrouter, xai, groq, github, or zai`);
+          if (!env) fail(422, "invalid", `unknown provider \`${input.provider}\`; use anthropic, openai, openai-compatible, google, openrouter, xai, groq, github, zai, or moonshot`);
           const planError = checkKeyPlan(input);
           if (planError) fail(422, "invalid", planError);
-          const zai = isZai(input.provider) ? zaiKeyDefaults(input) : null;
+          const ms = isMoonshot(input.provider) ? moonshotKeyDefaults(input) : null;
+          const zai = isZai(input.provider) ? zaiKeyDefaults(input) : ms;
           if (input.provider === "openai-compatible" && !input.base_url?.trim()) fail(422, "invalid", "openai-compatible needs base_url");
           let s = w.subscriptions.find((x) => x.name === name);
+          // A Moonshot key never goes to a harness other than pi.
+          if (ms && s) {
+            const why = isMoonshot(s.provider) ? moonshotHarnessError(name, s.harnesses) : `it is a ${s.provider} subscription`;
+            if (why) fail(422, "invalid", `cannot store a moonshot key on subscription \`${name}\`: ${why}`);
+          }
           if (!s) {
             checkSubName(name);
-            s = { name, provider: input.provider, plan: zai?.plan ?? "API key", harnesses: zai?.harnesses ?? [input.provider === "github" ? "copilot" : "pi"], alert_at: 80, source: "api", login_status: "logged_in", probe_status: "none", created_at: iso(), updated_at: iso(), windows: [], local_estimate_only: true, has_api_key: true, held_agents: 0, agents: [] };
+            s = { name, provider: input.provider, plan: zai?.plan ?? "API key", harnesses: zai?.harnesses ?? [input.provider === "github" ? "copilot" : "pi"], ...(ms?.probe ? { probe: ms.probe } : {}), alert_at: 80, source: "api", login_status: "logged_in", probe_status: "none", created_at: iso(), updated_at: iso(), windows: [], local_estimate_only: true, has_api_key: true, held_agents: 0, agents: [] };
             w.subscriptions.push(s);
           }
           w.apiKeys[name] = { provider: input.provider, key: input.key, base_url: input.base_url, models: input.models };
           if (zai && s.source === "api") s.plan = zai.plan;
+          if (ms && s.source === "api") { if (ms.probe) s.probe = ms.probe; else delete s.probe; }
           s.env_var = env;
           s.login_status = zai?.login_status ?? "logged_in";
           s.updated_at = iso();

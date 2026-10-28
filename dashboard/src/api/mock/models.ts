@@ -4,6 +4,7 @@
 
 import type { AgentSubscriptionDetail, Harness, ModelInfo, ModelList, Subscription } from "../types";
 import { isZai } from "./zai";
+import { isMoonshot, moonshotDefaultModel, moonshotModels } from "./moonshot";
 
 /** pi's default model by Terrarium provider, for an API key and for a plan login. A subset of the adapter table. */
 const PI_DEFAULTS: Record<string, { key?: string; plan?: string }> = {
@@ -23,7 +24,7 @@ export function defaultModels(s: Pick<Subscription, "provider" | "plan" | "harne
   const provider = s.provider.trim().toLowerCase();
   if (s.harnesses.includes("pi")) {
     const row = PI_DEFAULTS[provider];
-    const m = isZai(provider) ? row?.key : isKey(s) ? row?.key : row?.plan;
+    const m = isMoonshot(provider) ? moonshotDefaultModel(s.plan) : isZai(provider) ? row?.key : isKey(s) ? row?.key : row?.plan;
     if (m) out.pi = m;
   }
   if (s.harnesses.includes("claude") && isZai(provider)) out.claude = "glm-5.3";
@@ -94,6 +95,6 @@ export function modelList(s: Subscription, hasKey: boolean, at: string): ModelLi
   if (plan && s.login_status !== "missing" && s.login_status !== "expired") return { models: PLAN_MODELS[plan].map((m) => ({ ...m })), source: "plan", fetched_at: at };
   const pi = PI_CATALOGUE[provider];
   if (pi) return { models: pi.map((m) => ({ ...m })), source: "pi", fetched_at: at };
-  const ids = [...new Set(Object.values(defaultModels(s)))];
+  const ids = [...new Set([...Object.values(defaultModels(s)), ...(isMoonshot(provider) ? moonshotModels(s.plan) : [])])];
   return { models: ids.map((id) => ({ id })), source: "fallback", fetched_at: at, notes: [`pi lists no model for provider \`${s.provider}\``] };
 }

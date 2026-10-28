@@ -19,6 +19,7 @@ pub mod hook;
 pub mod ids;
 pub mod launch;
 pub mod model;
+pub mod moonshot;
 pub mod paths;
 pub mod protocol;
 pub mod redact;
