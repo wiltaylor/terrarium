@@ -22,6 +22,12 @@ pub struct LaunchSpec {
     pub clear_env: bool,
 }
 
+/// The exit code of `terrarium exec-env --require-credentials` when it
+/// cannot get the harness credentials from the daemon (`EX_CONFIG`). It
+/// does not start the harness then. The daemon names the cause in the
+/// status reason of the exit (PLAN §16b.4).
+pub const EXEC_ENV_NO_CREDENTIALS: i32 = 78;
+
 fn default_true() -> bool {
     true
 }

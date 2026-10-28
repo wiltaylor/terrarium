@@ -60,7 +60,7 @@ A runner process also uses these files:
 |---|---|
 | `<run>/runners/<ulid>.sock` | The control socket for the daemon, mode `0600`. |
 | `<run>/runners/<ulid>.pid` | The pid of the runner process. The live runner holds an exclusive `flock` on the file. The file stays after the exit, empty. |
-| `<state>/agents/<ulid>/private/runner.json` | The spec file (mode `0600`). `RemoteRunner::spawn_process` writes it. Its `launch.env` can hold the injected API key. |
+| `<state>/agents/<ulid>/private/runner.json` | The spec file (mode `0600`). `RemoteRunner::spawn_process` writes it at each start. Its `launch.env` holds no secret or credential value: the harness gets them from `terrarium exec-env` inside the sandbox (PLAN §16b.4). A file of an older daemon can hold the API key until the next start; a move to the trash removes it. |
 | `<state>/agents/<ulid>/private/runner-argv.json` | The sandbox argv, when the daemon gives one. |
 | `<state>/agents/<ulid>/private/runner.log` | The stdout and stderr of the runner process. The process appends to it. |
 | `<state>/agents/<ulid>/private/runner-exit.json` | The `ExitRecord` of the harness, as JSON: the `ExitStatus` fields (`code`, `signal`) and `stopped_by` (see "The exit record"). The runner writes it after each harness exit: a normal exit, a crash, a `kill`, and a SIGTERM. It writes a temp file and renames it, so a reader never sees half a file. It removes an old one at the start. |

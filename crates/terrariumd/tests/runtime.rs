@@ -1724,7 +1724,10 @@ async fn subscription_gates_the_start_and_injects_its_key() {
     )
     .await;
 
-    // The key goes into the launch env; the command line hides it.
+    // PLAN §16b.4: the key reaches the harness only through `terrarium
+    // exec-env` (tests/runner_process.rs has the full path). With no
+    // `terrarium` CLI (`--cli`), the start fails with the reason, and the
+    // key goes into no spec.
     let id = td
         .agent("demo", "bob", json!({"subscription": "keyed"}))
         .await;
@@ -1735,12 +1738,24 @@ async fn subscription_gates_the_start_and_injects_its_key() {
         .read(move |c| terrariumd::store::agents::get(c, &key))
         .await
         .unwrap();
-    let spec = td.sup.launch_spec(&view.agent, None).await.unwrap();
-    assert_eq!(spec.env["ANTHROPIC_API_KEY"], "sk-test-secret");
-    let line = terrariumd::sandbox::command_line(&spec);
-    assert!(!line.contains("sk-test-secret"), "{line}");
-    td.post(&format!("/api/agents/{id}/start"), None).await;
-    td.wait_status(&id, "idle").await;
+    let e = td
+        .sup
+        .launch_spec(&view.agent, None)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        e.contains("ANTHROPIC_API_KEY") && e.contains("--cli"),
+        "{e}"
+    );
+    assert!(!e.contains("sk-test-secret"), "{e}");
+    let (s, b) = td
+        .req(Method::POST, &format!("/api/agents/{id}/start"), None, None)
+        .await;
+    assert_eq!(s, 422, "{b}");
+    assert!(b.to_string().contains("--cli"), "{b}");
+    assert!(!b.to_string().contains("sk-test-secret"), "{b}");
+    assert_eq!(td.status(&id).await, "stopped");
 
     // A harness that cannot spend the subscription: 422, and it stays stopped.
     for (name, sub, want) in [

@@ -677,6 +677,23 @@ pub fn remove(state_dir: &Path, sub: &str) -> io::Result<bool> {
     Ok(true)
 }
 
+/// The credential env of a launched account (PLAN §16b.4): the Copilot
+/// token of `account` for a Copilot agent, else nothing. `account` is the
+/// account that the launch picked (`private/accounts.json`). Secrets:
+/// never log the values.
+pub fn credential_env(
+    state_dir: &Path,
+    harness: HarnessId,
+    account: Option<&str>,
+) -> Vec<(String, zeroize::Zeroizing<String>)> {
+    match (harness, account) {
+        (HarnessId::Copilot, Some(a)) => copilot_token(state_dir, a)
+            .map(|t| vec![(COPILOT_TOKEN_ENV.to_owned(), zeroize::Zeroizing::new(t))])
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
 /// The Copilot token of the account of `sub`. A secret.
 pub fn copilot_token(state_dir: &Path, sub: &str) -> Option<String> {
     let bytes = read_nofollow(&credential_path(
@@ -945,8 +962,14 @@ pub struct LaunchAccounts {
     /// The subscription whose account the agent runs on. `None`: no
     /// account (an API key, or a shared login that is not migrated yet).
     pub account: Option<String>,
-    /// Env vars. Secrets: never log the values.
+    /// Env vars with no credential value (a path). The launch spec holds
+    /// them.
     pub env: Vec<(String, String)>,
+    /// The names of the credential env vars of the account (the Copilot
+    /// token). The values never go into the launch spec: `terrarium
+    /// exec-env` gets them from the daemon inside the sandbox
+    /// ([`credential_env`], PLAN §16b.4).
+    pub credential_vars: Vec<String>,
     pub overlays: Vec<FileOverlay>,
     /// Account stores to bind read-write at their own path: each pool
     /// member with a login of the harness (Claude).
@@ -1084,9 +1107,10 @@ pub fn prepare_launch(input: &LaunchInput<'_>) -> Result<LaunchAccounts, String>
             });
         }
         HarnessId::Copilot => {
-            let token = copilot_token(input.state_dir, current)
-                .ok_or_else(|| format!("the Copilot token of `{current}` cannot be read"))?;
-            out.env.push((COPILOT_TOKEN_ENV.to_owned(), token));
+            if copilot_token(input.state_dir, current).is_none() {
+                return Err(format!("the Copilot token of `{current}` cannot be read"));
+            }
+            out.credential_vars.push(COPILOT_TOKEN_ENV.to_owned());
             // The env token wins over `config.json`. A token there again
             // (a login with the shared home) is another account that every
             // agent could read: the operator moves it with the wizard.
@@ -1633,7 +1657,7 @@ mod tests {
         );
         assert_eq!(fs::read_to_string(chome.join(AUTH_FILE)).unwrap(), "{}");
 
-        // Copilot: the token in the env, no bind.
+        // Copilot: the token name only (exec-env gets the value), no bind.
         let phome = tmp.path().join("auth/copilot");
         fs::create_dir_all(&phome).unwrap();
         write_credential(&state, "gh", HarnessId::Copilot, b"gho_x\n").unwrap();
@@ -1647,7 +1671,16 @@ mod tests {
             ..input
         })
         .unwrap();
-        assert_eq!(l.env, [(COPILOT_TOKEN_ENV.to_owned(), "gho_x".to_owned())]);
+        assert!(l.env.is_empty());
+        assert_eq!(l.credential_vars, [COPILOT_TOKEN_ENV.to_owned()]);
+        assert_eq!(
+            credential_env(&state, HarnessId::Copilot, Some("gh"))
+                .into_iter()
+                .map(|(k, v)| (k, v.to_string()))
+                .collect::<Vec<_>>(),
+            [(COPILOT_TOKEN_ENV.to_owned(), "gho_x".to_owned())]
+        );
+        assert!(credential_env(&state, HarnessId::Claude, Some("gh")).is_empty());
         assert!(l.stores.is_empty() && l.overlays.is_empty());
     }
 

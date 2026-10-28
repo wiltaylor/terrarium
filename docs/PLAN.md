@@ -1854,7 +1854,7 @@ login.
 | Claude Code (Anthropic plan) | Opens an embedded terminal running `claude auth login` as the daemon user, outside any sandbox. Extracts the login URL and shows it as a link with a copy button. Gives a paste field for the code and types it into the PTY. Offers `claude setup-token` as the long-lived alternative. |
 | Codex (ChatGPT plan) | Runs `codex login --device-auth` in the embedded terminal. Shows the device code and URL large, with copy buttons. Polls `codex login status` until it succeeds. |
 | Copilot (GitHub plan) | Runs `copilot login --device-code`. Same device-code pattern. A second tab takes a fine-grained PAT with the Copilot Requests permission and feeds it through `--with-token` on stdin. |
-| API key (pi, and the key providers) | A form: provider (Anthropic, OpenAI, Google, OpenRouter, xAI, Groq, or an OpenAI-compatible endpoint with a base URL and model list). The key is stored under `/state/credentials` with mode 0600, never shown again, and injected as the provider's env var only into agents on this subscription. Optionally written to pi's `auth.json` for `pi auth` compatibility. |
+| API key (pi, and the key providers) | A form: provider (Anthropic, OpenAI, Google, OpenRouter, xAI, Groq, or an OpenAI-compatible endpoint with a base URL and model list). The key is stored under `/state/credentials` with mode 0600, never shown again, and set as the provider's env var only in the harness of agents on this subscription. The key does not go through the launch spec: `terrarium exec-env` gets it from the daemon inside the sandbox at each start (§16b.4). Optionally written to pi's `auth.json` for `pi auth` compatibility. |
 
 **pi uses API keys only.** Use Claude Code for a Claude plan and Codex for
 a ChatGPT plan. The wizard has no pi login: `POST /api/subscriptions/login`
@@ -2300,6 +2300,33 @@ grant change applies at the next start of the agent; the brokers and
   replaces itself with the harness. So no value is in `runner.json`, on a
   command line, or in the env of `bwrap` outside the sandbox (secret
   manager review S1 and S6).
+- **Harness credentials.** The same call gives the credential env of the
+  harness: the stored API key of the agent's subscription with the vars
+  that go with it (§16.1; for example `ANTHROPIC_API_KEY`, or
+  `ANTHROPIC_AUTH_TOKEN` and `ZAI_API_KEY` for Z.ai, or `MOONSHOT_API_KEY`
+  and `KIMI_API_KEY`), and the token of a Copilot plan account
+  (`COPILOT_GITHUB_TOKEN`, §16.3). The launch spec holds the names only, so
+  no credential value is in `runner.json` or in any other file outside the
+  credential stores. The daemon reads the values from the agent's
+  subscription at the time of the request, so a key change applies at the
+  next start. The plan logins of Claude and Codex stay files that the
+  sandbox binds for each account (§16.3); this item does not change them.
+  - *Precedence.* A credential var wins over a var of the same name that
+    the harness or its account sets. The subscription's key wins over the
+    account's var. A secret grant with the name of a credential var gives
+    nothing (a warning event). These are the rules from before.
+  - *Failure.* The sandbox then starts `terrarium exec-env
+    --require-credentials`. When the daemon does not answer, `exec-env`
+    tries 5 times in about 3 seconds. Then it exits 78 and does not start
+    the harness, because a harness with no key cannot work and can show a
+    login screen that nobody answers. The exit goes through the restart
+    policy (§18), and the status reason names the cause.
+  - *No CLI.* With no `terrarium` CLI (`--cli`), a start that has
+    credential vars fails with a clear reason (`422`). The daemon does not
+    put the values into the spec as a fallback.
+  - *Not a secret.* A subscription key is not in the secret store. No grant
+    gives it, and `terrarium secret get` cannot read it. Only the harness
+    of an agent on the subscription gets it, as before.
 - **`terrarium secret`.** `terrarium secret list` shows the granted secrets
   (name, kind, level, plain fields). `terrarium secret get <name> [--field
   f]` prints a value, for a `read` grant only. Each `get` writes an audit

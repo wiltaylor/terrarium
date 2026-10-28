@@ -1195,6 +1195,15 @@ its grants. A new agent with the name of a removed agent gets no grant.
   `exec-env` prints a warning and starts the harness with no secret var.
   With no `terrarium` CLI (`--cli`), the start sets no secret var and
   emits a warning event.
+- *Harness credentials.* The stored API key of the agent's subscription
+  (PLAN §16.1) and the token of a Copilot plan account (PLAN §16.3) take
+  the same path. The launch spec holds their names only. `exec-env` sets
+  them over a var of the same name (the harness's or the account's). A
+  grant with the name of a credential var gives nothing. The sandbox then
+  starts `terrarium exec-env --require-credentials`: when the daemon does
+  not answer after 5 tries (about 3 s), `exec-env` exits 78 and the
+  harness does not start. The status reason of the exit names the cause.
+  With no `terrarium` CLI, such a start is `422`.
 - *Git hosts.* The start sets `credential.https://<host>.helper = !terrarium
   repo credential` (through `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_<n>`, and
   `GIT_CONFIG_VALUE_<n>`) for each host of a granted `token` (`hosts`) or
@@ -1233,14 +1242,34 @@ before a global secret. No entry holds a value. The operator gets `403`.
 `via` holds `agent`, `project`, or both.
 
 **The env of the start.** `POST /api/agent/secrets/env` answers the env
-vars of the calling agent's `read` grants with an `env` name, by the rules
-of *Env vars* above: `{"vars": {"DATABASE_URL": "..."}}`. `terrarium
-exec-env` calls it inside the sandbox at each start of the harness. The
-answer holds values and has `Cache-Control: no-store`. Each answer writes
-a `secret.env` audit row with the names only (`{agent, names}`). It counts
-in the limit of `get` (30 a minute for each agent, `429 rate_limited`).
-The operator gets `403`. The agent gets nothing that `get` does not give
-it.
+of the calling agent's harness. `terrarium exec-env` calls it inside the
+sandbox at each start of the harness.
+
+```json
+{"vars": {"DATABASE_URL": "..."},
+ "credentials": {"ANTHROPIC_API_KEY": "..."}}
+```
+
+- `vars`: the env vars of the agent's `read` grants with an `env` name, by
+  the rules of *Env vars* above. A grant with the name of a credential var
+  is not in it.
+- `credentials`: the credential env of the agent's harness. First the
+  token of the Copilot plan account that the last launch picked
+  (`COPILOT_GITHUB_TOKEN`), then the stored API key of the agent's
+  subscription and the vars that go with it (for example
+  `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, and `ZAI_API_KEY` for
+  Z.ai). The daemon reads the subscription at the request, so a key
+  change applies at the next start. A subscription that the harness
+  cannot spend gives nothing.
+
+The answer holds values and has `Cache-Control: no-store`. The daemon
+zeroes its copies after the answer. Each answer writes a `secret.env`
+audit row with the names only (`{agent, names, credentials}`). The call
+has its own limit of 30 a minute for each agent (`429 rate_limited`), so
+many `get` calls cannot stop a start. The operator gets `403`. An agent
+gets only its own env: the grants that `get` gives it, and the key that
+its harness has already. A subscription key is not a secret of the store:
+no grant and no `get` reads it.
 
 **Get.** `POST /api/agent/secrets/{name}/get` answers one value for a
 `read` grant. The name resolves among the granted secrets: the project

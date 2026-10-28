@@ -10,11 +10,12 @@
 //!   only. Each answer writes `secret.get`. At most [`GET_LIMIT`] a
 //!   minute per agent.
 //! - `POST /api/agent/secrets/env`: the env vars of the caller's `read`
-//!   grants, for `terrarium exec-env` at the start of the harness (PLAN
-//!   §16b.4). Each answer writes `secret.env` with the names only. It
-//!   counts in the same limit as a get.
+//!   grants and the credential env of its harness (the subscription's API
+//!   key, the Copilot account token), for `terrarium exec-env` at the
+//!   start of the harness (PLAN §16b.4). Each answer writes `secret.env`
+//!   with the names only. It has its own limit of [`GET_LIMIT`] a minute.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -322,11 +323,18 @@ async fn read_value(
     Ok(resp)
 }
 
-/// The answer of `POST /api/agent/secrets/env`. `vars` holds values:
-/// never log it.
+/// The answer of `POST /api/agent/secrets/env`. `vars` and `credentials`
+/// hold values: never log them.
 #[derive(Serialize)]
 struct EnvAnswer {
-    vars: std::collections::BTreeMap<String, EnvValue>,
+    /// The env vars of the `read` grants. `terrarium exec-env` sets each
+    /// one that the env does not hold yet.
+    vars: BTreeMap<String, EnvValue>,
+    /// The credential env of the harness: the stored API key of the
+    /// agent's subscription (with the vars that go with it) and the token
+    /// of its plan account (Copilot). `terrarium exec-env` sets each one,
+    /// over a var of the same name.
+    credentials: BTreeMap<String, EnvValue>,
 }
 
 /// One value of [`EnvAnswer`]. Zeroed on drop (PLAN §16b.2); the
@@ -336,39 +344,87 @@ struct EnvValue(
     #[serde(serialize_with = "crate::secrets::serialize_zeroizing")] zeroize::Zeroizing<String>,
 );
 
-/// `POST /api/agent/secrets/env`: the env vars of the caller's `read`
-/// grants with an `env` name ([`grants::launch`]: each final name passed
-/// the name rule). `terrarium exec-env` in the sandbox asks for them just
-/// before it starts the harness, so no value is in the launch spec, the
-/// runner spec file, or the env of `bwrap` (PLAN §16b.4). The answer has
-/// `Cache-Control: no-store`.
+/// `POST /api/agent/secrets/env`: the env of the caller's harness, for
+/// `terrarium exec-env` in the sandbox just before it starts the harness
+/// (PLAN §16b.4). So no value is in the launch spec, the runner spec file,
+/// or the env of `bwrap`.
+///
+/// - `vars`: the caller's `read` grants with an `env` name
+///   ([`grants::launch`]: each final name passed the name rule). A grant
+///   whose name is also a credential var is left out, as at the launch.
+/// - `credentials`: the credential env of the caller's harness
+///   ([`credential_env`]), from the agent's subscription at the time of
+///   the request. So a key change or an account swap applies at the next
+///   start.
+///
+/// The answer has `Cache-Control: no-store`. Each answer writes
+/// `secret.env` with the names only. It has its own rate limit (not the
+/// one of `secret get`), so many `secret get` calls cannot stop a start.
 async fn launch_env(State(state): State<Shared>, actor: Actor) -> ApiResult<Response> {
     let me = policy::agent_secrets(&actor)?.clone();
-    if !rate_ok(&me.id) {
+    if !rate_ok(&format!("env:{}", me.id)) {
         return Err(ApiError::new(
             Code::RateLimited,
-            format!("`secret get` answers at most {GET_LIMIT} times a minute per agent"),
+            format!("`exec-env` answers at most {GET_LIMIT} times a minute per agent"),
         ));
     }
     let key = secrets::key(&state.state_dir)?;
-    let vars = state
+    let state_dir = state.state_dir.clone();
+    let answer = state
         .db
         .write(actor.label(), move |t| {
+            let credentials = credential_env(t, &state_dir, &me.id)?;
             let l = grants::launch(t, &key, &me.id, &me.project)?;
-            let names: Vec<&String> = l.env.keys().collect();
+            let vars: BTreeMap<String, EnvValue> = l
+                .env
+                .into_iter()
+                .filter(|(k, _)| !credentials.contains_key(k))
+                .map(|(k, v)| (k, EnvValue(v)))
+                .collect();
+            let names: Vec<&String> = vars.keys().collect();
+            let credential_names: Vec<&String> = credentials.keys().collect();
             t.audit(
                 "secret.env",
                 &format!("agent:{}", me.id),
                 Some(&me.project),
-                json!({"agent": me.id, "names": names}),
+                json!({"agent": me.id, "names": names, "credentials": credential_names}),
             )?;
-            Ok(l.env.into_iter().map(|(k, v)| (k, EnvValue(v))).collect())
+            Ok(EnvAnswer { vars, credentials })
         })
         .await?;
-    let mut resp = Json(EnvAnswer { vars }).into_response();
+    let mut resp = Json(answer).into_response();
     resp.headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     Ok(resp)
+}
+
+/// The credential env of the harness of agent `agent_id` (PLAN §16b.4).
+/// The account's vars first ([`crate::accounts::credential_env`], for the
+/// account that the launch picked), then the subscription's stored API
+/// key ([`crate::login_session::credential_env_for`]) over them, as the
+/// launch put them before. A subscription that the harness cannot spend
+/// gives nothing (the start refuses it).
+fn credential_env(
+    conn: &rusqlite::Connection,
+    state_dir: &std::path::Path,
+    agent_id: &str,
+) -> ApiResult<BTreeMap<String, EnvValue>> {
+    let agent = crate::store::agents::get(conn, agent_id)?.agent;
+    let mut out = BTreeMap::new();
+    let account = crate::runner_supervisor::launched_account(state_dir, agent.id);
+    for (k, v) in crate::accounts::credential_env(state_dir, agent.harness, account.as_deref()) {
+        out.insert(k, EnvValue(v));
+    }
+    let sub = match &agent.subscription {
+        Some(n) => crate::store::subscriptions::find(conn, n)?,
+        None => None,
+    };
+    if let Some(sub) = sub.filter(|s| s.harnesses.contains(&agent.harness)) {
+        for (k, v) in crate::login_session::credential_env_for(state_dir, &sub) {
+            out.insert(k, EnvValue(zeroize::Zeroizing::new(v)));
+        }
+    }
+    Ok(out)
 }
 
 /// The granted `token` or `github_token` secret for a git host, for the

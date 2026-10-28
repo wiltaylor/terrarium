@@ -223,6 +223,11 @@ pub struct AgentLayout {
     /// daemon inside the sandbox, so no value is in the launch spec or in
     /// the env of `bwrap` (PLAN §16b.4). Needs [`SandboxConfig::cli`].
     pub exec_env: bool,
+    /// `exec-env` also sets the harness credentials (the subscription's
+    /// API key, the Copilot account token), so it runs with
+    /// `--require-credentials`: when the daemon does not answer, it fails
+    /// and does not start the harness with no credentials.
+    pub exec_env_credentials: bool,
 }
 
 /// One local repo bind: the real directory on the host, and the path of
@@ -423,7 +428,7 @@ impl SandboxConfig {
                 .map_or(spec.program.clone(), |f| f.display().to_string());
             let (program, args) = match self.cli.as_deref().filter(|_| layout.exec_env) {
                 Some(cli) => {
-                    let mut a = exec_env_args(program);
+                    let mut a = exec_env_args(program, layout.exec_env_credentials);
                     a.extend(spec.args.iter().cloned());
                     (cli.display().to_string(), a)
                 }
@@ -529,7 +534,7 @@ impl SandboxConfig {
         if self.cli.is_some() && layout.exec_env {
             let cli = Path::new(SANDBOX_BIN_DIR).join("terrarium");
             args.push(cli.display().to_string());
-            args.extend(exec_env_args(program));
+            args.extend(exec_env_args(program, layout.exec_env_credentials));
         } else {
             args.push(program);
         }
@@ -619,10 +624,17 @@ impl SandboxConfig {
     }
 }
 
-/// `exec-env -- <program>`: the args of `terrarium` that start `program`
-/// with the env vars of the secret grants ([`AgentLayout::exec_env`]).
-fn exec_env_args(program: String) -> Vec<String> {
-    vec!["exec-env".to_owned(), "--".to_owned(), program]
+/// `exec-env [--require-credentials] -- <program>`: the args of
+/// `terrarium` that start `program` with the env vars of the secret grants
+/// and the harness credentials ([`AgentLayout::exec_env`],
+/// [`AgentLayout::exec_env_credentials`]).
+fn exec_env_args(program: String, credentials: bool) -> Vec<String> {
+    let mut a = vec!["exec-env".to_owned()];
+    if credentials {
+        a.push("--require-credentials".to_owned());
+    }
+    a.extend(["--".to_owned(), program]);
+    a
 }
 
 /// True for a var that must not pass from the daemon env.
@@ -789,6 +801,7 @@ mod tests {
             cred_alias: None,
             ssh_agent: None,
             exec_env: false,
+            exec_env_credentials: false,
             harness_bin: None,
         }
     }
@@ -1108,6 +1121,7 @@ TERRARIUM_AGENT=01K8AGENT0000000000000000A TERRARIUM_SOCKET=/run/terrarium/agent
             cred_alias: Some(harness_dir.join("cred")),
             ssh_agent: None,
             exec_env: false,
+            exec_env_credentials: false,
             harness_bin: None,
         };
         let script = format!(
@@ -1176,6 +1190,26 @@ TERRARIUM_AGENT=01K8AGENT0000000000000000A TERRARIUM_SOCKET=/run/terrarium/agent
         assert_eq!(w.program, "/usr/local/bin/terrarium");
         assert_eq!(&w.args[..3], ["exec-env", "--", "claude"]);
         assert_eq!(&w.args[3..], original.as_slice());
+        // Harness credentials: exec-env must reach the daemon.
+        l.exec_env_credentials = true;
+        let w = plain.wrap_with(spec(), &l, BTreeMap::new(), &|_| None, &resolve);
+        assert_eq!(
+            &w.args[..4],
+            ["exec-env", "--require-credentials", "--", "claude"]
+        );
+        let w = cfg.wrap_with(spec(), &l, BTreeMap::new(), &|_| None, &resolve);
+        let i = w.args.iter().position(|a| a == "--").unwrap();
+        assert_eq!(
+            &w.args[i + 1..i + 6],
+            [
+                "/opt/terrarium/bin/terrarium",
+                "exec-env",
+                "--require-credentials",
+                "--",
+                "/usr/bin/claude"
+            ]
+        );
+        l.exec_env_credentials = false;
         // No CLI: no wrap (the daemon warns, and sets no var).
         let bare = SandboxConfig {
             cli: None,

@@ -356,12 +356,12 @@ async fn the_launch_env_comes_from_the_daemon_and_follows_the_name_rule() {
     let r = td.post_empty_as("p/w", "/api/agent/secrets/env").await;
     assert_eq!(
         r.ok(),
-        &json!({"vars": {"DB_KEY": PROJECT_VALUE, "GH_TOKEN": TOKEN_VALUE}})
+        &json!({"vars": {"DB_KEY": PROJECT_VALUE, "GH_TOKEN": TOKEN_VALUE}, "credentials": {}})
     );
     assert_eq!(r.headers["cache-control"], "no-store");
     // Another project's agent gets none of them; the operator gets 403.
     let r = td.post_empty_as("q/x", "/api/agent/secrets/env").await;
-    assert_eq!(r.ok(), &json!({"vars": {}}));
+    assert_eq!(r.ok(), &json!({"vars": {}, "credentials": {}}));
     td.post_empty("/api/agent/secrets/env")
         .await
         .err(403, "forbidden");
@@ -381,5 +381,112 @@ async fn the_launch_env_comes_from_the_daemon_and_follows_the_name_rule() {
         .await;
     assert_eq!(r.status.as_u16(), 204);
     let r = td.post_empty_as("p/w", "/api/agent/secrets/env").await;
-    assert_eq!(r.ok(), &json!({"vars": {"GH_TOKEN": TOKEN_VALUE}}));
+    assert_eq!(
+        r.ok(),
+        &json!({"vars": {"GH_TOKEN": TOKEN_VALUE}, "credentials": {}})
+    );
+}
+
+/// PLAN §16b.4: the stored API key of the agent's subscription reaches
+/// its harness through `POST /api/agent/secrets/env` (`credentials`), not
+/// through the launch spec. Only the agent of the subscription gets it,
+/// from its subscription at the time of the call; a grant of the same
+/// name loses; the audit row holds the names only; `secret get` cannot
+/// read the key.
+#[tokio::test]
+async fn the_subscription_key_comes_with_the_launch_env() {
+    const KEY: &str = "sk-ant-SUBSCRIPTION-key-1";
+    const ZAI: &str = "zai-SUBSCRIPTION-key-2";
+    let td = setup().await;
+    td.post(
+        "/api/subscriptions",
+        json!({"name": "keyed", "provider": "anthropic", "harnesses": ["claude"]}),
+    )
+    .await
+    .ok();
+    td.post(
+        "/api/subscriptions/keyed/api-key",
+        json!({"provider": "anthropic", "key": KEY}),
+    )
+    .await
+    .ok();
+    td.post(
+        "/api/subscriptions",
+        json!({"name": "glm", "provider": "zai", "plan": "coding", "harnesses": ["claude", "pi"]}),
+    )
+    .await
+    .ok();
+    td.post(
+        "/api/subscriptions/glm/api-key",
+        json!({"provider": "zai", "key": ZAI}),
+    )
+    .await
+    .ok();
+    let k = td.agent("p", "k", json!({"subscription": "keyed"})).await;
+    td.agent("p", "z", json!({"harness": "pi", "subscription": "glm"}))
+        .await;
+    // A grant next to the key: both come, each in its own map.
+    td.put(
+        "/api/secrets/p/other",
+        json!({"kind": "api_key", "fields": {"value": PROJECT_VALUE}}),
+    )
+    .await
+    .ok();
+    td.post(
+        "/api/secrets/p/other/grants",
+        json!({"grantee": "agent:p/k", "level": "read", "env": "MY_KEY"}),
+    )
+    .await
+    .ok();
+
+    let r = td.post_empty_as("p/k", "/api/agent/secrets/env").await;
+    assert_eq!(r.ok()["credentials"], json!({"ANTHROPIC_API_KEY": KEY}));
+    assert_eq!(r.ok()["vars"], json!({"MY_KEY": PROJECT_VALUE}));
+    assert_eq!(r.headers["cache-control"], "no-store");
+    let r = td.post_empty_as("p/z", "/api/agent/secrets/env").await;
+    let c = &r.ok()["credentials"];
+    assert_eq!(c["ZAI_API_KEY"], ZAI);
+    assert_eq!(c["ANTHROPIC_AUTH_TOKEN"], ZAI);
+    assert_eq!(c["ANTHROPIC_BASE_URL"], "https://api.z.ai/api/anthropic");
+    // Another agent gets no key.
+    for other in ["p/w", "q/x"] {
+        let r = td.post_empty_as(other, "/api/agent/secrets/env").await;
+        assert_eq!(r.ok()["credentials"], json!({}), "{other}");
+        let text = r.body.to_string();
+        assert!(!text.contains(KEY) && !text.contains(ZAI), "{text}");
+    }
+    // The key is not a secret of the store: `secret get` cannot read it.
+    let mine = td.get_as("p/k", "/api/agent/secrets").await;
+    assert!(!mine.body.to_string().contains(KEY), "{:?}", mine.body);
+    let r = td
+        .post_empty_as("p/k", "/api/agent/secrets/keyed/get")
+        .await;
+    assert!(r.status.as_u16() >= 400, "{:?}", r.body);
+    assert!(!r.body.to_string().contains(KEY));
+    // The audit row names the vars, with no value.
+    let audit = td.get("/api/audit?action=secret.env").await;
+    let text = audit.body.to_string();
+    assert!(text.contains("ANTHROPIC_API_KEY"), "{text}");
+    assert!(!text.contains(KEY) && !text.contains(ZAI), "{text}");
+    // A key change applies at the next call (the next start).
+    td.post(
+        "/api/subscriptions/keyed/api-key",
+        json!({"provider": "anthropic", "key": "sk-ant-NEW"}),
+    )
+    .await
+    .ok();
+    let r = td.post_empty_as("p/k", "/api/agent/secrets/env").await;
+    assert_eq!(
+        r.ok()["credentials"],
+        json!({"ANTHROPIC_API_KEY": "sk-ant-NEW"})
+    );
+    // An agent moved off the subscription gets no key.
+    td.patch(
+        &format!("/api/agents/{}", k["id"].as_str().unwrap()),
+        json!({"subscription": null}),
+    )
+    .await
+    .ok();
+    let r = td.post_empty_as("p/k", "/api/agent/secrets/env").await;
+    assert_eq!(r.ok()["credentials"], json!({}));
 }

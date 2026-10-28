@@ -416,18 +416,20 @@ struct Built {
 /// values never go into `env`. `terrarium exec-env` gets them from the
 /// daemon inside the sandbox, just before the harness starts, so no value
 /// is in the launch spec, the runner spec file (`runner.json`), or the env
-/// of `bwrap`. A var that the harness or the account sets already wins.
+/// of `bwrap`. A var that the harness, the account, or a credential var
+/// (`credentials`, the subscription's API key) sets already wins.
 /// The git hosts of the granted tokens get `terrarium repo credential` as
 /// their credential helper, through `GIT_CONFIG_*` (no file in the home).
 /// The answer: the names of the secret vars, and the warnings.
 fn secret_env(
     env: &mut std::collections::BTreeMap<String, String>,
+    credentials: &[String],
     secrets: &crate::secrets::grants::LaunchSecrets,
 ) -> (Vec<String>, Vec<String>) {
     let mut vars = Vec::new();
     let mut warnings = Vec::new();
     for k in secrets.env.keys() {
-        if env.contains_key(k) {
+        if env.contains_key(k) || credentials.contains(k) {
             warnings.push(format!(
                 "a secret grant sets `{k}`, but the harness sets it already; the grant does not apply"
             ));
@@ -458,6 +460,17 @@ fn secret_env(
 /// (`<agent dir>/private/accounts.json`): `{"account", "bound"}`. A daemon
 /// start reads it for an agent whose runner process still runs.
 pub const ACCOUNTS_FILE: &str = "accounts.json";
+
+/// The account that the last launch of `agent` picked, from
+/// [`ACCOUNTS_FILE`]. `POST /api/agent/secrets/env` reads it for the
+/// account's credential env ([`crate::accounts::credential_env`]).
+pub fn launched_account(state_dir: &Path, agent: AgentId) -> Option<String> {
+    let path = terrarium_runner::private_dir(state_dir, agent).join(ACCOUNTS_FILE);
+    safefs::read_to_string(&path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<LaunchedAccounts>(&t).ok())
+        .and_then(|a| a.account)
+}
 
 /// The content of [`ACCOUNTS_FILE`].
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1195,6 +1208,7 @@ impl RunnerSupervisor {
             ssh_agent: None,
             harness_bin: None,
             exec_env: false,
+            exec_env_credentials: false,
         }
     }
 
@@ -1491,10 +1505,11 @@ impl RunnerSupervisor {
                 let overlays = adapter
                     .materialize_config(&a, &home)
                     .map_err(|e| format!("cannot write the {} config: {e}", a.harness))?;
-                // The stored API key of the subscription (pi providers, the
-                // Copilot PAT as `COPILOT_GITHUB_TOKEN`). Secrets: never logged.
+                // The names of the stored API key vars of the subscription
+                // (PLAN §16b.4). The values reach the harness through
+                // `terrarium exec-env` only.
                 let credentials = match (&sub, &state_dir) {
-                    (Some(s), Some(dir)) => crate::login_session::credential_env_for(dir, s),
+                    (Some(s), Some(dir)) => crate::login_session::credential_vars_for(dir, s),
                     _ => Vec::new(),
                 };
                 let repos =
@@ -1550,6 +1565,7 @@ impl RunnerSupervisor {
         let crate::accounts::LaunchAccounts {
             account,
             env: account_env,
+            credential_vars: account_credentials,
             overlays: account_overlays,
             stores,
             cred_alias,
@@ -1604,17 +1620,41 @@ impl RunnerSupervisor {
                 "the agent runs on its plan account"
             );
         }
-        // The account first: a stored API key of the subscription wins.
         spec.env.extend(account_env);
-        if !credentials.is_empty() {
+        // The credential vars (PLAN §16b.4): the account's (the Copilot
+        // token), then the subscription's stored API key. Names only: the
+        // values never go into the spec, so neither into `runner.json` nor
+        // into the env of `bwrap`. `terrarium exec-env` gets them from the
+        // daemon inside the sandbox and sets them over the spec env, as
+        // the launch did before (a credential var wins).
+        let mut credential_vars = account_credentials;
+        for k in credentials {
+            if !credential_vars.contains(&k) {
+                credential_vars.push(k);
+            }
+        }
+        for k in &credential_vars {
+            spec.env.remove(k);
+        }
+        if !credential_vars.is_empty() {
+            if cfg.sandbox.cli.is_none() {
+                return Err(SupervisorError::NotReady(format!(
+                    "the harness credentials ({}) reach the harness only through \
+                     `terrarium exec-env`, and no `terrarium` CLI is set; start the daemon with \
+                     --cli <path to terrarium> (TERRARIUM_CLI)",
+                    credential_vars.join(", ")
+                )));
+            }
             debug!(
                 agent = %agent.id,
-                vars = ?credentials.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(),
-                "stored credentials go into the env"
+                vars = ?credential_vars,
+                "the harness credentials come through exec-env"
             );
+            layout.exec_env = true;
+            layout.exec_env_credentials = true;
         }
-        spec.env.extend(credentials);
-        let (secret_vars, mut secret_warnings) = secret_env(&mut spec.env, &view.secrets);
+        let (secret_vars, mut secret_warnings) =
+            secret_env(&mut spec.env, &credential_vars, &view.secrets);
         secret_warnings.extend(view.secrets.warnings.iter().cloned());
         if !secret_vars.is_empty() {
             if cfg.sandbox.cli.is_some() {
@@ -3129,6 +3169,15 @@ const EXIT_DRAIN: Duration = Duration::from_secs(1);
 pub fn exit_how(status: &ExitStatus) -> String {
     match &status.signal {
         Some(s) => format!("exited with code {} ({s})", status.code),
+        None if i64::from(status.code)
+            == i64::from(terrarium_core::launch::EXEC_ENV_NO_CREDENTIALS) =>
+        {
+            format!(
+                "exited with code {} (the code of `terrarium exec-env` when it cannot get the \
+             harness credentials from the daemon; the harness did not start)",
+                status.code
+            )
+        }
         None => format!("exited with code {}", status.code),
     }
 }

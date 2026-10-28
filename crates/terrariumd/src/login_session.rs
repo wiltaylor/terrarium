@@ -1592,10 +1592,11 @@ pub fn stored_key(state_dir: &Path, name: &str) -> Option<String> {
 /// `KIMI_API_KEY` for a Kimi Code plan, because pi's `kimi-coding`
 /// provider reads that var. Never an Anthropic var.
 ///
-/// Call site: the launch path of `RunnerSupervisor` (the agent's
-/// `LaunchSpec::env`, after the adapter's env and before the sandbox
-/// wraps it), for an agent whose `subscription` names `sub`. The values
-/// are secrets: never log them or write them to a file the agent can read.
+/// Call sites: `POST /api/agent/secrets/env`, which gives the vars to
+/// `terrarium exec-env` inside the sandbox just before the harness starts,
+/// and [`credential_vars_for`], which gives the launch the names only
+/// (PLAN §16b.4). The values never go into the launch spec or the runner
+/// spec file. They are secrets: never log them or write them to a file.
 pub fn credential_env_for(state_dir: &Path, sub: &Subscription) -> Vec<(String, String)> {
     let Some(var) = sub.env_var.as_deref() else {
         return Vec::new();
@@ -1617,6 +1618,18 @@ pub fn credential_env_for(state_dir: &Path, sub: &Subscription) -> Vec<(String, 
         out.push((url_var.to_owned(), url.clone()));
     }
     out
+}
+
+/// The names of [`credential_env_for`], for the launch. The values are
+/// zeroed here.
+pub fn credential_vars_for(state_dir: &Path, sub: &Subscription) -> Vec<String> {
+    credential_env_for(state_dir, sub)
+        .into_iter()
+        .map(|(k, v)| {
+            drop(zeroize::Zeroizing::new(v));
+            k
+        })
+        .collect()
 }
 
 #[cfg(test)]

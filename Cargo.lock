@@ -3777,6 +3777,7 @@ dependencies = [
  "tokio-rustls",
  "tokio-tungstenite",
  "ulid",
+ "zeroize",
 ]
 
 [[package]]

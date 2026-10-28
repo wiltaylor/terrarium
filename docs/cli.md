@@ -1127,20 +1127,25 @@ only:
 terrarium whoami                              agent, project, harness, status, roles
 terrarium agents ls [--all-projects]
 terrarium hook <event>                        for harness hooks; reads JSON on stdin
-terrarium exec-env -- <program> [args...]     the sandbox starts the harness with it
+terrarium exec-env [--require-credentials] -- <program> [args...]
+                                              the sandbox starts the harness with it
 ```
 
 `terrarium hook` does not start an async runtime. It always exits 0, so
 that a hook never stops the harness. See [runner.md](runner.md).
 
-`terrarium exec-env` gets the env vars of the agent's secret grants from
-the daemon (`POST /api/agent/secrets/env`, api.md §5.2). It adds each var
-that the env does not hold yet, and then replaces itself with the
+`terrarium exec-env` gets the env vars of the agent's secret grants and
+the credentials of its harness (the subscription's API key, the Copilot
+account token) from the daemon (`POST /api/agent/secrets/env`, api.md
+§5.2). It adds each grant var that the env does not hold yet, and sets
+each credential var over the env. Then it replaces itself with the
 program. When the daemon does not answer, it prints a warning and starts
-the program with no secret var. A program that does not start exits 127.
-The sandbox uses it at each start of the harness (PLAN §16b.4), so no
-secret value is in the launch spec or in the env of `bwrap`. Both help
-texts hide it.
+the program with no secret var. With `--require-credentials` (the
+harness has credentials to get), it tries 5 times in about 3 seconds,
+then exits 78 and does not start the program. A program that does not
+start exits 127. The sandbox uses it at each start of the harness (PLAN
+§16b.4), so no secret or credential value is in the launch spec or in
+the env of `bwrap`. Both help texts hide it.
 
 ### `terrarium admin`
 

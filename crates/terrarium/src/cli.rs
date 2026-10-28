@@ -262,10 +262,15 @@ pub enum Command {
         /// The hook name, for example `Stop` or `UserPromptSubmit`
         event: String,
     },
-    /// Start a program with the env vars of the agent's secret grants (the
-    /// sandbox starts the harness with it; PLAN §16b.4)
+    /// Start a program with the env vars of the agent's secret grants and
+    /// the credentials of its harness (the sandbox starts the harness with
+    /// it; PLAN §16b.4)
     #[command(name = "exec-env")]
     ExecEnv {
+        /// The harness has credentials to get: when the daemon does not
+        /// answer after a few tries, exit 78 and do not start the program
+        #[arg(long)]
+        require_credentials: bool,
         /// The program and its arguments
         #[arg(
             required = true,

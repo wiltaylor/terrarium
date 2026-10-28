@@ -82,6 +82,9 @@ struct FakeLaunch {
     /// harness version dir of the tools dir ([`tui_wrapper`]); else
     /// `python3 <fake_tui.py> ...`.
     pinned: bool,
+    /// Launch this script instead of `python3`: it writes its env to a
+    /// file and runs `python3 "$@"` ([`env_wrapper`]).
+    wrapper: Option<PathBuf>,
 }
 
 impl Adapter for FakeLaunch {
@@ -95,7 +98,11 @@ impl Adapter for FakeLaunch {
         Ok(Version::new(1, 0, 0))
     }
     fn launch(&self, agent: &Agent, resume: Option<&HarnessSessionId>) -> LaunchSpec {
-        let program = if self.pinned { "claude" } else { "python3" };
+        let program = match &self.wrapper {
+            Some(w) => w.display().to_string(),
+            None if self.pinned => "claude".to_owned(),
+            None => "python3".to_owned(),
+        };
         let spec = LaunchSpec::new(program, &agent.workspace)
             .arg(fake_tui().display().to_string())
             .env("FAKE_TUI_DELAY_MS", "150");
@@ -133,11 +140,60 @@ fn tools_config(root: &Path) -> ToolsConfig {
     cfg
 }
 
-fn supervisor(root: &Path, tools: Option<&Path>) -> Arc<RunnerSupervisor> {
-    let home = root.join("auth/claude");
-    std::fs::create_dir_all(&home).unwrap();
+/// The `terrarium` CLI binary next to the test binaries. A missing one is
+/// built once.
+fn cli_bin() -> PathBuf {
+    static BIN: OnceLock<PathBuf> = OnceLock::new();
+    BIN.get_or_init(|| {
+        let exe = std::env::current_exe().unwrap();
+        let dir = exe.parent().and_then(Path::parent).unwrap();
+        let bin = dir.join("terrarium");
+        if !bin.is_file() {
+            let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+            let status = std::process::Command::new(cargo)
+                .args(["build", "-q", "-p", "terrarium", "--bin", "terrarium"])
+                .current_dir(env!("CARGO_MANIFEST_DIR"))
+                .status()
+                .unwrap();
+            assert!(status.success(), "cargo build -p terrarium failed");
+        }
+        assert!(bin.is_file(), "no CLI binary at {}", bin.display());
+        bin
+    })
+    .clone()
+}
+
+/// A harness command that writes its env to `<seen>/<agent ulid>.env` and
+/// then runs `python3 "$@"` (the fake TUI).
+fn env_wrapper(root: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let seen = root.join("seen");
+    std::fs::create_dir_all(&seen).unwrap();
+    let bin = root.join("env-harness");
+    std::fs::write(
+        &bin,
+        format!(
+            "#!/bin/sh\nenv > '{}/'\"$TERRARIUM_AGENT\".env\nexec python3 \"$@\"\n",
+            seen.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    bin
+}
+
+fn supervisor(root: &Path, tools: Option<&Path>, cli: bool) -> Arc<RunnerSupervisor> {
     let mut homes = HashMap::new();
-    homes.insert(HarnessId::Claude, home);
+    for h in [
+        HarnessId::Claude,
+        HarnessId::Pi,
+        HarnessId::Codex,
+        HarnessId::Copilot,
+    ] {
+        let home = root.join("auth").join(h.as_str());
+        std::fs::create_dir_all(&home).unwrap();
+        homes.insert(h, home);
+    }
     let mut cfg = RunnerSupervisorConfig::new(
         root.join("state"),
         root.join("run"),
@@ -145,12 +201,14 @@ fn supervisor(root: &Path, tools: Option<&Path>) -> Arc<RunnerSupervisor> {
         SandboxConfig {
             mode: SandboxMode::None,
             tools_dir: tools.map(Path::to_path_buf),
+            cli: cli.then(cli_bin),
             ..SandboxConfig::default()
         },
         homes,
     );
     let mut entry = AdapterEntry::new(Arc::new(FakeLaunch {
         pinned: tools.is_some(),
+        wrapper: cli.then(|| env_wrapper(root)),
     }));
     entry.runner_adapter = AdapterKind::Fake;
     entry.ready_spec = Some(ReadyDetectorSpec {
@@ -158,6 +216,10 @@ fn supervisor(root: &Path, tools: Option<&Path>) -> Arc<RunnerSupervisor> {
         pattern: None,
     });
     cfg.adapters.clear();
+    // The other harnesses too, so their credential paths run.
+    for h in [HarnessId::Pi, HarnessId::Codex, HarnessId::Copilot] {
+        cfg.adapters.insert(h, entry.clone());
+    }
     cfg.adapters.insert(HarnessId::Claude, entry);
     cfg.restart = RestartTuning {
         backoff_base: Duration::from_millis(50),
@@ -184,11 +246,23 @@ struct Td {
     socket: PathBuf,
     /// A tools dir with harness version dirs ([`Td::start_with_tools`]).
     tools: Option<ToolsConfig>,
+    /// The sandbox binds the real `terrarium` CLI, and the harness writes
+    /// its env ([`Td::start_with_cli`]).
+    cli: bool,
 }
 
 impl Td {
     async fn start() -> Self {
         Self::start_with(false).await
+    }
+
+    /// A daemon whose agents start through the real `terrarium exec-env`
+    /// (PLAN §16b.4), with a harness that writes its env to
+    /// `<dir>/seen/<ulid>.env`.
+    async fn start_with_cli() -> Self {
+        let mut td = Self::new(None, true);
+        td.boot().await;
+        td
     }
 
     /// A daemon whose agents run the harness from the version dirs of a
@@ -216,15 +290,30 @@ impl Td {
             }
             false => None,
         };
-        let mut td = Self {
+        let mut td = Self::with_dir(dir, tools, false);
+        td.boot().await;
+        td
+    }
+
+    fn new(tools: Option<ToolsConfig>, cli: bool) -> Self {
+        let dir = tempfile::Builder::new()
+            .prefix("trp")
+            .tempdir_in("/tmp")
+            .unwrap();
+        std::fs::create_dir_all(dir.path().join("config")).unwrap();
+        sweep_stale_runners_once(&runner_bin());
+        Self::with_dir(dir, tools, cli)
+    }
+
+    fn with_dir(dir: tempfile::TempDir, tools: Option<ToolsConfig>, cli: bool) -> Self {
+        Self {
             _guard: RunnerProcessGuard::new(dir.path().join("run")),
             socket: dir.path().join("api.sock"),
             dir,
             daemon: None,
             tools,
-        };
-        td.boot().await;
-        td
+            cli,
+        }
     }
 
     /// Start a daemon with a new supervisor on the same state dir.
@@ -241,6 +330,7 @@ impl Td {
             supervisor: supervisor(
                 self.dir.path(),
                 self.tools.as_ref().map(|t| t.dir.as_path()),
+                self.cli,
             ),
             insecure_agent_header: true,
             artifact_listen: None,
@@ -1052,4 +1142,219 @@ async fn an_update_while_an_agent_runs_keeps_its_version_until_a_restart() {
     td.post(&format!("/api/agents/{id}/stop"), None).await;
     td.wait_status(&id, "stopped").await;
     td.wait_runner_gone(&id).await;
+}
+
+/// The bytes of each file under `dir`, recursively, as text, except the
+/// paths that `skip` names.
+fn tree_text(dir: &Path, skip: &[PathBuf]) -> String {
+    let mut out = String::new();
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if skip.contains(&p) {
+                continue;
+            }
+            let Ok(m) = std::fs::symlink_metadata(&p) else {
+                continue;
+            };
+            if m.is_dir() {
+                out.push_str(&tree_text(&p, skip));
+            } else if m.is_file()
+                && let Ok(b) = std::fs::read(&p)
+            {
+                out.push_str(&String::from_utf8_lossy(&b));
+            }
+        }
+    }
+    out
+}
+
+/// PLAN §16b.4, secret manager review §14: the credential env of each
+/// provider kind reaches the harness through the real `terrarium exec-env`
+/// (the runner socket, then `POST /api/agent/secrets/env`). No value is in
+/// `private/runner.json`, in any other file of the agent dir, or in any
+/// file of the state dir outside the credential stores (the store, the
+/// events, the audit log).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_harness_credentials_come_through_exec_env_only() {
+    struct Case {
+        agent: &'static str,
+        harness: &'static str,
+        sub: Value,
+        /// The API key to store, if any (provider, key).
+        key: Option<(&'static str, &'static str)>,
+        /// A Copilot plan account token, if any.
+        account_token: Option<&'static str>,
+        /// The vars that the harness must see with the value.
+        want: &'static [(&'static str, &'static str)],
+    }
+    let cases = [
+        Case {
+            agent: "claude-key",
+            harness: "claude",
+            sub: json!({"name": "ant", "provider": "anthropic", "harnesses": ["claude"]}),
+            key: Some(("anthropic", "sk-ant-E2E-anthropic-1")),
+            account_token: None,
+            want: &[("ANTHROPIC_API_KEY", "sk-ant-E2E-anthropic-1")],
+        },
+        Case {
+            agent: "claude-zai",
+            harness: "claude",
+            sub: json!({"name": "glm", "provider": "zai", "plan": "coding",
+                        "harnesses": ["claude", "pi"]}),
+            key: Some(("zai", "zai-E2E-glm-key-2")),
+            account_token: None,
+            want: &[
+                ("ANTHROPIC_AUTH_TOKEN", "zai-E2E-glm-key-2"),
+                ("ZAI_API_KEY", "zai-E2E-glm-key-2"),
+                ("ANTHROPIC_BASE_URL", "https://api.z.ai/api/anthropic"),
+            ],
+        },
+        Case {
+            agent: "pi-zai",
+            harness: "pi",
+            sub: json!({"name": "glm-pi", "provider": "zai", "plan": "coding",
+                        "harnesses": ["pi"]}),
+            key: Some(("zai", "zai-E2E-pi-key-3")),
+            account_token: None,
+            want: &[("ZAI_API_KEY", "zai-E2E-pi-key-3")],
+        },
+        Case {
+            agent: "pi-kimi",
+            harness: "pi",
+            sub: json!({"name": "kimi", "provider": "moonshot", "plan": "coding",
+                        "harnesses": ["pi"]}),
+            key: Some(("moonshot", "sk-E2E-moonshot-4")),
+            account_token: None,
+            want: &[
+                ("MOONSHOT_API_KEY", "sk-E2E-moonshot-4"),
+                ("KIMI_API_KEY", "sk-E2E-moonshot-4"),
+            ],
+        },
+        Case {
+            agent: "pi-or",
+            harness: "pi",
+            sub: json!({"name": "or", "provider": "openrouter", "harnesses": ["pi"]}),
+            key: Some(("openrouter", "sk-or-E2E-openrouter-5")),
+            account_token: None,
+            want: &[("OPENROUTER_API_KEY", "sk-or-E2E-openrouter-5")],
+        },
+        Case {
+            agent: "codex-key",
+            harness: "codex",
+            sub: json!({"name": "oa", "provider": "openai", "harnesses": ["codex"]}),
+            key: Some(("openai", "sk-E2E-openai-6")),
+            account_token: None,
+            want: &[("OPENAI_API_KEY", "sk-E2E-openai-6")],
+        },
+        Case {
+            agent: "copilot-pat",
+            harness: "copilot",
+            sub: json!({"name": "pat", "provider": "github", "harnesses": ["copilot"]}),
+            key: Some(("github", "github_pat_E2E_copilot_7")),
+            account_token: None,
+            want: &[("COPILOT_GITHUB_TOKEN", "github_pat_E2E_copilot_7")],
+        },
+        Case {
+            agent: "copilot-plan",
+            harness: "copilot",
+            sub: json!({"name": "ghplan", "provider": "github", "harnesses": ["copilot"]}),
+            key: None,
+            account_token: Some("gho_E2E_copilot_plan_8"),
+            want: &[("COPILOT_GITHUB_TOKEN", "gho_E2E_copilot_plan_8")],
+        },
+    ];
+
+    let td = Td::start_with_cli().await;
+    let state = td.dir.path().join("state");
+    let mut values = Vec::new();
+    for c in &cases {
+        let name = c.sub["name"].as_str().unwrap();
+        td.post("/api/subscriptions", Some(c.sub.clone())).await;
+        if let Some((provider, key)) = c.key {
+            td.post(
+                &format!("/api/subscriptions/{name}/api-key"),
+                Some(json!({"provider": provider, "key": key})),
+            )
+            .await;
+            values.push(key);
+        }
+        if let Some(token) = c.account_token {
+            terrariumd::accounts::write_credential(
+                &state,
+                name,
+                HarnessId::Copilot,
+                token.as_bytes(),
+            )
+            .unwrap();
+            values.push(token);
+        }
+        let id = td
+            .agent(c.agent, json!({"harness": c.harness, "subscription": name}))
+            .await;
+        td.post(&format!("/api/agents/{id}/start"), None).await;
+        td.wait_status(&id, "idle").await;
+        let seen = std::fs::read_to_string(td.dir.path().join("seen").join(format!("{id}.env")))
+            .unwrap_or_else(|e| panic!("{}: the harness wrote no env: {e}", c.agent));
+        for (k, v) in c.want {
+            assert!(
+                seen.lines().any(|l| l == format!("{k}={v}")),
+                "{}: the harness has no {k}",
+                c.agent
+            );
+        }
+        // The runner spec of this launch is there, with no value.
+        let spec = std::fs::read_to_string(td.private_dir(&id).join("runner.json")).unwrap();
+        assert!(spec.contains("exec-env"), "{}: {spec}", c.agent);
+        assert!(spec.contains("--require-credentials"), "{}", c.agent);
+        for v in &values {
+            assert!(!spec.contains(v), "{}: runner.json holds a key", c.agent);
+        }
+        td.post(&format!("/api/agents/{id}/stop"), None).await;
+        td.wait_status(&id, "stopped").await;
+        td.wait_runner_gone(&id).await;
+    }
+    // No file of the state dir holds a value, except the credential
+    // stores (`credentials/`).
+    let all = tree_text(&state, &[state.join("credentials")]);
+    assert!(!all.is_empty());
+    for v in &values {
+        assert!(!all.contains(v), "a file of the state dir holds {v}");
+    }
+}
+
+/// PLAN §16b.4: when `terrarium exec-env --require-credentials` cannot
+/// reach the daemon, it does not start the harness; it exits 78, and the
+/// status reason says why.
+#[test]
+fn exec_env_without_the_daemon_does_not_start_a_harness_with_no_credentials() {
+    let dir = tempfile::tempdir().unwrap();
+    let o = std::process::Command::new(cli_bin())
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("TERRARIUM_AGENT", "01AGENT")
+        .env("TERRARIUM_SOCKET", dir.path().join("gone.sock"))
+        .args([
+            "exec-env",
+            "--require-credentials",
+            "--",
+            "sh",
+            "-c",
+            "echo started",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        o.status.code(),
+        Some(terrarium_core::launch::EXEC_ENV_NO_CREDENTIALS)
+    );
+    assert!(!String::from_utf8_lossy(&o.stdout).contains("started"));
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(err.contains("try 5 of 5"), "{err}");
+    assert!(err.contains("does not start"), "{err}");
+    let how = terrariumd::runner_supervisor::exit_how(&terrarium_runner::ExitStatus {
+        code: 78,
+        signal: None,
+    });
+    assert!(how.contains("harness credentials"), "{how}");
 }

@@ -103,7 +103,8 @@ operator's event feed and the audit trail hide what it did. It can corrupt the f
 to break resume, or write a false `runner-exit.json` to change restart behaviour.
 The `runner.json` at rest also exposes the agent's own subscription key on disk;
 the agent already holds that key in its process env, so this is not a new leak to
-that agent, but it widens the on-disk footprint.
+that agent, but it widens the on-disk footprint. (Later: the key no longer goes into
+`runner.json`; see §14, "Residuals".)
 
 **Fix.** Do not bind the whole agent dir. Bind only what the harness needs:
 `prompt.md` read-only, and, for pi, its per-agent `pi/` and `sessions/`
@@ -1210,13 +1211,25 @@ rate limit.
 
 ### Residuals
 
-- **Other launch env.** The plan account keys and the subscription API
-  keys of §16 still go into the launch spec, so `runner.json` (0600, in
-  the 0700 private dir that the sandbox never binds) holds them while the
-  agent lives. They are daemon-chosen names, not grant names, so S1 (a)
-  and (b) do not apply to them. A move to the trash removes the file.
-- **An old `runner.json`.** A file that an older daemon wrote stays until
-  the next start of the agent (which writes a new one) or its delete.
+- **Other launch env (closed).** The subscription API keys of §16 (with
+  `ANTHROPIC_AUTH_TOKEN` for Z.ai and `KIMI_API_KEY` for Kimi Code) and
+  the Copilot account token (`COPILOT_GITHUB_TOKEN`) now take the
+  `exec-env` path too: `POST /api/agent/secrets/env` gives them in
+  `credentials`, and the launch spec holds the names only. So no
+  credential value is in `runner.json` or in any other file outside the
+  credential stores. With no `terrarium` CLI, such a start fails; it does
+  not fall back to the spec. When the daemon does not answer,
+  `exec-env --require-credentials` exits 78 and does not start the
+  harness. Test: `the_harness_credentials_come_through_exec_env_only`
+  (each provider kind, the whole state dir checked). The plan logins of
+  Claude and Codex stay files that the sandbox binds (PLAN §16.3).
+- **An old `runner.json`.** A file that an older daemon wrote can hold
+  a subscription key. It stays until the next start of the agent (which
+  writes a new one with no value) or its move to the trash.
+- **The credential env inside the sandbox.** Any process of the agent can
+  call `terrarium exec-env -- env` and see the subscription key. This is
+  not new: the harness has the key in its env, and the agent can read it
+  there (`/proc/<pid>/environ`).
 - **The env inside the sandbox.** A `read` grant with an env var shows the
   value to the agent by design (`/proc/self/environ`, `env`).
 - **Backups for 7 days.** A state backup in the first 7 days after the
