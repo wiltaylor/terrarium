@@ -2520,7 +2520,8 @@ Multi-stage, one image:
 3. Runtime stage, the Node image (Debian slim, `[node] image` in
    `harnesses.toml`): Node 22 (22.19+, which pi needs) and npm,
    `bubblewrap`, `git`, `python3`, `ripgrep`, `openssh-client`, `ca-certificates`,
-   `procps`, `tini`, and the Terrarium binaries (`terrariumd`, `terrarium`,
+   `procps`, `tini`, `uv` and `uvx` (copied from `ghcr.io/astral-sh/uv:0.13.0`),
+   and the Terrarium binaries (`terrariumd`, `terrarium`,
    `terrarium-runner`) only. **No harness.** The stage copies
    `harnesses.toml` to `/etc/terrarium/harnesses.toml` and sets
    `TERRARIUM_TOOLS_DIR` and `NPM_CONFIG_PREFIX` to `/opt/terrarium/tools`,

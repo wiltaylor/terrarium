@@ -21,7 +21,7 @@
 #   host-build   static musl terrarium-host, for `just host::build` and for the
 #                runtime's /opt/terrarium/dist (GET /install/terrarium-host)
 #   host-export  scratch stage that holds only the host binary, for `--output`
-#   runtime      Debian slim + Node and npm, bubblewrap, git, ssh, python3, ripgrep (no harness),
+#   runtime      Debian slim + Node and npm, bubblewrap, git, ssh, python3, ripgrep, uv (no harness),
 #                and the static terrarium-host with its SHA-256 for the host installer
 
 ARG RUST_IMAGE=rust:1.97-trixie
@@ -89,6 +89,11 @@ RUN apt-get update \
         ripgrep \
         tini \
     && rm -rf /var/lib/apt/lists/*
+
+# uv and uvx for Python in the sandboxes (bwrap binds /usr read-only, so
+# /usr/local/bin is on every agent's PATH). Pinned: the static binaries
+# of Astral's image.
+COPY --from=ghcr.io/astral-sh/uv:0.13.0 /uv /uvx /usr/local/bin/
 
 # The node image ships a `node` user with UID 1000. Replace it with
 # `terrarium`, whose UID and GID match the owner of the bind mounts.

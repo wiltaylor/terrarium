@@ -52,7 +52,10 @@ you end the turn.
 
 - The harness gives you the working directory, the platform, and the date
   in a separate message.
-- The sandbox has `git`, `ssh`, `python3`, and `node`. The network is on.
+- The sandbox has `git`, `ssh`, `rg`, `python3`, `uv`, and `node`. The
+  network is on. For Python, use `uv`: `uv run script.py`, `uv run --with
+  <pkg> ...`, `uvx <tool>`, and `uv venv` for a project. Do not run
+  `pip install` against the system Python.
 - The `terrarium` command reaches the daemon through a tunnel from the
   runner. When it says that the tunnel is down, try again one time. When
   it fails again, end the turn with a report.

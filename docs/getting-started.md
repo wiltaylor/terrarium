@@ -946,8 +946,10 @@ agents can change every file of the bare repo, so treat `repos/` as data
 that agents write.
 
 **Tools in the sandbox.** The sandbox uses the tools of the image: `git`,
-`ssh`, Node 22, `rg` (ripgrep), and `python3` (Python 3.13, the Debian
-trixie package, with no `pip` and no `venv`). The harnesses come from `tools/`:
+`ssh`, Node 22, `rg` (ripgrep), `python3` (Python 3.13, the Debian
+trixie package, with no `pip` and no `venv`), and `uv` and `uvx` (0.13.0,
+in `/usr/local/bin`). `uv` makes its own virtual environments, so it works
+without the `venv` module. The harnesses come from `tools/`:
 `/opt/terrarium/tools/bin` is on `PATH`, and the dir is read-only. The sandbox has no project toolchain. Run builds
 and tests on a target (section 2.8), and keep the toolchain in the image
 of the target.

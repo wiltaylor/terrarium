@@ -62,7 +62,10 @@ start a server or a long build in `bash`.
 - You run on Linux, in a sandbox, in the shell `bash`. The working
   directory is your workspace. Copilot does not tell you these facts in
   this setup.
-- The sandbox has `git`, `ssh`, `python3`, and `node`. The network is on.
+- The sandbox has `git`, `ssh`, `rg`, `python3`, `uv`, and `node`. The
+  network is on. For Python, use `uv`: `uv run script.py`, `uv run --with
+  <pkg> ...`, `uvx <tool>`, and `uv venv` for a project. Do not run
+  `pip install` against the system Python.
 - The `terrarium` command reaches the daemon through a tunnel from the
   runner. When it says that the tunnel is down, try again one time. When
   it fails again, end the turn with a report.
