@@ -92,6 +92,7 @@ import { createInboxMock, isPauseNotice } from "./inbox";
 import { createConfigMock } from "./config";
 import { createSkillMock, skillsError } from "./skills";
 import { applyTemplate, createTemplateMock, personaError, resolveTemplate, systemPromptError, templateRef } from "./templates";
+import { createSecretMock } from "./secrets";
 import { createTranscriptStream, encodeTranscriptFrame } from "../sse";
 import { appendBlock, fakeReply, mockModel, titleOf, type Draft as BlockDraft } from "./transcripts";
 
@@ -322,6 +323,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     access: "operator",
     lease: null,
     runtime: t.runtime ?? {},
+    ...(t.credential ? { credential_info: secrets.credentialInfo(t) } : {}),
   });
   // The checks of the daemon's `store/targets.rs` validate (docs/api.md §17.2): a bad value is `422 invalid`.
   const targetDef = (b: NewTarget): NewTarget => {
@@ -492,6 +494,10 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     w.audit.push(row);
     return row;
   };
+
+  // ----- secrets (PLAN §16b, docs/api.md §5.2): ./secrets.ts -----
+  // The operator password is read at each reveal; it is declared with the session below.
+  const secrets = createSecretMock({ w, iso, ulid, reply, fail, audit, password: () => password, caller: opts.scheduleCaller });
 
   // ----- event log and live hub (docs/api.md §9) -----
   const hub = new Set<(e: AgentEvent) => void>();
@@ -2992,6 +2998,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
             if (n >= max) fail(409, "conflict", `project \`${def.project}\` has ${n} targets, the most it may have (TERRARIUM_MAX_TARGETS_PER_PROJECT = ${max}); delete one first`, { project: def.project, targets: n, max });
           }
           if (w.targets.some((t) => t.name === def.name)) fail(409, "conflict", `target \`${def.name}\` exists`);
+          secrets.checkCredential(def);
           const t: Target = { ...def, id: def.name, scope: def.project ? "project" : "global", ephemeral: !!def.ephemeral, keep: !!def.keep, snapshot_before_task: !!def.snapshot_before_task, source: "api", state: "unknown", state_at: null, snapshots: [], usable: true, runtime: {} };
           w.targets.push(t);
           audit("target.create", t.name, t.project, { ...def });
@@ -3216,6 +3223,31 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           }
           return { target: t.name, op, ok: true, ...(op === "type" ? { chars: String(body.text ?? "").length } : body) };
         }),
+      // docs/api.md §17.2: a JSON merge patch. A running target takes only `keep` and `snapshot_before_task`.
+      update: (name, patch) =>
+        reply(() => {
+          const t = target(name);
+          if (t.source === "file") fail(409, "file_managed", `target \`${t.name}\` is declared in targets/${t.name}.toml; edit the file, then POST /api/reload`);
+          const next: Record<string, unknown> = { ...t };
+          for (const [k, v] of Object.entries(patch)) {
+            if (k === "name" && v !== t.name) fail(422, "invalid", "a target cannot change its name");
+            if (v === null) delete next[k];
+            else if (v !== undefined) next[k] = v;
+          }
+          const changed = Object.keys(patch).filter((k) => JSON.stringify(next[k] ?? null) !== JSON.stringify((t as unknown as Record<string, unknown>)[k] ?? null));
+          const running = t.state === "running" || Object.values(t.runtime?.instances ?? {}).some((i) => i.state === "running");
+          const locked = changed.filter((k) => k !== "keep" && k !== "snapshot_before_task");
+          if (running && locked.length) fail(409, "conflict", `target \`${t.name}\` runs: bring it down first to change ${locked.join(", ")}`, { state: "running", fields: locked });
+          const def = targetDef({ ...(next as unknown as NewTarget), name: t.name });
+          secrets.checkCredential(def, t);
+          for (const k of Object.keys(patch)) {
+            if (next[k] === undefined) delete (t as unknown as Record<string, unknown>)[k];
+            else (t as unknown as Record<string, unknown>)[k] = next[k];
+          }
+          if (changed.length) audit("target.update", t.name, t.project, { fields: changed });
+          return targetView(t);
+        }),
+      test: (name) => reply(() => secrets.test(targetView(target(name)))),
     },
 
     waits: waitMock.waits,
@@ -3242,6 +3274,9 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
 
     // The same caller as the schedules: the rights of §20 follow those of §19.
     eventSources: createEventSourceMock({ w, iso, ulid, reply, fail, emit, audit, caller: opts.scheduleCaller }),
+
+    // PLAN §16b, docs/api.md §5.2.
+    secrets: secrets.api,
 
     // The rights of §21 follow those of §20, but every caller reads the global templates.
     templates: createTemplateMock({ w, iso, ulid, reply, fail, emit, audit, agent, caller: opts.scheduleCaller }),

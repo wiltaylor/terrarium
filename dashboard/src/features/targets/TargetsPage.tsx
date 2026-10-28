@@ -24,6 +24,7 @@ import { deleteNeedsForce, deleteNotice, hasSnapshots, listSummary, snapshotName
 import { CreateTargetDialog } from "./CreateTargetDialog";
 import { ScopeChip } from "./ScopeChip";
 import { ScreenPanel } from "./ScreenPanel";
+import { CredentialCell, takesCredential, TargetCredential } from "./TargetCredential";
 import { targetHasDisplay } from "./display";
 
 const COLS = 7;
@@ -188,6 +189,7 @@ export default function TargetsPage() {
                                   </div>
                                 )}
                               </Show>
+                              <CredentialCell target={t()} />
                             </td>
                             <td>{t().kind}</td>
                             <td>
@@ -279,6 +281,13 @@ export default function TargetsPage() {
                             <tr class="screen-row">
                               <td colSpan={COLS}>
                                 <ScreenPanel target={t()} onClose={() => setScreenFor(null)} />
+                              </td>
+                            </tr>
+                          </Show>
+                          <Show when={takesCredential(t())}>
+                            <tr class="credential-row">
+                              <td colSpan={COLS}>
+                                <TargetCredential target={t()} onNotice={setNotice} onChanged={() => void refetch()} />
                               </td>
                             </tr>
                           </Show>

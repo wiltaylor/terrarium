@@ -1,0 +1,102 @@
+// The login of a target (PLAN §16b.6a, docs/api.md §17.2): a select of the
+// secrets that the target can use. An ssh target takes an `ssh_key`; a vnc
+// or rdp target takes a `login`. A project target takes its project's
+// secrets and the global ones; a global target, the global ones only. An
+// ssh target has "New key…": it generates a key in the store and selects
+// it.
+
+import { createResource, createSignal, For, Show } from "solid-js";
+import type { Secret, TargetKind } from "../../api/types";
+import { api } from "../../stores";
+import { credentialChoices, credentialKind, GLOBAL } from "./model";
+import { GenerateKeyForm } from "./GenerateKey";
+import { PublicKey } from "./PublicKey";
+
+/** Not a secret name: a name has no `+`. */
+const NEW_KEY = "+new-key";
+
+export function CredentialSelect(props: {
+  kind: TargetKind;
+  /** A project name or `global`; "" when not chosen yet. */
+  scope: string;
+  value: string;
+  onChange: (name: string) => void;
+  /** The name of the target, for the name of a new key. */
+  targetName?: string;
+}) {
+  const [secrets, { refetch }] = createResource(
+    () => (props.scope && credentialKind(props.kind) ? { scope: props.scope } : null),
+    async (v): Promise<Secret[]> => {
+      const reads = [api.secrets.list({ scope: GLOBAL }).catch(() => [] as Secret[])];
+      if (v.scope !== GLOBAL) reads.push(api.secrets.list({ scope: v.scope }).catch(() => [] as Secret[]));
+      return (await Promise.all(reads)).flat();
+    },
+  );
+  const [generating, setGenerating] = createSignal(false);
+  const [made, setMade] = createSignal<Secret | null>(null);
+  // The new key is in the list at once, before the refetch ends.
+  const choices = () => credentialChoices([...(secrets.latest ?? []), ...(made() ? [made()!] : [])], props.kind, props.scope || GLOBAL);
+  /** A value that is not in the list: an old name, or a secret this viewer cannot read. */
+  const unknown = () => !!props.value && !choices().some((c) => c.name === props.value);
+  const ssh = () => props.kind === "ssh";
+  const what = () => (ssh() ? "an ssh_key" : "a login");
+
+  return (
+    <div class="stack" style={{ gap: "6px" }}>
+      <select
+        aria-label="Credential"
+        value={props.value}
+        disabled={!props.scope}
+        onChange={(e) => {
+          const v = e.currentTarget.value;
+          if (v === NEW_KEY) {
+            setGenerating(true);
+            e.currentTarget.value = props.value;
+          } else props.onChange(v);
+        }}
+      >
+        <option value="" selected={!props.value}>
+          {!props.scope ? "Choose a scope first" : secrets.loading ? "Loading…" : `None (${ssh() ? "no key" : "no login"})`}
+        </option>
+        <Show when={unknown()}>
+          <option value={props.value} selected>
+            {props.value} (not found)
+          </option>
+        </Show>
+        <For each={choices()}>
+          {(c) => (
+            <option value={c.name} selected={c.name === props.value}>
+              {c.label}
+            </option>
+          )}
+        </For>
+        <Show when={ssh() && props.scope}>
+          <option value={NEW_KEY}>New key…</option>
+        </Show>
+      </select>
+      <Show when={props.scope && !secrets.loading && !choices().length && !generating()}>
+        <span class="small muted">
+          No {what()} secret that this target can use{props.scope === GLOBAL ? " (a global target uses a global secret only)" : ""}.{" "}
+          {ssh() ? "Pick New key…, or store one on the Secrets page." : "Store one on the Secrets page."}
+        </span>
+      </Show>
+      <Show when={generating()}>
+        <div class="card-box" style={{ padding: "8px" }}>
+          <GenerateKeyForm
+            scope={props.scope || GLOBAL}
+            scopes={[props.scope || GLOBAL]}
+            name={props.targetName ? `${props.targetName}-key` : ""}
+            onCancel={() => setGenerating(false)}
+            onGenerated={(s) => {
+              setGenerating(false);
+              setMade(s);
+              void refetch();
+              props.onChange(s.name);
+            }}
+          />
+        </div>
+      </Show>
+      <Show when={made() && made()!.name === props.value ? made() : null}>{(s) => <PublicKey secret={s()} />}</Show>
+    </div>
+  );
+}

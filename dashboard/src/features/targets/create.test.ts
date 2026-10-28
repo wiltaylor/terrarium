@@ -46,7 +46,8 @@ describe("createBody", () => {
 
   it("creates a vnc target through the mock", async () => {
     const api = mock();
-    const dlg = createCreateTargetDialog(api, "terrarium", { name: "win", kind: "vnc", host: "lab1", address: "10.0.0.9", credential: "pw" });
+    // The credential names a login secret (PLAN §16b.6a); the mock checks it as the daemon does.
+    const dlg = createCreateTargetDialog(api, "terrarium", { name: "win", kind: "vnc", host: "lab1", address: "10.0.0.9", credential: "win-vnc-pw" });
     const t = await dlg.submit();
     expect(t).toMatchObject({ name: "terrarium-win", kind: "vnc", has_display: true });
   });

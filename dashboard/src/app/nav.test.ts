@@ -83,6 +83,17 @@ describe("navigation", () => {
     expect(MOVED_ROUTES.map((r) => r.path)).toEqual(["/p/:project/spend", "/questions", "/p/:project/inbox"]);
   });
 
+  it("has Secrets after Subscriptions in the global list, and before Settings under the project, each with a route to one page", () => {
+    const hrefs = GLOBAL_ITEMS.map((i) => i.href) as string[];
+    expect(hrefs.indexOf("/secrets")).toBe(hrefs.indexOf("/subscriptions") + 1);
+    expect(GLOBAL_ITEMS.find((i) => i.href === "/secrets")?.label).toBe("Secrets");
+    const paths = PROJECT_ITEMS.map((i) => i.path) as string[];
+    expect(paths.indexOf("secrets")).toBe(paths.indexOf("settings") - 1);
+    expect(PROJECT_ITEMS.find((i) => i.path === "secrets")?.label).toBe("Secrets");
+    expect(app).toMatch(/path="\/secrets" component=\{SecretsPage\}/);
+    expect(app).toMatch(/path="\/p\/:project\/secrets" component=\{SecretsPage\}/);
+  });
+
   it("has no Spend page left in the code", () => {
     expect(Object.keys(import.meta.glob("../features/spend/**"))).toEqual([]);
     expect(app).not.toMatch(/SpendPage|features\/spend/);

@@ -12,6 +12,7 @@ import type { Target, TargetKind } from "../../api/types";
 import { api, projects } from "../../stores";
 import { capSentence } from "../../lib/target-runtime";
 import { createCreateTargetDialog, GLOBAL, LAB_SOURCES, showsField, type CreateOutcome, type CreateTargetForm } from "./create";
+import { CredentialSelect } from "../secrets/CredentialSelect";
 
 const KINDS: readonly TargetKind[] = ["docker", "vmlab", "host", "ssh", "vnc", "rdp", "desktop"];
 
@@ -95,7 +96,12 @@ export function CreateTargetDialog(props: { project: string | null; onClose: () 
           {text("port", "Port", "22")}
           {text("username", "User name", "Administrator")}
           {text("domain", "Domain", "LAB")}
-          {text("credential", remote() ? "Credential (a password name)" : "Credential (an ssh_key name)", remote() ? "win-pw" : "buildbox-key")}
+          <Show when={shows("credential")}>
+            <label style={{ "grid-column": "1 / -1" }}>
+              {remote() ? "Login (a login secret)" : "Key (an ssh_key secret)"}
+              <CredentialSelect kind={f().kind} scope={f().scope} value={f().credential} targetName={dlg.fullName() || undefined} onChange={(v) => dlg.set("credential", v)} />
+            </label>
+          </Show>
           {text("image", "Image", "alpine:3")}
           {text("container", "Container (an existing one)", "")}
           <Show when={shows("display")}>

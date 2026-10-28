@@ -793,7 +793,7 @@ ${XSS_DOCUMENT}
   // the project prefix (§17.2).
   const targets: Target[] = [
     { id: "lab-win11", name: "lab-win11", kind: "vmlab", project: "terrarium", host: "lab1", lab: "/labs/win11", machine: "win11", scope: "project", state: "stopped", state_at: ago(60 * 2), ephemeral: true, keep: true, snapshot_before_task: true, snapshots: ["terrarium-clean"], source: "file", usable: true, runtime: {} },
-    { id: "build-box", name: "build-box", kind: "ssh", address: "build@buildbox.lan", scope: "global", state: "unknown", ephemeral: false, keep: false, snapshot_before_task: false, snapshots: [], source: "file", usable: true, runtime: {} },
+    { id: "build-box", name: "build-box", kind: "ssh", address: "build@buildbox.lan", credential: "buildbox-key", scope: "global", state: "unknown", ephemeral: false, keep: false, snapshot_before_task: false, snapshots: [], source: "file", usable: true, runtime: {} },
     { id: "pg-test", name: "pg-test", kind: "docker", project: "webshop", host: "lab1", image: "postgres:17", scope: "project", state: "running", state_at: ago(60), ephemeral: true, keep: false, snapshot_before_task: false, snapshots: [], source: "api", usable: true, runtime: { attached: ["webshop/shop-lead"] } },
     { id: "dev-vm", name: "dev-vm", kind: "vmlab", host: "lab1", lab: "/labs/dev", scope: "global", state: "running", state_at: ago(30), ephemeral: false, keep: false, snapshot_before_task: false, snapshots: ["terrarium"], source: "file", usable: true, runtime: {} },
     { id: "ci-box", name: "ci-box", kind: "docker", host: "lab1", image: "alpine:3", scope: "global", state: "absent", state_at: ago(60 * 5), ephemeral: true, keep: false, snapshot_before_task: false, snapshots: [], source: "api", usable: true, runtime: {} },

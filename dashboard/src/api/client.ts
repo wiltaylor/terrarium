@@ -13,6 +13,8 @@ import { createWsEventStream, type EventStream, type PtySocket } from "./sockets
 import { createTranscriptStream, type TranscriptStream } from "./sse";
 import { onArtifactOrigin } from "../lib/artifact-origin";
 import { withScope } from "../lib/target-scope";
+// Secrets (PLAN §16b): a block of its own.
+import type { NewSecret, NewSecretGrant, RevealedSecret, Secret, SecretGenerate, SecretGrant, SecretPut, TargetPatch, TargetTestReport } from "./types";
 import type {
   SessionDetail,
   SessionRef,
@@ -484,6 +486,10 @@ export interface Api {
     screenshot(name: string, opts?: ScreenshotOpts): Promise<DisplayShot>;
     /** `POST /api/targets/{name}/display/{op}`. Input needs an exclusive lease, else `409`. */
     displayOp(name: string, op: DisplayOpName, body?: Record<string, unknown>): Promise<DisplayOpResult>;
+    /** `PATCH /api/targets/{name}`: a JSON merge patch. While the target runs, only `keep` and `snapshot_before_task` (`409 conflict`). A bad `credential` is `422 invalid`. */
+    update(name: string, patch: TargetPatch): Promise<Target>;
+    /** `POST /api/targets/{name}/test`: one ssh login with the target's key (docs/api.md §17.2). Another kind is `422 invalid`. */
+    test(name: string): Promise<TargetTestReport>;
   };
 
   /**
@@ -588,6 +594,34 @@ export interface Api {
     usage(name: string): Promise<SkillUsage>;
   };
 
+  /**
+   * The secret manager (PLAN §16b, docs/api.md §5.2). A global secret needs
+   * a sysadmin or the operator; a project secret, a project_admin of the
+   * project too (`403 forbidden`). No answer holds a secret field, except
+   * `reveal`.
+   */
+  secrets: {
+    /** `GET /api/secrets?scope=`. No scope: each secret that the caller manages. */
+    list(q?: { scope?: string }): Promise<Secret[]>;
+    get(scope: string, name: string): Promise<Secret>;
+    /** `POST /api/secrets`: `409` when the name exists in the scope. */
+    create(body: NewSecret): Promise<Secret>;
+    /** `PUT /api/secrets/{scope}/{name}`: make or replace. */
+    put(scope: string, name: string, body: SecretPut): Promise<Secret>;
+    /** `DELETE /api/secrets/{scope}/{name}?force=`. A secret that a target uses is `409 conflict` with `details.targets`, unless `force`. */
+    remove(scope: string, name: string, opts?: { force?: boolean }): Promise<void>;
+    /** `POST /api/secrets/{scope}/{name}/generate`: a new SSH key pair. The private key never leaves the daemon. */
+    generate(scope: string, name: string, body?: SecretGenerate): Promise<Secret>;
+    /** `POST /api/secrets/{scope}/{name}/reveal`: the operator only, with the operator password. `403` wrong password, `409` no password set, `429` too many. */
+    reveal(scope: string, name: string, password: string): Promise<RevealedSecret>;
+    /** `GET /api/secrets/{scope}/{name}/grants`. */
+    grants(scope: string, name: string): Promise<SecretGrant[]>;
+    /** `POST /api/secrets/{scope}/{name}/grants`: a second grant to the same grantee replaces the first. */
+    grant(scope: string, name: string, body: NewSecretGrant): Promise<SecretGrant>;
+    /** `DELETE /api/secrets/{scope}/{name}/grants?grantee=`. */
+    revoke(scope: string, name: string, grantee: string): Promise<void>;
+  };
+
   /** docs/host-protocol.md, the daemon's `api/hosts.rs`. */
   hosts: {
     list(): Promise<Host[]>;
@@ -651,6 +685,7 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
   const c = (id: string) => `/api/cards/${seg(id)}`;
   const sub = (name: string) => `/api/subscriptions/${seg(name)}`;
   const login = (id: string) => `/api/subscriptions/login/${seg(id)}`;
+  const secretPath = (scope: string, name: string) => `/api/secrets/${seg(scope)}/${seg(name)}`;
 
   return {
     health: () => get("/api/health"),
@@ -925,6 +960,8 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       screenshot: (name, opts = {}) =>
         t.request("POST", `/api/targets/${seg(name)}/display/screenshot`, { query: { format: "json" }, body: opts }),
       displayOp: (name, op, body = {}) => post(`/api/targets/${seg(name)}/display/${seg(op)}`, body),
+      update: async (name, body) => withScope(await patch<Target>(`/api/targets/${seg(name)}`, body)),
+      test: (name) => post(`/api/targets/${seg(name)}/test`),
     },
 
     schedules: {
@@ -981,6 +1018,20 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       update: (name, body) => put(`/api/skills/${seg(name)}`, body),
       remove: (name) => del(`/api/skills/${seg(name)}`),
       usage: (name) => get(`/api/skills/${seg(name)}/usage`),
+    },
+
+    secrets: {
+      // A plain array, no cursor (docs/api.md §5.2).
+      list: (q = {}) => get("/api/secrets", q.scope ? { scope: q.scope } : undefined),
+      get: (scope, name) => get(secretPath(scope, name)),
+      create: (body) => post("/api/secrets", body),
+      put: (scope, name, body) => put(secretPath(scope, name), body),
+      remove: (scope, name, o = {}) => del(secretPath(scope, name), o.force ? { force: true } : undefined),
+      generate: (scope, name, body = {}) => post(`${secretPath(scope, name)}/generate`, body),
+      reveal: (scope, name, password) => post(`${secretPath(scope, name)}/reveal`, { password }),
+      grants: (scope, name) => get(`${secretPath(scope, name)}/grants`),
+      grant: (scope, name, body) => post(`${secretPath(scope, name)}/grants`, body),
+      revoke: (scope, name, grantee) => del(`${secretPath(scope, name)}/grants`, { grantee }),
     },
 
     hosts: {

@@ -13,6 +13,8 @@ export const PROJECT_ITEMS = [
   { path: "versions", label: "Versions" },
   { path: "artifacts", label: "Artifacts" },
   { path: "schedules", label: "Schedules" },
+  // The project's secrets and the global ones it can use (PLAN §16b).
+  { path: "secrets", label: "Secrets" },
   { path: "settings", label: "Settings & repos" },
 ] as const;
 
@@ -26,6 +28,8 @@ export const GLOBAL_ITEMS = [
   // The skill library in the config repo.
   { href: "/skills", label: "Skills" },
   { href: "/subscriptions", label: "Subscriptions" },
+  // The secret manager (PLAN §16b): every secret the caller manages.
+  { href: "/secrets", label: "Secrets" },
   // The mail log: a record, with no unread state.
   { href: "/mail", label: "Mail" },
   { href: "/targets", label: "Targets" },

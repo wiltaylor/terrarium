@@ -29,6 +29,7 @@ const SettingsPage = lazy(() => import("../features/settings/SettingsPage"));
 const ConfigPage = lazy(() => import("../features/config/ConfigPage"));
 const SkillsPage = lazy(() => import("../features/skills/SkillsPage"));
 const SessionPage = lazy(() => import("../features/sessions/SessionPage"));
+const SecretsPage = lazy(() => import("../features/secrets/SecretsPage"));
 // Mock only: the hostile payloads, to eyeball that the sanitizer keeps them inert.
 const XssPage = lazy(() => import("../features/devxss/XssPage"));
 
@@ -69,6 +70,7 @@ export function App() {
         <Route path="/templates" component={TemplatesPage} />
         <Route path="/skills/:name?" component={SkillsPage} />
         <Route path="/subscriptions" component={SubscriptionsPage} />
+        <Route path="/secrets" component={SecretsPage} />
         <Route path="/mail" component={MailPage} />
         <Route path="/inbox" component={InboxPage} />
         <Route path="/targets" component={TargetsPage} />
@@ -89,6 +91,7 @@ export function App() {
         <Route path="/p/:project/artifacts/:id?" component={ArtifactsPage} />
         <Route path="/p/:project/versions/:id?" component={VersionsPage} />
         <Route path="/p/:project/schedules" component={SchedulesPage} />
+        <Route path="/p/:project/secrets" component={SecretsPage} />
         <Show when={isMock}>
           <Route path="/dev/xss" component={XssPage} />
         </Show>

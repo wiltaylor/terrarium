@@ -1615,6 +1615,8 @@ export interface Target {
   lease?: Lease | null;
   /** What runs now (docs/api.md §17.8). `{}` when nothing runs; absent on a daemon from before mode 1. */
   runtime?: TargetRuntime;
+  /** Only with a `credential` (docs/api.md §17.2): the secret that the daemon uses. Never a value. */
+  credential_info?: CredentialInfo;
 }
 
 /** docs/api.md §17.8: what runs on a target now. */
@@ -2518,4 +2520,117 @@ export interface SkillUser {
 export interface SkillUsage {
   agents: SkillUser[];
   templates: SkillUser[];
+}
+
+// ----- Secrets (PLAN §16b, docs/api.md §5.2) -----
+// No answer holds a secret field, except a reveal. The dashboard keeps a
+// revealed value in the dialog only, and never in a store or in storage.
+
+/** docs/api.md §5.2 "Kinds". */
+export type SecretKind = "api_key" | "token" | "github_token" | "login" | "ssh_key" | "generic";
+export const SECRET_KINDS: readonly SecretKind[] = ["api_key", "token", "github_token", "login", "ssh_key", "generic"];
+
+/** docs/api.md §5.2 "Grants": `use` gives the brokers only; `read` also gives the env var and `terrarium secret get`. */
+export type GrantLevel = "use" | "read";
+
+/** The secret shape of docs/api.md §5.2. `fields` holds the plain fields only. */
+export interface Secret {
+  id: string;
+  /** `global` or a project name. */
+  scope: string;
+  name: string;
+  kind: SecretKind;
+  /** The plain fields: a user name, a URL, hosts, the public key and the fingerprint of an `ssh_key`. */
+  fields: Record<string, unknown>;
+  /** The names of the secret fields that the secret holds. */
+  secret_fields: string[];
+  created_at: string;
+  updated_at: string;
+  /** The actor label. */
+  created_by: string;
+}
+
+/** `POST /api/secrets`. `fields` holds every field of the kind; `secret_fields` names the secret ones of a `generic`. */
+export interface NewSecret {
+  /** `global` (the default) or a project. */
+  scope?: string;
+  name: string;
+  kind: SecretKind;
+  fields: Record<string, unknown>;
+  secret_fields?: string[];
+}
+
+/** `PUT /api/secrets/{scope}/{name}`. */
+export interface SecretPut {
+  kind: SecretKind;
+  fields: Record<string, unknown>;
+  secret_fields?: string[];
+}
+
+/** `POST /api/secrets/{scope}/{name}/generate`. */
+export interface SecretGenerate {
+  type?: "ed25519" | "rsa";
+  /** `rsa` only: 3072 (the default) or 4096. */
+  bits?: 3072 | 4096;
+  comment?: string;
+  /** Replace a secret of that name; else a name that exists is `409`. */
+  replace?: boolean;
+}
+
+/** The answer of a reveal: the secret, with `values` (the secret fields by name). */
+export interface RevealedSecret extends Secret {
+  values: Record<string, string>;
+}
+
+/** A grant (docs/api.md §5.2 "Grants"). */
+export interface SecretGrant {
+  scope: string;
+  name: string;
+  /** The stored grantee: `agent:<ulid>` or `project:<name>`. */
+  grantee: string;
+  /** `agent:<project>/<name>` or `project:<name>`. */
+  grantee_label: string;
+  level: GrantLevel;
+  env?: string;
+  created_by: string;
+  created_at: string;
+}
+
+/** `POST /api/secrets/{scope}/{name}/grants`. `grantee`: `agent:<project>/<name>`, `agent:<id>`, or `project:<name>`. */
+export interface NewSecretGrant {
+  grantee: string;
+  level?: GrantLevel;
+  /** An env var name. Needs the level `read`. */
+  env?: string;
+}
+
+/** `credential_info` of a target (docs/api.md §17.2). `scope` and `kind` are `null` when there is no such secret. */
+export interface CredentialInfo {
+  name: string;
+  scope: string | null;
+  kind: SecretKind | null;
+  fingerprint?: string;
+  warning?: string;
+}
+
+/** `PATCH /api/targets/{name}`: a JSON merge patch; `null` removes a field. */
+export type TargetPatch = { [K in keyof NewTarget]?: NewTarget[K] | null };
+
+/** The `result` of `POST /api/targets/{name}/test` (docs/api.md §17.2). */
+export type TargetTestResult = "ok" | "auth_refused" | "host_key_mismatch" | "host_key_unknown" | "unreachable" | "error";
+
+/** The answer of `POST /api/targets/{name}/test`. The key never shows. */
+export interface TargetTestReport {
+  target: string;
+  kind: TargetKind;
+  address: string;
+  result: TargetTestResult;
+  message: string;
+  host_key: "known" | "added" | "unknown" | "mismatch" | "not_checked";
+  host_key_policy: string;
+  credential?: string | null;
+  fingerprint?: string | null;
+  exit_code: number | null;
+  stderr: string;
+  elapsed_ms: number;
 }
