@@ -1201,18 +1201,25 @@ mod tests {
         run(&db, "restarted", "H2").await;
         let r = rows(&db).await;
         assert_eq!(r.len(), 2, "{r:?}");
-        assert_eq!(r[0].harness_session_id.as_deref(), Some("H2"));
-        assert_eq!((r[0].resumes, r[0].turns, r[0].current), (0, 1, true));
-        assert_eq!(r[1].outcome.as_deref(), Some("restarted"));
-        assert_eq!((r[1].resumes, r[1].turns, r[1].current), (2, 3, false));
+        let by = |r: &[Session], h: &str| {
+            r.iter()
+                .find(|s| s.harness_session_id.as_deref() == Some(h))
+                .cloned()
+                .unwrap()
+        };
+        let h2 = by(&r, "H2");
+        assert_eq!((h2.resumes, h2.turns, h2.current), (0, 1, true));
+        let h1 = by(&r, "H1");
+        assert_eq!(h1.outcome.as_deref(), Some("restarted"));
+        assert_eq!((h1.resumes, h1.turns, h1.current), (2, 3, false));
 
         // A resume of the older session: its row is current again.
         run(&db, "restarted", "H1").await;
         let r = rows(&db).await;
         assert_eq!(r.len(), 2, "{r:?}");
-        assert_eq!(r[1].harness_session_id.as_deref(), Some("H1"));
-        assert_eq!((r[1].resumes, r[1].turns, r[1].current), (3, 4, true));
-        assert!(!r[0].current);
+        let h1 = by(&r, "H1");
+        assert_eq!((h1.resumes, h1.turns, h1.current), (3, 4, true));
+        assert!(!by(&r, "H2").current);
 
         // The harness begins a new conversation in a running session: the
         // row ends, and a new row holds the new one.
@@ -1221,8 +1228,13 @@ mod tests {
             .unwrap();
         let r = rows(&db).await;
         assert_eq!(r.len(), 3, "{r:?}");
-        assert_eq!(r[0].harness_session_id.as_deref(), Some("H3"));
-        assert!(r[0].current);
+        // Rows made in the same millisecond have no fixed order: find
+        // them by their harness session, not by position.
+        let h3 = r
+            .iter()
+            .find(|s| s.harness_session_id.as_deref() == Some("H3"));
+        assert!(h3.unwrap().current, "{r:?}");
+        assert_eq!(r.iter().filter(|s| s.current).count(), 1, "{r:?}");
         let h1 = r
             .iter()
             .find(|s| s.harness_session_id.as_deref() == Some("H1"));
