@@ -1166,8 +1166,7 @@ An independent review of the secret manager (PLAN §16b, commits
 7a07953..23a4ae7). The reviewer did not write the code, and proved each
 "verified" finding with a test in a copy of the source. S2 and S3 are in
 8ca3edd. S4, S5, S7, S8, S11, and S12 are in 9fa4b78. The fixes of S1,
-S6, S9, S10, and S13 are in one change (commit to be made, after
-9fa4b78). Each fix has a test that reproduces the finding.
+S6, S9, S10, and S13 are in 43a0307. Each fix has a test that reproduces the finding.
 
 | # | Finding | Status |
 |---|---|---|
