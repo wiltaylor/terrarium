@@ -20,8 +20,10 @@ Group=terrarium
 # Optional overrides: TERRARIUM_DAEMON_URL, TERRARIUM_HOST_NAME, RUST_LOG.
 EnvironmentFile=-/etc/terrarium-host/env
 ExecStart=/usr/local/bin/terrarium-host --config /etc/terrarium-host/config.toml run
-# vmlab is often a per-user install in ~/.local/bin.
-Environment=PATH=/usr/local/bin:/usr/bin:/bin:%h/.local/bin
+# vmlab is often a per-user install in ~/.local/bin or ~/.cargo/bin. In a
+# system unit `%h` is root's home, not the home of `User=`: both installers
+# write the service user's home in place of `%h`.
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:%h/.local/bin:%h/.cargo/bin
 Restart=always
 RestartSec=5
 # Sessions are process groups; stop them with the agent.

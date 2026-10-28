@@ -262,9 +262,9 @@ in_group() { id -nG "$1" 2>/dev/null | tr ' ' '\n' | grep -qx "$2"; }
 user_home() { getent passwd "$1" 2>/dev/null | cut -d: -f6; }
 has_systemd() { [ -d "$ROOT/run/systemd/system" ] && have systemctl; }
 
-# Is the program on the PATH of the unit (/usr/local/bin:/usr/bin:/bin:~/.local/bin)?
+# Is the program on the PATH of the unit (/usr/local/bin:/usr/bin:/bin:~/.local/bin:~/.cargo/bin)?
 on_service_path() {
-	for d in "$ROOT/usr/local/bin" "$ROOT/usr/bin" "$ROOT/bin" "$SERVICE_HOME/.local/bin"; do
+	for d in "$ROOT/usr/local/bin" "$ROOT/usr/bin" "$ROOT/bin" "$SERVICE_HOME/.local/bin" "$SERVICE_HOME/.cargo/bin"; do
 		[ -n "$d" ] && [ -x "$d/$1" ] && return 0
 	done
 	return 1
@@ -303,7 +303,9 @@ render_config() {
 }
 
 render_unit() {
-	unit_template | sed -e "s/^User=.*/User=$SERVICE_USER/" -e "s/^Group=.*/Group=$SERVICE_GROUP/"
+	# `%h` in a system unit is root's home, not the service user's.
+	unit_template | sed -e "s/^User=.*/User=$SERVICE_USER/" -e "s/^Group=.*/Group=$SERVICE_GROUP/" \
+		-e "/^Environment=PATH=/s|%h|$SERVICE_HOME|g"
 }
 
 # ---------------------------------------------------------------------------

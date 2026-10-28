@@ -226,7 +226,12 @@ class InstallHostScript(unittest.TestCase):
             unit_template=UNIT, terrarium=["terrarium"],
         )
         self.assertEqual(block(r.stdout, "/etc/terrarium-host/config.toml"), hi.render_config(s))
-        self.assertEqual(block(r.stdout, "/etc/systemd/system/terrarium-host.service"), hi.render_unit(UNIT.read_text(), "wil"))
+        unit = block(r.stdout, "/etc/systemd/system/terrarium-host.service")
+        home = str(self.h.root.parent / "home" / "wil")
+        self.assertEqual(unit, hi.render_unit(UNIT.read_text(), "wil", home))
+        # `%h` is root's home in a system unit: the PATH gets the user's home.
+        self.assertIn(f"Environment=PATH=/usr/local/bin:/usr/bin:/bin:{home}/.local/bin:{home}/.cargo/bin", unit)
+        self.assertNotIn("%h/", unit.split("Environment=PATH=")[1].splitlines()[0])
 
     def test_enable_display_matches_host_install_py(self):
         for flag in (False, True):

@@ -205,11 +205,21 @@ def render_config(s: Settings) -> str:
     return "\n".join(lines) + "\n"
 
 
-def render_unit(template: str, user: str) -> str:
+def render_unit(template: str, user: str, home: str | None = None) -> str:
     """The unit from crates/terrarium-host/terrarium-host.service, with
-    `User=` and `Group=` set to the service user."""
+    `User=` and `Group=` set to the service user. With `home`, `%h` in the
+    `Environment=PATH=` line becomes it: in a system unit `%h` is root's
+    home. The ssh install does the same on the host (`setup_cmd`), where it
+    knows the home."""
     out = re.sub(r"(?m)^User=.*$", f"User={user}", template)
-    return re.sub(r"(?m)^Group=.*$", f"Group={user}", out)
+    out = re.sub(r"(?m)^Group=.*$", f"Group={user}", out)
+    if home is not None:
+        out = re.sub(
+            r"(?m)^(Environment=PATH=.*)$",
+            lambda m: m.group(1).replace("%h", home),
+            out,
+        )
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -279,6 +289,8 @@ def setup_cmd(s: Settings, state: RemoteState, write_config: bool) -> list[str]:
     steps += [
         f"install -m 0755 -o root -g root {STAGE_BIN} {BIN_PATH}",
         f"install -m 0644 -o root -g root {STAGE_UNIT} {UNIT_PATH}",
+        # `%h` in a system unit is root's home: write the service user's.
+        f'h=$(getent passwd {u} | cut -d: -f6) && sed -i "/^Environment=PATH=/s|%h|$h|g" {UNIT_PATH}',
         # The agent writes the token through a temporary file and a rename,
         # so it must own the directory.
         f"install -d -m 0700 -o {u} -g {u} {CONFIG_DIR}",
