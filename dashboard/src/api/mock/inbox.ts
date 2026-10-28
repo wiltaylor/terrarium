@@ -57,7 +57,16 @@ export function createInboxMock(c: InboxMockContext) {
 
   const questionItem = (q: Question): InboxItem => {
     const open = q.status === "open";
-    return { id: questionItemId(q), kind: q.kind, open, urgent: open && q.priority === "urgent", project: q.project, at: q.created_at, question: q };
+    return {
+      id: questionItemId(q),
+      kind: q.kind,
+      open,
+      urgent: open && q.priority !== "normal",
+      critical: open && q.priority === "critical",
+      project: q.project,
+      at: q.created_at,
+      question: q,
+    };
   };
 
   /** Mail to `operator` is open until the operator acknowledges it (the read). */
@@ -66,6 +75,7 @@ export function createInboxMock(c: InboxMockContext) {
     kind: "mail",
     open: isUnread(m),
     urgent: false,
+    critical: false,
     project: m.from_kind === "system" ? null : projectOfName(m.from_name),
     at: m.created_at,
     message: c.render(m),
@@ -94,6 +104,7 @@ export function createInboxMock(c: InboxMockContext) {
       kind: "system",
       open: true,
       urgent: false,
+      critical: false,
       project: participants.map(projectOfName).find((p) => p) ?? null,
       at: (h[0] ?? msgs.at(-1))?.created_at ?? c.iso(),
       system,
@@ -109,14 +120,18 @@ export function createInboxMock(c: InboxMockContext) {
     ];
   };
 
-  /** Open first, then urgent first, then the newest (as the daemon). */
+  /** Open first, then critical, then urgent, then the newest (as the daemon). */
   const order = (a: InboxItem, b: InboxItem) =>
-    Number(b.open) - Number(a.open) || Number(b.urgent) - Number(a.urgent) || b.at.localeCompare(a.at) || b.id.localeCompare(a.id);
+    Number(b.open) - Number(a.open) ||
+    Number(!!b.critical) - Number(!!a.critical) ||
+    Number(b.urgent) - Number(a.urgent) ||
+    b.at.localeCompare(a.at) ||
+    b.id.localeCompare(a.id);
 
   const counts = (project?: string): InboxCounts => {
     const open = items().filter((i) => i.open && (!project || i.project === project));
     const n = (k: InboxKind) => open.filter((i) => i.kind === k).length;
-    return { open: open.length, urgent: open.filter((i) => i.urgent).length, question: n("question"), notice: n("notice"), mail: n("mail"), system: n("system") };
+    return { open: open.length, urgent: open.filter((i) => i.urgent).length, critical: open.filter((i) => i.critical).length, question: n("question"), notice: n("notice"), mail: n("mail"), system: n("system") };
   };
 
   /** Is the thread item open now? For the `inbox` event of a change. */

@@ -1202,6 +1202,95 @@ th {
   padding: 6px 16px;
   font-size: 13px;
 }
+/* The critical banner (docs/api.md §6.8): on every page while a critical item is open. */
+.critical-banner {
+  position: sticky;
+  top: env(safe-area-inset-top, 0px);
+  z-index: 21;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: center;
+  background: var(--danger);
+  color: var(--surface);
+  padding: 10px 16px;
+  font-size: 14px;
+  box-shadow: var(--shadow);
+}
+.critical-banner.collapsed {
+  padding: 4px 16px;
+  font-size: 13px;
+}
+.critical-icon {
+  font-size: 1.2em;
+  line-height: 1;
+}
+.critical-body {
+  flex: 1 1 260px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.critical-body strong {
+  font-weight: 800;
+  letter-spacing: 0.01em;
+}
+.critical-text {
+  display: block;
+  margin-top: 2px;
+}
+.critical-more {
+  font-weight: 600;
+}
+.critical-actions {
+  gap: 8px;
+}
+.critical-banner a.critical-open {
+  color: var(--danger);
+  background: var(--surface);
+  border-radius: var(--radius-sm);
+  padding: 3px 12px;
+  font-weight: 700;
+  text-decoration: none;
+}
+.critical-banner a.critical-open:focus-visible,
+.critical-banner button:focus-visible {
+  outline: 2px solid var(--surface);
+  outline-offset: 2px;
+}
+.critical-banner button.ghost {
+  color: inherit;
+  border-color: currentColor;
+}
+@media (max-width: 760px) {
+  .critical-banner {
+    position: static;
+  }
+}
+.chip.bad.strong {
+  background: var(--danger);
+  color: var(--surface);
+  font-weight: 700;
+}
+.question.critical {
+  border-color: var(--danger);
+  border-width: 2px;
+}
+.inbox-target {
+  border-radius: var(--radius);
+  outline: 3px solid var(--danger);
+  outline-offset: 3px;
+  animation: inbox-target-fade 2.4s ease-out 1;
+}
+@keyframes inbox-target-fade {
+  from {
+    background: var(--danger-soft);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .inbox-target {
+    animation: none;
+  }
+}
 .form-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
@@ -1360,55 +1449,35 @@ tr.row-open > td {
 
 /* ---------- Conversation (agent page) ---------- */
 
-.convo {
-  display: grid;
-  gap: 12px;
-  grid-template-columns: minmax(180px, 250px) minmax(0, 1fr);
-  align-items: start;
+.sessions-table tr.clickable {
+  cursor: pointer;
 }
-@media (max-width: 760px) {
-  .convo {
-    grid-template-columns: minmax(0, 1fr);
-  }
-  .convo-sessions ul {
-    max-height: 168px;
-  }
+.sessions-table tr.clickable:hover {
+  background: var(--surface-2);
 }
-.convo-sessions {
+.sessions-title {
+  max-width: 48ch;
+  overflow-wrap: anywhere;
+}
+.sessions-title button.link {
+  white-space: normal;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+.session-head {
   display: grid;
   gap: 6px;
-  min-width: 0;
 }
-.convo-sessions ul {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: grid;
-  gap: 4px;
-  max-height: 70vh;
-  overflow-y: auto;
+.session-title {
+  overflow-wrap: anywhere;
 }
-.convo-session {
-  display: grid;
-  gap: 2px;
-  width: 100%;
-  text-align: left;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: 6px 8px;
-  min-width: 0;
-}
-.convo-session.active {
-  border-color: var(--accent);
-  background: var(--accent-soft);
-}
-.convo-session-title {
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
   overflow: hidden;
-  text-overflow: ellipsis;
+  clip: rect(0 0 0 0);
   white-space: nowrap;
-  font-weight: 600;
-  font-size: 0.88rem;
 }
 .convo-main {
   display: grid;

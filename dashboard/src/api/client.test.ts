@@ -46,6 +46,26 @@ describe("createHttpApi", () => {
     s.close();
   });
 
+  it("reads the sessions of an agent as a page (docs/api.md §6.3): a JSON array and X-Next-Cursor", async () => {
+    // The shape that the daemon answers: a plain array, newest first, and the cursor in the header.
+    const rows = [
+      { id: "01S2", agent: "01A", harness_session_id: "h1", current: true, started_at: "2026-10-28T07:00:30.317Z", turns: 0, transcript: true, blocks: 26, title: "Test", active: true },
+      { id: "01S1", agent: "01A", harness_session_id: "h1", current: false, started_at: "2026-10-28T04:37:12.801Z", ended_at: "2026-10-28T07:00:30.317Z", outcome: "daemon_restart", turns: 2, transcript: true, blocks: 26, title: "Test", active: false },
+    ];
+    const seen: string[] = [];
+    const t = createHttpTransport({
+      fetch: vi.fn(async (url: RequestInfo | URL) => {
+        seen.push(String(url));
+        return new Response(JSON.stringify(rows), { status: 200, headers: { "Content-Type": "application/json", "X-Next-Cursor": "01S1" } });
+      }) as typeof fetch,
+      getToken: () => "tok",
+    });
+    const page = await createHttpApi(t).agents.sessions("demo/test", { limit: 5 });
+    expect(seen[0]).toMatch(/\/api\/agents\/demo%2Ftest\/sessions\?limit=5$/);
+    expect(page.items.map((s) => s.id)).toEqual(["01S2", "01S1"]);
+    expect(page.next).toBe("01S1");
+  });
+
   it("reads the transcript stream with fetch: the credentials of a request, and Accept text/event-stream", async () => {
     const seen: { url: string; init: RequestInit }[] = [];
     const body = new ReadableStream<Uint8Array>({

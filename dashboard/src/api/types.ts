@@ -421,7 +421,8 @@ export interface WaitEventData {
  * acknowledged | retracted.
  */
 export type QuestionStatus = "open" | "answered" | "acknowledged" | "retracted";
-export type QuestionPriority = "normal" | "urgent";
+/** `critical`: the operator must act now; the dashboard shows a banner on every page and flashes its tab. */
+export type QuestionPriority = "normal" | "urgent" | "critical";
 /** A `question` asks for a decision. A `notice` only tells the operator something; the operator acknowledges it. */
 export type QuestionKind = "question" | "notice";
 
@@ -795,7 +796,10 @@ export interface InboxItem {
   id: string;
   kind: InboxKind;
   open: boolean;
+  /** Open, with the priority `urgent` or `critical`. */
   urgent: boolean;
+  /** Open, with the priority `critical`. Absent on an older daemon. */
+  critical?: boolean;
   project: string | null;
   /** When it came in: the sort key. */
   at: string;
@@ -813,10 +817,12 @@ export interface InboxQuery {
   project?: string;
 }
 
-/** `GET /api/inbox/counts`: the open items. `urgent` counts the open urgent items. */
+/** `GET /api/inbox/counts`: the open items. `urgent` counts the open urgent and critical items; `critical` only the critical ones. */
 export interface InboxCounts {
   open: number;
   urgent: number;
+  /** Absent on an older daemon. */
+  critical?: number;
   question: number;
   notice: number;
   mail: number;

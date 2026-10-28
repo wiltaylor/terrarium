@@ -1369,8 +1369,8 @@ contract.
 **The question.** A question is a row on the asking agent: the text (at
 most 2000 characters), optional choices (at most 10 labels), optional
 context as Markdown (at most 16 KiB), an optional card, a priority
-(`normal` or `urgent`), and a status (`open`, `answered`, or
-`retracted`). Each update adds 1 to its revision. An agent has at most 50
+(`normal`, `urgent`, or `critical`), and a status (`open`, `answered`,
+or `retracted`). Each update adds 1 to its revision. An agent has at most 50
 open questions. The daemon refuses a copy of an open question of the same
 agent (`409`, with the ID of the open one).
 
@@ -1442,8 +1442,8 @@ not a table, and it copies no mail body:
 
 **The dashboard.** The global **Inbox** page (`/inbox`; `/questions`
 redirects) has the tabs All, Questions, Notices, Mail to you, and System,
-an Open and Done switch, and a project filter. Urgent items come first,
-then the newest. A question card shows the agent, the project, the card,
+an Open and Done switch, and a project filter. Critical items come first,
+then urgent items, then the newest. A question card shows the agent, the project, the card,
 the text (as plain text), the context (Markdown through the DOMPurify sink
 only), the choice buttons, a free-text answer, and Retract. A notice card
 shows the text, the context through the same sink, Acknowledge, and an
@@ -1451,7 +1451,7 @@ optional reply. A mail card shows the sender, the subject, and the body
 as data, with Acknowledge and an optional reply. A system card shows the
 thread, the held messages with Release, and Resume with an optional note.
 The Inbox nav item has the one badge of the things that wait for the
-operator: red when one is urgent. The Mail pages are logs (§12); the
+operator: red when one is urgent or critical. The Mail pages are logs (§12); the
 project page `Mail` (`/p/<project>/mail`; `/p/<project>/inbox` redirects)
 is the log of one project. The agent page shows the questions and notices
 of a leader. The `question` and `inbox` events keep all of them live.
@@ -1459,7 +1459,25 @@ of a leader. The `question` and `inbox` events keep all of them live.
 **Storage.** Migration 29: the table `questions`, and the kind column of
 `waits` again with `question` in its CHECK. Migration 30: `questions.kind`
 and the status `acknowledged`; `messages.released_at` and `released_by`;
-the table `thread_resumes` for a resume with no mail.
+the table `thread_resumes` for a resume with no mail. Migration 32: the
+priority `critical` in the CHECK of `questions.priority`.
+
+**Critical items.** Asked for on 2026-10-28. A leader uses
+`--critical` (`priority: "critical"`) only when the operator must act
+now: production is down, data is lost, a security problem, or a spent
+budget that stops all work. The rights are those of each other priority.
+While a critical question or notice is open, the dashboard shows a banner
+at the top of each page: "Critical notification", the agent, the short
+text of the newest critical item, "+N more" when there are more, and an
+"Open" link to the item in the Inbox (`/inbox?item=<id>`; the Inbox
+scrolls to the item and highlights it). The operator can make the banner
+smaller, but cannot close it while the item is open. The banner has
+`role="alert"` at the first appearance of an item only. While the page is
+hidden or has no focus, the browser tab title changes between
+"⚠ Critical — Terrarium" and the usual title each second, and the favicon
+is an alert icon. The focus stops it. The `question` and `inbox` events
+show and remove the banner with no reload. The Inbox counts give
+`critical`; `urgent` counts the urgent and the critical items.
 
 ---
 

@@ -8,9 +8,9 @@ import type { AgentEvent, Question, QuestionAnswer, QuestionStatus } from "../..
 /** The longest answer or reply, as in the daemon. */
 const MAX_TEXT = 8000;
 
-/** Open first: urgent first, then the oldest first. Then the others, the newest first. As the daemon. */
+/** Open first: critical first, then urgent, then the oldest first. Then the others, the newest first. As the daemon. */
 export function sortQuestions(list: Question[]): Question[] {
-  const rank = (q: Question) => (q.status === "open" ? (q.priority === "urgent" ? 0 : 1) : 2);
+  const rank = (q: Question) => (q.status === "open" ? 2 - (q.priority === "critical" ? 2 : q.priority === "urgent" ? 1 : 0) : 3);
   return list.slice().sort((x, y) => {
     const r = rank(x) - rank(y);
     if (r) return r;

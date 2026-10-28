@@ -684,13 +684,13 @@ wakes the agent. A worker gets `403` (exit 3): it mails its lead.
 
 ```
 terrarium question ask "<text>" [--option <label>]... [--context <text|-> | --context-file <path>]
-                       [--card <id>] [--urgent] [--wait [--timeout 2h]]
-terrarium notify "<text>" [--context <text|-> | --context-file <path>] [--card <id>] [--urgent]
+                       [--card <id>] [--urgent | --critical] [--wait [--timeout 2h]]
+terrarium notify "<text>" [--context <text|-> | --context-file <path>] [--card <id>] [--urgent | --critical]
                  [--wait [--timeout 2h]]
 terrarium question ls [--all] [--status open|answered|acknowledged|retracted] [--kind question|notice] [--agent a]
 terrarium question show <id>
 terrarium question update <id> [--text t] [--option o]... [--clear-options] [--context t | --context-file p]
-                       [--card c] [--urgent | --normal]
+                       [--card c] [--urgent | --critical | --normal]
 terrarium question retract <id> [-m reason]
 terrarium wait question <id> [--timeout t] [-m note]
 terrarium admin question ls [-p project] [--agent a] [--open | --status s | --all] [--kind k]
@@ -713,6 +713,12 @@ terrarium admin inbox resume <thread-id> [-m note]
   thread <thread>.` With `--wait`, it registers a `question` wait on the
   notice, as `question ask --wait` does. The acknowledgement mail is the
   wake mail. The operator does not send notices (exit 2).
+- `--urgent` and `--critical` set the priority (api.md §6.8). Use
+  `--critical` only when the operator must act now: production is down,
+  data is lost, a security problem, or a spent budget that stops all work.
+  The dashboard then shows a banner on each page and flashes its browser
+  tab until the operator acts. For all other items, use `--urgent` or no
+  flag. Only one of the two flags can be given.
 - A question whose text is the same as an open question of the agent is
   refused (`409`, exit 1): the message names the open one. Run `question
   ls` before you ask.
@@ -730,7 +736,7 @@ terrarium admin inbox resume <thread-id> [-m note]
   answered or retracted question is `409`. `--option` gives the new list
   of options; `--clear-options` removes them.
 - `admin question ls` lists the open questions of all agents by default,
-  urgent first, with the `AGENT` column. `-p` limits it to one project.
+  critical first, then urgent, with the `AGENT` column. `-p` limits it to one project.
 - `admin question answer` takes a text, an option, or both. `--option`
   takes the label, or the number of the option from 1 (`show` prints the
   numbers). The operator answers each question; a sysadmin agent answers
@@ -739,9 +745,9 @@ terrarium admin inbox resume <thread-id> [-m note]
   answer.
 - `admin inbox ls` lists what waits for the operator (api.md §6.9): the
   open questions, notices, mail to `operator`, and the threads of the loop
-  guard, urgent first. The columns: `ID` (`notice:<id>`, `mail:<id>`,
-  ...), `KIND`, `STATUS`, `URGENT`, `PROJECT`, `FROM`, `AT`, and a short
-  text. `--done` lists the closed items; `--all` both.
+  guard, critical first, then urgent. The columns: `ID` (`notice:<id>`,
+  `mail:<id>`, ...), `KIND`, `STATUS`, `URGENT` (`true`, `false`, or
+  `critical`), `PROJECT`, `FROM`, `AT`, and a short text. `--done` lists the closed items; `--all` both.
 - `admin inbox ack <id> [text]` acknowledges a notice or a mail to the
   operator. `<id>` is an item ID (`notice:<id>`, `mail:<id>`) or a bare
   ID: a notice ID, else a message ID. The text is the optional reply: the

@@ -1221,8 +1221,14 @@ pub struct NotifyArgs {
     #[arg(long)]
     pub card: Option<String>,
     /// Mark the notice urgent
-    #[arg(long)]
+    #[arg(long, conflicts_with = "critical")]
     pub urgent: bool,
+    /// Mark the notice critical: the dashboard shows a banner on every
+    /// page and flashes its tab. Only when the operator must act now:
+    /// production down, data loss, a security problem, or a spent budget
+    /// that blocks all work
+    #[arg(long)]
+    pub critical: bool,
     /// Also wait on the acknowledgement: your status is `waiting` until it
     /// comes. Then end your turn
     #[arg(long)]
@@ -1250,8 +1256,12 @@ pub enum QuestionCmd {
         #[arg(long)]
         card: Option<String>,
         /// Mark the question urgent
-        #[arg(long)]
+        #[arg(long, conflicts_with = "critical")]
         urgent: bool,
+        /// Mark the question critical: the operator must act now (see
+        /// `terrarium notify --help`)
+        #[arg(long)]
+        critical: bool,
         /// Also wait on the answer: your status is `waiting` until it
         /// comes. Then end your turn
         #[arg(long)]
@@ -1293,8 +1303,10 @@ pub enum QuestionCmd {
         /// The card that the question is about
         #[arg(long)]
         card: Option<String>,
-        #[arg(long, conflicts_with = "normal")]
+        #[arg(long, conflicts_with_all = ["normal", "critical"])]
         urgent: bool,
+        #[arg(long, conflicts_with = "normal")]
+        critical: bool,
         #[arg(long)]
         normal: bool,
     },

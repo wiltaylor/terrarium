@@ -738,6 +738,7 @@ mod tests {
                 "- `notify`: tell the operator something that needs no decision",
                 "run `terrarium notify \"<text>\"`",
                 "Do not mail\n  `operator` for these",
+                "Use `--critical` only when the operator must act now",
             ] {
                 assert!(t.contains(needle), "{name}: {needle}");
             }

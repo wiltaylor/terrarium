@@ -13,8 +13,8 @@
     "prompts/harness/copilot.md": "5f21cc6f3120b05b14549cdb85d35aae14b144e43015870df820519d16c972a2",
     "prompts/harness/pi.md": "9a11ba7c45c3e4fce4e44685f84d7d17443af3b2082bec68828807bcd9e0a297",
     "prompts/leader.md": "376e4b616647b02fc601aae426c8561e776b79903b326bda8c9ff32155d14de7",
-    "prompts/project-lead.md": "3011299f90e3bda29f3e92334ad42bc014fc897d5d1820044c0565330bf8c4cf",
-    "prompts/system-lead.md": "f30273e81841b60e826a62e0a67784e0cb28eaa516eb3522efc2571777848ff5",
+    "prompts/project-lead.md": "6ea72291ef8247802baa0e532f748a6081b1f985c6038a99bae770a93896ef96",
+    "prompts/system-lead.md": "3a9aa14c658a206c896ad44305c5b85734747c8b135a8cdcfd5c2cf9da722fa0",
     "prompts/worker.md": "3e76fa8c28a097aea56bb53671cf07566fe7c433b456a1a993a4b39a751dc17c"
   }
 }

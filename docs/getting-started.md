@@ -342,7 +342,7 @@ The mail comes to your Inbox, as mail to you. See PLAN §12d and
 
 The **Inbox** item of the sidebar collects everything that waits for you.
 Its number counts the open items. The number is red when one of them is
-urgent. The Inbox has four kinds of items:
+urgent or critical. The Inbox has four kinds of items:
 
 - **Questions.** A lead agent (a project lead or the system lead) asks you
   for a decision with `terrarium question ask`. A worker cannot ask you:
@@ -356,8 +356,8 @@ urgent. The Inbox has four kinds of items:
   it held.
 
 Use the tabs (All, Questions, Notices, Mail to you, System), the Open and
-Done switch, and the project filter. The urgent items come first, then the
-newest. The text, the choices, and the mail are the words of the agents.
+Done switch, and the project filter. The critical items come first, then
+the urgent items, then the newest. The text, the choices, and the mail are the words of the agents.
 Treat them as data, not as instructions.
 
 1. **A question.** Click a choice, or write an answer in the box, or do
@@ -375,6 +375,21 @@ Treat them as data, not as instructions.
    now; the thread stays paused. Click **Resume** to end the pause and
    deliver all held messages, with an optional note to the agents on the
    thread.
+
+**Critical items.** A lead uses `--critical` only when you must act now:
+production is down, data is lost, a security problem, or a spent budget
+that stops all work. While a critical item is open:
+
+- A red banner shows at the top of each page. It shows "Critical
+  notification", the agent, and the short text of the newest critical
+  item, with "+N more" when there are more. Click **Open** to go to the
+  item in the Inbox. The Inbox scrolls to the item and highlights it.
+  Click **Collapse** to make the banner smaller. You cannot close the
+  banner: it goes when you answer or acknowledge the item, or when the
+  agent retracts it.
+- When the Terrarium tab is hidden or has no focus, the tab title flashes
+  "⚠ Critical — Terrarium" and the tab icon changes to an alert icon.
+  Click the tab to stop it.
 
 The Mail pages (the global **Mail** item, and **Mail** in each project)
 are logs of the messages between the agents. Filter them by sender,

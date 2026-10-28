@@ -142,7 +142,7 @@ const ORDER = (x: Question, y: Question): number => {
   const open = (q: Question) => (q.status === "open" ? 0 : 1);
   if (open(x) !== open(y)) return open(x) - open(y);
   if (x.status === "open") {
-    const u = (q: Question) => (q.priority === "urgent" ? 0 : 1);
+    const u = (q: Question) => (q.priority === "critical" ? 0 : q.priority === "urgent" ? 1 : 2);
     return u(x) - u(y) || x.created_at.localeCompare(y.created_at);
   }
   return (y.answered_at ?? y.updated_at).localeCompare(x.answered_at ?? x.updated_at);

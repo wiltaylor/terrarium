@@ -132,6 +132,10 @@ you ask, run `terrarium question ls`. Do not ask the same thing twice.
 - Give choices with `--option <label>` (one flag for each), the background
   with `--context-file <path>` (Markdown), and the card with `--card <id>`.
   Use `--urgent` only when the work stops without the answer.
+- Use `--critical` only when the operator must act now: production is down,
+  data is lost, a security problem, or a spent budget that stops all work.
+  It puts a banner on each page of the dashboard and flashes its tab. For
+  all other items, use `--urgent` or no flag.
 - Add `--wait` when you cannot go on without the answer. Your status is
   `waiting` until the answer comes. Then end your turn. Without `--wait`, do
   other work.
@@ -147,8 +151,8 @@ you ask, run `terrarium question ls`. Do not ask the same thing twice.
   operator for them.
 - To tell the operator something that needs no decision (a milestone, a
   finished deploy, a risk), run `terrarium notify "<text>"`, with the same
-  `--context-file`, `--card`, and `--urgent`. The operator acknowledges it
-  in the Inbox, and the acknowledgement comes as mail. Do not mail
+  `--context-file`, `--card`, `--urgent`, and `--critical`. The operator
+  acknowledges it in the Inbox. The acknowledgement comes as mail. Do not mail
   `operator` for these, and do not ask a question when you need no
   decision.
 

@@ -5,6 +5,7 @@ import { createMockApi } from ".";
 import { fakeUlid } from "./data";
 import type { AgentEvent } from "../types";
 import { createInboxStore } from "../../stores/inbox";
+import { criticalBanner } from "../../features/inbox/critical";
 
 const mock = () => createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 0 });
 const wait = (ms = 5) => new Promise((r) => setTimeout(r, ms));
@@ -53,8 +54,8 @@ describe("the inbox in the mock", () => {
 
   it("counts the open items by kind, for a project too", async () => {
     const api = mock();
-    expect(await api.inbox.counts()).toEqual({ open: 7, urgent: 1, question: 2, notice: 1, mail: 3, system: 1 });
-    expect(await api.inbox.counts("webshop")).toEqual({ open: 1, urgent: 0, question: 1, notice: 0, mail: 0, system: 0 });
+    expect(await api.inbox.counts()).toEqual({ open: 7, urgent: 1, critical: 0, question: 2, notice: 1, mail: 3, system: 1 });
+    expect(await api.inbox.counts("webshop")).toEqual({ open: 1, urgent: 0, critical: 0, question: 1, notice: 0, mail: 0, system: 0 });
   });
 
   it("acknowledges mail to the operator, with an optional reply on the thread", async () => {
@@ -151,5 +152,25 @@ describe("the inbox in the mock", () => {
     await wait(30);
     expect(store.counts()).toMatchObject({ open: 5, mail: 2 });
     expect(store.open()).toHaveLength(5);
+  });
+
+  it("shows a critical notice first, counts it, and drops the banner after the acknowledgement", async () => {
+    const api = mock();
+    const store = createInboxStore(api, { on: (fn) => api.events.stream({ since: api.world.seq }).subscribe(fn) }, { debounceMs: 0 });
+    await store.refresh();
+    expect(criticalBanner(store.open())).toBeNull();
+    // A lead sends a critical notice (the dashboard does not ask; the world gets it).
+    const notice = api.world.questions!.find((q) => q.kind === "notice" && q.status === "open")!;
+    notice.priority = "critical";
+    await store.refresh();
+    expect(store.counts()).toMatchObject({ critical: 1, urgent: 2 });
+    expect(store.open()[0]!.id).toBe(`notice:${notice.id}`);
+    const b = criticalBanner(store.open())!;
+    expect(b).toMatchObject({ more: 0, from: notice.agent_name, href: `/inbox?item=notice%3A${notice.id}` });
+    await wait();
+    await api.questions.ack(notice.id);
+    await wait(30);
+    expect(store.counts()).toMatchObject({ critical: 0 });
+    expect(criticalBanner(store.open())).toBeNull();
   });
 });

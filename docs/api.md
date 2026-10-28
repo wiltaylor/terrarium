@@ -1235,8 +1235,10 @@ The transcript fields (§6.6):
 | `title` | The first user text that the harness did not make, on one line, at most 80 characters. `null` when there is none. |
 | `active` | This is the agent's current session, and the agent runs. |
 
-Two sessions can share one harness session (a restart resumes it). They
-then show the same file.
+Two sessions can share one harness session (a restart or a daemon restart
+resumes it). They then show the same file. The Sessions tab of the
+dashboard shows the sessions of one harness session in a row as one
+conversation, and opens the newest one.
 
 ### 6.4 Roles
 
@@ -1681,7 +1683,7 @@ for the differences below.
 | `options` | Short choice labels: at most 10, each at most 200 characters, no two the same. `[]` for a free answer. A notice has none: options on a notice are `422 invalid`. |
 | `context` | Optional background as Markdown, at most 16 KiB. The dashboard shows it through the DOMPurify sink only. |
 | `card` | Optional. A card of the agent's project. |
-| `priority` | `normal` or `urgent`. Lists put the urgent open questions first. |
+| `priority` | `normal`, `urgent`, or `critical`. Lists put the critical open questions first, then the urgent ones. Use `critical` only when the operator must act now: production is down, data is lost, a security problem, or a spent budget that stops all work. While a critical item is open, the dashboard shows a banner on each page and flashes its browser tab (§6.9). |
 | `status` | A question: `open`, `answered`, or `retracted`. A notice: `open`, `acknowledged`, or `retracted`. Only `open` changes. |
 | `answer`, `answer_option` | The answer text, and the 0-based index of the chosen option. An answer with an option and no text has the label as `answer`. For an acknowledged notice, `answer` is the reply of the operator, if any. |
 | `answered_by`, `answered_by_name` | `operator`, or the ULID and `project/name` of a sysadmin agent. |
@@ -1702,7 +1704,7 @@ The rights:
 |---|---|---|
 | `GET /api/agents/{id}/questions` | `?status=open\|answered\|acknowledged\|retracted`, `?all=true`, `?kind=question\|notice` | `200` the questions and notices of the agent. No filter: the open ones and those answered or acknowledged in the last 24 h. |
 | `POST /api/agents/{id}/questions` | `{"kind"?, "text", "options"?, "context"?, "card"?, "priority"?, "wait"?, "timeout"?}`; `kind` is `question` (the default) or `notice` | `201` the question or notice; with `wait: true`, also `wait`: the new `question` wait (§6.7) |
-| `GET /api/questions` | `?status=` (default `open`; `all` for every status), `?project=`, `?agent=`, `?kind=` | `200` at most 200 questions and notices. Open first (urgent first, then the oldest first), then the others (the newest first). `X-Open-Questions` and `X-Urgent-Questions` count the open ones of the `kind` filter (both kinds without it). The operator and a sysadmin see all; a project_admin sees its own project; a member gets `403`. |
+| `GET /api/questions` | `?status=` (default `open`; `all` for every status), `?project=`, `?agent=`, `?kind=` | `200` at most 200 questions and notices. Open first (critical first, then urgent, then the oldest first), then the others (the newest first). `X-Open-Questions`, `X-Urgent-Questions` (urgent and critical), and `X-Critical-Questions` count the open ones of the `kind` filter (both kinds without it). The operator and a sysadmin see all; a project_admin sees its own project; a member gets `403`. |
 | `GET /api/questions/{id}` | | `200` the question |
 | `PATCH /api/questions/{id}` | `{"text"?, "options"?, "context"?, "card"?, "priority"?}`; `null` (or `[]` for `options`) clears a field | `200` the question. A question that is not open is `409 conflict`. |
 | `POST /api/questions/{id}/answer` | `{"answer"?, "option"?}`: a text, an option (its label, or its 0-based index), or both | `200` the question. A question that is not open is `409 conflict`. A notice is `409 conflict`. |
@@ -1768,11 +1770,11 @@ The notice of a pause (`Thread T needs a human`, from `system`) is not a
 `mail` item: the `system` item of the thread shows it.
 
 ```json
-[{"id":"notice:01JQ...","kind":"notice","open":true,"urgent":true,"project":"demo",
+[{"id":"notice:01JQ...","kind":"notice","open":true,"urgent":true,"critical":false,"project":"demo",
   "at":"2026-10-28T10:00:00.000Z","question":{"id":"01JQ...","kind":"notice", "...": "§6.8"}},
- {"id":"mail:01M5...","kind":"mail","open":true,"urgent":false,"project":"demo",
+ {"id":"mail:01M5...","kind":"mail","open":true,"urgent":false,"critical":false,"project":"demo",
   "at":"2026-10-28T09:00:00.000Z","message":{"id":"01M5...", "...": "§7"}},
- {"id":"thread:01JT...","kind":"system","open":true,"urgent":false,"project":"demo",
+ {"id":"thread:01JT...","kind":"system","open":true,"urgent":false,"critical":false,"project":"demo",
   "at":"2026-10-28T08:00:00.000Z",
   "system":{"kind":"paused_thread","thread_id":"01JT...","subject":"loop","paused":true,
             "agent_run":7,"limit":6,"participants":["demo/w1","demo/w2"],
@@ -1783,15 +1785,16 @@ The notice of a pause (`Thread T needs a human`, from `system`) is not a
 |---|---|
 | `id` | `question:<id>`, `notice:<id>`, `mail:<message id>`, or `thread:<thread id>`. |
 | `open` | The item waits for the operator. |
-| `urgent` | An open question or notice with `priority: urgent`. Mail and system items are not urgent. |
+| `urgent` | An open question or notice with `priority: urgent` or `critical`. Mail and system items are not urgent. |
+| `critical` | An open question or notice with `priority: critical`. The dashboard shows the newest one in a banner on each page, with a link to `/inbox?item=<id>`, and flashes its browser tab while the page is hidden or has no focus. |
 | `project` | The project of the asking agent, of the sender of the mail, or of the first agent on the thread. `null` for mail from `system` or from the operator. |
 | `at` | When the item came in: the ask, the send, or the first held message that is not released. |
 | `question`, `message`, `system` | The question or notice, the message, or the thread. A system item has `paused`, `agent_run` (the agent-to-agent messages since the last reset), `limit` (`TERRARIUM_MAIL_LOOP_LIMIT`), `participants`, and `held` (the held messages that are not released). |
 
 | Endpoint | Body or query | Answer |
 |---|---|---|
-| `GET /api/inbox` | `?status=open\|done\|all` (default `open`), `?kind=question\|notice\|mail\|system`, `?project=` | `200` the items. The open ones first, then urgent first, then the newest first. `X-Inbox-Open` and `X-Inbox-Urgent` count the open items of the `project` filter (all kinds). System items show only while they are open; the audit log keeps their history. |
-| `GET /api/inbox/counts` | `?project=` | `200` `{"open", "urgent", "question", "notice", "mail", "system"}`: the open items of each kind. The dashboard badge shows `open`, red when `urgent` is not 0. |
+| `GET /api/inbox` | `?status=open\|done\|all` (default `open`), `?kind=question\|notice\|mail\|system`, `?project=` | `200` the items. The open ones first, then critical first, then urgent, then the newest first. `X-Inbox-Open`, `X-Inbox-Urgent`, and `X-Inbox-Critical` count the open items of the `project` filter (all kinds). System items show only while they are open; the audit log keeps their history. |
+| `GET /api/inbox/counts` | `?project=` | `200` `{"open", "urgent", "critical", "question", "notice", "mail", "system"}`: the open items of each kind. `urgent` counts the urgent and the critical items; `critical` counts only the critical ones. The dashboard badge shows `open`, red when `urgent` is not 0. |
 | `POST /api/inbox/mail/{id}/ack` | `{"reply"?}`, or no body | `200` `{"message", "replies"}`. The mail becomes `read`. With `reply`, the reply goes as `operator` on the thread of the mail to its other participants (§7.2), and the mail becomes `replied`. A message that is not to the operator is `404`. One that is acknowledged already is `409 conflict`. A reply to a system mail that has nobody to answer is `422 invalid`. |
 
 Only the operator reads the Inbox and acts on it. An agent gets `403`,

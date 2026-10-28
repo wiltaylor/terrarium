@@ -1093,6 +1093,17 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE deliveries DROP COLUMN origin;
     ALTER TABLE deliveries RENAME COLUMN origin_v31 TO origin;
     "#,
+    // 32: the priority `critical` of questions and notices (PLAN §12e,
+    // docs/api.md §6.8): the operator must act now. The priority column is
+    // made again with the new CHECK (the way of migration 29). No index has
+    // the column.
+    r#"
+    ALTER TABLE questions ADD COLUMN priority_v32 TEXT NOT NULL DEFAULT 'normal'
+        CHECK (priority_v32 IN ('normal', 'urgent', 'critical'));
+    UPDATE questions SET priority_v32 = priority;
+    ALTER TABLE questions DROP COLUMN priority;
+    ALTER TABLE questions RENAME COLUMN priority_v32 TO priority;
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call
@@ -1712,6 +1723,60 @@ mod tests {
         };
         assert_eq!(released("M1").as_deref(), Some("system"));
         assert_eq!(released("M3"), None);
+    }
+
+    #[test]
+    fn migration_32_keeps_the_priority_and_takes_critical() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        for (i, sql) in MIGRATIONS.iter().enumerate().take(31) {
+            conn.execute_batch(sql).unwrap();
+            conn.pragma_update(None, "user_version", i + 1).unwrap();
+        }
+        assert!(
+            conn.execute(
+                "INSERT INTO questions (id, agent, project, text, priority, thread_id,
+                                        created_at, updated_at)
+                   VALUES ('Q0', 'A1', 'p', 'x', 'critical', 'T0', 't', 't')",
+                [],
+            )
+            .is_err(),
+            "before 32, the CHECK refuses critical"
+        );
+        conn.execute(
+            "INSERT INTO questions (id, agent, project, text, priority, thread_id,
+                                    created_at, updated_at)
+               VALUES ('Q1', 'A1', 'p', 'Ship?', 'urgent', 'T0', 't', 't')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(migrate(&mut conn).unwrap(), MIGRATIONS.len() - 31);
+        let priority = |id: &str| -> String {
+            conn.query_row("SELECT priority FROM questions WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .unwrap()
+        };
+        assert_eq!(priority("Q1"), "urgent");
+        conn.execute(
+            "UPDATE questions SET priority = 'critical' WHERE id = 'Q1'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(priority("Q1"), "critical");
+        assert!(
+            conn.execute(
+                "UPDATE questions SET priority = 'bogus' WHERE id = 'Q1'",
+                []
+            )
+            .is_err()
+        );
+        conn.execute(
+            "INSERT INTO questions (id, agent, project, text, thread_id, created_at, updated_at)
+               VALUES ('Q2', 'A1', 'p', 'x', 'T0', 't', 't')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(priority("Q2"), "normal");
     }
 
     #[test]

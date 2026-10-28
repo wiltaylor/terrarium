@@ -29,6 +29,8 @@ describe("questions model", () => {
       q("early", { created_at: "2026-10-28T09:00:00.000Z" }),
     ];
     expect(sortQuestions(list).map((x) => x.id)).toEqual(["urgent", "early", "late", "done-new", "done-old"]);
+    const crit = q("crit", { priority: "critical", created_at: "2026-10-28T13:00:00.000Z" });
+    expect(sortQuestions([...list, crit]).map((x) => x.id)[0]).toBe("crit");
   });
 
   it("puts a changed question in place and keeps the order", () => {

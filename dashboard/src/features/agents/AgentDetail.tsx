@@ -1,21 +1,22 @@
-import { A, useNavigate, useParams } from "@solidjs/router";
-import { createEffect, createResource, createSignal, For, Match, on, onCleanup, onMount, Show, Switch } from "solid-js";
+import { A, useNavigate, useParams, useSearchParams } from "@solidjs/router";
+import { createResource, createSignal, For, Match, onCleanup, onMount, Show, Switch } from "solid-js";
 import { GrantDialog, grantNotice, LeaseChips, LeaseTable, useLeaseList } from "../../components/Leases";
 import { HoldBadge } from "../../components/QuotaBanner";
 import { SelfReport } from "../../components/SelfReport";
 import { EventHistory } from "../../components/EventHistory";
-import { createPagedList } from "../../components/paged";
 import { StatusBadge } from "../../components/StatusBadge";
 import { Terminal } from "../../components/Terminal";
-import { ConfirmButton, ErrorBanner, LoadMore, PageHead, Tabs, useNow } from "../../components/ui";
+import { ConfirmButton, ErrorBanner, PageHead, Tabs, useNow } from "../../components/ui";
 import { GRANTABLE_ROLES, type Agent, type AgentStatus, type Role } from "../../api/types";
-import { ago, compact, timeUntil, windowValue } from "../../lib/format";
+import { compact, timeUntil, windowValue } from "../../lib/format";
 import { agents, api, events, leases as holds, quota, subscriptions } from "../../stores";
 import { describeCause } from "../../stores/quota";
 import { AgentForm } from "./AgentForm";
 import { SaveAsTemplateDialog } from "../templates/TemplateDialog";
 import { Conversation } from "./conversation/Conversation";
 import { ScreenPanel } from "./ScreenPanel";
+import { SessionsPanel } from "./SessionsPanel";
+import { AGENT_TABS, agentViewQuery, parseAgentView, type AgentTab } from "./sessions";
 import { RoleBadges } from "./AgentsPage";
 import { appliedText, changeSubscription, loginText, noSubscriptionAccount, noSubscriptionAccountText, normalizePool, samePool, swapTargets } from "./subscription";
 import { PoolPicker, SubscriptionSelect } from "./SubscriptionFields";
@@ -24,14 +25,6 @@ import { effectivePersona, systemPromptProblem } from "./form";
 import { WaitsPanel, WatchesPanel } from "./Waits";
 import { QuestionsPanel } from "../inbox/QuestionsPanel";
 
-const TABS = [
-  { id: "conversation", label: "Conversation" },
-  { id: "terminal", label: "Terminal" },
-  { id: "screen", label: "Screen" },
-  { id: "events", label: "Events" },
-  { id: "sessions", label: "Sessions" },
-] as const;
-
 /** Statuses with a live session: the PTY can attach, `stop` works. */
 export const RUNNING: AgentStatus[] = ["starting", "idle", "waiting", "working", "blocked", "restarting"];
 
@@ -39,7 +32,12 @@ export default function AgentDetail() {
   const params = useParams<{ id: string }>();
   const navigate = useNavigate();
   const id = () => decodeURIComponent(params.id);
-  const [tab, setTab] = createSignal<(typeof TABS)[number]["id"]>("conversation");
+  // The tab and the open session are in the URL (`?tab=sessions&session=<id>`), so a reload keeps them.
+  const [search, setSearch] = useSearchParams<{ tab?: string; session?: string }>();
+  const view = () => parseAgentView({ tab: search.tab, session: search.session });
+  const tab = () => view().tab;
+  const setTab = (t: AgentTab) => setSearch(agentViewQuery({ tab: t, session: null }));
+  const openSession = (session: string | null) => setSearch(agentViewQuery({ tab: "sessions", session }));
   const [error, setError] = createSignal<unknown>(null);
   const [notice, setNotice] = createSignal<string | null>(null);
   const [turn, setTurn] = createSignal("");
@@ -48,14 +46,6 @@ export default function AgentDetail() {
   const [fetched] = createResource(id, (key) => api.agents.get(key).catch((e: unknown) => (setError(e), null)));
   const agent = (): Agent | undefined => agents.byId(id()) ?? agents.byId(fetched()?.id ?? "") ?? fetched() ?? undefined;
   const running = () => RUNNING.includes(agent()?.status ?? "stopped");
-
-  const sessions = createPagedList(
-    () => (tab() === "sessions" ? agent()?.id : null),
-    (aid, cursor) => api.agents.sessions(aid, { cursor }),
-    (s) => s.id,
-  );
-  // A new session shows up as a status change; reload the list if it is open.
-  createEffect(on(() => agent()?.session, () => tab() === "sessions" && void sessions.reload(), { defer: true }));
 
   const act = async (label: string, fn: () => Promise<unknown>) => {
     try {
@@ -214,7 +204,7 @@ export default function AgentDetail() {
           </Show>
 
           <div>
-            <Tabs tabs={TABS} active={tab()} onChange={setTab} />
+            <Tabs tabs={AGENT_TABS} active={tab()} onChange={setTab} />
             <Switch>
               <Match when={tab() === "conversation"}>
                 <Conversation agent={a()} onOpenTerminal={() => setTab("terminal")} />
@@ -229,36 +219,7 @@ export default function AgentDetail() {
                 <EventHistory filterKey={a().id} fetch={(q) => api.agents.events(a().id, q)} match={(e) => e.agent_id === a().id || e.data?.agent_id === a().id} />
               </Match>
               <Match when={tab() === "sessions"}>
-                <ErrorBanner error={sessions.error()} />
-                <div class="table-wrap">
-                  <table>
-                    <thead>
-                      <tr>
-                        <th>Harness session</th>
-                        <th>Started</th>
-                        <th>Ended</th>
-                        <th>Outcome</th>
-                        <th>Turns</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      <For each={sessions.items()}>
-                        {(s) => (
-                          <tr>
-                            <td class="mono small">
-                              {s.harness_session_id ?? s.id} {s.current ? <span class="chip ok">current</span> : null}
-                            </td>
-                            <td>{ago(s.started_at)}</td>
-                            <td>{s.ended_at ? ago(s.ended_at) : "—"}</td>
-                            <td>{s.outcome ?? "—"}</td>
-                            <td>{s.turns}</td>
-                          </tr>
-                        )}
-                      </For>
-                    </tbody>
-                  </table>
-                  <LoadMore hasMore={sessions.hasMore()} loading={sessions.loading()} onMore={sessions.loadMore} />
-                </div>
+                <SessionsPanel agent={a()} open={view().session} onOpen={openSession} onOpenConversation={() => setTab("conversation")} />
               </Match>
             </Switch>
           </div>

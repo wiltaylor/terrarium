@@ -5703,6 +5703,47 @@ async fn notify_and_the_admin_inbox() {
     .await;
     assert!(out.contains("wait W1 registered"), "{out}");
     assert!(Cli::try_parse_from(["terrarium", "notify", "x", "--timeout", "2h"]).is_err());
+    // --critical: the operator must act now. Not together with --urgent.
+    let mut crit = n.clone();
+    crit["priority"] = json!("critical");
+    let out = ok(
+        true,
+        &["notify", "Prod is down.", "--critical"],
+        vec![(201, crit.clone())],
+        vec![(
+            Post,
+            mine(),
+            vec![],
+            Some(json!({"kind": "notice", "text": "Prod is down.", "priority": "critical"})),
+        )],
+    )
+    .await;
+    assert!(out.contains("notice N1 sent (critical)"), "{out}");
+    assert!(Cli::try_parse_from(["terrarium", "notify", "x", "--urgent", "--critical"]).is_err());
+    let out = ok(
+        true,
+        &["question", "ask", "Roll back?", "--critical"],
+        vec![(201, crit)],
+        vec![(
+            Post,
+            mine(),
+            vec![],
+            Some(json!({"text": "Roll back?", "priority": "critical"})),
+        )],
+    )
+    .await;
+    assert!(out.contains("(critical)"), "{out}");
+    assert!(
+        Cli::try_parse_from([
+            "terrarium",
+            "question",
+            "update",
+            "Q1",
+            "--critical",
+            "--normal"
+        ])
+        .is_err()
+    );
     // The operator does not send notices.
     let r = exec(false, &["notify", "x"], vec![], None).await;
     assert_eq!(exit_code_of(&r.result.unwrap_err()), exit::USAGE);
