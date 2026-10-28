@@ -1032,19 +1032,21 @@ lists the leases that the agent holds.
 | `POST /api/agents/{id}/answer` | `{"request_id", "answer"}` or `{"text"}` | `202 {"accepted": true}` |
 | `POST /api/agents/{id}/subscription` | `{"subscription": "anthropic-max-20x-2"}` | `200 {"agent", "from"?, "to", "applied"}` (below) |
 
-All need project_admin. The work happens in the background. A `send` by
-the operator writes a row to the delivery log first, so the transcript tags
-the turn `origin: "operator"` when the harness writes it (§6.6).
+All need project_admin. The work happens in the background. A `send`
+writes a row to the delivery log first (§6.6).
 
-**A turn is plain text.** A `send` waits until the agent is `idle`. When
-its text starts with `/` or `!` (after white space), the adapter puts the
-character U+00A0 (no-break space) in front of it, so the harness does not
-run it as a slash command or a shell command. Copilot also gets the escape
-for a text that is only `$`. A mail pointer, a recap turn, and a schedule
-turn go the same way. The escape does not change the words that the model
-reads. To run a harness command on purpose, use `raw` (§6.5). The answer
-shows the agent when the daemon accepted the call; watch the events (§8)
-for the status changes.
+**A turn is tagged (PLAN §8.5).** A `send` waits until the agent is
+`idle`, and types `[User] <text>`: the tag line names the operator. A send
+by a leader agent gets the same tag. The text is not quoted, but a line in
+it that would read as a tag is defused (`[User]` becomes `[\User]`). A
+schedule `turn` action types `[System:schedule <name>] <text>`. Because a
+tagged turn starts with `[`, the harness never runs it as a slash command
+or a shell command. (An adapter still puts U+00A0 in front of an
+untagged text that starts with `/` or `!`, or of a lone `$` in Copilot.)
+To run a harness command on purpose, use `raw` (§6.5): a raw text has no
+tag, and its tag-like lines are defused. The answer shows the agent when
+the daemon accepted the call; watch the events (§8) for the status
+changes.
 
 - `start` opens a new session and resumes the last harness session.
   A running agent gets `409 already_running`.
@@ -1145,13 +1147,25 @@ With `TERRARIUM_RUNNER_MODE=inprocess` (tests and development), the daemon
 ends its harnesses when it stops, and launches them again with resume when
 it starts.
 
-Push delivery (PLAN §12, §13): new mail to an agent, a card assigned to it
-by someone else, and an unblocked card of its own each add one line to a
-pending pointer turn, for example "New mail from operator (thread T). Run
-`terrarium mail read --thread T`." The runner types the pointer when the
-agent is `idle` or `waiting`, else after the next stop hook. One pointer covers all the
-items that came in meanwhile. When the harness takes the turn, the mail
-becomes `delivered`. Mail that is `queued` when an agent starts goes into
+Push delivery (PLAN §12, §13, §8.5): new mail to an agent, a card
+assigned to it by someone else, and an unblocked card of its own each add
+one block to a pending pointer turn. A mail block is a tag line and the
+body quoted with `> `:
+
+```
+[Mailbox:operator] Subject: Deploy (thread T, message M)
+> Deploy the branch when the tests pass.
+
+[System:card] Card TER-4 was assigned to you. Run `terrarium card show TER-4`.
+```
+
+A body over 2000 characters (after the quote marks) is cut, and its block
+ends with `… (cut; run `terrarium mail read --thread T`)`. The runner
+types the pointer when the agent is `idle` or `waiting`, else after the
+next stop hook. One pointer covers all the items that came in meanwhile,
+one block each. When the harness takes the turn, a mail whose body the
+turn held whole becomes `read` (`read_by` is the agent, audit `via:
+"turn"`), and a cut mail becomes `delivered`. Mail that is `queued` when an agent starts goes into
 its first pointer. A card line (and a lease line, §17.7) for an agent that
 does not run is kept for the next start, also across a daemon restart: the
 daemon stores it in the `pending_pointers` table. A newer line for the same
@@ -1359,6 +1373,7 @@ harness session.
 | `text` | Markdown or plain text: `text`, `thinking`, and `system` blocks. Cut at 64 KiB with `truncated: true`. |
 | `redacted` | `true` on a `thinking` block when the harness stores no thinking text (only a signature or encrypted content). |
 | `origin` | On a user `text`: `operator`, `agent_mail_pointer`, `system`, or `user`. See below. |
+| `parts` | On a user `text` that starts with a turn tag (PLAN §8.5): one object for each tagged block, in order. `source` is `user`, `mailbox` (with `sender`, `subject`, `thread`, `message`), or `system` (with `kind`, and `detail` for `schedule <name>`). `body` is the text after the tag line: for a mail, the quoted body. Left out on an untagged text. `text` keeps the raw turn. |
 | `tool` | On a `tool_call`: `id` (the harness's call ID), `name`, `input` (JSON; an input over 64 KiB becomes a cut string), and `summary` (one line). |
 | `result` | On a `tool_result`: `tool_id` (the `tool.id` of its call), `output` (a string, cut at 64 KiB with `truncated: true`), and `is_error`. |
 | `model` | The model of an assistant block, when the harness records it. |
@@ -1374,13 +1389,22 @@ lists them.
 
 **Origin.** The parser sets `system` on a user text that the harness made
 (a `<task-notification>`, a `<system_notification>`, `<environment_context>`,
-a meta message) and `user` on a typed prompt. The daemon then tags the
-typed prompts that it typed itself: before it types a turn, it writes a row
-to its delivery log (the SHA-256 of the text with whitespace collapsed, not
-the text). `POST /api/agents/{id}/send` by the operator gives `operator`, a
-push pointer (mail, card, lead, lease) gives `agent_mail_pointer`, and the
-recap turn after a failed resume gives `system`. A send by an agent, and a
-prompt that someone typed into the terminal, stay `user`.
+a meta message) and `user` on a typed prompt. A typed prompt that starts
+with a turn tag gets its origin from the first tag: `[User]` gives
+`operator`, `[Mailbox:...]` gives `agent_mail_pointer`, and
+`[System:...]` gives `system`. It also gets `parts`. The daemon also
+writes a row to its delivery log before it types a turn (the SHA-256 of
+the text with whitespace collapsed, not the text, and the origin of its
+tag). An untagged prompt that matches a row gets the origin of the row. A
+prompt that someone typed into the terminal, and a raw send, stay
+`user`: they count as the operator's.
+
+```json
+{"seq":7,"role":"user","kind":"text","origin":"agent_mail_pointer",
+ "text":"[Mailbox:ht/lead] Subject: TER-4 (thread T1, message M1)\n> Use the new grammar.",
+ "parts":[{"source":"mailbox","sender":"ht/lead","subject":"TER-4","thread":"T1",
+           "message":"M1","body":"> Use the new grammar."}], …}
+```
 
 **Page**
 
@@ -1392,7 +1416,8 @@ GET /api/agents/smoke%2Fprobe/sessions/01M5PA0T1NSYX43DDK1M2KT8KR/transcript?aft
  "blocks":[
   {"id":"248e9b6e-e0ec-49d1-b44c-6a9d2a7bf38b:0","session":"01M5PA0T1NSYX43DDK1M2KT8KR","seq":1,
    "at":"2026-10-25T09:53:44.196Z","role":"user","kind":"text","origin":"operator",
-   "text":"Run `terrarium targets ls`.","source":{"harness":"claude","file":"01a1727a-….jsonl","line":5}},
+   "text":"[User] Run `terrarium targets ls`.","parts":[{"source":"user","body":"Run `terrarium targets ls`."}],
+   "source":{"harness":"claude","file":"01a1727a-….jsonl","line":5}},
   {"id":"msg_011CgNkaAdYdHCEbxuSH5HWk:0","seq":2,"role":"assistant","kind":"tool_call", …}],
  "next_after":2,"complete":false}
 ```

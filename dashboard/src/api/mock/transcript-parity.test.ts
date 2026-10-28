@@ -9,7 +9,7 @@ import type { Block, TranscriptFrame } from "../types";
 const mock = () => createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 0 });
 const wait = (ms = 5) => new Promise((r) => setTimeout(r, ms));
 
-const BLOCK_KEYS = new Set(["id", "session", "seq", "at", "role", "kind", "text", "tool", "result", "redacted", "origin", "model", "usage", "source"]);
+const BLOCK_KEYS = new Set(["id", "session", "seq", "at", "role", "kind", "text", "tool", "result", "redacted", "origin", "parts", "model", "usage", "source"]);
 const HARNESS_AGENTS = { claude: "terrarium/lead", codex: "terrarium/adapter-codex", pi: "terrarium/reviewer", copilot: "webshop/shop-lead" } as const;
 
 function checkBlock(b: Block, harness: string) {
@@ -24,6 +24,11 @@ function checkBlock(b: Block, harness: string) {
   if (b.kind === "tool_call") expect(b.tool).toHaveProperty("input");
   if (b.kind === "tool_result") expect(b.result).toMatchObject({ tool_id: expect.any(String), output: expect.any(String), is_error: expect.any(Boolean) });
   if (b.origin) expect(["operator", "agent_mail_pointer", "system", "user"]).toContain(b.origin);
+  for (const p of b.parts ?? []) {
+    expect(["user", "mailbox", "system"]).toContain(p.source);
+    expect(typeof p.body).toBe("string");
+  }
+  if (b.parts?.length) expect(b.origin).toBe({ user: "operator", mailbox: "agent_mail_pointer", system: "system" }[b.parts[0]!.source]);
   if (b.usage) expect(Object.keys(b.usage).sort()).toEqual(["cache_read", "cache_write", "input", "output"]);
 }
 
@@ -41,7 +46,7 @@ describe("transcripts in the mock (docs/api.md §6)", () => {
       expect(typeof s.active).toBe("boolean");
     }
     expect(list[0]).toMatchObject({ current: true, active: true, transcript: true });
-    expect(list[0]!.title).toMatch(/^New mail from operator/);
+    expect(list[0]!.title).toMatch(/^\[Mailbox:operator\] Subject: Transcript view/);
     expect(list[1]).toMatchObject({ current: false, active: false });
     // A current session of an agent in error is not active: no harness runs it.
     const css = await api.agents.get("webshop/css-worker");
@@ -82,7 +87,8 @@ describe("transcripts in the mock (docs/api.md §6)", () => {
     expect(all.some((b) => b.result?.is_error)).toBe(true);
     expect(all.some((b) => b.kind === "thinking" && b.redacted && !b.text)).toBe(true);
     expect(all.some((b) => b.kind === "thinking" && b.text)).toBe(true);
-    expect(all.some((b) => b.role === "user" && b.origin === "agent_mail_pointer")).toBe(true);
+    expect(all.some((b) => b.role === "user" && b.origin === "agent_mail_pointer" && b.parts?.[0]?.source === "mailbox")).toBe(true);
+    expect(all.some((b) => b.parts?.[0]?.source === "system")).toBe(true);
     expect(all.some((b) => b.result?.truncated)).toBe(true);
     expect(all.some((b) => b.kind === "system")).toBe(true);
     expect(all.some((b) => b.at === null)).toBe(true);
@@ -118,7 +124,7 @@ describe("transcripts in the mock (docs/api.md §6)", () => {
     await api.agents.send(a.id, "Run the tests, please.");
     await wait(40);
     const blocks = frames.filter((f): f is Extract<TranscriptFrame, { type: "block" }> => f.type === "block").map((f) => f.block);
-    expect(blocks[0]).toMatchObject({ seq: n + 1, role: "user", kind: "text", text: "Run the tests, please.", origin: "operator", session: ses.id });
+    expect(blocks[0]).toMatchObject({ seq: n + 1, role: "user", kind: "text", text: "[User] Run the tests, please.", origin: "operator", parts: [{ source: "user", body: "Run the tests, please." }], session: ses.id });
     expect(blocks.map((b) => b.kind)).toEqual(["text", "thinking", "tool_call", "tool_result", "text"]);
     expect(blocks.map((b) => b.seq)).toEqual([n + 1, n + 2, n + 3, n + 4, n + 5]);
     for (const b of blocks) checkBlock(b, "claude");

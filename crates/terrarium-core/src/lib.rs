@@ -28,6 +28,7 @@ pub mod status;
 pub mod tail;
 pub mod template;
 pub mod transcript;
+pub mod turn_tag;
 pub mod zai;
 
 pub use adapter::{Adapter, Answer, ScreenHint};

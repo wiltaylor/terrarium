@@ -6,7 +6,7 @@
 // User turns, tool input, and tool output render as text nodes only.
 
 import { createEffect, createMemo, createSignal, For, Match, on, onCleanup, Show, Switch } from "solid-js";
-import type { Agent, Block, Session } from "../../../api/types";
+import type { Agent, Block, Session, TurnPart } from "../../../api/types";
 import { createPagedList } from "../../../components/paged";
 import { Markdown } from "../../../components/Markdown";
 import { StatusBadge } from "../../../components/StatusBadge";
@@ -15,12 +15,14 @@ import { ago } from "../../../lib/format";
 import { api } from "../../../stores";
 import {
   assistantHtml,
+  bodySegments,
   composerState,
   footerLine,
   groupBlocks,
   isLongOutput,
   isSendKey,
   outputPreview,
+  partBadge,
   prettyInput,
   TAIL_START,
   tailOnAppend,
@@ -227,6 +229,21 @@ function StreamChip(props: { state: string; ended: boolean }) {
   );
 }
 
+/** One tagged part of a typed turn: the badge, then the body as plain text; a quoted mail body in a blockquote. */
+function TurnPartView(props: { part: TurnPart }) {
+  const badge = () => partBadge(props.part);
+  return (
+    <div class="convo-part">
+      <span class={`chip ${badge().tone}`} title={badge().title}>
+        {badge().label}
+      </span>
+      <For each={bodySegments(props.part.body)}>
+        {(seg) => (seg.quote ? <blockquote class="convo-quote convo-text">{seg.text}</blockquote> : <div class="convo-text">{seg.text}</div>)}
+      </For>
+    </div>
+  );
+}
+
 function ItemView(props: { item: RenderItem; project: string; active: boolean }) {
   const it = () => props.item;
   return (
@@ -236,10 +253,12 @@ function ItemView(props: { item: RenderItem; project: string; active: boolean })
           <div class="convo-user">
             <div class="convo-bubble">
               <div class="convo-meta">
-                <Show when={u().chip}>{(c) => <span class={`chip ${c().tone}`} title={c().title}>{c().label}</span>}</Show>
+                <Show when={!u().parts.length && u().chip}>{(c) => <span class={`chip ${c().tone}`} title={c().title}>{c().label}</span>}</Show>
                 <span class="muted small" title={u().block.at ?? ""}>{timeOf(u().block.at)}</span>
               </div>
-              <div class="convo-text">{u().block.text}</div>
+              <Show when={u().parts.length} fallback={<div class="convo-text">{u().block.text}</div>}>
+                <For each={u().parts}>{(p) => <TurnPartView part={p} />}</For>
+              </Show>
             </div>
           </div>
         )}

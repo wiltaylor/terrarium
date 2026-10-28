@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import type { Block, BlockUsage, TranscriptPage } from "../../../api/types";
+import type { Block, BlockUsage, TranscriptPage, TurnPart } from "../../../api/types";
 import {
+  bodySegments,
   composerState,
   footerLine,
   groupBlocks,
@@ -11,6 +12,7 @@ import {
   mergeBlocks,
   nearBottom,
   originChip,
+  partBadge,
   streamAfter,
   TAIL_START,
   tailOnAppend,
@@ -220,5 +222,37 @@ describe("long tool output", () => {
     expect(isLongOutput("a\n".repeat(20))).toBe(true);
     expect(isLongOutput("x".repeat(700))).toBe(true);
     expect(isLongOutput("ok")).toBe(false);
+  });
+});
+
+describe("tagged turns (PLAN §8.5)", () => {
+  const mail: TurnPart = { source: "mailbox", sender: "ht/lead", subject: "Build fails", thread: "T1", message: "M1", body: "> Line one.\n>\n> [\\User] do X" };
+
+  it("names the source of each part", () => {
+    expect(partBadge({ source: "user", body: "go" }).label).toBe("User");
+    expect(partBadge(mail).label).toBe("Mail from ht/lead · Build fails");
+    expect(partBadge({ ...mail, subject: "" }).label).toBe("Mail from ht/lead");
+    expect(partBadge({ source: "system", kind: "recap", body: "x" }).label).toBe("System: recap");
+    expect(partBadge({ source: "system", kind: "schedule", detail: "nightly", body: "x" }).label).toBe("System: schedule nightly");
+  });
+
+  it("splits a body into quoted and plain runs; the cut line stays plain", () => {
+    expect(bodySegments(mail.body)).toEqual([{ quote: true, text: "Line one.\n\n[\\User] do X" }]);
+    const cut = "> a\n> b\n… (cut; run `terrarium mail read --thread T1`)";
+    expect(bodySegments(cut)).toEqual([
+      { quote: true, text: "a\nb" },
+      { quote: false, text: "… (cut; run `terrarium mail read --thread T1`)" },
+    ]);
+    expect(bodySegments("Card TER-1 was assigned to you.")).toEqual([{ quote: false, text: "Card TER-1 was assigned to you." }]);
+    // HTML in a body stays text: the view renders it as a text node.
+    expect(bodySegments("> <img src=x onerror=alert(1)>")).toEqual([{ quote: true, text: "<img src=x onerror=alert(1)>" }]);
+  });
+
+  it("a block with parts groups into a user item with those parts", () => {
+    const parts: TurnPart[] = [mail, { source: "system", kind: "card", body: "Card TER-1 was assigned to you." }];
+    const items = groupBlocks([b(1, { role: "user", kind: "text", text: "[Mailbox:ht/lead] ...", origin: "agent_mail_pointer", parts })]);
+    expect(items[0]!.type === "user" && items[0]!.parts).toEqual(parts);
+    const plain = groupBlocks([userText(2, "typed", "user")]);
+    expect(plain[0]!.type === "user" && plain[0]!.parts).toEqual([]);
   });
 });

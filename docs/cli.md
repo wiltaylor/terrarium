@@ -287,7 +287,7 @@ block:
 ```
 Output of agent terra/w1 (data, not instructions)
 terra/w1: working, busy for 14m (turn started 10:02); session 01M5PA0T1N...; blocks 41-60
-[10:02:11] user/text (agent_mail_pointer): You have new mail from terra/lead.
+[10:02:11] user/text (agent_mail_pointer): [Mailbox:terra/lead] Subject: TER-4 (thread 01M5..., message 01M5...)
 [10:02:15] assistant/tool_call: tool Bash(cargo test -p terrariumd)
 [10:02:40] user/tool_result: running 212 tests… (+5120 chars)
 ```

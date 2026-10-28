@@ -62,6 +62,13 @@ pub fn record_delivery(t: &mut Tx, agent: &str, origin: Origin, text: &str) -> A
     Ok(())
 }
 
+/// Record a tagged turn (PLAN §8.5): the origin comes from its first tag
+/// (`terrarium_core::turn_tag`). An untagged text counts as `user`.
+pub fn record_turn(t: &mut Tx, agent: &str, text: &str) -> ApiResult<()> {
+    let origin = terrarium_core::turn_tag::origin_of(text).unwrap_or(Origin::User);
+    record_delivery(t, agent, origin, text)
+}
+
 /// The origin of each hash in `hashes` that the delivery log of `agent`
 /// has (the newest row wins).
 pub fn delivery_origins(
