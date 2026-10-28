@@ -3,11 +3,13 @@
 //! Each migration runs once, in order. `PRAGMA user_version` records how many
 //! have run. Never edit a migration that has shipped; add a new one.
 
+use std::borrow::Cow;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
 use rusqlite::Connection;
+use terrarium_core::redact::{Redactor, RedactorHandle};
 
 use crate::error::{ApiError, ApiResult};
 use crate::events::{EventDraft, EventHub, StoredEvent};
@@ -1194,6 +1196,10 @@ const MIGRATIONS: &[&str] = &[
 pub struct Db {
     conn: Arc<Mutex<Connection>>,
     hub: EventHub,
+    /// The redaction matcher (PLAN §16b.6). Each write transaction takes a
+    /// snapshot of it ([`Tx::redact`]); `crate::secrets::redact` swaps it
+    /// after each change of a secret or a subscription key.
+    redactor: RedactorHandle,
 }
 
 impl Db {
@@ -1201,11 +1207,17 @@ impl Db {
         Self {
             conn: Arc::new(Mutex::new(conn)),
             hub,
+            redactor: RedactorHandle::default(),
         }
     }
 
     pub fn hub(&self) -> &EventHub {
         &self.hub
+    }
+
+    /// The daemon's redaction matcher. Clones share the same slot.
+    pub fn redactor(&self) -> &RedactorHandle {
+        &self.redactor
     }
 
     /// Run a read on the blocking pool.
@@ -1246,6 +1258,7 @@ impl Db {
     {
         let conn = self.conn.clone();
         let actor = actor.into();
+        let redactor = self.redactor.get();
         let (value, events) = tokio::task::spawn_blocking(move || {
             let mut guard = match conn.lock() {
                 Ok(g) => g,
@@ -1257,6 +1270,7 @@ impl Db {
                 actor,
                 cause: None,
                 events: Vec::new(),
+                redactor,
             };
             let value = f(&mut t)?;
             let Tx { tx, events, .. } = t;
@@ -1282,6 +1296,8 @@ pub struct Tx<'c> {
     /// (a trigger run: `{schedule, run, event, depth}`).
     pub cause: Option<serde_json::Value>,
     events: Vec<StoredEvent>,
+    /// The redaction matcher at the start of the transaction.
+    redactor: Arc<Redactor>,
 }
 
 impl<'c> std::ops::Deref for Tx<'c> {
@@ -1300,6 +1316,7 @@ impl<'c> Tx<'c> {
             actor: actor.to_owned(),
             cause: None,
             events: Vec::new(),
+            redactor: Arc::new(Redactor::empty()),
         }
     }
 
@@ -1309,10 +1326,42 @@ impl<'c> Tx<'c> {
         self.tx.commit()
     }
 
+    /// Replace each known secret in `s` with `[secret:<label>]` (PLAN
+    /// §16b.6). Borrows `s` when nothing matches. Each store function that
+    /// writes a free text (a mail body, a card, a wiki page) calls it on the
+    /// text before the write, so the database never holds the value.
+    pub fn redact<'a>(&self, s: &'a str) -> Cow<'a, str> {
+        self.redactor.redact_str(s)
+    }
+
+    /// [`Self::redact`] of an optional text.
+    pub fn redact_opt<'a>(&self, s: Option<&'a str>) -> Option<Cow<'a, str>> {
+        s.map(|s| self.redact(s))
+    }
+
+    /// [`Self::redact`] of an owned text: the same allocation when nothing
+    /// matches.
+    pub fn redact_string(&self, s: String) -> String {
+        self.redactor.redact_string(s)
+    }
+
+    /// [`Self::redact`] of each string in a JSON value.
+    pub fn redact_json(&self, v: serde_json::Value) -> serde_json::Value {
+        redact_json(&self.redactor, v)
+    }
+
     /// Append an event to the log. Subscribers get it after the commit.
+    /// The summary and the data are redacted first, so the event log, the
+    /// streams, and the trigger payloads hold no known secret.
     pub fn emit(&mut self, mut draft: EventDraft) -> ApiResult<StoredEvent> {
         if let (Some(c), serde_json::Value::Object(m)) = (&self.cause, &mut draft.data) {
             m.entry("cause").or_insert_with(|| c.clone());
+        }
+        if !self.redactor.is_empty() {
+            draft.summary = self
+                .redactor
+                .redact_string(std::mem::take(&mut draft.summary));
+            draft.data = redact_json(&self.redactor, std::mem::take(&mut draft.data));
         }
         let event = crate::events::insert(&self.tx, &self.actor, draft)?;
         self.events.push(event.clone());
@@ -1339,6 +1388,7 @@ impl<'c> Tx<'c> {
     /// Change the `detail` of the audit row `id` (an aggregate row, such
     /// as the `auth.login_failed` count of one address and window).
     pub fn audit_update(&self, id: &str, detail: serde_json::Value) -> ApiResult<()> {
+        let detail = self.redact_json(detail);
         self.tx.execute(
             "UPDATE audit SET detail = ?2, at = ?3 WHERE id = ?1",
             rusqlite::params![id, detail.to_string(), now()],
@@ -1356,6 +1406,7 @@ impl<'c> Tx<'c> {
         project: Option<&str>,
         detail: serde_json::Value,
     ) -> ApiResult<()> {
+        let detail = self.redact_json(detail);
         self.tx.execute(
             "INSERT INTO audit (id, actor, action, target, project, detail, at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -1370,6 +1421,25 @@ impl<'c> Tx<'c> {
             ],
         )?;
         Ok(())
+    }
+}
+
+/// Redact each string of a JSON value, object keys too (PLAN §16b.6).
+/// Returns the value as it is when the matcher is empty.
+pub fn redact_json(r: &Redactor, v: serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    if r.is_empty() {
+        return v;
+    }
+    match v {
+        Value::String(s) => Value::String(r.redact_string(s)),
+        Value::Array(a) => Value::Array(a.into_iter().map(|v| redact_json(r, v)).collect()),
+        Value::Object(m) => Value::Object(
+            m.into_iter()
+                .map(|(k, v)| (r.redact_string(k), redact_json(r, v)))
+                .collect(),
+        ),
+        v => v,
     }
 }
 

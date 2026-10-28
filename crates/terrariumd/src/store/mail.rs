@@ -447,6 +447,14 @@ pub fn send(t: &mut Tx<'_>, m: Outgoing<'_>) -> ApiResult<Message> {
     if m.body.is_empty() {
         return Err(ApiError::invalid("the message body is empty"));
     }
+    // Each message (a reply, a resume note) comes here: redact it once
+    // (PLAN §16b.6).
+    let (subject, body) = (t.redact(m.subject), t.redact(m.body));
+    let m = Outgoing {
+        subject: &subject,
+        body: &body,
+        ..m
+    };
     let id = ulid::Ulid::new().to_string();
     let thread = m
         .thread

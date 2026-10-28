@@ -1883,8 +1883,10 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           const a = agent(id);
           if (a.source === "file") fail(409, "file_managed", `agent \`${a.project}/${a.name}\` is declared in a definition file`);
           if (LIVE.includes(a.status) && !confirm) fail(409, "confirm_required", `agent \`${a.project}/${a.name}\` has a live session; send ?confirm=true`);
+          if (LIVE.includes(a.status)) setStatus(a, "stopped", "stopped by operator");
           w.agents = w.agents.filter((x) => x.id !== a.id);
           audit("agent.delete", a.id, a.project, { name: a.name });
+          emit({ kind: "agent_removed", actor: "operator", agent: a.name, agent_id: a.id, project: a.project, summary: `${a.project}/${a.name}: removed`, data: { agent_id: a.id, project: a.project, name: a.name } });
         }),
       // 202: the answer shows the agent as the daemon accepted the call. The
       // fake supervisor then steps through the statuses, as the daemon's does.

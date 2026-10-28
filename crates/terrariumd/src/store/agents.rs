@@ -699,6 +699,17 @@ pub fn delete(t: &mut Tx<'_>, id: &str) -> ApiResult<()> {
         Some(&a.agent.project),
         json!({"name": a.agent.name}),
     )?;
+    // The lists of the dashboard and of other clients drop the agent on
+    // this event; without it, the agent stays with its last status.
+    t.emit(
+        crate::events::EventDraft::new(
+            "agent_removed",
+            format!("{}/{}: removed", a.agent.project, a.agent.name),
+            json!({"agent_id": id, "project": a.agent.project, "name": a.agent.name}),
+        )
+        .agent(id, a.agent.name.clone())
+        .project(a.agent.project.clone()),
+    )?;
     Ok(())
 }
 

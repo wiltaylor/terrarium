@@ -610,6 +610,8 @@ export type TranscriptFrame =
 /** Event kinds of docs/api.md §9 and §16.7. */
 export const EVENT_KINDS = [
   "status",
+  // The daemon deleted the agent: lists drop it (docs/api.md §9).
+  "agent_removed",
   "session_started",
   "turn_start",
   "turn_end",

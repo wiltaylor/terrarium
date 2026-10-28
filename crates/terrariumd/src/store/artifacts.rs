@@ -421,9 +421,22 @@ pub struct StoredBlob {
     pub content_type: String,
 }
 
+/// Is an artifact of this type text that redaction applies to? `text/*`
+/// and JSON. A binary type stays as it is.
+fn redactable(content_type: &str) -> bool {
+    let base = content_type.split(';').next().unwrap_or("").trim();
+    base.starts_with("text/") || base == "application/json" || base.ends_with("+json")
+}
+
 /// Check the size and the bundle, then write the blob (once per hash).
-/// Blocking; run it off the async runtime.
-pub fn store_blob(ctx: &ArtifactCtx, u: &Upload) -> ApiResult<StoredBlob> {
+/// A `file` of a text type (`text/*`, JSON) is redacted first (PLAN
+/// §16b.6); a binary file and a bundle are not. Blocking; run it off the
+/// async runtime.
+pub fn store_blob(
+    ctx: &ArtifactCtx,
+    u: &Upload,
+    redactor: &terrarium_core::redact::Redactor,
+) -> ApiResult<StoredBlob> {
     let size = u.data.len() as u64;
     if size > ctx.limits.max_file_bytes {
         return Err(ApiError::new(
@@ -440,20 +453,27 @@ pub fn store_blob(ctx: &ArtifactCtx, u: &Upload) -> ApiResult<StoredBlob> {
     }
     std::fs::create_dir_all(&ctx.dir)
         .map_err(|e| ApiError::internal(format!("cannot create the artifact dir: {e}")))?;
-    let sha = sha256_hex(&u.data);
-    let content_type = match u.kind.as_str() {
+    let (sha, size, content_type) = match u.kind.as_str() {
         "file" => {
+            let content_type = sniff(&u.name, &u.data);
+            let data = if redactable(&content_type) {
+                redactor.redact_bytes(&u.data)
+            } else {
+                std::borrow::Cow::Borrowed(u.data.as_slice())
+            };
+            let sha = sha256_hex(&data);
             let path = ctx.blob_path(&sha);
             if !path.is_file() {
-                write_atomic(&path, &u.data)
+                write_atomic(&path, &data)
                     .map_err(|e| ApiError::internal(format!("cannot store the blob: {e}")))?;
             }
-            sniff(&u.name, &u.data)
+            (sha, data.len() as u64, content_type)
         }
         "bundle" => {
+            let sha = sha256_hex(&u.data);
             check_bundle(&u.data)?;
             unpack_bundle(ctx, &sha, &u.data)?;
-            "text/html; charset=utf-8".into()
+            (sha, size, "text/html; charset=utf-8".into())
         }
         other => {
             return Err(ApiError::invalid(format!(

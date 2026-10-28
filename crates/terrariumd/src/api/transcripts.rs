@@ -103,6 +103,7 @@ async fn sessions(
         .read(move |c| agents::sessions(c, &id, &page))
         .await?;
     let running = live(&state, &a.agent).await;
+    let redactor = state.db.redactor().get();
     let mut items = Vec::with_capacity(rows.items.len());
     for s in rows.items {
         let (transcript, sum) = match locate_session(&state, &a.agent, &s).await {
@@ -114,7 +115,7 @@ async fn sessions(
             session: s,
             transcript,
             blocks: sum.blocks,
-            title: sum.title,
+            title: sum.title.map(|t| redactor.redact_string(t)),
             active,
         });
     }
@@ -162,6 +163,19 @@ async fn annotate(state: &Shared, agent: &str, blocks: &mut [Block]) {
         if let Some(o) = found.get(&h) {
             b.origin = Some(*o);
         }
+    }
+}
+
+/// Redact the blocks of a page or a stream frame (PLAN §16b.6). The
+/// harness writes the session file, so the daemon redacts at read time,
+/// after [`annotate`] (it matches the text that the daemon typed).
+fn redact_blocks(state: &Shared, blocks: &mut [Block]) {
+    let r = state.db.redactor().get();
+    if r.is_empty() {
+        return;
+    }
+    for b in blocks {
+        crate::secrets::redact::redact_block(&r, b);
     }
 }
 
@@ -245,6 +259,7 @@ async fn transcript(
         b.session.clone_from(&row.id);
     }
     annotate(&state, &a.agent.id.to_string(), &mut blocks).await;
+    redact_blocks(&state, &mut blocks);
     let next_after = blocks.last().map_or(after, |b| b.seq);
     let harness: HarnessId = loc.as_ref().map_or(a.agent.harness, |l| l.harness);
     Ok(Json(json!({
@@ -344,6 +359,7 @@ impl Streamer {
                     b.session.clone_from(&self.row.id);
                 }
                 annotate(&self.state, &self.agent.id.to_string(), &mut blocks).await;
+                redact_blocks(&self.state, &mut blocks);
                 for (new, b) in flags.into_iter().zip(blocks) {
                     if new {
                         self.last_seq = self.last_seq.max(b.seq);

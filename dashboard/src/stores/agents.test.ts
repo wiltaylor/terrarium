@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createRoot } from "solid-js";
 import { createMockApi } from "../api/mock";
 import type { Agent, AgentEvent } from "../api/types";
-import { applyAgentEvent, createAgentsStore } from "./agents";
+import { applyAgentEvent, createAgentsStore, mergeFresh, removeAgent } from "./agents";
 import { createEventsStore } from "./events";
 
 const agent = (over: Partial<Agent> = {}): Agent => ({
@@ -105,6 +105,58 @@ describe("createAgentsStore backlog", () => {
       const a = store.byId(lead.id)!;
       expect(a.last_event?.id).toBe("STALE");
       expect(a.status).toBe("idle");
+      dispose();
+    });
+  });
+});
+
+describe("agent removal", () => {
+  const removedEv = (id: string) => ev({ seq: 9, id: "RM", kind: "agent_removed", agent: "lead", agent_id: id, data: { agent_id: id, project: "p", name: "lead" } });
+
+  it("drops the agent on agent_removed, by ULID only", () => {
+    const list = [agent(), agent({ id: "A2", name: "w1" })];
+    expect(applyAgentEvent(list, removedEv("A1")).map((a) => a.id)).toEqual(["A2"]);
+    // An unknown ULID changes nothing, even when the name matches.
+    expect(applyAgentEvent(list, removedEv("ZZ"))).toBe(list);
+    expect(removeAgent(list, undefined)).toBe(list);
+  });
+
+  it("does not bring a removed agent back from a replayed backlog", () => {
+    const status = ev({ seq: 1, id: "S", agent_id: "A1", data: { agent_id: "A1", status: "stopped" } });
+    // The fresh list has no A1: the status replay cannot add it.
+    const out = mergeFresh([agent({ id: "A2", name: "w1" })], [agent()], [removedEv("A1"), status]);
+    expect(out.map((a) => a.id)).toEqual(["A2"]);
+  });
+
+  it("keeps a removed agent out of a list fetched before the removal", () => {
+    const out = mergeFresh([agent(), agent({ id: "A2", name: "w1" })], [], [], new Set(["A1"]));
+    expect(out.map((a) => a.id)).toEqual(["A2"]);
+  });
+
+  it("keeps the list's status for each agent when the replay drops one", () => {
+    const fresh = [agent({ id: "A1", status: "idle" }), agent({ id: "A2", name: "w1", status: "working" })];
+    const out = mergeFresh(fresh, [], [removedEv("A1")]);
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ id: "A2", status: "working" });
+  });
+
+  it("drops a deleted agent from the store, and its later events ask for no refresh", async () => {
+    const api = createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 0 });
+    await createRoot(async (dispose) => {
+      let listen: (e: AgentEvent) => void = () => {};
+      const store = createAgentsStore(api, { on: (fn) => ((listen = fn), () => {}) });
+      await store.refresh();
+      const w = store.state.agents.find((a) => a.source !== "file")!;
+      await api.agents.remove(w.id, true);
+      listen(removedEv(w.id));
+      expect(store.byId(w.id)).toBeUndefined();
+      let calls = 0;
+      const list = api.agents.list;
+      api.agents.list = (...args) => (calls++, list(...args));
+      listen(ev({ kind: "session_ended", agent_id: w.id, data: {} }));
+      await new Promise((r) => setTimeout(r, 600));
+      expect(calls).toBe(0);
+      store.dispose();
       dispose();
     });
   });

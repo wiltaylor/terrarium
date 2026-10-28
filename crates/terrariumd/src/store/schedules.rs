@@ -1436,9 +1436,9 @@ pub fn finish_run(t: &mut Tx<'_>, run_id: &str, o: &Outcome, now: DateTime<Utc>)
             run_id,
             o.status,
             at,
-            o.summary,
-            o.output.to_string(),
-            o.error
+            t.redact(&o.summary),
+            t.redact_string(o.output.to_string()),
+            t.redact_opt(o.error.as_deref())
         ],
     )?;
     let r = get_run(t, run_id)?;

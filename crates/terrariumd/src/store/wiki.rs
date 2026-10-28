@@ -644,7 +644,9 @@ fn write_revision(
     summary: &str,
     title: Option<&str>,
 ) -> ApiResult<PageRow> {
-    let summary = check_summary(summary)?;
+    let (body, summary, title) = (t.redact(body), t.redact(summary), t.redact_opt(title));
+    let (body, title) = (&*body, title.as_deref());
+    let summary = check_summary(&summary)?;
     let fm = front_matter(body);
     check_status(&fm)?;
     let rev = row.current_rev + 1;
@@ -685,7 +687,9 @@ fn insert_page(
     summary: &str,
     title: Option<&str>,
 ) -> ApiResult<PageRow> {
-    let summary = check_summary(summary)?;
+    let (body, summary, title) = (t.redact(body), t.redact(summary), t.redact_opt(title));
+    let (body, title) = (&*body, title.as_deref());
+    let summary = check_summary(&summary)?;
     let fm = front_matter(body);
     check_status(&fm)?;
     let title = title

@@ -630,7 +630,7 @@ fn emit(t: &mut Tx<'_>, row: &MemRow, change: &str, extra: serde_json::Value) ->
 pub fn create(t: &mut Tx<'_>, actor: &Actor, project: &str, m: NewMemory) -> ApiResult<Created> {
     projects::get(t, project)?;
     policy::read_project(actor, project)?;
-    let title = check_title(&m.title)?;
+    let title = t.redact_string(check_title(&m.title)?);
     let tags = clean_tags(&m.tags)?;
     let num = next_number(t, project, "memory")?;
     let at = now();
@@ -641,7 +641,7 @@ pub fn create(t: &mut Tx<'_>, actor: &Actor, project: &str, m: NewMemory) -> Api
             project,
             num,
             title,
-            m.body,
+            t.redact(&m.body),
             serde_json::to_string(&tags)?,
             actor.address(),
             at
@@ -702,7 +702,13 @@ pub fn update(t: &mut Tx<'_>, actor: &Actor, key: &str, p: MemoryPatch) -> ApiRe
     }
     t.execute(
         "UPDATE memories SET title = ?2, body = ?3, tags = ?4, updated_at = ?5 WHERE pk = ?1",
-        params![row.pk, title, body, serde_json::to_string(&tags)?, now()],
+        params![
+            row.pk,
+            t.redact(&title),
+            t.redact(&body),
+            serde_json::to_string(&tags)?,
+            now()
+        ],
     )?;
     if full_edit && actor.address() != row.author {
         t.audit(
@@ -799,7 +805,8 @@ fn add_link_rows(
     if relation == "supersedes" {
         return apply_supersede(t, actor, &target, from);
     }
-    let note = note.map(str::trim).filter(|n| !n.is_empty());
+    let note = t.redact_opt(note.map(str::trim).filter(|n| !n.is_empty()));
+    let note = note.as_deref();
     t.execute(
         "INSERT INTO memory_links (from_id, to_id, relation, author, note, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)

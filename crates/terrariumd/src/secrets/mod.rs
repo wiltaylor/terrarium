@@ -30,6 +30,7 @@
 pub mod crypto;
 pub mod kinds;
 pub mod migrate;
+pub mod redact;
 pub mod ssh;
 
 use std::fs::{self, OpenOptions};

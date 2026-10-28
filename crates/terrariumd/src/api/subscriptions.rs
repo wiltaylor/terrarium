@@ -756,6 +756,8 @@ async fn api_key(
         .await
         .map_err(|e| ApiError::internal(format!("key task failed: {e}")))?
         .map_err(|e| ApiError::internal(format!("cannot store the key: {e}")))?;
+    // The new key joins the redaction matcher (PLAN §16b.6, S9).
+    crate::secrets::redact::rebuild(&state).await;
     let (n, provider, base_url, models) = (
         name.clone(),
         key.provider.clone(),

@@ -482,6 +482,18 @@ async fn fake_supervisor_status_flow() {
             .status,
         204
     );
+    // The delete names the agent in one `agent_removed` event, so the lists
+    // of clients drop it.
+    let removed = td
+        .get(&format!("/api/events?agent={id}&kind=agent_removed"))
+        .await;
+    let removed = removed.ok().as_array().unwrap().clone();
+    assert_eq!(removed.len(), 1, "{removed:?}");
+    assert_eq!(removed[0]["agent_id"], id.as_str());
+    assert_eq!(removed[0]["project"], "p");
+    assert_eq!(removed[0]["data"]["agent_id"], id.as_str());
+    assert_eq!(removed[0]["data"]["project"], "p");
+    assert!(removed[0]["data"]["name"].is_string());
     // The log outlives the agent.
     let fire = td.get(&format!("/api/events?agent={id}&kind=status")).await;
     assert!(fire.ok().as_array().unwrap().len() >= 8);

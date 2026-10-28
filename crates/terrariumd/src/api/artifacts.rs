@@ -301,10 +301,11 @@ async fn upload(
     let ctx = ctx(&state)?;
     let up = parse_upload(&headers, &body, ctx.limits.max_file_bytes)?;
     drop(body);
-    let (c2, u2) = (ctx.clone(), up.clone());
-    let blob: StoredBlob = tokio::task::spawn_blocking(move || artifacts::store_blob(&c2, &u2))
-        .await
-        .map_err(|e| ApiError::internal(format!("upload task failed: {e}")))??;
+    let (c2, u2, r2) = (ctx.clone(), up.clone(), state.db.redactor().get());
+    let blob: StoredBlob =
+        tokio::task::spawn_blocking(move || artifacts::store_blob(&c2, &u2, &r2))
+            .await
+            .map_err(|e| ApiError::internal(format!("upload task failed: {e}")))??;
     let limits = ctx.limits.clone();
     let a = state
         .db

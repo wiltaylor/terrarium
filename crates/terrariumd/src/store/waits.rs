@@ -490,7 +490,13 @@ pub fn finish(
     let n = t.execute(
         "UPDATE waits SET state = ?2, result = ?3, resolved_at = ?4, notified_at = ?5
          WHERE id = ?1 AND state = 'open'",
-        params![id, state.as_str(), result.to_string(), at, notified],
+        params![
+            id,
+            state.as_str(),
+            t.redact_string(result.to_string()),
+            at,
+            notified
+        ],
     )?;
     if n == 0 {
         return Ok(None);

@@ -56,6 +56,21 @@ describe("mock parity with docs/api.md", () => {
     s.close();
   });
 
+  it("emits agent_removed when an agent is deleted, after the stop", async () => {
+    const api = mock();
+    const frames: AgentEvent[] = [];
+    const s = api.events.stream({ since: api.world.seq });
+    s.subscribe((e) => frames.push(e));
+    await wait();
+    const a = api.world.agents.find((x) => x.source !== "file")!;
+    await api.agents.remove(a.id, true);
+    await wait(20);
+    const rm = frames.filter((e) => e.kind === "agent_removed");
+    expect(rm).toHaveLength(1);
+    expect(rm[0]).toMatchObject({ agent: a.name, agent_id: a.id, project: a.project, data: { agent_id: a.id, project: a.project, name: a.name } });
+    s.close();
+  });
+
   it("emits card events with data.card_id, the column, and the assignee as agent", async () => {
     const api = mock();
     const frames: AgentEvent[] = [];

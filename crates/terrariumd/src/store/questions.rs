@@ -497,6 +497,7 @@ pub fn ask(t: &mut Tx<'_>, n: NewQuestion) -> ApiResult<Question> {
     let options = check_options(n.kind, &n.options)?;
     let context = check_context(n.context.as_deref())?;
     let card = check_card(t, &project, n.card.as_deref())?;
+    let (text, options, context) = redact_fields(t, text, options, context);
     let open = list(
         t,
         &Filter {
@@ -623,6 +624,7 @@ pub fn update(t: &mut Tx<'_>, id: &str, p: QuestionPatch) -> ApiResult<Question>
         None => q.card.clone(),
     };
     let priority = p.priority.unwrap_or(q.priority);
+    let (text, options, context) = redact_fields(t, text, options, context);
     let mut changed: Vec<&str> = Vec::new();
     if text != q.text {
         changed.push("text");
@@ -671,6 +673,21 @@ pub fn update(t: &mut Tx<'_>, id: &str, p: QuestionPatch) -> ApiResult<Question>
     )?;
     emit(t, &q, "updated")?;
     Ok(q)
+}
+
+/// Redact the text, the options, and the context of a question or a
+/// notice before the write (PLAN §16b.6).
+fn redact_fields(
+    t: &Tx<'_>,
+    text: String,
+    options: Vec<String>,
+    context: Option<String>,
+) -> (String, Vec<String>, Option<String>) {
+    (
+        t.redact_string(text),
+        options.into_iter().map(|o| t.redact_string(o)).collect(),
+        context.map(|c| t.redact_string(c)),
+    )
 }
 
 /// The summary of a `question` wait: `question <text>` or `notice <text>`.
@@ -789,7 +806,7 @@ pub fn answer(
          WHERE id = ?1 AND status = 'open'",
         params![
             q.id,
-            answer,
+            t.redact(&answer),
             index.and_then(|i| i64::try_from(i).ok()),
             by.key(),
             at
@@ -873,7 +890,7 @@ pub fn retract(
         "UPDATE questions SET status = 'retracted', retract_reason = ?2, retracted_by = ?3,
                 updated_at = ?4
          WHERE id = ?1 AND status = 'open'",
-        params![q.id, reason, t.actor, at],
+        params![q.id, t.redact_opt(reason), t.actor, at],
     )?;
     let q = get(t, &q.id)?;
     let ended = end_waits(t, &q, "retracted")?;
@@ -953,7 +970,7 @@ pub fn acknowledge(
         "UPDATE questions SET status = 'acknowledged', answer = ?2, answered_by = ?3,
                 answered_at = ?4, updated_at = ?4
          WHERE id = ?1 AND status = 'open'",
-        params![q.id, text, by.key(), at],
+        params![q.id, t.redact_opt(text), by.key(), at],
     )?;
     let q = get(t, &q.id)?;
     let ended = end_waits(t, &q, "acknowledged")?;

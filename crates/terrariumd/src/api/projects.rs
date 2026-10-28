@@ -124,6 +124,8 @@ async fn remove(
             projects::delete(t, &name)
         })
         .await?;
+    // The project's secrets are gone (PLAN §16b.6).
+    crate::secrets::redact::rebuild(&state).await;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 

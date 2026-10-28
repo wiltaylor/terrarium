@@ -201,6 +201,8 @@ pub async fn start_with_usage(
         })
         .map_err(|e| anyhow::anyhow!("secret store: {e}"))?;
     secrets::migrate::run_at_start(&state).await;
+    // The redaction matcher (PLAN §16b.6), from the store as it is now.
+    secrets::redact::rebuild(&state).await;
 
     let mut tasks = Vec::new();
     tasks.push(spawn_pump(state.clone()));

@@ -471,6 +471,9 @@ pub fn run_log(state: &Shared, w: &Wait, max: usize) -> RunLog {
             (text, None)
         }
     };
+    // The output is what the run printed: redact it whole, then cut it
+    // (PLAN §16b.6).
+    let output = state.db.redactor().get().redact_string(output);
     let max = max.clamp(1, LOG_TAIL);
     let output = if output.len() > max {
         let mut i = output.len() - max;

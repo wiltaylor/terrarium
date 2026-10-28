@@ -21,6 +21,8 @@ export function findEventAgent(agents: Agent[], e: AgentEvent): number {
 
 /** Apply one event to the agent list. Pure; returns a new array when something changed. */
 export function applyAgentEvent(agents: Agent[], e: AgentEvent): Agent[] {
+  // A removal names the agent by ULID only: a new agent can have the old name.
+  if (e.kind === "agent_removed") return removeAgent(agents, eventAgentId(e));
   const i = findEventAgent(agents, e);
   if (i < 0) return agents;
   const a = { ...agents[i]!, last_event: e };
@@ -63,6 +65,34 @@ export function applyAgentEvent(agents: Agent[], e: AgentEvent): Agent[] {
   return next;
 }
 
+/** The list without the agent `id`. Pure; the same array when the list does not have it. */
+export function removeAgent(agents: Agent[], id: string | undefined): Agent[] {
+  if (!id || !agents.some((a) => a.id === id)) return agents;
+  return agents.filter((a) => a.id !== id);
+}
+
+/**
+ * Put a fresh list from the daemon together with the events that came before it
+ * (the socket backlog, newest first). The fresh list is the truth for which agents
+ * there are and for their status; the replay adds the last events, the turn start,
+ * and the self-report. A replayed event cannot add an agent, and an agent in
+ * `removed` stays out (a list that was fetched before the delete).
+ */
+export function mergeFresh(fresh: Agent[], old: Agent[], recent: AgentEvent[], removed: ReadonlySet<string> = new Set()): Agent[] {
+  const merged = fresh
+    .filter((a) => !removed.has(a.id))
+    .map((a) => {
+      const o = old.find((x) => x.id === a.id);
+      return o ? { ...a, last_event: o.last_event, self_report: o.self_report, turn_started_at: a.status === "working" ? o.turn_started_at : undefined } : a;
+    });
+  // Oldest first.
+  const replayed = recent.slice().reverse().reduce(applyAgentEvent, merged);
+  return replayed.map((a) => {
+    const f = merged.find((x) => x.id === a.id)!;
+    return { ...a, status: f.status, current_card: f.current_card, waits: f.waits, waiting_on: f.waiting_on, turn_started_at: f.status === "working" ? a.turn_started_at : undefined };
+  });
+}
+
 export function createAgentsStore(api: Pick<Api, "agents">, events?: Pick<EventsStore, "on"> & Partial<Pick<EventsStore, "recent">>) {
   const [state, setState] = createStore<{ agents: Agent[]; loading: boolean; error: unknown }>({
     agents: [],
@@ -70,23 +100,15 @@ export function createAgentsStore(api: Pick<Api, "agents">, events?: Pick<Events
     error: null,
   });
   let pending: ReturnType<typeof setTimeout> | undefined;
+  // The agents the daemon removed in this session. Their later events do not
+  // ask for a refresh, and a list fetched before the removal does not bring them back.
+  const removed = new Set<string>();
 
   const refresh = async () => {
     setState("loading", true);
     try {
       const list = await api.agents.list();
-      // Keep the client-side fields (turn age, last event) across a refresh.
-      const merged = list.map((a) => {
-        const old = state.agents.find((x) => x.id === a.id);
-        return old ? { ...a, last_event: old.last_event, self_report: old.self_report, turn_started_at: a.status === "working" ? old.turn_started_at : undefined } : a;
-      });
-      // Events that came before the list (the socket backlog) apply now, oldest first.
-      const replayed = (events?.recent?.() ?? []).slice().reverse().reduce(applyAgentEvent, merged);
-      // The list is the truth for status; the replay adds last events, turn start, and the card.
-      const final = replayed.map((a, i) => {
-        const fresh = merged[i]!;
-        return { ...a, status: fresh.status, current_card: fresh.current_card, waits: fresh.waits, waiting_on: fresh.waiting_on, turn_started_at: fresh.status === "working" ? a.turn_started_at : undefined };
-      });
+      const final = mergeFresh(list, state.agents, events?.recent?.() ?? [], removed);
       setState("agents", reconcile(final, { key: "id" }));
       setState("error", null);
     } catch (e) {
@@ -103,9 +125,11 @@ export function createAgentsStore(api: Pick<Api, "agents">, events?: Pick<Events
   };
 
   const unsubscribe = events?.on((e) => {
+    const id = eventAgentId(e);
+    if (e.kind === "agent_removed" && id) removed.add(id);
     const next = applyAgentEvent(state.agents, e);
     if (next !== state.agents) setState("agents", reconcile(next, { key: "id" }));
-    else if (eventAgentId(e) && !state.loading) refreshSoon(); // an agent this list does not have yet
+    else if (id && !removed.has(id) && !state.loading) refreshSoon(); // an agent this list does not have yet
   });
 
   return {
@@ -122,6 +146,7 @@ export function createAgentsStore(api: Pick<Api, "agents">, events?: Pick<Events
       else setState("agents", i, (old) => ({ ...agent, last_event: old.last_event, self_report: old.self_report, turn_started_at: old.turn_started_at }));
     },
     drop(id: string) {
+      removed.add(id);
       setState("agents", (list) => list.filter((a) => a.id !== id));
     },
     dispose: () => {

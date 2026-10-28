@@ -11,6 +11,8 @@ import { GRANTABLE_ROLES, type Agent, type AgentStatus, type Role } from "../../
 import { compact, timeUntil, windowValue } from "../../lib/format";
 import { agents, api, events, leases as holds, quota, subscriptions } from "../../stores";
 import { describeCause } from "../../stores/quota";
+import { eventAgentId } from "../../stores/agents";
+import { ApiError } from "../../api/http";
 import { AgentForm } from "./AgentForm";
 import { SaveAsTemplateDialog } from "../templates/TemplateDialog";
 import { Conversation } from "./conversation/Conversation";
@@ -26,6 +28,18 @@ import { WaitsPanel, WatchesPanel } from "./Waits";
 import { QuestionsPanel } from "../inbox/QuestionsPanel";
 import { SkillsPicker } from "../skills/SkillsPicker";
 import { RESTART_NOTE, skillsLabel } from "../skills/model";
+
+/** The page of an agent that the daemon removed. */
+function RemovedAgent() {
+  return (
+    <div class="stack">
+      <PageHead title="Agent removed" />
+      <p class="muted">
+        This agent was removed. <A href="/agents">Back to the agents</A>
+      </p>
+    </div>
+  );
+}
 
 /** Statuses with a live session: the PTY can attach, `stop` works. */
 export const RUNNING: AgentStatus[] = ["starting", "idle", "waiting", "working", "blocked", "restarting"];
@@ -48,6 +62,21 @@ export default function AgentDetail() {
   const [fetched] = createResource(id, (key) => api.agents.get(key).catch((e: unknown) => (setError(e), null)));
   const agent = (): Agent | undefined => agents.byId(id()) ?? agents.byId(fetched()?.id ?? "") ?? fetched() ?? undefined;
   const running = () => RUNNING.includes(agent()?.status ?? "stopped");
+  // The daemon removed the agent while this page shows it (an `agent_removed`
+  // event), or the GET found no agent (404): the page says so, not a raw error.
+  const [removedKey, setRemovedKey] = createSignal<string | null>(null);
+  const notFound = () => {
+    const e = error();
+    return e instanceof ApiError && e.status === 404 && !agent();
+  };
+  const removed = () => removedKey() === id() || notFound();
+  onMount(() => {
+    const off = events.on((e) => {
+      const gone = e.kind === "agent_removed" ? eventAgentId(e) : undefined;
+      if (gone && gone === (agent()?.id ?? fetched()?.id)) setRemovedKey(id());
+    });
+    onCleanup(off);
+  });
 
   const act = async (label: string, fn: () => Promise<unknown>) => {
     try {
@@ -72,7 +101,16 @@ export default function AgentDetail() {
   };
 
   return (
-    <Show when={agent()} fallback={<Show when={error()} fallback={<p class="muted">Loading…</p>}><ErrorBanner error={error()} /></Show>}>
+    <Show
+      when={!removed() && agent()}
+      fallback={
+        <Show when={!removed()} fallback={<RemovedAgent />}>
+          <Show when={error()} fallback={<p class="muted">Loading…</p>}>
+            <ErrorBanner error={error()} />
+          </Show>
+        </Show>
+      }
+    >
       {(a) => (
         <div class="stack">
           <PageHead

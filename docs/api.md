@@ -1027,6 +1027,43 @@ the files. The secret keeps the old `created_at`. A pair that the store
 refuses stays, and the daemon logs a warning. `subscriptions/`,
 `accounts/`, and `backup/` stay as they are.
 
+**Redaction.** PLAN §16b.6. The daemon keeps a matcher of each secret
+field of each secret, and of each stored subscription API key
+(§16, `POST /api/subscriptions/{name}/api-key`). It replaces each match
+with `[secret:<label>]`. The label of a global secret is its name
+(`[secret:gh]`). The label of a project secret is `<project>/<name>`
+(`[secret:web/deploy]`). The label of a subscription key is
+`subscription/<name>` (`[secret:subscription/zai]`).
+
+- The matcher skips a value shorter than 8 bytes. A short value matches
+  too much ordinary text.
+- The matcher also finds the JSON-escaped form of a value. It finds each
+  line of 8 bytes or more of a value with more than one line (an SSH key),
+  except the PEM armor lines.
+- The daemon builds the matcher at the start, and again after each write
+  call of `/api/secrets` and `/api/credentials`, each project delete, and
+  each stored subscription key.
+
+The daemon redacts these records before it writes them, so the database
+never holds a known value: mail (subject and body), questions and notices
+(text, options, context, answer, reason), cards (title, body, comments),
+memories (title, body, link notes), wiki pages (title, body, summary),
+version notes and review comments, text artifacts (`text/*` and JSON; a
+binary file and a bundle stay as they are), events (summary and data,
+also the events that start a trigger), trigger run results, wait results,
+and audit details.
+
+The daemon redacts these at read time, because a harness or a run writes
+them: transcripts and the session list (§6.6), the screen snapshot
+(`GET /api/agents/{id}/screen`), and the output of a process wait
+(`GET /api/waits/{id}/log`). A change of a secret changes the next read.
+
+A record that the daemon stored before a secret existed keeps its text.
+The live terminal stream (`GET /api/agents/{id}/pty`) goes to the
+operator only and is not redacted. Redaction is a guard against
+accidents. It does not find a value that an agent changed (for example,
+base64).
+
 **`/api/credentials`.** This alias stays for one release. It makes and
 lists global secrets in the old shapes of §5.1. `kind` is `token`,
 `ssh_key`, or `password` (a `login` secret). A `POST` with an existing
@@ -1074,7 +1111,7 @@ An agent is the core `Agent` with bookkeeping fields:
 | `POST /api/agents` | an agent definition, or `template` and the fields that differ (§21.3) | `201` agent | project_admin of `project`; some `policy` entries need sysadmin (below) |
 | `GET /api/agents/{id}` | | `200` agent, with `subscription_detail` (below) | read |
 | `PATCH /api/agents/{id}` | `{"harness"?, "subscription"?, "subscription_pool"?, "model"?, "prompt"?, "system_prompt"?, "persona"?, "skills"?, "policy"?, "restart"?, "new_session_on_prompt_change"?}` | `200` agent | project_admin; some `policy` entries need sysadmin (below) |
-| `DELETE /api/agents/{id}` | `?confirm=true` when live; `?keep_workspace=true` | `204` | project_admin |
+| `DELETE /api/agents/{id}` | `?confirm=true` when live; `?keep_workspace=true` | `204`; emits `agent_removed` (§9) | project_admin |
 
 `DELETE` stops a live agent, waits for it to end (up to 10 s), and moves
 its dir `<state>/agents/<ulid>/` to `<state>/trash/<ulid>-<ts>/`. It also
@@ -1544,6 +1581,10 @@ map of each record type.
 Rights: the same as the agent's events (§9). A member of the agent's
 project reads; an agent of another project gets `403 forbidden`; the
 operator reads all.
+
+The daemon redacts each block when it reads it (§5.2, "Redaction"): the
+text, the turn parts, the tool input and summary, and the tool result. A
+known secret value shows as `[secret:<label>]`.
 
 `{session}` is the session `id` of §6.3. The harness session ID
 (`harness_session_id`) also works; it names the newest session with that
@@ -2025,6 +2066,9 @@ message (limit 6)`. The daemon sets both at the send and does not change
 them. Messages from before migration 16 have `held: false`.
 `thread_paused` is about the thread now; `held` is about the message.
 
+The daemon redacts the subject and the body before it stores a message
+(§5.2, "Redaction"). A known secret value shows as `[secret:<label>]`.
+
 Each row has one recipient. The **participants** of a thread are the
 addresses that sent or received a message on it. A reply goes to every
 participant except the sender, one row each.
@@ -2297,6 +2341,7 @@ Kinds:
 | `kind` | `data` |
 |---|---|
 | `status` | `{status, from, reason, waits, waiting_on?}`. `from` is never the same as `status`: a runner report of the status the agent already has (for example the runner's `spawned <program>` at start) goes in as a `system` event `{message, status}`. `waits` is the number of open waits; `waiting_on` is the line of §6.7. |
+| `agent_removed` | `{agent_id, project, name}`. The daemon deleted the agent: `DELETE /api/agents/{id}`, a fleet apply with prune, or a definitions sync that removes a file agent. The delete of a live agent stops it first, so a `status` event with `stopped` comes before this event. Clients remove the agent from their lists. `GET /api/agents` does not show the agent again. |
 | `wait` | `{wait_id, change, kind, summary, state, result?}`. `change` is `opened`, `resolved`, `timed_out`, `cancelled`, or `failed`. The `agent` is the waiter (§6.7). |
 | `watch` | `{watch_id, change, watcher, watcher_name, on, status?}`. `change` is `created`, `fired` (with `status`), or `removed`. The `agent` is the watched agent (§6.7). |
 | `question` | `{question_id, kind, change, status, priority, text, revision, agent_id, card_id?}`. `kind` is `question` or `notice`. `change` is `asked`, `updated`, `answered`, `acknowledged`, or `retracted`. The `agent` is the asking agent (§6.8). |

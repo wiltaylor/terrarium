@@ -491,10 +491,11 @@ fn actor_display(t: &Tx<'_>) -> ApiResult<String> {
     }
 }
 
+/// Write a comment, redacted (PLAN §16b.6). Each comment comes here.
 fn insert_comment(t: &mut Tx<'_>, card: &str, author: &str, body: &str) -> ApiResult<()> {
     t.execute(
         "INSERT INTO card_comments (id, card, author, body, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![ulid::Ulid::new().to_string(), card, author, body, now()],
+        params![ulid::Ulid::new().to_string(), card, author, t.redact(body), now()],
     )?;
     Ok(())
 }
@@ -1059,8 +1060,8 @@ pub fn create_card(
             number,
             backlog.id,
             position,
-            title.trim(),
-            new.body.clone().unwrap_or_default(),
+            t.redact(title.trim()),
+            t.redact(new.body.as_deref().unwrap_or_default()),
             serde_json::to_string(&new.labels)?,
             new.repo,
             new.branch,
@@ -1163,8 +1164,8 @@ pub fn update_card(t: &mut Tx<'_>, actor: &Actor, id: &str, p: CardPatch) -> Api
              WHERE id = ?1",
             params![
                 card.id,
-                p.title.as_deref().map(str::trim),
-                p.body,
+                t.redact_opt(p.title.as_deref().map(str::trim)),
+                t.redact_opt(p.body.as_deref()),
                 p.labels.as_ref().map(serde_json::to_string).transpose()?,
                 p.repo.is_some(),
                 p.repo.clone().flatten(),

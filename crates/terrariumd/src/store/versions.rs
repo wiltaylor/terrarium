@@ -441,7 +441,7 @@ pub fn create(t: &mut Tx<'_>, actor: &Actor, project: &str, v: NewVersion) -> Ap
             id,
             project,
             name,
-            v.notes,
+            t.redact(&v.notes),
             blank(v.repo),
             blank(v.git_ref),
             actor.address(),
@@ -507,7 +507,7 @@ pub fn update(t: &mut Tx<'_>, actor: &Actor, key: &str, p: VersionPatch) -> ApiR
     if let Some(n) = &p.notes {
         t.execute(
             "UPDATE versions SET notes = ?2 WHERE id = ?1",
-            params![row.id, n],
+            params![row.id, t.redact(n)],
         )?;
         fields.push("notes");
     }
@@ -623,7 +623,7 @@ fn review_row(
             row.id,
             actor.address(),
             decision,
-            comment,
+            t.redact_opt(comment),
             now()
         ],
     )?;
