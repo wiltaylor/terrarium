@@ -737,11 +737,28 @@ th {
 /* Agents */
 .agent-card {
   display: grid;
+  /* One track that never grows past the card: long chips shrink instead. */
+  grid-template-columns: minmax(0, 1fr);
+  /* A short card in a tall grid row keeps its rows at the top. */
+  align-content: start;
   gap: 8px;
 }
 .agent-card .name {
   font-weight: 650;
   font-size: 1rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+/* A long model name, project, or lease target ends in an ellipsis at the card edge. */
+.agent-card .spread > *,
+.agent-card .row > * {
+  min-width: 0;
+}
+.agent-card .chip {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
 }
 .kv {
   margin: 0;

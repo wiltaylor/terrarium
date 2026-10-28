@@ -2,11 +2,10 @@ import { A, useNavigate, useParams } from "@solidjs/router";
 import { createSignal, For, onMount, Show } from "solid-js";
 import { LeaseChips } from "../../components/Leases";
 import { HoldBadge } from "../../components/QuotaBanner";
-import { SelfReport } from "../../components/SelfReport";
 import { StatusBadge } from "../../components/StatusBadge";
 import { Empty, ErrorBanner, PageHead, useNow } from "../../components/ui";
 import { AGENT_STATUSES, type Agent, type AgentStatus } from "../../api/types";
-import { ago, duration } from "../../lib/format";
+import { duration } from "../../lib/format";
 import { agents, leases, projects } from "../../stores";
 import { AgentForm } from "./AgentForm";
 
@@ -32,12 +31,13 @@ export function AgentCard(props: { agent: Agent; now: number }) {
           <StatusBadge status={a().status} waitingOn={a().waiting_on} />
         </span>
       </div>
-      <SelfReport report={a().self_report} now={props.now} />
       <div class="row">
         <span class="chip">{a().harness}</span>
         <span class="chip">{a().project}</span>
         <Show when={a().model}>
-          <span class="chip mono small">{a().model}</span>
+          <span class="chip mono small" title={a().model}>
+            {a().model}
+          </span>
         </Show>
         <RoleBadges agent={a()} />
         <Show when={a().skills_restart}>
@@ -71,16 +71,6 @@ export function AgentCard(props: { agent: Agent; now: number }) {
             </>
           )}
         </Show>
-        <dt>Last event</dt>
-        <dd class="ellipsis" title={a().last_event?.summary}>
-          <Show when={a().last_event} fallback={<span class="muted">none</span>}>
-            {(e) => (
-              <>
-                {e().summary} <span class="muted">· {ago(e().at, props.now)}</span>
-              </>
-            )}
-          </Show>
-        </dd>
       </dl>
     </div>
   );
