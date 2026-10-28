@@ -1159,3 +1159,14 @@ runs them, in the sandbox, with the rights of the agent.
   agent's own text.
 - **The mechanisms are read, not run.** The live check of
   `docs/compat.md` ("Skills") is open.
+
+## Secret manager review: S2 and S3 (2026-10-29)
+
+A short note. The full "Secret manager review (2026-10-29)" section holds
+the other findings. Move these two rows into it when the two branches
+merge.
+
+| # | Finding | Status |
+|---|---|---|
+| S2 (HIGH) | A project_admin gets global secrets with no grant: a project repo or target names a global secret, and the credential helper, a checkout, an ssh exec, or a display login uses it. | **Fixed: grant required.** A project object can name a global secret only when the project holds a grant of it, or when the operator, a sysadmin, or a definition file set the object (`credential_admin` on `repos` and `targets`). The daemon checks at save (`403` with the fix) and at each use (refused, with a `secret.refused` warning event). The rows from before the upgrade count as set by an admin. PLAN §16b.6a, docs/api.md §5.2, `tests/global_secret_rule.rs`. |
+| S3 (MEDIUM) | A `use` grant of a token shows the value: the agent calls the credential helper itself. | **Accepted, documented: `use` is `read` for tokens.** The credential helper must hand the token to git, and the agent runs git. The docs and the grant form say so; only an `ssh_key` stays hidden under `use`. A test asserts the behaviour. The real fix is an HTTPS proxy in the daemon that adds the token. PLAN §16b.3, docs/api.md §5.2. |

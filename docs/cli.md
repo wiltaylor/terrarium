@@ -177,7 +177,11 @@ It prints `username=` and `password=` lines, or nothing when the daemon has
 no credential for the host and path. `store` and `erase` do nothing.
 
 `--credential` names a secret (see "Secrets"). The daemon uses the
-project's secret of that name, else the global one.
+project's secret of that name, else the global one. A global secret
+needs a grant to the project (`terrarium secret grant <name>
+project:<project>`), unless the operator or a sysadmin attaches the repo.
+Else the daemon refuses it (`403`, exit 3), at the attach and at each use
+(`api.md` §5.2).
 
 ### Secrets
 
@@ -249,6 +253,10 @@ terrarium admin target new box --kind ssh --address build@box --credential deplo
 terrarium target test ops-box
 ```
 
+A project target that names a global secret follows the rule of a repo:
+the project needs a grant of the secret, unless the operator or a
+sysadmin saves the target (`api.md` §5.2).
+
 `rm` of a secret that a target uses as its `credential` is `409` (exit 1).
 The message names the targets. Change the targets first. The API takes
 `?force=true` to delete it all the same (`api.md` §5.2).
@@ -263,7 +271,10 @@ grantee is `agent:<project>/<name>`, `agent:<id>`, `project:<name>`, or
 `<project>/<name>` (an agent). The scope rules are the same as for the
 secret. A project secret goes only to its own project. `--level use`
 gives the brokers only: the git credential helper and the ssh-agent. The
-agent cannot see the value. `--level read` also gives env vars and
+agent cannot see an `ssh_key`. For a `token` or a `github_token`, `use`
+is `read`: git's credential helper hands the token to git, so the agent
+can read it (`terrarium repo credential get`). Grant a token only to an
+agent that may read it. `--level read` also gives env vars and
 `secret get`. The default is `use` for `token`, `github_token`, and
 `ssh_key`, and `read` for the other kinds. `--env VAR` puts the value
 into that env var at each start. It needs `--level read`. A grant

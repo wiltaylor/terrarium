@@ -28,6 +28,11 @@
 //! The ssh-agent of an agent ([`agent_keys`]) signs and never gives a key
 //! out. The daemon decrypts a secret only when it uses one, into zeroizing
 //! buffers. The sandbox never binds the key file or the database.
+//!
+//! The credential helper answer holds the token, so a `use` grant of a
+//! token is in effect a `read` grant (PLAN §16b.3). A project repo or
+//! target names a global secret only with a grant to its project, or when
+//! an admin set it ([`Owner`], [`global_use_problem`], PLAN §16b.6a).
 
 pub mod agent_keys;
 pub mod crypto;
@@ -595,66 +600,310 @@ fn not_stored(name: &str, project: Option<&str>) -> ApiError {
     ))
 }
 
-/// Open the secret named `name` for an owner in `project` (`None`:
-/// global), on a connection. A name with no secret is `invalid`.
+/// The object that names a secret, for the rule of PLAN §16b.6a: a
+/// project object can name a global secret only when the project holds a
+/// grant of it, or when the operator or a sysadmin set the name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Owner<'a> {
+    /// A global object (a global target, the config remote): global
+    /// secrets only, and no grant is necessary.
+    Global,
+    /// A repo of a project. `admin_set` is its `credential_admin` column.
+    Repo {
+        project: &'a str,
+        name: &'a str,
+        admin_set: bool,
+    },
+    /// A target by name. The read takes `credential_admin` from its row.
+    Target {
+        name: &'a str,
+        project: Option<&'a str>,
+    },
+}
+
+/// The actors that can set the name of a global secret on a project
+/// object with no grant (PLAN §16b.6a): the operator, the daemon
+/// (`system`: the definition files), and a sysadmin agent. A
+/// project_admin needs a grant.
+pub fn is_admin_actor(conn: &Connection, actor: &str) -> ApiResult<bool> {
+    if actor == "operator" || actor == "system" {
+        return Ok(true);
+    }
+    let Some(id) = actor.strip_prefix("agent:") else {
+        return Ok(false);
+    };
+    Ok(crate::store::agents::get(conn, id)
+        .is_ok_and(|v| v.agent.roles.contains(&terrarium_core::Role::Sysadmin)))
+}
+
+/// Why a project object of `project` cannot name `name`, or `None` when
+/// it can (PLAN §16b.6a). It cannot when the name finds a global secret
+/// (the project has no secret of that name), the project holds no grant
+/// of it, and no admin set the name. A name with no secret passes: the
+/// check runs again at each use.
+pub fn global_use_problem(
+    conn: &Connection,
+    project: &str,
+    name: &str,
+    admin_set: bool,
+) -> ApiResult<Option<String>> {
+    if admin_set || project == GLOBAL || get(conn, project, name)?.is_some() {
+        return Ok(None);
+    }
+    let Some(global) = get(conn, GLOBAL, name)? else {
+        return Ok(None);
+    };
+    let granted: Option<i64> = conn
+        .query_row(
+            "SELECT 1 FROM secret_grants WHERE secret_id = ?1 AND grantee = ?2",
+            params![global.id, format!("project:{project}")],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if granted.is_some() {
+        return Ok(None);
+    }
+    Ok(Some(format!(
+        "`{name}` is a global secret, and project `{project}` has no grant of it: a project \
+         repo or target can name a global secret only when the project holds a grant of it, \
+         or when the operator or a sysadmin sets it; grant it with `terrarium secret grant \
+         {name} project:{project}`"
+    )))
+}
+
+/// [`global_use_problem`] as an error: `403 forbidden`.
+pub fn check_global_use(
+    conn: &Connection,
+    project: &str,
+    name: &str,
+    admin_set: bool,
+) -> ApiResult<()> {
+    match global_use_problem(conn, project, name, admin_set)? {
+        Some(m) => Err(ApiError::forbidden(m)),
+        None => Ok(()),
+    }
+}
+
+/// The project of an owner (`None`: global), and whether an admin set
+/// its name.
+fn owner_rule(conn: &Connection, owner: Owner<'_>) -> ApiResult<(Option<String>, bool)> {
+    Ok(match owner {
+        Owner::Global => (None, true),
+        Owner::Repo {
+            project, admin_set, ..
+        } => (Some(project.to_owned()), admin_set),
+        Owner::Target { name, project } => (
+            project.map(str::to_owned),
+            crate::store::targets::credential_admin(conn, name)?,
+        ),
+    })
+}
+
+/// Open the secret named `name` for `owner`, on a connection: the
+/// project's secret first, then the global one. A global secret for a
+/// project object needs a grant or an admin ([`check_global_use`],
+/// `403`). A name with no secret is `invalid`.
 pub fn open_named(
     conn: &Connection,
     state_dir: &Path,
-    project: Option<&str>,
+    owner: Owner<'_>,
     name: &str,
 ) -> ApiResult<Opened> {
+    let (project, admin_set) = owner_rule(conn, owner)?;
+    let project = project.as_deref().filter(|p| *p != GLOBAL);
+    if let Some(p) = project {
+        check_global_use(conn, p, name, admin_set)?;
+    }
     let key = key(state_dir)?;
     resolve(conn, &key, project, name)?.ok_or_else(|| not_stored(name, project))
 }
 
-/// [`open_named`], in the form that git, ssh, and the targets use.
+/// [`open_named`] in the form that git and ssh use, for the config
+/// remote (`project` `None`). A `Some` project is a project object that
+/// no admin set: a global secret needs a grant.
 pub fn require(
     conn: &Connection,
     state_dir: &Path,
     project: Option<&str>,
     name: &str,
 ) -> ApiResult<Secret> {
-    open_named(conn, state_dir, project, name)?.to_secret()
+    let owner = match project {
+        None => Owner::Global,
+        Some(p) => Owner::Repo {
+            project: p,
+            name: "",
+            admin_set: false,
+        },
+    };
+    open_named(conn, state_dir, owner, name)?.to_secret()
 }
 
-/// [`require`] through the daemon's database. The read runs on the
+/// An owned [`Owner`], for the blocking pool and the refusal event.
+#[derive(Debug, Clone)]
+enum OwnerBuf {
+    Global,
+    Repo {
+        project: String,
+        name: String,
+        admin_set: bool,
+    },
+    Target {
+        name: String,
+        project: Option<String>,
+    },
+}
+
+impl OwnerBuf {
+    fn of(o: Owner<'_>) -> Self {
+        match o {
+            Owner::Global => Self::Global,
+            Owner::Repo {
+                project,
+                name,
+                admin_set,
+            } => Self::Repo {
+                project: project.to_owned(),
+                name: name.to_owned(),
+                admin_set,
+            },
+            Owner::Target { name, project } => Self::Target {
+                name: name.to_owned(),
+                project: project.map(str::to_owned),
+            },
+        }
+    }
+
+    fn owner(&self) -> Owner<'_> {
+        match self {
+            Self::Global => Owner::Global,
+            Self::Repo {
+                project,
+                name,
+                admin_set,
+            } => Owner::Repo {
+                project,
+                name,
+                admin_set: *admin_set,
+            },
+            Self::Target { name, project } => Owner::Target {
+                name,
+                project: project.as_deref(),
+            },
+        }
+    }
+
+    /// The project of a project object, and its label: `repo p/x` or
+    /// `target t`.
+    fn project_object(&self) -> Option<(String, String)> {
+        match self {
+            Self::Global | Self::Target { project: None, .. } => None,
+            Self::Repo { project, name, .. } => {
+                Some((project.clone(), format!("repo {project}/{name}")))
+            }
+            Self::Target {
+                name,
+                project: Some(p),
+            } => Some((p.clone(), format!("target {name}"))),
+        }
+    }
+}
+
+/// A use that the rule of PLAN §16b.6a refuses: a `secret.refused`
+/// event, with `"level": "warning"`. Best effort; it needs the async
+/// runtime.
+fn refused(state: &Shared, owner: &OwnerBuf, name: &str, e: &ApiError) {
+    if e.code != crate::error::Code::Forbidden {
+        return;
+    }
+    let Some((project, object)) = owner.project_object() else {
+        return;
+    };
+    let Ok(rt) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    tracing::warn!(%project, %object, name, "refused a global secret: {}", e.message);
+    let draft = crate::events::EventDraft::new(
+        "secret.refused",
+        format!(
+            "refused the global secret `{name}` for {object}: project `{project}` has no grant"
+        ),
+        serde_json::json!({
+            "level": "warning",
+            "scope": GLOBAL,
+            "name": name,
+            "object": object,
+            "message": e.message,
+        }),
+    )
+    .project(project);
+    let db = state.db.clone();
+    rt.spawn(async move {
+        if let Err(err) = db.write("system", move |t| t.emit(draft).map(|_| ())).await {
+            tracing::warn!("cannot record a refused secret use: {}", err.message);
+        }
+    });
+}
+
+/// [`open_named`] through the daemon's database. The read runs on the
 /// blocking pool; the decrypt of a key with a passphrase (bcrypt, slow)
-/// runs there too, after the database lock is free.
-pub async fn load(state: &Shared, project: Option<&str>, name: &str) -> ApiResult<Secret> {
-    let (dir, p, n) = (
+/// runs there too, after the database lock is free. A refused global
+/// secret is `403` and a `secret.refused` event.
+pub async fn load(state: &Shared, owner: Owner<'_>, name: &str) -> ApiResult<Secret> {
+    let (dir, o, n) = (
         state.state_dir.clone(),
-        project.map(str::to_owned),
+        OwnerBuf::of(owner),
         name.to_owned(),
     );
+    let read = o.clone();
     let opened = state
         .db
-        .read(move |c| open_named(c, &dir, p.as_deref(), &n))
-        .await?;
+        .read(move |c| open_named(c, &dir, read.owner(), &n))
+        .await
+        .inspect_err(|e| refused(state, &o, name, e))?;
     tokio::task::spawn_blocking(move || opened.to_secret())
         .await
         .map_err(|e| ApiError::internal(format!("the secret task failed: {e}")))?
 }
 
-/// [`require`] through the daemon's database, on the calling thread: for
-/// the sync paths (an ssh exec start, a `display` frame). The read is one
-/// row by its unique key; the decrypt runs after the database lock is
-/// free.
-pub fn load_now(state: &Shared, project: Option<&str>, name: &str) -> ApiResult<Secret> {
+/// The use-time rule of PLAN §16b.6a alone, before a use that opens the
+/// secret later: `403` and a `secret.refused` event when `owner` cannot
+/// use the global secret `name`.
+pub async fn check_owner(state: &Shared, owner: Owner<'_>, name: &str) -> ApiResult<()> {
+    let (o, n) = (OwnerBuf::of(owner), name.to_owned());
+    let read = o.clone();
     state
         .db
-        .read_now(|c| open_named(c, &state.state_dir, project, name))?
+        .read(move |c| {
+            let (project, admin_set) = owner_rule(c, read.owner())?;
+            match project.as_deref().filter(|p| *p != GLOBAL) {
+                Some(p) => check_global_use(c, p, &n, admin_set),
+                None => Ok(()),
+            }
+        })
+        .await
+        .inspect_err(|e| refused(state, &o, name, e))
+}
+
+/// [`load`] on the calling thread: for the sync paths (an ssh exec
+/// start, a `display` frame). The read is one row by its unique key; the
+/// decrypt runs after the database lock is free.
+pub fn load_now(state: &Shared, owner: Owner<'_>, name: &str) -> ApiResult<Secret> {
+    state
+        .db
+        .read_now(|c| open_named(c, &state.state_dir, owner, name))
+        .inspect_err(|e| refused(state, &OwnerBuf::of(owner), name, e))?
         .to_secret()
 }
 
 /// The secret of an optional name: `(name, secret)`.
 pub async fn secret_of(
     state: &Shared,
-    project: Option<&str>,
+    owner: Owner<'_>,
     name: Option<&str>,
 ) -> ApiResult<Option<(String, Secret)>> {
     match name {
         None => Ok(None),
-        Some(n) => Ok(Some((n.to_owned(), load(state, project, n).await?))),
+        Some(n) => Ok(Some((n.to_owned(), load(state, owner, n).await?))),
     }
 }
 

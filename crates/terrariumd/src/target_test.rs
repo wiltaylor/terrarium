@@ -259,6 +259,11 @@ pub async fn test(state: &Shared, def: &TargetDef) -> ApiResult<TestReport> {
             def.name
         )));
     }
+    // A global secret with no grant to the project: `403` and a
+    // `secret.refused` event (PLAN §16b.6a).
+    if let Some(name) = &def.credential {
+        crate::secrets::check_owner(state, targets::owner(def), name).await?;
+    }
     let d = def.clone();
     let cred = state
         .db
@@ -271,7 +276,7 @@ pub async fn test(state: &Shared, def: &TargetDef) -> ApiResult<TestReport> {
     let mut run = None;
     let mut key = None;
     if let Some(name) = &def.credential {
-        match crate::secrets::load(state, def.project.as_deref(), name).await? {
+        match crate::secrets::load(state, crate::store::targets::owner(def), name).await? {
             Secret::SshKey(k) => {
                 let r = RunDirs::new(&state.state_dir).run_dir()?;
                 key = Some(r.write_private("id", k.as_bytes())?);

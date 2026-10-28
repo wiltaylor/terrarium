@@ -2223,12 +2223,21 @@ project), `level` (`use` or `read`), `env` (an env var name, optional),
 
 | Level | The agent gets |
 |---|---|
-| `use` | The brokers only: the git credential helper and the ssh-agent socket. The agent cannot see the value. |
+| `use` | The brokers only: the git credential helper and the ssh-agent socket. The agent cannot see an `ssh_key`. For a `token` or a `github_token`, `use` is `read` (below). |
 | `read` | `use`, plus env vars at start and `terrarium secret get`. |
 
 An env var puts the value into the agent's process environment, and the
 agent can print it. So an env var needs the level `read`. `ssh_key` grants
 are `use` by default.
+
+`use` is `read` for tokens. Decided by Wil, 2026-10-29 (security review
+S3). The git credential helper hands the token to git in plain text. The
+agent runs git, so it can call `terrarium repo credential get` itself and
+read the token. Only an `ssh_key` stays hidden under `use`: the ssh-agent
+signs and never gives the key out. The levels stay as they are. The
+docs and the grant form say this, and a test
+(`tests/global_secret_rule.rs`) asserts it, so that nobody changes it by
+accident. A real fix is an HTTPS proxy in the daemon that adds the token.
 
 Who can grant:
 
@@ -2328,7 +2337,8 @@ An `ssh_key` secret is also the login of an `ssh` target (§19). Asked by
 Wil, 2026-10-28.
 
 - The target field `credential` names an `ssh_key` secret. A project target
-  can use a secret of its project or a global secret. A global target can
+  can use a secret of its project or a global secret (with a grant, see
+  below). A global target can
   use a global secret only. The daemon refuses any other kind or scope when
   it saves the target, and it does not wait for the first connection.
   The same rule holds for the `login` of a `vnc` or `rdp` target. One
@@ -2337,9 +2347,40 @@ Wil, 2026-10-28.
   file, and the reload and the target view show a warning
   (docs/api.md §17.2). A delete of a secret that a target uses is `409`,
   unless `?force=true`.
+- A project object names a global secret only with a grant. Decided by
+  Wil, 2026-10-29 (security review S2). A project repo's `credential` and
+  a project target's `credential` can name a global secret only when
+  the project holds a grant of it (`project:<name>`, any level), or when
+  the operator, a sysadmin, or a definition file (project, target, or
+  fleet file) set the object. Else a project_admin could point a repo
+  at a host that it controls and get a global token from the credential
+  helper, or point a target at an address of its choice with a global
+  key or login. A project secret of the same name still wins, and needs
+  no grant.
+  - The daemon checks at save: a repo attach, `POST` and `PATCH
+    /api/targets`, a fleet apply, and a config import. A refusal is
+    `403`, and the message gives the fix: `terrarium secret grant <name>
+    project:<project>`.
+  - The daemon checks again at each use: the credential helper answer, a
+    checkout, an ssh exec, a display login, and a target test. A
+    refused use fails, and the daemon emits a `secret.refused` event
+    (`level: warning`). So a revoke of the project grant stops each
+    object that a project_admin set.
+  - The column `credential_admin` of `repos` and `targets` records who
+    set the object: 1 for the operator, a sysadmin, or a file; 0 for a
+    project_admin. A bool is enough, because the use-time check needs to
+    know only that, and a role change later must not change an old
+    decision. A `PATCH` by a project_admin sets 0, unless it changes
+    only `keep` and `snapshot_before_task`. So a project_admin cannot
+    move the login of an operator's target to another address.
+  - At the upgrade (migration 38), the old rows get 1. The daemon cannot
+    know who made them, and an upgrade must not break a working repo or
+    target. The operator checks the old project objects that name a
+    global secret (docs/api.md §5.2).
 - The daemon uses the key outside the sandbox. A target login needs no
-  grant: an agent that can use the target can use its login, and it never
-  sees the key.
+  grant to the agent: an agent that can use the target can use its
+  login, and it never sees the key. The grant to the project above is a
+  different rule: it controls which project objects can name the key.
 - `terrarium secret generate <name> [--project p] [--type ed25519|rsa]`
   and a Generate button in the dashboard make a new key pair in the store.
   The default type is ed25519. The private key never leaves the daemon.

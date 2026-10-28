@@ -1573,14 +1573,22 @@ fn apply_target(t: &mut Tx<'_>, def: &TargetDef) -> ApiResult<()> {
                 projects::get(t, p)?;
             }
             targets::check_credential(t, def, Some(&r.def))?;
+            // A global secret needs a grant, unless an admin applies
+            // (PLAN §16b.6a).
+            let was = targets::credential_admin(t, &def.name)?;
+            let admin = targets::admin_after_write(t, def, Some((&r.def, was)))?;
+            targets::check_global_credential(t, def, admin)?;
             t.execute(
-                "UPDATE targets SET project = ?2, kind = ?3, def = ?4, updated_at = ?5 WHERE name = ?1",
+                "UPDATE targets SET project = ?2, kind = ?3, def = ?4, updated_at = ?5,
+                                    credential_admin = ?6
+                 WHERE name = ?1",
                 params![
                     def.name,
                     def.project,
                     targets::kind_str(def.kind),
                     target_spec(def).to_string(),
-                    now()
+                    now(),
+                    admin
                 ],
             )?;
             t.audit(

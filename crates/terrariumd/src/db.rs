@@ -1247,6 +1247,21 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE card_comments ADD COLUMN session_id TEXT;
     CREATE INDEX card_comments_session ON card_comments(session_id);
     "#,
+    // 38: who set the `credential` of a repo or a target (PLAN §16b.6a).
+    // 1: the operator, a sysadmin, or a definition file; such an object
+    // can name a global secret with no grant. 0: a project_admin; a
+    // global secret then needs a grant to the project, at save and at
+    // each use. A new row is 0 unless the store sets 1. The rows from
+    // before are 1: the daemon cannot know who made them, and an upgrade
+    // must not break a working repo or target.
+    // Self-contained: when another branch takes number 38, move this
+    // entry to the end of the list.
+    r#"
+    ALTER TABLE repos ADD COLUMN credential_admin INTEGER NOT NULL DEFAULT 0;
+    UPDATE repos SET credential_admin = 1;
+    ALTER TABLE targets ADD COLUMN credential_admin INTEGER NOT NULL DEFAULT 0;
+    UPDATE targets SET credential_admin = 1;
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call
@@ -1775,6 +1790,15 @@ mod tests {
         assert_eq!(source("SELECT source FROM agents WHERE id = 'A2'"), "api");
         assert_eq!(source("SELECT source FROM targets"), "fleet:f");
         assert_eq!(source("SELECT source FROM subscriptions"), "fleet:f");
+        // Old repos and targets count as set by an admin (PLAN §16b.6a).
+        for table in ["repos", "targets"] {
+            let admin: bool = conn
+                .query_row(&format!("SELECT credential_admin FROM {table}"), [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert!(admin, "{table}");
+        }
         // No cascade: the child rows stay.
         for table in ["repos", "boards", "sessions", "roles", "quota_samples"] {
             let n: i64 = conn

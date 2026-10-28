@@ -359,7 +359,13 @@ export function createSecretMock(c: SecretMockContext) {
 
   return {
     api,
-    /** `credential_info` of a target view; undefined with no `credential`. */
+    /**
+     * `credential_info` of a target view; undefined with no `credential`.
+     * The mock's viewer is the operator, so each target and repo of the mock
+     * counts as set by an admin (`credential_admin`, PLAN §16b.6a): a global
+     * secret needs no grant, and the daemon's "has no grant" warning never
+     * shows here.
+     */
     credentialInfo(t: Target): CredentialInfo | undefined {
       if (!t.credential) return undefined;
       const s = credentialSecret(t);

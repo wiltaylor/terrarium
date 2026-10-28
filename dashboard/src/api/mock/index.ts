@@ -1824,7 +1824,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           if (!r.url?.trim()) fail(422, "invalid", "a repo needs a url");
           const repoName = r.name || r.url.replace(/\/+$/, "").split(/[/:]/).pop()!.replace(/\.git$/, "");
           if (w.repos.some((x) => x.project === name && x.name === repoName)) fail(409, "conflict", `repo \`${repoName}\` exists in \`${name}\``);
-          const repo: Repo = { id: ulid("repo"), project: name, name: repoName, url: r.url, ...(r.default_branch ? { default_branch: r.default_branch } : {}), ...(r.credential ? { credential: r.credential } : {}), path: r.path || repoName, source: "api", created_at: iso() };
+          const repo: Repo = { id: ulid("repo"), project: name, name: repoName, url: r.url, ...(r.default_branch ? { default_branch: r.default_branch } : {}), ...(r.credential ? { credential: r.credential } : {}), credential_admin: true, path: r.path || repoName, source: "api", created_at: iso() };
           w.repos.push(repo);
           audit("repo.attach", repo.id, name, { name: repoName, url: r.url });
           return repo;

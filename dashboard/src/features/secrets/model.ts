@@ -180,6 +180,12 @@ export function putBody(f: SecretForm): { body: SecretPut } | { error: string } 
 /** The default level of a grant: `use` for the kinds that a broker serves, else `read` (docs/api.md §5.2). */
 export const defaultLevel = (k: SecretKind): GrantLevel => (k === "token" || k === "github_token" || k === "ssh_key" ? "use" : "read");
 
+/** A kind that git's credential helper serves: under `use`, the agent can still read it (PLAN §16b.3). */
+export const tokenKind = (k: SecretKind): boolean => k === "token" || k === "github_token";
+
+/** The note of the grant form for a token (PLAN §16b.3). Only an ssh_key stays hidden under `use`. */
+export const TOKEN_USE_NOTE = "git's credential helper hands the token to git, so the agent can read it: use = read for tokens";
+
 /** An env var puts the value where the agent can print it, so it needs `read`. */
 export const envAllowed = (level: GrantLevel): boolean => level === "read";
 
@@ -277,15 +283,27 @@ export interface CredentialChoice {
   scope: string;
   fingerprint: string | null;
   label: string;
+  /**
+   * A global secret for a project target, and the project holds no grant of
+   * it: the operator can set it, a project_admin cannot (PLAN §16b.6a).
+   */
+  needsGrant?: boolean;
 }
+
+/** The hint of a global secret that the project holds no grant of. */
+export const NEEDS_GRANT_HINT = "operator-set; a project_admin needs a grant";
 
 /**
  * The secrets that a target can name in `credential`: the right kind; for a
  * project target, its project's and the global ones (a project secret hides
  * a global one of the same name); for a global target, the global ones only.
- * `scope` is a project name or `global`.
+ * `scope` is a project name or `global`. `granted` holds the names of the
+ * global secrets that the project holds a grant of. With it, each other
+ * global secret of a project target gets `needsGrant` and the hint in its
+ * label. The dashboard is the operator's, and the operator needs no grant,
+ * so the choice stays in the list.
  */
-export function credentialChoices(list: readonly Secret[], kind: TargetKind, scope: string): CredentialChoice[] {
+export function credentialChoices(list: readonly Secret[], kind: TargetKind, scope: string, granted?: ReadonlySet<string>): CredentialChoice[] {
   const want = credentialKind(kind);
   if (!want) return [];
   const ok = list.filter((s) => s.kind === want && (s.scope === GLOBAL || (scope !== GLOBAL && s.scope === scope)));
@@ -298,7 +316,9 @@ export function credentialChoices(list: readonly Secret[], kind: TargetKind, sco
     .sort((a, b) => (a.scope === GLOBAL ? 1 : 0) - (b.scope === GLOBAL ? 1 : 0) || a.name.localeCompare(b.name))
     .map((s) => {
       const fp = fingerprint(s);
-      return { name: s.name, scope: s.scope, fingerprint: fp, label: `${s.name} (${s.scope === GLOBAL ? "global" : s.scope})${fp ? ` · ${fp.slice(0, 19)}…` : ""}` };
+      const needsGrant = !!granted && scope !== GLOBAL && s.scope === GLOBAL && !granted.has(s.name);
+      const label = `${s.name} (${s.scope === GLOBAL ? "global" : s.scope})${fp ? ` · ${fp.slice(0, 19)}…` : ""}${needsGrant ? ` · ${NEEDS_GRANT_HINT}` : ""}`;
+      return { name: s.name, scope: s.scope, fingerprint: fp, label, ...(needsGrant ? { needsGrant } : {}) };
     });
 }
 

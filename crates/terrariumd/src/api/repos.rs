@@ -170,7 +170,7 @@ async fn checkout_inner(
     let dir = body.path.clone().unwrap_or_else(|| repo.path.clone());
     check_dir(&dir)?;
     // The repo's secret: the project's first, then the global one.
-    let secret = secrets::secret_of(state, Some(&repo.project), repo.credential.as_deref()).await?;
+    let secret = secrets::secret_of(state, repo.owner(), repo.credential.as_deref()).await?;
     // The workspace moves to the work root first (an agent made before it).
     let live = state
         .supervisor
@@ -331,7 +331,7 @@ async fn checkout_target(
         )));
     }
     let dir = body.path.clone().unwrap_or_else(|| repo.path.clone());
-    let secret = secrets::secret_of(state, Some(&repo.project), repo.credential.as_deref()).await?;
+    let secret = secrets::secret_of(state, repo.owner(), repo.credential.as_deref()).await?;
     let branch = body.branch.clone().or_else(|| repo.default_branch.clone());
     let event = |summary: String, data: serde_json::Value| {
         let d = EventDraft::new("repo.checkout", summary, data).project(repo.project.clone());
@@ -492,8 +492,7 @@ async fn credential_helper(
     };
     let name = repo.credential.clone().unwrap_or_default();
     // A `token` or a `github_token` of the project, else a global one.
-    let Ok(Secret::Token { username, token }) =
-        secrets::load(&state, Some(&repo.project), &name).await
+    let Ok(Secret::Token { username, token }) = secrets::load(&state, repo.owner(), &name).await
     else {
         return Err(none());
     };

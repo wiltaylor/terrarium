@@ -148,8 +148,14 @@ export interface Repo {
   name: string;
   url: string;
   default_branch?: string;
-  /** A key name in `/state/credentials`, never the secret. */
+  /** The name of a secret (docs/api.md §5.2), never the secret. */
   credential?: string;
+  /**
+   * The operator, a sysadmin, or a project file attached the repo, so
+   * `credential` can name a global secret with no grant to the project
+   * (PLAN §16b.6a). False: a project_admin attached it.
+   */
+  credential_admin?: boolean;
   path?: string;
   source?: Source;
   created_at?: string;

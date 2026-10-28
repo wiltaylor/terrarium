@@ -16,12 +16,15 @@ import {
   filterSecrets,
   grantBody,
   granteeOptions,
+  NEEDS_GRANT_HINT,
   plainFields,
   projectSecrets,
   putBody,
   replaceForm,
   revealError,
   REVEAL_MS,
+  TOKEN_USE_NOTE,
+  tokenKind,
   type SecretForm,
 } from "./model";
 
@@ -161,6 +164,26 @@ describe("target credentials", () => {
     const c = credentialChoices(list, "ssh", "ops");
     expect(c.map((x) => `${x.scope}/${x.name}`)).toEqual(["ops/bb", "ops/lab"]);
     expect(c[0]!.fingerprint).toBe("SHA256:bbbbbbbbbbbbbbbbbbbbbbb");
+  });
+
+  it("a project target: a global secret with no grant to the project keeps its place, with the hint (PLAN §16b.6a)", () => {
+    const c = credentialChoices([...list, secret("global", "gk", "ssh_key", {}, ["private_key"])], "ssh", "ops", new Set(["bb"]));
+    const gk = c.find((x) => x.name === "gk")!;
+    expect(gk.needsGrant).toBe(true);
+    expect(gk.label).toContain(NEEDS_GRANT_HINT);
+    // A granted global secret, a project secret, and a global target: no hint.
+    const granted = credentialChoices([...list, secret("global", "gk", "ssh_key", {}, ["private_key"])], "ssh", "ops", new Set(["gk"]));
+    expect(granted.some((x) => x.needsGrant)).toBe(false);
+    expect(credentialChoices(list, "ssh", "global", new Set()).some((x) => x.needsGrant)).toBe(false);
+    // No grant list yet: no hint.
+    expect(credentialChoices(list, "rdp", "web").some((x) => x.needsGrant)).toBe(false);
+  });
+
+  it("use = read for a token or a github_token; an ssh_key stays hidden (PLAN §16b.3)", () => {
+    expect(tokenKind("token")).toBe(true);
+    expect(tokenKind("github_token")).toBe(true);
+    expect(tokenKind("ssh_key")).toBe(false);
+    expect(TOKEN_USE_NOTE).toContain("use = read for tokens");
   });
 
   it("a global target: the global secrets only; vnc and rdp take logins; other kinds take none", () => {

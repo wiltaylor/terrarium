@@ -2,7 +2,9 @@
 //! the default branch, the checkout directory, and the *name* of a secret
 //! in `credential` (the project's secret of that name, else the global
 //! one). `crate::git` does the clones; `crate::secrets` holds the secrets,
-//! sealed (PLAN §16b).
+//! sealed (PLAN §16b). A global secret needs a grant to the project,
+//! unless the operator, a sysadmin, or a project file attached the repo
+//! (`credential_admin`, PLAN §16b.6a).
 
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
@@ -23,10 +25,27 @@ pub struct Repo {
     /// The name of a secret (PLAN §16b), never the secret.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential: Option<String>,
+    /// The operator, a sysadmin, or a project file attached the repo, so
+    /// `credential` can name a global secret with no grant (PLAN
+    /// §16b.6a). False: a project_admin attached it, and a global secret
+    /// needs a grant to the project.
+    #[serde(default)]
+    pub credential_admin: bool,
     /// The checkout directory name.
     pub path: String,
     pub source: String,
     pub created_at: String,
+}
+
+impl Repo {
+    /// The owner of `credential`, for `crate::secrets::load`.
+    pub fn owner(&self) -> crate::secrets::Owner<'_> {
+        crate::secrets::Owner::Repo {
+            project: &self.project,
+            name: &self.name,
+            admin_set: self.credential_admin,
+        }
+    }
 }
 
 fn repo_row(r: &Row<'_>) -> rusqlite::Result<Repo> {
@@ -41,6 +60,7 @@ fn repo_row(r: &Row<'_>) -> rusqlite::Result<Repo> {
         url: r.get("url")?,
         default_branch: r.get("default_branch")?,
         credential: r.get("credential")?,
+        credential_admin: r.get("credential_admin")?,
         source: r.get("source")?,
         created_at: r.get("created_at")?,
     })
@@ -86,7 +106,10 @@ fn name_from_url(url: &str) -> String {
 }
 
 /// Attach a repo. A clone happens on `POST /api/repos/{id}/checkout` and
-/// on agent create (`checkout.on_agent_create`).
+/// on agent create (`checkout.on_agent_create`). A `credential` that
+/// names a global secret is `403` when the project has no grant of it and
+/// the actor is not the operator or a sysadmin (PLAN §16b.6a). A project
+/// file (`source` `file`) counts as the operator.
 pub fn attach_repo(t: &mut Tx<'_>, project: &str, r: &NewRepo, source: &str) -> ApiResult<Repo> {
     projects::get(t, project)?;
     if r.url.trim().is_empty() {
@@ -115,10 +138,15 @@ pub fn attach_repo(t: &mut Tx<'_>, project: &str, r: &NewRepo, source: &str) -> 
             "project `{project}` has a repo `{name}` already"
         )));
     }
+    let admin = source == projects::SOURCE_FILE || crate::secrets::is_admin_actor(t, &t.actor)?;
+    if let Some(c) = &r.credential {
+        crate::secrets::check_global_use(t, project, c, admin)?;
+    }
     let id = ulid::Ulid::new().to_string();
     t.execute(
-        "INSERT INTO repos (id, project, name, url, default_branch, credential, path, source, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        "INSERT INTO repos (id, project, name, url, default_branch, credential, path, source,
+                            created_at, credential_admin)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             id,
             project,
@@ -128,7 +156,8 @@ pub fn attach_repo(t: &mut Tx<'_>, project: &str, r: &NewRepo, source: &str) -> 
             r.credential,
             r.path,
             source,
-            now()
+            now(),
+            admin
         ],
     )?;
     t.audit(

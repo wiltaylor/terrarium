@@ -224,7 +224,7 @@ fn secret(state: &Shared, def: &TargetDef) -> ApiResult<(Option<String>, Option<
     };
     // The secret of a project target: the project's first, then the
     // global one (PLAN §16b.2).
-    match crate::secrets::load_now(state, def.project.as_deref(), name)? {
+    match crate::secrets::load_now(state, crate::store::targets::owner(def), name)? {
         Secret::Login { username, password } => Ok((
             def.username.clone().or(username),
             Some(password.to_string()),

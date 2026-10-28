@@ -158,8 +158,8 @@ export function seed(now: number = Date.now()): MockWorld {
   ];
 
   const repos: Repo[] = [
-    { id: fakeUlid("repo", 1), project: "terrarium", name: "terrarium", url: "git@github.com:wil/terrarium.git", default_branch: "main", path: "terrarium", source: "file", created_at: ago(60 * 24 * 9) },
-    { id: fakeUlid("repo", 2), project: "webshop", name: "webshop", url: "git@github.com:wil/webshop.git", default_branch: "main", credential: "github-deploy", path: "webshop", source: "api", created_at: ago(60 * 24 * 4) },
+    { id: fakeUlid("repo", 1), project: "terrarium", name: "terrarium", url: "git@github.com:wil/terrarium.git", default_branch: "main", credential_admin: true, path: "terrarium", source: "file", created_at: ago(60 * 24 * 9) },
+    { id: fakeUlid("repo", 2), project: "webshop", name: "webshop", url: "git@github.com:wil/webshop.git", default_branch: "main", credential: "github-deploy", credential_admin: true, path: "webshop", source: "api", created_at: ago(60 * 24 * 4) },
   ];
 
   const agentRow = (

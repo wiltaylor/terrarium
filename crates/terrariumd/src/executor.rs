@@ -1286,7 +1286,8 @@ pub fn start_cmd(state: &Shared, def: &TargetDef, cmd: &RemoteCmd) -> ApiResult<
             let (key, guard): (Option<PathBuf>, Option<Box<dyn Send>>) = match &def.credential {
                 None => (None, None),
                 Some(name) => {
-                    match crate::secrets::load_now(state, def.project.as_deref(), name)? {
+                    match crate::secrets::load_now(state, crate::store::targets::owner(def), name)?
+                    {
                         Secret::SshKey(k) => {
                             let run = RunDirs::new(&state.state_dir).run_dir()?;
                             let p = run.write_private("id", k.as_bytes())?;
@@ -2931,7 +2932,7 @@ async fn lab_source(
         Some(_) => (None, BTreeMap::new()),
         None => {
             let secret = match &repo.credential {
-                Some(c) => Some(crate::secrets::load(state, Some(&repo.project), c).await?),
+                Some(c) => Some(crate::secrets::load(state, repo.owner(), c).await?),
                 None => None,
             };
             (Some(repo.url.clone()), checkout_env(secret.as_ref()))

@@ -738,7 +738,11 @@ POST /api/projects/ops/repos
 ```
 
 `credential` is the name of a secret (§5.2), never the secret. The daemon
-uses the project's secret of that name, else the global one.
+uses the project's secret of that name, else the global one. A global
+secret needs a grant to the project, unless the operator or a sysadmin
+attaches the repo (§5.2, "A global secret on a project object"). Else
+the attach is `403 forbidden`. `credential_admin` in the answer is `true`
+when the operator, a sysadmin, or a project file attached the repo.
 `branch` is an alias of `default_branch`. A body with the two is `400
 bad_request`. A body with an unknown field is `400 bad_request`, and the
 message names the fields.
@@ -850,7 +854,10 @@ the operator). The daemon answers only when a repo of the agent's own
 project has an `https` or `http` URL with the same protocol, host
 (with port), and path (`.git` and slashes at the ends do not count), and a
 secret of kind `token` or `github_token` (the project's secret of that
-name, else the global one). When no repo matches, the daemon answers for
+name, else the global one). A global secret needs a grant to the
+project, or a repo that the operator or a sysadmin attached (§5.2, "A
+global secret on a project object"). Else the daemon refuses it: the
+answer is `404`, and a `secret.refused` event records it. When no repo matches, the daemon answers for
 an `https` host of a `token` or `github_token` secret that is granted to
 the agent (§5.2, "Grants"); git does not need to send the path for it.
 Every other case is `404 not_found`, so git falls back to its next
@@ -858,6 +865,10 @@ helper. An SSH key is never answered. Each answer for a repo writes a
 `repo.credential` audit row, and each answer for a grant writes a
 `secret.use` audit row (without the secret). An agent gets at most 30
 answers a minute (`429 rate_limited`).
+
+The answer holds the token in plain text, because git needs it. So an
+agent that can call the helper can read the token, also with a `use`
+grant (§5.2, "Grants": `use` is `read` for tokens).
 
 ```
 POST /api/repos/credential          (agent)
@@ -912,6 +923,37 @@ repo, a target, or the config repo remote names a secret by its name in
 then the global secret of the same name. So a project secret hides a
 global secret of the same name for that project. A global target and the
 config repo remote use global secrets only.
+
+**A global secret on a project object** (PLAN §16b.6a). A project repo
+or a project target can name a global secret only in one of these cases:
+
+- The project holds a grant of the secret: a `project:<name>` grant, at
+  any level.
+- The operator, a sysadmin, or a definition file (a project file, a
+  target file, a fleet file in `fleets/`) set the object.
+
+The daemon checks this when it saves the object: an attach of a repo,
+`POST` and `PATCH /api/targets`, a fleet apply, and a config import. A
+refusal is `403 forbidden`. The message names the rule and the fix:
+`terrarium secret grant <name> project:<project>`. A name that finds no
+secret passes, and a project secret of the same name needs no grant.
+
+The daemon checks again at each use: the credential helper answer for a
+repo, a checkout, an ssh exec, a display login, and a target test. So a
+revoke of the project grant stops an object that a project_admin set. The
+use is refused (`403`; the credential helper answers `404`), and the
+daemon emits a `secret.refused` event on the project with `data: {level:
+"warning", scope, name, object, message}`. The target view shows the
+refusal in `credential_info.warning`.
+
+The repo and the target rows record who set them in `credential_admin`.
+A `PATCH` by a project_admin clears it, unless the patch changes only
+`keep` and `snapshot_before_task`. So a project_admin cannot move the
+login of an operator's target to another address. The repos and targets
+from before this rule count as set by an admin: the daemon cannot know
+who made them, and an upgrade does not break them. Check the old project
+repos and targets that name a global secret, and grant the secret or
+change the object.
 
 **Kinds.** `fields` holds all the fields of the kind. The secret fields
 are in bold.
@@ -1015,7 +1057,8 @@ daemon deletes the secret, and each target keeps a `credential` with no
 secret. The view of such a target shows a warning, and an exec on it
 fails until the operator stores a secret of that name again. A target of
 project `p` uses a global secret only when `p` has no secret of the same
-name.
+name, and only with a grant to `p` or an admin who set the target (see
+"A global secret on a project object" above).
 
 **Grants.** A grant gives one secret to an agent or to a whole project
 (PLAN §16b.3). A grant to a project applies to each agent of the project,
@@ -1023,8 +1066,16 @@ also to the agents that start later.
 
 | Level | The agent gets |
 |---|---|
-| `use` | The brokers only: the git credential helper and the ssh-agent socket. The agent cannot see the value. |
+| `use` | The brokers only: the git credential helper and the ssh-agent socket. The agent cannot see an `ssh_key`. For a `token` or a `github_token`, `use` is `read`: see below. |
 | `read` | `use`, the env var at the start, and `terrarium secret get`. |
+
+**`use` is `read` for tokens.** The git credential helper hands the token
+to git in plain text (§5.1). The agent runs git, so it can call the helper
+(`terrarium repo credential get`) and read the token. So give a `token` or
+a `github_token` only to an agent that may read it. Only an `ssh_key`
+stays hidden under `use`: the ssh-agent socket signs and never gives the
+key out. This is intended behaviour (2026-10-29). A real fix is an HTTPS
+proxy in the daemon that adds the token.
 
 | Secret | Grant to | Who |
 |---|---|---|
@@ -3674,7 +3725,7 @@ all projects. Targets are project targets by default: a global target
 | `lease` | The caller's active lease on the target (§17.7), when `access` is `lease`; else `null`. |
 | `has_display` | The target has a screen (§17.10): `vnc`, `rdp`, `desktop`, `vmlab` with a `machine` (or a lab instance kind), and a `docker` target with `display`. |
 | `runtime` | What runs now (§17.8): `attached` (the agent workspaces, `<project>/<agent>`, in the container or the lab instance), `lab` and `head` (the instance dir on the host and the commit of a `lab_repo` target), `instances` (one for each holder of a `lab_from_workspace` target, by the agent ULID: `{agent_name, lab, state, attached}`). `{}` when nothing runs. |
-| `credential_info` | Only with a `credential`: `{name, scope, kind, fingerprint?, warning?}`. `scope` and `kind` are those of the secret that the daemon uses (`null` when there is none). `fingerprint` is the `SHA256:` fingerprint of an `ssh_key`. `warning` tells why the credential does not work (below). Never a value. |
+| `credential_info` | Only with a `credential`: `{name, scope, kind, fingerprint?, warning?}`. `scope` and `kind` are those of the secret that the daemon uses (`null` when there is none). `fingerprint` is the `SHA256:` fingerprint of an `ssh_key`. `warning` tells why the credential does not work (below), also a global secret with no grant to the project (§5.2). Never a value. |
 
 **The project prefix.** `POST /api/targets` with a `project` names the
 target `<project>-<name>`, unless `name` starts with `<project>-` already.
@@ -3776,6 +3827,17 @@ rule. `POST /api/targets`, `PATCH /api/targets/{name}`, and a fleet apply
 (§18.1) do this check. A `PATCH` that keeps the `kind`, the `project`, and
 the `credential` does not do it, so an old target with a bad credential
 can still take other changes.
+
+A project target that names a global secret needs a grant of it to the
+project, unless the operator or a sysadmin saves the target (§5.2, "A
+global secret on a project object"). Else the save is `403 forbidden`,
+and the message gives the fix: `terrarium secret grant <name>
+project:<project>`. This check runs on each save by a project_admin, also
+on a `PATCH` that keeps the credential. A `PATCH` of `keep` or
+`snapshot_before_task` alone keeps the mark of an admin. At each use (an
+exec, a display login, a test), the daemon checks again. A refused use
+is `403` and a `secret.refused` event, and the view shows
+`credential_info.warning`.
 
 A target file is never refused for its credential. The daemon loads it,
 logs a warning, and adds `targets/<name>.toml: warning: ...` to the

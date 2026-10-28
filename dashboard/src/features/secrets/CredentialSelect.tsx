@@ -1,14 +1,15 @@
 // The login of a target (PLAN §16b.6a, docs/api.md §17.2): a select of the
 // secrets that the target can use. An ssh target takes an `ssh_key`; a vnc
 // or rdp target takes a `login`. A project target takes its project's
-// secrets and the global ones; a global target, the global ones only. An
-// ssh target has "New key…": it generates a key in the store and selects
-// it.
+// secrets and the global ones; a global target, the global ones only. A
+// global secret that the project holds no grant of gets a hint: the
+// operator can set it, a project_admin needs a grant. An ssh target has
+// "New key…": it generates a key in the store and selects it.
 
 import { createResource, createSignal, For, Show } from "solid-js";
 import type { Secret, TargetKind } from "../../api/types";
 import { api } from "../../stores";
-import { credentialChoices, credentialKind, GLOBAL } from "./model";
+import { credentialChoices, credentialKind, GLOBAL, NEEDS_GRANT_HINT } from "./model";
 import { GenerateKeyForm } from "./GenerateKey";
 import { PublicKey } from "./PublicKey";
 
@@ -32,10 +33,26 @@ export function CredentialSelect(props: {
       return (await Promise.all(reads)).flat();
     },
   );
+  // A project target: the global secrets of the kind that the project holds
+  // a grant of (PLAN §16b.6a). The others stay in the list with a hint: the
+  // operator needs no grant, a project_admin does.
+  const [granted] = createResource(
+    () => {
+      const want = credentialKind(props.kind);
+      if (!props.scope || props.scope === GLOBAL || !want || !secrets.latest) return null;
+      return { project: props.scope, names: secrets.latest.filter((s) => s.scope === GLOBAL && s.kind === want).map((s) => s.name) };
+    },
+    async (v): Promise<Set<string>> => {
+      const who = `project:${v.project}`;
+      const rows = await Promise.all(v.names.map((n) => api.secrets.grants(GLOBAL, n).then((gs) => (gs.some((g) => g.grantee === who) ? n : null)).catch(() => null)));
+      return new Set(rows.filter((n): n is string => !!n));
+    },
+  );
   const [generating, setGenerating] = createSignal(false);
   const [made, setMade] = createSignal<Secret | null>(null);
   // The new key is in the list at once, before the refetch ends.
-  const choices = () => credentialChoices([...(secrets.latest ?? []), ...(made() ? [made()!] : [])], props.kind, props.scope || GLOBAL);
+  const choices = () => credentialChoices([...(secrets.latest ?? []), ...(made() ? [made()!] : [])], props.kind, props.scope || GLOBAL, granted.latest);
+  const picked = () => choices().find((c) => c.name === props.value);
   /** A value that is not in the list: an old name, or a secret this viewer cannot read. */
   const unknown = () => !!props.value && !choices().some((c) => c.name === props.value);
   const ssh = () => props.kind === "ssh";
@@ -74,6 +91,15 @@ export function CredentialSelect(props: {
           <option value={NEW_KEY}>New key…</option>
         </Show>
       </select>
+      <Show when={picked()?.needsGrant}>
+        <span class="small muted">
+          {NEEDS_GRANT_HINT}: project <code>{props.scope}</code> holds no grant of the global secret <code>{props.value}</code>. You can save it as the operator. To let a project_admin use it, run{" "}
+          <code>
+            terrarium secret grant {props.value} project:{props.scope}
+          </code>
+          .
+        </span>
+      </Show>
       <Show when={props.scope && !secrets.loading && !choices().length && !generating()}>
         <span class="small muted">
           No {what()} secret that this target can use{props.scope === GLOBAL ? " (a global target uses a global secret only)" : ""}.{" "}

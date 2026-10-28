@@ -351,18 +351,20 @@ fn def_json(def: &TargetDef) -> ApiResult<String> {
     Ok(v.to_string())
 }
 
-fn insert(t: &mut Tx<'_>, def: &TargetDef, source: &str) -> ApiResult<()> {
+fn insert(t: &mut Tx<'_>, def: &TargetDef, source: &str, admin: bool) -> ApiResult<()> {
     let at = now();
     t.execute(
-        "INSERT INTO targets (name, project, kind, def, source, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+        "INSERT INTO targets (name, project, kind, def, source, created_at, updated_at,
+                              credential_admin)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7)",
         params![
             def.name,
             def.project,
             kind_str(def.kind),
             def_json(def)?,
             source,
-            at
+            at,
+            admin
         ],
     )?;
     Ok(())
@@ -387,18 +389,80 @@ pub fn set_runtime(t: &mut Tx<'_>, name: &str, rt: &Runtime) -> ApiResult<()> {
     Ok(())
 }
 
-/// Make an API target. The project must exist.
+/// Make an API target. The project must exist. A project target that
+/// names a global secret needs a grant to the project, unless the actor
+/// is the operator or a sysadmin ([`check_global_credential`]).
 pub fn create(t: &mut Tx<'_>, def: &TargetDef) -> ApiResult<TargetRow> {
     validate(def)?;
     if let Some(p) = &def.project {
         crate::store::projects::get(t, p)?;
     }
     check_credential(t, def, None)?;
+    let admin = secrets::is_admin_actor(t, &t.actor)?;
+    check_global_credential(t, def, admin)?;
     if find(t, &def.name)?.is_some() {
         return Err(ApiError::conflict(format!("target `{}` exists", def.name)));
     }
-    insert(t, def, SOURCE_API)?;
+    insert(t, def, SOURCE_API, admin)?;
     get(t, &def.name)
+}
+
+/// Whether the operator, a sysadmin, or a target file set the definition
+/// of target `name` (the `credential_admin` column, PLAN §16b.6a). False
+/// for a target that is not in the table.
+pub fn credential_admin(conn: &Connection, name: &str) -> ApiResult<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT credential_admin FROM targets WHERE name = ?1",
+            [name],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or(false))
+}
+
+/// The `credential_admin` of a write of `def` by the actor of `t`: true
+/// when the actor is the operator or a sysadmin. A write by another
+/// actor keeps an admin mark (`before`) only when it changes nothing but
+/// the fields that a running target takes (`keep`,
+/// `snapshot_before_task`): a project_admin cannot move an operator's
+/// login to another address.
+pub fn admin_after_write(
+    t: &Tx<'_>,
+    def: &TargetDef,
+    before: Option<(&TargetDef, bool)>,
+) -> ApiResult<bool> {
+    if secrets::is_admin_actor(t, &t.actor)? {
+        return Ok(true);
+    }
+    let Some((old, true)) = before else {
+        return Ok(false);
+    };
+    let mut a = old.clone();
+    let mut b = def.clone();
+    for d in [&mut a, &mut b] {
+        d.keep = false;
+        d.snapshot_before_task = false;
+    }
+    Ok(a == b)
+}
+
+/// The save-time check of a project target's `credential` against the
+/// rule of PLAN §16b.6a: `403 forbidden` when it names a global secret,
+/// the project has no grant of it, and `admin` is false.
+pub fn check_global_credential(conn: &Connection, def: &TargetDef, admin: bool) -> ApiResult<()> {
+    match (&def.project, &def.credential) {
+        (Some(p), Some(name)) => secrets::check_global_use(conn, p, name, admin),
+        _ => Ok(()),
+    }
+}
+
+/// The owner of the `credential` of `def`, for `crate::secrets::load`.
+pub fn owner(def: &TargetDef) -> secrets::Owner<'_> {
+    secrets::Owner::Target {
+        name: &def.name,
+        project: def.project.as_deref(),
+    }
 }
 
 fn refuse_file(r: &TargetRow) -> ApiResult<()> {
@@ -467,14 +531,20 @@ pub fn update(t: &mut Tx<'_>, name: &str, patch: &Value) -> ApiResult<TargetRow>
         crate::store::projects::get(t, p)?;
     }
     check_credential(t, &def, Some(&current.def))?;
+    let was = credential_admin(t, name)?;
+    let admin = admin_after_write(t, &def, Some((&current.def, was)))?;
+    check_global_credential(t, &def, admin)?;
     t.execute(
-        "UPDATE targets SET project = ?2, kind = ?3, def = ?4, updated_at = ?5 WHERE name = ?1",
+        "UPDATE targets SET project = ?2, kind = ?3, def = ?4, updated_at = ?5,
+                            credential_admin = ?6
+         WHERE name = ?1",
         params![
             name,
             def.project,
             kind_str(def.kind),
             def_json(&def)?,
-            now()
+            now(),
+            admin
         ],
     )?;
     get(t, name)
@@ -561,13 +631,15 @@ pub fn sync_files(t: &mut Tx<'_>, defs: &[TargetDef]) -> ApiResult<(Changes, Vec
         }
         match find(t, &def.name)? {
             None => {
-                insert(t, def, SOURCE_FILE)?;
+                // A file is the operator's: it can name a global secret
+                // with no grant (PLAN §16b.6a).
+                insert(t, def, SOURCE_FILE, true)?;
                 changes.added.push(def.name.clone());
             }
             Some(r) if r.def != *def || r.source != SOURCE_FILE => {
                 t.execute(
                     "UPDATE targets SET project = ?2, kind = ?3, def = ?4, source = 'file',
-                                        updated_at = ?5
+                                        updated_at = ?5, credential_admin = 1
                      WHERE name = ?1",
                     params![
                         def.name,
@@ -733,12 +805,19 @@ pub fn credential_view(conn: &Connection, def: &TargetDef) -> ApiResult<Option<C
     // A placeholder (PLAN §16b.5) passes the save check, so that a config
     // import can bring the target and the name of its login together; the
     // view reports that it has no value yet.
+    // A project target that a project_admin set, and a global secret with
+    // no grant to the project: each use is refused (PLAN §16b.6a).
+    let refused = match &def.project {
+        Some(p) => secrets::global_use_problem(conn, p, name, credential_admin(conn, &def.name)?)?,
+        None => None,
+    };
     let warning = match credential_problem(conn, def)? {
         Some(w) => Some(w),
-        None => s
-            .as_ref()
-            .filter(|s| !s.has_value)
-            .map(|s| secrets::no_value(&s.scope, &s.name).message),
+        None => refused.or_else(|| {
+            s.as_ref()
+                .filter(|s| !s.has_value)
+                .map(|s| secrets::no_value(&s.scope, &s.name).message)
+        }),
     };
     Ok(Some(CredentialView {
         name: name.clone(),

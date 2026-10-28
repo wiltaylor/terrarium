@@ -2,14 +2,15 @@
 // new grant, and a revoke. The grantee picker offers what the scope allows:
 // any project or agent for a global secret; the project and its agents for
 // a project secret. The level starts at the kind's default; an env var
-// needs the level read.
+// needs the level read. For a token or a github_token, use is read: the
+// panel says so (PLAN §16b.3).
 
 import { createResource, createSignal, For, onMount, Show } from "solid-js";
 import type { GrantLevel, Secret } from "../../api/types";
 import { ConfirmButton, ErrorBanner } from "../../components/ui";
 import { ago } from "../../lib/format";
 import { agents, api, projects } from "../../stores";
-import { defaultLevel, emptyGrant, envAllowed, grantBody, granteeOptions, type GrantForm } from "./model";
+import { defaultLevel, emptyGrant, envAllowed, grantBody, granteeOptions, TOKEN_USE_NOTE, tokenKind, type GrantForm } from "./model";
 
 export function GrantsPanel(props: { secret: Secret; onClose: () => void }) {
   const s = () => props.secret;
@@ -61,8 +62,13 @@ export function GrantsPanel(props: { secret: Secret; onClose: () => void }) {
         </button>
       </div>
       <p class="small muted" style={{ margin: 0 }}>
-        use: the brokers only (the git credential helper and the ssh-agent); the agent cannot see the value. read: also an env var at start and <code>terrarium secret get</code>. A change applies at the next start of the agent; a revoke stops the brokers at once.
+        use: the brokers only (the git credential helper and the ssh-agent); the agent cannot see an ssh_key. read: also an env var at start and <code>terrarium secret get</code>. A change applies at the next start of the agent; a revoke stops the brokers at once.
       </p>
+      <Show when={tokenKind(s().kind)}>
+        <p class="small" role="note" style={{ margin: 0 }}>
+          <span class="chip warn">use = read for tokens</span> {TOKEN_USE_NOTE}
+        </p>
+      </Show>
       <ErrorBanner error={error() ?? list.error} onDismiss={() => setError(null)} />
       <Show when={list()?.length} fallback={<p class="small muted" style={{ margin: 0 }}>{list.loading ? "Loading…" : "No grants. No agent gets this secret."}</p>}>
         <div class="table-wrap">
