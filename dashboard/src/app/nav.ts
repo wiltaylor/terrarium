@@ -1,6 +1,8 @@
 // The sidebar items and the routes that moved. Pure, so tests can read them.
 
 export const PROJECT_ITEMS = [
+  // Every agent of the project, in any status.
+  { path: "agents", label: "Agents" },
   { path: "board", label: "Board" },
   // The mail log of the project: every message that touches it.
   { path: "mail", label: "Mail" },

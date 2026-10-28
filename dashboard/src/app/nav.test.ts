@@ -14,6 +14,13 @@ describe("navigation", () => {
     expect(app).not.toMatch(/path="\/p\/:project\/inbox" component/);
   });
 
+  it("has Agents first under the project, with a route to the Agents page", () => {
+    expect(PROJECT_ITEMS[0]).toEqual({ path: "agents", label: "Agents" });
+    expect(GLOBAL_ITEMS.map((i) => i.href)).toContain("/agents");
+    expect(app).toMatch(/path="\/agents" component=\{AgentsPage\}/);
+    expect(app).toMatch(/path="\/p\/:project\/agents" component=\{AgentsPage\}/);
+  });
+
   it("has Schedules under the project and in the global list, each with a route", () => {
     expect(PROJECT_ITEMS.map((i) => i.path)).toContain("schedules");
     expect(GLOBAL_ITEMS.map((i) => i.href)).toContain("/schedules");

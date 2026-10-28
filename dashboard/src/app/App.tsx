@@ -77,6 +77,7 @@ export function App() {
         <Route path="/config" component={ConfigPage} />
         <Route path="/settings" component={SettingsPage} />
         <Route path="/p/:project" component={ProjectIndex} />
+        <Route path="/p/:project/agents" component={AgentsPage} />
         <Route path="/p/:project/board" component={BoardPage} />
         <Route path="/p/:project/mail" component={MailPage} />
         <Route path="/p/:project/settings" component={ProjectSettings} />
