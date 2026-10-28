@@ -4,7 +4,7 @@
 // keep a list in the same order after a local change, and give the tabs and
 // the badge.
 
-import type { AgentEvent, InboxCounts, InboxItem, InboxKind, InboxStatus, Question, QuestionPriority } from "../../api/types";
+import type { AgentEvent, InboxCounts, InboxItem, InboxKind, InboxStatus, Message, Question, QuestionPriority } from "../../api/types";
 
 /** The kind tabs of the Inbox page. `all` sends no `kind`. */
 export const INBOX_TABS = [
@@ -100,4 +100,32 @@ export function emptyText(tab: InboxTab, status: InboxStatusTab): string {
   if (status === "done" && tab === "system") return "A system item shows only while it is open.";
   if (status === "open") return tab === "all" ? "Nothing waits for you." : `No open ${KIND_LABELS[tab]} items.`;
   return "Nothing is done here yet.";
+}
+
+/**
+ * The dashboard page that a mail of the daemon links: its last `Open: <url>`
+ * line, as a path of this dashboard (a quota mail links `/subscriptions`, a
+ * budget mail `/p/<project>`). Only a `system` mail, and only a path.
+ */
+export function systemMailLink(m: Pick<Message, "from_kind" | "body">): { href: string; label: string } | null {
+  if (m.from_kind !== "system") return null;
+  const line = m.body
+    .split("\n")
+    .reverse()
+    .find((l) => l.startsWith("Open: "));
+  if (!line) return null;
+  const url = line.slice(6).trim();
+  let href: string;
+  if (url.startsWith("/") && !url.startsWith("//")) href = url;
+  else {
+    try {
+      const u = new URL(url);
+      if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+      href = `${u.pathname}${u.search}`;
+    } catch {
+      return null;
+    }
+  }
+  const label = href === "/subscriptions" ? "Subscriptions" : href.startsWith("/p/") ? "Project" : "Open";
+  return { href, label };
 }

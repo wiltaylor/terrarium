@@ -456,23 +456,39 @@ async fn credential_helper(
         ));
     }
     let none = || ApiError::not_found("no credential for this host and path in your project");
-    let Some(path) = q.path.as_deref().map(git::normalize_path) else {
-        return Err(none());
-    };
     let protocol = q.protocol.to_ascii_lowercase();
     let host = q.host.to_ascii_lowercase();
-    let project = me.project.clone();
-    let all = state
-        .db
-        .read(move |c| repos::all_for_project(c, &project))
-        .await?;
-    let found = all.into_iter().find(|r| {
-        r.credential.is_some()
-            && git::http_location(&r.url)
-                .is_some_and(|l| l.protocol == protocol && l.host == host && l.path == path)
-    });
+    // First a repo of the project (git sends the path with
+    // `credential.useHttpPath`), then a granted `token` or `github_token`
+    // for the host (PLAN §16b.4).
+    let found = match q.path.as_deref().map(git::normalize_path) {
+        Some(path) => {
+            let project = me.project.clone();
+            let all = state
+                .db
+                .read(move |c| repos::all_for_project(c, &project))
+                .await?;
+            all.into_iter().find(|r| {
+                r.credential.is_some()
+                    && git::http_location(&r.url)
+                        .is_some_and(|l| l.protocol == protocol && l.host == host && l.path == path)
+            })
+        }
+        None => None,
+    };
     let Some(repo) = found else {
-        return Err(none());
+        if protocol != "https" {
+            return Err(none());
+        }
+        let granted =
+            super::secret_grants::helper_answer(&state, &actor, &me.id, &me.project, &host).await?;
+        let Some((username, token)) = granted else {
+            return Err(none());
+        };
+        return Ok(Json(HelperAnswer {
+            username,
+            password: token.to_string(),
+        }));
     };
     let name = repo.credential.clone().unwrap_or_default();
     // A `token` or a `github_token` of the project, else a global one.

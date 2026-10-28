@@ -301,9 +301,135 @@ fn set_body(ctx: &Ctx, a: &SecretSetArgs) -> anyhow::Result<Value> {
     Ok(body)
 }
 
+/// A grantee as the API takes it: `<project>/<name>` and a bare agent ID
+/// get `agent:`.
+pub fn grantee(s: &str) -> String {
+    if s.starts_with("agent:") || s.starts_with("project:") {
+        s.to_owned()
+    } else {
+        format!("agent:{s}")
+    }
+}
+
+fn print_grants(ctx: &Ctx, v: &Value) {
+    print_table(
+        ctx,
+        v.as_array().map(Vec::as_slice).unwrap_or_default(),
+        &[
+            ("GRANTEE", "grantee_label"),
+            ("LEVEL", "level"),
+            ("ENV", "env"),
+            ("BY", "created_by"),
+            ("AT", "created_at"),
+        ],
+        "no grants",
+    );
+}
+
+/// `secret list` in an agent: the effective grants.
+fn print_granted(ctx: &Ctx, v: &Value) {
+    let rows: Vec<Value> = v
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|mut s| {
+            s["plain"] = plain_text(&s).into();
+            s
+        })
+        .collect();
+    print_table(
+        ctx,
+        &rows,
+        &[
+            ("SCOPE", "scope"),
+            ("NAME", "name"),
+            ("KIND", "kind"),
+            ("LEVEL", "level"),
+            ("ENV", "env"),
+            ("FIELDS", "plain"),
+        ],
+        "no secrets are granted to you",
+    );
+}
+
 pub async fn secret(ctx: &Ctx, cmd: &SecretCmd) -> anyhow::Result<()> {
     match cmd {
         SecretCmd::Generate(a) => super::ssh_keys::generate(ctx, a).await,
+        SecretCmd::List if ctx.is_agent() && ctx.project.is_none() => {
+            let v = ctx.api.get("/api/agent/secrets", vec![]).await?;
+            ctx.emit(&v, print_granted)
+        }
+        SecretCmd::Get { name, field } => {
+            let mut body = json!({});
+            if let Some(f) = field {
+                body["field"] = f.clone().into();
+            }
+            let v = ctx
+                .api
+                .post(
+                    &format!("/api/agent/secrets/{}/get", encode(name)),
+                    Some(body),
+                )
+                .await?;
+            // The value only: no line end is added, so `$(...)` and a pipe
+            // get it as it is stored.
+            ctx.emit(&v, |c, v| {
+                c.out.write_str(v["value"].as_str().unwrap_or_default());
+            })
+        }
+        SecretCmd::Grant {
+            name,
+            grantee: who,
+            level,
+            env,
+        } => {
+            let mut body = json!({"grantee": grantee(who)});
+            if let Some(l) = level {
+                body["level"] = l.clone().into();
+            }
+            if let Some(e) = env {
+                body["env"] = e.clone().into();
+            }
+            let v = ctx
+                .api
+                .post(&format!("{}/grants", path(&scope(ctx), name)), Some(body))
+                .await?;
+            ctx.emit(&v, |c, v| {
+                let env = v["env"]
+                    .as_str()
+                    .map(|e| format!(" as ${e}"))
+                    .unwrap_or_default();
+                c.line(format!(
+                    "granted {}/{} to {} ({}{env}); it applies at the next start",
+                    field(v, "scope"),
+                    field(v, "name"),
+                    field(v, "grantee_label"),
+                    field(v, "level"),
+                ));
+            })
+        }
+        SecretCmd::Revoke { name, grantee: who } => {
+            let s = scope(ctx);
+            let g = grantee(who);
+            ctx.api
+                .delete(
+                    &format!("{}/grants", path(&s, name)),
+                    query([("grantee", Some(g.clone()))]),
+                )
+                .await?;
+            ctx.emit(
+                &json!({"revoked": format!("{s}/{name}"), "grantee": g}),
+                |c, _| c.line(format!("revoked the grant of {s}/{name} to {g}")),
+            )
+        }
+        SecretCmd::Grants { name } => {
+            let v = ctx
+                .api
+                .get(&format!("{}/grants", path(&scope(ctx), name)), vec![])
+                .await?;
+            ctx.emit(&v, print_grants)
+        }
         SecretCmd::List => {
             let v = ctx
                 .api

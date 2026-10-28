@@ -14,6 +14,50 @@ use crate::commands::system::{as_items, show_events};
 use crate::ctx::Ctx;
 use crate::output::field;
 
+/// The line that names one attached image in a turn. The dashboard uses
+/// the same words (`dashboard/src/features/agents/conversation/attachments.ts`).
+pub fn image_line(path: &str) -> String {
+    format!("Attached image: {path} (open this file with your image or file-read tool to see it)")
+}
+
+/// The turn text: the text, then one line for each image path.
+pub fn turn_with_images(text: &str, paths: &[String]) -> String {
+    let text = text.trim();
+    let lines: Vec<String> = paths.iter().map(|p| image_line(p)).collect();
+    if text.is_empty() {
+        lines.join("\n")
+    } else {
+        format!("{text}\n\n{}", lines.join("\n"))
+    }
+}
+
+/// Upload each image to `POST /api/agents/{id}/attachments` (the JSON
+/// form), in order. Returns the paths that the agent sees. The first
+/// failure stops the send.
+async fn attach_images(
+    ctx: &Ctx,
+    agent: &str,
+    images: &[std::path::PathBuf],
+) -> anyhow::Result<Vec<String>> {
+    let mut paths = Vec::with_capacity(images.len());
+    for file in images {
+        let data = std::fs::read(file)
+            .map_err(|e| CliError::usage(format!("cannot read {}: {e}", file.display())))?;
+        let r = ctx
+            .api
+            .post(
+                &format!("{}/attachments", agent_path(agent)),
+                Some(json!({"data_base64": super::artifacts::base64(&data)})),
+            )
+            .await?;
+        let path = r["path"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("the daemon answered no path for {}", file.display()))?;
+        paths.push(path.to_owned());
+    }
+    Ok(paths)
+}
+
 pub async fn agent(ctx: &Ctx, cmd: &AgentCmd) -> anyhow::Result<()> {
     match cmd {
         AgentCmd::Ls { all_projects } => ls(ctx, *all_projects).await,
@@ -68,8 +112,22 @@ pub async fn agent(ctx: &Ctx, cmd: &AgentCmd) -> anyhow::Result<()> {
         AgentCmd::Start { agent, no_wait } => lifecycle(ctx, agent, "start", *no_wait).await,
         AgentCmd::Stop { agent, no_wait } => lifecycle(ctx, agent, "stop", *no_wait).await,
         AgentCmd::Restart { agent, no_wait } => lifecycle(ctx, agent, "restart", *no_wait).await,
-        AgentCmd::Send { agent, text, raw } => {
-            let text = ctx.text(text)?;
+        AgentCmd::Send {
+            agent,
+            text,
+            raw,
+            image,
+        } => {
+            let text = match text {
+                Some(t) => ctx.text(t)?,
+                None => String::new(),
+            };
+            let text = if image.is_empty() {
+                text
+            } else {
+                let paths = attach_images(ctx, agent, image).await?;
+                turn_with_images(&text, &paths)
+            };
             let mut body = json!({"text": text});
             if *raw {
                 body["raw"] = json!(true);

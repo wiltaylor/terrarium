@@ -213,6 +213,11 @@ pub struct AgentLayout {
     /// itself again through `PATH` gets the same version. `None`: the
     /// program comes from `PATH`.
     pub harness_bin: Option<PathBuf>,
+    /// The agent's ssh-agent socket dir
+    /// (`<runtime>/ssh-agent/<ulid>`, `crate::secrets::agent_keys`): bound
+    /// at `/run/terrarium/ssh-agent`, with `SSH_AUTH_SOCK` on its socket.
+    /// `None`: the agent has no `ssh_key` grant.
+    pub ssh_agent: Option<PathBuf>,
 }
 
 /// One local repo bind: the real directory on the host, and the path of
@@ -483,6 +488,18 @@ impl SandboxConfig {
             &layout.socket,
             Path::new(SANDBOX_SOCKET),
         );
+        if let Some(dir) = &layout.ssh_agent {
+            use crate::secrets::agent_keys::{SANDBOX_DIR, SANDBOX_SOCK, SOCK_NAME};
+            // The dir, not the socket file: a new daemon makes a new
+            // socket file there, and a running agent sees it.
+            push3(&mut args, "--bind", dir, Path::new(SANDBOX_DIR));
+            push3(
+                &mut args,
+                "--symlink",
+                &Path::new(SANDBOX_DIR).join(SOCK_NAME),
+                Path::new(SANDBOX_SOCK),
+            );
+        }
         if let Some(cli) = &self.cli {
             push3(
                 &mut args,
@@ -556,6 +573,16 @@ impl SandboxConfig {
                 env.insert("PATH".into(), path);
                 env.insert(ENV_AGENT_SOCKET.into(), layout.socket.display().to_string());
             }
+        }
+        if let Some(dir) = &layout.ssh_agent {
+            let sock = match self.mode {
+                SandboxMode::Bwrap => crate::secrets::agent_keys::SANDBOX_SOCK.to_owned(),
+                SandboxMode::None => dir
+                    .join(crate::secrets::agent_keys::SOCK_NAME)
+                    .display()
+                    .to_string(),
+            };
+            env.insert("SSH_AUTH_SOCK".into(), sock);
         }
         for h in &layout.homes {
             env.insert(
@@ -663,6 +690,12 @@ pub fn secret_var(key: &str) -> bool {
 /// For `terrariumd sandbox-dry-run` and the start log. The value of each
 /// [`secret_var`] shows as `<redacted>`.
 pub fn command_line(spec: &LaunchSpec) -> String {
+    command_line_hiding(spec, &[])
+}
+
+/// [`command_line`], and the value of each var in `hidden` (the env vars
+/// of the secret grants) shows as `<redacted>` too.
+pub fn command_line_hiding(spec: &LaunchSpec, hidden: &[String]) -> String {
     let mut words = vec![
         "cd".to_owned(),
         shell_quote(&spec.cwd.display().to_string()),
@@ -673,7 +706,11 @@ pub fn command_line(spec: &LaunchSpec) -> String {
         words.push("-i".into());
     }
     for (k, v) in &spec.env {
-        let v = if secret_var(k) { "<redacted>" } else { v };
+        let v = if secret_var(k) || hidden.iter().any(|h| h == k) {
+            "<redacted>"
+        } else {
+            v
+        };
         words.push(shell_quote(&format!("{k}={v}")));
     }
     words.push(shell_quote(&spec.program));
@@ -722,6 +759,7 @@ mod tests {
             repos: Vec::new(),
             accounts: Vec::new(),
             cred_alias: None,
+            ssh_agent: None,
             harness_bin: None,
         }
     }
@@ -805,6 +843,41 @@ TERRARIUM_AGENT=01K8AGENT0000000000000000A TERRARIUM_SOCKET=/run/terrarium/agent
     /// F1 of `docs/security-review.md`: the runner's records stay out of
     /// the sandbox. No bind of any kind names `private/` or a directory
     /// above it, so the agent can neither read nor change them.
+    /// PLAN §16b.4: the ssh-agent dir binds at `/run/terrarium/ssh-agent`,
+    /// and `SSH_AUTH_SOCK` names the symlink to its socket.
+    #[test]
+    fn the_ssh_agent_dir_binds_with_its_socket_var() {
+        let cfg = config();
+        let mut l = layout();
+        let resolve = |p: &str| (p == "claude").then(|| PathBuf::from("/usr/bin/claude"));
+        let none = cfg.wrap_with(spec(), &l, BTreeMap::new(), &|_| None, &resolve);
+        assert!(!none.args.iter().any(|a| a.contains("ssh-agent")));
+        assert!(
+            !cfg.child_env(&l, &BTreeMap::new(), &|_| None)
+                .contains_key("SSH_AUTH_SOCK")
+        );
+        l.ssh_agent = Some(PathBuf::from("/run/t/ssh-agent/01K8AGENT0000000000000000A"));
+        let env = cfg.child_env(&l, &BTreeMap::new(), &|_| None);
+        assert_eq!(env["SSH_AUTH_SOCK"], "/run/terrarium/ssh-agent.sock");
+        let line = command_line(&cfg.wrap_with(spec(), &l, env, &|_| None, &resolve));
+        assert!(
+            line.contains(
+                "--bind /run/t/ssh-agent/01K8AGENT0000000000000000A /run/terrarium/ssh-agent \
+                 --symlink /run/terrarium/ssh-agent/agent.sock /run/terrarium/ssh-agent.sock"
+            ),
+            "{line}"
+        );
+        let plain = SandboxConfig {
+            mode: SandboxMode::None,
+            ..config()
+        };
+        let env = plain.child_env(&l, &BTreeMap::new(), &|_| None);
+        assert_eq!(
+            env["SSH_AUTH_SOCK"],
+            "/run/t/ssh-agent/01K8AGENT0000000000000000A/agent.sock"
+        );
+    }
+
     #[test]
     fn the_sandbox_never_binds_the_private_dir() {
         let cfg = config();
@@ -1004,6 +1077,7 @@ TERRARIUM_AGENT=01K8AGENT0000000000000000A TERRARIUM_SOCKET=/run/terrarium/agent
             repos: Vec::new(),
             accounts: vec![root.join("max-a/store"), root.join("max-b/store")],
             cred_alias: Some(harness_dir.join("cred")),
+            ssh_agent: None,
             harness_bin: None,
         };
         let script = format!(

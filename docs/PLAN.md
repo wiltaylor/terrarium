@@ -1523,7 +1523,9 @@ not a table, and it copies no mail body:
 
 - the questions and the notices;
 - each mail to `operator`, until the operator acknowledges it (the state
-  `read`), with an optional reply as `operator` on its thread;
+  `read`), with an optional reply as `operator` on its thread. The quota
+  mail of the daemon (§16.2: the `alert_at`, 90, and used-up lines) comes
+  in here, with normal priority;
 - the threads of the loop guard (§12) as system items: a paused thread, or
   a held message that the operator did not release. The operator releases
   a held message or resumes the thread there.
@@ -1536,7 +1538,9 @@ the text (as plain text), the context (Markdown through the DOMPurify sink
 only), the choice buttons, a free-text answer, and Retract. A notice card
 shows the text, the context through the same sink, Acknowledge, and an
 optional reply. A mail card shows the sender, the subject, and the body
-as data, with Acknowledge and an optional reply. A system card shows the
+as data, with Acknowledge and an optional reply. A mail from `system` with
+an `Open: <url>` line also has a button to that dashboard page (a quota
+mail opens Subscriptions). A system card shows the
 thread, the held messages with Release, and Resume with an optional note.
 The Inbox nav item has the one badge of the things that wait for the
 operator: red when one is urgent or critical. The Mail pages are logs (§12); the
@@ -1913,10 +1917,14 @@ Policy hooks:
 - An agent definition names its subscription. For `pi` and `codex` the
   adapter also passes the model. The daemon refuses a start if the harness
   cannot spend that subscription.
-- When a window passes `alert_at`, the daemon mails the operator and raises a
-  dashboard banner. At 100 percent it pauses new turns on agents on that
-  subscription, marks them `blocked` with the reset time, and resumes them
-  after the reset. An agent with an account pool moves to the next account
+- A window has three lines: `alert_at` (default 80), 90, and 100 (used
+  up). When a window goes up past a line, the daemon sends one mail to the
+  operator. The mail is an item of the Inbox (§12e). Each line sends one
+  mail in a window period, also after a daemon restart. The dashboard
+  shows no quota banner. At 100 percent the daemon pauses new turns on
+  agents on that subscription, marks them `blocked` with the reset time,
+  and resumes them after the reset. The used-up mail names the held
+  agents. An agent card shows a `quota hold` badge. An agent with an account pool moves to the next account
   of its pool that is not full, before the hold (auto-swap, §16.3). An
   operator, a project admin, or a sysadmin agent can also move an agent with
   `terrarium admin agent swap <agent> <subscription>`.

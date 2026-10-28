@@ -608,15 +608,38 @@ describe("mock parity with docs/api.md", () => {
     const st = api.events.stream({ since: api.world.seq });
     st.subscribe((e) => frames.push(e));
     await wait();
+    const quotaMail = () => api.world.mail.filter((m) => m.to === "operator" && m.from === "system" && m.subject.startsWith("Quota: anthropic-max 5h window at"));
+    api.sim.setWindow("anthropic-max", "5h", 79);
+    expect(frames.filter((x) => x.kind === "quota.alert")).toHaveLength(0);
     api.sim.setWindow("anthropic-max", "5h", 85);
     const alert = frames.find((x) => x.kind === "quota.alert")!;
-    expect(Object.keys(alert.data).sort()).toEqual(["alert_at", "level", "resets_at", "subscription", "used_pct", "window"]);
-    expect(alert.data).toMatchObject({ subscription: "anthropic-max", window: "5h", used_pct: 85, level: "alert", alert_at: 80 });
+    expect(Object.keys(alert.data).sort()).toEqual(["alert_at", "level", "message", "resets_at", "subscription", "threshold", "used_pct", "window"]);
+    expect(alert.data).toMatchObject({ subscription: "anthropic-max", window: "5h", used_pct: 85, level: "alert", alert_at: 80, threshold: 80 });
+    expect(quotaMail()).toHaveLength(1);
+    expect(quotaMail()[0]!.body).toContain("Open: /subscriptions");
     api.sim.setWindow("anthropic-max", "5h", 85);
-    expect(frames.filter((x) => x.kind === "quota.alert")).toHaveLength(1); // once per window period
+    api.sim.setWindow("anthropic-max", "5h", 88);
+    expect(frames.filter((x) => x.kind === "quota.alert")).toHaveLength(1); // once per line and window period
+    // The second line: one more mail at 90, then nothing.
+    api.sim.setWindow("anthropic-max", "5h", 91);
+    expect(frames.filter((x) => x.kind === "quota.alert").at(-1)!.data).toMatchObject({ level: "alert", threshold: 90 });
+    api.sim.setWindow("anthropic-max", "5h", 95);
+    expect(quotaMail()).toHaveLength(2);
+    expect(frames.filter((x) => x.kind === "quota.alert")).toHaveLength(2);
 
     api.sim.setWindow("anthropic-max", "5h", 100);
-    expect(frames.filter((x) => x.kind === "quota.alert").at(-1)!.data.level).toBe("exhausted");
+    const exhausted = frames.filter((x) => x.kind === "quota.alert").at(-1)!;
+    expect(exhausted.data.level).toBe("exhausted");
+    expect(Object.keys(exhausted.data).sort()).toEqual(["alert_at", "level", "message", "resets_at", "subscription", "threshold", "used_pct", "window"]);
+    expect(exhausted.data).toMatchObject({ threshold: 100 });
+    // One used-up mail, with the held agents; a repeated sample sends none.
+    const usedUp = () => api.world.mail.filter((m) => m.to === "operator" && m.subject === "Quota: anthropic-max 5h window is used up");
+    expect(usedUp()).toHaveLength(1);
+    expect(usedUp()[0]!.body).toContain("New turns of these agents wait for the reset: ");
+    expect(usedUp()[0]!.body).toContain("terrarium/lead");
+    api.sim.setWindow("anthropic-max", "5h", 100);
+    expect(usedUp()).toHaveLength(1);
+    expect(frames.filter((x) => x.kind === "quota.alert")).toHaveLength(3);
     const blocked = frames.filter((x) => x.kind === "quota.blocked");
     const onPlan = (await api.agents.list()).filter((a) => a.subscription === "anthropic-max");
     expect(blocked.map((e) => e.agent_id).sort()).toEqual(onPlan.map((a) => a.id).sort());
@@ -631,6 +654,9 @@ describe("mock parity with docs/api.md", () => {
     expect(resumed).toHaveLength(onPlan.length);
     expect(resumed[0]!.data).toMatchObject({ cause: "quota:anthropic-max", holds_left: 0 });
     expect((await api.subscriptions.get("anthropic-max")).held_agents).toBe(0);
+    // The window dropped: the next crossing notifies again.
+    api.sim.setWindow("anthropic-max", "5h", 82);
+    expect(quotaMail()).toHaveLength(3);
     st.close();
   });
 

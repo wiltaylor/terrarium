@@ -1115,23 +1115,59 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     if (!NAME_RE.test(name)) fail(422, "invalid", `\`${name}\` is not a valid name: lowercase letters, digits, - and _`);
     if (name === "login" || name === "detect") fail(422, "invalid", `\`${name}\` is a reserved name`);
   };
-  const alerted = new Set<string>();
+  /** The lines that notified, `<sub>/<window>/<line>` -> the reset of that period (quota_notices.rs). */
+  const notified = new Map<string, string | undefined>();
   const exhaustedAt = new Map<string, number>();
   const latestReset = (s: Subscription) => s.windows.map((x) => x.resets_at ?? "").sort().at(-1) || undefined;
-  /** The quota policy (docs/api.md §16.6) after a new reading of one window. */
+  /** The quota lines (docs/api.md §16.6): `alert_at`, 90 when `alert_at` is under 90, and 100 (used up). */
+  const quotaLines = (alertAt: number): number[] => [...(alertAt >= 1 && alertAt < 100 ? [alertAt] : []), ...(alertAt < 90 ? [90] : []), 100];
+  // The seed: the lines that the windows passed already notified (the seed mail of chatgpt-pro).
+  for (const s of w.subscriptions) for (const win of s.windows) for (const line of quotaLines(s.alert_at)) if (win.used_pct >= line) notified.set(`${s.name}/${win.window}/${line}`, win.resets_at);
+  const fewNames = (names: string[]) => `${names.slice(0, 5).join(", ")}${names.length > 5 ? `, and ${names.length - 5} more` : ""}`;
+  /** One mail to the operator for the highest line that the window passed in this period (quota_notices.rs). */
+  const lineNotice = (s: Subscription, win: Subscription["windows"][number]) => {
+    const pct = win.used_pct;
+    let passed: number | undefined;
+    for (const line of quotaLines(s.alert_at)) {
+      const key = `${s.name}/${win.window}/${line}`;
+      if (notified.has(key)) {
+        const stored = notified.get(key);
+        const storedAt = stored ? Date.parse(stored) : NaN;
+        const sampleAt = win.resets_at ? Date.parse(win.resets_at) : NaN;
+        const newPeriod = storedAt <= now() && (Number.isNaN(sampleAt) || sampleAt > storedAt + 5 * 60_000);
+        if (pct <= line - 10 || newPeriod) notified.delete(key);
+      }
+      if (pct >= line && !notified.has(key)) {
+        notified.set(key, win.resets_at);
+        passed = line;
+      }
+    }
+    if (passed === undefined) return;
+    const usedUp = passed >= 100;
+    const resets = win.resets_at ? `The window resets in ${Math.max(1, Math.round((Date.parse(win.resets_at) - now()) / 60_000))}m (${win.resets_at}).` : "The provider gives no reset time for this window.";
+    let subject: string;
+    let body: string;
+    if (usedUp) {
+      const held = w.holds.filter((h) => h.cause === `quota:${s.name}`).map((h) => {
+        const a = w.agents.find((x) => x.id === h.agent);
+        return a ? `${a.project}/${a.name}` : h.agent;
+      });
+      const heldLine = held.length ? `New turns of these agents wait for the reset: ${fewNames(held)}.` : "No agent is held: no agent on it waits for the reset.";
+      subject = `Quota: ${s.name} ${win.window} window is used up`;
+      body = `Subscription \`${s.name}\` (${s.provider}) has used all of its ${win.window} window.\n${resets}\n${heldLine}\n\nMove agents to another account with \`terrarium admin agent swap <name> <subscription>\`, or wait for the reset.\n\nOpen: /subscriptions\n`;
+    } else {
+      const next = quotaLines(s.alert_at).find((l) => l > passed! && l < 100);
+      const on = w.agents.filter((a) => a.subscription === s.name).map((a) => `${a.project}/${a.name}`);
+      const agentsLine = on.length ? `The agents on this subscription: ${fewNames(on)}.` : "No agent is on this subscription now.";
+      subject = `Quota: ${s.name} ${win.window} window at ${pct}%`;
+      body = `Subscription \`${s.name}\` (${s.provider}) has used ${pct}% of its ${win.window} window. It passed the ${passed}% line.\n${resets}\n${agentsLine}\n${next ? `You get one more message at ${next}%.\n` : ""}\nMove agents to another account with \`terrarium admin agent swap <name> <subscription>\`, give them an account pool for the auto-swap, or wait for the reset.\n\nOpen: /subscriptions\n`;
+    }
+    const m = sendMail("operator", "system", subject, body);
+    emit({ kind: "quota.alert", actor: "system", summary: subject, data: { subscription: s.name, window: win.window, used_pct: pct, resets_at: win.resets_at ?? null, level: usedUp ? "exhausted" : "alert", alert_at: s.alert_at, threshold: passed, message: m.id } });
+  };
+  /** The quota policy (docs/api.md §16.6) after a new reading of one window: the holds, then the line mail. */
   const policy = (s: Subscription, win: Subscription["windows"][number]) => {
-    const period = `${s.name}/${win.window}/${win.resets_at ?? ""}`;
-    const alert = (level: "alert" | "exhausted") => {
-      if (alerted.has(`${period}/${level}`)) return;
-      alerted.add(`${period}/${level}`);
-      // The daemon's subjects (quota_policy.rs): the sender is `system`.
-      const subject = level === "alert" ? `Quota: ${s.name} ${win.window} window at ${win.used_pct}%` : `Quota: ${s.name} ${win.window} window is used up`;
-      sendMail("operator", "system", subject, `Subscription \`${s.name}\` (${s.provider}) has used ${win.used_pct}% of its ${win.window} window. The alert level is ${s.alert_at}%.\nThe window resets at ${win.resets_at ?? "an unknown time"}.`);
-      emit({ kind: "quota.alert", actor: "system", summary: subject, data: { subscription: s.name, window: win.window, used_pct: win.used_pct, resets_at: win.resets_at ?? null, level, alert_at: s.alert_at } });
-    };
-    if (win.used_pct >= s.alert_at) alert("alert");
     if (win.used_pct >= 100) {
-      alert("exhausted");
       exhaustedAt.set(s.name, tick);
       const cause = `quota:${s.name}`;
       const until = latestReset(s);
@@ -1144,6 +1180,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     } else if (s.windows.every((x) => x.used_pct < 100)) {
       release(s);
     }
+    lineNotice(s, win);
   };
   const release = (s: Subscription) => {
     const cause = `quota:${s.name}`;
@@ -1970,6 +2007,20 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           };
           later(typeTurn, 0);
           return { accepted: true };
+        }),
+      attach: (id, file) =>
+        reply(() => {
+          const a = agent(id);
+          // The daemon checks the magic bytes; the mock trusts the type of the Blob.
+          const types = { "image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp" } as const;
+          const type = (file as Blob | undefined)?.type as keyof typeof types;
+          if (!(type in types)) fail(415, "unsupported_media_type", `the Content-Type \`${String(type)}\` is not an image type; send image/png, image/jpeg, image/gif, or image/webp`);
+          if (file.size > 20 * 1024 * 1024) fail(413, "too_large", "an image has at most 20 MiB");
+          if (file.size === 0) fail(422, "invalid", "the image is empty");
+          const stamp = new Date().toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15);
+          const name = `${stamp}-${Math.random().toString(36).slice(2, 10).padEnd(8, "0")}.${types[type]}`;
+          audit("agent.attachment", a.id, a.project, { name, bytes: file.size, content_type: type });
+          return { path: `/work/${a.project}/${a.name}/.terrarium/attachments/${name}`, name, bytes: file.size, content_type: type };
         }),
       answer: (id) =>
         reply(() => {

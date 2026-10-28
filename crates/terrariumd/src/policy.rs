@@ -79,6 +79,27 @@ pub fn reveal_secret(actor: &Actor) -> ApiResult<()> {
     operator_only(actor, "revealing a secret")
 }
 
+/// Grant a secret, revoke a grant, or list the grants of a secret
+/// (PLAN §16b.3): the same rule as [`manage_secrets`]. The store checks
+/// that a project secret goes only to its own project.
+pub fn grant_secret(actor: &Actor, scope: &str) -> ApiResult<()> {
+    if scope == crate::secrets::GLOBAL {
+        sysadmin(actor, "granting a global secret")
+    } else {
+        admin_project(actor, scope, "granting a secret of a project")
+    }
+}
+
+/// Read the own granted secrets (`/api/agent/secrets`): agents only.
+pub fn agent_secrets(actor: &Actor) -> ApiResult<&AgentActor> {
+    match actor {
+        Actor::Agent(a) => Ok(a),
+        Actor::Operator => Err(ApiError::forbidden(
+            "/api/agent/secrets answers agents only; the operator uses /api/secrets",
+        )),
+    }
+}
+
 /// Ask for a git credential through the credential helper
 /// (`POST /api/repos/credential`). Agents only: the answer goes to git in
 /// the agent's own sandbox, for a repo of the agent's own project.
@@ -767,6 +788,23 @@ mod tests {
         assert!(reveal_secret(&sys).is_err());
         assert!(reveal_secret(&admin).is_err());
         assert!(reveal_secret(&op).is_ok());
+        // Grants: the same matrix.
+        for (actor, scope, ok) in [
+            (&member, "global", false),
+            (&admin, "global", false),
+            (&sys, "global", true),
+            (&op, "global", true),
+            (&member, "p", false),
+            (&admin, "p", true),
+            (&admin, "other", false),
+            (&sys, "p", true),
+            (&op, "p", true),
+        ] {
+            assert_eq!(grant_secret(actor, scope).is_ok(), ok, "{actor:?} {scope}");
+        }
+        // The own grants: agents only.
+        assert!(agent_secrets(&member).is_ok());
+        assert!(agent_secrets(&op).is_err());
     }
 
     #[test]

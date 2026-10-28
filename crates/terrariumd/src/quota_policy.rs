@@ -1,8 +1,9 @@
 //! The quota policy (PLAN §16.2, "Policy hooks").
 //!
-//! - When a window of a subscription passes its `alert_at` percent, the
-//!   daemon mails the operator and emits a `quota.alert` event (the
-//!   dashboard banner). Each window period alerts once.
+//! - When a window of a subscription passes its `alert_at` percent, 90
+//!   percent, and 100 percent (used up), the daemon mails the operator
+//!   once for each line in a window period ([`crate::quota_notices`]):
+//!   an open item of the Inbox. No banner shows.
 //! - At 100 percent an agent with an account pool moves to the next
 //!   member that is not full (`crate::account_swap`, PLAN §16.3;
 //!   `TERRARIUM_AUTO_SWAP=off` turns it off). The daemon holds new turns
@@ -287,31 +288,9 @@ pub async fn evaluate_subscription(state: &Shared, name: &str) -> ApiResult<()> 
         })
         .await?;
     let now = Utc::now();
-    let mut alerts = Vec::new();
     let mut exhausted_until: Option<Option<DateTime<Utc>>> = None;
     for w in &windows {
         let pct = effective_pct(w.used_pct, w.resets_at.as_deref(), now);
-        let period = w.resets_at.clone().unwrap_or_else(ustore::today_start);
-        let reset_txt = w.resets_at.as_deref().unwrap_or("an unknown time");
-        if pct >= f64::from(sub.alert_at) {
-            alerts.push(Alert {
-                scope: sub.name.clone(),
-                window: w.window.clone(),
-                period: period.clone(),
-                level: "alert",
-                subject: format!(
-                    "Quota: {} {} window at {pct:.0}%",
-                    sub.name, w.window
-                ),
-                body: format!(
-                    "Subscription `{}` ({}) has used {pct:.0}% of its {} window. The alert level is {}%.\nThe window resets at {reset_txt}.\n\nMove agents to another account with `terrarium admin agent swap <name> <subscription>`, give them an account pool for the auto-swap, or wait for the reset.\n\nOpen: {}\n",
-                    sub.name, sub.provider, w.window, sub.alert_at, subscriptions_link(&state.web)
-                ),
-                data: json!({"subscription": sub.name, "window": w.window, "used_pct": pct,
-                             "resets_at": w.resets_at, "level": "alert", "alert_at": sub.alert_at}),
-                project: None,
-            });
-        }
         if pct >= 100.0 {
             let reset = w
                 .resets_at
@@ -322,23 +301,8 @@ pub async fn evaluate_subscription(state: &Shared, name: &str) -> ApiResult<()> 
                 (Some(a), Some(b)) => Some(a.max(b)),
                 (a, b) => a.or(b),
             });
-            alerts.push(Alert {
-                scope: sub.name.clone(),
-                window: w.window.clone(),
-                period,
-                level: "exhausted",
-                subject: format!("Quota: {} {} window is used up", sub.name, w.window),
-                body: format!(
-                    "Subscription `{}` has used all of its {} window. New turns of its {} agent(s) wait until {reset_txt}.\n\nOpen: {}\n",
-                    sub.name, w.window, on.len(), subscriptions_link(&state.web)
-                ),
-                data: json!({"subscription": sub.name, "window": w.window, "used_pct": pct,
-                             "resets_at": w.resets_at, "level": "exhausted"}),
-                project: None,
-            });
         }
     }
-    raise(state, alerts).await?;
     let cause = format!("quota:{}", sub.name);
     match exhausted_until {
         Some(until) => {
@@ -361,7 +325,27 @@ pub async fn evaluate_subscription(state: &Shared, name: &str) -> ApiResult<()> 
             }
         }
     }
-    Ok(())
+    // The lines (`alert_at`, 90, 100): one mail each per window period.
+    // After the holds, so that the used-up mail names the held agents.
+    let link = subscriptions_link(&state.web);
+    state
+        .db
+        .write("system", move |t| {
+            for w in &windows {
+                let pct = effective_pct(w.used_pct, w.resets_at.as_deref(), now);
+                crate::quota_notices::check(
+                    t,
+                    &sub,
+                    &w.window,
+                    pct,
+                    w.resets_at.as_deref(),
+                    &link,
+                    now,
+                )?;
+            }
+            Ok(())
+        })
+        .await
 }
 
 fn next_midnight(now: DateTime<Utc>) -> DateTime<Utc> {

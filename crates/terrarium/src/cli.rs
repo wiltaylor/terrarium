@@ -415,15 +415,21 @@ pub enum AgentCmd {
     /// plain text for the model
     Send {
         agent: String,
-        /// The text, or `-` for stdin
-        text: String,
+        /// The text, or `-` for stdin. Optional with `--image`
+        #[arg(required_unless_present = "image")]
+        text: Option<String>,
         /// Type the text as-is, at once: a harness command such as
         /// `/compact` runs. For leaders (project_admin of the agent's
         /// project, sysadmin, or the operator) to run a harness command or
         /// fix a stuck harness. Run `terrarium agent screen <agent>` first
         /// and after
-        #[arg(long)]
+        #[arg(long, conflicts_with = "image")]
         raw: bool,
+        /// An image (PNG, JPEG, GIF, or WebP; at most 20 MiB) to attach.
+        /// The CLI copies it into the agent's workspace first, then the
+        /// turn names its path. Give the flag once for each image
+        #[arg(long, value_name = "FILE")]
+        image: Vec<std::path::PathBuf>,
     },
     /// Send key presses to the agent's harness terminal, at once: `esc`,
     /// `up`, `down`, `enter`, `tab`, `shift-tab`, `backspace`, `ctrl-c`,
@@ -1671,7 +1677,7 @@ pub enum AdminCmd {
 #[derive(Debug, Subcommand)]
 pub enum SecretCmd {
     /// List the secrets: of `--project`, else of each scope that you
-    /// manage. No value shows
+    /// manage. In an agent: the secrets granted to you. No value shows
     #[command(visible_alias = "ls")]
     List,
     /// Show one secret: its kind, plain fields, and the names of its
@@ -1692,6 +1698,34 @@ pub enum SecretCmd {
         /// Read the operator password from the first line of stdin
         #[arg(long)]
         password_stdin: bool,
+    },
+    /// Give a secret to an agent or to each agent of a project. A grant
+    /// applies at the next start of the agent
+    Grant {
+        name: String,
+        /// `agent:<project>/<name>`, `agent:<id>`, `project:<name>`, or
+        /// `<project>/<name>` (an agent)
+        grantee: String,
+        /// `use`: the git credential helper and the ssh-agent only. `read`:
+        /// also env vars and `secret get`. Default: `use` for token,
+        /// github_token, and ssh_key; `read` for the other kinds
+        #[arg(long, value_parser = ["use", "read"])]
+        level: Option<String>,
+        /// Put the value into this env var at the start (needs `read`)
+        #[arg(long)]
+        env: Option<String>,
+    },
+    /// Remove a grant
+    Revoke { name: String, grantee: String },
+    /// List the grants of a secret
+    Grants { name: String },
+    /// Print the value of a secret that is granted to you with `read`
+    /// (agents only). The output is the value only
+    Get {
+        name: String,
+        /// The field to print. Default: the main secret field of the kind
+        #[arg(long)]
+        field: Option<String>,
     },
 }
 

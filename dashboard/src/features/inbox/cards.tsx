@@ -9,6 +9,7 @@ import { ErrorBanner } from "../../components/ui";
 import { ago } from "../../lib/format";
 import { api } from "../../stores";
 import { MessageView } from "../mail/parts";
+import { systemMailLink } from "./model";
 
 /** Run one call with a busy flag, and keep its error for the banner. */
 function useAction() {
@@ -39,6 +40,7 @@ export function MailItemCard(props: { message: Message; open: boolean; now: numb
   const [reply, setReply] = createSignal("");
   const a = useAction();
   const system = () => m().from_kind === "system";
+  const link = () => systemMailLink(m());
   const ack = async (e: Event) => {
     e.preventDefault();
     const text = reply().trim();
@@ -64,7 +66,16 @@ export function MailItemCard(props: { message: Message; open: boolean; now: numb
           open the thread
         </A>
       </div>
-      <p style={{ margin: 0, "font-weight": 600 }}>{m().subject || "(no subject)"}</p>
+      <div class="spread" style={{ gap: "8px", "flex-wrap": "wrap" }}>
+        <p style={{ margin: 0, "font-weight": 600 }}>{m().subject || "(no subject)"}</p>
+        <Show when={link()}>
+          {(l) => (
+            <A class="btn small" href={l().href}>
+              {l().label}
+            </A>
+          )}
+        </Show>
+      </div>
       <pre class="mail-body">{m().body}</pre>
       <Show when={props.open}>
         <form class="stack" style={{ gap: "6px" }} onSubmit={ack} aria-label="Acknowledge">

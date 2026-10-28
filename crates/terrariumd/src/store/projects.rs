@@ -249,6 +249,7 @@ pub fn delete(t: &mut Tx<'_>, name: &str) -> ApiResult<()> {
     t.execute("DELETE FROM projects WHERE name = ?1", [name])?;
     // The project's secrets and their grants (PLAN §16b.2).
     crate::secrets::delete_project(t, name)?;
+    crate::secrets::grants::on_project_deleted(t, name)?;
     t.audit("project.delete", name, Some(name), json!({}))?;
     Ok(())
 }

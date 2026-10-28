@@ -678,6 +678,44 @@ async fn agents() {
         )],
     )
     .await;
+    // `--image`: upload each image (JSON form), then send the text with
+    // one line for each path.
+    let dir = tempfile::tempdir().unwrap();
+    let img = dir.path().join("shot.png");
+    std::fs::write(&img, b"\x89PNG\r\n\x1a\nxx").unwrap();
+    let img_arg = img.display().to_string();
+    let path = "/work/terra/w/.terrarium/attachments/20261028-120000-abcdefgh.png";
+    ok(
+        false,
+        &["agent", "send", "w", "--image", &img_arg],
+        vec![
+            (201, json!({"path": path, "name": "x.png", "bytes": 10, "content_type": "image/png"})),
+            (202, json!({"accepted": true})),
+        ],
+        vec![
+            (
+                Post,
+                "/api/agents/w/attachments",
+                vec![],
+                Some(json!({"data_base64": crate::commands::artifacts::base64(b"\x89PNG\r\n\x1a\nxx")})),
+            ),
+            (
+                Post,
+                "/api/agents/w/send",
+                vec![],
+                Some(json!({"text": crate::commands::agents::image_line(path)})),
+            ),
+        ],
+    )
+    .await;
+    assert_eq!(
+        crate::commands::agents::turn_with_images(" look ", &["/a.png".into(), "/b.png".into()]),
+        format!(
+            "look\n\n{}\n{}",
+            crate::commands::agents::image_line("/a.png"),
+            crate::commands::agents::image_line("/b.png")
+        )
+    );
     // D3: a raw send and keys, for the operator and for a lead agent.
     for agent_mode in [false, true] {
         let out = ok(
@@ -6066,4 +6104,110 @@ async fn secrets_list_show_rm_and_reveal() {
     )
     .await;
     assert!(out.contains("value: ghp_abc"), "{out}");
+}
+
+/// PLAN §16b.3: grant, revoke, and the grants of a secret; in an agent,
+/// `secret list` shows the own grants and `secret get` prints the value
+/// only.
+#[tokio::test]
+async fn secret_grants_and_the_agent_commands() {
+    let grant = json!({"scope": "p", "name": "db", "grantee": "agent:01K8",
+                       "grantee_label": "agent:p/w", "level": "read", "env": "DB_URL",
+                       "created_by": "operator", "created_at": "2026-10-28T00:00:00Z"});
+    let out = ok(
+        false,
+        &[
+            "secret", "grant", "db", "p/w", "--level", "read", "--env", "DB_URL", "-p", "p",
+        ],
+        vec![(201, grant.clone())],
+        vec![(
+            Post,
+            "/api/secrets/p/db/grants",
+            vec![],
+            Some(json!({"grantee": "agent:p/w", "level": "read", "env": "DB_URL"})),
+        )],
+    )
+    .await;
+    assert_eq!(
+        out,
+        "granted p/db to agent:p/w (read as $DB_URL); it applies at the next start\n"
+    );
+    ok(
+        false,
+        &["secret", "grant", "gh", "project:p"],
+        vec![(201, grant.clone())],
+        vec![(
+            Post,
+            "/api/secrets/global/gh/grants",
+            vec![],
+            Some(json!({"grantee": "project:p"})),
+        )],
+    )
+    .await;
+    assert!(
+        Cli::try_parse_from(["terrarium", "secret", "grant", "a", "b", "--level", "all"]).is_err()
+    );
+    ok(
+        false,
+        &["secret", "revoke", "db", "p/w", "-p", "p"],
+        vec![(204, Value::Null)],
+        vec![(
+            Delete,
+            "/api/secrets/p/db/grants",
+            vec![("grantee", "agent:p/w")],
+            None,
+        )],
+    )
+    .await;
+    let out = ok(
+        false,
+        &["secret", "grants", "db", "-p", "p"],
+        vec![(200, json!([grant]))],
+        vec![req(Get, "/api/secrets/p/db/grants")],
+    )
+    .await;
+    assert!(out.contains("agent:p/w") && out.contains("DB_URL"), "{out}");
+    // An agent: its own grants, and the value only.
+    let out = ok(
+        true,
+        &["secret", "list"],
+        vec![(
+            200,
+            json!([{"scope": "p", "name": "db", "kind": "api_key",
+                    "level": "read", "env": "DB_URL", "fields": {},
+                    "secret_fields": ["value"]}]),
+        )],
+        vec![req(Get, "/api/agent/secrets")],
+    )
+    .await;
+    assert!(out.contains("DB_URL") && out.contains("read"), "{out}");
+    let out = ok(
+        true,
+        &["secret", "get", "db"],
+        vec![(
+            200,
+            json!({"scope": "p", "name": "db", "kind": "api_key",
+                   "field": "value", "value": "s3cret"}),
+        )],
+        vec![(Post, "/api/agent/secrets/db/get", vec![], Some(json!({})))],
+    )
+    .await;
+    assert_eq!(out, "s3cret");
+    let out = ok(
+        true,
+        &["secret", "get", "door", "--field", "pin", "--json"],
+        vec![(
+            200,
+            json!({"scope": "p", "name": "door", "kind": "generic",
+                   "field": "pin", "value": "1234"}),
+        )],
+        vec![(
+            Post,
+            "/api/agent/secrets/door/get",
+            vec![],
+            Some(json!({"field": "pin"})),
+        )],
+    )
+    .await;
+    assert!(out.contains("\"value\": \"1234\""), "{out}");
 }

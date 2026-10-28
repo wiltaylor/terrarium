@@ -23,11 +23,15 @@
 //! The API never returns a secret field, except a reveal by the operator
 //! (`POST /api/secrets/{scope}/{name}/reveal`) and the credential helper
 //! answer of `POST /api/repos/credential`, which goes to git inside the
-//! agent's own sandbox for a repo of its own project. The daemon decrypts
-//! a secret only when it uses one, into zeroizing buffers. The sandbox
-//! never binds the key file or the database.
+//! agent's own sandbox for a repo of its own project or a granted host, and
+//! `POST /api/agent/secrets/{name}/get` for a `read` grant ([`grants`]).
+//! The ssh-agent of an agent ([`agent_keys`]) signs and never gives a key
+//! out. The daemon decrypts a secret only when it uses one, into zeroizing
+//! buffers. The sandbox never binds the key file or the database.
 
+pub mod agent_keys;
 pub mod crypto;
+pub mod grants;
 pub mod kinds;
 pub mod migrate;
 pub mod redact;

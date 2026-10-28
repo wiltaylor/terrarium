@@ -1,7 +1,7 @@
 import { useParams, useSearchParams } from "@solidjs/router";
 import { createEffect, createResource, createSignal, For, on, onCleanup, Show } from "solid-js";
 import { createPagedList } from "../../components/paged";
-import { HoldBadge } from "../../components/QuotaBanner";
+import { HoldBadge } from "../../components/HoldBadge";
 import { StatusBadge } from "../../components/StatusBadge";
 import { ConfirmButton, Drawer, ErrorBanner, LoadMore, Modal, PageHead } from "../../components/ui";
 import type { Card } from "../../api/types";

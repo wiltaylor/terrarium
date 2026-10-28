@@ -15,6 +15,7 @@ import { onArtifactOrigin } from "../lib/artifact-origin";
 import { withScope } from "../lib/target-scope";
 import type {
   Agent,
+  Attachment,
   AgentCreate,
   AgentEvent,
   AgentTemplate,
@@ -223,6 +224,8 @@ export interface Api {
     stop(id: string): Promise<Agent>;
     restart(id: string): Promise<Agent>;
     send(id: string, text: string): Promise<{ accepted: boolean }>;
+    /** `POST /api/agents/{id}/attachments` (docs/api.md §6.5): the raw image (PNG, JPEG, GIF, WebP; at most 20 MiB) into the agent's workspace. The answer has the path that the agent sees. The same rights as `send`. */
+    attach(id: string, file: Blob): Promise<Attachment>;
     /** `POST /api/agents/{id}/send` with `raw: true` (docs/api.md §6.5): typed as-is, at once; a `/` or `!` command runs. project_admin, sysadmin, or the operator. */
     sendRaw(id: string, text: string): Promise<{ accepted: boolean; raw: boolean }>;
     /** `POST /api/agents/{id}/keys` (docs/api.md §6.5): key presses (`esc`, `down`, `enter`, `ctrl-c`, `text:<text>`), at most 20 a second. */
@@ -709,6 +712,7 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       stop: (id) => post(`${a(id)}/stop`),
       restart: (id) => post(`${a(id)}/restart`),
       send: (id, text) => post(`${a(id)}/send`, { text }),
+      attach: (id, file) => t.request("POST", `${a(id)}/attachments`, { raw: { data: file, type: file.type || "application/octet-stream" } }),
       sendRaw: (id, text) => post(`${a(id)}/send`, { text, raw: true }),
       keys: (id, keys) => post(`${a(id)}/keys`, { keys }),
       answer: (id, body) => post(`${a(id)}/answer`, body),

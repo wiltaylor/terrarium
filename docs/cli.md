@@ -188,6 +188,11 @@ terrarium secret set <name> --kind k [-p project] [--file f] [kind flags]
 terrarium secret generate <name> [-p project] [--type ed25519|rsa] [--bits 3072|4096] [--comment c] [--replace]
 terrarium secret rm <name> [-p project]
 terrarium secret reveal <name> [-p project] [--password-stdin]     the operator only
+terrarium secret grant <name> <grantee> [-p project] [--level use|read] [--env VAR]
+terrarium secret revoke <name> <grantee> [-p project]
+terrarium secret grants <name> [-p project]
+terrarium secret list                       in an agent: the secrets granted to you
+terrarium secret get <name> [--field f]     in an agent: print one value (`read` grant)
 ```
 
 The secret manager of `docs/api.md` §5.2. The scope is `--project`, else
@@ -246,6 +251,38 @@ for the operator only, and it asks for the operator password (or reads the
 first line of stdin with `--password-stdin`). The daemon checks the
 password as a login checks it. Each reveal writes an audit row.
 
+`grant` gives a secret to an agent or to each agent of a project. The
+grantee is `agent:<project>/<name>`, `agent:<id>`, `project:<name>`, or
+`<project>/<name>` (an agent). The scope rules are the same as for the
+secret. A project secret goes only to its own project. `--level use`
+gives the brokers only: the git credential helper and the ssh-agent. The
+agent cannot see the value. `--level read` also gives env vars and
+`secret get`. The default is `use` for `token`, `github_token`, and
+`ssh_key`, and `read` for the other kinds. `--env VAR` puts the value
+into that env var at each start. It needs `--level read`. A grant
+applies at the next start of the agent. `revoke` removes a grant, and
+`grants` lists the grants of a secret.
+
+```
+terrarium secret grant db ops/builder --level read --env DATABASE_URL -p ops
+terrarium secret grant github-deploy project:ops
+terrarium secret grant build-box ops/builder           # an ssh_key: use
+terrarium secret revoke db ops/builder -p ops
+```
+
+In an agent, `secret list` (with no `--project`) shows the secrets that
+are granted to the agent: the scope, the name, the kind, the level, the
+env var, and the plain fields. It shows no value. `secret get` prints the
+value of a secret with a `read` grant, and nothing more: no label and no
+line end. `--field` names a field (the default is the main secret field).
+`--json` prints the whole answer. Each `get` writes an audit row. A `use`
+grant is refused (exit 3).
+
+```
+export DATABASE_URL="$(terrarium secret get db)"
+terrarium secret get door --field pin
+```
+
 ### Agents
 
 `agent` has the alias `agents`.
@@ -267,6 +304,7 @@ terrarium agent swap <agent> <subscription>  move to another plan account of the
 terrarium agent rm <agent> [--confirm] [--keep-workspace]
 terrarium agent start|stop|restart <agent> [--no-wait]
 terrarium agent send <agent> <text | -> [--raw]  --raw: project_admin, sysadmin, or the operator
+terrarium agent send <agent> [text | -] --image <file>...  attach images to the turn
 terrarium agent keys <agent> <key>...         project_admin, sysadmin, or the operator
 terrarium agent answer <agent> [--request-id id] (--choice N | --allow | --deny | --text T)
 terrarium agent logs <agent> [--since seq] [--kind k] [--limit n] [--follow]
@@ -396,6 +434,26 @@ with `[User]` in operator mode, and with `[Agent:<project>/<name>]` when
 an agent runs the command (PLAN §8.5). A text that starts
 with `/` or `!` stays plain text for the model: the adapter escapes it
 ([api.md §6.2](api.md#62-lifecycle-and-turns)).
+
+`agent send --image <file>` attaches an image to the turn. Give the flag
+once for each image. The image is a PNG, JPEG, GIF, or WebP file of at
+most 20 MiB. The CLI copies each image into the agent's workspace first
+(`POST /api/agents/{id}/attachments`). Then it sends the turn with one
+line for each image after the text. The line names the path that the
+agent sees, for example:
+
+```
+Attached image: /work/terra/w1/.terrarium/attachments/20261028-142501-k3m9x2qa.png (open this file with your image or file-read tool to see it)
+```
+
+The text is optional with `--image`. When an upload fails, the CLI sends
+no turn. `--image` and `--raw` do not go together. The rights are the
+rights of `agent send`. See
+[api.md §6.2](api.md#62-lifecycle-and-turns).
+
+```
+terrarium agent send terra/w1 "Fix the layout in this screenshot" --image shot.png
+```
 
 `agent send --raw` and `agent keys` are for leaders: they fix a stuck
 harness (a dialog, a wrong mode) and run harness commands. Both write to

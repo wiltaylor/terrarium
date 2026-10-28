@@ -1,7 +1,7 @@
 import { A, useNavigate, useParams } from "@solidjs/router";
 import { createSignal, For, onMount, Show } from "solid-js";
 import { LeaseChips } from "../../components/Leases";
-import { HoldBadge } from "../../components/QuotaBanner";
+import { HoldBadge } from "../../components/HoldBadge";
 import { StatusBadge } from "../../components/StatusBadge";
 import { Empty, ErrorBanner, PageHead, useNow } from "../../components/ui";
 import { AGENT_STATUSES, type Agent, type AgentStatus } from "../../api/types";

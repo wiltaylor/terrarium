@@ -1389,23 +1389,6 @@ th {
   color: var(--info);
 }
 
-/* Quota banner (PLAN §16.2) */
-.quota-banner {
-  margin: 0 0 12px;
-}
-.quota-alert {
-  padding: 8px 12px;
-  border-radius: 8px;
-  border: 1px solid var(--warn);
-  background: var(--warn-soft);
-  gap: 8px;
-  flex-wrap: wrap;
-}
-.quota-alert.exhausted {
-  border-color: var(--danger);
-  background: var(--danger-soft);
-}
-
 /* Self report: the agent's own word, apart from the runner status */
 .self-report {
   display: inline-flex;
@@ -1753,6 +1736,49 @@ tr.row-open > td {
 }
 .convo-compose-note {
   margin: 0;
+}
+/* The images of the composer: thumbnails with the size and a remove button. */
+.convo-composer.convo-drop {
+  outline: 2px dashed var(--accent, #4a8);
+  outline-offset: 2px;
+}
+.convo-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0;
+  padding: 8px 8px 0 0;
+  list-style: none;
+}
+.convo-image {
+  position: relative;
+  display: grid;
+  justify-items: center;
+  gap: 2px;
+  padding: 4px;
+  border: 1px solid var(--border, #ccc);
+  border-radius: 6px;
+}
+.convo-image.failed {
+  border-color: var(--danger, #c33);
+}
+.convo-image img,
+.convo-image-blank {
+  display: block;
+  width: 72px;
+  height: 72px;
+  object-fit: cover;
+  border-radius: 4px;
+}
+.convo-image-remove {
+  position: absolute;
+  top: -8px;
+  right: -8px;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border-radius: 50%;
+  line-height: 1;
 }
 
 /* The model combobox (components/ModelPicker.tsx). */

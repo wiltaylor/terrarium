@@ -1569,6 +1569,130 @@ async fn quota_hold_blocks_and_release_delivers() {
     assert!(td.sup.waiting_turns(agent).is_empty());
 }
 
+/// The text of each file under `dir`, recursively.
+fn tree_text(dir: &Path) -> String {
+    let mut out = String::new();
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                out.push_str(&tree_text(&p));
+            } else if let Ok(b) = std::fs::read(&p) {
+                out.push_str(&String::from_utf8_lossy(&b));
+            }
+        }
+    }
+    out
+}
+
+/// PLAN §16b.4: the env vars of the `read` grants, `GH_TOKEN` for a
+/// `github_token`, the git helper for the granted hosts, and the
+/// ssh-agent socket, which stops with the agent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn secret_grants_reach_the_launch() {
+    let td = Td::start().await;
+    let id = td.agent("demo", "sec", json!({})).await;
+    let key = ssh_key::PrivateKey::new(
+        ssh_key::private::Ed25519Keypair::from_seed(&[5u8; 32]).into(),
+        "t",
+    )
+    .unwrap()
+    .to_openssh(ssh_key::LineEnding::LF)
+    .unwrap()
+    .to_string();
+    for (path, body) in [
+        (
+            "/api/secrets/global/db",
+            json!({"kind": "api_key", "fields": {"value": "postgres-GRANTED-1"}}),
+        ),
+        (
+            "/api/secrets/global/gh",
+            json!({"kind": "github_token",
+                   "fields": {"value": "ghp_GRANTEDgh", "host": "git.example.org"}}),
+        ),
+        (
+            "/api/secrets/demo/deploy",
+            json!({"kind": "ssh_key", "fields": {"private_key": key}}),
+        ),
+    ] {
+        let (s, b) = td.req(Method::PUT, path, Some(body), None).await;
+        assert_eq!(s, 201, "{b}");
+    }
+    for (path, body) in [
+        (
+            "/api/secrets/global/db/grants",
+            json!({"grantee": "agent:demo/sec", "level": "read", "env": "DB_URL"}),
+        ),
+        (
+            "/api/secrets/global/gh/grants",
+            json!({"grantee": "project:demo", "level": "read"}),
+        ),
+        (
+            "/api/secrets/demo/deploy/grants",
+            json!({"grantee": "agent:demo/sec"}),
+        ),
+    ] {
+        td.post(path, Some(body)).await;
+    }
+    let state = td.daemon.as_ref().unwrap().state.clone();
+    let key_id = id.clone();
+    let view = state
+        .db
+        .read(move |c| terrariumd::store::agents::get(c, &key_id))
+        .await
+        .unwrap();
+    let spec = td.sup.launch_spec(&view.agent, None).await.unwrap();
+    assert_eq!(spec.env["DB_URL"], "postgres-GRANTED-1");
+    assert_eq!(spec.env["GH_TOKEN"], "ghp_GRANTEDgh");
+    assert_eq!(spec.env["GIT_CONFIG_COUNT"], "1");
+    assert_eq!(
+        spec.env["GIT_CONFIG_KEY_0"],
+        "credential.https://git.example.org.helper"
+    );
+    assert_eq!(spec.env["GIT_CONFIG_VALUE_0"], "!terrarium repo credential");
+    let sock = td
+        .dir
+        .path()
+        .join("run/ssh-agent")
+        .join(&id)
+        .join("agent.sock");
+    assert_eq!(spec.env["SSH_AUTH_SOCK"], sock.display().to_string());
+    let line = terrariumd::sandbox::command_line_hiding(&spec, &["DB_URL".to_owned()]);
+    assert!(!line.contains("postgres-GRANTED-1"), "{line}");
+    assert!(!line.contains("ghp_GRANTEDgh"), "{line}");
+
+    // The start serves the socket; it lists the granted key.
+    td.post(&format!("/api/agents/{id}/start"), None).await;
+    td.wait_status(&id, "idle").await;
+    let mut s = UnixStream::connect(&sock).await.unwrap();
+    s.write_all(&[0, 0, 0, 1, 11]).await.unwrap();
+    let mut len = [0u8; 4];
+    tokio::io::AsyncReadExt::read_exact(&mut s, &mut len)
+        .await
+        .unwrap();
+    let mut body = vec![0u8; u32::from_be_bytes(len) as usize];
+    tokio::io::AsyncReadExt::read_exact(&mut s, &mut body)
+        .await
+        .unwrap();
+    assert_eq!(body[0], 12);
+    assert_eq!(&body[1..5], &[0, 0, 0, 1]);
+    drop(s);
+    // No value is in a file that the agent sees.
+    let agent_dir = td.dir.path().join("state/agents").join(&id);
+    let seen = tree_text(&agent_dir.join("harness")) + &tree_text(&td.dir.path().join("work"));
+    for v in ["postgres-GRANTED-1", "ghp_GRANTEDgh", "PRIVATE KEY"] {
+        assert!(!seen.contains(v), "a file holds {v}");
+    }
+    // A stop removes the socket.
+    td.post(&format!("/api/agents/{id}/stop"), None).await;
+    td.wait_status(&id, "stopped").await;
+    let start = Instant::now();
+    while sock.exists() && start.elapsed() < WAIT {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(!sock.exists());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn subscription_gates_the_start_and_injects_its_key() {
     let td = Td::start().await;

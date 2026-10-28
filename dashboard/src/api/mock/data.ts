@@ -276,8 +276,8 @@ export function seed(now: number = Date.now()): MockWorld {
     at: ago(4),
     kind: "quota.alert",
     actor: "system",
-    summary: "chatgpt-pro: window 5h at 87% (alert at 80%)",
-    data: { subscription: "chatgpt-pro", window: "5h", used_pct: 87, resets_at: ahead(41), level: "alert", alert_at: 80 },
+    summary: "Quota: chatgpt-pro 5h window at 87%",
+    data: { subscription: "chatgpt-pro", window: "5h", used_pct: 87, resets_at: ahead(41), level: "alert", alert_at: 80, threshold: 80, message: fakeUlid("msg", 16) },
   });
   ev(0.2, "tool_use", "runner-dev", "terrarium", "Edit crates/terrariumd/src/runner.rs", { tool: "Edit", tool_id: "toolu_mock3" });
 
@@ -758,7 +758,17 @@ ${XSS_DOCUMENT}
     msg(fakeUlid("msg", 13), fakeUlid("th", 1), "system", "operator", "TER-15 blocked: Codex adapter: resume by session id", blocked, "delivered", 11),
     msg(fakeUlid("msg", 14), fakeUlid("th", 1), "system", "lead", "TER-15 blocked: Codex adapter: resume by session id", blocked, "read", 11, readBy("lead")),
     msg(fakeUlid("msg", 15), fakeUlid("th", 1), "lead", "adapter-codex", "Re: TER-15 blocked: Codex adapter: resume by session id", "Pick up TER-13 while we wait for the login.", "read", 9, { in_reply_to: fakeUlid("msg", 14), ...readBy("adapter-codex") }),
-    msg(fakeUlid("msg", 16), fakeUlid("th", 8), "system", "operator", "Quota: anthropic-max 5h window at 85%", "Subscription `anthropic-max` (anthropic) has used 85% of its 5h window. The alert level is 80%.\n\nOpen: /subscriptions", "delivered", 8),
+    // The quota line notice (quota_notices.rs): one mail at `alert_at`, one more at 90.
+    msg(
+      fakeUlid("msg", 16),
+      fakeUlid("th", 8),
+      "system",
+      "operator",
+      "Quota: chatgpt-pro 5h window at 87%",
+      "Subscription `chatgpt-pro` (openai) has used 87% of its 5h window. It passed the 80% line.\nThe window resets in 41m.\nThe agents that spent the most in the last 5h: terrarium/adapter-codex (412k tokens).\nYou get one more message at 90%.\n\nMove agents to another account with `terrarium admin agent swap <name> <subscription>`, give them an account pool for the auto-swap, or wait for the reset.\n\nOpen: /subscriptions\n",
+      "delivered",
+      8,
+    ),
     msg(fakeUlid("msg", 17), fakeUlid("th", 5), "lead", "project:webshop", "Shared CSS tokens?", "Can webshop reuse the dashboard CSS variables?", "delivered", 5),
   ];
 

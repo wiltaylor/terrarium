@@ -1111,6 +1111,16 @@ export interface WikiDiff {
 
 export type ArtifactLinkKind = "page" | "version" | "card";
 
+/** `POST /api/agents/{id}/attachments` (docs/api.md §6.5): an image in the agent's workspace. */
+export interface Attachment {
+  /** The path of the file as the agent sees it (in the sandbox). Never the host path. */
+  path: string;
+  /** The file name: `<YYYYMMDD-HHMMSS>-<id>.<ext>`. */
+  name: string;
+  bytes: number;
+  content_type: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+}
+
 export interface Artifact {
   /** Project-local: `ART-<n>`. */
   id: string;

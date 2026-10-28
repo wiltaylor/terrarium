@@ -29,6 +29,7 @@ pub mod policy;
 pub mod probes;
 pub mod prompt;
 pub mod question_guard;
+pub mod quota_notices;
 pub mod quota_policy;
 pub mod runner_supervisor;
 pub mod sandbox;
@@ -419,7 +420,8 @@ fn spawn_account_migration(state: Shared) -> JoinHandle<()> {
 /// same timer prunes the trash of deleted agents (`TERRARIUM_TRASH_DAYS`,
 /// [`trash::prune_trash`]), the revoked sessions past their `exp`, and the
 /// schedule runs past the newest 500 of each schedule, and the webhook
-/// delivery IDs older than 7 days.
+/// delivery IDs older than 7 days, and the turn attachments older than 7
+/// days ([`api::attachments::prune`]).
 fn spawn_prune_timer(state: Shared) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut wait = std::time::Duration::from_secs(3600);
@@ -442,6 +444,16 @@ fn spawn_prune_timer(state: Shared) -> JoinHandle<()> {
                 Ok(Ok(_)) => {}
                 Ok(Err(e)) => warn!("trash prune failed: {e}"),
                 Err(e) => warn!("trash prune task failed: {e}"),
+            }
+            let work = state.work_dir.clone();
+            match tokio::task::spawn_blocking(move || {
+                api::attachments::prune(&work, std::time::SystemTime::now())
+            })
+            .await
+            {
+                Ok(n) if n > 0 => info!(files = n, "attachment prune done"),
+                Ok(_) => {}
+                Err(e) => warn!("attachment prune task failed: {e}"),
             }
             let now = chrono::Utc::now().timestamp();
             if let Err(e) = state

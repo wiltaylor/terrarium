@@ -403,6 +403,53 @@ struct Built {
     account_warning: Option<String>,
     /// The skills that the launch could not deliver (PLAN §8.6).
     skill_warnings: Vec<String>,
+    /// The env vars of the secret grants (PLAN §16b.4): the start log
+    /// hides their values.
+    secret_vars: Vec<String>,
+    /// Grants that give nothing at this start. No value.
+    secret_warnings: Vec<String>,
+    /// The launch binds an ssh-agent socket dir: serve it.
+    ssh_agent: bool,
+}
+
+/// Put the env vars of the secret grants into `env` (PLAN §16b.4): a var
+/// that the harness or the account sets already wins. The git hosts of the
+/// granted tokens get `terrarium repo credential` as their credential
+/// helper, through `GIT_CONFIG_*` (no file in the home). The answer: the
+/// names of the secret vars, and the warnings. Never the values.
+fn secret_env(
+    env: &mut std::collections::BTreeMap<String, String>,
+    secrets: &crate::secrets::grants::LaunchSecrets,
+) -> (Vec<String>, Vec<String>) {
+    let mut vars = Vec::new();
+    let mut warnings = Vec::new();
+    for (k, v) in &secrets.env {
+        if env.contains_key(k) {
+            warnings.push(format!(
+                "a secret grant sets `{k}`, but the harness sets it already; the grant does not apply"
+            ));
+            continue;
+        }
+        env.insert(k.clone(), v.to_string());
+        vars.push(k.clone());
+    }
+    if !secrets.git_hosts.is_empty() && !env.contains_key("GIT_CONFIG_COUNT") {
+        env.insert(
+            "GIT_CONFIG_COUNT".into(),
+            secrets.git_hosts.len().to_string(),
+        );
+        for (i, host) in secrets.git_hosts.iter().enumerate() {
+            env.insert(
+                format!("GIT_CONFIG_KEY_{i}"),
+                format!("credential.https://{host}.helper"),
+            );
+            env.insert(
+                format!("GIT_CONFIG_VALUE_{i}"),
+                "!terrarium repo credential".into(),
+            );
+        }
+    }
+    (vars, warnings)
 }
 
 /// The file that records the account of the last launch
@@ -940,6 +987,9 @@ struct Inner {
     pointer_seq: AtomicI64,
     tx: broadcast::Sender<SupervisorEvent>,
     state: OnceLock<Weak<AppState>>,
+    /// The ssh-agent socket of each running agent with an `ssh_key` grant
+    /// (PLAN §16b.4). A drop stops it. Never locked with `slots`.
+    ssh_agents: Mutex<HashMap<AgentId, crate::ssh_agent::AgentHandle>>,
     shutting_down: AtomicBool,
     /// True after the shutdown: the forward and attach tasks end, and drop
     /// their runner handles, so the control connections close.
@@ -976,6 +1026,8 @@ struct StoreView {
     /// The URLs of the project's repos. The local ones under the repos dir
     /// are bound into the sandbox (`sandbox::local_repo_binds`).
     repo_urls: Vec<String>,
+    /// What the agent's secret grants give the start (PLAN §16b.4).
+    secrets: crate::secrets::grants::LaunchSecrets,
 }
 
 enum SubscriptionCheck {
@@ -1045,6 +1097,7 @@ impl RunnerSupervisor {
                 pointer_seq: AtomicI64::new(0),
                 tx,
                 state: OnceLock::new(),
+                ssh_agents: Mutex::new(HashMap::new()),
                 shutting_down: AtomicBool::new(false),
                 stop_tx: watch::Sender::new(false),
             }),
@@ -1137,6 +1190,7 @@ impl RunnerSupervisor {
             repos: Vec::new(),
             accounts: Vec::new(),
             cred_alias: None,
+            ssh_agent: None,
             harness_bin: None,
         }
     }
@@ -1212,13 +1266,76 @@ impl RunnerSupervisor {
                     default_account,
                     state_dir: Some(state_dir),
                     repo_urls,
+                    secrets: Default::default(),
                 })
             })
             .await;
-        result.unwrap_or_else(|e| {
+        let mut view = result.unwrap_or_else(|e| {
             warn!(agent = %agent.id, "cannot read the prompt context: {e}");
             StoreView::default()
+        });
+        view.secrets = Self::launch_secrets(&state, agent).await;
+        view
+    }
+
+    /// What the agent's secret grants give its start. An error gives
+    /// nothing, with a warning.
+    async fn launch_secrets(
+        state: &Shared,
+        agent: &Agent,
+    ) -> crate::secrets::grants::LaunchSecrets {
+        let (id, project, dir) = (
+            agent.id.to_string(),
+            agent.project.clone(),
+            state.state_dir.clone(),
+        );
+        let result = state
+            .db
+            .read(move |c| {
+                let key = crate::secrets::key(&dir)?;
+                crate::secrets::grants::launch(c, &key, &id, &project)
+            })
+            .await;
+        result.unwrap_or_else(|e| {
+            warn!(agent = %agent.id, "cannot read the secret grants: {e}");
+            crate::secrets::grants::LaunchSecrets {
+                warnings: vec![format!("the secret grants did not load: {}", e.message)],
+                ..Default::default()
+            }
         })
+    }
+
+    /// Serve the ssh-agent socket of `agent` (PLAN §16b.4), or stop it
+    /// when `serve` is false. A socket that does not start is a warning:
+    /// the agent starts with no keys.
+    fn ssh_agent(&self, agent: &Agent, serve: bool) -> Option<String> {
+        let old = lock(&self.inner.ssh_agents).remove(&agent.id);
+        drop(old);
+        if !serve {
+            return None;
+        }
+        let state = self.state()?;
+        let id = agent.id.to_string();
+        let runtime = &self.inner.cfg.runtime_dir;
+        match crate::secrets::agent_keys::serve(
+            state.db.clone(),
+            state.state_dir.clone(),
+            runtime,
+            &id,
+            &agent.project,
+        ) {
+            Ok(h) => {
+                debug!(agent = %agent.id, socket = %h.path().display(), "ssh-agent socket up");
+                lock(&self.inner.ssh_agents).insert(agent.id, h);
+                None
+            }
+            Err(e) => {
+                // The sandbox binds the dir: it must exist.
+                let dir = crate::secrets::agent_keys::socket_dir(runtime, &id);
+                let _ = std::fs::create_dir_all(&dir);
+                Some(format!("the ssh-agent socket did not start: {e}"))
+            }
+        }
     }
 
     /// `epoch`: the launch of the slot at this epoch; it records the
@@ -1455,6 +1572,12 @@ impl RunnerSupervisor {
             a
         });
         layout.harness_bin = active.as_ref().map(|a| a.dir.join("bin"));
+        if view.secrets.ssh_keys {
+            layout.ssh_agent = Some(crate::secrets::agent_keys::socket_dir(
+                &cfg.runtime_dir,
+                &agent.id.to_string(),
+            ));
+        }
 
         let resume = if fresh_for_prompt {
             info!(
@@ -1488,6 +1611,8 @@ impl RunnerSupervisor {
             );
         }
         spec.env.extend(credentials);
+        let (secret_vars, mut secret_warnings) = secret_env(&mut spec.env, &view.secrets);
+        secret_warnings.extend(view.secrets.warnings.iter().cloned());
         // A commit in the sandbox needs an identity: the home has no
         // `.gitconfig`, and the host name gives no mail domain.
         let email = format!("{}.{}@terrarium.invalid", agent.name, agent.project);
@@ -1510,6 +1635,9 @@ impl RunnerSupervisor {
             accounts: LaunchedAccounts { account, bound },
             account_warning,
             skill_warnings: delivery.warnings(),
+            secret_vars,
+            secret_warnings,
+            ssh_agent: layout.ssh_agent.is_some(),
         })
     }
 
@@ -1536,9 +1664,14 @@ impl RunnerSupervisor {
             accounts,
             account_warning,
             skill_warnings,
+            secret_vars,
+            mut secret_warnings,
+            ssh_agent,
         } = self
             .build_spec(&agent, resume.as_ref(), &view, Some(epoch))
             .await?;
+        // The socket is up before the sandbox binds its dir.
+        secret_warnings.extend(self.ssh_agent(&agent, ssh_agent));
         self.record_version(id, agent.harness, harness_version);
         self.record_accounts(id, &accounts);
         let resume = if fresh_for_prompt {
@@ -1561,7 +1694,11 @@ impl RunnerSupervisor {
         } else {
             resume
         };
-        debug!(agent = %id, command = %sandbox::command_line(&spec), "launch");
+        debug!(
+            agent = %id,
+            command = %sandbox::command_line_hiding(&spec, &secret_vars),
+            "launch"
+        );
 
         let cfg = &self.inner.cfg;
         let mut rc = RunnerConfig::new(id, &cfg.state_dir, &cfg.runtime_dir);
@@ -1682,7 +1819,7 @@ impl RunnerSupervisor {
             warn!(agent = %id, "{message}");
             self.emit(id, SupervisorEventKind::Harness(Event::Warning { message }));
         }
-        for message in skill_warnings {
+        for message in skill_warnings.into_iter().chain(secret_warnings) {
             warn!(agent = %id, "{message}");
             self.emit(id, SupervisorEventKind::Harness(Event::Warning { message }));
         }
@@ -1895,6 +2032,19 @@ impl RunnerSupervisor {
                 // A later crash restarts with resume of this session.
                 slot.session = Some(s.clone());
                 slot.resume = Some(s.clone());
+            }
+        }
+        // The runner process kept running across a daemon restart: its
+        // sandbox binds the ssh-agent dir, so serve the socket again.
+        let agent = lock(&self.inner.slots).get(&id).map(|s| s.agent.clone());
+        if let (Some(a), Some(state)) = (agent, self.state()) {
+            let (aid, project) = (a.id.to_string(), a.project.clone());
+            let has_keys = state
+                .db
+                .read_now(|c| crate::secrets::grants::ssh_keys(c, &aid, &project))
+                .is_ok_and(|k| !k.is_empty());
+            if let Some(w) = self.ssh_agent(&a, has_keys) {
+                warn!(agent = %id, "{w}");
             }
         }
         let reason = format!("connected to runner pid {}", hello.runner_pid);
@@ -2225,6 +2375,7 @@ impl RunnerSupervisor {
         };
         match next {
             Next::Done(s, reason) => {
+                lock(&self.inner.ssh_agents).remove(&id);
                 info!(agent = %id, status = %s, %reason, "agent ended");
                 self.emit_status(id, s, reason);
                 if let Some(a) = ended_agent {
@@ -3336,6 +3487,7 @@ impl Supervisor for RunnerSupervisor {
             };
             let harness = def.harness;
             let Some(r) = runner else {
+                lock(&self.inner.ssh_agents).remove(&agent);
                 self.emit_status(agent, AgentStatus::Stopped, "stopped");
                 self.targets_down(&def);
                 return Ok(());
@@ -3939,6 +4091,14 @@ impl Supervisor for RunnerSupervisor {
             migrate_all(&self.inner.cfg.state_dir);
             self.load_parked(state);
             self.spawn_hub_listener(state);
+        }
+    }
+
+    fn workspace_inside(&self, agent: &Agent) -> std::path::PathBuf {
+        let layout = self.layout(agent);
+        match self.inner.cfg.sandbox.mode {
+            SandboxMode::None => layout.workspace,
+            SandboxMode::Bwrap => layout.workspace_mount.unwrap_or(layout.workspace),
         }
     }
 

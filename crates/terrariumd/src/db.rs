@@ -1188,6 +1188,24 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX secret_grants_grantee ON secret_grants(grantee);
     "#,
+    // 36: the quota notices that the operator got (PLAN §16.2,
+    // `crate::quota_notices`). One row for each subscription window and
+    // line (`alert_at` or 90) that has notified in the current period.
+    // The row goes when the window drops back under the line or its
+    // `resets_at` passes; the next crossing notifies again. Only this
+    // comment and the table name hold the number: renumber freely.
+    r#"
+    CREATE TABLE quota_notices (
+        subscription TEXT NOT NULL,
+        window       TEXT NOT NULL,
+        threshold    INTEGER NOT NULL,           -- percent
+        resets_at    TEXT,                       -- the reset of the notified period
+        used_pct     REAL NOT NULL,
+        message      TEXT,                       -- the mail to the operator
+        at           TEXT NOT NULL,
+        PRIMARY KEY (subscription, window, threshold)
+    );
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call
@@ -1521,6 +1539,7 @@ mod tests {
             "login_sessions",
             "quota_holds",
             "quota_alerts",
+            "quota_notices",
             "hosts",
             "targets",
             "fleets",

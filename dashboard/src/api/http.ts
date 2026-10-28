@@ -20,6 +20,8 @@ export interface RequestOptions {
   body?: unknown;
   /** Multipart upload. Sent as-is, without a JSON content type. */
   form?: FormData;
+  /** A raw body with its own content type (an image attachment). */
+  raw?: { data: Blob; type: string };
   /** Send this bearer token instead of the stored credentials. Only `POST /api/session` uses it. */
   bearer?: string;
   /** Send no bearer token at all: the password login. */
@@ -168,6 +170,9 @@ export function createHttpTransport(opts: HttpTransportOptions): Transport {
     let body: BodyInit | undefined;
     if (ro.form) {
       body = ro.form;
+    } else if (ro.raw) {
+      headers["Content-Type"] = ro.raw.type;
+      body = ro.raw.data;
     } else if (ro.body !== undefined) {
       headers["Content-Type"] = "application/json";
       body = JSON.stringify(ro.body);

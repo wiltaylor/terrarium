@@ -418,6 +418,7 @@ refused it. Do not parse the message; use `code`.
 | 409 | `stale_base` | A wiki edit names a base revision that is not current. `details: {"base", "current", "diff"}`. |
 | 409 | `lease_held` | Another agent holds a lease on the target that the new lease clashes with (§17.7). `details: {"target", "holder", "holder_id", "lease_id", "exclusive", "expires_at"}`. |
 | 413 | `too_large` | An upload is over the per-file limit or the project quota. |
+| 415 | `unsupported_media_type` | An attachment is not a PNG, JPEG, GIF, or WebP image (§6.2). |
 | 429 | `rate_limited` | Too many calls of one kind; try again later. The credential helper (§5.1) has a limit per agent. An agent has too many live exec sessions (§17). A host agent runs its maximum of sessions. |
 | 501 | `not_available` | The route exists, but this phase does not do the request. |
 | 422 | `invalid` | Well-formed values that break a rule: a bad name, an empty title, a missing column. |
@@ -670,7 +671,8 @@ Rows oldest first. Cursor: `seq`.
 never the text), `agent.keys` (`keys`: the key names; a text key as
 `text(<length>)`), `agent.answer`, `agent.attach`,
 `repo.checkout`, `repo.credential` (each answer of the credential helper),
-`secret.put`, `secret.delete`, `secret.reveal`, `secret.migrated` (actor
+`secret.put`, `secret.delete`, `secret.reveal`, `secret.grant`,
+`secret.revoke`, `secret.get`, `secret.use`, `secret.migrated` (actor
 `system`), and `secret.rotate_key` (actor `system`) (§5.2),
 `mail.read` (the first read of a message; `detail` has `thread`, `from`,
 `to`, and `via`: `read` or `reply`), `board.columns`, `card.reassign`, `card.reopen`, `card.archive` (by an admin
@@ -848,10 +850,14 @@ the operator). The daemon answers only when a repo of the agent's own
 project has an `https` or `http` URL with the same protocol, host
 (with port), and path (`.git` and slashes at the ends do not count), and a
 secret of kind `token` or `github_token` (the project's secret of that
-name, else the global one). Every other case is `404 not_found`, so git
-falls back to its next helper. An SSH key is never answered. Each answer
-writes a `repo.credential` audit row (without the secret). An agent gets at
-most 30 answers a minute (`429 rate_limited`).
+name, else the global one). When no repo matches, the daemon answers for
+an `https` host of a `token` or `github_token` secret that is granted to
+the agent (§5.2, "Grants"); git does not need to send the path for it.
+Every other case is `404 not_found`, so git falls back to its next
+helper. An SSH key is never answered. Each answer for a repo writes a
+`repo.credential` audit row, and each answer for a grant writes a
+`secret.use` audit row (without the secret). An agent gets at most 30
+answers a minute (`429 rate_limited`).
 
 ```
 POST /api/repos/credential          (agent)
@@ -873,8 +879,9 @@ variable, or in the repo's `.git/config`.
 
 PLAN §16b. The secret manager holds the API keys, tokens, logins, SSH keys,
 and custom secrets that the daemon and the agents use. The code is in
-`crates/terrariumd/src/secrets/` and `api/secrets.rs`. Grants to agents
-come later (PLAN §16b.3).
+`crates/terrariumd/src/secrets/`, `api/secrets.rs`, and
+`api/secret_grants.rs`. An agent gets a secret only through a grant (see
+"Grants" below).
 
 | Endpoint | Body | Answer | Needs |
 |---|---|---|---|
@@ -885,6 +892,11 @@ come later (PLAN §16b.3).
 | `DELETE /api/secrets/{scope}/{name}?force=` | | `204`; `409` when a target uses it | below |
 | `POST /api/secrets/{scope}/{name}/generate` | `{"type"?: "ed25519" \| "rsa", "bits"?: 3072 \| 4096, "comment"?, "replace"?: false}` | `201` secret with `public_key` and `fingerprint`; `200` replaced | below |
 | `POST /api/secrets/{scope}/{name}/reveal` | `{"password"}` | `200` secret with `values` | the operator |
+| `GET /api/secrets/{scope}/{name}/grants` | | `200` `[grant]` | below |
+| `POST /api/secrets/{scope}/{name}/grants` | `{"grantee", "level"?, "env"?}` | `201` new, `200` replaced | below |
+| `DELETE /api/secrets/{scope}/{name}/grants?grantee=` | | `204` | below |
+| `GET /api/agent/secrets` | | `200` `[granted]` | an agent |
+| `POST /api/agent/secrets/{name}/get` | `{"field"?}` or none | `200` `{scope, name, kind, field, value}` | an agent with a `read` grant |
 
 **Scope.** `scope` is `global` or a project name. A global secret needs a
 sysadmin or the operator. A project secret needs a project_admin of that
@@ -993,12 +1005,127 @@ fails until the operator stores a secret of that name again. A target of
 project `p` uses a global secret only when `p` has no secret of the same
 name.
 
+**Grants.** A grant gives one secret to an agent or to a whole project
+(PLAN §16b.3). A grant to a project applies to each agent of the project,
+also to the agents that start later.
+
+| Level | The agent gets |
+|---|---|
+| `use` | The brokers only: the git credential helper and the ssh-agent socket. The agent cannot see the value. |
+| `read` | `use`, the env var at the start, and `terrarium secret get`. |
+
+| Secret | Grant to | Who |
+|---|---|---|
+| global | any agent or project | a sysadmin, the operator |
+| project | an agent of that project, or that project | a project_admin of the project, a sysadmin, the operator |
+
+`grantee` is `agent:<project>/<name>`, `agent:<id>`, or
+`project:<name>`. The daemon stores an agent by its ID. A project
+secret to another project, or to an agent of another project, is `403`.
+An unknown agent or project is `404`. A second grant to the same grantee
+replaces the first.
+
+`level` defaults to `use` for `token`, `github_token`, and `ssh_key` (the
+kinds that a broker serves). It defaults to `read` for `api_key`,
+`login`, and `generic`, because no broker serves them. `env` names an env
+var for the value. An env var puts the value into the agent's
+environment, where the agent can print it, so `env` needs the level
+`read` (`422` otherwise). The name is a POSIX name (a letter or `_`, then
+letters, digits, or `_`; at most 128 bytes). The daemon refuses the names
+that the sandbox sets: `PATH`, `HOME`, `USER`, `SHELL`, `TERM`, `LANG`,
+`TZ`, `SSH_AUTH_SOCK`, the harness home vars (`CLAUDE_CONFIG_DIR` and the
+others), and each name that starts with `LD_`, `LC_`, `TERRARIUM_`,
+`GIT_AUTHOR_`, `GIT_COMMITTER_`, or `GIT_CONFIG` (`422`).
+
+```
+POST /api/secrets/ops/db/grants
+{"grantee":"agent:ops/builder","level":"read","env":"DATABASE_URL"}
+
+201
+{"scope":"ops","name":"db","grantee":"agent:01MB2V...","grantee_label":"agent:ops/builder",
+ "level":"read","env":"DATABASE_URL","created_by":"operator","created_at":"..."}
+```
+
+The delete takes the grantee in the query (`?grantee=agent:ops/builder`).
+A grant that does not exist is `404`. The list shows each grant of the
+secret. A grant change applies at the next start of the agent. The
+brokers and `get` check the grants at each call, so a revoke stops them
+at once. A delete of the secret, of the agent, or of the project removes
+its grants. A new agent with the name of a removed agent gets no grant.
+
+**Delivery to agents.** PLAN §16b.4.
+
+- *Env vars.* At each start, the daemon puts each secret with a `read`
+  grant and an `env` name into the agent's environment. The agent's own
+  grant gives the name first, then the project grant. A `github_token`
+  with a `read` grant and no `env` name sets `GH_TOKEN`. The value is the
+  main secret field: `value`, `password` (`login`), or `private_key`
+  (`ssh_key`). A `generic` secret with one secret field sets that field. A
+  `generic` secret with more fields sets `<ENV>_<FIELD>` for each (upper
+  case, `_` for other characters). A var that the harness or its account
+  sets already wins, and the daemon shows a warning event. No value goes
+  into the start log, an event, or an audit row. The daemon writes no
+  value into a file that the sandbox binds.
+- *Git hosts.* The start sets `credential.https://<host>.helper = !terrarium
+  repo credential` (through `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_<n>`, and
+  `GIT_CONFIG_VALUE_<n>`) for each host of a granted `token` (`hosts`) or
+  `github_token` (`host`), at any level. The credential helper (§5.1) then
+  answers for the host.
+- *ssh-agent.* An agent with at least one `ssh_key` grant (any level) gets
+  an ssh-agent socket. The daemon serves it at
+  `<runtime>/ssh-agent/<agent id>/agent.sock` (the dirs 0700, the socket
+  0600). The sandbox binds the dir at `/run/terrarium/ssh-agent`, and
+  `SSH_AUTH_SOCK` is `/run/terrarium/ssh-agent.sock` (a symlink to the
+  socket). With the sandbox mode `none`, `SSH_AUTH_SOCK` is the host path.
+  The socket lists and signs with the granted keys only, and refuses add,
+  remove, and lock requests. It checks the grants at each list and each
+  sign. The key comment is `<scope>/<name>`. Each good sign counts in a
+  `secret.use` audit row: one row each minute for each key and agent, with
+  `signs`, the count in that minute. The socket stops when the agent
+  stops. The harness runs as the daemon's user, so the 0600 socket is
+  open to it.
+
+**The agent's grants.** `GET /api/agent/secrets` lists the secrets that
+are granted to the calling agent: its own grants and its project's, one
+entry for each secret, with the highest level. A project secret comes
+before a global secret. No entry holds a value. The operator gets `403`.
+
+```json
+[{"scope":"ops","name":"db","kind":"api_key","level":"read","env":"DATABASE_URL",
+  "fields":{},"secret_fields":["value"],"via":["agent"]}]
+```
+
+`via` holds `agent`, `project`, or both.
+
+**Get.** `POST /api/agent/secrets/{name}/get` answers one value for a
+`read` grant. The name resolves among the granted secrets: the project
+secret first, then the global one. A secret with no grant is `404`. A
+`use` grant is `403`. `field` names a field; the default is the main
+secret field (above). A `generic` secret with more than one secret field
+needs `field` (`422`). A plain field answers its value too. The answer
+has `Cache-Control: no-store`. Each answer writes a `secret.get` audit
+row (`{agent, scope, name, kind, field}`). An agent gets at most 30
+answers a minute (`429 rate_limited`).
+
+```
+POST /api/agent/secrets/db/get      (agent)
+{}
+
+200
+{"scope":"ops","name":"db","kind":"api_key","field":"value","value":"postgres://..."}
+```
+
 **Audit.** `secret.put` (`{scope, name, kind, created, plain_fields,
 secret_fields}`: field names, no value; a generate adds `"generated":
 true`, `type`, `bits`, and `fingerprint`), `secret.delete` (with
-`targets`: the targets that a forced delete left with no secret), and
-`secret.reveal` (`{scope, name, kind, secret_fields, ip}`). The target is
-`<scope>/<name>`. The project of a project secret is the row's `project`.
+`targets`: the targets that a forced delete left with no secret),
+`secret.reveal` (`{scope, name, kind, secret_fields, ip}`),
+`secret.grant` (`{scope, name, kind, grantee, grantee_label, level, env,
+created}`), `secret.revoke` (`{scope, name, kind, grantee}`),
+`secret.get`, and `secret.use` (`{agent, scope, name, broker, host}` for
+the git helper; `{agent, scope, name, broker, signs}` for the ssh-agent).
+The target is `<scope>/<name>`. The project of a project secret is the
+row's `project`. No row holds a value.
 
 **Storage.** The `secrets` table holds the plain fields and `sealed`: the
 XChaCha20-Poly1305 ciphertext of the JSON of the secret fields. The
@@ -1235,6 +1362,7 @@ lists the leases that the agent holds.
 | `POST /api/agents/{id}/restart` | none | `202` agent. Also on an agent in `error`: a new launch. |
 | `POST /api/agents/{id}/send` | `{"text": "Run the tests", "raw"?: false}` | `202 {"accepted": true}` (`"raw": true` with `raw`) |
 | `POST /api/agents/{id}/keys` | `{"keys": ["esc", "down", "enter"]}` | `202 {"accepted": true, "keys": [...]}` (§6.5) |
+| `POST /api/agents/{id}/attachments` | the raw image, or `{"data_base64"}` | `201 {"path", "name", "bytes", "content_type"}` (below) |
 | `POST /api/agents/{id}/answer` | `{"request_id", "answer"}` or `{"text"}` | `202 {"accepted": true}` |
 | `POST /api/agents/{id}/subscription` | `{"subscription": "anthropic-max-20x-2"}` | `200 {"agent", "from"?, "to", "applied"}` (below) |
 
@@ -1415,6 +1543,53 @@ Each message on a paused thread has `thread_paused: true`.
 
 `terrariumd sandbox-dry-run <agent>` prints the full sandbox command of an
 agent.
+
+**Attachments.** `POST /api/agents/{id}/attachments` puts one image into
+the agent's workspace. The next turn names its path, and the model reads
+the file with its own tool. The model can also copy the file or use it in
+other ways. The rights are the rights of `send`: project_admin of the
+agent's project, sysadmin, or the operator.
+
+- The body is the raw image, with `Content-Type: image/png`, `image/jpeg`,
+  `image/gif`, or `image/webp`. The CLI sends JSON
+  `{"data_base64": "..."}` with `Content-Type: application/json`, because
+  its transports carry JSON only.
+- The daemon reads the type from the magic bytes, not from the header. A
+  body that is not a PNG, JPEG, GIF, or WebP image is `415
+  unsupported_media_type`. Another `Content-Type` is `415` too.
+- An image has at most 20 MiB (`MAX_ATTACHMENT_BYTES`). A larger image is
+  `413 too_large`.
+- The daemon writes the file to
+  `<workspace>/.terrarium/attachments/<YYYYMMDD-HHMMSS>-<id>.<ext>`, with
+  a temp file and a rename. The file has mode `0644` and the uid of the
+  daemon (the sandbox runs as the same uid). The daemon does not follow a
+  symlink at `.terrarium` or `.terrarium/attachments`: it answers `409
+  conflict`.
+- The answer is `201 {"path", "name", "bytes", "content_type"}`. `path` is
+  the path that the harness sees:
+  `/work/<project>/<agent>/.terrarium/attachments/<name>` in the sandbox
+  (and on a target). It is the host path only in sandbox mode `none`. The
+  answer never has the host path of the work root.
+- When the workspace root is a git repo (a `.git` dir), the daemon adds
+  `/.terrarium/` to its `.git/info/exclude` once. It does not change
+  `.gitignore`. A repo in a subdir of the workspace does not see
+  `.terrarium/`.
+- The audit row is `agent.attachment`, with `name`, `bytes`, and
+  `content_type`. It does not have the image.
+- The prune timer removes attachments that are older than 7 days. Each
+  upload also removes the old attachments of its workspace. The other
+  attachments go with the workspace when the agent is removed.
+
+The dashboard composer and `terrarium agent send --image` upload each
+image first, then send the turn. The turn has the text, an empty line,
+and one line for each image:
+
+```
+Attached image: /work/terra/w1/.terrarium/attachments/20261028-142501-k3m9x2qa.png (open this file with your image or file-read tool to see it)
+```
+
+The text can be empty when the turn has an image. When an upload fails,
+no turn goes, and the dashboard keeps the draft and the images.
 
 ### 6.3 Sessions
 
@@ -3251,12 +3426,26 @@ value of each var whose name has `KEY`, `TOKEN`, `SECRET`, or `PASSWORD` as
 
 ### 16.6 The quota policy
 
-- A window at or over `alert_at` percent: one mail to the operator (from
-  `system`, event actor `system`) and one `quota.alert` event (`level:
-  alert`) per window period (the reset time). Each quota mail ends with a
-  dashboard link, `Open: <TERRARIUM_PUBLIC_URL>/subscriptions`; a budget
-  mail links the project page, `<TERRARIUM_PUBLIC_URL>/p/<project>`.
-- A window at 100 percent: a `quota.alert` with `level: exhausted`. Each
+- A window has three lines: `alert_at` (default 80), 90, and 100 (used
+  up). An `alert_at` of 90 or more gives no 90 line. When a probe reads a
+  window at or over a line, the daemon sends one mail to the operator
+  (from `system`, event actor `system`) and one `quota.alert` event. The
+  mail is an open item of the Inbox (§6.9) until the operator acknowledges
+  it. Its priority is normal: no banner shows, and the tab does not flash.
+- Each line sends one mail in a window period. The table `quota_notices`
+  keeps the lines that sent, by `(subscription, window, line)`, so a
+  repeated sample or a daemon restart sends nothing. A line can send again
+  when the window drops 10 points or more under it, or when the stored
+  `resets_at` has passed and the new sample has a later reset (more than
+  5 minutes later) or none. One sample past two lines sends one mail, for
+  the higher line.
+- The line mail gives the percent, the reset (in and at), and the agents
+  that spent the most in the window (else the agents on the
+  subscription). The used-up mail names the held agents. Each quota mail
+  ends with a dashboard link, `Open: <TERRARIUM_PUBLIC_URL>/subscriptions`;
+  a budget mail links the project page, `<TERRARIUM_PUBLIC_URL>/p/<project>`.
+- A window at 100 percent: the used-up mail and a `quota.alert` with
+  `level: exhausted`, after the holds. Each
   agent on the subscription with an account pool moves to the next member
   of its pool, in pool order, that is not full, is not `expired` or
   `missing`, and has a login of its harness (auto-swap, PLAN §16.3; §6.2).
@@ -3284,8 +3473,10 @@ value of each var whose name has `KEY`, `TOKEN`, `SECRET`, or `PASSWORD` as
   alert_at = 80                    # optional, percent
   ```
 
-  The same alert and hold apply, with the cause `budget:project:<p>[/<sub>]`
-  and the next UTC midnight as the reset.
+  A budget has two lines: its `alert_at` and 100. Each line sends one mail
+  to the operator and one `quota.alert` in a UTC day. The hold applies,
+  with the cause `budget:project:<p>[/<sub>]` and the next UTC midnight as
+  the reset.
 
 `POST /api/agents/{id}/status` (`terrarium status set`) is the agent's own
 word: `status` is `idle`, `working`, or `blocked`; `note` is up to 500
@@ -3299,7 +3490,7 @@ status that the runner reports. An agent may report for itself only.
 | `usage.sample` | `{subscription, harness, model, input_tokens, output_tokens, cache_read, cache_write, messages}`: the new usage of one agent since its last `usage.sample`, at most one each 10 s per agent. `model` is the model of the newest response, as the session file names it (the usage store has the same name); the agent definition's model only when the file names none. |
 | `usage.rejected_path` | `{harness, harness_session, path, reason}`: the usage collector refused the session file that a `session_started` hook named. The file must be a regular file (not a symlink) under the agent's own session dir (`harness/claude/projects/`, `harness/codex/sessions/`, `harness/copilot/session-state/`, `harness/pi/sessions/`; with sandbox mode `none` also the session area of the shared home), and another agent must not read it. A Claude Code, Codex, or Copilot file must also carry the session ID in its name (`docs/security-review.md` F12). The collector does not read a refused file. |
 | `quota.sample` | `{subscription, windows}` after each successful probe. |
-| `quota.alert` | `{subscription, window, used_pct, resets_at, level, alert_at}`, or for a budget `{project, subscription, window, used, limit, used_pct, level}`. |
+| `quota.alert` | `{subscription, window, used_pct, resets_at, level, alert_at, threshold, message}`: `level` is `alert` under 100 and `exhausted` at 100; `threshold` is the line; `message` is the ID of the mail to the operator. For a budget `{project, subscription, window, used, limit, used_pct, level}`. The dashboard shows no banner for it. |
 | `quota.blocked` | `{cause, until, reason, enforced}`. The `agent` is the held agent. |
 | `quota.resumed` | `{cause, holds_left}`. |
 | `subscription.offer` | `{login, suggested}`: a login found at daemon start that no subscription covers. |

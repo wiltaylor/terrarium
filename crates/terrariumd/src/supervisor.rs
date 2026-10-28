@@ -344,6 +344,14 @@ pub trait Supervisor: Send + Sync + 'static {
     /// serves. A supervisor that needs the store, the event hub, or the
     /// router keeps a weak reference.
     fn bind(&self, _state: &Shared) {}
+    /// Where the harness of `agent` sees its workspace: the sandbox shows
+    /// it at `/work/<project>/<name>` (the path a target sees too). The
+    /// real supervisor answers the host path in sandbox mode `none`.
+    fn workspace_inside(&self, agent: &Agent) -> std::path::PathBuf {
+        std::path::Path::new(crate::workspace::WORKSPACE_MOUNT_ROOT)
+            .join(&agent.project)
+            .join(&agent.name)
+    }
     /// The daemon shuts down. Keep the stored status. A harness in a
     /// runner process keeps running, and the next daemon start connects to
     /// it again. An in-process harness ends, and the next daemon start

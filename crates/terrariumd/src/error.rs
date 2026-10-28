@@ -45,6 +45,9 @@ pub enum Code {
     StaleBase,
     /// The upload is over the per-file limit or the project quota.
     TooLarge,
+    /// The body is not of a media type that the endpoint takes (an
+    /// attachment that is not a PNG, JPEG, GIF, or WebP image).
+    UnsupportedMediaType,
     /// The caller sent too many requests of this kind; try again later.
     RateLimited,
     /// Another agent holds a lease on the target that this lease conflicts
@@ -74,6 +77,7 @@ impl Code {
             | Self::StaleBase
             | Self::LeaseHeld => StatusCode::CONFLICT,
             Self::TooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+            Self::UnsupportedMediaType => StatusCode::UNSUPPORTED_MEDIA_TYPE,
             Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::NotAvailable => StatusCode::NOT_IMPLEMENTED,
             Self::Invalid | Self::CommentRequired => StatusCode::UNPROCESSABLE_ENTITY,

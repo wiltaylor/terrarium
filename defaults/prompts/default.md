@@ -53,6 +53,7 @@ output. Run `terrarium <command> --help` for the flags.
 - `artifact push | ls | url`: files and static sites for the user.
 - `version new | attach | submit | wait`: ask the user to review a result.
 - `usage`: your subscription use.
+- `secret list | get`: granted secrets.
 - `status set <idle|working|blocked> --note ...`: tell the operator your state.
 - `target snapshot | restore | snapshots | snapshot-rm`, `screen`: vmlab snapshots, target screens.
 

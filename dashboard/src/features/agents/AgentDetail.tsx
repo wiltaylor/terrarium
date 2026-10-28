@@ -1,7 +1,7 @@
 import { A, useNavigate, useParams, useSearchParams } from "@solidjs/router";
 import { createResource, createSignal, For, Match, onCleanup, onMount, Show, Switch } from "solid-js";
 import { GrantDialog, grantNotice, LeaseChips, LeaseTable, useLeaseList } from "../../components/Leases";
-import { HoldBadge } from "../../components/QuotaBanner";
+import { HoldBadge } from "../../components/HoldBadge";
 import { SelfReport } from "../../components/SelfReport";
 import { EventHistory } from "../../components/EventHistory";
 import { StatusBadge } from "../../components/StatusBadge";

@@ -4,6 +4,7 @@
 
 pub(crate) mod agents;
 mod artifacts;
+pub mod attachments;
 mod board;
 mod config;
 mod event_sources;
@@ -19,6 +20,7 @@ mod questions;
 mod repos;
 mod schedules;
 mod screen;
+mod secret_grants;
 mod secrets;
 mod secrets_generate;
 pub mod session;
@@ -240,7 +242,9 @@ fn routes(state: Shared, serve_artifacts: bool, host_connect: bool) -> Router {
                     crate::secrets::redact::after_change,
                 )),
         )
+        .merge(secret_grants::routes())
         .merge(agents::routes())
+        .merge(attachments::routes())
         .merge(transcripts::routes())
         .merge(screen::routes())
         .merge(mail::routes())

@@ -686,6 +686,9 @@ pub fn delete(t: &mut Tx<'_>, id: &str) -> ApiResult<()> {
     let a = get(t, id)?;
     crate::store::waits::on_agent_deleted(t, id)?;
     crate::store::questions::on_agent_deleted(t, id)?;
+    // Its secret grants (PLAN §16b.3): a new agent with the same name
+    // gets none of them.
+    crate::secrets::grants::on_agent_deleted(t, id)?;
     t.execute("DELETE FROM agents WHERE id = ?1", [id])?;
     // The name stays for the cards, comments, and mail of the agent.
     t.execute(

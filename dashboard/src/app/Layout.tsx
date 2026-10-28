@@ -4,7 +4,6 @@ import { A, useLocation, type RouteSectionProps } from "@solidjs/router";
 import { createEffect, createResource, createSignal, ErrorBoundary, For, on, onCleanup, onMount, Show } from "solid-js";
 import { isMock } from "../api";
 import { CriticalBanner } from "../components/CriticalBanner";
-import { QuotaBanner } from "../components/QuotaBanner";
 import { ErrorBanner, useNow } from "../components/ui";
 import { duration } from "../lib/format";
 import { agents, api, auth, events, inbox, projects, signOutNow, subscriptions, theme } from "../stores";
@@ -123,7 +122,6 @@ export function Layout(props: RouteSectionProps) {
         <CriticalBanner />
         <ConnectionBanner />
         <main class="main">
-          <QuotaBanner />
           <ErrorBoundary
             fallback={(err, reset) => {
               // A view whose resource failed lands here. A new route resets it.

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { InboxItem } from "../../api/types";
-import { badge, countItems, EMPTY_COUNTS, emptyText, inboxQuery, isCritical, isInboxEvent, matchesTabs, putItem, questionFlags, sortItems } from "./model";
+import { badge, countItems, EMPTY_COUNTS, emptyText, inboxQuery, isCritical, isInboxEvent, matchesTabs, putItem, questionFlags, sortItems, systemMailLink } from "./model";
 
 const item = (id: string, over: Partial<InboxItem> = {}): InboxItem => ({
   id,
@@ -95,5 +95,15 @@ describe("inbox model", () => {
     expect(isInboxEvent({ kind: "mail" })).toBe(false);
     expect(emptyText("all", "open")).toBe("Nothing waits for you.");
     expect(emptyText("system", "done")).toMatch(/only while it is open/);
+  });
+
+  it("links a daemon mail to its dashboard page", () => {
+    const quota = { from_kind: "system" as const, body: "Subscription `max` has used 81%.\n\nOpen: http://localhost:8080/subscriptions\n" };
+    expect(systemMailLink(quota)).toEqual({ href: "/subscriptions", label: "Subscriptions" });
+    expect(systemMailLink({ ...quota, body: "Budget.\n\nOpen: /p/web\n" })).toEqual({ href: "/p/web", label: "Project" });
+    expect(systemMailLink({ ...quota, from_kind: "agent" })).toBeNull();
+    expect(systemMailLink({ ...quota, body: "Open: javascript:alert(1)" })).toBeNull();
+    expect(systemMailLink({ ...quota, body: "Open: //evil.example/x" })).toBeNull();
+    expect(systemMailLink({ ...quota, body: "no link" })).toBeNull();
   });
 });

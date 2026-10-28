@@ -1,0 +1,307 @@
+//! Grants of secrets (PLAN §16b.3, §16b.4, docs/api.md §5.2): who may
+//! grant, `env` needs `read`, `secret get` needs `read`, a revoke applies
+//! at the next call, the git credential helper for a granted host, and the
+//! audit rows. No answer except a get holds a value.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+mod common;
+
+use common::TestDaemon;
+use serde_json::{Value, json};
+
+const GLOBAL_VALUE: &str = "sk-GLOBALgrant1234";
+const PROJECT_VALUE: &str = "sk-PROJECTgrant5678";
+const TOKEN_VALUE: &str = "ghp_GRANTEDtoken9999";
+
+fn clean(v: &Value) {
+    let text = v.to_string();
+    for s in [GLOBAL_VALUE, PROJECT_VALUE, TOKEN_VALUE] {
+        assert!(!text.contains(s), "an answer holds `{s}`: {text}");
+    }
+}
+
+async fn setup() -> TestDaemon {
+    let td = TestDaemon::start().await;
+    td.project("p").await;
+    td.project("q").await;
+    td.agent("p", "w", json!({})).await;
+    td.agent("p", "lead", json!({"roles": ["project_admin"]}))
+        .await;
+    td.agent("q", "x", json!({})).await;
+    td.agent("q", "root", json!({"roles": ["sysadmin"]})).await;
+    td.put(
+        "/api/secrets/global/openai",
+        json!({"kind": "api_key", "fields": {"value": GLOBAL_VALUE}}),
+    )
+    .await
+    .ok();
+    td.put(
+        "/api/secrets/p/db",
+        json!({"kind": "api_key", "fields": {"value": PROJECT_VALUE}}),
+    )
+    .await
+    .ok();
+    td.put(
+        "/api/secrets/global/gh",
+        json!({"kind": "github_token", "fields": {"value": TOKEN_VALUE, "host": "git.example.org"}}),
+    )
+    .await
+    .ok();
+    td
+}
+
+#[tokio::test]
+async fn grants_follow_the_scope_rules() {
+    let td = setup().await;
+    let grant = |g: &str| json!({"grantee": g});
+    // A global secret: the operator and a sysadmin, to any agent or project.
+    let r = td
+        .post("/api/secrets/global/openai/grants", grant("agent:q/x"))
+        .await;
+    assert_eq!(r.status.as_u16(), 201, "{:?}", r.body);
+    assert_eq!(r.body["grantee_label"], "agent:q/x");
+    assert_eq!(r.body["level"], "read");
+    clean(&r.body);
+    let r = td
+        .post_as(
+            "q/root",
+            "/api/secrets/global/openai/grants",
+            grant("project:p"),
+        )
+        .await;
+    assert_eq!(r.status.as_u16(), 201, "{:?}", r.body);
+    // The same grantee again replaces the grant: 200.
+    let r = td
+        .post("/api/secrets/global/openai/grants", grant("project:p"))
+        .await;
+    assert_eq!(r.status.as_u16(), 200);
+    // A project_admin and a member cannot grant a global secret.
+    td.post_as(
+        "p/lead",
+        "/api/secrets/global/openai/grants",
+        grant("agent:p/w"),
+    )
+    .await
+    .err(403, "forbidden");
+    td.post_as(
+        "p/w",
+        "/api/secrets/global/openai/grants",
+        grant("agent:p/w"),
+    )
+    .await
+    .err(403, "forbidden");
+    // A project secret: its project_admin, to its own project only.
+    td.post_as("p/lead", "/api/secrets/p/db/grants", grant("agent:p/w"))
+        .await
+        .ok();
+    td.post_as("p/lead", "/api/secrets/p/db/grants", grant("agent:q/x"))
+        .await
+        .err(403, "forbidden");
+    td.post("/api/secrets/p/db/grants", grant("project:q"))
+        .await
+        .err(403, "forbidden");
+    td.post_as("q/x", "/api/secrets/p/db/grants", grant("agent:q/x"))
+        .await
+        .err(403, "forbidden");
+    // Bad grantees and unknown secrets.
+    td.post("/api/secrets/p/db/grants", grant("p/w"))
+        .await
+        .err(422, "invalid");
+    td.post("/api/secrets/p/db/grants", grant("agent:p/none"))
+        .await
+        .err(404, "not_found");
+    td.post("/api/secrets/p/none/grants", grant("agent:p/w"))
+        .await
+        .err(404, "not_found");
+    // The list.
+    let l = td.get_as("p/lead", "/api/secrets/p/db/grants").await;
+    let labels: Vec<&str> = l
+        .ok()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|g| g["grantee_label"].as_str().unwrap())
+        .collect();
+    assert_eq!(labels, ["agent:p/w"]);
+    td.get_as("p/w", "/api/secrets/p/db/grants")
+        .await
+        .err(403, "forbidden");
+    // The audit holds the changes, with no value.
+    let audit = td.get("/api/audit?action=secret.grant").await;
+    assert!(audit.ok().as_array().unwrap().len() >= 4);
+    clean(&audit.body);
+}
+
+#[tokio::test]
+async fn env_and_get_need_read() {
+    let td = setup().await;
+    // `env` with `use` is refused; `env` with `read` is good.
+    td.post(
+        "/api/secrets/global/gh/grants",
+        json!({"grantee": "agent:p/w", "env": "GITHUB_TOKEN"}),
+    )
+    .await
+    .err(422, "invalid");
+    td.post(
+        "/api/secrets/global/gh/grants",
+        json!({"grantee": "agent:p/w", "level": "use", "env": "GH"}),
+    )
+    .await
+    .err(422, "invalid");
+    td.post(
+        "/api/secrets/p/db/grants",
+        json!({"grantee": "agent:p/w", "level": "read", "env": "LD_PRELOAD"}),
+    )
+    .await
+    .err(422, "invalid");
+    td.post(
+        "/api/secrets/p/db/grants",
+        json!({"grantee": "agent:p/w", "level": "read", "env": "DB_KEY"}),
+    )
+    .await
+    .ok();
+    td.post(
+        "/api/secrets/global/gh/grants",
+        json!({"grantee": "project:p"}),
+    )
+    .await
+    .ok();
+
+    // The agent's list: both, with no value.
+    let mine = td.get_as("p/w", "/api/agent/secrets").await;
+    clean(&mine.body);
+    let rows = mine.ok().as_array().unwrap().clone();
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert_eq!(rows[0]["name"], "db");
+    assert_eq!(rows[0]["level"], "read");
+    assert_eq!(rows[0]["env"], "DB_KEY");
+    assert_eq!(rows[1]["name"], "gh");
+    assert_eq!(rows[1]["level"], "use");
+    assert_eq!(rows[1]["fields"]["host"], "git.example.org");
+    // The operator has no agent list.
+    td.get("/api/agent/secrets").await.err(403, "forbidden");
+
+    // A get: the value for `read`, refused for `use` and for no grant.
+    let r = td
+        .post_as("p/w", "/api/agent/secrets/db/get", json!({}))
+        .await;
+    assert_eq!(r.ok()["value"], PROJECT_VALUE);
+    assert_eq!(r.headers["cache-control"], "no-store");
+    let r = td.post_empty_as("p/w", "/api/agent/secrets/db/get").await;
+    assert_eq!(r.ok()["value"], PROJECT_VALUE);
+    td.post_as("p/w", "/api/agent/secrets/gh/get", json!({}))
+        .await
+        .err(403, "forbidden");
+    td.post_as("p/w", "/api/agent/secrets/openai/get", json!({}))
+        .await
+        .err(404, "not_found");
+    td.post_as("q/x", "/api/agent/secrets/db/get", json!({}))
+        .await
+        .err(404, "not_found");
+    td.post_as("p/w", "/api/agent/secrets/db/get", json!({"field": "nope"}))
+        .await
+        .err(422, "invalid");
+    let audit = td.get("/api/audit?action=secret.get").await;
+    let rows = audit.ok().as_array().unwrap().clone();
+    assert_eq!(rows.len(), 2);
+    clean(&audit.body);
+
+    // A revoke applies at the next get.
+    let r = td
+        .req(
+            hyper::Method::DELETE,
+            "/api/secrets/p/db/grants?grantee=agent:p/w",
+            None,
+            Some("p/lead"),
+        )
+        .await;
+    assert_eq!(r.status.as_u16(), 204, "{:?}", r.body);
+    td.post_as("p/w", "/api/agent/secrets/db/get", json!({}))
+        .await
+        .err(404, "not_found");
+    td.req(
+        hyper::Method::DELETE,
+        "/api/secrets/p/db/grants?grantee=agent:p/w",
+        None,
+        None,
+    )
+    .await
+    .err(404, "not_found");
+    assert_eq!(
+        td.get("/api/audit?action=secret.revoke")
+            .await
+            .ok()
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn the_credential_helper_answers_for_a_granted_host() {
+    let td = setup().await;
+    let ask = json!({"protocol": "https", "host": "git.example.org"});
+    // No grant: nothing.
+    td.post_as("p/w", "/api/repos/credential", ask.clone())
+        .await
+        .err(404, "not_found");
+    // A `use` grant to the project: the helper answers, with a path too.
+    td.post(
+        "/api/secrets/global/gh/grants",
+        json!({"grantee": "project:p", "level": "use"}),
+    )
+    .await
+    .ok();
+    let r = td
+        .post_as("p/w", "/api/repos/credential", ask.clone())
+        .await;
+    assert_eq!(r.ok()["password"], TOKEN_VALUE);
+    assert_eq!(r.ok()["username"], "x-access-token");
+    let mut with_path = ask.clone();
+    with_path["path"] = "team/repo.git".into();
+    let r = td.post_as("p/w", "/api/repos/credential", with_path).await;
+    assert_eq!(r.ok()["password"], TOKEN_VALUE);
+    // Another host, another project, plain http: nothing.
+    td.post_as(
+        "p/w",
+        "/api/repos/credential",
+        json!({"protocol": "https", "host": "other.example.org"}),
+    )
+    .await
+    .err(404, "not_found");
+    td.post_as("q/x", "/api/repos/credential", ask.clone())
+        .await
+        .err(404, "not_found");
+    td.post_as(
+        "p/w",
+        "/api/repos/credential",
+        json!({"protocol": "http", "host": "git.example.org"}),
+    )
+    .await
+    .err(404, "not_found");
+    let audit = td.get("/api/audit?action=secret.use").await;
+    let rows = audit.ok().as_array().unwrap().clone();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0]["target"], "global/gh");
+    clean(&audit.body);
+}
+
+#[tokio::test]
+async fn removing_an_agent_removes_its_grants() {
+    let td = setup().await;
+    td.post(
+        "/api/secrets/global/openai/grants",
+        json!({"grantee": "agent:p/w"}),
+    )
+    .await
+    .ok();
+    let r = td.delete("/api/agents/p%2Fw?confirm=true").await;
+    assert_eq!(r.status.as_u16(), 204, "{:?}", r.body);
+    td.agent("p", "w", json!({})).await;
+    // The new agent with the same name has no grant.
+    let mine = td.get_as("p/w", "/api/agent/secrets").await;
+    assert_eq!(mine.ok(), &json!([]));
+    let grants = td.get("/api/secrets/global/openai/grants").await;
+    assert_eq!(grants.ok(), &json!([]));
+}
