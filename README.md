@@ -13,6 +13,30 @@ with live terminals.
 The design is in [docs/PLAN.md](docs/PLAN.md). To install and run Terrarium,
 read [docs/getting-started.md](docs/getting-started.md).
 
+## Quick start
+
+On your machine, in this repository, build the image and start the stack:
+
+```sh
+just up
+```
+
+On a server, over ssh. The repository is private, so no image is in a
+registry: the recipe sends the source (`git archive`) and builds the image
+on the server. The server needs Docker with the compose plugin, and no
+access to the repository:
+
+```sh
+just deploy::server wil@terrarium.lan --public-url http://terrarium.lan:8080 --dry-run
+just deploy::server wil@terrarium.lan --public-url http://terrarium.lan:8080
+just deploy::update wil@terrarium.lan      # a new commit; the data stays
+just deploy::rollback wil@terrarium.lan    # back to the previous deploy
+```
+
+The recipe shows the new `TERRARIUM_TOKEN` one time, and the commands to
+set the password and to add a host agent. See
+[getting-started §2.14](docs/getting-started.md#214-install-on-a-server).
+
 ## Status
 
 Terrarium is early work. Phases 0 to 5 of PLAN §20 are largely built, and
@@ -195,9 +219,10 @@ agents. PLAN §6 describes each component.
 terrarium/
   justfile                  entry point: modules and the build, test, up, down aggregates
   .just/
-    shared.just             require-* helpers (docker, cargo, node, uv, ssh)
+    shared.just             require-* helpers (docker, cargo, node, uv, git, ssh)
     ci/mod.just             the merge gate (check = fmt-check + lint + test + scripts-test + dashboard-check) and compat
     daemon/mod.just         cargo build, run, test, and the operator CLI
+    deploy/mod.just         install, update, roll back, and show a server; builds the image there (scripts/deploy.py)
     defaults/mod.just       the packaged defaults: apply (back up, then overwrite config/terrarium) and manifest
     dashboard/mod.just      npm install, dev, build, test, check
     docker/mod.just         image build and push, compose up/down/logs/shell, config dirs
@@ -231,7 +256,7 @@ terrarium/
   repos/                    local bare git repos, bound at /repos (gitignored)
   work/                     agent workspaces, <project>/<agent>/, bound at /work (gitignored)
   examples/fleet/           an example fleet file
-  scripts/                  install-host.sh (served at /install/host.sh), host-install.py (just host::install), and their tests
+  scripts/                  install-host.sh (served at /install/host.sh), host-install.py (just host::install), deploy.py (just deploy::...), and their tests
   defaults/                 the packaged defaults: personas and protocol templates (prompts/), harness settings (harness/), manifest.json; copied into config/terrarium at each start
   docs/                     design, contracts, and facts (see below)
   spikes/                   Phase 0 scripts and their captures (claude, codex, copilot, pi)
@@ -253,6 +278,9 @@ recipes of a module.
 | Task | Command |
 |---|---|
 | Build the image and start the stack | `just up` |
+| Install or re-install on a server over ssh (builds the image there; [getting-started §2.14](docs/getting-started.md#214-install-on-a-server)) | `just deploy::server wil@terrarium.lan` |
+| Update a server, roll it back, or show its deployed ref and health | `just deploy::update wil@terrarium.lan`, `just deploy::rollback ...`, `just deploy::status ...` |
+| Install in another dir on this machine (not this repo) | `just deploy::local --dir /tmp/tt-deploy --port 18090` |
 | Stop the stack | `just down` |
 | Follow the container logs | `just docker::logs` |
 | Open a shell in the container | `just docker::shell` |

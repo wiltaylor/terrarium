@@ -21,6 +21,8 @@ mod dashboard '.just/dashboard'
 mod harness '.just/harness'
 # Host agent build and install
 mod host '.just/host'
+# Install, update, and roll back a server: build the image on the target (no registry)
+mod deploy '.just/deploy'
 # Packaged defaults: the prompts and harness settings of the config repo
 mod defaults '.just/defaults'
 # Phase 0 spike scripts

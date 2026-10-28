@@ -2674,10 +2674,11 @@ end-to-end scenarios of each phase are not scripted yet (no `spikes/e2e/`).
 terrarium/
   justfile                      entry point: main, exports, mod declarations, aggregates
   .just/
-    shared.just                 require-* helpers (docker, cargo, node, just, uv, ssh)
+    shared.just                 require-* helpers (docker, cargo, node, just, uv, git, ssh)
     ci/mod.just                 the merge bar: check = fmt-check + lint + test + dashboard-check
     docker/mod.just             image build, compose up/down/logs/shell, volume init
     daemon/mod.just             cargo build/run/test for terrariumd and the CLI
+    deploy/mod.just             install, update, roll back a server over ssh; builds the image there (§23.6)
     defaults/mod.just           the packaged defaults: apply (back up and overwrite config/terrarium), manifest
     dashboard/mod.just          npm install/dev/build/test for the SolidJS app
     host/mod.just               build and package terrarium-host, install to a host over ssh
@@ -2745,6 +2746,8 @@ mod daemon '.just/daemon'
 mod dashboard '.just/dashboard'
 # Host agent build and install
 mod host '.just/host'
+# Install, update, and roll back a server: build the image on the target (no registry)
+mod deploy '.just/deploy'
 # Phase 0 spike scripts
 mod spikes '.just/spikes'
 
@@ -2774,6 +2777,7 @@ Recipes the modules provide (names, not bodies):
 | `daemon` | `build`, `run` (local, outside Docker, for fast iteration), `test`, `cli args` (runs the operator CLI against a running daemon) |
 | `dashboard` | `install`, `dev` (Vite dev server proxying to the daemon API), `build`, `test`, `check` |
 | `host` | `build` (static musl), `package`, `install host name` (binary, unit, config with the pin, and an enrol token over ssh; then a probe; `--dry-run`), `token host [enrol]` (mints a host agent token or an enrol token), `cert name` (the TLS certificate of the host listener) |
+| `deploy` | `server target` (first install or re-install over ssh), `local` (the same on this machine, never in the repo dir), `update target`, `rollback target`, `status target`, `test` (§23.6) |
 | `spikes` | `bwrap-check`, `claude-auth-check`, `claude-bwrap-check`, `claude-detector-check`, `claude-prompt-check *variant`, `claude-session-check`, `claude-sources-check`, `claude-typing-check`, `claude-yolo-check *variants`, `claude-yolo-root-check`, `hooks-capture harness idle_s='70'` (only claude has it), and three that are not wired yet: `login harness`, `usage-probe provider`, `compat-matrix` (`docs/compat.md` is written by hand from the captures) |
 
 ### 23.3 Dockerfile
@@ -2841,7 +2845,7 @@ services:
       TERRARIUM_HOST_LISTEN: ${TERRARIUM_HOST_LISTEN:-auto}   # 127.0.0.1:8082 without TLS (§19)
       TERRARIUM_HOST_TLS_CERT: ${TERRARIUM_HOST_TLS_CERT:-}
       TERRARIUM_HOST_TLS_KEY: ${TERRARIUM_HOST_TLS_KEY:-}
-    volumes:
+    volumes:                               # each source is ${TERRARIUM_DATA_DIR:-.}/...: see §23.6
       - ./config/claude:/auth/claude
       - ./config/codex:/auth/codex
       - ./config/copilot:/auth/copilot
@@ -2900,6 +2904,44 @@ variable.
   applied. Runs on demand and nightly, not in the merge bar.
 - **End to end** per phase (§20): the scenarios written in each phase run as a
   script under `spikes/e2e/` against `just up`.
+
+### 23.6 Install and release
+
+The repo is private, so there is no image in a registry. CI makes a
+release only from a trailer on the HEAD of `main` (`release: true` or
+`pre-release: true`): a tag, a GitHub release with generated notes, and the
+static `terrarium-host` binary as an asset. It pushes no container image.
+
+A server builds its own image from the source. `just deploy::server
+user@host` (`scripts/deploy.py`) does these steps:
+
+1. Pack the source with `git archive <ref>` (default `HEAD`). A tree with
+   changes to tracked files stops it, unless `--allow-dirty`: then it packs
+   the tracked files of the working tree.
+2. Run a read-only preflight on the target: docker, the compose plugin
+   (2.20 or later), the group `docker`, a user that is not root, the free
+   disk (a warning under 10 GB), the arch (x86_64; arm64 is a warning),
+   and git (optional). Each problem comes with the command that fixes it.
+3. Pipe the tar over ssh to `tar -x` in `<dir>/src.new`, and write
+   `src.new/.deployed-ref` (the commit, the image tag, the time).
+4. Make `<dir>/.env` from `.env.example` when it does not exist: a new
+   token (shown one time, at the end), the UID and GID of the target user,
+   the public URL, and the ports. A deploy never changes an existing `.env`.
+5. Build the image `<project>:<commit>` from `src.new`. A failed build
+   changes nothing that runs.
+6. Move `src` to `src.prev` and `src.new` to `src`, run `up -d --wait`,
+   and check the health (`terrarium daemon status` in the container).
+
+The data is not in `src/`. `compose.yaml` binds
+`${TERRARIUM_DATA_DIR:-.}/<dir>`: a dev checkout leaves the variable
+unset, so `just up` binds the dirs of the repo. On a server,
+`<dir>/terrarium-compose` sets it to `<dir>` and runs compose with
+`<dir>/src` as the project dir, `<dir>/.env` as the env file, and a project
+name of its own (`terrarium-<name of the dir>`). `just deploy::update`
+does steps 1, 3, 5, and 6; `just deploy::rollback` swaps `src.prev` and
+`src` and runs `up -d`; `just deploy::local` does the same steps on this
+machine, never in the repo dir. getting-started §2.14 is the operator
+guide.
 
 ---
 

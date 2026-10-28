@@ -23,6 +23,10 @@ require-uv:
 	@command -v uv > /dev/null 2>&1 || (echo "uv is required: see https://docs.astral.sh/uv/" >&2 && exit 1)
 
 [private]
+require-git:
+	@command -v git > /dev/null 2>&1 || (echo "git is required" >&2 && exit 1)
+
+[private]
 require-ssh:
 	@command -v ssh > /dev/null 2>&1 || (echo "ssh is required" >&2 && exit 1)
 	@command -v scp > /dev/null 2>&1 || (echo "scp is required" >&2 && exit 1)

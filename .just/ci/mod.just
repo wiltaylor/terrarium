@@ -25,7 +25,7 @@ lint: require-cargo
 test: require-cargo
 	cargo test --workspace
 
-# Run the Python tests under scripts/ (harnesses.toml, the Dockerfile pins, the host installer)
+# Run the Python tests under scripts/ (harnesses.toml, the Dockerfile pins, the host installer, the deploy, the CI workflow)
 [group('ci')]
 scripts-test: require-uv
 	uv run python -m unittest discover -s scripts -p 'test_*.py'

@@ -8,6 +8,9 @@ Claude Code adapter is verified end to end (see the status in
 
 Run every command from the root of the repository.
 
+To install Terrarium on a server, use `just deploy::server` (section
+2.14). It builds the image on the server. No image is in a registry.
+
 ## 1. Prerequisites
 
 To run Terrarium in Docker:
@@ -1007,6 +1010,169 @@ agent loads the instructions. Terrarium ships no skill (PLAN §8.6).
 `terrarium skill usage fern-check` lists the agents and templates that
 use a skill. When you delete a skill, the agents that name it start
 without it and show a warning.
+
+### 2.14 Install on a server
+
+The repository is private, so CI puts no image in a registry.
+`just deploy::server` sends the source to the server over ssh and builds
+the image on the server. The server does not need access to the
+repository. Run the commands of this section on your machine, in the
+repository.
+
+The server needs:
+
+- Linux on x86_64. The build can work on arm64, but nobody has tested it.
+- Docker Engine with the compose plugin, version 2.20 or later.
+- A user that is not root, in the group `docker`. The image makes its
+  `terrarium` user with the UID and GID of this user.
+- 10 GB or more of free disk space.
+
+The server does not need git. Your machine needs git, ssh access to the
+server (a key is best), uv, and just.
+
+#### Install
+
+1. Do a dry run first:
+
+   ```sh
+   just deploy::server wil@terrarium.lan --public-url http://terrarium.lan:8080 --dry-run
+   ```
+
+   The dry run runs only the read-only checks on the server (the
+   preflight), and prints all other commands. It changes nothing. When a
+   check fails, the preflight gives the command that fixes it, for example
+   `sudo usermod -aG docker wil`.
+
+2. Install:
+
+   ```sh
+   just deploy::server wil@terrarium.lan --public-url http://terrarium.lan:8080
+   ```
+
+   The recipe does these steps:
+   - It packs the source with `git archive HEAD`. A working tree with
+     changes to tracked files stops the deploy. Commit the changes, or
+     give `--ref <commit>`, or give `--allow-dirty` (the deploy then sends
+     the tracked files of the working tree).
+   - It runs the preflight on the server.
+   - It makes the data directories in `~/terrarium`, and writes
+     `~/terrarium/terrarium-compose`.
+   - It sends the source to `~/terrarium/src.new`, and writes the commit
+     and the time to `src.new/.deployed-ref`.
+   - It makes `~/terrarium/.env` from `.env.example`, when `.env` does not
+     exist: a new random `TERRARIUM_TOKEN`, the UID and GID of the user,
+     `TERRARIUM_PUBLIC_URL`, and the ports.
+   - It builds the image from `src.new` (`docker compose build`).
+   - After a good build, it moves `src` to `src.prev` and `src.new` to
+     `src`. Then it starts the stack (`up -d --wait`) and waits for the
+     health check.
+   - It removes the images of older deploys. It keeps the images of `src`
+     and `src.prev`.
+
+3. Keep the token. The recipe shows `TERRARIUM_TOKEN` one time only, at
+   the end. The token is also in `~/terrarium/.env` on the server.
+
+4. Set the operator password (section 2.3). The recipe prints the command:
+
+   ```sh
+   ssh -t wil@terrarium.lan '~/terrarium/terrarium-compose exec -it terrarium terrariumd password set'
+   ```
+
+   Then open the public URL and log in with the password, or with the
+   token (**Use the token instead**).
+
+5. To add a host agent, get the install command from the daemon
+   (section 2.7). It uses `GET /install/host.sh` of the daemon:
+
+   ```sh
+   ssh wil@terrarium.lan '~/terrarium/terrarium-compose exec terrarium terrarium admin host new lab1 --enrol'
+   ```
+
+When an install exists in the directory, `just deploy::server` asks
+before it replaces `src`. Give `--yes` to replace it with no question.
+
+#### The layout on the server
+
+`--dir` sets the install directory. The default is `~/terrarium`.
+
+| Path | Content |
+|---|---|
+| `src/` | The source of the running deploy, and `.deployed-ref` (the commit, the image, the time). |
+| `src.prev/` | The source of the deploy before it, for a rollback. |
+| `src.new/` | The source that a deploy builds. It exists only during a deploy, or after a failed build. |
+| `.env` | The settings of the stack. The deploy makes it once and never changes it. |
+| `terrarium-compose` | `docker compose` for this install. Each deploy writes it again. |
+| `config/`, `state/`, `tools/`, `work/`, `repos/`, `projects/`, `agents/`, `targets/`, `subscriptions/`, `fleets/` | The data. It is the same as in section 3. |
+
+Compose binds the data directories through `TERRARIUM_DATA_DIR`, which
+`terrarium-compose` sets to the install directory. The data is not in
+`src/`, so a deploy, an update, or a rollback never changes it. Use
+`terrarium-compose` for each compose command on the server, for example
+`~/terrarium/terrarium-compose logs -f`. It uses the `.env` of the
+install, and ignores the `TERRARIUM_*` variables of your shell.
+
+When `.env` exists, the deploy keeps it. It tells you the keys of
+`.env.example` that `.env` does not have. Then the defaults apply. To
+change a setting, edit `.env` on the server, and run
+`~/terrarium/terrarium-compose up -d`.
+
+#### Flags
+
+| Flag | Recipes | Effect |
+|---|---|---|
+| `--dir <dir>` | all | The install directory (default `~/terrarium`). |
+| `--ref <commit>` | `server`, `update`, `local` | The commit to send (default `HEAD`). The working tree does not count. |
+| `--allow-dirty` | `server`, `update`, `local` | Send the tracked files of the working tree. Not with `--ref`. |
+| `--public-url <url>` | `server`, `local` | `TERRARIUM_PUBLIC_URL` of a new `.env`. Default: `http://<host>:<port>`. |
+| `--port <port>` | `server`, `local` | The dashboard port of a new `.env`. The next three ports go to the artifacts, the host agents, and the webhooks. Default: 8080. |
+| `--yes` | `server`, `local` | Replace an existing `src/` with no question. |
+| `--dry-run` | `server`, `update`, `local`, `rollback` | Run only the read-only checks. Print all other commands. |
+| `--ssh-option <opt>` | all, not `local` | An ssh option. Give it one time for each word: `--ssh-option=-p --ssh-option=2222`. |
+
+#### Update, roll back, and status
+
+```sh
+just deploy::update wil@terrarium.lan
+just deploy::status wil@terrarium.lan
+just deploy::rollback wil@terrarium.lan
+```
+
+`deploy::update` sends a new source and builds the image from `src.new`.
+When the build fails, `src/` and the running stack do not change. After a
+good build, it swaps the directories and runs `up -d`. Compose makes the
+container again with the new image. Then the entrypoint stops each agent
+runner (SIGTERM, with `TERRARIUM_SHUTDOWN_GRACE`, 20 s), and the new
+daemon launches each agent again with resume (PLAN §18). Thus the agents
+keep their sessions, but each harness starts again. This is the same as
+`just up` with a new image. The runners keep running only through a
+daemon crash in the same container ([../docker/README.md](../docker/README.md)).
+The harnesses in `tools/` do not change: section 7 tells you how to update
+them.
+
+`deploy::rollback` swaps `src.prev` and `src`, and runs `up -d` with the
+image of the previous deploy. When that image does not exist, compose
+builds it from the source. A second rollback goes forward again.
+
+`deploy::status` shows `.deployed-ref` of `src` and `src.prev`, `compose
+ps`, and the health check (`terrarium daemon status` in the container, and
+an HTTP check of the dashboard port when the server has curl). It changes
+nothing.
+
+#### Install on this machine
+
+`just deploy::local` does the same steps on this machine, with no ssh. Use
+it to try a clean install next to the dev stack:
+
+```sh
+just deploy::local --dir /tmp/tt-deploy --port 18090
+just deploy::status local --dir /tmp/tt-deploy
+```
+
+The target `local` is this machine for each recipe. `deploy::local`
+refuses a `--dir` in this repository, because the dev stack of `just up`
+uses it. Each install has its own compose project, `terrarium-<name of the
+dir>` (`terrarium-deploy` for `~/terrarium`), so the stacks stay apart. Use
+a `--port` that the dev stack does not use.
 
 ## 3. Configuration directories
 

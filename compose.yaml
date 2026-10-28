@@ -1,5 +1,10 @@
 # Terrarium stack (PLAN §23.4). Start it with `just up`; stop it with `just down`.
 # Every variable is documented in .env.example.
+#
+# The bind mounts are under TERRARIUM_DATA_DIR. Unset (a dev checkout,
+# `just up`): the project dir, so ./config, ./state, ... of the repo.
+# `just deploy::server` sets it to the install dir: the code is in
+# <dir>/src and the data stays in <dir>, so a new deploy never touches it.
 services:
   terrarium:
     build:
@@ -52,21 +57,21 @@ services:
       TERRARIUM_CONFIG_SYNC: ${TERRARIUM_CONFIG_SYNC:-off}
       TERRARIUM_CONFIG_SYNC_INTERVAL: ${TERRARIUM_CONFIG_SYNC_INTERVAL:-15m}
     volumes:
-      - ./config/claude:/auth/claude
-      - ./config/codex:/auth/codex
-      - ./config/copilot:/auth/copilot
-      - ./config/pi:/auth/pi
-      - ./tools:/opt/terrarium/tools             # the harnesses: npm prefix, installed at the first start, updated in place (TERRARIUM_TOOLS_DIR)
-      - ./state:/state
-      - ./config/terrarium:/config/terrarium     # the config repo: prompts, harness settings, export (PLAN §8.3); git, shareable, no secrets
-      - ./subscriptions:/etc/terrarium/subscriptions
-      - ./projects:/etc/terrarium/projects
-      - ./agents:/etc/terrarium/agents
-      - ./targets:/etc/terrarium/targets
-      - ./fleets:/etc/terrarium/fleets           # *.toml fleet files, auto-applied at start and on reload
-      - ./repos:/repos                           # local bare repos, bound rw into the agents of their project (TERRARIUM_REPOS_DIR)
-      - ./work:/work                             # agent workspaces, <project>/<agent> (TERRARIUM_WORK_DIR); a host agent on this machine attaches them to targets (its work_dir is this ./work)
-      - ./config/tls:/etc/terrarium/tls:ro   # `just host::cert <name>` writes here
+      - ${TERRARIUM_DATA_DIR:-.}/config/claude:/auth/claude
+      - ${TERRARIUM_DATA_DIR:-.}/config/codex:/auth/codex
+      - ${TERRARIUM_DATA_DIR:-.}/config/copilot:/auth/copilot
+      - ${TERRARIUM_DATA_DIR:-.}/config/pi:/auth/pi
+      - ${TERRARIUM_DATA_DIR:-.}/tools:/opt/terrarium/tools             # the harnesses: npm prefix, installed at the first start, updated in place (TERRARIUM_TOOLS_DIR)
+      - ${TERRARIUM_DATA_DIR:-.}/state:/state
+      - ${TERRARIUM_DATA_DIR:-.}/config/terrarium:/config/terrarium     # the config repo: prompts, harness settings, export (PLAN §8.3); git, shareable, no secrets
+      - ${TERRARIUM_DATA_DIR:-.}/subscriptions:/etc/terrarium/subscriptions
+      - ${TERRARIUM_DATA_DIR:-.}/projects:/etc/terrarium/projects
+      - ${TERRARIUM_DATA_DIR:-.}/agents:/etc/terrarium/agents
+      - ${TERRARIUM_DATA_DIR:-.}/targets:/etc/terrarium/targets
+      - ${TERRARIUM_DATA_DIR:-.}/fleets:/etc/terrarium/fleets           # *.toml fleet files, auto-applied at start and on reload
+      - ${TERRARIUM_DATA_DIR:-.}/repos:/repos                           # local bare repos, bound rw into the agents of their project (TERRARIUM_REPOS_DIR)
+      - ${TERRARIUM_DATA_DIR:-.}/work:/work                             # agent workspaces, <project>/<agent> (TERRARIUM_WORK_DIR); a host agent on this machine attaches them to targets (its work_dir is this ./work)
+      - ${TERRARIUM_DATA_DIR:-.}/config/tls:/etc/terrarium/tls:ro   # `just host::cert <name>` writes here
     security_opt:
       - seccomp:docker/seccomp-bwrap.json   # user namespaces for bwrap (§11)
       - apparmor:unconfined

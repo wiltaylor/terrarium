@@ -15,7 +15,7 @@ main:
 image-build: require-docker
 	docker build -f docker/Dockerfile --build-arg UID={{uid}} --build-arg GID={{gid}} -t {{image}} .
 
-# Tag the image and push it to a registry, for example `just docker::image-push ghcr.io/me/terrarium:0.1.0`
+# Tag the image and push it to a registry of your own, for example `just docker::image-push registry.lan/terrarium:0.1.0` (CI pushes no image: see `just deploy`)
 [group('image')]
 image-push tag: require-docker
 	docker tag {{image}} {{tag}}

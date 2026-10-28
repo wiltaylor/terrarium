@@ -106,10 +106,38 @@ Run `just` to see the modules. Run `just <module>` to see its recipes.
 | Update one harness in the container    | `just harness::update <name>`   |
 | Write the defaults manifest            | `just defaults::manifest`       |
 | Back up and reset the config repo (dev) | `just defaults::apply`         |
+| Install or re-install on a server      | `just deploy::server user@host` |
+| Update or roll back a server           | `just deploy::update user@host`, `just deploy::rollback user@host` |
+| Show the deployed ref and the health   | `just deploy::status user@host` |
+| Install in another dir on this machine | `just deploy::local --dir <dir>` |
 
 `just ci::check` must pass before a change merges. It runs `fmt-check`,
 `lint`, `test`, `scripts-test`, and `dashboard-check`. `ci::compat` is not in the gate, because
 it needs real logins.
+
+## Install and release
+
+The repo is private, so CI pushes no image to a registry. A release (a
+`release: true` or `pre-release: true` trailer on `main`) makes a tag, a
+GitHub release, and the `terrarium-host` asset only. A server builds its
+own image from the source: the `deploy` module (`.just/deploy/mod.just`,
+`scripts/deploy.py`, tests in `scripts/test_deploy.py`) sends the source
+with `git archive` over ssh, builds the image on the target, and swaps the
+code dirs only after a good build (PLAN §23.6,
+[getting-started.md](getting-started.md) §2.14).
+
+Rules for the deploy:
+
+- The target keeps the code in `<dir>/src` and the data in `<dir>`.
+  `compose.yaml` binds each data dir as `${TERRARIUM_DATA_DIR:-.}/<dir>`.
+  Keep this form for a new bind mount, and add the dir to `DATA_DIRS` in
+  `scripts/deploy.py` and to `docker::volumes-init` (a test compares the
+  three lists).
+- A deploy never changes an existing `.env`. Put a new setting in
+  `.env.example` with a default in `compose.yaml`: the deploy then reports
+  the key as missing, and the default applies.
+- Never print a secret. The new `TERRARIUM_TOKEN` goes to the target on
+  stdin, and the deploy shows it one time, at the end.
 
 ## Environment
 
@@ -149,6 +177,7 @@ a new token, when `.env` does not exist. The daemon reads:
 | `TERRARIUM_ARTIFACT_LISTEN` | `0.0.0.0:8081`. Empty: no artifact listener of its own, and the dashboard port serves `/a/...`. With a listener, the dashboard port does not serve artifacts. |
 | `TERRARIUM_HOST_LISTEN` | `auto`, the host agent dial-in: `0.0.0.0:8082` with TLS, `127.0.0.1:8082` without. Empty: no listener of its own; the main router still serves `/hosts/connect`. A plaintext bind to a non-loopback address logs an `INSECURE` warning. |
 | `TERRARIUM_HOST_TLS_CERT`, `TERRARIUM_HOST_TLS_KEY` | unset. Both set: the host listener speaks TLS with this PEM certificate chain and key (`just host::cert`). One alone stops the daemon at start. |
+| `TERRARIUM_DATA_DIR` | `.` (the project dir). compose.yaml only: the dir that holds the bind-mount sources (`config/`, `state/`, `tools/`, ...). `<dir>/terrarium-compose` of a deploy sets it to the install dir, so the data is not in `<dir>/src`. The daemon does not read it. |
 | `TERRARIUM_PUBLIC_URL` | unset (mail links use `http://localhost:8080`). The dashboard as the operator opens it, for the links in operator mail, `Version.url`, the cookie `Origin` check on WebSocket upgrades, and CORS on `/a/...`. The host installer (`GET /install/host.sh`) downloads from it, and it and `just host::install` take the host agent's `daemon_url` from its host. |
 | `TERRARIUM_HOST_DAEMON_URL` | unset: `wss://<host of TERRARIUM_PUBLIC_URL>:<port of the host listener>` when the host listener speaks TLS. The `daemon_url` that the host installer writes (`docs/api.md` §17.9). `just host::install` reads it too. |
 | `TERRARIUM_HOST_DIST_DIR` | `/opt/terrarium/dist`. The static host agent binaries, `terrarium-host-<arch>-linux` and their `.sha256`, for `GET /install/terrarium-host`. The image fills it. For `just daemon::run`, run `just host::build` and set `target/host`. |
