@@ -3,9 +3,9 @@ import { createMockApi } from "../../api/mock";
 import type { AgentEvent, Schedule, ScheduleRun } from "../../api/types";
 import { applyRunAnswer, applyScheduleEvent, failedRecently, filterSchedules, groupSchedules, inView, readScheduleEvent, runOutputText, runSeconds, scheduleHref, tabOf, tabParam, touchesRuns, type ScheduleListState } from "./model";
 import { createRunHistory } from "./history";
+import { fakeClock } from "../../test/wait";
 
 const mock = () => createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 0 });
-const wait = (ms = 5) => new Promise((r) => setTimeout(r, ms));
 
 const sched = (id: string, project: string | null, over: Partial<Schedule> = {}): Schedule => ({
   id,
@@ -76,6 +76,8 @@ describe("applyScheduleEvent", () => {
   });
 
   it("follows the mock's ID-only events from run now to the end, and the answer sets the last run", async () => {
+    // A fake clock: the run takes 20 ms, so "the spinner is on" holds on any machine.
+    const tick = fakeClock();
     const api = createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 0, scheduleRunMs: 20 });
     const list = await api.schedules.list({ project: "terrarium" });
     let state: ScheduleListState = { items: list, running: {} };
@@ -86,14 +88,15 @@ describe("applyScheduleEvent", () => {
       state = r.state;
       if (r.refetch) refetches.push(String(e.data.change));
     });
-    await wait();
+    await tick();
     const t = list.find((x) => x.name === "tests")!;
     const pending = api.schedules.run(t.id);
-    await wait(5);
+    await tick(5);
     // run_started: the spinner, from the run ID.
     expect(state.running[t.id]).toMatch(/^01JBRUN/);
+    await tick(15);
     const r = await pending;
-    await wait(0);
+    await tick();
     expect(state.running[t.id]).toBeUndefined();
     // run_finished has no schedule body: the view reads the list again.
     expect(refetches).toEqual(["run_finished"]);

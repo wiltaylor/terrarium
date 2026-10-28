@@ -4,9 +4,9 @@ import { describe, expect, it } from "vitest";
 import { createHttpTransport } from "../http";
 import { createMockApi } from ".";
 import { checkSkill, newSkillMd } from "./skills";
+import { waitFor } from "../../test/wait";
 
 const mock = (o: Parameters<typeof createMockApi>[0] = {}) => createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 0, ...o });
-const wait = (ms = 5) => new Promise((r) => setTimeout(r, ms));
 
 describe("skills (mock)", () => {
   it("lists the seed: fern-check, and a skill that fails the checks", async () => {
@@ -93,8 +93,7 @@ describe("skills (mock)", () => {
     const live = await api.agents.get("terrarium/reviewer");
     expect((await api.agents.update(live.id, { skills: ["release-notes"] })).skills_restart).toBe(true);
     await api.agents.restart(live.id);
-    await wait(20);
-    expect((await api.agents.get(live.id)).skills_restart).toBeUndefined();
+    await waitFor(async () => expect((await api.agents.get(live.id)).skills_restart).toBeUndefined());
   });
 
   it("keeps skills in a template spec, and an agent from the template gets them", async () => {

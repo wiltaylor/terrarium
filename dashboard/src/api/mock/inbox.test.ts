@@ -6,6 +6,7 @@ import { fakeUlid } from "./data";
 import type { AgentEvent } from "../types";
 import { createInboxStore } from "../../stores/inbox";
 import { criticalBanner } from "../../features/inbox/critical";
+import { waitFor } from "../../test/wait";
 
 const mock = () => createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 0 });
 const wait = (ms = 5) => new Promise((r) => setTimeout(r, ms));
@@ -146,11 +147,9 @@ describe("the inbox in the mock", () => {
     expect(store.open()).toHaveLength(7);
     await wait();
     await api.questions.answer(store.open()[0]!.question!.id, { answer: "yes" });
-    await wait(30);
-    expect(store.counts()).toMatchObject({ open: 6, urgent: 0, question: 1 });
+    await waitFor(() => expect(store.counts()).toMatchObject({ open: 6, urgent: 0, question: 1 }));
     await api.inbox.ackMail(fakeUlid("msg", 13));
-    await wait(30);
-    expect(store.counts()).toMatchObject({ open: 5, mail: 2 });
+    await waitFor(() => expect(store.counts()).toMatchObject({ open: 5, mail: 2 }));
     expect(store.open()).toHaveLength(5);
   });
 
@@ -169,8 +168,7 @@ describe("the inbox in the mock", () => {
     expect(b).toMatchObject({ more: 0, from: notice.agent_name, href: `/inbox?item=notice%3A${notice.id}` });
     await wait();
     await api.questions.ack(notice.id);
-    await wait(30);
-    expect(store.counts()).toMatchObject({ critical: 0 });
+    await waitFor(() => expect(store.counts()).toMatchObject({ critical: 0 }));
     expect(criticalBanner(store.open())).toBeNull();
   });
 });

@@ -8,6 +8,7 @@ import { bearerProtocol, type AuthSocket, type MakeRawSocket, type PtySocket } f
 import { FakePty } from "./pty";
 import { acceptHandshake, MOCK_ORIGIN, MOCK_PASSWORD, MOCK_RULES, MOCK_TOKEN, type HandshakeRules } from "./ws";
 import { eachMethod, httpVerbs, NOT_TRANSPORT } from "./verbs";
+import { fakeClock, waitFor } from "../../test/wait";
 
 const mock = () => createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 0 });
 const wait = (ms = 5) => new Promise((r) => setTimeout(r, ms));
@@ -44,9 +45,11 @@ describe("mock parity with docs/api.md", () => {
     await wait();
     const a = await api.agents.start("terrarium/sysadmin");
     expect(a.status).toBe("stopped");
-    await wait(20);
-    const statuses = frames.filter((e) => e.kind === "status");
-    expect(statuses.map((e) => e.data.status)).toEqual(["starting", "idle"]);
+    const statuses = await waitFor(() => {
+      const st = frames.filter((e) => e.kind === "status");
+      expect(st.map((e) => e.data.status)).toEqual(["starting", "idle"]);
+      return st;
+    });
     const e = statuses[0]!;
     expect(e).toMatchObject({ kind: "status", actor: "system", agent: "sysadmin", agent_id: a.id, project: "terrarium" });
     expect(e.data).toMatchObject({ agent_id: a.id, status: "starting", from: "stopped", reason: null });
@@ -64,9 +67,11 @@ describe("mock parity with docs/api.md", () => {
     await wait();
     const a = api.world.agents.find((x) => x.source !== "file")!;
     await api.agents.remove(a.id, true);
-    await wait(20);
-    const rm = frames.filter((e) => e.kind === "agent_removed");
-    expect(rm).toHaveLength(1);
+    const rm = await waitFor(() => {
+      const r = frames.filter((e) => e.kind === "agent_removed");
+      expect(r).toHaveLength(1);
+      return r;
+    });
     expect(rm[0]).toMatchObject({ agent: a.name, agent_id: a.id, project: a.project, data: { agent_id: a.id, project: a.project, name: a.name } });
     s.close();
   });
@@ -1576,18 +1581,21 @@ describe("schedules (docs/api.md §19, the daemon's api/schedules.rs)", () => {
   });
 
   it("runs now: run_started at once, the answer is the run when it ends, then run_finished with {run, status, trigger}", async () => {
+    // A fake clock: the run takes 15 ms, so "not finished yet" holds on any machine.
+    const tick = fakeClock();
     const api = createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 0, scheduleRunMs: 15 });
     const ev = stream(api);
-    await wait();
+    await tick();
     const s = (await api.schedules.list()).find((x) => x.name === "tests")!;
     const pending = api.schedules.run(s.id);
-    await wait(2);
+    await tick(2);
     expect(ev.frames().map((e) => e.data.change)).toEqual(["run_started"]);
     expect(ev.frames()[0]!.data).toMatchObject({ schedule: s.id, status: "running", trigger: "manual" });
     expect(typeof ev.frames()[0]!.data.run).toBe("string");
     // A second run while one goes on is skipped at once.
     const overlap = await api.schedules.run(s.id);
     expect(overlap).toMatchObject({ status: "skipped", summary: expect.stringContaining("still running") });
+    await tick(15);
     const r = await pending;
     expect(Object.keys(r).sort()).toEqual(RUN_KEYS);
     expect(r).toMatchObject({ schedule: s.id, status: "ok", trigger: "manual", summary: "exec on build-box: exit 0" });
@@ -1600,7 +1608,9 @@ describe("schedules (docs/api.md §19, the daemon's api/schedules.rs)", () => {
     expect(after.runs_count).toBe(s.runs_count + 2);
     expect(after.last_run).toMatchObject({ run_id: r.id, status: "ok", at: r.finished_at });
     const failing = await api.schedules.create({ name: "f", project: "terrarium", spec: { kind: "interval", every: "1h" }, action: { type: "exec", target: "build-box", cmd: ["false"] } });
-    expect(await api.schedules.run(failing.id)).toMatchObject({ status: "failed", error: "exit code 1" });
+    const failed = api.schedules.run(failing.id);
+    await tick(15);
+    expect(await failed).toMatchObject({ status: "failed", error: "exit code 1" });
     expect((await api.schedules.get(failing.id)).last_run).toMatchObject({ status: "failed" });
     ev.close();
   });

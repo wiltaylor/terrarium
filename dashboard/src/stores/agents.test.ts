@@ -4,6 +4,7 @@ import { createMockApi } from "../api/mock";
 import type { Agent, AgentEvent } from "../api/types";
 import { applyAgentEvent, createAgentsStore, mergeFresh, removeAgent } from "./agents";
 import { createEventsStore } from "./events";
+import { fakeClock, waitFor } from "../test/wait";
 
 const agent = (over: Partial<Agent> = {}): Agent => ({
   id: "A1",
@@ -84,8 +85,7 @@ describe("createAgentsStore", () => {
       events.start();
       await new Promise((r) => setTimeout(r, 5));
       await api.agents.send(lead.id, "hello");
-      await new Promise((r) => setTimeout(r, 1));
-      expect(events.recent().some((e) => e.kind === "turn_start" && e.agent_id === lead.id)).toBe(true);
+      await waitFor(() => expect(events.recent().some((e) => e.kind === "turn_start" && e.agent_id === lead.id)).toBe(true));
       expect(store.byId("terrarium/lead")!.id).toBe(lead.id);
       events.stop();
       dispose();
@@ -153,8 +153,10 @@ describe("agent removal", () => {
       let calls = 0;
       const list = api.agents.list;
       api.agents.list = (...args) => (calls++, list(...args));
+      // A fake clock: 600 ms passes the 500 ms refresh debounce at once.
+      const tick = fakeClock();
       listen(ev({ kind: "session_ended", agent_id: w.id, data: {} }));
-      await new Promise((r) => setTimeout(r, 600));
+      await tick(600);
       expect(calls).toBe(0);
       store.dispose();
       dispose();

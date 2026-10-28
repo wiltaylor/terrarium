@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { createMockApi } from ".";
 import type { TranscriptStreamState } from "../sse";
 import type { Block, TranscriptFrame } from "../types";
+import { fakeClock, waitFor } from "../../test/wait";
 
 const mock = () => createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 0 });
 const wait = (ms = 5) => new Promise((r) => setTimeout(r, ms));
@@ -122,7 +123,11 @@ describe("transcripts in the mock (docs/api.md §6)", () => {
     expect(frames.map((f) => f.type === "block" && f.block.seq)).toEqual([n - 1, n]);
     frames.length = 0;
     await api.agents.send(a.id, "Run the tests, please.");
-    await wait(40);
+    // The turn ends with the update to the reply and the idle status.
+    await waitFor(() => {
+      expect(frames.some((f) => f.type === "update")).toBe(true);
+      expect(frames.some((f) => f.type === "status" && f.status === "idle")).toBe(true);
+    });
     const blocks = frames.filter((f): f is Extract<TranscriptFrame, { type: "block" }> => f.type === "block").map((f) => f.block);
     expect(blocks[0]).toMatchObject({ seq: n + 1, role: "user", kind: "text", text: "[User] Run the tests, please.", origin: "operator", parts: [{ source: "user", body: "Run the tests, please." }], session: ses.id });
     expect(blocks.map((b) => b.kind)).toEqual(["text", "thinking", "tool_call", "tool_result", "text"]);
@@ -142,6 +147,8 @@ describe("transcripts in the mock (docs/api.md §6)", () => {
   });
 
   it("queues a turn to a working agent until it is idle", async () => {
+    // A fake clock: "no block yet" then holds for 20 ms of the mock's time on any machine.
+    const tick = fakeClock();
     const api = mock();
     const a = await api.agents.get("terrarium/runner-dev");
     const ses = (await api.agents.sessions(a.id)).items.find((s) => s.current)!;
@@ -149,7 +156,7 @@ describe("transcripts in the mock (docs/api.md §6)", () => {
     const s = api.agents.transcriptStream(a.id, ses.id, { after: ses.blocks });
     s.subscribe((f) => frames.push(f));
     await api.agents.send(a.id, "after this turn");
-    await wait(20);
+    await tick(20);
     expect(frames.filter((f) => f.type === "block")).toEqual([]);
     s.close();
   });
@@ -165,8 +172,7 @@ describe("transcripts in the mock (docs/api.md §6)", () => {
     s.onState((st) => states.push(st));
     await wait();
     await api.agents.stop(a.id);
-    await wait(20);
-    expect(frames).toContainEqual({ type: "status", status: "ended" });
+    await waitFor(() => expect(frames).toContainEqual({ type: "status", status: "ended" }));
     const after = (await api.agents.sessions(a.id)).items.find((x) => x.id === ses.id)!;
     expect(after).toMatchObject({ active: false, current: false });
     s.close();
@@ -176,9 +182,11 @@ describe("transcripts in the mock (docs/api.md §6)", () => {
     const api = mock();
     const a = await api.agents.get("terrarium/lead");
     await api.agents.restart(a.id);
-    await wait(20);
-    const list = (await api.agents.sessions(a.id)).items;
-    expect(list[0]).toMatchObject({ current: true, active: true, blocks: 1, title: null });
+    const list = await waitFor(async () => {
+      const items = (await api.agents.sessions(a.id)).items;
+      expect(items[0]).toMatchObject({ current: true, active: true, blocks: 1, title: null });
+      return items;
+    });
     const page = await api.agents.transcript(a.id, list[0]!.id);
     expect(page.blocks[0]).toMatchObject({ seq: 1, role: "system", kind: "system" });
     expect(list.filter((s) => s.active)).toHaveLength(1);

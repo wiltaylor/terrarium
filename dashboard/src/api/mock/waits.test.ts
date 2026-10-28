@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { createMockApi } from ".";
 import type { AgentEvent, ProcessWaitResult } from "../types";
 import { untilMatches } from "./waits";
+import { waitFor } from "../../test/wait";
 
 const mock = () => createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 0 });
 const wait = (ms = 5) => new Promise((r) => setTimeout(r, ms));
@@ -82,8 +83,11 @@ describe("waits in the mock", () => {
     const l = await listen(api);
     // runner-dev is working; a restart brings it to idle with no waits: done.
     await api.agents.restart("terrarium/runner-dev");
-    await wait(20);
-    const resolved = l.frames.find((x) => x.kind === "wait" && x.data.change === "resolved")!;
+    const resolved = await waitFor(() => {
+      const r = l.frames.find((x) => x.kind === "wait" && x.data.change === "resolved");
+      expect(r).toBeDefined();
+      return r!;
+    });
     expect(resolved.data).toMatchObject({ kind: "agent", state: "resolved", summary: "agent terrarium/runner-dev (done)" });
     expect((await api.waits.get(String(resolved.data.wait_id))).result).toEqual({ outcome: "idle" });
     l.close();
@@ -142,10 +146,9 @@ describe("watches in the mock", () => {
     const w = await api.agents.watch("terrarium/sysadmin", { on: ["idle"], once: true });
     const l = await listen(api);
     await api.agents.start("terrarium/sysadmin");
-    await wait(20);
+    await waitFor(() => expect(l.frames.some((x) => x.kind === "watch" && x.data.change === "removed")).toBe(true));
     const fired = l.frames.find((x) => x.kind === "watch" && x.data.change === "fired")!;
     expect(fired.data).toMatchObject({ watch_id: w.id, status: "idle" });
-    expect(l.frames.some((x) => x.kind === "watch" && x.data.change === "removed")).toBe(true);
     expect(api.world.mail.some((m) => m.to === "operator" && m.subject === "terrarium/sysadmin is idle")).toBe(true);
     expect((await api.watches.list()).map((x) => x.id)).not.toContain(w.id);
     l.close();
