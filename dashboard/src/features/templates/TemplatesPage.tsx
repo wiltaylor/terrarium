@@ -1,22 +1,35 @@
 // Agent templates (docs/api.md §21): the global templates and those of each
 // project, with a scope filter. Create, edit, and delete (an in-page
-// confirm). `template` events keep the list fresh.
+// confirm). `template` events keep the list fresh. Under /p/:project the
+// page lists the templates that apply to the project: its own, then the
+// global ones. A global template that a project template of the same name
+// overrides stays in the list with a chip, because the New agent form still
+// offers it (as `global:<name>`).
 
+import { useParams } from "@solidjs/router";
 import { createResource, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { ConfirmButton, Empty, ErrorBanner, PageHead } from "../../components/ui";
 import type { AgentTemplate } from "../../api/types";
 import { ago } from "../../lib/format";
 import { api, events, projects } from "../../stores";
-import { pathKey, scopeLabel } from "./model";
+import { pathKey, scopeLabel, selectable } from "./model";
 import { TemplateDialog } from "./TemplateDialog";
 
 export default function TemplatesPage() {
+  const route = useParams<{ project?: string }>();
   // "all", "global", or a project name.
   const [scope, setScope] = createSignal("all");
   const [dialog, setDialog] = createSignal<{ template?: AgentTemplate } | null>(null);
   const [error, setError] = createSignal<unknown>(null);
   const [list, { refetch }] = createResource(() => api.templates.list().catch((e: unknown) => (setError(e), [] as AgentTemplate[])));
-  const shown = () => (list() ?? []).filter((t) => scope() === "all" || (scope() === "global" ? t.project === null : t.project === scope()));
+  /** The project of the route wins over the scope select. */
+  const shown = () => {
+    const all = list() ?? [];
+    if (route.project) return selectable(all, route.project);
+    return all.filter((t) => scope() === "all" || (scope() === "global" ? t.project === null : t.project === scope()));
+  };
+  /** A global template with the name of a template of the route project. */
+  const overridden = (t: AgentTemplate) => !!route.project && t.project === null && shown().some((o) => o.project === route.project && o.name === t.name);
 
   onMount(() => {
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -43,12 +56,14 @@ export default function TemplatesPage() {
 
   return (
     <>
-      <PageHead title="Agent templates">
-        <select value={scope()} onChange={(e) => setScope(e.currentTarget.value)} aria-label="Scope">
-          <option value="all">All scopes</option>
-          <option value="global">Global</option>
-          <For each={projects.projects()}>{(p) => <option value={p.name}>Project: {p.name}</option>}</For>
-        </select>
+      <PageHead title={route.project ? `Templates · ${route.project}` : "Agent templates"}>
+        <Show when={!route.project}>
+          <select value={scope()} onChange={(e) => setScope(e.currentTarget.value)} aria-label="Scope">
+            <option value="all">All scopes</option>
+            <option value="global">Global</option>
+            <For each={projects.projects()}>{(p) => <option value={p.name}>Project: {p.name}</option>}</For>
+          </select>
+        </Show>
         <button onClick={() => void refetch()}>Refresh</button>
         <button class="primary" onClick={() => setDialog({})}>
           New template
@@ -61,7 +76,7 @@ export default function TemplatesPage() {
         {(d) => (
           <TemplateDialog
             template={d().template}
-            scope={scope() === "all" || scope() === "global" ? "" : scope()}
+            scope={route.project ?? (scope() === "all" || scope() === "global" ? "" : scope())}
             onClose={() => setDialog(null)}
             onSaved={() => void refetch()}
           />
@@ -97,6 +112,12 @@ export default function TemplatesPage() {
                     </td>
                     <td>
                       <span class={`chip ${t.project ? "info" : ""}`}>{scopeLabel(t)}</span>
+                      <Show when={overridden(t)}>
+                        {" "}
+                        <span class="chip warn" title={`The template ${route.project}/${t.name} wins for agents of ${route.project}. Pick global:${t.name} in the New agent form to use this one.`}>
+                          overridden by project
+                        </span>
+                      </Show>
                     </td>
                     <td>{t.spec.harness}</td>
                     <td class="mono small">{t.spec.model ?? <span class="muted">default</span>}</td>

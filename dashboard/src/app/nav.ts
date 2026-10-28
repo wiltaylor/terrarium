@@ -3,6 +3,8 @@
 export const PROJECT_ITEMS = [
   // Every agent of the project, in any status.
   { path: "agents", label: "Agents" },
+  // The templates that apply to the project: its own and the global ones.
+  { path: "templates", label: "Templates" },
   { path: "board", label: "Board" },
   // The mail log of the project: every message that touches it.
   { path: "mail", label: "Mail" },

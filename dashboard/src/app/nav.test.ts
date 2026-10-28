@@ -21,6 +21,13 @@ describe("navigation", () => {
     expect(app).toMatch(/path="\/p\/:project\/agents" component=\{AgentsPage\}/);
   });
 
+  it("has Templates right after Agents under the project, with a route to the Templates page", () => {
+    const paths = PROJECT_ITEMS.map((i) => i.path) as string[];
+    expect(paths.indexOf("templates")).toBe(paths.indexOf("agents") + 1);
+    expect(PROJECT_ITEMS.find((i) => i.path === "templates")?.label).toBe("Templates");
+    expect(app).toMatch(/path="\/p\/:project\/templates" component=\{TemplatesPage\}/);
+  });
+
   it("has Schedules under the project and in the global list, each with a route", () => {
     expect(PROJECT_ITEMS.map((i) => i.path)).toContain("schedules");
     expect(GLOBAL_ITEMS.map((i) => i.href)).toContain("/schedules");
