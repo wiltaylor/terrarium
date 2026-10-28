@@ -118,6 +118,6 @@ mod tests {
         assert_ne!(text_hash("a b"), text_hash("a c"));
         assert_eq!(text_hash("x").len(), 64);
         // The escape of a command turn does not change the hash.
-        assert_eq!(text_hash("\u{200B}  /plan now"), text_hash("/plan now"));
+        assert_eq!(text_hash("\u{00A0}  /plan now"), text_hash("/plan now"));
     }
 }

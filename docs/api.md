@@ -1038,7 +1038,7 @@ the turn `origin: "operator"` when the harness writes it (§6.6).
 
 **A turn is plain text.** A `send` waits until the agent is `idle`. When
 its text starts with `/` or `!` (after white space), the adapter puts the
-character U+200B (zero width space) in front of it, so the harness does not
+character U+00A0 (no-break space) in front of it, so the harness does not
 run it as a slash command or a shell command. Copilot also gets the escape
 for a text that is only `$`. A mail pointer, a recap turn, and a schedule
 turn go the same way. The escape does not change the words that the model

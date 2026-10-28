@@ -100,8 +100,8 @@ mod tests {
             let typed = type_turn(t);
             let body = &typed[6..typed.len() - 7];
             let text = std::str::from_utf8(body).expect("utf8");
-            assert!(text.starts_with('\u{200B}'), "{t}: {text:?}");
-            assert_eq!(&text['\u{200B}'.len_utf8()..], t);
+            assert!(text.starts_with('\u{00A0}'), "{t}: {text:?}");
+            assert_eq!(&text['\u{00A0}'.len_utf8()..], t);
         }
         assert_eq!(
             type_turn("New mail"),

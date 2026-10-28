@@ -616,10 +616,10 @@ pull or a sync every `TERRARIUM_CONFIG_SYNC_INTERVAL` (default `15m`).
 **A turn is plain text.** A turn that the daemon types (a mail pointer,
 `POST /api/agents/{id}/send`, a recap turn, a schedule turn) can start with
 `/` or `!`. The harness would run it as a slash command (`/plan` enters
-plan mode) or a shell command. So each adapter puts U+200B (zero width
+plan mode) or a shell command. So each adapter puts U+00A0 (no-break
 space) in front of such a text (Copilot also before a lone `$`). The
-harnesses trim white space, but U+200B is not white space, and the model
-reads the same words (`terrarium_core::adapter::escape_turn`).
+harnesses then read a normal turn (verified live on all four; U+200B
+failed in Claude Code), and the model reads the same words (`terrarium_core::adapter::escape_turn`).
 
 **Leader controls.** A leader fixes a stuck harness (a dialog, a wrong
 mode) and runs harness commands on purpose:

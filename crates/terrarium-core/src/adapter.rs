@@ -186,12 +186,13 @@ pub fn exit_key_writes(keys: &[u8], pause: Duration) -> Vec<Vec<u8>> {
 /// Ctrl-U: kill the line before the cursor.
 pub const CTRL_U: u8 = 0x15;
 
-/// The character that [`escape_turn`] puts in front of a turn: U+200B ZERO
-/// WIDTH SPACE. It is not white space for JavaScript `trim()` or for Rust
-/// `char::is_whitespace`, so a harness that trims its input still sees a
-/// first character that is not `/` or `!`. A reader does not see it, and
-/// the words of the turn do not change.
-pub const TURN_ESCAPE: char = '\u{200B}';
+/// The character that [`escape_turn`] puts in front of a turn: U+00A0
+/// NO-BREAK SPACE. Verified live on 2026-10-28: with it, `/help ...` was a
+/// normal turn in Claude Code 2.1.310, Codex 0.164.0, Copilot 1.0.103,
+/// and pi 1.4.0. U+200B (zero width space) and a plain space did not work
+/// in Claude Code: it ran the slash command. The words of the turn do not
+/// change.
+pub const TURN_ESCAPE: char = '\u{00A0}';
 
 /// The first characters that make a harness run typed text as a command:
 /// `/` (a slash command, for example `/plan`) and `!` (a shell command in
@@ -279,19 +280,20 @@ mod tests {
     #[test]
     fn command_turns_get_the_escape() {
         let esc = |t| escape_turn(t, COMMAND_PREFIXES, &[]).into_owned();
-        assert_eq!(esc("/plan now"), "\u{200B}/plan now");
-        assert_eq!(esc("  !rm -rf x"), "\u{200B}  !rm -rf x");
-        assert_eq!(esc("\n/compact"), "\u{200B}\n/compact");
+        assert_eq!(esc("/plan now"), "\u{00A0}/plan now");
+        assert_eq!(esc("  !rm -rf x"), "\u{00A0}  !rm -rf x");
+        assert_eq!(esc("\n/compact"), "\u{00A0}\n/compact");
         // Other text does not change.
         for t in ["New mail from lead (thread T)", "a /b", "", "$", "x!"] {
             assert_eq!(esc(t), t);
         }
         // The lone `$` of Copilot.
-        assert_eq!(escape_turn(" $ ", COMMAND_PREFIXES, &["$"]), "\u{200B} $ ");
+        assert_eq!(escape_turn(" $ ", COMMAND_PREFIXES, &["$"]), "\u{00A0} $ ");
         assert_eq!(escape_turn("$HOME", COMMAND_PREFIXES, &["$"]), "$HOME");
-        // The escape survives the trims of the harnesses.
+        // The harnesses read a turn that starts with U+00A0 as text
+        // (verified live, see TURN_ESCAPE); the escape is the first char.
         let e = esc("/plan");
-        assert!(!e.trim().starts_with('/'));
+        assert!(e.starts_with(TURN_ESCAPE));
         assert_eq!(unescape_turn(&e), "/plan");
         assert_eq!(unescape_turn("plain"), "plain");
     }

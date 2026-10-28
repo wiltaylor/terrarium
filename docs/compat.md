@@ -1263,14 +1263,14 @@ and in each repo. Nothing loads `CLAUDE.md`. Per harness:
 | Copilot CLI | Very likely nothing in replace mode (the custom instructions are a section of the replaced system message; not tested). The global `copilot-instructions.md` is empty for agents. |
 | pi | Nothing: `--no-context-files` (it would also load the shared home's `AGENTS.md`). |
 
-**Turns that start with `/` or `!` (D3).** Each adapter puts U+200B (zero
-width space) in front of a turn whose text starts with `/` or `!` after
-white space; Copilot also for a lone `$`. The harnesses trim white space
-first (pi: `text.trim()` in `setupEditorSubmitHandler`), and U+200B is not
-white space for JavaScript or Rust, so the first character is no command
-prefix. The model reads the same words. The delivery log ignores the
-character when it matches a transcript block. Not tested live: whether a
-harness drops U+200B from a paste. A leader runs a command on purpose with
+**Turns that start with `/` or `!` (D3).** Each adapter puts U+00A0 (no-break
+space) in front of a turn whose text starts with `/` or `!` after
+white space; Copilot also for a lone `$`. Verified live on 2026-10-28
+with `/help reply with ok`, sent with Enter: with U+00A0, each of the four
+harnesses ran a normal turn. U+200B (zero width space) and a plain space
+did not work in Claude Code: it ran `/help`, and a `/plan` turn put the
+agent in plan mode. The model reads the same words. The delivery log
+ignores the character when it matches a transcript block. A leader runs a command on purpose with
 a raw send (`terrarium agent send --raw`) or keys (`terrarium agent keys`).
 
 **Dialogs (B2).** The screen detectors also know these dialogs from the
