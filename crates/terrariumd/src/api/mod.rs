@@ -14,6 +14,7 @@ mod longpoll;
 mod mail;
 mod memory;
 mod projects;
+mod questions;
 mod repos;
 mod schedules;
 mod screen;
@@ -243,6 +244,7 @@ fn routes(state: Shared, serve_artifacts: bool, host_connect: bool) -> Router {
         .merge(event_sources::routes())
         .merge(templates::routes())
         .merge(waits::routes())
+        .merge(questions::routes())
         .merge(config::routes())
         .route(
             "/session",

@@ -22,6 +22,12 @@ describe("navigation", () => {
     expect(app).toMatch(/path="\/templates"/);
   });
 
+  it("has Questions after Mail in the global list, with a route", () => {
+    const hrefs = GLOBAL_ITEMS.map((i) => i.href);
+    expect(hrefs.indexOf("/questions")).toBe(hrefs.indexOf("/mail") + 1);
+    expect(app).toMatch(/path="\/questions"/);
+  });
+
   it("has Config before Settings in the global list, with a route", () => {
     const hrefs = GLOBAL_ITEMS.map((i) => i.href);
     expect(hrefs.indexOf("/config")).toBe(hrefs.indexOf("/settings") - 1);

@@ -8,6 +8,7 @@ import { changePassword, createAuthStore, restoreSession, signIn, signInWithPass
 import { createEventsStore } from "./events";
 import { createLeasesStore } from "./leases";
 import { createProjectsStore } from "./projects";
+import { createQuestionsStore } from "./questions";
 import { createQuotaStore } from "./quota";
 import { createSubscriptionsStore } from "./subscriptions";
 import { createThemeStore } from "./theme";
@@ -39,6 +40,7 @@ export const quota = createQuotaStore(events);
 export const unread = createUnreadStore(api, events);
 export const attention = createAttentionStore(api, events, { prefixes: () => projects.prefixes() });
 export const leases = createLeasesStore(api, events);
+export const questions = createQuestionsStore(api, events);
 
 // At load: the cookie is the cache. `GET /api/session` says whether it is a
 // session, and gives the CSRF value. A token from an older build (bearer

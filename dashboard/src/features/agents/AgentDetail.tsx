@@ -22,6 +22,7 @@ import { PoolPicker, SubscriptionSelect } from "./SubscriptionFields";
 import { SystemPromptField } from "./AgentFields";
 import { effectivePersona, systemPromptProblem } from "./form";
 import { WaitsPanel, WatchesPanel } from "./Waits";
+import { QuestionsPanel } from "../questions/QuestionsPage";
 
 const TABS = [
   { id: "conversation", label: "Conversation" },
@@ -187,6 +188,8 @@ export default function AgentDetail() {
           <RolesPanel agent={a()} onError={setError} />
 
           <LeasesPanel agent={a()} onNotice={(n) => setNotice(n)} />
+
+          <QuestionsPanel agent={a()} />
 
           <WaitsPanel agent={a()} />
 

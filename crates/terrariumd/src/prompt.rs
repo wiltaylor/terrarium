@@ -617,6 +617,29 @@ mod tests {
         }
     }
 
+    /// The leads ask the operator with `terrarium question` (PLAN §12e);
+    /// a worker cannot, so `default.md` does not teach it.
+    #[test]
+    fn lead_templates_teach_the_questions_protocol() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../defaults/prompts");
+        for name in ["project-lead", "system-lead"] {
+            let t = load_template(&dir, Some(name)).unwrap();
+            for needle in [
+                "## Questions to the operator",
+                "`terrarium question ask \"<question>\"`, not in the text\nof your turn",
+                "Before\nyou ask, run `terrarium question ls`. Do not ask the same thing twice.",
+                "Add `--wait` when you cannot go on without the answer.",
+                "`terrarium question update <id>`",
+                "`terrarium question retract <id> -m \"<why>\"`",
+                "At the start of a session, after a compaction, or when you are not sure of\n  your state, run `terrarium question ls`.",
+                "`question ask | ls | show | update | retract`",
+            ] {
+                assert!(t.contains(needle), "{name}: {needle}");
+            }
+        }
+        assert!(!DEFAULT_TEMPLATE.contains("question ask"));
+    }
+
     /// `defaults/prompts/default.md` and the built-in template stay the same text.
     #[test]
     fn default_template_matches_prompts_default_md() {

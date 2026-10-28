@@ -620,6 +620,7 @@ pub fn set_subscription(t: &mut Tx<'_>, id: &str, subscription: &str) -> ApiResu
 pub fn delete(t: &mut Tx<'_>, id: &str) -> ApiResult<()> {
     let a = get(t, id)?;
     crate::store::waits::on_agent_deleted(t, id)?;
+    crate::store::questions::on_agent_deleted(t, id)?;
     t.execute("DELETE FROM agents WHERE id = ?1", [id])?;
     // The name stays for the cards, comments, and mail of the agent.
     t.execute(

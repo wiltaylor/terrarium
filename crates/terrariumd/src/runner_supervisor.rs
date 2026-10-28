@@ -800,7 +800,8 @@ struct Slot {
     /// which can lag behind the events; the push decision follows the
     /// events.
     seen: AgentStatus,
-    /// A recap turn to type at the first idle after a failed resume.
+    /// A recap turn to type at the first idle after a failed resume (or a
+    /// new session after a prompt change, for an agent with questions).
     recap: Option<String>,
     pointer: Pointer,
     pointer_busy: bool,
@@ -1468,11 +1469,20 @@ impl RunnerSupervisor {
         self.record_version(id, agent.harness, harness_version);
         self.record_accounts(id, &accounts);
         let resume = if fresh_for_prompt {
+            // A new session knows nothing of the old one: an agent with
+            // questions gets a recap turn that lists them (PLAN §12e).
+            let recap = self
+                .questions_recap(id)
+                .await
+                .map(|_| PROMPT_CHANGED_RECAP.to_owned());
             // The old session stays in the history; this launch begins a
             // new one, and a later restart resumes that.
             if let Some(slot) = lock(&self.inner.slots).get_mut(&id) {
                 slot.resume = None;
                 slot.session = None;
+                if recap.is_some() {
+                    slot.recap = recap;
+                }
             }
             None
         } else {
@@ -2001,9 +2011,15 @@ impl RunnerSupervisor {
                 None => None,
             }
         };
-        if let Some((text, runner)) = recap {
+        if let Some((mut text, runner)) = recap {
             let me = self.clone();
             tokio::spawn(async move {
+                // The open questions of the agent, and the answers since
+                // its last turn (PLAN §12e).
+                if let Some(q) = me.questions_recap(id).await {
+                    text.push_str("\n\n");
+                    text.push_str(&q);
+                }
                 me.log_delivery(id, terrarium_core::transcript::Origin::System, &text)
                     .await;
                 let delivery = runner.type_turn(text);
@@ -2014,6 +2030,23 @@ impl RunnerSupervisor {
             return;
         }
         self.maybe_push(id);
+    }
+
+    /// The questions part of a recap turn ([`crate::store::questions::recap`]).
+    async fn questions_recap(&self, id: AgentId) -> Option<String> {
+        let state = self.state()?;
+        let key = id.to_string();
+        match state
+            .db
+            .read(move |c| crate::store::questions::recap(c, &key))
+            .await
+        {
+            Ok(q) => q,
+            Err(e) => {
+                warn!(agent = %id, "cannot read the questions for the recap: {e}");
+                None
+            }
+        }
     }
 
     async fn on_exit(&self, id: AgentId, epoch: u64, status: ExitStatus) {
@@ -3020,6 +3053,12 @@ fn type_detached(agent: AgentId, runner: &Arc<dyn RunnerHandle>, text: String) {
         }
     });
 }
+
+/// The recap turn of a new session after a prompt change, for an agent
+/// with questions. The questions follow it ([`crate::store::questions::recap`]).
+const PROMPT_CHANGED_RECAP: &str = "Terrarium started you in a new session, because your system \
+     prompt changed. Run `terrarium mail check` and `terrarium card ls --mine` to continue your \
+     work.";
 
 /// The recap turn after a resume failed: the last turns and tool calls of
 /// the old session, from `events.jsonl` in `private_dir`, and the commands

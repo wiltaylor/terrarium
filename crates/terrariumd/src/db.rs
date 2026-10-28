@@ -1001,6 +1001,48 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE agents ADD COLUMN persona TEXT;
     "#,
+    // 29: questions to the operator (PLAN §12e, docs/api.md §6.8). A
+    // leader asks; the operator (or a sysadmin agent) answers or
+    // retracts. `options` is a JSON array of short choice labels;
+    // `answer_option` is the 0-based index of the chosen one. The answer
+    // mail goes on `thread_id`. `revision` counts the edits. The wait
+    // kind `question` is new: the column is made again with the new
+    // CHECK (the way of migration 9); its index goes first.
+    r#"
+    CREATE TABLE questions (
+        id             TEXT PRIMARY KEY,        -- ULID
+        agent          TEXT NOT NULL,           -- the asking agent ULID
+        project        TEXT NOT NULL,
+        text           TEXT NOT NULL,
+        options        TEXT NOT NULL DEFAULT '[]',
+        context        TEXT,                    -- Markdown
+        card           TEXT,
+        priority       TEXT NOT NULL DEFAULT 'normal'
+                       CHECK (priority IN ('normal', 'urgent')),
+        status         TEXT NOT NULL DEFAULT 'open'
+                       CHECK (status IN ('open', 'answered', 'retracted')),
+        answer         TEXT,
+        answer_option  INTEGER,
+        answered_by    TEXT,                    -- `operator` or an agent ULID
+        answered_at    TEXT,
+        retract_reason TEXT,
+        retracted_by   TEXT,                    -- the actor label
+        thread_id      TEXT NOT NULL,
+        created_at     TEXT NOT NULL,
+        updated_at     TEXT NOT NULL,
+        revision       INTEGER NOT NULL DEFAULT 1
+    );
+    CREATE INDEX questions_agent ON questions(agent, status);
+    CREATE INDEX questions_status ON questions(status, project);
+
+    DROP INDEX waits_open;
+    ALTER TABLE waits ADD COLUMN kind_v29 TEXT NOT NULL DEFAULT 'time'
+        CHECK (kind_v29 IN ('agent', 'process', 'time', 'card', 'question'));
+    UPDATE waits SET kind_v29 = kind;
+    ALTER TABLE waits DROP COLUMN kind;
+    ALTER TABLE waits RENAME COLUMN kind_v29 TO kind;
+    CREATE INDEX waits_open ON waits(state, kind);
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call
@@ -1270,6 +1312,7 @@ mod tests {
             "waits",
             "watches",
             "account_defaults",
+            "questions",
         ] {
             let n: i64 = conn
                 .query_row(
@@ -1523,6 +1566,38 @@ mod tests {
             )
             .unwrap();
         assert_eq!(n, 1);
+    }
+
+    /// Migration 29 makes the wait kind column again with `question`, and
+    /// keeps each stored wait.
+    #[test]
+    fn migration_29_keeps_waits_and_takes_question() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        for (i, sql) in MIGRATIONS.iter().enumerate().take(28) {
+            conn.execute_batch(sql).unwrap();
+            conn.pragma_update(None, "user_version", i + 1).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO waits (id, agent, project, kind, spec, summary, created_by, created_at)
+               VALUES ('W1', 'A1', 'p', 'card', '{}', 'card X in done', 'operator', 't')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(migrate(&mut conn).unwrap(), MIGRATIONS.len() - 28);
+        let kind: String = conn
+            .query_row("SELECT kind FROM waits WHERE id = 'W1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(kind, "card");
+        conn.execute(
+            "INSERT INTO waits (id, agent, project, kind, spec, summary, created_by, created_at)
+               VALUES ('W2', 'A1', 'p', 'question', '{}', 'question x', 'operator', 't')",
+            [],
+        )
+        .unwrap();
+        assert!(
+            conn.execute("UPDATE waits SET kind = 'bogus' WHERE id = 'W1'", [])
+                .is_err()
+        );
     }
 
     #[test]

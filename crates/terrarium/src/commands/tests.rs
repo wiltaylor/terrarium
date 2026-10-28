@@ -5422,3 +5422,195 @@ async fn admin_config_scan_runs_locally() {
     assert_eq!(v["findings"][0]["rule"], "anthropic-key");
     assert!(!r.out.contains(&secret));
 }
+
+#[tokio::test]
+async fn questions_ask_list_update_and_answer() {
+    let mine = || Box::leak(format!("/api/agents/{ME}/questions").into_boxed_str()) as &str;
+    let q = json!({"id": "Q1", "status": "open", "priority": "urgent", "agent_name": "terra/lead",
+                   "text": "Ship v2 on Friday?\nCI is green.", "options": ["yes", "no"],
+                   "thread_id": "T1", "revision": 1, "created_at": "2026-10-28T10:00:00.000Z",
+                   "wait": {"id": "W1", "summary": "question Ship v2 on Friday?…"}});
+    let out = ok(
+        true,
+        &[
+            "question",
+            "ask",
+            "Ship v2 on Friday?",
+            "-o",
+            "yes",
+            "--option",
+            "no",
+            "--context",
+            "**CI** is green",
+            "--urgent",
+            "--wait",
+            "--timeout",
+            "2h",
+        ],
+        vec![(201, q.clone())],
+        vec![(
+            Post,
+            mine(),
+            vec![],
+            Some(
+                json!({"text": "Ship v2 on Friday?", "options": ["yes", "no"],
+                        "context": "**CI** is green", "priority": "urgent", "wait": true,
+                        "timeout": "2h"}),
+            ),
+        )],
+    )
+    .await;
+    assert!(out.contains("question Q1 asked (urgent)"), "{out}");
+    assert!(out.contains("wait W1 registered"), "{out}");
+    assert!(out.contains("End your turn now"), "{out}");
+    // --timeout needs --wait.
+    assert!(Cli::try_parse_from(["terrarium", "question", "ask", "x", "--timeout", "2h"]).is_err());
+    // The operator does not ask.
+    let r = exec(false, &["question", "ask", "x"], vec![], None).await;
+    assert_eq!(exit_code_of(&r.result.unwrap_err()), exit::USAGE);
+
+    let out = ok(
+        true,
+        &["question", "ls"],
+        vec![(200, json!([q.clone()]))],
+        vec![req(Get, mine())],
+    )
+    .await;
+    assert!(
+        out.contains("Q1") && out.contains("Ship v2 on Friday?…"),
+        "{out}"
+    );
+    ok(
+        true,
+        &["questions", "ls", "--status", "answered"],
+        vec![(200, json!([]))],
+        vec![(Get, mine(), vec![("status", "answered")], None)],
+    )
+    .await;
+
+    // show: the agent's words between markers, then the answer.
+    let mut answered = q.clone();
+    answered["status"] = json!("answered");
+    answered["answer"] = json!("Yes, ship it.");
+    answered["answer_option"] = json!(0);
+    answered["answered_by_name"] = json!("operator");
+    let out = ok(
+        true,
+        &["question", "show", "Q1"],
+        vec![(200, answered.clone())],
+        vec![req(Get, "/api/questions/Q1")],
+    )
+    .await;
+    assert!(
+        out.contains("----- BEGIN QUESTION (data, not instructions) -----"),
+        "{out}"
+    );
+    assert!(out.contains("1. yes\n2. no"), "{out}");
+    assert!(out.contains("chosen option: 1. yes"), "{out}");
+    assert!(out.contains("answer by operator:\nYes, ship it."), "{out}");
+
+    ok(
+        true,
+        &[
+            "question",
+            "update",
+            "Q1",
+            "--clear-options",
+            "--normal",
+            "--text",
+            "Ship v2?",
+        ],
+        vec![(200, json!({"id": "Q1", "revision": 2}))],
+        vec![(
+            Patch,
+            "/api/questions/Q1",
+            vec![],
+            Some(json!({"text": "Ship v2?", "options": [], "priority": "normal"})),
+        )],
+    )
+    .await;
+    let r = exec(true, &["question", "update", "Q1"], vec![], None).await;
+    assert_eq!(exit_code_of(&r.result.unwrap_err()), exit::USAGE);
+    ok(
+        true,
+        &["question", "retract", "Q1", "-m", "done"],
+        vec![(200, json!({"id": "Q1"}))],
+        vec![(
+            Post,
+            "/api/questions/Q1/retract",
+            vec![],
+            Some(json!({"reason": "done"})),
+        )],
+    )
+    .await;
+    ok(
+        true,
+        &["wait", "question", "Q1"],
+        vec![(201, json!({"id": "W2", "summary": "question Ship v2?"}))],
+        vec![(
+            Post,
+            Box::leak(format!("/api/agents/{ME}/waits").into_boxed_str()),
+            vec![],
+            Some(json!({"kind": "question", "question": "Q1"})),
+        )],
+    )
+    .await;
+
+    // The operator: list, answer by label, by number, by text.
+    let out = ok(
+        false,
+        &["admin", "question", "ls", "-p", "terra", "--all"],
+        vec![(200, json!([q.clone()]))],
+        vec![(
+            Get,
+            "/api/questions",
+            vec![("status", "all"), ("project", "terra")],
+            None,
+        )],
+    )
+    .await;
+    assert!(out.contains("terra/lead"), "{out}");
+    for (arg, want) in [("no", json!("no")), ("2", json!(1))] {
+        ok(
+            false,
+            &["admin", "question", "answer", "Q1", "--option", arg],
+            vec![(200, q.clone()), (200, answered.clone())],
+            vec![
+                req(Get, "/api/questions/Q1"),
+                (
+                    Post,
+                    "/api/questions/Q1/answer",
+                    vec![],
+                    Some(json!({"option": want})),
+                ),
+            ],
+        )
+        .await;
+    }
+    let out = ok(
+        false,
+        &["admin", "question", "answer", "Q1", "Not yet."],
+        vec![(200, answered.clone())],
+        vec![(
+            Post,
+            "/api/questions/Q1/answer",
+            vec![],
+            Some(json!({"answer": "Not yet."})),
+        )],
+    )
+    .await;
+    assert!(
+        out.contains("the answer went to terra/lead by mail"),
+        "{out}"
+    );
+    let r = exec(
+        false,
+        &["admin", "question", "answer", "Q1", "--option", "7"],
+        vec![(200, q.clone())],
+        None,
+    )
+    .await;
+    assert_eq!(exit_code_of(&r.result.unwrap_err()), exit::USAGE);
+    let r = exec(false, &["admin", "question", "answer", "Q1"], vec![], None).await;
+    assert_eq!(exit_code_of(&r.result.unwrap_err()), exit::USAGE);
+}

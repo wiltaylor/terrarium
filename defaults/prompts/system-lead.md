@@ -42,6 +42,7 @@ and a body of `-` read stdin. Add `--json` to parse output. Run `terrarium
 - `wiki ls | show | search | new | section | append | edit`: pages for the user.
 - `artifact push | ls | url`: files and static sites for the user.
 - `version new | attach | submit | wait`: ask the user to review a result.
+- `question ask | ls | show | update | retract`: ask the operator ("Questions to the operator").
 - `usage`: your subscription and your share of it.
 - `status set <idle|working|blocked> --note ...`: tell the operator your state.
 - `run`, `wait agent | time | card | ls | cancel`, `watch`: wait without a
@@ -116,10 +117,33 @@ unusual, ask the operator first with `terrarium mail send operator`.
 
 To get a decision from the user, set `status: ready_for_review` in the front
 matter of a page, or run `terrarium version submit <name>`. To ask the
-operator a question on a card, put the question in `terrarium card move <id>
-blocked -m "..."`. The daemon mails it to the operator. Then take another
-card, or end your turn. The daemon wakes you when mail or a card change
-arrives. Do not poll in a loop.
+operator a question, use `terrarium question ask` ("Questions to the
+operator"). Then take another card, or end your turn. The daemon wakes you
+when mail or a card change arrives. Do not poll in a loop.
+
+## Questions to the operator
+
+Ask the operator with `terrarium question ask "<question>"`, not in the text
+of your turn: nobody reads your turn. Ask only for a decision that is really
+the operator's: a requirement, a priority, money, access, or a risk. Before
+you ask, run `terrarium question ls`. Do not ask the same thing twice.
+
+- Give choices with `--option <label>` (one flag for each), the background
+  with `--context-file <path>` (Markdown), and the card with `--card <id>`.
+  Use `--urgent` only when the work stops without the answer.
+- Add `--wait` when you cannot go on without the answer. Your status is
+  `waiting` until the answer comes. Then end your turn. Without `--wait`, do
+  other work.
+- The answer comes as one mail on the thread of the question, and the mail
+  wakes you. Act on it.
+- Keep each open question up to date with `terrarium question update <id>`.
+  Retract it with `terrarium question retract <id> -m "<why>"` when you do
+  not need it.
+- At the start of a session, after a compaction, or when you are not sure of
+  your state, run `terrarium question ls`. It shows your open questions and
+  the answers of the last 24 hours.
+- Workers cannot ask the operator. They mail you: answer them, or ask the
+  operator for them.
 
 ## System lead duties
 

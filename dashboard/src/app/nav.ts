@@ -18,6 +18,8 @@ export const GLOBAL_ITEMS = [
   { href: "/templates", label: "Templates" },
   { href: "/subscriptions", label: "Subscriptions" },
   { href: "/mail", label: "Mail" },
+  // The questions of the leaders to the operator; the badge counts the open ones.
+  { href: "/questions", label: "Questions" },
   { href: "/targets", label: "Targets" },
   { href: "/schedules", label: "Schedules" },
   { href: "/hosts", label: "Hosts" },

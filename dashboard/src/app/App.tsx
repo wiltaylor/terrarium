@@ -12,6 +12,7 @@ import { BoardPage } from "../features/board/BoardPage";
 const AgentDetail = lazy(() => import("../features/agents/AgentDetail"));
 const SubscriptionsPage = lazy(() => import("../features/subscriptions/SubscriptionsPage"));
 const MailPage = lazy(() => import("../features/mail/MailPage"));
+const QuestionsPage = lazy(() => import("../features/questions/QuestionsPage"));
 const InboxPage = lazy(() => import("../features/inbox/InboxPage"));
 const MemoryPage = lazy(() => import("../features/memory/MemoryPage"));
 const WikiPage = lazy(() => import("../features/wiki/WikiPage"));
@@ -66,6 +67,7 @@ export function App() {
         <Route path="/templates" component={TemplatesPage} />
         <Route path="/subscriptions" component={SubscriptionsPage} />
         <Route path="/mail" component={MailPage} />
+        <Route path="/questions" component={QuestionsPage} />
         <Route path="/targets" component={TargetsPage} />
         <Route path="/schedules" component={SchedulesPage} />
         <Route path="/hosts" component={HostsPage} />

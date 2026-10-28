@@ -1,11 +1,14 @@
 //! Waits and watches (PLAN §12d, docs/api.md §6.7).
 //!
 //! A wait is one thing that an agent (the waiter) waits on: another agent,
-//! a process (an exec session on a target), a time, or a card. While an
+//! a process (an exec session on a target), a time, a card, or the answer
+//! to one of its questions. While an
 //! idle agent has an open wait, its status is `waiting`, not `idle`. When
 //! a wait ends (it resolves, times out, fails, or is cancelled), the
 //! waiter gets one mail from `system` (several ends in a short time share
-//! one mail), and that mail wakes it as all mail does.
+//! one mail), and that mail wakes it as all mail does. A `question` wait
+//! that resolves is the exception: the answer mail of
+//! [`crate::store::questions`] is its wake mail.
 //!
 //! A watch mails its watcher (an agent or the operator) when the watched
 //! agent goes to one of the statuses of the watch.
@@ -45,6 +48,10 @@ pub enum WaitKind {
     Process,
     Time,
     Card,
+    /// A question to the operator (PLAN §12e): it resolves when the
+    /// question is answered or retracted. The answer mail is its wake
+    /// mail ([`crate::store::questions`]).
+    Question,
 }
 
 impl WaitKind {
@@ -54,6 +61,7 @@ impl WaitKind {
             Self::Process => "process",
             Self::Time => "time",
             Self::Card => "card",
+            Self::Question => "question",
         }
     }
 }
@@ -840,6 +848,9 @@ fn result_lines(w: &Wait) -> String {
             }
             if let Some(s) = r.get("status").and_then(Value::as_str) {
                 out.push_str(&format!("status: {s}\n"));
+            }
+            if let Some(a) = r.get("answer").and_then(Value::as_str) {
+                out.push_str(&format!("answer:\n{}", quoted(a)));
             }
         }
     }

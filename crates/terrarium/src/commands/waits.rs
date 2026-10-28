@@ -117,6 +117,11 @@ pub async fn wait(ctx: &Ctx, cmd: &WaitCmd) -> anyhow::Result<()> {
             opts_into(&mut b, opts);
             (waiter(ctx, &opts.waiter).await?, b)
         }
+        WaitCmd::Question { id, opts } => {
+            let mut b = json!({"kind": "question", "question": id});
+            opts_into(&mut b, opts);
+            (waiter(ctx, &opts.waiter).await?, b)
+        }
         WaitCmd::Ls { all, agent } => {
             let who = subject(ctx, agent).await?;
             let q = query([("all", all.then(|| "true".to_owned()))]);

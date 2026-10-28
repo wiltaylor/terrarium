@@ -84,6 +84,7 @@ import { FakePty } from "./pty";
 import { createScheduleMock, type ScheduleCaller } from "./schedules";
 import { createEventSourceMock } from "./eventSources";
 import { createWaitMock } from "./waits";
+import { createQuestionMock } from "./questions";
 import { createConfigMock } from "./config";
 import { applyTemplate, createTemplateMock, personaError, resolveTemplate, systemPromptError, templateRef } from "./templates";
 import { createTranscriptStream, encodeTranscriptFrame } from "../sse";
@@ -628,6 +629,19 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
   };
   // ----- waits and watches -----
   const waitMock = createWaitMock({ w, iso, now, ulid, reply, fail, emit, agent, setStatus, sendMail: (to, from, subject, body) => sendMail(to, from, subject, body) });
+  // ----- questions to the operator -----
+  const questionMock = createQuestionMock({
+    w,
+    iso,
+    ulid,
+    reply,
+    fail,
+    emit,
+    agent,
+    audit: (action, target, proj, detail) => audit(action, target, proj, detail),
+    sendMail: (to, from, subject, body, thread) => sendMail(to, from, subject, body, thread),
+    questionClosed: (id, result) => waitMock.questionClosed(id, result),
+  });
   const openSession = (a: Agent) => {
     // A start runs the active harness version.
     const v = harnessInstalled[a.harness];
@@ -2971,6 +2985,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     },
 
     waits: waitMock.waits,
+    questions: questionMock.questions,
     watches: waitMock.watches,
 
     schedules: createScheduleMock({
