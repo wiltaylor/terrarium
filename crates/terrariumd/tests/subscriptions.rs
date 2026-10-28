@@ -524,7 +524,7 @@ async fn quota_policy_alerts_holds_and_resumes() {
         .await
         .ok();
     let agent_id: AgentId = id.parse().unwrap();
-    assert_eq!(td.sup.waiting_turns(agent_id), ["later"]);
+    assert_eq!(td.sup.waiting_turns(agent_id), ["[User] later"]);
 
     // After the reset the probe reads 10 percent: the hold ends and the
     // waiting turn goes out.
@@ -538,7 +538,7 @@ async fn quota_policy_alerts_holds_and_resumes() {
         events_of(td, "turn_start")
             .await
             .iter()
-            .any(|e| e["data"]["prompt"] == "later")
+            .any(|e| e["data"]["prompt"] == "[User] later")
     })
     .await;
     td.wait_status(&id, "idle").await;

@@ -6,15 +6,15 @@
     "harness/codex/config.toml": "006ff344f766eb0eade0a90ca5262b122dc843ec0ea7c831b1a91e772f1355a7",
     "harness/copilot/settings.json": "5a7a5f96c478ca5efe40c0ad63bc262b55e553b6aa832ba3ad96891ca796bc59",
     "harness/pi/settings.json": "5e94a6d2af918bda2d112f802eec14baf4529a44c12d16b74ee36ffe8abc177c",
-    "prompts/README.md": "5340f9f6c6ccc1ea14a3228abb407d845f87f9231b0c53e6b6e5c4412813c277",
-    "prompts/default.md": "9ecbb9eae388bb7a6149c69553e246fe9d0b4fc9bd4cf30fefba276a58710b18",
+    "prompts/README.md": "2d63aa2e8390e730192a064756f372b8c9a4fb07cedb84a392fe06784f611204",
+    "prompts/default.md": "9a43171bfb73f09e9e60647e6ef74c7c3eebc49d732874056b6202b4b9bda6f6",
     "prompts/harness/claude.md": "4478d01ee3bd27a43347aca0cbffebe374d7bb0f8543eb18654153b36c4d9bc3",
     "prompts/harness/codex.md": "b4fefad9b0f5011d35ad8ab72547e84b7b662fdfa20eada89e10ef3b36e02534",
     "prompts/harness/copilot.md": "9cf9126c172188e13d231a38fd000248897ac392a10ea5626d5e349f8b325753",
     "prompts/harness/pi.md": "0f61a6580a11c5871ade4448f77e230cb4551272665c31a8c037d93b57ac80ed",
-    "prompts/leader.md": "9b36a494b6f101fcaf8d9d338b869fd0a6a89023f43214c480acaa1a5f669fc7",
-    "prompts/project-lead.md": "8f7c1a8aa8e01564a6a2dbe176d6d8a490404beb5c7c35ca9d372cdc2abd99cc",
-    "prompts/system-lead.md": "c3bca61a4186f1ab2969a99c0caf9071b322a1be643aadb6af7e1ef5a5fce707",
-    "prompts/worker.md": "80031fbe8101e53a5ba173c41b7d83aa1a8aac6c8061747d84f159da1c0423ee"
+    "prompts/leader.md": "7a465e99a683eac6ffbf3a73a4f98ecedd8165e8534a1590f311acf32a742b6a",
+    "prompts/project-lead.md": "3011299f90e3bda29f3e92334ad42bc014fc897d5d1820044c0565330bf8c4cf",
+    "prompts/system-lead.md": "f30273e81841b60e826a62e0a67784e0cb28eaa516eb3522efc2571777848ff5",
+    "prompts/worker.md": "3bd0fbdae518b7f08afad18f48858ca5395eb66f19959b2b0bcea1c7e8367c17"
   }
 }

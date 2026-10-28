@@ -544,7 +544,10 @@ async fn turn_actions_follow_the_agent_state() {
     let run = run.ok();
     assert_eq!(run["status"], "ok", "{run}");
     assert_eq!(run["output"]["started"], true);
-    assert_eq!(turn_starts(&td, "turn from wake").await, 1);
+    assert_eq!(
+        turn_starts(&td, "[System:schedule wake] turn from wake").await,
+        1
+    );
     let audit = td.get("/api/audit?action=agent.start").await;
     assert_eq!(audit.ok()[0]["actor"], format!("agent:{lead}"));
 
@@ -553,7 +556,10 @@ async fn turn_actions_follow_the_agent_state() {
     let run = td.post_empty(&format!("/api/schedules/{skip}/run")).await;
     assert_eq!(run.ok()["status"], "ok", "{}", run.body);
     assert_eq!(run.body["output"]["started"], false);
-    assert_eq!(turn_starts(&td, "turn from nudge").await, 1);
+    assert_eq!(
+        turn_starts(&td, "[System:schedule nudge] turn from nudge").await,
+        1
+    );
     let audit = td.get("/api/audit?action=agent.send").await;
     assert_eq!(audit.ok()[0]["actor"], format!("agent:{lead}"));
 }

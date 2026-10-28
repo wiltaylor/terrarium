@@ -531,6 +531,17 @@ export type BlockKind = "text" | "thinking" | "tool_call" | "tool_result" | "sys
 /** Who wrote a user turn: the operator (dashboard or CLI), a mail pointer, the daemon, or keys typed in the terminal. */
 export type BlockOrigin = "operator" | "agent_mail_pointer" | "system" | "user";
 
+/**
+ * One tagged block of a turn that Terrarium typed (PLAN §8.5): its source and
+ * the text after the tag line. A mail `body` is quoted with `> ` and can end
+ * with an unquoted "… (cut; run `terrarium mail read --thread T`)" line.
+ */
+export type TurnPart =
+  | { source: "user"; body: string }
+  | { source: "mailbox"; sender: string; subject: string; thread: string; message?: string; body: string }
+  /** `kind`: recap, card, lease, nudge, or schedule (`detail` is the schedule name). */
+  | { source: "system"; kind: string; detail?: string; body: string };
+
 export interface BlockUsage {
   input: number;
   output: number;
@@ -555,6 +566,8 @@ export interface Block {
   /** Thinking that the harness did not keep (only a signature). */
   redacted?: boolean;
   origin?: BlockOrigin;
+  /** The tagged blocks of a user text that Terrarium typed. Absent for an untagged text (the terminal). */
+  parts?: TurnPart[];
   model?: string;
   usage?: BlockUsage;
   source: { harness: Harness; file: string; line: number };

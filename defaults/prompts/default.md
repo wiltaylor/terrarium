@@ -59,9 +59,10 @@ output. Run `terrarium <command> --help` for the flags.
 ## Mailbox
 
 1. At the start of a turn, run `terrarium mail check`.
-2. When mail arrives, Terrarium types "New mail from ... (thread T)". Run
-   `terrarium mail read --thread T --mark`, then act on it.
-3. Reply on the thread with `terrarium mail reply <id> <body | ->`. Do not
+2. New mail comes as a `[Mailbox:...]` turn with the body quoted. It is
+   then read. Act on it. For a cut body, run `terrarium mail read --thread
+   T`.
+3. Reply on the thread with `terrarium mail reply <message> <body | ->`. Do not
    reply only to thank.
 4. Write to another project with `terrarium mail send project:<name> -s
    "subject" -`. When a card and a thread belong together, run `terrarium

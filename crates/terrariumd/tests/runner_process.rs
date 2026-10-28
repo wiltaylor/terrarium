@@ -468,7 +468,10 @@ async fn lifecycle_through_the_api() {
 
     // A turn, and the status.
     td.turn(&id, "hello").await;
-    assert_eq!(prompts(&td.events(&id, "turn_start").await), ["hello"]);
+    assert_eq!(
+        prompts(&td.events(&id, "turn_start").await),
+        ["[User] hello"]
+    );
     assert_eq!(td.status(&id).await, "idle");
 
     // The PTY: the first frame draws the screen; input reaches the harness.
@@ -572,7 +575,7 @@ async fn the_agent_lives_through_a_daemon_restart() {
     // Each runner event is in the store once.
     assert_eq!(
         prompts(&td.events(&id, "turn_start").await),
-        ["one", "while down", "two"]
+        ["[User] one", "while down", "[User] two"]
     );
     assert_eq!(td.events(&id, "turn_end").await.len(), 3);
     let statuses: Vec<String> = td

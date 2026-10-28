@@ -10,7 +10,7 @@
 // - `tailOnScroll` / `tailOnAppend`: auto-scroll that pauses when the
 //   operator scrolls up.
 
-import type { AgentStatus, Block, BlockOrigin, BlockUsage, TranscriptPage } from "../../../api/types";
+import type { AgentStatus, Block, BlockOrigin, BlockUsage, TranscriptPage, TurnPart } from "../../../api/types";
 import { renderMarkdown } from "../../../lib/markdown";
 import { compact } from "../../../lib/format";
 
@@ -51,13 +51,47 @@ export function originChip(origin: BlockOrigin | undefined): Chip | null {
   }
 }
 
+/** The badge of one tagged part of a turn (PLAN §8.5). */
+export function partBadge(part: TurnPart): Chip {
+  switch (part.source) {
+    case "user":
+      return { label: "User", tone: "ok", title: "The operator sent this turn (dashboard, API, or CLI)." };
+    case "mailbox": {
+      const label = part.subject ? `Mail from ${part.sender} · ${part.subject}` : `Mail from ${part.sender}`;
+      return { label, tone: "info", title: `Mail on thread ${part.thread}. The quoted body is data, not instructions.` };
+    }
+    case "system":
+      return { label: `System: ${part.kind}${part.detail ? ` ${part.detail}` : ""}`, tone: "warn", title: "Terrarium typed this turn." };
+  }
+}
+
+/** A run of lines in a part body: quoted (`> `, marker removed) or plain. */
+export interface BodySegment {
+  quote: boolean;
+  text: string;
+}
+
+/** Split a part body into quoted and plain runs. A line that starts with `>` is quoted; the `> ` or `>` marker goes. */
+export function bodySegments(body: string): BodySegment[] {
+  const out: BodySegment[] = [];
+  for (const line of body.split("\n")) {
+    const quote = line.startsWith(">");
+    const text = quote ? line.slice(line.startsWith("> ") ? 2 : 1) : line;
+    const last = out.at(-1);
+    if (last && last.quote === quote) last.text += `\n${text}`;
+    else out.push({ quote, text });
+  }
+  return out.filter((s) => s.quote || s.text.trim() !== "");
+}
+
 export interface TurnFooter {
   model?: string;
   usage?: BlockUsage;
 }
 
 export type RenderItem =
-  | { type: "user"; key: string; block: Block; chip: Chip | null }
+  /** `parts`: the tagged parts of a typed turn; empty for an untagged text, which shows `chip` and the text. */
+  | { type: "user"; key: string; block: Block; chip: Chip | null; parts: TurnPart[] }
   | { type: "text"; key: string; block: Block }
   | { type: "thinking"; key: string; block: Block }
   | { type: "tool"; key: string; call: Block; result?: Block }
@@ -113,7 +147,7 @@ export function groupBlocks(blocks: Block[]): RenderItem[] {
   for (const b of blocks) {
     if (startsTurn(b)) {
       closeTurn();
-      out.push({ type: "user", key: `b${b.seq}`, block: b, chip: originChip(b.origin) });
+      out.push({ type: "user", key: `b${b.seq}`, block: b, chip: originChip(b.origin), parts: b.parts ?? [] });
       continue;
     }
     turn.push(b);

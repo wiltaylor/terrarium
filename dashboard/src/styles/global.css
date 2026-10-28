@@ -1446,6 +1446,17 @@ tr.row-open > td {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+.convo-part {
+  display: grid;
+  gap: 4px;
+  justify-items: start;
+}
+.convo-quote {
+  margin: 0;
+  padding: 2px 0 2px 8px;
+  border-left: 3px solid var(--border);
+  color: var(--muted);
+}
 .convo-user {
   display: flex;
   justify-content: flex-end;

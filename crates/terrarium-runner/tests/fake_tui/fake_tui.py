@@ -19,6 +19,10 @@ Commands:
   /flood N    submit, print N numbered lines of 64 bytes, then Stop
   /abort      die of SIGABRT, with no hooks
 
+A command may come after a turn tag (`[User] /exit 1`, PLAN §8.5): the fake
+acts on it as a model that does what the turn says. The hooks get the whole
+text.
+
 Env:
   TERRARIUM_SOCKET     the runner socket (the runner sets it)
   FAKE_TUI_DELAY_MS    the work time of a normal turn (default 300)
@@ -56,6 +60,7 @@ work time of a normal turn and /stall.
 
 import json
 import os
+import re
 import signal
 import socket
 import sys
@@ -195,6 +200,8 @@ def main():
         text = line.replace("\x1b[200~", "").replace("\x1b[201~", "").strip()
         if not text:
             continue
+        full = text
+        text = re.sub(r"^\[(User|System:[^\]]*)\] ", "", text)
         if text == "/quit":
             out("bye\n")
             return 0
@@ -210,7 +217,7 @@ def main():
             while not os.path.exists(SUBMIT_GATE):
                 time.sleep(0.01)
         if not NO_SUBMIT_HOOK:
-            hook("UserPromptSubmit", {"prompt": text})
+            hook("UserPromptSubmit", {"prompt": full})
         out("working...\n")
         if text == "/stall":
             time.sleep(STALL)

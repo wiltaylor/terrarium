@@ -970,6 +970,30 @@ pub fn mark_delivered(t: &mut Tx<'_>, ids: &[String]) -> ApiResult<usize> {
     Ok(n)
 }
 
+/// Mark messages `read` by `reader` (an agent ULID) that a submitted turn
+/// held whole (PLAN §8.5): the agent saw the subject and the body. Only a
+/// `queued` or `delivered` message changes. Each one writes a `mail.read`
+/// audit row with `via = "turn"`.
+pub fn mark_read_in_turn(t: &mut Tx<'_>, ids: &[String], reader: &str) -> ApiResult<usize> {
+    let at = now();
+    let mut n = 0;
+    for id in ids {
+        let before = get(t, id)?;
+        let changed = t.execute(
+            "UPDATE messages SET state = 'read', read_at = coalesce(read_at, ?2),
+                    read_by = coalesce(read_by, ?3),
+                    delivered_at = coalesce(delivered_at, ?2)
+             WHERE id = ?1 AND state IN ('queued', 'delivered')",
+            params![id, at, reader],
+        )?;
+        if changed > 0 && before.read_at.is_none() {
+            audit_read(t, &before, "turn")?;
+        }
+        n += changed;
+    }
+    Ok(n)
+}
+
 /// Mark a message `read`. A `replied` message stays `replied`. The first
 /// read records the reader (`read_by`) and writes a `mail.read` audit row;
 /// a read again changes nothing.

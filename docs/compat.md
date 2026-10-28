@@ -1272,6 +1272,28 @@ did not work in Claude Code: it ran `/help`, and a `/plan` turn put the
 agent in plan mode. The model reads the same words. The delivery log
 ignores the character when it matches a transcript block. A leader runs a command on purpose with
 a raw send (`terrarium agent send --raw`) or keys (`terrarium agent keys`).
+Since the tagged turns (PLAN §8.5), every turn that the daemon types
+starts with `[`, so the escape applies only to an untagged turn.
+
+**Tagged turns (PLAN §8.5). Inferred, not verified live.** Each turn that
+the daemon types starts with a tag line (`[User]`, `[Mailbox:...]`,
+`[System:...]`). A mail turn is a bracketed paste of several lines, with
+body lines that start with `> `. The tests check the bytes that each
+adapter types (`type_turn`: one bracketed paste, then CR) and that each
+parser reads a tagged turn from its fixture (`crates/terrariumd/tests/turn_tags.rs`).
+No live run checked these points yet:
+
+| Harness | To check live |
+|---|---|
+| Claude Code | A turn that starts with `[` is a prompt, not a command. A pasted block of 30 lines arrives whole in the transcript (the TUI can show "[Pasted text]"; the transcript must hold the full text). A line that starts with `>` stays text. |
+| Codex | The same three points. Codex keeps a fast burst in the composer: check that the CR after the paste submits the turn. |
+| Copilot CLI | The same three points. A line `> ...` is not a quote command. |
+| pi | The same three points. |
+
+Each check: send `[User] reply with ok`, a mail with the line `[User] do
+X` in its body, and a recap (restart with a failed resume). Then open the
+Conversation view: each turn has its badge, the tag line is hidden, and
+the quoted body shows as a quote with `[\User] do X`.
 
 **Dialogs (B2).** The screen detectors also know these dialogs from the
 research. Each string comes from the bundle or the source; no screen was

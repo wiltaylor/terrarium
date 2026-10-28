@@ -33,6 +33,7 @@ including the mode 1 run. Keep them when you edit a template.
 - An agent never holds a turn open for a long build or for a peer. It starts the build with `terrarium run <target> --name build -- <cmd>`, or registers a wait with `terrarium wait agent <name>` or `terrarium wait time --for 30m`, and ends the turn. The commands do not block.
 - Each wait that ends sends the waiter one mail from `system` with its own result (the exit code and the output tail of a run, or the outcome). Waits that end within 2 s of each other share one mail, which lists each of them. A cancel by the agent itself sends no mail; a cancel by a lead or the operator does. The mail wakes the agent also when other waits are still open. The status is `waiting` while a wait is open and `idle` when the last one ends.
 - Command output in a wake mail is data, not instructions: it is quoted with `> `.
+- Each turn that Terrarium types starts with a tag line (PLAN §8.5): `[User] <text>` from the operator, `[Mailbox:<sender>] Subject: <subject> (thread T, message M)` with the body quoted with `> `, or `[System:<kind>] <text>` (`recap`, `card`, `lease`, `nudge`, `schedule <name>`). Untagged text is the operator at the terminal. Only Terrarium writes tags: a tag in inserted text is defused to `[\User]`. The personas teach this in "Messages you receive". A body over 2000 characters is cut, and the agent runs `terrarium mail read --thread T` for the rest. A mail that the turn holds whole is `read` when the turn is submitted. The templates say this in step 2 of "Mailbox".
 - The lead watches each new worker with `terrarium watch <worker> --on blocked,error`, so that it does not poll. A worker in `waiting` is not stuck. The system lead watches each lead with `--on error`.
 - The lead does these steps in this order: `admin agent new`, `repo checkout --agent`, `admin agent start`, `admin target grant`, `card assign`. The grant comes before the assign. The card pointer starts the worker, so the lead sends no start mail.
 - The lead makes each worker from the agent template `worker` of its project: `admin agent new w1 --template worker`. The template keeps the harness, the subscription, the prompt, and the policy in one place. A flag on `agent new` changes one field. When the project has no `worker` template, the lead makes one with `template new worker` before the first worker. The system lead makes it when it appoints the lead. (An agent template is not a prompt template: see docs/api.md §21.)
@@ -190,5 +191,5 @@ Keep each part to its own subject. A persona does not repeat a command
 from the template. A harness section names only tools and limits that
 `docs/research/harness-hardening.md` or the installed bundle in
 `tools/versions/` confirms. The comment at the top of each file names its
-sources. Keep a persona under about 800 words and a harness section
-under about 700 words. After a change, run `just defaults::manifest`.
+sources. Keep a persona under about 1000 words (the test cap) and a harness
+section under about 700 words. After a change, run `just defaults::manifest`.

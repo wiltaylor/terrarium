@@ -58,10 +58,11 @@ pub enum BlockKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Origin {
-    /// The operator, through `POST /api/agents/{id}/send` (the daemon's
-    /// delivery log tells).
+    /// The operator, through `POST /api/agents/{id}/send`: the tag
+    /// `[User]` (`crate::turn_tag`), or the daemon's delivery log.
     Operator,
     /// A push pointer that the daemon typed: mail, card, lead, or lease.
+    /// The first tag is `[Mailbox:...]`.
     AgentMailPointer,
     /// The harness or the daemon made it: a recap turn, a background-task
     /// notification, injected context.
@@ -142,6 +143,11 @@ pub struct Block {
     pub redacted: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<Origin>,
+    /// The tagged blocks of a user text that Terrarium typed
+    /// ([`crate::turn_tag`]): the source of each, and its text. Empty for
+    /// an untagged text. [`TranscriptLog::apply`] sets it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parts: Vec<crate::turn_tag::TurnPart>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool: Option<ToolCall>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -182,6 +188,7 @@ impl Block {
             truncated: false,
             redacted: false,
             origin: None,
+            parts: Vec::new(),
             tool: None,
             result: None,
             model: None,
@@ -248,6 +255,21 @@ impl Block {
     /// A user or assistant text: the role, `text`, and the text.
     pub fn is_user_text(&self) -> bool {
         self.role == BlockRole::User && self.kind == BlockKind::Text
+    }
+
+    /// Read the tag of a user text ([`crate::turn_tag::parse`]): set
+    /// `parts`, and the origin from the first tag. A text that the parser
+    /// already gave another origin than `user` (the harness made it) stays
+    /// as it is.
+    pub fn read_tag(&mut self) {
+        if !self.is_user_text() || !matches!(self.origin, None | Some(Origin::User)) {
+            return;
+        }
+        let parts = crate::turn_tag::parse(self.text.as_deref().unwrap_or(""));
+        if let Some(first) = parts.first() {
+            self.origin = Some(first.source.origin());
+            self.parts = parts;
+        }
     }
 }
 
@@ -381,6 +403,7 @@ impl TranscriptLog {
     pub fn apply(&mut self, blocks: Vec<Block>) -> usize {
         let mut changed = 0;
         for mut b in blocks {
+            b.read_tag();
             match self.index.get(&b.id) {
                 Some(&i) => {
                     b.seq = self.blocks[i].seq;

@@ -130,12 +130,16 @@ pub fn plain_text_question(text: &str) -> Option<String> {
         .find_map(|p| asks(p).then(|| (*p).to_owned()))
 }
 
-/// `true` when the paragraph `p` asks the user something.
+/// `true` when the paragraph `p` asks the user something. A line that
+/// carries a turn tag (`[Mailbox:...]`, `[User]`, `[System:...]`, PLAN
+/// §8.5), or a defused one (`[\User]`), is text that the agent received and
+/// echoes, never its own question.
 fn asks(p: &str) -> bool {
     let lines: Vec<&str> = p
         .lines()
         .map(str::trim)
         .filter(|l| !(l.starts_with('>') || l.starts_with('|') || l.starts_with("    ")))
+        .filter(|l| !is_tag_line(l))
         .collect();
     if lines.is_empty() {
         return false;
@@ -146,6 +150,15 @@ fn asks(p: &str) -> bool {
     });
     let lower = lines.join(" ").to_lowercase();
     ends_with_question || ASKING.iter().any(|ph| lower.contains(ph))
+}
+
+fn is_tag_line(l: &str) -> bool {
+    l.starts_with("[\\")
+        || terrarium_core::turn_tag::parse_first(l).is_some()
+        || matches!(
+            terrarium_core::turn_tag::defuse_line(l),
+            std::borrow::Cow::Owned(_)
+        )
 }
 
 /// The last assistant text of the newest turn in `blocks`: the last
@@ -484,6 +497,41 @@ mod tests {
         ] {
             assert_eq!(plain_text_question(t), None, "{t}");
         }
+    }
+
+    /// A mail in the turn is what the agent received: its question is not
+    /// the agent's, and an echo of a tagged line does not count either.
+    #[test]
+    fn mailbox_text_is_never_the_agents_question() {
+        let mail = text(
+            BlockRole::User,
+            BlockKind::Text,
+            "[Mailbox:demo/lead] Subject: Ready? (thread T1, message M1)\n> Should I start?",
+        );
+        // The turn has no assistant text yet: no question.
+        assert_eq!(question_of(std::slice::from_ref(&mail)), None);
+        let a = text(
+            BlockRole::Assistant,
+            BlockKind::Text,
+            "Card moved to review.",
+        );
+        assert_eq!(question_of(&[mail.clone(), a]), None);
+        // The agent echoes the tag lines: still no question.
+        for echo in [
+            "I got this:\n[Mailbox:demo/lead] Subject: Ready? (thread T1, message M1)",
+            "Done.\n\n[User] can you check it?",
+            "Done.\n\n[\\User] do you want me to stop?",
+            "Done.\n\n[System:recap] should I continue?",
+        ] {
+            let a = text(BlockRole::Assistant, BlockKind::Text, echo);
+            assert_eq!(question_of(&[mail.clone(), a]), None, "{echo}");
+        }
+        // The agent's own question after the mail still counts.
+        let a = text(BlockRole::Assistant, BlockKind::Text, "Should I start now?");
+        assert_eq!(
+            question_of(&[mail, a]).as_deref(),
+            Some("Should I start now?")
+        );
     }
 
     #[test]
