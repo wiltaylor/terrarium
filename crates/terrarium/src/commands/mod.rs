@@ -111,6 +111,10 @@ pub async fn run(ctx: &Ctx, cmd: &Command) -> anyhow::Result<()> {
             crate::runner_socket::hook_main(event);
             Ok(())
         }
+        Command::ExecEnv { argv } => {
+            let code = crate::exec_env::exec(ctx, argv).await;
+            std::process::exit(code)
+        }
     }
 }
 

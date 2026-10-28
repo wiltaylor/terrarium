@@ -1642,8 +1642,14 @@ async fn secret_grants_reach_the_launch() {
         .await
         .unwrap();
     let spec = td.sup.launch_spec(&view.agent, None).await.unwrap();
-    assert_eq!(spec.env["DB_URL"], "postgres-GRANTED-1");
-    assert_eq!(spec.env["GH_TOKEN"], "ghp_GRANTEDgh");
+    // Secret manager review S1 and S6: the values never go into the launch
+    // spec (so neither into `runner.json` nor into the env of `bwrap`);
+    // `terrarium exec-env` gets them inside the sandbox
+    // (`POST /api/agent/secrets/env`, tests/secret_grants.rs).
+    assert!(!spec.env.contains_key("DB_URL"), "{:?}", spec.env.keys());
+    assert!(!spec.env.contains_key("GH_TOKEN"), "{:?}", spec.env.keys());
+    let all = format!("{spec:?}");
+    assert!(!all.contains("postgres-GRANTED-1") && !all.contains("ghp_GRANTEDgh"));
     assert_eq!(spec.env["GIT_CONFIG_COUNT"], "1");
     assert_eq!(
         spec.env["GIT_CONFIG_KEY_0"],
@@ -1682,6 +1688,12 @@ async fn secret_grants_reach_the_launch() {
     let seen = tree_text(&agent_dir.join("harness")) + &tree_text(&td.dir.path().join("work"));
     for v in ["postgres-GRANTED-1", "ghp_GRANTEDgh", "PRIVATE KEY"] {
         assert!(!seen.contains(v), "a file holds {v}");
+    }
+    // No value is in any file of the agent dir: `private/runner.json` of a
+    // runner process holds none (S6).
+    let all = tree_text(&agent_dir);
+    for v in ["postgres-GRANTED-1", "ghp_GRANTEDgh"] {
+        assert!(!all.contains(v), "a file of the agent dir holds {v}");
     }
     // A stop removes the socket.
     td.post(&format!("/api/agents/{id}/stop"), None).await;

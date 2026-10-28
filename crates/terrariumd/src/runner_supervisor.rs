@@ -412,25 +412,27 @@ struct Built {
     ssh_agent: bool,
 }
 
-/// Put the env vars of the secret grants into `env` (PLAN §16b.4): a var
-/// that the harness or the account sets already wins. The git hosts of the
-/// granted tokens get `terrarium repo credential` as their credential
-/// helper, through `GIT_CONFIG_*` (no file in the home). The answer: the
-/// names of the secret vars, and the warnings. Never the values.
+/// The env vars of the secret grants (PLAN §16b.4), by name only: the
+/// values never go into `env`. `terrarium exec-env` gets them from the
+/// daemon inside the sandbox, just before the harness starts, so no value
+/// is in the launch spec, the runner spec file (`runner.json`), or the env
+/// of `bwrap`. A var that the harness or the account sets already wins.
+/// The git hosts of the granted tokens get `terrarium repo credential` as
+/// their credential helper, through `GIT_CONFIG_*` (no file in the home).
+/// The answer: the names of the secret vars, and the warnings.
 fn secret_env(
     env: &mut std::collections::BTreeMap<String, String>,
     secrets: &crate::secrets::grants::LaunchSecrets,
 ) -> (Vec<String>, Vec<String>) {
     let mut vars = Vec::new();
     let mut warnings = Vec::new();
-    for (k, v) in &secrets.env {
+    for k in secrets.env.keys() {
         if env.contains_key(k) {
             warnings.push(format!(
                 "a secret grant sets `{k}`, but the harness sets it already; the grant does not apply"
             ));
             continue;
         }
-        env.insert(k.clone(), v.to_string());
         vars.push(k.clone());
     }
     if !secrets.git_hosts.is_empty() && !env.contains_key("GIT_CONFIG_COUNT") {
@@ -1192,6 +1194,7 @@ impl RunnerSupervisor {
             cred_alias: None,
             ssh_agent: None,
             harness_bin: None,
+            exec_env: false,
         }
     }
 
@@ -1613,6 +1616,17 @@ impl RunnerSupervisor {
         spec.env.extend(credentials);
         let (secret_vars, mut secret_warnings) = secret_env(&mut spec.env, &view.secrets);
         secret_warnings.extend(view.secrets.warnings.iter().cloned());
+        if !secret_vars.is_empty() {
+            if cfg.sandbox.cli.is_some() {
+                layout.exec_env = true;
+            } else {
+                secret_warnings.push(format!(
+                    "no `terrarium` CLI is set (`--cli`), so the env vars of the secret grants \
+                     ({}) are not set",
+                    secret_vars.join(", ")
+                ));
+            }
+        }
         // A commit in the sandbox needs an identity: the home has no
         // `.gitconfig`, and the host name gives no mail domain.
         let email = format!("{}.{}@terrarium.invalid", agent.name, agent.project);

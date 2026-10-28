@@ -126,6 +126,15 @@ pub fn trash_agent_dir(
     }
     if has_dir {
         std::fs::rename(&dir, &to)?;
+        // The runner spec of the last launch: an older daemon wrote the
+        // env of the secret grants into it (secret manager review S6).
+        // The trash keeps no copy.
+        let spec = to.join("private").join("runner.json");
+        if std::fs::symlink_metadata(&spec).is_ok()
+            && let Err(e) = std::fs::remove_file(&spec)
+        {
+            tracing::warn!(path = %spec.display(), "cannot remove the runner spec: {e}");
+        }
     } else {
         std::fs::create_dir_all(&to)?;
     }
@@ -211,7 +220,11 @@ mod tests {
         let dir = state.join("agents/01A/private");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("events.jsonl"), b"{}\n").unwrap();
+        // S6 (secret manager review, 2026-10-29): a runner spec of an
+        // older daemon can hold secret env values; the trash holds none.
+        std::fs::write(dir.join("runner.json"), br#"{"env":{"DB":"v"}}"#).unwrap();
         let to = trash_agent_dir(state, "01A", None).unwrap().unwrap();
+        assert!(!to.join("private/runner.json").exists());
         assert!(!state.join("agents/01A").exists());
         assert!(to.starts_with(state.join(TRASH_DIR)));
         assert_eq!(

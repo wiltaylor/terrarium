@@ -2244,6 +2244,19 @@ An env var puts the value into the agent's process environment, and the
 agent can print it. So an env var needs the level `read`. `ssh_key` grants
 are `use` by default.
 
+Each final env var name (also each `<ENV>_<FIELD>` of a `generic` secret)
+must match `^[A-Z][A-Z0-9_]{0,127}$` and must not be in a deny set: the
+loader and C library vars (`LD_*`, `GCONV_PATH`, `GLIBC_TUNABLES`, ...),
+`GIT_*`, the shell vars (`BASH_*`, `ENV`, `IFS`, `PS4`, ...), the language
+runtime vars (`NODE_*`, `PYTHON*`, `JAVA_*`, ...), the proxy and CA vars,
+the harness and account vars (`ANTHROPIC_*`, `CLAUDE_*`, `OPENAI_*`, ...),
+`XDG_*`, `SSH_*`, `TERRARIUM_*`, and the session vars (`HOME`, `PATH`,
+`LANG`, `LC_*`, ...). `GH_TOKEN` stays allowed. The full list is in
+docs/api.md §5.2 ("The name rule"). The grants API and the config import
+refuse such a name. The start checks each final name again, just before
+it goes into the launch env, and skips a refused one with a warning event
+(secret manager review S1, docs/security-review.md §14).
+
 `use` is `read` for tokens. Decided by Wil, 2026-10-29 (security review
 S3). The git credential helper hands the token to git in plain text. The
 agent runs git, so it can call `terrarium repo credential get` itself and
@@ -2272,12 +2285,21 @@ grant change applies at the next start of the agent; the brokers and
   of a granted `token` or `github_token` secret (level `use` or `read`).
 - **ssh-agent.** The daemon serves the ssh-agent protocol on one socket for
   each agent, `/run/terrarium/ssh-agent.sock` in the sandbox, with
-  `SSH_AUTH_SOCK` set. It lists and signs with the granted `ssh_key`
-  secrets only. It refuses add, remove, and lock requests. Each sign is
-  counted in the audit (one row each minute for each key and agent).
-- **Env vars.** At start, the daemon puts each granted secret that has an
-  `env` name into the agent's environment. A `github_token` with no `env`
-  name sets `GH_TOKEN`.
+  `SSH_AUTH_SOCK` set. The sandbox binds the socket dir read-only. It lists
+  and signs with the granted `ssh_key` secrets only. It refuses add,
+  remove, and lock requests. Each socket allows 10 signs a second (a burst
+  of 30); a sign over the limit fails. The daemon keeps an opened key for
+  60 seconds, so a loop of signs does not run the KDF of a passphrase at
+  each sign. Each sign is counted in the audit (one row each minute for
+  each key and agent, with the good signs and the signs over the limit).
+- **Env vars.** At start, the harness gets each granted secret that has an
+  `env` name in its environment. A `github_token` with no `env` name sets
+  `GH_TOKEN`. The values do not go through the launch spec: the sandbox
+  starts the harness through `terrarium exec-env`, which asks the daemon
+  for the vars inside the sandbox (`POST /api/agent/secrets/env`) and then
+  replaces itself with the harness. So no value is in `runner.json`, on a
+  command line, or in the env of `bwrap` outside the sandbox (secret
+  manager review S1 and S6).
 - **`terrarium secret`.** `terrarium secret list` shows the granted secrets
   (name, kind, level, plain fields). `terrarium secret get <name> [--field
   f]` prints a value, for a `read` grant only. Each `get` writes an audit
@@ -2493,6 +2515,15 @@ into a global secret: `token` -> `token`, `ssh_key` -> `ssh_key`,
 `password` -> `login`. It copies each file to `<state>/credentials/backup/`
 (0600) first, then removes it. It writes a `secret.migrated` audit row for
 each. `subscriptions/`, `accounts/`, and `backup/` stay as they are.
+
+The backups `<state>/credentials/backup/*-credential-*` hold the plain
+values. The daemon removes each one when it is older than the trash
+retention (`TERRARIUM_TRASH_DAYS`, 7 days by default): at each start and
+at each run of the prune timer. Other backups in that dir (the plan
+accounts) stay. Decision (secret manager review S6): delete after the
+retention, not seal. A sealed backup needs the same key as the store, so
+it does not help when the key is lost, and the store is the copy to
+keep. Seven days give the operator time to check the move.
 
 ### 16b.8 Build order
 

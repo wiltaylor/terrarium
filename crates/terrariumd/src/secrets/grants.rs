@@ -167,64 +167,195 @@ fn label_of(conn: &Connection, key: &str) -> ApiResult<String> {
     Ok(key.to_owned())
 }
 
-/// Env vars that the sandbox or the daemon sets, and that the loader or
-/// the shell reads. A grant cannot set them.
-const RESERVED_ENV: &[&str] = &[
+/// Env var names that a grant cannot set (docs/api.md §5.2, "The name
+/// rule"): the loader and the C library, the shell, the sandbox and the
+/// daemon, the locale and the terminal, the proxy and CA vars, and the
+/// vars that a harness adapter or an account sets.
+const DENIED_ENV: &[&str] = &[
+    // The sandbox, the daemon, the session.
     "PATH",
     "HOME",
     "USER",
     "LOGNAME",
     "SHELL",
     "TERM",
+    "TERMINFO",
+    "TERMINFO_DIRS",
+    "TERMCAP",
     "LANG",
+    "LANGUAGE",
     "TZ",
+    "TZDIR",
     "PWD",
     "OLDPWD",
+    "DISPLAY",
+    "MAIL",
+    "MAILPATH",
+    // The loader and the C library.
+    "GCONV_PATH",
+    "GLIBC_TUNABLES",
+    "LOCPATH",
+    "NLSPATH",
+    "HOSTALIASES",
+    "RES_OPTIONS",
+    "LOCALDOMAIN",
     "TMPDIR",
+    // The shell.
     "IFS",
     "ENV",
-    "BASH_ENV",
+    "SHELLOPTS",
+    "BASHOPTS",
+    "PS1",
+    "PS2",
     "PS4",
-    "SSH_AUTH_SOCK",
+    "PROMPT_COMMAND",
+    "CDPATH",
+    "GLOBIGNORE",
+    "HISTFILE",
+    "INPUTRC",
+    "POSIXLY_CORRECT",
+    // Programs that other programs start.
+    "EDITOR",
+    "VISUAL",
+    "PAGER",
+    "MANPAGER",
+    "LESSOPEN",
+    "LESSCLOSE",
+    "BROWSER",
+    // Language runtimes.
+    "PERLLIB",
+    "CLASSPATH",
+    "JDK_JAVA_OPTIONS",
+    "GOFLAGS",
+    "GOPATH",
+    "GOROOT",
+    "GOPROXY",
+    "GOENV",
+    "GOTOOLCHAIN",
+    "GOINSECURE",
+    "GOPRIVATE",
+    "GONOSUMDB",
+    "GONOPROXY",
+    "VIRTUAL_ENV",
+    "TCLLIBPATH",
+    "PHPRC",
+    // Proxies and CA files.
+    "NO_PROXY",
+    "CURL_CA_BUNDLE",
+    "CURL_HOME",
+    "REQUESTS_CA_BUNDLE",
+    "SSLKEYLOGFILE",
+    "WGETRC",
+    "GNUPGHOME",
+    // The harness adapters and the accounts.
+    "IS_SANDBOX",
+    "ENABLE_CLAUDEAI_MCP_SERVERS",
+    "GEMINI_API_KEY",
+    "OPENROUTER_API_KEY",
+    "XAI_API_KEY",
+    "GROQ_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "MISTRAL_API_KEY",
+    "ZAI_API_KEY",
+    "KIMI_API_KEY",
+    "MOONSHOT_API_KEY",
 ];
 
-/// Prefixes of reserved env vars: the loader (`LD_`), the daemon
-/// (`TERRARIUM_`), the locale (`LC_`), and the git identity and config
-/// that the daemon sets (`GIT_AUTHOR_`, `GIT_COMMITTER_`, `GIT_CONFIG`).
-const RESERVED_ENV_PREFIXES: &[&str] = &[
+/// Prefixes of the env var names that a grant cannot set.
+const DENIED_ENV_PREFIXES: &[&str] = &[
+    // The loader, the C library, the shell, the locale.
     "LD_",
-    "TERRARIUM_",
+    "MALLOC_",
+    "BASH_",
     "LC_",
-    "GIT_AUTHOR_",
-    "GIT_COMMITTER_",
-    "GIT_CONFIG",
+    // git: the config, the dirs, the ssh command, the identity.
+    "GIT_",
+    // The sandbox and the daemon.
+    "TERRARIUM_",
+    "XDG_",
+    "SSH_",
+    "WAYLAND_",
+    // Language runtimes and package managers.
+    "NODE_",
+    "NPM_CONFIG_",
+    "YARN_",
+    "BUN_",
+    "DENO_",
+    "PYTHON",
+    "PIP_",
+    "UV_",
+    "CONDA_",
+    "PERL5",
+    "RUBY",
+    "GEM_",
+    "BUNDLE_",
+    "JAVA_",
+    "DOTNET_",
+    "COREHOST_",
+    "CGO_",
+    "CARGO_",
+    "RUSTC",
+    "RUSTDOC",
+    "RUSTFLAGS",
+    "RUSTUP_",
+    "LUA_",
+    // CA files.
+    "SSL_CERT_",
+    // The harnesses and their accounts.
+    "ANTHROPIC_",
+    "CLAUDE_",
+    "OPENAI_",
+    "CODEX_",
+    "COPILOT_",
+    "PI_",
+    "DISABLE_",
 ];
 
-/// Check the env var name of a grant: a POSIX name (`[A-Za-z_][A-Za-z0-9_]*`,
-/// at most 128 bytes), not one that the sandbox sets.
+/// Suffixes of the env var names that a grant cannot set: the proxies
+/// (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `FTP_PROXY`).
+const DENIED_ENV_SUFFIXES: &[&str] = &["_PROXY"];
+
+/// Check an env var name of a grant (docs/api.md §5.2, "The name rule"):
+/// it matches `^[A-Z][A-Z0-9_]{0,127}$`, and it is not in the deny set
+/// ([`DENIED_ENV`], [`DENIED_ENV_PREFIXES`], [`DENIED_ENV_SUFFIXES`], and
+/// the harness home vars). The daemon checks each final name (also each
+/// `<ENV>_<FIELD>` of a `generic` secret) when it writes a grant, when a
+/// config import writes one, and again at each launch.
 pub fn check_env_name(name: &str) -> ApiResult<()> {
-    let mut cs = name.chars();
-    let posix = matches!(cs.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+    let mut cs = name.bytes();
+    let shape = matches!(cs.next(), Some(c) if c.is_ascii_uppercase())
         && name.len() <= 128
-        && cs.all(|c| c.is_ascii_alphanumeric() || c == '_');
-    if !posix {
+        && cs.all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == b'_');
+    if !shape {
         return Err(ApiError::invalid(format!(
-            "`{name}` is not an env var name: a letter or `_`, then letters, digits, or `_`"
+            "`{name}` is not a usable env var name: an upper-case letter, then upper-case \
+             letters, digits, or `_` (at most 128)"
         )));
     }
-    let upper = name.to_ascii_uppercase();
     let home_env = terrarium_core::HarnessId::ALL
         .iter()
-        .any(|h| h.home_env() == upper);
-    if RESERVED_ENV.contains(&upper.as_str())
+        .any(|h| h.home_env() == name);
+    if DENIED_ENV.contains(&name)
         || home_env
-        || RESERVED_ENV_PREFIXES.iter().any(|p| upper.starts_with(p))
+        || DENIED_ENV_PREFIXES.iter().any(|p| name.starts_with(p))
+        || DENIED_ENV_SUFFIXES.iter().any(|p| name.ends_with(p))
     {
         return Err(ApiError::invalid(format!(
-            "`{name}` is an env var that the sandbox sets; choose another name"
+            "`{name}` is an env var that the sandbox, the loader, a shell, a language runtime, \
+             a proxy, or a harness reads or sets; choose another name"
         )));
     }
     Ok(())
+}
+
+/// The final env var names of a grant with the base name `env` of
+/// `secret`: `env` itself, or `<ENV>_<FIELD>` for each secret field of a
+/// `generic` secret with more than one.
+fn final_names(env: &str, kind: Kind, secret_fields: &[String]) -> Vec<String> {
+    match main_field(kind, secret_fields) {
+        Some(_) => vec![env.to_owned()],
+        None => secret_fields.iter().map(|f| generic_var(env, f)).collect(),
+    }
 }
 
 /// One grant of one secret, as the API shows it.
@@ -284,6 +415,9 @@ pub fn put(conn: &Connection, secret: &SecretInfo, g: &NewGrant<'_>) -> ApiResul
             ));
         }
         check_env_name(env)?;
+        for name in final_names(env, secret.kind, &secret.secret_fields) {
+            check_env_name(&name)?;
+        }
     }
     let key = g.grantee.key();
     let now = crate::db::now();
@@ -610,13 +744,6 @@ pub fn launch(
             (None, Kind::GithubToken) => GH_TOKEN.to_owned(),
             (None, _) => continue,
         };
-        if check_env_name(&env).is_err() {
-            out.warnings.push(format!(
-                "secret `{}/{}`: `{env}` is not a usable env var name; it is not set",
-                e.scope, e.name
-            ));
-            continue;
-        }
         let opened = match open_effective(conn, key, &e) {
             Ok(Some(o)) => o,
             Ok(None) => continue,
@@ -642,6 +769,16 @@ pub fn launch(
                     .collect(),
             };
         for (name, value) in vars {
+            // The one check of each final name before it goes into the
+            // launch env: a grant row from an older daemon or an import
+            // can hold a name that the rule refuses now.
+            if let Err(err) = check_env_name(&name) {
+                out.warnings.push(format!(
+                    "secret `{}/{}`: `{name}` is not set: {}",
+                    e.scope, e.name, err.message
+                ));
+                continue;
+            }
             if out.env.contains_key(&name) {
                 out.warnings.push(format!(
                     "secret `{}/{}`: `{name}` is set by another grant already; this one is not set",
@@ -873,7 +1010,7 @@ pub(crate) mod tests {
         ] {
             assert!(check_env_name(bad).is_err(), "{bad}");
         }
-        for good in ["GH_TOKEN", "OPENAI_API_KEY", "_X", "db_url"] {
+        for good in ["GH_TOKEN", "STRIPE_API_KEY", "X_1", "DB_URL"] {
             assert!(check_env_name(good).is_ok(), "{good}");
         }
     }
@@ -968,5 +1105,163 @@ pub(crate) mod tests {
         let l = launch(&c, &k, AGENT, "p").unwrap();
         let names: Vec<_> = l.env.keys().cloned().collect();
         assert_eq!(names, ["DB_HOST_NAME", "DB_PASSWORD"]);
+    }
+
+    /// S1 (secret manager review, 2026-10-29): the final name of each
+    /// var, `<ENV>_<FIELD>` of a `generic` secret too, passes the name
+    /// rule, so no grant sets a loader, shell, git, or daemon var.
+    #[test]
+    fn generic_env_names_pass_the_name_rule() {
+        let c = db();
+        let k = MasterKey::generate();
+        let s = secret(
+            &c,
+            &k,
+            "p",
+            "x",
+            Kind::Generic,
+            json!({
+                "fields": {"preload": "/w/evil.so", "library_path": "/tmp"},
+                "secret_fields": ["preload", "library_path"]
+            }),
+        );
+        // The grant API refuses a base name whose final names break the rule.
+        let e = grant(&c, &s, "agent:p/a", Some(Level::Read), Some("LD")).unwrap_err();
+        assert_eq!(e.code, crate::error::Code::Invalid, "{}", e.message);
+        // Grant rows that an older daemon or a config import wrote: the
+        // launch refuses each final name with a warning, and does not fail.
+        for (name, fields, env) in [
+            ("x", ["preload", "library_path"], "LD"),
+            ("y", ["socket", "agent"], "TERRARIUM"),
+            ("z", ["config_count", "config_key_0"], "GIT"),
+            ("w", ["env", "y"], "BASH"),
+            ("v", ["preload", "x"], "PYTHON"),
+        ] {
+            let values: Map<String, Value> = fields
+                .iter()
+                .map(|f| ((*f).to_owned(), json!("v1")))
+                .collect();
+            let s = match crate::secrets::get(&c, "p", name).unwrap() {
+                Some(s) => s,
+                None => secret(
+                    &c,
+                    &k,
+                    "p",
+                    name,
+                    Kind::Generic,
+                    json!({"fields": values, "secret_fields": fields}),
+                ),
+            };
+            c.execute(
+                "INSERT OR REPLACE INTO secret_grants
+                 (secret_id, grantee, level, env, created_by, created_at)
+                 VALUES (?1, ?2, 'read', ?3, 'test', '2026-10-29T00:00:00Z')",
+                params![s.id, format!("agent:{AGENT}"), env],
+            )
+            .unwrap();
+        }
+        let l = launch(&c, &k, AGENT, "p").unwrap();
+        let names: Vec<&String> = l.env.keys().collect();
+        assert!(names.is_empty(), "{names:?}");
+        for n in [
+            "LD_PRELOAD",
+            "TERRARIUM_SOCKET",
+            "GIT_CONFIG_COUNT",
+            "BASH_ENV",
+            "PYTHON_PRELOAD",
+        ] {
+            assert!(
+                l.warnings.iter().any(|w| w.contains(n)),
+                "{n}: {:?}",
+                l.warnings
+            );
+        }
+    }
+
+    #[test]
+    fn the_name_rule_is_an_allowlist_shape_and_a_deny_set() {
+        let long = "A".repeat(129);
+        for bad in [
+            "LD_AUDIT",
+            "GCONV_PATH",
+            "GLIBC_TUNABLES",
+            "MALLOC_CHECK_",
+            "LOCPATH",
+            "NLSPATH",
+            "HOSTALIASES",
+            "RES_OPTIONS",
+            "LOCALDOMAIN",
+            "TMPDIR",
+            "GIT_DIR",
+            "GIT_SSH_COMMAND",
+            "BASH_FUNC_X",
+            "BASH_ENV",
+            "ENV",
+            "SHELLOPTS",
+            "PS4",
+            "PROMPT_COMMAND",
+            "IFS",
+            "CDPATH",
+            "NODE_OPTIONS",
+            "NPM_CONFIG_PREFIX",
+            "PYTHONPATH",
+            "PYTHONSTARTUP",
+            "PERL5OPT",
+            "PERLLIB",
+            "RUBYOPT",
+            "GEM_HOME",
+            "JAVA_TOOL_OPTIONS",
+            "JDK_JAVA_OPTIONS",
+            "CLASSPATH",
+            "DOTNET_STARTUP_HOOKS",
+            "GOFLAGS",
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "NO_PROXY",
+            "http_proxy",
+            "SSL_CERT_FILE",
+            "CURL_CA_BUNDLE",
+            "REQUESTS_CA_BUNDLE",
+            "NODE_EXTRA_CA_CERTS",
+            "ANTHROPIC_BASE_URL",
+            "ANTHROPIC_API_KEY",
+            "CLAUDE_CONFIG_DIR",
+            "OPENAI_API_KEY",
+            "CODEX_HOME",
+            "COPILOT_GITHUB_TOKEN",
+            "PI_CODING_AGENT_DIR",
+            "DISABLE_TELEMETRY",
+            "IS_SANDBOX",
+            "GEMINI_API_KEY",
+            "XDG_CONFIG_HOME",
+            "TERRARIUM_SOCKET",
+            "SSH_AUTH_SOCK",
+            "HOME",
+            "PATH",
+            "USER",
+            "LOGNAME",
+            "SHELL",
+            "TERM",
+            "LANG",
+            "LC_ALL",
+            "TZ",
+            "PWD",
+            "OLDPWD",
+            "DISPLAY",
+            "WAYLAND_DISPLAY",
+            "_X",
+            "db_url",
+            "A-B",
+            "1A",
+            "",
+            long.as_str(),
+        ] {
+            assert!(check_env_name(bad).is_err(), "{bad}");
+        }
+        let longest = "A".repeat(128);
+        for good in ["GH_TOKEN", "DB_URL", "X", "STRIPE_KEY_2", longest.as_str()] {
+            assert!(check_env_name(good).is_ok(), "{good}");
+        }
     }
 }

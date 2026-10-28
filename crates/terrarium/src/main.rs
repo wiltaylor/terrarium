@@ -15,6 +15,7 @@ mod client;
 mod commands;
 mod credentials;
 mod ctx;
+mod exec_env;
 mod output;
 mod runner_socket;
 mod tls;

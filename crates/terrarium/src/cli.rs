@@ -262,6 +262,19 @@ pub enum Command {
         /// The hook name, for example `Stop` or `UserPromptSubmit`
         event: String,
     },
+    /// Start a program with the env vars of the agent's secret grants (the
+    /// sandbox starts the harness with it; PLAN §16b.4)
+    #[command(name = "exec-env")]
+    ExecEnv {
+        /// The program and its arguments
+        #[arg(
+            required = true,
+            trailing_var_arg = true,
+            allow_hyphen_values = true,
+            num_args = 1..
+        )]
+        argv: Vec<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -2615,9 +2628,11 @@ pub struct EventsArgs {
 /// Commands to hide from the help of each mode. They still parse and run.
 pub fn hide_for_mode(cmd: clap::Command, agent_mode: bool) -> clap::Command {
     let hidden: &[&str] = if agent_mode {
-        &["daemon", "events", "audit", "hook", "login", "logout"]
+        &[
+            "daemon", "events", "audit", "hook", "exec-env", "login", "logout",
+        ]
     } else {
-        &["admin", "status", "exec", "shell", "cp", "hook"]
+        &["admin", "status", "exec", "shell", "cp", "hook", "exec-env"]
     };
     hidden
         .iter()

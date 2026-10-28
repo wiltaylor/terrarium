@@ -239,8 +239,63 @@ pub fn remove_files(files: &[OldFile], outcomes: &[Outcome]) {
     }
 }
 
+/// The marker in the name of a backup of a moved credential
+/// (`<stamp>-credential-<file>`).
+const BACKUP_MARK: &str = "-credential-";
+
+/// Remove each backup of a moved credential
+/// (`<state>/credentials/backup/*-credential-*`) whose mtime is more than
+/// `max_age` before `now` (PLAN §16b.7: the trash retention,
+/// `TERRARIUM_TRASH_DAYS`, 7 by default). The backups hold the plain
+/// values, so they do not stay. Other backups in the dir stay. A symlink
+/// is removed, not followed. The answer: the removed paths.
+pub fn prune_backups(
+    state_dir: &Path,
+    now: std::time::SystemTime,
+    max_age: std::time::Duration,
+) -> Vec<PathBuf> {
+    let dir = credentials_dir(state_dir).join(crate::accounts::BACKUP_DIR);
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut removed = Vec::new();
+    for e in entries.flatten() {
+        if !e.file_name().to_string_lossy().contains(BACKUP_MARK) {
+            continue;
+        }
+        let path = e.path();
+        let Ok(meta) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        let old = meta
+            .modified()
+            .ok()
+            .and_then(|m| now.duration_since(m).ok())
+            .is_some_and(|age| age > max_age);
+        if !old || meta.is_dir() {
+            continue;
+        }
+        match fs::remove_file(&path) {
+            Ok(()) => removed.push(path),
+            Err(e) => tracing::warn!(path = %path.display(), "cannot remove an old backup: {e}"),
+        }
+    }
+    removed.sort();
+    removed
+}
+
+/// [`prune_backups`] with the trash retention, now.
+pub fn prune_backups_now(state_dir: &Path) {
+    let max_age = std::time::Duration::from_secs(crate::trash::trash_days() * 86_400);
+    let removed = prune_backups(state_dir, std::time::SystemTime::now(), max_age);
+    if !removed.is_empty() {
+        tracing::info!(files = removed.len(), "removed old credential backups");
+    }
+}
+
 /// The start-up move of the old files (the daemon calls it once).
 pub async fn run_at_start(state: &crate::api::Shared) {
+    prune_backups_now(&state.state_dir);
     let files = old_files(&state.state_dir);
     if files.is_empty() {
         return;
@@ -420,6 +475,36 @@ mod tests {
 
     fn count(c: &Connection, sql: &str) -> i64 {
         c.query_row(sql, [], |r| r.get(0)).unwrap()
+    }
+
+    /// S6 (secret manager review, 2026-10-29): the plain backups of the
+    /// moved credentials go after the retention time. The other backups
+    /// in the dir (the accounts) stay.
+    #[test]
+    fn old_credential_backups_are_pruned() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = credentials_dir(tmp.path()).join(crate::accounts::BACKUP_DIR);
+        fs::create_dir_all(&dir).unwrap();
+        let day = std::time::Duration::from_secs(86_400);
+        let now = std::time::SystemTime::now();
+        let old = dir.join("20261001T000000.000Z-credential-gh");
+        let young = dir.join("20261028T000000.000Z-credential-gh.json");
+        let other = dir.join("20261001T000000.000Z-account-max");
+        for p in [&old, &young, &other] {
+            fs::write(p, "ghp_PLAIN").unwrap();
+        }
+        let f = fs::File::options().write(true).open(&old).unwrap();
+        f.set_modified(now - 8 * day).unwrap();
+        let f = fs::File::options().write(true).open(&other).unwrap();
+        f.set_modified(now - 8 * day).unwrap();
+        let removed = prune_backups(tmp.path(), now, 7 * day);
+        assert_eq!(removed, vec![old.clone()]);
+        assert!(!old.exists());
+        assert!(young.exists());
+        assert!(other.exists());
+        // No backup dir: nothing to do.
+        let empty = tempfile::tempdir().unwrap();
+        assert!(prune_backups(empty.path(), now, 7 * day).is_empty());
     }
 
     #[test]

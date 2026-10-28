@@ -114,6 +114,9 @@ describe("grants", () => {
     expect(envError("TERRARIUM_X")).not.toBeNull();
     expect(envError("LD_PRELOAD")).not.toBeNull();
     expect(envError("GH_TOKEN")).toBeNull();
+    expect(envError("DB_URL")).toBeNull();
+    for (const bad of ["db_url", "_X", "NODE_OPTIONS", "HTTPS_PROXY", "GIT_DIR", "BASH_ENV", "OPENAI_API_KEY", "PYTHONPATH"])
+      expect(envError(bad), bad).not.toBeNull();
     expect(grantBody({ grantee: "project:ops", level: "read", env: "HOME" })).toHaveProperty("error");
   });
 

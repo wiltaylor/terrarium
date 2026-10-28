@@ -672,7 +672,7 @@ never the text), `agent.keys` (`keys`: the key names; a text key as
 `text(<length>)`), `agent.answer`, `agent.attach`,
 `repo.checkout`, `repo.credential` (each answer of the credential helper),
 `secret.put`, `secret.delete`, `secret.reveal`, `secret.grant`,
-`secret.revoke`, `secret.get`, `secret.use`, `secret.migrated` (actor
+`secret.revoke`, `secret.get`, `secret.env`, `secret.use`, `secret.migrated` (actor
 `system`), and `secret.rotate_key` (actor `system`) (§5.2),
 `mail.read` (the first read of a message; `detail` has `thread`, `from`,
 `to`, and `via`: `read` or `reply`), `board.columns`, `card.reassign`, `card.reopen`, `card.archive` (by an admin
@@ -1121,12 +1121,38 @@ kinds that a broker serves). It defaults to `read` for `api_key`,
 `login`, and `generic`, because no broker serves them. `env` names an env
 var for the value. An env var puts the value into the agent's
 environment, where the agent can print it, so `env` needs the level
-`read` (`422` otherwise). The name is a POSIX name (a letter or `_`, then
-letters, digits, or `_`; at most 128 bytes). The daemon refuses the names
-that the sandbox sets: `PATH`, `HOME`, `USER`, `SHELL`, `TERM`, `LANG`,
-`TZ`, `SSH_AUTH_SOCK`, the harness home vars (`CLAUDE_CONFIG_DIR` and the
-others), and each name that starts with `LD_`, `LC_`, `TERRARIUM_`,
-`GIT_AUTHOR_`, `GIT_COMMITTER_`, or `GIT_CONFIG` (`422`).
+`read` (`422` otherwise).
+
+*The name rule.* Each final env var name must obey this rule. The final
+names are the `env` name, and each `<ENV>_<FIELD>` of a `generic` secret
+with more than one secret field (below). A name that breaks the rule is
+`422`.
+
+- The name matches `^[A-Z][A-Z0-9_]{0,127}$`: an upper-case letter, then
+  upper-case letters, digits, or `_`, at most 128 characters. A lower-case
+  name and a name that starts with `_` are refused.
+- The name is not in the deny set. The deny set holds the vars that the
+  loader, a shell, the sandbox, a language runtime, a proxy, or a harness
+  reads or sets:
+
+| Group | Refused names |
+|---|---|
+| Loader and C library | `LD_*`, `MALLOC_*`, `GCONV_PATH`, `GLIBC_TUNABLES`, `LOCPATH`, `NLSPATH`, `HOSTALIASES`, `RES_OPTIONS`, `LOCALDOMAIN`, `TMPDIR` |
+| Shell | `BASH_*` (also `BASH_ENV`, `BASH_FUNC_*`), `ENV`, `SHELLOPTS`, `BASHOPTS`, `PS1`, `PS2`, `PS4`, `PROMPT_COMMAND`, `IFS`, `CDPATH`, `GLOBIGNORE`, `HISTFILE`, `INPUTRC`, `POSIXLY_CORRECT` |
+| Session and sandbox | `HOME`, `PATH`, `USER`, `LOGNAME`, `SHELL`, `TERM`, `TERMINFO`, `TERMINFO_DIRS`, `TERMCAP`, `LANG`, `LANGUAGE`, `LC_*`, `TZ`, `TZDIR`, `PWD`, `OLDPWD`, `DISPLAY`, `WAYLAND_*`, `MAIL`, `MAILPATH`, `XDG_*`, `SSH_*`, `TERRARIUM_*` |
+| git | `GIT_*` (all) |
+| Programs that other programs start | `EDITOR`, `VISUAL`, `PAGER`, `MANPAGER`, `LESSOPEN`, `LESSCLOSE`, `BROWSER` |
+| Language runtimes | `NODE_*`, `NPM_CONFIG_*`, `YARN_*`, `BUN_*`, `DENO_*`, `PYTHON*`, `PIP_*`, `UV_*`, `CONDA_*`, `VIRTUAL_ENV`, `PERL5*`, `PERLLIB`, `RUBY*`, `GEM_*`, `BUNDLE_*`, `JAVA_*`, `JDK_JAVA_OPTIONS`, `CLASSPATH`, `DOTNET_*`, `COREHOST_*`, `GOFLAGS`, `GOPATH`, `GOROOT`, `GOPROXY`, `GOENV`, `GOTOOLCHAIN`, `GOINSECURE`, `GOPRIVATE`, `GONOSUMDB`, `GONOPROXY`, `CGO_*`, `CARGO_*`, `RUSTC*`, `RUSTDOC*`, `RUSTFLAGS`, `RUSTUP_*`, `LUA_*`, `TCLLIBPATH`, `PHPRC` (`_JAVA_OPTIONS` breaks the shape) |
+| Proxies and CA files | `*_PROXY` (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, ...; a lower-case `http_proxy` breaks the shape), `NO_PROXY`, `SSL_CERT_*`, `CURL_CA_BUNDLE`, `CURL_HOME`, `REQUESTS_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS`, `SSLKEYLOGFILE`, `WGETRC`, `GNUPGHOME` |
+| Harnesses and their accounts | `ANTHROPIC_*`, `CLAUDE_*`, `OPENAI_*`, `CODEX_*`, `COPILOT_*`, `PI_*`, `DISABLE_*`, `IS_SANDBOX`, `ENABLE_CLAUDEAI_MCP_SERVERS`, the provider keys of pi (`GEMINI_API_KEY`, `OPENROUTER_API_KEY`, `XAI_API_KEY`, `GROQ_API_KEY`, `DEEPSEEK_API_KEY`, `MISTRAL_API_KEY`, `ZAI_API_KEY`, `KIMI_API_KEY`, `MOONSHOT_API_KEY`), and the harness home vars |
+
+`GH_TOKEN` (the default of a `github_token`) and `GITHUB_TOKEN` stay
+allowed. The daemon checks the rule in three places: when the grants API
+writes a grant, when a config import writes one (§25.3), and again at
+each start for each final name, just before the name goes into the
+launch env. A grant row from an older daemon with a name that the rule
+refuses now gives nothing at the start: the daemon sets no var for it and
+emits a warning event. The start does not fail.
 
 ```
 POST /api/secrets/ops/db/grants
@@ -1146,17 +1172,29 @@ its grants. A new agent with the name of a removed agent gets no grant.
 
 **Delivery to agents.** PLAN §16b.4.
 
-- *Env vars.* At each start, the daemon puts each secret with a `read`
-  grant and an `env` name into the agent's environment. The agent's own
-  grant gives the name first, then the project grant. A `github_token`
-  with a `read` grant and no `env` name sets `GH_TOKEN`. The value is the
-  main secret field: `value`, `password` (`login`), or `private_key`
-  (`ssh_key`). A `generic` secret with one secret field sets that field. A
-  `generic` secret with more fields sets `<ENV>_<FIELD>` for each (upper
-  case, `_` for other characters). A var that the harness or its account
-  sets already wins, and the daemon shows a warning event. No value goes
-  into the start log, an event, or an audit row. The daemon writes no
-  value into a file that the sandbox binds.
+- *Env vars.* At each start, the harness gets each secret with a `read`
+  grant and an `env` name in its environment. The agent's own grant gives
+  the name first, then the project grant. A `github_token` with a `read`
+  grant and no `env` name sets `GH_TOKEN`. The value is the main secret
+  field: `value`, `password` (`login`), or `private_key` (`ssh_key`). A
+  `generic` secret with one secret field sets that field. A `generic`
+  secret with more fields sets `<ENV>_<FIELD>` for each (upper case, `_`
+  for other characters). Each final name obeys the name rule (above). A
+  var that the harness or its account sets already wins, and the daemon
+  shows a warning event. No value goes into the start log, an event, or an
+  audit row.
+
+  The values do not go through the launch spec. The sandbox starts the
+  harness through `terrarium exec-env -- <harness> <args>`, with the CLI
+  that the sandbox binds. Inside the sandbox, `exec-env` asks the daemon
+  for the vars (`POST /api/agent/secrets/env`, below), adds each var that
+  the env does not hold yet, and replaces itself with the harness. So no
+  value is in the runner spec file (`private/runner.json`), on a command
+  line, or in the env of the `bwrap` process outside the sandbox. A
+  revoke applies at the next start. When the daemon does not answer,
+  `exec-env` prints a warning and starts the harness with no secret var.
+  With no `terrarium` CLI (`--cli`), the start sets no secret var and
+  emits a warning event.
 - *Git hosts.* The start sets `credential.https://<host>.helper = !terrarium
   repo credential` (through `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_<n>`, and
   `GIT_CONFIG_VALUE_<n>`) for each host of a granted `token` (`hosts`) or
@@ -1165,16 +1203,22 @@ its grants. A new agent with the name of a removed agent gets no grant.
 - *ssh-agent.* An agent with at least one `ssh_key` grant (any level) gets
   an ssh-agent socket. The daemon serves it at
   `<runtime>/ssh-agent/<agent id>/agent.sock` (the dirs 0700, the socket
-  0600). The sandbox binds the dir at `/run/terrarium/ssh-agent`, and
+  0600). The sandbox binds the dir read-only at `/run/terrarium/ssh-agent`
+  (a client can connect to a socket in a read-only bind), and
   `SSH_AUTH_SOCK` is `/run/terrarium/ssh-agent.sock` (a symlink to the
   socket). With the sandbox mode `none`, `SSH_AUTH_SOCK` is the host path.
   The socket lists and signs with the granted keys only, and refuses add,
   remove, and lock requests. It checks the grants at each list and each
-  sign. The key comment is `<scope>/<name>`. Each good sign counts in a
+  sign. The key comment is `<scope>/<name>`. Each socket allows 10 signs
+  a second, with a burst of 30 (a token bucket). A sign over the limit
+  answers `SSH_AGENT_FAILURE`. The daemon keeps an opened key for 60
+  seconds, so a loop of signs does not decrypt the key (and run the KDF of
+  its passphrase) at each sign. A revoke removes the kept key at the next
+  sign; a stop of the socket drops all of them. Each sign counts in a
   `secret.use` audit row: one row each minute for each key and agent, with
-  `signs`, the count in that minute. The socket stops when the agent
-  stops. The harness runs as the daemon's user, so the 0600 socket is
-  open to it.
+  `signs` (the good signs in that minute) and `limited` (the signs over
+  the limit). The socket stops when the agent stops. The harness runs as
+  the daemon's user, so the 0600 socket is open to it.
 
 **The agent's grants.** `GET /api/agent/secrets` lists the secrets that
 are granted to the calling agent: its own grants and its project's, one
@@ -1187,6 +1231,16 @@ before a global secret. No entry holds a value. The operator gets `403`.
 ```
 
 `via` holds `agent`, `project`, or both.
+
+**The env of the start.** `POST /api/agent/secrets/env` answers the env
+vars of the calling agent's `read` grants with an `env` name, by the rules
+of *Env vars* above: `{"vars": {"DATABASE_URL": "..."}}`. `terrarium
+exec-env` calls it inside the sandbox at each start of the harness. The
+answer holds values and has `Cache-Control: no-store`. Each answer writes
+a `secret.env` audit row with the names only (`{agent, names}`). It counts
+in the limit of `get` (30 a minute for each agent, `429 rate_limited`).
+The operator gets `403`. The agent gets nothing that `get` does not give
+it.
 
 **Get.** `POST /api/agent/secrets/{name}/get` answers one value for a
 `read` grant. The name resolves among the granted secrets: the project

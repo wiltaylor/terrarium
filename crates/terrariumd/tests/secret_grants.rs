@@ -305,3 +305,81 @@ async fn removing_an_agent_removes_its_grants() {
     let grants = td.get("/api/secrets/global/openai/grants").await;
     assert_eq!(grants.ok(), &json!([]));
 }
+
+/// Secret manager review S1 and S6: `terrarium exec-env` gets the env vars
+/// of the `read` grants from `POST /api/agent/secrets/env` inside the
+/// sandbox. The grant API refuses a name outside the name rule (`422`);
+/// the audit row holds the names only; a revoke applies at the next call.
+#[tokio::test]
+async fn the_launch_env_comes_from_the_daemon_and_follows_the_name_rule() {
+    let td = setup().await;
+    for bad in [
+        "NODE_OPTIONS",
+        "HTTPS_PROXY",
+        "OPENAI_API_KEY",
+        "GIT_DIR",
+        "db_key",
+    ] {
+        td.post(
+            "/api/secrets/p/db/grants",
+            json!({"grantee": "agent:p/w", "level": "read", "env": bad}),
+        )
+        .await
+        .err(422, "invalid");
+    }
+    // A generic secret whose final names break the rule: `LD_PRELOAD`.
+    td.put(
+        "/api/secrets/p/pre",
+        json!({"kind": "generic", "fields": {"preload": "/x.so", "path": "/y"},
+               "secret_fields": ["preload", "path"]}),
+    )
+    .await
+    .ok();
+    td.post(
+        "/api/secrets/p/pre/grants",
+        json!({"grantee": "agent:p/w", "level": "read", "env": "LD"}),
+    )
+    .await
+    .err(422, "invalid");
+    td.post(
+        "/api/secrets/p/db/grants",
+        json!({"grantee": "agent:p/w", "level": "read", "env": "DB_KEY"}),
+    )
+    .await
+    .ok();
+    td.post(
+        "/api/secrets/global/gh/grants",
+        json!({"grantee": "project:p", "level": "read"}),
+    )
+    .await
+    .ok();
+    let r = td.post_empty_as("p/w", "/api/agent/secrets/env").await;
+    assert_eq!(
+        r.ok(),
+        &json!({"vars": {"DB_KEY": PROJECT_VALUE, "GH_TOKEN": TOKEN_VALUE}})
+    );
+    assert_eq!(r.headers["cache-control"], "no-store");
+    // Another project's agent gets none of them; the operator gets 403.
+    let r = td.post_empty_as("q/x", "/api/agent/secrets/env").await;
+    assert_eq!(r.ok(), &json!({"vars": {}}));
+    td.post_empty("/api/agent/secrets/env")
+        .await
+        .err(403, "forbidden");
+    let audit = td.get("/api/audit?action=secret.env").await;
+    let rows = audit.ok().as_array().unwrap().clone();
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    clean(&audit.body);
+    assert!(audit.body.to_string().contains("DB_KEY"));
+    // A revoke applies at the next call.
+    let r = td
+        .req(
+            hyper::Method::DELETE,
+            "/api/secrets/p/db/grants?grantee=agent:p/w",
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(r.status.as_u16(), 204);
+    let r = td.post_empty_as("p/w", "/api/agent/secrets/env").await;
+    assert_eq!(r.ok(), &json!({"vars": {"GH_TOKEN": TOKEN_VALUE}}));
+}

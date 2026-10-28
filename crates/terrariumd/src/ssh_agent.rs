@@ -20,8 +20,14 @@
 //!
 //! The socket is made with mode 0600: the server binds a temporary name in
 //! the same directory, sets the mode, and renames it to the final path, so
-//! the final path never has a wider mode. Messages over
-//! [`AgentOptions::max_message_len`] close the connection.
+//! the final path never has a wider mode. The mode change does not follow a
+//! symlink: it opens the bound name with `O_PATH | O_NOFOLLOW`, checks that
+//! the file is a socket, and changes the mode through that file descriptor.
+//! Messages over [`AgentOptions::max_message_len`] close the connection.
+//!
+//! [`AgentOptions::sign_limit`] limits the signs of one socket (a token
+//! bucket). A sign over the limit answers `SSH_AGENT_FAILURE` with no call
+//! to the source, and the hook sees [`SignOutcome::Limited`].
 
 use std::fmt;
 use std::io;
@@ -133,6 +139,8 @@ pub enum SignOutcome {
     Signed,
     Refused,
     Failed,
+    /// Over [`AgentOptions::sign_limit`]: the source was not called.
+    Limited,
 }
 
 /// One sign of a listed key. A sign request for a key that is not listed
@@ -153,6 +161,56 @@ impl SignEvent {
 /// The hook that the server calls after each sign of a listed key.
 pub type SignHook = Arc<dyn Fn(&SignEvent) + Send + Sync>;
 
+/// A token bucket for the signs of one socket: `burst` signs at once,
+/// then `per_second` signs each second.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SignLimit {
+    pub per_second: u32,
+    pub burst: u32,
+}
+
+impl Default for SignLimit {
+    /// 10 signs a second, 30 at once. An ssh login signs one time; a git
+    /// fetch over ssh signs one time for each connection.
+    fn default() -> Self {
+        Self {
+            per_second: 10,
+            burst: 30,
+        }
+    }
+}
+
+/// The state of a [`SignLimit`].
+struct Bucket {
+    limit: SignLimit,
+    tokens: f64,
+    last: std::time::Instant,
+}
+
+impl Bucket {
+    fn new(limit: SignLimit) -> Self {
+        Self {
+            limit,
+            tokens: f64::from(limit.burst),
+            last: std::time::Instant::now(),
+        }
+    }
+
+    /// Take one token. False: the bucket is empty.
+    fn take(&mut self) -> bool {
+        let now = std::time::Instant::now();
+        let add = now.duration_since(self.last).as_secs_f64() * f64::from(self.limit.per_second);
+        self.tokens = (self.tokens + add).min(f64::from(self.limit.burst));
+        self.last = now;
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 /// The options of one agent socket.
 #[derive(Clone)]
 pub struct AgentOptions {
@@ -162,6 +220,8 @@ pub struct AgentOptions {
     pub max_connections: usize,
     /// Called after each sign of a listed key (audit, counters).
     pub on_sign: Option<SignHook>,
+    /// The sign rate limit of the socket. `None`: no limit.
+    pub sign_limit: Option<SignLimit>,
 }
 
 impl Default for AgentOptions {
@@ -170,6 +230,7 @@ impl Default for AgentOptions {
             max_message_len: DEFAULT_MAX_MESSAGE_LEN,
             max_connections: DEFAULT_MAX_CONNECTIONS,
             on_sign: None,
+            sign_limit: None,
         }
     }
 }
@@ -180,6 +241,7 @@ impl fmt::Debug for AgentOptions {
             .field("max_message_len", &self.max_message_len)
             .field("max_connections", &self.max_connections)
             .field("on_sign", &self.on_sign.is_some())
+            .field("sign_limit", &self.sign_limit)
             .finish()
     }
 }
@@ -291,13 +353,36 @@ fn bind_private(path: &Path) -> io::Result<std::os::unix::net::UnixListener> {
     };
     let _ = std::fs::remove_file(&tmp);
     let listener = std::os::unix::net::UnixListener::bind(&tmp)?;
-    let result = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
-        .and_then(|()| std::fs::rename(&tmp, path));
+    let result = chmod_socket_nofollow(&tmp).and_then(|()| std::fs::rename(&tmp, path));
     if let Err(e) = result {
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
     }
     Ok(listener)
+}
+
+/// Set mode 0600 on the socket at `path`. A symlink at `path` is not
+/// followed, and a file that is not a socket is an error: the mode change
+/// goes through an `O_PATH | O_NOFOLLOW` descriptor of the checked file.
+fn chmod_socket_nofollow(path: &Path) -> io::Result<()> {
+    use nix::libc;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)?;
+    if !file.metadata()?.file_type().is_socket() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} is not a socket", path.display()),
+        ));
+    }
+    // A chmod of the magic link changes the inode of the descriptor.
+    std::fs::set_permissions(
+        format!("/proc/self/fd/{}", file.as_raw_fd()),
+        std::fs::Permissions::from_mode(0o600),
+    )
 }
 
 async fn accept_loop(
@@ -307,6 +392,7 @@ async fn accept_loop(
     mut stop: watch::Receiver<bool>,
 ) {
     let slots = Arc::new(Semaphore::new(options.max_connections.max(1)));
+    let bucket = Arc::new(std::sync::Mutex::new(options.sign_limit.map(Bucket::new)));
     let options = Arc::new(options);
     let mut connections = JoinSet::new();
     loop {
@@ -332,9 +418,10 @@ async fn accept_loop(
         while connections.try_join_next().is_some() {}
         let source = Arc::clone(&source);
         let options = Arc::clone(&options);
+        let bucket = Arc::clone(&bucket);
         connections.spawn(async move {
             let _permit = permit;
-            if let Err(e) = serve_connection(stream, source, options).await {
+            if let Err(e) = serve_connection(stream, source, options, bucket).await {
                 tracing::debug!(error = %e, "ssh-agent connection ended");
             }
         });
@@ -342,10 +429,14 @@ async fn accept_loop(
     connections.shutdown().await;
 }
 
+/// The sign bucket of one socket, shared by its connections.
+type SharedBucket = Arc<std::sync::Mutex<Option<Bucket>>>;
+
 async fn serve_connection(
     mut stream: UnixStream,
     source: Arc<dyn KeySource>,
     options: Arc<AgentOptions>,
+    bucket: SharedBucket,
 ) -> io::Result<()> {
     loop {
         let mut len = [0u8; 4];
@@ -363,7 +454,7 @@ async fn serve_connection(
         }
         let mut body = vec![0u8; len];
         stream.read_exact(&mut body).await?;
-        let reply = handle_message(&body, &source, &options).await;
+        let reply = handle_message(&body, &source, &options, &bucket).await;
         let mut framed = Vec::with_capacity(reply.len() + 4);
         framed.extend_from_slice(&(reply.len() as u32).to_be_bytes());
         framed.extend_from_slice(&reply);
@@ -376,6 +467,7 @@ async fn handle_message(
     body: &[u8],
     source: &Arc<dyn KeySource>,
     options: &AgentOptions,
+    bucket: &SharedBucket,
 ) -> Vec<u8> {
     let failure = vec![SSH_AGENT_FAILURE];
     let (&kind, payload) = match body.split_first() {
@@ -389,7 +481,7 @@ async fn handle_message(
             };
             identities_answer(&identities).unwrap_or(failure)
         }
-        SSH_AGENTC_SIGN_REQUEST => sign_request(payload, source, options)
+        SSH_AGENTC_SIGN_REQUEST => sign_request(payload, source, options, bucket)
             .await
             .unwrap_or(failure),
         _ => failure,
@@ -425,6 +517,7 @@ async fn sign_request(
     payload: &[u8],
     source: &Arc<dyn KeySource>,
     options: &AgentOptions,
+    bucket: &SharedBucket,
 ) -> Option<Vec<u8>> {
     let mut reader = payload;
     let key_blob = get_string(&mut reader)?.to_vec();
@@ -440,6 +533,21 @@ async fn sign_request(
         .find(|i| i.public.to_bytes().is_ok_and(|b| b == key_blob))?;
 
     let label = identity.label.clone();
+    let allowed = bucket
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_mut()
+        .is_none_or(Bucket::take);
+    if !allowed {
+        tracing::info!(label = %label, "ssh-agent sign over the rate limit");
+        if let Some(hook) = &options.on_sign {
+            hook(&SignEvent {
+                label,
+                outcome: SignOutcome::Limited,
+            });
+        }
+        return None;
+    }
     let source = Arc::clone(source);
     let result = tokio::task::spawn_blocking(move || source.sign(&identity, &data, flags))
         .await
@@ -578,6 +686,10 @@ mod tests {
     }
 
     fn fixture(refuse: Option<&str>) -> Fixture {
+        fixture_with(refuse, None)
+    }
+
+    fn fixture_with(refuse: Option<&str>, sign_limit: Option<SignLimit>) -> Fixture {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("agent.sock");
         let source = Arc::new(MemorySource {
@@ -591,6 +703,7 @@ mod tests {
             on_sign: Some(Arc::new(move |e: &SignEvent| {
                 sink.lock().unwrap().push(e.clone())
             })),
+            sign_limit,
             ..AgentOptions::default()
         };
         let handle = serve(&path, Arc::clone(&source) as Arc<dyn KeySource>, options).unwrap();
@@ -761,6 +874,63 @@ mod tests {
         assert_eq!(events[0].label, "deploy-ed");
         assert_eq!(events[0].outcome, SignOutcome::Refused);
         assert!(!events[0].ok());
+    }
+
+    /// S10 (secret manager review, 2026-10-29): a sign over the rate limit
+    /// answers SSH_AGENT_FAILURE without a call to the source, and the
+    /// hook sees it as `Limited`.
+    #[tokio::test]
+    async fn signs_over_the_rate_limit_fail_without_the_source() {
+        let limit = SignLimit {
+            per_second: 1,
+            burst: 3,
+        };
+        let f = fixture_with(None, Some(limit));
+        let mut c = Client::connect(&f.path).await;
+        let ed = public(&f, "deploy-ed");
+        let mut good = 0;
+        for i in 0..6u32 {
+            if c.sign(&ed, &i.to_be_bytes(), 0).await.is_some() {
+                good += 1;
+            }
+        }
+        assert_eq!(good, 3);
+        assert_eq!(f.source.signs.load(Ordering::SeqCst), 3);
+        let events = f.events.lock().unwrap().clone();
+        let limited = events
+            .iter()
+            .filter(|e| e.outcome == SignOutcome::Limited)
+            .count();
+        assert_eq!(limited, 3, "{events:?}");
+        // The bucket fills again: one more token after a second.
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        assert!(c.sign(&ed, b"later", 0).await.is_some());
+    }
+
+    /// S13: the socket mode is set on the socket that this server bound,
+    /// never through a symlink.
+    #[test]
+    fn chmod_private_does_not_follow_a_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        std::fs::write(&target, "x").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(chmod_socket_nofollow(&link).is_err());
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o644);
+        // A regular file is not a socket either.
+        assert!(chmod_socket_nofollow(&target).is_err());
+        let sock = dir.path().join("s");
+        let _l = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        chmod_socket_nofollow(&sock).unwrap();
+        let mode = std::fs::symlink_metadata(&sock)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
     }
 
     #[tokio::test]

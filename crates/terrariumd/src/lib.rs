@@ -428,7 +428,8 @@ fn spawn_account_migration(state: Shared) -> JoinHandle<()> {
 /// Run the artifact retention prune (PLAN §15.2): first one hour after the
 /// start, then every `[artifacts] prune_interval_hours` (default 24). The
 /// same timer prunes the trash of deleted agents (`TERRARIUM_TRASH_DAYS`,
-/// [`trash::prune_trash`]), the session archive of deleted agents
+/// [`trash::prune_trash`]), the plain backups of the moved credentials
+/// after the same days ([`secrets::migrate::prune_backups`]), the session archive of deleted agents
 /// ([`session_archive::prune_archive`]), the revoked sessions past their `exp`, and the
 /// schedule runs past the newest 500 of each schedule, and the webhook
 /// delivery IDs older than 7 days, and the turn attachments older than 7
@@ -455,6 +456,13 @@ fn spawn_prune_timer(state: Shared) -> JoinHandle<()> {
                 Ok(Ok(_)) => {}
                 Ok(Err(e)) => warn!("trash prune failed: {e}"),
                 Err(e) => warn!("trash prune task failed: {e}"),
+            }
+            // The plain backups of the moved credentials (PLAN §16b.7).
+            let dir = state.state_dir.clone();
+            if let Err(e) =
+                tokio::task::spawn_blocking(move || secrets::migrate::prune_backups_now(&dir)).await
+            {
+                warn!("credential backup prune task failed: {e}");
             }
             let work = state.work_dir.clone();
             match tokio::task::spawn_blocking(move || {

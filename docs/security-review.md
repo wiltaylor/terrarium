@@ -1160,13 +1160,70 @@ runs them, in the sandbox, with the rights of the agent.
 - **The mechanisms are read, not run.** The live check of
   `docs/compat.md` ("Skills") is open.
 
-## Secret manager review: S2 and S3 (2026-10-29)
+## 14. Secret manager review (2026-10-29)
 
-A short note. The full "Secret manager review (2026-10-29)" section holds
-the other findings. Move these two rows into it when the two branches
-merge.
+An independent review of the secret manager (PLAN §16b, commits
+7a07953..23a4ae7). The reviewer did not write the code, and proved each
+"verified" finding with a test in a copy of the source. S2 and S3 are in
+8ca3edd. S4, S5, S7, S8, S11, and S12 are in 9fa4b78. The fixes of S1,
+S6, S9, S10, and S13 are in one change (commit to be made, after
+9fa4b78). Each fix has a test that reproduces the finding.
 
 | # | Finding | Status |
 |---|---|---|
-| S2 (HIGH) | A project_admin gets global secrets with no grant: a project repo or target names a global secret, and the credential helper, a checkout, an ssh exec, or a display login uses it. | **Fixed: grant required.** A project object can name a global secret only when the project holds a grant of it, or when the operator, a sysadmin, or a definition file set the object (`credential_admin` on `repos` and `targets`). The daemon checks at save (`403` with the fix) and at each use (refused, with a `secret.refused` warning event). The rows from before the upgrade count as set by an admin. PLAN §16b.6a, docs/api.md §5.2, `tests/global_secret_rule.rs`. |
-| S3 (MEDIUM) | A `use` grant of a token shows the value: the agent calls the credential helper itself. | **Accepted, documented: `use` is `read` for tokens.** The credential helper must hand the token to git, and the agent runs git. The docs and the grant form say so; only an `ssh_key` stays hidden under `use`. A test asserts the behaviour. The real fix is an HTTPS proxy in the daemon that adds the token. PLAN §16b.3, docs/api.md §5.2. |
+| S1 (HIGH) | The final env var names of a `generic` secret (`<ENV>_<FIELD>`) skip the reserved-name check, so a grant can set `LD_PRELOAD`, `GIT_CONFIG_*`, `BASH_ENV`, or `TERRARIUM_*`. The launch env is the env of the `bwrap` process outside the sandbox, so a loader var runs code of the agent as the daemon user. | **Fixed.** (a) One check of each final name just before it goes into the launch env (`grants::launch`), and in the grants API for each final name (`422`). A refused name in an old grant row gives a warning event at the start, not a crash. (b) The name rule is an allowlist shape, `^[A-Z][A-Z0-9_]{0,127}$`, and a larger deny set: the loader and C library, `GIT_*`, the shell, the language runtimes, the proxy and CA vars, the harness and account vars, `XDG_*`, `SSH_*`, `TERRARIUM_*`, and the session vars (docs/api.md §5.2, "The name rule"). `GH_TOKEN` stays allowed. (c) No secret value goes to `bwrap`: the sandbox starts the harness through `terrarium exec-env`, which gets the vars from the daemon inside the sandbox (`POST /api/agent/secrets/env`) and replaces itself with the harness. Tests: `generic_env_names_pass_the_name_rule`, `the_name_rule_is_an_allowlist_shape_and_a_deny_set`, `the_launch_env_comes_from_the_daemon_and_follows_the_name_rule`, `exec_env_wraps_the_program_inside_the_sandbox`, `exec_env_adds_the_granted_vars_and_execs`, `secret_grants_reach_the_launch`. |
+| S2 (HIGH) | A project_admin gets global secrets with no grant: a project repo or target names a global secret, and the credential helper, a checkout, an ssh exec, or a display login uses it. | **Fixed: grant required** (8ca3edd). A project object can name a global secret only when the project holds a grant of it, or when the operator, a sysadmin, or a definition file set the object (`credential_admin` on `repos` and `targets`). The daemon checks at save (`403` with the fix) and at each use (refused, with a `secret.refused` warning event). The rows from before the upgrade count as set by an admin. PLAN §16b.6a, docs/api.md §5.2, `tests/global_secret_rule.rs`. |
+| S3 (MEDIUM) | A `use` grant of a token shows the value: the agent calls the credential helper itself. | **Accepted, documented: `use` is `read` for tokens** (8ca3edd). The credential helper must hand the token to git, and the agent runs git. The docs and the grant form say so; only an `ssh_key` stays hidden under `use`. A test asserts the behaviour. The real fix is an HTTPS proxy in the daemon that adds the token. PLAN §16b.3, docs/api.md §5.2. |
+| S4 (MEDIUM) | A project_admin can blind the audit, the events, and the mail of all projects through the global redaction matcher. | **Fixed** (9fa4b78). The redaction keeps the JSON keys and the identifier fields, and a put refuses an identifier or a weak value for a machine secret (`token`, `api_key`, `github_token`). |
+| S5 (LOW) | Redaction is a guess oracle, and it shows the names of secrets in other projects. | **Fixed** (9fa4b78). The label of a match follows the view of the writer or the reader. |
+| S6 (LOW) | Plain values stay on disk outside the sealed store: `private/runner.json` holds the env of each `read` grant (also after a revoke, and in the trash), and `credentials/backup/*-credential-*` holds each moved credential forever. | **Fixed.** The env values never go into the launch spec, so `runner.json` holds none (S1 (c)); a restart after a revoke writes a new file with no value. A move to the trash removes `private/runner.json` (a file of an older daemon can hold values). The daemon removes each `*-credential-*` backup after the trash retention (7 days), at the start and at each prune. Decision: delete, not seal; a sealed backup needs the same key as the store (PLAN §16b.7). Tests: `secret_grants_reach_the_launch` (no value in any file of the agent dir), `trash_and_prune`, `old_credential_backups_are_pruned`. |
+| S7 (LOW) | A project named `global` can exist; its project_admin lists the global secrets. | **Fixed** (9fa4b78). The project name `global` is reserved. |
+| S8 (LOW) | A config import can grant any secret that has a value to any agent. | **Fixed** (9fa4b78). A new or wider imported grant of a secret with a value needs the approval of the operator (`--approve-grants`). |
+| S9 (LOW) | A checkout on a target runs git in a repo that the agent can change, with the token in the env: a planted `core.fsmonitor` or hook reads it. | **Fixed.** `CHECKOUT_SCRIPT` runs each git command with the `-c` overrides of `git.rs` (no hooks, no fsmonitor, no helper from a config, the safe transports only), with `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`, no askpass, a `GIT_SSH_COMMAND` that wins over `core.sshCommand`, and the git env vars that point at another repo unset. Before it touches an existing repo, it checks the key names of `.git/config` against the allowlist of `git::config_allowed` and refuses `.git/commondir`; a key outside the list gives `not_updated` with the key in `note`. The token and the key file go away after the fetch or the clone, before `status` and `merge`. Test: `checkout_script_ignores_a_planted_repo_config` (the script of 23a4ae7 leaks the token to the planted fsmonitor in the same setup). |
+| S10 (LOW) | The ssh-agent has no sign rate limit, and each sign decrypts the key (bcrypt KDF for a key with a passphrase). | **Fixed.** A token bucket for each agent socket: 10 signs a second, a burst of 30. A sign over the limit answers `SSH_AGENT_FAILURE` with no call to the key source, and counts as `limited` in the `secret.use` audit row. The source keeps an opened key for 60 seconds in a cache of that agent only; the grant check stays at each sign, and a revoke removes the kept key at the next sign. A cache, not "decrypt once for each connection": `ssh` and `git` open a new connection for each login, so a cache for each connection does not stop a loop. Tests: `signs_over_the_rate_limit_fail_without_the_source`, `signs_open_the_key_once_in_the_cache_time`, `the_socket_serves_the_grants_and_audits_once_a_minute`. |
+| S11 (INFO) | The redaction matcher is built after the commit; a write in that window stores a value unredacted. | **Fixed** (9fa4b78). The daemon builds the matcher again inside the write lock (`Tx::rebuild_redactor`). |
+| S12 (INFO) | The zeroization is partial (plain `String`s in answers and in the matcher). | **Fixed** (9fa4b78). The answers zeroize, and the docs say what stays. |
+| S13 (INFO) | The ssh-agent dir is bound read-write, and `bind_private` changes the mode through a path that can be a symlink. | **Fixed.** The sandbox binds the dir with `--ro-bind`; `connect()` works on a socket in a read-only bind. `bind_private` opens the bound name with `O_PATH` and `O_NOFOLLOW`, checks that it is a socket, and changes the mode through `/proc/self/fd/<n>`. `agent_keys::serve` refuses a socket dir that is not a real dir. Tests: `the_ssh_agent_socket_works_in_a_read_only_bind` (a real `bwrap` and `ssh-add -l`; a write into the dir fails), `chmod_private_does_not_follow_a_symlink`, `the_ssh_agent_dir_binds_with_its_socket_var`. |
+
+### The choice for S1 (c): `terrarium exec-env`
+
+Four ways can give the env to the harness and not to `bwrap`:
+
+| Way | Result |
+|---|---|
+| `bwrap --setenv NAME VALUE` | Refused: the value is on the argv of `bwrap` (`/proc/<pid>/cmdline`). |
+| `bwrap --args FD` with the `--setenv` args in a pipe or memfd | Not possible with the runner: `portable-pty` closes each file descriptor above 2 before it starts `bwrap`, and it has no hook to keep one. |
+| An env file in the runtime dir, bound into the sandbox | A value in a file again, and a race to remove it. |
+| `terrarium exec-env` asks the daemon over the runner socket | **Chosen.** No value in a file, in an argv, or in the env of `bwrap`. The daemon reads the grants at the request, so a revoke applies at the next start. The CLI is in the sandbox already (hooks, git helper), and the runner socket is up before the harness starts (a request waits for the daemon up to the queue timeout). |
+
+The answer gives the agent nothing that `terrarium secret get` does not
+give it: the agent can call the endpoint itself, and it counts in the same
+rate limit.
+
+### Notes
+
+- **bwrap is not setuid in the image.** The Dockerfile installs the
+  Debian `bubblewrap` package and changes no mode; Debian ships
+  `/usr/bin/bwrap` with mode 0755 and relies on user namespaces (the
+  seccomp profile `docker/seccomp-bwrap.json` allows them). A non-setuid
+  `bwrap` honours `LD_PRELOAD` from its env, which is why S1 (c) keeps the
+  secret vars out of that env. On this host `/usr/bin/bwrap` is 0755 too.
+
+### Residuals
+
+- **Other launch env.** The plan account keys and the subscription API
+  keys of §16 still go into the launch spec, so `runner.json` (0600, in
+  the 0700 private dir that the sandbox never binds) holds them while the
+  agent lives. They are daemon-chosen names, not grant names, so S1 (a)
+  and (b) do not apply to them. A move to the trash removes the file.
+- **An old `runner.json`.** A file that an older daemon wrote stays until
+  the next start of the agent (which writes a new one) or its delete.
+- **The env inside the sandbox.** A `read` grant with an env var shows the
+  value to the agent by design (`/proc/self/environ`, `env`).
+- **Backups for 7 days.** A state backup in the first 7 days after the
+  move can hold the plain values of the moved credentials.
+- **The repo config of a target.** As in `git.rs`, git reads the live
+  `.git/config` at each command. The check runs before the fetch; an
+  edit after the check and before the fetch can still add a key for that
+  one fetch, which runs with the token. The window is short, and the
+  token goes away before the work tree commands.

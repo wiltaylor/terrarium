@@ -3653,10 +3653,35 @@ pub async fn on_agent_stop(
 /// `TERRARIUM_GIT_PASSWORD` for a token (a credential helper of `-c` reads
 /// them; the helper text holds no secret), or `TERRARIUM_GIT_SSH_KEY`
 /// (written to a 0600 temp file for `GIT_SSH_COMMAND`, removed at exit).
+///
+/// The agent can write the repo on the target, so the script treats its
+/// config as hostile (secret manager review S9, the rules of `crate::git`):
+///
+/// - Each git command runs with the `-c` overrides of `crate::git`
+///   (no hooks, no fsmonitor, no helper from a config, only the safe
+///   transports), with `GIT_CONFIG_GLOBAL=/dev/null`,
+///   `GIT_CONFIG_NOSYSTEM=1`, no askpass, and a `GIT_SSH_COMMAND` that wins
+///   over `core.sshCommand`. The env vars that point git at another repo or
+///   config are unset.
+/// - Before it touches an existing repo, the script checks the names in
+///   `.git/config` against the allowlist of `crate::git::config_allowed`
+///   (by name only), and refuses a `.git/commondir`. A key outside the
+///   list stops the update: `not_updated`, with the key in `note`.
+/// - The secret is in the env for the fetch or the clone only. The script
+///   removes it (and the key file) before `status` and `merge`, which can
+///   run filters from the repo config.
 pub const CHECKOUT_SCRIPT: &str = r#"set -eu
 url=$1; dest=$2; branch=$3; depth=$4
 case "$dest" in /*) ;; *) dest="$HOME/work/$dest" ;; esac
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES \
+  GIT_CONFIG GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT GIT_NAMESPACE GIT_CREDENTIAL_HELPER \
+  GIT_TEMPLATE_DIR GIT_EXEC_PATH GIT_EXTERNAL_DIFF GIT_PAGER GIT_EDITOR GIT_PROXY_COMMAND \
+  GIT_SSH GIT_SSH_VARIANT GIT_CEILING_DIRECTORIES GIT_DISCOVERY_ACROSS_FILESYSTEM
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0
+export GIT_ASKPASS=false SSH_ASKPASS=false LC_ALL=C
+export GIT_SSH_COMMAND="ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
 helper=
+keyfile=
 if [ -n "${TERRARIUM_GIT_PASSWORD:-}" ]; then
   helper='!f() { test "$1" = get || exit 0; echo "username=$TERRARIUM_GIT_USERNAME"; echo "password=$TERRARIUM_GIT_PASSWORD"; }; f'
 fi
@@ -3668,22 +3693,62 @@ if [ -n "${TERRARIUM_GIT_SSH_KEY:-}" ]; then
   export GIT_SSH_COMMAND="ssh -i $keyfile -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
 fi
 unset TERRARIUM_GIT_SSH_KEY
-export GIT_TERMINAL_PROMPT=0
+G() {
+  git -c core.hooksPath=/dev/null -c core.fsmonitor=false -c core.untrackedCache=false \
+    -c credential.helper= -c protocol.allow=never -c protocol.https.allow=always \
+    -c protocol.http.allow=always -c protocol.ssh.allow=always -c protocol.file.allow=always \
+    -c protocol.git.allow=never -c protocol.ext.allow=never -c protocol.fd.allow=never \
+    -c protocol.ftp.allow=never -c protocol.ftps.allow=never -c fetch.recurseSubmodules=false \
+    -c submodule.recurse=false -c gc.auto=0 -c maintenance.auto=false \
+    -c merge.verifySignatures=false -c advice.detachedHead=false -c core.pager=cat "$@"
+}
 g() {
-  if [ -n "$helper" ]; then git -c credential.helper= -c "credential.helper=$helper" "$@"; else git "$@"; fi
+  if [ -n "$helper" ]; then G -c "credential.helper=$helper" "$@"; else G "$@"; fi
+}
+forget() {
+  unset TERRARIUM_GIT_PASSWORD TERRARIUM_GIT_USERNAME
+  helper=
+  if [ -n "$keyfile" ]; then rm -f "$keyfile"; fi
+  export GIT_SSH_COMMAND="ssh -o BatchMode=yes"
+}
+check_config() {
+  if [ -e "$dest/.git/commondir" ]; then echo ".git/commondir"; return; fi
+  names=$(git config --file "$dest/.git/config" --name-only --list 2>/dev/null) || { echo ".git/config"; return; }
+  printf '%s\n' "$names" | while IFS= read -r k; do
+    [ -n "$k" ] || continue
+    l=$(printf '%s' "$k" | tr 'A-Z' 'a-z')
+    case "$l" in
+      remote.*:*|remote.*/*) echo "$k"; exit ;;
+      core.repositoryformatversion|core.filemode|core.bare|core.logallrefupdates|core.ignorecase) ;;
+      core.precomposeunicode|core.symlinks|core.autocrlf|core.eol|core.safecrlf|core.quotepath) ;;
+      remote.*.url|remote.*.fetch|remote.*.pushurl|remote.*.push|remote.*.prune|remote.*.tagopt) ;;
+      branch.*.remote|branch.*.merge|branch.*.rebase|branch.*.pushremote|branch.*.description) ;;
+      credential.helper|credential.usehttppath|user.*|advice.*|color.*) ;;
+      push.default|push.autosetupremote|push.followtags|pull.rebase|pull.ff) ;;
+      init.defaultbranch|extensions.objectformat|commit.gpgsign) ;;
+      *) echo "$k"; exit ;;
+    esac
+  done
 }
 note=
 if [ -d "$dest/.git" ]; then
-  before=$(git -C "$dest" rev-parse -q --verify HEAD || true)
-  if [ -n "$branch" ]; then ref=$branch; else ref=$(git -C "$dest" symbolic-ref --short -q HEAD || echo HEAD); fi
-  if [ -n "$depth" ]; then g -C "$dest" fetch --depth "$depth" -- "$url" "$ref"; else g -C "$dest" fetch -- "$url" "$ref"; fi
-  if [ -n "$(git -C "$dest" status --porcelain)" ]; then
-    action=not_updated; note="the work tree has local changes"
-  elif git -C "$dest" merge --ff-only -q FETCH_HEAD >/dev/null 2>&1; then
-    after=$(git -C "$dest" rev-parse -q --verify HEAD || true)
-    if [ "$before" = "$after" ]; then action=up_to_date; else action=updated; fi
+  bad=$(check_config)
+  if [ -n "$bad" ]; then
+    forget
+    action=not_updated; note="the repo config has \`$bad\`, which the checkout does not allow; remove it"
   else
-    action=not_updated; note="the branch has diverged"
+    before=$(G -C "$dest" rev-parse -q --verify HEAD || true)
+    if [ -n "$branch" ]; then ref=$branch; else ref=$(G -C "$dest" symbolic-ref --short -q HEAD || echo HEAD); fi
+    if [ -n "$depth" ]; then g -C "$dest" fetch --depth "$depth" -- "$url" "$ref"; else g -C "$dest" fetch -- "$url" "$ref"; fi
+    forget
+    if [ -n "$(G -C "$dest" status --porcelain)" ]; then
+      action=not_updated; note="the work tree has local changes"
+    elif G -C "$dest" merge --ff-only -q FETCH_HEAD >/dev/null 2>&1; then
+      after=$(G -C "$dest" rev-parse -q --verify HEAD || true)
+      if [ "$before" = "$after" ]; then action=up_to_date; else action=updated; fi
+    else
+      action=not_updated; note="the branch has diverged"
+    fi
   fi
 else
   mkdir -p "$(dirname "$dest")"
@@ -3691,10 +3756,11 @@ else
   if [ -n "$depth" ]; then set -- "$@" --depth "$depth"; fi
   if [ -n "$branch" ]; then set -- "$@" --branch "$branch"; fi
   g clone "$@" -- "$url" "$dest"
+  forget
   action=cloned
 fi
-head=$(git -C "$dest" rev-parse -q --verify HEAD || true)
-cur=$(git -C "$dest" symbolic-ref --short -q HEAD || true)
+head=$(G -C "$dest" rev-parse -q --verify HEAD || true)
+cur=$(G -C "$dest" symbolic-ref --short -q HEAD || true)
 printf 'TERRARIUM_CHECKOUT\taction=%s\thead=%s\tbranch=%s\tpath=%s\tnote=%s\n' "$action" "$head" "$cur" "$dest" "$note"
 "#;
 
@@ -3986,6 +4052,83 @@ mod tests {
             v,
             json!({"action": "cloned", "head": "abc", "branch": "main", "path": "/h/work/r"})
         );
+    }
+
+    /// S9 (secret manager review, 2026-10-29): the agent can write the
+    /// repo config on the target. A planted `core.fsmonitor` or hook must
+    /// not run while the token is in the env of the checkout script.
+    #[test]
+    fn checkout_script_ignores_a_planted_repo_config() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::Command;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(["-c", "commit.gpgsign=false", "-c", "user.name=t"])
+                .args(["-c", "user.email=t@t.invalid"])
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{args:?}: {out:?}");
+        };
+        let origin = root.join("origin");
+        let o = origin.to_str().unwrap();
+        git(&["init", "-q", "-b", "main", o]);
+        git(&["-C", o, "commit", "-q", "--allow-empty", "-m", "one"]);
+        let dest = root.join("dest");
+        let secret = Secret::Token {
+            username: "x-access-token".into(),
+            token: zeroize::Zeroizing::new("ghp_PLANTEDtoken".into()),
+        };
+        let run = || {
+            let url = format!("file://{o}");
+            let c = checkout_cmd(&url, dest.to_str().unwrap(), None, None, Some(&secret)).unwrap();
+            let out = Command::new(&c.argv[0])
+                .args(&c.argv[1..])
+                .env_clear()
+                .env("PATH", std::env::var("PATH").unwrap_or_default())
+                .env("HOME", root)
+                .envs(&c.env)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{out:?}");
+            parse_checkout(&String::from_utf8_lossy(&out.stdout)).unwrap()
+        };
+        assert_eq!(run()["action"], "cloned");
+        // The agent plants an fsmonitor and a hooks dir that write the env.
+        let leak = root.join("leak");
+        let spy = root.join("spy.sh");
+        std::fs::write(&spy, format!("#!/bin/sh\nenv >> {}\n", leak.display())).unwrap();
+        std::fs::set_permissions(&spy, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let hooks = root.join("hooks");
+        std::fs::create_dir(&hooks).unwrap();
+        for h in ["reference-transaction", "post-merge", "post-checkout"] {
+            std::fs::copy(&spy, hooks.join(h)).unwrap();
+        }
+        let d = dest.to_str().unwrap();
+        git(&["-C", d, "config", "core.fsmonitor", spy.to_str().unwrap()]);
+        git(&["-C", d, "config", "core.hooksPath", hooks.to_str().unwrap()]);
+        git(&["-C", o, "commit", "-q", "--allow-empty", "-m", "two"]);
+        let v = run();
+        let leaked = std::fs::read_to_string(&leak).unwrap_or_default();
+        assert!(!leaked.contains("ghp_PLANTED"), "the token leaked: {v}");
+        assert!(!leak.exists(), "a planted program ran: {v}");
+        assert_eq!(v["action"], "not_updated", "{v}");
+        assert!(
+            v["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("core.fsmonitor"),
+            "{v}"
+        );
+        // Without the planted keys the update goes on.
+        git(&["-C", d, "config", "--unset", "core.fsmonitor"]);
+        git(&["-C", d, "config", "--unset", "core.hooksPath"]);
+        assert_eq!(run()["action"], "updated");
+        assert!(!leak.exists());
     }
 
     #[test]

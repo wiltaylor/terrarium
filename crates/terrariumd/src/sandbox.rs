@@ -218,6 +218,11 @@ pub struct AgentLayout {
     /// at `/run/terrarium/ssh-agent`, with `SSH_AUTH_SOCK` on its socket.
     /// `None`: the agent has no `ssh_key` grant.
     pub ssh_agent: Option<PathBuf>,
+    /// Start the program through `terrarium exec-env` (the CLI that the
+    /// sandbox binds): it gets the env vars of the secret grants from the
+    /// daemon inside the sandbox, so no value is in the launch spec or in
+    /// the env of `bwrap` (PLAN §16b.4). Needs [`SandboxConfig::cli`].
+    pub exec_env: bool,
 }
 
 /// One local repo bind: the real directory on the host, and the path of
@@ -416,8 +421,17 @@ impl SandboxConfig {
                 .as_deref()
                 .and_then(|b| resolve(&spec.program).filter(|f| f.starts_with(b)))
                 .map_or(spec.program.clone(), |f| f.display().to_string());
+            let (program, args) = match self.cli.as_deref().filter(|_| layout.exec_env) {
+                Some(cli) => {
+                    let mut a = exec_env_args(program);
+                    a.extend(spec.args.iter().cloned());
+                    (cli.display().to_string(), a)
+                }
+                None => (program, spec.args.clone()),
+            };
             return LaunchSpec {
                 program,
+                args,
                 env,
                 clear_env: true,
                 ..spec
@@ -492,7 +506,9 @@ impl SandboxConfig {
             use crate::secrets::agent_keys::{SANDBOX_DIR, SANDBOX_SOCK, SOCK_NAME};
             // The dir, not the socket file: a new daemon makes a new
             // socket file there, and a running agent sees it.
-            push3(&mut args, "--bind", dir, Path::new(SANDBOX_DIR));
+            // Read-only: connect() works on a socket in a read-only bind,
+            // and the agent cannot put a file or a symlink next to it.
+            push3(&mut args, "--ro-bind", dir, Path::new(SANDBOX_DIR));
             push3(
                 &mut args,
                 "--symlink",
@@ -510,7 +526,13 @@ impl SandboxConfig {
         }
         push2(&mut args, "--chdir", &spec.cwd);
         args.push("--".into());
-        args.push(program);
+        if self.cli.is_some() && layout.exec_env {
+            let cli = Path::new(SANDBOX_BIN_DIR).join("terrarium");
+            args.push(cli.display().to_string());
+            args.extend(exec_env_args(program));
+        } else {
+            args.push(program);
+        }
         args.extend(spec.args);
         LaunchSpec {
             program: self.bwrap.display().to_string(),
@@ -595,6 +617,12 @@ impl SandboxConfig {
         }
         env
     }
+}
+
+/// `exec-env -- <program>`: the args of `terrarium` that start `program`
+/// with the env vars of the secret grants ([`AgentLayout::exec_env`]).
+fn exec_env_args(program: String) -> Vec<String> {
+    vec!["exec-env".to_owned(), "--".to_owned(), program]
 }
 
 /// True for a var that must not pass from the daemon env.
@@ -760,6 +788,7 @@ mod tests {
             accounts: Vec::new(),
             cred_alias: None,
             ssh_agent: None,
+            exec_env: false,
             harness_bin: None,
         }
     }
@@ -862,7 +891,7 @@ TERRARIUM_AGENT=01K8AGENT0000000000000000A TERRARIUM_SOCKET=/run/terrarium/agent
         let line = command_line(&cfg.wrap_with(spec(), &l, env, &|_| None, &resolve));
         assert!(
             line.contains(
-                "--bind /run/t/ssh-agent/01K8AGENT0000000000000000A /run/terrarium/ssh-agent \
+                "--ro-bind /run/t/ssh-agent/01K8AGENT0000000000000000A /run/terrarium/ssh-agent \
                  --symlink /run/terrarium/ssh-agent/agent.sock /run/terrarium/ssh-agent.sock"
             ),
             "{line}"
@@ -1078,6 +1107,7 @@ TERRARIUM_AGENT=01K8AGENT0000000000000000A TERRARIUM_SOCKET=/run/terrarium/agent
             accounts: vec![root.join("max-a/store"), root.join("max-b/store")],
             cred_alias: Some(harness_dir.join("cred")),
             ssh_agent: None,
+            exec_env: false,
             harness_bin: None,
         };
         let script = format!(
@@ -1112,6 +1142,105 @@ TERRARIUM_AGENT=01K8AGENT0000000000000000A TERRARIUM_SOCKET=/run/terrarium/agent
         assert_eq!(lines.last(), Some(&"meta-hidden"), "{text}");
         assert!(text.contains("hidden"), "{text}");
         assert!(!text.contains("max-c\n"), "{text}");
+    }
+
+    /// S1 and S6 (secret manager review, 2026-10-29): with secret env vars
+    /// the program starts through `terrarium exec-env` inside the sandbox,
+    /// so no value is in the env or the argv of `bwrap`.
+    #[test]
+    fn exec_env_wraps_the_program_inside_the_sandbox() {
+        let cfg = config();
+        let mut l = layout();
+        l.exec_env = true;
+        let resolve = |p: &str| (p == "claude").then(|| PathBuf::from("/usr/bin/claude"));
+        let s = spec();
+        let original = s.args.clone();
+        let w = cfg.wrap_with(s, &l, BTreeMap::new(), &|_| None, &resolve);
+        let i = w.args.iter().position(|a| a == "--").unwrap();
+        assert_eq!(
+            &w.args[i + 1..i + 5],
+            [
+                "/opt/terrarium/bin/terrarium",
+                "exec-env",
+                "--",
+                "/usr/bin/claude"
+            ]
+        );
+        assert_eq!(&w.args[i + 5..], original.as_slice());
+        // Mode `none`: the host CLI runs the program.
+        let plain = SandboxConfig {
+            mode: SandboxMode::None,
+            ..config()
+        };
+        let w = plain.wrap_with(spec(), &l, BTreeMap::new(), &|_| None, &resolve);
+        assert_eq!(w.program, "/usr/local/bin/terrarium");
+        assert_eq!(&w.args[..3], ["exec-env", "--", "claude"]);
+        assert_eq!(&w.args[3..], original.as_slice());
+        // No CLI: no wrap (the daemon warns, and sets no var).
+        let bare = SandboxConfig {
+            cli: None,
+            ..config()
+        };
+        let w = bare.wrap_with(spec(), &l, BTreeMap::new(), &|_| None, &resolve);
+        assert!(!w.args.iter().any(|a| a == "exec-env"));
+    }
+
+    /// S13 (secret manager review, 2026-10-29): the ssh-agent dir binds
+    /// read-only. `ssh-add -l` in a real sandbox still connects to the
+    /// socket and lists the key, and the agent cannot write into the dir.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_ssh_agent_socket_works_in_a_read_only_bind() {
+        let cfg = SandboxConfig {
+            bwrap: PathBuf::from("bwrap"),
+            ..SandboxConfig::default()
+        };
+        let Ok(bwrap) = cfg.check() else {
+            eprintln!("skipped: bwrap cannot make a sandbox here");
+            return;
+        };
+        if which("ssh-add", std::env::var("PATH").ok().as_deref()).is_none() {
+            eprintln!("skipped: no ssh-add");
+            return;
+        }
+        let (dir, db, _) = crate::secrets::agent_keys::tests::fixture().await;
+        let a = crate::secrets::grants::tests::AGENT;
+        let run = dir.path().join("run");
+        let h = crate::secrets::agent_keys::serve(db, dir.path().into(), &run, a, "p").unwrap();
+        let mut l = layout();
+        l.agent = a.parse().unwrap();
+        let workspace = dir.path().join("work");
+        std::fs::create_dir_all(&workspace).unwrap();
+        l.workspace = workspace;
+        l.workspace_mount = None;
+        l.harness_dir = dir.path().join("harness");
+        std::fs::create_dir_all(&l.harness_dir).unwrap();
+        l.socket = dir.path().join("agent.sock");
+        std::fs::write(&l.socket, "").unwrap();
+        l.homes = Vec::new();
+        l.overlays = Vec::new();
+        l.ssh_agent = Some(crate::secrets::agent_keys::socket_dir(&run, a));
+        let spec = LaunchSpec::new("/bin/sh", "/home/agent/work")
+            .arg("-c")
+            .arg("ssh-add -l; touch /run/terrarium/ssh-agent/x 2>/dev/null && echo WROTE || echo READONLY");
+        let cfg = SandboxConfig {
+            bwrap,
+            cli: None,
+            tools_dir: None,
+            ..cfg
+        };
+        let env = cfg.child_env(&l, &BTreeMap::new(), &|_| None);
+        let wrapped = cfg.wrap(spec, &l, env);
+        let out = tokio::process::Command::new(&wrapped.program)
+            .args(&wrapped.args)
+            .env_clear()
+            .envs(&wrapped.env)
+            .output()
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(text.contains("global/deploy"), "{text} {out:?}");
+        assert!(text.contains("READONLY"), "{text}");
+        h.shutdown().await;
     }
 
     #[test]

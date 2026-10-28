@@ -4,6 +4,7 @@
 // target, the error sentences, and the reveal timer. No JSX; no value goes
 // into a store or into storage.
 
+import { envNameError } from "../../api/envNames";
 import { ApiError } from "../../api/http";
 import type { Agent, GrantLevel, NewSecret, NewSecretGrant, Secret, SecretKind, SecretPut, Target, TargetKind, TargetTestResult } from "../../api/types";
 
@@ -35,7 +36,7 @@ export const KINDS: Record<SecretKind, KindSpec> = {
     help: "One value. A grant with the level read can put it into an env var.",
     fields: [
       { name: "value", label: "Value", secret: true, required: true, placeholder: "sk-…" },
-      { name: "env", label: "Suggested env var", secret: false, required: false, placeholder: "OPENAI_API_KEY" },
+      { name: "env", label: "Suggested env var", secret: false, required: false, placeholder: "STRIPE_API_KEY" },
     ],
   },
   token: {
@@ -189,16 +190,10 @@ export const TOKEN_USE_NOTE = "git's credential helper hands the token to git, s
 /** An env var puts the value where the agent can print it, so it needs `read`. */
 export const envAllowed = (level: GrantLevel): boolean => level === "read";
 
-const ENV_RE = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
-const RESERVED_ENV = ["PATH", "HOME", "USER", "SHELL", "TERM", "LANG", "TZ", "SSH_AUTH_SOCK"];
-const RESERVED_PREFIX = ["LD_", "LC_", "TERRARIUM_", "GIT_AUTHOR_", "GIT_COMMITTER_", "GIT_CONFIG"];
-
-/** Why an env name is refused, or null. The daemon checks it too (and knows the harness home vars). */
+/** Why an env name is refused, or null (docs/api.md §5.2, "The name rule"). The daemon checks it too, also each `<ENV>_<FIELD>` of a generic secret. */
 export function envError(env: string): string | null {
   if (!env) return null;
-  if (!ENV_RE.test(env)) return "An env var name is a letter or _, then letters, digits, or _.";
-  if (RESERVED_ENV.includes(env) || RESERVED_PREFIX.some((p) => env.startsWith(p))) return `The sandbox sets ${env}.`;
-  return null;
+  return envNameError(env);
 }
 
 export interface GrantForm {

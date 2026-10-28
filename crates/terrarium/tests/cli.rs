@@ -592,6 +592,67 @@ fn agent_mode_tunnels_every_call_over_the_runner_socket() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// PLAN §16b.4, secret manager review S1 and S6: the harness gets the env
+/// vars of its secret grants from `terrarium exec-env` inside the sandbox,
+/// not from the launch spec. A var that the env holds already wins.
+#[test]
+fn exec_env_adds_the_granted_vars_and_execs() {
+    let dir = temp_dir("exec-env");
+    let (socket, seen) = fake_runner(&dir, |p| match (p["method"].as_str(), p["path"].as_str()) {
+        (Some("POST"), Some("/api/agent/secrets/env")) => json!({
+                "status": 200, "headers": {},
+                "body": {"vars": {"DB_URL": "pg://granted", "GH_TOKEN": "ghp_granted"}}}),
+        _ => json!({"status": 404, "headers": {},
+                "body": {"error": {"code": "not_found", "message": "no such API route"}}}),
+    });
+    let o = bin()
+        .env("TERRARIUM_AGENT", "01AGENT")
+        .env("TERRARIUM_SOCKET", &socket)
+        .env("GH_TOKEN", "from-the-harness")
+        .args([
+            "exec-env",
+            "--",
+            "sh",
+            "-c",
+            "echo \"$DB_URL|$GH_TOKEN|$1\"",
+            "sh",
+            "-x",
+        ])
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", text(&o.stderr));
+    assert_eq!(text(&o.stdout), "pg://granted|from-the-harness|-x\n");
+    assert!(
+        seen.lock()
+            .unwrap()
+            .iter()
+            .any(|r| r["params"]["path"] == "/api/agent/secrets/env")
+    );
+    // No daemon: a warning, and the program still starts.
+    let o = bin()
+        .env("TERRARIUM_AGENT", "01AGENT")
+        .env("TERRARIUM_SOCKET", dir.join("gone.sock"))
+        .args(["exec-env", "--", "sh", "-c", "echo \"[$DB_URL]\""])
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", text(&o.stderr));
+    assert_eq!(text(&o.stdout), "[]\n");
+    assert!(
+        text(&o.stderr).contains("are not set"),
+        "{}",
+        text(&o.stderr)
+    );
+    // A program that does not exist: exit 127.
+    let o = bin()
+        .env("TERRARIUM_AGENT", "01AGENT")
+        .env("TERRARIUM_SOCKET", &socket)
+        .args(["exec-env", "--", "/nonexistent/prog"])
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(127));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn hook_stays_quiet_and_exits_zero() {
     let o = bin().args(["hook", "Stop"]).output().unwrap();

@@ -12,6 +12,7 @@
 
 import type { Api } from "../client";
 import type { Agent, CredentialInfo, GrantLevel, NewSecret, RevealedSecret, Secret, SecretGrant, SecretKind, Target, TargetKind, TargetTestReport } from "../types";
+import { envNameError } from "../envNames";
 import { SECRET_KINDS } from "../types";
 import type { MockWorld } from "./data";
 import type { ScheduleCaller } from "./schedules";
@@ -34,9 +35,6 @@ export const GLOBAL = "global";
 const NAME_RE = /^[a-z0-9_-]{1,63}$/;
 const ULID_RE = /^[0-9A-Z]{26}$/;
 const ENV_RE = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
-/** The env names that the sandbox sets (docs/api.md §5.2 "Grants"). */
-const RESERVED_ENV = ["PATH", "HOME", "USER", "SHELL", "TERM", "LANG", "TZ", "SSH_AUTH_SOCK", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "COPILOT_HOME", "PI_CODING_AGENT_DIR"];
-const RESERVED_PREFIX = ["LD_", "LC_", "TERRARIUM_", "GIT_AUTHOR_", "GIT_COMMITTER_", "GIT_CONFIG"];
 
 /** The fields of each kind: the secret ones, and the plain ones (docs/api.md §5.2). `generic` takes any. */
 const KIND_FIELDS: Record<Exclude<SecretKind, "generic">, { secret: string[]; required: string; plain: string[] }> = {
@@ -317,8 +315,8 @@ export function createSecretMock(c: SecretMockContext) {
         const env = body.env || undefined;
         if (env !== undefined) {
           if (level !== "read") fail(422, "invalid", "`env` puts the value into the agent's environment, so it needs the level `read`", { field: "env" });
-          if (!ENV_RE.test(env)) fail(422, "invalid", `\`env\`: \`${env}\` is not a POSIX name`, { field: "env" });
-          if (RESERVED_ENV.includes(env) || RESERVED_PREFIX.some((p) => env.startsWith(p))) fail(422, "invalid", `\`env\`: the sandbox sets \`${env}\``, { field: "env" });
+          const why = envNameError(env);
+          if (why) fail(422, "invalid", `\`env\`: ${why}`, { field: "env" });
         }
         const old = grants.find((g) => g.secret === r.info.id && g.grantee === who.grantee);
         const g: GrantRow = { secret: r.info.id, scope, name, grantee: who.grantee, grantee_label: who.label, level, ...(env ? { env } : {}), created_by: "operator", created_at: c.iso() };

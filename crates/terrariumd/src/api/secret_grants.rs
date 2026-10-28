@@ -9,6 +9,10 @@
 //! - `POST /api/agent/secrets/{name}/get`: one value, for a `read` grant
 //!   only. Each answer writes `secret.get`. At most [`GET_LIMIT`] a
 //!   minute per agent.
+//! - `POST /api/agent/secrets/env`: the env vars of the caller's `read`
+//!   grants, for `terrarium exec-env` at the start of the harness (PLAN
+//!   §16b.4). Each answer writes `secret.env` with the names only. It
+//!   counts in the same limit as a get.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Mutex, OnceLock};
@@ -38,6 +42,7 @@ pub fn routes() -> Router<Shared> {
         )
         .route("/agent/secrets", get(mine))
         .route("/agent/secrets/{name}/get", post(read_value))
+        .route("/agent/secrets/env", post(launch_env))
 }
 
 /// `terrarium secret get` answers at most this many times per agent in
@@ -312,6 +317,55 @@ async fn read_value(
         })
         .await?;
     let mut resp = Json(answer).into_response();
+    resp.headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok(resp)
+}
+
+/// The answer of `POST /api/agent/secrets/env`. `vars` holds values:
+/// never log it.
+#[derive(Serialize)]
+struct EnvAnswer {
+    vars: std::collections::BTreeMap<String, EnvValue>,
+}
+
+/// One value of [`EnvAnswer`]. Zeroed on drop (PLAN §16b.2); the
+/// serialized body is not.
+#[derive(Serialize)]
+struct EnvValue(
+    #[serde(serialize_with = "crate::secrets::serialize_zeroizing")] zeroize::Zeroizing<String>,
+);
+
+/// `POST /api/agent/secrets/env`: the env vars of the caller's `read`
+/// grants with an `env` name ([`grants::launch`]: each final name passed
+/// the name rule). `terrarium exec-env` in the sandbox asks for them just
+/// before it starts the harness, so no value is in the launch spec, the
+/// runner spec file, or the env of `bwrap` (PLAN §16b.4). The answer has
+/// `Cache-Control: no-store`.
+async fn launch_env(State(state): State<Shared>, actor: Actor) -> ApiResult<Response> {
+    let me = policy::agent_secrets(&actor)?.clone();
+    if !rate_ok(&me.id) {
+        return Err(ApiError::new(
+            Code::RateLimited,
+            format!("`secret get` answers at most {GET_LIMIT} times a minute per agent"),
+        ));
+    }
+    let key = secrets::key(&state.state_dir)?;
+    let vars = state
+        .db
+        .write(actor.label(), move |t| {
+            let l = grants::launch(t, &key, &me.id, &me.project)?;
+            let names: Vec<&String> = l.env.keys().collect();
+            t.audit(
+                "secret.env",
+                &format!("agent:{}", me.id),
+                Some(&me.project),
+                json!({"agent": me.id, "names": names}),
+            )?;
+            Ok(l.env.into_iter().map(|(k, v)| (k, EnvValue(v))).collect())
+        })
+        .await?;
+    let mut resp = Json(EnvAnswer { vars }).into_response();
     resp.headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     Ok(resp)

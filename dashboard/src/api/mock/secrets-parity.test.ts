@@ -93,8 +93,8 @@ describe("secrets (docs/api.md §5.2)", () => {
     const g = await api.secrets.grant("global", "github-deploy", { grantee: "project:webshop" });
     expect(g).toEqual({ scope: "global", name: "github-deploy", grantee: "project:webshop", grantee_label: "project:webshop", level: "use", created_by: "operator", created_at: g.created_at });
     const a = api.world.agents.find((x) => x.project === "terrarium")!;
-    const r = await api.secrets.grant("terrarium", "openai", { grantee: `agent:terrarium/${a.name}`, env: "OPENAI_API_KEY" });
-    expect(r).toMatchObject({ grantee: `agent:${a.id}`, grantee_label: `agent:terrarium/${a.name}`, level: "read", env: "OPENAI_API_KEY" });
+    const r = await api.secrets.grant("terrarium", "openai", { grantee: `agent:terrarium/${a.name}`, env: "STRIPE_API_KEY" });
+    expect(r).toMatchObject({ grantee: `agent:${a.id}`, grantee_label: `agent:terrarium/${a.name}`, level: "read", env: "STRIPE_API_KEY" });
     await api.secrets.grant("terrarium", "openai", { grantee: `agent:${a.id}`, level: "read" });
     const list = await api.secrets.grants("terrarium", "openai");
     expect(list).toHaveLength(1);
