@@ -30,6 +30,20 @@
 //!
 //! Redaction is a guard against accidents. It does not find a value that is
 //! changed (base64, reversed, split with spaces).
+//!
+//! # Labels and views
+//!
+//! Each entry has a scope (`None`: the label is public). A [`View`] says
+//! which labels a caller may see. A match of an entry that the view does
+//! not show becomes [`HIDDEN`] (`[secret]`), with no name (PLAN §16b.6).
+//!
+//! # Weak values
+//!
+//! [`judge`] marks a value that looks like an identifier (a ULID, a word
+//! of the daemon's records) or that has low entropy. Such a value matches
+//! too much ordinary text: a matcher with it blinds records. The daemon
+//! refuses some of these values and leaves the others out of the matcher
+//! ([`Redactor::build`] with a `keep` filter).
 
 use std::borrow::Cow;
 use std::collections::HashSet;
@@ -41,6 +55,202 @@ use aho_corasick::{AhoCorasick, MatchKind};
 /// The minimum length in bytes of a pattern. Shorter values are skipped.
 pub const MIN_LEN: usize = 8;
 
+/// The replacement of a match that the [`View`] does not show: no name.
+pub const HIDDEN: &str = "[secret]";
+
+/// A value of this length in bytes or more is judged only as an
+/// identifier, not by its shape or its entropy ([`judge`]).
+pub const STRONG_LEN: usize = 16;
+
+/// The lowest entropy, in bits, of a value shorter than [`STRONG_LEN`].
+/// The estimate is the Shannon entropy of the characters of the value
+/// times its length.
+pub const MIN_BITS: f64 = 28.0;
+
+/// Words of the daemon's records (roles, actors, kinds, field names). A
+/// value equal to one of them (case is not significant) is an identifier
+/// ([`judge`]).
+pub const RECORD_WORDS: &[&str] = &[
+    "operator",
+    "sysadmin",
+    "project_admin",
+    "system",
+    "global",
+    "terrarium",
+    "terrariumd",
+    "password",
+    "passphrase",
+    "secret",
+    "secrets",
+    "secret_fields",
+    "plain_fields",
+    "private_key",
+    "public_key",
+    "authorized_keys",
+    "fingerprint",
+    "grantee",
+    "grantee_label",
+    "username",
+    "localhost",
+    "github_token",
+    "api_key",
+    "ssh_key",
+    "generic",
+    "token",
+    "login",
+    "agent",
+    "project",
+    "created_by",
+    "created_at",
+    "updated_at",
+];
+
+/// Which labels a caller sees (PLAN §16b.6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum View {
+    /// Each label in full: the operator, a sysadmin, the system.
+    All,
+    /// The labels of this scope and the public labels. The others are
+    /// [`HIDDEN`].
+    Scope(String),
+    /// The public labels only.
+    Hidden,
+}
+
+impl View {
+    fn shows(&self, scope: Option<&str>) -> bool {
+        match (self, scope) {
+            (_, None) | (Self::All, _) => true,
+            (Self::Scope(own), Some(s)) => own == s,
+            (Self::Hidden, Some(_)) => false,
+        }
+    }
+}
+
+/// One value of a [`Redactor::build`].
+#[derive(Debug, Clone)]
+pub struct Entry<V> {
+    /// The text in `[secret:<label>]`.
+    pub label: String,
+    /// The scope of the value. `None`: each view sees the label.
+    pub scope: Option<String>,
+    pub value: V,
+}
+
+/// What [`judge`] finds in a value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Judgment {
+    /// Safe to match.
+    Ok,
+    /// Looks like an identifier of the records (a ULID, an actor label, a
+    /// word of [`RECORD_WORDS`]). The text is the reason.
+    Identifier(&'static str),
+    /// Shorter than [`STRONG_LEN`] bytes, and one word or name, or low
+    /// entropy. The text is the reason.
+    Weak(&'static str),
+}
+
+/// True for a ULID: 26 characters of Crockford base32 (no I, L, O, U),
+/// in either case.
+pub fn is_ulid(s: &str) -> bool {
+    s.len() == 26
+        && s.bytes().all(|b| {
+            let u = b.to_ascii_uppercase();
+            u.is_ascii_digit()
+                || (u.is_ascii_uppercase() && !matches!(u, b'I' | b'L' | b'O' | b'U'))
+        })
+}
+
+/// The Shannon entropy of the characters of `s`, times its length in
+/// characters: an estimate of the bits of a value.
+#[allow(clippy::cast_precision_loss)]
+pub fn entropy_bits(s: &str) -> f64 {
+    let mut counts: std::collections::HashMap<char, usize> = std::collections::HashMap::new();
+    let mut n = 0usize;
+    for c in s.chars() {
+        *counts.entry(c).or_default() += 1;
+        n += 1;
+    }
+    if n == 0 {
+        return 0.0;
+    }
+    let total = n as f64;
+    let per_char: f64 = counts
+        .values()
+        .map(|&k| {
+            let p = k as f64 / total;
+            -p * p.log2()
+        })
+        .sum();
+    per_char * total
+}
+
+/// Judge one pattern (a value, or one line of a value). A pattern shorter
+/// than [`MIN_LEN`] bytes is `Ok`: the matcher skips it anyway.
+pub fn judge(pattern: &[u8]) -> Judgment {
+    let Ok(s) = std::str::from_utf8(pattern) else {
+        return Judgment::Ok;
+    };
+    let s = s.trim();
+    if s.len() < MIN_LEN {
+        return Judgment::Ok;
+    }
+    // An actor label (`agent:<ULID>`, `schedule:<ULID>`) or a bare ULID.
+    let id = match s.rsplit_once(':') {
+        Some((prefix, id)) if prefix.chars().all(|c| c.is_ascii_lowercase() || c == '_') => id,
+        _ => s,
+    };
+    if is_ulid(id) {
+        return Judgment::Identifier("it is a ULID, the form of the IDs in the records");
+    }
+    if RECORD_WORDS.iter().any(|w| w.eq_ignore_ascii_case(s)) {
+        return Judgment::Identifier("it is a word of the daemon's records");
+    }
+    if s.len() >= STRONG_LEN {
+        return Judgment::Ok;
+    }
+    if s.chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "._:/-".contains(c))
+    {
+        return Judgment::Weak("it is a lower-case word, name, or number");
+    }
+    if s.chars().all(|c| c.is_ascii_alphabetic()) {
+        return Judgment::Weak("it is one word of letters only");
+    }
+    if entropy_bits(s) < MIN_BITS {
+        return Judgment::Weak("it has low entropy");
+    }
+    Judgment::Ok
+}
+
+/// The patterns of a value before the JSON escape: the value, and for a
+/// value with more than one line, each trimmed line of [`MIN_LEN`] bytes
+/// or more that is not a PEM armor line. A value shorter than [`MIN_LEN`]
+/// bytes gives no pattern of its own.
+pub fn raw_patterns(value: &[u8]) -> Vec<&[u8]> {
+    let mut out = Vec::new();
+    if value.len() >= MIN_LEN {
+        out.push(value);
+    }
+    if value.contains(&b'\n') {
+        for line in value.split(|&b| b == b'\n') {
+            let line = line.trim_ascii();
+            if line.len() >= MIN_LEN && !is_armor(line) {
+                out.push(line);
+            }
+        }
+    }
+    out
+}
+
+/// The replacement of one pattern.
+#[derive(Clone)]
+struct Replacement {
+    /// `[secret:<label>]`.
+    full: Arc<str>,
+    scope: Option<Arc<str>>,
+}
+
 /// An error from [`Redactor::new`].
 #[derive(Debug, thiserror::Error)]
 #[error("cannot build the redaction matcher: {0}")]
@@ -51,45 +261,55 @@ pub struct RedactorError(String);
 pub struct Redactor {
     /// `None` when there is no pattern: the fast path.
     matcher: Option<AhoCorasick>,
-    /// The replacement text of each pattern, by pattern index.
-    replacements: Vec<Arc<str>>,
+    /// The replacement of each pattern, by pattern index.
+    replacements: Vec<Replacement>,
 }
 
 impl Redactor {
-    /// Builds a matcher from `(label, value)` pairs.
+    /// Builds a matcher from `(label, value)` pairs. Each label is public
+    /// (no scope), and each pattern is kept.
     ///
     /// A value shorter than [`MIN_LEN`] bytes is skipped. When two entries
     /// make the same pattern, the first entry gives the label.
     pub fn new<V: AsRef<[u8]>>(
         entries: impl IntoIterator<Item = (String, V)>,
     ) -> Result<Self, RedactorError> {
+        Self::build(
+            entries.into_iter().map(|(label, value)| Entry {
+                label,
+                scope: None,
+                value,
+            }),
+            |_| true,
+        )
+    }
+
+    /// Builds a matcher from entries. `keep` gets each raw pattern
+    /// ([`raw_patterns`]). A pattern that `keep` refuses is not matched,
+    /// and its JSON-escaped form is not matched either.
+    pub fn build<V: AsRef<[u8]>>(
+        entries: impl IntoIterator<Item = Entry<V>>,
+        keep: impl Fn(&[u8]) -> bool,
+    ) -> Result<Self, RedactorError> {
         let mut patterns: Vec<Vec<u8>> = Vec::new();
-        let mut replacements: Vec<Arc<str>> = Vec::new();
+        let mut replacements: Vec<Replacement> = Vec::new();
         let mut seen: HashSet<Vec<u8>> = HashSet::new();
 
-        for (label, value) in entries {
-            let value = value.as_ref();
-            let replacement: Arc<str> = Arc::from(format!("[secret:{label}]"));
-            let mut add = |pattern: Vec<u8>| {
-                if pattern.len() >= MIN_LEN && seen.insert(pattern.clone()) {
-                    patterns.push(pattern);
-                    replacements.push(Arc::clone(&replacement));
-                }
+        for entry in entries {
+            let value = entry.value.as_ref();
+            let replacement = Replacement {
+                full: Arc::from(format!("[secret:{}]", entry.label)),
+                scope: entry.scope.map(Arc::from),
             };
-
-            add(value.to_vec());
-            if let Some(escaped) = json_escaped(value) {
-                add(escaped);
-            }
-            if value.contains(&b'\n') {
-                for line in value.split(|&b| b == b'\n') {
-                    let line = line.trim_ascii();
-                    if line.len() < MIN_LEN || is_armor(line) {
-                        continue;
-                    }
-                    add(line.to_vec());
-                    if let Some(escaped) = json_escaped(line) {
-                        add(escaped);
+            for raw in raw_patterns(value) {
+                if !keep(raw) {
+                    continue;
+                }
+                let escaped = json_escaped(raw);
+                for pattern in std::iter::once(raw.to_vec()).chain(escaped) {
+                    if pattern.len() >= MIN_LEN && seen.insert(pattern.clone()) {
+                        patterns.push(pattern);
+                        replacements.push(replacement.clone());
                     }
                 }
             }
@@ -127,18 +347,35 @@ impl Redactor {
         self.replacements.len()
     }
 
-    /// Replaces each secret in `s` with `[secret:<label>]`.
+    /// The replacement of pattern `i` for `view`.
+    fn replacement(&self, i: usize, view: &View) -> &str {
+        let r = &self.replacements[i];
+        if view.shows(r.scope.as_deref()) {
+            &r.full
+        } else {
+            HIDDEN
+        }
+    }
+
+    /// Replaces each secret in `s` with `[secret:<label>]`, each label in
+    /// full ([`View::All`]).
     ///
     /// Returns the input borrowed (no allocation) when nothing matches. A
     /// match that starts or ends inside a UTF-8 character (possible only for
     /// a value that is not valid UTF-8) is widened to the whole character, so
     /// the result is always valid UTF-8 and no part of the secret stays.
     pub fn redact_str<'a>(&self, s: &'a str) -> Cow<'a, str> {
+        self.redact_str_as(s, &View::All).0
+    }
+
+    /// [`Self::redact_str`] for a view, with the number of matches.
+    pub fn redact_str_as<'a>(&self, s: &'a str, view: &View) -> (Cow<'a, str>, usize) {
         let Some(matcher) = &self.matcher else {
-            return Cow::Borrowed(s);
+            return (Cow::Borrowed(s), 0);
         };
         let mut out: Option<String> = None;
         let mut last = 0;
+        let mut n = 0;
         for m in matcher.find_iter(s) {
             let mut start = m.start();
             while !s.is_char_boundary(start) {
@@ -154,14 +391,15 @@ impl Redactor {
             }
             let buf = out.get_or_insert_with(|| String::with_capacity(s.len()));
             buf.push_str(&s[last..start]);
-            buf.push_str(&self.replacements[m.pattern().as_usize()]);
+            buf.push_str(self.replacement(m.pattern().as_usize(), view));
             last = end;
+            n += 1;
         }
         match out {
-            None => Cow::Borrowed(s),
+            None => (Cow::Borrowed(s), 0),
             Some(mut buf) => {
                 buf.push_str(&s[last..]);
-                Cow::Owned(buf)
+                (Cow::Owned(buf), n)
             }
         }
     }
@@ -169,6 +407,11 @@ impl Redactor {
     /// Replaces each secret in `b` with `[secret:<label>]`. Returns the
     /// input borrowed (no allocation) when nothing matches.
     pub fn redact_bytes<'a>(&self, b: &'a [u8]) -> Cow<'a, [u8]> {
+        self.redact_bytes_as(b, &View::All)
+    }
+
+    /// [`Self::redact_bytes`] for a view.
+    pub fn redact_bytes_as<'a>(&self, b: &'a [u8], view: &View) -> Cow<'a, [u8]> {
         let Some(matcher) = &self.matcher else {
             return Cow::Borrowed(b);
         };
@@ -177,7 +420,7 @@ impl Redactor {
         for m in matcher.find_iter(b) {
             let buf = out.get_or_insert_with(|| Vec::with_capacity(b.len()));
             buf.extend_from_slice(&b[last..m.start()]);
-            buf.extend_from_slice(self.replacements[m.pattern().as_usize()].as_bytes());
+            buf.extend_from_slice(self.replacement(m.pattern().as_usize(), view).as_bytes());
             last = m.end();
         }
         match out {
@@ -192,9 +435,15 @@ impl Redactor {
     /// Redacts an owned string. Returns the same allocation when nothing
     /// matches.
     pub fn redact_string(&self, s: String) -> String {
-        match self.redact_str(&s) {
-            Cow::Borrowed(_) => s,
-            Cow::Owned(r) => r,
+        self.redact_string_as(s, &View::All).0
+    }
+
+    /// [`Self::redact_string`] for a view, with the number of matches.
+    /// Returns the same allocation when nothing matches.
+    pub fn redact_string_as(&self, s: String, view: &View) -> (String, usize) {
+        match self.redact_str_as(&s, view) {
+            (Cow::Borrowed(_), _) => (s, 0),
+            (Cow::Owned(r), n) => (r, n),
         }
     }
 }
@@ -494,5 +743,108 @@ Bw==\n\
         for t in threads {
             t.join().unwrap();
         }
+    }
+
+    fn scoped() -> Redactor {
+        Redactor::build(
+            [
+                Entry {
+                    label: "gh".to_owned(),
+                    scope: Some("global".to_owned()),
+                    value: "ghp_globalvalue123",
+                },
+                Entry {
+                    label: "p/db".to_owned(),
+                    scope: Some("p".to_owned()),
+                    value: "p-project-Value-77",
+                },
+                Entry {
+                    label: "q/db".to_owned(),
+                    scope: Some("q".to_owned()),
+                    value: "q-project-Value-88",
+                },
+                Entry {
+                    label: "open".to_owned(),
+                    scope: None,
+                    value: "public-label-Value-99",
+                },
+            ],
+            |_| true,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_view_hides_the_names_of_other_scopes() {
+        let red = scoped();
+        let text = "ghp_globalvalue123 p-project-Value-77 q-project-Value-88 public-label-Value-99";
+        let (all, n) = red.redact_str_as(text, &View::All);
+        assert_eq!(all, "[secret:gh] [secret:p/db] [secret:q/db] [secret:open]");
+        assert_eq!(n, 4);
+        let (p, n) = red.redact_str_as(text, &View::Scope("p".to_owned()));
+        assert_eq!(p, "[secret] [secret:p/db] [secret] [secret:open]");
+        assert_eq!(n, 4);
+        let (none, _) = red.redact_str_as(text, &View::Hidden);
+        assert_eq!(none, "[secret] [secret] [secret] [secret:open]");
+        assert_eq!(
+            red.redact_bytes_as(b"x q-project-Value-88", &View::Scope("p".to_owned()))
+                .as_ref(),
+            b"x [secret]"
+        );
+        let (s, n) = red.redact_string_as("nothing".to_owned(), &View::Hidden);
+        assert_eq!((s.as_str(), n), ("nothing", 0));
+        // The default is the full view.
+        assert_eq!(red.redact_str("q-project-Value-88"), "[secret:q/db]");
+    }
+
+    #[test]
+    fn keep_leaves_patterns_out() {
+        let value = "line-one-is-strong-XyZ\nweakline\n";
+        let red = Redactor::build(
+            [Entry {
+                label: "k".to_owned(),
+                scope: None,
+                value,
+            }],
+            |p| judge(p) == Judgment::Ok,
+        )
+        .unwrap();
+        assert_eq!(red.redact_str("weakline"), "weakline");
+        assert_eq!(red.redact_str("line-one-is-strong-XyZ"), "[secret:k]");
+    }
+
+    #[test]
+    fn judge_marks_identifiers_and_weak_values() {
+        use Judgment::{Identifier, Ok as Fine, Weak};
+        let ok = |s: &str| judge(s.as_bytes()) == Fine;
+        let id = |s: &str| matches!(judge(s.as_bytes()), Identifier(_));
+        let weak = |s: &str| matches!(judge(s.as_bytes()), Weak(_));
+        // Identifiers.
+        assert!(id("01K8AGENT0000000000000000A"));
+        assert!(id("01k8agent0000000000000000a"));
+        assert!(id("agent:01K8AGENT0000000000000000A"));
+        assert!(id("operator"));
+        assert!(id("Grantee_Label"));
+        assert!(id("authorized_keys"));
+        // Weak: short words, names, numbers, low entropy.
+        assert!(weak("hostname"));
+        assert!(weak("web-dev-01"));
+        assert!(weak("12345678"));
+        assert!(weak("agent:p/w"));
+        assert!(weak("Hostname"));
+        assert!(weak("aaaaBBBB1"));
+        // Short values are not judged: the matcher skips them.
+        assert!(ok("abc"));
+        // Real tokens and passwords pass.
+        assert!(ok("ghp_R3alLook1ngT0ken"));
+        assert!(ok("Tr0ub4dor&3"));
+        assert!(ok("x7#Kp2!qZ"));
+        assert!(ok("correct horse battery staple"));
+        assert!(ok("sk-PROJECT-redact-me"));
+        // 16 bytes or more: only the identifier checks.
+        assert!(ok("aaaaaaaaaaaaaaaa"));
+        // A TOTP seed (base32, 32 characters) is not a ULID.
+        assert!(ok("JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"));
+        assert!(entropy_bits("") < 1.0);
     }
 }

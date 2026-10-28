@@ -59,6 +59,15 @@ use crate::api::Shared;
 use crate::error::{ApiError, ApiResult};
 use crate::store::check_name;
 
+/// Serialize a zeroizing string as a plain JSON string (an answer that
+/// holds a value).
+pub fn serialize_zeroizing<S: serde::Serializer>(
+    v: &Zeroizing<String>,
+    s: S,
+) -> Result<S::Ok, S::Error> {
+    s.serialize_str(v)
+}
+
 /// The scope of a global secret. A project named `global` cannot have
 /// project secrets.
 pub const GLOBAL: &str = "global";
@@ -94,6 +103,11 @@ pub struct SecretInfo {
     pub created_at: String,
     pub updated_at: String,
     pub created_by: String,
+    /// The warnings of a put: a weak login password, passphrase, or
+    /// `generic` field that redaction does not hide (PLAN §16b.6). Only in
+    /// the answer of a put.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// A secret with its secret fields open. Daemon use only. `Debug` shows no
@@ -390,6 +404,7 @@ fn row_info(r: &rusqlite::Row<'_>) -> rusqlite::Result<SecretInfo> {
         updated_at: r.get(7)?,
         created_by: r.get(8)?,
         has_value: r.get(9)?,
+        warnings: Vec::new(),
     })
 }
 
@@ -411,6 +426,8 @@ pub struct NewSecret<'a> {
     /// The actor label.
     pub by: &'a str,
     /// False only for the migration of the old files ([`kinds::split`]).
+    /// The migration also skips the value check ([`redact::check_value`]):
+    /// the matcher leaves a weak or identifier value out.
     pub strict: bool,
 }
 
@@ -425,6 +442,13 @@ pub fn put(
     check_name("secret", s.name)?;
     check_scope(conn, s.scope)?;
     let split = kinds::split(s.kind, s.input, s.strict)?;
+    let mut warnings = Vec::new();
+    if s.strict {
+        let record_names = redact::record_names(conn)?;
+        for (field, value) in &split.secret {
+            warnings.extend(redact::check_value(&record_names, s.kind, field, value)?);
+        }
+    }
     let names = kinds::secret_names(&split.secret);
     let now = crate::db::now();
     let existing = get(conn, s.scope, s.name)?;
@@ -476,8 +500,9 @@ pub fn put(
             params![id, s.kind.as_str(), plain, names_json, sealed, now],
         )?;
     }
-    let info = get(conn, s.scope, s.name)?
+    let mut info = get(conn, s.scope, s.name)?
         .ok_or_else(|| ApiError::internal("the secret is gone after the write"))?;
+    info.warnings = warnings;
     Ok((info, created))
 }
 
@@ -976,7 +1001,7 @@ pub(crate) mod tests {
             GLOBAL,
             "deploy",
             Kind::Token,
-            json!({"fields": {"value": "ghp_s3cret", "username": "bot"}}),
+            json!({"fields": {"value": "ghp_s3cretT0kenValue", "username": "bot"}}),
         )
         .unwrap();
         assert!(created);
@@ -997,11 +1022,11 @@ pub(crate) mod tests {
         assert!(!list.contains("ghp_s3cret"), "{list}");
         // Open gives it back.
         let o = open(&c, &k, GLOBAL, "deploy").unwrap().unwrap();
-        assert_eq!(o.values["value"].as_str(), "ghp_s3cret");
+        assert_eq!(o.values["value"].as_str(), "ghp_s3cretT0kenValue");
         assert!(!format!("{o:?}").contains("ghp_s3cret"));
         let s = o.to_secret().unwrap();
         assert!(
-            matches!(&s, Secret::Token { username, token } if username == "bot" && token.as_str() == "ghp_s3cret")
+            matches!(&s, Secret::Token { username, token } if username == "bot" && token.as_str() == "ghp_s3cretT0kenValue")
         );
         assert!(!format!("{s:?}").contains("ghp_s3cret"));
         // Another key does not open it.

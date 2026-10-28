@@ -1818,6 +1818,10 @@ pub enum ConfigCmd {
         /// Apply the `export/` changes as fleets
         #[arg(long)]
         apply: bool,
+        /// With --apply: also make the new and wider grants of secrets
+        /// that have a value (the operator only). Without it, they wait
+        #[arg(long, requires = "apply")]
+        approve_grants: bool,
     },
     /// Commit the local changes (with the secret scan), fetch, merge, and
     /// push. A conflict stops it, with the files listed
@@ -1827,6 +1831,10 @@ pub enum ConfigCmd {
         /// Apply the `export/` changes as fleets
         #[arg(long)]
         apply: bool,
+        /// With --apply: also make the new and wider grants of secrets
+        /// that have a value (the operator only). Without it, they wait
+        #[arg(long, requires = "apply")]
+        approve_grants: bool,
     },
     /// Leave a merge that stopped on a conflict (no local commit is lost)
     Abort,

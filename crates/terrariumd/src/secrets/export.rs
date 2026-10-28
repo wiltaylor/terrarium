@@ -46,6 +46,12 @@
 //! - The grants of each secret in the file match the file. A grant to an
 //!   agent or a project that does not exist yet is skipped with a warning;
 //!   the next import adds it.
+//! - A new grant, or a wider one (`use` to `read`, a new or changed `env`),
+//!   of a secret that has a value waits for the operator (S8): the plan
+//!   shows it with `"approval": "needed"`, and an apply holds it
+//!   (`"approval": "held"`) unless the operator approves the grants
+//!   ([`apply`] with `approve`). A grant of a placeholder applies: it
+//!   gives nothing until the operator sets the value.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -237,7 +243,19 @@ pub struct Change {
     pub secret: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub grantee: Option<String>,
+    /// A new or wider grant of a secret with a value (S8): `needed` in a
+    /// plan, `held` when an apply did not make it, `approved` when the
+    /// operator approved it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approval: Option<String>,
 }
+
+/// The `approval` of a grant that waits for the operator, in a plan.
+pub const APPROVAL_NEEDED: &str = "needed";
+/// The `approval` of a grant that an apply did not make.
+pub const APPROVAL_HELD: &str = "held";
+/// The `approval` of a grant that the operator approved.
+pub const APPROVAL_GIVEN: &str = "approved";
 
 /// What an import does, or did.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -272,6 +290,9 @@ enum Op {
         grantee: String,
         level: Level,
         env: Option<String>,
+        /// A new or wider grant of a secret with a value: the operator
+        /// approves it (S8).
+        approval: bool,
     },
     Revoke {
         scope: String,
@@ -294,7 +315,15 @@ impl Plan {
             action: action.to_owned(),
             secret: format!("{scope}/{name}"),
             grantee,
+            approval: None,
         });
+    }
+
+    /// True when the plan has a grant that waits for the operator.
+    pub fn needs_approval(&self) -> bool {
+        self.ops
+            .iter()
+            .any(|op| matches!(op, Op::Grant { approval: true, .. }))
     }
 
     fn warn(&mut self, m: String) {
@@ -580,10 +609,18 @@ fn plan_grants(
                 continue;
             }
         }
-        let same = stored
-            .get(&key)
-            .is_some_and(|s| s.level == level && s.env == g.env);
+        let old = stored.get(&key);
+        let same = old.is_some_and(|s| s.level == level && s.env == g.env);
         if !same {
+            // A grant of a value: new, or wider (S8).
+            let wider = match old {
+                None => true,
+                Some(s) => {
+                    (s.level == Level::Use && level == Level::Read)
+                        || (g.env.is_some() && g.env != s.env)
+                }
+            };
+            let approval = wider && cur.is_some_and(|c| c.has_value);
             p.push(
                 Op::Grant {
                     scope: scope.to_owned(),
@@ -591,12 +628,16 @@ fn plan_grants(
                     grantee: key,
                     level,
                     env: g.env.clone(),
+                    approval,
                 },
                 "grant",
                 scope,
                 name,
                 Some(grantee.label()),
             );
+            if approval && let Some(c) = p.report.changes.last_mut() {
+                c.approval = Some(APPROVAL_NEEDED.to_owned());
+            }
         }
     }
     for (key, g) in stored {
@@ -626,9 +667,15 @@ fn get_info(conn: &Connection, scope: &str, name: &str) -> ApiResult<SecretInfo>
 /// (`secret.put`, `secret.delete`, `secret.grant`, `secret.revoke`, with
 /// `"source": "config"`). `by` is the actor label. The caller builds the
 /// redaction matcher again after it (`super::redact::rebuild`).
-pub fn apply(t: &crate::db::Tx<'_>, plan: &Plan, by: &str) -> ApiResult<()> {
+///
+/// A new or wider grant of a secret with a value runs only with
+/// `approve` (the operator approves it, S8). Without it, the grant does
+/// not change, and its change in the answer has `"approval": "held"`. The
+/// answer is the report of the plan with the approvals.
+pub fn apply(t: &crate::db::Tx<'_>, plan: Plan, by: &str, approve: bool) -> ApiResult<Report> {
     let now = crate::db::now();
-    for op in &plan.ops {
+    let Plan { ops, mut report } = plan;
+    for (i, op) in ops.iter().enumerate() {
         match op {
             Op::Create {
                 scope,
@@ -718,7 +765,21 @@ pub fn apply(t: &crate::db::Tx<'_>, plan: &Plan, by: &str) -> ApiResult<()> {
                 grantee,
                 level,
                 env,
+                approval,
             } => {
+                if *approval {
+                    let mark = if approve {
+                        APPROVAL_GIVEN
+                    } else {
+                        APPROVAL_HELD
+                    };
+                    if let Some(c) = report.changes.get_mut(i) {
+                        c.approval = Some(mark.to_owned());
+                    }
+                    if !approve {
+                        continue;
+                    }
+                }
                 let info = get_info(t, scope, name)?;
                 let g = grants::parse_grantee(t, grantee)?;
                 let (grant, created) = grants::put(
@@ -739,7 +800,7 @@ pub fn apply(t: &crate::db::Tx<'_>, plan: &Plan, by: &str) -> ApiResult<()> {
                         "scope": scope, "name": name, "kind": info.kind,
                         "grantee": grant.grantee, "grantee_label": grant.grantee_label,
                         "level": grant.level, "env": grant.env, "created": created,
-                        "source": "config",
+                        "source": "config", "approved": *approval,
                     }),
                 )?;
             }
@@ -757,7 +818,7 @@ pub fn apply(t: &crate::db::Tx<'_>, plan: &Plan, by: &str) -> ApiResult<()> {
             }
         }
     }
-    Ok(())
+    Ok(report)
 }
 
 #[cfg(test)]
@@ -855,9 +916,9 @@ mod tests {
         let t = c.transaction().unwrap();
         let tx = crate::db::Tx::for_test(t, "operator");
         let plan = plan(&tx, files, &[]).unwrap();
-        apply(&tx, &plan, "operator").unwrap();
+        let report = apply(&tx, plan, "operator", true).unwrap();
         tx.commit_for_test().unwrap();
-        plan.report
+        report
     }
 
     fn row_sealed(c: &Connection, scope: &str, name: &str) -> Option<Vec<u8>> {
@@ -1087,5 +1148,116 @@ mod tests {
         .unwrap();
         let e = crate::secrets::require(&c, dir.path(), None, "box").unwrap_err();
         assert!(e.message.contains("no value yet"), "{}", e.message);
+    }
+
+    fn run_with(c: &mut Connection, files: &[(String, String)], approve: bool) -> Report {
+        let t = c.transaction().unwrap();
+        let tx = crate::db::Tx::for_test(t, "operator");
+        let plan = plan(&tx, files, &[]).unwrap();
+        let report = apply(&tx, plan, "operator", approve).unwrap();
+        tx.commit_for_test().unwrap();
+        report
+    }
+
+    fn with_approval<'a>(r: &'a Report, approval: &str) -> Vec<(&'a str, &'a str)> {
+        r.changes
+            .iter()
+            .filter(|x| x.approval.as_deref() == Some(approval))
+            .map(|x| (x.secret.as_str(), x.grantee.as_deref().unwrap_or_default()))
+            .collect()
+    }
+
+    fn grant_rows(c: &Connection, scope: &str, name: &str) -> Vec<(String, Level, Option<String>)> {
+        let info = crate::secrets::get(c, scope, name).unwrap().unwrap();
+        grants::list(c, &info)
+            .unwrap()
+            .into_iter()
+            .map(|g| (g.grantee_label, g.level, g.env))
+            .collect()
+    }
+
+    /// S8: a config import does not grant a value by itself. A new or a
+    /// wider grant of a secret with a value waits for the operator; a
+    /// grant of a placeholder applies.
+    #[test]
+    fn an_import_holds_new_and_wider_grants_of_a_secret_with_a_value() {
+        let mut c = db();
+        let k = MasterKey::generate();
+        let gh = secret(
+            &c,
+            &k,
+            GLOBAL,
+            "gh",
+            Kind::GithubToken,
+            json!({"fields": {"value": github_token(), "host": "github.com"}}),
+        );
+        grant(&c, &gh, "project:q", Some(Level::Use), None).unwrap();
+        let file = "version = 1\nscope = \"global\"\n\n\
+                    [[secret]]\nname = \"gh\"\nkind = \"github_token\"\n\n\
+                    [secret.fields]\nhost = \"github.com\"\n\n\
+                    [[secret.grant]]\ngrantee = \"agent:p/a\"\nlevel = \"read\"\n\
+                    env = \"GH_TOKEN\"\n\n\
+                    [[secret.grant]]\ngrantee = \"project:q\"\nlevel = \"read\"\n\n\
+                    [[secret]]\nname = \"new\"\nkind = \"token\"\n\n\
+                    [[secret.grant]]\ngrantee = \"agent:p/a\"\nlevel = \"read\"\n\
+                    env = \"NEW_TOKEN\"\n"
+            .to_owned();
+        let files = vec![(path_of(GLOBAL), file)];
+        let wait = [("global/gh", "agent:p/a"), ("global/gh", "project:q")];
+
+        // The plan shows the grants that wait.
+        let p = plan(&c, &files, &[]).unwrap();
+        assert!(p.needs_approval());
+        assert_eq!(with_approval(&p.report, APPROVAL_NEEDED), wait);
+
+        // An apply without the approval holds them. The grant of the
+        // placeholder applies: it gives nothing.
+        let r = run_with(&mut c, &files, false);
+        assert_eq!(with_approval(&r, APPROVAL_HELD), wait, "{r:?}");
+        assert_eq!(
+            grant_rows(&c, GLOBAL, "gh"),
+            [("project:q".to_owned(), Level::Use, None)]
+        );
+        assert_eq!(
+            grant_rows(&c, GLOBAL, "new"),
+            [(
+                "agent:p/a".to_owned(),
+                Level::Read,
+                Some("NEW_TOKEN".to_owned())
+            )]
+        );
+
+        // The operator approves them.
+        let r = run_with(&mut c, &files, true);
+        assert_eq!(with_approval(&r, APPROVAL_GIVEN), wait, "{r:?}");
+        assert_eq!(
+            grant_rows(&c, GLOBAL, "gh"),
+            [
+                (
+                    "agent:p/a".to_owned(),
+                    Level::Read,
+                    Some("GH_TOKEN".to_owned())
+                ),
+                ("project:q".to_owned(), Level::Read, None),
+            ]
+        );
+        let approved: i64 = c
+            .query_row(
+                "SELECT count(*) FROM audit WHERE action = 'secret.grant'
+                 AND json_extract(detail, '$.approved') = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(approved, 2);
+
+        // A narrower grant needs no approval.
+        let narrow = "version = 1\nscope = \"global\"\n\n\
+                      [[secret]]\nname = \"gh\"\nkind = \"github_token\"\n\n\
+                      [secret.fields]\nhost = \"github.com\"\n\n\
+                      [[secret.grant]]\ngrantee = \"project:q\"\nlevel = \"use\"\n"
+            .to_owned();
+        let p = plan(&c, &[(path_of(GLOBAL), narrow)], &[]).unwrap();
+        assert!(!p.needs_approval(), "{:?}", p.report);
     }
 }

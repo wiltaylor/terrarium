@@ -412,10 +412,21 @@ pub struct HelperQuery {
     pub path: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+/// The answer of the credential helper. The password is zeroed on drop
+/// (PLAN §16b.2); the serialized body is not.
+#[derive(Clone, Serialize)]
 pub struct HelperAnswer {
     pub username: String,
-    pub password: String,
+    #[serde(serialize_with = "crate::secrets::serialize_zeroizing")]
+    pub password: zeroize::Zeroizing<String>,
+}
+
+impl std::fmt::Debug for HelperAnswer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HelperAnswer")
+            .field("username", &self.username)
+            .finish_non_exhaustive()
+    }
 }
 
 /// A sliding window per agent.
@@ -487,7 +498,7 @@ async fn credential_helper(
         };
         return Ok(Json(HelperAnswer {
             username,
-            password: token.to_string(),
+            password: token,
         }));
     };
     let name = repo.credential.clone().unwrap_or_default();
@@ -507,7 +518,7 @@ async fn credential_helper(
         .await?;
     Ok(Json(HelperAnswer {
         username,
-        password: token.to_string(),
+        password: token,
     }))
 }
 

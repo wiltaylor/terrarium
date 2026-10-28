@@ -17,6 +17,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use terrarium_core::redact::View;
 use terrarium_core::transcript::{Block, Origin};
 use terrarium_core::{Agent, AgentStatus, HarnessId};
 use tokio::sync::broadcast::error::RecvError;
@@ -104,6 +105,7 @@ async fn sessions(
         .await?;
     let running = live(&state, &a.agent).await;
     let redactor = state.db.redactor().get();
+    let view = crate::secrets::redact::view_of(&actor);
     let mut items = Vec::with_capacity(rows.items.len());
     for s in rows.items {
         let (transcript, sum) = match locate_session(&state, &a.agent, &s).await {
@@ -115,7 +117,7 @@ async fn sessions(
             session: s,
             transcript,
             blocks: sum.blocks,
-            title: sum.title.map(|t| redactor.redact_string(t)),
+            title: sum.title.map(|t| redactor.redact_string_as(t, &view).0),
             active,
         });
     }
@@ -166,16 +168,17 @@ async fn annotate(state: &Shared, agent: &str, blocks: &mut [Block]) {
     }
 }
 
-/// Redact the blocks of a page or a stream frame (PLAN §16b.6). The
-/// harness writes the session file, so the daemon redacts at read time,
-/// after [`annotate`] (it matches the text that the daemon typed).
-fn redact_blocks(state: &Shared, blocks: &mut [Block]) {
+/// Redact the blocks of a page or a stream frame for the reader's view
+/// (PLAN §16b.6). The harness writes the session file, so the daemon
+/// redacts at read time, after [`annotate`] (it matches the text that the
+/// daemon typed).
+fn redact_blocks(state: &Shared, view: &View, blocks: &mut [Block]) {
     let r = state.db.redactor().get();
     if r.is_empty() {
         return;
     }
     for b in blocks {
-        crate::secrets::redact::redact_block(&r, b);
+        crate::secrets::redact::redact_block(&r, view, b);
     }
 }
 
@@ -251,6 +254,7 @@ async fn transcript(
         loc,
         active,
         &q,
+        &crate::secrets::redact::view_of(&actor),
     )
     .await?;
     Ok(Json(body))
@@ -260,6 +264,7 @@ async fn transcript(
 /// `/api/agents/{id}/sessions/{s}/transcript` and
 /// `/api/sessions/{id}/transcript`, so a filter of the blocks (such as a
 /// redaction) covers both.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn transcript_page(
     state: &Shared,
     agent: &str,
@@ -268,6 +273,7 @@ pub(super) async fn transcript_page(
     loc: Option<Located>,
     active: bool,
     q: &TranscriptQuery,
+    view: &View,
 ) -> ApiResult<Value> {
     let after = q.after.unwrap_or(0);
     let limit = q.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
@@ -285,7 +291,7 @@ pub(super) async fn transcript_page(
         b.session = session.to_owned();
     }
     annotate(state, agent, &mut blocks).await;
-    redact_blocks(state, &mut blocks);
+    redact_blocks(state, view, &mut blocks);
     let next_after = blocks.last().map_or(after, |b| b.seq);
     let harness: HarnessId = loc.as_ref().map_or(default_harness, |l| l.harness);
     Ok(json!({
@@ -306,6 +312,8 @@ struct StreamQuery {
 /// The state of one transcript stream.
 struct Streamer {
     state: Shared,
+    /// The labels that the reader sees (PLAN §16b.6).
+    view: View,
     agent: Agent,
     row: Session,
     loc: Option<Located>,
@@ -385,7 +393,7 @@ impl Streamer {
                     b.session.clone_from(&self.row.id);
                 }
                 annotate(&self.state, &self.agent.id.to_string(), &mut blocks).await;
-                redact_blocks(&self.state, &mut blocks);
+                redact_blocks(&self.state, &self.view, &mut blocks);
                 for (new, b) in flags.into_iter().zip(blocks) {
                     if new {
                         self.last_seq = self.last_seq.max(b.seq);
@@ -457,6 +465,7 @@ async fn stream(
     let init = Streamer {
         hub: state.db.hub().subscribe(),
         state: Arc::clone(&state),
+        view: crate::secrets::redact::view_of(&actor),
         agent: a.agent.clone(),
         row,
         loc,

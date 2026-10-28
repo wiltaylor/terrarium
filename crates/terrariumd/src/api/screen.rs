@@ -68,7 +68,8 @@ async fn screen(
         plain_text(&snap)
     };
     // The snapshot is redacted (PLAN §16b.6); the live PTY stream is not.
-    let text = state.db.redactor().get().redact_string(text);
+    let view = crate::secrets::redact::view_of(&actor);
+    let text = state.db.redactor().get().redact_string_as(text, &view).0;
     Ok(Json(json!({
         "agent": format!("{}/{}", a.agent.project, a.agent.name),
         "agent_id": a.agent.id,

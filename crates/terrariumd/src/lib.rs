@@ -205,6 +205,15 @@ pub async fn start_with_usage(
     secrets::migrate::run_at_start(&state).await;
     // The redaction matcher (PLAN §16b.6), from the store as it is now.
     secrets::redact::rebuild(&state).await;
+    // A project named `global` from before the name was reserved (S7): it
+    // stays, but it has no secrets of its own.
+    if let Ok(true) = state.db.read_now(store::projects::has_reserved_name) {
+        warn!(
+            "project `global` has a reserved name: its project_admin cannot manage the global \
+             secrets, and it has no project secrets; rename it (make a new project and move \
+             the agents)"
+        );
+    }
 
     let mut tasks = Vec::new();
     tasks.push(spawn_pump(state.clone()));

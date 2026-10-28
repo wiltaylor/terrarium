@@ -191,12 +191,14 @@ struct SecretsImport {
 
 /// Plan, or run, the import of the secrets files of the export. A run
 /// writes the store in one transaction, then builds the redaction matcher
-/// again.
+/// again. A new or wider grant of a secret with a value runs only with
+/// `approve` (the operator, S8); else the report shows it as held.
 async fn import_secrets(
     state: &Shared,
     actor: &Actor,
     r: &ConfigRepo,
     apply: bool,
+    approve: bool,
 ) -> ApiResult<SecretsReport> {
     let (files, projects) = blocking(r.clone(), |r| {
         Ok((r.secrets_in_repo(), r.exported_projects()))
@@ -213,8 +215,7 @@ async fn import_secrets(
         .db
         .write(actor.label(), move |t| {
             let plan = secrets_export::plan(t, &files, &projects)?;
-            secrets_export::apply(t, &plan, &by)?;
-            Ok(plan.report)
+            secrets_export::apply(t, plan, &by, approve)
         })
         .await?;
     if !report.changes.is_empty() {
@@ -265,12 +266,18 @@ async fn apply_export(
     actor: &Actor,
     r: &ConfigRepo,
     files: Vec<(String, String)>,
+    approve: bool,
 ) -> (Vec<ExportPlan>, SecretsImport, bool) {
     let mut secrets = SecretsImport::default();
-    let mut changes = Vec::new();
+    let mut changes: Vec<secrets_export::Change> = Vec::new();
     let mut run = |res: ApiResult<SecretsReport>, s: &mut SecretsImport| match res {
         Ok(rep) => {
-            changes.extend(rep.changes.clone());
+            // A held grant comes back in each pass: show it once.
+            for c in &rep.changes {
+                if !changes.contains(c) {
+                    changes.push(c.clone());
+                }
+            }
             s.report = rep;
             true
         }
@@ -279,9 +286,15 @@ async fn apply_export(
             false
         }
     };
-    let mut ok = run(import_secrets(state, actor, r, true).await, &mut secrets);
+    let mut ok = run(
+        import_secrets(state, actor, r, true, approve).await,
+        &mut secrets,
+    );
     let (mut rows, failed) = apply_fleets(state, actor, files.clone()).await;
-    ok &= run(import_secrets(state, actor, r, true).await, &mut secrets);
+    ok &= run(
+        import_secrets(state, actor, r, true, approve).await,
+        &mut secrets,
+    );
     let mut failed = failed;
     if failed {
         let again: Vec<(String, String)> = files
@@ -295,10 +308,33 @@ async fn apply_export(
             }
         }
         failed = still;
-        ok &= run(import_secrets(state, actor, r, true).await, &mut secrets);
+        ok &= run(
+            import_secrets(state, actor, r, true, approve).await,
+            &mut secrets,
+        );
     }
     secrets.report.changes = changes;
     (rows, secrets, failed || !ok)
+}
+
+/// True when the report holds a grant that waits for the operator.
+fn holds_grants(report: &SecretsReport) -> bool {
+    report
+        .changes
+        .iter()
+        .any(|c| c.approval.as_deref() == Some(secrets_export::APPROVAL_HELD))
+}
+
+/// `approve_grants` is for the operator only: a sysadmin agent cannot
+/// approve the grants of a config import (S8).
+fn check_approve(actor: &Actor, approve: bool) -> ApiResult<()> {
+    if approve && !matches!(actor, Actor::Operator) {
+        return Err(ApiError::forbidden(
+            "`approve_grants` is for the operator only: an agent cannot approve the grants of \
+             a config import",
+        ));
+    }
+    Ok(())
 }
 
 /// After a merge: plan (or apply) the export files when `export/`
@@ -309,6 +345,7 @@ async fn export_plans(
     r: &ConfigRepo,
     merged: &Merged,
     apply: bool,
+    approve: bool,
 ) -> ApiResult<(Vec<ExportPlan>, Option<SecretsImport>)> {
     let changed = merged
         .changed
@@ -319,8 +356,11 @@ async fn export_plans(
     }
     let files = blocking(r.clone(), |r| Ok(r.export_in_repo())).await?;
     if apply {
-        let (rows, secrets, failed) = apply_export(state, actor, r, files).await;
-        blocking(r.clone(), move |r| r.set_export_pending(failed)).await?;
+        let (rows, secrets, failed) = apply_export(state, actor, r, files, approve).await;
+        // A held grant keeps the export pending: the next `pull --apply
+        // --approve-grants` plans it again.
+        let pending = failed || holds_grants(&secrets.report);
+        blocking(r.clone(), move |r| r.set_export_pending(pending)).await?;
         return Ok((rows, Some(secrets)));
     }
     let mut out = Vec::new();
@@ -342,7 +382,7 @@ async fn export_plans(
         };
         out.push(row);
     }
-    let secrets = match import_secrets(state, actor, r, false).await {
+    let secrets = match import_secrets(state, actor, r, false, false).await {
         Ok(report) => SecretsImport {
             report,
             error: None,
@@ -363,6 +403,10 @@ struct PullBody {
     /// their plans, and they wait.
     #[serde(default)]
     apply: bool,
+    /// With `apply`: make the new and wider grants of secrets that have a
+    /// value (S8). The operator only.
+    #[serde(default)]
+    approve_grants: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -399,6 +443,7 @@ async fn pull(
 ) -> ApiResult<Json<PullResult>> {
     allow(&actor, "pulling the config repo")?;
     let b: PullBody = body_or_default(&body)?;
+    check_approve(&actor, b.approve_grants)?;
     let r = state.config_repo.get()?;
     let _busy = state.config_repo.busy.lock().await;
     let merged = blocking(r.clone(), |r| {
@@ -409,7 +454,8 @@ async fn pull(
     if !merged.conflicts.is_empty() {
         return Err(conflict_error(&merged));
     }
-    let (export, secrets) = export_plans(&state, &actor, &r, &merged, b.apply).await?;
+    let (export, secrets) =
+        export_plans(&state, &actor, &r, &merged, b.apply, b.approve_grants).await?;
     audit(
         &state,
         &actor,
@@ -445,6 +491,9 @@ struct SyncBody {
     message: Option<String>,
     #[serde(default)]
     apply: bool,
+    /// As in a pull (S8). The operator only.
+    #[serde(default)]
+    approve_grants: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -477,7 +526,9 @@ pub(crate) async fn run_sync(state: &Shared, actor: &Actor, b: SyncBodyIn) -> Ap
         return Err(conflict_error(&merged));
     }
     let pushed = blocking(r.clone(), ConfigRepo::push).await?;
-    let (export, secrets) = export_plans(state, actor, &r, &merged, b.apply).await?;
+    check_approve(actor, b.approve_grants)?;
+    let (export, secrets) =
+        export_plans(state, actor, &r, &merged, b.apply, b.approve_grants).await?;
     audit(
         state,
         actor,
@@ -499,6 +550,7 @@ pub(crate) async fn run_sync(state: &Shared, actor: &Actor, b: SyncBodyIn) -> Ap
 pub(crate) struct SyncBodyIn {
     pub message: Option<String>,
     pub apply: bool,
+    pub approve_grants: bool,
 }
 
 async fn sync(
@@ -514,6 +566,7 @@ async fn sync(
         SyncBodyIn {
             message: b.message,
             apply: b.apply,
+            approve_grants: b.approve_grants,
         },
     )
     .await

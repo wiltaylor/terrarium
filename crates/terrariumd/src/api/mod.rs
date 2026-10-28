@@ -235,14 +235,8 @@ fn routes(state: Shared, serve_artifacts: bool, host_connect: bool) -> Router {
         .route("/events/latest", get(streams::latest))
         .merge(projects::routes())
         .merge(repos::routes())
-        .merge(
-            secrets::routes()
-                .merge(secrets_generate::routes())
-                .route_layer(middleware::from_fn_with_state(
-                    state.clone(),
-                    crate::secrets::redact::after_change,
-                )),
-        )
+        .merge(secrets::routes())
+        .merge(secrets_generate::routes())
         .merge(secret_grants::routes())
         .merge(agents::routes())
         .merge(attachments::routes())

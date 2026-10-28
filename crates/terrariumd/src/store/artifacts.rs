@@ -436,6 +436,7 @@ pub fn store_blob(
     ctx: &ArtifactCtx,
     u: &Upload,
     redactor: &terrarium_core::redact::Redactor,
+    view: &terrarium_core::redact::View,
 ) -> ApiResult<StoredBlob> {
     let size = u.data.len() as u64;
     if size > ctx.limits.max_file_bytes {
@@ -457,7 +458,7 @@ pub fn store_blob(
         "file" => {
             let content_type = sniff(&u.name, &u.data);
             let data = if redactable(&content_type) {
-                redactor.redact_bytes(&u.data)
+                redactor.redact_bytes_as(&u.data, view)
             } else {
                 std::borrow::Cow::Borrowed(u.data.as_slice())
             };

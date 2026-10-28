@@ -751,13 +751,7 @@ async fn api_key(
     }
     let source = exists.as_ref().map(|s| s.source.clone());
     let dir = state.state_dir.clone();
-    let (n, k) = (name.clone(), key.clone());
-    tokio::task::spawn_blocking(move || login::store_key(&dir, &n, &k))
-        .await
-        .map_err(|e| ApiError::internal(format!("key task failed: {e}")))?
-        .map_err(|e| ApiError::internal(format!("cannot store the key: {e}")))?;
-    // The new key joins the redaction matcher (PLAN §16b.6, S9).
-    crate::secrets::redact::rebuild(&state).await;
+    let k = key.clone();
     let (n, provider, base_url, models) = (
         name.clone(),
         key.provider.clone(),
@@ -767,6 +761,12 @@ async fn api_key(
     state
         .db
         .write(actor.label(), move |t| {
+            // The key file, then the matcher, in the write: the new key
+            // joins the redaction matcher before any other write (PLAN
+            // §16b.6, S9 and S11).
+            login::store_key(&dir, &n, &k)
+                .map_err(|e| ApiError::internal(format!("cannot store the key: {e}")))?;
+            t.rebuild_redactor(&dir);
             if let Some(plan) = key_plan {
                 // Z.ai: Claude Code and pi. Moonshot: pi only. No probe in
                 // the definition: the read gives the default probe of the

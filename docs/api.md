@@ -914,8 +914,10 @@ sysadmin or the operator. A project secret needs a project_admin of that
 project, a sysadmin, or the operator. A member gets `403`. A list with no
 `?scope=` shows each secret for the operator and a sysadmin, and the
 secrets of its own project for a project_admin. A scope that is not
-`global` and not a project is `404`. A project named `global` cannot have
-project secrets. A project delete deletes the secrets of the project.
+`global` and not a project is `404`. No project can have the name
+`global`: a create is `422`. A project named `global` from before has no
+project secrets, and a list by its project_admin is `403`. A project
+delete deletes the secrets of the project.
 
 The name is unique in its scope (1-63 of `a-z`, `0-9`, `-`, `_`). A
 repo, a target, or the config repo remote names a secret by its name in
@@ -971,6 +973,32 @@ A plain field is 1 to 1024 bytes with no control characters. A secret
 field is 1 to 64 KiB. A field that the kind does not have is `422
 invalid`. A bad value is `422 invalid`, and the message never holds the
 value.
+
+**Values that redaction cannot use** (PLAN §16b.6). A put (`POST`, `PUT`,
+`/api/credentials`) checks each secret field, and each line of 8 bytes or
+more of it:
+
+- A value that looks like an identifier is `422 invalid`, for each kind:
+  a ULID, an actor label (`agent:<ULID>`), a word of the records
+  (`operator`, `sysadmin`, `grantee_label`, a kind or field name), or a
+  name of this instance (a project, an agent, `project/agent`, a repo, a
+  host, a target, a subscription, a schedule, a template, an event
+  source, a secret).
+- A weak value is shorter than 16 bytes, and is one lower-case word,
+  name, or number (`a-z`, `0-9`, `._:/-`), or one word of letters only,
+  or has less than 28 bits of entropy. A weak `value` of an `api_key`, a
+  `token`, or a `github_token` is `422 invalid`. A weak `password` of a
+  `login`, `passphrase` of an `ssh_key`, or field of a `generic` is
+  stored. The answer then has `warnings` (a list of texts), and the
+  daemon does not redact this value.
+
+```
+PUT /api/secrets/ops/win
+{"kind":"login","fields":{"username":"bob","password":"summer2024"}}
+
+201
+{...,"name":"win","kind":"login",...,"warnings":["the value of `password` is weak (it is a lower-case word, name, or number): it is stored, but redaction does not hide it in records, because a weak value matches ordinary text"]}
+```
 
 An `ssh_key` is a private key in the OpenSSH format (with or without a
 passphrase), or in PEM with no passphrase: PKCS#1 RSA, PKCS#8 (RSA,
@@ -1230,9 +1258,32 @@ with `[secret:<label>]`. The label of a global secret is its name
 - The matcher also finds the JSON-escaped form of a value. It finds each
   line of 8 bytes or more of a value with more than one line (an SSH key),
   except the PEM armor lines.
-- The daemon builds the matcher at the start, and again after each write
-  call of `/api/secrets` and `/api/credentials`, each project delete, and
-  each stored subscription key.
+- The matcher leaves out a value (or a line) that looks like an
+  identifier, that is a name of this instance, or that is weak (see
+  "Values that redaction cannot use" above). This covers the secrets that
+  the store had before these checks.
+- A put, a generate, and a stored subscription key build the matcher in
+  their own write, before the commit. No other write sees the new value
+  with the old matcher. A delete of a secret, a project delete, and the
+  delete of a subscription build it after the write.
+- **Labels by view.** The label shows the secret name only to a caller
+  who may see it. Others see `[secret]`. A record that an actor writes
+  uses the view of the writer: the operator and a sysadmin agent see each
+  name; another agent sees the names of the secrets of its own project,
+  and `[secret]` for a global secret, a subscription key, or a secret of
+  another project; `system`, a trigger, and an event source get
+  `[secret]`. A text that the daemon redacts when it shows it (a
+  transcript, a screen, an upload) uses the view of the reader. The log
+  of a process wait uses the view of its project.
+- **JSON records.** In an event, a trigger payload, and an audit detail,
+  the daemon redacts string values only. Object keys stay. The value of
+  an identifier key stays too: `id`, `ids`, `actor`, `agent`, `agents`,
+  `project`, `projects`, `kind`, `grantee`, `grantee_label`, `scope`,
+  `name`, `by`, `created_by`, `from`, `to`, `level`, `action`, `target`,
+  `schedule`, `run`, `event`, `session`, `card`, `thread`,
+  `subscription`, `harness`, `status`, `state`, and each key that ends in
+  `_id`, `_ids`, or `_name`. An audit detail with a redacted match gets
+  `"redacted": <the number of matches>`.
 
 The daemon redacts these records before it writes them, so the database
 never holds a known value: mail (subject and body), questions and notices
@@ -1252,7 +1303,16 @@ A record that the daemon stored before a secret existed keeps its text.
 The live terminal stream (`GET /api/agents/{id}/pty`) goes to the
 operator only and is not redacted. Redaction is a guard against
 accidents. It does not find a value that an agent changed (for example,
-base64).
+base64). Redaction is also a guess oracle: an agent that writes a guess
+and reads it back learns that the guess is a stored value, also when the
+label is `[secret]`.
+
+**Zeroization.** The daemon zeroes the opened secret fields, the parsed
+body of a secret put, and the value in the answer of `POST
+/api/repos/credential` and of `secret get` when it drops them. It does
+not zero the request bytes, the buffers of the JSON parser, the
+serialized body of an answer, or the matcher. The matcher holds each
+value for the life of the daemon.
 
 **`/api/credentials`.** This alias stays for one release. It makes and
 lists global secrets in the old shapes of §5.1. `kind` is `token`,
@@ -5464,9 +5524,9 @@ A merge conflict is `409 conflict` with `details.conflicts` (the paths).
 | `GET /api/config/diff?path=` | | `200 {"diff"}`: the unified diff of the work tree against the last commit (new files in full); `path` limits it to one file |
 | `GET /api/config/log?limit=` | | `200 [{"commit","author","at","subject"}]`, newest first; `limit` default 20, at most 500 |
 | `POST /api/config/commit` | `{"message", "export"?: true, "force_export"?: false}` | `200 {"commit","files","export"}`. `commit` is `null` when nothing changed. `export` lists the export files written first. `422` on a scan finding |
-| `POST /api/config/pull` | `{"apply"?: false}` | `200 {"fetched","updated","changed","conflicts","export","secrets"?}`; `409` on a conflict |
+| `POST /api/config/pull` | `{"apply"?: false, "approve_grants"?: false}` | `200 {"fetched","updated","changed","conflicts","export","secrets"?}`; `409` on a conflict; `403` when an agent gives `approve_grants` |
 | `POST /api/config/push` | | `200 {"pushed"}`; `409` when the remote has commits that this repo does not have |
-| `POST /api/config/sync` | `{"message"?, "apply"?: false}` | `200 {"committed","fetched","updated","changed","conflicts","pushed","export","secrets"?}`; `422` on a scan finding, `409` on a conflict |
+| `POST /api/config/sync` | `{"message"?, "apply"?: false, "approve_grants"?: false}` | `200 {"committed","fetched","updated","changed","conflicts","pushed","export","secrets"?}`; `422` on a scan finding, `409` on a conflict; `403` when an agent gives `approve_grants` |
 | `POST /api/config/abort` | | `200 {"aborted":true}`: leave a merge that waits; `409` when none waits |
 | `PUT /api/config/remote` | `{"url", "credential"?, "branch"?: "main"}` | `200` status. Needs a sysadmin or the operator (credential rights) |
 | `DELETE /api/config/remote` | | `200` status |
@@ -5541,6 +5601,16 @@ A merge conflict is `409 conflict` with `details.conflicts` (the paths).
   - makes the grants of each secret in the file match the file. A grant
     to an agent or a project that does not exist yet is skipped with a
     warning, and the next import adds it;
+  - does not make a new or wider grant of a secret that has a value
+    unless the operator approves it (PLAN §16b.5). Wider is `use` to
+    `read`, or a new or changed `env`. A plan shows such a grant with
+    `"approval": "needed"`. An apply makes it only with
+    `"approve_grants": true`, which only the operator can give (`403` for
+    an agent). Without it, the change has `"approval": "held"`, the grant
+    does not change, and `export_pending` stays set, so the next pull
+    plans it again. An approved grant has `"approval": "approved"`, and
+    its audit row has `"approved": true`. A grant of a placeholder, a
+    narrower grant, and a revoke apply with no approval;
   - writes the audit rows of §5.2 (`secret.put`, `secret.delete`,
     `secret.grant`, `secret.revoke`) with `"source": "config"`, and then
     builds the redaction matcher again.
@@ -5550,13 +5620,16 @@ A merge conflict is `409 conflict` with `details.conflicts` (the paths).
 
   ```json
   {"changes":[{"action":"create","secret":"global/gh"},
-              {"action":"grant","secret":"global/gh","grantee":"agent:web/lead"}],
+              {"action":"grant","secret":"global/gh","grantee":"agent:web/lead"},
+              {"action":"grant","secret":"global/db","grantee":"agent:web/lead",
+               "approval":"held"}],
    "warnings":["secret `web/db` has a value and is not in the export; the import keeps it"]}
   ```
 
   `action` is `create` (a placeholder), `update` (the plain fields),
-  `delete` (a placeholder), `grant`, or `revoke`. `error` shows when the
-  import did not run.
+  `delete` (a placeholder), `grant`, or `revoke`. `approval` is on a
+  grant that needs the operator only: `needed`, `held`, or `approved`.
+  `error` shows when the import did not run.
 - **Push.** `git push <url> HEAD:refs/heads/<branch>`. Never forced.
 - **Sync.** Commit (with the export and the scan), pull, push.
 - **Conflict.** The merge stops, and the repo waits in it with conflict

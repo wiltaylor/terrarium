@@ -888,7 +888,7 @@ pub(crate) mod tests {
             GLOBAL,
             "x",
             Kind::ApiKey,
-            json!({"fields": {"value": "global-x"}}),
+            json!({"fields": {"value": "global-X-Value-1"}}),
         );
         let p = secret(
             &c,
@@ -896,7 +896,7 @@ pub(crate) mod tests {
             "p",
             "x",
             Kind::ApiKey,
-            json!({"fields": {"value": "project-x"}}),
+            json!({"fields": {"value": "project-X-Value-1"}}),
         );
         let h = secret(
             &c,
@@ -925,7 +925,7 @@ pub(crate) mod tests {
         assert!(effective(&c, OTHER, "q").unwrap().is_empty());
         // The env at start: the read grants, and GH_TOKEN for the github_token.
         let l = launch(&c, &k, AGENT, "p").unwrap();
-        assert_eq!(l.env["X_GLOBAL"].as_str(), "global-x");
+        assert_eq!(l.env["X_GLOBAL"].as_str(), "global-X-Value-1");
         assert_eq!(l.env[GH_TOKEN].as_str(), "ghp_x");
         assert_eq!(l.env.len(), 2);
         assert_eq!(l.git_hosts, ["github.example"]);

@@ -85,6 +85,12 @@ fn visible_scope(actor: &Actor) -> ApiResult<Option<String>> {
     match actor {
         Actor::Operator => Ok(None),
         Actor::Agent(a) if a.is_sysadmin() => Ok(None),
+        // A project named `global` from before the reserved name (S7):
+        // its scope is the global scope, which needs sysadmin.
+        Actor::Agent(a) if a.project == GLOBAL => Err(ApiError::forbidden(
+            "project `global` has a reserved name: its secrets are the global secrets, and \
+             listing them needs sysadmin",
+        )),
         Actor::Agent(a) if a.is_admin_of(&a.project) => Ok(Some(a.project.clone())),
         Actor::Agent(_) => Err(ApiError::forbidden(
             "listing secrets needs project_admin, sysadmin, or the operator",
@@ -127,7 +133,8 @@ async fn show(
 }
 
 /// Store a secret and write its `secret.put` audit row, in one
-/// transaction.
+/// transaction. The transaction builds the redaction matcher again before
+/// its commit (PLAN §16b.6, S11).
 async fn store(
     state: &Shared,
     actor: &Actor,
@@ -140,9 +147,11 @@ async fn store(
     policy::manage_secrets(actor, &scope)?;
     let key = secrets::key(&state.state_dir)?;
     let by = actor.label();
+    let dir = state.state_dir.clone();
     state
         .db
         .write(actor.label(), move |t| {
+            t.rebuild_redactor(&dir);
             let (info, created) = secrets::put(
                 t,
                 &key,
@@ -164,6 +173,7 @@ async fn store(
                     "scope": scope, "name": name, "kind": kind, "created": created,
                     "plain_fields": info.fields.keys().collect::<Vec<_>>(),
                     "secret_fields": info.secret_fields,
+                    "warnings": info.warnings,
                 }),
             )?;
             Ok((info, created))
@@ -249,7 +259,10 @@ async fn delete_one(
             Ok(true)
         })
         .await?;
+    // A delete only shrinks the matcher: until this rebuild, the old one
+    // redacts more, never less (PLAN §16b.6).
     if gone {
+        crate::secrets::redact::rebuild(state).await;
         Ok(())
     } else {
         Err(ApiError::not_found("no such secret"))
@@ -457,4 +470,32 @@ async fn delete_credential(
             _ => e,
         })?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use crate::actor::AgentActor;
+    use terrarium_core::Role;
+
+    fn admin_of(project: &str) -> Actor {
+        Actor::Agent(AgentActor {
+            id: "01K8AGENT0000000000000000A".into(),
+            name: "lead".into(),
+            project: project.into(),
+            roles: vec![Role::ProjectAdmin],
+            policy: Default::default(),
+        })
+    }
+
+    /// S7: the project_admin of a project named `global` (made before the
+    /// name was reserved) does not list the global secrets.
+    #[test]
+    fn a_project_named_global_does_not_list_the_global_secrets() {
+        assert_eq!(visible_scope(&admin_of("web")).unwrap(), Some("web".into()));
+        let e = visible_scope(&admin_of(GLOBAL)).unwrap_err();
+        assert_eq!(e.code, crate::error::Code::Forbidden);
+        assert!(policy::manage_secrets(&admin_of(GLOBAL), GLOBAL).is_err());
+    }
 }

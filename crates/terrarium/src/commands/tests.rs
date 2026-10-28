@@ -5328,7 +5328,9 @@ async fn admin_config_commands_map_onto_the_config_api() {
         "plan": {"summary": {"create": 1, "update": 0, "unchanged": 2},
         "entries": [{"action": "create", "kind": "agent", "key": "p/w1"}]}}],
         "secrets": {"changes": [{"action": "create", "secret": "global/gh"},
-                                {"action": "grant", "secret": "global/gh", "grantee": "agent:p/w1"}],
+                                {"action": "grant", "secret": "global/gh", "grantee": "agent:p/w1"},
+                                {"action": "grant", "secret": "global/db", "grantee": "agent:p/w1",
+                                 "approval": "needed"}],
                     "warnings": ["secret `p/db` has a value and is not in the export; the import keeps it"]}});
     let out = ok(
         false,
@@ -5338,10 +5340,16 @@ async fn admin_config_commands_map_onto_the_config_api() {
             Post,
             "/api/config/pull",
             vec![],
-            Some(json!({"apply": false})),
+            Some(json!({"apply": false, "approve_grants": false})),
         )],
     )
     .await;
+    assert!(
+        out.contains(
+            "secrets: grant   global/db agent:p/w1 (needs the operator: --apply --approve-grants)"
+        ),
+        "{out}"
+    );
     assert!(
         out.contains("plan 1 create, 0 update, 2 unchanged (apply with --apply)"),
         "{out}"
@@ -5355,6 +5363,24 @@ async fn admin_config_commands_map_onto_the_config_api() {
     assert!(out.contains("secrets: warning: secret `p/db`"), "{out}");
     ok(
         false,
+        &["admin", "config", "pull", "--apply", "--approve-grants"],
+        vec![(
+            200,
+            json!({"fetched": true, "updated": false, "changed": [], "conflicts": [],
+                   "export": [], "secrets": {"changes": [{"action": "grant",
+                   "secret": "global/db", "grantee": "agent:p/w1", "approval": "approved"}],
+                   "warnings": []}}),
+        )],
+        vec![(
+            Post,
+            "/api/config/pull",
+            vec![],
+            Some(json!({"apply": true, "approve_grants": true})),
+        )],
+    )
+    .await;
+    ok(
+        false,
         &["admin", "config", "sync", "-m", "s", "--apply"],
         vec![(
             200,
@@ -5365,7 +5391,7 @@ async fn admin_config_commands_map_onto_the_config_api() {
             Post,
             "/api/config/sync",
             vec![],
-            Some(json!({"message": "s", "apply": true})),
+            Some(json!({"message": "s", "apply": true, "approve_grants": false})),
         )],
     )
     .await;

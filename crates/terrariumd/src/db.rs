@@ -4,12 +4,13 @@
 //! have run. Never edit a migration that has shipped; add a new one.
 
 use std::borrow::Cow;
-use std::path::Path;
+use std::cell::OnceCell;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
 use rusqlite::Connection;
-use terrarium_core::redact::{Redactor, RedactorHandle};
+use terrarium_core::redact::{Redactor, RedactorHandle, View};
 
 use crate::error::{ApiError, ApiResult};
 use crate::events::{EventDraft, EventHub, StoredEvent};
@@ -1271,8 +1272,10 @@ pub struct Db {
     conn: Arc<Mutex<Connection>>,
     hub: EventHub,
     /// The redaction matcher (PLAN §16b.6). Each write transaction takes a
-    /// snapshot of it ([`Tx::redact`]); `crate::secrets::redact` swaps it
-    /// after each change of a secret or a subscription key.
+    /// snapshot of it under the database lock ([`Tx::redact`]). A write
+    /// that adds a value builds the new matcher before its commit and swaps
+    /// it in before it lets the lock go ([`Tx::rebuild_redactor`]), so no
+    /// other write sees the value with the old matcher.
     redactor: RedactorHandle,
 }
 
@@ -1332,12 +1335,15 @@ impl Db {
     {
         let conn = self.conn.clone();
         let actor = actor.into();
-        let redactor = self.redactor.get();
+        let handle = self.redactor.clone();
         let (value, events) = tokio::task::spawn_blocking(move || {
             let mut guard = match conn.lock() {
                 Ok(g) => g,
                 Err(poisoned) => poisoned.into_inner(),
             };
+            // The snapshot comes after the lock: a write that changed a
+            // secret swapped its matcher in before it let the lock go.
+            let redactor = handle.get();
             let tx = guard.transaction()?;
             let mut t = Tx {
                 tx,
@@ -1345,10 +1351,29 @@ impl Db {
                 cause: None,
                 events: Vec::new(),
                 redactor,
+                view: OnceCell::new(),
+                rebuild: None,
             };
             let value = f(&mut t)?;
-            let Tx { tx, events, .. } = t;
+            let Tx {
+                tx,
+                events,
+                rebuild,
+                ..
+            } = t;
+            // The new matcher reads the store as this transaction left it.
+            // A failure to build it fails the write (PLAN §16b.6, S11).
+            let next = match rebuild {
+                Some(dir) => Some(crate::secrets::redact::build(&tx, &dir)?),
+                None => None,
+            };
             tx.commit()?;
+            // The swap comes before the guard goes (at the end of this
+            // closure): the next write takes its snapshot after it.
+            if let Some(r) = next {
+                tracing::debug!(patterns = r.pattern_count(), "redaction matcher built");
+                handle.replace(r);
+            }
             Ok::<_, ApiError>((value, events))
         })
         .await
@@ -1372,6 +1397,10 @@ pub struct Tx<'c> {
     events: Vec<StoredEvent>,
     /// The redaction matcher at the start of the transaction.
     redactor: Arc<Redactor>,
+    /// The labels that the writes of this actor show ([`writer_view`]).
+    view: OnceCell<View>,
+    /// Set by [`Self::rebuild_redactor`]: the state dir of the build.
+    rebuild: Option<PathBuf>,
 }
 
 impl<'c> std::ops::Deref for Tx<'c> {
@@ -1391,6 +1420,8 @@ impl<'c> Tx<'c> {
             cause: None,
             events: Vec::new(),
             redactor: Arc::new(Redactor::empty()),
+            view: OnceCell::new(),
+            rebuild: None,
         }
     }
 
@@ -1400,12 +1431,28 @@ impl<'c> Tx<'c> {
         self.tx.commit()
     }
 
+    /// Build the redaction matcher again in this transaction, before its
+    /// commit, and swap it in before the lock goes (PLAN §16b.6, S11).
+    /// Each write that adds or changes a secret value calls it.
+    pub fn rebuild_redactor(&mut self, state_dir: &Path) {
+        self.rebuild = Some(state_dir.to_owned());
+    }
+
+    /// The labels that the writes of this transaction show.
+    fn view(&self) -> &View {
+        self.view.get_or_init(|| writer_view(&self.tx, &self.actor))
+    }
+
     /// Replace each known secret in `s` with `[secret:<label>]` (PLAN
     /// §16b.6). Borrows `s` when nothing matches. Each store function that
     /// writes a free text (a mail body, a card, a wiki page) calls it on the
-    /// text before the write, so the database never holds the value.
+    /// text before the write, so the database never holds the value. The
+    /// label shows a name only when the actor may see it ([`writer_view`]).
     pub fn redact<'a>(&self, s: &'a str) -> Cow<'a, str> {
-        self.redactor.redact_str(s)
+        if self.redactor.is_empty() {
+            return Cow::Borrowed(s);
+        }
+        self.redactor.redact_str_as(s, self.view()).0
     }
 
     /// [`Self::redact`] of an optional text.
@@ -1416,12 +1463,36 @@ impl<'c> Tx<'c> {
     /// [`Self::redact`] of an owned text: the same allocation when nothing
     /// matches.
     pub fn redact_string(&self, s: String) -> String {
-        self.redactor.redact_string(s)
+        if self.redactor.is_empty() {
+            return s;
+        }
+        self.redactor.redact_string_as(s, self.view()).0
     }
 
-    /// [`Self::redact`] of each string in a JSON value.
+    /// [`Self::redact`] of each string value in a JSON value
+    /// ([`redact_json_as`]).
     pub fn redact_json(&self, v: serde_json::Value) -> serde_json::Value {
-        redact_json(&self.redactor, v)
+        self.redact_json_counted(v).0
+    }
+
+    /// [`Self::redact_json`] with the number of matches.
+    fn redact_json_counted(&self, v: serde_json::Value) -> (serde_json::Value, usize) {
+        if self.redactor.is_empty() {
+            return (v, 0);
+        }
+        redact_json_as(&self.redactor, self.view(), v)
+    }
+
+    /// The redacted detail of an audit row. With a match, an object gets
+    /// `"redacted": <the number of matches>` (PLAN §16b.6).
+    fn audit_detail(&self, detail: serde_json::Value) -> serde_json::Value {
+        let (mut detail, n) = self.redact_json_counted(detail);
+        if n > 0
+            && let serde_json::Value::Object(m) = &mut detail
+        {
+            m.insert("redacted".to_owned(), n.into());
+        }
+        detail
     }
 
     /// Append an event to the log. Subscribers get it after the commit.
@@ -1432,10 +1503,8 @@ impl<'c> Tx<'c> {
             m.entry("cause").or_insert_with(|| c.clone());
         }
         if !self.redactor.is_empty() {
-            draft.summary = self
-                .redactor
-                .redact_string(std::mem::take(&mut draft.summary));
-            draft.data = redact_json(&self.redactor, std::mem::take(&mut draft.data));
+            draft.summary = self.redact_string(std::mem::take(&mut draft.summary));
+            draft.data = self.redact_json(std::mem::take(&mut draft.data));
         }
         let event = crate::events::insert(&self.tx, &self.actor, draft)?;
         self.events.push(event.clone());
@@ -1462,7 +1531,7 @@ impl<'c> Tx<'c> {
     /// Change the `detail` of the audit row `id` (an aggregate row, such
     /// as the `auth.login_failed` count of one address and window).
     pub fn audit_update(&self, id: &str, detail: serde_json::Value) -> ApiResult<()> {
-        let detail = self.redact_json(detail);
+        let detail = self.audit_detail(detail);
         self.tx.execute(
             "UPDATE audit SET detail = ?2, at = ?3 WHERE id = ?1",
             rusqlite::params![id, detail.to_string(), now()],
@@ -1480,7 +1549,7 @@ impl<'c> Tx<'c> {
         project: Option<&str>,
         detail: serde_json::Value,
     ) -> ApiResult<()> {
-        let detail = self.redact_json(detail);
+        let detail = self.audit_detail(detail);
         self.tx.execute(
             "INSERT INTO audit (id, actor, action, target, project, detail, at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -1498,19 +1567,149 @@ impl<'c> Tx<'c> {
     }
 }
 
-/// Redact each string of a JSON value, object keys too (PLAN §16b.6).
-/// Returns the value as it is when the matcher is empty.
+/// The labels that the records of `actor` show (PLAN §16b.6, S5): each
+/// name for the operator and a sysadmin agent; for another agent, the
+/// names of its own project, and `[secret]` for the others (global, other
+/// projects); `[secret]` for each other actor (`system`, a trigger, an
+/// event source), whose text can come from any agent.
+pub fn writer_view(conn: &Connection, actor: &str) -> View {
+    if actor == "operator" {
+        return View::All;
+    }
+    let Some(id) = actor.strip_prefix("agent:") else {
+        return View::Hidden;
+    };
+    let row: Option<(String, String)> = conn
+        .query_row(
+            "SELECT project, roles FROM agents WHERE id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .ok();
+    match row {
+        Some((project, roles)) => {
+            let roles: Vec<terrarium_core::Role> = crate::store::json_col(&roles);
+            if roles.contains(&terrarium_core::Role::Sysadmin) {
+                View::All
+            } else {
+                View::Scope(project)
+            }
+        }
+        None => View::Hidden,
+    }
+}
+
+/// The keys whose string values are identifiers, not free text: an ID, an
+/// actor, an agent, a project, a kind, a grantee, a scope, a name. The
+/// redaction leaves them as they are (PLAN §16b.6, S4), as it leaves each
+/// object key. A value that looks like an identifier is not a secret
+/// value: the store refuses it, or leaves it out of the matcher
+/// (`crate::secrets::redact`).
+const IDENTIFIER_KEYS: &[&str] = &[
+    "id",
+    "ids",
+    "actor",
+    "agent",
+    "agents",
+    "project",
+    "projects",
+    "kind",
+    "grantee",
+    "grantee_label",
+    "scope",
+    "name",
+    "by",
+    "created_by",
+    "from",
+    "to",
+    "level",
+    "action",
+    "target",
+    "schedule",
+    "run",
+    "event",
+    "session",
+    "card",
+    "thread",
+    "subscription",
+    "harness",
+    "status",
+    "state",
+];
+
+/// True for a key whose string values are identifiers: one of
+/// [`IDENTIFIER_KEYS`], or a key that ends in `_id`, `_ids`, or `_name`.
+fn identifier_key(k: &str) -> bool {
+    IDENTIFIER_KEYS.contains(&k)
+        || k.ends_with("_id")
+        || k.ends_with("_ids")
+        || k.ends_with("_name")
+}
+
+/// Redact each string value of a JSON value, each label in full (PLAN
+/// §16b.6). Object keys and the values of identifier keys stay
+/// ([`redact_json_as`]). Returns the value as it is when the matcher is
+/// empty.
 pub fn redact_json(r: &Redactor, v: serde_json::Value) -> serde_json::Value {
-    use serde_json::Value;
+    redact_json_as(r, &View::All, v).0
+}
+
+/// [`redact_json`] for a view, with the number of matches. The keys of an
+/// object stay as they are: a key is a name of the record, not a value. A
+/// string (or a list of strings) under an identifier key stays too, so a
+/// secret value cannot change the IDs, actors, and names of a record.
+pub fn redact_json_as(
+    r: &Redactor,
+    view: &View,
+    v: serde_json::Value,
+) -> (serde_json::Value, usize) {
+    if r.is_empty() {
+        return (v, 0);
+    }
+    let mut n = 0;
+    let v = redact_value(r, view, v, false, true, &mut n);
+    (v, n)
+}
+
+/// Redact each string value of a JSON value that an agent or a harness
+/// wrote (a tool input of a transcript): the keys stay, and each string
+/// value is free text, under an identifier key too.
+pub fn redact_json_values(r: &Redactor, view: &View, v: serde_json::Value) -> serde_json::Value {
     if r.is_empty() {
         return v;
     }
+    let mut n = 0;
+    redact_value(r, view, v, false, false, &mut n)
+}
+
+fn redact_value(
+    r: &Redactor,
+    view: &View,
+    v: serde_json::Value,
+    identifier: bool,
+    ids: bool,
+    n: &mut usize,
+) -> serde_json::Value {
+    use serde_json::Value;
     match v {
-        Value::String(s) => Value::String(r.redact_string(s)),
-        Value::Array(a) => Value::Array(a.into_iter().map(|v| redact_json(r, v)).collect()),
+        Value::String(s) if identifier => Value::String(s),
+        Value::String(s) => {
+            let (s, k) = r.redact_string_as(s, view);
+            *n += k;
+            Value::String(s)
+        }
+        Value::Array(a) => Value::Array(
+            a.into_iter()
+                .map(|v| redact_value(r, view, v, identifier, ids, n))
+                .collect(),
+        ),
         Value::Object(m) => Value::Object(
             m.into_iter()
-                .map(|(k, v)| (r.redact_string(k), redact_json(r, v)))
+                .map(|(k, v)| {
+                    let id = ids && identifier_key(&k);
+                    let v = redact_value(r, view, v, id, ids, n);
+                    (k, v)
+                })
                 .collect(),
         ),
         v => v,
@@ -2311,5 +2510,210 @@ mod tests {
         assert_eq!(v, MIGRATIONS.len());
         drop(conn);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// S4: a secret value cannot blind a record. The keys of a JSON
+    /// object and the identifier fields stay; the free text is redacted,
+    /// and the count is right.
+    #[test]
+    fn redaction_keeps_keys_and_identifier_fields() {
+        let me = "01K8AGENT0000000000000000A";
+        let r = Redactor::new([
+            ("p/x".to_owned(), me),
+            ("p/y".to_owned(), "grantee_label"),
+            ("p/z".to_owned(), "operator"),
+            ("p/t".to_owned(), "ghp_R3alLook1ngT0ken"),
+        ])
+        .unwrap();
+        let detail = serde_json::json!({
+            "agent": me, "grantee_label": "agent:q/b", "by": "operator",
+            "id": me, "agent_id": me, "note": "token ghp_R3alLook1ngT0ken",
+            "nested": {"project_ids": [me], "items": ["ghp_R3alLook1ngT0ken"]},
+        });
+        let (out, n) = redact_json_as(&r, &View::All, detail);
+        assert_eq!(out["agent"], me, "{out}");
+        assert_eq!(out["id"], me, "{out}");
+        assert_eq!(out["agent_id"], me, "{out}");
+        assert_eq!(out["by"], "operator", "{out}");
+        assert_eq!(out["grantee_label"], "agent:q/b", "{out}");
+        assert_eq!(out["nested"]["project_ids"][0], me, "{out}");
+        assert_eq!(out["note"], "token [secret:p/t]", "{out}");
+        assert_eq!(out["nested"]["items"][0], "[secret:p/t]", "{out}");
+        assert_eq!(n, 2);
+        let keys: Vec<&String> = out.as_object().unwrap().keys().collect();
+        assert!(keys.iter().all(|k| !k.contains("[secret")), "{keys:?}");
+        // The text of an agent (a tool input): each value is free text.
+        let input = serde_json::json!({"name": "ghp_R3alLook1ngT0ken"});
+        assert_eq!(
+            redact_json_values(&r, &View::All, input)["name"],
+            "[secret:p/t]"
+        );
+    }
+
+    fn test_db() -> Connection {
+        let mut c = Connection::open_in_memory().unwrap();
+        migrate(&mut c).unwrap();
+        for p in ["p", "q"] {
+            c.execute(
+                "INSERT INTO projects (name, created_at, updated_at) VALUES (?1, 'x', 'x')",
+                [p],
+            )
+            .unwrap();
+        }
+        for (id, project, name, roles) in [
+            ("01K8AGENT0000000000000000A", "p", "a", "[]"),
+            (
+                "01K8AGENT0000000000000000B",
+                "q",
+                "b",
+                "[\"project_admin\"]",
+            ),
+            ("01K8AGENT0000000000000000C", "q", "s", "[\"sysadmin\"]"),
+        ] {
+            c.execute(
+                "INSERT INTO agents (id, project, name, harness, workspace, roles,
+                                     created_at, updated_at)
+                 VALUES (?1, ?2, ?3, 'claude', '', ?4, 'x', 'x')",
+                rusqlite::params![id, project, name, roles],
+            )
+            .unwrap();
+        }
+        c
+    }
+
+    /// S5: the label of a write shows the names that its actor may see.
+    #[test]
+    fn the_writer_view_follows_the_actor() {
+        let c = test_db();
+        assert_eq!(writer_view(&c, "operator"), View::All);
+        assert_eq!(writer_view(&c, "system"), View::Hidden);
+        assert_eq!(writer_view(&c, "schedule:01K8X"), View::Hidden);
+        assert_eq!(
+            writer_view(&c, "agent:01K8AGENT0000000000000000A"),
+            View::Scope("p".to_owned())
+        );
+        assert_eq!(
+            writer_view(&c, "agent:01K8AGENT0000000000000000B"),
+            View::Scope("q".to_owned())
+        );
+        assert_eq!(
+            writer_view(&c, "agent:01K8AGENT0000000000000000C"),
+            View::All
+        );
+        assert_eq!(writer_view(&c, "agent:gone"), View::Hidden);
+    }
+
+    const VALUE: &str = "ghp_R3alLook1ngT0kenRace";
+
+    fn put_value(c: &Connection, k: &crate::secrets::MasterKey, scope: &str, name: &str) {
+        let input: crate::secrets::SecretInput =
+            serde_json::from_value(serde_json::json!({"fields": {"value": VALUE}})).unwrap();
+        crate::secrets::put(
+            c,
+            k,
+            crate::secrets::PutMode::Upsert,
+            &crate::secrets::NewSecret {
+                scope,
+                name,
+                kind: crate::secrets::Kind::Token,
+                input: &input,
+                by: "operator",
+                strict: true,
+            },
+        )
+        .unwrap();
+    }
+
+    fn key_dir() -> (tempfile::TempDir, crate::secrets::MasterKey) {
+        let dir = tempfile::tempdir().unwrap();
+        let k = crate::secrets::MasterKey::generate();
+        crate::secrets::crypto::write_key(&crate::secrets::crypto::key_path(dir.path()), &k)
+            .unwrap();
+        (dir, k)
+    }
+
+    /// S11: a write that starts while a secret put runs stores the label,
+    /// never the value. Before the fix, the second write took its matcher
+    /// before the lock, and the put built the new matcher after its commit.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_write_during_a_secret_put_never_stores_the_value() {
+        let (dir, k) = key_dir();
+        let db = Db::new(test_db(), EventHub::default());
+        let (go, wait) = std::sync::mpsc::channel::<()>();
+        let state_dir = dir.path().to_owned();
+        let db1 = db.clone();
+        let put = tokio::spawn(async move {
+            db1.write("operator", move |t| {
+                t.rebuild_redactor(&state_dir);
+                put_value(t, &k, crate::secrets::GLOBAL, "gh");
+                // Hold the lock until the other write waits for it.
+                wait.recv().unwrap();
+                Ok(())
+            })
+            .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let db2 = db.clone();
+        let other = tokio::spawn(async move {
+            db2.write("operator", |t| {
+                t.audit(
+                    "test.leak",
+                    "x",
+                    None,
+                    serde_json::json!({"text": format!("leak {VALUE}")}),
+                )?;
+                Ok(t.redact_string(format!("mail {VALUE}")))
+            })
+            .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        go.send(()).unwrap();
+        put.await.unwrap().unwrap();
+        let mail = other.await.unwrap().unwrap();
+        assert_eq!(mail, "mail [secret:gh]");
+        let detail: String = db
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT detail FROM audit WHERE action = 'test.leak'",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert!(!detail.contains(VALUE), "{detail}");
+        assert!(detail.contains("[secret:gh]"), "{detail}");
+        assert!(detail.contains("\"redacted\":1"), "{detail}");
+    }
+
+    /// S5: a project agent's write shows `[secret]` for a secret outside
+    /// its project, and the name of a secret of its own project.
+    #[tokio::test]
+    async fn a_project_agent_sees_only_its_own_names() {
+        let (dir, k) = key_dir();
+        let db = Db::new(test_db(), EventHub::default());
+        let d = dir.path().to_owned();
+        db.write("operator", move |t| {
+            t.rebuild_redactor(&d);
+            put_value(t, &k, "q", "db");
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let text = format!("x {VALUE} y");
+        for (actor, want) in [
+            ("agent:01K8AGENT0000000000000000A", "x [secret] y"),
+            ("agent:01K8AGENT0000000000000000B", "x [secret:q/db] y"),
+            ("agent:01K8AGENT0000000000000000C", "x [secret:q/db] y"),
+            ("system", "x [secret] y"),
+            ("operator", "x [secret:q/db] y"),
+        ] {
+            let t2 = text.clone();
+            let got = db
+                .write(actor, move |t| Ok(t.redact_string(t2)))
+                .await
+                .unwrap();
+            assert_eq!(got, want, "{actor}");
+        }
     }
 }

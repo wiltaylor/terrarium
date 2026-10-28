@@ -561,10 +561,14 @@ export interface Api {
     log(limit?: number): Promise<ConfigLogEntry[]>;
     commit(body: ConfigCommitBody): Promise<ConfigCommitResult>;
     /** Fetch and merge. With `apply`, apply the `export/` changes as fleets; else their plans wait. */
-    pull(body?: { apply?: boolean }): Promise<ConfigPullResult>;
+    pull(body?: { apply?: boolean; approve_grants?: boolean }): Promise<ConfigPullResult>;
     push(): Promise<{ pushed: boolean }>;
     /** Commit, fetch, merge, and push. */
-    sync(body?: { message?: string; apply?: boolean }): Promise<ConfigSyncResult>;
+    sync(body?: {
+      message?: string;
+      apply?: boolean;
+      approve_grants?: boolean;
+    }): Promise<ConfigSyncResult>;
     /** Leave a merge that stopped on a conflict. */
     abort(): Promise<{ aborted: true }>;
     setRemote(body: ConfigRemoteBody): Promise<ConfigStatus>;

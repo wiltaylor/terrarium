@@ -1178,8 +1178,8 @@ terrarium admin fleet validate|plan|apply|ls|show|export ...
 terrarium admin schedule ls|show|new|set|rm|run|enable|disable|runs ...
 terrarium admin config status|diff [path]|log [-n N]|push|abort
 terrarium admin config commit -m <message> [--no-export] [--force-export]
-terrarium admin config pull [--apply]
-terrarium admin config sync [-m <message>] [--apply]
+terrarium admin config pull [--apply [--approve-grants]]
+terrarium admin config sync [-m <message>] [--apply [--approve-grants]]
 terrarium admin config remote set <url> [--credential c] [--branch b]
 terrarium admin config remote rm
 terrarium admin config defaults [ls|accept <path>|keep <path>]
@@ -1290,8 +1290,8 @@ operator or a sysadmin.
 | `admin config commit -m m` | `POST /api/config/commit` `{"message", "export", "force_export"}` | `committed <commit> (<n> file(s)): <files>`, or `nothing to commit`. A scan finding exits 1 with the file, the line, and the rule of each one. |
 | `admin config log [-n N]` | `GET /api/config/log?limit=N` | One line per commit: the commit, the time, the author, the subject. |
 | `admin config push` | `POST /api/config/push` | `pushed` or `nothing to push`. |
-| `admin config pull [--apply]` | `POST /api/config/pull` `{"apply"}` | The merged files, then for each changed export file its fleet plan (`plan N create, N update, N unchanged`) and the entries that change, or `applied`. Then one `secrets:` line for each change of the secrets import (`create`, `update`, `delete`, `grant`, `revoke`), and one for each warning. A conflict exits 1 with the files. |
-| `admin config sync [-m m] [--apply]` | `POST /api/config/sync` `{"message"?, "apply"}` | The commit line, the merge lines, and `pushed`. |
+| `admin config pull [--apply [--approve-grants]]` | `POST /api/config/pull` `{"apply", "approve_grants"}` | The merged files, then for each changed export file its fleet plan (`plan N create, N update, N unchanged`) and the entries that change, or `applied`. Then one `secrets:` line for each change of the secrets import (`create`, `update`, `delete`, `grant`, `revoke`), and one for each warning. A new or wider grant of a secret that has a value ends with `(needs the operator: --apply --approve-grants)` in a plan, and with `(held: ...)` after an apply without `--approve-grants`: the apply does not make it. `--approve-grants` makes it (`(approved)`). Only the operator can give `--approve-grants`; an agent gets 403. A conflict exits 1 with the files. |
+| `admin config sync [-m m] [--apply [--approve-grants]]` | `POST /api/config/sync` `{"message"?, "apply", "approve_grants"}` | The commit line, the merge lines, and `pushed`. `--approve-grants` works as for `pull`. |
 | `admin config abort` | `POST /api/config/abort` | `merge aborted: the repo is back at your last commit` |
 | `admin config remote set <url> [--credential c] [--branch b]` | `PUT /api/config/remote` | The status. Put a token or a deploy key in a global secret (`terrarium secret set`), never in the URL: a URL with a user or a password is refused. |
 | `admin config remote rm` | `DELETE /api/config/remote` | The status. |

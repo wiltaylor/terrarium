@@ -145,8 +145,13 @@ async fn stored_records_hold_the_label_not_the_value() {
         )
         .await;
     assert_eq!(q.status, 201, "{}", q.body);
+    // The writer is an agent of `p`: the names of `p` show, the others are
+    // `[secret]` (PLAN §16b.6, S5).
     assert!(
-        q.body["text"].as_str().unwrap().contains(EXPECTED),
+        q.body["text"]
+            .as_str()
+            .unwrap()
+            .contains("gh=[secret] deploy=[secret:p/deploy] sub=[secret] pin=pin1234"),
         "{}",
         q.body
     );
@@ -299,4 +304,91 @@ async fn session_links_are_redacted_too() {
     assert_redacted("the archived transcript", &r.ok().to_string());
     let text = r.ok()["blocks"][0]["text"].as_str().unwrap().to_owned();
     assert!(text.contains(EXPECTED), "{text}");
+}
+
+/// S4 (review 2026-10-29): a project_admin cannot store a value that
+/// blinds the records of other projects: its own agent ULID, a record
+/// word, a name of this instance. The audit and the events keep their keys
+/// and identifiers.
+#[tokio::test]
+async fn a_project_admin_cannot_blind_records() {
+    let td = TestDaemon::start().await;
+    td.project("p").await;
+    td.project("q").await;
+    let w = td
+        .agent("p", "w", json!({"roles": ["project_admin"]}))
+        .await;
+    let wid = w["id"].as_str().unwrap().to_owned();
+    let label = format!("agent:{wid}");
+    for v in [
+        wid.as_str(),
+        label.as_str(),
+        "operator",
+        "grantee_label",
+        "a-quite-long-name",
+    ] {
+        if v == "a-quite-long-name" {
+            td.project(v).await;
+        }
+        let r = td
+            .post_as(
+                &wid,
+                "/api/secrets",
+                json!({"scope": "p", "name": "x", "kind": "generic",
+                       "fields": {"v": v}, "secret_fields": ["v"]}),
+            )
+            .await;
+        assert_eq!(r.status, 422, "{v}: {}", r.body);
+    }
+    // A weak token is refused; a weak login password is stored with a
+    // warning, and it is not redacted.
+    let r = td
+        .post_as(
+            &wid,
+            "/api/secrets",
+            json!({"scope": "p", "name": "t", "kind": "token", "fields": {"value": "hostname1"}}),
+        )
+        .await;
+    assert_eq!(r.status, 422, "{}", r.body);
+    let r = td
+        .post_as(
+            &wid,
+            "/api/secrets",
+            json!({"scope": "p", "name": "win", "kind": "login",
+                   "fields": {"username": "bob", "password": "summer2024"}}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert!(
+        r.body["warnings"][0].as_str().unwrap().contains("weak"),
+        "{}",
+        r.body
+    );
+    let m = td
+        .post(
+            "/api/mail",
+            json!({"to": "p/w", "body": "summer2024 operator"}),
+        )
+        .await;
+    assert_eq!(m.ok()["body"], "summer2024 operator");
+    // The agent of `q` writes the value of a secret of `p`: the label has
+    // no name (S5).
+    td.post(
+        "/api/secrets",
+        json!({"scope": "p", "name": "deploy", "kind": "api_key",
+               "fields": {"value": PROJECT_VALUE}}),
+    )
+    .await
+    .ok();
+    let b = td.agent("q", "b", json!({})).await;
+    let bid = b["id"].as_str().unwrap().to_owned();
+    let r = td
+        .post_as(
+            &bid,
+            "/api/mail",
+            json!({"to": "q/b", "body": format!("look {PROJECT_VALUE}")}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert_eq!(r.body["body"], "look [secret]", "{}", r.body);
 }

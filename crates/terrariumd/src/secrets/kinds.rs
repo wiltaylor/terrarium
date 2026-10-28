@@ -109,6 +109,23 @@ pub struct SecretInput {
     pub secret_fields: Vec<String>,
 }
 
+/// The input holds the values as the request gave them: zero each string
+/// on drop (PLAN §16b.2). The request bytes and the buffers of the JSON
+/// parser are not zeroed.
+impl Drop for SecretInput {
+    fn drop(&mut self) {
+        fn wipe(v: &mut Value) {
+            match v {
+                Value::String(s) => zeroize::Zeroize::zeroize(s),
+                Value::Array(a) => a.iter_mut().for_each(wipe),
+                Value::Object(m) => m.values_mut().for_each(wipe),
+                _ => {}
+            }
+        }
+        self.fields.values_mut().for_each(wipe);
+    }
+}
+
 impl std::fmt::Debug for SecretInput {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SecretInput")

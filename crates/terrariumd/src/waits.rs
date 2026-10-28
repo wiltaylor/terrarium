@@ -473,7 +473,9 @@ pub fn run_log(state: &Shared, w: &Wait, max: usize) -> RunLog {
     };
     // The output is what the run printed: redact it whole, then cut it
     // (PLAN §16b.6).
-    let output = state.db.redactor().get().redact_string(output);
+    // The labels that the agent of the wait sees (S5): the run is its own.
+    let view = terrarium_core::redact::View::Scope(w.project.clone());
+    let output = state.db.redactor().get().redact_string_as(output, &view).0;
     let max = max.clamp(1, LOG_TAIL);
     let output = if output.len() > max {
         let mut i = output.len() - max;

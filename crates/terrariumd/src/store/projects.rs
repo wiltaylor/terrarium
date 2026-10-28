@@ -147,9 +147,38 @@ pub struct NewProject {
     pub card_prefix: Option<String>,
 }
 
-/// Make a project, its board, and the default columns.
+/// The names that a project cannot have: the scope words of the secret
+/// store (PLAN §16b, S7). A project named `global` would get the global
+/// secrets as its own scope.
+pub const RESERVED_NAMES: [&str; 1] = [crate::secrets::GLOBAL];
+
+/// Refuse a reserved project name ([`RESERVED_NAMES`]).
+pub fn check_not_reserved(name: &str) -> ApiResult<()> {
+    if RESERVED_NAMES.contains(&name) {
+        return Err(ApiError::invalid(format!(
+            "`{name}` is a reserved word (the scope of the global secrets); a project cannot \
+             have this name"
+        )));
+    }
+    Ok(())
+}
+
+/// True when a project has a reserved name: one made before the name was
+/// reserved. The daemon starts, and warns.
+pub fn has_reserved_name(conn: &rusqlite::Connection) -> ApiResult<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT count(*) FROM projects WHERE name = ?1",
+        [crate::secrets::GLOBAL],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// Make a project, its board, and the default columns. The API, a fleet,
+/// and the config import all come here.
 pub fn create(t: &mut Tx<'_>, p: &NewProject, source: &str) -> ApiResult<Project> {
     check_name("project", &p.name)?;
+    check_not_reserved(&p.name)?;
     if find(t, &p.name)?.is_some() {
         return Err(ApiError::conflict(format!("project `{}` exists", p.name)));
     }
@@ -265,5 +294,42 @@ mod tests {
         assert!(valid_prefix("T2"));
         assert!(!valid_prefix("2T"));
         assert!(!valid_prefix("ter"));
+    }
+
+    /// S7: `global` is the scope of the global secrets: no project has
+    /// this name.
+    #[tokio::test]
+    async fn a_project_cannot_be_named_global() {
+        let mut c = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrate(&mut c).unwrap();
+        let db = crate::db::Db::new(c, crate::events::EventHub::default());
+        let e = db
+            .write("operator", |t| {
+                create(
+                    t,
+                    &NewProject {
+                        name: "global".into(),
+                        ..Default::default()
+                    },
+                    SOURCE_API,
+                )
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, crate::error::Code::Invalid);
+        assert!(e.message.contains("reserved"), "{}", e.message);
+        // A project named `global` from before: the daemon finds it.
+        assert!(!db.read(has_reserved_name).await.unwrap());
+        db.read(|c| {
+            c.execute(
+                "INSERT INTO projects (name, created_at, updated_at)
+                 VALUES ('global', 'x', 'x')",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert!(db.read(has_reserved_name).await.unwrap());
     }
 }

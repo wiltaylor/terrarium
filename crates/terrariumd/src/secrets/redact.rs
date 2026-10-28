@@ -10,16 +10,31 @@
 //!   `subscription/<name>` (`[secret:subscription/zai]`).
 //!
 //! The decrypted values live only for the build, in zeroizing buffers. The
-//! matcher keeps its own copy of the patterns: it must, to find them.
+//! matcher keeps its own copy of the patterns, for the life of the daemon:
+//! it must, to find them. That copy is not zeroized.
+//!
+//! The matcher leaves out a value (or one line of a value) that
+//! [`keep`] refuses: a value that looks like an identifier of the records
+//! (a ULID, a record word, a name of a project, an agent, a target, ...),
+//! or a weak value shorter than 16 bytes. Such a value matches ordinary
+//! text, so a matcher with it blinds records (PLAN §16b.6, S4). [`check_value`]
+//! refuses most of these values at a put; a weak login password or
+//! passphrase is stored, but not redacted.
+//!
+//! The label of a match shows the name only to a view that may see it
+//! (`crate::db::writer_view`, [`view_of`]); the others see `[secret]`.
 //!
 //! The daemon keeps one matcher in `Db` (`crate::db::Db::redactor`). It
 //! builds it at the start, after the migration of the old credential files
 //! ([`rebuild`]), and again after each change:
 //!
-//! - each successful write call of `/api/secrets` and `/api/credentials`
-//!   ([`after_change`], a route layer in `crate::api`);
-//! - the delete of a project (its secrets go with it);
-//! - a stored subscription API key, and the delete of a subscription.
+//! - a write that adds or changes a value (a secret put, a generated key, a
+//!   stored subscription API key) builds it inside its transaction, before
+//!   the commit ([`crate::db::Tx::rebuild_redactor`]), so no other write
+//!   stores the value with the old matcher (S11);
+//! - a delete (a secret, a project, a subscription) builds it after the
+//!   commit ([`rebuild`]): until then the old matcher redacts more, never
+//!   less.
 //!
 //! `terrariumd secrets rotate-key` runs with no daemon; the values do not
 //! change, and the next start builds the matcher again.
@@ -36,20 +51,18 @@
 //!
 //! The live terminal stream to the operator is not redacted.
 
+use std::collections::HashSet;
 use std::path::Path;
 
-use axum::extract::{Request, State};
-use axum::http::Method;
-use axum::middleware::Next;
-use axum::response::Response;
 use rusqlite::Connection;
-use terrarium_core::redact::Redactor;
+use terrarium_core::redact::{self as core, Entry, Judgment, Redactor, View};
 use terrarium_core::transcript::Block;
 use zeroize::Zeroizing;
 
-use super::{GLOBAL, key, list, open};
-use crate::api::{AppState, Shared};
-use crate::error::ApiResult;
+use super::{GLOBAL, Kind, key, list, open};
+use crate::actor::Actor;
+use crate::api::AppState;
+use crate::error::{ApiError, ApiResult};
 
 /// The label prefix of a subscription API key.
 pub const SUBSCRIPTION_PREFIX: &str = "subscription/";
@@ -64,12 +77,10 @@ pub fn label(scope: &str, name: &str) -> String {
     }
 }
 
-/// The `(label, value)` pairs of each secret field of each secret. A
-/// secret with no sealed value yet adds nothing.
-fn secret_entries(
-    conn: &Connection,
-    state_dir: &Path,
-) -> ApiResult<Vec<(String, Zeroizing<String>)>> {
+/// The entries of each secret field of each secret. The scope of an entry
+/// is the scope of its secret. A secret with no sealed value yet adds
+/// nothing.
+fn secret_entries(conn: &Connection, state_dir: &Path) -> ApiResult<Vec<Entry<Zeroizing<String>>>> {
     let infos = list(conn, None)?;
     if infos.is_empty() {
         return Ok(Vec::new());
@@ -90,14 +101,19 @@ fn secret_entries(
         };
         let l = label(&info.scope, &info.name);
         for (_, v) in opened.values {
-            out.push((l.clone(), v));
+            out.push(Entry {
+                label: l.clone(),
+                scope: Some(info.scope.clone()),
+                value: v,
+            });
         }
     }
     Ok(out)
 }
 
-/// The `(label, key)` pairs of the stored subscription API keys.
-fn subscription_entries(state_dir: &Path) -> Vec<(String, Zeroizing<String>)> {
+/// The entries of the stored subscription API keys. Their scope is
+/// `global`: a project agent sees `[secret]`.
+fn subscription_entries(state_dir: &Path) -> Vec<Entry<Zeroizing<String>>> {
     let dir = super::credentials_dir(state_dir).join("subscriptions");
     let Ok(read) = std::fs::read_dir(&dir) else {
         return Vec::new();
@@ -113,29 +129,141 @@ fn subscription_entries(state_dir: &Path) -> Vec<(String, Zeroizing<String>)> {
             continue;
         };
         if let Some(k) = crate::login_session::read_key(state_dir, name) {
-            out.push((
-                format!("{SUBSCRIPTION_PREFIX}{name}"),
-                Zeroizing::new(k.key),
-            ));
+            out.push(Entry {
+                label: format!("{SUBSCRIPTION_PREFIX}{name}"),
+                scope: Some(GLOBAL.to_owned()),
+                value: Zeroizing::new(k.key),
+            });
         }
     }
     out
 }
 
+/// The names of this instance, in lower case: projects, agents (also as
+/// `<project>/<name>`), repos, hosts, targets, subscriptions, schedules,
+/// templates, event sources, and secrets. A secret value equal to one of
+/// them is an identifier.
+pub fn record_names(conn: &Connection) -> ApiResult<HashSet<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT name FROM projects
+         UNION SELECT name FROM agents
+         UNION SELECT project || '/' || name FROM agents
+         UNION SELECT name FROM repos
+         UNION SELECT project || '/' || name FROM repos
+         UNION SELECT name FROM hosts
+         UNION SELECT name FROM targets
+         UNION SELECT name FROM subscriptions
+         UNION SELECT name FROM schedules
+         UNION SELECT name FROM agent_templates
+         UNION SELECT name FROM event_sources
+         UNION SELECT name FROM secrets",
+    )?;
+    let names = stmt
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(names.into_iter().map(|n| n.to_lowercase()).collect())
+}
+
+/// True when the matcher may hold `pattern` (one raw pattern of a value,
+/// [`core::raw_patterns`]): [`core::judge`] finds it safe, and it is not a
+/// name of this instance.
+pub fn keep(names: &HashSet<String>, pattern: &[u8]) -> bool {
+    if core::judge(pattern) != Judgment::Ok {
+        return false;
+    }
+    match std::str::from_utf8(pattern) {
+        Ok(s) => !names.contains(&s.trim().to_lowercase()),
+        Err(_) => true,
+    }
+}
+
+/// True for a secret field that a person chooses: the password of a
+/// `login`, the passphrase of an `ssh_key`, each field of a `generic`.
+/// A weak value there is stored, but not redacted. The other fields
+/// (tokens, API keys, private keys) are made by a machine: a weak value
+/// there is refused.
+fn chosen_by_a_person(kind: Kind, field: &str) -> bool {
+    matches!(
+        (kind, field),
+        (Kind::Login, "password") | (Kind::SshKey, "passphrase") | (Kind::Generic, _)
+    )
+}
+
+/// Check the value of one secret field at a put (PLAN §16b.6, S4).
+///
+/// - A value that looks like an identifier (a ULID, an actor label, a
+///   record word, a name of this instance) is refused, for each kind: it
+///   is not a secret, and redaction would blind each record that holds it.
+/// - A weak value (shorter than 16 bytes, and one word or name, or low
+///   entropy) is refused for a token or a key. For a field that a person
+///   chooses (a login password, a passphrase, a `generic` field), it is
+///   stored, and the answer is a warning: redaction does not hide it.
+///
+/// The answer is the warnings.
+pub fn check_value(
+    names: &HashSet<String>,
+    kind: Kind,
+    field: &str,
+    value: &str,
+) -> ApiResult<Vec<String>> {
+    let mut warnings = Vec::new();
+    for pattern in core::raw_patterns(value.as_bytes()) {
+        let text = String::from_utf8_lossy(pattern);
+        let why = match core::judge(pattern) {
+            Judgment::Identifier(why) => Some(why),
+            Judgment::Ok if names.contains(&text.trim().to_lowercase()) => {
+                Some("it is a name of a project, an agent, a target, or another record here")
+            }
+            Judgment::Ok => None,
+            Judgment::Weak(why) => {
+                if chosen_by_a_person(kind, field) {
+                    warnings.push(format!(
+                        "the value of `{field}` is weak ({why}): it is stored, but redaction does \
+                         not hide it in records, because a weak value matches ordinary text"
+                    ));
+                    continue;
+                }
+                return Err(ApiError::invalid(format!(
+                    "the value of `{field}` is weak ({why}); the value of a secret of kind \
+                     `{kind}` is random: 16 bytes or more, or not one word, name, or number"
+                )));
+            }
+        };
+        if let Some(why) = why {
+            return Err(ApiError::invalid(format!(
+                "the value of `{field}` cannot be a secret: {why}. Redaction would replace it \
+                 in each record that holds it"
+            )));
+        }
+    }
+    Ok(warnings)
+}
+
 /// Build the matcher from the store and the subscription keys. A value
-/// shorter than [`terrarium_core::redact::MIN_LEN`] bytes is skipped.
+/// shorter than [`terrarium_core::redact::MIN_LEN`] bytes is skipped, and
+/// so is each pattern that [`keep`] refuses.
 pub fn build(conn: &Connection, state_dir: &Path) -> ApiResult<Redactor> {
+    let names = record_names(conn)?;
     let mut entries = secret_entries(conn, state_dir)?;
     entries.extend(subscription_entries(state_dir));
-    let redactor = Redactor::new(entries.iter().map(|(l, v)| (l.clone(), v.as_bytes())))
-        .map_err(|e| crate::error::ApiError::internal(e.to_string()))?;
+    let redactor = Redactor::build(
+        entries.iter().map(|e| Entry {
+            label: e.label.clone(),
+            scope: e.scope.clone(),
+            value: e.value.as_bytes(),
+        }),
+        |p| keep(&names, p),
+    )
+    .map_err(|e| ApiError::internal(e.to_string()))?;
     // `entries` drops here and zeroes each value.
     Ok(redactor)
 }
 
-/// Build the matcher and swap it into the daemon's handle. The build runs
-/// under the database lock, so two rebuilds swap in the order of the
-/// writes they follow. A failure keeps the old matcher and logs it.
+/// Build the matcher and swap it into the daemon's handle: at the start,
+/// and after a delete. The build runs under the database lock, so two
+/// rebuilds swap in the order of the writes they follow. A failure keeps
+/// the old matcher and logs it. A write that adds a value uses
+/// [`crate::db::Tx::rebuild_redactor`] instead.
 pub async fn rebuild(state: &AppState) {
     let handle = state.db.redactor().clone();
     let dir = state.state_dir.clone();
@@ -154,43 +282,44 @@ pub async fn rebuild(state: &AppState) {
     }
 }
 
+/// The labels that `actor` sees in a text that the daemon redacts when it
+/// shows it (a transcript, a screen, an upload): each name for the
+/// operator and a sysadmin; the names of the own project for another
+/// agent, and `[secret]` for the others (PLAN §16b.6, S5).
+pub fn view_of(actor: &Actor) -> View {
+    match actor {
+        Actor::Operator => View::All,
+        Actor::Agent(a) if a.is_sysadmin() => View::All,
+        Actor::Agent(a) => View::Scope(a.project.clone()),
+    }
+}
+
 /// Redact `s` in place. No allocation when nothing matches.
-fn redact_in_place(r: &Redactor, s: &mut String) {
-    if let std::borrow::Cow::Owned(new) = r.redact_str(s) {
+fn redact_in_place(r: &Redactor, view: &View, s: &mut String) {
+    if let (std::borrow::Cow::Owned(new), _) = r.redact_str_as(s, view) {
         *s = new;
     }
 }
 
-/// Redact the text of a transcript block: the text, the turn parts, the
-/// tool call (input and summary), and the tool result.
-pub fn redact_block(r: &Redactor, b: &mut Block) {
+/// Redact the text of a transcript block for `view`: the text, the turn
+/// parts, the tool call (input and summary), and the tool result.
+pub fn redact_block(r: &Redactor, view: &View, b: &mut Block) {
     if r.is_empty() {
         return;
     }
     if let Some(t) = &mut b.text {
-        redact_in_place(r, t);
+        redact_in_place(r, view, t);
     }
     for p in &mut b.parts {
-        redact_in_place(r, &mut p.body);
+        redact_in_place(r, view, &mut p.body);
     }
     if let Some(tool) = &mut b.tool {
-        redact_in_place(r, &mut tool.summary);
-        tool.input = crate::db::redact_json(r, std::mem::take(&mut tool.input));
+        redact_in_place(r, view, &mut tool.summary);
+        tool.input = crate::db::redact_json_values(r, view, std::mem::take(&mut tool.input));
     }
     if let Some(res) = &mut b.result {
-        redact_in_place(r, &mut res.output);
+        redact_in_place(r, view, &mut res.output);
     }
-}
-
-/// A route layer for `/api/secrets` and `/api/credentials`: after each
-/// successful call that is not a read, build the matcher again.
-pub async fn after_change(State(state): State<Shared>, req: Request, next: Next) -> Response {
-    let write = !matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS);
-    let resp = next.run(req).await;
-    if write && resp.status().is_success() {
-        rebuild(&state).await;
-    }
-    resp
 }
 
 #[cfg(test)]
@@ -252,5 +381,169 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let c = crate::secrets::tests::db();
         assert!(build(&c, dir.path()).unwrap().is_empty());
+    }
+
+    fn put_kind(
+        c: &Connection,
+        k: &MasterKey,
+        scope: &str,
+        name: &str,
+        kind: Kind,
+        fields: serde_json::Value,
+        strict: bool,
+    ) -> ApiResult<crate::secrets::SecretInfo> {
+        let input: SecretInput = serde_json::from_value(fields).unwrap();
+        put(
+            c,
+            k,
+            PutMode::Upsert,
+            &NewSecret {
+                scope,
+                name,
+                kind,
+                input: &input,
+                by: "operator",
+                strict,
+            },
+        )
+        .map(|(i, _)| i)
+    }
+
+    /// S4 (b): a put refuses a value that looks like an identifier, and a
+    /// weak token; a weak login password is stored with a warning.
+    #[test]
+    fn a_put_refuses_identifier_and_weak_values() {
+        let c = crate::secrets::grants::tests::db();
+        let k = MasterKey::generate();
+        let token = |v: &str| {
+            put_kind(
+                &c,
+                &k,
+                "p",
+                "t",
+                Kind::Token,
+                serde_json::json!({"fields": {"value": v}}),
+                true,
+            )
+        };
+        // The ULID of an agent, an actor label, record words, a name here.
+        for v in [
+            crate::secrets::grants::tests::AGENT,
+            "agent:01K8AGENT0000000000000000A",
+            "operator",
+            "grantee_label",
+        ] {
+            let e = token(v).unwrap_err();
+            assert_eq!(e.code, crate::error::Code::Invalid, "{v}");
+            assert!(
+                e.message.contains("cannot be a secret"),
+                "{v}: {}",
+                e.message
+            );
+        }
+        // A long name of this instance.
+        c.execute(
+            "INSERT INTO projects (name, created_at, updated_at)
+             VALUES ('a-long-project-name', 'x', 'x')",
+            [],
+        )
+        .unwrap();
+        let e = token("a-long-project-name").unwrap_err();
+        assert!(e.message.contains("name of a project"), "{}", e.message);
+        // A weak token.
+        let e = token("hostname1").unwrap_err();
+        assert!(e.message.contains("is weak"), "{}", e.message);
+        // A real token.
+        let info = token("ghp_R3alLook1ngT0ken").unwrap();
+        assert!(info.warnings.is_empty());
+        // A weak login password: stored, with a warning.
+        let info = put_kind(
+            &c,
+            &k,
+            "p",
+            "win",
+            Kind::Login,
+            serde_json::json!({"fields": {"username": "bob", "password": "summer2024"}}),
+            true,
+        )
+        .unwrap();
+        assert!(info.has_value);
+        assert_eq!(info.warnings.len(), 1, "{:?}", info.warnings);
+        assert!(info.warnings[0].contains("redaction does not hide it"));
+        // An identifier login password is refused all the same.
+        let e = put_kind(
+            &c,
+            &k,
+            "p",
+            "win",
+            Kind::Login,
+            serde_json::json!({"fields": {"password": "Operator"}}),
+            true,
+        )
+        .unwrap_err();
+        assert!(e.message.contains("cannot be a secret"), "{}", e.message);
+        // A real ssh key passes, line by line.
+        put_kind(
+            &c,
+            &k,
+            "p",
+            "key",
+            Kind::SshKey,
+            serde_json::json!({"fields": {"private_key": crate::secrets::ssh::tests::ed25519_key()}}),
+            true,
+        )
+        .unwrap();
+    }
+
+    /// S4: the matcher leaves out a weak value and an identifier value
+    /// that a put did not check (the migration of old files, or a store
+    /// from before the check), and a value equal to a name made later.
+    #[test]
+    fn the_matcher_leaves_out_weak_and_identifier_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = crate::secrets::grants::tests::db();
+        let k = MasterKey::generate();
+        crypto::write_key(&crypto::key_path(dir.path()), &k).unwrap();
+        for (name, value) in [
+            ("ulid", crate::secrets::grants::tests::AGENT),
+            ("word", "operator"),
+            ("weak", "hostname1"),
+            ("later", "a-name-made-later-1"),
+            ("good", "ghp_R3alLook1ngT0ken"),
+        ] {
+            put_kind(
+                &c,
+                &k,
+                "p",
+                name,
+                Kind::Token,
+                serde_json::json!({"fields": {"value": value}}),
+                false,
+            )
+            .unwrap();
+        }
+        c.execute(
+            "INSERT INTO projects (name, created_at, updated_at)
+             VALUES ('a-name-made-later-1', 'x', 'x')",
+            [],
+        )
+        .unwrap();
+        let r = build(&c, dir.path()).unwrap();
+        let text = format!(
+            "{} operator hostname1 a-name-made-later-1 ghp_R3alLook1ngT0ken",
+            crate::secrets::grants::tests::AGENT
+        );
+        assert_eq!(
+            r.redact_str(&text),
+            format!(
+                "{} operator hostname1 a-name-made-later-1 [secret:p/good]",
+                crate::secrets::grants::tests::AGENT
+            )
+        );
+    }
+
+    #[test]
+    fn the_view_of_an_actor() {
+        assert_eq!(view_of(&Actor::Operator), View::All);
     }
 }

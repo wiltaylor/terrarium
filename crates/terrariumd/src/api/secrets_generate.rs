@@ -80,9 +80,12 @@ async fn generate(
     } else {
         PutMode::Create
     };
+    let dir = state.state_dir.clone();
     let (info, created) = state
         .db
         .write(actor.label(), move |t| {
+            // The new key joins the matcher before the commit (S11).
+            t.rebuild_redactor(&dir);
             let (info, created) = secrets::put(
                 t,
                 &key,

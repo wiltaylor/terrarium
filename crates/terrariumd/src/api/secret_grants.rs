@@ -203,7 +203,9 @@ struct GetAnswer {
     name: String,
     kind: Kind,
     field: String,
-    value: String,
+    /// Zeroed on drop (PLAN §16b.2); the serialized body is not.
+    #[serde(serialize_with = "crate::secrets::serialize_zeroizing")]
+    value: zeroize::Zeroizing<String>,
 }
 
 /// A sliding window per agent.
@@ -276,7 +278,7 @@ async fn read_value(
                     ))
                 })?,
             };
-            let value = if let Some(v) = e.fields.get(&field) {
+            let value = zeroize::Zeroizing::new(if let Some(v) = e.fields.get(&field) {
                 v.as_str().map_or_else(|| v.to_string(), str::to_owned)
             } else {
                 let opened = secrets::open(t, &key, &e.scope, &e.name)?
@@ -292,7 +294,7 @@ async fn read_value(
                     )));
                 };
                 v.to_string()
-            };
+            });
             t.audit(
                 "secret.get",
                 &format!("{}/{}", e.scope, e.name),

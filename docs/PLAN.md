@@ -2212,8 +2212,22 @@ host, public key) show in each list.
   backup without the key file shows no secret. `terrariumd secrets
   rotate-key` makes a new key and seals all rows again in one transaction.
 - The daemon decrypts a secret only when it uses one, and holds the plain
-  value in a zeroizing buffer.
+  value in a zeroizing buffer. These buffers are zeroed on drop: the opened
+  secret fields, the request body of a secret put (`SecretInput`), the
+  answer of the git credential helper, and the answer of `secret get`.
+- Zeroization is partial (review S12, 2026-10-29). These copies are not
+  zeroed: the request bytes and the scratch buffers of the JSON parser,
+  the serialized body of an answer that holds a value (a reveal, a
+  `secret get`, a helper answer), and the patterns of the redaction
+  matcher (§16b.6). The matcher holds each value for the life of the
+  daemon, because it must find it.
 - The sandbox never binds the key file or the store.
+- `global` is the scope of the global secrets, so no project can have the
+  name `global` (review S7, 2026-10-29). A create of a project with this
+  name is `422`, from the API, a fleet, and the config import. A project
+  named `global` from before stays: the daemon starts and logs a warning.
+  Its project_admin cannot list or manage the global secrets (that needs
+  sysadmin), and the project has no secrets of its own.
 
 ### 16b.3 Grants
 
@@ -2307,6 +2321,21 @@ grant change applies at the next start of the agent; the brokers and
   - The grants of each secret in the file match the file: the import adds,
     changes, and removes grants. A grant to an agent or a project that
     does not exist yet is skipped with a warning; the next import adds it.
+  - A new grant, or a wider grant, of a secret that has a value waits for
+    the operator (review S8, 2026-10-29). Wider is `use` to `read`, or a
+    new or changed `env`. The plan shows it with `"approval": "needed"`.
+    An apply makes it only with `approve_grants` (`terrarium admin config
+    pull --apply --approve-grants`, or `sync`). Only the operator can give
+    `approve_grants`; for a sysadmin agent it is `403`. Without it, the
+    apply holds the grant (`"approval": "held"`), and the export stays
+    pending, so the next pull plans it again. A grant of a placeholder
+    applies, because it gives nothing. A narrower grant and a revoke
+    apply. The audit row of an approved grant has `"approved": true`.
+    Reason: write access to the config remote plus one sysadmin pull must
+    not give the value of a secret to any agent.
+  - The operator sets the value of a placeholder after its grants exist.
+    The grants then deliver the value. The dashboard shows the grants of
+    the secret before the operator sets the value.
   - Each change writes the audit row of the store (`secret.put`,
     `secret.delete`, `secret.grant`, `secret.revoke`) with `"source":
     "config"`. After the import the daemon builds the redaction matcher
@@ -2316,9 +2345,9 @@ grant change applies at the next start of the agent; the brokers and
 ### 16b.6 Redaction
 
 The daemon keeps an Aho-Corasick matcher of each secret field of 8 or more
-bytes, and of each subscription API key. It rebuilds the matcher after each
-change. It replaces each match with `[secret:<name>]` (and
-`[secret:subscription/<name>]`) before it stores or shows:
+bytes, and of each subscription API key. It replaces each match with
+`[secret:<name>]` (and `[secret:subscription/<name>]`) before it stores or
+shows:
 
 - transcripts and the session view, runner logs, and the PTY screen
   snapshots;
@@ -2330,6 +2359,65 @@ The live terminal stream goes to the operator only and is not redacted.
 Redaction is a guard against accidents. It does not stop an agent with a
 `read` grant from sending a value out in a changed form (for example,
 base64).
+
+Rules after the security review of 2026-10-29 (S4, S5, S11):
+
+- **Keys and identifiers stay.** In a JSON record (an event, a trigger
+  payload, an audit detail), the daemon redacts string values only. It
+  never changes an object key. It does not change the value of an
+  identifier key: `id`, `ids`, `actor`, `agent`, `agents`, `project`,
+  `projects`, `kind`, `grantee`, `grantee_label`, `scope`, `name`, `by`,
+  `created_by`, `from`, `to`, `level`, `action`, `target`, `schedule`,
+  `run`, `event`, `session`, `card`, `thread`, `subscription`, `harness`,
+  `status`, `state`, and each key that ends in `_id`, `_ids`, or `_name`.
+  A tool input in a transcript is text of an agent: the daemon redacts
+  each of its string values.
+- **No identifier values.** A put (API, CLI, dashboard, generate) refuses
+  a secret field, or a line of 8 or more bytes of it, that looks like an
+  identifier: a ULID, an actor label (`agent:<ULID>`), a word of the
+  records (`operator`, `sysadmin`, `grantee_label`, the kind and field
+  names), or a name of this instance (a project, an agent,
+  `project/agent`, a repo, a host, a target, a subscription, a schedule,
+  a template, an event source, a secret). The answer is `422`.
+- **Weak values.** A value shorter than 16 bytes is weak when it is one
+  lower-case word, name, or number (`a-z`, `0-9`, `._:/-`), one word of
+  letters only, or has less than 28 bits of Shannon entropy. The put
+  refuses a weak token, API key, or private key (`422`): a machine makes
+  these values. The put stores a weak login password, `ssh_key`
+  passphrase, or `generic` field, because a person chooses it and a
+  target needs it. The answer of the put and its audit row have a
+  warning. The matcher leaves the value out. Reason: a weak value matches
+  ordinary text, so it blinds records, and a guess finds it easily
+  anyway.
+- **The matcher checks again.** At each build, the matcher leaves out
+  each value (or line) that is an identifier, a name of this instance, or
+  weak. This covers the secrets from before the check, the migration of
+  the old files, and a name that is made after the secret.
+- **A count.** An audit row with a redacted match has `"redacted": <n>`
+  in its detail.
+- **Labels by view (S5).** The label shows the secret name only to a
+  caller who may see it. At write time, the view is the writer's. The
+  operator and a sysadmin agent see each name. Another agent sees the
+  names of the secrets of its own project, and `[secret]` for a global
+  secret, a subscription key, or a secret of another project. Each other
+  actor (`system`, a trigger, an event source) gets `[secret]`, because
+  its text can come from any agent. At read time (a transcript, a screen
+  snapshot, an upload), the view is the reader's. The log of a process
+  wait uses the view of the project of the wait.
+- **Residual risk.** Redaction is still a guess oracle. An agent that
+  writes a guess and reads it back learns that the guess is a stored
+  value, also when the label is `[secret]`. The view removes the name,
+  not the match. The weak-value rules make a guess list less useful; they
+  do not stop it. The daemon does not redact a weak value that a person
+  chose.
+- **No unredacted window (S11).** A write that adds a value (a secret
+  put, a generated key, a stored subscription key) builds the new matcher
+  in its own transaction, before the commit. It swaps the matcher in
+  before it lets the database lock go. Each write takes its matcher after
+  it gets the lock. So no write stores a new value with the old matcher.
+  A build failure fails the put. A delete (a secret, a project, a
+  subscription) builds the matcher after its commit: until then, the old
+  matcher redacts more, never less.
 
 ### 16b.6a SSH keys for targets
 

@@ -152,6 +152,7 @@ async fn transcript(
         loc,
         active,
         &q,
+        &crate::secrets::redact::view_of(&actor),
     )
     .await?;
     Ok(Json(body))

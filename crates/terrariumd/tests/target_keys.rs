@@ -61,7 +61,7 @@ async fn a_target_credential_must_name_a_secret_of_its_kind_and_scope() {
     let r = td
         .post(
             "/api/secrets",
-            json!({"name": "tok", "kind": "token", "fields": {"value": "ghp_tokens3cret"}}),
+            json!({"name": "tok", "kind": "token", "fields": {"value": "ghp_tokens3cretValue"}}),
         )
         .await;
     assert_eq!(r.status.as_u16(), 201);

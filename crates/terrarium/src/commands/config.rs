@@ -68,15 +68,25 @@ pub async fn config(ctx: &Ctx, cmd: &ConfigCmd) -> anyhow::Result<()> {
                 });
             })
         }
-        ConfigCmd::Pull { apply } => {
+        ConfigCmd::Pull {
+            apply,
+            approve_grants,
+        } => {
             let v = ctx
                 .api
-                .post("/api/config/pull", Some(json!({"apply": apply})))
+                .post(
+                    "/api/config/pull",
+                    Some(json!({"apply": apply, "approve_grants": approve_grants})),
+                )
                 .await?;
             ctx.emit(&v, print_merge)
         }
-        ConfigCmd::Sync { message, apply } => {
-            let mut body = json!({"apply": apply});
+        ConfigCmd::Sync {
+            message,
+            apply,
+            approve_grants,
+        } => {
+            let mut body = json!({"apply": apply, "approve_grants": approve_grants});
             if let Some(m) = message {
                 body["message"] = m.clone().into();
             }
@@ -323,8 +333,15 @@ fn print_secrets(c: &Ctx, v: &Value) {
             .as_str()
             .map(|g| format!(" {g}"))
             .unwrap_or_default();
+        // A new or wider grant of a secret with a value (docs/api.md §25.3).
+        let approval = match ch["approval"].as_str() {
+            Some("needed") => " (needs the operator: --apply --approve-grants)",
+            Some("held") => " (held: not made; the operator applies it with --approve-grants)",
+            Some("approved") => " (approved)",
+            _ => "",
+        };
         c.line(format!(
-            "secrets: {:<7} {}{grantee}",
+            "secrets: {:<7} {}{grantee}{approval}",
             field(ch, "action"),
             field(ch, "secret")
         ));

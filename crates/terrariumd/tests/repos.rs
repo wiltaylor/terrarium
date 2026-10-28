@@ -89,7 +89,7 @@ async fn credentials_are_write_only() {
     let r = td
         .post(
             "/api/credentials",
-            json!({"name": "github-deploy", "kind": "token", "value": "ghp_s3cret"}),
+            json!({"name": "github-deploy", "kind": "token", "value": "ghp_s3cretT0kenValue"}),
         )
         .await;
     let info = r.ok().clone();
