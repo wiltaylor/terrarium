@@ -71,6 +71,28 @@ describe("mock parity with docs/api.md", () => {
     s.close();
   });
 
+  it("links agent comments to sessions that outlive agent rm (docs/api.md §6.6)", async () => {
+    const api = mock();
+    const cards = (await api.cards.list("terrarium")).items;
+    const card = cards.find((c) => c.comments.some((cm) => cm.session))!;
+    const cm = card.comments.find((x) => x.session)!;
+    const ref = cm.session!;
+    expect(ref).toMatchObject({ agent_id: cm.author, project: "terrarium", removed: false });
+    expect(card.comments.filter((x) => x.author === "operator").every((x) => !x.session)).toBe(true);
+    expect((await api.cards.sessions(card.id)).map((s) => s.id)).toContain(ref.id);
+    expect(await api.sessions.get(ref.id)).toMatchObject({ id: ref.id, agent: ref.agent, removed: false });
+
+    await api.agents.remove(ref.agent_id, true);
+    const after = await api.cards.get(card.id);
+    expect(after.comments.find((x) => x.id === cm.id)!.session).toMatchObject({ id: ref.id, removed: true, agent: ref.agent });
+    const listed = (await api.cards.sessions(card.id)).find((s) => s.id === ref.id)!;
+    expect(listed).toMatchObject({ removed: true });
+    expect(listed.ended_at).toBeTruthy();
+    const page = await api.sessions.transcript(ref.id);
+    expect(page).toMatchObject({ session: ref.id, harness: ref.harness, active: false });
+    await expect(api.sessions.get("NOPE")).rejects.toMatchObject({ status: 404 });
+  });
+
   it("emits card events with data.card_id, the column, and the assignee as agent", async () => {
     const api = mock();
     const frames: AgentEvent[] = [];

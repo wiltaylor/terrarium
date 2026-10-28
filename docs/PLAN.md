@@ -1629,6 +1629,20 @@ pointer.
 Status link: the dashboard shows each agent's current `in_progress` card next
 to its status badge, so "working" always answers "on what".
 
+Session links: the operator can read the work behind a card. An agent
+comment stores the agent's current session (`card_comments.session_id`).
+Each path that writes a comment does this: a comment, a move with a
+comment, a patch with a comment, and the note on a linked card. Operator
+comments have no session. A `card` event of an agent carries its session
+in `data.actor_session`. `GET /api/cards/{id}/sessions` lists the distinct
+sessions of the card. The dashboard shows "View session" on each agent
+comment and on each history line with a session. A "Sessions" section on
+the card lists the sessions with the agent, the harness, the time range,
+and a "removed" chip for a deleted agent. The link opens a read-only
+session page (`/sessions/<id>`). The links work after `agent rm`: the
+session rows stay, and the transcript comes from the session archive
+(§18, api.md §6.6).
+
 ---
 
 ## 14. Memory graph
@@ -2459,6 +2473,16 @@ Rust crates: `tokio`, `axum`, `portable-pty`, `vt100`, `rusqlite`, `clap`,
   session reuses its row: the row is current again, and its `resumes`
   count and `resumed_at` change. Only a new harness session makes a new
   row (api.md §6.3).
+- Sessions outlive their agent. A delete keeps the session rows (no
+  cascade since migration 37) and ends the open ones with `removed`. Before
+  the agent dir goes to the trash, the daemon copies the session file of
+  each session to
+  `<state>/archive/agents/<agent>/<harness>/<session>/<file name>`. Only the
+  session files go, not the workspace. The transcript endpoints read this
+  copy for a deleted agent (api.md §6.6). The archive of an agent stays
+  `TERRARIUM_SESSION_ARCHIVE_DAYS` days. The default is the trash
+  retention (`TERRARIUM_TRASH_DAYS`, 7). `0` keeps it forever. The session
+  rows stay after a prune.
 - The daemon restarts without killing agents. The runner holds the PTY. On
   start the daemon reconnects to each runner socket and reconciles state.
 - The container restarts with `restart: unless-stopped`. On container start the

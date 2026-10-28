@@ -36,6 +36,7 @@ import type {
   Session,
   AgentScreen,
   SessionGrant,
+  SessionRef,
   SessionInfo,
   TranscriptFrame,
   ArtifactAttach,
@@ -531,6 +532,16 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     const list = w.transcripts[s.id];
     return { ...s, transcript: list !== undefined, blocks: list?.length ?? 0, title: titleOf(list), active: s.current && !!a && LIVE.includes(a.status) };
   };
+  /** A session as a link (docs/api.md §6.6): its agent, or the tombstone of a deleted one. */
+  const sessionRef = (id: string): SessionRef | undefined => {
+    const s = w.sessions.find((x) => x.id === id);
+    if (!s) return undefined;
+    const a = w.agents.find((x) => x.id === s.agent);
+    const gone = a ? undefined : w.removedAgents.find((x) => x.id === s.agent);
+    const who = a ?? gone;
+    if (!who) return undefined;
+    return { id: s.id, agent_id: s.agent, agent: who.name, project: who.project, harness: who.harness, started_at: s.started_at, ...(s.ended_at ? { ended_at: s.ended_at } : {}), removed: !a };
+  };
   /** A fake `text/event-stream` body: the blocks after `after`, then live frames until the client aborts. */
   const transcriptBody = (sessionId: string, after: number | undefined, signal: AbortSignal): AsyncIterable<string> => {
     const queue: string[] = [];
@@ -805,7 +816,22 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     const dep = w.cards.find((x) => x.id === d);
     return dep && dep.column !== "done" && !dep.archived;
   });
-  const view = (c: Card): Card => ({ ...c, blocked_by: blockedBy(c) });
+  // The session of a comment renders at read time, like the daemon: `removed` follows the agent.
+  const view = (c: Card): Card => ({
+    ...c,
+    blocked_by: blockedBy(c),
+    comments: c.comments.map((cm) => ({ ...cm, session: cm.session ? (sessionRef(cm.session.id) ?? null) : null })),
+  });
+  /** The distinct sessions of a card's comments and card events (`data.actor_session`), oldest first. */
+  const cardSessions = (c: Card): SessionRef[] => {
+    const ids = new Set<string>();
+    for (const cm of c.comments) if (cm.session) ids.add(cm.session.id);
+    for (const e of w.events) if (e.kind === "card" && e.card === c.id && typeof e.data.actor_session === "string") ids.add(e.data.actor_session);
+    return [...ids]
+      .map(sessionRef)
+      .filter((s): s is SessionRef => !!s)
+      .sort((a, b) => a.started_at.localeCompare(b.started_at) || a.id.localeCompare(b.id));
+  };
   const activeIn = (proj: string, column: string) => w.cards.filter((c) => c.project === proj && c.column === column && !c.archived);
   const boardOf = (name: string) => {
     const p = project(name);
@@ -830,7 +856,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     emit({ kind: "card", actor: "operator", ...(as ? { agent: as.name, agent_id: as.id } : {}), project: c.project, card: c.id, summary, data: { card_id: c.id, change, title: c.title, column: c.column, ...data } });
   };
   const comment = (c: Card, body: string) => {
-    const cm: CardComment = { id: ulid("cmt"), author: "operator", author_name: "operator", body, created_at: iso() };
+    const cm: CardComment = { id: ulid("cmt"), author: "operator", author_name: "operator", body, created_at: iso(), session: null };
     c.comments.push(cm);
     return cm;
   };
@@ -1922,6 +1948,13 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           if (LIVE.includes(a.status) && !confirm) fail(409, "confirm_required", `agent \`${a.project}/${a.name}\` has a live session; send ?confirm=true`);
           if (LIVE.includes(a.status)) setStatus(a, "stopped", "stopped by operator");
           w.agents = w.agents.filter((x) => x.id !== a.id);
+          // The sessions stay and end; the tombstone names the agent (docs/api.md §6.6).
+          w.removedAgents.push({ id: a.id, project: a.project, name: a.name, harness: a.harness });
+          for (const s of w.sessions.filter((x) => x.agent === a.id)) {
+            s.current = false;
+            s.ended_at ??= iso();
+            s.outcome ??= "removed";
+          }
           audit("agent.delete", a.id, a.project, { name: a.name });
           emit({ kind: "agent_removed", actor: "operator", agent: a.name, agent_id: a.id, project: a.project, summary: `${a.project}/${a.name}: removed`, data: { agent_id: a.id, project: a.project, name: a.name } });
         }),
@@ -2264,10 +2297,30 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           cardEvent(c, "linked", `operator linked ${kind} ${ref} to ${c.id}`, { kind, ref });
           return view(c);
         }),
+      sessions: (id) => reply(() => cardSessions(cardById(id))),
       events: (id, q = {}) =>
         reply(() => {
           const c = cardById(id);
           return eventsAfter(q, (e) => e.card === c.id);
+        }),
+    },
+
+    sessions: {
+      get: (id) =>
+        reply(() => {
+          const r = sessionRef(id) ?? fail(404, "not_found", `no session \`${id}\``);
+          const s = w.sessions.find((x) => x.id === id)!;
+          return { ...r, ...(s.harness_session_id ? { harness_session_id: s.harness_session_id } : {}), active: !r.removed && (sessionView(s).active ?? false) };
+        }),
+      transcript: (id, q = {}) =>
+        reply(() => {
+          const r = sessionRef(id) ?? fail(404, "not_found", `no session \`${id}\``);
+          const s = w.sessions.find((x) => x.id === id)!;
+          const after = Math.max(0, Number(q.after ?? 0) || 0);
+          const limit = Math.min(Math.max(1, Number(q.limit ?? 500) || 500), 1000);
+          const all = blocksOf(s.id).filter((b) => b.seq > after);
+          const blocks = all.slice(0, limit);
+          return { session: s.id, harness: r.harness, active: !r.removed && (sessionView(s).active ?? false), blocks, next_after: blocks.at(-1)?.seq ?? after, complete: all.length <= limit };
         }),
     },
 

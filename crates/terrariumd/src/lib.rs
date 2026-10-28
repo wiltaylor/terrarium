@@ -35,6 +35,7 @@ pub mod runner_supervisor;
 pub mod sandbox;
 pub mod scheduler;
 pub mod secrets;
+pub mod session_archive;
 pub mod settings;
 pub mod skills;
 pub mod ssh_agent;
@@ -418,7 +419,8 @@ fn spawn_account_migration(state: Shared) -> JoinHandle<()> {
 /// Run the artifact retention prune (PLAN §15.2): first one hour after the
 /// start, then every `[artifacts] prune_interval_hours` (default 24). The
 /// same timer prunes the trash of deleted agents (`TERRARIUM_TRASH_DAYS`,
-/// [`trash::prune_trash`]), the revoked sessions past their `exp`, and the
+/// [`trash::prune_trash`]), the session archive of deleted agents
+/// ([`session_archive::prune_archive`]), the revoked sessions past their `exp`, and the
 /// schedule runs past the newest 500 of each schedule, and the webhook
 /// delivery IDs older than 7 days, and the turn attachments older than 7
 /// days ([`api::attachments::prune`]).
@@ -454,6 +456,20 @@ fn spawn_prune_timer(state: Shared) -> JoinHandle<()> {
                 Ok(n) if n > 0 => info!(files = n, "attachment prune done"),
                 Ok(_) => {}
                 Err(e) => warn!("attachment prune task failed: {e}"),
+            }
+            let dir = state.state_dir.clone();
+            let max_age = std::time::Duration::from_secs(session_archive::archive_days() * 86_400);
+            match tokio::task::spawn_blocking(move || {
+                session_archive::prune_archive(&dir, std::time::SystemTime::now(), max_age)
+            })
+            .await
+            {
+                Ok(Ok(removed)) if !removed.is_empty() => {
+                    info!(agents = removed.len(), "session archive prune done");
+                }
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => warn!("session archive prune failed: {e}"),
+                Err(e) => warn!("session archive prune task failed: {e}"),
             }
             let now = chrono::Utc::now().timestamp();
             if let Err(e) = state

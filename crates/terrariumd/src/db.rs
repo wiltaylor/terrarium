@@ -1206,6 +1206,47 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (subscription, window, threshold)
     );
     "#,
+    // 37: sessions outlive their agent (PLAN §13, §18). A card comment
+    // links to the session that wrote it, and the link must still work
+    // after `agent rm`. So `sessions` loses its `ON DELETE CASCADE`: a
+    // rebuild, because SQLite cannot drop a foreign key in place. No
+    // table refers to `sessions` (the events table has no foreign keys
+    // since migration 2), so the `DROP TABLE` deletes nothing else.
+    // `agent_id` is an agent, else a tombstone in `agents_removed`.
+    // `harness` is the harness of a deleted agent (NULL: the agent's own).
+    // `archive` is the copy of the session file under `<state>/archive/`
+    // (`crate::session_archive`), relative to the state dir.
+    // `card_comments.session_id` is the session of the agent that wrote
+    // the comment (NULL: the operator, or no session).
+    //
+    // Self-contained: when another branch takes number 37, move this
+    // entry to the end of the list; it depends on nothing after 35. The
+    // test finds it by the name `sessions_rebuilt`, not by its number.
+    r#"
+    CREATE TABLE sessions_rebuilt (
+        id                 TEXT PRIMARY KEY,    -- ULID
+        agent_id           TEXT NOT NULL,       -- agents(id) or agents_removed(id)
+        harness_session_id TEXT,
+        current            INTEGER NOT NULL DEFAULT 0,
+        started_at         TEXT NOT NULL,
+        ended_at           TEXT,
+        end_reason         TEXT,
+        resumes            INTEGER NOT NULL DEFAULT 0,
+        resumed_at         TEXT,
+        harness            TEXT,
+        archive            TEXT
+    );
+    INSERT INTO sessions_rebuilt (id, agent_id, harness_session_id, current, started_at,
+                              ended_at, end_reason, resumes, resumed_at)
+        SELECT id, agent_id, harness_session_id, current, started_at,
+               ended_at, end_reason, resumes, resumed_at
+        FROM sessions;
+    DROP TABLE sessions;
+    ALTER TABLE sessions_rebuilt RENAME TO sessions;
+    CREATE INDEX sessions_agent ON sessions(agent_id, started_at);
+    ALTER TABLE card_comments ADD COLUMN session_id TEXT;
+    CREATE INDEX card_comments_session ON card_comments(session_id);
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call
@@ -2180,6 +2221,57 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    /// Migration 37 keeps every session row and drops the cascade: a
+    /// deleted agent keeps its sessions. Found by its content, so that a
+    /// renumber does not break the test.
+    #[test]
+    fn migration_37_keeps_sessions_of_a_deleted_agent() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        let n = MIGRATIONS
+            .iter()
+            .position(|m| m.contains("sessions_rebuilt"))
+            .unwrap();
+        for (i, sql) in MIGRATIONS.iter().enumerate().take(n) {
+            conn.execute_batch(sql).unwrap();
+            conn.pragma_update(None, "user_version", i + 1).unwrap();
+        }
+        conn.execute_batch(
+            "INSERT INTO projects (name, created_at, updated_at) VALUES ('p', 't', 't');
+             INSERT INTO agents (id, name, project, harness, workspace, created_at, updated_at)
+               VALUES ('A1', 'a', 'p', 'claude', '/w', 't', 't');
+             INSERT INTO sessions (id, agent_id, harness_session_id, current, started_at,
+                                   resumes, resumed_at)
+               VALUES ('S1', 'A1', 'h1', 1, 't0', 2, 't1');",
+        )
+        .unwrap();
+        migrate(&mut conn).unwrap();
+        let row = |c: &Connection| -> (String, Option<String>, i64, i64, Option<String>) {
+            c.query_row(
+                "SELECT agent_id, harness_session_id, current, resumes, resumed_at
+                 FROM sessions WHERE id = 'S1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            row(&conn),
+            ("A1".into(), Some("h1".into()), 1, 2, Some("t1".into()))
+        );
+        conn.execute("DELETE FROM agents WHERE id = 'A1'", [])
+            .unwrap();
+        assert_eq!(row(&conn).0, "A1", "no cascade");
+        let col: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('card_comments') WHERE name = 'session_id'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(col, 1);
     }
 
     #[test]

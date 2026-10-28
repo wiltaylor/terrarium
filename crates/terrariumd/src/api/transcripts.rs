@@ -189,7 +189,7 @@ fn locate_error(e: LocateError) -> ApiError {
 }
 
 #[derive(Debug, Default, Deserialize)]
-struct TranscriptQuery {
+pub(super) struct TranscriptQuery {
     /// Only blocks with a larger `seq` (exclusive).
     after: Option<u64>,
     limit: Option<usize>,
@@ -243,11 +243,37 @@ async fn transcript(
     let row = session_row(&state, &a, &key).await?;
     let active = row.current && live(&state, &a.agent).await;
     let loc = located(&state, &a.agent, &row, active).await?;
+    let body = transcript_page(
+        &state,
+        &a.agent.id.to_string(),
+        &row.id,
+        a.agent.harness,
+        loc,
+        active,
+        &q,
+    )
+    .await?;
+    Ok(Json(body))
+}
+
+/// The body of a transcript page: the one place that reads blocks for
+/// `/api/agents/{id}/sessions/{s}/transcript` and
+/// `/api/sessions/{id}/transcript`, so a filter of the blocks (such as a
+/// redaction) covers both.
+pub(super) async fn transcript_page(
+    state: &Shared,
+    agent: &str,
+    session: &str,
+    default_harness: HarnessId,
+    loc: Option<Located>,
+    active: bool,
+    q: &TranscriptQuery,
+) -> ApiResult<Value> {
     let after = q.after.unwrap_or(0);
     let limit = q.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
     let (mut blocks, total) = match &loc {
         Some(loc) => {
-            let (st, l) = (state.clone(), loc.clone());
+            let (st, l) = (Arc::clone(state), loc.clone());
             tokio::task::spawn_blocking(move || page(&st, &l, after, limit))
                 .await
                 .map_err(|e| ApiError::internal(e.to_string()))?
@@ -256,20 +282,20 @@ async fn transcript(
         None => (Vec::new(), 0),
     };
     for b in &mut blocks {
-        b.session.clone_from(&row.id);
+        b.session = session.to_owned();
     }
-    annotate(&state, &a.agent.id.to_string(), &mut blocks).await;
-    redact_blocks(&state, &mut blocks);
+    annotate(state, agent, &mut blocks).await;
+    redact_blocks(state, &mut blocks);
     let next_after = blocks.last().map_or(after, |b| b.seq);
-    let harness: HarnessId = loc.as_ref().map_or(a.agent.harness, |l| l.harness);
-    Ok(Json(json!({
-        "session": row.id,
+    let harness: HarnessId = loc.as_ref().map_or(default_harness, |l| l.harness);
+    Ok(json!({
+        "session": session,
         "harness": harness,
         "active": active,
         "blocks": blocks,
         "next_after": next_after,
         "complete": next_after >= total,
-    })))
+    }))
 }
 
 #[derive(Debug, Default, Deserialize)]

@@ -42,6 +42,8 @@ export interface MockWorld {
   repos: Repo[];
   agents: Agent[];
   sessions: Session[];
+  /** The tombstones of deleted agents (the daemon's `agents_removed`); their sessions stay (docs/api.md §6.6). */
+  removedAgents: { id: string; project: string; name: string; harness: Agent["harness"] }[];
   /** Transcript blocks by terrarium session ID, oldest first (docs/api.md §6, transcripts). */
   transcripts: Record<string, Block[]>;
   /** The event log, oldest first, like the daemon's. */
@@ -310,7 +312,11 @@ export function seed(now: number = Date.now()): MockWorld {
   let cid = 0;
   const comment = (author: string, body: string, min: number) => {
     const w = who(author);
-    return { id: fakeUlid("cmt", ++cid), author: w.addr, author_name: w.label, body, created_at: ago(min) };
+    // An agent's comment links to its session (the current one, else its newest).
+    const a = w.kind === "agent" ? byName(author) : undefined;
+    const s = a ? (sessions.find((x) => x.agent === a.id && x.current) ?? sessions.find((x) => x.agent === a.id)) : undefined;
+    const session = a && s ? { id: s.id, agent_id: a.id, agent: a.name, project: a.project, harness: a.harness, started_at: s.started_at, ...(s.ended_at ? { ended_at: s.ended_at } : {}), removed: false } : null;
+    return { id: fakeUlid("cmt", ++cid), author: w.addr, author_name: w.label, body, created_at: ago(min), session };
   };
 
   const cards: Card[] = [
@@ -839,7 +845,7 @@ ${XSS_DOCUMENT}
 
   return {
     schedules: sched.schedules, scheduleRuns: sched.runs, eventSources: seedEventSources(now), eventSourceSecrets: {}, templates: seedTemplates(now),
-    projects, repos, agents, sessions, transcripts: seedTranscripts(agents, sessions), events, columns: { terrarium: COLUMNS.map((c) => ({ ...c })), webshop: COLUMNS.map((c) => ({ ...c })) },
+    projects, repos, agents, sessions, removedAgents: [], transcripts: seedTranscripts(agents, sessions), events, columns: { terrarium: COLUMNS.map((c) => ({ ...c })), webshop: COLUMNS.map((c) => ({ ...c })) },
     cards, memories, links, pages, revisions, artifacts, artifactBodies, versions, subscriptions, quota, usage, holds: [], apiKeys, mail, heldMail: [fakeUlid("msg", 11)], targets, hostSnapshots, leases, ...waitSeed, hosts, hostTokens, audit, seq,
   };
 }

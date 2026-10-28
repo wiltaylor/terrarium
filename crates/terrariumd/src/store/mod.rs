@@ -17,6 +17,7 @@ pub mod projects;
 pub mod questions;
 pub mod repos;
 pub mod schedules;
+pub mod session_refs;
 pub mod subscriptions;
 pub mod sync;
 pub mod targets;

@@ -26,7 +26,7 @@ import {
   tailOnScroll,
   type RenderItem,
 } from "./model";
-import { createTranscript, type Change } from "./transcript";
+import { createTranscript, type Change, type TranscriptSource } from "./transcript";
 
 const timeOf = (at: string | null | undefined) => (at ? new Date(at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "");
 
@@ -36,7 +36,12 @@ export type TranscriptState = ReturnType<typeof createTranscript>;
  * The transcript of `session` with its scroll state. `TranscriptLog`
  * renders it; the caller reads `t` for the status (`active`, the stream).
  */
-export function createTranscriptView(agent: () => Agent, session: () => Session | undefined) {
+export function createTranscriptView(
+  agent: () => Pick<Agent, "id" | "project">,
+  session: () => Session | undefined,
+  /** The page source. Default: the agent's own transcript endpoint. The session page passes `GET /api/sessions/{id}/transcript`. */
+  fetch: TranscriptSource["fetch"] = (aid, sid, after, limit) => api.agents.transcript(aid, sid, { after, limit }),
+) {
   let scroller: HTMLDivElement | undefined;
   const [tail, setTail] = createSignal(TAIL_START);
   const toBottom = () => {
@@ -65,7 +70,7 @@ export function createTranscriptView(agent: () => Agent, session: () => Session 
   const t = createTranscript({
     agentId: () => agent().id,
     session,
-    fetch: (aid, sid, after, limit) => api.agents.transcript(aid, sid, { after, limit }),
+    fetch,
     stream: (aid, sid, after) => api.agents.transcriptStream(aid, sid, { after }),
     onChange,
   });

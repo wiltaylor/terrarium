@@ -1,4 +1,4 @@
-import { useParams, useSearchParams } from "@solidjs/router";
+import { A, useParams, useSearchParams } from "@solidjs/router";
 import { createEffect, createResource, createSignal, For, on, onCleanup, Show } from "solid-js";
 import { createPagedList } from "../../components/paged";
 import { HoldBadge } from "../../components/HoldBadge";
@@ -7,6 +7,7 @@ import { ConfirmButton, Drawer, ErrorBanner, LoadMore, Modal, PageHead } from ".
 import type { Card } from "../../api/types";
 import { ago, compact, humanize } from "../../lib/format";
 import { cardsIn, createBoardStore } from "../../stores/board";
+import { cardSessionRows, commentSessions, sessionHref, sessionRange } from "./sessions";
 import { agents, api, events } from "../../stores";
 
 type Drop = { column: string; index: number };
@@ -284,6 +285,13 @@ function CardDrawer(props: {
     (e) => e.id,
   );
   const projectAgents = () => agents.inProject(props.card.project);
+  // docs/api.md §8 `GET /api/cards/{id}/sessions`; it loads again when the card changes (a new comment).
+  // An older daemon without it: the sessions of the comments.
+  const [sessions] = createResource(
+    () => [props.card.id, props.card.updated_at, props.card.comments.length] as const,
+    ([id]) => api.cards.sessions(id).catch(() => null),
+  );
+  const sessionRows = () => cardSessionRows(sessions.latest ?? commentSessions(props.card), props.card);
   // docs/api.md §16.3 `GET /api/cards/{id}/usage`. A daemon without it gives no line.
   const [usage] = createResource(
     () => props.card.id,
@@ -410,6 +418,16 @@ function CardDrawer(props: {
             <div class="comment">
               <div class="small muted">
                 <strong style={{ color: "var(--text)" }}>{c.author_name ?? c.author}</strong> · {ago(c.created_at)}
+                <Show when={c.session}>
+                  {(s) => (
+                    <>
+                      {" · "}
+                      <A href={sessionHref(s().id)} title={`${s().harness} session ${s().id}`}>
+                        View session
+                      </A>
+                    </>
+                  )}
+                </Show>
               </div>
               <div style={{ "white-space": "pre-wrap" }}>{c.body}</div>
             </div>
@@ -438,6 +456,27 @@ function CardDrawer(props: {
         </form>
       </section>
 
+      <section class="stack" style={{ gap: "8px" }}>
+        <h3 style={{ margin: 0 }}>Sessions</h3>
+        <For each={sessionRows()} fallback={<p class="muted small">No agent session worked on this card.</p>}>
+          {(r) => (
+            <div class="row small" style={{ gap: "6px", "flex-wrap": "wrap" }}>
+              <A href={r.href}>{r.agent}</A>
+              <span class="muted">{r.session.harness}</span>
+              <span class="muted" title={r.session.started_at}>
+                {sessionRange(r.session)}
+              </span>
+              <Show when={r.comments}>
+                <span class="muted">
+                  · {r.comments} {r.comments === 1 ? "comment" : "comments"}
+                </span>
+              </Show>
+              <For each={r.chips}>{(c) => <span class={`chip ${c.tone}`}>{c.label}</span>}</For>
+            </div>
+          )}
+        </For>
+      </section>
+
       <details>
         <summary>History</summary>
         <ul class="small">
@@ -445,6 +484,14 @@ function CardDrawer(props: {
             {(e) => (
               <li>
                 {ago(e.at)}: {e.summary}
+                <Show when={typeof e.data.actor_session === "string" && (e.data.actor_session as string)}>
+                  {(sid) => (
+                    <>
+                      {" · "}
+                      <A href={sessionHref(sid())}>View session</A>
+                    </>
+                  )}
+                </Show>
               </li>
             )}
           </For>

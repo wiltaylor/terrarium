@@ -14,6 +14,8 @@ import { createTranscriptStream, type TranscriptStream } from "./sse";
 import { onArtifactOrigin } from "../lib/artifact-origin";
 import { withScope } from "../lib/target-scope";
 import type {
+  SessionDetail,
+  SessionRef,
   Agent,
   Attachment,
   AgentCreate,
@@ -300,6 +302,16 @@ export interface Api {
     comment(id: string, body: string): Promise<Card>;
     link(id: string, kind: CardLinkKind, ref: string): Promise<Card>;
     events(id: string, q?: EventQuery): Promise<Page<AgentEvent>>;
+    /** `GET /api/cards/{id}/sessions` (docs/api.md §8): the sessions of the card's comments and card events, oldest first. */
+    sessions(id: string): Promise<SessionRef[]>;
+  };
+
+  /** Agent sessions by their own ID (docs/api.md §6.6); they work after `agent rm`. Read-only. */
+  sessions: {
+    /** `GET /api/sessions/{id}`. */
+    get(id: string): Promise<SessionDetail>;
+    /** `GET /api/sessions/{id}/transcript?after=&limit=`: the same page as the agent transcript; a deleted agent's comes from the archive. */
+    transcript(id: string, q?: { after?: number; limit?: number }): Promise<TranscriptPage>;
   };
 
   /** docs/api.md §10. `id` is `MEM-n` or `project/MEM-n`; pass the `key` from the operator. */
@@ -778,6 +790,12 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       comment: (id, body) => post(`${c(id)}/comments`, { body }),
       link: (id, kind, ref) => post(`${c(id)}/links`, { kind, ref }),
       events: (id, q = {}) => page(`${c(id)}/events`, { ...q }),
+      sessions: (id) => get(`${c(id)}/sessions`),
+    },
+
+    sessions: {
+      get: (id) => get(`/api/sessions/${seg(id)}`),
+      transcript: (id, q = {}) => get(`/api/sessions/${seg(id)}/transcript`, { after: q.after, limit: q.limit }),
     },
 
     memories: {

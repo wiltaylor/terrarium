@@ -255,3 +255,48 @@ async fn transcripts_are_redacted_at_read_time() {
     assert!(text.contains(&format!("deploy={PROJECT_VALUE}")), "{text}");
     assert!(text.contains("gh=[secret:gh]"), "{text}");
 }
+
+/// `GET /api/sessions/{id}/transcript` (the card's session link) goes
+/// through the same page code: it is redacted, also when it reads the
+/// archived copy after `agent rm`.
+#[tokio::test]
+async fn session_links_are_redacted_too() {
+    let td = TestDaemon::start().await;
+    td.project("p").await;
+    let a = td.agent("p", "w", json!({})).await;
+    let id = a["id"].as_str().unwrap().to_owned();
+    td.post_empty(&format!("/api/agents/{id}/start")).await.ok();
+    td.wait_status(&id, "idle").await;
+    let mut s = Value::Null;
+    for _ in 0..200 {
+        let r = td.get(&format!("/api/agents/{id}/sessions")).await;
+        s = r.ok()[0].clone();
+        if s["harness_session_id"].is_string() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    store_secrets(&td).await;
+    let file = common::claude_project_dir(&td.state, &id).join(format!(
+        "{}.jsonl",
+        s["harness_session_id"].as_str().unwrap()
+    ));
+    let line = json!({"type": "user", "uuid": "u1", "timestamp": "2026-10-26T01:00:00.000Z",
+                      "message": {"role": "user", "content": leaky("typed")}})
+    .to_string()
+        + "\n";
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, line).unwrap();
+
+    let url = format!("/api/sessions/{}/transcript", s["id"].as_str().unwrap());
+    let r = td.get(&url).await;
+    let text = r.ok()["blocks"][0]["text"].as_str().unwrap().to_owned();
+    assert!(text.contains(EXPECTED), "{text}");
+
+    let r = td.delete(&format!("/api/agents/{id}?confirm=true")).await;
+    assert_eq!(r.status, 204, "{}", r.body);
+    let r = td.get(&url).await;
+    assert_redacted("the archived transcript", &r.ok().to_string());
+    let text = r.ok()["blocks"][0]["text"].as_str().unwrap().to_owned();
+    assert!(text.contains(EXPECTED), "{text}");
+}

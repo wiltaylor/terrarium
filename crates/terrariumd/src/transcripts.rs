@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use terrarium_core::tail::LineTail;
 use terrarium_core::transcript::{Transcript, TranscriptLog};
-use terrarium_core::{Agent, HarnessId};
+use terrarium_core::{Agent, AgentId, HarnessId};
 
 use crate::api::Shared;
 use crate::store::agents;
@@ -125,6 +125,19 @@ pub async fn locate(
     sid: &str,
     reported: Option<&str>,
 ) -> Result<Located, LocateError> {
+    locate_for(state, agent.id, agent.harness, sid, reported).await
+}
+
+/// [`locate`] by the agent ID and harness only: the archive
+/// (`crate::session_archive`) uses it for an agent that the store
+/// deleted already.
+pub async fn locate_for(
+    state: &Shared,
+    agent_id: AgentId,
+    agent_harness: HarnessId,
+    sid: &str,
+    reported: Option<&str>,
+) -> Result<Located, LocateError> {
     if sid.is_empty() {
         return Err(LocateError::Missing(
             "the harness has not reported its session yet".into(),
@@ -132,9 +145,9 @@ pub async fn locate(
     }
     let harness = reported
         .and_then(|r| harness_of_path(Path::new(r)))
-        .unwrap_or(agent.harness);
+        .unwrap_or(agent_harness);
     let home = state.usage.config.home(harness);
-    let harness_dir = terrarium_runner::harness_dir(&state.state_dir, agent.id);
+    let harness_dir = terrarium_runner::harness_dir(&state.state_dir, agent_id);
     let roots = transcript_roots(
         harness,
         &home,
@@ -150,7 +163,7 @@ pub async fn locate(
     let path = check_transcript(&candidate, harness, sid, &roots)
         .map_err(|e| LocateError::Refused(format!("{}: {e}", candidate.display())))?;
     if harness != HarnessId::Pi {
-        let (me, s) = (agent.id.to_string(), sid.to_owned());
+        let (me, s) = (agent_id.to_string(), sid.to_owned());
         let owner = state
             .db
             .read(move |c| agents::harness_session_owner(c, &s, &me))
@@ -172,19 +185,36 @@ pub async fn locate_session(
     agent: &Agent,
     session: &agents::Session,
 ) -> Result<Located, LocateError> {
-    let id = session.id.clone();
+    locate_row(
+        state,
+        agent.id,
+        agent.harness,
+        &session.id,
+        session.harness_session_id.as_deref(),
+    )
+    .await
+}
+
+/// [`locate_session`] by the parts of the row: the agent may be deleted.
+pub async fn locate_row(
+    state: &Shared,
+    agent_id: AgentId,
+    harness: HarnessId,
+    session: &str,
+    harness_session_id: Option<&str>,
+) -> Result<Located, LocateError> {
+    let id = session.to_owned();
     let reported = state
         .db
         .read(move |c| tstore::reported_transcript(c, &id))
         .await
         .map_err(|e| LocateError::Missing(e.to_string()))?;
     let (path, reported_sid) = reported.unwrap_or_default();
-    let sid = session
-        .harness_session_id
-        .clone()
+    let sid = harness_session_id
+        .map(str::to_owned)
         .or(reported_sid)
         .unwrap_or_default();
-    locate(state, agent, &sid, path.as_deref()).await
+    locate_for(state, agent_id, harness, &sid, path.as_deref()).await
 }
 
 /// The parse state of one file.

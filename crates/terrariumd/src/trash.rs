@@ -62,6 +62,10 @@ pub async fn stop_agent(state: &Shared, agent: AgentId) -> Result<(), Supervisor
 /// into the same trash entry. A failure is a warning only: the agent is
 /// gone from the store already.
 pub async fn trash_agent(state: &Shared, agent: AgentId, workspace: Option<PathBuf>) {
+    // --- session archive (PLAN §18): copy the session files out first,
+    // so that the card links to the sessions still open.
+    crate::session_archive::archive_agent(state, agent).await;
+    // --- end of the session archive.
     let state_dir = state.state_dir.clone();
     let id = agent.to_string();
     match tokio::task::spawn_blocking(move || {

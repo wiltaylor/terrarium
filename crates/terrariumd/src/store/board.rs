@@ -23,6 +23,7 @@ use crate::error::{ApiError, ApiResult, Code};
 use crate::events::EventDraft;
 use crate::policy;
 use crate::store::mail::{self, Address, Outgoing};
+use crate::store::session_refs::{self, SessionRef};
 use crate::store::{Page, Paged, agents, json_col, valid_name};
 
 /// The columns of a new board, in order.
@@ -60,6 +61,10 @@ pub struct Comment {
     pub author_name: String,
     pub body: String,
     pub created_at: String,
+    /// The session of the agent that wrote the comment; `null` for the
+    /// operator. It stays after the agent is deleted (`removed: true`).
+    #[serde(default)]
+    pub session: Option<SessionRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -284,7 +289,7 @@ fn unmet(conn: &Connection, id: &str) -> ApiResult<Vec<String>> {
 
 fn render(conn: &Connection, row: CardRow) -> ApiResult<Card> {
     let mut stmt = conn.prepare(
-        "SELECT id, author, body, created_at FROM card_comments WHERE card = ?1
+        "SELECT id, author, body, created_at, session_id FROM card_comments WHERE card = ?1
          ORDER BY created_at, id",
     )?;
     let raw = stmt
@@ -294,17 +299,23 @@ fn render(conn: &Connection, row: CardRow) -> ApiResult<Card> {
                 r.get::<_, String>(1)?,
                 r.get::<_, String>(2)?,
                 r.get::<_, String>(3)?,
+                r.get::<_, Option<String>>(4)?,
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
     let mut comments = Vec::new();
-    for (id, author, body, created_at) in raw {
+    for (id, author, body, created_at, session) in raw {
+        let session = match session {
+            Some(s) => session_refs::get(conn, &s)?.map(|r| r.session),
+            None => None,
+        };
         comments.push(Comment {
             id,
             author_name: name_of(conn, &author)?,
             author,
             body,
             created_at,
+            session,
         });
     }
     let mut stmt = conn.prepare(
@@ -460,6 +471,10 @@ fn card_event(t: &mut Tx<'_>, card: &CardRow, change: &str, mut extra: Value) ->
         map.insert("title".into(), json!(card.title));
         map.insert("column".into(), json!(card.column));
         map.insert("actor_name".into(), json!(actor_name));
+        // The session of an agent actor, for the card's session list.
+        if let Some(sid) = session_refs::current_of(t, &t.actor)? {
+            map.insert("actor_session".into(), json!(sid));
+        }
     }
     let mut draft = EventDraft::new("card", summary, extra)
         .project(card.project.clone())
@@ -492,10 +507,21 @@ fn actor_display(t: &Tx<'_>) -> ApiResult<String> {
 }
 
 /// Write a comment, redacted (PLAN §16b.6). Each comment comes here.
+/// The comment of an agent links to the agent's current session (PLAN
+/// §13), so the operator can read the work behind it.
 fn insert_comment(t: &mut Tx<'_>, card: &str, author: &str, body: &str) -> ApiResult<()> {
+    let session = session_refs::current_of(t, author)?;
     t.execute(
-        "INSERT INTO card_comments (id, card, author, body, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![ulid::Ulid::new().to_string(), card, author, t.redact(body), now()],
+        "INSERT INTO card_comments (id, card, author, body, created_at, session_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            ulid::Ulid::new().to_string(),
+            card,
+            author,
+            t.redact(body),
+            now(),
+            session
+        ],
     )?;
     Ok(())
 }

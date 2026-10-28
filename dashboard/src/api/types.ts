@@ -887,6 +887,29 @@ export interface CardComment {
   author_name?: string;
   body: string;
   created_at: string;
+  /** docs/api.md §8: the session of the agent that wrote the comment. `null` or absent for the operator and an older daemon. */
+  session?: SessionRef | null;
+}
+
+/** docs/api.md §6.6: a session with enough of its agent to render a link. It stays after `agent rm` (`removed: true`). */
+export interface SessionRef {
+  id: string;
+  agent_id: string;
+  /** The agent name, without the project. */
+  agent: string;
+  project: string;
+  harness: Harness;
+  started_at: string;
+  ended_at?: string;
+  /** The agent is deleted; the transcript comes from the session archive. */
+  removed: boolean;
+}
+
+/** `GET /api/sessions/{id}` (docs/api.md §6.6). */
+export interface SessionDetail extends SessionRef {
+  harness_session_id?: string;
+  /** The agent's current session, and the agent runs. */
+  active: boolean;
 }
 
 export type CardLinkKind = "thread" | "branch" | "card" | "url";

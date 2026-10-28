@@ -1900,6 +1900,45 @@ The daemon keeps the parsed blocks of the 16 newest files in memory. A read
 checks the file length and parses only the new bytes; a file that got
 shorter is parsed again from the top.
 
+**Sessions by ID.** A session also has endpoints of its own, keyed by the
+session `id` only. A card links to them (§8.1). They work after the agent
+is deleted.
+
+| Endpoint | Answer |
+|---|---|
+| `GET /api/sessions/{id}` | `200` session link, with `harness_session_id` and `active` |
+| `GET /api/sessions/{id}/transcript?after=<seq>&limit=<n>` | `200` one page of blocks, the same shape as above |
+
+A session link:
+
+```json
+{"id":"01M5PA0T1NSYX43DDK1M2KT8KR","agent_id":"01M5PA0T0Z0K16V6G88P3SE78W",
+ "agent":"worker","project":"terrarium","harness":"claude",
+ "started_at":"2026-10-24T06:36:54.197Z","ended_at":"2026-10-24T07:02:10.004Z",
+ "removed":false}
+```
+
+`agent` is the agent name without the project. `removed` is `true` when the
+agent is deleted. `ended_at` is absent while the session is open. Rights:
+a member of the session's project reads; the operator reads all; an agent
+of another project gets `403 forbidden`. These endpoints are read-only and
+have no stream. The page goes through the same code as the agent's
+transcript endpoint, so a filter of the blocks applies to both.
+
+**After `agent rm`.** The session rows stay (migration 37 removed the
+cascade). The delete ends each open session with `outcome` `removed`. The
+daemon then copies the session file of each session to
+`<state>/archive/agents/<agent ulid>/<harness>/<session ulid>/<file name>`,
+before the agent dir goes to the trash. Only the session files go to the
+archive, not the workspace. The transcript of a deleted agent comes from
+this copy. A session with no copy (no file, or a pruned archive) gives
+`404 not_found`.
+
+**Retention.** The archive of an agent stays `TERRARIUM_SESSION_ARCHIVE_DAYS`
+days. The default is the trash retention (`TERRARIUM_TRASH_DAYS`, default
+7). `0` keeps the archive forever. The prune timer removes an older archive.
+The session rows and the card links stay.
+
 ### 6.7 Waits, runs, and watches
 
 PLAN §12d gives the design. The code is in
@@ -2379,6 +2418,14 @@ A card:
 
 - `assignee`, `assignee_name`, `repo`, `branch` are absent when not set.
 - `blocked_by` lists the dependencies that are neither `done` nor archived.
+- `comments[].session` is the session link (§6.6) of the agent that wrote
+  the comment: the agent's current session at that time. It is `null` for
+  the operator and for a comment from before migration 37. Each path that
+  writes a comment sets it: a comment, a move with a comment, a patch with
+  a comment, and the note on a linked card when a card is done. It stays
+  after `agent rm`, with `removed: true`.
+- A `card` event of an agent carries the agent's current session in
+  `data.actor_session` (a claim, a move, an assign, an edit, a comment).
 - Link kinds: `thread` (a mail thread ID), `branch`, `card`, `url`.
 - `position` counts from 0 inside the column.
 
@@ -2436,6 +2483,7 @@ A new board has the columns `backlog`, `ready`, `in_progress`, `review`,
 | `POST /api/cards/{id}/comments` | `{"body"}` | `201` card |
 | `POST /api/cards/{id}/links` | `{"kind", "ref"}` | `201` card |
 | `GET /api/cards/{id}/events?since=` | | `200` card events, cursor: `seq`. `since` is a `seq`, an event ID, or a time (§2.1). |
+| `GET /api/cards/{id}/sessions` | | `200` the session links (§6.6) of the card's comments and card events, distinct, oldest first |
 
 **Columns.** The `PATCH` list is the whole board, in order. Each column is
 `{"name", "wip_limit"?, "rename_from"?}`. A missing `wip_limit` means no
