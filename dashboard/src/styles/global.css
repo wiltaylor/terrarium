@@ -347,8 +347,79 @@ th {
   padding: 0 7px;
   color: var(--muted);
 }
-.project-picker select {
+/* The project tree: a node per project, open to show its pages. */
+.tree,
+.tree-group {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 1px;
+}
+.tree-group {
+  margin: 1px 0 4px 15px;
+  padding-left: 6px;
+  border-left: 1px solid var(--border);
+}
+.tree [role="treeitem"] {
+  outline: none;
+}
+.tree-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 8px 5px 2px;
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  cursor: pointer;
+  user-select: none;
+}
+.tree-row:hover {
+  background: var(--surface-2);
+}
+.tree-row.current .tree-name {
+  font-weight: 600;
+}
+.tree li[role="treeitem"]:focus-visible > .tree-row,
+.tree a[role="treeitem"]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.tree-chevron {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+  font-size: 0.8rem;
+  transition: transform 0.12s ease;
+}
+.tree-chevron:hover {
+  background: var(--surface-3);
+  color: var(--text);
+}
+.tree-chevron.open {
+  transform: rotate(90deg);
+}
+.tree-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.nav-count.warn {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+.tree-filter {
   width: 100%;
+  margin: 0 0 4px;
+}
+.tree-empty {
+  padding: 4px 8px;
 }
 .sidebar-foot {
   margin-top: auto;

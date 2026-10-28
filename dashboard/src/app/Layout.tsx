@@ -1,6 +1,6 @@
-// The app shell: sidebar with the project picker, global items, and the footer.
+// The app shell: sidebar with the project tree, global items, and the footer.
 
-import { A, useLocation, useNavigate, type RouteSectionProps } from "@solidjs/router";
+import { A, useLocation, type RouteSectionProps } from "@solidjs/router";
 import { createEffect, createResource, createSignal, ErrorBoundary, For, on, onCleanup, onMount, Show } from "solid-js";
 import { isMock } from "../api";
 import { CriticalBanner } from "../components/CriticalBanner";
@@ -9,12 +9,13 @@ import { ErrorBanner, useNow } from "../components/ui";
 import { duration } from "../lib/format";
 import { agents, api, auth, events, inbox, projects, signOutNow, subscriptions, theme } from "../stores";
 import { badge } from "../features/inbox/model";
-import { GLOBAL_ITEMS, PROJECT_ITEMS } from "./nav";
+import { GLOBAL_ITEMS } from "./nav";
+import { ProjectTree } from "./ProjectTree";
+import { projectFromPath } from "./treeModel";
 import { LoginScreen } from "./LoginScreen";
 
 export function Layout(props: RouteSectionProps) {
   const location = useLocation();
-  const navigate = useNavigate();
   const [open, setOpen] = createSignal(false);
   const [health, { refetch }] = createResource(() => api.health().catch(() => null));
 
@@ -30,11 +31,8 @@ export function Layout(props: RouteSectionProps) {
 
   // The URL wins: /p/<name>/... selects that project.
   createEffect(() => {
-    const m = /^\/p\/([^/]+)/.exec(location.pathname);
-    if (m) {
-      const name = decodeURIComponent(m[1]!);
-      if (projects.selected() !== name) projects.select(name);
-    }
+    const name = projectFromPath(location.pathname);
+    if (name && projects.selected() !== name) projects.select(name);
   });
 
   createEffect(() => {
@@ -42,15 +40,8 @@ export function Layout(props: RouteSectionProps) {
     setOpen(false);
   });
 
-  const pickProject = (name: string) => {
-    projects.select(name);
-    const m = /^\/p\/[^/]+\/([^/]+)/.exec(location.pathname);
-    if (m) navigate(`/p/${encodeURIComponent(name)}/${m[1]}`);
-  };
-
   const inboxBadge = () => badge(inbox.counts());
   const blockedCount = () => agents.inProject(projects.selected()).filter((a) => a.status === "blocked" || a.status === "error").length;
-  const projectHref = (path: string) => `/p/${encodeURIComponent(projects.selected() ?? "")}/${path}`;
 
   return (
     <div class="shell">
@@ -69,31 +60,7 @@ export function Layout(props: RouteSectionProps) {
           </Show>
         </div>
 
-        <div class="nav-section project-picker">
-          <h4>Project</h4>
-          <select aria-label="Project" value={projects.selected() ?? ""} onChange={(e) => pickProject(e.currentTarget.value)}>
-            <For each={projects.projects()}>
-              {(p) => (
-                // `selected` per option: the select's value alone is lost when the options arrive later.
-                <option value={p.name} selected={p.name === projects.selected()}>
-                  {p.name}
-                </option>
-              )}
-            </For>
-          </select>
-        </div>
-
-        <Show when={projects.selected()}>
-          <div class="nav-section">
-            <For each={PROJECT_ITEMS}>
-              {(item) => (
-                <A href={projectHref(item.path)} activeClass="active">
-                  <span>{item.label}</span>
-                </A>
-              )}
-            </For>
-          </div>
-        </Show>
+        <ProjectTree />
 
         <div class="nav-section">
           <h4>Terrarium</h4>
