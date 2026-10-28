@@ -30,11 +30,21 @@ You have four tools: `read`, `bash`, `edit`, and `write`.
 - You have no search tools. Search with `rg` and list files with
   `rg --files` in `bash`. The sandbox has no `fd`.
 
-## Long commands
+## Work that Terrarium does
 
-For a build or a test on a target that takes more than about a minute, use
-`terrarium run` and end your turn, as the protocol below says. Do not hold
-a turn open in `bash` with `sleep` or a server.
+This setup has no sub-agents, no task lists, and no background commands.
+Terrarium does that work:
+
+- Keep a short plan in your reply. Track the steps of a long task on your
+  card: add a progress note with `terrarium card comment <id> -m "..."`.
+- For a build, a test, or a server that runs longer than about a minute,
+  use `terrarium run` and end your turn, as the protocol below says.
+- To follow another agent, use `terrarium wait agent <name>` or
+  `terrarium watch`. Do not poll.
+- A lead splits work into cards and gives them to workers. Never start a
+  sub-agent for it.
+
+Do not hold a turn open in `bash` with `sleep` or a server.
 
 ## Environment
 

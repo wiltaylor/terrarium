@@ -362,7 +362,7 @@ mod tests {
             let t = t.as_str().expect("name");
             assert!(!f.forced_deny.contains(&t), "{t} is forced");
         }
-        assert!(deny.iter().any(|t| t == "Workflow"));
+        assert!(deny.iter().any(|t| t == "Artifact"));
         assert_eq!(v["autoMemoryEnabled"], false);
     }
 
@@ -428,6 +428,62 @@ mod tests {
                 .env
                 .contains_key("CLAUDE_CODE_DISABLE_DANGEROUS_RM_TIMEOUT")
         );
+    }
+
+    /// Sub-agents, task lists, and background work stay off whatever the
+    /// user file says: Terrarium does them (workers, cards, `terrarium run`).
+    #[test]
+    fn a_user_file_cannot_turn_sub_agents_tasks_or_background_on() {
+        let opts = ClaudeOptions::default();
+        let mut agent = test_agent(None);
+        agent.harness_settings = Some(json!({
+            "permissions": {
+                "allow": ["Agent", "TodoWrite", "Monitor", "Bash(ls:*)"],
+                "ask": ["TaskStop"],
+            },
+            "env": {"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "0"},
+        }));
+        let spec = build(&opts, &agent, SessionStart::Fresh("x"), None, false);
+        let s: Value = serde_json::from_str(value_after(&spec, "--settings").expect("settings"))
+            .expect("json");
+        let deny: Vec<&str> = s["permissions"]["deny"]
+            .as_array()
+            .expect("deny")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        for tool in [
+            "Agent",
+            "SendMessage",
+            "ListAgents",
+            "Workflow",
+            "TodoWrite",
+            "TaskCreate",
+            "TaskGet",
+            "TaskUpdate",
+            "TaskList",
+            "TaskStop",
+            "Monitor",
+            "CronCreate",
+            "CronDelete",
+            "CronList",
+            "ScheduleWakeup",
+        ] {
+            assert_eq!(deny.iter().filter(|t| **t == tool).count(), 1, "{tool}");
+        }
+        assert_eq!(s["permissions"]["allow"], json!(["Bash(ls:*)"]));
+        assert_eq!(s["permissions"]["ask"], json!([]));
+        // The env of the launch wins; the settings `env` loses the name.
+        assert_eq!(spec.env["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"], "1");
+        assert!(
+            s["env"]
+                .get("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS")
+                .is_none()
+        );
+        // The core tools stay.
+        for keep in ["Bash", "Read", "Edit", "Write", "Skill", "ToolSearch"] {
+            assert!(!deny.contains(&keep), "{keep}");
+        }
     }
 
     #[test]

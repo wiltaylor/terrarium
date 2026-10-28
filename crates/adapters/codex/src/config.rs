@@ -20,6 +20,7 @@
 //! | `codex/sqlite/` | bound over itself, read-write; `-c sqlite_home` names it (see [`crate::launch`]) |
 //! | `codex/AGENTS.md`, `codex/AGENTS.override.md` | empty; bound read-only over the same files in `$CODEX_HOME` |
 //! | `<workspace>/generated_images/` | bound read-write over `$CODEX_HOME/generated_images/` (D4) |
+//! | `codex/requirements.toml` | bound read-only over `/etc/codex/requirements.toml`: the managed requirements, see [`REQUIREMENTS`] |
 //!
 //! # What Codex writes into its home, and where it goes
 //!
@@ -81,6 +82,29 @@ pub const GLOBAL_INSTRUCTION_FILES: &[&str] = &["AGENTS.md", "AGENTS.override.md
 /// The directory of the generated images, in the Codex home and in the
 /// agent's workspace (D4).
 pub const IMAGES_DIR: &str = "generated_images";
+/// The per-agent copy of the managed requirements, in [`codex_dir`].
+pub const REQUIREMENTS_FILE: &str = "requirements.toml";
+/// Where Codex reads the system requirements on Unix
+/// (`config/src/loader/mod.rs:113`, `tui/src/debug_config.rs:810`).
+pub const SYSTEM_REQUIREMENTS: &str = "/etc/codex/requirements.toml";
+/// The managed requirements of each agent: unified exec pinned off.
+///
+/// With unified exec on (the default), `exec_command` returns a session ID
+/// when a command runs past its yield time, the process keeps running
+/// after the turn ends, and `write_stdin` reads it later. Only `/stop` or
+/// the end of the session stops it (`core/src/session/handlers.rs:64`,
+/// `:316`). That is background work, which Terrarium does with
+/// `terrarium run`. With unified exec off, Codex registers a one-shot
+/// `exec_command`: it runs a command to completion (default timeout 10 s,
+/// `timeout_ms` sets more), stops it on timeout or interrupt, and has no
+/// `write_stdin` (`core/src/tools/spec_plan.rs:1257-1267`,
+/// `core/src/tools/handlers/unified_exec/exec_command.rs:463-490`).
+///
+/// A user `config.toml` or `-c` cannot turn unified exec off: only a
+/// managed requirement can (`core/src/config/managed_features.rs:178-183`).
+/// The file is bound only in the sandbox; with no sandbox, Codex keeps
+/// unified exec. Verified in the source and the binary strings; not run.
+pub const REQUIREMENTS: &str = "# Written by Terrarium at each start: no background terminals.\n[features]\nunified_exec = false\n";
 
 /// `/state/agents/<ulid>/harness`: the directory of the per-agent harness
 /// files, next to the workspace. The sandbox binds it read-only at the
@@ -238,6 +262,17 @@ pub fn materialize(
         &home.join(IMAGES_DIR),
         opts.codex_home.join(IMAGES_DIR),
     )?);
+
+    // No background terminals: the managed requirements, written again at
+    // each start. bwrap makes `/etc/codex/` in its own root, so the host
+    // needs no mount point.
+    let requirements = dir.join(REQUIREMENTS_FILE);
+    write_atomic(&requirements, REQUIREMENTS.as_bytes())?;
+    overlays.push(FileOverlay {
+        source: requirements,
+        target: PathBuf::from(SYSTEM_REQUIREMENTS),
+        writable: false,
+    });
     Ok(overlays)
 }
 
@@ -349,6 +384,11 @@ mod tests {
                     PathBuf::from("/auth/codex/generated_images"),
                     true
                 ),
+                (
+                    own.join("requirements.toml"),
+                    PathBuf::from("/etc/codex/requirements.toml"),
+                    false
+                ),
             ]
         );
         // D4: the images dir is in the workspace, made at the start.
@@ -399,6 +439,32 @@ mod tests {
                 .unwrap_or_else(|| panic!("{own_path} must be per agent"));
             assert!(o.source.starts_with(&own), "{own_path}");
         }
+    }
+
+    /// The managed requirements pin unified exec off, so `exec_command` is
+    /// one-shot and no process runs on after a turn. The file is TOML in
+    /// the requirements shape (`[features]`, a bool per feature key), and a
+    /// start writes it again over an edit.
+    #[test]
+    fn the_requirements_pin_unified_exec_off() {
+        let (_tmp, home, agent) = setup();
+        let opts = CodexOptions::default();
+        materialize(&opts, &agent, &home, None).expect("mat");
+        let path = codex_dir(&agent).join(REQUIREMENTS_FILE);
+        fs::write(&path, "[features]\nunified_exec = true\n").expect("edit");
+        let overlays = materialize(&opts, &agent, &home, None).expect("again");
+        let o = overlays
+            .iter()
+            .find(|o| o.target == Path::new(SYSTEM_REQUIREMENTS))
+            .expect("overlay");
+        assert!(!o.writable);
+        let t: toml::Table =
+            toml::from_str(&fs::read_to_string(&o.source).expect("read")).expect("toml");
+        assert_eq!(t.len(), 1);
+        assert_eq!(t["features"]["unified_exec"].as_bool(), Some(false));
+        assert_eq!(t["features"].as_table().expect("table").len(), 1);
+        // Nothing goes into the shared home for it.
+        assert!(!home.join(REQUIREMENTS_FILE).exists());
     }
 
     /// The operator's global `AGENTS.md` stays in the shared home, and the

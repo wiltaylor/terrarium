@@ -26,25 +26,30 @@ system message in spikes/copilot/session-id-and-resume/captured/events.jsonl.
   process in the working directory: `cd`, variables, and shell state do
   not stay. Turn off pagers (`git --no-pager`, `PAGER=cat`). Use quiet
   flags. Chain dependent commands with `&&`.
-  - `mode: "sync"` waits `initial_wait` seconds (default 30). A command
-    that is still running then moves to the background. You get a
+  - Use `mode: "sync"` only. Do not use `mode: "async"` or `detach`.
+    `sync` waits `initial_wait` seconds (default 30). A command that is
+    still running then moves to the background, and you get a
     notification when it ends. Read its output with `read_bash` and the
-    same `shellId`.
-  - `mode: "async"` runs a check while you work.
-  - `list_bash` lists your shells. `write_bash` sends input. `stop_bash`
-    stops a shell. Stop each shell that you started before you end the
-    turn: a running shell keeps you busy.
+    same `shellId`, or stop it with `stop_bash`. Stop each such shell
+    before you end the turn: a running shell keeps you busy.
   - Stop a process with `kill <PID>`. Do not use `pkill` or `killall`.
-- **sql** has a session database with the tables `todos` and `todo_deps`.
-  They exist already: do not create them. Use them to track the steps of a
-  long task.
 - Make independent tool calls in parallel, in one response.
 
-## Long commands
+## Work that Terrarium does
 
-For a build or a test on a target that takes more than about a minute, use
-`terrarium run` and end your turn, as the protocol below says. Do not
-start a server or a long build in `bash`.
+This setup has no sub-agents, no task lists, and no background commands.
+Terrarium does that work:
+
+- Keep a short plan in your reply. Track the steps of a long task on your
+  card: add a progress note with `terrarium card comment <id> -m "..."`.
+- For a build, a test, or a server that runs longer than about a minute,
+  use `terrarium run` and end your turn, as the protocol below says.
+- To follow another agent, use `terrarium wait agent <name>` or
+  `terrarium watch`. Do not poll.
+- A lead splits work into cards and gives them to workers. Never start a
+  sub-agent for it.
+
+Do not start a server or a long build in `bash`.
 
 ## Harness messages and security
 

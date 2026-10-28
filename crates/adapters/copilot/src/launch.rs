@@ -64,6 +64,8 @@ pub fn hooks_json(opts: &CopilotOptions) -> Value {
 ///   there is no trust dialog; each alone is not enough.
 /// - `--no-ask-user --mode interactive --disable-builtin-mcps
 ///   --sync-session=off`: see [`crate::flags::CopilotFlags::forced_args`].
+/// - `--excluded-tools=task,read_agent,...`: no sub-agents, task lists, or
+///   context tools; see [`crate::flags::CopilotFlags::excluded_tools`].
 /// - `--no-auto-update`, `--disable-client-telemetry`: quiet start.
 /// - `--secret-env-vars=COPILOT_GITHUB_TOKEN,GH_TOKEN,GITHUB_TOKEN`: keep
 ///   the token out of the agent's shell commands.
@@ -89,6 +91,11 @@ pub fn build(opts: &CopilotOptions, agent: &Agent, session: SessionStart<'_>) ->
         spec = spec.arg(*a);
     }
     spec = spec
+        .arg(format!(
+            "{}={}",
+            f.excluded_tools_flag,
+            f.excluded_tools.join(",")
+        ))
         .arg(f.no_auto_update)
         .arg(f.disable_telemetry)
         .arg(format!("{}={}", f.secret_env_vars, f.token_env.join(",")))
@@ -171,8 +178,12 @@ mod tests {
         assert!(spec.pty);
         assert_eq!(spec.cwd, agent.workspace);
         let a = args(&spec);
+        let excluded = format!(
+            "--excluded-tools={}",
+            crate::COPILOT_1_0.excluded_tools.join(",")
+        );
         assert_eq!(
-            &a[..9],
+            &a[..10],
             [
                 "--yolo",
                 "--no-ask-user",
@@ -180,6 +191,7 @@ mod tests {
                 "interactive",
                 "--disable-builtin-mcps",
                 "--sync-session=off",
+                &excluded,
                 "--no-auto-update",
                 "--disable-client-telemetry",
                 "--secret-env-vars=COPILOT_GITHUB_TOKEN,GH_TOKEN,GITHUB_TOKEN",
@@ -221,6 +233,57 @@ mod tests {
         assert!(!spec.env.contains_key("COPILOT_PKG_CACHE_HOME"));
         // No secret in the spec: the daemon adds the token.
         assert!(!spec.env.keys().any(|k| k.contains("TOKEN")));
+    }
+
+    /// One `--excluded-tools` value, comma-separated, with the sub-agent,
+    /// task-list, and context tools. The shell tools and the file tools
+    /// stay.
+    #[test]
+    fn the_excluded_tools_hide_sub_agents_and_task_lists() {
+        let spec = build(
+            &CopilotOptions::default(),
+            &test_agent(None),
+            SessionStart::Fresh("x"),
+        );
+        let flags: Vec<&str> = args(&spec)
+            .into_iter()
+            .filter(|a| a.starts_with("--excluded-tools"))
+            .collect();
+        assert_eq!(flags.len(), 1);
+        let list: Vec<&str> = flags[0]
+            .strip_prefix("--excluded-tools=")
+            .expect("one value")
+            .split(',')
+            .collect();
+        for tool in [
+            "task",
+            "read_agent",
+            "list_agents",
+            "write_agent",
+            "search_code_subagent",
+            "sql",
+            "update_todo",
+            "manage_schedule",
+            "new_context",
+        ] {
+            assert!(list.contains(&tool), "{tool}");
+        }
+        for keep in [
+            "bash",
+            "read_bash",
+            "write_bash",
+            "list_bash",
+            "stop_bash",
+            "view",
+            "create",
+            "edit",
+            "apply_patch",
+            "grep",
+            "glob",
+        ] {
+            assert!(!list.contains(&keep), "{keep}");
+        }
+        assert!(list.iter().all(|t| !t.is_empty() && !t.contains(' ')));
     }
 
     #[test]

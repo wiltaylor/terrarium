@@ -226,6 +226,9 @@ pub fn agent_settings(base: Option<Value>, user: Option<&Value>, experimental_ke
 ///   GitHub, on by default), `remoteSessions` (another client could steer
 ///   the agent), `memory` (Copilot Memory is shared by every agent of an
 ///   account), `connectors`.
+/// - No sub-agents and no context tools: `builtInAgents` (the rubber-duck
+///   agent can start by itself), `contextManagementTools`. The tools go by
+///   `--excluded-tools` too ([`crate::flags::CopilotFlags::excluded_tools`]).
 pub fn forced_settings() -> Value {
     json!({
         "askUser": false,
@@ -240,6 +243,8 @@ pub fn forced_settings() -> Value {
         "remoteSessions": false,
         "memory": false,
         "connectors": false,
+        "builtInAgents": {"rubberDuck": false, "rubberDuckAutoInvoke": false},
+        "contextManagementTools": false,
     })
 }
 
@@ -487,6 +492,24 @@ mod tests {
             json!({"disableAssistedPermissionsMode": true, "other": 1})
         );
         assert_eq!(v["banner"], "always");
+    }
+
+    /// A user file cannot turn the sub-agents or the context tools on.
+    #[test]
+    fn a_user_file_cannot_turn_sub_agents_or_context_tools_on() {
+        let user = json!({
+            "builtInAgents": {"rubberDuck": true, "rubberDuckAutoInvoke": true},
+            "contextManagementTools": true,
+            "subagents": {"disabledSubagents": []},
+        });
+        let v = agent_settings(None, Some(&user), "experimental");
+        assert_eq!(
+            v["builtInAgents"],
+            json!({"rubberDuck": false, "rubberDuckAutoInvoke": false})
+        );
+        assert_eq!(v["contextManagementTools"], false);
+        // A tweakable key passes; `task` is hidden by the flag anyway.
+        assert_eq!(v["subagents"]["disabledSubagents"], json!([]));
     }
 
     /// The packaged default holds no forced key.

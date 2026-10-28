@@ -3,16 +3,11 @@
   "autoDreamEnabled": false,
   "permissions": {
     "deny": [
-      "Workflow",
       "Artifact",
       "ReportFindings",
       "SendFeedback",
       "PushNotification",
       "RemoteTrigger",
-      "CronCreate",
-      "CronDelete",
-      "CronList",
-      "ScheduleWakeup",
       "ClaudeDesign",
       "Projects",
       "ReadNotifications",

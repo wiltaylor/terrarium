@@ -10,10 +10,6 @@
   },
   "continueOnAutoMode": false,
   "imageGeneration": false,
-  "builtInAgents": {
-    "rubberDuck": false,
-    "rubberDuckAutoInvoke": false
-  },
   "subagents": {
     "disabledSubagents": ["rubber-duck", "research", "security-review", "code-review"]
   },
@@ -21,7 +17,6 @@
     "defaultLocalOnly": true
   },
   "disabledSkills": ["customize-cloud-agent", "github-pr-media", "discover-resources"],
-  "contextManagementTools": false,
   "enabledMcpServers": [],
   "enabledPlugins": {}
 }

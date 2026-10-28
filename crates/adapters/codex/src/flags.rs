@@ -144,9 +144,29 @@ pub const CODEX_PINNED: CodexFlags = CodexFlags {
         ("features.daemon_auto_start", "false"),
         // Terrarium needs its hooks.
         ("features.hooks", "true"),
+        // No sub-agent tools (`spawn_agent`, `send_message`,
+        // `followup_task`, `wait_agent`, ...): leads make workers instead.
+        // `agents.enabled = false` gives `MultiAgentVersion::Disabled`
+        // over the catalog's version, unless `features.multi_agent_v2` is
+        // on (`core/src/config/mod.rs:1658-1684`), so that is forced off
+        // too; `features.multi_agent` is the fallback for a model with no
+        // catalog version.
+        ("agents.enabled", "false"),
+        ("features.multi_agent_v2", "false"),
+        ("features.multi_agent", "false"),
+        // No `sleep` tool (gpt-6 models): a wait is `terrarium wait`
+        // (`core/src/tools/spec_plan.rs:1365-1388`).
+        ("features.sleep_tool", "false"),
         // Not forced: `features.image_generation` (default on; D4 keeps the
         // `image_gen.imagegen` tool, and the packaged default file says
-        // `true`), `web_search`, `agents.enabled`, the bundled skills.
+        // `true`), `web_search`, the bundled skills.
+        //
+        // Not removable: the code-mode `wait` tool. Codex registers it with
+        // `exec` in every code-mode session (`spec_plan.rs:1094`), and it
+        // is the only way to get the result of an `exec` cell that runs
+        // longer than its yield time (30 s). Background terminals are
+        // removed by the managed requirements file instead
+        // ([`crate::config::REQUIREMENTS`]).
     ],
     model_instructions_file: "model_instructions_file",
     developer_instructions: "developer_instructions",
@@ -197,6 +217,12 @@ pub const CODEX_PINNED: CodexFlags = CodexFlags {
         // The Terrarium prompt.
         "model_instructions_file",
         "developer_instructions",
+        // The managed requirements file pins unified exec off
+        // ([`crate::config::REQUIREMENTS`]). A user value cannot turn it
+        // on, and a `true` would stop the start with a constraint error
+        // (`core/src/config/managed_features.rs:336-372`).
+        "features.unified_exec",
+        "experimental_use_unified_exec_tool",
     ],
 };
 

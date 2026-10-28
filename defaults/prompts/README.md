@@ -181,8 +181,10 @@ parts, in this order:
    `copilot`, or `pi`. It holds the tools of that harness in the Terrarium
    configuration, how to use them, the environment facts, and the output
    format. The persona replaces the harness's default prompt, so this text
-   puts back the tool guidance that the agent needs. The question tools and
-   plan modes are off, so the files do not name them.
+   puts back the tool guidance that the agent needs. The question tools,
+   plan modes, sub-agents, task lists, and background tools are off, so the
+   files do not name them. Each file has the same section "Work that
+   Terrarium does": the card, `terrarium run`, and the waits do that work.
 3. The protocol template: `default.md`, `project-lead.md`, or
    `system-lead.md`. It holds the CLI commands.
 

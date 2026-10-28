@@ -116,6 +116,12 @@ pub const CLAUDE_2_1: ClaudeFlags = ClaudeFlags {
         // No predicted prompt in the input box: the screen detector reads
         // text in the box as "not ready", and a turn would not go in.
         ("CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION", "false"),
+        // No background work in the harness: Terrarium has `terrarium run`
+        // and the waits for that. Read in the 2.1.310 bundle: with it set,
+        // the Bash schema drops `run_in_background`
+        // (`ap()?rn().omit({run_in_background:!0})`), and no command or
+        // MCP call moves to the background by itself. Not run.
+        ("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "1"),
         // Never set `CLAUDE_CODE_DISABLE_DANGEROUS_RM_TIMEOUT`: it removes
         // the 2-minute auto-deny of the critical-path `rm` prompt, so the
         // prompt would wait forever.
@@ -182,6 +188,28 @@ pub const CLAUDE_2_1: ClaudeFlags = ClaudeFlags {
         // trust key, and the session dir are all keyed by the cwd.
         "EnterWorktree",
         "ExitWorktree",
+        // Sub-agents, task lists, and background work: Terrarium does
+        // these (leads make workers, cards on the board, `terrarium run`,
+        // `wait`, `watch`). Each name is a tool constant in the 2.1.310
+        // bundle; `Task` is an alias of `Agent`, and `KillShell` of
+        // `TaskStop`, so the deny covers them. `TaskOutput`, `BashOutput`,
+        // and the team tools are not tools in 2.1.310.
+        "Agent",
+        "SendMessage",
+        "ListAgents",
+        "Workflow",
+        "TodoWrite",
+        "TaskCreate",
+        "TaskGet",
+        "TaskUpdate",
+        "TaskList",
+        "TaskStop",
+        "Monitor",
+        // Turns that nobody typed (`CLAUDE_CODE_DISABLE_CRON` too).
+        "CronCreate",
+        "CronDelete",
+        "CronList",
+        "ScheduleWakeup",
     ],
     // `disableAllHooks` would stop the Terrarium hooks, and so the status
     // machine, the turns, and the usage.

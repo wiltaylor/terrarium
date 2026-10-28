@@ -400,7 +400,6 @@ env = { "A.B" = "x" }
         for want in [
             "web_search=\"disabled\"",
             "features.image_generation=true",
-            "agents.enabled=false",
             "skills.bundled.enabled=false",
         ] {
             assert!(c.iter().any(|o| o == want), "{want}: {c:?}");
@@ -467,6 +466,67 @@ model_migrations = { "gpt-5.6-luna" = "gpt-5.6-luna" }
             let (k, v) = o.split_once('=').expect("kv");
             let _: toml::Table =
                 toml::from_str(&format!("x = {v}")).unwrap_or_else(|e| panic!("{k}: {e}"));
+        }
+    }
+
+    /// Sub-agents, the sleep tool, and background terminals stay off
+    /// whatever the user file says. The image tool, `view_image`, and
+    /// `apply_patch` are not touched.
+    #[test]
+    fn a_user_file_cannot_turn_sub_agents_or_background_work_on() {
+        let mut agent = test_agent(None);
+        let toml = r#"
+experimental_use_unified_exec_tool = true
+[agents]
+enabled = true
+max_threads = 4
+[features]
+multi_agent = true
+sleep_tool = true
+unified_exec = true
+[features.multi_agent_v2]
+enabled = true
+[tools.update_plan]
+enabled = true
+"#;
+        agent.harness_settings = Some(
+            terrarium_core::harness_settings::parse(toml, terrarium_core::HarnessId::Codex)
+                .expect("toml"),
+        );
+        let spec = build(&sandbox_opts(), &agent, None, None);
+        let c = overrides(&spec);
+        for want in [
+            "agents.enabled=false",
+            "features.multi_agent=false",
+            "features.multi_agent_v2=false",
+            "features.sleep_tool=false",
+            "tools.update_plan.enabled=false",
+        ] {
+            assert_eq!(c.iter().filter(|o| **o == want).count(), 1, "{want}: {c:?}");
+        }
+        for gone in [
+            "agents.enabled=true",
+            "features.multi_agent=true",
+            "features.multi_agent_v2.enabled",
+            "features.sleep_tool=true",
+            "unified_exec",
+            "tools.update_plan.enabled=true",
+        ] {
+            assert!(!c.iter().any(|o| o.contains(gone)), "{gone}: {c:?}");
+        }
+        // A key next to a forced one passes.
+        assert!(c.contains(&"agents.max_threads=4"), "{c:?}");
+        // No key turns off the tools that stay.
+        for keep in [
+            "image_generation",
+            "view_image",
+            "apply_patch",
+            "shell_tool",
+        ] {
+            assert!(
+                !c.iter().any(|o| o.contains(keep) && o.ends_with("false")),
+                "{keep}: {c:?}"
+            );
         }
     }
 

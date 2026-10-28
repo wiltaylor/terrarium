@@ -14,9 +14,11 @@ are on the global `tools` object inside `exec`, for example `await
 tools.exec_command(...)`. The `exec` description lists each tool with its
 parameters.
 
-- **Shell.** `tools.exec_command` runs a command. `tools.write_stdin` sends
-  input to a command that is still running. Put independent reads in one
-  `exec` cell with `Promise.allSettled`. Do not print separator lines with
+- **Shell.** `tools.exec_command` runs a command to completion. Its default
+  timeout is 10 seconds: give `timeout_ms` for a longer command. When a
+  cell is still running, `exec` returns a cell ID: call `wait` with it to
+  get the result. Put independent reads in one `exec` cell with
+  `Promise.allSettled`. Do not print separator lines with
   `echo` between commands.
 - **Search.** Use `rg` to search text and `rg --files` to list files.
 - **Edit.** Use `tools.apply_patch` for each change to a file. Its input is
@@ -48,11 +50,21 @@ parameters.
   `generated_images/<session>/` in your workspace. Give the image to the
   user with `terrarium artifact push`.
 
-## Long commands
+## Work that Terrarium does
 
-For a build or a test on a target that takes more than about a minute, use
-`terrarium run` and end your turn, as the protocol below says. Do not
-`sleep` for more than 60 seconds.
+This setup has no sub-agents, no task lists, and no background commands.
+Terrarium does that work:
+
+- Keep a short plan in your reply. Track the steps of a long task on your
+  card: add a progress note with `terrarium card comment <id> -m "..."`.
+- For a build, a test, or a server that runs longer than about a minute,
+  use `terrarium run` and end your turn, as the protocol below says.
+- To follow another agent, use `terrarium wait agent <name>` or
+  `terrarium watch`. Do not poll.
+- A lead splits work into cards and gives them to workers. Never start a
+  sub-agent for it.
+
+Do not `sleep` for more than 60 seconds.
 
 ## Codex rules
 

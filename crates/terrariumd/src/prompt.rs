@@ -895,6 +895,72 @@ mod tests {
         assert_eq!(strip_comments("a<!-- x -->b<!-- y"), "ab");
     }
 
+    /// The harness sections stay short, name no tool that the adapters
+    /// force off (sub-agents, task lists, background work), and point to
+    /// the Terrarium way: the card, `terrarium run`, and the waits.
+    #[test]
+    fn harness_sections_offer_no_removed_tool() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../defaults/prompts/harness");
+        let removed: &[(&str, &[&str])] = &[
+            (
+                "claude",
+                &[
+                    "**Agent**",
+                    "TodoWrite",
+                    "TaskCreate",
+                    "TaskStop",
+                    "Monitor",
+                    "run_in_background",
+                    "SendMessage",
+                ],
+            ),
+            (
+                "codex",
+                &[
+                    "write_stdin",
+                    "update_plan",
+                    "spawn_agent",
+                    "session_id",
+                    "tools.sleep",
+                ],
+            ),
+            (
+                "copilot",
+                &[
+                    "**sql**",
+                    "todos",
+                    "`mode: \"async\"` runs",
+                    "list_bash",
+                    "write_bash",
+                    "read_agent",
+                    "**task**",
+                ],
+            ),
+            ("pi", &["sub-agent tool", "todo"]),
+        ];
+        for (harness, names) in removed {
+            let text = strip_comments(
+                &std::fs::read_to_string(dir.join(format!("{harness}.md"))).unwrap(),
+            );
+            let words = text.split_whitespace().count();
+            assert!(words < 700, "{harness}: {words} words");
+            let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            for name in *names {
+                assert!(!text.contains(name), "{harness} offers {name}");
+            }
+            for needle in [
+                "## Work that Terrarium does",
+                "terrarium card comment <id>",
+                "`terrarium run`",
+                "`terrarium wait agent <name>`",
+                "`terrarium watch`",
+                "Never start a sub-agent",
+            ] {
+                assert!(flat.contains(needle), "{harness}: {needle}");
+            }
+        }
+    }
+
     /// The composition order: the base (persona or `system_prompt`), the
     /// harness section, the protocol template. `persona = "none"` drops the
     /// harness section after a `system_prompt`, and drops the whole base
