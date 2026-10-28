@@ -281,12 +281,13 @@ async fn chained_waits_propagate() {
 async fn a_wait_on_a_done_agent_resolves_after_the_settle_time() {
     let (td, lead, _) = setup().await;
     let a = new_wait(&td, &lead, json!({"kind": "agent", "agent": "w1"})).await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert_eq!(
-        td.get(&format!("/api/waits/{}", id(&a))).await.body["state"],
-        "open"
-    );
-    wait_state(&td, &id(&a), "resolved").await;
+    let r = wait_state(&td, &id(&a), "resolved").await;
+    assert_eq!(r["result"]["outcome"], "done", "{r}");
+    // Not before the settle time (300 ms in `fast`). The stored times, not
+    // a sleep: a slow test run cannot make this check fail.
+    let at = |k: &str| chrono::DateTime::parse_from_rfc3339(r[k].as_str().unwrap()).unwrap();
+    let took = at("resolved_at") - at("created_at");
+    assert!(took >= chrono::Duration::milliseconds(300), "{took} {r}");
 }
 
 #[tokio::test]
@@ -338,6 +339,35 @@ async fn until_options_and_terminal_outcomes() {
     td.delete(&format!("/api/agents/{w1}?confirm=true")).await;
     let r = wait_state(&td, &id(&gone), "resolved").await;
     assert_eq!(r["result"]["outcome"], "deleted");
+}
+
+/// The delete of a live agent stops it first. The `stopped` status of that
+/// stop can go into the store before the delete does. The waits on the
+/// agent still end as `deleted`: the delete is the operator's act.
+#[tokio::test]
+async fn a_delete_ends_waits_as_deleted_when_the_stop_lands_first() {
+    let (td, lead, w1) = setup().await;
+    let done = new_wait(&td, &lead, json!({"kind": "agent", "agent": "w1"})).await;
+    let blocked = new_wait(
+        &td,
+        &lead,
+        json!({"kind": "agent", "agent": "w1", "until": "blocked"}),
+    )
+    .await;
+    let change = new_wait(
+        &td,
+        &lead,
+        json!({"kind": "agent", "agent": "w1", "until": "any_change"}),
+    )
+    .await;
+    // The fake stop returns only after the store shows `stopped`: the
+    // order that made the waits end as `stopped`.
+    td.sup.settle_stops(true);
+    td.delete(&format!("/api/agents/{w1}?confirm=true")).await;
+    for w in [&done, &blocked, &change] {
+        let r = wait_state(&td, &id(w), "resolved").await;
+        assert_eq!(r["result"]["outcome"], "deleted", "{r}");
+    }
 }
 
 #[tokio::test]

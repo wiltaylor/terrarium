@@ -39,7 +39,18 @@ pub const STOP_WAIT: Duration = Duration::from_secs(10);
 /// Stop `agent` if it runs, then wait (up to [`STOP_WAIT`]) for the harness
 /// to end, so that the runner does not write into the agent dir while it
 /// moves. An agent that does not run is not an error.
-pub async fn stop_agent(state: &Shared, agent: AgentId) -> Result<(), SupervisorError> {
+///
+/// The stop is part of a delete. The result is a [`Deleting`] guard: hold
+/// it until the delete commits, so that the `stopped` status of this stop
+/// does not end the waits on the agent before the delete ends them as
+/// `deleted` (docs/api.md, waits).
+///
+/// [`Deleting`]: crate::store::waits::Deleting
+pub async fn stop_agent(
+    state: &Shared,
+    agent: AgentId,
+) -> Result<crate::store::waits::Deleting, SupervisorError> {
+    let deleting = crate::store::waits::Deleting::new(&agent.to_string());
     match state.supervisor.stop(agent).await {
         Ok(()) | Err(SupervisorError::NotRunning(_)) => {}
         Err(e) => return Err(e),
@@ -54,7 +65,7 @@ pub async fn stop_agent(state: &Shared, agent: AgentId) -> Result<(), Supervisor
     {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    Ok(())
+    Ok(deleting)
 }
 
 /// Move the agent dir of `agent` to the trash ([`trash_agent_dir`]) in a

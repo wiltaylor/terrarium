@@ -584,8 +584,51 @@ pub fn outcome(
     }
 }
 
+/// The agents that a delete stops now, with the count of deletes of each.
+static DELETING: std::sync::Mutex<BTreeMap<String, usize>> = std::sync::Mutex::new(BTreeMap::new());
+
+/// A delete of an agent is in progress while this guard lives. The delete
+/// of a live agent stops it first, and the `stopped` status of that stop
+/// can go into the store before the delete does. While the guard lives, a
+/// status change of the agent does not end the `agent` waits on it: the
+/// delete ends them with the outcome `deleted` ([`on_agent_deleted`]). Hold
+/// the guard from before the stop until the delete commits. If the delete
+/// does not occur, the drop of the guard lets the timer check the waits
+/// again ([`sweep_agent_waits`]).
+#[must_use = "the guard protects the waits only while it lives"]
+pub struct Deleting(String);
+
+impl Deleting {
+    pub fn new(agent: &str) -> Self {
+        let mut map = DELETING.lock().unwrap_or_else(|e| e.into_inner());
+        *map.entry(agent.to_owned()).or_default() += 1;
+        Deleting(agent.to_owned())
+    }
+}
+
+impl Drop for Deleting {
+    fn drop(&mut self) {
+        let mut map = DELETING.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(n) = map.get_mut(&self.0) {
+            *n -= 1;
+            if *n == 0 {
+                map.remove(&self.0);
+            }
+        }
+    }
+}
+
+/// Is a delete of `agent` in progress ([`Deleting`])?
+fn is_deleting(agent: &str) -> bool {
+    DELETING
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains_key(agent)
+}
+
 /// Check one open `agent` wait against its agent now. A deleted agent
-/// resolves it with the outcome `deleted`.
+/// resolves it with the outcome `deleted`. An agent that a delete stops
+/// now ([`Deleting`]) does not resolve it: the delete does.
 fn check_agent_wait(t: &mut Tx<'_>, w: &Wait, depth: u8) -> ApiResult<()> {
     let Some(target) = w.target() else {
         return Ok(());
@@ -606,6 +649,9 @@ fn check_agent_wait(t: &mut Tx<'_>, w: &Wait, depth: u8) -> ApiResult<()> {
         )?;
         return Ok(());
     };
+    if is_deleting(target) {
+        return Ok(());
+    }
     let status: AgentStatus = serde_json::from_value(json!(status)).unwrap_or_default();
     let done = is_done(t, target, status)?;
     if let Some(o) = outcome(w.until(), w.status_at_create(), status, done) {

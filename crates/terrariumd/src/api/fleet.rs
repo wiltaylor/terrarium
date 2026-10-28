@@ -216,11 +216,16 @@ async fn apply(
         )
         .with_details(json!({"agents": names})));
     }
+    // The guards keep the `stopped` status of each stop from ending the
+    // waits on the agent: the prune ends them as `deleted`.
+    let mut deleting = Vec::new();
     for e in &live {
         if let Some(id) = e.id.as_deref().and_then(|i| i.parse().ok()) {
-            crate::trash::stop_agent(&state, id)
-                .await
-                .map_err(super::agents::supervisor_error)?;
+            deleting.push(
+                crate::trash::stop_agent(&state, id)
+                    .await
+                    .map_err(super::agents::supervisor_error)?,
+            );
         }
     }
 
@@ -236,6 +241,7 @@ async fn apply(
             store::apply(t, &fl, &origin, &a, prune, confirm, &state_dir)
         })
         .await?;
+    drop(deleting);
     // Like `DELETE /api/agents/{id}`: each pruned agent dir goes to the
     // trash (`crate::trash`).
     for id in &applied.deleted_agents {

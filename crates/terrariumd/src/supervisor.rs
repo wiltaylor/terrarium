@@ -402,6 +402,8 @@ mod fake {
         /// came (RFC 3339, microseconds).
         lease_pointers: Vec<(AgentId, String, String)>,
         state: Option<std::sync::Weak<crate::api::AppState>>,
+        /// `stop` returns only after the store shows `stopped`.
+        settle_stops: bool,
     }
 
     /// A fake supervisor. `start` goes `starting` -> `idle` after `delay`.
@@ -644,6 +646,14 @@ mod fake {
             }
         }
 
+        /// With `on`, `stop` returns only after the store shows the agent
+        /// `stopped` (up to 5 s), as a slow real stop can. Without it, the
+        /// `stopped` status can go into the store before or after the
+        /// caller of `stop` writes. For tests.
+        pub fn settle_stops(&self, on: bool) {
+            self.lock().settle_stops = on;
+        }
+
         /// The last size a PTY client reported. For tests.
         pub fn pty_size(&self, agent: AgentId) -> Option<(u16, u16)> {
             self.lock().agents.get(&agent).and_then(|a| a.size)
@@ -736,6 +746,29 @@ mod fake {
                     SupervisorEventKind::Harness(Event::Exit { code: Some(0) }),
                 );
                 self.set_status(agent, AgentStatus::Stopped, Some("stopped"));
+                let state = {
+                    let inner = self.lock();
+                    inner
+                        .settle_stops
+                        .then(|| inner.state.as_ref().and_then(std::sync::Weak::upgrade))
+                        .flatten()
+                };
+                if let Some(state) = state {
+                    let id = agent.to_string();
+                    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+                    while tokio::time::Instant::now() < deadline {
+                        let key = id.clone();
+                        let stored = state
+                            .db
+                            .read(move |c| crate::store::agents::get(c, &key))
+                            .await
+                            .map(|a| a.agent.status);
+                        if !matches!(stored, Ok(s) if s != AgentStatus::Stopped) {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                }
                 Ok(())
             })
         }

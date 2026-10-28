@@ -421,11 +421,16 @@ async fn remove(
             ),
         ));
     }
-    if live {
-        crate::trash::stop_agent(&state, agent_id(&a))
+    // The guard keeps the `stopped` status of the stop from ending the
+    // waits on the agent: the delete ends them as `deleted`.
+    let _deleting = if live {
+        let g = crate::trash::stop_agent(&state, agent_id(&a))
             .await
             .map_err(supervisor_error)?;
-    }
+        Some(g)
+    } else {
+        None
+    };
     let key = a.agent.id.to_string();
     state
         .db
