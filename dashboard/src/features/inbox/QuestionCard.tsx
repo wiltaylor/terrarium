@@ -1,6 +1,7 @@
-// One question of a leader to the operator, with the answer form. The text
-// and the options are the agent's words: they go into the page as text
-// nodes only. The context is Markdown, and goes through the DOMPurify sink
+// One question or notice of a leader to the operator. A question has the
+// answer form; a notice has Acknowledge with an optional reply. The text and
+// the options are the agent's words: they go into the page as text nodes
+// only. The context is Markdown, and goes through the DOMPurify sink
 // (SafeHtml) only.
 
 import { A } from "@solidjs/router";
@@ -11,10 +12,11 @@ import { ConfirmButton, ErrorBanner } from "../../components/ui";
 import { ago } from "../../lib/format";
 import { renderMarkdown } from "../../lib/markdown";
 import { api } from "../../stores";
-import { answerBody, chosenLabel, statusChip } from "./model";
+import { ackText, answerBody, chosenLabel, statusChip } from "./questions";
 
-export function QuestionCard(props: { question: Question; now: number; showAgent?: boolean; onChange: (q: Question) => void }) {
+export function QuestionCard(props: { question: Question; now: number; showAgent?: boolean; showKind?: boolean; onChange: (q: Question) => void }) {
   const q = () => props.question;
+  const notice = () => q().kind === "notice";
   const [option, setOption] = createSignal<number | null>(null);
   const [text, setText] = createSignal("");
   const [reason, setReason] = createSignal("");
@@ -34,14 +36,26 @@ export function QuestionCard(props: { question: Question; now: number; showAgent
   };
   const send = (e: Event) => {
     e.preventDefault();
+    if (notice()) {
+      const t = ackText(q().status, text());
+      if ("error" in t) return setError(t.error);
+      return void run(() => api.questions.ack(q().id, t.text));
+    }
     const b = answerBody(q(), text(), option());
     if ("error" in b) return setError(b.error);
     void run(() => api.questions.answer(q().id, b.body));
   };
 
   return (
-    <article class={`card-box stack question${q().priority === "urgent" && q().status === "open" ? " urgent" : ""}`} style={{ gap: "8px" }} aria-label={`Question ${q().id}`}>
+    <article
+      class={`card-box stack question${q().priority === "urgent" && q().status === "open" ? " urgent" : ""}`}
+      style={{ gap: "8px" }}
+      aria-label={`${notice() ? "Notice" : "Question"} ${q().id}`}
+    >
       <div class="row small" style={{ "flex-wrap": "wrap", gap: "6px" }}>
+        <Show when={props.showKind}>
+          <span class="chip">{q().kind}</span>
+        </Show>
         <Show when={q().priority === "urgent"}>
           <span class="chip bad">urgent</span>
         </Show>
@@ -54,7 +68,7 @@ export function QuestionCard(props: { question: Question; now: number; showAgent
         </A>
         <Show when={q().card}>{(c) => <A href={`/p/${encodeURIComponent(q().project)}/board?card=${encodeURIComponent(c())}`}>{c()}</A>}</Show>
         <span class="muted" title={q().created_at}>
-          asked {ago(q().created_at, props.now)}
+          {notice() ? "sent" : "asked"} {ago(q().created_at, props.now)}
         </span>
         <Show when={q().revision > 1}>
           <span class="muted" title={`Updated ${q().updated_at}`}>
@@ -71,9 +85,9 @@ export function QuestionCard(props: { question: Question; now: number; showAgent
       <Show when={q().context}>{(c) => <SafeHtml class="prose question-context" html={renderMarkdown(c(), q().project)} />}</Show>
 
       <Show when={q().status === "open"}>
-        <form class="stack" style={{ gap: "6px" }} onSubmit={send} aria-label="Answer">
+        <form class="stack" style={{ gap: "6px" }} onSubmit={send} aria-label={notice() ? "Acknowledge" : "Answer"}>
           <ErrorBanner error={error()} onDismiss={() => setError(null)} />
-          <Show when={q().options.length}>
+          <Show when={!notice() && q().options.length}>
             <div class="row" style={{ "flex-wrap": "wrap", gap: "6px" }} role="group" aria-label="Options">
               <For each={q().options}>
                 {(o, i) => (
@@ -86,22 +100,31 @@ export function QuestionCard(props: { question: Question; now: number; showAgent
           </Show>
           <textarea
             rows={2}
-            placeholder={q().options.length ? "An answer in your own words (optional with an option)" : "Your answer"}
+            placeholder={notice() ? "A reply to the agent (optional)" : q().options.length ? "An answer in your own words (optional with an option)" : "Your answer"}
             value={text()}
             onInput={(e) => setText(e.currentTarget.value)}
-            aria-label="Answer text"
+            aria-label={notice() ? "Reply text" : "Answer text"}
           />
           <div class="row" style={{ "flex-wrap": "wrap", gap: "6px" }}>
-            <button class="primary" type="submit" disabled={busy() || (!text().trim() && option() === null)}>
-              Send answer
-            </button>
+            <Show
+              when={notice()}
+              fallback={
+                <button class="primary" type="submit" disabled={busy() || (!text().trim() && option() === null)}>
+                  Send answer
+                </button>
+              }
+            >
+              <button class="primary" type="submit" disabled={busy()}>
+                Acknowledge
+              </button>
+            </Show>
             <input placeholder="Reason to retract (optional)" value={reason()} onInput={(e) => setReason(e.currentTarget.value)} aria-label="Retract reason" />
             <ConfirmButton class="small" label="Retract" confirmLabel="Yes, retract" disabled={busy()} onConfirm={() => run(() => api.questions.retract(q().id, reason().trim() || undefined))} />
           </div>
         </form>
       </Show>
 
-      <Show when={q().status === "answered"}>
+      <Show when={q().status === "answered" || q().status === "acknowledged"}>
         <div class="stack small" style={{ gap: "4px" }}>
           <Show when={chosenLabel(q())}>
             {(l) => (
@@ -114,7 +137,8 @@ export function QuestionCard(props: { question: Question; now: number; showAgent
             <div style={{ "white-space": "pre-wrap" }}>{q().answer}</div>
           </Show>
           <div class="muted" title={q().answered_at ?? ""}>
-            answered by {q().answered_by_name ?? q().answered_by ?? "operator"} {q().answered_at ? ago(q().answered_at!, props.now) : ""}
+            {q().status} by {q().answered_by_name ?? q().answered_by ?? "operator"} {q().answered_at ? ago(q().answered_at!, props.now) : ""}
+            <Show when={q().status === "acknowledged" && !q().answer}> with no reply</Show>
           </div>
         </div>
       </Show>

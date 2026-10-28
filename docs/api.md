@@ -1495,7 +1495,7 @@ The kinds:
 | `process` | The exec session ends. Any exit code resolves the wait; the result has the code. A run that the target stopped at its timeout is `timed_out`. A session that the daemon lost (a daemon restart, a host that did not come back) is `failed` with `error: "lost"`. |
 | `time` | The time comes. |
 | `card` | The card is in the column. A deleted card is `failed`. |
-| `question` | The question (§6.8) is answered or retracted. The answer mail is the wake mail: the wait sends no mail of its own. |
+| `question` | The question or notice (§6.8) is answered, acknowledged, or retracted. The answer or acknowledgement mail is the wake mail: the wait sends no mail of its own. |
 
 The rules:
 
@@ -1580,8 +1580,8 @@ The create body:
   `wait.cancel`.
 
 A **watch** mails its watcher when the watched agent goes to one of its
-statuses. The watcher is an agent or `operator` (the mail log of the
-dashboard).
+statuses. The watcher is an agent or `operator` (the Inbox of the
+dashboard, §6.9).
 
 ```json
 {"id":"01JE...","watcher":"01M5...","watcher_name":"demo/lead","agent":"01M6...",
@@ -1612,7 +1612,7 @@ dashboard).
 - Each create writes a `watch.create` audit row; each remove writes
   `watch.delete`.
 
-### 6.8 Questions to the operator
+### 6.8 Questions and notices to the operator
 
 PLAN §12e gives the design. The code is in
 `crates/terrariumd/src/store/questions.rs` and
@@ -1622,8 +1622,15 @@ A **question** is a request from a leader agent (a project_admin or a
 sysadmin) for a decision of the operator. The question is on the agent. A
 new session or a compaction reads it again with `terrarium question ls`,
 and the recap turn of a new session lists it (PLAN §18). The operator
-answers it in the dashboard (the Questions page) or with `terrarium admin
+answers it in the dashboard (the Inbox, §6.9) or with `terrarium admin
 question answer`. The answer goes to the agent as mail.
+
+A **notice** (`kind: "notice"`) is a message from a leader to the operator
+that needs no decision: a milestone, a finished deploy, or a risk. It has
+no options. The operator acknowledges it, with an optional reply. The
+acknowledgement always goes to the agent as one mail. A notice is a row of
+the same table, with the same fields, rights, limits, and endpoints, except
+for the differences below.
 
 ```json
 {"id":"01JQ...","agent":"01M5...","agent_name":"demo/lead","project":"demo",
@@ -1637,13 +1644,14 @@ question answer`. The answer goes to the agent as mail.
 
 | Field | Meaning |
 |---|---|
+| `kind` | `question` or `notice`. Set at the ask; it does not change. |
 | `text` | The question, at most 2000 characters. The agent's own words: untrusted data. |
-| `options` | Short choice labels: at most 10, each at most 200 characters, no two the same. `[]` for a free answer. |
+| `options` | Short choice labels: at most 10, each at most 200 characters, no two the same. `[]` for a free answer. A notice has none: options on a notice are `422 invalid`. |
 | `context` | Optional background as Markdown, at most 16 KiB. The dashboard shows it through the DOMPurify sink only. |
 | `card` | Optional. A card of the agent's project. |
 | `priority` | `normal` or `urgent`. Lists put the urgent open questions first. |
-| `status` | `open`, `answered`, or `retracted`. Only `open` changes. |
-| `answer`, `answer_option` | The answer text, and the 0-based index of the chosen option. An answer with an option and no text has the label as `answer`. |
+| `status` | A question: `open`, `answered`, or `retracted`. A notice: `open`, `acknowledged`, or `retracted`. Only `open` changes. |
+| `answer`, `answer_option` | The answer text, and the 0-based index of the chosen option. An answer with an option and no text has the label as `answer`. For an acknowledged notice, `answer` is the reply of the operator, if any. |
 | `answered_by`, `answered_by_name` | `operator`, or the ULID and `project/name` of a sysadmin agent. |
 | `retract_reason`, `retracted_by` | The reason, and the actor label (`operator`, `agent:<ulid>`, or `system` for a deleted agent). |
 | `thread_id` | The mail thread of the question. The answer goes on it. |
@@ -1655,17 +1663,18 @@ The rights:
 |---|---|
 | Ask, update | The agent itself, when it is a leader: project_admin of its project, or sysadmin. A member gets `403` with "workers send questions to their lead: terrarium mail send <lead> ...". The operator does not ask. |
 | Read | The agent itself, a project_admin of its project, a sysadmin, the operator. Another caller gets `404` for one question and `403` for a list. |
-| Answer | The operator. A sysadmin agent, for the question of another agent. Never the asking agent (`403`). |
+| Answer, acknowledge | The operator. A sysadmin agent, for the question or notice of another agent. Never the asking agent (`403`). |
 | Retract | The asking leader, or the operator. |
 
 | Endpoint | Body or query | Answer |
 |---|---|---|
-| `GET /api/agents/{id}/questions` | `?status=open\|answered\|retracted`, `?all=true` | `200` the questions of the agent. No filter: the open ones and those answered in the last 24 h. |
-| `POST /api/agents/{id}/questions` | `{"text", "options"?, "context"?, "card"?, "priority"?, "wait"?, "timeout"?}` | `201` the question; with `wait: true`, also `wait`: the new `question` wait (§6.7) |
-| `GET /api/questions` | `?status=` (default `open`; `all` for every status), `?project=`, `?agent=` | `200` at most 200 questions. Open first (urgent first, then the oldest first), then the others (the newest first). `X-Open-Questions` and `X-Urgent-Questions` count the open ones. The operator and a sysadmin see all; a project_admin sees its own project; a member gets `403`. |
+| `GET /api/agents/{id}/questions` | `?status=open\|answered\|acknowledged\|retracted`, `?all=true`, `?kind=question\|notice` | `200` the questions and notices of the agent. No filter: the open ones and those answered or acknowledged in the last 24 h. |
+| `POST /api/agents/{id}/questions` | `{"kind"?, "text", "options"?, "context"?, "card"?, "priority"?, "wait"?, "timeout"?}`; `kind` is `question` (the default) or `notice` | `201` the question or notice; with `wait: true`, also `wait`: the new `question` wait (§6.7) |
+| `GET /api/questions` | `?status=` (default `open`; `all` for every status), `?project=`, `?agent=`, `?kind=` | `200` at most 200 questions and notices. Open first (urgent first, then the oldest first), then the others (the newest first). `X-Open-Questions` and `X-Urgent-Questions` count the open ones of the `kind` filter (both kinds without it). The operator and a sysadmin see all; a project_admin sees its own project; a member gets `403`. |
 | `GET /api/questions/{id}` | | `200` the question |
 | `PATCH /api/questions/{id}` | `{"text"?, "options"?, "context"?, "card"?, "priority"?}`; `null` (or `[]` for `options`) clears a field | `200` the question. A question that is not open is `409 conflict`. |
-| `POST /api/questions/{id}/answer` | `{"answer"?, "option"?}`: a text, an option (its label, or its 0-based index), or both | `200` the question. A question that is not open is `409 conflict`. |
+| `POST /api/questions/{id}/answer` | `{"answer"?, "option"?}`: a text, an option (its label, or its 0-based index), or both | `200` the question. A question that is not open is `409 conflict`. A notice is `409 conflict`. |
+| `POST /api/questions/{id}/ack` | `{"text"?}`, or no body | `200` the notice, `acknowledged`. A notice that is not open is `409 conflict`. A question is `409 conflict`. |
 | `POST /api/questions/{id}/retract` | `{"reason"?}`, or no body | `200` the question. A question that is not open is `409 conflict`. |
 
 The rules:
@@ -1681,19 +1690,84 @@ The rules:
   agent as all mail does (§6.2, push delivery).
 - A retract by the operator sends one mail on the thread (`Retracted:
   ...`), with the reason. A retract by the agent itself sends no mail.
+- The acknowledgement of a notice is always one mail from the operator
+  (or the sysadmin agent) to the agent, on the thread of the notice, also
+  with no reply text. The subject is `Acknowledged: <the first line of the
+  notice>`. The body quotes the notice and the reply. The mail wakes the
+  agent.
 - A `question` wait (§6.7) resolves when its question is answered
-  (`{outcome: "answered", answer, option?, question}`) or retracted
-  (`{outcome: "retracted", question}`). It sends no wake mail of its own:
+  (`{outcome: "answered", answer, option?, question}`), its notice is
+  acknowledged (`{outcome: "acknowledged", answer?, kind: "notice",
+  question}`), or either is retracted (`{outcome: "retracted", question}`). It sends no wake mail of its own:
   the answer mail (or the retract mail of the operator) is its wake mail,
   so the agent gets one mail, not two. The mail says that the wait is
   resolved. A timeout of the wait sends the usual wake mail from `system`.
 - A deleted agent: its open questions are `retracted` (`retracted_by:
   "system"`), with no mail.
+- The open questions and notices of one agent share the limit of 50. The
+  copy check compares a new text with the open items of the same kind.
+- The recap turn of a new session lists the open questions, the open
+  notices, the answers since the last turn, and the acknowledgements since
+  the last turn, with the replies.
 - Each change writes an audit row (`question.ask`, `question.update`,
-  `question.answer`, `question.retract`) and a `question` event:
-  `{question_id, change, status, priority, text, revision, agent_id,
-  card_id?}`, where `change` is `asked`, `updated`, `answered`, or
-  `retracted`.
+  `question.answer`, `question.ack`, `question.retract`), a `question`
+  event: `{question_id, kind, change, status, priority, text, revision,
+  agent_id, card_id?}`, where `change` is `asked`, `updated`, `answered`,
+  `acknowledged`, or `retracted`, and an `inbox` event (§6.9).
+
+### 6.9 The Inbox
+
+PLAN §12e gives the design. The code is in
+`crates/terrariumd/src/store/inbox.rs` and
+`crates/terrariumd/src/api/inbox.rs`.
+
+The Inbox is the list of the things that wait for the operator. It is a
+view, not a table: it copies no mail body. Each item has one of four
+kinds:
+
+| Kind | What | Open while | The operator's verbs |
+|---|---|---|---|
+| `question` | A question (§6.8). | `status` is `open`. | `POST /api/questions/{id}/answer`, `.../retract` |
+| `notice` | A notice (§6.8). | `status` is `open`. | `POST /api/questions/{id}/ack`, `.../retract` |
+| `mail` | A message to `operator` (§7). | Its `state` is `queued` or `delivered`: not acknowledged. | `POST /api/inbox/mail/{id}/ack` |
+| `system` | A thread of the loop guard (§7.4): it is paused now, or it has a held message that is not released. | The thread is paused, or a held message is not released. | `POST /api/mail/{id}/release`, `POST /api/mail/threads/{thread}/resume` |
+
+The notice of a pause (`Thread T needs a human`, from `system`) is not a
+`mail` item: the `system` item of the thread shows it.
+
+```json
+[{"id":"notice:01JQ...","kind":"notice","open":true,"urgent":true,"project":"demo",
+  "at":"2026-10-28T10:00:00.000Z","question":{"id":"01JQ...","kind":"notice", "...": "§6.8"}},
+ {"id":"mail:01M5...","kind":"mail","open":true,"urgent":false,"project":"demo",
+  "at":"2026-10-28T09:00:00.000Z","message":{"id":"01M5...", "...": "§7"}},
+ {"id":"thread:01JT...","kind":"system","open":true,"urgent":false,"project":"demo",
+  "at":"2026-10-28T08:00:00.000Z",
+  "system":{"kind":"paused_thread","thread_id":"01JT...","subject":"loop","paused":true,
+            "agent_run":7,"limit":6,"participants":["demo/w1","demo/w2"],
+            "held":[{"id":"01M6...", "...": "§7"}]}}]
+```
+
+| Field | Meaning |
+|---|---|
+| `id` | `question:<id>`, `notice:<id>`, `mail:<message id>`, or `thread:<thread id>`. |
+| `open` | The item waits for the operator. |
+| `urgent` | An open question or notice with `priority: urgent`. Mail and system items are not urgent. |
+| `project` | The project of the asking agent, of the sender of the mail, or of the first agent on the thread. `null` for mail from `system` or from the operator. |
+| `at` | When the item came in: the ask, the send, or the first held message that is not released. |
+| `question`, `message`, `system` | The question or notice, the message, or the thread. A system item has `paused`, `agent_run` (the agent-to-agent messages since the last reset), `limit` (`TERRARIUM_MAIL_LOOP_LIMIT`), `participants`, and `held` (the held messages that are not released). |
+
+| Endpoint | Body or query | Answer |
+|---|---|---|
+| `GET /api/inbox` | `?status=open\|done\|all` (default `open`), `?kind=question\|notice\|mail\|system`, `?project=` | `200` the items. The open ones first, then urgent first, then the newest first. `X-Inbox-Open` and `X-Inbox-Urgent` count the open items of the `project` filter (all kinds). System items show only while they are open; the audit log keeps their history. |
+| `GET /api/inbox/counts` | `?project=` | `200` `{"open", "urgent", "question", "notice", "mail", "system"}`: the open items of each kind. The dashboard badge shows `open`, red when `urgent` is not 0. |
+| `POST /api/inbox/mail/{id}/ack` | `{"reply"?}`, or no body | `200` `{"message", "replies"}`. The mail becomes `read`. With `reply`, the reply goes as `operator` on the thread of the mail to its other participants (§7.2), and the mail becomes `replied`. A message that is not to the operator is `404`. One that is acknowledged already is `409 conflict`. A reply to a system mail that has nobody to answer is `422 invalid`. |
+
+Only the operator reads the Inbox and acts on it. An agent gets `403`,
+with a message that sends it to `terrarium question ls`.
+
+Each change of an item emits an `inbox` event: `{item, kind, change,
+project?}`, where `change` is `opened`, `updated`, or `closed`. The
+acknowledgement of a mail writes an `inbox.ack` audit row.
 
 ## 7. Mail
 
@@ -1718,7 +1792,7 @@ the reader (`operator` or an agent ULID), and `read_by_name`, and writes a
 do. A stored agent key that never was an agent shows as the key alone.
 
 `held` is `true` when the loop guard held the message at the send (§6.2, the
-loop guard): the message is `delivered` at once and types no push pointer.
+loop guard, and §7.4): the message is `delivered` at once and types no push pointer.
 A held message also has `held_reason`, for example `loop guard: message 7
 of agent-to-agent mail on thread T since the last operator or project-inbox
 message (limit 6)`. The daemon sets both at the send and does not change
@@ -1747,13 +1821,18 @@ For an agent sender:
 
 | Endpoint | Body | Answer |
 |---|---|---|
-| `GET /api/mail?to=&from=&thread=&state=&wait=` | | `200` messages oldest first, cursor: message ID |
+| `GET /api/mail?to=&from=&thread=&state=&project=&since=&until=&q=&wait=` | | `200` messages oldest first, cursor: message ID |
 | `POST /api/mail` | `{"from"?, "to", "subject"?, "body", "thread_id"?}` | `201` message |
 | `GET /api/mail/{id}` | | `200` message |
 | `POST /api/mail/{id}/read` | none | `200` message |
 | `POST /api/mail/{id}/reply` | `{"body", "subject"?}` | `201` **array** of messages, one for each recipient |
 
 - `state` is a state or `unread` (`queued` and `delivered`).
+- `project` keeps the messages from or to the inbox of the project, or
+  from or to one of its agents (also a removed one). `since` and `until`
+  are RFC 3339 times (`since` is inclusive); another value is
+  `422 invalid`. `q` is free text: a part of the subject or the body,
+  with no case. The dashboard Mail pages are logs with these filters.
 - `to` and `from` take every address kind of §2.3: `operator`, `system`,
   `project:<name>`, or an agent. Nothing goes to `system`, so `to=system`
   answers `[]`. An unknown project or agent is `404`.
@@ -1803,6 +1882,38 @@ POST /api/mail                      (X-Terrarium-Agent: terrarium/worker)
    thread gets a `Done: <card> <title>` message from `project:ops` with the
    closing comment. Each other card linked to the thread gets a comment from
    `project:ops` and a `thread_update` card event.
+
+### 7.4 The loop guard: release and resume
+
+The loop guard (§6.2) holds agent mail on a thread with too many
+agent-to-agent messages. The Inbox shows each such thread as a `system`
+item (§6.9). The operator acts on it with two endpoints. Only the operator
+may call them: an agent gets `403`.
+
+| Endpoint | Body | Answer |
+|---|---|---|
+| `POST /api/mail/{id}/release` | none | `200` the message, with `released_at` and `released_by`. |
+| `POST /api/mail/threads/{thread}/resume` | `{"note"?}`, or no body | `200` `{"thread_id", "released", "note"}`: the IDs of the released messages, and the messages of the note. |
+
+- A **release** delivers one held message. A message to an agent becomes
+  `queued` again, and its `mail` event (with `released: true`, without
+  `held`) types the push pointer. The thread stays paused: the next agent
+  message on it is held again. A message that is not held, or that is
+  released already, is `409 conflict`. Audit: `mail.release`.
+- A **resume** ends the pause: the loop guard counts only the messages
+  after it (the table `thread_resumes`). It releases each held message of
+  the thread, and marks the pause notices on the thread `read`. With a
+  `note`, the note goes from `operator` to each other participant of the
+  thread. With no note, nobody gets mail. A thread that is not paused and
+  has no held message is `409 conflict`; an unknown thread is `404`.
+  Audit: `mail.resume`.
+- A message from the operator on the thread (a reply in the Mail log)
+  also ends the pause, as before. It does not release the held messages:
+  the system item stays until the operator releases them or resumes the
+  thread.
+- Migration 30 marks a held message as released (`released_by:
+  "system"`) when a later operator or project-inbox message on its thread
+  reset the guard.
 
 ## 8. Board
 
@@ -1962,11 +2073,12 @@ Kinds:
 | `status` | `{status, from, reason, waits, waiting_on?}`. `from` is never the same as `status`: a runner report of the status the agent already has (for example the runner's `spawned <program>` at start) goes in as a `system` event `{message, status}`. `waits` is the number of open waits; `waiting_on` is the line of §6.7. |
 | `wait` | `{wait_id, change, kind, summary, state, result?}`. `change` is `opened`, `resolved`, `timed_out`, `cancelled`, or `failed`. The `agent` is the waiter (§6.7). |
 | `watch` | `{watch_id, change, watcher, watcher_name, on, status?}`. `change` is `created`, `fired` (with `status`), or `removed`. The `agent` is the watched agent (§6.7). |
-| `question` | `{question_id, change, status, priority, text, revision, agent_id, card_id?}`. `change` is `asked`, `updated`, `answered`, or `retracted`. The `agent` is the asking agent (§6.8). |
+| `question` | `{question_id, kind, change, status, priority, text, revision, agent_id, card_id?}`. `kind` is `question` or `notice`. `change` is `asked`, `updated`, `answered`, `acknowledged`, or `retracted`. The `agent` is the asking agent (§6.8). |
+| `inbox` | `{item, kind, change, project?}`: an item of the Inbox (§6.9) was `opened`, `updated`, or `closed`. `kind` is `question`, `notice`, `mail`, or `system`. |
 | `session_started` | `{harness_session, transcript_path?, source?}` |
 | `turn_start`, `turn_end`, `notification`, `question`, `session_ended`, `exit`, `delivery_failed`, `system`, `warning` | The fields of the core `Event` variant of the same name (`crates/terrarium-core/src/event.rs`). A `warning` (`{message}`) needs the operator's attention, for example a harness version outside its tested range at a start (§6.2). |
 | `tool_use`, `tool_finished` | `{tool, tool_id?, summary?, ...}`: `input` (`tool_use`), `ok` (`tool_finished`). `tool_id` is the harness's ID for the tool call (for Claude Code, `toolu_...`). It is not the event `id`. Older records used the key `id` for it; the `events.jsonl` reader still takes those. |
-| `mail` | `{message_id, thread_id, from, from_name, to, to_name, subject}`. The `agent` is the recipient. A message that the loop guard holds also has `held: true`, `held_reason`, and `thread_state: "paused"`. |
+| `mail` | `{message_id, thread_id, from, from_name, to, to_name, subject}`. The `agent` is the recipient. A message that the loop guard holds also has `held: true`, `held_reason`, and `thread_state: "paused"`. A release (§7.4) emits the event again with `released: true`. |
 | `card` | `{card_id, change, title, column, ...}`. `change` is `created`, `moved` (`from`, `to`, `comment`, `assignee`), `reordered`, `assigned` (`assignee`, `previous`), `claimed`, `edited` (`fields`), `commented` (`comment`), `linked` (`kind`, `ref`), `archived`, `unblocked` (`by`), or `thread_update` (`thread_id`, `done`). `actor_name` names who made the change (`operator` or `project/name`). The `agent` is the assignee. |
 | `board` | `{columns}` after a column change. |
 | `question_guard` | `{question, mailed}`: a member ended its turn with a question in plain text and reported nothing, so the daemon set `blocked` (reason "asked a question in plain text: ...") and mailed `mailed` (the leads, or `operator`). `question` is the first 200 characters. The actor is `system`. PLAN §8.4. |

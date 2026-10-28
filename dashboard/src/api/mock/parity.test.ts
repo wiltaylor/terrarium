@@ -31,8 +31,8 @@ describe("mock parity with docs/api.md", () => {
 
   it("replies from the project inbox as project:<name>", async () => {
     const api = mock();
-    const m = (await api.inbox.list("terrarium")).items[0]!;
-    const sent = await api.inbox.reply("terrarium", m.id, "Accepted.");
+    const m = (await api.projectInbox.list("terrarium")).items[0]!;
+    const sent = await api.projectInbox.reply("terrarium", m.id, "Accepted.");
     expect(sent.every((x) => x.from === "project:terrarium" && x.from_kind === "project")).toBe(true);
   });
 
@@ -1276,6 +1276,25 @@ describe("mail parity with docs/api.md §7 (the mail log's filters)", () => {
     const again = (await api.mail.list({ to: "operator", state: "unread" })).items[0]!;
     await api.mail.reply(again.id, "Seen.");
     expect(await api.mail.get(again.id)).toMatchObject({ state: "replied", read_by: "operator" });
+  });
+
+  it("filters by project, time, and free text on the server", async () => {
+    const api = mock();
+    const all = (await api.mail.list({ limit: 1000 })).items;
+    const webshop = (await api.mail.list({ project: "webshop", limit: 1000 })).items;
+    expect(webshop.length).toBeGreaterThan(0);
+    expect(webshop.every((m) => [m.from_name, m.to_name].some((n) => n === "project:webshop" || n.startsWith("webshop/")))).toBe(true);
+    await expect(api.mail.list({ project: "nope" })).rejects.toMatchObject({ status: 404 });
+    const mid = all[Math.floor(all.length / 2)]!.created_at;
+    const since = (await api.mail.list({ since: mid, limit: 1000 })).items;
+    const until = (await api.mail.list({ until: mid, limit: 1000 })).items;
+    expect(since.every((m) => m.created_at >= mid)).toBe(true);
+    expect(until.every((m) => m.created_at <= mid)).toBe(true);
+    expect(since.length + until.length).toBeGreaterThanOrEqual(all.length);
+    await expect(api.mail.list({ since: "yesterday" })).rejects.toMatchObject({ status: 400 });
+    const flaky = (await api.mail.list({ q: "FLAKY", limit: 1000 })).items;
+    expect(flaky.length).toBeGreaterThan(0);
+    expect(flaky.every((m) => /flaky/i.test(m.subject + m.body + m.from_name + m.to_name))).toBe(true);
   });
 
   it("refuses mail to `system` and mail as `system`", async () => {

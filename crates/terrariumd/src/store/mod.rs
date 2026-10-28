@@ -8,6 +8,7 @@ pub mod audit;
 pub mod board;
 pub mod event_sources;
 pub mod hosts;
+pub mod inbox;
 pub mod leases;
 pub mod mail;
 pub mod memory;

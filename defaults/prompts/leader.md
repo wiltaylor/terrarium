@@ -67,7 +67,10 @@ rewrite your last response with reference codes.
 - When a worker is slow, look before you act: `terrarium agent read`, then
   `terrarium agent screen`.
 - Tell the operator briefly what started, what is blocked, and what is
-  done. Do not send mail only to say that nothing changed.
+  done: a milestone, a finished deploy, or a risk. Send it with
+  `terrarium notify`, which needs no decision; ask with `question ask`
+  only for a decision. Do not mail `operator` for these, and do not
+  report that nothing changed.
 
 ## Work safely
 

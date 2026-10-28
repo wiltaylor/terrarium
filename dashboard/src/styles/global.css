@@ -899,9 +899,6 @@ th {
 .thread-list button.active {
   background: var(--accent-soft);
 }
-.thread-list button.unread .subject {
-  font-weight: 700;
-}
 .message {
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
@@ -913,43 +910,31 @@ th {
   gap: 8px;
   margin-bottom: 12px;
 }
+.log-filters input {
+  flex: 0 1 160px;
+  min-width: 0;
+}
 .log-filters input[type="search"] {
   flex: 1 1 200px;
-  min-width: 0;
 }
-.attention-toggle {
-  gap: 6px;
-  font-weight: 600;
+.mail-log .log-row {
+  cursor: pointer;
 }
-.mail-log {
-  display: grid;
-}
-.log-row {
-  border-bottom: 1px solid var(--border);
-  border-left: 3px solid transparent;
-}
-.log-row:last-child {
-  border-bottom: none;
-}
-.log-row.attn {
-  border-left-color: var(--warn);
-}
-.log-row.open {
+.mail-log .log-row:hover {
   background: var(--accent-soft);
 }
-.log-head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-start;
-  gap: 6px 10px;
-  padding: 8px 10px;
+.mail-log .log-row.open {
+  background: var(--accent-soft);
+}
+.mail-log .nowrap {
+  white-space: nowrap;
+}
+.log-subject-cell {
+  max-width: 40ch;
 }
 .log-main {
-  flex: 1 1 320px;
-  min-width: 0;
-  display: grid;
-  gap: 2px;
-  justify-items: start;
+  display: block;
+  max-width: 100%;
   text-align: left;
   white-space: normal;
   border: none;
@@ -957,26 +942,12 @@ th {
   padding: 0;
   border-radius: 0;
 }
-.log-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px 10px;
-}
 .log-subject {
+  display: block;
   max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-.log-subject .strong {
-  font-weight: 700;
-}
-.log-side {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 4px;
 }
 .chips {
   display: inline-flex;
@@ -989,7 +960,8 @@ th {
 .log-thread .current .message {
   border-color: var(--accent);
 }
-.message pre {
+.message pre,
+.mail-body {
   white-space: pre-wrap;
   background: none;
   padding: 0;

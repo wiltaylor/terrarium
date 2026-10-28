@@ -52,6 +52,7 @@ import type {
   Host,
   LoginKind,
   LoginSession,
+  InboxEventData,
   Message,
   Project,
   Repo,
@@ -85,6 +86,7 @@ import { createScheduleMock, type ScheduleCaller } from "./schedules";
 import { createEventSourceMock } from "./eventSources";
 import { createWaitMock } from "./waits";
 import { createQuestionMock } from "./questions";
+import { createInboxMock, isPauseNotice } from "./inbox";
 import { createConfigMock } from "./config";
 import { applyTemplate, createTemplateMock, personaError, resolveTemplate, systemPromptError, templateRef } from "./templates";
 import { createTranscriptStream, encodeTranscriptFrame } from "../sse";
@@ -658,6 +660,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     audit: (action, target, proj, detail) => audit(action, target, proj, detail),
     sendMail: (to, from, subject, body, thread) => sendMail(to, from, subject, body, thread),
     questionClosed: (id, result) => waitMock.questionClosed(id, result),
+    inboxEvent: (d) => inboxEvent(d),
   });
   const openSession = (a: Agent) => {
     // A start runs the active harness version.
@@ -880,11 +883,12 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
   /** The loop guard limit (`TERRARIUM_MAIL_LOOP_LIMIT`, default 6). */
   const LOOP_LIMIT = 6;
   const byId = (a: Message, b: Message) => a.id.localeCompare(b.id);
-  /** Agent-to-agent messages on the thread since its last operator or project-inbox message. */
+  /** Agent-to-agent messages on the thread since its last operator or project-inbox message, or its last resume. */
   const agentRun = (thread: string): number => {
     let n = 0;
+    const reset = w.mailResets?.[thread] ?? "";
     for (const m of w.mail.filter((x) => x.thread_id === thread).sort(byId)) {
-      if (m.from_kind === "operator" || m.from_kind === "project" || m.to_kind === "project") n = 0;
+      if (m.id <= reset || m.from_kind === "operator" || m.from_kind === "project" || m.to_kind === "project") n = 0;
       else if (m.from_kind === "agent" && m.to_kind === "agent") n++;
     }
     return n;
@@ -897,6 +901,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     const f = address(from);
     const threadId = thread ?? ulid("th");
     const held = f.kind === "agent" && t.kind === "agent" && agentRun(threadId) >= LOOP_LIMIT;
+    const threadWas = inboxMock.threadOpen(threadId);
     const m: Message = {
       id: ulid("msg"),
       thread_id: threadId,
@@ -914,15 +919,13 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
       ...(t.kind === "agent" && !held ? {} : { delivered_at: iso() }),
     };
     w.mail.push(m);
-    const recipient = t.kind === "agent" ? w.agents.find((a) => a.id === t.addr) : undefined;
-    emit({
-      kind: "mail",
-      actor: f.kind === "agent" ? `agent:${f.addr}` : f.kind === "system" ? "system" : "operator",
-      ...(recipient ? { agent: recipient.name, agent_id: recipient.id } : {}),
-      project: t.project,
-      summary: `Mail from ${m.from_name} to ${m.to_name}: ${subject}`,
-      data: { message_id: m.id, thread_id: m.thread_id, from: m.from, from_name: m.from_name, to: m.to, to_name: m.to_name, subject, ...(held ? { held: true, thread_state: "paused" } : {}) },
-    });
+    if (held) (w.heldMail ??= []).push(m.id);
+    mailEvent(m, held ? { held: true, thread_state: "paused" } : {});
+    if (m.to_kind === "operator" && !isPauseNotice(m)) {
+      const item = inboxMock.mailItem(m);
+      inboxEvent({ item: item.id, kind: "mail", change: "opened", ...(item.project ? { project: item.project } : {}) });
+    }
+    inboxMock.threadEvent(threadId, threadWas);
     if (held) {
       // One notice for each pause (store/mail.rs pause_notice).
       const reset = w.mail.filter((x) => x.thread_id === threadId && (x.from_kind === "operator" || x.from_kind === "project" || x.to_kind === "project")).sort(byId).at(-1)?.id ?? "";
@@ -933,6 +936,33 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     }
     return render(m);
   };
+  /** A `mail` event about one message. */
+  const mailEvent = (m: Message, extra: Record<string, unknown>) => {
+    const recipient = m.to_kind === "agent" ? w.agents.find((a) => a.id === m.to) : undefined;
+    emit({
+      kind: "mail",
+      actor: m.from_kind === "agent" ? `agent:${m.from}` : m.from_kind === "system" ? "system" : "operator",
+      ...(recipient ? { agent: recipient.name, agent_id: recipient.id } : {}),
+      project: m.to_kind === "project" ? m.to.slice(8) : recipient?.project,
+      summary: `Mail from ${m.from_name} to ${m.to_name}: ${m.subject}`,
+      data: { message_id: m.id, thread_id: m.thread_id, from: m.from, from_name: m.from_name, to: m.to, to_name: m.to_name, subject: m.subject, ...extra },
+    });
+  };
+  const inboxEvent = (d: InboxEventData) =>
+    emit({ kind: "inbox", actor: "system", ...(d.project ? { project: d.project } : {}), summary: `inbox ${d.change}: ${d.item}`, data: d as unknown as Record<string, unknown> });
+  const inboxMock = createInboxMock({
+    w,
+    iso,
+    reply,
+    fail,
+    loopLimit: LOOP_LIMIT,
+    agentRun,
+    render: (m) => render(m),
+    replyTo: (id, body, subject, as) => replyTo(id, body, subject, as),
+    sendMail: (to, from, subject, body, thread) => sendMail(to, from, subject, body, thread),
+    mailEvent: (m, data) => mailEvent(m, data),
+    inboxEvent: (d) => inboxEvent(d),
+  });
   /** The first read sets `read_by` (docs/api.md §7). */
   const readBy = (m: Message, reader: string) => {
     if (m.read_by) return;
@@ -2738,7 +2768,20 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
         reply(() => {
           // The daemon resolves `to` and `from` as addresses, and `system` is not one it resolves (store/mail.rs `resolve`).
           for (const v of [q.to, q.from]) if (v?.trim() === "system") notFound("agent `system`");
-          return listMail((m) => (!q.to || m.to === q.to || m.to_name === q.to) && (!q.from || m.from === q.from || m.from_name === q.from), q);
+          if (q.project) project(q.project);
+          for (const v of [q.since, q.until]) if (v && Number.isNaN(Date.parse(v))) fail(400, "bad_request", `bad time \`${v}\`: use RFC 3339`);
+          const text = q.q?.trim().toLowerCase();
+          const inProject = (m: Message) => [m.from_name, m.to_name].some((n) => n === `project:${q.project}` || n.startsWith(`${q.project}/`));
+          return listMail(
+            (m) =>
+              (!q.to || m.to === q.to || m.to_name === q.to) &&
+              (!q.from || m.from === q.from || m.from_name === q.from) &&
+              (!q.project || inProject(m)) &&
+              (!q.since || Date.parse(m.created_at) >= Date.parse(q.since)) &&
+              (!q.until || Date.parse(m.created_at) <= Date.parse(q.until)) &&
+              (!text || [m.subject, m.body, m.from_name, m.to_name].some((x) => x.toLowerCase().includes(text))),
+            q,
+          );
         }),
       get: (id) => reply(() => render(find(w.mail, (m) => m.id === id, `message ${id}`))),
       send: (m) =>
@@ -2750,9 +2793,12 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
         }),
       markRead: (id) => reply(() => markRead(id)),
       reply: (id, body, subject) => reply(() => replyTo(id, body, subject)),
+      ...inboxMock.mail,
     },
 
-    inbox: {
+    inbox: inboxMock.inbox,
+
+    projectInbox: {
       list: (proj, q = {}) => reply(() => (project(proj), listMail((m) => m.to === `project:${proj}`, q))),
       send: (proj, m) => api.mail.send({ ...m, to: `project:${proj}` }),
       markRead: (proj, id) =>

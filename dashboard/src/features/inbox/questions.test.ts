@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { AgentEvent, Question } from "../../api/types";
-import { answerBody, chosenLabel, isQuestionEvent, matchesFilter, openCounts, putQuestion, shortQuestion, sortQuestions } from "./model";
+import { ackText, answerBody, chosenLabel, isQuestionEvent, putQuestion, shortQuestion, sortQuestions, statusChip } from "./questions";
 
 const q = (id: string, over: Partial<Question> = {}): Question => ({
   id,
+  kind: "question",
   agent: "A1",
   agent_name: "p/lead",
   project: "p",
@@ -24,15 +25,10 @@ describe("questions model", () => {
       q("done-old", { status: "answered", answered_at: "2026-10-28T08:00:00.000Z" }),
       q("late", { created_at: "2026-10-28T11:00:00.000Z" }),
       q("urgent", { priority: "urgent", created_at: "2026-10-28T12:00:00.000Z" }),
-      q("done-new", { status: "answered", answered_at: "2026-10-28T09:00:00.000Z" }),
+      q("done-new", { kind: "notice", status: "acknowledged", answered_at: "2026-10-28T09:00:00.000Z" }),
       q("early", { created_at: "2026-10-28T09:00:00.000Z" }),
     ];
     expect(sortQuestions(list).map((x) => x.id)).toEqual(["urgent", "early", "late", "done-new", "done-old"]);
-  });
-
-  it("counts the open and urgent questions for the badge", () => {
-    expect(openCounts([q("a"), q("b", { priority: "urgent" }), q("c", { status: "answered", priority: "urgent" })])).toEqual({ open: 2, urgent: 1 });
-    expect(openCounts([])).toEqual({ open: 0, urgent: 0 });
   });
 
   it("puts a changed question in place and keeps the order", () => {
@@ -54,12 +50,18 @@ describe("questions model", () => {
     expect("error" in answerBody(q("b"), "x".repeat(8001), null)).toBe(true);
   });
 
-  it("filters, names the chosen option, and matches the events", () => {
-    expect(matchesFilter(q("a"), "open")).toBe(true);
-    expect(matchesFilter(q("a", { status: "retracted" }), "open")).toBe(false);
-    expect(matchesFilter(q("a", { status: "retracted" }), "all")).toBe(true);
+  it("builds the optional reply of an acknowledge", () => {
+    expect(ackText("open", "")).toEqual({});
+    expect(ackText("open", "  Thanks.  ")).toEqual({ text: "Thanks." });
+    expect(ackText("acknowledged", "x")).toEqual({ error: "The notice is acknowledged." });
+    expect("error" in ackText("open", "x".repeat(8001))).toBe(true);
+  });
+
+  it("names the chosen option, the status chip, and matches the events", () => {
     expect(chosenLabel(q("a", { options: ["x", "y"], answer_option: 1 }))).toBe("y");
     expect(chosenLabel(q("a"))).toBeNull();
+    expect(statusChip("acknowledged")).toBe("ok");
+    expect(statusChip("open")).toBe("info");
     const e = { kind: "question", agent_id: "A1", data: { agent_id: "A1" } } as unknown as AgentEvent;
     expect(isQuestionEvent(e)).toBe(true);
     expect(isQuestionEvent(e, "A1")).toBe(true);

@@ -1,12 +1,15 @@
 //! Questions to the operator (PLAN §12e, docs/api.md §6.8).
 //!
-//! - `GET|POST /api/agents/{id}/questions`: the questions of an agent; a
-//!   leader asks one (with `wait: true`, also a `question` wait on it).
-//! - `GET /api/questions?status=&project=&agent=`: the questions that the
-//!   caller may read, for the operator's Questions page.
+//! - `GET|POST /api/agents/{id}/questions`: the questions and notices of
+//!   an agent; a leader asks a question or sends a notice (`kind:
+//!   "notice"`), with `wait: true` also a `question` wait on it.
+//! - `GET /api/questions?status=&project=&agent=&kind=`: the questions and
+//!   notices that the caller may read.
 //! - `GET|PATCH /api/questions/{id}`.
 //! - `POST /api/questions/{id}/answer`: the operator, or a sysadmin agent
-//!   for the question of another agent.
+//!   for the question of another agent. A notice is `409`.
+//! - `POST /api/questions/{id}/ack`: the same rights, for a notice. A
+//!   question is `409`.
 //! - `POST /api/questions/{id}/retract`: the asking leader or the
 //!   operator.
 
@@ -25,7 +28,8 @@ use crate::policy;
 use crate::store::agents::{self, AgentView};
 use crate::store::mail::Address;
 use crate::store::questions::{
-    self, Filter, NewQuestion, OptionRef, Priority, Question, QuestionPatch, QuestionStatus,
+    self, Filter, NewQuestion, OptionRef, Priority, Question, QuestionKind, QuestionPatch,
+    QuestionStatus,
 };
 use crate::store::waits::{self, NewWait, Wait, WaitKind};
 use crate::waits as rt;
@@ -36,6 +40,7 @@ pub fn routes() -> Router<Shared> {
         .route("/questions", get(list_all))
         .route("/questions/{id}", get(show).patch(update))
         .route("/questions/{id}/answer", post(answer))
+        .route("/questions/{id}/ack", post(ack))
         .route("/questions/{id}/retract", post(retract))
 }
 
@@ -61,6 +66,15 @@ struct AgentListQuery {
     status: Option<String>,
     #[serde(default)]
     all: Option<bool>,
+    #[serde(default)]
+    kind: Option<String>,
+}
+
+/// The `kind` filter of a list: `question`, `notice`, or none (both).
+fn kind_filter(kind: Option<&str>) -> ApiResult<Option<QuestionKind>> {
+    kind.filter(|k| !k.trim().is_empty())
+        .map(QuestionKind::parse)
+        .transpose()
 }
 
 /// `GET /api/agents/{id}/questions[?status=|all=true]`: no filter lists
@@ -83,6 +97,7 @@ async fn list_of(
     let all = q.all.unwrap_or(false) || q.status.as_deref() == Some("all");
     let f = Filter {
         agent: Some(key),
+        kind: kind_filter(q.kind.as_deref())?,
         status,
         recent: status.is_none() && !all,
         ..Filter::default()
@@ -98,6 +113,8 @@ struct ListQuery {
     project: Option<String>,
     #[serde(default)]
     agent: Option<String>,
+    #[serde(default)]
+    kind: Option<String>,
 }
 
 /// `GET /api/questions?status=open&project=&agent=`. The operator and a
@@ -138,9 +155,11 @@ async fn list_all(
         }
         None => None,
     };
+    let kind = kind_filter(q.kind.as_deref())?;
     let f = Filter {
         agent,
         project: project.clone(),
+        kind,
         status,
         recent: false,
     };
@@ -149,7 +168,7 @@ async fn list_all(
         .read(move |c| {
             Ok((
                 questions::list(c, &f)?,
-                questions::open_total(c, project.as_deref())?,
+                questions::open_total(c, project.as_deref(), kind)?,
             ))
         })
         .await?;
@@ -175,6 +194,9 @@ async fn show(
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AskBody {
+    /// `question` (the default) or `notice`.
+    #[serde(default)]
+    kind: QuestionKind,
     text: String,
     #[serde(default)]
     options: Vec<String>,
@@ -209,7 +231,7 @@ pub fn new_wait(waiter: &str, q: &Question, timeout_at: Option<String>) -> NewWa
         agent: waiter.to_owned(),
         kind: WaitKind::Question,
         spec: json!({"question": q.id}),
-        summary: questions::wait_summary(&q.text),
+        summary: questions::wait_summary(q.kind, &q.text),
         target_agent: None,
         reason: None,
         timeout_at,
@@ -235,7 +257,8 @@ pub fn create_wait(
     }
     if q.status != QuestionStatus::Open {
         return Err(ApiError::conflict(format!(
-            "question {} is {} already; run `terrarium question show {}`",
+            "{} {} is {} already; run `terrarium question show {}`",
+            q.noun(),
             q.id,
             q.status.as_str(),
             q.id
@@ -246,7 +269,8 @@ pub fn create_wait(
     waits::create(t, w)
 }
 
-/// `POST /api/agents/{id}/questions`: a leader asks the operator.
+/// `POST /api/agents/{id}/questions`: a leader asks the operator, or
+/// sends a notice (`kind: "notice"`).
 async fn ask(
     State(state): State<Shared>,
     actor: Actor,
@@ -255,7 +279,11 @@ async fn ask(
 ) -> ApiResult<Response> {
     let a = find_agent(&state, &actor, id).await?;
     let key = a.agent.id.to_string();
-    policy::ask_question(&actor, &key, &a.agent.project, "asking the operator")?;
+    let what = match b.kind {
+        QuestionKind::Question => "asking the operator",
+        QuestionKind::Notice => "sending a notice to the operator",
+    };
+    policy::ask_question(&actor, &key, &a.agent.project, what)?;
     let tuning = state.waits.tuning();
     let timeout_at = match (b.wait, b.timeout.as_deref()) {
         (false, Some(_)) => {
@@ -273,6 +301,7 @@ async fn ask(
     };
     let new = NewQuestion {
         agent: key.clone(),
+        kind: b.kind,
         text: b.text,
         options: b.options,
         context: b.context,
@@ -380,6 +409,47 @@ async fn answer(
     ))
 }
 
+/// The body of `POST /api/questions/{id}/ack`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AckBody {
+    /// An optional reply to the agent.
+    #[serde(default)]
+    text: Option<String>,
+}
+
+/// `POST /api/questions/{id}/ack`: acknowledge a notice. The body is
+/// optional. The agent always gets one mail on the thread of the notice.
+async fn ack(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(id): Path<String>,
+    body: axum::body::Bytes,
+) -> ApiResult<Json<Question>> {
+    let b: AckBody = optional_body(&body)?;
+    let q = find(&state, &actor, id).await?;
+    policy::answer_question(&actor, &q.agent)?;
+    let by = Address::from_actor(&actor);
+    let qid = q.id.clone();
+    Ok(Json(
+        state
+            .db
+            .write(actor.label(), move |t| {
+                questions::acknowledge(t, &qid, &by, b.text.as_deref())
+            })
+            .await?,
+    ))
+}
+
+/// A JSON body that may be absent: no body is the default.
+fn optional_body<T: Default + serde::de::DeserializeOwned>(body: &[u8]) -> ApiResult<T> {
+    if body.iter().all(u8::is_ascii_whitespace) {
+        Ok(T::default())
+    } else {
+        serde_json::from_slice(body).map_err(|e| ApiError::bad_request(e.to_string()))
+    }
+}
+
 /// The body of `POST /api/questions/{id}/retract`.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -396,11 +466,7 @@ async fn retract(
     body: axum::body::Bytes,
 ) -> ApiResult<Json<Question>> {
     // The body is optional: no body is no reason.
-    let b: RetractBody = if body.iter().all(u8::is_ascii_whitespace) {
-        RetractBody::default()
-    } else {
-        serde_json::from_slice(&body).map_err(|e| ApiError::bad_request(e.to_string()))?
-    };
+    let b: RetractBody = optional_body(&body)?;
     let q = find(&state, &actor, id).await?;
     policy::retract_question(&actor, &q.agent, &q.project)?;
     let by_owner = actor.agent().is_some_and(|a| a.id == q.agent);

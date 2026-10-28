@@ -3,7 +3,7 @@ import { For, lazy, Match, Show, Switch } from "solid-js";
 import { isMock } from "../api";
 import { auth } from "../stores";
 import { Layout } from "./Layout";
-import { MOVED_ROUTES } from "./nav";
+import { MOVED_ROUTES, movedTo } from "./nav";
 import { LoginScreen } from "./LoginScreen";
 import { Home } from "../features/home/Home";
 import { AgentsPage } from "../features/agents/AgentsPage";
@@ -12,7 +12,6 @@ import { BoardPage } from "../features/board/BoardPage";
 const AgentDetail = lazy(() => import("../features/agents/AgentDetail"));
 const SubscriptionsPage = lazy(() => import("../features/subscriptions/SubscriptionsPage"));
 const MailPage = lazy(() => import("../features/mail/MailPage"));
-const QuestionsPage = lazy(() => import("../features/questions/QuestionsPage"));
 const InboxPage = lazy(() => import("../features/inbox/InboxPage"));
 const MemoryPage = lazy(() => import("../features/memory/MemoryPage"));
 const WikiPage = lazy(() => import("../features/wiki/WikiPage"));
@@ -67,7 +66,7 @@ export function App() {
         <Route path="/templates" component={TemplatesPage} />
         <Route path="/subscriptions" component={SubscriptionsPage} />
         <Route path="/mail" component={MailPage} />
-        <Route path="/questions" component={QuestionsPage} />
+        <Route path="/inbox" component={InboxPage} />
         <Route path="/targets" component={TargetsPage} />
         <Route path="/schedules" component={SchedulesPage} />
         <Route path="/hosts" component={HostsPage} />
@@ -77,7 +76,7 @@ export function App() {
         <Route path="/settings" component={SettingsPage} />
         <Route path="/p/:project" component={ProjectIndex} />
         <Route path="/p/:project/board" component={BoardPage} />
-        <Route path="/p/:project/inbox" component={InboxPage} />
+        <Route path="/p/:project/mail" component={MailPage} />
         <Route path="/p/:project/settings" component={ProjectSettings} />
         <Route path="/p/:project/memory" component={MemoryPage} />
         <Route path="/p/:project/wiki/*path" component={WikiPage} />
@@ -87,7 +86,7 @@ export function App() {
         <Show when={isMock}>
           <Route path="/dev/xss" component={XssPage} />
         </Show>
-        <For each={MOVED_ROUTES}>{(r) => <Route path={r.path} component={() => <Navigate href={r.to} />} />}</For>
+        <For each={MOVED_ROUTES}>{(r) => <Route path={r.path} component={() => <Navigate href={({ location }) => movedTo(location.pathname) ?? r.to} />} />}</For>
         <Route path="*" component={NotFound} />
       </Router>
       </Match>

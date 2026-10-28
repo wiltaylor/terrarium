@@ -53,6 +53,7 @@ including the mode 1 run. Keep them when you edit a template.
 - A lead asks the operator with `terrarium question ask`, never in the text of its turn (PLAN §12e). It runs `terrarium question ls` first and does not ask the same thing twice. It keeps each open question up to date (`question update`) and retracts it when it does not need it. At the start of a session, after a compaction, or when it is not sure of its state, it runs `terrarium question ls`. A new session gets the open questions and the new answers in its recap turn.
 - `--wait` on `question ask` registers a `question` wait: the lead is `waiting` until the answer comes. The answer mail is the wake mail of the wait, so the lead gets one mail, not two.
 - A worker cannot ask the operator (`403`). It mails its lead, and the lead asks for it. `default.md` does not teach `question` (the word cap).
+- A lead tells the operator something that needs no decision (a milestone, a finished deploy, a risk) with `terrarium notify`, not with mail to `operator` (PLAN §12e). The operator acknowledges the notice in the Inbox, and the lead gets one mail. The system lead sends its daily summary as a notice. The leader persona (`leader.md`) says the same in one bullet, and stays under its word cap. A worker cannot send a notice.
 - The system lead gives each lead `--subscription` in `admin agent new`: the one the operator gave, or its own. Its reply to the operator gives the project, repo, and lead names.
 
 ## Personas

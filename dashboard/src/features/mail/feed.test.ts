@@ -4,7 +4,7 @@ import { createMockApi } from "../../api/mock";
 import { fakeUlid } from "../../api/mock/data";
 import type { MailQuery } from "../../api/types";
 import { createMailFeed } from "./feed";
-import { annotate, applyFilter, DEFAULT_FILTER, threadOf } from "./log";
+import { applyFilter, DEFAULT_FILTER, threadOf } from "./log";
 
 const wait = (ms = 10) => new Promise((r) => setTimeout(r, ms));
 
@@ -87,8 +87,9 @@ describe("mail feed", () => {
         ["operator", "queued"],
       ]);
       // The reply is not to the operator; the filter in the browser keeps it out of a "to operator" view.
-      const shown = applyFilter(annotate(feed.messages()), { ...DEFAULT_FILTER, attention: false, kind: "to_operator" }, Date.now());
-      expect(shown.every((e) => e.message.to === "operator")).toBe(true);
+      const shown = applyFilter(feed.messages(), { ...DEFAULT_FILTER, to: "operator" }, Date.now());
+      expect(shown.length).toBeGreaterThan(0);
+      expect(shown.every((m) => m.to === "operator")).toBe(true);
       dispose();
     });
   });

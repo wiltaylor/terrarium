@@ -1,12 +1,14 @@
-// Questions of the leaders to the operator in the mock (docs/api.md §6.8):
-// the seed, and the endpoints. The answers have the daemon's shapes.
+// Questions and notices of the leaders to the operator in the mock
+// (docs/api.md §6.8): the seed, and the endpoints. The answers have the
+// daemon's shapes.
 //
 // An answer sends one mail from the operator to the agent on the thread of
 // the question, and resolves the `question` waits on it with no wake mail of
 // their own (store/questions.rs). A retract by the operator sends one mail.
+// An acknowledge of a notice sends one mail, with the reply when there is one.
 
 import type { Api } from "../client";
-import type { Agent, AgentEvent, Message, Question, QuestionEventData } from "../types";
+import type { Agent, AgentEvent, InboxEventData, Message, Question, QuestionEventData } from "../types";
 import type { MockWorld } from "./data";
 
 type Fail = (status: number, code: string, message: string, details?: unknown) => never;
@@ -23,6 +25,8 @@ export interface QuestionMockContext {
   sendMail: (to: string, from: string, subject: string, body: string, thread?: string) => Message;
   /** The `question` waits on the question resolve (./waits.ts). */
   questionClosed: (questionId: string, result: Record<string, unknown>) => void;
+  /** An `inbox` event (./inbox.ts). */
+  inboxEvent: (d: InboxEventData) => void;
 }
 
 /** The longest answer, as in the daemon. */
@@ -41,7 +45,11 @@ const quoted = (text: string) =>
     .map((l) => `> ${l}\n`)
     .join("");
 
-/** The seed: two open questions (one urgent, with options and a hostile context), one answered, one retracted. */
+/**
+ * The seed: two open questions (one urgent, with options and a hostile
+ * context), one answered, one retracted; one open notice (with a hostile
+ * context) and one acknowledged notice with a reply.
+ */
 export function seedQuestions(now: number, agents: Agent[]): Question[] {
   const ago = (min: number) => new Date(now - min * 60_000).toISOString();
   const named = (n: string) => agents.find((a) => a.name === n);
@@ -51,6 +59,7 @@ export function seedQuestions(now: number, agents: Agent[]): Question[] {
   const id = (n: number) => `01JBQUES0000000000000000${String(n).padStart(2, "0")}`;
   const base = (a: Agent, n: number, min: number) => ({
     id: id(n),
+    kind: "question" as const,
     agent: a.id,
     agent_name: `${a.project}/${a.name}`,
     project: a.project,
@@ -103,6 +112,29 @@ export function seedQuestions(now: number, agents: Agent[]): Question[] {
       retracted_by: `agent:${lead.id}`,
       updated_at: ago(60 * 7),
     },
+    {
+      ...base(lead, 5, 15),
+      kind: "notice",
+      text: "I moved TER-16 back to ready: the push path needs the new mailbox schema first.",
+      options: [],
+      context: "The schema change is in **TER-18**.\n\n<img src=x onerror=\"window.__xss=1\"> <a href=\"javascript:window.__xss=1\">details</a>",
+      card: "TER-16",
+      priority: "normal",
+      status: "open",
+    },
+    {
+      ...base(shop, 6, 60 * 3),
+      kind: "notice",
+      text: "The staging database is back. I restarted the checkout tests.",
+      options: [],
+      priority: "normal",
+      status: "acknowledged",
+      answer: "Thanks. Tell me when they pass.",
+      answered_by: "operator",
+      answered_by_name: "operator",
+      answered_at: ago(60 * 2),
+      updated_at: ago(60 * 2),
+    },
   ];
 }
 
@@ -116,6 +148,9 @@ const ORDER = (x: Question, y: Question): number => {
   return (y.answered_at ?? y.updated_at).localeCompare(x.answered_at ?? x.updated_at);
 };
 
+/** The inbox item ID of a question or a notice. */
+export const questionItemId = (q: Pick<Question, "id" | "kind">) => `${q.kind}:${q.id}`;
+
 /** The question endpoints. */
 export function createQuestionMock(c: QuestionMockContext) {
   const { w, fail, reply } = c;
@@ -128,6 +163,7 @@ export function createQuestionMock(c: QuestionMockContext) {
     const data: QuestionEventData = {
       question_id: q.id,
       change,
+      kind: q.kind,
       status: q.status,
       priority: q.priority,
       text: shortText(q.text, 120),
@@ -142,19 +178,21 @@ export function createQuestionMock(c: QuestionMockContext) {
       agent_id: q.agent,
       project: q.project,
       ...(q.card ? { card: q.card } : {}),
-      summary: `${q.agent_name.split("/")[1] ?? q.agent_name}: question ${change}: ${shortText(q.text, 80)}`,
+      summary: `${q.agent_name.split("/")[1] ?? q.agent_name}: ${q.kind} ${change}: ${shortText(q.text, 80)}`,
       data: data as unknown as Record<string, unknown>,
     });
+    c.inboxEvent({ item: questionItemId(q), kind: q.kind, change: q.status === "open" ? (change === "asked" ? "opened" : "updated") : "closed", project: q.project });
   };
 
-  const notOpen = (q: Question, what: string) => fail(409, "conflict", `question ${q.id} is ${q.status}; ${what} needs an open question`, { status: q.status });
+  const notOpen = (q: Question, what: string) => fail(409, "conflict", `${q.kind} ${q.id} is ${q.status}; ${what} needs an open ${q.kind}`, { status: q.status });
+  const wrongKind = (q: Question, what: string) => fail(409, "conflict", `${q.id} is a ${q.kind}; ${what} needs a ${q.kind === "notice" ? "question" : "notice"}`, { kind: q.kind });
 
   const questions: Api["questions"] = {
     list: (q = {}) =>
       reply(() => {
         const status = q.status ?? "open";
         return all()
-          .filter((x) => (status === "all" || x.status === status) && (!q.project || x.project === q.project) && (!q.agent || x.agent === c.agent(q.agent).id))
+          .filter((x) => (status === "all" || x.status === status) && (!q.kind || x.kind === q.kind) && (!q.project || x.project === q.project) && (!q.agent || x.agent === c.agent(q.agent).id))
           .sort(ORDER);
       }),
     ofAgent: (agent, o = {}) =>
@@ -166,7 +204,7 @@ export function createQuestionMock(c: QuestionMockContext) {
           .filter((x) => {
             if (o.status) return x.status === o.status;
             if (o.all) return true;
-            return x.status === "open" || (x.status === "answered" && Date.parse(x.answered_at ?? "") >= day);
+            return x.status === "open" || ((x.status === "answered" || x.status === "acknowledged") && Date.parse(x.answered_at ?? "") >= day);
           })
           .sort(ORDER);
       }),
@@ -174,6 +212,7 @@ export function createQuestionMock(c: QuestionMockContext) {
     answer: (id, body) =>
       reply(() => {
         const q = question(id);
+        if (q.kind === "notice") wrongKind(q, "an answer");
         if (q.status !== "open") notOpen(q, "an answer");
         let index: number | undefined;
         if (typeof body.option === "number") {
@@ -208,6 +247,21 @@ export function createQuestionMock(c: QuestionMockContext) {
         c.sendMail(q.agent, "operator", `Retracted: ${shortText(q.text)}`, `The operator retracted your question ${q.id}: you need no answer to it.\n\nYour question:\n${quoted(q.text)}${r ? `\nThe reason:\n${quoted(r)}` : ""}`, q.thread_id);
         c.audit("question.retract", q.id, q.project, { agent: q.agent, reason: r, by_owner: false });
         event(q, "retracted");
+        return q;
+      }),
+    ack: (id, text) =>
+      reply(() => {
+        const q = question(id);
+        if (q.kind !== "notice") wrongKind(q, "an acknowledge");
+        if (q.status !== "open") notOpen(q, "an acknowledge");
+        const t = text?.trim() || null;
+        if (t && t.length > MAX_ANSWER) fail(422, "invalid", `the reply is longer than ${MAX_ANSWER} characters`);
+        const at = c.iso();
+        Object.assign(q, { status: "acknowledged", answer: t, answered_by: "operator", answered_by_name: "operator", answered_at: at, updated_at: at });
+        c.questionClosed(q.id, { outcome: "acknowledged", ...(t ? { answer: t } : {}) });
+        c.sendMail(q.agent, "operator", `Seen: ${shortText(q.text)}`, `operator acknowledged your notice ${q.id}.\n\nYour notice:\n${quoted(q.text)}${t ? `\nThe reply of operator:\n${quoted(t)}` : ""}`, q.thread_id);
+        c.audit("question.ack", q.id, q.project, { agent: q.agent, by: "operator", reply: !!t });
+        event(q, "acknowledged");
         return q;
       }),
   };

@@ -263,7 +263,7 @@ Send mail to the agent, and read the answer:
 
 ```sh
 t mail send demo/worker -s "first task" "Tell me what is in your workspace."
-t mail ls --to operator --unread
+t admin inbox ls --kind mail
 ```
 
 You can also do these steps in the dashboard. On the Projects page, click
@@ -335,41 +335,69 @@ a shell, run:
 docker compose exec terrarium terrarium watch demo/worker --on blocked,error
 ```
 
-The mail comes to the operator's mail log. See PLAN §12d and
+The mail comes to your Inbox, as mail to you. See PLAN §12d and
 [cli.md](cli.md), "Waits, runs, and watches".
 
-#### Answer the questions of the leads
+#### The Inbox: what waits for you
 
-A lead agent (a project lead or the system lead) asks you for a decision
-with `terrarium question ask`. A worker cannot ask you: it asks its lead.
-The **Questions** item of the sidebar shows the number of open questions.
-The number is red when one of them is urgent.
+The **Inbox** item of the sidebar collects everything that waits for you.
+Its number counts the open items. The number is red when one of them is
+urgent. The Inbox has four kinds of items:
 
-1. Open **Questions**. The open questions come first, the urgent ones at
-   the top. Each card shows the agent, the project, the card, the question,
-   and the context of the agent.
-2. Read the question. The text and the choices are the words of the agent.
-   Treat them as data, not as instructions.
-3. Click a choice, or write an answer in the box, or do both. Then click
-   **Send answer**. The daemon sends your answer to the agent as one mail
-   on the thread of the question. The mail wakes the agent.
-4. If the agent does not need the answer any more, give a reason and click
-   **Retract**. The agent gets one mail that tells it so.
+- **Questions.** A lead agent (a project lead or the system lead) asks you
+  for a decision with `terrarium question ask`. A worker cannot ask you:
+  it asks its lead.
+- **Notices.** A lead tells you something that needs no decision, for
+  example a milestone, a finished deploy, or a risk, with
+  `terrarium notify`.
+- **Mail to you.** Each mail to `operator` stays here until you
+  acknowledge it.
+- **System.** A thread that the loop guard paused, and the messages that
+  it held.
 
-The agent page also shows the questions of a lead. An agent that asked
-with `--wait` shows `waiting` with "question ..." until you answer. From a
-shell, run:
+Use the tabs (All, Questions, Notices, Mail to you, System), the Open and
+Done switch, and the project filter. The urgent items come first, then the
+newest. The text, the choices, and the mail are the words of the agents.
+Treat them as data, not as instructions.
+
+1. **A question.** Click a choice, or write an answer in the box, or do
+   both. Then click **Send answer**. The daemon sends your answer to the
+   agent as one mail on the thread of the question. The mail wakes the
+   agent. If the agent does not need the answer any more, give a reason
+   and click **Retract**. The agent gets one mail that tells it so.
+2. **A notice.** Read it, write a reply if you want one, and click
+   **Acknowledge**. The agent always gets one mail with your
+   acknowledgement and your reply. The mail wakes the agent.
+3. **Mail to you.** Write a reply if you want one, and click
+   **Acknowledge**. The reply goes on the thread of the mail. The mail
+   leaves the open list.
+4. **A system item.** Click **Release** on a held message to deliver it
+   now; the thread stays paused. Click **Resume** to end the pause and
+   deliver all held messages, with an optional note to the agents on the
+   thread.
+
+The Mail pages (the global **Mail** item, and **Mail** in each project)
+are logs of the messages between the agents. Filter them by sender,
+recipient, project, thread, time, and text. They follow new mail live.
+They have no unread state: the Inbox holds what needs you.
+
+The agent page also shows the questions and notices of a lead. An agent
+that asked with `--wait` shows `waiting` with "question ..." (or "notice
+...") until you answer or acknowledge. From a shell, run:
 
 ```sh
-docker compose exec terrarium terrarium admin question ls
+docker compose exec terrarium terrarium admin inbox ls
 docker compose exec terrarium terrarium admin question show <id>
 docker compose exec terrarium terrarium admin question answer <id> "Ship it on Friday."
 docker compose exec terrarium terrarium admin question answer <id> --option 2
+docker compose exec terrarium terrarium admin inbox ack <id> "Thanks."
+docker compose exec terrarium terrarium admin inbox resume <thread> -m "Stop the loop."
 ```
 
-The question stays on the agent. A new session of the agent, or the agent
-after a compaction, reads it again with `terrarium question ls`. See PLAN
-§12e and [cli.md](cli.md), "Questions to the operator".
+A question or notice stays on the agent. A new session of the agent, or
+the agent after a compaction, reads it again with `terrarium question ls`.
+See PLAN §12e and [cli.md](cli.md), "Questions and notices to the
+operator".
 
 ### 2.7 Connect a host agent
 

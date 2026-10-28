@@ -5,8 +5,10 @@ import { Empty, ErrorBanner, Modal, PageHead, Tabs, useNow } from "../../compone
 import type { Subscription, UsageGroup, UsagePoint } from "../../api/types";
 import { isMissingEndpoint } from "../../api/http";
 import { ago, compact } from "../../lib/format";
-import { api, attention, events, projects, subscriptions } from "../../stores";
-import { REASON_LABELS } from "../mail/log";
+import { api, events, inbox, projects, subscriptions } from "../../stores";
+import type { InboxItem } from "../../api/types";
+import { KIND_LABELS } from "../inbox/model";
+import { shortQuestion } from "../inbox/questions";
 import { usageLabel } from "./labels";
 import { bucketStarts, cardProject, cardRows, tokenSeries, toPercent, totalsByKey } from "./usage";
 import { buildQueue, type ProjectSnapshot } from "./queue";
@@ -86,16 +88,27 @@ async function loadSchedules(missing: Set<string>): Promise<Schedule[]> {
   }
 }
 
-const KIND_LABEL = { version: "version", page: "review", card: "blocked", schedule: "run failed", mail: "mail" } as const;
-const KIND_CHIP = { version: "info", page: "warn", card: "bad", schedule: "bad", mail: "" } as const;
+const KIND_LABEL = { version: "version", page: "review", card: "blocked", schedule: "run failed" } as const;
+const KIND_CHIP = { version: "info", page: "warn", card: "bad", schedule: "bad" } as const;
+
+/** The chip of an Inbox item on Home: its kind; red when it is urgent. */
+const inboxChip = (i: InboxItem) => ({ label: KIND_LABELS[i.kind], cls: i.urgent ? "bad" : i.kind === "system" ? "warn" : "info" });
+
+/** One line for an Inbox item. Each text is the sender's words: the view shows it as a text node. */
+function inboxLine(i: InboxItem): { title: string; detail: string } {
+  if (i.question) return { title: shortQuestion(i.question.text), detail: `from ${i.question.agent_name}` };
+  if (i.message) return { title: i.message.subject || "(no subject)", detail: `from ${i.message.from_name}` };
+  if (i.system) return { title: i.system.subject || "(no subject)", detail: `paused: ${i.system.participants.join(", ")}` };
+  return { title: i.id, detail: "" };
+}
 
 export function Home() {
   const now = useNow(15_000);
   const missing = new Set<string>();
   const [snaps, { refetch }] = createResource(() => loadQueue(missing));
   const [schedules, { refetch: refetchSchedules }] = createResource(() => loadSchedules(missing));
-  // The mail items come from the attention store, which a `mail` event refreshes.
-  const queue = createMemo(() => (snaps() ? buildQueue(snaps()!, attention.items(), failedRecently(schedules.latest ?? [], now())) : undefined));
+  // The Inbox items come from the inbox store, which an `inbox` event refreshes.
+  const queue = createMemo(() => (snaps() ? buildQueue(snaps()!, inbox.open(), failedRecently(schedules.latest ?? [], now())) : undefined));
   const [detail, setDetail] = createSignal<string | null>(null);
   const strip = useStripUsage(now);
 
@@ -154,7 +167,7 @@ export function Home() {
       <section class="card-box">
         <div class="spread">
           <h2 style={{ margin: 0 }}>Waiting on you</h2>
-          <button class="small" onClick={() => (void refetch(), void refetchSchedules(), void attention.refresh())}>
+          <button class="small" onClick={() => (void refetch(), void refetchSchedules(), void inbox.refresh())}>
             Refresh
           </button>
         </div>
@@ -165,7 +178,9 @@ export function Home() {
                 {(item) => (
                   <div class="queue-item">
                     <span class="queue-kind">
-                      <span class={`chip ${KIND_CHIP[item.kind]}`}>{KIND_LABEL[item.kind]}</span>
+                      <Show when={item.kind === "inbox" && item} fallback={<span class={`chip ${KIND_CHIP[item.kind as keyof typeof KIND_CHIP]}`}>{KIND_LABEL[item.kind as keyof typeof KIND_LABEL]}</span>}>
+                        {(x) => <span class={`chip ${inboxChip(x().item).cls}`}>{inboxChip(x().item).label}</span>}
+                      </Show>
                     </span>
                     <div style={{ "min-width": 0, flex: 1 }}>
                       <Switch>
@@ -210,18 +225,13 @@ export function Home() {
                             </>
                           )}
                         </Match>
-                        <Match when={item.kind === "mail" && item}>
-                          {(m) => (
+                        <Match when={item.kind === "inbox" && item}>
+                          {(x) => (
                             <>
-                              <A href={`/mail?thread=${m().entry.message.thread_id}`}>
-                                <strong>{m().entry.message.subject || "(no subject)"}</strong>
+                              <A href={`/inbox?tab=${x().item.kind}`}>
+                                <strong>{inboxLine(x().item).title}</strong>
                               </A>{" "}
-                              <span class="muted">
-                                {m().entry.message.from_name} → {m().entry.message.to_name}
-                              </span>{" "}
-                              <span class="chips">
-                                <For each={m().entry.reasons}>{(r) => <span class="chip warn">{REASON_LABELS[r]}</span>}</For>
-                              </span>
+                              <span class="muted">{inboxLine(x().item).detail}</span>
                             </>
                           )}
                         </Match>

@@ -179,13 +179,19 @@ pub enum Command {
         #[command(subcommand)]
         command: WaitCmd,
     },
-    /// Questions to the operator (leaders only): ask, list, update,
-    /// retract. The answer comes as mail. Workers ask their lead by mail
+    /// Questions and notices to the operator (leaders only): ask, list,
+    /// update, retract. The answer comes as mail. Workers ask their lead by
+    /// mail
     #[command(visible_alias = "questions")]
     Question {
         #[command(subcommand)]
         command: QuestionCmd,
     },
+    /// Tell the operator something that needs no decision (leaders only):
+    /// a milestone, a finished deploy, a risk. The operator acknowledges it
+    /// in the Inbox; the acknowledgement comes as mail. Use `question ask`
+    /// when you need a decision
+    Notify(NotifyArgs),
     /// Get a mail when an agent goes idle, waiting, blocked, error, or
     /// stopped: `watch <agent> --on blocked,error`
     #[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
@@ -1204,6 +1210,28 @@ pub struct QuestionContext {
     pub context_file: Option<PathBuf>,
 }
 
+/// `terrarium notify ...` (docs/api.md §6.8): a notice to the operator.
+#[derive(Debug, Args)]
+pub struct NotifyArgs {
+    /// The notice, short and clear (`-` reads stdin)
+    pub text: String,
+    #[command(flatten)]
+    pub context: QuestionContext,
+    /// The card that the notice is about
+    #[arg(long)]
+    pub card: Option<String>,
+    /// Mark the notice urgent
+    #[arg(long)]
+    pub urgent: bool,
+    /// Also wait on the acknowledgement: your status is `waiting` until it
+    /// comes. Then end your turn
+    #[arg(long)]
+    pub wait: bool,
+    /// With --wait: end the wait as `timed_out` after this time
+    #[arg(long, requires = "wait")]
+    pub timeout: Option<String>,
+}
+
 /// `terrarium question ...` (docs/api.md §6.8). A leader asks the
 /// operator; the answer comes as mail.
 #[derive(Debug, Subcommand)]
@@ -1232,21 +1260,24 @@ pub enum QuestionCmd {
         #[arg(long, requires = "wait")]
         timeout: Option<String>,
     },
-    /// List your questions: the open ones and the ones answered in the
-    /// last 24 h (`--all`: every one)
+    /// List your questions and notices: the open ones and the ones
+    /// answered or acknowledged in the last 24 h (`--all`: every one)
     Ls {
         #[arg(long)]
         all: bool,
-        /// open, answered, or retracted
+        /// open, answered, acknowledged, or retracted
         #[arg(long)]
         status: Option<String>,
+        /// question or notice (default: both)
+        #[arg(long)]
+        kind: Option<String>,
         /// The agent whose questions to list (default: yourself)
         #[arg(long)]
         agent: Option<String>,
     },
-    /// Show one question, with the answer when there is one
+    /// Show one question or notice, with the answer or the reply
     Show { id: String },
-    /// Change an open question
+    /// Change an open question or notice
     Update {
         id: String,
         #[arg(long)]
@@ -1267,7 +1298,7 @@ pub enum QuestionCmd {
         #[arg(long)]
         normal: bool,
     },
-    /// Retract an open question that you do not need any more
+    /// Retract an open question or notice that you do not need any more
     Retract {
         id: String,
         /// Why
@@ -1279,7 +1310,8 @@ pub enum QuestionCmd {
 /// `terrarium admin question ...`: the operator answers.
 #[derive(Debug, Subcommand)]
 pub enum AdminQuestionCmd {
-    /// The questions of all agents (the project with `-p`), urgent first
+    /// The questions and notices of all agents (the project with `-p`),
+    /// urgent first
     Ls {
         /// Only the questions of this agent
         #[arg(long)]
@@ -1287,12 +1319,15 @@ pub enum AdminQuestionCmd {
         /// Only the open questions (the default)
         #[arg(long, conflicts_with_all = ["status", "all"])]
         open: bool,
-        /// open, answered, or retracted
+        /// open, answered, acknowledged, or retracted
         #[arg(long)]
         status: Option<String>,
         /// Every status
         #[arg(long, conflicts_with = "status")]
         all: bool,
+        /// question or notice (default: both)
+        #[arg(long)]
+        kind: Option<String>,
     },
     /// Show one question, with the answer when there is one
     Show { id: String },
@@ -1311,6 +1346,45 @@ pub enum AdminQuestionCmd {
         id: String,
         #[arg(long, short = 'm')]
         reason: Option<String>,
+    },
+}
+
+/// `terrarium admin inbox ...` (docs/api.md §6.9): what waits for the
+/// operator.
+#[derive(Debug, Subcommand)]
+pub enum AdminInboxCmd {
+    /// The open items: questions, notices, mail to you, and paused threads,
+    /// urgent first (the project with `-p`)
+    Ls {
+        /// The open and the done items
+        #[arg(long, conflicts_with = "done")]
+        all: bool,
+        /// Only the done items
+        #[arg(long)]
+        done: bool,
+        /// question, notice, mail, or system
+        #[arg(long)]
+        kind: Option<String>,
+    },
+    /// Acknowledge a notice or a mail to you, with an optional reply. The
+    /// agent of a notice always gets a mail; a mail reply goes on its
+    /// thread
+    Ack {
+        /// The ID: a notice, a message, or an item ID (`notice:<id>`,
+        /// `mail:<id>`)
+        id: String,
+        /// The reply (`-` reads stdin)
+        text: Option<String>,
+    },
+    /// Release one message that the loop guard held: its agent gets it now
+    Release { id: String },
+    /// Resume a thread that the loop guard paused, and release its held
+    /// messages
+    Resume {
+        thread: String,
+        /// A note to the participants of the thread
+        #[arg(long, short = 'm')]
+        note: Option<String>,
     },
 }
 
@@ -1534,6 +1608,11 @@ pub enum AdminCmd {
     Question {
         #[command(subcommand)]
         command: AdminQuestionCmd,
+    },
+    /// The Inbox: questions, notices, mail to you, and paused threads
+    Inbox {
+        #[command(subcommand)]
+        command: AdminInboxCmd,
     },
     /// The audit log
     Audit(AuditArgs),

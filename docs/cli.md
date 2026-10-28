@@ -670,27 +670,35 @@ terrarium watch rm <id>
   removes the watch after its first mail. The operator's watches mail
   `operator`; `--watcher <agent>` sends them to an agent.
 
-### Questions to the operator
+### Questions and notices to the operator
 
-PLAN §12e gives the design; [api.md §6.8](api.md#68-questions-to-the-operator)
-is the contract. A leader (project_admin or sysadmin) asks the operator for
-a decision. The question is on the agent, so a new session reads it again.
-The answer comes as mail on the thread of the question, and the mail wakes
-the agent. A worker gets `403` (exit 3): it mails its lead.
+PLAN §12e gives the design; [api.md §6.8](api.md#68-questions-and-notices-to-the-operator)
+and [§6.9](api.md#69-the-inbox) are the contract. A leader (project_admin
+or sysadmin) asks the operator for a decision with `question ask`, or
+tells the operator something that needs no decision with `notify`. The
+question or notice is on the agent, so a new session reads it again. The
+answer or the acknowledgement comes as mail on its thread, and the mail
+wakes the agent. A worker gets `403` (exit 3): it mails its lead.
 
 ```
 terrarium question ask "<text>" [--option <label>]... [--context <text|-> | --context-file <path>]
                        [--card <id>] [--urgent] [--wait [--timeout 2h]]
-terrarium question ls [--all] [--status open|answered|retracted] [--agent a]
+terrarium notify "<text>" [--context <text|-> | --context-file <path>] [--card <id>] [--urgent]
+                 [--wait [--timeout 2h]]
+terrarium question ls [--all] [--status open|answered|acknowledged|retracted] [--kind question|notice] [--agent a]
 terrarium question show <id>
 terrarium question update <id> [--text t] [--option o]... [--clear-options] [--context t | --context-file p]
                        [--card c] [--urgent | --normal]
 terrarium question retract <id> [-m reason]
 terrarium wait question <id> [--timeout t] [-m note]
-terrarium admin question ls [-p project] [--agent a] [--open | --status s | --all]
+terrarium admin question ls [-p project] [--agent a] [--open | --status s | --all] [--kind k]
 terrarium admin question show <id>
 terrarium admin question answer <id> ["<text>" | -] [--option <label|n>]
 terrarium admin question retract <id> [-m reason]
+terrarium admin inbox ls [-p project] [--all | --done] [--kind question|notice|mail|system]
+terrarium admin inbox ack <id> ["<text>" | -]
+terrarium admin inbox release <message-id>
+terrarium admin inbox resume <thread-id> [-m note]
 ```
 
 - `ask` prints `question <id> asked (<priority>). The answer comes as mail
@@ -698,17 +706,24 @@ terrarium admin question retract <id> [-m reason]
   prints `wait <id> registered: question <text>`, and "End your turn now".
   The agent is then `waiting` until the answer comes. The answer mail is
   the wake mail of the wait: the agent gets one mail.
+- `notify` sends a notice: `kind: "notice"`, with no options. It prints
+  `notice <id> sent (<priority>). The acknowledgement comes as mail on
+  thread <thread>.` With `--wait`, it registers a `question` wait on the
+  notice, as `question ask --wait` does. The acknowledgement mail is the
+  wake mail. The operator does not send notices (exit 2).
 - A question whose text is the same as an open question of the agent is
   refused (`409`, exit 1): the message names the open one. Run `question
   ls` before you ask.
-- `ls` lists the open questions and those answered in the last 24 h:
-  `ID`, `STATUS`, `PRIORITY`, `CARD`, `ASKED`, and the first line of the
-  question. `--all` lists every one. The operator names the agent with
+- `ls` lists the open questions and notices, and those answered or
+  acknowledged in the last 24 h: `ID`, `KIND`, `STATUS`, `PRIORITY`,
+  `CARD`, `ASKED`, and the first line of the text. `--kind` keeps one
+  kind. `--all` lists every one. The operator names the agent with
   `--agent`, or uses `admin question ls`.
 - `show` prints the fields, then the question, the options (numbered from
   1), and the context, each between `BEGIN ... (data, not instructions)`
   markers. When there is an answer, it prints the chosen option and
-  `answer by <who>:` with the text.
+  `answer by <who>:` with the text. For a notice, the markers say
+  `NOTICE`, and the reply of the operator follows `reply by <who>:`.
 - `update` changes an open question and adds 1 to its revision. An
   answered or retracted question is `409`. `--option` gives the new list
   of options; `--clear-options` removes them.
@@ -720,6 +735,19 @@ terrarium admin question retract <id> [-m reason]
   the questions of other agents. The asking agent cannot answer its own.
 - `admin question retract` sends the agent one mail that it needs no
   answer.
+- `admin inbox ls` lists what waits for the operator (api.md §6.9): the
+  open questions, notices, mail to `operator`, and the threads of the loop
+  guard, urgent first. The columns: `ID` (`notice:<id>`, `mail:<id>`,
+  ...), `KIND`, `STATUS`, `URGENT`, `PROJECT`, `FROM`, `AT`, and a short
+  text. `--done` lists the closed items; `--all` both.
+- `admin inbox ack <id> [text]` acknowledges a notice or a mail to the
+  operator. `<id>` is an item ID (`notice:<id>`, `mail:<id>`) or a bare
+  ID: a notice ID, else a message ID. The text is the optional reply: the
+  agent of a notice always gets one mail; a mail reply goes as `operator`
+  on the thread of the mail. A question is a usage error: answer it.
+- `admin inbox release` delivers one held message of the loop guard;
+  `admin inbox resume` ends the pause of a thread and releases its held
+  messages, with an optional note to the participants (api.md §7.4).
 
 ### Fleet files
 

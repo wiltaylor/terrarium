@@ -1,131 +1,106 @@
-import { A, useParams, useSearchParams } from "@solidjs/router";
-import { createSignal, For, onCleanup, Show } from "solid-js";
-import { createPagedList } from "../../components/paged";
-import { Empty, ErrorBanner, LoadMore, PageHead } from "../../components/ui";
-import type { Card, Message } from "../../api/types";
-import { ago } from "../../lib/format";
-import { api, events, unread } from "../../stores";
-import { MessageView } from "../mail/parts";
+// The Inbox: everything that waits for the operator (`GET /api/inbox`).
+// Questions and notices of the leaders, mail to `operator`, and threads that
+// the loop guard paused. Tabs pick the kind and Open or Done; the project
+// filter picks one project. `inbox` and `question` events read the list again.
 
-const isUnread = (m: Message) => m.state === "delivered" || m.state === "queued";
+import { useSearchParams } from "@solidjs/router";
+import { createEffect, createSignal, For, Match, on, onCleanup, onMount, Show, Switch } from "solid-js";
+import type { InboxItem, Message, Question } from "../../api/types";
+import { Empty, ErrorBanner, PageHead, Tabs, useNow } from "../../components/ui";
+import { api, events, inbox, projects } from "../../stores";
+import { MailItemCard, PausedThreadCard } from "./cards";
+import { emptyText, INBOX_TABS, inboxQuery, isInboxEvent, matchesTabs, putItem, sortItems, STATUS_TABS, type InboxStatusTab, type InboxTab } from "./model";
+import { QuestionCard } from "./QuestionCard";
+
+const TAB_IDS = INBOX_TABS.map((t) => t.id) as string[];
 
 export default function InboxPage() {
-  const params = useParams<{ project: string }>();
-  const [search, setSearch] = useSearchParams<{ id?: string }>();
-  const [onlyUnread, setOnlyUnread] = createSignal(false);
-  const inbox = createPagedList(
-    () => `${params.project}|${onlyUnread()}`,
-    (_k, cursor) => api.inbox.list(params.project, { unread: onlyUnread() || undefined, cursor }),
-    (m) => m.id,
-  );
+  const now = useNow(30_000);
+  const [params, setParams] = useSearchParams<{ tab?: string; status?: string; project?: string }>();
+  const tab = (): InboxTab => (TAB_IDS.includes(params.tab ?? "") ? (params.tab as InboxTab) : "all");
+  const status = (): InboxStatusTab => (params.status === "done" ? "done" : "open");
+  const project = () => params.project ?? "";
+  const keep = (i: InboxItem) => matchesTabs(i, tab(), status(), project());
+
+  const [list, setList] = createSignal<InboxItem[]>([]);
+  const [loading, setLoading] = createSignal(false);
   const [error, setError] = createSignal<unknown>(null);
-  const [made, setMade] = createSignal<Record<string, Card>>({});
-  const [reply, setReply] = createSignal("");
-  // Newest first for the list; the API answers oldest first.
-  const shown = () => inbox.items().slice().reverse();
-  const selected = () => inbox.items().find((m) => m.id === search.id) ?? shown()[0];
+  let gen = 0;
+  const reload = async () => {
+    const mine = ++gen;
+    setLoading(true);
+    try {
+      const rows = await api.inbox.list(inboxQuery(tab(), status(), project()));
+      if (mine !== gen) return;
+      setList(sortItems(rows));
+      setError(null);
+    } catch (e) {
+      if (mine === gen) setError(e);
+    } finally {
+      if (mine === gen) setLoading(false);
+    }
+  };
+  createEffect(on([tab, status, project], () => void reload()));
 
-  let t: ReturnType<typeof setTimeout> | undefined;
-  const off = events.on((e) => {
-    if (e.kind === "mail" && (e.project === params.project || e.data?.to === `project:${params.project}`)) {
+  onMount(() => {
+    let t: ReturnType<typeof setTimeout> | undefined;
+    const off = events.on((e) => {
+      if (!isInboxEvent(e)) return;
       clearTimeout(t);
-      t = setTimeout(() => void inbox.reload(), 300);
-    }
+      t = setTimeout(() => void reload(), 300);
+    });
+    onCleanup(() => (off(), clearTimeout(t)));
   });
-  onCleanup(() => (off(), clearTimeout(t)));
 
-  const markRead = async (m: Message) => {
-    if (!isUnread(m)) return;
-    try {
-      inbox.upsert([await api.inbox.markRead(params.project, m.id)]);
-      void unread.refresh();
-    } catch (e) {
-      setError(e);
-    }
+  /** Put the changed item in at once; the badge reads the counts again. */
+  const changed = (item: InboxItem) => {
+    setList((xs) => putItem(xs, item, keep));
+    void inbox.refresh();
   };
-
-  const makeCard = async (m: Message) => {
-    try {
-      // The daemon takes the title and the body from the message, and links its thread.
-      const card = await api.cards.create(params.project, { from_mail: m.id });
-      setMade({ ...made(), [m.id]: card });
-      await markRead(m);
-    } catch (e) {
-      setError(e);
-    }
+  const questionChanged = (item: InboxItem, q: Question) => {
+    const open = q.status === "open";
+    changed({ ...item, question: q, open, urgent: open && q.priority === "urgent" });
   };
+  const mailAcked = (item: InboxItem, m: Message) => changed({ ...item, message: m, open: false, urgent: false });
+  const systemChanged = () => (void reload(), void inbox.refresh());
 
   return (
-    <>
-      <PageHead title={`Inbox · ${params.project}`}>
-        <span class="muted small">project:{params.project}</span>
-        <label class="row small">
-          <input type="checkbox" checked={onlyUnread()} onChange={(e) => setOnlyUnread(e.currentTarget.checked)} /> Unread only
-        </label>
-        <button onClick={() => inbox.reload()}>Refresh</button>
-      </PageHead>
-      <ErrorBanner error={error() ?? inbox.error()} onDismiss={() => setError(null)} />
-      <div class="split">
-        <div class="card-box thread-list" style={{ padding: "4px" }}>
-          <For each={shown()} fallback={<Empty>{inbox.initial() ? "Loading…" : "The inbox is empty."}</Empty>}>
-            {(m) => (
-              <button class={`${selected()?.id === m.id ? "active" : ""} ${isUnread(m) ? "unread" : ""}`} onClick={() => (setSearch({ id: m.id }), void markRead(m))}>
-                <span class="subject">{m.subject || "(no subject)"}</span>
-                <span class="muted small">
-                  from {m.from_name} · {ago(m.created_at)}
-                </span>
-              </button>
+    <div class="stack">
+      <PageHead title="Inbox">
+        <select aria-label="Project" value={project()} onChange={(e) => setParams({ project: e.currentTarget.value || undefined })}>
+          <option value="">All projects</option>
+          <For each={projects.projects()}>
+            {(p) => (
+              <option value={p.name} selected={p.name === project()}>
+                {p.name}
+              </option>
             )}
           </For>
-          <LoadMore hasMore={inbox.hasMore()} loading={inbox.loading()} onMore={inbox.loadMore} count={inbox.items().length} />
+        </select>
+        <button onClick={() => void reload()}>Refresh</button>
+      </PageHead>
+      <p class="muted small" style={{ margin: 0 }}>
+        Everything that waits for you. Leader agents ask questions and send notices with <code>terrarium question</code>. Agents and the daemon send you
+        mail. The loop guard pauses a thread when agents write too many messages to each other. The text of each item is the sender's own words.
+      </p>
+      <Tabs tabs={INBOX_TABS} active={tab()} onChange={(t) => setParams({ tab: t === "all" ? undefined : t })} />
+      <Tabs tabs={STATUS_TABS} active={status()} onChange={(s) => setParams({ status: s === "open" ? undefined : s })} />
+      <ErrorBanner error={error()} onDismiss={() => setError(null)} />
+      <Show when={list().length} fallback={<Empty>{loading() ? "Loading…" : emptyText(tab(), status())}</Empty>}>
+        <div class="stack">
+          <For each={list()}>
+            {(item) => (
+              <Switch>
+                <Match when={item.question}>
+                  {(q) => <QuestionCard question={q()} now={now()} showAgent showKind onChange={(next) => questionChanged(item, next)} />}
+                </Match>
+                <Match when={item.message}>{(m) => <MailItemCard message={m()} open={item.open} now={now()} onAck={(next) => mailAcked(item, next)} />}</Match>
+                <Match when={item.system}>{(s) => <PausedThreadCard system={s()} onChange={systemChanged} />}</Match>
+              </Switch>
+            )}
+          </For>
         </div>
-        <Show when={selected()}>
-          {(m) => (
-            <div class="stack">
-              <MessageView message={m()} />
-              <div class="row">
-                <Show
-                  when={made()[m().id]}
-                  fallback={
-                    <button class="primary" onClick={() => makeCard(m())}>
-                      Make card
-                    </button>
-                  }
-                >
-                  {(c) => (
-                    <span class="notice">
-                      Created <A href={`/p/${params.project}/board?card=${c().id}`}>{c().id}</A>. It links thread <span class="mono small">{m().thread_id}</span>.
-                    </span>
-                  )}
-                </Show>
-              </div>
-              <form
-                class="stack"
-                style={{ gap: "6px" }}
-                onSubmit={async (e) => {
-                  e.preventDefault();
-                  if (!reply().trim()) return;
-                  try {
-                    // From project:<name>, one message for each participant.
-                    await api.inbox.reply(params.project, m().id, reply());
-                    setReply("");
-                    void inbox.reload();
-                  } catch (err) {
-                    setError(err);
-                  }
-                }}
-              >
-                <textarea placeholder={`Reply on the thread as project:${params.project}`} value={reply()} onInput={(e) => setReply(e.currentTarget.value)} aria-label="Reply" />
-                <div>
-                  <button type="submit" disabled={!reply().trim()}>
-                    Reply
-                  </button>
-                </div>
-              </form>
-            </div>
-          )}
-        </Show>
-      </div>
-    </>
+      </Show>
+    </div>
   );
 }

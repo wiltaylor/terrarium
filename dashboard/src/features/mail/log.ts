@@ -1,90 +1,31 @@
-// The mail log (docs/api.md §7): every message, newest first, with the
-// attention rule that drives the log's default view, the sidebar count, and
-// the mail items of the Home queue. Pure, testable.
+// The mail log (docs/api.md §7): every message, newest first, with filters.
+// The log is a record only: it keeps no unread state for the operator. Mail
+// that needs the operator goes to the Inbox (features/inbox). Pure, testable.
 
 import type { MailQuery, Message } from "../../api/types";
 
-/** The direction filter of the log. A message can match more than one. */
-export type MailKind = "to_operator" | "from_operator" | "agents" | "system" | "inbox";
-export type TimeRange = "hour" | "day" | "week" | "all";
+export type TimeRange = "hour" | "day" | "week" | "all" | "custom";
 
 export interface LogFilter {
+  /** Part of the sender's name or address. */
+  from: string;
+  /** Part of the recipient's name or address. */
+  to: string;
   /** A project name, or "" for every project. */
   project: string;
-  kind: MailKind | "";
+  /** A thread ID, or "" for every thread. */
+  thread: string;
   /** Free text: subject, body, names, and IDs. */
   q: string;
   range: TimeRange;
-  /** Only the messages that need the operator. On by default. */
-  attention: boolean;
+  /** The custom range: `datetime-local` values, or "". */
+  since: string;
+  until: string;
 }
 
-export const DEFAULT_FILTER: LogFilter = { project: "", kind: "", q: "", range: "all", attention: true };
+export const DEFAULT_FILTER: LogFilter = { from: "", to: "", project: "", thread: "", q: "", range: "all", since: "", until: "" };
 
-export const KIND_LABELS: Record<MailKind, string> = {
-  to_operator: "To operator",
-  from_operator: "From operator",
-  agents: "Agent ↔ agent",
-  system: "System",
-  inbox: "Project inbox",
-};
-
-export const RANGE_LABELS: Record<TimeRange, string> = { hour: "Last hour", day: "Last day", week: "Last week", all: "All time" };
-
-/** What a `system` message is about, from its subject (crates/terrariumd: board.rs, quota_policy.rs, mail.rs). */
-export type Notice = "blocked" | "quota" | "needs_human" | "login" | "notice";
-
-/** Why a message needs the operator. */
-export type Reason = "unread" | "held" | "paused" | "blocked" | "quota" | "needs_human";
-
-export const REASON_LABELS: Record<Reason, string> = {
-  unread: "unread by you",
-  held: "held",
-  paused: "thread paused",
-  blocked: "blocked card",
-  quota: "quota",
-  needs_human: "needs a human",
-};
-
-export interface LogEntry {
-  message: Message;
-  /** The loop guard held it: delivered with no pointer to the agent. */
-  held: boolean;
-  notice: Notice | null;
-  /** Empty when the message does not need the operator. */
-  reasons: Reason[];
-  /** The projects that the message touches, from the addresses (and the subject of a system notice). */
-  projects: string[];
-}
-
-/** `queued` and `delivered`: the recipient has not read it. */
-export const isUnread = (m: Pick<Message, "state">) => m.state === "queued" || m.state === "delivered";
-
-export function matchesKind(m: Message, kind: MailKind | ""): boolean {
-  switch (kind) {
-    case "":
-      return true;
-    case "to_operator":
-      return m.to_kind === "operator";
-    case "from_operator":
-      return m.from_kind === "operator";
-    case "agents":
-      return m.from_kind === "agent" && m.to_kind === "agent";
-    case "system":
-      return m.from_kind === "system";
-    case "inbox":
-      return m.from_kind === "project" || m.to_kind === "project";
-  }
-}
-
-export function noticeOf(m: Message): Notice | null {
-  if (m.from_kind !== "system") return null;
-  if (/^Thread \S+ needs a human/.test(m.subject)) return "needs_human";
-  if (/^\S+-\d+ blocked: /.test(m.subject)) return "blocked";
-  if (/^(Quota|Budget):/.test(m.subject)) return "quota";
-  if (/^Login expired/.test(m.subject)) return "login";
-  return "notice";
-}
+export const RANGE_LABELS: Record<TimeRange, string> = { hour: "Last hour", day: "Last day", week: "Last week", all: "All time", custom: "From – to" };
 
 /** The project of a readable address: `project:<name>` or `project/agent`. */
 const projectOfName = (name: string): string | undefined => {
@@ -93,7 +34,7 @@ const projectOfName = (name: string): string | undefined => {
   return i > 0 ? name.slice(0, i) : undefined;
 };
 
-/** The projects of a message. `prefixes` maps card prefixes to projects (`{TER: "terrarium"}`), for blocked notices. */
+/** The projects of a message. `prefixes` maps card prefixes to projects (`{TER: "terrarium"}`), for blocked-card notices. */
 export function projectsOf(m: Message, prefixes: Record<string, string> = {}): string[] {
   const out = new Set<string>();
   for (const n of [m.to_name, m.from_name]) {
@@ -116,124 +57,50 @@ const byTime = (a: Message, b: Message) =>
 /** Newest first. */
 export const newestFirst = (a: Message, b: Message) => b.created_at.localeCompare(a.created_at) || b.id.localeCompare(a.id);
 
-/** A message from the operator or from or to a project inbox resets the loop guard (docs/api.md §6.2). */
-const resetsGuard = (m: Message) => m.from_kind === "operator" || m.from_kind === "project" || m.to_kind === "project";
-const agentToAgent = (m: Message) => m.from_kind === "agent" && m.to_kind === "agent";
+const RANGE_MS: Record<"hour" | "day" | "week", number> = { hour: 3_600_000, day: 86_400_000, week: 7 * 86_400_000 };
 
-/**
- * The messages that the loop guard held. A message row does not say it; the
- * `mail` event does (`held: true`), and `live` carries those IDs. For the
- * rest: the daemon sends its "needs a human" notice right after the first
- * held message, and holds every later agent-to-agent message on the thread
- * until the operator or a project inbox writes on it.
- */
-export function heldIds(messages: Message[], live: ReadonlySet<string> = new Set()): Set<string> {
-  const held = new Set<string>([...live].filter((id) => messages.some((m) => m.id === id)));
-  const threads = new Map<string, Message[]>();
-  for (const m of messages) threads.set(m.thread_id, [...(threads.get(m.thread_id) ?? []), m]);
-  for (const msgs of threads.values()) {
-    let holding = false;
-    let lastAgent: Message | undefined;
-    for (const m of msgs.slice().sort(byTime)) {
-      if (resetsGuard(m)) {
-        holding = false;
-        lastAgent = undefined;
-      } else if (agentToAgent(m)) {
-        if (holding) held.add(m.id);
-        lastAgent = m;
-      } else if (noticeOf(m) === "needs_human") {
-        if (lastAgent) held.add(lastAgent.id);
-        holding = true;
-      }
-    }
-  }
-  return held;
-}
-
-export interface AnnotateOptions {
-  prefixes?: Record<string, string>;
-  /** Message IDs that a `mail` event flagged `held: true`. */
-  live?: ReadonlySet<string>;
+/** The time window of the filter in ms, each end optional. A custom value that does not parse is no limit. */
+export function windowOf(f: Pick<LogFilter, "range" | "since" | "until">, now: number): { since?: number; until?: number } {
+  if (f.range === "all") return {};
+  if (f.range !== "custom") return { since: now - RANGE_MS[f.range] };
+  const at = (v: string) => {
+    const t = v ? Date.parse(v) : NaN;
+    return Number.isNaN(t) ? undefined : t;
+  };
+  return { since: at(f.since), until: at(f.until) };
 }
 
 /**
- * The attention rule. A message needs the operator when:
- * - it goes to the operator, and the operator has not read it (`unread`);
- *   a system notice to the operator adds its kind (`blocked`, `quota`, `needs_human`);
- * - the loop guard held it, and its thread is still paused (`held`);
- * - it is the newest message of a paused thread (`paused`).
- * A reply from the operator ends the pause, and a read ends `unread`.
- */
-export function attentionReasons(m: Message, held: boolean, notice: Notice | null, newestOfThread: boolean): Reason[] {
-  const r: Reason[] = [];
-  const unreadByOperator = m.to_kind === "operator" && isUnread(m);
-  if (unreadByOperator) r.push("unread");
-  if (unreadByOperator && (notice === "blocked" || notice === "quota" || notice === "needs_human")) r.push(notice);
-  if (held && m.thread_paused) r.push("held");
-  if (newestOfThread && m.thread_paused) r.push("paused");
-  return r;
-}
-
-/** Annotate messages for the log, newest first. */
-export function annotate(messages: Message[], opts: AnnotateOptions = {}): LogEntry[] {
-  const held = heldIds(messages, opts.live);
-  const newest = new Map<string, Message>();
-  for (const m of messages) {
-    const cur = newest.get(m.thread_id);
-    if (!cur || byTime(cur, m) < 0) newest.set(m.thread_id, m);
-  }
-  return messages
-    .slice()
-    .sort(newestFirst)
-    .map((m) => {
-      const notice = noticeOf(m);
-      const isHeld = held.has(m.id);
-      return {
-        message: m,
-        held: isHeld,
-        notice,
-        reasons: attentionReasons(m, isHeld, notice, newest.get(m.thread_id)?.id === m.id),
-        projects: projectsOf(m, opts.prefixes),
-      };
-    });
-}
-
-export const needsAttention = (e: Pick<LogEntry, "reasons">) => e.reasons.length > 0;
-
-const RANGE_MS: Record<Exclude<TimeRange, "all">, number> = { hour: 3_600_000, day: 86_400_000, week: 7 * 86_400_000 };
-
-/** The first instant in the range, or undefined for `all`. */
-export const sinceOf = (range: TimeRange, now: number): number | undefined => (range === "all" ? undefined : now - RANGE_MS[range]);
-
-/**
- * The part of the filter that `GET /api/mail` does itself (`to`, `from`).
- * The daemon has no project, text, time, or "involves a project inbox"
- * filter, so those run in the browser over the full list (`applyFilter`).
- * `from=system` is a 404 on the daemon ("no agent `system`": store/mail.rs
- * `resolve` does not know the address), so `system` runs in the browser too.
+ * The part of the filter that `GET /api/mail` does: a whole thread ID (a
+ * ULID), so a half-typed ID does not ask the daemon at each key. The other
+ * filters run in the browser (`applyFilter`): `from` and `to` match part of
+ * a name there, and the daemon's `from` and `to` take a whole address only.
  */
 export function serverQuery(f: LogFilter): MailQuery {
-  switch (f.kind) {
-    case "to_operator":
-      return { to: "operator" };
-    case "from_operator":
-      return { from: "operator" };
-    default:
-      return {};
-  }
+  return /^[0-9A-Z]{26}$/i.test(f.thread) ? { thread: f.thread } : {};
 }
 
-/** Every filter, in the browser. It also repeats the server part, so extra rows (a live thread fetch) cannot leak in. */
-export function applyFilter(entries: LogEntry[], f: LogFilter, now: number): LogEntry[] {
-  const since = sinceOf(f.range, now);
+const has = (hay: string, needle: string) => hay.toLowerCase().includes(needle);
+
+/**
+ * Every filter, in the browser. `prefixes` names the project of a blocked-card
+ * notice. It also repeats the server part, so extra rows (a live thread fetch)
+ * cannot leak in.
+ */
+export function applyFilter(messages: Message[], f: LogFilter, now: number, prefixes: Record<string, string> = {}): Message[] {
+  const { since, until } = windowOf(f, now);
   const q = f.q.trim().toLowerCase();
-  return entries.filter((e) => {
-    const m = e.message;
-    if (f.attention && !needsAttention(e)) return false;
-    if (!matchesKind(m, f.kind)) return false;
-    if (f.project && !e.projects.includes(f.project)) return false;
-    if (since !== undefined && Date.parse(m.created_at) < since) return false;
-    if (q && ![m.subject, m.body, m.from_name, m.to_name, m.id, m.thread_id].some((s) => s.toLowerCase().includes(q))) return false;
+  const from = f.from.trim().toLowerCase();
+  const to = f.to.trim().toLowerCase();
+  return messages.filter((m) => {
+    if (f.thread && m.thread_id !== f.thread) return false;
+    if (from && !has(m.from_name, from) && !has(m.from, from)) return false;
+    if (to && !has(m.to_name, to) && !has(m.to, to)) return false;
+    if (f.project && !projectsOf(m, prefixes).includes(f.project)) return false;
+    const t = Date.parse(m.created_at);
+    if (since !== undefined && t < since) return false;
+    if (until !== undefined && t > until) return false;
+    if (q && ![m.subject, m.body, m.from_name, m.to_name, m.id, m.thread_id].some((s) => has(s, q))) return false;
     return true;
   });
 }
@@ -253,6 +120,9 @@ export const threadOf = (messages: Message[], threadId: string): Message[] => me
 
 export const firstLine = (body: string): string => body.split("\n").find((l) => l.trim())?.trim() ?? "";
 
+/** The short form of a thread ID for a table cell: its last 6 characters. */
+export const shortThread = (id: string): string => (id.length > 8 ? `…${id.slice(-6)}` : id);
+
 /** The other party of the operator on a message: whom a new message goes to. Undefined for `system` and operator-only rows. */
 export function counterpart(m: Message): string | undefined {
   if (m.from_kind === "agent" || m.from_kind === "project") return m.from_name;
@@ -260,31 +130,70 @@ export function counterpart(m: Message): string | undefined {
   return undefined;
 }
 
+/** The names in a list, for the `from` and `to` suggestions. */
+export const namesOf = (messages: Message[]): string[] => [...new Set(messages.flatMap((m) => [m.from_name, m.to_name]))].sort();
+
+// ----- live tail -----
+
+/**
+ * Live tail: on, a `mail` event pulls the new messages at once. Off, the
+ * log stays as it is, and counts the events, so the page can say "N new".
+ */
+export interface TailState {
+  live: boolean;
+  /** `mail` events while the tail was off. */
+  missed: number;
+  /** Threads that those events touched, to pull when the tail goes on again. */
+  threads: string[];
+}
+
+export const TAIL_START: TailState = { live: true, missed: 0, threads: [] };
+
+/** A `mail` event: pull now (live), or count it. */
+export function tailEvent(s: TailState, thread: string | undefined): { state: TailState; pull: boolean } {
+  if (s.live) return { state: s, pull: true };
+  return { state: { ...s, missed: s.missed + 1, threads: thread && !s.threads.includes(thread) ? [...s.threads, thread] : s.threads }, pull: false };
+}
+
+/** Turn the tail on or off. On again: pull the threads that the missed events touched. */
+export function setTail(s: TailState, live: boolean): { state: TailState; pull: string[] | null } {
+  if (live === s.live) return { state: s, pull: null };
+  if (!live) return { state: { live: false, missed: 0, threads: [] }, pull: null };
+  return { state: TAIL_START, pull: s.threads };
+}
+
 // ----- URL state -----
 
-export type LogParams = Partial<Record<"project" | "kind" | "q" | "range" | "attention" | "thread", string>>;
+export type LogParams = Partial<Record<"from" | "to" | "project" | "thread" | "q" | "range" | "since" | "until" | "open", string>>;
 
-const KINDS = Object.keys(KIND_LABELS) as MailKind[];
 const RANGES = Object.keys(RANGE_LABELS) as TimeRange[];
 
 /** Read the filter from the URL. A bad value falls back to the default. */
 export function filterFromParams(p: LogParams): LogFilter {
+  const range = RANGES.includes(p.range as TimeRange) ? (p.range as TimeRange) : DEFAULT_FILTER.range;
   return {
+    from: p.from ?? "",
+    to: p.to ?? "",
     project: p.project ?? "",
-    kind: KINDS.includes(p.kind as MailKind) ? (p.kind as MailKind) : "",
+    thread: p.thread ?? "",
     q: p.q ?? "",
-    range: RANGES.includes(p.range as TimeRange) ? (p.range as TimeRange) : DEFAULT_FILTER.range,
-    attention: p.attention !== "0",
+    range,
+    since: range === "custom" ? (p.since ?? "") : "",
+    until: range === "custom" ? (p.until ?? "") : "",
   };
 }
 
 /** The URL form of the filter. A default value is left out (undefined clears it). */
 export function filterToParams(f: LogFilter): LogParams {
+  const custom = f.range === "custom";
   return {
+    from: f.from || undefined,
+    to: f.to || undefined,
     project: f.project || undefined,
-    kind: f.kind || undefined,
+    thread: f.thread || undefined,
     q: f.q || undefined,
     range: f.range === DEFAULT_FILTER.range ? undefined : f.range,
-    attention: f.attention ? undefined : "0",
+    since: (custom && f.since) || undefined,
+    until: (custom && f.until) || undefined,
   };
 }

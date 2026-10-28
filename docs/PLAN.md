@@ -979,7 +979,11 @@ Two delivery paths. Both are needed. The board (§13) reuses the push path.
    between them, the daemon types no more pointers for it, marks it
    `paused`, and mails the operator once on the thread ("thread T needs a
    human: N agent replies without operator input"); an operator message on
-   the thread resets the count.
+   the thread resets the count. The Inbox (§12e) shows the paused thread
+   as a system item. There the operator releases one held message (its
+   recipient gets the pointer; the thread stays paused), or resumes the
+   thread: the count starts again, each held message is released, and an
+   optional note goes to the participants (`docs/api.md` §7.4).
 
 Safety: mail from another agent is untrusted input. The pushed turn carries
 only the sender, thread, and the command to read it. The body is read through
@@ -1008,8 +1012,16 @@ Project admins read it. The intended flow:
 
 Threads span projects. A thread's participants are the agents and project
 inboxes that have posted on it. Replies go to all participants. The dashboard
-shows a project's inbox as a view next to its board, with a one-click
-"make card" action.
+shows the mail of a project as a log next to its board (the project **Mail**
+page).
+
+**Mail is a log for the operator.** The global Mail page and the project
+Mail page list the messages with filters: from, to, project, thread, a time
+range, and free text. They follow new mail live. They have no unread state,
+no unread count, and no "mark read" for the operator. What needs the
+operator goes to the Inbox (§12e), so nothing is lost: each mail to
+`operator` is an Inbox item until the operator acknowledges it, and a
+paused thread is a system item.
 
 Project inbox commands, for project admins:
 
@@ -1229,7 +1241,7 @@ still run on the target.
 
 **Watches.** `terrarium watch <agent> --on blocked,error` mails the watcher
 when the agent goes to one of the statuses. The operator watches from the
-agent page of the dashboard; the mail goes to the operator's mail log. By
+agent page of the dashboard; the mail goes to the operator's Inbox (§12e). By
 default a change waits 5 s (10 s for `idle`, `waiting`, and `working`) and
 goes out only when it still holds, so a flap sends nothing. `--no-debounce`
 sends each change. `--once` removes the watch after its first mail.
@@ -1247,7 +1259,7 @@ engine ticks each second next to the lease and schedule timers.
 
 ---
 
-## 12e. Questions to the operator
+## 12e. Questions and notices to the operator; the Inbox
 
 Asked for on 2026-10-28: a leader must ask the operator for a decision in
 a way that lives through a new session or a compaction, and the operator
@@ -1302,15 +1314,52 @@ from `system`.
   need it; and not to ask the same thing twice. `default.md` does not
   teach it: a worker cannot ask.
 
-**The dashboard.** The Questions page lists the questions, urgent first,
-with a badge of the open questions on its nav item. Each card shows the
-agent, the project, the card, the text (as plain text), the context
-(Markdown through the DOMPurify sink only), the choice buttons, a free-text
-answer, and Retract. The agent page shows the questions of a leader. The
-`question` event keeps both live.
+**Notices.** Asked for on 2026-10-28: a leader must also tell the
+operator something that needs no decision (a milestone, a finished
+deploy, a risk) in a way that is not lost. A notice is a question with no
+choices (`kind = notice`), sent with `terrarium notify`. Only leaders send
+notices, with the rights of a question. The operator (or a sysadmin, for
+the notices of other agents) acknowledges it, with an optional reply. The
+acknowledgement always sends one mail to the agent on the thread of the
+notice, as an answer does, so the agent wakes with it. A notice is `open`,
+then `acknowledged` or `retracted`. An answer of a notice and an
+acknowledgement of a question are `409`. `notify --wait` registers a
+`question` wait; the acknowledgement mail is its wake mail. The recap turn
+lists the open notices and the acknowledgements since the last turn. The
+lead templates and the leader persona say: `notify` for news, `question
+ask` for a decision, and no mail to `operator` for either.
+
+**The Inbox.** Everything that needs the operator goes to one Inbox, so
+nothing is lost (`docs/api.md` §6.9). It is a read model over the stores,
+not a table, and it copies no mail body:
+
+- the questions and the notices;
+- each mail to `operator`, until the operator acknowledges it (the state
+  `read`), with an optional reply as `operator` on its thread;
+- the threads of the loop guard (§12) as system items: a paused thread, or
+  a held message that the operator did not release. The operator releases
+  a held message or resumes the thread there.
+
+**The dashboard.** The global **Inbox** page (`/inbox`; `/questions`
+redirects) has the tabs All, Questions, Notices, Mail to you, and System,
+an Open and Done switch, and a project filter. Urgent items come first,
+then the newest. A question card shows the agent, the project, the card,
+the text (as plain text), the context (Markdown through the DOMPurify sink
+only), the choice buttons, a free-text answer, and Retract. A notice card
+shows the text, the context through the same sink, Acknowledge, and an
+optional reply. A mail card shows the sender, the subject, and the body
+as data, with Acknowledge and an optional reply. A system card shows the
+thread, the held messages with Release, and Resume with an optional note.
+The Inbox nav item has the one badge of the things that wait for the
+operator: red when one is urgent. The Mail pages are logs (§12); the
+project page `Mail` (`/p/<project>/mail`; `/p/<project>/inbox` redirects)
+is the log of one project. The agent page shows the questions and notices
+of a leader. The `question` and `inbox` events keep all of them live.
 
 **Storage.** Migration 29: the table `questions`, and the kind column of
-`waits` again with `question` in its CHECK.
+`waits` again with `question` in its CHECK. Migration 30: `questions.kind`
+and the status `acknowledged`; `messages.released_at` and `released_by`;
+the table `thread_resumes` for a resume with no mail.
 
 ---
 
@@ -2288,6 +2337,7 @@ end-to-end scenarios of each phase are not scripted yet (no `spikes/e2e/`).
 | Templates | Agent templates (§5b, `docs/api.md` §21): global and project templates, `POST /api/agents` with `template` (project over global, `global:`, field and `policy` key overrides, the create rights on the merged values), `resolve`, `from-agent`, `[[templates]]` in project files and fleets, `template = "..."` on fleet agents and in export, `terrarium template` and `agent new --template`, the dashboard Templates page, the template select of the agent form, and "Save as template". The lead templates make workers from the `worker` template. | Agent files (`agents/<name>.toml`) cannot name a template. |
 | Waits | Waits and watches (§12d, `docs/api.md` §6.7): the status `waiting`, `agent`, `process`, `time`, and `card` waits with timeouts, the cycle check, and the limits; `terrarium run` (a detached exec session with a `process` wait); one wake mail for each end (a 2 s batch); watches with debounce and `--once`; `terrarium wait`, `run`, `watch`; the `waiting` chip and the Waits and Watches sections of the agent page; the prompt text. Tests with the fake supervisor and a real host agent (`tests/waits.rs`). | Not run live with real harnesses yet. The queued watch changes of a debounce do not live through a daemon restart. |
 | Questions | Questions to the operator (§12e, `docs/api.md` §6.8): the `questions` table, the rights (leaders ask; the operator, or a sysadmin for others, answers), the limits and the copy check, the answer mail on the thread, the `question` wait with one mail, the questions in the recap turn, `terrarium question` and `terrarium admin question`, the Questions page with the badge, the agent page panel, and the lead template text. Tests with the fake supervisor (`tests/questions.rs`). | Not run live with real harnesses yet. |
+| Inbox | Notices and the Inbox (§12e, `docs/api.md` §6.8, §6.9, §7.4): migration 30 (`kind` and `acknowledged` on `questions`, the release columns of `messages`, `thread_resumes`); `POST /api/questions/{id}/ack` with one mail on the thread; the notice wait; the notices in the recap; `GET /api/inbox` and `/api/inbox/counts` over the questions, the notices, the mail to `operator`, and the threads of the loop guard; `POST /api/inbox/mail/{id}/ack`; release and resume; the `inbox` event; the mail log filters; `terrarium notify` and `terrarium admin inbox`; the lead template and persona text; the Inbox page, the renamed Mail pages, and one badge. Tests with the fake supervisor (`tests/inbox.rs`). | Not run live with real harnesses yet. |
 | 6 | Mail and event views in the dashboard. The fleet file (`docs/fleet.md`): `terrarium fleet validate`, `plan`, `apply` (with `--prune`), `ls`, `show`, and `export`, ownership as `source: "fleet:<name>"`, and the auto-apply of `fleets/*.toml` at start and on reload. | The sibling-container sandbox fallback is not started. |
 | Security | The fixes for findings F1 to F7 of `docs/security-review.md`: the `private/` and `harness/` split of the agent dir (F1, §11); TLS on the host link with a loopback-only plaintext default, pinning, rotation, and enrol (F2, §19); DOMPurify as the one HTML sink, an ESLint guard, adversarial payload tests, and a page CSP in the dashboard (F3); the WebSocket token in the `bearer.<token>` subprotocol, with `TERRARIUM_WS_QUERY_TOKEN=0` to refuse `?token=` (F4); artifacts off the dashboard origin by default, with an origin badge in the viewer (F5); no PTY log for the login flow (F6); a constant-time token compare (F7). Signed `HttpOnly` session cookies for the dashboard, with a CSRF header on mutating calls and an `Origin` check on WebSocket upgrades (`docs/api.md` §1.1); the CSP and other security headers from the daemon (§1.2); `?token=` refused by default. The fixes for F10 to F14 of §9: fleet ownership and overwrite checks (F10); quarantine of an old agent dir with a symlink (F11); transcript path checks with the `usage.rejected_path` event (F12); sysadmin for global targets, `cross_project`, and outside `mail_to` in a policy (F13); a wider ESLint sink rule with a fixture test, and the CSP as a header with `frame-ancestors 'none'` (F14). `DELETE /api/session` needs the CSRF token when a cookie is present. | — |
 

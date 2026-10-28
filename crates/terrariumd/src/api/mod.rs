@@ -9,6 +9,7 @@ mod config;
 mod event_sources;
 mod fleet;
 mod hosts;
+mod inbox;
 pub mod install;
 mod longpoll;
 mod mail;
@@ -245,6 +246,7 @@ fn routes(state: Shared, serve_artifacts: bool, host_connect: bool) -> Router {
         .merge(templates::routes())
         .merge(waits::routes())
         .merge(questions::routes())
+        .merge(inbox::routes())
         .merge(config::routes())
         .route(
             "/session",

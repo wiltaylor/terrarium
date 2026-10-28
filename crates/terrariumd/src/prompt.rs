@@ -713,8 +713,9 @@ mod tests {
         }
     }
 
-    /// The leads ask the operator with `terrarium question` (PLAN §12e);
-    /// a worker cannot, so `default.md` does not teach it.
+    /// The leads ask the operator with `terrarium question`, and tell it
+    /// with `terrarium notify` (PLAN §12e); a worker cannot, so
+    /// `default.md` teaches neither.
     #[test]
     fn lead_templates_teach_the_questions_protocol() {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../defaults/prompts");
@@ -729,11 +730,15 @@ mod tests {
                 "`terrarium question retract <id> -m \"<why>\"`",
                 "At the start of a session, after a compaction, or when you are not sure of\n  your state, run `terrarium question ls`.",
                 "`question ask | ls | show | update | retract`",
+                "- `notify`: tell the operator something that needs no decision",
+                "run `terrarium notify \"<text>\"`",
+                "Do not mail\n  `operator` for these",
             ] {
                 assert!(t.contains(needle), "{name}: {needle}");
             }
         }
         assert!(!DEFAULT_TEMPLATE.contains("question ask"));
+        assert!(!DEFAULT_TEMPLATE.contains("terrarium notify"));
     }
 
     /// `defaults/prompts/default.md` and the built-in template stay the same text.

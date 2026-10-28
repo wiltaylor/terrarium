@@ -66,6 +66,10 @@ export interface MockWorld {
   /** Stored API keys by subscription. No endpoint returns them. */
   apiKeys: Record<string, { provider: string; key: string; base_url?: string; models?: string[] }>;
   mail: Message[];
+  /** The IDs of the messages that the loop guard held (./inbox.ts). */
+  heldMail?: string[];
+  /** A resume of a paused thread: the agent run counts only the messages after this ID. */
+  mailResets?: Record<string, string>;
   targets: Target[];
   /**
    * The snapshots on the host (docs/api.md §17.3), by instance: the target
@@ -822,6 +826,6 @@ ${XSS_DOCUMENT}
   return {
     schedules: sched.schedules, scheduleRuns: sched.runs, eventSources: seedEventSources(now), eventSourceSecrets: {}, templates: seedTemplates(now),
     projects, repos, agents, sessions, transcripts: seedTranscripts(agents, sessions), events, columns: { terrarium: COLUMNS.map((c) => ({ ...c })), webshop: COLUMNS.map((c) => ({ ...c })) },
-    cards, memories, links, pages, revisions, artifacts, artifactBodies, versions, subscriptions, quota, usage, holds: [], apiKeys, mail, targets, hostSnapshots, leases, ...waitSeed, hosts, hostTokens, audit, seq,
+    cards, memories, links, pages, revisions, artifacts, artifactBodies, versions, subscriptions, quota, usage, holds: [], apiKeys, mail, heldMail: [fakeUlid("msg", 11)], targets, hostSnapshots, leases, ...waitSeed, hosts, hostTokens, audit, seq,
   };
 }

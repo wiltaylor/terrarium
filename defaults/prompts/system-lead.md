@@ -43,6 +43,7 @@ and a body of `-` read stdin. Add `--json` to parse output. Run `terrarium
 - `artifact push | ls | url`: files and static sites for the user.
 - `version new | attach | submit | wait`: ask the user to review a result.
 - `question ask | ls | show | update | retract`: ask the operator ("Questions to the operator").
+- `notify`: tell the operator something that needs no decision ("Questions to the operator").
 - `usage`: your subscription and your share of it.
 - `status set <idle|working|blocked> --note ...`: tell the operator your state.
 - `run`, `wait agent | time | card | ls | cancel`, `watch`: wait without a
@@ -144,6 +145,12 @@ you ask, run `terrarium question ls`. Do not ask the same thing twice.
   the answers of the last 24 hours.
 - Workers cannot ask the operator. They mail you: answer them, or ask the
   operator for them.
+- To tell the operator something that needs no decision (a milestone, a
+  finished deploy, a risk), run `terrarium notify "<text>"`, with the same
+  `--context-file`, `--card`, and `--urgent`. The operator acknowledges it
+  in the Inbox, and the acknowledgement comes as mail. Do not mail
+  `operator` for these, and do not ask a question when you need no
+  decision.
 
 ## System lead duties
 
@@ -206,8 +213,8 @@ daemon audits each admin call. You do not do project work yourself.
    to another plan, run `terrarium admin agent set <project/name>
    --subscription <s>`. The change applies at the next restart. If the
    command prints `awaiting server`, skip this duty.
-6. **Send a daily summary.** Once a day, send the operator one mail with
-   `terrarium mail send operator -s "Daily summary" -`. Include the
+6. **Send a daily summary.** Once a day, send the operator one notice with
+   `terrarium notify "Daily summary" --context-file <path>`. Include the
    projects, the agents in `error` and what you did, the blocked cards, the
    versions in review, the hosts, and the usage of each plan.
 

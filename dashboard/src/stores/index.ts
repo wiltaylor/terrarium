@@ -3,16 +3,14 @@
 
 import { createApi } from "../api";
 import { createAgentsStore } from "./agents";
-import { createAttentionStore } from "./attention";
 import { changePassword, createAuthStore, restoreSession, signIn, signInWithPassword, signOut, signOutEverywhere } from "./auth";
 import { createEventsStore } from "./events";
+import { createInboxStore } from "./inbox";
 import { createLeasesStore } from "./leases";
 import { createProjectsStore } from "./projects";
-import { createQuestionsStore } from "./questions";
 import { createQuotaStore } from "./quota";
 import { createSubscriptionsStore } from "./subscriptions";
 import { createThemeStore } from "./theme";
-import { createUnreadStore } from "./unread";
 
 const storage = (() => {
   try {
@@ -37,10 +35,8 @@ export const projects = createProjectsStore(api, storage);
 export const agents = createAgentsStore(api, events);
 export const subscriptions = createSubscriptionsStore(api, events);
 export const quota = createQuotaStore(events);
-export const unread = createUnreadStore(api, events);
-export const attention = createAttentionStore(api, events, { prefixes: () => projects.prefixes() });
 export const leases = createLeasesStore(api, events);
-export const questions = createQuestionsStore(api, events);
+export const inbox = createInboxStore(api, events);
 
 // At load: the cookie is the cache. `GET /api/session` says whether it is a
 // session, and gives the CSRF value. A token from an older build (bearer

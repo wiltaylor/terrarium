@@ -22,7 +22,7 @@ import { PoolPicker, SubscriptionSelect } from "./SubscriptionFields";
 import { SystemPromptField } from "./AgentFields";
 import { effectivePersona, systemPromptProblem } from "./form";
 import { WaitsPanel, WatchesPanel } from "./Waits";
-import { QuestionsPanel } from "../questions/QuestionsPage";
+import { QuestionsPanel } from "../inbox/QuestionsPanel";
 
 const TABS = [
   { id: "conversation", label: "Conversation" },

@@ -416,16 +416,25 @@ export interface WaitEventData {
 
 // ----- Questions to the operator (docs/api.md §6.8) -----
 
-export type QuestionStatus = "open" | "answered" | "retracted";
+/**
+ * `question`: open → answered | retracted. `notice` (no options): open →
+ * acknowledged | retracted.
+ */
+export type QuestionStatus = "open" | "answered" | "acknowledged" | "retracted";
 export type QuestionPriority = "normal" | "urgent";
+/** A `question` asks for a decision. A `notice` only tells the operator something; the operator acknowledges it. */
+export type QuestionKind = "question" | "notice";
 
 /**
- * A question of a leader agent to the operator. `text`, `options`, and
- * `context` are the agent's own words: show `text` and `options` as plain
- * text, and `context` (Markdown) only through the DOMPurify sink.
+ * A question or a notice of a leader agent to the operator. `text`,
+ * `options`, and `context` are the agent's own words: show `text` and
+ * `options` as plain text, and `context` (Markdown) only through the
+ * DOMPurify sink. For an acknowledged notice, `answer` is the operator's
+ * optional reply, and the `answered_*` fields are set.
  */
 export interface Question {
   id: string;
+  kind: QuestionKind;
   /** The asking agent's ULID. */
   agent: string;
   agent_name: string;
@@ -461,7 +470,8 @@ export interface QuestionAnswer {
 /** `data` of a `question` event. */
 export interface QuestionEventData {
   question_id: string;
-  change: "asked" | "updated" | "answered" | "retracted";
+  change: "asked" | "updated" | "answered" | "acknowledged" | "retracted";
+  kind: QuestionKind;
   status: QuestionStatus;
   priority: QuestionPriority;
   text: string;
@@ -625,8 +635,10 @@ export const EVENT_KINDS = [
   "wait",
   // Watches: `{watch_id, change, on, status?}`.
   "watch",
-  // docs/api.md §6.8: `{question_id, change, status, priority, text, revision, agent_id}`.
+  // docs/api.md §6.8: `{question_id, change, kind, status, priority, text, revision, agent_id}`.
   "question",
+  // The operator's inbox: `{item, kind, change, project?}` on each change of an item.
+  "inbox",
   // docs/api.md §4: a harness update in the container.
   "harness",
   // docs/api.md §19: `{change, schedule, run?, status?}`.
@@ -699,6 +711,9 @@ export interface Message {
   read_by_name?: string;
   /** The loop guard paused the thread (docs/api.md §6.2). Absent when false. */
   thread_paused?: boolean;
+  /** The operator released a message that the loop guard held: the recipient got its pointer then. */
+  released_at?: string;
+  released_by?: string;
 }
 
 export interface NewMessage {
@@ -715,16 +730,103 @@ export interface MailQuery {
   thread?: string;
   /** A state, or `unread` (`queued` and `delivered`). */
   state?: MessageState | "unread";
+  /** The messages that touch the project. */
+  project?: string;
+  /** RFC 3339 times. */
+  since?: string;
+  until?: string;
+  /** Free text over the subject, the body, and the names. */
+  q?: string;
   limit?: number;
   cursor?: string;
 }
 
-export interface InboxQuery {
+export interface ProjectInboxQuery {
   unread?: boolean;
   state?: MessageState;
   thread?: string;
   limit?: number;
   cursor?: string;
+}
+
+// ----- The operator's inbox: what waits for the operator -----
+
+export type InboxKind = "question" | "notice" | "mail" | "system";
+export type InboxStatus = "open" | "done" | "all";
+
+/** A thread that the loop guard paused, with the messages that it held. */
+export interface PausedThread {
+  kind: "paused_thread";
+  thread_id: string;
+  subject: string;
+  /** The loop guard pauses the thread now. */
+  paused: boolean;
+  /** Agent-to-agent messages since the last reset. */
+  agent_run: number;
+  /** `TERRARIUM_MAIL_LOOP_LIMIT`. */
+  limit: number;
+  /** Display names. */
+  participants: string[];
+  /** The held messages that are not released. */
+  held: Message[];
+}
+
+/**
+ * One thing that waits for the operator (`GET /api/inbox`). `id` is
+ * `question:<id>`, `notice:<id>`, `mail:<message id>`, or `thread:<thread id>`.
+ * A system item shows only while it is open.
+ */
+export interface InboxItem {
+  id: string;
+  kind: InboxKind;
+  open: boolean;
+  urgent: boolean;
+  project: string | null;
+  /** When it came in: the sort key. */
+  at: string;
+  /** Kind `question` or `notice`. */
+  question?: Question;
+  /** Kind `mail`. */
+  message?: Message;
+  /** Kind `system`. */
+  system?: PausedThread;
+}
+
+export interface InboxQuery {
+  status?: InboxStatus;
+  kind?: InboxKind;
+  project?: string;
+}
+
+/** `GET /api/inbox/counts`: the open items. `urgent` counts the open urgent items. */
+export interface InboxCounts {
+  open: number;
+  urgent: number;
+  question: number;
+  notice: number;
+  mail: number;
+  system: number;
+}
+
+/** `POST /api/inbox/mail/{id}/ack`: the acknowledged message, and the replies (one for each participant). */
+export interface MailAck {
+  message: Message;
+  replies: Message[];
+}
+
+/** `POST /api/mail/threads/{id}/resume`: the released message IDs, and the note messages. */
+export interface ThreadResume {
+  thread_id: string;
+  released: string[];
+  note: Message[];
+}
+
+/** `data` of an `inbox` event. */
+export interface InboxEventData {
+  item: string;
+  kind: InboxKind;
+  change: "opened" | "updated" | "closed";
+  project?: string;
 }
 
 // ----- Board (§13, docs/api.md §8) -----

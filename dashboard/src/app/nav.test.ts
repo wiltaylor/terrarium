@@ -3,10 +3,15 @@ import app from "./App.tsx?raw";
 import { GLOBAL_ITEMS, MOVED_ROUTES, movedTo, PROJECT_ITEMS } from "./nav";
 
 describe("navigation", () => {
-  it("has no Spend item, and keeps Mail and the project Inbox", () => {
-    expect(PROJECT_ITEMS.map((i) => i.path)).not.toContain("spend");
-    expect(PROJECT_ITEMS.map((i) => i.path)).toContain("inbox");
+  it("has no Spend item; the project has Mail, not Inbox, with a route", () => {
+    const paths = PROJECT_ITEMS.map((i) => i.path) as string[];
+    expect(paths).not.toContain("spend");
+    expect(paths).not.toContain("inbox");
+    expect(PROJECT_ITEMS.find((i) => i.path === "mail")?.label).toBe("Mail");
     expect(GLOBAL_ITEMS.map((i) => i.href)).toContain("/mail");
+    expect(app).toMatch(/path="\/mail" component=\{MailPage\}/);
+    expect(app).toMatch(/path="\/p\/:project\/mail" component=\{MailPage\}/);
+    expect(app).not.toMatch(/path="\/p\/:project\/inbox" component/);
   });
 
   it("has Schedules under the project and in the global list, each with a route", () => {
@@ -22,10 +27,14 @@ describe("navigation", () => {
     expect(app).toMatch(/path="\/templates"/);
   });
 
-  it("has Questions after Mail in the global list, with a route", () => {
-    const hrefs = GLOBAL_ITEMS.map((i) => i.href);
-    expect(hrefs.indexOf("/questions")).toBe(hrefs.indexOf("/mail") + 1);
-    expect(app).toMatch(/path="\/questions"/);
+  it("has Inbox right after Home in the global list, with a route, and no Questions item", () => {
+    const hrefs = GLOBAL_ITEMS.map((i) => i.href) as string[];
+    expect(hrefs.indexOf("/inbox")).toBe(hrefs.indexOf("/") + 1);
+    expect(GLOBAL_ITEMS.find((i) => i.href === "/inbox")?.label).toBe("Inbox");
+    expect(hrefs).not.toContain("/questions");
+    expect(app).toMatch(/path="\/inbox" component=\{InboxPage\}/);
+    expect(app).not.toMatch(/path="\/questions" component/);
+    expect(Object.keys(import.meta.glob("../features/questions/**"))).toEqual([]);
   });
 
   it("has Config before Settings in the global list, with a route", () => {
@@ -40,7 +49,18 @@ describe("navigation", () => {
     expect(movedTo("/p/terrarium/board")).toBeUndefined();
     expect(movedTo("/p/terrarium/spend/x")).toBeUndefined();
     expect(movedTo("/spend")).toBeUndefined();
-    expect(MOVED_ROUTES.map((r) => r.path)).toEqual(["/p/:project/spend"]);
+  });
+
+  it("redirects Questions to the Inbox, and the project inbox to the project Mail with the same project", () => {
+    expect(movedTo("/questions")).toBe("/inbox");
+    expect(movedTo("/questions/")).toBe("/inbox");
+    expect(movedTo("/questions/x")).toBeUndefined();
+    expect(movedTo("/p/terrarium/inbox")).toBe("/p/terrarium/mail");
+    expect(movedTo("/p/my%20app/inbox/")).toBe("/p/my%20app/mail");
+    expect(movedTo("/p/terrarium/inbox/x")).toBeUndefined();
+    expect(movedTo("/inbox")).toBeUndefined();
+    expect(movedTo("/p/terrarium/mail")).toBeUndefined();
+    expect(MOVED_ROUTES.map((r) => r.path)).toEqual(["/p/:project/spend", "/questions", "/p/:project/inbox"]);
   });
 
   it("has no Spend page left in the code", () => {

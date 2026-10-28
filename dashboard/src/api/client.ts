@@ -48,7 +48,13 @@ import type {
   HarnessUpdateResult,
   Health,
   Host,
+  InboxCounts,
+  InboxItem,
   InboxQuery,
+  MailAck,
+  ProjectInboxQuery,
+  QuestionKind,
+  ThreadResume,
   Lease,
   NewWatch,
   Question,
@@ -248,17 +254,19 @@ export interface Api {
     log(id: string, opts?: { max?: number }): Promise<WaitLog>;
   };
 
-  /** Questions of the leaders to the operator (docs/api.md §6.8). Plain arrays, no cursor. */
+  /** Questions and notices of the leaders to the operator (docs/api.md §6.8). Plain arrays, no cursor. */
   questions: {
-    /** `GET /api/questions?status=&project=&agent=`: open by default, urgent first. `status: "all"` lists every status. */
-    list(q?: { status?: QuestionStatus | "all"; project?: string; agent?: string }): Promise<Question[]>;
+    /** `GET /api/questions?status=&project=&agent=&kind=`: open by default, urgent first. `status: "all"` lists every status; no `kind` lists both kinds. */
+    list(q?: { status?: QuestionStatus | "all"; project?: string; agent?: string; kind?: QuestionKind }): Promise<Question[]>;
     /** `GET /api/agents/{id}/questions`: the open ones and those answered in the last 24 h; `all` lists every one. */
     ofAgent(agent: string, opts?: { all?: boolean; status?: QuestionStatus }): Promise<Question[]>;
     get(id: string): Promise<Question>;
     /** `POST /api/questions/{id}/answer`: 409 when the question is not open. The agent gets the answer by mail. */
     answer(id: string, body: QuestionAnswer): Promise<Question>;
-    /** `POST /api/questions/{id}/retract`: the agent gets a mail that it needs no answer. */
+    /** `POST /api/questions/{id}/retract`: the agent gets a mail that it needs no answer. Works for both kinds. */
     retract(id: string, reason?: string): Promise<Question>;
+    /** `POST /api/questions/{id}/ack`: acknowledge a notice, with an optional reply. 409 for a question. */
+    ack(id: string, text?: string): Promise<Question>;
   };
 
   watches: {
@@ -398,10 +406,25 @@ export interface Api {
     markRead(id: string): Promise<Message>;
     /** One message for each participant except the sender. */
     reply(id: string, body: string, subject?: string): Promise<Message[]>;
+    /** `POST /api/mail/{id}/release`: release one held message. The recipient gets its pointer now; the thread stays paused. */
+    release(id: string): Promise<Message>;
+    /** `POST /api/mail/threads/{id}/resume`: end the pause and release every held message. A note goes as `operator` to the participants. */
+    resume(threadId: string, note?: string): Promise<ThreadResume>;
   };
 
+  /** What waits for the operator: questions, notices, mail to `operator`, and paused threads. Operator only. */
   inbox: {
-    list(project: string, q?: InboxQuery): Promise<Page<Message>>;
+    /** `GET /api/inbox?status=&kind=&project=`: open by default, urgent first, then the newest. */
+    list(q?: InboxQuery): Promise<InboxItem[]>;
+    /** `GET /api/inbox/counts?project=`: the open items by kind. */
+    counts(project?: string): Promise<InboxCounts>;
+    /** `POST /api/inbox/mail/{id}/ack`: acknowledge a mail to the operator. A reply goes out as `operator` on the thread. */
+    ackMail(id: string, reply?: string): Promise<MailAck>;
+  };
+
+  /** The inbox of a project: the address `project:<name>`. */
+  projectInbox: {
+    list(project: string, q?: ProjectInboxQuery): Promise<Page<Message>>;
     send(project: string, m: Omit<NewMessage, "to">): Promise<Message>;
     markRead(project: string, id: string): Promise<Message>;
     /** From `project:<name>`, one message for each participant. */
@@ -705,6 +728,7 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       get: (id) => get(`/api/questions/${seg(id)}`),
       answer: (id, body) => post(`/api/questions/${seg(id)}/answer`, body),
       retract: (id, reason) => post(`/api/questions/${seg(id)}/retract`, reason ? { reason } : {}),
+      ack: (id, text) => post(`/api/questions/${seg(id)}/ack`, text ? { text } : {}),
     },
 
     watches: {
@@ -820,9 +844,17 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       send: (m) => post("/api/mail", m),
       markRead: (id) => post(`/api/mail/${seg(id)}/read`),
       reply: (id, body, subject) => post(`/api/mail/${seg(id)}/reply`, { body, subject }),
+      release: (id) => post(`/api/mail/${seg(id)}/release`),
+      resume: (thread, note) => post(`/api/mail/threads/${seg(thread)}/resume`, note ? { note } : {}),
     },
 
     inbox: {
+      list: (q = {}) => get("/api/inbox", Object.keys(q).length ? { ...q } : undefined),
+      counts: (project) => get("/api/inbox/counts", project ? { project } : undefined),
+      ackMail: (id, reply) => post(`/api/inbox/mail/${seg(id)}/ack`, reply ? { reply } : {}),
+    },
+
+    projectInbox: {
       list: (project, q = {}) => page(`${p(project)}/inbox`, { ...q }),
       send: (project, m) => post(`${p(project)}/inbox`, m),
       markRead: (project, id) => post(`${p(project)}/inbox/${seg(id)}/read`),

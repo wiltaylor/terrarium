@@ -1,14 +1,15 @@
-//! `question` and `admin question` (docs/api.md §6.8, PLAN §12e). A
-//! leader asks the operator; the answer comes as mail. The text, the
-//! options, and the context of a question are the agent's own words:
-//! `show` prints them between data markers.
+//! `question`, `notify`, `admin question`, and `admin inbox` (docs/api.md
+//! §6.8, §6.9, PLAN §12e). A leader asks the operator, or sends a notice;
+//! the answer or the acknowledgement comes as mail. The text, the options,
+//! and the context of a question are the agent's own words: `show` prints
+//! them between data markers.
 
 use anyhow::Context as _;
 use serde_json::{Value, json};
 
 use super::{agent_path, delimited, print_object, print_table};
 use crate::api::{CliError, query};
-use crate::cli::{AdminQuestionCmd, QuestionCmd, QuestionContext};
+use crate::cli::{AdminInboxCmd, AdminQuestionCmd, NotifyArgs, QuestionCmd, QuestionContext};
 use crate::commands::system::as_items;
 use crate::ctx::Ctx;
 use crate::output::field;
@@ -16,6 +17,7 @@ use crate::transport::encode;
 
 const COLS: &[(&str, &str)] = &[
     ("ID", "id"),
+    ("KIND", "kind"),
     ("STATUS", "status"),
     ("PRIORITY", "priority"),
     ("CARD", "card"),
@@ -25,6 +27,7 @@ const COLS: &[(&str, &str)] = &[
 
 const ADMIN_COLS: &[(&str, &str)] = &[
     ("ID", "id"),
+    ("KIND", "kind"),
     ("STATUS", "status"),
     ("PRIORITY", "priority"),
     ("AGENT", "agent_name"),
@@ -54,6 +57,9 @@ fn rows(v: &Value) -> Vec<Value> {
         .map(|q| {
             let mut q = q.clone();
             q["short"] = json!(short(q["text"].as_str().unwrap_or_default()));
+            if q["kind"].is_null() {
+                q["kind"] = json!("question");
+            }
             q
         })
         .collect()
@@ -81,9 +87,10 @@ fn print_question(c: &Ctx, v: &Value) {
     let context = take("context");
     let answer = take("answer");
     let option = take("answer_option");
+    let notice = v["kind"] == "notice";
     print_object(c, &head);
     if let Some(t) = text.as_ref().and_then(Value::as_str) {
-        delimited(c, "QUESTION", t);
+        delimited(c, if notice { "NOTICE" } else { "QUESTION" }, t);
     }
     let options: Vec<String> = options
         .as_ref()
@@ -112,7 +119,8 @@ fn print_question(c: &Ctx, v: &Value) {
         c.line(format!("chosen option: {}. {label}", i + 1));
     }
     if let Some(a) = answer.as_ref().and_then(Value::as_str) {
-        c.line(format!("answer by {}:", field(v, "answered_by_name")));
+        let what = if notice { "reply" } else { "answer" };
+        c.line(format!("{what} by {}:", field(v, "answered_by_name")));
         c.out.write_str(a);
         if !a.ends_with('\n') {
             c.line("");
@@ -189,18 +197,29 @@ pub async fn question(ctx: &Ctx, cmd: &QuestionCmd) -> anyhow::Result<()> {
                 }
             })
         }
-        QuestionCmd::Ls { all, status, agent } => {
+        QuestionCmd::Ls {
+            all,
+            status,
+            kind,
+            agent,
+        } => {
             let who = subject(ctx, agent).await?;
             let q = query([
                 ("all", all.then(|| "true".to_owned())),
                 ("status", status.clone()),
+                ("kind", kind.clone()),
             ]);
             let v = ctx
                 .api
                 .get(&format!("{}/questions", agent_path(&who)), q)
                 .await?;
             ctx.emit(&v, |c, v| {
-                print_table(c, &rows(v), COLS, "no open or recently answered questions")
+                print_table(
+                    c,
+                    &rows(v),
+                    COLS,
+                    "no open or recently answered questions or notices",
+                )
             })
         }
         QuestionCmd::Show { id } => {
@@ -260,7 +279,12 @@ async fn retract(ctx: &Ctx, id: &str, reason: &Option<String>) -> anyhow::Result
         .post(&format!("{}/retract", path(id)), Some(body))
         .await?;
     ctx.emit(&v, |c, v| {
-        c.line(format!("question {} retracted.", field(v, "id")));
+        let kind = if v["kind"] == "notice" {
+            "notice"
+        } else {
+            "question"
+        };
+        c.line(format!("{kind} {} retracted.", field(v, "id")));
     })
 }
 
@@ -294,6 +318,7 @@ pub async fn admin(ctx: &Ctx, cmd: &AdminQuestionCmd) -> anyhow::Result<()> {
             open: _,
             status,
             all,
+            kind,
         } => {
             let status = if *all {
                 Some("all".to_owned())
@@ -304,6 +329,7 @@ pub async fn admin(ctx: &Ctx, cmd: &AdminQuestionCmd) -> anyhow::Result<()> {
                 ("status", status),
                 ("project", ctx.project.clone()),
                 ("agent", agent.clone()),
+                ("kind", kind.clone()),
             ]);
             let v = ctx.api.get("/api/questions", q).await?;
             ctx.emit(&v, |c, v| {
@@ -341,5 +367,239 @@ pub async fn admin(ctx: &Ctx, cmd: &AdminQuestionCmd) -> anyhow::Result<()> {
             })
         }
         AdminQuestionCmd::Retract { id, reason } => retract(ctx, id, reason).await,
+    }
+}
+
+/// `terrarium notify`: a leader sends a notice to the operator.
+pub async fn notify(ctx: &Ctx, a: &NotifyArgs) -> anyhow::Result<()> {
+    if !ctx.is_agent() {
+        return Err(CliError::usage(
+            "an agent sends notices; the operator acknowledges them with `terrarium admin \
+             inbox ack`",
+        ));
+    }
+    let me = ctx.me().await?;
+    let mut body = json!({"kind": "notice", "text": ctx.text(&a.text)?});
+    super::set_opt(&mut body, "context", context_value(ctx, &a.context)?);
+    super::set_opt(&mut body, "card", a.card.clone());
+    if a.urgent {
+        body["priority"] = json!("urgent");
+    }
+    if a.wait {
+        body["wait"] = json!(true);
+    }
+    super::set_opt(&mut body, "timeout", a.timeout.clone());
+    let v = ctx
+        .api
+        .post(&format!("{}/questions", agent_path(&me)), Some(body))
+        .await?;
+    ctx.emit(&v, |c, v| {
+        c.line(format!(
+            "notice {} sent ({}). The acknowledgement comes as mail on thread {}.",
+            field(v, "id"),
+            field(v, "priority"),
+            field(v, "thread_id")
+        ));
+        if v["wait"].is_object() {
+            c.line(format!(
+                "wait {} registered: {}",
+                field(&v["wait"], "id"),
+                field(&v["wait"], "summary")
+            ));
+            c.line("End your turn now. The acknowledgement wakes you; do not poll.");
+        } else {
+            c.line("Go on with your work. Do not send it again.");
+        }
+    })
+}
+
+const INBOX_COLS: &[(&str, &str)] = &[
+    ("ID", "id"),
+    ("KIND", "kind"),
+    ("STATUS", "status"),
+    ("URGENT", "urgent"),
+    ("PROJECT", "project"),
+    ("FROM", "from"),
+    ("AT", "at"),
+    ("WHAT", "short"),
+];
+
+/// The rows of the Inbox table: one line for each item.
+fn inbox_rows(v: &Value) -> Vec<Value> {
+    as_items(v)
+        .iter()
+        .map(|i| {
+            let mut row = json!({
+                "id": i["id"], "kind": i["kind"], "urgent": i["urgent"],
+                "project": i["project"], "at": i["at"],
+                "status": if i["open"] == true { "open" } else { "done" },
+            });
+            match i["kind"].as_str() {
+                Some("question" | "notice") => {
+                    let q = &i["question"];
+                    row["from"] = q["agent_name"].clone();
+                    row["status"] = q["status"].clone();
+                    row["short"] = json!(short(q["text"].as_str().unwrap_or_default()));
+                }
+                Some("mail") => {
+                    let m = &i["message"];
+                    row["from"] = m["from_name"].clone();
+                    row["short"] = json!(short(m["subject"].as_str().unwrap_or_default()));
+                }
+                Some("system") => {
+                    let s = &i["system"];
+                    row["from"] = json!("system");
+                    let held = as_items(&s["held"]).len();
+                    let paused = if s["paused"] == true {
+                        "paused"
+                    } else {
+                        "not paused"
+                    };
+                    row["short"] = json!(format!(
+                        "thread {} {paused}, {held} held",
+                        s["thread_id"].as_str().unwrap_or_default()
+                    ));
+                }
+                _ => {}
+            }
+            row
+        })
+        .collect()
+}
+
+/// The question or message ID of an Inbox ID: `notice:<id>` gives
+/// `(Some("notice"), id)`; a bare ID gives `(None, id)`.
+fn item_ref(id: &str) -> (Option<&str>, &str) {
+    match id.split_once(':') {
+        Some((k @ ("question" | "notice" | "mail" | "thread"), rest)) => (Some(k), rest),
+        _ => (None, id),
+    }
+}
+
+/// `terrarium admin inbox ...`.
+pub async fn inbox(ctx: &Ctx, cmd: &AdminInboxCmd) -> anyhow::Result<()> {
+    match cmd {
+        AdminInboxCmd::Ls { all, done, kind } => {
+            let status = if *all {
+                Some("all".to_owned())
+            } else if *done {
+                Some("done".to_owned())
+            } else {
+                None
+            };
+            let q = query([
+                ("status", status),
+                ("kind", kind.clone()),
+                ("project", ctx.project.clone()),
+            ]);
+            let v = ctx.api.get("/api/inbox", q).await?;
+            ctx.emit(&v, |c, v| {
+                print_table(c, &inbox_rows(v), INBOX_COLS, "nothing waits for you")
+            })
+        }
+        AdminInboxCmd::Ack { id, text } => {
+            let text = text.as_deref().map(|t| ctx.text(t)).transpose()?;
+            let (kind, key) = item_ref(id);
+            let notice = match kind {
+                Some("notice") => true,
+                Some("mail") => false,
+                Some(other) => {
+                    return Err(CliError::usage(format!(
+                        "`{other}` items have no ack: answer a question with `terrarium admin \
+                         question answer`, resume a thread with `terrarium admin inbox resume`"
+                    )));
+                }
+                // A bare ID: a notice when it is a question ID, else a mail.
+                None => match ctx.api.get(&path(key), vec![]).await {
+                    Ok(q) if q["kind"] == "notice" => true,
+                    Ok(_) => {
+                        return Err(CliError::usage(format!(
+                            "{key} is a question: answer it with `terrarium admin question \
+                             answer {key}`"
+                        )));
+                    }
+                    Err(e)
+                        if e.downcast_ref::<crate::api::ServerError>()
+                            .is_some_and(|s| s.status == 404) =>
+                    {
+                        false
+                    }
+                    Err(e) => return Err(e),
+                },
+            };
+            if notice {
+                let mut body = json!({});
+                super::set_opt(&mut body, "text", text);
+                let v = ctx
+                    .api
+                    .post(&format!("{}/ack", path(key)), Some(body))
+                    .await?;
+                ctx.emit(&v, |c, v| {
+                    c.line(format!(
+                        "notice {} acknowledged; {} gets a mail.",
+                        field(v, "id"),
+                        field(v, "agent_name")
+                    ));
+                })
+            } else {
+                let mut body = json!({});
+                super::set_opt(&mut body, "reply", text);
+                let v = ctx
+                    .api
+                    .post(&format!("/api/inbox/mail/{}/ack", encode(key)), Some(body))
+                    .await?;
+                ctx.emit(&v, |c, v| {
+                    let n = as_items(&v["replies"]).len();
+                    let m = &v["message"];
+                    if n == 0 {
+                        c.line(format!("mail {} acknowledged.", field(m, "id")));
+                    } else {
+                        c.line(format!(
+                            "mail {} acknowledged; the reply went on thread {}.",
+                            field(m, "id"),
+                            field(m, "thread_id")
+                        ));
+                    }
+                })
+            }
+        }
+        AdminInboxCmd::Release { id } => {
+            let (_, key) = item_ref(id);
+            let v = ctx
+                .api
+                .post(&format!("/api/mail/{}/release", encode(key)), None)
+                .await?;
+            ctx.emit(&v, |c, v| {
+                c.line(format!(
+                    "message {} released; {} gets it now.",
+                    field(v, "id"),
+                    field(v, "to_name")
+                ));
+            })
+        }
+        AdminInboxCmd::Resume { thread, note } => {
+            let (_, key) = item_ref(thread);
+            let mut body = json!({});
+            super::set_opt(
+                &mut body,
+                "note",
+                note.as_deref().map(|n| ctx.text(n)).transpose()?,
+            );
+            let v = ctx
+                .api
+                .post(
+                    &format!("/api/mail/threads/{}/resume", encode(key)),
+                    Some(body),
+                )
+                .await?;
+            ctx.emit(&v, |c, v| {
+                c.line(format!(
+                    "thread {} resumed: {} held messages released, {} notes sent.",
+                    field(v, "thread_id"),
+                    as_items(&v["released"]).len(),
+                    as_items(&v["note"]).len()
+                ));
+            })
+        }
     }
 }

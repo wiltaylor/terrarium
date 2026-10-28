@@ -231,7 +231,7 @@ checks the shapes that differ from PLAN §17.
 
 - **Lists.** The daemon answers a JSON array and puts the next cursor in the
   `X-Next-Cursor` header. `Transport.page()` returns `{items, next}`. Methods
-  that return `Page<T>` (mail, inbox, audit, events, sessions, card events,
+  that return `Page<T>` (mail, project inbox, audit, events, sessions, card events,
   cards) give the cursor to the view, and the view shows **Load more**
   (`components/paged.ts`). Methods that return `T[]` follow every cursor with
   `collectAll` (`lib/paging.ts`).
@@ -245,7 +245,7 @@ checks the shapes that differ from PLAN §17.
   store. The status change comes from the event stream.
 - **Agent keys.** `{id}` is a ULID, `project/name` (sent as
   `project%2Fname`), or a unique name.
-- **Replies.** `mail.reply` and `inbox.reply` answer an array: one message
+- **Replies.** `mail.reply` and `projectInbox.reply` answer an array: one message
   for each participant.
 - **Artifacts.** An artifact has no URL. The viewer mints a short-lived
   signed URL with `POST /api/artifacts/{id}/url`.
@@ -265,8 +265,8 @@ While the socket is down, the layout shows a **Disconnected** strip with a
 
 Every view listens through `events.on(...)`: agent status badges, the
 current card, and the self-report (`applyAgentEvent`), the board (`card` and
-`board` events), the Mail attention count and the inbox counts in the sidebar
-(`stores/attention.ts`, `stores/unread.ts`), the mail log (`features/mail/feed.ts`), the quota banner and the hold badges
+`board` events), the Inbox count in the sidebar and the Inbox items of the
+Home queue (`stores/inbox.ts`, `inbox` and `question` events), the mail log (`features/mail/feed.ts`), the quota banner and the hold badges
 (`stores/quota.ts`), the subscription list (`quota.*` events) and the detect
 banner (`subscription.offer`), the home queue and usage strip, the Event
 log, and the agent's Events tab. `lease` events keep the lease lists on the
@@ -354,27 +354,52 @@ so the sidebar count of blocked agents does not include it.
   it fires a watch (a `watch` event and a mail) on a status change. It does not
   run timers for time waits.
 
-## Questions to the operator
+## The Inbox
 
-A leader agent asks the operator for a decision (docs/api.md §6.8). The
-**Questions** page (`features/questions/QuestionsPage.tsx`) lists the
-questions, open first and urgent first, with tabs for the status and a
-project filter. The sidebar item has a badge of the open questions
-(`stores/questions.ts`); the badge is red when one of them is urgent.
+Everything that needs the operator goes to the **Inbox** (`/inbox`,
+`features/inbox/InboxPage.tsx`, `GET /api/inbox`). The old `/questions`
+route redirects to it (`app/nav.ts` `MOVED_ROUTES`). An item has one of four
+kinds:
 
-- Each card (`QuestionCard.tsx`) shows the agent, the project, the card link,
-  the question, the context, the choice buttons, a free-text answer, and
-  **Retract**. An answered card shows the chosen option and the answer.
-- The question text, the options, and the retract reason are the agent's
-  words: the page shows them as text nodes only. The context is Markdown: it
-  goes through `renderMarkdown` and the DOMPurify sink (`SafeHtml`) only.
-- The agent page shows the questions of a leader (`QuestionsPanel`).
-- `question` events read the lists and the badge again.
-- The pure helpers are in `features/questions/model.ts`. The mock is in
-  `api/mock/questions.ts`: two open questions (one urgent, with a hostile
-  context), one answered, one retracted. An answer sends one mail on the
-  thread and resolves the `question` waits with no second mail, as the daemon
-  does.
+- **question**: a leader agent asks for a decision (docs/api.md §6.8). The
+  card has the choice buttons, a free-text answer, and **Retract**.
+- **notice**: a leader agent tells the operator something, with no choices.
+  The card has **Acknowledge**, an optional reply, and **Retract**. An
+  acknowledged notice shows the reply.
+- **mail**: a message to `operator`. The card shows the sender, the subject,
+  and the body, and has **Acknowledge** with an optional reply on the thread
+  (`POST /api/inbox/mail/{id}/ack`). A reply to a `system` mail with nobody
+  else on the thread is a `422`.
+- **system**: a thread that the loop guard paused. The card shows the
+  subject, the participants, the agent run and the limit, and the held
+  messages with **Release** each (`POST /api/mail/{id}/release`). **Resume**
+  ends the pause and releases every held message, with an optional note to the
+  participants (`POST /api/mail/threads/{id}/resume`). A system item shows only
+  while it is open.
+
+The page has kind tabs (All, Questions, Notices, Mail to you, System), Open
+or Done, and a project filter, all in the URL (`?tab=&status=&project=`). The
+daemon sorts: urgent first, then the newest.
+
+- The sidebar badge on Inbox is the one count of the open items
+  (`GET /api/inbox/counts`, `stores/inbox.ts`). It is red when one item is
+  urgent, else it has the info style (`features/inbox/model.ts` `badge`).
+- `inbox` events (`{item, kind, change, project?}`) and `question` events
+  read the page, the badge, and the Home queue again.
+- The question text, the options, the mail subject and body, and the retract
+  reason are the sender's words: the page shows them as text nodes only. The
+  context of a question or a notice is Markdown: it goes through
+  `renderMarkdown` and the DOMPurify sink (`SafeHtml`) only.
+- The agent page shows the questions and notices of a leader
+  (`features/inbox/QuestionsPanel.tsx`), each with its kind.
+- The pure helpers are in `features/inbox/model.ts` (tabs, order, counts,
+  badge) and `features/inbox/questions.ts` (answer and acknowledge bodies).
+  The mock is in `api/mock/questions.ts` and `api/mock/inbox.ts`: two open
+  questions (one urgent, with a hostile context), one answered, one retracted;
+  one open notice (with a hostile context) and one acknowledged notice; three
+  open mails to the operator; and one paused thread with one held message.
+  An answer sends one mail on the thread and resolves the `question` waits
+  with no second mail, as the daemon does.
 
 ## The conversation view
 
@@ -445,72 +470,55 @@ A `status` event carries `data.status`. A `card` event carries `data.card_id`.
 
 ## The mail log
 
-The operator reads mail only when something needs them. `/mail` is a log of
-every message (agent to agent, agent to operator, operator to agent, `system`,
-project inboxes), newest first. A row shows the time, from and to, the
-projects, the subject, the first line, and chips: unread (by the recipient),
-the state (`queued`, `delivered`, `read`, `replied`), read by, the notice
-kind, held, and thread paused. A click opens the thread under the row. The
-filter state is in the URL (`?project=&kind=&q=&range=&attention=0&thread=`),
-so Home links to `/mail?thread=<id>`. A row to a project inbox links to
-`/p/<project>/inbox?id=`.
+The mail log is a record, not a to-do list. It keeps no unread state for the
+operator: no unread count, no mark read, no attention badge. Mail that needs
+the operator is in the Inbox.
 
-**The attention rule** (`features/mail/log.ts`, `attentionReasons`). A message
-needs the operator when:
+`/mail` is a log of every message (agent to agent, agent to operator,
+operator to agent, `system`, project inboxes), newest first.
+`/p/<project>/mail` is the same log for the messages that touch one project.
+The old `/p/<project>/inbox` route redirects to it. A row of the table shows
+the time, from, to, the subject with the first line and the state chips (the
+recipient's state, read by, released, thread paused), and the thread. A click
+opens the thread under the row, with reply and compose. On a project page, a
+thread to the project inbox replies from `project:<name>`, and **Make card**
+makes a card from its newest message.
 
-- it goes to the operator and is `queued` or `delivered` (`unread`). A
-  `system` notice adds its kind, from the daemon's subjects: `<CARD> blocked:`
-  (`blocked`), `Quota:` or `Budget:` (`quota`), `Thread <id> needs a human`
-  (`needs_human`);
-- the loop guard held it, and the thread is still paused (`held`);
-- it is the newest message of a paused thread (`paused`).
+The filters are from, to, project (`/mail` only), thread, time range (last
+hour, day, week, all time, or from and to times), and free text. They are in
+the URL (`?from=&to=&project=&thread=&range=&since=&until=&q=`). `open=<thread>`
+opens a thread, so the Inbox links to `/mail?thread=<id>&open=<id>`.
 
-A read (`POST /api/mail/{id}/read`, which sets `read_by`) ends `unread`. A
-reply from the operator on the thread ends the pause. The "Needs attention"
-toggle (on by default), the sidebar count on Mail, and the mail items of the
-Home queue use this one rule. Unread project-inbox mail is not in the rule:
-the Inbox count in the sidebar shows it.
-
-A message row does not say that the loop guard held it. The `mail` event
-does (`held: true`); `stores/attention.ts` keeps those IDs. For older rows,
-`heldIds` finds them: the daemon sends its "needs a human" notice right after
-the first held message, and holds every later agent-to-agent message on the
-thread until the operator or a project inbox writes on it.
+**Live tail.** On (the default), a `mail` event pulls the new messages at
+once. Off, the log stays still and shows **N new**; a click turns the tail on
+and pulls the threads that the events touched (`features/mail/log.ts`
+`tailEvent`, `setTail`).
 
 **Server or browser.** `GET /api/mail` answers oldest first, so a newest-first
 log reads the full list (`collectAll`, pages of 1000, at most 20 pages), and
 the view shows 50 rows at a time (**Load more**). A `mail` event asks only for
 the messages after the newest ID (`?cursor=<id>`, the list is `id > cursor`)
-and reads the event's thread again (`?thread=`).
-
-| Filter | Where |
-|---|---|
-| To operator | Server: `?to=operator` |
-| From operator | Server: `?from=operator` |
-| System | Browser. The daemon answers `?from=system` with `404 no agent \`system\`` (`store/mail.rs` `resolve`). |
-| Agent to agent, project inbox | Browser: the daemon has no kind filter. |
-| Project | Browser: a message has no project field. The project comes from `project/agent` and `project:<name>`, and from the card prefix or budget scope in a `system` subject. |
-| Text search, time range | Browser |
-| Needs attention | Browser: held and paused need the whole thread. |
-| Thread (an open row) | Server: `?thread=` |
-
-The browser filter also repeats the server part, so a thread read for a live
-update cannot put other rows in the view. The mock answers the same params
-(`api/mock/index.ts` `listMail`): `id > cursor`, `to`, `from`, `thread`,
-`state`, and the 404 for `system`.
+and reads the event's thread again (`?thread=`). A whole thread ID goes to the
+server (`?thread=`). The other filters run in the browser: from and to match
+part of a name there, and the project of a `system` notice comes from its card
+prefix or budget scope. The daemon also has `project`, `since`, `until`, and
+`q`; the mock answers them (`api/mock/index.ts`).
 
 ## Pages and the API
 
 | Route | View | API calls |
 |---|---|---|
-| `/` | Home: usage strip, waiting-on-you queue; the tile detail has the usage split by project, agent, model, and card | `GET /api/subscriptions`, `GET /api/usage?bucket=hour&group=subscription`; tile detail: `GET /api/usage?subscription=&group=project\|agent\|model\|card`, `GET .../quota`; per project: `versions?status=in_review`, `wiki?status=ready_for_review`, `board`; mail items: the attention store (see "The mail log") |
+| `/` | Home: usage strip, waiting-on-you queue; the tile detail has the usage split by project, agent, model, and card | `GET /api/subscriptions`, `GET /api/usage?bucket=hour&group=subscription`; tile detail: `GET /api/usage?subscription=&group=project\|agent\|model\|card`, `GET .../quota`; per project: `versions?status=in_review`, `wiki?status=ready_for_review`, `board`; Inbox items: `GET /api/inbox` (see "The Inbox") |
 | `/projects` | Projects: list, create | `GET`, `POST /api/projects` |
 | `/p/:project/settings` | Project edit and delete, Repos panel | `GET`, `PATCH`, `DELETE /api/projects/{name}?confirm=true`, `GET`, `POST .../repos`, `POST /api/repos/{id}/checkout` |
 | `/agents` | Agents grid, new agent | `GET`, `POST /api/agents`, events socket |
 | `/agents/:id` | Agent detail: edit, delete, roles, quota, leases, conversation (the default tab), terminal, events, sessions | `GET`, `PATCH`, `DELETE /api/agents/{id}`, `start/stop/restart/send`, `GET`, `PUT .../roles`, `GET /api/usage/me?agent=`, `GET .../leases?all=`, `WS .../pty`, `GET .../events?since=`, `GET .../sessions`, `GET .../sessions/{session}/transcript?after=&limit=`, `GET .../transcript/stream?after=` (SSE) |
 | `/subscriptions` | Subscriptions, detect banner, add wizard | `GET`, `POST`, `DELETE /api/subscriptions[/{name}]`, `GET .../detect`, `POST .../{name}/probe\|verify\|logout\|api-key`, `POST /api/subscriptions/login`, `GET`, `DELETE .../login/{id}`, `POST .../login/{id}/input`, `WS .../login/{id}/pty` |
-| `/mail` | Mail log: every message, newest first, filters, the attention view (default), the thread inline, mark read, reply, compose | `GET /api/mail?to=&from=&thread=&cursor=`, `POST /api/mail`, `POST /api/mail/{id}/read`, `POST /api/mail/{id}/reply` |
-| `/p/:project/inbox` | Project inbox, make card | `GET .../inbox`, `POST .../inbox/{id}/read`, `POST .../inbox/{id}/reply`, `POST .../cards` (`from_mail`) |
+| `/inbox` | Inbox: questions, notices, mail to the operator, paused threads; kind tabs, open or done, project filter | `GET /api/inbox?status=&kind=&project=`, `GET /api/inbox/counts`, `POST /api/questions/{id}/answer\|ack\|retract`, `POST /api/inbox/mail/{id}/ack`, `POST /api/mail/{id}/release`, `POST /api/mail/threads/{id}/resume` |
+| `/questions` | Gone: redirects to `/inbox`. | none |
+| `/mail` | Mail log: every message, newest first, filters, live tail, the thread inline, reply, compose | `GET /api/mail?thread=&cursor=`, `POST /api/mail`, `POST /api/mail/{id}/reply` |
+| `/p/:project/mail` | The mail log of one project; reply from the project inbox, make card | `GET /api/mail`, `POST .../inbox/{id}/reply`, `POST .../cards` (`from_mail`) |
+| `/p/:project/inbox` | Gone: redirects to `/p/:project/mail`. | none |
 | `/p/:project/board` | Board, drag and drop, card drawer | `GET .../board`, `PATCH /api/cards/{id}`, `POST .../comments`, `GET .../events`, `DELETE /api/cards/{id}` |
 | `/p/:project/memory` | Memory list, detail, graph | `GET .../memories`, `GET /api/memories/{project/MEM-n}/graph` |
 | `/p/:project/wiki/*path` | Page tree, render, edit, history, create | `GET .../wiki`, `GET`, `PUT /api/wiki/{project/path}`, `revisions`, `diff`, `restore`, `backlinks`, `review` |
@@ -643,9 +651,9 @@ All of the earlier follow-ups are done in `terrariumd`:
 3. **Absolute signed URLs**: `POST /api/artifacts/{id}/url` answers a URL on the artifact origin (`TERRARIUM_ARTIFACT_PUBLIC_URL`); `/a/...` leaves the dashboard port when the artifact listener is set.
 4. **CORS on the artifact routes**: the artifact origin answers the dashboard origin, never `*`.
 5. **`?token=` refused by default** (`TERRARIUM_WS_QUERY_TOKEN=1` turns it on).
-6. **`?from=system` and `?to=system` on `GET /api/mail`** work; the log still filters agent-to-agent, inbox, project, text, and time in the browser (docs/api.md §7).
+6. **`?from=system` and `?to=system` on `GET /api/mail`** work; the log still filters from, to, project, text, and time in the browser (docs/api.md §7).
 7. **Budget alert links** go to `/p/<project>`; the old `/p/<project>/spend` route still redirects to Home for mail sent before that change.
-8. **`held` and `held_reason`** are on the message row (migration 16); the log reads them and keeps the notice-based fallback for older rows.
+8. **`held` and `held_reason`** are on the message row (migration 16). The Inbox takes the held messages of a paused thread from `GET /api/inbox` (system items); the log does not compute holds.
 9. **Names of removed agents** resolve through the tombstone table on mail as on cards.
 
 Still open: `GET /api/mail?to=<ULID>` for a removed agent answers 404.

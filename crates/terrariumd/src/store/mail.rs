@@ -198,6 +198,14 @@ pub struct Message {
     /// Why the loop guard held the message. Only for a held message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub held_reason: Option<String>,
+    /// When the operator released the held message: its recipient got the
+    /// pointer then (migration 30).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub released_at: Option<String>,
+    /// The actor label of the release: `operator`, or `system` for a
+    /// message that migration 30 found on a thread with a later reset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub released_by: Option<String>,
 }
 
 struct RawMessage {
@@ -217,6 +225,8 @@ struct RawMessage {
     read_by: Option<String>,
     held: bool,
     held_reason: Option<String>,
+    released_at: Option<String>,
+    released_by: Option<String>,
 }
 
 fn raw_row(r: &Row<'_>) -> rusqlite::Result<RawMessage> {
@@ -237,6 +247,8 @@ fn raw_row(r: &Row<'_>) -> rusqlite::Result<RawMessage> {
         read_by: r.get("read_by")?,
         held: r.get("held")?,
         held_reason: r.get("held_reason")?,
+        released_at: r.get("released_at")?,
+        released_by: r.get("released_by")?,
     })
 }
 
@@ -282,6 +294,8 @@ fn render(conn: &Connection, raw: RawMessage, cache: &mut RenderCache) -> Messag
         thread_paused,
         held: raw.held,
         held_reason: raw.held_reason,
+        released_at: raw.released_at,
+        released_by: raw.released_by,
     }
 }
 
@@ -303,6 +317,15 @@ pub struct MailFilter {
     pub state: Option<String>,
     /// Only messages to or from this address (an agent reader).
     pub involving: Option<String>,
+    /// Only messages that touch this project: from or to its inbox, or
+    /// from or to one of its agents (also a deleted one).
+    pub project: Option<String>,
+    /// Only messages at or after this time (RFC 3339).
+    pub since: Option<String>,
+    /// Only messages before this time (RFC 3339).
+    pub until: Option<String>,
+    /// Free text: a part of the subject or the body, case-insensitive.
+    pub text: Option<String>,
 }
 
 /// Messages, oldest first. The cursor is a message ID.
@@ -337,6 +360,33 @@ pub fn list(conn: &Connection, f: &MailFilter, page: &Page) -> ApiResult<Paged<M
         sql.push_str(" AND (to_agent = ? OR from_agent = ?)");
         args.push(who.clone());
         args.push(who.clone());
+    }
+    if let Some(p) = &f.project {
+        sql.push_str(
+            " AND (to_agent = ? OR from_agent = ?
+                   OR to_agent IN (SELECT id FROM agents WHERE project = ?
+                                   UNION SELECT id FROM agents_removed WHERE project = ?)
+                   OR from_agent IN (SELECT id FROM agents WHERE project = ?
+                                     UNION SELECT id FROM agents_removed WHERE project = ?))",
+        );
+        let inbox = format!("project:{p}");
+        args.extend([inbox.clone(), inbox]);
+        args.extend(std::iter::repeat_n(p.clone(), 4));
+    }
+    if let Some(at) = &f.since {
+        sql.push_str(" AND created_at >= ?");
+        args.push(at.clone());
+    }
+    if let Some(at) = &f.until {
+        sql.push_str(" AND created_at < ?");
+        args.push(at.clone());
+    }
+    if let Some(q) = f.text.as_deref().map(str::trim).filter(|q| !q.is_empty()) {
+        sql.push_str(
+            " AND (instr(lower(coalesce(subject, '')), ?) > 0 OR instr(lower(body), ?) > 0)",
+        );
+        args.push(q.to_lowercase());
+        args.push(q.to_lowercase());
     }
     sql.push_str(&format!(" ORDER BY id LIMIT {}", limit + 1));
     let mut stmt = conn.prepare(&sql)?;
@@ -481,10 +531,31 @@ pub fn send(t: &mut Tx<'_>, m: Outgoing<'_>) -> ApiResult<Message> {
         draft = draft.project(p);
     }
     t.emit(draft)?;
+    if *m.to == Address::Operator && !is_pause_notice(m.from, m.subject) {
+        crate::store::inbox::emit(t, &format!("mail:{id}"), "mail", "opened", m.from.project())?;
+    }
     if held {
         pause_notice(t, &thread)?;
+        crate::store::inbox::emit(
+            t,
+            &format!("thread:{thread}"),
+            "system",
+            "updated",
+            m.to.project(),
+        )?;
     }
     get(t, &id)
+}
+
+/// The subject of the notice of a pause, from `system` to the operator.
+const PAUSE_SUBJECT_LIKE: &str = "Thread % needs a human";
+
+/// Is this the notice of a pause? The Inbox shows the paused thread as a
+/// system item, not this mail.
+pub fn is_pause_notice(from: &Address, subject: &str) -> bool {
+    *from == Address::System
+        && subject.starts_with("Thread ")
+        && subject.ends_with(" needs a human")
 }
 
 /// `TERRARIUM_MAIL_LOOP_LIMIT`: the agent-to-agent messages a thread may
@@ -507,14 +578,23 @@ pub fn mail_loop_limit() -> usize {
 }
 
 /// The rowid of the last message on the thread that resets the loop guard:
-/// one from the operator, or one from or to a project inbox. 0 when none.
+/// one from the operator, or one from or to a project inbox; or the last
+/// message at a resume with no mail (`thread_resumes`). 0 when none.
 fn last_reset(conn: &Connection, thread: &str) -> ApiResult<i64> {
     Ok(conn.query_row(
-        "SELECT coalesce(max(rowid), 0) FROM messages WHERE thread_id = ?1
-           AND (from_kind IN ('operator', 'project') OR to_kind = 'project')",
+        "SELECT max(
+            (SELECT coalesce(max(rowid), 0) FROM messages WHERE thread_id = ?1
+               AND (from_kind IN ('operator', 'project') OR to_kind = 'project')),
+            (SELECT coalesce(max(after_rowid), 0) FROM thread_resumes WHERE thread_id = ?1))",
         [thread],
         |r| r.get(0),
     )?)
+}
+
+/// The agent-to-agent messages on the thread since the last reset, and the
+/// limit. For the system items of the Inbox.
+pub fn loop_state(conn: &Connection, thread: &str) -> ApiResult<(usize, usize)> {
+    Ok((agent_run(conn, thread)?, mail_loop_limit()))
 }
 
 /// The agent-to-agent messages on the thread since the last reset.
@@ -539,8 +619,8 @@ fn pause_notice(t: &mut Tx<'_>, thread: &str) -> ApiResult<()> {
     let sent: i64 = t.query_row(
         "SELECT count(*) FROM messages WHERE thread_id = ?1
            AND from_kind = 'system' AND to_kind = 'operator' AND rowid > ?2
-           AND subject LIKE 'Thread % needs a human'",
-        params![thread, last_reset(t, thread)?],
+           AND subject LIKE ?3",
+        params![thread, last_reset(t, thread)?, PAUSE_SUBJECT_LIKE],
         |r| r.get(0),
     )?;
     if sent > 0 {
@@ -555,14 +635,250 @@ fn pause_notice(t: &mut Tx<'_>, thread: &str) -> ApiResult<()> {
             subject: &format!("Thread {thread} needs a human"),
             body: &format!(
                 "thread {thread} needs a human: {n} agent replies without operator input. \
-                 The daemon types no more mail pointers for this thread. Reply on the \
-                 thread to resume it."
+                 The daemon types no more mail pointers for this thread. Resume it in the \
+                 Inbox (or `terrarium admin inbox resume {thread}`), or reply on the thread."
             ),
             thread: Some(thread),
             in_reply_to: None,
         },
     )?;
     Ok(())
+}
+
+/// The mail to the operator for the Inbox, newest first, at most `limit`:
+/// the open ones (`queued` or `delivered`: not acknowledged) or the done
+/// ones (`read` or `replied`). The notices of a pause are not there: the
+/// Inbox shows the paused thread as a system item.
+pub fn operator_mail(conn: &Connection, open: bool, limit: usize) -> ApiResult<Vec<Message>> {
+    let states = if open {
+        "('queued', 'delivered')"
+    } else {
+        "('read', 'replied')"
+    };
+    let mut st = conn.prepare(&format!(
+        "SELECT * FROM messages WHERE to_kind = 'operator' AND state IN {states}
+           AND NOT (from_kind = 'system' AND coalesce(subject, '') LIKE ?1)
+         ORDER BY id DESC LIMIT {limit}"
+    ))?;
+    let raws = st
+        .query_map([PAUSE_SUBJECT_LIKE], raw_row)?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut cache = RenderCache::default();
+    Ok(raws
+        .into_iter()
+        .map(|r| render(conn, r, &mut cache))
+        .collect())
+}
+
+/// The held messages on `thread` that the operator did not release yet,
+/// oldest first.
+pub fn unreleased_held(conn: &Connection, thread: &str) -> ApiResult<Vec<Message>> {
+    let mut st = conn.prepare(
+        "SELECT * FROM messages WHERE thread_id = ?1 AND held = 1 AND released_at IS NULL
+         ORDER BY id",
+    )?;
+    let raws = st
+        .query_map([thread], raw_row)?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut cache = RenderCache::default();
+    Ok(raws
+        .into_iter()
+        .map(|r| render(conn, r, &mut cache))
+        .collect())
+}
+
+/// The threads that need the operator because of the loop guard: a held
+/// message that is not released, or a pause now. These are the system
+/// items of the Inbox. A paused thread has a held message since its last
+/// reset, so the threads with a held message are the candidates.
+pub fn guard_threads(conn: &Connection) -> ApiResult<Vec<String>> {
+    let mut st = conn.prepare(
+        "SELECT thread_id, max(released_at IS NULL) FROM messages WHERE held = 1
+         GROUP BY thread_id ORDER BY min(id)",
+    )?;
+    let rows = st
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut out = Vec::new();
+    for (thread, unreleased) in rows {
+        if unreleased || thread_paused(conn, &thread)? {
+            out.push(thread);
+        }
+    }
+    Ok(out)
+}
+
+/// Release one held message (the operator). A message to an agent becomes
+/// `queued` again, and its `mail` event (with `released: true` and no
+/// `held`) makes the push pointer for the recipient. The thread stays
+/// paused. A message that is not held, or that is released already, is
+/// `409`.
+pub fn release(t: &mut Tx<'_>, id: &str) -> ApiResult<Message> {
+    let m = get(t, id)?;
+    if !m.held {
+        return Err(ApiError::conflict(format!(
+            "message {id} is not held: the loop guard did not stop it"
+        )));
+    }
+    if let Some(at) = &m.released_at {
+        return Err(ApiError::conflict(format!(
+            "message {id} was released at {at}"
+        )));
+    }
+    let to_agent = m.to_kind == "agent";
+    t.execute(
+        "UPDATE messages SET released_at = ?2, released_by = ?3,
+                state = CASE WHEN ?4 AND state = 'delivered' THEN 'queued' ELSE state END,
+                delivered_at = CASE WHEN ?4 AND state = 'delivered' THEN NULL
+                                    ELSE delivered_at END
+         WHERE id = ?1",
+        params![id, now(), t.actor, to_agent],
+    )?;
+    let m = get(t, id)?;
+    let to = from_key(t, &m.to, &mut HashMap::new());
+    if to_agent {
+        let data = json!({
+            "message_id": m.id,
+            "thread_id": m.thread_id,
+            "from": m.from,
+            "from_name": m.from_name,
+            "to": m.to,
+            "to_name": m.to_name,
+            "subject": m.subject,
+            "released": true,
+        });
+        let mut draft = EventDraft::new(
+            "mail",
+            format!(
+                "mail from {} to {} released: {}",
+                m.from_name, m.to_name, m.subject
+            ),
+            data,
+        );
+        if let Address::Agent { id, name, .. } = &to {
+            draft = draft.agent(id.clone(), name.clone());
+        }
+        if let Some(p) = to.project().filter(|p| !p.is_empty()) {
+            draft = draft.project(p);
+        }
+        t.emit(draft)?;
+    }
+    let project = to.project().filter(|p| !p.is_empty()).map(str::to_owned);
+    t.audit(
+        "mail.release",
+        &m.id,
+        project.as_deref(),
+        json!({"thread": m.thread_id, "to": m.to}),
+    )?;
+    let change = if guard_threads(t)?.contains(&m.thread_id) {
+        "updated"
+    } else {
+        "closed"
+    };
+    crate::store::inbox::emit(
+        t,
+        &format!("thread:{}", m.thread_id),
+        "system",
+        change,
+        project.as_deref(),
+    )?;
+    Ok(m)
+}
+
+/// The outcome of [`resume`].
+#[derive(Debug, Clone, Serialize)]
+pub struct Resumed {
+    pub thread_id: String,
+    /// The held messages that the resume released.
+    pub released: Vec<String>,
+    /// The note of the operator: one message to each other participant.
+    pub note: Vec<Message>,
+}
+
+/// Resume a thread (the operator): end the pause of the loop guard, and
+/// release each held message on it. With a note, the note goes from the
+/// operator to the other participants of the thread. With no note, nobody
+/// gets mail. A `thread_resumes` row resets the guard in both cases. The
+/// pause notices on the thread become read. A thread that is not paused
+/// and has no held message is `409`.
+pub fn resume(t: &mut Tx<'_>, thread: &str, note: Option<&str>) -> ApiResult<Resumed> {
+    if !thread_exists(t, thread)? {
+        return Err(ApiError::not_found(format!("no thread `{thread}`")));
+    }
+    let held = unreleased_held(t, thread)?;
+    if held.is_empty() && !thread_paused(t, thread)? {
+        return Err(ApiError::conflict(format!(
+            "thread {thread} is not paused and has no held message"
+        )));
+    }
+    let max: i64 = t.query_row(
+        "SELECT coalesce(max(rowid), 0) FROM messages WHERE thread_id = ?1",
+        [thread],
+        |r| r.get(0),
+    )?;
+    t.execute(
+        "INSERT INTO thread_resumes (thread_id, after_rowid, by, at) VALUES (?1, ?2, ?3, ?4)",
+        params![thread, max, t.actor, now()],
+    )?;
+    let mut released = Vec::new();
+    for m in &held {
+        release(t, &m.id)?;
+        released.push(m.id.clone());
+    }
+    let note = note.map(str::trim).filter(|n| !n.is_empty());
+    let mut sent = Vec::new();
+    if let Some(body) = note {
+        let subject: String = t
+            .query_row(
+                "SELECT subject FROM messages WHERE thread_id = ?1
+                   AND coalesce(subject, '') <> '' ORDER BY id LIMIT 1",
+                [thread],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or_default();
+        let subject = if subject.is_empty() || subject.starts_with("Re: ") {
+            subject
+        } else {
+            format!("Re: {subject}")
+        };
+        for to in participants(t, thread)? {
+            if matches!(to, Address::Operator | Address::System) {
+                continue;
+            }
+            sent.push(send(
+                t,
+                Outgoing {
+                    from: &Address::Operator,
+                    to: &to,
+                    subject: &subject,
+                    body,
+                    thread: Some(thread),
+                    in_reply_to: None,
+                },
+            )?);
+        }
+    }
+    let at = now();
+    t.execute(
+        "UPDATE messages SET state = 'read', read_at = coalesce(read_at, ?2),
+                read_by = coalesce(read_by, 'operator')
+         WHERE thread_id = ?1 AND from_kind = 'system' AND to_kind = 'operator'
+           AND subject LIKE ?3 AND state IN ('queued', 'delivered')",
+        params![thread, at, PAUSE_SUBJECT_LIKE],
+    )?;
+    t.audit(
+        "mail.resume",
+        thread,
+        None,
+        json!({"released": released, "note": note.is_some()}),
+    )?;
+    crate::store::inbox::emit(t, &format!("thread:{thread}"), "system", "closed", None)?;
+    Ok(Resumed {
+        thread_id: thread.to_owned(),
+        released,
+        note: sent,
+    })
 }
 
 /// Reply on the thread of `original`: one message to every other

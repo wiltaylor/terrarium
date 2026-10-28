@@ -2,15 +2,13 @@ import { describe, expect, it } from "vitest";
 import { fakeUlid, seed } from "../api/mock/data";
 import { createMockApi } from "../api/mock";
 import { buildQueue } from "./home/queue";
-import { annotate, needsAttention } from "./mail/log";
 import { buildTree } from "./wiki/tree";
 
 const world = seed(Date.parse("2026-10-24T12:00:00Z"));
 
 describe("home queue", () => {
-  it("collects versions in review, pages for review, blocked cards, and the mail that needs the operator", async () => {
+  it("collects the open Inbox items first, then versions in review, pages for review, and blocked cards", async () => {
     const api = createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 0 });
-    const mail = annotate((await api.mail.list({ limit: 1000 })).items, { prefixes: { TER: "terrarium" } });
     const q = buildQueue(
       world.projects.map((p) => ({
         project: p.name,
@@ -18,25 +16,33 @@ describe("home queue", () => {
         pages: world.pages.filter((x) => x.project === p.name),
         board: { project: p.name, columns: [], cards: world.cards.filter((c) => c.project === p.name) },
       })),
-      mail.filter(needsAttention),
+      await api.inbox.list(),
     );
-    expect(q.map((i) => i.kind)).toEqual(["version", "page", "card", "card", "mail", "mail", "mail", "mail", "mail"]);
-    expect(q[0]!.kind === "version" && q[0]!.version.name).toBe("v0.1.0");
-    const reasons = Object.fromEntries(q.flatMap((i) => (i.kind === "mail" ? [[i.entry.message.id, i.entry.reasons]] : [])));
-    expect(reasons).toEqual({
-      [fakeUlid("msg", 3)]: ["unread"],
-      [fakeUlid("msg", 11)]: ["held"],
-      [fakeUlid("msg", 12)]: ["unread", "needs_human", "paused"],
-      [fakeUlid("msg", 13)]: ["unread", "blocked"],
-      [fakeUlid("msg", 16)]: ["unread", "quota"],
-    });
-    // The blocked notice names its project by the card prefix; the quota alert has none.
-    expect(q.find((i) => i.kind === "mail" && i.entry.message.id === fakeUlid("msg", 13))!.project).toBe("terrarium");
-    expect(q.find((i) => i.kind === "mail" && i.entry.message.id === fakeUlid("msg", 16))!.project).toBe("");
+    expect(q.map((i) => (i.kind === "inbox" ? `${i.kind}:${i.item.kind}` : i.kind))).toEqual([
+      "inbox:question",
+      "inbox:mail",
+      "inbox:mail",
+      "inbox:notice",
+      "inbox:system",
+      "inbox:mail",
+      "inbox:question",
+      "version",
+      "page",
+      "card",
+      "card",
+    ]);
+    // The urgent question first; then the newest first.
+    expect(q[0]!.kind === "inbox" && q[0]!.item.urgent).toBe(true);
+    const ids = q.flatMap((i) => (i.kind === "inbox" ? [i.item.id] : []));
+    expect(ids).toContain(`mail:${fakeUlid("msg", 3)}`);
+    expect(ids).toContain(`thread:${fakeUlid("th", 7)}`);
+    // The "needs a human" notice is not a mail item: the thread item stands for it.
+    expect(ids).not.toContain(`mail:${fakeUlid("msg", 12)}`);
+    expect(q[4]!.project).toBe("terrarium");
   });
 
-  it("leaves out mail with no reason", () => {
-    expect(buildQueue([], annotate(world.mail.filter((m) => m.state === "read")))).toEqual([]);
+  it("leaves out the done Inbox items", () => {
+    expect(buildQueue([], [{ id: "notice:x", kind: "notice", open: false, urgent: false, project: null, at: "2026-10-24T12:00:00Z" }])).toEqual([]);
   });
 });
 

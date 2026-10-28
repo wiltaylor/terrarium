@@ -98,7 +98,7 @@ describe("createHttpApi", () => {
     await api.wiki.diff("PG-1", 2, 3);
     await api.versions.transition("VER-1", "reject", "tests fail");
     await api.subscriptions.loginInput("LOGIN-1", "abc");
-    await api.inbox.list("webshop");
+    await api.projectInbox.list("webshop");
     await api.targets.action("TGT-1", "snapshot");
     await api.targets.snapshots("vm", { scope: "lab", agent: "terra/w1" });
     await api.targets.deleteSnapshot("vm", "pre up", { force: true });
@@ -173,9 +173,53 @@ describe("createHttpApi, docs/api.md specifics", () => {
 
   it("uses the inbox reply and read routes", async () => {
     const { api, calls } = recorder();
-    await api.inbox.reply("ops", "M1", "ok");
-    await api.inbox.markRead("ops", "M1");
+    await api.projectInbox.reply("ops", "M1", "ok");
+    await api.projectInbox.markRead("ops", "M1");
     expect(calls.map((c) => `${c.method} ${c.path}`)).toEqual(["POST /api/projects/ops/inbox/M1/reply", "POST /api/projects/ops/inbox/M1/read"]);
+  });
+
+  it("uses the operator inbox, notice, release, and resume routes", async () => {
+    const { api, calls } = recorder();
+    await api.inbox.list({ status: "done", kind: "notice", project: "ops" });
+    await api.inbox.list();
+    await api.inbox.counts("ops");
+    await api.inbox.counts();
+    await api.inbox.ackMail("M1", "Thanks.");
+    await api.inbox.ackMail("M2");
+    await api.questions.ack("Q1", "Seen.");
+    await api.questions.ack("Q2");
+    await api.questions.list({ kind: "notice" });
+    await api.mail.release("M3");
+    await api.mail.resume("T1", "Stop and wait for me.");
+    await api.mail.resume("T2");
+    expect(calls.map((c) => `${c.method} ${c.path}`)).toEqual([
+      "GET /api/inbox",
+      "GET /api/inbox",
+      "GET /api/inbox/counts",
+      "GET /api/inbox/counts",
+      "POST /api/inbox/mail/M1/ack",
+      "POST /api/inbox/mail/M2/ack",
+      "POST /api/questions/Q1/ack",
+      "POST /api/questions/Q2/ack",
+      "GET /api/questions",
+      "POST /api/mail/M3/release",
+      "POST /api/mail/threads/T1/resume",
+      "POST /api/mail/threads/T2/resume",
+    ]);
+    expect(calls.map((c) => c.opts?.query ?? c.opts?.body)).toEqual([
+      { status: "done", kind: "notice", project: "ops" },
+      undefined,
+      { project: "ops" },
+      undefined,
+      { reply: "Thanks." },
+      {},
+      { text: "Seen." },
+      {},
+      { kind: "notice" },
+      undefined,
+      { note: "Stop and wait for me." },
+      {},
+    ]);
   });
 
   it("passes the cursor through page methods", async () => {

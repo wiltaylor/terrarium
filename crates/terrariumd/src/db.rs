@@ -1043,6 +1043,45 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE waits RENAME COLUMN kind_v29 TO kind;
     CREATE INDEX waits_open ON waits(state, kind);
     "#,
+    // 30: notices and the Inbox (PLAN §12e, docs/api.md §6.8, §7.4). A
+    // notice is a row of `questions` with `kind = 'notice'`: no options,
+    // and the operator acknowledges it (`acknowledged`). The status
+    // column is made again with the new CHECK (the way of migration 29);
+    // its indexes go first. `released_at` and `released_by` record the
+    // release of a message that the loop guard held. `thread_resumes`
+    // records a resume of a paused thread with no mail: the loop guard
+    // counts only the messages after `after_rowid`. A held message on a
+    // thread that a later operator or project-inbox message reset counts
+    // as released, so it does not come back as an Inbox item.
+    r#"
+    DROP INDEX questions_agent;
+    DROP INDEX questions_status;
+    ALTER TABLE questions ADD COLUMN kind TEXT NOT NULL DEFAULT 'question'
+        CHECK (kind IN ('question', 'notice'));
+    ALTER TABLE questions ADD COLUMN status_v30 TEXT NOT NULL DEFAULT 'open'
+        CHECK (status_v30 IN ('open', 'answered', 'acknowledged', 'retracted'));
+    UPDATE questions SET status_v30 = status;
+    ALTER TABLE questions DROP COLUMN status;
+    ALTER TABLE questions RENAME COLUMN status_v30 TO status;
+    CREATE INDEX questions_agent ON questions(agent, status);
+    CREATE INDEX questions_status ON questions(status, project);
+
+    ALTER TABLE messages ADD COLUMN released_at TEXT;
+    ALTER TABLE messages ADD COLUMN released_by TEXT;
+    UPDATE messages SET released_at = created_at, released_by = 'system'
+     WHERE held = 1 AND EXISTS (
+        SELECT 1 FROM messages r WHERE r.thread_id = messages.thread_id
+           AND r.rowid > messages.rowid
+           AND (r.from_kind IN ('operator', 'project') OR r.to_kind = 'project'));
+
+    CREATE TABLE thread_resumes (
+        thread_id   TEXT NOT NULL,
+        after_rowid INTEGER NOT NULL,           -- the last message rowid at the resume
+        by          TEXT NOT NULL,              -- the actor label
+        at          TEXT NOT NULL
+    );
+    CREATE INDEX thread_resumes_thread ON thread_resumes(thread_id);
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call
@@ -1313,6 +1352,7 @@ mod tests {
             "watches",
             "account_defaults",
             "questions",
+            "thread_resumes",
         ] {
             let n: i64 = conn
                 .query_row(
@@ -1598,6 +1638,69 @@ mod tests {
             conn.execute("UPDATE waits SET kind = 'bogus' WHERE id = 'W1'", [])
                 .is_err()
         );
+    }
+
+    #[test]
+    fn migration_30_keeps_questions_and_releases_old_held_mail() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        for (i, sql) in MIGRATIONS.iter().enumerate().take(29) {
+            conn.execute_batch(sql).unwrap();
+            conn.pragma_update(None, "user_version", i + 1).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO questions (id, agent, project, text, status, answer, thread_id,
+                                    created_at, updated_at)
+               VALUES ('Q1', 'A1', 'p', 'Ship?', 'answered', 'yes', 'T0', 't', 't')",
+            [],
+        )
+        .unwrap();
+        // Thread T1: a held message, then an operator reset. Thread T2: a
+        // held message with no reset.
+        for (id, thread, from_kind, held) in [
+            ("M1", "T1", "agent", 1),
+            ("M2", "T1", "operator", 0),
+            ("M3", "T2", "agent", 1),
+        ] {
+            conn.execute(
+                "INSERT INTO messages (id, thread_id, from_agent, from_kind, to_agent, to_kind,
+                                       body, state, created_at, held)
+                   VALUES (?1, ?2, 'a', ?3, 'b', 'agent', 'x', 'delivered', 't', ?4)",
+                rusqlite::params![id, thread, from_kind, held],
+            )
+            .unwrap();
+        }
+        assert_eq!(migrate(&mut conn).unwrap(), MIGRATIONS.len() - 29);
+        let (kind, status): (String, String) = conn
+            .query_row(
+                "SELECT kind, status FROM questions WHERE id = 'Q1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((kind.as_str(), status.as_str()), ("question", "answered"));
+        conn.execute(
+            "UPDATE questions SET kind = 'notice', status = 'acknowledged' WHERE id = 'Q1'",
+            [],
+        )
+        .unwrap();
+        assert!(
+            conn.execute("UPDATE questions SET status = 'bogus' WHERE id = 'Q1'", [])
+                .is_err()
+        );
+        assert!(
+            conn.execute("UPDATE questions SET kind = 'bogus' WHERE id = 'Q1'", [])
+                .is_err()
+        );
+        let released = |id: &str| -> Option<String> {
+            conn.query_row(
+                "SELECT released_by FROM messages WHERE id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(released("M1").as_deref(), Some("system"));
+        assert_eq!(released("M3"), None);
     }
 
     #[test]

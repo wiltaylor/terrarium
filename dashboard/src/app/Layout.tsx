@@ -6,7 +6,8 @@ import { isMock } from "../api";
 import { QuotaBanner } from "../components/QuotaBanner";
 import { ErrorBanner, useNow } from "../components/ui";
 import { duration } from "../lib/format";
-import { agents, api, attention, auth, events, projects, questions, signOutNow, subscriptions, theme, unread } from "../stores";
+import { agents, api, auth, events, inbox, projects, signOutNow, subscriptions, theme } from "../stores";
+import { badge } from "../features/inbox/model";
 import { GLOBAL_ITEMS, PROJECT_ITEMS } from "./nav";
 import { LoginScreen } from "./LoginScreen";
 
@@ -17,13 +18,9 @@ export function Layout(props: RouteSectionProps) {
   const [health, { refetch }] = createResource(() => api.health().catch(() => null));
 
   onMount(() => {
-    // The attention rule names blocked notices by card prefix: load the projects first.
-    void projects
-      .refresh()
-      .catch(() => undefined)
-      .then(() => attention.refresh());
+    void projects.refresh().catch(() => undefined);
     void agents.refresh();
-    void questions.refresh();
+    void inbox.refresh();
     subscriptions.poll(isMock ? 5000 : 30_000);
     events.start();
     const t = setInterval(refetch, 30_000);
@@ -50,14 +47,7 @@ export function Layout(props: RouteSectionProps) {
     if (m) navigate(`/p/${encodeURIComponent(name)}/${m[1]}`);
   };
 
-  createEffect(() => {
-    const p = projects.selected();
-    if (p) unread.watch(p);
-  });
-
-  const inboxCount = () => unread.inbox(projects.selected());
-  const countText = (c: { n: number; more: boolean } | undefined) => (c ? `${c.n}${c.more ? "+" : ""}` : "");
-
+  const inboxBadge = () => badge(inbox.counts());
   const blockedCount = () => agents.inProject(projects.selected()).filter((a) => a.status === "blocked" || a.status === "error").length;
   const projectHref = (path: string) => `/p/${encodeURIComponent(projects.selected() ?? "")}/${path}`;
 
@@ -98,11 +88,6 @@ export function Layout(props: RouteSectionProps) {
               {(item) => (
                 <A href={projectHref(item.path)} activeClass="active">
                   <span>{item.label}</span>
-                  <Show when={item.path === "inbox" && (inboxCount()?.n ?? 0) > 0}>
-                    <span class="nav-count info" title="Unread in the project inbox">
-                      {countText(inboxCount())}
-                    </span>
-                  </Show>
                 </A>
               )}
             </For>
@@ -120,18 +105,12 @@ export function Layout(props: RouteSectionProps) {
                     {blockedCount()}
                   </span>
                 </Show>
-                <Show when={item.href === "/questions" && questions.counts().open > 0}>
-                  <span
-                    class={`nav-count${questions.counts().urgent ? "" : " info"}`}
-                    title={`Open questions from the leaders${questions.counts().urgent ? `, ${questions.counts().urgent} urgent` : ""}`}
-                  >
-                    {questions.counts().open}
-                  </span>
-                </Show>
-                <Show when={item.href === "/mail" && attention.count() > 0}>
-                  <span class="nav-count info" title="Mail that needs you: unread mail to you, held mail, paused threads">
-                    {attention.count()}
-                  </span>
+                <Show when={item.href === "/inbox" && inboxBadge()}>
+                  {(b) => (
+                    <span class={b().cls} title={b().title}>
+                      {b().n}
+                    </span>
+                  )}
                 </Show>
               </A>
             )}

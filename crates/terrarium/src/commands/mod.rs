@@ -83,6 +83,7 @@ pub async fn run(ctx: &Ctx, cmd: &Command) -> anyhow::Result<()> {
         Command::Run { command, args } => waits::run(ctx, command.as_ref(), args).await,
         Command::Wait { command } => waits::wait(ctx, command).await,
         Command::Question { command } => questions::question(ctx, command).await,
+        Command::Notify(args) => questions::notify(ctx, args).await,
         Command::Watch { command, args } => waits::watch(ctx, command.as_ref(), args).await,
         Command::Shell { target } => remote::shell(ctx, target).await,
         Command::Cp { src, dst } => remote::cp(ctx, src, dst).await,
@@ -116,6 +117,7 @@ async fn admin(ctx: &Ctx, cmd: &AdminCmd) -> anyhow::Result<()> {
         AdminCmd::Template { command } => templates::template(ctx, command).await,
         AdminCmd::Config { command } => config::config(ctx, command).await,
         AdminCmd::Question { command } => questions::admin(ctx, command).await,
+        AdminCmd::Inbox { command } => questions::inbox(ctx, command).await,
         AdminCmd::Audit(args) => system::audit(ctx, args).await,
         AdminCmd::Password {
             command: crate::cli::PasswordCmd::Set { stdin },

@@ -1,4 +1,9 @@
 //! `/api/mail/...` and the project inboxes, `/api/projects/{name}/inbox/...`.
+//!
+//! The operator acts on the loop guard here: `POST /api/mail/{id}/release`
+//! releases one held message, and `POST /api/mail/threads/{thread}/resume`
+//! ends the pause of a thread (docs/api.md §7.4). The Inbox shows both as
+//! system items.
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -23,6 +28,8 @@ pub fn routes() -> Router<Shared> {
         .route("/mail/{id}", get(show))
         .route("/mail/{id}/read", post(read))
         .route("/mail/{id}/reply", post(reply))
+        .route("/mail/{id}/release", post(release))
+        .route("/mail/threads/{thread}/resume", post(resume))
         .route("/projects/{name}/inbox", get(inbox_list).post(inbox_send))
         .route("/projects/{name}/inbox/{id}", get(inbox_show))
         .route("/projects/{name}/inbox/{id}/read", post(inbox_read))
@@ -35,6 +42,11 @@ struct ListQuery {
     from: Option<String>,
     thread: Option<String>,
     state: Option<String>,
+    project: Option<String>,
+    since: Option<String>,
+    until: Option<String>,
+    /// Free text over the subject and the body.
+    q: Option<String>,
 }
 
 async fn list(
@@ -53,12 +65,33 @@ async fn list(
                     .map(|s| mail::resolve_known(c, s, context).map(|a| a.key()))
                     .transpose()
             };
+            let time = |s: &Option<String>, name: &str| -> ApiResult<Option<String>> {
+                s.as_deref()
+                    .filter(|s| !s.trim().is_empty())
+                    .map(|s| {
+                        chrono::DateTime::parse_from_rfc3339(s.trim())
+                            .map(|t| {
+                                t.with_timezone(&chrono::Utc)
+                                    .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+                            })
+                            .map_err(|_| {
+                                ApiError::invalid(format!(
+                                    "`{name}` is not an RFC 3339 time: `{s}`"
+                                ))
+                            })
+                    })
+                    .transpose()
+            };
             let mut f = MailFilter {
                 to: key(&q.to)?,
                 from: key(&q.from)?,
                 thread: q.thread.clone(),
                 state: q.state.clone(),
                 involving: None,
+                project: q.project.clone().filter(|p| !p.trim().is_empty()),
+                since: time(&q.since, "since")?,
+                until: time(&q.until, "until")?,
+                text: q.q.clone(),
             };
             if let Actor::Agent(a) = &actor {
                 match f.to.as_deref().and_then(|t| t.strip_prefix("project:")) {
@@ -267,6 +300,55 @@ async fn reply(
         })
         .await?;
     Ok((StatusCode::CREATED, Json(out)))
+}
+
+/// `POST /api/mail/{id}/release`: the operator releases a message that
+/// the loop guard held. Its recipient gets the pointer now.
+async fn release(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Message>> {
+    policy::operator_only(&actor, "releasing held mail")?;
+    Ok(Json(
+        state
+            .db
+            .write(actor.label(), move |t| mail::release(t, &id))
+            .await?,
+    ))
+}
+
+/// The body of `POST /api/mail/threads/{thread}/resume`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResumeBody {
+    /// A note from the operator to the participants of the thread.
+    #[serde(default)]
+    note: Option<String>,
+}
+
+/// `POST /api/mail/threads/{thread}/resume`: the operator ends the pause
+/// of a thread and releases its held messages. The body is optional.
+async fn resume(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(thread): Path<String>,
+    body: axum::body::Bytes,
+) -> ApiResult<Json<mail::Resumed>> {
+    policy::operator_only(&actor, "resuming a paused thread")?;
+    let b: ResumeBody = if body.iter().all(u8::is_ascii_whitespace) {
+        ResumeBody::default()
+    } else {
+        serde_json::from_slice(&body).map_err(|e| ApiError::bad_request(e.to_string()))?
+    };
+    Ok(Json(
+        state
+            .db
+            .write(actor.label(), move |t| {
+                mail::resume(t, &thread, b.note.as_deref())
+            })
+            .await?,
+    ))
 }
 
 #[derive(Debug, Default, Deserialize)]

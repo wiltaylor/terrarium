@@ -1,24 +1,17 @@
-// Mail pieces that the mail log and the project inbox share.
+// Mail pieces that the mail log and the Inbox share. A subject and a body
+// are the sender's words: they go into the page as text nodes only.
 
 import { createSignal, For, Show } from "solid-js";
 import { ErrorBanner, Modal } from "../../components/ui";
 import type { Message } from "../../api/types";
 import { ago } from "../../lib/format";
 import { agents, api, projects } from "../../stores";
-import { isUnread, REASON_LABELS, type Notice, type Reason } from "./log";
 
-const NOTICE_LABELS: Record<Notice, string> = { blocked: "blocked card", quota: "quota", needs_human: "needs a human", login: "login expired", notice: "system" };
-
-/** The state of a message, and what the log knows about it, as chips. */
-export function StateChips(props: { message: Message; held?: boolean; notice?: Notice | null; reasons?: Reason[] }) {
+/** The delivery state of a message, as chips. The state is the recipient's; the log keeps no unread state for the operator. */
+export function StateChips(props: { message: Message }) {
   const m = () => props.message;
   return (
     <span class="chips">
-      <Show when={isUnread(m()) && !props.reasons?.includes("unread")}>
-        <span class="chip info" title={`${m().to_name} has not read it`}>
-          unread
-        </span>
-      </Show>
       <span class={`chip ${m().state === "replied" ? "ok" : ""}`} title={m().delivered_at ? `delivered ${m().delivered_at}` : undefined}>
         {m().state}
       </span>
@@ -29,29 +22,23 @@ export function StateChips(props: { message: Message; held?: boolean; notice?: N
           </span>
         )}
       </Show>
-      <Show when={props.notice && props.notice !== "notice"}>
-        <span class="chip warn">{NOTICE_LABELS[props.notice!]}</span>
-      </Show>
-      <Show when={props.held}>
-        <span class="chip bad" title="The loop guard held it: delivered with no pointer to the agent">
-          held
-        </span>
+      <Show when={m().released_at}>
+        {(at) => (
+          <span class="chip" title={`The loop guard held it. ${m().released_by ?? "The operator"} released it ${at()}.`}>
+            released
+          </span>
+        )}
       </Show>
       <Show when={m().thread_paused}>
-        <span class="chip warn" title="The loop guard paused the thread. A reply from you resumes it.">
+        <span class="chip warn" title="The loop guard paused the thread. Resume it in the Inbox.">
           thread paused
-        </span>
-      </Show>
-      <Show when={props.reasons?.includes("unread")}>
-        <span class="chip bad" title="Mail to you that you have not read">
-          {REASON_LABELS.unread}
         </span>
       </Show>
     </span>
   );
 }
 
-export function MessageView(props: { message: Message; held?: boolean; notice?: Notice | null }) {
+export function MessageView(props: { message: Message }) {
   return (
     <div class="message">
       <div class="spread small">
@@ -66,7 +53,7 @@ export function MessageView(props: { message: Message; held?: boolean; notice?: 
         <Show when={props.message.subject}>
           <span class="muted">{props.message.subject}</span>
         </Show>
-        <StateChips message={props.message} held={props.held} notice={props.notice} />
+        <StateChips message={props.message} />
       </div>
       <pre>{props.message.body}</pre>
     </div>
