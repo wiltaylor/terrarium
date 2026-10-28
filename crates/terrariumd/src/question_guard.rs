@@ -90,31 +90,62 @@ const ASKING: &[&str] = &[
     "which would you prefer",
     "waiting for your",
     "awaiting your",
+    "please tell me",
+    "tell me your",
+    "tell me which",
+    "your preference",
+    "which do you prefer",
+    "what do you prefer",
+    "let me know your",
+    "i can ask you",
+    "once you decide",
+    "once you tell me",
+    "when you tell me",
+    "after you confirm",
 ];
 
-/// The question in `text`, the last assistant text of a turn, when its
-/// last paragraph asks the user something: it ends with `?`, or it holds a
-/// phrase of [`ASKING`]. The check is conservative: a text that ends in a
-/// code block or a quote is not a question, and neither is a question
-/// earlier in the text. The result is the last paragraph, trimmed.
+/// How many paragraphs at the end of the text the guard reads: a question
+/// is often followed by a short closing line ("Tell me, and I will start").
+const TAIL_PARAGRAPHS: usize = 3;
+
+/// The question in `text`, the last assistant text of a turn, when one of
+/// its last [`TAIL_PARAGRAPHS`] paragraphs asks the user something: it ends
+/// with `?` (after Markdown emphasis), or it holds a phrase of [`ASKING`].
+/// The check stays conservative: a text that ends in a code block is not a
+/// question, and a quote, a table row, or a code line never counts. The
+/// result is the paragraph that asks, trimmed.
 pub fn plain_text_question(text: &str) -> Option<String> {
     let text = text.trim();
     if text.is_empty() || text.ends_with("```") || text.ends_with("~~~") {
         return None;
     }
-    let last = text
+    let paragraphs: Vec<&str> = text
         .split("\n\n")
         .map(str::trim)
         .filter(|p| !p.is_empty())
-        .last()?;
-    let last_line = last.lines().last().unwrap_or_default().trim();
-    if last_line.starts_with('>') || last_line.starts_with('|') {
-        return None;
+        .collect();
+    let tail = &paragraphs[paragraphs.len().saturating_sub(TAIL_PARAGRAPHS)..];
+    tail.iter()
+        .rev()
+        .find_map(|p| asks(p).then(|| (*p).to_owned()))
+}
+
+/// `true` when the paragraph `p` asks the user something.
+fn asks(p: &str) -> bool {
+    let lines: Vec<&str> = p
+        .lines()
+        .map(str::trim)
+        .filter(|l| !(l.starts_with('>') || l.starts_with('|') || l.starts_with("    ")))
+        .collect();
+    if lines.is_empty() {
+        return false;
     }
-    let bare = last.trim_end_matches(['*', '_', '`', ')', '"', '\'', ' ']);
-    let lower = last.to_lowercase();
-    let asks = bare.ends_with('?') || ASKING.iter().any(|p| lower.contains(p));
-    asks.then(|| last.to_owned())
+    let ends_with_question = lines.iter().any(|l| {
+        l.trim_end_matches(['*', '_', '`', ')', '"', '\'', ' '])
+            .ends_with('?')
+    });
+    let lower = lines.join(" ").to_lowercase();
+    ends_with_question || ASKING.iter().any(|ph| lower.contains(ph))
 }
 
 /// The last assistant text of the newest turn in `blocks`: the last
@@ -423,6 +454,13 @@ mod tests {
             "I need a decision.\n\nPlease let me know which branch to use.",
             "Would you like me to also update the docs?",
             "Waiting for your go-ahead before I push.",
+            // Live, Copilot on 2026-10-28: the question in bold, then a
+            // closing paragraph.
+            "I don't have a specialized tool to halt and wait for user input mid-task. \
+             However, you're here directly in this conversation, so I can ask you now:\n\n\
+             **Should the new config file be YAML or TOML?**\n\n\
+             Please tell me your preference and the reasoning if there's context I should \
+             know, and I'll proceed with the work.",
         ] {
             assert!(plain_text_question(t).is_some(), "{t}");
         }

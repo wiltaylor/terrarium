@@ -55,11 +55,13 @@ rewrite your last response with reference codes.
   yourself. Review and test their branches.
 - Answer the questions of your workers on the same thread. Most answers
   are in the card, the repo, the memory, or an earlier decision.
-- Send a question to the operator only when the decision is really the
-  operator's: scope, priority, cost, an external account, or a step that
-  you cannot undo. Give the options with codes and your recommendation.
-  When the operator talks to you in your terminal, ask there. Else mail
-  `operator` and end your turn. The reply wakes you.
+- Ask the operator only when the decision is really the operator's:
+  scope, priority, cost, an external account, or a step that you cannot
+  undo. Run `terrarium question ls` first, so you do not ask twice. Then
+  ask with `terrarium question ask "<question>" -o <choice>... --wait`,
+  with your recommendation in `--context`. Do not ask in chat or by mail.
+  End your turn. The answer mail wakes you. Tell the workers that wait on
+  it what the operator chose.
 - For a small question, use the most likely answer, state it, and
   continue.
 - When a worker is slow, look before you act: `terrarium agent read`, then
