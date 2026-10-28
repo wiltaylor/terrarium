@@ -2269,6 +2269,12 @@ Wil, 2026-10-28.
   can use a secret of its project or a global secret. A global target can
   use a global secret only. The daemon refuses any other kind or scope when
   it saves the target, and it does not wait for the first connection.
+  The same rule holds for the `login` of a `vnc` or `rdp` target. One
+  exception: the daemon does not refuse a `targets/<name>.toml` file for
+  its credential, so an upgrade does not drop an old target. It loads the
+  file, and the reload and the target view show a warning
+  (docs/api.md §17.2). A delete of a secret that a target uses is `409`,
+  unless `?force=true`.
 - The daemon uses the key outside the sandbox. A target login needs no
   grant: an agent that can use the target can use its login, and it never
   sees the key.
@@ -2283,7 +2289,10 @@ Wil, 2026-10-28.
   name and its fingerprint.
 - `terrarium target test <name>` connects once and reports one of these
   results: the key is refused, the host key is unknown, or the login is
-  good.
+  good. It also reports a changed host key, a host that it cannot reach,
+  and other errors. The test keeps the host key policy of each exec:
+  trust on first use in `<state>/ssh/known_hosts`. A first test records
+  the host key, and the report says so (docs/api.md §17.2).
 
 ### 16b.7 Migration
 

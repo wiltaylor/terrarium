@@ -20,6 +20,7 @@ mod repos;
 mod schedules;
 mod screen;
 mod secrets;
+mod secrets_generate;
 pub mod session;
 mod skills;
 mod streams;
@@ -232,6 +233,7 @@ fn routes(state: Shared, serve_artifacts: bool, host_connect: bool) -> Router {
         .merge(projects::routes())
         .merge(repos::routes())
         .merge(secrets::routes())
+        .merge(secrets_generate::routes())
         .merge(agents::routes())
         .merge(transcripts::routes())
         .merge(screen::routes())

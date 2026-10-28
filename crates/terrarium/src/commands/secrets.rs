@@ -303,6 +303,7 @@ fn set_body(ctx: &Ctx, a: &SecretSetArgs) -> anyhow::Result<Value> {
 
 pub async fn secret(ctx: &Ctx, cmd: &SecretCmd) -> anyhow::Result<()> {
     match cmd {
+        SecretCmd::Generate(a) => super::ssh_keys::generate(ctx, a).await,
         SecretCmd::List => {
             let v = ctx
                 .api

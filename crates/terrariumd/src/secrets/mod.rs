@@ -360,12 +360,16 @@ fn row_info(r: &rusqlite::Row<'_>) -> rusqlite::Result<SecretInfo> {
     let kind: String = r.get(3)?;
     let plain: String = r.get(4)?;
     let names: String = r.get(5)?;
+    let kind = Kind::parse(&kind).unwrap_or(Kind::Generic);
+    let mut fields = serde_json::from_str(&plain).unwrap_or_default();
+    // An ssh_key stored before the `fingerprint` field (PLAN §16b.6a).
+    ssh::fill_fingerprint(kind, &mut fields);
     Ok(SecretInfo {
         id: r.get(0)?,
         scope: r.get(1)?,
         name: r.get(2)?,
-        kind: Kind::parse(&kind).unwrap_or(Kind::Generic),
-        fields: serde_json::from_str(&plain).unwrap_or_default(),
+        kind,
+        fields,
         secret_fields: serde_json::from_str(&names).unwrap_or_default(),
         created_at: r.get(6)?,
         updated_at: r.get(7)?,

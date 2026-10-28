@@ -15,6 +15,7 @@ use terrarium_core::config::{TargetDef, TargetKind};
 
 use crate::db::{Tx, now};
 use crate::error::{ApiError, ApiResult, Code};
+use crate::secrets::{self, GLOBAL, Kind, SecretInfo};
 use crate::store::projects::{SOURCE_API, SOURCE_FILE};
 use crate::store::sync::Changes;
 use crate::store::{check_name, json_col};
@@ -392,6 +393,7 @@ pub fn create(t: &mut Tx<'_>, def: &TargetDef) -> ApiResult<TargetRow> {
     if let Some(p) = &def.project {
         crate::store::projects::get(t, p)?;
     }
+    check_credential(t, def, None)?;
     if find(t, &def.name)?.is_some() {
         return Err(ApiError::conflict(format!("target `{}` exists", def.name)));
     }
@@ -464,6 +466,7 @@ pub fn update(t: &mut Tx<'_>, name: &str, patch: &Value) -> ApiResult<TargetRow>
     if let Some(p) = &def.project {
         crate::store::projects::get(t, p)?;
     }
+    check_credential(t, &def, Some(&current.def))?;
     t.execute(
         "UPDATE targets SET project = ?2, kind = ?3, def = ?4, updated_at = ?5 WHERE name = ?1",
         params![
@@ -549,6 +552,13 @@ pub fn sync_files(t: &mut Tx<'_>, defs: &[TargetDef]) -> ApiResult<(Changes, Vec
             continue;
         }
         kept.push(def.name.clone());
+        // A file is not refused for its credential: a missing secret must
+        // not drop a declared target at a start. The reload reports it as
+        // a warning, and the target view shows it.
+        if let Some(problem) = credential_problem(t, def)? {
+            tracing::warn!(target = %def.name, "targets/{}.toml: {problem}", def.name);
+            errors.push(format!("targets/{}.toml: warning: {problem}", def.name));
+        }
         match find(t, &def.name)? {
             None => {
                 insert(t, def, SOURCE_FILE)?;
@@ -590,6 +600,191 @@ pub fn sync_files(t: &mut Tx<'_>, defs: &[TargetDef]) -> ApiResult<(Changes, Vec
         )?;
     }
     Ok((changes, errors))
+}
+
+// ---------------------------------------------------------- credentials
+
+/// The secret kind that the `credential` of a target kind names
+/// (PLAN §16b.6a): an `ssh_key` for `ssh`, a `login` for `vnc` and `rdp`.
+/// `None`: the daemon has no rule for the credential of this kind.
+pub fn credential_kind(k: TargetKind) -> Option<Kind> {
+    match k {
+        TargetKind::Ssh => Some(Kind::SshKey),
+        TargetKind::Vnc | TargetKind::Rdp => Some(Kind::Login),
+        _ => None,
+    }
+}
+
+/// The secret that the `credential` of `def` names, as the executor finds
+/// it: for a project target, the project's secret first, then the global
+/// one; for a global target, the global one only.
+pub fn credential_secret(conn: &Connection, def: &TargetDef) -> ApiResult<Option<SecretInfo>> {
+    let Some(name) = &def.credential else {
+        return Ok(None);
+    };
+    if let Some(p) = def.project.as_deref().filter(|p| *p != GLOBAL)
+        && let Some(s) = secrets::get(conn, p, name)?
+    {
+        return Ok(Some(s));
+    }
+    secrets::get(conn, GLOBAL, name)
+}
+
+/// Why the `credential` of `def` does not work, or `None` when it works
+/// (or when the kind has no rule).
+pub fn credential_problem(conn: &Connection, def: &TargetDef) -> ApiResult<Option<String>> {
+    let (Some(name), Some(want)) = (&def.credential, credential_kind(def.kind)) else {
+        return Ok(None);
+    };
+    let k = kind_str(def.kind);
+    let Some(s) = credential_secret(conn, def)? else {
+        let wher = match &def.project {
+            Some(p) => format!("project `{p}` or global"),
+            None => "global".to_owned(),
+        };
+        let mut m = format!("credential `{name}`: there is no secret `{name}` ({wher})");
+        if def.project.is_none() {
+            let others: Vec<String> = secrets::list(conn, None)?
+                .into_iter()
+                .filter(|s| s.name == *name && s.scope != GLOBAL)
+                .map(|s| format!("`{}`", s.scope))
+                .collect();
+            if !others.is_empty() {
+                m.push_str(&format!(
+                    "; a global target can use a global secret only, and `{name}` is a secret \
+                     of project {}",
+                    others.join(", ")
+                ));
+            }
+        }
+        if want == Kind::SshKey {
+            m.push_str(&format!(
+                "; {k} targets need kind ssh_key: store one with `terrarium secret set {name} \
+                 --kind ssh_key`, or make one with `terrarium secret generate {name}`"
+            ));
+        } else {
+            m.push_str(&format!(
+                "; {k} targets need kind login: store one with `terrarium secret set {name} \
+                 --kind login`"
+            ));
+        }
+        return Ok(Some(m));
+    };
+    if s.kind != want {
+        return Ok(Some(format!(
+            "credential `{name}`: secret `{}/{name}` is of kind {}; {k} targets need kind {want}",
+            s.scope, s.kind
+        )));
+    }
+    Ok(None)
+}
+
+/// The save-time check of the `credential` of a target (PLAN §16b.6a):
+/// `422 invalid` when it does not name a usable secret. `before` is the
+/// stored definition: a change that keeps the kind, the project, and the
+/// credential passes, so an old target with a bad credential can still
+/// take other changes (its view shows the warning).
+pub fn check_credential(
+    conn: &Connection,
+    def: &TargetDef,
+    before: Option<&TargetDef>,
+) -> ApiResult<()> {
+    if before.is_some_and(|b| {
+        b.kind == def.kind && b.project == def.project && b.credential == def.credential
+    }) {
+        return Ok(());
+    }
+    match credential_problem(conn, def)? {
+        Some(m) => Err(ApiError::invalid(m)),
+        None => Ok(()),
+    }
+}
+
+/// The login of a target, as the target view shows it: the secret that
+/// `credential` names, and the fingerprint of an SSH key. Never a value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CredentialView {
+    /// The secret name (the `credential` field).
+    pub name: String,
+    /// `global` or the project of the secret; `null` when it is missing.
+    pub scope: Option<String>,
+    /// The kind of the secret; `null` when it is missing.
+    pub kind: Option<Kind>,
+    /// An `ssh_key`: the SHA-256 fingerprint of its public key
+    /// (`SHA256:...`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
+    /// Why the credential does not work, when it does not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
+}
+
+/// The [`CredentialView`] of a target, or `None` when it has no
+/// `credential`.
+pub fn credential_view(conn: &Connection, def: &TargetDef) -> ApiResult<Option<CredentialView>> {
+    let Some(name) = &def.credential else {
+        return Ok(None);
+    };
+    let s = credential_secret(conn, def)?;
+    let fingerprint = s
+        .as_ref()
+        .filter(|s| s.kind == Kind::SshKey)
+        .and_then(secrets::ssh::fingerprint_of);
+    Ok(Some(CredentialView {
+        name: name.clone(),
+        scope: s.as_ref().map(|s| s.scope.clone()),
+        kind: s.as_ref().map(|s| s.kind),
+        fingerprint,
+        warning: credential_problem(conn, def)?,
+    }))
+}
+
+/// The targets that use the secret `scope/name` as their `credential`:
+/// for a project secret, the targets of that project; for a global
+/// secret, the global targets and the project targets whose project has
+/// no secret of that name.
+pub fn targets_using_secret(conn: &Connection, scope: &str, name: &str) -> ApiResult<Vec<String>> {
+    let mut out = Vec::new();
+    for r in list(conn)? {
+        if r.def.credential.as_deref() != Some(name) {
+            continue;
+        }
+        let uses = match r.def.project.as_deref() {
+            None => scope == GLOBAL,
+            Some(p) if scope == GLOBAL => secrets::get(conn, p, name)?.is_none(),
+            Some(p) => p == scope,
+        };
+        if uses {
+            out.push(r.def.name);
+        }
+    }
+    Ok(out)
+}
+
+/// The hook of a secret delete (PLAN §16b.6a): `409 conflict` that names
+/// the targets which use the secret, unless `force`. With `force`, the
+/// answer is the targets that keep a dangling `credential` (their view
+/// shows a warning).
+pub fn guard_secret_delete(
+    conn: &Connection,
+    scope: &str,
+    name: &str,
+    force: bool,
+) -> ApiResult<Vec<String>> {
+    let users = targets_using_secret(conn, scope, name)?;
+    if users.is_empty() || force {
+        return Ok(users);
+    }
+    Err(ApiError::conflict(format!(
+        "secret `{scope}/{name}` is the credential of target {}; change the target first, or \
+         delete with `?force=true` (the target then keeps a name with no secret)",
+        users
+            .iter()
+            .map(|u| format!("`{u}`"))
+            .collect::<Vec<_>>()
+            .join(", "),
+    ))
+    .with_details(json!({"targets": users})))
 }
 
 #[cfg(test)]

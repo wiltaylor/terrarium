@@ -314,6 +314,9 @@ pub fn split(kind: Kind, input: &SecretInput, strict: bool) -> ApiResult<Split> 
             };
             match super::ssh::public_key(&key, passphrase.as_deref().map(String::as_str)) {
                 Ok(p) => {
+                    if let Some(f) = super::ssh::fingerprint(&p) {
+                        plain.insert("fingerprint".into(), f.into());
+                    }
                     plain.insert("public_key".into(), p.into());
                 }
                 Err(e) if strict || passphrase.is_some() => return Err(e),

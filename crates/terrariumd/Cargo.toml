@@ -51,6 +51,9 @@ ed25519-dalek.workspace = true
 p256.workspace = true
 # The ssh-agent broker (`ssh_agent`, PLAN §16b.4): signatures.
 signature.workspace = true
+# `secret generate` (PLAN §16b.6a): the OS random source (`SysRng`) for
+# new SSH key pairs.
+rand.workspace = true
 # The lock of the password file (`flock`) and the owner check (`geteuid`).
 nix.workspace = true
 # A unique temp file for the password file write.

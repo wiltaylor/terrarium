@@ -943,12 +943,18 @@ pub fn check_against(conn: &Connection, f: &Fleet, prompts: &Path) -> ApiResult<
         }
     }
     for t in f.all_targets() {
+        let at = match &t.project {
+            Some(p) => format!("projects.{p}.targets.{}", t.name),
+            None => format!("targets.{}", t.name),
+        };
         if let Err(e) = targets::validate(t) {
-            let at = match &t.project {
-                Some(p) => format!("projects.{p}.targets.{}", t.name),
-                None => format!("targets.{}", t.name),
-            };
             issues.push(Issue::error(at, e.message));
+        } else {
+            // The credential of a new or changed target (PLAN §16b.6a).
+            let before = targets::find(conn, &t.name)?.map(|r| r.def);
+            if let Err(e) = targets::check_credential(conn, t, before.as_ref()) {
+                issues.push(Issue::error(at, e.message));
+            }
         }
     }
     let now = chrono::Utc::now();
@@ -1566,6 +1572,7 @@ fn apply_target(t: &mut Tx<'_>, def: &TargetDef) -> ApiResult<()> {
             if let Some(p) = &def.project {
                 projects::get(t, p)?;
             }
+            targets::check_credential(t, def, Some(&r.def))?;
             t.execute(
                 "UPDATE targets SET project = ?2, kind = ?3, def = ?4, updated_at = ?5 WHERE name = ?1",
                 params![

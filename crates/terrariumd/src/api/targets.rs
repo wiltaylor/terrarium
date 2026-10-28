@@ -44,6 +44,7 @@ pub fn routes() -> Router<Shared> {
     Router::new()
         .route("/targets", get(list).post(create))
         .route("/targets/{name}", get(show).patch(update).delete(remove))
+        .route("/targets/{name}/test", post(test))
         .route("/targets/{name}/up", post(up))
         .route("/targets/{name}/down", post(down))
         .route("/targets/{name}/snapshot", post(snapshot))
@@ -107,6 +108,41 @@ pub struct TargetView {
     /// target), `instances` (one for each holder of a `lab_from_workspace`
     /// target). `{}` when nothing runs.
     pub runtime: targets::Runtime,
+    /// The secret that `credential` names: its scope, kind, the
+    /// fingerprint of an SSH key, and a `warning` when it does not work
+    /// (PLAN §16b.6a). Absent when the target has no `credential`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credential_info: Option<targets::CredentialView>,
+}
+
+/// Add the `credential_info` of each view, in one read.
+pub async fn with_credentials(
+    state: &Shared,
+    mut views: Vec<TargetView>,
+) -> ApiResult<Vec<TargetView>> {
+    if views.iter().all(|v| v.def.credential.is_none()) {
+        return Ok(views);
+    }
+    let defs: Vec<TargetDef> = views.iter().map(|v| v.def.clone()).collect();
+    let infos = state
+        .db
+        .read(move |c| {
+            defs.iter()
+                .map(|d| targets::credential_view(c, d))
+                .collect::<ApiResult<Vec<_>>>()
+        })
+        .await?;
+    for (v, i) in views.iter_mut().zip(infos) {
+        v.credential_info = i;
+    }
+    Ok(views)
+}
+
+/// [`with_credentials`] for one view.
+async fn with_credential(state: &Shared, v: TargetView) -> ApiResult<TargetView> {
+    let mut out = with_credentials(state, vec![v]).await?;
+    out.pop()
+        .ok_or_else(|| ApiError::internal("the target view is gone"))
 }
 
 fn visible(actor: &Actor, def: &TargetDef) -> bool {
@@ -169,6 +205,7 @@ pub fn view(state: &Shared, actor: &Actor, r: TargetRow, mine: &[LeaseRow]) -> T
         access,
         lease: if access == Some("lease") { lease } else { None },
         runtime: r.runtime,
+        credential_info: None,
     }
 }
 
@@ -181,11 +218,12 @@ pub async fn for_project(
 ) -> ApiResult<Vec<TargetView>> {
     let rows = state.db.read(targets::list).await?;
     let mine = my_leases(state, actor).await?;
-    Ok(rows
+    let views = rows
         .into_iter()
         .filter(|r| r.def.project.as_deref().is_none_or(|p| p == project))
         .map(|r| view(state, actor, r, &mine))
-        .collect())
+        .collect();
+    with_credentials(state, views).await
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -206,18 +244,18 @@ async fn list(
 ) -> ApiResult<Json<Vec<TargetView>>> {
     let rows = state.db.read(targets::list).await?;
     let mine = my_leases(&state, &actor).await?;
-    Ok(Json(
-        rows.into_iter()
-            .filter(|r| visible(&actor, &r.def))
-            .filter(|r| {
-                q.project
-                    .as_deref()
-                    .is_none_or(|p| r.def.project.as_deref().is_none_or(|x| x == p))
-            })
-            .map(|r| view(&state, &actor, r, &mine))
-            .filter(|v| !q.usable.unwrap_or(false) || v.usable)
-            .collect(),
-    ))
+    let views = rows
+        .into_iter()
+        .filter(|r| visible(&actor, &r.def))
+        .filter(|r| {
+            q.project
+                .as_deref()
+                .is_none_or(|p| r.def.project.as_deref().is_none_or(|x| x == p))
+        })
+        .map(|r| view(&state, &actor, r, &mine))
+        .filter(|v| !q.usable.unwrap_or(false) || v.usable)
+        .collect();
+    Ok(Json(with_credentials(&state, views).await?))
 }
 
 async fn load(state: &Shared, actor: &Actor, name: String) -> ApiResult<TargetRow> {
@@ -236,7 +274,9 @@ async fn show(
 ) -> ApiResult<Json<TargetView>> {
     let r = load(&state, &actor, name).await?;
     let mine = my_leases(&state, &actor).await?;
-    Ok(Json(view(&state, &actor, r, &mine)))
+    Ok(Json(
+        with_credential(&state, view(&state, &actor, r, &mine)).await?,
+    ))
 }
 
 /// The name of a project target made through the API: `<project>-<name>`,
@@ -287,7 +327,8 @@ async fn create(
             Ok(r)
         })
         .await?;
-    Ok((StatusCode::CREATED, Json(view(&state, &actor, r, &[]))).into_response())
+    let v = with_credential(&state, view(&state, &actor, r, &[])).await?;
+    Ok((StatusCode::CREATED, Json(v)).into_response())
 }
 
 /// `PATCH /api/targets/{name}`: a JSON merge patch of the definition.
@@ -312,7 +353,9 @@ async fn update(
             Ok(r)
         })
         .await?;
-    Ok(Json(view(&state, &actor, r, &[])))
+    Ok(Json(
+        with_credential(&state, view(&state, &actor, r, &[])).await?,
+    ))
 }
 
 async fn remove(
@@ -349,6 +392,28 @@ async fn verb_target(state: &Shared, actor: &Actor, name: String) -> ApiResult<T
         })?;
     }
     Ok(r)
+}
+
+/// `POST /api/targets/{name}/test`: one login to an `ssh` target with its
+/// key (PLAN §16b.6a, `crate::target_test`). The rights of a lifecycle
+/// verb: an actor that may use the target, or one that may define it.
+async fn test(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(name): Path<String>,
+) -> ApiResult<Json<crate::target_test::TestReport>> {
+    let r = verb_target(&state, &actor, name).await?;
+    let report = crate::target_test::test(&state, &r.def).await?;
+    let (target, project) = (r.def.name.clone(), r.def.project.clone());
+    let detail = json!({"result": report.result, "host_key": report.host_key,
+                        "exit_code": report.exit_code});
+    state
+        .db
+        .write(actor.label(), move |t| {
+            t.audit("target.test", &target, project.as_deref(), detail)
+        })
+        .await?;
+    Ok(Json(report))
 }
 
 /// `GET /api/targets/{name}/snapshots`: the snapshots the host reports,

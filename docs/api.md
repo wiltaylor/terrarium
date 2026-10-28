@@ -882,7 +882,8 @@ come later (PLAN §16b.3).
 | `POST /api/secrets` | `{"scope"?: "global", "name", "kind", "fields", "secret_fields"?}` | `201` secret; `409` when the name exists | below |
 | `GET /api/secrets/{scope}/{name}` | | `200` secret | below |
 | `PUT /api/secrets/{scope}/{name}` | `{"kind", "fields", "secret_fields"?}` | `201` new, `200` replaced | below |
-| `DELETE /api/secrets/{scope}/{name}` | | `204` | below |
+| `DELETE /api/secrets/{scope}/{name}?force=` | | `204`; `409` when a target uses it | below |
+| `POST /api/secrets/{scope}/{name}/generate` | `{"type"?: "ed25519" \| "rsa", "bits"?: 3072 \| 4096, "comment"?, "replace"?: false}` | `201` secret with `public_key` and `fingerprint`; `200` replaced | below |
 | `POST /api/secrets/{scope}/{name}/reveal` | `{"password"}` | `200` secret with `values` | the operator |
 
 **Scope.** `scope` is `global` or a project name. A global secret needs a
@@ -909,7 +910,7 @@ are in bold.
 | `token` | `username`?, **`value`**, `hosts`? | `username` defaults to `x-access-token`. `value` is one line, trimmed. `hosts` is a list of git host names (or a comma list). |
 | `github_token` | **`value`**, `host`? | `host` defaults to `github.com`. |
 | `login` | `username`?, **`password`**, `url`?, `domain`? | The password is one line of 1 to 1024 bytes. The daemon keeps its spaces. |
-| `ssh_key` | **`private_key`**, **`passphrase`**?, `public_key` | The daemon derives `public_key`; a body cannot set it. |
+| `ssh_key` | **`private_key`**, **`passphrase`**?, `public_key`, `fingerprint` | The daemon derives `public_key` (the `authorized_keys` line) and `fingerprint` (`SHA256:<base64>`, as `ssh-keygen -l` shows it); a body cannot set them. |
 | `generic` | any | `secret_fields` names the secret fields. The other fields are plain. At most 32 fields. |
 
 A plain field is 1 to 1024 bytes with no control characters. A secret
@@ -959,8 +960,43 @@ POST /api/secrets/global/github-deploy/reveal
 {"id":"...","scope":"global","name":"github-deploy","kind":"token",...,"values":{"value":"ghp_..."}}
 ```
 
+**Generate.** `POST /api/secrets/{scope}/{name}/generate` makes a new
+SSH key pair as an `ssh_key` secret (PLAN §16b.6a). The rights are the
+rights of a create. The daemon makes the key from the OS random source.
+The private key never leaves the daemon, and it has no passphrase (the
+store seals it). `type` is `ed25519` (the default) or `rsa`. `bits` is for
+`rsa` only: 3072 (the default) or 4096. Another value is `422`.
+`comment` goes at the end of the public key; the default is
+`terrarium:<scope>/<name>`. A name that exists is `409`, unless
+`"replace": true`; then the old key is gone and the answer is `200`. An
+empty body makes an ed25519 key.
+
+```
+POST /api/secrets/global/deploy/generate
+{}
+
+201
+{"id":"...","scope":"global","name":"deploy","kind":"ssh_key",
+ "fields":{"public_key":"ssh-ed25519 AAAAC3Nza... terrarium:global/deploy",
+           "fingerprint":"SHA256:3Qm4..."},"secret_fields":["private_key"],...}
+```
+
+Add the `public_key` line to `~/.ssh/authorized_keys` of the user on the
+target. A target uses the key through its `credential` (§17.2).
+
+**The login of a target.** A target names a secret in `credential`
+(§17.2). A delete of a secret that a target uses is `409 conflict`. The
+message and `details.targets` name the targets. With `?force=true`, the
+daemon deletes the secret, and each target keeps a `credential` with no
+secret. The view of such a target shows a warning, and an exec on it
+fails until the operator stores a secret of that name again. A target of
+project `p` uses a global secret only when `p` has no secret of the same
+name.
+
 **Audit.** `secret.put` (`{scope, name, kind, created, plain_fields,
-secret_fields}`: field names, no value), `secret.delete`, and
+secret_fields}`: field names, no value; a generate adds `"generated":
+true`, `type`, `bits`, and `fingerprint`), `secret.delete` (with
+`targets`: the targets that a forced delete left with no secret), and
 `secret.reveal` (`{scope, name, kind, secret_fields, ip}`). The target is
 `<scope>/<name>`. The project of a project secret is the row's `project`.
 
@@ -3336,6 +3372,7 @@ all projects. Targets are project targets by default: a global target
 | `lease` | The caller's active lease on the target (§17.7), when `access` is `lease`; else `null`. |
 | `has_display` | The target has a screen (§17.10): `vnc`, `rdp`, `desktop`, `vmlab` with a `machine` (or a lab instance kind), and a `docker` target with `display`. |
 | `runtime` | What runs now (§17.8): `attached` (the agent workspaces, `<project>/<agent>`, in the container or the lab instance), `lab` and `head` (the instance dir on the host and the commit of a `lab_repo` target), `instances` (one for each holder of a `lab_from_workspace` target, by the agent ULID: `{agent_name, lab, state, attached}`). `{}` when nothing runs. |
+| `credential_info` | Only with a `credential`: `{name, scope, kind, fingerprint?, warning?}`. `scope` and `kind` are those of the secret that the daemon uses (`null` when there is none). `fingerprint` is the `SHA256:` fingerprint of an `ssh_key`. `warning` tells why the credential does not work (below). Never a value. |
 
 **The project prefix.** `POST /api/targets` with a `project` names the
 target `<project>-<name>`, unless `name` starts with `<project>-` already.
@@ -3354,6 +3391,7 @@ max}`.
 | `GET /api/targets/{name}` | | `200` target | read |
 | `PATCH /api/targets/{name}` | JSON merge patch; `null` removes a field | `200` target; `409 conflict` while it runs (below) | as `POST` |
 | `DELETE /api/targets/{name}` | | `204` | as `POST` |
+| `POST /api/targets/{name}/test` | | `200` a test report (below) | as a lifecycle verb (§17.3) |
 | `GET /api/projects/{name}/targets` | | `200` the project's and the global targets, each with `scope` | read |
 
 An agent reads the global targets and the targets of its own project. A
@@ -3418,6 +3456,74 @@ File sync, at start and on `POST /api/reload`: a file target is made or
 updated and becomes `file`. An API target with the same name becomes
 `file`. When the file is gone, the target is deleted. The API refuses to
 change a file target (`409 file_managed`).
+
+**The credential of a target** (PLAN §16b.6a). `credential` names a
+secret (§5.2). The daemon checks it when it saves the target. It does not
+wait for the first connection.
+
+| `kind` | `credential` must name |
+|---|---|
+| `ssh` | an `ssh_key` secret |
+| `vnc`, `rdp` | a `login` secret |
+
+A project target uses a secret of its project, or a global secret when
+its project has no secret of that name. A global target uses a global
+secret only. A missing secret, a secret of another project, and a secret
+of another kind are `422 invalid`. The message names the secret and the
+rule. `POST /api/targets`, `PATCH /api/targets/{name}`, and a fleet apply
+(§18.1) do this check. A `PATCH` that keeps the `kind`, the `project`, and
+the `credential` does not do it, so an old target with a bad credential
+can still take other changes.
+
+A target file is never refused for its credential. The daemon loads it,
+logs a warning, and adds `targets/<name>.toml: warning: ...` to the
+`errors` of the reload. So an upgrade does not drop an old target whose
+credential breaks the rule. The view of each target with a bad
+credential shows `credential_info.warning`. `terrarium targets show`
+prints it, and `terrarium targets ls` marks the KEY cell with `(!)`.
+
+**Test a target.** `POST /api/targets/{name}/test` logs in to an `ssh`
+target one time with its key and runs `true`. The caller needs the rights
+of a lifecycle verb: it may use the target, or it may define it. The
+daemon runs `ssh` with the same options as an exec: `BatchMode=yes`,
+`IdentitiesOnly=yes`, the key in a 0600 file of one run, and the
+daemon's own known hosts file `<state>/ssh/known_hosts`. The connect
+timeout is 10 seconds, and the test stops after 20 seconds.
+
+The host key policy is the policy of each exec: trust on first use
+(`StrictHostKeyChecking=accept-new`). At the first connection, ssh
+records the host key, and the report says `"host_key": "added"`. So the
+daemon never takes a new key silently. Check the host after a first
+test. A changed host key is refused: remove the old line with
+`ssh-keygen -R <host> -f <state>/ssh/known_hosts`.
+
+| `result` | Meaning |
+|---|---|
+| `ok` | The login works (ssh exit 0). |
+| `auth_refused` | `Permission denied`: add the public key to `~/.ssh/authorized_keys` of the user. |
+| `host_key_mismatch` | The host key changed since the first connection. |
+| `host_key_unknown` | The host key is not known, and ssh did not record it. |
+| `unreachable` | `Connection refused`, a timeout, no route, or no DNS name. |
+| `error` | Another failure; read `stderr`. |
+
+```
+POST /api/targets/box/test
+
+200
+{"target":"box","kind":"ssh","address":"build@box","result":"auth_refused",
+ "message":"the host refused the key: add the public key ...","host_key":"known",
+ "host_key_policy":"trust on first use (StrictHostKeyChecking=accept-new) ...",
+ "credential":"deploy","fingerprint":"SHA256:3Qm4...","exit_code":255,
+ "stderr":"build@box: Permission denied (publickey).","elapsed_ms":212}
+```
+
+`host_key` is `known`, `added`, `unknown`, `mismatch`, or `not_checked`.
+`stderr` is the tail of the ssh stderr (at most 2000 bytes). The key
+never shows. A target of another kind is `422 invalid` ("not
+supported"); for a target with a host agent, use the `status` verb
+(§17.3). A target whose credential does not work is `422 invalid`. Each
+test writes a `target.test` audit row with `{result, host_key,
+exit_code}`.
 
 ### 17.3 Lifecycle verbs
 

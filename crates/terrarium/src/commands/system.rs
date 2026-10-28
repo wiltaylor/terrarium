@@ -92,9 +92,11 @@ const TARGET_COLS: &[(&str, &str)] = &[
     ("ADDRESS", "address"),
     ("STATE", "state"),
     ("ONLINE", "online"),
+    ("KEY", "key"),
 ];
 
 /// `host_online` as a word for the table: `online`, `offline`, or `-` (ssh).
+/// Also the KEY cell: the credential and the fingerprint of its key.
 fn with_online(items: &[Value]) -> Vec<Value> {
     items
         .iter()
@@ -105,6 +107,7 @@ fn with_online(items: &[Value]) -> Vec<Value> {
                 Some(false) => "offline".into(),
                 None => "-".into(),
             };
+            t["key"] = super::ssh_keys::key_cell(&t).into();
             t
         })
         .collect()

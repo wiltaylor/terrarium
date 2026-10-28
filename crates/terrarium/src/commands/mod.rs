@@ -18,6 +18,7 @@ pub mod schedules;
 pub mod screen;
 pub mod secrets;
 pub mod skills;
+pub mod ssh_keys;
 pub mod system;
 pub mod templates;
 pub mod waits;
@@ -64,6 +65,12 @@ pub async fn run(ctx: &Ctx, cmd: &Command) -> anyhow::Result<()> {
         Command::Targets {
             command: crate::cli::TargetsCmd::Snapshot(c),
         } => system::snapshot(ctx, c).await,
+        Command::Targets {
+            command: crate::cli::TargetsCmd::Show { name },
+        } => ssh_keys::show(ctx, name).await,
+        Command::Targets {
+            command: crate::cli::TargetsCmd::Test { name },
+        } => ssh_keys::test(ctx, name).await,
         Command::Exec {
             target,
             cwd,

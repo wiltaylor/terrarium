@@ -116,6 +116,88 @@ pub fn public_key(pem: &str, passphrase: Option<&str>) -> ApiResult<String> {
         .map_err(|e| invalid(format!("cannot write the public key: {e}")))
 }
 
+/// The SHA-256 fingerprint of a public key in the `authorized_keys`
+/// format, as `ssh-keygen -l` shows it: `SHA256:<base64>`.
+pub fn fingerprint(public_key: &str) -> Option<String> {
+    PublicKey::from_openssh(public_key.trim())
+        .ok()
+        .map(|k| k.fingerprint(ssh_key::HashAlg::Sha256).to_string())
+}
+
+/// The fingerprint of an `ssh_key` secret: its `fingerprint` field, else
+/// one from its `public_key` field (a row from before the field).
+pub fn fingerprint_of(info: &super::SecretInfo) -> Option<String> {
+    let field = |n: &str| info.fields.get(n).and_then(serde_json::Value::as_str);
+    field("fingerprint")
+        .map(str::to_owned)
+        .or_else(|| field("public_key").and_then(fingerprint))
+}
+
+/// Add the `fingerprint` of the `public_key` to the plain fields of an
+/// `ssh_key`, when it is not there.
+pub fn fill_fingerprint(
+    kind: super::Kind,
+    fields: &mut serde_json::Map<String, serde_json::Value>,
+) {
+    if kind != super::Kind::SshKey || fields.contains_key("fingerprint") {
+        return;
+    }
+    if let Some(f) = fields
+        .get("public_key")
+        .and_then(serde_json::Value::as_str)
+        .and_then(fingerprint)
+    {
+        fields.insert("fingerprint".into(), f.into());
+    }
+}
+
+/// The type of a new key pair (`terrarium secret generate`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum KeyType {
+    Ed25519,
+    Rsa,
+}
+
+/// The RSA sizes that a generate takes. 3072 is the default.
+pub const RSA_BITS: [usize; 2] = [3072, 4096];
+
+/// Make a new private key from the OS random source, in the OpenSSH
+/// format, with no passphrase (the store seals it). `bits` is for RSA
+/// only.
+pub fn generate(kind: KeyType, bits: Option<usize>, comment: &str) -> ApiResult<Zeroizing<String>> {
+    use ssh_key::rand_core::UnwrapErr;
+    if comment.len() > 256 || comment.chars().any(char::is_control) {
+        return Err(invalid(
+            "`comment` is at most 256 bytes with no control characters",
+        ));
+    }
+    let mut rng = UnwrapErr(rand::rngs::SysRng);
+    let data = match kind {
+        KeyType::Ed25519 => {
+            if bits.is_some() {
+                return Err(invalid("`bits` is for an rsa key only"));
+            }
+            ssh_key::private::KeypairData::from(ssh_key::private::Ed25519Keypair::random(&mut rng))
+        }
+        KeyType::Rsa => {
+            let bits = bits.unwrap_or(RSA_BITS[0]);
+            if !RSA_BITS.contains(&bits) {
+                return Err(invalid(format!(
+                    "`bits` of an rsa key is 3072 or 4096, not {bits}"
+                )));
+            }
+            ssh_key::private::KeypairData::from(
+                ssh_key::private::RsaKeypair::random(&mut rng, bits)
+                    .map_err(|e| ApiError::internal(format!("cannot make the RSA key: {e}")))?,
+            )
+        }
+    };
+    PrivateKey::new(data, comment)
+        .and_then(|k| k.to_openssh(LineEnding::LF))
+        .map_err(|e| ApiError::internal(format!("cannot write the new key: {e}")))
+}
+
 /// A key that `ssh -i` reads with no prompt: the key as stored, or the
 /// OpenSSH key without its passphrase. It goes only to a 0600 file of one
 /// run (`super::RunDir`).
@@ -211,6 +293,34 @@ pub(crate) mod tests {
                 .is_encrypted()
         );
         assert!(usable_key(&enc, Some("wrong")).is_err());
+    }
+
+    #[test]
+    fn generated_keys_parse_and_have_a_sha256_fingerprint() {
+        let k = generate(KeyType::Ed25519, None, "terrarium:global/deploy").unwrap();
+        let p = public_key(&k, None).unwrap();
+        assert!(p.starts_with("ssh-ed25519 AAAA"), "{p}");
+        assert!(p.ends_with(" terrarium:global/deploy"), "{p}");
+        let f = fingerprint(&p).unwrap();
+        // `SHA256:` and 43 characters of unpadded base64, as ssh-keygen -l.
+        assert!(f.starts_with("SHA256:"), "{f}");
+        assert_eq!(f.len(), "SHA256:".len() + 43, "{f}");
+        assert!(!f.contains('='), "{f}");
+        // Two keys differ.
+        let k2 = generate(KeyType::Ed25519, None, "").unwrap();
+        assert_ne!(fingerprint(&public_key(&k2, None).unwrap()), Some(f));
+        // RSA: 3072 by default; other sizes are refused.
+        let r = generate(KeyType::Rsa, None, "c").unwrap();
+        let rk = PrivateKey::from_openssh(r.trim()).unwrap();
+        assert_eq!(rk.algorithm(), ssh_key::Algorithm::Rsa { hash: None });
+        let KeyData::Rsa(rsa) = rk.public_key().key_data() else {
+            panic!("not rsa");
+        };
+        assert_eq!(rsa.key_size(), 3072);
+        assert!(generate(KeyType::Rsa, Some(1024), "c").is_err());
+        assert!(generate(KeyType::Ed25519, Some(4096), "c").is_err());
+        assert!(generate(KeyType::Ed25519, None, "a\nb").is_err());
+        assert_eq!(fingerprint("not a key"), None);
     }
 
     #[test]

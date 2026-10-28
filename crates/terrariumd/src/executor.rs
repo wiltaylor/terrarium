@@ -1266,7 +1266,7 @@ impl Executor {
     }
 }
 
-fn known_hosts(state_dir: &Path) -> ApiResult<PathBuf> {
+pub(crate) fn known_hosts(state_dir: &Path) -> ApiResult<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
     let dir = state_dir.join("ssh");
     std::fs::create_dir_all(&dir)

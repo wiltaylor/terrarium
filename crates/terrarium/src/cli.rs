@@ -1520,6 +1520,13 @@ pub enum StatusCmd {
 pub enum TargetsCmd {
     /// Targets this caller may use
     Ls,
+    /// Show one target: its definition, state, and the key of its
+    /// credential with the fingerprint
+    Show { name: String },
+    /// Log in to an ssh target once with its key, and report the result:
+    /// ok, auth_refused, host_key_unknown, host_key_mismatch,
+    /// unreachable, or error. Exit 1 when it is not ok
+    Test { name: String },
     #[command(flatten)]
     Snapshot(SnapshotCmd),
 }
@@ -1673,6 +1680,9 @@ pub enum SecretCmd {
     /// Store a secret, or replace one. The value comes from stdin or
     /// `--file`; a terminal asks for it
     Set(Box<SecretSetArgs>),
+    /// Make a new SSH key pair as an `ssh_key` secret. The private key
+    /// stays in the daemon; the public key prints
+    Generate(SecretGenerateArgs),
     /// Delete a secret
     Rm { name: String },
     /// Show the values of a secret (the operator only). It asks for the
@@ -1683,6 +1693,24 @@ pub enum SecretCmd {
         #[arg(long)]
         password_stdin: bool,
     },
+}
+
+/// `secret generate` (PLAN §16b.6a). `--project` makes a project secret.
+#[derive(Debug, Args)]
+pub struct SecretGenerateArgs {
+    pub name: String,
+    /// The key type. Default: `ed25519`
+    #[arg(long = "type", value_parser = ["ed25519", "rsa"])]
+    pub key_type: Option<String>,
+    /// `rsa` only: 3072 (the default) or 4096
+    #[arg(long, value_parser = ["3072", "4096"])]
+    pub bits: Option<String>,
+    /// The comment of the public key. Default: `terrarium:<scope>/<name>`
+    #[arg(long)]
+    pub comment: Option<String>,
+    /// Replace a secret of the same name (its old key is gone)
+    #[arg(long)]
+    pub replace: bool,
 }
 
 #[derive(Debug, Args)]

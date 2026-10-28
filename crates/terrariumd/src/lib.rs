@@ -39,6 +39,7 @@ pub mod skills;
 pub mod ssh_agent;
 pub mod store;
 pub mod supervisor;
+pub mod target_test;
 pub mod time_param;
 pub mod transcripts;
 pub mod trash;

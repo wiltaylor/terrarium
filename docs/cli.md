@@ -185,6 +185,7 @@ project's secret of that name, else the global one.
 terrarium secret list [-p project]          the secrets of each scope that you manage
 terrarium secret show <name> [-p project]   kind, plain fields, secret field names
 terrarium secret set <name> --kind k [-p project] [--file f] [kind flags]
+terrarium secret generate <name> [-p project] [--type ed25519|rsa] [--bits 3072|4096] [--comment c] [--replace]
 terrarium secret rm <name> [-p project]
 terrarium secret reveal <name> [-p project] [--password-stdin]     the operator only
 ```
@@ -217,6 +218,28 @@ terrarium secret set github-deploy --kind token --host github.com < token.txt
 terrarium secret set build-box --kind ssh_key --file ~/.ssh/id_ed25519 -p ops
 printf 'PIN=1234\n' | terrarium secret set door --kind generic --field user=bob
 ```
+
+`generate` makes a new SSH key pair as an `ssh_key` secret (`POST
+/api/secrets/{scope}/{name}/generate`, PLAN §16b.6a). It needs the rights
+of `set`. The private key stays in the daemon. The default type is
+`ed25519`; `--bits` is for `rsa` only. The comment of the public key is
+`terrarium:<scope>/<name>`, unless you give `--comment`. A name that
+exists is `409` (exit 1); `--replace` makes a new key in its place. The
+first line of the text output is the public key, ready for
+`~/.ssh/authorized_keys`. The second line gives the `SHA256:`
+fingerprint. `--json` prints the secret, with `fields.public_key` and
+`fields.fingerprint`.
+
+```
+terrarium secret generate deploy -p ops | head -1 > deploy.pub
+ssh-copy-id -f -i deploy.pub build@box
+terrarium admin target new box --kind ssh --address build@box --credential deploy -p ops
+terrarium target test ops-box
+```
+
+`rm` of a secret that a target uses as its `credential` is `409` (exit 1).
+The message names the targets. Change the targets first. The API takes
+`?force=true` to delete it all the same (`api.md` §5.2).
 
 `list` and `show` never print a value. `reveal` prints the values. It is
 for the operator only, and it asks for the operator password (or reads the
@@ -610,6 +633,8 @@ terrarium usage project                       the project, per agent
 terrarium usage subscriptions                 all plans
 terrarium status set <idle|working|blocked> [--note text]
 terrarium targets ls                          an agent: the targets its policy or a lease allows, with host online/offline
+terrarium targets show <target>               the definition, the state, and the key of the credential with its fingerprint
+terrarium targets test <target>               an ssh target: log in one time with its key, and report the result
 terrarium targets snapshot <target> [name] [--scope machine|lab] [--agent a]
 terrarium targets restore <target> [name] [--discard-guest-changes] [--scope machine|lab] [--agent a]
 terrarium targets snapshots <target> [--scope machine|lab] [--agent a]
@@ -619,6 +644,22 @@ terrarium shell <target>                      a login shell in a PTY; Ctrl-] det
 terrarium cp <src> <target>:<dst>             one file to the target
 terrarium cp <target>:<src> <dst>             one file from the target
 ```
+
+For the operator, `targets ls` has the column `KEY`: the `credential` and
+the `SHA256:` fingerprint of its key. `(!)` marks a credential that does
+not work; `targets show` prints the `warning`
+([api.md §17.2](api.md#172-targets)).
+
+`targets test` sends `POST /api/targets/{t}/test`. It needs the rights of
+a lifecycle verb: the caller may use the target, or may define it. The
+first line is `<t>: <result>: <message>`. The result is `ok`,
+`auth_refused`, `host_key_unknown`, `host_key_mismatch`, `unreachable`,
+or `error`. Then come the key and its fingerprint, the host key state
+(`known`, `added`, `unknown`, `mismatch`, or `not_checked`), the host key
+policy, and the tail of the ssh stderr. The exit code is 0 for `ok`, else
+1. A target that is not `ssh` is `422` (exit 1). The host key policy is
+trust on first use: the first test of a host records its key, and
+`host key: added` tells you so. Check the host then.
 
 In agent mode, `targets ls` adds the columns `ACCESS` (`policy` or
 `lease`), `EXCLUSIVE` (`yes` or `no` for a lease, else `-`), and `EXPIRES`

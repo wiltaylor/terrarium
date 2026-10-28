@@ -214,8 +214,22 @@ async fn replace(
     Ok((status, Json(info)))
 }
 
+/// `?force=true` on a delete: delete a secret that a target uses.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeleteQuery {
+    #[serde(default)]
+    pub force: bool,
+}
+
 /// Delete a secret and write its `secret.delete` audit row.
-async fn delete_one(state: &Shared, actor: &Actor, scope: String, name: String) -> ApiResult<()> {
+async fn delete_one(
+    state: &Shared,
+    actor: &Actor,
+    scope: String,
+    name: String,
+    force: bool,
+) -> ApiResult<()> {
     policy::manage_secrets(actor, &scope)?;
     let gone = state
         .db
@@ -223,12 +237,14 @@ async fn delete_one(state: &Shared, actor: &Actor, scope: String, name: String) 
             let Some(info) = secrets::get(t, &scope, &name)? else {
                 return Ok(false);
             };
+            // A target login (PLAN §16b.6a): 409, unless `force`.
+            let users = crate::store::targets::guard_secret_delete(t, &scope, &name, force)?;
             secrets::delete(t, &scope, &name)?;
             t.audit(
                 "secret.delete",
                 &format!("{scope}/{name}"),
                 secrets::scope_project(&scope),
-                json!({"scope": scope, "name": name, "kind": info.kind}),
+                json!({"scope": scope, "name": name, "kind": info.kind, "targets": users}),
             )?;
             Ok(true)
         })
@@ -244,9 +260,10 @@ async fn remove(
     State(state): State<Shared>,
     actor: Actor,
     Path((scope, name)): Path<(String, String)>,
+    ApiQuery(q): ApiQuery<DeleteQuery>,
 ) -> ApiResult<StatusCode> {
     let label = format!("{scope}/{name}");
-    delete_one(&state, &actor, scope, name)
+    delete_one(&state, &actor, scope, name, q.force)
         .await
         .map_err(|e| match e.code {
             crate::error::Code::NotFound => ApiError::not_found(format!("no secret `{label}`")),
@@ -433,7 +450,7 @@ async fn delete_credential(
     actor: Actor,
     Path(name): Path<String>,
 ) -> ApiResult<StatusCode> {
-    delete_one(&state, &actor, GLOBAL.to_owned(), name.clone())
+    delete_one(&state, &actor, GLOBAL.to_owned(), name.clone(), false)
         .await
         .map_err(|e| match e.code {
             crate::error::Code::NotFound => ApiError::not_found(format!("no credential `{name}`")),
