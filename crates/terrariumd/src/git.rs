@@ -50,7 +50,7 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
-use crate::credentials::{CredentialStore, Secret};
+use crate::secrets::{RunDirs, Secret};
 
 /// The value of `credential.helper` in a workspace repo.
 pub const WORKSPACE_HELPER: &str = "!terrarium repo credential";
@@ -113,9 +113,9 @@ pub struct Checkout {
     pub depth: Option<u32>,
     pub secret: Option<Secret>,
     /// Where the one-shot helper files go.
-    pub store: CredentialStore,
+    pub store: RunDirs,
     /// A local-path URL under one of these dirs is refused (the state dir:
-    /// other agents' workspaces and the credential store).
+    /// other agents' workspaces and the run dirs of the secrets).
     pub deny_local_under: Vec<PathBuf>,
     pub timeout: Duration,
 }
@@ -331,7 +331,7 @@ struct Runner {
     env: Vec<(String, String)>,
     deadline: Instant,
     timeout: Duration,
-    _run: Option<crate::credentials::RunDir>,
+    _run: Option<crate::secrets::RunDir>,
 }
 
 fn token_helper(loc: &HttpLocation, answer: &Path) -> String {
@@ -371,7 +371,11 @@ impl Runner {
                     let answer = dir
                         .write_private(
                             "answer",
-                            format!("username={username}\npassword={token}\n").as_bytes(),
+                            zeroize::Zeroizing::new(format!(
+                                "username={username}\npassword={}\n",
+                                token.as_str()
+                            ))
+                            .as_bytes(),
                         )
                         .map_err(|e| io(e.message))?;
                     let script = dir
@@ -395,10 +399,11 @@ impl Runner {
                 ));
                 run = Some(dir);
             }
-            Some(Secret::Password { .. }) => {
-                return Err(io(
-                    "the credential is a password, for vnc and rdp targets; a repo needs a token or an ssh_key",
-                ));
+            Some(other @ (Secret::Login { .. } | Secret::Other(_))) => {
+                return Err(io(format!(
+                    "the credential is a {}; a repo needs a token, a github_token, or an ssh_key",
+                    other.kind_label()
+                )));
             }
             None => {}
         }
@@ -670,7 +675,7 @@ impl GitRunner {
     pub fn new(
         url: &str,
         secret: Option<Secret>,
-        store: CredentialStore,
+        store: RunDirs,
         timeout: Duration,
     ) -> Result<Self, GitError> {
         let c = Checkout {
@@ -897,7 +902,7 @@ mod tests {
             branch: None,
             depth: None,
             secret: None,
-            store: CredentialStore::new(&dir.join("state")),
+            store: RunDirs::new(&dir.join("state")),
             deny_local_under: vec![dir.join("state")],
             timeout: Duration::from_secs(60),
         }
@@ -1169,7 +1174,7 @@ mod tests {
     #[test]
     fn token_helper_answers_only_its_host() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = CredentialStore::new(tmp.path());
+        let store = RunDirs::new(tmp.path());
         let c = Checkout {
             url: "https://github.com/a/b.git".into(),
             dest: tmp.path().join("d"),
@@ -1177,7 +1182,7 @@ mod tests {
             depth: None,
             secret: Some(Secret::Token {
                 username: "x-access-token".into(),
-                token: "tok'en".into(),
+                token: zeroize::Zeroizing::new("tok'en".into()),
             }),
             store,
             deny_local_under: vec![],

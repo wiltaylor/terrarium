@@ -1151,6 +1151,41 @@ const MIGRATIONS: &[&str] = &[
     DROP TABLE session_dups;
     DROP TABLE session_groups;
     "#,
+    // 35: the secret manager (PLAN §16b). `scope` is `global` or a project
+    // name (no foreign key: `global` is no project; a project delete
+    // deletes its secrets, `store::projects::delete`). `plain` is the JSON
+    // of the plain fields, `secret_fields` the JSON array of the names of
+    // the secret fields, and `sealed` the XChaCha20-Poly1305 ciphertext of
+    // the JSON of the secret fields (`crate::secrets::crypto`). A NULL
+    // `sealed` is a placeholder with no value (a config import, §16b.5).
+    // `secret_grants` gives a secret to an agent or a project (§16b.3);
+    // `grantee` is `agent:<ulid>` or `project:<name>`.
+    r#"
+    CREATE TABLE secrets (
+        id            TEXT PRIMARY KEY,           -- ULID
+        scope         TEXT NOT NULL,
+        name          TEXT NOT NULL,
+        kind          TEXT NOT NULL CHECK (kind IN
+                          ('api_key', 'token', 'github_token', 'login', 'ssh_key', 'generic')),
+        plain         TEXT NOT NULL DEFAULT '{}',
+        secret_fields TEXT NOT NULL DEFAULT '[]',
+        sealed        BLOB,
+        created_at    TEXT NOT NULL,
+        updated_at    TEXT NOT NULL,
+        created_by    TEXT NOT NULL,
+        UNIQUE (scope, name)
+    );
+    CREATE TABLE secret_grants (
+        secret_id  TEXT NOT NULL REFERENCES secrets(id) ON DELETE CASCADE,
+        grantee    TEXT NOT NULL,
+        level      TEXT NOT NULL CHECK (level IN ('use', 'read')),
+        env        TEXT,
+        created_by TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (secret_id, grantee)
+    );
+    CREATE INDEX secret_grants_grantee ON secret_grants(grantee);
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call
@@ -1266,6 +1301,12 @@ impl<'c> Tx<'c> {
             cause: None,
             events: Vec::new(),
         }
+    }
+
+    /// Commit a test transaction (the events stay in it).
+    #[cfg(test)]
+    pub fn commit_for_test(self) -> rusqlite::Result<()> {
+        self.tx.commit()
     }
 
     /// Append an event to the log. Subscribers get it after the commit.
@@ -1422,6 +1463,8 @@ mod tests {
             "account_defaults",
             "questions",
             "thread_resumes",
+            "secrets",
+            "secret_grants",
         ] {
             let n: i64 = conn
                 .query_row(

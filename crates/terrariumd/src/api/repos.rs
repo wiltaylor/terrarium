@@ -1,7 +1,8 @@
-//! `/api/repos/...` and `/api/credentials`: checkouts into agent
-//! workspaces, the git credential helper, and the write-only credential
-//! store (PLAN §9, §17, §21). `GET|POST /api/projects/{name}/repos` stay in
-//! `projects.rs`.
+//! `/api/repos/...`: checkouts into agent workspaces and the git
+//! credential helper (PLAN §9, §17, §21). `GET|POST
+//! /api/projects/{name}/repos` stay in `projects.rs`. The secrets that the
+//! repos name are in `crate::secrets` (PLAN §16b); `/api/credentials` is
+//! in `secrets.rs`.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Component, Path as FsPath};
@@ -9,20 +10,19 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post};
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use super::{ApiJson, Shared};
 use crate::actor::Actor;
-use crate::credentials::{self, CredentialInfo, CredentialStore, NewCredential, Secret};
 use crate::error::{ApiError, ApiResult, Code};
 use crate::events::EventDraft;
 use crate::git::{self, Checkout, GitError, Outcome};
 use crate::policy;
+use crate::secrets::{self, RunDirs, Secret};
 use crate::store::agents::{self, AgentView};
 use crate::store::repos::{self, Repo};
 
@@ -31,8 +31,6 @@ pub fn routes() -> Router<Shared> {
         .route("/repos/credential", post(credential_helper))
         .route("/repos/{id}", get(show))
         .route("/repos/{id}/checkout", post(checkout))
-        .route("/credentials", get(list_credentials).post(put_credential))
-        .route("/credentials/{name}", delete(delete_credential))
 }
 
 /// The credential helper answers at most this many times per agent in
@@ -42,10 +40,6 @@ const HELPER_WINDOW: Duration = Duration::from_secs(60);
 
 /// Progress events: at most one per phase in this time.
 const PROGRESS_EVERY: Duration = Duration::from_millis(1000);
-
-pub fn store(state: &Shared) -> CredentialStore {
-    CredentialStore::new(&state.state_dir)
-}
 
 async fn show(
     State(state): State<Shared>,
@@ -175,8 +169,8 @@ async fn checkout_inner(
 ) -> ApiResult<CheckoutResult> {
     let dir = body.path.clone().unwrap_or_else(|| repo.path.clone());
     check_dir(&dir)?;
-    let store = store(state);
-    let secret = credentials::secret_of(&store, repo.credential.as_deref())?;
+    // The repo's secret: the project's first, then the global one.
+    let secret = secrets::secret_of(state, Some(&repo.project), repo.credential.as_deref()).await?;
     // The workspace moves to the work root first (an agent made before it).
     let live = state
         .supervisor
@@ -194,7 +188,7 @@ async fn checkout_inner(
         branch: body.branch.clone().or_else(|| repo.default_branch.clone()),
         depth: body.depth,
         secret: secret.as_ref().map(|(_, s)| s.clone()),
-        store,
+        store: RunDirs::new(&state.state_dir),
         deny_local_under: vec![state.state_dir.clone(), state.work_dir.clone()],
         timeout: git::DEFAULT_TIMEOUT,
     };
@@ -337,7 +331,7 @@ async fn checkout_target(
         )));
     }
     let dir = body.path.clone().unwrap_or_else(|| repo.path.clone());
-    let secret = credentials::secret_of(&store(state), repo.credential.as_deref())?;
+    let secret = secrets::secret_of(state, Some(&repo.project), repo.credential.as_deref()).await?;
     let branch = body.branch.clone().or_else(|| repo.default_branch.clone());
     let event = |summary: String, data: serde_json::Value| {
         let d = EventDraft::new("repo.checkout", summary, data).project(repo.project.clone());
@@ -481,7 +475,10 @@ async fn credential_helper(
         return Err(none());
     };
     let name = repo.credential.clone().unwrap_or_default();
-    let Some(Secret::Token { username, token }) = store(&state).load(&name)? else {
+    // A `token` or a `github_token` of the project, else a global one.
+    let Ok(Secret::Token { username, token }) =
+        secrets::load(&state, Some(&repo.project), &name).await
+    else {
         return Err(none());
     };
     let target = format!("{}/{}", repo.project, repo.name);
@@ -495,64 +492,8 @@ async fn credential_helper(
         .await?;
     Ok(Json(HelperAnswer {
         username,
-        password: token,
+        password: token.to_string(),
     }))
-}
-
-async fn list_credentials(
-    State(state): State<Shared>,
-    actor: Actor,
-) -> ApiResult<Json<Vec<CredentialInfo>>> {
-    policy::manage_credentials(&actor)?;
-    let s = store(&state);
-    let list = tokio::task::spawn_blocking(move || s.list())
-        .await
-        .map_err(|e| ApiError::internal(e.to_string()))??;
-    Ok(Json(list))
-}
-
-async fn put_credential(
-    State(state): State<Shared>,
-    actor: Actor,
-    ApiJson(body): ApiJson<NewCredential>,
-) -> ApiResult<(StatusCode, Json<CredentialInfo>)> {
-    policy::manage_credentials(&actor)?;
-    let s = store(&state);
-    let info = tokio::task::spawn_blocking(move || s.put(&body))
-        .await
-        .map_err(|e| ApiError::internal(e.to_string()))??;
-    let detail = json!({"kind": info.kind, "username": info.username});
-    let name = info.name.clone();
-    state
-        .db
-        .write(actor.label(), move |t| {
-            t.audit("credential.put", &name, None, detail)
-        })
-        .await?;
-    Ok((StatusCode::CREATED, Json(info)))
-}
-
-async fn delete_credential(
-    State(state): State<Shared>,
-    actor: Actor,
-    Path(name): Path<String>,
-) -> ApiResult<Response> {
-    policy::manage_credentials(&actor)?;
-    let s = store(&state);
-    let n = name.clone();
-    let gone = tokio::task::spawn_blocking(move || s.delete(&n))
-        .await
-        .map_err(|e| ApiError::internal(e.to_string()))??;
-    if !gone {
-        return Err(ApiError::not_found(format!("no credential `{name}`")));
-    }
-    state
-        .db
-        .write(actor.label(), move |t| {
-            t.audit("credential.delete", &name, None, json!({}))
-        })
-        .await?;
-    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 /// Clone each repo of the project's `checkout.on_agent_create` list (the

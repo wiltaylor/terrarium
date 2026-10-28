@@ -442,7 +442,8 @@ everything. Every privileged action writes an audit row (§9).
 | Grant, extend, or revoke a target lease (§17.7) | no | a target of own project, to an agent of own project | any |
 | Check out a repo into its own workspace; ask the credential helper (§5.1) | own project | own project | own project |
 | Check out a repo into another agent's workspace | no | own project | any |
-| Store, list, or delete credentials (write-only) | no | no | yes |
+| Store, list, show, or delete secrets (§5.2); never a value | no | own project | any, global too |
+| Reveal the value of a secret (§5.2) | no | no | no (operator only) |
 | Create and delete projects; `POST /api/reload` | no | no | yes |
 | Grant or revoke `project_admin` | no | own project | any |
 | Grant or revoke `sysadmin` | no | no | no (operator only) |
@@ -669,7 +670,8 @@ Rows oldest first. Cursor: `seq`.
 never the text), `agent.keys` (`keys`: the key names; a text key as
 `text(<length>)`), `agent.answer`, `agent.attach`,
 `repo.checkout`, `repo.credential` (each answer of the credential helper),
-`credential.put`, `credential.delete` (§5.1),
+`secret.put`, `secret.delete`, `secret.reveal`, `secret.migrated` (actor
+`system`), and `secret.rotate_key` (actor `system`) (§5.2),
 `mail.read` (the first read of a message; `detail` has `thread`, `from`,
 `to`, and `via`: `read` or `reply`), `board.columns`, `card.reassign`, `card.reopen`, `card.archive` (by an admin
 on a card that is not its own), `definitions.sync`, `memory.edit` and
@@ -733,7 +735,8 @@ POST /api/projects/ops/repos
  "default_branch":"main","credential":"github-deploy","path":"infra","source":"api","created_at":"2026-10-24T06:36:54.170Z"}
 ```
 
-`credential` is a key name in `/state/credentials`, never the secret.
+`credential` is the name of a secret (§5.2), never the secret. The daemon
+uses the project's secret of that name, else the global one.
 `branch` is an alias of `default_branch`. A body with the two is `400
 bad_request`. A body with an unknown field is `400 bad_request`, and the
 message names the fields.
@@ -760,9 +763,9 @@ calls `POST /api/repos/credential` through the runner socket.
 | `GET /api/repos/{id}` | | `200` repo | read |
 | `POST /api/repos/{id}/checkout` | below | `200` checkout result | own workspace: read; another agent's: project_admin |
 | `POST /api/repos/credential` | `{"protocol", "host", "path"?}` | `200` `{"username", "password"}` | an agent |
-| `GET /api/credentials` | | `200` `[{"name", "kind", "username"?, "created_at"}]` | sysadmin |
-| `POST /api/credentials` | `{"name", "kind", "value", "username"?}` | `201` credential, without `value` | sysadmin |
-| `DELETE /api/credentials/{name}` | | `204` | sysadmin |
+| `GET /api/credentials` | | `200` `[{"name", "kind", "username"?, "created_at"}]` | sysadmin (an alias, §5.2) |
+| `POST /api/credentials` | `{"name", "kind", "value", "username"?}` | `201` credential, without `value` | sysadmin (an alias, §5.2) |
+| `DELETE /api/credentials/{name}` | | `204` | sysadmin (an alias, §5.2) |
 
 `{id}` is the repo ULID, `project/name`, or (for an agent) a repo name in
 its own project.
@@ -844,7 +847,8 @@ git sends to a credential helper. The caller must be an agent (`403` for
 the operator). The daemon answers only when a repo of the agent's own
 project has an `https` or `http` URL with the same protocol, host
 (with port), and path (`.git` and slashes at the ends do not count), and a
-credential of kind `token`. Every other case is `404 not_found`, so git
+secret of kind `token` or `github_token` (the project's secret of that
+name, else the global one). Every other case is `404 not_found`, so git
 falls back to its next helper. An SSH key is never answered. Each answer
 writes a `repo.credential` audit row (without the secret). An agent gets at
 most 30 answers a minute (`429 rate_limited`).
@@ -857,22 +861,142 @@ POST /api/repos/credential          (agent)
 {"username":"x-access-token","password":"ghp_..."}
 ```
 
-**Credentials.** The store is `<state>/credentials/`, mode 0700. The secret
-is `<name>` (mode 0600). The metadata, without the secret, is `<name>.json`.
-No endpoint gives the secret back, except the credential helper above.
-`kind` is `token`, `ssh_key`, or `password`. A token is one line. A token's
-`username` defaults to `x-access-token`. An `ssh_key` is a private key in
-OpenSSH or PEM format, and has no `username`. A `password` (1 to 1024 bytes,
-one line, spaces kept) is for a `vnc` or `rdp` target, with an optional
-default `username` (§17.10); a repo cannot use it. A `POST` with an
-existing name replaces the credential.
-
 For one clone or fetch, the daemon puts the secret in a 0700 run dir under
 `<state>/credentials/.run/`, and removes the dir after the run. A token goes
 to git through a one-shot helper script that answers only for the repo's
 protocol and host. An SSH key goes to `ssh -i` through `GIT_SSH_COMMAND`.
-The secret is never on a command line, in an env variable, or in the
-repo's `.git/config`.
+A key with a passphrase goes there without its passphrase, in the 0600
+file of the run only. The secret is never on a command line, in an env
+variable, or in the repo's `.git/config`.
+
+### 5.2 Secrets
+
+PLAN §16b. The secret manager holds the API keys, tokens, logins, SSH keys,
+and custom secrets that the daemon and the agents use. The code is in
+`crates/terrariumd/src/secrets/` and `api/secrets.rs`. Grants to agents
+come later (PLAN §16b.3).
+
+| Endpoint | Body | Answer | Needs |
+|---|---|---|---|
+| `GET /api/secrets?scope=` | | `200` `[secret]` | below |
+| `POST /api/secrets` | `{"scope"?: "global", "name", "kind", "fields", "secret_fields"?}` | `201` secret; `409` when the name exists | below |
+| `GET /api/secrets/{scope}/{name}` | | `200` secret | below |
+| `PUT /api/secrets/{scope}/{name}` | `{"kind", "fields", "secret_fields"?}` | `201` new, `200` replaced | below |
+| `DELETE /api/secrets/{scope}/{name}` | | `204` | below |
+| `POST /api/secrets/{scope}/{name}/reveal` | `{"password"}` | `200` secret with `values` | the operator |
+
+**Scope.** `scope` is `global` or a project name. A global secret needs a
+sysadmin or the operator. A project secret needs a project_admin of that
+project, a sysadmin, or the operator. A member gets `403`. A list with no
+`?scope=` shows each secret for the operator and a sysadmin, and the
+secrets of its own project for a project_admin. A scope that is not
+`global` and not a project is `404`. A project named `global` cannot have
+project secrets. A project delete deletes the secrets of the project.
+
+The name is unique in its scope (1-63 of `a-z`, `0-9`, `-`, `_`). A
+repo, a target, or the config repo remote names a secret by its name in
+`credential`. The daemon uses the secret of the owner's project first,
+then the global secret of the same name. So a project secret hides a
+global secret of the same name for that project. A global target and the
+config repo remote use global secrets only.
+
+**Kinds.** `fields` holds all the fields of the kind. The secret fields
+are in bold.
+
+| Kind | Fields | Rules |
+|---|---|---|
+| `api_key` | **`value`**, `env`? | `value` is one line, trimmed. `env` is an env var name. |
+| `token` | `username`?, **`value`**, `hosts`? | `username` defaults to `x-access-token`. `value` is one line, trimmed. `hosts` is a list of git host names (or a comma list). |
+| `github_token` | **`value`**, `host`? | `host` defaults to `github.com`. |
+| `login` | `username`?, **`password`**, `url`?, `domain`? | The password is one line of 1 to 1024 bytes. The daemon keeps its spaces. |
+| `ssh_key` | **`private_key`**, **`passphrase`**?, `public_key` | The daemon derives `public_key`; a body cannot set it. |
+| `generic` | any | `secret_fields` names the secret fields. The other fields are plain. At most 32 fields. |
+
+A plain field is 1 to 1024 bytes with no control characters. A secret
+field is 1 to 64 KiB. A field that the kind does not have is `422
+invalid`. A bad value is `422 invalid`, and the message never holds the
+value.
+
+An `ssh_key` is a private key in the OpenSSH format (with or without a
+passphrase), or in PEM with no passphrase: PKCS#1 RSA, PKCS#8 (RSA,
+Ed25519, P-256), or SEC1 P-256. A PEM key with a passphrase is `422`:
+write it again in the OpenSSH format with `ssh-keygen -p -f <file>`. A
+wrong passphrase is `422`.
+
+**The secret shape.** No answer holds a secret field, except a reveal.
+
+```json
+{"id":"01MB2V8Q4X0K16V6G88P3SE78W","scope":"global","name":"github-deploy","kind":"token",
+ "fields":{"username":"x-access-token","hosts":["github.com"]},"secret_fields":["value"],
+ "created_at":"2026-10-28T09:00:00.000Z","updated_at":"2026-10-28T09:00:00.000Z",
+ "created_by":"operator"}
+```
+
+`fields` holds the plain fields. `secret_fields` holds the names of the
+secret fields that the secret has. `created_by` is the actor label.
+
+```
+POST /api/secrets
+{"scope":"ops","name":"door","kind":"generic","fields":{"user":"bob","pin":"1234"},"secret_fields":["pin"]}
+
+201
+{"id":"01MB2V9...","scope":"ops","name":"door","kind":"generic","fields":{"user":"bob"},"secret_fields":["pin"],...}
+```
+
+**Reveal.** `POST /api/secrets/{scope}/{name}/reveal` is for the operator
+only (a sysadmin agent gets `403`). The body must hold the operator
+password. The daemon checks it as a login checks it (§1.1): a wrong
+password is `403`, and the login limiter counts it (`429` after too many).
+With no password set, the answer is `409`. The answer is the secret shape
+with `values` (the secret fields by name), and `Cache-Control: no-store`.
+Each reveal writes a `secret.reveal` audit row.
+
+```
+POST /api/secrets/global/github-deploy/reveal
+{"password":"..."}
+
+200
+{"id":"...","scope":"global","name":"github-deploy","kind":"token",...,"values":{"value":"ghp_..."}}
+```
+
+**Audit.** `secret.put` (`{scope, name, kind, created, plain_fields,
+secret_fields}`: field names, no value), `secret.delete`, and
+`secret.reveal` (`{scope, name, kind, secret_fields, ip}`). The target is
+`<scope>/<name>`. The project of a project secret is the row's `project`.
+
+**Storage.** The `secrets` table holds the plain fields and `sealed`: the
+XChaCha20-Poly1305 ciphertext of the JSON of the secret fields. The
+associated data is the ID, the scope, the name, and the kind, so a row
+copied to another name does not open. The master key is
+`<state>/secrets.key` (32 bytes, mode 0600), outside the database. The
+daemon makes it at the first start. A database backup without the key
+file shows no secret. When the key file is missing and secrets exist, the
+daemon does not start: restore the key file from a backup. The daemon
+decrypts a secret only when it uses one. The sandbox never binds the key
+file or the database.
+
+`terrariumd secrets rotate-key` (with the daemon stopped) makes a new key
+and seals each secret again in one transaction. It writes the new key to
+`secrets.key.new` first, and moves it over `secrets.key` after the
+commit. When a crash stops it between the two, the next start finishes
+the move. It writes a `secret.rotate_key` audit row.
+
+**The move of the old credentials.** Before this store, each credential
+was `<state>/credentials/<name>` (the secret) and `<name>.json`. At each
+start, the daemon moves each such pair into a global secret: `token` to
+`token`, `ssh_key` to `ssh_key`, `password` to `login`. It copies the two
+files to `<state>/credentials/backup/` (mode 0600) first. It writes a
+`secret.migrated` audit row (actor `system`) for each, and then removes
+the files. The secret keeps the old `created_at`. A pair that the store
+refuses stays, and the daemon logs a warning. `subscriptions/`,
+`accounts/`, and `backup/` stay as they are.
+
+**`/api/credentials`.** This alias stays for one release. It makes and
+lists global secrets in the old shapes of §5.1. `kind` is `token`,
+`ssh_key`, or `password` (a `login` secret). A `POST` with an existing
+name replaces the secret. The list shows each global secret: a `login` as
+`password`, the other kinds with their own names. Its audit rows are
+`secret.put` and `secret.delete`.
 
 ## 6. Agents
 
@@ -3209,11 +3333,11 @@ The fields that each kind needs:
 | `kind` | Needs | Optional |
 |---|---|---|
 | `host` | `host` | |
-| `ssh` | `address` | `port`, `credential` (an `ssh_key` in the credential store) |
+| `ssh` | `address` | `port`, `credential` (an `ssh_key` secret, §5.2) |
 | `docker` | `host`, and `image` or `container` | `ephemeral`, `keep`, `display` (`x11`, `wayland`, `auto`), `display_name` (§17.10) |
 | `vmlab` | `host`, and one of: `lab` (an absolute path); `lab_repo` with `machine`; `lab_from_workspace = true` with `machine` | `machine`, `lab_ref`, `lab_path`, `ephemeral`, `keep`, `snapshot_before_task` |
-| `vnc` | `host` (the host agent that connects), `address` (`host:port`, port default 5900) | `username`, `credential` (a `password` in the credential store) |
-| `rdp` | `host`, `address` (port default 3389) | `username`, `domain`, `credential` (a `password`) |
+| `vnc` | `host` (the host agent that connects), `address` (`host:port`, port default 5900) | `username`, `credential` (a `login` secret, §5.2) |
+| `rdp` | `host`, `address` (port default 3389) | `username`, `domain`, `credential` (a `login` secret) |
 | `desktop` | `host` | `display` (default `auto`), `display_name` |
 
 `vnc`, `rdp`, and `desktop` targets have only a display (§17.10): exec,
@@ -3927,9 +4051,9 @@ The daemon cannot turn it on. The host agent sends the state in `hello`
 the display off before it sends a frame, and the host agent refuses the
 frame too.
 
-**Secrets.** A `vnc` or `rdp` target names a `password` credential
-(`POST /api/credentials {"name", "kind": "password", "value",
-"username"?}`). The daemon reads it only to build the `display` frame,
+**Secrets.** A `vnc` or `rdp` target names a `login` secret (§5.2; the
+target's project first, then global). The target's `username` wins over
+the secret's. The daemon reads it only to build the `display` frame,
 and sends it only to the target's host agent in that frame. No answer to
 an agent or to the dashboard holds it, and the audit rows do not. The host
 agent does not log it, and its error texts do not hold it.
@@ -4879,8 +5003,9 @@ A merge conflict is `409 conflict` with `details.conflicts` (the paths).
   commit.
 - **Remote.** The URL must be `https://`, `http://`, `ssh://`, `git://`,
   `file://`, `user@host:path`, or an absolute path. A URL with a user or a
-  password is `422`: give the token as `credential`, the name of a `token`
-  or `ssh_key` credential (§5.1). The URL and the credential name go to
+  password is `422`: give the token as `credential`, the name of a global
+  `token`, `github_token`, or `ssh_key` secret (§5.2). The URL and the
+  secret name go to
   `<state>/config-repo.json` (mode 0600), never to the repo or its
   `.git/config`. The secret reaches git through a one-shot credential
   helper or `GIT_SSH_COMMAND`, as for a workspace clone.

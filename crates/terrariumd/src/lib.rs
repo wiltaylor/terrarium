@@ -9,7 +9,6 @@ pub mod agent_rpc;
 pub mod api;
 pub mod assets;
 pub mod config_repo;
-pub mod credentials;
 pub mod db;
 pub mod defaults;
 pub mod display;
@@ -34,8 +33,10 @@ pub mod quota_policy;
 pub mod runner_supervisor;
 pub mod sandbox;
 pub mod scheduler;
+pub mod secrets;
 pub mod settings;
 pub mod skills;
+pub mod ssh_agent;
 pub mod store;
 pub mod supervisor;
 pub mod time_param;
@@ -190,6 +191,15 @@ pub async fn start_with_usage(
     if cfg.insecure_agent_header {
         warn!("--insecure-agent-header: any local caller can act as any agent");
     }
+    // The secret store (PLAN §16b): the master key, then the move of the
+    // old credential files.
+    state
+        .db
+        .read_now(|c| {
+            secrets::ensure_key(c, &state.state_dir).map_err(crate::error::ApiError::from)
+        })
+        .map_err(|e| anyhow::anyhow!("secret store: {e}"))?;
+    secrets::migrate::run_at_start(&state).await;
 
     let mut tasks = Vec::new();
     tasks.push(spawn_pump(state.clone()));

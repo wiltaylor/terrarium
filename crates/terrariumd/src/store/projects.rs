@@ -247,6 +247,8 @@ pub fn delete(t: &mut Tx<'_>, name: &str) -> ApiResult<()> {
     // Cards point at columns without a cascade; drop them first.
     t.execute("DELETE FROM cards WHERE project = ?1", [name])?;
     t.execute("DELETE FROM projects WHERE name = ?1", [name])?;
+    // The project's secrets and their grants (PLAN §16b.2).
+    crate::secrets::delete_project(t, name)?;
     t.audit("project.delete", name, Some(name), json!({}))?;
     Ok(())
 }

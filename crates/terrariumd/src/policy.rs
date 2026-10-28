@@ -61,10 +61,22 @@ pub fn sysadmin(actor: &Actor, what: &str) -> ApiResult<()> {
     }
 }
 
-/// Store, list, or delete git credentials (`/api/credentials`). The API
-/// never returns a secret.
-pub fn manage_credentials(actor: &Actor) -> ApiResult<()> {
-    sysadmin(actor, "managing credentials")
+/// Store, list, show, or delete the secrets of a scope (PLAN §16b.5):
+/// `global` needs sysadmin or the operator; a project needs project_admin
+/// of that project, sysadmin, or the operator. The API never returns a
+/// secret field (a reveal is [`reveal_secret`]).
+pub fn manage_secrets(actor: &Actor, scope: &str) -> ApiResult<()> {
+    if scope == crate::secrets::GLOBAL {
+        sysadmin(actor, "managing global secrets")
+    } else {
+        admin_project(actor, scope, "managing the secrets of a project")
+    }
+}
+
+/// Show the value of a secret (`POST /api/secrets/{scope}/{name}/reveal`):
+/// the operator only, with the operator password (PLAN §16b, S4).
+pub fn reveal_secret(actor: &Actor) -> ApiResult<()> {
+    operator_only(actor, "revealing a secret")
 }
 
 /// Ask for a git credential through the credential helper
@@ -74,7 +86,7 @@ pub fn credential_helper(actor: &Actor) -> ApiResult<&AgentActor> {
     match actor {
         Actor::Agent(a) => Ok(a),
         Actor::Operator => Err(ApiError::forbidden(
-            "the credential helper answers agents only; the operator has the credential store",
+            "the credential helper answers agents only; the operator has the secret store",
         )),
     }
 }
@@ -732,6 +744,29 @@ mod tests {
             name: name.into(),
             project: project.into(),
         }
+    }
+
+    #[test]
+    fn secrets_follow_their_scope() {
+        let member = Actor::Agent(agent("p", &[], Policy::default()));
+        let admin = Actor::Agent(agent("p", &[Role::ProjectAdmin], Policy::default()));
+        let sys = Actor::Agent(agent("q", &[Role::Sysadmin], Policy::default()));
+        let op = Actor::Operator;
+        // Global: sysadmin and the operator.
+        assert!(manage_secrets(&member, "global").is_err());
+        assert!(manage_secrets(&admin, "global").is_err());
+        assert!(manage_secrets(&sys, "global").is_ok());
+        assert!(manage_secrets(&op, "global").is_ok());
+        // A project: its project_admin, sysadmin, and the operator.
+        assert!(manage_secrets(&member, "p").is_err());
+        assert!(manage_secrets(&admin, "p").is_ok());
+        assert!(manage_secrets(&admin, "other").is_err());
+        assert!(manage_secrets(&sys, "p").is_ok());
+        assert!(manage_secrets(&op, "p").is_ok());
+        // A reveal: the operator only.
+        assert!(reveal_secret(&sys).is_err());
+        assert!(reveal_secret(&admin).is_err());
+        assert!(reveal_secret(&op).is_ok());
     }
 
     #[test]

@@ -1,4 +1,5 @@
-//! Repos: the credential store, checkouts into workspaces, the credential
+//! Repos: the `/api/credentials` alias of the secret store, checkouts into
+//! workspaces, the credential
 //! helper endpoint, and the auto-checkout on agent create. No network: the
 //! remotes are local bare repos.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -102,11 +103,15 @@ async fn credentials_are_write_only() {
     assert!(!list.body.to_string().contains("ghp_s3cret"));
     assert_eq!(list.body[0]["kind"], "token");
 
-    // On disk: 0700 dir, 0600 files.
-    let dir = td.state.join("credentials");
+    // The alias stores a global secret (PLAN §16b): sealed in the
+    // database, no file; the key file is 0600.
     let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
-    assert_eq!(mode(&dir), 0o700);
-    assert_eq!(mode(&dir.join("github-deploy")), 0o600);
+    assert!(!td.state.join("credentials/github-deploy").exists());
+    assert_eq!(mode(&td.state.join("secrets.key")), 0o600);
+    let s = td.get("/api/secrets/global/github-deploy").await;
+    assert_eq!(s.ok()["kind"], "token");
+    assert_eq!(s.body["fields"]["username"], "x-access-token");
+    assert!(!s.body.to_string().contains("ghp_s3cret"));
 
     // A member agent cannot list or write credentials.
     td.project("p").await;
@@ -134,7 +139,7 @@ async fn credentials_are_write_only() {
     .err(422, "invalid");
 
     // The audit row has the kind, not the secret.
-    let audit = td.get("/api/audit?action=credential.put").await;
+    let audit = td.get("/api/audit?action=secret.put").await;
     assert_eq!(audit.ok().as_array().unwrap().len(), 1);
     assert!(!audit.body.to_string().contains("ghp_s3cret"));
 

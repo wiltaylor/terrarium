@@ -20,10 +20,10 @@ use terrarium_host::protocol::{DaemonFrame, DisplayRequest, DisplayTarget};
 
 use crate::actor::Actor;
 use crate::api::Shared;
-use crate::credentials::{CredentialStore, Secret};
 use crate::error::{ApiError, ApiResult, Code};
 use crate::executor::{End, container_name, pump_host, resolved_def};
 use crate::policy;
+use crate::secrets::Secret;
 use crate::store::leases::{self, LeaseRow};
 use crate::store::targets::{self, TargetRow};
 
@@ -222,16 +222,17 @@ fn secret(state: &Shared, def: &TargetDef) -> ApiResult<(Option<String>, Option<
     let Some(name) = &def.credential else {
         return Ok((def.username.clone(), None));
     };
-    match CredentialStore::new(&state.state_dir).load(name)? {
-        Some(Secret::Password { username, password }) => {
-            Ok((def.username.clone().or(username), Some(password)))
-        }
-        Some(_) => Err(ApiError::invalid(format!(
-            "credential `{name}` is not a password; a {} target needs a `password` credential",
+    // The secret of a project target: the project's first, then the
+    // global one (PLAN §16b.2).
+    match crate::secrets::load_now(state, def.project.as_deref(), name)? {
+        Secret::Login { username, password } => Ok((
+            def.username.clone().or(username),
+            Some(password.to_string()),
+        )),
+        other => Err(ApiError::invalid(format!(
+            "secret `{name}` is a {}; a {} target needs a `login` secret",
+            other.kind_label(),
             targets::kind_str(def.kind)
-        ))),
-        None => Err(ApiError::invalid(format!(
-            "credential `{name}` is not in the store; add it with POST /api/credentials"
         ))),
     }
 }

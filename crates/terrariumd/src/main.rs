@@ -10,7 +10,8 @@ use terrariumd::harness_tools::ToolsConfig;
 use terrariumd::runner_supervisor::{RunnerMode, RunnerSupervisor, RunnerSupervisorConfig};
 use terrariumd::sandbox::{self, SandboxConfig};
 use terrariumd::settings::{
-    Command, ConfigCommand, DefaultsCommand, HarnessCommand, PasswordCommand, Settings,
+    Command, ConfigCommand, DefaultsCommand, HarnessCommand, PasswordCommand, SecretsCommand,
+    Settings,
 };
 use terrariumd::usage_collector::UsageConfig;
 use terrariumd::{DaemonConfig, start_with_usage};
@@ -33,6 +34,9 @@ async fn main() -> anyhow::Result<()> {
     }
     if let Some(Command::Password { command }) = &settings.command {
         return password_command(&settings, command);
+    }
+    if let Some(Command::Secrets { command }) = &settings.command {
+        return secrets_command(&settings, command);
     }
     if let Some(Command::Defaults { command }) = &settings.command {
         return defaults_command(&settings, command);
@@ -527,6 +531,30 @@ fn password_command(settings: &Settings, command: &PasswordCommand) -> anyhow::R
         println!(
             "password set in {} (version {version}); every session has ended",
             store.path().display()
+        );
+    }
+    Ok(())
+}
+
+/// `terrariumd secrets rotate-key`: a new master key, and each secret
+/// sealed again with it (PLAN §16b.2). It refuses while a daemon answers
+/// on the socket: the daemon reads the key file at each use.
+fn secrets_command(settings: &Settings, command: &SecretsCommand) -> anyhow::Result<()> {
+    let SecretsCommand::RotateKey = command;
+    if std::os::unix::net::UnixStream::connect(&settings.socket).is_ok() {
+        anyhow::bail!(
+            "a daemon answers on {}: stop it first, then rotate the key",
+            settings.socket.display()
+        );
+    }
+    let mut conn = terrariumd::db::open(&settings.state_dir.join("terrarium.db"))?;
+    terrariumd::secrets::ensure_key(&conn, &settings.state_dir)?;
+    let n = terrariumd::secrets::migrate::rotate_key(&mut conn, &settings.state_dir)?;
+    #[allow(clippy::print_stdout)]
+    {
+        println!(
+            "new key in {}; {n} secret(s) sealed again",
+            terrariumd::secrets::crypto::key_path(&settings.state_dir).display()
         );
     }
     Ok(())

@@ -72,6 +72,13 @@ pub enum Command {
         #[command(subcommand)]
         command: RepoCmd,
     },
+    /// Secrets: API keys, tokens, logins, SSH keys (docs/api.md §5.2). The
+    /// scope is `--project`, else global
+    #[command(visible_alias = "secrets")]
+    Secret {
+        #[command(subcommand)]
+        command: SecretCmd,
+    },
     /// Agents
     #[command(visible_alias = "agents")]
     Agent {
@@ -1650,6 +1657,66 @@ pub enum AdminCmd {
         #[command(subcommand)]
         command: PasswordCmd,
     },
+}
+
+/// `terrarium secret ...` (docs/api.md §5.2). A secret value never comes
+/// from an argument: `set` reads it from stdin or `--file`.
+#[derive(Debug, Subcommand)]
+pub enum SecretCmd {
+    /// List the secrets: of `--project`, else of each scope that you
+    /// manage. No value shows
+    #[command(visible_alias = "ls")]
+    List,
+    /// Show one secret: its kind, plain fields, and the names of its
+    /// secret fields. No value shows
+    Show { name: String },
+    /// Store a secret, or replace one. The value comes from stdin or
+    /// `--file`; a terminal asks for it
+    Set(Box<SecretSetArgs>),
+    /// Delete a secret
+    Rm { name: String },
+    /// Show the values of a secret (the operator only). It asks for the
+    /// operator password
+    Reveal {
+        name: String,
+        /// Read the operator password from the first line of stdin
+        #[arg(long)]
+        password_stdin: bool,
+    },
+}
+
+#[derive(Debug, Args)]
+pub struct SecretSetArgs {
+    pub name: String,
+    /// `api_key`, `token`, `github_token`, `login`, `ssh_key`, or `generic`
+    #[arg(long)]
+    pub kind: String,
+    /// Read the value from this file, not from stdin. For `generic`: the
+    /// file holds `KEY=value` lines, one secret field each
+    #[arg(long)]
+    pub file: Option<PathBuf>,
+    /// The user name (`token`, `login`)
+    #[arg(long)]
+    pub username: Option<String>,
+    /// A git host: one for a `github_token` (default github.com); repeat
+    /// for the hosts of a `token`
+    #[arg(long = "host")]
+    pub hosts: Vec<String>,
+    /// The URL of a `login`
+    #[arg(long = "login-url", id = "login_url", value_name = "URL")]
+    pub url: Option<String>,
+    /// The domain of a `login`
+    #[arg(long)]
+    pub domain: Option<String>,
+    /// The env var name of an `api_key`
+    #[arg(long)]
+    pub env: Option<String>,
+    /// A plain field of a `generic` secret, `KEY=value`; repeat for more
+    #[arg(long = "field")]
+    pub fields: Vec<String>,
+    /// A file that holds the passphrase of an `ssh_key`
+    #[arg(long)]
+    pub passphrase_file: Option<PathBuf>,
 }
 
 /// `terrarium admin config ...` (docs/api.md §25). The operator or a

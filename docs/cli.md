@@ -176,6 +176,53 @@ helper that the daemon writes into each workspace clone. It reads git's
 It prints `username=` and `password=` lines, or nothing when the daemon has
 no credential for the host and path. `store` and `erase` do nothing.
 
+`--credential` names a secret (see "Secrets"). The daemon uses the
+project's secret of that name, else the global one.
+
+### Secrets
+
+```
+terrarium secret list [-p project]          the secrets of each scope that you manage
+terrarium secret show <name> [-p project]   kind, plain fields, secret field names
+terrarium secret set <name> --kind k [-p project] [--file f] [kind flags]
+terrarium secret rm <name> [-p project]
+terrarium secret reveal <name> [-p project] [--password-stdin]     the operator only
+```
+
+The secret manager of `docs/api.md` §5.2. The scope is `--project`, else
+`global`. A global secret needs a sysadmin or the operator. A project
+secret needs a project_admin of the project, a sysadmin, or the operator.
+`secret` has the alias `secrets`, and `list` has the alias `ls`.
+
+`set` stores a new secret, or replaces one (`PUT
+/api/secrets/{scope}/{name}`). It never takes a secret value from an
+argument. It reads the value from `--file`, else from stdin. On a
+terminal, it asks for the value with no echo. It removes one line end
+from a token, an API key, a password, and a passphrase. The kind flags set
+the plain fields:
+
+| Kind | The value | Flags |
+|---|---|---|
+| `api_key` | the key | `--env NAME` |
+| `token` | the token | `--username u`, `--host h` (repeat for more hosts) |
+| `github_token` | the token | `--host h` (default `github.com`) |
+| `login` | the password | `--username u`, `--login-url u` (the `url` field), `--domain d` |
+| `ssh_key` | the private key (`--file` or stdin) | `--passphrase-file f` |
+| `generic` | `KEY=value` lines, one secret field each | `--field KEY=value` (a plain field; repeat for more) |
+
+A flag that the kind does not have is a usage error (exit 2).
+
+```
+terrarium secret set github-deploy --kind token --host github.com < token.txt
+terrarium secret set build-box --kind ssh_key --file ~/.ssh/id_ed25519 -p ops
+printf 'PIN=1234\n' | terrarium secret set door --kind generic --field user=bob
+```
+
+`list` and `show` never print a value. `reveal` prints the values. It is
+for the operator only, and it asks for the operator password (or reads the
+first line of stdin with `--password-stdin`). The daemon checks the
+password as a login checks it. Each reveal writes an audit row.
+
 ### Agents
 
 `agent` has the alias `agents`.
@@ -656,7 +703,7 @@ The CLI checks a chord and a region before it sends them.
 
 `admin target new` takes the display fields: `--kind vnc|rdp|desktop`,
 `--address host:port`, `--username`, `--domain` (rdp), `--credential` (a
-`password` credential), `--display x11|wayland|auto`, and
+`login` secret), `--display x11|wayland|auto`, and
 `--display-name` (docker, desktop).
 
 ### Waits, runs, and watches
@@ -1129,7 +1176,7 @@ operator or a sysadmin.
 | `admin config pull [--apply]` | `POST /api/config/pull` `{"apply"}` | The merged files, then for each changed export file its fleet plan (`plan N create, N update, N unchanged`) and the entries that change, or `applied`. A conflict exits 1 with the files. |
 | `admin config sync [-m m] [--apply]` | `POST /api/config/sync` `{"message"?, "apply"}` | The commit line, the merge lines, and `pushed`. |
 | `admin config abort` | `POST /api/config/abort` | `merge aborted: the repo is back at your last commit` |
-| `admin config remote set <url> [--credential c] [--branch b]` | `PUT /api/config/remote` | The status. Put a token or a deploy key in a credential (`POST /api/credentials`), never in the URL: a URL with a user or a password is refused. |
+| `admin config remote set <url> [--credential c] [--branch b]` | `PUT /api/config/remote` | The status. Put a token or a deploy key in a global secret (`terrarium secret set`), never in the URL: a URL with a user or a password is refused. |
 | `admin config remote rm` | `DELETE /api/config/remote` | The status. |
 | `admin config defaults [ls]`, `accept <path>`, `keep <path>` | `GET /api/config/defaults`, `POST /api/config/defaults/accept|keep` `{"path"}` | Each new default that waits, with its diff, or `no new defaults wait`. |
 

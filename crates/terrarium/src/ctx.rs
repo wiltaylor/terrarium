@@ -168,6 +168,12 @@ impl Ctx {
         Ok(s)
     }
 
+    /// True when stdin is a terminal (never with the test stdin): a
+    /// command then asks for a secret with no echo.
+    pub fn stdin_is_terminal(&self) -> bool {
+        self.stdin.is_none() && std::io::IsTerminal::is_terminal(&std::io::stdin())
+    }
+
     /// Lines of stdin up to the first blank line or the end (the git
     /// credential helper protocol).
     pub fn stdin_until_blank(&self) -> anyhow::Result<String> {

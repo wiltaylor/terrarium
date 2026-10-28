@@ -19,6 +19,7 @@ mod questions;
 mod repos;
 mod schedules;
 mod screen;
+mod secrets;
 pub mod session;
 mod skills;
 mod streams;
@@ -230,6 +231,7 @@ fn routes(state: Shared, serve_artifacts: bool, host_connect: bool) -> Router {
         .route("/events/latest", get(streams::latest))
         .merge(projects::routes())
         .merge(repos::routes())
+        .merge(secrets::routes())
         .merge(agents::routes())
         .merge(transcripts::routes())
         .merge(screen::routes())

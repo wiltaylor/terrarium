@@ -21,6 +21,7 @@ pub mod launch;
 pub mod model;
 pub mod paths;
 pub mod protocol;
+pub mod redact;
 pub mod role;
 pub mod schedule;
 pub mod secret_scan;

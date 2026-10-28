@@ -78,6 +78,20 @@ png = "0.17"
 similar = "2.7"
 # The operator password (docs/api.md §1.1): an Argon2id PHC hash.
 argon2 = "0.6"
+# The secret store (PLAN §16b): XChaCha20-Poly1305 at rest, zeroizing
+# buffers for the plain values, and the SSH key parser that derives the
+# public key (OpenSSH, and PEM through rsa, ed25519-dalek, and p256). The
+# RustCrypto RC stack that picky (IronRDP) pins already: ssh-key rc.10 fits
+# it (rc.11 does not), so the tree holds one crypto stack.
+chacha20poly1305 = "0.11"
+zeroize = { version = "1.9", features = ["std"] }
+ssh-key = { version = "=0.7.0-rc.10", features = ["std", "ed25519", "rsa", "p256", "p384", "p521", "encryption"] }
+signature = "3"
+# The redaction matcher (PLAN §16b.6).
+aho-corasick = "1.1.5"
+rsa = { version = "=0.10.0-rc.18", default-features = false, features = ["std", "encoding"] }
+ed25519-dalek = { version = "=3.0.0-rc.1", default-features = false, features = ["pkcs8", "pem", "zeroize"] }
+p256 = { version = "=0.14.0-rc.14", default-features = false, features = ["pem", "std", "arithmetic"] }
 # Password prompts with no echo (`terrariumd password set`, `terrarium login`).
 rpassword = "7.5"
 
@@ -104,6 +118,8 @@ ironrdp-tokio = { version = "=0.10.0", default-features = false }
 
 # Tests
 tempfile = "3.20"
+# Key generation in the ssh-agent tests (rand_core 0.10, as ssh-key 0.7).
+rand = "0.10"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

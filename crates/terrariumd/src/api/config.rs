@@ -471,7 +471,7 @@ async fn remote_set(
     ApiJson(b): ApiJson<RemoteBody>,
 ) -> ApiResult<Json<Status>> {
     allow(&actor, "setting the config repo remote")?;
-    policy::manage_credentials(&actor)?;
+    policy::manage_secrets(&actor, crate::secrets::GLOBAL)?;
     let r = state.config_repo.get()?;
     let _busy = state.config_repo.busy.lock().await;
     let remote = Remote {

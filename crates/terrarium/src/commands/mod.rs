@@ -16,6 +16,7 @@ pub mod questions;
 pub mod remote;
 pub mod schedules;
 pub mod screen;
+pub mod secrets;
 pub mod skills;
 pub mod system;
 pub mod templates;
@@ -43,6 +44,7 @@ pub async fn run(ctx: &Ctx, cmd: &Command) -> anyhow::Result<()> {
         Command::Logout => auth::logout(ctx).await,
         Command::Project { command } => projects::project(ctx, command).await,
         Command::Repo { command } => projects::repo(ctx, command).await,
+        Command::Secret { command } => secrets::secret(ctx, command).await,
         Command::Agent { command } => agents::agent(ctx, command).await,
         Command::Template { command } => templates::template(ctx, command).await,
         Command::Skill { command } => skills::skill(ctx, command).await,

@@ -32,7 +32,7 @@
 //!    and drops the user part of a repo URL ([`redact_url`]).
 //!
 //! The remote URL and its credential stay in the state dir
-//! (`<state>/config-repo.json`, the credential in the credential store),
+//! (`<state>/config-repo.json`, the credential in the secret store),
 //! never in the repo or in `.git/config`: each fetch and push names the
 //! URL on the command line, and the secret goes to git as for a workspace
 //! clone (`crate::git::GitRunner`). A sync never discards a local commit:
@@ -47,9 +47,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use terrarium_core::secret_scan::{self, Finding};
 
-use crate::credentials::CredentialStore;
 use crate::error::{ApiError, ApiResult, Code};
 use crate::git::{GitError, GitRunner};
+use crate::secrets::RunDirs;
 
 /// The file in the state dir with the remote and the sync state.
 pub const STATE_FILE: &str = "config-repo.json";
@@ -181,8 +181,8 @@ impl ConfigRepoRuntime {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Remote {
     pub url: String,
-    /// The name of a `token` or `ssh_key` credential in the credential
-    /// store.
+    /// The name of a global `token`, `github_token`, or `ssh_key` secret
+    /// (PLAN §16b).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential: Option<String>,
     pub branch: String,
@@ -418,7 +418,7 @@ impl ConfigRepo {
 
     /// A runner for local work: no remote, no secret.
     fn local(&self) -> ApiResult<GitRunner> {
-        GitRunner::new("", None, CredentialStore::new(&self.state_dir), TIMEOUT).map_err(git_error)
+        GitRunner::new("", None, RunDirs::new(&self.state_dir), TIMEOUT).map_err(git_error)
     }
 
     /// A runner for the remote, with its credential.
@@ -428,14 +428,25 @@ impl ConfigRepo {
                 "the config repo has no remote: run `terrarium admin config remote set <url>`",
             )
         })?;
-        let store = CredentialStore::new(&self.state_dir);
+        // A global secret (PLAN §16b.2). The config repo has no `Db`
+        // handle (`terrariumd config` runs with no daemon): it reads the
+        // database on its own connection.
         let secret = match &remote.credential {
-            Some(name) => Some(store.load(name)?.ok_or_else(|| {
-                ApiError::invalid(format!("no credential `{name}` for the config repo remote"))
-            })?),
+            Some(name) => {
+                let conn = crate::secrets::open_db(&self.state_dir)?;
+                Some(
+                    crate::secrets::require(&conn, &self.state_dir, None, name).map_err(|e| {
+                        ApiError::invalid(format!(
+                            "the config repo remote's secret `{name}`: {}",
+                            e.message
+                        ))
+                    })?,
+                )
+            }
             None => None,
         };
-        let g = GitRunner::new(&remote.url, secret, store, TIMEOUT).map_err(git_error)?;
+        let g = GitRunner::new(&remote.url, secret, RunDirs::new(&self.state_dir), TIMEOUT)
+            .map_err(git_error)?;
         Ok((g, remote))
     }
 
@@ -871,10 +882,15 @@ impl ConfigRepo {
                 return Err(ApiError::invalid(format!("bad branch `{b}`")));
             }
             if let Some(name) = &r.credential
-                && CredentialStore::new(&self.state_dir).info(name)?.is_none()
+                && crate::secrets::get(
+                    &crate::secrets::open_db(&self.state_dir)?,
+                    crate::secrets::GLOBAL,
+                    name,
+                )?
+                .is_none()
             {
                 return Err(ApiError::invalid(format!(
-                    "no credential `{name}`: store it first (token or ssh_key)"
+                    "no global secret `{name}`: store it first (token, github_token, or ssh_key)"
                 )));
             }
         }

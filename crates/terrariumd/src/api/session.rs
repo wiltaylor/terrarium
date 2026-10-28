@@ -676,7 +676,7 @@ async fn audit_failure(state: &Shared, r: FailReport, ip: &str) {
 /// hash. `Ok(version)`: it matches the hash of that password version; mint
 /// with it. `Err`: the answer to send (`429`, `409`, or `failed`), with the
 /// failure counted and audited.
-async fn check_password(
+pub(crate) async fn check_password(
     state: &Shared,
     ip: &str,
     password: String,
@@ -702,7 +702,9 @@ const MAX_AUTH_BODY: usize = 16 * 1024;
 /// Read a JSON body; an empty body is `T::default()`. A body needs
 /// `Content-Type: application/json`, so a cross-site form (which cannot
 /// set it without a CORS preflight) cannot post one.
-async fn read_json<T: serde::de::DeserializeOwned + Default>(req: Request) -> ApiResult<T> {
+pub(crate) async fn read_json<T: serde::de::DeserializeOwned + Default>(
+    req: Request,
+) -> ApiResult<T> {
     let json = req
         .headers()
         .get(header::CONTENT_TYPE)

@@ -5906,3 +5906,164 @@ async fn notify_and_the_admin_inbox() {
         "{out}"
     );
 }
+
+#[tokio::test]
+async fn secrets_read_values_from_stdin_never_from_arguments() {
+    let info = json!({"scope": "global", "name": "gh", "kind": "token",
+                      "fields": {"username": "x-access-token"}, "secret_fields": ["value"],
+                      "updated_at": "2026-10-28T00:00:00Z", "created_by": "operator"});
+    // A token: the value from stdin, without the line end.
+    let out = ok_in(
+        false,
+        &[
+            "secret",
+            "set",
+            "gh",
+            "--kind",
+            "token",
+            "--host",
+            "github.com",
+        ],
+        vec![(201, info.clone())],
+        Some("ghp_abc\n"),
+        vec![(
+            Put,
+            "/api/secrets/global/gh",
+            vec![],
+            Some(json!({"kind": "token",
+                        "fields": {"value": "ghp_abc", "hosts": ["github.com"]}})),
+        )],
+    )
+    .await;
+    assert_eq!(out, "stored secret global/gh (token)\n");
+    // A login of a project.
+    ok_in(
+        false,
+        &[
+            "secret",
+            "set",
+            "win",
+            "--kind",
+            "login",
+            "--username",
+            "Admin",
+            "-p",
+            "lab",
+        ],
+        vec![(201, info.clone())],
+        Some(" pass word \n"),
+        vec![(
+            Put,
+            "/api/secrets/lab/win",
+            vec![],
+            Some(json!({"kind": "login",
+                        "fields": {"password": " pass word ", "username": "Admin"}})),
+        )],
+    )
+    .await;
+    // A generic secret: plain fields from --field, secret ones from stdin.
+    ok_in(
+        false,
+        &[
+            "secret", "set", "door", "--kind", "generic", "--field", "user=bob",
+        ],
+        vec![(201, info.clone())],
+        Some("# the secret fields\nPIN=1234\nCODE=a=b\n"),
+        vec![(
+            Put,
+            "/api/secrets/global/door",
+            vec![],
+            Some(json!({"kind": "generic",
+                        "fields": {"user": "bob", "PIN": "1234", "CODE": "a=b"},
+                        "secret_fields": ["CODE", "PIN"]})),
+        )],
+    )
+    .await;
+    // A flag that the kind has not, and an unknown kind.
+    let r = exec(
+        false,
+        &["secret", "set", "k", "--kind", "api_key", "--username", "u"],
+        vec![],
+        Some("v\n"),
+    )
+    .await;
+    assert!(r.result.is_err() && r.reqs.is_empty());
+    let r = exec(
+        false,
+        &["secret", "set", "k", "--kind", "password"],
+        vec![],
+        Some("v"),
+    )
+    .await;
+    assert!(r.result.is_err() && r.reqs.is_empty());
+    // No flag takes a value.
+    assert!(
+        Cli::try_parse_from([
+            "terrarium",
+            "secret",
+            "set",
+            "k",
+            "--kind",
+            "token",
+            "--value",
+            "v"
+        ])
+        .is_err()
+    );
+}
+
+#[tokio::test]
+async fn secrets_list_show_rm_and_reveal() {
+    let info = json!({"scope": "global", "name": "gh", "kind": "token",
+                      "fields": {"username": "bot"}, "secret_fields": ["value"],
+                      "updated_at": "2026-10-28T00:00:00Z", "created_by": "operator"});
+    let out = ok(
+        false,
+        &["secret", "list"],
+        vec![(200, json!([info.clone()]))],
+        vec![req(Get, "/api/secrets")],
+    )
+    .await;
+    assert!(
+        out.contains("username=bot") && out.contains("value"),
+        "{out}"
+    );
+    ok(
+        false,
+        &["secret", "ls", "-p", "lab"],
+        vec![(200, json!([]))],
+        vec![(Get, "/api/secrets", vec![("scope", "lab")], None)],
+    )
+    .await;
+    let out = ok(
+        false,
+        &["secret", "show", "gh"],
+        vec![(200, info.clone())],
+        vec![req(Get, "/api/secrets/global/gh")],
+    )
+    .await;
+    assert!(out.contains("secret:   value (not shown)"), "{out}");
+    ok(
+        false,
+        &["secret", "rm", "gh", "-p", "lab"],
+        vec![(204, Value::Null)],
+        vec![req(Delete, "/api/secrets/lab/gh")],
+    )
+    .await;
+    let mut revealed = info.clone();
+    revealed["values"] = json!({"value": "ghp_abc"});
+    let out = ok_in(
+        false,
+        &["secret", "reveal", "gh", "--password-stdin"],
+        vec![(200, revealed)],
+        Some("correct horse battery\n"),
+        vec![(
+            Post,
+            "/api/secrets/global/gh/reveal",
+            vec![],
+            Some(json!({"password": "correct horse battery"})),
+        )],
+    )
+    .await;
+    assert!(out.contains("value: ghp_abc"), "{out}");
+}

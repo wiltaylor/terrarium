@@ -1,8 +1,8 @@
 //! The repositories of a project (PLAN §9). A repo row is data: the URL,
-//! the default branch, the checkout directory, and the *name* of a
-//! credential in `<state>/credentials`. The secret never enters the
-//! database. `crate::git` does the clones; `crate::credentials` holds the
-//! secrets.
+//! the default branch, the checkout directory, and the *name* of a secret
+//! in `credential` (the project's secret of that name, else the global
+//! one). `crate::git` does the clones; `crate::secrets` holds the secrets,
+//! sealed (PLAN §16b).
 
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
@@ -20,7 +20,7 @@ pub struct Repo {
     pub url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_branch: Option<String>,
-    /// A key name in `/state/credentials`, never the secret.
+    /// The name of a secret (PLAN §16b), never the secret.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential: Option<String>,
     /// The checkout directory name.

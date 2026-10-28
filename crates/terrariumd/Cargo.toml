@@ -42,6 +42,15 @@ hmac.workspace = true
 base64.workspace = true
 argon2.workspace = true
 rpassword.workspace = true
+# The secret store (PLAN §16b).
+chacha20poly1305.workspace = true
+zeroize.workspace = true
+ssh-key.workspace = true
+rsa.workspace = true
+ed25519-dalek.workspace = true
+p256.workspace = true
+# The ssh-agent broker (`ssh_agent`, PLAN §16b.4): signatures.
+signature.workspace = true
 # The lock of the password file (`flock`) and the owner check (`geteuid`).
 nix.workspace = true
 # A unique temp file for the password file write.
@@ -68,6 +77,8 @@ hyper.workspace = true
 hyper-util.workspace = true
 tokio-tungstenite.workspace = true
 tempfile.workspace = true
+# Key generation in the `ssh_agent` tests.
+rand.workspace = true
 
 [lints]
 workspace = true

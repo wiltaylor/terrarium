@@ -2250,6 +2250,31 @@ Redaction is a guard against accidents. It does not stop an agent with a
 `read` grant from sending a value out in a changed form (for example,
 base64).
 
+### 16b.6a SSH keys for targets
+
+An `ssh_key` secret is also the login of an `ssh` target (§19). Asked by
+Wil, 2026-10-28.
+
+- The target field `credential` names an `ssh_key` secret. A project target
+  can use a secret of its project or a global secret. A global target can
+  use a global secret only. The daemon refuses any other kind or scope when
+  it saves the target, and it does not wait for the first connection.
+- The daemon uses the key outside the sandbox. A target login needs no
+  grant: an agent that can use the target can use its login, and it never
+  sees the key.
+- `terrarium secret generate <name> [--project p] [--type ed25519|rsa]`
+  and a Generate button in the dashboard make a new key pair in the store.
+  The default type is ed25519. The private key never leaves the daemon.
+  The answer shows the public key.
+- The dashboard shows the public key of each `ssh_key` secret with a copy
+  button, and the line to add to `~/.ssh/authorized_keys`.
+- The target form has a select of the `ssh_key` secrets that the target
+  can use, with "New key" in the same form. The target view shows the key
+  name and its fingerprint.
+- `terrarium target test <name>` connects once and reports one of these
+  results: the key is refused, the host key is unknown, or the login is
+  good.
+
 ### 16b.7 Migration
 
 Migration 35 makes `secrets` and `secret_grants`. At the next start, the
@@ -2266,9 +2291,11 @@ each. `subscriptions/`, `accounts/`, and `backup/` stay as they are.
 2. API, CLI `terrarium secret`, audit, and the `/api/credentials` alias.
 3. Grants, env vars at start, `terrarium secret get`, and the git helper
    for granted hosts.
-4. The ssh-agent broker.
+4. The ssh-agent broker; SSH keys for targets (§16b.6a): scope checks,
+   `secret generate`, `target test`.
 5. Redaction.
-6. Dashboard: the Secrets page and the project tab, with reveal.
+6. Dashboard: the Secrets page and the project tab, with reveal; the key
+   select, Generate, and the public key in the target form.
 7. Config repo export and import of secret names; docs (api.md, cli.md).
 
 ---

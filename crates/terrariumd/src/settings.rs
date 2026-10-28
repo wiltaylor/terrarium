@@ -267,6 +267,12 @@ pub enum Command {
         #[command(subcommand)]
         command: PasswordCommand,
     },
+    /// The secret store in the state dir (PLAN §16b), with no daemon:
+    /// stop the daemon first.
+    Secrets {
+        #[command(subcommand)]
+        command: SecretsCommand,
+    },
     /// The packaged defaults and the config repo (`--defaults-dir`,
     /// `--config-repo`), with no daemon.
     Defaults {
@@ -324,6 +330,15 @@ pub enum PasswordCommand {
         #[arg(long)]
         stdin: bool,
     },
+}
+
+/// `terrariumd secrets ...`.
+#[derive(Debug, Subcommand)]
+pub enum SecretsCommand {
+    /// Make a new master key (`<state>/secrets.key`) and seal each secret
+    /// again with it, in one transaction. The old key stops working. Stop
+    /// the daemon first.
+    RotateKey,
 }
 
 /// `terrariumd harness ...`.

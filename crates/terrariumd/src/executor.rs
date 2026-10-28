@@ -48,10 +48,10 @@ use tracing::{debug, warn};
 
 use crate::actor::Actor;
 use crate::api::Shared;
-use crate::credentials::{CredentialStore, Secret};
 use crate::error::{ApiError, ApiResult, Code};
 use crate::hosts::{HostRegistry, HostSession, SessionEvent};
 use crate::policy;
+use crate::secrets::{RunDirs, Secret};
 use crate::store::leases;
 use crate::store::targets::{self, TargetRow};
 
@@ -1281,30 +1281,25 @@ pub fn start_cmd(state: &Shared, def: &TargetDef, cmd: &RemoteCmd) -> ApiResult<
     let ex = &state.executor;
     match def.kind {
         TargetKind::Ssh => {
-            let store = CredentialStore::new(&state.state_dir);
+            // The secret of a project target: the project's first, then
+            // the global one (PLAN §16b.2).
             let (key, guard): (Option<PathBuf>, Option<Box<dyn Send>>) = match &def.credential {
                 None => (None, None),
-                Some(name) => match store.load(name)? {
-                    Some(Secret::SshKey(k)) => {
-                        let run = store.run_dir()?;
-                        let mut key = k.into_bytes();
-                        if !key.ends_with(b"\n") {
-                            key.push(b'\n');
+                Some(name) => {
+                    match crate::secrets::load_now(state, def.project.as_deref(), name)? {
+                        Secret::SshKey(k) => {
+                            let run = RunDirs::new(&state.state_dir).run_dir()?;
+                            let p = run.write_private("id", k.as_bytes())?;
+                            (Some(p), Some(Box::new(run)))
                         }
-                        let p = run.write_private("id", &key)?;
-                        (Some(p), Some(Box::new(run)))
+                        other => {
+                            return Err(ApiError::invalid(format!(
+                                "secret `{name}` is a {}; an ssh target needs an ssh_key",
+                                other.kind_label()
+                            )));
+                        }
                     }
-                    Some(Secret::Token { .. } | Secret::Password { .. }) => {
-                        return Err(ApiError::invalid(format!(
-                            "credential `{name}` is not an ssh_key; an ssh target needs an ssh_key"
-                        )));
-                    }
-                    None => {
-                        return Err(ApiError::invalid(format!(
-                            "credential `{name}` is not in the store"
-                        )));
-                    }
-                },
+                }
             };
             let plan = ssh_plan(
                 &ex.ssh_bin,
@@ -2936,7 +2931,7 @@ async fn lab_source(
         Some(_) => (None, BTreeMap::new()),
         None => {
             let secret = match &repo.credential {
-                Some(c) => CredentialStore::new(&state.state_dir).load(c)?,
+                Some(c) => Some(crate::secrets::load(state, Some(&repo.project), c).await?),
                 None => None,
             };
             (Some(repo.url.clone()), checkout_env(secret.as_ref()))
@@ -3708,13 +3703,13 @@ pub fn checkout_env(secret: Option<&Secret>) -> BTreeMap<String, String> {
     match secret {
         Some(Secret::Token { username, token }) => {
             env.insert("TERRARIUM_GIT_USERNAME".into(), username.clone());
-            env.insert("TERRARIUM_GIT_PASSWORD".into(), token.clone());
+            env.insert("TERRARIUM_GIT_PASSWORD".into(), token.to_string());
         }
         Some(Secret::SshKey(k)) => {
             env.insert("TERRARIUM_GIT_SSH_KEY".into(), k.trim_end().to_owned());
         }
-        // A password is for vnc and rdp targets; git gets no credential.
-        Some(Secret::Password { .. }) | None => {}
+        // A login is for vnc and rdp targets; git gets no credential.
+        Some(Secret::Login { .. } | Secret::Other(_)) | None => {}
     }
     env
 }
@@ -3976,7 +3971,7 @@ mod tests {
     fn checkout_secret_is_env_only() {
         let s = Secret::Token {
             username: "x-access-token".into(),
-            token: "ghp_SECRET".into(),
+            token: zeroize::Zeroizing::new("ghp_SECRET".into()),
         };
         let c = checkout_cmd("https://h/r.git", "r", Some("main"), Some(1), Some(&s)).unwrap();
         assert!(!c.argv.iter().any(|a| a.contains("ghp_SECRET")));
