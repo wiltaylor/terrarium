@@ -28,7 +28,7 @@
 //! | `claude/file-history/` | bound over `$CLAUDE_CONFIG_DIR/file-history/` |
 //! | `claude/todos/` | bound over `$CLAUDE_CONFIG_DIR/todos/` |
 //! | `claude/session-env/` | bound over `$CLAUDE_CONFIG_DIR/session-env/` |
-//! | `claude/plugin/` | the agent's skills as a plugin (`--plugin-dir`, PLAN §8.5): `.claude-plugin/plugin.json` and `skills/<name>/`, a copy of `skills/`; read-only. Absent when the agent has no skill. |
+//! | `claude/plugin/` | the agent's skills as a plugin (`--plugin-dir`, PLAN §8.6): `.claude-plugin/plugin.json` and `skills/<name>/`, a copy of `skills/`; read-only. Absent when the agent has no skill. |
 //!
 //! The shared home's own skills (`$CLAUDE_CONFIG_DIR/skills`) and the
 //! workspace's `.claude/skills` do not load: `--setting-sources ""` turns
@@ -114,7 +114,7 @@ pub fn claude_dir(agent: &Agent) -> PathBuf {
     agent_dir(agent).join("claude")
 }
 
-/// The agent's plugin dir (PLAN §8.5): its skills, for `--plugin-dir`.
+/// The agent's plugin dir (PLAN §8.6): its skills, for `--plugin-dir`.
 pub fn plugin_dir(agent: &Agent) -> PathBuf {
     claude_dir(agent).join("plugin")
 }

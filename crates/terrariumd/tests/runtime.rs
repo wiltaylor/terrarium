@@ -493,7 +493,7 @@ async fn lifecycle_events_sse_and_pty() {
     assert_eq!(statuses.first(), Some(&"working"), "{seen:#?}");
     td.wait_status(&id, "idle").await;
     let starts = td.events(&id, "turn_start").await;
-    assert_eq!(starts.last().unwrap()["data"]["prompt"], "hello");
+    assert_eq!(starts.last().unwrap()["data"]["prompt"], "[User] hello");
 
     // The PTY: the first frame draws the screen; input reaches the harness.
     let stream = UnixStream::connect(&td.socket).await.unwrap();
@@ -779,22 +779,17 @@ async fn mail_and_cards_push_a_pointer() {
         )
         .await;
     let thread = m["thread_id"].as_str().unwrap().to_owned();
-    let want = format!(
-        "New mail from operator (thread {thread}). Run `terrarium mail read --thread {thread}`."
-    );
+    let mid = m["id"].as_str().unwrap().to_owned();
+    // The turn is tagged, with the body quoted (PLAN §8.5).
+    let want =
+        format!("[Mailbox:operator] Subject:  (thread {thread}, message {mid})\n> secret body");
     let starts = td.wait_events(&id, "turn_start", |e| !e.is_empty()).await;
     assert_eq!(starts[0]["data"]["prompt"], want.as_str());
-    assert!(
-        !starts[0]["data"]["prompt"]
-            .as_str()
-            .unwrap()
-            .contains("secret")
-    );
     td.wait_status(&id, "idle").await;
-    let msg = td
-        .get(&format!("/api/mail/{}", m["id"].as_str().unwrap()))
-        .await;
-    assert_eq!(msg["state"], "delivered");
+    // The turn held the whole body: the mail is read, by the agent.
+    let msg = td.get(&format!("/api/mail/{mid}")).await;
+    assert_eq!(msg["state"], "read");
+    assert_eq!(msg["read_by"], id.as_str());
 
     // Working: the mail waits for the stop hook, and one pointer covers it
     // all, with a card that was assigned meanwhile.
@@ -813,11 +808,13 @@ async fn mail_and_cards_push_a_pointer() {
         .post("/api/mail", Some(json!({"to": "demo/bob", "body": "one"})))
         .await;
     let t2 = a["thread_id"].as_str().unwrap().to_owned();
-    td.post(
-        "/api/mail",
-        Some(json!({"to": "demo/bob", "body": "two", "thread_id": t2})),
-    )
-    .await;
+    let b = td
+        .post(
+            "/api/mail",
+            Some(json!({"to": "demo/bob", "body": "two", "thread_id": t2})),
+        )
+        .await;
+    let (ma, mb) = (a["id"].as_str().unwrap(), b["id"].as_str().unwrap());
     let card = td
         .post(
             "/api/projects/demo/cards",
@@ -843,8 +840,9 @@ async fn mail_and_cards_push_a_pointer() {
     assert_eq!(
         pointer,
         format!(
-            "New mail from operator (thread {t2}). Run `terrarium mail read --thread {t2}`.\n\
-             Card {card_id} was assigned to you. Run `terrarium card show {card_id}`."
+            "[Mailbox:operator] Subject:  (thread {t2}, message {ma})\n> one\n\n\
+             [Mailbox:operator] Subject:  (thread {t2}, message {mb})\n> two\n\n\
+             [System:card] Card {card_id} was assigned to you. Run `terrarium card show {card_id}`."
         )
     );
     let n = starts
@@ -1123,7 +1121,7 @@ async fn board_changes_nudge_the_project_leads() {
     assert_eq!(
         starts[0]["data"]["prompt"],
         format!(
-            "New card {c1} in ready: Ship it…. Run `terrarium card ls --unassigned --column ready`."
+            "[System:nudge] New card {c1} in ready: Ship it…. Run `terrarium card ls --unassigned --column ready`."
         )
         .as_str()
     );
@@ -1165,8 +1163,8 @@ async fn board_changes_nudge_the_project_leads() {
     assert_eq!(
         starts[1]["data"]["prompt"],
         format!(
-            "{c1} moved to review by demo/bob. Run `terrarium card show {c1}`.\n\
-             {c2} moved to blocked by operator: needs the API key. Run `terrarium card show {c2}`."
+            "[System:nudge] {c1} moved to review by demo/bob. Run `terrarium card show {c1}`.\n\n\
+             [System:nudge] {c2} moved to blocked by operator: needs the API key. Run `terrarium card show {c2}`."
         )
         .as_str()
     );
@@ -1319,7 +1317,7 @@ async fn daemon_restart_relaunches_with_resume() {
                 x["data"]["prompt"]
                     .as_str()
                     .unwrap_or("")
-                    .starts_with("Terrarium restarted you")
+                    .starts_with("[System:recap] Terrarium restarted you")
             })
         })
         .await;
@@ -1327,7 +1325,8 @@ async fn daemon_restart_relaunches_with_resume() {
         .as_str()
         .unwrap()
         .to_owned();
-    assert!(recap.contains("- turn: remember me"), "{recap}");
+    // The old turn keeps its tag in the recap line.
+    assert!(recap.contains("- turn: [User] remember me"), "{recap}");
     let started = td.events(&id, "session_started").await;
     assert_eq!(started.last().unwrap()["data"]["source"], "startup");
     assert_ne!(started.last().unwrap()["data"]["harness_session"], first);
@@ -1531,13 +1530,13 @@ async fn quota_hold_blocks_and_release_delivers() {
     let thread = m["thread_id"].as_str().unwrap().to_owned();
     tokio::time::sleep(Duration::from_millis(600)).await;
     assert!(td.events(&id, "turn_start").await.is_empty());
-    assert_eq!(td.sup.waiting_turns(agent), ["held turn"]);
+    assert_eq!(td.sup.waiting_turns(agent), ["[User] held turn"]);
     assert_eq!(td.status(&id).await, "blocked");
 
     // The release sends the turn, then the pointer.
     td.sup.hold_turns(agent, None).await.unwrap();
     let starts = td.wait_events(&id, "turn_start", |e| e.len() >= 2).await;
-    assert_eq!(starts[0]["data"]["prompt"], "held turn");
+    assert_eq!(starts[0]["data"]["prompt"], "[User] held turn");
     assert!(
         starts[1]["data"]["prompt"]
             .as_str()
@@ -2145,7 +2144,8 @@ async fn a_card_assigned_while_stopped_points_at_the_next_start() {
     let starts = td.wait_events(&id, "turn_start", |e| !e.is_empty()).await;
     assert_eq!(
         starts[0]["data"]["prompt"],
-        format!("Card {c1} was assigned to you. Run `terrarium card show {c1}`.").as_str()
+        format!("[System:card] Card {c1} was assigned to you. Run `terrarium card show {c1}`.")
+            .as_str()
     );
     td.wait_status(&id, "idle").await;
     // A restart types it no more.
@@ -2192,7 +2192,8 @@ async fn a_parked_pointer_survives_a_daemon_restart() {
     let starts = td.wait_events(&id, "turn_start", |e| !e.is_empty()).await;
     assert_eq!(
         starts[0]["data"]["prompt"],
-        format!("Card {c1} was assigned to you. Run `terrarium card show {c1}`.").as_str()
+        format!("[System:card] Card {c1} was assigned to you. Run `terrarium card show {c1}`.")
+            .as_str()
     );
     td.wait_status(&id, "idle").await;
     // Typed and dropped pointers are gone from the store: a stop, a daemon
@@ -2269,8 +2270,8 @@ async fn the_assign_pointer_skips_a_card_that_the_assignee_took_up() {
     assert_eq!(
         starts[0]["data"]["prompt"],
         format!(
-            "Card {untouched} was assigned to you. Run `terrarium card show {untouched}`.\n\
-             Card {again} was assigned to you. Run `terrarium card show {again}`."
+            "[System:card] Card {untouched} was assigned to you. Run `terrarium card show {untouched}`.\n\n\
+             [System:card] Card {again} was assigned to you. Run `terrarium card show {again}`."
         )
         .as_str()
     );
@@ -2318,7 +2319,7 @@ async fn a_stale_lead_nudge_is_dropped() {
     )
     .await;
     let want = format!(
-        "New card {b} in ready: Open. Run `terrarium card ls --unassigned --column ready`."
+        "[System:nudge] New card {b} in ready: Open. Run `terrarium card ls --unassigned --column ready`."
     );
     let starts = td
         .wait_events(&lead, "turn_start", |e| {
@@ -2328,7 +2329,7 @@ async fn a_stale_lead_nudge_is_dropped() {
     assert_eq!(starts.len(), 2, "{starts:#?}");
     tokio::time::sleep(LEAD_NUDGE + Duration::from_millis(500)).await;
     let all = prompts(&td, &lead).await;
-    assert_eq!(all, vec!["long work".to_owned(), want], "{all:#?}");
+    assert_eq!(all, vec!["[User] long work".to_owned(), want], "{all:#?}");
 }
 
 /// Lease pointers (docs/api.md §17.7): a grant types "You now have access
@@ -2356,7 +2357,7 @@ async fn lease_grant_and_revoke_push_a_pointer() {
         .await;
     assert_eq!(g["state"], "active", "{g}");
     td.post(&format!("/api/agents/{id}/start"), None).await;
-    let granted = "You now have access to target demo-box (unknown) until revoked. Run `terrarium targets ls`.";
+    let granted = "[System:lease] You now have access to target demo-box (unknown) until revoked. Run `terrarium targets ls`.";
     let starts = td.wait_events(&id, "turn_start", |e| !e.is_empty()).await;
     assert_eq!(starts[0]["data"]["prompt"], granted);
     td.wait_status(&id, "idle").await;
@@ -2373,7 +2374,7 @@ async fn lease_grant_and_revoke_push_a_pointer() {
     let starts = td.wait_events(&id, "turn_start", |e| e.len() >= 2).await;
     assert_eq!(
         starts[1]["data"]["prompt"],
-        "Your access to target demo-box ended."
+        "[System:lease] Your access to target demo-box ended."
     );
     td.wait_status(&id, "idle").await;
     // A grant with an expiry names the time.
@@ -2388,7 +2389,7 @@ async fn lease_grant_and_revoke_push_a_pointer() {
     assert_eq!(
         starts[2]["data"]["prompt"],
         format!(
-            "You now have access to target demo-box (unknown) until {until}. Run `terrarium targets ls`."
+            "[System:lease] You now have access to target demo-box (unknown) until {until}. Run `terrarium targets ls`."
         )
         .as_str()
     );
@@ -2437,7 +2438,7 @@ async fn lease_grant_and_revoke_push_a_pointer() {
     let all = prompts(&td, &id).await;
     assert_eq!(
         starts[5]["data"]["prompt"],
-        "Your access to target demo-box ended."
+        "[System:lease] Your access to target demo-box ended."
     );
     assert_eq!(all.len(), 6, "{all:#?}");
 }

@@ -9,14 +9,15 @@ import type { InboxItem, Message, Question } from "../../api/types";
 import { Empty, ErrorBanner, PageHead, Tabs, useNow } from "../../components/ui";
 import { api, events, inbox, projects } from "../../stores";
 import { MailItemCard, PausedThreadCard } from "./cards";
-import { emptyText, INBOX_TABS, inboxQuery, isInboxEvent, matchesTabs, putItem, sortItems, STATUS_TABS, type InboxStatusTab, type InboxTab } from "./model";
+import { emptyText, INBOX_TABS, inboxQuery, isInboxEvent, matchesTabs, putItem, questionFlags, sortItems, STATUS_TABS, type InboxStatusTab, type InboxTab } from "./model";
+import { inboxItemDomId } from "./critical";
 import { QuestionCard } from "./QuestionCard";
 
 const TAB_IDS = INBOX_TABS.map((t) => t.id) as string[];
 
 export default function InboxPage() {
   const now = useNow(30_000);
-  const [params, setParams] = useSearchParams<{ tab?: string; status?: string; project?: string }>();
+  const [params, setParams] = useSearchParams<{ tab?: string; status?: string; project?: string; item?: string }>();
   const tab = (): InboxTab => (TAB_IDS.includes(params.tab ?? "") ? (params.tab as InboxTab) : "all");
   const status = (): InboxStatusTab => (params.status === "done" ? "done" : "open");
   const project = () => params.project ?? "";
@@ -52,16 +53,24 @@ export default function InboxPage() {
     onCleanup(() => (off(), clearTimeout(t)));
   });
 
+  // `?item=<id>` (the critical banner's link): scroll to the item once it is in the list, and highlight it.
+  let scrolledTo: string | null = null;
+  createEffect(() => {
+    const target = params.item;
+    if (!target || target === scrolledTo || !list().some((i) => i.id === target)) return;
+    scrolledTo = target;
+    requestAnimationFrame(() => document.getElementById(inboxItemDomId(target))?.scrollIntoView({ block: "center", behavior: "smooth" }));
+  });
+
   /** Put the changed item in at once; the badge reads the counts again. */
   const changed = (item: InboxItem) => {
     setList((xs) => putItem(xs, item, keep));
     void inbox.refresh();
   };
   const questionChanged = (item: InboxItem, q: Question) => {
-    const open = q.status === "open";
-    changed({ ...item, question: q, open, urgent: open && q.priority === "urgent" });
+    changed({ ...item, question: q, ...questionFlags(q) });
   };
-  const mailAcked = (item: InboxItem, m: Message) => changed({ ...item, message: m, open: false, urgent: false });
+  const mailAcked = (item: InboxItem, m: Message) => changed({ ...item, message: m, open: false, urgent: false, critical: false });
   const systemChanged = () => (void reload(), void inbox.refresh());
 
   return (
@@ -90,13 +99,15 @@ export default function InboxPage() {
         <div class="stack">
           <For each={list()}>
             {(item) => (
-              <Switch>
-                <Match when={item.question}>
-                  {(q) => <QuestionCard question={q()} now={now()} showAgent showKind onChange={(next) => questionChanged(item, next)} />}
-                </Match>
-                <Match when={item.message}>{(m) => <MailItemCard message={m()} open={item.open} now={now()} onAck={(next) => mailAcked(item, next)} />}</Match>
-                <Match when={item.system}>{(s) => <PausedThreadCard system={s()} onChange={systemChanged} />}</Match>
-              </Switch>
+              <div id={inboxItemDomId(item.id)} classList={{ "inbox-target": params.item === item.id }}>
+                <Switch>
+                  <Match when={item.question}>
+                    {(q) => <QuestionCard question={q()} now={now()} showAgent showKind onChange={(next) => questionChanged(item, next)} />}
+                  </Match>
+                  <Match when={item.message}>{(m) => <MailItemCard message={m()} open={item.open} now={now()} onAck={(next) => mailAcked(item, next)} />}</Match>
+                  <Match when={item.system}>{(s) => <PausedThreadCard system={s()} onChange={systemChanged} />}</Match>
+                </Switch>
+              </div>
             )}
           </For>
         </div>

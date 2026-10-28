@@ -104,7 +104,10 @@ pub struct InboxItem {
     pub id: String,
     pub kind: InboxKind,
     pub open: bool,
+    /// Open, with the priority `urgent` or `critical`.
     pub urgent: bool,
+    /// Open, with the priority `critical`: the operator must act now.
+    pub critical: bool,
     pub project: Option<String>,
     /// When the item came in: the sort key.
     pub at: String,
@@ -150,7 +153,8 @@ fn question_item(q: Question) -> InboxItem {
         id: format!("{}:{}", q.kind.as_str(), q.id),
         kind,
         open: q.status == QuestionStatus::Open,
-        urgent: q.status == QuestionStatus::Open && q.priority == Priority::Urgent,
+        urgent: q.status == QuestionStatus::Open && q.priority.at_least_urgent(),
+        critical: q.status == QuestionStatus::Open && q.priority == Priority::Critical,
         project: Some(q.project.clone()),
         at: q.created_at.clone(),
         question: Some(q),
@@ -165,6 +169,7 @@ fn mail_item(m: Message, open: bool) -> InboxItem {
         kind: InboxKind::Mail,
         open,
         urgent: false,
+        critical: false,
         project: sender_project(&m),
         at: m.created_at.clone(),
         question: None,
@@ -205,6 +210,7 @@ fn system_item(conn: &Connection, thread: &str) -> ApiResult<InboxItem> {
         kind: InboxKind::System,
         open: true,
         urgent: false,
+        critical: false,
         project,
         at,
         question: None,
@@ -261,8 +267,8 @@ fn question_items(conn: &Connection, f: &Filter, kind: QuestionKind) -> ApiResul
     Ok(out.into_iter().map(question_item).collect())
 }
 
-/// The Inbox: urgent first, then the newest first. The open items come
-/// before the done ones in a list of both.
+/// The Inbox: critical first, then urgent, then the newest first. The
+/// open items come before the done ones in a list of both.
 pub fn list(conn: &Connection, f: &Filter) -> ApiResult<Vec<InboxItem>> {
     let mut items = Vec::new();
     if wants(f, InboxKind::Question) {
@@ -305,6 +311,7 @@ pub fn list(conn: &Connection, f: &Filter) -> ApiResult<Vec<InboxItem>> {
     items.sort_by(|a, b| {
         b.open
             .cmp(&a.open)
+            .then(b.critical.cmp(&a.critical))
             .then(b.urgent.cmp(&a.urgent))
             .then(b.at.cmp(&a.at))
             .then(b.id.cmp(&a.id))
@@ -316,7 +323,10 @@ pub fn list(conn: &Connection, f: &Filter) -> ApiResult<Vec<InboxItem>> {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct Counts {
     pub open: usize,
+    /// The open urgent and critical items.
     pub urgent: usize,
+    /// The open critical items only.
+    pub critical: usize,
     pub question: usize,
     pub notice: usize,
     pub mail: usize,
@@ -325,8 +335,9 @@ pub struct Counts {
 
 /// The counts of the open items, of every project or of one.
 pub fn counts(conn: &Connection, project: Option<&str>) -> ApiResult<Counts> {
-    let (question, uq) = questions::open_total(conn, project, Some(QuestionKind::Question))?;
-    let (notice, un) = questions::open_total(conn, project, Some(QuestionKind::Notice))?;
+    let q = questions::open_total(conn, project, Some(QuestionKind::Question))?;
+    let n = questions::open_total(conn, project, Some(QuestionKind::Notice))?;
+    let (question, notice) = (q.open, n.open);
     let f = Filter {
         status: Status::Open,
         kind: None,
@@ -345,7 +356,8 @@ pub fn counts(conn: &Connection, project: Option<&str>) -> ApiResult<Counts> {
     }
     Ok(Counts {
         open: question + notice + mail + system,
-        urgent: uq + un,
+        urgent: q.urgent + n.urgent,
+        critical: q.critical + n.critical,
         question,
         notice,
         mail,

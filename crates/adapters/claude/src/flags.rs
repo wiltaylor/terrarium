@@ -61,7 +61,7 @@ pub struct ClaudeFlags {
     pub removed_settings: &'static [&'static str],
     /// Flags that every launch gets, after the yolo flag.
     pub forced_args: &'static [&'static str],
-    /// Loads a plugin from a directory (PLAN §8.5: the agent's skills).
+    /// Loads a plugin from a directory (PLAN §8.6: the agent's skills).
     /// In `--help` of 2.1.310. Not gated on `--setting-sources`: an inline
     /// plugin is on unless `enabledPlugins` turns it off (bundle marker
     /// `lt.enabled=Aqt(lt.source,...)`).
@@ -120,7 +120,7 @@ pub const CLAUDE_2_1: ClaudeFlags = ClaudeFlags {
         // No self-scheduled turns (`CronCreate`, `/loop`): Terrarium has its
         // own schedules (PLAN §12b).
         ("CLAUDE_CODE_DISABLE_CRON", "1"),
-        // PLAN §8.5: no managed-policy skills (`<managed>/.claude/skills`
+        // PLAN §8.6: no managed-policy skills (`<managed>/.claude/skills`
         // loads with `--setting-sources ""` too). Bundle marker
         // `i.CLAUDE_CODE_DISABLE_POLICY_SKILLS||...`; not run.
         ("CLAUDE_CODE_DISABLE_POLICY_SKILLS", "1"),
@@ -135,6 +135,12 @@ pub const CLAUDE_2_1: ClaudeFlags = ClaudeFlags {
         // No predicted prompt in the input box: the screen detector reads
         // text in the box as "not ready", and a turn would not go in.
         ("CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION", "false"),
+        // No background work in the harness: Terrarium has `terrarium run`
+        // and the waits for that. Read in the 2.1.310 bundle: with it set,
+        // the Bash schema drops `run_in_background`
+        // (`ap()?rn().omit({run_in_background:!0})`), and no command or
+        // MCP call moves to the background by itself. Not run.
+        ("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "1"),
         // Never set `CLAUDE_CODE_DISABLE_DANGEROUS_RM_TIMEOUT`: it removes
         // the 2-minute auto-deny of the critical-path `rm` prompt, so the
         // prompt would wait forever.
@@ -170,7 +176,7 @@ pub const CLAUDE_2_1: ClaudeFlags = ClaudeFlags {
         ("disableRemoteControl", true),
         ("remoteControlAtStartup", false),
         ("autoUploadSessions", false),
-        // PLAN §8.5: only Terrarium-managed skills, the same on every
+        // PLAN §8.6: only Terrarium-managed skills, the same on every
         // harness. The bundled skills (`schedule`, `claude-api`, ...) stay
         // off; the agent's own skills come from its plugin dir. Bundle
         // marker `e.source==="builtin"&&...`: the key hides only the
@@ -207,10 +213,32 @@ pub const CLAUDE_2_1: ClaudeFlags = ClaudeFlags {
         // trust key, and the session dir are all keyed by the cwd.
         "EnterWorktree",
         "ExitWorktree",
+        // Sub-agents, task lists, and background work: Terrarium does
+        // these (leads make workers, cards on the board, `terrarium run`,
+        // `wait`, `watch`). Each name is a tool constant in the 2.1.310
+        // bundle; `Task` is an alias of `Agent`, and `KillShell` of
+        // `TaskStop`, so the deny covers them. `TaskOutput`, `BashOutput`,
+        // and the team tools are not tools in 2.1.310.
+        "Agent",
+        "SendMessage",
+        "ListAgents",
+        "Workflow",
+        "TodoWrite",
+        "TaskCreate",
+        "TaskGet",
+        "TaskUpdate",
+        "TaskList",
+        "TaskStop",
+        "Monitor",
+        // Turns that nobody typed (`CLAUDE_CODE_DISABLE_CRON` too).
+        "CronCreate",
+        "CronDelete",
+        "CronList",
+        "ScheduleWakeup",
     ],
     // `disableAllHooks` would stop the Terrarium hooks, and so the status
     // machine, the turns, and the usage.
-    // PLAN §8.5: `enabledPlugins` could turn on a plugin of the shared
+    // PLAN §8.6: `enabledPlugins` could turn on a plugin of the shared
     // home (and its skills), or turn off the agent's own plugin.
     removed_settings: &["disableAllHooks", "enabledPlugins"],
     forced_args: &[

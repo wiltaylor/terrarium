@@ -1931,7 +1931,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
             if (!LIVE.includes(a.status) || currentSession(a) !== s) return;
             if (a.status !== "idle" && a.status !== "waiting") return void later(typeTurn, Math.max(pace, 1));
             if (s) s.turns++;
-            writeBlock(a, { role: "user", kind: "text", text, origin: "operator" });
+            writeBlock(a, { role: "user", kind: "text", text: `[User] ${text}`, origin: "operator", parts: [{ source: "user", body: text }] });
             agentEvent(a, "turn_start", `Turn typed by operator: ${text.slice(0, 60)}`, { text }, "operator");
             setStatus(a, "working");
             const steps: (() => void)[] = [

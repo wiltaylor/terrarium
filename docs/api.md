@@ -1034,19 +1034,26 @@ lists the leases that the agent holds.
 | `POST /api/agents/{id}/answer` | `{"request_id", "answer"}` or `{"text"}` | `202 {"accepted": true}` |
 | `POST /api/agents/{id}/subscription` | `{"subscription": "anthropic-max-20x-2"}` | `200 {"agent", "from"?, "to", "applied"}` (below) |
 
-All need project_admin. The work happens in the background. A `send` by
-the operator writes a row to the delivery log first, so the transcript tags
-the turn `origin: "operator"` when the harness writes it (§6.6).
+All need project_admin. The work happens in the background. A `send`
+writes a row to the delivery log first (§6.6).
 
-**A turn is plain text.** A `send` waits until the agent is `idle`. When
-its text starts with `/` or `!` (after white space), the adapter puts the
-character U+00A0 (no-break space) in front of it, so the harness does not
-run it as a slash command or a shell command. Copilot also gets the escape
-for a text that is only `$`. A mail pointer, a recap turn, and a schedule
-turn go the same way. The escape does not change the words that the model
-reads. To run a harness command on purpose, use `raw` (§6.5). The answer
-shows the agent when the daemon accepted the call; watch the events (§8)
-for the status changes.
+**A turn is tagged (PLAN §8.5).** A `send` waits until the agent is
+`idle`, and types `[User] <text>` when the operator calls it (the
+dashboard, or the API or the CLI with the operator's token or session).
+A send from an agent (for example a lead's `terrarium agent send
+<worker> ...`) types `[Agent:<project>/<name>] <text>`: it names the
+calling agent and is never `[User]`. The text is not quoted, but a line in
+it that would read as a tag is defused (`[User]` becomes `[\User]`). A
+schedule `turn` action types `[System:schedule <name>] <text>`. Because a
+tagged turn starts with `[`, the harness never runs it as a slash command
+or a shell command. (An adapter still puts U+00A0 in front of an
+untagged text that starts with `/` or `!`, or of a lone `$` in Copilot.)
+To run a harness command on purpose, use `raw` (§6.5): a raw text has no
+tag, and its tag-like lines are defused. A raw text and keys stay
+untagged for an agent caller too, so untagged text is the operator or a
+lead with the PTY rights. The answer shows the agent when
+the daemon accepted the call; watch the events (§8) for the status
+changes.
 
 - `start` opens a new session and resumes the last harness session.
   A running agent gets `409 already_running`.
@@ -1147,13 +1154,25 @@ With `TERRARIUM_RUNNER_MODE=inprocess` (tests and development), the daemon
 ends its harnesses when it stops, and launches them again with resume when
 it starts.
 
-Push delivery (PLAN §12, §13): new mail to an agent, a card assigned to it
-by someone else, and an unblocked card of its own each add one line to a
-pending pointer turn, for example "New mail from operator (thread T). Run
-`terrarium mail read --thread T`." The runner types the pointer when the
-agent is `idle` or `waiting`, else after the next stop hook. One pointer covers all the
-items that came in meanwhile. When the harness takes the turn, the mail
-becomes `delivered`. Mail that is `queued` when an agent starts goes into
+Push delivery (PLAN §12, §13, §8.5): new mail to an agent, a card
+assigned to it by someone else, and an unblocked card of its own each add
+one block to a pending pointer turn. A mail block is a tag line and the
+body quoted with `> `:
+
+```
+[Mailbox:operator] Subject: Deploy (thread T, message M)
+> Deploy the branch when the tests pass.
+
+[System:card] Card TER-4 was assigned to you. Run `terrarium card show TER-4`.
+```
+
+A body over 2000 characters (after the quote marks) is cut, and its block
+ends with `… (cut; run `terrarium mail read --thread T`)`. The runner
+types the pointer when the agent is `idle` or `waiting`, else after the
+next stop hook. One pointer covers all the items that came in meanwhile,
+one block each. When the harness takes the turn, a mail whose body the
+turn held whole becomes `read` (`read_by` is the agent, audit `via:
+"turn"`), and a cut mail becomes `delivered`. Mail that is `queued` when an agent starts goes into
 its first pointer. A card line (and a lease line, §17.7) for an agent that
 does not run is kept for the next start, also across a daemon restart: the
 daemon stores it in the `pending_pointers` table. A newer line for the same
@@ -1218,8 +1237,10 @@ The transcript fields (§6.6):
 | `title` | The first user text that the harness did not make, on one line, at most 80 characters. `null` when there is none. |
 | `active` | This is the agent's current session, and the agent runs. |
 
-Two sessions can share one harness session (a restart resumes it). They
-then show the same file.
+Two sessions can share one harness session (a restart or a daemon restart
+resumes it). They then show the same file. The Sessions tab of the
+dashboard shows the sessions of one harness session in a row as one
+conversation, and opens the newest one.
 
 ### 6.4 Roles
 
@@ -1360,7 +1381,8 @@ harness session.
 | `kind` | `text`, `thinking`, `tool_call`, `tool_result`, or `system`. |
 | `text` | Markdown or plain text: `text`, `thinking`, and `system` blocks. Cut at 64 KiB with `truncated: true`. |
 | `redacted` | `true` on a `thinking` block when the harness stores no thinking text (only a signature or encrypted content). |
-| `origin` | On a user `text`: `operator`, `agent_mail_pointer`, `system`, or `user`. See below. |
+| `origin` | On a user `text`: `operator`, `agent`, `agent_mail_pointer`, `system`, or `user`. See below. |
+| `parts` | On a user `text` that starts with a turn tag (PLAN §8.5): one object for each tagged block, in order. `source` is `user`, `agent` (with `sender`, `project/agent`), `mailbox` (with `sender`, `subject`, `thread`, `message`), or `system` (with `kind`, and `detail` for `schedule <name>`). `body` is the text after the tag line: for a mail, the quoted body. Left out on an untagged text. `text` keeps the raw turn. |
 | `tool` | On a `tool_call`: `id` (the harness's call ID), `name`, `input` (JSON; an input over 64 KiB becomes a cut string), and `summary` (one line). |
 | `result` | On a `tool_result`: `tool_id` (the `tool.id` of its call), `output` (a string, cut at 64 KiB with `truncated: true`), and `is_error`. |
 | `model` | The model of an assistant block, when the harness records it. |
@@ -1376,13 +1398,24 @@ lists them.
 
 **Origin.** The parser sets `system` on a user text that the harness made
 (a `<task-notification>`, a `<system_notification>`, `<environment_context>`,
-a meta message) and `user` on a typed prompt. The daemon then tags the
-typed prompts that it typed itself: before it types a turn, it writes a row
-to its delivery log (the SHA-256 of the text with whitespace collapsed, not
-the text). `POST /api/agents/{id}/send` by the operator gives `operator`, a
-push pointer (mail, card, lead, lease) gives `agent_mail_pointer`, and the
-recap turn after a failed resume gives `system`. A send by an agent, and a
-prompt that someone typed into the terminal, stay `user`.
+a meta message) and `user` on a typed prompt. A typed prompt that starts
+with a turn tag gets its origin from the first tag: `[User]` gives
+`operator`, `[Agent:...]` gives `agent`, `[Mailbox:...]` gives
+`agent_mail_pointer`, and
+`[System:...]` gives `system`. It also gets `parts`. The daemon also
+writes a row to its delivery log before it types a turn (the SHA-256 of
+the text with whitespace collapsed, not the text, and the origin of its
+tag). An untagged prompt that matches a row gets the origin of the row. A
+prompt that someone typed into the terminal, and a raw send, stay
+`user`: they count as the operator's (a raw send can also come from a
+lead with the PTY rights).
+
+```json
+{"seq":7,"role":"user","kind":"text","origin":"agent_mail_pointer",
+ "text":"[Mailbox:ht/lead] Subject: TER-4 (thread T1, message M1)\n> Use the new grammar.",
+ "parts":[{"source":"mailbox","sender":"ht/lead","subject":"TER-4","thread":"T1",
+           "message":"M1","body":"> Use the new grammar."}], …}
+```
 
 **Page**
 
@@ -1394,7 +1427,8 @@ GET /api/agents/smoke%2Fprobe/sessions/01M5PA0T1NSYX43DDK1M2KT8KR/transcript?aft
  "blocks":[
   {"id":"248e9b6e-e0ec-49d1-b44c-6a9d2a7bf38b:0","session":"01M5PA0T1NSYX43DDK1M2KT8KR","seq":1,
    "at":"2026-10-25T09:53:44.196Z","role":"user","kind":"text","origin":"operator",
-   "text":"Run `terrarium targets ls`.","source":{"harness":"claude","file":"01a1727a-….jsonl","line":5}},
+   "text":"[User] Run `terrarium targets ls`.","parts":[{"source":"user","body":"Run `terrarium targets ls`."}],
+   "source":{"harness":"claude","file":"01a1727a-….jsonl","line":5}},
   {"id":"msg_011CgNkaAdYdHCEbxuSH5HWk:0","seq":2,"role":"assistant","kind":"tool_call", …}],
  "next_after":2,"complete":false}
 ```
@@ -1651,7 +1685,7 @@ for the differences below.
 | `options` | Short choice labels: at most 10, each at most 200 characters, no two the same. `[]` for a free answer. A notice has none: options on a notice are `422 invalid`. |
 | `context` | Optional background as Markdown, at most 16 KiB. The dashboard shows it through the DOMPurify sink only. |
 | `card` | Optional. A card of the agent's project. |
-| `priority` | `normal` or `urgent`. Lists put the urgent open questions first. |
+| `priority` | `normal`, `urgent`, or `critical`. Lists put the critical open questions first, then the urgent ones. Use `critical` only when the operator must act now: production is down, data is lost, a security problem, or a spent budget that stops all work. While a critical item is open, the dashboard shows a banner on each page and flashes its browser tab (§6.9). |
 | `status` | A question: `open`, `answered`, or `retracted`. A notice: `open`, `acknowledged`, or `retracted`. Only `open` changes. |
 | `answer`, `answer_option` | The answer text, and the 0-based index of the chosen option. An answer with an option and no text has the label as `answer`. For an acknowledged notice, `answer` is the reply of the operator, if any. |
 | `answered_by`, `answered_by_name` | `operator`, or the ULID and `project/name` of a sysadmin agent. |
@@ -1672,7 +1706,7 @@ The rights:
 |---|---|---|
 | `GET /api/agents/{id}/questions` | `?status=open\|answered\|acknowledged\|retracted`, `?all=true`, `?kind=question\|notice` | `200` the questions and notices of the agent. No filter: the open ones and those answered or acknowledged in the last 24 h. |
 | `POST /api/agents/{id}/questions` | `{"kind"?, "text", "options"?, "context"?, "card"?, "priority"?, "wait"?, "timeout"?}`; `kind` is `question` (the default) or `notice` | `201` the question or notice; with `wait: true`, also `wait`: the new `question` wait (§6.7) |
-| `GET /api/questions` | `?status=` (default `open`; `all` for every status), `?project=`, `?agent=`, `?kind=` | `200` at most 200 questions and notices. Open first (urgent first, then the oldest first), then the others (the newest first). `X-Open-Questions` and `X-Urgent-Questions` count the open ones of the `kind` filter (both kinds without it). The operator and a sysadmin see all; a project_admin sees its own project; a member gets `403`. |
+| `GET /api/questions` | `?status=` (default `open`; `all` for every status), `?project=`, `?agent=`, `?kind=` | `200` at most 200 questions and notices. Open first (critical first, then urgent, then the oldest first), then the others (the newest first). `X-Open-Questions`, `X-Urgent-Questions` (urgent and critical), and `X-Critical-Questions` count the open ones of the `kind` filter (both kinds without it). The operator and a sysadmin see all; a project_admin sees its own project; a member gets `403`. |
 | `GET /api/questions/{id}` | | `200` the question |
 | `PATCH /api/questions/{id}` | `{"text"?, "options"?, "context"?, "card"?, "priority"?}`; `null` (or `[]` for `options`) clears a field | `200` the question. A question that is not open is `409 conflict`. |
 | `POST /api/questions/{id}/answer` | `{"answer"?, "option"?}`: a text, an option (its label, or its 0-based index), or both | `200` the question. A question that is not open is `409 conflict`. A notice is `409 conflict`. |
@@ -1738,11 +1772,11 @@ The notice of a pause (`Thread T needs a human`, from `system`) is not a
 `mail` item: the `system` item of the thread shows it.
 
 ```json
-[{"id":"notice:01JQ...","kind":"notice","open":true,"urgent":true,"project":"demo",
+[{"id":"notice:01JQ...","kind":"notice","open":true,"urgent":true,"critical":false,"project":"demo",
   "at":"2026-10-28T10:00:00.000Z","question":{"id":"01JQ...","kind":"notice", "...": "§6.8"}},
- {"id":"mail:01M5...","kind":"mail","open":true,"urgent":false,"project":"demo",
+ {"id":"mail:01M5...","kind":"mail","open":true,"urgent":false,"critical":false,"project":"demo",
   "at":"2026-10-28T09:00:00.000Z","message":{"id":"01M5...", "...": "§7"}},
- {"id":"thread:01JT...","kind":"system","open":true,"urgent":false,"project":"demo",
+ {"id":"thread:01JT...","kind":"system","open":true,"urgent":false,"critical":false,"project":"demo",
   "at":"2026-10-28T08:00:00.000Z",
   "system":{"kind":"paused_thread","thread_id":"01JT...","subject":"loop","paused":true,
             "agent_run":7,"limit":6,"participants":["demo/w1","demo/w2"],
@@ -1753,15 +1787,16 @@ The notice of a pause (`Thread T needs a human`, from `system`) is not a
 |---|---|
 | `id` | `question:<id>`, `notice:<id>`, `mail:<message id>`, or `thread:<thread id>`. |
 | `open` | The item waits for the operator. |
-| `urgent` | An open question or notice with `priority: urgent`. Mail and system items are not urgent. |
+| `urgent` | An open question or notice with `priority: urgent` or `critical`. Mail and system items are not urgent. |
+| `critical` | An open question or notice with `priority: critical`. The dashboard shows the newest one in a banner on each page, with a link to `/inbox?item=<id>`, and flashes its browser tab while the page is hidden or has no focus. |
 | `project` | The project of the asking agent, of the sender of the mail, or of the first agent on the thread. `null` for mail from `system` or from the operator. |
 | `at` | When the item came in: the ask, the send, or the first held message that is not released. |
 | `question`, `message`, `system` | The question or notice, the message, or the thread. A system item has `paused`, `agent_run` (the agent-to-agent messages since the last reset), `limit` (`TERRARIUM_MAIL_LOOP_LIMIT`), `participants`, and `held` (the held messages that are not released). |
 
 | Endpoint | Body or query | Answer |
 |---|---|---|
-| `GET /api/inbox` | `?status=open\|done\|all` (default `open`), `?kind=question\|notice\|mail\|system`, `?project=` | `200` the items. The open ones first, then urgent first, then the newest first. `X-Inbox-Open` and `X-Inbox-Urgent` count the open items of the `project` filter (all kinds). System items show only while they are open; the audit log keeps their history. |
-| `GET /api/inbox/counts` | `?project=` | `200` `{"open", "urgent", "question", "notice", "mail", "system"}`: the open items of each kind. The dashboard badge shows `open`, red when `urgent` is not 0. |
+| `GET /api/inbox` | `?status=open\|done\|all` (default `open`), `?kind=question\|notice\|mail\|system`, `?project=` | `200` the items. The open ones first, then critical first, then urgent, then the newest first. `X-Inbox-Open`, `X-Inbox-Urgent`, and `X-Inbox-Critical` count the open items of the `project` filter (all kinds). System items show only while they are open; the audit log keeps their history. |
+| `GET /api/inbox/counts` | `?project=` | `200` `{"open", "urgent", "critical", "question", "notice", "mail", "system"}`: the open items of each kind. `urgent` counts the urgent and the critical items; `critical` counts only the critical ones. The dashboard badge shows `open`, red when `urgent` is not 0. |
 | `POST /api/inbox/mail/{id}/ack` | `{"reply"?}`, or no body | `200` `{"message", "replies"}`. The mail becomes `read`. With `reply`, the reply goes as `operator` on the thread of the mail to its other participants (§7.2), and the mail becomes `replied`. A message that is not to the operator is `404`. One that is acknowledged already is `409 conflict`. A reply to a system mail that has nobody to answer is `422 invalid`. |
 
 Only the operator reads the Inbox and acts on it. An agent gets `403`,
@@ -4825,7 +4860,7 @@ A merge conflict is `409 conflict` with `details.conflicts` (the paths).
 
 ## 26. Skills
 
-The skill library (PLAN §8.5): `skills/<name>/` in the config repo, in
+The skill library (PLAN §8.6): `skills/<name>/` in the config repo, in
 the Agent Skills format (`SKILL.md` with `name` and `description` in its
 front matter, and optional files). The operator and a sysadmin read and
 write all of it. Another agent reads only its own skills (the ones its
@@ -4899,7 +4934,7 @@ A write body:
   The next start of such an agent gives a `warning` event, and the agent
   starts without the skill.
 - **Delivery.** At each start the agent gets a fresh copy of its skills,
-  read-only (PLAN §8.5). A change of the library or of the list applies
+  read-only (PLAN §8.6). A change of the library or of the list applies
   at the next start; until then the agent shows `skills_restart: true`.
 - **Audit.** `skill.create`, `skill.update`, and `skill.delete`; an
   agent `PATCH` audits `skills`.

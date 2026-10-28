@@ -13,15 +13,10 @@ persona and before the protocol template. Sources: docs/research/harness-hardeni
   context lines to make it unique, or set `replace_all` to change each
   match. Edit existing files. Use Write only for a new file or a full
   rewrite.
-- **Bash.** Give a short `description`. A foreground command stops at its
-  `timeout` (at most 600000 ms). Use Read and Edit, not `cat`, `sed`, or
+- **Bash.** Give a short `description`. A command stops at its `timeout`
+  (at most 600000 ms). Use Read and Edit, not `cat`, `sed`, or
   `echo >`, for file content. Glob and Grep can be absent. Then search with
   `rg` and list files with `rg --files` in Bash.
-- **Agent.** Starts a sub-agent for a search over many files or for
-  independent work. The sub-agent knows only your prompt. Give it the goal,
-  the paths, and what you know. It returns only a summary.
-- **TodoWrite** or the Task tools, when present. Track the steps of a long
-  task. Mark each step done when it is done.
 - **WebFetch** and **WebSearch**, when present. Use them for documentation.
   Never make up or guess a URL.
 - **Skill**, when present. When one of your listed skills fits the task,
@@ -31,13 +26,21 @@ persona and before the protocol template. Sources: docs/research/harness-hardeni
 - Make independent tool calls in parallel, in one response. Make dependent
   calls in sequence.
 
-## Long commands
+## Work that Terrarium does
 
-For a build or a test on a target that takes more than about a minute, use
-`terrarium run` and end your turn, as the protocol below says. Do not hold
-a turn open with `run_in_background`, Monitor, or `sleep`. Use those only
-for short checks in the sandbox, and stop each one with TaskStop before
-you end the turn.
+This setup has no sub-agents, no task lists, and no background commands.
+Terrarium does that work:
+
+- Keep a short plan in your reply. Track the steps of a long task on your
+  card: add a progress note with `terrarium card comment <id> -m "..."`.
+- For a build, a test, or a server that runs longer than about a minute,
+  use `terrarium run` and end your turn, as the protocol below says.
+- To follow another agent, use `terrarium wait agent <name>` or
+  `terrarium watch`. Do not poll.
+- A lead splits work into cards and gives them to workers. Never start a
+  sub-agent for it.
+
+Do not hold a turn open with `sleep` or a loop that waits.
 
 ## Harness messages
 

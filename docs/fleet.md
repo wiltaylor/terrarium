@@ -286,7 +286,7 @@ name = "w1"
 persona = "none"        # the harness's own default prompt
 ```
 
-An agent or a template can set `skills` (PLAN §8.5): names of the skill
+An agent or a template can set `skills` (PLAN §8.6): names of the skill
 library in the config repo, or `*` for every skill. Not set: no skills. A
 name that is not in the library is an error of the plan.
 

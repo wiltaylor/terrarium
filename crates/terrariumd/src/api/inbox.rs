@@ -2,8 +2,9 @@
 //!
 //! - `GET /api/inbox?status=open|done|all&kind=&project=`: the questions,
 //!   the notices, the mail to the operator, and the system items in one
-//!   list, urgent first, then the newest first. `x-inbox-open` and
-//!   `x-inbox-urgent` give the open counts.
+//!   list, critical first, then urgent, then the newest first.
+//!   `x-inbox-open`, `x-inbox-urgent`, and `x-inbox-critical` give the
+//!   open counts.
 //! - `GET /api/inbox/counts?project=`: the open counts of each kind.
 //! - `POST /api/inbox/mail/{id}/ack`: acknowledge a mail to the operator,
 //!   with an optional reply on its thread.
@@ -76,7 +77,11 @@ async fn list(
         .read(move |c| Ok((inbox::list(c, &f)?, inbox::counts(c, project.as_deref())?)))
         .await?;
     let mut resp = Json(rows).into_response();
-    for (k, v) in [("x-inbox-open", c.open), ("x-inbox-urgent", c.urgent)] {
+    for (k, v) in [
+        ("x-inbox-open", c.open),
+        ("x-inbox-urgent", c.urgent),
+        ("x-inbox-critical", c.critical),
+    ] {
         if let Ok(v) = v.to_string().parse() {
             resp.headers_mut().insert(k, v);
         }

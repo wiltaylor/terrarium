@@ -691,6 +691,7 @@ async fn execute(
                 actor,
                 &id,
                 &format!("{project}/{name}"),
+                &s.name,
                 text,
                 start_if_stopped,
             )
@@ -872,6 +873,7 @@ async fn turn(
     actor: Actor,
     id: &str,
     who: &str,
+    schedule: &str,
     text: String,
     start_if_stopped: bool,
 ) -> Outcome {
@@ -904,14 +906,12 @@ async fn turn(
         }
     }
     let body = super::agents::SendBody { text, raw: false };
-    match super::agents::send(
-        State(state.clone()),
-        actor,
-        Path(id.to_owned()),
-        ApiJson(body),
-    )
-    .await
-    {
+    // The turn starts with `[System:schedule <name>]` (PLAN §8.5).
+    let source = terrarium_core::turn_tag::TurnSource::System {
+        kind: terrarium_core::turn_tag::SystemKind::Schedule,
+        detail: Some(schedule.to_owned()),
+    };
+    match super::agents::send_as(state, actor, id.to_owned(), body, &source).await {
         Ok(_) => Outcome::ok(
             if started {
                 format!("started {who} and sent the turn")

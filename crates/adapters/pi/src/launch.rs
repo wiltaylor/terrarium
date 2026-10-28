@@ -84,7 +84,7 @@ pub fn model_args(
 /// - `--no-skills --no-prompt-templates`: no global skills (pi reads
 ///   `~/.agents/skills` outside its home) and no `/template` expansions.
 /// - `--skill <agent dir>/skills/<name>` for each delivered skill (PLAN
-///   §8.5). pi lists them in the `<skills>` prompt section, and the model
+///   §8.6). pi lists them in the `<skills>` prompt section, and the model
 ///   reads the `SKILL.md` with its `read` tool. pi has no skill tool.
 /// - `--no-context-files` (unless [`PiOptions::context_files`]): pi does
 ///   not load `AGENTS.md`/`CLAUDE.md`. It would load the one in the shared
@@ -253,7 +253,7 @@ mod tests {
         assert_eq!(spec.env.len(), 3);
     }
 
-    /// PLAN §8.5: one `--skill` for each delivered skill, after
+    /// PLAN §8.6: one `--skill` for each delivered skill, after
     /// `--no-skills` (which stops only discovery).
     #[test]
     fn delivered_skills_load_with_no_skills() {

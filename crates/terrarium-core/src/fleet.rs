@@ -1533,7 +1533,7 @@ host = "h1"
 image = "alpine"
 "#;
 
-    /// PLAN §8.5: `skills` on a fleet agent and a fleet template; a bad
+    /// PLAN §8.6: `skills` on a fleet agent and a fleet template; a bad
     /// name is an error.
     #[test]
     fn skills_on_agents_and_templates() {

@@ -985,7 +985,7 @@ pub fn check_against(conn: &Connection, f: &Fleet, prompts: &Path) -> ApiResult<
         }
     }
     // The skills of each agent and template are in the skill library
-    // (PLAN §8.5).
+    // (PLAN §8.6).
     let library = crate::skills::library_dir_from_env();
     let mut skill_users: Vec<(String, Vec<String>)> = f
         .agents()

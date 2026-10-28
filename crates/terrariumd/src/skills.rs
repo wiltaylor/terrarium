@@ -1,4 +1,4 @@
-//! The skill library (PLAN §8.5): `<config repo>/skills/<name>/`, its
+//! The skill library (PLAN §8.6): `<config repo>/skills/<name>/`, its
 //! reads and writes for `/api/skills`, the check of a `skills` list at
 //! assignment, and the record of the skills that an agent got at its
 //! start.

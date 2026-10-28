@@ -1082,7 +1082,29 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX thread_resumes_thread ON thread_resumes(thread_id);
     "#,
-    // 31: the skills of an agent (PLAN §8.5): a JSON array of skill names
+    // 31: the origin `agent` in the delivery log (PLAN §8.5): a turn that
+    // another agent typed with `POST /api/agents/{id}/send`, tagged
+    // `[Agent:<project>/<name>]`. The origin column is made again with the
+    // new CHECK (the way of migration 29). No index has the column.
+    r#"
+    ALTER TABLE deliveries ADD COLUMN origin_v31 TEXT NOT NULL DEFAULT 'user'
+        CHECK (origin_v31 IN ('operator', 'agent', 'agent_mail_pointer', 'system', 'user'));
+    UPDATE deliveries SET origin_v31 = origin;
+    ALTER TABLE deliveries DROP COLUMN origin;
+    ALTER TABLE deliveries RENAME COLUMN origin_v31 TO origin;
+    "#,
+    // 32: the priority `critical` of questions and notices (PLAN §12e,
+    // docs/api.md §6.8): the operator must act now. The priority column is
+    // made again with the new CHECK (the way of migration 29). No index has
+    // the column.
+    r#"
+    ALTER TABLE questions ADD COLUMN priority_v32 TEXT NOT NULL DEFAULT 'normal'
+        CHECK (priority_v32 IN ('normal', 'urgent', 'critical'));
+    UPDATE questions SET priority_v32 = priority;
+    ALTER TABLE questions DROP COLUMN priority;
+    ALTER TABLE questions RENAME COLUMN priority_v32 TO priority;
+    "#,
+    // 33: the skills of an agent (PLAN §8.6): a JSON array of skill names
     // from the skill library, or `["*"]` for all of them.
     r#"
     ALTER TABLE agents ADD COLUMN skills TEXT NOT NULL DEFAULT '[]';
@@ -1709,6 +1731,60 @@ mod tests {
     }
 
     #[test]
+    fn migration_32_keeps_the_priority_and_takes_critical() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        for (i, sql) in MIGRATIONS.iter().enumerate().take(31) {
+            conn.execute_batch(sql).unwrap();
+            conn.pragma_update(None, "user_version", i + 1).unwrap();
+        }
+        assert!(
+            conn.execute(
+                "INSERT INTO questions (id, agent, project, text, priority, thread_id,
+                                        created_at, updated_at)
+                   VALUES ('Q0', 'A1', 'p', 'x', 'critical', 'T0', 't', 't')",
+                [],
+            )
+            .is_err(),
+            "before 32, the CHECK refuses critical"
+        );
+        conn.execute(
+            "INSERT INTO questions (id, agent, project, text, priority, thread_id,
+                                    created_at, updated_at)
+               VALUES ('Q1', 'A1', 'p', 'Ship?', 'urgent', 'T0', 't', 't')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(migrate(&mut conn).unwrap(), MIGRATIONS.len() - 31);
+        let priority = |id: &str| -> String {
+            conn.query_row("SELECT priority FROM questions WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .unwrap()
+        };
+        assert_eq!(priority("Q1"), "urgent");
+        conn.execute(
+            "UPDATE questions SET priority = 'critical' WHERE id = 'Q1'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(priority("Q1"), "critical");
+        assert!(
+            conn.execute(
+                "UPDATE questions SET priority = 'bogus' WHERE id = 'Q1'",
+                []
+            )
+            .is_err()
+        );
+        conn.execute(
+            "INSERT INTO questions (id, agent, project, text, thread_id, created_at, updated_at)
+               VALUES ('Q2', 'A1', 'p', 'x', 'T0', 't', 't')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(priority("Q2"), "normal");
+    }
+
+    #[test]
     fn migration_25_keeps_targets_and_allows_display_kinds() {
         let mut conn = Connection::open_in_memory().unwrap();
         for sql in &MIGRATIONS[..23] {
@@ -1751,6 +1827,49 @@ mod tests {
             conn.execute(
                 "INSERT INTO targets (name, kind, def, created_at, updated_at)
                    VALUES ('x', 'telnet', '{}', 't', 't')",
+                [],
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn migration_31_keeps_deliveries_and_allows_agent() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        for sql in &MIGRATIONS[..30] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 30).unwrap();
+        // No agent row: the foreign keys are off on this connection.
+        conn.pragma_update(None, "foreign_keys", false).unwrap();
+        conn.execute(
+            "INSERT INTO deliveries (agent_id, origin, hash, at) VALUES ('A1', 'system', 'h1', 't')",
+            [],
+        )
+        .unwrap();
+        assert!(
+            conn.execute(
+                "INSERT INTO deliveries (agent_id, origin, hash, at) VALUES ('A1', 'agent', 'h2', 't')",
+                [],
+            )
+            .is_err(),
+            "the old CHECK refuses agent"
+        );
+        assert_eq!(migrate(&mut conn).unwrap(), MIGRATIONS.len() - 30);
+        let origin: String = conn
+            .query_row("SELECT origin FROM deliveries WHERE hash = 'h1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(origin, "system");
+        conn.execute(
+            "INSERT INTO deliveries (agent_id, origin, hash, at) VALUES ('A1', 'agent', 'h2', 't')",
+            [],
+        )
+        .unwrap();
+        assert!(
+            conn.execute(
+                "INSERT INTO deliveries (agent_id, origin, hash, at) VALUES ('A1', 'robot', 'h3', 't')",
                 [],
             )
             .is_err()

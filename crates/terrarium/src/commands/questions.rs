@@ -147,6 +147,7 @@ pub async fn question(ctx: &Ctx, cmd: &QuestionCmd) -> anyhow::Result<()> {
             context,
             card,
             urgent,
+            critical,
             wait,
             timeout,
         } => {
@@ -161,9 +162,7 @@ pub async fn question(ctx: &Ctx, cmd: &QuestionCmd) -> anyhow::Result<()> {
             super::set_list(&mut body, "options", options);
             super::set_opt(&mut body, "context", context_value(ctx, context)?);
             super::set_opt(&mut body, "card", card.clone());
-            if *urgent {
-                body["priority"] = json!("urgent");
-            }
+            set_priority(&mut body, *urgent, *critical);
             if *wait {
                 body["wait"] = json!(true);
             }
@@ -234,6 +233,7 @@ pub async fn question(ctx: &Ctx, cmd: &QuestionCmd) -> anyhow::Result<()> {
             context,
             card,
             urgent,
+            critical,
             normal,
         } => {
             let mut body = json!({});
@@ -247,15 +247,14 @@ pub async fn question(ctx: &Ctx, cmd: &QuestionCmd) -> anyhow::Result<()> {
             }
             super::set_opt(&mut body, "context", context_value(ctx, context)?);
             super::set_opt(&mut body, "card", card.clone());
-            if *urgent {
-                body["priority"] = json!("urgent");
-            } else if *normal {
+            set_priority(&mut body, *urgent, *critical);
+            if *normal {
                 body["priority"] = json!("normal");
             }
             if body.as_object().is_some_and(serde_json::Map::is_empty) {
                 return Err(CliError::usage(
                     "nothing to change: give --text, --option, --clear-options, --context, \
-                     --card, --urgent, or --normal",
+                     --card, --urgent, --critical, or --normal",
                 ));
             }
             let v = ctx.api.patch(&path(id), body).await?;
@@ -370,6 +369,15 @@ pub async fn admin(ctx: &Ctx, cmd: &AdminQuestionCmd) -> anyhow::Result<()> {
     }
 }
 
+/// `--urgent` or `--critical` (clap lets only one through) as `priority`.
+fn set_priority(body: &mut Value, urgent: bool, critical: bool) {
+    if critical {
+        body["priority"] = json!("critical");
+    } else if urgent {
+        body["priority"] = json!("urgent");
+    }
+}
+
 /// `terrarium notify`: a leader sends a notice to the operator.
 pub async fn notify(ctx: &Ctx, a: &NotifyArgs) -> anyhow::Result<()> {
     if !ctx.is_agent() {
@@ -382,9 +390,7 @@ pub async fn notify(ctx: &Ctx, a: &NotifyArgs) -> anyhow::Result<()> {
     let mut body = json!({"kind": "notice", "text": ctx.text(&a.text)?});
     super::set_opt(&mut body, "context", context_value(ctx, &a.context)?);
     super::set_opt(&mut body, "card", a.card.clone());
-    if a.urgent {
-        body["priority"] = json!("urgent");
-    }
+    set_priority(&mut body, a.urgent, a.critical);
     if a.wait {
         body["wait"] = json!(true);
     }
@@ -430,7 +436,8 @@ fn inbox_rows(v: &Value) -> Vec<Value> {
         .iter()
         .map(|i| {
             let mut row = json!({
-                "id": i["id"], "kind": i["kind"], "urgent": i["urgent"],
+                "id": i["id"], "kind": i["kind"],
+                "urgent": if i["critical"] == true { json!("critical") } else { i["urgent"].clone() },
                 "project": i["project"], "at": i["at"],
                 "status": if i["open"] == true { "open" } else { "done" },
             });

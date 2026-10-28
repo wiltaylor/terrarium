@@ -48,7 +48,7 @@ export function QuestionCard(props: { question: Question; now: number; showAgent
 
   return (
     <article
-      class={`card-box stack question${q().priority === "urgent" && q().status === "open" ? " urgent" : ""}`}
+      class={`card-box stack question${q().priority !== "normal" && q().status === "open" ? " urgent" : ""}${q().priority === "critical" && q().status === "open" ? " critical" : ""}`}
       style={{ gap: "8px" }}
       aria-label={`${notice() ? "Notice" : "Question"} ${q().id}`}
     >
@@ -56,8 +56,8 @@ export function QuestionCard(props: { question: Question; now: number; showAgent
         <Show when={props.showKind}>
           <span class="chip">{q().kind}</span>
         </Show>
-        <Show when={q().priority === "urgent"}>
-          <span class="chip bad">urgent</span>
+        <Show when={q().priority !== "normal"}>
+          <span class={`chip bad${q().priority === "critical" ? " strong" : ""}`}>{q().priority}</span>
         </Show>
         <span class={`chip ${statusChip(q().status)}`}>{q().status}</span>
         <Show when={props.showAgent}>

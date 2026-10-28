@@ -445,7 +445,7 @@ async fn the_inbox_mixes_the_kinds_with_the_counts() {
     assert!(ids.contains(&format!("thread:{thread}").as_str()));
     assert_eq!(
         counts,
-        json!({"open": 4, "urgent": 1, "question": 1, "notice": 1, "mail": 1, "system": 1})
+        json!({"open": 4, "urgent": 1, "critical": 0, "question": 1, "notice": 1, "mail": 1, "system": 1})
     );
     // The pause notice to the operator is the system item, not a mail item.
     let sys = rows.iter().find(|r| r["kind"] == "system").unwrap();
@@ -492,6 +492,104 @@ async fn the_inbox_mixes_the_kinds_with_the_counts() {
     let (all, _) = inbox(&td, "?status=all").await;
     assert_eq!(all.len(), 4);
     assert_eq!(all[0]["open"], true);
+}
+
+/// The priority `critical`: first in the Inbox and in the agent's list,
+/// counted as critical and as urgent, a lead only, and gone from the
+/// counts after the acknowledgement.
+#[tokio::test]
+async fn a_critical_notice_goes_first_and_counts() {
+    let World { td, lead, w1, .. } = setup().await;
+    let normal = td
+        .post_as(
+            &lead,
+            &format!("/api/agents/{lead}/questions"),
+            json!({"text": "Ship?"}),
+        )
+        .await
+        .ok()
+        .clone();
+    let urgent = notify(
+        &td,
+        &lead,
+        json!({"text": "CI is red.", "priority": "urgent"}),
+    )
+    .await;
+    let critical = notify(
+        &td,
+        &lead,
+        json!({"text": "Prod is down.", "priority": "critical"}),
+    )
+    .await;
+    assert_eq!(critical["priority"], "critical");
+    // A worker sends no notice, critical or not.
+    td.post_as(
+        &w1,
+        &format!("/api/agents/{w1}/questions"),
+        json!({"kind": "notice", "text": "x", "priority": "critical"}),
+    )
+    .await
+    .err(403, "forbidden");
+    td.post_as(
+        &lead,
+        &format!("/api/agents/{lead}/questions"),
+        json!({"kind": "notice", "text": "x", "priority": "panic"}),
+    )
+    .await
+    .err(400, "bad_request");
+
+    let (rows, counts) = inbox(&td, "").await;
+    let ids: Vec<&str> = rows.iter().map(|r| r["id"].as_str().unwrap()).collect();
+    assert_eq!(
+        ids,
+        vec![
+            format!("notice:{}", id(&critical)),
+            format!("notice:{}", id(&urgent)),
+            format!("question:{}", id(&normal)),
+        ],
+        "{rows:#?}"
+    );
+    assert_eq!(
+        (rows[0]["critical"].clone(), rows[0]["urgent"].clone()),
+        (json!(true), json!(true))
+    );
+    assert_eq!(
+        (rows[1]["critical"].clone(), rows[1]["urgent"].clone()),
+        (json!(false), json!(true))
+    );
+    assert_eq!(rows[2]["critical"], false);
+    assert_eq!(counts["critical"], 1);
+    assert_eq!(counts["urgent"], 2);
+    let r = td.get("/api/inbox").await;
+    assert_eq!(r.headers["x-inbox-critical"], "1");
+
+    // The list of all questions: critical first too, with the header.
+    let all = td.get("/api/questions").await;
+    assert_eq!(all.headers["x-critical-questions"], "1");
+    assert_eq!(all.headers["x-urgent-questions"], "2");
+    assert_eq!(all.ok()[0]["id"], critical["id"]);
+
+    // The lead raises a priority; the operator acknowledges both.
+    td.patch_as(
+        &lead,
+        &format!("/api/questions/{}", id(&urgent)),
+        json!({"priority": "critical"}),
+    )
+    .await
+    .ok();
+    let (_, counts) = inbox(&td, "").await;
+    assert_eq!(counts["critical"], 2);
+    for n in [&critical, &urgent] {
+        td.post_empty(&format!("/api/questions/{}/ack", id(n)))
+            .await
+            .ok();
+    }
+    let (rows, counts) = inbox(&td, "").await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        (counts["critical"].clone(), counts["urgent"].clone()),
+        (json!(0), json!(0))
+    );
 }
 
 /// The acknowledgement of a mail to the operator, with a reply on its

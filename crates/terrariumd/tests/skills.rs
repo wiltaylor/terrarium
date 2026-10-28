@@ -1,4 +1,4 @@
-//! Terrarium-managed skills (PLAN §8.5, docs/api.md §26): the library
+//! Terrarium-managed skills (PLAN §8.6, docs/api.md §26): the library
 //! API and its rights, the checks of a skill, the assignment to agents
 //! and templates, the users of a skill, and the skill files in the config
 //! repo (allowlist and secret scan).

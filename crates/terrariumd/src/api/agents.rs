@@ -7,6 +7,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use terrarium_core::turn_tag::{self, TurnSource};
 use terrarium_core::{AgentId, AgentStatus, Answer, Role};
 
 use super::{ApiJson, ApiQuery, Shared, paged, streams};
@@ -105,7 +106,7 @@ async fn list(
 
 /// Set `skills_restart` on each live agent of `views` whose delivered
 /// skills differ from what its `skills` list picks from the library now
-/// (PLAN §8.5).
+/// (PLAN §8.6).
 async fn mark_skills_restart(
     state: &Shared,
     runs: &[crate::supervisor::HarnessRun],
@@ -175,7 +176,7 @@ async fn create(
     for role in &def.roles {
         policy::change_role(&actor, "", &def.project, *role)?;
     }
-    // Each skill is in the library (PLAN §8.5).
+    // Each skill is in the library (PLAN §8.6).
     crate::skills::check_assignment(super::skills::library_opt(&state).as_deref(), &def.skills)?;
     let state_dir = state.work_dir.clone();
     let who = actor.clone();
@@ -580,8 +581,9 @@ pub(super) async fn restart(
 pub(super) struct SendBody {
     pub(super) text: String,
     /// Type the text as-is, at once (D3): a leading `/` or `!` runs as a
-    /// harness command. Without it, the turn waits for `idle`, and the
-    /// adapter escapes such a text so that it stays a prompt.
+    /// harness command. Without it, the turn waits for `idle`, and starts
+    /// with the tag `[User]`, or `[Agent:<project>/<name>]` from an agent
+    /// (PLAN §8.5), so it stays a prompt.
     #[serde(default)]
     pub(super) raw: bool,
 }
@@ -603,33 +605,49 @@ pub(super) async fn send(
     Path(id): Path<String>,
     ApiJson(body): ApiJson<SendBody>,
 ) -> ApiResult<(StatusCode, Json<serde_json::Value>)> {
-    let a = load(&state, &actor, id).await?;
+    // `[User]` is only the operator; an agent's turn names the agent
+    // (PLAN §8.5).
+    let source = match actor.agent() {
+        Some(a) => TurnSource::Agent {
+            sender: format!("{}/{}", a.project, a.name),
+        },
+        None => TurnSource::User,
+    };
+    send_as(&state, actor, id, body, &source).await
+}
+
+/// `send` with the source of the turn: `[User]` for the operator,
+/// `[Agent:<project>/<name>]` for an agent, and
+/// `[System:schedule <name>]` for a schedule (PLAN §8.5). A raw send has
+/// no tag.
+pub(super) async fn send_as(
+    state: &Shared,
+    actor: Actor,
+    id: String,
+    body: SendBody,
+    source: &TurnSource,
+) -> ApiResult<(StatusCode, Json<serde_json::Value>)> {
+    let a = load(state, &actor, id).await?;
     policy::admin_project(&actor, &a.agent.project, "typing a turn into an agent")?;
     if body.text.trim().is_empty() {
         return Err(ApiError::invalid("the turn text is empty"));
     }
     if body.raw {
-        return send_raw(&state, &actor, &a, body.text).await;
+        return send_raw(state, &actor, &a, body.text).await;
     }
-    // The delivery log tags the operator's turn in the transcript
-    // (`docs/api.md` §6.6). It goes in before the turn is typed.
-    if matches!(actor, Actor::Operator) {
-        let (id, text) = (a.agent.id.to_string(), body.text.clone());
-        state
-            .db
-            .write(actor.label(), move |t| {
-                crate::store::transcripts::record_delivery(
-                    t,
-                    &id,
-                    terrarium_core::transcript::Origin::Operator,
-                    &text,
-                )
-            })
-            .await?;
-    }
+    let text = turn_tag::render(source, &body.text);
+    // The delivery log of the turn (`docs/api.md` §6.6). It goes in
+    // before the turn is typed.
+    let (id, logged) = (a.agent.id.to_string(), text.clone());
+    state
+        .db
+        .write(actor.label(), move |t| {
+            crate::store::transcripts::record_turn(t, &id, &logged)
+        })
+        .await?;
     state
         .supervisor
-        .send_turn(agent_id(&a), body.text.clone())
+        .send_turn(agent_id(&a), text)
         .await
         .map_err(supervisor_error)?;
     let id = a.agent.id.to_string();
@@ -645,7 +663,10 @@ pub(super) async fn send(
 }
 
 /// `send` with `raw: true`: the supervisor types the text at once, with
-/// no escape. The audit row has the length and the first word only.
+/// no escape and no tag. A line that would read as a tag is defused
+/// (`[User]` becomes `[\User]`), so a raw send cannot pose as a mail or
+/// as Terrarium (PLAN §8.5). The audit row has the length and the first
+/// word only.
 async fn send_raw(
     state: &Shared,
     actor: &Actor,
@@ -662,6 +683,7 @@ async fn send_raw(
         return Err(key_limit_error());
     }
     let (len, word) = (text.len(), first_word(&text));
+    let text = turn_tag::defuse(&text).into_owned();
     state
         .supervisor
         .send_raw(agent_id(a), text)

@@ -1,4 +1,4 @@
-//! `skill`: the skill library (PLAN §8.5, docs/api.md §26).
+//! `skill`: the skill library (PLAN §8.6, docs/api.md §26).
 
 use std::collections::BTreeMap;
 use std::io::Read as _;

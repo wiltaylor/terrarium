@@ -21,7 +21,7 @@
 //! | `logs/` | `logs/` | rw | The same directory as `--log-dir`. The system-prompt extension subprocess ignores `--log-dir` and writes `logs/process-<ts>-<pid>.log` in the home (one file for each start; it holds the session ID). With the bind, both logs land in the agent's own `logs/`. |
 //! | `cache/` | `$HOME/.cache/copilot` (when [`CopilotOptions::cache_dir`] is set) | rw | Copilot writes outside its home (`COPILOT_CACHE_HOME`). |
 //!
-//! The skills (PLAN §8.5): `settings.json` gets `skillDirectories` = the
+//! The skills (PLAN §8.6): `settings.json` gets `skillDirectories` = the
 //! agent's delivered skills dir (`<agent dir>/skills/`, read-only at its
 //! own path), or none; `ignoredSkillsLocations` = the shared home's
 //! `skills/`, `~/.agents/skills`, `~/.claude/skills`, and the
@@ -235,6 +235,9 @@ pub fn agent_settings(base: Option<Value>, user: Option<&Value>, experimental_ke
 ///   GitHub, on by default), `remoteSessions` (another client could steer
 ///   the agent), `memory` (Copilot Memory is shared by every agent of an
 ///   account), `connectors`.
+/// - No sub-agents and no context tools: `builtInAgents` (the rubber-duck
+///   agent can start by itself), `contextManagementTools`. The tools go by
+///   `--excluded-tools` too ([`crate::flags::CopilotFlags::excluded_tools`]).
 pub fn forced_settings() -> Value {
     json!({
         "askUser": false,
@@ -249,6 +252,8 @@ pub fn forced_settings() -> Value {
         "remoteSessions": false,
         "memory": false,
         "connectors": false,
+        "builtInAgents": {"rubberDuck": false, "rubberDuckAutoInvoke": false},
+        "contextManagementTools": false,
     })
 }
 
@@ -269,7 +274,7 @@ fn pretty(v: &Value) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// The skill keys of the agent's `settings.json` (PLAN §8.5), over the
+/// The skill keys of the agent's `settings.json` (PLAN §8.6), over the
 /// merged settings:
 ///
 /// - `skillDirectories`: the delivered skills dir, or none. Absolute;
@@ -339,7 +344,7 @@ fn union_strings(root: &mut Map<String, Value>, key: &str, add: impl Iterator<It
     root.insert(key.to_owned(), Value::Array(list));
 }
 
-/// The skill list for `SYSTEM.md` in replace mode (PLAN §8.5): Copilot
+/// The skill list for `SYSTEM.md` in replace mode (PLAN §8.6): Copilot
 /// puts `<available_skills>` in the system message, which `SYSTEM.md`
 /// replaces. Empty when the agent has no skill.
 pub fn skills_block(agent: &Agent) -> String {
@@ -587,7 +592,7 @@ mod tests {
         v
     }
 
-    /// PLAN §8.5: the skill keys of the agent's settings, and the skill
+    /// PLAN §8.6: the skill keys of the agent's settings, and the skill
     /// list in `SYSTEM.md` in replace mode.
     #[test]
     fn skills_go_to_the_settings_and_the_replace_prompt() {
@@ -689,6 +694,24 @@ mod tests {
             json!({"disableAssistedPermissionsMode": true, "other": 1})
         );
         assert_eq!(v["banner"], "always");
+    }
+
+    /// A user file cannot turn the sub-agents or the context tools on.
+    #[test]
+    fn a_user_file_cannot_turn_sub_agents_or_context_tools_on() {
+        let user = json!({
+            "builtInAgents": {"rubberDuck": true, "rubberDuckAutoInvoke": true},
+            "contextManagementTools": true,
+            "subagents": {"disabledSubagents": []},
+        });
+        let v = agent_settings(None, Some(&user), "experimental");
+        assert_eq!(
+            v["builtInAgents"],
+            json!({"rubberDuck": false, "rubberDuckAutoInvoke": false})
+        );
+        assert_eq!(v["contextManagementTools"], false);
+        // A tweakable key passes; `task` is hidden by the flag anyway.
+        assert_eq!(v["subagents"]["disabledSubagents"], json!([]));
     }
 
     /// The packaged default holds no forced key.

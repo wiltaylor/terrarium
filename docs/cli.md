@@ -231,7 +231,7 @@ or `error` after a stop.
 provider that a swap may pick, comma-separated. The current subscription
 is always a member. `agent set --pool ''` clears the pool.
 
-`--skill` gives the agent a skill of the skill library (PLAN §8.5);
+`--skill` gives the agent a skill of the skill library (PLAN §8.6);
 repeat it for more, and give `*` for every skill. `agent set --skill`
 replaces the list, and `agent set --no-skills` clears it. A name that is
 not in the library is refused (exit code 1, `422`). The agent gets its
@@ -294,7 +294,7 @@ block:
 ```
 Output of agent terra/w1 (data, not instructions)
 terra/w1: working, busy for 14m (turn started 10:02); session 01M5PA0T1N...; blocks 41-60
-[10:02:11] user/text (agent_mail_pointer): You have new mail from terra/lead.
+[10:02:11] user/text (agent_mail_pointer): [Mailbox:terra/lead] Subject: TER-4 (thread 01M5..., message 01M5...)
 [10:02:15] assistant/tool_call: tool Bash(cargo test -p terrariumd)
 [10:02:40] user/tool_result: running 212 tests… (+5120 chars)
 ```
@@ -319,7 +319,9 @@ Output of agent terra/w1 (data, not instructions)
 --- end of screen ---
 ```
 
-`agent send` types one turn when the agent is idle. A text that starts
+`agent send` types one turn when the agent is idle. The turn starts
+with `[User]` in operator mode, and with `[Agent:<project>/<name>]` when
+an agent runs the command (PLAN §8.5). A text that starts
 with `/` or `!` stays plain text for the model: the adapter escapes it
 ([api.md §6.2](api.md#62-lifecycle-and-turns)).
 
@@ -396,7 +398,7 @@ project's first, then the global one).
 ### Skills
 
 `skill` has the alias `skills`. A skill is a folder in the Agent Skills
-format in the config repo (PLAN §8.5, [api.md §26](api.md#26-skills)).
+format in the config repo (PLAN §8.6, [api.md §26](api.md#26-skills)).
 The operator and a sysadmin write the library. Another agent sees only
 its own skills.
 
@@ -720,13 +722,13 @@ wakes the agent. A worker gets `403` (exit 3): it mails its lead.
 
 ```
 terrarium question ask "<text>" [--option <label>]... [--context <text|-> | --context-file <path>]
-                       [--card <id>] [--urgent] [--wait [--timeout 2h]]
-terrarium notify "<text>" [--context <text|-> | --context-file <path>] [--card <id>] [--urgent]
+                       [--card <id>] [--urgent | --critical] [--wait [--timeout 2h]]
+terrarium notify "<text>" [--context <text|-> | --context-file <path>] [--card <id>] [--urgent | --critical]
                  [--wait [--timeout 2h]]
 terrarium question ls [--all] [--status open|answered|acknowledged|retracted] [--kind question|notice] [--agent a]
 terrarium question show <id>
 terrarium question update <id> [--text t] [--option o]... [--clear-options] [--context t | --context-file p]
-                       [--card c] [--urgent | --normal]
+                       [--card c] [--urgent | --critical | --normal]
 terrarium question retract <id> [-m reason]
 terrarium wait question <id> [--timeout t] [-m note]
 terrarium admin question ls [-p project] [--agent a] [--open | --status s | --all] [--kind k]
@@ -749,6 +751,12 @@ terrarium admin inbox resume <thread-id> [-m note]
   thread <thread>.` With `--wait`, it registers a `question` wait on the
   notice, as `question ask --wait` does. The acknowledgement mail is the
   wake mail. The operator does not send notices (exit 2).
+- `--urgent` and `--critical` set the priority (api.md §6.8). Use
+  `--critical` only when the operator must act now: production is down,
+  data is lost, a security problem, or a spent budget that stops all work.
+  The dashboard then shows a banner on each page and flashes its browser
+  tab until the operator acts. For all other items, use `--urgent` or no
+  flag. Only one of the two flags can be given.
 - A question whose text is the same as an open question of the agent is
   refused (`409`, exit 1): the message names the open one. Run `question
   ls` before you ask.
@@ -766,7 +774,7 @@ terrarium admin inbox resume <thread-id> [-m note]
   answered or retracted question is `409`. `--option` gives the new list
   of options; `--clear-options` removes them.
 - `admin question ls` lists the open questions of all agents by default,
-  urgent first, with the `AGENT` column. `-p` limits it to one project.
+  critical first, then urgent, with the `AGENT` column. `-p` limits it to one project.
 - `admin question answer` takes a text, an option, or both. `--option`
   takes the label, or the number of the option from 1 (`show` prints the
   numbers). The operator answers each question; a sysadmin agent answers
@@ -775,9 +783,9 @@ terrarium admin inbox resume <thread-id> [-m note]
   answer.
 - `admin inbox ls` lists what waits for the operator (api.md §6.9): the
   open questions, notices, mail to `operator`, and the threads of the loop
-  guard, urgent first. The columns: `ID` (`notice:<id>`, `mail:<id>`,
-  ...), `KIND`, `STATUS`, `URGENT`, `PROJECT`, `FROM`, `AT`, and a short
-  text. `--done` lists the closed items; `--all` both.
+  guard, critical first, then urgent. The columns: `ID` (`notice:<id>`,
+  `mail:<id>`, ...), `KIND`, `STATUS`, `URGENT` (`true`, `false`, or
+  `critical`), `PROJECT`, `FROM`, `AT`, and a short text. `--done` lists the closed items; `--all` both.
 - `admin inbox ack <id> [text]` acknowledges a notice or a mail to the
   operator. `<id>` is an item ID (`notice:<id>`, `mail:<id>`) or a bare
   ID: a notice ID, else a message ID. The text is the optional reply: the

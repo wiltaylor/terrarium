@@ -3,6 +3,7 @@
 import { A, useLocation, useNavigate, type RouteSectionProps } from "@solidjs/router";
 import { createEffect, createResource, createSignal, ErrorBoundary, For, on, onCleanup, onMount, Show } from "solid-js";
 import { isMock } from "../api";
+import { CriticalBanner } from "../components/CriticalBanner";
 import { QuotaBanner } from "../components/QuotaBanner";
 import { ErrorBanner, useNow } from "../components/ui";
 import { duration } from "../lib/format";
@@ -152,6 +153,7 @@ export function Layout(props: RouteSectionProps) {
           <strong>Terrarium</strong>
           <span class="muted small">{projects.selected()}</span>
         </header>
+        <CriticalBanner />
         <ConnectionBanner />
         <main class="main">
           <QuotaBanner />

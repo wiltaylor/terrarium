@@ -47,7 +47,7 @@ pub struct PiFlags {
     /// No skills. Without it, pi loads `~/.agents/skills` even with a
     /// temporary `PI_CODING_AGENT_DIR`.
     pub no_skills: &'static str,
-    /// Load one skill dir (repeatable; PLAN §8.5). It loads also with
+    /// Load one skill dir (repeatable; PLAN §8.6). It loads also with
     /// [`Self::no_skills`], which stops only the discovered and settings
     /// paths (`dist/core/resource-loader.js:424`, `this.noSkills ?
     /// this.mergePaths(cliEnabledSkills, ...)`).

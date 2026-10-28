@@ -1645,3 +1645,132 @@ Must-keep guidance for a Terrarium replacement prompt:
    runner should prefix or escape it.
 8. Does `quietStartup: true` change any line that `screen.rs` uses? It is
    not tested.
+
+---
+
+## Sub-agents, task lists, and background work
+
+Date: 2026-10-28. Method: static reading of the pinned bundles and of the
+Codex source at `rust-v0.164.0` (commit `6aaac69`, cloned again). The only
+commands that ran were `copilot --version` with tool flags, in a scratch
+home. No model turn ran. This section replaces the earlier advice to keep
+`Agent`, `TaskStop`, `Monitor`, `sql`, and the bash companion tools.
+
+Terrarium does this work itself: a lead makes workers from a template, the
+board holds the tasks, and `terrarium run`, `wait`, `watch`, `agent read`,
+and `agent screen` replace background commands and polls. So the adapters
+force the harness tools for it off. `docs/compat.md` ("Harness hardening")
+has the table of what is forced.
+
+### Claude Code 2.1.310 (Bundle, SDK types)
+
+- **Sub-agents (V).** `var ht="Agent"` has `aliases:[cf]`, and the
+  permission rules map `Task:"Agent"`. `SendMessage` (`var Mn`) and
+  `ListAgents` (`var uc`, alias `ListPeers`) go with it. `Workflow` starts
+  agents too.
+- **Task lists (V).** `TodoWrite` (`isEnabled(){return!IO()&&N4()}`) and
+  `TaskCreate`, `TaskGet`, `TaskUpdate`, `TaskList`
+  (`isEnabled(){return ale()}`, `ale=IO()&&N4()`). `IO()` is
+  `CLAUDE_CODE_ENABLE_TASKS!==false`, so that env var only swaps the
+  Task tools for `TodoWrite`. A bare deny of all five is the only switch.
+- **Background Bash (V in code, I in effect).** `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`
+  is a bool env (`$E=D.bool()`). `function ap(){return vf().backgroundTasksDisabled||__e()}`
+  and `function __e(){return i.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS||wr()}`.
+  With it set: the Bash schema drops the parameter
+  (`to=p(()=>ap()?rn().omit({run_in_background:!0}):rn())`), a call with
+  `run_in_background` runs in the foreground (`ee=ap()||...`,
+  `ce=Z===!0&&!ee`), MCP calls do not move to the background
+  (`if(ap())return 0`), and tool `detach` is off. The docs list the same
+  variable.
+- **Companions (V).** `var $d="TaskStop"` with aliases `KillShell`,
+  `KillBash`; `var Gs="Monitor"` with `isEnabled(){return vd()}` (true on
+  Linux), so the env var does not remove `Monitor`. `TaskOutput`,
+  `BashOutput`, `AgentOutputTool`, `TeamCreate`, and `TeamDelete` are in a
+  list of old names (`nMe=new Set([...])`), not tools of 2.1.310.
+- **Side effect (V).** With background tasks off, Claude Code no longer
+  blocks a long `sleep` in Bash (that check runs only when `!ap()`). The
+  prompt tells the agent not to sleep.
+
+### Codex 0.164.0 (source paths relative to `codex-rs/`)
+
+- **Sub-agents (V).** `multi_agent_version_override()` gives `V2` when
+  `features.multi_agent_v2` is on, else `Disabled` when `agents.enabled`
+  is false (`core/src/config/mod.rs:1658-1684`). `features.multi_agent`
+  (`Collab`, default on) is the fallback for a model with no catalog
+  version. Force all three.
+- **Sleep (V).** `features.sleep_tool` gates `SleepHandler`
+  (`core/src/tools/spec_plan.rs:1365-1388`).
+- **Background terminals (V).** With `features.unified_exec` on,
+  `exec_command` and `write_stdin` are registered
+  (`spec_plan.rs:1257-1267`). A command that runs past `yield_time_ms`
+  (at most 30 s) returns a session ID and runs on. The process stays
+  after the turn: only `Op::CleanBackgroundTerminals` (`/stop`) and the
+  session shutdown end it (`core/src/session/handlers.rs:64,316,507`).
+  A user setting cannot turn unified exec off: "Only managed requirements
+  may disable the remaining unified-exec implementation"
+  (`core/src/config/managed_features.rs:178-183`). A system requirements
+  file at `/etc/codex/requirements.toml` (`config/src/loader/mod.rs:113`)
+  with `[features] unified_exec = false` does it. Then Codex registers
+  `ExecCommandHandler::one_shot`: "Runs a command to completion and returns
+  its output. The process is terminated on timeout or cancellation and
+  cannot be resumed." Its default timeout is 10 s (`core/src/exec.rs:63`),
+  and the model can give `timeout_ms`
+  (`core/src/tools/handlers/unified_exec/exec_command.rs:463-490`). The
+  binary has the same string. A config value that differs from a pinned
+  feature stops the start (`managed_features.rs:336-372`), so the adapter
+  drops `features.unified_exec` from the user file. The only other user
+  of `require_unified_exec` is the guardian reviewer, which Terrarium does
+  not use. A start with the file is **not** tested (I).
+- **Code-mode `wait` (V): keep it.** `wait` is registered with `exec` in
+  each code-mode session, with no config key (`spec_plan.rs:1094`). Its
+  description says "Use `wait` only after `exec` returns `Script running
+  with cell ID ...`". An `exec` cell yields after
+  `default_exec_yield_time_ms` (30 s, `core/src/config/mod.rs:1206`), and
+  only `wait` gets the rest of its output or its result. A build or a test
+  run in a cell would be lost without it. So `wait` is not background
+  persistence: it is how a normal command ends.
+
+### Copilot CLI 1.0.103
+
+- **Flag syntax (V).** The docs (CLI command reference, fetched
+  2026-10-28): `--excluded-tools=TOOL ...` "These tools will not be
+  available to the model. For multiple tools, use a quoted, comma-separated
+  list." The 1.0.103 parser accepts `--excluded-tools=task,sql`, the
+  repeated form, the space form, and an unknown name (each with
+  `--version`, exit 0). Open question 1 of the Copilot section is closed
+  for the deny list.
+- **Sub-agents (V names, I effect).** `task`, `read_agent`, `list_agents`,
+  `write_agent`, `search_code_subagent` were in the captured tool list.
+  `execution_subagent`, `run_dynamic_workflow`, `dynamic_workflows_manage`,
+  `manage_schedule`, `context_board`, `read_inbox`, `send_inbox` are tool
+  modules in the runtime. `builtInAgents.rubberDuckAutoInvoke` can start
+  the rubber-duck agent with no tool call, so it is forced off.
+- **Task lists (V).** The todos live in the `sql` tool (`todos`,
+  `todo_deps`). The settings catalog has no key for the tables or for
+  `sql`, so the whole tool goes. `update_todo` is the old list.
+- **Async bash (V): cannot be removed alone.** The catalog has no key for
+  async, `detach`, or background shells. The runtime bash text says "For
+  sync commands, if the command is still running when initial_wait
+  expires, it moves to the background and you'll be notified on
+  completion". So a long `sync` command needs `read_bash` and `stop_bash`.
+  They stay, with `list_bash` and `write_bash`, and the prompt tells the
+  model not to use `async` or `detach`.
+- **Context tools (V).** `contextManagementTools: false` and the same four
+  names in `--excluded-tools`.
+
+### pi 1.4.0 (V)
+
+Nothing to remove. pi has `read`, `bash`, `edit`, and `write`. The `bash`
+schema has `command` and `timeout` only (`dist/core/tools/bash.js:28-30`);
+`detached` there is the spawn option of the process group, not a model
+parameter. The README says pi "skips features like sub-agents and plan
+mode". `--no-extensions` keeps extension tools out.
+
+### Open questions
+
+1. Does a Codex start with `/etc/codex/requirements.toml` show the normal
+   composer, and does `exec_command` lose `session_id` and `yield_time_ms`?
+2. Does Copilot send no `task`, `sql`, or `read_agent` to the model with
+   the comma list? The `tools` list of `session.usage_checkpoint` shows it.
+3. Does Claude Code send no `run_in_background` in the Bash schema with the
+   env var? The `system/init` tool list and a Bash call show it.

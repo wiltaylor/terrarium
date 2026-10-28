@@ -1,4 +1,4 @@
-//! `/api/skills/...`: the skill library (PLAN §8.5, docs/api.md §26).
+//! `/api/skills/...`: the skill library (PLAN §8.6, docs/api.md §26).
 //!
 //! The operator and a sysadmin read and write the whole library. Any other
 //! agent reads only its own skills (its `skills` list against the

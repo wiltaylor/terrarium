@@ -10,17 +10,12 @@
   },
   "continueOnAutoMode": false,
   "imageGeneration": false,
-  "builtInAgents": {
-    "rubberDuck": false,
-    "rubberDuckAutoInvoke": false
-  },
   "subagents": {
     "disabledSubagents": ["rubber-duck", "research", "security-review", "code-review"]
   },
   "customAgents": {
     "defaultLocalOnly": true
   },
-  "contextManagementTools": false,
   "enabledMcpServers": [],
   "enabledPlugins": {}
 }

@@ -1,4 +1,4 @@
-//! Terrarium-managed skills (PLAN §8.5): the skill library in the config
+//! Terrarium-managed skills (PLAN §8.6): the skill library in the config
 //! repo, the checks of a skill, and the copy of an agent's skills at each
 //! start.
 //!

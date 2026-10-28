@@ -42,7 +42,7 @@ pub struct AgentView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness_version: Option<String>,
     /// The live agent runs with other skills than its `skills` list now
-    /// picks from the library (PLAN §8.5): the list or a skill changed
+    /// picks from the library (PLAN §8.6): the list or a skill changed
     /// after the start. A restart applies them. Absent when false. The
     /// API fills it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -463,7 +463,7 @@ pub struct AgentPatch {
     pub restart: Option<RestartPolicy>,
     #[serde(default)]
     pub new_session_on_prompt_change: Option<bool>,
-    /// The skills (PLAN §8.5): names of the skill library, or `*`. `[]`
+    /// The skills (PLAN §8.6): names of the skill library, or `*`. `[]`
     /// clears them. The API checks that each name is in the library.
     #[serde(default)]
     pub skills: Option<Vec<String>>,

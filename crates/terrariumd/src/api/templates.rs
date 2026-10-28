@@ -133,7 +133,7 @@ fn spec_of(v: Value) -> ApiResult<Spec> {
     }
 }
 
-/// Each skill that a spec names is in the skill library (PLAN §8.5): an
+/// Each skill that a spec names is in the skill library (PLAN §8.6): an
 /// unknown name is `422 invalid`. A spec with a `skills` that is not a
 /// list of strings fails later, in the spec check.
 fn check_skills(state: &Shared, spec: &Spec) -> ApiResult<()> {

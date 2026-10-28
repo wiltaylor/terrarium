@@ -1116,7 +1116,7 @@ is `crates/terrariumd/src/config_repo.rs`, `api/config.rs`,
 
 ## 13. Skills (F18, 2026-10-28)
 
-The change: Terrarium-managed skills (PLAN §8.5). A skill is a folder in
+The change: Terrarium-managed skills (PLAN §8.6). A skill is a folder in
 the config repo (`skills/<name>/`): a `SKILL.md` with instructions, and
 optional scripts, references, and assets. At each start the daemon copies
 the agent's skills into its harness dir, and the harness loads them. The

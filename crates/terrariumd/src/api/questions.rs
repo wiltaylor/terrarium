@@ -163,7 +163,7 @@ async fn list_all(
         status,
         recent: false,
     };
-    let (rows, (open, urgent)) = state
+    let (rows, total) = state
         .db
         .read(move |c| {
             Ok((
@@ -173,7 +173,11 @@ async fn list_all(
         })
         .await?;
     let mut resp = Json(rows).into_response();
-    for (k, v) in [("x-open-questions", open), ("x-urgent-questions", urgent)] {
+    for (k, v) in [
+        ("x-open-questions", total.open),
+        ("x-urgent-questions", total.urgent),
+        ("x-critical-questions", total.critical),
+    ] {
         if let Ok(v) = v.to_string().parse() {
             resp.headers_mut().insert(k, v);
         }

@@ -64,6 +64,11 @@ pub fn hooks_json(opts: &CopilotOptions) -> Value {
 ///   there is no trust dialog; each alone is not enough.
 /// - `--no-ask-user --mode interactive --disable-builtin-mcps
 ///   --sync-session=off`: see [`crate::flags::CopilotFlags::forced_args`].
+/// - `--excluded-tools=task,read_agent,...`: no sub-agents, task lists, or
+///   context tools; see [`crate::flags::CopilotFlags::excluded_tools`].
+///   For an agent with no skill, the same list also has `skill`
+///   (PLAN §8.6). An agent with skills keeps the tool; its `settings.json`
+///   names its skills dir ([`config::skill_settings`]).
 /// - `--no-auto-update`, `--disable-client-telemetry`: quiet start.
 /// - `--secret-env-vars=COPILOT_GITHUB_TOKEN,GH_TOKEN,GITHUB_TOKEN`: keep
 ///   the token out of the agent's shell commands.
@@ -76,9 +81,6 @@ pub fn hooks_json(opts: &CopilotOptions) -> Value {
 /// - `-C <cwd>`.
 /// - `--session-id <uuid>` or `--resume <id>`: see [`SessionStart`].
 /// - `--model <m>` when the agent sets one.
-/// - `--excluded-tools=skill` for an agent with no skill (PLAN §8.5). An
-///   agent with skills keeps the tool; its `settings.json` names its
-///   skills dir ([`config::skill_settings`]).
 ///
 /// The env: `COPILOT_HOME`, `COPILOT_ALLOW_ALL=true`, the quiet vars, and
 /// `COPILOT_CACHE_HOME` (see [`CopilotOptions::cache_dir`]). The token is
@@ -91,7 +93,14 @@ pub fn build(opts: &CopilotOptions, agent: &Agent, session: SessionStart<'_>) ->
     for a in f.forced_args {
         spec = spec.arg(*a);
     }
+    // One `--excluded-tools` flag: the forced list, and the skill tool for
+    // an agent with no skill (PLAN §8.6).
+    let mut excluded: Vec<&str> = f.excluded_tools.to_vec();
+    if agent.delivered_skills.is_empty() {
+        excluded.push(f.skill_tool);
+    }
     spec = spec
+        .arg(format!("{}={}", f.excluded_tools_flag, excluded.join(",")))
         .arg(f.no_auto_update)
         .arg(f.disable_telemetry)
         .arg(format!("{}={}", f.secret_env_vars, f.token_env.join(",")))
@@ -109,9 +118,6 @@ pub fn build(opts: &CopilotOptions, agent: &Agent, session: SessionStart<'_>) ->
         SessionStart::Fresh(uuid) => spec.arg(f.session_id).arg(uuid),
         SessionStart::Resume(id) => spec.arg(f.resume).arg(id.0.as_str()),
     };
-    if agent.delivered_skills.is_empty() {
-        spec = spec.arg(format!("{}={}", f.excluded_tools, f.skill_tool));
-    }
     if let Some(model) = agent.model.as_deref().filter(|m| !m.is_empty()) {
         spec = spec.arg(f.model).arg(model);
     }
@@ -177,8 +183,12 @@ mod tests {
         assert!(spec.pty);
         assert_eq!(spec.cwd, agent.workspace);
         let a = args(&spec);
+        let excluded = format!(
+            "--excluded-tools={},skill",
+            crate::COPILOT_1_0.excluded_tools.join(",")
+        );
         assert_eq!(
-            &a[..9],
+            &a[..10],
             [
                 "--yolo",
                 "--no-ask-user",
@@ -186,6 +196,7 @@ mod tests {
                 "interactive",
                 "--disable-builtin-mcps",
                 "--sync-session=off",
+                &excluded,
                 "--no-auto-update",
                 "--disable-client-telemetry",
                 "--secret-env-vars=COPILOT_GITHUB_TOKEN,GH_TOKEN,GITHUB_TOKEN",
@@ -212,12 +223,20 @@ mod tests {
         // The flag makes Copilot rename over the bound settings.json, which
         // fails with EBUSY: experimental mode comes from the settings copy.
         assert!(!a.contains(&"--experimental"));
-        // PLAN §8.5: no skill, no skill tool; with skills, the tool.
-        assert!(a.contains(&"--excluded-tools=skill"));
+        // PLAN §8.6: no skill, no skill tool; with skills, the tool.
         let mut with = agent.clone();
         with.delivered_skills = vec!["fern-check".into()];
         let s = build(&opts, &with, SessionStart::Fresh("x"));
-        assert!(!args(&s).iter().any(|x| x.starts_with("--excluded-tools")));
+        let only_forced = format!(
+            "--excluded-tools={}",
+            crate::COPILOT_1_0.excluded_tools.join(",")
+        );
+        let with_args = args(&s);
+        let flags: Vec<&&str> = with_args
+            .iter()
+            .filter(|x| x.starts_with("--excluded-tools"))
+            .collect();
+        assert_eq!(flags, [&only_forced.as_str()]);
         assert_eq!(value_after(&spec, "--model"), Some("claude-haiku-4.5"));
         assert_eq!(a.iter().filter(|x| **x == "--plugin-dir").count(), 1);
 
@@ -233,6 +252,57 @@ mod tests {
         assert!(!spec.env.contains_key("COPILOT_PKG_CACHE_HOME"));
         // No secret in the spec: the daemon adds the token.
         assert!(!spec.env.keys().any(|k| k.contains("TOKEN")));
+    }
+
+    /// One `--excluded-tools` value, comma-separated, with the sub-agent,
+    /// task-list, and context tools. The shell tools and the file tools
+    /// stay.
+    #[test]
+    fn the_excluded_tools_hide_sub_agents_and_task_lists() {
+        let spec = build(
+            &CopilotOptions::default(),
+            &test_agent(None),
+            SessionStart::Fresh("x"),
+        );
+        let flags: Vec<&str> = args(&spec)
+            .into_iter()
+            .filter(|a| a.starts_with("--excluded-tools"))
+            .collect();
+        assert_eq!(flags.len(), 1);
+        let list: Vec<&str> = flags[0]
+            .strip_prefix("--excluded-tools=")
+            .expect("one value")
+            .split(',')
+            .collect();
+        for tool in [
+            "task",
+            "read_agent",
+            "list_agents",
+            "write_agent",
+            "search_code_subagent",
+            "sql",
+            "update_todo",
+            "manage_schedule",
+            "new_context",
+        ] {
+            assert!(list.contains(&tool), "{tool}");
+        }
+        for keep in [
+            "bash",
+            "read_bash",
+            "write_bash",
+            "list_bash",
+            "stop_bash",
+            "view",
+            "create",
+            "edit",
+            "apply_patch",
+            "grep",
+            "glob",
+        ] {
+            assert!(!list.contains(&keep), "{keep}");
+        }
+        assert!(list.iter().all(|t| !t.is_empty() && !t.contains(' ')));
     }
 
     #[test]

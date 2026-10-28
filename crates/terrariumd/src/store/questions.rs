@@ -56,6 +56,9 @@ pub enum Priority {
     #[default]
     Normal,
     Urgent,
+    /// The operator must act now: production is down, data is lost, a
+    /// security problem, or a spent budget that blocks all work.
+    Critical,
 }
 
 impl Priority {
@@ -63,9 +66,20 @@ impl Priority {
         match self {
             Self::Normal => "normal",
             Self::Urgent => "urgent",
+            Self::Critical => "critical",
         }
     }
+
+    /// Urgent or critical: the item goes before the normal ones, and the
+    /// badge is red.
+    pub fn at_least_urgent(self) -> bool {
+        self != Self::Normal
+    }
 }
+
+/// The SQL rank of the `priority` column: critical 2, urgent 1, normal 0.
+pub const PRIORITY_RANK_SQL: &str =
+    "CASE priority WHEN 'critical' THEN 2 WHEN 'urgent' THEN 1 ELSE 0 END";
 
 /// A question asks for a decision; a notice tells the operator something
 /// and needs only an acknowledgement.
@@ -265,7 +279,8 @@ pub struct Filter {
 /// The longest list.
 const LIST_MAX: usize = 200;
 
-/// Questions. The open ones first: urgent first, then the oldest first.
+/// Questions. The open ones first: critical first, then urgent, then the
+/// oldest first.
 /// Then the others, the newest first. At most [`LIST_MAX`].
 pub fn list(conn: &Connection, f: &Filter) -> ApiResult<Vec<Question>> {
     let mut sql = String::from("SELECT * FROM questions WHERE 1 = 1");
@@ -298,7 +313,7 @@ pub fn list(conn: &Connection, f: &Filter) -> ApiResult<Vec<Question>> {
     }
     sql.push_str(&format!(
         " ORDER BY status = 'open' DESC,
-                   CASE WHEN status = 'open' THEN priority = 'urgent' ELSE 0 END DESC,
+                   CASE WHEN status = 'open' THEN {PRIORITY_RANK_SQL} ELSE 0 END DESC,
                    CASE WHEN status = 'open' THEN created_at END ASC,
                    coalesce(answered_at, updated_at) DESC, id
           LIMIT {LIST_MAX}"
@@ -320,23 +335,37 @@ pub fn open_count(conn: &Connection, agent: &str) -> ApiResult<usize> {
     Ok(usize::try_from(n).unwrap_or(0))
 }
 
-/// The number of open questions and notices, and of the urgent ones: all
-/// of them, or those of one project, of one kind or of both.
+/// The open questions and notices of [`open_total`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OpenTotal {
+    pub open: usize,
+    /// The urgent and the critical ones.
+    pub urgent: usize,
+    /// The critical ones only.
+    pub critical: usize,
+}
+
+/// The number of open questions and notices, of the urgent ones (urgent
+/// or critical), and of the critical ones: all of them, or those of one
+/// project, of one kind or of both.
 pub fn open_total(
     conn: &Connection,
     project: Option<&str>,
     kind: Option<QuestionKind>,
-) -> ApiResult<(usize, usize)> {
-    let (n, urgent): (i64, i64) = conn.query_row(
-        "SELECT count(*), coalesce(sum(priority = 'urgent'), 0) FROM questions
+) -> ApiResult<OpenTotal> {
+    let (total, urgent, critical): (i64, i64, i64) = conn.query_row(
+        "SELECT count(*), coalesce(sum(priority IN ('urgent', 'critical')), 0),
+                coalesce(sum(priority = 'critical'), 0) FROM questions
          WHERE status = 'open' AND (?1 IS NULL OR project = ?1) AND (?2 IS NULL OR kind = ?2)",
         params![project, kind.map(QuestionKind::as_str)],
-        |r| Ok((r.get(0)?, r.get(1)?)),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )?;
-    Ok((
-        usize::try_from(n).unwrap_or(0),
-        usize::try_from(urgent).unwrap_or(0),
-    ))
+    let n = |v: i64| usize::try_from(v).unwrap_or(0);
+    Ok(OpenTotal {
+        open: n(total),
+        urgent: n(urgent),
+        critical: n(critical),
+    })
 }
 
 // ------------------------------------------------------------- the checks
@@ -1076,10 +1105,10 @@ pub fn recap(conn: &Connection, agent: &str) -> ApiResult<Option<String>> {
         }
         text.push_str(head);
         for q in rows.iter().take(20) {
-            let urgent = if q.priority == Priority::Urgent {
-                " [urgent]"
-            } else {
-                ""
+            let urgent = match q.priority {
+                Priority::Critical => " [critical]",
+                Priority::Urgent => " [urgent]",
+                Priority::Normal => "",
             };
             text.push_str(&format!("\n- {}{urgent}: {}", q.id, short(&q.text, 200)));
         }

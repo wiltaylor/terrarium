@@ -36,7 +36,7 @@ pub enum SessionStart<'a> {
 ///    - `env`: the names that the launch sets (`CLAUDE_CONFIG_DIR`, the
 ///      quiet env, `IS_SANDBOX`) are removed from the user `env`, so the
 ///      home and the quiet start stay as the sandbox needs them.
-///    - The skill tool (PLAN §8.5): an agent with no delivered skill gets
+///    - The skill tool (PLAN §8.6): an agent with no delivered skill gets
 ///      `Skill` in `permissions.deny`; an agent with skills gets no deny
 ///      (and no `allow`/`ask` rule) for it, also when the user file has
 ///      one.
@@ -154,7 +154,7 @@ fn set_dotted(root: &mut Map<String, Value>, key: &str, value: Value) {
 /// - `--session-id <uuid>` or `--resume <id>`: see [`SessionStart`].
 /// - `--model <m>` when the agent sets one.
 /// - `--plugin-dir <claude dir>/plugin` when the agent has skills (PLAN
-///   §8.5): the plugin holds only the agent's skills
+///   §8.6): the plugin holds only the agent's skills
 ///   ([`crate::config::plugin_dir`]).
 /// - `--append-system-prompt <text>` (default) or `--system-prompt <text>`
 ///   (see [`PromptMode`]).
@@ -381,7 +381,7 @@ mod tests {
             let t = t.as_str().expect("name");
             assert!(!f.forced_deny.contains(&t), "{t} is forced");
         }
-        assert!(deny.iter().any(|t| t == "Workflow"));
+        assert!(deny.iter().any(|t| t == "Artifact"));
         assert_eq!(v["autoMemoryEnabled"], false);
     }
 
@@ -449,7 +449,7 @@ mod tests {
         );
     }
 
-    /// PLAN §8.5: an agent with no skill has no skill tool and no plugin;
+    /// PLAN §8.6: an agent with no skill has no skill tool and no plugin;
     /// an agent with skills gets its plugin dir and the tool, whatever
     /// the user file says. The bundled skills stay off, and no
     /// `enabledPlugins` of the user file goes through.
@@ -487,6 +487,62 @@ mod tests {
             value_after(&spec, "--plugin-dir"),
             Some("/state/agents/A/harness/claude/plugin")
         );
+    }
+
+    /// Sub-agents, task lists, and background work stay off whatever the
+    /// user file says: Terrarium does them (workers, cards, `terrarium run`).
+    #[test]
+    fn a_user_file_cannot_turn_sub_agents_tasks_or_background_on() {
+        let opts = ClaudeOptions::default();
+        let mut agent = test_agent(None);
+        agent.harness_settings = Some(json!({
+            "permissions": {
+                "allow": ["Agent", "TodoWrite", "Monitor", "Bash(ls:*)"],
+                "ask": ["TaskStop"],
+            },
+            "env": {"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "0"},
+        }));
+        let spec = build(&opts, &agent, SessionStart::Fresh("x"), None, false);
+        let s: Value = serde_json::from_str(value_after(&spec, "--settings").expect("settings"))
+            .expect("json");
+        let deny: Vec<&str> = s["permissions"]["deny"]
+            .as_array()
+            .expect("deny")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        for tool in [
+            "Agent",
+            "SendMessage",
+            "ListAgents",
+            "Workflow",
+            "TodoWrite",
+            "TaskCreate",
+            "TaskGet",
+            "TaskUpdate",
+            "TaskList",
+            "TaskStop",
+            "Monitor",
+            "CronCreate",
+            "CronDelete",
+            "CronList",
+            "ScheduleWakeup",
+        ] {
+            assert_eq!(deny.iter().filter(|t| **t == tool).count(), 1, "{tool}");
+        }
+        assert_eq!(s["permissions"]["allow"], json!(["Bash(ls:*)"]));
+        assert_eq!(s["permissions"]["ask"], json!([]));
+        // The env of the launch wins; the settings `env` loses the name.
+        assert_eq!(spec.env["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"], "1");
+        assert!(
+            s["env"]
+                .get("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS")
+                .is_none()
+        );
+        // The core tools stay.
+        for keep in ["Bash", "Read", "Edit", "Write", "ToolSearch"] {
+            assert!(!deny.contains(&keep), "{keep}");
+        }
     }
 
     #[test]

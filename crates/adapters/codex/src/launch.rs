@@ -164,7 +164,7 @@ pub fn user_overrides(agent: &Agent, forced: &[&str]) -> Vec<String> {
 ///   `-c sqlite_home="<agent dir>/codex/sqlite"`, the agent's own SQLite
 ///   files ([`config`]). With no sandbox, Codex keeps them in `CODEX_HOME`.
 /// - `-c skills.include_instructions=<bool>`: true only for an agent with
-///   delivered skills (PLAN §8.5). Its skills dir is bound over
+///   delivered skills (PLAN §8.6). Its skills dir is bound over
 ///   `$CODEX_HOME/skills` ([`config`]).
 /// - On a resume, `-c tui.resume_cwd="session"`.
 /// - The prompt: `-c developer_instructions="<text>"` (default) or, for an
@@ -206,7 +206,7 @@ pub fn build(
     for (key, value) in f.quiet_config.iter().chain(f.hardening_config) {
         spec = spec.arg(f.config).arg(format!("{key}={value}"));
     }
-    // PLAN §8.5: the skill list only for an agent with skills.
+    // PLAN §8.6: the skill list only for an agent with skills.
     spec = spec.arg(f.config).arg(format!(
         "{}={}",
         f.skill_instructions,
@@ -406,16 +406,16 @@ env = { "A.B" = "x" }
         let c = user_overrides(&agent, &flags.all_forced_keys());
         let all = user_overrides(&agent, &[]);
         assert_eq!(c, all);
-        for want in [
-            "web_search=\"disabled\"",
-            "features.image_generation=true",
-            "agents.enabled=false",
-        ] {
+        for want in ["web_search=\"disabled\"", "features.image_generation=true"] {
             assert!(c.iter().any(|o| o == want), "{want}: {c:?}");
+        }
+        // Forced keys are not in the file (sub-agents, bundled skills).
+        for gone in ["agents.", "skills."] {
+            assert!(!c.iter().any(|o| o.starts_with(gone)), "{gone}: {c:?}");
         }
     }
 
-    /// PLAN §8.5: no bundled skills whatever the user file says, and the
+    /// PLAN §8.6: no bundled skills whatever the user file says, and the
     /// skill list only for an agent with skills.
     #[test]
     fn the_skill_list_follows_the_delivered_skills() {
@@ -502,6 +502,67 @@ model_migrations = { "gpt-5.6-luna" = "gpt-5.6-luna" }
             let (k, v) = o.split_once('=').expect("kv");
             let _: toml::Table =
                 toml::from_str(&format!("x = {v}")).unwrap_or_else(|e| panic!("{k}: {e}"));
+        }
+    }
+
+    /// Sub-agents, the sleep tool, and background terminals stay off
+    /// whatever the user file says. The image tool, `view_image`, and
+    /// `apply_patch` are not touched.
+    #[test]
+    fn a_user_file_cannot_turn_sub_agents_or_background_work_on() {
+        let mut agent = test_agent(None);
+        let toml = r#"
+experimental_use_unified_exec_tool = true
+[agents]
+enabled = true
+max_threads = 4
+[features]
+multi_agent = true
+sleep_tool = true
+unified_exec = true
+[features.multi_agent_v2]
+enabled = true
+[tools.update_plan]
+enabled = true
+"#;
+        agent.harness_settings = Some(
+            terrarium_core::harness_settings::parse(toml, terrarium_core::HarnessId::Codex)
+                .expect("toml"),
+        );
+        let spec = build(&sandbox_opts(), &agent, None, None);
+        let c = overrides(&spec);
+        for want in [
+            "agents.enabled=false",
+            "features.multi_agent=false",
+            "features.multi_agent_v2=false",
+            "features.sleep_tool=false",
+            "tools.update_plan.enabled=false",
+        ] {
+            assert_eq!(c.iter().filter(|o| **o == want).count(), 1, "{want}: {c:?}");
+        }
+        for gone in [
+            "agents.enabled=true",
+            "features.multi_agent=true",
+            "features.multi_agent_v2.enabled",
+            "features.sleep_tool=true",
+            "unified_exec",
+            "tools.update_plan.enabled=true",
+        ] {
+            assert!(!c.iter().any(|o| o.contains(gone)), "{gone}: {c:?}");
+        }
+        // A key next to a forced one passes.
+        assert!(c.contains(&"agents.max_threads=4"), "{c:?}");
+        // No key turns off the tools that stay.
+        for keep in [
+            "image_generation",
+            "view_image",
+            "apply_patch",
+            "shell_tool",
+        ] {
+            assert!(
+                !c.iter().any(|o| o.contains(keep) && o.ends_with("false")),
+                "{keep}: {c:?}"
+            );
         }
     }
 

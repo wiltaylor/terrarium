@@ -2,19 +2,19 @@
   "version": 1,
   "files": {
     "README.md": "51b47f4b091d2d104088031e95f3d968f875d91a7aa3126db4fd8250766b316b",
-    "harness/claude/settings.json": "d3b0d325b38b27240b15d6749d0eea1deaa3bdfc9598252ff6cb6b362a274811",
-    "harness/codex/config.toml": "0cedf0b7edc2dedab32090b2d169f3e9c64e72524f7d59172cd9ed206c83e8a3",
-    "harness/copilot/settings.json": "0cb2a197f6dd0815b51ea2adb2b3d71c66a9189c1796ed6a0a3785c00d5d666b",
+    "harness/claude/settings.json": "d5b5ea9dd861dbdfa4b41bcde785c5b30fbb1ee7502ec0db1042a1f179fe0fbf",
+    "harness/codex/config.toml": "055e812aae3e09fc401dbe619fbce23beb04b06dcb4373a327eb99e1b66ae59e",
+    "harness/copilot/settings.json": "13fd01aea6238c828d706954ec693cb818d5b4b6b03ac1179673e18437bb9c34",
     "harness/pi/settings.json": "5e94a6d2af918bda2d112f802eec14baf4529a44c12d16b74ee36ffe8abc177c",
-    "prompts/README.md": "5340f9f6c6ccc1ea14a3228abb407d845f87f9231b0c53e6b6e5c4412813c277",
-    "prompts/default.md": "9ecbb9eae388bb7a6149c69553e246fe9d0b4fc9bd4cf30fefba276a58710b18",
-    "prompts/harness/claude.md": "6eb6f59ac31d6840f8fbceee356cd6f190e487c7244ce4b677486709f5d1f34c",
-    "prompts/harness/codex.md": "b381cc259b0ce1bde11ec3d94cf5a37896dea60f5ae0b8ab8ce7d6281ff688b0",
-    "prompts/harness/copilot.md": "ab6036c381e22015191606183a15f7b9573cf106cfc0d29068841f89e6dcbc3d",
-    "prompts/harness/pi.md": "f41dce2d9e8c9f1ffa2f250ad60f0e64bcc47e8515dd859ab71a17bb1dfe23c8",
-    "prompts/leader.md": "9b36a494b6f101fcaf8d9d338b869fd0a6a89023f43214c480acaa1a5f669fc7",
-    "prompts/project-lead.md": "8f7c1a8aa8e01564a6a2dbe176d6d8a490404beb5c7c35ca9d372cdc2abd99cc",
-    "prompts/system-lead.md": "c3bca61a4186f1ab2969a99c0caf9071b322a1be643aadb6af7e1ef5a5fce707",
-    "prompts/worker.md": "80031fbe8101e53a5ba173c41b7d83aa1a8aac6c8061747d84f159da1c0423ee"
+    "prompts/README.md": "dcb62b207d1726896b1e739b59e3cf9fddf2fb361a19ce7fc149c9a1c86cecc8",
+    "prompts/default.md": "9a43171bfb73f09e9e60647e6ef74c7c3eebc49d732874056b6202b4b9bda6f6",
+    "prompts/harness/claude.md": "5f7fc61d7b5603bed6c50464c01d802cb5705b3a0c53395e315db608269ef403",
+    "prompts/harness/codex.md": "c8ea0527824f3996e82d96ce2899a8bc02771e0f8ac3b8c6d2c1527514a02920",
+    "prompts/harness/copilot.md": "6feffee8e034e5e0369fa45ced127fe8c7603c75c10319ca5ad2d6167f210275",
+    "prompts/harness/pi.md": "9156cdfe5e416f0d9e03a6ed9030510253d10532ac7c13b793c49f4830445e01",
+    "prompts/leader.md": "376e4b616647b02fc601aae426c8561e776b79903b326bda8c9ff32155d14de7",
+    "prompts/project-lead.md": "6ea72291ef8247802baa0e532f748a6081b1f985c6038a99bae770a93896ef96",
+    "prompts/system-lead.md": "3a9aa14c658a206c896ad44305c5b85734747c8b135a8cdcfd5c2cf9da722fa0",
+    "prompts/worker.md": "3e76fa8c28a097aea56bb53671cf07566fe7c433b456a1a993a4b39a751dc17c"
   }
 }

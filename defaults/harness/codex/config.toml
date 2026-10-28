@@ -16,8 +16,12 @@
 #   `features.goals`, the start-up notices (`notice.*`, `tui.show_tooltips`),
 #   apps, plugins, tool suggestions, MCP install prompts, memories, the
 #   app-server daemon, and `features.hooks`;
+# - the sub-agent tools (`agents.enabled`, `features.multi_agent`,
+#   `features.multi_agent_v2`), the `sleep` tool (`features.sleep_tool`),
+#   and background terminals (`features.unified_exec`: a managed
+#   requirements file in the sandbox pins it off);
 # - the skills (`skills.bundled`, `skills.include_instructions`): only
-#   Terrarium-managed skills load (PLAN §8.5).
+#   Terrarium-managed skills load (PLAN §8.6).
 #
 # docs/compat.md ("Harness hardening") lists them with the reason.
 #
@@ -32,14 +36,8 @@ web_search = "disabled"
 # not an API key). Each agent's images go to `generated_images/` in its
 # workspace.
 image_generation = true
-# The `sleep` tool of the gpt-6 models: no long sleeps in a worker.
-sleep_tool = false
 # Shadow-mode metrics only.
 skill_search = false
-
-[agents]
-# No sub-agent tools.
-enabled = false
 
 [tui]
 notifications = false

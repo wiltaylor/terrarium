@@ -429,7 +429,8 @@ export interface WaitEventData {
  * acknowledged | retracted.
  */
 export type QuestionStatus = "open" | "answered" | "acknowledged" | "retracted";
-export type QuestionPriority = "normal" | "urgent";
+/** `critical`: the operator must act now; the dashboard shows a banner on every page and flashes its tab. */
+export type QuestionPriority = "normal" | "urgent" | "critical";
 /** A `question` asks for a decision. A `notice` only tells the operator something; the operator acknowledges it. */
 export type QuestionKind = "question" | "notice";
 
@@ -536,8 +537,21 @@ export interface Session {
 
 export type BlockRole = "user" | "assistant" | "system";
 export type BlockKind = "text" | "thinking" | "tool_call" | "tool_result" | "system";
-/** Who wrote a user turn: the operator (dashboard or CLI), a mail pointer, the daemon, or keys typed in the terminal. */
-export type BlockOrigin = "operator" | "agent_mail_pointer" | "system" | "user";
+/** Who wrote a user turn: the operator (dashboard or CLI), another agent (`agent send`), a mail pointer, the daemon, or keys typed in the terminal. */
+export type BlockOrigin = "operator" | "agent" | "agent_mail_pointer" | "system" | "user";
+
+/**
+ * One tagged block of a turn that Terrarium typed (PLAN §8.5): its source and
+ * the text after the tag line. A mail `body` is quoted with `> ` and can end
+ * with an unquoted "… (cut; run `terrarium mail read --thread T`)" line.
+ */
+export type TurnPart =
+  | { source: "user"; body: string }
+  /** `sender`: `project/agent`, the agent that typed the turn with `agent send`. */
+  | { source: "agent"; sender: string; body: string }
+  | { source: "mailbox"; sender: string; subject: string; thread: string; message?: string; body: string }
+  /** `kind`: recap, card, lease, nudge, or schedule (`detail` is the schedule name). */
+  | { source: "system"; kind: string; detail?: string; body: string };
 
 export interface BlockUsage {
   input: number;
@@ -563,6 +577,8 @@ export interface Block {
   /** Thinking that the harness did not keep (only a signature). */
   redacted?: boolean;
   origin?: BlockOrigin;
+  /** The tagged blocks of a user text that Terrarium typed. Absent for an untagged text (the terminal). */
+  parts?: TurnPart[];
   model?: string;
   usage?: BlockUsage;
   source: { harness: Harness; file: string; line: number };
@@ -788,7 +804,10 @@ export interface InboxItem {
   id: string;
   kind: InboxKind;
   open: boolean;
+  /** Open, with the priority `urgent` or `critical`. */
   urgent: boolean;
+  /** Open, with the priority `critical`. Absent on an older daemon. */
+  critical?: boolean;
   project: string | null;
   /** When it came in: the sort key. */
   at: string;
@@ -806,10 +825,12 @@ export interface InboxQuery {
   project?: string;
 }
 
-/** `GET /api/inbox/counts`: the open items. `urgent` counts the open urgent items. */
+/** `GET /api/inbox/counts`: the open items. `urgent` counts the open urgent and critical items; `critical` only the critical ones. */
 export interface InboxCounts {
   open: number;
   urgent: number;
+  /** Absent on an older daemon. */
+  critical?: number;
   question: number;
   notice: number;
   mail: number;

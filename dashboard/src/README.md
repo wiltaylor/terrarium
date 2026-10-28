@@ -411,8 +411,12 @@ The code is in `features/agents/conversation/`. The logic is pure and in
 - **Sessions.** The list on the left is `GET .../sessions`, newest first,
   with `title`, `blocks`, and `active`. The view opens the active session
   first. A new session or a start or stop reads the list again.
-- **Blocks.** A user turn is a bubble on the right, with a chip for its
-  origin: `you` (operator), `mail pointer`, `system`, or `terminal`.
+- **Blocks.** A user turn is a bubble on the right. A tagged turn (PLAN
+  §8.5) shows one badge for each of its `parts`: `User`, `Mail from
+  <sender> · <subject>`, or `System: <kind>`. The tag line does not show,
+  and a quoted mail body shows as a quote, as plain text. An untagged turn
+  has a chip for its origin: `you` (operator), `mail pointer`, `system`,
+  or `terminal`.
   Assistant text is markdown. Thinking is collapsed; with no text it shows
   `redacted`. A `tool_call` is a card with the tool name and the summary,
   and the JSON input opens below it. Its `tool_result` goes under the card

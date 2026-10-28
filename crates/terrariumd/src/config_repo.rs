@@ -11,7 +11,7 @@
 //! - `export/`: the templates, the schedules, and the projects with their
 //!   agents, targets, and repos, as fleet files ([`export_files`]). No
 //!   runtime state, and no ID of this instance.
-//! - `skills/`: the skill library (PLAN §8.5, `crate::skills`), one dir
+//! - `skills/`: the skill library (PLAN §8.6, `crate::skills`), one dir
 //!   for each skill, with the file types of
 //!   `terrarium_core::skills::EXTENSIONS`.
 //! - `README.md`, `.gitignore`.

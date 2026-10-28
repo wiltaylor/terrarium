@@ -60,7 +60,7 @@ pub struct Agent {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skills: Vec<String>,
     /// The skills that the daemon copied into `<harness dir>/skills/` for
-    /// this start (PLAN §8.5), sorted. The supervisor sets it before it
+    /// this start (PLAN §8.6), sorted. The supervisor sets it before it
     /// calls the adapter; the adapter gives the harness these skills and
     /// its skill tool, and no skill tool when the list is empty. Never
     /// stored.

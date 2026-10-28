@@ -96,7 +96,7 @@ pub struct AgentDef {
     pub policy: Policy,
     #[serde(default)]
     pub restart: RestartPolicy,
-    /// The skills of the agent from the skill library (PLAN §8.5): skill
+    /// The skills of the agent from the skill library (PLAN §8.6): skill
     /// names, or `*` for every skill of the library. Default none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skills: Vec<String>,
@@ -656,7 +656,7 @@ alert_at = 80                          # percent of any window
         assert_eq!(def.alert_at, 80);
     }
 
-    // PLAN §8.5, an agent with skills.
+    // PLAN §8.6, an agent with skills.
     const AGENT_SKILLS: &str = r#"
 name = "reviewer"
 project = "terra"
