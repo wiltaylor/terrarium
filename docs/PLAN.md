@@ -32,6 +32,7 @@ These are settled. The rest of the plan follows from them.
 | D17 | **Subscriptions** are first-class. The dashboard home shows usage and remaining quota for every subscription Terrarium is logged in to, and which agents are spending it. |
 | D18 | The dashboard **registers subscriptions**: it drives each harness's login flow in an embedded terminal, and takes API keys for pi through a form. No shell access needed to log in. |
 | D19 | The repo ships a **justfile**, a **Dockerfile**, and a **compose file**. Every harness config directory is a bind mount from the host, so settings are editable from outside the container. |
+| D20 | A **secret manager** holds API keys, tokens, logins, SSH keys, and custom secrets, encrypted at rest. Agents get them only through grants (§16b). |
 
 ---
 
@@ -2110,6 +2111,165 @@ token file. A probe reads the account's file. Neither refreshes.
 - **Pool agents read pool tokens.** Each Claude agent can read and
   change the credential of every account in its pool. It cannot see any
   other account. Codex and Copilot agents see only their current account.
+
+---
+
+## 16b. Secrets
+
+The secret manager holds the secrets that the daemon and the agents use:
+API keys, tokens, user names and passwords, SSH keys, GitHub tokens, and
+custom sets of fields. It replaces the credential store of §9 and §19
+(`crates/terrariumd/src/credentials.rs`). Decisions by Wil, 2026-10-28:
+
+| # | Decision |
+|---|---|
+| S1 | One store. The old credentials move into it with a migration. Repos, targets, and the config remote continue to refer to a secret by name. |
+| S2 | The daemon encrypts each secret at rest with a master key in a separate file. |
+| S3 | Secrets are global (sysadmin) or project scoped (project_admin of the project). |
+| S4 | The operator can show a value in the dashboard. Each reveal writes an audit row. |
+| S5 | Typed kinds, plus a `generic` kind with named fields. |
+| S6 | An agent gets a secret only through a grant. A grant has the level `use` or `read`. |
+| S7 | Agents get secrets in three ways: brokers (the key stays in the daemon), env vars at start, and `terrarium secret get`. |
+| S8 | The daemon redacts each known secret value in everything that it stores or shows. |
+| S9 | The subscription API keys stay in `credentials/subscriptions/`. No grant can give them to an agent. The redaction (S8) covers them too. |
+
+### 16b.1 Kinds
+
+| Kind | Fields (secret fields in bold) | Brokers |
+|---|---|---|
+| `api_key` | **`value`**, `env`? (a suggested env var name) | env var only |
+| `token` | `username`? (default `x-access-token`), **`value`**, `hosts`? (a list of git hosts) | git credential helper |
+| `github_token` | **`value`**, `host` (default `github.com`) | git credential helper for the host; `GH_TOKEN` for `gh` |
+| `login` | `username`, **`password`**, `url`?, `domain`? | `vnc` and `rdp` targets (it replaces the `password` kind) |
+| `ssh_key` | **`private_key`**, **`passphrase`**?, `public_key` (the daemon derives it; not secret) | ssh-agent socket; targets with ssh |
+| `generic` | named fields; each field is marked secret or plain | env vars only |
+
+The API never returns a secret field, except a reveal (§16b.5) and
+`terrarium secret get` with a `read` grant. Plain fields (user name, URL,
+host, public key) show in each list.
+
+### 16b.2 Storage and encryption
+
+- Table `secrets`: `id`, `scope` (`global` or a project), `name`, `kind`,
+  `plain` (JSON of the plain fields), `sealed` (the ciphertext of the secret
+  fields), `created_at`, `updated_at`, `created_by`. The name is unique in
+  its scope. A project secret hides a global secret of the same name for
+  that project.
+- `sealed` is XChaCha20-Poly1305 of the JSON of the secret fields. The
+  associated data is `id`, `scope`, `name`, and `kind`, so a row copied to
+  another name does not open.
+- The master key is 32 random bytes in `<state>/secrets.key`, mode 0600,
+  outside the database. The daemon makes it at the first start. A database
+  backup without the key file shows no secret. `terrariumd secrets
+  rotate-key` makes a new key and seals all rows again in one transaction.
+- The daemon decrypts a secret only when it uses one, and holds the plain
+  value in a zeroizing buffer.
+- The sandbox never binds the key file or the store.
+
+### 16b.3 Grants
+
+Table `secret_grants`: `secret_id`, `grantee` (an agent or a whole
+project), `level` (`use` or `read`), `env` (an env var name, optional),
+`created_by`, `created_at`.
+
+| Level | The agent gets |
+|---|---|
+| `use` | The brokers only: the git credential helper and the ssh-agent socket. The agent cannot see the value. |
+| `read` | `use`, plus env vars at start and `terrarium secret get`. |
+
+An env var puts the value into the agent's process environment, and the
+agent can print it. So an env var needs the level `read`. `ssh_key` grants
+are `use` by default.
+
+Who can grant:
+
+| Secret | Grant to | Who |
+|---|---|---|
+| Global | any agent or project | sysadmin, the operator |
+| Project | an agent of that project, or that project | project_admin of the project, sysadmin, the operator |
+
+A grant to a project applies to each agent of the project, also to the
+agents that start later. Each change of a grant writes an audit row. A
+grant change applies at the next start of the agent; the brokers and
+`terrarium secret get` check the grant at each call.
+
+### 16b.4 Delivery to agents
+
+- **Git credential helper.** `POST /api/repos/credential` (§9) answers
+  for the repos of the agent's project as now. It also answers for a host
+  of a granted `token` or `github_token` secret (level `use` or `read`).
+- **ssh-agent.** The daemon serves the ssh-agent protocol on one socket for
+  each agent, `/run/terrarium/ssh-agent.sock` in the sandbox, with
+  `SSH_AUTH_SOCK` set. It lists and signs with the granted `ssh_key`
+  secrets only. It refuses add, remove, and lock requests. Each sign is
+  counted in the audit (one row each minute for each key and agent).
+- **Env vars.** At start, the daemon puts each granted secret that has an
+  `env` name into the agent's environment. A `github_token` with no `env`
+  name sets `GH_TOKEN`.
+- **`terrarium secret`.** `terrarium secret list` shows the granted secrets
+  (name, kind, level, plain fields). `terrarium secret get <name> [--field
+  f]` prints a value, for a `read` grant only. Each `get` writes an audit
+  row.
+
+### 16b.5 Management, API, CLI, and dashboard
+
+- API: `GET/POST /api/secrets`, `GET/PUT/DELETE /api/secrets/{scope}/{name}`,
+  `POST /api/secrets/{scope}/{name}/reveal` (the operator only; the
+  dashboard asks for the operator password again), `GET/POST/DELETE
+  /api/secrets/{scope}/{name}/grants`, and `GET /api/agent/secrets` and
+  `POST /api/agent/secrets/{name}/get` for agents. `/api/credentials`
+  stays one release as an alias that makes global secrets.
+- CLI: `terrarium secret list|show|set|rm|grant|revoke|get`. `set` reads a
+  value from stdin or from a file, never from an argument.
+- Dashboard: a Secrets page (global secrets and all projects for the
+  operator), a Secrets tab in the project settings, a form for each kind,
+  the grants of each secret, and its audit rows. Reveal shows the value for
+  30 seconds.
+- Audit: `secret.put`, `secret.delete`, `secret.reveal`, `secret.get`,
+  `secret.use` (helper and ssh-agent), `secret.grant`, `secret.revoke`.
+  No row holds a value.
+- Config repo (§8.3): the export holds no secret. It holds the names, kinds,
+  and plain fields of the secrets, and the grants by name. An import makes a
+  missing secret as a placeholder with no value, and the dashboard marks it.
+
+### 16b.6 Redaction
+
+The daemon keeps an Aho-Corasick matcher of each secret field of 8 or more
+bytes, and of each subscription API key. It rebuilds the matcher after each
+change. It replaces each match with `[secret:<name>]` (and
+`[secret:subscription/<name>]`) before it stores or shows:
+
+- transcripts and the session view, runner logs, and the PTY screen
+  snapshots;
+- mail, notices, questions, board cards, memory nodes, wiki pages, text
+  artifacts, and version notes;
+- events, trigger payloads, and the audit details.
+
+The live terminal stream goes to the operator only and is not redacted.
+Redaction is a guard against accidents. It does not stop an agent with a
+`read` grant from sending a value out in a changed form (for example,
+base64).
+
+### 16b.7 Migration
+
+Migration 35 makes `secrets` and `secret_grants`. At the next start, the
+daemon moves each file of `<state>/credentials/<name>` (with its `.json`)
+into a global secret: `token` -> `token`, `ssh_key` -> `ssh_key`,
+`password` -> `login`. It copies each file to `<state>/credentials/backup/`
+(0600) first, then removes it. It writes a `secret.migrated` audit row for
+each. `subscriptions/`, `accounts/`, and `backup/` stay as they are.
+
+### 16b.8 Build order
+
+1. Store, encryption, key file, migration of the old credentials, and the
+   callers (repos, targets, config remote) on the new store.
+2. API, CLI `terrarium secret`, audit, and the `/api/credentials` alias.
+3. Grants, env vars at start, `terrarium secret get`, and the git helper
+   for granted hosts.
+4. The ssh-agent broker.
+5. Redaction.
+6. Dashboard: the Secrets page and the project tab, with reveal.
+7. Config repo export and import of secret names; docs (api.md, cli.md).
 
 ---
 
