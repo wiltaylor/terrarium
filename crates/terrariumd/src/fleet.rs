@@ -19,10 +19,10 @@ use std::path::{Path, PathBuf};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use terrarium_core::Role;
 use terrarium_core::agent_template::TemplateDef;
 use terrarium_core::config::{AgentDef, ProjectDef, RepoDef, SubscriptionDef, TargetDef};
 use terrarium_core::fleet::{self, Fleet, Issue, Kind};
+use terrarium_core::{HarnessId, Role};
 
 use crate::actor::Actor;
 use crate::api::Shared;
@@ -438,7 +438,8 @@ fn subscription_spec(def: &SubscriptionDef) -> Value {
     json!({
         "provider": def.provider,
         "plan": def.plan,
-        "harnesses": def.harnesses,
+        // As the store keeps them: a plan never lists pi.
+        "harnesses": subscriptions::spendable_harnesses(def),
         "probe": def.probe,
         "alert_at": def.alert_at,
     })
@@ -1022,6 +1023,27 @@ pub fn check_against(conn: &Connection, f: &Fleet, prompts: &Path) -> ApiResult<
                 format!("subscriptions.{}", s.name),
                 "the subscription needs a provider",
             ));
+        }
+    }
+    // pi uses API keys only (PLAN §16.3): a pi agent of the fleet names no
+    // plan login, the fleet's own or a stored one.
+    for a in f.agents().filter(|a| a.def.harness == HarnessId::Pi) {
+        let names = a.def.subscription.iter().chain(&a.def.subscription_pool);
+        for name in names {
+            let plan = match f.subscriptions.iter().find(|s| s.name == *name) {
+                Some(s) => terrarium_adapter_pi::provider::is_plan(s),
+                None => subscriptions::find(conn, name)?.is_some_and(|s| s.is_plan()),
+            };
+            if plan {
+                issues.push(Issue::error(
+                    format!("projects.{}.agents.{}", a.def.project, a.def.name),
+                    format!(
+                        "subscription `{name}`: {}",
+                        terrarium_adapter_pi::provider::PLAN_REFUSAL
+                    ),
+                ));
+                break;
+            }
         }
     }
     for a in f.agents() {

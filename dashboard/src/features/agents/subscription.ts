@@ -4,9 +4,13 @@
 import type { Api } from "../../api/client";
 import type { Agent, Harness, LoginStatus, ModelList, Subscription, SwapResult } from "../../api/types";
 
-/** The subscriptions whose `harnesses` include `harness`. The daemon refuses a start on any other. */
+/**
+ * The subscriptions whose `harnesses` include `harness`. The daemon refuses a start on any other.
+ * pi uses API keys only (PLAN §16.3): the daemon never lists pi on a plan, and a subscription with
+ * a plan account is never one for pi.
+ */
 export function compatibleSubscriptions(list: Subscription[], harness: Harness): Subscription[] {
-  return list.filter((s) => s.harnesses.includes(harness));
+  return list.filter((s) => s.harnesses.includes(harness) && (harness !== "pi" || !s.account));
 }
 
 /** The login status in short words. */
@@ -77,7 +81,8 @@ export function subscriptionOptions(list: Subscription[], harness: Harness, curr
   const name = current.trim();
   if (name && !fit.some((s) => s.name === name)) {
     const known = list.find((s) => s.name === name);
-    out.push({ value: name, label: known ? `${subscriptionLabel(known)} — not for ${harness}` : `${name} — not found` });
+    const why = harness === "pi" ? "not for pi, which uses API keys only" : `not for ${harness}`;
+    out.push({ value: name, label: known ? `${subscriptionLabel(known)} — ${why}` : `${name} — not found` });
   }
   return out;
 }

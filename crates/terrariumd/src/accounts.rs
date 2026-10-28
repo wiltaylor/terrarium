@@ -8,10 +8,10 @@
 //! ```text
 //! <state>/credentials/accounts/<subscription>/      0700, the daemon only
 //!   account.json            harness, provider, login name, Claude's oauthAccount (no secret)
-//!   store/                  0700, bound read-write into the sandboxes of the pool (Claude, pi)
+//!   store/                  0700, bound read-write into the sandboxes of the pool (Claude)
 //!     claude/.credentials.json   Claude: the CLAUDE_SECURESTORAGE_CONFIG_DIR target
 //!     claude.lock/               Claude's own legacy lock, `<realpath(dir)>.lock`
-//!     auth.json                  Codex, pi
+//!     auth.json                  Codex
 //!     token                      Copilot: the GitHub token (`gho_`)
 //! <state>/credentials/backup/   0700: copies of the shared logins that the migration moved (0600)
 //! <harness dir>/cred/account    the per-agent pointer: a symlink to one account's `store/`
@@ -22,9 +22,16 @@
 //! | Harness | Pointer use | Swap |
 //! |---|---|---|
 //! | Claude Code | `CLAUDE_SECURESTORAGE_CONFIG_DIR=<harness dir>/cred/account/claude`. Claude resolves the dir for each request (an mtime check), takes its locks inside it, and writes by a rename inside it. | live: take `.oauth_refresh.lock` and `.storage-write.lock` of both accounts, re-point, release |
-//! | pi | The shared home's `auth.json` is a symlink to `/run/terrarium/cred/account/auth.json`; the sandbox binds `<harness dir>/cred` at `/run/terrarium/cred`. pi checks the file revision for each request. | live: take pi's lock `<shared home>/auth.json.lock`, re-point, release |
 //! | Codex | The launch binds the account's `auth.json` over `$CODEX_HOME/auth.json`. Codex writes it in place. | restart with resume |
 //! | Copilot CLI | The launch sets `COPILOT_GITHUB_TOKEN` from `store/token`. | restart with resume |
+//!
+//! pi uses API keys only and has no plan account (PLAN §16.3). An install
+//! from before can have pi accounts and the shared pi `auth.json` as a
+//! symlink to `/run/terrarium/cred/account/auth.json` (the link of the pi
+//! plan accounts). The migration makes that file a plain `{}` file again
+//! when no pi agent runs ([`migrate`]); until then a pi launch points the
+//! agent at an empty store, so the link reads `{}`. An old pi account
+//! stays on disk until its logout or the delete of its subscription.
 //!
 //! The daemon never refreshes a token and never calls a token endpoint
 //! (PLAN §16.3, "The refresh rule"). It reads, copies, and moves credential
@@ -40,7 +47,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime};
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 use terrarium_core::{FileOverlay, HarnessId};
 use tracing::{info, warn};
 
@@ -58,16 +65,17 @@ pub const BACKUP_DIR: &str = "backup";
 pub const POINTER_DIR: &str = "cred";
 /// The pointer: a symlink to the store of the current account.
 pub const POINTER: &str = "account";
-/// The store of a pi agent with no account: an empty `auth.json`.
+/// The store of a pi agent while the old link is there: an empty
+/// `auth.json`.
 pub const NONE_STORE: &str = "none";
-/// Where the sandbox shows `<harness dir>/cred` (read-only). pi's shared
-/// `auth.json` link goes through it, so one link serves every agent.
+/// Where the sandbox shows `<harness dir>/cred` (read-only). The old pi
+/// link (an install from before pi took API keys only) goes through it.
 pub const SANDBOX_CRED: &str = "/run/terrarium/cred";
 /// Claude's credential directory in a store.
 pub const CLAUDE_DIR: &str = "claude";
 /// Claude's credential file.
 pub const CLAUDE_CREDENTIALS: &str = ".credentials.json";
-/// The credential file of Codex and pi.
+/// The credential file of Codex (and of the pi accounts from before).
 pub const AUTH_FILE: &str = "auth.json";
 /// Copilot's token file.
 pub const TOKEN_FILE: &str = "token";
@@ -87,13 +95,9 @@ pub const CLAUDE_REFRESH_LOCK: &str = ".oauth_refresh.lock";
 /// (`stale: 15000`). Every save of the credential is a read-modify-write
 /// under it.
 pub const CLAUDE_STORAGE_LOCK: &str = ".storage-write.lock";
-/// pi's lock: `proper-lockfile` on the auth path with `realpath: false`,
-/// so the directory is `<shared home>/auth.json.lock` (`stale: 30000`).
-pub const PI_LOCK: &str = "auth.json.lock";
 
 const CLAUDE_REFRESH_STALE: Duration = Duration::from_secs(60);
 const CLAUDE_STORAGE_STALE: Duration = Duration::from_secs(15);
-const PI_STALE: Duration = Duration::from_secs(30);
 /// How long a swap waits for a harness to release its lock. A Claude
 /// refresh holds it for at most about 30 s.
 pub const LOCK_TIMEOUT: Duration = Duration::from_secs(45);
@@ -203,13 +207,14 @@ pub fn claude_cred_dir(harness_dir: &Path) -> PathBuf {
     pointer_path(harness_dir).join(CLAUDE_DIR)
 }
 
-/// The target of pi's shared `auth.json` link, the same in every sandbox.
+/// The target of the old shared pi `auth.json` link, the same in every
+/// sandbox.
 pub fn pi_link_target() -> PathBuf {
     Path::new(SANDBOX_CRED).join(POINTER).join(AUTH_FILE)
 }
 
-/// True when the shared pi home has its `auth.json` link to the account
-/// of each agent.
+/// True when the shared pi home still has its `auth.json` link of the pi
+/// plan accounts (an install from before pi took API keys only).
 pub fn pi_link_installed(home: &Path) -> bool {
     fs::read_link(home.join(AUTH_FILE)).is_ok_and(|t| t == pi_link_target())
 }
@@ -417,41 +422,34 @@ pub fn lock_dir(path: &Path, stale: Duration, timeout: Duration) -> io::Result<D
 
 /// The harness locks that keep a swap or a credential write atomic.
 /// Claude: `.oauth_refresh.lock`, then `.storage-write.lock`, in each
-/// store, in path order. pi: the shared `auth.json.lock`. Codex and
-/// Copilot have none (they swap by a restart).
+/// store, in path order. Codex and Copilot have none (they swap by a
+/// restart).
 fn harness_locks(
     harness: HarnessId,
     stores: &[&Path],
-    shared_home: &Path,
     timeout: Duration,
 ) -> io::Result<Vec<DirLock>> {
     let mut out = Vec::new();
-    match harness {
-        HarnessId::Claude => {
-            let mut dirs: Vec<PathBuf> = stores
-                .iter()
-                .map(|s| s.join(CLAUDE_DIR))
-                .filter(|d| is_real_dir(d))
-                .collect();
-            dirs.sort();
-            dirs.dedup();
-            for d in dirs {
-                out.push(lock_dir(
-                    &d.join(CLAUDE_REFRESH_LOCK),
-                    CLAUDE_REFRESH_STALE,
-                    timeout,
-                )?);
-                out.push(lock_dir(
-                    &d.join(CLAUDE_STORAGE_LOCK),
-                    CLAUDE_STORAGE_STALE,
-                    timeout,
-                )?);
-            }
+    if harness == HarnessId::Claude {
+        let mut dirs: Vec<PathBuf> = stores
+            .iter()
+            .map(|s| s.join(CLAUDE_DIR))
+            .filter(|d| is_real_dir(d))
+            .collect();
+        dirs.sort();
+        dirs.dedup();
+        for d in dirs {
+            out.push(lock_dir(
+                &d.join(CLAUDE_REFRESH_LOCK),
+                CLAUDE_REFRESH_STALE,
+                timeout,
+            )?);
+            out.push(lock_dir(
+                &d.join(CLAUDE_STORAGE_LOCK),
+                CLAUDE_STORAGE_STALE,
+                timeout,
+            )?);
         }
-        HarnessId::Pi if is_real_dir(shared_home) => {
-            out.push(lock_dir(&shared_home.join(PI_LOCK), PI_STALE, timeout)?);
-        }
-        _ => {}
     }
     Ok(out)
 }
@@ -474,8 +472,8 @@ pub fn point(harness_dir: &Path, target: &Path) -> io::Result<()> {
     })
 }
 
-/// The store for a pi agent with no account: `cred/none/auth.json` holds
-/// `{}`.
+/// The store for a pi agent while the old link is there:
+/// `cred/none/auth.json` holds `{}`.
 fn none_store(harness_dir: &Path) -> io::Result<PathBuf> {
     let dir = harness_dir.join(POINTER_DIR).join(NONE_STORE);
     fs::create_dir_all(&dir)?;
@@ -486,19 +484,18 @@ fn none_store(harness_dir: &Path) -> io::Result<PathBuf> {
     Ok(dir)
 }
 
-/// Swap the account of a running Claude or pi agent (PLAN §16.3): take
-/// the harness's locks on the old and the new account, re-point the
-/// agent's pointer at the store of `to`, and release. The harness reads
-/// the new credential at its next request.
+/// Swap the account of a running Claude agent (PLAN §16.3): take the
+/// harness's locks on the old and the new account, re-point the agent's
+/// pointer at the store of `to`, and release. The harness reads the new
+/// credential at its next request.
 pub fn live_swap(
     state_dir: &Path,
     harness: HarnessId,
     harness_dir: &Path,
     to: &str,
-    shared_home: &Path,
     timeout: Duration,
 ) -> Result<(), String> {
-    if !matches!(harness, HarnessId::Claude | HarnessId::Pi) {
+    if harness != HarnessId::Claude {
         return Err(format!("the {harness} harness has no live swap"));
     }
     if !has_credential(state_dir, to, harness) {
@@ -511,7 +508,7 @@ pub fn live_swap(
     if let Some(o) = old.as_deref() {
         stores.push(o);
     }
-    let locks = harness_locks(harness, &stores, shared_home, timeout).map_err(|e| e.to_string())?;
+    let locks = harness_locks(harness, &stores, timeout).map_err(|e| e.to_string())?;
     let result = point(harness_dir, &new).map_err(|e| format!("cannot re-point the agent: {e}"));
     drop(locks);
     result
@@ -520,17 +517,16 @@ pub fn live_swap(
 // ---- Writing a credential ----
 
 /// Write the credential `bytes` of `harness` into the store of `sub`,
-/// under the harness locks. Claude and pi: a rename inside the store (both
-/// reach the file through a directory). Codex: in place, because a
-/// running Codex has the file bound. Copilot: a rename.
+/// under the harness locks. Claude: a rename inside the store (it reaches
+/// the file through a directory). Codex: in place, because a running Codex
+/// has the file bound. Copilot: a rename.
 pub fn write_credential(
     state_dir: &Path,
     sub: &str,
     harness: HarnessId,
     bytes: &[u8],
-    shared_home: &Path,
 ) -> Result<(), String> {
-    write_credential_within(state_dir, sub, harness, bytes, shared_home, LOCK_TIMEOUT)
+    write_credential_within(state_dir, sub, harness, bytes, LOCK_TIMEOUT)
 }
 
 /// [`write_credential`] with its own wait for the harness locks.
@@ -539,7 +535,6 @@ fn write_credential_within(
     sub: &str,
     harness: HarnessId,
     bytes: &[u8],
-    shared_home: &Path,
     timeout: Duration,
 ) -> Result<(), String> {
     let err = |e: io::Error| format!("cannot write the {harness} login of `{sub}`: {e}");
@@ -553,7 +548,7 @@ fn write_credential_within(
         private_dir(&store.join(CLAUDE_DIR)).map_err(err)?;
     }
     let _one = swaps();
-    let _locks = harness_locks(harness, &[&store], shared_home, timeout).map_err(err)?;
+    let _locks = harness_locks(harness, &[&store], timeout).map_err(err)?;
     let path = credential_path(&store, harness);
     match harness {
         HarnessId::Codex => write_in_place(&path, bytes),
@@ -591,11 +586,10 @@ fn record_meta(
 /// The credential of `harness` in a harness home `home` (a shared home or
 /// the scratch home of a login), as the bytes the store keeps, with the
 /// login name and Claude's `oauthAccount`. `None`: no plan login there.
-/// For pi, `pi_provider` picks the entry of `auth.json`.
+/// pi has no plan login (it uses API keys only): always `None`.
 pub fn credential_in_home(
     harness: HarnessId,
     home: &Path,
-    pi_provider: Option<&str>,
 ) -> Option<(Vec<u8>, Option<String>, Option<Value>)> {
     let json = |p: &Path| -> Option<Value> { serde_json::from_slice(&read_nofollow(p).ok()?).ok() };
     match harness {
@@ -636,18 +630,7 @@ pub fn credential_in_home(
                 .map(str::to_owned);
             Some((token.into_bytes(), login, None))
         }
-        HarnessId::Pi => {
-            let provider = pi_provider?;
-            let v = json(&home.join(AUTH_FILE))?;
-            let entry = v.get(provider)?.clone();
-            let mut one = Map::new();
-            one.insert(provider.to_owned(), entry);
-            Some((
-                serde_json::to_vec_pretty(&Value::Object(one)).ok()?,
-                None,
-                None,
-            ))
-        }
+        HarnessId::Pi => None,
     }
 }
 
@@ -662,15 +645,13 @@ pub fn import_login(
     harness: HarnessId,
     provider: &str,
     scratch: &Path,
-    pi_provider: Option<&str>,
-    shared_home: &Path,
 ) -> Result<(), String> {
-    let Some((bytes, login, oauth)) = credential_in_home(harness, scratch, pi_provider) else {
+    let Some((bytes, login, oauth)) = credential_in_home(harness, scratch) else {
         return Err(format!(
             "the login finished, but its scratch home has no {harness} plan login"
         ));
     };
-    write_credential(state_dir, sub, harness, &bytes, shared_home)?;
+    write_credential(state_dir, sub, harness, &bytes)?;
     record_meta(
         state_dir,
         sub,
@@ -710,33 +691,29 @@ pub fn copilot_token(state_dir: &Path, sub: &str) -> Option<String> {
 // ---- The migration ----
 
 /// True when `provider` is the plan provider of `harness` (the provider a
-/// login of that harness makes, `LoginKind::provider`).
+/// login of that harness makes, `LoginKind::provider`). pi has none: it
+/// uses API keys only.
 pub fn plan_provider(harness: HarnessId, provider: &str) -> bool {
     match harness {
         HarnessId::Claude => provider == "anthropic",
         HarnessId::Codex => matches!(provider, "openai" | "openai-codex"),
         HarnessId::Copilot => matches!(provider, "github" | "github-copilot" | "copilot"),
-        HarnessId::Pi => true,
+        HarnessId::Pi => false,
     }
 }
 
-/// The one subscription that the shared login of `harness` (for pi: of
-/// the provider entry `pi_provider`) belongs to: a plan provider of the
-/// harness, the harness can spend it, no stored API key, and no account
-/// yet. `Err` names why there is not exactly one.
+/// The one subscription that the shared login of `harness` belongs to: a
+/// plan provider of the harness, the harness can spend it, no stored API
+/// key, and no account yet. `Err` names why there is not exactly one.
 fn owner<'a>(
     state_dir: &Path,
     subs: &'a [Subscription],
     harness: HarnessId,
-    pi_provider: Option<&str>,
 ) -> Result<&'a Subscription, String> {
     let fits: Vec<&Subscription> = subs
         .iter()
         .filter(|s| s.harnesses.contains(&harness) && s.env_var.is_none())
-        .filter(|s| match pi_provider {
-            Some(p) => s.provider == p,
-            None => plan_provider(harness, &s.provider),
-        })
+        .filter(|s| plan_provider(harness, &s.provider))
         .filter(|s| !exists(state_dir, &s.name))
         .collect();
     match fits.as_slice() {
@@ -763,42 +740,32 @@ pub struct Migration {
     pub backups: Vec<PathBuf>,
     /// Why a shared login stayed.
     pub skipped: Vec<String>,
-    /// pi: the shared `auth.json` is now the link to each agent's account.
-    pub pi_link: bool,
+    /// pi: the shared `auth.json` was the link of the pi plan accounts
+    /// (an install from before pi took API keys only); it is a plain `{}`
+    /// file again.
+    pub pi_unlinked: bool,
 }
 
 impl Migration {
     pub fn is_empty(&self) -> bool {
-        self.moved.is_empty() && self.skipped.is_empty() && !self.pi_link
+        self.moved.is_empty() && self.skipped.is_empty() && !self.pi_unlinked
     }
 }
 
 /// True when the shared home of `harness` has something that the
 /// migration moves (a cheap check, for the start-up loop).
-pub fn migration_pending(state_dir: &Path, harness: HarnessId, home: &Path) -> bool {
+pub fn migration_pending(harness: HarnessId, home: &Path) -> bool {
     match harness {
-        HarnessId::Claude => credential_in_home(harness, home, None).is_some(),
-        HarnessId::Codex => credential_in_home(harness, home, None).is_some(),
-        HarnessId::Copilot => credential_in_home(harness, home, None).is_some(),
-        HarnessId::Pi => {
-            if pi_link_installed(home) {
-                return false;
-            }
-            let entries = read_nofollow(&home.join(AUTH_FILE))
-                .ok()
-                .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
-                .and_then(|v| v.as_object().map(Map::len))
-                .unwrap_or(0);
-            entries > 0
-                || list(state_dir)
-                    .iter()
-                    .any(|(_, m)| m.harness == HarnessId::Pi)
+        HarnessId::Claude | HarnessId::Codex | HarnessId::Copilot => {
+            credential_in_home(harness, home).is_some()
         }
+        HarnessId::Pi => pi_link_installed(home),
     }
 }
 
 /// Move the shared login of `harness` in `home` into the account of the
-/// subscription that uses it (PLAN §16.3, "The migration"). Idempotent:
+/// subscription that uses it (PLAN §16.3, "The migration"). For pi, make
+/// the old shared `auth.json` link a plain `{}` file again. Idempotent:
 /// a second run finds nothing to move. Call it only while no agent of the
 /// harness runs (`Supervisor::with_quiet_harness`): a running agent reads
 /// the shared file that this moves away.
@@ -819,7 +786,7 @@ pub fn migrate(
         ..Migration::default()
     };
     match harness {
-        HarnessId::Pi => migrate_pi(state_dir, home, subs, &mut m),
+        HarnessId::Pi => unlink_pi(home, &mut m),
         _ => migrate_one(state_dir, harness, home, subs, &mut m),
     }
     m
@@ -832,7 +799,7 @@ fn migrate_one(
     subs: &[Subscription],
     m: &mut Migration,
 ) {
-    let Some((bytes, login, oauth)) = credential_in_home(harness, home, None) else {
+    let Some((bytes, login, oauth)) = credential_in_home(harness, home) else {
         return;
     };
     let shared = match harness {
@@ -848,7 +815,7 @@ fn migrate_one(
     });
     let sub = match done_before {
         Some(s) => s,
-        None => match owner(state_dir, subs, harness, None) {
+        None => match owner(state_dir, subs, harness) {
             Ok(s) => s,
             Err(why) => {
                 m.skipped
@@ -878,14 +845,9 @@ fn migrate_one(
         }
     }
     if done_before.is_none() {
-        if let Err(e) = write_credential_within(
-            state_dir,
-            &sub.name,
-            harness,
-            &bytes,
-            home,
-            MIGRATION_LOCK_WAIT,
-        ) {
+        if let Err(e) =
+            write_credential_within(state_dir, &sub.name, harness, &bytes, MIGRATION_LOCK_WAIT)
+        {
             m.skipped.push(e);
             return;
         }
@@ -938,95 +900,20 @@ fn strip_copilot_tokens(path: &Path, original: &[u8]) -> io::Result<()> {
     write_renamed(path, format!("{head}{body}\n").as_bytes())
 }
 
-/// pi: move each provider entry of the shared `auth.json` into the account
-/// of its subscription, then make the shared `auth.json` the link to each
-/// agent's account. When an entry has no subscription, nothing changes.
-fn migrate_pi(state_dir: &Path, home: &Path, subs: &[Subscription], m: &mut Migration) {
-    if pi_link_installed(home) {
+/// pi: the shared `auth.json` of an install from before pi took API keys
+/// only can be the link of the pi plan accounts. Make it a plain `{}`
+/// file again, by a rename over the link. pi then reads no login there;
+/// its agents get their API key in the env. A plain file stays as it is.
+fn unlink_pi(home: &Path, m: &mut Migration) {
+    if !pi_link_installed(home) {
         return;
     }
-    let shared = home.join(AUTH_FILE);
-    let original = read_nofollow(&shared).ok();
-    let entries: Map<String, Value> = original
-        .as_deref()
-        .and_then(|b| serde_json::from_slice::<Value>(b).ok())
-        .and_then(|v| v.as_object().cloned())
-        .unwrap_or_default();
-    let has_accounts = list(state_dir)
-        .iter()
-        .any(|(_, x)| x.harness == HarnessId::Pi);
-    if entries.is_empty() && !has_accounts {
-        return;
-    }
-    let mut plan = Vec::new();
-    for (provider, entry) in &entries {
-        match owner(state_dir, subs, HarnessId::Pi, Some(provider)) {
-            Ok(s) => plan.push((s.name.clone(), provider.clone(), entry.clone())),
-            Err(why) => m
-                .skipped
-                .push(format!("pi provider `{provider}` stays shared: {why}")),
-        }
-    }
-    if !m.skipped.is_empty() {
-        m.skipped.push(
-            "the shared pi auth.json stays as it is until every entry has a subscription".into(),
-        );
-        return;
-    }
-    if let Some(bytes) = original
-        .as_deref()
-        .filter(|b| !entries.is_empty() || b.len() > 2)
-    {
-        match backup(state_dir, HarnessId::Pi, AUTH_FILE, bytes) {
-            Ok(p) => m.backups.push(p),
-            Err(e) => {
-                m.skipped
-                    .push(format!("cannot back up {}: {e}", shared.display()));
-                return;
-            }
-        }
-    }
-    for (sub, provider, entry) in plan {
-        let one = json!({ provider.clone(): entry });
-        let bytes = serde_json::to_vec_pretty(&one).unwrap_or_default();
-        let provider_of = subs
-            .iter()
-            .find(|s| s.name == sub)
-            .map(|s| s.provider.clone());
-        if let Err(e) = write_credential_within(
-            state_dir,
-            &sub,
-            HarnessId::Pi,
-            &bytes,
-            home,
-            MIGRATION_LOCK_WAIT,
-        )
-        .and_then(|()| {
-            record_meta(
-                state_dir,
-                &sub,
-                HarnessId::Pi,
-                provider_of.as_deref(),
-                None,
-                None,
-                "migration",
-            )
-        }) {
-            m.skipped.push(e);
-            return;
-        }
-        m.moved.push(sub);
-    }
-    let tmp = home.join(format!(".{AUTH_FILE}.terrarium-{}", ulid::Ulid::new()));
-    let linked =
-        std::os::unix::fs::symlink(pi_link_target(), &tmp).and_then(|()| fs::rename(&tmp, &shared));
-    match linked {
-        Ok(()) => m.pi_link = true,
-        Err(e) => {
-            let _ = fs::remove_file(&tmp);
-            m.skipped
-                .push(format!("cannot link the shared pi auth.json: {e}"));
-        }
+    // A rename replaces the link itself, not its target.
+    match write_renamed(&home.join(AUTH_FILE), b"{}") {
+        Ok(()) => m.pi_unlinked = true,
+        Err(e) => m.skipped.push(format!(
+            "cannot make the shared pi auth.json a plain file again: {e}"
+        )),
     }
 }
 
@@ -1062,9 +949,10 @@ pub struct LaunchAccounts {
     pub env: Vec<(String, String)>,
     pub overlays: Vec<FileOverlay>,
     /// Account stores to bind read-write at their own path: each pool
-    /// member with a login of the harness (Claude, pi).
+    /// member with a login of the harness (Claude).
     pub stores: Vec<PathBuf>,
-    /// Bind `<harness dir>/cred` read-only at [`SANDBOX_CRED`] (pi).
+    /// Bind `<harness dir>/cred` read-only at [`SANDBOX_CRED`]: pi, while
+    /// the old shared `auth.json` link is there.
     pub cred_alias: Option<PathBuf>,
     /// The subscriptions of `stores`: a live swap may pick these.
     pub bound: Vec<String>,
@@ -1136,44 +1024,37 @@ fn default_account(
 /// shared login before the migration.
 pub fn prepare_launch(input: &LaunchInput<'_>) -> Result<LaunchAccounts, String> {
     let mut out = LaunchAccounts::default();
-    // pi agents name their provider through a subscription (mostly API
-    // keys), so pi gets no default account.
-    let default = match input.subscription {
-        None if input.harness != HarnessId::Pi => {
-            default_account(input.state_dir, input.harness, input.default)?
+    let fs_err = |e: io::Error| format!("cannot point the agent at its account: {e}");
+    // pi uses API keys only: no account, and no default account. While the
+    // old shared `auth.json` link is there (until the migration makes it a
+    // plain file), the link reads the agent's empty store.
+    if input.harness == HarnessId::Pi {
+        if pi_link_installed(input.shared_home) {
+            if !input.sandboxed {
+                return Err(
+                    "the shared pi auth.json is still the link of the old pi plan accounts, \
+                     which needs the sandbox; stop every pi agent once, so the daemon makes it \
+                     a plain file again"
+                        .into(),
+                );
+            }
+            out.cred_alias = Some(input.harness_dir.join(POINTER_DIR));
+            let none = none_store(input.harness_dir).map_err(fs_err)?;
+            point(input.harness_dir, &none).map_err(fs_err)?;
         }
-        _ => None,
+        return Ok(out);
+    }
+    let default = match input.subscription {
+        None => default_account(input.state_dir, input.harness, input.default)?,
+        Some(_) => None,
     };
     let current = input
         .subscription
         .or(default.as_deref())
         .filter(|s| has_credential(input.state_dir, s, input.harness));
-    let fs_err = |e: io::Error| format!("cannot point the agent at its account: {e}");
-    if input.harness == HarnessId::Pi && pi_link_installed(input.shared_home) {
-        if !input.sandboxed {
-            return Err(
-                "the shared pi auth.json links to the account of each agent, which needs the \
-                 sandbox; run the daemon with --sandbox bwrap"
-                    .into(),
-            );
-        }
-        out.cred_alias = Some(input.harness_dir.join(POINTER_DIR));
-        if current.is_none() {
-            let none = none_store(input.harness_dir).map_err(fs_err)?;
-            point(input.harness_dir, &none).map_err(fs_err)?;
-            return Ok(out);
-        }
-    }
     let Some(current) = current else {
         return Ok(out);
     };
-    if input.harness == HarnessId::Pi && !pi_link_installed(input.shared_home) {
-        return Err(
-            "the pi home still has its shared auth.json; stop every pi agent once, so the \
-             daemon can link it to the account of each agent (PLAN §16.3)"
-                .into(),
-        );
-    }
     let store = store_dir(input.state_dir, current);
     point(input.harness_dir, &store).map_err(fs_err)?;
     out.account = Some(current.to_owned());
@@ -1185,7 +1066,8 @@ pub fn prepare_launch(input: &LaunchInput<'_>) -> Result<LaunchAccounts, String>
             ));
             out.bound = pool_with_logins(input, current);
         }
-        HarnessId::Pi => out.bound = pool_with_logins(input, current),
+        // pi returned above: it has no account.
+        HarnessId::Pi => {}
         HarnessId::Codex => {
             // bwrap needs a mount point in the shared home. `{}` is "no
             // login" for an agent without an account.
@@ -1208,7 +1090,7 @@ pub fn prepare_launch(input: &LaunchInput<'_>) -> Result<LaunchAccounts, String>
             // The env token wins over `config.json`. A token there again
             // (a login with the shared home) is another account that every
             // agent could read: the operator moves it with the wizard.
-            if credential_in_home(HarnessId::Copilot, input.shared_home, None).is_some() {
+            if credential_in_home(HarnessId::Copilot, input.shared_home).is_some() {
                 out.warning = Some(
                     "the shared Copilot config.json holds a login token again; the agent uses \
                      its account token (COPILOT_GITHUB_TOKEN wins), but every Copilot agent can \
@@ -1354,14 +1236,7 @@ mod tests {
         let home = tmp.path().join("auth/claude");
         fs::create_dir_all(&home).unwrap();
         for s in ["max-a", "max-b"] {
-            write_credential(
-                &state,
-                s,
-                HarnessId::Claude,
-                claude_login(s).as_bytes(),
-                &home,
-            )
-            .unwrap();
+            write_credential(&state, s, HarnessId::Claude, claude_login(s).as_bytes()).unwrap();
         }
         let h = tmp.path().join("agent/harness");
         point(&h, &store_dir(&state, "max-a")).unwrap();
@@ -1374,7 +1249,6 @@ mod tests {
             HarnessId::Claude,
             &h,
             "max-b",
-            &home,
             Duration::from_millis(150),
         )
         .unwrap_err();
@@ -1399,7 +1273,6 @@ mod tests {
             HarnessId::Claude,
             &h,
             "max-b",
-            &home,
             Duration::from_secs(5),
         )
         .unwrap();
@@ -1414,7 +1287,7 @@ mod tests {
             assert!(!d.join(CLAUDE_STORAGE_LOCK).exists());
         }
         // Codex has no live swap.
-        assert!(live_swap(&state, HarnessId::Codex, &h, "max-b", &home, LOCK_TIMEOUT).is_err());
+        assert!(live_swap(&state, HarnessId::Codex, &h, "max-b", LOCK_TIMEOUT).is_err());
     }
 
     /// The account layout: mode 0700 dirs, 0600 files, the Claude store
@@ -1424,8 +1297,7 @@ mod tests {
     fn the_store_layout_keeps_the_locks_per_account() {
         let tmp = tempfile::tempdir().unwrap();
         let state = tmp.path();
-        let home = tmp.path().join("home");
-        write_credential(state, "a", HarnessId::Claude, b"{}", &home).unwrap();
+        write_credential(state, "a", HarnessId::Claude, b"{}").unwrap();
         let store = store_dir(state, "a");
         for d in [
             credentials_dir(state),
@@ -1540,11 +1412,11 @@ mod tests {
         );
         assert!(
             !pi_link_installed(&homes[&HarnessId::Pi]),
-            "no pi account: no link"
+            "pi never gets the link"
         );
         // Idempotent.
         for h in harnesses() {
-            assert!(!migration_pending(&state, h, &homes[&h]), "{h}");
+            assert!(!migration_pending(h, &homes[&h]), "{h}");
             assert!(migrate(&state, h, &homes[&h], &subs).is_empty(), "{h}");
         }
         let backups = fs::read_dir(credentials_dir(&state).join(BACKUP_DIR))
@@ -1573,47 +1445,40 @@ mod tests {
         assert!(m.skipped[0].contains("2 subscriptions fit it"), "{m:?}");
         assert!(claude.join(CLAUDE_CREDENTIALS).exists());
 
-        write_credential(&state, "max-a", HarnessId::Claude, login.as_bytes(), claude).unwrap();
+        write_credential(&state, "max-a", HarnessId::Claude, login.as_bytes()).unwrap();
         let m = migrate(&state, HarnessId::Claude, claude, &two);
         assert_eq!(m.moved, ["max-a"]);
         assert!(!claude.join(CLAUDE_CREDENTIALS).exists());
     }
 
-    /// pi: the entries move, and the shared `auth.json` becomes the link
-    /// through the sandbox path. An entry without a subscription keeps
-    /// everything as it is.
+    /// pi uses API keys only: a login in the shared `auth.json` moves
+    /// nowhere, and a plain file stays as it is. The old link of the pi
+    /// plan accounts becomes a plain `{}` file again, once.
     #[test]
-    fn the_pi_migration_links_the_shared_file() {
+    fn the_pi_migration_makes_the_old_link_a_plain_file() {
         let tmp = tempfile::tempdir().unwrap();
         let state = tmp.path().join("state");
         let homes = fake_homes(tmp.path());
         let pi = &homes[&HarnessId::Pi];
-        let file = r#"{"anthropic": {"type": "oauth", "refresh": "r", "access": "a", "expires": 1},
-                       "openai-codex": {"type": "oauth", "refresh": "r2"}}"#;
+        let file =
+            r#"{"anthropic": {"type": "oauth", "refresh": "r", "access": "a", "expires": 1}}"#;
         fs::write(pi.join(AUTH_FILE), file).unwrap();
-        let one = vec![sub("pi-anthropic", "anthropic", HarnessId::Pi)];
-        let m = migrate(&state, HarnessId::Pi, pi, &one);
-        assert!(m.moved.is_empty() && !m.pi_link, "{m:?}");
+        let subs = vec![sub("pi-anthropic", "anthropic", HarnessId::Pi)];
+        assert!(!migration_pending(HarnessId::Pi, pi));
+        assert!(migrate(&state, HarnessId::Pi, pi, &subs).is_empty());
         assert_eq!(fs::read_to_string(pi.join(AUTH_FILE)).unwrap(), file);
+        assert!(!exists(&state, "pi-anthropic"));
 
-        let both = vec![
-            sub("pi-anthropic", "anthropic", HarnessId::Pi),
-            sub("pi-codex", "openai-codex", HarnessId::Pi),
-        ];
-        assert!(migration_pending(&state, HarnessId::Pi, pi));
-        let m = migrate(&state, HarnessId::Pi, pi, &both);
-        assert_eq!(m.moved, ["pi-anthropic", "pi-codex"]);
-        assert!(m.pi_link && pi_link_installed(pi));
-        let a: Value = serde_json::from_slice(
-            &fs::read(credential_path(
-                &store_dir(&state, "pi-codex"),
-                HarnessId::Pi,
-            ))
-            .unwrap(),
-        )
-        .unwrap();
-        assert!(a.get("openai-codex").is_some() && a.get("anthropic").is_none());
-        assert!(!migration_pending(&state, HarnessId::Pi, pi));
+        fs::remove_file(pi.join(AUTH_FILE)).unwrap();
+        std::os::unix::fs::symlink(pi_link_target(), pi.join(AUTH_FILE)).unwrap();
+        assert!(pi_link_installed(pi) && migration_pending(HarnessId::Pi, pi));
+        let m = migrate(&state, HarnessId::Pi, pi, &subs);
+        assert!(m.pi_unlinked && m.moved.is_empty(), "{m:?}");
+        let meta = fs::symlink_metadata(pi.join(AUTH_FILE)).unwrap();
+        assert!(meta.file_type().is_file());
+        assert_eq!(fs::read_to_string(pi.join(AUTH_FILE)).unwrap(), "{}");
+        assert!(!migration_pending(HarnessId::Pi, pi));
+        assert!(migrate(&state, HarnessId::Pi, pi, &subs).is_empty());
     }
 
     /// The launch binds only the pool's accounts with a login of the
@@ -1626,14 +1491,7 @@ mod tests {
         let home = tmp.path().join("auth/claude");
         fs::create_dir_all(&home).unwrap();
         for s in ["max-a", "max-b", "max-c"] {
-            write_credential(
-                &state,
-                s,
-                HarnessId::Claude,
-                claude_login(s).as_bytes(),
-                &home,
-            )
-            .unwrap();
+            write_credential(&state, s, HarnessId::Claude, claude_login(s).as_bytes()).unwrap();
         }
         let h = tmp.path().join("agent/harness");
         let pool = vec![
@@ -1699,7 +1557,7 @@ mod tests {
         // A default of another harness is not a Claude login.
         let phome0 = tmp.path().join("auth/copilot0");
         fs::create_dir_all(&phome0).unwrap();
-        write_credential(&state, "gh0", HarnessId::Copilot, b"gho_y\n", &phome0).unwrap();
+        write_credential(&state, "gh0", HarnessId::Copilot, b"gho_y\n").unwrap();
         assert!(
             prepare_launch(&LaunchInput {
                 subscription: None,
@@ -1721,7 +1579,6 @@ mod tests {
             "only",
             HarnessId::Claude,
             claude_login("only").as_bytes(),
-            &home,
         )
         .unwrap();
         let h1 = tmp.path().join("agent1/harness");
@@ -1756,14 +1613,7 @@ mod tests {
         // `{}` mount point in the shared home.
         let chome = tmp.path().join("auth/codex");
         fs::create_dir_all(&chome).unwrap();
-        write_credential(
-            &state,
-            "pro",
-            HarnessId::Codex,
-            br#"{"tokens": {}}"#,
-            &chome,
-        )
-        .unwrap();
+        write_credential(&state, "pro", HarnessId::Codex, br#"{"tokens": {}}"#).unwrap();
         let ch = tmp.path().join("agent2/harness");
         let l = prepare_launch(&LaunchInput {
             harness: HarnessId::Codex,
@@ -1786,7 +1636,7 @@ mod tests {
         // Copilot: the token in the env, no bind.
         let phome = tmp.path().join("auth/copilot");
         fs::create_dir_all(&phome).unwrap();
-        write_credential(&state, "gh", HarnessId::Copilot, b"gho_x\n", &phome).unwrap();
+        write_credential(&state, "gh", HarnessId::Copilot, b"gho_x\n").unwrap();
         let l = prepare_launch(&LaunchInput {
             harness: HarnessId::Copilot,
             subscription: Some("gh"),
@@ -1801,22 +1651,18 @@ mod tests {
         assert!(l.stores.is_empty() && l.overlays.is_empty());
     }
 
-    /// pi after the link: the agent's `cred` dir is shown at the sandbox
-    /// path, and an agent with no account points at an empty store.
+    /// pi has no account, also when an old pi account exists. While the
+    /// old shared link is there, the agent's `cred` dir is shown at the
+    /// sandbox path and points at an empty store; after the unlink, the
+    /// launch adds nothing.
     #[test]
-    fn a_pi_launch_uses_the_shared_link() {
+    fn a_pi_launch_has_no_account() {
         let tmp = tempfile::tempdir().unwrap();
         let state = tmp.path().join("state");
         let home = tmp.path().join("auth/pi");
         fs::create_dir_all(&home).unwrap();
-        write_credential(
-            &state,
-            "pi-a",
-            HarnessId::Pi,
-            br#"{"anthropic": {}}"#,
-            &home,
-        )
-        .unwrap();
+        // An old pi account, from before pi took API keys only.
+        write_credential(&state, "pi-a", HarnessId::Pi, br#"{"anthropic": {}}"#).unwrap();
         record_meta(
             &state,
             "pi-a",
@@ -1827,45 +1673,44 @@ mod tests {
             "login",
         )
         .unwrap();
+        std::os::unix::fs::symlink(pi_link_target(), home.join(AUTH_FILE)).unwrap();
         let h = tmp.path().join("agent/harness");
         let input = LaunchInput {
             state_dir: &state,
             harness: HarnessId::Pi,
             subscription: Some("pi-a"),
-            default: None,
+            default: Some("pi-a"),
             pool: &[],
             harness_dir: &h,
             shared_home: &home,
             home_inside: Path::new("/home/agent/.pi/agent"),
             sandboxed: true,
         };
-        let e = prepare_launch(&input).unwrap_err();
-        assert!(e.contains("stop every pi agent"), "{e}");
-        let m = migrate(&state, HarnessId::Pi, &home, &[]);
-        assert!(m.pi_link, "{m:?}");
         let l = prepare_launch(&input).unwrap();
+        assert_eq!(l.account, None);
+        assert!(l.stores.is_empty() && l.bound.is_empty() && l.env.is_empty());
         assert_eq!(l.cred_alias, Some(h.join(POINTER_DIR)));
-        assert_eq!(l.stores, [store_dir(&state, "pi-a")]);
+        let p = pointed(&h).unwrap();
+        assert_eq!(fs::read_to_string(p.join(AUTH_FILE)).unwrap(), "{}");
+        let e = prepare_launch(&LaunchInput {
+            sandboxed: false,
+            ..input
+        })
+        .unwrap_err();
+        assert!(e.contains("stop every pi agent"), "{e}");
+        // After the unlink: nothing at all.
+        assert!(migrate(&state, HarnessId::Pi, &home, &[]).pi_unlinked);
         let other = tmp.path().join("agent2/harness");
-        // pi gets no default account, also when one is given.
         let l = prepare_launch(&LaunchInput {
-            subscription: None,
-            default: Some("pi-a"),
             harness_dir: &other,
+            sandboxed: false,
             ..input
         })
         .unwrap();
-        assert!(l.stores.is_empty() && l.cred_alias.is_some());
-        assert_eq!(l.account, None);
-        let p = pointed(&other).unwrap();
-        assert_eq!(fs::read_to_string(p.join(AUTH_FILE)).unwrap(), "{}");
-        assert!(
-            prepare_launch(&LaunchInput {
-                sandboxed: false,
-                ..input
-            })
-            .is_err()
-        );
+        assert_eq!(l, LaunchAccounts::default());
+        assert_eq!(pointed(&other), None);
+        // pi has no live swap.
+        assert!(live_swap(&state, HarnessId::Pi, &h, "pi-a", LOCK_TIMEOUT).is_err());
     }
 
     /// A login moves only its credential from the scratch home; another
@@ -1882,7 +1727,6 @@ mod tests {
             "max-a",
             HarnessId::Claude,
             claude_login("a").as_bytes(),
-            &home,
         )
         .unwrap();
         let scratch = tmp.path().join("scratch");
@@ -1893,16 +1737,7 @@ mod tests {
             r#"{"oauthAccount": {"accountUuid": "ub"}}"#,
         )
         .unwrap();
-        import_login(
-            &state,
-            "max-b",
-            HarnessId::Claude,
-            "anthropic",
-            &scratch,
-            None,
-            &home,
-        )
-        .unwrap();
+        import_login(&state, "max-b", HarnessId::Claude, "anthropic", &scratch).unwrap();
         let a = fs::read_to_string(credential_path(
             &store_dir(&state, "max-a"),
             HarnessId::Claude,
@@ -1926,18 +1761,7 @@ mod tests {
         );
         let empty = tmp.path().join("empty");
         fs::create_dir_all(&empty).unwrap();
-        assert!(
-            import_login(
-                &state,
-                "max-c",
-                HarnessId::Claude,
-                "anthropic",
-                &empty,
-                None,
-                &home
-            )
-            .is_err()
-        );
+        assert!(import_login(&state, "max-c", HarnessId::Claude, "anthropic", &empty,).is_err());
         assert!(remove(&state, "max-b").unwrap());
         assert!(!exists(&state, "max-b"));
         assert!(has_credential(&state, "max-a", HarnessId::Claude));
@@ -1974,24 +1798,10 @@ mod tests {
         let state = tmp.path().join("state");
         let home = tmp.path().join("auth/codex");
         fs::create_dir_all(&home).unwrap();
-        write_credential(
-            &state,
-            "pro",
-            HarnessId::Codex,
-            br#"{"tokens": {"a": 1}}"#,
-            &home,
-        )
-        .unwrap();
+        write_credential(&state, "pro", HarnessId::Codex, br#"{"tokens": {"a": 1}}"#).unwrap();
         let p = credential_path(&store_dir(&state, "pro"), HarnessId::Codex);
         let ino = fs::metadata(&p).unwrap().ino();
-        write_credential(
-            &state,
-            "pro",
-            HarnessId::Codex,
-            br#"{"tokens": {"a": 2}}"#,
-            &home,
-        )
-        .unwrap();
+        write_credential(&state, "pro", HarnessId::Codex, br#"{"tokens": {"a": 2}}"#).unwrap();
         assert_eq!(fs::metadata(&p).unwrap().ino(), ino);
         assert!(fs::read_to_string(&p).unwrap().contains('2'));
     }

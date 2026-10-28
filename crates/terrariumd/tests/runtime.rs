@@ -1255,9 +1255,11 @@ async fn restart_policy_backoff_and_crash_loop() {
         started[1]["data"]["harness_session"],
         started[0]["data"]["harness_session"]
     );
+    // One harness session is one row: the two resumes count on it.
     let sessions = td.get(&format!("/api/agents/{id}/sessions")).await;
-    assert_eq!(sessions.as_array().unwrap().len(), 3, "{sessions}");
-    assert_eq!(sessions[1]["outcome"], "crashed");
+    assert_eq!(sessions.as_array().unwrap().len(), 1, "{sessions}");
+    assert_eq!(sessions[0]["resumes"], 2, "{sessions}");
+    assert_eq!(sessions[0]["outcome"], "error");
 
     // never: a non-zero exit is `error`; exit 0 is `stopped` with "exited".
     td.adapter.clear_env();
@@ -1299,8 +1301,12 @@ async fn daemon_restart_relaunches_with_resume() {
     let started = td.events(&id, "session_started").await;
     assert_eq!(started[1]["data"]["source"], "resume");
     assert_eq!(started[1]["data"]["harness_session"], first);
+    // The resume reused the row of the harness session (PLAN §18).
     let sessions = td.get(&format!("/api/agents/{id}/sessions")).await;
-    assert_eq!(sessions[1]["outcome"], "daemon_restart");
+    assert_eq!(sessions.as_array().unwrap().len(), 1, "{sessions}");
+    assert_eq!(sessions[0]["harness_session_id"], first);
+    assert_eq!(sessions[0]["resumes"], 1);
+    assert_eq!(sessions[0]["current"], true);
 
     // A resume that fails starts a fresh session and types a recap turn.
     td.post(
@@ -1330,6 +1336,21 @@ async fn daemon_restart_relaunches_with_resume() {
     let started = td.events(&id, "session_started").await;
     assert_eq!(started.last().unwrap()["data"]["source"], "startup");
     assert_ne!(started.last().unwrap()["data"]["harness_session"], first);
+    // A new harness session is a new row; the old one keeps its resume.
+    // The failed attempt has a row of its own, with no harness session.
+    let sessions = td.get(&format!("/api/agents/{id}/sessions")).await;
+    assert_eq!(sessions.as_array().unwrap().len(), 3, "{sessions}");
+    assert_eq!(
+        sessions[0]["harness_session_id"],
+        started.last().unwrap()["data"]["harness_session"]
+    );
+    assert_eq!(sessions[0]["resumes"], 0);
+    assert_eq!(sessions[0]["current"], true);
+    assert_eq!(sessions[1]["outcome"], "resume_failed");
+    assert!(sessions[1]["harness_session_id"].is_null());
+    assert_eq!(sessions[2]["harness_session_id"], first);
+    assert_eq!(sessions[2]["resumes"], 1);
+    assert_eq!(sessions[2]["outcome"], "daemon_restart");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1896,30 +1917,128 @@ async fn stop_and_restart_clear_an_agent_in_error() {
     td.wait_status(&id, "stopped").await;
 }
 
+/// pi uses API keys only (PLAN §16.3): a plan login on a pi agent, its
+/// pool, or a pi template is `422`, and a start on one fails with the same
+/// words. An API key is fine.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn pi_refuses_a_claude_plan() {
+async fn pi_uses_api_keys_only() {
+    const WORDS: &str =
+        "pi uses API keys only; use Claude Code for a Claude plan and Codex for a ChatGPT plan";
     let td = Td::start().await;
-    td.post(
-        "/api/subscriptions",
-        Some(
-            json!({"name": "max", "provider": "anthropic", "plan": "Max 20x",
-                    "harnesses": ["claude", "pi"]}),
-        ),
-    )
-    .await;
+    let refused = |s: u16, b: &Value| {
+        assert_eq!(s, 422, "{b}");
+        let msg = b["error"]["message"].as_str().unwrap();
+        assert!(msg.contains(WORDS), "{msg}");
+    };
+    for (name, provider, plan) in [
+        ("max", "anthropic", "Max 20x"),
+        ("chatgpt", "openai", "ChatGPT Pro"),
+        ("key", "anthropic", "API key"),
+    ] {
+        td.post(
+            "/api/subscriptions",
+            Some(json!({"name": name, "provider": provider, "plan": plan,
+                        "harnesses": ["claude", "codex", "pi"]})),
+        )
+        .await;
+    }
+    // A plan never lists pi.
+    let max = td.get("/api/subscriptions/max").await;
+    assert_eq!(max["harnesses"], json!(["claude", "codex"]), "{max}");
+    let key = td.get("/api/subscriptions/key").await;
+    assert_eq!(key["harnesses"], json!(["claude", "codex", "pi"]), "{key}");
+
+    let _ = td
+        .req(
+            Method::POST,
+            "/api/projects",
+            Some(json!({"name": "demo"})),
+            None,
+        )
+        .await;
+    for sub in ["max", "chatgpt"] {
+        let (s, b) = td
+            .req(
+                Method::POST,
+                "/api/agents",
+                Some(json!({"name": "p0", "project": "demo", "harness": "pi",
+                            "subscription": sub})),
+                None,
+            )
+            .await;
+        refused(s, &b);
+    }
+    // An API key is fine; a change to a plan, or a plan in the pool, is not.
     let id = td
         .agent(
             "demo",
             "p1",
-            json!({"harness": "pi", "subscription": "max"}),
+            json!({"harness": "pi", "subscription": "key", "model": "m"}),
         )
         .await;
+    for patch in [
+        json!({"subscription": "max"}),
+        json!({"subscription_pool": ["key", "max"]}),
+    ] {
+        let (s, b) = td
+            .req(
+                Method::PATCH,
+                &format!("/api/agents/{id}"),
+                Some(patch),
+                None,
+            )
+            .await;
+        refused(s, &b);
+    }
+    let a = td.get(&format!("/api/agents/{id}")).await;
+    assert_eq!(a["subscription"], "key", "{a}");
+    // A Claude agent on the plan may move to pi only with an API key.
+    let c = td.agent("demo", "c1", json!({"subscription": "max"})).await;
     let (s, b) = td
-        .req(Method::POST, &format!("/api/agents/{id}/start"), None, None)
+        .req(
+            Method::PATCH,
+            &format!("/api/agents/{c}"),
+            Some(json!({"harness": "pi"})),
+            None,
+        )
         .await;
-    assert_eq!(s, 422, "{b}");
-    let msg = b["error"]["message"].as_str().unwrap();
-    assert!(msg.contains("pi cannot spend a Claude plan"), "{msg}");
+    refused(s, &b);
+    // A template.
+    let (s, b) = td
+        .req(
+            Method::POST,
+            "/api/templates",
+            Some(json!({"name": "pi-plan", "spec": {"harness": "pi", "subscription": "max"}})),
+            None,
+        )
+        .await;
+    refused(s, &b);
+    // An agent named a subscription that a plan later took: the start
+    // fails with the same words.
+    let late = td
+        .agent(
+            "demo",
+            "p2",
+            json!({"harness": "pi", "subscription": "later"}),
+        )
+        .await;
+    td.post(
+        "/api/subscriptions",
+        Some(
+            json!({"name": "later", "provider": "anthropic", "plan": "Pro",
+                    "harnesses": ["claude", "pi"]}),
+        ),
+    )
+    .await;
+    let (s, b) = td
+        .req(
+            Method::POST,
+            &format!("/api/agents/{late}/start"),
+            None,
+            None,
+        )
+        .await;
+    refused(s, &b);
 }
 
 /// The loop guard (PLAN §12): the 7th agent-to-agent message on a thread
@@ -2534,7 +2653,6 @@ async fn an_old_workspace_moves_to_the_work_root_at_the_next_start() {
 async fn a_claude_swap_inside_the_pool_is_live() {
     let td = Td::start().await;
     let state = td.daemon.as_ref().unwrap().state.state_dir.clone();
-    let home = td.dir.path().join("auth/claude");
     for n in ["max-a", "max-b", "max-c"] {
         td.post(
             "/api/subscriptions",
@@ -2544,14 +2662,8 @@ async fn a_claude_swap_inside_the_pool_is_live() {
         let login = format!(
             r#"{{"claudeAiOauth": {{"accessToken": "at-{n}", "refreshToken": "rt-{n}"}}}}"#
         );
-        terrariumd::accounts::write_credential(
-            &state,
-            n,
-            HarnessId::Claude,
-            login.as_bytes(),
-            &home,
-        )
-        .unwrap();
+        terrariumd::accounts::write_credential(&state, n, HarnessId::Claude, login.as_bytes())
+            .unwrap();
     }
     let id = td
         .agent(

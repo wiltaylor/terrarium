@@ -20,12 +20,23 @@ restart = "on-failure"
 start = false
 
 # Subscriptions that agents name must exist in the daemon, or be defined
-# here. This one is defined here, so the fleet applies on a fresh daemon.
+# here. These are defined here, so the fleet applies on a fresh daemon.
+# A plan login is for Claude Code (Claude) or Codex (ChatGPT); pi uses API
+# keys only. Store the Z.ai key on the Subscriptions page, or with
+# `POST /api/subscriptions/glm/api-key` (docs/api.md §16.5).
 [[subscriptions]]
 name = "anthropic-max"
 provider = "anthropic"
 plan = "Max 20x"
+harnesses = ["claude"]
+alert_at = 80
+
+[[subscriptions]]
+name = "glm"
+provider = "zai"
+plan = "coding"
 harnesses = ["claude", "pi"]
+probe = "zai-usage"
 alert_at = 80
 
 [[projects]]
@@ -57,8 +68,8 @@ targets = ["buildbox"]
 [[projects.agents]]
 name = "worker-2"
 harness = "pi"
-subscription = "anthropic-max"
-model = "anthropic/claude-opus-5-5"
+subscription = "glm"
+model = "glm-5.3"
 [projects.agents.policy]
 targets = ["buildbox"]
 

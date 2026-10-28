@@ -42,20 +42,24 @@ export function agentViewQuery(v: AgentView): { tab: string | undefined; session
 export const currentSession = (rows: Session[]): Session | undefined => rows.find((s) => s.current) ?? rows[0];
 
 /**
- * One row of the Sessions tab. A restart or a daemon restart resumes the
- * same harness session in a new session row, and each of those rows shows
- * the same session file (docs/api.md §6.3). So the rows of one harness
- * session in a row (newest first) are one conversation here.
+ * One row of the Sessions tab. The daemon keeps one session row for each
+ * harness session: a restart or a daemon restart that resumes it counts in
+ * the row's `resumes` (docs/api.md §6.3). An older daemon made a new row
+ * for each resume, and each of those rows shows the same session file; so
+ * the rows of one harness session in a row (newest first) are still one
+ * conversation here.
  */
 export interface SessionGroup {
   /** The newest row: the viewer opens it. Its transcript is the whole file. */
   session: Session;
-  /** The rows, newest first. */
+  /** The rows, newest first. One, from a current daemon. */
   rows: Session[];
   /** The start of the oldest row. */
   started_at: string;
   /** The turns of all the rows. */
   turns: number;
+  /** The resumes of the harness session: the `resumes` of the rows, and one for each row after the first. */
+  resumes: number;
   title: string | null;
   current: boolean;
   active: boolean;
@@ -70,6 +74,7 @@ export function groupSessions(rows: Session[]): SessionGroup[] {
       last.rows.push(s);
       last.started_at = s.started_at;
       last.turns += s.turns;
+      last.resumes += (s.resumes ?? 0) + 1;
       last.title ??= s.title?.trim() || null;
       last.current ||= s.current;
       last.active ||= !!s.active;
@@ -80,6 +85,7 @@ export function groupSessions(rows: Session[]): SessionGroup[] {
       rows: [s],
       started_at: s.started_at,
       turns: s.turns,
+      resumes: s.resumes ?? 0,
       title: s.title?.trim() || null,
       current: s.current,
       active: !!s.active,

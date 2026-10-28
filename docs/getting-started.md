@@ -137,8 +137,13 @@ sandbox, in a scratch home. When the login is done, the daemon moves the
 credential into the account of the subscription, makes the subscription,
 verifies the login, and runs the quota probe one time. The **Verify now**
 button checks the login again. The wizard has the same flow for Codex and
-Copilot (a device code), and for pi. To store an API key, click **API
-key**.
+Copilot (a device code). To store an API key, click **API key**.
+
+pi uses API keys only. Use Claude Code for a Claude plan, and Codex for a
+ChatGPT plan. Give a pi agent an API-key subscription: Z.ai, OpenRouter,
+an Anthropic or OpenAI API key, or another provider of the **API key**
+form. The daemon refuses a pi agent, a pi template, or a fleet pi agent on
+a plan login (`422`).
 
 To log in from a shell:
 
@@ -165,8 +170,8 @@ You can have more than one login of a provider, for example two Claude Max
 logins. Each login is its own subscription. To add a second login:
 
 1. Open the **Subscriptions** page.
-2. Click **Add subscription**, then click **Claude Code** (or **Codex**,
-   **Copilot**, or **pi**).
+2. Click **Add subscription**, then click **Claude Code** (or **Codex**, or
+   **Copilot**).
 3. Keep the **Name** field empty, or type a name such as `max-work`.
 4. Sign in with the **other** account in the browser. Paste the code, or
    enter the device code.
@@ -196,8 +201,9 @@ terrarium admin agent set terra/lead --pool anthropic-max-20x,anthropic-max-20x-
 terrarium admin agent swap terra/lead anthropic-max-20x-2
 ```
 
-Claude Code and pi move live, at their next request. Codex and Copilot
-restart with resume when the turn ends. When a probe finds an account at
+Claude Code moves live, at its next request. Codex and Copilot restart
+with resume when the turn ends. A pi agent moves between API keys by a
+restart with resume. When a probe finds an account at
 100 percent, the daemon moves each agent with a pool to the next account
 with room (`TERRARIUM_AUTO_SWAP=off` turns this off). The agent page of
 the dashboard has the pool editor and **Swap**.

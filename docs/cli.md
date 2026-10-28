@@ -229,7 +229,9 @@ or `error` after a stop.
 
 `--pool` sets the account pool (PLAN §16.3): subscriptions of one
 provider that a swap may pick, comma-separated. The current subscription
-is always a member. `agent set --pool ''` clears the pool.
+is always a member. `agent set --pool ''` clears the pool. pi uses API keys only: a pi agent whose subscription or pool names a
+plan login is refused (exit code 1, `422`, "pi uses API keys only; use
+Claude Code for a Claude plan and Codex for a ChatGPT plan").
 
 `--skill` gives the agent a skill of the skill library (PLAN §8.6);
 repeat it for more, and give `*` for every skill. `agent set --skill`
@@ -241,9 +243,9 @@ skills at its next start ("Skills" below).
 account ([api.md §6.2](api.md#62-lifecycle-and-turns)). The rights are the
 same as for `agent set`. The CLI prints how it applied, for example
 `terra/lead: anthropic-max-20x -> anthropic-max-20x-2 (live; the harness
-reads the new login at its next request)`. Claude Code and pi swap live.
-Codex and Copilot restart with resume, at once when the agent is idle, else
-when its turn ends. A stopped agent uses the new account at its next start.
+reads the new login at its next request)`. Claude Code swaps live.
+Codex, Copilot, and pi (which moves between API keys) restart with resume,
+at once when the agent is idle, else when its turn ends. A stopped agent uses the new account at its next start.
 
 `agent rm` deletes the agent. The daemon moves the agent dir and the
 workspace `work/<project>/<agent>` to `<state>/trash/<ulid>-<ts>/` (the
@@ -1082,7 +1084,7 @@ the agents of its own project; a global target needs sysadmin.
 | Command | Request | Text output |
 |---|---|---|
 | `admin subscription ls` | `GET /api/subscriptions` | A table: `NAME`, `PROVIDER`, `PLAN`, `ACCOUNT` (the harness of the plan account, `API key`, or `-`), `LOGIN` (the `login_status`), `DEFAULT` (`*` on the default account of each harness), `AGENTS` (the number of agents on it). |
-| `admin subscription default <name>` | `POST /api/subscriptions/{name}/default` | `<name> is the default <harness> account`. A Claude Code, Codex, or Copilot agent with no subscription then runs on it; the old default stops being one. `422` for an API key, a subscription with no plan account, or a pi account. Needs sysadmin or the operator ([api.md §16.3](api.md)). |
+| `admin subscription default <name>` | `POST /api/subscriptions/{name}/default` | `<name> is the default <harness> account`. A Claude Code, Codex, or Copilot agent with no subscription then runs on it; the old default stops being one. `422` for an API key, a subscription with no plan account, or an old pi account (pi uses API keys only). Needs sysadmin or the operator ([api.md §16.3](api.md)). |
 | `admin harness ls [--refresh]` | `GET /api/harnesses[?refresh=true]` | A table: `HARNESS`, `PINNED`, `TESTED`, `INSTALLED`, `IN RANGE` (`yes`, `NO`, or `unknown`), `ON DISK` (the version dirs in the tools dir). Then `policy: warn` or `policy: refuse`, one line for each harness out of its range (with the fix) or with an unknown version (with the reason), and one line for each live agent on another version than the active one (`<harness>: <agent> runs <v>; it moves to <active> at its next restart`). The pins come from `harnesses.toml` ([api.md §4](api.md)). |
 | `admin harness update <name> [--version v] [--force]`, `admin harness update --all [--force]` | `POST /api/harnesses/{name}/update` `{version?, force?}`, or `POST /api/harnesses/update` | npm's output, then `<name>: <from> -> <to>`, with `(outside the tested range ...)` when `to` is outside it. Then the `note` on the live agents that keep an older version until their next restart, and `<name>: removed the unused version(s) ...`. On a failure: npm's output, then the error. `--force` installs the version again when its version dir is on disk; running agents never stop an update. Needs sysadmin or the operator ([api.md §4](api.md)). |
 

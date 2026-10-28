@@ -49,11 +49,21 @@ describe("the rows of the Sessions tab", () => {
     ];
     const g = groupSessions(rows);
     expect(g.map((x) => x.session.id)).toEqual(["r4", "r1", "r0"]);
-    expect(g[0]).toMatchObject({ turns: 3, started_at: "2026-10-27T09:00:00.000Z", current: true, active: true, title: "Test" });
+    expect(g[0]).toMatchObject({ turns: 3, resumes: 2, started_at: "2026-10-27T09:00:00.000Z", current: true, active: true, title: "Test" });
     expect(g[0]!.rows.map((x) => x.id)).toEqual(["r4", "r3", "r2"]);
     expect(g[2]!.title).toBeNull();
     // Rows with no harness session never merge.
     expect(groupSessions([s("a", { outcome: "error" }), s("b", { outcome: "error" })])).toHaveLength(2);
+  });
+
+  it("shows the resumes that the daemon counts on one row", () => {
+    const g = groupSessions([s("r1", { harness_session_id: "h", resumes: 3, turns: 7, current: true }), s("r0", { harness_session_id: "h0" })]);
+    expect(g).toHaveLength(2);
+    expect(g[0]).toMatchObject({ resumes: 3, turns: 7, current: true });
+    expect(g[0]!.rows).toHaveLength(1);
+    expect(g[1]!.resumes).toBe(0);
+    // An old split row and a counted row of one harness session add up.
+    expect(groupSessions([s("b", { harness_session_id: "h", resumes: 2 }), s("a", { harness_session_id: "h", resumes: 1 })])[0]!.resumes).toBe(4);
   });
 
   it("does not merge a harness session that comes back after another one", () => {

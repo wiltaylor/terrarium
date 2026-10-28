@@ -56,15 +56,15 @@ async fn apply_creates_and_a_second_apply_changes_nothing() {
     let v = td.post("/api/fleet/validate", body(EXAMPLE)).await;
     assert_eq!(v.ok()["valid"], true, "{}", v.body);
     assert_eq!(v.body["fleet"], "terrarium");
-    assert_eq!(v.body["objects"].as_array().unwrap().len(), 6);
+    assert_eq!(v.body["objects"].as_array().unwrap().len(), 7);
 
     let plan = td.post("/api/fleet/plan", body(EXAMPLE)).await;
     let s = &plan.ok()["summary"];
-    assert_eq!(s["create"], 6, "{}", plan.body);
+    assert_eq!(s["create"], 7, "{}", plan.body);
     assert_eq!(s["unchanged"], 0);
 
     let r = td.post("/api/fleet/apply", body(EXAMPLE)).await;
-    assert_eq!(r.ok()["summary"]["create"], 6, "{}", r.body);
+    assert_eq!(r.ok()["summary"]["create"], 7, "{}", r.body);
     assert_eq!(r.body["prune"], false);
 
     let p = td.get("/api/projects/terrarium").await;
@@ -91,23 +91,23 @@ async fn apply_creates_and_a_second_apply_changes_nothing() {
     // Idempotent: the second apply finds everything unchanged.
     let plan = td.post("/api/fleet/plan", body(EXAMPLE)).await;
     let s = &plan.ok()["summary"];
-    assert_eq!(s["unchanged"], 6, "{}", plan.body);
+    assert_eq!(s["unchanged"], 7, "{}", plan.body);
     assert_eq!(s["create"], 0);
     assert_eq!(s["update"], 0);
     assert_eq!(s["drift"], 0);
     let r = td.post("/api/fleet/apply", body(EXAMPLE)).await;
-    assert_eq!(r.ok()["summary"]["unchanged"], 6);
+    assert_eq!(r.ok()["summary"]["unchanged"], 7);
     assert_eq!(agent_by_key(&td, "terrarium/lead").await["id"], lead["id"]);
 
     let list = td.get("/api/fleet").await;
     let row = &list.ok()[0];
     assert_eq!(row["name"], "terrarium");
     assert_eq!(row["origin"], "api");
-    assert_eq!(row["objects"], 6);
+    assert_eq!(row["objects"], 7);
     assert_eq!(row["projects"], json!(["terrarium"]));
     let shown = td.get("/api/fleet/terrarium").await;
     assert_eq!(shown.ok()["content"], EXAMPLE);
-    assert_eq!(shown.body["plan"]["summary"]["unchanged"], 6);
+    assert_eq!(shown.body["plan"]["summary"]["unchanged"], 7);
     td.get("/api/fleet/nope").await.err(404, "not_found");
 
     let audit = td.get("/api/audit?action=fleet.apply").await;
@@ -129,7 +129,7 @@ async fn a_changed_file_updates_the_changed_fields() {
     let plan = td.post("/api/fleet/plan", body(&changed)).await;
     let s = &plan.ok()["summary"];
     assert_eq!(s["update"], 3, "{}", plan.body);
-    assert_eq!(s["unchanged"], 3);
+    assert_eq!(s["unchanged"], 4);
     let w1 = entry(&plan.body, "agent", "terrarium/worker-1");
     assert_eq!(w1["action"], "update");
     let fields: Vec<&str> = w1["changes"]
@@ -158,7 +158,7 @@ async fn a_changed_file_updates_the_changed_fields() {
         "Changed"
     );
     let again = td.post("/api/fleet/plan", body(&changed)).await;
-    assert_eq!(again.ok()["summary"]["unchanged"], 6);
+    assert_eq!(again.ok()["summary"]["unchanged"], 7);
 }
 
 #[tokio::test]
@@ -273,7 +273,7 @@ async fn prune_deletes_only_with_the_flag_and_confirms_live_agents() {
         .err(404, "not_found");
     let plan = td.post("/api/fleet/plan", body(&smaller)).await;
     assert_eq!(plan.ok()["summary"]["delete"], 0);
-    assert_eq!(plan.body["summary"]["unchanged"], 5);
+    assert_eq!(plan.body["summary"]["unchanged"], 6);
 }
 
 #[tokio::test]
@@ -438,7 +438,7 @@ async fn an_existing_api_project_is_adopted() {
         "fleet:terrarium"
     );
     let plan = td.post("/api/fleet/plan", body(EXAMPLE)).await;
-    assert_eq!(plan.ok()["summary"]["unchanged"], 6);
+    assert_eq!(plan.ok()["summary"]["unchanged"], 7);
 }
 
 #[tokio::test]
@@ -762,7 +762,7 @@ async fn the_lists_show_the_fleet_source_and_a_file_object_stays_file() {
     td.boot(None, None).await;
     assert_eq!(sources(&td, "/api/projects").await["terrarium"], fleet);
     let plan = td.post("/api/fleet/plan", body(EXAMPLE)).await;
-    assert_eq!(plan.ok()["summary"]["unchanged"], 6, "{}", plan.body);
+    assert_eq!(plan.ok()["summary"]["unchanged"], 7, "{}", plan.body);
 }
 
 /// F10 (`docs/security-review.md`): a fleet apply with the name of a

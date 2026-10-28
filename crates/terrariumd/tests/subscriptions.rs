@@ -1388,7 +1388,10 @@ esac"#,
                 HarnessId::Copilot,
                 script(bin, "copilot-login", "echo 'To authenticate, visit https://github.com/login/device and enter code WXYZ-1234'; sleep 30"),
             );
-            u.programs.insert(HarnessId::Pi, script(bin, "pi-broken", "echo 'boom'; exit 3"));
+            u.programs.insert(
+                HarnessId::Claude,
+                script(bin, "claude-broken", "echo 'boom'; exit 3"),
+            );
         },
     )
     .await;
@@ -1453,15 +1456,26 @@ esac"#,
     assert_login_row_clean(td, &id).await;
     assert_login_dir_gone(&id);
 
+    // pi uses API keys only: no pi login.
+    for body in [
+        json!({"kind": "pi"}),
+        json!({"kind": "pi", "provider": "anthropic"}),
+    ] {
+        let r = td.post("/api/subscriptions/login", body).await;
+        r.err(422, "invalid");
+        assert!(
+            r.body["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("pi uses API keys only"),
+            "{}",
+            r.body
+        );
+    }
+
     // A command that fails.
-    td.post("/api/subscriptions/login", json!({"kind": "pi"}))
-        .await
-        .err(422, "invalid");
     let r = td
-        .post(
-            "/api/subscriptions/login",
-            json!({"kind": "pi", "provider": "anthropic"}),
-        )
+        .post("/api/subscriptions/login", json!({"kind": "claude"}))
         .await;
     let id = r.ok()["id"].as_str().unwrap().to_owned();
     let f = wait_login(td, &id, "failed").await;
@@ -1693,14 +1707,8 @@ async fn shared_logins_migrate_and_full_accounts_swap() {
     .await
     .ok();
     let login = r#"{"claudeAiOauth": {"accessToken": "tok-b", "refreshToken": "rb", "expiresAt": 4102444800000}}"#;
-    terrariumd::accounts::write_credential(
-        &state,
-        "max-b",
-        HarnessId::Claude,
-        login.as_bytes(),
-        &env.homes[&HarnessId::Claude],
-    )
-    .unwrap();
+    terrariumd::accounts::write_credential(&state, "max-b", HarnessId::Claude, login.as_bytes())
+        .unwrap();
 
     td.post("/api/projects", json!({"name": "demo"})).await.ok();
     let pooled = td
@@ -1815,16 +1823,8 @@ async fn the_default_account_follows_the_operator() {
     let scratch = td.dir.path().join("scratch-b");
     std::fs::create_dir_all(&scratch).unwrap();
     claude_creds(&scratch);
-    terrariumd::accounts::import_login(
-        &state,
-        "max-b",
-        HarnessId::Claude,
-        "anthropic",
-        &scratch,
-        None,
-        &env.homes[&HarnessId::Claude],
-    )
-    .unwrap();
+    terrariumd::accounts::import_login(&state, "max-b", HarnessId::Claude, "anthropic", &scratch)
+        .unwrap();
     let list = td.get("/api/subscriptions").await;
     let row = |n: &str| {
         list.body

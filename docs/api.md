@@ -1000,8 +1000,15 @@ subscription must have one provider (`422 invalid`, the message names the
 member). The daemon puts the current subscription at the front when it is
 missing, and drops empty names and duplicates. `[]` clears the pool. A
 `PATCH` of `subscription` checks the stored pool again. A change of the
-pool reaches a running Claude Code or pi agent at its next start (the
-sandbox binds the pool's accounts at the launch).
+pool reaches a running Claude Code agent at its next start (the sandbox
+binds the pool's accounts at the launch).
+
+pi uses API keys only (PLAN §16.3). A create, a `PATCH`, a file sync, or a
+fleet apply that gives a `pi` agent a plan login (as its `subscription` or
+in its pool), or a `PATCH` of `harness` to `pi` on one, gets `422
+invalid`: "subscription `<name>`: pi uses API keys only; use Claude Code
+for a Claude plan and Codex for a ChatGPT plan". A template whose spec
+does the same gets the same `422`.
 
 `roles` in the definition need the grant rights of §3. `policy.cross_project`
 entries are `project/agent`.
@@ -1078,8 +1085,8 @@ changes.
 
   | `applied` | Meaning |
   |---|---|
-  | `live` | Claude Code or pi on an account, and the new account is bound in the sandbox: the daemon took the harness's locks and moved the agent's pointer. The harness reads the new login at its next request. No restart. |
-  | `restart_scheduled` | The agent is in a turn (`working`, `starting`): it restarts with resume when the turn ends. Codex and Copilot, and a Claude or pi agent whose new account is not bound. |
+  | `live` | Claude Code on an account, and the new account is bound in the sandbox: the daemon took the harness's locks and moved the agent's pointer. The harness reads the new login at its next request. No restart. |
+  | `restart_scheduled` | The agent is in a turn (`working`, `starting`): it restarts with resume when the turn ends. Codex, Copilot, pi (it moves between API keys), and a Claude agent whose new account is not bound. |
   | `restarted` | The agent was not in a turn (`idle`, `waiting`, `blocked`): it restarted with resume now. |
   | `next_start` | The agent does not run: its next start uses the new account. |
 
@@ -1106,8 +1113,10 @@ changes.
   cannot be read never refuses a start.
 - `start` of an agent whose subscription does not exist, or whose harness
   is not in the subscription's `harnesses` (PLAN §16, policy hooks), gets
-  `422 invalid` with the reason. A `pi` agent on a Claude plan login (not an
-  API key) gets `422 invalid` too: pi cannot spend a Pro/Max plan. An agent with no subscription starts; the
+  `422 invalid` with the reason. pi uses API keys only: a `pi` agent on a
+  plan login (Claude Pro/Max, ChatGPT, Copilot, any OAuth login) gets
+  `422 invalid`, "pi uses API keys only; use Claude Code for a Claude plan
+  and Codex for a ChatGPT plan". An agent with no subscription starts; the
   daemon logs it. A restart and the relaunch after a daemon start apply the
   same check.
 - `answer` answers a question (`Event::Question`). `answer` is
@@ -1218,6 +1227,7 @@ agent.
 [{"id":"01M5PA0T1NSYX43DDK1M2KT8KR","agent":"01M5PA0T0Z0K16V6G88P3SE78W",
   "harness_session_id":"01a1727a-c74a-4775-b7e8-97ff4e4add64","current":true,
   "started_at":"2026-10-24T06:36:54.197Z","turns":3,
+  "resumes":2,"resumed_at":"2026-10-24T09:12:03.881Z",
   "transcript":true,"blocks":17,"title":"You now have access to target vlab until 2026-10-25T10:13:44.170Z. Run `terrariu",
   "active":true}]
 ```
@@ -1225,8 +1235,27 @@ agent.
 An ended session adds `ended_at` and `outcome`: `stopped`, `restarted`,
 `error`, `start_failed`, `superseded`, `exited`, `crashed` (a restart after
 an exit), `resume_failed`, `daemon_restart`, or the reason the supervisor
-gave.
-`turns` counts the `turn_start` events of the session.
+gave. A harness session that began a new conversation in the same run
+ends its row with `new_session`.
+`turns` counts the `turn_start` events of the session, its resumes
+included.
+
+**One row for each harness session.** A start, a restart, or a daemon
+restart that resumes the same harness session (the same
+`harness_session_id`) reuses the agent's row of that harness session. The
+row becomes current again, its end goes, `resumes` goes up by one, and
+`resumed_at` is the start of the resume. A new row comes only with a new
+harness session: a fresh start, a resume that failed, or a new
+conversation of the harness. A start whose harness has not reported its
+session yet has a row of its own for a short time; when the harness
+reports a session that an older row has, that row takes its events, and
+the short row goes. Migration 34 merged the rows that earlier resumes made
+into the earliest row of each harness session.
+
+| Field | Meaning |
+|---|---|
+| `resumes` | How many times the daemon resumed this harness session. `0` for a session that never resumed. |
+| `resumed_at` | The start of the last resume. Absent when `resumes` is `0`. |
 
 The transcript fields (§6.6):
 
@@ -1237,10 +1266,10 @@ The transcript fields (§6.6):
 | `title` | The first user text that the harness did not make, on one line, at most 80 characters. `null` when there is none. |
 | `active` | This is the agent's current session, and the agent runs. |
 
-Two sessions can share one harness session (a restart or a daemon restart
-resumes it). They then show the same file. The Sessions tab of the
-dashboard shows the sessions of one harness session in a row as one
-conversation, and opens the newest one.
+The Sessions tab of the dashboard shows one row for each session, with
+"resumed N×" when `resumes` is more than 0. Rows of one harness session
+from an older daemon (one row for each resume) still show as one
+conversation, and the tab opens the newest one.
 
 ### 6.4 Roles
 
@@ -2662,6 +2691,7 @@ A subscription:
 |---|---|
 | `source` | `file` (`subscriptions/<name>.toml`), `api` (the API, the login wizard, an API key), or `fleet:<name>` (a fleet file, §18.1). A file subscription whose file is gone becomes `api` on reload; its samples stay. |
 | `login_status` | `logged_in`, `expiring`, `expired`, `missing`, `unknown` (not checked yet), or `api_key` (a stored Z.ai key: no harness status command can check it, §16.5). See "Expired logins" in §16.2. |
+| `harnesses` | The harnesses that may spend it. pi uses API keys only: a plan login (a provider that sells a plan, Claude, ChatGPT, Copilot, or any OAuth login, with no `plan` "API key") never lists `pi`. The daemon drops `pi` from such a definition when it stores it, and from an older row when it reads it. |
 | `probe_status` | `ok`, `failed` (`probe_error` says why), or `none` (no probe, or not run yet). `last_success_at` stays when a probe fails. |
 | `windows` | The newest sample of each window. Window names: `5h`, `7d`, `7d_opus`, `7d_sonnet` (Anthropic); `<n>h` or `<n>d` from the window length (OpenAI); `monthly` (Copilot premium requests). |
 | `local_estimate_only` | `true` when there is no probe: local accounting is the only number. |
@@ -2762,17 +2792,17 @@ keep their card.
 | Method and path | Body or query | Answer |
 |---|---|---|
 | `GET /api/subscriptions` | | Array of subscriptions. |
-| `POST /api/subscriptions` | `{name, provider, plan?, harnesses?, probe?, alert_at?}` | `201` with the subscription (`source = api`). `409 conflict` when the name exists; `422 invalid` for an unknown probe, or for provider `zai` with a plan that is not `coding` or `api`. |
+| `POST /api/subscriptions` | `{name, provider, plan?, harnesses?, probe?, alert_at?}` | `201` with the subscription (`source = api`). `409 conflict` when the name exists; `422 invalid` for an unknown probe, or for provider `zai` with a plan that is not `coding` or `api`. A plan login loses `pi` from `harnesses` (§16.1). |
 | `GET /api/subscriptions/{name}` | | One subscription. |
 | `DELETE /api/subscriptions/{name}` | | `204`. `409 file_managed` for a file subscription. The plan account goes with it; `409 conflict` while an agent's current subscription is this one (swap it first, §6.2). |
 | `GET /api/subscriptions/{name}/quota` | `?since=` (a time, §2.1; default 24 h ago), `?window=`, `?limit=` (default 1000) | Array of samples, oldest first: `{subscription, window, used_pct, resets_at, raw, at}`. `raw` is the provider's window object. |
 | `GET /api/subscriptions/{name}/models` | `?refresh=true` | The models the subscription can use (below). Cached for 6 h per subscription; `refresh` reads the list again. |
 | `POST /api/subscriptions/{name}/probe` | | `{subscription, probe_status, error?, windows}`. Here `subscription` is the **name** only, not the object. A failed probe is still `200`. |
 | `POST /api/subscriptions/{name}/verify` | | `{subscription, status}`. Here `subscription` is the **full** subscription (§16.1), after the check. `status` is `{kind, harness, provider, pi_provider?, logged_in, plan?, detail?}`. The harness status command runs against the subscription's plan account (PLAN §16.3; before its migration, the shared home) and sets `login_status` (and `plan`, when the subscription has none). A stored API key counts as logged in: `status` is then `{logged_in: true, detail}`. |
-| `POST /api/subscriptions/{name}/logout` | | The subscription (§16.1), with `login_status` `missing`. A plan account: removes the account directory and nothing else; no harness command runs, so no other account and no shared file changes. `409 conflict` while an agent's current subscription is this one. A subscription with no account (a shared login before its migration): runs `claude auth logout`, `codex logout`, or `copilot logout` against the shared home. pi has no logout command: `422 invalid`. A `zai` subscription has no logout either (`422 invalid`): the Claude logout would end the shared Claude login. |
+| `POST /api/subscriptions/{name}/logout` | | The subscription (§16.1), with `login_status` `missing`. A plan account: removes the account directory and nothing else; no harness command runs, so no other account and no shared file changes. `409 conflict` while an agent's current subscription is this one. A subscription with no account (a shared login before its migration): runs `claude auth logout`, `codex logout`, or `copilot logout` against the shared home. pi has no logout command (it uses API keys only): `422 invalid`. An old pi plan account (from before pi took API keys only) logs out as any plan account: its directory goes. A `zai` subscription has no logout either (`422 invalid`): the Claude logout would end the shared Claude login. |
 | `POST /api/subscriptions/{name}/default` | | The subscription (§16.1), with `default: true`. Its plan account becomes the default account of its harness; the old default stops being one, in the same transaction. The audit row is `subscription.default` (`{harness, from, to, reason}`), and a `subscription` event (§16.7) follows. `422 invalid` for an API-key subscription, a subscription with no plan account, and a pi account or a provider that is not the plan provider of the harness. `404 not_found` for an unknown name. |
 | `POST /api/subscriptions/{name}/api-key` | `{provider, key, plan?, base_url?, models?}` | The subscription, without the key. `plan` is for `zai` only. See §16.5. |
-| `GET /api/subscriptions/detect` | | Logins found in the harness homes that no subscription covers (same provider, and the harness is in `harnesses`): `[{kind, harness, provider, pi_provider?, logged_in, plan?, detail?, suggested}]`. `suggested` is a subscription definition. |
+| `GET /api/subscriptions/detect` | | Logins found in the Claude Code, Codex, and Copilot homes that no subscription covers (same provider, and the harness is in `harnesses`): `[{kind, harness, provider, logged_in, plan?, detail?, suggested}]`. pi uses API keys only: no pi login is found. `suggested` is a subscription definition. |
 | `POST /api/subscriptions/login` | `{kind, provider?, name?}` | `201` with the login session (§16.4). |
 | `GET /api/subscriptions/login/{id}` | | The login session. |
 | `DELETE /api/subscriptions/login/{id}` | | `202`; the session becomes `cancelled`. `409 not_running` when the session ended (also when it is `done`). |
@@ -2815,10 +2845,10 @@ that has a model:
 
    The token stays in the daemon. `docs/compat.md`, "Model lists (plan
    logins)", records the requests.
-3. `pi`: `pi --offline --list-models <pi provider>`, pi's own catalogue. For
-   an API key, pi runs in an empty pi dir with a placeholder in the key env
-   var (`--offline` sends no request); for a plan login, in the shared pi
-   home.
+3. `pi`: `pi --offline --list-models <pi provider>`, pi's own catalogue. pi
+   uses API keys only: pi runs in an empty pi dir with a placeholder in the
+   key env var (`--offline` sends no request). A custom provider of the
+   shared `models.json` lists in the shared pi home.
 4. `fallback`: the values of `default_models` (§16.1).
 
 `notes` (absent when empty) says why an earlier source gave no list.
@@ -2882,7 +2912,10 @@ mode 0700), never in the shared harness home:
 | `claude` | `claude auth login` | `url` (the OAuth authorize URL). Paste the code with `.../input`. |
 | `codex` | `codex login --device-auth` | `url` and `device_code`. |
 | `copilot` | `copilot login --device-code` | `url` and `device_code`. |
-| `pi` | `pi` (needs `provider`) | `url` after the operator types `/login` and picks the provider in the terminal. |
+
+pi uses API keys only (PLAN §16.3): `kind` `pi` is `422 invalid`, "pi
+uses API keys only; use Claude Code for a Claude plan and Codex for a
+ChatGPT plan". Store a pi key with §16.5.
 
 ```json
 {"id":"01M5...","kind":"codex","state":"waiting","url":"https://auth.openai.com/codex/device",
@@ -2890,17 +2923,17 @@ mode 0700), never in the shared harness home:
  "instructions":"Open the URL, sign in, and enter the device code."}
 ```
 
-`kind` is exactly `claude`, `codex`, `copilot`, or `pi`. `provider`,
-`url`, `device_code`, `subscription`, `finished_at`, and `error` are absent
-until they have a value.
+`kind` is exactly `claude`, `codex`, or `copilot`. `provider`, `url`,
+`device_code`, `subscription`, `finished_at`, and `error` are absent until
+they have a value.
 
 `state`: `starting`, `waiting` (a URL or a code is on screen), `verifying`,
 `done` (`subscription` names the definition made or updated), `failed`
 (`error`), `cancelled`, or `expired` (after ten minutes, or after a daemon
 restart). `done` is `true` for the last four.
 
-When the command exits with code 0 (pi: when `pi auth check` says the
-provider is ready), the daemon runs the status command in the scratch home,
+When the command exits with code 0, the daemon runs the status command in
+the scratch home,
 moves only the credential into the plan account of the subscription (PLAN
 §16.3), makes or updates the subscription (name, provider, plan from the
 status output, the harness, the matching probe), sets `login_status =
@@ -2909,8 +2942,7 @@ session's temp dir.
 
 The subscription name: `name` when the request gives it (**Re-login** on a
 card gives it, and replaces the login of that account only). Else the
-default name (`anthropic-max-20x`, `openai-pro`, `github-copilot`,
-`pi-<provider>`). When the default subscription has an account already, or
+default name (`anthropic-max-20x`, `openai-pro`, `github-copilot`). When the default subscription has an account already, or
 has another provider, the login is a **second account**: `<default>-2`, then
 `-3`. No other account and no shared file changes. A
 file subscription keeps its definition; only its login state changes.
@@ -4668,7 +4700,8 @@ the caller's project first, then the global one. Encode `/` as `%2F`.
 | `GET /api/templates/{key}/resolve?project=P` | | `200`, `{template: {id, name, project, revision}, agent: {...}}`: the template that a create of an agent in `P` with `template: "{key}"` uses, and its spec with `project: P`. Without `project`: the caller's project. The dashboard fills its agent form from `agent`. |
 | `POST /api/templates/from-agent/{agent}` | `{name, project?, description?}` | `201`, a template with the settings of the agent now. An absent `project` is the agent's project; `null` is global. The default description is `from agent <project>/<name>`. |
 
-Errors: `422 invalid` (a bad name or spec), `409 conflict` (the name is in
+Errors: `422 invalid` (a bad name or spec; a `pi` spec on a plan login,
+§6.2), `409 conflict` (the name is in
 use in the scope), `409 file_managed`, `404 not_found` (no such template or
 project), `403 forbidden` (the rules below).
 

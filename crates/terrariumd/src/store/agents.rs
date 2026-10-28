@@ -368,6 +368,12 @@ pub fn create_from(
 ) -> ApiResult<AgentView> {
     check_def(def)?;
     projects::get(t, &def.project)?;
+    check_plan_logins(
+        t,
+        def.harness,
+        def.subscription.as_deref(),
+        &def.subscription_pool,
+    )?;
     let exists: i64 = t.query_row(
         "SELECT count(*) FROM agents WHERE project = ?1 AND name = ?2",
         params![def.project, def.name],
@@ -551,12 +557,23 @@ pub fn write_def(t: &mut Tx<'_>, id: &str, p: &AgentPatch) -> ApiResult<()> {
             skills.as_ref().map(serde_json::to_string).transpose()?,
         ],
     )?;
+    if p.harness.is_some() || p.subscription.is_some() || p.subscription_pool.is_some() {
+        // The rows as they are now; an error rolls the write back.
+        let a = get(t, id)?.agent;
+        check_plan_logins(
+            t,
+            a.harness,
+            a.subscription.as_deref(),
+            &a.subscription_pool,
+        )?;
+    }
     Ok(())
 }
 
 /// Check an account pool for an agent on `harness` whose current
 /// subscription is `current` (PLAN §16.3), and give it as it is stored.
-/// Each member must exist, the harness must be able to spend it, and all
+/// pi takes no plan login ([`check_plan_logins`]). Each member must
+/// exist, the harness must be able to spend it, and all
 /// members and the current subscription must have one provider. The
 /// current subscription joins the pool at the front when it is missing.
 /// An empty pool stays empty.
@@ -567,6 +584,7 @@ pub fn check_pool(
     pool: &[String],
 ) -> ApiResult<Vec<String>> {
     let mut pool = clean_pool(pool);
+    check_plan_logins(conn, harness, current, &pool)?;
     if pool.is_empty() {
         return Ok(pool);
     }
@@ -600,6 +618,28 @@ pub fn check_pool(
         }
     }
     Ok(pool)
+}
+
+/// pi uses API keys only (PLAN §16.3): a pi agent's subscription and each
+/// member of its pool must not be a plan login. `422 invalid` names the
+/// first plan. A name with no subscription passes here; the start says why.
+pub fn check_plan_logins(
+    conn: &Connection,
+    harness: HarnessId,
+    current: Option<&str>,
+    pool: &[String],
+) -> ApiResult<()> {
+    if harness != HarnessId::Pi {
+        return Ok(());
+    }
+    for name in current.into_iter().chain(pool.iter().map(String::as_str)) {
+        if let Some(why) = crate::store::subscriptions::find(conn, name)?
+            .and_then(|s| crate::store::subscriptions::plan_refusal(harness, &s))
+        {
+            return Err(ApiError::invalid(why));
+        }
+    }
+    Ok(())
 }
 
 /// A pool as it is stored: no empty names, no duplicates, in the given
@@ -692,6 +732,12 @@ pub struct Session {
     pub outcome: Option<String>,
     /// The number of turns that started in the session.
     pub turns: i64,
+    /// How many times the daemon resumed this harness session: each
+    /// resume reuses the row (PLAN §18).
+    pub resumes: i64,
+    /// The start of the last resume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resumed_at: Option<String>,
 }
 
 fn session_row(r: &Row<'_>) -> rusqlite::Result<Session> {
@@ -704,6 +750,8 @@ fn session_row(r: &Row<'_>) -> rusqlite::Result<Session> {
         ended_at: r.get("ended_at")?,
         outcome: r.get("end_reason")?,
         turns: r.get("turns")?,
+        resumes: r.get("resumes")?,
+        resumed_at: r.get("resumed_at")?,
     })
 }
 
@@ -828,10 +876,68 @@ pub fn begin_session(t: &mut Tx<'_>, agent: &str, outcome_of_previous: &str) -> 
     Ok(id)
 }
 
+/// Record the harness session that the current session runs (PLAN §18).
+///
+/// - The same harness session again (a compact, a second report): no
+///   change.
+/// - A resume of a harness session that an older row of the agent has:
+///   that row is the session. It becomes current again, `resumes` goes up
+///   by one, `resumed_at` is now, and its end goes. The events of the new
+///   row move to it, and the new row goes. So one harness session is one
+///   row, however often the agent restarts.
+/// - A new harness session on a row that has another one already (the
+///   harness began a new conversation): that row ends (`new_session`),
+///   and a new row holds the new one.
+/// - Else the current row takes the harness session.
 pub fn set_harness_session(t: &mut Tx<'_>, agent: &str, harness: &str) -> ApiResult<()> {
+    let current: Option<(String, Option<String>)> = t
+        .query_row(
+            "SELECT id, harness_session_id FROM sessions WHERE agent_id = ?1 AND current = 1",
+            [agent],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((id, had)) = current else {
+        return Ok(());
+    };
+    match had.as_deref() {
+        Some(h) if h == harness => return Ok(()),
+        Some(_) => {
+            let id = begin_session(t, agent, "new_session")?;
+            t.execute(
+                "UPDATE sessions SET harness_session_id = ?2 WHERE id = ?1",
+                params![id, harness],
+            )?;
+            return Ok(());
+        }
+        None => {}
+    }
+    let older: Option<String> = t
+        .query_row(
+            "SELECT id FROM sessions
+             WHERE agent_id = ?1 AND harness_session_id = ?2 AND id != ?3
+             ORDER BY id LIMIT 1",
+            params![agent, harness, id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(old) = older else {
+        t.execute(
+            "UPDATE sessions SET harness_session_id = ?2 WHERE id = ?1",
+            params![id, harness],
+        )?;
+        return Ok(());
+    };
     t.execute(
-        "UPDATE sessions SET harness_session_id = ?2 WHERE agent_id = ?1 AND current = 1",
-        params![agent, harness],
+        "UPDATE events SET session_id = ?2 WHERE session_id = ?1",
+        params![id, old],
+    )?;
+    t.execute("DELETE FROM sessions WHERE id = ?1", [&id])?;
+    t.execute(
+        "UPDATE sessions SET current = 1, resumes = resumes + 1, resumed_at = ?2,
+                ended_at = NULL, end_reason = NULL
+         WHERE id = ?1",
+        params![old, now()],
     )?;
     Ok(())
 }
@@ -843,6 +949,7 @@ pub fn sync_def(t: &mut Tx<'_>, id: &str, def: &AgentDef) -> ApiResult<bool> {
     let system_prompt = stored_system_prompt(def.system_prompt.as_ref());
     let subscription = synced_subscription(before.agent.subscription.as_deref(), def);
     let pool = clean_pool(&def.subscription_pool);
+    check_plan_logins(t, def.harness, subscription.as_deref(), &pool)?;
     let persona = stored_persona(def.persona.as_ref());
     let skills = stored_skills(&def.skills)?;
     let changed = before.source != projects::SOURCE_FILE
@@ -1024,4 +1131,101 @@ pub fn all_statuses(conn: &Connection) -> ApiResult<Vec<(String, AgentStatus)>> 
 
 pub fn json_policy(text: &str) -> Policy {
     json_col(text)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::db::Db;
+    use crate::events::EventHub;
+
+    fn db() -> Db {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::db::migrate(&mut conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO agents (id, name, project, harness, workspace, created_at, updated_at)
+               VALUES ('A1', 'a', 'p', 'claude', '/w', 't', 't');",
+        )
+        .unwrap();
+        Db::new(conn, EventHub::default())
+    }
+
+    /// One start of the agent: a new row, then the harness reports `h`.
+    /// A turn in it, as an event on the current row.
+    async fn run(db: &Db, outcome: &'static str, h: &'static str) {
+        db.write("system", move |t| {
+            begin_session(t, "A1", outcome)?;
+            set_harness_session(t, "A1", h)?;
+            let s = current_session(t, "A1")?;
+            t.execute(
+                "INSERT INTO events (id, agent_id, session_id, kind, payload, at)
+                 VALUES (?1, 'A1', ?2, 'turn_start', '{}', 't')",
+                params![ulid::Ulid::new().to_string(), s],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    async fn rows(db: &Db) -> Vec<Session> {
+        db.read(|c| sessions(c, "A1", &Page::default()))
+            .await
+            .unwrap()
+            .items
+    }
+
+    /// A resume of the same harness session reuses its row (PLAN §18):
+    /// two resumes give one row with `resumes` 2 and the turns of all
+    /// three starts. A new harness session is a new row.
+    #[tokio::test]
+    async fn a_resume_reuses_the_row_of_its_harness_session() {
+        let db = db();
+        run(&db, "superseded", "H1").await;
+        run(&db, "restarted", "H1").await;
+        run(&db, "daemon_restart", "H1").await;
+        let r = rows(&db).await;
+        assert_eq!(r.len(), 1, "{r:?}");
+        assert_eq!(r[0].harness_session_id.as_deref(), Some("H1"));
+        assert_eq!((r[0].resumes, r[0].turns), (2, 3));
+        assert!(r[0].current && r[0].ended_at.is_none() && r[0].outcome.is_none());
+        assert!(r[0].resumed_at.is_some());
+        // The same id again (a compact): no change.
+        db.write("system", |t| set_harness_session(t, "A1", "H1"))
+            .await
+            .unwrap();
+        assert_eq!(rows(&db).await[0].resumes, 2);
+
+        // A new harness session on the next start: a new row.
+        run(&db, "restarted", "H2").await;
+        let r = rows(&db).await;
+        assert_eq!(r.len(), 2, "{r:?}");
+        assert_eq!(r[0].harness_session_id.as_deref(), Some("H2"));
+        assert_eq!((r[0].resumes, r[0].turns, r[0].current), (0, 1, true));
+        assert_eq!(r[1].outcome.as_deref(), Some("restarted"));
+        assert_eq!((r[1].resumes, r[1].turns, r[1].current), (2, 3, false));
+
+        // A resume of the older session: its row is current again.
+        run(&db, "restarted", "H1").await;
+        let r = rows(&db).await;
+        assert_eq!(r.len(), 2, "{r:?}");
+        assert_eq!(r[1].harness_session_id.as_deref(), Some("H1"));
+        assert_eq!((r[1].resumes, r[1].turns, r[1].current), (3, 4, true));
+        assert!(!r[0].current);
+
+        // The harness begins a new conversation in a running session: the
+        // row ends, and a new row holds the new one.
+        db.write("system", |t| set_harness_session(t, "A1", "H3"))
+            .await
+            .unwrap();
+        let r = rows(&db).await;
+        assert_eq!(r.len(), 3, "{r:?}");
+        assert_eq!(r[0].harness_session_id.as_deref(), Some("H3"));
+        assert!(r[0].current);
+        let h1 = r
+            .iter()
+            .find(|s| s.harness_session_id.as_deref() == Some("H1"));
+        assert_eq!(h1.unwrap().outcome.as_deref(), Some("new_session"));
+    }
 }

@@ -5,7 +5,7 @@
 
 import { createEffect, createResource, createSignal, For, Match, on, onCleanup, Show, Switch } from "solid-js";
 import { ApiError } from "../../api/http";
-import { HARNESSES, type Harness, type LoginKind, type LoginSession } from "../../api/types";
+import { HARNESSES, type Harness, type LoginSession } from "../../api/types";
 import { Terminal } from "../../components/Terminal";
 import { isLocalOnly } from "../../components/UsageTile";
 import { CopyButton, ErrorBanner, Modal, useNow } from "../../components/ui";
@@ -19,7 +19,6 @@ import {
   isLoginPath,
   KEY_HELP,
   KEY_PROVIDERS,
-  PI_PROVIDERS,
   sessionToCancel,
   shouldPoll,
   takesCode,
@@ -29,6 +28,7 @@ import {
   ZAI_DEFAULT_PLAN,
   ZAI_PLANS,
   type WizardAction,
+  type WizardLogin,
   type WizardPath,
   type WizardSetup,
   type WizardState,
@@ -38,8 +38,7 @@ export const PATHS: { path: WizardPath; title: string; detail: string }[] = [
   { path: "claude", title: "Claude Code", detail: "Anthropic plan. Runs claude auth login; paste the code back." },
   { path: "codex", title: "Codex", detail: "ChatGPT plan. Device code with codex login --device-auth." },
   { path: "copilot", title: "Copilot", detail: "GitHub plan. Device code with copilot login --device-code." },
-  { path: "pi", title: "pi, OAuth provider", detail: "Runs pi; type /login and pick the provider." },
-  { path: "api_key", title: "API key", detail: "Anthropic, OpenAI, Google, OpenRouter, xAI, Groq, Z.ai (GLM), an OpenAI-compatible endpoint, or a GitHub PAT." },
+  { path: "api_key", title: "API key", detail: "Anthropic, OpenAI, Google, OpenRouter, xAI, Groq, Z.ai (GLM), an OpenAI-compatible endpoint, or a GitHub PAT. pi uses API keys only." },
   { path: "define", title: "Define only", detail: "Write the definition now; log in or add a key later." },
 ];
 
@@ -104,7 +103,6 @@ export function AddSubscriptionWizard(props: { path?: WizardPath; setup?: Wizard
     try {
       const session = await api.subscriptions.startLogin({
         kind: s.path,
-        ...(s.path === "pi" ? { provider: s.setup.provider ?? PI_PROVIDERS[0] } : {}),
         ...(s.setup.name?.trim() ? { name: s.setup.name.trim() } : {}),
       });
       send({ type: "started", session });
@@ -149,7 +147,7 @@ export function AddSubscriptionWizard(props: { path?: WizardPath; setup?: Wizard
               <Match when={s().path === "define"}>
                 <DefineForm onBack={() => send({ type: "back" })} onSaved={(name) => send({ type: "saved", subscription: name })} />
               </Match>
-              <Match when={isLoginPath(s().path) && (s().path as LoginKind)}>
+              <Match when={isLoginPath(s().path) && (s().path as WizardLogin)}>
                 {(kind) => <LoginSetup kind={kind()} setup={s().setup} onSetup={(setup) => send({ type: "setup", setup })} onBack={() => send({ type: "back" })} onStart={start} onPat={() => setState({ step: "setup", path: "api_key", setup: { provider: "github", name: s().setup.name } })} />}
               </Match>
             </Switch>
@@ -189,7 +187,7 @@ export function AddSubscriptionWizard(props: { path?: WizardPath; setup?: Wizard
   );
 }
 
-function LoginSetup(props: { kind: LoginKind; setup: WizardSetup; onSetup: (s: WizardSetup) => void; onBack: () => void; onStart: () => void; onPat: () => void }) {
+function LoginSetup(props: { kind: WizardLogin; setup: WizardSetup; onSetup: (s: WizardSetup) => void; onBack: () => void; onStart: () => void; onPat: () => void }) {
   const title = () => PATHS.find((k) => k.path === props.kind)?.title ?? props.kind;
   return (
     <form
@@ -205,14 +203,6 @@ function LoginSetup(props: { kind: LoginKind; setup: WizardSetup; onSetup: (s: W
           Back
         </button>
       </div>
-      <Show when={props.kind === "pi"}>
-        <label>
-          Provider
-          <select value={props.setup.provider ?? PI_PROVIDERS[0]} onChange={(e) => props.onSetup({ provider: e.currentTarget.value })}>
-            <For each={PI_PROVIDERS}>{(p) => <option value={p}>{p}</option>}</For>
-          </select>
-        </label>
-      </Show>
       <label>
         Subscription name (optional)
         <input value={props.setup.name ?? ""} onInput={(e) => props.onSetup({ name: e.currentTarget.value })} placeholder="from the status output" autocomplete="off" />
@@ -245,7 +235,7 @@ function LoginSetup(props: { kind: LoginKind; setup: WizardSetup; onSetup: (s: W
   );
 }
 
-function LiveLogin(props: { kind: LoginKind; session: LoginSession; onError: (e: unknown) => void; onCancel: () => void }) {
+function LiveLogin(props: { kind: WizardLogin; session: LoginSession; onError: (e: unknown) => void; onCancel: () => void }) {
   const now = useNow(1000);
   const [code, setCode] = createSignal("");
   const [sent, setSent] = createSignal(false);
@@ -310,7 +300,7 @@ function LiveLogin(props: { kind: LoginKind; session: LoginSession; onError: (e:
           <input
             type="password"
             style={{ flex: 1 }}
-            placeholder={props.kind === "pi" ? "Paste the code or the final redirect URL" : "Paste the code from the browser"}
+            placeholder="Paste the code from the browser"
             value={code()}
             onInput={(e) => setCode(e.currentTarget.value)}
             autocomplete="off"

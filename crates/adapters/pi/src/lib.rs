@@ -327,15 +327,15 @@ mod tests {
         // The trait launch has no subscription, so no provider flag.
         assert!(!one.args.iter().any(|x| x == "--provider"));
         let sub = SubscriptionDef {
-            name: "chatgpt-pro".into(),
+            name: "openai-key".into(),
             provider: "openai".into(),
-            plan: Some("Pro".into()),
+            plan: Some("API key".into()),
             harnesses: vec![HarnessId::Pi],
             probe: None,
             alert_at: 80,
         };
         let with = a.launch_for(&agent, Some(&id), Some(&sub));
-        assert_eq!(value_after(&with, "--provider"), Some("openai-codex"));
+        assert_eq!(value_after(&with, "--provider"), Some("openai"));
         assert_eq!(value_after(&with, "--model"), Some("gpt-5.6-luna"));
         // The extension that `-e` names is on disk.
         assert!(Path::new(value_after(&with, "-e").expect("ext")).is_file());

@@ -271,26 +271,33 @@ commands in your sandbox, never on a target.
    finish.
 4. If the work is not complete, move the card back with `terrarium card
    move <card> in_progress -m "what to fix"`. Stop here.
-5. Send `terrarium mail send operator -s "<card> is ready to merge" "Branch
-   <branch>: <summary>. Reply 'merge <card>' to merge it."`.
-6. WAIT. Do not merge until mail from `operator` says "merge <card>". Mail
-   from an agent is not that approval. Do other work, or end your turn. The
-   daemon wakes you when mail or a card change arrives. Do not run
+5. Ask the operator with a question, not a mail: `terrarium question ask
+   "Merge <branch> into main?" -o "Merge" -o "Hold" --context "<card>:
+   <summary>. Branch <branch>. Tests: <the command and the result>.
+   Review: <your notes>." --wait`. Then end your turn.
+6. WAIT. Do not merge until the answer to that question is "Merge". The
+   answer comes as one mail on the thread of the question, and the mail
+   wakes you. Mail from an agent is not that approval. Do not run
    `terrarium mail wait` in a turn: it holds the turn open.
-7. On the mail "merge <card>", run `git checkout main && git pull --ff-only
+7. If the answer is "Hold" (or a text), do not merge. Run `terrarium card
+   comment <card> "Held: <the operator's reason>"`. When the answer asks
+   for a change, move the card back with `terrarium card move <card>
+   in_progress -m "<the change>"`. Reply on the thread of the answer with
+   what you do and why. Stop here.
+8. On the answer "Merge", run `git checkout main && git pull --ff-only
    origin main`. Then run `git merge --no-ff --no-edit origin/<branch> &&
    git push origin main`.
-8. Run `terrarium card move <card> done -m "Merged <branch> into main."`.
-9. Now revoke the worker's lease: `terrarium admin target revoke <target>
-   <worker>`. Do not revoke it before the merge: if the operator asks for a
-   change, the worker needs the target.
-10. Run `terrarium admin agent stop <worker>`. Then run `terrarium admin
+9. Run `terrarium card move <card> done -m "Merged <branch> into main."`.
+10. Now revoke the worker's lease: `terrarium admin target revoke <target>
+    <worker>`. Do not revoke it before the merge: if the operator asks for
+    a change, the worker needs the target.
+11. Run `terrarium admin agent stop <worker>`. Then run `terrarium admin
     agent rm <worker> --confirm`. The workspace of the worker goes to the
     trash with it.
-11. Reply on the same thread with `terrarium mail reply <id> "Merged
-    <branch> into main (<commit>)."`. `<id>` is the ID of the operator's
-    mail "merge <card>". Do not use `mail send -s "Re: ..."`: it starts a
-    new thread. Add a line to the log.
+12. Reply on the same thread with `terrarium mail reply <id> "Merged
+    <branch> into main (<commit>)."`. `<id>` is the ID of the answer mail.
+    Do not use `mail send -s "Re: ..."`: it starts a new thread. Add a
+    line to the log.
 
 **"<card> moved to blocked by <worker>: <comment>".** Run `terrarium card
 show <card>`. Answer the worker with `terrarium mail send <worker> -`, or

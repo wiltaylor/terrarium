@@ -14,7 +14,7 @@ These are settled. The rest of the plan follows from them.
 | # | Decision |
 |---|---|
 | D1 | Backend in **Rust**. Dashboard in **SolidJS**, served by the daemon. |
-| D2 | Adapters for **Claude Code**, **Codex**, **Copilot CLI**, and **pi**. pi runs any model we hold a subscription for, through its OAuth logins. |
+| D2 | Adapters for **Claude Code**, **Codex**, **Copilot CLI**, and **pi**. pi runs any model we hold an API key for. pi uses API keys only: Claude Code spends a Claude plan, and Codex spends a ChatGPT plan (§16.1). |
 | D3 | Harnesses always run in **interactive mode** in a real PTY. No headless mode. |
 | D4 | Every agent runs in **yolo mode**. The harness never asks for approval. |
 | D5 | Agents reach Terrarium through a **CLI** inside their sandbox, not MCP. |
@@ -111,11 +111,12 @@ Observations that shape the design:
   extension, which uses the Copilot SDK `systemMessage` API and keeps native
   auth, billing, tools, and model routing. Terrarium never edits the user's
   repo to inject a prompt.
-- pi is the escape hatch. One harness, many subscriptions. Its `--provider`
-  and `--model` flags pick which plan an agent spends, so Terrarium can route
-  an agent to whichever subscription has headroom. The exception is an
-  Anthropic plan: pi cannot spend it (`docs/compat.md`, "pi: facts that
-  contradict the plan"). The daemon refuses that start.
+- pi is the escape hatch for API keys. One harness, many providers. Its
+  `--provider` and `--model` flags pick which API key an agent spends. pi
+  uses API keys only: it never spends a plan login (Claude, ChatGPT,
+  Copilot, any OAuth login). Use Claude Code for a Claude plan and Codex for
+  a ChatGPT plan (§16.1; `docs/compat.md`, "pi: facts that contradict the
+  plan"). The daemon refuses a pi agent on a plan, and its start.
 - The flags change often. Each adapter pins the version it was tested against.
   A compatibility suite runs in CI.
 
@@ -1059,8 +1060,8 @@ passes straight through. Visible to the harness:
 | `/work/<project>/<agent>` (`TERRARIUM_WORK_DIR`) as `$HOME/work`, and again at `/work/<project>/<agent>` | rw | the agent's files; the second path is where a target sees them ("mode 1", below) |
 | `/state/agents/<ulid>/harness` at the same path | ro | `prompt.md` and the adapter's per-agent files. The harness cannot change them. |
 | `/auth/claude` as `$HOME/.claude`, `/auth/pi` as `$HOME/.pi`, etc. | rw | shared settings and caches. The logins are per account (§16.3) |
-| `/state/credentials/accounts/<subscription>/store` at the same path, for each account of the agent's pool that has a login of the harness (Claude Code, pi) | rw | the credential of each account that the agent can swap to (§16.3). No other account. |
-| `/run/terrarium/cred` (pi on an account) | ro | the agent's account pointer, `harness/cred/`; pi's shared `auth.json` link goes through it (§16.3) |
+| `/state/credentials/accounts/<subscription>/store` at the same path, for each account of the agent's pool that has a login of the harness (Claude Code) | rw | the credential of each account that the agent can swap to (§16.3). No other account. |
+| `/run/terrarium/cred` (pi, only while the old shared `auth.json` link of an install from before is there) | ro | the agent's pointer, `harness/cred/`, at an empty store; the old link reads `{}` through it until the migration makes it a plain file (§16.3) |
 | per-agent overlays from `harness/` (`FileOverlay`) | rw or ro | the files that the harness writes itself are rw (Claude's `.claude.json`, `sessions/`, `history.jsonl`, `backups/`, `projects/<cwd>/` with the transcripts and memory, `file-history/`, `todos/`, `session-env/`; Codex's `history.jsonl`, `sessions/`, `session_index.jsonl`, `shell_snapshots/`, and its SQLite home (`-c sqlite_home`); Copilot's settings, history, state files, `session-state/`, `session-store.db` with its `-wal` and `-shm`, `logs/`, cache; pi's `settings.json` and `sessions/`); the rest are ro (Copilot's `SYSTEM.md`, hook dirs, Codex's `hooks.json`, pi's extension). The session files of each agent are its own, so no agent sees the transcripts of another agent, in its project or in another project |
 | `/run/terrarium/agents/<ulid>.sock` | rw | hooks and the agent CLI |
 | `/usr/local/bin/terrarium` | ro | the CLI |
@@ -1801,7 +1802,7 @@ A subscription definition:
 name = "anthropic-max"
 provider = "anthropic"
 plan = "Max 20x"
-harnesses = ["claude"]                 # which harnesses can spend it (pi cannot spend an Anthropic plan)
+harnesses = ["claude"]                 # which harnesses can spend it (pi uses API keys only, never a plan)
 probe = "anthropic-oauth-usage"        # how to read remaining quota
 alert_at = 80                          # percent of any window
 ```
@@ -1811,9 +1812,10 @@ alert_at = 80                          # percent of any window
 The **Subscriptions** page lists every plan with a status chip: `logged in`,
 `expiring`, `expired`, `missing`, with the last time the daemon verified it.
 On startup, and on demand, the daemon runs the harness status commands
-(`claude auth status`, `codex login status`, `pi auth check --json` per
-provider, and Copilot's stored-token check) and offers to create a subscription
-definition for each login it finds that has none.
+(`claude auth status`, `codex login status`, and Copilot's stored-token
+check) and offers to create a subscription definition for each login it
+finds that has none. pi uses API keys only, so the daemon looks for no pi
+login.
 
 **Add subscription** is a wizard with one path per kind:
 
@@ -1822,14 +1824,23 @@ definition for each login it finds that has none.
 | Claude Code (Anthropic plan) | Opens an embedded terminal running `claude auth login` as the daemon user, outside any sandbox. Extracts the login URL and shows it as a link with a copy button. Gives a paste field for the code and types it into the PTY. Offers `claude setup-token` as the long-lived alternative. |
 | Codex (ChatGPT plan) | Runs `codex login --device-auth` in the embedded terminal. Shows the device code and URL large, with copy buttons. Polls `codex login status` until it succeeds. |
 | Copilot (GitHub plan) | Runs `copilot login --device-code`. Same device-code pattern. A second tab takes a fine-grained PAT with the Copilot Requests permission and feeds it through `--with-token` on stdin. |
-| pi, OAuth provider | Runs `pi` in the embedded terminal with instructions to use `/login` for the chosen provider. The idea to reuse the Claude Code token for Anthropic is dead: Anthropic bills a Pro/Max token used through pi as extra usage, not from the plan (`docs/compat.md`, "pi: facts that contradict the plan"). For Anthropic through pi, use an API-key subscription (next row). A copy of the Codex access token works for `openai-codex`, but only with no refresh token, so it expires. |
-| pi, API key | A form: provider (Anthropic, OpenAI, Google, OpenRouter, xAI, Groq, or an OpenAI-compatible endpoint with a base URL and model list). The key is stored under `/state/credentials` with mode 0600, never shown again, and injected as the provider's env var only into agents on this subscription. Optionally written to pi's `auth.json` for `pi auth` compatibility. |
+| API key (pi, and the key providers) | A form: provider (Anthropic, OpenAI, Google, OpenRouter, xAI, Groq, or an OpenAI-compatible endpoint with a base URL and model list). The key is stored under `/state/credentials` with mode 0600, never shown again, and injected as the provider's env var only into agents on this subscription. Optionally written to pi's `auth.json` for `pi auth` compatibility. |
+
+**pi uses API keys only.** Use Claude Code for a Claude plan and Codex for
+a ChatGPT plan. The wizard has no pi login: `POST /api/subscriptions/login`
+with `kind = "pi"` is `422`. A plan subscription (Claude Pro/Max, ChatGPT,
+Copilot, any OAuth login) never lists `pi` in `harnesses`: the daemon drops
+it when it stores a definition and when it reads an older row. A pi agent,
+a pi template, or a fleet pi agent whose subscription or pool names a plan
+is `422` ("pi uses API keys only; use Claude Code for a Claude plan and
+Codex for a ChatGPT plan"), and a start of one fails with the same words.
+Anthropic bills a Pro/Max token used through pi as extra usage, not from
+the plan (`docs/compat.md`, "pi: facts that contradict the plan").
 
 The login command runs in a scratch home (a temp dir, mode 0700), not in
 the shared harness home. After the login succeeds the wizard:
 
-1. Verifies with the harness status command and `pi auth check`, in the
-   scratch home.
+1. Verifies with the harness status command, in the scratch home.
 2. Moves only the credential from the scratch home into the account of the
    subscription (§16.3), and deletes the scratch home. A login with no
    name whose default subscription has an account already makes a second
@@ -1927,8 +1938,9 @@ Claude Max logins, two ChatGPT Pro logins, and two Copilot logins. Each
 login is its own subscription, with its own **account**. Each harness keeps
 one shared settings home (`/auth/<harness>`); only the credential is per
 account. An agent can move to another account when its account is used up:
-live (no restart) for Claude Code and pi, by a restart with session resume
-for Codex and Copilot. The research is in
+live (no restart) for Claude Code, by a restart with session resume for
+Codex and Copilot. pi uses API keys only and has no plan account (§16.1);
+a pi agent moves between API keys by a restart with resume. The research is in
 [research/credential-sharing.md](research/credential-sharing.md); the code is
 `crates/terrariumd/src/accounts.rs` and `account_swap.rs`.
 
@@ -1944,7 +1956,7 @@ with no subscription runs on an account in this order:
    `terrarium admin subscription default <name>` or give the agent a
    subscription".
 
-pi has no default account: a pi agent names its provider with a
+pi has no default account: a pi agent names its API key with a
 subscription.
 
 How an account becomes the default:
@@ -1979,9 +1991,9 @@ every crate for the token endpoints and for `grant_type`, and fails
 ```text
 <state>/credentials/accounts/<subscription>/      0700, the daemon only
   account.json            harness, provider, login name, Claude's oauthAccount (no secret)
-  store/                  0700; bound rw into the sandbox of each agent whose pool holds it (Claude, pi)
+  store/                  0700; bound rw into the sandbox of each agent whose pool holds it (Claude)
     claude/.credentials.json   Claude Code
-    auth.json                  Codex, pi
+    auth.json                  Codex
     token                      Copilot (the `gho_` token)
 <state>/credentials/backup/   0700: copies (0600) of the shared logins that the migration moved
 <state>/agents/<ulid>/harness/cred/account   the agent's pointer: a symlink to one account's store/
@@ -1996,11 +2008,10 @@ change its pointer.
 | Harness | How the agent reads its account | Swap |
 |---|---|---|
 | Claude Code | `CLAUDE_SECURESTORAGE_CONFIG_DIR=<harness dir>/cred/account/claude`. Claude Code 2.1.310 reads this undocumented var for its credential dir (`O0()`). It checks the mtime of `.credentials.json` before each model request, writes it by a temp file and a rename inside the dir, and takes its locks inside the dir: `.oauth_refresh.lock` and `.storage-write.lock` (`proper-lockfile`). Its legacy lock `<realpath(dir)>.lock` resolves to `store/claude.lock`, inside the bound store. So all agents on one account share the locks and the compare-and-swap of a refresh. The settings stay in `/auth/claude`. | **Live.** The daemon takes `.oauth_refresh.lock` and `.storage-write.lock` of the old and the new account (in path order), re-points the pointer, and releases. A refresh or a save in flight ends first; Claude reads the new account at its next request. |
-| pi | The shared `auth.json` (`/auth/pi/auth.json`) is a symlink to `/run/terrarium/cred/account/auth.json`. The sandbox binds the agent's `harness/cred` read-only at `/run/terrarium/cred`, so one link serves every agent. pi 1.4.0 checks the file revision (dev, inode, size, times; `statSync` follows the links) before each request. Its lock is `proper-lockfile` with `realpath: false`, so the lock dir is `/auth/pi/auth.json.lock` in the shared home: one lock for all pi agents. It serializes refreshes of different accounts too, which costs only waits. pi writes in place through the links. | **Live.** The daemon takes the shared `auth.json.lock`, re-points, and releases. |
 | Codex | The launch binds the account's `auth.json` over `$CODEX_HOME/auth.json` (a file bind). Codex writes it in place. A `{}` mount point stays in the shared home. | **Restart with resume.** Codex refuses to load another account id while it runs. The daemon re-points and restarts the agent with `codex resume`; the conversation stays. |
 | Copilot CLI | The launch sets `COPILOT_GITHUB_TOKEN` from `store/token`. The env var wins over `config.json`; Copilot does not refresh a `gho_` token. The launch also passes `--secret-env-vars` for it. | **Restart with resume.** |
 
-A swap that needs a restart, or a Claude or pi swap to an account that the
+A swap that needs a restart, or a Claude swap to an account that the
 sandbox does not bind (the pool changed after the start), waits until the
 agent is not in a turn (`idle`, `waiting`, or `blocked`). The answer is then
 `restart_scheduled`; when the turn ends, the agent restarts with resume. An
@@ -2045,7 +2056,7 @@ account of the subscription that uses it:
 | Claude Code | `/auth/claude/.credentials.json` (and `oauthAccount` from `.claude.json`) | the one subscription with provider `anthropic`, harness `claude`, no stored API key, and no account yet |
 | Codex | `/auth/codex/auth.json` with ChatGPT tokens | the same rule, provider `openai` |
 | Copilot | the token in `authTokens` of `/auth/copilot/config.json`; the daemon then removes `authTokens` from the file and keeps the rest | the same rule, provider `github` |
-| pi | each provider entry of `/auth/pi/auth.json`; then the file becomes the link to `/run/terrarium/cred/account/auth.json` | the one pi subscription of that provider. When an entry has no subscription, nothing changes. |
+| pi | nothing: pi uses API keys only. An install from before kept the pi plan logins in accounts and made `/auth/pi/auth.json` the link to `/run/terrarium/cred/account/auth.json`. The migration makes that link a plain `{}` file again; until then a pi launch points the agent at an empty store, so the link reads `{}`. An old pi account stays until its logout or the delete of its subscription. | — |
 
 Rules:
 
@@ -2072,8 +2083,8 @@ Rules:
 **Status checks and probes.** A status check of an account runs the harness
 status command against the account only: Claude Code with
 `CLAUDE_SECURESTORAGE_CONFIG_DIR` at the account and a temp config dir;
-Codex and pi with a temp home that links the account's `auth.json`; Copilot
-by the token file. A probe reads the account's file. Neither refreshes.
+Codex with a temp home that links the account's `auth.json`; Copilot by the
+token file. A probe reads the account's file. Neither refreshes.
 
 **Residual risks.**
 
@@ -2096,7 +2107,7 @@ by the token file. A probe reads the account's file. Neither refreshes.
 - **An undocumented env var.** `CLAUDE_SECURESTORAGE_CONFIG_DIR` is not in
   Claude Code's public docs. A later release can drop it. The compat suite
   must check it at each pin change.
-- **Pool agents read pool tokens.** Each Claude or pi agent can read and
+- **Pool agents read pool tokens.** Each Claude agent can read and
   change the credential of every account in its pool. It cannot see any
   other account. Codex and Copilot agents see only their current account.
 
@@ -2230,6 +2241,10 @@ Rust crates: `tokio`, `axum`, `portable-pty`, `vt100`, `rusqlite`, `clap`,
   agent and the questions answered since its last turn (§12e). A new
   session after a prompt change gets a recap turn only when the agent has
   such questions. The recap turn starts with `[System:recap]` (§8.5).
+- One session row for each harness session. A resume of the same harness
+  session reuses its row: the row is current again, and its `resumes`
+  count and `resumed_at` change. Only a new harness session makes a new
+  row (api.md §6.3).
 - The daemon restarts without killing agents. The runner holds the PTY. On
   start the daemon reconnects to each runner socket and reconciles state.
 - The container restarts with `restart: unless-stopped`. On container start the

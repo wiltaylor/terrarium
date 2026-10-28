@@ -523,6 +523,10 @@ export interface Session {
   outcome?: string;
   turns: number;
   current: boolean;
+  /** How many times the daemon resumed this harness session; each resume reuses the row (docs/api.md §6.3). Absent on an older daemon. */
+  resumes?: number;
+  /** The start of the last resume. */
+  resumed_at?: string;
   /** docs/api.md §6 (transcripts): the harness transcript is readable (a path or true). Absent on an older daemon. */
   transcript?: boolean | string | null;
   /** docs/api.md §6 (transcripts): how many transcript blocks the session has. */

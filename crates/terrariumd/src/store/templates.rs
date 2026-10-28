@@ -98,6 +98,21 @@ fn spec_error(e: impl std::fmt::Display) -> ApiError {
     crate::store::schedules::field_error("spec", e)
 }
 
+/// [`normalize`], and the checks that read the store: a pi template names
+/// no plan login (PLAN §16.3).
+fn checked(conn: &Connection, spec: &Spec) -> ApiResult<Spec> {
+    let n = normalize(spec)?;
+    let def = agent_template::to_def(&n, "x", "x").map_err(spec_error)?;
+    crate::store::agents::check_plan_logins(
+        conn,
+        def.harness,
+        def.subscription.as_deref(),
+        &def.subscription_pool,
+    )
+    .map_err(|e| spec_error(e.message))?;
+    Ok(n)
+}
+
 /// Check a spec and give its normal form.
 pub fn normalize(spec: &Spec) -> ApiResult<Spec> {
     let n = agent_template::normalize(spec).map_err(spec_error)?;
@@ -263,7 +278,7 @@ pub fn create(t: &mut Tx<'_>, new: &NewTemplate) -> ApiResult<Template> {
     {
         return Err(ApiError::not_found(format!("no project `{p}`")));
     }
-    let spec = normalize(&new.spec)?;
+    let spec = checked(t, &new.spec)?;
     if find_in(t, new.project.as_deref(), &new.name)?.is_some() {
         return Err(ApiError::conflict(format!(
             "template `{}` exists in {}",
@@ -337,7 +352,7 @@ pub fn update(t: &mut Tx<'_>, id: &str, p: &TemplatePatch) -> ApiResult<Template
         _ => before.name.clone(),
     };
     let spec = match &p.spec {
-        Some(s) => normalize(s)?,
+        Some(s) => checked(t, s)?,
         None => before.spec.clone(),
     };
     let description = p

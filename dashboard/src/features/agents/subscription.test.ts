@@ -51,6 +51,13 @@ describe("subscription choice", () => {
     expect(compatibleSubscriptions(all, "copilot")).toEqual([]);
   });
 
+  it("lists API keys only for pi", () => {
+    const or = sub({ name: "or", provider: "openrouter", plan: "API key", harnesses: ["pi"], has_api_key: true });
+    // A row from an older daemon that still lists pi on a plan account.
+    const stale = sub({ name: "pi-anthropic", harnesses: ["pi"], account: { harness: "pi", has_login: true } as Subscription["account"] });
+    expect(compatibleSubscriptions([max, pro, zai, or, stale], "pi").map((s) => s.name)).toEqual(["zai-key", "or"]);
+  });
+
   it("labels name, provider, plan, and status", () => {
     expect(subscriptionLabel(zai)).toBe("zai-key — zai coding (API key)");
     expect(subscriptionLabel(max)).toBe("anthropic-max — anthropic Max 20x (logged in)");
@@ -63,7 +70,7 @@ describe("subscription choice", () => {
     expect(subscriptionOptions(all, "pi", "").map((o) => o.value)).toEqual(["", "zai-key"]);
     expect(subscriptionOptions(all, "codex", "").map((o) => o.value)).toEqual(["", "openai-pro"]);
     const kept = subscriptionOptions(all, "pi", "anthropic-max");
-    expect(kept.at(-1)).toEqual({ value: "anthropic-max", label: "anthropic-max — anthropic Max 20x (logged in) — not for pi" });
+    expect(kept.at(-1)).toEqual({ value: "anthropic-max", label: "anthropic-max — anthropic Max 20x (logged in) — not for pi, which uses API keys only" });
     expect(subscriptionOptions(all, "pi", "gone").at(-1)).toEqual({ value: "gone", label: "gone — not found" });
   });
 

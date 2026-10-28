@@ -363,9 +363,9 @@ pub enum AgentCmd {
     New(Box<AgentNewArgs>),
     /// Change an agent's definition
     Set(Box<AgentSetArgs>),
-    /// Move an agent to another plan account of its pool (PLAN §16.3):
-    /// live for Claude Code and pi, a restart with resume for Codex and
-    /// Copilot (when the turn ends)
+    /// Move an agent to another account of its pool (PLAN §16.3): live
+    /// for Claude Code, a restart with resume for Codex, Copilot, and pi
+    /// (when the turn ends). pi uses API keys only.
     Swap {
         agent: String,
         /// The subscription to move to

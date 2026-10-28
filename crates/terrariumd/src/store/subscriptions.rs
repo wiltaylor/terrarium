@@ -67,6 +67,50 @@ pub struct Subscription {
     pub updated_at: String,
 }
 
+impl Subscription {
+    /// The definition columns, as the adapters read them.
+    pub fn def(&self) -> SubscriptionDef {
+        SubscriptionDef {
+            name: self.name.clone(),
+            provider: self.provider.clone(),
+            plan: self.plan.clone(),
+            harnesses: self.harnesses.clone(),
+            probe: self.probe.clone(),
+            alert_at: self.alert_at,
+        }
+    }
+
+    /// True when the subscription is a plan login (Claude Pro/Max,
+    /// ChatGPT, Copilot, any OAuth login), not an API key, as pi sees it
+    /// (`terrarium_adapter_pi::provider::is_plan`).
+    pub fn is_plan(&self) -> bool {
+        terrarium_adapter_pi::provider::is_plan(&self.def())
+    }
+}
+
+/// The harnesses that may spend a subscription of `def`: its `harnesses`,
+/// without `pi` when it is a plan login. pi uses API keys only (PLAN
+/// §16.3), so a plan never lists pi, also when its file or an older row
+/// says so.
+pub fn spendable_harnesses(def: &SubscriptionDef) -> Vec<HarnessId> {
+    let mut out = def.harnesses.clone();
+    if out.contains(&HarnessId::Pi) && terrarium_adapter_pi::provider::is_plan(def) {
+        out.retain(|h| *h != HarnessId::Pi);
+    }
+    out
+}
+
+/// Why `harness` must not spend `sub`: pi and a plan login (PLAN §16.3).
+pub fn plan_refusal(harness: HarnessId, sub: &Subscription) -> Option<String> {
+    (harness == HarnessId::Pi && sub.is_plan()).then(|| {
+        format!(
+            "subscription `{}`: {}",
+            sub.name,
+            terrarium_adapter_pi::provider::PLAN_REFUSAL
+        )
+    })
+}
+
 /// The probe of a subscription that names none: `zai-usage` for a Z.ai
 /// GLM Coding Plan (the `api` plan has no quota endpoint), and
 /// `openrouter-credits` for OpenRouter. Applied when a row is read, so rows
@@ -88,7 +132,7 @@ fn row(r: &Row<'_>) -> rusqlite::Result<Subscription> {
     let provider: String = r.get("provider")?;
     let plan: Option<String> = r.get("plan")?;
     let probe: Option<String> = r.get("probe")?;
-    Ok(Subscription {
+    let mut s = Subscription {
         name: r.get("name")?,
         probe: probe.or_else(|| default_probe(&provider, plan.as_deref())),
         provider,
@@ -105,7 +149,10 @@ fn row(r: &Row<'_>) -> rusqlite::Result<Subscription> {
         last_success_at: r.get("last_success_at")?,
         created_at: r.get("created_at")?,
         updated_at: r.get("updated_at")?,
-    })
+    };
+    // A row from before pi took API keys only can list pi on a plan.
+    s.harnesses = spendable_harnesses(&s.def());
+    Ok(s)
 }
 
 pub fn find(conn: &Connection, name: &str) -> ApiResult<Option<Subscription>> {
@@ -150,7 +197,7 @@ pub fn upsert_def(t: &mut Tx<'_>, def: &SubscriptionDef, source: &str) -> ApiRes
         terrarium_core::zai::parse_plan(def.plan.as_deref()).map_err(ApiError::invalid)?;
     }
     let at = now();
-    let harnesses = serde_json::to_string(&def.harnesses)?;
+    let harnesses = serde_json::to_string(&spendable_harnesses(def))?;
     t.execute(
         "INSERT INTO subscriptions (name, provider, plan, harnesses, probe, alert_at, source,
                                     created_at, updated_at)
@@ -736,7 +783,8 @@ mod tests {
         assert_eq!(changes.upserted, ["anthropic-max"]);
         let s = db.read(|c| get(c, "anthropic-max")).await.unwrap();
         assert_eq!(s.source, "file");
-        assert_eq!(s.harnesses, [HarnessId::Claude, HarnessId::Pi]);
+        // pi uses API keys only: a plan that lists pi loses it.
+        assert_eq!(s.harnesses, [HarnessId::Claude]);
         assert_eq!(s.alert_at, 80);
         assert_eq!(s.probe_status, "none");
         // Daemon columns survive a sync.
@@ -760,6 +808,56 @@ mod tests {
             db.read(|c| get(c, "anthropic-max")).await.unwrap().source,
             "api"
         );
+    }
+
+    /// A row stored before pi took API keys only keeps `pi` in its
+    /// column; the read drops it from a plan, and keeps it on an API key.
+    #[tokio::test]
+    async fn a_stored_plan_row_loses_pi_on_read() {
+        let db = db();
+        db.write("system", |t| {
+            for (name, provider, plan) in [
+                ("max", "anthropic", Some("Max 20x")),
+                ("chatgpt", "openai", Some("ChatGPT Pro")),
+                ("pi-openai-codex", "openai-codex", None),
+                ("or", "openrouter", Some("API key")),
+                ("ak", "anthropic", Some("API key")),
+                ("glm", "zai", Some("coding")),
+            ] {
+                t.execute(
+                    "INSERT INTO subscriptions (name, provider, plan, harnesses, alert_at, source,
+                                                created_at, updated_at)
+                     VALUES (?1, ?2, ?3, '[\"claude\",\"pi\"]', 80, 'api', '', '')",
+                    params![name, provider, plan],
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let got: Vec<(String, Vec<HarnessId>)> = db
+            .read(list)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|s| (s.name, s.harnesses))
+            .collect();
+        let (c, p) = (HarnessId::Claude, HarnessId::Pi);
+        assert_eq!(
+            got,
+            [
+                ("ak".to_owned(), vec![c, p]),
+                ("chatgpt".to_owned(), vec![c]),
+                ("glm".to_owned(), vec![c, p]),
+                ("max".to_owned(), vec![c]),
+                ("or".to_owned(), vec![c, p]),
+                ("pi-openai-codex".to_owned(), vec![c]),
+            ]
+        );
+        let max = db.read(|c| get(c, "max")).await.unwrap();
+        let why = plan_refusal(HarnessId::Pi, &max).unwrap();
+        assert!(why.contains("pi uses API keys only"), "{why}");
+        assert_eq!(plan_refusal(HarnessId::Claude, &max), None);
     }
 
     #[tokio::test]

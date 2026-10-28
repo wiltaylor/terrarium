@@ -9,7 +9,11 @@
 //! | `claude` | `claude auth login` (a URL, then a pasted code) |
 //! | `codex` | `codex login --device-auth` (a URL and a device code) |
 //! | `copilot` | `copilot login --device-code` (a URL and a device code) |
-//! | `pi` | `pi`; the operator types `/login` and picks the provider |
+//!
+//! pi uses API keys only (PLAN §16.3): [`start`] refuses the kind `pi`.
+//! A pi API key goes through `POST /api/subscriptions/{name}/api-key`. The
+//! kind `pi` stays for the status check of a pi subscription
+//! (`pi auth check`).
 //!
 //! The command runs in a scratch home (`<temp dir>/terrarium-login-<id>/home`,
 //! mode 0700), never in the shared home. When it succeeds, only the
@@ -23,8 +27,7 @@
 //! and the device code (see [`parse_output`]; the fixtures are in
 //! `tests/fixtures/login/`). The output stays in memory only: the runner of
 //! a login writes no `pty.log` (`log_max_bytes = 0`), so the device code
-//! never reaches the disk (`docs/security-review.md`, F6). When the command exits with code 0 (for pi:
-//! when `pi auth check` says the provider is ready), the session runs the
+//! never reaches the disk (`docs/security-review.md`, F6). When the command exits with code 0, the session runs the
 //! status command, makes or updates the subscription definition, and runs
 //! its probe once. The session ends then, or after the login timeout (ten
 //! minutes), or on cancel; its temp dir (`$TMPDIR/terrarium-login-<id>`,
@@ -65,7 +68,8 @@ use crate::store::projects::SOURCE_API;
 use crate::store::subscriptions::{self as subs, LoginRow, Subscription};
 use crate::supervisor::{PtyAttachment, PtyInput};
 
-/// The kinds of the Add-subscription wizard.
+/// The kinds of the Add-subscription wizard, and of the status checks.
+/// `Pi` is a status check only: pi uses API keys only, so it has no login.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LoginKind {
@@ -126,21 +130,13 @@ impl LoginKind {
             Self::Codex | Self::Copilot => {
                 "Open the URL, sign in, and enter the device code.".into()
             }
-            Self::Pi => format!(
-                "In the terminal, type /login, choose \"Sign in with an account\", and pick {}. Then open the URL and paste the code or the final redirect URL.",
-                provider.unwrap_or("the provider")
-            ),
+            Self::Pi => {
+                let _ = provider;
+                terrarium_adapter_pi::provider::PLAN_REFUSAL.into()
+            }
         }
     }
 }
-
-/// The pi providers that `GET /api/subscriptions/detect` checks.
-pub const PI_PROVIDERS: [&str; 4] = [
-    "anthropic",
-    "openai-codex",
-    "github-copilot",
-    "google-gemini-cli",
-];
 
 /// What the patterns found in the login output.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -236,16 +232,8 @@ pub fn parse_output(kind: LoginKind, raw: &[u8]) -> Parsed {
                 device_code: last(&p.any_code, &text, 1),
             },
         },
-        // pi wraps a long URL across screen rows; the OSC 8 target is whole.
-        LoginKind::Pi => Parsed {
-            url: links
-                .iter()
-                .rev()
-                .find(|l| l.starts_with("https://"))
-                .cloned()
-                .or_else(|| last(&p.claude_url, &text, 0)),
-            device_code: last(&p.any_code, &text, 1),
-        },
+        // pi has no login: it uses API keys only.
+        LoginKind::Pi => Parsed::default(),
     }
 }
 
@@ -659,10 +647,6 @@ pub fn default_name(st: &LoginStatus) -> String {
             .to_owned()
     };
     match st.kind {
-        LoginKind::Pi => format!(
-            "pi-{}",
-            clean(st.pi_provider.as_deref().unwrap_or("anthropic"))
-        ),
         LoginKind::Copilot => "github-copilot".into(),
         _ => match st.plan.as_deref() {
             Some(p) => format!("{}-{}", st.provider, clean(p)),
@@ -706,18 +690,13 @@ pub struct Detected {
     pub suggested: SubscriptionDef,
 }
 
-/// Check every harness home (and each pi provider).
+/// Check the home of every harness with a plan login. pi has none: it
+/// uses API keys only.
 pub async fn detect_all(state: &Shared) -> ApiResult<Vec<Detected>> {
     let list = state.db.read(subs::list).await?;
-    let mut checks = vec![
-        (LoginKind::Claude, None),
-        (LoginKind::Codex, None),
-        (LoginKind::Copilot, None),
-    ];
-    checks.extend(PI_PROVIDERS.iter().map(|p| (LoginKind::Pi, Some(*p))));
     let mut out = Vec::new();
-    for (kind, provider) in checks {
-        let st = check_status(state, kind, provider).await;
+    for kind in [LoginKind::Claude, LoginKind::Codex, LoginKind::Copilot] {
+        let st = check_status(state, kind, None).await;
         let subscription = covering(&list, &st).map(|s| s.name.clone());
         let suggested = suggested_def(&st, None);
         out.push(Detected {
@@ -992,7 +971,7 @@ impl Logins {
 #[serde(deny_unknown_fields)]
 pub struct StartLogin {
     pub kind: LoginKind,
-    /// For `pi`: the provider to log in to.
+    /// Not used: pi, the one kind with a provider, has no login.
     #[serde(default)]
     pub provider: Option<String>,
     /// The subscription to make or update. The default comes from the
@@ -1033,15 +1012,12 @@ pub async fn start(state: &Shared, req: StartLogin) -> ApiResult<LoginView> {
     if let Some(n) = &req.name {
         subs::check_name(n)?;
     }
+    // pi uses API keys only (PLAN §16.3): store a key instead.
     if req.kind == LoginKind::Pi {
-        match req.provider.as_deref() {
-            Some(p) if !p.trim().is_empty() => {}
-            _ => {
-                return Err(ApiError::invalid(
-                    "a pi login needs `provider`, for example `anthropic`",
-                ));
-            }
-        }
+        return Err(ApiError::invalid(format!(
+            "{}; store a pi API key with POST /api/subscriptions/{{name}}/api-key",
+            terrarium_adapter_pi::provider::PLAN_REFUSAL
+        )));
     }
     if state.usage.logins.len() >= MAX_LIVE_LOGINS {
         return Err(ApiError::conflict(format!(
@@ -1188,7 +1164,6 @@ async fn watch(state: Shared, s: Arc<LoginSession>) {
     let started = Instant::now();
     let r = s.runner.clone();
     let mut exited = Box::pin(async move { r.wait().await });
-    let mut last_pi_check = Instant::now();
     let mut seen = Parsed::default();
     let outcome: Result<Option<subs::Subscription>, String> = loop {
         let exit = tokio::select! {
@@ -1224,23 +1199,6 @@ async fn watch(state: Shared, s: Arc<LoginSession>) {
                 ));
             }
             break finish(&state, &s).await.map(Some);
-        }
-        if s.kind == LoginKind::Pi
-            && seen.url.is_some()
-            && last_pi_check.elapsed() >= Duration::from_secs(5)
-        {
-            last_pi_check = Instant::now();
-            let st = check_status_in(
-                &state,
-                LoginKind::Pi,
-                s.provider.as_deref(),
-                &CheckHome::Scratch(s.dir.join(SCRATCH_HOME)),
-            )
-            .await;
-            if st.logged_in {
-                let _ = s.runner.kill();
-                break finish(&state, &s).await.map(Some);
-            }
         }
         if started.elapsed() >= timeout {
             break Err("expired".into());
@@ -1328,16 +1286,14 @@ async fn finish(state: &Shared, s: &LoginSession) -> Result<subs::Subscription, 
     subs::check_name(&name).map_err(|e| e.message)?;
     // Only the credential leaves the scratch home, into the account of
     // `name`.
-    let (dir, n, h, provider, pi) = (
+    let (dir, n, h, provider) = (
         state.state_dir.clone(),
         name.clone(),
         s.kind.harness(),
         st.provider.clone(),
-        s.provider.clone(),
     );
-    let shared = state.usage.config.home(h);
     tokio::task::spawn_blocking(move || {
-        crate::accounts::import_login(&dir, &n, h, &provider, &scratch, pi.as_deref(), &shared)
+        crate::accounts::import_login(&dir, &n, h, &provider, &scratch)
     })
     .await
     .map_err(|e| e.to_string())??;
@@ -1446,7 +1402,8 @@ pub fn attach(state: &Shared, id: &str) -> ApiResult<PtyAttachment> {
 pub async fn logout(state: &Shared, kind: LoginKind) -> ApiResult<String> {
     let Some(args) = kind.logout_args() else {
         return Err(ApiError::invalid(format!(
-            "{} has no logout command; remove the provider with /logout in pi",
+            "{} has no logout: it uses API keys only; store another key, or delete the \
+             subscription",
             kind.as_str()
         )));
     };
@@ -1710,18 +1667,6 @@ mod tests {
     }
 
     #[test]
-    fn pi_url_from_the_osc8_link() {
-        let p = parse_output(LoginKind::Pi, &fixture("pi"));
-        let url = p.url.unwrap();
-        assert!(
-            url.starts_with("https://claude.ai/oauth/authorize?"),
-            "{url}"
-        );
-        assert!(url.contains("redirect_uri=http%3A%2F%2Flocalhost%3A53692%2Fcallback"));
-        assert!(url.ends_with("state=STATEstateSTATEstateSTATEstate0123456789"));
-    }
-
-    #[test]
     fn nothing_before_the_prompt() {
         for k in [
             LoginKind::Claude,
@@ -1757,16 +1702,6 @@ mod tests {
         let def = suggested_def(&st, None);
         assert_eq!(def.probe.as_deref(), Some("anthropic-oauth-usage"));
         assert_eq!(def.harnesses, [HarnessId::Claude]);
-        let pi = LoginStatus {
-            kind: LoginKind::Pi,
-            harness: HarnessId::Pi,
-            provider: "openai-codex".into(),
-            pi_provider: Some("openai-codex".into()),
-            plan: None,
-            ..st
-        };
-        assert_eq!(default_name(&pi), "pi-openai-codex");
-        assert_eq!(suggested_def(&pi, Some("x")).probe, None);
     }
 
     #[test]

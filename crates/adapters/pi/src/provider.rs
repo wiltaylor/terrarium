@@ -6,31 +6,28 @@
 //! ids. [`provider_for`] maps one to the other, and [`required_env`] names
 //! the env var that carries an API key.
 //!
-//! Two kinds of credential:
+//! **pi uses API keys only.** The daemon keeps the key in its credential
+//! store and injects it into the env of the agents on that subscription
+//! only. A plan login (Claude Pro/Max, ChatGPT, Copilot, any OAuth login)
+//! is never a pi subscription ([`is_plan`], [`PLAN_REFUSAL`]): Claude Code
+//! spends a Claude plan, and Codex spends a ChatGPT plan. The login wizard
+//! marks an API-key subscription with `plan = "API key"` ([`is_api_key`]).
 //!
-//! - **A plan login (OAuth).** It lives in the shared `auth.json` of the pi
-//!   home. All agents share it, and pi refreshes it under a file lock. No
-//!   env var is needed.
-//! - **An API key.** The daemon keeps it in its credential store and
-//!   injects it into the env of the agents on that subscription only. The
-//!   login wizard marks such a subscription with `plan = "API key"`
-//!   ([`is_api_key`]).
-//!
-//! `openai` is the one word with two meanings: a ChatGPT plan that Codex
-//! logged in (pi `openai-codex`, OAuth) or an OpenAI API key (pi `openai`,
+//! `anthropic` and `openai` have two meanings: a plan login (refused) or
+//! an API key (pi `anthropic` with `ANTHROPIC_API_KEY`, pi `openai` with
 //! `OPENAI_API_KEY`). The plan field decides.
 //!
-//! Verified through pi (`docs/compat.md`, "Auth and token reuse"): only
-//! `openai-codex` (with a copy of the Codex access token). `anthropic` with
-//! Claude Code's OAuth token was refused ("You're out of extra usage"):
-//! third-party use of a Claude Pro/Max plan is billed as extra usage. The
-//! API-key providers are not tested; the env var names are from
+//! The API-key providers are not tested; the env var names are from
 //! `pi --help`.
 
 use terrarium_core::config::SubscriptionDef;
 
 /// The plan value that the login wizard gives an API-key subscription.
 pub const API_KEY_PLAN: &str = "API key";
+
+/// Why pi refuses a plan subscription.
+pub const PLAN_REFUSAL: &str =
+    "pi uses API keys only; use Claude Code for a Claude plan and Codex for a ChatGPT plan";
 
 /// True when the subscription is an API key, not a plan login.
 pub fn is_api_key(sub: &SubscriptionDef) -> bool {
@@ -43,8 +40,8 @@ pub fn is_api_key(sub: &SubscriptionDef) -> bool {
 struct Row {
     /// Terrarium's words for the provider.
     names: &'static [&'static str],
-    /// pi's provider id for a plan login.
-    oauth: Option<&'static str>,
+    /// The provider sells a plan login (OAuth). pi does not spend it.
+    plan: bool,
     /// pi's provider id and env var for an API key.
     api_key: Option<(&'static str, &'static str)>,
 }
@@ -52,66 +49,66 @@ struct Row {
 const TABLE: &[Row] = &[
     Row {
         names: &["anthropic", "claude"],
-        oauth: Some("anthropic"),
+        plan: true,
         api_key: Some(("anthropic", "ANTHROPIC_API_KEY")),
     },
     Row {
         names: &["openai"],
-        oauth: Some("openai-codex"),
+        plan: true,
         api_key: Some(("openai", "OPENAI_API_KEY")),
     },
     Row {
         names: &["openai-codex", "codex", "chatgpt"],
-        oauth: Some("openai-codex"),
+        plan: true,
         api_key: None,
     },
     Row {
         names: &["github", "github-copilot", "copilot"],
-        oauth: Some("github-copilot"),
+        plan: true,
         api_key: None,
     },
     Row {
         names: &["google", "gemini"],
-        oauth: None,
+        plan: false,
         api_key: Some(("google", "GEMINI_API_KEY")),
     },
     Row {
         names: &["google-gemini-cli"],
-        oauth: Some("google-gemini-cli"),
+        plan: true,
         api_key: None,
     },
     Row {
         names: &["openrouter"],
-        oauth: None,
+        plan: false,
         api_key: Some(("openrouter", "OPENROUTER_API_KEY")),
     },
     Row {
         names: &["xai"],
-        oauth: None,
+        plan: false,
         api_key: Some(("xai", "XAI_API_KEY")),
     },
     Row {
         names: &["groq"],
-        oauth: None,
+        plan: false,
         api_key: Some(("groq", "GROQ_API_KEY")),
     },
     Row {
         names: &["deepseek"],
-        oauth: None,
+        plan: false,
         api_key: Some(("deepseek", "DEEPSEEK_API_KEY")),
     },
     Row {
         names: &["mistral"],
-        oauth: None,
+        plan: false,
         api_key: Some(("mistral", "MISTRAL_API_KEY")),
     },
     // Z.ai: pi's built-in `zai` provider is the GLM Coding Plan endpoint.
     // The `api` plan (pay as you go) is the custom provider `zai-api` in
     // the per-agent `models.json` ([`crate::config::zai_api_provider`]);
-    // [`provider_for`] picks it. A Z.ai plan is never a pi login.
+    // [`provider_for`] picks it. A Z.ai plan is an API key, never a login.
     Row {
         names: &["zai"],
-        oauth: None,
+        plan: false,
         api_key: Some(("zai", terrarium_core::zai::KEY_ENV)),
     },
     // An OpenAI-compatible endpoint needs a provider entry in the shared
@@ -119,7 +116,7 @@ const TABLE: &[Row] = &[
     // URL from the env. Not supported yet: no provider flag.
     Row {
         names: &["openai-compatible"],
-        oauth: None,
+        plan: false,
         api_key: None,
     },
 ];
@@ -131,14 +128,27 @@ fn row(provider: &str) -> Option<&'static Row> {
         .find(|r| r.names.iter().any(|n| n.eq_ignore_ascii_case(p)))
 }
 
+/// True when the subscription is a plan login (Claude Pro/Max, ChatGPT,
+/// Copilot, any OAuth login), which pi does not spend: a provider that
+/// sells a plan, and no `plan = "API key"` (or a provider with no API key
+/// at all). A Z.ai plan, a key-only provider, and a custom provider are
+/// not plans.
+pub fn is_plan(sub: &SubscriptionDef) -> bool {
+    if terrarium_core::zai::is_zai(&sub.provider) {
+        return false;
+    }
+    row(&sub.provider).is_some_and(|r| r.plan && (r.api_key.is_none() || !is_api_key(sub)))
+}
+
 /// The pi provider id (`--provider`) for a subscription.
 ///
 /// A provider that is not in the table goes through as it is: it can be a
 /// custom provider in the shared `models.json` (the spike host has three).
-/// `None` when the provider is empty or cannot be used through pi.
+/// `None` when the provider is empty, is a plan login ([`is_plan`]), or
+/// cannot be used through pi.
 pub fn provider_for(sub: &SubscriptionDef) -> Option<String> {
     let name = sub.provider.trim();
-    if name.is_empty() {
+    if name.is_empty() || is_plan(sub) {
         return None;
     }
     if terrarium_core::zai::is_zai(name) {
@@ -148,43 +158,31 @@ pub fn provider_for(sub: &SubscriptionDef) -> Option<String> {
     let Some(r) = row(name) else {
         return Some(name.to_owned());
     };
-    let id = if is_api_key(sub) {
-        r.api_key.map(|(id, _)| id).or(r.oauth)
-    } else {
-        r.oauth.or(r.api_key.map(|(id, _)| id))
-    };
-    id.map(str::to_owned)
+    r.api_key.map(|(id, _)| id.to_owned())
 }
 
-/// The env var that must carry the subscription's API key, or `None` when
-/// the credential is a plan login in the shared `auth.json`.
+/// The env var that must carry the subscription's API key, or `None` for
+/// a plan login (refused) and a custom provider.
 ///
 /// The daemon injects the value from its credential store
 /// (`<state>/credentials/subscriptions/<name>.json`) into
 /// `LaunchSpec::env`, for the agents on this subscription only. The names
 /// agree with `terrariumd`'s `login_session::env_var_for`.
 pub fn required_env(sub: &SubscriptionDef) -> Option<&'static str> {
-    let r = row(&sub.provider)?;
-    match (r.oauth, r.api_key) {
-        // A provider with only API keys always needs the env var.
-        (None, Some((_, var))) => Some(var),
-        (Some(_), Some((_, var))) if is_api_key(sub) => Some(var),
-        _ => None,
+    if is_plan(sub) {
+        return None;
     }
+    row(&sub.provider)?.api_key.map(|(_, var)| var)
 }
 
 /// Why pi must not spend this subscription, or `None` when it can.
 ///
-/// A Claude Pro/Max plan login through pi is billed as extra usage, not
-/// from the plan (`docs/compat.md`, "pi: facts that contradict the plan",
-/// 1). The daemon refuses such a start; an Anthropic API key is fine.
+/// pi uses API keys only: a plan login is [`PLAN_REFUSAL`]. A Claude
+/// Pro/Max login through pi is also billed as extra usage, not from the
+/// plan (`docs/compat.md`, "pi: facts that contradict the plan", 1).
 pub fn refusal(sub: &SubscriptionDef) -> Option<&'static str> {
-    let anthropic = row(&sub.provider).is_some_and(|r| r.oauth == Some("anthropic"));
-    if anthropic && !is_api_key(sub) {
-        return Some(
-            "pi cannot spend a Claude plan: Anthropic bills third-party use of a Pro/Max \
-             login as extra usage. Use the claude harness, or an Anthropic API key",
-        );
+    if is_plan(sub) {
+        return Some(PLAN_REFUSAL);
     }
     if provider_for(sub).is_none() {
         return Some("pi has no provider for this subscription");
@@ -227,20 +225,28 @@ mod tests {
         }
     }
 
+    /// pi uses API keys only: every plan login is refused, with one text.
     #[test]
-    fn plan_logins_map_to_oauth_providers() {
-        for (p, want) in [
-            ("anthropic", "anthropic"),
-            ("openai", "openai-codex"),
-            ("openai-codex", "openai-codex"),
-            ("github", "github-copilot"),
-            ("copilot", "github-copilot"),
-            ("google-gemini-cli", "google-gemini-cli"),
+    fn plan_logins_are_refused() {
+        for (p, plan) in [
+            ("anthropic", Some("Max 20x")),
+            ("claude", None),
+            ("openai", Some("ChatGPT Pro")),
+            ("openai", None),
+            ("openai-codex", None),
+            ("openai-codex", Some("API key")),
+            ("github", Some("Pro")),
+            ("copilot", None),
+            ("google-gemini-cli", None),
         ] {
-            let s = sub(p, Some("Pro"));
-            assert_eq!(provider_for(&s).as_deref(), Some(want), "{p}");
+            let s = sub(p, plan);
+            assert!(is_plan(&s), "{p} {plan:?}");
+            assert_eq!(refusal(&s), Some(PLAN_REFUSAL), "{p}");
+            assert_eq!(start_refusal(&s, Some("m")).as_deref(), Some(PLAN_REFUSAL));
+            assert_eq!(provider_for(&s), None, "{p}");
             assert_eq!(required_env(&s), None, "{p}");
         }
+        assert!(PLAN_REFUSAL.starts_with("pi uses API keys only"));
     }
 
     #[test]
@@ -271,12 +277,25 @@ mod tests {
     }
 
     #[test]
-    fn claude_plans_are_refused() {
-        assert!(refusal(&sub("anthropic", Some("Max 20x"))).is_some());
-        assert!(refusal(&sub("claude", None)).is_some());
+    fn api_keys_and_key_only_providers_are_not_plans() {
+        for (p, plan) in [
+            ("anthropic", Some("API key")),
+            ("openai", Some("api key")),
+            ("openrouter", None),
+            ("google", Some("Gemini Code Assist")),
+            ("zai", Some("coding")),
+            ("zai", Some("api")),
+            ("glm53-exl3", None),
+            ("openai-compatible", Some("API key")),
+        ] {
+            assert!(!is_plan(&sub(p, plan)), "{p} {plan:?}");
+        }
         assert_eq!(refusal(&sub("anthropic", Some("API key"))), None);
-        assert_eq!(refusal(&sub("openai", Some("Pro"))), None);
-        assert!(refusal(&sub("openai-compatible", Some("API key"))).is_some());
+        // Not a plan, but pi has no provider flag for it yet.
+        assert_eq!(
+            refusal(&sub("openai-compatible", Some("API key"))),
+            Some("pi has no provider for this subscription")
+        );
     }
 
     #[test]
@@ -285,7 +304,7 @@ mod tests {
         assert!(start_refusal(&custom, None).is_some());
         assert!(start_refusal(&custom, Some(" ")).is_some());
         assert_eq!(start_refusal(&custom, Some("glm-5.3")), None);
-        assert_eq!(start_refusal(&sub("openai", Some("Pro")), None), None);
+        assert_eq!(start_refusal(&sub("openai", Some("API key")), None), None);
         assert!(start_refusal(&sub("anthropic", Some("Max")), Some("x")).is_some());
     }
 

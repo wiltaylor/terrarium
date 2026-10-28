@@ -388,7 +388,8 @@ async fn from_pi(
                 .map_err(|e| format!("cannot write the pi models.json: {e}"))?;
             cmd.env(dir_env, &scratch.0).env(var, PLACEHOLDER_KEY);
         }
-        // A plan login lives in the shared home.
+        // A custom provider of the shared `models.json` (pi uses API
+        // keys only; no plan login).
         None => {
             cmd.env(dir_env, &src.pi_home);
         }

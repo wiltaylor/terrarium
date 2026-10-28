@@ -319,7 +319,7 @@ fn spawn_account_migration(state: Shared) -> JoinHandle<()> {
                     subs.clone(),
                 );
                 let run = tokio::task::spawn_blocking(move || {
-                    if !accounts::migration_pending(&dir, h, &home) {
+                    if !accounts::migration_pending(h, &home) {
                         return Ok(None);
                     }
                     let mut out = None;
@@ -342,21 +342,26 @@ fn spawn_account_migration(state: Shared) -> JoinHandle<()> {
                 match run {
                     Ok(Ok(Some(m))) if !m.is_empty() => {
                         moved |= !m.moved.is_empty();
-                        if m.moved.is_empty() && !m.pi_link {
+                        if m.moved.is_empty() && !m.pi_unlinked {
                             warn!(harness = %h, skipped = ?m.skipped, "the shared login stays in the shared home");
                         } else {
-                            info!(harness = %h, moved = ?m.moved, pi_link = m.pi_link,
+                            info!(harness = %h, moved = ?m.moved, pi_unlinked = m.pi_unlinked,
                                   backups = m.backups.len(), "moved the shared login into its account");
                         }
                         let detail = serde_json::json!(m);
-                        let summary = format!(
-                            "{h}: shared login moved to {}",
-                            if m.moved.is_empty() {
-                                "no account".to_owned()
-                            } else {
-                                m.moved.join(", ")
-                            }
-                        );
+                        let summary = if m.pi_unlinked {
+                            "pi: the shared auth.json is a plain file again (pi uses API keys only)"
+                                .to_owned()
+                        } else {
+                            format!(
+                                "{h}: shared login moved to {}",
+                                if m.moved.is_empty() {
+                                    "no account".to_owned()
+                                } else {
+                                    m.moved.join(", ")
+                                }
+                            )
+                        };
                         let _ = state
                             .db
                             .write("system", move |t| {

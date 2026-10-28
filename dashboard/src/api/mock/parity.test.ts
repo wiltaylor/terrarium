@@ -400,11 +400,16 @@ describe("mock parity with docs/api.md", () => {
 
   it("detects logins with no subscription, with a suggested definition", async () => {
     const api = mock();
+    // Every login of the mock has a subscription.
+    expect(await api.subscriptions.detect()).toEqual([]);
+    // pi uses API keys only, so a login is Claude Code, Codex, or Copilot: here the Codex login loses its subscription.
+    api.world.subscriptions = api.world.subscriptions.filter((s) => s.name !== "chatgpt-pro");
     const found = await api.subscriptions.detect();
     expect(found.length).toBe(1);
     const d = found[0]!;
-    expect(d).toMatchObject({ kind: "pi", harness: "pi", provider: "openai-codex", pi_provider: "openai-codex", logged_in: true });
-    expect(d.suggested).toMatchObject({ provider: "openai-codex", harnesses: ["pi"] });
+    expect(d).toMatchObject({ kind: "codex", harness: "codex", provider: "openai", logged_in: true });
+    expect(d).not.toHaveProperty("pi_provider");
+    expect(d.suggested).toMatchObject({ provider: "openai", harnesses: ["codex"] });
     await api.subscriptions.create({ ...d.suggested, name: d.suggested.name! });
     expect(await api.subscriptions.detect()).toEqual([]);
   });
@@ -415,10 +420,11 @@ describe("mock parity with docs/api.md", () => {
     const st = api.events.stream({ since: api.world.seq });
     st.subscribe((e) => frames.push(e));
     await wait();
+    api.world.subscriptions = api.world.subscriptions.filter((s) => s.name !== "chatgpt-pro");
     api.sim.offerLogins();
     const e = frames.find((x) => x.kind === "subscription.offer")!;
     expect(Object.keys(e.data).sort()).toEqual(["login", "suggested"]);
-    expect(e.data.login).toMatchObject({ harness: "pi", provider: "openai-codex", logged_in: true });
+    expect(e.data.login).toMatchObject({ harness: "codex", provider: "openai", logged_in: true });
     st.close();
   });
 
@@ -467,15 +473,29 @@ describe("mock parity with docs/api.md", () => {
     expect(api.world.audit.find((a) => a.action === "login.input")!.detail).toEqual({ length: 15 });
   });
 
-  it("expires a login after its time, refuses a fifth live session, and needs a provider for pi", async () => {
+  it("expires a login after its time, refuses a fifth live session, and has no pi login", async () => {
     const api = createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 0, autoLoginMs: 0, loginTtlMs: 5 });
     const s = await api.subscriptions.startLogin({ kind: "copilot" });
     await wait(15);
     expect(await api.subscriptions.loginState(s.id)).toMatchObject({ state: "expired", done: true });
-    await expect(api.subscriptions.startLogin({ kind: "pi" })).rejects.toMatchObject({ status: 422 });
+    // pi uses API keys only (PLAN §16.3).
+    for (const req of [{ kind: "pi" as const }, { kind: "pi" as const, provider: "anthropic" }]) {
+      await expect(api.subscriptions.startLogin(req)).rejects.toMatchObject({ status: 422, message: expect.stringContaining("pi uses API keys only") });
+    }
     const api2 = createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 0, autoLoginMs: 0 });
     for (let i = 0; i < 4; i++) await api2.subscriptions.startLogin({ kind: "codex" });
     await expect(api2.subscriptions.startLogin({ kind: "codex" })).rejects.toMatchObject({ status: 409, code: "conflict" });
+  });
+
+  it("refuses a plan login on a pi agent, like the daemon", async () => {
+    const api = mock();
+    const project = api.world.projects[0]!.name;
+    const refused = { status: 422, message: expect.stringContaining("pi uses API keys only") };
+    await expect(api.agents.create({ name: "p-plan", project, harness: "pi", subscription: "anthropic-max" })).rejects.toMatchObject(refused);
+    const a = await api.agents.create({ name: "p-key", project, harness: "pi", subscription: "openrouter-key" });
+    await expect(api.agents.update(a.id, { subscription: "chatgpt-pro" })).rejects.toMatchObject(refused);
+    const c = await api.agents.create({ name: "c-plan", project, harness: "claude", subscription: "anthropic-max" });
+    await expect(api.agents.update(c.id, { harness: "pi" })).rejects.toMatchObject(refused);
   });
 
   it("answers GET /api/usage as points oldest first; group keys agents by ULID", async () => {

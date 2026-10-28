@@ -209,10 +209,10 @@ export function seed(now: number = Date.now()): MockWorld {
   };
 
   const sessions: Session[] = agents.flatMap((a, i) => [
-    { id: fakeUlid(`ses${i}`, 1), agent: a.id, harness_session_id: `${(i * 7919).toString(16)}-0a1b-4c2d-9e8f-${a.name}`, started_at: ago(60 * 26), ended_at: ago(60 * 20), outcome: "restarted", turns: 12 + i, current: false },
+    { id: fakeUlid(`ses${i}`, 1), agent: a.id, harness_session_id: `${(i * 7919).toString(16)}-0a1b-4c2d-9e8f-${a.name}`, started_at: ago(60 * 26), ended_at: ago(60 * 20), outcome: "restarted", turns: 12 + i, current: false, resumes: i % 3, ...(i % 3 ? { resumed_at: ago(60 * 22) } : {}) },
     ...(a.status === "stopped"
       ? []
-      : [{ id: fakeUlid(`ses${i}`, 2), agent: a.id, harness_session_id: `${(i * 104729).toString(16)}-77aa-4bbb-8ccc-${a.name}`, started_at: ago(60 * 3), turns: 3 + i, current: true }]),
+      : [{ id: fakeUlid(`ses${i}`, 2), agent: a.id, harness_session_id: `${(i * 104729).toString(16)}-77aa-4bbb-8ccc-${a.name}`, started_at: ago(60 * 3), turns: 3 + i, current: true, resumes: 0 }]),
   ]);
   const sessionOf = (a: Agent) => sessions.find((s) => s.agent === a.id && s.current)?.id;
   for (const a of agents) a.session = sessions.find((s) => s.agent === a.id && s.current)?.harness_session_id;
@@ -637,17 +637,17 @@ ${XSS_DOCUMENT}
   });
   const subscriptions: Subscription[] = [
     {
-      ...subBase, name: "anthropic-max", provider: "anthropic", plan: "Max 20x", harnesses: ["claude", "pi"], probe: "anthropic-oauth-usage", alert_at: 80, source: "file",
+      ...subBase, name: "anthropic-max", provider: "anthropic", plan: "Max 20x", harnesses: ["claude"], probe: "anthropic-oauth-usage", alert_at: 80, source: "file",
       login_status: "logged_in", verified_at: ago(4), probe_status: "ok", last_probe_at: ago(1), last_success_at: ago(1),
       windows: [win("5h", 62, 97), win("7d", 38, 60 * 24 * 3 + 200)], local_estimate_only: false, account: account("claude", "migration", "wil@example.com"), default: true,
     },
     {
-      ...subBase, name: "anthropic-max-2", provider: "anthropic", plan: "Max 20x", harnesses: ["claude", "pi"], probe: "anthropic-oauth-usage", alert_at: 80,
+      ...subBase, name: "anthropic-max-2", provider: "anthropic", plan: "Max 20x", harnesses: ["claude"], probe: "anthropic-oauth-usage", alert_at: 80,
       login_status: "logged_in", verified_at: ago(6), probe_status: "ok", last_probe_at: ago(1), last_success_at: ago(1),
       windows: [win("5h", 14, 180), win("7d", 21, 60 * 24 * 5)], local_estimate_only: false, account: account("claude", "login", "ops@example.com", 60 * 24 * 2),
     },
     {
-      ...subBase, name: "chatgpt-pro", provider: "openai", plan: "ChatGPT Pro", harnesses: ["codex", "pi"], probe: "openai-codex-usage", alert_at: 80,
+      ...subBase, name: "chatgpt-pro", provider: "openai", plan: "ChatGPT Pro", harnesses: ["codex"], probe: "openai-codex-usage", alert_at: 80,
       login_status: "expiring", verified_at: ago(30), probe_status: "ok", last_probe_at: ago(5), last_success_at: ago(5),
       windows: [win("5h", 87, 41, 5), win("7d", 54, 60 * 24 * 5, 5)], local_estimate_only: false, account: account("codex", "migration"), default: true,
     },

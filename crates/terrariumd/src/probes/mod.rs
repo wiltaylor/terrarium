@@ -532,14 +532,8 @@ pub(crate) mod tests {
         let c = read_credentials(&p, &state, "max-b", &shared).unwrap();
         assert_eq!(c.token(), "shared", "no account yet: the shared login");
         let login = r#"{"claudeAiOauth": {"accessToken": "acct-b", "expiresAt": 1}}"#;
-        crate::accounts::write_credential(
-            &state,
-            "max-b",
-            HarnessId::Claude,
-            login.as_bytes(),
-            &shared,
-        )
-        .unwrap();
+        crate::accounts::write_credential(&state, "max-b", HarnessId::Claude, login.as_bytes())
+            .unwrap();
         let path = crate::accounts::credential_path(
             &crate::accounts::store_dir(&state, "max-b"),
             HarnessId::Claude,
@@ -558,8 +552,7 @@ pub(crate) mod tests {
             before
         );
         // Copilot: the token file of the account.
-        crate::accounts::write_credential(&state, "gh", HarnessId::Copilot, b"gho_t\n", &shared)
-            .unwrap();
+        crate::accounts::write_credential(&state, "gh", HarnessId::Copilot, b"gho_t\n").unwrap();
         let c = read_credentials(&github::CopilotQuota, &state, "gh", &shared).unwrap();
         assert_eq!(c.token(), "gho_t");
     }

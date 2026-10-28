@@ -1,7 +1,8 @@
 //! Per-agent files for pi (PLAN §8 and §11).
 //!
 //! All agents share one pi home (`/auth/pi`, seen as `PI_CODING_AGENT_DIR`)
-//! for the logins (`auth.json`) and the custom providers (`models.json`).
+//! for `auth.json` (no login: pi uses API keys only) and the custom
+//! providers (`models.json`).
 //! Everything that is per agent lives in the harness directory
 //! (`/state/agents/<ulid>/harness/`). The sandbox binds that directory
 //! read-only at the same path, so these paths are the same for the daemon
@@ -20,7 +21,7 @@
 //!
 //! | Path in the home | Decision | Why |
 //! |---|---|---|
-//! | `auth.json` | per account | the logins. With a pi plan account (PLAN §16.3) the shared `auth.json` is a symlink to `/run/terrarium/cred/account/auth.json`, the agent's account through its `cred` pointer (`terrariumd::accounts`). pi writes it in place under its file lock (`proper-lockfile`, `realpath: false`, so the lock is `auth.json.lock` in the shared home), and refreshes OAuth tokens in it, so a refresh reaches every agent on the account. With no pi account, the file is shared. |
+//! | `auth.json` | shared, `{}` | no login: pi uses API keys only (PLAN §16.3), and each agent gets its key in the env. An install from before had the pi plan accounts and made the file a symlink to `/run/terrarium/cred/account/auth.json`; the daemon makes it a plain `{}` file again (`terrariumd::accounts`). |
 //! | `models.json` | per agent, from the shared file | custom providers (base URL, models, API key). Read only for pi. Every start copies the shared file and adds the Terrarium providers ([`TERRARIUM_PROVIDERS`]: `zai-api`, the Z.ai pay-as-you-go endpoint). An edit of the shared file reaches an agent at its next start. |
 //! | `settings.json` | per agent | the operator's own defaults (provider, model, theme, packages) stay out, and a `/model` change in one agent does not change the default of the others. The first start copies the shared file; later starts keep the agent's copy. Every start sets `lastChangelogVersion` to the pinned version ([`LAST_CHANGELOG_KEY`]), so pi 1.4's "What's new" changelog does not show. |
 //! | `mcp.json` | not loaded | `--no-mcp` (pi 1.4 has built-in MCP). |

@@ -1109,6 +1109,48 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE agents ADD COLUMN skills TEXT NOT NULL DEFAULT '[]';
     "#,
+    // 34: one session row per harness session (PLAN §18). A resume of the
+    // same harness session reuses its row (`store::agents::
+    // set_harness_session`) and counts in `resumes`; `resumed_at` is the
+    // start of the last resume. The rows that earlier resumes made merge
+    // into the earliest row of each (agent, harness session): the earliest
+    // start, the end of the newest row, its events (so its turns), and
+    // `resumes` = the other rows.
+    r#"
+    ALTER TABLE sessions ADD COLUMN resumes INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE sessions ADD COLUMN resumed_at TEXT;
+    CREATE TEMP TABLE session_groups AS
+        SELECT agent_id, harness_session_id, min(id) AS keep, max(id) AS last,
+               count(*) - 1 AS resumes, min(started_at) AS first_start,
+               max(started_at) AS last_start, max(current) AS current
+        FROM sessions
+        WHERE harness_session_id IS NOT NULL
+        GROUP BY agent_id, harness_session_id
+        HAVING count(*) > 1;
+    CREATE TEMP TABLE session_dups AS
+        SELECT d.id AS dup, g.keep AS keep
+        FROM sessions d
+        JOIN session_groups g
+          ON g.agent_id = d.agent_id AND g.harness_session_id = d.harness_session_id
+        WHERE d.id != g.keep;
+    UPDATE sessions SET
+        resumes = (SELECT g.resumes FROM session_groups g WHERE g.keep = sessions.id),
+        resumed_at = (SELECT g.last_start FROM session_groups g WHERE g.keep = sessions.id),
+        started_at = (SELECT g.first_start FROM session_groups g WHERE g.keep = sessions.id),
+        current = (SELECT g.current FROM session_groups g WHERE g.keep = sessions.id),
+        ended_at = (SELECT CASE WHEN g.current = 1 THEN NULL ELSE l.ended_at END
+                    FROM session_groups g JOIN sessions l ON l.id = g.last
+                    WHERE g.keep = sessions.id),
+        end_reason = (SELECT CASE WHEN g.current = 1 THEN NULL ELSE l.end_reason END
+                      FROM session_groups g JOIN sessions l ON l.id = g.last
+                      WHERE g.keep = sessions.id)
+    WHERE id IN (SELECT keep FROM session_groups);
+    UPDATE events SET session_id = (SELECT x.keep FROM session_dups x WHERE x.dup = events.session_id)
+    WHERE session_id IN (SELECT dup FROM session_dups);
+    DELETE FROM sessions WHERE id IN (SELECT dup FROM session_dups);
+    DROP TABLE session_dups;
+    DROP TABLE session_groups;
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call
@@ -1633,6 +1675,138 @@ mod tests {
             )
             .unwrap();
         assert_eq!(n, 1);
+    }
+
+    /// Migration 34 merges the rows that resumes of one harness session
+    /// made: the earliest row stays, with the earliest start, the end of
+    /// the newest row, `resumes` = the other rows, and their events (so
+    /// their turns). A session with one row, and a row with no harness
+    /// session, stay as they are.
+    #[test]
+    fn migration_34_merges_the_rows_of_one_harness_session() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        for (i, sql) in MIGRATIONS.iter().enumerate().take(33) {
+            conn.execute_batch(sql).unwrap();
+            conn.pragma_update(None, "user_version", i + 1).unwrap();
+        }
+        conn.execute_batch(
+            "INSERT INTO agents (id, name, project, harness, workspace, created_at, updated_at)
+               VALUES ('A1', 'a', 'p', 'claude', '/w', 't', 't'),
+                      ('A2', 'b', 'p', 'claude', '/w', 't', 't');
+             -- A1: H1 resumed twice (the last row is current), then H2 once.
+             INSERT INTO sessions (id, agent_id, harness_session_id, current, started_at,
+                                   ended_at, end_reason) VALUES
+               ('S1', 'A1', 'H1', 0, 't1', 'e1', 'restarted'),
+               ('S2', 'A1', 'H1', 0, 't2', 'e2', 'daemon_restart'),
+               ('S3', 'A1', NULL, 0, 't3', 'e3', 'start_failed'),
+               ('S4', 'A1', 'H2', 0, 't4', 'e4', 'stopped'),
+               ('S5', 'A1', 'H1', 1, 't5', NULL, NULL),
+               -- A2: H1 too (another agent), two ended rows.
+               ('T1', 'A2', 'H1', 0, 'u1', 'f1', 'restarted'),
+               ('T2', 'A2', 'H1', 0, 'u2', 'f2', 'stopped');
+             INSERT INTO events (id, agent_id, session_id, kind, payload, at) VALUES
+               ('E1', 'A1', 'S1', 'turn_start', '{}', 't1'),
+               ('E2', 'A1', 'S2', 'turn_start', '{}', 't2'),
+               ('E3', 'A1', 'S5', 'turn_start', '{}', 't5'),
+               ('E4', 'A1', 'S5', 'turn_start', '{}', 't5'),
+               ('E5', 'A1', 'S4', 'turn_start', '{}', 't4'),
+               ('E6', 'A2', 'T2', 'turn_start', '{}', 'u2');",
+        )
+        .unwrap();
+        assert_eq!(migrate(&mut conn).unwrap(), MIGRATIONS.len() - 33);
+        type Row = (
+            String,
+            Option<String>,
+            i64,
+            String,
+            Option<String>,
+            Option<String>,
+            i64,
+            Option<String>,
+            i64,
+        );
+        let rows: Vec<Row> = conn
+            .prepare(
+                "SELECT s.id, s.harness_session_id, s.current, s.started_at, s.ended_at,
+                        s.end_reason, s.resumes, s.resumed_at,
+                        (SELECT count(*) FROM events e
+                         WHERE e.session_id = s.id AND e.kind = 'turn_start')
+                 FROM sessions s ORDER BY s.id",
+            )
+            .unwrap()
+            .query_map([], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                    r.get(7)?,
+                    r.get(8)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let o = |s: &str| Some(s.to_owned());
+        assert_eq!(
+            rows,
+            [
+                (
+                    "S1".into(),
+                    o("H1"),
+                    1,
+                    "t1".into(),
+                    None,
+                    None,
+                    2,
+                    o("t5"),
+                    4
+                ),
+                (
+                    "S3".into(),
+                    None,
+                    0,
+                    "t3".into(),
+                    o("e3"),
+                    o("start_failed"),
+                    0,
+                    None,
+                    0
+                ),
+                (
+                    "S4".into(),
+                    o("H2"),
+                    0,
+                    "t4".into(),
+                    o("e4"),
+                    o("stopped"),
+                    0,
+                    None,
+                    1
+                ),
+                (
+                    "T1".into(),
+                    o("H1"),
+                    0,
+                    "u1".into(),
+                    o("f2"),
+                    o("stopped"),
+                    1,
+                    o("u2"),
+                    1
+                ),
+            ]
+        );
+        let fk: i64 = conn
+            .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(fk, 0);
     }
 
     /// Migration 29 makes the wait kind column again with `question`, and

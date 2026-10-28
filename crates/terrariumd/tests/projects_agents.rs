@@ -461,17 +461,14 @@ async fn fake_supervisor_status_flow() {
 
     let sessions = td.get(&format!("/api/agents/{id}/sessions")).await;
     let sessions = sessions.ok().as_array().unwrap().clone();
-    assert_eq!(sessions.len(), 2);
-    // Newest first.
+    // The restart resumed the same harness session: one row, with the
+    // resume counted (PLAN §18).
+    assert_eq!(sessions.len(), 1, "{sessions:?}");
     assert_eq!(sessions[0]["outcome"], "stopped");
     assert_eq!(sessions[0]["current"], false);
-    assert_eq!(sessions[1]["outcome"], "restarted");
-    assert_eq!(sessions[1]["turns"], 3);
-    // The restart resumed the same harness session.
-    assert_eq!(
-        sessions[0]["harness_session_id"],
-        sessions[1]["harness_session_id"]
-    );
+    assert_eq!(sessions[0]["resumes"], 1);
+    assert!(sessions[0]["resumed_at"].is_string());
+    assert_eq!(sessions[0]["turns"], 3);
 
     // A live agent needs ?confirm=true to delete.
     td.post_empty(&format!("/api/agents/{id}/start")).await.ok();

@@ -329,14 +329,7 @@ pub fn not_ready(harness: HarnessId) -> SupervisorError {
 
 /// The definition of a stored subscription, as the adapters take it.
 pub(crate) fn sub_def(s: &Subscription) -> SubscriptionDef {
-    SubscriptionDef {
-        name: s.name.clone(),
-        provider: s.provider.clone(),
-        plan: s.plan.clone(),
-        harnesses: s.harnesses.clone(),
-        probe: s.probe.clone(),
-        alert_at: s.alert_at,
-    }
+    s.def()
 }
 
 /// How long a graceful stop waits for the harness to exit on its exit
@@ -997,6 +990,13 @@ fn check_subscription(
     agent: &Agent,
     sub: Option<&SubscriptionCheck>,
 ) -> Result<Option<Subscription>, SupervisorError> {
+    // pi uses API keys only (PLAN §16.3): a plan login does not list pi,
+    // so say why before the harness list does.
+    if let Some(SubscriptionCheck::Found(s)) = sub
+        && let Some(why) = crate::store::subscriptions::plan_refusal(agent.harness, s)
+    {
+        return Err(SupervisorError::NotReady(why));
+    }
     match sub {
         Some(SubscriptionCheck::Found(s)) if s.harnesses.contains(&agent.harness) => {
             Ok(Some((**s).clone()))
@@ -3824,7 +3824,7 @@ impl Supervisor for RunnerSupervisor {
                 let mut slots = lock(&self.inner.slots);
                 match slots.get_mut(&id) {
                     Some(slot) if slot.live() => {
-                        let live = matches!(agent.harness, HarnessId::Claude | HarnessId::Pi)
+                        let live = agent.harness == HarnessId::Claude
                             && slot.account.is_some()
                             && slot.runner.is_some()
                             && slot.bound.contains(&to);
@@ -3861,7 +3861,6 @@ impl Supervisor for RunnerSupervisor {
                     let cfg = &self.inner.cfg;
                     let (state_dir, harness) = (cfg.state_dir.clone(), agent.harness);
                     let harness_dir = terrarium_runner::harness_dir(&cfg.state_dir, id);
-                    let home = cfg.home(harness);
                     let target = to.clone();
                     tokio::task::spawn_blocking(move || {
                         crate::accounts::live_swap(
@@ -3869,7 +3868,6 @@ impl Supervisor for RunnerSupervisor {
                             harness,
                             &harness_dir,
                             &target,
-                            &home,
                             crate::accounts::LOCK_TIMEOUT,
                         )
                     })

@@ -1,6 +1,6 @@
 // The Sessions tab of the agent page (docs/api.md §6.3): the sessions of the
-// agent, one row for each conversation (the rows that resume one harness
-// session are one conversation), and a read-only viewer of one transcript.
+// agent, one row for each harness session (its resumes counted on the row),
+// and a read-only viewer of one transcript.
 // The open session is in the URL (`?tab=sessions&session=<id>`).
 
 import { createEffect, createMemo, For, on, Show } from "solid-js";
@@ -91,10 +91,10 @@ function SessionTable(props: { groups: SessionGroup[]; onOpen: (g: SessionGroup)
                   >
                     {sessionLabel({ ...g.session, title: g.title })}
                   </button>
-                  <Show when={g.rows.length > 1}>
-                    <span class="muted small" title="A restart resumed this harness session in a new session row.">
+                  <Show when={g.resumes > 0}>
+                    <span class="muted small" title="A restart or a daemon restart resumed this harness session.">
                       {" "}
-                      · resumed {g.rows.length - 1}×
+                      · resumed {g.resumes}×
                     </span>
                   </Show>
                   <Show when={g.session.transcript === false}>
@@ -181,8 +181,8 @@ function SessionViewer(props: {
                 <dt>Turns</dt>
                 <dd>
                   {gr().turns}
-                  <Show when={gr().rows.length > 1}>
-                    <span class="muted"> · resumed {gr().rows.length - 1}×</span>
+                  <Show when={gr().resumes > 0}>
+                    <span class="muted"> · resumed {gr().resumes}×</span>
                   </Show>
                 </dd>
               </>

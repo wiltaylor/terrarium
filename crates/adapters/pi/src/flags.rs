@@ -125,12 +125,9 @@ pub const PI_PINNED: PiFlags = PiFlags {
 /// (`defaultModelPerProvider`) are the top tier. Read only: no turn ran
 /// with them.
 pub const DEFAULT_MODELS: &[(&str, &str)] = &[
-    ("openai-codex", "gpt-6-luna"),
+    // API keys only: pi refuses a plan login ([`crate::provider::refusal`]).
     ("openai", "gpt-6-luna"),
-    // An Anthropic API key only: pi refuses a Claude plan login
-    // ([`crate::provider::refusal`]).
     ("anthropic", "claude-haiku-5-5"),
-    ("github-copilot", "gpt-6-luna"),
     ("google", "gemini-3.1-flash-lite"),
     ("openrouter", "openai/gpt-6-luna"),
     ("xai", "grok-4.3"),
@@ -157,12 +154,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_oauth_and_key_provider_has_a_default_model() {
+    fn every_key_provider_has_a_default_model() {
         for p in [
-            "openai-codex",
             "openai",
             "anthropic",
-            "github-copilot",
             "google",
             "openrouter",
             "xai",
@@ -174,7 +169,8 @@ mod tests {
         ] {
             assert!(default_model(p).is_some(), "{p}");
         }
-        assert_eq!(default_model("openai-codex"), Some("gpt-6-luna"));
+        assert_eq!(default_model("openai"), Some("gpt-6-luna"));
+        assert_eq!(default_model("openai-codex"), None);
         assert_eq!(default_model("glm53-exl3"), None);
         assert_eq!(default_model("zai"), Some("glm-5.3-flash"));
     }

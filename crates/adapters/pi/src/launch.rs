@@ -192,11 +192,11 @@ mod tests {
         spec.args.get(i + 1).map(String::as_str)
     }
 
-    fn codex_sub() -> SubscriptionDef {
+    fn key_sub() -> SubscriptionDef {
         SubscriptionDef {
-            name: "chatgpt-pro".into(),
-            provider: "openai-codex".into(),
-            plan: Some("Pro".into()),
+            name: "openai-key".into(),
+            provider: "openai".into(),
+            plan: Some("API key".into()),
             harnesses: vec![terrarium_core::HarnessId::Pi],
             probe: None,
             alert_at: 80,
@@ -211,7 +211,7 @@ mod tests {
             &PiOptions::default(),
             &agent,
             "11111111-2222-4333-8444-555555555555",
-            Some(&codex_sub()),
+            Some(&key_sub()),
             Some(&prompt),
         );
         assert_eq!(spec.program, "pi");
@@ -220,7 +220,7 @@ mod tests {
         let dir = config::pi_dir(&agent);
         let want: Vec<String> = [
             "--provider",
-            "openai-codex",
+            "openai",
             "--model",
             "gpt-5.6-luna",
             "--tui-mode",
@@ -330,14 +330,14 @@ mod tests {
 
     #[test]
     fn model_prefix_and_provider() {
-        let sub = codex_sub();
+        let sub = key_sub();
         assert_eq!(
             model_args(
                 &crate::PI_PINNED,
-                &test_agent(Some("openai-codex/gpt-5.6-luna")),
+                &test_agent(Some("openai/gpt-5.6-luna")),
                 Some(&sub)
             ),
-            ["--provider", "openai-codex", "--model", "gpt-5.6-luna"]
+            ["--provider", "openai", "--model", "gpt-5.6-luna"]
         );
         // OpenRouter model ids have their own slash.
         let or = SubscriptionDef {
@@ -361,10 +361,10 @@ mod tests {
         assert_eq!(
             model_args(
                 &crate::PI_PINNED,
-                &test_agent(Some("openai-codex/gpt-5.6-luna")),
+                &test_agent(Some("openai/gpt-5.6-luna")),
                 None
             ),
-            ["--model", "openai-codex/gpt-5.6-luna"]
+            ["--model", "openai/gpt-5.6-luna"]
         );
         assert!(model_args(&crate::PI_PINNED, &test_agent(Some(" ")), None).is_empty());
         assert!(model_args(&crate::PI_PINNED, &test_agent(None), None).is_empty());
@@ -376,13 +376,13 @@ mod tests {
     fn subscription_without_model_gets_the_default_model() {
         let f = &crate::PI_PINNED;
         assert_eq!(
-            model_args(f, &test_agent(None), Some(&codex_sub())),
-            ["--provider", "openai-codex", "--model", "gpt-6-luna"]
+            model_args(f, &test_agent(None), Some(&key_sub())),
+            ["--provider", "openai", "--model", "gpt-6-luna"]
         );
         let key = SubscriptionDef {
             provider: "anthropic".into(),
             plan: Some("API key".into()),
-            ..codex_sub()
+            ..key_sub()
         };
         assert_eq!(
             model_args(f, &test_agent(Some("  ")), Some(&key)),
@@ -392,7 +392,7 @@ mod tests {
         // `--provider` (the daemon refuses this start first).
         let custom = SubscriptionDef {
             provider: "glm53-exl3".into(),
-            ..codex_sub()
+            ..key_sub()
         };
         assert!(model_args(f, &test_agent(None), Some(&custom)).is_empty());
     }
@@ -403,7 +403,7 @@ mod tests {
         let zai = |plan: &str| SubscriptionDef {
             provider: "zai".into(),
             plan: Some(plan.into()),
-            ..codex_sub()
+            ..key_sub()
         };
         assert_eq!(
             model_args(f, &test_agent(None), Some(&zai("coding"))),
@@ -426,12 +426,12 @@ mod tests {
     fn subscription_and_model_use_the_agent_model() {
         let f = &crate::PI_PINNED;
         assert_eq!(
-            model_args(f, &test_agent(Some("gpt-6-sol")), Some(&codex_sub())),
-            ["--provider", "openai-codex", "--model", "gpt-6-sol"]
+            model_args(f, &test_agent(Some("gpt-6-sol")), Some(&key_sub())),
+            ["--provider", "openai", "--model", "gpt-6-sol"]
         );
         let custom = SubscriptionDef {
             provider: "glm53-exl3".into(),
-            ..codex_sub()
+            ..key_sub()
         };
         assert_eq!(
             model_args(f, &test_agent(Some("glm-5.3")), Some(&custom)),
@@ -444,14 +444,14 @@ mod tests {
     fn provider_never_goes_alone() {
         let subs = [
             None,
-            Some(codex_sub()),
+            Some(key_sub()),
             Some(SubscriptionDef {
                 provider: "glm53-exl3".into(),
-                ..codex_sub()
+                ..key_sub()
             }),
         ];
         for sub in &subs {
-            for model in [None, Some(""), Some("x"), Some("openai-codex/y")] {
+            for model in [None, Some(""), Some("x"), Some("openai/y")] {
                 let a = model_args(&crate::PI_PINNED, &test_agent(model), sub.as_ref());
                 if a.iter().any(|x| x == "--provider") {
                     assert!(a.iter().any(|x| x == "--model"), "{a:?}");

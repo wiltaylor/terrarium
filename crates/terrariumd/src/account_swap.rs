@@ -4,13 +4,15 @@
 //!
 //! The rules:
 //!
-//! - The new subscription exists, the agent's harness can spend it, and
-//!   it has the provider of the current one. When the agent has a pool,
+//! - The new subscription exists, the agent's harness can spend it (pi:
+//!   an API key only, never a plan login), and it has the provider of the
+//!   current one. When the agent has a pool,
 //!   the new subscription is a member.
 //! - When the current subscription has a plan account, the new one must
 //!   have a login of the harness too (`crate::accounts`).
 //! - The supervisor applies it ([`Supervisor::swap_subscription`]): live
-//!   for Claude Code and pi, a restart with resume for Codex and Copilot.
+//!   for Claude Code, a restart with resume for Codex and Copilot. A pi
+//!   agent moves between API keys by a restart with resume.
 //! - The store then names the new subscription, an `agent.swap` audit row
 //!   records the old and the new one and how it applied, and an
 //!   `agent.swapped` event goes out. The quota hold of the old
@@ -51,6 +53,9 @@ pub fn check(
             "agent `{}` is on subscription `{}` already",
             a.name, to.name
         )));
+    }
+    if let Some(why) = subs::plan_refusal(a.harness, to) {
+        return Err(ApiError::invalid(why));
     }
     if !to.harnesses.contains(&a.harness) {
         return Err(ApiError::invalid(format!(
@@ -305,9 +310,8 @@ mod tests {
     fn pick_takes_the_next_member_with_room() {
         let tmp = tempfile::tempdir().unwrap();
         let state = tmp.path();
-        let home = tmp.path().join("home");
         for s in ["a", "b", "c"] {
-            crate::accounts::write_credential(state, s, HarnessId::Claude, b"{}", &home).unwrap();
+            crate::accounts::write_credential(state, s, HarnessId::Claude, b"{}").unwrap();
         }
         let now = Utc::now();
         let later = Some((now + chrono::Duration::hours(1)).to_rfc3339());
@@ -340,8 +344,7 @@ mod tests {
     fn check_refuses_a_member_outside_the_pool_and_a_missing_login() {
         let tmp = tempfile::tempdir().unwrap();
         let state = tmp.path();
-        let home = tmp.path().join("home");
-        crate::accounts::write_credential(state, "a", HarnessId::Claude, b"{}", &home).unwrap();
+        crate::accounts::write_credential(state, "a", HarnessId::Claude, b"{}").unwrap();
         let v = view("a", &["a", "b"]);
         let (a, b, c) = (
             sub("a", "logged_in"),
@@ -352,7 +355,7 @@ mod tests {
         assert!(e.message.contains("not in the pool"), "{}", e.message);
         let e = check(state, &v, Some(&a), &b).unwrap_err();
         assert!(e.message.contains("no claude login"), "{}", e.message);
-        crate::accounts::write_credential(state, "b", HarnessId::Claude, b"{}", &home).unwrap();
+        crate::accounts::write_credential(state, "b", HarnessId::Claude, b"{}").unwrap();
         check(state, &v, Some(&a), &b).unwrap();
         assert!(check(state, &v, Some(&a), &a).is_err());
         let mut other = sub("b", "logged_in");

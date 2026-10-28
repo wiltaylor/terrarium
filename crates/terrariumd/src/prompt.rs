@@ -631,8 +631,13 @@ mod tests {
             "`terrarium admin target revoke <target>\n   {{agent.name}}`",
             "Then use the test result in\n   the worker's last comment.",
             // The worker's lease ends after the merge, not at review.
-            "8. Run `terrarium card move <card> done",
-            "9. Now revoke the worker's lease: `terrarium admin target revoke <target>\n   <worker>`. Do not revoke it before the merge",
+            "9. Run `terrarium card move <card> done",
+            "10. Now revoke the worker's lease: `terrarium admin target revoke <target>\n    <worker>`. Do not revoke it before the merge",
+            // The merge is a question to the operator, not a mail.
+            "`terrarium question ask\n   \"Merge <branch> into main?\" -o \"Merge\" -o \"Hold\" --context",
+            "--wait`. Then end your turn.",
+            "Do not merge until the answer to that question is \"Merge\".",
+            "If the answer is \"Hold\" (or a text), do not merge.",
             "Keep the lease while the card is in `review`",
             // A grant whose target did not come up exits non-zero.
             "If the\n   grant exits with an error (\"the target did not come up\"), do not assign\n   the card.",

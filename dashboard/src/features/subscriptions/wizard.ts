@@ -9,21 +9,24 @@
 
 import type { ApiKeyInput, LoginKind, LoginSession, Subscription } from "../../api/types";
 
-export type WizardPath = LoginKind | "api_key" | "define";
+/** The logins of the wizard. pi uses API keys only, so it has none (its API key is the `api_key` path). */
+export type WizardLogin = Exclude<LoginKind, "pi">;
+
+export type WizardPath = WizardLogin | "api_key" | "define";
 
 export interface WizardSetup {
   /** The subscription to make or update. Absent: the daemon picks a name from the status output. */
   name?: string;
-  /** For `pi`: the pi provider. For `api_key`: the key provider. */
+  /** For `api_key`: the key provider. */
   provider?: string;
 }
 
 export type WizardState =
   | { step: "pick" }
   | { step: "setup"; path: WizardPath; setup: WizardSetup }
-  | { step: "starting"; path: LoginKind; setup: WizardSetup }
-  | { step: "live"; path: LoginKind; setup: WizardSetup; session: LoginSession }
-  | { step: "ended"; path: LoginKind; setup: WizardSetup; session: LoginSession; message: string }
+  | { step: "starting"; path: WizardLogin; setup: WizardSetup }
+  | { step: "live"; path: WizardLogin; setup: WizardSetup; session: LoginSession }
+  | { step: "ended"; path: WizardLogin; setup: WizardSetup; session: LoginSession; message: string }
   | { step: "done"; subscription: string; session?: LoginSession };
 
 export type WizardAction =
@@ -37,12 +40,12 @@ export type WizardAction =
   | { type: "saved"; subscription: string }
   | { type: "retry" };
 
-export const isLoginPath = (p: WizardPath): p is LoginKind => p !== "api_key" && p !== "define";
+export const isLoginPath = (p: WizardPath): p is WizardLogin => p !== "api_key" && p !== "define";
 
 /** The wizard that `?add=<path>` opens (the agent form links `?add=api_key`), or `null`. */
 export function wizardFromQuery(add: string | string[] | undefined): { path: WizardPath } | null {
   const p = Array.isArray(add) ? add[0] : add;
-  const paths: WizardPath[] = ["api_key", "define", "claude", "codex", "copilot", "pi"];
+  const paths: WizardPath[] = ["api_key", "define", "claude", "codex", "copilot"];
   return p && (paths as string[]).includes(p) ? { path: p as WizardPath } : null;
 }
 
@@ -65,7 +68,7 @@ export function endMessage(s: LoginSession): string {
 }
 
 /** A session that the daemon reports. `done` true ends the flow. */
-function fromSession(state: { path: LoginKind; setup: WizardSetup }, session: LoginSession): WizardState {
+function fromSession(state: { path: WizardLogin; setup: WizardSetup }, session: LoginSession): WizardState {
   if (session.done) {
     if (session.state === "done" && session.subscription) return { step: "done", subscription: session.subscription, session };
     return { step: "ended", path: state.path, setup: state.setup, session, message: endMessage(session) };
@@ -118,12 +121,9 @@ export function countdown(ms: number): string {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
 
-/** Device-code flows show the code large. Paste flows (`claude`, `pi`) take a code from the browser. */
-export const isDeviceFlow = (k: LoginKind): boolean => k === "codex" || k === "copilot";
-export const takesCode = (k: LoginKind): boolean => k === "claude" || k === "pi";
-
-/** The pi providers that `GET /api/subscriptions/detect` checks. */
-export const PI_PROVIDERS = ["anthropic", "openai-codex", "github-copilot", "google-gemini-cli"] as const;
+/** Device-code flows show the code large. The paste flow (`claude`) takes a code from the browser. */
+export const isDeviceFlow = (k: WizardLogin): boolean => k === "codex" || k === "copilot";
+export const takesCode = (k: WizardLogin): boolean => k === "claude";
 
 /** The providers of `POST /api/subscriptions/{name}/api-key` and their env vars (docs/api.md §16.5). */
 export const KEY_PROVIDERS: { id: string; env: string; label: string }[] = [
@@ -167,9 +167,9 @@ export function apiKeyBody(f: { provider: string; key: string; plan?: string; ba
   };
 }
 
-/** The wizard path and setup for **Re-login** on a subscription. */
+/** The wizard path and setup for **Re-login** on a subscription. pi uses API keys only: a pi subscription stores a key again. */
 export function reloginFor(s: Pick<Subscription, "name" | "provider" | "harnesses" | "env_var" | "has_api_key">): { path: WizardPath; setup: WizardSetup } {
   if (s.has_api_key || s.env_var) return { path: "api_key", setup: { name: s.name, provider: s.provider } };
   for (const k of ["claude", "codex", "copilot"] as const) if (s.harnesses.includes(k)) return { path: k, setup: { name: s.name } };
-  return { path: "pi", setup: { name: s.name, provider: s.provider } };
+  return { path: "api_key", setup: { name: s.name, provider: s.provider } };
 }

@@ -238,6 +238,8 @@ const NAME_RE = /^[a-z0-9][a-z0-9_-]{0,62}$/;
 const PREFIX_RE = /^[A-Z][A-Z0-9]{0,9}$/;
 const REQUIRED_COLUMNS = ["backlog", "in_progress", "blocked", "done"];
 const LIVE: AgentStatus[] = ["starting", "idle", "waiting", "working", "blocked", "restarting"];
+/** Why pi refuses a plan login (PLAN §16.3): it uses API keys only. */
+const PI_PLAN_REFUSAL = "pi uses API keys only; use Claude Code for a Claude plan and Codex for a ChatGPT plan";
 
 /** Test and demo hooks: drive the quota policy without a timer. */
 export interface MockSim {
@@ -678,7 +680,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     // A new session gets the skills of the list now.
     delete a.skills_restart;
     const harness = `fake-${ulid("hs")}`;
-    const fresh: Session = { id: ulid("ses"), agent: a.id, harness_session_id: harness, started_at: iso(), turns: 0, current: true };
+    const fresh: Session = { id: ulid("ses"), agent: a.id, harness_session_id: harness, started_at: iso(), turns: 0, current: true, resumes: 0 };
     w.sessions.unshift(fresh);
     a.session = harness;
     w.transcripts[fresh.id] = [];
@@ -1075,8 +1077,20 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     emit({ kind: "subscription", actor, summary: `${s.name} is the default ${harness} account`, data: { change: "default", ...detail } });
   };
   /** PLAN §16.3: a pool holds accounts of one provider, and the harness can spend each. The current subscription goes first. */
+  /** PLAN §16.3: pi uses API keys only. A plan login of a provider that sells one, unless its plan says "API key". */
+  const PLAN_PROVIDERS = ["anthropic", "claude", "openai", "openai-codex", "codex", "chatgpt", "github", "github-copilot", "copilot", "google-gemini-cli"];
+  const piPlan = (s: Subscription) => PLAN_PROVIDERS.includes(s.provider.trim().toLowerCase()) && (s.plan ?? "").trim().toLowerCase() !== "api key";
+  /** A pi agent, its pool, or a pi template names no plan login. */
+  const checkPiPlans = (harness: Agent["harness"], names: (string | undefined)[]) => {
+    if (harness !== "pi") return;
+    for (const n of names) {
+      const s = n ? w.subscriptions.find((x) => x.name === n) : undefined;
+      if (s && piPlan(s)) fail(422, "invalid", `subscription \`${s.name}\`: ${PI_PLAN_REFUSAL}`);
+    }
+  };
   const checkPool = (harness: Agent["harness"], current: string | undefined, pool: string[]): string[] => {
     const names = [...new Set(pool.map((n) => n.trim()).filter(Boolean))];
+    checkPiPlans(harness, [current, ...names]);
     if (!names.length) return [];
     if (current && !names.includes(current)) names.unshift(current);
     let provider: string | undefined;
@@ -1182,8 +1196,9 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
 
   /** The logins in the harness homes (what the status commands would find). */
   const homeLogins = () => [
-    ...w.subscriptions.filter((s) => s.login_status === "logged_in" || s.login_status === "expiring").map((s) => ({ provider: s.provider, harness: s.harnesses[0] ?? "pi" })),
-    { provider: "openai-codex", harness: "pi" as const },
+    ...w.subscriptions.filter((s) => s.login_status === "logged_in" || s.login_status === "expiring" ).map((s) => ({ provider: s.provider, harness: s.harnesses[0] ?? "claude" })),
+    // A Codex login in the shared home with no subscription. pi uses API keys only: no pi login.
+    { provider: "openai", harness: "codex" as const },
   ];
   const detected = () =>
     homeLogins()
@@ -1192,10 +1207,9 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
         kind: l.harness,
         harness: l.harness,
         provider: l.provider,
-        ...(l.harness === "pi" ? { pi_provider: l.provider } : {}),
         logged_in: true,
-        detail: l.harness === "pi" ? `pi auth check: ${l.provider} ready` : `${l.harness}: logged in`,
-        suggested: { name: `pi-${l.provider}`, provider: l.provider, harnesses: [l.harness], alert_at: 80 },
+        detail: `${l.harness}: logged in`,
+        suggested: { name: `${l.provider}-${l.harness}`, provider: l.provider, harnesses: [l.harness], alert_at: 80 },
       }));
 
   // ----- local accounting (docs/api.md §16.4 `GET /api/usage`) -----
@@ -1318,7 +1332,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     kind === "claude"
       ? "Open the URL, sign in, and paste the code that the page shows."
       : kind === "pi"
-        ? `In the terminal, type /login, choose "Sign in with an account", and pick ${provider ?? "the provider"}. Then open the URL and paste the code or the final redirect URL.`
+        ? `${PI_PLAN_REFUSAL} (${provider ?? "no provider"})`
         : "Open the URL, sign in, and enter the device code.";
   const DEFAULTS: Record<LoginKind, (p?: string) => Pick<Subscription, "provider" | "plan" | "harnesses" | "probe"> & { name: string }> = {
     claude: () => ({ name: "claude-pro", provider: "anthropic", plan: "Pro", harnesses: ["claude"], probe: "anthropic-oauth-usage" }),
@@ -1388,17 +1402,12 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     if (k === "codex") banner.push("", "Welcome to Codex [v0.141.0]", "", "Follow these steps to sign in with ChatGPT using device code authorization:", "", `1. Open this link in your browser and sign in to your account`, `   \x1b[94m${LOGIN_URL.codex}\x1b[0m`, "", `2. Enter this one-time code \x1b[90m(expires in 15 minutes)\x1b[0m`, `   \x1b[94m${DEVICE_CODE.codex}\x1b[0m`, "");
     if (k === "copilot") banner.push("", `! First copy your one-time code: \x1b[1m${DEVICE_CODE.copilot}\x1b[0m`, `Then open: ${LOGIN_URL.copilot}`, "Waiting for authorization...");
     if (k === "claude") banner.push("", "Browser didn't open? Use the url below to sign in:", "", LOGIN_URL.claude, "", "Paste code here if prompted >");
-    if (k === "pi") banner.push("", "pi (mock). Type /login to sign in to a provider.");
     return new FakePty({
       protocol,
-      prompt: k === "pi" ? "> " : "",
+      prompt: "",
       banner,
       onLine: (line) => {
         if (s.done || !line.trim()) return [];
-        if (k === "pi" && line.trim() === "/login") {
-          toWaiting(s);
-          return [`Sign in with an account: ${s.provider ?? "anthropic"}`, `Open: ${LOGIN_URL.pi}`, "Paste the code or the final redirect URL:"];
-        }
         finishLogin(s);
         return ["\x1b[32m✓ Login successful.\x1b[0m"];
       },
@@ -1826,6 +1835,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
             if (pool.length) a.subscription_pool = pool;
             else delete a.subscription_pool;
           }
+          if (patch.harness) checkPiPlans(patch.harness, [patch.subscription !== undefined ? patch.subscription || undefined : a.subscription, ...(patch.subscription_pool ?? a.subscription_pool ?? [])]);
           if (patch.harness) a.harness = patch.harness;
           if (patch.subscription !== undefined) a.subscription = patch.subscription || undefined;
           if (patch.model !== undefined) a.model = patch.model || undefined;
@@ -2705,7 +2715,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
       startLogin: (req) =>
         reply(() => {
           if (!["claude", "codex", "copilot", "pi"].includes(req.kind)) fail(422, "invalid", `unknown login kind \`${req.kind}\``);
-          if (req.kind === "pi" && !req.provider) fail(422, "invalid", "a pi login needs a provider");
+          if (req.kind === "pi") fail(422, "invalid", `${PI_PLAN_REFUSAL}; store a pi API key with POST /api/subscriptions/{name}/api-key`);
           if (req.name) checkSubName(req.name);
           if ([...logins.values()].filter((x) => !x.done).length >= 4) fail(409, "conflict", "four login sessions are live; finish or cancel one");
           const s: LoginSession & { name?: string } = {
@@ -2714,7 +2724,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           };
           logins.set(s.id, s);
           audit("login.start", s.id, undefined, { kind: s.kind, provider: s.provider ?? null });
-          if (s.kind !== "pi") setTimeout(() => toWaiting(s), opts.loginStepMs ?? (latency > 0 ? 800 : 0));
+          setTimeout(() => toWaiting(s), opts.loginStepMs ?? (latency > 0 ? 800 : 0));
           setTimeout(() => endLogin(s, "expired"), opts.loginTtlMs ?? 10 * 60_000);
           return s;
         }),

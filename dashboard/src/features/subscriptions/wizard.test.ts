@@ -81,7 +81,8 @@ describe("wizard state machine", () => {
   it("picks the re-login path from the subscription", () => {
     const base = { name: "n", provider: "anthropic", env_var: undefined, has_api_key: false };
     expect(reloginFor({ ...base, harnesses: ["claude", "pi"] })).toEqual({ path: "claude", setup: { name: "n" } });
-    expect(reloginFor({ ...base, harnesses: ["pi"], provider: "openai-codex" })).toEqual({ path: "pi", setup: { name: "n", provider: "openai-codex" } });
+    // pi uses API keys only: a pi subscription stores a key again.
+    expect(reloginFor({ ...base, harnesses: ["pi"], provider: "openrouter" })).toEqual({ path: "api_key", setup: { name: "n", provider: "openrouter" } });
     expect(reloginFor({ ...base, harnesses: ["pi"], provider: "groq", has_api_key: true, env_var: "GROQ_API_KEY" })).toEqual({ path: "api_key", setup: { name: "n", provider: "groq" } });
   });
 });
@@ -112,7 +113,9 @@ describe("Z.ai in the API-key path", () => {
 describe("wizardFromQuery", () => {
   it("opens the step that ?add= names, and nothing else", () => {
     expect(wizardFromQuery("api_key")).toEqual({ path: "api_key" });
-    expect(wizardFromQuery(["pi"])).toEqual({ path: "pi" });
+    expect(wizardFromQuery(["codex"])).toEqual({ path: "codex" });
+    // pi uses API keys only: no pi login path.
+    expect(wizardFromQuery("pi")).toBeNull();
     expect(wizardFromQuery("nope")).toBeNull();
     expect(wizardFromQuery(undefined)).toBeNull();
   });
