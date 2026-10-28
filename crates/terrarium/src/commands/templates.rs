@@ -142,6 +142,8 @@ fn has_spec_flags(a: &TemplateSpecArgs) -> bool {
         || !a.targets.is_empty()
         || !a.mail_to.is_empty()
         || !a.cross_project.is_empty()
+        || !a.skills.is_empty()
+        || a.no_skills
 }
 
 /// The spec: `base` (or the file), then the flags over it. The second
@@ -182,6 +184,12 @@ fn spec_of(
     }
     if !a.roles.is_empty() {
         flags.insert("roles".into(), json!(a.roles));
+    }
+    if a.no_skills {
+        // `null` removes the key: no skills.
+        flags.insert("skills".into(), Value::Null);
+    } else if !a.skills.is_empty() {
+        flags.insert("skills".into(), json!(a.skills));
     }
     let mut policy = Map::new();
     for (k, v) in [

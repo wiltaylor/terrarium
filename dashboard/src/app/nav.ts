@@ -19,6 +19,8 @@ export const GLOBAL_ITEMS = [
   { href: "/projects", label: "Projects" },
   { href: "/agents", label: "Agents" },
   { href: "/templates", label: "Templates" },
+  // The skill library in the config repo.
+  { href: "/skills", label: "Skills" },
   { href: "/subscriptions", label: "Subscriptions" },
   // The mail log: a record, with no unread state.
   { href: "/mail", label: "Mail" },

@@ -33,6 +33,7 @@ export function specToForm(spec: TemplateSpec, project = "", name = ""): AgentFo
     mail_to: (spec.policy?.mail_to ?? ["*"]).join(", "),
     cross_project: (spec.policy?.cross_project ?? []).join(", "),
     restart: spec.restart ?? "on-failure",
+    skills: spec.skills ?? [],
   };
 }
 
@@ -125,5 +126,7 @@ export function formToCreate(v: AgentFormValues, template: string | null): Agent
     system_prompt: def.system_prompt ?? null,
     // `null`: by role, not the template's persona.
     persona: def.persona ?? null,
+    // `[]`: no skills, not the template's.
+    skills: def.skills ?? [],
   };
 }

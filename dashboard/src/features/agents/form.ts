@@ -22,6 +22,8 @@ export interface AgentFormValues {
   mail_to: string;
   cross_project: string;
   restart: RestartPolicy;
+  /** Skill names, or `["*"]` for all. Empty: none. */
+  skills: string[];
 }
 
 /** "a, b\nc" -> ["a", "b", "c"]. */
@@ -32,7 +34,7 @@ export const parseList = (s: string): string[] =>
     .filter(Boolean);
 
 export function emptyAgentForm(project = ""): AgentFormValues {
-  return { name: "", project, harness: "claude", subscription: "", subscription_pool: [], model: "", prompt: "", system_prompt: "", persona: "", roles: [], targets: [], mail_to: "*", cross_project: "", restart: "on-failure" };
+  return { name: "", project, harness: "claude", subscription: "", subscription_pool: [], model: "", prompt: "", system_prompt: "", persona: "", roles: [], targets: [], mail_to: "*", cross_project: "", restart: "on-failure", skills: [] };
 }
 
 export function agentToForm(a: Agent): AgentFormValues {
@@ -51,6 +53,7 @@ export function agentToForm(a: Agent): AgentFormValues {
     mail_to: (a.policy?.mail_to ?? ["*"]).join(", "),
     cross_project: (a.policy?.cross_project ?? []).join(", "),
     restart: a.restart ?? "on-failure",
+    skills: a.skills ?? [],
   };
 }
 
@@ -116,6 +119,7 @@ export function formToDef(v: AgentFormValues): AgentDef {
   if (systemPrompt) def.system_prompt = systemPrompt;
   const persona = opt(v.persona);
   if (persona) def.persona = persona;
+  if (v.skills.length) def.skills = v.skills;
   return def;
 }
 
@@ -151,6 +155,8 @@ export function formToPatch(original: Agent, v: AgentFormValues): AgentPatch {
   const persona = changed(v.persona, before.persona);
   if (persona !== undefined) patch.persona = persona;
   if (v.restart !== before.restart) patch.restart = v.restart;
+  // `[]` clears the skills.
+  if (!sameList(v.skills, before.skills)) patch.skills = v.skills;
   const policy = { targets: v.targets, mail_to: parseList(v.mail_to), cross_project: parseList(v.cross_project) };
   const oldPolicy = { targets: before.targets, mail_to: parseList(before.mail_to), cross_project: parseList(before.cross_project) };
   if (!sameList(policy.targets, oldPolicy.targets) || !sameList(policy.mail_to, oldPolicy.mail_to) || !sameList(policy.cross_project, oldPolicy.cross_project)) patch.policy = policy;

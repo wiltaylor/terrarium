@@ -197,6 +197,8 @@ export interface AgentDef {
   restart?: RestartPolicy;
   /** Start a new session, not a resume, when the prompt changed (Codex). The daemon leaves it out when true. */
   new_session_on_prompt_change?: boolean;
+  /** Terrarium-managed skills (`GET /api/skills` names). Absent or empty: none. `"*"`: every skill. */
+  skills?: string[];
 }
 
 /**
@@ -226,6 +228,8 @@ export type AgentPatch = Partial<Pick<AgentDef, "harness" | "policy" | "restart"
   system_prompt?: string | null;
   /** `null` goes back to "by role". */
   persona?: string | null;
+  /** The skill names; `[]` clears them. An unknown name is a 422. Applies at the next start. */
+  skills?: string[];
 };
 
 /** `subscription_detail` of `GET /api/agents/{id}`: the agent's subscription, when it exists. */
@@ -288,6 +292,10 @@ export interface Agent {
   harness_version?: string;
   /** Only in `GET /api/agents/{id}`: the open waits. */
   open_waits?: Wait[];
+  /** See `AgentDef.skills`. Absent: none. */
+  skills?: string[];
+  /** True when the live agent runs with other skills than its list now gives: a restart applies them. */
+  skills_restart?: true;
 }
 
 /** How a subscription swap took effect (`POST /api/agents/{id}/subscription`). */
@@ -2386,4 +2394,64 @@ export interface ConfigScanFinding {
   path: string;
   line: number;
   rule: string;
+}
+
+// ----- Terrarium-managed skills (in the config repo) -----
+
+/** One skill of `GET /api/skills`. */
+export interface SkillSummary {
+  name: string;
+  /** From the front matter of SKILL.md. Empty when it does not parse. Plain text. */
+  description: string;
+  files: number;
+  bytes: number;
+  /** The problems of the checks. A skill with problems is not given to agents. Absent when none. */
+  errors?: string[];
+}
+
+/** One file of a skill other than SKILL.md. */
+export interface SkillFile {
+  path: string;
+  size: number;
+  /** The text of a UTF-8 file. Absent for a binary file. */
+  text?: string;
+}
+
+/** `GET /api/skills/{name}`. */
+export interface SkillDetail extends SkillSummary {
+  skill_md: string;
+  /** Every file but SKILL.md, sorted by path. */
+  file_list: SkillFile[];
+}
+
+/** The content of a file in a write: text, or base64 for a binary file. */
+export type SkillFileBody = string | { base64: string };
+
+/** `POST /api/skills`. `description` without `skill_md` makes a new SKILL.md. */
+export interface NewSkill {
+  name: string;
+  skill_md?: string;
+  description?: string;
+  files?: Record<string, SkillFileBody>;
+}
+
+/** `PUT /api/skills/{name}`. `files` absent keeps the other files; present replaces them all. */
+export interface SkillUpdate {
+  skill_md?: string;
+  files?: Record<string, SkillFileBody>;
+}
+
+/** An agent or a template that names a skill. */
+export interface SkillUser {
+  id: string;
+  /** `project/agent` for an agent; the name (`project/name` for a project template) for a template. */
+  name: string;
+  /** True when the list names the skill through `"*"`. */
+  all: boolean;
+}
+
+/** `GET /api/skills/{name}/usage`. */
+export interface SkillUsage {
+  agents: SkillUser[];
+  templates: SkillUser[];
 }

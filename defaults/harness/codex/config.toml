@@ -15,7 +15,9 @@
 #   `include_collaboration_mode_instructions`, `tools.update_plan`),
 #   `features.goals`, the start-up notices (`notice.*`, `tui.show_tooltips`),
 #   apps, plugins, tool suggestions, MCP install prompts, memories, the
-#   app-server daemon, and `features.hooks`.
+#   app-server daemon, and `features.hooks`;
+# - the skills (`skills.bundled`, `skills.include_instructions`): only
+#   Terrarium-managed skills load (PLAN §8.5).
 #
 # docs/compat.md ("Harness hardening") lists them with the reason.
 #
@@ -37,11 +39,6 @@ skill_search = false
 
 [agents]
 # No sub-agent tools.
-enabled = false
-
-[skills.bundled]
-# No bundled skills (imagegen, openai-docs, review-agent, skill-creator,
-# skill-installer). The image tool stays.
 enabled = false
 
 [tui]

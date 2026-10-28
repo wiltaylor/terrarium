@@ -75,6 +75,15 @@ pub struct CodexFlags {
     /// settings file, so the forced `-c` value is the only one. See
     /// [`CODEX_PINNED`] for the reason of each.
     pub forced_keys: &'static [&'static str],
+    /// The key of the "## Skills" list in the context (default `true`).
+    /// The adapter sets it to whether the agent has skills: with `false`
+    /// the catalog is empty and a `$name` mention finds nothing
+    /// (`ext/skills/src/preparation.rs:118-119`, `extension.rs:199-200`).
+    pub skill_instructions: &'static str,
+    /// The user skill dir in `CODEX_HOME` (`$CODEX_HOME/skills`, scope
+    /// User; `ext/skills/src/host_roots.rs:95-101`). The adapter binds the
+    /// agent's delivered skills over it, read-only.
+    pub skills_dir: &'static str,
 }
 
 /// The pinned Codex (`harnesses.toml`). Measured on 0.160.0 and checked
@@ -144,9 +153,16 @@ pub const CODEX_PINNED: CodexFlags = CodexFlags {
         ("features.daemon_auto_start", "false"),
         // Terrarium needs its hooks.
         ("features.hooks", "true"),
+        // PLAN §8.5: only Terrarium-managed skills. No system skills
+        // (`imagegen`, `openai-docs`, `review-agent`, `skill-creator`,
+        // `skill-installer`): with this key Codex installs none into
+        // `$CODEX_HOME/skills/.system` and drops the System root
+        // (`ext/skills/src/host_service.rs:140,234-236`). The image tool
+        // stays (D4).
+        ("skills.bundled.enabled", "false"),
         // Not forced: `features.image_generation` (default on; D4 keeps the
         // `image_gen.imagegen` tool, and the packaged default file says
-        // `true`), `web_search`, `agents.enabled`, the bundled skills.
+        // `true`), `web_search`, `agents.enabled`.
     ],
     model_instructions_file: "model_instructions_file",
     developer_instructions: "developer_instructions",
@@ -197,7 +213,12 @@ pub const CODEX_PINNED: CodexFlags = CodexFlags {
         // The Terrarium prompt.
         "model_instructions_file",
         "developer_instructions",
+        // PLAN §8.5: the skill list, on only for an agent with skills
+        // ([`CodexFlags::skill_instructions`]).
+        "skills.include_instructions",
     ],
+    skill_instructions: "skills.include_instructions",
+    skills_dir: "skills",
 };
 
 impl CodexFlags {

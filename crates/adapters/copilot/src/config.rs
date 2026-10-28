@@ -21,6 +21,15 @@
 //! | `logs/` | `logs/` | rw | The same directory as `--log-dir`. The system-prompt extension subprocess ignores `--log-dir` and writes `logs/process-<ts>-<pid>.log` in the home (one file for each start; it holds the session ID). With the bind, both logs land in the agent's own `logs/`. |
 //! | `cache/` | `$HOME/.cache/copilot` (when [`CopilotOptions::cache_dir`] is set) | rw | Copilot writes outside its home (`COPILOT_CACHE_HOME`). |
 //!
+//! The skills (PLAN §8.5): `settings.json` gets `skillDirectories` = the
+//! agent's delivered skills dir (`<agent dir>/skills/`, read-only at its
+//! own path), or none; `ignoredSkillsLocations` = the shared home's
+//! `skills/`, `~/.agents/skills`, `~/.claude/skills`, and the
+//! workspace's `.github/skills`, `.claude/skills`, `.agents/skills`; and
+//! `disabledSkills` holds the built-in skills ([`skill_settings`]). In
+//! replace mode the system message has no `<available_skills>` list, so
+//! `SYSTEM.md` gets one ([`skills_block`]).
+//!
 //! Copilot writes `settings.json`, `command-history-state.json`,
 //! `open-sessions-state.json`, and `config.json` by a rename over the
 //! file (verified in the container on 2026-10-25: the inode changes). A
@@ -260,6 +269,99 @@ fn pretty(v: &Value) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+/// The skill keys of the agent's `settings.json` (PLAN §8.5), over the
+/// merged settings:
+///
+/// - `skillDirectories`: the delivered skills dir, or none. Absolute;
+///   Copilot reads each entry as a root of `<name>/SKILL.md`
+///   (settings catalog `{"path":"skillDirectories",...}`).
+/// - `ignoredSkillsLocations`: the user's entries, and each discovery
+///   root that Terrarium does not manage: `$COPILOT_HOME/skills`
+///   (`personal-copilot`), `~/.agents/skills` (`personal-agents`),
+///   `~/.claude/skills`, and the workspace's `.github/skills`,
+///   `.claude/skills`, `.agents/skills` (`project`). Each entry also
+///   drops the dirs under it (`canonicalIgnoredSkillLocations`).
+/// - `disabledSkills`: the user's names and the built-in skills.
+pub fn skill_settings(opts: &CopilotOptions, agent: &Agent, settings: &mut Value) {
+    let Value::Object(root) = settings else {
+        return;
+    };
+    let dirs: Vec<Value> = if agent.delivered_skills.is_empty() {
+        Vec::new()
+    } else {
+        vec![Value::String(path_string(
+            &terrarium_core::skills::delivered_dir(&agent_dir(agent)),
+        ))]
+    };
+    root.insert("skillDirectories".into(), Value::Array(dirs));
+    let home = opts
+        .config_dir
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("/"));
+    let cwd = opts.harness_cwd(agent);
+    let ignored = [
+        opts.config_dir.join("skills"),
+        home.join(".agents/skills"),
+        home.join(".claude/skills"),
+        cwd.join(".github/skills"),
+        cwd.join(".claude/skills"),
+        cwd.join(".agents/skills"),
+    ];
+    union_strings(
+        root,
+        "ignoredSkillsLocations",
+        ignored.iter().map(|p| path_string(p)),
+    );
+    union_strings(
+        root,
+        "disabledSkills",
+        opts.flags.builtin_skills.iter().map(|s| (*s).to_owned()),
+    );
+}
+
+fn path_string(p: &Path) -> String {
+    p.to_string_lossy().into_owned()
+}
+
+/// `root[key]` as a list of strings with each of `add` in it: the user's
+/// entries first, then the ones that were missing.
+fn union_strings(root: &mut Map<String, Value>, key: &str, add: impl Iterator<Item = String>) {
+    let mut list: Vec<Value> = match root.remove(key) {
+        Some(Value::Array(a)) => a.into_iter().filter(Value::is_string).collect(),
+        _ => Vec::new(),
+    };
+    for s in add {
+        if !list.iter().any(|v| v.as_str() == Some(s.as_str())) {
+            list.push(Value::String(s));
+        }
+    }
+    root.insert(key.to_owned(), Value::Array(list));
+}
+
+/// The skill list for `SYSTEM.md` in replace mode (PLAN §8.5): Copilot
+/// puts `<available_skills>` in the system message, which `SYSTEM.md`
+/// replaces. Empty when the agent has no skill.
+pub fn skills_block(agent: &Agent) -> String {
+    if agent.delivered_skills.is_empty() {
+        return String::new();
+    }
+    let dir = terrarium_core::skills::delivered_dir(&agent_dir(agent));
+    let mut out = String::from(
+        "<available_skills>\nLoad a skill with the `skill` tool (its name only) before you \
+         act on a task that it fits.\n",
+    );
+    for m in terrarium_core::skills::describe(&dir, &agent.delivered_skills) {
+        out.push_str(&format!(
+            "<skill>\n<name>{}</name>\n<description>{}</description>\n</skill>\n",
+            m.name,
+            m.description.replace('<', "&lt;").replace('>', "&gt;")
+        ));
+    }
+    out.push_str("</available_skills>\n");
+    out
+}
+
 /// The text of the two prompt files for `prompt`: (`SYSTEM.md`,
 /// `APPEND_SYSTEM.md`).
 pub fn prompt_files(mode: PromptMode, prompt: &str) -> (String, String) {
@@ -295,7 +397,12 @@ pub fn materialize(
         write_atomic(&prompt_path(agent), text.as_bytes())?;
     }
     let text = read_prompt(agent)?.unwrap_or_default();
-    let (system, append) = prompt_files(opts.prompt_mode_for(agent), &text);
+    let mode = opts.prompt_mode_for(agent);
+    let (mut system, append) = prompt_files(mode, &text);
+    let block = skills_block(agent);
+    if mode == PromptMode::Replace && !block.is_empty() {
+        system = format!("{}\n\n{block}", system.trim_end());
+    }
 
     // The Terrarium plugin and the agent's own directories.
     let plugin = plugin_dir(agent);
@@ -348,14 +455,13 @@ pub fn materialize(
         Some(v) => Some(v),
         None => read_jsonc(&home.join(SETTINGS_FILE))?,
     };
-    write_atomic(
-        &own_settings,
-        &pretty(&agent_settings(
-            base,
-            agent.harness_settings.as_ref(),
-            opts.flags.experimental_key,
-        ))?,
-    )?;
+    let mut settings = agent_settings(
+        base,
+        agent.harness_settings.as_ref(),
+        opts.flags.experimental_key,
+    );
+    skill_settings(opts, agent, &mut settings);
+    write_atomic(&own_settings, &pretty(&settings)?)?;
     ensure_file(&home.join(SETTINGS_FILE), b"{}\n")?;
     overlays.push(FileOverlay {
         source: own_settings,
@@ -463,6 +569,102 @@ mod tests {
     fn with_forced(mut v: Value) -> Value {
         terrarium_core::harness_settings::deep_merge(&mut v, &forced_settings());
         v
+    }
+
+    /// The written settings without the skill keys ([`skill_settings`],
+    /// tested on its own).
+    fn read_settings(path: &Path) -> Value {
+        let mut v: Value = serde_json::from_slice(&fs::read(path).expect("read")).expect("json");
+        if let Value::Object(m) = &mut v {
+            for k in [
+                "skillDirectories",
+                "ignoredSkillsLocations",
+                "disabledSkills",
+            ] {
+                assert!(m.remove(k).is_some(), "{k} is set");
+            }
+        }
+        v
+    }
+
+    /// PLAN §8.5: the skill keys of the agent's settings, and the skill
+    /// list in `SYSTEM.md` in replace mode.
+    #[test]
+    fn skills_go_to_the_settings_and_the_replace_prompt() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let home = tmp.path().join("auth-copilot");
+        fs::create_dir_all(&home).expect("home");
+        let mut agent = test_agent_in(tmp.path(), None);
+        agent.harness_settings = Some(json!({
+            "disabledSkills": ["mine"],
+            "ignoredSkillsLocations": ["/x"],
+            "skillDirectories": ["/operator/skills"],
+        }));
+        let opts = CopilotOptions {
+            config_dir: PathBuf::from("/home/agent/.copilot"),
+            harness_workspace: Some(PathBuf::from("/home/agent/work")),
+            ..CopilotOptions::default()
+        };
+        materialize(&opts, &agent, &home, Some("P")).expect("m");
+        let own = copilot_dir(&agent);
+        let v: Value =
+            serde_json::from_slice(&fs::read(own.join(SETTINGS_FILE)).expect("r")).expect("json");
+        // No skill: no skill dir, every other root ignored, built-ins off.
+        assert_eq!(v["skillDirectories"], json!([]));
+        assert_eq!(
+            v["ignoredSkillsLocations"],
+            json!([
+                "/x",
+                "/home/agent/.copilot/skills",
+                "/home/agent/.agents/skills",
+                "/home/agent/.claude/skills",
+                "/home/agent/work/.github/skills",
+                "/home/agent/work/.claude/skills",
+                "/home/agent/work/.agents/skills",
+            ])
+        );
+        assert_eq!(
+            v["disabledSkills"],
+            json!([
+                "mine",
+                "customize-cloud-agent",
+                "github-pr-media",
+                "discover-resources"
+            ])
+        );
+        // With a skill, in replace mode.
+        let skills = terrarium_core::skills::delivered_dir(&agent_dir(&agent));
+        fs::create_dir_all(skills.join("fern-check")).expect("mkdir");
+        fs::write(
+            skills.join("fern-check/SKILL.md"),
+            "---\nname: fern-check\ndescription: Reply <FERN-42>\n---\nbody\n",
+        )
+        .expect("w");
+        agent.delivered_skills = vec!["fern-check".into()];
+        agent.system_prompt = Some("Base.".into());
+        materialize(&opts, &agent, &home, Some("Base.\n\nP")).expect("m");
+        let v: Value =
+            serde_json::from_slice(&fs::read(own.join(SETTINGS_FILE)).expect("r")).expect("json");
+        assert_eq!(v["skillDirectories"], json!([skills.to_string_lossy()]));
+        let system = fs::read_to_string(own.join(SYSTEM_FILE)).expect("s");
+        assert!(
+            system.starts_with("Base.\n\nP\n\n<available_skills>"),
+            "{system}"
+        );
+        assert!(
+            system.contains(
+                "<name>fern-check</name>\n<description>Reply &lt;FERN-42&gt;</description>"
+            ),
+            "{system}"
+        );
+        // Append mode keeps Copilot's own list: no block.
+        agent.system_prompt = None;
+        materialize(&opts, &agent, &home, Some("P")).expect("m");
+        assert_eq!(fs::read_to_string(own.join(SYSTEM_FILE)).expect("s"), "");
+        assert_eq!(
+            fs::read_to_string(own.join(APPEND_SYSTEM_FILE)).expect("a"),
+            "P"
+        );
     }
 
     /// D5: a user file cannot turn `ask_user`, plan mode, or autopilot on
@@ -617,8 +819,7 @@ mod tests {
         );
         assert_eq!(fs::read_dir(own.join(HOOKS_DIR)).expect("hooks").count(), 0);
         assert!(home.join("hooks/orca.json").is_file());
-        let s: Value =
-            serde_json::from_slice(&fs::read(own.join(SETTINGS_FILE)).expect("own")).expect("json");
+        let s = read_settings(&own.join(SETTINGS_FILE));
         assert_eq!(
             s,
             with_forced(json!({"model": "claude-haiku-4.5", "experimental": true}))
@@ -659,8 +860,7 @@ mod tests {
         fs::write(prompt_path(&agent), "P2").expect("w");
         materialize(&opts, &agent, &home, None).expect("again");
         assert_eq!(fs::read_to_string(own.join(SYSTEM_FILE)).expect("s"), "P2");
-        let s: Value =
-            serde_json::from_slice(&fs::read(own.join(SETTINGS_FILE)).expect("own")).expect("json");
+        let s = read_settings(&own.join(SETTINGS_FILE));
         assert_eq!(
             s,
             with_forced(json!({"theme": "dark", "experimental": true}))
@@ -764,10 +964,7 @@ mod tests {
         let mut agent = test_agent_in(tmp.path(), None);
         agent.harness_settings = Some(json!({"theme": "dark", "hooks": {}}));
         materialize(&CopilotOptions::default(), &agent, &home, Some("p")).expect("m");
-        let v: Value = serde_json::from_slice(
-            &fs::read(copilot_dir(&agent).join(SETTINGS_FILE)).expect("read"),
-        )
-        .expect("json");
+        let v = read_settings(&copilot_dir(&agent).join(SETTINGS_FILE));
         assert_eq!(
             v,
             with_forced(json!({"theme": "dark", "experimental": true}))

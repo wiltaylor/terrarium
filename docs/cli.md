@@ -186,12 +186,13 @@ terrarium agent show <agent>
 terrarium agent new <name> --harness <h> [--subscription s] [--pool s1,s2] [--model m] [--prompt p]
                     [--system-prompt <text | -> | --system-prompt-file path] [--persona p]
                     [--role r]... [--target t]... [--mail-to a]... [--cross-project p/a]...
-                    [--restart always|on-failure|never]
+                    [--restart always|on-failure|never] [--skill s]...
 terrarium agent new --from-file agents/lead.toml [flags that override the file]
 terrarium agent new <name> --template <t> [flags that override the template]
 terrarium agent set <agent> [--harness h] [--subscription s] [--pool s1,s2] [--model m] [--prompt p]
                     [--system-prompt <text | -> | --system-prompt-file path | --no-system-prompt]
                     [--persona p] [--restart r] [--policy JSON] [--new-session-on-prompt-change true|false]
+                    [--skill s... | --no-skills]
 terrarium agent swap <agent> <subscription>  move to another plan account of the pool
 terrarium agent rm <agent> [--confirm] [--keep-workspace]
 terrarium agent start|stop|restart <agent> [--no-wait]
@@ -229,6 +230,12 @@ or `error` after a stop.
 `--pool` sets the account pool (PLAN §16.3): subscriptions of one
 provider that a swap may pick, comma-separated. The current subscription
 is always a member. `agent set --pool ''` clears the pool.
+
+`--skill` gives the agent a skill of the skill library (PLAN §8.5);
+repeat it for more, and give `*` for every skill. `agent set --skill`
+replaces the list, and `agent set --no-skills` clears it. A name that is
+not in the library is refused (exit code 1, `422`). The agent gets its
+skills at its next start ("Skills" below).
 
 `agent swap` (also `admin agent swap`) moves the agent to another plan
 account ([api.md §6.2](api.md#62-lifecycle-and-turns)). The rights are the
@@ -360,6 +367,7 @@ terrarium template new <name> [--global] [--description d] --harness <h> [--subs
                        [--model m] [--prompt p] [--role r]... [--target t]... [--mail-to a]...
                        [--cross-project p/a]... [--restart r]
                        [--system-prompt <text | -> | --system-prompt-file path] [--persona p]
+                       [--skill s]...
 terrarium template new <name> --from-file worker.toml [flags that override the file]
 terrarium template edit <template> [--rename n] [--description d] [spec flags as in new]
 terrarium template rm <template>
@@ -382,6 +390,36 @@ project's first, then the global one).
   `--no-system-prompt` work as with `agent new|set`. `show` prints the
   whole `system_prompt` after the other spec fields. A `--from-file` can
   give `system_prompt_file = "<path>"`, relative to the file.
+- `--skill` sets the skills of the spec, as with `agent new`. With `edit`,
+  `--no-skills` removes them.
+
+### Skills
+
+`skill` has the alias `skills`. A skill is a folder in the Agent Skills
+format in the config repo (PLAN §8.5, [api.md §26](api.md#26-skills)).
+The operator and a sysadmin write the library. Another agent sees only
+its own skills.
+
+```
+terrarium skill ls                                 the skills, with their problems
+terrarium skill show <name>                        SKILL.md and the file list
+terrarium skill new <name> --description d         a new SKILL.md with this description
+terrarium skill new <name> --from-dir ./my-skill   SKILL.md and the other files of a dir
+terrarium skill edit <name> --file SKILL.md        replace SKILL.md (`-` reads stdin); the other files stay
+terrarium skill rm <name>
+terrarium skill validate [<name>]                  exit code 2 when a skill has a problem
+terrarium skill usage <name>                       the agents and templates that name it
+```
+
+- A write goes to the work tree of the config repo. Commit it with
+  `terrarium admin config commit` (or the Config page).
+- `new --from-dir` refuses a symbolic link, and sends a binary file (an
+  image) as base64. The daemon checks the rest: the name, the front
+  matter, the file types, the caps, and the secret scan.
+- Give skills to an agent with `agent new|set --skill <name>` (repeat
+  it; `*` is every skill) and take them away with `agent set --no-skills`.
+  The agent gets them at its next start. `agent show` has
+  `skills_restart: true` until then.
 
 ### Mail and the project inbox
 

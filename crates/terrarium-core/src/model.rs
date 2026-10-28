@@ -56,6 +56,16 @@ pub struct Agent {
     /// See [`AgentDef::new_session_on_prompt_change`].
     #[serde(default = "yes")]
     pub new_session_on_prompt_change: bool,
+    /// See [`AgentDef::skills`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<String>,
+    /// The skills that the daemon copied into `<harness dir>/skills/` for
+    /// this start (PLAN §8.5), sorted. The supervisor sets it before it
+    /// calls the adapter; the adapter gives the harness these skills and
+    /// its skill tool, and no skill tool when the list is empty. Never
+    /// stored.
+    #[serde(skip)]
+    pub delivered_skills: Vec<String>,
     /// The user settings of the harness from the config repo
     /// (`<config repo>/harness/<harness>/<file>`, PLAN §8.2), parsed. A
     /// TOML file (Codex) is here as the same tree in JSON. The supervisor
@@ -105,6 +115,8 @@ impl Agent {
             status: AgentStatus::Stopped,
             session: None,
             new_session_on_prompt_change: def.new_session_on_prompt_change,
+            skills: def.skills.clone(),
+            delivered_skills: Vec::new(),
             harness_settings: None,
         }
     }

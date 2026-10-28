@@ -96,6 +96,10 @@ pub struct AgentDef {
     pub policy: Policy,
     #[serde(default)]
     pub restart: RestartPolicy,
+    /// The skills of the agent from the skill library (PLAN §8.5): skill
+    /// names, or `*` for every skill of the library. Default none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<String>,
     /// Start a fresh session, not a resume, when the rendered prompt
     /// changed and the harness keeps the prompt of a session
     /// (`Adapter::prompt_frozen_on_resume`, for example Codex). The old
@@ -650,6 +654,24 @@ alert_at = 80                          # percent of any window
         let def: SubscriptionDef = round_trip(SUBSCRIPTION);
         assert_eq!(def.harnesses, [HarnessId::Claude, HarnessId::Pi]);
         assert_eq!(def.alert_at, 80);
+    }
+
+    // PLAN §8.5, an agent with skills.
+    const AGENT_SKILLS: &str = r#"
+name = "reviewer"
+project = "terra"
+harness = "claude"
+skills = ["code-review", "release-notes"]
+"#;
+
+    #[test]
+    fn agent_skills_example_round_trips() {
+        let def: AgentDef = round_trip(AGENT_SKILLS);
+        assert_eq!(def.skills, ["code-review", "release-notes"]);
+        // No skills: the key is not written.
+        let none: AgentDef = toml::from_str("project = \"p\"\nharness = \"pi\"\n").expect("parse");
+        assert!(none.skills.is_empty());
+        assert!(!toml::to_string(&none).expect("ser").contains("skills"));
     }
 
     #[test]

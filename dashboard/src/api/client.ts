@@ -22,6 +22,11 @@ import type {
   TemplateFromAgent,
   TemplatePatch,
   TemplateResolved,
+  NewSkill,
+  SkillDetail,
+  SkillSummary,
+  SkillUpdate,
+  SkillUsage,
   AgentPatch,
   SwapResult,
   ApiKeyInput,
@@ -551,6 +556,23 @@ export interface Api {
     keepDefault(path: string): Promise<ConfigPendingDefault[]>;
   };
 
+  /**
+   * Terrarium-managed skills, kept in the config repo. A write stays
+   * uncommitted: the Config page commits it. The operator or a sysadmin
+   * reads all and writes; another agent reads its own. A daemon with no
+   * config repo answers `501 not_available`. A failed check is `422 invalid`
+   * with `details.problems`.
+   */
+  skills: {
+    list(): Promise<SkillSummary[]>;
+    get(name: string): Promise<SkillDetail>;
+    create(body: NewSkill): Promise<SkillDetail>;
+    update(name: string, body: SkillUpdate): Promise<SkillDetail>;
+    remove(name: string): Promise<void>;
+    /** `GET /api/skills/{name}/usage`: the agents and templates that name it. */
+    usage(name: string): Promise<SkillUsage>;
+  };
+
   /** docs/host-protocol.md, the daemon's `api/hosts.rs`. */
   hosts: {
     list(): Promise<Host[]>;
@@ -928,6 +950,15 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       defaults: () => get("/api/config/defaults"),
       acceptDefault: (path) => post("/api/config/defaults/accept", { path }),
       keepDefault: (path) => post("/api/config/defaults/keep", { path }),
+    },
+
+    skills: {
+      list: () => get("/api/skills"),
+      get: (name) => get(`/api/skills/${seg(name)}`),
+      create: (body) => post("/api/skills", body),
+      update: (name, body) => put(`/api/skills/${seg(name)}`, body),
+      remove: (name) => del(`/api/skills/${seg(name)}`),
+      usage: (name) => get(`/api/skills/${seg(name)}/usage`),
     },
 
     hosts: {

@@ -112,7 +112,7 @@ export function AgentForm(props: { agent?: Agent; project?: string | null; onClo
           value={v()}
           onChange={setV}
           roles={!editing()}
-          rolesNote="Change roles in the Roles panel of the agent page. An emptied model or prompt is cleared. A new subscription, model, or system prompt applies at the next start."
+          rolesNote="Change roles in the Roles panel of the agent page. An emptied model or prompt is cleared. A new subscription, model, system prompt, or skill list applies at the next start."
         />
 
         <Show when={problems().length && v().name}>

@@ -96,4 +96,19 @@ describe("agent form", () => {
     expect(effectivePersona({ ...agent, roles: [] })).toEqual({ persona: "worker", byRole: true });
     expect(effectivePersona({ ...agent, persona: "none" })).toEqual({ persona: "none", byRole: false });
   });
+
+  it("carries the skills: in the definition when set, [] in the patch to clear them", () => {
+    const base = { ...emptyAgentForm("p"), name: "w" };
+    expect(base.skills).toEqual([]);
+    expect(formToDef(base)).not.toHaveProperty("skills");
+    expect(formToDef({ ...base, skills: ["fern-check"] }).skills).toEqual(["fern-check"]);
+    expect(formToDef({ ...base, skills: ["*"] }).skills).toEqual(["*"]);
+    const withS: Agent = { ...agent, skills: ["fern-check", "release-notes"] };
+    expect(agentToForm(withS).skills).toEqual(["fern-check", "release-notes"]);
+    expect(agentToForm(agent).skills).toEqual([]);
+    expect(formToPatch(withS, agentToForm(withS))).toEqual({});
+    expect(formToPatch(withS, { ...agentToForm(withS), skills: [] })).toEqual({ skills: [] });
+    expect(formToPatch(withS, { ...agentToForm(withS), skills: ["*"] })).toEqual({ skills: ["*"] });
+    expect(formToPatch(agent, { ...agentToForm(agent), skills: ["fern-check"] })).toEqual({ skills: ["fern-check"] });
+  });
 });

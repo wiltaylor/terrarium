@@ -40,6 +40,11 @@ export function AgentCard(props: { agent: Agent; now: number }) {
           <span class="chip mono small">{a().model}</span>
         </Show>
         <RoleBadges agent={a()} />
+        <Show when={a().skills_restart}>
+          <span class="chip warn" title="The live agent runs with other skills than its list. A restart applies the list.">
+            restart to apply skills
+          </span>
+        </Show>
       </div>
       <dl class="kv">
         <dt>Card</dt>

@@ -20,6 +20,7 @@
 //! | `codex/sqlite/` | bound over itself, read-write; `-c sqlite_home` names it (see [`crate::launch`]) |
 //! | `codex/AGENTS.md`, `codex/AGENTS.override.md` | empty; bound read-only over the same files in `$CODEX_HOME` |
 //! | `<workspace>/generated_images/` | bound read-write over `$CODEX_HOME/generated_images/` (D4) |
+//! | `skills/` | the agent's delivered skills (PLAN §8.5); bound read-only over `$CODEX_HOME/skills/`, also when empty |
 //!
 //! # What Codex writes into its home, and where it goes
 //!
@@ -42,7 +43,8 @@
 //! | `tmp/arg0*/codex-arg0<random>/` | shared | random names. |
 //! | `state_5`, `logs_2`, `memories_1`, `goals_1`, `queue_1`, `thread_history_1` (`.sqlite`, `-wal`, `-shm`) | per-agent, in `codex/sqlite/` | SQLite in WAL mode. `threads` (in `state_5`) holds the first user message and the title of each session; `thread_items` (in `thread_history_1`) holds every item of each turn. Shared, each agent could read the turns of every other agent. `-c sqlite_home` moves all of them, so no file bind splits a database from its `-wal` and `-shm` files. The SQLite files that an older version left in the shared home stay there, unused by the agents. |
 //! | `config.toml` | shared | the operator's settings (model, providers). Codex writes `[tui]` keys into it on the first start. Trust comes from `-c`, so no agent writes a trust decision. |
-//! | `version.json`, `models_cache.json`, `installation_id`, `cache/`, `skills/`, `plugins/` | shared | caches of public data. The update check is off. |
+//! | `version.json`, `models_cache.json`, `installation_id`, `cache/`, `plugins/` | shared | caches of public data. The update check is off. |
+//! | `skills/` | per-agent, read-only | the user skill root of Codex (`ext/skills/src/host_roots.rs:95-101`). The agent's delivered skills go over it (PLAN §8.5), so the operator's skills in the shared home never load. An agent with no skill gets an empty dir. `.system` stays out: `skills.bundled.enabled = false`. `$HOME/.agents/skills`, the other user root, is on the sandbox's empty tmpfs `$HOME`. |
 //! | `packages/`, `app-server-daemon/` | not used | only the app-server daemon writes them; `--no-daemon` keeps it off. |
 //!
 //! | `AGENTS.md`, `AGENTS.override.md` | per-agent, empty | the operator's global instructions. Codex loads them in every session, also with a Terrarium prompt in replace mode. They stay out of agents, as for the other harnesses (PLAN §8, the AGENTS.md rule). Codex still loads the `AGENTS.md` of the workspace root. |
@@ -238,6 +240,17 @@ pub fn materialize(
         &home.join(IMAGES_DIR),
         opts.codex_home.join(IMAGES_DIR),
     )?);
+
+    // PLAN §8.5: the agent's skills (maybe none) over the user skill dir
+    // of the shared home, read-only.
+    let skills = terrarium_core::skills::delivered_dir(&agent_dir(agent));
+    let mut over_skills = dir_overlay(
+        &skills,
+        &home.join(opts.flags.skills_dir),
+        opts.codex_home.join(opts.flags.skills_dir),
+    )?;
+    over_skills.writable = false;
+    overlays.push(over_skills);
     Ok(overlays)
 }
 
@@ -349,8 +362,15 @@ mod tests {
                     PathBuf::from("/auth/codex/generated_images"),
                     true
                 ),
+                // PLAN §8.5: the agent's skills, read-only, also with none.
+                (
+                    agent_dir(&agent).join("skills"),
+                    PathBuf::from("/auth/codex/skills"),
+                    false
+                ),
             ]
         );
+        assert!(home.join("skills").is_dir(), "the mount point");
         // D4: the images dir is in the workspace, made at the start.
         assert!(images_dir(&agent).is_dir());
         assert_eq!(fs::read(own.join("AGENTS.md")).expect("agents"), b"");

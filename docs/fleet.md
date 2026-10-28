@@ -286,6 +286,16 @@ name = "w1"
 persona = "none"        # the harness's own default prompt
 ```
 
+An agent or a template can set `skills` (PLAN §8.5): names of the skill
+library in the config repo, or `*` for every skill. Not set: no skills. A
+name that is not in the library is an error of the plan.
+
+```toml
+[[projects.agents]]
+name = "w2"
+skills = ["fern-check"]
+```
+
 The config repo (PLAN §8.3) keeps an export of each project as a fleet
 file in `export/projects/<project>.fleet.toml`. A pull from another
 instance shows its plan, and `terrarium admin config pull --apply` applies
@@ -296,7 +306,7 @@ it as `fleet apply` does (no prune, no start).
 `[[templates]]` declares a global agent template, and
 `[[projects.templates]]` a template of the project. The spec keys
 (`harness`, `subscription`, `model`, `prompt`, `system_prompt`, `persona`, `roles`,
-`policy`, `restart`, `new_session_on_prompt_change`) sit next to `name` and
+`policy`, `restart`, `skills`, `new_session_on_prompt_change`) sit next to `name` and
 `description`. An agent entry with `template = "worker"` gets the values
 in this order: `[defaults]`, then the template, then the keys of the entry.
 `policy` merges key by key. `worker` is the project's template, else the

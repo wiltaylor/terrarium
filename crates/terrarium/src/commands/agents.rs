@@ -223,6 +223,9 @@ pub async fn definition(ctx: &Ctx, a: &AgentNewArgs) -> anyhow::Result<Value> {
     if !a.roles.is_empty() {
         def["roles"] = json!(a.roles);
     }
+    if !a.skills.is_empty() {
+        def["skills"] = json!(a.skills);
+    }
     if !(a.targets.is_empty() && a.mail_to.is_empty() && a.cross_project.is_empty()) {
         // With a template, the daemon merges `policy` key by key: send
         // only the keys that the flags give.
@@ -304,6 +307,11 @@ async fn set(ctx: &Ctx, a: &AgentSetArgs) -> anyhow::Result<()> {
     }
     if let Some(b) = a.new_session_on_prompt_change {
         body["new_session_on_prompt_change"] = b.into();
+    }
+    if a.no_skills {
+        body["skills"] = json!([]);
+    } else if !a.skills.is_empty() {
+        body["skills"] = json!(a.skills);
     }
     if body.as_object().is_some_and(serde_json::Map::is_empty) {
         return Err(CliError::usage("give at least one field to change"));

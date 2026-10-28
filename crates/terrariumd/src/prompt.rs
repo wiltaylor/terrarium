@@ -781,6 +781,7 @@ mod tests {
             roles,
             policy: Default::default(),
             restart: Default::default(),
+            skills: vec![],
             new_session_on_prompt_change: true,
         };
         Agent::from_def(&def, Path::new("/state"))

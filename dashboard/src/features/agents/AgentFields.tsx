@@ -1,5 +1,5 @@
 // The agent fields that an agent and a template share: harness,
-// subscription, model, prompt, system prompt, persona, restart, roles, and policy. No name and no
+// subscription, model, prompt, system prompt, persona, skills, restart, roles, and policy. No name and no
 // project: the agent form and the template form add those.
 
 import { createResource, createSignal, createUniqueId, For, Show } from "solid-js";
@@ -8,6 +8,7 @@ import { api, subscriptions } from "../../stores";
 import { PERSONAS, personaProblem, type AgentFormValues } from "./form";
 import { prunePool, reconcileSubscription } from "./subscription";
 import { defaultModelHint, ModelField, PoolPicker, SubscriptionSelect } from "./SubscriptionFields";
+import { SkillsPicker } from "../skills/SkillsPicker";
 
 export const SYSTEM_PROMPT_HELP = "Replaces the harness's default system prompt. Terrarium's protocol instructions are always added after it.";
 
@@ -134,6 +135,7 @@ export function AgentFields(props: {
 
       <SystemPromptField value={v().system_prompt} onChange={(s) => set("system_prompt", s)} />
       <PersonaField value={v().persona} onChange={(s) => set("persona", s)} />
+      <SkillsPicker value={v().skills} onChange={(s) => set("skills", s)} />
 
       <Show when={props.roles} fallback={<Show when={props.rolesNote}>{(n) => <p class="muted small">{n()}</p>}</Show>}>
         <fieldset class="row">

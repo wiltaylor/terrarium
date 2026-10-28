@@ -401,6 +401,7 @@ fn agent_spec(def: &AgentDef) -> Value {
         "roles": role_list(&def.roles),
         "policy": def.policy,
         "restart": def.restart,
+        "skills": def.skills,
         "new_session_on_prompt_change": def.new_session_on_prompt_change,
     })
 }
@@ -420,6 +421,7 @@ fn view_def(v: &AgentView) -> AgentDef {
         roles: a.roles.clone(),
         policy: a.policy.clone(),
         restart: a.restart,
+        skills: a.skills.clone(),
         new_session_on_prompt_change: a.new_session_on_prompt_change,
     }
 }
@@ -979,6 +981,35 @@ pub fn check_against(conn: &Connection, f: &Fleet, prompts: &Path) -> ApiResult<
                 Some(p) => format!("projects.{p}.templates.{}", d.name),
                 None => format!("templates.{}", d.name),
             };
+            issues.push(Issue::error(at, e.message));
+        }
+    }
+    // The skills of each agent and template are in the skill library
+    // (PLAN §8.5).
+    let library = crate::skills::library_dir_from_env();
+    let mut skill_users: Vec<(String, Vec<String>)> = f
+        .agents()
+        .map(|a| {
+            (
+                format!("projects.{}.agents.{}", a.def.project, a.def.name),
+                a.def.skills.clone(),
+            )
+        })
+        .collect();
+    for (p, d) in f.all_templates() {
+        let list: Vec<String> = d
+            .spec
+            .get("skills")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+        let at = match p {
+            Some(p) => format!("projects.{p}.templates.{}", d.name),
+            None => format!("templates.{}", d.name),
+        };
+        skill_users.push((at, list));
+    }
+    for (at, list) in skill_users {
+        if let Err(e) = crate::skills::check_assignment(Some(&library), &list) {
             issues.push(Issue::error(at, e.message));
         }
     }
@@ -1554,6 +1585,7 @@ fn apply_agent(t: &mut Tx<'_>, v: &AgentView, def: &AgentDef) -> ApiResult<()> {
         policy: Some(def.policy.clone()),
         restart: Some(def.restart),
         new_session_on_prompt_change: Some(def.new_session_on_prompt_change),
+        skills: Some(def.skills.clone()),
     };
     agents::write_def(t, &id, &patch)?;
     let want = role_list(&def.roles);

@@ -24,6 +24,8 @@ persona and before the protocol template. Sources: docs/research/harness-hardeni
   task. Mark each step done when it is done.
 - **WebFetch** and **WebSearch**, when present. Use them for documentation.
   Never make up or guess a URL.
+- **Skill**, when present. When one of your listed skills fits the task,
+  load it with Skill (`terrarium:<name>`) before you start the work.
 - **ToolSearch** loads a deferred tool. Load the schema of a tool before
   the first call.
 - Make independent tool calls in parallel, in one response. Make dependent

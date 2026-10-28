@@ -37,6 +37,12 @@ describe("navigation", () => {
     expect(Object.keys(import.meta.glob("../features/questions/**"))).toEqual([]);
   });
 
+  it("has Skills after Templates in the global list, with a route that takes a skill name", () => {
+    const hrefs = GLOBAL_ITEMS.map((i) => i.href) as string[];
+    expect(hrefs.indexOf("/skills")).toBe(hrefs.indexOf("/templates") + 1);
+    expect(app).toMatch(/path="\/skills\/:name\?" component=\{SkillsPage\}/);
+  });
+
   it("has Config before Settings in the global list, with a route", () => {
     const hrefs = GLOBAL_ITEMS.map((i) => i.href);
     expect(hrefs.indexOf("/config")).toBe(hrefs.indexOf("/settings") - 1);

@@ -88,6 +88,7 @@ import { createWaitMock } from "./waits";
 import { createQuestionMock } from "./questions";
 import { createInboxMock, isPauseNotice } from "./inbox";
 import { createConfigMock } from "./config";
+import { createSkillMock, skillsError } from "./skills";
 import { applyTemplate, createTemplateMock, personaError, resolveTemplate, systemPromptError, templateRef } from "./templates";
 import { createTranscriptStream, encodeTranscriptFrame } from "../sse";
 import { appendBlock, fakeReply, mockModel, titleOf, type Draft as BlockDraft } from "./transcripts";
@@ -647,6 +648,8 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     waitMock.statusChanged(a, status);
   };
   // ----- waits and watches -----
+  // The skill library lives in the config repo: no repo, no skills.
+  const skillMock = createSkillMock({ w, reply, fail, audit, caller: opts.scheduleCaller, available: opts.configRepo });
   const waitMock = createWaitMock({ w, iso, now, ulid, reply, fail, emit, agent, setStatus, sendMail: (to, from, subject, body) => sendMail(to, from, subject, body) });
   // ----- questions to the operator -----
   const questionMock = createQuestionMock({
@@ -672,6 +675,8 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
       s.outcome = "restarted";
       frame(s.id, { type: "status", status: "ended" });
     }
+    // A new session gets the skills of the list now.
+    delete a.skills_restart;
     const harness = `fake-${ulid("hs")}`;
     const fresh: Session = { id: ulid("ses"), agent: a.id, harness_session_id: harness, started_at: iso(), turns: 0, current: true };
     w.sessions.unshift(fresh);
@@ -688,6 +693,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
       frame(s.id, { type: "status", status: "ended" });
     }
     delete a.session;
+    delete a.skills_restart;
   };
 
   const eventsAfter = (q: EventQuery, base: (e: AgentEvent) => boolean) => {
@@ -1769,6 +1775,8 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           if (sp) fail(422, "invalid", sp, { field: "system_prompt" });
           const pe = personaError(def.persona);
           if (pe) fail(422, "invalid", pe, { field: "persona" });
+          const sk = skillsError(def.skills, skillMock.names());
+          if (sk) fail(422, "invalid", sk, { field: "skills" });
           if (!NAME_RE.test(def.name)) fail(422, "invalid", `\`${def.name}\` is not a valid name`);
           if (w.agents.some((a) => a.project === def.project && a.name === def.name)) fail(409, "conflict", `agent \`${def.project}/${def.name}\` exists`);
           if (def.policy?.mail_to.some((m) => !m.trim())) fail(422, "invalid", "policy.mail_to has an empty entry");
@@ -1786,6 +1794,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
             ...(def.prompt ? { prompt: def.prompt } : {}),
             ...(def.system_prompt ? { system_prompt: def.system_prompt } : {}),
             ...(def.persona?.trim() ? { persona: def.persona.trim() } : {}),
+            ...(def.skills?.length ? { skills: [...def.skills] } : {}),
             workspace: `/state/agents/${id}/workspace`,
             roles: (def.roles ?? []).filter((r): r is Role => r !== "member"),
             // Like the daemon: `cross_project` is left out when empty.
@@ -1809,6 +1818,8 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           if (sp) fail(422, "invalid", sp, { field: "system_prompt" });
           const pe = personaError(patch.persona);
           if (pe) fail(422, "invalid", pe, { field: "persona" });
+          const sk = skillsError(patch.skills, skillMock.names());
+          if (sk) fail(422, "invalid", sk, { field: "skills" });
           if (patch.subscription_pool !== undefined || patch.subscription !== undefined) {
             const current = patch.subscription !== undefined ? patch.subscription || undefined : a.subscription;
             const pool = checkPool(patch.harness ?? a.harness, current, patch.subscription_pool ?? a.subscription_pool ?? []);
@@ -1823,6 +1834,12 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           if (patch.system_prompt !== undefined) a.system_prompt = patch.system_prompt || undefined;
           // null or empty: by role.
           if (patch.persona !== undefined) a.persona = patch.persona?.trim() || undefined;
+          // `[]` clears. A live agent keeps its skills until the next start.
+          if (patch.skills !== undefined && JSON.stringify(patch.skills) !== JSON.stringify(a.skills ?? [])) {
+            if (patch.skills.length) a.skills = [...patch.skills];
+            else delete a.skills;
+            if (LIVE.includes(a.status)) a.skills_restart = true;
+          }
           if (patch.policy) a.policy = { targets: patch.policy.targets, mail_to: patch.policy.mail_to, ...(patch.policy.cross_project?.length ? { cross_project: patch.policy.cross_project } : {}) };
           if (patch.restart) a.restart = patch.restart;
           a.updated_at = iso();
@@ -3096,6 +3113,9 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
 
     // PLAN §8.3, docs/api.md §25: a small in-memory config repo.
     config: createConfigMock({ iso, reply, fail, audit, available: opts.configRepo }),
+
+    // Terrarium-managed skills, in the config repo (./skills).
+    skills: skillMock.api,
 
     hosts: {
       list: () => reply(() => w.hosts),

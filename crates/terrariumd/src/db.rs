@@ -1082,6 +1082,11 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX thread_resumes_thread ON thread_resumes(thread_id);
     "#,
+    // 31: the skills of an agent (PLAN §8.5): a JSON array of skill names
+    // from the skill library, or `["*"]` for all of them.
+    r#"
+    ALTER TABLE agents ADD COLUMN skills TEXT NOT NULL DEFAULT '[]';
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call

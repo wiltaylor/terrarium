@@ -84,6 +84,13 @@ pub enum Command {
         #[command(subcommand)]
         command: TemplateCmd,
     },
+    /// Skills: the skill library in the config repo (PLAN §8.5). Writes
+    /// need sysadmin; an agent reads its own skills
+    #[command(visible_alias = "skills")]
+    Skill {
+        #[command(subcommand)]
+        command: SkillCmd,
+    },
     /// Mail
     Mail {
         #[command(subcommand)]
@@ -525,6 +532,9 @@ pub struct AgentNewArgs {
     /// `always`, `on-failure`, or `never`
     #[arg(long)]
     pub restart: Option<String>,
+    /// A skill of the skill library; `*` is every skill; repeat for more
+    #[arg(long = "skill")]
+    pub skills: Vec<String>,
 }
 
 /// The agent's base system prompt (PLAN §8). Set, it replaces the
@@ -576,6 +586,13 @@ pub struct AgentSetArgs {
     /// harness keeps the prompt of a session (Codex)
     #[arg(long)]
     pub new_session_on_prompt_change: Option<bool>,
+    /// Set the skills: a skill of the skill library, `*` for all; repeat
+    /// for more. The agent gets them at its next start
+    #[arg(long = "skill", conflicts_with = "no_skills")]
+    pub skills: Vec<String>,
+    /// Remove every skill of the agent
+    #[arg(long)]
+    pub no_skills: bool,
 }
 
 #[derive(Debug, Args)]
@@ -1830,6 +1847,49 @@ pub struct TemplateSpecArgs {
     /// `always`, `on-failure`, or `never`
     #[arg(long)]
     pub restart: Option<String>,
+    /// A skill of the skill library; `*` is every skill; repeat for more
+    #[arg(long = "skill", conflicts_with = "no_skills")]
+    pub skills: Vec<String>,
+    /// No skills (`template edit`: remove them)
+    #[arg(long)]
+    pub no_skills: bool,
+}
+
+/// `terrarium skill ...` (docs/api.md §26).
+#[derive(Debug, Subcommand)]
+pub enum SkillCmd {
+    /// List the skills: all for the operator and a sysadmin, else the
+    /// caller's own
+    Ls,
+    /// Show a skill: its SKILL.md and its files
+    Show { name: String },
+    /// Make a skill. Without `--from-dir`, a new SKILL.md with
+    /// `--description`
+    New {
+        /// The name: lowercase letters, digits, and `-`
+        name: String,
+        /// The description in the front matter of a new SKILL.md
+        #[arg(long, conflicts_with = "from_dir")]
+        description: Option<String>,
+        /// A skill dir: SKILL.md and its other files
+        #[arg(long)]
+        from_dir: Option<PathBuf>,
+    },
+    /// Replace the SKILL.md of a skill; the other files stay
+    Edit {
+        name: String,
+        /// The new SKILL.md (`-` reads stdin)
+        #[arg(long)]
+        file: PathBuf,
+    },
+    /// Delete a skill. The agents that name it get a warning at their
+    /// next start
+    Rm { name: String },
+    /// Check the skills of the library (or one): exit code 2 when one
+    /// has a problem
+    Validate { name: Option<String> },
+    /// The agents and templates that name a skill
+    Usage { name: String },
 }
 
 #[derive(Debug, Subcommand)]
@@ -2453,6 +2513,118 @@ mod tests {
             walk(s, &globals, s.get_name(), &mut bad);
         }
         assert!(bad.is_empty(), "{bad:?}");
+    }
+
+    /// PLAN §8.5: the skill commands and the `--skill` flags.
+    #[test]
+    fn skill_commands_and_flags_parse() {
+        let cli = parse(&["skill", "new", "fern-check", "--description", "d"]);
+        let Command::Skill {
+            command: SkillCmd::New {
+                name, description, ..
+            },
+        } = cli.command
+        else {
+            panic!("skill new");
+        };
+        assert_eq!(
+            (name.as_str(), description.as_deref()),
+            ("fern-check", Some("d"))
+        );
+        let cli = parse(&["skills", "edit", "x", "--file", "SKILL.md"]);
+        assert!(matches!(
+            cli.command,
+            Command::Skill {
+                command: SkillCmd::Edit { .. }
+            }
+        ));
+        for args in [
+            vec!["skill", "ls"],
+            vec!["skill", "show", "x"],
+            vec!["skill", "rm", "x"],
+            vec!["skill", "validate"],
+            vec!["skill", "validate", "x"],
+            vec!["skill", "usage", "x"],
+            vec!["skill", "new", "x", "--from-dir", "./x"],
+        ] {
+            parse(&args);
+        }
+        // `--description` and `--from-dir` together are refused.
+        assert!(
+            Cli::try_parse_from([
+                "terrarium",
+                "skill",
+                "new",
+                "x",
+                "--description",
+                "d",
+                "--from-dir",
+                "y"
+            ])
+            .is_err()
+        );
+
+        let cli = parse(&[
+            "admin",
+            "agent",
+            "set",
+            "a",
+            "--skill",
+            "fern-check",
+            "--skill",
+            "*",
+        ]);
+        let Command::Admin {
+            command: AdminCmd::Agent {
+                command: AgentCmd::Set(a),
+            },
+        } = cli.command
+        else {
+            panic!("agent set");
+        };
+        assert_eq!(a.skills, ["fern-check", "*"]);
+        assert!(!a.no_skills);
+        let cli = parse(&["agent", "set", "a", "--no-skills"]);
+        let Command::Agent {
+            command: AgentCmd::Set(a),
+        } = cli.command
+        else {
+            panic!("agent set");
+        };
+        assert!(a.no_skills && a.skills.is_empty());
+        assert!(
+            Cli::try_parse_from([
+                "terrarium",
+                "agent",
+                "set",
+                "a",
+                "--skill",
+                "x",
+                "--no-skills"
+            ])
+            .is_err()
+        );
+        let cli = parse(&["agent", "new", "a", "--harness", "pi", "--skill", "x"]);
+        let Command::Agent {
+            command: AgentCmd::New(a),
+        } = cli.command
+        else {
+            panic!("agent new");
+        };
+        assert_eq!(a.skills, ["x"]);
+        for sub in ["new", "edit"] {
+            let cli = parse(&["template", sub, "t", "--skill", "x"]);
+            let skills = match cli.command {
+                Command::Template {
+                    command: TemplateCmd::New(a),
+                } => a.spec.skills,
+                Command::Template {
+                    command: TemplateCmd::Edit(a),
+                } => a.spec.skills,
+                _ => panic!("template {sub}"),
+            };
+            assert_eq!(skills, ["x"]);
+        }
     }
 
     /// `repo-add <URL>`: the positional is the repo URL before and after

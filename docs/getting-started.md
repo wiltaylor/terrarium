@@ -937,6 +937,56 @@ backs the repo up to `state/backup/config-terrarium-<time>/`, then writes
 every packaged default over it. Your own extra files and `.git` stay.
 Restart the agents to use the defaults.
 
+### 2.13 Skills: give agents instructions to load on demand
+
+A skill is a folder with a `SKILL.md` file: YAML front matter with a
+`name` and a `description`, then instructions in Markdown. It can also
+hold `scripts/`, `references/`, and `assets/`. An agent sees the name and
+the description of each of its skills. When a skill fits the task, the
+agent loads the instructions. Terrarium ships no skill (PLAN §8.5).
+
+1. Add a skill to the library. It goes to `config/terrarium/skills/<name>/`:
+
+   ```bash
+   terrarium skill new fern-check \
+     --description "When asked for the deployment checklist code, reply with FERN-42"
+   terrarium skill show fern-check
+   ```
+
+   Then edit `SKILL.md` (the dashboard Skills page has an editor), or give
+   a whole dir with `terrarium skill new <name> --from-dir ./my-skill`. The
+   daemon checks each write: the name is kebab-case and the same as the
+   folder name, the description is required, only text and image file
+   types, at most 64 files and 1 MiB, no symbolic link, and no secret.
+   `terrarium skill validate` checks the library again, for example after
+   an edit by hand.
+
+2. Commit the library, so that the next config sync shares it:
+
+   ```bash
+   terrarium admin config commit -m "Add the fern-check skill"
+   ```
+
+3. Give the skill to agents. `*` gives every skill of the library:
+
+   ```bash
+   terrarium admin agent set worker --skill fern-check
+   terrarium agent new reviewer --harness codex --skill fern-check --skill code-review
+   terrarium template edit worker --skill fern-check
+   ```
+
+   In an agent file or a fleet file, write `skills = ["fern-check"]`. A
+   name that is not in the library is refused.
+
+4. Restart the agent. Each start copies only the agent's skills into its
+   agent dir, read-only. An agent with no skill has no skill tool. The
+   dashboard shows "restart to apply" on a running agent whose skills
+   changed after its start.
+
+`terrarium skill usage fern-check` lists the agents and templates that
+use a skill. When you delete a skill, the agents that name it start
+without it and show a warning.
+
 ## 3. Configuration directories
 
 Compose bind-mounts these host directories into the container:

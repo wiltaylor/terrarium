@@ -56,10 +56,25 @@ pub struct ClaudeFlags {
     /// the adapter adds these to them.
     pub forced_deny: &'static [&'static str],
     /// The settings keys that Terrarium removes from the user settings:
-    /// each one would stop the Terrarium hooks.
+    /// each one would stop the Terrarium hooks, or load skills that
+    /// Terrarium does not manage.
     pub removed_settings: &'static [&'static str],
     /// Flags that every launch gets, after the yolo flag.
     pub forced_args: &'static [&'static str],
+    /// Loads a plugin from a directory (PLAN §8.5: the agent's skills).
+    /// In `--help` of 2.1.310. Not gated on `--setting-sources`: an inline
+    /// plugin is on unless `enabledPlugins` turns it off (bundle marker
+    /// `lt.enabled=Aqt(lt.source,...)`).
+    pub plugin_dir: &'static str,
+    /// The `name` in the agent's plugin manifest. The model sees each
+    /// skill as `<name>:<skill>` (bundle marker
+    /// `ft=`${n}:${Ee.name.replace(...)}``).
+    pub plugin_name: &'static str,
+    /// The tool that runs a skill. An agent with no skill gets it in
+    /// `permissions.deny`: a bare deny removes the tool and the skill
+    /// list (bundle marker
+    /// `if(!e.options.tools.some((we)=>Rt(we,Ao)))return[]`).
+    pub skill_tool: &'static str,
 }
 
 /// Claude Code 2.1.x. Measured on 2.1.310 (`docs/compat.md`).
@@ -105,6 +120,10 @@ pub const CLAUDE_2_1: ClaudeFlags = ClaudeFlags {
         // No self-scheduled turns (`CronCreate`, `/loop`): Terrarium has its
         // own schedules (PLAN §12b).
         ("CLAUDE_CODE_DISABLE_CRON", "1"),
+        // PLAN §8.5: no managed-policy skills (`<managed>/.claude/skills`
+        // loads with `--setting-sources ""` too). Bundle marker
+        // `i.CLAUDE_CODE_DISABLE_POLICY_SKILLS||...`; not run.
+        ("CLAUDE_CODE_DISABLE_POLICY_SKILLS", "1"),
         // No marketplace install at start.
         ("CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL", "1"),
         // Commands that start a flow with a human.
@@ -151,6 +170,12 @@ pub const CLAUDE_2_1: ClaudeFlags = ClaudeFlags {
         ("disableRemoteControl", true),
         ("remoteControlAtStartup", false),
         ("autoUploadSessions", false),
+        // PLAN §8.5: only Terrarium-managed skills, the same on every
+        // harness. The bundled skills (`schedule`, `claude-api`, ...) stay
+        // off; the agent's own skills come from its plugin dir. Bundle
+        // marker `e.source==="builtin"&&...`: the key hides only the
+        // bundled ones.
+        ("disableBundledSkills", true),
         // `autoMemoryEnabled = false` is not forced any more: it is in the
         // packaged default `defaults/harness/claude/settings.json`.
         // Terrarium has its own memory graph (PLAN §14), and the
@@ -185,7 +210,9 @@ pub const CLAUDE_2_1: ClaudeFlags = ClaudeFlags {
     ],
     // `disableAllHooks` would stop the Terrarium hooks, and so the status
     // machine, the turns, and the usage.
-    removed_settings: &["disableAllHooks"],
+    // PLAN §8.5: `enabledPlugins` could turn on a plugin of the shared
+    // home (and its skills), or turn off the agent's own plugin.
+    removed_settings: &["disableAllHooks", "enabledPlugins"],
     forced_args: &[
         // No Claude in Chrome (its setup is a dialog). In `--help`.
         "--no-chrome",
@@ -194,4 +221,7 @@ pub const CLAUDE_2_1: ClaudeFlags = ClaudeFlags {
         // in a repo. In `--help`; the dialog part is not tested.
         "--strict-mcp-config",
     ],
+    plugin_dir: "--plugin-dir",
+    plugin_name: "terrarium",
+    skill_tool: "Skill",
 };

@@ -24,6 +24,7 @@ pub mod protocol;
 pub mod role;
 pub mod schedule;
 pub mod secret_scan;
+pub mod skills;
 pub mod status;
 pub mod tail;
 pub mod template;

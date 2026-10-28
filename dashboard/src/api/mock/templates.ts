@@ -14,7 +14,7 @@ import type { ScheduleCaller } from "./schedules";
 
 const NAME_RE = /^[a-z0-9][a-z0-9_-]{0,62}$/;
 const ULID_RE = /^[0-9A-Z]{26}$/;
-const SPEC_KEYS = ["harness", "subscription", "subscription_pool", "model", "prompt", "system_prompt", "persona", "roles", "policy", "restart", "new_session_on_prompt_change"] as const;
+const SPEC_KEYS = ["harness", "subscription", "subscription_pool", "model", "prompt", "system_prompt", "persona", "roles", "policy", "restart", "new_session_on_prompt_change", "skills"] as const;
 /** The daemon's limit on `system_prompt`: 32 KiB of UTF-8. */
 export const SYSTEM_PROMPT_MAX_BYTES = 32 * 1024;
 
@@ -82,6 +82,8 @@ export function normalizeSpec(raw: unknown): TemplateSpec {
   spec.policy = policy;
   spec.restart = (o.restart as TemplateSpec["restart"]) ?? "on-failure";
   if (o.new_session_on_prompt_change === false) spec.new_session_on_prompt_change = false;
+  if (o.skills !== undefined && (!Array.isArray(o.skills) || o.skills.some((x) => typeof x !== "string"))) throw new Error("spec: skills: use a list of skill names");
+  if ((o.skills as string[] | undefined)?.length) spec.skills = o.skills as string[];
   return spec;
 }
 
@@ -261,6 +263,7 @@ export function createTemplateMock(c: TemplateMockContext): Api["templates"] {
           ...(a.prompt ? { prompt: a.prompt } : {}),
           ...(a.system_prompt ? { system_prompt: a.system_prompt } : {}),
           ...(a.persona ? { persona: a.persona } : {}),
+          ...(a.skills?.length ? { skills: a.skills } : {}),
           roles: a.roles,
           policy: a.policy,
           restart: a.restart,

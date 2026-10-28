@@ -407,6 +407,8 @@ struct Built {
     accounts: LaunchedAccounts,
     /// A warning about the account of the launch.
     account_warning: Option<String>,
+    /// The skills that the launch could not deliver (PLAN §8.5).
+    skill_warnings: Vec<String>,
 }
 
 /// The file that records the account of the last launch
@@ -1231,7 +1233,10 @@ impl RunnerSupervisor {
             layout.private_dir.clone(),
             layout.workspace.clone(),
         );
-        let a = agent.clone();
+        // The skill library (PLAN §8.5). No config repo: no library, and
+        // the agent gets an empty skills dir.
+        let skill_library = cfg.config_repo.as_deref().map(crate::skills::library_dir);
+        let mut a = agent.clone();
         let state_dir = view.state_dir.clone();
         // A harness that keeps the prompt of a session gets a new session
         // when the prompt changed since that session began.
@@ -1253,7 +1258,7 @@ impl RunnerSupervisor {
             host: home.clone(),
         });
         let sandboxed = cfg.sandbox.mode == SandboxMode::Bwrap;
-        let (overlays, credentials, fresh_for_prompt, prompt_updated, repos, accounts) =
+        let (overlays, credentials, fresh_for_prompt, prompt_updated, repos, accounts, delivery) =
             tokio::task::spawn_blocking(move || {
                 migrate_dir(&dirs.0);
                 // An agent made before the work root: its files move from
@@ -1290,6 +1295,19 @@ impl RunnerSupervisor {
                 let path = dirs.1.join("prompt.md");
                 std::fs::write(&path, text)
                     .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+                // The agent's skills (PLAN §8.5): a fresh copy in
+                // `harness/skills/` at each start, which the sandbox binds
+                // read-only, and the record for "restart to apply".
+                let skills_dir = terrarium_core::skills::delivered_dir(&dirs.1);
+                let no_library = dirs.1.join(".no-skill-library");
+                let library = skill_library.as_deref().unwrap_or(&no_library);
+                let delivery = terrarium_core::skills::deliver(library, &a.skills, &skills_dir)?;
+                let record = dirs.2.join(crate::skills::DELIVERED_FILE);
+                let json = serde_json::to_vec(&delivery).map_err(|e| e.to_string())?;
+                safefs::write_private(&record, &json).map_err(|e| {
+                    format!("cannot write {}: {}", record.display(), launch_fs_error(&e))
+                })?;
+                a.delivered_skills = delivery.names.clone();
                 if !home.is_dir() {
                     return Err(format!(
                         "the {} home {} does not exist; log in first, or point the daemon at it \
@@ -1341,6 +1359,7 @@ impl RunnerSupervisor {
                     prompt_updated,
                     repos,
                     accounts,
+                    delivery,
                 ))
             })
             .await
@@ -1397,6 +1416,7 @@ impl RunnerSupervisor {
         } else {
             resume
         };
+        agent.delivered_skills = delivery.names.clone();
         let mut spec = entry.adapter.launch_for(&agent, resume, def.as_ref());
         if let Some(acct) = &account {
             info!(
@@ -1438,6 +1458,7 @@ impl RunnerSupervisor {
             harness_version: active.map(|a| a.version),
             accounts: LaunchedAccounts { account, bound },
             account_warning,
+            skill_warnings: delivery.warnings(),
         })
     }
 
@@ -1463,6 +1484,7 @@ impl RunnerSupervisor {
             harness_version,
             accounts,
             account_warning,
+            skill_warnings,
         } = self
             .build_spec(&agent, resume.as_ref(), &view, Some(epoch))
             .await?;
@@ -1606,6 +1628,10 @@ impl RunnerSupervisor {
             self.emit(id, SupervisorEventKind::Harness(Event::Warning { message }));
         }
         if let Some(message) = account_warning {
+            warn!(agent = %id, "{message}");
+            self.emit(id, SupervisorEventKind::Harness(Event::Warning { message }));
+        }
+        for message in skill_warnings {
             warn!(agent = %id, "{message}");
             self.emit(id, SupervisorEventKind::Harness(Event::Warning { message }));
         }
@@ -4039,6 +4065,97 @@ mod tests {
         let e = sup.launch_spec(&lead, None).await.unwrap_err().to_string();
         assert!(e.contains("harness/claude/settings.json"), "{e}");
         assert!(e.contains("line 3"), "{e}");
+    }
+
+    /// PLAN §8.5: each start copies only the agent's skills into
+    /// `harness/skills/`, records the delivery in `private/`, and the
+    /// adapter gives the harness the skills and the skill tool. An agent
+    /// without skills gets an empty dir and no skill tool.
+    #[tokio::test]
+    async fn a_launch_delivers_only_the_agents_skills() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let home = tmp.path().join("auth/claude");
+        std::fs::create_dir_all(&home).unwrap();
+        let repo = tmp.path().join("config-terrarium");
+        let prompts = repo.join("prompts");
+        std::fs::create_dir_all(&prompts).unwrap();
+        for name in ["fern-check", "other"] {
+            let dir = repo.join("skills").join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: d\n---\nbody\n"),
+            )
+            .unwrap();
+        }
+        let mut cfg = RunnerSupervisorConfig::new(
+            state.clone(),
+            tmp.path().join("run"),
+            prompts,
+            SandboxConfig {
+                mode: SandboxMode::None,
+                ..SandboxConfig::default()
+            },
+            [(HarnessId::Claude, home)].into_iter().collect(),
+        );
+        cfg.config_repo = Some(repo.clone());
+        let sup = RunnerSupervisor::new(cfg);
+        let agent = |name: &str, skills: serde_json::Value| {
+            let def: terrarium_core::config::AgentDef = serde_json::from_value(
+                serde_json::json!({"name": name, "project": "p", "harness": "claude",
+                                   "skills": skills}),
+            )
+            .unwrap();
+            Agent::from_def(&def, &state)
+        };
+        let value_after = |spec: &LaunchSpec, flag: &str| {
+            let i = spec.args.iter().position(|a| a == flag)?;
+            spec.args.get(i + 1).cloned()
+        };
+        let deny = |spec: &LaunchSpec| -> Vec<String> {
+            let s: serde_json::Value =
+                serde_json::from_str(&value_after(spec, "--settings").unwrap()).unwrap();
+            serde_json::from_value(s["permissions"]["deny"].clone()).unwrap()
+        };
+
+        let with = agent("with", serde_json::json!(["fern-check", "gone"]));
+        let spec = sup.launch_spec(&with, None).await.unwrap();
+        let harness = terrarium_runner::harness_dir(&state, with.id);
+        let delivered = harness.join("skills");
+        assert!(delivered.join("fern-check/SKILL.md").is_file());
+        assert!(!delivered.join("other").exists());
+        let plugin = value_after(&spec, "--plugin-dir").expect("plugin dir");
+        assert!(
+            std::path::Path::new(&plugin)
+                .join("skills/fern-check/SKILL.md")
+                .is_file()
+        );
+        assert!(!deny(&spec).contains(&"Skill".to_owned()));
+        let record = crate::skills::delivered(&terrarium_runner::private_dir(&state, with.id))
+            .expect("record");
+        assert_eq!(record.names, ["fern-check"]);
+        assert_eq!(record.missing, ["gone"]);
+        assert_eq!(record.warnings().len(), 1);
+        // The record matches the library now; a change of the skill
+        // makes it stale.
+        let private = terrarium_runner::private_dir(&state, with.id);
+        let lib = crate::skills::library_dir(&repo);
+        assert!(!crate::skills::restart_needed(&lib, &private, &with.skills));
+        std::fs::write(
+            lib.join("fern-check/SKILL.md"),
+            "---\nname: fern-check\ndescription: new\n---\n",
+        )
+        .unwrap();
+        assert!(crate::skills::restart_needed(&lib, &private, &with.skills));
+
+        let without = agent("without", serde_json::json!([]));
+        let spec = sup.launch_spec(&without, None).await.unwrap();
+        let delivered = terrarium_runner::harness_dir(&state, without.id).join("skills");
+        assert!(delivered.is_dir());
+        assert_eq!(std::fs::read_dir(&delivered).unwrap().count(), 0);
+        assert!(value_after(&spec, "--plugin-dir").is_none());
+        assert!(deny(&spec).contains(&"Skill".to_owned()));
     }
 
     /// A launch runs the harness from the active version dir of the tools

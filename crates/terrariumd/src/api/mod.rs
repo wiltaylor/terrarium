@@ -20,6 +20,7 @@ mod repos;
 mod schedules;
 mod screen;
 pub mod session;
+mod skills;
 mod streams;
 mod subscriptions;
 pub mod system;
@@ -248,6 +249,7 @@ fn routes(state: Shared, serve_artifacts: bool, host_connect: bool) -> Router {
         .merge(questions::routes())
         .merge(inbox::routes())
         .merge(config::routes())
+        .merge(skills::routes())
         .route(
             "/session",
             get(session::current)

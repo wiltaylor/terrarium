@@ -23,6 +23,8 @@ import { SystemPromptField } from "./AgentFields";
 import { effectivePersona, systemPromptProblem } from "./form";
 import { WaitsPanel, WatchesPanel } from "./Waits";
 import { QuestionsPanel } from "../inbox/QuestionsPanel";
+import { SkillsPicker } from "../skills/SkillsPicker";
+import { RESTART_NOTE, skillsLabel } from "../skills/model";
 
 const TABS = [
   { id: "conversation", label: "Conversation" },
@@ -146,6 +148,10 @@ export default function AgentDetail() {
                 <Show when={a().system_prompt}>
                   <span class="muted small"> · the system prompt wins</span>
                 </Show>
+              </dd>
+              <dt>Skills</dt>
+              <dd>
+                <SkillsCell agent={a()} running={running()} onError={setError} />
               </dd>
               <dt>Restart</dt>
               <dd>{a().restart ?? "on-failure"}</dd>
@@ -597,6 +603,93 @@ function SystemPromptCell(props: { agent: Agent; running: boolean; onError: (e: 
           A new system prompt applies at the next start or restart.
           <Show when={saved() && props.running}>
             {" "}
+            <button class="small" onClick={restart}>
+              Restart now
+            </button>
+          </Show>
+        </span>
+      </Show>
+    </div>
+  );
+}
+
+/**
+ * The agent's skills, and a control to change them with
+ * `PATCH /api/agents/{id}` (`[]` clears them). The live agent keeps its
+ * skills until the next start: `skills_restart` says that a restart applies
+ * the list.
+ */
+function SkillsCell(props: { agent: Agent; running: boolean; onError: (e: unknown) => void }) {
+  const [editing, setEditing] = createSignal(false);
+  const [draft, setDraft] = createSignal<string[]>([]);
+  const [busy, setBusy] = createSignal(false);
+  const fileManaged = () => props.agent.source === "file";
+  const current = () => props.agent.skills ?? [];
+  const same = () => draft().length === current().length && draft().every((x, i) => x === current()[i]);
+
+  const save = async () => {
+    setBusy(true);
+    try {
+      agents.upsert(await api.agents.update(props.agent.id, { skills: draft() }));
+      setEditing(false);
+    } catch (e) {
+      props.onError(e);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const restart = async () => {
+    try {
+      await api.agents.restart(props.agent.id);
+    } catch (e) {
+      props.onError(e);
+    }
+  };
+
+  return (
+    <div class="stack" style={{ gap: "4px" }}>
+      <Show
+        when={!editing()}
+        fallback={
+          <>
+            <SkillsPicker value={draft()} onChange={setDraft} legend="New skills" />
+            <span class="row">
+              <button class="small primary" disabled={busy() || same()} onClick={save}>
+                Save
+              </button>
+              <button class="small" onClick={() => setEditing(false)}>
+                Cancel
+              </button>
+            </span>
+            <span class="muted small">{RESTART_NOTE}</span>
+          </>
+        }
+      >
+        <span class="row" style={{ "flex-wrap": "wrap" }}>
+          <Show when={current().length} fallback={<span class="muted">none</span>}>
+            <span class="mono small">{skillsLabel(current())}</span>
+          </Show>
+          <button
+            class="small"
+            disabled={fileManaged()}
+            title={fileManaged() ? "A file agent: edit its definition file." : undefined}
+            onClick={() => {
+              setDraft(current());
+              setEditing(true);
+            }}
+          >
+            Edit
+          </button>
+          <A class="small" href="/skills">
+            Skills page
+          </A>
+        </span>
+      </Show>
+      <Show when={props.agent.skills_restart}>
+        <span class="small row" role="status">
+          <span class="chip warn">restart to apply</span>
+          <span class="muted">The live agent runs with other skills than this list.</span>
+          <Show when={props.running}>
             <button class="small" onClick={restart}>
               Restart now
             </button>

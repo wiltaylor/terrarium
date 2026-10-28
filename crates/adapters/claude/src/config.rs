@@ -28,6 +28,13 @@
 //! | `claude/file-history/` | bound over `$CLAUDE_CONFIG_DIR/file-history/` |
 //! | `claude/todos/` | bound over `$CLAUDE_CONFIG_DIR/todos/` |
 //! | `claude/session-env/` | bound over `$CLAUDE_CONFIG_DIR/session-env/` |
+//! | `claude/plugin/` | the agent's skills as a plugin (`--plugin-dir`, PLAN §8.5): `.claude-plugin/plugin.json` and `skills/<name>/`, a copy of `skills/`; read-only. Absent when the agent has no skill. |
+//!
+//! The shared home's own skills (`$CLAUDE_CONFIG_DIR/skills`) and the
+//! workspace's `.claude/skills` do not load: `--setting-sources ""` turns
+//! off the user and project sources that read them (bundle markers
+//! `Qt("userSettings")&&!w?SL(s,"userSettings","skills",n)` and
+//! `Qt("projectSettings")`).
 //!
 //! # What Claude Code writes into its home, and where it goes
 //!
@@ -105,6 +112,33 @@ pub const HARNESS_DIR: &str = "harness";
 /// `/state/agents/<ulid>/claude`.
 pub fn claude_dir(agent: &Agent) -> PathBuf {
     agent_dir(agent).join("claude")
+}
+
+/// The agent's plugin dir (PLAN §8.5): its skills, for `--plugin-dir`.
+pub fn plugin_dir(agent: &Agent) -> PathBuf {
+    claude_dir(agent).join("plugin")
+}
+
+/// Write the agent's plugin dir: a manifest and a copy of the delivered
+/// skills (`<harness dir>/skills/`). No delivered skill: the dir goes.
+pub fn write_plugin(opts: &ClaudeOptions, agent: &Agent) -> Result<()> {
+    let dir = plugin_dir(agent);
+    if agent.delivered_skills.is_empty() {
+        if dir.exists() {
+            fs::remove_dir_all(&dir).map_err(|e| ClaudeError::io(&dir, e))?;
+        }
+        return Ok(());
+    }
+    let skills = terrarium_core::skills::delivered_dir(&agent_dir(agent));
+    terrarium_core::skills::copy_delivered(&skills, &agent.delivered_skills, &dir.join("skills"))
+        .map_err(|e| ClaudeError::io(&dir, std::io::Error::other(e)))?;
+    let manifest = serde_json::json!({
+        "name": opts.flags.plugin_name,
+        "description": "The Terrarium skills of this agent",
+    });
+    let meta = dir.join(".claude-plugin");
+    fs::create_dir_all(&meta).map_err(|e| ClaudeError::io(&meta, e))?;
+    write_atomic(&meta.join("plugin.json"), &pretty(&manifest)?)
 }
 
 /// The agent's own project directory for `cwd` (the daemon's view):
@@ -240,6 +274,7 @@ pub fn materialize(
         &dir.join("settings.json"),
         &pretty(&launch::settings_json(opts, agent))?,
     )?;
+    write_plugin(opts, agent)?;
 
     if !shared.exists() {
         write_atomic(&shared, b"{}\n")?;

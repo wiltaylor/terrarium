@@ -510,10 +510,10 @@ Each harness gets its settings in three layers. A later layer wins:
 
 | Harness | How the layers merge | Forced keys |
 |---|---|---|
-| Claude Code | A JSON object, then the forced keys on top; it goes to `--settings` (with `--setting-sources ""`, Claude Code reads no other settings file). | `hooks` (replaced), `skipDangerousModePermissionPrompt`, `disableAllHooks` (removed), and the `env` names that the launch sets (`CLAUDE_CONFIG_DIR`, the quiet env, `IS_SANDBOX`). The ask-user and plan tools in `permissions.deny` (added to the user's list), `modelProposedGoals`, `disableAutoMode`, `askUserQuestionTimeout`, `crossSessionInbound`, `autoContinueAtUsageLimit`, the connector, Remote Control, and upload keys. The flags: yolo, `--no-chrome`, `--strict-mcp-config`, `--setting-sources ""`, `--system-prompt-snapshot off`, the session flags. |
-| Codex | The TOML file becomes `-c key=value` overrides, flattened to dotted keys down to the leaves; a table with a key that is not bare goes as one inline table. They come before the forced `-c` values. | `hooks`, `projects` (trust), `sqlite_home`, `tui.resume_cwd`, `check_for_update_on_startup`, `analytics.enabled`, `feedback.enabled`, `sandbox_mode`, `approval_policy`, `model_instructions_file`, `developer_instructions`; `model` when the agent sets one. The ask-user tools, the plan text, goals, the start-up notices, apps, plugins, tool suggestions, memories, and `features.hooks` (`CodexFlags::hardening_config`). The adapter drops these from the file. |
-| Copilot CLI | A JSON deep merge over the agent's settings copy (on the first start a copy of the shared `settings.json`), then the forced keys. | `hooks` and `disableAllHooks` (removed), `experimental: true` (the prompt extension needs it), and `config::forced_settings`: `askUser`, `defaultMode`, `stayInAutopilot`, the permission and IDE keys, `shellShortcut`, `autoUpdate`, `remoteExport`, `remoteSessions`, `memory`, `connectors`. The flags `--no-ask-user`, `--mode interactive`, `--disable-builtin-mcps`, `--sync-session=off`. |
-| pi | A JSON deep merge over the agent's settings copy, then the forced keys. | `lastChangelogVersion` (no changelog screen at start), `doubleEscapeAction`, `branchSummary.skipPrompt`, `defaultProjectTrust`, `tuiMode`. The flags: `--offline`, `--no-extensions`, `--no-mcp`, the session dir, and both prompt flags (one empty). |
+| Claude Code | A JSON object, then the forced keys on top; it goes to `--settings` (with `--setting-sources ""`, Claude Code reads no other settings file). | `hooks` (replaced), `skipDangerousModePermissionPrompt`, `disableAllHooks` (removed), and the `env` names that the launch sets (`CLAUDE_CONFIG_DIR`, the quiet env, `IS_SANDBOX`). The ask-user and plan tools in `permissions.deny` (added to the user's list), `modelProposedGoals`, `disableAutoMode`, `askUserQuestionTimeout`, `crossSessionInbound`, `autoContinueAtUsageLimit`, the connector, Remote Control, and upload keys. The flags: yolo, `--no-chrome`, `--strict-mcp-config`, `--setting-sources ""`, `--system-prompt-snapshot off`, the session flags. The skill keys (§8.5). |
+| Codex | The TOML file becomes `-c key=value` overrides, flattened to dotted keys down to the leaves; a table with a key that is not bare goes as one inline table. They come before the forced `-c` values. | `hooks`, `projects` (trust), `sqlite_home`, `tui.resume_cwd`, `check_for_update_on_startup`, `analytics.enabled`, `feedback.enabled`, `sandbox_mode`, `approval_policy`, `model_instructions_file`, `developer_instructions`; `model` when the agent sets one. The ask-user tools, the plan text, goals, the start-up notices, apps, plugins, tool suggestions, memories, and `features.hooks` (`CodexFlags::hardening_config`). The skill keys (§8.5). The adapter drops these from the file. |
+| Copilot CLI | A JSON deep merge over the agent's settings copy (on the first start a copy of the shared `settings.json`), then the forced keys. | `hooks` and `disableAllHooks` (removed), `experimental: true` (the prompt extension needs it), and `config::forced_settings`: `askUser`, `defaultMode`, `stayInAutopilot`, the permission and IDE keys, `shellShortcut`, `autoUpdate`, `remoteExport`, `remoteSessions`, `memory`, `connectors`. The flags `--no-ask-user`, `--mode interactive`, `--disable-builtin-mcps`, `--sync-session=off`. The skill keys (§8.5). |
+| pi | A JSON deep merge over the agent's settings copy, then the forced keys. | `lastChangelogVersion` (no changelog screen at start), `doubleEscapeAction`, `branchSummary.skipPrompt`, `defaultProjectTrust`, `tuiMode`. The flags: `--offline`, `--no-extensions`, `--no-mcp`, the session dir, both prompt flags (one empty), and the skill flags (§8.5). |
 
 A key is forced when an unattended agent needs it: an ask-user tool, a
 plan mode, a dialog that waits for a key, a trust prompt, or data that
@@ -559,8 +559,8 @@ diff; Accept takes the new default, Keep keeps the edit.
 `state/backup/config-terrarium-<time>/` and writes every default over it.
 
 **Git.** The config repo is a git repo (the daemon runs `git init` on
-first use). It holds `prompts/`, `harness/`, `export/`, `README.md`, and
-`.gitignore`. `export/` is the declarative export of the store, written
+first use). It holds `prompts/`, `harness/`, `skills/` (§8.5), `export/`,
+`README.md`, and `.gitignore`. `export/` is the declarative export of the store, written
 before each commit: one fleet file for each project
 (`export/projects/<project>.fleet.toml`: repos, agents, project targets,
 schedules, templates) and `export/global.fleet.toml` (global templates and
@@ -576,8 +576,9 @@ and session transcripts. Three controls (`docs/security-review.md`,
 
 1. The `.gitignore` is an allowlist: it ignores everything, allows only
    `prompts/**/*.md`, `harness/**/*.{json,toml,yaml}`,
-   `export/**/*.{toml,json,yaml,md}`, `README.md`, and itself, then
-   ignores the credential file names again. The daemon writes it.
+   `export/**/*.{toml,json,yaml,md}`, the skill file types under
+   `skills/` (§8.5), `README.md`, and itself, then ignores the credential
+   file names again. The daemon writes it.
 2. A secret scan (`terrarium_core::secret_scan`) runs on the staged files
    before each commit that the daemon makes, and in the `pre-commit` hook
    that the daemon installs (`terrarium admin config scan --staged`, which
@@ -652,6 +653,91 @@ there is no lead) get mail from `system` with the question as quoted data.
 The answer by mail wakes the agent. Leads are exempt: they talk to the
 operator. `TERRARIUM_QUESTION_GUARD=off` turns the guard off
 (`crates/terrariumd/src/question_guard.rs`).
+
+### 8.5 Skills
+
+A skill is a folder in the open Agent Skills format: `SKILL.md` with YAML
+front matter (`name`, `description`), then Markdown instructions, and
+optional files in `scripts/`, `references/`, and `assets/`. Terrarium
+manages the skills of all agents. Each harness gets the same skills by
+its own mechanism. Terrarium ships no skill.
+
+**The library.** The skills are in the config repo, at
+`skills/<name>/` (§8.3). Git keeps their versions, and a config sync
+shares them. Only the operator and a sysadmin create, change, or delete a
+skill: through the API (`/api/skills`), the CLI (`terrarium skill`), the
+dashboard (Skills page), or an edit of the repo by hand and a config
+sync. A write through the API goes to the work tree and stays
+uncommitted, as an edit of a prompt does. The Config page commits it.
+
+**The checks** (`terrarium_core::skills::check`) run at each write and
+at each start:
+
+- The name is kebab-case (lowercase letters, digits, and `-`), at most
+  64 characters, and the same as the folder name and the `name` of the
+  front matter.
+- The front matter has a `description` of 1 to 1024 characters.
+- Each file is a regular file (no symbolic link), at most 4 levels deep,
+  with no hidden part, of a type of `md`, `txt`, `json`, `yaml`, `yml`,
+  `toml`, `py`, `sh`, `js`, `ts`, `png`, `jpg`, `jpeg`, `gif`, `svg`, or
+  `webp`.
+- A skill has at most 64 files and 1 MiB.
+- The secret scan of the config repo (§8.3) finds nothing in each file.
+
+A write that fails the checks is `422 invalid`, with each problem in
+`details.problems`. A skill in the library that fails them (an edit by
+hand) shows its problems in the list, and no agent gets it.
+
+**Assignment.** `skills = [...]` on an agent, a template, and a fleet
+agent or template names skills of the library. The default is none. `*`
+is every skill of the library. An unknown name is `422 invalid` at the
+assignment (an API create or patch, a template write, a fleet check). A
+skill that is deleted later stays in the list; the next start gives a
+`warning` event and goes on without it.
+
+```toml
+# agents/reviewer.toml
+name = "reviewer"
+project = "terra"
+harness = "claude"
+skills = ["code-review", "release-notes"]
+```
+
+**Delivery.** At each start the daemon copies only the agent's skills
+from the library into `<harness dir>/skills/` (a new, empty dir each
+time). The sandbox binds the harness dir read-only, so the agent cannot
+change its skills. `private/skills.json` records the delivered skills
+and their hash. Each adapter points its harness at the dir:
+
+| Harness | Mechanism | The skill tool |
+|---|---|---|
+| Claude Code | A per-agent plugin, `--plugin-dir <harness dir>/claude/plugin` (`.claude-plugin/plugin.json` named `terrarium`, and a copy of the skills in `skills/`). The model sees `terrarium:<name>`. | `Skill`. An agent with no skill gets `Skill` in `permissions.deny`. |
+| Codex | The skills dir, bound read-only over `$CODEX_HOME/skills`, also when it is empty. `-c skills.include_instructions=<true when the agent has skills>`. | Codex has no skill tool: the model reads the `SKILL.md` that the "Skills" list names. |
+| Copilot CLI | `skillDirectories` = the skills dir, in the agent's `settings.json`. In replace mode, `SYSTEM.md` gets an `<available_skills>` list, because the system message that holds Copilot's list is replaced. | `skill`. An agent with no skill gets `--excluded-tools=skill`. |
+| pi | `--skill <harness dir>/skills/<name>` for each skill, with `--no-skills` (it stops only the discovery). | pi has no skill tool: the model reads the `SKILL.md` with `read`. |
+
+The skill dirs of the shared harness homes never load, with or without
+agent skills: `~/.claude/skills`, `$CODEX_HOME/skills`,
+`~/.copilot/skills`, and the pi home. `~/.agents/skills` is on the empty
+tmpfs `$HOME` of the sandbox. The skill dirs of the workspace
+(`.claude/skills`, `.github/skills`, `.agents/skills`) do not load in
+Claude Code, Copilot, and pi. Codex still reads
+`<workspace>/.agents/skills` (and `<workspace>/.codex/skills`): no Codex
+key turns a repo root off. The workspace is the agent's own dir, so such
+a skill is the agent's own text, as an `AGENTS.md` there is.
+The bundled or built-in skills of each harness stay off
+(`disableBundledSkills`, `skills.bundled.enabled = false`, Copilot's
+`disabledSkills`). `docs/compat.md` ("Skills") gives the source of each
+mechanism.
+
+**A change applies at the next start.** The API marks a live agent with
+`skills_restart: true` when the hash of the skills that its list now picks
+differs from the hash of its last delivery (a changed list, a changed or
+deleted skill). The dashboard shows "restart to apply".
+
+**The harness sections** of the prompt (`prompts/harness/<harness>.md`)
+tell the model to load a listed skill that fits the task, with the skill
+tool of its harness.
 
 ---
 

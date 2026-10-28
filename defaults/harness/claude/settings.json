@@ -40,7 +40,6 @@
   },
   "switchModelsOnFlag": true,
   "spinnerTipsEnabled": false,
-  "disableBundledSkills": true,
   "fileCheckpointingEnabled": false,
   "includeGitInstructions": true,
   "fastMode": false

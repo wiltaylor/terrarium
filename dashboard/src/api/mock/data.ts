@@ -187,10 +187,10 @@ export function seed(now: number = Date.now()): MockWorld {
 
   const agents: Agent[] = [
     agentRow("01JB0LEAD00000000000000001", "lead", "terrarium", "claude", "anthropic-max", "idle", { roles: ["project_admin"], prompt: "lead", source: "file", subscription_pool: ["anthropic-max", "anthropic-max-2"] }),
-    agentRow("01JB0WRK100000000000000002", "runner-dev", "terrarium", "claude", "anthropic-max", "working", { current_card: "TER-12", prompt: "worker", subscription_pool: ["anthropic-max", "anthropic-max-2"] }),
+    agentRow("01JB0WRK100000000000000002", "runner-dev", "terrarium", "claude", "anthropic-max", "working", { current_card: "TER-12", prompt: "worker", subscription_pool: ["anthropic-max", "anthropic-max-2"], skills: ["fern-check"], skills_restart: true }),
     agentRow("01JB0WRK200000000000000003", "adapter-codex", "terrarium", "codex", "chatgpt-pro", "blocked", { model: "gpt-5-codex", current_card: "TER-15" }),
     agentRow("01JB0WRK300000000000000004", "reviewer", "terrarium", "pi", "openrouter-key", "starting", { model: "anthropic/claude-sonnet", policy: { targets: [], mail_to: ["lead"], cross_project: ["webshop/shop-lead"] } }),
-    agentRow("01JB0WEB100000000000000005", "shop-lead", "webshop", "copilot", "copilot-pro", "working", { roles: ["project_admin"], current_card: "WEB-4", policy: { targets: ["pg-test"], mail_to: ["*"] } }),
+    agentRow("01JB0WEB100000000000000005", "shop-lead", "webshop", "copilot", "copilot-pro", "working", { roles: ["project_admin"], current_card: "WEB-4", policy: { targets: ["pg-test"], mail_to: ["*"] }, skills: ["*"] }),
     agentRow("01JB0WEB200000000000000006", "css-worker", "webshop", "codex", "chatgpt-pro", "error", { restart: "never" }),
     agentRow("01JB0SYS000000000000000007", "sysadmin", "terrarium", "claude", "anthropic-max", "stopped", { roles: ["sysadmin"], restart: "always" }),
     // Idle with open waits (./waits.ts).

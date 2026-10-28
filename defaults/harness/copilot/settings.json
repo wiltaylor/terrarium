@@ -20,7 +20,6 @@
   "customAgents": {
     "defaultLocalOnly": true
   },
-  "disabledSkills": ["customize-cloud-agent", "github-pr-media", "discover-resources"],
   "contextManagementTools": false,
   "enabledMcpServers": [],
   "enabledPlugins": {}

@@ -1113,3 +1113,49 @@ is `crates/terrariumd/src/config_repo.rs`, `api/config.rs`,
   a Claude `permissions` block or a Codex `mcp_servers` entry). Give the
   remote write access only to operators that you trust as much as your
   own.
+
+## 13. Skills (F18, 2026-10-28)
+
+The change: Terrarium-managed skills (PLAN §8.5). A skill is a folder in
+the config repo (`skills/<name>/`): a `SKILL.md` with instructions, and
+optional scripts, references, and assets. At each start the daemon copies
+the agent's skills into its harness dir, and the harness loads them. The
+code is `crates/terrarium-core/src/skills.rs`, `crates/terrariumd/src/skills.rs`,
+`api/skills.rs`, the delivery in `runner_supervisor.rs`, and the skill
+keys of each adapter.
+
+A skill is **prompt content that the operator controls**. Its text goes
+into the model's context when the agent loads it, as a persona or a
+prompt template does. Its scripts are files: they run only when the agent
+runs them, in the sandbox, with the rights of the agent.
+
+### Threats and controls
+
+| Threat | Control | Test |
+|---|---|---|
+| An agent writes or changes a skill (its own, or one of another agent) | Every write of `/api/skills` needs the operator or a sysadmin. The delivered copy is in `harness/`, which the sandbox binds read-only. The config repo is not bound into the sandbox. | `crud_validation_and_rights`, `the_sandbox_never_binds_the_private_dir` |
+| An agent reads skills that it does not have | `GET /api/skills` and `GET /api/skills/{name}` give a non-sysadmin agent only the skills that its own `skills` list picks; another name is `403`. The delivery copies only the agent's skills. | `crud_validation_and_rights`, `a_launch_delivers_only_the_agents_skills`, `deliver_copies_only_the_assigned_skills` |
+| A skill holds a secret, and the config repo carries it to a remote | Each write runs the secret scan on each file (`422`, the finding without the value). The commit scan and the `pre-commit` hook (§12) cover a skill file that came by hand. The `.gitignore` admits only the skill file types under `skills/`; the credential file names stay ignored. | `each_rule_is_checked`, `skill_files_go_into_the_config_repo_with_the_scan` |
+| A path or a link in a skill escapes its dir (on write, or on the copy into the agent dir) | A path must be relative, with no `..`, no hidden part, and at most 4 parts. A symbolic link or a special file in a skill dir is refused, and such a skill is not delivered. The delivery makes a new, empty dir each start. | `read_dir_refuses_symlinks`, `each_rule_is_checked`, `write_get_list_remove` |
+| A large skill fills the disk or the context | At most 64 files and 1 MiB for each skill, and 1024 characters of description. | `each_rule_is_checked` |
+| Skills that Terrarium does not manage load into an agent (the operator's own skills in a shared harness home, bundled skills that start cloud work, a marketplace plugin) | Claude Code: `--setting-sources ""`, `disableBundledSkills`, no `enabledPlugins`, `CLAUDE_CODE_DISABLE_POLICY_SKILLS`. Codex: the agent's dir over `$CODEX_HOME/skills`, `skills.bundled.enabled = false`. Copilot: `ignoredSkillsLocations` and the built-ins in `disabledSkills`. pi: `--no-skills`. With or without agent skills. | the adapter tests `the_skill_tool_follows_the_delivered_skills`, `the_skill_list_follows_the_delivered_skills`, `skills_go_to_the_settings_and_the_replace_prompt`, `delivered_skills_load_with_no_skills`, `overlay_list` |
+| An agent with no skill gets a skill tool (and its built-in skills) | Claude Code: `Skill` in `permissions.deny`. Copilot: `--excluded-tools=skill`. Codex: `skills.include_instructions = false`. pi has no tool. | as above |
+| The dashboard renders a skill as HTML | A description shows as text. The SKILL.md preview goes only through the DOMPurify Markdown sink (F3, F14). | the dashboard tests |
+
+### Residuals
+
+- **A skill is a prompt.** The operator (or a sysadmin agent) can put any
+  instruction in a skill, and a shared config repo lets each instance
+  change the skills of the others, as for the prompts (§12). Give the
+  remote write access only to operators that you trust.
+- **A sysadmin agent writes skills.** A sysadmin agent can change the
+  skills of every agent, as it can change their prompts and settings.
+- **Scripts run in the sandbox.** A skill script runs with the rights of
+  the agent that runs it: its workspace, its targets, and the network. The
+  sandbox is the limit, not the skill.
+- **Codex reads the workspace.** `<workspace>/.agents/skills` and a
+  project `.codex/skills` still load in Codex (no key turns a repo root
+  off). The workspace is the agent's own dir, so such a skill is the
+  agent's own text.
+- **The mechanisms are read, not run.** The live check of
+  `docs/compat.md` ("Skills") is open.

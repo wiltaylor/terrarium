@@ -35,6 +35,7 @@ pub mod runner_supervisor;
 pub mod sandbox;
 pub mod scheduler;
 pub mod settings;
+pub mod skills;
 pub mod store;
 pub mod supervisor;
 pub mod time_param;

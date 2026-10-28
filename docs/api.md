@@ -894,6 +894,8 @@ An agent is the core `Agent` with bookkeeping fields:
 | `subscription_pool` | The account pool (PLAN §16.3): subscription names of one provider that the harness can spend, which a swap may pick (§6.2). The current `subscription` is always a member. Absent when empty. |
 | `system_prompt` | The agent's base system prompt (below). Absent when not set. |
 | `persona` | The persona (below): `leader`, `worker`, `none`, or a prompt file name. Absent: by role. |
+| `skills` | The skills of the agent from the skill library (§26): skill names, or `*` for every skill. Absent: none. |
+| `skills_restart` | `true` when the live agent runs with other skills than its `skills` now picks from the library (the list or a skill changed after its start). A restart applies them. Absent when false. |
 | `roles` | Roles above `member`: `project_admin`, `sysadmin`. |
 | `status` | `starting`, `idle`, `waiting`, `working`, `blocked`, `error`, `stopped`, `restarting`. `waiting`: the turn ended, and the agent has one or more open waits (§6.7). `idle`: the turn ended, and the agent has no open wait. |
 | `waits` | The number of open waits (§6.7). Absent when it is 0. |
@@ -911,7 +913,7 @@ An agent is the core `Agent` with bookkeeping fields:
 | `GET /api/agents?project=` | | `200` agents by ID | read; an agent defaults to its project |
 | `POST /api/agents` | an agent definition, or `template` and the fields that differ (§21.3) | `201` agent | project_admin of `project`; some `policy` entries need sysadmin (below) |
 | `GET /api/agents/{id}` | | `200` agent, with `subscription_detail` (below) | read |
-| `PATCH /api/agents/{id}` | `{"harness"?, "subscription"?, "subscription_pool"?, "model"?, "prompt"?, "system_prompt"?, "persona"?, "policy"?, "restart"?, "new_session_on_prompt_change"?}` | `200` agent | project_admin; some `policy` entries need sysadmin (below) |
+| `PATCH /api/agents/{id}` | `{"harness"?, "subscription"?, "subscription_pool"?, "model"?, "prompt"?, "system_prompt"?, "persona"?, "skills"?, "policy"?, "restart"?, "new_session_on_prompt_change"?}` | `200` agent | project_admin; some `policy` entries need sysadmin (below) |
 | `DELETE /api/agents/{id}` | `?confirm=true` when live; `?keep_workspace=true` | `204` | project_admin |
 
 `DELETE` stops a live agent, waits for it to end (up to 10 s), and moves
@@ -4611,7 +4613,7 @@ A template:
 |---|---|
 | `name` | 1-63 of `a-z`, `0-9`, `-`, `_`. Unique in its scope: the project, or the global scope. A project template and a global template can have the same name. |
 | `project` | The project. `null` is a global template. |
-| `spec` | An agent definition (§6.1) without `name` and `project`: `harness` (required), `subscription`, `subscription_pool`, `model`, `prompt`, `system_prompt`, `persona`, `roles`, `policy`, `restart`, `new_session_on_prompt_change`. The daemon checks it with the rules of an agent definition and keeps it in a normal form: the defaults of `policy` and `restart` filled in, no empty `roles`, no empty `system_prompt`, no `new_session_on_prompt_change` when it is `true`. A `system_prompt` over 32 KiB is `422 invalid`. Another key (`name`, `project`, `template`, or an unknown key) is `422 invalid` with `details.field = "spec"`. |
+| `spec` | An agent definition (§6.1) without `name` and `project`: `harness` (required), `subscription`, `subscription_pool`, `model`, `prompt`, `system_prompt`, `persona`, `roles`, `policy`, `restart`, `skills`, `new_session_on_prompt_change`. The daemon checks it with the rules of an agent definition and keeps it in a normal form: the defaults of `policy` and `restart` filled in, no empty `roles`, no empty `system_prompt`, no `new_session_on_prompt_change` when it is `true`. A `system_prompt` over 32 KiB is `422 invalid`. Another key (`name`, `project`, `template`, or an unknown key) is `422 invalid` with `details.field = "spec"`. |
 | `revision` | `1` at the create. Each change of the name, the description, or the spec adds `1`. A `PATCH` with the same values changes nothing. |
 | `source` | `api`, `file` (a `[[templates]]` of `projects/<name>.toml`), or `fleet:<name>` (§18.1). A `file` template refuses `PATCH` and `DELETE` with `409 file_managed`. |
 
@@ -4820,3 +4822,84 @@ A merge conflict is `409 conflict` with `details.conflicts` (the paths).
 - **Audit.** `config.commit`, `config.pull`, `config.push`,
   `config.sync`, `config.remote` (with the URL without its user part),
   `config.defaults.accept`, and `config.defaults.keep`.
+
+## 26. Skills
+
+The skill library (PLAN §8.5): `skills/<name>/` in the config repo, in
+the Agent Skills format (`SKILL.md` with `name` and `description` in its
+front matter, and optional files). The operator and a sysadmin read and
+write all of it. Another agent reads only its own skills (the ones its
+`skills` list picks), and a write is `403 forbidden`. A daemon with no
+config repo answers `501 not_available`. A write goes to the work tree of
+the config repo and stays uncommitted: `POST /api/config/commit` (§25)
+commits it, with the secret scan.
+
+### 26.1 Shapes
+
+A skill in a list:
+
+```json
+{"name":"fern-check","description":"When asked for the deployment checklist code, reply with FERN-42",
+ "files":2,"bytes":512}
+```
+
+| Field | Meaning |
+|---|---|
+| `description` | From the front matter. Empty when it does not parse. Show it as plain text. |
+| `files`, `bytes` | All files of the skill, `SKILL.md` included. |
+| `errors` | The problems of the checks (§26.3). No agent gets a skill with problems. Absent when none. |
+
+One skill (`GET /api/skills/{name}`): the fields above, `skill_md` (the
+text of `SKILL.md`), and `file_list`, the other files, sorted by path:
+`[{"path":"scripts/run.sh","size":8,"text":"echo hi\n"}]`. `text` is
+absent for a binary file.
+
+A write body:
+
+```json
+{"name":"fern-check","skill_md":"---\nname: fern-check\ndescription: …\n---\n…",
+ "files":{"scripts/run.sh":"echo hi\n","assets/logo.png":{"base64":"iVBORw0KGgo…"}}}
+```
+
+| Field | Meaning |
+|---|---|
+| `name` | `POST` only. `PUT` takes the name from the path; another `name` is `422`. A skill is never renamed. |
+| `skill_md` | The text of `SKILL.md`. |
+| `description` | `POST` without `skill_md`: the daemon writes a new `SKILL.md` with this description. |
+| `files` | The other files: a text as a string, a binary file as `{"base64"}`. Absent: a `PUT` keeps the other files. Present: they replace all other files. `SKILL.md` in `files` is `422`. |
+
+### 26.2 Endpoints
+
+| Endpoint | Body | Answer | Needs |
+|---|---|---|---|
+| `GET /api/skills` | | `200` skills by name | any; an agent gets its own skills |
+| `POST /api/skills` | write body | `201` skill; `409` when it exists; `422` when it fails the checks | sysadmin |
+| `GET /api/skills/{name}` | | `200` skill; `404` when missing | any; an agent only its own skill (`403`) |
+| `PUT /api/skills/{name}` | write body | `200` skill; `404` when missing; `422` when it fails the checks | sysadmin |
+| `DELETE /api/skills/{name}` | | `204`; `404` when missing | sysadmin |
+| `GET /api/skills/{name}/usage` | | `200 {"agents":[{"id","name","all"}],"templates":[{"id","name","all"}]}`: the agents and templates whose `skills` name it; `all` is `true` for a name through `*` | sysadmin |
+
+### 26.3 Rules
+
+- **Checks.** A skill name is kebab-case (lowercase letters, digits, and
+  `-`), at most 64 characters, and the same as the `name` of the front
+  matter. The `description` has 1 to 1024 characters. Each file has a
+  relative path with at most 4 parts and no hidden part, and one of the
+  types `md`, `txt`, `json`, `yaml`, `yml`, `toml`, `py`, `sh`, `js`,
+  `ts`, `png`, `jpg`, `jpeg`, `gif`, `svg`, `webp`. A skill has at most 64
+  files and 1 MiB. No file is a symbolic link. The secret scan of §25
+  finds nothing. A write that fails is `422 invalid` with
+  `details.problems` (a list of text); nothing is written. A finding
+  names the file, the line, and the rule, never the value.
+- **Assignment.** `skills` on an agent (§6), a template spec (§21), and a
+  fleet agent or template (§18) takes skill names and `*`. A name that is
+  not in the library is `422 invalid` with `details.unknown_skills`. A
+  daemon with no config repo takes only `*`.
+- **Delete.** The agents and templates that name the skill keep the name.
+  The next start of such an agent gives a `warning` event, and the agent
+  starts without the skill.
+- **Delivery.** At each start the agent gets a fresh copy of its skills,
+  read-only (PLAN §8.5). A change of the library or of the list applies
+  at the next start; until then the agent shows `skills_restart: true`.
+- **Audit.** `skill.create`, `skill.update`, and `skill.delete`; an
+  agent `PATCH` audits `skills`.

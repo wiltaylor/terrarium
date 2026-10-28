@@ -99,7 +99,49 @@ async fn list(
     for v in &mut rows.items {
         v.harness_version = harness_version(&runs, v.agent.id);
     }
+    mark_skills_restart(&state, &runs, &mut rows.items).await;
     Ok(paged(rows))
+}
+
+/// Set `skills_restart` on each live agent of `views` whose delivered
+/// skills differ from what its `skills` list picks from the library now
+/// (PLAN §8.5).
+async fn mark_skills_restart(
+    state: &Shared,
+    runs: &[crate::supervisor::HarnessRun],
+    views: &mut [AgentView],
+) {
+    let Some(lib) = super::skills::library_opt(state) else {
+        return;
+    };
+    let live: Vec<(usize, std::path::PathBuf, Vec<String>)> = views
+        .iter()
+        .enumerate()
+        .filter(|(_, v)| runs.iter().any(|r| r.agent == v.agent.id))
+        .map(|(i, v)| {
+            (
+                i,
+                terrarium_runner::private_dir(&state.state_dir, v.agent.id),
+                v.agent.skills.clone(),
+            )
+        })
+        .collect();
+    if live.is_empty() {
+        return;
+    }
+    let marks = tokio::task::spawn_blocking(move || {
+        live.into_iter()
+            .filter(|(_, private, list)| crate::skills::restart_needed(&lib, private, list))
+            .map(|(i, _, _)| i)
+            .collect::<Vec<_>>()
+    })
+    .await
+    .unwrap_or_default();
+    for i in marks {
+        if let Some(v) = views.get_mut(i) {
+            v.skills_restart = true;
+        }
+    }
 }
 
 /// The harness version that the live agent `id` runs.
@@ -133,6 +175,8 @@ async fn create(
     for role in &def.roles {
         policy::change_role(&actor, "", &def.project, *role)?;
     }
+    // Each skill is in the library (PLAN §8.5).
+    crate::skills::check_assignment(super::skills::library_opt(&state).as_deref(), &def.skills)?;
     let state_dir = state.work_dir.clone();
     let who = actor.clone();
     let mut def = def;
@@ -192,7 +236,9 @@ async fn show(
     Path(id): Path<String>,
 ) -> ApiResult<Json<Shown>> {
     let mut view = load(&state, &actor, id).await?;
-    view.harness_version = harness_version(&state.supervisor.harness_runs(), view.agent.id);
+    let runs = state.supervisor.harness_runs();
+    view.harness_version = harness_version(&runs, view.agent.id);
+    mark_skills_restart(&state, &runs, std::slice::from_mut(&mut view)).await;
     let subscription_detail = match view.agent.subscription.clone() {
         Some(name) => {
             let harness = view.agent.harness;
@@ -234,6 +280,9 @@ async fn update(
     )?;
     if a.source == projects::SOURCE_FILE {
         return Err(file_managed(&a));
+    }
+    if let Some(list) = &patch.skills {
+        crate::skills::check_assignment(super::skills::library_opt(&state).as_deref(), list)?;
     }
     let id = a.agent.id.to_string();
     let project = a.agent.project.clone();
@@ -284,6 +333,7 @@ async fn update(
                         }
                     }),
                     "persona": patch.persona,
+                    "skills": patch.skills,
                     "policy": patch.policy,
                     "restart": patch.restart,
                 }),

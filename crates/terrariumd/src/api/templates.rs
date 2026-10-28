@@ -133,6 +133,19 @@ fn spec_of(v: Value) -> ApiResult<Spec> {
     }
 }
 
+/// Each skill that a spec names is in the skill library (PLAN §8.5): an
+/// unknown name is `422 invalid`. A spec with a `skills` that is not a
+/// list of strings fails later, in the spec check.
+fn check_skills(state: &Shared, spec: &Spec) -> ApiResult<()> {
+    let Some(list) = spec
+        .get("skills")
+        .and_then(|v| serde_json::from_value::<Vec<String>>(v.clone()).ok())
+    else {
+        return Ok(());
+    };
+    crate::skills::check_assignment(super::skills::library_opt(state).as_deref(), &list)
+}
+
 /// The body of `POST /api/templates`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -152,11 +165,13 @@ async fn create(
 ) -> ApiResult<(StatusCode, Json<Template>)> {
     let project = scope_of(&actor, b.project);
     policy::manage_templates(&actor, project.as_deref(), "")?;
+    let spec = spec_of(b.spec)?;
+    check_skills(&state, &spec)?;
     let new = NewTemplate {
         name: b.name,
         project,
         description: b.description.unwrap_or_default(),
-        spec: spec_of(b.spec)?,
+        spec,
         created_by: actor.label(),
         source: SOURCE_API.into(),
     };
@@ -198,10 +213,14 @@ async fn update(
     if t.source == SOURCE_FILE {
         return Err(file_managed(&t));
     }
+    let spec = b.spec.map(spec_of).transpose()?;
+    if let Some(spec) = &spec {
+        check_skills(&state, spec)?;
+    }
     let patch = TemplatePatch {
         name: b.name,
         description: b.description,
-        spec: b.spec.map(spec_of).transpose()?,
+        spec,
         source: None,
     };
     let v = state
@@ -317,6 +336,7 @@ async fn from_agent(
         roles: a.agent.roles.clone(),
         policy: a.agent.policy.clone(),
         restart: a.agent.restart,
+        skills: a.agent.skills.clone(),
         new_session_on_prompt_change: a.agent.new_session_on_prompt_change,
     };
     let new = NewTemplate {

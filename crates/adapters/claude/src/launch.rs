@@ -36,6 +36,10 @@ pub enum SessionStart<'a> {
 ///    - `env`: the names that the launch sets (`CLAUDE_CONFIG_DIR`, the
 ///      quiet env, `IS_SANDBOX`) are removed from the user `env`, so the
 ///      home and the quiet start stay as the sandbox needs them.
+///    - The skill tool (PLAN §8.5): an agent with no delivered skill gets
+///      `Skill` in `permissions.deny`; an agent with skills gets no deny
+///      (and no `allow`/`ask` rule) for it, also when the user file has
+///      one.
 ///
 /// Each hook runs `<hook_program> hook <Name>`. The CLI forwards the stdin
 /// JSON to `TERRARIUM_SOCKET`. The payload also names the event in
@@ -79,6 +83,13 @@ pub fn settings_json(opts: &ClaudeOptions, agent: &Agent) -> Value {
                 if !list.iter().any(|v| v.as_str() == Some(tool)) {
                     list.push(Value::String((*tool).to_owned()));
                 }
+            }
+            if agent.delivered_skills.is_empty() {
+                if !list.iter().any(|v| v.as_str() == Some(f.skill_tool)) {
+                    list.push(Value::String(f.skill_tool.to_owned()));
+                }
+            } else {
+                list.retain(|v| v.as_str() != Some(f.skill_tool));
             }
         }
         // An `allow` or `ask` rule for a forced tool would not win over the
@@ -142,6 +153,9 @@ fn set_dotted(root: &mut Map<String, Value>, key: &str, value: Value) {
 ///   template still sends the old prompt.
 /// - `--session-id <uuid>` or `--resume <id>`: see [`SessionStart`].
 /// - `--model <m>` when the agent sets one.
+/// - `--plugin-dir <claude dir>/plugin` when the agent has skills (PLAN
+///   §8.5): the plugin holds only the agent's skills
+///   ([`crate::config::plugin_dir`]).
 /// - `--append-system-prompt <text>` (default) or `--system-prompt <text>`
 ///   (see [`PromptMode`]).
 pub fn build(
@@ -171,6 +185,11 @@ pub fn build(
     };
     if let Some(model) = agent.model.as_deref().filter(|m| !m.is_empty()) {
         spec = spec.arg(f.model).arg(model);
+    }
+    if !agent.delivered_skills.is_empty() {
+        spec = spec
+            .arg(f.plugin_dir)
+            .arg(path_str(&crate::config::plugin_dir(agent)));
     }
     if let Some(text) = prompt.map(str::trim).filter(|t| !t.is_empty()) {
         let flag = match opts.prompt_mode_for(agent) {
@@ -427,6 +446,46 @@ mod tests {
             !spec
                 .env
                 .contains_key("CLAUDE_CODE_DISABLE_DANGEROUS_RM_TIMEOUT")
+        );
+    }
+
+    /// PLAN §8.5: an agent with no skill has no skill tool and no plugin;
+    /// an agent with skills gets its plugin dir and the tool, whatever
+    /// the user file says. The bundled skills stay off, and no
+    /// `enabledPlugins` of the user file goes through.
+    #[test]
+    fn the_skill_tool_follows_the_delivered_skills() {
+        let opts = ClaudeOptions::default();
+        let mut agent = test_agent(None);
+        agent.harness_dir = Some("/state/agents/A/harness".into());
+        agent.harness_settings = Some(json!({
+            "permissions": {"deny": ["Skill"], "allow": ["Skill"]},
+            "disableBundledSkills": false,
+            "enabledPlugins": {"evil@market": true},
+        }));
+        let deny = |spec: &LaunchSpec| -> Vec<String> {
+            let s: Value = serde_json::from_str(value_after(spec, "--settings").expect("settings"))
+                .expect("json");
+            assert_eq!(s["disableBundledSkills"], true);
+            assert!(s.get("enabledPlugins").is_none());
+            s["permissions"]["deny"]
+                .as_array()
+                .expect("deny")
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect()
+        };
+        let spec = build(&opts, &agent, SessionStart::Fresh("x"), None, false);
+        assert_eq!(deny(&spec).iter().filter(|t| *t == "Skill").count(), 1);
+        assert!(!args(&spec).contains(&"--plugin-dir"));
+        assert_eq!(spec.env["CLAUDE_CODE_DISABLE_POLICY_SKILLS"], "1");
+
+        agent.delivered_skills = vec!["fern-check".into()];
+        let spec = build(&opts, &agent, SessionStart::Fresh("x"), None, false);
+        assert!(!deny(&spec).iter().any(|t| t == "Skill"));
+        assert_eq!(
+            value_after(&spec, "--plugin-dir"),
+            Some("/state/agents/A/harness/claude/plugin")
         );
     }
 

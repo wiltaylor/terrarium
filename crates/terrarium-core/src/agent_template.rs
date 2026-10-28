@@ -38,6 +38,7 @@ pub const SPEC_KEYS: &[&str] = &[
     "roles",
     "policy",
     "restart",
+    "skills",
     "new_session_on_prompt_change",
 ];
 
@@ -118,6 +119,7 @@ pub fn to_def(spec: &Spec, name: &str, project: &str) -> Result<AgentDef, String
     let mut def: AgentDef = serde_json::from_value(Value::Object(m)).map_err(|e| e.to_string())?;
     def.system_prompt = crate::config::clean_system_prompt(def.system_prompt)?;
     def.persona = crate::config::clean_persona(def.persona)?;
+    def.skills = crate::skills::clean_list(&def.skills)?;
     Ok(def)
 }
 
@@ -218,6 +220,7 @@ fn full(def: &AgentDef) -> Spec {
     p.insert("cross_project".into(), to(&def.policy.cross_project));
     m.insert("policy".into(), Value::Object(p));
     m.insert("restart".into(), to(&def.restart));
+    m.insert("skills".into(), to(&def.skills));
     m.insert(
         "new_session_on_prompt_change".into(),
         Value::Bool(def.new_session_on_prompt_change),

@@ -163,6 +163,9 @@ pub fn user_overrides(agent: &Agent, forced: &[&str]) -> Vec<String> {
 /// - In the sandbox (a `harness_workspace` is set):
 ///   `-c sqlite_home="<agent dir>/codex/sqlite"`, the agent's own SQLite
 ///   files ([`config`]). With no sandbox, Codex keeps them in `CODEX_HOME`.
+/// - `-c skills.include_instructions=<bool>`: true only for an agent with
+///   delivered skills (PLAN §8.5). Its skills dir is bound over
+///   `$CODEX_HOME/skills` ([`config`]).
 /// - On a resume, `-c tui.resume_cwd="session"`.
 /// - The prompt: `-c developer_instructions="<text>"` (default) or, for an
 ///   agent with its own base system prompt,
@@ -203,6 +206,12 @@ pub fn build(
     for (key, value) in f.quiet_config.iter().chain(f.hardening_config) {
         spec = spec.arg(f.config).arg(format!("{key}={value}"));
     }
+    // PLAN §8.5: the skill list only for an agent with skills.
+    spec = spec.arg(f.config).arg(format!(
+        "{}={}",
+        f.skill_instructions,
+        !agent.delivered_skills.is_empty()
+    ));
     for event in f.hook_events {
         spec = spec
             .arg(f.config)
@@ -401,10 +410,36 @@ env = { "A.B" = "x" }
             "web_search=\"disabled\"",
             "features.image_generation=true",
             "agents.enabled=false",
-            "skills.bundled.enabled=false",
         ] {
             assert!(c.iter().any(|o| o == want), "{want}: {c:?}");
         }
+    }
+
+    /// PLAN §8.5: no bundled skills whatever the user file says, and the
+    /// skill list only for an agent with skills.
+    #[test]
+    fn the_skill_list_follows_the_delivered_skills() {
+        let mut agent = test_agent(None);
+        agent.harness_settings = Some(
+            terrarium_core::harness_settings::parse(
+                "[skills]\ninclude_instructions = true\n[skills.bundled]\nenabled = true\n",
+                terrarium_core::HarnessId::Codex,
+            )
+            .expect("toml"),
+        );
+        let spec = build(&sandbox_opts(), &agent, None, None);
+        let c = overrides(&spec);
+        assert!(c.contains(&"skills.bundled.enabled=false"), "{c:?}");
+        assert!(!c.contains(&"skills.bundled.enabled=true"), "{c:?}");
+        assert_eq!(
+            c.iter()
+                .filter(|o| o.starts_with("skills.include_instructions"))
+                .collect::<Vec<_>>(),
+            [&"skills.include_instructions=false"]
+        );
+        agent.delivered_skills = vec!["fern-check".into()];
+        let spec = build(&sandbox_opts(), &agent, None, None);
+        assert!(overrides(&spec).contains(&"skills.include_instructions=true"));
     }
 
     /// D5 and the start-up dialogs: the forced keys go to every launch,

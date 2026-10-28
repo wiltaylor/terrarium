@@ -27,6 +27,7 @@ const ProjectsPage = lazy(() => import("../features/projects/ProjectsPage"));
 const ProjectSettings = lazy(() => import("../features/projects/ProjectSettings"));
 const SettingsPage = lazy(() => import("../features/settings/SettingsPage"));
 const ConfigPage = lazy(() => import("../features/config/ConfigPage"));
+const SkillsPage = lazy(() => import("../features/skills/SkillsPage"));
 // Mock only: the hostile payloads, to eyeball that the sanitizer keeps them inert.
 const XssPage = lazy(() => import("../features/devxss/XssPage"));
 
@@ -64,6 +65,7 @@ export function App() {
         <Route path="/agents" component={AgentsPage} />
         <Route path="/agents/:id" component={AgentDetail} />
         <Route path="/templates" component={TemplatesPage} />
+        <Route path="/skills/:name?" component={SkillsPage} />
         <Route path="/subscriptions" component={SubscriptionsPage} />
         <Route path="/mail" component={MailPage} />
         <Route path="/inbox" component={InboxPage} />

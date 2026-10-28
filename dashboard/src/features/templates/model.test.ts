@@ -122,4 +122,25 @@ describe("template model", () => {
     expect(applyTemplate(t.spec, body)).not.toHaveProperty("persona");
     expect(applyTemplate(t.spec, { name: "w1", project: "p", template: "w" }).persona).toBe("leader");
   });
+
+  it("round-trips the skills: in the spec when set, [] in a create with a template so the form wins", () => {
+    const t = tpl("w", "p", { spec: { ...tpl("w", "p").spec, skills: ["fern-check"] } });
+    const form = specToForm(t.spec, "p", "w1");
+    expect(form.skills).toEqual(["fern-check"]);
+    expect(formToSpec(form).skills).toEqual(["fern-check"]);
+    expect(formToSpec({ ...form, skills: [] })).not.toHaveProperty("skills");
+    expect(specToForm(tpl("w", "p").spec).skills).toEqual([]);
+    // A template form: a changed skill list is a spec change.
+    const tf = templateToForm(t);
+    expect(formToTemplatePatch(t, tf)).toEqual({});
+    expect(formToTemplatePatch(t, { ...tf, agent: { ...tf.agent, skills: ["*"] } }).spec?.skills).toEqual(["*"]);
+    expect(formToNewTemplate({ ...emptyTemplateForm(), name: "n", agent: { ...emptyTemplateForm().agent, skills: ["a"] } }).spec.skills).toEqual(["a"]);
+    // The create body: the form's list, or [] to clear the template's.
+    expect(formToCreate(form, "w").skills).toEqual(["fern-check"]);
+    const cleared = formToCreate({ ...form, skills: [] }, "w");
+    expect(cleared.skills).toEqual([]);
+    expect(applyTemplate(t.spec, cleared).skills).toEqual([]);
+    expect(applyTemplate(t.spec, { name: "w1", project: "p", template: "w" }).skills).toEqual(["fern-check"]);
+    expect(formToCreate({ ...form, skills: [] }, null)).not.toHaveProperty("skills");
+  });
 });

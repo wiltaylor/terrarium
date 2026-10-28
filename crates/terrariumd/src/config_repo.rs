@@ -11,6 +11,9 @@
 //! - `export/`: the templates, the schedules, and the projects with their
 //!   agents, targets, and repos, as fleet files ([`export_files`]). No
 //!   runtime state, and no ID of this instance.
+//! - `skills/`: the skill library (PLAN §8.5, `crate::skills`), one dir
+//!   for each skill, with the file types of
+//!   `terrarium_core::skills::EXTENSIONS`.
 //! - `README.md`, `.gitignore`.
 //!
 //! What never goes in: the harness homes (`config/<harness>`: sessions,
@@ -79,6 +82,7 @@ pub const GITIGNORE: &str = "\
 !/prompts/
 !/harness/
 !/export/
+!/skills/
 /prompts/**
 !/prompts/**/
 !/prompts/**/*.md
@@ -93,6 +97,24 @@ pub const GITIGNORE: &str = "\
 !/export/**/*.json
 !/export/**/*.yaml
 !/export/**/*.md
+/skills/**
+!/skills/**/
+!/skills/**/*.md
+!/skills/**/*.txt
+!/skills/**/*.json
+!/skills/**/*.yaml
+!/skills/**/*.yml
+!/skills/**/*.toml
+!/skills/**/*.py
+!/skills/**/*.sh
+!/skills/**/*.js
+!/skills/**/*.ts
+!/skills/**/*.png
+!/skills/**/*.jpg
+!/skills/**/*.jpeg
+!/skills/**/*.gif
+!/skills/**/*.svg
+!/skills/**/*.webp
 # Credential files never go in, whatever their type.
 .env*
 .credentials.json

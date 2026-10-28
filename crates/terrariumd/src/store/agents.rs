@@ -41,6 +41,12 @@ pub struct AgentView {
     /// known. The API fills it from the supervisor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness_version: Option<String>,
+    /// The live agent runs with other skills than its `skills` list now
+    /// picks from the library (PLAN §8.5): the list or a skill changed
+    /// after the start. A restart applies them. Absent when false. The
+    /// API fills it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub skills_restart: bool,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -94,6 +100,8 @@ fn base_row(r: &Row<'_>) -> rusqlite::Result<AgentView> {
             prompt: r.get("prompt")?,
             system_prompt: r.get("system_prompt")?,
             persona: r.get("persona")?,
+            skills: json_col(&r.get::<_, String>("skills")?),
+            delivered_skills: Vec::new(),
             roles: Vec::new(),
             policy: serde_json::from_str(&policy).unwrap_or_default(),
             restart: restart_from(&r.get::<_, String>("restart")?),
@@ -110,6 +118,7 @@ fn base_row(r: &Row<'_>) -> rusqlite::Result<AgentView> {
         waits: 0,
         waiting_on: None,
         harness_version: None,
+        skills_restart: false,
         created_at: r.get("created_at")?,
         updated_at: r.get("updated_at")?,
     })
@@ -294,7 +303,13 @@ fn check_def(def: &AgentDef) -> ApiResult<()> {
     if let Some(p) = &def.persona {
         terrarium_core::config::check_persona(p.trim()).map_err(ApiError::invalid)?;
     }
+    terrarium_core::skills::clean_list(&def.skills).map_err(ApiError::invalid)?;
     Ok(())
+}
+
+/// A skills list as the store keeps it (`terrarium_core::skills::clean_list`).
+fn stored_skills(list: &[String]) -> ApiResult<Vec<String>> {
+    terrarium_core::skills::clean_list(list).map_err(ApiError::invalid)
 }
 
 /// The persona as the store keeps it: `None` for an empty name.
@@ -369,15 +384,16 @@ pub fn create_from(
     agent.workspace = crate::workspace::dir(work_dir, &def.project, &def.name);
     agent.system_prompt = stored_system_prompt(agent.system_prompt.as_ref()).cloned();
     agent.persona = stored_persona(agent.persona.as_ref());
+    agent.skills = stored_skills(&agent.skills)?;
     let id = agent.id.to_string();
     let at = now();
     t.execute(
         "INSERT INTO agents (id, name, project, harness, subscription, model, prompt, policy,
                              restart, status, workspace, source, created_at, updated_at,
                              new_session_on_prompt_change, template, system_prompt,
-                             subscription_pool, persona)
+                             subscription_pool, persona, skills)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'stopped', ?10, ?11, ?12, ?12, ?13, ?14,
-                 ?15, ?16, ?17)",
+                 ?15, ?16, ?17, ?18)",
         params![
             id,
             agent.name,
@@ -395,7 +411,8 @@ pub fn create_from(
             template.map(serde_json::to_string).transpose()?,
             agent.system_prompt,
             serde_json::to_string(&agent.subscription_pool)?,
-            agent.persona
+            agent.persona,
+            serde_json::to_string(&agent.skills)?
         ],
     )?;
     set_roles(t, &id, &def.project, &def.roles)?;
@@ -446,6 +463,10 @@ pub struct AgentPatch {
     pub restart: Option<RestartPolicy>,
     #[serde(default)]
     pub new_session_on_prompt_change: Option<bool>,
+    /// The skills (PLAN §8.5): names of the skill library, or `*`. `[]`
+    /// clears them. The API checks that each name is in the library.
+    #[serde(default)]
+    pub skills: Option<Vec<String>>,
 }
 
 /// A field that is present: `Some(None)` for `null`, `Some(Some(v))` for a
@@ -471,6 +492,7 @@ pub fn write_def(t: &mut Tx<'_>, id: &str, p: &AgentPatch) -> ApiResult<()> {
             prompt: None,
             system_prompt: None,
             persona: None,
+            skills: Vec::new(),
             roles: Vec::new(),
             policy: policy.clone(),
             restart: RestartPolicy::default(),
@@ -488,6 +510,7 @@ pub fn write_def(t: &mut Tx<'_>, id: &str, p: &AgentPatch) -> ApiResult<()> {
     if let Some(Some(name)) = &persona {
         terrarium_core::config::check_persona(name).map_err(ApiError::invalid)?;
     }
+    let skills = p.skills.as_deref().map(stored_skills).transpose()?;
     // `?N IS NOT NULL` is the "field present" flag of each nullable column.
     t.execute(
         "UPDATE agents SET
@@ -501,6 +524,7 @@ pub fn write_def(t: &mut Tx<'_>, id: &str, p: &AgentPatch) -> ApiResult<()> {
             system_prompt = CASE WHEN ?13 THEN ?14 ELSE system_prompt END,
             subscription_pool = coalesce(?15, subscription_pool),
             persona = CASE WHEN ?16 THEN ?17 ELSE persona END,
+            skills = coalesce(?18, skills),
             updated_at = ?8
          WHERE id = ?1",
         params![
@@ -524,6 +548,7 @@ pub fn write_def(t: &mut Tx<'_>, id: &str, p: &AgentPatch) -> ApiResult<()> {
                 .transpose()?,
             persona.is_some(),
             persona.flatten(),
+            skills.as_ref().map(serde_json::to_string).transpose()?,
         ],
     )?;
     Ok(())
@@ -819,6 +844,7 @@ pub fn sync_def(t: &mut Tx<'_>, id: &str, def: &AgentDef) -> ApiResult<bool> {
     let subscription = synced_subscription(before.agent.subscription.as_deref(), def);
     let pool = clean_pool(&def.subscription_pool);
     let persona = stored_persona(def.persona.as_ref());
+    let skills = stored_skills(&def.skills)?;
     let changed = before.source != projects::SOURCE_FILE
         || before.agent.harness != def.harness
         || before.agent.subscription != subscription
@@ -827,6 +853,7 @@ pub fn sync_def(t: &mut Tx<'_>, id: &str, def: &AgentDef) -> ApiResult<bool> {
         || before.agent.prompt != def.prompt
         || before.agent.system_prompt.as_ref() != system_prompt
         || before.agent.persona != persona
+        || before.agent.skills != skills
         || before.agent.policy != def.policy
         || before.agent.restart != def.restart;
     if changed {
@@ -834,7 +861,7 @@ pub fn sync_def(t: &mut Tx<'_>, id: &str, def: &AgentDef) -> ApiResult<bool> {
             "UPDATE agents SET harness = ?2, subscription = ?3, model = ?4, prompt = ?5,
                     policy = ?6, restart = ?7, source = 'file', updated_at = ?8,
                     new_session_on_prompt_change = ?9, system_prompt = ?10,
-                    subscription_pool = ?11, persona = ?12
+                    subscription_pool = ?11, persona = ?12, skills = ?13
              WHERE id = ?1",
             params![
                 id,
@@ -848,7 +875,8 @@ pub fn sync_def(t: &mut Tx<'_>, id: &str, def: &AgentDef) -> ApiResult<bool> {
                 def.new_session_on_prompt_change,
                 system_prompt,
                 serde_json::to_string(&pool)?,
-                persona
+                persona,
+                serde_json::to_string(&skills)?
             ],
         )?;
     }

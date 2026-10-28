@@ -94,6 +94,7 @@ const AGENT_KEYS: &[&str] = &[
     "roles",
     "policy",
     "restart",
+    "skills",
     "new_session_on_prompt_change",
     "start",
 ];
@@ -131,6 +132,7 @@ const TEMPLATE_KEYS: &[&str] = &[
     "roles",
     "policy",
     "restart",
+    "skills",
     "new_session_on_prompt_change",
 ];
 
@@ -867,6 +869,13 @@ fn project(
                     return None;
                 }
             };
+            def.skills = match crate::skills::clean_list(&def.skills) {
+                Ok(l) => l,
+                Err(e) => {
+                    issues.push(Issue::error(&at, e));
+                    return None;
+                }
+            };
             Some(FleetAgent {
                 def,
                 start,
@@ -1523,6 +1532,40 @@ kind = "docker"
 host = "h1"
 image = "alpine"
 "#;
+
+    /// PLAN §8.5: `skills` on a fleet agent and a fleet template; a bad
+    /// name is an error.
+    #[test]
+    fn skills_on_agents_and_templates() {
+        let text = r#"
+name = "skills"
+
+[[templates]]
+name = "reviewer"
+harness = "claude"
+skills = ["code-review", "code-review", "*"]
+
+[[projects]]
+name = "alpha"
+
+[[projects.agents]]
+name = "one"
+harness = "codex"
+skills = ["fern-check"]
+"#;
+        let f = parse(text, None).ok().unwrap();
+        assert_eq!(f.projects[0].agents[0].def.skills, ["fern-check"]);
+        let spec = &f.templates[0].spec;
+        let def = crate::agent_template::to_def(spec, "x", "alpha").unwrap();
+        assert_eq!(def.skills, ["code-review", "*"]);
+        let bad = text.replace("[\"fern-check\"]", "[\"Fern Check\"]");
+        let p = parse(&bad, None);
+        assert!(
+            errors(&p).iter().any(|e| e.contains("skill name")),
+            "{:?}",
+            errors(&p)
+        );
+    }
 
     #[test]
     fn defaults_apply_where_the_agent_is_silent() {

@@ -39,6 +39,8 @@ parameters.
 
   The tool reports an error when a patch does not apply. Do not read the
   file again only to check a patch that applied.
+- **Skills**, when listed. When a skill in the Skills list fits the task,
+  read its `SKILL.md` and follow it before you start the work.
 - **Images.** `tools.view_image` shows you a local image, for example a
   screenshot from `terrarium screen <target> shot`.
 - **Image generation.** The tool `image_gen.imagegen` makes or edits an

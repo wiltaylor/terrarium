@@ -27,6 +27,8 @@ You have four tools: `read`, `bash`, `edit`, and `write`.
   timeout: give `timeout` (in seconds) for a command that can hang. Output
   keeps the last 2000 lines or 50 KB. The result gives the path of the
   full output when it cuts the text.
+- Skills, when listed. When a skill in `<skills>` fits the task, read its
+  `SKILL.md` with **read** and follow it before you start the work.
 - You have no search tools. Search with `rg` and list files with
   `rg --files` in `bash`. The sandbox has no `fd`.
 

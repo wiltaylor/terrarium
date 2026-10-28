@@ -83,6 +83,9 @@ pub fn model_args(
 ///   shared home, which is the operator's.
 /// - `--no-skills --no-prompt-templates`: no global skills (pi reads
 ///   `~/.agents/skills` outside its home) and no `/template` expansions.
+/// - `--skill <agent dir>/skills/<name>` for each delivered skill (PLAN
+///   §8.5). pi lists them in the `<skills>` prompt section, and the model
+///   reads the `SKILL.md` with its `read` tool. pi has no skill tool.
 /// - `--no-context-files` (unless [`PiOptions::context_files`]): pi does
 ///   not load `AGENTS.md`/`CLAUDE.md`. It would load the one in the shared
 ///   home too, which is the operator's. The prompt templates tell the agent
@@ -117,8 +120,12 @@ pub fn build(
         .arg(f.extension)
         .arg(path_str(&config::extension_path(agent)))
         .arg(f.no_mcp)
-        .arg(f.no_skills)
-        .arg(f.no_prompt_templates);
+        .arg(f.no_skills);
+    let skills = terrarium_core::skills::delivered_dir(&config::agent_dir(agent));
+    for name in &agent.delivered_skills {
+        spec = spec.arg(f.skill).arg(path_str(&skills.join(name)));
+    }
+    spec = spec.arg(f.no_prompt_templates);
     if !opts.context_files {
         spec = spec.arg(f.no_context_files);
     }
@@ -244,6 +251,32 @@ mod tests {
         assert_eq!(spec.env["PI_TELEMETRY"], "0");
         assert_eq!(spec.env["PI_OFFLINE"], "1");
         assert_eq!(spec.env.len(), 3);
+    }
+
+    /// PLAN §8.5: one `--skill` for each delivered skill, after
+    /// `--no-skills` (which stops only discovery).
+    #[test]
+    fn delivered_skills_load_with_no_skills() {
+        let mut agent = test_agent(None);
+        let spec = build(&PiOptions::default(), &agent, "s", None, None);
+        assert!(!spec.args.iter().any(|a| a == "--skill"));
+        agent.delivered_skills = vec!["a".into(), "fern-check".into()];
+        let spec = build(&PiOptions::default(), &agent, "s", None, None);
+        let dir = terrarium_core::skills::delivered_dir(&config::agent_dir(&agent));
+        let i = spec
+            .args
+            .iter()
+            .position(|a| a == "--no-skills")
+            .expect("no-skills");
+        assert_eq!(
+            spec.args[i + 1..i + 5],
+            [
+                "--skill".to_owned(),
+                dir.join("a").to_string_lossy().into_owned(),
+                "--skill".to_owned(),
+                dir.join("fern-check").to_string_lossy().into_owned(),
+            ]
+        );
     }
 
     #[test]

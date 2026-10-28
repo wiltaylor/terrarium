@@ -80,6 +80,15 @@ pub struct CopilotFlags {
     /// Copilot CLI, 2a). Each is in `copilot --help` of 1.0.103; a start
     /// with them is not tested.
     pub forced_args: &'static [&'static str],
+    /// Removes tools from the model (`--excluded-tools`, in `--help`).
+    /// The adapter gives it the skill tool for an agent with no skill.
+    pub excluded_tools: &'static str,
+    /// The tool that loads a skill (PLAN §8.5). Its description lists no
+    /// skill; the list is `<available_skills>` in the system message.
+    pub skill_tool: &'static str,
+    /// The built-in skills (`builtin-skills/` of the package). The adapter
+    /// puts each in `disabledSkills`: only Terrarium-managed skills load.
+    pub builtin_skills: &'static [&'static str],
 }
 
 /// Copilot CLI 1.0.x. Measured on 1.0.103 (`docs/compat.md`). Copilot
@@ -146,5 +155,12 @@ pub const COPILOT_1_0: CopilotFlags = CopilotFlags {
         "--disable-builtin-mcps",
         // No session export to GitHub for this run.
         "--sync-session=off",
+    ],
+    excluded_tools: "--excluded-tools",
+    skill_tool: "skill",
+    builtin_skills: &[
+        "customize-cloud-agent",
+        "github-pr-media",
+        "discover-resources",
     ],
 };

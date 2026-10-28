@@ -35,6 +35,8 @@ system message in spikes/copilot/session-id-and-resume/captured/events.jsonl.
     stops a shell. Stop each shell that you started before you end the
     turn: a running shell keeps you busy.
   - Stop a process with `kill <PID>`. Do not use `pkill` or `killall`.
+- **skill**, when present. When one of your listed skills fits the task,
+  load it with `skill` (the name only) before you start the work.
 - **sql** has a session database with the tables `todos` and `todo_deps`.
   They exist already: do not create them. Use them to track the steps of a
   long task.

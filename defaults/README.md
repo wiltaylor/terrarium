@@ -14,6 +14,7 @@ instances (`terrarium admin config sync`).
 | `harness/codex/config.toml` | Codex settings, given as `-c` overrides. |
 | `harness/copilot/settings.json` | Copilot CLI settings, merged into the settings copy of each agent. |
 | `harness/pi/settings.json` | pi settings, merged into the settings copy of each agent. |
+| `skills/<name>/` | The skill library: one folder for each skill, with `SKILL.md` (front matter `name` and `description`, then the instructions) and optional `scripts/`, `references/`, `assets/`. An agent gets only the skills that its `skills` list names. Terrarium ships no skill. `terrarium skill validate` checks them. |
 | `export/` | The declarative export of the templates, schedules, and projects (agents, targets, repos), as fleet files. The daemon writes it at each commit. |
 
 A change applies at the next start or restart of an agent. A file that
