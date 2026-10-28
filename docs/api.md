@@ -1036,15 +1036,20 @@ All need project_admin. The work happens in the background. A `send`
 writes a row to the delivery log first (§6.6).
 
 **A turn is tagged (PLAN §8.5).** A `send` waits until the agent is
-`idle`, and types `[User] <text>`: the tag line names the operator. A send
-by a leader agent gets the same tag. The text is not quoted, but a line in
+`idle`, and types `[User] <text>` when the operator calls it (the
+dashboard, or the API or the CLI with the operator's token or session).
+A send from an agent (for example a lead's `terrarium agent send
+<worker> ...`) types `[Agent:<project>/<name>] <text>`: it names the
+calling agent and is never `[User]`. The text is not quoted, but a line in
 it that would read as a tag is defused (`[User]` becomes `[\User]`). A
 schedule `turn` action types `[System:schedule <name>] <text>`. Because a
 tagged turn starts with `[`, the harness never runs it as a slash command
 or a shell command. (An adapter still puts U+00A0 in front of an
 untagged text that starts with `/` or `!`, or of a lone `$` in Copilot.)
 To run a harness command on purpose, use `raw` (§6.5): a raw text has no
-tag, and its tag-like lines are defused. The answer shows the agent when
+tag, and its tag-like lines are defused. A raw text and keys stay
+untagged for an agent caller too, so untagged text is the operator or a
+lead with the PTY rights. The answer shows the agent when
 the daemon accepted the call; watch the events (§8) for the status
 changes.
 
@@ -1372,8 +1377,8 @@ harness session.
 | `kind` | `text`, `thinking`, `tool_call`, `tool_result`, or `system`. |
 | `text` | Markdown or plain text: `text`, `thinking`, and `system` blocks. Cut at 64 KiB with `truncated: true`. |
 | `redacted` | `true` on a `thinking` block when the harness stores no thinking text (only a signature or encrypted content). |
-| `origin` | On a user `text`: `operator`, `agent_mail_pointer`, `system`, or `user`. See below. |
-| `parts` | On a user `text` that starts with a turn tag (PLAN §8.5): one object for each tagged block, in order. `source` is `user`, `mailbox` (with `sender`, `subject`, `thread`, `message`), or `system` (with `kind`, and `detail` for `schedule <name>`). `body` is the text after the tag line: for a mail, the quoted body. Left out on an untagged text. `text` keeps the raw turn. |
+| `origin` | On a user `text`: `operator`, `agent`, `agent_mail_pointer`, `system`, or `user`. See below. |
+| `parts` | On a user `text` that starts with a turn tag (PLAN §8.5): one object for each tagged block, in order. `source` is `user`, `agent` (with `sender`, `project/agent`), `mailbox` (with `sender`, `subject`, `thread`, `message`), or `system` (with `kind`, and `detail` for `schedule <name>`). `body` is the text after the tag line: for a mail, the quoted body. Left out on an untagged text. `text` keeps the raw turn. |
 | `tool` | On a `tool_call`: `id` (the harness's call ID), `name`, `input` (JSON; an input over 64 KiB becomes a cut string), and `summary` (one line). |
 | `result` | On a `tool_result`: `tool_id` (the `tool.id` of its call), `output` (a string, cut at 64 KiB with `truncated: true`), and `is_error`. |
 | `model` | The model of an assistant block, when the harness records it. |
@@ -1391,13 +1396,15 @@ lists them.
 (a `<task-notification>`, a `<system_notification>`, `<environment_context>`,
 a meta message) and `user` on a typed prompt. A typed prompt that starts
 with a turn tag gets its origin from the first tag: `[User]` gives
-`operator`, `[Mailbox:...]` gives `agent_mail_pointer`, and
+`operator`, `[Agent:...]` gives `agent`, `[Mailbox:...]` gives
+`agent_mail_pointer`, and
 `[System:...]` gives `system`. It also gets `parts`. The daemon also
 writes a row to its delivery log before it types a turn (the SHA-256 of
 the text with whitespace collapsed, not the text, and the origin of its
 tag). An untagged prompt that matches a row gets the origin of the row. A
 prompt that someone typed into the terminal, and a raw send, stay
-`user`: they count as the operator's.
+`user`: they count as the operator's (a raw send can also come from a
+lead with the PTY rights).
 
 ```json
 {"seq":7,"role":"user","kind":"text","origin":"agent_mail_pointer",

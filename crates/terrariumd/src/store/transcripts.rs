@@ -30,6 +30,7 @@ pub fn text_hash(text: &str) -> String {
 fn origin_str(o: Origin) -> &'static str {
     match o {
         Origin::Operator => "operator",
+        Origin::Agent => "agent",
         Origin::AgentMailPointer => "agent_mail_pointer",
         Origin::System => "system",
         Origin::User => "user",
@@ -39,6 +40,7 @@ fn origin_str(o: Origin) -> &'static str {
 fn origin_from(s: &str) -> Option<Origin> {
     Some(match s {
         "operator" => Origin::Operator,
+        "agent" => Origin::Agent,
         "agent_mail_pointer" => Origin::AgentMailPointer,
         "system" => Origin::System,
         "user" => Origin::User,

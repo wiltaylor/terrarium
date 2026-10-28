@@ -96,6 +96,7 @@ describe("turn usage and footer", () => {
 describe("origin chips", () => {
   it("names who typed a user turn", () => {
     expect(originChip("operator")?.label).toBe("you");
+    expect(originChip("agent")?.label).toBe("agent");
     expect(originChip("agent_mail_pointer")?.label).toBe("mail pointer");
     expect(originChip("system")?.label).toBe("system");
     expect(originChip("user")?.label).toBe("terminal");
@@ -230,6 +231,7 @@ describe("tagged turns (PLAN §8.5)", () => {
 
   it("names the source of each part", () => {
     expect(partBadge({ source: "user", body: "go" }).label).toBe("User");
+    expect(partBadge({ source: "agent", sender: "ht/lead", body: "go" }).label).toBe("Agent ht/lead");
     expect(partBadge(mail).label).toBe("Mail from ht/lead · Build fails");
     expect(partBadge({ ...mail, subject: "" }).label).toBe("Mail from ht/lead");
     expect(partBadge({ source: "system", kind: "recap", body: "x" }).label).toBe("System: recap");

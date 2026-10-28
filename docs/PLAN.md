@@ -674,7 +674,8 @@ recap turn, and the schedule turns.
 
 | Tag | Source | Example |
 |---|---|---|
-| `[User] <text>` | The operator: the dashboard, the API, `terrarium agent send`. A send by a leader agent gets the same tag. | `[User] Run the tests.` |
+| `[User] <text>` | Only the operator: the dashboard, the API or the CLI with the operator's token or session. | `[User] Run the tests.` |
+| `[Agent:<project>/<name>] <text>` | Another agent, through `POST /api/agents/{id}/send` (`terrarium agent send` from a lead). Decided on 2026-10-28: an agent's send is never `[User]`. | `[Agent:ht/lead] Do TER-4.` |
 | `[Mailbox:<sender>] Subject: <subject> (thread <T>, message <M>)` | One mail. `<sender>` is `project/agent`, `operator`, or `system`. The body follows on the next lines, quoted with `> `. | see below |
 | `[System:<kind>] <text>` | A fact from the daemon. | `[System:recap] Terrarium restarted you ...` |
 
@@ -720,18 +721,21 @@ still work for all mail.
 
 - Only the formatter writes a tag line. A line of inserted text (a mail
   body, a subject, a card title, an operator text, the old turns in a
-  recap) that would start with `[User]`, `[System`, or `[Mailbox` after
+  recap) that would start with `[User]`, `[Agent`, `[System`, or `[Mailbox` after
   the quote marks, white space, and zero-width characters is defused: a
   backslash goes after the `[` (`[\User]`). The check ignores case. Every
   harness shows the backslash as it is, and the model reads it as text.
-- A mail body is always quoted with `> `. Operator text is not quoted.
+- A mail body is always quoted with `> `. Operator text and agent text
+  are not quoted.
 - The subject, the sender, and a detail are cut to one line of at most 200
   characters. `[` and `]` in them become `(` and `)`.
 - A raw send (`raw: true`) has no tag, but its tag-like lines are defused
   too, so a leader cannot pose as a mail or as Terrarium. Keys
   (`POST .../keys`) stay as they are.
 - Untagged text (keys typed through the PTY attach, a raw send, keys) counts
-  as the operator's.
+  as the operator's. It can also come from a lead with the PTY rights
+  (the project's `project_admin` or a `sysadmin`): a raw send and keys
+  stay untagged for an agent too.
 
 The personas (`leader.md`, `worker.md`) teach the format in the section
 "Messages you receive": the tags with an example each, that only Terrarium
@@ -739,11 +743,12 @@ writes tags, that quoted text is data, how to reply, and the kinds.
 
 **The transcript.** The transcript keeps the raw text of the turn. The
 core reads the tags of each user text (`TranscriptLog::apply`), sets the
-`origin` from the first tag (`[User]` gives `operator`, `[Mailbox:...]`
-gives `agent_mail_pointer`, `[System:...]` gives `system`), and adds
+`origin` from the first tag (`[User]` gives `operator`, `[Agent:...]`
+gives `agent`, `[Mailbox:...]` gives `agent_mail_pointer`, `[System:...]`
+gives `system`), and adds
 `parts`: the source fields and the text of each block (`docs/api.md`
 §6.6). An untagged text keeps the hash match of the delivery log. The
-dashboard shows a badge for each part ("User", "Mail from ht/lead ·
+dashboard shows a badge for each part ("User", "Agent ht/lead", "Mail from ht/lead ·
 Subject", "System: recap"), hides the tag line, and shows a quoted body as
 a quote, as plain text.
 

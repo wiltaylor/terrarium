@@ -1082,6 +1082,17 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX thread_resumes_thread ON thread_resumes(thread_id);
     "#,
+    // 31: the origin `agent` in the delivery log (PLAN §8.5): a turn that
+    // another agent typed with `POST /api/agents/{id}/send`, tagged
+    // `[Agent:<project>/<name>]`. The origin column is made again with the
+    // new CHECK (the way of migration 29). No index has the column.
+    r#"
+    ALTER TABLE deliveries ADD COLUMN origin_v31 TEXT NOT NULL DEFAULT 'user'
+        CHECK (origin_v31 IN ('operator', 'agent', 'agent_mail_pointer', 'system', 'user'));
+    UPDATE deliveries SET origin_v31 = origin;
+    ALTER TABLE deliveries DROP COLUMN origin;
+    ALTER TABLE deliveries RENAME COLUMN origin_v31 TO origin;
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call
@@ -1746,6 +1757,49 @@ mod tests {
             conn.execute(
                 "INSERT INTO targets (name, kind, def, created_at, updated_at)
                    VALUES ('x', 'telnet', '{}', 't', 't')",
+                [],
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn migration_31_keeps_deliveries_and_allows_agent() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        for sql in &MIGRATIONS[..30] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 30).unwrap();
+        // No agent row: the foreign keys are off on this connection.
+        conn.pragma_update(None, "foreign_keys", false).unwrap();
+        conn.execute(
+            "INSERT INTO deliveries (agent_id, origin, hash, at) VALUES ('A1', 'system', 'h1', 't')",
+            [],
+        )
+        .unwrap();
+        assert!(
+            conn.execute(
+                "INSERT INTO deliveries (agent_id, origin, hash, at) VALUES ('A1', 'agent', 'h2', 't')",
+                [],
+            )
+            .is_err(),
+            "the old CHECK refuses agent"
+        );
+        assert_eq!(migrate(&mut conn).unwrap(), MIGRATIONS.len() - 30);
+        let origin: String = conn
+            .query_row("SELECT origin FROM deliveries WHERE hash = 'h1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(origin, "system");
+        conn.execute(
+            "INSERT INTO deliveries (agent_id, origin, hash, at) VALUES ('A1', 'agent', 'h2', 't')",
+            [],
+        )
+        .unwrap();
+        assert!(
+            conn.execute(
+                "INSERT INTO deliveries (agent_id, origin, hash, at) VALUES ('A1', 'robot', 'h3', 't')",
                 [],
             )
             .is_err()

@@ -131,9 +131,9 @@ pub fn plain_text_question(text: &str) -> Option<String> {
 }
 
 /// `true` when the paragraph `p` asks the user something. A line that
-/// carries a turn tag (`[Mailbox:...]`, `[User]`, `[System:...]`, PLAN
-/// §8.5), or a defused one (`[\User]`), is text that the agent received and
-/// echoes, never its own question.
+/// carries a turn tag (`[Mailbox:...]`, `[User]`, `[Agent:...]`,
+/// `[System:...]`, PLAN §8.5), or a defused one (`[\User]`), is text that
+/// the agent received and echoes, never its own question.
 fn asks(p: &str) -> bool {
     let lines: Vec<&str> = p
         .lines()

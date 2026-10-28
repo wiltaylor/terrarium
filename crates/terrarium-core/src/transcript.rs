@@ -61,6 +61,9 @@ pub enum Origin {
     /// The operator, through `POST /api/agents/{id}/send`: the tag
     /// `[User]` (`crate::turn_tag`), or the daemon's delivery log.
     Operator,
+    /// Another agent, through `POST /api/agents/{id}/send`: the tag
+    /// `[Agent:<project>/<name>]` (`crate::turn_tag`).
+    Agent,
     /// A push pointer that the daemon typed: mail, card, lead, or lease.
     /// The first tag is `[Mailbox:...]`.
     AgentMailPointer,

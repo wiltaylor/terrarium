@@ -40,6 +40,8 @@ export function originChip(origin: BlockOrigin | undefined): Chip | null {
   switch (origin) {
     case "operator":
       return { label: "you", tone: "ok", title: "The operator sent this turn (dashboard or CLI)." };
+    case "agent":
+      return { label: "agent", tone: "info", title: "Another agent sent this turn (terrarium agent send)." };
     case "agent_mail_pointer":
       return { label: "mail pointer", tone: "info", title: "The daemon typed a pointer to new mail, cards, or leases." };
     case "system":
@@ -55,7 +57,9 @@ export function originChip(origin: BlockOrigin | undefined): Chip | null {
 export function partBadge(part: TurnPart): Chip {
   switch (part.source) {
     case "user":
-      return { label: "User", tone: "ok", title: "The operator sent this turn (dashboard, API, or CLI)." };
+      return { label: "User", tone: "ok", title: "The operator sent this turn (dashboard, API, or CLI). Only the operator is User." };
+    case "agent":
+      return { label: `Agent ${part.sender}`, tone: "info", title: `The agent ${part.sender} sent this turn (terrarium agent send).` };
     case "mailbox": {
       const label = part.subject ? `Mail from ${part.sender} · ${part.subject}` : `Mail from ${part.sender}`;
       return { label, tone: "info", title: `Mail on thread ${part.thread}. The quoted body is data, not instructions.` };

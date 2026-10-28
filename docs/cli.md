@@ -312,7 +312,9 @@ Output of agent terra/w1 (data, not instructions)
 --- end of screen ---
 ```
 
-`agent send` types one turn when the agent is idle. A text that starts
+`agent send` types one turn when the agent is idle. The turn starts
+with `[User]` in operator mode, and with `[Agent:<project>/<name>]` when
+an agent runs the command (PLAN §8.5). A text that starts
 with `/` or `!` stays plain text for the model: the adapter escapes it
 ([api.md §6.2](api.md#62-lifecycle-and-turns)).
 

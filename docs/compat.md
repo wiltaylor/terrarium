@@ -1308,8 +1308,8 @@ Since the tagged turns (PLAN §8.5), every turn that the daemon types
 starts with `[`, so the escape applies only to an untagged turn.
 
 **Tagged turns (PLAN §8.5). Inferred, not verified live.** Each turn that
-the daemon types starts with a tag line (`[User]`, `[Mailbox:...]`,
-`[System:...]`). A mail turn is a bracketed paste of several lines, with
+the daemon types starts with a tag line (`[User]`, `[Agent:...]`,
+`[Mailbox:...]`, `[System:...]`). A mail turn is a bracketed paste of several lines, with
 body lines that start with `> `. The tests check the bytes that each
 adapter types (`type_turn`: one bracketed paste, then CR) and that each
 parser reads a tagged turn from its fixture (`crates/terrariumd/tests/turn_tags.rs`).

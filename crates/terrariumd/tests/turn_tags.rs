@@ -95,6 +95,17 @@ fn each_parser_reads_the_tag_of_a_typed_turn() {
         assert_eq!(b.origin, Some(Origin::Operator), "{harness}");
         assert_eq!(b.parts[0].source, PartSource::User);
 
+        let b = retag(harness, file, new, "[Agent:demo/lead] Do TER-4.");
+        assert_eq!(b.origin, Some(Origin::Agent), "{harness}");
+        assert_eq!(
+            b.parts[0].source,
+            PartSource::Agent {
+                sender: "demo/lead".into()
+            },
+            "{harness}"
+        );
+        assert_eq!(b.parts[0].body, "Do TER-4.", "{harness}");
+
         let b = retag(
             harness,
             file,

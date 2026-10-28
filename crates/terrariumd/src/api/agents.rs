@@ -532,7 +532,8 @@ pub(super) struct SendBody {
     pub(super) text: String,
     /// Type the text as-is, at once (D3): a leading `/` or `!` runs as a
     /// harness command. Without it, the turn waits for `idle`, and starts
-    /// with the tag `[User]` (PLAN §8.5), so it stays a prompt.
+    /// with the tag `[User]`, or `[Agent:<project>/<name>]` from an agent
+    /// (PLAN §8.5), so it stays a prompt.
     #[serde(default)]
     pub(super) raw: bool,
 }
@@ -554,10 +555,19 @@ pub(super) async fn send(
     Path(id): Path<String>,
     ApiJson(body): ApiJson<SendBody>,
 ) -> ApiResult<(StatusCode, Json<serde_json::Value>)> {
-    send_as(&state, actor, id, body, &TurnSource::User).await
+    // `[User]` is only the operator; an agent's turn names the agent
+    // (PLAN §8.5).
+    let source = match actor.agent() {
+        Some(a) => TurnSource::Agent {
+            sender: format!("{}/{}", a.project, a.name),
+        },
+        None => TurnSource::User,
+    };
+    send_as(&state, actor, id, body, &source).await
 }
 
-/// `send` with the source of the turn: `[User]` for the API, and
+/// `send` with the source of the turn: `[User]` for the operator,
+/// `[Agent:<project>/<name>]` for an agent, and
 /// `[System:schedule <name>]` for a schedule (PLAN §8.5). A raw send has
 /// no tag.
 pub(super) async fn send_as(

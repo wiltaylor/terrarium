@@ -528,8 +528,8 @@ export interface Session {
 
 export type BlockRole = "user" | "assistant" | "system";
 export type BlockKind = "text" | "thinking" | "tool_call" | "tool_result" | "system";
-/** Who wrote a user turn: the operator (dashboard or CLI), a mail pointer, the daemon, or keys typed in the terminal. */
-export type BlockOrigin = "operator" | "agent_mail_pointer" | "system" | "user";
+/** Who wrote a user turn: the operator (dashboard or CLI), another agent (`agent send`), a mail pointer, the daemon, or keys typed in the terminal. */
+export type BlockOrigin = "operator" | "agent" | "agent_mail_pointer" | "system" | "user";
 
 /**
  * One tagged block of a turn that Terrarium typed (PLAN §8.5): its source and
@@ -538,6 +538,8 @@ export type BlockOrigin = "operator" | "agent_mail_pointer" | "system" | "user";
  */
 export type TurnPart =
   | { source: "user"; body: string }
+  /** `sender`: `project/agent`, the agent that typed the turn with `agent send`. */
+  | { source: "agent"; sender: string; body: string }
   | { source: "mailbox"; sender: string; subject: string; thread: string; message?: string; body: string }
   /** `kind`: recap, card, lease, nudge, or schedule (`detail` is the schedule name). */
   | { source: "system"; kind: string; detail?: string; body: string };
