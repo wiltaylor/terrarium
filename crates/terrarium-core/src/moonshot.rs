@@ -83,9 +83,18 @@ pub const PI_API_CN_PROVIDER: &str = "moonshotai-cn";
 /// Code has it, and it is the cheapest model in pi 1.4.0's `kimi-coding`
 /// catalog.
 pub const MODEL_CODING_DEFAULT: &str = "kimi-for-coding";
-/// The default model of an Open Platform plan: the cheapest coding model
-/// in pi 1.4.0's `moonshotai` catalog.
-pub const MODEL_API_DEFAULT: &str = "kimi-k2.7-code";
+/// The default model of an Open Platform plan: Kimi K3 (an operator
+/// decision, 2026-10-29). The id is from the Open Platform model list
+/// (platform.kimi.ai/docs/models) and pi 1.4.0's `moonshotai` and
+/// `moonshotai-cn` catalogs. The K2 series retires by the end of December
+/// 2026, and new accounts lose it on 2026-10-31 (the same page).
+pub const MODEL_API_DEFAULT: &str = "kimi-k3";
+
+/// The Kimi Code model ids that pi 1.4.0's `kimi-coding` catalog does not
+/// have. Terrarium adds them to the per-agent `models.json`, for the
+/// custom `kimi-coding-intl` and for the built-in `kimi-coding`
+/// (kimi.com/code/docs/en/kimi-code/models.html, read 2026-10-29).
+pub const CODING_MODELS_NOT_IN_PI: [&str; 2] = ["k3.1-pro", "k3.1-pro-highspeed"];
 
 /// The Kimi Code model ids (kimi.com/code/docs/en/kimi-code/models.html).
 /// The fallback when no list can be read. The tier of the membership
@@ -281,7 +290,11 @@ mod tests {
         assert_eq!(Plan::Api.pi_key_env(), "MOONSHOT_API_KEY");
         assert_eq!(Plan::ApiCn.pi_key_env(), "MOONSHOT_API_KEY");
         assert_eq!(Plan::Coding.default_model(), "kimi-for-coding");
-        assert_eq!(Plan::ApiCn.default_model(), "kimi-k2.7-code");
+        assert_eq!(Plan::Api.default_model(), "kimi-k3");
+        assert_eq!(Plan::ApiCn.default_model(), "kimi-k3");
+        for m in CODING_MODELS_NOT_IN_PI {
+            assert!(CODING_MODELS.contains(&m), "{m}");
+        }
         for p in [Plan::Coding, Plan::CodingCn, Plan::Api, Plan::ApiCn] {
             assert!(p.fallback_models().contains(&p.default_model()), "{p:?}");
         }

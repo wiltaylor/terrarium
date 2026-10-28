@@ -444,13 +444,10 @@ mod tests {
                 "coding-cn",
                 ["--provider", "kimi-coding", "--model", "kimi-for-coding"],
             ),
-            (
-                "api",
-                ["--provider", "moonshotai", "--model", "kimi-k2.7-code"],
-            ),
+            ("api", ["--provider", "moonshotai", "--model", "kimi-k3"]),
             (
                 "api-cn",
-                ["--provider", "moonshotai-cn", "--model", "kimi-k2.7-code"],
+                ["--provider", "moonshotai-cn", "--model", "kimi-k3"],
             ),
         ] {
             assert_eq!(

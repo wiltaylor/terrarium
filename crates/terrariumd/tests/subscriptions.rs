@@ -1077,7 +1077,7 @@ async fn moonshot_key_is_a_pi_only_subscription() {
     assert_eq!(r.ok()["plan"], "api-cn");
     assert_eq!(r.body["probe"], "moonshot-cn-balance");
     assert_eq!(r.body["local_estimate_only"], false);
-    assert_eq!(r.body["default_models"], json!({"pi": "kimi-k2.7-code"}));
+    assert_eq!(r.body["default_models"], json!({"pi": "kimi-k3"}));
     // The agent page shows the subscription.
     td.project("p").await;
     let a = td
@@ -1167,8 +1167,8 @@ async fn moonshot_models_come_from_the_provider_then_the_table() {
         .iter()
         .map(|m| m["id"].as_str().unwrap())
         .collect();
-    assert_eq!(ids[0], "kimi-k2.7-code");
-    assert!(ids.contains(&"kimi-k3"), "{ids:?}");
+    assert_eq!(ids[0], "kimi-k3");
+    assert!(ids.contains(&"kimi-k2.7-code"), "{ids:?}");
     assert!(!body.to_string().contains(secret));
 }
 

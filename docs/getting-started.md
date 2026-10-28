@@ -264,8 +264,9 @@ curl -X POST http://localhost:8080/api/subscriptions/kimi/api-key \
 ```
 
 Then give a pi agent `subscription = "kimi"`. Set `model` to a Kimi id,
-for example `k3`, or leave it empty. An Open Platform plan has a balance
-probe. A Kimi Code plan has no usage probe, so the tile shows "Local
+for example `k3` or `k3.1-pro`, or leave it empty. An Open Platform plan
+has a balance probe. A Kimi Code plan has no usage probe, so the tile
+shows "Local
 estimate only". docs/api.md §16.5 lists the env that the agents get.
 
 ### 2.5 Make a project and an agent

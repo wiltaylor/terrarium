@@ -198,6 +198,6 @@ mod tests {
         assert_eq!(default_model("glm53-exl3"), None);
         assert_eq!(default_model("zai"), Some("glm-5.3-flash"));
         assert_eq!(default_model("kimi-coding-intl"), Some("kimi-for-coding"));
-        assert_eq!(default_model("moonshotai-cn"), Some("kimi-k2.7-code"));
+        assert_eq!(default_model("moonshotai-cn"), Some("kimi-k3"));
     }
 }

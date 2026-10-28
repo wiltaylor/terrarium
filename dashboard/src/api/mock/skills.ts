@@ -35,7 +35,7 @@ const MAX_FILES = 64;
 const MAX_BYTES = 1024 * 1024;
 const TYPES = ["md", "txt", "json", "yaml", "yml", "toml", "py", "sh", "js", "ts", "png", "jpg", "jpeg", "gif", "svg", "webp"];
 const BINARY = ["png", "jpg", "jpeg", "gif", "webp"];
-const SECRET_RE = /(sk-ant-[A-Za-z0-9_-]{8,}|sk-[A-Za-z0-9]{32,}|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY-----)/;
+const SECRET_RE = /(sk-ant-[A-Za-z0-9_-]{8,}|sk-kimi-[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9]{32,}|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY-----)/;
 
 /** A 1x1 PNG. */
 const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";

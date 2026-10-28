@@ -140,6 +140,7 @@ async fn the_scan_blocks_each_secret_pattern() {
     let cases = [
         ("anthropic-key", fake("sk-ant-api03-")),
         ("openrouter-key", fake("sk-or-v1-")),
+        ("moonshot-key", fake("sk-kimi-")),
         ("github-token", fake("ghp_")),
         ("github-token", fake("github_pat_")),
         ("aws-access-key", "AKIAFAKEFAKEFAKEFAKE".to_owned()),

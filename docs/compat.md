@@ -1687,6 +1687,18 @@ only.** Claude Code does not get the Anthropic-compatible endpoints. The
 daemon refuses a `moonshot` subscription that lists another harness, and it
 refuses a start of a Claude Code, Codex, or Copilot agent on one.
 
+**Decisions (operator, 2026-10-29):**
+
+- The "dev subscription" is the Kimi Code membership. `coding` stays the
+  default plan. The `api` and `api-cn` plans stay.
+- The operator's key is an overseas Kimi Code key. The `coding` plan
+  therefore keeps the custom provider `kimi-coding-intl` on
+  `https://api.kimi.ai/coding/v1`. The operator confirmed this. It is
+  **not verified live**.
+- An agent can select `k3.1-pro` and `k3.1-pro-highspeed` on a Kimi Code
+  plan, although pi 1.4.0 does not have them (see below).
+- The default model of the `api` and `api-cn` plans is `kimi-k3`.
+
 Moonshot sells two products. Each has its own keys, and each key works only
 in the region where it was made:
 
@@ -1701,9 +1713,10 @@ in the region where it was made:
 | Open Platform (pay as you go) | Global `https://api.moonshot.ai/v1` (keys from platform.kimi.ai); China `https://api.moonshot.cn/v1` (keys from platform.kimi.com). Anthropic Messages at `/anthropic`; not used. | https://platform.kimi.ai/docs/api/overview , https://platform.kimi.com/docs/api/overview |
 | Open Platform model list | `GET /v1/models`, OpenAI list shape, with `context_length` per model | https://platform.kimi.ai/docs/api/list-models |
 | Open Platform balance | `GET /v1/users/me/balance` answers `{code, data: {available_balance, voucher_balance, cash_balance}, scode, status}`. US dollars (global) or yuan (China). At an `available_balance` of 0 or less, the inference API refuses calls. | https://platform.kimi.ai/docs/api/balance , https://platform.kimi.com/docs/api/balance |
-| Open Platform models | Kimi K3.1 Pro, K3, K2.7 Code, K2.6. The K2 series retires at the end of December 2026. | https://platform.kimi.ai/docs/pricing/chat |
+| Open Platform models | `kimi-k3.1-pro`, `kimi-k3.1-pro-highspeed`, `kimi-k3`, `kimi-k2.7-code`, `kimi-k2.7-code-highspeed`, `kimi-k2.6`. New accounts lose the K2 series on 2026-10-31, and it retires at the end of December 2026. | https://platform.kimi.ai/docs/models , https://platform.kimi.ai/docs/pricing/chat |
+| Kimi Code `k3.1-pro`, `k3.1-pro-highspeed` | Context up to 1M (1M for Pro and above). Image and video input. `reasoning_effort` low, high, or max; thinking cannot be off (HTTP 400). No output limit on the page. `k3.1-pro` is for Plus and above; `k3.1-pro-highspeed` is for Pro and above. | https://www.kimi.com/code/docs/en/kimi-code/models.html (read 2026-10-29) |
 | Key header | `Authorization: Bearer <key>` | https://platform.kimi.ai/docs/api/overview |
-| Key format | **Not documented.** No secret-scan rule. | |
+| Key format | **Not documented by Moonshot.** Third-party clients say that Kimi Code keys start with `sk-kimi-`. The secret scan has the rule `moonshot-key`: `\bsk-kimi-[A-Za-z0-9_\-]{20,}`. The length is a guess. An Open Platform key has no known prefix, so the scan finds it only by its key name or its entropy. | https://github.com/NousResearch/hermes-agent/issues/5561 |
 
 The plan of a `moonshot` subscription picks the product and the region:
 
@@ -1711,8 +1724,8 @@ The plan of a `moonshot` subscription picks the product and the region:
 |---|---|---|---|
 | `coding` (default) | `kimi-coding-intl` (custom, in the agent's `models.json`) | `KIMI_API_KEY` | `kimi-for-coding` |
 | `coding-cn` | `kimi-coding` (built-in) | `KIMI_API_KEY` | `kimi-for-coding` |
-| `api` | `moonshotai` (built-in) | `MOONSHOT_API_KEY` | `kimi-k2.7-code` |
-| `api-cn` | `moonshotai-cn` (built-in) | `MOONSHOT_API_KEY` | `kimi-k2.7-code` |
+| `api` | `moonshotai` (built-in) | `MOONSHOT_API_KEY` | `kimi-k3` |
+| `api-cn` | `moonshotai-cn` (built-in) | `MOONSHOT_API_KEY` | `kimi-k3` |
 
 **Verified offline** (pi 1.4.0 in `./tools`, the files only, no turn):
 
@@ -1727,8 +1740,25 @@ The plan of a `moonshot` subscription picks the product and the region:
 - pi's `kimi-coding` catalogue has `k3`, `k3-256k`, `kimi-for-coding`, and
   `kimi-for-coding-highspeed`; no `k3.1-pro`. The `moonshotai` catalogue
   has `kimi-k3`, `kimi-k2.7-code`, `kimi-k2.7-code-highspeed`, and
-  `kimi-k2.6`; no `kimi-k3.1-pro`. The default models are the cheapest
-  ids of each catalogue.
+  `kimi-k2.6`; no `kimi-k3.1-pro`. The Kimi Code default is the
+  cheapest id of the catalogue. The Open Platform default is `kimi-k3`
+  (the operator's choice; the K2 series retires).
+- pi's `models.json` can change a built-in provider: a key with the
+  built-in id adds each `models` entry to its catalogue, and the entry
+  takes `api` and `baseUrl` from the built-in models
+  (`docs/models-configuration.md`, "Providers" and "Models";
+  `dist/core/provider-composer.js`, `applyModelsJson`). The agent's
+  `models.json` therefore adds `k3.1-pro` and `k3.1-pro-highspeed` to
+  `kimi-coding-intl` and to the built-in `kimi-coding`. A shared
+  `kimi-coding` entry keeps its fields, and its own model of the same id
+  wins. The entries copy pi's `k3` entry: context 1048576, output 131072
+  (the Kimi page gives no output limit), text and image input, effort low,
+  high, or max, `off` unsupported. The cost is 0, because the membership
+  has no price for each token.
+- The `kimi-coding-intl` entry of `kimi-for-coding-highspeed` has the
+  `compat` block of pi's catalogue (`thinkingFormat` `deepseek`, no
+  `reasoning_effort`). Before 2026-10-29 it had the `openai` block of the
+  other models by mistake.
 - pi turns on its Moonshot request format from the provider id or from a
   base URL with `api.moonshot.` (`detectCompat`). The Kimi Code models set
   their `compat` block in the catalogue.

@@ -43,7 +43,7 @@ export function moonshotProbe(plan: string | undefined): string | undefined {
 /** pi's model when the agent sets none. */
 export function moonshotDefaultModel(plan: string | undefined): string {
   const r = moonshotPlan(plan);
-  return "plan" in r && r.plan.startsWith("api") ? "kimi-k2.7-code" : "kimi-for-coding";
+  return "plan" in r && r.plan.startsWith("api") ? "kimi-k3" : "kimi-for-coding";
 }
 
 /** The documented model ids of a plan, the default first (the daemon's fallback table). */

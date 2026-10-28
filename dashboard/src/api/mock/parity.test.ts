@@ -419,7 +419,7 @@ describe("mock parity with docs/api.md", () => {
     expect(s).not.toHaveProperty("probe");
     expect(JSON.stringify(s)).not.toContain("sk-never-shown");
     const cn = await api.subscriptions.setApiKey("kimi-cn", { provider: "moonshot", key: "k", plan: "api-cn" });
-    expect(cn).toMatchObject({ plan: "api-cn", probe: "moonshot-cn-balance", local_estimate_only: false, default_models: { pi: "kimi-k2.7-code" } });
+    expect(cn).toMatchObject({ plan: "api-cn", probe: "moonshot-cn-balance", local_estimate_only: false, default_models: { pi: "kimi-k3" } });
     await expect(api.subscriptions.setApiKey("kimi3", { provider: "moonshot", key: "k", plan: "Allegretto" })).rejects.toMatchObject({ status: 422, code: "invalid" });
     // pi only: a definition for another harness, or a key on a subscription of another harness.
     for (const h of ["claude", "codex", "copilot"] as const) {

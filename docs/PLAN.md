@@ -595,7 +595,7 @@ and session transcripts. Three controls (`docs/security-review.md`,
    before each commit that the daemon makes, and in the `pre-commit` hook
    that the daemon installs (`terrarium admin config scan --staged`, which
    fails closed with no Terrarium binary on `PATH`). The rules: the known
-   token patterns (`sk-ant-`, `sk-or-`, `sk-proj-`, `ghp_`/`gho_`/
+   token patterns (`sk-ant-`, `sk-or-`, `sk-proj-`, `sk-kimi-`, `ghp_`/`gho_`/
    `github_pat_`, `AKIA`, `xox?-`, `-----BEGIN ... PRIVATE KEY-----`, a
    JWT, the host tokens `thk_` and `the_`), a credential-like key name
    (`token`, `secret`, `password`, `api_key`, `authorization`) with a value
@@ -1921,7 +1921,13 @@ Two sources of truth, combined:
      documented balance endpoint (probe `moonshot-balance` or
      `moonshot-cn-balance`). Kimi Code (`coding`, `coding-cn`) documents no
      usage endpoint, so it is local estimate only (api.md §16.5,
-     compat.md "Moonshot").
+     compat.md "Moonshot"). The operator decided on 2026-10-29: `coding`
+     (the Kimi Code membership, overseas) stays the default plan, the
+     `api` plans stay, and the Open Platform default model is `kimi-k3`.
+     The operator's key is an overseas Kimi Code key, so `coding` keeps
+     the custom provider on `api.kimi.ai` (confirmed by the operator, not
+     verified live). Every pi agent can select the Kimi Code models
+     `k3.1-pro` and `k3.1-pro-highspeed`, which pi 1.4.0 does not have.
    The probe reads the credential of the subscription's plan account
    (§16.3), so there is no second login. It only reads: it never refreshes
    a token, and an expired token is a failed probe until the harness of an

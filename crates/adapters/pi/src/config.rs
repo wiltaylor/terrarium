@@ -22,7 +22,7 @@
 //! | Path in the home | Decision | Why |
 //! |---|---|---|
 //! | `auth.json` | shared, `{}` | no login: pi uses API keys only (PLAN §16.3), and each agent gets its key in the env. An install from before had the pi plan accounts and made the file a symlink to `/run/terrarium/cred/account/auth.json`; the daemon makes it a plain `{}` file again (`terrariumd::accounts`). |
-//! | `models.json` | per agent, from the shared file | custom providers (base URL, models, API key). Read only for pi. Every start copies the shared file and adds the Terrarium providers ([`TERRARIUM_PROVIDERS`]: `zai-api`, the Z.ai pay-as-you-go endpoint, and `kimi-coding-intl`, the overseas Kimi Code endpoint). An edit of the shared file reaches an agent at its next start. |
+//! | `models.json` | per agent, from the shared file | custom providers (base URL, models, API key). Read only for pi. Every start copies the shared file and adds the Terrarium providers ([`TERRARIUM_PROVIDERS`]: `zai-api`, the Z.ai pay-as-you-go endpoint, and `kimi-coding-intl`, the overseas Kimi Code endpoint) and adds `k3.1-pro` and `k3.1-pro-highspeed` to the models of the built-in `kimi-coding`. An edit of the shared file reaches an agent at its next start. |
 //! | `settings.json` | per agent | the operator's own defaults (provider, model, theme, packages) stay out, and a `/model` change in one agent does not change the default of the others. The first start copies the shared file; later starts keep the agent's copy. Every start sets `lastChangelogVersion` to the pinned version ([`LAST_CHANGELOG_KEY`]), so pi 1.4's "What's new" changelog does not show. |
 //! | `mcp.json` | not loaded | `--no-mcp` (pi 1.4 has built-in MCP). |
 //! | `sessions/` | not used | `--session-dir` puts the sessions in the agent directory. In the sandbox every agent has the cwd `$HOME/work`, so the default directory (`sessions/--home-…-work--/`) would be one directory for all agents, and `pi --resume` would list the sessions of every agent. Session IDs do not collide (each agent gets new UUIDs), but pi has **no lock on a session**: two processes with one `--session-id` both start and both append (`docs/compat.md`). The supervisor must run one pi per agent. |
@@ -195,10 +195,50 @@ pub fn zai_api_provider() -> Value {
     })
 }
 
-/// One Kimi Code model entry for a custom pi provider. The values are pi
-/// 1.4.0's built-in `kimi-coding` catalog
-/// (`pi-ai/dist/providers/data/kimi-coding.json`), compat included, so the
-/// custom provider sends the same requests as the built-in one.
+/// The `compat` block of pi 1.4.0's `kimi-coding` models that think with a
+/// `reasoning_effort` (`pi-ai/dist/providers/data/kimi-coding.json`).
+fn kimi_compat() -> Value {
+    json!({
+        "supportsStrictMode": false,
+        "supportsStore": false,
+        "supportsDeveloperRole": false,
+        "supportsReasoningEffort": true,
+        "maxTokensField": "max_tokens",
+        "thinkingFormat": "openai",
+        "requiresReasoningContentOnAssistantMessages": true,
+        "supportsMidConvoSystemMessages": true,
+        "supportsMidConvoToolAdditions": true,
+    })
+}
+
+/// The `compat` block of pi 1.4.0's `kimi-for-coding-highspeed`. The model
+/// always thinks and takes no effort, so pi gives it the DeepSeek thinking
+/// format.
+fn kimi_highspeed_compat() -> Value {
+    json!({
+        "supportsStrictMode": false,
+        "supportsStore": false,
+        "supportsDeveloperRole": false,
+        "supportsReasoningEffort": false,
+        "maxTokensField": "max_tokens",
+        "thinkingFormat": "deepseek",
+        "supportsMidConvoSystemMessages": true,
+    })
+}
+
+/// The thinking levels of the Kimi Code models with a `reasoning_effort`:
+/// low, high and max (kimi.com/code/docs/en/kimi-code/models.html and pi
+/// 1.4.0's `kimi-coding` catalog).
+fn kimi_levels() -> Value {
+    json!({"off": null, "minimal": null, "low": "low", "medium": null,
+           "high": "high", "xhigh": null, "max": "max"})
+}
+
+/// One Kimi Code model entry for a pi provider. The values are pi 1.4.0's
+/// built-in `kimi-coding` catalog
+/// (`pi-ai/dist/providers/data/kimi-coding.json`), compat and image limits
+/// included, so a custom provider sends the same requests as the built-in
+/// one.
 fn kimi_model(
     id: &str,
     name: &str,
@@ -206,56 +246,139 @@ fn kimi_model(
     max_tokens: u64,
     cost: [f64; 3],
     levels: Value,
+    compat: Value,
 ) -> Value {
     json!({
         "id": id,
         "name": name,
         "reasoning": true,
         "input": ["text", "image"],
+        "inputLimits": {"images": {"resize": {"maxWidth": 2000, "maxHeight": 2000, "maxBytes": 4_718_592, "jpegQuality": 80}}},
         "cost": {"input": cost[0], "output": cost[1], "cacheRead": cost[2], "cacheWrite": 0},
         "contextWindow": context,
         "maxTokens": max_tokens,
         "thinkingLevelMap": levels,
-        "compat": {
-            "supportsStrictMode": false,
-            "supportsStore": false,
-            "supportsDeveloperRole": false,
-            "supportsReasoningEffort": true,
-            "maxTokensField": "max_tokens",
-            "thinkingFormat": "openai",
-            "requiresReasoningContentOnAssistantMessages": true,
-            "supportsMidConvoSystemMessages": true,
-            "supportsMidConvoToolAdditions": true,
-        },
+        "compat": compat,
     })
+}
+
+/// The Kimi Code models that pi 1.4.0's `kimi-coding` catalog lacks
+/// ([`terrarium_core::moonshot::CODING_MODELS_NOT_IN_PI`]).
+///
+/// Source: kimi.com/code/docs/en/kimi-code/models.html (read 2026-10-29).
+/// The context window is up to 1M tokens (1M for the Pro tier and above).
+/// The input is images and video (pi takes text and images). The
+/// `reasoning_effort` is low, high or max. Thinking cannot be off (the
+/// endpoint refuses such a request with HTTP 400), so `off` is null. The
+/// page gives no output limit: the value is that of `k3` in pi's catalog.
+/// The membership has no price for each token, so the cost is 0, as for
+/// pi's `k3-256k`.
+fn kimi_models_not_in_pi() -> Vec<Value> {
+    let names = ["Kimi K3.1 Pro", "Kimi K3.1 Pro HighSpeed"];
+    terrarium_core::moonshot::CODING_MODELS_NOT_IN_PI
+        .into_iter()
+        .zip(names)
+        .map(|(id, name)| {
+            kimi_model(
+                id,
+                name,
+                1_048_576,
+                131_072,
+                [0.0; 3],
+                kimi_levels(),
+                kimi_compat(),
+            )
+        })
+        .collect()
 }
 
 /// The custom pi provider `kimi-coding-intl`: the overseas Kimi Code
 /// endpoint (`api.kimi.ai`), OpenAI-compatible, with the key from
 /// `$KIMI_API_KEY` (the daemon injects it for an agent on a Moonshot
-/// `coding` subscription). pi 1.4.0's built-in `kimi-coding` has the same
-/// models on the China host (`api.kimi.com`), which the `coding-cn` plan
-/// uses with no entry.
+/// `coding` subscription). The models are pi 1.4.0's built-in
+/// `kimi-coding` catalog (which has the China host `api.kimi.com` only)
+/// and the Kimi Code models that the catalog lacks.
 pub fn kimi_coding_intl_provider() -> Value {
     use terrarium_core::moonshot;
-    let levels = json!({"off": null, "minimal": null, "low": "low", "medium": null,
-                        "high": "high", "xhigh": null, "max": "max"});
+    let mut models = vec![
+        kimi_model(
+            moonshot::MODEL_CODING_DEFAULT,
+            "kimi-for-coding",
+            1_048_576,
+            32_768,
+            [0.95, 4.0, 0.19],
+            kimi_levels(),
+            kimi_compat(),
+        ),
+        kimi_model(
+            "k3",
+            "Kimi K3",
+            1_048_576,
+            131_072,
+            [3.0, 15.0, 0.3],
+            kimi_levels(),
+            kimi_compat(),
+        ),
+        kimi_model(
+            "k3-256k",
+            "Kimi K3-256K",
+            262_144,
+            131_072,
+            [0.0, 0.0, 0.0],
+            kimi_levels(),
+            kimi_compat(),
+        ),
+        kimi_model(
+            "kimi-for-coding-highspeed",
+            "Kimi For Coding HighSpeed",
+            262_144,
+            32_768,
+            [1.9, 8.0, 0.38],
+            json!({"off": null}),
+            kimi_highspeed_compat(),
+        ),
+    ];
+    models.extend(kimi_models_not_in_pi());
     json!({
         "name": "Kimi For Coding (overseas)",
         "baseUrl": moonshot::CODING_BASE_URL,
         "api": "openai-completions",
         "apiKey": format!("${}", moonshot::KIMI_KEY_ENV),
-        "models": [
-            kimi_model(moonshot::MODEL_CODING_DEFAULT, "kimi-for-coding", 1_048_576, 32_768, [0.95, 4.0, 0.19], levels.clone()),
-            kimi_model("k3", "Kimi K3", 1_048_576, 131_072, [3.0, 15.0, 0.3], levels.clone()),
-            kimi_model("k3-256k", "Kimi K3-256K", 262_144, 131_072, [0.0, 0.0, 0.0], levels),
-            kimi_model("kimi-for-coding-highspeed", "Kimi For Coding HighSpeed", 262_144, 32_768, [1.9, 8.0, 0.38], json!({"off": null})),
-        ],
+        "models": models,
     })
 }
 
+/// Add the Kimi Code models that pi 1.4.0 lacks to pi's built-in
+/// `kimi-coding` provider (the `coding-cn` plan).
+///
+/// A built-in provider id as a key of `models.json` changes that provider.
+/// A `models` entry adds a model, and the model takes `api` and `baseUrl`
+/// from the built-in models (pi docs `models-configuration.md`,
+/// "Providers" and "Models"; `dist/core/provider-composer.js`,
+/// `applyModelsJson`). The other fields of a shared entry stay. A shared
+/// model with the same id wins.
+fn add_kimi_coding_cn_models(providers: &mut Value) {
+    let id = terrarium_core::moonshot::PI_CODING_CN_PROVIDER;
+    if !providers.get(id).is_some_and(Value::is_object) {
+        providers[id] = json!({});
+    }
+    let entry = &mut providers[id];
+    if !entry.get("models").is_some_and(Value::is_array) {
+        entry["models"] = json!([]);
+    }
+    let Some(list) = entry["models"].as_array_mut() else {
+        return;
+    };
+    for m in kimi_models_not_in_pi() {
+        if !list.iter().any(|e| e.get("id") == m.get("id")) {
+            list.push(m);
+        }
+    }
+}
+
 /// The agent's `models.json`: the shared file (or none) with the
-/// Terrarium providers set.
+/// Terrarium providers set ([`TERRARIUM_PROVIDERS`]), and with the missing
+/// Kimi Code models added to pi's built-in `kimi-coding`.
 pub fn agent_models(shared: Option<Value>) -> Value {
     let mut models = shared.unwrap_or_else(|| json!({}));
     if !models.get("providers").is_some_and(Value::is_object) {
@@ -263,6 +386,7 @@ pub fn agent_models(shared: Option<Value>) -> Value {
     }
     models["providers"][terrarium_core::zai::PI_API_PROVIDER] = zai_api_provider();
     models["providers"][terrarium_core::moonshot::PI_CODING_PROVIDER] = kimi_coding_intl_provider();
+    add_kimi_coding_cn_models(&mut models["providers"]);
     models
 }
 
@@ -608,6 +732,32 @@ mod tests {
         assert_eq!(k["apiKey"], "$KIMI_API_KEY");
         assert_eq!(k["models"][0]["id"], "kimi-for-coding");
         assert_eq!(k["models"][0]["compat"]["thinkingFormat"], "openai");
+        // The overseas provider has every documented Kimi Code id, and
+        // the highspeed model has the DeepSeek format of pi's catalog.
+        let intl_ids: Vec<&str> = k["models"]
+            .as_array()
+            .expect("models")
+            .iter()
+            .map(|m| m["id"].as_str().expect("id"))
+            .collect();
+        for id in terrarium_core::moonshot::CODING_MODELS {
+            assert!(intl_ids.contains(&id), "{id} in {intl_ids:?}");
+        }
+        let hs = k["models"]
+            .as_array()
+            .expect("models")
+            .iter()
+            .find(|m| m["id"] == "kimi-for-coding-highspeed")
+            .expect("highspeed");
+        assert_eq!(hs["compat"]["thinkingFormat"], "deepseek");
+        // pi's built-in `kimi-coding` (plan `coding-cn`) gets the ids that
+        // its catalog lacks, with no base URL of its own.
+        let cn = &own["providers"]["kimi-coding"];
+        assert!(cn.get("baseUrl").is_none(), "{cn}");
+        assert_eq!(cn["models"][0]["id"], "k3.1-pro");
+        assert_eq!(cn["models"][1]["id"], "k3.1-pro-highspeed");
+        assert_eq!(cn["models"][0]["thinkingLevelMap"]["off"], Value::Null);
+        assert_eq!(cn["models"][0]["contextWindow"], 1_048_576);
         // The shared file stays as it was.
         assert_eq!(
             fs::read_to_string(home.join(MODELS_FILE)).expect("shared"),
@@ -620,7 +770,9 @@ mod tests {
         let own: Value = serde_json::from_slice(&fs::read(&o.source).expect("own")).expect("json");
         let mut ids: Vec<&String> = own["providers"].as_object().expect("obj").keys().collect();
         ids.sort();
-        assert_eq!(ids, ["kimi-coding-intl", "zai-api"]);
+        assert_eq!(ids, ["kimi-coding", "kimi-coding-intl", "zai-api"]);
+        let cn = own["providers"]["kimi-coding"].as_object().expect("obj");
+        assert_eq!(cn.keys().collect::<Vec<_>>(), ["models"]);
         let mount: Value =
             serde_json::from_slice(&fs::read(home.join(MODELS_FILE)).expect("mount"))
                 .expect("json");
@@ -628,6 +780,28 @@ mod tests {
         for p in TERRARIUM_PROVIDERS {
             assert!(own["providers"].get(*p).is_some(), "{p}");
         }
+    }
+
+    #[test]
+    fn shared_kimi_coding_entry_keeps_its_fields_and_models() {
+        let shared = json!({"providers": {"kimi-coding": {
+            "headers": {"X-A": "1"},
+            "models": [{"id": "k3.1-pro", "name": "mine"}, {"id": "other"}],
+        }}});
+        let own = agent_models(Some(shared));
+        let cn = &own["providers"]["kimi-coding"];
+        assert_eq!(cn["headers"]["X-A"], "1");
+        let ids: Vec<&str> = cn["models"]
+            .as_array()
+            .expect("models")
+            .iter()
+            .map(|m| m["id"].as_str().expect("id"))
+            .collect();
+        assert_eq!(ids, ["k3.1-pro", "other", "k3.1-pro-highspeed"]);
+        assert_eq!(cn["models"][0]["name"], "mine");
+        // A second pass adds nothing.
+        let again = agent_models(Some(own.clone()));
+        assert_eq!(again, own);
     }
 
     #[test]

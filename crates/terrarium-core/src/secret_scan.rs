@@ -14,6 +14,7 @@
 //! | `anthropic-key` | `sk-ant-...` |
 //! | `openrouter-key` | `sk-or-...` |
 //! | `openai-key` | `sk-proj-...`, `sk-svcacct-...` |
+//! | `moonshot-key` | `sk-kimi-...` (a Kimi Code key; the format is not documented by Moonshot) |
 //! | `github-token` | `ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`, `github_pat_` |
 //! | `aws-access-key` | `AKIA...`, `ASIA...` |
 //! | `slack-token` | `xoxa-`, `xoxb-`, `xoxp-`, `xoxo-`, `xoxr-`, `xoxs-` |
@@ -68,6 +69,10 @@ fn patterns() -> &'static [Pattern] {
         let table: &[(&str, &str)] = &[
             ("anthropic-key", r"sk-ant-[A-Za-z0-9_\-]{16,}"),
             ("openrouter-key", r"sk-or-[A-Za-z0-9_\-]{16,}"),
+            // Kimi Code keys. Moonshot does not document the format; the
+            // prefix is from third-party clients (hermes-agent issue
+            // #5561). 20 or more characters keep a short example out.
+            ("moonshot-key", r"\bsk-kimi-[A-Za-z0-9_\-]{20,}"),
             (
                 "openai-key",
                 r"sk-(?:proj|svcacct|admin)-[A-Za-z0-9_\-]{16,}",
@@ -307,6 +312,7 @@ mod tests {
             ("anthropic-key", fake("sk-ant-api03-")),
             ("openrouter-key", fake("sk-or-v1-")),
             ("openai-key", fake("sk-proj-")),
+            ("moonshot-key", fake("sk-kimi-")),
             ("github-token", fake("ghp_")),
             ("github-token", fake("gho_")),
             ("github-token", fake("github_pat_")),
@@ -328,6 +334,29 @@ mod tests {
             let found = rules("prompts/x.md", &format!("text {value} text\n"));
             assert!(found.contains(&rule.to_owned()), "{rule}: {found:?}");
         }
+    }
+
+    /// A Kimi Code key hits; a short example or a word that ends in
+    /// `sk-kimi-` does not. The allow marker does not skip it.
+    #[test]
+    fn moonshot_keys_hit_and_near_misses_do_not() {
+        let key = format!("sk-kimi-{}", "FAKEfake0123456789".repeat(2));
+        let moonshot = "moonshot-key".to_owned();
+        assert!(rules("prompts/a.md", &format!("key {key}\n")).contains(&moonshot));
+        assert!(
+            rules("harness/pi/models.json", &format!("\"k\": \"{key}\"\n")).contains(&moonshot)
+        );
+        for line in [
+            "Kimi Code keys start with sk-kimi- and stay in the env.",
+            "sk-kimi-mock-never-shown",
+            "task-kimi-FAKEfake0123456789FAKE",
+            "sk-kimi FAKEfake0123456789FAKEfake",
+        ] {
+            assert!(!rules("prompts/a.md", line).contains(&moonshot), "{line}");
+        }
+        // The marker skips the entropy rule, but not the token pattern.
+        let marked = format!("key {key} # {ALLOW_MARKER}\n");
+        assert_eq!(rules("prompts/a.md", &marked), [moonshot]);
     }
 
     #[test]

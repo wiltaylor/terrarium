@@ -3457,8 +3457,8 @@ and the region. Moonshot keys work only for their own product and region:
 |---|---|---|---|---|---|
 | `coding` (the default) | Kimi Code membership, overseas | `https://api.kimi.ai/coding/v1` | `kimi-coding-intl` | `kimi-for-coding` | none |
 | `coding-cn` | Kimi Code membership, China | `https://api.kimi.com/coding/v1` | `kimi-coding` | `kimi-for-coding` | none |
-| `api` | Open Platform, pay as you go | `https://api.moonshot.ai/v1` | `moonshotai` | `kimi-k2.7-code` | `moonshot-balance` |
-| `api-cn` | Open Platform, pay as you go, China | `https://api.moonshot.cn/v1` | `moonshotai-cn` | `kimi-k2.7-code` | `moonshot-cn-balance` |
+| `api` | Open Platform, pay as you go | `https://api.moonshot.ai/v1` | `moonshotai` | `kimi-k3` | `moonshot-balance` |
+| `api-cn` | Open Platform, pay as you go, China | `https://api.moonshot.cn/v1` | `moonshotai-cn` | `kimi-k3` | `moonshot-cn-balance` |
 
 Another plan is `422 invalid`. A new name gets `harnesses = ["pi"]` and
 `login_status` `api_key`. `POST /api/subscriptions` and a subscription
@@ -3469,7 +3469,13 @@ as for Z.ai. The env of an agent on it is `MOONSHOT_API_KEY` (the key),
 and also `KIMI_API_KEY` (the same key) for a `coding` or `coding-cn` plan,
 because pi's `kimi-coding` reads that var. There is no Anthropic var.
 `kimi-coding-intl` is a custom provider in the agent's `models.json`, like
-`zai-api`. The other three are pi's built-in providers.
+`zai-api`. The other three are pi's built-in providers. pi 1.4.0's
+`kimi-coding` catalogue does not have `k3.1-pro` and `k3.1-pro-highspeed`.
+The agent's `models.json` adds them to `kimi-coding-intl` and to the
+built-in `kimi-coding`, so an agent on a `coding` or `coding-cn` plan can
+select them. The default of an Open Platform plan is `kimi-k3` (an
+operator decision, 2026-10-29). The K2 series retires at the end of
+December 2026.
 
 A window of `moonshot-balance` or `moonshot-cn-balance` is `balance`: 0 %
 while the account has money, 100 % at an `available_balance` of 0 or less.
