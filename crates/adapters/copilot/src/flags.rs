@@ -187,6 +187,16 @@ pub const COPILOT_1_0: CopilotFlags = CopilotFlags {
         "get_context_remaining",
         "session_history",
         "new_context",
+        // Seen in a live 1.0.103 tool list on 2026-10-28: the canvas UI,
+        // the extension manager (it could turn off the system-prompt
+        // extension that carries the agent's prompt), and the session
+        // store query tool.
+        "list_canvas_capabilities",
+        "open_canvas",
+        "invoke_canvas_action",
+        "extensions_reload",
+        "extensions_manage",
+        "session_store_sql",
         // Not hidden: `bash`, `read_bash`, `write_bash`, `list_bash`,
         // `stop_bash`. A `sync` command that runs past `initial_wait`
         // moves to the background by itself (the bash tool text in the
