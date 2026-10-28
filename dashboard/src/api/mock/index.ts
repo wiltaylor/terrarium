@@ -143,7 +143,8 @@ export interface MockOptions {
    * Who calls the schedule endpoints (docs/api.md §19). Default the
    * operator, who may do everything. A member reads only; a project_admin
    * writes in its project; a global schedule needs a sysadmin. The event
-   * sources (§20) use the same caller.
+   * sources (§20) and the config repo (§25: only the operator may give
+   * `approve_grants`) use the same caller.
    */
   scheduleCaller?: ScheduleCaller;
   /** False: a daemon with no config repo, so `/api/config/*` answers `501 not_available`. Default true. */
@@ -3282,7 +3283,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     templates: createTemplateMock({ w, iso, ulid, reply, fail, emit, audit, agent, caller: opts.scheduleCaller }),
 
     // PLAN §8.3, docs/api.md §25: a small in-memory config repo.
-    config: createConfigMock({ iso, reply, fail, audit, available: opts.configRepo }),
+    config: createConfigMock({ iso, reply, fail, audit, available: opts.configRepo, caller: opts.scheduleCaller }),
 
     // Terrarium-managed skills, in the config repo (./skills).
     skills: skillMock.api,

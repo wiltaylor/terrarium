@@ -4,7 +4,16 @@
 // export file, and the lines of a diff. Pure.
 
 import { ApiError, isMissingEndpoint } from "../../api/http";
-import type { ConfigChangeStatus, ConfigExportPlan, ConfigScanFinding, ConfigStatus, FleetPlan } from "../../api/types";
+import type {
+  ConfigChangeStatus,
+  ConfigExportPlan,
+  ConfigGrantApproval,
+  ConfigScanFinding,
+  ConfigSecretChange,
+  ConfigSecretsImport,
+  ConfigStatus,
+  FleetPlan,
+} from "../../api/types";
 
 /** The note under the findings of a scan block. */
 export const SCAN_NOTE = "Remove the secret, or for a false hit add `terrarium-scan: allow` to the line.";
@@ -162,6 +171,77 @@ export function remoteUrlProblem(url: string): string | null {
   }
   return null;
 }
+
+// ---- Secret grants that need the operator (S8, docs/api.md §25) ----
+
+/** The warning of the confirm step of Apply with grant approval. */
+export const GRANT_APPROVAL_WARNING =
+  "These grants give agents the values of secrets: an agent with the read level can get the value, and an env var puts it in the agent's environment. Only approve grants that you expect.";
+
+/** A grant change of the secrets import that has an `approval`, as the page shows it. */
+export interface GrantApprovalRow {
+  /** `global`, or the project. */
+  scope: string;
+  name: string;
+  grantee: string;
+  /** The level that the file gives: `use`, `read`, or "—" when the daemon did not say. */
+  level: string;
+  /** The env var that the file gives, or "". */
+  env: string;
+  /** What the grant changes: "new grant", "use → read", "new env GH_TOKEN", or "env A → B". */
+  what: string;
+  approval: ConfigGrantApproval;
+}
+
+/** What a grant change adds: a new grant, a wider level, or a new or changed env var. */
+export function grantWhat(c: Pick<ConfigSecretChange, "level" | "env" | "was">): string {
+  if (!c.was) return "new grant";
+  const parts: string[] = [];
+  if (c.level && c.level !== c.was.level) parts.push(`${c.was.level} → ${c.level}`);
+  if (c.env && c.env !== c.was.env) parts.push(c.was.env ? `env ${c.was.env} → ${c.env}` : `new env ${c.env}`);
+  return parts.length ? parts.join(", ") : "wider grant";
+}
+
+/** The grant changes of a secrets import that have an `approval` (needed, held, or approved). */
+export function grantApprovals(s: ConfigSecretsImport | null | undefined): GrantApprovalRow[] {
+  return (s?.changes ?? [])
+    .filter((c): c is ConfigSecretChange & { approval: ConfigGrantApproval } => c.action === "grant" && !!c.approval)
+    .map((c) => {
+      const slash = c.secret.indexOf("/");
+      return {
+        scope: slash >= 0 ? c.secret.slice(0, slash) : "",
+        name: slash >= 0 ? c.secret.slice(slash + 1) : c.secret,
+        grantee: c.grantee ?? "—",
+        level: c.level ?? "—",
+        env: c.env ?? "",
+        what: grantWhat(c),
+        approval: c.approval,
+      };
+    });
+}
+
+/** True when a grant waits for the operator: a plan needs it, or an apply held it. */
+export const grantsWait = (rows: GrantApprovalRow[]): boolean => rows.some((r) => r.approval === "needed" || r.approval === "held");
+
+const APPROVAL_LABELS: Record<ConfigGrantApproval, { label: string; tone: "ok" | "warn" | "bad" }> = {
+  needed: { label: "needs approval", tone: "warn" },
+  held: { label: "held", tone: "bad" },
+  approved: { label: "approved", tone: "ok" },
+};
+
+/** The chip of an approval. */
+export const approvalLabel = (a: ConfigGrantApproval) => APPROVAL_LABELS[a] ?? { label: a, tone: "warn" as const };
+
+/** The note above the grants: why they wait. Null when no grant waits. */
+export function grantsNote(rows: GrantApprovalRow[]): string | null {
+  if (rows.some((r) => r.approval === "held"))
+    return "The last apply did not make these grants: they give secret values, and only the operator can approve them. The export stays pending until you approve them.";
+  if (rows.some((r) => r.approval === "needed")) return "An apply of this export makes these grants only with your approval. Apply export without approval holds them.";
+  return null;
+}
+
+/** The text of a refusal of `approve_grants` (`403`), else null. */
+export const grantRefusal = (e: unknown): string | null => (e instanceof ApiError && e.status === 403 ? e.message : null);
 
 /** The short form of a commit: 7 characters. */
 export const shortCommit = (c: string | null | undefined) => (c ? c.slice(0, 7) : "—");

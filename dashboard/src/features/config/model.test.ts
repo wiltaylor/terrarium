@@ -1,8 +1,30 @@
 import { describe, expect, it } from "vitest";
 import { ApiError } from "../../api/http";
-import type { ConfigStatus, FleetPlan } from "../../api/types";
+import type { ConfigSecretChange, ConfigSecretsImport, ConfigStatus, FleetPlan } from "../../api/types";
 import { createMockApi } from "../../api/mock";
-import { actions, aheadBehind, autoSyncLabel, changeLabel, diffLines, exportLine, findingLabel, mergeConflicts, noConfigRepo, planSummary, remoteUrlProblem, scanFindings, shortCommit, waitingPlans } from "./model";
+import {
+  actions,
+  aheadBehind,
+  approvalLabel,
+  autoSyncLabel,
+  changeLabel,
+  diffLines,
+  exportLine,
+  findingLabel,
+  GRANT_APPROVAL_WARNING,
+  grantApprovals,
+  grantRefusal,
+  grantsNote,
+  grantsWait,
+  grantWhat,
+  mergeConflicts,
+  noConfigRepo,
+  planSummary,
+  remoteUrlProblem,
+  scanFindings,
+  shortCommit,
+  waitingPlans,
+} from "./model";
 
 const err = (status: number, code: string, details?: unknown) => new ApiError(status, "m", { error: { code, message: "m", details } }, code, details);
 
@@ -124,6 +146,57 @@ describe("config actions", () => {
   });
 });
 
+describe("config grant approval", () => {
+  const imp = (changes: ConfigSecretChange[]): ConfigSecretsImport => ({ changes, warnings: [] });
+
+  it("names what a grant adds: new, use → read, a new or changed env", () => {
+    expect(grantWhat({ level: "read", env: "GH_TOKEN" })).toBe("new grant");
+    expect(grantWhat({ level: "read", was: { level: "use" } })).toBe("use → read");
+    expect(grantWhat({ level: "read", env: "GH_TOKEN", was: { level: "read" } })).toBe("new env GH_TOKEN");
+    expect(grantWhat({ level: "read", env: "B", was: { level: "read", env: "A" } })).toBe("env A → B");
+    expect(grantWhat({ level: "read", env: "B", was: { level: "use" } })).toBe("use → read, new env B");
+    expect(grantWhat({ was: { level: "read" } })).toBe("wider grant");
+  });
+
+  it("keeps only the grants with an approval, and splits the secret into scope and name", () => {
+    const rows = grantApprovals(
+      imp([
+        { action: "create", secret: "web/npm" },
+        { action: "grant", secret: "web/npm", grantee: "agent:web/lead", level: "use" },
+        { action: "revoke", secret: "global/gh", grantee: "project:old" },
+        { action: "grant", secret: "global/gh", grantee: "agent:web/lead", approval: "held", level: "read", env: "GH_TOKEN" },
+        { action: "grant", secret: "web/db", grantee: "project:web", approval: "needed", level: "read", was: { level: "use" } },
+      ]),
+    );
+    expect(rows).toEqual([
+      { scope: "global", name: "gh", grantee: "agent:web/lead", level: "read", env: "GH_TOKEN", what: "new grant", approval: "held" },
+      { scope: "web", name: "db", grantee: "project:web", level: "read", env: "", what: "use → read", approval: "needed" },
+    ]);
+    expect(grantsWait(rows)).toBe(true);
+    expect(grantApprovals(null)).toEqual([]);
+    // An old daemon: no level and no `was`.
+    expect(grantApprovals(imp([{ action: "grant", secret: "global/gh", grantee: "project:p", approval: "needed" }]))[0]).toMatchObject({ level: "—", what: "new grant" });
+  });
+
+  it("waits only for needed or held grants; the note says why", () => {
+    const row = (approval: "needed" | "held" | "approved") => grantApprovals(imp([{ action: "grant", secret: "global/gh", grantee: "project:p", approval }]));
+    expect(grantsWait(row("approved"))).toBe(false);
+    expect(grantsNote(row("approved"))).toBeNull();
+    expect(grantsNote(row("needed"))).toMatch(/only with your approval/);
+    expect(grantsNote(row("held"))).toMatch(/did not make these grants/);
+    expect(approvalLabel("held")).toEqual({ label: "held", tone: "bad" });
+    expect(approvalLabel("needed").tone).toBe("warn");
+    expect(approvalLabel("approved").tone).toBe("ok");
+    expect(GRANT_APPROVAL_WARNING).toMatch(/give agents the values of secrets/);
+  });
+
+  it("reads the text of a 403 refusal, and nothing else", () => {
+    expect(grantRefusal(new ApiError(403, "`approve_grants` is for the operator only", { error: { code: "forbidden", message: "x" } }, "forbidden"))).toMatch(/operator only/);
+    expect(grantRefusal(err(409, "conflict"))).toBeNull();
+    expect(grantRefusal(new Error("x"))).toBeNull();
+  });
+});
+
 describe("config mock", () => {
   const mock = (o = {}) => createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 0, ...o });
 
@@ -156,6 +229,11 @@ describe("config mock", () => {
     expect((await api.config.status()).export_pending).toBe(true);
     const a = await api.config.pull({ apply: true });
     expect(a.export[0]!.applied).toBeDefined();
+    // The held grants keep the export pending until the operator approves them.
+    expect(grantsWait(grantApprovals(a.secrets))).toBe(true);
+    expect((await api.config.status()).export_pending).toBe(true);
+    const b = await api.config.pull({ apply: true, approve_grants: true });
+    expect(grantApprovals(b.secrets).map((r) => r.approval)).toEqual(["approved", "approved"]);
     expect((await api.config.status()).export_pending).toBe(false);
     expect(await api.config.push()).toEqual({ pushed: true });
     expect(await api.config.push()).toEqual({ pushed: false });

@@ -1,23 +1,31 @@
 // The config repo (PLAN §8.3, docs/api.md §25), for the operator or a
 // sysadmin: the repo state, the changed files with their diffs, commit,
-// sync, pull, push, the export plans of a pull, the remote, the new
+// sync, pull, push, the export plans of a pull, the secret grants of a
+// pull that wait for the operator (S8), the remote, the new
 // defaults that wait as `<file>.new`, and the merge banner. The logic is in
 // ./model.ts. A daemon with no config repo answers `501 not_available`;
 // the page then shows a short note.
 
 import { createResource, createSignal, For, Show } from "solid-js";
 import { ConfirmButton, Empty, ErrorBanner, PageHead } from "../../components/ui";
-import type { ConfigChangeStatus, ConfigExportPlan, ConfigScanFinding, ConfigStatus } from "../../api/types";
+import type { ConfigChangeStatus, ConfigExportPlan, ConfigScanFinding, ConfigSecretsImport, ConfigStatus } from "../../api/types";
 import { ago } from "../../lib/format";
 import { api } from "../../stores";
 import {
   actions,
   aheadBehind,
+  approvalLabel,
   autoSyncLabel,
   changeLabel,
   diffLines,
   exportLine,
   findingLabel,
+  GRANT_APPROVAL_WARNING,
+  grantApprovals,
+  grantRefusal,
+  grantsNote,
+  grantsWait,
+  type GrantApprovalRow,
   mergeConflicts,
   NO_REPO_NOTE,
   noConfigRepo,
@@ -113,6 +121,95 @@ function ExportPlans(props: { list: ConfigExportPlan[] }) {
   );
 }
 
+/**
+ * The secret grants of the last pull or sync that need the operator: the
+ * secret, the grantee, the level, the env var, what changes, and the
+ * approval. Apply with grant approval asks first: the grants give agents
+ * secret values.
+ */
+function GrantApprovals(props: { rows: GrantApprovalRow[]; action: Action; refusal: string | null; onApprove: () => void }) {
+  const [asking, setAsking] = createSignal(false);
+  return (
+    <section class="card-box stack">
+      <h3 style={{ margin: 0 }}>{grantsWait(props.rows) ? "Secret grants that need your approval" : "Secret grants"}</h3>
+      <Show when={grantsNote(props.rows)}>
+        <p class="notice small" style={{ margin: 0 }}>
+          {grantsNote(props.rows)}
+        </p>
+      </Show>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Secret</th>
+              <th>Grantee</th>
+              <th>Level</th>
+              <th>Env</th>
+              <th>Change</th>
+              <th>Approval</th>
+            </tr>
+          </thead>
+          <tbody>
+            <For each={props.rows}>
+              {(r) => (
+                <tr>
+                  <td>
+                    <span class="muted">{r.scope}/</span>
+                    <span class="mono">{r.name}</span>
+                  </td>
+                  <td class="mono">{r.grantee}</td>
+                  <td>{r.level}</td>
+                  <td class="mono">{r.env || "—"}</td>
+                  <td>{r.what}</td>
+                  <td>
+                    <span class={`chip ${approvalLabel(r.approval).tone}`}>{approvalLabel(r.approval).label}</span>
+                  </td>
+                </tr>
+              )}
+            </For>
+          </tbody>
+        </table>
+      </div>
+      <Show when={props.refusal}>
+        <p class="small" role="alert" style={{ margin: 0, color: "var(--danger)" }}>
+          The daemon refused the approval: {props.refusal}
+        </p>
+      </Show>
+      <Show when={grantsWait(props.rows)}>
+        <Show
+          when={asking()}
+          fallback={
+            <div class="row">
+              <button class="danger" disabled={!props.action.enabled} title={props.action.reason ?? ""} onClick={() => setAsking(true)}>
+                Apply with grant approval
+              </button>
+            </div>
+          }
+        >
+          <div class="error-banner stack" role="alertdialog" aria-label="Confirm the grant approval" style={{ gap: "6px" }}>
+            <strong>Approve {props.rows.filter((r) => r.approval !== "approved").length} secret grant(s)?</strong>
+            <span class="small">{GRANT_APPROVAL_WARNING}</span>
+            <div class="row">
+              <button
+                class="danger"
+                disabled={!props.action.enabled}
+                onClick={() => {
+                  setAsking(false);
+                  props.onApprove();
+                }}
+              >
+                Yes, apply and give these grants
+              </button>
+              <button onClick={() => setAsking(false)}>Cancel</button>
+            </div>
+          </div>
+        </Show>
+        <span class="muted small">Apply export (without approval) applies the rest of the export and holds these grants.</span>
+      </Show>
+    </section>
+  );
+}
+
 /** The remote: URL, credential name, and branch. Remove deletes it. */
 function RemoteEditor(props: { status: ConfigStatus; busy: boolean; onSave: (url: string, credential: string, branch: string) => void; onRemove: () => void }) {
   const [url, setUrl] = createSignal(props.status.remote?.url ?? "");
@@ -168,6 +265,7 @@ export default function ConfigPage() {
   const [findings, setFindings] = createSignal<ConfigScanFinding[] | null>(null);
   const [notice, setNotice] = createSignal<string | null>(null);
   const [exports, setExports] = createSignal<ConfigExportPlan[]>([]);
+  const [secrets, setSecrets] = createSignal<ConfigSecretsImport | null>(null);
   const [message, setMessage] = createSignal("");
   const [busy, setBusy] = createSignal(false);
   const [openDefault, setOpenDefault] = createSignal<string | null>(null);
@@ -214,15 +312,18 @@ export default function ConfigPage() {
       (r) => {
         setMessage("");
         setExports(r.export);
+        setSecrets(r.secrets ?? null);
         setNotice(`Synced. ${r.committed.commit ? `Committed ${shortCommit(r.committed.commit)}. ` : ""}${r.updated ? `Pulled ${r.changed.length} changed file(s). ` : ""}${r.pushed ? "Pushed." : "Nothing to push."}`);
       },
     );
-  const pull = (apply: boolean) =>
+  const pull = (apply: boolean, approveGrants = false) =>
     run(
-      () => api.config.pull({ apply }),
+      () => api.config.pull(approveGrants ? { apply, approve_grants: true } : { apply }),
       (r) => {
         setExports(r.export);
-        setNotice(apply ? "Applied the export changes." : r.updated ? `Pulled ${r.changed.length} changed file(s).` : "The repo has every commit of the remote.");
+        setSecrets(r.secrets ?? null);
+        const held = grantApprovals(r.secrets).filter((g) => g.approval === "held").length;
+        setNotice(apply ? `Applied the export changes.${approveGrants ? " The secret grants are approved." : held ? ` ${held} secret grant(s) are held for your approval.` : ""}` : r.updated ? `Pulled ${r.changed.length} changed file(s).` : "The repo has every commit of the remote.");
       },
     );
   const push = () => run(() => api.config.push(), (r) => setNotice(r.pushed ? "Pushed." : "Nothing to push."));
@@ -368,6 +469,10 @@ export default function ConfigPage() {
                     <ExportPlans list={exports()} />
                   </Show>
                 </section>
+              </Show>
+
+              <Show when={grantApprovals(secrets()).length}>
+                <GrantApprovals rows={grantApprovals(secrets())} action={acts()!.applyExport} refusal={grantRefusal(error())} onApprove={() => void pull(true, true)} />
               </Show>
 
               <section class="card-box stack">

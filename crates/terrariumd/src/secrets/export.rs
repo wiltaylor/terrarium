@@ -248,6 +248,23 @@ pub struct Change {
     /// operator approved it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub approval: Option<String>,
+    /// A grant: the level that the file gives (`use` or `read`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub level: Option<Level>,
+    /// A grant: the env var that the file gives.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env: Option<String>,
+    /// A grant that changes a stored grant: the stored one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub was: Option<GrantWas>,
+}
+
+/// The stored grant that a grant change replaces.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GrantWas {
+    pub level: Level,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env: Option<String>,
 }
 
 /// The `approval` of a grant that waits for the operator, in a plan.
@@ -316,6 +333,9 @@ impl Plan {
             secret: format!("{scope}/{name}"),
             grantee,
             approval: None,
+            level: None,
+            env: None,
+            was: None,
         });
     }
 
@@ -635,8 +655,16 @@ fn plan_grants(
                 name,
                 Some(grantee.label()),
             );
-            if approval && let Some(c) = p.report.changes.last_mut() {
-                c.approval = Some(APPROVAL_NEEDED.to_owned());
+            if let Some(c) = p.report.changes.last_mut() {
+                c.level = Some(level);
+                c.env = g.env.clone();
+                c.was = old.map(|s| GrantWas {
+                    level: s.level,
+                    env: s.env.clone(),
+                });
+                if approval {
+                    c.approval = Some(APPROVAL_NEEDED.to_owned());
+                }
             }
         }
     }
@@ -1209,6 +1237,28 @@ mod tests {
         let p = plan(&c, &files, &[]).unwrap();
         assert!(p.needs_approval());
         assert_eq!(with_approval(&p.report, APPROVAL_NEEDED), wait);
+        // Each grant shows its level and env, and the grant that it widens.
+        let shown: Vec<_> = p
+            .report
+            .changes
+            .iter()
+            .filter(|x| x.approval.is_some())
+            .map(|x| (x.level, x.env.as_deref(), x.was.clone()))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                (Some(Level::Read), Some("GH_TOKEN"), None),
+                (
+                    Some(Level::Read),
+                    None,
+                    Some(GrantWas {
+                        level: Level::Use,
+                        env: None
+                    })
+                ),
+            ]
+        );
 
         // An apply without the approval holds them. The grant of the
         // placeholder applies: it gives nothing.

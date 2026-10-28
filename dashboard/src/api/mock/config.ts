@@ -5,10 +5,15 @@
 // block (`422 invalid`, `details.findings`). A sync with "conflict" in the
 // message stops the merge on a conflict (`409`, `details.conflicts`), so the
 // merge banner can be seen. `available: false` acts as a daemon with no
-// config repo (`501 not_available`).
+// config repo (`501 not_available`). The pulled export also has secrets
+// files: two new or wider grants of secrets with a value wait for the
+// operator (S8). An apply without `approve_grants` holds them and keeps
+// `export_pending`; `approve_grants` from a caller that is not the
+// operator is `403 forbidden`.
 
 import type { Api } from "../client";
-import type { ConfigExportPlan, ConfigLogEntry, ConfigMerged, ConfigPendingDefault, ConfigScanFinding, ConfigStatus, FleetPlan } from "../types";
+import type { ConfigExportPlan, ConfigLogEntry, ConfigMerged, ConfigPendingDefault, ConfigScanFinding, ConfigSecretChange, ConfigSecretsImport, ConfigStatus, FleetPlan } from "../types";
+import type { ScheduleCaller } from "./schedules";
 
 type Fail = (status: number, code: string, message: string, details?: unknown) => never;
 
@@ -19,6 +24,8 @@ export interface ConfigMockContext {
   audit: (action: string, target: string, project: string | undefined, detail?: Record<string, unknown>) => unknown;
   /** False: a daemon with no config repo. Default true. */
   available?: boolean;
+  /** The caller. Only the operator may give `approve_grants`. Default: the operator. */
+  caller?: ScheduleCaller;
 }
 
 /** The marker that lets a line through the secret scan. */
@@ -169,11 +176,42 @@ export function createConfigMock(c: ConfigMockContext): Api["config"] {
     return { fetched: true, updated: true, changed: [EXPORT_FILE, "prompts/worker.md"], conflicts: [] };
   };
 
+  /** The grants of the pulled secrets files are made. */
+  let grantsMade = false;
+  /**
+   * The secrets import of the export, as the daemon's `secrets_export`: a
+   * placeholder, a grant of it (no approval), and two grants of secrets
+   * with a value that need the operator (a new one with an env var, and
+   * `use` to `read`).
+   */
+  const secretsImport = (apply: boolean, approve: boolean): ConfigSecretsImport => {
+    const approval = !apply ? "needed" : approve ? "approved" : "held";
+    const changes: ConfigSecretChange[] = grantsMade
+      ? []
+      : [
+          { action: "create", secret: "terrarium/npm" },
+          { action: "grant", secret: "terrarium/npm", grantee: "agent:terrarium/lead", level: "use" },
+          { action: "grant", secret: "global/gh", grantee: "agent:terrarium/lead", approval, level: "read", env: "GH_TOKEN" },
+          { action: "grant", secret: "terrarium/db", grantee: "project:terrarium", approval, level: "read", was: { level: "use" } },
+        ];
+    if (apply && approve) grantsMade = true;
+    return { changes, warnings: [] };
+  };
+
   /** The export plans after a merge, as the daemon's `export_plans`. */
-  const exportPlans = (m: ConfigMerged, apply: boolean): ConfigExportPlan[] => {
-    if (!m.changed.some((p) => p.startsWith("export/")) && !st.export_pending) return [];
-    st.export_pending = !apply;
-    return [apply ? { path: EXPORT_FILE, applied: { fleet: EXPORT_FILE, created: 1, updated: 1, unchanged: 1 } } : { path: EXPORT_FILE, plan: exportPlan() }];
+  const exportPlans = (m: ConfigMerged, apply: boolean, approve: boolean): { export: ConfigExportPlan[]; secrets?: ConfigSecretsImport } => {
+    if (!m.changed.some((p) => p.startsWith("export/")) && !st.export_pending) return { export: [] };
+    const secrets = secretsImport(apply, approve);
+    // A held grant keeps the export pending: the next pull plans it again.
+    st.export_pending = !apply || secrets.changes.some((x) => x.approval === "held");
+    const rows: ConfigExportPlan[] = [apply ? { path: EXPORT_FILE, applied: { fleet: EXPORT_FILE, created: 1, updated: 1, unchanged: 1 } } : { path: EXPORT_FILE, plan: exportPlan() }];
+    return { export: rows, secrets };
+  };
+
+  /** `approve_grants` is for the operator only (S8). */
+  const checkApprove = (approve: boolean | undefined) => {
+    if (approve && c.caller && c.caller.role !== "operator")
+      fail(403, "forbidden", "`approve_grants` is for the operator only: an agent cannot approve the grants of a config import");
   };
 
   const push = () => {
@@ -221,14 +259,16 @@ export function createConfigMock(c: ConfigMockContext): Api["config"] {
       }),
     pull: (body = {}) =>
       wrap(() => {
+        checkApprove(body.approve_grants);
         const m = merge();
-        const exp = exportPlans(m, !!body.apply);
+        const exp = exportPlans(m, !!body.apply, !!body.approve_grants);
         c.audit("config.pull", st.branch, undefined, { changed: m.changed });
-        return { ...m, export: exp };
+        return { ...m, ...exp };
       }),
     push: () => wrap(() => ({ pushed: push() })),
     sync: (body = {}) =>
       wrap(() => {
+        checkApprove(body.approve_grants);
         remote();
         const message = body.message?.trim() || "Terrarium config sync";
         const committed = commit(message);
@@ -241,9 +281,9 @@ export function createConfigMock(c: ConfigMockContext): Api["config"] {
         }
         const m = merge();
         const pushed = push();
-        const exp = exportPlans(m, !!body.apply);
+        const exp = exportPlans(m, !!body.apply, !!body.approve_grants);
         c.audit("config.sync", st.branch, undefined, { commit: committed.commit, changed: m.changed });
-        return { committed, ...m, pushed, export: exp };
+        return { committed, ...m, pushed, ...exp };
       }),
     abort: () =>
       wrap(() => {

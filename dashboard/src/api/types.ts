@@ -2436,9 +2436,43 @@ export interface ConfigMerged {
   conflicts: string[];
 }
 
+/**
+ * The operator's approval of a new or wider grant of a secret that has a
+ * value (S8, docs/api.md §25): `needed` in a plan, `held` when an apply
+ * without `approve_grants` did not make it, `approved` when it did.
+ */
+export type ConfigGrantApproval = "needed" | "held" | "approved";
+
+/** One change of the secrets import of a pulled export. No value. */
+export interface ConfigSecretChange {
+  action: "create" | "update" | "delete" | "grant" | "revoke";
+  /** `<scope>/<name>`. */
+  secret: string;
+  /** A grant or a revoke: `agent:<project>/<name>` or `project:<name>`. */
+  grantee?: string;
+  /** Only on a grant that needs the operator. */
+  approval?: ConfigGrantApproval;
+  /** A grant: the level that the file gives. */
+  level?: "use" | "read";
+  /** A grant: the env var that the file gives. */
+  env?: string;
+  /** A grant that changes a stored grant: the stored one. */
+  was?: { level: "use" | "read"; env?: string };
+}
+
+/** The secrets import of a pulled export (PLAN §16b.5). */
+export interface ConfigSecretsImport {
+  changes: ConfigSecretChange[];
+  warnings: string[];
+  /** The import did not run. */
+  error?: string;
+}
+
 /** `POST /api/config/pull`. */
 export interface ConfigPullResult extends ConfigMerged {
   export: ConfigExportPlan[];
+  /** When the export has secrets files. */
+  secrets?: ConfigSecretsImport;
 }
 
 /** `POST /api/config/sync`: commit, fetch, merge, push. */
@@ -2446,6 +2480,8 @@ export interface ConfigSyncResult extends ConfigMerged {
   committed: ConfigCommitted;
   pushed: boolean;
   export: ConfigExportPlan[];
+  /** When the export has secrets files. */
+  secrets?: ConfigSecretsImport;
 }
 
 /** `PUT /api/config/remote`. A URL with a user or a password is refused (422). */

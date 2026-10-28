@@ -1927,8 +1927,10 @@ describe("agent templates (docs/api.md §21)", () => {
     await api.config.commit({ message: "m" });
     await api.config.pull();
     await api.config.pull({ apply: true });
+    await api.config.pull({ apply: true, approve_grants: true });
     await api.config.push();
     await api.config.sync({ message: "m" });
+    await api.config.sync({ apply: true, approve_grants: true });
     await api.config.abort();
     await api.config.setRemote({ url: "git@h:c.git", branch: "main" });
     await api.config.clearRemote();
@@ -1943,8 +1945,10 @@ describe("agent templates (docs/api.md §21)", () => {
       'POST /api/config/commit {"message":"m"}',
       "POST /api/config/pull {}",
       'POST /api/config/pull {"apply":true}',
+      'POST /api/config/pull {"apply":true,"approve_grants":true}',
       "POST /api/config/push",
       'POST /api/config/sync {"message":"m"}',
+      'POST /api/config/sync {"apply":true,"approve_grants":true}',
       "POST /api/config/abort",
       'PUT /api/config/remote {"url":"git@h:c.git","branch":"main"}',
       "DELETE /api/config/remote",
@@ -1952,6 +1956,30 @@ describe("agent templates (docs/api.md §21)", () => {
       'POST /api/config/defaults/accept {"path":"prompts/leader.md"}',
       'POST /api/config/defaults/keep {"path":"prompts/leader.md"}',
     ]);
+  });
+
+  it("holds a new or wider grant of a secret with a value until the operator gives approve_grants (§25, S8)", async () => {
+    const api = mock();
+    await api.config.commit({ message: "local" });
+    const grants = (r: { secrets?: { changes: { action: string; secret: string; approval?: string }[] } }) =>
+      (r.secrets?.changes ?? []).filter((c) => c.action === "grant" && c.approval).map((c) => `${c.secret} ${c.approval}`);
+    const p = await api.config.pull();
+    expect(grants(p)).toEqual(["global/gh needed", "terrarium/db needed"]);
+    // The grant of a placeholder needs no approval.
+    expect(p.secrets!.changes).toContainEqual({ action: "grant", secret: "terrarium/npm", grantee: "agent:terrarium/lead", level: "use" });
+    expect(p.secrets!.changes).toContainEqual(expect.objectContaining({ secret: "terrarium/db", level: "read", was: { level: "use" } }));
+    // An apply without approval holds them, and the export stays pending.
+    const held = await api.config.pull({ apply: true });
+    expect(grants(held)).toEqual(["global/gh held", "terrarium/db held"]);
+    expect((await api.config.status()).export_pending).toBe(true);
+    // An agent cannot approve them.
+    const agent = createMockApi({ latencyMs: 0, eventsIntervalMs: 0, stepMs: 0, scheduleCaller: { role: "sysadmin" } });
+    await expect(agent.config.pull({ apply: true, approve_grants: true })).rejects.toMatchObject({ status: 403, code: "forbidden" });
+    await expect(agent.config.sync({ apply: true, approve_grants: true })).rejects.toMatchObject({ status: 403, code: "forbidden" });
+    // The operator approves them.
+    const ok = await api.config.pull({ apply: true, approve_grants: true });
+    expect(grants(ok)).toEqual(["global/gh approved", "terrarium/db approved"]);
+    expect((await api.config.status()).export_pending).toBe(false);
   });
 
   it("makes a template from an agent, in the agent's project by default", async () => {

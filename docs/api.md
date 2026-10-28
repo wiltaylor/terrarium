@@ -5674,16 +5674,22 @@ A merge conflict is `409 conflict` with `details.conflicts` (the paths).
 
   ```json
   {"changes":[{"action":"create","secret":"global/gh"},
-              {"action":"grant","secret":"global/gh","grantee":"agent:web/lead"},
+              {"action":"grant","secret":"global/gh","grantee":"agent:web/lead",
+               "level":"use"},
               {"action":"grant","secret":"global/db","grantee":"agent:web/lead",
-               "approval":"held"}],
+               "approval":"held","level":"read","env":"DB_URL",
+               "was":{"level":"use"}}],
    "warnings":["secret `web/db` has a value and is not in the export; the import keeps it"]}
   ```
 
   `action` is `create` (a placeholder), `update` (the plain fields),
   `delete` (a placeholder), `grant`, or `revoke`. `approval` is on a
   grant that needs the operator only: `needed`, `held`, or `approved`.
-  `error` shows when the import did not run.
+  A grant also has `level` (`use` or `read`) and `env` (when the file
+  gives one), and `was` (`{"level", "env"?}`) when it changes a stored
+  grant. With `was`, the dashboard shows what the grant adds: a new
+  grant, `use` to `read`, or a new `env`. `error` shows when the import
+  did not run.
 - **Push.** `git push <url> HEAD:refs/heads/<branch>`. Never forced.
 - **Sync.** Commit (with the export and the scan), pull, push.
 - **Conflict.** The merge stops, and the repo waits in it with conflict
