@@ -393,6 +393,9 @@ pub struct Effective {
     pub fields: Map<String, Value>,
     /// The names of the secret fields.
     pub secret_fields: Vec<String>,
+    /// The secret holds a value. False: a placeholder (PLAN §16b.5); the
+    /// grant gives nothing until the operator sets the value.
+    pub has_value: bool,
     /// The grants that give it: `agent` and/or `project`.
     pub via: Vec<String>,
 }
@@ -415,9 +418,9 @@ pub fn effective(conn: &Connection, agent_id: &str, project: &str) -> ApiResult<
     let rows = stmt
         .query_map(params![agent_key, project_key, project], |r| {
             let info = super::row_info(r)?;
-            let grantee: String = r.get(9)?;
-            let level: String = r.get(10)?;
-            let env: Option<String> = r.get(11)?;
+            let grantee: String = r.get(10)?;
+            let level: String = r.get(11)?;
+            let env: Option<String> = r.get(12)?;
             Ok((grantee, level, env, info))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -436,6 +439,7 @@ pub fn effective(conn: &Connection, agent_id: &str, project: &str) -> ApiResult<
                     env: None,
                     fields: info.fields.clone(),
                     secret_fields: info.secret_fields.clone(),
+                    has_value: info.has_value,
                     via: Vec::new(),
                 },
                 None,
@@ -585,6 +589,15 @@ pub fn launch(
 ) -> ApiResult<LaunchSecrets> {
     let mut out = LaunchSecrets::default();
     for e in effective(conn, agent_id, project)? {
+        if !e.has_value {
+            // A placeholder from a config import: no broker, no env var.
+            out.warnings.push(format!(
+                "secret `{}/{}` has no value yet (a placeholder from a config import); its \
+                 grant gives nothing at this start",
+                e.scope, e.name
+            ));
+            continue;
+        }
         out.git_hosts.extend(git_hosts(&e));
         if e.kind == Kind::SshKey {
             out.ssh_keys = true;
@@ -645,7 +658,8 @@ pub fn launch(
 }
 
 /// The granted `token` or `github_token` secret for the git host `host`
-/// (any level), opened. The project secrets come first.
+/// (any level), opened. The project secrets come first. A placeholder
+/// with no value does not count.
 pub fn token_for_host(
     conn: &Connection,
     key: &MasterKey,
@@ -655,7 +669,7 @@ pub fn token_for_host(
 ) -> ApiResult<Option<(Effective, Opened)>> {
     let host = host.to_ascii_lowercase();
     for e in effective(conn, agent_id, project)? {
-        if !git_hosts(&e).contains(&host) {
+        if !e.has_value || !git_hosts(&e).contains(&host) {
             continue;
         }
         if let Some(o) = open_effective(conn, key, &e)? {
@@ -665,11 +679,12 @@ pub fn token_for_host(
     Ok(None)
 }
 
-/// The granted `ssh_key` secrets of an agent (any level).
+/// The granted `ssh_key` secrets of an agent (any level) that hold a
+/// value. A placeholder gives no key to the ssh-agent.
 pub fn ssh_keys(conn: &Connection, agent_id: &str, project: &str) -> ApiResult<Vec<Effective>> {
     Ok(effective(conn, agent_id, project)?
         .into_iter()
-        .filter(|e| e.kind == Kind::SshKey)
+        .filter(|e| e.kind == Kind::SshKey && e.has_value)
         .collect())
 }
 

@@ -941,12 +941,24 @@ wrong passphrase is `422`.
 ```json
 {"id":"01MB2V8Q4X0K16V6G88P3SE78W","scope":"global","name":"github-deploy","kind":"token",
  "fields":{"username":"x-access-token","hosts":["github.com"]},"secret_fields":["value"],
+ "has_value":true,
  "created_at":"2026-10-28T09:00:00.000Z","updated_at":"2026-10-28T09:00:00.000Z",
  "created_by":"operator"}
 ```
 
 `fields` holds the plain fields. `secret_fields` holds the names of the
 secret fields that the secret has. `created_by` is the actor label.
+
+`has_value` is `false` for a placeholder: a secret that a config repo
+import made with no value (§25.3, PLAN §16b.5). A placeholder has its
+name, kind, plain fields, and grants. The dashboard marks it, and
+`terrarium secret list|show` shows "no value". A reveal, a `secret get`
+of a secret field, and a target login with it are `422 invalid` ("has no
+value yet"). A grant of a placeholder gives nothing: the brokers skip it,
+the start sets no env var for it, and the start emits a warning event. A
+target with a placeholder login saves, and its view shows a
+`credential.warning`. A `PUT` with the value makes it a normal secret.
+The granted shape of `GET /api/agent/secrets` has `has_value` too.
 
 ```
 POST /api/secrets
@@ -5384,9 +5396,9 @@ A merge conflict is `409 conflict` with `details.conflicts` (the paths).
 | `GET /api/config/diff?path=` | | `200 {"diff"}`: the unified diff of the work tree against the last commit (new files in full); `path` limits it to one file |
 | `GET /api/config/log?limit=` | | `200 [{"commit","author","at","subject"}]`, newest first; `limit` default 20, at most 500 |
 | `POST /api/config/commit` | `{"message", "export"?: true, "force_export"?: false}` | `200 {"commit","files","export"}`. `commit` is `null` when nothing changed. `export` lists the export files written first. `422` on a scan finding |
-| `POST /api/config/pull` | `{"apply"?: false}` | `200 {"fetched","updated","changed","conflicts","export"}`; `409` on a conflict |
+| `POST /api/config/pull` | `{"apply"?: false}` | `200 {"fetched","updated","changed","conflicts","export","secrets"?}`; `409` on a conflict |
 | `POST /api/config/push` | | `200 {"pushed"}`; `409` when the remote has commits that this repo does not have |
-| `POST /api/config/sync` | `{"message"?, "apply"?: false}` | `200 {"committed","fetched","updated","changed","conflicts","pushed","export"}`; `422` on a scan finding, `409` on a conflict |
+| `POST /api/config/sync` | `{"message"?, "apply"?: false}` | `200 {"committed","fetched","updated","changed","conflicts","pushed","export","secrets"?}`; `422` on a scan finding, `409` on a conflict |
 | `POST /api/config/abort` | | `200 {"aborted":true}`: leave a merge that waits; `409` when none waits |
 | `PUT /api/config/remote` | `{"url", "credential"?, "branch"?: "main"}` | `200` status. Needs a sysadmin or the operator (credential rights) |
 | `DELETE /api/config/remote` | | `200` status |
@@ -5405,7 +5417,8 @@ A merge conflict is `409 conflict` with `details.conflicts` (the paths).
   `export/projects/<project>.fleet.toml` (its repos, agents, project
   targets, schedules, and templates; the fleet name is the fleet that owns
   the project, else the project name), and `export/global.fleet.toml`
-  (the global templates and targets, fleet `terrarium-global`). No ULID,
+  (the global templates and targets, fleet `terrarium-global`), and the
+  secrets files (below). No ULID,
   no mail `thread`, no `start`, no user part of a repo URL. A credential
   or a subscription shows by its name only. The file objects of a
   definition file (`source = file`) of a template or a global target stay
@@ -5416,10 +5429,66 @@ A merge conflict is `409 conflict` with `details.conflicts` (the paths).
   a repo with no commit yet: its files become the first commit, so a new
   instance can join a shared repo. When `export/` changed, or
   `export_pending` is set, the answer has a fleet plan of each export
-  file (`export[].plan`, the shape of `POST /api/fleet/plan`); with
-  `apply`, each file goes through `POST /api/fleet/apply` (no prune, no
-  start) and the answer has `export[].applied`. A file that fails has
-  `export[].error`, and `export_pending` stays.
+  file (`export[].plan`, the shape of `POST /api/fleet/plan`) and the plan
+  of the secrets import (`secrets`, below); with `apply`, each file goes
+  through `POST /api/fleet/apply` (no prune, no start), the secrets are
+  imported, and the answer has `export[].applied` and what the import
+  did. A file that fails has `export[].error`, and `export_pending`
+  stays. The order of an apply: the secrets, the fleets, the secrets
+  again (the project secrets and the grants need the projects and the
+  agents), and one more try of a fleet that failed.
+- **Secrets in the export.** `export/secrets/<scope>.toml` (`global.toml`,
+  and one file for each project with secrets). It holds no value:
+
+  ```toml
+  version = 1
+  scope = "global"
+
+  [[secret]]
+  name = "gh"
+  kind = "github_token"
+  secret_fields = ["value"]
+
+  [secret.fields]
+  host = "github.com"
+
+  [[secret.grant]]
+  grantee = "agent:web/lead"
+  level = "read"
+  env = "GH_TOKEN"
+  ```
+
+  The grantee is `agent:<project>/<name>` or `project:<name>`, never an
+  ID. The `public_key` and `fingerprint` lines of an `ssh_key` carry the
+  marker `terrarium-scan: allow`. The import:
+
+  - makes a missing secret as a placeholder with no value
+    (`has_value: false`, §5.2);
+  - changes the plain fields only when they differ, and never a value. A
+    secret with a value keeps its kind, the names of its secret fields,
+    and (an `ssh_key`) its public key; a difference is a warning;
+  - never deletes a secret with a value. A secret that the file does not
+    name stays, with a warning. A placeholder that the file does not name
+    goes, unless a target uses it;
+  - makes the grants of each secret in the file match the file. A grant
+    to an agent or a project that does not exist yet is skipped with a
+    warning, and the next import adds it;
+  - writes the audit rows of §5.2 (`secret.put`, `secret.delete`,
+    `secret.grant`, `secret.revoke`) with `"source": "config"`, and then
+    builds the redaction matcher again.
+
+  An import that runs twice changes nothing the second time. The
+  `secrets` shape:
+
+  ```json
+  {"changes":[{"action":"create","secret":"global/gh"},
+              {"action":"grant","secret":"global/gh","grantee":"agent:web/lead"}],
+   "warnings":["secret `web/db` has a value and is not in the export; the import keeps it"]}
+  ```
+
+  `action` is `create` (a placeholder), `update` (the plain fields),
+  `delete` (a placeholder), `grant`, or `revoke`. `error` shows when the
+  import did not run.
 - **Push.** `git push <url> HEAD:refs/heads/<branch>`. Never forced.
 - **Sync.** Commit (with the export and the scan), pull, push.
 - **Conflict.** The merge stops, and the repo waits in it with conflict

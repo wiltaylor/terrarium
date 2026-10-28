@@ -305,6 +305,35 @@ fn print_merge(c: &Ctx, v: &Value) {
             }
         }
     }
+    print_secrets(c, v);
+}
+
+/// The secrets of a pulled export (docs/api.md §25.3): the changes of the
+/// import (or its plan), and the warnings. No value.
+fn print_secrets(c: &Ctx, v: &Value) {
+    let s = &v["secrets"];
+    if !s.is_object() {
+        return;
+    }
+    if let Some(err) = s["error"].as_str() {
+        c.line(format!("secrets: {err}"));
+    }
+    for ch in s["changes"].as_array().into_iter().flatten() {
+        let grantee = ch["grantee"]
+            .as_str()
+            .map(|g| format!(" {g}"))
+            .unwrap_or_default();
+        c.line(format!(
+            "secrets: {:<7} {}{grantee}",
+            field(ch, "action"),
+            field(ch, "secret")
+        ));
+    }
+    for w in s["warnings"].as_array().into_iter().flatten() {
+        if let Some(w) = w.as_str() {
+            c.line(format!("secrets: warning: {w}"));
+        }
+    }
 }
 
 fn print_pending(c: &Ctx, v: &Value) {

@@ -5326,7 +5326,10 @@ async fn admin_config_commands_map_onto_the_config_api() {
     let pulled = json!({"fetched": true, "updated": true, "changed": ["export/projects/p.fleet.toml"],
         "conflicts": [], "export": [{"path": "export/projects/p.fleet.toml",
         "plan": {"summary": {"create": 1, "update": 0, "unchanged": 2},
-        "entries": [{"action": "create", "kind": "agent", "key": "p/w1"}]}}]});
+        "entries": [{"action": "create", "kind": "agent", "key": "p/w1"}]}}],
+        "secrets": {"changes": [{"action": "create", "secret": "global/gh"},
+                                {"action": "grant", "secret": "global/gh", "grantee": "agent:p/w1"}],
+                    "warnings": ["secret `p/db` has a value and is not in the export; the import keeps it"]}});
     let out = ok(
         false,
         &["admin", "config", "pull"],
@@ -5344,6 +5347,12 @@ async fn admin_config_commands_map_onto_the_config_api() {
         "{out}"
     );
     assert!(out.contains("create    agent p/w1"), "{out}");
+    assert!(out.contains("secrets: create  global/gh"), "{out}");
+    assert!(
+        out.contains("secrets: grant   global/gh agent:p/w1"),
+        "{out}"
+    );
+    assert!(out.contains("secrets: warning: secret `p/db`"), "{out}");
     ok(
         false,
         &["admin", "config", "sync", "-m", "s", "--apply"],
@@ -6081,6 +6090,25 @@ async fn secrets_list_show_rm_and_reveal() {
     )
     .await;
     assert!(out.contains("secret:   value (not shown)"), "{out}");
+    // A placeholder from a config import shows "no value".
+    let mut placeholder = info.clone();
+    placeholder["has_value"] = json!(false);
+    let out = ok(
+        false,
+        &["secret", "list"],
+        vec![(200, json!([placeholder.clone()]))],
+        vec![req(Get, "/api/secrets")],
+    )
+    .await;
+    assert!(out.contains("value (no value)"), "{out}");
+    let out = ok(
+        false,
+        &["secret", "show", "gh"],
+        vec![(200, placeholder)],
+        vec![req(Get, "/api/secrets/global/gh")],
+    )
+    .await;
+    assert!(out.contains("(no value: a placeholder"), "{out}");
     ok(
         false,
         &["secret", "rm", "gh", "-p", "lab"],

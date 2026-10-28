@@ -374,6 +374,89 @@ fn split_generic(input: &SecretInput) -> ApiResult<Split> {
     Ok(Split { plain, secret })
 }
 
+/// The secret fields of a typed kind that a placeholder names (the kind
+/// fixes them): `value`, `password`, or `private_key`. `generic`: none.
+pub fn fixed_secret_fields(kind: Kind) -> Vec<String> {
+    match kind {
+        Kind::Generic => Vec::new(),
+        k => vec![k.secret_names()[0].to_owned()],
+    }
+}
+
+/// Check the plain fields and the secret field names of a secret with no
+/// value: a placeholder that a config import makes (PLAN §16b.5). The
+/// rules of [`split`] for the plain fields; an `ssh_key` may also carry
+/// the `public_key` and `fingerprint` of the key it waits for. No value
+/// goes into an error.
+pub fn check_plain(
+    kind: Kind,
+    plain: &Map<String, Value>,
+    secret_fields: &[String],
+) -> ApiResult<()> {
+    if kind == Kind::Generic {
+        if plain.len() + secret_fields.len() > MAX_GENERIC_FIELDS {
+            return Err(invalid(format!(
+                "a generic secret has at most {MAX_GENERIC_FIELDS} fields"
+            )));
+        }
+        for name in plain.keys().chain(secret_fields) {
+            if !field_name_ok(name) {
+                return Err(invalid(format!("bad field name `{name}`")));
+            }
+        }
+        if let Some(both) = secret_fields.iter().find(|n| plain.contains_key(*n)) {
+            return Err(invalid(format!(
+                "`{both}` is a plain field and a secret field"
+            )));
+        }
+        for (name, v) in plain {
+            plain_text(kind, name, v)?;
+        }
+        return Ok(());
+    }
+    if let Some(bad) = secret_fields
+        .iter()
+        .find(|n| !kind.secret_names().contains(&n.as_str()))
+    {
+        return Err(invalid(format!(
+            "a {kind} has no secret field `{bad}`; its secret fields are {}",
+            kind.secret_names().join(", ")
+        )));
+    }
+    for (name, v) in plain {
+        let derived = kind == Kind::SshKey && (name == "public_key" || name == "fingerprint");
+        if !derived && !kind.plain_names().contains(&name.as_str()) {
+            return Err(invalid(format!("a {kind} has no plain field `{name}`")));
+        }
+        match (kind, name.as_str(), v) {
+            (Kind::Token, "hosts", Value::Array(a)) => {
+                for h in a {
+                    let h = plain_text(kind, "hosts", h)?;
+                    if !host_ok(&h) {
+                        return Err(invalid(format!("`{h}` is not a host name")));
+                    }
+                }
+            }
+            (Kind::GithubToken, "host", v) => {
+                let h = plain_text(kind, "host", v)?;
+                if !host_ok(&h) {
+                    return Err(invalid(format!("`{h}` is not a host name")));
+                }
+            }
+            (Kind::ApiKey, "env", v) => {
+                let e = plain_text(kind, "env", v)?;
+                if !env_ok(&e) {
+                    return Err(invalid(format!("`{e}` is not an env var name")));
+                }
+            }
+            (_, n, v) => {
+                plain_text(kind, n, v)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The names of the secret fields that a split has, in order.
 pub fn secret_names(s: &SecretFields) -> Vec<String> {
     s.keys().cloned().collect()

@@ -200,6 +200,13 @@ The secret manager of `docs/api.md` §5.2. The scope is `--project`, else
 secret needs a project_admin of the project, a sysadmin, or the operator.
 `secret` has the alias `secrets`, and `list` has the alias `ls`.
 
+A config repo import can make a placeholder: a secret with a name, a
+kind, plain fields, and grants, but no value (`has_value: false`,
+[api.md §5.2](api.md#52-secrets)). `secret list` shows `(no value)` after
+its secret field names. `secret show` shows `no value: a placeholder`,
+and the `secret set` line that sets the value. A grant of a placeholder
+gives nothing until you set the value.
+
 `set` stores a new secret, or replaces one (`PUT
 /api/secrets/{scope}/{name}`). It never takes a secret value from an
 argument. It reads the value from `--file`, else from stdin. On a
@@ -1272,7 +1279,7 @@ operator or a sysadmin.
 | `admin config commit -m m` | `POST /api/config/commit` `{"message", "export", "force_export"}` | `committed <commit> (<n> file(s)): <files>`, or `nothing to commit`. A scan finding exits 1 with the file, the line, and the rule of each one. |
 | `admin config log [-n N]` | `GET /api/config/log?limit=N` | One line per commit: the commit, the time, the author, the subject. |
 | `admin config push` | `POST /api/config/push` | `pushed` or `nothing to push`. |
-| `admin config pull [--apply]` | `POST /api/config/pull` `{"apply"}` | The merged files, then for each changed export file its fleet plan (`plan N create, N update, N unchanged`) and the entries that change, or `applied`. A conflict exits 1 with the files. |
+| `admin config pull [--apply]` | `POST /api/config/pull` `{"apply"}` | The merged files, then for each changed export file its fleet plan (`plan N create, N update, N unchanged`) and the entries that change, or `applied`. Then one `secrets:` line for each change of the secrets import (`create`, `update`, `delete`, `grant`, `revoke`), and one for each warning. A conflict exits 1 with the files. |
 | `admin config sync [-m m] [--apply]` | `POST /api/config/sync` `{"message"?, "apply"}` | The commit line, the merge lines, and `pushed`. |
 | `admin config abort` | `POST /api/config/abort` | `merge aborted: the repo is back at your last commit` |
 | `admin config remote set <url> [--credential c] [--branch b]` | `PUT /api/config/remote` | The status. Put a token or a deploy key in a global secret (`terrarium secret set`), never in the URL: a URL with a user or a password is refused. |

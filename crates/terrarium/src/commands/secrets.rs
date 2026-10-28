@@ -41,6 +41,12 @@ fn plain_text(s: &Value) -> String {
         .unwrap_or_default()
 }
 
+/// A placeholder with no value (a config import, PLAN §16b.5). An older
+/// daemon sends no `has_value`: its secrets have values.
+fn no_value(s: &Value) -> bool {
+    s["has_value"] == Value::Bool(false)
+}
+
 fn print_list(ctx: &Ctx, v: &Value) {
     let rows: Vec<Value> = v
         .as_array()
@@ -49,7 +55,7 @@ fn print_list(ctx: &Ctx, v: &Value) {
         .into_iter()
         .map(|mut s| {
             s["plain"] = plain_text(&s).into();
-            s["secret"] = s["secret_fields"]
+            let names = s["secret_fields"]
                 .as_array()
                 .map(|a| {
                     a.iter()
@@ -57,8 +63,13 @@ fn print_list(ctx: &Ctx, v: &Value) {
                         .collect::<Vec<_>>()
                         .join(",")
                 })
-                .unwrap_or_default()
-                .into();
+                .unwrap_or_default();
+            s["secret"] = if no_value(&s) {
+                format!("{names} (no value)").trim_start().to_owned()
+            } else {
+                names
+            }
+            .into();
             s
         })
         .collect();
@@ -90,7 +101,19 @@ fn print_one(ctx: &Ctx, s: &Value) {
         .as_array()
         .map(|a| a.iter().filter_map(Value::as_str).collect())
         .unwrap_or_default();
-    ctx.line(format!("  secret:   {} (not shown)", names.join(", ")));
+    if no_value(s) {
+        let flag = match field(s, "scope").as_str() {
+            GLOBAL => String::new(),
+            p => format!(" -p {p}"),
+        };
+        ctx.line(format!(
+            "  secret:   {} (no value: a placeholder; set it with `terrarium secret set {}{flag}`)",
+            names.join(", "),
+            field(s, "name")
+        ));
+    } else {
+        ctx.line(format!("  secret:   {} (not shown)", names.join(", ")));
+    }
     ctx.line(format!(
         "  updated:  {} by {}",
         field(s, "updated_at"),

@@ -9,8 +9,10 @@
 //! - `prompts/`: the personas and the protocol templates (`*.md`).
 //! - `harness/<harness>/`: the user settings of each harness.
 //! - `export/`: the templates, the schedules, and the projects with their
-//!   agents, targets, and repos, as fleet files ([`export_files`]). No
-//!   runtime state, and no ID of this instance.
+//!   agents, targets, and repos, as fleet files ([`export_files`]); and the
+//!   secrets by name in `export/secrets/` (`crate::secrets::export`: the
+//!   names, kinds, plain fields, and grants, never a value). No runtime
+//!   state, and no ID of this instance.
 //! - `skills/`: the skill library (PLAN §8.6, `crate::skills`), one dir
 //!   for each skill, with the file types of
 //!   `terrarium_core::skills::EXTENSIONS`.
@@ -908,11 +910,50 @@ impl ConfigRepo {
         Ok(())
     }
 
-    /// The export files in the repo: `(path in the repo, content)`.
+    /// The fleet files of the export in the repo: `(path in the repo,
+    /// content)`.
     pub fn export_in_repo(&self) -> Vec<(String, String)> {
-        let dir = self.dir.join(EXPORT_DIR);
+        self.read_rel(
+            export_paths(&self.dir.join(EXPORT_DIR))
+                .into_iter()
+                .filter(|p| !is_secrets_file(&self.dir, p))
+                .collect(),
+        )
+    }
+
+    /// The secrets files of the export in the repo
+    /// (`export/secrets/*.toml`): `(path in the repo, content)`.
+    pub fn secrets_in_repo(&self) -> Vec<(String, String)> {
+        self.read_rel(
+            export_paths(&self.dir.join(EXPORT_DIR))
+                .into_iter()
+                .filter(|p| is_secrets_file(&self.dir, p))
+                .collect(),
+        )
+    }
+
+    /// The projects of the export: the names of
+    /// `export/projects/<name>.fleet.toml`.
+    pub fn exported_projects(&self) -> Vec<String> {
+        let dir = self.dir.join(EXPORT_DIR).join("projects");
+        let mut out: Vec<String> = std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|e| {
+                e.file_name()
+                    .to_str()
+                    .and_then(|n| n.strip_suffix(terrarium_core::fleet::FLEET_SUFFIX))
+                    .map(str::to_owned)
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    fn read_rel(&self, paths: Vec<PathBuf>) -> Vec<(String, String)> {
         let mut out = Vec::new();
-        for p in export_paths(&dir) {
+        for p in paths {
             if let Ok(text) = std::fs::read_to_string(&p) {
                 let rel = p
                     .strip_prefix(&self.dir)
@@ -951,18 +992,32 @@ impl ConfigRepo {
     }
 }
 
-/// The fleet files under `export/`: `*.fleet.toml`, at any depth.
+/// A secrets file of the export: `export/secrets/<scope>.toml`.
+fn is_secrets_file(repo: &Path, p: &Path) -> bool {
+    p.parent() == Some(repo.join(crate::secrets::export::DIR).as_path())
+        && p.extension().is_some_and(|e| e == "toml")
+}
+
+/// The files under `export/` that the export writes: the fleet files
+/// (`*.fleet.toml`, at any depth) and the secrets files
+/// (`export/secrets/*.toml`).
 fn export_paths(dir: &Path) -> Vec<PathBuf> {
     fn walk(d: &Path, out: &mut Vec<PathBuf>) {
+        let secrets = d.file_name().is_some_and(|n| n == "secrets")
+            && d.parent()
+                .and_then(Path::file_name)
+                .is_some_and(|n| n == EXPORT_DIR);
         for e in std::fs::read_dir(d).into_iter().flatten().flatten() {
             let p = e.path();
             let Ok(ty) = e.file_type() else { continue };
+            let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
             if ty.is_dir() {
                 walk(&p, out);
             } else if ty.is_file()
-                && p.file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.ends_with(terrarium_core::fleet::FLEET_SUFFIX))
+                && (name.ends_with(terrarium_core::fleet::FLEET_SUFFIX)
+                    || (secrets && name.ends_with(".toml")))
             {
                 out.push(p);
             }
@@ -1015,8 +1070,9 @@ fn clean_fleet(f: &mut terrarium_core::fleet::Fleet) {
 }
 
 /// The export of the store (PLAN §8.3): one fleet file for each project
-/// (its repos, agents, project targets, schedules, and templates), and one
-/// for the global templates and targets. A project that a fleet owns is
+/// (its repos, agents, project targets, schedules, and templates), one
+/// for the global templates and targets, and one secrets file for each
+/// scope with secrets (`crate::secrets::export`: no value). A project that a fleet owns is
 /// exported under that fleet's name, so an apply on another instance
 /// keeps one owner.
 pub fn export_files(conn: &rusqlite::Connection) -> ApiResult<Vec<ExportFile>> {
@@ -1082,6 +1138,9 @@ pub fn export_files(conn: &rusqlite::Connection) -> ApiResult<Vec<ExportFile>> {
             path: format!("{EXPORT_DIR}/global.fleet.toml"),
             content: f.to_toml(),
         });
+    }
+    for (path, content) in crate::secrets::export::files(conn)? {
+        out.push(ExportFile { path, content });
     }
     Ok(out)
 }

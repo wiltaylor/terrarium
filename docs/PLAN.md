@@ -572,7 +572,13 @@ before each commit: one fleet file for each project
 schedules, templates) and `export/global.fleet.toml` (global templates and
 targets). It has no runtime state and no ID of the instance: no ULID, no
 mail thread, no `start`. A project that a fleet owns is exported under
-that fleet's name.
+that fleet's name. `export/secrets/<scope>.toml` (`global.toml` and one
+file for each project with secrets) holds the secrets by name (§16b.5):
+the name, the kind, the plain fields, the names of the secret fields, and
+the grants by grantee name (`agent:<project>/<name>`, `project:<name>`).
+It never holds a value. The `public_key` and `fingerprint` lines of an
+`ssh_key` carry the scan marker `terrarium-scan: allow`: they are long
+base64 runs, and they are not secret.
 
 **Never in the repo**: the harness homes (`config/<harness>`: sessions,
 history), `state/` (credentials, keys, the database), `.env`, an API key,
@@ -613,8 +619,13 @@ conflict stops the merge with the files listed, and the repo waits in the
 merge: edit the files and commit, or `abort`. No step discards a local
 commit: no `reset --hard`, no force push. `pull` applies the changes:
 prompts and harness settings at the next agent start; `export/` changes
-show as a fleet plan, and apply only with `--apply` (the fleet apply of
-§20, no prune). Until then a commit does not write `export/` over them.
+show as a fleet plan and a secrets plan (`secrets` in the answer), and
+apply only with `--apply` (the fleet apply of §20, no prune). An apply
+imports the secrets first (a target names its login), then applies the
+fleets, then imports the secrets again (the project secrets and the
+grants need the projects and the agents of the fleets). A fleet that
+failed gets one more try. Until then a commit does not write `export/`
+over them.
 `TERRARIUM_CONFIG_SYNC` (`off`, `pull`, or `sync`; default `off`) runs a
 pull or a sync every `TERRARIUM_CONFIG_SYNC_INTERVAL` (default `15m`).
 
@@ -2263,6 +2274,29 @@ grant change applies at the next start of the agent; the brokers and
 - Config repo (§8.3): the export holds no secret. It holds the names, kinds,
   and plain fields of the secrets, and the grants by name. An import makes a
   missing secret as a placeholder with no value, and the dashboard marks it.
+  The rules of the import (`pull --apply`, `crate::secrets::export`):
+  - A missing secret becomes a placeholder: a row with no value (`sealed`
+    is NULL). The API shows it with `has_value: false`, and `terrarium
+    secret list|show` shows "no value". It does not open: a reveal, a
+    `secret get`, and a target login are `422` "has no value yet".
+  - A grant of a placeholder gives nothing. The broker skips it, and the
+    start sets no env var for it and emits a warning event. A target with
+    a placeholder login saves, and the target view shows a warning.
+  - The import changes the plain fields of a secret only when they
+    differ. It never changes a value. A secret with a value keeps its
+    kind and the names of its secret fields, and an `ssh_key` with a value
+    keeps its public key; a difference is a warning.
+  - The import never deletes a secret with a value: a secret that the file
+    does not name stays, with a warning. A placeholder that the file does
+    not name goes, unless a target uses it.
+  - The grants of each secret in the file match the file: the import adds,
+    changes, and removes grants. A grant to an agent or a project that
+    does not exist yet is skipped with a warning; the next import adds it.
+  - Each change writes the audit row of the store (`secret.put`,
+    `secret.delete`, `secret.grant`, `secret.revoke`) with `"source":
+    "config"`. After the import the daemon builds the redaction matcher
+    again.
+  - An import that runs twice changes nothing the second time.
 
 ### 16b.6 Redaction
 

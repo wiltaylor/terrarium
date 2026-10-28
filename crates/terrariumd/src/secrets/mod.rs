@@ -31,6 +31,7 @@
 
 pub mod agent_keys;
 pub mod crypto;
+pub mod export;
 pub mod grants;
 pub mod kinds;
 pub mod migrate;
@@ -81,6 +82,10 @@ pub struct SecretInfo {
     pub fields: Map<String, Value>,
     /// The names of the secret fields that the secret holds.
     pub secret_fields: Vec<String>,
+    /// The secret holds a value. False: a placeholder with no value (a
+    /// config import made it, PLAN §16b.5). It does not open, and a grant
+    /// of it gives nothing until the operator sets the value.
+    pub has_value: bool,
     pub created_at: String,
     pub updated_at: String,
     pub created_by: String,
@@ -358,8 +363,8 @@ pub fn scope_project(scope: &str) -> Option<&str> {
     (scope != GLOBAL).then_some(scope)
 }
 
-const COLS: &str =
-    "id, scope, name, kind, plain, secret_fields, created_at, updated_at, created_by";
+const COLS: &str = "id, scope, name, kind, plain, secret_fields, created_at, updated_at, \
+                    created_by, sealed IS NOT NULL";
 
 fn row_info(r: &rusqlite::Row<'_>) -> rusqlite::Result<SecretInfo> {
     let kind: String = r.get(3)?;
@@ -379,6 +384,7 @@ fn row_info(r: &rusqlite::Row<'_>) -> rusqlite::Result<SecretInfo> {
         created_at: r.get(6)?,
         updated_at: r.get(7)?,
         created_by: r.get(8)?,
+        has_value: r.get(9)?,
     })
 }
 
@@ -510,7 +516,21 @@ pub fn delete_project(conn: &Connection, project: &str) -> ApiResult<usize> {
     Ok(conn.execute("DELETE FROM secrets WHERE scope = ?1", [project])?)
 }
 
-/// Open one secret of one scope.
+/// The error of a secret with no value (a placeholder, PLAN §16b.5).
+pub fn no_value(scope: &str, name: &str) -> ApiError {
+    let flag = if scope == GLOBAL {
+        String::new()
+    } else {
+        format!(" -p {scope}")
+    };
+    ApiError::invalid(format!(
+        "secret `{scope}/{name}` has no value yet (a placeholder from a config import); \
+         set it with `terrarium secret set {name}{flag}`"
+    ))
+}
+
+/// Open one secret of one scope. A placeholder with no value is
+/// `invalid` ([`no_value`]).
 pub fn open(
     conn: &Connection,
     key: &MasterKey,
@@ -526,9 +546,7 @@ pub fn open(
         |r| r.get(0),
     )?;
     let Some(sealed) = sealed else {
-        return Err(ApiError::invalid(format!(
-            "secret `{scope}/{name}` has no value yet; set it first"
-        )));
+        return Err(no_value(scope, name));
     };
     let bytes = key
         .open(

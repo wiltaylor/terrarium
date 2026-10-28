@@ -730,12 +730,22 @@ pub fn credential_view(conn: &Connection, def: &TargetDef) -> ApiResult<Option<C
         .as_ref()
         .filter(|s| s.kind == Kind::SshKey)
         .and_then(secrets::ssh::fingerprint_of);
+    // A placeholder (PLAN §16b.5) passes the save check, so that a config
+    // import can bring the target and the name of its login together; the
+    // view reports that it has no value yet.
+    let warning = match credential_problem(conn, def)? {
+        Some(w) => Some(w),
+        None => s
+            .as_ref()
+            .filter(|s| !s.has_value)
+            .map(|s| secrets::no_value(&s.scope, &s.name).message),
+    };
     Ok(Some(CredentialView {
         name: name.clone(),
         scope: s.as_ref().map(|s| s.scope.clone()),
         kind: s.as_ref().map(|s| s.kind),
         fingerprint,
-        warning: credential_problem(conn, def)?,
+        warning,
     }))
 }
 

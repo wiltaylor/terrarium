@@ -21,6 +21,7 @@ use crate::defaults::{self, Pending};
 use crate::error::{ApiError, ApiResult};
 use crate::fleet::Plan;
 use crate::policy;
+use crate::secrets::export::{self as secrets_export, Report as SecretsReport};
 
 pub fn routes() -> Router<Shared> {
     Router::new()
@@ -177,6 +178,129 @@ struct ExportPlan {
     error: Option<String>,
 }
 
+/// The secrets of a pulled export (PLAN §16b.5): what their import does,
+/// or did.
+#[derive(Debug, Default, Serialize)]
+struct SecretsImport {
+    #[serde(flatten)]
+    report: SecretsReport,
+    /// The import did not run (a database error).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+/// Plan, or run, the import of the secrets files of the export. A run
+/// writes the store in one transaction, then builds the redaction matcher
+/// again.
+async fn import_secrets(
+    state: &Shared,
+    actor: &Actor,
+    r: &ConfigRepo,
+    apply: bool,
+) -> ApiResult<SecretsReport> {
+    let (files, projects) = blocking(r.clone(), |r| {
+        Ok((r.secrets_in_repo(), r.exported_projects()))
+    })
+    .await?;
+    if !apply {
+        return state
+            .db
+            .read(move |c| Ok(secrets_export::plan(c, &files, &projects)?.report))
+            .await;
+    }
+    let by = actor.label();
+    let report = state
+        .db
+        .write(actor.label(), move |t| {
+            let plan = secrets_export::plan(t, &files, &projects)?;
+            secrets_export::apply(t, &plan, &by)?;
+            Ok(plan.report)
+        })
+        .await?;
+    if !report.changes.is_empty() {
+        crate::secrets::redact::rebuild(state).await;
+    }
+    Ok(report)
+}
+
+/// Apply the fleet files `files`; the answer has a row for each, and
+/// whether one failed.
+async fn apply_fleets(
+    state: &Shared,
+    actor: &Actor,
+    files: Vec<(String, String)>,
+) -> (Vec<ExportPlan>, bool) {
+    let mut out = Vec::new();
+    let mut failed = false;
+    for (path, content) in files {
+        let name = Some(path.clone());
+        let row = match super::fleet::apply_file(state, actor, content, name).await {
+            Ok(v) => ExportPlan {
+                path,
+                plan: None,
+                applied: Some(v),
+                error: None,
+            },
+            Err(e) => {
+                failed = true;
+                ExportPlan {
+                    path,
+                    plan: None,
+                    applied: None,
+                    error: Some(e.message),
+                }
+            }
+        };
+        out.push(row);
+    }
+    (out, failed)
+}
+
+/// Apply the export: the secrets first (a target names its login, so the
+/// login must exist), then the fleets, then the secrets again (the
+/// project secrets and the grants need the projects and the agents of the
+/// fleets). A fleet that failed gets one more try after that.
+async fn apply_export(
+    state: &Shared,
+    actor: &Actor,
+    r: &ConfigRepo,
+    files: Vec<(String, String)>,
+) -> (Vec<ExportPlan>, SecretsImport, bool) {
+    let mut secrets = SecretsImport::default();
+    let mut changes = Vec::new();
+    let mut run = |res: ApiResult<SecretsReport>, s: &mut SecretsImport| match res {
+        Ok(rep) => {
+            changes.extend(rep.changes.clone());
+            s.report = rep;
+            true
+        }
+        Err(e) => {
+            s.error = Some(e.message);
+            false
+        }
+    };
+    let mut ok = run(import_secrets(state, actor, r, true).await, &mut secrets);
+    let (mut rows, failed) = apply_fleets(state, actor, files.clone()).await;
+    ok &= run(import_secrets(state, actor, r, true).await, &mut secrets);
+    let mut failed = failed;
+    if failed {
+        let again: Vec<(String, String)> = files
+            .into_iter()
+            .filter(|(p, _)| rows.iter().any(|x| x.path == *p && x.error.is_some()))
+            .collect();
+        let (retry, still) = apply_fleets(state, actor, again).await;
+        for row in retry {
+            if let Some(slot) = rows.iter_mut().find(|x| x.path == row.path) {
+                *slot = row;
+            }
+        }
+        failed = still;
+        ok &= run(import_secrets(state, actor, r, true).await, &mut secrets);
+    }
+    secrets.report.changes = changes;
+    (rows, secrets, failed || !ok)
+}
+
 /// After a merge: plan (or apply) the export files when `export/`
 /// changed or a pulled export waits.
 async fn export_plans(
@@ -185,58 +309,51 @@ async fn export_plans(
     r: &ConfigRepo,
     merged: &Merged,
     apply: bool,
-) -> ApiResult<Vec<ExportPlan>> {
+) -> ApiResult<(Vec<ExportPlan>, Option<SecretsImport>)> {
     let changed = merged
         .changed
         .iter()
         .any(|p| p.starts_with(&format!("{EXPORT_DIR}/")));
     if !changed && !r.state().export_pending {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), None));
     }
     let files = blocking(r.clone(), |r| Ok(r.export_in_repo())).await?;
+    if apply {
+        let (rows, secrets, failed) = apply_export(state, actor, r, files).await;
+        blocking(r.clone(), move |r| r.set_export_pending(failed)).await?;
+        return Ok((rows, Some(secrets)));
+    }
     let mut out = Vec::new();
-    let mut failed = false;
     for (path, content) in files {
         let name = Some(path.clone());
-        let row = if apply {
-            match super::fleet::apply_file(state, actor, content, name).await {
-                Ok(v) => ExportPlan {
-                    path,
-                    plan: None,
-                    applied: Some(v),
-                    error: None,
-                },
-                Err(e) => {
-                    failed = true;
-                    ExportPlan {
-                        path,
-                        plan: None,
-                        applied: None,
-                        error: Some(e.message),
-                    }
-                }
-            }
-        } else {
-            match super::fleet::plan_file(state, actor, content, name).await {
-                Ok(p) => ExportPlan {
-                    path,
-                    plan: Some(p),
-                    applied: None,
-                    error: None,
-                },
-                Err(e) => ExportPlan {
-                    path,
-                    plan: None,
-                    applied: None,
-                    error: Some(e.message),
-                },
-            }
+        let row = match super::fleet::plan_file(state, actor, content, name).await {
+            Ok(p) => ExportPlan {
+                path,
+                plan: Some(p),
+                applied: None,
+                error: None,
+            },
+            Err(e) => ExportPlan {
+                path,
+                plan: None,
+                applied: None,
+                error: Some(e.message),
+            },
         };
         out.push(row);
     }
-    let pending = !apply || failed;
-    blocking(r.clone(), move |r| r.set_export_pending(pending)).await?;
-    Ok(out)
+    let secrets = match import_secrets(state, actor, r, false).await {
+        Ok(report) => SecretsImport {
+            report,
+            error: None,
+        },
+        Err(e) => SecretsImport {
+            report: SecretsReport::default(),
+            error: Some(e.message),
+        },
+    };
+    blocking(r.clone(), move |r| r.set_export_pending(true)).await?;
+    Ok((out, Some(secrets)))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -253,6 +370,10 @@ struct PullResult {
     #[serde(flatten)]
     merged: Merged,
     export: Vec<ExportPlan>,
+    /// The secrets of the export: the plan of their import, or what it
+    /// did. Absent when `export/` did not change.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    secrets: Option<SecretsImport>,
 }
 
 fn conflict_error(merged: &Merged) -> ApiError {
@@ -288,7 +409,7 @@ async fn pull(
     if !merged.conflicts.is_empty() {
         return Err(conflict_error(&merged));
     }
-    let export = export_plans(&state, &actor, &r, &merged, b.apply).await?;
+    let (export, secrets) = export_plans(&state, &actor, &r, &merged, b.apply).await?;
     audit(
         &state,
         &actor,
@@ -296,7 +417,11 @@ async fn pull(
         json!({"changed": merged.changed}),
     )
     .await;
-    Ok(Json(PullResult { merged, export }))
+    Ok(Json(PullResult {
+        merged,
+        export,
+        secrets,
+    }))
 }
 
 #[derive(Debug, Serialize)]
@@ -329,6 +454,8 @@ struct SyncResult {
     merged: Merged,
     pushed: bool,
     export: Vec<ExportPlan>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    secrets: Option<SecretsImport>,
 }
 
 /// One sync: commit the local changes (with the scan), fetch, merge, push.
@@ -350,7 +477,7 @@ pub(crate) async fn run_sync(state: &Shared, actor: &Actor, b: SyncBodyIn) -> Ap
         return Err(conflict_error(&merged));
     }
     let pushed = blocking(r.clone(), ConfigRepo::push).await?;
-    let export = export_plans(state, actor, &r, &merged, b.apply).await?;
+    let (export, secrets) = export_plans(state, actor, &r, &merged, b.apply).await?;
     audit(
         state,
         actor,
@@ -363,6 +490,7 @@ pub(crate) async fn run_sync(state: &Shared, actor: &Actor, b: SyncBodyIn) -> Ap
         merged,
         pushed,
         export,
+        secrets,
     })?)
 }
 
