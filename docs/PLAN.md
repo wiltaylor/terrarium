@@ -152,8 +152,9 @@ Observations that shape the design:
 | **Target** | A machine the agent may run commands on: `host`, `ssh`, `docker`, `vmlab`. A target is either global or owned by one project. |
 | **Executor** | The daemon component that runs a command on a target for an agent. |
 | **Status** | `starting`, `idle`, `waiting`, `working`, `blocked`, `error`, `stopped`, `restarting`. |
-| **Wait** | One thing an agent waits on: another agent, a process on a target, a time, or a card. Open until it resolves, times out, fails, or is cancelled (§12d). |
+| **Wait** | One thing an agent waits on: another agent, a process on a target, a time, a card, or the answer to a question (§12e). Open until it resolves, times out, fails, or is cancelled (§12d). |
 | **Watch** | A subscription to the status changes of an agent. It mails its watcher (an agent or the operator) (§12d). |
+| **Question** | A request of a leader agent for a decision of the operator. It is on the agent, and the answer comes as mail (§12e). |
 
 Status rules:
 
@@ -721,6 +722,9 @@ terrarium wait process <session> | card <id> [--column done]
 terrarium wait ls [--all] | show <id> | cancel <id> [--kill]
 terrarium watch <agent> --on blocked,error [--once] [--no-debounce]
 terrarium watch ls | rm <id>
+terrarium question ask "<text>" [--option o]... [--context t] [--card c] [--urgent] [--wait]   leaders (§12e)
+terrarium question ls [--all] | show <id> | update <id> ... | retract <id> [-m why]
+terrarium wait question <id>                 until the answer comes
 terrarium targets ls                         targets this agent may use
 terrarium exec <target> [--cwd d] -- <cmd>   run a command, stream output
 terrarium shell <target>                     interactive shell (we have a PTY)
@@ -796,6 +800,9 @@ to the audit log with the agent's ID.
 | Lease a target to an agent at run time (§19; a global target needs sysadmin) | no | in project | anywhere |
 | Wait on and watch agents (§12d; another project needs a `cross_project` entry) | own project | own project | anywhere |
 | See and cancel the waits and watches of other agents (§12d) | no | in project | anywhere |
+| Ask the operator a question; update and retract its own (§12e) | no | yes | yes |
+| Read the questions of other agents (§12e) | no | in project | anywhere |
+| Answer a question (§12e; never its own; the operator answers all) | no | no | yes |
 | Read schedules (§12b) | own project | own project | all, global too |
 | Create, edit, delete, run schedules (§12b; the action stays inside the project; a global schedule needs sysadmin) | no | in project | anywhere |
 | Create and delete projects | no | no | yes |
@@ -828,6 +835,7 @@ terrarium admin target new ... | host ls                        sysadmin for glo
 terrarium admin target grant|revoke <target> <agent> [--until 30m] [--exclusive]
 terrarium admin audit [--since ...]
 terrarium admin schedule new|set|rm|run|enable|disable|ls|show|runs ...   §12b
+terrarium admin question ls|show|answer|retract ...    §12e; answer: sysadmin
 ```
 
 Leader agents are ordinary agents with a role and a leader prompt template.
@@ -1236,6 +1244,73 @@ create and cancel writes an audit row.
 **Storage.** Migration 24: the tables `waits` and `watches`, and the status
 column of `agents` again with `waiting` in its CHECK. The timer of the wait
 engine ticks each second next to the lease and schedule timers.
+
+---
+
+## 12e. Questions to the operator
+
+Asked for on 2026-10-28: a leader must ask the operator for a decision in
+a way that lives through a new session or a compaction, and the operator
+must see each open question in one place. `docs/api.md` §6.8 is the
+contract.
+
+**The question.** A question is a row on the asking agent: the text (at
+most 2000 characters), optional choices (at most 10 labels), optional
+context as Markdown (at most 16 KiB), an optional card, a priority
+(`normal` or `urgent`), and a status (`open`, `answered`, or
+`retracted`). Each update adds 1 to its revision. An agent has at most 50
+open questions. The daemon refuses a copy of an open question of the same
+agent (`409`, with the ID of the open one).
+
+**Rights.** Only a leader asks: a project_admin of its project, or a
+sysadmin. A worker gets `403` and a message that sends it to its lead by
+mail. The agent itself updates and retracts its own open questions. The
+agent itself, the project_admins of its project, a sysadmin, and the
+operator read them. The operator answers each question; a sysadmin agent
+answers the questions of other agents, never its own. The operator also
+retracts any question. Each change writes an audit row and a `question`
+event.
+
+**The answer.** The answer is one mail from the answerer to the agent, on
+the thread of the question, with the question quoted and the answer. The
+mail wakes the agent as all mail does (§12, push). A retract by the
+operator sends one mail on the thread. A retract by the agent itself sends
+none. An answered or retracted question does not change any more: an
+answer, an update, or a retract is `409`.
+
+**Waits.** The wait kind `question` (§12d) resolves when the question is
+answered or retracted. `terrarium question ask ... --wait` asks and
+registers the wait in one step; `terrarium wait question <id>` waits on an
+open question. The agent is `waiting` on "question <text>". The rule of
+§12d is one mail for each wait that ends. Here the answer mail (or the
+retract mail of the operator) is that mail: the wait ends with its wake
+mail marked as sent, and the answer mail says that the wait is resolved.
+So the agent gets one mail, not two. A timeout still sends the wake mail
+from `system`.
+
+**Resilience.** The question is on the agent, not in the conversation.
+
+- The recap turn of a new session (§18: a resume that failed, and a new
+  session after a prompt change) lists the open questions of the agent,
+  and the questions answered since its last turn, with the answers. A new
+  session after a prompt change gets a recap turn only when the agent has
+  such questions.
+- The lead templates tell the lead to run `terrarium question ls` at the
+  start of a session, after a compaction, and when it is not sure of its
+  state; to ask with `terrarium question ask`, never in the text of a
+  turn; to keep each question up to date; to retract it when it does not
+  need it; and not to ask the same thing twice. `default.md` does not
+  teach it: a worker cannot ask.
+
+**The dashboard.** The Questions page lists the questions, urgent first,
+with a badge of the open questions on its nav item. Each card shows the
+agent, the project, the card, the text (as plain text), the context
+(Markdown through the DOMPurify sink only), the choice buttons, a free-text
+answer, and Retract. The agent page shows the questions of a leader. The
+`question` event keeps both live.
+
+**Storage.** Migration 29: the table `questions`, and the kind column of
+`waits` again with `question` in its CHECK.
 
 ---
 
@@ -1898,7 +1973,10 @@ Rust crates: `tokio`, `axum`, `portable-pty`, `vt100`, `rusqlite`, `clap`,
 - On restart the runner calls `launch(agent, Some(session_id))`. The harness
   resumes its conversation. If the resume fails, Terrarium starts a fresh
   session, records the old one in history, and types a short recap turn built
-  from the last events.
+  from the last events. The recap also lists the open questions of the
+  agent and the questions answered since its last turn (§12e). A new
+  session after a prompt change gets a recap turn only when the agent has
+  such questions.
 - The daemon restarts without killing agents. The runner holds the PTY. On
   start the daemon reconnects to each runner socket and reconciles state.
 - The container restarts with `restart: unless-stopped`. On container start the
@@ -2209,6 +2287,7 @@ end-to-end scenarios of each phase are not scripted yet (no `spikes/e2e/`).
 | Harnesses | The image holds no harness (`just ci::check` fails when the Dockerfile installs one). `terrariumd harness install` at each start (the entrypoint, then the daemon) installs each missing pin of `harnesses.toml` into the tools dir (`./tools` at `/opt/terrarium/tools`, one npm prefix for each version) and the Copilot prompt extension, and writes `terrarium-manifest.json`. Updates into version dirs: `POST /api/harnesses/{name}/update` and `POST /api/harnesses/update`, `terrarium admin harness update` (`--version`, `--force`, `--all`), `just harness::update` and `just harness::latest` (with `--pin`), and the "Update" buttons of the dashboard. Sysadmin or the operator only, audited as `harness.update`. Running agents keep their version dir until their next start; the GC removes the unused version dirs. The sandbox binds the tools dir read-only. The version guard at each agent start (`TERRARIUM_HARNESS_VERSION_POLICY`). `docs/getting-started.md` §7. | — |
 | Templates | Agent templates (§5b, `docs/api.md` §21): global and project templates, `POST /api/agents` with `template` (project over global, `global:`, field and `policy` key overrides, the create rights on the merged values), `resolve`, `from-agent`, `[[templates]]` in project files and fleets, `template = "..."` on fleet agents and in export, `terrarium template` and `agent new --template`, the dashboard Templates page, the template select of the agent form, and "Save as template". The lead templates make workers from the `worker` template. | Agent files (`agents/<name>.toml`) cannot name a template. |
 | Waits | Waits and watches (§12d, `docs/api.md` §6.7): the status `waiting`, `agent`, `process`, `time`, and `card` waits with timeouts, the cycle check, and the limits; `terrarium run` (a detached exec session with a `process` wait); one wake mail for each end (a 2 s batch); watches with debounce and `--once`; `terrarium wait`, `run`, `watch`; the `waiting` chip and the Waits and Watches sections of the agent page; the prompt text. Tests with the fake supervisor and a real host agent (`tests/waits.rs`). | Not run live with real harnesses yet. The queued watch changes of a debounce do not live through a daemon restart. |
+| Questions | Questions to the operator (§12e, `docs/api.md` §6.8): the `questions` table, the rights (leaders ask; the operator, or a sysadmin for others, answers), the limits and the copy check, the answer mail on the thread, the `question` wait with one mail, the questions in the recap turn, `terrarium question` and `terrarium admin question`, the Questions page with the badge, the agent page panel, and the lead template text. Tests with the fake supervisor (`tests/questions.rs`). | Not run live with real harnesses yet. |
 | 6 | Mail and event views in the dashboard. The fleet file (`docs/fleet.md`): `terrarium fleet validate`, `plan`, `apply` (with `--prune`), `ls`, `show`, and `export`, ownership as `source: "fleet:<name>"`, and the auto-apply of `fleets/*.toml` at start and on reload. | The sibling-container sandbox fallback is not started. |
 | Security | The fixes for findings F1 to F7 of `docs/security-review.md`: the `private/` and `harness/` split of the agent dir (F1, §11); TLS on the host link with a loopback-only plaintext default, pinning, rotation, and enrol (F2, §19); DOMPurify as the one HTML sink, an ESLint guard, adversarial payload tests, and a page CSP in the dashboard (F3); the WebSocket token in the `bearer.<token>` subprotocol, with `TERRARIUM_WS_QUERY_TOKEN=0` to refuse `?token=` (F4); artifacts off the dashboard origin by default, with an origin badge in the viewer (F5); no PTY log for the login flow (F6); a constant-time token compare (F7). Signed `HttpOnly` session cookies for the dashboard, with a CSRF header on mutating calls and an `Origin` check on WebSocket upgrades (`docs/api.md` §1.1); the CSP and other security headers from the daemon (§1.2); `?token=` refused by default. The fixes for F10 to F14 of §9: fleet ownership and overwrite checks (F10); quarantine of an old agent dir with a symlink (F11); transcript path checks with the `usage.rejected_path` event (F12); sysadmin for global targets, `cross_project`, and outside `mail_to` in a policy (F13); a wider ESLint sink rule with a fixture test, and the CSP as a header with `frame-ancestors 'none'` (F14). `DELETE /api/session` needs the CSRF token when a cookie is present. | — |
 

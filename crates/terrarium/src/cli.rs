@@ -179,6 +179,13 @@ pub enum Command {
         #[command(subcommand)]
         command: WaitCmd,
     },
+    /// Questions to the operator (leaders only): ask, list, update,
+    /// retract. The answer comes as mail. Workers ask their lead by mail
+    #[command(visible_alias = "questions")]
+    Question {
+        #[command(subcommand)]
+        command: QuestionCmd,
+    },
     /// Get a mail when an agent goes idle, waiting, blocked, error, or
     /// stopped: `watch <agent> --on blocked,error`
     #[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
@@ -1161,6 +1168,13 @@ pub enum WaitCmd {
         #[command(flatten)]
         opts: WaitOpts,
     },
+    /// Wait until one of your questions to the operator is answered or
+    /// retracted. The answer mail is the wake mail
+    Question {
+        id: String,
+        #[command(flatten)]
+        opts: WaitOpts,
+    },
     /// List your open waits (`--all`: the recent closed ones too)
     Ls {
         #[arg(long)]
@@ -1176,6 +1190,127 @@ pub enum WaitCmd {
         id: String,
         #[arg(long)]
         kill: bool,
+    },
+}
+
+/// The context of a question: text, or a file.
+#[derive(Debug, Args, Clone, Default)]
+pub struct QuestionContext {
+    /// Longer background for the operator, as Markdown (`-` reads stdin)
+    #[arg(long, conflicts_with = "context_file")]
+    pub context: Option<String>,
+    /// Read the context from a file
+    #[arg(long)]
+    pub context_file: Option<PathBuf>,
+}
+
+/// `terrarium question ...` (docs/api.md §6.8). A leader asks the
+/// operator; the answer comes as mail.
+#[derive(Debug, Subcommand)]
+pub enum QuestionCmd {
+    /// Ask the operator a question. Check `question ls` first: do not ask
+    /// the same thing twice
+    Ask {
+        /// The question, short and clear
+        text: String,
+        /// A choice for the operator; repeat for more (at most 10)
+        #[arg(long = "option", short = 'o')]
+        options: Vec<String>,
+        #[command(flatten)]
+        context: QuestionContext,
+        /// The card that the question is about
+        #[arg(long)]
+        card: Option<String>,
+        /// Mark the question urgent
+        #[arg(long)]
+        urgent: bool,
+        /// Also wait on the answer: your status is `waiting` until it
+        /// comes. Then end your turn
+        #[arg(long)]
+        wait: bool,
+        /// With --wait: end the wait as `timed_out` after this time
+        #[arg(long, requires = "wait")]
+        timeout: Option<String>,
+    },
+    /// List your questions: the open ones and the ones answered in the
+    /// last 24 h (`--all`: every one)
+    Ls {
+        #[arg(long)]
+        all: bool,
+        /// open, answered, or retracted
+        #[arg(long)]
+        status: Option<String>,
+        /// The agent whose questions to list (default: yourself)
+        #[arg(long)]
+        agent: Option<String>,
+    },
+    /// Show one question, with the answer when there is one
+    Show { id: String },
+    /// Change an open question
+    Update {
+        id: String,
+        #[arg(long)]
+        text: Option<String>,
+        /// The new choices, all of them; repeat for more
+        #[arg(long = "option", short = 'o', conflicts_with = "clear_options")]
+        options: Vec<String>,
+        /// Remove the choices
+        #[arg(long)]
+        clear_options: bool,
+        #[command(flatten)]
+        context: QuestionContext,
+        /// The card that the question is about
+        #[arg(long)]
+        card: Option<String>,
+        #[arg(long, conflicts_with = "normal")]
+        urgent: bool,
+        #[arg(long)]
+        normal: bool,
+    },
+    /// Retract an open question that you do not need any more
+    Retract {
+        id: String,
+        /// Why
+        #[arg(long, short = 'm')]
+        reason: Option<String>,
+    },
+}
+
+/// `terrarium admin question ...`: the operator answers.
+#[derive(Debug, Subcommand)]
+pub enum AdminQuestionCmd {
+    /// The questions of all agents (the project with `-p`), urgent first
+    Ls {
+        /// Only the questions of this agent
+        #[arg(long)]
+        agent: Option<String>,
+        /// Only the open questions (the default)
+        #[arg(long, conflicts_with_all = ["status", "all"])]
+        open: bool,
+        /// open, answered, or retracted
+        #[arg(long)]
+        status: Option<String>,
+        /// Every status
+        #[arg(long, conflicts_with = "status")]
+        all: bool,
+    },
+    /// Show one question, with the answer when there is one
+    Show { id: String },
+    /// Answer a question: a text, an option (its label or its number), or
+    /// both
+    Answer {
+        id: String,
+        /// The answer (`-` reads stdin)
+        text: Option<String>,
+        /// The chosen option: its label, or its number from 1
+        #[arg(long)]
+        option: Option<String>,
+    },
+    /// Retract a question: the agent gets a mail that it needs no answer
+    Retract {
+        id: String,
+        #[arg(long, short = 'm')]
+        reason: Option<String>,
     },
 }
 
@@ -1394,6 +1529,11 @@ pub enum AdminCmd {
     Config {
         #[command(subcommand)]
         command: ConfigCmd,
+    },
+    /// Questions of the agents to the operator: list, answer, retract
+    Question {
+        #[command(subcommand)]
+        command: AdminQuestionCmd,
     },
     /// The audit log
     Audit(AuditArgs),

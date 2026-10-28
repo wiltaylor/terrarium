@@ -13,6 +13,7 @@ pub mod mail;
 pub mod memory;
 pub mod pointers;
 pub mod projects;
+pub mod questions;
 pub mod repos;
 pub mod schedules;
 pub mod subscriptions;

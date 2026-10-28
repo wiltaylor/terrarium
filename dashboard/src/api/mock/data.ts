@@ -31,6 +31,7 @@ import type {
   Subscription,
   Target,
   Version,
+  Question,
   Wait,
   Watch,
   WikiPage,
@@ -78,6 +79,8 @@ export interface MockWorld {
   waits: Wait[];
   /** Watches on the agents. */
   watches: Watch[];
+  /** Questions of the leaders to the operator (./questions.ts seeds them). */
+  questions?: Question[];
   /** The output of each process wait by wait ID (untrusted text). */
   waitLogs: Record<string, string>;
   hosts: Host[];

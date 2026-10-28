@@ -51,6 +51,9 @@ import type {
   InboxQuery,
   Lease,
   NewWatch,
+  Question,
+  QuestionAnswer,
+  QuestionStatus,
   Wait,
   WaitKind,
   WaitLog,
@@ -243,6 +246,19 @@ export interface Api {
     cancel(id: string, opts?: { kill?: boolean }): Promise<Wait>;
     /** `GET /api/waits/{id}/log`: the output tail of a process wait. The output is untrusted text. */
     log(id: string, opts?: { max?: number }): Promise<WaitLog>;
+  };
+
+  /** Questions of the leaders to the operator (docs/api.md §6.8). Plain arrays, no cursor. */
+  questions: {
+    /** `GET /api/questions?status=&project=&agent=`: open by default, urgent first. `status: "all"` lists every status. */
+    list(q?: { status?: QuestionStatus | "all"; project?: string; agent?: string }): Promise<Question[]>;
+    /** `GET /api/agents/{id}/questions`: the open ones and those answered in the last 24 h; `all` lists every one. */
+    ofAgent(agent: string, opts?: { all?: boolean; status?: QuestionStatus }): Promise<Question[]>;
+    get(id: string): Promise<Question>;
+    /** `POST /api/questions/{id}/answer`: 409 when the question is not open. The agent gets the answer by mail. */
+    answer(id: string, body: QuestionAnswer): Promise<Question>;
+    /** `POST /api/questions/{id}/retract`: the agent gets a mail that it needs no answer. */
+    retract(id: string, reason?: string): Promise<Question>;
   };
 
   watches: {
@@ -676,6 +692,19 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       get: (id) => get(`/api/waits/${seg(id)}`),
       cancel: (id, o = {}) => t.request<Wait>("DELETE", `/api/waits/${seg(id)}`, { query: o.kill ? { kill: true } : undefined }),
       log: (id, o = {}) => get(`/api/waits/${seg(id)}/log`, o.max ? { max: o.max } : undefined),
+    },
+
+    questions: {
+      list: (q = {}) => get("/api/questions", Object.keys(q).length ? { ...q } : undefined),
+      ofAgent: (agent, o = {}) => {
+        const q: Query = {};
+        if (o.all) q.all = true;
+        if (o.status) q.status = o.status;
+        return get(`${a(agent)}/questions`, Object.keys(q).length ? q : undefined);
+      },
+      get: (id) => get(`/api/questions/${seg(id)}`),
+      answer: (id, body) => post(`/api/questions/${seg(id)}/answer`, body),
+      retract: (id, reason) => post(`/api/questions/${seg(id)}/retract`, reason ? { reason } : {}),
     },
 
     watches: {

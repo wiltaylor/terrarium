@@ -68,7 +68,7 @@ async fn find_wait(state: &Shared, actor: &Actor, id: String) -> ApiResult<Wait>
 
 /// A duration (`90m`, `2h`, `3600`) or an RFC 3339 time, as the time from
 /// now. It must be in the future and at most `max` away.
-fn parse_span(what: &str, s: &str, max: Duration) -> ApiResult<Duration> {
+pub(crate) fn parse_span(what: &str, s: &str, max: Duration) -> ApiResult<Duration> {
     let s = s.trim();
     let d = match chrono::DateTime::parse_from_rfc3339(s) {
         Ok(t) => (t.with_timezone(&chrono::Utc) - chrono::Utc::now())
@@ -152,6 +152,9 @@ struct WaitBody {
     card: Option<String>,
     #[serde(default)]
     column: Option<String>,
+    /// `question`: the ID of one of the waiter's own questions.
+    #[serde(default)]
+    question: Option<String>,
     /// A duration or a time. Default: `TERRARIUM_WAIT_DEFAULT_TIMEOUT`
     /// (24 h) for `agent`, `process`, and `card`; none for `time`.
     #[serde(default)]
@@ -187,6 +190,18 @@ async fn create(
     };
     let mut poll_session = None;
     let mut new = match b.kind {
+        WaitKind::Question => {
+            // The check that the question is open runs in the write.
+            let qid = need(&b.question, "question", "question")?.to_owned();
+            let timeout_at = timeout.map(rt::from_now);
+            let w = state
+                .db
+                .write(actor.label(), move |t| {
+                    super::questions::create_wait(t, &waiter_id, &qid, timeout_at, reason)
+                })
+                .await?;
+            return Ok((StatusCode::CREATED, Json(w)).into_response());
+        }
         WaitKind::Agent => {
             let key = need(&b.agent, "agent", "agent")?.to_owned();
             // A bare name is a peer of the waiter first.

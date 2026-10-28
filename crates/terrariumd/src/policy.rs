@@ -419,6 +419,63 @@ pub fn manage_waits(actor: &Actor, owner: &str, project: &str, what: &str) -> Ap
     }
 }
 
+// ---- questions to the operator (PLAN §12e) ----
+
+/// Ask, update, or retract a question of `owner` (an agent ULID of
+/// `project`): only the agent itself, and only a leader (project_admin of
+/// its project, or sysadmin). The operator retracts with
+/// [`retract_question`].
+pub fn ask_question(actor: &Actor, owner: &str, project: &str, what: &str) -> ApiResult<()> {
+    match actor {
+        Actor::Agent(a) if a.id == owner && a.is_admin_of(project) => Ok(()),
+        Actor::Agent(a) if a.id == owner => Err(ApiError::forbidden(format!(
+            "{what} needs a leader (project_admin or sysadmin); workers send questions to \
+             their lead: terrarium mail send <lead> -s \"question: ...\" -"
+        ))),
+        Actor::Agent(_) => Err(ApiError::forbidden(format!(
+            "{what}: an agent asks and changes only its own questions"
+        ))),
+        Actor::Operator => Err(ApiError::forbidden(format!(
+            "{what}: the operator answers or retracts questions; an agent asks them"
+        ))),
+    }
+}
+
+/// Read the questions of `owner`, an agent of `project`: the agent
+/// itself, a project_admin of the project, a sysadmin, or the operator.
+pub fn read_questions(actor: &Actor, owner: &str, project: &str) -> ApiResult<()> {
+    match actor {
+        Actor::Operator => Ok(()),
+        Actor::Agent(a) if a.id == owner || a.is_admin_of(project) => Ok(()),
+        Actor::Agent(_) => Err(deny(
+            "reading questions",
+            &format!("the agent itself, project_admin of `{project}`, sysadmin, or the operator"),
+        )),
+    }
+}
+
+/// Answer a question of `owner`: the operator, or a sysadmin agent for
+/// the question of another agent. Never the asking agent.
+pub fn answer_question(actor: &Actor, owner: &str) -> ApiResult<()> {
+    match actor {
+        Actor::Operator => Ok(()),
+        Actor::Agent(a) if a.id == owner => Err(ApiError::forbidden(
+            "an agent cannot answer its own question; the operator answers it",
+        )),
+        Actor::Agent(a) if a.is_sysadmin() => Ok(()),
+        Actor::Agent(_) => Err(deny("answering a question", "sysadmin or the operator")),
+    }
+}
+
+/// Retract a question of `owner`: the operator, or the asking agent when
+/// it is a leader.
+pub fn retract_question(actor: &Actor, owner: &str, project: &str) -> ApiResult<()> {
+    match actor {
+        Actor::Operator => Ok(()),
+        _ => ask_question(actor, owner, project, "retracting a question"),
+    }
+}
+
 /// May the agent `waiter` wait on or watch the agent `name` of `project`?
 /// An agent of its own project, yes. Another project needs a
 /// `cross_project` entry (`project/name` or `project/*`), as mail does. A
@@ -703,6 +760,42 @@ mod tests {
         assert!(manage_waits(&lead, "w-id", "p", "x").is_ok());
         assert!(manage_waits(&lead, "w-id", "q", "x").is_err());
         assert!(manage_waits(&me, "w-id", "p", "x").is_err());
+    }
+
+    #[test]
+    fn question_rights_per_role() {
+        let member = Actor::Agent(agent("p", &[], Policy::default()));
+        let lead = Actor::Agent(agent("p", &[Role::ProjectAdmin], Policy::default()));
+        let other_lead = Actor::Agent(agent("q", &[Role::ProjectAdmin], Policy::default()));
+        let sys = Actor::Agent(agent("s", &[Role::Sysadmin], Policy::default()));
+        // Ask: a leader for itself only.
+        assert!(ask_question(&lead, "p-id", "p", "x").is_ok());
+        let e = ask_question(&member, "p-id", "p", "x").unwrap_err();
+        assert!(
+            e.message.contains("terrarium mail send <lead>"),
+            "{}",
+            e.message
+        );
+        assert!(ask_question(&lead, "w-id", "p", "x").is_err());
+        assert!(ask_question(&Actor::Operator, "p-id", "p", "x").is_err());
+        assert!(ask_question(&sys, "s-id", "s", "x").is_ok());
+        // Read: the owner, the project's admins, sysadmin, the operator.
+        assert!(read_questions(&member, "p-id", "p").is_ok());
+        assert!(read_questions(&member, "w-id", "p").is_err());
+        assert!(read_questions(&lead, "w-id", "p").is_ok());
+        assert!(read_questions(&other_lead, "p-id", "p").is_err());
+        assert!(read_questions(&sys, "p-id", "p").is_ok());
+        assert!(read_questions(&Actor::Operator, "p-id", "p").is_ok());
+        // Answer: the operator; a sysadmin for others, not for itself.
+        assert!(answer_question(&Actor::Operator, "p-id").is_ok());
+        assert!(answer_question(&sys, "p-id").is_ok());
+        assert!(answer_question(&sys, "s-id").is_err());
+        assert!(answer_question(&lead, "w-id").is_err());
+        assert!(answer_question(&lead, "p-id").is_err());
+        // Retract: the operator, or the leader itself.
+        assert!(retract_question(&Actor::Operator, "p-id", "p").is_ok());
+        assert!(retract_question(&lead, "p-id", "p").is_ok());
+        assert!(retract_question(&sys, "p-id", "p").is_err());
     }
 
     #[test]

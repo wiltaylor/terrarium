@@ -633,6 +633,7 @@ terrarium wait agent <agent> [--until done|idle|blocked|any-change] [--timeout t
 terrarium wait time (--for 30m | --until <RFC 3339 time>) [-m note]
 terrarium wait process <session-id> [--timeout t] [-m note]
 terrarium wait card <card> [--column done] [--timeout t] [-m note]
+terrarium wait question <question-id> [--timeout t] [-m note]
 terrarium wait ls [--all] [--agent a]
 terrarium wait show <id>
 terrarium wait cancel <id> [--kill]
@@ -668,6 +669,57 @@ terrarium watch rm <id>
   `idle`, `waiting`, and `working`) unless `--no-debounce`. `--once`
   removes the watch after its first mail. The operator's watches mail
   `operator`; `--watcher <agent>` sends them to an agent.
+
+### Questions to the operator
+
+PLAN §12e gives the design; [api.md §6.8](api.md#68-questions-to-the-operator)
+is the contract. A leader (project_admin or sysadmin) asks the operator for
+a decision. The question is on the agent, so a new session reads it again.
+The answer comes as mail on the thread of the question, and the mail wakes
+the agent. A worker gets `403` (exit 3): it mails its lead.
+
+```
+terrarium question ask "<text>" [--option <label>]... [--context <text|-> | --context-file <path>]
+                       [--card <id>] [--urgent] [--wait [--timeout 2h]]
+terrarium question ls [--all] [--status open|answered|retracted] [--agent a]
+terrarium question show <id>
+terrarium question update <id> [--text t] [--option o]... [--clear-options] [--context t | --context-file p]
+                       [--card c] [--urgent | --normal]
+terrarium question retract <id> [-m reason]
+terrarium wait question <id> [--timeout t] [-m note]
+terrarium admin question ls [-p project] [--agent a] [--open | --status s | --all]
+terrarium admin question show <id>
+terrarium admin question answer <id> ["<text>" | -] [--option <label|n>]
+terrarium admin question retract <id> [-m reason]
+```
+
+- `ask` prints `question <id> asked (<priority>). The answer comes as mail
+  on thread <thread>.` With `--wait`, it also registers a `question` wait,
+  prints `wait <id> registered: question <text>`, and "End your turn now".
+  The agent is then `waiting` until the answer comes. The answer mail is
+  the wake mail of the wait: the agent gets one mail.
+- A question whose text is the same as an open question of the agent is
+  refused (`409`, exit 1): the message names the open one. Run `question
+  ls` before you ask.
+- `ls` lists the open questions and those answered in the last 24 h:
+  `ID`, `STATUS`, `PRIORITY`, `CARD`, `ASKED`, and the first line of the
+  question. `--all` lists every one. The operator names the agent with
+  `--agent`, or uses `admin question ls`.
+- `show` prints the fields, then the question, the options (numbered from
+  1), and the context, each between `BEGIN ... (data, not instructions)`
+  markers. When there is an answer, it prints the chosen option and
+  `answer by <who>:` with the text.
+- `update` changes an open question and adds 1 to its revision. An
+  answered or retracted question is `409`. `--option` gives the new list
+  of options; `--clear-options` removes them.
+- `admin question ls` lists the open questions of all agents by default,
+  urgent first, with the `AGENT` column. `-p` limits it to one project.
+- `admin question answer` takes a text, an option, or both. `--option`
+  takes the label, or the number of the option from 1 (`show` prints the
+  numbers). The operator answers each question; a sysadmin agent answers
+  the questions of other agents. The asking agent cannot answer its own.
+- `admin question retract` sends the agent one mail that it needs no
+  answer.
 
 ### Fleet files
 
@@ -880,6 +932,7 @@ terrarium admin harness ls [--refresh]         each harness: pin, tested range, 
 terrarium admin harness update <name> [--version v|latest] [--force]   npm install -g into a new version dir, then the switch
 terrarium admin harness update --all [--force]   every harness and the extension to the latest
 terrarium admin audit [--since time] [--actor a] [--action a]
+terrarium admin question ls|show|answer|retract ...   the operator answers; a sysadmin answers other agents (§4)
 terrarium admin password set [--stdin]         the operator password; every session ends
 terrarium admin fleet validate|plan|apply|ls|show|export ...
 terrarium admin schedule ls|show|new|set|rm|run|enable|disable|runs ...

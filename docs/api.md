@@ -1480,8 +1480,8 @@ wait ends, the waiter gets mail from `system`, and the mail wakes it.
 
 | Field | Meaning |
 |---|---|
-| `kind` | `agent`, `process`, `time`, or `card`. |
-| `spec` | `agent`: `{agent, agent_name, until, from_status}`. `process`: `{target, session, name?, command?, run}`; `run` is true when the daemon started the command (`POST .../run`) and reads its output. `time`: `{due_at}`. `card`: `{card, column}`. |
+| `kind` | `agent`, `process`, `time`, `card`, or `question`. |
+| `spec` | `agent`: `{agent, agent_name, until, from_status}`. `process`: `{target, session, name?, command?, run}`; `run` is true when the daemon started the command (`POST .../run`) and reads its output. `time`: `{due_at}`. `card`: `{card, column}`. `question`: `{question}`. |
 | `state` | `open`, `resolved`, `timed_out`, `cancelled`, or `failed`. Only `open` changes. |
 | `reason` | The waiter's note, at most 500 characters. It comes back in the mail. |
 | `result` | After the end. `agent`: `{outcome, status}`. `process`: `{exit_code, signal, reason, duration_secs, stdout_tail, stderr_tail}`, or `{error, message}` for a run that the daemon lost. `time`: `{outcome: "due"}`. `card`: `{outcome: "reached", card, column}`. A timeout: `{outcome: "timed_out"}`. A cancel: `{outcome: "cancelled", by}`. |
@@ -1495,6 +1495,7 @@ The kinds:
 | `process` | The exec session ends. Any exit code resolves the wait; the result has the code. A run that the target stopped at its timeout is `timed_out`. A session that the daemon lost (a daemon restart, a host that did not come back) is `failed` with `error: "lost"`. |
 | `time` | The time comes. |
 | `card` | The card is in the column. A deleted card is `failed`. |
+| `question` | The question (§6.8) is answered or retracted. The answer mail is the wake mail: the wait sends no mail of its own. |
 
 The rules:
 
@@ -1561,6 +1562,7 @@ The create body:
 {"kind":"time","at":"2026-10-27T15:00:00Z"}
 {"kind":"process","session":"01JC..."}
 {"kind":"card","card":"TER-3","column":"done"}
+{"kind":"question","question":"01JQ..."}
 ```
 
 - `agent` takes a ULID, `project/name`, or a name. An agent may wait on the
@@ -1572,6 +1574,8 @@ The create body:
   read its output; whoever opened it reads it. The result has no tail.
 - `card`: the column must be a column of the card's board (`422`). The
   waiter must be able to read the card's project.
+- `question`: one of the waiter's own questions (else `404`). A question
+  that is not open is `409 conflict`.
 - Each create writes a `wait.create` audit row; each cancel writes
   `wait.cancel`.
 
@@ -1607,6 +1611,89 @@ dashboard).
   them. The watches stay.
 - Each create writes a `watch.create` audit row; each remove writes
   `watch.delete`.
+
+### 6.8 Questions to the operator
+
+PLAN §12e gives the design. The code is in
+`crates/terrariumd/src/store/questions.rs` and
+`crates/terrariumd/src/api/questions.rs`.
+
+A **question** is a request from a leader agent (a project_admin or a
+sysadmin) for a decision of the operator. The question is on the agent. A
+new session or a compaction reads it again with `terrarium question ls`,
+and the recap turn of a new session lists it (PLAN §18). The operator
+answers it in the dashboard (the Questions page) or with `terrarium admin
+question answer`. The answer goes to the agent as mail.
+
+```json
+{"id":"01JQ...","agent":"01M5...","agent_name":"demo/lead","project":"demo",
+ "text":"Ship v2 on Friday?","options":["yes","no"],"context":"**CI** is green.",
+ "card":"DEM-3","priority":"urgent","status":"answered","answer":"yes",
+ "answer_option":0,"answered_by":"operator","answered_by_name":"operator",
+ "answered_at":"2026-10-28T11:00:00.000Z","thread_id":"01JT...",
+ "created_at":"2026-10-28T10:00:00.000Z","updated_at":"2026-10-28T11:00:00.000Z",
+ "revision":1}
+```
+
+| Field | Meaning |
+|---|---|
+| `text` | The question, at most 2000 characters. The agent's own words: untrusted data. |
+| `options` | Short choice labels: at most 10, each at most 200 characters, no two the same. `[]` for a free answer. |
+| `context` | Optional background as Markdown, at most 16 KiB. The dashboard shows it through the DOMPurify sink only. |
+| `card` | Optional. A card of the agent's project. |
+| `priority` | `normal` or `urgent`. Lists put the urgent open questions first. |
+| `status` | `open`, `answered`, or `retracted`. Only `open` changes. |
+| `answer`, `answer_option` | The answer text, and the 0-based index of the chosen option. An answer with an option and no text has the label as `answer`. |
+| `answered_by`, `answered_by_name` | `operator`, or the ULID and `project/name` of a sysadmin agent. |
+| `retract_reason`, `retracted_by` | The reason, and the actor label (`operator`, `agent:<ulid>`, or `system` for a deleted agent). |
+| `thread_id` | The mail thread of the question. The answer goes on it. |
+| `revision` | 1 at the ask. Each update that changes a field adds 1. |
+
+The rights:
+
+| Action | Who |
+|---|---|
+| Ask, update | The agent itself, when it is a leader: project_admin of its project, or sysadmin. A member gets `403` with "workers send questions to their lead: terrarium mail send <lead> ...". The operator does not ask. |
+| Read | The agent itself, a project_admin of its project, a sysadmin, the operator. Another caller gets `404` for one question and `403` for a list. |
+| Answer | The operator. A sysadmin agent, for the question of another agent. Never the asking agent (`403`). |
+| Retract | The asking leader, or the operator. |
+
+| Endpoint | Body or query | Answer |
+|---|---|---|
+| `GET /api/agents/{id}/questions` | `?status=open\|answered\|retracted`, `?all=true` | `200` the questions of the agent. No filter: the open ones and those answered in the last 24 h. |
+| `POST /api/agents/{id}/questions` | `{"text", "options"?, "context"?, "card"?, "priority"?, "wait"?, "timeout"?}` | `201` the question; with `wait: true`, also `wait`: the new `question` wait (§6.7) |
+| `GET /api/questions` | `?status=` (default `open`; `all` for every status), `?project=`, `?agent=` | `200` at most 200 questions. Open first (urgent first, then the oldest first), then the others (the newest first). `X-Open-Questions` and `X-Urgent-Questions` count the open ones. The operator and a sysadmin see all; a project_admin sees its own project; a member gets `403`. |
+| `GET /api/questions/{id}` | | `200` the question |
+| `PATCH /api/questions/{id}` | `{"text"?, "options"?, "context"?, "card"?, "priority"?}`; `null` (or `[]` for `options`) clears a field | `200` the question. A question that is not open is `409 conflict`. |
+| `POST /api/questions/{id}/answer` | `{"answer"?, "option"?}`: a text, an option (its label, or its 0-based index), or both | `200` the question. A question that is not open is `409 conflict`. |
+| `POST /api/questions/{id}/retract` | `{"reason"?}`, or no body | `200` the question. A question that is not open is `409 conflict`. |
+
+The rules:
+
+- An agent has at most 50 open questions (`429 rate_limited`). A question
+  whose text is the same as an open question of the agent (case and
+  spaces do not count) is `409 conflict`; `details.question` names the
+  open one.
+- The answer is one mail from the answerer (`operator`, or the sysadmin
+  agent) to the agent, on the thread of the question. The subject is
+  `Answer: <the first line of the question>`. The body quotes the
+  question, and gives the chosen option and the answer. The mail wakes the
+  agent as all mail does (§6.2, push delivery).
+- A retract by the operator sends one mail on the thread (`Retracted:
+  ...`), with the reason. A retract by the agent itself sends no mail.
+- A `question` wait (§6.7) resolves when its question is answered
+  (`{outcome: "answered", answer, option?, question}`) or retracted
+  (`{outcome: "retracted", question}`). It sends no wake mail of its own:
+  the answer mail (or the retract mail of the operator) is its wake mail,
+  so the agent gets one mail, not two. The mail says that the wait is
+  resolved. A timeout of the wait sends the usual wake mail from `system`.
+- A deleted agent: its open questions are `retracted` (`retracted_by:
+  "system"`), with no mail.
+- Each change writes an audit row (`question.ask`, `question.update`,
+  `question.answer`, `question.retract`) and a `question` event:
+  `{question_id, change, status, priority, text, revision, agent_id,
+  card_id?}`, where `change` is `asked`, `updated`, `answered`, or
+  `retracted`.
 
 ## 7. Mail
 
@@ -1875,6 +1962,7 @@ Kinds:
 | `status` | `{status, from, reason, waits, waiting_on?}`. `from` is never the same as `status`: a runner report of the status the agent already has (for example the runner's `spawned <program>` at start) goes in as a `system` event `{message, status}`. `waits` is the number of open waits; `waiting_on` is the line of §6.7. |
 | `wait` | `{wait_id, change, kind, summary, state, result?}`. `change` is `opened`, `resolved`, `timed_out`, `cancelled`, or `failed`. The `agent` is the waiter (§6.7). |
 | `watch` | `{watch_id, change, watcher, watcher_name, on, status?}`. `change` is `created`, `fired` (with `status`), or `removed`. The `agent` is the watched agent (§6.7). |
+| `question` | `{question_id, change, status, priority, text, revision, agent_id, card_id?}`. `change` is `asked`, `updated`, `answered`, or `retracted`. The `agent` is the asking agent (§6.8). |
 | `session_started` | `{harness_session, transcript_path?, source?}` |
 | `turn_start`, `turn_end`, `notification`, `question`, `session_ended`, `exit`, `delivery_failed`, `system`, `warning` | The fields of the core `Event` variant of the same name (`crates/terrarium-core/src/event.rs`). A `warning` (`{message}`) needs the operator's attention, for example a harness version outside its tested range at a start (§6.2). |
 | `tool_use`, `tool_finished` | `{tool, tool_id?, summary?, ...}`: `input` (`tool_use`), `ok` (`tool_finished`). `tool_id` is the harness's ID for the tool call (for Claude Code, `toolu_...`). It is not the event `id`. Older records used the key `id` for it; the `events.jsonl` reader still takes those. |

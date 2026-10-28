@@ -291,5 +291,18 @@ export function createWaitMock(c: WaitMockContext) {
       }),
   };
 
-  return { agentWaits, agentWatches, agentWatch, waits, watches, statusChanged, restStatus, openWaits: (a: Agent) => openWaits(w, a.id) };
+  /**
+   * A question was answered or retracted: its open `question` waits resolve. They get no wake
+   * mail of their own: the answer mail (or the retract mail) is the wake mail, as in the daemon.
+   */
+  const questionClosed = (questionId: string, result: Record<string, unknown>) => {
+    for (const x of w.waits.filter((y) => y.state === "open" && y.kind === "question" && (y.spec as { question?: string }).question === questionId)) {
+      x.state = "resolved";
+      x.resolved_at = c.iso();
+      x.result = { ...result, question: questionId };
+      closed(x, "resolved");
+    }
+  };
+
+  return { agentWaits, agentWatches, agentWatch, waits, watches, statusChanged, restStatus, questionClosed, openWaits: (a: Agent) => openWaits(w, a.id) };
 }

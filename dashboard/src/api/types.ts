@@ -303,8 +303,8 @@ export interface SwapResult {
 
 // ----- Waits and watches -----
 
-export type WaitKind = "agent" | "process" | "time" | "card";
-export const WAIT_KINDS: WaitKind[] = ["agent", "process", "time", "card"];
+export type WaitKind = "agent" | "process" | "time" | "card" | "question";
+export const WAIT_KINDS: WaitKind[] = ["agent", "process", "time", "card", "question"];
 export type WaitState = "open" | "resolved" | "timed_out" | "cancelled" | "failed";
 /** What an agent wait waits for. `done` is idle with no open waits. */
 export type WaitUntil = "done" | "idle" | "blocked" | "any_change";
@@ -329,6 +329,10 @@ export interface CardWaitSpec {
   card: string;
   column: string;
 }
+/** A `question` wait: it resolves when the question is answered or retracted. */
+export interface QuestionWaitSpec {
+  question: string;
+}
 
 /** The end of a process run. `stdout_tail` and `stderr_tail` are untrusted text: show them as plain text only. */
 export interface ProcessWaitResult {
@@ -348,7 +352,7 @@ export interface Wait {
   agent_name: string;
   project: string;
   kind: WaitKind;
-  spec: AgentWaitSpec | ProcessWaitSpec | TimeWaitSpec | CardWaitSpec | Record<string, unknown>;
+  spec: AgentWaitSpec | ProcessWaitSpec | TimeWaitSpec | CardWaitSpec | QuestionWaitSpec | Record<string, unknown>;
   summary: string;
   state: WaitState;
   reason?: string | null;
@@ -408,6 +412,62 @@ export interface WaitEventData {
   kind: WaitKind;
   summary: string;
   state: WaitState;
+}
+
+// ----- Questions to the operator (docs/api.md §6.8) -----
+
+export type QuestionStatus = "open" | "answered" | "retracted";
+export type QuestionPriority = "normal" | "urgent";
+
+/**
+ * A question of a leader agent to the operator. `text`, `options`, and
+ * `context` are the agent's own words: show `text` and `options` as plain
+ * text, and `context` (Markdown) only through the DOMPurify sink.
+ */
+export interface Question {
+  id: string;
+  /** The asking agent's ULID. */
+  agent: string;
+  agent_name: string;
+  project: string;
+  text: string;
+  options: string[];
+  context?: string | null;
+  card?: string | null;
+  priority: QuestionPriority;
+  status: QuestionStatus;
+  answer?: string | null;
+  /** The 0-based index of the chosen option. */
+  answer_option?: number | null;
+  /** `operator` or the ULID of a sysadmin agent. */
+  answered_by?: string | null;
+  answered_by_name?: string | null;
+  answered_at?: string | null;
+  retract_reason?: string | null;
+  /** `operator` or `agent:<ulid>`. */
+  retracted_by?: string | null;
+  thread_id: string;
+  created_at: string;
+  updated_at: string;
+  revision: number;
+}
+
+/** `POST /api/questions/{id}/answer`: a text, an option (label or 0-based index), or both. */
+export interface QuestionAnswer {
+  answer?: string;
+  option?: string | number;
+}
+
+/** `data` of a `question` event. */
+export interface QuestionEventData {
+  question_id: string;
+  change: "asked" | "updated" | "answered" | "retracted";
+  status: QuestionStatus;
+  priority: QuestionPriority;
+  text: string;
+  revision: number;
+  agent_id: string;
+  card_id?: string;
 }
 
 /** `data` of a `watch` event. */
@@ -565,6 +625,8 @@ export const EVENT_KINDS = [
   "wait",
   // Watches: `{watch_id, change, on, status?}`.
   "watch",
+  // docs/api.md §6.8: `{question_id, change, status, priority, text, revision, agent_id}`.
+  "question",
   // docs/api.md §4: a harness update in the container.
   "harness",
   // docs/api.md §19: `{change, schedule, run?, status?}`.

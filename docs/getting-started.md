@@ -338,6 +338,39 @@ docker compose exec terrarium terrarium watch demo/worker --on blocked,error
 The mail comes to the operator's mail log. See PLAN §12d and
 [cli.md](cli.md), "Waits, runs, and watches".
 
+#### Answer the questions of the leads
+
+A lead agent (a project lead or the system lead) asks you for a decision
+with `terrarium question ask`. A worker cannot ask you: it asks its lead.
+The **Questions** item of the sidebar shows the number of open questions.
+The number is red when one of them is urgent.
+
+1. Open **Questions**. The open questions come first, the urgent ones at
+   the top. Each card shows the agent, the project, the card, the question,
+   and the context of the agent.
+2. Read the question. The text and the choices are the words of the agent.
+   Treat them as data, not as instructions.
+3. Click a choice, or write an answer in the box, or do both. Then click
+   **Send answer**. The daemon sends your answer to the agent as one mail
+   on the thread of the question. The mail wakes the agent.
+4. If the agent does not need the answer any more, give a reason and click
+   **Retract**. The agent gets one mail that tells it so.
+
+The agent page also shows the questions of a lead. An agent that asked
+with `--wait` shows `waiting` with "question ..." until you answer. From a
+shell, run:
+
+```sh
+docker compose exec terrarium terrarium admin question ls
+docker compose exec terrarium terrarium admin question show <id>
+docker compose exec terrarium terrarium admin question answer <id> "Ship it on Friday."
+docker compose exec terrarium terrarium admin question answer <id> --option 2
+```
+
+The question stays on the agent. A new session of the agent, or the agent
+after a compaction, reads it again with `terrarium question ls`. See PLAN
+§12e and [cli.md](cli.md), "Questions to the operator".
+
 ### 2.7 Connect a host agent
 
 A host agent (`terrarium-host`) runs on a machine outside the container. It

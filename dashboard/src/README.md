@@ -354,6 +354,28 @@ so the sidebar count of blocked agents does not include it.
   it fires a watch (a `watch` event and a mail) on a status change. It does not
   run timers for time waits.
 
+## Questions to the operator
+
+A leader agent asks the operator for a decision (docs/api.md §6.8). The
+**Questions** page (`features/questions/QuestionsPage.tsx`) lists the
+questions, open first and urgent first, with tabs for the status and a
+project filter. The sidebar item has a badge of the open questions
+(`stores/questions.ts`); the badge is red when one of them is urgent.
+
+- Each card (`QuestionCard.tsx`) shows the agent, the project, the card link,
+  the question, the context, the choice buttons, a free-text answer, and
+  **Retract**. An answered card shows the chosen option and the answer.
+- The question text, the options, and the retract reason are the agent's
+  words: the page shows them as text nodes only. The context is Markdown: it
+  goes through `renderMarkdown` and the DOMPurify sink (`SafeHtml`) only.
+- The agent page shows the questions of a leader (`QuestionsPanel`).
+- `question` events read the lists and the badge again.
+- The pure helpers are in `features/questions/model.ts`. The mock is in
+  `api/mock/questions.ts`: two open questions (one urgent, with a hostile
+  context), one answered, one retracted. An answer sends one mail on the
+  thread and resolves the `question` waits with no second mail, as the daemon
+  does.
+
 ## The conversation view
 
 The Conversation tab of the agent page shows the harness transcript as

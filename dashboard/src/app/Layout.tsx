@@ -6,7 +6,7 @@ import { isMock } from "../api";
 import { QuotaBanner } from "../components/QuotaBanner";
 import { ErrorBanner, useNow } from "../components/ui";
 import { duration } from "../lib/format";
-import { agents, api, attention, auth, events, projects, signOutNow, subscriptions, theme, unread } from "../stores";
+import { agents, api, attention, auth, events, projects, questions, signOutNow, subscriptions, theme, unread } from "../stores";
 import { GLOBAL_ITEMS, PROJECT_ITEMS } from "./nav";
 import { LoginScreen } from "./LoginScreen";
 
@@ -23,6 +23,7 @@ export function Layout(props: RouteSectionProps) {
       .catch(() => undefined)
       .then(() => attention.refresh());
     void agents.refresh();
+    void questions.refresh();
     subscriptions.poll(isMock ? 5000 : 30_000);
     events.start();
     const t = setInterval(refetch, 30_000);
@@ -117,6 +118,14 @@ export function Layout(props: RouteSectionProps) {
                 <Show when={item.href === "/agents" && blockedCount() > 0}>
                   <span class="nav-count" title="Blocked or in error in this project">
                     {blockedCount()}
+                  </span>
+                </Show>
+                <Show when={item.href === "/questions" && questions.counts().open > 0}>
+                  <span
+                    class={`nav-count${questions.counts().urgent ? "" : " info"}`}
+                    title={`Open questions from the leaders${questions.counts().urgent ? `, ${questions.counts().urgent} urgent` : ""}`}
+                  >
+                    {questions.counts().open}
                   </span>
                 </Show>
                 <Show when={item.href === "/mail" && attention.count() > 0}>
