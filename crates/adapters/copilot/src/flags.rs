@@ -197,6 +197,10 @@ pub const COPILOT_1_0: CopilotFlags = CopilotFlags {
         "extensions_reload",
         "extensions_manage",
         "session_store_sql",
+        // Removed by the operator's choice (2026-10-28): Copilot's own
+        // documentation lookup, and the GitHub code index search.
+        "fetch_copilot_cli_documentation",
+        "semantic_code_search",
         // Not hidden: `bash`, `read_bash`, `write_bash`, `list_bash`,
         // `stop_bash`. A `sync` command that runs past `initial_wait`
         // moves to the background by itself (the bash tool text in the
