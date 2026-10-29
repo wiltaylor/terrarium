@@ -214,8 +214,40 @@ pub fn list(
     since: i64,
     limit: usize,
 ) -> ApiResult<Vec<StoredEvent>> {
+    select(conn, filter, since, None, limit)
+}
+
+/// Events after `since` and before `before` (all when `None`), newest
+/// first, at most `limit`. The pages of `?order=desc`.
+pub fn list_desc(
+    conn: &Connection,
+    filter: &EventFilter,
+    since: i64,
+    before: Option<i64>,
+    limit: usize,
+) -> ApiResult<Vec<StoredEvent>> {
+    select(conn, filter, since, Some(before.unwrap_or(i64::MAX)), limit)
+}
+
+/// The query of `list` (`before` is `None`: oldest first) and of
+/// `list_desc` (`before` is set: newest first). The `seq` key of the
+/// table and the `(agent_id, seq)`, `(project, seq)`, and `(card, seq)`
+/// indexes serve both directions.
+fn select(
+    conn: &Connection,
+    filter: &EventFilter,
+    since: i64,
+    before: Option<i64>,
+    limit: usize,
+) -> ApiResult<Vec<StoredEvent>> {
+    use rusqlite::types::Value as Sql;
     let mut sql = String::from("SELECT * FROM events WHERE seq > ?");
-    let mut args: Vec<String> = vec![since.to_string()];
+    // `seq` compares with an integer; bind it as one.
+    let mut values: Vec<Sql> = vec![Sql::Integer(since)];
+    if let Some(before) = before {
+        sql.push_str(" AND seq < ?");
+        values.push(Sql::Integer(before));
+    }
     for (col, val) in [
         ("agent_id", &filter.agent),
         ("project", &filter.project),
@@ -224,20 +256,17 @@ pub fn list(
     ] {
         if let Some(v) = val {
             sql.push_str(&format!(" AND {col} = ?"));
-            args.push(v.clone());
+            values.push(Sql::Text(v.clone()));
         }
     }
     if let Some((project, agent)) = &filter.visible_to {
         sql.push_str(" AND (project = ? OR agent_id = ?)");
-        args.push(project.clone());
-        args.push(agent.clone());
+        values.push(Sql::Text(project.clone()));
+        values.push(Sql::Text(agent.clone()));
     }
-    sql.push_str(&format!(" ORDER BY seq LIMIT {limit}"));
+    let order = if before.is_some() { "DESC" } else { "ASC" };
+    sql.push_str(&format!(" ORDER BY seq {order} LIMIT {limit}"));
     let mut stmt = conn.prepare(&sql)?;
-    // `seq > ?` compares with an integer; bind it as one.
-    let mut values: Vec<rusqlite::types::Value> = Vec::with_capacity(args.len());
-    values.push(rusqlite::types::Value::Integer(since));
-    values.extend(args.into_iter().skip(1).map(rusqlite::types::Value::Text));
     let rows = stmt.query_map(params_from_iter(values), from_row)?;
     Ok(rows.collect::<Result<_, _>>()?)
 }

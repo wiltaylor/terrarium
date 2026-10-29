@@ -709,8 +709,10 @@ export interface AgentEvent {
 
 /** Query of the event history: `GET /api/events` and `GET /api/agents/{id}/events`. */
 export interface EventQuery {
-  /** A `seq` or an event ID. Only later events come. */
+  /** A `seq` or an event ID. Only later events come. With `order: "desc"`, the lower bound of every page. */
   since?: number | string;
+  /** `desc`: newest first, and the cursor goes on to older events. JSON pages of `/api/events` and `/api/agents/{id}/events` only. */
+  order?: "asc" | "desc";
   kind?: string;
   project?: string;
   agent?: string;

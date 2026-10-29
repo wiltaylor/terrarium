@@ -134,6 +134,28 @@ describe("mock parity with docs/api.md", () => {
     expect(typeof audit.items[0]!.detail).toBe("object");
   });
 
+  it("pages events newest first with order=desc, down to `since`", async () => {
+    const api = mock();
+    const all = (await api.events.history({ since: 0, limit: 1000 })).items.map((e) => e.seq);
+    const p1 = await api.events.history({ order: "desc", limit: 3 });
+    expect(p1.items.map((e) => e.seq)).toEqual(all.slice(-3).reverse());
+    expect(p1.next).toBe(String(p1.items.at(-1)!.seq));
+    const p2 = await api.events.history({ order: "desc", limit: 3, cursor: p1.next! });
+    expect(p2.items.map((e) => e.seq)).toEqual(all.slice(-6, -3).reverse());
+    // `since` is the lower bound: the last page stops at it.
+    const since = all.at(-5)!;
+    const q = { order: "desc" as const, since, limit: 3 };
+    const a = await api.events.history(q);
+    const b = await api.events.history({ ...q, cursor: a.next! });
+    expect([...a.items, ...b.items].map((e) => e.seq)).toEqual(all.slice(-4).reverse());
+    expect(b.next).toBeNull();
+    // The agent events take the same order.
+    const agent = (await api.events.history({ since: 0, limit: 1000 })).items.find((e) => e.agent_id)!.agent_id!;
+    const mine = await api.agents.events(agent, { order: "desc", limit: 2 });
+    expect(mine.items.length).toBeGreaterThan(0);
+    expect(mine.items.map((e) => e.seq)).toEqual(mine.items.map((e) => e.seq).sort((x, y) => y - x));
+  });
+
   it("names the tool call ID data.tool_id, not data.id (the event's own id)", async () => {
     const api = mock();
     const page = await api.events.history({ since: 0, limit: 1000 });

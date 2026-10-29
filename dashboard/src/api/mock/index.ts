@@ -719,9 +719,13 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
 
   const eventsAfter = (q: EventQuery, base: (e: AgentEvent) => boolean) => {
     const since = typeof q.since === "string" && !/^\d+$/.test(q.since) ? (w.events.find((e) => e.id === q.since)?.seq ?? fail(400, "bad_request", `no event \`${q.since}\` for since`)) : Number(q.since ?? 0);
-    const after = q.cursor ? Number(q.cursor) : since;
-    const rows = w.events.filter((e) => e.seq > after && base(e) && (!q.kind || e.kind === q.kind) && (!q.project || e.project === q.project));
-    return paginate(rows, { limit: q.limit }, (e) => String(e.seq));
+    const rows = (after: number) => w.events.filter((e) => e.seq > after && base(e) && (!q.kind || e.kind === q.kind) && (!q.project || e.project === q.project));
+    // `order=desc`: newest first; `since` stays the lower bound and the cursor is the upper bound.
+    if (q.order === "desc") {
+      const before = q.cursor ? Number(q.cursor) : Infinity;
+      return paginate(rows(since).filter((e) => e.seq < before).reverse(), { limit: q.limit }, (e) => String(e.seq));
+    }
+    return paginate(rows(q.cursor ? Number(q.cursor) : since), { limit: q.limit }, (e) => String(e.seq));
   };
 
   /** A fake WebSocket to `/api/events`: the backlog after `?since=`, then live frames. */
@@ -2308,7 +2312,8 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
       events: (id, q = {}) =>
         reply(() => {
           const c = cardById(id);
-          return eventsAfter(q, (e) => e.card === c.id);
+          // The card events have no `order` (docs/api.md §8.3): oldest first only.
+          return eventsAfter({ ...q, order: undefined }, (e) => e.card === c.id);
         }),
     },
 

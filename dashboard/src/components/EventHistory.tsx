@@ -1,11 +1,14 @@
-// The event log from `?since=`, page by page, with live frames appended once
-// the history has caught up (docs/api.md §9).
+// The event log after `?since=`, page by page (docs/api.md §9.1). Newest
+// first, the list starts at the newest event, Load more adds older events
+// at the bottom, and live frames go on top. Oldest first, the list starts
+// at `since`, and live frames go at the end once the history has caught up.
 
 import { createSignal, onCleanup, Show } from "solid-js";
 import type { Page } from "../api/http";
 import type { AgentEvent, EventQuery } from "../api/types";
 import { events } from "../stores";
 import { EventList } from "./EventList";
+import { historyQuery, livePlace } from "./historyPaging";
 import { createPagedList } from "./paged";
 import { ErrorBanner, LoadMore } from "./ui";
 
@@ -20,26 +23,25 @@ export function EventHistory(props: {
   match: (e: AgentEvent) => boolean;
   showAgent?: boolean;
 }) {
-  // Default: the last few hundred events of the log, so the newest show first.
+  // Default: the last few hundred events of the log. `since` is the lower
+  // bound in both orders, so the two orders show the same events.
   const recentSince = () => Math.max(0, events.status().lastSeq - RECENT_WINDOW);
   const [since, setSince] = createSignal<string>(String(recentSince()));
   const [follow, setFollow] = createSignal(true);
   const [newestFirst, setNewestFirst] = createSignal(true);
 
   const list = createPagedList(
-    () => `${props.filterKey}|${since()}`,
-    (_k, cursor) => props.fetch({ since: since().trim() || 0, cursor, limit: 100 }),
+    () => `${props.filterKey}|${since()}|${newestFirst()}`,
+    (_k, cursor) => props.fetch(historyQuery(since(), newestFirst(), cursor)),
     (e) => e.id,
   );
 
   const off = events.on((e) => {
-    if (!follow() || list.hasMore() || list.initial() || !props.match(e)) return;
-    const last = list.items().at(-1);
-    if (!last || e.seq > last.seq) list.upsert([e], "end");
+    if (!follow() || list.initial() || !props.match(e)) return;
+    const where = livePlace(list.items(), e, newestFirst(), list.hasMore());
+    if (where) list.upsert([e], where);
   });
   onCleanup(off);
-
-  const shown = () => (newestFirst() ? list.items().slice().reverse() : list.items());
 
   return (
     <div class="stack" style={{ gap: "8px" }}>
@@ -61,19 +63,14 @@ export function EventHistory(props: {
           <input type="checkbox" checked={follow()} onChange={(e) => setFollow(e.currentTarget.checked)} /> Follow live
         </label>
         <span class="muted small">
-          {list.items().length} events{list.hasMore() ? ", more after these" : ""} · stream {events.state()}
+          {list.items().length} events{list.hasMore() ? (newestFirst() ? ", older ones to load" : ", more after these") : ""} · stream {events.state()}
         </span>
       </div>
       <ErrorBanner error={list.error()} />
-      <Show when={newestFirst() && list.hasMore()}>
-        <LoadMore hasMore loading={list.loading()} onMore={list.loadMore} />
-      </Show>
       <Show when={!list.initial()} fallback={<p class="muted">Loading…</p>}>
-        <EventList events={shown()} showAgent={props.showAgent} limit={100_000} />
+        <EventList events={list.items()} showAgent={props.showAgent} limit={100_000} />
       </Show>
-      <Show when={!newestFirst()}>
-        <LoadMore hasMore={list.hasMore()} loading={list.loading()} onMore={list.loadMore} />
-      </Show>
+      <LoadMore hasMore={list.hasMore()} loading={list.loading()} onMore={list.loadMore} />
     </div>
   );
 }

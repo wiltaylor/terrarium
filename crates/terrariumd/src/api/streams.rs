@@ -8,6 +8,9 @@
 //! - `Accept: text/event-stream`: the same as Server-Sent Events;
 //! - anything else: one JSON page of the log after `?since=`.
 //!
+//! A JSON page with `?order=desc` is newest first, and its cursor goes on
+//! to older events. `since` is then the lower bound of the pages.
+//!
 //! `?since=latest` or `?live=1` skips the backlog: only events after the
 //! newest `seq` at connect time come. `GET /api/events/latest` gives that
 //! `seq`, so a client can read a short page first and then stream.
@@ -44,6 +47,8 @@ pub struct StreamQuery {
     since: Option<String>,
     /// `1` or `true`: no backlog, live events only (`since=latest`).
     live: Option<String>,
+    /// `asc` (the default) or `desc`. A JSON page only.
+    order: Option<String>,
     kind: Option<String>,
     project: Option<String>,
     agent: Option<String>,
@@ -89,6 +94,17 @@ fn is_on(v: Option<&str>) -> ApiResult<bool> {
     }
 }
 
+/// `?order=desc`: true. `asc` or no value: false. Another value is `400`.
+fn is_desc(v: Option<&str>) -> ApiResult<bool> {
+    match v {
+        None | Some("" | "asc") => Ok(false),
+        Some("desc") => Ok(true),
+        Some(other) => Err(ApiError::bad_request(format!(
+            "bad order `{other}`: use asc or desc"
+        ))),
+    }
+}
+
 async fn respond(
     state: Shared,
     filter: EventFilter,
@@ -97,9 +113,25 @@ async fn respond(
     req: Request,
 ) -> ApiResult<Response> {
     let live = is_on(q.live.as_deref())?;
+    let desc = is_desc(q.order.as_deref())?;
     let (mode, last_event_id) = mode(req).await?;
+    if desc && !matches!(mode, Mode::Json) {
+        return Err(ApiError::bad_request(
+            "order=desc is for a JSON page; a stream is oldest first",
+        ));
+    }
+    // Oldest first, the cursor is the next `since`. Newest first, `since`
+    // stays the lower bound and the cursor is the upper bound.
+    let before = match page.cursor() {
+        Some(c) if desc => Some(c.parse::<i64>().map_err(|_| {
+            ApiError::bad_request(format!("bad cursor `{c}`: send back X-Next-Cursor"))
+        })?),
+        _ => None,
+    };
     let since_key = if live {
         Some(LATEST.to_owned())
+    } else if desc {
+        q.since.or(last_event_id)
     } else {
         page.cursor()
             .map(str::to_owned)
@@ -119,7 +151,13 @@ async fn respond(
             let f = filter.clone();
             let rows = state
                 .db
-                .read(move |c| events::list(c, &f, since, limit + 1))
+                .read(move |c| {
+                    if desc {
+                        events::list_desc(c, &f, since, before, limit + 1)
+                    } else {
+                        events::list(c, &f, since, limit + 1)
+                    }
+                })
                 .await?;
             paged(Paged::from_rows(rows, limit, |e: &StoredEvent| {
                 e.seq.to_string()

@@ -2809,12 +2809,13 @@ three ways:
 |---|---|
 | WebSocket upgrade | One JSON event per **text** frame: the backlog after `since`, then live events. |
 | `Accept: text/event-stream` | Server-Sent Events: `id: <seq>`, `event: <kind>`, `data: <event JSON>`. `Last-Event-ID` works as `since`. |
-| Anything else | `200` one JSON page of events after `since`, oldest first, cursor: `seq`. |
+| Anything else | `200` one JSON page of events after `since`, oldest first, cursor: `seq`. With `order=desc`, newest first. |
 
 | Query | Meaning |
 |---|---|
 | `since` | A `seq`, an event ID, `latest`, or a time (§2.1). Only later events come; a time gives the events at or after it. Default: 0, the whole log. `latest` skips the backlog: only events after the newest `seq` at connect time come. |
 | `live` | `1` or `true`: the same as `since=latest`. It wins over `since`, a cursor, and `Last-Event-ID`. `0`, `false`, or empty: off. Another value is `400`. |
+| `order` | JSON page only. `asc` (the default): oldest first, and the cursor goes on to newer events. `desc`: newest first, and the cursor goes on to older events. `since` is then the lower bound of every page: the pages stop at it. Another value is `400`. A stream with `desc` is `400`. |
 | `kind` | One kind. |
 | `project` | Firehose only: one project. |
 | `agent` | Firehose only: an agent key or ULID. A ULID works after the agent is deleted. |
@@ -2828,9 +2829,16 @@ log, `0` when the log is empty. A client that shows recent activity reads a
 short JSON page (for example `?since=<seq - 50>`), then streams with
 `since=<seq>`. It does not replay the whole log.
 
+A client that shows the log newest first reads `?order=desc` for the
+first page: the newest events. Each `X-Next-Cursor` gives the next older
+page. The client streams with `since=<seq of the first event of the first
+page>` and puts the live events on top. An event that comes between the
+page and the stream is in the backlog of the stream, so no event is lost.
+
 ```sh
 curl -s --unix-socket $S 'http://localhost/api/agents/terrarium%2Fworker/events?since=0&limit=3'
 curl -s -N --unix-socket $S -H 'Accept: text/event-stream' 'http://localhost/api/events?kind=status'
+curl -s --unix-socket $S 'http://localhost/api/events?order=desc&limit=50'
 ```
 
 ## 10. Memory graph
