@@ -9,7 +9,7 @@ import { ModelPicker } from "../../components/ModelPicker";
 import { compatibleSubscriptions, defaultModelFor, loginText, modelSourceText, normalizePool, poolCandidates, subscriptionOptions } from "./subscription";
 
 /** The Subscriptions page with the API-key step of the wizard open. */
-export const ADD_API_KEY_HREF = "/subscriptions?add=api_key";
+export const ADD_API_KEY_HREF = "/settings/subscriptions?add=api_key";
 
 /** A select of the subscriptions that `harness` can spend, and "none". Loads the list itself. */
 export function SubscriptionSelect(props: { harness: Harness; value: string; onChange: (name: string) => void; disabled?: boolean; label?: string }) {

@@ -562,7 +562,7 @@ terrarium skill usage <name>                       the agents and templates that
 ```
 
 - A write goes to the work tree of the config repo. Commit it with
-  `terrarium admin config commit` (or the Config page).
+  `terrarium admin config commit` (or Settings, Harness config in the dashboard).
 - `new --from-dir` refuses a symbolic link, and sends a binary file (an
   image) as base64. The daemon checks the rest: the name, the front
   matter, the file types, the caps, and the secret scan.

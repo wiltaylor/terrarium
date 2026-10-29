@@ -83,7 +83,7 @@ docker compose exec terrarium terrariumd password set
 The command asks for the password twice, with no echo. Use 12 characters or
 more. The daemon keeps only an Argon2id hash, in `state/operator.password`.
 A running daemon sees the new password at once. To change the password
-later, run the command again, or use the Settings page of the dashboard.
+later, run the command again, or use Settings, Account in the dashboard.
 Each change ends every session.
 
 For a first start with no prompt, put `TERRARIUM_PASSWORD=...` in `.env`.
@@ -103,7 +103,7 @@ new tab, and a browser restart, so you do not log in again. It lives
 `TERRARIUM_SESSION_TTL` (default 30 days), and the daemon renews it while
 you use the dashboard. The dashboard keeps only the CSRF value, in memory.
 **sign out** in the sidebar ends the session. **Log out everywhere** on the
-Settings page ends every session, in each browser and each CLI
+Account tab of Settings ends every session, in each browser and each CLI
 ([../dashboard/src/README.md](../dashboard/src/README.md)).
 
 After five wrong passwords from one address, the daemon makes you wait:

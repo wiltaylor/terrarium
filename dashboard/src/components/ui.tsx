@@ -162,10 +162,11 @@ export function Tabs<T extends string>(props: { tabs: readonly { id: T; label: s
   );
 }
 
-export function PageHead(props: { title: JSX.Element; children?: JSX.Element }) {
+/** The page title and its actions. A tab of a page with its own title (Settings) gives `level={2}`. */
+export function PageHead(props: { title: JSX.Element; level?: 1 | 2; children?: JSX.Element }) {
   return (
     <div class="page-head">
-      <h1>{props.title}</h1>
+      {props.level === 2 ? <h2>{props.title}</h2> : <h1>{props.title}</h1>}
       <div class="actions">{props.children}</div>
     </div>
   );

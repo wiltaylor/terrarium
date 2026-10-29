@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { KeyValueStorage } from "../stores/auth";
-import { collapse, createExpandedStore, expand, EXPANDED_KEY, filterProjects, parseExpanded, projectFromPath, prune, toggle } from "./treeModel";
+import { collapse, createExpandedStore, expand, EXPANDED_KEY, filterProjects, inProjects, parseExpanded, projectFromPath, PROJECTS_ROOT, prune, ROOT_CLOSED, toggle } from "./treeModel";
 
 const memory = (init: Record<string, string> = {}): KeyValueStorage & { data: Record<string, string> } => {
   const data = { ...init };
@@ -95,6 +95,40 @@ describe("createExpandedStore", () => {
     st.prune(["a", "b", "c"]);
     expect(st.list()).toEqual(["a", "b"]);
     expect(JSON.parse(s.data[EXPANDED_KEY]!)).toEqual(["a", "b"]);
+  });
+
+  it("has the Projects root open by default, also for a list stored before the root", () => {
+    expect(createExpandedStore(memory()).isOpen(PROJECTS_ROOT)).toBe(true);
+    expect(createExpandedStore(memory({ [EXPANDED_KEY]: '["a"]' })).isOpen(PROJECTS_ROOT)).toBe(true);
+  });
+
+  it("persists a closed root, keeps it through a prune, and opens it again on the project pages", () => {
+    const s = memory();
+    const st = createExpandedStore(s);
+    st.toggle(PROJECTS_ROOT);
+    expect(st.isOpen(PROJECTS_ROOT)).toBe(false);
+    expect(JSON.parse(s.data[EXPANDED_KEY]!)).toEqual([ROOT_CLOSED]);
+    st.prune(["a"]);
+    expect(createExpandedStore(s).isOpen(PROJECTS_ROOT)).toBe(false);
+    st.follow("/agents"); // not a project page: the root stays closed
+    expect(st.isOpen(PROJECTS_ROOT)).toBe(false);
+    st.follow("/projects");
+    expect(st.isOpen(PROJECTS_ROOT)).toBe(true);
+    st.close(PROJECTS_ROOT);
+    st.follow("/projects/"); // the same place: your close stays
+    expect(st.isOpen(PROJECTS_ROOT)).toBe(false);
+    st.follow("/p/alpha/board");
+    expect(st.isOpen(PROJECTS_ROOT)).toBe(true);
+    expect(st.isOpen("alpha")).toBe(true);
+  });
+
+  it("knows the pages under the root", () => {
+    expect(inProjects("/projects")).toBe(true);
+    expect(inProjects("/projects/")).toBe(true);
+    expect(inProjects("/p/a/board")).toBe(true);
+    expect(inProjects("/")).toBe(false);
+    expect(inProjects("/projectsx")).toBe(false);
+    expect(inProjects("/settings/hosts")).toBe(false);
   });
 
   it("works when storage throws", () => {

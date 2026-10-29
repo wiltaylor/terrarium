@@ -100,6 +100,9 @@ describe("inbox model", () => {
   it("links a daemon mail to its dashboard page", () => {
     const quota = { from_kind: "system" as const, body: "Subscription `max` has used 81%.\n\nOpen: http://localhost:8080/subscriptions\n" };
     expect(systemMailLink(quota)).toEqual({ href: "/subscriptions", label: "Subscriptions" });
+    expect(systemMailLink({ ...quota, body: "Open: http://localhost:8080/settings/subscriptions\n" })).toEqual({ href: "/settings/subscriptions", label: "Subscriptions" });
+    expect(systemMailLink({ ...quota, body: "Open: /subscriptions?add=api_key\n" })).toEqual({ href: "/subscriptions?add=api_key", label: "Subscriptions" });
+    expect(systemMailLink({ ...quota, body: "Open: /subscriptions-old\n" })?.label).toBe("Open");
     expect(systemMailLink({ ...quota, body: "Budget.\n\nOpen: /p/web\n" })).toEqual({ href: "/p/web", label: "Project" });
     expect(systemMailLink({ ...quota, from_kind: "agent" })).toBeNull();
     expect(systemMailLink({ ...quota, body: "Open: javascript:alert(1)" })).toBeNull();

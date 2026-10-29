@@ -26,6 +26,7 @@ const EventsPage = lazy(() => import("../features/events/EventsPage"));
 const ProjectsPage = lazy(() => import("../features/projects/ProjectsPage"));
 const ProjectSettings = lazy(() => import("../features/projects/ProjectSettings"));
 const SettingsPage = lazy(() => import("../features/settings/SettingsPage"));
+const AccountPage = lazy(() => import("../features/settings/AccountPage"));
 const ConfigPage = lazy(() => import("../features/config/ConfigPage"));
 const SkillsPage = lazy(() => import("../features/skills/SkillsPage"));
 const SessionPage = lazy(() => import("../features/sessions/SessionPage"));
@@ -69,17 +70,20 @@ export function App() {
         <Route path="/sessions/:id" component={SessionPage} />
         <Route path="/templates" component={TemplatesPage} />
         <Route path="/skills/:name?" component={SkillsPage} />
-        <Route path="/subscriptions" component={SubscriptionsPage} />
         <Route path="/secrets" component={SecretsPage} />
         <Route path="/mail" component={MailPage} />
         <Route path="/inbox" component={InboxPage} />
         <Route path="/targets" component={TargetsPage} />
         <Route path="/schedules" component={SchedulesPage} />
-        <Route path="/hosts" component={HostsPage} />
         <Route path="/events" component={EventsPage} />
         <Route path="/audit" component={AuditPage} />
-        <Route path="/config" component={ConfigPage} />
-        <Route path="/settings" component={SettingsPage} />
+        {/* The settings screen: a tab bar over one route per tab (nav.ts SETTINGS_TABS). /settings redirects to the first tab. */}
+        <Route path="/settings" component={SettingsPage}>
+          <Route path="/account" component={AccountPage} />
+          <Route path="/subscriptions" component={SubscriptionsPage} />
+          <Route path="/harness" component={ConfigPage} />
+          <Route path="/hosts" component={HostsPage} />
+        </Route>
         <Route path="/p/:project" component={ProjectIndex} />
         <Route path="/p/:project/agents" component={AgentsPage} />
         <Route path="/p/:project/templates" component={TemplatesPage} />
@@ -95,7 +99,8 @@ export function App() {
         <Show when={isMock}>
           <Route path="/dev/xss" component={XssPage} />
         </Show>
-        <For each={MOVED_ROUTES}>{(r) => <Route path={r.path} component={() => <Navigate href={({ location }) => movedTo(location.pathname) ?? r.to} />} />}</For>
+        {/* A redirect keeps the query and the hash: an old `/subscriptions?add=api_key` link still opens the wizard. */}
+        <For each={MOVED_ROUTES}>{(r) => <Route path={r.path} component={() => <Navigate href={({ location }) => `${movedTo(location.pathname) ?? r.to}${location.search}${location.hash}`} />} />}</For>
         <Route path="*" component={NotFound} />
       </Router>
       </Match>

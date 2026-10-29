@@ -364,7 +364,7 @@ export function SubscriptionCell(props: { agent: Agent; running: boolean; onErro
           >
             {(name) => (
               <>
-                <A href="/subscriptions">{name()}</A>
+                <A href="/settings/subscriptions">{name()}</A>
                 <Show when={detail()} fallback={<Show when={!detail.loading}><span class="chip warn">not found</span></Show>}>
                   {(d) => (
                     <>

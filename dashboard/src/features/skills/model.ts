@@ -12,8 +12,8 @@ export const ALL_SKILLS = "*";
 /** The note of a daemon with no config repo, so no skills. */
 export const NO_SKILLS_NOTE = "This daemon has no config repo, so it has no skills. Set TERRARIUM_CONFIG_REPO on the daemon to use skills.";
 
-/** The note under a write: the Config page commits it. */
-export const COMMIT_NOTE = "A change to a skill stays in the config repo as a local change. Commit it on the Config page.";
+/** The note under a write: the Harness config page commits it. */
+export const COMMIT_NOTE = "A change to a skill stays in the config repo as a local change. Commit it on the Harness config page.";
 
 /** The note of a changed skill list: the agent gets it at the next start. */
 export const RESTART_NOTE = "The skills of a live agent change at the next start or restart.";

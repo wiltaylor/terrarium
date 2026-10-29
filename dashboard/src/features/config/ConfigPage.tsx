@@ -1,5 +1,5 @@
-// The config repo (PLAN §8.3, docs/api.md §25), for the operator or a
-// sysadmin: the repo state, the changed files with their diffs, commit,
+// Settings, Harness config tab: the config repo (PLAN §8.3, docs/api.md
+// §25), for the operator or a sysadmin: the repo state, the changed files with their diffs, commit,
 // sync, pull, push, the export plans of a pull, the secret grants of a
 // pull that wait for the operator (S8), the remote, the new
 // defaults that wait as `<file>.new`, and the merge banner. The logic is in
@@ -355,7 +355,7 @@ export default function ConfigPage() {
 
   return (
     <>
-      <PageHead title="Config">
+      <PageHead title="Harness config" level={2}>
         <button onClick={() => refetch()} disabled={busy()}>
           Refresh
         </button>

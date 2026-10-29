@@ -583,7 +583,7 @@ export interface Api {
 
   /**
    * Terrarium-managed skills, kept in the config repo. A write stays
-   * uncommitted: the Config page commits it. The operator or a sysadmin
+   * uncommitted: the Harness config page commits it. The operator or a sysadmin
    * reads all and writes; another agent reads its own. A daemon with no
    * config repo answers `501 not_available`. A failed check is `422 invalid`
    * with `details.problems`.

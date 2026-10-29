@@ -780,7 +780,7 @@ shares them. Only the operator and a sysadmin create, change, or delete a
 skill: through the API (`/api/skills`), the CLI (`terrarium skill`), the
 dashboard (Skills page), or an edit of the repo by hand and a config
 sync. A write through the API goes to the work tree and stays
-uncommitted, as an edit of a prompt does. The Config page commits it.
+uncommitted, as an edit of a prompt does. The Harness config page commits it.
 
 **The checks** (`terrarium_core::skills::check`) run at each write and
 at each start:

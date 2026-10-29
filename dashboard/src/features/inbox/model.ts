@@ -105,8 +105,13 @@ export function emptyText(tab: InboxTab, status: InboxStatusTab): string {
 /**
  * The dashboard page that a mail of the daemon links: its last `Open: <url>`
  * line, as a path of this dashboard (a quota mail links `/subscriptions`, a
- * budget mail `/p/<project>`). Only a `system` mail, and only a path.
+ * budget mail `/p/<project>`). Only a `system` mail, and only a path. The
+ * old `/subscriptions` and the new `/settings/subscriptions` get the same
+ * label; the old path redirects.
  */
+/** The Subscriptions page, at its old and its new path, with or without a query. */
+const SUBSCRIPTIONS_PATHS = /^\/(settings\/)?subscriptions\/?(\?|#|$)/;
+
 export function systemMailLink(m: Pick<Message, "from_kind" | "body">): { href: string; label: string } | null {
   if (m.from_kind !== "system") return null;
   const line = m.body
@@ -126,6 +131,6 @@ export function systemMailLink(m: Pick<Message, "from_kind" | "body">): { href: 
       return null;
     }
   }
-  const label = href === "/subscriptions" ? "Subscriptions" : href.startsWith("/p/") ? "Project" : "Open";
+  const label = SUBSCRIPTIONS_PATHS.test(href) ? "Subscriptions" : href.startsWith("/p/") ? "Project" : "Open";
   return { href, label };
 }

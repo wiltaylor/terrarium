@@ -1,6 +1,6 @@
-// Subscriptions (PLAN §16.1, docs/api.md §16): every plan with its login and
-// probe status, the logins the daemon found with no definition, and the
-// actions: verify, probe, re-login, logout, delete. Above them, the harness
+// Settings, Subscriptions tab (PLAN §16.1, docs/api.md §16): every plan
+// with its login and probe status, the logins the daemon found with no
+// definition, and the actions: verify, probe, re-login, logout, delete. Above them, the harness
 // versions against their pins (./HarnessVersions.tsx).
 
 import { createSignal, For, onMount, Show } from "solid-js";
@@ -66,7 +66,7 @@ export default function SubscriptionsPage() {
 
   return (
     <>
-      <PageHead title="Subscriptions">
+      <PageHead title="Subscriptions" level={2}>
         <button onClick={() => void Promise.all([subscriptions.refresh(), subscriptions.detect()])}>Refresh</button>
         <button class="primary" onClick={() => setWizard({})}>
           Add subscription

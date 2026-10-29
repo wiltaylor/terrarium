@@ -82,7 +82,7 @@ it over the file, and fsyncs the dir. A read that finds a looser mode sets
   reads the new file at the next request (it compares the inode, size, and
   mtime).
 - `PUT /api/auth/password` (`terrarium admin password set`, or the
-  dashboard Settings page).
+  dashboard Settings, Account tab).
 - `TERRARIUM_PASSWORD` (or `TERRARIUM_PASSWORD_FILE`, its first line) at the
   start, only when no password is set. The daemon logs a warning: remove the
   variable from the env after the first start. The daemon reads the value

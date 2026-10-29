@@ -8,6 +8,18 @@ export const EXPANDED_KEY = "terrarium.tree.expanded";
 /** Above this many projects, the tree shows a filter input. */
 export const FILTER_THRESHOLD = 8;
 
+/**
+ * The name of the Projects root in the open set. A project name has no `/`
+ * (a-z, 0-9, `-`, `_`), so this name cannot be a project.
+ */
+export const PROJECTS_ROOT = "/projects";
+
+/**
+ * The root is open by default. The open set holds this marker while the root
+ * is closed, so a list from before the root keeps the projects in view.
+ */
+export const ROOT_CLOSED = "!/projects";
+
 /** The project in a /p/<name>/... path, or null. */
 export function projectFromPath(pathname: string): string | null {
   const m = /^\/p\/([^/]+)/.exec(pathname);
@@ -45,10 +57,15 @@ export function toggle(list: readonly string[], name: string): string[] {
   return list.includes(name) ? collapse(list, name) : expand(list, name);
 }
 
-/** Drop the names of projects that are gone. An empty `known` list (not loaded yet) keeps all. */
+/** Drop the names of projects that are gone. An empty `known` list (not loaded yet) keeps all. The root marker stays. */
 export function prune(list: readonly string[], known: readonly string[]): string[] {
   if (known.length === 0) return [...list];
-  return list.filter((n) => known.includes(n));
+  return list.filter((n) => n === ROOT_CLOSED || known.includes(n));
+}
+
+/** True for the pages under the Projects root: the cards (/projects) and every /p/<name>/... page. */
+export function inProjects(pathname: string): boolean {
+  return /^\/projects\/?$/.test(pathname) || projectFromPath(pathname) !== null;
 }
 
 /** The projects whose name holds the query (case-insensitive). An empty query keeps all. */
@@ -61,6 +78,8 @@ export function filterProjects<T extends { name: string }>(projects: readonly T[
 /**
  * The open set, persisted. `follow(path)` opens the project of a new URL, so
  * the project you go to is always open; you can close it again after that.
+ * The name PROJECTS_ROOT is the root: it is open while ROOT_CLOSED is not in
+ * the list.
  */
 export function createExpandedStore(storage: KeyValueStorage | null = null) {
   const read = () => {
@@ -81,22 +100,36 @@ export function createExpandedStore(storage: KeyValueStorage | null = null) {
   };
   let lastFollowed: string | null = null;
 
+  const isOpen = (name: string) => (name === PROJECTS_ROOT ? !list().includes(ROOT_CLOSED) : list().includes(name));
+  const open = (name: string) => {
+    if (name === PROJECTS_ROOT) {
+      if (list().includes(ROOT_CLOSED)) write(collapse(list(), ROOT_CLOSED));
+    } else if (!list().includes(name)) write(expand(list(), name));
+  };
+  const close = (name: string) => {
+    if (name === PROJECTS_ROOT) {
+      if (!list().includes(ROOT_CLOSED)) write(expand(list(), ROOT_CLOSED));
+    } else if (list().includes(name)) write(collapse(list(), name));
+  };
+
   return {
     list,
-    isOpen: (name: string) => list().includes(name),
-    toggle: (name: string) => write(toggle(list(), name)),
-    open: (name: string) => {
-      if (!list().includes(name)) write(expand(list(), name));
-    },
-    close: (name: string) => {
-      if (list().includes(name)) write(collapse(list(), name));
-    },
-    /** Open the project of `pathname` when the URL moves to a different project. */
+    isOpen,
+    toggle: (name: string) => (isOpen(name) ? close(name) : open(name)),
+    open,
+    close,
+    /**
+     * Open the root and the project of `pathname` when the URL moves into the
+     * project pages or to a different project.
+     */
     follow: (pathname: string) => {
       const p = projectFromPath(pathname);
-      if (p === lastFollowed) return;
-      lastFollowed = p;
-      if (p && !list().includes(p)) write(expand(list(), p));
+      const at = p ?? (inProjects(pathname) ? PROJECTS_ROOT : null);
+      if (at === lastFollowed) return;
+      lastFollowed = at;
+      if (!at) return;
+      open(PROJECTS_ROOT);
+      if (p) open(p);
     },
     prune: (known: readonly string[]) => {
       const next = prune(list(), known);

@@ -3,7 +3,7 @@
 // description), and the editor of one skill at /skills/<name>: SKILL.md in a
 // textarea, a Markdown preview through the sanitizing Markdown component,
 // the other files, save with the problems of a 422, "used by", and delete
-// (an in-page confirm). A write stays uncommitted: the Config page commits
+// (an in-page confirm). A write stays uncommitted: the Harness config page commits
 // it. A daemon with no config repo answers `501`; the page then shows a
 // short note. The logic is in ./model.ts. A description is plain text.
 
@@ -17,11 +17,11 @@ import { renderMarkdown } from "../../lib/markdown";
 import { api } from "../../stores";
 import { COMMIT_NOTE, descriptionProblem, filterSkills, nameProblem, NO_SKILLS_NOTE, noSkills, previewBody, RESTART_NOTE, skillProblems, usedBy, usedByText } from "./model";
 
-/** The note with a link to the Config page. */
+/** The note with a link to the Harness config page. */
 function CommitNote() {
   return (
     <p class="muted small" style={{ margin: 0 }}>
-      {COMMIT_NOTE} <A href="/config">Open the Config page</A>.
+      {COMMIT_NOTE} <A href="/settings/harness">Open Harness config</A>.
     </p>
   );
 }

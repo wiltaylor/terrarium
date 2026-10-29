@@ -78,9 +78,9 @@ sends either one to the daemon once, at sign-in, and does not keep it
    `Authorization`.
 6. Past half its life, the daemon renews the cookie on a request. The new
    cookie keeps the same CSRF value, so the app changes nothing.
-7. **Log out** (sidebar footer, or the Settings page) sends
+7. **Log out** (sidebar footer, or Settings, Account tab) sends
    `DELETE /api/session` with the CSRF header. **Log out everywhere**
-   (Settings) sends `DELETE /api/sessions`, which ends every browser and CLI
+   (Account tab) sends `DELETE /api/sessions`, which ends every browser and CLI
    session. Then the app forgets the CSRF value and shows the login screen.
 
 The login screen shows the daemon's answers: the same text for every wrong
@@ -95,7 +95,7 @@ The state machine is in `stores/auth.ts`. Its modes are `checking`, `none`,
   shows **over** the current page. The router stays mounted, so the route and
   the page state stay. After the sign-in, the event socket reconnects at
   once.
-- The Settings page (`/settings`) shows the mode and the time the session
+- The Account tab of Settings (`/settings/account`) shows the mode and the time the session
   ends. It also changes the operator password (`PUT /api/auth/password`);
   the change ends every session, so the page signs in again with the new
   password.
@@ -123,8 +123,8 @@ The state machine is in `stores/auth.ts`. Its modes are `checking`, `none`,
 
 A daemon without sessions answers `POST /api/session` with `404` (or
 `405`). Then the app keeps the token in memory and in this tab's
-`sessionStorage`. The sidebar shows a **bearer mode** chip, and the Settings
-page says why. Each request sends `Authorization: Bearer`, and sockets offer
+`sessionStorage`. The sidebar shows a **bearer mode** chip, and the Account
+tab of Settings says why. Each request sends `Authorization: Bearer`, and sockets offer
 the `bearer.<token>` subprotocol. Each load tries the session again, so an
 updated daemon moves the app to cookie mode without a new sign-in.
 
@@ -206,6 +206,16 @@ src/
   styles/         global.css with the theme variables
   app/            router, layout, token screen
 ```
+
+The sidebar (`app/Layout.tsx`, the item lists in `app/nav.ts`) has, from the
+top: Home and Inbox; the project tree; the "Terrarium" section with the
+global pages; and a Settings section at the bottom. The project tree
+(`app/ProjectTree.tsx`) has a Projects root. A click on its name opens the
+project cards (`/projects`) and opens the root; the chevron only opens or
+closes it. Under the root, each project opens to show its pages. Settings
+(`features/settings/SettingsPage.tsx`) is one page with a tab for each of
+Account, Subscriptions, Harness config, and Hosts. Each tab is a route under
+`/settings`.
 
 ## Conventions
 
@@ -513,11 +523,11 @@ prefix or budget scope. The daemon also has `project`, `since`, `until`, and
 | Route | View | API calls |
 |---|---|---|
 | `/` | Home: usage strip, waiting-on-you queue; the tile detail has the usage split by project, agent, model, and card | `GET /api/subscriptions`, `GET /api/usage?bucket=hour&group=subscription`; tile detail: `GET /api/usage?subscription=&group=project\|agent\|model\|card`, `GET .../quota`; per project: `versions?status=in_review`, `wiki?status=ready_for_review`, `board`; Inbox items: `GET /api/inbox` (see "The Inbox") |
-| `/projects` | Projects: list, create | `GET`, `POST /api/projects` |
+| `/projects` | Projects: list, create. The Projects root of the sidebar tree links it | `GET`, `POST /api/projects` |
 | `/p/:project/settings` | Project edit and delete, Repos panel | `GET`, `PATCH`, `DELETE /api/projects/{name}?confirm=true`, `GET`, `POST .../repos`, `POST /api/repos/{id}/checkout` |
 | `/agents` | Agents grid, new agent | `GET`, `POST /api/agents`, events socket |
 | `/agents/:id` | Agent detail: edit, delete, roles, quota, leases, conversation (the default tab), terminal, events, sessions | `GET`, `PATCH`, `DELETE /api/agents/{id}`, `start/stop/restart/send`, `GET`, `PUT .../roles`, `GET /api/usage/me?agent=`, `GET .../leases?all=`, `WS .../pty`, `GET .../events?since=`, `GET .../sessions`, `GET .../sessions/{session}/transcript?after=&limit=`, `GET .../transcript/stream?after=` (SSE) |
-| `/subscriptions` | Subscriptions, detect banner, add wizard | `GET`, `POST`, `DELETE /api/subscriptions[/{name}]`, `GET .../detect`, `POST .../{name}/probe\|verify\|logout\|api-key`, `POST /api/subscriptions/login`, `GET`, `DELETE .../login/{id}`, `POST .../login/{id}/input`, `WS .../login/{id}/pty` |
+| `/settings/subscriptions` | Settings, Subscriptions tab: subscriptions, detect banner, add wizard | `GET`, `POST`, `DELETE /api/subscriptions[/{name}]`, `GET .../detect`, `POST .../{name}/probe\|verify\|logout\|api-key`, `POST /api/subscriptions/login`, `GET`, `DELETE .../login/{id}`, `POST .../login/{id}/input`, `WS .../login/{id}/pty` |
 | `/inbox` | Inbox: questions, notices, mail to the operator, paused threads; kind tabs, open or done, project filter | `GET /api/inbox?status=&kind=&project=`, `GET /api/inbox/counts`, `POST /api/questions/{id}/answer\|ack\|retract`, `POST /api/inbox/mail/{id}/ack`, `POST /api/mail/{id}/release`, `POST /api/mail/threads/{id}/resume` |
 | `/questions` | Gone: redirects to `/inbox`. | none |
 | `/mail` | Mail log: every message, newest first, filters, live tail, the thread inline, reply, compose | `GET /api/mail?thread=&cursor=`, `POST /api/mail`, `POST /api/mail/{id}/reply` |
@@ -533,10 +543,12 @@ prefix or budget scope. The daemon also has `project`, `since`, `until`, and
 | `/schedules` | All schedules, grouped by scope | `GET /api/schedules` and the calls above |
 | `/p/:project/schedules?tab=triggers`, `/schedules?tab=triggers` | Triggers (spec `on`) and their runs with the event; event sources: list, create, enable, rotate, delete, the one-time secret | `GET /api/schedules?kind=trigger`, `GET`, `POST /api/event-sources`, `PATCH`, `DELETE /api/event-sources/{id}`, `POST .../rotate` (docs/api.md §19.4, §20) |
 | `/targets` | Targets, lifecycle, snapshots (list, take, restore, delete), exec console, leases (grant, extend, revoke, history) | `GET /api/targets`, `POST /api/targets/{name}/up\|down\|snapshot\|restore\|status`, `GET .../snapshots`, `DELETE .../snapshots/{snap}`, `POST .../exec`, `WS .../sessions/{id}/ws`, `DELETE .../sessions/{id}`, `GET`, `POST .../leases`, `PATCH`, `DELETE .../leases/{agent}` (docs/api.md §17.7) |
-| `/hosts` | Host agents: status, capabilities, add with a one-time token, revoke | `GET`, `POST /api/hosts`, `DELETE /api/hosts/{name}` (new API, not in docs/api.md yet) |
+| `/settings/hosts` | Settings, Hosts tab: host agents: status, capabilities, add with a one-time token, revoke | `GET`, `POST /api/hosts`, `DELETE /api/hosts/{name}` (new API, not in docs/api.md yet) |
 | `/events` | Event log with history | `GET /api/events?since=&kind=&project=&agent=`, events socket |
 | `/audit` | Audit log | `GET /api/audit?actor=&action=&project=` |
-| `/settings` | Session: mode, end time, what the browser keeps; sign out; theme | `DELETE /api/session` |
+| `/settings/account` | Settings, Account tab: session mode, end time, what the browser keeps; password; sign out, sign out everywhere | `GET`, `DELETE /api/session`, `DELETE /api/sessions`, `PUT /api/auth/password` |
+| `/settings/harness` | Settings, Harness config tab: the config repo, its changes and diffs, commit, sync, pull, push, secret grants to approve | `GET /api/config/...` (docs/api.md §25) |
+| `/settings`, `/subscriptions`, `/hosts`, `/config` | Gone: redirect to `/settings/account`, `/settings/subscriptions`, `/settings/hosts`, and `/settings/harness` (`app/nav.ts` `MOVED_ROUTES`). The redirect keeps the query. A quota mail of the daemon still links `/subscriptions`. | none |
 | `/dev/xss` | Mock only: the hostile payloads of `lib/xss-payloads.ts`, rendered | none |
 
 Artifact upload sends a multipart form: `file`, `name`, `kind`, and

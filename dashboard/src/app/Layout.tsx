@@ -1,4 +1,5 @@
-// The app shell: sidebar with the project tree, global items, and the footer.
+// The app shell: sidebar with Home and Inbox, the project tree, the global
+// items, the Settings section, and the footer.
 
 import { A, useLocation, type RouteSectionProps } from "@solidjs/router";
 import { createEffect, createResource, createSignal, ErrorBoundary, For, on, onCleanup, onMount, Show } from "solid-js";
@@ -8,7 +9,7 @@ import { ErrorBanner, useNow } from "../components/ui";
 import { duration } from "../lib/format";
 import { agents, api, auth, events, inbox, projects, signOutNow, subscriptions, theme } from "../stores";
 import { badge } from "../features/inbox/model";
-import { GLOBAL_ITEMS } from "./nav";
+import { GLOBAL_ITEMS, SETTINGS_ITEMS, TOP_ITEMS } from "./nav";
 import { ProjectTree } from "./ProjectTree";
 import { projectFromPath } from "./treeModel";
 import { LoginScreen } from "./LoginScreen";
@@ -59,19 +60,11 @@ export function Layout(props: RouteSectionProps) {
           </Show>
         </div>
 
-        <ProjectTree />
-
         <div class="nav-section">
-          <h4>Terrarium</h4>
-          <For each={GLOBAL_ITEMS}>
+          <For each={TOP_ITEMS}>
             {(item) => (
               <A href={item.href} activeClass="active" end={"end" in item}>
                 <span>{item.label}</span>
-                <Show when={item.href === "/agents" && blockedCount() > 0}>
-                  <span class="nav-count" title="Blocked or in error in this project">
-                    {blockedCount()}
-                  </span>
-                </Show>
                 <Show when={item.href === "/inbox" && inboxBadge()}>
                   {(b) => (
                     <span class={b().cls} title={b().title}>
@@ -79,6 +72,36 @@ export function Layout(props: RouteSectionProps) {
                     </span>
                   )}
                 </Show>
+              </A>
+            )}
+          </For>
+        </div>
+
+        <ProjectTree />
+
+        <div class="nav-section">
+          <h4>Terrarium</h4>
+          <For each={GLOBAL_ITEMS}>
+            {(item) => (
+              <A href={item.href} activeClass="active">
+                <span>{item.label}</span>
+                <Show when={item.href === "/agents" && blockedCount() > 0}>
+                  <span class="nav-count" title="Blocked or in error in this project">
+                    {blockedCount()}
+                  </span>
+                </Show>
+              </A>
+            )}
+          </For>
+        </div>
+
+        {/* At the bottom, above the footer. The link is active on every /settings/... tab. */}
+        <div class="nav-section nav-settings">
+          <h4>Settings</h4>
+          <For each={SETTINGS_ITEMS}>
+            {(item) => (
+              <A href={item.href} activeClass="active">
+                <span>{item.label}</span>
               </A>
             )}
           </For>
@@ -104,7 +127,7 @@ export function Layout(props: RouteSectionProps) {
             </button>
           </div>
           <Show when={auth.bearerFallback()}>
-            <A href="/settings" class="small" title="This daemon has no cookie sessions, so the token stays in the browser">
+            <A href="/settings/account" class="small" title="This daemon has no cookie sessions, so the token stays in the browser">
               <span class="chip warn">bearer mode</span> no cookie sessions
             </A>
           </Show>

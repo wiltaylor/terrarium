@@ -18,28 +18,40 @@ export const PROJECT_ITEMS = [
   { path: "settings", label: "Settings & repos" },
 ] as const;
 
-export const GLOBAL_ITEMS = [
+/** Above the project tree. */
+export const TOP_ITEMS = [
   { href: "/", label: "Home", end: true },
   // Everything that waits for the operator; the badge counts the open items.
   { href: "/inbox", label: "Inbox" },
-  { href: "/projects", label: "Projects" },
+] as const;
+
+/** The "Terrarium" section, under the project tree. The Projects root of the tree links /projects. */
+export const GLOBAL_ITEMS = [
   { href: "/agents", label: "Agents" },
   { href: "/templates", label: "Templates" },
   // The skill library in the config repo.
   { href: "/skills", label: "Skills" },
-  { href: "/subscriptions", label: "Subscriptions" },
   // The secret manager (PLAN §16b): every secret the caller manages.
   { href: "/secrets", label: "Secrets" },
   // The mail log: a record, with no unread state.
   { href: "/mail", label: "Mail" },
   { href: "/targets", label: "Targets" },
   { href: "/schedules", label: "Schedules" },
-  { href: "/hosts", label: "Hosts" },
   { href: "/events", label: "Event log" },
   { href: "/audit", label: "Audit" },
+] as const;
+
+/** The Settings section at the bottom of the sidebar: one link to the tabbed settings screen. */
+export const SETTINGS_ITEMS = [{ href: "/settings", label: "Settings" }] as const;
+
+/** The tabs of the settings screen, in order. Each is a route under /settings. */
+export const SETTINGS_TABS = [
+  // The sign-in session, the password, and the log-outs.
+  { path: "account", label: "Account" },
+  { path: "subscriptions", label: "Subscriptions" },
   // The config repo: for the operator or a sysadmin.
-  { href: "/config", label: "Config" },
-  { href: "/settings", label: "Settings" },
+  { path: "harness", label: "Harness config" },
+  { path: "hosts", label: "Hosts" },
 ] as const;
 
 /**
@@ -53,11 +65,18 @@ export const GLOBAL_ITEMS = [
  * - The Questions page is now the Inbox, with notices, mail to the
  *   operator, and paused threads.
  * - The project inbox page is now the project Mail log.
+ * - Subscriptions, Hosts, and Config (now "Harness config") are tabs of the
+ *   settings screen. A quota mail of the daemon links `/subscriptions`, so
+ *   the old paths stay as redirects. `/settings` opens the first tab.
  */
 export const MOVED_ROUTES = [
   { path: "/p/:project/spend", to: "/" },
   { path: "/questions", to: "/inbox" },
   { path: "/p/:project/inbox", to: "/p/:project/mail" },
+  { path: "/subscriptions", to: "/settings/subscriptions" },
+  { path: "/hosts", to: "/settings/hosts" },
+  { path: "/config", to: "/settings/harness" },
+  { path: "/settings", to: "/settings/account" },
 ] as const;
 
 /** The new place of a moved path, or undefined. */

@@ -136,7 +136,7 @@ export function Home() {
   return (
     <>
       <PageHead title="Home">
-        <A class="btn" href="/subscriptions">
+        <A class="btn" href="/settings/subscriptions">
           Subscriptions
         </A>
       </PageHead>
@@ -153,7 +153,7 @@ export function Home() {
                   "Loading…"
                 ) : (
                   <>
-                    No subscriptions yet. <A href="/subscriptions">Add one</A>.
+                    No subscriptions yet. <A href="/settings/subscriptions">Add one</A>.
                   </>
                 )}
               </Empty>
@@ -287,7 +287,7 @@ function UsageDetail(props: { sub: Subscription; onClose: () => void }) {
     <Modal title={`${props.sub.plan ?? props.sub.name} (${props.sub.name})`} onClose={() => props.onClose()}>
       <div class="spread">
         <Tabs tabs={RANGES.map((x) => ({ id: x.id, label: x.label }))} active={range()} onChange={setRange} />
-        <A class="btn small" href="/subscriptions">
+        <A class="btn small" href="/settings/subscriptions">
           Manage
         </A>
       </div>
