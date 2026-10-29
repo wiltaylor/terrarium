@@ -216,18 +216,17 @@ closes it. Under the root, each project opens to show its pages. The Agents
 page of a project is a node too. A click on its name opens the agent list of
 the project (`/p/:project/agents`) and opens the node; the chevron only opens
 or closes it. The node is closed by default. The agent list of the project
-and the page of one of its agents open it. Open, it shows the agents of that
-project only, with the same rows as the agent tree and no project name. The
-"Terrarium" section starts with the agent tree (`app/AgentTree.tsx`). Its
-Agents root works the same way: a click on its name opens the agent list
-(`/agents`) and opens the root. The root is closed by default, because the
-agent list grows with the fleet. An agent page opens it. Under the root, each
-agent has a row, sorted by project and then by name. The row shows the agent
-name, the project in muted text, and a dot in the colour of the agent status.
-The row label and title also give the status. Above eight projects or agents,
-a tree or a project Agents node shows a filter. Both roots and the project
-Agents nodes use `app/TreeRoot.tsx`, one open set in
-`localStorage`, and the keyboard map in `app/treeNav.ts`. Settings
+opens it. Open, it shows the agents of that project, sorted by name
+(`app/AgentRow.tsx`). The row shows the agent name and a dot in the colour of
+the agent status. The row label and title also give the status. The project
+row and its Agents node show the number of agents that are blocked or in
+error. The sidebar has no other agent list: each agent is in a project. An
+agent page (`/agents/:id`) opens the Projects root, the project of the agent,
+and its Agents node, and marks the agent row. The list of all agents
+(`/agents`) stays as a page, with no sidebar item. Above eight projects or
+agents, the tree or a project Agents node shows a filter. The root and the
+project Agents nodes use `app/TreeRoot.tsx`, one open set in `localStorage`,
+and the keyboard map in `app/treeNav.ts`. Settings
 (`features/settings/SettingsPage.tsx`) is one page with a tab for each of
 Account, Subscriptions, Harness config, and Hosts. Each tab is a route under
 `/settings`. Logs (`features/logs/LogsPage.tsx`) is the same: the

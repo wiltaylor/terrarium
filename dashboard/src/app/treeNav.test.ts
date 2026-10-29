@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { treeKeyAction } from "./treeNav";
 
 describe("treeKeyAction", () => {
-  // The Agents tree, open: the root and two agents.
+  // A tree, open: the root and two rows under it.
   const keys = ["root", "a:1", "a:2"];
   const root = { key: "root", open: true };
   const leaf = (key: string) => ({ key, parent: "root" });

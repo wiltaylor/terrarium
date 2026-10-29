@@ -434,7 +434,7 @@ th {
 .tree-empty {
   padding: 4px 8px;
 }
-/* The agent tree: a row per agent, with a dot and a light tint in the status colour. */
+/* The agent rows of a project Agents node: a dot and a light tint in the status colour. */
 .tree a.tree-agent {
   display: flex;
   justify-content: flex-start;
@@ -462,16 +462,6 @@ th {
   background: transparent;
   border: 1.5px solid var(--st);
   box-sizing: border-box;
-}
-.tree-sub {
-  flex: 0 1 auto;
-  min-width: 0;
-  max-width: 45%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 0.75rem;
-  color: var(--muted);
 }
 .tree-agent.st-starting { --st: var(--st-starting); }
 .tree-agent.st-idle { --st: var(--st-idle); }

@@ -7,7 +7,7 @@ import { A, useLocation } from "@solidjs/router";
 import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
 import type { Agent } from "../api/types";
 import { agents, projects } from "../stores";
-import { AgentRow } from "./AgentTree";
+import { AgentRow } from "./AgentRow";
 import { PROJECT_ITEMS } from "./nav";
 import { expanded, ROOT_KEY, TreeRoot } from "./TreeRoot";
 import {
@@ -15,8 +15,8 @@ import {
   filterProjects,
   FILTER_THRESHOLD,
   itemKey,
+  agentFromPath,
   projectAgentKey,
-  projectAgentsFromPath,
   projectAgentsNode,
   projectFromPath,
   projectKey,
@@ -33,14 +33,18 @@ export function ProjectTree() {
   const [query, setQuery] = createSignal("");
 
   const urlProject = () => projectFromPath(location.pathname);
+  // The agent of an agent page, by ID or `project/name` (agents.byId).
+  const urlAgent = () => {
+    const id = agentFromPath(location.pathname);
+    return id ? (agents.byId(id)?.id ?? null) : null;
+  };
   const rootOpen = () => expanded.isOpen(PROJECTS_ROOT);
 
-  // The project you go to is open, and so is the root. The Agents tree also
-  // calls it; the second call does nothing.
-  createEffect(() => expanded.follow(location.pathname));
-  // The Agents node of a project opens on its agent list and on the page of
-  // one of its agents. The agent page takes an ID or `project/name`.
-  createEffect(() => expanded.followProjectAgents(projectAgentsFromPath(location.pathname, (id) => agents.byId(id)?.project)));
+  // The project you go to is open, and so is the root. The Agents node of a
+  // project opens on its agent list. An agent page opens the root, the
+  // project of the agent, and its Agents node. The agent page takes an ID or
+  // `project/name` (agents.byId).
+  createEffect(() => expanded.follow(location.pathname, (id) => agents.byId(id)?.project));
   // Forget open projects that are gone, once the list is in.
   createEffect(() => expanded.prune(projects.projects().map((p) => p.name)));
 
@@ -63,10 +67,12 @@ export function ProjectTree() {
       agentsOf: (p) => visibleAgents(p).map((a) => a.id),
     }),
   );
-  // Tab reaches the last focused row, else the URL project, else the root.
+  // Tab reaches the last focused row, else the URL agent, else the URL project, else the root.
   const nav = createRovingTree({
     keys,
     preferred: () => {
+      const a = urlAgent();
+      if (a) return projectAgentKey(a);
       const u = urlProject();
       return u ? projectKey(u) : null;
     },
@@ -182,7 +188,9 @@ export function ProjectTree() {
                                 label={item.label}
                                 nav={nav}
                                 total={projectAgents(p.name).length}
+                                blocked={blocked(p.name)}
                                 agents={visibleAgents(p.name)}
+                                currentAgent={urlAgent()}
                                 query={agentQueries()[p.name] ?? ""}
                                 onQuery={(q) => setAgentQueries((all) => ({ ...all, [p.name]: q }))}
                               />
@@ -223,8 +231,12 @@ function ProjectAgentsNode(props: {
   nav: ReturnType<typeof createRovingTree>;
   /** The agents of the project before the filter. */
   total: number;
+  /** The agents of the project that are blocked or in error. */
+  blocked: number;
   /** The agents to show: sorted and filtered. */
   agents: Agent[];
+  /** The ID of the agent of the URL, or null. */
+  currentAgent: string | null;
   query: string;
   onQuery: (q: string) => void;
 }) {
@@ -241,12 +253,19 @@ function ProjectAgentsNode(props: {
       onOpen={() => expanded.open(node())}
       onToggle={() => expanded.toggle(node())}
       nav={props.nav}
+      badge={
+        <Show when={props.blocked > 0}>
+          <span class="nav-count warn" title="Agents blocked or in error in this project">
+            {props.blocked}
+          </span>
+        </Show>
+      }
       showFilter={props.total > FILTER_THRESHOLD}
       query={props.query}
       onQuery={props.onQuery}
     >
       <For each={props.agents} fallback={<li class="tree-empty muted small">{props.query ? "No agent matches." : "No agents."}</li>}>
-        {(a) => <AgentRow agent={a} rowKey={projectAgentKey(a.id)} nav={props.nav} project={props.project} />}
+        {(a) => <AgentRow agent={a} rowKey={projectAgentKey(a.id)} nav={props.nav} project={props.project} current={a.id === props.currentAgent} />}
       </For>
     </TreeRoot>
   );

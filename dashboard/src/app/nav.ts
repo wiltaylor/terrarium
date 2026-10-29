@@ -25,10 +25,12 @@ export const TOP_ITEMS = [
   { href: "/inbox", label: "Inbox" },
 ] as const;
 
-/** The "Terrarium" section, under the project tree. The Projects root of the tree links /projects. */
+/**
+ * The "Terrarium" section, under the project tree. The Projects root of the
+ * tree links /projects. The agents are in the tree only, under the Agents
+ * node of their project. The /agents page stays, but it has no item.
+ */
 export const GLOBAL_ITEMS = [
-  // A tree root (app/AgentTree.tsx): it opens to show every agent.
-  { href: "/agents", label: "Agents" },
   { href: "/templates", label: "Templates" },
   // The skill library in the config repo.
   { href: "/skills", label: "Skills" },

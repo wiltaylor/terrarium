@@ -38,14 +38,16 @@ describe("navigation", () => {
 
   it("has Agents first under the project, with a route to the Agents page", () => {
     expect(PROJECT_ITEMS[0]).toEqual({ path: "agents", label: "Agents" });
-    expect(GLOBAL_ITEMS.map((i) => i.href)).toContain("/agents");
     expect(app).toMatch(/path="\/agents" component=\{AgentsPage\}/);
     expect(app).toMatch(/path="\/p\/:project\/agents" component=\{AgentsPage\}/);
   });
 
-  it("shows the global Agents item as the agent tree, first in the Terrarium section", () => {
-    expect(GLOBAL_ITEMS[0]).toEqual({ href: "/agents", label: "Agents" });
-    expect(layout).toMatch(/<Show when=\{item\.href !== "\/agents"\} fallback=\{<AgentTree \/>\}>/);
+  it("has no global Agents item: the agents are in the project tree only, but the agent pages keep their routes", () => {
+    expect(GLOBAL_ITEMS.map((i) => i.href)).not.toContain("/agents");
+    expect(GLOBAL_ITEMS[0]).toEqual({ href: "/templates", label: "Templates" });
+    expect(layout).not.toMatch(/AgentTree/);
+    expect(Object.keys(import.meta.glob("./AgentTree.tsx"))).toEqual([]);
+    expect(app).toMatch(/path="\/agents" component=\{AgentsPage\}/);
     expect(app).toMatch(/path="\/agents\/:id" component=\{AgentDetail\}/);
   });
 
@@ -63,9 +65,8 @@ describe("navigation", () => {
     expect(app).toMatch(/path="\/p\/:project\/schedules"/);
   });
 
-  it("has Templates after Agents in the global list, with a route", () => {
-    const hrefs = GLOBAL_ITEMS.map((i) => i.href);
-    expect(hrefs.indexOf("/templates")).toBe(hrefs.indexOf("/agents") + 1);
+  it("has Templates in the global list, with a route", () => {
+    expect(GLOBAL_ITEMS.map((i) => i.href)).toContain("/templates");
     expect(app).toMatch(/path="\/templates"/);
   });
 

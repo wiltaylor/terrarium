@@ -2,16 +2,15 @@ import { describe, expect, it } from "vitest";
 import type { KeyValueStorage } from "../stores/auth";
 import {
   agentFromPath,
-  AGENTS_ROOT,
   collapse,
   createExpandedStore,
   expand,
   EXPANDED_KEY,
   filterAgents,
   filterProjects,
-  inAgents,
   inProjects,
   itemKey,
+  OLD_AGENTS_ROOT,
   parseExpanded,
   projectAgentKey,
   projectAgentsFromPath,
@@ -64,8 +63,12 @@ describe("the open set", () => {
   });
   it("prunes gone projects, but keeps all while the list is not loaded", () => {
     expect(prune(["a", "gone"], ["a", "b"])).toEqual(["a"]);
-    expect(prune([ROOT_CLOSED, AGENTS_ROOT, "gone"], ["a"])).toEqual([ROOT_CLOSED, AGENTS_ROOT]);
+    expect(prune([ROOT_CLOSED, "gone"], ["a"])).toEqual([ROOT_CLOSED]);
     expect(prune(["a", "gone"], [])).toEqual(["a", "gone"]);
+  });
+  it("drops the old Agents root from a stored list, also before the projects are loaded", () => {
+    expect(prune(["a", OLD_AGENTS_ROOT], [])).toEqual(["a"]);
+    expect(prune([OLD_AGENTS_ROOT, "a", ROOT_CLOSED], ["a"])).toEqual(["a", ROOT_CLOSED]);
   });
   it("reads only a JSON array of strings from storage", () => {
     expect(parseExpanded(null)).toEqual([]);
@@ -105,16 +108,11 @@ describe("the agent tree", () => {
     expect(filterAgents(as, "")).toHaveLength(4);
     expect(filterAgents(as, "zzz")).toEqual([]);
   });
-  it("reads the agent of an /agents/ path, and knows the pages under the root", () => {
+  it("reads the agent of an /agents/ path", () => {
     expect(agentFromPath("/agents/01JB0LEAD")).toBe("01JB0LEAD");
     expect(agentFromPath("/agents/terrarium%2Flead")).toBe("terrarium/lead");
     expect(agentFromPath("/agents")).toBeNull();
     expect(agentFromPath("/p/a/agents")).toBeNull();
-    expect(inAgents("/agents")).toBe(true);
-    expect(inAgents("/agents/")).toBe(true);
-    expect(inAgents("/agents/x")).toBe(true);
-    expect(inAgents("/agentsx")).toBe(false);
-    expect(inAgents("/p/a/agents")).toBe(false);
   });
 });
 
@@ -167,7 +165,7 @@ describe("createExpandedStore", () => {
     expect(JSON.parse(s.data[EXPANDED_KEY]!)).toEqual([ROOT_CLOSED]);
     st.prune(["a"]);
     expect(createExpandedStore(s).isOpen(PROJECTS_ROOT)).toBe(false);
-    st.follow("/agents"); // not a project page: the root stays closed
+    st.follow("/inbox"); // not a project page: the root stays closed
     expect(st.isOpen(PROJECTS_ROOT)).toBe(false);
     st.follow("/projects");
     expect(st.isOpen(PROJECTS_ROOT)).toBe(true);
@@ -179,39 +177,18 @@ describe("createExpandedStore", () => {
     expect(st.isOpen("alpha")).toBe(true);
   });
 
-  it("has the Agents root closed by default, persists it open, and keeps the Projects root apart", () => {
-    const s = memory();
+  it("cleans the old Agents root out of storage on the first prune", () => {
+    const s = memory({ [EXPANDED_KEY]: JSON.stringify(["a", OLD_AGENTS_ROOT]) });
     const st = createExpandedStore(s);
-    expect(st.isOpen(AGENTS_ROOT)).toBe(false);
-    expect(st.isOpen(PROJECTS_ROOT)).toBe(true);
-    st.toggle(AGENTS_ROOT);
-    expect(JSON.parse(s.data[EXPANDED_KEY]!)).toEqual([AGENTS_ROOT]);
-    st.close(PROJECTS_ROOT);
-    st.prune(["a"]);
-    const back = createExpandedStore(s);
-    expect(back.isOpen(AGENTS_ROOT)).toBe(true);
-    expect(back.isOpen(PROJECTS_ROOT)).toBe(false);
-    back.toggle(AGENTS_ROOT);
-    expect(createExpandedStore(s).isOpen(AGENTS_ROOT)).toBe(false);
+    st.prune([]);
+    expect(st.list()).toEqual(["a"]);
+    expect(JSON.parse(s.data[EXPANDED_KEY]!)).toEqual(["a"]);
   });
 
-  it("opens the Agents root on the agent pages, and lets you close it until the URL moves to another agent", () => {
-    const st = createExpandedStore(memory());
-    st.follow("/p/alpha/agents"); // the project page: not the Agents root
-    expect(st.isOpen(AGENTS_ROOT)).toBe(false);
+  it("does not open anything on the agent list, which is not in the tree", () => {
+    const st = createExpandedStore(memory({ [EXPANDED_KEY]: JSON.stringify([ROOT_CLOSED]) }));
     st.follow("/agents");
-    expect(st.isOpen(AGENTS_ROOT)).toBe(true);
-    expect(st.isOpen("alpha")).toBe(true);
-    st.close(AGENTS_ROOT);
-    st.follow("/agents/"); // the same place: your close stays
-    expect(st.isOpen(AGENTS_ROOT)).toBe(false);
-    st.follow("/agents/a1");
-    expect(st.isOpen(AGENTS_ROOT)).toBe(true);
-    st.close(AGENTS_ROOT);
-    st.follow("/agents/a1"); // the same agent: your close stays
-    expect(st.isOpen(AGENTS_ROOT)).toBe(false);
-    st.follow("/agents/a2");
-    expect(st.isOpen(AGENTS_ROOT)).toBe(true);
+    expect(st.list()).toEqual([ROOT_CLOSED]);
   });
 
   it("knows the pages under the root", () => {
@@ -246,7 +223,7 @@ describe("the Agents node of a project", () => {
   it("names the node apart from the projects and the roots", () => {
     expect(projectAgentsNode("alpha")).toBe("alpha/agents");
     expect(projectOfAgentsNode("alpha/agents")).toBe("alpha");
-    expect(projectOfAgentsNode(AGENTS_ROOT)).toBeNull();
+    expect(projectOfAgentsNode(OLD_AGENTS_ROOT)).toBeNull();
     expect(projectOfAgentsNode("alpha")).toBeNull();
     expect(projectOfAgentsNode(PROJECTS_ROOT)).toBeNull();
   });
@@ -262,24 +239,65 @@ describe("the Agents node of a project", () => {
     expect(projectAgentsFromPath("/agents", projectOf)).toBeNull();
   });
 
-  it("is closed by default, follows the URL once, and persists", () => {
+  it("is closed by default, opens on the agent list of the project once, and persists", () => {
     const s = memory();
     const st = createExpandedStore(s);
     expect(st.isOpen(projectAgentsNode("alpha"))).toBe(false);
-    st.followProjectAgents("alpha");
+    st.follow("/p/alpha/agents", projectOf);
+    expect(st.isOpen("alpha")).toBe(true);
     expect(st.isOpen(projectAgentsNode("alpha"))).toBe(true);
     st.close(projectAgentsNode("alpha"));
-    st.followProjectAgents("alpha"); // the same place: your close stays
+    st.follow("/p/alpha/agents/", projectOf); // the same place: your close stays
     expect(st.isOpen(projectAgentsNode("alpha"))).toBe(false);
-    st.followProjectAgents(null);
-    st.followProjectAgents("alpha");
+    st.follow("/p/alpha/board", projectOf); // another page: the node stays closed
+    expect(st.isOpen(projectAgentsNode("alpha"))).toBe(false);
+    st.follow("/p/alpha/agents", projectOf);
     expect(st.isOpen(projectAgentsNode("alpha"))).toBe(true);
     expect(createExpandedStore(s).isOpen(projectAgentsNode("alpha"))).toBe(true);
   });
 
+  it("reveals an agent page: the Projects root, the project of the agent, and its Agents node", () => {
+    const s = memory({ [EXPANDED_KEY]: JSON.stringify([ROOT_CLOSED]) });
+    const st = createExpandedStore(s);
+    st.follow("/agents/a1", projectOf);
+    expect(st.isOpen(PROJECTS_ROOT)).toBe(true);
+    expect(st.isOpen("alpha")).toBe(true);
+    expect(st.isOpen(projectAgentsNode("alpha"))).toBe(true);
+    expect(JSON.parse(s.data[EXPANDED_KEY]!)).toEqual(["alpha", projectAgentsNode("alpha")]);
+    // The `project/name` form works too.
+    st.follow("/agents/beta%2Fw", projectOf);
+    expect(st.isOpen("beta")).toBe(true);
+    expect(st.isOpen(projectAgentsNode("beta"))).toBe(true);
+  });
+
+  it("waits for the agents before it reveals an agent page", () => {
+    let loaded = false;
+    const later = (id: string) => (loaded ? projectOf(id) : undefined);
+    const st = createExpandedStore(memory({ [EXPANDED_KEY]: JSON.stringify([ROOT_CLOSED]) }));
+    st.follow("/agents/a1", later);
+    expect(st.list()).toEqual([ROOT_CLOSED]);
+    loaded = true;
+    st.follow("/agents/a1", later);
+    expect(st.isOpen(PROJECTS_ROOT)).toBe(true);
+    expect(st.isOpen(projectAgentsNode("alpha"))).toBe(true);
+  });
+
+  it("lets you close the nodes of an agent page until the URL moves to another agent", () => {
+    const st = createExpandedStore(memory());
+    st.follow("/agents/a1", projectOf);
+    st.close(projectAgentsNode("alpha"));
+    st.close("alpha");
+    st.follow("/agents/a1", projectOf); // the same agent: your close stays
+    expect(st.isOpen("alpha")).toBe(false);
+    st.follow("/agents/beta%2Fw", projectOf);
+    st.follow("/agents/a1", projectOf); // back to a1: open again
+    expect(st.isOpen("alpha")).toBe(true);
+    expect(st.isOpen(projectAgentsNode("alpha"))).toBe(true);
+  });
+
   it("is pruned with its project only", () => {
-    const list = ["alpha", projectAgentsNode("alpha"), projectAgentsNode("gone"), AGENTS_ROOT];
-    expect(prune(list, ["alpha"])).toEqual(["alpha", projectAgentsNode("alpha"), AGENTS_ROOT]);
+    const list = ["alpha", projectAgentsNode("alpha"), projectAgentsNode("gone")];
+    expect(prune(list, ["alpha"])).toEqual(["alpha", projectAgentsNode("alpha")]);
   });
 
   it("puts the agents of an open node after its row, in screen order", () => {

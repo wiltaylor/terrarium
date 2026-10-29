@@ -1,6 +1,6 @@
-// The root of a sidebar tree (Projects, Agents): a link to the list page,
-// with a chevron that only opens or closes the root, an optional filter, and
-// the group of child rows. The Agents node of a project uses it too.
+// The root of the sidebar tree (Projects): a link to the list page, with a
+// chevron that only opens or closes the root, an optional filter, and the
+// group of child rows. The Agents node of a project uses it too.
 
 import { A } from "@solidjs/router";
 import { Show, type JSX } from "solid-js";
@@ -10,7 +10,7 @@ import { createExpandedStore } from "./treeModel";
 /** The `data-key` of a tree root row. */
 export const ROOT_KEY = "root";
 
-/** The open set of both sidebar trees. One store, so the two trees do not write over each other. */
+/** The open set of the sidebar tree: the Projects root, the projects, and their Agents nodes. */
 export const expanded = createExpandedStore(
   (() => {
     try {

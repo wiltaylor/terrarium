@@ -23,12 +23,10 @@ export const PROJECTS_ROOT = "/projects";
 export const ROOT_CLOSED = "!/projects";
 
 /**
- * The name of the Agents root in the open set. It has a `/`, so it cannot be
- * a project. The root is closed by default: the agent list grows with the
- * fleet and pushes the other global pages down. The open set holds this name
- * while the root is open.
+ * The name of the Agents root in the open set before the root was removed.
+ * A stored list can still hold it, so prune drops it.
  */
-export const AGENTS_ROOT = "/agents";
+export const OLD_AGENTS_ROOT = "/agents";
 
 /**
  * The name of the Agents node of a project in the open set: `<project>/agents`.
@@ -64,11 +62,6 @@ export function agentFromPath(pathname: string): string | null {
   } catch {
     return m[1]!;
   }
-}
-
-/** True for the pages under the Agents root: the list (/agents) and every /agents/<id> page. */
-export function inAgents(pathname: string): boolean {
-  return /^\/agents\/?$/.test(pathname) || agentFromPath(pathname) !== null;
 }
 
 /** The agents in sidebar order: by project, then by name. */
@@ -121,10 +114,15 @@ export function toggle(list: readonly string[], name: string): string[] {
   return list.includes(name) ? collapse(list, name) : expand(list, name);
 }
 
-/** Drop the names of projects that are gone, and their Agents nodes. An empty `known` list (not loaded yet) keeps all. The root markers stay. */
+/**
+ * Drop the names of projects that are gone, and their Agents nodes. An empty
+ * `known` list (not loaded yet) keeps all. The root marker stays. The old
+ * Agents root goes always.
+ */
 export function prune(list: readonly string[], known: readonly string[]): string[] {
-  if (known.length === 0) return [...list];
-  return list.filter((n) => n === ROOT_CLOSED || n === AGENTS_ROOT || known.includes(n) || known.includes(projectOfAgentsNode(n) ?? ""));
+  const kept = list.filter((n) => n !== OLD_AGENTS_ROOT);
+  if (known.length === 0) return kept;
+  return kept.filter((n) => n === ROOT_CLOSED || known.includes(n) || known.includes(projectOfAgentsNode(n) ?? ""));
 }
 
 /** True for the pages under the Projects root: the cards (/projects) and every /p/<name>/... page. */
@@ -143,8 +141,7 @@ export function filterProjects<T extends { name: string }>(projects: readonly T[
  * The open set, persisted. `follow(path)` opens the project of a new URL, so
  * the project you go to is always open; you can close it again after that.
  * The name PROJECTS_ROOT is the Projects root: it is open while ROOT_CLOSED
- * is not in the list. The name AGENTS_ROOT is the Agents root: it is open
- * while it is in the list.
+ * is not in the list.
  */
 export function createExpandedStore(storage: KeyValueStorage | null = null) {
   const read = () => {
@@ -164,7 +161,6 @@ export function createExpandedStore(storage: KeyValueStorage | null = null) {
     }
   };
   let lastFollowed: string | null = null;
-  let lastAgent: string | null = null;
   let lastProjectAgents: string | null = null;
 
   const isOpen = (name: string) => (name === PROJECTS_ROOT ? !list().includes(ROOT_CLOSED) : list().includes(name));
@@ -187,14 +183,32 @@ export function createExpandedStore(storage: KeyValueStorage | null = null) {
     close,
     /**
      * Open the Projects root and the project of `pathname` when the URL moves
-     * into the project pages or to a different project. Open the Agents root
-     * when the URL moves into the agent pages or to a different agent.
+     * into the project pages or to a different project. Open the Agents node
+     * of a project when the URL moves to its agent list. When the URL moves
+     * to a different agent page, open the Projects root, the project of the
+     * agent, and its Agents node. `projectOfAgent` gives the project of an
+     * agent ID or `project/name` (undefined while the agents are not loaded).
      */
-    follow: (pathname: string) => {
-      const agent = agentFromPath(pathname) ?? (inAgents(pathname) ? AGENTS_ROOT : null);
-      if (agent !== lastAgent) {
-        lastAgent = agent;
-        if (agent) open(AGENTS_ROOT);
+    follow: (pathname: string, projectOfAgent: (id: string) => string | undefined = () => undefined) => {
+      const agent = agentFromPath(pathname);
+      if (agent) {
+        const p = projectOfAgent(agent);
+        // Wait for the agents: then the project of the agent is known.
+        if (!p) return;
+        // A different agent is a different place, also in the same project.
+        const at = `${p}\n${agent}`;
+        if (at === lastFollowed) return;
+        lastFollowed = at;
+        lastProjectAgents = p;
+        open(PROJECTS_ROOT);
+        open(p);
+        open(projectAgentsNode(p));
+        return;
+      }
+      const node = projectAgentsFromPath(pathname, projectOfAgent);
+      if (node !== lastProjectAgents) {
+        lastProjectAgents = node;
+        if (node) open(projectAgentsNode(node));
       }
       const p = projectFromPath(pathname);
       const at = p ?? (inProjects(pathname) ? PROJECTS_ROOT : null);
@@ -203,16 +217,6 @@ export function createExpandedStore(storage: KeyValueStorage | null = null) {
       if (!at) return;
       open(PROJECTS_ROOT);
       if (p) open(p);
-    },
-    /**
-     * Open the Agents node of `project` when the URL moves to the agent list
-     * of the project or to the page of one of its agents
-     * (projectAgentsFromPath). Null changes nothing.
-     */
-    followProjectAgents: (project: string | null) => {
-      if (project === lastProjectAgents) return;
-      lastProjectAgents = project;
-      if (project) open(projectAgentsNode(project));
     },
     prune: (known: readonly string[]) => {
       const next = prune(list(), known);
