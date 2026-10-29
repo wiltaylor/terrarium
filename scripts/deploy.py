@@ -84,12 +84,23 @@ class DeployError(Exception):
 # The target
 
 
+# A POSIX user name, as `--sudo-user` takes it.
+USER_NAME = re.compile(r"[a-z_][a-z0-9_-]{0,31}")
+
+# With `--sudo-user`, sudo runs this before the command: the command starts
+# in the home of that user, so "~" and a relative --dir resolve there.
+SUDO_CD = 'cd ~ && exec "$@"'
+
+
 @dataclass
 class Target:
-    """`user@host` over ssh, or `local` (this machine, no ssh)."""
+    """`user@host` over ssh, or `local` (this machine, no ssh). With a
+    `sudo_user`, each command runs on the target as that user, through
+    `sudo -n -H -u <user>`: the ssh user only logs in."""
 
     name: str
     ssh_opts: list[str] = field(default_factory=list)
+    sudo_user: str | None = None
 
     @property
     def local(self) -> bool:
@@ -105,17 +116,26 @@ class Target:
         """Run `script` with `sh`, with `args` as $1, $2, ... A value never goes
         into the script text, so it needs no quoting there. ssh joins its
         arguments and the remote shell splits them again, so the command goes
-        to ssh as one quoted string."""
+        to ssh as one quoted string. sudo gets the command as its arguments
+        and passes stdin through; -n makes a password prompt fail."""
         cmd = ["sh", "-ec" if errexit else "-c", script, "deploy", *args]
         if self.local:
             return cmd
+        if self.sudo_user:
+            cmd = ["sudo", "-n", "-H", "-u", self.sudo_user, "--", "sh", "-c", SUDO_CD, "sh", *cmd]
         return ["ssh", *self.ssh_opts, self.name, shlex.join(cmd)]
 
     def shell_hint(self, cmd: str) -> str:
         """A command for the operator to type, run on the target."""
         if self.local:
             return cmd
-        return shlex.join(["ssh", "-t", *self.ssh_opts, self.name, cmd])
+        ssh = ["ssh", "-t", *self.ssh_opts, self.name]
+        if not self.sudo_user:
+            return shlex.join([*ssh, cmd])
+        remote = shlex.join(["sudo", "-H", "-u", self.sudo_user, "sh", "-c", f"cd ~ && {cmd}"])
+        if not set(remote) & set('"$`\\!'):
+            return f'{shlex.join(ssh)} "{remote}"'  # easier to read than a second shlex quote
+        return shlex.join([*ssh, remote])
 
 
 # ---------------------------------------------------------------------------
@@ -645,10 +665,12 @@ class Options:
 
 
 def recipe_hint(o: Options, recipe: str) -> str:
-    """`just deploy::<recipe> <target>` with the --dir of this run."""
+    """`just deploy::<recipe> <target>` with the --dir and --sudo-user of this run."""
     parts = ["just", f"deploy::{recipe}", o.target.name]
     if o.dir != DEFAULT_DIR:
         parts.append(f"--dir={o.dir}")
+    if o.target.sudo_user:
+        parts.append(f"--sudo-user={o.target.sudo_user}")
     return shlex.join(parts)
 
 
@@ -832,6 +854,9 @@ def parse_args(argv: list[str]) -> Options:
         sp.add_argument("--dir", default=DEFAULT_DIR, help="the install dir on the target (default: %(default)s)")
         sp.add_argument("--ssh-option", "--ssh-opt", action="append", default=[], dest="ssh_option",
                         help="an extra ssh option, for example --ssh-option=-p --ssh-option=2222 (repeat)")
+        sp.add_argument("--sudo-user", metavar="USER",
+                        help="run each command on the target as USER, with `sudo -n -H -u USER`: "
+                        "the ssh user needs sudo without a password; ~ and a relative --dir are in the home of USER")
 
     def source(sp: argparse.ArgumentParser) -> None:
         sp.add_argument("--ref", help="the commit to deploy (default: HEAD)")
@@ -863,9 +888,14 @@ def parse_args(argv: list[str]) -> Options:
     ssh_opts = [x for v in a.ssh_option for x in shlex.split(v)]
     if a.target == LOCAL and ssh_opts:
         ap.error("--ssh-option does not go with the target `local`")
+    if a.sudo_user is not None:
+        if a.target == LOCAL:
+            ap.error("--sudo-user does not go with the target `local`")
+        if not USER_NAME.fullmatch(a.sudo_user):
+            ap.error(f"--sudo-user {a.sudo_user!r} is not a user name (lower case letters, digits, _ and -)")
     return Options(
         mode=a.mode,
-        target=Target(a.target, ssh_opts),
+        target=Target(a.target, ssh_opts, a.sudo_user),
         dir=a.dir,
         ref=getattr(a, "ref", None),
         public_url=getattr(a, "public_url", None),

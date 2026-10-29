@@ -1162,6 +1162,7 @@ change a setting, edit `.env` on the server, and run
 | `--yes` | `server`, `local` | Replace an existing `src/` with no question. |
 | `--dry-run` | `server`, `update`, `local`, `rollback` | Run only the read-only checks. Print all other commands. |
 | `--ssh-option <opt>` | all, not `local` | An ssh option. Give it one time for each word: `--ssh-option=-p --ssh-option=2222`. |
+| `--sudo-user <user>` | all, not `local` | Run each command on the server as `<user>`, with `sudo -n -H -u <user>`. Use it when the ssh user is not the owner of the install. The ssh user needs sudo with no password. `~` and a relative `--dir` are in the home of `<user>`. |
 
 #### Update, roll back, and status
 

@@ -87,11 +87,21 @@ EXISTING = [
 
 
 def script_of(argv: list[str]) -> tuple[str, list[str]]:
-    """The script and its $1... of a target command, local or over ssh."""
+    """The script and its $1... of a target command, local or over ssh, with
+    or without `--sudo-user`."""
     cmd = shlex.split(argv[-1]) if argv[0] == "ssh" else argv
+    if cmd[0] == "sudo":
+        cmd = sudo_inner(cmd)
     assert cmd[0] == "sh" and cmd[1] in ("-c", "-ec"), cmd
     assert cmd[3] == "deploy"
     return cmd[2], cmd[4:]
+
+
+def sudo_inner(words: list[str]) -> list[str]:
+    """The command that `sudo -n -H -u <user> -- sh -c SUDO_CD sh ...` runs."""
+    assert words[:3] == ["sudo", "-n", "-H"] and words[3] == "-u" and words[5:10] == \
+        ["--", "sh", "-c", dp.SUDO_CD, "sh"], words
+    return words[10:]
 
 
 NAMES = {
@@ -498,6 +508,56 @@ class Flows(unittest.TestCase):
         self.assertEqual(r.argv["probe"][:6], ["ssh", "-p", "2222", "-i", "key", "wil@t.lan"])
         with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
             dp.parse_args(["server", "local", "--ssh-option=-p"])
+
+    def test_sudo_user_argv(self):
+        t = dp.Target("meta@t.lan", ["-p", "2222"], "wil")
+        argv = t.argv(dp.SWAP, "~/my dir")
+        self.assertEqual(argv[:4], ["ssh", "-p", "2222", "meta@t.lan"])
+        words = shlex.split(argv[-1])
+        self.assertEqual(words[:5], ["sudo", "-n", "-H", "-u", "wil"])
+        self.assertEqual(sudo_inner(words), ["sh", "-ec", dp.SWAP, "deploy", "~/my dir"])
+
+    def test_sudo_user_runs_in_home_and_keeps_stdin(self):
+        # The remote string, run by sh with a stub `sudo` that sets HOME, as
+        # `sudo -H` does: the command starts in that home and gets stdin.
+        with tempfile.TemporaryDirectory() as tmp:
+            home, bin_ = Path(tmp, "home"), Path(tmp, "bin")
+            home.mkdir()
+            bin_.mkdir()
+            stub = bin_ / "sudo"
+            stub.write_text(f'#!/bin/sh\nshift 5\nHOME={shlex.quote(str(home))} exec "$@"\n')
+            stub.chmod(0o755)
+            argv = dp.Target("meta@t.lan", [], "wil").argv('pwd; cat; echo " $1"', "x")
+            env = {**os.environ, "PATH": f"{bin_}:{os.environ['PATH']}"}
+            r = subprocess.run(["sh", "-c", argv[-1]], input="in", capture_output=True, text=True,
+                               cwd="/", env=env, check=False)
+        self.assertEqual((r.returncode, r.stdout), (0, f"{home}\nin x\n"), r.stderr)
+
+    def test_sudo_user_shell_hint(self):
+        t = dp.Target("meta@t.lan", [], "wil")
+        hint = t.shell_hint("/home/wil/t/terrarium-compose logs")
+        self.assertEqual(hint, """ssh -t meta@t.lan "sudo -H -u wil sh -c 'cd ~ && /home/wil/t/terrarium-compose logs'\"""")
+        words = shlex.split(hint)
+        self.assertEqual(shlex.split(words[-1]), ["sudo", "-H", "-u", "wil", "sh", "-c",
+                                                  "cd ~ && /home/wil/t/terrarium-compose logs"])
+        odd = t.shell_hint('echo "$HOME"')  # no plain double quotes here: a second shlex quote
+        self.assertEqual(shlex.split(shlex.split(odd)[-1])[-1], 'cd ~ && echo "$HOME"')
+        self.assertEqual(dp.Target("meta@t.lan").shell_hint("ls"), "ssh -t meta@t.lan ls")
+
+    def test_sudo_user_flag(self):
+        r = FakeRunner(False, probe_out(extra=EXISTING))
+        code, out, err = run_main(["rollback", "meta@t.lan", "--sudo-user", "wil", "--dir", "~/T"], r)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(shlex.split(r.argv["probe"][-1])[:5], ["sudo", "-n", "-H", "-u", "wil"])
+        self.assertIn("just deploy::rollback meta@t.lan '--dir=~/T' --sudo-user=wil again", out)
+        r = FakeRunner(False, probe_out())
+        code, out, err = run_main(["server", "meta@t.lan", "--sudo-user=wil"], r)
+        self.assertEqual(code, 0, err)
+        self.assertIn("just deploy::update meta@t.lan --sudo-user=wil", out)
+        for bad in (["status", "local", "--sudo-user=wil"], ["status", "meta@t.lan", "--sudo-user=wil;id"],
+                    ["status", "meta@t.lan", "--sudo-user=-u"], ["status", "meta@t.lan", "--sudo-user=Wil"]):
+            with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+                dp.parse_args(bad)
 
 
 class Scripts(unittest.TestCase):

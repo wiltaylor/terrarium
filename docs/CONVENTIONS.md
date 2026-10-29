@@ -138,6 +138,9 @@ Rules for the deploy:
   the key as missing, and the default applies.
 - Never print a secret. The new `TERRARIUM_TOKEN` goes to the target on
   stdin, and the deploy shows it one time, at the end.
+- Make each command on the target with `Target.argv()`, and each hint for
+  the operator with `Target.shell_hint()` or `recipe_hint()`. Then
+  `--ssh-option` and `--sudo-user` apply to all of them.
 
 ## Environment
 
