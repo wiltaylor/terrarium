@@ -22,6 +22,12 @@ describe("navigation", () => {
     expect(app).toMatch(/path="\/p\/:project\/agents" component=\{AgentsPage\}/);
   });
 
+  it("shows the global Agents item as the agent tree, first in the Terrarium section", () => {
+    expect(GLOBAL_ITEMS[0]).toEqual({ href: "/agents", label: "Agents" });
+    expect(layout).toMatch(/<Show when=\{item\.href !== "\/agents"\} fallback=\{<AgentTree \/>\}>/);
+    expect(app).toMatch(/path="\/agents\/:id" component=\{AgentDetail\}/);
+  });
+
   it("has Templates right after Agents under the project, with a route to the Templates page", () => {
     const paths = PROJECT_ITEMS.map((i) => i.path) as string[];
     expect(paths.indexOf("templates")).toBe(paths.indexOf("agents") + 1);

@@ -1,6 +1,24 @@
 import { describe, expect, it } from "vitest";
 import type { KeyValueStorage } from "../stores/auth";
-import { collapse, createExpandedStore, expand, EXPANDED_KEY, filterProjects, inProjects, parseExpanded, projectFromPath, PROJECTS_ROOT, prune, ROOT_CLOSED, toggle } from "./treeModel";
+import {
+  agentFromPath,
+  AGENTS_ROOT,
+  collapse,
+  createExpandedStore,
+  expand,
+  EXPANDED_KEY,
+  filterAgents,
+  filterProjects,
+  inAgents,
+  inProjects,
+  parseExpanded,
+  projectFromPath,
+  PROJECTS_ROOT,
+  prune,
+  ROOT_CLOSED,
+  sortAgents,
+  toggle,
+} from "./treeModel";
 
 const memory = (init: Record<string, string> = {}): KeyValueStorage & { data: Record<string, string> } => {
   const data = { ...init };
@@ -39,6 +57,7 @@ describe("the open set", () => {
   });
   it("prunes gone projects, but keeps all while the list is not loaded", () => {
     expect(prune(["a", "gone"], ["a", "b"])).toEqual(["a"]);
+    expect(prune([ROOT_CLOSED, AGENTS_ROOT, "gone"], ["a"])).toEqual([ROOT_CLOSED, AGENTS_ROOT]);
     expect(prune(["a", "gone"], [])).toEqual(["a", "gone"]);
   });
   it("reads only a JSON array of strings from storage", () => {
@@ -58,6 +77,37 @@ describe("filterProjects", () => {
   it("keeps all for an empty query and none for no match", () => {
     expect(filterProjects(ps, "  ")).toHaveLength(3);
     expect(filterProjects(ps, "zzz")).toEqual([]);
+  });
+});
+
+describe("the agent tree", () => {
+  const as = [
+    { name: "lead", project: "webshop" },
+    { name: "runner", project: "terrarium" },
+    { name: "lead", project: "terrarium" },
+    { name: "css-worker", project: "webshop" },
+  ];
+  it("sorts by project, then by name, and does not change the input", () => {
+    expect(sortAgents(as).map((a) => `${a.project}/${a.name}`)).toEqual(["terrarium/lead", "terrarium/runner", "webshop/css-worker", "webshop/lead"]);
+    expect(as[0]!.project).toBe("webshop");
+  });
+  it("filters on the project and the name, case-insensitive", () => {
+    expect(filterAgents(as, "LEAD").map((a) => `${a.project}/${a.name}`)).toEqual(["webshop/lead", "terrarium/lead"]);
+    expect(filterAgents(as, " shop ")).toHaveLength(2);
+    expect(filterAgents(as, "terrarium/r").map((a) => a.name)).toEqual(["runner"]);
+    expect(filterAgents(as, "")).toHaveLength(4);
+    expect(filterAgents(as, "zzz")).toEqual([]);
+  });
+  it("reads the agent of an /agents/ path, and knows the pages under the root", () => {
+    expect(agentFromPath("/agents/01JB0LEAD")).toBe("01JB0LEAD");
+    expect(agentFromPath("/agents/terrarium%2Flead")).toBe("terrarium/lead");
+    expect(agentFromPath("/agents")).toBeNull();
+    expect(agentFromPath("/p/a/agents")).toBeNull();
+    expect(inAgents("/agents")).toBe(true);
+    expect(inAgents("/agents/")).toBe(true);
+    expect(inAgents("/agents/x")).toBe(true);
+    expect(inAgents("/agentsx")).toBe(false);
+    expect(inAgents("/p/a/agents")).toBe(false);
   });
 });
 
@@ -84,7 +134,7 @@ describe("createExpandedStore", () => {
     expect(st.isOpen("alpha")).toBe(false);
     st.follow("/p/beta/board");
     expect(st.list()).toEqual(["beta"]);
-    st.follow("/agents");
+    st.follow("/inbox");
     st.follow("/p/alpha/wiki"); // back to alpha: open again
     expect(st.list()).toEqual(["beta", "alpha"]);
   });
@@ -120,6 +170,41 @@ describe("createExpandedStore", () => {
     st.follow("/p/alpha/board");
     expect(st.isOpen(PROJECTS_ROOT)).toBe(true);
     expect(st.isOpen("alpha")).toBe(true);
+  });
+
+  it("has the Agents root closed by default, persists it open, and keeps the Projects root apart", () => {
+    const s = memory();
+    const st = createExpandedStore(s);
+    expect(st.isOpen(AGENTS_ROOT)).toBe(false);
+    expect(st.isOpen(PROJECTS_ROOT)).toBe(true);
+    st.toggle(AGENTS_ROOT);
+    expect(JSON.parse(s.data[EXPANDED_KEY]!)).toEqual([AGENTS_ROOT]);
+    st.close(PROJECTS_ROOT);
+    st.prune(["a"]);
+    const back = createExpandedStore(s);
+    expect(back.isOpen(AGENTS_ROOT)).toBe(true);
+    expect(back.isOpen(PROJECTS_ROOT)).toBe(false);
+    back.toggle(AGENTS_ROOT);
+    expect(createExpandedStore(s).isOpen(AGENTS_ROOT)).toBe(false);
+  });
+
+  it("opens the Agents root on the agent pages, and lets you close it until the URL moves to another agent", () => {
+    const st = createExpandedStore(memory());
+    st.follow("/p/alpha/agents"); // the project page: not the Agents root
+    expect(st.isOpen(AGENTS_ROOT)).toBe(false);
+    st.follow("/agents");
+    expect(st.isOpen(AGENTS_ROOT)).toBe(true);
+    expect(st.isOpen("alpha")).toBe(true);
+    st.close(AGENTS_ROOT);
+    st.follow("/agents/"); // the same place: your close stays
+    expect(st.isOpen(AGENTS_ROOT)).toBe(false);
+    st.follow("/agents/a1");
+    expect(st.isOpen(AGENTS_ROOT)).toBe(true);
+    st.close(AGENTS_ROOT);
+    st.follow("/agents/a1"); // the same agent: your close stays
+    expect(st.isOpen(AGENTS_ROOT)).toBe(false);
+    st.follow("/agents/a2");
+    expect(st.isOpen(AGENTS_ROOT)).toBe(true);
   });
 
   it("knows the pages under the root", () => {

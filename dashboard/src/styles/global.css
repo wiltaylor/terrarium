@@ -427,6 +427,53 @@ th {
 .tree-empty {
   padding: 4px 8px;
 }
+/* The agent tree: a row per agent, with a dot and a light tint in the status colour. */
+.tree a.tree-agent {
+  display: flex;
+  justify-content: flex-start;
+  gap: 6px;
+  padding: 4px 8px 4px 6px;
+  background: color-mix(in srgb, var(--st) 9%, transparent);
+}
+.tree a.tree-agent:hover {
+  background: color-mix(in srgb, var(--st) 18%, transparent);
+}
+/* The open agent keeps its status tint, with a bar in the accent colour. */
+.tree a.tree-agent.active {
+  background: color-mix(in srgb, var(--st) 20%, transparent);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+.tree-agent .status-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--st);
+}
+/* A hollow dot, as on the badge: idle, but not done. */
+.tree-agent.st-waiting .status-dot {
+  background: transparent;
+  border: 1.5px solid var(--st);
+  box-sizing: border-box;
+}
+.tree-sub {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+.tree-agent.st-starting { --st: var(--st-starting); }
+.tree-agent.st-idle { --st: var(--st-idle); }
+.tree-agent.st-waiting { --st: var(--st-waiting); }
+.tree-agent.st-working { --st: var(--st-working); }
+.tree-agent.st-blocked { --st: var(--st-blocked); }
+.tree-agent.st-error { --st: var(--st-error); }
+.tree-agent.st-stopped { --st: var(--st-stopped); }
+.tree-agent.st-restarting { --st: var(--st-restarting); }
 /* The Settings section sits at the bottom of the sidebar, above the footer. */
 .nav-section.nav-settings {
   margin-top: auto;

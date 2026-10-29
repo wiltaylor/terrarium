@@ -212,7 +212,16 @@ top: Home and Inbox; the project tree; the "Terrarium" section with the
 global pages; and a Settings section at the bottom. The project tree
 (`app/ProjectTree.tsx`) has a Projects root. A click on its name opens the
 project cards (`/projects`) and opens the root; the chevron only opens or
-closes it. Under the root, each project opens to show its pages. Settings
+closes it. Under the root, each project opens to show its pages. The
+"Terrarium" section starts with the agent tree (`app/AgentTree.tsx`). Its
+Agents root works the same way: a click on its name opens the agent list
+(`/agents`) and opens the root. The root is closed by default, because the
+agent list grows with the fleet. An agent page opens it. Under the root, each
+agent has a row, sorted by project and then by name. The row shows the agent
+name, the project in muted text, and a dot in the colour of the agent status.
+The row label and title also give the status. Above eight projects or agents,
+a tree shows a filter. Both roots use `app/TreeRoot.tsx`, one open set in
+`localStorage`, and the keyboard map in `app/treeNav.ts`. Settings
 (`features/settings/SettingsPage.tsx`) is one page with a tab for each of
 Account, Subscriptions, Harness config, and Hosts. Each tab is a route under
 `/settings`.
