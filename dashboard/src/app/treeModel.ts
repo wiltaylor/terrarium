@@ -30,6 +30,31 @@ export const ROOT_CLOSED = "!/projects";
  */
 export const AGENTS_ROOT = "/agents";
 
+/**
+ * The name of the Agents node of a project in the open set: `<project>/agents`.
+ * A project name has no `/`, so this name cannot be a project or a root. The
+ * node is closed by default.
+ */
+export const projectAgentsNode = (project: string): string => `${project}/agents`;
+
+/** The project of a project Agents node name, or null for any other name. */
+export function projectOfAgentsNode(name: string): string | null {
+  const m = /^([^/]+)\/agents$/.exec(name);
+  return m ? m[1]! : null;
+}
+
+/**
+ * The project whose Agents node a URL opens: /p/<project>/agents, or the
+ * page of an agent in that project. `projectOfAgent` gives the project of
+ * an agent ID or `project/name` (undefined while the agents are not loaded).
+ */
+export function projectAgentsFromPath(pathname: string, projectOfAgent: (id: string) => string | undefined): string | null {
+  const p = projectFromPath(pathname);
+  if (p) return /^\/p\/[^/]+\/agents\/?$/.test(pathname) ? p : null;
+  const id = agentFromPath(pathname);
+  return id ? (projectOfAgent(id) ?? null) : null;
+}
+
 /** The agent ID (or `project/name`) in an /agents/<id> path, or null. */
 export function agentFromPath(pathname: string): string | null {
   const m = /^\/agents\/([^/]+)/.exec(pathname);
@@ -96,10 +121,10 @@ export function toggle(list: readonly string[], name: string): string[] {
   return list.includes(name) ? collapse(list, name) : expand(list, name);
 }
 
-/** Drop the names of projects that are gone. An empty `known` list (not loaded yet) keeps all. The root markers stay. */
+/** Drop the names of projects that are gone, and their Agents nodes. An empty `known` list (not loaded yet) keeps all. The root markers stay. */
 export function prune(list: readonly string[], known: readonly string[]): string[] {
   if (known.length === 0) return [...list];
-  return list.filter((n) => n === ROOT_CLOSED || n === AGENTS_ROOT || known.includes(n));
+  return list.filter((n) => n === ROOT_CLOSED || n === AGENTS_ROOT || known.includes(n) || known.includes(projectOfAgentsNode(n) ?? ""));
 }
 
 /** True for the pages under the Projects root: the cards (/projects) and every /p/<name>/... page. */
@@ -140,6 +165,7 @@ export function createExpandedStore(storage: KeyValueStorage | null = null) {
   };
   let lastFollowed: string | null = null;
   let lastAgent: string | null = null;
+  let lastProjectAgents: string | null = null;
 
   const isOpen = (name: string) => (name === PROJECTS_ROOT ? !list().includes(ROOT_CLOSED) : list().includes(name));
   const open = (name: string) => {
@@ -178,6 +204,16 @@ export function createExpandedStore(storage: KeyValueStorage | null = null) {
       open(PROJECTS_ROOT);
       if (p) open(p);
     },
+    /**
+     * Open the Agents node of `project` when the URL moves to the agent list
+     * of the project or to the page of one of its agents
+     * (projectAgentsFromPath). Null changes nothing.
+     */
+    followProjectAgents: (project: string | null) => {
+      if (project === lastProjectAgents) return;
+      lastProjectAgents = project;
+      if (project) open(projectAgentsNode(project));
+    },
     prune: (known: readonly string[]) => {
       const next = prune(list(), known);
       if (next.length !== list().length) write(next);
@@ -186,3 +222,31 @@ export function createExpandedStore(storage: KeyValueStorage | null = null) {
 }
 
 export type ExpandedStore = ReturnType<typeof createExpandedStore>;
+
+// ----- the project tree rows -----
+
+/** The `data-key` of a project row. */
+export const projectKey = (name: string): string => `p:${name}`;
+/** The `data-key` of a page row under a project (PROJECT_ITEMS). */
+export const itemKey = (name: string, path: string): string => `i:${name}/${path}`;
+/** The `data-key` of an agent row under the Agents node of a project. */
+export const projectAgentKey = (id: string): string => `pa:${id}`;
+
+/**
+ * The rows of the project tree in screen order, for the roving tabindex.
+ * `items` are the page paths of a project. The `agents` item is a node: open,
+ * it shows `agentsOf(project)` (agent IDs, sorted and filtered).
+ */
+export function projectTreeKeys(t: {
+  rootKey: string;
+  rootOpen: boolean;
+  projects: readonly string[];
+  items: readonly string[];
+  isOpen: (name: string) => boolean;
+  agentsOf: (project: string) => readonly string[];
+}): string[] {
+  if (!t.rootOpen) return [t.rootKey];
+  const rows = (p: string) =>
+    t.items.flatMap((path) => [itemKey(p, path), ...(path === "agents" && t.isOpen(projectAgentsNode(p)) ? t.agentsOf(p).map(projectAgentKey) : [])]);
+  return [t.rootKey, ...t.projects.flatMap((p) => [projectKey(p), ...(t.isOpen(p) ? rows(p) : [])])];
+}

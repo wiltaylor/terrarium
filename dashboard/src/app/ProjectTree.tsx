@@ -1,17 +1,31 @@
 // The sidebar project tree: a Projects root that links the project cards,
-// and under it one node per project, open to show its pages. Keyboard
-// follows the WAI-ARIA tree pattern with a roving tabindex.
+// and under it one node per project, open to show its pages. The Agents page
+// of a project is a node too: open, it shows the agents of that project.
+// Keyboard follows the WAI-ARIA tree pattern with a roving tabindex.
 
 import { A, useLocation } from "@solidjs/router";
 import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
+import type { Agent } from "../api/types";
 import { agents, projects } from "../stores";
+import { AgentRow } from "./AgentTree";
 import { PROJECT_ITEMS } from "./nav";
 import { expanded, ROOT_KEY, TreeRoot } from "./TreeRoot";
-import { filterProjects, FILTER_THRESHOLD, projectFromPath, PROJECTS_ROOT } from "./treeModel";
+import {
+  filterAgents,
+  filterProjects,
+  FILTER_THRESHOLD,
+  itemKey,
+  projectAgentKey,
+  projectAgentsFromPath,
+  projectAgentsNode,
+  projectFromPath,
+  projectKey,
+  PROJECTS_ROOT,
+  projectTreeKeys,
+  sortAgents,
+} from "./treeModel";
 import { createRovingTree } from "./treeNav";
 
-const projectKey = (name: string) => `p:${name}`;
-const itemKey = (name: string, path: string) => `i:${name}/${path}`;
 const href = (name: string, path: string) => `/p/${encodeURIComponent(name)}/${path}`;
 
 export function ProjectTree() {
@@ -24,19 +38,31 @@ export function ProjectTree() {
   // The project you go to is open, and so is the root. The Agents tree also
   // calls it; the second call does nothing.
   createEffect(() => expanded.follow(location.pathname));
+  // The Agents node of a project opens on its agent list and on the page of
+  // one of its agents. The agent page takes an ID or `project/name`.
+  createEffect(() => expanded.followProjectAgents(projectAgentsFromPath(location.pathname, (id) => agents.byId(id)?.project)));
   // Forget open projects that are gone, once the list is in.
   createEffect(() => expanded.prune(projects.projects().map((p) => p.name)));
 
   const visible = () => filterProjects(projects.projects(), query());
   const showFilter = () => projects.projects().length > FILTER_THRESHOLD;
 
+  // The filter of each project Agents node, by project.
+  const [agentQueries, setAgentQueries] = createSignal<Record<string, string>>({});
+  const projectAgents = (project: string) => sortAgents(agents.inProject(project));
+  const visibleAgents = (project: string) => filterAgents(projectAgents(project), agentQueries()[project] ?? "");
+
   // The rows in screen order, for the roving tabindex.
-  const keys = createMemo(() => [
-    ROOT_KEY,
-    ...(rootOpen()
-      ? visible().flatMap((p) => [projectKey(p.name), ...(expanded.isOpen(p.name) ? PROJECT_ITEMS.map((i) => itemKey(p.name, i.path)) : [])])
-      : []),
-  ]);
+  const keys = createMemo(() =>
+    projectTreeKeys({
+      rootKey: ROOT_KEY,
+      rootOpen: rootOpen(),
+      projects: visible().map((p) => p.name),
+      items: PROJECT_ITEMS.map((i) => i.path),
+      isOpen: expanded.isOpen,
+      agentsOf: (p) => visibleAgents(p).map((a) => a.id),
+    }),
+  );
   // Tab reaches the last focused row, else the URL project, else the root.
   const nav = createRovingTree({
     keys,
@@ -73,6 +99,12 @@ export function ProjectTree() {
           onClose: () => expanded.close(PROJECTS_ROOT),
         };
       const project = target.dataset.project!;
+      const agentsItem = itemKey(project, "agents");
+      if (key === agentsItem) {
+        const node = projectAgentsNode(project);
+        return { key, parent: projectKey(project), open: expanded.isOpen(node), onOpen: () => expanded.open(node), onClose: () => expanded.close(node) };
+      }
+      if (key.startsWith("pa:")) return { key, parent: agentsItem };
       if (key !== projectKey(project)) return { key, parent: projectKey(project) };
       return {
         key,
@@ -142,19 +174,34 @@ export function ProjectTree() {
                     <ul role="group" class="tree-group">
                       <For each={PROJECT_ITEMS}>
                         {(item) => (
-                          <li role="none">
-                            <A
-                              href={href(p.name, item.path)}
-                              activeClass="active"
-                              role="treeitem"
-                              data-key={itemKey(p.name, item.path)}
-                              data-project={p.name}
-                              tabIndex={tabIndex(itemKey(p.name, item.path))}
-                              onFocus={() => setFocusKey(itemKey(p.name, item.path))}
-                            >
-                              <span>{item.label}</span>
-                            </A>
-                          </li>
+                          <Show
+                            when={item.path !== "agents"}
+                            fallback={
+                              <ProjectAgentsNode
+                                project={p.name}
+                                label={item.label}
+                                nav={nav}
+                                total={projectAgents(p.name).length}
+                                agents={visibleAgents(p.name)}
+                                query={agentQueries()[p.name] ?? ""}
+                                onQuery={(q) => setAgentQueries((all) => ({ ...all, [p.name]: q }))}
+                              />
+                            }
+                          >
+                            <li role="none">
+                              <A
+                                href={href(p.name, item.path)}
+                                activeClass="active"
+                                role="treeitem"
+                                data-key={itemKey(p.name, item.path)}
+                                data-project={p.name}
+                                tabIndex={tabIndex(itemKey(p.name, item.path))}
+                                onFocus={() => setFocusKey(itemKey(p.name, item.path))}
+                              >
+                                <span>{item.label}</span>
+                              </A>
+                            </li>
+                          </Show>
                         )}
                       </For>
                     </ul>
@@ -166,5 +213,41 @@ export function ProjectTree() {
         </TreeRoot>
       </ul>
     </div>
+  );
+}
+
+/** The Agents page of a project as a node: the label goes to the page and opens the node; the chevron only toggles. */
+function ProjectAgentsNode(props: {
+  project: string;
+  label: string;
+  nav: ReturnType<typeof createRovingTree>;
+  /** The agents of the project before the filter. */
+  total: number;
+  /** The agents to show: sorted and filtered. */
+  agents: Agent[];
+  query: string;
+  onQuery: (q: string) => void;
+}) {
+  const node = () => projectAgentsNode(props.project);
+  return (
+    <TreeRoot
+      label={props.label}
+      href={href(props.project, "agents")}
+      rowKey={itemKey(props.project, "agents")}
+      rowClass="tree-node"
+      project={props.project}
+      groupId={`project-agents-${props.project}`}
+      open={expanded.isOpen(node())}
+      onOpen={() => expanded.open(node())}
+      onToggle={() => expanded.toggle(node())}
+      nav={props.nav}
+      showFilter={props.total > FILTER_THRESHOLD}
+      query={props.query}
+      onQuery={props.onQuery}
+    >
+      <For each={props.agents} fallback={<li class="tree-empty muted small">{props.query ? "No agent matches." : "No agents."}</li>}>
+        {(a) => <AgentRow agent={a} rowKey={projectAgentKey(a.id)} nav={props.nav} project={props.project} />}
+      </For>
+    </TreeRoot>
   );
 }

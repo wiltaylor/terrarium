@@ -391,6 +391,13 @@ th {
   justify-content: flex-start;
   padding: 5px 8px 5px 2px;
 }
+/* The Agents node of a project: the same, at the size of the other project pages. */
+.tree a.tree-node {
+  display: flex;
+  justify-content: flex-start;
+  gap: 2px;
+  padding: 3px 6px 3px 0;
+}
 .tree-chevron {
   flex: none;
   width: 18px;

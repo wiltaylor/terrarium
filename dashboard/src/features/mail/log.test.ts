@@ -10,6 +10,8 @@ import {
   mergeMessages,
   namesOf,
   newestId,
+  openRowOf,
+  openThreadOf,
   projectsOf,
   serverQuery,
   setTail,
@@ -74,6 +76,28 @@ describe("mail log: parts of a message", () => {
     expect(namesOf([msg("t/b", "operator"), msg("operator", "t/a")])).toEqual(["operator", "t/a", "t/b"]);
     expect(shortThread("01JBQTHR000000000000000007")).toBe("…000007");
     expect(shortThread("T1")).toBe("T1");
+  });
+});
+
+describe("mail log: the open row", () => {
+  // Mail to the operator, then the operator's reply on the same thread: the newest row is the reply.
+  const ask = msg("svc/lead", "operator", { min: 30, subject: "SVC-2 is ready to merge" });
+  const answer = msg("operator", "svc/lead", { min: 20, subject: "Re: SVC-2 is ready to merge" });
+  const other = msg("ops/meta", "operator", { min: 10, thread_id: "T2" });
+  const rows = mergeMessages([], [ask, answer, other]);
+
+  it("opens the clicked mail to the operator, not the newest row of its thread", () => {
+    expect(openRowOf(rows, ask.id)).toBe(ask);
+    expect(openRowOf(rows, answer.id)).toBe(answer);
+    expect(openThreadOf(rows, ask.id)).toBe("T1");
+  });
+
+  it("opens the newest shown row of a linked thread, and nothing without `open`", () => {
+    expect(openRowOf(rows, "T1")).toBe(answer);
+    expect(openRowOf(rows.filter((m) => m !== answer), "T1")).toBe(ask);
+    expect(openThreadOf(rows, "T1")).toBe("T1");
+    expect(openRowOf(rows, undefined)).toBeUndefined();
+    expect(openThreadOf(rows, undefined)).toBeUndefined();
   });
 });
 

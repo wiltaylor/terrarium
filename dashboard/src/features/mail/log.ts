@@ -115,6 +115,23 @@ export function mergeMessages(current: Message[], incoming: Message[]): Message[
 /** The biggest message ID: the `cursor` that asks the daemon for later messages only (IDs are ULIDs, the list is `id > cursor`). */
 export const newestId = (messages: Message[]): string | undefined => messages.reduce<string | undefined>((a, m) => (!a || m.id > a ? m.id : a), undefined);
 
+/**
+ * The open row of the log. `open` is a message ID (a click on a row) or a
+ * thread ID (a link from the Inbox). A message ID opens that row, also when
+ * the thread has newer rows: mail to the operator usually has a later reply
+ * from the operator. A thread ID opens the newest shown row of the thread.
+ */
+export function openRowOf(rows: Message[], open: string | undefined): Message | undefined {
+  if (!open) return undefined;
+  return rows.find((m) => m.id === open) ?? rows.find((m) => m.thread_id === open);
+}
+
+/** The thread of `open` (a message ID or a thread ID), to load in full. */
+export function openThreadOf(messages: Message[], open: string | undefined): string | undefined {
+  if (!open) return undefined;
+  return messages.find((m) => m.id === open)?.thread_id ?? open;
+}
+
 /** The messages of one thread, oldest first. */
 export const threadOf = (messages: Message[], threadId: string): Message[] => messages.filter((m) => m.thread_id === threadId).sort(byTime);
 

@@ -11,9 +11,16 @@ import {
   filterProjects,
   inAgents,
   inProjects,
+  itemKey,
   parseExpanded,
+  projectAgentKey,
+  projectAgentsFromPath,
+  projectAgentsNode,
   projectFromPath,
+  projectKey,
+  projectOfAgentsNode,
   PROJECTS_ROOT,
+  projectTreeKeys,
   prune,
   ROOT_CLOSED,
   sortAgents,
@@ -230,5 +237,71 @@ describe("createExpandedStore", () => {
     expect(st.list()).toEqual([]);
     st.toggle("a");
     expect(st.isOpen("a")).toBe(true);
+  });
+});
+
+describe("the Agents node of a project", () => {
+  const projectOf = (id: string) => ({ a1: "alpha", "beta/w": "beta" })[id];
+
+  it("names the node apart from the projects and the roots", () => {
+    expect(projectAgentsNode("alpha")).toBe("alpha/agents");
+    expect(projectOfAgentsNode("alpha/agents")).toBe("alpha");
+    expect(projectOfAgentsNode(AGENTS_ROOT)).toBeNull();
+    expect(projectOfAgentsNode("alpha")).toBeNull();
+    expect(projectOfAgentsNode(PROJECTS_ROOT)).toBeNull();
+  });
+
+  it("reads the project from its agent list or from the page of one of its agents", () => {
+    expect(projectAgentsFromPath("/p/alpha/agents", projectOf)).toBe("alpha");
+    expect(projectAgentsFromPath("/p/alpha/agents/", projectOf)).toBe("alpha");
+    expect(projectAgentsFromPath("/p/alpha/board", projectOf)).toBeNull();
+    expect(projectAgentsFromPath("/agents/a1", projectOf)).toBe("alpha");
+    expect(projectAgentsFromPath("/agents/beta%2Fw", projectOf)).toBe("beta");
+    // Not loaded yet, or not an agent page.
+    expect(projectAgentsFromPath("/agents/zz", projectOf)).toBeNull();
+    expect(projectAgentsFromPath("/agents", projectOf)).toBeNull();
+  });
+
+  it("is closed by default, follows the URL once, and persists", () => {
+    const s = memory();
+    const st = createExpandedStore(s);
+    expect(st.isOpen(projectAgentsNode("alpha"))).toBe(false);
+    st.followProjectAgents("alpha");
+    expect(st.isOpen(projectAgentsNode("alpha"))).toBe(true);
+    st.close(projectAgentsNode("alpha"));
+    st.followProjectAgents("alpha"); // the same place: your close stays
+    expect(st.isOpen(projectAgentsNode("alpha"))).toBe(false);
+    st.followProjectAgents(null);
+    st.followProjectAgents("alpha");
+    expect(st.isOpen(projectAgentsNode("alpha"))).toBe(true);
+    expect(createExpandedStore(s).isOpen(projectAgentsNode("alpha"))).toBe(true);
+  });
+
+  it("is pruned with its project only", () => {
+    const list = ["alpha", projectAgentsNode("alpha"), projectAgentsNode("gone"), AGENTS_ROOT];
+    expect(prune(list, ["alpha"])).toEqual(["alpha", projectAgentsNode("alpha"), AGENTS_ROOT]);
+  });
+
+  it("puts the agents of an open node after its row, in screen order", () => {
+    const open = new Set(["alpha", projectAgentsNode("alpha"), projectAgentsNode("beta")]);
+    const keys = projectTreeKeys({
+      rootKey: "root",
+      rootOpen: true,
+      projects: ["alpha", "beta"],
+      items: ["agents", "board"],
+      isOpen: (n) => open.has(n),
+      agentsOf: (p) => (p === "alpha" ? ["a1", "a2"] : ["b1"]),
+    });
+    // beta is closed, so its open Agents node shows nothing.
+    expect(keys).toEqual([
+      "root",
+      projectKey("alpha"),
+      itemKey("alpha", "agents"),
+      projectAgentKey("a1"),
+      projectAgentKey("a2"),
+      itemKey("alpha", "board"),
+      projectKey("beta"),
+    ]);
+    expect(projectTreeKeys({ rootKey: "root", rootOpen: false, projects: ["alpha"], items: ["agents"], isOpen: () => true, agentsOf: () => ["a1"] })).toEqual(["root"]);
   });
 });

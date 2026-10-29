@@ -1,6 +1,6 @@
 // The root of a sidebar tree (Projects, Agents): a link to the list page,
 // with a chevron that only opens or closes the root, an optional filter, and
-// the group of child rows.
+// the group of child rows. The Agents node of a project uses it too.
 
 import { A } from "@solidjs/router";
 import { Show, type JSX } from "solid-js";
@@ -24,6 +24,12 @@ export const expanded = createExpandedStore(
 export function TreeRoot(props: {
   label: string;
   href: string;
+  /** The `data-key` of the row. The default is ROOT_KEY. */
+  rowKey?: string;
+  /** The row class after `tree-row`. The default is `tree-root`. */
+  rowClass?: string;
+  /** The `data-project` of the row, for a node under a project. */
+  project?: string;
   /** The id of the child group, for aria-owns. Unique on the page. */
   groupId: string;
   open: boolean;
@@ -38,6 +44,7 @@ export function TreeRoot(props: {
   onQuery?: (q: string) => void;
   children: JSX.Element;
 }) {
+  const key = () => props.rowKey ?? ROOT_KEY;
   return (
     // The root is a link (WAI-ARIA navigation tree): its group follows it and aria-owns joins them.
     <li role="none">
@@ -45,16 +52,17 @@ export function TreeRoot(props: {
         href={props.href}
         end
         activeClass="active"
-        class="tree-row tree-root"
+        class={`tree-row ${props.rowClass ?? "tree-root"}`}
         role="treeitem"
         aria-expanded={props.open}
         aria-owns={props.groupId}
-        data-key={ROOT_KEY}
-        tabIndex={props.nav.tabIndex(ROOT_KEY)}
-        onFocus={() => props.nav.setFocusKey(ROOT_KEY)}
+        data-key={key()}
+        data-project={props.project}
+        tabIndex={props.nav.tabIndex(key())}
+        onFocus={() => props.nav.setFocusKey(key())}
         onClick={() => {
           props.onOpen();
-          props.nav.setFocusKey(ROOT_KEY);
+          props.nav.setFocusKey(key());
         }}
       >
         <span
@@ -66,7 +74,7 @@ export function TreeRoot(props: {
             e.preventDefault();
             e.stopPropagation();
             props.onToggle();
-            props.nav.setFocusKey(ROOT_KEY);
+            props.nav.setFocusKey(key());
           }}
         >
           ▸

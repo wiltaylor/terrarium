@@ -22,6 +22,8 @@ import {
   filterToParams,
   firstLine,
   namesOf,
+  openRowOf,
+  openThreadOf,
   RANGE_LABELS,
   serverQuery,
   setTail,
@@ -58,10 +60,12 @@ export default function MailPage() {
   const names = createMemo(() => namesOf(feed.messages()));
   const [error, setError] = createSignal<unknown>(null);
   const [composing, setComposing] = createSignal<{ to?: string } | null>(null);
+  /** `?open=`: the clicked message, or a thread from a link. */
   const expanded = () => params.open;
-  /** One open row: the newest shown row of the open thread. */
-  const openRow = createMemo(() => (expanded() ? visible().find((m) => m.thread_id === expanded())?.id : undefined));
-  const toggle = (thread: string) => setParams({ open: expanded() === thread ? undefined : thread });
+  /** One open row: the clicked row, or the newest shown row of a linked thread. */
+  const openRow = createMemo(() => openRowOf(visible(), expanded())?.id);
+  const openThread = createMemo(() => openThreadOf(feed.messages(), expanded()));
+  const toggle = (m: Message) => setParams({ open: openRow() === m.id ? undefined : m.id });
 
   // Live tail: a `mail` event pulls the new messages and its thread again.
   // With the tail off, the log stays still and counts the events.
@@ -93,7 +97,7 @@ export default function MailPage() {
 
   // Opening a thread loads all of it: a filter can hide part of it.
   createEffect(
-    on(expanded, (thread) => {
+    on(openThread, (thread) => {
       if (thread) void feed.pull([thread]);
     }),
   );
@@ -180,7 +184,7 @@ export default function MailPage() {
                   now={now()}
                   open={openRow() === m.id}
                   project={route.project}
-                  onToggle={() => toggle(m.thread_id)}
+                  onToggle={() => toggle(m)}
                   onThread={() => setFilter({ thread: m.thread_id })}
                   feed={feed}
                   onCompose={(to) => setComposing({ to })}

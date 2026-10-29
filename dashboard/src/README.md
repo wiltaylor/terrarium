@@ -212,7 +212,12 @@ top: Home and Inbox; the project tree; the "Terrarium" section with the
 global pages; and a Settings section at the bottom. The project tree
 (`app/ProjectTree.tsx`) has a Projects root. A click on its name opens the
 project cards (`/projects`) and opens the root; the chevron only opens or
-closes it. Under the root, each project opens to show its pages. The
+closes it. Under the root, each project opens to show its pages. The Agents
+page of a project is a node too. A click on its name opens the agent list of
+the project (`/p/:project/agents`) and opens the node; the chevron only opens
+or closes it. The node is closed by default. The agent list of the project
+and the page of one of its agents open it. Open, it shows the agents of that
+project only, with the same rows as the agent tree and no project name. The
 "Terrarium" section starts with the agent tree (`app/AgentTree.tsx`). Its
 Agents root works the same way: a click on its name opens the agent list
 (`/agents`) and opens the root. The root is closed by default, because the
@@ -220,7 +225,8 @@ agent list grows with the fleet. An agent page opens it. Under the root, each
 agent has a row, sorted by project and then by name. The row shows the agent
 name, the project in muted text, and a dot in the colour of the agent status.
 The row label and title also give the status. Above eight projects or agents,
-a tree shows a filter. Both roots use `app/TreeRoot.tsx`, one open set in
+a tree or a project Agents node shows a filter. Both roots and the project
+Agents nodes use `app/TreeRoot.tsx`, one open set in
 `localStorage`, and the keyboard map in `app/treeNav.ts`. Settings
 (`features/settings/SettingsPage.tsx`) is one page with a tab for each of
 Account, Subscriptions, Harness config, and Hosts. Each tab is a route under
@@ -514,8 +520,11 @@ makes a card from its newest message.
 
 The filters are from, to, project (`/logs/mail` only), thread, time range (last
 hour, day, week, all time, or from and to times), and free text. They are in
-the URL (`?from=&to=&project=&thread=&range=&since=&until=&q=`). `open=<thread>`
-opens a thread, so the Inbox links to `/logs/mail?thread=<id>&open=<id>`.
+the URL (`?from=&to=&project=&thread=&range=&since=&until=&q=`). A click on
+a row sets `open=<message>`: the thread opens under that row, also when the
+thread has newer rows (mail to the operator usually has a later reply from the
+operator). `open=<thread>` opens a thread under its newest shown row, so the
+Inbox links to `/logs/mail?thread=<id>&open=<id>` (`openRowOf`).
 
 **Live tail.** On (the default), a `mail` event pulls the new messages at
 once. Off, the log stays still and shows **N new**; a click turns the tail on

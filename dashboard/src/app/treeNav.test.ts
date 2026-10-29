@@ -36,4 +36,21 @@ describe("treeKeyAction", () => {
     expect(treeKeyAction(["root", "p:x"], project, " ")).toEqual({ activate: true });
     expect(treeKeyAction(keys, leaf("a:1"), "a")).toBeNull();
   });
+
+  it("walks the third level: a project, its Agents node, and the agents", () => {
+    const keys = ["root", "p:x", "i:x/agents", "pa:1", "pa:2", "i:x/board"];
+    const node = (open: boolean) => ({ key: "i:x/agents", parent: "p:x", open });
+    const agent = (key: string) => ({ key, parent: "i:x/agents" });
+    expect(treeKeyAction(["root", "p:x", "i:x/agents", "i:x/board"], node(false), "ArrowRight")).toEqual({ open: true });
+    expect(treeKeyAction(keys, node(true), "ArrowRight")).toEqual({ focus: "pa:1" });
+    expect(treeKeyAction(keys, node(true), "ArrowLeft")).toEqual({ close: true });
+    expect(treeKeyAction(keys, node(false), "ArrowLeft")).toEqual({ focus: "p:x" });
+    expect(treeKeyAction(keys, agent("pa:2"), "ArrowLeft")).toEqual({ focus: "i:x/agents" });
+    expect(treeKeyAction(keys, agent("pa:2"), "ArrowDown")).toEqual({ focus: "i:x/board" });
+    expect(treeKeyAction(keys, agent("pa:1"), "ArrowUp")).toEqual({ focus: "i:x/agents" });
+    expect(treeKeyAction(keys, agent("pa:1"), "End")).toEqual({ focus: "i:x/board" });
+    // The node is a link: Enter follows it, Space clicks it.
+    expect(treeKeyAction(keys, node(true), "Enter")).toBeNull();
+    expect(treeKeyAction(keys, node(true), " ")).toEqual({ click: true });
+  });
 });

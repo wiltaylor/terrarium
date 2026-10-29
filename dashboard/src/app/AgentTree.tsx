@@ -4,6 +4,7 @@
 
 import { A, useLocation } from "@solidjs/router";
 import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
+import type { Agent } from "../api/types";
 import { statusTitle } from "../components/StatusBadge";
 import { agents, projects } from "../stores";
 import { expanded, ROOT_KEY, TreeRoot } from "./TreeRoot";
@@ -73,31 +74,42 @@ export function AgentTree() {
         onQuery={setQuery}
       >
         <For each={visible()} fallback={<li class="tree-empty muted small">{query() ? "No agent matches." : "No agents."}</li>}>
-          {(a) => {
-            // The status is in the label too, not in the colour only.
-            const label = () => `${a.project}/${a.name}, ${statusTitle(a.status, a.waiting_on)}`;
-            return (
-              <li role="none">
-                <A
-                  href={`/agents/${encodeURIComponent(a.id)}`}
-                  activeClass="active"
-                  class={`tree-agent st-${a.status}`}
-                  role="treeitem"
-                  aria-label={label()}
-                  title={`${a.project}/${a.name}\n${statusTitle(a.status, a.waiting_on)}`}
-                  data-key={agentKey(a.id)}
-                  tabIndex={nav.tabIndex(agentKey(a.id))}
-                  onFocus={() => nav.setFocusKey(agentKey(a.id))}
-                >
-                  <span class="status-dot" aria-hidden="true" />
-                  <span class="tree-name">{a.name}</span>
-                  <span class="tree-sub">{a.project}</span>
-                </A>
-              </li>
-            );
-          }}
+          {(a) => <AgentRow agent={a} rowKey={agentKey(a.id)} nav={nav} showProject />}
         </For>
       </TreeRoot>
     </ul>
+  );
+}
+
+/**
+ * One agent row: a link to the agent page, with a dot and a tint in the
+ * colour of its status. The Agents node of a project uses it too, there
+ * without the project name.
+ */
+export function AgentRow(props: { agent: Agent; rowKey: string; nav: ReturnType<typeof createRovingTree>; showProject?: boolean; project?: string }) {
+  const a = () => props.agent;
+  // The status is in the label too, not in the colour only.
+  const label = () => `${a().project}/${a().name}, ${statusTitle(a().status, a().waiting_on)}`;
+  return (
+    <li role="none">
+      <A
+        href={`/agents/${encodeURIComponent(a().id)}`}
+        activeClass="active"
+        class={`tree-agent st-${a().status}`}
+        role="treeitem"
+        aria-label={label()}
+        title={`${a().project}/${a().name}\n${statusTitle(a().status, a().waiting_on)}`}
+        data-key={props.rowKey}
+        data-project={props.project}
+        tabIndex={props.nav.tabIndex(props.rowKey)}
+        onFocus={() => props.nav.setFocusKey(props.rowKey)}
+      >
+        <span class="status-dot" aria-hidden="true" />
+        <span class="tree-name">{a().name}</span>
+        <Show when={props.showProject}>
+          <span class="tree-sub">{a().project}</span>
+        </Show>
+      </A>
+    </li>
   );
 }
