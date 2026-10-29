@@ -4,7 +4,7 @@
 import { createSignal } from "solid-js";
 import type { Api } from "../api/client";
 import type { ConnectionState, EventStream, StreamStatus } from "../api/sockets";
-import type { AgentEvent } from "../api/types";
+import type { AgentEvent, AuditEntry } from "../api/types";
 
 export const RECENT_LIMIT = 300;
 
@@ -40,6 +40,7 @@ export function createEventsStore(api: Pick<Api, "events">, opts: EventsStoreOpt
   /** True once the socket has opened at least once. */
   const [everOpen, setEverOpen] = createSignal(false);
   const listeners = new Set<(e: AgentEvent) => void>();
+  const auditListeners = new Set<(a: AuditEntry) => void>();
   let stream: EventStream | null = null;
   let starting = false;
   let stopped = false;
@@ -57,6 +58,7 @@ export function createEventsStore(api: Pick<Api, "events">, opts: EventsStoreOpt
       setStatus((st) => ({ ...st, lastSeq: Math.max(st.lastSeq, e.seq ?? 0) }));
       listeners.forEach((fn) => fn(e));
     });
+    stream.onAudit((a) => auditListeners.forEach((fn) => fn(a)));
   };
 
   const start = () => {
@@ -86,6 +88,15 @@ export function createEventsStore(api: Pick<Api, "events">, opts: EventsStoreOpt
       start();
       listeners.add(fn);
       return () => listeners.delete(fn);
+    },
+    /**
+     * Listen to the `audit` frames: new audit rows that the caller may read
+     * (docs/api.md §9.1). The daemon sends none to a caller that may not.
+     */
+    onAudit(fn: (a: AuditEntry) => void): () => void {
+      start();
+      auditListeners.add(fn);
+      return () => auditListeners.delete(fn);
     },
     stop() {
       stopped = true;

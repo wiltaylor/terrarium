@@ -649,7 +649,9 @@ rules are in §17.
 
 ### `GET /api/audit`
 
-Rows oldest first. Cursor: `seq`.
+Rows oldest first. Cursor: `seq`. The operator and a sysadmin read every
+row. A project admin reads the rows of its project. Another agent gets
+`403 forbidden`.
 
 | Query | Meaning |
 |---|---|
@@ -657,6 +659,10 @@ Rows oldest first. Cursor: `seq`.
 | `actor` | `operator`, `system`, `anonymous` (a failed login), or `agent:<ulid>`. |
 | `action` | For example `agent.start`. |
 | `project` | Rows of one project. A project admin gets its own project only. |
+| `order` | `asc` (the default): oldest first, and the cursor goes on to newer rows. `desc`: newest first, and the cursor goes on to older rows. Another value is `400`. |
+
+New and changed rows also come live, as `audit` frames on the firehose
+stream with `audit=1` (§9.1). The same read rule applies.
 
 ```json
 [{"id":"01M5PA0S0RK019JM7AD46MKF6B","seq":1,"at":"2026-10-24T06:36:53.144Z","actor":"system",
@@ -2819,10 +2825,35 @@ three ways:
 | `kind` | One kind. |
 | `project` | Firehose only: one project. |
 | `agent` | Firehose only: an agent key or ULID. A ULID works after the agent is deleted. |
+| `audit` | Firehose stream only: `1` or `true` adds the `audit` frames (below). `0`, `false`, or empty: off. Another value is `400`. |
 
 The firehose shows an agent (not a sysadmin) only the events of its project
 and its own events. To resume after a disconnect, reconnect with
 `since=<last seq>`.
+
+**Audit frames.** With `audit=1`, a firehose stream (WebSocket or SSE)
+also sends one frame for each new or changed audit row (§4,
+`GET /api/audit`). A changed row is an aggregate row such as the count of
+`auth.login_failed`; the frame has the full row again, with the same `id`.
+
+```json
+{"kind":"audit","audit":{"id":"01M5PA0S0RK019JM7AD46MKF6B","seq":42,"at":"2026-10-24T06:36:53.144Z",
+ "actor":"operator","action":"agent.start","target":"01M5PA0T0Z0K16V6G88P3SE78W",
+ "project":"terrarium","detail":{}}}
+```
+
+- The read rule of `GET /api/audit` applies. The operator and a sysadmin
+  get every row. A project admin gets the rows of its project. Another
+  agent gets no `audit` frames, and the stream sends its events as usual
+  (no error).
+- `project` limits the frames to the rows of that project. `kind` and
+  `agent` do not apply to them.
+- An `audit` frame has no `seq`: `audit.seq` is the position in the audit
+  log, not in the event log. Over SSE it is `event: audit` with no `id:`,
+  so `Last-Event-ID` stays an event `seq`.
+- The frames are live notifications only. The event log does not keep
+  them, a stream does not replay them, and a slow client can miss some.
+  After a reconnect, read `GET /api/audit` for the full list.
 
 `GET /api/events/latest` answers `200 {"seq": 1234}`: the newest `seq` of the
 log, `0` when the log is empty. A client that shows recent activity reads a

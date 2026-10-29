@@ -14,6 +14,11 @@
 //! `?since=latest` or `?live=1` skips the backlog: only events after the
 //! newest `seq` at connect time come. `GET /api/events/latest` gives that
 //! `seq`, so a client can read a short page first and then stream.
+//!
+//! `?audit=1` on a firehose stream adds an `audit` frame for each new or
+//! changed audit row that the caller may read (the rule of
+//! `GET /api/audit`). Audit rows stay in their own table: the frames are
+//! live notifications only, with no `seq`, no backlog, and no replay.
 
 use std::collections::VecDeque;
 use std::convert::Infallible;
@@ -36,10 +41,15 @@ use crate::actor::Actor;
 use crate::error::{ApiError, ApiResult};
 use crate::events::{self, EventFilter, StoredEvent};
 use crate::policy;
+use crate::store::audit::{AuditEntry, AuditFilter};
 use crate::store::{Page, Paged};
 use crate::supervisor::{PtyAttachment, PtyInput};
 
 const BATCH: usize = 500;
+
+/// The `audit` frames of one stream: the filter and the live receiver.
+/// `None`: the stream has no `audit` frames.
+type AuditFeed = Option<(AuditFilter, tokio::sync::broadcast::Receiver<AuditEntry>)>;
 
 #[derive(Debug, Default, Deserialize)]
 pub struct StreamQuery {
@@ -52,6 +62,8 @@ pub struct StreamQuery {
     kind: Option<String>,
     project: Option<String>,
     agent: Option<String>,
+    /// `1` or `true`: add `audit` frames (firehose stream only).
+    audit: Option<String>,
 }
 
 enum Mode {
@@ -108,6 +120,7 @@ fn is_desc(v: Option<&str>) -> ApiResult<bool> {
 async fn respond(
     state: Shared,
     filter: EventFilter,
+    audit: Option<AuditFilter>,
     page: Page,
     q: StreamQuery,
     req: Request,
@@ -163,8 +176,16 @@ async fn respond(
                 e.seq.to_string()
             }))
         }
-        Mode::WebSocket(ws) => ws.on_upgrade(move |socket| ws_events(socket, state, filter, since)),
-        Mode::Sse => sse_events(state, filter, since).into_response(),
+        Mode::WebSocket(ws) => {
+            // Subscribe before the upgrade, so no row between now and the
+            // live loop is lost.
+            let audit = audit.map(|f| (f, state.db.hub().subscribe_audit()));
+            ws.on_upgrade(move |socket| ws_events(socket, state, filter, audit, since))
+        }
+        Mode::Sse => {
+            let audit = audit.map(|f| (f, state.db.hub().subscribe_audit()));
+            sse_events(state, filter, audit, since).into_response()
+        }
     })
 }
 
@@ -197,7 +218,50 @@ pub async fn firehose(
     {
         filter.visible_to = Some((a.project.clone(), a.id.clone()));
     }
-    respond(state, filter, page, q, req).await
+    let audit = if is_on(q.audit.as_deref())? {
+        audit_frames(&actor, q.project.as_deref())
+    } else {
+        None
+    };
+    respond(state, filter, audit, page, q, req).await
+}
+
+/// The `audit` frames of a firehose stream with `?audit=1`: the rows that
+/// `GET /api/audit` gives `actor` (`super::system::audit_scope`), in the
+/// `project` of the stream when it has one. `None` for a caller who may not
+/// read the audit log: the stream then has events only, with no error.
+fn audit_frames(actor: &Actor, project: Option<&str>) -> Option<AuditFilter> {
+    let scope = super::system::audit_scope(actor).ok()?;
+    let project = match (scope, project) {
+        (Some(own), Some(p)) if own != p => return None,
+        (Some(own), _) => Some(own),
+        (None, p) => p.map(str::to_owned),
+    };
+    Some(AuditFilter {
+        project,
+        ..AuditFilter::default()
+    })
+}
+
+/// The JSON of an `audit` frame: `{"kind":"audit","audit":<row>}`.
+fn audit_frame(e: &AuditEntry) -> serde_json::Value {
+    json!({ "kind": "audit", "audit": e })
+}
+
+/// The next audit row for a stream, or never when the stream has no
+/// `audit` frames. A lagged receiver skips the lost rows: a client reads
+/// `GET /api/audit` for a full list.
+async fn next_audit(rx: &mut AuditFeed) -> AuditEntry {
+    loop {
+        let Some((f, r)) = rx.as_mut() else {
+            return std::future::pending().await;
+        };
+        match r.recv().await {
+            Ok(e) if f.matches(&e) => return e,
+            Ok(_) | Err(RecvError::Lagged(_)) => {}
+            Err(RecvError::Closed) => *rx = None,
+        }
+    }
 }
 
 /// `GET /api/events/latest`: the newest `seq` of the log, 0 when it is
@@ -222,7 +286,7 @@ pub async fn agent_events(
         kind: q.kind.clone(),
         ..EventFilter::default()
     };
-    respond(state, filter, page, q, req).await
+    respond(state, filter, None, page, q, req).await
 }
 
 async fn backlog(state: &Shared, filter: &EventFilter, after: i64) -> ApiResult<Vec<StoredEvent>> {
@@ -233,7 +297,13 @@ async fn backlog(state: &Shared, filter: &EventFilter, after: i64) -> ApiResult<
         .await
 }
 
-async fn ws_events(socket: WebSocket, state: Shared, filter: EventFilter, since: i64) {
+async fn ws_events(
+    socket: WebSocket,
+    state: Shared,
+    filter: EventFilter,
+    mut audit: AuditFeed,
+    since: i64,
+) {
     let (mut tx, mut rx) = socket.split();
     let mut live = state.db.hub().subscribe();
     let mut last = since;
@@ -265,6 +335,12 @@ async fn ws_events(socket: WebSocket, state: Shared, filter: EventFilter, since:
                 None | Some(Err(_)) | Some(Ok(WsMessage::Close(_))) => return,
                 Some(Ok(_)) => {}
             },
+            row = next_audit(&mut audit) => {
+                let m = WsMessage::Text(audit_frame(&row).to_string().into());
+                if tx.send(m).await.is_err() {
+                    return;
+                }
+            }
             ev = live.recv() => match ev {
                 Ok(e) => {
                     if e.seq > last && filter.matches(&e) {
@@ -302,12 +378,14 @@ struct SseState {
     last: i64,
     queue: VecDeque<StoredEvent>,
     live: tokio::sync::broadcast::Receiver<StoredEvent>,
+    audit: AuditFeed,
     caught_up: bool,
 }
 
 fn sse_events(
     state: Shared,
     filter: EventFilter,
+    audit: AuditFeed,
     since: i64,
 ) -> Sse<impl futures_util::Stream<Item = Result<SseEvent, Infallible>>> {
     let live = state.db.hub().subscribe();
@@ -317,6 +395,7 @@ fn sse_events(
         last: since,
         queue: VecDeque::new(),
         live,
+        audit,
         caught_up: false,
     };
     let stream = futures_util::stream::unfold(init, |mut s| async move {
@@ -336,7 +415,18 @@ fn sse_events(
                 s.queue.extend(batch);
                 continue;
             }
-            match s.live.recv().await {
+            let ev = tokio::select! {
+                row = next_audit(&mut s.audit) => {
+                    // No `id`: `Last-Event-ID` stays the `seq` of the event log.
+                    let ev = SseEvent::default()
+                        .event("audit")
+                        .json_data(audit_frame(&row))
+                        .unwrap_or_else(|_| SseEvent::default().comment("bad audit row"));
+                    return Some((Ok(ev), s));
+                }
+                ev = s.live.recv() => ev,
+            };
+            match ev {
                 Ok(e) if e.seq > s.last && s.filter.matches(&e) => s.queue.push_back(e),
                 Ok(_) => {}
                 Err(RecvError::Lagged(_)) => s.caught_up = false,

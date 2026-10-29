@@ -1992,8 +1992,20 @@ export interface AuditQuery {
   actor?: string;
   action?: string;
   project?: string;
+  /** `desc`: newest first; the cursor goes on to older rows. */
+  order?: "asc" | "desc";
   limit?: number;
   cursor?: string;
+}
+
+/**
+ * An `audit` frame of the firehose with `?audit=1` (docs/api.md §9.1): a
+ * new or changed audit row. A live notification only: it has no `seq` of
+ * the event log, and a reconnect does not replay it.
+ */
+export interface AuditFrame {
+  kind: "audit";
+  audit: AuditEntry;
 }
 
 /**

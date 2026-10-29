@@ -1075,6 +1075,73 @@ th {
 .log-filters input[type="search"] {
   flex: 1 1 200px;
 }
+
+/* Live mode of the log tabs (components/Live.tsx): the same control first in each toolbar. */
+.live-control {
+  gap: 8px;
+}
+.live-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.85rem;
+  padding: 2px 10px 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 99px;
+  background: var(--surface-3);
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+}
+.live-toggle.on {
+  background: var(--accent-soft);
+  color: var(--link);
+  border-color: transparent;
+}
+.live-toggle input {
+  margin: 0;
+}
+.live-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.35;
+}
+.live-toggle.on .live-dot {
+  opacity: 1;
+  animation: pulse 1.2s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .live-toggle.on .live-dot { animation: none; }
+}
+/* The "N new" pill: sticky over the list, it takes no room. */
+.new-above-slot {
+  position: sticky;
+  top: 8px;
+  height: 0;
+  z-index: 15;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+}
+.new-above {
+  margin-top: 4px;
+  border-radius: 99px;
+  padding: 4px 14px;
+  background: var(--link);
+  color: var(--surface);
+  border: none;
+  box-shadow: var(--shadow);
+  font-size: 0.85rem;
+}
+.new-above:hover {
+  background: var(--link);
+  filter: brightness(1.1);
+}
+@media (max-width: 760px) {
+  .new-above-slot { top: 56px; }
+}
 .mail-log .log-row {
   cursor: pointer;
 }

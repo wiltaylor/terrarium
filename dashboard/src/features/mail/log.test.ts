@@ -14,14 +14,12 @@ import {
   openThreadOf,
   projectsOf,
   serverQuery,
-  setTail,
   shortThread,
-  TAIL_START,
-  tailEvent,
   threadOf,
   windowOf,
   type LogFilter,
 } from "./log";
+import { arrive, heldCount, LIVE_START, newKeys, release, setLive, shownOf } from "../../components/live";
 
 const NOW = Date.parse("2026-10-25T12:00:00Z");
 const at = (minAgo: number) => new Date(NOW - minAgo * 60_000).toISOString();
@@ -161,19 +159,22 @@ describe("mail log: filters", () => {
   });
 });
 
-describe("mail log: live tail", () => {
-  it("pulls at once while live, and counts the events while it is off", () => {
-    expect(tailEvent(TAIL_START, "T1")).toEqual({ state: TAIL_START, pull: true });
-    let s = setTail(TAIL_START, false).state;
-    expect(s).toEqual({ live: false, missed: 0, threads: [] });
-    s = tailEvent(s, "T1").state;
-    s = tailEvent(s, "T1").state;
-    const r = tailEvent(s, undefined);
-    expect(r.pull).toBe(false);
-    expect(r.state).toEqual({ live: false, missed: 3, threads: ["T1"] });
-    // On again: pull the touched threads, and start again from zero.
-    expect(setTail(r.state, true)).toEqual({ state: TAIL_START, pull: ["T1"] });
-    expect(setTail(TAIL_START, true)).toEqual({ state: TAIL_START, pull: null });
+describe("mail log: live mode", () => {
+  it("holds new messages while off, and counts only the ones that match the filters", () => {
+    const old = msg("t/a", "operator", { id: "01MA", min: 30 });
+    const toA = msg("t/a", "operator", { id: "01MB", min: 2 });
+    const toB = msg("t/b", "operator", { id: "01MC", min: 1 });
+    const all = mergeMessages([], [old, toA, toB]);
+    let s = setLive(LIVE_START, false);
+    s = arrive(s, newKeys([old], all, (m) => m.id));
+    const f: LogFilter = { ...DEFAULT_FILTER, from: "t/a" };
+    const matching = applyFilter(all, f, NOW);
+    expect(shownOf(matching, s, (m) => m.id).map((m) => m.id)).toEqual(["01MA"]);
+    expect(heldCount(matching, s, (m) => m.id)).toBe(1);
+    // "Show N new" shows them, and live stays off. The message that the filters hide stays held.
+    s = release(s, matching.map((m) => m.id));
+    expect(shownOf(matching, s, (m) => m.id).map((m) => m.id)).toEqual(["01MB", "01MA"]);
+    expect(s).toEqual({ live: false, held: ["01MC"] });
   });
 });
 

@@ -235,6 +235,19 @@ Account, Subscriptions, Harness config, and Hosts. Each tab is a route under
 project, under `/p/<project>/logs`. Both screens use
 `components/TabScreen.tsx`. The Logs item is active on each of its tabs.
 
+**Live mode of the log tabs.** Mail, Events, and Audit have the same
+**Live** control first in their toolbar (`components/Live.tsx`
+`LiveControl`), on at the start, with a pulsing dot while on. Each tab is
+newest first. Live, a new item that matches the filters comes in on top. Off,
+the tab puts the new items in its list but holds them: the list stays still,
+and **Show N new** counts the held items that match the filters and shows
+them. Live on again, **Refresh**, or a new filter shows the held items too.
+When the top of the list is out of view, `createScrollKeeper` moves the page
+by the height of the new rows, so the viewport stays still, and a sticky
+**N new** pill goes back up to them. The state is the pure
+`components/live.ts`. The Audit tab gets its rows from the `audit` frames of
+the event stream (below).
+
 ## Conventions
 
 - Put each view in its own folder under `src/features/<feature>/`.
@@ -283,7 +296,10 @@ checks the shapes that differ from PLAN §17.
 `stores/events.ts` holds the one firehose socket. `createWsEventStream`
 reconnects with backoff (0.5 s, doubling to 15 s, with jitter) and resumes
 with `?since=<last seq>`, so a drop loses no event and a repeated frame is
-dropped. Before the first connect, the store asks `GET /api/events/latest`.
+dropped. The socket asks for `audit=1`: the daemon also sends an `audit`
+frame (no `seq`) for each new audit row that the caller may read, and
+`events.onAudit(...)` gives them to the Audit tab (docs/api.md §9.1). Before
+the first connect, the store asks `GET /api/events/latest`.
 When the daemon has it, the first connect uses `since = latest - 300`: the
 backlog is the last 300 events only. When the daemon does not have it, the
 first connect has no `since`, and the daemon sends the whole log. The agents
@@ -525,10 +541,10 @@ thread has newer rows (mail to the operator usually has a later reply from the
 operator). `open=<thread>` opens a thread under its newest shown row, so the
 Inbox links to `/logs/mail?thread=<id>&open=<id>` (`openRowOf`).
 
-**Live tail.** On (the default), a `mail` event pulls the new messages at
-once. Off, the log stays still and shows **N new**; a click turns the tail on
-and pulls the threads that the events touched (`features/mail/log.ts`
-`tailEvent`, `setTail`).
+**Live mode.** A `mail` event pulls the new messages and the event's thread,
+live or not. The feed gives the IDs of the new messages to the live mode of
+the log tabs (above): live, they show at once; off, they wait for **Show N
+new**.
 
 **Server or browser.** `GET /api/mail` answers oldest first, so a newest-first
 log reads the full list (`collectAll`, pages of 1000, at most 20 pages), and
@@ -552,7 +568,7 @@ prefix or budget scope. The daemon also has `project`, `since`, `until`, and
 | `/settings/subscriptions` | Settings, Subscriptions tab: subscriptions, detect banner, add wizard | `GET`, `POST`, `DELETE /api/subscriptions[/{name}]`, `GET .../detect`, `POST .../{name}/probe\|verify\|logout\|api-key`, `POST /api/subscriptions/login`, `GET`, `DELETE .../login/{id}`, `POST .../login/{id}/input`, `WS .../login/{id}/pty` |
 | `/inbox` | Inbox: questions, notices, mail to the operator, paused threads; kind tabs, open or done, project filter | `GET /api/inbox?status=&kind=&project=`, `GET /api/inbox/counts`, `POST /api/questions/{id}/answer\|ack\|retract`, `POST /api/inbox/mail/{id}/ack`, `POST /api/mail/{id}/release`, `POST /api/mail/threads/{id}/resume` |
 | `/questions` | Gone: redirects to `/inbox`. | none |
-| `/logs/mail` | Logs, Mail tab: every message, newest first, filters, live tail, the thread inline, reply, compose | `GET /api/mail?thread=&cursor=`, `POST /api/mail`, `POST /api/mail/{id}/reply` |
+| `/logs/mail` | Logs, Mail tab: every message, newest first, filters, live mode, the thread inline, reply, compose | `GET /api/mail?thread=&cursor=`, `POST /api/mail`, `POST /api/mail/{id}/reply` |
 | `/p/:project/logs/mail` | Project logs, Mail tab: the mail log of one project; reply from the project inbox, make card | `GET /api/mail`, `POST .../inbox/{id}/reply`, `POST .../cards` (`from_mail`) |
 | `/p/:project/logs/events` | Project logs, Events tab: the event log of one project, with the kind and agent filters (the agents of the project only) | `GET /api/events?since=&kind=&project=&agent=`, events socket |
 | `/p/:project/inbox`, `/p/:project/mail`, `/p/:project/logs` | Gone: redirect to `/p/:project/logs/mail` (`app/nav.ts` `MOVED_ROUTES`). The redirect keeps the query. | none |
@@ -568,7 +584,7 @@ prefix or budget scope. The daemon also has `project`, `since`, `until`, and
 | `/targets` | Targets, lifecycle, snapshots (list, take, restore, delete), exec console, leases (grant, extend, revoke, history) | `GET /api/targets`, `POST /api/targets/{name}/up\|down\|snapshot\|restore\|status`, `GET .../snapshots`, `DELETE .../snapshots/{snap}`, `POST .../exec`, `WS .../sessions/{id}/ws`, `DELETE .../sessions/{id}`, `GET`, `POST .../leases`, `PATCH`, `DELETE .../leases/{agent}` (docs/api.md §17.7) |
 | `/settings/hosts` | Settings, Hosts tab: host agents: status, capabilities, add with a one-time token, revoke | `GET`, `POST /api/hosts`, `DELETE /api/hosts/{name}` (new API, not in docs/api.md yet) |
 | `/logs/events` | Logs, Events tab: event log with history; all projects or the selected one, kind and agent filters | `GET /api/events?since=&kind=&project=&agent=`, events socket |
-| `/logs/audit` | Logs, Audit tab: audit log; actor, action, and project filters | `GET /api/audit?actor=&action=&project=` |
+| `/logs/audit` | Logs, Audit tab: audit log, newest first, live mode; actor, action, and project filters | `GET /api/audit?order=desc&actor=&action=&project=`, `audit` frames of the events socket |
 | `/settings/account` | Settings, Account tab: session mode, end time, what the browser keeps; password; sign out, sign out everywhere | `GET`, `DELETE /api/session`, `DELETE /api/sessions`, `PUT /api/auth/password` |
 | `/settings/harness` | Settings, Harness config tab: the config repo, its changes and diffs, commit, sync, pull, push, secret grants to approve | `GET /api/config/...` (docs/api.md §25) |
 | `/settings`, `/subscriptions`, `/hosts`, `/config` | Gone: redirect to `/settings/account`, `/settings/subscriptions`, `/settings/hosts`, and `/settings/harness` (`app/nav.ts` `MOVED_ROUTES`). The redirect keeps the query. A quota mail of the daemon still links `/subscriptions`. | none |

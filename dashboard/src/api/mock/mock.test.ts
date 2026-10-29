@@ -50,6 +50,18 @@ describe("mock API", () => {
     stream.close();
   });
 
+  it("sends an audit frame for an audited action, as the daemon does with ?audit=1", async () => {
+    const api = mock();
+    const rows: string[] = [];
+    const stream = api.events.stream({ since: api.world.seq });
+    stream.onAudit((a) => rows.push(`${a.action} ${a.target}`));
+    await tick();
+    const name = api.world.hosts[0]!.name;
+    await api.hosts.revoke(name);
+    expect(rows).toEqual([`host.revoke ${name}`]);
+    stream.close();
+  });
+
   it("returns copies, so callers cannot mutate the world", async () => {
     const api = mock();
     const agents = await api.agents.list();

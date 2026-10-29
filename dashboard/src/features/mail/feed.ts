@@ -3,18 +3,20 @@
 // once, then asks only for messages after the newest ID it has (the list is
 // `id > cursor`). A `mail` event pulls the new messages and the event's
 // thread again (a reply marks the original `replied`; a pause changes
-// `thread_paused` on the whole thread).
+// `thread_paused` on the whole thread). `onNew` gets the IDs of the
+// messages that a pull found for the first time, for the live mode.
 
-import { createEffect, createMemo, createSignal, on } from "solid-js";
+import { batch, createEffect, createMemo, createSignal, on } from "solid-js";
 import type { Api } from "../../api/client";
 import type { MailQuery, Message } from "../../api/types";
+import { newKeys } from "../../components/live";
 import { collectAll } from "../../lib/paging";
 import { mergeMessages, newestId } from "./log";
 
 const PAGE = 1000;
 const MAX_PAGES = 20;
 
-export function createMailFeed(api: Pick<Api, "mail">, query: () => MailQuery) {
+export function createMailFeed(api: Pick<Api, "mail">, query: () => MailQuery, opts: { onNew?: (ids: string[]) => void } = {}) {
   const [messages, setMessages] = createSignal<Message[]>([]);
   const [loading, setLoading] = createSignal(false);
   const [loaded, setLoaded] = createSignal(false);
@@ -52,7 +54,14 @@ export function createMailFeed(api: Pick<Api, "mail">, query: () => MailQuery) {
       if (gen !== generation) return;
       const next = newestId(fresh!);
       if (next && (!cursor || next > cursor)) cursor = next;
-      setMessages((cur) => mergeMessages(cur, [...fresh!, ...again.flat()]));
+      const cur = messages();
+      const merged = mergeMessages(cur, [...fresh!, ...again.flat()]);
+      const ids = newKeys(cur, merged, (m) => m.id);
+      // One update: a held message never shows for a moment.
+      batch(() => {
+        setMessages(merged);
+        if (ids.length) opts.onNew?.(ids);
+      });
     } catch (e) {
       if (gen === generation) setError(e);
     }

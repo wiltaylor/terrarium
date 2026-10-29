@@ -489,10 +489,13 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
   };
 
   // ----- audit (docs/api.md §4) -----
+  /** The `audit` frames of the firehose with `?audit=1` (docs/api.md §9.1). The mock caller is the operator: every row. */
+  const auditHub = new Set<(a: AuditEntry) => void>();
   const audit = (action: string, target: string, proj: string | undefined, detail: Record<string, unknown> = {}, actor = "operator") => {
     const seq = (w.audit.at(-1)?.seq ?? 0) + 1;
     const row: AuditEntry = { id: ulid("aud"), seq, at: iso(), actor, action, target, ...(proj ? { project: proj } : {}), detail };
     w.audit.push(row);
+    auditHub.forEach((fn) => fn(clone(row)));
     return row;
   };
 
@@ -738,7 +741,9 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     /** `protocol` is what the "daemon" echoes (./ws); null refuses the upgrade. */
     constructor(url: string, protocol: string | null = "") {
       this.protocol = protocol ?? "";
-      const since = Number(new URL(url, "http://mock").searchParams.get("since") ?? 0);
+      const params = new URL(url, "http://mock").searchParams;
+      const since = Number(params.get("since") ?? 0);
+      const withAudit = ["1", "true"].includes(params.get("audit") ?? "");
       queueMicrotask(() => {
         if (this.readyState !== 0) return;
         if (protocol === null) {
@@ -761,7 +766,10 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           }
         };
         hub.add(fn);
-        this.off = () => hub.delete(fn);
+        // `audit` frames: live only, no `seq`, no backlog.
+        const onAudit = (a: AuditEntry) => this.fire("message", { data: JSON.stringify({ kind: "audit", audit: a }) });
+        if (withAudit) auditHub.add(onAudit);
+        this.off = () => (hub.delete(fn), auditHub.delete(onAudit));
       });
     }
     addEventListener(type: string, fn: (ev: SocketEvent) => void) {
@@ -815,6 +823,11 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     // A plan at 100% resets after a while, so the demo shows `quota.resumed`.
     for (const [name, at] of exhaustedAt) if (tick - at >= 6) resetPlan(name);
     if (tick % 2 === 0) usageTick();
+    // Live audit rows for the Audit tab: an agent reads a secret, or the git credential helper answers.
+    if (tick % 4 === 2 && a) {
+      if (tick % 8 === 2) audit("secret.use", "GITHUB_TOKEN", a.project, { scope: a.project, via: "env" }, `agent:${a.id}`);
+      else audit("repo.credential", `${a.project}/main`, a.project, { host: "github.com", ok: true }, `agent:${a.id}`);
+    }
   };
   let timer: ReturnType<typeof setInterval> | undefined;
   const ensureActivity = () => {
@@ -2978,13 +2991,11 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     },
 
     audit: (q = {}) =>
-      reply(() =>
-        paginate(
-          w.audit.filter((a) => (!q.actor || a.actor === q.actor) && (!q.action || a.action === q.action) && (!q.project || a.project === q.project) && (!q.since || a.at >= q.since)),
-          q,
-          (a) => String(a.seq ?? a.id),
-        ),
-      ),
+      reply(() => {
+        const rows = w.audit.filter((a) => (!q.actor || a.actor === q.actor) && (!q.action || a.action === q.action) && (!q.project || a.project === q.project) && (!q.since || a.at >= q.since));
+        // `order=desc`: newest first, the cursor goes on to older rows.
+        return paginate(q.order === "desc" ? [...rows].reverse() : rows, q, (a) => String(a.seq ?? a.id));
+      }),
 
     // The daemon's `api/targets.rs` is new; the mock runs the same lifecycle.
     targets: {
@@ -3328,7 +3339,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     events: {
       stream: (o = {}): EventStream => {
         ensureActivity();
-        return createWsEventStream((since) => `/api/events${since === undefined ? "" : `?since=${since}`}`, {
+        return createWsEventStream((since) => `/api/events?audit=1${since === undefined ? "" : `&since=${since}`}`, {
           since: o.since,
           makeSocket: (path) => sock(path, (protocol, h) => new MockEventSocket(h.url, protocol)),
         });

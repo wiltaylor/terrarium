@@ -11,6 +11,7 @@ use tokio::sync::broadcast;
 
 use crate::db::now;
 use crate::error::ApiResult;
+use crate::store::audit::AuditEntry;
 
 /// One row of the event log, as the API shows it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -318,16 +319,21 @@ pub fn last_seq(conn: &Connection) -> ApiResult<i64> {
 }
 
 /// The live feed of new events. Each subscriber gets every event that
-/// commits after it subscribed.
+/// commits after it subscribed. The hub also carries each new or changed
+/// audit row (`audit` frames, docs/api.md §9.1). Audit rows are not
+/// events: they stay in their own table, and the hub only tells the live
+/// streams about them.
 #[derive(Clone)]
 pub struct EventHub {
     tx: broadcast::Sender<StoredEvent>,
+    audit: broadcast::Sender<AuditEntry>,
 }
 
 impl Default for EventHub {
     fn default() -> Self {
         let (tx, _) = broadcast::channel(4096);
-        Self { tx }
+        let (audit, _) = broadcast::channel(1024);
+        Self { tx, audit }
     }
 }
 
@@ -339,5 +345,14 @@ impl EventHub {
 
     pub fn subscribe(&self) -> broadcast::Receiver<StoredEvent> {
         self.tx.subscribe()
+    }
+
+    /// Tell the live streams about a new or changed audit row.
+    pub fn publish_audit(&self, entry: AuditEntry) {
+        let _ = self.audit.send(entry);
+    }
+
+    pub fn subscribe_audit(&self) -> broadcast::Receiver<AuditEntry> {
+        self.audit.subscribe()
     }
 }

@@ -1,11 +1,12 @@
-// The Events tab of the Logs screen: the event history with a live tail,
-// with filters by kind and agent. `/logs/events` can show every project or
+// The Events tab of the Logs screen: the event history in the live mode of
+// the log tabs (components/Live.tsx), with filters by kind and agent. `/logs/events` can show every project or
 // the selected one. `/p/:project/logs/events` shows the project of the URL
 // only, and the agent filter lists the agents of that project.
 
 import { useParams } from "@solidjs/router";
 import { createEffect, createSignal, For, on, Show } from "solid-js";
 import { EventHistory } from "../../components/EventHistory";
+import { createLive, LiveControl } from "../../components/Live";
 import { PageHead } from "../../components/ui";
 import { EVENT_KINDS, type EventKind } from "../../api/types";
 import { agents, api, projects } from "../../stores";
@@ -19,10 +20,12 @@ export default function EventsPage() {
   const project = () => route.project ?? (scope() === "project" ? (projects.selected() ?? undefined) : undefined);
   // An agent of the last project is not in the list of a new one.
   createEffect(on(project, () => setAgent(""), { defer: true }));
+  const live = createLive();
 
   return (
     <>
       <PageHead title="Events" level={2}>
+        <LiveControl live={live} count={live.state().held.length} />
         <Show when={!route.project}>
           <select value={scope()} onChange={(e) => setScope(e.currentTarget.value as "all" | "project")} aria-label="Scope">
             <option value="all">All projects</option>
@@ -44,6 +47,7 @@ export default function EventsPage() {
           fetch={(q) => api.events.history({ ...q, kind: kind() || undefined, project: project(), agent: agent() || undefined })}
           match={(e) => (!kind() || e.kind === kind()) && (!project() || e.project === project()) && (!agent() || e.agent_id === agent())}
           showAgent
+          live={live}
         />
       </div>
     </>

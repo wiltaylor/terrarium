@@ -1046,7 +1046,7 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
 
     events: {
       stream: (o = {}) =>
-        createWsEventStream((since) => t.wsUrl("/api/events", { since }), { makeSocket: (u) => t.openSocket(u), since: o.since }),
+        createWsEventStream((since) => t.wsUrl("/api/events", { since, audit: 1 }), { makeSocket: (u) => t.openSocket(u), since: o.since }),
       history: (q = {}) => page("/api/events", { ...q }),
       latest: async () => {
         try {

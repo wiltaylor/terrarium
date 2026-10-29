@@ -45,24 +45,50 @@ pub struct AuditFilter {
     pub actor: Option<String>,
     pub action: Option<String>,
     pub project: Option<String>,
+    /// `asc` (the default) or `desc`. The API checks the value.
+    pub order: Option<String>,
 }
 
-/// Rows oldest first. The cursor is a `seq`.
+impl AuditFilter {
+    /// True when the row passes the filter (`since` aside). The live
+    /// `audit` frames of the event streams use it.
+    pub fn matches(&self, e: &AuditEntry) -> bool {
+        self.actor.as_ref().is_none_or(|a| *a == e.actor)
+            && self.action.as_ref().is_none_or(|a| *a == e.action)
+            && self
+                .project
+                .as_ref()
+                .is_none_or(|p| e.project.as_ref() == Some(p))
+    }
+}
+
+/// Rows oldest first. The cursor is a `seq`. With `order=desc`, newest
+/// first, and the cursor goes on to older rows.
 pub fn list(conn: &Connection, f: &AuditFilter, page: &Page) -> ApiResult<Paged<AuditEntry>> {
     let limit = page.limit();
-    let after: i64 = page.cursor().and_then(|c| c.parse().ok()).unwrap_or(0);
-    let mut stmt = conn.prepare(
+    let desc = f.order.as_deref() == Some("desc");
+    let cursor: Option<i64> = page.cursor().and_then(|c| c.parse().ok());
+    let sql = if desc {
+        "SELECT * FROM audit WHERE seq < ?1
+           AND (?2 IS NULL OR at >= ?2)
+           AND (?3 IS NULL OR actor = ?3)
+           AND (?4 IS NULL OR action = ?4)
+           AND (?5 IS NULL OR project = ?5)
+         ORDER BY seq DESC LIMIT ?6"
+    } else {
         "SELECT * FROM audit WHERE seq > ?1
            AND (?2 IS NULL OR at >= ?2)
            AND (?3 IS NULL OR actor = ?3)
            AND (?4 IS NULL OR action = ?4)
            AND (?5 IS NULL OR project = ?5)
-         ORDER BY seq LIMIT ?6",
-    )?;
+         ORDER BY seq LIMIT ?6"
+    };
+    let bound = cursor.unwrap_or(if desc { i64::MAX } else { 0 });
+    let mut stmt = conn.prepare(sql)?;
     let rows = stmt
         .query_map(
             rusqlite::params![
-                after,
+                bound,
                 f.since,
                 f.actor,
                 f.action,
@@ -73,4 +99,12 @@ pub fn list(conn: &Connection, f: &AuditFilter, page: &Page) -> ApiResult<Paged<
         )?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(Paged::from_rows(rows, limit, |e| e.seq.to_string()))
+}
+
+/// One row by its ID.
+pub fn get(conn: &Connection, id: &str) -> ApiResult<Option<AuditEntry>> {
+    use rusqlite::OptionalExtension;
+    Ok(conn
+        .query_row("SELECT * FROM audit WHERE id = ?1", [id], row)
+        .optional()?)
 }

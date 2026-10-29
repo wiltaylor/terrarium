@@ -487,6 +487,21 @@ pub async fn reload(State(state): State<Shared>, actor: Actor) -> ApiResult<Json
     Ok(Json(report))
 }
 
+/// Which audit rows `actor` may read: `Ok(None)` every row (the operator
+/// and a sysadmin), `Ok(Some(project))` the rows of one project (a project
+/// admin), or `403` (any other agent). `GET /api/audit` and the `audit`
+/// frames of the firehose (docs/api.md §9.1) both use this rule.
+pub fn audit_scope(actor: &Actor) -> ApiResult<Option<String>> {
+    match actor {
+        Actor::Operator => Ok(None),
+        Actor::Agent(a) if a.is_sysadmin() => Ok(None),
+        Actor::Agent(a) if a.roles.contains(&Role::ProjectAdmin) => Ok(Some(a.project.clone())),
+        Actor::Agent(_) => Err(ApiError::forbidden(
+            "reading the audit log needs project_admin, sysadmin, or the operator",
+        )),
+    }
+}
+
 /// `GET /api/audit`: the operator and sysadmins see every row; a project
 /// admin sees the rows of its project.
 pub async fn audit(
@@ -495,21 +510,20 @@ pub async fn audit(
     ApiQuery(page): ApiQuery<Page>,
     ApiQuery(mut filter): ApiQuery<AuditFilter>,
 ) -> ApiResult<Response> {
-    match &actor {
-        Actor::Operator => {}
-        Actor::Agent(a) if a.is_sysadmin() => {}
-        Actor::Agent(a) if a.roles.contains(&Role::ProjectAdmin) => {
-            if filter.project.as_deref().is_some_and(|p| p != a.project) {
-                return Err(ApiError::forbidden(
-                    "a project admin reads the audit rows of its own project only",
-                ));
-            }
-            filter.project = Some(a.project.clone());
-        }
-        Actor::Agent(_) => {
+    if let Some(own) = audit_scope(&actor)? {
+        if filter.project.as_deref().is_some_and(|p| p != own) {
             return Err(ApiError::forbidden(
-                "reading the audit log needs project_admin, sysadmin, or the operator",
+                "a project admin reads the audit rows of its own project only",
             ));
+        }
+        filter.project = Some(own);
+    }
+    match filter.order.as_deref() {
+        None | Some("" | "asc" | "desc") => {}
+        Some(other) => {
+            return Err(ApiError::bad_request(format!(
+                "bad order `{other}`: use asc or desc"
+            )));
         }
     }
     filter.since = crate::time_param::opt_time_param("since", filter.since.as_deref())?;

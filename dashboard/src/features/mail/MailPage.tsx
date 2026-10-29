@@ -1,6 +1,6 @@
 // The Mail tab of the Logs screen (docs/api.md §7): every message, newest
 // first, with filters (from, to, project, thread, time range, free text)
-// and a live tail. The log is a record: it keeps no unread state for the
+// and the live mode of the log tabs (components/Live.tsx). The log is a record: it keeps no unread state for the
 // operator. Mail that needs the operator goes to the Inbox. A row opens its
 // thread inline, with reply and compose.
 //
@@ -10,6 +10,7 @@
 
 import { A, useParams, useSearchParams } from "@solidjs/router";
 import { createEffect, createMemo, createSignal, For, on, onCleanup, Show } from "solid-js";
+import { createLive, createScrollKeeper, LiveControl, NewAbove } from "../../components/Live";
 import { Empty, ErrorBanner, LoadMore, PageHead, useNow } from "../../components/ui";
 import type { Card, Message } from "../../api/types";
 import { ago } from "../../lib/format";
@@ -26,10 +27,7 @@ import {
   openThreadOf,
   RANGE_LABELS,
   serverQuery,
-  setTail,
   shortThread,
-  TAIL_START,
-  tailEvent,
   threadOf,
   type LogFilter,
   type LogParams,
@@ -54,8 +52,13 @@ export default function MailPage() {
     setLimit(PAGE);
   };
   const now = useNow(60_000);
-  const feed = createMailFeed(api, () => serverQuery(filter()));
-  const shown = createMemo(() => applyFilter(feed.messages(), filter(), now(), projects.prefixes()));
+  const live = createLive();
+  const feed = createMailFeed(api, () => serverQuery(filter()), { onNew: live.arrive });
+  /** Every message that the filters let through, held ones too. */
+  const matching = createMemo(() => applyFilter(feed.messages(), filter(), now(), projects.prefixes()));
+  const shown = createMemo(() => live.shown(matching(), (m) => m.id));
+  /** "Show N new": the held messages that match the filters; the others stay held. */
+  const showHeld = () => live.release(matching().map((m) => m.id));
   const visible = () => shown().slice(0, limit());
   const names = createMemo(() => namesOf(feed.messages()));
   const [error, setError] = createSignal<unknown>(null);
@@ -67,9 +70,9 @@ export default function MailPage() {
   const openThread = createMemo(() => openThreadOf(feed.messages(), expanded()));
   const toggle = (m: Message) => setParams({ open: openRow() === m.id ? undefined : m.id });
 
-  // Live tail: a `mail` event pulls the new messages and its thread again.
-  // With the tail off, the log stays still and counts the events.
-  const [tail, setTailState] = createSignal(TAIL_START);
+  // A `mail` event pulls the new messages and its thread again, live or
+  // not: off, the new messages wait (held) and "Show N new" counts the ones
+  // that match the filters.
   let t: ReturnType<typeof setTimeout> | undefined;
   const touched = new Set<string>();
   const pullSoon = (threads: string[]) => {
@@ -84,16 +87,10 @@ export default function MailPage() {
   const off = events.on((e) => {
     if (e.kind !== "mail") return;
     const thread = typeof e.data?.thread_id === "string" ? e.data.thread_id : undefined;
-    const r = tailEvent(tail(), thread);
-    setTailState(r.state);
-    if (r.pull) pullSoon(thread ? [thread] : []);
+    pullSoon(thread ? [thread] : []);
   });
   onCleanup(() => (off(), clearTimeout(t)));
-  const live = (on: boolean) => {
-    const r = setTail(tail(), on);
-    setTailState(r.state);
-    if (r.pull) pullSoon(r.pull);
-  };
+  const keeper = createScrollKeeper("tr.log-row");
 
   // Opening a thread loads all of it: a filter can hide part of it.
   createEffect(
@@ -105,15 +102,8 @@ export default function MailPage() {
   return (
     <>
       <PageHead title="Mail" level={2}>
-        <label class="row small" title="Show new messages as they come">
-          <input type="checkbox" checked={tail().live} onChange={(e) => live(e.currentTarget.checked)} /> Live tail
-        </label>
-        <Show when={!tail().live && tail().missed > 0}>
-          <button class="small" onClick={() => live(true)}>
-            {tail().missed} new
-          </button>
-        </Show>
-        <button onClick={() => void feed.reload()}>Refresh</button>
+        <LiveControl live={live} count={live.held(matching(), (m) => m.id)} onShow={showHeld} />
+        <button onClick={() => (live.release(), void feed.reload())}>Refresh</button>
         <button class="primary" onClick={() => setComposing(route.project ? { to: `project:${route.project}` } : {})}>
           Compose
         </button>
@@ -156,6 +146,7 @@ export default function MailPage() {
 
       <ErrorBanner error={error() ?? feed.error()} onDismiss={() => setError(null)} />
 
+      <NewAbove live={live} keeper={keeper} held={live.held(matching(), (m) => m.id)} onShow={showHeld} />
       <div class="card-box table-wrap" style={{ padding: "0" }}>
         <table class="mail-log">
           <thead>
@@ -167,7 +158,7 @@ export default function MailPage() {
               <th>Thread</th>
             </tr>
           </thead>
-          <tbody>
+          <tbody ref={keeper.ref}>
             <For
               each={visible()}
               fallback={

@@ -7,7 +7,9 @@
 //     {"type":"resize","cols":<n>,"rows":<n>}
 //
 // Events protocol (`/api/events`, `/api/agents/{id}/events`):
-//   server -> client: one JSON `AgentEvent` per text frame.
+//   server -> client: one JSON `AgentEvent` per text frame. With `?audit=1`
+//   (firehose only), also `{"kind":"audit","audit":<row>}` frames with no
+//   `seq`: new audit rows that the caller may read (docs/api.md §9.1).
 //
 // Authentication (docs/security-review.md F4): a browser cannot set an
 // `Authorization` header on a WebSocket. Two modes, picked by `AuthSocket`
@@ -18,7 +20,7 @@
 //   (`Sec-WebSocket-Protocol`), and the daemon echoes it back.
 // The URL never carries a token.
 
-import type { AgentEvent } from "./types";
+import type { AgentEvent, AuditEntry } from "./types";
 
 /** The subset of `WebSocket` the terminal needs. A real `WebSocket` fits it; the mock implements it. */
 export interface PtySocket {
@@ -62,6 +64,8 @@ export interface StreamStatus {
 
 export interface EventStream {
   subscribe(fn: (e: AgentEvent) => void): () => void;
+  /** The `audit` frames: new or changed audit rows. They do not move `lastSeq`. */
+  onAudit(fn: (a: AuditEntry) => void): () => void;
   onState(fn: (s: ConnectionState, status: StreamStatus) => void): () => void;
   /** Connect now, without waiting for the backoff. */
   reconnect(): void;
@@ -72,6 +76,14 @@ export interface EventStream {
 export function backoffDelay(attempt: number, min = 500, max = 15_000, random: () => number = Math.random): number {
   const base = Math.min(max, min * 2 ** Math.max(0, attempt));
   return Math.round(base * (0.8 + 0.2 * random()));
+}
+
+/** The audit row of an `audit` frame (no `seq`), or undefined for an event frame. */
+export function auditOf(frame: unknown): AuditEntry | undefined {
+  const f = frame as { kind?: unknown; seq?: unknown; audit?: unknown } | null;
+  if (!f || f.kind !== "audit" || typeof f.seq === "number") return undefined;
+  const a = f.audit as AuditEntry | undefined;
+  return a && typeof a === "object" && typeof a.id === "string" ? a : undefined;
 }
 
 /** The parts of `WebSocket` the event stream uses. */
@@ -104,6 +116,7 @@ export function createWsEventStream(url: (since: number | undefined) => string, 
   const clearTimer = opts.clearTimer ?? ((t: unknown) => clearTimeout(t as ReturnType<typeof setTimeout>));
   const now = opts.now ?? Date.now;
   const listeners = new Set<(e: AgentEvent) => void>();
+  const auditListeners = new Set<(a: AuditEntry) => void>();
   const stateListeners = new Set<(s: ConnectionState, status: StreamStatus) => void>();
   let socket: EventSocket | null = null;
   let closed = false;
@@ -148,6 +161,8 @@ export function createWsEventStream(url: (since: number | undefined) => string, 
       } catch {
         return; // ignore malformed frames
       }
+      const audit = auditOf(e);
+      if (audit) return auditListeners.forEach((fn) => fn(audit));
       if (typeof e.seq === "number") {
         if (started && e.seq <= status.lastSeq) return; // seen already
         status.lastSeq = e.seq;
@@ -172,6 +187,10 @@ export function createWsEventStream(url: (since: number | undefined) => string, 
     subscribe(fn) {
       listeners.add(fn);
       return () => listeners.delete(fn);
+    },
+    onAudit(fn) {
+      auditListeners.add(fn);
+      return () => auditListeners.delete(fn);
     },
     onState(fn) {
       stateListeners.add(fn);

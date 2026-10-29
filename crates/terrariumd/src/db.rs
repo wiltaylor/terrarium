@@ -4,7 +4,7 @@
 //! have run. Never edit a migration that has shipped; add a new one.
 
 use std::borrow::Cow;
-use std::cell::OnceCell;
+use std::cell::{OnceCell, RefCell};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -14,6 +14,7 @@ use terrarium_core::redact::{Redactor, RedactorHandle, View};
 
 use crate::error::{ApiError, ApiResult};
 use crate::events::{EventDraft, EventHub, StoredEvent};
+use crate::store::audit::AuditEntry;
 
 /// The migrations, in order. Index + 1 is the schema version.
 const MIGRATIONS: &[&str] = &[
@@ -1327,7 +1328,7 @@ impl Db {
 
     /// Run a write in one transaction. `actor` labels the events and audit
     /// rows that the write makes. The transaction commits when `f` returns
-    /// `Ok`; then the new events go to the subscribers.
+    /// `Ok`; then the new events and audit rows go to the subscribers.
     pub async fn write<T, F>(&self, actor: impl Into<String>, f: F) -> ApiResult<T>
     where
         T: Send + 'static,
@@ -1336,7 +1337,7 @@ impl Db {
         let conn = self.conn.clone();
         let actor = actor.into();
         let handle = self.redactor.clone();
-        let (value, events) = tokio::task::spawn_blocking(move || {
+        let (value, events, audits) = tokio::task::spawn_blocking(move || {
             let mut guard = match conn.lock() {
                 Ok(g) => g,
                 Err(poisoned) => poisoned.into_inner(),
@@ -1350,6 +1351,7 @@ impl Db {
                 actor,
                 cause: None,
                 events: Vec::new(),
+                audits: RefCell::default(),
                 redactor,
                 view: OnceCell::new(),
                 rebuild: None,
@@ -1358,6 +1360,7 @@ impl Db {
             let Tx {
                 tx,
                 events,
+                audits,
                 rebuild,
                 ..
             } = t;
@@ -1374,18 +1377,21 @@ impl Db {
                 tracing::debug!(patterns = r.pattern_count(), "redaction matcher built");
                 handle.replace(r);
             }
-            Ok::<_, ApiError>((value, events))
+            Ok::<_, ApiError>((value, events, audits.into_inner()))
         })
         .await
         .map_err(|e| ApiError::internal(format!("database task failed: {e}")))??;
         for e in events {
             self.hub.publish(e);
         }
+        for a in audits {
+            self.hub.publish_audit(a);
+        }
         Ok(value)
     }
 }
 
-/// A write transaction with the actor and the events it made.
+/// A write transaction with the actor and the events and audit rows it made.
 pub struct Tx<'c> {
     tx: rusqlite::Transaction<'c>,
     /// `operator`, `agent:<ulid>`, `system`, or `schedule:<ulid>` (the
@@ -1395,6 +1401,9 @@ pub struct Tx<'c> {
     /// (a trigger run: `{schedule, run, event, depth}`).
     pub cause: Option<serde_json::Value>,
     events: Vec<StoredEvent>,
+    /// The audit rows that the transaction wrote or changed, for the live
+    /// streams after the commit (`audit` frames).
+    audits: RefCell<Vec<AuditEntry>>,
     /// The redaction matcher at the start of the transaction.
     redactor: Arc<Redactor>,
     /// The labels that the writes of this actor show ([`writer_view`]).
@@ -1419,6 +1428,7 @@ impl<'c> Tx<'c> {
             actor: actor.to_owned(),
             cause: None,
             events: Vec::new(),
+            audits: RefCell::default(),
             redactor: Arc::new(Redactor::empty()),
             view: OnceCell::new(),
             rebuild: None,
@@ -1536,6 +1546,9 @@ impl<'c> Tx<'c> {
             "UPDATE audit SET detail = ?2, at = ?3 WHERE id = ?1",
             rusqlite::params![id, detail.to_string(), now()],
         )?;
+        if let Some(row) = crate::store::audit::get(&self.tx, id)? {
+            self.audits.borrow_mut().push(row);
+        }
         Ok(())
     }
 
@@ -1550,6 +1563,7 @@ impl<'c> Tx<'c> {
         detail: serde_json::Value,
     ) -> ApiResult<()> {
         let detail = self.audit_detail(detail);
+        let at = now();
         self.tx.execute(
             "INSERT INTO audit (id, actor, action, target, project, detail, at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -1560,9 +1574,20 @@ impl<'c> Tx<'c> {
                 target,
                 project,
                 detail.to_string(),
-                now()
+                at
             ],
         )?;
+        // `seq` is the rowid (INTEGER PRIMARY KEY).
+        self.audits.borrow_mut().push(AuditEntry {
+            id: id.to_owned(),
+            seq: self.tx.last_insert_rowid(),
+            at,
+            actor: self.actor.clone(),
+            action: action.to_owned(),
+            target: target.to_owned(),
+            project: project.map(str::to_owned),
+            detail,
+        });
         Ok(())
     }
 }

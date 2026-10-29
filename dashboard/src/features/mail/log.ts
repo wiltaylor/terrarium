@@ -150,35 +150,6 @@ export function counterpart(m: Message): string | undefined {
 /** The names in a list, for the `from` and `to` suggestions. */
 export const namesOf = (messages: Message[]): string[] => [...new Set(messages.flatMap((m) => [m.from_name, m.to_name]))].sort();
 
-// ----- live tail -----
-
-/**
- * Live tail: on, a `mail` event pulls the new messages at once. Off, the
- * log stays as it is, and counts the events, so the page can say "N new".
- */
-export interface TailState {
-  live: boolean;
-  /** `mail` events while the tail was off. */
-  missed: number;
-  /** Threads that those events touched, to pull when the tail goes on again. */
-  threads: string[];
-}
-
-export const TAIL_START: TailState = { live: true, missed: 0, threads: [] };
-
-/** A `mail` event: pull now (live), or count it. */
-export function tailEvent(s: TailState, thread: string | undefined): { state: TailState; pull: boolean } {
-  if (s.live) return { state: s, pull: true };
-  return { state: { ...s, missed: s.missed + 1, threads: thread && !s.threads.includes(thread) ? [...s.threads, thread] : s.threads }, pull: false };
-}
-
-/** Turn the tail on or off. On again: pull the threads that the missed events touched. */
-export function setTail(s: TailState, live: boolean): { state: TailState; pull: string[] | null } {
-  if (live === s.live) return { state: s, pull: null };
-  if (!live) return { state: { live: false, missed: 0, threads: [] }, pull: null };
-  return { state: TAIL_START, pull: s.threads };
-}
-
 // ----- URL state -----
 
 export type LogParams = Partial<Record<"from" | "to" | "project" | "thread" | "q" | "range" | "since" | "until" | "open", string>>;

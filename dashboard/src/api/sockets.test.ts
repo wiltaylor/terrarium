@@ -89,6 +89,20 @@ describe("createWsEventStream", () => {
     expect(h.seen).toEqual([1, 2, 3]);
   });
 
+  it("gives audit frames to onAudit, and they do not move the resume point", () => {
+    const h = harness();
+    const rows: string[] = [];
+    h.stream.onAudit((a) => rows.push(a.action));
+    h.sockets[0]!.fire("open");
+    h.sockets[0]!.frame({ seq: 4 });
+    h.sockets[0]!.fire("message", JSON.stringify({ kind: "audit", audit: { id: "A1", seq: 90, at: "", actor: "operator", action: "agent.start", target: "x" } }));
+    expect(rows).toEqual(["agent.start"]);
+    expect(h.seen).toEqual([4]);
+    h.sockets[0]!.fire("close");
+    h.fireTimer();
+    expect(h.sockets[1]!.url).toBe("ws://d/api/events?since=4");
+  });
+
   it("backs off on failed connects and resets after an open", () => {
     const h = harness(10);
     expect(h.sockets[0]!.url).toBe("ws://d/api/events?since=10");
