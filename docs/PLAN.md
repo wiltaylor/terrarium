@@ -1211,12 +1211,12 @@ Project admins read it. The intended flow:
 
 Threads span projects. A thread's participants are the agents and project
 inboxes that have posted on it. Replies go to all participants. The dashboard
-shows the mail of a project as a log next to its board (the project **Mail**
-page).
+shows the mail of a project as a log next to its board (the Mail tab of the
+project **Logs** page).
 
-**Mail is a log for the operator.** The global Mail page and the project
-Mail page list the messages with filters: from, to, project, thread, a time
-range, and free text. They follow new mail live. They have no unread state,
+**Mail is a log for the operator.** The global Mail tab and the project
+Mail tab (dashboard **Logs**) list the messages with filters: from, to,
+project, thread, a time range, and free text. They follow new mail live. They have no unread state,
 no unread count, and no "mark read" for the operator. What needs the
 operator goes to the Inbox (§12e), so nothing is lost: each mail to
 `operator` is an Inbox item until the operator acknowledges it, and a
@@ -1555,7 +1555,7 @@ mail opens Subscriptions). A system card shows the
 thread, the held messages with Release, and Resume with an optional note.
 The Inbox nav item has the one badge of the things that wait for the
 operator: red when one is urgent or critical. The Mail pages are logs (§12); the
-project page `Mail` (`/p/<project>/mail`; `/p/<project>/inbox` redirects)
+project Mail tab (`/p/<project>/logs/mail`; `/p/<project>/mail` and `/p/<project>/inbox` redirect)
 is the log of one project. The agent page shows the questions and notices
 of a leader. The `question` and `inbox` events keep all of them live.
 

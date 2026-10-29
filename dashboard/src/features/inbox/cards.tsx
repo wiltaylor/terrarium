@@ -31,8 +31,8 @@ function useAction() {
   return { busy, error, setError, run };
 }
 
-/** The mail log, filtered to the thread, with the thread open. */
-const threadHref = (thread: string) => `/mail?thread=${encodeURIComponent(thread)}&open=${encodeURIComponent(thread)}`;
+/** The Mail tab of the logs, filtered to the thread, with the thread open. */
+const threadHref = (thread: string) => `/logs/mail?thread=${encodeURIComponent(thread)}&open=${encodeURIComponent(thread)}`;
 
 /** A mail to `operator`: Acknowledge, with an optional reply on the thread. */
 export function MailItemCard(props: { message: Message; open: boolean; now: number; onAck: (m: Message) => void }) {

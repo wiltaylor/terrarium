@@ -40,7 +40,7 @@ export default function MemoryPage() {
     return { ...g, edges: g.edges.filter((l) => l.relation === relation()) };
   };
   const sourceHref = (s: Memory["sources"][number]) =>
-    s.kind === "card" ? `/p/${params.project}/board?card=${s.ref}` : s.kind === "thread" ? `/mail` : s.kind === "url" && /^https?:/.test(s.ref) ? s.ref : undefined;
+    s.kind === "card" ? `/p/${params.project}/board?card=${s.ref}` : s.kind === "thread" ? `/logs/mail` : s.kind === "url" && /^https?:/.test(s.ref) ? s.ref : undefined;
 
   return (
     <>

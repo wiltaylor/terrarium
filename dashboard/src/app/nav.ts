@@ -6,8 +6,8 @@ export const PROJECT_ITEMS = [
   // The templates that apply to the project: its own and the global ones.
   { path: "templates", label: "Templates" },
   { path: "board", label: "Board" },
-  // The mail log of the project: every message that touches it.
-  { path: "mail", label: "Mail" },
+  // The logs of the project (PROJECT_LOGS_TABS): every message and every event that touches it.
+  { path: "logs", label: "Logs" },
   { path: "wiki", label: "Wiki" },
   { path: "memory", label: "Memory" },
   { path: "versions", label: "Versions" },
@@ -34,12 +34,10 @@ export const GLOBAL_ITEMS = [
   { href: "/skills", label: "Skills" },
   // The secret manager (PLAN §16b): every secret the caller manages.
   { href: "/secrets", label: "Secrets" },
-  // The mail log: a record, with no unread state.
-  { href: "/mail", label: "Mail" },
+  // The logs screen (LOGS_TABS): mail, events, and audit. Active on every /logs/... tab.
+  { href: "/logs", label: "Logs" },
   { href: "/targets", label: "Targets" },
   { href: "/schedules", label: "Schedules" },
-  { href: "/events", label: "Event log" },
-  { href: "/audit", label: "Audit" },
 ] as const;
 
 /** The Settings section at the bottom of the sidebar: one link to the tabbed settings screen. */
@@ -55,6 +53,20 @@ export const SETTINGS_TABS = [
   { path: "hosts", label: "Hosts" },
 ] as const;
 
+/** The tabs of the logs screen, in order. Each is a route under /logs. */
+export const LOGS_TABS = [
+  // The mail log: a record, with no unread state.
+  { path: "mail", label: "Mail" },
+  { path: "events", label: "Events" },
+  { path: "audit", label: "Audit" },
+] as const;
+
+/** The tabs of the project logs screen. Each is a route under /p/:project/logs and shows that project only. */
+export const PROJECT_LOGS_TABS = [
+  { path: "mail", label: "Mail" },
+  { path: "events", label: "Events" },
+] as const;
+
 /**
  * Routes that are gone, and where they go now. A `:param` in `to` takes the
  * value of the same param in the old path.
@@ -65,19 +77,29 @@ export const SETTINGS_TABS = [
  *   so the route redirects to Home and does not answer "Page not found".
  * - The Questions page is now the Inbox, with notices, mail to the
  *   operator, and paused threads.
- * - The project inbox page is now the project Mail log.
+ * - The project inbox page is now the Mail tab of the project logs.
  * - Subscriptions, Hosts, and Config (now "Harness config") are tabs of the
  *   settings screen. A quota mail of the daemon links `/subscriptions`, so
  *   the old paths stay as redirects. `/settings` opens the first tab.
+ * - Mail, Event log, and Audit are tabs of the logs screen, and the project
+ *   Mail page is the Mail tab of the project logs. A bookmark can have an old
+ *   path with a query (`/mail?thread=...`), so the old paths stay as
+ *   redirects. `/logs` and `/p/:project/logs` open the Mail tab.
  */
 export const MOVED_ROUTES = [
   { path: "/p/:project/spend", to: "/" },
   { path: "/questions", to: "/inbox" },
-  { path: "/p/:project/inbox", to: "/p/:project/mail" },
+  { path: "/p/:project/inbox", to: "/p/:project/logs/mail" },
   { path: "/subscriptions", to: "/settings/subscriptions" },
   { path: "/hosts", to: "/settings/hosts" },
   { path: "/config", to: "/settings/harness" },
   { path: "/settings", to: "/settings/account" },
+  { path: "/mail", to: "/logs/mail" },
+  { path: "/events", to: "/logs/events" },
+  { path: "/audit", to: "/logs/audit" },
+  { path: "/logs", to: "/logs/mail" },
+  { path: "/p/:project/mail", to: "/p/:project/logs/mail" },
+  { path: "/p/:project/logs", to: "/p/:project/logs/mail" },
 ] as const;
 
 /** The new place of a moved path, or undefined. */

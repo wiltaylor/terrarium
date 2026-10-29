@@ -224,7 +224,11 @@ a tree shows a filter. Both roots use `app/TreeRoot.tsx`, one open set in
 `localStorage`, and the keyboard map in `app/treeNav.ts`. Settings
 (`features/settings/SettingsPage.tsx`) is one page with a tab for each of
 Account, Subscriptions, Harness config, and Hosts. Each tab is a route under
-`/settings`.
+`/settings`. Logs (`features/logs/LogsPage.tsx`) is the same: the
+"Terrarium" item has a tab for each of Mail, Events, and Audit, under
+`/logs`. The **Logs** item of a project has the Mail and Events tabs of that
+project, under `/p/<project>/logs`. Both screens use
+`components/TabScreen.tsx`. The Logs item is active on each of its tabs.
 
 ## Conventions
 
@@ -497,20 +501,21 @@ The mail log is a record, not a to-do list. It keeps no unread state for the
 operator: no unread count, no mark read, no attention badge. Mail that needs
 the operator is in the Inbox.
 
-`/mail` is a log of every message (agent to agent, agent to operator,
+The mail log is the Mail tab of the Logs screen. `/logs/mail` is a log of every message (agent to agent, agent to operator,
 operator to agent, `system`, project inboxes), newest first.
-`/p/<project>/mail` is the same log for the messages that touch one project.
-The old `/p/<project>/inbox` route redirects to it. A row of the table shows
+`/p/<project>/logs/mail` is the same log for the messages that touch one
+project. The old `/mail`, `/p/<project>/mail`, and `/p/<project>/inbox`
+routes redirect to them. A row of the table shows
 the time, from, to, the subject with the first line and the state chips (the
 recipient's state, read by, released, thread paused), and the thread. A click
 opens the thread under the row, with reply and compose. On a project page, a
 thread to the project inbox replies from `project:<name>`, and **Make card**
 makes a card from its newest message.
 
-The filters are from, to, project (`/mail` only), thread, time range (last
+The filters are from, to, project (`/logs/mail` only), thread, time range (last
 hour, day, week, all time, or from and to times), and free text. They are in
 the URL (`?from=&to=&project=&thread=&range=&since=&until=&q=`). `open=<thread>`
-opens a thread, so the Inbox links to `/mail?thread=<id>&open=<id>`.
+opens a thread, so the Inbox links to `/logs/mail?thread=<id>&open=<id>`.
 
 **Live tail.** On (the default), a `mail` event pulls the new messages at
 once. Off, the log stays still and shows **N new**; a click turns the tail on
@@ -539,9 +544,10 @@ prefix or budget scope. The daemon also has `project`, `since`, `until`, and
 | `/settings/subscriptions` | Settings, Subscriptions tab: subscriptions, detect banner, add wizard | `GET`, `POST`, `DELETE /api/subscriptions[/{name}]`, `GET .../detect`, `POST .../{name}/probe\|verify\|logout\|api-key`, `POST /api/subscriptions/login`, `GET`, `DELETE .../login/{id}`, `POST .../login/{id}/input`, `WS .../login/{id}/pty` |
 | `/inbox` | Inbox: questions, notices, mail to the operator, paused threads; kind tabs, open or done, project filter | `GET /api/inbox?status=&kind=&project=`, `GET /api/inbox/counts`, `POST /api/questions/{id}/answer\|ack\|retract`, `POST /api/inbox/mail/{id}/ack`, `POST /api/mail/{id}/release`, `POST /api/mail/threads/{id}/resume` |
 | `/questions` | Gone: redirects to `/inbox`. | none |
-| `/mail` | Mail log: every message, newest first, filters, live tail, the thread inline, reply, compose | `GET /api/mail?thread=&cursor=`, `POST /api/mail`, `POST /api/mail/{id}/reply` |
-| `/p/:project/mail` | The mail log of one project; reply from the project inbox, make card | `GET /api/mail`, `POST .../inbox/{id}/reply`, `POST .../cards` (`from_mail`) |
-| `/p/:project/inbox` | Gone: redirects to `/p/:project/mail`. | none |
+| `/logs/mail` | Logs, Mail tab: every message, newest first, filters, live tail, the thread inline, reply, compose | `GET /api/mail?thread=&cursor=`, `POST /api/mail`, `POST /api/mail/{id}/reply` |
+| `/p/:project/logs/mail` | Project logs, Mail tab: the mail log of one project; reply from the project inbox, make card | `GET /api/mail`, `POST .../inbox/{id}/reply`, `POST .../cards` (`from_mail`) |
+| `/p/:project/logs/events` | Project logs, Events tab: the event log of one project, with the kind and agent filters (the agents of the project only) | `GET /api/events?since=&kind=&project=&agent=`, events socket |
+| `/p/:project/inbox`, `/p/:project/mail`, `/p/:project/logs` | Gone: redirect to `/p/:project/logs/mail` (`app/nav.ts` `MOVED_ROUTES`). The redirect keeps the query. | none |
 | `/p/:project/board` | Board, drag and drop, card drawer | `GET .../board`, `PATCH /api/cards/{id}`, `POST .../comments`, `GET .../events`, `DELETE /api/cards/{id}` |
 | `/p/:project/memory` | Memory list, detail, graph | `GET .../memories`, `GET /api/memories/{project/MEM-n}/graph` |
 | `/p/:project/wiki/*path` | Page tree, render, edit, history, create | `GET .../wiki`, `GET`, `PUT /api/wiki/{project/path}`, `revisions`, `diff`, `restore`, `backlinks`, `review` |
@@ -553,11 +559,12 @@ prefix or budget scope. The daemon also has `project`, `since`, `until`, and
 | `/p/:project/schedules?tab=triggers`, `/schedules?tab=triggers` | Triggers (spec `on`) and their runs with the event; event sources: list, create, enable, rotate, delete, the one-time secret | `GET /api/schedules?kind=trigger`, `GET`, `POST /api/event-sources`, `PATCH`, `DELETE /api/event-sources/{id}`, `POST .../rotate` (docs/api.md §19.4, §20) |
 | `/targets` | Targets, lifecycle, snapshots (list, take, restore, delete), exec console, leases (grant, extend, revoke, history) | `GET /api/targets`, `POST /api/targets/{name}/up\|down\|snapshot\|restore\|status`, `GET .../snapshots`, `DELETE .../snapshots/{snap}`, `POST .../exec`, `WS .../sessions/{id}/ws`, `DELETE .../sessions/{id}`, `GET`, `POST .../leases`, `PATCH`, `DELETE .../leases/{agent}` (docs/api.md §17.7) |
 | `/settings/hosts` | Settings, Hosts tab: host agents: status, capabilities, add with a one-time token, revoke | `GET`, `POST /api/hosts`, `DELETE /api/hosts/{name}` (new API, not in docs/api.md yet) |
-| `/events` | Event log with history | `GET /api/events?since=&kind=&project=&agent=`, events socket |
-| `/audit` | Audit log | `GET /api/audit?actor=&action=&project=` |
+| `/logs/events` | Logs, Events tab: event log with history; all projects or the selected one, kind and agent filters | `GET /api/events?since=&kind=&project=&agent=`, events socket |
+| `/logs/audit` | Logs, Audit tab: audit log; actor, action, and project filters | `GET /api/audit?actor=&action=&project=` |
 | `/settings/account` | Settings, Account tab: session mode, end time, what the browser keeps; password; sign out, sign out everywhere | `GET`, `DELETE /api/session`, `DELETE /api/sessions`, `PUT /api/auth/password` |
 | `/settings/harness` | Settings, Harness config tab: the config repo, its changes and diffs, commit, sync, pull, push, secret grants to approve | `GET /api/config/...` (docs/api.md §25) |
 | `/settings`, `/subscriptions`, `/hosts`, `/config` | Gone: redirect to `/settings/account`, `/settings/subscriptions`, `/settings/hosts`, and `/settings/harness` (`app/nav.ts` `MOVED_ROUTES`). The redirect keeps the query. A quota mail of the daemon still links `/subscriptions`. | none |
+| `/logs`, `/mail`, `/events`, `/audit` | Gone: redirect to `/logs/mail`, `/logs/mail`, `/logs/events`, and `/logs/audit` (`app/nav.ts` `MOVED_ROUTES`). The redirect keeps the query. | none |
 | `/dev/xss` | Mock only: the hostile payloads of `lib/xss-payloads.ts`, rendered | none |
 
 Artifact upload sends a multipart form: `file`, `name`, `kind`, and

@@ -52,7 +52,7 @@ export function ProjectTree() {
 
   /**
    * The name toggles the node. Off a project page it also selects the project,
-   * so global pages (Agents, Event log) scope to it. On a project page the URL
+   * so global pages (Agents, the Events tab of Logs) scope to it. On a project page the URL
    * is the selection, so the name only toggles.
    */
   const activate = (name: string) => {

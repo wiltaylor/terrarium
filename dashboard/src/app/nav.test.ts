@@ -1,18 +1,39 @@
 import { describe, expect, it } from "vitest";
 import app from "./App.tsx?raw";
 import layout from "./Layout.tsx?raw";
-import { GLOBAL_ITEMS, MOVED_ROUTES, movedTo, PROJECT_ITEMS, SETTINGS_ITEMS, SETTINGS_TABS, TOP_ITEMS } from "./nav";
+import { GLOBAL_ITEMS, LOGS_TABS, MOVED_ROUTES, movedTo, PROJECT_ITEMS, PROJECT_LOGS_TABS, SETTINGS_ITEMS, SETTINGS_TABS, TOP_ITEMS } from "./nav";
 
 describe("navigation", () => {
-  it("has no Spend item; the project has Mail, not Inbox, with a route", () => {
+  it("has no Spend item; the project has Logs, not Inbox or Mail, with a route", () => {
     const paths = PROJECT_ITEMS.map((i) => i.path) as string[];
     expect(paths).not.toContain("spend");
     expect(paths).not.toContain("inbox");
-    expect(PROJECT_ITEMS.find((i) => i.path === "mail")?.label).toBe("Mail");
-    expect(GLOBAL_ITEMS.map((i) => i.href)).toContain("/mail");
-    expect(app).toMatch(/path="\/mail" component=\{MailPage\}/);
-    expect(app).toMatch(/path="\/p\/:project\/mail" component=\{MailPage\}/);
+    expect(paths).not.toContain("mail");
+    expect(PROJECT_ITEMS.find((i) => i.path === "logs")?.label).toBe("Logs");
+    expect(app).toMatch(/<Route path="\/p\/:project\/logs" component=\{LogsPage\}>/);
     expect(app).not.toMatch(/path="\/p\/:project\/inbox" component/);
+    expect(app).not.toMatch(/path="\/p\/:project\/mail" component/);
+  });
+
+  it("has one Logs item where Mail was, and the logs screen has the tabs Mail, Events, Audit, each with a route", () => {
+    const hrefs = GLOBAL_ITEMS.map((i) => i.href) as string[];
+    expect(hrefs.indexOf("/logs")).toBe(hrefs.indexOf("/secrets") + 1);
+    expect(GLOBAL_ITEMS.find((i) => i.href === "/logs")?.label).toBe("Logs");
+    for (const gone of ["/mail", "/events", "/audit"]) expect(hrefs).not.toContain(gone);
+    expect(LOGS_TABS.map((t) => t.label)).toEqual(["Mail", "Events", "Audit"]);
+    expect(app).toMatch(/<Route path="\/logs" component=\{LogsPage\}>/);
+    expect(app).toMatch(/path="\/mail" component=\{MailPage\}/);
+    expect(app).toMatch(/path="\/events" component=\{EventsPage\}/);
+    expect(app).toMatch(/path="\/audit" component=\{AuditPage\}/);
+    for (const t of LOGS_TABS) expect(app).toContain(`path="/${t.path}"`);
+  });
+
+  it("has the tabs Mail and Events on the project logs screen, each with a route under the project", () => {
+    expect(PROJECT_LOGS_TABS.map((t) => t.label)).toEqual(["Mail", "Events"]);
+    const block = app.slice(app.indexOf('<Route path="/p/:project/logs"'), app.indexOf("</Route>", app.indexOf('<Route path="/p/:project/logs"')));
+    expect(block).toMatch(/path="\/mail" component=\{MailPage\}/);
+    expect(block).toMatch(/path="\/events" component=\{EventsPage\}/);
+    expect(block).not.toMatch(/AuditPage/);
   });
 
   it("has Agents first under the project, with a route to the Agents page", () => {
@@ -112,12 +133,43 @@ describe("navigation", () => {
     expect(movedTo("/questions")).toBe("/inbox");
     expect(movedTo("/questions/")).toBe("/inbox");
     expect(movedTo("/questions/x")).toBeUndefined();
-    expect(movedTo("/p/terrarium/inbox")).toBe("/p/terrarium/mail");
-    expect(movedTo("/p/my%20app/inbox/")).toBe("/p/my%20app/mail");
+    // Straight to the Mail tab of the project logs: no second redirect.
+    expect(movedTo("/p/terrarium/inbox")).toBe("/p/terrarium/logs/mail");
+    expect(movedTo("/p/my%20app/inbox/")).toBe("/p/my%20app/logs/mail");
+    expect(movedTo(movedTo("/p/terrarium/inbox")!)).toBeUndefined();
     expect(movedTo("/p/terrarium/inbox/x")).toBeUndefined();
     expect(movedTo("/inbox")).toBeUndefined();
-    expect(movedTo("/p/terrarium/mail")).toBeUndefined();
-    expect(MOVED_ROUTES.map((r) => r.path)).toEqual(["/p/:project/spend", "/questions", "/p/:project/inbox", "/subscriptions", "/hosts", "/config", "/settings"]);
+    expect(MOVED_ROUTES.map((r) => r.path)).toEqual([
+      "/p/:project/spend",
+      "/questions",
+      "/p/:project/inbox",
+      "/subscriptions",
+      "/hosts",
+      "/config",
+      "/settings",
+      "/mail",
+      "/events",
+      "/audit",
+      "/logs",
+      "/p/:project/mail",
+      "/p/:project/logs",
+    ]);
+  });
+
+  it("redirects the old Mail, Event log, and Audit paths to the logs tabs, and the project Mail to the project logs", () => {
+    expect(movedTo("/mail")).toBe("/logs/mail");
+    expect(movedTo("/mail/")).toBe("/logs/mail");
+    expect(movedTo("/events")).toBe("/logs/events");
+    expect(movedTo("/audit")).toBe("/logs/audit");
+    expect(movedTo("/logs")).toBe("/logs/mail");
+    expect(movedTo("/logs/")).toBe("/logs/mail");
+    expect(movedTo("/p/terrarium/mail")).toBe("/p/terrarium/logs/mail");
+    expect(movedTo("/p/my%20app/mail/")).toBe("/p/my%20app/logs/mail");
+    expect(movedTo("/p/terrarium/logs")).toBe("/p/terrarium/logs/mail");
+    for (const now of ["/logs/mail", "/logs/events", "/logs/audit", "/p/terrarium/logs/mail", "/p/terrarium/logs/events"]) expect(movedTo(now)).toBeUndefined();
+    expect(movedTo("/mail/x")).toBeUndefined();
+    // Every redirect lands on a page, not on a second redirect.
+    for (const r of MOVED_ROUTES) expect(movedTo(r.to.replace(":project", "terrarium"))).toBeUndefined();
   });
 
   it("has Secrets after Skills in the global list, and before Settings under the project, each with a route to one page", () => {

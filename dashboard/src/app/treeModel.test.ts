@@ -130,7 +130,7 @@ describe("createExpandedStore", () => {
     st.follow("/p/alpha/board");
     expect(st.isOpen("alpha")).toBe(true);
     st.close("alpha");
-    st.follow("/p/alpha/mail"); // same project: your close stays
+    st.follow("/p/alpha/logs/mail"); // same project: your close stays
     expect(st.isOpen("alpha")).toBe(false);
     st.follow("/p/beta/board");
     expect(st.list()).toEqual(["beta"]);

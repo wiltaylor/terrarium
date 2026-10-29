@@ -1,12 +1,12 @@
-// The mail log (docs/api.md §7): every message, newest first, with filters
-// (from, to, project, thread, time range, free text) and a live tail. The
-// log is a record: it keeps no unread state for the operator. Mail that
-// needs the operator goes to the Inbox. A row opens its thread inline, with
-// reply and compose.
+// The Mail tab of the Logs screen (docs/api.md §7): every message, newest
+// first, with filters (from, to, project, thread, time range, free text)
+// and a live tail. The log is a record: it keeps no unread state for the
+// operator. Mail that needs the operator goes to the Inbox. A row opens its
+// thread inline, with reply and compose.
 //
-// `/mail` shows every project. `/p/:project/mail` shows the messages that
-// touch one project, and replies from the project inbox where the thread
-// goes to it.
+// `/logs/mail` shows every project. `/p/:project/logs/mail` shows the
+// messages that touch one project, and replies from the project inbox where
+// the thread goes to it.
 
 import { A, useParams, useSearchParams } from "@solidjs/router";
 import { createEffect, createMemo, createSignal, For, on, onCleanup, Show } from "solid-js";
@@ -100,7 +100,7 @@ export default function MailPage() {
 
   return (
     <>
-      <PageHead title={route.project ? `Mail · ${route.project}` : "Mail log"}>
+      <PageHead title="Mail" level={2}>
         <label class="row small" title="Show new messages as they come">
           <input type="checkbox" checked={tail().live} onChange={(e) => live(e.currentTarget.checked)} /> Live tail
         </label>

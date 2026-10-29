@@ -25,6 +25,7 @@ const AuditPage = lazy(() => import("../features/audit/AuditPage"));
 const EventsPage = lazy(() => import("../features/events/EventsPage"));
 const ProjectsPage = lazy(() => import("../features/projects/ProjectsPage"));
 const ProjectSettings = lazy(() => import("../features/projects/ProjectSettings"));
+const LogsPage = lazy(() => import("../features/logs/LogsPage"));
 const SettingsPage = lazy(() => import("../features/settings/SettingsPage"));
 const AccountPage = lazy(() => import("../features/settings/AccountPage"));
 const ConfigPage = lazy(() => import("../features/config/ConfigPage"));
@@ -71,12 +72,15 @@ export function App() {
         <Route path="/templates" component={TemplatesPage} />
         <Route path="/skills/:name?" component={SkillsPage} />
         <Route path="/secrets" component={SecretsPage} />
-        <Route path="/mail" component={MailPage} />
         <Route path="/inbox" component={InboxPage} />
         <Route path="/targets" component={TargetsPage} />
         <Route path="/schedules" component={SchedulesPage} />
-        <Route path="/events" component={EventsPage} />
-        <Route path="/audit" component={AuditPage} />
+        {/* The logs screen: a tab bar over one route per tab (nav.ts LOGS_TABS). /logs redirects to the first tab. */}
+        <Route path="/logs" component={LogsPage}>
+          <Route path="/mail" component={MailPage} />
+          <Route path="/events" component={EventsPage} />
+          <Route path="/audit" component={AuditPage} />
+        </Route>
         {/* The settings screen: a tab bar over one route per tab (nav.ts SETTINGS_TABS). /settings redirects to the first tab. */}
         <Route path="/settings" component={SettingsPage}>
           <Route path="/account" component={AccountPage} />
@@ -88,7 +92,11 @@ export function App() {
         <Route path="/p/:project/agents" component={AgentsPage} />
         <Route path="/p/:project/templates" component={TemplatesPage} />
         <Route path="/p/:project/board" component={BoardPage} />
-        <Route path="/p/:project/mail" component={MailPage} />
+        {/* The project logs: the Mail and Events tabs (nav.ts PROJECT_LOGS_TABS), each for this project only. */}
+        <Route path="/p/:project/logs" component={LogsPage}>
+          <Route path="/mail" component={MailPage} />
+          <Route path="/events" component={EventsPage} />
+        </Route>
         <Route path="/p/:project/settings" component={ProjectSettings} />
         <Route path="/p/:project/memory" component={MemoryPage} />
         <Route path="/p/:project/wiki/*path" component={WikiPage} />

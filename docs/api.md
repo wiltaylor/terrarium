@@ -2522,7 +2522,7 @@ For an agent sender:
   from or to one of its agents (also a removed one). `since` and `until`
   are RFC 3339 times (`since` is inclusive); another value is
   `422 invalid`. `q` is free text: a part of the subject or the body,
-  with no case. The dashboard Mail pages are logs with these filters.
+  with no case. The Mail tabs of the dashboard Logs screens use these filters.
 - `to` and `from` take every address kind of §2.3: `operator`, `system`,
   `project:<name>`, or an agent. Nothing goes to `system`, so `to=system`
   answers `[]`. An unknown project or agent is `404`.

@@ -1,3 +1,6 @@
+// The Audit tab of the Logs screen: who did what, with filters by actor,
+// action, and project.
+
 import { createSignal, For, Show } from "solid-js";
 import { createPagedList } from "../../components/paged";
 import { Empty, ErrorBanner, LoadMore, PageHead } from "../../components/ui";
@@ -44,7 +47,7 @@ export default function AuditPage() {
   const actors = () => [...new Set(["operator", "system", ...list.items().map((e) => e.actor)])].sort();
   return (
     <>
-      <PageHead title="Audit">
+      <PageHead title="Audit" level={2}>
         <select value={actor()} onChange={(e) => setActor(e.currentTarget.value)} aria-label="Actor">
           <option value="">Any actor</option>
           <For each={actors()}>{(a) => <option value={a}>{actorName(a)}</option>}</For>

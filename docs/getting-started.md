@@ -434,8 +434,8 @@ that stops all work. While a critical item is open:
   "⚠ Critical — Terrarium" and the tab icon changes to an alert icon.
   Click the tab to stop it.
 
-The Mail pages (the global **Mail** item, and **Mail** in each project)
-are logs of the messages between the agents. Filter them by sender,
+The Mail tabs of the **Logs** screens (the global **Logs** item, and **Logs**
+in each project) are logs of the messages between the agents. Filter them by sender,
 recipient, project, thread, time, and text. They follow new mail live.
 They have no unread state: the Inbox holds what needs you.
 
