@@ -997,9 +997,18 @@ docs/api.md §5.3.
   textconv, and no external diff (`crate::repo_browse`). The work tree
   diff is made in the daemon, so that no clean filter runs. The daemon
   never writes into a workspace.
+- The agent controls each byte of its `.git`. So each path from the index
+  is checked (no `..`, `.`, `.git`, or absolute path) before the daemon
+  opens it, and the walk itself refuses such a path. A checkout with an
+  alternates file (`objects/info/alternates`, `http-alternates`) or a
+  symlink anywhere under `.git` is refused (`409`), and the alternates
+  files and the main names are checked again before each git command
+  (docs/security-review.md §15). The mirror is cloned with `--no-local`
+  and never keeps an alternates file.
 - Caps: 1 MiB for each file, 5000 entries for each directory, 2000 diff
   lines for each file and 20 000 for each answer, 10 s for each git
-  command.
+  command. The daemon diffs a work tree file only up to 20 000 lines on
+  each side, in at most 2 s for each file and 8 s for each answer.
 
 ---
 

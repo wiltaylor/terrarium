@@ -26,12 +26,20 @@
 //!   component is opened with `O_NOFOLLOW` from the checkout's directory
 //!   fd ([`Root`]). A symlink is shown as a symlink (its target text) and
 //!   is never followed. `.git` is not shown and cannot be named.
+//! - The agent can write any path into `.git/index`. Each index path is
+//!   checked with [`check_git_path`] before the daemon opens it, and
+//!   [`Root::lookup`] refuses `..`, `.`, `.git`, and an absolute path too.
+//! - [`ReadGit`] refuses a checkout with an alternates file or a symlink
+//!   in `.git` (the objects or files of another repo), before each
+//!   command too (`crate::git`).
 //! - The changes in the work tree (not staged) are found without git: the
 //!   daemon reads each index entry's file, makes its blob ID in Rust
 //!   (`blob <len>\0<bytes>`), and makes the diff with `similar`. `git
 //!   status`, `git diff` against the work tree, and `git hash-object` run
 //!   the clean filter, so they are not used. A file that a filter or
-//!   `core.autocrlf` changes on checkout shows as changed.
+//!   `core.autocrlf` changes on checkout shows as changed. The Rust diff
+//!   has a line cap and deadlines ([`MAX_DIFF_INPUT_LINES`],
+//!   [`DIFF_FILE_TIME`], [`DIFF_TOTAL_TIME`]).
 //!
 //! Every call is blocking: the API runs it on the blocking pool.
 
@@ -40,7 +48,7 @@ use std::io::Read;
 use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use nix::errno::Errno;
 use nix::fcntl::{AtFlags, OFlag, openat, readlinkat};
@@ -66,6 +74,14 @@ pub const MAX_COMMITS: usize = 200;
 const MAX_UNTRACKED: usize = 1000;
 /// The most changed work tree files that get a patch.
 const MAX_PATCHED: usize = 300;
+/// The most lines of one side of a diff that the daemon makes in Rust.
+/// A file with more gets no patch, and its counts are not known.
+pub const MAX_DIFF_INPUT_LINES: usize = 20_000;
+/// The longest the daemon diffs one file in Rust, and all the files of
+/// one answer. At the file deadline, `similar` stops its search and
+/// gives a diff that is correct but not the smallest.
+pub const DIFF_FILE_TIME: Duration = Duration::from_secs(2);
+pub const DIFF_TOTAL_TIME: Duration = Duration::from_secs(8);
 /// The work tree files and bytes that one comparison reads at most.
 #[derive(Debug, Clone, Copy)]
 pub struct HashBudget {
@@ -142,6 +158,36 @@ pub fn clean_path(p: &str) -> Result<String, BrowseError> {
     Ok(parts.join("/"))
 }
 
+/// A path that git gives (an index entry): it reaches the disk as it is,
+/// with no normalisation, so it must be relative, with `/` between the
+/// parts, and with no empty part, no `.` or `..`, no NUL, and no `.git`
+/// part in any case. The answer is the reason for a refusal.
+pub fn check_git_path(p: &str) -> Result<(), &'static str> {
+    if p.is_empty() {
+        return Err("the path is empty");
+    }
+    if p.contains('\0') {
+        return Err("the path has a NUL");
+    }
+    if p.starts_with('/') {
+        return Err("the path is absolute");
+    }
+    for part in p.split('/') {
+        match part {
+            "" => return Err("the path has an empty part"),
+            "." | ".." => return Err("the path has a `.` or `..` part"),
+            x if x.eq_ignore_ascii_case(".git") => return Err("the path has a `.git` part"),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// An object ID that git gives: 40 or 64 lower-case hex digits.
+fn is_object_id(s: &str) -> bool {
+    matches!(s.len(), 40 | 64) && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 /// A commit ID from a request: 4 to 64 hex digits.
 pub fn check_sha(s: &str) -> Result<(), BrowseError> {
     if (4..=64).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -199,11 +245,14 @@ impl Root {
         Ok(Self(fd))
     }
 
-    /// Look up a [`clean_path`] path.
+    /// Look up a [`clean_path`] path (`""` is the root). Any other path,
+    /// and a path with a `.git` part, is `BadRequest`: no caller can step
+    /// out of the checkout or into `.git`.
     fn lookup(&self, rel: &str) -> Result<Node, BrowseError> {
         if rel.is_empty() {
             return Ok(Node::Dir(self.0.try_clone().map_err(io_err)?));
         }
+        check_git_path(rel).map_err(|why| BrowseError::BadRequest(format!("bad path: {why}")))?;
         let parts: Vec<&str> = rel.split('/').collect();
         let (last, dirs) = parts.split_last().ok_or_else(|| io_err("empty path"))?;
         let mut cur: Option<OwnedFd> = None;
@@ -302,7 +351,9 @@ pub struct FileData {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct FileDiff {
     pub path: String,
-    /// `added`, `deleted`, `modified`, `typechange`, `mode`, or `unmerged`.
+    /// `added`, `deleted`, `modified`, `typechange`, `mode`, `unmerged`,
+    /// or `refused` (an index entry with a path or an ID that the daemon
+    /// does not read; `note` says why).
     pub status: &'static str,
     pub additions: u64,
     pub deletions: u64,
@@ -869,9 +920,19 @@ pub fn diff_commits(
     git_diff(git, tree.git_dir(), &["diff-tree", "-r", from, to], budget)
 }
 
-/// A unified diff of two texts, made in Rust.
-fn unified(old: &str, new: &str, budget: &mut LineBudget) -> (String, u64, u64, bool) {
-    let diff = similar::TextDiff::from_lines(old, new);
+/// A unified diff of two texts, made in Rust, until `deadline`. After the
+/// deadline, the diff is correct but not the smallest; the last value is
+/// true then.
+fn unified(
+    old: &str,
+    new: &str,
+    budget: &mut LineBudget,
+    deadline: Instant,
+) -> (String, u64, u64, bool, bool) {
+    let diff = similar::TextDiff::configure()
+        .deadline(deadline)
+        .diff_lines(old, new);
+    let late = Instant::now() >= deadline;
     let mut adds = 0;
     let mut dels = 0;
     for op in diff.iter_all_changes() {
@@ -886,7 +947,7 @@ fn unified(old: &str, new: &str, budget: &mut LineBudget) -> (String, u64, u64, 
         text.push_str(&h.to_string());
     }
     let (p, cut) = cap_patch(&text, budget);
-    (p, adds, dels, cut)
+    (p, adds, dels, cut, late)
 }
 
 /// One index entry: mode, blob ID, stage, path.
@@ -897,26 +958,54 @@ struct IndexEntry {
     path: String,
 }
 
-fn index_entries(git: &ReadGit, dir: &Path) -> Result<(Vec<IndexEntry>, bool), BrowseError> {
+/// The entries of the index, and the entries that the daemon refuses
+/// (path and reason). The agent can write any bytes in `.git/index`, so
+/// each path is checked with [`check_git_path`] before it reaches the
+/// disk (a path `../../x` would read a file of the daemon), and each mode
+/// and ID before it reaches git.
+#[allow(clippy::type_complexity)]
+fn index_entries(
+    git: &ReadGit,
+    dir: &Path,
+) -> Result<(Vec<IndexEntry>, Vec<(String, &'static str)>, bool), BrowseError> {
     let out = git.run(dir, &["ls-files", "-s", "-z"], 64 << 20)?;
     let mut v = Vec::new();
-    for rec in out.bytes.split(|&b| b == 0).filter(|r| !r.is_empty()) {
+    let mut refused = Vec::new();
+    let mut recs: Vec<&[u8]> = out
+        .bytes
+        .split(|&b| b == 0)
+        .filter(|r| !r.is_empty())
+        .collect();
+    // A cut output ends in a cut entry.
+    if out.truncated {
+        recs.pop();
+    }
+    for rec in recs {
         let Some(tab) = rec.iter().position(|&b| b == b'\t') else {
             continue;
         };
         let head = String::from_utf8_lossy(&rec[..tab]);
+        let path = String::from_utf8_lossy(&rec[tab + 1..]).into_owned();
         let mut it = head.split_whitespace();
         let (Some(mode), Some(id), Some(stage)) = (it.next(), it.next(), it.next()) else {
             continue;
         };
+        if let Err(why) = check_git_path(&path) {
+            refused.push((path, why));
+            continue;
+        }
+        if !matches!(mode, "100644" | "100755" | "120000" | "160000") || !is_object_id(id) {
+            refused.push((path, "the index entry has a bad mode or ID"));
+            continue;
+        }
         v.push(IndexEntry {
             mode: mode.to_owned(),
             id: id.to_owned(),
             stage: stage.parse().unwrap_or(0),
-            path: String::from_utf8_lossy(&rec[tab + 1..]).into_owned(),
+            path,
         });
     }
-    Ok((v, out.truncated))
+    Ok((v, refused, out.truncated))
 }
 
 /// A work tree file against its index entry.
@@ -1033,10 +1122,25 @@ fn uncommitted_inner(
     };
 
     let root = Root::open(dir)?;
-    let (entries, index_cut) = index_entries(git, dir)?;
+    let (entries, refused, index_cut) = index_entries(git, dir)?;
     let mut left = hash;
     let mut partial = index_cut;
     let mut unstaged = DiffSet::default();
+    for (path, why) in refused {
+        unstaged.files.push(FileDiff {
+            path,
+            status: "refused",
+            additions: 0,
+            deletions: 0,
+            binary: false,
+            patch: String::new(),
+            truncated: false,
+            note: Some(format!("{why}; the daemon does not read it")),
+        });
+    }
+    // The time for all the Rust diffs of this answer.
+    let until = Instant::now() + DIFF_TOTAL_TIME;
+    let mut patched = 0;
     let mut unmerged: Vec<String> = Vec::new();
     for e in &entries {
         if e.stage != 0 {
@@ -1077,28 +1181,49 @@ fn uncommitted_inner(
             }
             WorkState::Modified(b) => Some(b),
         };
-        if patches && unstaged.files.len() < MAX_PATCHED {
+        if patches && patched < MAX_PATCHED && Instant::now() < until {
+            patched += 1;
             let old = git.run(dir, &["cat-file", "blob", &e.id], MAX_FILE + 1)?;
             let new_b = new.as_deref().unwrap_or(b"");
+            let lines = |b: &[u8]| b.iter().filter(|&&c| c == b'\n').count();
             if old.truncated || new_b.len() > MAX_FILE {
                 f.truncated = true;
                 f.note = Some("the file is over 1 MiB; no patch".into());
             } else if !is_text(&old.bytes) || !is_text(new_b) {
                 f.binary = true;
+            } else if lines(&old.bytes) > MAX_DIFF_INPUT_LINES
+                || lines(new_b) > MAX_DIFF_INPUT_LINES
+            {
+                f.truncated = true;
+                f.note = Some(format!(
+                    "the file is too large to diff (over {MAX_DIFF_INPUT_LINES} lines); \
+                     no patch, the counts are not known"
+                ));
             } else {
-                let (p, a, d, cut) = unified(
+                let deadline = until.min(Instant::now() + DIFF_FILE_TIME);
+                let (p, a, d, cut, late) = unified(
                     &String::from_utf8_lossy(&old.bytes),
                     &String::from_utf8_lossy(new_b),
                     budget,
+                    deadline,
                 );
                 f.patch = p;
                 f.additions = a;
                 f.deletions = d;
                 f.truncated = cut;
+                if late {
+                    f.note = Some(
+                        "the diff timed out: it is correct, but it can be larger than needed"
+                            .into(),
+                    );
+                }
             }
-        } else if patches {
+        } else if patches && patched >= MAX_PATCHED {
             f.truncated = true;
             f.note = Some(format!("over {MAX_PATCHED} changed files; no patch"));
+        } else if patches {
+            f.truncated = true;
+            f.note = Some("the diff time of the answer ran out; no patch".into());
         }
         unstaged.truncated |= f.truncated;
         unstaged.files.push(f);
@@ -1600,6 +1725,294 @@ mod tests {
             .output()
             .unwrap();
         assert!(marker.exists(), "the fixture does not run its drivers");
+    }
+
+    /// Write `.git/index` by hand (version 2), with one entry for each
+    /// path, each with the blob ID `id`: git itself never writes a path
+    /// with `..`, `.git`, or a `/` in front, but an agent can.
+    fn write_index(dir: &Path, paths: &[&str], id: &str) {
+        use sha1::Digest as _;
+        let mut paths: Vec<&str> = paths.to_vec();
+        paths.sort();
+        let sha: Vec<u8> = (0..20)
+            .map(|i| u8::from_str_radix(&id[i * 2..i * 2 + 2], 16).unwrap())
+            .collect();
+        let mut d = b"DIRC".to_vec();
+        d.extend(2u32.to_be_bytes());
+        d.extend((paths.len() as u32).to_be_bytes());
+        for p in paths {
+            let mut e = Vec::new();
+            for v in [0u32, 0, 0, 0, 0, 0, 0o100644, 0, 0, 0] {
+                e.extend(v.to_be_bytes());
+            }
+            e.extend(&sha);
+            e.extend((p.len() as u16).to_be_bytes());
+            e.extend(p.as_bytes());
+            let pad = 8 - (e.len() % 8);
+            e.extend(std::iter::repeat_n(0u8, pad));
+            d.extend(e);
+        }
+        let sum = sha1::Sha1::digest(&d);
+        d.extend(sum);
+        std::fs::write(dir.join(".git/index"), d).unwrap();
+    }
+
+    fn rev(dir: &Path, spec: &str) -> String {
+        let o = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["rev-parse", spec])
+            .output()
+            .unwrap();
+        String::from_utf8(o.stdout).unwrap().trim().to_owned()
+    }
+
+    /// R1 and R3 (docs/security-review.md §15): an index entry that names
+    /// a path out of the checkout, a path in `.git`, or an absolute path
+    /// is refused, and its file is never read.
+    #[test]
+    fn an_index_path_out_of_the_checkout_is_refused() {
+        let t = tempfile::tempdir().unwrap();
+        let dir = checkout(t.path());
+        std::fs::write(t.path().join("secret.txt"), "TOPSECRET\n").unwrap();
+        std::fs::write(dir.join(".git/secret.txt"), "TOPSECRET\n").unwrap();
+        let abs = t.path().join("secret.txt");
+        let abs = abs.to_str().unwrap();
+        let id = rev(&dir, "HEAD:a.txt");
+        let bad = [
+            "../../secret.txt",
+            "docs/../../../secret.txt",
+            ".git/config",
+            ".GIT/secret.txt",
+            "docs/.git/x",
+            "./a.txt",
+            "docs//b.md",
+            abs,
+        ];
+        let mut all = bad.to_vec();
+        all.push("a.txt");
+        write_index(&dir, &all, &id);
+        let g = git();
+        let u = uncommitted(&g, &dir, &mut LineBudget::default()).unwrap();
+        let json = serde_json::to_string(&u).unwrap();
+        assert!(!json.contains("TOPSECRET"), "{json}");
+        assert!(!json.contains("[core]"), "{json}");
+        for p in bad {
+            let f = u.unstaged.files.iter().find(|f| f.path == p);
+            let f = f.unwrap_or_else(|| panic!("{p} is not in {json}"));
+            assert_eq!(f.status, "refused", "{p}");
+            assert!(f.patch.is_empty(), "{p}");
+            assert!(f.note.as_deref().unwrap().contains("does not read"), "{p}");
+        }
+        // `a.txt` is the same as its index entry (`two` against `TWO` is
+        // the committed change, not in the work tree).
+        assert!(
+            !u.unstaged.files.iter().any(|f| f.path == "a.txt"),
+            "{json}"
+        );
+        let d = dirty(&g, &dir, LIST_BUDGET).unwrap();
+        assert_eq!(d.unstaged, bad.len());
+
+        // Defence in depth: the walk itself refuses such a path.
+        let root = Root::open(&dir).unwrap();
+        for p in [
+            "..",
+            "../secret.txt",
+            "a/../b",
+            "/etc/passwd",
+            ".",
+            ".git/config",
+            "a//b",
+        ] {
+            assert!(
+                matches!(root.lookup(p), Err(BrowseError::BadRequest(_))),
+                "{p}"
+            );
+        }
+        for p in ["a.txt", "a..b", "..a", ".gitx"] {
+            check_git_path(p).unwrap();
+        }
+    }
+
+    /// An object store of another repo, named by `objects/info/alternates`:
+    /// git would read its commits by ID. `other` has a commit that only it
+    /// has.
+    fn foreign(t: &Path) -> (PathBuf, String) {
+        let other = t.join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        sh(
+            &other,
+            "git init -q -b main && echo FOREIGN > f.txt && git add f.txt && git commit -q -m foreign",
+        );
+        let sha = rev(&other, "HEAD");
+        (other.join(".git/objects"), sha)
+    }
+
+    /// R2: an alternates file (or an http-alternates file) is refused
+    /// before any read; an empty alternates file is allowed.
+    #[test]
+    fn an_alternates_file_is_refused() {
+        let t = tempfile::tempdir().unwrap();
+        let dir = checkout(t.path());
+        let (objects, sha) = foreign(t.path());
+        let store = RunDirs::new(&t.path().join("state"));
+        let g = git();
+        let tree = Tree::Checkout { dir: dir.clone() };
+        let info = dir.join(".git/objects/info");
+        std::fs::create_dir_all(&info).unwrap();
+        std::fs::write(info.join("alternates"), "").unwrap();
+        g.check_checkout(&dir, &store).unwrap();
+        assert!(matches!(
+            commit(&g, &tree, &sha),
+            Err(BrowseError::NotFound(_))
+        ));
+
+        for (name, text) in [
+            ("alternates", format!("{}\n", objects.display())),
+            ("http-alternates", "http://127.0.0.1:1/x\n".to_owned()),
+        ] {
+            let _ = std::fs::remove_file(info.join("alternates"));
+            std::fs::write(info.join(name), text).unwrap();
+            match g.check_checkout(&dir, &store) {
+                Err(GitError::Refused(m)) => assert!(m.contains(name), "{m}"),
+                other => panic!("{name}: {other:?}"),
+            }
+            // Each read command checks again: the file can come after the
+            // check.
+            for short in [&sha[..], &sha[..7]] {
+                assert!(commit(&g, &tree, short).is_err(), "{name} {short}");
+                match commits(&g, &tree, short, 0, 10) {
+                    Err(BrowseError::Git(GitError::Refused(m))) => assert!(m.contains(name), "{m}"),
+                    other => panic!("{name} {short}: {other:?}"),
+                }
+            }
+            assert!(uncommitted(&g, &dir, &mut LineBudget::default()).is_err());
+            assert!(checkout_info(&g, &dir, Some("main")).head.is_none());
+            std::fs::remove_file(info.join(name)).unwrap();
+        }
+        // The fixture is real: git reads the foreign commit through the
+        // file.
+        std::fs::write(info.join("alternates"), format!("{}\n", objects.display())).unwrap();
+        let o = Command::new("git")
+            .arg("-C")
+            .arg(&dir)
+            .args(["cat-file", "-p", &format!("{sha}:f.txt")])
+            .output()
+            .unwrap();
+        assert_eq!(o.stdout, b"FOREIGN\n");
+    }
+
+    /// R2: a symlink in place of a part of `.git` (the object store, the
+    /// index, HEAD, a ref, a loose object) is refused.
+    #[test]
+    fn a_symlink_in_the_git_dir_is_refused() {
+        let t = tempfile::tempdir().unwrap();
+        let (objects, _) = foreign(t.path());
+        let store = RunDirs::new(&t.path().join("state"));
+        let g = git();
+        type Plant<'a> = &'a dyn Fn(&Path);
+        let cases: [(&str, Plant); 6] = [
+            ("objects", &|git: &Path| {
+                std::fs::rename(git.join("objects"), git.join("objects.old")).unwrap();
+                std::os::unix::fs::symlink(&objects, git.join("objects")).unwrap();
+            }),
+            ("index", &|git: &Path| {
+                std::fs::remove_file(git.join("index")).unwrap();
+                std::os::unix::fs::symlink(objects.join("../index"), git.join("index")).unwrap();
+            }),
+            ("HEAD", &|git: &Path| {
+                std::fs::remove_file(git.join("HEAD")).unwrap();
+                std::os::unix::fs::symlink(objects.join("../HEAD"), git.join("HEAD")).unwrap();
+            }),
+            ("objects/info", &|git: &Path| {
+                let _ = std::fs::remove_dir_all(git.join("objects/info"));
+                std::os::unix::fs::symlink(objects.join("info"), git.join("objects/info")).unwrap();
+            }),
+            ("packed-refs", &|git: &Path| {
+                let _ = std::fs::remove_file(git.join("packed-refs"));
+                std::os::unix::fs::symlink("/etc/hostname", git.join("packed-refs")).unwrap();
+            }),
+            ("refs/heads/x", &|git: &Path| {
+                std::os::unix::fs::symlink("/etc/hostname", git.join("refs/heads/x")).unwrap();
+            }),
+        ];
+        for (i, (name, plant)) in cases.iter().enumerate() {
+            let base = t.path().join(format!("c{i}"));
+            std::fs::create_dir_all(&base).unwrap();
+            let dir = checkout(&base);
+            plant(&dir.join(".git"));
+            match g.check_checkout(&dir, &store) {
+                Err(GitError::Refused(m)) => assert!(m.contains(name), "{name}: {m}"),
+                other => panic!("{name}: {other:?}"),
+            }
+        }
+        // A loose object as a symlink: the walk finds it.
+        std::fs::create_dir_all(t.path().join("c9")).unwrap();
+        let dir = checkout(&t.path().join("c9"));
+        let obj = std::fs::read_dir(dir.join(".git/objects"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .find(|p| p.file_name().unwrap().len() == 2)
+            .unwrap();
+        let one = std::fs::read_dir(&obj)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        std::fs::remove_file(&one).unwrap();
+        std::os::unix::fs::symlink("/etc/hostname", &one).unwrap();
+        match g.check_checkout(&dir, &store) {
+            Err(GitError::Refused(m)) => assert!(m.contains("symlink"), "{m}"),
+            other => panic!("{other:?}"),
+        }
+        // The cheap check before each command sees the main parts.
+        std::fs::create_dir_all(t.path().join("c10")).unwrap();
+        let dir = checkout(&t.path().join("c10"));
+        std::fs::remove_file(dir.join(".git/HEAD")).unwrap();
+        std::os::unix::fs::symlink("/etc/hostname", dir.join(".git/HEAD")).unwrap();
+        assert!(matches!(
+            g.run(&dir, &["rev-parse", "HEAD"], 1024),
+            Err(GitError::Refused(_))
+        ));
+    }
+
+    /// R4: a pair of large texts with no line in common is diffed in a
+    /// bounded time, and a text over the line cap is not diffed.
+    #[test]
+    fn a_pathological_diff_is_bounded() {
+        let t = tempfile::tempdir().unwrap();
+        let dir = checkout(t.path());
+        let n = MAX_DIFF_INPUT_LINES - 10;
+        let old: String = (0..n).map(|i| format!("{i}\n")).collect();
+        let big: String = (0..MAX_DIFF_INPUT_LINES + 10)
+            .map(|i| format!("{i}\n"))
+            .collect();
+        std::fs::write(dir.join("p.txt"), &old).unwrap();
+        std::fs::write(dir.join("q.txt"), "x\n").unwrap();
+        sh(&dir, "git add p.txt q.txt && git commit -q -m p");
+        let new: String = (0..n).map(|i| format!("{}\n", i * 7 + 3_000_001)).collect();
+        std::fs::write(dir.join("p.txt"), &new).unwrap();
+        std::fs::write(dir.join("q.txt"), &big).unwrap();
+
+        let start = Instant::now();
+        let u = uncommitted(&git(), &dir, &mut LineBudget::default()).unwrap();
+        let took = start.elapsed();
+        assert!(took < DIFF_TOTAL_TIME + Duration::from_secs(4), "{took:?}");
+        let p = u.unstaged.files.iter().find(|f| f.path == "p.txt").unwrap();
+        // All lines changed: every old line out, every new line in.
+        assert_eq!((p.additions, p.deletions), (n as u64, n as u64));
+        let q = u.unstaged.files.iter().find(|f| f.path == "q.txt").unwrap();
+        assert!(q.truncated && q.patch.is_empty());
+        assert!(q.note.as_deref().unwrap().contains("too large"), "{q:?}");
+
+        // Straight into `unified`: a deadline in the past ends the search
+        // at once, and the diff says so.
+        let start = Instant::now();
+        let (_, a, d, _, late) = unified(&old, &new, &mut LineBudget::default(), Instant::now());
+        assert!(start.elapsed() < Duration::from_secs(2));
+        assert!(late);
+        assert_eq!((a, d), (n as u64, n as u64));
     }
 
     #[test]

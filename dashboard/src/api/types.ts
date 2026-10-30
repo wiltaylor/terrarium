@@ -229,7 +229,7 @@ export interface TreeFile {
 
 export interface FileDiff {
   path: string;
-  status: "added" | "deleted" | "modified" | "typechange" | "mode" | "unmerged";
+  status: "added" | "deleted" | "modified" | "typechange" | "mode" | "unmerged" | "refused";
   additions: number;
   deletions: number;
   binary: boolean;

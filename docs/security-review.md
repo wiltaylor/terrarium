@@ -1239,3 +1239,62 @@ rate limit.
   edit after the check and before the fetch can still add a key for that
   one fetch, which runs with the token. The window is short, and the
   token goes away before the work tree commands.
+
+## 15. Repo browser review (2026-10-31)
+
+An independent review of the repo browser (PLAN §9a, docs/api.md §5.3,
+commit f636306: `repo_browse.rs`, `api/repo_trees.rs`, and `ReadGit`,
+`check_checkout`, `check_workspace_repo`, and `refresh_mirror` in
+`git.rs`). The threat model: the daemon runs outside every sandbox and
+holds every secret, and the agent controls each file of its checkout,
+`.git` too, at any time. The reviewer proved R1 and R2 with probes
+against the code of f636306. Each fix has a test that reproduces the
+finding.
+
+| # | Finding | Status |
+|---|---|---|
+| R1 (CRITICAL) | Index entry path traversal. The work tree diff opened the path of each `.git/index` entry with `Root::lookup`, which walks with `O_NOFOLLOW` but did not refuse `..`. Only request paths went through `clean_path`. A planted entry `../../../state/credentials/...` (or an absolute path) made `GET .../diff` read any file that the daemon can read, and show it as the new side of an unstaged patch. | **Fixed.** `index_entries` checks each path with `check_git_path` (the rules of `clean_path`, with no normalisation: no empty part, no `.` or `..`, no `.git` part in any case, no NUL, not absolute) and each mode and blob ID, before any disk access. A refused entry is in `unstaged` with `status: "refused"` and a `note`, and is never read. `Root::lookup` itself refuses such a path (`BadRequest`), so no other caller can step out. Test: `an_index_path_out_of_the_checkout_is_refused` (`..` relative and deep, `.git/config`, `.GIT/...`, a `.git` part deeper down, `./`, `//`, an absolute path; the JSON answer has no byte of the files). |
+| R2 (CRITICAL) | `objects/info/alternates` was not checked. An agent wrote an alternates file that named the object store of another agent, of another project, or of the main mirror. The browser then served the foreign commits and files by ID (a short prefix worked too). A symlinked `.git/objects`, `objects/info`, pack, loose object, ref, `index`, `HEAD`, or `packed-refs` does the same, or shows a daemon file through a parse error. | **Fixed.** `check_git_dir` (in `check_workspace_repo`, so in `check_checkout` and before a checkout update too) opens each name with `O_NOFOLLOW` and refuses (`409`) an alternates file that is not empty, any `http-alternates`, a linked worktree, and a symlink or a wrong type for `HEAD`, `config`, `index`, `packed-refs`, `shallow`, `info/grafts`, `objects`, `objects/info`, `objects/pack`, `refs`, and `info`. `check_no_links` walks all of `.git` once for each check and refuses any symlink or special file (at most 1 000 000 entries). `ReadGit::run` runs `check_git_dir` again just before each git command, and gives git `--git-dir` and `--work-tree` (no search in the parent dirs, no `core.worktree`). The env has `GIT_ALTERNATE_OBJECT_DIRECTORIES` empty. git has no switch that ignores the alternates file, so the file check is the control. Tests: `an_alternates_file_is_refused` (full and short IDs; the file put in after the first check is caught by the next command; an empty file is allowed; the fixture reads the foreign commit with plain git), `a_symlink_in_the_git_dir_is_refused` (`objects`, `index`, `HEAD`, `objects/info`, `packed-refs`, a ref, a loose object; and the check before each command). |
+| R3 (HIGH) | The R1 hole read `.git/config` and the other files of `.git` through an index entry `.git/...`. | **Fixed** by the R1 rules (a `.git` part in any case is refused). Test: `an_index_path_out_of_the_checkout_is_refused`. |
+| R4 (MEDIUM) | The Rust diff (`similar::TextDiff::from_lines`, up to 1 MiB for each side, up to 300 files) had no time bound: 1 MiB of lines with nothing in common did not end in 300 s. | **Fixed.** A side with more than 20 000 lines gets no patch (`note`: "too large to diff", the counts are not known). Each file has a `similar` deadline of 2 s, and all the files of one answer share 8 s; after the file deadline the diff is correct but not the smallest (`note` says so), and after the answer deadline a file gets no patch. The work tree diff is the only Rust diff; the diffs from git have the 10 s deadline of each command. Test: `a_pathological_diff_is_bounded` (two sides of 19 990 lines with nothing in common end within the bound with the right counts; a 20 010 line file is "too large"; a past deadline ends at once). |
+| R5 (INFO) | A local repo URL (`/repos/...`) fed R2 through the mirror: `git clone --bare --no-hardlinks` of a local source copies its alternates file into the mirror. | **Fixed.** The mirror clone uses `--no-local` (git reads a local source through `git-upload-pack`, as a remote one, and writes its own pack). After each clone and fetch, `refresh_mirror` removes any alternates file; a mirror that has one (from an older daemon) is removed and cloned again, because a fetch would not get the objects that only the alternate store had. A read of the mirror goes through the same `check_git_dir`. The workspace clone uses `--no-local` too, so its update is not refused. Tests: `a_mirror_has_no_alternates` (a local source with an alternates file; no alternates file in the mirror; an object that only the alternate store has is not readable by full or short ID; an old mirror with the file is refused, then cloned again), `a_workspace_clone_has_no_alternates`. |
+
+### Other changes from the re-read
+
+- **The update path.** `check_workspace_repo` also runs before a
+  checkout update. Before this fix, an alternates file or a symlinked
+  loose object let the daemon's `merge` write foreign objects into the
+  work tree, where the agent reads them. The same checks now refuse it.
+- **No transport and no lazy fetch in a read.** `ReadGit` sets
+  `protocol.allow=never` (and `never` for `file`, `http`, `https`, and
+  `ssh`) and `GIT_NO_LAZY_FETCH=1`. A promisor remote that a live config
+  edit adds (`extensions.partialClone`) cannot fetch objects of a local
+  repo into a read.
+- **No outside file through config names.** `ReadGit` sets
+  `log.mailmap=false`, `mailmap.file=/dev/null`, `mailmap.blob=`, and
+  `core.excludesFile=/dev/null`, so an edit of the live config after the
+  check cannot point a read at a daemon file.
+- **Object IDs from the index.** An index entry with a mode other than
+  `100644`, `100755`, `120000`, or `160000`, or an ID that is not 40 or
+  64 hex digits, is refused before its ID goes to `cat-file`. A cut
+  `ls-files` output drops its last (cut) entry.
+
+### Residuals
+
+- **The window before each command.** The agent can add an alternates
+  file or a symlink between the check in `ReadGit::run` and the reads of
+  git. The window is a few milliseconds for each command. To close it,
+  the daemon would have to copy the object store, or stop the agent.
+  The full walk of `.git` (loose objects and packs) runs once for each
+  request, not before each command; a symlink put into the store after
+  it is not seen until the next request.
+- **A deleted `.git`.** When `<checkout>/.git` is gone, `ReadGit::run`
+  takes the checkout dir as a bare repo. Its layout is checked as above,
+  but its `config` is not checked against the allowlist. The read
+  commands run no program from config (above), so the agent sees only
+  its own files.
+- **Hard links.** A hard link in `.git` to a file of another repo is not
+  found. The agent can make one only to a file that its sandbox shows.
+- **Cost.** The walk of `.git` reads each entry once for each request (and
+  for each agent tree in the tree list). A checkout with more than
+  1 000 000 entries under `.git` is refused; `git gc` packs it.

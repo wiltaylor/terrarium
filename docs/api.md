@@ -1470,10 +1470,18 @@ work tree against the index), and `untracked` (paths, at most 1000). For
 `main`, `uncommitted` is `null` and `note` is `main is the base`. A diff
 set is `{"files": [file], "truncated"}`; a file is `{"path", "status",
 "additions", "deletions", "binary", "patch", "truncated", "note"?}`.
-`status` is `added`, `deleted`, `modified`, `typechange`, `mode`, or
-`unmerged`. `patch` has the unified diff hunks from the first `@@` line.
-A file has at most 2000 diff lines and an answer at most 20 000;
-`truncated` says that a cap cut it.
+`status` is `added`, `deleted`, `modified`, `typechange`, `mode`,
+`unmerged`, or `refused`. `refused` is an index entry that the daemon does
+not read: its path is absolute, has an empty, `.`, `..`, or `.git` part,
+or its mode or blob ID is not valid; `note` says why. `patch` has the
+unified diff hunks from the first `@@` line. A file has at most 2000 diff
+lines and an answer at most 20 000; `truncated` says that a cap cut it.
+The daemon makes the work tree diff only for a text file of at most
+20 000 lines on each side (else `note` says "too large to diff", and
+`additions` and `deletions` are 0, not known). One file gets at most 2 s
+and all the files of an answer at most 8 s. At the file limit the diff is
+correct but can be larger than needed (`note` says so). After the answer
+limit, a file gets no patch.
 
 **Commits.** For an agent tree, the commits of base..HEAD; for `main`, the
 history of the default branch. A commit is `{"sha", "parents",
@@ -1486,6 +1494,8 @@ hex digits (`422` if not).
 **Errors.** A `path` that is absolute, has `..` or a NUL, or names `.git`
 is `422 invalid`. An unknown tree is `404`. A checkout whose
 `.git/config` has a key outside the allowlist of §5.1 is `409 conflict`.
+A checkout with an alternates file, or with a symlink or a special file
+anywhere under `.git`, is `409 conflict` too (Security, below).
 A git command that does not end in 10 s is `500`.
 
 **Security.** The daemon reads repos that agents control, outside the
@@ -1496,8 +1506,26 @@ sandbox:
   `.git/config` against the allowlist before the first command. Also
   `--no-ext-diff`, `--no-textconv`, `core.attributesFile=/dev/null`,
   `diff.external=`, `log.showSignature=false`, `GIT_ATTR_NOSYSTEM=1`, and
-  `GIT_OPTIONAL_LOCKS=0`. Each command has a 10 s deadline and an output
-  cap.
+  `GIT_OPTIONAL_LOCKS=0`, `GIT_NO_LAZY_FETCH=1`, every transport off
+  (`protocol.allow=never`), no mailmap, and no excludes file of the daemon
+  user. Each command has a 10 s deadline and an output cap. git gets the
+  git dir and the work tree on the command line (`--git-dir`,
+  `--work-tree`), so it does not search the parent dirs and ignores
+  `core.worktree`.
+- No objects of another repo. Before the first command, the daemon
+  refuses a checkout with `.git/objects/info/alternates` (an empty file is
+  allowed) or `.git/objects/info/http-alternates`, a checkout where
+  `HEAD`, `config`, `index`, `packed-refs`, `shallow`, `objects`,
+  `objects/info`, `objects/pack`, `refs`, or `info` is a symlink or of the
+  wrong type, and a checkout with a symlink or a special file anywhere
+  under `.git` (a loose object, a pack, a ref). Each check opens each
+  path part with `O_NOFOLLOW`. Just before each git command, the daemon
+  checks the alternates files and the main names again. The window that
+  stays is the time between that check and the reads of git (a few
+  milliseconds). The mirror is cloned with `--no-local`, so a local source
+  repo does not give its alternates file to the mirror; after each clone
+  and fetch the daemon removes any alternates file, and it clones a
+  mirror with one again.
 - Only commands that run no filter driver: `ls-tree`, `ls-files`,
   `cat-file blob`, `log`, `rev-parse`, `rev-list`, `diff-tree` (commit to
   commit), and `diff-index --cached` (HEAD to index). The daemon never
@@ -1505,7 +1533,10 @@ sandbox:
   `git hash-object` in a checkout: these run the clean filter.
 - The changes in the work tree are found in the daemon: it reads each file
   (each path part opened with `O_NOFOLLOW`), makes the blob ID itself, and
-  makes the diff itself. A file that a filter or `core.autocrlf` changes
+  makes the diff itself. The agent can write any path into `.git/index`,
+  so the daemon checks each index path with the rules of a request path
+  before it opens the file (`refused` above). The disk walk itself also
+  refuses `..`, `.`, `.git`, and an absolute path. A file that a filter or `core.autocrlf` changes
   on checkout shows as changed.
 - A symlink is never followed; `.git` is never shown. The daemon never
   writes into a workspace.

@@ -8,7 +8,7 @@ import type { DiffSet, FileDiff } from "../api/types";
 import { parsePatch } from "../lib/diff";
 import { Empty } from "./ui";
 
-const STATUS: Record<FileDiff["status"], string> = { added: "A", deleted: "D", modified: "M", typechange: "T", mode: "mode", unmerged: "U" };
+const STATUS: Record<FileDiff["status"], string> = { added: "A", deleted: "D", modified: "M", typechange: "T", mode: "mode", unmerged: "U", refused: "!" };
 
 function FileBlock(props: { file: FileDiff; open: boolean }) {
   const rows = createMemo(() => parsePatch(props.file.patch));

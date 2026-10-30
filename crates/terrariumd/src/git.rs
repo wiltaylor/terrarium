@@ -49,11 +49,16 @@
 
 use std::collections::VecDeque;
 use std::io::Read;
+use std::os::fd::OwnedFd;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+use nix::errno::Errno;
+use nix::fcntl::{AtFlags, OFlag, openat};
+use nix::sys::stat::{Mode, SFlag, fstatat};
 use serde::Serialize;
 
 use crate::secrets::{RunDirs, Secret};
@@ -721,7 +726,10 @@ fn check_config_copy(dest: &Path, store: &RunDirs, r: &Runner) -> Result<(), Git
     Ok(())
 }
 
-/// The checks before the daemon runs git in a repo the agent controls.
+/// The checks before the daemon runs git in a repo the agent controls:
+/// a plain `.git` directory, not a linked worktree, the layout of
+/// [`check_git_dir`], and no symlink or special file anywhere under
+/// `.git` ([`check_no_links`]).
 fn check_workspace_repo(dest: &Path) -> Result<(), GitError> {
     let git = dest.join(".git");
     let meta = std::fs::symlink_metadata(&git).map_err(io)?;
@@ -737,6 +745,218 @@ fn check_workspace_repo(dest: &Path) -> Result<(), GitError> {
                 "{} is a linked worktree; the daemon updates only its own clones",
                 dest.display()
             )));
+        }
+    }
+    let fd = open_git_dir(dest, false)?;
+    check_git_dir(&fd, &git)?;
+    check_no_links(&fd, &git)
+}
+
+const DIR_FLAGS: OFlag = OFlag::O_RDONLY
+    .union(OFlag::O_DIRECTORY)
+    .union(OFlag::O_NOFOLLOW)
+    .union(OFlag::O_CLOEXEC);
+
+/// The most entries under one `.git` that [`check_no_links`] reads.
+const MAX_GIT_ENTRIES: usize = 1_000_000;
+
+fn refused_layout(shown: &Path, what: &str) -> GitError {
+    GitError::Refused(format!(
+        "{}: {what}; the daemon reads only a plain git dir",
+        shown.display()
+    ))
+}
+
+/// Open the git dir of `dir` with no symlink in the last components:
+/// `<dir>/.git` for a checkout, `<dir>` itself when `bare`.
+fn open_git_dir(dir: &Path, bare: bool) -> Result<OwnedFd, GitError> {
+    let parent = match dir.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    let name = dir
+        .file_name()
+        .ok_or_else(|| io("the repo path has no name"))?;
+    let p = openat(
+        nix::fcntl::AT_FDCWD,
+        parent,
+        OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|e| io(format!("{}: {e}", parent.display())))?;
+    let d = openat(&p, name, DIR_FLAGS, Mode::empty()).map_err(|e| match e {
+        Errno::ELOOP | Errno::ENOTDIR => refused_layout(dir, "not a plain directory"),
+        e => io(format!("{}: {e}", dir.display())),
+    })?;
+    if bare {
+        return Ok(d);
+    }
+    openat(&d, ".git", DIR_FLAGS, Mode::empty()).map_err(|e| match e {
+        Errno::ELOOP | Errno::ENOTDIR => refused_layout(dir, "`.git` is not a plain directory"),
+        Errno::ENOENT => refused_layout(dir, "no `.git` directory"),
+        e => io(format!("{}/.git: {e}", dir.display())),
+    })
+}
+
+/// What one name in a git dir must be.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Want {
+    File,
+    Dir,
+    /// A regular file or nothing.
+    OptFile,
+    /// A directory or nothing.
+    OptDir,
+    /// Nothing, or an empty regular file.
+    Empty,
+    Absent,
+}
+
+/// Check `name` under `at` (no symlink followed). The answer is the dir,
+/// opened, for a [`Want::Dir`] or a [`Want::OptDir`] that is there.
+fn check_entry(
+    at: &OwnedFd,
+    name: &str,
+    want: Want,
+    shown: &Path,
+) -> Result<Option<OwnedFd>, GitError> {
+    let path = shown.join(name);
+    let st = match fstatat(at, name, AtFlags::AT_SYMLINK_NOFOLLOW) {
+        Ok(st) => Some(st),
+        Err(Errno::ENOENT) => None,
+        Err(e) => return Err(io(format!("{}: {e}", path.display()))),
+    };
+    let kind = st.map(|s| SFlag::from_bits_truncate(s.st_mode & SFlag::S_IFMT.bits()));
+    let ok = match (want, kind) {
+        (Want::File | Want::OptFile, Some(SFlag::S_IFREG)) => true,
+        (Want::Dir | Want::OptDir, Some(SFlag::S_IFDIR)) => true,
+        (Want::OptFile | Want::OptDir | Want::Empty | Want::Absent, None) => true,
+        (Want::Empty, Some(SFlag::S_IFREG)) => st.is_some_and(|s| s.st_size == 0),
+        _ => false,
+    };
+    if !ok {
+        let what = match want {
+            Want::File | Want::OptFile => "is not a regular file",
+            Want::Dir | Want::OptDir => "is not a plain directory",
+            Want::Empty | Want::Absent if name.contains("alternates") => {
+                "is there; the daemon does not read the objects of another repo"
+            }
+            Want::Empty | Want::Absent => "is there: a linked worktree",
+        };
+        return Err(refused_layout(&path, what));
+    }
+    if kind == Some(SFlag::S_IFDIR) && matches!(want, Want::Dir | Want::OptDir) {
+        return openat(at, name, DIR_FLAGS, Mode::empty())
+            .map(Some)
+            .map_err(|e| match e {
+                Errno::ELOOP | Errno::ENOTDIR => refused_layout(&path, "is not a plain directory"),
+                e => io(format!("{}: {e}", path.display())),
+            });
+    }
+    Ok(None)
+}
+
+/// The layout of a git dir that the daemon reads (`.git` of a checkout,
+/// or a bare repo), checked with no symlink followed: `HEAD`, `config`,
+/// `index`, `packed-refs`, `shallow`, and `info/grafts` are regular files
+/// (or are not there); `objects`, `objects/info`, `objects/pack`, `refs`,
+/// and `info` are plain directories; there is no `commondir` or `gitdir`
+/// (a linked worktree); and there is no `objects/info/alternates` (an
+/// empty file is allowed) and no `objects/info/http-alternates`. An
+/// alternates file, or a symlink in place of one of these names, would
+/// let git read the objects or the files of another repo, or a file of
+/// the daemon. Cheap: it runs before each read command ([`ReadGit::run`]).
+fn check_git_dir(fd: &OwnedFd, shown: &Path) -> Result<(), GitError> {
+    for (name, want) in [
+        ("HEAD", Want::File),
+        ("config", Want::OptFile),
+        ("index", Want::OptFile),
+        ("packed-refs", Want::OptFile),
+        ("shallow", Want::OptFile),
+        ("commondir", Want::Absent),
+        ("gitdir", Want::Absent),
+        ("refs", Want::Dir),
+    ] {
+        check_entry(fd, name, want, shown)?;
+    }
+    if let Some(info) = check_entry(fd, "info", Want::OptDir, shown)? {
+        check_entry(&info, "grafts", Want::OptFile, &shown.join("info"))?;
+    }
+    let objects = check_entry(fd, "objects", Want::Dir, shown)?
+        .ok_or_else(|| refused_layout(&shown.join("objects"), "is not there"))?;
+    let shown_o = shown.join("objects");
+    check_entry(&objects, "pack", Want::OptDir, &shown_o)?;
+    if let Some(info) = check_entry(&objects, "info", Want::OptDir, &shown_o)? {
+        let shown_i = shown_o.join("info");
+        check_entry(&info, "alternates", Want::Empty, &shown_i)?;
+        check_entry(&info, "http-alternates", Want::Absent, &shown_i)?;
+    }
+    Ok(())
+}
+
+/// Walk the whole git dir: each entry is a plain directory or a regular
+/// file. A symlink anywhere (a loose object, a pack, a ref, `info/exclude`)
+/// could make git read a file of another repo or of the daemon, and show
+/// its bytes as an object or in an error message. Each directory is
+/// opened again from `fd`, one component at a time with `O_NOFOLLOW`, so
+/// the walk holds few file descriptors.
+fn check_no_links(fd: &OwnedFd, shown: &Path) -> Result<(), GitError> {
+    let mut todo: Vec<Vec<std::ffi::OsString>> = vec![Vec::new()];
+    let mut seen = 0usize;
+    while let Some(rel) = todo.pop() {
+        let mut dir = fd.try_clone().map_err(io)?;
+        for part in &rel {
+            dir = openat(&dir, part.as_os_str(), DIR_FLAGS, Mode::empty()).map_err(|e| {
+                let p = rel.iter().fold(shown.to_path_buf(), |p, x| p.join(x));
+                match e {
+                    Errno::ELOOP | Errno::ENOTDIR => refused_layout(&p, "is not a plain directory"),
+                    e => io(format!("{}: {e}", p.display())),
+                }
+            })?;
+        }
+        let at = dir.try_clone().map_err(io)?;
+        let mut d = nix::dir::Dir::from_fd(dir).map_err(io)?;
+        for e in d.iter() {
+            let e = e.map_err(io)?;
+            let name = e.file_name().to_bytes();
+            if name == b"." || name == b".." {
+                continue;
+            }
+            seen += 1;
+            if seen > MAX_GIT_ENTRIES {
+                return Err(GitError::Refused(format!(
+                    "{} has more than {MAX_GIT_ENTRIES} entries; run `git gc` in it",
+                    shown.display()
+                )));
+            }
+            let os = std::ffi::OsStr::from_bytes(name).to_owned();
+            let kind = match e.file_type() {
+                Some(t) => t,
+                None => {
+                    let st =
+                        fstatat(&at, os.as_os_str(), AtFlags::AT_SYMLINK_NOFOLLOW).map_err(io)?;
+                    match SFlag::from_bits_truncate(st.st_mode & SFlag::S_IFMT.bits()) {
+                        SFlag::S_IFDIR => nix::dir::Type::Directory,
+                        SFlag::S_IFREG => nix::dir::Type::File,
+                        _ => nix::dir::Type::Symlink,
+                    }
+                }
+            };
+            match kind {
+                nix::dir::Type::File => {}
+                nix::dir::Type::Directory => {
+                    let mut next = rel.clone();
+                    next.push(os);
+                    todo.push(next);
+                }
+                _ => {
+                    let p = rel.iter().fold(shown.to_path_buf(), |p, x| p.join(x));
+                    return Err(refused_layout(
+                        &p.join(&os),
+                        "is a symlink or a special file",
+                    ));
+                }
+            }
         }
     }
     Ok(())
@@ -798,7 +1018,18 @@ const READ_HARDEN: &[&str] = &[
     "log.decorate=false",
     "log.follow=false",
     "log.showRoot=true",
+    "log.mailmap=false",
+    "mailmap.file=/dev/null",
+    "mailmap.blob=",
+    "core.excludesFile=/dev/null",
     "i18n.logOutputEncoding=UTF-8",
+    // A read command fetches nothing: no transport at all (a promisor
+    // remote would fetch missing objects from another repo).
+    "protocol.allow=never",
+    "protocol.file.allow=never",
+    "protocol.http.allow=never",
+    "protocol.https.allow=never",
+    "protocol.ssh.allow=never",
 ];
 
 /// A runner for the read commands of the repo browser (PLAN §9a). It has
@@ -851,6 +1082,10 @@ impl ReadGit {
             ("PAGER".to_owned(), "cat".to_owned()),
             // No network from a read command; `false` fails any ssh.
             ("GIT_SSH_COMMAND".to_owned(), "false".to_owned()),
+            // No lazy fetch of a missing object from a promisor remote.
+            ("GIT_NO_LAZY_FETCH".to_owned(), "1".to_owned()),
+            // Empty: no alternate object store from the env.
+            ("GIT_ALTERNATE_OBJECT_DIRECTORIES".to_owned(), String::new()),
         ];
         Self {
             runner,
@@ -859,8 +1094,37 @@ impl ReadGit {
     }
 
     /// `git --no-pager -C <cwd> <args>`, at most `cap` bytes of stdout.
+    ///
+    /// `cwd` is a checkout when `<cwd>/.git` is there, else a bare repo.
+    /// git gets the git dir and the work tree on the command line (no
+    /// search in the parent dirs, no `core.worktree`). Just before git
+    /// starts, [`check_git_dir`] checks the layout of the git dir again:
+    /// an agent can add an alternates file or a symlink after the checks
+    /// of [`ReadGit::check_checkout`]. What remains is the window between
+    /// this check and the reads of git (a few milliseconds).
     pub fn run(&self, cwd: &Path, args: &[&str], cap: usize) -> Result<ReadOut, GitError> {
-        let mut full = vec!["--no-pager"];
+        let bare = match std::fs::symlink_metadata(cwd.join(".git")) {
+            Ok(_) => false,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+            Err(e) => return Err(io(e)),
+        };
+        let fd = open_git_dir(cwd, bare)?;
+        let shown = if bare {
+            cwd.to_owned()
+        } else {
+            cwd.join(".git")
+        };
+        check_git_dir(&fd, &shown)?;
+        drop(fd);
+        let mut full = vec![
+            "--no-pager",
+            if bare {
+                "--git-dir=."
+            } else {
+                "--git-dir=.git"
+            },
+            "--work-tree=.",
+        ];
         full.extend_from_slice(args);
         let deadline = Instant::now() + self.per_command;
         // `--no-pager` goes before the subcommand, so `exec` names the
@@ -882,8 +1146,10 @@ impl ReadGit {
 
     /// The checks before a read in a repo that an agent controls: `dir`
     /// is a plain directory (not a symlink) with a plain `.git` directory
-    /// (not a linked worktree), and a copy of `.git/config` has only keys
-    /// of the allowlist ([`config_allowed`]).
+    /// (not a linked worktree), the layout of [`check_git_dir`] (no
+    /// alternates file), no symlink or special file under `.git`, and a
+    /// copy of `.git/config` has only keys of the allowlist
+    /// ([`config_allowed`]).
     pub fn check_checkout(&self, dir: &Path, store: &RunDirs) -> Result<(), GitError> {
         let meta = std::fs::symlink_metadata(dir).map_err(io)?;
         if !meta.is_dir() {
@@ -897,11 +1163,26 @@ impl ReadGit {
     }
 }
 
+/// The alternates files of a bare repo. With one of them, git reads the
+/// objects of another repo.
+fn alternates_files(git_dir: &Path) -> [PathBuf; 2] {
+    let info = git_dir.join("objects").join("info");
+    [info.join("alternates"), info.join("http-alternates")]
+}
+
 /// Clone `c.url` into the bare mirror `c.dest`, or fetch every branch into
 /// the mirror that is there (PLAN §9a). The mirror is the daemon's own:
 /// no agent can write it, so its config is the one that `git clone`
 /// wrote. A first clone goes to a temp dir beside `c.dest`, then a rename,
 /// so a failed clone leaves no half mirror. Blocking.
+///
+/// The clone uses `--no-local`: a local source is read through
+/// `git-upload-pack`, as a remote one is. A plain local clone copies the
+/// source's `objects/info/alternates`, and the browser would then serve
+/// the objects of the repo that the file names. A mirror with an
+/// alternates file (from an older daemon) is removed and cloned again;
+/// after each clone and fetch, the daemon makes sure that there is no
+/// alternates file.
 pub fn refresh_mirror(c: &Checkout) -> Result<(), GitError> {
     check_url(&c.url, &c.deny_local_under)?;
     let r = Runner::new(c)?;
@@ -910,6 +1191,15 @@ pub fn refresh_mirror(c: &Checkout) -> Result<(), GitError> {
         .parent()
         .ok_or_else(|| io("the mirror path has no parent"))?;
     std::fs::create_dir_all(parent).map_err(io)?;
+    if alternates_files(&c.dest)
+        .iter()
+        .any(|f| std::fs::symlink_metadata(f).is_ok())
+    {
+        // Objects can be missing from the mirror's own store: a fetch
+        // would not get them again. Clone it again.
+        tracing::warn!(mirror = %c.dest.display(), "the mirror has an alternates file; cloning it again");
+        std::fs::remove_dir_all(&c.dest).map_err(io)?;
+    }
     if std::fs::symlink_metadata(c.dest.join("HEAD")).is_ok() {
         let args = [
             "fetch",
@@ -923,7 +1213,7 @@ pub fn refresh_mirror(c: &Checkout) -> Result<(), GitError> {
             "+refs/heads/*:refs/heads/*",
         ];
         r.git(Some(&c.dest), &args, &mut |_| {})?;
-        return Ok(());
+        return remove_alternates(&c.dest);
     }
     let name = c
         .dest
@@ -938,7 +1228,7 @@ pub fn refresh_mirror(c: &Checkout) -> Result<(), GitError> {
             "clone",
             "--quiet",
             "--bare",
-            "--no-hardlinks",
+            "--no-local",
             "--no-tags",
             "--",
             c.url.as_str(),
@@ -946,13 +1236,25 @@ pub fn refresh_mirror(c: &Checkout) -> Result<(), GitError> {
         ],
         &mut |_| {},
     );
-    if let Err(e) = cloned {
+    if let Err(e) = cloned.and_then(|_| remove_alternates(&tmp)) {
         let _ = std::fs::remove_dir_all(&tmp);
         return Err(e);
     }
     if let Err(e) = std::fs::rename(&tmp, &c.dest) {
         let _ = std::fs::remove_dir_all(&tmp);
         return Err(io(e));
+    }
+    Ok(())
+}
+
+/// Remove the alternates files of the bare repo `git_dir`, if any.
+fn remove_alternates(git_dir: &Path) -> Result<(), GitError> {
+    for f in alternates_files(git_dir) {
+        match std::fs::remove_file(&f) {
+            Ok(()) => tracing::warn!(file = %f.display(), "removed an alternates file"),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(io(format!("{}: {e}", f.display()))),
+        }
     }
     Ok(())
 }
@@ -1005,8 +1307,10 @@ fn clone(
     let r = Runner::new(c)?;
     let dest = c.dest.to_string_lossy().into_owned();
     // No hardlinks: the agent owns the workspace files, and must not reach
-    // the objects of a local source repo through them.
-    let mut args = vec!["clone", "--progress", "--no-hardlinks"];
+    // the objects of a local source repo through them. `--no-local`: a
+    // local clone copies the source's `objects/info/alternates`, and the
+    // daemon refuses a checkout with one ([`check_git_dir`]).
+    let mut args = vec!["clone", "--progress", "--no-hardlinks", "--no-local"];
     if let Some(b) = &c.branch {
         args.extend(["--branch", b.as_str()]);
     }
@@ -1391,6 +1695,95 @@ mod tests {
                 dest.display()
             );
         }
+    }
+
+    /// R2 and R5 (docs/security-review.md §15): a local source with an
+    /// alternates file gives a mirror with no alternates file, and the
+    /// objects that only the alternate store has are not in the mirror.
+    /// A mirror with an alternates file is cloned again.
+    #[test]
+    fn a_mirror_has_no_alternates() {
+        let tmp = tempfile::tempdir().unwrap();
+        let origin = bare_repo(tmp.path());
+        // `shared.git` has no objects of its own: an alternates file names
+        // the store of `origin.git`.
+        sh(
+            tmp.path(),
+            "git clone -q --bare --shared origin.git shared.git",
+        );
+        assert!(
+            tmp.path()
+                .join("shared.git/objects/info/alternates")
+                .is_file()
+        );
+        // A commit that only `origin.git` has.
+        sh(
+            &tmp.path().join("src"),
+            "git checkout -q -b secret && echo FOREIGN > f.txt && git add f.txt && \
+             git commit -q -m foreign && git push -q ../origin.git secret",
+        );
+        let foreign = git_out(&tmp.path().join("src"), &["rev-parse", "HEAD"]);
+        let main = git_out(&tmp.path().join("src"), &["rev-parse", "main"]);
+        let dest = tmp.path().join("state/repo-mirrors/R.git");
+        let mut c = checkout(tmp.path(), &tmp.path().join("shared.git"), &dest);
+        c.deny_local_under = Vec::new();
+        refresh_mirror(&c).unwrap();
+        let alt = dest.join("objects/info/alternates");
+        assert!(!alt.exists());
+        let g = ReadGit::new(Duration::from_secs(10));
+        let head = g.text(&dest, &["rev-parse", "refs/heads/main"]).unwrap();
+        assert_eq!(head.trim(), main);
+        assert!(g.run(&dest, &["cat-file", "-e", &foreign], 64).is_err());
+        assert!(
+            g.run(&dest, &["cat-file", "-e", &foreign[..7]], 64)
+                .is_err()
+        );
+        // A fetch: still no alternates file.
+        refresh_mirror(&c).unwrap();
+        assert!(!alt.exists());
+
+        // An old mirror with an alternates file: the read refuses it, and
+        // the next refresh clones it again.
+        std::fs::write(&alt, format!("{}/objects\n", origin.display())).unwrap();
+        match g.run(&dest, &["cat-file", "-e", &foreign], 64) {
+            Err(GitError::Refused(m)) => assert!(m.contains("alternates"), "{m}"),
+            other => panic!("{other:?}"),
+        }
+        refresh_mirror(&c).unwrap();
+        assert!(!alt.exists());
+        assert!(g.run(&dest, &["cat-file", "-e", &foreign], 64).is_err());
+        assert_eq!(
+            g.text(&dest, &["rev-parse", "refs/heads/main"])
+                .unwrap()
+                .trim(),
+            main
+        );
+    }
+
+    /// A workspace clone of a local source with an alternates file has no
+    /// alternates file (`--no-local`), so the daemon can update it.
+    #[test]
+    fn a_workspace_clone_has_no_alternates() {
+        let tmp = tempfile::tempdir().unwrap();
+        bare_repo(tmp.path());
+        sh(
+            tmp.path(),
+            "git clone -q --bare --shared origin.git shared.git",
+        );
+        let dest = tmp.path().join("ws/proj");
+        let c = checkout(tmp.path(), &tmp.path().join("shared.git"), &dest);
+        clone_or_update(&c, &mut |_| {}).unwrap();
+        assert!(!dest.join(".git/objects/info/alternates").exists());
+        assert_eq!(
+            clone_or_update(&c, &mut |_| {}).unwrap().action,
+            Action::UpToDate
+        );
+        // A planted alternates file stops the update.
+        std::fs::write(dest.join(".git/objects/info/alternates"), "/x\n").unwrap();
+        assert!(matches!(
+            clone_or_update(&c, &mut |_| {}),
+            Err(GitError::Refused(m)) if m.contains("alternates")
+        ));
     }
 
     #[test]

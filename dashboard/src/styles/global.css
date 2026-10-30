@@ -2348,7 +2348,8 @@ tr.row-open > td {
   color: var(--info);
 }
 .diff-status.st-typechange,
-.diff-status.st-unmerged {
+.diff-status.st-unmerged,
+.diff-status.st-refused {
   background: var(--warn-soft);
   color: var(--warn);
 }
