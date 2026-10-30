@@ -433,6 +433,7 @@ everything. Every privileged action writes an audit row (§9).
 | Capability | member | project_admin | sysadmin |
 |---|---|---|---|
 | Read own project: project, agents, repos, targets, board, cards | yes | yes | all projects |
+| Browse a repo (§5.3): its trees, files, changes, commits | own project | own project | all projects |
 | Mail (§7.1 scope rules) | own project | own project | any agent |
 | Read and reply from the project inbox | no | own project | any project |
 | Create, change, start, stop, restart, delete agents; send turns; answer; attach the PTY | no | own project | any |
@@ -775,6 +776,7 @@ calls `POST /api/repos/credential` through the runner socket.
 | `GET /api/repos/{id}` | | `200` repo | read |
 | `POST /api/repos/{id}/checkout` | below | `200` checkout result | own workspace: read; another agent's: project_admin |
 | `POST /api/repos/credential` | `{"protocol", "host", "path"?}` | `200` `{"username", "password"}` | an agent |
+| `GET /api/repos/{id}/trees...` | | the repo browser (§5.3) | read |
 | `GET /api/credentials` | | `200` `[{"name", "kind", "username"?, "created_at"}]` | sysadmin (an alias, §5.2) |
 | `POST /api/credentials` | `{"name", "kind", "value", "username"?}` | `201` credential, without `value` | sysadmin (an alias, §5.2) |
 | `DELETE /api/credentials/{name}` | | `204` | sysadmin (an alias, §5.2) |
@@ -1409,6 +1411,106 @@ lists global secrets in the old shapes of §5.1. `kind` is `token`,
 name replaces the secret. The list shows each global secret: a `login` as
 `password`, the other kinds with their own names. Its audit rows are
 `secret.put` and `secret.delete`.
+
+### 5.3 The repo browser
+
+PLAN §9a. The daemon reads the trees of a repo for the dashboard (and for
+any caller that can read the project). A tree is:
+
+- `main`: the repo's default branch (`default_branch`, else the remote's
+  HEAD), from a bare mirror that the daemon owns:
+  `<state>/repo-mirrors/<repo ULID>.git`. The daemon clones it at the first
+  request, with the repo's secret as for a checkout (§5.1), outside every
+  sandbox. A read fetches every branch into it when the last fetch is more
+  than 60 s old; `?refresh=true` on the tree list fetches at most each 5 s.
+  A failed fetch keeps the old mirror (`mirror.error`). No agent can write
+  the mirror.
+- `agent:<ULID>`: the checkout of the repo in that agent's workspace,
+  `<work>/<project>/<agent>/<path>`, for each agent of the project that has
+  one (a plain `.git` directory). The browser reads the work tree: what the
+  agent sees, with its uncommitted files.
+
+| Endpoint | Answer |
+|---|---|
+| `GET /api/repos/{id}/trees[?refresh=true]` | `200` `{"repo", "repo_id", "project", "default_branch", "trees": [tree]}` |
+| `GET /api/repos/{id}/trees/{tree}/files?path=` | `200` `{"path", "entries": [entry], "truncated"}` |
+| `GET /api/repos/{id}/trees/{tree}/file?path=` | `200` the raw bytes, at most 1 MiB |
+| `GET /api/repos/{id}/trees/{tree}/diff` | `200` changes, below |
+| `GET /api/repos/{id}/trees/{tree}/commits[?cursor=&limit=]` | `200` commits, newest first; `X-Next-Cursor` |
+| `GET /api/repos/{id}/trees/{tree}/commits/{sha}` | `200` commit with its message and diff |
+
+A tree in the list:
+
+```json
+{"id":"main","kind":"main","label":"main","branch":"main","head":"3f2c...","mirror":{"fetched_at":"2026-10-31T01:02:03.000Z"}}
+{"id":"agent:01M5PA0T0Z0K16V6G88P3SE78W","kind":"agent","agent":"worker","agent_id":"01M5PA0T0Z0K16V6G88P3SE78W",
+ "label":"worker · feat/parser","branch":"feat/parser","head":"9a1b...","base_ref":"refs/remotes/origin/main",
+ "base":"3f2c...","ahead":2,"behind":1,"dirty":{"staged":1,"unstaged":2,"untracked":0}}
+```
+
+A tree that the daemon cannot read has `error` (a refused repo config, a
+failed first clone). `dirty.partial` is `true` when the checkout is too
+large to compare each file. An entry is `{"name", "path", "kind", "size"?,
+"target"?}`; `kind` is `dir`, `file`, `symlink`, `submodule`, or `other`.
+Folders come first. A symlink has its `target` text; the daemon does not
+follow it. `truncated` is `true` over 5000 entries.
+
+**The raw file.** UTF-8 text is `text/plain; charset=utf-8`. Anything else
+is `application/octet-stream` with `Content-Disposition: attachment`. The
+answer is never `text/html` or `image/svg+xml`, and has
+`X-Content-Type-Options: nosniff`. `X-Terrarium-Size` is the size of the
+whole file; `X-Terrarium-Truncated: true` says that the body is the first
+1 MiB only. A directory, a symlink, or a submodule is `422 invalid`.
+
+**Changes.** The base is the merge base of HEAD and the default branch
+(`refs/remotes/origin/<default>` in the checkout, else
+`refs/heads/<default>`). `committed` is the diff base..HEAD. For an agent
+tree, `uncommitted` has `staged` (the index against HEAD), `unstaged` (the
+work tree against the index), and `untracked` (paths, at most 1000). For
+`main`, `uncommitted` is `null` and `note` is `main is the base`. A diff
+set is `{"files": [file], "truncated"}`; a file is `{"path", "status",
+"additions", "deletions", "binary", "patch", "truncated", "note"?}`.
+`status` is `added`, `deleted`, `modified`, `typechange`, `mode`, or
+`unmerged`. `patch` has the unified diff hunks from the first `@@` line.
+A file has at most 2000 diff lines and an answer at most 20 000;
+`truncated` says that a cap cut it.
+
+**Commits.** For an agent tree, the commits of base..HEAD; for `main`, the
+history of the default branch. A commit is `{"sha", "parents",
+"author_name", "author_email", "date", "subject"}`. `limit` is 1 to 200
+(default 50); the cursor is the number of commits to skip. A commit detail
+adds `committer_name`, `committer_date`, `message`, and `diff` (against
+the first parent; the empty tree for a root commit). `{sha}` is 4 to 64
+hex digits (`422` if not).
+
+**Errors.** A `path` that is absolute, has `..` or a NUL, or names `.git`
+is `422 invalid`. An unknown tree is `404`. A checkout whose
+`.git/config` has a key outside the allowlist of §5.1 is `409 conflict`.
+A git command that does not end in 10 s is `500`.
+
+**Security.** The daemon reads repos that agents control, outside the
+sandbox:
+
+- git runs with the hardening of a checkout update (§5.1): no hooks, no
+  fsmonitor, no global or system config, and a check of a copy of
+  `.git/config` against the allowlist before the first command. Also
+  `--no-ext-diff`, `--no-textconv`, `core.attributesFile=/dev/null`,
+  `diff.external=`, `log.showSignature=false`, `GIT_ATTR_NOSYSTEM=1`, and
+  `GIT_OPTIONAL_LOCKS=0`. Each command has a 10 s deadline and an output
+  cap.
+- Only commands that run no filter driver: `ls-tree`, `ls-files`,
+  `cat-file blob`, `log`, `rev-parse`, `rev-list`, `diff-tree` (commit to
+  commit), and `diff-index --cached` (HEAD to index). The daemon never
+  runs `git status`, `git diff` against the work tree, `git add`, or
+  `git hash-object` in a checkout: these run the clean filter.
+- The changes in the work tree are found in the daemon: it reads each file
+  (each path part opened with `O_NOFOLLOW`), makes the blob ID itself, and
+  makes the diff itself. A file that a filter or `core.autocrlf` changes
+  on checkout shows as changed.
+- A symlink is never followed; `.git` is never shown. The daemon never
+  writes into a workspace.
+- The dashboard shows each name, file, and diff as text. Only a Markdown
+  file with **Rendered** on goes through the safe Markdown renderer.
 
 ## 6. Agents
 

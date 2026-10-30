@@ -238,9 +238,12 @@ Account, Subscriptions, Harness config, and Hosts. Each tab is a route under
 "Terrarium" item has a tab for each of Mail, Events, and Audit, under
 `/logs`. The **Logs** item of a project has the Mail and Events tabs of that
 project, under `/p/<project>/logs`. The project settings screen is the
-same: it has a tab for each of General & repos, Secrets, and Templates of
+same: it has a tab for each of General, Secrets, and Templates of
 the project, under `/p/<project>/settings`. The screens use
 `components/TabScreen.tsx`. The Logs item is active on each of its tabs.
+The **Repos** item of a project (after Board) opens `/p/<project>/repos`
+(`features/repos/ReposPage.tsx`): the repos, and **Add repo**. A repo opens
+its browser (`features/repos/RepoPage.tsx`, see "The repo browser").
 
 **Live mode of the log tabs.** Mail, Events, and Audit have the same
 **Live** control first in their toolbar (`components/Live.tsx`
@@ -586,7 +589,9 @@ prefix or budget scope. The daemon also has `project`, `since`, `until`, and
 |---|---|---|
 | `/` | Home: usage strip, waiting-on-you queue, host cards (see "Home: hosts"); the tile detail has the usage split by project, agent, model, and card | `GET /api/subscriptions`, `GET /api/usage?bucket=hour&group=subscription`; tile detail: `GET /api/usage?subscription=&group=project\|agent\|model\|card`, `GET .../quota`; per project: `versions?status=in_review`, `wiki?status=ready_for_review`, `board`; Inbox items: `GET /api/inbox` (see "The Inbox"); hosts: `GET /api/hosts`, `GET /api/hosts/{name}/metrics?minutes=15` |
 | `/projects` | Projects: list, create. The Projects root of the sidebar tree links it | `GET`, `POST /api/projects` |
-| `/p/:project/settings/general` | Project settings, General & repos tab: project edit and delete, Targets panel, Repos panel | `GET`, `PATCH`, `DELETE /api/projects/{name}?confirm=true`, `GET .../targets`, `GET`, `POST .../repos`, `POST /api/repos/{id}/checkout` |
+| `/p/:project/settings/general` | Project settings, General tab: project edit and delete, Targets panel, a link to the Repos page | `GET`, `PATCH`, `DELETE /api/projects/{name}?confirm=true`, `GET .../targets` |
+| `/p/:project/repos` | Repos of the project: list, **Add repo** (project_admin), a checkout row for each repo | `GET`, `POST /api/projects/{name}/repos`, `GET .../targets`, `POST /api/repos/{id}/checkout` |
+| `/p/:project/repos/:repo` | Repo browser: tree selector (`main` and each agent checkout), tabs Files, Changes, Commits. The query keeps `tree`, `tab`, `path`, `file`, and `commit` | `GET /api/repos/{id}/trees[?refresh=true]`, `GET .../trees/{tree}/files?path=`, `.../file?path=`, `.../diff`, `.../commits?cursor=`, `.../commits/{sha}` |
 | `/p/:project/settings/secrets` | Project settings, Secrets tab: the secrets of the project, then the global ones that it can use | `GET /api/secrets?scope=`, `POST /api/secrets`, `PUT`, `DELETE /api/secrets/{scope}/{name}`, `POST .../generate\|reveal`, `GET .../grants` |
 | `/p/:project/settings/templates` | Project settings, Templates tab: the templates of the project, then the global ones | `GET`, `POST /api/templates`, `PATCH`, `DELETE /api/templates/{key}`, `template` events |
 | `/p/:project/settings`, `/p/:project/secrets`, `/p/:project/templates` | Gone: redirect to `/p/:project/settings/general`, `/p/:project/settings/secrets`, and `/p/:project/settings/templates` (`app/nav.ts` `MOVED_ROUTES`). The redirect keeps the query. | none |
@@ -811,3 +816,30 @@ All of the earlier follow-ups are done in `terrariumd`:
 9. **Names of removed agents** resolve through the tombstone table on mail as on cards.
 
 Still open: `GET /api/mail?to=<ULID>` for a removed agent answers 404.
+
+## The repo browser
+
+`/p/:project/repos/:repo` (`features/repos/RepoPage.tsx`, docs/api.md
+§5.3). The tree select has `main` (the daemon's mirror of the default
+branch) and each agent checkout as `<agent> · <branch>`, with the ahead and
+behind counts and a "changed" mark. **Refresh** fetches `main` again.
+
+- **Files**: breadcrumbs, folders first, sizes. A symlink shows its target
+  and is not a link. A text file has line numbers. A Markdown file shows its
+  source; **Rendered** puts it through the safe `Markdown` component. A PNG,
+  JPEG, GIF, or WebP file shows as an image from a blob URL with a fixed
+  type (never SVG). Another binary file shows its size only. Over 1 MiB, the
+  view shows the first 1 MiB and says so.
+- **Changes**: for an agent tree, the committed diff (base..HEAD), then the
+  uncommitted part: staged, not staged, and the untracked paths. `main` is
+  the base, so it has no diff.
+- **Commits**: newest first, **Load more**; a commit shows its message and
+  its diff.
+
+The diff viewer (`components/DiffView.tsx`, `lib/diff.ts`) has a file list
+with +/- counts, one collapsible block for each file with a sticky header,
+and the old and new line numbers. The colours are theme tokens. On a phone
+only the code blocks scroll sideways. Agents write every name, file, and
+diff: they go into text nodes only. The mock (`api/mock/repoTrees.ts`) has
+`main` and two agent trees of the repo `terrarium`.
+

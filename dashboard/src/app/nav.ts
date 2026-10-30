@@ -4,6 +4,8 @@ export const PROJECT_ITEMS = [
   // Every agent of the project, in any status.
   { path: "agents", label: "Agents" },
   { path: "board", label: "Board" },
+  // The repos of the project (PLAN §9a): add one, then browse its trees (main and each agent checkout).
+  { path: "repos", label: "Repos" },
   // The logs of the project (PROJECT_LOGS_TABS): every message and every event that touches it.
   { path: "logs", label: "Logs" },
   { path: "wiki", label: "Wiki" },
@@ -18,8 +20,8 @@ export const PROJECT_ITEMS = [
  * /p/:project/settings. The cog of the project row in the tree opens it.
  */
 export const PROJECT_SETTINGS_TABS = [
-  // The project edit and delete, the Targets panel, and the Repos panel.
-  { path: "general", label: "General & repos" },
+  // The project edit and delete, and the Targets panel. The repos have their own item (PROJECT_ITEMS).
+  { path: "general", label: "General" },
   // The project's secrets and the global ones it can use (PLAN §16b).
   { path: "secrets", label: "Secrets" },
   // The templates that apply to the project: its own and the global ones.
@@ -98,9 +100,11 @@ export const PROJECT_LOGS_TABS = [
  * - The global Agents page is removed. The agents of a project are on the
  *   Agents page of the project. `/agents` opens the project cards.
  * - The project Secrets and Templates pages, and the project Settings page
- *   (now "General & repos"), are tabs of the project settings screen. A
+ *   (now "General"), are tabs of the project settings screen. A
  *   bookmark can have an old path, so the old paths stay as redirects.
- *   `/p/:project/settings` opens the first tab.
+ *   `/p/:project/settings` opens the first tab. The Repos panel left the
+ *   General tab for the Repos item of the project (/p/:project/repos); the
+ *   General tab keeps its path.
  */
 export const MOVED_ROUTES = [
   { path: "/p/:project/spend", to: "/" },

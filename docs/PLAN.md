@@ -977,6 +977,30 @@ agent uses plain `git` inside its workspace; pushes go through a credential
 helper that calls `terrarium repo credential`, which the daemon answers only
 for repos in the agent's project.
 
+### 9a. The repo browser
+
+The **Repos** item of a project in the dashboard lists the repos and adds
+one. A repo opens a browser of its trees: `main`, and the checkout of the
+repo in each agent workspace (`<agent> · <branch>`, with ahead and behind
+counts and the work tree state). Each tree has three tabs: **Files** (a
+directory browser and a file viewer), **Changes** (the diff against the
+branch that the tree came from: committed, then uncommitted for an agent
+tree), and **Commits** (paged, each with its message and diff). API:
+docs/api.md §5.3.
+
+- `main` reads a bare mirror that the daemon owns,
+  `<state>/repo-mirrors/<repo ULID>.git`. The daemon clones it with the
+  repo's secret at the first read and fetches it when it is more than 60 s
+  old, or on **Refresh** (at most each 5 s).
+- An agent tree reads the work tree from disk (no symlink followed, no
+  `.git`), and the object store with git plumbing that runs no filter, no
+  textconv, and no external diff (`crate::repo_browse`). The work tree
+  diff is made in the daemon, so that no clean filter runs. The daemon
+  never writes into a workspace.
+- Caps: 1 MiB for each file, 5000 entries for each directory, 2000 diff
+  lines for each file and 20 000 for each answer, 10 s for each git
+  command.
+
 ---
 
 ## 10. Roles and leader agents

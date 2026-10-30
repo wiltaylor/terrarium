@@ -106,7 +106,7 @@ fn check_dir(dir: &str) -> ApiResult<()> {
     }
 }
 
-fn git_error(e: GitError) -> ApiError {
+pub(super) fn git_error(e: GitError) -> ApiError {
     match e {
         GitError::Refused(m) => ApiError::conflict(m),
         GitError::Failed {

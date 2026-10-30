@@ -161,6 +161,128 @@ export interface Repo {
   created_at?: string;
 }
 
+/** The work tree changes of an agent checkout, as counts (docs/api.md §5.3). */
+export interface RepoDirty {
+  staged: number;
+  unstaged: number;
+  untracked: number;
+  /** The checkout is large: the counts are a lower bound. */
+  partial?: boolean;
+}
+
+/** One tree of a repo: `main` (the daemon's mirror) or `agent:<ULID>` (a workspace checkout). */
+export interface RepoTree {
+  id: string;
+  kind: "main" | "agent";
+  /** `main`, or `<agent> · <branch>`. */
+  label: string;
+  branch?: string | null;
+  head?: string | null;
+  agent?: string;
+  agent_id?: string;
+  base_ref?: string | null;
+  base?: string | null;
+  ahead?: number | null;
+  behind?: number | null;
+  dirty?: RepoDirty | null;
+  /** `main` only: the last fetch of the mirror. */
+  mirror?: { fetched_at: string | null; error?: string };
+  /** The tree cannot be read (a refused repo config, a failed fetch). */
+  error?: string;
+}
+
+/** `GET /api/repos/{id}/trees`. */
+export interface RepoTrees {
+  repo: string;
+  repo_id: string;
+  project: string;
+  default_branch?: string | null;
+  trees: RepoTree[];
+}
+
+export interface TreeEntry {
+  name: string;
+  path: string;
+  kind: "dir" | "file" | "symlink" | "submodule" | "other";
+  size?: number;
+  /** The target text of a symlink. The daemon does not follow it. */
+  target?: string;
+}
+
+/** `GET /api/repos/{id}/trees/{tree}/files?path=`. */
+export interface TreeListing {
+  path: string;
+  entries: TreeEntry[];
+  /** Over 5000 entries: the rest are not in the answer. */
+  truncated: boolean;
+}
+
+/** `GET .../file?path=`: the bytes (at most 1 MiB) and what the headers say. */
+export interface TreeFile {
+  blob: Blob;
+  /** `text/plain`: UTF-8 text. Else the bytes are binary. */
+  text: boolean;
+  /** The size of the whole file. */
+  size: number;
+  truncated: boolean;
+}
+
+export interface FileDiff {
+  path: string;
+  status: "added" | "deleted" | "modified" | "typechange" | "mode" | "unmerged";
+  additions: number;
+  deletions: number;
+  binary: boolean;
+  /** Unified diff hunks, from the first `@@` line. */
+  patch: string;
+  truncated: boolean;
+  note?: string;
+}
+
+export interface DiffSet {
+  files: FileDiff[];
+  truncated: boolean;
+}
+
+export interface TreeUncommitted {
+  staged: DiffSet;
+  unstaged: DiffSet;
+  untracked: string[];
+  untracked_truncated: boolean;
+  note?: string;
+}
+
+/** `GET .../diff`: the tree against the branch it came from. */
+export interface TreeChanges {
+  tree: string;
+  agent?: string;
+  agent_id?: string;
+  base?: string | null;
+  head?: string | null;
+  base_ref?: string | null;
+  branch?: string | null;
+  committed: DiffSet;
+  /** `null` for `main`. */
+  uncommitted: TreeUncommitted | null;
+  note?: string | null;
+}
+
+export interface RepoCommit {
+  sha: string;
+  parents: string[];
+  author_name: string;
+  author_email: string;
+  date: string;
+  subject: string;
+}
+
+export interface RepoCommitDetail extends RepoCommit {
+  committer_name: string;
+  committer_date: string;
+  message: string;
+  diff: DiffSet;
+}
+
 export interface NewRepo {
   name?: string;
   url: string;

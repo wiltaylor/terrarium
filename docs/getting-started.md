@@ -316,6 +316,13 @@ You can also do these steps in the dashboard. On the Projects page, click
 **New project**. In the sidebar, open the project and click **Agents**.
 Then click **New agent**. Then open the agent and click **Start**.
 
+To add a repo in the dashboard, open the project in the sidebar and click
+**Repos**. Then click **Add repo**, and give the URL. The project settings
+(the cog of the project row) do not have the repos any more. Click the name
+of a repo to open its browser: select `main` or the checkout of an agent,
+then use the **Files**, **Changes**, and **Commits** tabs. From the shell,
+use `t -p demo project repo-add <url>`.
+
 To make more agents with the same settings, use an agent template. Make
 the template one time, then give only the name of each agent:
 

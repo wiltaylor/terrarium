@@ -2168,3 +2168,211 @@ tr.row-open > td {
   width: 100%;
   box-sizing: border-box;
 }
+
+/* The repo browser (features/repos): the file list, the file viewer, and
+   the diff viewer. Agents write the content: it is text only. On a phone,
+   only the code blocks scroll sideways. */
+.crumbs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px;
+}
+.file-table td.num,
+.file-table th.num {
+  text-align: right;
+  white-space: nowrap;
+}
+.file-table td {
+  overflow-wrap: anywhere;
+}
+.file-image {
+  max-width: 100%;
+  image-rendering: auto;
+  background: repeating-conic-gradient(var(--surface-2) 0% 25%, var(--surface) 0% 50%) 50% / 16px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  align-self: flex-start;
+}
+.seg {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+.seg button {
+  border: none;
+  border-radius: 0;
+  padding: 3px 10px;
+  background: var(--surface);
+  color: var(--muted);
+}
+.seg button.active {
+  background: var(--accent-soft);
+  color: var(--text);
+  font-weight: 600;
+}
+.code-scroll {
+  overflow-x: auto;
+  max-width: 100%;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+.code-table,
+.diff-table {
+  border-collapse: collapse;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.5;
+  width: 100%;
+}
+.code-table td,
+.diff-table td {
+  padding: 0 8px;
+  border: none;
+  vertical-align: top;
+}
+.code-table td.code,
+.diff-table td.code {
+  white-space: pre;
+  width: 100%;
+}
+.code-table td.ln,
+.diff-table td.ln {
+  color: var(--muted);
+  text-align: right;
+  user-select: none;
+  min-width: 3.5em;
+  background: var(--surface-2);
+}
+.diff-table td.mark {
+  user-select: none;
+  color: var(--muted);
+  padding: 0 2px;
+}
+.diff-table tr.diff-add td.code,
+.diff-table tr.diff-add td.mark {
+  background: var(--accent-soft);
+}
+.diff-table tr.diff-add td.ln {
+  background: color-mix(in srgb, var(--accent-soft) 70%, var(--surface-2));
+}
+.diff-table tr.diff-del td.code,
+.diff-table tr.diff-del td.mark {
+  background: var(--danger-soft);
+}
+.diff-table tr.diff-del td.ln {
+  background: color-mix(in srgb, var(--danger-soft) 70%, var(--surface-2));
+}
+.diff-table tr.diff-hunk td {
+  background: var(--info-soft);
+  color: var(--info);
+}
+.diff-table tr.diff-note td {
+  color: var(--muted);
+  font-style: italic;
+}
+.diff-file {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+.diff-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+}
+.diff-path {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.diff-counts {
+  white-space: nowrap;
+  font-size: 12px;
+}
+.diff-add-n {
+  color: var(--st-working);
+}
+.diff-del-n {
+  color: var(--danger);
+}
+.diff-status {
+  display: inline-block;
+  min-width: 1.6em;
+  text-align: center;
+  font-family: var(--mono);
+  font-size: 11px;
+  border-radius: var(--radius-sm);
+  padding: 0 4px;
+  background: var(--surface-3);
+  color: var(--text);
+}
+.diff-status.st-added {
+  background: var(--accent-soft);
+  color: var(--link);
+}
+.diff-status.st-deleted {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+.diff-status.st-modified,
+.diff-status.st-mode {
+  background: var(--info-soft);
+  color: var(--info);
+}
+.diff-status.st-typechange,
+.diff-status.st-unmerged {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+.diff-note {
+  margin: 6px 10px;
+}
+.diff-index {
+  margin: 0;
+  padding-left: 0;
+  list-style: none;
+  display: grid;
+  gap: 2px;
+}
+.diff-index li {
+  overflow-wrap: anywhere;
+}
+.untracked {
+  margin: 0;
+  padding-left: 18px;
+}
+.untracked li {
+  overflow-wrap: anywhere;
+}
+.commit-message {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--mono);
+  font-size: 13px;
+}
+.repo-tree-bar select {
+  max-width: 100%;
+}
+/* Keep a wide diff inside its own scroll box: no block grows to the width of a code line. */
+.diff-set,
+.diff-file,
+.repo-section {
+  min-width: 0;
+  max-width: 100%;
+}
+.diff-file {
+  /* clip, not hidden: no scroll box, so the file header stays sticky. */
+  overflow: clip;
+}

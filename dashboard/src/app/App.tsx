@@ -25,6 +25,8 @@ const AuditPage = lazy(() => import("../features/audit/AuditPage"));
 const EventsPage = lazy(() => import("../features/events/EventsPage"));
 const ProjectsPage = lazy(() => import("../features/projects/ProjectsPage"));
 const ProjectSettings = lazy(() => import("../features/projects/ProjectSettings"));
+const ReposPage = lazy(() => import("../features/repos/ReposPage"));
+const RepoPage = lazy(() => import("../features/repos/RepoPage"));
 const LogsPage = lazy(() => import("../features/logs/LogsPage"));
 const SettingsPage = lazy(() => import("../features/settings/SettingsPage"));
 const AccountPage = lazy(() => import("../features/settings/AccountPage"));
@@ -90,12 +92,15 @@ export function App() {
         <Route path="/p/:project" component={ProjectIndex} />
         <Route path="/p/:project/agents" component={AgentsPage} />
         <Route path="/p/:project/board" component={BoardPage} />
+        {/* The repos of the project, and the browser of one repo (its trees: main and each agent checkout). */}
+        <Route path="/p/:project/repos" component={ReposPage} />
+        <Route path="/p/:project/repos/:repo" component={RepoPage} />
         {/* The project logs: the Mail and Events tabs (nav.ts PROJECT_LOGS_TABS), each for this project only. */}
         <Route path="/p/:project/logs" component={LogsPage}>
           <Route path="/mail" component={MailPage} />
           <Route path="/events" component={EventsPage} />
         </Route>
-        {/* The project settings screen: the tabs General & repos, Secrets, and Templates (nav.ts PROJECT_SETTINGS_TABS). /p/:project/settings redirects to the first tab. */}
+        {/* The project settings screen: the tabs General, Secrets, and Templates (nav.ts PROJECT_SETTINGS_TABS). /p/:project/settings redirects to the first tab. */}
         <Route path="/p/:project/settings" component={SettingsPage}>
           <Route path="/general" component={ProjectSettings} />
           <Route path="/secrets" component={SecretsPage} />

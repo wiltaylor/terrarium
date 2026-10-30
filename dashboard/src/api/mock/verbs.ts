@@ -48,6 +48,10 @@ export function httpVerbs(): Map<string, Verb> {
       last = "GET";
       return pending();
     },
+    bytes: () => {
+      last = "GET";
+      return pending();
+    },
     stream: () => {
       last = "SSE";
       return pending();

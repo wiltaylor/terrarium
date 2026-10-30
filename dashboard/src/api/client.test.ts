@@ -17,6 +17,10 @@ function recorder(opts: HttpApiOptions = {}, answer: unknown = undefined) {
       calls.push({ method: "GET", path, opts: { query: query as RequestOptions["query"] } });
       return { items: [] as T[], next: null };
     },
+    async bytes(path: string, query?: Record<string, unknown>) {
+      calls.push({ method: "GET", path, opts: { query: query as RequestOptions["query"] } });
+      return { blob: new Blob([]), headers: new Headers() };
+    },
     async stream(path: string, query: Record<string, unknown> | undefined) {
       calls.push({ method: "SSE", path, opts: { query: query as RequestOptions["query"] } });
       return (async function* () {})();

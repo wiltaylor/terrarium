@@ -46,6 +46,8 @@ export interface Transport {
   request<T>(method: string, path: string, opts?: RequestOptions): Promise<T>;
   /** GET a list endpoint: the JSON array and the `X-Next-Cursor` header. */
   page<T>(path: string, query?: Query): Promise<Page<T>>;
+  /** GET raw bytes (a file of a repo tree): the body as a Blob, and the headers. Errors throw as `request` does. */
+  bytes(path: string, query?: Query): Promise<{ blob: Blob; headers: Headers }>;
   /**
    * GET a `text/event-stream` with the same credentials as `request`, and
    * yield its text. A refusal throws as `request` does. `signal` ends it.
@@ -161,7 +163,7 @@ export function createHttpTransport(opts: HttpTransportOptions): Transport {
   const base = (opts.baseUrl ?? "").replace(/\/$/, "");
   const doFetch = opts.fetch ?? ((...args: Parameters<typeof fetch>) => fetch(...args));
 
-  const send = async (method: string, path: string, ro: RequestOptions = {}): Promise<{ data: unknown; res: Response }> => {
+  const send = async (method: string, path: string, ro: RequestOptions = {}, binary = false): Promise<{ data: unknown; res: Response }> => {
     const headers: Record<string, string> = { Accept: "application/json" };
     const token = ro.anonymous ? null : (ro.bearer ?? opts.getToken());
     if (token) headers.Authorization = `Bearer ${token}`;
@@ -179,6 +181,8 @@ export function createHttpTransport(opts: HttpTransportOptions): Transport {
     }
     // `same-origin`: the session cookie goes to the dashboard origin only.
     const res = await doFetch(`${base}${path}${buildQuery(ro.query)}`, { method, headers, body, credentials: "same-origin" });
+    // A binary answer: the body as bytes. An error is JSON as always.
+    if (binary && res.ok) return { data: await res.blob(), res };
     const text = await res.text();
     let data: unknown = undefined;
     if (text) {
@@ -205,6 +209,11 @@ export function createHttpTransport(opts: HttpTransportOptions): Transport {
       const { data, res } = await send("GET", path, { query });
       if (!Array.isArray(data)) throw new ApiError(res.status, `GET ${path}: expected a JSON array`, data, "bad_shape");
       return { items: data as T[], next: res.headers.get(NEXT_CURSOR) || null };
+    },
+
+    async bytes(path: string, query?: Query): Promise<{ blob: Blob; headers: Headers }> {
+      const { data, res } = await send("GET", path, { query }, true);
+      return { blob: data as Blob, headers: res.headers };
     },
 
     async stream(path: string, query: Query | undefined, signal: AbortSignal): Promise<AsyncIterable<string>> {

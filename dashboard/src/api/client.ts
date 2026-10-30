@@ -90,6 +90,12 @@ import type {
   NewMessage,
   NewProject,
   NewRepo,
+  RepoTrees,
+  TreeListing,
+  TreeFile,
+  TreeChanges,
+  RepoCommit,
+  RepoCommitDetail,
   ModelList,
   NewSubscription,
   NewVersion,
@@ -209,8 +215,14 @@ export interface Api {
   };
 
   repos: {
-    /** Not in the daemon yet (docs/api.md §10): answers 404. */
-    checkout(id: string, opts: { target?: string; branch?: string; path?: string }): Promise<void>;
+    checkout(id: string, opts: { target?: string; branch?: string; path?: string; agent?: string }): Promise<void>;
+    /** The browser of a repo (docs/api.md §5.3). `refresh` fetches the mirror of `main` now (at most each 5 s). */
+    trees(id: string, refresh?: boolean): Promise<RepoTrees>;
+    files(id: string, tree: string, path: string): Promise<TreeListing>;
+    file(id: string, tree: string, path: string): Promise<TreeFile>;
+    diff(id: string, tree: string): Promise<TreeChanges>;
+    commits(id: string, tree: string, cursor?: string | null): Promise<Page<RepoCommit>>;
+    commit(id: string, tree: string, sha: string): Promise<RepoCommitDetail>;
   };
 
   agents: {
@@ -758,6 +770,20 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
 
     repos: {
       checkout: (id, opts) => post(`/api/repos/${seg(id)}/checkout`, opts),
+      trees: (id, refresh) => get(`/api/repos/${seg(id)}/trees`, refresh ? { refresh: true } : undefined),
+      files: (id, tree, path) => get(`/api/repos/${seg(id)}/trees/${seg(tree)}/files`, { path }),
+      file: async (id, tree, path) => {
+        const { blob, headers } = await t.bytes(`/api/repos/${seg(id)}/trees/${seg(tree)}/file`, { path });
+        return {
+          blob,
+          text: (headers.get("Content-Type") ?? "").startsWith("text/plain"),
+          size: Number(headers.get("X-Terrarium-Size") ?? blob.size),
+          truncated: headers.get("X-Terrarium-Truncated") === "true",
+        };
+      },
+      diff: (id, tree) => get(`/api/repos/${seg(id)}/trees/${seg(tree)}/diff`),
+      commits: (id, tree, cursor) => page(`/api/repos/${seg(id)}/trees/${seg(tree)}/commits`, cursor ? { cursor } : undefined),
+      commit: (id, tree, sha) => get(`/api/repos/${seg(id)}/trees/${seg(tree)}/commits/${seg(sha)}`),
     },
 
     agents: {

@@ -17,6 +17,7 @@ mod mail;
 mod memory;
 mod projects;
 mod questions;
+mod repo_trees;
 mod repos;
 mod schedules;
 mod screen;
@@ -235,6 +236,7 @@ fn routes(state: Shared, serve_artifacts: bool, host_connect: bool) -> Router {
         .route("/events/latest", get(streams::latest))
         .merge(projects::routes())
         .merge(repos::routes())
+        .merge(repo_trees::routes())
         .merge(secrets::routes())
         .merge(secrets_generate::routes())
         .merge(secret_grants::routes())

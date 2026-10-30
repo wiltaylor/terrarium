@@ -503,3 +503,164 @@ async fn repo_body_takes_branch_as_an_alias_of_default_branch() {
         "{msg}"
     );
 }
+
+/// The repo browser (docs/api.md §5.3): the trees of a repo, files,
+/// changes, commits, the headers of a raw file, and the refusals.
+#[tokio::test]
+async fn the_browser_reads_main_and_agent_trees() {
+    let (td, _origin, _remotes) = daemon_with_repo().await;
+    let created = td
+        .post(
+            "/api/agents",
+            json!({"name": "worker", "project": "terra", "harness": "claude"}),
+        )
+        .await;
+    let a = created.ok().clone();
+    let agent_id = a["id"].as_str().unwrap().to_owned();
+    let dest = PathBuf::from(a["workspace"].as_str().unwrap()).join("proj");
+    // The agent works on a branch: one commit, one staged file, one
+    // change in the work tree, one untracked file, a binary file.
+    sh(
+        &dest,
+        "git checkout -q -b feat && printf 'one\\nmore\\n' > a.txt && mkdir -p d && \
+         echo '# Doc' > d/x.md && git add . && git commit -q -m 'feat: more' && \
+         echo staged > s.txt && git add s.txt && echo changed >> a.txt && echo u > u.txt && \
+         printf '\\x89PNG\\0\\1' > img.png",
+    );
+    let repos = td.get("/api/projects/terra/repos").await;
+    let id = repos
+        .ok()
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == "proj")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let base = format!("/api/repos/{id}/trees");
+
+    let t = td.get(&base).await;
+    let trees = t.ok()["trees"].as_array().unwrap().clone();
+    assert_eq!(t.body["default_branch"], "main");
+    assert_eq!(trees.len(), 2, "{trees:#?}");
+    assert_eq!(trees[0]["id"], "main");
+    assert!(trees[0]["mirror"]["fetched_at"].is_string(), "{trees:#?}");
+    let tree = format!("agent:{agent_id}");
+    assert_eq!(trees[1]["id"], tree.as_str());
+    assert_eq!(trees[1]["label"], "worker · feat");
+    assert_eq!(trees[1]["ahead"], 1);
+    assert_eq!(trees[1]["behind"], 0);
+    assert_eq!(trees[1]["dirty"]["staged"], 1, "{trees:#?}");
+    assert_eq!(trees[1]["dirty"]["unstaged"], 1);
+    assert_eq!(trees[1]["dirty"]["untracked"], 2);
+    // The mirror is the daemon's own, in the state dir.
+    let mirror = td.state.join(format!("repo-mirrors/{id}.git"));
+    assert!(mirror.join("HEAD").is_file());
+
+    // Files: main from the mirror, the agent tree from its work tree.
+    let l = td.get(&format!("{base}/main/files")).await;
+    let names: Vec<&str> = l.ok()["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["a.txt"]);
+    let l = td.get(&format!("{base}/{tree}/files")).await;
+    let names: Vec<&str> = l.ok()["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["d", "a.txt", "img.png", "s.txt", "u.txt"]);
+    let f = td.get(&format!("{base}/{tree}/file?path=d/x.md")).await;
+    assert_eq!(f.status.as_u16(), 200);
+    assert_eq!(f.headers["content-type"], "text/plain; charset=utf-8");
+    assert_eq!(f.headers["x-content-type-options"], "nosniff");
+    assert_eq!(f.headers["x-terrarium-size"], "6");
+    assert_eq!(f.headers["x-terrarium-truncated"], "false");
+    assert_eq!(f.body, "# Doc\n");
+    let f = td.get(&format!("{base}/{tree}/file?path=img.png")).await;
+    assert_eq!(f.headers["content-type"], "application/octet-stream");
+    assert_eq!(f.headers["content-disposition"], "attachment");
+
+    // Refusals.
+    for bad in ["..", "/etc/passwd", ".git/config", "d/../../x"] {
+        td.get(&format!("{base}/{tree}/file?path={bad}"))
+            .await
+            .err(422, "invalid");
+    }
+    td.get(&format!("{base}/agent:nope/files"))
+        .await
+        .err(404, "not_found");
+    td.get(&format!("{base}/other/files"))
+        .await
+        .err(404, "not_found");
+    td.get(&format!("{base}/main/commits/HEAD"))
+        .await
+        .err(422, "invalid");
+
+    // Changes: committed and uncommitted.
+    let d = td.get(&format!("{base}/{tree}/diff")).await;
+    let c = &d.ok()["committed"]["files"];
+    let paths: Vec<&str> = c
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(paths, ["a.txt", "d/x.md"], "{}", d.body);
+    assert_eq!(d.body["base_ref"], "refs/remotes/origin/main");
+    let u = &d.body["uncommitted"];
+    assert_eq!(u["staged"]["files"][0]["path"], "s.txt");
+    assert_eq!(u["unstaged"]["files"][0]["path"], "a.txt");
+    assert!(
+        u["unstaged"]["files"][0]["patch"]
+            .as_str()
+            .unwrap()
+            .contains("+changed")
+    );
+    assert_eq!(u["untracked"], json!(["img.png", "u.txt"]));
+    let d = td.get(&format!("{base}/main/diff")).await;
+    assert_eq!(d.ok()["note"], "main is the base");
+
+    // Commits: the branch's own, then one commit with its diff.
+    let c = td.get(&format!("{base}/{tree}/commits")).await;
+    let list = c.ok().as_array().unwrap().clone();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0]["subject"], "feat: more");
+    assert!(c.next_cursor().is_none());
+    let sha = list[0]["sha"].as_str().unwrap();
+    let one = td.get(&format!("{base}/{tree}/commits/{sha}")).await;
+    assert_eq!(one.ok()["message"], "feat: more");
+    assert_eq!(one.body["diff"]["files"].as_array().unwrap().len(), 2);
+    let m = td.get(&format!("{base}/main/commits?limit=1")).await;
+    assert_eq!(m.ok().as_array().unwrap().len(), 1);
+    assert!(m.next_cursor().is_none());
+
+    // An agent of another project cannot read it; one of the project can.
+    td.agent("terra", "peer", json!({})).await;
+    td.get_as("terra/peer", &format!("{base}/{tree}/files"))
+        .await
+        .ok();
+    td.project("other").await;
+    td.agent("other", "x", json!({})).await;
+    td.get_as("other/x", &base).await.err(403, "forbidden");
+
+    // A planted repo config: the agent tree is refused, and the list says so.
+    sh(&dest, "git config core.fsmonitor 'touch /tmp/never'");
+    td.get(&format!("{base}/{tree}/files"))
+        .await
+        .err(409, "conflict");
+    let t = td.get(&base).await;
+    assert!(
+        t.ok()["trees"][1]["error"]
+            .as_str()
+            .unwrap()
+            .contains("core.fsmonitor"),
+        "{}",
+        t.body
+    );
+}

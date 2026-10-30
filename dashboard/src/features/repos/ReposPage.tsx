@@ -1,0 +1,175 @@
+// The Repos page of a project (/p/:project/repos): the repos, an Add repo
+// form (`POST /api/projects/{name}/repos`, project_admin), and for each repo
+// a link to its browser (/p/:project/repos/:repo) and a checkout row.
+
+import { A, useParams } from "@solidjs/router";
+import { createResource, createSignal, For, Show } from "solid-js";
+import { isMissingEndpoint } from "../../api/http";
+import type { NewRepo, Repo, Target } from "../../api/types";
+import { Empty, ErrorBanner, PageHead } from "../../components/ui";
+import { api } from "../../stores";
+
+export const repoHref = (project: string, repo: string) => `/p/${encodeURIComponent(project)}/repos/${encodeURIComponent(repo)}`;
+
+export default function ReposPage() {
+  const params = useParams<{ project: string }>();
+  const [repos, { refetch }] = createResource(() => params.project, (p) => api.projects.repos(p));
+  const [targets] = createResource(() => params.project, (p) => api.projects.targets(p).catch((): Target[] => []));
+  const [adding, setAdding] = createSignal(false);
+
+  return (
+    <>
+      <PageHead title="Repos">
+        <button class="primary" onClick={() => setAdding(!adding())} aria-expanded={adding()}>
+          {adding() ? "Close" : "Add repo"}
+        </button>
+      </PageHead>
+      <Show when={adding()}>
+        <AddRepoForm
+          project={params.project}
+          onAdded={() => {
+            setAdding(false);
+            void refetch();
+          }}
+        />
+      </Show>
+      <ErrorBanner error={repos.error} />
+      <Show when={repos()?.length} fallback={<Empty>{repos.loading ? "Loading…" : "No repos yet. Add one: the daemon clones it into a workspace at a checkout."}</Empty>}>
+        <div class="stack" style={{ gap: "8px" }}>
+          <For each={repos()}>{(r) => <RepoRow repo={r} targets={targets() ?? []} />}</For>
+        </div>
+      </Show>
+    </>
+  );
+}
+
+/** Attach a repo (docs/api.md §5). Attaching does not clone. */
+export function AddRepoForm(props: { project: string; onAdded: () => void }) {
+  const [form, setForm] = createSignal<NewRepo>({ url: "" });
+  const [error, setError] = createSignal<unknown>(null);
+  const set = (k: keyof NewRepo, v: string) => setForm({ ...form(), [k]: v });
+  return (
+    <form
+      class="card-box stack"
+      style={{ gap: "8px", "margin-bottom": "16px" }}
+      aria-label="Add a repo"
+      onSubmit={async (e) => {
+        e.preventDefault();
+        const f = form();
+        const body: NewRepo = { url: f.url.trim() };
+        for (const k of ["name", "default_branch", "credential", "path"] as const) if (f[k]?.trim()) body[k] = f[k]!.trim();
+        try {
+          await api.projects.attachRepo(props.project, body);
+          setForm({ url: "" });
+          setError(null);
+          props.onAdded();
+        } catch (err) {
+          setError(err);
+        }
+      }}
+    >
+      <h2 style={{ margin: 0 }}>Add a repo</h2>
+      <ErrorBanner error={error()} onDismiss={() => setError(null)} />
+      <div class="form-grid">
+        <label>
+          URL
+          <input value={form().url} onInput={(e) => set("url", e.currentTarget.value)} required placeholder="https://github.com/me/infra.git" />
+        </label>
+        <label>
+          Name (empty: from the URL)
+          <input value={form().name ?? ""} onInput={(e) => set("name", e.currentTarget.value)} />
+        </label>
+        <label>
+          Default branch
+          <input value={form().default_branch ?? ""} onInput={(e) => set("default_branch", e.currentTarget.value)} placeholder="main" />
+        </label>
+        <label>
+          Credential (a key name, never the secret)
+          <input value={form().credential ?? ""} onInput={(e) => set("credential", e.currentTarget.value)} placeholder="github-deploy" />
+        </label>
+        <label>
+          Checkout path
+          <input value={form().path ?? ""} onInput={(e) => set("path", e.currentTarget.value)} placeholder="infra" />
+        </label>
+      </div>
+      <div>
+        <button class="primary" type="submit">
+          Add
+        </button>
+      </div>
+    </form>
+  );
+}
+
+function RepoRow(props: { repo: Repo; targets: Target[] }) {
+  const [open, setOpen] = createSignal(false);
+  const [branch, setBranch] = createSignal(props.repo.default_branch ?? "");
+  const [target, setTarget] = createSignal("");
+  const [path, setPath] = createSignal(props.repo.path ?? "");
+  const [result, setResult] = createSignal<{ ok: boolean; text: string } | null>(null);
+  const [error, setError] = createSignal<unknown>(null);
+
+  const checkout = async () => {
+    setResult(null);
+    setError(null);
+    try {
+      await api.repos.checkout(props.repo.id, { target: target() || undefined, branch: branch().trim() || undefined, path: path().trim() || undefined });
+      setResult({ ok: true, text: "Checkout requested." });
+    } catch (e) {
+      if (isMissingEndpoint(e)) setResult({ ok: false, text: "Checkout is not available here: the daemon does not have POST /api/repos/{id}/checkout." });
+      else setError(e);
+    }
+  };
+
+  return (
+    <div class="comment stack" style={{ gap: "6px" }}>
+      <div class="spread" style={{ "flex-wrap": "wrap" }}>
+        <span style={{ "min-width": 0 }}>
+          <A href={repoHref(props.repo.project, props.repo.name)}>
+            <strong>{props.repo.name}</strong>
+          </A>{" "}
+          <span class="mono small muted" style={{ "overflow-wrap": "anywhere" }}>
+            {props.repo.url}
+          </span>
+        </span>
+        <span class="muted small">
+          {props.repo.default_branch ? `${props.repo.default_branch} · ` : ""}
+          {props.repo.credential ? `credential ${props.repo.credential} · ` : ""}
+          {props.repo.source ?? "api"}
+        </span>
+      </div>
+      <div class="row" style={{ "flex-wrap": "wrap" }}>
+        <A class="small" href={repoHref(props.repo.project, props.repo.name)}>
+          Browse files, changes, and commits
+        </A>
+        <button class="small" onClick={() => setOpen(!open())} aria-expanded={open()}>
+          Check out…
+        </button>
+      </div>
+      <Show when={open()}>
+        <div class="row" style={{ "flex-wrap": "wrap" }}>
+          <label class="row small">
+            Branch
+            <input style={{ width: "12em" }} value={branch()} onInput={(e) => setBranch(e.currentTarget.value)} placeholder={props.repo.default_branch ?? "main"} aria-label="Branch" />
+          </label>
+          <label class="row small">
+            Target
+            <select value={target()} onChange={(e) => setTarget(e.currentTarget.value)} aria-label="Target">
+              <option value="">the agent workspace</option>
+              <For each={props.targets}>{(t) => <option value={t.id}>{t.name}</option>}</For>
+            </select>
+          </label>
+          <label class="row small">
+            Path
+            <input style={{ width: "10em" }} value={path()} onInput={(e) => setPath(e.currentTarget.value)} aria-label="Path" />
+          </label>
+          <button class="small" onClick={checkout}>
+            Check out
+          </button>
+        </div>
+      </Show>
+      <ErrorBanner error={error()} onDismiss={() => setError(null)} />
+      <Show when={result()}>{(r) => <span class={`small ${r().ok ? "" : "muted"}`}>{r().text}</span>}</Show>
+    </div>
+  );
+}

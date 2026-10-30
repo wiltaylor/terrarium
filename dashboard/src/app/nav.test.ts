@@ -60,9 +60,9 @@ describe("navigation", () => {
   it("has no Templates, Secrets, or Settings item under the project: they are tabs of the project settings screen, each with a route", () => {
     const paths = PROJECT_ITEMS.map((i) => i.path) as string[];
     for (const gone of ["templates", "secrets", "settings"]) expect(paths).not.toContain(gone);
-    expect(paths).toEqual(["agents", "board", "logs", "wiki", "memory", "versions", "artifacts", "schedules"]);
+    expect(paths).toEqual(["agents", "board", "repos", "logs", "wiki", "memory", "versions", "artifacts", "schedules"]);
     expect(PROJECT_SETTINGS_TABS).toEqual([
-      { path: "general", label: "General & repos" },
+      { path: "general", label: "General" },
       { path: "secrets", label: "Secrets" },
       { path: "templates", label: "Templates" },
     ]);
@@ -86,6 +86,15 @@ describe("navigation", () => {
     // The global pages stay.
     expect(movedTo("/secrets")).toBeUndefined();
     expect(movedTo("/templates")).toBeUndefined();
+  });
+
+  it("has Repos under the project after Board, with a list route and a repo route", () => {
+    const paths = PROJECT_ITEMS.map((i) => i.path) as string[];
+    expect(paths.indexOf("repos")).toBe(paths.indexOf("board") + 1);
+    expect(PROJECT_ITEMS.find((i) => i.path === "repos")?.label).toBe("Repos");
+    expect(app).toMatch(/path="\/p\/:project\/repos" component=\{ReposPage\}/);
+    expect(app).toMatch(/path="\/p\/:project\/repos\/:repo" component=\{RepoPage\}/);
+    expect(movedTo("/p/terrarium/repos")).toBeUndefined();
   });
 
   it("has Schedules under the project and in the global list, each with a route", () => {

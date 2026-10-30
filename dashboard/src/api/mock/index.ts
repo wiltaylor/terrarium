@@ -28,6 +28,7 @@ import { defaultModels, modelList, subscriptionDetail } from "./models";
 import { splitFrontMatter } from "../../lib/markdown";
 import { installCommand } from "../../lib/host-install";
 import { resolveEta } from "../../lib/eta";
+import { mockChanges, mockCommit, mockCommits, mockFile, mockList, mockTrees } from "./repoTrees";
 import type {
   Agent,
   AgentDef,
@@ -308,6 +309,8 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
   const noRoute = (): never => fail(404, "not_found", "no such API route");
   const find = <T>(list: T[], pred: (x: T) => boolean, what: string): T => list.find(pred) ?? notFound(what);
   const project = (name: string) => find(w.projects, (p) => p.name === name, `project \`${name}\``);
+  /** The name of a repo by ULID or `project/name`: the key of the browser fixture. */
+  const repoName = (id: string) => find(w.repos, (x) => x.id === id || `${x.project}/${x.name}` === id, `repo \`${id}\``).name;
   // The target as the API shows it (docs/api.md §17.2). The mock caller is the operator: `access` is `operator`, and the operator holds no lease.
   // docs/api.md §17.10: a target has a screen when it is vnc, rdp, desktop, vmlab, or docker with `display`.
   const hasDisplay = (t: Target): boolean =>
@@ -1850,8 +1853,25 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
         }),
     },
 
-    // Not in the daemon yet (docs/api.md §10): the same 404.
-    repos: { checkout: () => reply(noRoute) },
+    // Checkout: the mock has no workspaces, so the same 404 as an unknown route.
+    // The browser (docs/api.md §5.3) reads a fixture (./repoTrees).
+    repos: {
+      checkout: () => reply(noRoute),
+      trees: (id) =>
+        reply(() => {
+          const r = find(w.repos, (x) => x.id === id || `${x.project}/${x.name}` === id, `repo \`${id}\``);
+          return { repo: r.name, repo_id: r.id, project: r.project, default_branch: r.default_branch ?? "main", trees: mockTrees(r.name) };
+        }),
+      files: (id, tree, path) => reply(() => mockList(repoName(id), tree, path)),
+      file: async (id, tree, path) => {
+        const f = await reply(() => mockFile(repoName(id), tree, path));
+        const bytes = f.bytes.slice(0, 1 << 20);
+        return { blob: new Blob([bytes], { type: f.text ? "text/plain; charset=utf-8" : "application/octet-stream" }), text: f.text, size: f.bytes.length, truncated: bytes.length < f.bytes.length };
+      },
+      diff: (id, tree) => reply(() => mockChanges(repoName(id), tree)),
+      commits: (id, tree, cursor) => reply(() => mockCommits(repoName(id), tree, cursor)),
+      commit: (id, tree, sha) => reply(() => mockCommit(repoName(id), tree, sha)),
+    },
 
     agents: {
       list: (proj) => reply(() => w.agents.filter((a) => !proj || a.project === proj).sort((a, b) => a.id.localeCompare(b.id))),

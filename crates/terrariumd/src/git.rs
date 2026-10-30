@@ -40,6 +40,12 @@
 //! picks. The window is a few milliseconds per command. To close it, the
 //! daemon would have to update a clone of its own and copy the files, or
 //! stop the agent during the update.
+//!
+//! The repo browser (`crate::repo_browse`) reads checkouts with
+//! [`ReadGit`]: the same hardening, more overrides ([`READ_HARDEN`]), and
+//! only commands that run no filter, textconv, or external diff, so the
+//! window above runs nothing there. For `main` it reads a bare mirror that
+//! the daemon owns ([`refresh_mirror`]).
 
 use std::collections::VecDeque;
 use std::io::Read;
@@ -437,6 +443,46 @@ impl Runner {
         args: &[&str],
         progress: &mut dyn FnMut(&str),
     ) -> Result<String, GitError> {
+        let (out, _) = self.exec(cwd, args, progress, None, self.deadline)?;
+        Ok(String::from_utf8_lossy(&out).into_owned())
+    }
+
+    /// Run one git command until `deadline`. With `cap`, keep at most
+    /// `cap` bytes of stdout: at more, git is stopped and the answer is
+    /// the first `cap` bytes and `true`.
+    fn exec(
+        &self,
+        cwd: Option<&Path>,
+        args: &[&str],
+        progress: &mut dyn FnMut(&str),
+        cap: Option<usize>,
+        deadline: Instant,
+    ) -> Result<(Vec<u8>, bool), GitError> {
+        let name = args.first().copied().unwrap_or("");
+        self.exec_inner(cwd, args, name, progress, cap, deadline)
+    }
+
+    /// [`Runner::exec`] with no progress, and `name` for the error.
+    fn exec_named(
+        &self,
+        cwd: Option<&Path>,
+        args: &[&str],
+        name: &str,
+        cap: Option<usize>,
+        deadline: Instant,
+    ) -> Result<(Vec<u8>, bool), GitError> {
+        self.exec_inner(cwd, args, name, &mut |_| {}, cap, deadline)
+    }
+
+    fn exec_inner(
+        &self,
+        cwd: Option<&Path>,
+        args: &[&str],
+        name: &str,
+        progress: &mut dyn FnMut(&str),
+        cap: Option<usize>,
+        deadline: Instant,
+    ) -> Result<(Vec<u8>, bool), GitError> {
         use std::os::unix::process::CommandExt;
         let mut cmd = Command::new("git");
         for kv in &self.config {
@@ -456,18 +502,33 @@ impl Runner {
             // Its own process group, so a timeout kills ssh and the remote
             // helpers too.
             .process_group(0);
-        let name = args.first().copied().unwrap_or("");
         let mut child = cmd
             .spawn()
             .map_err(|e| io(format!("cannot run git: {e}")))?;
         let mut stdout = child.stdout.take();
         let stderr = child.stderr.take();
+        let (full_tx, full_rx) = mpsc::channel::<()>();
         let out_thread = std::thread::spawn(move || {
             let mut buf = Vec::new();
-            if let Some(s) = stdout.as_mut() {
-                let _ = s.read_to_end(&mut buf);
+            let Some(s) = stdout.as_mut() else {
+                return (buf, false);
+            };
+            match cap {
+                None => {
+                    let _ = s.read_to_end(&mut buf);
+                    (buf, false)
+                }
+                Some(cap) => {
+                    // One byte more than the cap tells "more" from "exactly".
+                    let _ = s.take(cap as u64 + 1).read_to_end(&mut buf);
+                    let over = buf.len() > cap;
+                    if over {
+                        buf.truncate(cap);
+                        let _ = full_tx.send(());
+                    }
+                    (buf, over)
+                }
             }
-            buf
         });
         let (tx, rx) = mpsc::channel::<String>();
         let err_thread = std::thread::spawn(move || {
@@ -502,6 +563,16 @@ impl Runner {
                 tail.pop_front();
             }
         };
+        let kill = |child: &mut std::process::Child| {
+            let pid = child.id().to_string();
+            let _ = Command::new("kill")
+                .arg("-KILL")
+                .arg(format!("-{pid}"))
+                .status();
+            let _ = child.kill();
+            let _ = child.wait();
+        };
+        let mut over = false;
         let status = loop {
             match rx.recv_timeout(Duration::from_millis(50)) {
                 Ok(l) => on_line(l, &mut tail),
@@ -510,17 +581,17 @@ impl Runner {
                     std::thread::sleep(Duration::from_millis(20));
                 }
             }
-            if let Some(st) = child.try_wait().map_err(io)? {
-                break st;
+            if full_rx.try_recv().is_ok() {
+                // The cap is full: the rest of the output is not needed.
+                over = true;
+                kill(&mut child);
+                break None;
             }
-            if Instant::now() >= self.deadline {
-                let pid = child.id().to_string();
-                let _ = Command::new("kill")
-                    .arg("-KILL")
-                    .arg(format!("-{pid}"))
-                    .status();
-                let _ = child.kill();
-                let _ = child.wait();
+            if let Some(st) = child.try_wait().map_err(io)? {
+                break Some(st);
+            }
+            if Instant::now() >= deadline {
+                kill(&mut child);
                 return Err(GitError::Timeout(self.timeout));
             }
         };
@@ -528,8 +599,13 @@ impl Runner {
         while let Ok(l) = rx.try_recv() {
             on_line(l, &mut tail);
         }
-        let out = out_thread.join().unwrap_or_default();
-        if !status.success() {
+        let (out, full) = out_thread.join().unwrap_or_default();
+        if over || full {
+            return Ok((out, true));
+        }
+        if let Some(status) = status
+            && !status.success()
+        {
             return Err(GitError::Failed {
                 command: name.to_owned(),
                 status: status
@@ -538,7 +614,7 @@ impl Runner {
                 stderr: tail.into_iter().collect::<Vec<_>>().join("\n"),
             });
         }
-        Ok(String::from_utf8_lossy(&out).into_owned())
+        Ok((out, false))
     }
 
     fn quiet(&self, cwd: &Path, args: &[&str]) -> Result<String, GitError> {
@@ -616,7 +692,11 @@ fn unsafe_config_keys(r: &Runner, file: &Path) -> Result<Vec<String>, GitError> 
 /// against the allowlist. The copy, not the live file, is what the check
 /// reads, so an edit during the check does not pass half-read.
 fn check_config_snapshot(c: &Checkout, r: &Runner) -> Result<(), GitError> {
-    let live = c.dest.join(".git").join("config");
+    check_config_copy(&c.dest, &c.store, r)
+}
+
+fn check_config_copy(dest: &Path, store: &RunDirs, r: &Runner) -> Result<(), GitError> {
+    let live = dest.join(".git").join("config");
     let meta = std::fs::symlink_metadata(&live).map_err(io)?;
     if !meta.is_file() {
         return Err(GitError::Refused(format!(
@@ -625,7 +705,7 @@ fn check_config_snapshot(c: &Checkout, r: &Runner) -> Result<(), GitError> {
         )));
     }
     let bytes = std::fs::read(&live).map_err(io)?;
-    let dir = c.store.run_dir().map_err(|e| io(e.message))?;
+    let dir = store.run_dir().map_err(|e| io(e.message))?;
     let copy = dir
         .write_private("config", &bytes)
         .map_err(|e| io(e.message))?;
@@ -634,7 +714,7 @@ fn check_config_snapshot(c: &Checkout, r: &Runner) -> Result<(), GitError> {
         return Err(GitError::Refused(format!(
             "the repo config at {} has keys the daemon does not run git with: {}; \
              remove them, or fetch inside the sandbox",
-            c.dest.display(),
+            dest.display(),
             bad.join(", ")
         )));
     }
@@ -696,6 +776,185 @@ impl GitRunner {
     pub fn run(&self, cwd: &Path, args: &[&str]) -> Result<String, GitError> {
         self.0.quiet(cwd, args)
     }
+}
+
+/// More `-c` overrides for the read commands of the repo browser
+/// (`crate::repo_browse`). They switch off each git feature that runs a
+/// program named by config or by `.gitattributes` (external diff,
+/// textconv, signature checks with `gpg.program`), and they fix the
+/// output format, so that a key in the live repo config cannot change
+/// what the parser reads.
+const READ_HARDEN: &[&str] = &[
+    "core.attributesFile=/dev/null",
+    "diff.external=",
+    "diff.noprefix=false",
+    "diff.mnemonicPrefix=false",
+    "diff.relative=false",
+    "diff.renames=false",
+    "diff.ignoreSubmodules=all",
+    "core.quotePath=true",
+    "color.ui=false",
+    "log.showSignature=false",
+    "log.decorate=false",
+    "log.follow=false",
+    "log.showRoot=true",
+    "i18n.logOutputEncoding=UTF-8",
+];
+
+/// A runner for the read commands of the repo browser (PLAN §9a). It has
+/// the hardening of a workspace update ([`HARDEN`], no global or system
+/// config, no askpass), [`READ_HARDEN`], `GIT_ATTR_NOSYSTEM=1`,
+/// `GIT_OPTIONAL_LOCKS=0` (git writes no index), and a deadline for each
+/// command. It has no secret: it does not fetch.
+pub struct ReadGit {
+    runner: Runner,
+    per_command: Duration,
+}
+
+/// The stdout of one read command.
+#[derive(Debug, Clone)]
+pub struct ReadOut {
+    pub bytes: Vec<u8>,
+    /// The output was over the cap: `bytes` is the first part only.
+    pub truncated: bool,
+}
+
+impl ReadOut {
+    pub fn text(&self) -> String {
+        String::from_utf8_lossy(&self.bytes).into_owned()
+    }
+}
+
+impl ReadGit {
+    pub fn new(per_command: Duration) -> Self {
+        let mut runner = Runner {
+            config: HARDEN.iter().map(|s| (*s).to_owned()).collect(),
+            env: Vec::new(),
+            deadline: Instant::now() + per_command,
+            timeout: per_command,
+            _run: None,
+        };
+        runner
+            .config
+            .extend(READ_HARDEN.iter().map(|s| (*s).to_owned()));
+        runner.env = vec![
+            ("LC_ALL".to_owned(), "C".to_owned()),
+            ("GIT_CONFIG_GLOBAL".to_owned(), "/dev/null".to_owned()),
+            ("GIT_CONFIG_NOSYSTEM".to_owned(), "1".to_owned()),
+            ("GIT_ATTR_NOSYSTEM".to_owned(), "1".to_owned()),
+            ("GIT_OPTIONAL_LOCKS".to_owned(), "0".to_owned()),
+            ("GIT_NO_REPLACE_OBJECTS".to_owned(), "1".to_owned()),
+            ("GIT_TERMINAL_PROMPT".to_owned(), "0".to_owned()),
+            ("GIT_ASKPASS".to_owned(), "false".to_owned()),
+            ("SSH_ASKPASS".to_owned(), "false".to_owned()),
+            ("GIT_PAGER".to_owned(), "cat".to_owned()),
+            ("PAGER".to_owned(), "cat".to_owned()),
+            // No network from a read command; `false` fails any ssh.
+            ("GIT_SSH_COMMAND".to_owned(), "false".to_owned()),
+        ];
+        Self {
+            runner,
+            per_command,
+        }
+    }
+
+    /// `git --no-pager -C <cwd> <args>`, at most `cap` bytes of stdout.
+    pub fn run(&self, cwd: &Path, args: &[&str], cap: usize) -> Result<ReadOut, GitError> {
+        let mut full = vec!["--no-pager"];
+        full.extend_from_slice(args);
+        let deadline = Instant::now() + self.per_command;
+        // `--no-pager` goes before the subcommand, so `exec` names the
+        // subcommand from args.
+        let (bytes, truncated) = self.runner.exec_named(
+            Some(cwd),
+            &full,
+            args.first().copied().unwrap_or(""),
+            Some(cap),
+            deadline,
+        )?;
+        Ok(ReadOut { bytes, truncated })
+    }
+
+    /// [`ReadGit::run`] as text, with a cap of 4 MiB.
+    pub fn text(&self, cwd: &Path, args: &[&str]) -> Result<String, GitError> {
+        Ok(self.run(cwd, args, 4 << 20)?.text())
+    }
+
+    /// The checks before a read in a repo that an agent controls: `dir`
+    /// is a plain directory (not a symlink) with a plain `.git` directory
+    /// (not a linked worktree), and a copy of `.git/config` has only keys
+    /// of the allowlist ([`config_allowed`]).
+    pub fn check_checkout(&self, dir: &Path, store: &RunDirs) -> Result<(), GitError> {
+        let meta = std::fs::symlink_metadata(dir).map_err(io)?;
+        if !meta.is_dir() {
+            return Err(GitError::Refused(format!(
+                "{} is not a plain directory",
+                dir.display()
+            )));
+        }
+        check_workspace_repo(dir)?;
+        check_config_copy(dir, store, &self.runner)
+    }
+}
+
+/// Clone `c.url` into the bare mirror `c.dest`, or fetch every branch into
+/// the mirror that is there (PLAN §9a). The mirror is the daemon's own:
+/// no agent can write it, so its config is the one that `git clone`
+/// wrote. A first clone goes to a temp dir beside `c.dest`, then a rename,
+/// so a failed clone leaves no half mirror. Blocking.
+pub fn refresh_mirror(c: &Checkout) -> Result<(), GitError> {
+    check_url(&c.url, &c.deny_local_under)?;
+    let r = Runner::new(c)?;
+    let parent = c
+        .dest
+        .parent()
+        .ok_or_else(|| io("the mirror path has no parent"))?;
+    std::fs::create_dir_all(parent).map_err(io)?;
+    if std::fs::symlink_metadata(c.dest.join("HEAD")).is_ok() {
+        let args = [
+            "fetch",
+            "--quiet",
+            "--prune",
+            "--no-tags",
+            "--no-recurse-submodules",
+            "--upload-pack=git-upload-pack",
+            "--",
+            c.url.as_str(),
+            "+refs/heads/*:refs/heads/*",
+        ];
+        r.git(Some(&c.dest), &args, &mut |_| {})?;
+        return Ok(());
+    }
+    let name = c
+        .dest
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "mirror".into());
+    let tmp = parent.join(format!(".{name}.{}", ulid::Ulid::new()));
+    let tmp_s = tmp.to_string_lossy().into_owned();
+    let cloned = r.git(
+        None,
+        &[
+            "clone",
+            "--quiet",
+            "--bare",
+            "--no-hardlinks",
+            "--no-tags",
+            "--",
+            c.url.as_str(),
+            tmp_s.as_str(),
+        ],
+        &mut |_| {},
+    );
+    if let Err(e) = cloned {
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Err(e);
+    }
+    if let Err(e) = std::fs::rename(&tmp, &c.dest) {
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Err(io(e));
+    }
+    Ok(())
 }
 
 /// Clone `c.url` into `c.dest`, or update the clone that is there.
