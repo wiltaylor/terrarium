@@ -338,9 +338,11 @@ export interface AgentDef {
 export type AgentCreate =
   | AgentDef
   | (Pick<AgentDef, "name" | "project"> &
-      Partial<Omit<AgentDef, "name" | "project" | "subscription" | "model" | "prompt">> & {
+      Partial<Omit<AgentDef, "name" | "project" | "subscription" | "model" | "prompt" | "policy">> & {
         /** A template key: a name, `global:<name>`, `<project>/<name>`, or a ULID. */
         template: string;
+        /** Merges per key over the template's policy. */
+        policy?: Partial<AgentPolicy>;
         subscription?: string | null;
         model?: string | null;
         prompt?: string | null;

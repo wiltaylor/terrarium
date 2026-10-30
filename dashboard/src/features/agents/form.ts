@@ -123,7 +123,7 @@ export function formToDef(v: AgentFormValues): AgentDef {
   return def;
 }
 
-const sameList = (a: string[], b: string[]) => a.length === b.length && a.every((x, i) => x === b[i]);
+export const sameList = (a: string[], b: string[]) => a.length === b.length && a.every((x, i) => x === b[i]);
 
 /** A changed optional field: the new value, `null` to clear it, or `undefined` for no change. */
 const changed = (now: string, before: string): string | null | undefined => {
@@ -138,7 +138,15 @@ const changed = (now: string, before: string): string | null | undefined => {
  * `null`, which clears it (docs/api.md §6.1).
  */
 export function formToPatch(original: Agent, v: AgentFormValues): AgentPatch {
-  const before = agentToForm(original);
+  return formDiff(agentToForm(original), v);
+}
+
+/**
+ * The fields of `v` that differ from `before`, in the shape of a patch:
+ * `null` clears an optional, `[]` clears a list, and `policy` comes whole
+ * when one of its keys changed. Name, project, and roles are not in it.
+ */
+export function formDiff(before: AgentFormValues, v: AgentFormValues): AgentPatch {
   const patch: AgentPatch = {};
   if (v.harness !== before.harness) patch.harness = v.harness;
   const subscription = changed(v.subscription, before.subscription);

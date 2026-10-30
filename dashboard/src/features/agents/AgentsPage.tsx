@@ -7,7 +7,7 @@ import { Empty, ErrorBanner, PageHead, useNow } from "../../components/ui";
 import { AGENT_STATUSES, type Agent, type AgentStatus } from "../../api/types";
 import { duration } from "../../lib/format";
 import { agents, leases } from "../../stores";
-import { AgentForm } from "./AgentForm";
+import { NewAgentDialog } from "./NewAgentDialog";
 
 export function RoleBadges(props: { agent: Agent }) {
   return (
@@ -100,7 +100,7 @@ export function AgentsPage() {
         </button>
       </PageHead>
       <Show when={creating()}>
-        <AgentForm project={route.project} onClose={() => setCreating(false)} onSaved={(a) => navigate(`/agents/${encodeURIComponent(a.id)}`)} />
+        <NewAgentDialog project={route.project} onClose={() => setCreating(false)} onSaved={(a) => navigate(`/agents/${encodeURIComponent(a.id)}`)} />
       </Show>
       <ErrorBanner error={agents.state.error} />
       <Show when={shown().length} fallback={<Empty>{agents.state.loading ? "Loading…" : "No agents match."}</Empty>}>

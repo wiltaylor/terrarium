@@ -39,20 +39,30 @@ describe("template model", () => {
     expect(pathKey(tpl("w", "p"))).toBe("p/w");
   });
 
-  it("sends every form field as an override, so the agent equals the form", () => {
+  it("sends the template and only the fields that differ from it", () => {
     const t = tpl("w", "p");
-    const form = resolvedToForm({ template: { id: t.id, name: "w", project: "p", revision: 1 }, agent: { project: "p", ...t.spec } }, "w1");
-    const body = formToCreate({ ...form, model: "" }, "w");
-    expect(body).toMatchObject({ name: "w1", project: "p", template: "w", model: null, subscription: null, prompt: "worker" });
-    // The daemon's merge of that body gives what the form shows.
-    const def = applyTemplate(t.spec, body);
-    expect(def.model).toBeUndefined();
-    expect(def.policy).toEqual({ targets: ["t1"], mail_to: ["lead"], cross_project: [] });
-    // The pool goes as an override too: `[]` clears the template's pool.
-    expect(body.subscription_pool).toEqual([]);
-    expect(formToCreate({ ...form, subscription: "a", subscription_pool: ["a", "b"] }, "w")).toMatchObject({ subscription: "a", subscription_pool: ["a", "b"] });
+    const base = resolvedToForm({ template: { id: t.id, name: "w", project: "p", revision: 1 }, agent: { project: "p", ...t.spec } }, "");
+    const pick = { key: "w", base };
+    const form = { ...base, name: "w1" };
+    // No change: the name, the project, and the template only.
+    expect(formToCreate(form, pick)).toEqual({ name: "w1", project: "p", template: "w" });
+    // An emptied model goes as null, which clears the template's model.
+    const body = formToCreate({ ...form, model: "" }, pick);
+    expect(body).toEqual({ name: "w1", project: "p", template: "w", model: null });
+    expect(applyTemplate(t.spec, body).model).toBeUndefined();
+    // The policy has only the keys that changed; the daemon merges per key.
+    const targets = formToCreate({ ...form, targets: [] }, pick);
+    expect(targets).toEqual({ name: "w1", project: "p", template: "w", policy: { targets: [] } });
+    expect(applyTemplate(t.spec, targets).policy).toEqual({ targets: [], mail_to: ["lead"] });
+    expect(formToCreate({ ...form, mail_to: "*", cross_project: "ops/lead" }, pick)).toMatchObject({ policy: { mail_to: ["*"], cross_project: ["ops/lead"] } });
+    // Roles and the pool are overrides too.
+    expect(formToCreate({ ...form, roles: ["project_admin"] }, pick)).toEqual({ name: "w1", project: "p", template: "w", roles: ["project_admin"] });
+    expect(formToCreate({ ...form, subscription: "a", subscription_pool: ["a", "b"] }, pick)).toEqual({ name: "w1", project: "p", template: "w", subscription: "a", subscription_pool: ["a", "b"] });
     expect(specToForm({ harness: "claude", subscription: "a", subscription_pool: ["a", "b"] }).subscription_pool).toEqual(["a", "b"]);
     expect(formToSpec({ ...form, subscription: "a", subscription_pool: ["a", "b"] }).subscription_pool).toEqual(["a", "b"]);
+    // The daemon's merge of the body gives what the form shows.
+    const changed = { ...form, harness: "claude" as const, model: "", prompt: "lead", persona: "leader", skills: ["*"], targets: [], restart: "always" as const };
+    expect(specToForm(applyTemplate(t.spec, formToCreate(changed, pick)), "p", "w1")).toEqual(changed);
     // Without a template the body is the plain definition.
     expect(formToCreate(form, null)).not.toHaveProperty("template");
   });
@@ -94,9 +104,12 @@ describe("template model", () => {
     const spec = { ...tpl("w", "p").spec, system_prompt: "Be brief." };
     const form = resolvedToForm({ template: { id: "T", name: "w", project: "p", revision: 1 }, agent: { project: "p", ...spec } }, "w1");
     expect(form.system_prompt).toBe("Be brief.");
-    expect(formToCreate(form, "w")).toMatchObject({ system_prompt: "Be brief." });
+    const pick = { key: "w", base: { ...form, name: "" } };
+    // Not changed: not in the body, so the agent gets the template's.
+    expect(formToCreate(form, pick)).not.toHaveProperty("system_prompt");
+    expect(formToCreate({ ...form, system_prompt: "Other." }, pick)).toMatchObject({ system_prompt: "Other." });
     // Emptied in the form: null, which clears the template's value.
-    const body = formToCreate({ ...form, system_prompt: "" }, "w");
+    const body = formToCreate({ ...form, system_prompt: "" }, pick);
     expect(body).toMatchObject({ system_prompt: null });
     expect(applyTemplate(spec, body)).not.toHaveProperty("system_prompt");
     expect(applyTemplate(spec, { name: "w1", project: "p", template: "w", system_prompt: "Other." }).system_prompt).toBe("Other.");
@@ -115,9 +128,11 @@ describe("template model", () => {
     expect(patch.spec).toBeDefined();
     expect(patch.spec).not.toHaveProperty("persona");
     expect(validateTemplateForm({ ...v, agent: { ...v.agent, persona: "bad name" } })).toHaveLength(1);
-    // A create with the template: the form's persona, or null for "by role".
-    expect(formToCreate(v.agent, "w")).toMatchObject({ persona: "leader" });
-    const body = formToCreate({ ...v.agent, persona: "" }, "w");
+    // A create with the template: no persona when not changed, or null for "by role".
+    const pick = { key: "w", base: v.agent };
+    expect(formToCreate(v.agent, pick)).not.toHaveProperty("persona");
+    expect(formToCreate({ ...v.agent, persona: "none" }, pick)).toMatchObject({ persona: "none" });
+    const body = formToCreate({ ...v.agent, persona: "" }, pick);
     expect(body).toMatchObject({ persona: null });
     expect(applyTemplate(t.spec, body)).not.toHaveProperty("persona");
     expect(applyTemplate(t.spec, { name: "w1", project: "p", template: "w" }).persona).toBe("leader");
@@ -135,9 +150,11 @@ describe("template model", () => {
     expect(formToTemplatePatch(t, tf)).toEqual({});
     expect(formToTemplatePatch(t, { ...tf, agent: { ...tf.agent, skills: ["*"] } }).spec?.skills).toEqual(["*"]);
     expect(formToNewTemplate({ ...emptyTemplateForm(), name: "n", agent: { ...emptyTemplateForm().agent, skills: ["a"] } }).spec.skills).toEqual(["a"]);
-    // The create body: the form's list, or [] to clear the template's.
-    expect(formToCreate(form, "w").skills).toEqual(["fern-check"]);
-    const cleared = formToCreate({ ...form, skills: [] }, "w");
+    // The create body: no list when not changed, a new list, or [] to clear the template's.
+    const pick = { key: "w", base: form };
+    expect(formToCreate(form, pick)).not.toHaveProperty("skills");
+    expect(formToCreate({ ...form, skills: ["*"] }, pick).skills).toEqual(["*"]);
+    const cleared = formToCreate({ ...form, skills: [] }, pick);
     expect(cleared.skills).toEqual([]);
     expect(applyTemplate(t.spec, cleared).skills).toEqual([]);
     expect(applyTemplate(t.spec, { name: "w1", project: "p", template: "w" }).skills).toEqual(["fern-check"]);

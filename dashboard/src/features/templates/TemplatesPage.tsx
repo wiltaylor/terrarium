@@ -4,7 +4,7 @@
 // /p/:project/settings/templates (a tab of the project settings screen) the
 // page lists the templates that apply to the project: its own, then the
 // global ones. A global template that a project template of the same name
-// overrides stays in the list with a chip, because the New agent form still
+// overrides stays in the list with a chip, because the New agent chooser still
 // offers it (as `global:<name>`).
 
 import { useParams } from "@solidjs/router";
@@ -71,7 +71,7 @@ export default function TemplatesPage() {
         </button>
       </PageHead>
       <p class="muted small">
-        A template holds every agent setting except the name and the project. Pick one in the New agent form, or use <code>terrarium agent new &lt;name&gt; --template &lt;template&gt;</code>. A project template wins over a global one with the same name.
+        A template holds every agent setting except the name and the project. Pick one in the New agent chooser, or use <code>terrarium agent new &lt;name&gt; --template &lt;template&gt;</code>. A project template wins over a global one with the same name.
       </p>
       <Show when={dialog()}>
         {(d) => (
@@ -115,7 +115,7 @@ export default function TemplatesPage() {
                       <span class={`chip ${t.project ? "info" : ""}`}>{scopeLabel(t)}</span>
                       <Show when={overridden(t)}>
                         {" "}
-                        <span class="chip warn" title={`The template ${route.project}/${t.name} wins for agents of ${route.project}. Pick global:${t.name} in the New agent form to use this one.`}>
+                        <span class="chip warn" title={`The template ${route.project}/${t.name} wins for agents of ${route.project}. Pick the global ${t.name} card in the New agent chooser to use this one.`}>
                           overridden by project
                         </span>
                       </Show>

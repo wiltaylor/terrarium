@@ -254,6 +254,20 @@ The **Repos** item of a project (after Board) opens `/p/<project>/repos`
 (`features/repos/ReposPage.tsx`): the repos, and **Add repo**. A repo opens
 its browser (`features/repos/RepoPage.tsx`, see "The repo browser").
 
+**New agent.** The **New agent** button of the Agents page opens
+`features/agents/NewAgentDialog.tsx`. The dialog starts on a chooser: a card
+for each template of the project, then the global ones (with a "global"
+chip), and a dashed **Custom** card. Above eight templates, a search box
+shows. The arrow keys, Home, and End move the focus between the cards, and
+Enter picks one. A template card opens a short form: the name and a summary
+of the template. **Change settings…** shows the agent fields, filled from
+the template. The create sends `template` and only the fields that differ
+from the template (`formToCreate` in `features/templates/model.ts`,
+docs/api.md §21.3). **Custom** opens the full form, with no template.
+**Back** goes to the chooser and keeps the name. With no template, the
+dialog opens on the full form, with a link to Settings → Templates. The
+chooser model is the pure `features/agents/chooser.ts`.
+
 **Live mode of the log tabs.** Mail, Events, and Audit have the same
 **Live** control first in their toolbar (`components/Live.tsx`
 `LiveControl`), on at the start, with a pulsing dot while on. Each tab is
@@ -604,7 +618,7 @@ prefix or budget scope. The daemon also has `project`, `since`, `until`, and
 | `/p/:project/settings/secrets` | Project settings, Secrets tab: the secrets of the project, then the global ones that it can use | `GET /api/secrets?scope=`, `POST /api/secrets`, `PUT`, `DELETE /api/secrets/{scope}/{name}`, `POST .../generate\|reveal`, `GET .../grants` |
 | `/p/:project/settings/templates` | Project settings, Templates tab: the templates of the project, then the global ones | `GET`, `POST /api/templates`, `PATCH`, `DELETE /api/templates/{key}`, `template` events |
 | `/p/:project/settings`, `/p/:project/secrets`, `/p/:project/templates` | Gone: redirect to `/p/:project/settings/general`, `/p/:project/settings/secrets`, and `/p/:project/settings/templates` (`app/nav.ts` `MOVED_ROUTES`). The redirect keeps the query. | none |
-| `/p/:project/agents` | Agents grid of the project, status filter, new agent (the form starts with the project of the route) | `GET`, `POST /api/agents`, events socket |
+| `/p/:project/agents` | Agents grid of the project, status filter, new agent (a template chooser, then a form, for the project of the route) | `GET`, `POST /api/agents`, `GET /api/templates?project=`, `GET /api/templates/{key}/resolve`, events socket |
 | `/agents` | Gone: redirects to `/projects` (`app/nav.ts` `MOVED_ROUTES`). | none |
 | `/agents/:id` | Agent detail: edit, delete, roles, quota, leases, conversation (the default tab), terminal, events, sessions | `GET`, `PATCH`, `DELETE /api/agents/{id}`, `start/stop/restart/send`, `GET`, `PUT .../roles`, `GET /api/usage/me?agent=`, `GET .../leases?all=`, `WS .../pty`, `GET .../events?since=`, `GET .../sessions`, `GET .../sessions/{session}/transcript?after=&limit=`, `GET .../transcript/stream?after=` (SSE) |
 | `/settings/subscriptions` | Settings, Subscriptions tab: subscriptions, detect banner, add wizard | `GET`, `POST`, `DELETE /api/subscriptions[/{name}]`, `GET .../detect`, `POST .../{name}/probe\|verify\|logout\|api-key`, `POST /api/subscriptions/login`, `GET`, `DELETE .../login/{id}`, `POST .../login/{id}/input`, `WS .../login/{id}/pty` |

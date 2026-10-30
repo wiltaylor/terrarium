@@ -1,9 +1,9 @@
 // The agent template model (docs/api.md §21): a template's spec as the
 // agent form values (no name, no project), the template form, the key that
-// picks a template for an agent, and the order of the template select. Pure.
+// picks a template for an agent, and the order of the template chooser. Pure.
 
-import type { AgentCreate, AgentDef, AgentTemplate, NewTemplate, TemplatePatch, TemplateResolved, TemplateSpec } from "../../api/types";
-import { emptyAgentForm, formToDef, personaProblem, systemPromptProblem, type AgentFormValues } from "../agents/form";
+import type { AgentCreate, AgentDef, AgentPolicy, AgentTemplate, NewTemplate, TemplatePatch, TemplateResolved, TemplateSpec } from "../../api/types";
+import { emptyAgentForm, formDiff, formToDef, parseList, personaProblem, sameList, systemPromptProblem, type AgentFormValues } from "../agents/form";
 
 /** The template form: the template's own fields and the agent fields of its spec. */
 export interface TemplateFormValues {
@@ -107,26 +107,29 @@ export function resolvedToForm(r: TemplateResolved, name: string): AgentFormValu
   return specToForm(r.agent, r.agent.project, name);
 }
 
+/** A template pick for an agent create: the `template` key, and the form values that the template gives. */
+export interface TemplatePick {
+  key: string;
+  base: AgentFormValues;
+}
+
 /**
- * The create body with a template: every field of the form goes as an
- * override, so the agent equals what the form shows. An empty optional goes
- * as `null`, which clears the template's value.
+ * The create body. Without a template: the full definition. With a
+ * template: `template` and only the fields that differ from what the
+ * template gives (docs/api.md §21.3), in the shape of `formDiff`. An
+ * emptied optional goes as `null` and an emptied list as `[]`, which clear
+ * the template's value. `policy` merges per key, so it has only the keys
+ * that changed.
  */
-export function formToCreate(v: AgentFormValues, template: string | null): AgentCreate {
-  const def = formToDef(v);
-  if (!template) return def;
-  return {
-    ...def,
-    template,
-    subscription: def.subscription ?? null,
-    // `[]` clears the template's pool.
-    subscription_pool: def.subscription_pool ?? [],
-    model: def.model ?? null,
-    prompt: def.prompt ?? null,
-    system_prompt: def.system_prompt ?? null,
-    // `null`: by role, not the template's persona.
-    persona: def.persona ?? null,
-    // `[]`: no skills, not the template's.
-    skills: def.skills ?? [],
-  };
+export function formToCreate(v: AgentFormValues, pick: TemplatePick | null): AgentCreate {
+  if (!pick) return formToDef(v);
+  const { policy, ...diff } = formDiff(pick.base, v);
+  const body: AgentCreate = { name: v.name.trim(), project: v.project, template: pick.key, ...diff };
+  if (!sameList(v.roles, pick.base.roles)) body.roles = v.roles;
+  if (policy) {
+    const was = { targets: pick.base.targets, mail_to: parseList(pick.base.mail_to), cross_project: parseList(pick.base.cross_project) };
+    const keys = (["targets", "mail_to", "cross_project"] as const).filter((k) => !sameList(policy[k] ?? [], was[k]));
+    body.policy = Object.fromEntries(keys.map((k) => [k, policy[k]])) as Partial<AgentPolicy>;
+  }
+  return body;
 }

@@ -314,7 +314,8 @@ t admin inbox ls --kind mail
 
 You can also do these steps in the dashboard. On the Projects page, click
 **New project**. In the sidebar, open the project and click **Agents**.
-Then click **New agent**. Then open the agent and click **Start**.
+Then click **New agent**, and pick a template or **Custom**. With no
+template, the form opens at once. Then open the agent and click **Start**.
 
 To add a repo in the dashboard, open the project in the sidebar and click
 **Repos**. Then click **Add repo**, and give the URL. The project settings
@@ -335,9 +336,12 @@ t -p demo agent new w2 --template worker --model sonnet
 A flag on `agent new` changes that field of the template. `t template ls`
 lists the templates of the project and the global ones. The agent copies
 the values: a later `template edit` does not change `w1` or `w2`. In the
-dashboard, use the **Templates** page, the **Template** select of the
-**New agent** form, or **Save as template** on an agent page
-([api.md §21](api.md#21-agent-templates)). The **Templates** tab of the
+dashboard, use the **Templates** page, or **Save as template** on an agent
+page ([api.md §21](api.md#21-agent-templates)). **New agent** first shows
+the templates of the project and the global ones. Click a template, give
+the name, and click **Create agent**. To change a field of the template,
+click **Change settings…** before the create. To set every field yourself,
+click **Custom**. The **Templates** tab of the
 project settings (the cog of the project in the sidebar) shows the
 templates of one project.
 
