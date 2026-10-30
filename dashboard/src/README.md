@@ -222,8 +222,8 @@ the agent status. The row label and title also give the status. The project
 row and its Agents node show the number of agents that are blocked or in
 error. The sidebar has no other agent list: each agent is in a project. An
 agent page (`/agents/:id`) opens the Projects root, the project of the agent,
-and its Agents node, and marks the agent row. The list of all agents
-(`/agents`) stays as a page, with no sidebar item. Above eight projects or
+and its Agents node, and marks the agent row. The dashboard has no list of
+all agents: `/agents` redirects to `/projects`. Above eight projects or
 agents, the tree or a project Agents node shows a filter. The root and the
 project Agents nodes use `app/TreeRoot.tsx`, one open set in `localStorage`,
 and the keyboard map in `app/treeNav.ts`. Settings
@@ -563,7 +563,8 @@ prefix or budget scope. The daemon also has `project`, `since`, `until`, and
 | `/` | Home: usage strip, waiting-on-you queue; the tile detail has the usage split by project, agent, model, and card | `GET /api/subscriptions`, `GET /api/usage?bucket=hour&group=subscription`; tile detail: `GET /api/usage?subscription=&group=project\|agent\|model\|card`, `GET .../quota`; per project: `versions?status=in_review`, `wiki?status=ready_for_review`, `board`; Inbox items: `GET /api/inbox` (see "The Inbox") |
 | `/projects` | Projects: list, create. The Projects root of the sidebar tree links it | `GET`, `POST /api/projects` |
 | `/p/:project/settings` | Project edit and delete, Repos panel | `GET`, `PATCH`, `DELETE /api/projects/{name}?confirm=true`, `GET`, `POST .../repos`, `POST /api/repos/{id}/checkout` |
-| `/agents` | Agents grid, new agent | `GET`, `POST /api/agents`, events socket |
+| `/p/:project/agents` | Agents grid of the project, status filter, new agent (the form starts with the project of the route) | `GET`, `POST /api/agents`, events socket |
+| `/agents` | Gone: redirects to `/projects` (`app/nav.ts` `MOVED_ROUTES`). | none |
 | `/agents/:id` | Agent detail: edit, delete, roles, quota, leases, conversation (the default tab), terminal, events, sessions | `GET`, `PATCH`, `DELETE /api/agents/{id}`, `start/stop/restart/send`, `GET`, `PUT .../roles`, `GET /api/usage/me?agent=`, `GET .../leases?all=`, `WS .../pty`, `GET .../events?since=`, `GET .../sessions`, `GET .../sessions/{session}/transcript?after=&limit=`, `GET .../transcript/stream?after=` (SSE) |
 | `/settings/subscriptions` | Settings, Subscriptions tab: subscriptions, detect banner, add wizard | `GET`, `POST`, `DELETE /api/subscriptions[/{name}]`, `GET .../detect`, `POST .../{name}/probe\|verify\|logout\|api-key`, `POST /api/subscriptions/login`, `GET`, `DELETE .../login/{id}`, `POST .../login/{id}/input`, `WS .../login/{id}/pty` |
 | `/inbox` | Inbox: questions, notices, mail to the operator, paused threads; kind tabs, open or done, project filter | `GET /api/inbox?status=&kind=&project=`, `GET /api/inbox/counts`, `POST /api/questions/{id}/answer\|ack\|retract`, `POST /api/inbox/mail/{id}/ack`, `POST /api/mail/{id}/release`, `POST /api/mail/threads/{id}/resume` |

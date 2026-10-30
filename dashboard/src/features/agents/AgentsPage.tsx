@@ -6,7 +6,7 @@ import { StatusBadge } from "../../components/StatusBadge";
 import { Empty, ErrorBanner, PageHead, useNow } from "../../components/ui";
 import { AGENT_STATUSES, type Agent, type AgentStatus } from "../../api/types";
 import { duration } from "../../lib/format";
-import { agents, leases, projects } from "../../stores";
+import { agents, leases } from "../../stores";
 import { AgentForm } from "./AgentForm";
 
 export function RoleBadges(props: { agent: Agent }) {
@@ -76,28 +76,20 @@ export function AgentCard(props: { agent: Agent; now: number }) {
   );
 }
 
+/** The agents of the route project (`/p/:project/agents`). */
 export function AgentsPage() {
   const now = useNow(1000);
   const navigate = useNavigate();
-  const route = useParams<{ project?: string }>();
+  const route = useParams<{ project: string }>();
   const [creating, setCreating] = createSignal(false);
   // The "holds <target>" chips: the leases older than the event backlog.
   onMount(() => void leases.loadAll());
-  const [scope, setScope] = createSignal<"project" | "all">("project");
   const [status, setStatus] = createSignal<AgentStatus | "">("");
-  /** The project of the route wins over the scope select. */
-  const project = () => route.project ?? (scope() === "project" ? projects.selected() : null);
-  const shown = () => agents.inProject(project()).filter((a) => !status() || a.status === status());
+  const shown = () => agents.inProject(route.project).filter((a) => !status() || a.status === status());
 
   return (
     <>
-      <PageHead title={route.project ? `Agents · ${route.project}` : "Agents"}>
-        <Show when={!route.project}>
-          <select value={scope()} onChange={(e) => setScope(e.currentTarget.value as "project" | "all")} aria-label="Scope">
-            <option value="project">Project: {projects.selected() ?? "none"}</option>
-            <option value="all">All projects</option>
-          </select>
-        </Show>
+      <PageHead title={`Agents · ${route.project}`}>
         <select value={status()} onChange={(e) => setStatus(e.currentTarget.value as AgentStatus | "")} aria-label="Status filter">
           <option value="">Any status</option>
           <For each={AGENT_STATUSES}>{(s) => <option value={s}>{s}</option>}</For>
@@ -108,7 +100,7 @@ export function AgentsPage() {
         </button>
       </PageHead>
       <Show when={creating()}>
-        <AgentForm project={route.project ?? projects.selected()} onClose={() => setCreating(false)} onSaved={(a) => navigate(`/agents/${encodeURIComponent(a.id)}`)} />
+        <AgentForm project={route.project} onClose={() => setCreating(false)} onSaved={(a) => navigate(`/agents/${encodeURIComponent(a.id)}`)} />
       </Show>
       <ErrorBanner error={agents.state.error} />
       <Show when={shown().length} fallback={<Empty>{agents.state.loading ? "Loading…" : "No agents match."}</Empty>}>

@@ -310,8 +310,8 @@ t admin inbox ls --kind mail
 ```
 
 You can also do these steps in the dashboard. On the Projects page, click
-**New project**. On the Agents page, click **New agent**. Then open the
-agent and click **Start**.
+**New project**. In the sidebar, open the project and click **Agents**.
+Then click **New agent**. Then open the agent and click **Start**.
 
 To make more agents with the same settings, use an agent template. Make
 the template one time, then give only the name of each agent:

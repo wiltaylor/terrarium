@@ -66,7 +66,6 @@ export function App() {
       <Router root={Layout}>
         <Route path="/" component={Home} />
         <Route path="/projects" component={ProjectsPage} />
-        <Route path="/agents" component={AgentsPage} />
         <Route path="/agents/:id" component={AgentDetail} />
         <Route path="/sessions/:id" component={SessionPage} />
         <Route path="/templates" component={TemplatesPage} />

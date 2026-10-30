@@ -29,13 +29,16 @@ import { QuestionsPanel } from "../inbox/QuestionsPanel";
 import { SkillsPicker } from "../skills/SkillsPicker";
 import { RESTART_NOTE, skillsLabel } from "../skills/model";
 
-/** The page of an agent that the daemon removed. */
-function RemovedAgent() {
+/**
+ * The page of an agent that the daemon removed. The back link opens the agents
+ * of the project of the agent, or the project cards if the project is not known.
+ */
+function RemovedAgent(props: { project?: string }) {
   return (
     <div class="stack">
       <PageHead title="Agent removed" />
       <p class="muted">
-        This agent was removed. <A href="/agents">Back to the agents</A>
+        This agent was removed. <A href={props.project ? `/p/${props.project}/agents` : "/projects"}>Back to the agents</A>
       </p>
     </div>
   );
@@ -94,7 +97,7 @@ export default function AgentDetail() {
     try {
       await api.agents.remove(a.id, true);
       agents.drop(a.id);
-      navigate("/agents");
+      navigate(`/p/${a.project}/agents`);
     } catch (e) {
       setError(e);
     }
@@ -104,7 +107,7 @@ export default function AgentDetail() {
     <Show
       when={!removed() && agent()}
       fallback={
-        <Show when={!removed()} fallback={<RemovedAgent />}>
+        <Show when={!removed()} fallback={<RemovedAgent project={agent()?.project} />}>
           <Show when={error()} fallback={<p class="muted">Loading…</p>}>
             <ErrorBanner error={error()} />
           </Show>

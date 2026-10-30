@@ -87,6 +87,8 @@ export const PROJECT_LOGS_TABS = [
  *   Mail page is the Mail tab of the project logs. A bookmark can have an old
  *   path with a query (`/mail?thread=...`), so the old paths stay as
  *   redirects. `/logs` and `/p/:project/logs` open the Mail tab.
+ * - The global Agents page is removed. The agents of a project are on the
+ *   Agents page of the project. `/agents` opens the project cards.
  */
 export const MOVED_ROUTES = [
   { path: "/p/:project/spend", to: "/" },
@@ -102,6 +104,7 @@ export const MOVED_ROUTES = [
   { path: "/logs", to: "/logs/mail" },
   { path: "/p/:project/mail", to: "/p/:project/logs/mail" },
   { path: "/p/:project/logs", to: "/p/:project/logs/mail" },
+  { path: "/agents", to: "/projects" },
 ] as const;
 
 /** The new place of a moved path, or undefined. */

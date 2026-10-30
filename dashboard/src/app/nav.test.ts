@@ -38,17 +38,23 @@ describe("navigation", () => {
 
   it("has Agents first under the project, with a route to the Agents page", () => {
     expect(PROJECT_ITEMS[0]).toEqual({ path: "agents", label: "Agents" });
-    expect(app).toMatch(/path="\/agents" component=\{AgentsPage\}/);
     expect(app).toMatch(/path="\/p\/:project\/agents" component=\{AgentsPage\}/);
   });
 
-  it("has no global Agents item: the agents are in the project tree only, but the agent pages keep their routes", () => {
+  it("has no global Agents item or page: the agents are in the project tree only, but the agent detail keeps its route", () => {
     expect(GLOBAL_ITEMS.map((i) => i.href)).not.toContain("/agents");
     expect(GLOBAL_ITEMS[0]).toEqual({ href: "/templates", label: "Templates" });
     expect(layout).not.toMatch(/AgentTree/);
     expect(Object.keys(import.meta.glob("./AgentTree.tsx"))).toEqual([]);
-    expect(app).toMatch(/path="\/agents" component=\{AgentsPage\}/);
+    expect(app).not.toMatch(/path="\/agents" component=/);
     expect(app).toMatch(/path="\/agents\/:id" component=\{AgentDetail\}/);
+  });
+
+  it("redirects the old global Agents page to the project cards, but not an agent page", () => {
+    expect(movedTo("/agents")).toBe("/projects");
+    expect(movedTo("/agents/")).toBe("/projects");
+    expect(movedTo("/agents/a1")).toBeUndefined();
+    expect(movedTo("/p/terrarium/agents")).toBeUndefined();
   });
 
   it("has Templates right after Agents under the project, with a route to the Templates page", () => {
@@ -154,6 +160,7 @@ describe("navigation", () => {
       "/logs",
       "/p/:project/mail",
       "/p/:project/logs",
+      "/agents",
     ]);
   });
 
