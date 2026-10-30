@@ -389,6 +389,11 @@ mod fake {
         old_runner: bool,
         /// The bytes of `send_raw` and `write_keys`, in order.
         typed: Vec<u8>,
+        /// Turns that came while the agent started, as the real supervisor
+        /// keeps them for its first idle. One goes out at each idle.
+        early: Vec<String>,
+        /// The text of each turn that started, in order. For tests.
+        prompts: Vec<String>,
     }
 
     #[derive(Default)]
@@ -504,8 +509,40 @@ mod fake {
                     Some(h) => me.set_status(agent, AgentStatus::Blocked, Some(&h.reason)),
                     None => me.set_status(agent, AgentStatus::Idle, None),
                 };
+                me.next_early(agent);
                 me.push_mail(agent);
             });
+        }
+
+        /// Start the next early turn of an idle agent.
+        fn next_early(&self, agent: AgentId) {
+            let text = {
+                let mut inner = self.lock();
+                match inner.agents.get_mut(&agent) {
+                    Some(a)
+                        if a.status == AgentStatus::Idle
+                            && a.held.is_none()
+                            && !a.early.is_empty() =>
+                    {
+                        a.early.remove(0)
+                    }
+                    _ => return,
+                }
+            };
+            if self.turn(agent, text.clone()).is_err()
+                && let Some(a) = self.lock().agents.get_mut(&agent)
+            {
+                a.early.insert(0, text);
+            }
+        }
+
+        /// The text of each turn that started, in order. For tests.
+        pub fn prompts(&self, agent: AgentId) -> Vec<String> {
+            self.lock()
+                .agents
+                .get(&agent)
+                .map(|a| a.prompts.clone())
+                .unwrap_or_default()
         }
 
         fn held(&self, agent: AgentId) -> Option<TurnHold> {
@@ -525,6 +562,9 @@ mod fake {
             let Some((_, epoch)) = self.current(agent).filter(|(s, _)| s.is_live()) else {
                 return Err(SupervisorError::NotRunning(agent));
             };
+            if let Some(a) = self.lock().agents.get_mut(&agent) {
+                a.prompts.push(prompt.clone());
+            }
             self.emit(
                 agent,
                 SupervisorEventKind::Harness(Event::TurnStart {
@@ -535,6 +575,7 @@ mod fake {
             self.later(agent, epoch, move |me| {
                 me.emit(agent, SupervisorEventKind::Harness(Event::TurnEnd));
                 me.set_status(agent, AgentStatus::Idle, None);
+                me.next_early(agent);
                 me.push_mail(agent);
             });
             Ok(())
@@ -812,6 +853,15 @@ mod fake {
                         && a.status.is_live()
                     {
                         a.waiting.push(text);
+                        return Ok(());
+                    }
+                    // A starting agent, or one with early turns: in order,
+                    // after the start.
+                    if let Some(a) = inner.agents.get_mut(&agent)
+                        && a.status.is_live()
+                        && (a.status == AgentStatus::Starting || !a.early.is_empty())
+                    {
+                        a.early.push(text);
                         return Ok(());
                     }
                 }

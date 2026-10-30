@@ -1,11 +1,11 @@
 // The agent fields that an agent and a template share: harness,
-// subscription, model, prompt, system prompt, persona, skills, restart, roles, and policy. No name and no
+// subscription, model, prompt, system prompt, persona, skills, restart, idle stop, roles, and policy. No name and no
 // project: the agent form and the template form add those.
 
 import { createResource, createSignal, createUniqueId, For, Show } from "solid-js";
 import { GRANTABLE_ROLES, HARNESSES, RESTART_POLICIES, type Harness, type RestartPolicy, type Role } from "../../api/types";
 import { api, subscriptions } from "../../stores";
-import { PERSONAS, personaProblem, type AgentFormValues } from "./form";
+import { idleStopProblem, PERSONAS, personaProblem, type AgentFormValues } from "./form";
 import { prunePool, reconcileSubscription } from "./subscription";
 import { defaultModelHint, ModelField, PoolPicker, SubscriptionSelect } from "./SubscriptionFields";
 import { SkillsPicker } from "../skills/SkillsPicker";
@@ -36,6 +36,39 @@ export function PersonaField(props: { value: string; onChange: (s: string) => vo
         <For each={PERSONAS}>{(p) => <option value={p} />}</For>
       </datalist>
       <Show when={personaProblem(props.value)} fallback={<span class="muted small">{PERSONA_HELP}</span>}>
+        {(p) => (
+          <span class="small" style={{ color: "var(--danger)" }}>
+            {p()}
+          </span>
+        )}
+      </Show>
+    </label>
+  );
+}
+
+// The global idle stop (`GET /api/health` `idle_stop`). One request for each page load.
+let idleStopDefault: Promise<string | undefined> | undefined;
+
+/** The global idle stop, such as `10m` or `off`. Undefined until the health answers, or when it does not say. */
+export function useGlobalIdleStop(): () => string | undefined {
+  idleStopDefault ??= api
+    .health()
+    .then((h) => h.idle_stop)
+    .catch(() => undefined);
+  const [value] = createResource(() => idleStopDefault);
+  return () => value();
+}
+
+export const IDLE_STOP_HELP = "The time the agent stays idle before the daemon stops it. Work wakes it again. off: never stop it.";
+
+/** The idle stop: empty is the global default, `off` never stops the agent, else a duration. */
+export function IdleStopField(props: { value: string; onChange: (s: string) => void }) {
+  const fallback = useGlobalIdleStop();
+  return (
+    <label>
+      Idle stop
+      <input value={props.value} onInput={(e) => props.onChange(e.currentTarget.value)} placeholder={fallback() ? `default (${fallback()})` : "default"} pattern="off|0|([0-9]+[dhms])+" />
+      <Show when={idleStopProblem(props.value)} fallback={<span class="muted small">{IDLE_STOP_HELP}</span>}>
         {(p) => (
           <span class="small" style={{ color: "var(--danger)" }}>
             {p()}
@@ -125,6 +158,7 @@ export function AgentFields(props: {
             </For>
           </select>
         </label>
+        <IdleStopField value={v().idle_stop} onChange={(s) => set("idle_stop", s)} />
       </div>
 
       <fieldset class="stack" style={{ gap: "4px" }}>

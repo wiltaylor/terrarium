@@ -180,6 +180,7 @@ export function seed(now: number = Date.now()): MockWorld {
     roles: [],
     policy: { targets: [], mail_to: ["*"] },
     restart: "on-failure",
+    paused: false,
     workspace: `/state/agents/${id}/workspace`,
     source: "api",
     created_at: ago(60 * 24 * 3),
@@ -197,6 +198,10 @@ export function seed(now: number = Date.now()): MockWorld {
     agentRow("01JB0SYS000000000000000007", "sysadmin", "terrarium", "claude", "anthropic-max", "stopped", { roles: ["sysadmin"], restart: "always" }),
     // Idle with open waits (./waits.ts).
     agentRow("01JB0PLAN00000000000000008", "planner", "terrarium", "claude", "anthropic-max", "waiting", { prompt: "planner" }),
+    // Stopped by the idle timeout, with work queued: the next turn or a wake runs it.
+    agentRow("01JB0DOCS00000000000000009", "docs-writer", "terrarium", "claude", "anthropic-max", "stopped", { prompt: "worker", status_reason: "idle", queued: 2, idle_stop: "30m" }),
+    // Paused: nothing wakes it; its mail waits.
+    agentRow("01JB0WEB300000000000000010", "seo-worker", "webshop", "codex", "chatgpt-pro", "stopped", { paused: true, status_reason: "paused", queued: 1, idle_stop: "off" }),
   ];
   const waitSeed = seedWaits(now, agents);
   for (const a of agents) syncWaitFields(waitSeed, a);

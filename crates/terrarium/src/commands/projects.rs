@@ -34,11 +34,33 @@ pub const AGENT_COLS: &[(&str, &str)] = &[
     ("NAME", "name"),
     ("PROJECT", "project"),
     ("HARNESS", "harness"),
-    ("STATUS", "status"),
+    ("STATUS", "state"),
+    ("QUEUED", "queued"),
     ("ROLES", "roles"),
     ("CARD", "current_card"),
     ("WAITING ON", "waiting_on"),
 ];
+
+/// The agents of a list, each with `state` for the table: the status,
+/// `paused`, or `stopped (idle)` after an idle stop (PLAN §18).
+pub fn agent_rows(items: &[Value]) -> Vec<Value> {
+    items
+        .iter()
+        .map(|a| {
+            let mut a = a.clone();
+            let status = field(&a, "status");
+            let state = if a["paused"].as_bool() == Some(true) {
+                "paused".to_owned()
+            } else if status == "stopped" && a["status_reason"] == "idle" {
+                "stopped (idle)".to_owned()
+            } else {
+                status
+            };
+            a["state"] = state.into();
+            a
+        })
+        .collect()
+}
 
 pub async fn project(ctx: &Ctx, cmd: &ProjectCmd) -> anyhow::Result<()> {
     match cmd {
@@ -75,7 +97,7 @@ pub async fn project(ctx: &Ctx, cmd: &ProjectCmd) -> anyhow::Result<()> {
                     c.line(d);
                 }
                 c.line("\nagents:");
-                print_table(c, as_items(&v["agents"]), AGENT_COLS, "  none");
+                print_table(c, &agent_rows(as_items(&v["agents"])), AGENT_COLS, "  none");
                 c.line("\nrepos:");
                 print_table(c, as_items(&v["repos"]), REPO_COLS, "  none");
                 c.line("\ntargets:");

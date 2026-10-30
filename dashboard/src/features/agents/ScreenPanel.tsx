@@ -106,7 +106,7 @@ export function ScreenPanel(props: { agentId: string; running: boolean }) {
       </div>
       <ErrorBanner error={error()} />
       <Show when={!props.running}>
-        <p class="muted">The agent is not running. Start it to see its screen.{snap() ? " The last snapshot is below." : ""}</p>
+        <p class="muted">The agent is not running. A turn or mail wakes it.{snap() ? " The last snapshot is below." : ""}</p>
       </Show>
       <Show when={snap()}>
         {(s) => <pre class="mono screen-snapshot">{screenText(s())}</pre>}

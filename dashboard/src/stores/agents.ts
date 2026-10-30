@@ -5,6 +5,9 @@ import type { Api } from "../api/client";
 import { AGENT_STATUSES, type Agent, type AgentEvent, type AgentStatus } from "../api/types";
 import type { EventsStore } from "./events";
 
+/** The lifecycle events after which the list is read again (the queued count). */
+const LIFECYCLE = new Set<AgentEvent["kind"]>(["agent.paused", "agent.unpaused", "agent.woken"]);
+
 const isStatus = (s: unknown): s is AgentStatus => AGENT_STATUSES.includes(s as AgentStatus);
 
 /** The agent ULID of an event: `agent_id`, or `data.agent_id`. */
@@ -29,6 +32,10 @@ export function applyAgentEvent(agents: Agent[], e: AgentEvent): Agent[] {
   const status = e.data?.status;
   if (e.kind === "status" && isStatus(status)) {
     a.status = status;
+    // `idle` for an idle stop, `paused`, `stopped`, crash text, and so on.
+    const reason = e.data?.reason;
+    if (typeof reason === "string" && reason) a.status_reason = reason;
+    else delete a.status_reason;
     // The open waits come with the status (absent: none).
     const waits = e.data?.waits;
     const on = e.data?.waiting_on;
@@ -49,6 +56,8 @@ export function applyAgentEvent(agents: Agent[], e: AgentEvent): Agent[] {
     delete a.turn_started_at;
   }
   if (e.kind === "exit") a.status = "error";
+  if (e.kind === "agent.paused") a.paused = true;
+  if (e.kind === "agent.unpaused") a.paused = false;
   if (e.kind === "self_report") {
     // The agent's own word. It does not change the runner status (docs/api.md §16.6).
     a.self_report = { status: String(e.data?.status ?? ""), at: e.at, ...(typeof e.data?.note === "string" && e.data.note ? { note: e.data.note } : {}) };
@@ -89,7 +98,7 @@ export function mergeFresh(fresh: Agent[], old: Agent[], recent: AgentEvent[], r
   const replayed = recent.slice().reverse().reduce(applyAgentEvent, merged);
   return replayed.map((a) => {
     const f = merged.find((x) => x.id === a.id)!;
-    return { ...a, status: f.status, current_card: f.current_card, waits: f.waits, waiting_on: f.waiting_on, turn_started_at: f.status === "working" ? a.turn_started_at : undefined };
+    return { ...a, status: f.status, status_reason: f.status_reason, paused: f.paused, current_card: f.current_card, waits: f.waits, waiting_on: f.waiting_on, turn_started_at: f.status === "working" ? a.turn_started_at : undefined };
   });
 }
 
@@ -128,8 +137,11 @@ export function createAgentsStore(api: Pick<Api, "agents">, events?: Pick<Events
     const id = eventAgentId(e);
     if (e.kind === "agent_removed" && id) removed.add(id);
     const next = applyAgentEvent(state.agents, e);
-    if (next !== state.agents) setState("agents", reconcile(next, { key: "id" }));
+    const known = next !== state.agents;
+    if (known) setState("agents", reconcile(next, { key: "id" }));
     else if (id && !removed.has(id) && !state.loading) refreshSoon(); // an agent this list does not have yet
+    // No event carries the queued count: a wake, a pause, an unpause, or a stop changes it.
+    if (known && (LIFECYCLE.has(e.kind) || (e.kind === "status" && e.data?.status === "stopped"))) refreshSoon();
   });
 
   return {

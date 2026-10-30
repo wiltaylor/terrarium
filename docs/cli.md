@@ -311,16 +311,17 @@ terrarium agent show <agent>
 terrarium agent new <name> --harness <h> [--subscription s] [--pool s1,s2] [--model m] [--prompt p]
                     [--system-prompt <text | -> | --system-prompt-file path] [--persona p]
                     [--role r]... [--target t]... [--mail-to a]... [--cross-project p/a]...
-                    [--restart always|on-failure|never] [--skill s]...
+                    [--restart always|on-failure|never] [--idle-stop 30m|off] [--skill s]...
 terrarium agent new --from-file agents/lead.toml [flags that override the file]
 terrarium agent new <name> --template <t> [flags that override the template]
 terrarium agent set <agent> [--harness h] [--subscription s] [--pool s1,s2] [--model m] [--prompt p]
                     [--system-prompt <text | -> | --system-prompt-file path | --no-system-prompt]
-                    [--persona p] [--restart r] [--policy JSON] [--new-session-on-prompt-change true|false]
-                    [--skill s... | --no-skills]
+                    [--persona p] [--restart r] [--idle-stop 30m|off|default] [--policy JSON]
+                    [--new-session-on-prompt-change true|false] [--skill s... | --no-skills]
 terrarium agent swap <agent> <subscription>  move to another plan account of the pool
 terrarium agent rm <agent> [--confirm] [--keep-workspace]
 terrarium agent start|stop|restart <agent> [--no-wait]
+terrarium agent pause|unpause <agent>         nothing wakes a paused agent
 terrarium agent send <agent> <text | -> [--raw]  --raw: project_admin, sysadmin, or the operator
 terrarium agent send <agent> [text | -] --image <file>...  attach images to the turn
 terrarium agent keys <agent> <key>...         project_admin, sysadmin, or the operator
@@ -352,6 +353,25 @@ or `error` after a stop.
 
 `agent ls` has the column `WAITING ON`: what a `waiting` agent waits on
 ([api.md §6.7](api.md#67-waits-runs-and-watches)).
+
+You do not need to start or stop an agent (PLAN §18). Mail, a turn
+(`agent send`), a card assignment, or a lead nudge wakes a stopped agent:
+the daemon starts it with resume of its last session, and gives it the
+work when it is ready. An agent at rest (`idle` or `waiting`) for its
+idle stop stops by itself. The default is `TERRARIUM_IDLE_STOP` (10
+minutes). `--idle-stop` sets the time for one agent: a duration such as
+`30m` or `1h30m`, or `off`. `agent set --idle-stop default` goes back to
+the daemon's value. `agent start` wakes an agent now, and `agent stop`
+stops it now; the next work wakes it again.
+
+`agent pause` stops a running agent and keeps it stopped: nothing wakes
+it, and its turns and mail wait. `agent unpause` lets it wake again; it
+wakes at once when turns or mail wait for it. Both print the state and
+the count of waiting items: `terra/w is paused (stopped, 2 queued)`. They
+need the rights of `stop`. A `start` or `restart` of a paused agent is
+refused (`409`). In `agent ls`, the column `STATUS` shows `paused` for a
+paused agent and `stopped (idle)` after an idle stop, and `QUEUED` counts
+the turns, mail, and card and nudge lines that wait for the agent.
 
 `--pool` sets the account pool (PLAN §16.3): subscriptions of one
 provider that a swap may pick, comma-separated. The current subscription
@@ -515,7 +535,7 @@ terrarium template ls [--global]
 terrarium template show <template>
 terrarium template new <name> [--global] [--description d] --harness <h> [--subscription s]
                        [--model m] [--prompt p] [--role r]... [--target t]... [--mail-to a]...
-                       [--cross-project p/a]... [--restart r]
+                       [--cross-project p/a]... [--restart r] [--idle-stop 30m|off]
                        [--system-prompt <text | -> | --system-prompt-file path] [--persona p]
                        [--skill s]...
 terrarium template new <name> --from-file worker.toml [flags that override the file]
@@ -1211,7 +1231,7 @@ PLAN §10: an agent with a role uses the operator commands under `admin`.
 The shapes are the same as in §4 and §5.
 
 ```
-terrarium admin agent new|set|start|stop|restart|rm|send|answer|logs|sessions|roles ...
+terrarium admin agent new|set|start|stop|restart|pause|unpause|rm|send|answer|logs|sessions|roles ...
 terrarium admin template ls|show|new|edit|rm|from-agent ...
 terrarium admin project new|set|rm|repos|repo-add ...
 terrarium admin role grant|revoke <agent> <role>
@@ -1393,7 +1413,7 @@ terrarium daemon status
 terrarium project new terra -d "The test project"
 terrarium -p terra agent new worker --harness claude --prompt project-lead
 terrarium -p terra agent new --from-file agents/lead.toml
-terrarium agent start terra/worker
+terrarium mail send terra/worker -s "Hello" "Run the tests."   # the mail wakes the worker
 ```
 
 Use TCP:

@@ -194,14 +194,17 @@ You do not take cards yourself while the duties below have work.
    cards are done or reassigned. Do not make more workers than `ready` can
    feed. Check `terrarium usage project` before you add one, and plan around
    the resets.
-4. **Watch for stuck work.** Look for workers that are `idle` on an
-   `in_progress` card, and for cards in `blocked`. A worker in `waiting`
+4. **Watch for stuck work.** Look for workers that are `idle` or `stopped`
+   on an `in_progress` card, and for cards in `blocked`. A worker in `waiting`
    waits on a run or a peer: it is not stuck. Do not poll the workers:
-   watch them (step 7 of "New card"), or run `terrarium wait agent
+   watch them (step 6 of "New card"), or run `terrarium wait agent
    <worker>` and end your turn. Run `terrarium card show
    <id>` and `terrarium admin agent logs <agent> --limit 50`. Send the worker mail,
    answer the question, split the card, or reassign it. Run `terrarium admin
-   agent restart <name>` on a worker in `error`. Ask the operator when only
+   agent restart <name>` on a worker in `error`. A worker at rest stops by
+   itself after some minutes; mail or a card wakes it again. To keep a
+   worker stopped, run `terrarium admin agent pause <worker>`; `unpause`
+   lets it wake again. Ask the operator when only
    the operator can unblock a card. You may schedule reminders and checks
    with `terrarium schedule new` inside your project.
    When a worker is slow or blocked, do these steps in this order. First,
@@ -246,19 +249,19 @@ order:
    {{agent.harness}}`, leave out `--model`, and use your own subscription
    (`terrarium usage` shows it).
 3. Run `terrarium repo checkout <repo> --agent <worker>`.
-4. Run `terrarium admin agent start <worker>`.
-5. Give the worker a target for the card: `terrarium admin target grant
+4. Give the worker a target for the card: `terrarium admin target grant
    <target> <worker> --until 4h --reason <card>` (see "Targets for
    workers"). A worker cannot compile or test without a target. If the
    grant exits with an error ("the target did not come up"), do not assign
    the card. The lease is made, but the target is not up. Fix the target
    with `terrarium admin target edit <target> ...`, run `terrarium admin
    target revoke <target> <worker>`, and grant again.
-6. Run `terrarium card assign <card> <worker>`. The card pointer starts the
-   work. Do not send the worker a start mail.
-7. Run `terrarium watch <worker> --on blocked,error`. The daemon mails you
+5. Run `terrarium card assign <card> <worker>`. The card wakes the worker
+   and starts the work. Do not start the worker, and do not send it a start
+   mail.
+6. Run `terrarium watch <worker> --on blocked,error`. The daemon mails you
    when the worker needs you, so you do not poll it.
-8. Add a line to the log (see below): "<card>: started <worker>".
+7. Add a line to the log (see below): "<card>: started <worker>".
 
 **Worker templates.** An agent template keeps the worker settings in one
 place. Before the first worker, run `terrarium template ls`. If it shows
@@ -306,9 +309,8 @@ commands in your sandbox, never on a target.
 10. Now revoke the worker's lease: `terrarium admin target revoke <target>
     <worker>`. Do not revoke it before the merge: if the operator asks for
     a change, the worker needs the target.
-11. Run `terrarium admin agent stop <worker>`. Then run `terrarium admin
-    agent rm <worker> --confirm`. The workspace of the worker goes to the
-    trash with it.
+11. Run `terrarium admin agent rm <worker> --confirm`. It stops the worker
+    first. The workspace of the worker goes to the trash with it.
 12. Reply on the same thread with `terrarium mail reply <id> "Merged
     <branch> into main (<commit>)."`. `<id>` is the ID of the answer mail.
     Do not use `mail send -s "Re: ..."`: it starts a new thread. Add a
@@ -336,7 +338,7 @@ push) in the sandbox, and build and test on a target. The daemon attaches the wo
 worker to its targets at `/work/{{project.name}}/<worker>`.
 
 1. Each card that compiles or tests needs a target. Grant the worker one
-   before you assign the card (step 5 above), unless its `policy.targets`
+   before you assign the card (step 4 above), unless its `policy.targets`
    lists one.
 2. Make targets at project scope: `terrarium admin target new <name> --kind
    docker --host <host> --image <image> --ephemeral`. Never use `--global`:
@@ -385,7 +387,7 @@ Some targets are shared, for example one VM. Give a shared target to one
 worker for one card at a time. The daemon enforces the lease: the worker
 can use the target only while the lease is active.
 
-1. Do this step after `admin agent start` and before `card assign`. Run
+1. Do this step before `card assign`. Run
    `terrarium admin target grant <target> <worker> --exclusive --until 4h
    --reason <card>`. Use an `--until` that is longer than the work. When
    the work needs more time, run `terrarium admin target extend <target>

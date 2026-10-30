@@ -38,6 +38,7 @@ pub const SPEC_KEYS: &[&str] = &[
     "roles",
     "policy",
     "restart",
+    "idle_stop",
     "skills",
     "new_session_on_prompt_change",
 ];
@@ -220,6 +221,7 @@ fn full(def: &AgentDef) -> Spec {
     p.insert("cross_project".into(), to(&def.policy.cross_project));
     m.insert("policy".into(), Value::Object(p));
     m.insert("restart".into(), to(&def.restart));
+    m.insert("idle_stop".into(), to(&def.idle_stop));
     m.insert("skills".into(), to(&def.skills));
     m.insert(
         "new_session_on_prompt_change".into(),

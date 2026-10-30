@@ -1013,12 +1013,16 @@ async fn lead_and_sysadmin_manage_agents_through_the_tunnel() {
     )
     .await;
     assert_eq!((s, b["assignee"].as_str()), (200, Some(w.as_str())), "{b}");
-    let (s, b) = call("POST", "/api/agents/w-1/start".into(), Value::Null).await;
-    assert!((200..300).contains(&s), "{s} {b}");
+    // The assignment wakes the worker (PLAN §18): the lead does not start
+    // it. The lead may pause and unpause it.
     td.wait_status(&w, "idle").await;
-    let (s, b) = call("POST", "/api/agents/w-1/stop".into(), Value::Null).await;
+    let (s, b) = call("POST", "/api/agents/w-1/pause".into(), Value::Null).await;
     assert!((200..300).contains(&s), "{s} {b}");
+    assert_eq!(b["paused"], true, "{b}");
     td.wait_status(&w, "stopped").await;
+    let (s, b) = call("POST", "/api/agents/w-1/unpause".into(), Value::Null).await;
+    assert!((200..300).contains(&s), "{s} {b}");
+    assert_eq!(b["paused"], false, "{b}");
     let (s, b) = call("DELETE", "/api/agents/w-1?confirm=true".into(), Value::Null).await;
     assert_eq!(s, 204, "{b}");
     // Not in another project, and no project of its own.
@@ -2387,6 +2391,9 @@ async fn a_card_assigned_while_stopped_points_at_the_next_start() {
     let td = Td::start().await;
     let id = td.agent("demo", "bob", json!({})).await;
     td.agent("demo", "eve", json!({})).await;
+    // Paused: the assignments park the pointer and do not wake bob (PLAN
+    // §18). The unpause is the next start.
+    td.post(&format!("/api/agents/{id}/pause"), None).await;
     let mk = |title: &'static str| {
         let td = &td;
         async move {
@@ -2410,7 +2417,7 @@ async fn a_card_assigned_while_stopped_points_at_the_next_start() {
         Some(json!({"assignee": "demo/eve"})),
     )
     .await;
-    td.post(&format!("/api/agents/{id}/start"), None).await;
+    td.post(&format!("/api/agents/{id}/unpause"), None).await;
     let starts = td.wait_events(&id, "turn_start", |e| !e.is_empty()).await;
     assert_eq!(
         starts[0]["data"]["prompt"],
@@ -2436,6 +2443,8 @@ async fn a_parked_pointer_survives_a_daemon_restart() {
     let mut td = Td::start().await;
     let id = td.agent("demo", "bob", json!({})).await;
     td.agent("demo", "eve", json!({})).await;
+    // Paused, so the assignments park the pointer and do not wake bob.
+    td.post(&format!("/api/agents/{id}/pause"), None).await;
     let mut cards = Vec::new();
     for title in ["Kept", "Moved away"] {
         let c = td
@@ -2458,7 +2467,7 @@ async fn a_parked_pointer_survives_a_daemon_restart() {
         Some(json!({"assignee": "demo/eve"})),
     )
     .await;
-    td.post(&format!("/api/agents/{id}/start"), None).await;
+    td.post(&format!("/api/agents/{id}/unpause"), None).await;
     let starts = td.wait_events(&id, "turn_start", |e| !e.is_empty()).await;
     assert_eq!(
         starts[0]["data"]["prompt"],
@@ -2515,6 +2524,8 @@ async fn the_assign_pointer_skips_a_card_that_the_assignee_took_up() {
             assert!((200..300).contains(&s), "POST {path}: {s} {b}");
         }
     };
+    // Paused: the assignments park the pointers and do not wake bob.
+    td.post(&format!("/api/agents/{id}/pause"), None).await;
     let untouched = mk("Untouched").await;
     let claimed = mk("Claimed").await;
     let commented = mk("Commented").await;
@@ -2535,7 +2546,7 @@ async fn the_assign_pointer_skips_a_card_that_the_assignee_took_up() {
     .await;
     assign(again.clone(), "demo/eve").await;
     assign(again.clone(), "demo/bob").await;
-    td.post(&format!("/api/agents/{id}/start"), None).await;
+    td.post(&format!("/api/agents/{id}/unpause"), None).await;
     let starts = td.wait_events(&id, "turn_start", |e| !e.is_empty()).await;
     assert_eq!(
         starts[0]["data"]["prompt"],
@@ -2948,4 +2959,103 @@ async fn a_swap_by_restart_waits_for_the_end_of_the_turn() {
     assert_eq!(r["applied"], "restarted", "{r}");
     td.wait_events(&id, "session_started", |e| e.len() == 3)
         .await;
+}
+
+/// PLAN §18 with the real supervisor: work for a stopped agent wakes it
+/// with resume of its harness session. The queued turn goes out first,
+/// then the mail pointer. The idle stop then stops it with the reason
+/// `idle`, and restart `always` does not start it again: an idle stop is
+/// not a crash.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn work_wakes_a_stopped_agent_and_rest_stops_it() {
+    use terrarium_core::config::IdleStop;
+    let td = Td::start().await;
+    let id = td.agent("demo", "bob", json!({"restart": "always"})).await;
+    td.post(&format!("/api/agents/{id}/start"), None).await;
+    td.wait_status(&id, "idle").await;
+    let first = td.events(&id, "session_started").await[0]["data"]["harness_session"].clone();
+    td.post(&format!("/api/agents/{id}/stop"), None).await;
+    td.wait_status(&id, "stopped").await;
+
+    let r = td
+        .post(
+            &format!("/api/agents/{id}/send"),
+            Some(json!({"text": "queued work"})),
+        )
+        .await;
+    assert_eq!(r["queued"], true, "{r}");
+    let m = td
+        .post(
+            "/api/mail",
+            Some(json!({"to": "demo/bob", "body": "and mail"})),
+        )
+        .await;
+    let thread = m["thread_id"].as_str().unwrap().to_owned();
+    let starts = td
+        .wait_events(&id, "turn_start", |e| {
+            e.iter()
+                .any(|x| x["data"]["prompt"].as_str().unwrap_or("").contains(&thread))
+        })
+        .await;
+    let prompts: Vec<&str> = starts
+        .iter()
+        .map(|x| x["data"]["prompt"].as_str().unwrap())
+        .collect();
+    assert_eq!(prompts[0], "[User] queued work", "{prompts:#?}");
+    assert_eq!(prompts.len(), 2, "{prompts:#?}");
+    let started = td.events(&id, "session_started").await;
+    assert_eq!(started.last().unwrap()["data"]["harness_session"], first);
+    let woken = td.events(&id, "agent.woken").await;
+    assert_eq!(
+        woken.len(),
+        1,
+        "one wake for the turn and the mail: {woken:#?}"
+    );
+    td.wait_status(&id, "idle").await;
+
+    td.daemon
+        .as_ref()
+        .unwrap()
+        .state
+        .lifecycle
+        .set_tuning(terrariumd::lifecycle::Tuning {
+            idle_stop: IdleStop::After(Duration::from_millis(300)),
+            tick: Duration::from_millis(50),
+        });
+    td.wait_status(&id, "stopped").await;
+    let last = td.events(&id, "status").await.last().unwrap().clone();
+    assert_eq!(last["data"]["reason"], "idle", "{last}");
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(td.status(&id).await, "stopped");
+    let after = td.events(&id, "status").await;
+    assert!(
+        !after.iter().any(|x| x["data"]["status"] == "restarting"),
+        "{after:#?}"
+    );
+}
+
+/// A wake whose start fails puts the agent in `error`, and later work
+/// does not wake it until the operator clears the error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_wake_is_an_error_and_stops_the_wakes() {
+    let td = Td::start().await;
+    // No adapter is registered for codex here: every start fails.
+    let id = td.agent("demo", "cx", json!({"harness": "codex"})).await;
+    td.post("/api/mail", Some(json!({"to": "demo/cx", "body": "one"})))
+        .await;
+    td.wait_status(&id, "error").await;
+    let last = td.events(&id, "status").await.last().unwrap().clone();
+    assert!(
+        last["data"]["reason"]
+            .as_str()
+            .unwrap()
+            .starts_with("wake failed: "),
+        "{last}"
+    );
+    td.post("/api/mail", Some(json!({"to": "demo/cx", "body": "two"})))
+        .await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(td.status(&id).await, "error");
+    assert_eq!(td.events(&id, "agent.woken").await.len(), 1);
+    assert_eq!(td.get(&format!("/api/agents/{id}")).await["queued"], 2);
 }

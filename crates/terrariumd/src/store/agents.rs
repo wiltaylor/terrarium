@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use terrarium_core::config::{AgentDef, Policy, RestartPolicy, check_system_prompt};
+use terrarium_core::config::{AgentDef, IdleStop, Policy, RestartPolicy, check_system_prompt};
 use terrarium_core::{Agent, AgentId, AgentStatus, HarnessId, HarnessSessionId, Role};
 
 use crate::actor::AgentActor;
@@ -47,6 +47,18 @@ pub struct AgentView {
     /// API fills it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub skills_restart: bool,
+    /// Nothing wakes the agent while it is paused (PLAN §18): its turns
+    /// and mail wait. A pause stops a running agent.
+    #[serde(default)]
+    pub paused: bool,
+    /// The reason of the last status change, for example `idle` for an
+    /// idle stop or `paused`. Absent when not known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_reason: Option<String>,
+    /// The turns, the mail, and the card and nudge pointers that wait for
+    /// the agent ([`queued_count`]). Absent when 0.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub queued: usize,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -105,6 +117,9 @@ fn base_row(r: &Row<'_>) -> rusqlite::Result<AgentView> {
             roles: Vec::new(),
             policy: serde_json::from_str(&policy).unwrap_or_default(),
             restart: restart_from(&r.get::<_, String>("restart")?),
+            idle_stop: r
+                .get::<_, Option<String>>("idle_stop")?
+                .and_then(|s| s.parse::<IdleStop>().ok()),
             status: status_from(&r.get::<_, String>("status")?),
             session: None,
             new_session_on_prompt_change: r.get("new_session_on_prompt_change")?,
@@ -119,6 +134,9 @@ fn base_row(r: &Row<'_>) -> rusqlite::Result<AgentView> {
         waiting_on: None,
         harness_version: None,
         skills_restart: false,
+        paused: r.get("paused")?,
+        status_reason: r.get("status_reason")?,
+        queued: 0,
         created_at: r.get("created_at")?,
         updated_at: r.get("updated_at")?,
     })
@@ -150,7 +168,93 @@ fn complete(conn: &Connection, mut v: AgentView) -> ApiResult<AgentView> {
     if v.waits > 0 {
         v.waiting_on = crate::store::waits::waiting_on(conn, &id)?;
     }
+    v.queued = queued_count(conn, &id)?;
     Ok(v)
+}
+
+/// The work that waits for agent `id` (PLAN §18): its queued turns, its
+/// `queued` mail, and its parked card and nudge pointers. A lease line
+/// waits too, but it does not count: it does not wake the agent.
+pub fn queued_count(conn: &Connection, id: &str) -> ApiResult<usize> {
+    let n: i64 = conn.query_row(
+        "SELECT (SELECT count(*) FROM queued_turns WHERE agent = ?1)
+              + (SELECT count(*) FROM messages
+                 WHERE to_agent = ?1 AND to_kind = 'agent' AND state = 'queued')
+              + (SELECT count(*) FROM pending_pointers
+                 WHERE agent = ?1 AND kind IN ('card', 'lead'))",
+        [id],
+        |r| r.get(0),
+    )?;
+    Ok(usize::try_from(n).unwrap_or(0))
+}
+
+/// The agents with work that waits for them ([`queued_count`] above 0).
+pub fn with_queued_work(conn: &Connection) -> ApiResult<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT agent FROM queued_turns
+         UNION SELECT to_agent FROM messages WHERE to_kind = 'agent' AND state = 'queued'
+         UNION SELECT agent FROM pending_pointers WHERE kind IN ('card', 'lead')",
+    )?;
+    let rows = stmt
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// One turn that waits for the wake of its agent (`queued_turns`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueuedTurn {
+    pub id: i64,
+    pub text: String,
+}
+
+/// Keep `text` as a turn for agent `id`, after the turns that wait already.
+pub fn queue_turn(t: &mut Tx<'_>, id: &str, text: &str) -> ApiResult<()> {
+    t.execute(
+        "INSERT INTO queued_turns (agent, text, created_at) VALUES (?1, ?2, ?3)",
+        params![id, text, now()],
+    )?;
+    Ok(())
+}
+
+/// The queued turns of agent `id`, oldest first.
+pub fn queued_turns(conn: &Connection, id: &str) -> ApiResult<Vec<QueuedTurn>> {
+    let mut stmt =
+        conn.prepare("SELECT id, text FROM queued_turns WHERE agent = ?1 ORDER BY id")?;
+    let rows = stmt
+        .query_map([id], |r| {
+            Ok(QueuedTurn {
+                id: r.get(0)?,
+                text: r.get(1)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// Delete the queued turns of agent `id` up to `upto` (the ID of the
+/// last turn that went to the supervisor).
+pub fn forget_queued_turns(t: &mut Tx<'_>, id: &str, upto: i64) -> ApiResult<()> {
+    t.execute(
+        "DELETE FROM queued_turns WHERE agent = ?1 AND id <= ?2",
+        params![id, upto],
+    )?;
+    Ok(())
+}
+
+/// Set or clear the `paused` flag. Returns the flag before.
+pub fn set_paused(t: &mut Tx<'_>, id: &str, paused: bool) -> ApiResult<bool> {
+    let before: bool = t
+        .query_row("SELECT paused FROM agents WHERE id = ?1", [id], |r| {
+            r.get(0)
+        })
+        .optional()?
+        .ok_or_else(|| ApiError::not_found(format!("no agent `{id}`")))?;
+    t.execute(
+        "UPDATE agents SET paused = ?2, updated_at = ?3 WHERE id = ?1",
+        params![id, paused, now()],
+    )?;
+    Ok(before)
 }
 
 pub fn get(conn: &Connection, id: &str) -> ApiResult<AgentView> {
@@ -397,9 +501,9 @@ pub fn create_from(
         "INSERT INTO agents (id, name, project, harness, subscription, model, prompt, policy,
                              restart, status, workspace, source, created_at, updated_at,
                              new_session_on_prompt_change, template, system_prompt,
-                             subscription_pool, persona, skills)
+                             subscription_pool, persona, skills, idle_stop)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'stopped', ?10, ?11, ?12, ?12, ?13, ?14,
-                 ?15, ?16, ?17, ?18)",
+                 ?15, ?16, ?17, ?18, ?19)",
         params![
             id,
             agent.name,
@@ -418,7 +522,8 @@ pub fn create_from(
             agent.system_prompt,
             serde_json::to_string(&agent.subscription_pool)?,
             agent.persona,
-            serde_json::to_string(&agent.skills)?
+            serde_json::to_string(&agent.skills)?,
+            agent.idle_stop.map(IdleStop::as_text)
         ],
     )?;
     set_roles(t, &id, &def.project, &def.roles)?;
@@ -467,6 +572,10 @@ pub struct AgentPatch {
     pub policy: Option<Policy>,
     #[serde(default)]
     pub restart: Option<RestartPolicy>,
+    /// The idle stop (PLAN §18): `off`, or a duration. `null` goes back
+    /// to the global default.
+    #[serde(default, deserialize_with = "nullable")]
+    pub idle_stop: Option<Option<IdleStop>>,
     #[serde(default)]
     pub new_session_on_prompt_change: Option<bool>,
     /// The skills (PLAN §8.6): names of the skill library, or `*`. `[]`
@@ -502,6 +611,7 @@ pub fn write_def(t: &mut Tx<'_>, id: &str, p: &AgentPatch) -> ApiResult<()> {
             roles: Vec::new(),
             policy: policy.clone(),
             restart: RestartPolicy::default(),
+            idle_stop: None,
             new_session_on_prompt_change: true,
         })?;
     }
@@ -531,6 +641,7 @@ pub fn write_def(t: &mut Tx<'_>, id: &str, p: &AgentPatch) -> ApiResult<()> {
             subscription_pool = coalesce(?15, subscription_pool),
             persona = CASE WHEN ?16 THEN ?17 ELSE persona END,
             skills = coalesce(?18, skills),
+            idle_stop = CASE WHEN ?19 THEN ?20 ELSE idle_stop END,
             updated_at = ?8
          WHERE id = ?1",
         params![
@@ -555,6 +666,8 @@ pub fn write_def(t: &mut Tx<'_>, id: &str, p: &AgentPatch) -> ApiResult<()> {
             persona.is_some(),
             persona.flatten(),
             skills.as_ref().map(serde_json::to_string).transpose()?,
+            p.idle_stop.is_some(),
+            p.idle_stop.flatten().map(IdleStop::as_text),
         ],
     )?;
     if p.harness.is_some() || p.subscription.is_some() || p.subscription_pool.is_some() {
@@ -719,7 +832,13 @@ pub fn delete(t: &mut Tx<'_>, id: &str) -> ApiResult<()> {
     Ok(())
 }
 
-pub fn set_status(t: &mut Tx<'_>, id: &str, status: AgentStatus) -> ApiResult<AgentStatus> {
+/// Set the status and its reason. Returns the status before.
+pub fn set_status(
+    t: &mut Tx<'_>,
+    id: &str,
+    status: AgentStatus,
+    reason: Option<&str>,
+) -> ApiResult<AgentStatus> {
     let before: String = t
         .query_row("SELECT status FROM agents WHERE id = ?1", [id], |r| {
             r.get(0)
@@ -727,8 +846,8 @@ pub fn set_status(t: &mut Tx<'_>, id: &str, status: AgentStatus) -> ApiResult<Ag
         .optional()?
         .ok_or_else(|| ApiError::not_found(format!("no agent `{id}`")))?;
     t.execute(
-        "UPDATE agents SET status = ?2, updated_at = ?3 WHERE id = ?1",
-        params![id, status.as_str(), now()],
+        "UPDATE agents SET status = ?2, status_reason = ?4, updated_at = ?3 WHERE id = ?1",
+        params![id, status.as_str(), now(), reason],
     )?;
     Ok(status_from(&before))
 }
@@ -979,13 +1098,14 @@ pub fn sync_def(t: &mut Tx<'_>, id: &str, def: &AgentDef) -> ApiResult<bool> {
         || before.agent.persona != persona
         || before.agent.skills != skills
         || before.agent.policy != def.policy
-        || before.agent.restart != def.restart;
+        || before.agent.restart != def.restart
+        || before.agent.idle_stop != def.idle_stop;
     if changed {
         t.execute(
             "UPDATE agents SET harness = ?2, subscription = ?3, model = ?4, prompt = ?5,
                     policy = ?6, restart = ?7, source = 'file', updated_at = ?8,
                     new_session_on_prompt_change = ?9, system_prompt = ?10,
-                    subscription_pool = ?11, persona = ?12, skills = ?13
+                    subscription_pool = ?11, persona = ?12, skills = ?13, idle_stop = ?14
              WHERE id = ?1",
             params![
                 id,
@@ -1000,7 +1120,8 @@ pub fn sync_def(t: &mut Tx<'_>, id: &str, def: &AgentDef) -> ApiResult<bool> {
                 system_prompt,
                 serde_json::to_string(&pool)?,
                 persona,
-                serde_json::to_string(&skills)?
+                serde_json::to_string(&skills)?,
+                def.idle_stop.map(IdleStop::as_text)
             ],
         )?;
     }

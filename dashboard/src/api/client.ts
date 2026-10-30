@@ -240,7 +240,12 @@ export interface Api {
     start(id: string): Promise<Agent>;
     stop(id: string): Promise<Agent>;
     restart(id: string): Promise<Agent>;
-    send(id: string, text: string): Promise<{ accepted: boolean }>;
+    /** Stop the agent if it runs, and block every wake. Turns and mail stay queued. Idempotent. */
+    pause(id: string): Promise<Agent>;
+    /** Clear the pause. The agent wakes at once only when work waits for it. Idempotent. */
+    unpause(id: string): Promise<Agent>;
+    /** `queued`: the agent does not run; the turn waits, and the agent wakes (unless paused). */
+    send(id: string, text: string): Promise<{ accepted: boolean; queued?: boolean }>;
     /** `POST /api/agents/{id}/attachments` (docs/api.md §6.5): the raw image (PNG, JPEG, GIF, WebP; at most 20 MiB) into the agent's workspace. The answer has the path that the agent sees. The same rights as `send`. */
     attach(id: string, file: Blob): Promise<Attachment>;
     /** `POST /api/agents/{id}/send` with `raw: true` (docs/api.md §6.5): typed as-is, at once; a `/` or `!` command runs. project_admin, sysadmin, or the operator. */
@@ -796,6 +801,8 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       start: (id) => post(`${a(id)}/start`),
       stop: (id) => post(`${a(id)}/stop`),
       restart: (id) => post(`${a(id)}/restart`),
+      pause: (id) => post(`${a(id)}/pause`),
+      unpause: (id) => post(`${a(id)}/unpause`),
       send: (id, text) => post(`${a(id)}/send`, { text }),
       attach: (id, file) => t.request("POST", `${a(id)}/attachments`, { raw: { data: file, type: file.type || "application/octet-stream" } }),
       sendRaw: (id, text) => post(`${a(id)}/send`, { text, raw: true }),

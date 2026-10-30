@@ -327,6 +327,11 @@ pub async fn run(
         return Err(no_display(&row.def));
     }
     op.check().map_err(ApiError::invalid)?;
+    // Computer use is work: the idle clock of the agent starts again
+    // (`crate::lifecycle`).
+    if let Some(me) = actor.agent() {
+        state.lifecycle.touch(&me.id);
+    }
     if op.is_input() {
         r.input?;
         state.executor.display_limiter.check(name)?;

@@ -336,6 +336,7 @@ async fn from_agent(
         roles: a.agent.roles.clone(),
         policy: a.agent.policy.clone(),
         restart: a.agent.restart,
+        idle_stop: a.agent.idle_stop,
         skills: a.agent.skills.clone(),
         new_session_on_prompt_change: a.agent.new_session_on_prompt_change,
     };

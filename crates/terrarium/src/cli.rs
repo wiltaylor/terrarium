@@ -407,7 +407,8 @@ pub enum AgentCmd {
         #[arg(long)]
         keep_workspace: bool,
     },
-    /// Start an agent; wait up to 10 s for its new status
+    /// Start an agent now; wait up to 10 s for its new status. Mail, a
+    /// turn, a card, or a nudge also wakes a stopped agent (PLAN §18)
     Start {
         agent: String,
         /// Print the status before the start and do not wait
@@ -428,6 +429,12 @@ pub enum AgentCmd {
         #[arg(long)]
         no_wait: bool,
     },
+    /// Pause an agent: a running agent stops, and nothing wakes it. Its
+    /// turns and mail wait until the unpause
+    Pause { agent: String },
+    /// Unpause an agent. It wakes now when turns or mail wait for it, else
+    /// at its next work
+    Unpause { agent: String },
     /// Type one turn into the agent. Without `--raw`, the turn waits for
     /// the agent to be idle, and a text that starts with `/` or `!` stays
     /// plain text for the model
@@ -563,6 +570,10 @@ pub struct AgentNewArgs {
     /// `always`, `on-failure`, or `never`
     #[arg(long)]
     pub restart: Option<String>,
+    /// Stop the agent after this long at rest: a duration such as `30m`
+    /// or `1h30m`, or `off`. Default: the daemon's `TERRARIUM_IDLE_STOP`
+    #[arg(long)]
+    pub idle_stop: Option<String>,
     /// A skill of the skill library; `*` is every skill; repeat for more
     #[arg(long = "skill")]
     pub skills: Vec<String>,
@@ -610,6 +621,10 @@ pub struct AgentSetArgs {
     pub system_prompt: SystemPromptArgs,
     #[arg(long)]
     pub restart: Option<String>,
+    /// Stop the agent after this long at rest: a duration such as `30m`,
+    /// `off`, or `default` (the daemon's `TERRARIUM_IDLE_STOP`)
+    #[arg(long)]
+    pub idle_stop: Option<String>,
     /// The whole policy as JSON, for example `{"targets":[],"mail_to":["*"]}`
     #[arg(long)]
     pub policy: Option<String>,
@@ -2099,6 +2114,10 @@ pub struct TemplateSpecArgs {
     /// `always`, `on-failure`, or `never`
     #[arg(long)]
     pub restart: Option<String>,
+    /// Stop the agent after this long at rest: a duration such as `30m`,
+    /// or `off`
+    #[arg(long)]
+    pub idle_stop: Option<String>,
     /// A skill of the skill library; `*` is every skill; repeat for more
     #[arg(long = "skill", conflicts_with = "no_skills")]
     pub skills: Vec<String>,

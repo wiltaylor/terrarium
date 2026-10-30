@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Agent } from "../../api/types";
-import { agentToForm, effectivePersona, emptyAgentForm, formToDef, formToPatch, parseList, personaProblem, validateAgentForm } from "./form";
+import { agentToForm, effectivePersona, emptyAgentForm, formToDef, formToPatch, idleStopProblem, idleStopText, parseList, personaProblem, validateAgentForm } from "./form";
 
 const agent: Agent = {
   id: "A1", name: "worker", project: "p", harness: "pi", model: "m1", workspace: "/w", status: "idle", roles: ["project_admin"],
@@ -110,5 +110,30 @@ describe("agent form", () => {
     expect(formToPatch(withS, { ...agentToForm(withS), skills: [] })).toEqual({ skills: [] });
     expect(formToPatch(withS, { ...agentToForm(withS), skills: ["*"] })).toEqual({ skills: ["*"] });
     expect(formToPatch(agent, { ...agentToForm(agent), skills: ["fern-check"] })).toEqual({ skills: ["fern-check"] });
+  });
+
+  it("takes off, 0, or a duration of d, h, m, and s parts as the idle stop; empty is the default", () => {
+    for (const ok of ["", "  ", "off", "0", "90s", "30m", "2h", "1h30m", "1d2h3m4s", " 10m "]) expect(idleStopProblem(ok)).toBeNull();
+    for (const bad of ["10", "m", "1.5h", "10 m", "1h 30m", "-5m", "10min", "OFF", "never", "1w"]) expect(idleStopProblem(bad)).toMatch(/Idle stop/);
+    expect(validateAgentForm({ ...emptyAgentForm("p"), name: "w", idle_stop: "10min" })).toEqual([expect.stringContaining("Idle stop")]);
+  });
+
+  it("sends the idle stop only when set or changed; an emptied one goes as null", () => {
+    expect(formToDef({ ...emptyAgentForm("p"), name: "w" }).idle_stop).toBeUndefined();
+    expect(formToDef({ ...emptyAgentForm("p"), name: "w", idle_stop: " 30m " }).idle_stop).toBe("30m");
+    const v = agentToForm(agent);
+    expect(v.idle_stop).toBe("");
+    expect(formToPatch(agent, { ...v, idle_stop: "off" })).toEqual({ idle_stop: "off" });
+    expect(formToPatch({ ...agent, idle_stop: "1h" }, { ...v, idle_stop: "1h" })).toEqual({});
+    expect(formToPatch({ ...agent, idle_stop: "1h" }, { ...v, idle_stop: "" })).toEqual({ idle_stop: null });
+  });
+
+  it("shows the idle stop with the global default", () => {
+    expect(idleStopText(undefined, "10m")).toBe("default (10m)");
+    expect(idleStopText(undefined, "off")).toBe("default (never)");
+    expect(idleStopText(undefined, undefined)).toBe("default");
+    expect(idleStopText("off", "10m")).toBe("never");
+    expect(idleStopText("0", "10m")).toBe("never");
+    expect(idleStopText("1h30m", "10m")).toBe("after 1h30m idle");
   });
 });

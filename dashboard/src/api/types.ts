@@ -35,6 +35,8 @@ export interface Health {
   uptime: number;
   started_at?: string;
   definitions?: { projects: number; agents: number; targets: number; subscriptions: number };
+  /** The global idle stop of an agent: a duration such as `10m`, or `off`. An agent's `idle_stop` overrides it. */
+  idle_stop?: string;
 }
 
 /** `GET /api/harnesses` (docs/api.md §4): one harness against its pin and tested range. */
@@ -327,6 +329,12 @@ export interface AgentDef {
   new_session_on_prompt_change?: boolean;
   /** Terrarium-managed skills (`GET /api/skills` names). Absent or empty: none. `"*"`: every skill. */
   skills?: string[];
+  /**
+   * The time that the agent stays `idle` or `waiting` before the daemon stops it:
+   * `off` (or `0`) never stops it, else a duration such as `30m` or `1h30m`.
+   * Absent: the global default (`GET /api/health` `idle_stop`).
+   */
+  idle_stop?: string;
 }
 
 /**
@@ -338,7 +346,7 @@ export interface AgentDef {
 export type AgentCreate =
   | AgentDef
   | (Pick<AgentDef, "name" | "project"> &
-      Partial<Omit<AgentDef, "name" | "project" | "subscription" | "model" | "prompt" | "policy">> & {
+      Partial<Omit<AgentDef, "name" | "project" | "subscription" | "model" | "prompt" | "policy" | "idle_stop">> & {
         /** A template key: a name, `global:<name>`, `<project>/<name>`, or a ULID. */
         template: string;
         /** Merges per key over the template's policy. */
@@ -346,6 +354,8 @@ export type AgentCreate =
         subscription?: string | null;
         model?: string | null;
         prompt?: string | null;
+        /** `null`: the global default, not the template's value. */
+        idle_stop?: string | null;
       });
 
 /** `PATCH /api/agents/{id}`. Name, project, and roles do not change here. `null` clears subscription, model, prompt, or system_prompt; an absent field does not change. A new system_prompt applies at the next start. */
@@ -360,6 +370,8 @@ export type AgentPatch = Partial<Pick<AgentDef, "harness" | "policy" | "restart"
   persona?: string | null;
   /** The skill names; `[]` clears them. An unknown name is a 422. Applies at the next start. */
   skills?: string[];
+  /** `off`, `0`, or a duration. `null` goes back to the global default. */
+  idle_stop?: string | null;
 };
 
 /** `subscription_detail` of `GET /api/agents/{id}`: the agent's subscription, when it exists. */
@@ -426,6 +438,14 @@ export interface Agent {
   skills?: string[];
   /** True when the live agent runs with other skills than its list now gives: a restart applies them. */
   skills_restart?: true;
+  /** True when the operator paused the agent: it does not run, and nothing wakes it. Turns and mail stay queued. */
+  paused?: boolean;
+  /** See `AgentDef.idle_stop`. Absent: the global default. */
+  idle_stop?: string;
+  /** The reason of the last status change: `idle` for an idle stop, `paused`, `stopped`, crash text, and so on. */
+  status_reason?: string;
+  /** The turns, mail, and card or nudge pointers that wait for the agent. Absent when 0. */
+  queued?: number;
 }
 
 /** How a subscription swap took effect (`POST /api/agents/{id}/subscription`). */
@@ -820,6 +840,10 @@ export const EVENT_KINDS = [
   // docs/api.md §16.7: `{change, harness, from, to}`, the default plan account of a harness.
   "subscription",
   "self_report",
+  // The lifecycle: a pause, an unpause, and a wake (`{cause}`) of a stopped agent.
+  "agent.paused",
+  "agent.unpaused",
+  "agent.woken",
   // docs/api.md §9, §17.7.
   "lease",
   // Waits: `{wait_id, change, kind, summary, state}`.

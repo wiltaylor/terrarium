@@ -2870,19 +2870,34 @@ async fn leader_worker_flow_commands() {
         )],
     )
     .await;
-    for verb in ["start", "stop"] {
-        let path: &'static str = if verb == "start" {
-            "/api/agents/w-dem-3/start"
+    // The card assignment wakes the worker (PLAN §18): the lead does not
+    // start it. It may pause and unpause it.
+    for verb in ["pause", "unpause"] {
+        let path: &'static str = if verb == "pause" {
+            "/api/agents/w-dem-3/pause"
         } else {
-            "/api/agents/w-dem-3/stop"
+            "/api/agents/w-dem-3/unpause"
         };
-        ok(
+        let out = ok(
             true,
             &["admin", "agent", verb, "w-dem-3"],
-            vec![(202, json!({}))],
+            vec![(
+                202,
+                json!({"name": "w-dem-3", "project": "terra", "status": "stopped",
+                       "paused": verb == "pause", "queued": 1}),
+            )],
             vec![req(Post, path)],
         )
         .await;
+        let state = if verb == "pause" {
+            "paused"
+        } else {
+            "not paused"
+        };
+        assert_eq!(
+            out,
+            format!("terra/w-dem-3 is {state} (stopped, 1 queued)\n")
+        );
     }
     ok(
         true,
@@ -6562,4 +6577,88 @@ async fn secret_grants_and_the_agent_commands() {
     )
     .await;
     assert!(out.contains("\"value\": \"1234\""), "{out}");
+}
+
+/// The lifecycle commands (PLAN §18): `pause`, `unpause`, `--idle-stop` on
+/// `agent new` and `agent set` (`default` sends `null`), and the state
+/// column of `agent ls`.
+#[tokio::test]
+async fn agent_lifecycle_commands() {
+    let out = ok(
+        false,
+        &["agent", "pause", "terra/w"],
+        vec![(
+            202,
+            json!({"name": "w", "project": "terra", "status": "stopping",
+                   "paused": true}),
+        )],
+        vec![req(Post, "/api/agents/terra%2Fw/pause")],
+    )
+    .await;
+    assert_eq!(out, "terra/w is paused (stopping, 0 queued)\n");
+    ok(
+        false,
+        &["agent", "unpause", "w"],
+        vec![(202, json!({"name": "w", "paused": false}))],
+        vec![req(Post, "/api/agents/w/unpause")],
+    )
+    .await;
+    ok(
+        false,
+        &[
+            "-p",
+            "terra",
+            "agent",
+            "new",
+            "w",
+            "--harness",
+            "claude",
+            "--idle-stop",
+            "30m",
+        ],
+        vec![(201, json!({"name": "w"}))],
+        vec![(
+            Post,
+            "/api/agents",
+            vec![],
+            Some(json!({"name": "w", "project": "terra", "harness": "claude",
+                        "idle_stop": "30m"})),
+        )],
+    )
+    .await;
+    for (flag, want) in [("off", json!("off")), ("default", Value::Null)] {
+        ok(
+            false,
+            &["agent", "set", "w", "--idle-stop", flag],
+            vec![(200, json!({}))],
+            vec![(
+                Patch,
+                "/api/agents/w",
+                vec![],
+                Some(json!({"idle_stop": want})),
+            )],
+        )
+        .await;
+    }
+    let out = ok(
+        false,
+        &["-p", "terra", "agent", "ls"],
+        vec![(
+            200,
+            json!([
+                {"id": "A1", "name": "a", "project": "terra", "status": "stopped",
+                 "status_reason": "idle", "queued": 2, "paused": false},
+                {"id": "A2", "name": "b", "project": "terra", "status": "stopped",
+                 "paused": true},
+                {"id": "A3", "name": "c", "project": "terra", "status": "idle",
+                 "paused": false},
+            ]),
+        )],
+        vec![(Get, "/api/agents", vec![("project", "terra")], None)],
+    )
+    .await;
+    assert!(out.contains("stopped (idle)"), "{out}");
+    assert!(out.contains("paused"), "{out}");
+    assert!(out.contains("QUEUED"), "{out}");
+    assert!(Cli::try_parse_from(["terrarium", "agent", "pause"]).is_err());
 }

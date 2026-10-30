@@ -24,6 +24,8 @@ export interface AgentFormValues {
   restart: RestartPolicy;
   /** Skill names, or `["*"]` for all. Empty: none. */
   skills: string[];
+  /** `off`, `0`, or a duration such as `30m` or `1h30m`. Empty: the global default. */
+  idle_stop: string;
 }
 
 /** "a, b\nc" -> ["a", "b", "c"]. */
@@ -34,7 +36,7 @@ export const parseList = (s: string): string[] =>
     .filter(Boolean);
 
 export function emptyAgentForm(project = ""): AgentFormValues {
-  return { name: "", project, harness: "claude", subscription: "", subscription_pool: [], model: "", prompt: "", system_prompt: "", persona: "", roles: [], targets: [], mail_to: "*", cross_project: "", restart: "on-failure", skills: [] };
+  return { name: "", project, harness: "claude", subscription: "", subscription_pool: [], model: "", prompt: "", system_prompt: "", persona: "", roles: [], targets: [], mail_to: "*", cross_project: "", restart: "on-failure", skills: [], idle_stop: "" };
 }
 
 export function agentToForm(a: Agent): AgentFormValues {
@@ -54,6 +56,7 @@ export function agentToForm(a: Agent): AgentFormValues {
     cross_project: (a.policy?.cross_project ?? []).join(", "),
     restart: a.restart ?? "on-failure",
     skills: a.skills ?? [],
+    idle_stop: a.idle_stop ?? "",
   };
 }
 
@@ -82,6 +85,23 @@ export function effectivePersona(a: Pick<Agent, "persona" | "roles">): { persona
   return { persona: leader ? "leader" : "worker", byRole: true };
 }
 
+/** One or more `<n><unit>` parts, units d, h, m, s: `90s`, `30m`, `1h30m`, `2d`. */
+const DURATION_RE = /^(\d+[dhms])+$/;
+
+/** The problem of an idle stop, or null. Empty is the global default; `off` and `0` never stop the agent. */
+export function idleStopProblem(s: string): string | null {
+  const v = s.trim();
+  if (!v || v === "off" || v === "0" || DURATION_RE.test(v)) return null;
+  return `Idle stop "${v}": use off, 0, or a duration such as 30m, 1h30m, or 90s (units d, h, m, s).`;
+}
+
+/** The idle stop as the agent page shows it. `fallback` is the global default from the health. */
+export function idleStopText(value: string | undefined, fallback: string | undefined): string {
+  const v = value?.trim();
+  if (!v) return fallback ? `default (${fallback === "off" ? "never" : fallback})` : "default";
+  return v === "off" || v === "0" ? "never" : `after ${v} idle`;
+}
+
 /** Problems the daemon would refuse with 422. Empty when the form is fine. */
 export function validateAgentForm(v: AgentFormValues): string[] {
   const out: string[] = [];
@@ -92,6 +112,8 @@ export function validateAgentForm(v: AgentFormValues): string[] {
   if (sp) out.push(sp);
   const pp = personaProblem(v.persona);
   if (pp) out.push(pp);
+  const ip = idleStopProblem(v.idle_stop);
+  if (ip) out.push(ip);
   return out;
 }
 
@@ -120,6 +142,8 @@ export function formToDef(v: AgentFormValues): AgentDef {
   const persona = opt(v.persona);
   if (persona) def.persona = persona;
   if (v.skills.length) def.skills = v.skills;
+  const idleStop = opt(v.idle_stop);
+  if (idleStop) def.idle_stop = idleStop;
   return def;
 }
 
@@ -134,7 +158,7 @@ const changed = (now: string, before: string): string | null | undefined => {
 
 /**
  * Only the fields that changed. `PATCH` cannot change name, project, or
- * roles. An emptied subscription, model, prompt, system prompt, or persona goes as
+ * roles. An emptied subscription, model, prompt, system prompt, persona, or idle stop goes as
  * `null`, which clears it (docs/api.md §6.1).
  */
 export function formToPatch(original: Agent, v: AgentFormValues): AgentPatch {
@@ -165,6 +189,9 @@ export function formDiff(before: AgentFormValues, v: AgentFormValues): AgentPatc
   if (v.restart !== before.restart) patch.restart = v.restart;
   // `[]` clears the skills.
   if (!sameList(v.skills, before.skills)) patch.skills = v.skills;
+  // An emptied idle stop goes as null: back to the global default.
+  const idleStop = changed(v.idle_stop, before.idle_stop);
+  if (idleStop !== undefined) patch.idle_stop = idleStop;
   const policy = { targets: v.targets, mail_to: parseList(v.mail_to), cross_project: parseList(v.cross_project) };
   const oldPolicy = { targets: before.targets, mail_to: parseList(before.mail_to), cross_project: parseList(before.cross_project) };
   if (!sameList(policy.targets, oldPolicy.targets) || !sameList(policy.mail_to, oldPolicy.mail_to) || !sameList(policy.cross_project, oldPolicy.cross_project)) patch.policy = policy;

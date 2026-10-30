@@ -138,6 +138,7 @@ fn has_spec_flags(a: &TemplateSpecArgs) -> bool {
         || a.system_prompt.no_system_prompt
         || a.system_prompt.persona.is_some()
         || a.restart.is_some()
+        || a.idle_stop.is_some()
         || !a.roles.is_empty()
         || !a.targets.is_empty()
         || !a.mail_to.is_empty()
@@ -171,6 +172,7 @@ fn spec_of(
         ("model", &a.model),
         ("prompt", &a.prompt),
         ("restart", &a.restart),
+        ("idle_stop", &a.idle_stop),
     ] {
         if let Some(v) = v {
             flags.insert(k.into(), v.clone().into());

@@ -3,7 +3,7 @@
 // picks a template for an agent, and the order of the template chooser. Pure.
 
 import type { AgentCreate, AgentDef, AgentPolicy, AgentTemplate, NewTemplate, TemplatePatch, TemplateResolved, TemplateSpec } from "../../api/types";
-import { emptyAgentForm, formDiff, formToDef, parseList, personaProblem, sameList, systemPromptProblem, type AgentFormValues } from "../agents/form";
+import { emptyAgentForm, formDiff, formToDef, idleStopProblem, parseList, personaProblem, sameList, systemPromptProblem, type AgentFormValues } from "../agents/form";
 
 /** The template form: the template's own fields and the agent fields of its spec. */
 export interface TemplateFormValues {
@@ -34,6 +34,7 @@ export function specToForm(spec: TemplateSpec, project = "", name = ""): AgentFo
     cross_project: (spec.policy?.cross_project ?? []).join(", "),
     restart: spec.restart ?? "on-failure",
     skills: spec.skills ?? [],
+    idle_stop: spec.idle_stop ?? "",
   };
 }
 
@@ -64,6 +65,8 @@ export function validateTemplateForm(v: TemplateFormValues): string[] {
   if (sp) out.push(sp);
   const pp = personaProblem(v.agent.persona);
   if (pp) out.push(pp);
+  const ip = idleStopProblem(v.agent.idle_stop);
+  if (ip) out.push(ip);
   return out;
 }
 

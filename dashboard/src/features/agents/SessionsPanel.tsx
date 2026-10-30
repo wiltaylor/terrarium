@@ -38,7 +38,7 @@ export function SessionsPanel(props: {
           <SessionTable groups={groups()} onOpen={(g) => props.onOpen(g.session.id)} onOpenConversation={props.onOpenConversation} />
           <LoadMore hasMore={sessions.hasMore()} loading={sessions.loading()} onMore={sessions.loadMore} />
           <Show when={!sessions.loading() && !sessions.initial() && groups().length === 0}>
-            <p class="muted small">No sessions yet. Start the agent.</p>
+            <p class="muted small">No sessions yet. A turn or mail wakes the agent.</p>
           </Show>
         </>
       }

@@ -28,7 +28,7 @@ export function AgentCard(props: { agent: Agent; now: number }) {
         <span class="row" style={{ gap: "4px", "flex-wrap": "wrap", "justify-content": "flex-end" }}>
           <LeaseChips agentId={a().id} now={props.now} />
           <HoldBadge agentId={a().id} now={props.now} />
-          <StatusBadge status={a().status} waitingOn={a().waiting_on} />
+          <StatusBadge agent={a()} />
         </span>
       </div>
       <div class="row">
@@ -84,15 +84,17 @@ export function AgentsPage() {
   const [creating, setCreating] = createSignal(false);
   // The "holds <target>" chips: the leases older than the event backlog.
   onMount(() => void leases.loadAll());
-  const [status, setStatus] = createSignal<AgentStatus | "">("");
-  const shown = () => agents.inProject(route.project).filter((a) => !status() || a.status === status());
+  // `paused` is not a status: a paused agent is `stopped` with the pause flag.
+  const [status, setStatus] = createSignal<AgentStatus | "paused" | "">("");
+  const shown = () => agents.inProject(route.project).filter((a) => !status() || (status() === "paused" ? a.paused : a.status === status()));
 
   return (
     <>
       <PageHead title={`Agents · ${route.project}`}>
-        <select value={status()} onChange={(e) => setStatus(e.currentTarget.value as AgentStatus | "")} aria-label="Status filter">
+        <select value={status()} onChange={(e) => setStatus(e.currentTarget.value as AgentStatus | "paused" | "")} aria-label="Status filter">
           <option value="">Any status</option>
           <For each={AGENT_STATUSES}>{(s) => <option value={s}>{s}</option>}</For>
+          <option value="paused">paused</option>
         </select>
         <button onClick={() => agents.refresh()}>Refresh</button>
         <button class="primary" onClick={() => setCreating(true)}>

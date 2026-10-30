@@ -25,6 +25,8 @@ pub fn routes() -> Router<Shared> {
         .route("/agents/{id}/start", post(start))
         .route("/agents/{id}/stop", post(stop))
         .route("/agents/{id}/restart", post(restart))
+        .route("/agents/{id}/pause", post(pause))
+        .route("/agents/{id}/unpause", post(unpause))
         .route("/agents/{id}/send", post(send))
         .route("/agents/{id}/keys", post(keys))
         .route("/agents/{id}/answer", post(answer))
@@ -337,6 +339,7 @@ async fn update(
                     "skills": patch.skills,
                     "policy": patch.policy,
                     "restart": patch.restart,
+                    "idle_stop": patch.idle_stop,
                 }),
             )?;
             agents::get(t, &id)
@@ -454,6 +457,7 @@ pub(super) async fn start(
 ) -> ApiResult<(StatusCode, Json<AgentView>)> {
     let a = load(&state, &actor, id).await?;
     policy::admin_project(&actor, &a.agent.project, "starting an agent")?;
+    refuse_paused(&a, "start")?;
     if state
         .supervisor
         .status(agent_id(&a))
@@ -486,9 +490,131 @@ pub(super) async fn start(
             .await?;
         return Err(supervisor_error(e));
     }
+    // A start is a wake: the queued turns go to the agent (PLAN §18).
+    crate::lifecycle::wake_soon(&state, agent_id(&a), "start");
     let id = a.agent.id.to_string();
     let v = state.db.read(move |c| agents::get(c, &id)).await?;
     Ok((StatusCode::ACCEPTED, Json(v)))
+}
+
+/// `409 conflict` for a paused agent: a start or a restart needs an
+/// unpause first (PLAN §18).
+fn refuse_paused(a: &AgentView, verb: &str) -> ApiResult<()> {
+    if a.paused {
+        return Err(ApiError::new(
+            Code::Conflict,
+            format!(
+                "agent `{}/{}` is paused; unpause it before a {verb} \
+                 (`terrarium agent unpause {}`)",
+                a.agent.project, a.agent.name, a.agent.name
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// `POST /api/agents/{id}/pause`: set the `paused` flag, and stop the
+/// agent when it runs (status reason `paused`). While the flag is set,
+/// nothing wakes the agent; its turns and mail wait (PLAN §18). The same
+/// rights as `stop`. A second pause changes nothing.
+pub(super) async fn pause(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(id): Path<String>,
+) -> ApiResult<(StatusCode, Json<AgentView>)> {
+    let a = load(&state, &actor, id).await?;
+    policy::admin_project(&actor, &a.agent.project, "pausing an agent")?;
+    set_paused(&state, &actor, &a, true).await?;
+    let live = state
+        .supervisor
+        .status(agent_id(&a))
+        .await
+        .is_some_and(|s| s.is_live() || s == AgentStatus::Restarting);
+    if live {
+        let id = agent_id(&a);
+        state
+            .lifecycle
+            .expect_stop(id, crate::lifecycle::REASON_PAUSED);
+        let result = match actor.agent() {
+            Some(by) => {
+                let label = format!("agent:{}/{}", by.project, by.name);
+                state
+                    .supervisor
+                    .stop_by(id, terrarium_runner::StoppedBy::Actor(label))
+                    .await
+            }
+            None => state.supervisor.stop(id).await,
+        };
+        match result {
+            Ok(()) => {}
+            Err(SupervisorError::NotRunning(_)) => state.lifecycle.forget_stop(id),
+            Err(e) => {
+                state.lifecycle.forget_stop(id);
+                return Err(supervisor_error(e));
+            }
+        }
+    }
+    let id = a.agent.id.to_string();
+    let v = state.db.read(move |c| agents::get(c, &id)).await?;
+    Ok((StatusCode::ACCEPTED, Json(v)))
+}
+
+/// `POST /api/agents/{id}/unpause`: clear the `paused` flag. An agent with
+/// queued work wakes now; else it stays stopped until its next work
+/// (PLAN §18). A second unpause changes nothing.
+pub(super) async fn unpause(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(id): Path<String>,
+) -> ApiResult<(StatusCode, Json<AgentView>)> {
+    let a = load(&state, &actor, id).await?;
+    policy::admin_project(&actor, &a.agent.project, "unpausing an agent")?;
+    set_paused(&state, &actor, &a, false).await?;
+    crate::lifecycle::wake_with_work(&state, Some(agent_id(&a)), "unpause").await;
+    let id = a.agent.id.to_string();
+    let v = state.db.read(move |c| agents::get(c, &id)).await?;
+    Ok((StatusCode::ACCEPTED, Json(v)))
+}
+
+/// Write the `paused` flag. A change writes the audit row `agent.pause` or
+/// `agent.unpause` and the event `agent.paused` or `agent.unpaused`.
+async fn set_paused(state: &Shared, actor: &Actor, a: &AgentView, paused: bool) -> ApiResult<()> {
+    let (id, project, name) = (
+        a.agent.id.to_string(),
+        a.agent.project.clone(),
+        a.agent.name.clone(),
+    );
+    state
+        .db
+        .write(actor.label(), move |t| {
+            let before = agents::set_paused(t, &id, paused)?;
+            if before == paused {
+                return Ok(());
+            }
+            let (verb, kind) = if paused {
+                ("pause", "agent.paused")
+            } else {
+                ("unpause", "agent.unpaused")
+            };
+            let queued = agents::queued_count(t, &id)?;
+            t.audit(
+                &format!("agent.{verb}"),
+                &id,
+                Some(&project),
+                json!({"queued": queued}),
+            )?;
+            t.emit(
+                crate::events::EventDraft::new(
+                    kind,
+                    format!("{name}: {kind}"),
+                    json!({"paused": paused, "queued": queued}),
+                )
+                .agent(id.clone(), name.clone())
+                .project(project.clone()),
+            )?;
+            Ok(())
+        })
+        .await
 }
 
 pub(super) async fn stop(
@@ -549,6 +675,7 @@ pub(super) async fn restart(
 ) -> ApiResult<(StatusCode, Json<AgentView>)> {
     let a = load(&state, &actor, id).await?;
     policy::admin_project(&actor, &a.agent.project, "restarting an agent")?;
+    refuse_paused(&a, "restart")?;
     let live = state
         .supervisor
         .status(agent_id(&a))
@@ -654,20 +781,49 @@ pub(super) async fn send_as(
             crate::store::transcripts::record_turn(t, &id, &logged)
         })
         .await?;
-    state
+    // An agent that does not run (stopped, paused, in `error`) gets the
+    // turn at its next wake (PLAN §18): the turn waits in the store, and a
+    // wake starts the agent unless it may not wake.
+    let runs = state
         .supervisor
-        .send_turn(agent_id(&a), text)
+        .status(agent_id(&a))
         .await
-        .map_err(supervisor_error)?;
+        .is_some_and(|s| s.is_live() || s == AgentStatus::Restarting);
+    let queued = if runs {
+        match state.supervisor.send_turn(agent_id(&a), text.clone()).await {
+            Ok(()) => false,
+            // It stopped meanwhile.
+            Err(SupervisorError::NotRunning(_)) => true,
+            Err(e) => return Err(supervisor_error(e)),
+        }
+    } else {
+        true
+    };
     let id = a.agent.id.to_string();
     let project = a.agent.project.clone();
     let len = body.text.len();
     state
         .db
         .write(actor.label(), move |t| {
-            t.audit("agent.send", &id, Some(&project), json!({"bytes": len}))
+            if queued {
+                agents::queue_turn(t, &id, &text)?;
+            }
+            let mut detail = json!({"bytes": len});
+            if queued {
+                detail["queued"] = json!(true);
+            }
+            t.audit("agent.send", &id, Some(&project), detail)
         })
         .await?;
+    if queued {
+        if !a.paused {
+            crate::lifecycle::wake(state, agent_id(&a), "turn").await;
+        }
+        return Ok((
+            StatusCode::ACCEPTED,
+            Json(json!({"accepted": true, "queued": true})),
+        ));
+    }
     Ok((StatusCode::ACCEPTED, Json(json!({"accepted": true}))))
 }
 

@@ -1172,7 +1172,10 @@ impl Executor {
         self.sessions.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn live_of(&self, agent: &str) -> usize {
+    /// The exec sessions of agent `agent` (a ULID) that have not ended:
+    /// its shells and its `terrarium run` jobs. They keep the agent from
+    /// an idle stop (`crate::lifecycle`).
+    pub fn live_of(&self, agent: &str) -> usize {
         self.table()
             .values()
             .filter(|s| s.owner.as_deref() == Some(agent) && !s.is_done())

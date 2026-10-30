@@ -917,6 +917,11 @@ struct Slot {
     recap: Option<String>,
     pointer: Pointer,
     pointer_busy: bool,
+    /// Turns that came before the first idle of a launch (for example the
+    /// queued turns of a wake, PLAN §18). They go out at the first idle,
+    /// after the recap turn. A stop before then keeps them for the next
+    /// launch.
+    turns: Vec<String>,
     /// The harness version that the last launch resolved; `None` when the
     /// harness came from `PATH`.
     harness_version: Option<String>,
@@ -948,6 +953,7 @@ impl Slot {
             recap: None,
             pointer: Pointer::default(),
             pointer_busy: false,
+            turns: Vec::new(),
             harness_version: None,
             account: None,
             bound: Vec::new(),
@@ -957,6 +963,12 @@ impl Slot {
 
     fn live(&self) -> bool {
         self.runner.is_some() || self.phase == Phase::Restarting
+    }
+
+    /// Not down: it runs, launches, or waits for a restart. Pointer items
+    /// for it go into its pointer, which goes out at its next idle.
+    fn up(&self) -> bool {
+        self.runner.is_some() || !matches!(self.phase, Phase::Down(_))
     }
 }
 
@@ -2276,41 +2288,52 @@ impl RunnerSupervisor {
         self.deliver_pending(id);
     }
 
-    /// Type the recap turn, else the pending pointer. Nothing goes out
-    /// while a quota hold lasts.
+    /// Type the recap turn and the early turns, else the pending pointer.
+    /// Nothing goes out while a quota hold lasts.
     fn deliver_pending(&self, id: AgentId) {
         if self.held(id).is_some() {
             return;
         }
-        let recap = {
+        let (recap, turns, runner) = {
             let mut slots = lock(&self.inner.slots);
             let Some(slot) = slots.get_mut(&id) else {
                 return;
             };
-            match slot.runner.clone() {
-                Some(r) => slot.recap.take().map(|t| (t, r)),
-                None => None,
-            }
+            let Some(runner) = slot.runner.clone() else {
+                return;
+            };
+            (slot.recap.take(), std::mem::take(&mut slot.turns), runner)
         };
-        if let Some((mut text, runner)) = recap {
-            let me = self.clone();
-            tokio::spawn(async move {
-                // The open questions of the agent, and the answers since
-                // its last turn (PLAN §12e).
-                if let Some(q) = me.questions_recap(id).await {
-                    text.push_str("\n\n");
-                    text.push_str(&q);
-                }
-                let text = turn_tag::render(&TurnSource::system(SystemKind::Recap), &text);
-                me.log_delivery(id, &text).await;
-                let delivery = runner.type_turn(text);
-                if let Err(e) = delivery.wait().await {
-                    warn!(agent = %id, "the recap turn was not delivered: {e}");
-                }
-            });
+        if recap.is_none() && turns.is_empty() {
+            self.maybe_push(id);
             return;
         }
-        self.maybe_push(id);
+        let me = self.clone();
+        tokio::spawn(async move {
+            // The recap goes first; the runner types its turns in order.
+            let recap = match recap {
+                Some(mut text) => {
+                    // The open questions of the agent, and the answers
+                    // since its last turn (PLAN §12e).
+                    if let Some(q) = me.questions_recap(id).await {
+                        text.push_str("\n\n");
+                        text.push_str(&q);
+                    }
+                    let text = turn_tag::render(&TurnSource::system(SystemKind::Recap), &text);
+                    me.log_delivery(id, &text).await;
+                    Some(runner.type_turn(text))
+                }
+                None => None,
+            };
+            for text in turns {
+                type_detached(id, &runner, text);
+            }
+            if let Some(delivery) = recap
+                && let Err(e) = delivery.wait().await
+            {
+                warn!(agent = %id, "the recap turn was not delivered: {e}");
+            }
+        });
     }
 
     /// The questions part of a recap turn ([`crate::store::questions::recap`]).
@@ -2554,11 +2577,12 @@ impl RunnerSupervisor {
         }
     }
 
-    /// Queue a pointer item for a running agent, then push if it is idle.
+    /// Queue a pointer item for an agent that is up (it runs, or it
+    /// launches: the launch keeps the item), then push if it is idle.
     fn add_pointer(&self, id: AgentId, add: impl FnOnce(&mut Pointer)) {
         {
             let mut slots = lock(&self.inner.slots);
-            let Some(slot) = slots.get_mut(&id).filter(|s| s.runner.is_some()) else {
+            let Some(slot) = slots.get_mut(&id).filter(|s| s.up()) else {
                 return;
             };
             add(&mut slot.pointer);
@@ -2573,12 +2597,12 @@ impl RunnerSupervisor {
         self.add_parked_pointer(id, |p| p.add_card(c));
     }
 
-    /// Queue a pointer item; an agent that does not run keeps it parked
-    /// until its next launch.
-    fn add_parked_pointer(&self, id: AgentId, add: impl FnOnce(&mut Pointer)) {
+    /// Queue a pointer item; an agent that is down keeps it parked until
+    /// its next launch. True: the item is parked.
+    fn add_parked_pointer(&self, id: AgentId, add: impl FnOnce(&mut Pointer)) -> bool {
         {
             let mut slots = lock(&self.inner.slots);
-            match slots.get_mut(&id).filter(|s| s.runner.is_some()) {
+            match slots.get_mut(&id).filter(|s| s.up()) {
                 Some(slot) => add(&mut slot.pointer),
                 None => {
                     let rows = {
@@ -2594,11 +2618,12 @@ impl RunnerSupervisor {
                         self.stored_rows(id, changed)
                     };
                     self.store_parked(rows);
-                    return;
+                    return true;
                 }
             }
         }
         self.maybe_push(id);
+        false
     }
 
     /// The `pending_pointers` rows of `items`, each with a new `id`. Called
@@ -3067,8 +3092,14 @@ impl RunnerSupervisor {
                 None => by_lead.push((id, vec![item])),
             }
         }
+        // A lead that is down keeps the nudge for its next launch, and
+        // wakes (PLAN §18).
         for (id, items) in by_lead {
-            self.add_pointer(id, |p| items.into_iter().for_each(|i| p.add_lead(i)));
+            if self.add_parked_pointer(id, |p| items.into_iter().for_each(|i| p.add_lead(i)))
+                && let Some(state) = self.state()
+            {
+                crate::lifecycle::wake_soon(&state, id, "nudge");
+            }
         }
     }
 
@@ -3671,6 +3702,15 @@ impl Supervisor for RunnerSupervisor {
                 info!(agent = %agent, "a quota hold lasts; the turn waits");
                 h.waiting.push(text);
                 return Ok(());
+            }
+            // Before the first idle of the launch: the turn goes after the
+            // recap turn.
+            {
+                let mut slots = lock(&self.inner.slots);
+                if let Some(slot) = slots.get_mut(&agent).filter(|s| !s.reached_idle) {
+                    slot.turns.push(text);
+                    return Ok(());
+                }
             }
             type_detached(agent, &runner, text);
             Ok(())

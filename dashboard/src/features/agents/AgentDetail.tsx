@@ -22,12 +22,17 @@ import { AGENT_TABS, agentViewQuery, parseAgentView, type AgentTab } from "./ses
 import { RoleBadges } from "./AgentsPage";
 import { appliedText, changeSubscription, loginText, noSubscriptionAccount, noSubscriptionAccountText, normalizePool, samePool, swapTargets } from "./subscription";
 import { PoolPicker, SubscriptionSelect } from "./SubscriptionFields";
-import { SystemPromptField } from "./AgentFields";
-import { effectivePersona, systemPromptProblem } from "./form";
+import { SystemPromptField, useGlobalIdleStop } from "./AgentFields";
+import { effectivePersona, idleStopText, systemPromptProblem } from "./form";
 import { WaitsPanel, WatchesPanel } from "./Waits";
 import { QuestionsPanel } from "../inbox/QuestionsPanel";
 import { SkillsPicker } from "../skills/SkillsPicker";
 import { RESTART_NOTE, skillsLabel } from "../skills/model";
+import { lifecycleActions, type LifecycleAction } from "../../lib/lifecycle";
+
+/** The API call of a lifecycle button. Resume clears the pause (`unpause`). */
+const lifecycleCall = (kind: LifecycleAction["kind"], id: string) =>
+  kind === "pause" ? api.agents.pause(id) : kind === "resume" ? api.agents.unpause(id) : api.agents.restart(id);
 
 /**
  * The page of an agent that the daemon removed. The back link opens the agents
@@ -44,7 +49,7 @@ function RemovedAgent(props: { project?: string }) {
   );
 }
 
-/** Statuses with a live session: the PTY can attach, `stop` works. */
+/** Statuses with a live session: the PTY can attach. */
 export const RUNNING: AgentStatus[] = ["starting", "idle", "waiting", "working", "blocked", "restarting"];
 
 export default function AgentDetail() {
@@ -65,6 +70,7 @@ export default function AgentDetail() {
   const [fetched] = createResource(id, (key) => api.agents.get(key).catch((e: unknown) => (setError(e), null)));
   const agent = (): Agent | undefined => agents.byId(id()) ?? agents.byId(fetched()?.id ?? "") ?? fetched() ?? undefined;
   const running = () => RUNNING.includes(agent()?.status ?? "stopped");
+  const globalIdleStop = useGlobalIdleStop();
   // The daemon removed the agent while this page shows it (an `agent_removed`
   // event), or the GET found no agent (404): the page says so, not a raw error.
   const [removedKey, setRemovedKey] = createSignal<string | null>(null);
@@ -83,11 +89,14 @@ export default function AgentDetail() {
 
   const act = async (label: string, fn: () => Promise<unknown>) => {
     try {
-      await fn();
+      const r = await fn();
       setError(null);
       // 202: the body shows the old status. The events stream brings the change.
-      setNotice(`${label} requested. The status follows from the event stream.`);
+      const queued = !!r && typeof r === "object" && "queued" in r && r.queued === true;
+      setNotice(queued ? `${label} queued. ${agent()?.paused ? "The agent is paused: it runs the turn after you resume it." : "The agent wakes to run it."}` : `${label} requested. The status follows from the event stream.`);
       setTimeout(() => setNotice(null), 4000);
+      // The pause flag and the queued count do not come in status events: read the list again.
+      agents.refreshSoon(300);
     } catch (e) {
       setError(e);
     }
@@ -119,17 +128,18 @@ export default function AgentDetail() {
           <PageHead
             title={
               <span class="row">
-                {a().name} <StatusBadge status={a().status} waitingOn={a().waiting_on} /> <HoldBadge agentId={a().id} long /> <LeaseChips agentId={a().id} />
+                {a().name} <StatusBadge agent={a()} /> <HoldBadge agentId={a().id} long /> <LeaseChips agentId={a().id} />
               </span>
             }
           >
-            <button onClick={() => act("Start", () => api.agents.start(a().id))} disabled={running()}>
-              Start
-            </button>
-            <button onClick={() => act("Restart", () => api.agents.restart(a().id))}>Restart</button>
-            <button class="danger" onClick={() => act("Stop", () => api.agents.stop(a().id))} disabled={!running()}>
-              Stop
-            </button>
+            {/* No Start and no Stop: work wakes the agent, and the idle timeout stops it. */}
+            <For each={lifecycleActions(a())}>
+              {(b) => (
+                <button onClick={() => act(b.label, () => lifecycleCall(b.kind, a().id))} disabled={b.disabled} title={b.title}>
+                  {b.label}
+                </button>
+              )}
+            </For>
             <button onClick={() => setEditing(true)}>Edit</button>
             <button onClick={() => setSaving(true)}>Save as template</button>
             <ConfirmButton label="Delete" confirmLabel={running() ? "Yes, stop and delete" : "Yes, delete"} onConfirm={() => remove(a())} />
@@ -186,12 +196,19 @@ export default function AgentDetail() {
               </dd>
               <dt>Restart</dt>
               <dd>{a().restart ?? "on-failure"}</dd>
+              <dt>Idle stop</dt>
+              <dd>
+                {idleStopText(a().idle_stop, globalIdleStop())}
+                <Show when={a().status_reason && a().status === "stopped"}>
+                  <span class="muted small"> · last stop: {a().status_reason}</span>
+                </Show>
+              </dd>
               <Show when={a().template}>
                 {(t) => (
                   <>
                     <dt>Template</dt>
                     <dd>
-                      <A href="/templates">{t().name}</A> <span class="chip">{t().project ?? "global"}</span> <span class="muted small">revision {t().revision} at the create; a copy, not a live link</span>
+                      <A href={t().project ? `/p/${encodeURIComponent(t().project!)}/settings/templates` : "/settings/templates"}>{t().name}</A> <span class="chip">{t().project ?? "global"}</span> <span class="muted small">revision {t().revision} at the create; a copy, not a live link</span>
                     </dd>
                   </>
                 )}
@@ -243,8 +260,14 @@ export default function AgentDetail() {
                 void act("Turn", () => api.agents.send(a().id, text)).then(() => setTurn(""));
               }}
             >
-              <input style={{ flex: 1 }} placeholder={running() ? "Type a turn for this agent…" : "Start the agent to send a turn"} value={turn()} onInput={(e) => setTurn(e.currentTarget.value)} aria-label="Turn text" />
-              <button class="primary" type="submit" disabled={!running()}>
+              <input
+                style={{ flex: 1 }}
+                placeholder={a().paused ? "The agent is paused: a turn waits until you resume it" : running() ? "Type a turn for this agent…" : "Type a turn: the agent wakes to run it"}
+                value={turn()}
+                onInput={(e) => setTurn(e.currentTarget.value)}
+                aria-label="Turn text"
+              />
+              <button class="primary" type="submit">
                 Send turn
               </button>
             </form>
@@ -682,8 +705,8 @@ function SkillsCell(props: { agent: Agent; running: boolean; onError: (e: unknow
           >
             Edit
           </button>
-          <A class="small" href="/skills">
-            Skills page
+          <A class="small" href="/settings/skills">
+            Skills in Settings
           </A>
         </span>
       </Show>

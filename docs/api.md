@@ -280,6 +280,7 @@ gives them to the routers and the mail code.
 |---|---|---|---|
 | `TERRARIUM_PUBLIC_URL` | `--public-url` | unset (mail: `http://localhost:8080`) | Mail links, `Version.url`, the cookie `Origin` check, CORS on `/a/...`. |
 | `TERRARIUM_MAIL_LOOP_LIMIT` | none | `6` | The mail loop guard (§6, PLAN §12): the agent-to-agent messages a thread can have since the last operator or project-inbox message before new agent mail on it types no pointer. The daemon reads it once. |
+| `TERRARIUM_IDLE_STOP` | none | `10m` | The idle stop of an agent that sets no `idle_stop` (§6.2, PLAN §18): a duration (`30m`, `1h30m`), or `off` (also `0`). The daemon reads it once. |
 | `TERRARIUM_ARTIFACT_LISTEN` | `--artifact-listen` | `0.0.0.0:8081` | The artifact origin listener. Empty: none, and the dashboard port serves `/a/...`. |
 | `TERRARIUM_ARTIFACT_PUBLIC_URL` | `--artifact-public-url` | unset | The artifact origin in signed URLs and the CSP. |
 | `TERRARIUM_WS_QUERY_TOKEN` | `--ws-query-token` | `0` | `1`: take `?token=` on an upgrade. |
@@ -467,11 +468,12 @@ Limits that always hold:
 
 ```json
 {"status":"ok","version":"0.1.0","uptime":1,"started_at":"2026-10-24T06:36:53.143044982Z",
- "definitions":{"projects":1,"agents":1,"targets":0,"subscriptions":0}}
+ "definitions":{"projects":1,"agents":1,"targets":0,"subscriptions":0},"idle_stop":"10m"}
 ```
 
 `uptime` is in seconds. `definitions` counts the files loaded at the last
-start or reload.
+start or reload. `idle_stop` is the idle stop of an agent that sets none
+(`TERRARIUM_IDLE_STOP`, §6.2): `off`, or a duration such as `10m`.
 
 ### `GET /api/harnesses`
 
@@ -1594,6 +1596,10 @@ An agent is the core `Agent` with bookkeeping fields:
 | `skills_restart` | `true` when the live agent runs with other skills than its `skills` now picks from the library (the list or a skill changed after its start). A restart applies them. Absent when false. |
 | `roles` | Roles above `member`: `project_admin`, `sysadmin`. |
 | `status` | `starting`, `idle`, `waiting`, `working`, `blocked`, `error`, `stopped`, `restarting`. `waiting`: the turn ended, and the agent has one or more open waits (§6.7). `idle`: the turn ended, and the agent has no open wait. |
+| `status_reason` | The reason of the last status change: `idle` after an idle stop, `paused` after the stop of a pause, `stopped`, an exit, or an error text. Absent when not known. |
+| `paused` | `true` while the agent is paused (§6.2): nothing wakes it, and its work waits. Always present. |
+| `queued` | The work that waits for the agent: queued turns, `queued` mail, and card and nudge lines (§6.2). Absent when 0. |
+| `idle_stop` | The idle stop of the agent (§6.2): `off`, or a duration such as `30m`. Absent: the daemon's `TERRARIUM_IDLE_STOP`. |
 | `waits` | The number of open waits (§6.7). Absent when it is 0. |
 | `waiting_on` | What the agent waits on, in one short line: the summaries of the oldest 3 open waits and a count of the others. Absent when the agent has no open wait. |
 | `session` | The harness session ID of the current session, when known. |
@@ -1609,7 +1615,7 @@ An agent is the core `Agent` with bookkeeping fields:
 | `GET /api/agents?project=` | | `200` agents by ID | read; an agent defaults to its project |
 | `POST /api/agents` | an agent definition, or `template` and the fields that differ (§21.3) | `201` agent | project_admin of `project`; some `policy` entries need sysadmin (below) |
 | `GET /api/agents/{id}` | | `200` agent, with `subscription_detail` (below) | read |
-| `PATCH /api/agents/{id}` | `{"harness"?, "subscription"?, "subscription_pool"?, "model"?, "prompt"?, "system_prompt"?, "persona"?, "skills"?, "policy"?, "restart"?, "new_session_on_prompt_change"?}` | `200` agent | project_admin; some `policy` entries need sysadmin (below) |
+| `PATCH /api/agents/{id}` | `{"harness"?, "subscription"?, "subscription_pool"?, "model"?, "prompt"?, "system_prompt"?, "persona"?, "skills"?, "policy"?, "restart"?, "idle_stop"?, "new_session_on_prompt_change"?}` | `200` agent | project_admin; some `policy` entries need sysadmin (below) |
 | `DELETE /api/agents/{id}` | `?confirm=true` when live; `?keep_workspace=true` | `204`; emits `agent_removed` (§9) | project_admin |
 
 `DELETE` stops a live agent, waits for it to end (up to 10 s), and moves
@@ -1686,9 +1692,16 @@ It is absent when the harness keeps its own default. The field has no
 secret and no quota numbers (those are in `GET /api/usage/me`).
 
 `PATCH` changes only the fields in the body. Send `null` for
-`subscription`, `model`, `prompt`, or `system_prompt` to clear it
-(`{"subscription": null}`). An empty `system_prompt` also clears it.
+`subscription`, `model`, `prompt`, `system_prompt`, or `idle_stop` to clear
+it (`{"subscription": null}`). An empty `system_prompt` also clears it.
 `null` for the other fields changes nothing.
+
+`idle_stop` (in `POST`, `PATCH`, a template spec, an agent file, and a
+fleet entry): how long the agent may rest before the idle stop (§6.2).
+`off` (or `0`) never stops it; a duration has one or more parts with the
+units `d`, `h`, `m`, and `s` (`30m`, `1h30m`, `90s`). A number is
+seconds. Another value is `400 bad_request`. Absent or `null`: the daemon's
+`TERRARIUM_IDLE_STOP`.
 
 `subscription_pool` (in `POST` and `PATCH`): each member must exist, the
 agent's harness must be able to spend it, and all members and the current
@@ -1729,10 +1742,12 @@ lists the leases that the agent holds.
 
 | Endpoint | Body | Answer |
 |---|---|---|
-| `POST /api/agents/{id}/start` | none | `202` agent |
+| `POST /api/agents/{id}/start` | none | `202` agent. A wake now. A paused agent gets `409 conflict`. |
 | `POST /api/agents/{id}/stop` | none | `202` agent. Also on an agent in `error`: it becomes `stopped`. |
-| `POST /api/agents/{id}/restart` | none | `202` agent. Also on an agent in `error`: a new launch. |
-| `POST /api/agents/{id}/send` | `{"text": "Run the tests", "raw"?: false}` | `202 {"accepted": true}` (`"raw": true` with `raw`) |
+| `POST /api/agents/{id}/restart` | none | `202` agent. Also on an agent in `error`: a new launch. A paused agent gets `409 conflict`. |
+| `POST /api/agents/{id}/pause` | none | `202` agent, `paused: true`. A running agent stops (reason `paused`). |
+| `POST /api/agents/{id}/unpause` | none | `202` agent, `paused: false`. It wakes when work waits. |
+| `POST /api/agents/{id}/send` | `{"text": "Run the tests", "raw"?: false}` | `202 {"accepted": true}` (`"raw": true` with `raw`; `"queued": true` when the agent does not run) |
 | `POST /api/agents/{id}/keys` | `{"keys": ["esc", "down", "enter"]}` | `202 {"accepted": true, "keys": [...]}` (§6.5) |
 | `POST /api/agents/{id}/attachments` | the raw image, or `{"data_base64"}` | `201 {"path", "name", "bytes", "content_type"}` (below) |
 | `POST /api/agents/{id}/answer` | `{"request_id", "answer"}` or `{"text"}` | `202 {"accepted": true}` |
@@ -1759,8 +1774,45 @@ lead with the PTY rights. The answer shows the agent when
 the daemon accepted the call; watch the events (§8) for the status
 changes.
 
+**Wake, idle stop, and pause (PLAN §18).** An operator or a lead does not
+need `start` and `stop`:
+
+- **Wake.** Work for an agent that does not run starts it, with resume of
+  its last harness session: mail to the agent (also the result mail of a
+  wait, a watch mail, and a question answer), a `send` (also a schedule
+  `turn` action), a card that another actor assigns to it or its
+  unblocked card, and a lead nudge. The work waits in the store (the
+  `queued` mail, the queued turns, the card and nudge lines) and goes out
+  when the harness is ready: the queued turns first, in order, after a
+  recap turn; then one pointer turn. A lease line waits for the next start
+  but does not wake the agent. One wake at a time runs for each agent. The
+  wake writes an `agent.woken` event (§9) with its `cause`.
+- **No wake** for a paused agent, an agent in `error`, or an agent with a
+  quota or budget hold (§16.6): the work waits. The end of the last hold,
+  an unpause, and the daemon start wake an agent with work. A wake whose
+  start fails sets `error` (reason `wake failed: ...`); then no work wakes
+  the agent until the operator clears `error` (`stop`, `start`, or
+  `restart`).
+- **Idle stop.** An agent that is `idle` or `waiting` for its `idle_stop`
+  (else `TERRARIUM_IDLE_STOP`, default `10m`) stops as `stop` does. The
+  status is `stopped`, `status_reason` is `idle`, and the session ends
+  with the outcome `idle`. The restart policy does not apply. Not stopped:
+  an agent with a live exec session or `terrarium run` job, an open
+  `process` wait, queued work, or a wake on the way. A target display
+  operation of the agent starts its clock again. Open waits, watches,
+  leases, and grants stay; an ephemeral target goes down as at any stop.
+- **Pause.** `pause` sets `paused` and stops a running agent gracefully
+  (reason `paused`). While it is paused, nothing wakes it; `send` answers
+  `202 {"accepted": true, "queued": true}` and the turn waits. `start` and
+  `restart` answer `409 conflict`. `unpause` clears the flag and wakes the
+  agent when work waits. A second `pause` or `unpause` changes nothing.
+  Each change writes an audit row (`agent.pause`, `agent.unpause`, with
+  `queued`) and an event (`agent.paused`, `agent.unpaused`). The rights
+  are those of `stop`.
+
 - `start` opens a new session and resumes the last harness session.
-  A running agent gets `409 already_running`.
+  A running agent gets `409 already_running`. It is a wake now: the
+  queued turns go to the agent.
 - `stop` types the adapter's exit keys into an idle harness that has them
   (Claude, Codex, Copilot: `/exit`; pi: `/quit`), and kills it when it has
   not exited after 5 s. A busy harness, or one with no exit keys, is killed
@@ -1797,8 +1849,11 @@ changes.
   `start`: a new launch. A `start` or a `restart` is a retry: it ends the
   agent's usage-limit holds (§16.6).
 - `send` types one turn through the runner: it waits until the agent is
-  `idle` and the prompt is ready. A stopped agent, or one between an exit
-  and its restart, gets `409 not_running`.
+  `idle` and the prompt is ready. To an agent that does not run (also a
+  paused agent, or one in `error`), the turn waits in the store, and the
+  answer is `202 {"accepted": true, "queued": true}`. The agent wakes,
+  unless it may not (above). A `raw` send and `keys` need a running
+  agent: `409 not_running`.
 - `start` of an agent whose harness adapter is not registered, or whose
   prompt template or harness home is missing, gets `422 invalid` with the
   reason.
@@ -1827,7 +1882,9 @@ The daemon runs agents through the `Supervisor` trait
 `bwrap` sandbox (`sandbox.rs`, `--sandbox bwrap|none`). The status comes
 from the hooks and the screen (`docs/runner.md`).
 
-When the harness exits on its own, the restart policy applies (PLAN §18):
+When the harness exits on its own, the restart policy applies (PLAN §18).
+A `stop`, a `pause`, and an idle stop are not exits of the harness: no
+policy starts the agent again after them, also not `always`.
 
 | `restart` | Exit code 0 | Other exit |
 |---|---|---|
@@ -1888,8 +1945,9 @@ pointer goes out, the daemon checks each card line again and drops a line
 that no longer applies (for example, the card went to another agent).
 
 Lead nudges (PLAN §13): three board changes add a line to the pointer of
-each running `project_admin` agent of the card's project. The agent that
-made the change gets no nudge.
+each `project_admin` agent of the card's project. The agent that made the
+change gets no nudge. A lead that does not run keeps the line in
+`pending_pointers`, and the nudge wakes it.
 
 | Change | Line |
 |---|---|
@@ -3037,6 +3095,8 @@ Kinds:
 | `kind` | `data` |
 |---|---|
 | `status` | `{status, from, reason, waits, waiting_on?}`. `from` is never the same as `status`: a runner report of the status the agent already has (for example the runner's `spawned <program>` at start) goes in as a `system` event `{message, status}`. `waits` is the number of open waits; `waiting_on` is the line of §6.7. |
+| `agent.woken` | `{cause, queued}`: the daemon woke the agent (§6.2). `cause` is `mail`, `turn`, `card`, `nudge`, `start`, `unpause`, `hold_end`, `queued`, or `daemon_start`; `queued` is the work that waited. A `status` event follows. An idle stop is a `status` event with `reason: "idle"`. |
+| `agent.paused`, `agent.unpaused` | `{paused, queued}`: a pause or an unpause changed the flag (§6.2). The actor is the caller. |
 | `agent_removed` | `{agent_id, project, name}`. The daemon deleted the agent: `DELETE /api/agents/{id}`, a fleet apply with prune, or a definitions sync that removes a file agent. The delete of a live agent stops it first, so a `status` event with `stopped` comes before this event. Clients remove the agent from their lists. `GET /api/agents` does not show the agent again. |
 | `wait` | `{wait_id, change, kind, summary, state, result?}`. `change` is `opened`, `resolved`, `timed_out`, `cancelled`, or `failed`. The `agent` is the waiter (§6.7). |
 | `watch` | `{watch_id, change, watcher, watcher_name, on, status?}`. `change` is `created`, `fired` (with `status`), or `removed`. The `agent` is the watched agent (§6.7). |
@@ -5821,7 +5881,7 @@ A template:
 |---|---|
 | `name` | 1-63 of `a-z`, `0-9`, `-`, `_`. Unique in its scope: the project, or the global scope. A project template and a global template can have the same name. |
 | `project` | The project. `null` is a global template. |
-| `spec` | An agent definition (§6.1) without `name` and `project`: `harness` (required), `subscription`, `subscription_pool`, `model`, `prompt`, `system_prompt`, `persona`, `roles`, `policy`, `restart`, `skills`, `new_session_on_prompt_change`. The daemon checks it with the rules of an agent definition and keeps it in a normal form: the defaults of `policy` and `restart` filled in, no empty `roles`, no empty `system_prompt`, no `new_session_on_prompt_change` when it is `true`. A `system_prompt` over 32 KiB is `422 invalid`. Another key (`name`, `project`, `template`, or an unknown key) is `422 invalid` with `details.field = "spec"`. |
+| `spec` | An agent definition (§6.1) without `name` and `project`: `harness` (required), `subscription`, `subscription_pool`, `model`, `prompt`, `system_prompt`, `persona`, `roles`, `policy`, `restart`, `idle_stop`, `skills`, `new_session_on_prompt_change`. The daemon checks it with the rules of an agent definition and keeps it in a normal form: the defaults of `policy` and `restart` filled in, no empty `roles`, no empty `system_prompt`, no `new_session_on_prompt_change` when it is `true`. A `system_prompt` over 32 KiB is `422 invalid`. Another key (`name`, `project`, `template`, or an unknown key) is `422 invalid` with `details.field = "spec"`. |
 | `revision` | `1` at the create. Each change of the name, the description, or the spec adds `1`. A `PATCH` with the same values changes nothing. |
 | `source` | `api`, `file` (a `[[templates]]` of `projects/<name>.toml`), or `fleet:<name>` (§18.1). A `file` template refuses `PATCH` and `DELETE` with `409 file_managed`. |
 

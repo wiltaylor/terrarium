@@ -1299,6 +1299,27 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE cards ADD COLUMN eta_set_by TEXT;
     ALTER TABLE cards ADD COLUMN done_at TEXT;
     "#,
+    // 41: the agent lifecycle (PLAN §18, "Wake, idle stop, and pause").
+    // `idle_stop` is the idle stop of the agent: NULL for the global
+    // default, `off`, or a duration such as `30m`. `paused` is 1 while
+    // nothing may wake the agent. `status_reason` is the reason of the
+    // last status change (`idle` for an idle stop). `queued_turns` keeps
+    // the turns (`POST /api/agents/{id}/send`) for an agent that does not
+    // run, in order, until its wake types them.
+    // Self-contained: when another branch takes number 41, move this
+    // entry to the end of the list.
+    r#"
+    ALTER TABLE agents ADD COLUMN idle_stop TEXT;
+    ALTER TABLE agents ADD COLUMN paused INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE agents ADD COLUMN status_reason TEXT;
+    CREATE TABLE queued_turns (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        agent      TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+        text       TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    );
+    CREATE INDEX queued_turns_agent ON queued_turns(agent, id);
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call

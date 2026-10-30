@@ -59,6 +59,51 @@ describe("mock parity with docs/api.md", () => {
     s.close();
   });
 
+  it("queues a turn to a stopped agent, wakes it, and then runs the turn", async () => {
+    const api = mock();
+    const frames: AgentEvent[] = [];
+    const s = api.events.stream({ since: api.world.seq });
+    s.subscribe((e) => frames.push(e));
+    await wait();
+    expect(await api.agents.send("terrarium/sysadmin", "hello")).toEqual({ accepted: true, queued: true });
+    await waitFor(() => expect(frames.some((e) => e.kind === "turn_start" && e.agent === "sysadmin")).toBe(true));
+    expect(frames.find((e) => e.kind === "agent.woken")).toMatchObject({ agent: "sysadmin", data: { cause: "turn" } });
+    expect((await api.agents.get("terrarium/sysadmin")).queued).toBeUndefined();
+    s.close();
+  });
+
+  it("pauses a live agent, keeps turns queued, refuses a start, and wakes on the unpause when work waits", async () => {
+    const api = mock();
+    const frames: AgentEvent[] = [];
+    const s = api.events.stream({ since: api.world.seq });
+    s.subscribe((e) => frames.push(e));
+    await wait();
+    const a = await api.agents.pause("terrarium/lead");
+    expect(a.paused).toBe(true);
+    await waitFor(() => expect(api.world.agents.find((x) => x.name === "lead")).toMatchObject({ status: "stopped", status_reason: "paused" }));
+    // Idempotent.
+    expect((await api.agents.pause("terrarium/lead")).paused).toBe(true);
+    expect(frames.filter((e) => e.kind === "agent.paused")).toHaveLength(1);
+    await expect(api.agents.start("terrarium/lead")).rejects.toMatchObject({ status: 409, code: "conflict", message: expect.stringContaining("paused") });
+    expect(await api.agents.send("terrarium/lead", "later")).toEqual({ accepted: true, queued: true });
+    await wait();
+    expect(api.world.agents.find((x) => x.name === "lead")).toMatchObject({ status: "stopped", queued: 1 });
+    expect((await api.agents.unpause("terrarium/lead")).paused).toBe(false);
+    await waitFor(() => expect(frames.some((e) => e.kind === "turn_start" && e.agent === "lead")).toBe(true));
+    expect(frames.find((e) => e.kind === "agent.woken")).toMatchObject({ data: { cause: "unpause" } });
+    s.close();
+  });
+
+  it("checks idle_stop on the agent create and patch, and a null patch goes back to the default", async () => {
+    const api = mock();
+    expect((await api.health()).idle_stop).toBe("10m");
+    const a = await api.agents.create({ name: "idler", project: "terrarium", harness: "claude", idle_stop: "1h30m" });
+    expect(a).toMatchObject({ idle_stop: "1h30m", paused: false });
+    await expect(api.agents.update(a.id, { idle_stop: "soon" })).rejects.toMatchObject({ status: 422 });
+    expect((await api.agents.update(a.id, { idle_stop: "off" })).idle_stop).toBe("off");
+    expect((await api.agents.update(a.id, { idle_stop: null })).idle_stop).toBeUndefined();
+  });
+
   it("emits agent_removed when an agent is deleted, after the stop", async () => {
     const api = mock();
     const frames: AgentEvent[] = [];

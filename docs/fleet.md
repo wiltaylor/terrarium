@@ -60,7 +60,8 @@ on_agent_create = ["terrarium"]
 name = "lead"
 prompt = "project-lead"
 roles = ["project_admin"]
-start = true                     # start on `fleet apply --start`
+idle_stop = "30m"                # optional: `off`, or the rest before the idle stop (PLAN §18)
+start = true                     # start on `fleet apply --start`; work also wakes it
 
 [projects.agents.policy]
 targets = ["buildbox", "shared-lab"]
@@ -189,7 +190,9 @@ unchanged, and `!` conflict.
   with a conflict (code `conflict`).
 - `apply --prune` needs `--confirm` when it deletes an agent with a live
   session. The daemon stops the agent, then deletes it.
-- `apply --start` starts each agent with `start = true` that does not run.
+- `apply --start` starts each agent with `start = true` that does not run
+  and is not paused. It is not needed for work: mail, a turn, or a card
+  wakes an agent (PLAN §18).
 - `apply` clones `checkout.on_agent_create` into the workspace of each new
   agent, as `agent new` does.
 - `export` captures a project that was made by hand. The fleet declares the
@@ -306,7 +309,7 @@ it as `fleet apply` does (no prune, no start).
 `[[templates]]` declares a global agent template, and
 `[[projects.templates]]` a template of the project. The spec keys
 (`harness`, `subscription`, `model`, `prompt`, `system_prompt`, `persona`, `roles`,
-`policy`, `restart`, `skills`, `new_session_on_prompt_change`) sit next to `name` and
+`policy`, `restart`, `idle_stop`, `skills`, `new_session_on_prompt_change`) sit next to `name` and
 `description`. An agent entry with `template = "worker"` gets the values
 in this order: `[defaults]`, then the template, then the keys of the entry.
 `policy` merges key by key. `worker` is the project's template, else the

@@ -22,6 +22,7 @@ pub mod harness_versions;
 pub mod hosts;
 pub mod ingest;
 pub mod leases;
+pub mod lifecycle;
 pub mod login_session;
 pub mod models;
 pub mod password;
@@ -192,6 +193,7 @@ pub async fn start_with_usage(
         operator_auth: Arc::new(password::OperatorAuth::new(&cfg.state_dir)),
         waits: Arc::default(),
         config_repo: Arc::default(),
+        lifecycle: Arc::default(),
     });
     if cfg.insecure_agent_header {
         warn!("--insecure-agent-header: any local caller can act as any agent");
@@ -283,6 +285,8 @@ pub async fn start_with_usage(
     tasks.push(leases::spawn_timer(&state));
     tasks.push(scheduler::spawn(state.clone()));
     tasks.extend(waits::spawn(&state));
+    // After the reconcile: the agents with queued work wake.
+    tasks.extend(lifecycle::spawn(&state));
     tasks.extend(start_usage(&state).await);
     Ok(Daemon {
         state,
@@ -638,7 +642,7 @@ pub fn apply_status_at(
     if status == AgentStatus::Waiting && a.agent.status == AgentStatus::Waiting {
         return Ok(());
     }
-    let from = agents::set_status(t, id, status)?;
+    let from = agents::set_status(t, id, status, reason)?;
     if matches!(status, AgentStatus::Stopped | AgentStatus::Error) {
         let outcome = match status {
             AgentStatus::Error => "error",
@@ -769,6 +773,9 @@ fn spawn_pump(state: Shared) -> JoinHandle<()> {
                 }
                 Err(RecvError::Closed) => return,
             };
+            // An idle stop and a pause give the `stopped` status their
+            // reason (`crate::lifecycle`).
+            let ev = state.lifecycle.with_stop_reason(ev);
             let result = state.db.write("system", move |t| record(t, &ev)).await;
             if let Err(e) = result {
                 warn!("cannot record a supervisor event: {e}");

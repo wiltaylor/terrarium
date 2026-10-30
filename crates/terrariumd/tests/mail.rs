@@ -372,12 +372,15 @@ async fn mail_reads_are_audited_and_names_stay_after_agent_rm() {
         .await;
     let to_worker = to_worker.ok()["id"].as_str().unwrap().to_owned();
 
-    // The worker goes; its mail keeps the name.
+    // The worker goes; its mail keeps the name. The mail woke it (PLAN
+    // §18), so the delete needs `confirm`.
     let worker = td.get("/api/agents/a%2Fworker").await.ok()["id"]
         .as_str()
         .unwrap()
         .to_owned();
-    let r = td.delete(&format!("/api/agents/{worker}")).await;
+    let r = td
+        .delete(&format!("/api/agents/{worker}?confirm=true"))
+        .await;
     assert_eq!(r.status, 204, "{}", r.body);
     let got = td.get(&format!("/api/mail/{m}")).await;
     assert_eq!(got.ok()["from"], worker.as_str());

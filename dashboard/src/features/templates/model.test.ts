@@ -55,6 +55,10 @@ describe("template model", () => {
     expect(targets).toEqual({ name: "w1", project: "p", template: "w", policy: { targets: [] } });
     expect(applyTemplate(t.spec, targets).policy).toEqual({ targets: [], mail_to: ["lead"] });
     expect(formToCreate({ ...form, mail_to: "*", cross_project: "ops/lead" }, pick)).toMatchObject({ policy: { mail_to: ["*"], cross_project: ["ops/lead"] } });
+    // The idle stop: a new one overrides; no change sends nothing.
+    expect(formToCreate({ ...form, idle_stop: "1h" }, pick)).toEqual({ name: "w1", project: "p", template: "w", idle_stop: "1h" });
+    expect(specToForm({ ...t.spec, idle_stop: "off" }).idle_stop).toBe("off");
+    expect(validateTemplateForm({ ...emptyTemplateForm(), name: "t", agent: { ...emptyTemplateForm().agent, idle_stop: "5x" } })).toEqual([expect.stringContaining("Idle stop")]);
     // Roles and the pool are overrides too.
     expect(formToCreate({ ...form, roles: ["project_admin"] }, pick)).toEqual({ name: "w1", project: "p", template: "w", roles: ["project_admin"] });
     expect(formToCreate({ ...form, subscription: "a", subscription_pool: ["a", "b"] }, pick)).toEqual({ name: "w1", project: "p", template: "w", subscription: "a", subscription_pool: ["a", "b"] });

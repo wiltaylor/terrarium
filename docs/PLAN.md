@@ -168,8 +168,15 @@ Status rules:
   never reports it. It is not a stall.
 - `blocked`: the harness asked the user a question, or a turn has been open
   with no hook and no PTY output for longer than the stall timeout.
-- `error`: the process exited non-zero, or the restart budget is exhausted.
-- `stopped`: a user or the API stopped the agent on purpose.
+- `error`: the process exited non-zero, the restart budget is exhausted,
+  or a wake could not start the agent (§18).
+- `stopped`: the agent does not run. The status reason says why: `idle`
+  (the idle stop, §18), `paused`, `stopped` (a user or the API), or the
+  exit. A stopped agent wakes when work comes for it, unless it is paused.
+
+`paused` is not a status. It is a flag on the agent (§18): a paused agent
+is `stopped`, and nothing wakes it. The status and its reason stay the
+process facts; the flag is the operator's rule.
 
 ## 5b. Agent templates
 
@@ -1033,7 +1040,7 @@ to the audit log with the agent's ID.
 | Read own project: peers, board, memories, repos | yes | yes | all projects |
 | Mail agents in own project | yes | yes | any agent |
 | Read the project inbox, reply from it | no | yes | any project |
-| Create, start, stop, restart, delete agents | no | in project | anywhere |
+| Create, start, stop, restart, pause, delete agents | no | in project | anywhere |
 | Set an agent's system prompt, harness, policy (project targets and `mail_to` in the project; a global target or a `cross_project` entry needs sysadmin) | no | in project | anywhere |
 | Assign, reassign, reopen any card; edit columns and WIP limits | no | in project | anywhere |
 | Edit or delete any memory | no | in project | anywhere |
@@ -1068,7 +1075,7 @@ under `terrarium admin ...`, with the same shape as the operator CLI:
 
 ```
 terrarium admin agent new <name> --harness claude --project P --prompt leader-worker [--role project_admin]
-terrarium admin agent start|stop|restart|rm <name> [--confirm]
+terrarium admin agent start|stop|restart|pause|unpause|rm <name> [--confirm]
 terrarium admin agent set <name> --prompt ... | --policy ... 
 terrarium admin project new <name> | rm <name> --confirm        sysadmin
 terrarium admin role grant|revoke <agent> <role>
@@ -1083,7 +1090,8 @@ Leader agents are ordinary agents with a role and a leader prompt template.
 Two templates ship:
 
 - **Project lead** (`project_admin`): triage the project inbox into cards,
-  keep `ready` stocked, create and retire worker agents as the board demands,
+  keep `ready` stocked, create and retire worker agents as the board demands
+  (a card assignment wakes a worker; the lead does not start it, §18),
   watch for workers idle on `in_progress` cards or stuck in `blocked`, reply to
   other projects when their requests are done.
 - **System lead** (`sysadmin`): create projects from operator requests, appoint
@@ -1215,7 +1223,8 @@ Two delivery paths. Both are needed. The board (§13) reuses the push path.
    types a turn into the PTY: a `[Mailbox:<sender>] Subject: ... (thread
    T, message M)` line and the body quoted with `> ` (§8.5). If the
    recipient is `working`, the message waits for the stop hook, then push
-   runs. Loop guard: when a
+   runs. When the recipient does not run, the message wakes it (§18) and
+   goes into its first pointer. Loop guard: when a
    thread has more than `TERRARIUM_MAIL_LOOP_LIMIT` (default 6)
    agent-to-agent messages with no operator or project-inbox message
    between them, the daemon types no more pointers for it, marks it
@@ -1281,7 +1290,8 @@ The push path also carries target lease changes (§19): "You now have access
 to target <t> (<state>) until <time or 'revoked'>. Run `terrarium targets
 ls`." after the lifecycle step of the grant, and "Your access to target <t>
 ended." An extend types nothing. A pointer for a stopped agent waits for its
-next start, as a card pointer does, also across a daemon restart.
+next start, as a card pointer does, also across a daemon restart. A lease
+pointer does not wake the agent (§18).
 
 ---
 
@@ -1439,7 +1449,8 @@ is the contract.
 - No call blocks. `terrarium wait ...` and `terrarium run ...` register the
   wait and return. The agent ends its turn. When the wait ends, the waiter
   gets one mail from `system`, and the mail wakes it as all mail does (the
-  push pointer of §12).
+  push pointer of §12). A waiter that the idle stop stopped starts again
+  for that mail (§18): its open waits stay through the stop.
 - Every wait that ends gets a mail: resolved, timed out, failed, or
   cancelled by another caller. A cancel by the waiter itself sends none.
   Only the waits that end within 2 s of the first of them share one mail;
@@ -1727,15 +1738,17 @@ unblocked, the runner uses the same push path as mail (§12). If the agent is
 `idle` it types a pointer turn: "Card TER-42 was assigned to you. Run
 `terrarium card show TER-42`." If it is `working`, the pointer waits for the
 stop hook. If the agent does not run, the pointer waits for its next start,
-also across a daemon restart (`pending_pointers`), and the daemon checks
-the card again before it types the line. `terrarium card wait` is the pull
+also across a daemon restart (`pending_pointers`), and the assignment wakes
+the agent (§18). The daemon checks the card again before it types the
+line. `terrarium card wait` is the pull
 equivalent for an agent that prefers to block.
 
 Lead nudges use the same path. A card with no assignee in `ready`, or a
 move to `review` or `blocked`, types a pointer into each `project_admin` of
 the project, except the agent that made the change. Each project gets at
 most one batch of nudges in 10 s; the changes in that time go out as one
-pointer.
+pointer. A lead that does not run keeps the nudge for its next start
+(`pending_pointers`), and the nudge wakes it (§18).
 
 Questions: a card with open linked questions (§12e) shows a badge "? N" on
 the board. N counts the questions, the bundles, and the notices; a bundle
@@ -2835,8 +2848,110 @@ Rust crates: `tokio`, `axum`, `portable-pty`, `vt100`, `rusqlite`, `clap`,
 
 ## 18. Durability and resume
 
+### Wake, idle stop, and pause
+
+Asked for on 2026-10-31: an operator or a lead does not start and stop
+agents. Work starts an agent, rest stops it, and a pause keeps it
+stopped. `crates/terrariumd/src/lifecycle.rs` has the rules.
+
+```mermaid
+stateDiagram-v2
+    [*] --> stopped
+    stopped --> starting: wake (work, start)
+    starting --> idle
+    idle --> working: turn
+    working --> idle: stop hook
+    idle --> waiting: open wait
+    waiting --> idle: last wait ends
+    idle --> stopped: idle stop (reason idle)
+    waiting --> stopped: idle stop (reason idle)
+    working --> restarting: crash (restart policy)
+    restarting --> starting
+    restarting --> error: crash loop
+    starting --> error: wake failed
+    error --> stopped: operator stop
+    stopped --> stopped: pause (nothing wakes it)
+```
+
+**Wake.** Work for an agent that does not run wakes it. The wake is a
+start with resume of the last harness session, as the relaunch after a
+daemon start. When the resume fails, a new session with a recap turn
+begins, as at any start. The work waits until the harness is ready, and
+nothing is lost on the way:
+
+| Wake source | Where the work waits |
+|---|---|
+| Mail to the agent (also the wake mail of a wait, a watch mail, a question answer, a schedule `mail` action) | the `queued` message in the store |
+| A turn: `POST /api/agents/{id}/send` (the dashboard, `terrarium agent send`, a schedule `turn` action) | the `queued_turns` table (migration 41) |
+| A card that another actor assigns to the agent, or its unblocked card | `pending_pointers` (a card line) |
+| A lead nudge (§13) for a `project_admin` agent | `pending_pointers` (a lead line) |
+| `POST /api/agents/{id}/start` | (no work: a wake now) |
+| An unpause, the end of the last quota or budget hold, the daemon start, an idle stop with work that came during the stop | the work above |
+
+A lease line (§19) waits for the next start too, but it does not wake the
+agent. Raw sends and keys need a running harness (`409 not_running`).
+
+- One wake at a time for each agent. A wake that comes while another one
+  runs does nothing; the running wake takes all the work.
+- The queued turns go out in order at the first idle, after the recap
+  turn. Then the pointer turn takes the mail and the card and nudge
+  lines.
+- No wake for a paused agent, an agent in `error`, or an agent with a
+  quota or budget hold (§16.2). Their work waits. The end of the last
+  hold wakes an agent with work.
+- A wake counts as a start. When the start fails (a missing subscription,
+  a harness outside its range with `refuse`), the agent goes to `error`
+  with the reason `wake failed: ...`, and no later work wakes it. A crash
+  loop (below) also ends in `error`. The operator clears `error` with
+  `stop`, `start`, or `restart`; then the next work wakes the agent.
+- An agent wakes with an `agent.woken` event (`{cause, queued}`). The
+  causes are `mail`, `turn`, `card`, `nudge`, `start`, `unpause`,
+  `hold_end`, `queued`, and `daemon_start`.
+
+**Idle stop.** An agent at rest (`idle` or `waiting`) for its idle stop
+stops gracefully, with the same stop as `POST /api/agents/{id}/stop`.
+Its status is `stopped` with the reason `idle`, and its session ends with
+the outcome `idle`. It is not an error, and the restart policy does not
+apply: `always` does not start it again.
+
+- The idle stop of an agent is its `idle_stop` (a duration such as
+  `30m`, or `off`), else `TERRARIUM_IDLE_STOP` (default `10m`; `off` or
+  `0` turns it off). Templates, fleet files, and agent files take
+  `idle_stop` too.
+- Not stopped: an agent with a live exec session (a shell or a
+  `terrarium run` job), an open `process` wait, queued work, or a wake on
+  the way. A target display operation of the agent (§19b) starts its
+  clock again. A turn in progress is `working`, and a held agent is
+  `blocked`: neither is at rest.
+- What stays: open waits (their result mail wakes the agent), watches,
+  questions, target leases (their expiry rules apply), and grants. An
+  ephemeral target goes down as at any stop and comes up at the wake.
+- The daemon checks every 15 s. After a daemon start, the clock of each
+  agent at rest starts again.
+
+**Pause.** `POST /api/agents/{id}/pause` sets the `paused` flag (migration
+41) and stops a running agent (reason `paused`). While the flag is set,
+nothing wakes the agent: mail, turns, and card lines wait, and the agent
+shows the count (`queued`). `start` and `restart` answer `409`.
+`POST /api/agents/{id}/unpause` clears the flag; the agent wakes at once
+when work waits, else at its next work. Each change writes an audit row
+(`agent.pause`, `agent.unpause`) and an event (`agent.paused`,
+`agent.unpaused`). The rights are those of `stop`: the operator, a
+sysadmin, and the `project_admin` of the project. A pause is not a status
+because a paused agent is `stopped`: the flag only says that it may not
+wake.
+
+**Start and stop.** `start` (a wake now) and `stop` (a stop now, not a
+pause) stay for the API and the CLI. The dashboard shows Pause or Resume,
+and Restart.
+
+### Restart policy and the daemon start
+
 - Restart policy per agent: `always`, `on-failure`, `never`. Exponential
   backoff. A crash loop (N restarts in M minutes) sets `error` and stops.
+  The policy applies to an exit that the daemon did not ask for: an idle
+  stop, a pause, and a `stop` are not exits of the harness, so no policy
+  starts the agent again.
 - On restart the runner calls `launch(agent, Some(session_id))`. The harness
   resumes its conversation. If the resume fails, Terrarium starts a fresh
   session, records the old one in history, and types a short recap turn built
@@ -2861,7 +2976,9 @@ Rust crates: `tokio`, `axum`, `portable-pty`, `vt100`, `rusqlite`, `clap`,
 - The daemon restarts without killing agents. The runner holds the PTY. On
   start the daemon reconnects to each runner socket and reconciles state.
 - The container restarts with `restart: unless-stopped`. On container start the
-  daemon re-launches every agent that was running, with resume.
+  daemon re-launches every agent that was running, with resume. Then the
+  idle stop applies to them as to every agent. An agent that does not run,
+  is not paused, and has work waiting wakes at the daemon start.
 
 ---
 
@@ -3174,6 +3291,7 @@ end-to-end scenarios of each phase are not scripted yet (no `spikes/e2e/`).
 | Harnesses | The image holds no harness (`just ci::check` fails when the Dockerfile installs one). `terrariumd harness install` at each start (the entrypoint, then the daemon) installs each missing pin of `harnesses.toml` into the tools dir (`./tools` at `/opt/terrarium/tools`, one npm prefix for each version) and the Copilot prompt extension, and writes `terrarium-manifest.json`. Updates into version dirs: `POST /api/harnesses/{name}/update` and `POST /api/harnesses/update`, `terrarium admin harness update` (`--version`, `--force`, `--all`), `just harness::update` and `just harness::latest` (with `--pin`), and the "Update" buttons of the dashboard. Sysadmin or the operator only, audited as `harness.update`. Running agents keep their version dir until their next start; the GC removes the unused version dirs. The sandbox binds the tools dir read-only. The version guard at each agent start (`TERRARIUM_HARNESS_VERSION_POLICY`). `docs/getting-started.md` §7. | — |
 | Templates | Agent templates (§5b, `docs/api.md` §21): global and project templates, `POST /api/agents` with `template` (project over global, `global:`, field and `policy` key overrides, the create rights on the merged values), `resolve`, `from-agent`, `[[templates]]` in project files and fleets, `template = "..."` on fleet agents and in export, `terrarium template` and `agent new --template`, the Templates tab of the dashboard Settings, the template chooser of New agent, and "Save as template". The lead templates make workers from the `worker` template. | Agent files (`agents/<name>.toml`) cannot name a template. |
 | Waits | Waits and watches (§12d, `docs/api.md` §6.7): the status `waiting`, `agent`, `process`, `time`, and `card` waits with timeouts, the cycle check, and the limits; `terrarium run` (a detached exec session with a `process` wait); one wake mail for each end (a 2 s batch); watches with debounce and `--once`; `terrarium wait`, `run`, `watch`; the `waiting` chip and the Waits and Watches sections of the agent page; the prompt text. Tests with the fake supervisor and a real host agent (`tests/waits.rs`). | Not run live with real harnesses yet. The queued watch changes of a debounce do not live through a daemon restart. |
+| Lifecycle | Wake on demand, the idle stop, and the pause (§18, 2026-10-31): `crates/terrariumd/src/lifecycle.rs`; migration 41 (`agents.idle_stop`, `paused`, `status_reason`, `queued_turns`); `TERRARIUM_IDLE_STOP`; `POST /api/agents/{id}/pause` and `unpause`; `terrarium agent pause|unpause`, `--idle-stop`; Pause, Resume, the `paused` and `stopped (idle)` badges, and the queued count in the dashboard; the lead prompts wake workers with a card, not a start. Tests with the fake supervisor (`tests/lifecycle.rs`) and the real one (`tests/runtime.rs`). | Not run live with real harnesses yet. A turn queued before a stop that ends a launch before its first idle waits for the next launch in memory only. |
 | Questions | Questions to the operator (§12e, `docs/api.md` §6.8): the `questions` table, the rights (leaders ask; the operator, or a sysadmin for others, answers), the limits and the copy check, the answer mail on the thread, the `question` wait with one mail, the questions in the recap turn, `terrarium question` and `terrarium admin question`, the Questions page with the badge, the agent page panel, and the lead template text. Tests with the fake supervisor (`tests/questions.rs`). | Not run live with real harnesses yet. |
 | Inbox | Notices and the Inbox (§12e, `docs/api.md` §6.8, §6.9, §7.4): migration 30 (`kind` and `acknowledged` on `questions`, the release columns of `messages`, `thread_resumes`); `POST /api/questions/{id}/ack` with one mail on the thread; the notice wait; the notices in the recap; `GET /api/inbox` and `/api/inbox/counts` over the questions, the notices, the mail to `operator`, and the threads of the loop guard; `POST /api/inbox/mail/{id}/ack`; release and resume; the `inbox` event; the mail log filters; `terrarium notify` and `terrarium admin inbox`; the lead template and persona text; the Inbox page, the renamed Mail pages, and one badge. Tests with the fake supervisor (`tests/inbox.rs`). | Not run live with real harnesses yet. |
 | 6 | Mail and event views in the dashboard. The fleet file (`docs/fleet.md`): `terrarium fleet validate`, `plan`, `apply` (with `--prune`), `ls`, `show`, and `export`, ownership as `source: "fleet:<name>"`, and the auto-apply of `fleets/*.toml` at start and on reload. | The sibling-container sandbox fallback is not started. |

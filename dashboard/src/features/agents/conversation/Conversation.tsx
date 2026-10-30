@@ -62,7 +62,7 @@ export function Conversation(props: { agent: Agent; onOpenTerminal: () => void }
     <section class="convo-main" aria-label="Conversation">
       <div class="convo-strip">
         <span class="row" style={{ gap: "6px" }}>
-          <StatusBadge status={props.agent.status} waitingOn={props.agent.waiting_on} />
+          <StatusBadge agent={props.agent} />
           <span class="muted small">
             {props.agent.harness}
             {props.agent.model ? ` · ${props.agent.model}` : ""}
@@ -79,7 +79,7 @@ export function Conversation(props: { agent: Agent; onOpenTerminal: () => void }
       <TranscriptLog
         view={view}
         label="Conversation"
-        empty={<p class="muted convo-note">{loaded() ? "No session yet. Start the agent." : "Loading…"}</p>}
+        empty={<p class="muted convo-note">{loaded() ? "No session yet. Send a turn: the agent wakes to run it." : "Loading…"}</p>}
       />
       <Composer agent={props.agent} sessionActive={isActive()} />
     </section>
@@ -97,7 +97,7 @@ function Composer(props: { agent: Agent; sessionActive: boolean }) {
   let fileInput: HTMLInputElement | undefined;
   let nextId = 0;
   onCleanup(() => clearTimeout(timer));
-  const state = () => composerState({ agentStatus: props.agent.status, sessionActive: props.sessionActive });
+  const state = () => composerState({ agentStatus: props.agent.status, sessionActive: props.sessionActive, paused: props.agent.paused });
 
   const patchImage = (id: string, patch: Partial<DraftImage>) =>
     setImages((cur) => cur.map((i) => (i.id === id ? { ...i, ...patch } : i)));

@@ -292,10 +292,16 @@ Make a project and a Claude agent in it:
 ```sh
 t project new demo -d "My first project"
 t -p demo agent new worker --harness claude --model haiku
-t agent start demo/worker
 ```
 
 `--model` is optional. `haiku` keeps each turn cheap.
+
+You do not start the agent. Its first turn or mail wakes it: the daemon
+starts it, and types the turn when it is ready. After 10 minutes at rest
+(`idle` or `waiting`), the agent stops by itself, and its status shows
+`stopped (idle)`. The next turn wakes it again, with the same
+conversation. Change the time for one agent with `--idle-stop 30m` (or
+`off`), or for all agents with `TERRARIUM_IDLE_STOP` in `.env`.
 
 Give the agent a turn, and look at its status:
 
@@ -315,7 +321,11 @@ t admin inbox ls --kind mail
 You can also do these steps in the dashboard. On the Projects page, click
 **New project**. In the sidebar, open the project and click **Agents**.
 Then click **New agent**, and pick a template or **Custom**. With no
-template, the form opens at once. Then open the agent and click **Start**.
+template, the form opens at once. Then open the agent and type a turn in
+the composer: the turn wakes the agent. The agent page has no Start or
+Stop buttons. **Pause** stops the agent and keeps it stopped: turns and
+mail wait, and the page shows how many. **Resume** lets it wake again.
+**Restart** starts a new launch with resume.
 
 To add a repo in the dashboard, open the project in the sidebar and click
 **Repos**. Then click **Add repo**, and give the URL. The project settings
@@ -381,7 +391,9 @@ docker compose exec terrarium terrarium agent attach demo/worker
 
 Press Ctrl-] to detach. The agent continues to run.
 
-The status chip of an agent tells you more than "busy or not". `idle` means
+The status chip of an agent tells you more than "busy or not". `stopped
+(idle)` means that the idle stop stopped the agent; the next work wakes it.
+`paused` means that nothing wakes it until you click **Resume**. `idle` means
 that the agent ended its turn and waits on nothing: it is done. `waiting`
 means that the agent ended its turn but waits on a peer, a long build on a
 target (`terrarium run`), a time, or a card. Point at the chip to see what
@@ -699,15 +711,17 @@ runs the `project-lead` template. You can also do them by hand.
    to `main`. Use an image that has every tool of the build and the tests,
    because a lab file may not use `provision` (see the rules below).
 
-3. Make the project, attach the repo, and start the lead:
+3. Make the project, attach the repo, and make the lead:
 
    ```sh
    t project new svc --prefix SVC
    t -p svc project repo-add file:///repos/hello-svc.git --name hello-svc --branch main
    t -p svc admin agent new lead --harness claude --model sonnet \
      --prompt project-lead --role project_admin --subscription anthropic-max-20x
-   t agent start svc/lead
    ```
+
+   Do not start the lead. Its first mail (the goal of the project) or a
+   board nudge wakes it.
 
 4. Make a project target. A project target gets the project name as a
    prefix, so `dev` becomes `svc-dev`:
@@ -735,7 +749,8 @@ runs the `project-lead` template. You can also do them by hand.
    (`svc-dev.<agent ULID>`). When the target does not come up, the grant
    exits 1, so the `&&` chain stops before the assign. The lease is made
    all the same: fix the target, revoke the lease, and grant again. Do not
-   use `--exclusive` on a `lab_from_workspace` target (`422`).
+   use `--exclusive` on a `lab_from_workspace` target (`422`). The card
+   assignment wakes the worker; nobody starts it.
 
 6. Give the target to one worker at a time. vmlab 0.33.3-alpha keys a
    running lab by the name in its `lab` block. Each checkout has the same
@@ -1357,7 +1372,7 @@ daemon. Then the agents stop with the daemon.
    just daemon::cli daemon status
    just daemon::cli project new demo
    just daemon::cli -p demo agent new worker --harness claude --model haiku
-   just daemon::cli agent start demo/worker
+   just daemon::cli agent send demo/worker "Say hello."   # the turn wakes the agent
    ```
 
 The CLI finds the daemon through the Unix socket
@@ -1797,8 +1812,8 @@ the daemon does not cause this error.
 
 The usual cause is a launch command that you ran by hand two times, for
 example the output of `terrariumd sandbox-dry-run <agent>`. Use
-`--resume <uuid>` to continue that session, or start the agent through the
-daemon with `terrarium agent start`.
+`--resume <uuid>` to continue that session, or wake the agent through the
+daemon with `terrarium agent start` (or a turn).
 
 ### 8.4 The trust dialog in sandbox mode `none`
 

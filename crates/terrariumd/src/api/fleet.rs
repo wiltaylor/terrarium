@@ -348,12 +348,16 @@ pub(crate) async fn apply_file(
     Ok(serde_json::to_value(r.0)?)
 }
 
-/// Start an agent that does not run. False: it runs already.
+/// Start an agent that does not run. False: it runs already, or it is
+/// paused (PLAN §18: nothing starts a paused agent).
 async fn start_agent(state: &Shared, actor: &Actor, project: &str, name: &str) -> ApiResult<bool> {
     policy::admin_project(actor, project, "starting an agent")?;
     let key = format!("{project}/{name}");
     let a = state.db.read(move |c| agents::find(c, &key, None)).await?;
     let agent_id = a.agent.id;
+    if a.paused {
+        return Ok(false);
+    }
     if state
         .supervisor
         .status(agent_id)

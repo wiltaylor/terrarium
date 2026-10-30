@@ -48,6 +48,8 @@ services:
       TERRARIUM_SESSION_MAX_AGE: ${TERRARIUM_SESSION_MAX_AGE:-90d}
       TERRARIUM_MAIL_LOOP_LIMIT: ${TERRARIUM_MAIL_LOOP_LIMIT:-}
       TERRARIUM_TRASH_DAYS: ${TERRARIUM_TRASH_DAYS:-}
+      # The idle stop of an agent that sets none (PLAN §18): a duration, or off.
+      TERRARIUM_IDLE_STOP: ${TERRARIUM_IDLE_STOP:-10m}
       TERRARIUM_HOST_TLS_CERT: ${TERRARIUM_HOST_TLS_CERT:-}
       TERRARIUM_HOST_TLS_KEY: ${TERRARIUM_HOST_TLS_KEY:-}
       # A harness outside its tested range (harnesses.toml) at an agent start:

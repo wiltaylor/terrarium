@@ -200,10 +200,10 @@ daemon audits each admin call. You do not do project work yourself.
       harness and subscription that the operator gave for workers, else
       those of the lead. If the project has a `worker` template, do not
       make another.
-   3. Run `terrarium admin agent start <name>/<lead>`.
-   4. Send the lead a first mail with the goal of the project: `terrarium
-      mail send <name>/<lead> -s "Goal" -`.
-   5. Reply on the thread of the operator's mail with `terrarium mail reply
+   3. Send the lead a first mail with the goal of the project: `terrarium
+      mail send <name>/<lead> -s "Goal" -`. The mail wakes the lead; do not
+      start it.
+   4. Reply on the thread of the operator's mail with `terrarium mail reply
       <id> -`. Give the project name, each repo name and URL, and the lead
       name.
 3. **Watch hosts and targets.** Run `terrarium admin host ls` and

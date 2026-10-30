@@ -171,6 +171,7 @@ a new token, when `.env` does not exist. The daemon reads:
 | `TERRARIUM_WAIT_DEFAULT_TIMEOUT` | `24h`. The timeout of an `agent`, `process`, or `card` wait, and of a `terrarium run`, that gives none (PLAN §12d): seconds, or a number with `s`, `m`, `h`, or `d`. |
 | `TERRARIUM_WAIT_MAX_TIMEOUT` | `7d`. The longest timeout of a wait or a run, and the longest `time` wait. A longer one is `422 invalid`. |
 | `TERRARIUM_TRASH_DAYS` | `7`. The days that a deleted agent stays in `<state>/trash/`, with its workspace. |
+| `TERRARIUM_IDLE_STOP` | `10m`. An agent at rest (`idle` or `waiting`) this long stops by itself, with the status reason `idle`; work wakes it again (PLAN §18). A duration (`30m`, `1h30m`), or `off` (also `0`). The `idle_stop` of an agent wins over it. |
 | `TERRARIUM_HARNESS_HOME` | `/auth/<harness>`. Override as `claude=/path,codex=/path`. |
 | `TERRARIUM_TOOLS_DIR` | `tools` (from the cwd). The image sets `/opt/terrarium/tools`; `just daemon::run` sets `<repo>/tools`. The harnesses, one npm prefix for each version (`versions/<name>/<version>`): the daemon installs the pins with no active version there at start, puts `<dir>/bin` first on `PATH`, and the sandbox binds it read-only. Empty: no tools dir; the harnesses come from `PATH`, and `POST /api/harnesses/{name}/update` answers `501`. |
 | `TERRARIUM_NO_HARNESS_INSTALL` | off. On (or `--no-harness-install`): the daemon does not install the missing pins at start. |

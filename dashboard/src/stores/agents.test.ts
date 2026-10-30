@@ -21,6 +21,17 @@ const agent = (over: Partial<Agent> = {}): Agent => ({
 const ev = (over: Partial<AgentEvent>): AgentEvent => ({ seq: 1, id: "E", at: "2026-10-24T10:00:00Z", kind: "status", agent: "lead", project: "p", summary: "", data: {}, ...over });
 
 describe("applyAgentEvent", () => {
+  it("keeps the reason of a status change, and the pause flag of the pause events", () => {
+    const [a] = applyAgentEvent([agent()], ev({ data: { status: "stopped", from: "idle", reason: "idle" } }));
+    expect(a).toMatchObject({ status: "stopped", status_reason: "idle" });
+    const [b] = applyAgentEvent([a!], ev({ kind: "agent.paused" }));
+    expect(b!.paused).toBe(true);
+    const [c] = applyAgentEvent([b!], ev({ kind: "agent.unpaused" }));
+    expect(c!.paused).toBe(false);
+    const [d] = applyAgentEvent([c!], ev({ data: { status: "starting", from: "stopped", reason: null } }));
+    expect(d!.status_reason).toBeUndefined();
+  });
+
   it("applies status events and tracks turn start", () => {
     const [a] = applyAgentEvent([agent()], ev({ data: { status: "working" } }));
     expect(a!.status).toBe("working");

@@ -14,7 +14,7 @@ import type { ScheduleCaller } from "./schedules";
 
 const NAME_RE = /^[a-z0-9][a-z0-9_-]{0,62}$/;
 const ULID_RE = /^[0-9A-Z]{26}$/;
-const SPEC_KEYS = ["harness", "subscription", "subscription_pool", "model", "prompt", "system_prompt", "persona", "roles", "policy", "restart", "new_session_on_prompt_change", "skills"] as const;
+const SPEC_KEYS = ["harness", "subscription", "subscription_pool", "model", "prompt", "system_prompt", "persona", "roles", "policy", "restart", "new_session_on_prompt_change", "skills", "idle_stop"] as const;
 /** The daemon's limit on `system_prompt`: 32 KiB of UTF-8. */
 export const SYSTEM_PROMPT_MAX_BYTES = 32 * 1024;
 
@@ -32,6 +32,14 @@ export function personaError(v: unknown, field = "persona"): string | null {
   if (typeof v !== "string") return `${field}: use a string`;
   const n = v.trim();
   return n && !/^[A-Za-z0-9_-]{1,64}$/.test(n) ? `${field}: the persona \`${n}\` is not valid: use \`leader\`, \`worker\`, \`none\`, or a prompt file name (letters, digits, \`-\`, \`_\`)` : null;
+}
+
+/** The daemon's check of `idle_stop`: `off`, `0`, or one or more `<n><d|h|m|s>` parts. A message on a bad one, else null. */
+export function idleStopError(v: unknown, field = "idle_stop"): string | null {
+  if (v === undefined || v === null) return null;
+  if (typeof v !== "string") return `${field}: use a string`;
+  const n = v.trim();
+  return n === "off" || n === "0" || /^(\d+[dhms])+$/.test(n) ? null : `${field}: \`${n}\` is not a duration: use \`off\`, \`0\`, or parts such as \`1h30m\` (units d, h, m, s)`;
 }
 
 type Fail = (status: number, code: string, message: string, details?: unknown) => never;
@@ -71,6 +79,8 @@ export function normalizeSpec(raw: unknown): TemplateSpec {
   if (sp) throw new Error(sp);
   const pe = personaError(o.persona, "spec: persona");
   if (pe) throw new Error(pe);
+  const ie = idleStopError(o.idle_stop, "spec: idle_stop");
+  if (ie) throw new Error(ie);
   const roles = ((o.roles as string[] | undefined) ?? []).filter((r) => r !== "member");
   const spec: TemplateSpec = { harness: o.harness as TemplateSpec["harness"] };
   for (const k of ["subscription", "model", "prompt", "system_prompt"] as const) if (typeof o[k] === "string" && o[k]) spec[k] = o[k];
@@ -84,6 +94,7 @@ export function normalizeSpec(raw: unknown): TemplateSpec {
   if (o.new_session_on_prompt_change === false) spec.new_session_on_prompt_change = false;
   if (o.skills !== undefined && (!Array.isArray(o.skills) || o.skills.some((x) => typeof x !== "string"))) throw new Error("spec: skills: use a list of skill names");
   if ((o.skills as string[] | undefined)?.length) spec.skills = o.skills as string[];
+  if (typeof o.idle_stop === "string" && o.idle_stop.trim()) spec.idle_stop = o.idle_stop.trim();
   return spec;
 }
 
@@ -264,6 +275,7 @@ export function createTemplateMock(c: TemplateMockContext): Api["templates"] {
           ...(a.system_prompt ? { system_prompt: a.system_prompt } : {}),
           ...(a.persona ? { persona: a.persona } : {}),
           ...(a.skills?.length ? { skills: a.skills } : {}),
+          ...(a.idle_stop ? { idle_stop: a.idle_stop } : {}),
           roles: a.roles,
           policy: a.policy,
           restart: a.restart,

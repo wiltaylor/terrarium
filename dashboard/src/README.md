@@ -315,9 +315,9 @@ checks the shapes that differ from PLAN §17.
   value and shows `details`, for example `blocked_by`, a WIP limit, or the
   wiki `stale_base` diff. A route that the daemon does not have yet
   (`404 no such API route`, or `405`) shows "Not available yet".
-- **202 answers.** `start`, `stop`, and `restart` answer with the agent as the
-  daemon accepted the call: the old status. Do not put that body into the
-  store. The status change comes from the event stream.
+- **202 answers.** `start`, `stop`, `restart`, `pause`, and `unpause` answer
+  with the agent as the daemon accepted the call: the old status. Do not put
+  that body into the store. The status change comes from the event stream.
 - **Agent keys.** `{id}` is a ULID, `project/name` (sent as
   `project%2Fname`), or a unique name.
 - **Replies.** `mail.reply` and `projectInbox.reply` answer an array: one message
@@ -382,6 +382,41 @@ the secret. The secret shows one time in a panel, with the hook URL and the
 setup steps. The list never keeps the secret (`withoutSecret`), and the
 panel drops it when it closes. `event_source` events, and the events that a
 source adds to the log, read the list again.
+
+## The agent lifecycle
+
+The operator does not start or stop an agent. Work wakes a stopped agent:
+a turn (`POST .../send`), mail, a card, a nudge, or an answer. The daemon
+starts it with a resume and then delivers the work. An agent that stays
+`idle` or `waiting` for its idle timeout stops (`status_reason: "idle"`).
+The model is pure and in `lib/lifecycle.ts`.
+
+- **Badge.** `StatusBadge` shows the status, `paused` (grey, with a pause
+  glyph), or `stopped (idle)`. A `N queued` chip follows it when work waits
+  (`queued`). The sidebar row gives a paused agent the same grey pause
+  glyph in place of the status dot.
+- **Buttons.** The agent page has Pause, or Resume for a paused agent
+  (`POST .../pause`, `POST .../unpause`), and Restart. Restart is off while
+  the agent is paused. Pause stops a live agent and blocks every wake;
+  turns and mail stay queued. Resume wakes the agent at once only when
+  work waits.
+- **Send.** A send to an agent that does not run answers
+  `{"accepted": true, "queued": true}`. The page says that the agent wakes,
+  that it waits for a resume (paused), or that it waits for a restart (an
+  agent in `error` does not wake).
+- **Idle stop.** The agent form and the template form have an `idle_stop`
+  field. Empty is the global default (`GET /api/health` `idle_stop`, shown
+  as the placeholder). `off` or `0` never stops the agent. Else a duration
+  of `d`, `h`, `m`, and `s` parts, such as `1h30m`. The form checks the
+  format (`idleStopProblem`). A patch sends it only when it changed; an
+  emptied field goes as `null`, back to the default.
+- **Store.** A `status` event sets `status_reason` from `reason`.
+  `agent.paused` and `agent.unpaused` set `paused`. No event carries
+  `queued`, so a lifecycle event or a stop reads the list again.
+- **Mock.** `docs-writer` is stopped by the idle timeout with 2 queued, and
+  `seo-worker` is paused with 1 queued. A send to a stopped agent wakes it
+  (`agent.woken`), and the mock runs the turn. The mock does not stop idle
+  agents by time.
 
 ## Quota alerts and holds
 
@@ -533,12 +568,13 @@ The code is in `features/agents/conversation/`. The logic is pure and in
 - **Auto-scroll.** The view follows new blocks while it is at the end. When
   the operator scrolls up, it stops and counts the new blocks in a
   "new messages" pill. The pill scrolls back to the end.
-- **Composer.** It is on only when the session is active and the agent is
-  `idle`, `waiting`, `working`, or `blocked`. Enter sends (`POST .../send`) and
-  Shift+Enter adds a line. When the agent is not idle or waiting, it says "queued —
-  the agent is working": the daemon queues the turn. Otherwise it is off
-  and gives the reason. The user block comes back through the stream when
-  the harness writes it.
+- **Composer.** It is on for every agent, also a stopped or paused one.
+  Enter sends (`POST .../send`) and Shift+Enter adds a line. When the agent
+  is not idle or waiting, it says "queued — …": the daemon queues the turn.
+  A stopped agent wakes to run it; a paused agent keeps it until the
+  operator resumes it. The composer is off only for a live agent when the
+  session is not active, and it gives the reason. The user block comes
+  back through the stream when the harness writes it.
 - **Safety.** Assistant text goes through `assistantHtml` and the
   `Markdown` component, so DOMPurify cleans it (`setSafeHtml`). User text,
   tool input, and tool output are text nodes only.
@@ -621,7 +657,7 @@ prefix or budget scope. The daemon also has `project`, `since`, `until`, and
 | `/p/:project/settings`, `/p/:project/secrets`, `/p/:project/templates` | Gone: redirect to `/p/:project/settings/general`, `/p/:project/settings/secrets`, and `/p/:project/settings/templates` (`app/nav.ts` `MOVED_ROUTES`). The redirect keeps the query. | none |
 | `/p/:project/agents` | Agents grid of the project, status filter, new agent (a template chooser, then a form, for the project of the route) | `GET`, `POST /api/agents`, `GET /api/templates?project=`, `GET /api/templates/{key}/resolve`, events socket |
 | `/agents` | Gone: redirects to `/projects` (`app/nav.ts` `MOVED_ROUTES`). | none |
-| `/agents/:id` | Agent detail: edit, delete, roles, quota, leases, conversation (the default tab), terminal, events, sessions | `GET`, `PATCH`, `DELETE /api/agents/{id}`, `start/stop/restart/send`, `GET`, `PUT .../roles`, `GET /api/usage/me?agent=`, `GET .../leases?all=`, `WS .../pty`, `GET .../events?since=`, `GET .../sessions`, `GET .../sessions/{session}/transcript?after=&limit=`, `GET .../transcript/stream?after=` (SSE) |
+| `/agents/:id` | Agent detail: edit, delete, roles, quota, leases, conversation (the default tab), terminal, events, sessions | `GET`, `PATCH`, `DELETE /api/agents/{id}`, `pause/unpause/restart/send`, `GET`, `PUT .../roles`, `GET /api/usage/me?agent=`, `GET .../leases?all=`, `WS .../pty`, `GET .../events?since=`, `GET .../sessions`, `GET .../sessions/{session}/transcript?after=&limit=`, `GET .../transcript/stream?after=` (SSE) |
 | `/settings/subscriptions` | Settings, Subscriptions tab: subscriptions, detect banner, add wizard | `GET`, `POST`, `DELETE /api/subscriptions[/{name}]`, `GET .../detect`, `POST .../{name}/probe\|verify\|logout\|api-key`, `POST /api/subscriptions/login`, `GET`, `DELETE .../login/{id}`, `POST .../login/{id}/input`, `WS .../login/{id}/pty` |
 | `/inbox` | Inbox: questions, notices, mail to the operator, paused threads; kind tabs, open or done, project filter | `GET /api/inbox?status=&kind=&project=`, `GET /api/inbox/counts`, `POST /api/questions/{id}/answer\|ack\|retract`, `POST /api/inbox/mail/{id}/ack`, `POST /api/mail/{id}/release`, `POST /api/mail/threads/{id}/resume` |
 | `/questions` | Gone: redirects to `/inbox`. | none |

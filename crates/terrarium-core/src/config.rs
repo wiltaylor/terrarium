@@ -51,6 +51,95 @@ pub enum RestartPolicy {
     Never,
 }
 
+/// How long an agent may rest (`idle` or `waiting`) before the daemon
+/// stops it (PLAN §18, "Idle stop"). The text form is `off`, or a duration
+/// of one or more `<number><unit>` parts with the units `d`, `h`, `m`, and
+/// `s` (`30m`, `1h30m`, `90s`). `0` is `off`. A definition without the key
+/// takes the global default (`TERRARIUM_IDLE_STOP`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IdleStop {
+    /// The agent never stops for idleness.
+    Off,
+    /// The agent stops after this long at rest.
+    After(std::time::Duration),
+}
+
+impl IdleStop {
+    /// The time at rest before the stop; `None` for `off`.
+    pub fn duration(self) -> Option<std::time::Duration> {
+        match self {
+            Self::Off => None,
+            Self::After(d) => Some(d),
+        }
+    }
+
+    /// The text form: `off`, or the duration in its largest units
+    /// (`5400 s` is `1h30m`).
+    pub fn as_text(self) -> String {
+        let Self::After(d) = self else {
+            return "off".into();
+        };
+        let mut secs = d.as_secs();
+        let mut out = String::new();
+        for (unit, size) in [("d", 86_400), ("h", 3600), ("m", 60), ("s", 1)] {
+            if secs >= size {
+                out.push_str(&format!("{}{unit}", secs / size));
+                secs %= size;
+            }
+        }
+        if out.is_empty() { "off".into() } else { out }
+    }
+}
+
+impl std::str::FromStr for IdleStop {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, String> {
+        let t = s.trim().to_ascii_lowercase();
+        if t == "off" || t == "0" || t == "never" {
+            return Ok(Self::Off);
+        }
+        crate::eta::parse_duration(&t)
+            .map_err(|_| {
+                format!("`{s}` is not an idle stop: use `off`, or a duration such as 30m or 1h30m")
+            })
+            .and_then(|d| {
+                d.to_std()
+                    .map(Self::After)
+                    .map_err(|_| format!("`{s}` is not an idle stop"))
+            })
+    }
+}
+
+impl std::fmt::Display for IdleStop {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.as_text())
+    }
+}
+
+impl Serialize for IdleStop {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        s.serialize_str(&self.as_text())
+    }
+}
+
+impl<'de> Deserialize<'de> for IdleStop {
+    /// A text form, or a number of seconds (`0` is `off`).
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Secs(u64),
+            Text(String),
+        }
+        match Raw::deserialize(d)? {
+            Raw::Secs(0) => Ok(Self::Off),
+            Raw::Secs(n) => Ok(Self::After(std::time::Duration::from_secs(n))),
+            Raw::Text(t) => t.parse().map_err(serde::de::Error::custom),
+        }
+    }
+}
+
 /// An agent definition, `agents/<name>.toml`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentDef {
@@ -96,6 +185,10 @@ pub struct AgentDef {
     pub policy: Policy,
     #[serde(default)]
     pub restart: RestartPolicy,
+    /// The idle stop of the agent ([`IdleStop`]). `None`: the global
+    /// default (`TERRARIUM_IDLE_STOP`, 10 minutes).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_stop: Option<IdleStop>,
     /// The skills of the agent from the skill library (PLAN §8.6): skill
     /// names, or `*` for every skill of the library. Default none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -683,6 +776,7 @@ skills = ["code-review", "release-notes"]
         assert!(
             toml::to_string(&AgentDef {
                 restart: RestartPolicy::OnFailure,
+                idle_stop: None,
                 ..def
             })
             .expect("serialise")

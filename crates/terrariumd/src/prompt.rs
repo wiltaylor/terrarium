@@ -800,6 +800,7 @@ mod tests {
             roles,
             policy: Default::default(),
             restart: Default::default(),
+            idle_stop: None,
             skills: vec![],
             new_session_on_prompt_change: true,
         };

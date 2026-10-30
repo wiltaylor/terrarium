@@ -9,7 +9,7 @@ use super::{
 };
 use crate::api::{CliError, query};
 use crate::cli::{AgentCmd, AgentNewArgs, AgentSetArgs, AnswerArgs, RoleCmd, RolesCmd, StatusCmd};
-use crate::commands::projects::{AGENT_COLS, project_path};
+use crate::commands::projects::{AGENT_COLS, agent_rows, project_path};
 use crate::commands::system::{as_items, show_events};
 use crate::ctx::Ctx;
 use crate::output::field;
@@ -112,6 +112,8 @@ pub async fn agent(ctx: &Ctx, cmd: &AgentCmd) -> anyhow::Result<()> {
         AgentCmd::Start { agent, no_wait } => lifecycle(ctx, agent, "start", *no_wait).await,
         AgentCmd::Stop { agent, no_wait } => lifecycle(ctx, agent, "stop", *no_wait).await,
         AgentCmd::Restart { agent, no_wait } => lifecycle(ctx, agent, "restart", *no_wait).await,
+        AgentCmd::Pause { agent } => pause(ctx, agent, "pause").await,
+        AgentCmd::Unpause { agent } => pause(ctx, agent, "unpause").await,
         AgentCmd::Send {
             agent,
             text,
@@ -243,7 +245,7 @@ async fn ls(ctx: &Ctx, all_projects: bool) -> anyhow::Result<()> {
     };
     let v = Value::Array(items);
     ctx.emit(&v, |c, v| {
-        print_table(c, as_items(v), AGENT_COLS, "no agents")
+        print_table(c, &agent_rows(as_items(v)), AGENT_COLS, "no agents")
     })
 }
 
@@ -277,6 +279,7 @@ pub async fn definition(ctx: &Ctx, a: &AgentNewArgs) -> anyhow::Result<Value> {
     );
     set_opt(&mut def, "persona", persona_value(&a.system_prompt));
     set_opt(&mut def, "restart", a.restart.clone());
+    set_opt(&mut def, "idle_stop", a.idle_stop.clone());
     set_opt(&mut def, "template", a.template.clone());
     if !a.roles.is_empty() {
         def["roles"] = json!(a.roles);
@@ -358,6 +361,12 @@ async fn set(ctx: &Ctx, a: &AgentSetArgs) -> anyhow::Result<()> {
     );
     set_opt(&mut body, "persona", persona_value(&a.system_prompt));
     set_opt(&mut body, "restart", a.restart.clone());
+    // `default` goes back to the daemon's idle stop.
+    match a.idle_stop.as_deref() {
+        Some("default") => body["idle_stop"] = Value::Null,
+        Some(v) => body["idle_stop"] = v.into(),
+        None => {}
+    }
     if let Some(p) = &a.policy {
         let p: Value = serde_json::from_str(p)
             .map_err(|e| CliError::usage(format!("--policy is not JSON: {e}")))?;
@@ -380,6 +389,28 @@ async fn set(ctx: &Ctx, a: &AgentSetArgs) -> anyhow::Result<()> {
             "updated agent {}/{}",
             field(r, "project"),
             field(r, "name")
+        ));
+    })
+}
+
+/// `agent pause|unpause`: the daemon answers with the agent.
+async fn pause(ctx: &Ctx, agent: &str, action: &str) -> anyhow::Result<()> {
+    let r = ctx
+        .api
+        .post(&format!("{}/{action}", agent_path(agent)), None)
+        .await?;
+    ctx.emit(&r, |c, r| {
+        let queued = r["queued"].as_u64().unwrap_or(0);
+        let state = if r["paused"].as_bool() == Some(true) {
+            "paused"
+        } else {
+            "not paused"
+        };
+        c.line(format!(
+            "{}/{} is {state} ({}, {queued} queued)",
+            field(r, "project"),
+            field(r, "name"),
+            field(r, "status")
         ));
     })
 }

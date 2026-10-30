@@ -380,9 +380,14 @@ async fn fake_supervisor_status_flow() {
     let a = td.agent("p", "a", json!({})).await;
     let id = a["id"].as_str().unwrap().to_owned();
 
-    td.post(&format!("/api/agents/{id}/send"), json!({"text": "hi"}))
-        .await
-        .err(409, "not_running");
+    // A raw send needs a running harness; a plain send would queue the
+    // turn and wake the agent (PLAN §18, `tests/lifecycle.rs`).
+    td.post(
+        &format!("/api/agents/{id}/send"),
+        json!({"text": "hi", "raw": true}),
+    )
+    .await
+    .err(409, "not_running");
     let started = td.post_empty(&format!("/api/agents/{id}/start")).await;
     assert_eq!(started.status, 202);
     td.wait_status(&id, "idle").await;

@@ -94,7 +94,7 @@ import { createQuestionMock } from "./questions";
 import { createInboxMock, isPauseNotice } from "./inbox";
 import { createConfigMock } from "./config";
 import { createSkillMock, skillsError } from "./skills";
-import { applyTemplate, createTemplateMock, personaError, resolveTemplate, systemPromptError, templateRef } from "./templates";
+import { applyTemplate, createTemplateMock, idleStopError, personaError, resolveTemplate, systemPromptError, templateRef } from "./templates";
 import { createSecretMock } from "./secrets";
 import { createTranscriptStream, encodeTranscriptFrame } from "../sse";
 import { appendBlock, fakeReply, mockModel, titleOf, type Draft as BlockDraft } from "./transcripts";
@@ -245,6 +245,8 @@ const NAME_RE = /^[a-z0-9][a-z0-9_-]{0,62}$/;
 const PREFIX_RE = /^[A-Z][A-Z0-9]{0,9}$/;
 const REQUIRED_COLUMNS = ["backlog", "in_progress", "blocked", "done"];
 const LIVE: AgentStatus[] = ["starting", "idle", "waiting", "working", "blocked", "restarting"];
+/** The global idle stop of the mock daemon (`TERRARIUM_IDLE_STOP`). The mock does not stop idle agents by time. */
+const MOCK_IDLE_STOP = "10m";
 /** Why pi refuses a plan login (PLAN §16.3): it uses API keys only. */
 const PI_PLAN_REFUSAL = "pi uses API keys only; use Claude Code for a Claude plan and Codex for a ChatGPT plan";
 
@@ -670,6 +672,8 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     const from = a.status;
     if (from === status) return;
     a.status = status;
+    if (reason) a.status_reason = reason;
+    else delete a.status_reason;
     a.updated_at = iso();
     agentEvent(a, "status", `${a.name}: ${from} -> ${status}`, { status, from, reason, ...(a.waits ? { waits: a.waits, waiting_on: a.waiting_on } : {}) });
     const cur = currentSession(a);
@@ -694,6 +698,66 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     questionClosed: (id, result) => waitMock.questionClosed(id, result),
     inboxEvent: (d) => inboxEvent(d),
   });
+  // ----- wakes: work for an agent that does not run -----
+  /** The turns that wait for a stopped or paused agent. The rest of `queued` (mail, cards) has no body in the mock. */
+  const queuedTurns: Record<string, string[]> = {};
+  /** The agent is ready: the queued work goes to it. */
+  const flushQueue = (a: Agent) => {
+    const turns = queuedTurns[a.id] ?? [];
+    delete queuedTurns[a.id];
+    delete a.queued;
+    for (const t of turns) deliverTurn(a, t);
+  };
+  /** Start a stopped agent (with resume) for `cause`, then deliver its queued work. A paused, live, or errored agent does not wake. */
+  const wake = (a: Agent, cause: string) => {
+    if (a.paused || a.status === "error" || LIVE.includes(a.status) || !w.agents.includes(a)) return;
+    agentEvent(a, "agent.woken", `${a.name}: woken (${cause})`, { cause });
+    openSession(a);
+    setStatus(a, "starting", "woken");
+    later(() => {
+      setStatus(a, waitMock.restStatus(a));
+      flushQueue(a);
+    });
+  };
+  /**
+   * One turn to a live agent. The daemon queues the turn until the agent is
+   * idle; the fake harness then writes the user block, thinks, calls a tool,
+   * and streams a reply.
+   */
+  const deliverTurn = (a: Agent, text: string) => {
+    const s = currentSession(a);
+    const model = mockModel(a);
+    const r = fakeReply(text, model);
+    const pace = Math.max(step, latency > 0 ? 450 : 0);
+    const typeTurn = () => {
+      if (!LIVE.includes(a.status) || currentSession(a) !== s) return;
+      if (a.status !== "idle" && a.status !== "waiting") return void later(typeTurn, Math.max(pace, 1));
+      if (s) s.turns++;
+      writeBlock(a, { role: "user", kind: "text", text: `[User] ${text}`, origin: "operator", parts: [{ source: "user", body: text }] });
+      agentEvent(a, "turn_start", `Turn typed by operator: ${text.slice(0, 60)}`, { text }, "operator");
+      setStatus(a, "working");
+      const steps: (() => void)[] = [
+        () => void writeBlock(a, r.thinking),
+        () => void writeBlock(a, r.call),
+        () => void writeBlock(a, r.result),
+        () => {
+          const b = writeBlock(a, r.reply);
+          if (b && s) later(() => growBlock(s.id, b.seq, r.full), pace);
+        },
+        () => {
+          agentEvent(a, "turn_end", "Turn ended");
+          setStatus(a, waitMock.restStatus(a));
+        },
+      ];
+      const run = (i: number) => {
+        if (i >= steps.length || currentSession(a) !== s) return;
+        steps[i]!();
+        later(() => run(i + 1), i === 3 ? pace * 2 : pace);
+      };
+      later(() => run(0), pace);
+    };
+    later(typeTurn, 0);
+  };
   const openSession = (a: Agent) => {
     // A start runs the active harness version.
     const v = harnessInstalled[a.harness];
@@ -1764,6 +1828,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
         uptime: Math.round((now() - startedAt) / 1000) + 3600,
         started_at: new Date(startedAt - 3600_000).toISOString(),
         definitions: { projects: 1, agents: 1, targets: 0, subscriptions: 0 },
+        idle_stop: MOCK_IDLE_STOP,
       })),
     harnesses: (_refresh, latest) => reply(() => harnessReport(latest === true)),
     harnessUpdate: (name, o = {}) =>
@@ -1894,6 +1959,8 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           if (sp) fail(422, "invalid", sp, { field: "system_prompt" });
           const pe = personaError(def.persona);
           if (pe) fail(422, "invalid", pe, { field: "persona" });
+          const ie = idleStopError(def.idle_stop);
+          if (ie) fail(422, "invalid", ie, { field: "idle_stop" });
           const sk = skillsError(def.skills, skillMock.names());
           if (sk) fail(422, "invalid", sk, { field: "skills" });
           if (!NAME_RE.test(def.name)) fail(422, "invalid", `\`${def.name}\` is not a valid name`);
@@ -1919,6 +1986,8 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
             // Like the daemon: `cross_project` is left out when empty.
             policy: { targets: def.policy?.targets ?? [], mail_to: def.policy?.mail_to ?? ["*"], ...(def.policy?.cross_project?.length ? { cross_project: def.policy.cross_project } : {}) },
             restart: def.restart ?? "on-failure",
+            ...(def.idle_stop?.trim() ? { idle_stop: def.idle_stop.trim() } : {}),
+            paused: false,
             status: "stopped",
             source: "api",
             ...(tpl ? { template: templateRef(tpl) } : {}),
@@ -1937,6 +2006,8 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           if (sp) fail(422, "invalid", sp, { field: "system_prompt" });
           const pe = personaError(patch.persona);
           if (pe) fail(422, "invalid", pe, { field: "persona" });
+          const ie = idleStopError(patch.idle_stop);
+          if (ie) fail(422, "invalid", ie, { field: "idle_stop" });
           const sk = skillsError(patch.skills, skillMock.names());
           if (sk) fail(422, "invalid", sk, { field: "skills" });
           if (patch.subscription_pool !== undefined || patch.subscription !== undefined) {
@@ -1962,6 +2033,11 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           }
           if (patch.policy) a.policy = { targets: patch.policy.targets, mail_to: patch.policy.mail_to, ...(patch.policy.cross_project?.length ? { cross_project: patch.policy.cross_project } : {}) };
           if (patch.restart) a.restart = patch.restart;
+          // null or empty: the global default.
+          if (patch.idle_stop !== undefined) {
+            if (patch.idle_stop?.trim()) a.idle_stop = patch.idle_stop.trim();
+            else delete a.idle_stop;
+          }
           a.updated_at = iso();
           audit("agent.update", a.id, a.project, { ...patch });
           return a;
@@ -2008,13 +2084,17 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
       start: (id) =>
         reply(() => {
           const a = agent(id);
+          if (a.paused) fail(409, "conflict", `agent \`${a.project}/${a.name}\` is paused; unpause it first`);
           if (LIVE.includes(a.status)) fail(409, "already_running", `agent \`${a.project}/${a.name}\` is running already`);
           const snap = clone(a);
           audit("agent.start", a.id, a.project);
           later(() => {
             openSession(a);
             setStatus(a, "starting");
-            later(() => setStatus(a, waitMock.restStatus(a)));
+            later(() => {
+              setStatus(a, waitMock.restStatus(a));
+              flushQueue(a);
+            });
           }, 0);
           return snap;
         }),
@@ -2026,7 +2106,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           audit("agent.stop", a.id, a.project);
           later(() => {
             endSession(a, "stopped");
-            setStatus(a, "stopped", "stopped by operator");
+            setStatus(a, "stopped", "stopped");
           }, 0);
           return snap;
         }),
@@ -2040,50 +2120,55 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
             if (wasLive) setStatus(a, "restarting");
             openSession(a);
             setStatus(a, "starting");
-            later(() => setStatus(a, waitMock.restStatus(a)));
+            later(() => {
+              setStatus(a, waitMock.restStatus(a));
+              flushQueue(a);
+            });
           }, 0);
           return snap;
+        }),
+      // 202, idempotent. A live agent stops; nothing wakes it until the unpause.
+      pause: (id) =>
+        reply(() => {
+          const a = agent(id);
+          if (!a.paused) {
+            a.paused = true;
+            a.updated_at = iso();
+            audit("agent.pause", a.id, a.project);
+            agentEvent(a, "agent.paused", `${a.name}: paused`, {}, "operator");
+            if (LIVE.includes(a.status)) {
+              endSession(a, "stopped");
+              setStatus(a, "stopped", "paused");
+            }
+          }
+          return clone(a);
+        }),
+      // 202, idempotent. The agent wakes at once only when work waits for it.
+      unpause: (id) =>
+        reply(() => {
+          const a = agent(id);
+          if (a.paused) {
+            a.paused = false;
+            a.updated_at = iso();
+            audit("agent.unpause", a.id, a.project);
+            agentEvent(a, "agent.unpaused", `${a.name}: unpaused`, {}, "operator");
+            if (a.queued) later(() => wake(a, "unpause"), 0);
+          }
+          return clone(a);
         }),
       send: (id, text) =>
         reply(() => {
           const a = agent(id);
-          if (!LIVE.includes(a.status)) fail(409, "not_running", `agent \`${a.project}/${a.name}\` is not running`);
           if (!text.trim()) fail(422, "invalid", "the text is empty");
           audit("agent.send", a.id, a.project, { chars: text.length });
-          // The daemon queues the turn until the agent is idle; the fake harness then
-          // writes the user block, thinks, calls a tool, and streams a reply.
-          const s = currentSession(a);
-          const model = mockModel(a);
-          const r = fakeReply(text, model);
-          const pace = Math.max(step, latency > 0 ? 450 : 0);
-          const typeTurn = () => {
-            if (!LIVE.includes(a.status) || currentSession(a) !== s) return;
-            if (a.status !== "idle" && a.status !== "waiting") return void later(typeTurn, Math.max(pace, 1));
-            if (s) s.turns++;
-            writeBlock(a, { role: "user", kind: "text", text: `[User] ${text}`, origin: "operator", parts: [{ source: "user", body: text }] });
-            agentEvent(a, "turn_start", `Turn typed by operator: ${text.slice(0, 60)}`, { text }, "operator");
-            setStatus(a, "working");
-            const steps: (() => void)[] = [
-              () => void writeBlock(a, r.thinking),
-              () => void writeBlock(a, r.call),
-              () => void writeBlock(a, r.result),
-              () => {
-                const b = writeBlock(a, r.reply);
-                if (b && s) later(() => growBlock(s.id, b.seq, r.full), pace);
-              },
-              () => {
-                agentEvent(a, "turn_end", "Turn ended");
-                setStatus(a, waitMock.restStatus(a));
-              },
-            ];
-            const run = (i: number) => {
-              if (i >= steps.length || currentSession(a) !== s) return;
-              steps[i]!();
-              later(() => run(i + 1), i === 3 ? pace * 2 : pace);
-            };
-            later(() => run(0), pace);
-          };
-          later(typeTurn, 0);
+          if (!LIVE.includes(a.status) || a.paused) {
+            // The turn waits; the agent wakes (unless paused) and then takes it.
+            (queuedTurns[a.id] ??= []).push(text);
+            a.queued = (a.queued ?? 0) + 1;
+            if (!a.paused) later(() => wake(a, "turn"), 0);
+            return { accepted: true, queued: true };
+          }
+          deliverTurn(a, text);
           return { accepted: true };
         }),
       attach: (id, file) =>

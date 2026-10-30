@@ -25,6 +25,10 @@ pub struct Health {
     pub uptime: u64,
     pub started_at: chrono::DateTime<chrono::Utc>,
     pub definitions: DefinitionCounts,
+    /// The idle stop of an agent that sets none (`TERRARIUM_IDLE_STOP`):
+    /// `off`, or a duration such as `10m`.
+    #[serde(default)]
+    pub idle_stop: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -48,6 +52,7 @@ pub async fn health(State(state): State<Shared>) -> Json<Health> {
             targets: d.targets.len(),
             subscriptions: d.subscriptions.len(),
         },
+        idle_stop: state.lifecycle.tuning().idle_stop.as_text(),
     })
 }
 

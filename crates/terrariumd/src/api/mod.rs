@@ -117,6 +117,9 @@ pub struct AppState {
     /// The config repo (PLAN §8.3, `/api/config/...`). Not configured: the
     /// routes answer `501 not_available`.
     pub config_repo: Arc<crate::config_repo::ConfigRepoRuntime>,
+    /// Wake on demand, the idle stop, and the stop reasons (PLAN §18,
+    /// `crate::lifecycle`).
+    pub lifecycle: Arc<crate::lifecycle::Lifecycle>,
 }
 
 impl AppState {
@@ -870,6 +873,7 @@ mod tests {
             ))),
             waits: Arc::default(),
             config_repo: Arc::default(),
+            lifecycle: Arc::default(),
         })
     }
 
