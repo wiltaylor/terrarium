@@ -103,7 +103,7 @@ export function CredentialSelect(props: {
       <Show when={props.scope && !secrets.loading && !choices().length && !generating()}>
         <span class="small muted">
           No {what()} secret that this target can use{props.scope === GLOBAL ? " (a global target uses a global secret only)" : ""}.{" "}
-          {ssh() ? "Pick New key…, or store one on the Secrets page." : "Store one on the Secrets page."}
+          {ssh() ? "Pick New key…, or store one on the Secrets tab of Settings." : "Store one on the Secrets tab of Settings."}
         </span>
       </Show>
       <Show when={generating()}>

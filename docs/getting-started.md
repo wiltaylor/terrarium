@@ -336,7 +336,7 @@ t -p demo agent new w2 --template worker --model sonnet
 A flag on `agent new` changes that field of the template. `t template ls`
 lists the templates of the project and the global ones. The agent copies
 the values: a later `template edit` does not change `w1` or `w2`. In the
-dashboard, use the **Templates** page, or **Save as template** on an agent
+dashboard, use the **Templates** tab of **Settings**, or **Save as template** on an agent
 page ([api.md §21](api.md#21-agent-templates)). **New agent** first shows
 the templates of the project and the global ones. Click a template, give
 the name, and click **Create agent**. To change a field of the template,
@@ -1027,7 +1027,7 @@ agent loads the instructions. Terrarium ships no skill (PLAN §8.6).
    terrarium skill show fern-check
    ```
 
-   Then edit `SKILL.md` (the dashboard Skills page has an editor), or give
+   Then edit `SKILL.md` (the Skills tab of the dashboard Settings has an editor), or give
    a whole dir with `terrarium skill new <name> --from-dir ./my-skill`. The
    daemon checks each write: the name is kebab-case and the same as the
    folder name, the description is required, only text and image file

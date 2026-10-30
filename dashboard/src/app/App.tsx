@@ -72,11 +72,7 @@ export function App() {
         <Route path="/projects" component={ProjectsPage} />
         <Route path="/agents/:id" component={AgentDetail} />
         <Route path="/sessions/:id" component={SessionPage} />
-        <Route path="/templates" component={TemplatesPage} />
-        <Route path="/skills/:name?" component={SkillsPage} />
-        <Route path="/secrets" component={SecretsPage} />
         <Route path="/inbox" component={InboxPage} />
-        <Route path="/targets" component={TargetsPage} />
         <Route path="/schedules" component={SchedulesPage} />
         {/* The logs screen: a tab bar over one route per tab (nav.ts LOGS_TABS). /logs redirects to the first tab. */}
         <Route path="/logs" component={LogsPage}>
@@ -88,6 +84,10 @@ export function App() {
         <Route path="/settings" component={SettingsPage}>
           <Route path="/account" component={AccountPage} />
           <Route path="/subscriptions" component={SubscriptionsPage} />
+          <Route path="/secrets" component={SecretsPage} />
+          <Route path="/templates" component={TemplatesPage} />
+          <Route path="/skills/:name?" component={SkillsPage} />
+          <Route path="/targets" component={TargetsPage} />
           <Route path="/harness" component={ConfigPage} />
           <Route path="/hosts" component={HostsPage} />
         </Route>

@@ -113,7 +113,7 @@ export default function TargetsPage() {
 
   return (
     <>
-      <PageHead title={project() ? `Targets · ${project()}` : "Targets · all"}>
+      <PageHead title={project() ? `Targets · ${project()}` : "Targets · all"} level={2}>
         <button class="primary" onClick={() => setCreating(true)}>
           New target
         </button>

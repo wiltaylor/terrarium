@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import app from "./App.tsx?raw";
 import layout from "./Layout.tsx?raw";
-import { BOARD_TABS, GLOBAL_ITEMS, KNOWLEDGE_TABS, LOGS_TABS, MOVED_ROUTES, movedTo, PROJECT_ITEMS, PROJECT_LOGS_TABS, PROJECT_SETTINGS_TABS, SETTINGS_ITEMS, SETTINGS_TABS, TOP_ITEMS } from "./nav";
+import { BOARD_TABS, KNOWLEDGE_TABS, LOGS_TABS, MOVED_ROUTES, movedTo, PROJECT_ITEMS, PROJECT_LOGS_TABS, PROJECT_SETTINGS_TABS, SETTINGS_ITEMS, SETTINGS_TABS, TOP_ITEMS } from "./nav";
 
 describe("navigation", () => {
   it("has no Spend item; the project has Logs, not Inbox or Mail, with a route", () => {
@@ -16,9 +16,9 @@ describe("navigation", () => {
   });
 
   it("has one Logs item where Mail was, and the logs screen has the tabs Mail, Events, Audit, each with a route", () => {
-    const hrefs = GLOBAL_ITEMS.map((i) => i.href) as string[];
-    expect(hrefs.indexOf("/logs")).toBe(hrefs.indexOf("/secrets") + 1);
-    expect(GLOBAL_ITEMS.find((i) => i.href === "/logs")?.label).toBe("Logs");
+    const hrefs = TOP_ITEMS.map((i) => i.href) as string[];
+    expect(hrefs.indexOf("/logs")).toBe(hrefs.indexOf("/inbox") + 1);
+    expect(TOP_ITEMS.find((i) => i.href === "/logs")?.label).toBe("Logs");
     for (const gone of ["/mail", "/events", "/audit"]) expect(hrefs).not.toContain(gone);
     expect(LOGS_TABS.map((t) => t.label)).toEqual(["Mail", "Events", "Audit"]);
     expect(app).toMatch(/<Route path="\/logs" component=\{LogsPage\}>/);
@@ -42,8 +42,7 @@ describe("navigation", () => {
   });
 
   it("has no global Agents item or page: the agents are in the project tree only, but the agent detail keeps its route", () => {
-    expect(GLOBAL_ITEMS.map((i) => i.href)).not.toContain("/agents");
-    expect(GLOBAL_ITEMS[0]).toEqual({ href: "/templates", label: "Templates" });
+    expect([...TOP_ITEMS, ...SETTINGS_ITEMS].map((i) => i.href)).not.toContain("/agents");
     expect(layout).not.toMatch(/AgentTree/);
     expect(Object.keys(import.meta.glob("./AgentTree.tsx"))).toEqual([]);
     expect(app).not.toMatch(/path="\/agents" component=/);
@@ -83,9 +82,9 @@ describe("navigation", () => {
     expect(movedTo("/p/terrarium/settings")).toBe("/p/terrarium/settings/general");
     expect(movedTo("/p/terrarium/settings/")).toBe("/p/terrarium/settings/general");
     for (const now of ["/p/terrarium/settings/general", "/p/terrarium/settings/secrets", "/p/terrarium/settings/templates"]) expect(movedTo(now)).toBeUndefined();
-    // The global pages stay.
-    expect(movedTo("/secrets")).toBeUndefined();
-    expect(movedTo("/templates")).toBeUndefined();
+    // The global pages are tabs of the settings screen.
+    expect(movedTo("/secrets")).toBe("/settings/secrets");
+    expect(movedTo("/templates")).toBe("/settings/templates");
   });
 
   it("has Repos under the project after Board, with a list route and a repo route", () => {
@@ -97,57 +96,73 @@ describe("navigation", () => {
     expect(movedTo("/p/terrarium/repos")).toBeUndefined();
   });
 
-  it("has Schedules under the project and in the global list, each with a route", () => {
+  it("has Schedules under the project and after Logs in the top list, each with a route", () => {
     expect(PROJECT_ITEMS.map((i) => i.path)).toContain("schedules");
-    expect(GLOBAL_ITEMS.map((i) => i.href)).toContain("/schedules");
+    const hrefs = TOP_ITEMS.map((i) => i.href) as string[];
+    expect(hrefs.indexOf("/schedules")).toBe(hrefs.indexOf("/logs") + 1);
     expect(app).toMatch(/path="\/schedules"/);
     expect(app).toMatch(/path="\/p\/:project\/schedules"/);
   });
 
-  it("has Templates in the global list, with a route", () => {
-    expect(GLOBAL_ITEMS.map((i) => i.href)).toContain("/templates");
-    expect(app).toMatch(/path="\/templates"/);
-  });
-
-  it("has Home, then Inbox, above the project tree, with a route, and no Questions item", () => {
-    expect(TOP_ITEMS.map((i) => i.href)).toEqual(["/", "/inbox"]);
+  it("has Home, Inbox, Logs, then Schedules above the project tree, with a route, and no Questions item", () => {
+    expect(TOP_ITEMS.map((i) => i.href)).toEqual(["/", "/inbox", "/logs", "/schedules"]);
     expect(TOP_ITEMS.find((i) => i.href === "/inbox")?.label).toBe("Inbox");
-    expect([...TOP_ITEMS, ...GLOBAL_ITEMS].map((i) => i.href)).not.toContain("/questions");
+    expect(TOP_ITEMS.map((i) => i.href)).not.toContain("/questions");
     expect(app).toMatch(/path="\/inbox" component=\{InboxPage\}/);
     expect(app).not.toMatch(/path="\/questions" component/);
     expect(Object.keys(import.meta.glob("../features/questions/**"))).toEqual([]);
   });
 
-  it("has Skills after Templates in the global list, with a route that takes a skill name", () => {
-    const hrefs = GLOBAL_ITEMS.map((i) => i.href) as string[];
-    expect(hrefs.indexOf("/skills")).toBe(hrefs.indexOf("/templates") + 1);
-    expect(app).toMatch(/path="\/skills\/:name\?" component=\{SkillsPage\}/);
+  it("has no Secrets, Templates, Skills, or Targets item in the sidebar: they are tabs of the settings screen, each with a route", () => {
+    const hrefs = [...TOP_ITEMS, ...SETTINGS_ITEMS].map((i) => i.href) as string[];
+    for (const gone of ["/secrets", "/templates", "/skills", "/targets"]) expect(hrefs).not.toContain(gone);
+    const start = app.indexOf('<Route path="/settings"');
+    const block = app.slice(start, app.indexOf("</Route>", start));
+    expect(block).toMatch(/path="\/secrets" component=\{SecretsPage\}/);
+    expect(block).toMatch(/path="\/templates" component=\{TemplatesPage\}/);
+    // The Skills tab keeps the editor of one skill.
+    expect(block).toMatch(/path="\/skills\/:name\?" component=\{SkillsPage\}/);
+    expect(block).toMatch(/path="\/targets" component=\{TargetsPage\}/);
+    for (const old of ["secrets", "templates", "skills[^\"]*", "targets"]) expect(app).not.toMatch(new RegExp(`\\n {8}<Route path="/${old}" component=`));
   });
 
-  it("orders the sidebar: Home and Inbox, the project tree, the global items, then Settings", () => {
+  it("redirects the old Secrets, Templates, Skills, and Targets paths to the settings tabs, with the skill name", () => {
+    expect(movedTo("/secrets")).toBe("/settings/secrets");
+    expect(movedTo("/secrets/")).toBe("/settings/secrets");
+    expect(movedTo("/templates")).toBe("/settings/templates");
+    expect(movedTo("/skills")).toBe("/settings/skills");
+    expect(movedTo("/skills/")).toBe("/settings/skills");
+    expect(movedTo("/skills/code-review")).toBe("/settings/skills/code-review");
+    expect(movedTo("/skills/my%20skill/")).toBe("/settings/skills/my%20skill");
+    expect(movedTo("/targets")).toBe("/settings/targets");
+    expect(movedTo("/skills/a/b")).toBeUndefined();
+    for (const now of ["/settings/secrets", "/settings/templates", "/settings/skills", "/settings/skills/code-review", "/settings/targets"]) expect(movedTo(now)).toBeUndefined();
+  });
+
+  it("orders the sidebar: Home, Inbox, Logs, and Schedules, the project tree, then Settings; no Terrarium section", () => {
     const at = (s: string) => layout.indexOf(s);
     expect(at("TOP_ITEMS}")).toBeGreaterThan(0);
     expect(at("TOP_ITEMS}")).toBeLessThan(at("<ProjectTree />"));
-    expect(at("<ProjectTree />")).toBeLessThan(at("GLOBAL_ITEMS}"));
-    expect(at("GLOBAL_ITEMS}")).toBeLessThan(at("SETTINGS_ITEMS}"));
+    expect(at("<ProjectTree />")).toBeLessThan(at("SETTINGS_ITEMS}"));
+    expect(layout).not.toMatch(/GLOBAL_ITEMS|<h4>Terrarium<\/h4>/);
     expect(at("SETTINGS_ITEMS}")).toBeLessThan(at('class="sidebar-foot"'));
     // The Projects root of the tree links the cards; no flat Projects item.
-    const hrefs = [...TOP_ITEMS, ...GLOBAL_ITEMS, ...SETTINGS_ITEMS].map((i) => i.href) as string[];
+    const hrefs = [...TOP_ITEMS, ...SETTINGS_ITEMS].map((i) => i.href) as string[];
     expect(hrefs).not.toContain("/projects");
     expect(app).toMatch(/path="\/projects" component=\{ProjectsPage\}/);
   });
 
-  it("has one Settings item, and the settings screen has the tabs Account, Subscriptions, Harness config, Hosts, each with a route", () => {
+  it("has one Settings item, and the settings screen has its tabs in order, each with a route", () => {
     expect(SETTINGS_ITEMS).toEqual([{ href: "/settings", label: "Settings" }]);
-    expect(SETTINGS_TABS.map((t) => t.label)).toEqual(["Account", "Subscriptions", "Harness config", "Hosts"]);
-    const hrefs = GLOBAL_ITEMS.map((i) => i.href) as string[];
+    expect(SETTINGS_TABS.map((t) => t.label)).toEqual(["Account", "Subscriptions", "Secrets", "Templates", "Skills", "Targets", "Harness config", "Hosts"]);
+    const hrefs = TOP_ITEMS.map((i) => i.href) as string[];
     for (const gone of ["/subscriptions", "/hosts", "/config", "/settings"]) expect(hrefs).not.toContain(gone);
     expect(app).toMatch(/<Route path="\/settings" component=\{SettingsPage\}>/);
     expect(app).toMatch(/path="\/account" component=\{AccountPage\}/);
     expect(app).toMatch(/path="\/subscriptions" component=\{SubscriptionsPage\}/);
     expect(app).toMatch(/path="\/harness" component=\{ConfigPage\}/);
     expect(app).toMatch(/path="\/hosts" component=\{HostsPage\}/);
-    for (const t of SETTINGS_TABS) expect(app).toContain(`path="/${t.path}"`);
+    for (const t of SETTINGS_TABS) expect(app).toMatch(new RegExp(`path="/${t.path}[/"]`));
   });
 
   it("redirects the old Subscriptions, Hosts, Config, and Settings paths to the settings tabs", () => {
@@ -204,6 +219,11 @@ describe("navigation", () => {
       "/p/:project/wiki/*path",
       "/p/:project/memory",
       "/p/:project/knowledge",
+      "/secrets",
+      "/templates",
+      "/skills",
+      "/skills/:name",
+      "/targets",
     ]);
   });
 
@@ -221,11 +241,11 @@ describe("navigation", () => {
     expect(movedTo("/mail/x")).toBeUndefined();
     // Every redirect lands on a page, not on a second redirect.
     for (const r of MOVED_ROUTES) {
-      const sample = r.path.replace(":project", "terrarium").replace(":id", "x1").replace("*path", "a/b");
+      const sample = r.path.replace(":project", "terrarium").replace(":id", "x1").replace(":name", "code-review").replace("*path", "a/b");
       const to = movedTo(sample);
       expect(to, sample).toBeDefined();
       expect(movedTo(to!), to).toBeUndefined();
-      expect(movedTo(r.to.replace(":project", "terrarium").replace(":id", "x1").replace("/*path", "")), r.to).toBeUndefined();
+      expect(movedTo(r.to.replace(":project", "terrarium").replace(":id", "x1").replace(":name", "code-review").replace("/*path", "")), r.to).toBeUndefined();
     }
   });
 
@@ -286,13 +306,6 @@ describe("navigation", () => {
     expect(movedTo("/p/terrarium/memory/x")).toBeUndefined();
     // The router gives the query and the hash to the redirect (App.tsx).
     expect(app).toMatch(/\$\{location\.search\}\$\{location\.hash\}/);
-  });
-
-  it("has Secrets after Skills in the global list, with a route to the page", () => {
-    const hrefs = GLOBAL_ITEMS.map((i) => i.href) as string[];
-    expect(hrefs.indexOf("/secrets")).toBe(hrefs.indexOf("/skills") + 1);
-    expect(GLOBAL_ITEMS.find((i) => i.href === "/secrets")?.label).toBe("Secrets");
-    expect(app).toMatch(/path="\/secrets" component=\{SecretsPage\}/);
   });
 
   it("has no Spend page left in the code", () => {

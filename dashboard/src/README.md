@@ -208,8 +208,8 @@ src/
 ```
 
 The sidebar (`app/Layout.tsx`, the item lists in `app/nav.ts`) has, from the
-top: Home and Inbox; the project tree; the "Terrarium" section with the
-global pages; and a Settings section at the bottom. The project tree
+top: Home, Inbox, Logs, and Schedules; the project tree; and a Settings
+section at the bottom. The project tree
 (`app/ProjectTree.tsx`) has a Projects root. A click on its name opens the
 project cards (`/projects`) and opens the root; the chevron only opens or
 closes it. Under the root, each project opens to show its pages. The Agents
@@ -233,10 +233,11 @@ agents, the tree or a project Agents node shows a filter. The root and the
 project Agents nodes use `app/TreeRoot.tsx`, one open set in `localStorage`,
 and the keyboard map in `app/treeNav.ts`. Settings
 (`features/settings/SettingsPage.tsx`) is one page with a tab for each of
-Account, Subscriptions, Harness config, and Hosts. Each tab is a route under
-`/settings`. Logs (`features/logs/LogsPage.tsx`) is the same: the
-"Terrarium" item has a tab for each of Mail, Events, and Audit, under
-`/logs`. The **Logs** item of a project has the Mail and Events tabs of that
+Account, Subscriptions, Secrets, Templates, Skills, Targets, Harness config,
+and Hosts. Each tab is a route under `/settings`. The Skills tab also has the
+editor of one skill at `/settings/skills/<name>`. Logs
+(`features/logs/LogsPage.tsx`) is the same: the top Logs item has a tab for
+each of Mail, Events, and Audit, under `/logs`. The **Logs** item of a project has the Mail and Events tabs of that
 project, under `/p/<project>/logs`. The project settings screen is the
 same: it has a tab for each of General, Secrets, and Templates of
 the project, under `/p/<project>/settings`. The screens use
@@ -638,12 +639,16 @@ prefix or budget scope. The daemon also has `project`, `since`, `until`, and
 | `/p/:project/schedules` | Schedules of the project and the global ones, scope filter, run history, run now, enable, create, edit, delete | `GET /api/schedules?project=`, `POST /api/schedules`, `PATCH`, `DELETE /api/schedules/{id}`, `POST .../run\|enable\|disable`, `GET .../runs?limit=&cursor=` (docs/api.md §19) |
 | `/schedules` | All schedules, grouped by scope | `GET /api/schedules` and the calls above |
 | `/p/:project/schedules?tab=triggers`, `/schedules?tab=triggers` | Triggers (spec `on`) and their runs with the event; event sources: list, create, enable, rotate, delete, the one-time secret | `GET /api/schedules?kind=trigger`, `GET`, `POST /api/event-sources`, `PATCH`, `DELETE /api/event-sources/{id}`, `POST .../rotate` (docs/api.md §19.4, §20) |
-| `/targets` | Targets, lifecycle, snapshots (list, take, restore, delete), exec console, leases (grant, extend, revoke, history) | `GET /api/targets`, `POST /api/targets/{name}/up\|down\|snapshot\|restore\|status`, `GET .../snapshots`, `DELETE .../snapshots/{snap}`, `POST .../exec`, `WS .../sessions/{id}/ws`, `DELETE .../sessions/{id}`, `GET`, `POST .../leases`, `PATCH`, `DELETE .../leases/{agent}` (docs/api.md §17.7) |
+| `/settings/targets` | Settings, Targets tab: targets, lifecycle, snapshots (list, take, restore, delete), exec console, leases (grant, extend, revoke, history) | `GET /api/targets`, `POST /api/targets/{name}/up\|down\|snapshot\|restore\|status`, `GET .../snapshots`, `DELETE .../snapshots/{snap}`, `POST .../exec`, `WS .../sessions/{id}/ws`, `DELETE .../sessions/{id}`, `GET`, `POST .../leases`, `PATCH`, `DELETE .../leases/{agent}` (docs/api.md §17.7) |
 | `/settings/hosts` | Settings, Hosts tab: host agents: status, capabilities, add with a one-time token, revoke | `GET`, `POST /api/hosts`, `DELETE /api/hosts/{name}` (new API, not in docs/api.md yet) |
 | `/logs/events` | Logs, Events tab: event log with history; all projects or the selected one, kind and agent filters | `GET /api/events?since=&kind=&project=&agent=`, events socket |
 | `/logs/audit` | Logs, Audit tab: audit log, newest first, live mode; actor, action, and project filters | `GET /api/audit?order=desc&actor=&action=&project=`, `audit` frames of the events socket |
 | `/settings/account` | Settings, Account tab: session mode, end time, what the browser keeps; password; sign out, sign out everywhere | `GET`, `DELETE /api/session`, `DELETE /api/sessions`, `PUT /api/auth/password` |
 | `/settings/harness` | Settings, Harness config tab: the config repo, its changes and diffs, commit, sync, pull, push, secret grants to approve | `GET /api/config/...` (docs/api.md §25) |
+| `/settings/secrets` | Settings, Secrets tab: every secret that the caller manages, with a scope filter | `GET /api/secrets`, `POST /api/secrets`, `PUT`, `DELETE /api/secrets/{scope}/{name}`, `POST .../generate\|reveal`, `GET .../grants` |
+| `/settings/templates` | Settings, Templates tab: the global templates and those of each project, with a scope filter | `GET`, `POST /api/templates`, `PATCH`, `DELETE /api/templates/{key}`, `template` events |
+| `/settings/skills/:name?` | Settings, Skills tab: the skill library in the config repo; with a name, the editor of that skill | `GET`, `POST /api/skills`, `GET`, `PUT`, `DELETE /api/skills/{name}`, `GET .../usage` |
+| `/secrets`, `/templates`, `/skills/:name?`, `/targets` | Gone: redirect to `/settings/secrets`, `/settings/templates`, `/settings/skills/:name?`, and `/settings/targets` (`app/nav.ts` `MOVED_ROUTES`). The skill redirect keeps the skill name, and each redirect keeps the query. | none |
 | `/settings`, `/subscriptions`, `/hosts`, `/config` | Gone: redirect to `/settings/account`, `/settings/subscriptions`, `/settings/hosts`, and `/settings/harness` (`app/nav.ts` `MOVED_ROUTES`). The redirect keeps the query. A quota mail of the daemon still links `/subscriptions`. | none |
 | `/logs`, `/mail`, `/events`, `/audit` | Gone: redirect to `/logs/mail`, `/logs/mail`, `/logs/events`, and `/logs/audit` (`app/nav.ts` `MOVED_ROUTES`). The redirect keeps the query. | none |
 | `/dev/xss` | Mock only: the hostile payloads of `lib/xss-payloads.ts`, rendered | none |

@@ -72,12 +72,12 @@ export default function ProjectSettings() {
 /**
  * The Targets panel: the project's targets and the global ones (`GET
  * /api/projects/{name}/targets`, docs/api.md §17.2), with a link to the
- * Targets page for the project.
+ * Targets tab of Settings for the project.
  */
 export function TargetsPanel(props: { project: string }) {
   const [targets] = createResource(() => props.project, (p) => api.projects.targets(p));
   const own = () => filterByScope(targets() ?? [], "project", props.project).length;
-  const href = (scope?: "project" | "global") => `/targets?project=${encodeURIComponent(props.project)}${scope ? `&scope=${scope}` : ""}`;
+  const href = (scope?: "project" | "global") => `/settings/targets?project=${encodeURIComponent(props.project)}${scope ? `&scope=${scope}` : ""}`;
   return (
     <section class="card-box stack" style={{ "margin-top": "16px" }} aria-label="Targets">
       <div class="spread">

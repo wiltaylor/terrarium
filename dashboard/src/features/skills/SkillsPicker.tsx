@@ -29,7 +29,7 @@ export function SkillsPicker(props: { value: string[]; onChange: (v: string[]) =
           <label class="row small">
             <input type="checkbox" checked={all()} disabled={props.disabled} onChange={(e) => props.onChange(toggleSkill(props.value, ALL_SKILLS, e.currentTarget.checked))} /> All skills (*)
           </label>
-          <Show when={skillOptions(list() ?? [], props.value).length} fallback={<span class="muted small">There are no skills. Make one on the Skills page.</span>}>
+          <Show when={skillOptions(list() ?? [], props.value).length} fallback={<span class="muted small">There are no skills. Make one on the Skills tab of Settings.</span>}>
             <div class="stack" style={{ gap: "2px" }}>
               <For each={skillOptions(list() ?? [], props.value)}>
                 {(name) => (

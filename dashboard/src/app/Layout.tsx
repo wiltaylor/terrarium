@@ -1,5 +1,5 @@
-// The app shell: sidebar with Home and Inbox, the project tree, the global
-// items, the Settings section, and the footer.
+// The app shell: sidebar with Home, Inbox, Logs, and Schedules, the project
+// tree, the Settings section, and the footer.
 
 import { A, useLocation, type RouteSectionProps } from "@solidjs/router";
 import { createEffect, createResource, createSignal, ErrorBoundary, For, on, onCleanup, onMount, Show } from "solid-js";
@@ -9,7 +9,7 @@ import { ErrorBanner, useNow } from "../components/ui";
 import { duration } from "../lib/format";
 import { agents, api, auth, events, inbox, projects, signOutNow, subscriptions, theme } from "../stores";
 import { badge } from "../features/inbox/model";
-import { GLOBAL_ITEMS, SETTINGS_ITEMS, TOP_ITEMS } from "./nav";
+import { SETTINGS_ITEMS, TOP_ITEMS } from "./nav";
 import { ProjectTree } from "./ProjectTree";
 import { projectFromPath } from "./treeModel";
 import { LoginScreen } from "./LoginScreen";
@@ -77,17 +77,6 @@ export function Layout(props: RouteSectionProps) {
         </div>
 
         <ProjectTree />
-
-        <div class="nav-section">
-          <h4>Terrarium</h4>
-          <For each={GLOBAL_ITEMS}>
-            {(item) => (
-              <A href={item.href} activeClass="active">
-                <span>{item.label}</span>
-              </A>
-            )}
-          </For>
-        </div>
 
         {/* At the bottom, above the footer. The link is active on every /settings/... tab. */}
         <div class="nav-section nav-settings">

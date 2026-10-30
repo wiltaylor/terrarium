@@ -1,5 +1,6 @@
-// Agent templates (docs/api.md §21): the global templates and those of each
-// project, with a scope filter. Create, edit, and delete (an in-page
+// Agent templates (docs/api.md §21). Under /settings/templates (a tab of the
+// settings screen): the global templates and those of each project, with a
+// scope filter. Create, edit, and delete (an in-page
 // confirm). `template` events keep the list fresh. Under
 // /p/:project/settings/templates (a tab of the project settings screen) the
 // page lists the templates that apply to the project: its own, then the
@@ -57,7 +58,7 @@ export default function TemplatesPage() {
 
   return (
     <>
-      <PageHead title={route.project ? "Templates" : "Agent templates"} level={route.project ? 2 : 1}>
+      <PageHead title={route.project ? "Templates" : "Agent templates"} level={2}>
         <Show when={!route.project}>
           <select value={scope()} onChange={(e) => setScope(e.currentTarget.value)} aria-label="Scope">
             <option value="all">All scopes</option>

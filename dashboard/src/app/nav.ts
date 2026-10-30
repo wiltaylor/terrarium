@@ -44,38 +44,39 @@ export const PROJECT_SETTINGS_TABS = [
   { path: "templates", label: "Templates" },
 ] as const;
 
-/** Above the project tree. */
+/**
+ * Above the project tree. The Projects root of the tree links /projects.
+ * The agents are in the tree only, under the Agents node of their project.
+ * The /agents page stays, but it has no item.
+ */
 export const TOP_ITEMS = [
   { href: "/", label: "Home", end: true },
   // Everything that waits for the operator; the badge counts the open items.
   { href: "/inbox", label: "Inbox" },
-] as const;
-
-/**
- * The "Terrarium" section, under the project tree. The Projects root of the
- * tree links /projects. The agents are in the tree only, under the Agents
- * node of their project. The /agents page stays, but it has no item.
- */
-export const GLOBAL_ITEMS = [
-  { href: "/templates", label: "Templates" },
-  // The skill library in the config repo.
-  { href: "/skills", label: "Skills" },
-  // The secret manager (PLAN §16b): every secret the caller manages.
-  { href: "/secrets", label: "Secrets" },
   // The logs screen (LOGS_TABS): mail, events, and audit. Active on every /logs/... tab.
   { href: "/logs", label: "Logs" },
-  { href: "/targets", label: "Targets" },
   { href: "/schedules", label: "Schedules" },
 ] as const;
 
 /** The Settings section at the bottom of the sidebar: one link to the tabbed settings screen. */
 export const SETTINGS_ITEMS = [{ href: "/settings", label: "Settings" }] as const;
 
-/** The tabs of the settings screen, in order. Each is a route under /settings. */
+/**
+ * The tabs of the settings screen, in order. Each is a route under
+ * /settings. The Skills tab also has the editor of one skill at
+ * /settings/skills/:name.
+ */
 export const SETTINGS_TABS = [
   // The sign-in session, the password, and the log-outs.
   { path: "account", label: "Account" },
   { path: "subscriptions", label: "Subscriptions" },
+  // The secret manager (PLAN §16b): every secret the caller manages.
+  { path: "secrets", label: "Secrets" },
+  // The global templates and the templates of each project.
+  { path: "templates", label: "Templates" },
+  // The skill library in the config repo. The rest of the path is the skill name.
+  { path: "skills", label: "Skills" },
+  { path: "targets", label: "Targets" },
   // The config repo: for the operator or a sysadmin.
   { path: "harness", label: "Harness config" },
   { path: "hosts", label: "Hosts" },
@@ -128,6 +129,10 @@ export const PROJECT_LOGS_TABS = [
  * - The project Wiki and Memory pages are tabs of the knowledge screen
  *   (KNOWLEDGE_TABS). The wiki redirect keeps the page path (`*path`).
  *   `/p/:project/knowledge` opens the Wiki tab.
+ * - The global Secrets, Templates, Skills, and Targets pages are tabs of the
+ *   settings screen. A bookmark can have an old path, and a link can have a
+ *   query (`/targets?project=...`), so the old paths stay as redirects. The
+ *   skill redirect keeps the skill name.
  */
 export const MOVED_ROUTES = [
   { path: "/p/:project/spend", to: "/" },
@@ -154,6 +159,11 @@ export const MOVED_ROUTES = [
   { path: "/p/:project/wiki/*path", to: "/p/:project/knowledge/wiki/*path" },
   { path: "/p/:project/memory", to: "/p/:project/knowledge/memory" },
   { path: "/p/:project/knowledge", to: "/p/:project/knowledge/wiki" },
+  { path: "/secrets", to: "/settings/secrets" },
+  { path: "/templates", to: "/settings/templates" },
+  { path: "/skills", to: "/settings/skills" },
+  { path: "/skills/:name", to: "/settings/skills/:name" },
+  { path: "/targets", to: "/settings/targets" },
 ] as const;
 
 /**

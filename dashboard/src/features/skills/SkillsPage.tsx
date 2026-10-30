@@ -1,6 +1,6 @@
 // Terrarium-managed skills, kept in the config repo: the list (name,
 // description, files, "used by", problems), a new skill (name and
-// description), and the editor of one skill at /skills/<name>: SKILL.md in a
+// description), and the editor of one skill at /settings/skills/<name>: SKILL.md in a
 // textarea, a Markdown preview through the sanitizing Markdown component,
 // the other files, save with the problems of a 422, "used by", and delete
 // (an in-page confirm). A write stays uncommitted: the Harness config page commits
@@ -176,7 +176,7 @@ function SkillEditor(props: { name: string; onSaved: () => void; onDeleted: () =
           {props.name}
         </h2>
         <span class="row">
-          <A class="small" href="/skills">
+          <A class="small" href="/settings/skills">
             Close
           </A>
         </span>
@@ -222,7 +222,7 @@ function SkillEditor(props: { name: string; onSaved: () => void; onDeleted: () =
                           <For each={u().templates}>
                             {(x) => (
                               <li>
-                                template <A href="/templates">{x.name}</A>
+                                template <A href="/settings/templates">{x.name}</A>
                                 <Show when={x.all}>
                                   <span class="muted"> (all skills)</span>
                                 </Show>
@@ -326,7 +326,7 @@ export default function SkillsPage() {
 
   return (
     <>
-      <PageHead title="Skills">
+      <PageHead title="Skills" level={2}>
         <input type="search" placeholder="Find a skill" value={q()} onInput={(e) => setQ(e.currentTarget.value)} aria-label="Find a skill" />
         <button onClick={() => void refetch()}>Refresh</button>
         <button class="primary" disabled={noSkills(list.error)} onClick={() => setCreating(true)}>
@@ -351,7 +351,7 @@ export default function SkillsPage() {
               setCreating(false);
               setNotice(`Made the skill ${d.name}.`);
               void refetch();
-              navigate(`/skills/${encodeURIComponent(d.name)}`);
+              navigate(`/settings/skills/${encodeURIComponent(d.name)}`);
             }}
           />
         </Show>
@@ -363,7 +363,7 @@ export default function SkillsPage() {
               onDeleted={() => {
                 setNotice(`Deleted the skill ${name}.`);
                 void refetch();
-                navigate("/skills");
+                navigate("/settings/skills");
               }}
             />
           )}
@@ -386,7 +386,7 @@ export default function SkillsPage() {
                   {(s) => (
                     <tr aria-current={s.name === selected() ? "true" : undefined}>
                       <td>
-                        <A class="mono" href={`/skills/${encodeURIComponent(s.name)}`}>
+                        <A class="mono" href={`/settings/skills/${encodeURIComponent(s.name)}`}>
                           {s.name}
                         </A>
                       </td>
