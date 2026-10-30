@@ -1279,22 +1279,50 @@ finding.
   64 hex digits, is refused before its ID goes to `cat-file`. A cut
   `ls-files` output drops its last (cut) entry.
 
+### Re-review: N1 to N3
+
+A second review of the fixes above (commit f11c6f2). The reviewer proved
+each finding with a probe. N1 closes a class: the fix does not add more
+checks, it removes the host filesystem from the reads of git.
+
+| # | Finding | Status |
+|---|---|---|
+| N1 (HIGH) | The checks before each command looked only at fixed names in `.git`. An agent that toggled symlinks `.git/objects/<xx>` to the object dirs of another repo, in a loop, made the browser serve the other repo's commit and file (18 of 200 tries). The same race applied to every path that git opened by name: `--git-dir`, `--work-tree`, and the checkout dir itself (a swap for a symlink). | **Fixed.** git reads an agent checkout only inside a `bwrap` sandbox (`ReadGit::run`): `--unshare-all` (no network), `--die-with-parent`, `--new-session`, `--clearenv`, `/usr` read-only (with the `/lib`, `/lib64`, `/bin`, `/sbin` binds or symlinks of the agent sandbox), a new `/proc`, a minimal `/dev`, a tmpfs `/tmp`, and the checkout read-only at `/repo`; nothing else of the host (no `/etc`, `/home`, state dir, work dir, or other checkout). The daemon opens the checkout once for each request (`CheckoutDir::open`: the workspace, then each part of the repo path with `O_NOFOLLOW`) and gives that fd to `bwrap` as its stdin; `--ro-bind-fd 0 /repo` binds the directory of the fd. `bwrap` compares the device and inode of the mount with the fd and stops on a difference, then closes the fd before git starts. git gets `--git-dir=/repo/.git --work-tree=/repo`, the env and `-c` hardening of before, `HOME=/nonexistent`, and `PATH=/usr/bin:/bin`. So a swap of the checkout path has no effect, and a symlink in `.git` (relative or absolute) to another repo, to the state dir, or to a daemon file finds nothing in the sandbox (or a file of `/usr`, which holds no secret). The Rust reads of the work tree use the same fd (`Root::of`). With no usable `bwrap` (the host dev mode without bubblewrap), a read of an agent tree is `503 unavailable`, with no fallback; `main` (the daemon's own mirror) is read on the host as before. `check_git_dir` still runs before each command, for a clear `409`; it is no longer the boundary. The full walk of `.git` (`check_no_links`) no longer runs for reads (M1 below puts it back, as a check, not the boundary). Tests: `a_race_in_the_git_dir_never_serves_a_foreign_repo` (300 tries while a thread toggles `objects/<xx>` and loose object symlinks, an alternates file, a symlinked `.git`, and a symlinked checkout dir; the fixture serves the foreign file with git on the host), `a_symlink_in_the_git_dir_is_refused` (a ref and a loose object as symlinks to host files are not read in the sandbox), `no_sandbox_no_agent_tree`. The tests that need the sandbox print a note and skip on a machine where `bwrap` cannot make one. |
+| N2 (MEDIUM) | `check_no_links` opened each directory again from the top of `.git`, one part at a time: the cost was quadratic in the depth. A chain of 8000 dirs took 75 s, with no deadline. | **Fixed.** The walk opens each directory from the fd of its parent with `O_NOFOLLOW` (one fd for each level), refuses more than 64 levels and a walk longer than 2 s, and keeps the cap of 1 000 000 entries. It stays the check before the daemon's own fetch and merge into a workspace (`clone_or_update`), which run on the host. Test: `the_link_walk_is_linear_and_bounded` (a chain of 2000 dirs is refused in less than 2 s, through `clone_or_update` too; 63 levels pass; a loose object as a symlink is refused). |
+| N3 (INFO) | The stderr of a failed read command went to the API in `details.stderr`. With an `include.path` added in a race, it told if a daemon file exists, or showed a line of it. Some `Refused` messages had absolute daemon paths. | **Fixed.** `ReadGit::run` logs the stderr of a failed command at debug level with the tree (`agent:<ULID>/<path>`) and returns `Failed` with no stderr; the API answer of the browser is a fixed message for each error kind, and an I/O error is a fixed `500` (the detail is in the log). The checks (`check_git_dir`, `check_no_links`, the config copy, `CheckoutDir::open`) name paths relative to the checkout (`.git/objects/...`), never the workspace or the state dir. A failed mirror fetch has the state dir and the work dir replaced by `<state>` and `<work>`. In the sandbox, an `include.path` to a host file reads nothing. Tests: `an_include_added_after_the_check_shows_nothing` (an absolute include of a host file: no content, no path; a bad include in the checkout: an error with no stderr), the `repo_trees` error tests, and `tests/repos.rs` (no state dir, no workspace path, and no stderr in an error answer). |
+
+### Second re-review: M1 and M2
+
+The reviewer confirmed N1 to N3 as fixed and found no way out of the
+read sandbox. Two small findings:
+
+| # | Finding | Status |
+|---|---|---|
+| M1 (LOW) | A FIFO in `.git/refs` (a branch, or the ref of HEAD) held each git command until its 10 s deadline (`rev-parse` 10.07 s, `uncommitted` 10.2 s), and the commands of one request added up. The cause: the full walk of `.git` no longer ran for reads, and `check_git_dir` checks fixed names only. | **Fixed.** `ReadGit::check_checkout` runs the bounded, fd-based walk (`check_no_links`, N2) again, once for each request, so a FIFO, a device, or a symlink anywhere in `.git` is a `409` before any git command. Each request also has one deadline for all its reads of an agent checkout: 20 s from `CheckoutDir::open` (`READ_REQUEST_TIME`). After it, no git command starts, a running one stops, and the work tree comparison stops (`500`, "did not finish"). A FIFO put in after the check costs at most that time. Test: `a_fifo_in_the_git_dir_is_refused_at_once` (a FIFO as `refs/heads/main` and as the ref of HEAD is refused in less than 2 s; after the request deadline a read is `Timeout` at once). |
+| M2 (INFO) | The probe of the read sandbox was kept for the life of the daemon, a failure too. A short failure (no free user namespace or PID at that time) made every agent tree `503` until a restart. | **Fixed.** A good probe is kept. A failed probe is kept for 30 s, then the next read probes again. Test: `a_failed_sandbox_probe_is_tried_again` (an injected probe: no new probe within 30 s, a new one after, and a good result is kept). |
+
 ### Residuals
 
-- **The window before each command.** The agent can add an alternates
-  file or a symlink between the check in `ReadGit::run` and the reads of
-  git. The window is a few milliseconds for each command. To close it,
-  the daemon would have to copy the object store, or stop the agent.
-  The full walk of `.git` (loose objects and packs) runs once for each
-  request, not before each command; a symlink put into the store after
-  it is not seen until the next request.
-- **A deleted `.git`.** When `<checkout>/.git` is gone, `ReadGit::run`
-  takes the checkout dir as a bare repo. Its layout is checked as above,
-  but its `config` is not checked against the allowlist. The read
-  commands run no program from config (above), so the agent sees only
-  its own files.
+- **The update path.** The daemon's fetch and merge into a workspace
+  (`clone_or_update`) run git on the host, in a repo that the agent
+  controls, with the checks of `check_workspace_repo` (now linear and
+  bounded) and the config check. The window between those checks and the
+  reads of git stays for that path (`crate::git`, module docs): a
+  symlink or an alternates file put in after the check can make the merge
+  read foreign objects into the work tree. To close it, the update would
+  run in a sandbox too, or in a clone that the daemon owns.
+- **`/usr` in the read sandbox.** git in the sandbox can read the files
+  of `/usr`. A symlink in `.git` to a file there can show its bytes as an
+  object, or in an error message (which the API does not return). `/usr`
+  holds the programs and libraries of the image, and no secret.
+- **A config race in the sandbox.** A key that the agent adds to the
+  live config after the check applies to the next command. The read
+  commands run no program from config, and a program that did run would
+  see only the checkout and `/usr`, with no network.
 - **Hard links.** A hard link in `.git` to a file of another repo is not
   found. The agent can make one only to a file that its sandbox shows.
-- **Cost.** The walk of `.git` reads each entry once for each request (and
-  for each agent tree in the tree list). A checkout with more than
-  1 000 000 entries under `.git` is refused; `git gc` packs it.
+- **Cost.** Each git command of an agent tree starts a sandbox (a few
+  milliseconds). The tree list runs a few commands for each agent tree.
+  Each request walks all of `.git` once (at most 2 s and 1 000 000
+  entries). The tree list opens each agent tree on its own, so each agent
+  tree has its own 20 s.

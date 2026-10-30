@@ -679,6 +679,18 @@ fn locate(
 }
 
 fn system_args(symlink: &dyn Fn(&Path) -> Option<PathBuf>) -> Vec<String> {
+    let mut args = system_dir_args(symlink);
+    for e in ETC_ENTRIES {
+        let p = Path::new("/etc").join(e);
+        push3(&mut args, "--ro-bind-try", &p, &p);
+    }
+    args
+}
+
+/// The binds of [`SYSTEM_DIRS`] only (no `/etc`): read-only, and a
+/// directory that is a symlink on the host is the same symlink inside.
+/// The read sandbox of the repo browser (`crate::git::ReadGit`) uses them.
+pub fn system_dir_args(symlink: &dyn Fn(&Path) -> Option<PathBuf>) -> Vec<String> {
     let mut args = Vec::new();
     for d in SYSTEM_DIRS {
         let p = Path::new(d);
@@ -686,10 +698,6 @@ fn system_args(symlink: &dyn Fn(&Path) -> Option<PathBuf>) -> Vec<String> {
             Some(target) => push3(&mut args, "--symlink", &target, p),
             None => push3(&mut args, "--ro-bind-try", p, p),
         }
-    }
-    for e in ETC_ENTRIES {
-        let p = Path::new("/etc").join(e);
-        push3(&mut args, "--ro-bind-try", &p, &p);
     }
     args
 }

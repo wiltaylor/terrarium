@@ -119,6 +119,7 @@ pub(super) fn git_error(e: GitError) -> ApiError {
             ApiError::internal(format!("git did not finish in {}s", d.as_secs()))
         }
         GitError::Io(m) => ApiError::internal(m),
+        GitError::Unavailable(m) => ApiError::new(crate::error::Code::Unavailable, m),
     }
 }
 

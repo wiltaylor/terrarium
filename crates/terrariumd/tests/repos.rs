@@ -539,6 +539,17 @@ async fn the_browser_reads_main_and_agent_trees() {
         .unwrap()
         .to_owned();
     let base = format!("/api/repos/{id}/trees");
+    let tree = format!("agent:{agent_id}");
+
+    // With no read sandbox (the host dev mode with no bubblewrap), an
+    // agent tree is `503 unavailable`; the tests below need the sandbox.
+    if !terrariumd::git::read_sandbox_ready() {
+        td.get(&format!("{base}/{tree}/files"))
+            .await
+            .err(503, "unavailable");
+        eprintln!("skipped the agent tree reads: no read sandbox here");
+        return;
+    }
 
     let t = td.get(&base).await;
     let trees = t.ok()["trees"].as_array().unwrap().clone();
@@ -546,7 +557,6 @@ async fn the_browser_reads_main_and_agent_trees() {
     assert_eq!(trees.len(), 2, "{trees:#?}");
     assert_eq!(trees[0]["id"], "main");
     assert!(trees[0]["mirror"]["fetched_at"].is_string(), "{trees:#?}");
-    let tree = format!("agent:{agent_id}");
     assert_eq!(trees[1]["id"], tree.as_str());
     assert_eq!(trees[1]["label"], "worker · feat");
     assert_eq!(trees[1]["ahead"], 1);
@@ -650,10 +660,19 @@ async fn the_browser_reads_main_and_agent_trees() {
     td.get_as("other/x", &base).await.err(403, "forbidden");
 
     // A planted repo config: the agent tree is refused, and the list says so.
+    // No error answer names the state dir or the workspace, or has stderr.
+    let workspace = dest.parent().unwrap().to_str().unwrap().to_owned();
+    let state = td.state.to_str().unwrap().to_owned();
+    let clean = |body: &serde_json::Value| {
+        let text = body.to_string();
+        assert!(!text.contains(&state), "{text}");
+        assert!(!text.contains(&workspace), "{text}");
+        assert!(!text.contains("stderr"), "{text}");
+    };
     sh(&dest, "git config core.fsmonitor 'touch /tmp/never'");
-    td.get(&format!("{base}/{tree}/files"))
-        .await
-        .err(409, "conflict");
+    let r = td.get(&format!("{base}/{tree}/files")).await;
+    clean(&r.body);
+    r.err(409, "conflict");
     let t = td.get(&base).await;
     assert!(
         t.ok()["trees"][1]["error"]
@@ -663,4 +682,22 @@ async fn the_browser_reads_main_and_agent_trees() {
         "{}",
         t.body
     );
+    clean(&t.body);
+    sh(&dest, "git config --unset core.fsmonitor");
+
+    // A symlinked HEAD: `409` with the path in `.git` only.
+    sh(
+        &dest,
+        "mv .git/HEAD .git/HEAD.real && ln -s HEAD.real .git/HEAD",
+    );
+    let r = td.get(&format!("{base}/{tree}/commits")).await;
+    clean(&r.body);
+    assert!(r.body.to_string().contains(".git/HEAD"), "{}", r.body);
+    r.err(409, "conflict");
+    sh(&dest, "rm .git/HEAD && mv .git/HEAD.real .git/HEAD");
+
+    // An unknown commit: `404`, with no stderr.
+    let r = td.get(&format!("{base}/{tree}/commits/abcd1234")).await;
+    clean(&r.body);
+    r.err(404, "not_found");
 }

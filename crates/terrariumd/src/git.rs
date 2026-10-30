@@ -44,8 +44,10 @@
 //! The repo browser (`crate::repo_browse`) reads checkouts with
 //! [`ReadGit`]: the same hardening, more overrides ([`READ_HARDEN`]), and
 //! only commands that run no filter, textconv, or external diff, so the
-//! window above runs nothing there. For `main` it reads a bare mirror that
-//! the daemon owns ([`refresh_mirror`]).
+//! window above runs nothing there. git reads an agent checkout only in a
+//! `bwrap` sandbox that shows the checkout (bound by its fd) and `/usr`,
+//! and nothing else of the host ([`ReadGit::run`]). For `main` it reads a
+//! bare mirror that the daemon owns ([`refresh_mirror`]), on the host.
 
 use std::collections::VecDeque;
 use std::io::Read;
@@ -168,6 +170,10 @@ pub enum GitError {
     Timeout(Duration),
     #[error("{0}")]
     Io(String),
+    /// The daemon cannot run the command here: the repo browser has no
+    /// read sandbox for an agent checkout ([`ReadGit`]).
+    #[error("{0}")]
+    Unavailable(String),
 }
 
 /// The parts of an `http(s)` URL that git sends to a credential helper.
@@ -488,7 +494,6 @@ impl Runner {
         cap: Option<usize>,
         deadline: Instant,
     ) -> Result<(Vec<u8>, bool), GitError> {
-        use std::os::unix::process::CommandExt;
         let mut cmd = Command::new("git");
         for kv in &self.config {
             cmd.arg("-c").arg(kv);
@@ -501,8 +506,23 @@ impl Runner {
             cmd.env_remove(k);
         }
         cmd.envs(self.env.iter().map(|(k, v)| (k, v)))
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
+            .stdin(Stdio::null());
+        self.spawn_wait(cmd, name, progress, cap, deadline)
+    }
+
+    /// Run `cmd` (git, or `bwrap` around git) until `deadline`, as
+    /// [`Runner::exec`] says. The caller sets the program, the args, the
+    /// env, and stdin.
+    fn spawn_wait(
+        &self,
+        mut cmd: Command,
+        name: &str,
+        progress: &mut dyn FnMut(&str),
+        cap: Option<usize>,
+        deadline: Instant,
+    ) -> Result<(Vec<u8>, bool), GitError> {
+        use std::os::unix::process::CommandExt;
+        cmd.stdout(Stdio::piped())
             .stderr(Stdio::piped())
             // Its own process group, so a timeout kills ssh and the remote
             // helpers too.
@@ -697,19 +717,47 @@ fn unsafe_config_keys(r: &Runner, file: &Path) -> Result<Vec<String>, GitError> 
 /// against the allowlist. The copy, not the live file, is what the check
 /// reads, so an edit during the check does not pass half-read.
 fn check_config_snapshot(c: &Checkout, r: &Runner) -> Result<(), GitError> {
-    check_config_copy(&c.dest, &c.store, r)
+    let fd = open_git_dir(&c.dest, false)?;
+    check_config_copy(&fd, &c.store, r)
 }
 
-fn check_config_copy(dest: &Path, store: &RunDirs, r: &Runner) -> Result<(), GitError> {
-    let live = dest.join(".git").join("config");
-    let meta = std::fs::symlink_metadata(&live).map_err(io)?;
-    if !meta.is_file() {
+/// The largest `.git/config` that the daemon copies and checks.
+const MAX_CONFIG: u64 = 1 << 20;
+
+/// Copy the `config` of the git dir `git_dir` (opened with no symlink
+/// followed, [`open_git_dir`]) and check the copy. The file is opened
+/// from the fd with `O_NOFOLLOW`, not by a path. No file is no config.
+fn check_config_copy(git_dir: &OwnedFd, store: &RunDirs, r: &Runner) -> Result<(), GitError> {
+    let not_file = || {
+        GitError::Refused(
+            ".git/config is not a regular file; the daemon updates only its own clones".into(),
+        )
+    };
+    let fd = match openat(
+        git_dir,
+        "config",
+        OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(fd) => fd,
+        Err(Errno::ENOENT) => return Ok(()),
+        Err(Errno::ELOOP) => return Err(not_file()),
+        Err(e) => return Err(io(format!(".git/config: {e}"))),
+    };
+    let st = nix::sys::stat::fstat(&fd).map_err(io)?;
+    if SFlag::from_bits_truncate(st.st_mode & SFlag::S_IFMT.bits()) != SFlag::S_IFREG {
+        return Err(not_file());
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::from(fd)
+        .take(MAX_CONFIG + 1)
+        .read_to_end(&mut bytes)
+        .map_err(io)?;
+    if bytes.len() as u64 > MAX_CONFIG {
         return Err(GitError::Refused(format!(
-            "{} is not a regular file; the daemon updates only its own clones",
-            live.display()
+            ".git/config is larger than {MAX_CONFIG} bytes"
         )));
     }
-    let bytes = std::fs::read(&live).map_err(io)?;
     let dir = store.run_dir().map_err(|e| io(e.message))?;
     let copy = dir
         .write_private("config", &bytes)
@@ -717,9 +765,8 @@ fn check_config_copy(dest: &Path, store: &RunDirs, r: &Runner) -> Result<(), Git
     let bad = unsafe_config_keys(r, &copy)?;
     if !bad.is_empty() {
         return Err(GitError::Refused(format!(
-            "the repo config at {} has keys the daemon does not run git with: {}; \
+            "the repo config (.git/config) has keys the daemon does not run git with: {}; \
              remove them, or fetch inside the sandbox",
-            dest.display(),
             bad.join(", ")
         )));
     }
@@ -730,26 +777,16 @@ fn check_config_copy(dest: &Path, store: &RunDirs, r: &Runner) -> Result<(), Git
 /// a plain `.git` directory, not a linked worktree, the layout of
 /// [`check_git_dir`], and no symlink or special file anywhere under
 /// `.git` ([`check_no_links`]).
+///
+/// The daemon's own fetch and merge into a workspace (`clone_or_update`)
+/// run on the host, not in the read sandbox of [`ReadGit`], so this walk
+/// stays the check for them. The messages name paths relative to the
+/// checkout, never a path of the daemon.
 fn check_workspace_repo(dest: &Path) -> Result<(), GitError> {
-    let git = dest.join(".git");
-    let meta = std::fs::symlink_metadata(&git).map_err(io)?;
-    if !meta.is_dir() {
-        return Err(GitError::Refused(format!(
-            "{} is not a plain .git directory; the daemon updates only its own clones",
-            git.display()
-        )));
-    }
-    for f in ["commondir", "gitdir"] {
-        if git.join(f).exists() {
-            return Err(GitError::Refused(format!(
-                "{} is a linked worktree; the daemon updates only its own clones",
-                dest.display()
-            )));
-        }
-    }
     let fd = open_git_dir(dest, false)?;
-    check_git_dir(&fd, &git)?;
-    check_no_links(&fd, &git)
+    let shown = Path::new(".git");
+    check_git_dir(&fd, shown)?;
+    check_no_links(&fd, shown)
 }
 
 const DIR_FLAGS: OFlag = OFlag::O_RDONLY
@@ -759,6 +796,11 @@ const DIR_FLAGS: OFlag = OFlag::O_RDONLY
 
 /// The most entries under one `.git` that [`check_no_links`] reads.
 const MAX_GIT_ENTRIES: usize = 1_000_000;
+/// The most directory levels under `.git` that [`check_no_links`] goes
+/// down. git itself makes few (`refs/heads/<a>/<b>`, `objects/<xx>`).
+const MAX_GIT_DEPTH: usize = 64;
+/// The longest that [`check_no_links`] takes for one `.git`.
+const LINK_CHECK_TIME: Duration = Duration::from_secs(2);
 
 fn refused_layout(shown: &Path, what: &str) -> GitError {
     GitError::Refused(format!(
@@ -785,16 +827,25 @@ fn open_git_dir(dir: &Path, bare: bool) -> Result<OwnedFd, GitError> {
     )
     .map_err(|e| io(format!("{}: {e}", parent.display())))?;
     let d = openat(&p, name, DIR_FLAGS, Mode::empty()).map_err(|e| match e {
-        Errno::ELOOP | Errno::ENOTDIR => refused_layout(dir, "not a plain directory"),
+        Errno::ELOOP | Errno::ENOTDIR => GitError::Refused(
+            "the repo dir is not a plain directory; the daemon reads only a plain git dir".into(),
+        ),
         e => io(format!("{}: {e}", dir.display())),
     })?;
     if bare {
         return Ok(d);
     }
-    openat(&d, ".git", DIR_FLAGS, Mode::empty()).map_err(|e| match e {
-        Errno::ELOOP | Errno::ENOTDIR => refused_layout(dir, "`.git` is not a plain directory"),
-        Errno::ENOENT => refused_layout(dir, "no `.git` directory"),
-        e => io(format!("{}/.git: {e}", dir.display())),
+    open_dot_git(&d)
+}
+
+/// Open `.git` under the checkout dir `dir`, with no symlink followed.
+fn open_dot_git(dir: &OwnedFd) -> Result<OwnedFd, GitError> {
+    openat(dir, ".git", DIR_FLAGS, Mode::empty()).map_err(|e| match e {
+        Errno::ELOOP | Errno::ENOTDIR => {
+            refused_layout(Path::new(".git"), "is not a plain directory")
+        }
+        Errno::ENOENT => refused_layout(Path::new(".git"), "is not there"),
+        e => io(format!(".git: {e}")),
     })
 }
 
@@ -897,44 +948,66 @@ fn check_git_dir(fd: &OwnedFd, shown: &Path) -> Result<(), GitError> {
 /// Walk the whole git dir: each entry is a plain directory or a regular
 /// file. A symlink anywhere (a loose object, a pack, a ref, `info/exclude`)
 /// could make git read a file of another repo or of the daemon, and show
-/// its bytes as an object or in an error message. Each directory is
-/// opened again from `fd`, one component at a time with `O_NOFOLLOW`, so
-/// the walk holds few file descriptors.
+/// its bytes as an object or in an error message. The walk opens each
+/// directory from the fd of its parent with `O_NOFOLLOW` (one fd for each
+/// level, never a path from the top), so it is linear in the entries. It
+/// refuses a git dir with more than [`MAX_GIT_ENTRIES`] entries, more than
+/// [`MAX_GIT_DEPTH`] levels, or a walk longer than [`LINK_CHECK_TIME`].
 fn check_no_links(fd: &OwnedFd, shown: &Path) -> Result<(), GitError> {
-    let mut todo: Vec<Vec<std::ffi::OsString>> = vec![Vec::new()];
-    let mut seen = 0usize;
-    while let Some(rel) = todo.pop() {
-        let mut dir = fd.try_clone().map_err(io)?;
-        for part in &rel {
-            dir = openat(&dir, part.as_os_str(), DIR_FLAGS, Mode::empty()).map_err(|e| {
-                let p = rel.iter().fold(shown.to_path_buf(), |p, x| p.join(x));
-                match e {
-                    Errno::ELOOP | Errno::ENOTDIR => refused_layout(&p, "is not a plain directory"),
-                    e => io(format!("{}: {e}", p.display())),
-                }
-            })?;
+    let mut w = LinkWalk {
+        seen: 0,
+        until: Instant::now() + LINK_CHECK_TIME,
+        shown,
+    };
+    w.dir(fd, &mut Vec::new())
+}
+
+/// The state of one [`check_no_links`] walk.
+struct LinkWalk<'a> {
+    seen: usize,
+    until: Instant,
+    shown: &'a Path,
+}
+
+impl LinkWalk<'_> {
+    fn path(&self, rel: &[std::ffi::OsString]) -> PathBuf {
+        rel.iter().fold(self.shown.to_path_buf(), |p, x| p.join(x))
+    }
+
+    /// Check the directory `fd` (at `rel` under the git dir), then each
+    /// directory in it.
+    fn dir(&mut self, fd: &OwnedFd, rel: &mut Vec<std::ffi::OsString>) -> Result<(), GitError> {
+        if rel.len() > MAX_GIT_DEPTH {
+            return Err(GitError::Refused(format!(
+                "{} has more than {MAX_GIT_DEPTH} levels of directories; \
+                 the daemon reads only a plain git dir",
+                self.shown.display()
+            )));
         }
-        let at = dir.try_clone().map_err(io)?;
-        let mut d = nix::dir::Dir::from_fd(dir).map_err(io)?;
+        let mut subdirs = Vec::new();
+        let mut d = nix::dir::Dir::from_fd(fd.try_clone().map_err(io)?).map_err(io)?;
         for e in d.iter() {
             let e = e.map_err(io)?;
             let name = e.file_name().to_bytes();
             if name == b"." || name == b".." {
                 continue;
             }
-            seen += 1;
-            if seen > MAX_GIT_ENTRIES {
+            self.seen += 1;
+            if self.seen > MAX_GIT_ENTRIES {
                 return Err(GitError::Refused(format!(
                     "{} has more than {MAX_GIT_ENTRIES} entries; run `git gc` in it",
-                    shown.display()
+                    self.shown.display()
                 )));
+            }
+            if self.seen.is_multiple_of(256) && Instant::now() >= self.until {
+                return Err(self.slow());
             }
             let os = std::ffi::OsStr::from_bytes(name).to_owned();
             let kind = match e.file_type() {
                 Some(t) => t,
                 None => {
                     let st =
-                        fstatat(&at, os.as_os_str(), AtFlags::AT_SYMLINK_NOFOLLOW).map_err(io)?;
+                        fstatat(fd, os.as_os_str(), AtFlags::AT_SYMLINK_NOFOLLOW).map_err(io)?;
                     match SFlag::from_bits_truncate(st.st_mode & SFlag::S_IFMT.bits()) {
                         SFlag::S_IFDIR => nix::dir::Type::Directory,
                         SFlag::S_IFREG => nix::dir::Type::File,
@@ -944,22 +1017,41 @@ fn check_no_links(fd: &OwnedFd, shown: &Path) -> Result<(), GitError> {
             };
             match kind {
                 nix::dir::Type::File => {}
-                nix::dir::Type::Directory => {
-                    let mut next = rel.clone();
-                    next.push(os);
-                    todo.push(next);
-                }
+                nix::dir::Type::Directory => subdirs.push(os),
                 _ => {
-                    let p = rel.iter().fold(shown.to_path_buf(), |p, x| p.join(x));
                     return Err(refused_layout(
-                        &p.join(&os),
+                        &self.path(rel).join(&os),
                         "is a symlink or a special file",
                     ));
                 }
             }
         }
+        drop(d);
+        for name in subdirs {
+            if Instant::now() >= self.until {
+                return Err(self.slow());
+            }
+            let child = openat(fd, name.as_os_str(), DIR_FLAGS, Mode::empty()).map_err(|e| {
+                let p = self.path(rel).join(&name);
+                match e {
+                    Errno::ELOOP | Errno::ENOTDIR => refused_layout(&p, "is not a plain directory"),
+                    e => io(format!("{}: {e}", p.display())),
+                }
+            })?;
+            rel.push(name);
+            self.dir(&child, rel)?;
+            rel.pop();
+        }
+        Ok(())
     }
-    Ok(())
+
+    fn slow(&self) -> GitError {
+        GitError::Refused(format!(
+            "the check of {} took more than {}s; run `git gc` in it",
+            self.shown.display(),
+            LINK_CHECK_TIME.as_secs()
+        ))
+    }
 }
 
 /// A git runner for the config repo (`crate::config_repo`), with the same
@@ -1037,9 +1129,133 @@ const READ_HARDEN: &[&str] = &[
 /// config, no askpass), [`READ_HARDEN`], `GIT_ATTR_NOSYSTEM=1`,
 /// `GIT_OPTIONAL_LOCKS=0` (git writes no index), and a deadline for each
 /// command. It has no secret: it does not fetch.
+///
+/// git reads an agent checkout ([`CheckoutDir`]) only inside a `bwrap`
+/// sandbox ([`ReadGit::run`]). With no usable `bwrap`, each read of an
+/// agent checkout is [`GitError::Unavailable`]: there is no fallback to
+/// git on the host. The daemon's own mirror is read on the host.
 pub struct ReadGit {
     runner: Runner,
     per_command: Duration,
+    jail: Jail,
+}
+
+/// Where git reads an agent checkout.
+#[derive(Debug, Clone)]
+enum Jail {
+    /// In a sandbox of this `bwrap`.
+    Bwrap(PathBuf),
+    /// Nowhere: there is no usable `bwrap` (the reason).
+    Missing(String),
+    /// Tests only: git on the host, in the checkout. The hostile-config
+    /// tests use it to show that the read commands themselves run no
+    /// driver (a driver that runs inside the sandbox leaves no mark).
+    #[cfg(test)]
+    Host,
+}
+
+/// The path of the checkout inside the read sandbox.
+const REPO_INSIDE: &str = "/repo";
+
+/// The message of [`GitError::Unavailable`] for an agent checkout.
+pub const NO_READ_SANDBOX: &str = "the repo browser needs bwrap for agent trees; \
+     install bubblewrap (the Docker image has it), or read the main tree only";
+
+/// The args of the read sandbox, before the bind of the checkout: no
+/// namespace shared with the host (no network), a new session, an empty
+/// env except `env`, and only `/usr` (and the `/lib`, `/lib64`, `/bin`,
+/// `/sbin` symlinks or binds of [`crate::sandbox::SYSTEM_DIRS`]), a new
+/// `/proc`, a minimal `/dev`, and an empty `/tmp`. No `/etc`, no `/home`,
+/// no state dir, no work dir, no other checkout.
+///
+/// `/usr` is visible: it holds the programs and the libraries of the
+/// image, and no secret (the secrets are under the state dir and in the
+/// daemon's env, which the sandbox does not get). A symlink in the
+/// checkout that points out of [`REPO_INSIDE`] finds nothing, or a
+/// file of `/usr`.
+fn jail_args(env: &[(String, String)]) -> Vec<String> {
+    let mut a: Vec<String> = [
+        "--unshare-all",
+        "--die-with-parent",
+        "--new-session",
+        "--clearenv",
+    ]
+    .map(String::from)
+    .into();
+    a.extend(crate::sandbox::system_dir_args(
+        &crate::sandbox::real_symlink,
+    ));
+    a.extend(["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"].map(String::from));
+    let fixed = [("PATH", "/usr/bin:/bin"), ("HOME", "/nonexistent")];
+    for (k, v) in fixed
+        .iter()
+        .map(|(k, v)| (*k, *v))
+        .chain(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+    {
+        a.extend(["--setenv".to_owned(), k.to_owned(), v.to_owned()]);
+    }
+    a
+}
+
+/// After a failed probe of the read sandbox, the time until the next
+/// probe. A short failure (no free user namespace or PID at that time)
+/// does not stop the agent trees until a restart.
+const JAIL_RETRY: Duration = Duration::from_secs(30);
+
+/// The last probe of the read sandbox and its time.
+type JailCache = std::sync::Mutex<Option<(Jail, Instant)>>;
+
+/// The read sandbox of this machine: `bwrap` on `PATH`, and a sandbox
+/// with [`jail_args`] that runs `git --version`. A good probe is kept; a
+/// failed probe is kept for [`JAIL_RETRY`], then the next call probes
+/// again.
+fn read_jail() -> Jail {
+    static JAIL: JailCache = std::sync::Mutex::new(None);
+    cached_jail(&JAIL, Instant::now(), probe_jail)
+}
+
+fn cached_jail(cache: &JailCache, now: Instant, probe: impl FnOnce() -> Jail) -> Jail {
+    let mut c = match cache.lock() {
+        Ok(c) => c,
+        Err(p) => p.into_inner(),
+    };
+    match &*c {
+        Some((j @ Jail::Bwrap(_), _)) => return j.clone(),
+        Some((j, at)) if now.saturating_duration_since(*at) < JAIL_RETRY => return j.clone(),
+        _ => {}
+    }
+    let j = probe();
+    if let Jail::Missing(why) = &j {
+        tracing::warn!("the repo browser cannot read agent trees: {why}");
+    }
+    *c = Some((j.clone(), now));
+    j
+}
+
+fn probe_jail() -> Jail {
+    let path = std::env::var("PATH").ok();
+    let Some(bwrap) = crate::sandbox::which("bwrap", path.as_deref()) else {
+        return Jail::Missing("bwrap is not on PATH".into());
+    };
+    let out = Command::new(&bwrap)
+        .args(jail_args(&[]))
+        .args(["--", "git", "--version"])
+        .env_clear()
+        .stdin(Stdio::null())
+        .output();
+    match out {
+        Ok(o) if o.status.success() => Jail::Bwrap(bwrap),
+        Ok(o) => Jail::Missing(format!(
+            "bwrap cannot make the read sandbox here: {}",
+            String::from_utf8_lossy(&o.stderr).trim()
+        )),
+        Err(e) => Jail::Missing(format!("cannot run {}: {e}", bwrap.display())),
+    }
+}
+
+/// True when this machine has a usable read sandbox for agent checkouts.
+pub fn read_sandbox_ready() -> bool {
+    matches!(read_jail(), Jail::Bwrap(_))
 }
 
 /// The stdout of one read command.
@@ -1056,8 +1272,132 @@ impl ReadOut {
     }
 }
 
+/// An agent checkout, opened for the reads of one request: the fd of its
+/// directory. [`CheckoutDir::open`] opens it once, with no symlink
+/// followed under the workspace. Every later read goes through this fd,
+/// never through a path that is resolved again: git binds it into the
+/// read sandbox ([`ReadGit::run`]), and `crate::repo_browse` reads the
+/// work tree from it. An agent that swaps the checkout dir or `.git` for
+/// a symlink after the open changes nothing that the daemon reads.
+#[derive(Debug)]
+pub struct CheckoutDir {
+    fd: OwnedFd,
+    /// The name in logs (for example `agent:<ULID>`).
+    label: String,
+    /// The end of the request: [`READ_REQUEST_TIME`] after the open.
+    until: Instant,
+}
+
+/// The longest that all the reads of one agent checkout take for one
+/// request (the git commands and the work of the daemon), from
+/// [`CheckoutDir::open`]. Each git command also has its own deadline, but
+/// many slow commands do not add up past this one.
+pub const READ_REQUEST_TIME: Duration = Duration::from_secs(20);
+
+impl CheckoutDir {
+    /// Open `<workspace>/<path>`. The workspace is the daemon's own dir
+    /// (`<work>/<project>/<agent>`: no agent can replace it, it is a mount
+    /// point in the sandbox); each part of `path` is opened from its parent
+    /// with `O_NOFOLLOW`. The messages do not name the workspace.
+    pub fn open(workspace: &Path, path: &str, label: impl Into<String>) -> Result<Self, GitError> {
+        let mut fd = openat(
+            nix::fcntl::AT_FDCWD,
+            workspace,
+            OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|e| match e {
+            Errno::ENOENT => GitError::Refused("the agent has no workspace".into()),
+            e => io(format!("the workspace: {e}")),
+        })?;
+        let parts: Vec<&str> = path.split('/').collect();
+        if path.is_empty()
+            || path.starts_with('/')
+            || parts
+                .iter()
+                .any(|p| matches!(*p, "" | "." | "..") || p.contains('\0'))
+        {
+            return Err(GitError::Refused(format!("bad checkout path `{path}`")));
+        }
+        for p in parts {
+            fd = openat(&fd, p, DIR_FLAGS, Mode::empty()).map_err(|e| match e {
+                Errno::ENOENT => GitError::Refused(format!("there is no checkout `{path}`")),
+                Errno::ELOOP | Errno::ENOTDIR => {
+                    GitError::Refused(format!("the checkout `{path}` is not a plain directory"))
+                }
+                e => io(format!("the checkout `{path}`: {e}")),
+            })?;
+        }
+        Ok(Self {
+            fd,
+            label: label.into(),
+            until: Instant::now() + READ_REQUEST_TIME,
+        })
+    }
+
+    /// `Timeout` when the time of the request ([`READ_REQUEST_TIME`]) is
+    /// over.
+    pub fn in_time(&self) -> Result<(), GitError> {
+        if Instant::now() >= self.until {
+            return Err(GitError::Timeout(READ_REQUEST_TIME));
+        }
+        Ok(())
+    }
+
+    /// Tests only: the time of the request is over.
+    #[cfg(test)]
+    pub(crate) fn expire(&mut self) {
+        self.until = Instant::now();
+    }
+
+    /// The fd of the checkout dir.
+    pub fn fd(&self) -> &OwnedFd {
+        &self.fd
+    }
+
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    fn git_dir(&self) -> Result<OwnedFd, GitError> {
+        open_dot_git(&self.fd)
+    }
+}
+
+/// The repo of one read command.
+#[derive(Debug, Clone, Copy)]
+pub enum ReadRepo<'a> {
+    /// The daemon's own bare mirror (`refresh_mirror`): git runs on the
+    /// host.
+    Mirror(&'a Path),
+    /// An agent checkout: git runs in the read sandbox.
+    Checkout(&'a CheckoutDir),
+}
+
+impl<'a> From<&'a Path> for ReadRepo<'a> {
+    fn from(p: &'a Path) -> Self {
+        Self::Mirror(p)
+    }
+}
+
+impl<'a> From<&'a PathBuf> for ReadRepo<'a> {
+    fn from(p: &'a PathBuf) -> Self {
+        Self::Mirror(p)
+    }
+}
+
+impl<'a> From<&'a CheckoutDir> for ReadRepo<'a> {
+    fn from(c: &'a CheckoutDir) -> Self {
+        Self::Checkout(c)
+    }
+}
+
 impl ReadGit {
     pub fn new(per_command: Duration) -> Self {
+        Self::with_jail(per_command, read_jail())
+    }
+
+    fn with_jail(per_command: Duration, jail: Jail) -> Self {
         let mut runner = Runner {
             config: HARDEN.iter().map(|s| (*s).to_owned()).collect(),
             env: Vec::new(),
@@ -1090,76 +1430,180 @@ impl ReadGit {
         Self {
             runner,
             per_command,
+            jail,
         }
     }
 
-    /// `git --no-pager -C <cwd> <args>`, at most `cap` bytes of stdout.
+    /// Tests only: the read commands of an agent checkout run on the host.
+    #[cfg(test)]
+    pub(crate) fn on_host(per_command: Duration) -> Self {
+        Self::with_jail(per_command, Jail::Host)
+    }
+
+    /// Tests only: a machine with no usable `bwrap`.
+    #[cfg(test)]
+    pub(crate) fn without_sandbox(per_command: Duration) -> Self {
+        Self::with_jail(per_command, Jail::Missing("no bwrap in this test".into()))
+    }
+
+    /// Tests only: a runner with the read sandbox, or `None` (with a
+    /// note on stderr) when this machine cannot make one.
+    #[cfg(test)]
+    pub(crate) fn sandboxed(per_command: Duration) -> Option<Self> {
+        match read_jail() {
+            Jail::Bwrap(_) => Some(Self::new(per_command)),
+            j => {
+                eprintln!("skipped: no read sandbox here ({j:?})");
+                None
+            }
+        }
+    }
+
+    /// `git --no-pager <args>` in `repo`, at most `cap` bytes of stdout.
     ///
-    /// `cwd` is a checkout when `<cwd>/.git` is there, else a bare repo.
     /// git gets the git dir and the work tree on the command line (no
     /// search in the parent dirs, no `core.worktree`). Just before git
-    /// starts, [`check_git_dir`] checks the layout of the git dir again:
-    /// an agent can add an alternates file or a symlink after the checks
-    /// of [`ReadGit::check_checkout`]. What remains is the window between
-    /// this check and the reads of git (a few milliseconds).
-    pub fn run(&self, cwd: &Path, args: &[&str], cap: usize) -> Result<ReadOut, GitError> {
-        let bare = match std::fs::symlink_metadata(cwd.join(".git")) {
-            Ok(_) => false,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
-            Err(e) => return Err(io(e)),
+    /// starts, [`check_git_dir`] checks the layout of the git dir again,
+    /// for a clear refusal of an alternates file or a symlink.
+    ///
+    /// For an agent checkout, that check is not the boundary. git runs in
+    /// `bwrap` ([`jail_args`]) with the checkout dir bound read-only at
+    /// [`REPO_INSIDE`] by its fd: the fd of the [`CheckoutDir`] is the
+    /// stdin of `bwrap`, and `--ro-bind-fd 0` binds the directory of that
+    /// fd. (`bwrap` mounts the dir that the fd names, compares the device
+    /// and inode of the mount with the fd, stops on a difference, and
+    /// closes the fd before git starts.) So a swap of the checkout path
+    /// has no effect, and inside the sandbox each symlink in `.git` that
+    /// points to another repo, to the state dir, or to any file of the
+    /// daemon finds nothing.
+    ///
+    /// The stderr of git never leaves this function: a failure is logged
+    /// at debug level and is [`GitError::Failed`] with an empty `stderr`
+    /// (with an `include.path` added in a race, stderr could show if a
+    /// file of the daemon exists, or a line of it).
+    pub fn run<'a>(
+        &self,
+        repo: impl Into<ReadRepo<'a>>,
+        args: &[&str],
+        cap: usize,
+    ) -> Result<ReadOut, GitError> {
+        let repo = repo.into();
+        let name = args.first().copied().unwrap_or("");
+        let mut deadline = Instant::now() + self.per_command;
+        if let ReadRepo::Checkout(c) = repo {
+            c.in_time()?;
+            deadline = deadline.min(c.until);
+        }
+        let r = match repo {
+            ReadRepo::Mirror(dir) => {
+                let fd = open_git_dir(dir, true)?;
+                check_git_dir(&fd, Path::new(""))?;
+                drop(fd);
+                let mut full = vec!["--no-pager", "--git-dir=.", "--work-tree=."];
+                full.extend_from_slice(args);
+                // `--no-pager` goes before the subcommand, so `exec` names
+                // the subcommand from args.
+                self.runner
+                    .exec_named(Some(dir), &full, name, Some(cap), deadline)
+            }
+            ReadRepo::Checkout(c) => {
+                check_git_dir(&c.git_dir()?, Path::new(".git"))?;
+                self.run_checkout(c, args, name, cap, deadline)
+            }
         };
-        let fd = open_git_dir(cwd, bare)?;
-        let shown = if bare {
-            cwd.to_owned()
-        } else {
-            cwd.join(".git")
+        let label = match repo {
+            ReadRepo::Mirror(dir) => dir.display().to_string(),
+            ReadRepo::Checkout(c) => c.label.clone(),
         };
-        check_git_dir(&fd, &shown)?;
-        drop(fd);
-        let mut full = vec![
-            "--no-pager",
-            if bare {
-                "--git-dir=."
-            } else {
-                "--git-dir=.git"
-            },
-            "--work-tree=.",
-        ];
-        full.extend_from_slice(args);
-        let deadline = Instant::now() + self.per_command;
-        // `--no-pager` goes before the subcommand, so `exec` names the
-        // subcommand from args.
-        let (bytes, truncated) = self.runner.exec_named(
-            Some(cwd),
-            &full,
-            args.first().copied().unwrap_or(""),
-            Some(cap),
-            deadline,
-        )?;
-        Ok(ReadOut { bytes, truncated })
+        match r {
+            Ok((bytes, truncated)) => Ok(ReadOut { bytes, truncated }),
+            Err(GitError::Failed {
+                command,
+                status,
+                stderr,
+            }) => {
+                tracing::debug!(tree = %label, %command, %status, %stderr, "a repo browser read failed");
+                Err(GitError::Failed {
+                    command,
+                    status,
+                    stderr: String::new(),
+                })
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    fn run_checkout(
+        &self,
+        c: &CheckoutDir,
+        args: &[&str],
+        name: &str,
+        cap: usize,
+        deadline: Instant,
+    ) -> Result<(Vec<u8>, bool), GitError> {
+        let bwrap = match &self.jail {
+            Jail::Bwrap(b) => b,
+            Jail::Missing(why) => {
+                tracing::debug!(tree = %c.label, "no read sandbox: {why}");
+                return Err(GitError::Unavailable(NO_READ_SANDBOX.into()));
+            }
+            #[cfg(test)]
+            Jail::Host => {
+                use std::os::fd::AsRawFd as _;
+                let p = std::fs::read_link(format!("/proc/self/fd/{}", c.fd.as_raw_fd()))
+                    .map_err(io)?;
+                let mut full = vec!["--no-pager", "--git-dir=.git", "--work-tree=."];
+                full.extend_from_slice(args);
+                return self
+                    .runner
+                    .exec_named(Some(&p), &full, name, Some(cap), deadline);
+            }
+        };
+        let mut cmd = Command::new(bwrap);
+        cmd.env_clear()
+            .args(jail_args(&self.runner.env))
+            .args(["--ro-bind-fd", "0", REPO_INSIDE, "--chdir", REPO_INSIDE])
+            .args(["--", "git"]);
+        for kv in &self.runner.config {
+            cmd.arg("-c").arg(kv);
+        }
+        cmd.arg("--no-pager")
+            .arg(format!("--git-dir={REPO_INSIDE}/.git"))
+            .arg(format!("--work-tree={REPO_INSIDE}"))
+            .args(args)
+            // The child gets the fd as its stdin (fd 0, no close-on-exec);
+            // no other process of the daemon gets it.
+            .stdin(Stdio::from(c.fd.try_clone().map_err(io)?));
+        // At the deadline or the cap, `spawn_wait` kills the process group
+        // of `bwrap`; `--die-with-parent` then kills git in the sandbox.
+        self.runner
+            .spawn_wait(cmd, name, &mut |_| {}, Some(cap), deadline)
     }
 
     /// [`ReadGit::run`] as text, with a cap of 4 MiB.
-    pub fn text(&self, cwd: &Path, args: &[&str]) -> Result<String, GitError> {
-        Ok(self.run(cwd, args, 4 << 20)?.text())
+    pub fn text<'a>(
+        &self,
+        repo: impl Into<ReadRepo<'a>>,
+        args: &[&str],
+    ) -> Result<String, GitError> {
+        Ok(self.run(repo, args, 4 << 20)?.text())
     }
 
-    /// The checks before a read in a repo that an agent controls: `dir`
-    /// is a plain directory (not a symlink) with a plain `.git` directory
-    /// (not a linked worktree), the layout of [`check_git_dir`] (no
-    /// alternates file), no symlink or special file under `.git`, and a
-    /// copy of `.git/config` has only keys of the allowlist
-    /// ([`config_allowed`]).
-    pub fn check_checkout(&self, dir: &Path, store: &RunDirs) -> Result<(), GitError> {
-        let meta = std::fs::symlink_metadata(dir).map_err(io)?;
-        if !meta.is_dir() {
-            return Err(GitError::Refused(format!(
-                "{} is not a plain directory",
-                dir.display()
-            )));
-        }
-        check_workspace_repo(dir)?;
-        check_config_copy(dir, store, &self.runner)
+    /// The checks before the reads of a repo that an agent controls:
+    /// `.git` is a plain directory (not a symlink, not a linked worktree),
+    /// the layout of [`check_git_dir`] (no alternates file), and a copy of
+    /// `.git/config` has only keys of the allowlist ([`config_allowed`]).
+    ///
+    /// It also walks all of `.git` once ([`check_no_links`], bounded):
+    /// a FIFO or a device in `.git` (a ref, the HEAD ref) would hold each
+    /// git command until its deadline. The walk is not the boundary for a
+    /// symlink (the read sandbox is), but it gives a clear `409` for one.
+    pub fn check_checkout(&self, c: &CheckoutDir, store: &RunDirs) -> Result<(), GitError> {
+        let gd = c.git_dir()?;
+        let shown = Path::new(".git");
+        check_git_dir(&gd, shown)?;
+        check_no_links(&gd, shown)?;
+        check_config_copy(&gd, store, &self.runner)
     }
 }
 
@@ -1606,6 +2050,106 @@ mod tests {
         }
         assert!(!marker.exists());
         assert!(!dest.join("b.txt").exists());
+    }
+
+    /// N2 (docs/security-review.md §15): the walk of `.git` before an
+    /// update opens each dir from its parent's fd, so a deep chain costs
+    /// one open for each level; it stops at [`MAX_GIT_DEPTH`] levels. A
+    /// loose object as a symlink is refused. The messages name no path of
+    /// the daemon.
+    #[test]
+    fn the_link_walk_is_linear_and_bounded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let origin = bare_repo(tmp.path());
+        let dest = tmp.path().join("ws/proj");
+        let c = checkout(tmp.path(), &origin, &dest);
+        clone_or_update(&c, &mut |_| {}).unwrap();
+        check_workspace_repo(&dest).unwrap();
+
+        // A chain of 2000 dirs under `.git` (too long for one path).
+        let mut fd = open_git_dir(&dest, false).unwrap();
+        for _ in 0..2000 {
+            nix::sys::stat::mkdirat(&fd, "d", Mode::from_bits_truncate(0o755)).unwrap();
+            fd = openat(&fd, "d", DIR_FLAGS, Mode::empty()).unwrap();
+        }
+        drop(fd);
+        let start = Instant::now();
+        match check_workspace_repo(&dest) {
+            Err(GitError::Refused(m)) => {
+                assert!(m.contains("levels"), "{m}");
+                assert!(!m.contains(tmp.path().to_str().unwrap()), "{m}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            start.elapsed()
+        );
+        assert!(matches!(
+            clone_or_update(&c, &mut |_| {}),
+            Err(GitError::Refused(m)) if m.contains("levels")
+        ));
+        sh(&dest, "rm -rf .git/d");
+
+        // A deep chain under the cap is fine: each level is one open.
+        let mut fd = open_git_dir(&dest, false).unwrap();
+        for _ in 0..MAX_GIT_DEPTH - 1 {
+            nix::sys::stat::mkdirat(&fd, "d", Mode::from_bits_truncate(0o755)).unwrap();
+            fd = openat(&fd, "d", DIR_FLAGS, Mode::empty()).unwrap();
+        }
+        drop(fd);
+        check_workspace_repo(&dest).unwrap();
+        sh(&dest, "rm -rf .git/d");
+
+        // A loose object as a symlink.
+        let id = git_out(&dest, &["rev-parse", "HEAD"]);
+        let obj = dest.join(".git/objects").join(&id[..2]).join(&id[2..]);
+        if obj.exists() {
+            std::fs::remove_file(&obj).unwrap();
+        } else {
+            std::fs::create_dir_all(obj.parent().unwrap()).unwrap();
+        }
+        std::os::unix::fs::symlink("/etc/hostname", &obj).unwrap();
+        match check_workspace_repo(&dest) {
+            Err(GitError::Refused(m)) => {
+                assert!(m.contains("symlink"), "{m}");
+                assert!(m.starts_with(".git/objects/"), "{m}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// M2 (docs/security-review.md §15): a good probe of the read sandbox
+    /// is kept; a failed probe is kept for [`JAIL_RETRY`] only.
+    #[test]
+    fn a_failed_sandbox_probe_is_tried_again() {
+        let cache: JailCache = std::sync::Mutex::new(None);
+        let t0 = Instant::now();
+        let probes = std::cell::Cell::new(0);
+        let fail = || {
+            probes.set(probes.get() + 1);
+            Jail::Missing("no userns now".into())
+        };
+        let good = || {
+            probes.set(probes.get() + 1);
+            Jail::Bwrap(PathBuf::from("/usr/bin/bwrap"))
+        };
+        assert!(matches!(cached_jail(&cache, t0, fail), Jail::Missing(_)));
+        // Within the retry time: no new probe.
+        let soon = t0 + JAIL_RETRY / 2;
+        assert!(matches!(cached_jail(&cache, soon, good), Jail::Missing(_)));
+        assert_eq!(probes.get(), 1);
+        // After it: a new probe, and a good one is kept.
+        let later = t0 + JAIL_RETRY;
+        assert!(matches!(cached_jail(&cache, later, good), Jail::Bwrap(_)));
+        assert_eq!(probes.get(), 2);
+        let much_later = later + JAIL_RETRY * 10;
+        assert!(matches!(
+            cached_jail(&cache, much_later, fail),
+            Jail::Bwrap(_)
+        ));
+        assert_eq!(probes.get(), 2);
     }
 
     #[test]

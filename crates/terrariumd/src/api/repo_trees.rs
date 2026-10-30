@@ -11,6 +11,13 @@
 //! [`MIRROR_MIN_GAP`] with `?refresh=true`). The fetch uses the repo's
 //! secret as a checkout does (`crate::git`), outside every sandbox. No
 //! agent can write the mirror.
+//!
+//! An agent tree is opened once for each request ([`CheckoutDir`]), and
+//! git reads it only in the read sandbox (`crate::git::ReadGit`). With no
+//! usable `bwrap`, a read of an agent tree is `503 unavailable`.
+//!
+//! An error answer has no stderr of a read command and no path of the
+//! daemon ([`browse_error`], [`scrub`]): the API callers include agents.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -28,8 +35,8 @@ use serde_json::json;
 use super::repos::git_error;
 use super::{ApiQuery, NEXT_CURSOR, Shared};
 use crate::actor::Actor;
-use crate::error::{ApiError, ApiResult};
-use crate::git::{self, Checkout, ReadGit};
+use crate::error::{ApiError, ApiResult, Code};
+use crate::git::{self, Checkout, CheckoutDir, GitError, ReadGit};
 use crate::policy;
 use crate::repo_browse::{self as browse, BrowseError, LineBudget, Tree};
 use crate::secrets::{self, RunDirs};
@@ -123,9 +130,14 @@ async fn ensure_mirror(state: &Shared, repo: &Repo, force: bool) -> ApiResult<Mi
                 let msg = e.to_string();
                 tracing::warn!(repo = %repo.id, "mirror fetch failed: {msg}");
                 if !dest.join("HEAD").exists() {
-                    return Err(git_error(e));
+                    let mut err = git_error(e);
+                    err.message = scrub(state, &err.message);
+                    err.details = err
+                        .details
+                        .map(|d| serde_json::Value::String(scrub(state, &d.to_string())));
+                    return Err(err);
                 }
-                m.error = Some(msg);
+                m.error = Some(scrub(state, &msg));
             }
         }
     }
@@ -144,12 +156,39 @@ pub struct MirrorView {
     pub error: Option<String>,
 }
 
+/// Replace the state dir and the work dir in `m` with `<state>` and
+/// `<work>`: a message of a mirror fetch can name the mirror dir.
+fn scrub(state: &Shared, m: &str) -> String {
+    let mut m = m.to_owned();
+    for (dir, name) in [(&state.state_dir, "<state>"), (&state.work_dir, "<work>")] {
+        let d = dir.to_string_lossy();
+        if !d.is_empty() && d != "/" {
+            m = m.replace(d.as_ref(), name);
+        }
+    }
+    m
+}
+
+/// The answer to a failed read. The refusals of the browser and of the
+/// checks in `crate::git` name paths relative to the checkout only. A
+/// failed git command is a fixed message with no stderr (`ReadGit` keeps
+/// it out already), and an I/O error is a fixed message (it is logged).
 fn browse_error(e: BrowseError) -> ApiError {
     match e {
         BrowseError::BadRequest(m) => ApiError::invalid(m),
         BrowseError::NotFound(m) => ApiError::not_found(m),
-        BrowseError::Git(g) => git_error(g),
-        BrowseError::Io(m) => ApiError::internal(m),
+        BrowseError::Git(GitError::Refused(m)) => ApiError::conflict(m),
+        BrowseError::Git(GitError::Failed {
+            command, status, ..
+        }) => ApiError::invalid(format!("git {command} failed ({status})")),
+        BrowseError::Git(GitError::Timeout(d)) => {
+            ApiError::internal(format!("git did not finish in {}s", d.as_secs()))
+        }
+        BrowseError::Git(GitError::Unavailable(m)) => ApiError::new(Code::Unavailable, m),
+        BrowseError::Git(GitError::Io(m)) | BrowseError::Io(m) => {
+            tracing::warn!("repo browser: {m}");
+            ApiError::internal("the repo browser cannot read the tree (see the daemon log)")
+        }
     }
 }
 
@@ -183,7 +222,7 @@ enum Opened {
     },
     Agent {
         tree: Tree,
-        dir: PathBuf,
+        dir: Arc<CheckoutDir>,
         agent_id: String,
         agent: String,
     },
@@ -230,6 +269,22 @@ fn checkout_dir(repo: &Repo, a: &agents::AgentView) -> PathBuf {
     a.agent.workspace.join(&repo.path)
 }
 
+/// Open the checkout of `repo` for `a` and check it, on the blocking pool.
+fn open_checkout(
+    g: &ReadGit,
+    repo: &Repo,
+    a: &agents::AgentView,
+    store: &RunDirs,
+) -> Result<CheckoutDir, BrowseError> {
+    let c = CheckoutDir::open(
+        &a.agent.workspace,
+        &repo.path,
+        format!("agent:{}/{}", a.agent.id, repo.path),
+    )?;
+    g.check_checkout(&c, store)?;
+    Ok(c)
+}
+
 async fn agent_tree(state: &Shared, repo: &Repo, ulid: &str) -> ApiResult<Opened> {
     let missing = || ApiError::not_found(format!("no tree `agent:{ulid}` for this repo"));
     if ulid.parse::<terrarium_core::AgentId>().is_err() {
@@ -249,8 +304,8 @@ async fn agent_tree(state: &Shared, repo: &Repo, ulid: &str) -> ApiResult<Opened
         return Err(missing());
     }
     let store = RunDirs::new(&state.state_dir);
-    let d = dir.clone();
-    blocking(move |g| Ok(g.check_checkout(&d, &store)?)).await?;
+    let (r, view) = (repo.clone(), a.clone());
+    let dir = Arc::new(blocking(move |g| open_checkout(g, &r, &view, &store)).await?);
     Ok(Opened::Agent {
         tree: Tree::Checkout { dir: dir.clone() },
         dir,
@@ -337,25 +392,27 @@ async fn trees(
         }
         let id = format!("agent:{}", a.agent.id);
         let name = a.agent.name.clone();
+        let agent_id = a.agent.id.to_string();
         let store = store.clone();
         let default = default_branch.clone();
+        let r = repo.clone();
         let r = blocking(move |g| {
-            g.check_checkout(&dir, &store)?;
-            let info = browse::checkout_info(g, &dir, default.as_deref());
-            let dirty = browse::dirty(g, &dir, browse::LIST_BUDGET).ok();
+            let c = open_checkout(g, &r, &a, &store)?;
+            let info = browse::checkout_info(g, &c, default.as_deref());
+            let dirty = browse::dirty(g, &c, browse::LIST_BUDGET).ok();
             Ok((info, dirty))
         })
         .await;
         let label = |branch: Option<&str>| format!("{name} · {}", branch.unwrap_or("detached"));
         out.push(match r {
             Ok((info, dirty)) => json!({
-                "id": id, "kind": "agent", "agent": name, "agent_id": a.agent.id.to_string(),
+                "id": id, "kind": "agent", "agent": name, "agent_id": agent_id,
                 "label": label(info.branch.as_deref()), "branch": info.branch, "head": info.head,
                 "base_ref": info.base_ref, "base": info.base, "ahead": info.ahead,
                 "behind": info.behind, "dirty": dirty,
             }),
             Err(e) => json!({
-                "id": id, "kind": "agent", "agent": name, "agent_id": a.agent.id.to_string(),
+                "id": id, "kind": "agent", "agent": name, "agent_id": agent_id,
                 "label": label(None), "error": e.message,
             }),
         });
@@ -545,4 +602,38 @@ async fn commit(
     let repo = load_repo(&state, &actor, id).await?;
     let t = open(&state, &repo, &tree).await?.tree();
     Ok(Json(blocking(move |g| browse::commit(g, &t, &sha)).await?))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    /// N3 (docs/security-review.md §15): the answer of a failed read has
+    /// no stderr and no path of the daemon.
+    #[test]
+    fn a_read_error_has_no_stderr_and_no_daemon_path() {
+        let secret = "/state/credentials/x: TOPSECRET";
+        for e in [
+            BrowseError::Git(GitError::Failed {
+                command: "log".into(),
+                status: "exit 128".into(),
+                stderr: secret.into(),
+            }),
+            BrowseError::Git(GitError::Io(secret.into())),
+            BrowseError::Io(secret.into()),
+        ] {
+            let a = browse_error(e);
+            let text = format!("{} {:?}", a.message, a.details);
+            assert!(!text.contains("TOPSECRET"), "{text}");
+            assert!(!text.contains("/state"), "{text}");
+            assert!(a.details.is_none(), "{text}");
+        }
+        let a = browse_error(BrowseError::Git(GitError::Unavailable(
+            git::NO_READ_SANDBOX.into(),
+        )));
+        assert_eq!(a.code, Code::Unavailable);
+        assert_eq!(a.code.status().as_u16(), 503);
+        assert!(a.message.contains("bwrap"));
+    }
 }

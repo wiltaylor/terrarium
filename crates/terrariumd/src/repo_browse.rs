@@ -3,12 +3,21 @@
 //! bare mirror of the repo, `crate::git::refresh_mirror`) or the checkout
 //! of the repo in an agent workspace (`<work>/<project>/<agent>/<path>`).
 //!
-//! The daemon reads an agent checkout outside every sandbox, and the agent
-//! controls each file in it. So:
+//! The daemon runs outside every sandbox, and the agent controls each file
+//! of its checkout. So:
 //!
-//! - git runs through [`ReadGit`]: the hardening of a workspace update, no
-//!   external diff, no textconv, no attributes file, no signature check, a
-//!   deadline and an output cap on each command. Before the first command,
+//! - The checkout is opened once for each request ([`CheckoutDir`]: no
+//!   symlink followed under the workspace). Every read goes through that
+//!   fd: git binds it into its sandbox, and the daemon reads the work tree
+//!   from it ([`Root`]). No read resolves the checkout path again.
+//! - git runs through [`ReadGit`]: for an agent checkout, in a `bwrap`
+//!   sandbox that shows only the checkout (read-only, by its fd) and
+//!   `/usr`, with no network. A symlink or an alternates file in `.git`
+//!   that names another repo or a daemon file finds nothing there. Also
+//!   the hardening of a workspace update, no external diff, no textconv,
+//!   no attributes file, no signature check, a deadline and an output cap
+//!   on each command. With no usable `bwrap`, an agent checkout is not
+//!   read ([`GitError::Unavailable`]). Before the first command,
 //!   [`ReadGit::check_checkout`] checks a copy of `.git/config` against
 //!   the allowlist.
 //! - Only commands that run no filter driver: `rev-parse`, `symbolic-ref`,
@@ -30,8 +39,10 @@
 //!   checked with [`check_git_path`] before the daemon opens it, and
 //!   [`Root::lookup`] refuses `..`, `.`, `.git`, and an absolute path too.
 //! - [`ReadGit`] refuses a checkout with an alternates file or a symlink
-//!   in `.git` (the objects or files of another repo), before each
-//!   command too (`crate::git`).
+//!   in place of a main name of `.git`, before each command too
+//!   (`crate::git`), for a clear error. The sandbox is the boundary.
+//! - An error has no stderr of git and no path of the daemon: paths are
+//!   relative to the checkout.
 //! - The changes in the work tree (not staged) are found without git: the
 //!   daemon reads each index entry's file, makes its blob ID in Rust
 //!   (`blob <len>\0<bytes>`), and makes the diff with `similar`. `git
@@ -48,6 +59,7 @@ use std::io::Read;
 use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use nix::errno::Errno;
@@ -55,7 +67,7 @@ use nix::fcntl::{AtFlags, OFlag, openat, readlinkat};
 use nix::sys::stat::{FileStat, Mode, SFlag, fstat, fstatat};
 use serde::Serialize;
 
-use crate::git::{GitError, ReadGit};
+use crate::git::{CheckoutDir, GitError, ReadGit, ReadRepo};
 
 /// The longest one git command of the browser may take.
 pub const CMD_TIMEOUT: Duration = Duration::from_secs(10);
@@ -120,16 +132,17 @@ fn io_err(e: impl std::fmt::Display) -> BrowseError {
 pub enum Tree {
     /// The daemon's bare mirror, at the commit of `rev`.
     Mirror { git_dir: PathBuf, rev: String },
-    /// An agent checkout: git reads its object store and index, the
-    /// daemon reads its work tree.
-    Checkout { dir: PathBuf },
+    /// An agent checkout, opened ([`CheckoutDir`]): git reads its object
+    /// store and index in the read sandbox, the daemon reads its work
+    /// tree from the same fd.
+    Checkout { dir: Arc<CheckoutDir> },
 }
 
 impl Tree {
-    fn git_dir(&self) -> &Path {
+    fn repo(&self) -> ReadRepo<'_> {
         match self {
-            Tree::Mirror { git_dir, .. } => git_dir,
-            Tree::Checkout { dir } => dir,
+            Tree::Mirror { git_dir, .. } => ReadRepo::Mirror(git_dir),
+            Tree::Checkout { dir } => ReadRepo::Checkout(dir),
         }
     }
 }
@@ -210,8 +223,9 @@ enum Node {
     Other,
 }
 
-/// The checkout's directory, opened once. Every lookup walks from it, one
-/// component at a time, with `O_NOFOLLOW`.
+/// The checkout's directory: the fd of the [`CheckoutDir`], which the
+/// daemon opened once. Every lookup walks from it, one component at a
+/// time, with `O_NOFOLLOW`; no lookup uses a path from the top.
 struct Root(OwnedFd);
 
 const DIR_FLAGS: OFlag = OFlag::O_RDONLY
@@ -224,25 +238,8 @@ fn kind_of(st: &FileStat) -> SFlag {
 }
 
 impl Root {
-    /// Open `dir`. Its last component must not be a symlink.
-    fn open(dir: &Path) -> Result<Self, BrowseError> {
-        let parent = dir.parent().ok_or_else(|| io_err("no parent dir"))?;
-        let name = dir.file_name().ok_or_else(|| io_err("no dir name"))?;
-        let p = openat(
-            nix::fcntl::AT_FDCWD,
-            parent,
-            OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC,
-            Mode::empty(),
-        )
-        .map_err(|e| io_err(format!("{}: {e}", parent.display())))?;
-        let fd = openat(&p, name, DIR_FLAGS, Mode::empty()).map_err(|e| match e {
-            Errno::ENOENT => BrowseError::NotFound(format!("{} is gone", dir.display())),
-            Errno::ELOOP | Errno::ENOTDIR => {
-                BrowseError::BadRequest(format!("{} is not a plain directory", dir.display()))
-            }
-            e => io_err(format!("{}: {e}", dir.display())),
-        })?;
-        Ok(Self(fd))
+    fn of(c: &CheckoutDir) -> Result<Self, BrowseError> {
+        Ok(Self(c.fd().try_clone().map_err(io_err)?))
     }
 
     /// Look up a [`clean_path`] path (`""` is the root). Any other path,
@@ -444,16 +441,16 @@ pub struct CheckoutInfo {
 
 // --- git helpers ----------------------------------------------------------
 
-fn opt_line(git: &ReadGit, dir: &Path, args: &[&str]) -> Option<String> {
-    git.text(dir, args)
+fn opt_line(git: &ReadGit, repo: ReadRepo<'_>, args: &[&str]) -> Option<String> {
+    git.text(repo, args)
         .ok()
         .map(|s| s.trim().to_owned())
         .filter(|s| !s.is_empty())
 }
 
 /// The object format of the repo: `sha1` or `sha256`.
-fn object_format(git: &ReadGit, dir: &Path) -> String {
-    opt_line(git, dir, &["rev-parse", "--show-object-format"]).unwrap_or_else(|| "sha1".into())
+fn object_format(git: &ReadGit, repo: ReadRepo<'_>) -> String {
+    opt_line(git, repo, &["rev-parse", "--show-object-format"]).unwrap_or_else(|| "sha1".into())
 }
 
 fn empty_tree(format: &str) -> &'static str {
@@ -503,24 +500,33 @@ pub fn is_text(b: &[u8]) -> bool {
 }
 
 /// The HEAD commit, or `None` on an unborn branch.
-fn head(git: &ReadGit, dir: &Path) -> Option<String> {
-    opt_line(git, dir, &["rev-parse", "-q", "--verify", "HEAD^{commit}"])
+fn head(git: &ReadGit, repo: ReadRepo<'_>) -> Option<String> {
+    opt_line(git, repo, &["rev-parse", "-q", "--verify", "HEAD^{commit}"])
 }
 
 /// The default branch of a mirror: its HEAD.
 pub fn mirror_default_branch(git: &ReadGit, git_dir: &Path) -> Option<String> {
-    opt_line(git, git_dir, &["symbolic-ref", "-q", "--short", "HEAD"])
+    opt_line(
+        git,
+        git_dir.into(),
+        &["symbolic-ref", "-q", "--short", "HEAD"],
+    )
 }
 
 /// The commit of `rev` in a repo, if it has one.
-pub fn resolve(git: &ReadGit, dir: &Path, rev: &str) -> Option<String> {
+pub fn resolve<'a>(git: &ReadGit, repo: impl Into<ReadRepo<'a>>, rev: &str) -> Option<String> {
     let spec = format!("{rev}^{{commit}}");
-    opt_line(git, dir, &["rev-parse", "-q", "--verify", &spec])
+    opt_line(git, repo.into(), &["rev-parse", "-q", "--verify", &spec])
 }
 
 /// The facts of an agent checkout. `default_branch` is the repo's; with
 /// none, `refs/remotes/origin/HEAD` names it.
-pub fn checkout_info(git: &ReadGit, dir: &Path, default_branch: Option<&str>) -> CheckoutInfo {
+pub fn checkout_info(
+    git: &ReadGit,
+    dir: &CheckoutDir,
+    default_branch: Option<&str>,
+) -> CheckoutInfo {
+    let dir = ReadRepo::from(dir);
     let head = head(git, dir);
     let branch = opt_line(git, dir, &["symbolic-ref", "-q", "--short", "HEAD"]);
     let default = default_branch.map(str::to_owned).or_else(|| {
@@ -648,7 +654,7 @@ pub fn list_dir(git: &ReadGit, tree: &Tree, path: &str) -> Result<Listing, Brows
             truncated |= out.truncated;
         }
         Tree::Checkout { dir } => {
-            let root = Root::open(dir)?;
+            let root = Root::of(dir)?;
             let Node::Dir(fd) = root.lookup(path)? else {
                 return Err(not_dir());
             };
@@ -741,7 +747,7 @@ pub fn read_file(git: &ReadGit, tree: &Tree, path: &str) -> Result<FileData, Bro
                 truncated: out.truncated,
             })
         }
-        Tree::Checkout { dir } => match Root::open(dir)?.lookup(path)? {
+        Tree::Checkout { dir } => match Root::of(dir)?.lookup(path)? {
             Node::File(f, size) => {
                 let mut bytes = Vec::new();
                 f.take(MAX_FILE as u64)
@@ -821,7 +827,7 @@ fn split_section(sec: &str) -> (&'static str, bool, &str) {
 /// and the patches from `-p`, in the same order.
 fn git_diff(
     git: &ReadGit,
-    dir: &Path,
+    dir: ReadRepo<'_>,
     args: &[&str],
     budget: &mut LineBudget,
 ) -> Result<DiffSet, BrowseError> {
@@ -917,7 +923,7 @@ pub fn diff_commits(
     to: &str,
     budget: &mut LineBudget,
 ) -> Result<DiffSet, BrowseError> {
-    git_diff(git, tree.git_dir(), &["diff-tree", "-r", from, to], budget)
+    git_diff(git, tree.repo(), &["diff-tree", "-r", from, to], budget)
 }
 
 /// A unified diff of two texts, made in Rust, until `deadline`. After the
@@ -966,7 +972,7 @@ struct IndexEntry {
 #[allow(clippy::type_complexity)]
 fn index_entries(
     git: &ReadGit,
-    dir: &Path,
+    dir: &CheckoutDir,
 ) -> Result<(Vec<IndexEntry>, Vec<(String, &'static str)>, bool), BrowseError> {
     let out = git.run(dir, &["ls-files", "-s", "-z"], 64 << 20)?;
     let mut v = Vec::new();
@@ -1053,7 +1059,7 @@ fn compare(
 }
 
 /// The counts of the uncommitted changes of a checkout (no patches).
-pub fn dirty(git: &ReadGit, dir: &Path, budget: HashBudget) -> Result<Dirty, BrowseError> {
+pub fn dirty(git: &ReadGit, dir: &CheckoutDir, budget: HashBudget) -> Result<Dirty, BrowseError> {
     let u = uncommitted_inner(git, dir, budget, false, &mut LineBudget(0))?;
     Ok(Dirty {
         staged: u.0.staged.files.len(),
@@ -1069,7 +1075,7 @@ pub fn dirty(git: &ReadGit, dir: &Path, budget: HashBudget) -> Result<Dirty, Bro
 /// --others`, which reads no file content).
 pub fn uncommitted(
     git: &ReadGit,
-    dir: &Path,
+    dir: &CheckoutDir,
     budget: &mut LineBudget,
 ) -> Result<Uncommitted, BrowseError> {
     Ok(uncommitted_inner(git, dir, FULL_BUDGET, true, budget)?.0)
@@ -1077,15 +1083,16 @@ pub fn uncommitted(
 
 fn uncommitted_inner(
     git: &ReadGit,
-    dir: &Path,
+    dir: &CheckoutDir,
     hash: HashBudget,
     patches: bool,
     budget: &mut LineBudget,
 ) -> Result<(Uncommitted, bool), BrowseError> {
-    let format = object_format(git, dir);
-    let base = head(git, dir).unwrap_or_else(|| empty_tree(&format).to_owned());
+    let repo = ReadRepo::from(dir);
+    let format = object_format(git, repo);
+    let base = head(git, repo).unwrap_or_else(|| empty_tree(&format).to_owned());
     let staged = if patches {
-        git_diff(git, dir, &["diff-index", "--cached", &base], budget)?
+        git_diff(git, repo, &["diff-index", "--cached", &base], budget)?
     } else {
         let out = git.run(
             dir,
@@ -1121,7 +1128,7 @@ fn uncommitted_inner(
         }
     };
 
-    let root = Root::open(dir)?;
+    let root = Root::of(dir)?;
     let (entries, refused, index_cut) = index_entries(git, dir)?;
     let mut left = hash;
     let mut partial = index_cut;
@@ -1153,6 +1160,7 @@ fn uncommitted_inner(
         if e.mode == "160000" {
             continue;
         }
+        dir.in_time()?;
         let state = compare(&root, e, &format, &mut left)?;
         let mut f = FileDiff {
             path: e.path.clone(),
@@ -1291,7 +1299,7 @@ pub fn commits(
     let skip_s = format!("--skip={skip}");
     let max = format!("--max-count={}", limit + 1);
     let out = git.text(
-        tree.git_dir(),
+        tree.repo(),
         &["log", "--no-color", LOG_FORMAT, &skip_s, &max, range, "--"],
     )?;
     let mut v: Vec<Commit> = out
@@ -1318,7 +1326,7 @@ pub fn commits(
 /// empty tree for a root commit).
 pub fn commit(git: &ReadGit, tree: &Tree, sha: &str) -> Result<CommitDetail, BrowseError> {
     check_sha(sha)?;
-    let dir = tree.git_dir();
+    let dir = tree.repo();
     let full = resolve(git, dir, sha)
         .ok_or_else(|| BrowseError::NotFound(format!("no commit `{sha}` in this tree")))?;
     let out = git.text(
@@ -1382,8 +1390,22 @@ mod tests {
         assert!(st.success(), "{script}");
     }
 
+    /// The runner of the tests: in the read sandbox, or on the host (with
+    /// a note) when this machine cannot make one.
     fn git() -> ReadGit {
-        ReadGit::new(CMD_TIMEOUT)
+        ReadGit::sandboxed(CMD_TIMEOUT).unwrap_or_else(|| ReadGit::on_host(CMD_TIMEOUT))
+    }
+
+    /// The checkout at `dir`, opened as the API opens it.
+    fn open(dir: &Path) -> CheckoutDir {
+        let name = dir.file_name().unwrap().to_str().unwrap();
+        CheckoutDir::open(dir.parent().unwrap(), name, "test").unwrap()
+    }
+
+    fn tree(dir: &Path) -> Tree {
+        Tree::Checkout {
+            dir: Arc::new(open(dir)),
+        }
     }
 
     /// A checkout `ws/proj` of `origin.git`: `main` has `a.txt` and
@@ -1435,7 +1457,7 @@ mod tests {
         std::os::unix::fs::symlink(&secret, dir.join("out")).unwrap();
         std::os::unix::fs::symlink(secret.join("key"), dir.join("key")).unwrap();
         std::os::unix::fs::symlink("../../secret", dir.join("rel")).unwrap();
-        let tree = Tree::Checkout { dir: dir.clone() };
+        let tree = tree(&dir);
         let g = git();
 
         let root = list_dir(&g, &tree, "").unwrap();
@@ -1469,14 +1491,17 @@ mod tests {
             Err(BrowseError::NotFound(_))
         ));
 
-        // The checkout dir itself as a symlink is refused.
+        // The checkout dir itself as a symlink is refused, and the
+        // message does not name the workspace.
         let link = t.path().join("ws/link");
         std::os::unix::fs::symlink(&dir, &link).unwrap();
-        let tree = Tree::Checkout { dir: link };
-        assert!(matches!(
-            list_dir(&g, &tree, ""),
-            Err(BrowseError::BadRequest(_))
-        ));
+        match CheckoutDir::open(&t.path().join("ws"), "link", "t") {
+            Err(GitError::Refused(m)) => {
+                assert!(m.contains("not a plain directory"), "{m}");
+                assert!(!m.contains(t.path().to_str().unwrap()), "{m}");
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
@@ -1484,7 +1509,7 @@ mod tests {
         let t = tempfile::tempdir().unwrap();
         let dir = checkout(t.path());
         nix::unistd::mkfifo(&dir.join("pipe"), Mode::from_bits_truncate(0o644)).unwrap();
-        let tree = Tree::Checkout { dir };
+        let tree = tree(&dir);
         let l = list_dir(&git(), &tree, "").unwrap();
         assert!(
             l.entries
@@ -1502,7 +1527,7 @@ mod tests {
         let t = tempfile::tempdir().unwrap();
         let dir = checkout(t.path());
         let g = git();
-        let tree = Tree::Checkout { dir: dir.clone() };
+        let tree = tree(&dir);
         let f = read_file(&g, &tree, "docs/b.md").unwrap();
         assert_eq!(f.bytes, b"# B\n");
         assert!(!f.truncated);
@@ -1561,8 +1586,9 @@ mod tests {
         std::fs::write(dir.join("long.txt"), &long).unwrap();
         sh(&dir, "git add long.txt && git commit -q -m long");
         let g = git();
-        let tree = Tree::Checkout { dir: dir.clone() };
-        let info = checkout_info(&g, &dir, Some("main"));
+        let c = Arc::new(open(&dir));
+        let tree = Tree::Checkout { dir: c.clone() };
+        let info = checkout_info(&g, &c, Some("main"));
         let mut budget = LineBudget::default();
         let d = diff_commits(
             &g,
@@ -1641,8 +1667,9 @@ mod tests {
         let t = tempfile::tempdir().unwrap();
         let (dir, marker) = hostile(t.path());
         let store = RunDirs::new(&t.path().join("state"));
-        match git().check_checkout(&dir, &store) {
+        match git().check_checkout(&open(&dir), &store) {
             Err(GitError::Refused(m)) => {
+                assert!(!m.contains(t.path().to_str().unwrap()), "{m}");
                 assert!(m.contains("filter.x.clean"), "{m}");
                 assert!(m.contains("diff.x.textconv"), "{m}");
                 assert!(m.contains("core.fsmonitor"), "{m}");
@@ -1653,32 +1680,42 @@ mod tests {
         // A clean config passes.
         std::fs::create_dir_all(t.path().join("c")).unwrap();
         let clean = checkout(&t.path().join("c"));
-        git().check_checkout(&clean, &store).unwrap();
+        git().check_checkout(&open(&clean), &store).unwrap();
     }
 
     /// The race of `crate::git`: the drivers are in the live config (as
     /// after an edit that follows the check). No call of the browser runs
-    /// one of them.
+    /// one of them. git on the host shows it for the commands themselves
+    /// (a driver in the sandbox would leave no mark); the sandbox runs
+    /// the same calls too, when this machine has one.
     #[test]
     fn no_filter_textconv_or_external_diff_runs() {
+        let mut runners = vec![ReadGit::on_host(CMD_TIMEOUT)];
+        runners.extend(ReadGit::sandboxed(CMD_TIMEOUT));
+        for g in runners {
+            hostile_reads(&g);
+        }
+    }
+
+    fn hostile_reads(g: &ReadGit) {
         let t = tempfile::tempdir().unwrap();
         let (dir, marker) = hostile(t.path());
-        let g = git();
-        let tree = Tree::Checkout { dir: dir.clone() };
+        let c = Arc::new(open(&dir));
+        let tree = Tree::Checkout { dir: c.clone() };
 
-        let l = list_dir(&g, &tree, "").unwrap();
+        let l = list_dir(g, &tree, "").unwrap();
         assert!(l.entries.iter().any(|e| e.name == ".gitattributes"));
         assert_eq!(
-            read_file(&g, &tree, "a.txt").unwrap().bytes,
+            read_file(g, &tree, "a.txt").unwrap().bytes,
             b"one\nTWO\nthree\n"
         );
-        let info = checkout_info(&g, &dir, Some("main"));
+        let info = checkout_info(g, &c, Some("main"));
         assert_eq!(info.branch.as_deref(), Some("feat"));
         assert_eq!(info.ahead, Some(1));
         assert_eq!(info.behind, Some(0));
         let mut budget = LineBudget::default();
         let committed = diff_commits(
-            &g,
+            g,
             &tree,
             info.base.as_deref().unwrap(),
             info.head.as_deref().unwrap(),
@@ -1689,7 +1726,7 @@ mod tests {
         assert_eq!(paths, ["a.txt", "c.txt"]);
         assert!(committed.files[0].patch.contains("+TWO"), "{committed:?}");
 
-        let u = uncommitted(&g, &dir, &mut budget).unwrap();
+        let u = uncommitted(g, &c, &mut budget).unwrap();
         let staged: Vec<&str> = u.staged.files.iter().map(|f| f.path.as_str()).collect();
         assert_eq!(staged, [".gitattributes", "s.txt"]);
         assert_eq!(u.unstaged.files.len(), 1, "{u:?}");
@@ -1699,20 +1736,20 @@ mod tests {
         assert!(a.patch.starts_with("@@ "), "{}", a.patch);
         assert!(a.patch.contains("+three"), "{}", a.patch);
         assert_eq!(u.untracked, ["new.txt"]);
-        let d = dirty(&g, &dir, LIST_BUDGET).unwrap();
+        let d = dirty(g, &c, LIST_BUDGET).unwrap();
         assert_eq!((d.staged, d.unstaged, d.untracked), (2, 1, 1));
 
         let (list, next) =
-            commits(&g, &tree, &format!("{}..HEAD", info.base.unwrap()), 0, 50).unwrap();
+            commits(g, &tree, &format!("{}..HEAD", info.base.unwrap()), 0, 50).unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].subject, "feat: c");
         assert!(next.is_none());
-        let c = commit(&g, &tree, &list[0].sha).unwrap();
+        let c = commit(g, &tree, &list[0].sha).unwrap();
         assert_eq!(c.message, "feat: c\n\nThe body.");
         assert_eq!(c.diff.files.len(), 2);
         // The root commit diffs against the empty tree.
-        let (all, _) = commits(&g, &tree, "HEAD", 0, 50).unwrap();
-        let root = commit(&g, &tree, &all.last().unwrap().sha).unwrap();
+        let (all, _) = commits(g, &tree, "HEAD", 0, 50).unwrap();
+        let root = commit(g, &tree, &all.last().unwrap().sha).unwrap();
         assert!(root.diff.files.iter().all(|f| f.status == "added"));
 
         assert!(!marker.exists(), "a driver ran");
@@ -1793,7 +1830,8 @@ mod tests {
         all.push("a.txt");
         write_index(&dir, &all, &id);
         let g = git();
-        let u = uncommitted(&g, &dir, &mut LineBudget::default()).unwrap();
+        let c = open(&dir);
+        let u = uncommitted(&g, &c, &mut LineBudget::default()).unwrap();
         let json = serde_json::to_string(&u).unwrap();
         assert!(!json.contains("TOPSECRET"), "{json}");
         assert!(!json.contains("[core]"), "{json}");
@@ -1810,11 +1848,11 @@ mod tests {
             !u.unstaged.files.iter().any(|f| f.path == "a.txt"),
             "{json}"
         );
-        let d = dirty(&g, &dir, LIST_BUDGET).unwrap();
+        let d = dirty(&g, &c, LIST_BUDGET).unwrap();
         assert_eq!(d.unstaged, bad.len());
 
         // Defence in depth: the walk itself refuses such a path.
-        let root = Root::open(&dir).unwrap();
+        let root = Root::of(&c).unwrap();
         for p in [
             "..",
             "../secret.txt",
@@ -1857,11 +1895,12 @@ mod tests {
         let (objects, sha) = foreign(t.path());
         let store = RunDirs::new(&t.path().join("state"));
         let g = git();
-        let tree = Tree::Checkout { dir: dir.clone() };
+        let c = Arc::new(open(&dir));
+        let tree = Tree::Checkout { dir: c.clone() };
         let info = dir.join(".git/objects/info");
         std::fs::create_dir_all(&info).unwrap();
         std::fs::write(info.join("alternates"), "").unwrap();
-        g.check_checkout(&dir, &store).unwrap();
+        g.check_checkout(&c, &store).unwrap();
         assert!(matches!(
             commit(&g, &tree, &sha),
             Err(BrowseError::NotFound(_))
@@ -1873,7 +1912,7 @@ mod tests {
         ] {
             let _ = std::fs::remove_file(info.join("alternates"));
             std::fs::write(info.join(name), text).unwrap();
-            match g.check_checkout(&dir, &store) {
+            match g.check_checkout(&c, &store) {
                 Err(GitError::Refused(m)) => assert!(m.contains(name), "{m}"),
                 other => panic!("{name}: {other:?}"),
             }
@@ -1886,8 +1925,8 @@ mod tests {
                     other => panic!("{name} {short}: {other:?}"),
                 }
             }
-            assert!(uncommitted(&g, &dir, &mut LineBudget::default()).is_err());
-            assert!(checkout_info(&g, &dir, Some("main")).head.is_none());
+            assert!(uncommitted(&g, &c, &mut LineBudget::default()).is_err());
+            assert!(checkout_info(&g, &c, Some("main")).head.is_none());
             std::fs::remove_file(info.join(name)).unwrap();
         }
         // The fixture is real: git reads the foreign commit through the
@@ -1902,8 +1941,10 @@ mod tests {
         assert_eq!(o.stdout, b"FOREIGN\n");
     }
 
-    /// R2: a symlink in place of a part of `.git` (the object store, the
-    /// index, HEAD, a ref, a loose object) is refused.
+    /// R2: a symlink in place of a main part of `.git` (the object store,
+    /// the index, HEAD, `objects/info`, `packed-refs`) is refused by the
+    /// check. A symlink deeper in `.git` (a ref, a loose object) is not
+    /// checked for reads: in the read sandbox it finds nothing.
     #[test]
     fn a_symlink_in_the_git_dir_is_refused() {
         let t = tempfile::tempdir().unwrap();
@@ -1911,7 +1952,7 @@ mod tests {
         let store = RunDirs::new(&t.path().join("state"));
         let g = git();
         type Plant<'a> = &'a dyn Fn(&Path);
-        let cases: [(&str, Plant); 6] = [
+        let cases: [(&str, Plant); 5] = [
             ("objects", &|git: &Path| {
                 std::fs::rename(git.join("objects"), git.join("objects.old")).unwrap();
                 std::os::unix::fs::symlink(&objects, git.join("objects")).unwrap();
@@ -1932,39 +1973,19 @@ mod tests {
                 let _ = std::fs::remove_file(git.join("packed-refs"));
                 std::os::unix::fs::symlink("/etc/hostname", git.join("packed-refs")).unwrap();
             }),
-            ("refs/heads/x", &|git: &Path| {
-                std::os::unix::fs::symlink("/etc/hostname", git.join("refs/heads/x")).unwrap();
-            }),
         ];
         for (i, (name, plant)) in cases.iter().enumerate() {
             let base = t.path().join(format!("c{i}"));
             std::fs::create_dir_all(&base).unwrap();
             let dir = checkout(&base);
             plant(&dir.join(".git"));
-            match g.check_checkout(&dir, &store) {
-                Err(GitError::Refused(m)) => assert!(m.contains(name), "{name}: {m}"),
+            match g.check_checkout(&open(&dir), &store) {
+                Err(GitError::Refused(m)) => {
+                    assert!(m.contains(name), "{name}: {m}");
+                    assert!(!m.contains(t.path().to_str().unwrap()), "{m}");
+                }
                 other => panic!("{name}: {other:?}"),
             }
-        }
-        // A loose object as a symlink: the walk finds it.
-        std::fs::create_dir_all(t.path().join("c9")).unwrap();
-        let dir = checkout(&t.path().join("c9"));
-        let obj = std::fs::read_dir(dir.join(".git/objects"))
-            .unwrap()
-            .map(|e| e.unwrap().path())
-            .find(|p| p.file_name().unwrap().len() == 2)
-            .unwrap();
-        let one = std::fs::read_dir(&obj)
-            .unwrap()
-            .next()
-            .unwrap()
-            .unwrap()
-            .path();
-        std::fs::remove_file(&one).unwrap();
-        std::os::unix::fs::symlink("/etc/hostname", &one).unwrap();
-        match g.check_checkout(&dir, &store) {
-            Err(GitError::Refused(m)) => assert!(m.contains("symlink"), "{m}"),
-            other => panic!("{other:?}"),
         }
         // The cheap check before each command sees the main parts.
         std::fs::create_dir_all(t.path().join("c10")).unwrap();
@@ -1972,9 +1993,332 @@ mod tests {
         std::fs::remove_file(dir.join(".git/HEAD")).unwrap();
         std::os::unix::fs::symlink("/etc/hostname", dir.join(".git/HEAD")).unwrap();
         assert!(matches!(
-            g.run(&dir, &["rev-parse", "HEAD"], 1024),
+            g.run(&open(&dir), &["rev-parse", "HEAD"], 1024),
             Err(GitError::Refused(_))
         ));
+
+        // A ref and a loose object as symlinks to files of the host: the
+        // walk of the check refuses them, and when one comes after the
+        // check, git in the sandbox does not read it.
+        let Some(g) = ReadGit::sandboxed(CMD_TIMEOUT) else {
+            return;
+        };
+        std::fs::create_dir_all(t.path().join("c11")).unwrap();
+        let dir = checkout(&t.path().join("c11"));
+        let host = t.path().join("host-file");
+        std::fs::write(&host, "0123456789012345678901234567890123456789\n").unwrap();
+        let c = open(&dir);
+        g.check_checkout(&c, &store).unwrap();
+        std::os::unix::fs::symlink(&host, dir.join(".git/refs/heads/x")).unwrap();
+        match g.check_checkout(&c, &store) {
+            Err(GitError::Refused(m)) => assert!(m.contains(".git/refs/heads/x"), "{m}"),
+            other => panic!("{other:?}"),
+        }
+        assert!(
+            g.run(&c, &["rev-parse", "--verify", "refs/heads/x"], 1024)
+                .is_err()
+        );
+        let id = rev(&dir, "HEAD:a.txt");
+        let one = dir.join(".git/objects").join(&id[..2]).join(&id[2..]);
+        let text = rev(&dir, "HEAD:docs/b.md");
+        let other = dir.join(".git/objects").join(&text[..2]).join(&text[2..]);
+        std::fs::remove_file(&one).unwrap();
+        std::os::unix::fs::symlink(&other, &one).unwrap();
+        // On the host, git follows the symlink (the fixture is real).
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(&dir)
+                .args(["cat-file", "-e", &id])
+                .status()
+                .unwrap()
+                .success()
+        );
+        // The absolute target is not in the sandbox.
+        assert!(g.run(&c, &["cat-file", "blob", &id], 1024).is_err());
+    }
+
+    /// N1 (docs/security-review.md §15): while the browser reads in a
+    /// loop, the agent puts the objects of another repo into `.git` and
+    /// takes them away again: symlinks `objects/<xx>` (or loose object
+    /// files) to the other repo's objects, an alternates file, a symlink
+    /// `.git` to the other repo's `.git`, and a symlink in place of the
+    /// checkout dir. The checks before each command cannot see such a
+    /// race; the read sandbox makes it harmless. The foreign commit and
+    /// its file are never served.
+    #[test]
+    fn a_race_in_the_git_dir_never_serves_a_foreign_repo() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let Some(g) = ReadGit::sandboxed(CMD_TIMEOUT) else {
+            return;
+        };
+        let t = tempfile::tempdir().unwrap();
+        let dir = checkout(t.path());
+        let (objects, sha) = foreign(t.path());
+        let blob = rev(&t.path().join("other"), "HEAD:f.txt");
+        let store = RunDirs::new(&t.path().join("state"));
+        g.check_checkout(&open(&dir), &store).unwrap();
+
+        // The links: a dir `objects/<xx>` that the checkout does not have
+        // (relative, as the agent would write it), else each loose file.
+        let mine = dir.join(".git/objects");
+        let mut links: Vec<(PathBuf, PathBuf)> = Vec::new();
+        for e in std::fs::read_dir(&objects).unwrap() {
+            let xx = e.unwrap().file_name();
+            if xx.len() != 2 {
+                continue;
+            }
+            if mine.join(&xx).exists() {
+                for f in std::fs::read_dir(objects.join(&xx)).unwrap() {
+                    let f = f.unwrap().file_name();
+                    if !mine.join(&xx).join(&f).exists() {
+                        links.push((mine.join(&xx).join(&f), objects.join(&xx).join(&f)));
+                    }
+                }
+            } else {
+                let rel = Path::new("../../../../other/.git/objects").join(&xx);
+                links.push((mine.join(&xx), rel));
+            }
+        }
+        assert!(!links.is_empty());
+        let links = Arc::new(links);
+        let plant = |links: &[(PathBuf, PathBuf)], on: bool| {
+            for (l, target) in links {
+                if on {
+                    let _ = std::os::unix::fs::symlink(target, l);
+                } else {
+                    let _ = std::fs::remove_file(l);
+                }
+            }
+        };
+        // The fixture is real: with the links, git on the host serves the
+        // foreign commit and file.
+        plant(&links, true);
+        let o = Command::new("git")
+            .arg("-C")
+            .arg(&dir)
+            .args(["cat-file", "-p", &format!("{sha}:f.txt")])
+            .output()
+            .unwrap();
+        assert_eq!(o.stdout, b"FOREIGN\n");
+        plant(&links, false);
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let toggler = {
+            let stop = stop.clone();
+            let dir = dir.clone();
+            let objects = objects.clone();
+            let links = links.clone();
+            std::thread::spawn(move || {
+                // Each round puts one of the four in place for a short
+                // time, then leaves the checkout as it is for longer, so
+                // that the reads hit both states.
+                let present = || std::thread::sleep(Duration::from_micros(400));
+                let absent = || std::thread::sleep(Duration::from_micros(1500));
+                let git = dir.join(".git");
+                let alt = git.join("objects/info/alternates");
+                let ws = dir.parent().unwrap().to_path_buf();
+                let mut rounds = 0u32;
+                while !stop.load(Ordering::Relaxed) {
+                    match rounds % 4 {
+                        0 => {
+                            plant(&links, true);
+                            present();
+                            plant(&links, false);
+                        }
+                        1 => {
+                            let _ = std::fs::create_dir_all(git.join("objects/info"));
+                            std::fs::write(&alt, format!("{}\n", objects.display())).unwrap();
+                            present();
+                            std::fs::remove_file(&alt).unwrap();
+                        }
+                        2 => {
+                            std::fs::rename(&git, dir.join(".git.real")).unwrap();
+                            std::os::unix::fs::symlink("../../other/.git", &git).unwrap();
+                            present();
+                            std::fs::remove_file(&git).unwrap();
+                            std::fs::rename(dir.join(".git.real"), &git).unwrap();
+                        }
+                        _ => {
+                            std::fs::rename(&dir, ws.join("proj.real")).unwrap();
+                            std::os::unix::fs::symlink("../other", &dir).unwrap();
+                            present();
+                            std::fs::remove_file(&dir).unwrap();
+                            std::fs::rename(ws.join("proj.real"), &dir).unwrap();
+                        }
+                    }
+                    absent();
+                    rounds += 1;
+                }
+                rounds
+            })
+        };
+
+        let start = Instant::now();
+        let (mut tries, mut good) = (0, 0);
+        while tries < 300 {
+            if start.elapsed() > Duration::from_secs(120) {
+                break;
+            }
+            // Each try opens the checkout, as each request does.
+            let Ok(c) = CheckoutDir::open(&t.path().join("ws"), "proj", "race") else {
+                continue;
+            };
+            tries += 1;
+            let c = Arc::new(c);
+            let tree = Tree::Checkout { dir: c.clone() };
+            if let Ok(d) = commit(&g, &tree, &sha) {
+                panic!("the foreign commit was served: {d:?}");
+            }
+            if let Ok((list, _)) = commits(&g, &tree, &sha, 0, 5) {
+                assert!(list.iter().all(|x| x.sha != sha), "{list:?}");
+            }
+            if let Ok(o) = g.run(&*c, &["cat-file", "blob", &blob], 1024) {
+                panic!("the foreign file was served: {:?}", o.text());
+            }
+            let head = resolve(&g, &*c, "HEAD");
+            assert_ne!(head.as_deref(), Some(sha.as_str()));
+            if head.is_some() {
+                good += 1;
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        let rounds = toggler.join().unwrap();
+        eprintln!("race: {tries} tries, {good} good reads, {rounds} toggle rounds");
+        assert_eq!(tries, 300);
+        // Most reads see the checkout as it is, so the loop does read.
+        assert!(good > 30 && rounds > 30, "{good} {rounds}");
+        assert!(start.elapsed() < Duration::from_secs(150));
+    }
+
+    /// N3: an `include.path` that the agent adds to the live config after
+    /// the check. A file of the host is not in the sandbox, so git reads
+    /// nothing of it and says nothing of it. A bad include inside the
+    /// checkout fails the command, and the error has no stderr.
+    #[test]
+    fn an_include_added_after_the_check_shows_nothing() {
+        let Some(g) = ReadGit::sandboxed(CMD_TIMEOUT) else {
+            return;
+        };
+        let t = tempfile::tempdir().unwrap();
+        let dir = checkout(t.path());
+        let secret = t.path().join("secret.cfg");
+        // Not valid config: git on the host names the file in a fatal error.
+        std::fs::write(&secret, "[TOPSECRET\n").unwrap();
+        let store = RunDirs::new(&t.path().join("state"));
+        let c = Arc::new(open(&dir));
+        g.check_checkout(&c, &store).unwrap();
+        let cfg = dir.join(".git/config");
+        let clean = std::fs::read_to_string(&cfg).unwrap();
+        std::fs::write(
+            &cfg,
+            format!("{clean}[include]\n\tpath = {}\n", secret.display()),
+        )
+        .unwrap();
+        // The fixture is real: git on the host names the file.
+        let o = Command::new("git")
+            .arg("-C")
+            .arg(&dir)
+            .args(["rev-parse", "HEAD"])
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()
+            .unwrap();
+        assert!(!o.status.success());
+        assert!(String::from_utf8_lossy(&o.stderr).contains("secret.cfg"));
+
+        let tree = Tree::Checkout { dir: c.clone() };
+        let mut seen = String::new();
+        let info = checkout_info(&g, &c, Some("main"));
+        assert!(info.head.is_some());
+        seen.push_str(&format!("{info:?}"));
+        seen.push_str(&format!("{:?}", commits(&g, &tree, "HEAD", 0, 5)));
+        seen.push_str(&format!(
+            "{:?}",
+            uncommitted(&g, &c, &mut LineBudget::default())
+        ));
+        seen.push_str(&format!(
+            "{:?}",
+            g.run(&*c, &["cat-file", "-p", "HEAD"], 4096)
+        ));
+        assert!(!seen.contains("TOPSECRET"), "{seen}");
+        assert!(!seen.contains("secret.cfg"), "{seen}");
+        assert!(!seen.contains(t.path().to_str().unwrap()), "{seen}");
+
+        std::fs::write(dir.join("bad.cfg"), "[TOPSECRET\n").unwrap();
+        std::fs::write(&cfg, format!("{clean}[include]\n\tpath = ../bad.cfg\n")).unwrap();
+        match commits(&g, &tree, "HEAD", 0, 5) {
+            Err(BrowseError::Git(GitError::Failed { stderr, .. })) => {
+                assert!(stderr.is_empty(), "{stderr}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// M1 (docs/security-review.md §15): a FIFO in `.git/refs` (a branch,
+    /// or the ref of HEAD) would hold each git command until its deadline.
+    /// The check refuses it at once. A request has one deadline for all its
+    /// reads ([`crate::git::READ_REQUEST_TIME`]).
+    #[test]
+    fn a_fifo_in_the_git_dir_is_refused_at_once() {
+        let t = tempfile::tempdir().unwrap();
+        let store = RunDirs::new(&t.path().join("state"));
+        let g = git();
+        // `main`, and `feat`: the ref of HEAD in the fixture.
+        for (i, name) in ["main", "feat"].iter().enumerate() {
+            let base = t.path().join(format!("f{i}"));
+            std::fs::create_dir_all(&base).unwrap();
+            let dir = checkout(&base);
+            let r = dir.join(".git/refs/heads").join(name);
+            std::fs::remove_file(&r).unwrap();
+            nix::unistd::mkfifo(&r, Mode::from_bits_truncate(0o644)).unwrap();
+            let start = Instant::now();
+            match g.check_checkout(&open(&dir), &store) {
+                Err(GitError::Refused(m)) => {
+                    assert!(m.contains("special file"), "{m}");
+                    assert!(m.contains(&format!(".git/refs/heads/{name}")), "{m}");
+                }
+                other => panic!("{name}: {other:?}"),
+            }
+            assert!(start.elapsed() < Duration::from_secs(2));
+        }
+
+        // After the time of the request, no read starts.
+        let base = t.path().join("f9");
+        std::fs::create_dir_all(&base).unwrap();
+        let dir = checkout(&base);
+        let mut c = open(&dir);
+        g.run(&c, &["rev-parse", "HEAD"], 64).unwrap();
+        c.expire();
+        assert!(matches!(
+            g.run(&c, &["rev-parse", "HEAD"], 64),
+            Err(GitError::Timeout(_))
+        ));
+        assert!(matches!(
+            uncommitted(&g, &c, &mut LineBudget::default()),
+            Err(BrowseError::Git(GitError::Timeout(_)))
+        ));
+    }
+
+    /// With no `bwrap`, git does not read an agent checkout at all; the
+    /// daemon's mirror is read on the host.
+    #[test]
+    fn no_sandbox_no_agent_tree() {
+        let g = ReadGit::without_sandbox(CMD_TIMEOUT);
+        let t = tempfile::tempdir().unwrap();
+        let dir = checkout(t.path());
+        match g.run(&open(&dir), &["rev-parse", "HEAD"], 64) {
+            Err(GitError::Unavailable(m)) => assert!(m.contains("bwrap"), "{m}"),
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(
+            commits(&g, &tree(&dir), "HEAD", 0, 5),
+            Err(BrowseError::Git(GitError::Unavailable(_)))
+        ));
+        let mirror = Tree::Mirror {
+            git_dir: t.path().join("origin.git"),
+            rev: "refs/heads/main".into(),
+        };
+        assert_eq!(list_dir(&g, &mirror, "").unwrap().entries.len(), 2);
     }
 
     /// R4: a pair of large texts with no line in common is diffed in a
@@ -1996,7 +2340,7 @@ mod tests {
         std::fs::write(dir.join("q.txt"), &big).unwrap();
 
         let start = Instant::now();
-        let u = uncommitted(&git(), &dir, &mut LineBudget::default()).unwrap();
+        let u = uncommitted(&git(), &open(&dir), &mut LineBudget::default()).unwrap();
         let took = start.elapsed();
         assert!(took < DIFF_TOTAL_TIME + Duration::from_secs(4), "{took:?}");
         let p = u.unstaged.files.iter().find(|f| f.path == "p.txt").unwrap();
@@ -2023,7 +2367,7 @@ mod tests {
             &dir,
             "for i in 1 2 3 4 5; do echo $i > n.txt && git add n.txt && git commit -q -m \"n $i\"; done",
         );
-        let tree = Tree::Checkout { dir };
+        let tree = tree(&dir);
         let (p1, next) = commits(&git(), &tree, "main..HEAD", 0, 4).unwrap();
         assert_eq!(p1.len(), 4);
         assert_eq!(p1[0].subject, "n 5");

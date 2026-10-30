@@ -421,6 +421,7 @@ refused it. Do not parse the message; use `code`.
 | 415 | `unsupported_media_type` | An attachment is not a PNG, JPEG, GIF, or WebP image (§6.2). |
 | 429 | `rate_limited` | Too many calls of one kind; try again later. The credential helper (§5.1) has a limit per agent. An agent has too many live exec sessions (§17). A host agent runs its maximum of sessions. |
 | 501 | `not_available` | The route exists, but this phase does not do the request. |
+| 503 | `unavailable` | The daemon cannot do the request on this machine: the repo browser has no `bwrap` to read an agent tree (§5.3). |
 | 422 | `invalid` | Well-formed values that break a rule: a bad name, an empty title, a missing column. |
 | 422 | `comment_required` | A move to `blocked` without a comment; a version rejection or a wiki review comment without a comment. |
 | 500 | `internal` | A daemon bug or an I/O error. |
@@ -1494,13 +1495,36 @@ hex digits (`422` if not).
 **Errors.** A `path` that is absolute, has `..` or a NUL, or names `.git`
 is `422 invalid`. An unknown tree is `404`. A checkout whose
 `.git/config` has a key outside the allowlist of §5.1 is `409 conflict`.
-A checkout with an alternates file, or with a symlink or a special file
-anywhere under `.git`, is `409 conflict` too (Security, below).
-A git command that does not end in 10 s is `500`.
+A checkout with an alternates file, with a symlink or a wrong type in
+place of a main name of `.git`, or with a symlink, a FIFO, or a device
+anywhere in `.git`, is `409 conflict` too (Security, below).
+A git command that does not end in 10 s is `500`, and so is a request
+whose reads of an agent tree take more than 20 s in all. A daemon with no usable
+`bwrap` answers `503 unavailable` for an agent tree (`main` still works).
+An error answer has no stderr of git and no path of the daemon: a failed
+git command is `422` with a fixed message (`git <command> failed
+(<status>)`), an I/O error is a fixed `500`, and a refusal names paths
+relative to the checkout (`.git/HEAD`).
 
-**Security.** The daemon reads repos that agents control, outside the
-sandbox:
+**Security.** The daemon reads repos that agents control. It runs
+outside every agent sandbox, so:
 
+- git reads an agent tree only in a `bwrap` sandbox of its own: no
+  network and no other namespace of the host, an empty env, `/usr`
+  read-only (with the `/lib`, `/lib64`, `/bin`, and `/sbin` of the agent
+  sandbox), a new `/proc`, a minimal `/dev`, an empty `/tmp`, and the
+  checkout read-only at `/repo`. Nothing else of the host is there: no
+  `/etc`, no state dir, no other workspace or checkout. The daemon opens
+  the checkout dir once for each request (each path part with
+  `O_NOFOLLOW`) and `bwrap` binds the directory of that fd
+  (`--ro-bind-fd`; it checks the device and inode of the mount against the
+  fd). So a swap of the checkout dir, of `.git`, or of `.git/objects/<xx>`
+  for a symlink while the browser reads (a race that the checks before
+  each command cannot see) finds nothing outside the checkout. `/usr` is
+  visible: it holds programs and libraries, and no secret. The daemon
+  reads the work tree from the same fd. `main` is the daemon's own mirror
+  and is read on the host. With no usable `bwrap` (a development daemon
+  on a host without bubblewrap), an agent tree is `503 unavailable`.
 - git runs with the hardening of a checkout update (§5.1): no hooks, no
   fsmonitor, no global or system config, and a check of a copy of
   `.git/config` against the allowlist before the first command. Also
@@ -1512,20 +1536,23 @@ sandbox:
   git dir and the work tree on the command line (`--git-dir`,
   `--work-tree`), so it does not search the parent dirs and ignores
   `core.worktree`.
-- No objects of another repo. Before the first command, the daemon
-  refuses a checkout with `.git/objects/info/alternates` (an empty file is
-  allowed) or `.git/objects/info/http-alternates`, a checkout where
-  `HEAD`, `config`, `index`, `packed-refs`, `shallow`, `objects`,
-  `objects/info`, `objects/pack`, `refs`, or `info` is a symlink or of the
-  wrong type, and a checkout with a symlink or a special file anywhere
-  under `.git` (a loose object, a pack, a ref). Each check opens each
-  path part with `O_NOFOLLOW`. Just before each git command, the daemon
-  checks the alternates files and the main names again. The window that
-  stays is the time between that check and the reads of git (a few
-  milliseconds). The mirror is cloned with `--no-local`, so a local source
-  repo does not give its alternates file to the mirror; after each clone
-  and fetch the daemon removes any alternates file, and it clones a
-  mirror with one again.
+- No objects of another repo. The sandbox above is the control. Also,
+  before the first command and again before each command, the daemon
+  refuses (`409`, a clear error) a checkout with
+  `.git/objects/info/alternates` (an empty file is allowed) or
+  `.git/objects/info/http-alternates`, and a checkout where `HEAD`,
+  `config`, `index`, `packed-refs`, `shallow`, `objects`, `objects/info`,
+  `objects/pack`, `refs`, or `info` is a symlink or of the wrong type.
+  Each check opens each path part with `O_NOFOLLOW`. Once for each
+  request (and before a checkout update), a walk of all of `.git` refuses
+  a symlink, a FIFO, or a device anywhere in it (at most 2 s); a symlink
+  that comes after the walk finds nothing in the sandbox.
+  The stderr of git never goes to the caller (it is logged): with an
+  `include.path` added in a race, it could tell if a daemon file exists.
+  The mirror is cloned with `--no-local`, so a local source repo does not
+  give its alternates file to the mirror; after each clone and fetch the
+  daemon removes any alternates file, and it clones a mirror with one
+  again.
 - Only commands that run no filter driver: `ls-tree`, `ls-files`,
   `cat-file blob`, `log`, `rev-parse`, `rev-list`, `diff-tree` (commit to
   commit), and `diff-index --cached` (HEAD to index). The daemon never

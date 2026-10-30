@@ -997,14 +997,24 @@ docs/api.md §5.3.
   textconv, and no external diff (`crate::repo_browse`). The work tree
   diff is made in the daemon, so that no clean filter runs. The daemon
   never writes into a workspace.
-- The agent controls each byte of its `.git`. So each path from the index
-  is checked (no `..`, `.`, `.git`, or absolute path) before the daemon
-  opens it, and the walk itself refuses such a path. A checkout with an
-  alternates file (`objects/info/alternates`, `http-alternates`) or a
-  symlink anywhere under `.git` is refused (`409`), and the alternates
-  files and the main names are checked again before each git command
-  (docs/security-review.md §15). The mirror is cloned with `--no-local`
-  and never keeps an alternates file.
+- The agent controls each byte of its `.git`. So git reads an agent
+  tree only in a `bwrap` sandbox that shows the checkout (read-only,
+  bound by the fd that the daemon opened with no symlink followed) and
+  `/usr`, with no network and nothing else of the host. A symlink or an
+  alternates file that names another repo or a daemon file finds nothing
+  there, even when the agent puts it in while the browser reads. With no
+  usable `bwrap` (a host dev daemon without bubblewrap), an agent tree is
+  `503 unavailable`; there is no fallback to git on the host. `main` (the
+  daemon's own mirror) is read on the host.
+- Each path from the index is checked (no `..`, `.`, `.git`, or absolute
+  path) before the daemon opens it, and the walk itself refuses such a
+  path. A checkout with an alternates file (`objects/info/alternates`,
+  `http-alternates`), or with a symlink, a FIFO, or a device anywhere in
+  `.git`, is refused (`409`); the main names are checked again before
+  each git command, for a clear error (docs/security-review.md §15). All
+  the reads of one request for an agent tree end within 20 s. An error answer has no stderr of
+  git and no daemon path. The mirror is cloned with `--no-local` and
+  never keeps an alternates file.
 - Caps: 1 MiB for each file, 5000 entries for each directory, 2000 diff
   lines for each file and 20 000 for each answer, 10 s for each git
   command. The daemon diffs a work tree file only up to 20 000 lines on

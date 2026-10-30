@@ -55,6 +55,9 @@ pub enum Code {
     LeaseHeld,
     /// The endpoint exists, but this phase does not implement the request.
     NotAvailable,
+    /// The daemon cannot do the request on this machine now (the repo
+    /// browser has no `bwrap` for an agent tree).
+    Unavailable,
     /// A bug or an I/O failure in the daemon.
     Internal,
 }
@@ -80,6 +83,7 @@ impl Code {
             Self::UnsupportedMediaType => StatusCode::UNSUPPORTED_MEDIA_TYPE,
             Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::NotAvailable => StatusCode::NOT_IMPLEMENTED,
+            Self::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::Invalid | Self::CommentRequired => StatusCode::UNPROCESSABLE_ENTITY,
             Self::Internal => StatusCode::INTERNAL_SERVER_ERROR,
         }
