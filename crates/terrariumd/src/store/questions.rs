@@ -333,6 +333,8 @@ pub struct Filter {
     /// Only the questions of this agent (a ULID).
     pub agent: Option<String>,
     pub project: Option<String>,
+    /// Only the questions linked to this card (a card ID).
+    pub card: Option<String>,
     /// One kind. `None`: both.
     pub kind: Option<QuestionKind>,
     /// One status. `None` with `recent`: open, and answered or
@@ -357,6 +359,10 @@ pub fn list(conn: &Connection, f: &Filter) -> ApiResult<Vec<Question>> {
     if let Some(p) = &f.project {
         sql.push_str(" AND project = ?");
         args.push(p.clone());
+    }
+    if let Some(c) = &f.card {
+        sql.push_str(" AND card = ?");
+        args.push(c.clone());
     }
     if let Some(k) = f.kind {
         sql.push_str(" AND kind = ?");
@@ -570,7 +576,14 @@ fn check_card(conn: &Connection, project: &str, card: Option<&str>) -> ApiResult
     let Some(key) = card.map(str::trim).filter(|c| !c.is_empty()) else {
         return Ok(None);
     };
-    let c = crate::store::board::get_card(conn, key)?;
+    // An unknown card is a bad field of the body: 422, not 404.
+    let c = crate::store::board::get_card(conn, key).map_err(|e| {
+        if e.code == Code::NotFound {
+            ApiError::invalid(format!("no card `{key}` in project `{project}`"))
+        } else {
+            e
+        }
+    })?;
     if c.project != project {
         return Err(ApiError::invalid(format!(
             "card `{}` is in project `{}`, not in `{project}`",
@@ -820,6 +833,41 @@ pub fn update(t: &mut Tx<'_>, id: &str, p: QuestionPatch) -> ApiResult<Question>
         json!({"agent": q.agent, "kind": q.kind, "changed": changed, "revision": q.revision}),
     )?;
     emit(t, &q, "updated")?;
+    Ok(q)
+}
+
+/// Link `id` to `card` (a card of its project), or unlink it with
+/// `None`. Only the card changes: the revision stays, so a draft answer
+/// stays valid. With `any_status` (the operator, a sysadmin) a question
+/// that is not open changes too; else that is `409`.
+pub fn set_card(
+    t: &mut Tx<'_>,
+    id: &str,
+    card: Option<&str>,
+    any_status: bool,
+) -> ApiResult<Question> {
+    let q = get(t, id)?;
+    if !any_status && q.status != QuestionStatus::Open {
+        return Err(not_open(&q, "a change of the card"));
+    }
+    let card = check_card(t, &q.project, card)?;
+    if card == q.card {
+        return Ok(q);
+    }
+    t.execute(
+        "UPDATE questions SET card = ?2, updated_at = ?3 WHERE id = ?1",
+        params![q.id, card, now()],
+    )?;
+    let previous = q.card;
+    let q = get(t, &q.id)?;
+    t.audit(
+        "question.update",
+        &q.id,
+        Some(&q.project),
+        json!({"agent": q.agent, "kind": q.kind, "changed": ["card"], "card": q.card,
+               "previous_card": previous, "revision": q.revision}),
+    )?;
+    emit_change(t, &q, "updated", previous.as_deref())?;
     Ok(q)
 }
 
@@ -1412,6 +1460,18 @@ pub fn on_agent_deleted(t: &mut Tx<'_>, agent: &str) -> ApiResult<()> {
 }
 
 fn emit(t: &mut Tx<'_>, q: &Question, change: &str) -> ApiResult<()> {
+    emit_change(t, q, change, None)
+}
+
+/// The `question` and `inbox` events of a change. `previous_card`: the
+/// card that a question was linked to before, so that its board updates
+/// too (`data.previous_card_id`).
+fn emit_change(
+    t: &mut Tx<'_>,
+    q: &Question,
+    change: &str,
+    previous_card: Option<&str>,
+) -> ApiResult<()> {
     let name = q.agent_name.rsplit('/').next().unwrap_or(&q.agent_name);
     let mut data = json!({
         "question_id": q.id, "kind": q.kind, "change": change, "status": q.status,
@@ -1420,6 +1480,9 @@ fn emit(t: &mut Tx<'_>, q: &Question, change: &str) -> ApiResult<()> {
     });
     if let Some(c) = &q.card {
         data["card_id"] = json!(c);
+    }
+    if let Some(c) = previous_card {
+        data["previous_card_id"] = json!(c);
     }
     let mut draft = EventDraft::new(
         "question",
@@ -1434,7 +1497,7 @@ fn emit(t: &mut Tx<'_>, q: &Question, change: &str) -> ApiResult<()> {
     t.emit(draft)?;
     let inbox_change = match (change, q.status) {
         ("asked", _) => "opened",
-        (_, QuestionStatus::Open) => "updated",
+        (_, QuestionStatus::Open) | ("updated", _) => "updated",
         _ => "closed",
     };
     // A bundle is an item of the Inbox kind `question`.

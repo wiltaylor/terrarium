@@ -448,6 +448,10 @@ daemon sorts: urgent first, then the newest.
   `renderMarkdown` and the DOMPurify sink (`SafeHtml`) only.
 - The agent page shows the questions and notices of a leader
   (`features/inbox/QuestionsPanel.tsx`), each with its kind.
+- A question, a bundle, or a notice with a `card` has a chip "card <id>".
+  It opens the board with the drawer of that card
+  (`/p/<project>/board?card=<id>`, `cardHref`). The board shows the same
+  question on the card (see "The board").
 - The pure helpers are in `features/inbox/model.ts` (tabs, order, counts,
   badge) and `features/inbox/questions.ts` (answer and acknowledge bodies).
   The mock is in `api/mock/questions.ts` and `api/mock/inbox.ts`: two open
@@ -586,7 +590,7 @@ prefix or budget scope. The daemon also has `project`, `since`, `until`, and
 | `/p/:project/logs/mail` | Project logs, Mail tab: the mail log of one project; reply from the project inbox, make card | `GET /api/mail`, `POST .../inbox/{id}/reply`, `POST .../cards` (`from_mail`) |
 | `/p/:project/logs/events` | Project logs, Events tab: the event log of one project, with the kind and agent filters (the agents of the project only) | `GET /api/events?since=&kind=&project=&agent=`, events socket |
 | `/p/:project/inbox`, `/p/:project/mail`, `/p/:project/logs` | Gone: redirect to `/p/:project/logs/mail` (`app/nav.ts` `MOVED_ROUTES`). The redirect keeps the query. | none |
-| `/p/:project/board` | Board, drag and drop, ETA countdowns, card drawer (see "The board") | `GET .../board`, `PATCH /api/cards/{id}`, `POST .../comments`, `GET .../events`, `DELETE /api/cards/{id}` |
+| `/p/:project/board` | Board, drag and drop, ETA countdowns, question badges, card drawer with its questions (see "The board") | `GET .../board`, `PATCH /api/cards/{id}`, `POST .../comments`, `GET .../events`, `DELETE /api/cards/{id}`, `GET /api/questions?project=\|card=`, `PATCH /api/questions/{id}` (`card`), `POST /api/questions/{id}/answer\|ack\|retract` |
 | `/p/:project/memory` | Memory list, detail, graph | `GET .../memories`, `GET /api/memories/{project/MEM-n}/graph` |
 | `/p/:project/wiki/*path` | Page tree, render, edit, history, create | `GET .../wiki`, `GET`, `PUT /api/wiki/{project/path}`, `revisions`, `diff`, `restore`, `backlinks`, `review` |
 | `/p/:project/artifacts/:id?` | Artifact viewer, upload, delete | `GET .../artifacts`, `.../artifacts/usage`, `POST .../artifacts` (multipart), `POST /api/artifacts/{id}/url` |
@@ -662,6 +666,25 @@ the value with the daemon's rule (`resolveEta`: in the future, at most 30
 days away) before it sends `PATCH /api/cards/{id}` with `eta_at`. A done
 card shows "done in X (estimated Y)" from `eta_set_at`, `eta_at`, and
 `done_at`.
+
+**Questions.** A card with open linked questions, bundles, or notices
+(docs/api.md §6.8 "Cards") shows a badge "? N" next to its ID. N counts
+each open item once (a bundle too). The colour is that of the highest
+priority, as in the Inbox: `chip info` (normal), `chip bad` (urgent), and
+`chip bad strong` (critical). The title and the aria-label list the
+items. The board reads the open questions of the project once
+(`GET /api/questions?project=`), and a `question` event of the project
+reads them again after 300 ms. The card drawer has a **Questions**
+section (`features/board/CardQuestions.tsx`,
+`GET /api/questions?card=<id>&status=all`). It uses the Inbox cards
+(`QuestionCard`, `BundleCard`), so the operator answers, acknowledges, or
+retracts there; each change refreshes the Inbox counts and the badges.
+The closed ones are under **Answered (N)**. **Link a question** picks an
+open question of the project with no card, and **Unlink** on each item
+sends `PATCH /api/questions/{id}` with `card: null`. A `question` event
+whose `card_id` or `previous_card_id` is the card reads the section
+again. The pure helpers are in `features/board/questions.ts`
+(`cardQuestionBadges`, `linkable`, `isCardQuestionEvent`).
 
 ## Security notes
 

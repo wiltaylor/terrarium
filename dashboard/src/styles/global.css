@@ -1024,6 +1024,18 @@ button.link-button {
 .kcard .title {
   font-weight: 550;
 }
+/* The open questions of a card (features/board/questions.ts): "? n" in the Inbox priority colour. */
+.kcard .q-badge {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+/* The card of a question in the Inbox: a chip that opens the card drawer on the board. */
+a.chip.card-link {
+  text-decoration: none;
+}
+a.chip.card-link:hover {
+  text-decoration: underline;
+}
 /* The ETA of a card (lib/eta.ts): a countdown chip and a thin bar of the time used. */
 .eta {
   display: grid;

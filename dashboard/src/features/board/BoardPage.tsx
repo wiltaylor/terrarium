@@ -4,11 +4,13 @@ import { createPagedList } from "../../components/paged";
 import { HoldBadge } from "../../components/HoldBadge";
 import { StatusBadge } from "../../components/StatusBadge";
 import { ConfirmButton, Drawer, ErrorBanner, LoadMore, Modal, PageHead } from "../../components/ui";
-import type { Card } from "../../api/types";
+import type { Card, Question } from "../../api/types";
 import { ago, compact, humanize } from "../../lib/format";
 import { countdown, doneSummary, etaStopped, resolveEta, tickInterval } from "../../lib/eta";
 import { cardsIn, createBoardStore } from "../../stores/board";
 import { cardSessionRows, commentSessions, sessionHref, sessionRange } from "./sessions";
+import { CardQuestions } from "./CardQuestions";
+import { type CardQuestionBadge, cardQuestionBadges, isCardQuestionEvent, linkable } from "./questions";
 import { agents, api, events } from "../../stores";
 
 type Drop = { column: string; index: number };
@@ -26,6 +28,23 @@ export function BoardPage() {
 
   createEffect(on(() => params.project, (p) => void board.load(p)));
 
+  // The open questions of the project: the "? n" badges of the cards and the "Link a question" list of the drawer.
+  const [questions, setQuestions] = createSignal<Question[]>([]);
+  let qGen = 0;
+  const loadQuestions = async () => {
+    const mine = ++qGen;
+    const project = params.project;
+    try {
+      const rows = await api.questions.list({ project, status: "open" });
+      if (mine === qGen) setQuestions(rows);
+    } catch {
+      // A caller who may not list questions gets no badges.
+      if (mine === qGen) setQuestions([]);
+    }
+  };
+  createEffect(on(() => params.project, () => void loadQuestions()));
+  const badges = () => cardQuestionBadges(questions());
+
   // One shared clock for the ETA countdowns: 1 s while a countdown is under an hour, else 30 s; no timer without one.
   const [now, setNow] = createSignal(Date.now());
   createEffect(() => {
@@ -37,16 +56,22 @@ export function BoardPage() {
   });
 
   let reloadTimer: ReturnType<typeof setTimeout> | undefined;
-  // Live: card and board events of this project reload the board.
+  let questionTimer: ReturnType<typeof setTimeout> | undefined;
+  // Live: card and board events of this project reload the board; question events reload the badges.
   const off = events.on((e) => {
     if ((e.kind === "card" || e.kind === "board") && e.project === params.project && !dragging()) {
       clearTimeout(reloadTimer);
       reloadTimer = setTimeout(() => void board.reload(), 300);
     }
+    if (isCardQuestionEvent(e, { project: params.project })) {
+      clearTimeout(questionTimer);
+      questionTimer = setTimeout(() => void loadQuestions(), 300);
+    }
   });
   onCleanup(() => {
     off();
     clearTimeout(reloadTimer);
+    clearTimeout(questionTimer);
   });
 
   const labels = () => [...new Set(board.state.board?.cards.flatMap((c) => c.labels) ?? [])].sort();
@@ -146,6 +171,7 @@ export function BoardPage() {
                           <KCard
                             card={card}
                             now={now()}
+                            questions={badges().get(card.id)}
                             hidden={!visible(card)}
                             dragging={dragging() === card.id}
                             onOpen={() => setSearch({ card: card.id })}
@@ -193,6 +219,8 @@ export function BoardPage() {
             card={c()}
             now={now()}
             columns={board.state.board?.columns.map((x) => x.name) ?? []}
+            linkable={linkable(questions(), params.project)}
+            onQuestionsChanged={() => void loadQuestions()}
             onClose={() => setSearch({ card: undefined })}
             onMove={(column, comment) => {
               const b = board.state.board;
@@ -236,6 +264,7 @@ function EtaChip(props: { card: Card; now: number }) {
 function KCard(props: {
   card: Card;
   now: number;
+  questions?: CardQuestionBadge;
   hidden: boolean;
   dragging: boolean;
   onOpen: () => void;
@@ -257,11 +286,20 @@ function KCard(props: {
     >
       <div class="spread small">
         <span class="mono muted">{props.card.id}</span>
-        <Show when={(props.card.blocked_by ?? []).length}>
-          <span class="chip warn" title={`Waiting on ${props.card.blocked_by.join(", ")}`}>
-            waits on {props.card.blocked_by.length}
-          </span>
-        </Show>
+        <span class="row" style={{ gap: "4px" }}>
+          <Show when={props.questions}>
+            {(q) => (
+              <span class={`${q().cls} q-badge`} title={q().title} aria-label={q().title}>
+                {q().label}
+              </span>
+            )}
+          </Show>
+          <Show when={(props.card.blocked_by ?? []).length}>
+            <span class="chip warn" title={`Waiting on ${props.card.blocked_by.join(", ")}`}>
+              waits on {props.card.blocked_by.length}
+            </span>
+          </Show>
+        </span>
       </div>
       <div class="title">{props.card.title}</div>
       <EtaChip card={props.card} now={props.now} />
@@ -307,6 +345,8 @@ function CardDrawer(props: {
   card: Card;
   now: number;
   columns: string[];
+  linkable: Question[];
+  onQuestionsChanged: () => void;
   onClose: () => void;
   onMove: (column: string, comment?: string) => Promise<void>;
   onSaved: (c: Card) => void;
@@ -497,6 +537,8 @@ function CardDrawer(props: {
           </dd>
         </Show>
       </dl>
+
+      <CardQuestions card={props.card} linkable={props.linkable} onChanged={() => props.onQuestionsChanged()} />
 
       <section class="stack" style={{ gap: "8px" }}>
         <h3 style={{ margin: 0 }}>Comments</h3>

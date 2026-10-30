@@ -2348,7 +2348,7 @@ except for the differences in "Bundles" below.
 | `options` | Short choice labels: at most 10, each at most 200 characters, no two the same. `[]` for a free answer. A notice and a bundle have none: options on a notice or a bundle are `422 invalid`. |
 | `items` | A bundle only: the questions, 2 to 20, each `{text, options, context?, answer?, answer_option?}`. Absent for a question and a notice. See "Bundles". |
 | `context` | Optional background as Markdown, at most 16 KiB. The dashboard shows it through the DOMPurify sink only. |
-| `card` | Optional. A card of the agent's project. |
+| `card` | Optional. A card of the agent's project. The question then shows on that card on the board (§8) and in the Inbox. Link or unlink later with `PATCH` (see "Cards"). |
 | `priority` | `normal`, `urgent`, or `critical`. Lists put the critical open questions first, then the urgent ones. Use `critical` only when the operator must act now: production is down, data is lost, a security problem, or a spent budget that stops all work. While a critical item is open, the dashboard shows a banner on each page and flashes its browser tab (§6.9). |
 | `status` | A question: `open`, `answered`, or `retracted`. A notice: `open`, `acknowledged`, or `retracted`. Only `open` changes. |
 | `answer`, `answer_option` | The answer text, and the 0-based index of the chosen option. An answer with an option and no text has the label as `answer`. For an acknowledged notice, `answer` is the reply of the operator, if any. |
@@ -2365,14 +2365,15 @@ The rights:
 | Read | The agent itself, a project_admin of its project, a sysadmin, the operator. Another caller gets `404` for one question and `403` for a list. |
 | Answer, acknowledge | The operator. A sysadmin agent, for the question or notice of another agent. Never the asking agent (`403`). |
 | Retract | The asking leader, or the operator. |
+| Link to a card, unlink | The asking leader while the question is open. The operator, and a sysadmin agent for the question of another agent, at each status. |
 
 | Endpoint | Body or query | Answer |
 |---|---|---|
 | `GET /api/agents/{id}/questions` | `?status=open\|answered\|acknowledged\|retracted`, `?all=true`, `?kind=question\|notice\|bundle` | `200` the questions and notices of the agent. No filter: the open ones and those answered or acknowledged in the last 24 h. |
 | `POST /api/agents/{id}/questions` | `{"kind"?, "text", "options"?, "items"?, "context"?, "card"?, "priority"?, "wait"?, "timeout"?}`; `kind` is `question` (the default), `notice`, or `bundle` (with `items`) | `201` the question, notice, or bundle; with `wait: true`, also `wait`: the new `question` wait (§6.7) |
-| `GET /api/questions` | `?status=` (default `open`; `all` for every status), `?project=`, `?agent=`, `?kind=` | `200` at most 200 questions and notices. Open first (critical first, then urgent, then the oldest first), then the others (the newest first). `X-Open-Questions`, `X-Urgent-Questions` (urgent and critical), and `X-Critical-Questions` count the open ones of the `kind` filter (both kinds without it). The operator and a sysadmin see all; a project_admin sees its own project; a member gets `403`. |
+| `GET /api/questions` | `?status=` (default `open`; `all` for every status), `?project=`, `?agent=`, `?kind=`, `?card=` | `200` at most 200 questions and notices. `?card=` keeps the questions linked to that card; an unknown card is `404`. Open first (critical first, then urgent, then the oldest first), then the others (the newest first). `X-Open-Questions`, `X-Urgent-Questions` (urgent and critical), and `X-Critical-Questions` count the open ones of the `kind` filter (both kinds without it). The operator and a sysadmin see all; a project_admin sees its own project; a member gets `403`. |
 | `GET /api/questions/{id}` | | `200` the question |
-| `PATCH /api/questions/{id}` | `{"text"?, "options"?, "items"?, "context"?, "card"?, "priority"?}`; `null` (or `[]` for `options`) clears a field; `items` replaces all items of a bundle | `200` the question. A question that is not open is `409 conflict`. |
+| `PATCH /api/questions/{id}` | `{"text"?, "options"?, "items"?, "context"?, "card"?, "priority"?}`; `null` (or `[]` for `options`) clears a field; `items` replaces all items of a bundle. `{"card": "<id>" \| null}` alone links or unlinks a card (see "Cards") | `200` the question. A question that is not open is `409 conflict`, except for a change of the card by the operator or a sysadmin. A card of another project, or an unknown card, is `422 invalid`. |
 | `POST /api/questions/{id}/answer` | `{"answer"?, "option"?, "revision"?}`: a text, an option (its label, or its 0-based index), or both. A bundle: `{"items": [{"answer"?, "option"?}, ...], "revision"?}` | `200` the question. A question that is not open is `409 conflict`. A notice is `409 conflict`. A `revision` that is not the current one is `409 conflict`, with `details.revision`. |
 | `POST /api/questions/{id}/ack` | `{"text"?}`, or no body | `200` the notice, `acknowledged`. A notice that is not open is `409 conflict`. A question is `409 conflict`. |
 | `POST /api/questions/{id}/retract` | `{"reason"?}`, or no body | `200` the question. A question that is not open is `409 conflict`. |
@@ -2412,8 +2413,27 @@ The rules:
 - Each change writes an audit row (`question.ask`, `question.update`,
   `question.answer`, `question.ack`, `question.retract`), a `question`
   event: `{question_id, kind, change, status, priority, text, revision,
-  agent_id, card_id?}`, where `change` is `asked`, `updated`, `answered`,
-  `acknowledged`, or `retracted`, and an `inbox` event (§6.9).
+  agent_id, card_id?, previous_card_id?}`, where `change` is `asked`,
+  `updated`, `answered`, `acknowledged`, or `retracted`, and an `inbox`
+  event (§6.9). The event has the top-level `card` of the linked card.
+
+Cards:
+
+- A question, a bundle, or a notice links to at most one card of its
+  project (`card`). The board shows the open ones on their card, and the
+  card drawer lists all of them (§8). `GET /api/questions?card=<id>&status=all`
+  reads the questions of a card: the open ones first, then the others,
+  the newest first.
+- `PATCH /api/questions/{id}` with only `card` links the question to a
+  card, or unlinks it with `"card": null`. The revision stays, so an answer
+  in progress stays valid. The asking leader changes the card of an open
+  question only. The operator and a sysadmin change it at each status.
+- A change of the card writes the audit row `question.update` with
+  `changed: ["card"]`, `card`, and `previous_card`, and an `updated`
+  event with `previous_card_id` (the old card), so that the old card
+  updates too. A `PATCH` with the same card changes nothing.
+- The ask (`POST /api/agents/{id}/questions`) and a `PATCH` give `422
+  invalid` for a card of another project, or an unknown card.
 
 Bundles:
 
@@ -2701,6 +2721,12 @@ A card:
   `data.actor_session` (a claim, a move, an assign, an edit, a comment).
 - Link kinds: `thread` (a mail thread ID), `branch`, `card`, `url`.
 - `position` counts from 0 inside the column.
+- The questions, bundles, and notices of a card are not in the card. Read
+  them with `GET /api/questions?card=<id>&status=all` (§6.8, "Cards"),
+  and the open ones of a whole board with `GET
+  /api/questions?project=<name>`. Their `question` events have the
+  top-level `card`, and `data.previous_card_id` when a question leaves a
+  card.
 
 A board:
 

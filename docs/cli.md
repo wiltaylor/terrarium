@@ -909,13 +909,14 @@ terrarium notify "<text>" [--context <text|-> | --context-file <path>] [--card <
 terrarium question ls [--all] [--status open|answered|acknowledged|retracted] [--kind question|notice|bundle] [--agent a]
 terrarium question show <id>
 terrarium question update <id> [--text t] [--option o]... [--clear-options] [--items-file <path|->]
-                       [--context t | --context-file p] [--card c] [--urgent | --critical | --normal]
+                       [--context t | --context-file p] [--card c | --no-card] [--urgent | --critical | --normal]
 terrarium question retract <id> [-m reason]
 terrarium wait question <id> [--timeout t] [-m note]
 terrarium admin question ls [-p project] [--agent a] [--open | --status s | --all] [--kind k]
 terrarium admin question show <id>
 terrarium admin question answer <id> ["<text>" | -] [--option <label|n>]
 terrarium admin question answer <id> --answers-file <path|->
+terrarium admin question update <id> (--card <id> | --no-card)
 terrarium admin question retract <id> [-m reason]
 terrarium admin inbox ls [-p project] [--all | --done] [--kind question|notice|mail|system]
 terrarium admin inbox ack <id> ["<text>" | -]
@@ -974,6 +975,12 @@ terrarium admin inbox resume <thread-id> [-m note]
   answered or retracted question is `409`. `--option` gives the new list
   of options; `--clear-options` removes them. `--items-file` replaces all
   questions of a bundle (the format of `bundle --items-file`).
+- `--card <id>` links a question, a bundle, or a notice to a card of its
+  project; `update --no-card` unlinks it. The question then shows on the
+  card on the board, and in the Inbox. Give `--card` when a question is
+  about a card. An `update` with only `--card` or `--no-card` keeps the
+  revision. A card of another project, or an unknown card, is `422`
+  (exit 1).
 - For a bundle, `show` prints the summary between `BUNDLE` markers, then
   each question between `ITEM <n> OF <m>` markers, with its options and
   its context. Each answer follows its item: `item <n> chosen option: ...`
@@ -992,6 +999,10 @@ terrarium admin inbox resume <thread-id> [-m note]
   The command sends the revision that it read, so a change of the agent
   meanwhile is `409`. The operator answers each question; a sysadmin agent answers
   the questions of other agents. The asking agent cannot answer its own.
+- `admin question update` links a question, a bundle, or a notice to a
+  card (`--card`), or unlinks it (`--no-card`). The operator can do this
+  at each status; the revision stays. It prints `<kind> <id> linked to
+  <card>.` or `<kind> <id> has no card now.`
 - `admin question retract` sends the agent one mail that it needs no
   answer.
 - `admin inbox ls` lists what waits for the operator (api.md §6.9): the
@@ -1234,7 +1245,7 @@ terrarium admin harness ls [--refresh]         each harness: pin, tested range, 
 terrarium admin harness update <name> [--version v|latest] [--force]   npm install -g into a new version dir, then the switch
 terrarium admin harness update --all [--force]   every harness and the extension to the latest
 terrarium admin audit [--since time] [--actor a] [--action a]
-terrarium admin question ls|show|answer|retract ...   the operator answers; a sysadmin answers other agents (§4)
+terrarium admin question ls|show|answer|update|retract ...   the operator answers; a sysadmin answers other agents (§4)
 terrarium admin password set [--stdin]         the operator password; every session ends
 terrarium admin fleet validate|plan|apply|ls|show|export ...
 terrarium admin schedule ls|show|new|set|rm|run|enable|disable|runs ...

@@ -12,9 +12,9 @@
     "prompts/harness/codex.md": "c8ea0527824f3996e82d96ce2899a8bc02771e0f8ac3b8c6d2c1527514a02920",
     "prompts/harness/copilot.md": "6feffee8e034e5e0369fa45ced127fe8c7603c75c10319ca5ad2d6167f210275",
     "prompts/harness/pi.md": "9156cdfe5e416f0d9e03a6ed9030510253d10532ac7c13b793c49f4830445e01",
-    "prompts/leader.md": "376e4b616647b02fc601aae426c8561e776b79903b326bda8c9ff32155d14de7",
-    "prompts/project-lead.md": "995eb6dda5c30f7c2527f01d885e27ff4a4ae195c70f5a0c80eb897a768af126",
-    "prompts/system-lead.md": "409eb095c1c5903057974354ebaa5dca86cd3723cd53f4affe700700135b20e7",
+    "prompts/leader.md": "367c92ae349c77c2727bb42f9616429d375b8ca5f91a55eaf5b11365eba85fc2",
+    "prompts/project-lead.md": "eef97f00a0d6bae450bd6da6c4ae5727f81c886f6983e7daa74051466dbf0eae",
+    "prompts/system-lead.md": "0f75e21a7df8e7e9254fc16ac455c100faed0bdd0e8363d80cdb31786c909220",
     "prompts/worker.md": "3e76fa8c28a097aea56bb53671cf07566fe7c433b456a1a993a4b39a751dc17c"
   }
 }

@@ -181,7 +181,7 @@ export function createQuestionMock(c: QuestionMockContext) {
 
   const question = (id: string): Question => all().find((q) => q.id === id) ?? fail(404, "not_found", `no question \`${id}\``);
 
-  const event = (q: Question, change: QuestionEventData["change"], actor = "operator") => {
+  const event = (q: Question, change: QuestionEventData["change"], actor = "operator", previousCard?: string | null) => {
     const data: QuestionEventData = {
       question_id: q.id,
       change,
@@ -192,6 +192,7 @@ export function createQuestionMock(c: QuestionMockContext) {
       revision: q.revision,
       agent_id: q.agent,
       ...(q.card ? { card_id: q.card } : {}),
+      ...(previousCard ? { previous_card_id: previousCard } : {}),
     };
     c.emit({
       kind: "question",
@@ -203,8 +204,10 @@ export function createQuestionMock(c: QuestionMockContext) {
       summary: `${q.agent_name.split("/")[1] ?? q.agent_name}: ${q.kind} ${change}: ${shortText(q.text, 80)}`,
       data: data as unknown as Record<string, unknown>,
     });
-    c.inboxEvent({ item: questionItemId(q), kind: q.kind === "notice" ? "notice" : "question", change: q.status === "open" ? (change === "asked" ? "opened" : "updated") : "closed", project: q.project });
+    c.inboxEvent({ item: questionItemId(q), kind: q.kind === "notice" ? "notice" : "question", change: q.status === "open" || change === "updated" ? (change === "asked" ? "opened" : "updated") : "closed", project: q.project });
   };
+
+  const findCard = (id: string) => w.cards.find((x) => x.id.toUpperCase() === id.trim().toUpperCase());
 
   const notOpen = (q: Question, what: string) => fail(409, "conflict", `${q.kind} ${q.id} is ${q.status}; ${what} needs an open ${q.kind}`, { status: q.status });
   const wrongKind = (q: Question, what: string) => fail(409, "conflict", `${q.id} is a ${q.kind}; ${what} needs a ${q.kind === "notice" ? "question" : "notice"}`, { kind: q.kind });
@@ -276,8 +279,10 @@ export function createQuestionMock(c: QuestionMockContext) {
     list: (q = {}) =>
       reply(() => {
         const status = q.status ?? "open";
+        // An unknown card is a 404, as in the daemon.
+        const card = q.card?.trim() ? (findCard(q.card) ?? fail(404, "not_found", `no card \`${q.card.trim()}\``)).id : undefined;
         return all()
-          .filter((x) => (status === "all" || x.status === status) && (!q.kind || x.kind === q.kind) && (!q.project || x.project === q.project) && (!q.agent || x.agent === c.agent(q.agent).id))
+          .filter((x) => (status === "all" || x.status === status) && (!q.kind || x.kind === q.kind) && (!q.project || x.project === q.project) && (!q.agent || x.agent === c.agent(q.agent).id) && (!card || x.card === card))
           .sort(ORDER);
       }),
     ofAgent: (agent, o = {}) =>
@@ -351,6 +356,25 @@ export function createQuestionMock(c: QuestionMockContext) {
         c.sendMail(q.agent, "operator", `Seen: ${shortText(q.text)}`, `operator acknowledged your notice ${q.id}.\n\nYour notice:\n${quoted(q.text)}${t ? `\nThe reply of operator:\n${quoted(t)}` : ""}`, q.thread_id);
         c.audit("question.ack", q.id, q.project, { agent: q.agent, by: "operator", reply: !!t });
         event(q, "acknowledged");
+        return q;
+      }),
+    // The operator links at any status; the revision stays (store/questions.rs set_card).
+    setCard: (id, card) =>
+      reply(() => {
+        const q = question(id);
+        const key = card?.trim() || null;
+        let next: string | null = null;
+        if (key) {
+          const found = findCard(key) ?? fail(422, "invalid", `no card \`${key}\` in project \`${q.project}\``);
+          if (found.project !== q.project) fail(422, "invalid", `card \`${found.id}\` is in project \`${found.project}\`, not in \`${q.project}\``);
+          next = found.id;
+        }
+        const previous = q.card ?? null;
+        if (next === previous) return q;
+        q.card = next;
+        q.updated_at = c.iso();
+        c.audit("question.update", q.id, q.project, { agent: q.agent, kind: q.kind, changed: ["card"], card: next, previous_card: previous, revision: q.revision });
+        event(q, "updated", "operator", previous);
         return q;
       }),
   };

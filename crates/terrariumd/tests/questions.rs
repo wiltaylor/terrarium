@@ -927,3 +927,130 @@ async fn a_bundle_is_updated_and_retracted_whole() {
         "{body}"
     );
 }
+
+#[tokio::test]
+async fn a_question_is_linked_to_a_card_and_unlinked() {
+    let World {
+        td,
+        lead,
+        worker,
+        sys,
+        other_lead,
+    } = setup().await;
+    let card = |p: &'static str| {
+        let td = &td;
+        async move {
+            id(td
+                .post(&format!("/api/projects/{p}/cards"), json!({"title": "c"}))
+                .await
+                .ok())
+        }
+    };
+    let (c1, c2, cq) = (card("p").await, card("p").await, card("q").await);
+    let q = ask(&td, &lead, json!({"text": "Ship it?"})).await;
+    let qid = id(&q);
+    let path = format!("/api/questions/{qid}");
+
+    // The asking leader links its open question; the revision stays.
+    let r = td.patch_as(&lead, &path, json!({"card": c1})).await;
+    let v = r.ok();
+    assert_eq!(v["card"], c1.as_str());
+    assert_eq!(v["revision"], 1);
+    // A card of another project, or an unknown card: 422.
+    td.patch_as(&lead, &path, json!({"card": cq}))
+        .await
+        .err(422, "invalid");
+    td.patch(&path, json!({"card": "NOPE-9"}))
+        .await
+        .err(422, "invalid");
+    // A worker and another leader may not: they do not see it.
+    assert_eq!(
+        td.patch_as(&worker, &path, json!({"card": c2}))
+            .await
+            .status,
+        404
+    );
+    assert_eq!(
+        td.patch_as(&other_lead, &path, json!({"card": c2}))
+            .await
+            .status,
+        404
+    );
+    // The operator may link, but not change the text.
+    assert_eq!(
+        td.patch(&path, json!({"card": c2})).await.ok()["card"],
+        c2.as_str()
+    );
+    assert_eq!(
+        td.patch(&path, json!({"card": c1, "text": "x"}))
+            .await
+            .status,
+        403
+    );
+
+    // The list filter: only the questions of the card.
+    let other = ask(&td, &lead, json!({"text": "Another one?", "card": c1})).await;
+    let of = |c: &str| {
+        let td = &td;
+        let c = c.to_owned();
+        async move {
+            td.get(&format!("/api/questions?card={c}&status=all"))
+                .await
+                .ok()
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(id)
+                .collect::<Vec<_>>()
+        }
+    };
+    assert_eq!(of(&c2).await, vec![qid.clone()]);
+    assert_eq!(of(&c1).await, vec![id(&other)]);
+    assert_eq!(td.get("/api/questions?card=NOPE-9").await.status, 404);
+    let r = td.get_as(&lead, &format!("/api/questions?card={c2}")).await;
+    assert_eq!(r.ok().as_array().unwrap().len(), 1);
+    assert_eq!(
+        td.get_as(&other_lead, &format!("/api/questions?card={c2}"))
+            .await
+            .status,
+        404
+    );
+
+    // A closed question: the leader may not unlink it; the operator and a
+    // sysadmin may.
+    td.post(&format!("{path}/answer"), json!({"answer": "yes"}))
+        .await
+        .ok();
+    td.patch_as(&lead, &path, json!({"card": null}))
+        .await
+        .err(409, "conflict");
+    let v = td.patch_as(&sys, &path, json!({"card": c1})).await;
+    assert_eq!(v.ok()["card"], c1.as_str());
+    let v = td.patch(&path, json!({"card": null})).await;
+    assert_eq!(v.ok()["card"], Value::Null);
+    assert!(of(&c1).await.iter().all(|q| *q != qid));
+
+    // The `question` event names the new card and the old one.
+    let ev = td.get("/api/events?kind=question&limit=100").await;
+    let last = ev
+        .ok()
+        .as_array()
+        .unwrap()
+        .iter()
+        .rfind(|e| e["data"]["question_id"] == qid.as_str())
+        .unwrap()
+        .clone();
+    assert_eq!(last["data"]["change"], "updated");
+    assert_eq!(last["data"]["previous_card_id"], c1.as_str());
+    assert!(last["data"].get("card_id").is_none());
+    // The audit log has each change of the card.
+    let audit = td.get("/api/audit?action=question.update&limit=50").await;
+    let cards = audit
+        .ok()
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|a| a["detail"]["changed"] == json!(["card"]))
+        .count();
+    assert_eq!(cards, 4, "{}", audit.body);
+}

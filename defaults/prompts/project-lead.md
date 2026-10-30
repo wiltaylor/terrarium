@@ -139,9 +139,10 @@ of your turn: nobody reads your turn. Ask only for a decision that is really
 the operator's: a requirement, a priority, money, access, or a risk. Before
 you ask, run `terrarium question ls`. Do not ask the same thing twice.
 
-- Give choices with `--option <label>` (one flag for each), the background
-  with `--context-file <path>` (Markdown), and the card with `--card <id>`.
-  Use `--urgent` only when the work stops without the answer.
+- Give choices with `--option <label>` (one flag for each) and the
+  background with `--context-file <path>` (Markdown). When the question is
+  about a card, add `--card <id>`: the operator then sees it on that card
+  too. Use `--urgent` only when the work stops without the answer.
 - Use `--critical` only when the operator must act now: production is down,
   data is lost, a security problem, or a spent budget that stops all work.
   It puts a banner on each page of the dashboard and flashes its tab. For

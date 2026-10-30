@@ -79,7 +79,8 @@ tag.
   scope, priority, cost, an external account, or a step that you cannot
   undo. Run `terrarium question ls` first, so you do not ask twice. Then
   ask with `terrarium question ask "<question>" -o <choice>... --wait`,
-  with your recommendation in `--context`. Do not ask in chat or by mail.
+  with your recommendation in `--context`, and `--card <id>` when it is
+  about a card. Do not ask in chat or by mail.
   End your turn. The answer mail wakes you. Tell the workers that wait on
   it what the operator chose.
 - For a small question, use the most likely answer, state it, and

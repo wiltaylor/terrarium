@@ -5,16 +5,16 @@
 // (SafeHtml) only.
 
 import { A } from "@solidjs/router";
-import { createSignal, For, Show } from "solid-js";
+import { createSignal, For, type JSX, Show } from "solid-js";
 import type { Question } from "../../api/types";
 import { SafeHtml } from "../../components/SafeHtml";
 import { ConfirmButton, ErrorBanner } from "../../components/ui";
 import { ago } from "../../lib/format";
 import { renderMarkdown } from "../../lib/markdown";
 import { api } from "../../stores";
-import { ackText, answerBody, chosenLabel, statusChip } from "./questions";
+import { ackText, answerBody, cardHref, chosenLabel, statusChip } from "./questions";
 
-export function QuestionCard(props: { question: Question; now: number; showAgent?: boolean; showKind?: boolean; onChange: (q: Question) => void }) {
+export function QuestionCard(props: { question: Question; now: number; showAgent?: boolean; showKind?: boolean; hideCard?: boolean; actions?: JSX.Element; onChange: (q: Question) => void }) {
   const q = () => props.question;
   const notice = () => q().kind === "notice";
   const [option, setOption] = createSignal<number | null>(null);
@@ -66,7 +66,13 @@ export function QuestionCard(props: { question: Question; now: number; showAgent
         <A href={`/p/${encodeURIComponent(q().project)}/board`} class="muted">
           {q().project}
         </A>
-        <Show when={q().card}>{(c) => <A href={`/p/${encodeURIComponent(q().project)}/board?card=${encodeURIComponent(c())}`}>{c()}</A>}</Show>
+        <Show when={!props.hideCard && q().card}>
+          {(c) => (
+            <A class="chip card-link" href={cardHref(q().project, c())} title={`Open card ${c()} on the board`}>
+              card {c()}
+            </A>
+          )}
+        </Show>
         <span class="muted" title={q().created_at}>
           {notice() ? "sent" : "asked"} {ago(q().created_at, props.now)}
         </span>
@@ -76,6 +82,7 @@ export function QuestionCard(props: { question: Question; now: number; showAgent
           </span>
         </Show>
         <span class="mono muted">{q().id}</span>
+        {props.actions}
       </div>
 
       <p class="question-text" style={{ margin: 0, "white-space": "pre-wrap", "font-weight": 600 }}>

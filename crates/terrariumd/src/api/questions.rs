@@ -4,9 +4,11 @@
 //!   an agent; a leader asks a question, sends a notice (`kind:
 //!   "notice"`), or asks a bundle of related questions (`kind: "bundle"`
 //!   with `items`), with `wait: true` also a `question` wait on it.
-//! - `GET /api/questions?status=&project=&agent=&kind=`: the questions and
-//!   notices that the caller may read.
-//! - `GET|PATCH /api/questions/{id}`.
+//! - `GET /api/questions?status=&project=&agent=&kind=&card=`: the
+//!   questions and notices that the caller may read.
+//! - `GET|PATCH /api/questions/{id}`. A body with only `card` links the
+//!   question to a card or unlinks it: the operator and a sysadmin at
+//!   any time, the asking leader while it is open.
 //! - `POST /api/questions/{id}/answer`: the operator, or a sysadmin agent
 //!   for the question of another agent. A notice is `409`. A bundle takes
 //!   `items`, with an answer for each item.
@@ -117,11 +119,14 @@ struct ListQuery {
     agent: Option<String>,
     #[serde(default)]
     kind: Option<String>,
+    #[serde(default)]
+    card: Option<String>,
 }
 
-/// `GET /api/questions?status=open&project=&agent=`. The operator and a
-/// sysadmin read all; a project_admin reads its project; a member gets
-/// `403`. Default status: `open`; `all` lists every status.
+/// `GET /api/questions?status=open&project=&agent=&card=`. The operator
+/// and a sysadmin read all; a project_admin reads its project; a member
+/// gets `403`. Default status: `open`; `all` lists every status. `card`:
+/// only the questions linked to that card (an unknown card is `404`).
 async fn list_all(
     State(state): State<Shared>,
     actor: Actor,
@@ -157,10 +162,31 @@ async fn list_all(
         }
         None => None,
     };
+    let card = match q.card.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
+        Some(key) => {
+            let key = key.to_owned();
+            let c = state
+                .db
+                .read(move |c| crate::store::board::get_card(c, &key))
+                .await?;
+            // A project_admin sees only the cards of its project.
+            let all =
+                matches!(actor, Actor::Operator) || actor.agent().is_some_and(|a| a.is_sysadmin());
+            if let Some(p) = project.as_deref().filter(|p| !all && *p != c.project) {
+                return Err(ApiError::not_found(format!(
+                    "no card `{}` in project `{p}`",
+                    c.id
+                )));
+            }
+            Some(c.id)
+        }
+        None => None,
+    };
     let kind = kind_filter(q.kind.as_deref())?;
     let f = Filter {
         agent,
         project: project.clone(),
+        card,
         kind,
         status,
         recent: false,
@@ -392,7 +418,8 @@ struct PatchBody {
 
 /// `PATCH /api/questions/{id}`: the asking leader changes its open
 /// question. Each change adds 1 to `revision`. A question that is not
-/// open is `409`.
+/// open is `409`. A body with only `card` links or unlinks the card and
+/// keeps the revision (see [`policy::link_question`] for who may).
 async fn update(
     State(state): State<Shared>,
     actor: Actor,
@@ -400,6 +427,25 @@ async fn update(
     ApiJson(b): ApiJson<PatchBody>,
 ) -> ApiResult<Json<Question>> {
     let q = find(&state, &actor, id).await?;
+    if let (Some(card), None, None, None, None, None) = (
+        &b.card,
+        &b.text,
+        &b.options,
+        &b.items,
+        &b.context,
+        &b.priority,
+    ) {
+        let any_status = policy::link_question(&actor, &q.agent, &q.project)?;
+        let (qid, card) = (q.id.clone(), card.clone());
+        return Ok(Json(
+            state
+                .db
+                .write(actor.label(), move |t| {
+                    questions::set_card(t, &qid, card.as_deref(), any_status)
+                })
+                .await?,
+        ));
+    }
     policy::ask_question(&actor, &q.agent, &q.project, "updating a question")?;
     let patch = QuestionPatch {
         text: b.text,

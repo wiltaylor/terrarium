@@ -894,8 +894,10 @@ mod tests {
             assert!(!persona.contains("<!--"), "{file}");
             // A cap with room, so a persona stays a persona. 1000 (900
             // before): the section "Messages you receive" (PLAN §8.5).
+            // 1015 (2026-10-30): `--card` on a question about a card
+            // (PLAN §12e).
             let words = persona.split_whitespace().count();
-            assert!(words < 1000, "{file}: {words} words");
+            assert!(words < 1015, "{file}: {words} words");
             // Each persona says how to read a tagged turn (PLAN §8.5).
             for needle in [
                 "## Messages you receive",

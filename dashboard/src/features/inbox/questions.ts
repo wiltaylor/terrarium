@@ -63,3 +63,6 @@ export function shortQuestion(text: string, max = 80): string {
   const first = (text.split("\n").find((l) => l.trim()) ?? "").trim();
   return first.length > max || text.trim().split("\n").length > 1 ? `${first.slice(0, max)}…` : first;
 }
+
+/** The board with the drawer of `card` open (`?card=`). */
+export const cardHref = (project: string, card: string): string => `/p/${encodeURIComponent(project)}/board?card=${encodeURIComponent(card)}`;

@@ -430,6 +430,7 @@ pub async fn question(ctx: &Ctx, cmd: &QuestionCmd) -> anyhow::Result<()> {
             items_file,
             context,
             card,
+            no_card,
             urgent,
             critical,
             normal,
@@ -452,7 +453,7 @@ pub async fn question(ctx: &Ctx, cmd: &QuestionCmd) -> anyhow::Result<()> {
                 super::set_list(&mut body, "options", options);
             }
             super::set_opt(&mut body, "context", context_value(ctx, context)?);
-            super::set_opt(&mut body, "card", card.clone());
+            card_value(&mut body, card, *no_card);
             set_priority(&mut body, *urgent, *critical);
             if *normal {
                 body["priority"] = json!("normal");
@@ -460,7 +461,7 @@ pub async fn question(ctx: &Ctx, cmd: &QuestionCmd) -> anyhow::Result<()> {
             if body.as_object().is_some_and(serde_json::Map::is_empty) {
                 return Err(CliError::usage(
                     "nothing to change: give --text, --option, --clear-options, --items-file, \
-                     --context, --card, --urgent, --critical, or --normal",
+                     --context, --card, --no-card, --urgent, --critical, or --normal",
                 ));
             }
             let v = ctx.api.patch(&path(id), body).await?;
@@ -599,7 +600,33 @@ pub async fn admin(ctx: &Ctx, cmd: &AdminQuestionCmd) -> anyhow::Result<()> {
                 ));
             })
         }
+        AdminQuestionCmd::Update { id, card, no_card } => {
+            let mut body = json!({});
+            card_value(&mut body, card, *no_card);
+            let v = ctx.api.patch(&path(id), body).await?;
+            ctx.emit(&v, |c, v| match v["card"].as_str() {
+                Some(card) => c.line(format!(
+                    "{} {} linked to {card}.",
+                    kind_of(v),
+                    field(v, "id")
+                )),
+                None => c.line(format!(
+                    "{} {} has no card now.",
+                    kind_of(v),
+                    field(v, "id")
+                )),
+            })
+        }
         AdminQuestionCmd::Retract { id, reason } => retract(ctx, id, reason).await,
+    }
+}
+
+/// `--card <id>` as `card`, `--no-card` as `card: null`.
+fn card_value(body: &mut Value, card: &Option<String>, no_card: bool) {
+    if no_card {
+        body["card"] = Value::Null;
+    } else {
+        super::set_opt(body, "card", card.clone());
     }
 }
 

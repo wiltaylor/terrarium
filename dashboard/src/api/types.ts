@@ -521,6 +521,8 @@ export interface QuestionEventData {
   revision: number;
   agent_id: string;
   card_id?: string;
+  /** A change of the card: the card that the question was linked to before. */
+  previous_card_id?: string;
 }
 
 /** `data` of a `watch` event. */

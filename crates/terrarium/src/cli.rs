@@ -1413,9 +1413,13 @@ pub enum QuestionCmd {
         items_file: Option<String>,
         #[command(flatten)]
         context: QuestionContext,
-        /// The card that the question is about
-        #[arg(long)]
+        /// The card that the question is about. Only --card (or
+        /// --no-card) keeps the revision
+        #[arg(long, conflicts_with = "no_card")]
         card: Option<String>,
+        /// Unlink the question from its card
+        #[arg(long)]
+        no_card: bool,
         #[arg(long, conflicts_with_all = ["normal", "critical"])]
         urgent: bool,
         #[arg(long, conflicts_with = "normal")]
@@ -1470,6 +1474,17 @@ pub enum AdminQuestionCmd {
         /// "answer": "<text>"}, ...]`; a plain string is a text answer
         #[arg(long, conflicts_with_all = ["text", "option"])]
         answers_file: Option<String>,
+    },
+    /// Link a question, a bundle, or a notice to a card of its project, or
+    /// unlink it (--no-card). Also when it is not open
+    Update {
+        id: String,
+        /// The card that the question is about
+        #[arg(long, conflicts_with = "no_card", required_unless_present = "no_card")]
+        card: Option<String>,
+        /// Unlink the question from its card
+        #[arg(long)]
+        no_card: bool,
     },
     /// Retract a question: the agent gets a mail that it needs no answer
     Retract {

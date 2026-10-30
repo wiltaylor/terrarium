@@ -269,8 +269,8 @@ export interface Api {
 
   /** Questions and notices of the leaders to the operator (docs/api.md §6.8). Plain arrays, no cursor. */
   questions: {
-    /** `GET /api/questions?status=&project=&agent=&kind=`: open by default, urgent first. `status: "all"` lists every status; no `kind` lists both kinds. */
-    list(q?: { status?: QuestionStatus | "all"; project?: string; agent?: string; kind?: QuestionKind }): Promise<Question[]>;
+    /** `GET /api/questions?status=&project=&agent=&kind=&card=`: open by default, urgent first. `status: "all"` lists every status; no `kind` lists both kinds; `card` lists the questions linked to that card. */
+    list(q?: { status?: QuestionStatus | "all"; project?: string; agent?: string; kind?: QuestionKind; card?: string }): Promise<Question[]>;
     /** `GET /api/agents/{id}/questions`: the open ones and those answered in the last 24 h; `all` lists every one. */
     ofAgent(agent: string, opts?: { all?: boolean; status?: QuestionStatus }): Promise<Question[]>;
     get(id: string): Promise<Question>;
@@ -283,6 +283,8 @@ export interface Api {
     retract(id: string, reason?: string): Promise<Question>;
     /** `POST /api/questions/{id}/ack`: acknowledge a notice, with an optional reply. 409 for a question. */
     ack(id: string, text?: string): Promise<Question>;
+    /** `PATCH /api/questions/{id}` with only `card`: link to a card of the question's project, or unlink with `null`. Any status; the revision stays. 422 for a card of another project or an unknown card. */
+    setCard(id: string, card: string | null): Promise<Question>;
   };
 
   watches: {
@@ -812,6 +814,7 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       answer: (id, body) => post(`/api/questions/${seg(id)}/answer`, body),
       retract: (id, reason) => post(`/api/questions/${seg(id)}/retract`, reason ? { reason } : {}),
       ack: (id, text) => post(`/api/questions/${seg(id)}/ack`, text ? { text } : {}),
+      setCard: (id, card) => patch(`/api/questions/${seg(id)}`, { card }),
     },
 
     watches: {

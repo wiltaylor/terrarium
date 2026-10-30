@@ -5636,6 +5636,33 @@ async fn questions_ask_list_update_and_answer() {
     .await;
     let r = exec(true, &["question", "update", "Q1"], vec![], None).await;
     assert_eq!(exit_code_of(&r.result.unwrap_err()), exit::USAGE);
+    // Link to a card, and unlink.
+    for (args, body) in [
+        (&["--card", "TER-4"][..], json!({"card": "TER-4"})),
+        (&["--no-card"][..], json!({"card": null})),
+    ] {
+        let mut argv = vec!["question", "update", "Q1"];
+        argv.extend_from_slice(args);
+        ok(
+            true,
+            &argv,
+            vec![(200, json!({"id": "Q1", "revision": 2}))],
+            vec![(Patch, "/api/questions/Q1", vec![], Some(body))],
+        )
+        .await;
+    }
+    assert!(
+        Cli::try_parse_from([
+            "terrarium",
+            "question",
+            "update",
+            "Q1",
+            "--card",
+            "X",
+            "--no-card"
+        ])
+        .is_err()
+    );
     ok(
         true,
         &["question", "retract", "Q1", "-m", "done"],
@@ -5718,6 +5745,34 @@ async fn questions_ask_list_update_and_answer() {
     assert_eq!(exit_code_of(&r.result.unwrap_err()), exit::USAGE);
     let r = exec(false, &["admin", "question", "answer", "Q1"], vec![], None).await;
     assert_eq!(exit_code_of(&r.result.unwrap_err()), exit::USAGE);
+    // The operator links a question to a card, and unlinks it.
+    let out = ok(
+        false,
+        &["admin", "question", "update", "Q1", "--card", "TER-4"],
+        vec![(200, json!({"id": "Q1", "kind": "bundle", "card": "TER-4"}))],
+        vec![(
+            Patch,
+            "/api/questions/Q1",
+            vec![],
+            Some(json!({"card": "TER-4"})),
+        )],
+    )
+    .await;
+    assert!(out.contains("bundle Q1 linked to TER-4."), "{out}");
+    let out = ok(
+        false,
+        &["admin", "question", "update", "Q1", "--no-card"],
+        vec![(200, json!({"id": "Q1", "card": null}))],
+        vec![(
+            Patch,
+            "/api/questions/Q1",
+            vec![],
+            Some(json!({"card": null})),
+        )],
+    )
+    .await;
+    assert!(out.contains("question Q1 has no card now."), "{out}");
+    assert!(Cli::try_parse_from(["terrarium", "admin", "question", "update", "Q1"]).is_err());
 }
 
 #[tokio::test]

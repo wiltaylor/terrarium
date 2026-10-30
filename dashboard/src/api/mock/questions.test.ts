@@ -170,4 +170,33 @@ describe("questions in the mock", () => {
     expect(mail).toHaveLength(1);
     expect(mail[0]!.body).toContain(`retracted your bundle ${b.id}: you need no answers`);
   });
+
+  it("links a question to a card and unlinks it, at any status, with the revision kept", async () => {
+    const api = mock();
+    const { frames, close } = await listen(api);
+    const onCard = await api.questions.list({ card: "TER-12", status: "all" });
+    expect(onCard.map((q) => q.kind)).toEqual(["question", "bundle"]);
+    expect((await api.questions.list({ card: "ter-12" })).length).toBe(2);
+    await expect(api.questions.list({ card: "NOPE-1" })).rejects.toMatchObject({ status: 404 });
+    const q = onCard[0]!;
+    const moved = await api.questions.setCard(q.id, "TER-16");
+    expect(moved).toMatchObject({ card: "TER-16", revision: q.revision });
+    expect((await api.questions.list({ card: "TER-12" })).map((x) => x.kind)).toEqual(["bundle"]);
+    await expect(api.questions.setCard(q.id, "WEB-4")).rejects.toMatchObject({ status: 422 });
+    await expect(api.questions.setCard(q.id, "NOPE-1")).rejects.toMatchObject({ status: 422 });
+    // A closed one changes too.
+    const done = (await api.questions.list({ status: "answered" }))[0]!;
+    expect((await api.questions.setCard(done.id, "TER-14")).card).toBe("TER-14");
+    expect((await api.questions.setCard(done.id, null)).card).toBeNull();
+    await wait();
+    const ev = frames.filter((f) => f.kind === "question");
+    expect(ev.map((f) => [f.data.change, f.data.card_id ?? null, f.data.previous_card_id ?? null])).toEqual([
+      ["updated", "TER-16", "TER-12"],
+      ["updated", "TER-14", null],
+      ["updated", null, "TER-14"],
+    ]);
+    expect(frames.filter((f) => f.kind === "inbox").every((f) => f.data.change === "updated")).toBe(true);
+    expect(api.world.audit.filter((a) => a.action === "question.update").length).toBeGreaterThanOrEqual(3);
+    close();
+  });
 });

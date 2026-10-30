@@ -1033,7 +1033,7 @@ terrarium admin target new ... | host ls                        sysadmin for glo
 terrarium admin target grant|revoke <target> <agent> [--until 30m] [--exclusive]
 terrarium admin audit [--since ...]
 terrarium admin schedule new|set|rm|run|enable|disable|ls|show|runs ...   §12b
-terrarium admin question ls|show|answer|retract ...    §12e; answer: sysadmin
+terrarium admin question ls|show|answer|update|retract ... §12e; answer: sysadmin
 ```
 
 Leader agents are ordinary agents with a role and a leader prompt template.
@@ -1559,6 +1559,21 @@ share the limit of 50 open items of the agent.
   related decisions that the operator makes at the same time. An
   unrelated question goes on its own.
 
+**Cards.** Asked for on 2026-10-30: a question about a card must show on
+that card as well as in the Inbox. A question, a bundle, or a notice links
+to at most one card of its project (`card`), at the ask (`--card <id>`) or
+later. `PATCH /api/questions/{id}` with only `card` links or unlinks it,
+and keeps the revision, so an answer in progress stays valid. The asking
+leader changes the card of an open question only (`terrarium question
+update <id> --card <id> | --no-card`). The operator, and a sysadmin for
+the questions of other agents, change it at each status (`terrarium admin
+question update`). A card of another project, or an unknown card, is
+`422`. `GET /api/questions?card=<id>` lists the questions of one card. A
+change of the card writes the audit row `question.update` and an `updated`
+event with the old card in `previous_card_id`. The lead templates and the
+leader persona tell a leader to give `--card` when a question is about a
+card. The board shows the open ones on their card (§13).
+
 **The Inbox.** Everything that needs the operator goes to one Inbox, so
 nothing is lost (`docs/api.md` §6.9). It is a read model over the stores,
 not a table, and it copies no mail body:
@@ -1577,7 +1592,9 @@ redirects) has the tabs All, Questions, Notices, Mail to you, and System,
 an Open and Done switch, and a project filter. Critical items come first,
 then urgent items, then the newest. A question card shows the agent, the project, the card,
 the text (as plain text), the context (Markdown through the DOMPurify sink
-only), the choice buttons, a free-text answer, and Retract. A notice card
+only), the choice buttons, a free-text answer, and Retract. Each card with a linked board card has a
+chip "card <id>" that opens the board with the drawer of that card
+(`/p/<project>/board?card=<id>`). A notice card
 shows the text, the context through the same sink, Acknowledge, and an
 optional reply. A bundle card shows the summary, the shared context, and
 each item with its number, text, context, choice buttons, and a free-text
@@ -1676,6 +1693,16 @@ move to `review` or `blocked`, types a pointer into each `project_admin` of
 the project, except the agent that made the change. Each project gets at
 most one batch of nudges in 10 s; the changes in that time go out as one
 pointer.
+
+Questions: a card with open linked questions (§12e) shows a badge "? N" on
+the board. N counts the questions, the bundles, and the notices; a bundle
+counts once. The colour is that of the highest priority, as in the Inbox:
+normal, urgent, or critical. The tooltip lists them. The card drawer has a
+"Questions" section with the same cards as the Inbox, so the operator
+answers, acknowledges, or retracts there. The closed ones are under
+"Answered (N)". The operator links an open question of the project that
+has no card ("Link a question"), and unlinks each one ("Unlink"). The
+`question` events keep the badges and the drawer live.
 
 Status link: the dashboard shows each agent's current `in_progress` card next
 to its status badge, so "working" always answers "on what".

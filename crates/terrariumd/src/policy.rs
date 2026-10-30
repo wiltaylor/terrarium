@@ -474,6 +474,17 @@ pub fn ask_question(actor: &Actor, owner: &str, project: &str, what: &str) -> Ap
     }
 }
 
+/// Link a question of `owner` (an agent of `project`) to a card, or
+/// unlink it: the operator or a sysadmin at any time (`Ok(true)`), the
+/// asking leader while the question is open (`Ok(false)`).
+pub fn link_question(actor: &Actor, owner: &str, project: &str) -> ApiResult<bool> {
+    match actor {
+        Actor::Operator => Ok(true),
+        Actor::Agent(a) if a.id != owner && a.is_sysadmin() => Ok(true),
+        _ => ask_question(actor, owner, project, "linking a question to a card").map(|()| false),
+    }
+}
+
 /// Read the questions of `owner`, an agent of `project`: the agent
 /// itself, a project_admin of the project, a sysadmin, or the operator.
 pub fn read_questions(actor: &Actor, owner: &str, project: &str) -> ApiResult<()> {

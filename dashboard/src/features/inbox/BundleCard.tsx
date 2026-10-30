@@ -7,7 +7,7 @@
 // Markdown, and go through the DOMPurify sink (SafeHtml) only.
 
 import { A } from "@solidjs/router";
-import { createEffect, createSignal, For, on, Show } from "solid-js";
+import { createEffect, createSignal, For, type JSX, on, Show } from "solid-js";
 import { ApiError } from "../../api/http";
 import type { Question } from "../../api/types";
 import { SafeHtml } from "../../components/SafeHtml";
@@ -31,9 +31,9 @@ import {
   saveDraft,
   sessionDraftStorage,
 } from "./bundle";
-import { statusChip } from "./questions";
+import { cardHref, statusChip } from "./questions";
 
-export function BundleCard(props: { question: Question; now: number; showAgent?: boolean; showKind?: boolean; onChange: (q: Question) => void }) {
+export function BundleCard(props: { question: Question; now: number; showAgent?: boolean; showKind?: boolean; hideCard?: boolean; actions?: JSX.Element; onChange: (q: Question) => void }) {
   const q = () => props.question;
   const store = sessionDraftStorage();
   const [draft, setDraft] = createSignal<BundleDraft>(loadDraft(store, q()) ?? emptyDraft(q()));
@@ -126,7 +126,13 @@ export function BundleCard(props: { question: Question; now: number; showAgent?:
         <A href={`/p/${encodeURIComponent(q().project)}/board`} class="muted">
           {q().project}
         </A>
-        <Show when={q().card}>{(c) => <A href={`/p/${encodeURIComponent(q().project)}/board?card=${encodeURIComponent(c())}`}>{c()}</A>}</Show>
+        <Show when={!props.hideCard && q().card}>
+          {(c) => (
+            <A class="chip card-link" href={cardHref(q().project, c())} title={`Open card ${c()} on the board`}>
+              card {c()}
+            </A>
+          )}
+        </Show>
         <span class="muted" title={q().created_at}>
           asked {ago(q().created_at, props.now)}
         </span>
@@ -136,6 +142,7 @@ export function BundleCard(props: { question: Question; now: number; showAgent?:
           </span>
         </Show>
         <span class="mono muted">{q().id}</span>
+        {props.actions}
       </div>
 
       <p class="question-text" style={{ margin: 0, "white-space": "pre-wrap", "font-weight": 600 }}>
