@@ -1,7 +1,7 @@
 // A screen with a title and a tab bar over the tab pages. Each tab is a
 // route under `base`, so a tab has a URL and the browser back button moves
-// between tabs. The tab page gives its own heading at level 2. Settings
-// and the Logs screens use it.
+// between tabs. The tab page gives its own heading at level 2. The Settings
+// and Logs screens use it, and their project variants too.
 
 import { A } from "@solidjs/router";
 import { For, type JSX } from "solid-js";

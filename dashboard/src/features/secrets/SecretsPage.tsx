@@ -1,5 +1,6 @@
 // Secrets (PLAN §16b, docs/api.md §5.2). Under /secrets: every secret that
-// the caller manages, with a scope filter. Under /p/:project/secrets: the
+// the caller manages, with a scope filter. Under
+// /p/:project/settings/secrets (a tab of the project settings screen): the
 // project's secrets, then the global ones that the project can use
 // (marked; a project secret hides a global one of the same name). The
 // plain fields, the public key of an `ssh_key` with the authorized_keys
@@ -76,7 +77,7 @@ export default function SecretsPage() {
 
   return (
     <>
-      <PageHead title={route.project ? `Secrets · ${route.project}` : "Secrets"}>
+      <PageHead title="Secrets" level={route.project ? 2 : 1}>
         <Show when={!route.project}>
           <select value={scope()} onChange={(e) => setScope(e.currentTarget.value)} aria-label="Scope filter">
             <option value="all">All scopes</option>

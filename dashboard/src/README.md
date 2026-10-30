@@ -220,7 +220,12 @@ opens it. Open, it shows the agents of that project, sorted by name
 (`app/AgentRow.tsx`). The row shows the agent name and a dot in the colour of
 the agent status. The row label and title also give the status. The project
 row and its Agents node show the number of agents that are blocked or in
-error. The sidebar has no other agent list: each agent is in a project. An
+error. A cog at the right of each project row opens the project settings
+screen (`/p/:project/settings`). The cog is muted until the row is under the
+pointer or has the focus, and it is in the accent colour while the screen is
+open. The cog is not a tree row, so it is not in the roving tabindex. The
+keyboard gets to the screen through the Settings link of the project cards
+(`/projects`). The sidebar has no other agent list: each agent is in a project. An
 agent page (`/agents/:id`) opens the Projects root, the project of the agent,
 and its Agents node, and marks the agent row. The dashboard has no list of
 all agents: `/agents` redirects to `/projects`. Above eight projects or
@@ -232,7 +237,9 @@ Account, Subscriptions, Harness config, and Hosts. Each tab is a route under
 `/settings`. Logs (`features/logs/LogsPage.tsx`) is the same: the
 "Terrarium" item has a tab for each of Mail, Events, and Audit, under
 `/logs`. The **Logs** item of a project has the Mail and Events tabs of that
-project, under `/p/<project>/logs`. Both screens use
+project, under `/p/<project>/logs`. The project settings screen is the
+same: it has a tab for each of General & repos, Secrets, and Templates of
+the project, under `/p/<project>/settings`. The screens use
 `components/TabScreen.tsx`. The Logs item is active on each of its tabs.
 
 **Live mode of the log tabs.** Mail, Events, and Audit have the same
@@ -579,7 +586,10 @@ prefix or budget scope. The daemon also has `project`, `since`, `until`, and
 |---|---|---|
 | `/` | Home: usage strip, waiting-on-you queue, host cards (see "Home: hosts"); the tile detail has the usage split by project, agent, model, and card | `GET /api/subscriptions`, `GET /api/usage?bucket=hour&group=subscription`; tile detail: `GET /api/usage?subscription=&group=project\|agent\|model\|card`, `GET .../quota`; per project: `versions?status=in_review`, `wiki?status=ready_for_review`, `board`; Inbox items: `GET /api/inbox` (see "The Inbox"); hosts: `GET /api/hosts`, `GET /api/hosts/{name}/metrics?minutes=15` |
 | `/projects` | Projects: list, create. The Projects root of the sidebar tree links it | `GET`, `POST /api/projects` |
-| `/p/:project/settings` | Project edit and delete, Repos panel | `GET`, `PATCH`, `DELETE /api/projects/{name}?confirm=true`, `GET`, `POST .../repos`, `POST /api/repos/{id}/checkout` |
+| `/p/:project/settings/general` | Project settings, General & repos tab: project edit and delete, Targets panel, Repos panel | `GET`, `PATCH`, `DELETE /api/projects/{name}?confirm=true`, `GET .../targets`, `GET`, `POST .../repos`, `POST /api/repos/{id}/checkout` |
+| `/p/:project/settings/secrets` | Project settings, Secrets tab: the secrets of the project, then the global ones that it can use | `GET /api/secrets?scope=`, `POST /api/secrets`, `PUT`, `DELETE /api/secrets/{scope}/{name}`, `POST .../generate\|reveal`, `GET .../grants` |
+| `/p/:project/settings/templates` | Project settings, Templates tab: the templates of the project, then the global ones | `GET`, `POST /api/templates`, `PATCH`, `DELETE /api/templates/{key}`, `template` events |
+| `/p/:project/settings`, `/p/:project/secrets`, `/p/:project/templates` | Gone: redirect to `/p/:project/settings/general`, `/p/:project/settings/secrets`, and `/p/:project/settings/templates` (`app/nav.ts` `MOVED_ROUTES`). The redirect keeps the query. | none |
 | `/p/:project/agents` | Agents grid of the project, status filter, new agent (the form starts with the project of the route) | `GET`, `POST /api/agents`, events socket |
 | `/agents` | Gone: redirects to `/projects` (`app/nav.ts` `MOVED_ROUTES`). | none |
 | `/agents/:id` | Agent detail: edit, delete, roles, quota, leases, conversation (the default tab), terminal, events, sessions | `GET`, `PATCH`, `DELETE /api/agents/{id}`, `start/stop/restart/send`, `GET`, `PUT .../roles`, `GET /api/usage/me?agent=`, `GET .../leases?all=`, `WS .../pty`, `GET .../events?since=`, `GET .../sessions`, `GET .../sessions/{session}/transcript?after=&limit=`, `GET .../transcript/stream?after=` (SSE) |

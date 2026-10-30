@@ -9,6 +9,7 @@ import { ProjectForm } from "./ProjectsPage";
 import { ScopeChip } from "../targets/ScopeChip";
 import { filterByScope, groupByScope } from "../../lib/target-scope";
 
+/** The General & repos tab of the project settings screen (/p/:project/settings/general). */
 export default function ProjectSettings() {
   const params = useParams<{ project: string }>();
   const navigate = useNavigate();
@@ -28,7 +29,7 @@ export default function ProjectSettings() {
 
   return (
     <>
-      <PageHead title={`Settings · ${params.project}`}>
+      <PageHead title="General & repos" level={2}>
         <button onClick={() => setEditing(true)} disabled={!project()}>
           Edit
         </button>

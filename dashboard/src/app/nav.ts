@@ -3,8 +3,6 @@
 export const PROJECT_ITEMS = [
   // Every agent of the project, in any status.
   { path: "agents", label: "Agents" },
-  // The templates that apply to the project: its own and the global ones.
-  { path: "templates", label: "Templates" },
   { path: "board", label: "Board" },
   // The logs of the project (PROJECT_LOGS_TABS): every message and every event that touches it.
   { path: "logs", label: "Logs" },
@@ -13,9 +11,19 @@ export const PROJECT_ITEMS = [
   { path: "versions", label: "Versions" },
   { path: "artifacts", label: "Artifacts" },
   { path: "schedules", label: "Schedules" },
+] as const;
+
+/**
+ * The tabs of the project settings screen, in order. Each is a route under
+ * /p/:project/settings. The cog of the project row in the tree opens it.
+ */
+export const PROJECT_SETTINGS_TABS = [
+  // The project edit and delete, the Targets panel, and the Repos panel.
+  { path: "general", label: "General & repos" },
   // The project's secrets and the global ones it can use (PLAN §16b).
   { path: "secrets", label: "Secrets" },
-  { path: "settings", label: "Settings & repos" },
+  // The templates that apply to the project: its own and the global ones.
+  { path: "templates", label: "Templates" },
 ] as const;
 
 /** Above the project tree. */
@@ -89,6 +97,10 @@ export const PROJECT_LOGS_TABS = [
  *   redirects. `/logs` and `/p/:project/logs` open the Mail tab.
  * - The global Agents page is removed. The agents of a project are on the
  *   Agents page of the project. `/agents` opens the project cards.
+ * - The project Secrets and Templates pages, and the project Settings page
+ *   (now "General & repos"), are tabs of the project settings screen. A
+ *   bookmark can have an old path, so the old paths stay as redirects.
+ *   `/p/:project/settings` opens the first tab.
  */
 export const MOVED_ROUTES = [
   { path: "/p/:project/spend", to: "/" },
@@ -105,6 +117,9 @@ export const MOVED_ROUTES = [
   { path: "/p/:project/mail", to: "/p/:project/logs/mail" },
   { path: "/p/:project/logs", to: "/p/:project/logs/mail" },
   { path: "/agents", to: "/projects" },
+  { path: "/p/:project/secrets", to: "/p/:project/settings/secrets" },
+  { path: "/p/:project/templates", to: "/p/:project/settings/templates" },
+  { path: "/p/:project/settings", to: "/p/:project/settings/general" },
 ] as const;
 
 /** The new place of a moved path, or undefined. */

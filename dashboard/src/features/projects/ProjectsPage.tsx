@@ -91,7 +91,7 @@ export default function ProjectsPage() {
                 {(p) => (
                   <tr>
                     <td>
-                      <A href={`/p/${encodeURIComponent(p.name)}/settings`}>
+                      <A href={`/p/${encodeURIComponent(p.name)}/settings/general`}>
                         <strong>{p.name}</strong>
                       </A>
                     </td>
@@ -108,7 +108,7 @@ export default function ProjectsPage() {
         </div>
       </Show>
       <Show when={creating()}>
-        <ProjectForm onClose={() => setCreating(false)} onSaved={(p) => (projects.select(p.name), navigate(`/p/${encodeURIComponent(p.name)}/settings`))} />
+        <ProjectForm onClose={() => setCreating(false)} onSaved={(p) => (projects.select(p.name), navigate(`/p/${encodeURIComponent(p.name)}/settings/general`))} />
       </Show>
     </>
   );

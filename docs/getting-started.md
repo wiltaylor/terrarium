@@ -330,7 +330,9 @@ lists the templates of the project and the global ones. The agent copies
 the values: a later `template edit` does not change `w1` or `w2`. In the
 dashboard, use the **Templates** page, the **Template** select of the
 **New agent** form, or **Save as template** on an agent page
-([api.md §21](api.md#21-agent-templates)).
+([api.md §21](api.md#21-agent-templates)). The **Templates** tab of the
+project settings (the cog of the project in the sidebar) shows the
+templates of one project.
 
 Each harness keeps its own default system prompt, and Terrarium adds its
 protocol prompt after it. To replace the harness's default prompt, give

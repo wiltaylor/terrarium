@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import app from "./App.tsx?raw";
 import layout from "./Layout.tsx?raw";
-import { GLOBAL_ITEMS, LOGS_TABS, MOVED_ROUTES, movedTo, PROJECT_ITEMS, PROJECT_LOGS_TABS, SETTINGS_ITEMS, SETTINGS_TABS, TOP_ITEMS } from "./nav";
+import { GLOBAL_ITEMS, LOGS_TABS, MOVED_ROUTES, movedTo, PROJECT_ITEMS, PROJECT_LOGS_TABS, PROJECT_SETTINGS_TABS, SETTINGS_ITEMS, SETTINGS_TABS, TOP_ITEMS } from "./nav";
 
 describe("navigation", () => {
   it("has no Spend item; the project has Logs, not Inbox or Mail, with a route", () => {
@@ -57,11 +57,35 @@ describe("navigation", () => {
     expect(movedTo("/p/terrarium/agents")).toBeUndefined();
   });
 
-  it("has Templates right after Agents under the project, with a route to the Templates page", () => {
+  it("has no Templates, Secrets, or Settings item under the project: they are tabs of the project settings screen, each with a route", () => {
     const paths = PROJECT_ITEMS.map((i) => i.path) as string[];
-    expect(paths.indexOf("templates")).toBe(paths.indexOf("agents") + 1);
-    expect(PROJECT_ITEMS.find((i) => i.path === "templates")?.label).toBe("Templates");
-    expect(app).toMatch(/path="\/p\/:project\/templates" component=\{TemplatesPage\}/);
+    for (const gone of ["templates", "secrets", "settings"]) expect(paths).not.toContain(gone);
+    expect(paths).toEqual(["agents", "board", "logs", "wiki", "memory", "versions", "artifacts", "schedules"]);
+    expect(PROJECT_SETTINGS_TABS).toEqual([
+      { path: "general", label: "General & repos" },
+      { path: "secrets", label: "Secrets" },
+      { path: "templates", label: "Templates" },
+    ]);
+    expect(app).toMatch(/<Route path="\/p\/:project\/settings" component=\{SettingsPage\}>/);
+    const start = app.indexOf('<Route path="/p/:project/settings"');
+    const block = app.slice(start, app.indexOf("</Route>", start));
+    expect(block).toMatch(/path="\/general" component=\{ProjectSettings\}/);
+    expect(block).toMatch(/path="\/secrets" component=\{SecretsPage\}/);
+    expect(block).toMatch(/path="\/templates" component=\{TemplatesPage\}/);
+    for (const t of PROJECT_SETTINGS_TABS) expect(block).toContain(`path="/${t.path}"`);
+    for (const old of ["secrets", "templates"]) expect(app).not.toMatch(new RegExp(`path="/p/:project/${old}" component=`));
+    expect(app).not.toMatch(/path="\/p\/:project\/settings" component=\{ProjectSettings\}/);
+  });
+
+  it("redirects the old project Secrets, Templates, and Settings paths to the project settings tabs", () => {
+    expect(movedTo("/p/terrarium/secrets")).toBe("/p/terrarium/settings/secrets");
+    expect(movedTo("/p/my%20app/templates/")).toBe("/p/my%20app/settings/templates");
+    expect(movedTo("/p/terrarium/settings")).toBe("/p/terrarium/settings/general");
+    expect(movedTo("/p/terrarium/settings/")).toBe("/p/terrarium/settings/general");
+    for (const now of ["/p/terrarium/settings/general", "/p/terrarium/settings/secrets", "/p/terrarium/settings/templates"]) expect(movedTo(now)).toBeUndefined();
+    // The global pages stay.
+    expect(movedTo("/secrets")).toBeUndefined();
+    expect(movedTo("/templates")).toBeUndefined();
   });
 
   it("has Schedules under the project and in the global list, each with a route", () => {
@@ -161,6 +185,9 @@ describe("navigation", () => {
       "/p/:project/mail",
       "/p/:project/logs",
       "/agents",
+      "/p/:project/secrets",
+      "/p/:project/templates",
+      "/p/:project/settings",
     ]);
   });
 
@@ -180,15 +207,11 @@ describe("navigation", () => {
     for (const r of MOVED_ROUTES) expect(movedTo(r.to.replace(":project", "terrarium"))).toBeUndefined();
   });
 
-  it("has Secrets after Skills in the global list, and before Settings under the project, each with a route to one page", () => {
+  it("has Secrets after Skills in the global list, with a route to the page", () => {
     const hrefs = GLOBAL_ITEMS.map((i) => i.href) as string[];
     expect(hrefs.indexOf("/secrets")).toBe(hrefs.indexOf("/skills") + 1);
     expect(GLOBAL_ITEMS.find((i) => i.href === "/secrets")?.label).toBe("Secrets");
-    const paths = PROJECT_ITEMS.map((i) => i.path) as string[];
-    expect(paths.indexOf("secrets")).toBe(paths.indexOf("settings") - 1);
-    expect(PROJECT_ITEMS.find((i) => i.path === "secrets")?.label).toBe("Secrets");
     expect(app).toMatch(/path="\/secrets" component=\{SecretsPage\}/);
-    expect(app).toMatch(/path="\/p\/:project\/secrets" component=\{SecretsPage\}/);
   });
 
   it("has no Spend page left in the code", () => {

@@ -427,6 +427,36 @@ th {
   background: var(--warn-soft);
   color: var(--warn);
 }
+/* The cog of a project row: muted, in full colour on the hover or focus of the row, accent while its screen is open. */
+.tree a.tree-cog {
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+  opacity: 0.55;
+}
+.tree-row:hover a.tree-cog,
+.tree li[role="treeitem"]:focus-visible > .tree-row a.tree-cog,
+.tree a.tree-cog:focus-visible {
+  opacity: 1;
+}
+.tree a.tree-cog:hover {
+  background: var(--surface-3);
+  color: var(--text);
+}
+.tree a.tree-cog:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.tree a.tree-cog.active {
+  opacity: 1;
+  color: var(--link);
+  background: var(--accent-soft);
+}
 .tree-filter {
   width: 100%;
   margin: 0 0 4px;

@@ -89,20 +89,23 @@ export function App() {
         </Route>
         <Route path="/p/:project" component={ProjectIndex} />
         <Route path="/p/:project/agents" component={AgentsPage} />
-        <Route path="/p/:project/templates" component={TemplatesPage} />
         <Route path="/p/:project/board" component={BoardPage} />
         {/* The project logs: the Mail and Events tabs (nav.ts PROJECT_LOGS_TABS), each for this project only. */}
         <Route path="/p/:project/logs" component={LogsPage}>
           <Route path="/mail" component={MailPage} />
           <Route path="/events" component={EventsPage} />
         </Route>
-        <Route path="/p/:project/settings" component={ProjectSettings} />
+        {/* The project settings screen: the tabs General & repos, Secrets, and Templates (nav.ts PROJECT_SETTINGS_TABS). /p/:project/settings redirects to the first tab. */}
+        <Route path="/p/:project/settings" component={SettingsPage}>
+          <Route path="/general" component={ProjectSettings} />
+          <Route path="/secrets" component={SecretsPage} />
+          <Route path="/templates" component={TemplatesPage} />
+        </Route>
         <Route path="/p/:project/memory" component={MemoryPage} />
         <Route path="/p/:project/wiki/*path" component={WikiPage} />
         <Route path="/p/:project/artifacts/:id?" component={ArtifactsPage} />
         <Route path="/p/:project/versions/:id?" component={VersionsPage} />
         <Route path="/p/:project/schedules" component={SchedulesPage} />
-        <Route path="/p/:project/secrets" component={SecretsPage} />
         <Show when={isMock}>
           <Route path="/dev/xss" component={XssPage} />
         </Show>
