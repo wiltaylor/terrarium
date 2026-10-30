@@ -1,5 +1,5 @@
 // The Inbox: everything that waits for the operator (`GET /api/inbox`).
-// Questions and notices of the leaders, mail to `operator`, and threads that
+// Questions, bundles of questions, and notices of the leaders, mail to `operator`, and threads that
 // the loop guard paused. Tabs pick the kind and Open or Done; the project
 // filter picks one project. `inbox` and `question` events read the list again.
 
@@ -11,6 +11,7 @@ import { api, events, inbox, projects } from "../../stores";
 import { MailItemCard, PausedThreadCard } from "./cards";
 import { emptyText, INBOX_TABS, inboxQuery, isInboxEvent, matchesTabs, putItem, questionFlags, sortItems, STATUS_TABS, type InboxStatusTab, type InboxTab } from "./model";
 import { inboxItemDomId } from "./critical";
+import { BundleCard } from "./BundleCard";
 import { QuestionCard } from "./QuestionCard";
 
 const TAB_IDS = INBOX_TABS.map((t) => t.id) as string[];
@@ -102,7 +103,11 @@ export default function InboxPage() {
               <div id={inboxItemDomId(item.id)} classList={{ "inbox-target": params.item === item.id }}>
                 <Switch>
                   <Match when={item.question}>
-                    {(q) => <QuestionCard question={q()} now={now()} showAgent showKind onChange={(next) => questionChanged(item, next)} />}
+                    {(q) => (
+                      <Show when={q().kind === "bundle"} fallback={<QuestionCard question={q()} now={now()} showAgent showKind onChange={(next) => questionChanged(item, next)} />}>
+                        <BundleCard question={q()} now={now()} showAgent showKind onChange={(next) => questionChanged(item, next)} />
+                      </Show>
+                    )}
                   </Match>
                   <Match when={item.message}>{(m) => <MailItemCard message={m()} open={item.open} now={now()} onAck={(next) => mailAcked(item, next)} />}</Match>
                   <Match when={item.system}>{(s) => <PausedThreadCard system={s()} onChange={systemChanged} />}</Match>

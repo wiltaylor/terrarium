@@ -21,14 +21,16 @@
 //!   between probes does not start a new period.
 //!
 //! One sample that passes two lines sends one mail, for the higher line.
-//! The 100 line mail says that the window is used up and names the agents
-//! that [`crate::quota_policy`] holds; the policy calls [`check`] after the
-//! holds. Each mail also emits one `quota.alert` event with the
-//! `threshold`, and `level: alert` (under 100) or `level: exhausted`.
+//! The 100 line mail says that the probe shows the window used up and
+//! names the agents that spent the most. Each mail also emits one
+//! `quota.alert` event with the `threshold`, and `level: alert` (under
+//! 100) or `level: exhausted`.
 //!
 //! The priority is normal at all lines: mail has no priority, and the
-//! operator wants no popup. A used-up window is not an outage: the held
-//! turns go out after the reset, and the auto-swap moves pooled agents.
+//! operator wants no popup. The mails give information only. No line holds
+//! a turn or swaps an account: a probe can show 100 percent while the plan
+//! still serves turns. Only the refusal of the provider blocks an agent
+//! ([`crate::usage_limit`]).
 
 use chrono::{DateTime, Duration, Utc};
 use rusqlite::{OptionalExtension, params};
@@ -226,29 +228,6 @@ fn agents_line(t: &Tx<'_>, sub: &str, window: &str, now: DateTime<Utc>) -> ApiRe
     ))
 }
 
-/// The line about the held agents of a used-up subscription.
-fn held_line(t: &Tx<'_>, sub: &str) -> ApiResult<String> {
-    let cause = format!("quota:{sub}");
-    let held: Vec<String> = ustore::holds(t)?
-        .into_iter()
-        .filter(|h| h.cause == cause)
-        .map(|h| Ok(agents::known_name(t, &h.agent)?.unwrap_or(h.agent)))
-        .collect::<ApiResult<_>>()?;
-    if held.is_empty() {
-        return Ok("No agent is held: no agent on it waits for the reset.".into());
-    }
-    let more = if held.len() > MAX_AGENTS {
-        format!(", and {} more", held.len() - MAX_AGENTS)
-    } else {
-        String::new()
-    };
-    let names: Vec<&str> = held.iter().take(MAX_AGENTS).map(String::as_str).collect();
-    Ok(format!(
-        "New turns of these agents wait for the reset: {}{more}.",
-        names.join(", ")
-    ))
-}
-
 /// Check one window of `sub` at `pct` percent (a reset that has passed
 /// counts as 0). When it passed a line that did not notify in this
 /// period, mail the operator and emit a `quota.alert` event. `link` is
@@ -278,12 +257,14 @@ pub fn check(
         (
             format!("Quota: {} {window} window is used up", sub.name),
             format!(
-                "Subscription `{}` ({}) has used all of its {window} window.\n{reset}\n{}\n\n\
-                 Move agents to another account with `terrarium admin agent swap <name> \
-                 <subscription>`, or wait for the reset.\n\nOpen: {link}\n",
+                "Subscription `{}` ({}) has used all of its {window} window, as the probe \
+                 reads it.\n{reset}\n{}\n\nThe agents keep their turns. An agent stops only \
+                 when the provider refuses a turn: then it moves to the next account of its \
+                 pool, or it waits, and you get a mail. To move agents now, use `terrarium \
+                 admin agent swap <name> <subscription>`.\n\nOpen: {link}\n",
                 sub.name,
                 sub.provider,
-                held_line(t, &sub.name)?
+                agents_line(t, &sub.name, window, now)?
             ),
         )
     } else {
@@ -506,18 +487,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_used_up_window_sends_one_mail_with_the_held_agents() {
+    async fn a_used_up_window_sends_one_mail_and_holds_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("t.db");
         let db = open(&path);
         add_sub(&db, 80).await;
-        db.write("system", |t| {
-            ustore::add_hold(t, "01HELDAGENT", "quota:max", None, "used up", false)?;
-            ustore::add_hold(t, "01OTHER", "quota:other", None, "used up", false)?;
-            Ok(())
-        })
-        .await
-        .unwrap();
         let now = Utc::now();
         let r = (now + Duration::hours(2)).to_rfc3339();
         assert_eq!(
@@ -536,11 +510,11 @@ mod tests {
             m[0].body
         );
         assert!(
-            m[0].body.contains("wait for the reset: 01HELDAGENT."),
+            m[0].body.contains("The agents keep their turns."),
             "{}",
             m[0].body
         );
-        assert!(!m[0].body.contains("01OTHER"), "{}", m[0].body);
+        assert!(db.read(ustore::holds).await.unwrap().is_empty());
         let level: String = db
             .read(|c| {
                 Ok(c.query_row(

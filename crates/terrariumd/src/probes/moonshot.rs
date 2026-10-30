@@ -12,9 +12,9 @@
 //! cash_balance}, scode, status}`; `code` 0 is success. The docs say that
 //! at an `available_balance` of 0 or less the inference API refuses calls.
 //!
-//! Only the Open Platform plans (`api`, `api-cn`) get this probe. Kimi Code
-//! (`coding`, `coding-cn`) documents no usage endpoint: its quota shows in
-//! the Kimi Code Console only.
+//! Only the Open Platform plans (`api`, `api-cn`) get this probe. The Kimi
+//! Code plans (`coding`, `coding-cn`) get `kimi-code-usage`
+//! ([`super::kimi`]).
 //!
 //! A balance has no total, so the one window, `balance`, is 0 % used while
 //! money is left and 100 % at 0 or less. The quota policy then acts on it

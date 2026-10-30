@@ -651,7 +651,7 @@ describe("mock parity with docs/api.md", () => {
     expect(me.holds).toEqual([]);
   });
 
-  it("runs the quota policy: quota.alert, quota.blocked per agent, held_agents, then quota.resumed", async () => {
+  it("runs the quota policy: quota.alert mails at each line, and a probe window holds no turn", async () => {
     const api = mock();
     const frames: AgentEvent[] = [];
     const st = api.events.stream({ since: api.world.seq });
@@ -681,28 +681,20 @@ describe("mock parity with docs/api.md", () => {
     expect(exhausted.data.level).toBe("exhausted");
     expect(Object.keys(exhausted.data).sort()).toEqual(["alert_at", "level", "message", "resets_at", "subscription", "threshold", "used_pct", "window"]);
     expect(exhausted.data).toMatchObject({ threshold: 100 });
-    // One used-up mail, with the held agents; a repeated sample sends none.
+    // One used-up mail; a repeated sample sends none. A probe window holds no turn.
     const usedUp = () => api.world.mail.filter((m) => m.to === "operator" && m.subject === "Quota: anthropic-max 5h window is used up");
     expect(usedUp()).toHaveLength(1);
-    expect(usedUp()[0]!.body).toContain("New turns of these agents wait for the reset: ");
+    expect(usedUp()[0]!.body).toContain("The agents keep their turns.");
     expect(usedUp()[0]!.body).toContain("terrarium/lead");
     api.sim.setWindow("anthropic-max", "5h", 100);
     expect(usedUp()).toHaveLength(1);
     expect(frames.filter((x) => x.kind === "quota.alert")).toHaveLength(3);
-    const blocked = frames.filter((x) => x.kind === "quota.blocked");
-    const onPlan = (await api.agents.list()).filter((a) => a.subscription === "anthropic-max");
-    expect(blocked.map((e) => e.agent_id).sort()).toEqual(onPlan.map((a) => a.id).sort());
-    expect(Object.keys(blocked[0]!.data).sort()).toEqual(["agent_id", "cause", "enforced", "reason", "until"]);
-    expect(blocked[0]!.data).toMatchObject({ cause: "quota:anthropic-max", enforced: false });
-    expect((await api.subscriptions.get("anthropic-max")).held_agents).toBe(onPlan.length);
-    expect((await api.usage.me("terrarium/lead")).holds[0]).toMatchObject({ cause: "quota:anthropic-max", enforced: false });
-    expect(api.world.mail.some((m) => m.to === "operator" && m.subject.includes("anthropic-max"))).toBe(true);
+    expect(frames.filter((x) => x.kind === "quota.blocked")).toHaveLength(0);
+    expect((await api.subscriptions.get("anthropic-max")).held_agents).toBe(0);
+    expect((await api.usage.me("terrarium/lead")).holds).toEqual([]);
 
     api.sim.setWindow("anthropic-max", "5h", 20);
-    const resumed = frames.filter((x) => x.kind === "quota.resumed");
-    expect(resumed).toHaveLength(onPlan.length);
-    expect(resumed[0]!.data).toMatchObject({ cause: "quota:anthropic-max", holds_left: 0 });
-    expect((await api.subscriptions.get("anthropic-max")).held_agents).toBe(0);
+    expect(frames.filter((x) => x.kind === "quota.resumed")).toHaveLength(0);
     // The window dropped: the next crossing notifies again.
     api.sim.setWindow("anthropic-max", "5h", 82);
     expect(quotaMail()).toHaveLength(3);
@@ -721,6 +713,24 @@ describe("mock parity with docs/api.md", () => {
   it("answers GET /api/events/latest with the newest seq", async () => {
     const api = mock();
     expect(await api.events.latest()).toBe(api.world.seq);
+  });
+
+  it("gives host metrics as the daemon does (docs/api.md §17.1)", async () => {
+    const api = mock();
+    const hosts = await api.hosts.list();
+    const lab1 = hosts.find((h) => h.name === "lab1")!;
+    expect(lab1.capabilities?.metrics).toBe(true);
+    expect(lab1.metrics).toMatchObject({ stale: false, interval_secs: 10 });
+    expect(lab1.metrics!.cpu!.busy_pct).toBeGreaterThanOrEqual(0);
+    // An older host agent has no samples.
+    expect(hosts.find((h) => h.name === "nas")!.metrics).toBeNull();
+    const hist = await api.hosts.metrics("lab1", { minutes: 15 });
+    expect(hist).toMatchObject({ host: "lab1", interval_secs: 10, minutes: 15, stale: false });
+    expect(hist.samples).toHaveLength(90);
+    expect(Date.parse(hist.samples[0]!.at)).toBeLessThan(Date.parse(hist.samples.at(-1)!.at));
+    expect((await api.hosts.metrics("nas")).samples).toEqual([]);
+    await expect(api.hosts.metrics("lab1", { minutes: 61 })).rejects.toMatchObject({ status: 400, code: "bad_request" });
+    await expect(api.hosts.metrics("nope")).rejects.toMatchObject({ status: 404 });
   });
 
   // ----- PLAN §19 hosts and targets: mock-only until the daemon has them -----

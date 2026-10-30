@@ -261,6 +261,92 @@ async fn hello_welcome_and_capabilities() {
 }
 
 #[tokio::test]
+async fn metrics_reach_the_host_list_and_the_history() {
+    let lab = Lab::start().await;
+    lab.td.project("ops").await;
+    let agent = lab.td.agent("ops", "worker", json!({})).await;
+    let agent = agent["id"].as_str().unwrap().to_owned();
+
+    // An older host agent: no `metrics` capability, so no samples.
+    let old_token = lab.register("old").await;
+    let old = tokio::spawn(lab.client("old", &old_token).run());
+    lab.wait_online("old", true).await;
+    let h = lab.td.get("/api/hosts/old").await;
+    assert_eq!(h.ok()["metrics"], Value::Null);
+    assert!(
+        h.body["capabilities"].get("metrics").is_none(),
+        "{}",
+        h.body
+    );
+    let hist = lab.td.get("/api/hosts/old/metrics").await;
+    assert_eq!(hist.ok()["samples"], json!([]));
+    assert_eq!(hist.body["stale"], true);
+
+    // A host agent with metrics, at a short interval for the test.
+    let token = lab.register("lab1").await;
+    let mut o = ClientOptions::new(format!("ws://{}/hosts/connect", lab.addr), token, "lab1");
+    o.capabilities.metrics = true;
+    o.metrics_interval = Duration::from_millis(50);
+    o.backoff_min = Duration::from_millis(50);
+    let task = tokio::spawn(Client::new(o).run());
+    lab.wait_online("lab1", true).await;
+    let mut latest = Value::Null;
+    for _ in 0..200 {
+        latest = lab.td.get("/api/hosts/lab1").await.body["metrics"].clone();
+        if !latest.is_null() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(latest["at"].is_string(), "{latest}");
+    assert_eq!(latest["stale"], false);
+    assert!(latest["cpu"]["cores"].as_u64().unwrap() > 0, "{latest}");
+    assert!(latest["memory"]["total_bytes"].as_u64().unwrap() > 0);
+    assert!(latest["interval_secs"].as_f64().unwrap() > 0.0);
+    let listed = lab.td.get("/api/hosts").await;
+    let row = listed
+        .ok()
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["name"] == "lab1")
+        .unwrap();
+    assert_eq!(row["capabilities"]["metrics"], true);
+    assert!(row["metrics"].is_object());
+
+    // The history: oldest first, and any caller may read it.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let hist = lab
+        .td
+        .get_as(&agent, "/api/hosts/lab1/metrics?minutes=5")
+        .await;
+    let hist = hist.ok();
+    assert_eq!(hist["interval_secs"], 10);
+    assert_eq!(hist["minutes"], 5);
+    let samples = hist["samples"].as_array().unwrap();
+    assert!(samples.len() >= 2, "{hist}");
+    assert!(samples[0]["at"].as_str() <= samples[samples.len() - 1]["at"].as_str());
+    for bad in ["0", "61", "x"] {
+        let r = lab
+            .td
+            .get(&format!("/api/hosts/lab1/metrics?minutes={bad}"))
+            .await;
+        assert_eq!(r.status, 400, "{bad}: {}", r.body);
+    }
+    lab.td
+        .get("/api/hosts/nope/metrics")
+        .await
+        .err(404, "not_found");
+
+    // Offline: the samples stay, and they are stale.
+    task.abort();
+    lab.wait_online("lab1", false).await;
+    let h = lab.td.get("/api/hosts/lab1").await;
+    assert_eq!(h.ok()["metrics"]["stale"], true);
+    old.abort();
+}
+
+#[tokio::test]
 async fn exec_streams_output_and_the_exit_code() {
     let lab = Lab::start().await;
     let _h = lab.host("lab1").await;

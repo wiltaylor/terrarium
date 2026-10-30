@@ -336,7 +336,9 @@ pub fn today_start() -> String {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Hold {
     pub agent: String,
-    /// `quota:<subscription>` or `budget:<project>`.
+    /// `limit:<subscription>` (a usage-limit error) or `budget:<scope>`.
+    /// An older version also set `quota:<subscription>`; the start ends
+    /// those holds.
     pub cause: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub until: Option<String>,

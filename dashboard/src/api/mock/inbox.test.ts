@@ -23,11 +23,12 @@ describe("the inbox in the mock", () => {
   it("lists the open items, urgent first, then the newest, with the daemon's fields", async () => {
     const api = mock();
     const open = await api.inbox.list();
-    expect(open.length).toBe(7);
+    expect(open.length).toBe(8);
     expect(open[0]).toMatchObject({ kind: "question", urgent: true, open: true });
     expect(open.slice(1).map((i) => i.at)).toEqual(open.slice(1).map((i) => i.at).sort().reverse());
     for (const i of open) {
-      expect(i.id.startsWith(`${i.kind === "system" ? "thread" : i.kind}:`)).toBe(true);
+      // A bundle is a `question` item with the ID `bundle:<id>`.
+      expect(i.id.startsWith(`${i.kind === "system" ? "thread" : i.question?.kind === "bundle" ? "bundle" : i.kind}:`)).toBe(true);
       expect(i.open).toBe(true);
       expect(!!i.question).toBe(i.kind === "question" || i.kind === "notice");
       expect(!!i.message).toBe(i.kind === "mail");
@@ -40,6 +41,9 @@ describe("the inbox in the mock", () => {
     expect(sys.system!.held.map((m) => m.id)).toEqual([fakeUlid("msg", 11)]);
     // Mail to the operator, but not the "needs a human" notice: the thread item stands for it.
     expect(open.filter((i) => i.kind === "mail").map((i) => i.message!.id).sort()).toEqual([3, 13, 16].map((n) => fakeUlid("msg", n)));
+    const b = open.find((i) => i.question?.kind === "bundle")!;
+    expect(b).toMatchObject({ id: `bundle:${b.question!.id}`, kind: "question", project: "terrarium" });
+    expect(b.question!.items).toHaveLength(3);
   });
 
   it("filters by kind, project, and status; system items show only while open", async () => {
@@ -49,13 +53,16 @@ describe("the inbox in the mock", () => {
     const done = await api.inbox.list({ status: "done" });
     expect(done.every((i) => !i.open && i.kind !== "system")).toBe(true);
     expect(done.map((i) => i.kind).sort()).toEqual(["mail", "notice", "question", "question"]);
-    expect((await api.inbox.list({ status: "all" })).length).toBe(11);
+    expect((await api.inbox.list({ status: "all" })).length).toBe(12);
+    // The Questions tab holds the bundle too.
+    expect((await api.inbox.list({ kind: "question" })).map((i) => i.question!.kind).sort()).toEqual(["bundle", "question", "question"]);
     await expect(api.inbox.list({ status: "nope" as "open" })).rejects.toMatchObject({ status: 422 });
   });
 
   it("counts the open items by kind, for a project too", async () => {
     const api = mock();
-    expect(await api.inbox.counts()).toEqual({ open: 7, urgent: 1, critical: 0, question: 2, notice: 1, mail: 3, system: 1 });
+    // The bundle counts once, as a question.
+    expect(await api.inbox.counts()).toEqual({ open: 8, urgent: 1, critical: 0, question: 3, notice: 1, mail: 3, system: 1 });
     expect(await api.inbox.counts("webshop")).toEqual({ open: 1, urgent: 0, critical: 0, question: 1, notice: 0, mail: 0, system: 0 });
   });
 
@@ -143,14 +150,14 @@ describe("the inbox in the mock", () => {
     const store = createInboxStore(api, { on: (fn) => api.events.stream({ since: api.world.seq }).subscribe(fn) }, { debounceMs: 0 });
     await store.refresh();
     expect(store.loaded()).toBe(true);
-    expect(store.counts()).toMatchObject({ open: 7, urgent: 1 });
-    expect(store.open()).toHaveLength(7);
+    expect(store.counts()).toMatchObject({ open: 8, urgent: 1 });
+    expect(store.open()).toHaveLength(8);
     await wait();
     await api.questions.answer(store.open()[0]!.question!.id, { answer: "yes" });
-    await waitFor(() => expect(store.counts()).toMatchObject({ open: 6, urgent: 0, question: 1 }));
+    await waitFor(() => expect(store.counts()).toMatchObject({ open: 7, urgent: 0, question: 2 }));
     await api.inbox.ackMail(fakeUlid("msg", 13));
-    await waitFor(() => expect(store.counts()).toMatchObject({ open: 5, mail: 2 }));
-    expect(store.open()).toHaveLength(5);
+    await waitFor(() => expect(store.counts()).toMatchObject({ open: 6, mail: 2 }));
+    expect(store.open()).toHaveLength(6);
   });
 
   it("shows a critical notice first, counts it, and drops the banner after the acknowledgement", async () => {

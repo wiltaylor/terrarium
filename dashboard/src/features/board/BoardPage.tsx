@@ -6,6 +6,7 @@ import { StatusBadge } from "../../components/StatusBadge";
 import { ConfirmButton, Drawer, ErrorBanner, LoadMore, Modal, PageHead } from "../../components/ui";
 import type { Card } from "../../api/types";
 import { ago, compact, humanize } from "../../lib/format";
+import { countdown, doneSummary, etaStopped, resolveEta, tickInterval } from "../../lib/eta";
 import { cardsIn, createBoardStore } from "../../stores/board";
 import { cardSessionRows, commentSessions, sessionHref, sessionRange } from "./sessions";
 import { agents, api, events } from "../../stores";
@@ -24,6 +25,16 @@ export function BoardPage() {
   const [newTitle, setNewTitle] = createSignal("");
 
   createEffect(on(() => params.project, (p) => void board.load(p)));
+
+  // One shared clock for the ETA countdowns: 1 s while a countdown is under an hour, else 30 s; no timer without one.
+  const [now, setNow] = createSignal(Date.now());
+  createEffect(() => {
+    const delay = tickInterval(board.state.board?.cards ?? [], now());
+    if (delay === null) return;
+    // A clock that is late (no ETA for a while) ticks at once.
+    const t = setTimeout(() => setNow(Date.now()), Math.max(0, delay - (Date.now() - now())));
+    onCleanup(() => clearTimeout(t));
+  });
 
   let reloadTimer: ReturnType<typeof setTimeout> | undefined;
   // Live: card and board events of this project reload the board.
@@ -134,6 +145,7 @@ export function BoardPage() {
                           </Show>
                           <KCard
                             card={card}
+                            now={now()}
                             hidden={!visible(card)}
                             dragging={dragging() === card.id}
                             onOpen={() => setSearch({ card: card.id })}
@@ -179,6 +191,7 @@ export function BoardPage() {
         {(c) => (
           <CardDrawer
             card={c()}
+            now={now()}
             columns={board.state.board?.columns.map((x) => x.name) ?? []}
             onClose={() => setSearch({ card: undefined })}
             onMove={(column, comment) => {
@@ -198,8 +211,31 @@ export function BoardPage() {
   );
 }
 
+/** The countdown chip of a card with an ETA, with a thin bar of the time used. Nothing for a done or archived card. */
+function EtaChip(props: { card: Card; now: number }) {
+  const cd = () => countdown(props.card, props.now);
+  return (
+    <Show when={cd()}>
+      {(c) => {
+        const soon = () => !c().overdue && c().progress !== null && c().progress! >= 0.9;
+        return (
+          <div class={`eta${c().overdue ? " overdue" : soon() ? " soon" : ""}`} title={c().title} role="timer" aria-label={`${c().label}. ${c().title}`}>
+            <span class={`chip${c().overdue ? " bad" : soon() ? " warn" : " info"}`}>{c().label}</span>
+            <Show when={c().progress !== null}>
+              <div class="eta-bar" aria-hidden="true">
+                <span style={{ width: `${Math.round(c().progress! * 100)}%` }} />
+              </div>
+            </Show>
+          </div>
+        );
+      }}
+    </Show>
+  );
+}
+
 function KCard(props: {
   card: Card;
+  now: number;
   hidden: boolean;
   dragging: boolean;
   onOpen: () => void;
@@ -228,6 +264,7 @@ function KCard(props: {
         </Show>
       </div>
       <div class="title">{props.card.title}</div>
+      <EtaChip card={props.card} now={props.now} />
       <div class="row small">
         <For each={props.card.labels}>{(l) => <span class="chip">{l}</span>}</For>
       </div>
@@ -268,6 +305,7 @@ function BlockModal(props: { cardId: string; onCancel: () => void; onSubmit: (co
 
 function CardDrawer(props: {
   card: Card;
+  now: number;
   columns: string[];
   onClose: () => void;
   onMove: (column: string, comment?: string) => Promise<void>;
@@ -279,6 +317,12 @@ function CardDrawer(props: {
   const [editing, setEditing] = createSignal(false);
   const [title, setTitle] = createSignal("");
   const [body, setBody] = createSignal("");
+  const [eta, setEta] = createSignal("");
+  const etaCheck = () => (eta().trim() ? resolveEta(eta(), props.now) : null);
+  const etaError = () => {
+    const r = etaCheck();
+    return r && "error" in r ? r.error : null;
+  };
   const history = createPagedList(
     () => props.card.id,
     (id, cursor) => api.cards.events(id, { cursor }),
@@ -395,6 +439,49 @@ function CardDrawer(props: {
         <dd class="mono small">{props.card.repo ?? "—"}</dd>
         <dt>Branch</dt>
         <dd class="mono small">{props.card.branch ?? "—"}</dd>
+        <dt>ETA</dt>
+        <dd class="stack" style={{ gap: "4px" }}>
+          <Show
+            when={etaStopped(props.card)}
+            fallback={
+              <Show when={props.card.eta_at} fallback={<span class="muted">—</span>}>
+                <EtaChip card={props.card} now={props.now} />
+                <span class="small muted">
+                  {new Date(props.card.eta_at!).toLocaleString()}
+                  {props.card.eta_set_by_name || props.card.eta_set_by ? ` · set by ${props.card.eta_set_by_name ?? props.card.eta_set_by}` : ""}
+                  {props.card.eta_set_at ? ` ${ago(props.card.eta_set_at, props.now)}` : ""}
+                </span>
+              </Show>
+            }
+          >
+            <span class="small">{doneSummary(props.card) ?? (props.card.eta_at ? `estimated ${new Date(props.card.eta_at).toLocaleString()}` : "—")}</span>
+          </Show>
+          <form
+            class="eta-edit"
+            onSubmit={async (e) => {
+              e.preventDefault();
+              if (!eta().trim() || etaError()) return;
+              if (await save({ eta_at: eta().trim() })) setEta("");
+            }}
+          >
+            <Show when={!etaStopped(props.card)}>
+              <input value={eta()} onInput={(e) => setEta(e.currentTarget.value)} placeholder="2h30m" aria-label="ETA: a duration such as 45m, 2h30m, or 1d" aria-invalid={!!etaError()} />
+              <button class="small" type="submit" disabled={!eta().trim() || !!etaError()}>
+                {props.card.eta_at ? "Change ETA" : "Set ETA"}
+              </button>
+            </Show>
+            <Show when={props.card.eta_at}>
+              <button class="small" type="button" onClick={() => void save({ eta_at: null })}>
+                Clear ETA
+              </button>
+            </Show>
+          </form>
+          <Show when={etaError()}>
+            <span class="small" style={{ color: "var(--danger)" }}>
+              {etaError()}
+            </span>
+          </Show>
+        </dd>
         <dt>Created</dt>
         <dd>
           {props.card.created_by_name ?? props.card.created_by} · {ago(props.card.created_at)}

@@ -86,6 +86,7 @@ impl Lab {
                 enabled: desktop,
                 ..DisplayCapability::default()
             },
+            metrics: false,
         };
         o.display.enabled = desktop;
         o.docker_bin = self.bins.path().join("docker").display().to_string();

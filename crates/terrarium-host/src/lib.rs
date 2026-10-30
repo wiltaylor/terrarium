@@ -22,6 +22,8 @@
 //!   lab instances).
 //! - [`config`]: the config file and the path policy.
 //! - [`capabilities`]: tool detection for `hello` and `check`.
+//! - [`metrics`]: CPU, memory, network, disk IO, and disk space samples for
+//!   the `metrics` frame.
 //! - [`tls`]: the transport check, fingerprint pinning, the probe, and
 //!   self-signed certificates.
 
@@ -31,6 +33,7 @@ pub mod config;
 pub mod display;
 pub mod docker;
 pub mod labcheck;
+pub mod metrics;
 pub mod outbox;
 pub mod prepare;
 pub mod protocol;

@@ -434,8 +434,10 @@ async fn file_subscription_cannot_be_deleted_and_survives_reload() {
     assert_eq!(s.ok()["source"], "api");
 }
 
+/// A probe window mails the operator at its lines, but holds no turn: a
+/// probe can show 100 percent while the plan still serves turns.
 #[tokio::test]
-async fn quota_policy_alerts_holds_and_resumes() {
+async fn quota_probe_windows_alert_but_hold_nothing() {
     let env = boot(
         |c| write(c, "subscriptions/anthropic-max.toml", MAX_SUB),
         |_, _| {},
@@ -447,7 +449,6 @@ async fn quota_policy_alerts_holds_and_resumes() {
     let a = td
         .agent("p", "worker", json!({"subscription": "anthropic-max"}))
         .await;
-    let other = td.agent("p", "other", json!({})).await;
     let id = a["id"].as_str().unwrap().to_owned();
     td.post_empty(&format!("/api/agents/{id}/start")).await.ok();
     td.wait_status(&id, "idle").await;
@@ -489,26 +490,113 @@ async fn quota_policy_alerts_holds_and_resumes() {
         .await
         .ok();
     assert_eq!(events_of(td, "quota.alert").await.len(), 1);
-    assert_eq!(
-        td.get(&format!("/api/agents/{id}")).await.body["status"],
-        "idle"
-    );
 
-    // 100 percent: exhausted alert, the agent is blocked, turns wait.
+    // 100 percent: the used-up mail, but no hold and no block.
     env.http.set(ANTHROPIC, 200, &at(100.0));
     td.post_empty("/api/subscriptions/anthropic-max/probe")
         .await
         .ok();
+    let alerts = events_of(td, "quota.alert").await;
+    assert_eq!(alerts.len(), 2);
+    assert!(alerts.iter().any(|a| a["data"]["level"] == "exhausted"));
+    let mail = td.get("/api/mail?to=operator").await;
+    let used_up = mail
+        .ok()
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["subject"] == "Quota: anthropic-max 5h window is used up")
+        .cloned()
+        .unwrap();
+    let body = used_up["body"].as_str().unwrap();
+    assert!(body.contains("The agents keep their turns."), "{body}");
+    assert!(events_of(td, "quota.blocked").await.is_empty());
+    let s = td.get("/api/subscriptions/anthropic-max").await;
+    assert_eq!(s.body["held_agents"], 0);
+    assert!(
+        td.get_as(&id, "/api/usage/me").await.ok()["holds"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        td.get(&format!("/api/agents/{id}")).await.body["status"],
+        "idle"
+    );
+    // A turn goes out at once.
+    td.post(&format!("/api/agents/{id}/send"), json!({"text": "now"}))
+        .await
+        .ok();
+    let agent_id: AgentId = id.parse().unwrap();
+    assert!(td.sup.waiting_turns(agent_id).is_empty());
+    wait_for("the turn", || async {
+        events_of(td, "turn_start")
+            .await
+            .iter()
+            .any(|e| e["data"]["prompt"] == "[User] now")
+    })
+    .await;
+}
+
+/// A usage-limit error of the provider blocks the agent: a hold with the
+/// message and the reset time, one mail to the operator, and turns that
+/// wait. A later turn that ends with no error ends the hold, and the
+/// waiting turn goes out.
+#[tokio::test]
+async fn a_usage_limit_error_blocks_the_agent_until_a_turn_succeeds() {
+    let env = boot(
+        |c| write(c, "subscriptions/anthropic-max.toml", MAX_SUB),
+        |_, _| {},
+    )
+    .await;
+    let td = &env.td;
+    td.project("p").await;
+    let a = td
+        .agent("p", "worker", json!({"subscription": "anthropic-max"}))
+        .await;
+    let other = td.agent("p", "other", json!({})).await;
+    let id = a["id"].as_str().unwrap().to_owned();
+    let agent_id: AgentId = id.parse().unwrap();
+    td.post_empty(&format!("/api/agents/{id}/start")).await.ok();
+    td.wait_status(&id, "idle").await;
+
+    let reset = chrono::Utc::now() + chrono::Duration::hours(2);
+    let limit = terrarium_core::Event::UsageLimit {
+        message: "You've hit your limit · resets 5pm (UTC)".into(),
+        resets_at: Some(reset),
+    };
+    td.sup.emit_harness(agent_id, limit.clone());
+    td.sup
+        .emit_harness(agent_id, terrarium_core::Event::TurnEnd);
     td.wait_status(&id, "blocked").await;
     let blocked = events_of(td, "quota.blocked").await;
     assert_eq!(blocked.len(), 1);
     assert_eq!(blocked[0]["agent_id"], id.as_str());
+    assert_eq!(blocked[0]["data"]["cause"], "limit:anthropic-max");
     assert_eq!(blocked[0]["data"]["enforced"], true);
-    assert!(blocked[0]["data"]["until"].as_str().is_some());
-    assert_eq!(events_of(td, "quota.alert").await.len(), 2);
+    let reason = blocked[0]["data"]["reason"].as_str().unwrap();
+    assert!(
+        reason.contains("usage limit on `anthropic-max`: You've hit your limit"),
+        "{reason}"
+    );
+    let until = blocked[0]["data"]["until"].as_str().unwrap();
+    assert_eq!(
+        until,
+        reset.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    );
+    // The `blocked` status carries the message.
+    let statuses = events_of(td, "status").await;
+    assert!(
+        statuses.iter().any(|e| e["data"]["status"] == "blocked"
+            && e["data"]["reason"]
+                .as_str()
+                .is_some_and(|r| r.contains("You've hit your limit"))),
+        "{statuses:?}"
+    );
     let s = td.get("/api/subscriptions/anthropic-max").await;
     assert_eq!(s.body["held_agents"], 1);
-    // The agent on another subscription runs on.
+    let me = td.get_as(&id, "/api/usage/me").await;
+    assert_eq!(me.ok()["holds"][0]["cause"], "limit:anthropic-max");
     assert!(
         td.get_as(other["id"].as_str().unwrap(), "/api/usage/me")
             .await
@@ -517,22 +605,58 @@ async fn quota_policy_alerts_holds_and_resumes() {
             .unwrap()
             .is_empty()
     );
-    let me = td.get_as(&id, "/api/usage/me").await;
-    assert_eq!(me.ok()["holds"][0]["cause"], "quota:anthropic-max");
+    let block_mail = || async {
+        td.get("/api/mail?to=operator")
+            .await
+            .ok()
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| m["subject"] == "Usage limit: p/worker is blocked")
+            .cloned()
+            .collect::<Vec<Value>>()
+    };
+    wait_for("the block mail", || async { block_mail().await.len() == 1 }).await;
+    let body = block_mail().await[0]["body"].as_str().unwrap().to_owned();
+    assert!(
+        body.contains("The provider said: You've hit your limit · resets 5pm (UTC)"),
+        "{body}"
+    );
+    assert!(body.contains("wait until the reset at"), "{body}");
+    assert!(
+        body.contains(&format!("Open: http://localhost:8080/agents/{id}")),
+        "{body}"
+    );
+    // The same error again: no second hold, no second mail.
+    td.sup.emit_harness(agent_id, limit);
+    td.sup
+        .emit_harness(agent_id, terrarium_core::Event::TurnEnd);
+    wait_for("the second error", || async {
+        events_of(td, "usage_limit").await.len() == 2
+    })
+    .await;
+    assert_eq!(events_of(td, "quota.blocked").await.len(), 1);
+    assert_eq!(block_mail().await.len(), 1);
 
     td.post(&format!("/api/agents/{id}/send"), json!({"text": "later"}))
         .await
         .ok();
-    let agent_id: AgentId = id.parse().unwrap();
     assert_eq!(td.sup.waiting_turns(agent_id), ["[User] later"]);
 
-    // After the reset the probe reads 10 percent: the hold ends and the
-    // waiting turn goes out.
-    env.http.set(ANTHROPIC, 200, &at(10.0));
-    td.post_empty("/api/subscriptions/anthropic-max/probe")
-        .await
-        .ok();
-    assert_eq!(events_of(td, "quota.resumed").await.len(), 1);
+    // The harness continues by itself after the reset, and the turn ends
+    // with no error: the hold ends, and the waiting turn goes out.
+    td.sup.emit_harness(
+        agent_id,
+        terrarium_core::Event::TurnStart {
+            prompt: Some("Your claude.ai usage limit has reset.".into()),
+        },
+    );
+    td.sup
+        .emit_harness(agent_id, terrarium_core::Event::TurnEnd);
+    wait_for("the release", || async {
+        events_of(td, "quota.resumed").await.len() == 1
+    })
+    .await;
     assert!(td.sup.waiting_turns(agent_id).is_empty());
     wait_for("the waiting turn", || async {
         events_of(td, "turn_start")
@@ -541,11 +665,113 @@ async fn quota_policy_alerts_holds_and_resumes() {
             .any(|e| e["data"]["prompt"] == "[User] later")
     })
     .await;
-    td.wait_status(&id, "idle").await;
     assert_eq!(
         td.get("/api/subscriptions/anthropic-max").await.body["held_agents"],
         0
     );
+}
+
+/// With no reset time, a usage-limit hold stays until the operator
+/// restarts the agent (a retry).
+#[tokio::test]
+async fn a_restart_ends_a_usage_limit_hold() {
+    let env = boot(
+        |c| write(c, "subscriptions/anthropic-max.toml", MAX_SUB),
+        |_, _| {},
+    )
+    .await;
+    let td = &env.td;
+    td.project("p").await;
+    let a = td
+        .agent("p", "worker", json!({"subscription": "anthropic-max"}))
+        .await;
+    let id = a["id"].as_str().unwrap().to_owned();
+    let agent_id: AgentId = id.parse().unwrap();
+    td.post_empty(&format!("/api/agents/{id}/start")).await.ok();
+    td.wait_status(&id, "idle").await;
+    td.sup.emit_harness(
+        agent_id,
+        terrarium_core::Event::UsageLimit {
+            message: "the API answered `billing_error`".into(),
+            resets_at: None,
+        },
+    );
+    td.wait_status(&id, "blocked").await;
+    let blocked = events_of(td, "quota.blocked").await;
+    assert!(blocked[0]["data"]["until"].is_null(), "{blocked:?}");
+    let state = td.daemon.as_ref().unwrap().state.clone();
+    assert_eq!(
+        terrariumd::quota_policy::release_expired(&state)
+            .await
+            .unwrap(),
+        0
+    );
+    td.post_empty(&format!("/api/agents/{id}/restart"))
+        .await
+        .ok();
+    wait_for("the release", || async {
+        events_of(td, "quota.resumed").await.len() == 1
+    })
+    .await;
+    td.wait_status(&id, "idle").await;
+}
+
+/// A hold of an older version from a probe window at 100 percent (cause
+/// `quota:...`) ends at the start; a budget hold stays.
+#[tokio::test]
+async fn old_probe_holds_end_at_the_start() {
+    let env = boot(
+        |c| write(c, "subscriptions/anthropic-max.toml", MAX_SUB),
+        |_, _| {},
+    )
+    .await;
+    let td = &env.td;
+    td.project("p").await;
+    let w = td
+        .agent("p", "worker", json!({"subscription": "anthropic-max"}))
+        .await;
+    let b = td
+        .agent("p", "budgeted", json!({"subscription": "anthropic-max"}))
+        .await;
+    let (w, b) = (
+        w["id"].as_str().unwrap().to_owned(),
+        b["id"].as_str().unwrap().to_owned(),
+    );
+    for id in [&w, &b] {
+        td.post_empty(&format!("/api/agents/{id}/start")).await.ok();
+        td.wait_status(id, "idle").await;
+    }
+    // The rows as an older version left them.
+    let state = td.daemon.as_ref().unwrap().state.clone();
+    let until = Some(chrono::Utc::now() + chrono::Duration::hours(2));
+    let old = "subscription `anthropic-max` is at its limit";
+    for id in [&w, &b] {
+        terrariumd::quota_policy::hold(&state, id, "quota:anthropic-max", until, old)
+            .await
+            .unwrap();
+    }
+    terrariumd::quota_policy::hold(&state, &b, "budget:project:p", until, "budget")
+        .await
+        .unwrap();
+    td.wait_status(&w, "blocked").await;
+
+    // The start.
+    assert_eq!(terrariumd::quota_policy::reapply(&state).await.unwrap(), 2);
+    td.wait_status(&w, "idle").await;
+    assert_eq!(events_of(td, "quota.resumed").await.len(), 2);
+    let holds = |id: String| async move {
+        td.get_as(&id, "/api/usage/me").await.ok()["holds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|h| h["cause"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    assert!(holds(w.clone()).await.is_empty());
+    assert_eq!(holds(b.clone()).await, ["budget:project:p"]);
+    td.wait_status(&b, "blocked").await;
+    // A second start finds none.
+    assert_eq!(terrariumd::quota_policy::reapply(&state).await.unwrap(), 0);
 }
 
 #[tokio::test]
@@ -565,7 +791,7 @@ async fn holds_end_at_their_reset_time() {
     td.wait_status(&id, "idle").await;
     let state = td.daemon.as_ref().unwrap().state.clone();
     let past = chrono::Utc::now() - chrono::Duration::seconds(1);
-    terrariumd::quota_policy::hold(&state, &id, "quota:anthropic-max", Some(past), "test")
+    terrariumd::quota_policy::hold(&state, &id, "limit:anthropic-max", Some(past), "test")
         .await
         .unwrap();
     td.wait_status(&id, "blocked").await;
@@ -1049,7 +1275,7 @@ async fn moonshot_key_is_a_pi_only_subscription() {
     )
     .await
     .err(422, "invalid");
-    // No plan: Kimi Code, overseas. pi only, no probe.
+    // No plan: Kimi Code, overseas. pi only, the Kimi Code usage probe.
     let r = td
         .post(
             "/api/subscriptions/kimi/api-key",
@@ -1063,8 +1289,8 @@ async fn moonshot_key_is_a_pi_only_subscription() {
     assert_eq!(r.body["harnesses"], json!(["pi"]));
     assert_eq!(r.body["env_var"], "MOONSHOT_API_KEY");
     assert_eq!(r.body["login_status"], "api_key");
-    assert_eq!(r.body["local_estimate_only"], true);
-    assert!(r.body.get("probe").is_none(), "{body}");
+    assert_eq!(r.body["local_estimate_only"], false);
+    assert_eq!(r.body["probe"], "kimi-code-usage", "{body}");
     assert_eq!(r.body["default_models"], json!({"pi": "kimi-for-coding"}));
     // The Open Platform, China: pi's `moonshotai-cn` and the CN balance
     // probe.
@@ -1849,10 +2075,12 @@ async fn models_come_from_the_provider_then_pi_then_the_table() {
 
 /// PLAN §16.3: at the start, the shared Claude login moves into the
 /// account of the one subscription that uses it, with a backup and an
-/// audit row. A pool must hold accounts of one provider. When a probe
-/// finds an account full, an agent with a pool moves to the next account
-/// with room (auto-swap); an agent without a pool is held. An account
-/// that an agent runs on cannot be logged out.
+/// audit row. A pool must hold accounts of one provider. A probe that
+/// finds an account full swaps nothing. When the provider refuses a turn
+/// with a usage-limit error, an agent with a pool moves to the next
+/// account that did not hit a limit (auto-swap); an agent without a pool,
+/// or with no account left, is held. An account that an agent runs on
+/// cannot be logged out.
 #[tokio::test]
 async fn shared_logins_migrate_and_full_accounts_swap() {
     let max_a =
@@ -1940,7 +2168,7 @@ async fn shared_logins_migrate_and_full_accounts_swap() {
         .await;
     assert_eq!(r.status.as_u16(), 422, "{}", r.body);
 
-    // max-a is full.
+    // The probe reads max-a full: no swap, no hold.
     let reset = (chrono::Utc::now() + chrono::Duration::hours(2)).to_rfc3339();
     env.http.set(
         ANTHROPIC,
@@ -1949,11 +2177,28 @@ async fn shared_logins_migrate_and_full_accounts_swap() {
     );
     td.post_empty("/api/subscriptions/max-a/probe").await.ok();
     let a = td.get(&format!("/api/agents/{a1}")).await;
-    assert_eq!(a.ok()["subscription"], "max-b", "{}", a.body);
+    assert_eq!(a.ok()["subscription"], "max-a", "{}", a.body);
+    let s = td.get("/api/subscriptions/max-a").await;
+    assert_eq!(s.ok()["held_agents"], 0, "{}", s.body);
+
+    // The provider refuses a turn of each agent on max-a.
+    let limit = || terrarium_core::Event::UsageLimit {
+        message: "You've hit your limit".into(),
+        resets_at: None,
+    };
+    td.sup.emit_harness(a1.parse().unwrap(), limit());
+    wait_for("the auto-swap", || async {
+        td.get(&format!("/api/agents/{a1}")).await.body["subscription"] == "max-b"
+    })
+    .await;
+    td.sup.emit_harness(a2.parse().unwrap(), limit());
+    wait_for("the hold of a2", || async {
+        td.get("/api/subscriptions/max-a").await.body["held_agents"] == 1
+    })
+    .await;
     let b = td.get(&format!("/api/agents/{a2}")).await;
     assert_eq!(b.ok()["subscription"], "max-a");
     let s = td.get("/api/subscriptions/max-a").await;
-    assert_eq!(s.ok()["held_agents"], 1, "only a2 waits: {}", s.body);
     assert_eq!(s.body["agents"][0]["name"], "a2");
     let audit = td
         .get("/api/audit?action=agent.swap")
@@ -1965,6 +2210,15 @@ async fn shared_logins_migrate_and_full_accounts_swap() {
         "{audit}"
     );
     assert!(!events_of(td, "agent.swapped").await.is_empty());
+    // a1 hits the limit on max-b too: max-a hit its limit, so no member is
+    // left, and a1 is held.
+    td.sup.emit_harness(a1.parse().unwrap(), limit());
+    wait_for("the hold of a1", || async {
+        td.get("/api/subscriptions/max-b").await.body["held_agents"] == 1
+    })
+    .await;
+    let a = td.get(&format!("/api/agents/{a1}")).await;
+    assert_eq!(a.ok()["subscription"], "max-b");
 
     // The account of a running agent cannot go.
     let r = td.post_empty("/api/subscriptions/max-b/logout").await;

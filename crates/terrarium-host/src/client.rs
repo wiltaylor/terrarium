@@ -24,8 +24,8 @@ use crate::config::{HostPaths, PathPolicy};
 use crate::outbox::{Link, Outbox, Outgoing};
 use crate::protocol::{
     CpPull, CpPush, DaemonFrame, DataFrame, ErrorCode, ExitReason, Hello, HostCapabilities,
-    HostFrame, PROTOCOL_VERSION, Resume, ResumeOffer, SessionId, StreamTag, Welcome,
-    decode_control, encode_control, parse_signal,
+    HostFrame, METRICS_INTERVAL_SECS, PROTOCOL_VERSION, Resume, ResumeOffer, SessionId, StreamTag,
+    Welcome, decode_control, encode_control, parse_signal,
 };
 use crate::session::{self, SessionInput};
 use crate::transfer::{self, PushFile};
@@ -74,6 +74,9 @@ pub struct ClientOptions {
     pub token_file: Option<PathBuf>,
     /// `[display]` of the config: the opt-in for `desktop` targets.
     pub display: crate::config::DisplayConfig,
+    /// The time between two `metrics` frames: [`METRICS_INTERVAL_SECS`].
+    /// Only the tests change it.
+    pub metrics_interval: Duration,
 }
 
 impl ClientOptions {
@@ -99,6 +102,45 @@ impl ClientOptions {
             allow_insecure: false,
             token_file: None,
             display: crate::config::DisplayConfig::default(),
+            metrics_interval: Duration::from_secs(METRICS_INTERVAL_SECS),
+        }
+    }
+}
+
+/// Send a `metrics` frame every `interval` until the link ends. The sampler reads `/proc` on a blocking thread; while one sample
+/// runs, the next tick waits, so a slow `statvfs` holds back only the
+/// metrics.
+async fn run_metrics(out: mpsc::Sender<HostFrame>, interval: Duration) {
+    let interval = interval.max(Duration::from_millis(10));
+    let Ok(mut sampler) = tokio::task::spawn_blocking(|| {
+        let mut s = crate::metrics::Sampler::default();
+        s.prime();
+        s
+    })
+    .await
+    else {
+        return;
+    };
+    let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + interval, interval);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        ticker.tick().await;
+        let Ok((s, sample)) = tokio::task::spawn_blocking(move || {
+            let m = sampler.sample();
+            (sampler, m)
+        })
+        .await
+        else {
+            return;
+        };
+        sampler = s;
+        let Some(m) = sample else { continue };
+        match out.try_send(HostFrame::Metrics(Box::new(m))) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                tracing::debug!("the link is busy; dropped a metrics sample");
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => return,
         }
     }
 }
@@ -396,9 +438,23 @@ impl Client {
 
         let (tx, mut rx) = mpsc::unbounded_channel::<Outgoing>();
         self.apply_welcome(&welcome, &tx);
+        // Metrics go on their own queue of one. The writer takes them only
+        // when the other queue is empty, so a sample never delays a frame
+        // of a session; a sample that finds the queue full is dropped.
+        let (mtx, mut mrx) = mpsc::channel::<HostFrame>(1);
+        let sampler = (welcome.metrics && self.opts.capabilities.metrics)
+            .then(|| tokio::spawn(run_metrics(mtx, self.opts.metrics_interval)));
 
         let mut writer = tokio::spawn(async move {
-            while let Some(item) = rx.recv().await {
+            loop {
+                let item = tokio::select! {
+                    biased;
+                    item = rx.recv() => match item {
+                        Some(i) => i,
+                        None => break,
+                    },
+                    Some(f) = mrx.recv() => Outgoing::Control(f),
+                };
                 let msg = match item {
                     Outgoing::Data(d) => Message::Binary(d.encode().into()),
                     Outgoing::Control(f) => match encode_control(&f) {
@@ -446,6 +502,9 @@ impl Client {
                 _ = &mut writer => break Ok(()),
             }
         };
+        if let Some(t) = sampler {
+            t.abort();
+        }
         self.detach_all();
         drop(tx);
         // Give the writer a moment to flush a close, then stop it.

@@ -77,7 +77,7 @@ pub struct UsageConfig {
     /// sandbox mode `none`: no overlay is bound, and the session files are
     /// in the shared home. See [`transcript_roots`].
     pub per_agent_sessions: bool,
-    /// Move the agents of a full subscription to the next account of their
+    /// Move an agent that hits a usage limit to the next account of its
     /// pool (`TERRARIUM_AUTO_SWAP`, PLAN §16.3). Default on.
     pub auto_swap: bool,
     pub http: Arc<dyn HttpGet>,
@@ -146,6 +146,8 @@ pub struct UsageRuntime {
     pub logins: Logins,
     /// The model lists of `GET /api/subscriptions/{name}/models`.
     pub models: crate::models::ModelCache,
+    /// The subscriptions that hit a usage limit ([`crate::usage_limit`]).
+    pub limits: crate::usage_limit::LimitBook,
 }
 
 impl UsageRuntime {
@@ -154,6 +156,7 @@ impl UsageRuntime {
             config,
             logins: Logins::default(),
             models: crate::models::ModelCache::default(),
+            limits: crate::usage_limit::LimitBook::default(),
         }
     }
 }

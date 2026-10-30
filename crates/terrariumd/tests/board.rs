@@ -607,3 +607,134 @@ async fn names_stay_after_agent_rm() {
         .await
         .err(404, "not_found");
 }
+
+/// The ETA of a card (PLAN §13): set and clear with PATCH, the limits, the
+/// rights of an edit, the `eta` card event, and the audit of a change to
+/// another's card.
+#[tokio::test]
+async fn eta_set_clear_and_rules() {
+    let td = setup().await;
+    let id = card(&td, "proj/w1", json!({"title": "Estimate", "eta_at": "2h"})).await;
+    let path = format!("/api/cards/{id}");
+    let c = td.get(&path).await.ok().clone();
+    let at = chrono::DateTime::parse_from_rfc3339(c["eta_at"].as_str().unwrap()).unwrap();
+    let left = at.with_timezone(&chrono::Utc) - chrono::Utc::now();
+    assert!(
+        left.num_minutes() > 118 && left.num_minutes() <= 120,
+        "{left}"
+    );
+    assert!(c["eta_at"].as_str().unwrap().ends_with('Z'));
+    assert!(c["eta_set_at"].is_string());
+    assert_eq!(c["eta_set_by_name"], "proj/w1");
+    // A compound duration and an RFC 3339 time.
+    let c = td
+        .patch_as("proj/w1", &path, json!({"eta_at": "1h30m"}))
+        .await
+        .ok()
+        .clone();
+    assert!(c["eta_at"].is_string());
+    let later = (chrono::Utc::now() + chrono::Duration::hours(3)).to_rfc3339();
+    let c = td
+        .patch_as("proj/w1", &path, json!({"eta_at": later}))
+        .await
+        .ok()
+        .clone();
+    let at = chrono::DateTime::parse_from_rfc3339(c["eta_at"].as_str().unwrap()).unwrap();
+    assert!((at.with_timezone(&chrono::Utc) - chrono::Utc::now()).num_minutes() >= 179);
+    // The limits: 422 with a clear message.
+    for (bad, says) in [
+        ("2000-01-01T00:00:00Z", "past"),
+        ("31d", "30 days"),
+        ("soon", "RFC 3339"),
+        ("0m", "more than zero"),
+    ] {
+        let r = td.patch_as("proj/w1", &path, json!({"eta_at": bad})).await;
+        let body = r.body.clone();
+        r.err(422, "invalid");
+        assert!(body.to_string().contains(says), "{bad}: {body}");
+    }
+    // Another member may not set it; the owner's edits are not audited.
+    td.patch_as("proj/w2", &path, json!({"eta_at": "1h"}))
+        .await
+        .err(403, "forbidden");
+    let audit = td.get("/api/audit?action=card.eta").await;
+    assert!(audit.ok().as_array().unwrap().is_empty());
+    // The operator sets it on w1's card: audited.
+    td.patch(&path, json!({"eta_at": "4h"})).await.ok();
+    let audit = td.get("/api/audit?action=card.eta").await.ok().clone();
+    assert_eq!(audit.as_array().unwrap().len(), 1);
+    // Each change is a card event with `change: eta`.
+    let ev = td.get(&format!("{path}/events")).await.ok().clone();
+    let etas: Vec<&Value> = ev
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["data"]["change"] == "eta")
+        .collect();
+    assert_eq!(etas.len(), 4, "{ev}");
+    assert!(etas[3]["summary"].as_str().unwrap().contains("ETA"));
+    assert!(etas[3]["data"]["previous"].is_string());
+    // Clear it: `null`. A second clear is no change and no event.
+    let c = td
+        .patch_as("proj/w1", &path, json!({"eta_at": null}))
+        .await
+        .ok()
+        .clone();
+    assert!(c.get("eta_at").is_none() && c.get("eta_set_by").is_none());
+    td.patch_as("proj/w1", &path, json!({"eta_at": null}))
+        .await
+        .ok();
+    let ev = td.get(&format!("{path}/events")).await.ok().clone();
+    let n = ev
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["data"]["change"] == "eta")
+        .count();
+    assert_eq!(n, 5);
+}
+
+/// A done card keeps its ETA and gets `done_at`; it takes no new ETA. A
+/// reopen clears `done_at`.
+#[tokio::test]
+async fn eta_stays_on_done_and_done_at_is_set() {
+    let td = setup().await;
+    let id = card(&td, "proj/w1", json!({"title": "Ship"})).await;
+    let path = format!("/api/cards/{id}");
+    td.post_empty_as("proj/w1", &format!("{path}/claim"))
+        .await
+        .ok();
+    let c = td
+        .patch_as("proj/w1", &path, json!({"eta_at": "45m"}))
+        .await
+        .ok()
+        .clone();
+    assert!(c.get("done_at").is_none());
+    let eta = c["eta_at"].clone();
+    let c = td
+        .post_as(
+            "proj/w1",
+            &format!("{path}/move"),
+            json!({"column": "done"}),
+        )
+        .await
+        .ok()
+        .clone();
+    assert_eq!(c["eta_at"], eta);
+    assert!(c["done_at"].is_string());
+    td.patch(&path, json!({"eta_at": "1h"}))
+        .await
+        .err(409, "conflict");
+    let c = td
+        .post(&format!("{path}/move"), json!({"column": "ready"}))
+        .await
+        .ok()
+        .clone();
+    assert!(c.get("done_at").is_none());
+    assert_eq!(c["eta_at"], eta);
+    // An archived card takes no ETA.
+    td.delete(&path).await;
+    td.patch(&path, json!({"eta_at": "1h"}))
+        .await
+        .err(409, "conflict");
+}

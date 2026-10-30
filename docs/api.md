@@ -1629,12 +1629,13 @@ changes.
 
   The store names the new subscription at once. Each swap writes an
   `agent.swap` audit row `{from, to, applied, auto, reason}` and an
-  `agent.swapped` event, and ends the agent's quota hold of the old
-  subscription. The quota policy uses the same swap for the auto-swap of a
-  full account (§16.6), with `auto: true` and the actor `system`.
+  `agent.swapped` event, and ends the agent's usage-limit hold of the old
+  subscription. The daemon uses the same swap for the auto-swap after a
+  usage-limit error (§16.6), with `auto: true` and the actor `system`.
 - `restart` ends the current session with outcome `restarted` and starts a
   new one. On a stopped agent, or an agent in `error`, it is the same as
-  `start`: a new launch.
+  `start`: a new launch. A `start` or a `restart` is a retry: it ends the
+  agent's usage-limit holds (§16.6).
 - `send` types one turn through the runner: it waits until the agent is
   `idle` and the prompt is ready. A stopped agent, or one between an exit
   and its restart, gets `409 not_running`.
@@ -2324,6 +2325,12 @@ acknowledgement always goes to the agent as one mail. A notice is a row of
 the same table, with the same fields, rights, limits, and endpoints, except
 for the differences below.
 
+A **bundle** (`kind: "bundle"`) is a group of 2 to 20 related questions
+(`items`) under one summary (`text`). The operator answers all items in
+one step, and the agent gets all answers in one mail. A bundle is a row of
+the same table, with the rights, limits, and endpoints of a question,
+except for the differences in "Bundles" below.
+
 ```json
 {"id":"01JQ...","agent":"01M5...","agent_name":"demo/lead","project":"demo",
  "text":"Ship v2 on Friday?","options":["yes","no"],"context":"**CI** is green.",
@@ -2336,9 +2343,10 @@ for the differences below.
 
 | Field | Meaning |
 |---|---|
-| `kind` | `question` or `notice`. Set at the ask; it does not change. |
-| `text` | The question, at most 2000 characters. The agent's own words: untrusted data. |
-| `options` | Short choice labels: at most 10, each at most 200 characters, no two the same. `[]` for a free answer. A notice has none: options on a notice are `422 invalid`. |
+| `kind` | `question`, `notice`, or `bundle`. Set at the ask; it does not change. |
+| `text` | The question (the summary of a bundle), at most 2000 characters. The agent's own words: untrusted data. |
+| `options` | Short choice labels: at most 10, each at most 200 characters, no two the same. `[]` for a free answer. A notice and a bundle have none: options on a notice or a bundle are `422 invalid`. |
+| `items` | A bundle only: the questions, 2 to 20, each `{text, options, context?, answer?, answer_option?}`. Absent for a question and a notice. See "Bundles". |
 | `context` | Optional background as Markdown, at most 16 KiB. The dashboard shows it through the DOMPurify sink only. |
 | `card` | Optional. A card of the agent's project. |
 | `priority` | `normal`, `urgent`, or `critical`. Lists put the critical open questions first, then the urgent ones. Use `critical` only when the operator must act now: production is down, data is lost, a security problem, or a spent budget that stops all work. While a critical item is open, the dashboard shows a banner on each page and flashes its browser tab (§6.9). |
@@ -2360,12 +2368,12 @@ The rights:
 
 | Endpoint | Body or query | Answer |
 |---|---|---|
-| `GET /api/agents/{id}/questions` | `?status=open\|answered\|acknowledged\|retracted`, `?all=true`, `?kind=question\|notice` | `200` the questions and notices of the agent. No filter: the open ones and those answered or acknowledged in the last 24 h. |
-| `POST /api/agents/{id}/questions` | `{"kind"?, "text", "options"?, "context"?, "card"?, "priority"?, "wait"?, "timeout"?}`; `kind` is `question` (the default) or `notice` | `201` the question or notice; with `wait: true`, also `wait`: the new `question` wait (§6.7) |
+| `GET /api/agents/{id}/questions` | `?status=open\|answered\|acknowledged\|retracted`, `?all=true`, `?kind=question\|notice\|bundle` | `200` the questions and notices of the agent. No filter: the open ones and those answered or acknowledged in the last 24 h. |
+| `POST /api/agents/{id}/questions` | `{"kind"?, "text", "options"?, "items"?, "context"?, "card"?, "priority"?, "wait"?, "timeout"?}`; `kind` is `question` (the default), `notice`, or `bundle` (with `items`) | `201` the question, notice, or bundle; with `wait: true`, also `wait`: the new `question` wait (§6.7) |
 | `GET /api/questions` | `?status=` (default `open`; `all` for every status), `?project=`, `?agent=`, `?kind=` | `200` at most 200 questions and notices. Open first (critical first, then urgent, then the oldest first), then the others (the newest first). `X-Open-Questions`, `X-Urgent-Questions` (urgent and critical), and `X-Critical-Questions` count the open ones of the `kind` filter (both kinds without it). The operator and a sysadmin see all; a project_admin sees its own project; a member gets `403`. |
 | `GET /api/questions/{id}` | | `200` the question |
-| `PATCH /api/questions/{id}` | `{"text"?, "options"?, "context"?, "card"?, "priority"?}`; `null` (or `[]` for `options`) clears a field | `200` the question. A question that is not open is `409 conflict`. |
-| `POST /api/questions/{id}/answer` | `{"answer"?, "option"?}`: a text, an option (its label, or its 0-based index), or both | `200` the question. A question that is not open is `409 conflict`. A notice is `409 conflict`. |
+| `PATCH /api/questions/{id}` | `{"text"?, "options"?, "items"?, "context"?, "card"?, "priority"?}`; `null` (or `[]` for `options`) clears a field; `items` replaces all items of a bundle | `200` the question. A question that is not open is `409 conflict`. |
+| `POST /api/questions/{id}/answer` | `{"answer"?, "option"?, "revision"?}`: a text, an option (its label, or its 0-based index), or both. A bundle: `{"items": [{"answer"?, "option"?}, ...], "revision"?}` | `200` the question. A question that is not open is `409 conflict`. A notice is `409 conflict`. A `revision` that is not the current one is `409 conflict`, with `details.revision`. |
 | `POST /api/questions/{id}/ack` | `{"text"?}`, or no body | `200` the notice, `acknowledged`. A notice that is not open is `409 conflict`. A question is `409 conflict`. |
 | `POST /api/questions/{id}/retract` | `{"reason"?}`, or no body | `200` the question. A question that is not open is `409 conflict`. |
 
@@ -2407,6 +2415,51 @@ The rules:
   agent_id, card_id?}`, where `change` is `asked`, `updated`, `answered`,
   `acknowledged`, or `retracted`, and an `inbox` event (§6.9).
 
+Bundles:
+
+```json
+{"id":"01JQ...","kind":"bundle","agent_name":"demo/lead","project":"demo",
+ "text":"Release plan for v0.3","options":[],"context":"CI is green.",
+ "items":[{"text":"Tag on Friday?","options":["yes","no"],"answer":"no","answer_option":1},
+          {"text":"Which staging host?","options":["eu","us"],"context":"`us` has the newer kernel.",
+           "answer":"us, for the kernel","answer_option":1},
+          {"text":"Release notes?","options":[],"answer":"Mention the PTY fix."}],
+ "priority":"normal","status":"answered","answered_by":"operator", "...": "as a question"}
+```
+
+- An item has a `text` (at most 2000 characters), `options` (the rules of
+  the options of a question), and an optional `context` (Markdown, at most
+  4 KiB). No two items have the same text. A bundle has 2 to 20 items. A
+  bundle with no items, one item, or more than 20 is `422 invalid`, and so
+  are `items` on a question or a notice. The message names the item.
+- The answer of a bundle takes `items`: one entry for each item, in order.
+  Each entry has `answer` (text), `option` (a label of the item, or its
+  0-based index), or both. `answer` or `option` at the top is `422`. An
+  item with no answer is `422 invalid`: the message names the items
+  (`items 2 and 3 of 3 have no answer ...`), `details.missing` lists their
+  numbers from 1, and nothing changes. A full answer is one write: the
+  status becomes `answered`, each item gets `answer` and `answer_option`,
+  the revision stays, and one `answered` event follows.
+- The answer mail is one mail on the thread of the bundle. The subject is
+  `Answers: <the first line of the summary>`. The body quotes the summary,
+  then gives each item: `Item 1 of 3:`, the first line of the item quoted
+  with `> `, `Chosen option: 2. no`, and `The answer of operator:` with the
+  answer quoted. The label alone is not given again as an answer. As for
+  each mail, the delivery quotes the body and defuses each line that reads
+  as a tag (`[\User]`, §6.2).
+- A `question` wait on a bundle resolves with `{outcome: "answered", kind:
+  "bundle", question, answers: [{item, text, answer, option?}, ...]}`.
+- `PATCH` with `items` replaces all items of an open bundle and adds 1 to
+  the revision. The answers in progress in the dashboard are then for the
+  old revision: the dashboard sends `revision`, and gets `409 conflict`.
+- A retract ends the whole bundle. An acknowledgement of a bundle is `409
+  conflict`.
+- `?kind=bundle` lists the bundles. In the Inbox (§6.9), a bundle is an
+  item of the kind `question` with the ID `bundle:<id>`, and it counts as
+  one question.
+- The recap turn lists an open bundle as `<id> [bundle of N items]`, and
+  an answered bundle item by item.
+
 ### 6.9 The Inbox
 
 PLAN §12e gives the design. The code is in
@@ -2419,7 +2472,7 @@ kinds:
 
 | Kind | What | Open while | The operator's verbs |
 |---|---|---|---|
-| `question` | A question (§6.8). | `status` is `open`. | `POST /api/questions/{id}/answer`, `.../retract` |
+| `question` | A question or a bundle of questions (§6.8). | `status` is `open`. | `POST /api/questions/{id}/answer`, `.../retract` |
 | `notice` | A notice (§6.8). | `status` is `open`. | `POST /api/questions/{id}/ack`, `.../retract` |
 | `mail` | A message to `operator` (§7). | Its `state` is `queued` or `delivered`: not acknowledged. | `POST /api/inbox/mail/{id}/ack` |
 | `system` | A thread of the loop guard (§7.4): it is paused now, or it has a held message that is not released. | The thread is paused, or a held message is not released. | `POST /api/mail/{id}/release`, `POST /api/mail/threads/{thread}/resume` |
@@ -2441,7 +2494,7 @@ The notice of a pause (`Thread T needs a human`, from `system`) is not a
 
 | Field | Meaning |
 |---|---|
-| `id` | `question:<id>`, `notice:<id>`, `mail:<message id>`, or `thread:<thread id>`. |
+| `id` | `question:<id>`, `bundle:<id>`, `notice:<id>`, `mail:<message id>`, or `thread:<thread id>`. |
 | `open` | The item waits for the operator. |
 | `urgent` | An open question or notice with `priority: urgent` or `critical`. Mail and system items are not urgent. |
 | `critical` | An open question or notice with `priority: critical`. The dashboard shows the newest one in a banner on each page, with a link to `/inbox?item=<id>`, and flashes its browser tab while the page is hidden or has no focus. |
@@ -2629,6 +2682,14 @@ A card:
 ```
 
 - `assignee`, `assignee_name`, `repo`, `branch` are absent when not set.
+- `eta_at` is when the work is expected to be done (RFC 3339, UTC,
+  milliseconds). `eta_set_at` is when the ETA was set, and `eta_set_by` (an
+  address) and `eta_set_by_name` say who set it. The four fields are absent
+  when the card has no ETA. They stay when the card moves to `done` or is
+  archived.
+- `done_at` is when the card last moved to `done`. A move out of `done`
+  clears it. It is absent for a card that is not done, and for a card done
+  before migration 40.
 - `blocked_by` lists the dependencies that are neither `done` nor archived.
 - `comments[].session` is the session link (§6.6) of the agent that wrote
   the comment: the agent's current session at that time. It is `null` for
@@ -2675,6 +2736,16 @@ A new board has the columns `backlog`, `ready`, `in_progress`, `review`,
   reopens a card; the reopen is audited. A member cannot make a card in
   `done`. On `done`, the daemon notifies every linked thread (§7.3), and
   each dependent card that is now free gets an `unblocked` event.
+- **ETA.** `eta_at` in a new card or a card patch sets the ETA: an RFC 3339
+  time, or a duration from now with one or more parts (`45m`, `2h30m`,
+  `1d`). The time must be in the future and at most 30 days away; else
+  `422 invalid` with a message that says why. `eta_at: null` clears it. The
+  rights are those of an edit: the card's own member, a project admin, or
+  the operator. A done card takes no new ETA (`409 conflict`); an admin can
+  clear it. An archived card refuses both (`409 conflict`). A change to
+  the ETA of a card that is not the actor's own is audited as `card.eta`
+  (`{eta_at, previous}`). Each change is a `card` event with `change: eta`;
+  it does not start a turn.
 - **Events.** Every change is a `card` event with the actor (§9).
 
 ### 8.3 Endpoints
@@ -2716,7 +2787,8 @@ supply:
 
 ```json
 {"title":"Ship the parser","body":"","column":"backlog","assignee":"worker","labels":["parser"],
- "repo":"terrarium","branch":"feat/parser","depends_on":["TER-1"],"from_mail":null,"comment":null}
+ "repo":"terrarium","branch":"feat/parser","depends_on":["TER-1"],"from_mail":null,"comment":null,
+ "eta_at":"2h30m"}
 ```
 
 - `column` defaults to `backlog`. Another column follows the move rules, so
@@ -2725,12 +2797,15 @@ supply:
   subject as `title` and `From <sender>:\n\n<body>` as `body`, unless the
   request sets them, and links the message's thread.
 - `assignee` follows the assign rules.
+- `eta_at` follows the ETA rule (§8.2). The daemon sets it last, after the
+  assignment.
 
 **Card patch.** Every field is optional:
 `title`, `body`, `labels`, `repo`, `branch`, `depends_on`, `column`,
-`position`, `assignee`, `comment`.
+`position`, `assignee`, `comment`, `eta_at`.
 
-- `repo`, `branch`, and `assignee` take `null` to clear.
+- `repo`, `branch`, `assignee`, and `eta_at` take `null` to clear.
+- `eta_at` comes last, after the move and the assignment.
 - `column` or `position` moves the card, with `comment` as the move comment.
   `comment` alone adds a comment.
 - `assignee: "me"` (or the caller) assigns first, then moves. Any other
@@ -2779,13 +2854,13 @@ Kinds:
 | `agent_removed` | `{agent_id, project, name}`. The daemon deleted the agent: `DELETE /api/agents/{id}`, a fleet apply with prune, or a definitions sync that removes a file agent. The delete of a live agent stops it first, so a `status` event with `stopped` comes before this event. Clients remove the agent from their lists. `GET /api/agents` does not show the agent again. |
 | `wait` | `{wait_id, change, kind, summary, state, result?}`. `change` is `opened`, `resolved`, `timed_out`, `cancelled`, or `failed`. The `agent` is the waiter (§6.7). |
 | `watch` | `{watch_id, change, watcher, watcher_name, on, status?}`. `change` is `created`, `fired` (with `status`), or `removed`. The `agent` is the watched agent (§6.7). |
-| `question` | `{question_id, kind, change, status, priority, text, revision, agent_id, card_id?}`. `kind` is `question` or `notice`. `change` is `asked`, `updated`, `answered`, `acknowledged`, or `retracted`. The `agent` is the asking agent (§6.8). |
+| `question` | `{question_id, kind, change, status, priority, text, revision, agent_id, card_id?}`. `kind` is `question`, `notice`, or `bundle`. `change` is `asked`, `updated`, `answered`, `acknowledged`, or `retracted`. The `agent` is the asking agent (§6.8). |
 | `inbox` | `{item, kind, change, project?}`: an item of the Inbox (§6.9) was `opened`, `updated`, or `closed`. `kind` is `question`, `notice`, `mail`, or `system`. |
 | `session_started` | `{harness_session, transcript_path?, source?}` |
-| `turn_start`, `turn_end`, `notification`, `question`, `session_ended`, `exit`, `delivery_failed`, `system`, `warning` | The fields of the core `Event` variant of the same name (`crates/terrarium-core/src/event.rs`). A `warning` (`{message}`) needs the operator's attention, for example a harness version outside its tested range at a start (§6.2). |
+| `turn_start`, `turn_end`, `notification`, `question`, `session_ended`, `exit`, `delivery_failed`, `system`, `warning`, `usage_limit` | The fields of the core `Event` variant of the same name (`crates/terrarium-core/src/event.rs`). A `warning` (`{message}`) needs the operator's attention, for example a harness version outside its tested range at a start (§6.2). A `usage_limit` (`{message, resets_at?}`) is the provider's refusal of a turn for a usage limit or a rate limit (§16.6). |
 | `tool_use`, `tool_finished` | `{tool, tool_id?, summary?, ...}`: `input` (`tool_use`), `ok` (`tool_finished`). `tool_id` is the harness's ID for the tool call (for Claude Code, `toolu_...`). It is not the event `id`. Older records used the key `id` for it; the `events.jsonl` reader still takes those. |
 | `mail` | `{message_id, thread_id, from, from_name, to, to_name, subject}`. The `agent` is the recipient. A message that the loop guard holds also has `held: true`, `held_reason`, and `thread_state: "paused"`. A release (§7.4) emits the event again with `released: true`. |
-| `card` | `{card_id, change, title, column, ...}`. `change` is `created`, `moved` (`from`, `to`, `comment`, `assignee`), `reordered`, `assigned` (`assignee`, `previous`), `claimed`, `edited` (`fields`), `commented` (`comment`), `linked` (`kind`, `ref`), `archived`, `unblocked` (`by`), or `thread_update` (`thread_id`, `done`). `actor_name` names who made the change (`operator` or `project/name`). The `agent` is the assignee. |
+| `card` | `{card_id, change, title, column, ...}`. `change` is `created`, `moved` (`from`, `to`, `comment`, `assignee`), `reordered`, `assigned` (`assignee`, `previous`), `claimed`, `edited` (`fields`), `commented` (`comment`), `linked` (`kind`, `ref`), `archived`, `unblocked` (`by`), `thread_update` (`thread_id`, `done`), or `eta` (`eta_at`, `previous`; `eta_at` is `null` when cleared). `actor_name` names who made the change (`operator` or `project/name`). The `agent` is the assignee. |
 | `board` | `{columns}` after a column change. |
 | `question_guard` | `{question, mailed}`: a member ended its turn with a question in plain text and reported nothing, so the daemon set `blocked` (reason "asked a question in plain text: ...") and mailed `mailed` (the leads, or `operator`). `question` is the first 200 characters. The actor is `system`. PLAN §8.4. |
 | `memory.created`, `memory.updated`, `memory.deleted`, `memory.linked`, `memory.unlinked`, `memory.superseded` | `{memory_id, key, title, ...}`: `fields`, `to`, `relation`, `note`, `by`. |
@@ -3369,7 +3444,7 @@ A subscription:
 | `windows` | The newest sample of each window. Window names: `5h`, `7d`, `7d_opus`, `7d_sonnet` (Anthropic); `<n>h` or `<n>d` from the window length (OpenAI); `monthly` (Copilot premium requests). |
 | `local_estimate_only` | `true` when there is no probe: local accounting is the only number. |
 | `env_var` | Set when an API key is stored: the env var that carries it into the agents. The key is never in the API. |
-| `held_agents` | Agents whose turns wait for a reset of this subscription. |
+| `held_agents` | Agents whose turns wait after a usage-limit error on this subscription (cause `limit:<subscription>`, §16.6). |
 | `account` | The plan account of the subscription (PLAN §16.3), when it has one: `harness` (whose login it holds), `has_login` (the credential file is there), `login` (the Copilot login name, or the email of a Claude login), `source` (`migration`: the shared login moved here at a daemon start; `login`: the login wizard), `created_at`, `updated_at`. Never a secret. |
 | `agents` | The agents whose current `subscription` this is: `[{id, name, project}]`. Always present. |
 | `default` | `true` when the plan account is the default account of its harness (PLAN §16.3): a Claude Code, Codex, or Copilot agent with no subscription runs on it. Each harness has one default or none. Always present. |
@@ -3382,7 +3457,9 @@ Probes: `anthropic-oauth-usage`, `openai-codex-usage` (alias
 `copilot-premium-requests`), `zai-usage` (the default of a `zai`
 subscription on the `coding` plan that names no probe), `moonshot-balance`
 and `moonshot-cn-balance` (the defaults of a `moonshot` subscription on the
-`api` or `api-cn` plan that names no probe), and
+`api` or `api-cn` plan that names no probe), `kimi-code-usage` (the default
+of a `moonshot` subscription on the `coding` or `coding-cn` plan that names
+no probe), and
 `openrouter-credits` (the default of an `openrouter` subscription that names
 no probe). `docs/compat.md`, "Usage probes", records each endpoint.
 
@@ -3688,8 +3765,8 @@ and the region. Moonshot keys work only for their own product and region:
 
 | `plan` | Product | Base URL | pi `--provider` | Default `--model` | Probe |
 |---|---|---|---|---|---|
-| `coding` (the default) | Kimi Code membership, overseas | `https://api.kimi.ai/coding/v1` | `kimi-coding-intl` | `kimi-for-coding` | none |
-| `coding-cn` | Kimi Code membership, China | `https://api.kimi.com/coding/v1` | `kimi-coding` | `kimi-for-coding` | none |
+| `coding` (the default) | Kimi Code membership, overseas | `https://api.kimi.ai/coding/v1` | `kimi-coding-intl` | `kimi-for-coding` | `kimi-code-usage` |
+| `coding-cn` | Kimi Code membership, China | `https://api.kimi.com/coding/v1` | `kimi-coding` | `kimi-for-coding` | `kimi-code-usage` |
 | `api` | Open Platform, pay as you go | `https://api.moonshot.ai/v1` | `moonshotai` | `kimi-k3` | `moonshot-balance` |
 | `api-cn` | Open Platform, pay as you go, China | `https://api.moonshot.cn/v1` | `moonshotai-cn` | `kimi-k3` | `moonshot-cn-balance` |
 
@@ -3714,7 +3791,16 @@ A window of `moonshot-balance` or `moonshot-cn-balance` is `balance`: 0 %
 while the account has money, 100 % at an `available_balance` of 0 or less.
 It has no reset time. `raw` has `available_balance`, `voucher_balance`,
 `cash_balance`, and `currency` (`USD` or `CNY`). `docs/compat.md`,
-"Moonshot", has the sources. Nothing about Moonshot is verified live.
+"Moonshot", has the sources.
+
+The windows of `kimi-code-usage` come from `GET
+https://api.kimi.com/coding/v1/usages` (both Kimi Code plans; verified
+live 2026-10-30): `5h`, `monthly`, `monthly-code`, and `7d` on the legacy
+plans, each with a reset time. `raw` has `source` (the field of the answer)
+and the numbers, and the first window also has `booster_wallet` when the
+answer has one. A `401`, `403`, or `404` fails the probe with a hint, for
+example that the key is an Open Platform key and not a Kimi Code key
+(`sk-kimi-`). `docs/compat.md`, "Kimi Code usage", has the answer.
 
 At each launch, `RunnerSupervisor` puts the stored key into the env of
 every agent whose `subscription` has `env_var`
@@ -3740,28 +3826,47 @@ value of each var whose name has `KEY`, `TOKEN`, `SECRET`, or `PASSWORD` as
   the higher line.
 - The line mail gives the percent, the reset (in and at), and the agents
   that spent the most in the window (else the agents on the
-  subscription). The used-up mail names the held agents. Each quota mail
+  subscription). The used-up mail names them too, and says that the agents
+  keep their turns. Each quota mail
   ends with a dashboard link, `Open: <TERRARIUM_PUBLIC_URL>/subscriptions`;
   a budget mail links the project page, `<TERRARIUM_PUBLIC_URL>/p/<project>`.
 - A window at 100 percent: the used-up mail and a `quota.alert` with
-  `level: exhausted`, after the holds. Each
-  agent on the subscription with an account pool moves to the next member
-  of its pool, in pool order, that is not full, is not `expired` or
-  `missing`, and has a login of its harness (auto-swap, PLAN §16.3; §6.2).
-  `TERRARIUM_AUTO_SWAP=off` turns it off. Every other agent gets a hold
-  until the latest reset time. The
-  supervisor's `hold_turns` marks an idle agent `blocked` with the reason
-  and the reset time (a working agent finishes its turn first). New turns
-  wait: `POST .../send` still answers `202`, and push pointers and the
-  recap turn stay pending. The `quota.blocked` event has `{cause, until,
-  reason, enforced}`. `enforced: false` means the supervisor cannot hold
-  turns (the default of the `Supervisor` trait), so the hold is advice
-  only. A hold on an agent that does not run applies when it starts.
-- The hold ends when a probe reads the window under 100 percent, or when its
-  reset time passes (checked on each probe tick). The `quota.resumed` event
-  follows, the agent goes back to `idle`, and the waiting turns go out in
-  order, then the pending push pointer. Turns that wait when the agent
-  stops are dropped.
+  `level: exhausted`. That is all: a probe window holds no turn and swaps
+  no account, because a probe can show 100 percent while the plan still
+  serves turns. A hold of an older version from a probe window (cause
+  `quota:<subscription>`) ends at the daemon start, with a
+  `quota.resumed` event.
+- A usage-limit error holds turns. When the provider refuses a turn with a
+  usage limit or a rate limit, the adapter gives a `usage_limit` event
+  (§16.7). Only Claude Code has a known signal: the `StopFailure` hook with
+  `error` `rate_limit` or `billing_error` (docs/compat.md, "Usage
+  limits"). Then:
+  - An agent with an account pool moves to the next member of its pool,
+    in pool order, that did not hit a limit, is not `expired` or
+    `missing`, and has a login of its harness (auto-swap, PLAN §16.3;
+    §6.2). `TERRARIUM_AUTO_SWAP=off` turns it off. The daemon keeps the
+    accounts that hit a limit in memory, until the reset time or a turn on
+    the account that ends with no error.
+  - Every other agent gets a hold with the cause
+    `limit:<subscription>`, the provider's message as the reason, and the
+    reset time when the message gives one. The operator gets one mail for
+    each new hold, `Usage limit: <project>/<agent> is blocked`, with a link
+    to the agent page.
+- A hold: the supervisor's `hold_turns` marks an idle agent `blocked` with
+  the reason and the reset time (a working agent finishes its turn first).
+  New turns wait: `POST .../send` still answers `202`, and push pointers
+  and the recap turn stay pending. The `quota.blocked` event has `{cause,
+  until, reason, enforced}`. `enforced: false` means the supervisor cannot
+  hold turns (the default of the `Supervisor` trait), so the hold is
+  advice only. A hold on an agent that does not run applies when it
+  starts.
+- A usage-limit hold ends when its reset time passes (checked on each
+  probe tick), when a later turn of the agent ends with no error, when the
+  agent swaps to another account, or when the operator starts or restarts
+  the agent (`POST .../start`, `POST .../restart`). The `quota.resumed`
+  event follows, the agent goes back to `idle`, and the waiting turns go
+  out in order, then the pending push pointer. Turns that wait when the
+  agent stops are dropped.
 - Daily project budgets come from the project file:
 
   ```toml
@@ -3823,6 +3928,7 @@ gets `401 unauthorized` before the upgrade.
 |---|---|---|---|
 | `GET /api/hosts` | | `200` hosts by name | any caller |
 | `GET /api/hosts/{name}` | | `200` host | any caller |
+| `GET /api/hosts/{name}/metrics?minutes=N` | | `200` the metrics history (below) | any caller |
 | `POST /api/hosts` | `{"name", "enrol"?}` | `201` one flat host object (the shape below) with `token`, `token_kind`, and for an enrol token `token_expires_at` and `install_command` (§17.9) | the operator |
 | `POST /api/hosts/{name}/rotate` | none, or `{"enrol"?}` | `200` the same shape as `POST /api/hosts` | the operator |
 | `DELETE /api/hosts/{name}` | | `204` | the operator |
@@ -3836,7 +3942,15 @@ gets `401 unauthorized` before the upgrade.
  "connected_at":"2026-10-24T06:36:54.149Z","last_seen":"2026-10-24T06:36:54.149Z",
  "created_at":"2026-10-24T06:30:00.000Z",
  "first_used_at":"2026-10-24T06:31:02.410Z","last_used_at":"2026-10-24T06:36:54.149Z",
- "last_used_from":"10.0.0.7:51544","rotated_at":null,"enrol_expires_at":null}
+ "last_used_from":"10.0.0.7:51544","rotated_at":null,"enrol_expires_at":null,
+ "metrics":{"at":"2026-10-24T06:36:50.002Z","stale":false,"interval_secs":10.0,
+   "cpu":{"busy_pct":12.4,"cores":16,"load1":1.32},
+   "memory":{"total_bytes":100923486208,"used_bytes":24047804416,"used_pct":23.8,
+             "swap_total_bytes":100923338752,"swap_used_bytes":9918578688},
+   "net":{"rx_bytes_per_sec":18234.5,"tx_bytes_per_sec":4021.0},
+   "disk_io":{"read_bytes_per_sec":0.0,"write_bytes_per_sec":1294336.0},
+   "filesystems":[{"mount":"/","fstype":"btrfs","device":"/dev/sda2","total_bytes":1998694907904,
+     "used_bytes":1201450532864,"avail_bytes":795540078592,"used_pct":60.2}]}}
 ```
 
 Rules:
@@ -3879,6 +3993,35 @@ Rules:
   `goodbye protocol`.
 - Each link writes the events `host.connected` and `host.disconnected`
   (§9).
+
+Host metrics:
+
+- A host agent with `capabilities.metrics` sends a `metrics` frame every
+  10 seconds ([host-protocol.md "`metrics`"](host-protocol.md#metrics)):
+  CPU, memory, network IO, disk IO, and disk space. The filter rules for
+  interfaces, disks, and filesystems are there. An older host agent has no
+  `capabilities.metrics` and sends no samples. Install the new host agent
+  on the host to get them (§17.9).
+- `metrics` in a host row is the latest sample, or `null` when the daemon
+  has no sample of the host. `at` is the time the daemon got the sample.
+  `stale` is true when the sample is older than 30 seconds, or when the
+  host is offline. The rates are bytes per second over `interval_secs`.
+  A part that the host agent cannot read (`cpu`, `memory`, `net`,
+  `disk_io`) is absent.
+- The daemon keeps the last 360 samples (1 hour) of each host in memory
+  only. A restart of the daemon loses them. Samples stay while the host is
+  offline. A revoke removes them.
+- `GET /api/hosts/{name}/metrics?minutes=N` gives the samples of the last
+  `N` minutes, oldest first. `N` is 1 to 60, default 60. Another value is
+  `400`. An unknown host is `404`. A host without samples gives
+  `"samples": []` and `"stale": true`. There is no event for a sample: the
+  dashboard polls every 10 seconds.
+
+```json
+{"host":"lab1","interval_secs":10,"minutes":15,"stale":false,
+ "samples":[{"at":"2026-10-24T06:36:40.001Z","interval_secs":10.0,"cpu":{"busy_pct":9.8,"cores":16,"load1":1.2},
+   "memory":{...},"net":{...},"disk_io":{...},"filesystems":[...]}]}
+```
 
 ### 17.2 Targets
 

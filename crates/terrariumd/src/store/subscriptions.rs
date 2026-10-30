@@ -114,7 +114,7 @@ pub fn plan_refusal(harness: HarnessId, sub: &Subscription) -> Option<String> {
 /// The probe of a subscription that names none: `zai-usage` for a Z.ai
 /// GLM Coding Plan (the `api` plan has no quota endpoint),
 /// `moonshot-balance` or `moonshot-cn-balance` for a Moonshot Open
-/// Platform plan (Kimi Code documents no usage endpoint), and
+/// Platform plan, `kimi-code-usage` for a Kimi Code plan, and
 /// `openrouter-credits` for OpenRouter. Applied when a row is read, so rows
 /// written before the probe existed get it too.
 pub fn default_probe(provider: &str, plan: Option<&str>) -> Option<String> {
@@ -127,7 +127,7 @@ pub fn default_probe(provider: &str, plan: Option<&str>) -> Option<String> {
         return match plan_or_default(plan) {
             Plan::Api => Some(crate::probes::moonshot::NAME.to_owned()),
             Plan::ApiCn => Some(crate::probes::moonshot::NAME_CN.to_owned()),
-            Plan::Coding | Plan::CodingCn => None,
+            Plan::Coding | Plan::CodingCn => Some(crate::probes::kimi::NAME.to_owned()),
         };
     }
     provider
@@ -1071,7 +1071,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn moonshot_open_platform_plans_get_the_balance_probe() {
+    async fn moonshot_plans_get_the_probe_of_their_product() {
         assert_eq!(
             default_probe("moonshot", Some("api")).as_deref(),
             Some("moonshot-balance")
@@ -1080,10 +1080,14 @@ mod tests {
             default_probe("Moonshot", Some("api-cn")).as_deref(),
             Some("moonshot-cn-balance")
         );
-        // Kimi Code documents no usage endpoint.
-        assert_eq!(default_probe("moonshot", Some("coding")), None);
-        assert_eq!(default_probe("moonshot", Some("coding-cn")), None);
-        assert_eq!(default_probe("moonshot", None), None);
+        // Both Kimi Code plans read the same usage endpoint.
+        for plan in [Some("coding"), Some("coding-cn"), None] {
+            assert_eq!(
+                default_probe("moonshot", plan).as_deref(),
+                Some("kimi-code-usage"),
+                "{plan:?}"
+            );
+        }
     }
 
     #[tokio::test]

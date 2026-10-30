@@ -193,9 +193,9 @@ pub enum Command {
         #[command(subcommand)]
         command: WaitCmd,
     },
-    /// Questions and notices to the operator (leaders only): ask, list,
-    /// update, retract. The answer comes as mail. Workers ask their lead by
-    /// mail
+    /// Questions and notices to the operator (leaders only): ask, bundle,
+    /// list, update, retract. The answer comes as mail. Workers ask their
+    /// lead by mail
     #[command(visible_alias = "questions")]
     Question {
         #[command(subcommand)]
@@ -809,7 +809,12 @@ pub enum CardCmd {
     /// Change a card
     Edit(Box<CardEditArgs>),
     /// Assign to self and move to in_progress
-    Claim { id: String },
+    Claim {
+        id: String,
+        /// Set the ETA too: a duration such as 45m, 2h30m, or 1d
+        #[arg(long, value_name = "DURATION|TIME")]
+        eta: Option<String>,
+    },
     /// Move a card to a column
     Move {
         id: String,
@@ -819,6 +824,19 @@ pub enum CardCmd {
         /// The move comment; `blocked` needs one
         #[arg(long, short = 'm')]
         comment: Option<String>,
+        /// Set the ETA too: a duration such as 45m, 2h30m, or 1d
+        #[arg(long, value_name = "DURATION|TIME")]
+        eta: Option<String>,
+    },
+    /// Set when the work is expected to be done, or clear it
+    Eta {
+        id: String,
+        /// A duration from now (45m, 2h30m, 1d) or an RFC 3339 time
+        #[arg(required_unless_present = "clear", conflicts_with = "clear")]
+        when: Option<String>,
+        /// Remove the ETA
+        #[arg(long)]
+        clear: bool,
     },
     /// Assign a card: an agent, `operator`, `me`, or `none`
     Assign { id: String, agent: String },
@@ -896,6 +914,9 @@ pub struct CardNewArgs {
     /// A comment, needed for `--column blocked`
     #[arg(long, short = 'm')]
     pub comment: Option<String>,
+    /// The ETA: a duration such as 45m, 2h30m, or 1d, or an RFC 3339 time
+    #[arg(long, value_name = "DURATION|TIME")]
+    pub eta: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -1318,6 +1339,46 @@ pub enum QuestionCmd {
         #[arg(long, requires = "wait")]
         timeout: Option<String>,
     },
+    /// Ask the operator several related questions as one bundle. The
+    /// operator answers all of them in one step, and you get all answers
+    /// in one mail. Only for decisions that belong together; ask an
+    /// unrelated question on its own
+    Bundle {
+        /// The summary of the bundle, short and clear (`-` reads stdin)
+        text: String,
+        /// One question of the bundle, with no options; repeat for each
+        /// (2 to 20). Use --items-file for options and context
+        #[arg(
+            long = "item",
+            conflicts_with = "items_file",
+            required_unless_present = "items_file"
+        )]
+        items: Vec<String>,
+        /// The questions as JSON (`-` reads stdin): `[{"text": "...",
+        /// "options": ["..."], "context": "..."}, ...]`; a plain string is
+        /// a question with no options
+        #[arg(long)]
+        items_file: Option<String>,
+        #[command(flatten)]
+        context: QuestionContext,
+        /// The card that the bundle is about
+        #[arg(long)]
+        card: Option<String>,
+        /// Mark the bundle urgent
+        #[arg(long, conflicts_with = "critical")]
+        urgent: bool,
+        /// Mark the bundle critical: the operator must act now (see
+        /// `terrarium notify --help`)
+        #[arg(long)]
+        critical: bool,
+        /// Also wait on the answers: your status is `waiting` until they
+        /// come. Then end your turn
+        #[arg(long)]
+        wait: bool,
+        /// With --wait: end the wait as `timed_out` after this time
+        #[arg(long, requires = "wait")]
+        timeout: Option<String>,
+    },
     /// List your questions and notices: the open ones and the ones
     /// answered or acknowledged in the last 24 h (`--all`: every one)
     Ls {
@@ -1326,7 +1387,7 @@ pub enum QuestionCmd {
         /// open, answered, acknowledged, or retracted
         #[arg(long)]
         status: Option<String>,
-        /// question or notice (default: both)
+        /// question, notice, or bundle (default: all)
         #[arg(long)]
         kind: Option<String>,
         /// The agent whose questions to list (default: yourself)
@@ -1346,6 +1407,10 @@ pub enum QuestionCmd {
         /// Remove the choices
         #[arg(long)]
         clear_options: bool,
+        /// The new questions of a bundle, all of them, as JSON (`-` reads
+        /// stdin; the format of `question bundle --items-file`)
+        #[arg(long)]
+        items_file: Option<String>,
         #[command(flatten)]
         context: QuestionContext,
         /// The card that the question is about
@@ -1385,14 +1450,14 @@ pub enum AdminQuestionCmd {
         /// Every status
         #[arg(long, conflicts_with = "status")]
         all: bool,
-        /// question or notice (default: both)
+        /// question, notice, or bundle (default: all)
         #[arg(long)]
         kind: Option<String>,
     },
     /// Show one question, with the answer when there is one
     Show { id: String },
     /// Answer a question: a text, an option (its label or its number), or
-    /// both
+    /// both. Answer a bundle with --answers-file: every item at once
     Answer {
         id: String,
         /// The answer (`-` reads stdin)
@@ -1400,6 +1465,11 @@ pub enum AdminQuestionCmd {
         /// The chosen option: its label, or its number from 1
         #[arg(long)]
         option: Option<String>,
+        /// The answers of a bundle as JSON (`-` reads stdin), one for each
+        /// item, in order: `[{"option": "<label or number from 1>",
+        /// "answer": "<text>"}, ...]`; a plain string is a text answer
+        #[arg(long, conflicts_with_all = ["text", "option"])]
+        answers_file: Option<String>,
     },
     /// Retract a question: the agent gets a mail that it needs no answer
     Retract {

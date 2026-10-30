@@ -58,6 +58,7 @@ import type {
   HarnessUpdateResult,
   Health,
   Host,
+  HostMetricsHistory,
   InboxCounts,
   InboxItem,
   InboxQuery,
@@ -273,7 +274,10 @@ export interface Api {
     /** `GET /api/agents/{id}/questions`: the open ones and those answered in the last 24 h; `all` lists every one. */
     ofAgent(agent: string, opts?: { all?: boolean; status?: QuestionStatus }): Promise<Question[]>;
     get(id: string): Promise<Question>;
-    /** `POST /api/questions/{id}/answer`: 409 when the question is not open. The agent gets the answer by mail. */
+    /**
+     * `POST /api/questions/{id}/answer`: 409 when the question is not open, or when `revision` is not the current one.
+     * The agent gets the answer by mail. A bundle takes `items` (every item; a partial answer is a 422) and gets all answers in one mail.
+     */
     answer(id: string, body: QuestionAnswer): Promise<Question>;
     /** `POST /api/questions/{id}/retract`: the agent gets a mail that it needs no answer. Works for both kinds. */
     retract(id: string, reason?: string): Promise<Question>;
@@ -633,6 +637,8 @@ export interface Api {
     create(name: string, opts?: { enrol?: boolean }): Promise<NewHostToken>;
     /** Revoke the token: the daemon sends `goodbye token_revoked` and closes the link. */
     revoke(name: string): Promise<void>;
+    /** `GET /api/hosts/{name}/metrics?minutes=N` (1 to 60): the samples, oldest first. */
+    metrics(name: string, opts?: { minutes?: number }): Promise<HostMetricsHistory>;
   };
 
   events: {
@@ -1042,6 +1048,7 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       list: () => all("/api/hosts"),
       create: (name, opts) => post("/api/hosts", opts?.enrol ? { name, enrol: true } : { name }),
       revoke: (name) => del(`/api/hosts/${seg(name)}`),
+      metrics: (name, opts = {}) => get(`/api/hosts/${seg(name)}/metrics`, opts.minutes ? { minutes: opts.minutes } : undefined),
     },
 
     events: {

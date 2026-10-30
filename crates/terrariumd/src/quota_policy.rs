@@ -3,15 +3,19 @@
 //! - When a window of a subscription passes its `alert_at` percent, 90
 //!   percent, and 100 percent (used up), the daemon mails the operator
 //!   once for each line in a window period ([`crate::quota_notices`]):
-//!   an open item of the Inbox. No banner shows.
-//! - At 100 percent an agent with an account pool moves to the next
-//!   member that is not full (`crate::account_swap`, PLAN §16.3;
-//!   `TERRARIUM_AUTO_SWAP=off` turns it off). The daemon holds new turns
-//!   of every other agent on that subscription: [`Supervisor::hold_turns`] marks the agent `blocked`
-//!   with the reset time, and turns wait. After the reset, the hold ends
-//!   and the waiting turns go out.
+//!   an open item of the Inbox. No banner shows. The mails give
+//!   information only: a probe window holds no turns and swaps no
+//!   account, because a probe can show 100 percent while the plan still
+//!   serves turns.
+//! - The refusal of the provider blocks an agent: [`crate::usage_limit`]
+//!   moves the agent to the next account of its pool, or holds its turns.
 //! - A project may set daily budgets on tokens or turns. The same alert
-//!   and hold apply, with the next UTC midnight as the reset.
+//!   applies. At 100 percent, the daemon holds new turns of the agents of
+//!   the project: [`Supervisor::hold_turns`] marks the agent `blocked`
+//!   with the next UTC midnight as the reset, and turns wait. After the
+//!   reset, the hold ends and the waiting turns go out.
+//! - A hold of an older version from a probe window at 100 percent (the
+//!   cause `quota:<subscription>`) ends at the daemon start ([`reapply`]).
 //!
 //! A supervisor that cannot hold turns (`SupervisorError::NotReady`) still
 //! gets the hold row and the events, with `enforced: false`, so the
@@ -175,18 +179,19 @@ async fn raise(state: &Shared, alerts: Vec<Alert>) -> ApiResult<()> {
         .await
 }
 
-/// Hold an agent's new turns for `cause`.
+/// Hold an agent's new turns for `cause`. Returns false when the agent
+/// has this hold already.
 pub async fn hold(
     state: &Shared,
     agent: &str,
     cause: &str,
     until: Option<DateTime<Utc>>,
     reason: &str,
-) -> ApiResult<()> {
+) -> ApiResult<bool> {
     let key = agent.to_owned();
     let known = state.db.read(move |c| ustore::holds_of(c, &key)).await?;
     if known.iter().any(|h| h.cause == cause) {
-        return Ok(());
+        return Ok(false);
     }
     let enforced = match agent.parse::<AgentId>() {
         Ok(id) => {
@@ -214,7 +219,7 @@ pub async fn hold(
         .db
         .write("system", move |t| {
             if !ustore::add_hold(t, &agent, &cause, until_s.as_deref(), &reason, enforced)? {
-                return Ok(());
+                return Ok(false);
             }
             let a = crate::store::agents::get(t, &agent).ok();
             let mut d = EventDraft::new(
@@ -232,7 +237,7 @@ pub async fn hold(
                     .project(a.agent.project);
             }
             t.emit(d)?;
-            Ok(())
+            Ok(true)
         })
         .await
 }
@@ -274,59 +279,16 @@ pub async fn release(state: &Shared, agent: &str, cause: &str) -> ApiResult<()> 
     Ok(())
 }
 
-/// Apply the policy to the latest windows of one subscription.
+/// Apply the policy to the latest windows of one subscription: the
+/// alert mails (`alert_at`, 90, 100), one each per window period. A window
+/// at 100 percent holds no turn and swaps no account.
 pub async fn evaluate_subscription(state: &Shared, name: &str) -> ApiResult<()> {
     let key = name.to_owned();
-    let (sub, windows, on) = state
+    let (sub, windows) = state
         .db
-        .read(move |c| {
-            Ok((
-                subs::get(c, &key)?,
-                subs::latest_windows(c, &key)?,
-                ustore::agents_on(c, &key)?,
-            ))
-        })
+        .read(move |c| Ok((subs::get(c, &key)?, subs::latest_windows(c, &key)?)))
         .await?;
     let now = Utc::now();
-    let mut exhausted_until: Option<Option<DateTime<Utc>>> = None;
-    for w in &windows {
-        let pct = effective_pct(w.used_pct, w.resets_at.as_deref(), now);
-        if pct >= 100.0 {
-            let reset = w
-                .resets_at
-                .as_deref()
-                .and_then(|r| DateTime::parse_from_rfc3339(r).ok())
-                .map(|r| r.with_timezone(&Utc));
-            exhausted_until = Some(match (exhausted_until.flatten(), reset) {
-                (Some(a), Some(b)) => Some(a.max(b)),
-                (a, b) => a.or(b),
-            });
-        }
-    }
-    let cause = format!("quota:{}", sub.name);
-    match exhausted_until {
-        Some(until) => {
-            let reason = format!(
-                "subscription `{}` is at its limit; resets at {}",
-                sub.name,
-                until.map_or_else(|| "an unknown time".into(), |u| u.to_rfc3339())
-            );
-            // An agent with a pool moves to an account with room
-            // (PLAN §16.3); the others wait for the reset.
-            let stay = crate::account_swap::auto_swap(state, &sub.name, on).await?;
-            for (id, _, _) in &stay {
-                hold(state, id, &cause, until, &reason).await?;
-            }
-        }
-        None => {
-            let holds = state.db.read(ustore::holds).await?;
-            for h in holds.iter().filter(|h| h.cause == cause) {
-                release(state, &h.agent, &cause).await?;
-            }
-        }
-    }
-    // The lines (`alert_at`, 90, 100): one mail each per window period.
-    // After the holds, so that the used-up mail names the held agents.
     let link = subscriptions_link(&state.web);
     state
         .db
@@ -449,25 +411,57 @@ pub async fn release_expired(state: &Shared) -> ApiResult<usize> {
     Ok(n)
 }
 
+/// The cause prefix of the holds that an older version set for a probe
+/// window at 100 percent.
+pub const LEGACY_QUOTA_CAUSE: &str = "quota:";
+
+fn turn_hold(h: &ustore::Hold) -> TurnHold {
+    TurnHold {
+        until: h
+            .until
+            .as_deref()
+            .and_then(|u| DateTime::parse_from_rfc3339(u).ok())
+            .map(|u| u.with_timezone(&Utc)),
+        reason: h.reason.clone(),
+    }
+}
+
 /// Give the stored holds to the supervisor again after a daemon start.
-pub async fn reapply(state: &Shared) -> ApiResult<()> {
+///
+/// A hold of an older version from a probe window (cause `quota:...`)
+/// ends here: the supervisor gets it first, so that the release returns
+/// an idle agent from `blocked` to `idle`, with a `quota.resumed` event.
+/// The other holds go to the supervisor after that, so that the reason of
+/// an agent with two holds is the one that stays.
+pub async fn reapply(state: &Shared) -> ApiResult<usize> {
     let holds = state.db.read(ustore::holds).await?;
-    for h in holds {
-        if let Ok(id) = h.agent.parse::<AgentId>() {
-            let hold = TurnHold {
-                until: h
-                    .until
-                    .as_deref()
-                    .and_then(|u| DateTime::parse_from_rfc3339(u).ok())
-                    .map(|u| u.with_timezone(&Utc)),
-                reason: h.reason.clone(),
-            };
-            if let Err(e) = state.supervisor.hold_turns(id, Some(hold)).await {
-                info!(agent = %h.agent, "stored quota hold not enforced: {e}");
-            }
+    let (legacy, keep): (Vec<_>, Vec<_>) = holds
+        .into_iter()
+        .partition(|h| h.cause.starts_with(LEGACY_QUOTA_CAUSE));
+    for h in &legacy {
+        if let Ok(id) = h.agent.parse::<AgentId>()
+            && let Err(e) = state.supervisor.hold_turns(id, Some(turn_hold(h))).await
+        {
+            info!(agent = %h.agent, "old quota hold not enforced: {e}");
         }
     }
-    Ok(())
+    for h in &legacy {
+        release(state, &h.agent, &h.cause).await?;
+    }
+    if !legacy.is_empty() {
+        info!(
+            holds = legacy.len(),
+            "the holds of probe windows at 100 percent ended: only a usage-limit error holds turns now"
+        );
+    }
+    for h in keep {
+        if let Ok(id) = h.agent.parse::<AgentId>()
+            && let Err(e) = state.supervisor.hold_turns(id, Some(turn_hold(&h))).await
+        {
+            info!(agent = %h.agent, "stored quota hold not enforced: {e}");
+        }
+    }
+    Ok(legacy.len())
 }
 
 /// The policy timer: release expired holds on each probe tick.

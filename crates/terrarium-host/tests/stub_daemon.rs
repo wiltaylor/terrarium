@@ -126,6 +126,7 @@ impl Conn {
             resume_token: "resume-1".into(),
             resume,
             token: None,
+            metrics: false,
         }))
         .await;
     }

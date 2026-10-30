@@ -19,6 +19,7 @@
 import type { Api } from "../client";
 import { ApiError, AuthError, isMutating, type Page } from "../http";
 import { createWsEventStream, type EventStream, type RawSocket, type SocketEvent } from "../sockets";
+import { mockHistory, withMetrics } from "./hostMetrics";
 import { MOCK_PASSWORD, MOCK_TOKEN, mockSocket, type MockSocketAuth } from "./ws";
 import { httpVerbs } from "./verbs";
 import { checkKeyPlan, isZai, zaiKeyDefaults, zaiPlan, ZAI_KEY_ENV } from "./zai";
@@ -26,6 +27,7 @@ import { isMoonshot, moonshotHarnessError, moonshotKeyDefaults, moonshotPlan, mo
 import { defaultModels, modelList, subscriptionDetail } from "./models";
 import { splitFrontMatter } from "../../lib/markdown";
 import { installCommand } from "../../lib/host-install";
+import { resolveEta } from "../../lib/eta";
 import type {
   Agent,
   AgentDef,
@@ -820,7 +822,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     if (tick % 3 === 0) {
       for (const s of w.subscriptions) for (const win of s.windows) setWindow(s.name, win.window, Math.min(100, win.used_pct + 1));
     }
-    // A plan at 100% resets after a while, so the demo shows `quota.resumed`.
+    // A plan at 100% resets after a while, so the demo shows the next period.
     for (const [name, at] of exhaustedAt) if (tick - at >= 6) resetPlan(name);
     if (tick % 2 === 0) usageTick();
     // Live audit rows for the Audit tab: an agent reads a secret, or the git credential helper answers.
@@ -901,6 +903,11 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     }
     if (note?.trim()) comment(c, note.trim());
     c.column = column;
+    // `done_at` (docs/api.md §8): set on a move to done, cleared on a move out of it.
+    if (from !== column) {
+      if (column === "done") c.done_at = iso();
+      else delete c.done_at;
+    }
     const target = position ?? Number.MAX_SAFE_INTEGER;
     activeIn(c.project, column)
       .filter((x) => x !== c && x.position >= target)
@@ -936,6 +943,27 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     }
     c.updated_at = iso();
     cardEvent(c, "assigned", `operator assigned ${c.id} to ${c.assignee_name ?? "nobody"}`, { assignee: c.assignee ?? null, previous });
+  };
+  /** The ETA (store/board.rs set_eta): set from a duration or a time, or clear with `null`. A change to another's card is audited. */
+  const setEta = (c: Card, v: string | null) => {
+    if (c.archived) fail(409, "conflict", `${c.id} is archived`);
+    const previous = c.eta_at ?? null;
+    if (v === null) {
+      if (!previous) return;
+      for (const k of ["eta_at", "eta_set_at", "eta_set_by", "eta_set_by_name"] as const) delete c[k];
+    } else {
+      if (c.column === "done") fail(409, "conflict", `${c.id} is done; a done card takes no new ETA`);
+      const r = resolveEta(v);
+      if ("error" in r) fail(422, "invalid", r.error);
+      c.eta_at = new Date(r.at).toISOString();
+      c.eta_set_at = iso();
+      c.eta_set_by = "operator";
+      c.eta_set_by_name = "operator";
+    }
+    c.updated_at = iso();
+    const mine = c.assignee ? c.assignee === "operator" : c.created_by === "operator";
+    if (!mine) audit("card.eta", c.id, c.project, { eta_at: c.eta_at ?? null, previous });
+    cardEvent(c, "eta", c.eta_at ? `${c.id} ETA ${c.eta_at} by operator` : `${c.id} ETA cleared by operator`, { eta_at: c.eta_at ?? null, previous });
   };
 
   // ----- mail (docs/api.md §7) -----
@@ -1105,7 +1133,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     ...s,
     local_estimate_only: !s.probe,
     has_api_key: !!s.env_var && !!w.apiKeys[s.name],
-    held_agents: w.holds.filter((h) => h.cause === `quota:${s.name}`).length,
+    held_agents: w.holds.filter((h) => h.cause === `limit:${s.name}`).length,
     default_models: defaultModels(s),
     agents: w.agents.filter((a) => a.subscription === s.name).map((a) => ({ id: a.id, name: a.name, project: a.project })),
     default: !!s.default,
@@ -1168,7 +1196,6 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
   /** The lines that notified, `<sub>/<window>/<line>` -> the reset of that period (quota_notices.rs). */
   const notified = new Map<string, string | undefined>();
   const exhaustedAt = new Map<string, number>();
-  const latestReset = (s: Subscription) => s.windows.map((x) => x.resets_at ?? "").sort().at(-1) || undefined;
   /** The quota lines (docs/api.md §16.6): `alert_at`, 90 when `alert_at` is under 90, and 100 (used up). */
   const quotaLines = (alertAt: number): number[] => [...(alertAt >= 1 && alertAt < 100 ? [alertAt] : []), ...(alertAt < 90 ? [90] : []), 100];
   // The seed: the lines that the windows passed already notified (the seed mail of chatgpt-pro).
@@ -1197,50 +1224,24 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     const resets = win.resets_at ? `The window resets in ${Math.max(1, Math.round((Date.parse(win.resets_at) - now()) / 60_000))}m (${win.resets_at}).` : "The provider gives no reset time for this window.";
     let subject: string;
     let body: string;
+    const on = w.agents.filter((a) => a.subscription === s.name).map((a) => `${a.project}/${a.name}`);
+    const agentsLine = on.length ? `The agents on this subscription: ${fewNames(on)}.` : "No agent is on this subscription now.";
     if (usedUp) {
-      const held = w.holds.filter((h) => h.cause === `quota:${s.name}`).map((h) => {
-        const a = w.agents.find((x) => x.id === h.agent);
-        return a ? `${a.project}/${a.name}` : h.agent;
-      });
-      const heldLine = held.length ? `New turns of these agents wait for the reset: ${fewNames(held)}.` : "No agent is held: no agent on it waits for the reset.";
       subject = `Quota: ${s.name} ${win.window} window is used up`;
-      body = `Subscription \`${s.name}\` (${s.provider}) has used all of its ${win.window} window.\n${resets}\n${heldLine}\n\nMove agents to another account with \`terrarium admin agent swap <name> <subscription>\`, or wait for the reset.\n\nOpen: /subscriptions\n`;
+      body = `Subscription \`${s.name}\` (${s.provider}) has used all of its ${win.window} window, as the probe reads it.\n${resets}\n${agentsLine}\n\nThe agents keep their turns. An agent stops only when the provider refuses a turn: then it moves to the next account of its pool, or it waits, and you get a mail. To move agents now, use \`terrarium admin agent swap <name> <subscription>\`.\n\nOpen: /subscriptions\n`;
     } else {
       const next = quotaLines(s.alert_at).find((l) => l > passed! && l < 100);
-      const on = w.agents.filter((a) => a.subscription === s.name).map((a) => `${a.project}/${a.name}`);
-      const agentsLine = on.length ? `The agents on this subscription: ${fewNames(on)}.` : "No agent is on this subscription now.";
       subject = `Quota: ${s.name} ${win.window} window at ${pct}%`;
       body = `Subscription \`${s.name}\` (${s.provider}) has used ${pct}% of its ${win.window} window. It passed the ${passed}% line.\n${resets}\n${agentsLine}\n${next ? `You get one more message at ${next}%.\n` : ""}\nMove agents to another account with \`terrarium admin agent swap <name> <subscription>\`, give them an account pool for the auto-swap, or wait for the reset.\n\nOpen: /subscriptions\n`;
     }
     const m = sendMail("operator", "system", subject, body);
     emit({ kind: "quota.alert", actor: "system", summary: subject, data: { subscription: s.name, window: win.window, used_pct: pct, resets_at: win.resets_at ?? null, level: usedUp ? "exhausted" : "alert", alert_at: s.alert_at, threshold: passed, message: m.id } });
   };
-  /** The quota policy (docs/api.md §16.6) after a new reading of one window: the holds, then the line mail. */
+  /** The quota policy (docs/api.md §16.6) after a new reading of one window: the line mail only. A probe window holds no turn. */
   const policy = (s: Subscription, win: Subscription["windows"][number]) => {
-    if (win.used_pct >= 100) {
-      exhaustedAt.set(s.name, tick);
-      const cause = `quota:${s.name}`;
-      const until = latestReset(s);
-      for (const a of w.agents.filter((x) => x.subscription === s.name)) {
-        if (w.holds.some((h) => h.agent === a.id && h.cause === cause)) continue;
-        const reason = `${s.name} window ${win.window} is at 100%`;
-        w.holds.push({ agent: a.id, cause, until, reason, enforced: false, created_at: iso() });
-        agentEvent(a, "quota.blocked", `${a.name}: turns held until ${until ?? "further notice"} (${reason})`, { cause, until: until ?? null, reason, enforced: false });
-      }
-    } else if (s.windows.every((x) => x.used_pct < 100)) {
-      release(s);
-    }
+    if (win.used_pct >= 100) exhaustedAt.set(s.name, tick);
+    else if (s.windows.every((x) => x.used_pct < 100)) exhaustedAt.delete(s.name);
     lineNotice(s, win);
-  };
-  const release = (s: Subscription) => {
-    const cause = `quota:${s.name}`;
-    exhaustedAt.delete(s.name);
-    for (const h of w.holds.filter((x) => x.cause === cause)) {
-      w.holds.splice(w.holds.indexOf(h), 1);
-      const a = w.agents.find((x) => x.id === h.agent);
-      const left = w.holds.filter((x) => x.agent === h.agent).length;
-      if (a) agentEvent(a, "quota.resumed", `${a.name}: hold \`${cause}\` ended`, { cause, holds_left: left });
-    }
   };
   /** A probe reading: store the samples, emit `quota.sample`, and run the policy. */
   const reading = (s: Subscription) => {
@@ -2227,6 +2228,8 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           const column = c.column ?? "backlog";
           if (!(w.columns[proj] ?? []).some((x) => x.name === column)) fail(422, "invalid", `no column \`${column}\``);
           if (column === "blocked" && !c.comment?.trim()) fail(422, "comment_required", "a move to `blocked` needs a comment");
+          const eta = c.eta_at ? resolveEta(c.eta_at) : undefined;
+          if (eta && "error" in eta) fail(422, "invalid", eta.error);
           const card: Card = {
             id: `${p.card_prefix}-${n}`,
             project: proj,
@@ -2251,6 +2254,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           if (c.comment?.trim()) comment(card, c.comment.trim());
           cardEvent(card, "created", `operator created ${card.id}`);
           if (c.assignee) assign(card, c.assignee);
+          if (c.eta_at) setEta(card, c.eta_at);
           return view(card);
         }),
       get: (id) => reply(() => view(cardById(id))),
@@ -2284,6 +2288,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
             c.updated_at = iso();
             cardEvent(c, "edited", `operator edited ${c.id}`, { fields });
           }
+          if (patch.eta_at !== undefined) setEta(c, patch.eta_at);
           return view(c);
         }),
       archive: (id) =>
@@ -3305,7 +3310,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     skills: skillMock.api,
 
     hosts: {
-      list: () => reply(() => w.hosts),
+      list: () => reply(() => w.hosts.map((h) => withMetrics(h))),
       create: (name, opts) =>
         reply(() => {
           if (!NAME_RE.test(name)) fail(422, "invalid", `\`${name}\` is not a valid host name`);
@@ -3333,6 +3338,15 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           w.hosts.splice(w.hosts.indexOf(h), 1);
           delete w.hostTokens[name];
           audit("host.revoke", name, undefined);
+        }),
+      // As the daemon's api/hosts.rs: 1 to 60 minutes, oldest first; none for an older host agent.
+      metrics: (name, opts = {}) =>
+        reply(() => {
+          const minutes = opts.minutes ?? 60;
+          if (!Number.isInteger(minutes) || minutes < 1 || minutes > 60) fail(400, "bad_request", "minutes must be 1 to 60");
+          const h = find(w.hosts, (x) => x.name === name, `host \`${name}\``);
+          const samples = h.capabilities?.metrics && h.status === "online" ? mockHistory(name, minutes) : [];
+          return { host: name, interval_secs: 10, minutes, stale: samples.length === 0, samples };
         }),
     },
 

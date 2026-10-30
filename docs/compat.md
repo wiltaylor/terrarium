@@ -1374,6 +1374,26 @@ harness and not to a second agent. The first must answer FERN-42 through
 the skill; the second must not know the code. Until it passes, each
 mechanism above is read, not verified.
 
+## Usage limits (all harnesses)
+
+Only the refusal of the provider blocks an agent (PLAN §16.2,
+`crates/terrariumd/src/usage_limit.rs`); a probe window at 100 percent only
+sends a mail. An adapter gives `Event::UsageLimit` for the usage-limit
+error of its harness. Read on 2026-10-30 in the installed versions (Claude
+Code 2.1.312, Codex 0.165.0, Copilot CLI 1.0.105, pi 1.4.0). No harness ran
+a turn, and no limit was hit live.
+
+| Harness | Signal | Reset time | Status |
+|---|---|---|---|
+| Claude Code | The `StopFailure` hook. Its input schema in the bundle: `{hook_event_name: "StopFailure", error, error_details?, last_assistant_message?}`. `error` is one of `authentication_failed`, `oauth_org_not_allowed`, `account_on_hold`, `verification_required`, `billing_error`, `rate_limit`, `overloaded`, `invalid_request`, `model_not_found`, `server_error`, `unknown`, `max_output_tokens`, `cloud_credential_error`. An HTTP 429 gives `rate_limit`; the bundle labels `billing_error` "usage limit reached". The adapter gives `UsageLimit` for `rate_limit` and `billing_error` (`crates/adapters/claude/src/limit.rs`). | `last_assistant_message` is the TUI text, for example `You've hit your limit · resets 5pm (UTC)`. The bundle builds ` · resets <time>` with the reset time in `toLocaleTimeString("en-US")` form (`5pm`, `5:30pm`) within 24 hours, else `Oct 31, 5pm` (with `, 2027` after the day for another year), then ` (<time zone>)`. The adapter reads that form; a zone that is not an IANA name gives no reset time. | verified (bundle code); not captured |
+| Claude Code | With `autoContinueAtUsageLimit: true` (forced), Claude Code waits for the reset and then continues the task by itself ("Your claude.ai usage limit has reset. Continue the task ..."). The daemon ends the hold when a later turn ends with no error. | — | verified (bundle settings schema and text); the turn hooks of the continue are not captured |
+| Codex | **Gap.** The binary has `CodexErrorInfo` `usage_limit_exceeded`, the text "You've hit your usage limit", "Try again at", and `token_count.rate_limits.rate_limit_reached_type`. The record that a limit writes to the session file, and the values of `rate_limit_reached_type`, are not captured. The adapter gives no `UsageLimit`; the error stays a notice. | — | not verified |
+| Copilot CLI | **Gap.** The `errorOccurred` hook maps to a `system` notice. Its payload for a rate limit is not known. With `continueOnAutoMode: false`, a rate limit shows the "switch to Auto" dialog, which the screen detector reads as a question (`blocked`). | — | not verified |
+| pi | **Gap.** A `message_end` with `stop_reason: "error"` maps to a `system` notice with `error_message`. The message of a rate limit is not captured. | — | not verified |
+
+To close a gap, capture the session file or the hook payload of a turn
+that hits the limit, add it as a fixture, and map it in the adapter.
+
 ## Usage probes and login flows
 
 Tested on 2026-10-24 on the same host, against the operator's real logins:
@@ -1550,8 +1570,8 @@ The probe maps each `TOKENS_LIMIT` or `CREDIT_LIMIT` entry to a window:
 `5h`, `7d`, `14d`, `monthly`, `<n>mo`, or `unit<u>x<n>` for an unknown
 unit. `used_pct` is `percentage`, and `resets_at` is `nextResetTime`. `raw`
 keeps the entry and `level`. A `TIME_LIMIT` entry is not a window: a used
-up tool budget does not stop chat, and the quota policy would hold the
-agents. The probe keeps it in the `raw` of the first window, under
+up tool budget does not stop chat, and the quota policy would send a
+false used-up mail. The probe keeps it in the `raw` of the first window, under
 `other_limits`. An answer with `success: false` fails the probe with its
 `code` and `msg`; `code` 401 counts as an HTTP 401 (the login shows as
 expired). A failed probe sets `probe_status = failed`; local accounting
@@ -1560,6 +1580,50 @@ continues.
 A Z.ai subscription with plan `coding` (or no plan) and no `probe` gets
 `zai-usage` when the row is read, so existing rows probe with no
 migration. The `api` plan (pay as you go) gets no probe.
+
+### Kimi Code usage
+
+**Undocumented, verified live 2026-10-30** with the stored `moonshot-key`
+key (plan `coding`, an overseas Kimi Code membership key, `sk-kimi-`). One
+read-only `GET` to each host, from inside the daemon container; the key was
+not printed or stored. The code is `crates/terrariumd/src/probes/kimi.rs`;
+the answer is `crates/terrariumd/tests/fixtures/probes/kimi_code_usages.json`
+(it had no ids, emails, or names, so nothing was replaced).
+
+| Fact | Value | Source |
+|---|---|---|
+| Request | `GET https://api.kimi.com/coding/v1/usages`. The official CLI sends it to the base URL of its Kimi Code platform (`KIMI_CODE_BASE_URL` changes it). | verified; https://github.com/MoonshotAI/kimi-cli (`src/kimi_cli/ui/shell/usage.py`, `src/kimi_cli/auth/platforms.py`) |
+| Auth | `Authorization: Bearer <Kimi Code key>`. No other header is necessary. The CLI sends no special user agent; the daemon's `terrarium/<version>` worked. | verified |
+| Host | `api.kimi.com` answered `200` with an overseas key. `https://api.kimi.ai/coding/v1/usages` answered `403` from Cloudflare (error 1010, a block on the client signature) to a Python `urllib` client. Terrarium did not try that host with the daemon's user agent, so the probe uses `api.kimi.com` for both plans. | verified |
+| Shape (live) | `{limits: [{window: {duration: 300, timeUnit: "TIME_UNIT_MINUTE"}, detail: {limit: "100", remaining: "100", resetTime: "<ISO time>"}}], usages: {limit_5h, limit_month_total, limit_month_code}}`. Each `usages` entry is `{used_ratio, reset_time}`, with `used_ratio` from 0 to 1. The numbers of `detail` are strings. No `usage`, no `booster_wallet`, and no weekly window came back. | verified |
+| Shape (other clients) | Also `usage` (the weekly window of the legacy plans: `limit`, `used`, `remaining`, a reset), `usages.limit_7d`, and `booster_wallet` (older `boosterWallet`): `status` `STATUS_ENABLED` or `STATUS_DISABLED`, `monthlyUsed` and `monthlyChargeLimit` with `priceInCents` (a string) and `currency`. The reset is `resetTime`, `reset_at`, `reset_time` (an ISO time or an epoch), or `reset_in` (seconds). With no `used`, used is `limit - remaining`. | https://github.com/MoonshotAI/kimi-cli , https://github.com/Golden0Voyager/kimi-code-usage (`providers/kimi.py`, 2026-10-19) |
+| Monthly credits | Only on the kimi.com membership web page, not in the API. Terrarium does not read web pages. | https://github.com/Golden0Voyager/kimi-code-usage |
+
+The probe `kimi-code-usage` makes one window for each `limits` item with a
+known `window` (`5h`, `7d`, `monthly`, and so on), with `used_pct` = used /
+`limit` x 100. Then it makes a window from `usage` (`7d` when it has no
+`window`). Then it makes a window from each `usages` entry
+(`limit_5h` = `5h`, `limit_7d` = `7d`, `limit_month_total` = `monthly`,
+`limit_month_code` = `monthly-code`), with `used_pct` = `used_ratio` x 100.
+A window name that is already there is not added again, so the live answer
+gives `5h` (from `limits`), `monthly`, and `monthly-code`. `raw` has
+`source` and the numbers. A booster wallet is not a window: it stays in the
+`raw` of the first window, under `booster_wallet`.
+
+A refused request fails the probe with a hint. A `401` says that a Kimi
+Code key (`sk-kimi-`) is necessary when the key has another prefix (an
+Open Platform key belongs on plan `api` or `api-cn`), else that the key is
+revoked; the subscription then shows as expired. A `403` names Cloudflare
+when the body is a Cloudflare error, else a membership with no coding
+quota. A `404` says that the endpoint moved.
+
+A `moonshot` subscription with plan `coding` or `coding-cn` (or no plan)
+and no `probe` gets `kimi-code-usage` when the row is read.
+
+Not tested: a `coding-cn` (China) key; an answer with `usage`, a weekly
+window, or a booster wallet; what `limit_month_code` counts that
+`limit_month_total` does not; a refused key; rate limits at the 5-minute
+interval.
 
 ### Custom system prompt (all harnesses)
 
@@ -1709,7 +1773,7 @@ in the region where it was made:
 | Kimi Code, Anthropic-compatible | Overseas `https://api.kimi.ai/coding/`; China `https://api.kimi.com/coding/`. Not used (pi only). | https://www.kimi.com/code/docs/en/ , https://www.kimi.com/code/docs/en/third-party-tools/claude-code |
 | Kimi Code models | `k3.1-pro`, `k3.1-pro-highspeed`, `k3`, `k3-256k`, `kimi-for-coding`, `kimi-for-coding-highspeed`. The tier decides which ids work and the context (256K or 1M). | https://www.kimi.com/code/docs/en/kimi-code/models.html |
 | Kimi Code quota | A 5-hour rolling window, a monthly total, and (legacy plans only) a weekly window. All clients share it. | https://www.kimi.com/code/docs/en/kimi-code/membership.html |
-| Kimi Code usage endpoint | **Not documented.** The usage shows in the Kimi Code Console, the Kimi app, and the CLI `/usage` only. No probe. | https://www.kimi.com/code/docs/en/kimi-code/membership.html |
+| Kimi Code usage endpoint | **Not documented.** `GET https://api.kimi.com/coding/v1/usages`, which the official CLI's `/usage` reads. Verified live on 2026-10-30: see "Kimi Code usage" below. The probe `kimi-code-usage` reads it. | https://www.kimi.com/code/docs/en/kimi-code/membership.html , https://github.com/MoonshotAI/kimi-cli (`src/kimi_cli/ui/shell/usage.py`) |
 | Open Platform (pay as you go) | Global `https://api.moonshot.ai/v1` (keys from platform.kimi.ai); China `https://api.moonshot.cn/v1` (keys from platform.kimi.com). Anthropic Messages at `/anthropic`; not used. | https://platform.kimi.ai/docs/api/overview , https://platform.kimi.com/docs/api/overview |
 | Open Platform model list | `GET /v1/models`, OpenAI list shape, with `context_length` per model | https://platform.kimi.ai/docs/api/list-models |
 | Open Platform balance | `GET /v1/users/me/balance` answers `{code, data: {available_balance, voucher_balance, cash_balance}, scode, status}`. US dollars (global) or yuan (China). At an `available_balance` of 0 or less, the inference API refuses calls. | https://platform.kimi.ai/docs/api/balance , https://platform.kimi.com/docs/api/balance |
@@ -1767,10 +1831,12 @@ The probe `moonshot-balance` (plan `api`) or `moonshot-cn-balance` (plan
 `api-cn`) makes one window, `balance`: 0 % while `available_balance` is
 over 0, else 100 %, with no reset time. `raw` has the three amounts and
 `currency`. A `moonshot` subscription with no `probe` gets the probe of its
-plan when the row is read. A Kimi Code plan has no probe.
+plan when the row is read. A Kimi Code plan (`coding` or `coding-cn`) gets
+`kimi-code-usage` (see "Kimi Code usage" below).
 
 Not tested: a turn on any endpoint; whether the China Kimi Code host
-(`api.kimi.com`) also takes an overseas key; whether
+(`api.kimi.com`) also takes an overseas key for chat (it does for
+`/usages`); whether
 `https://api.kimi.ai/coding/v1/models` answers (the model list then falls
 back to pi's catalogue and the table); the balance answer; the key format.
 The live test is `cargo test -p terrarium-adapter-pi --test moonshot_live

@@ -602,11 +602,12 @@ terrarium board                               the board, grouped by column
 terrarium card ls [-c column] [--mine | --assignee a] [--unassigned] [--label l] [--archived]
 terrarium card show <id>
 terrarium card new <title> [-b body | -] [-c column] [--label l]... [--depends-on id]...
-                   [--assignee a] [--repo r] [--branch b] [-m comment]
+                   [--assignee a] [--repo r] [--branch b] [-m comment] [--eta 2h30m]
 terrarium card new --from-mail <message id> [...]
 terrarium card edit <id> [--title t] [-b body] [--label l]... [--depends-on id]... [--repo r|none] [--branch b|none]
-terrarium card claim <id>
-terrarium card move <id> <column> [--position n] [-m comment]
+terrarium card claim <id> [--eta 2h30m]
+terrarium card move <id> <column> [--position n] [-m comment] [--eta 2h30m]
+terrarium card eta <id> (<duration | time> | --clear)
 terrarium card assign <id> <agent | operator | me | none>
 terrarium card comment <id> (<text | -> | -b text | - | -m text)
 terrarium card link <id> (--thread T | --branch b | --card id | --link-url u)
@@ -620,6 +621,16 @@ with `-m`, as `card move` does. Give only one of them.
 
 A move to `blocked` needs `-m`. A card with unmet dependencies cannot
 enter `in_progress`; the error lists the blocking cards.
+
+`card eta` sets when the work is expected to be done: a duration from now
+with one or more parts (`45m`, `2h30m`, `1d`), or an RFC 3339 time. The
+time must be in the future and at most 30 days away. The CLI checks the
+value first, then sends it as it is, so the daemon counts from its own
+clock. `--clear` removes the ETA. `--eta` on `card new`, `card claim`, and
+`card move` sets the ETA in the same command: `card move --eta` sends one
+`PATCH`, and `card claim --eta` sends the claim, then a `PATCH`. `card
+show` prints the ETA, the time left (or `overdue`), and who set it. The
+dashboard board shows a countdown on each card with an ETA.
 
 `card wait --mine`: when no card is assigned to me, the CLI long-polls the
 card list with `assignee=me&wait=`. It returns when a card is assigned.
@@ -880,7 +891,8 @@ terrarium watch rm <id>
 
 PLAN §12e gives the design; [api.md §6.8](api.md#68-questions-and-notices-to-the-operator)
 and [§6.9](api.md#69-the-inbox) are the contract. A leader (project_admin
-or sysadmin) asks the operator for a decision with `question ask`, or
+or sysadmin) asks the operator for a decision with `question ask`, asks
+for several related decisions at the same time with `question bundle`, or
 tells the operator something that needs no decision with `notify`. The
 question or notice is on the agent, so a new session reads it again. The
 answer or the acknowledgement comes as mail on its thread, and the mail
@@ -889,17 +901,21 @@ wakes the agent. A worker gets `403` (exit 3): it mails its lead.
 ```
 terrarium question ask "<text>" [--option <label>]... [--context <text|-> | --context-file <path>]
                        [--card <id>] [--urgent | --critical] [--wait [--timeout 2h]]
+terrarium question bundle "<summary>" (--item "<text>"... | --items-file <path|->)
+                       [--context <text|-> | --context-file <path>] [--card <id>] [--urgent | --critical]
+                       [--wait [--timeout 2h]]
 terrarium notify "<text>" [--context <text|-> | --context-file <path>] [--card <id>] [--urgent | --critical]
                  [--wait [--timeout 2h]]
-terrarium question ls [--all] [--status open|answered|acknowledged|retracted] [--kind question|notice] [--agent a]
+terrarium question ls [--all] [--status open|answered|acknowledged|retracted] [--kind question|notice|bundle] [--agent a]
 terrarium question show <id>
-terrarium question update <id> [--text t] [--option o]... [--clear-options] [--context t | --context-file p]
-                       [--card c] [--urgent | --critical | --normal]
+terrarium question update <id> [--text t] [--option o]... [--clear-options] [--items-file <path|->]
+                       [--context t | --context-file p] [--card c] [--urgent | --critical | --normal]
 terrarium question retract <id> [-m reason]
 terrarium wait question <id> [--timeout t] [-m note]
 terrarium admin question ls [-p project] [--agent a] [--open | --status s | --all] [--kind k]
 terrarium admin question show <id>
 terrarium admin question answer <id> ["<text>" | -] [--option <label|n>]
+terrarium admin question answer <id> --answers-file <path|->
 terrarium admin question retract <id> [-m reason]
 terrarium admin inbox ls [-p project] [--all | --done] [--kind question|notice|mail|system]
 terrarium admin inbox ack <id> ["<text>" | -]
@@ -912,6 +928,24 @@ terrarium admin inbox resume <thread-id> [-m note]
   prints `wait <id> registered: question <text>`, and "End your turn now".
   The agent is then `waiting` until the answer comes. The answer mail is
   the wake mail of the wait: the agent gets one mail.
+- `bundle` asks 2 to 20 related questions in one step: `kind: "bundle"`.
+  The summary is the text of the bundle. `--item "<text>"` (one for each
+  question) gives questions with no options. `--items-file` gives the
+  questions as JSON, from a file or from stdin (`-`):
+
+  ```json
+  [{"text": "Tag v0.3 on Friday?", "options": ["yes", "no"]},
+   {"text": "Which staging host?", "options": ["eu", "us"], "context": "`us` has the newer kernel."},
+   "Anything for the release notes?"]
+  ```
+
+  A plain string is a question with no options; `{"items": [...]}` is the
+  same as the array. Only one of the summary and `--items-file` can be
+  `-`. It prints `bundle <id> asked (<priority>): <n> questions. The
+  answers come as one mail on thread <thread>.` The operator answers all
+  questions together, and the agent gets all answers in one mail, item by
+  item. Use a bundle only for decisions that belong together; ask an
+  unrelated question on its own. `--wait` works as for `ask`.
 - `notify` sends a notice: `kind: "notice"`, with no options. It prints
   `notice <id> sent (<priority>). The acknowledgement comes as mail on
   thread <thread>.` With `--wait`, it registers a `question` wait on the
@@ -938,19 +972,32 @@ terrarium admin inbox resume <thread-id> [-m note]
   `NOTICE`, and the reply of the operator follows `reply by <who>:`.
 - `update` changes an open question and adds 1 to its revision. An
   answered or retracted question is `409`. `--option` gives the new list
-  of options; `--clear-options` removes them.
+  of options; `--clear-options` removes them. `--items-file` replaces all
+  questions of a bundle (the format of `bundle --items-file`).
+- For a bundle, `show` prints the summary between `BUNDLE` markers, then
+  each question between `ITEM <n> OF <m>` markers, with its options and
+  its context. Each answer follows its item: `item <n> chosen option: ...`
+  and `item <n> answer by <who>:`. `wait show` prints one line for each
+  answer of a bundle (`answer <n> [option: <label>]: <text>`), then the
+  rest of the result.
 - `admin question ls` lists the open questions of all agents by default,
   critical first, then urgent, with the `AGENT` column. `-p` limits it to one project.
 - `admin question answer` takes a text, an option, or both. `--option`
   takes the label, or the number of the option from 1 (`show` prints the
-  numbers). The operator answers each question; a sysadmin agent answers
+  numbers). A bundle takes `--answers-file` (a file, or `-` for stdin):
+  a JSON array with one answer for each question, in order. Each answer
+  is a string (a text), or `{"option": "<label>" | <number from 1>,
+  "answer": "<text>"}`. Every question needs an answer: a partial answer
+  is `422` (exit 1), and the message names the questions with no answer.
+  The command sends the revision that it read, so a change of the agent
+  meanwhile is `409`. The operator answers each question; a sysadmin agent answers
   the questions of other agents. The asking agent cannot answer its own.
 - `admin question retract` sends the agent one mail that it needs no
   answer.
 - `admin inbox ls` lists what waits for the operator (api.md §6.9): the
   open questions, notices, mail to `operator`, and the threads of the loop
   guard, critical first, then urgent. The columns: `ID` (`notice:<id>`,
-  `mail:<id>`, ...), `KIND`, `STATUS`, `URGENT` (`true`, `false`, or
+  `bundle:<id>`, `mail:<id>`, ...), `KIND`, `STATUS`, `URGENT` (`true`, `false`, or
   `critical`), `PROJECT`, `FROM`, `AT`, and a short text. `--done` lists the closed items; `--all` both.
 - `admin inbox ack <id> [text]` acknowledges a notice or a mail to the
   operator. `<id>` is an item ID (`notice:<id>`, `mail:<id>`) or a bare

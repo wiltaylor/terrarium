@@ -788,6 +788,94 @@ th {
   color: var(--accent);
 }
 
+/* Home host cards (features/home/HostCards.tsx) */
+.host-section {
+  margin-top: 22px;
+}
+.host-section h2 {
+  margin: 0 0 10px;
+}
+.host-strip {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr));
+  margin-bottom: 22px;
+}
+.host-card {
+  display: grid;
+  gap: 10px;
+  align-content: start;
+}
+.host-card p {
+  margin: 0;
+}
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 14px;
+}
+.metric-grid.dim,
+.host-fs.dim {
+  opacity: 0.6;
+}
+.metric-cell {
+  min-width: 0;
+}
+.metric-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 6px;
+}
+.metric-value {
+  font-weight: 600;
+  white-space: nowrap;
+}
+.metric-sub {
+  min-height: 1.2em;
+}
+.metric-spark {
+  display: block;
+  cursor: crosshair;
+  border-radius: 2px;
+}
+.metric-spark:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.metric-base {
+  stroke: var(--border);
+  stroke-width: 1;
+}
+.metric-cross {
+  stroke: var(--muted);
+  stroke-width: 1;
+}
+.host-fs {
+  display: grid;
+  gap: 6px;
+}
+.host-fs .meter-label > span:first-child {
+  min-width: 0;
+  margin-right: 8px;
+}
+.host-fs .meter-label > span:last-child {
+  white-space: nowrap;
+}
+button.link-button {
+  justify-self: start;
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--link);
+  cursor: pointer;
+}
+@media (max-width: 360px) {
+  .metric-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 /* Queue */
 .queue-item {
   display: flex;
@@ -935,6 +1023,38 @@ th {
 }
 .kcard .title {
   font-weight: 550;
+}
+/* The ETA of a card (lib/eta.ts): a countdown chip and a thin bar of the time used. */
+.eta {
+  display: grid;
+  gap: 3px;
+}
+.eta .chip {
+  justify-self: start;
+  font-variant-numeric: tabular-nums;
+}
+.eta-bar {
+  height: 3px;
+  border-radius: 99px;
+  background: var(--surface-3);
+  overflow: hidden;
+}
+.eta-bar > span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+}
+.eta.soon .eta-bar > span { background: var(--warn); }
+.eta.overdue .eta-bar > span { background: var(--danger); }
+.eta-edit {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+.eta-edit input {
+  width: 9em;
+  max-width: 100%;
 }
 .drop-marker {
   height: 3px;
@@ -1967,4 +2087,42 @@ tr.row-open > td {
 .model-picker-note {
   padding: 5px 10px;
   border-top: 1px solid var(--border);
+}
+/* A bundle of questions (features/inbox/BundleCard.tsx): numbered items, each with its options and text. */
+.bundle-items {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  gap: 10px;
+}
+.bundle-item {
+  border-left: 3px solid var(--border);
+  padding-left: 10px;
+  min-width: 0;
+}
+.bundle-item.done {
+  border-left-color: var(--accent);
+}
+.bundle-item fieldset {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}
+.bundle-legend {
+  padding: 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.bundle-num {
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+.bundle-check {
+  margin-left: 6px;
+  font-weight: 400;
+}
+.bundle-item textarea {
+  width: 100%;
+  box-sizing: border-box;
 }

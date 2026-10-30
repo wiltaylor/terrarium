@@ -49,7 +49,7 @@ export function UsageTile(props: { sub: Subscription; now: number; spark: number
             </span>
           </Show>
           <Show when={props.sub.held_agents > 0}>
-            <span class="chip bad" title="Agents whose turns wait for a reset">
+            <span class="chip bad" title="Agents whose turns wait after a usage-limit error">
               {props.sub.held_agents} held
             </span>
           </Show>

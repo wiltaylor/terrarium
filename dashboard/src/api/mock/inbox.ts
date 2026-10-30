@@ -59,7 +59,8 @@ export function createInboxMock(c: InboxMockContext) {
     const open = q.status === "open";
     return {
       id: questionItemId(q),
-      kind: q.kind,
+      // A bundle is an item of the kind `question`.
+      kind: q.kind === "notice" ? "notice" : "question",
       open,
       urgent: open && q.priority !== "normal",
       critical: open && q.priority === "critical",

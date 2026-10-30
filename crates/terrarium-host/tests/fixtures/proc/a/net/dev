@@ -1,0 +1,10 @@
+Inter-|   Receive                                                |  Transmit
+ face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed
+    lo: 611761622  621947    0    0    0     0          0         0 611761622  621947    0    0    0     0       0          0
+enp3s0: 1000000    5000    0    0    0     0          0         0   500000    2000    0    0    0     0       0          0
+ wlan0: 2000000    6000    0    0    0     0          0         0   800000    3000    0   59    0     0       0          0
+tailscale0: 44880502   60810    0    0    0     0          0         0 14533689   67668    0    0    0     0       0          0
+virbr0:       0       0    0    0    0     0          0         0        0       0    0  242    0     0       0          0
+br-32cd90606f27: 94300128  220344    0    0    0     0          0         0 725145064  245527    0   69    0     0       0          0
+docker0:  885080   12882    0    0    0     0          0         0 132407860   17586    0    2    0     0       0          0
+veth0aac2e2: 13713757  118257    0    0    0     0          0         0 153208029  119366    0    0    0     0       0          0

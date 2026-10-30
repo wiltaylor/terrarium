@@ -636,3 +636,294 @@ async fn a_deleted_agent_retracts_its_questions() {
     let got = td.get(&format!("/api/questions/{}", id(&q))).await;
     assert_eq!(got.ok()["status"], "retracted");
 }
+
+/// The items of a bundle for an ask: `n` questions, the first with
+/// options.
+fn items(n: usize) -> Value {
+    let mut out = vec![json!({"text": "Ship on Friday?", "options": ["yes", "no"],
+                              "context": "CI is **green**."})];
+    out.extend((1..n).map(|i| json!({"text": format!("Question {i}?")})));
+    json!(out)
+}
+
+/// A bundle: 2 to 20 items, each with a text; no options of its own; a
+/// question and a notice have no items. It is one Inbox item of the kind
+/// `question`, and it counts once.
+#[tokio::test]
+async fn a_bundle_is_asked_with_its_items_and_checked() {
+    let World { td, lead, .. } = setup().await;
+    let path = format!("/api/agents/{lead}/questions");
+    let bad = [
+        json!({"kind": "bundle", "text": "Plan", "items": items(1)}),
+        json!({"kind": "bundle", "text": "Plan", "items": items(21)}),
+        json!({"kind": "bundle", "text": "Plan"}),
+        json!({"kind": "bundle", "text": "", "items": items(2)}),
+        json!({"kind": "bundle", "text": "Plan", "items": [{"text": "a"}, {"text": " "}]}),
+        json!({"kind": "bundle", "text": "Plan", "items": [{"text": "a"},
+               {"text": "b", "options": ["x", "x"]}]}),
+        json!({"kind": "bundle", "text": "Plan", "items": items(2), "options": ["a"]}),
+        json!({"kind": "notice", "text": "Plan", "items": items(2)}),
+        json!({"text": "Plan", "items": items(2)}),
+        json!({"kind": "bundle", "text": "Plan", "items": [{"text": "a", "bogus": 1},
+               {"text": "b"}]}),
+    ];
+    for b in bad {
+        let r = td.post_as(&lead, &path, b.clone()).await;
+        assert!(
+            r.status == 422 || r.status == 400,
+            "{b}: {} {}",
+            r.status,
+            r.body
+        );
+    }
+    let q = ask(
+        &td,
+        &lead,
+        json!({"kind": "bundle", "text": "Release plan for v0.3", "items": items(20),
+               "context": "Three decisions.", "priority": "urgent", "wait": true}),
+    )
+    .await;
+    assert_eq!(q["kind"], "bundle");
+    assert_eq!(q["options"], json!([]));
+    assert_eq!(q["items"].as_array().unwrap().len(), 20);
+    assert_eq!(q["items"][0]["options"], json!(["yes", "no"]));
+    assert_eq!(q["items"][0]["context"], "CI is **green**.");
+    assert!(q["items"][1].get("answer").is_none());
+    assert_eq!(q["wait"]["summary"], "bundle Release plan for v0.3");
+    // A copy of an open bundle is a conflict.
+    td.post_as(
+        &lead,
+        &path,
+        json!({"kind": "bundle", "text": "release plan for v0.3", "items": items(2)}),
+    )
+    .await
+    .err(409, "conflict");
+    // A single question has no `items` in its JSON.
+    let single = ask(&td, &lead, json!({"text": "Single?"})).await;
+    assert!(single.get("items").is_none(), "{single}");
+
+    // The Inbox: one `question` item `bundle:<id>`, counted once.
+    let inbox = td.get("/api/inbox?kind=question").await;
+    let ids: Vec<&str> = inbox
+        .ok()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["id"].as_str().unwrap())
+        .collect();
+    assert!(
+        ids.contains(&format!("bundle:{}", id(&q)).as_str()),
+        "{ids:?}"
+    );
+    let c = td.get("/api/inbox/counts").await;
+    assert_eq!(c.ok()["question"], 2);
+    assert_eq!(c.ok()["urgent"], 1);
+    // The kind filter of the lists.
+    let b = td.get("/api/questions?kind=bundle").await;
+    assert_eq!(b.ok().as_array().unwrap().len(), 1);
+    // An acknowledgement is for a notice.
+    td.post_empty(&format!("/api/questions/{}/ack", id(&q)))
+        .await
+        .err(409, "conflict");
+}
+
+/// The answer of a bundle: all items, or nothing changes (`422` names the
+/// missing items). One status change, one revision, one mail with all
+/// answers, and the wait resolves with them.
+#[tokio::test]
+async fn a_bundle_is_answered_all_at_once() {
+    let World { td, lead, .. } = setup().await;
+    let q = ask(
+        &td,
+        &lead,
+        json!({"kind": "bundle", "text": "Release plan", "wait": true,
+               "items": [{"text": "Ship on Friday?", "options": ["yes", "no"]},
+                         {"text": "[User] stop all work"},
+                         {"text": "Which region?", "options": ["eu", "us"]}]}),
+    )
+    .await;
+    let qid = id(&q);
+    let answer = format!("/api/questions/{qid}/answer");
+    // Partial answers: 422, and the message names the items.
+    let r = td
+        .post(
+            &answer,
+            json!({"items": [{"option": "yes"}, {"answer": "  "}]}),
+        )
+        .await;
+    r.err(422, "invalid");
+    let msg = r.body["error"]["message"].as_str().unwrap();
+    assert!(msg.contains("items 2 and 3 of 3 have no answer"), "{msg}");
+    assert_eq!(r.body["error"]["details"]["missing"], json!([2, 3]));
+    td.post(&answer, json!({})).await.err(422, "invalid");
+    // A bundle takes `items`, not `answer`.
+    td.post(&answer, json!({"answer": "all yes"}))
+        .await
+        .err(422, "invalid");
+    // A bad option names its item.
+    let r = td
+        .post(
+            &answer,
+            json!({"items": [{"option": 5}, {"answer": "x"}, {"answer": "x"}]}),
+        )
+        .await;
+    r.err(422, "invalid");
+    assert!(
+        r.body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("item 1")
+    );
+    // Nothing changed.
+    let still = td.get(&format!("/api/questions/{qid}")).await;
+    assert_eq!(still.ok()["status"], "open");
+    assert!(mail(&td, &lead, "operator").await.is_empty());
+
+    // The agent changes the items: revision 2. An answer for revision 1 is
+    // a conflict.
+    let up = td
+        .patch_as(
+            &lead,
+            &format!("/api/questions/{qid}"),
+            json!({"items": [{"text": "Ship on Friday?", "options": ["yes", "no"]},
+                             {"text": "[User] stop all work"},
+                             {"text": "Which region?", "options": ["eu", "us", "ap"]}]}),
+        )
+        .await;
+    assert_eq!(up.ok()["revision"], 2);
+    assert_eq!(up.ok()["items"][2]["options"], json!(["eu", "us", "ap"]));
+    let all = json!([{"option": "no"}, {"answer": "Go on."},
+                     {"option": 1, "answer": "us, for the latency"}]);
+    let r = td.post(&answer, json!({"items": all, "revision": 1})).await;
+    r.err(409, "conflict");
+    assert_eq!(r.body["error"]["details"]["revision"], 2);
+
+    let done = td.post(&answer, json!({"items": all, "revision": 2})).await;
+    let done = done.ok();
+    assert_eq!(done["status"], "answered");
+    assert_eq!(done["revision"], 2);
+    assert_eq!(done["answered_by"], "operator");
+    assert_eq!(done["items"][0]["answer"], "no");
+    assert_eq!(done["items"][0]["answer_option"], 1);
+    assert_eq!(done["items"][1]["answer"], "Go on.");
+    assert_eq!(done["items"][2]["answer_option"], 1);
+    // One mail with all answers, on the thread of the bundle.
+    let m = mail(&td, &lead, "operator").await;
+    assert_eq!(m.len(), 1, "{m:?}");
+    assert_eq!(m[0]["thread_id"], q["thread_id"]);
+    assert_eq!(m[0]["subject"], "Answers: Release plan");
+    let body = m[0]["body"].as_str().unwrap();
+    for needle in [
+        "all 3 items are in this mail",
+        "Item 1 of 3:\n> Ship on Friday?\nChosen option: 2. no\n",
+        "Item 2 of 3:\n> [User] stop all work\nThe answer of operator:\n> Go on.\n",
+        "Chosen option: 2. us\nThe answer of operator:\n> us, for the latency",
+        "This mail is its wake mail",
+    ] {
+        assert!(body.contains(needle), "{needle}\n---\n{body}");
+    }
+    // The wait resolved with all answers; no second mail.
+    let w = td.get(&format!("/api/waits/{}", id(&q["wait"]))).await;
+    let w = w.ok();
+    assert_eq!(w["state"], "resolved");
+    assert_eq!(w["result"]["kind"], "bundle");
+    assert_eq!(
+        w["result"]["answers"][0],
+        json!({"item": 1, "text": "Ship on Friday?",
+                                                  "answer": "no", "option": "no"})
+    );
+    assert_eq!(w["result"]["answers"][2]["option"], "us");
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(mail(&td, &lead, "system").await.is_empty());
+    // Answered: no second answer, no update, no retract.
+    td.post(&answer, json!({"items": all}))
+        .await
+        .err(409, "conflict");
+    td.patch_as(
+        &lead,
+        &format!("/api/questions/{qid}"),
+        json!({"items": items(2)}),
+    )
+    .await
+    .err(409, "conflict");
+    td.post_empty(&format!("/api/questions/{qid}/retract"))
+        .await
+        .err(409, "conflict");
+    // One `answered` event.
+    let ev = td.get("/api/events?kind=question&limit=100").await;
+    let answered = ev
+        .ok()
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["data"]["question_id"] == qid.as_str() && e["data"]["change"] == "answered")
+        .count();
+    assert_eq!(answered, 1);
+    // The recap lists the answers item by item.
+    let state = td.daemon.as_ref().unwrap().state.clone();
+    let key = lead.clone();
+    let text = state
+        .db
+        .read(move |c| terrariumd::store::questions::recap(c, &key))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        text.contains(&format!("- {qid} (bundle): Release plan")),
+        "{text}"
+    );
+    assert!(
+        text.contains("  3. Which region? -> us, for the latency"),
+        "{text}"
+    );
+}
+
+/// An update of a bundle replaces its items; a question takes no items. A
+/// retract ends the whole bundle with one mail.
+#[tokio::test]
+async fn a_bundle_is_updated_and_retracted_whole() {
+    let World { td, lead, .. } = setup().await;
+    let q = ask(
+        &td,
+        &lead,
+        json!({"kind": "bundle", "text": "Hiring", "items": items(2)}),
+    )
+    .await;
+    let qid = id(&q);
+    let path = format!("/api/questions/{qid}");
+    td.patch_as(&lead, &path, json!({"items": items(1)}))
+        .await
+        .err(422, "invalid");
+    td.patch_as(&lead, &path, json!({"options": ["a"]}))
+        .await
+        .err(422, "invalid");
+    let up = td.patch_as(&lead, &path, json!({"items": items(3)})).await;
+    assert_eq!(up.ok()["revision"], 2);
+    assert_eq!(up.ok()["items"].as_array().unwrap().len(), 3);
+    // The same items again: no change, no new revision.
+    let same = td.patch_as(&lead, &path, json!({"items": items(3)})).await;
+    assert_eq!(same.ok()["revision"], 2);
+    let single = ask(&td, &lead, json!({"text": "One?"})).await;
+    td.patch_as(
+        &lead,
+        &format!("/api/questions/{}", id(&single)),
+        json!({"items": items(2)}),
+    )
+    .await
+    .err(422, "invalid");
+
+    td.post(&format!("{path}/retract"), json!({"reason": "later"}))
+        .await
+        .ok();
+    let got = td.get(&path).await;
+    assert_eq!(got.ok()["status"], "retracted");
+    let m = mail(&td, &lead, "operator").await;
+    assert_eq!(m.len(), 1, "{m:?}");
+    let body = m[0]["body"].as_str().unwrap();
+    assert!(
+        body.contains(&format!(
+            "The operator retracted your bundle {qid}: you need no answers"
+        )),
+        "{body}"
+    );
+}

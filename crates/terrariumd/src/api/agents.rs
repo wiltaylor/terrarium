@@ -474,6 +474,8 @@ pub(super) async fn start(
             agents::last_harness_session(t, &id)
         })
         .await?;
+    // A start is a retry: a usage-limit hold ends (`crate::usage_limit`).
+    crate::usage_limit::release_all(&state, &a.agent.id.to_string()).await?;
     if let Err(e) = state.supervisor.start(a.agent.clone(), resume).await {
         let id = a.agent.id.to_string();
         state
@@ -576,6 +578,8 @@ pub(super) async fn restart(
         state.supervisor.start(agent, resume).await
     };
     result.map_err(supervisor_error)?;
+    // A restart is a retry: a usage-limit hold ends (`crate::usage_limit`).
+    crate::usage_limit::release_all(&state, &a.agent.id.to_string()).await?;
     let id = a.agent.id.to_string();
     let v = state.db.read(move |c| agents::get(c, &id)).await?;
     Ok((StatusCode::ACCEPTED, Json(v)))

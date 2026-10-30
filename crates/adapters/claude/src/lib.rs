@@ -5,6 +5,8 @@
 //! - [`launch`]: the command line and env (`ClaudeAdapter::launch_with`).
 //! - [`config`]: the per-agent `.claude.json` and the overlays.
 //! - [`hooks`]: hook payloads to events.
+//! - [`limit`]: the usage-limit signal of `StopFailure` (read from the
+//!   binary, not captured).
 //! - [`screen`]: the prompt-ready detector.
 //! - [`keys`]: turns and answers as keystrokes.
 //! - [`session`]: the session file path.
@@ -18,6 +20,7 @@ pub mod flags;
 pub mod hooks;
 pub mod keys;
 pub mod launch;
+pub mod limit;
 pub mod screen;
 pub mod session;
 pub mod transcript;

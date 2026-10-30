@@ -437,8 +437,21 @@ export interface WaitEventData {
 export type QuestionStatus = "open" | "answered" | "acknowledged" | "retracted";
 /** `critical`: the operator must act now; the dashboard shows a banner on every page and flashes its tab. */
 export type QuestionPriority = "normal" | "urgent" | "critical";
-/** A `question` asks for a decision. A `notice` only tells the operator something; the operator acknowledges it. */
-export type QuestionKind = "question" | "notice";
+/**
+ * A `question` asks for a decision. A `notice` only tells the operator something; the operator acknowledges it.
+ * A `bundle` holds 2 to 20 related questions (`items`) under one summary (`text`); the operator answers all of them in one step.
+ */
+export type QuestionKind = "question" | "notice" | "bundle";
+
+/** One question of a bundle, with its answer when the bundle is answered. The agent's words, as for a question. */
+export interface BundleItem {
+  text: string;
+  options: string[];
+  context?: string | null;
+  answer?: string | null;
+  /** The 0-based index of the chosen option. */
+  answer_option?: number | null;
+}
 
 /**
  * A question or a notice of a leader agent to the operator. `text`,
@@ -454,8 +467,11 @@ export interface Question {
   agent: string;
   agent_name: string;
   project: string;
+  /** The question, the notice, or the summary of a bundle. */
   text: string;
   options: string[];
+  /** Kind `bundle` only: the questions, with their answers. */
+  items?: BundleItem[];
   context?: string | null;
   card?: string | null;
   priority: QuestionPriority;
@@ -476,10 +492,22 @@ export interface Question {
   revision: number;
 }
 
-/** `POST /api/questions/{id}/answer`: a text, an option (label or 0-based index), or both. */
+/** The answer to one item of a bundle: a text, an option (label or 0-based index), or both. */
+export interface BundleItemAnswer {
+  answer?: string;
+  option?: string | number;
+}
+
+/**
+ * `POST /api/questions/{id}/answer`: a text, an option (label or 0-based index), or both. A bundle takes
+ * `items` instead: one entry for each item, in order; a missing answer is a 422. `revision`: the revision that
+ * the operator saw; another one is a 409 (the agent changed the question meanwhile).
+ */
 export interface QuestionAnswer {
   answer?: string;
   option?: string | number;
+  items?: BundleItemAnswer[];
+  revision?: number;
 }
 
 /** `data` of a `question` event. */
@@ -630,6 +658,7 @@ export const EVENT_KINDS = [
   "delivery_failed",
   "system",
   "warning",
+  "usage_limit",
   "mail",
   "card",
   "board",
@@ -811,7 +840,8 @@ export interface PausedThread {
 
 /**
  * One thing that waits for the operator (`GET /api/inbox`). `id` is
- * `question:<id>`, `notice:<id>`, `mail:<message id>`, or `thread:<thread id>`.
+ * `question:<id>`, `bundle:<id>`, `notice:<id>`, `mail:<message id>`, or `thread:<thread id>`.
+ * A bundle is an item of the kind `question`.
  * A system item shows only while it is open.
  */
 export interface InboxItem {
@@ -953,6 +983,15 @@ export interface Card {
   created_at: string;
   updated_at: string;
   archived: boolean;
+  /** docs/api.md §8: when the work is expected to be done (RFC 3339). It stays on a done or archived card. */
+  eta_at?: string | null;
+  /** When the ETA was set: the start of the countdown's progress bar. */
+  eta_set_at?: string | null;
+  /** The address that set the ETA: an agent ULID or `operator`. */
+  eta_set_by?: string | null;
+  eta_set_by_name?: string | null;
+  /** When the card last moved to `done`; a reopen clears it. */
+  done_at?: string | null;
 }
 
 export interface Board {
@@ -974,6 +1013,8 @@ export interface NewCard {
   depends_on?: string[];
   from_mail?: string;
   comment?: string;
+  /** An RFC 3339 time or a duration from now (`2h30m`): in the future, at most 30 days away. */
+  eta_at?: string;
 }
 
 export interface CardPatch {
@@ -988,6 +1029,8 @@ export interface CardPatch {
   depends_on?: string[];
   /** Required by the daemon when `column` is `blocked`. */
   comment?: string;
+  /** An RFC 3339 time or a duration from now (`2h30m`); `null` clears the ETA. */
+  eta_at?: string | null;
 }
 
 export interface CardQuery {
@@ -1339,7 +1382,7 @@ export interface Subscription {
   /** No probe: local accounting is the only number. */
   local_estimate_only: boolean;
   has_api_key: boolean;
-  /** Agents whose turns wait for a reset of this subscription. */
+  /** Agents whose turns wait after a usage-limit error on this subscription. */
   held_agents: number;
   /**
    * The model each harness gets on this subscription when the agent sets no
@@ -1918,6 +1961,43 @@ export interface HostCapabilities {
   shell?: string;
   /** Target displays (docs/api.md §17.10). Absent from an older host agent: off. */
   display?: DisplayCapability;
+  /** The host agent sends performance samples (docs/api.md §17.1). Absent from an older host agent. */
+  metrics?: boolean;
+}
+
+/** `terrarium_host::protocol::HostMetrics` with the daemon's `at` (docs/host-protocol.md, "`metrics`"). Rates are bytes per second. A part the host agent cannot read is absent. */
+export interface HostMetricsSample {
+  /** When the daemon got the sample. */
+  at: string;
+  /** The seconds that the rates cover. */
+  interval_secs: number;
+  cpu?: { busy_pct: number; cores: number; load1: number };
+  memory?: { total_bytes: number; used_bytes: number; used_pct: number; swap_total_bytes: number; swap_used_bytes: number };
+  net?: { rx_bytes_per_sec: number; tx_bytes_per_sec: number };
+  disk_io?: { read_bytes_per_sec: number; write_bytes_per_sec: number };
+  filesystems: HostFilesystem[];
+}
+
+export interface HostFilesystem {
+  mount: string;
+  fstype: string;
+  device: string;
+  total_bytes: number;
+  used_bytes: number;
+  avail_bytes: number;
+  /** `used / (used + avail)`, as `df` shows it. */
+  used_pct: number;
+}
+
+/** `GET /api/hosts/{name}/metrics?minutes=N`: in memory on the daemon, the last hour at most. */
+export interface HostMetricsHistory {
+  host: string;
+  interval_secs: number;
+  minutes: number;
+  /** No sample in the last 30 s, or the host is offline. */
+  stale: boolean;
+  /** Oldest first. */
+  samples: HostMetricsSample[];
 }
 
 /** `terrarium_core::protocol::DisplayCapability`. */
@@ -1958,6 +2038,8 @@ export interface Host {
   connected_at?: string;
   created_at?: string;
   created_by?: string;
+  /** The latest performance sample; `null` with none (an older host agent, or none since the daemon started). */
+  metrics?: (HostMetricsSample & { stale: boolean }) | null;
 }
 
 /** `POST /api/hosts` (`201`): the host and its token. The token shows once, here only. */

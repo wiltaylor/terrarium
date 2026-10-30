@@ -89,6 +89,9 @@ pub fn print_card(ctx: &Ctx, k: &Value) {
         field(k, "depends_on"),
         field(k, "blocked_by")
     ));
+    if let Some(eta) = eta_line(k, chrono::Utc::now()) {
+        ctx.line(eta);
+    }
     if let Some(body) = k["body"].as_str().filter(|b| !b.is_empty()) {
         delimited(ctx, "CARD BODY", body);
     }
@@ -113,6 +116,34 @@ pub fn print_card(ctx: &Ctx, k: &Value) {
             }
         }
     }
+}
+
+/// Check an ETA value here, for a usage error before the call: a duration
+/// from now (`45m`, `2h30m`, `1d`) or an RFC 3339 time, in the future and
+/// at most 30 days away. The daemon resolves the value again on its own
+/// clock, so the value goes as it is.
+pub fn eta_value(v: &str) -> anyhow::Result<String> {
+    terrarium_core::eta::resolve(v, chrono::Utc::now()).map_err(CliError::usage)?;
+    Ok(v.trim().to_owned())
+}
+
+/// The ETA line of `card show`: the time, the time left (or `overdue`, or
+/// the done time), and who set it. `None` for a card with no ETA.
+pub fn eta_line(k: &Value, now: chrono::DateTime<chrono::Utc>) -> Option<String> {
+    let at = k["eta_at"].as_str()?;
+    let t = chrono::DateTime::parse_from_rfc3339(at).ok()?;
+    let secs = (t.with_timezone(&chrono::Utc) - now).num_seconds();
+    let state = if k["column"] == "done" || k["archived"] == true {
+        "done".to_owned()
+    } else if secs >= 0 {
+        format!("{} left", super::inspect::duration(secs))
+    } else {
+        format!("overdue {}", super::inspect::duration(-secs))
+    };
+    Some(format!(
+        "eta: {at} ({state}), set by {}",
+        field(k, "eta_set_by_name")
+    ))
 }
 
 fn card_line(ctx: &Ctx, verb: &str, k: &Value) {
@@ -162,11 +193,18 @@ pub async fn card(ctx: &Ctx, cmd: &CardCmd) -> anyhow::Result<()> {
         }
         CardCmd::New(a) => new(ctx, a).await,
         CardCmd::Edit(a) => edit(ctx, a).await,
-        CardCmd::Claim { id } => {
-            let k = ctx
+        CardCmd::Claim { id, eta } => {
+            let eta = eta.as_deref().map(eta_value).transpose()?;
+            let mut k = ctx
                 .api
                 .post(&format!("{}/claim", card_path(id)), None)
                 .await?;
+            if let Some(eta) = eta {
+                k = ctx
+                    .api
+                    .patch(&card_path(id), json!({"eta_at": eta}))
+                    .await?;
+            }
             ctx.emit(&k, |c, k| card_line(c, "claimed", k))
         }
         CardCmd::Move {
@@ -174,15 +212,38 @@ pub async fn card(ctx: &Ctx, cmd: &CardCmd) -> anyhow::Result<()> {
             column,
             position,
             comment,
+            eta,
         } => {
             let mut b = json!({"column": column});
             set_opt(&mut b, "position", *position);
             set_opt(&mut b, "comment", ctx.opt_text(comment.as_deref())?);
+            // With an ETA, one PATCH moves the card and sets it together.
+            let k = match eta.as_deref().map(eta_value).transpose()? {
+                Some(eta) => {
+                    b["eta_at"] = eta.into();
+                    ctx.api.patch(&card_path(id), b).await?
+                }
+                None => {
+                    ctx.api
+                        .post(&format!("{}/move", card_path(id)), Some(b))
+                        .await?
+                }
+            };
+            ctx.emit(&k, |c, k| card_line(c, "moved", k))
+        }
+        CardCmd::Eta { id, when, clear } => {
+            let eta = match when.as_deref() {
+                Some(w) if !*clear => Value::String(eta_value(w)?),
+                _ => Value::Null,
+            };
             let k = ctx
                 .api
-                .post(&format!("{}/move", card_path(id)), Some(b))
+                .patch(&card_path(id), json!({"eta_at": eta}))
                 .await?;
-            ctx.emit(&k, |c, k| card_line(c, "moved", k))
+            ctx.emit(&k, |c, k| match k["eta_at"].as_str() {
+                Some(at) => c.line(format!("{} ETA {at}", field(k, "id"))),
+                None => c.line(format!("{} has no ETA", field(k, "id"))),
+            })
         }
         CardCmd::Assign { id, agent } => {
             let who = match agent.as_str() {
@@ -290,6 +351,11 @@ async fn new(ctx: &Ctx, a: &CardNewArgs) -> anyhow::Result<()> {
     set_opt(&mut b, "branch", a.branch.clone());
     set_opt(&mut b, "from_mail", a.from_mail.clone());
     set_opt(&mut b, "comment", ctx.opt_text(a.comment.as_deref())?);
+    set_opt(
+        &mut b,
+        "eta_at",
+        a.eta.as_deref().map(eta_value).transpose()?,
+    );
     if a.title.is_none() && a.from_mail.is_none() {
         return Err(CliError::usage("give a title, or --from-mail <message id>"));
     }
@@ -397,4 +463,38 @@ async fn wait(ctx: &Ctx, mine: bool, timeout: u64) -> anyhow::Result<()> {
     ctx.emit(&json!([]), |c, _| {
         c.line(format!("no card changes after {timeout}s"));
     })
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod eta_tests {
+    use super::*;
+
+    #[test]
+    fn eta_values_are_checked_before_the_call() {
+        assert_eq!(eta_value(" 2h30m ").unwrap(), "2h30m");
+        assert_eq!(eta_value("45m").unwrap(), "45m");
+        assert_eq!(eta_value("1d").unwrap(), "1d");
+        let later = (chrono::Utc::now() + chrono::Duration::hours(2)).to_rfc3339();
+        assert_eq!(eta_value(&later).unwrap(), later);
+        for bad in ["45", "2000-01-01T00:00:00Z", "31d", "soon", "0m", "14:30"] {
+            assert!(eta_value(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_eta_line_counts_down_or_says_overdue() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-10-30T10:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let k = json!({"eta_at": "2026-10-30T11:12:00.000Z", "column": "in_progress",
+                       "eta_set_by_name": "proj/w1"});
+        let line = eta_line(&k, now).unwrap();
+        assert!(line.contains("left") && line.contains("proj/w1"), "{line}");
+        let k = json!({"eta_at": "2026-10-30T09:48:00.000Z", "column": "review"});
+        assert!(eta_line(&k, now).unwrap().contains("overdue"));
+        let k = json!({"eta_at": "2026-10-30T09:48:00.000Z", "column": "done"});
+        assert!(eta_line(&k, now).unwrap().contains("(done)"));
+        assert_eq!(eta_line(&json!({"column": "done"}), now), None);
+    }
 }

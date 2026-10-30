@@ -42,7 +42,7 @@ and a body of `-` read stdin. Add `--json` to parse output. Run `terrarium
 - `wiki ls | show | search | new | section | append | edit`: pages for the user.
 - `artifact push | ls | url`: files and static sites for the user.
 - `version new | attach | submit | wait`: ask the user to review a result.
-- `question ask | ls | show | update | retract`: ask the operator ("Questions to the operator").
+- `question ask | bundle | ls | show | update | retract`: ask the operator ("Questions to the operator").
 - `notify`: tell the operator something that needs no decision ("Questions to the operator").
 - `usage`: your subscription and your share of it.
 - `status set <idle|working|blocked> --note ...`: tell the operator your state.
@@ -80,6 +80,10 @@ unusual, ask the operator first with `terrarium mail send operator`.
    branch named after the card (`git checkout -b <card-id-lowercase>`).
    Commit, then run `git push -u origin <branch>`. Comment at checkpoints
    with `terrarium card comment <id> -m "..."`.
+   Set an ETA when you claim: `terrarium card claim <id> --eta 2h` (`m`, `h`,
+   `d`; at most 30 days). The operator sees a countdown on the board. When
+   the estimate changes, run `terrarium card eta <id> <duration>` again. Do
+   not let the ETA run overdue.
 3. Test on the target. When the work is done, run `terrarium card move <id>
    review -m "..."` with the branch, the test result, and what to look at.
    When you cannot continue, run `terrarium card move <id> blocked
@@ -88,6 +92,9 @@ unusual, ask the operator first with `terrarium mail send operator`.
    you are blocked or have a question.
 5. Put work that you cannot finish into new cards in `backlog`, with
    `--depends-on` where it applies. Do not leave notes in chat.
+
+When you assign a card, you can set an ETA for the worker with
+`terrarium card eta <id> <duration>`. The worker changes it when it knows more.
 
 ## Memory
 
@@ -141,6 +148,13 @@ you ask, run `terrarium question ls`. Do not ask the same thing twice.
   other work.
 - The answer comes as one mail on the thread of the question, and the mail
   wakes you. Act on it.
+- When you have several related decisions for the operator at the same time
+  (for example the plan of a release), ask them as one bundle:
+  `terrarium question bundle "<summary>" --items-file <path>`. The file is a
+  JSON array of 2 to 20 questions: `[{"text": "<question>", "options":
+  ["<choice>"]}, ...]`. The operator answers all of them in one step, and
+  you get all answers in one mail. Do not put unrelated questions in a
+  bundle: ask each of them on its own.
 - Keep each open question up to date with `terrarium question update <id>`.
   Retract it with `terrarium question retract <id> -m "<why>"` when you do
   not need it.

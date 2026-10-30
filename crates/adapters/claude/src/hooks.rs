@@ -135,7 +135,9 @@ pub fn hook_events(hook: &HookPayload) -> Vec<Event> {
         }],
         "Stop" => vec![Event::TurnEnd],
         "StopFailure" => vec![
-            Event::System {
+            // A usage limit or a rate limit stops the agent
+            // (`crate::limit`); another error is a notice.
+            crate::limit::usage_limit(b, chrono::Utc::now()).unwrap_or_else(|| Event::System {
                 message: format!(
                     "claude: the turn ended with an error{}",
                     s(b, "error")
@@ -143,7 +145,7 @@ pub fn hook_events(hook: &HookPayload) -> Vec<Event> {
                         .map(|e| format!(": {e}"))
                         .unwrap_or_default()
                 ),
-            },
+            }),
             Event::TurnEnd,
         ],
         "PreToolUse" => {
@@ -365,6 +367,15 @@ mod tests {
         assert!(matches!(
             &hook_events(&hook("StopFailure", json!({"error": "overloaded"})))[..],
             [Event::System { .. }, Event::TurnEnd]
+        ));
+        // A usage limit ends the turn too.
+        assert!(matches!(
+            &hook_events(&hook(
+                "StopFailure",
+                json!({"error": "rate_limit", "last_assistant_message": "You've hit your limit"})
+            ))[..],
+            [Event::UsageLimit { message, resets_at: None }, Event::TurnEnd]
+                if message == "You've hit your limit"
         ));
         assert!(hook_events(&hook("MessageDisplay", json!({}))).is_empty());
         assert!(hook_events(&hook("SessionStart", json!({}))).is_empty());

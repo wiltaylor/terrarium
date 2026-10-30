@@ -1,6 +1,6 @@
 //! Move an agent to another plan account (PLAN §16.3): the operator's
-//! `POST /api/agents/{id}/subscription` and the auto-swap of the quota
-//! policy.
+//! `POST /api/agents/{id}/subscription` and the auto-swap after a
+//! usage-limit error (`crate::usage_limit`).
 //!
 //! The rules:
 //!
@@ -15,10 +15,9 @@
 //!   agent moves between API keys by a restart with resume.
 //! - The store then names the new subscription, an `agent.swap` audit row
 //!   records the old and the new one and how it applied, and an
-//!   `agent.swapped` event goes out. The quota hold of the old
+//!   `agent.swapped` event goes out. The usage-limit hold of the old
 //!   subscription ends for the agent.
 
-use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::json;
 
@@ -148,8 +147,12 @@ pub async fn swap(
         })
         .await?;
     if let Some(f) = &from_name {
-        crate::quota_policy::release(state, &view.agent.id.to_string(), &format!("quota:{f}"))
-            .await?;
+        crate::quota_policy::release(
+            state,
+            &view.agent.id.to_string(),
+            &crate::usage_limit::cause(f),
+        )
+        .await?;
     }
     Ok(SwapOutcome {
         agent: view.agent.id.to_string(),
@@ -159,28 +162,17 @@ pub async fn swap(
     })
 }
 
-/// A window of a subscription at or past 100 percent, with a reset in the
-/// future (or no reset time).
-fn full(windows: &[subs::QuotaSample], now: DateTime<Utc>) -> bool {
-    windows.iter().any(|w| {
-        let reset = w
-            .resets_at
-            .as_deref()
-            .and_then(|r| DateTime::parse_from_rfc3339(r).ok())
-            .map(|r| r.with_timezone(&Utc));
-        w.used_pct >= 100.0 && reset.is_none_or(|r| r > now)
-    })
-}
-
-/// The pool member that an agent on the full subscription `current` moves
-/// to: the next member after `current` in pool order (then from the
-/// start) that is not full, is not expired or missing, and has a login of
-/// the harness (or a stored key). `None`: every member is full.
+/// The pool member that an agent on the subscription `current` moves to
+/// after a usage-limit error: the next member after `current` in pool
+/// order (then from the start) that did not hit a limit (`limited` is
+/// false), is not expired or missing, and has a login of the harness (or a
+/// stored key). `None`: no member is left. A probe window does not count:
+/// a probe can show 100 percent while the plan still serves turns.
 pub fn pick(
     state_dir: &std::path::Path,
     view: &AgentView,
-    members: &[(Subscription, Vec<subs::QuotaSample>)],
-    now: DateTime<Utc>,
+    members: &[Subscription],
+    limited: impl Fn(&str) -> bool,
 ) -> Option<String> {
     let a = &view.agent;
     let current = a.subscription.as_deref()?;
@@ -191,7 +183,7 @@ pub fn pick(
         if name == current {
             continue;
         }
-        let Some((s, windows)) = members.iter().find(|(s, _)| &s.name == name) else {
+        let Some(s) = members.iter().find(|s| &s.name == name) else {
             continue;
         };
         let usable = matches!(
@@ -200,74 +192,57 @@ pub fn pick(
         );
         let login =
             crate::accounts::has_credential(state_dir, name, a.harness) || s.env_var.is_some();
-        if usable && login && s.harnesses.contains(&a.harness) && !full(windows, now) {
+        if usable && login && s.harnesses.contains(&a.harness) && !limited(name) {
             return Some(name.clone());
         }
     }
     None
 }
 
-/// The auto-swap of the quota policy for the agents on the full
-/// subscription `sub` (PLAN §16.3). Each agent with a pool moves to the
-/// next member that is not full. Returns the agents that stay (no pool,
-/// auto-swap off, or every member full): the hold applies to them.
+/// The auto-swap after a usage-limit error (PLAN §16.3): move the agent
+/// of `view` to the next member of its pool ([`pick`]). `None`: the
+/// agent stays, because it has no pool, the auto-swap is off
+/// (`TERRARIUM_AUTO_SWAP=off`), no member is left, or the swap failed.
 pub async fn auto_swap(
     state: &Shared,
-    sub: &str,
-    on: Vec<(String, String, String)>,
-) -> ApiResult<Vec<(String, String, String)>> {
-    if !state.usage.config.auto_swap {
-        return Ok(on);
+    view: AgentView,
+    reason: String,
+    limited: impl Fn(&str) -> bool,
+) -> ApiResult<Option<SwapOutcome>> {
+    if !state.usage.config.auto_swap || view.agent.subscription_pool.len() < 2 {
+        return Ok(None);
     }
-    let mut stay = Vec::new();
-    let now = Utc::now();
-    for (id, name, project) in on {
-        let key = id.clone();
-        let view = match state.db.read(move |c| agents::get(c, &key)).await {
-            Ok(v) => v,
-            Err(_) => {
-                stay.push((id, name, project));
-                continue;
+    let pool = view.agent.subscription_pool.clone();
+    let members = state
+        .db
+        .read(move |c| {
+            let mut out = Vec::new();
+            for n in &pool {
+                out.extend(subs::find(c, n)?);
             }
-        };
-        if view.agent.subscription_pool.len() < 2 {
-            stay.push((id, name, project));
-            continue;
-        }
-        let pool = view.agent.subscription_pool.clone();
-        let members = state
-            .db
-            .read(move |c| {
-                let mut out = Vec::new();
-                for n in &pool {
-                    if let Some(s) = subs::find(c, n)? {
-                        let w = subs::latest_windows(c, n)?;
-                        out.push((s, w));
-                    }
-                }
-                Ok(out)
-            })
-            .await?;
-        let Some(to) = pick(&state.state_dir, &view, &members, now) else {
-            stay.push((id, name, project));
-            continue;
-        };
-        let reason = format!("subscription `{sub}` is at its limit");
-        match swap(state, "system".into(), view, &to, Some(reason)).await {
-            Ok(o) => tracing::info!(
+            Ok(out)
+        })
+        .await?;
+    let Some(to) = pick(&state.state_dir, &view, &members, limited) else {
+        return Ok(None);
+    };
+    let (name, from) = (view.agent.name.clone(), view.agent.subscription.clone());
+    match swap(state, "system".into(), view, &to, Some(reason)).await {
+        Ok(o) => {
+            tracing::info!(
                 agent = %name,
-                from = sub,
+                from = from.as_deref().unwrap_or("none"),
                 to = %o.to,
                 applied = o.applied.as_str(),
                 "auto-swap: the agent moved to another account of its pool"
-            ),
-            Err(e) => {
-                tracing::warn!(agent = %name, "auto-swap failed: {}", e.message);
-                stay.push((id, name, project));
-            }
+            );
+            Ok(Some(o))
+        }
+        Err(e) => {
+            tracing::warn!(agent = %name, "auto-swap failed: {}", e.message);
+            Ok(None)
         }
     }
-    Ok(stay)
 }
 
 #[cfg(test)]
@@ -285,14 +260,6 @@ mod tests {
         .unwrap()
     }
 
-    fn sample(pct: f64, resets: Option<String>) -> subs::QuotaSample {
-        serde_json::from_value(json!({
-            "id": 1, "subscription": "x", "window": "5h", "used_pct": pct,
-            "resets_at": resets, "raw": {}, "at": ""
-        }))
-        .unwrap()
-    }
-
     fn view(current: &str, pool: &[&str]) -> AgentView {
         let mut v: AgentView = serde_json::from_value(json!({
             "id": "01K8AGENT0000000000000000A", "name": "a1", "project": "p", "harness": "claude",
@@ -304,8 +271,9 @@ mod tests {
         v
     }
 
-    /// The auto-swap picks the next pool member that has a login and room,
-    /// in pool order after the current one; none when all are full.
+    /// The auto-swap picks the next pool member that has a login and did
+    /// not hit a limit, in pool order after the current one; none when no
+    /// member is left.
     #[test]
     fn pick_takes_the_next_member_with_room() {
         let tmp = tempfile::tempdir().unwrap();
@@ -313,31 +281,27 @@ mod tests {
         for s in ["a", "b", "c"] {
             crate::accounts::write_credential(state, s, HarnessId::Claude, b"{}").unwrap();
         }
-        let now = Utc::now();
-        let later = Some((now + chrono::Duration::hours(1)).to_rfc3339());
-        let past = Some((now - chrono::Duration::hours(1)).to_rfc3339());
         let members = vec![
-            (sub("a", "logged_in"), vec![sample(100.0, later.clone())]),
-            (sub("b", "logged_in"), vec![sample(100.0, later.clone())]),
-            (sub("c", "logged_in"), vec![sample(40.0, later.clone())]),
-            (sub("d", "logged_in"), vec![]),
+            sub("a", "logged_in"),
+            sub("b", "logged_in"),
+            sub("c", "logged_in"),
+            sub("d", "logged_in"),
         ];
         let v = view("a", &["a", "b", "c", "d"]);
-        assert_eq!(pick(state, &v, &members, now).as_deref(), Some("c"));
-        // From `c`: `d` has no login, so `a` (its window reset passed).
-        let mut m2 = members.clone();
-        m2[0].1 = vec![sample(100.0, past)];
+        assert_eq!(
+            pick(state, &v, &members, |n| n == "b").as_deref(),
+            Some("c")
+        );
+        // From `c`: `d` has no login, so `a`.
         let v = view("c", &["a", "b", "c", "d"]);
-        assert_eq!(pick(state, &v, &m2, now).as_deref(), Some("a"));
-        // Every member full: no swap, the hold applies.
-        let mut m3 = members.clone();
-        m3[2].1 = vec![sample(100.0, later)];
+        assert_eq!(pick(state, &v, &members, |_| false).as_deref(), Some("a"));
+        // Every other member hit a limit: no swap, the hold applies.
         let v = view("a", &["a", "b", "c"]);
-        assert_eq!(pick(state, &v, &m3, now), None);
+        assert_eq!(pick(state, &v, &members, |n| n != "a"), None);
         // An expired member is skipped.
-        let mut m4 = members;
-        m4[2].0.login_status = "expired".into();
-        assert_eq!(pick(state, &v, &m4, now), None);
+        let mut m2 = members;
+        m2[1].login_status = "expired".into();
+        assert_eq!(pick(state, &v, &m2, |n| n == "c"), None);
     }
 
     #[test]

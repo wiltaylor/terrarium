@@ -29,6 +29,12 @@
 //!   `moonshotai-cn` (`pi-ai/dist/providers/`).
 //!
 //! The key goes in `Authorization: Bearer <key>`.
+//!
+//! Usage probes (`crates/terrariumd/src/probes/`): the Open Platform plans
+//! get `moonshot-balance` or `moonshot-cn-balance`. Both Kimi Code plans get
+//! `kimi-code-usage`, which reads `GET https://api.kimi.com/coding/v1/usages`
+//! (the host of the official `kimi-cli`). That host answered an overseas key
+//! (verified live 2026-10-30, `docs/compat.md`, "Kimi Code usage").
 
 use crate::HarnessId;
 

@@ -406,7 +406,19 @@ route redirects to it (`app/nav.ts` `MOVED_ROUTES`). An item has one of four
 kinds:
 
 - **question**: a leader agent asks for a decision (docs/api.md §6.8). The
-  card has the choice buttons, a free-text answer, and **Retract**.
+  card has the choice buttons, a free-text answer, and **Retract**. A
+  bundle of related questions (`question.kind: "bundle"`, item ID
+  `bundle:<id>`) is a question item too, and counts once. Its card
+  (`features/inbox/BundleCard.tsx`) shows the summary, the shared context,
+  and each item with its number, text, context, choice buttons, and a
+  free-text answer. A counter says "N of M answered", and **Submit all
+  answers** is on only when each item has an option or a text. The draft is
+  in the card and in sessionStorage for each bundle and revision
+  (`features/inbox/bundle.ts`), so a reload keeps it. The answer sends the
+  revision: when the agent changed the bundle, the daemon answers `409`, the
+  card reads the bundle again, keeps the answers of the items that did not
+  change, and names the items that did. After the answer, the card shows
+  each answer.
 - **notice**: a leader agent tells the operator something, with no choices.
   The card has **Acknowledge**, an optional reply, and **Retract**. An
   acknowledged notice shows the reply.
@@ -430,9 +442,9 @@ daemon sorts: urgent first, then the newest.
   urgent, else it has the info style (`features/inbox/model.ts` `badge`).
 - `inbox` events (`{item, kind, change, project?}`) and `question` events
   read the page, the badge, and the Home queue again.
-- The question text, the options, the mail subject and body, and the retract
-  reason are the sender's words: the page shows them as text nodes only. The
-  context of a question or a notice is Markdown: it goes through
+- The question text, the options, the bundle items, the mail subject and
+  body, and the retract reason are the sender's words: the page shows them as
+  text nodes only. The context of a question, a bundle item, or a notice is Markdown: it goes through
   `renderMarkdown` and the DOMPurify sink (`SafeHtml`) only.
 - The agent page shows the questions and notices of a leader
   (`features/inbox/QuestionsPanel.tsx`), each with its kind.
@@ -440,7 +452,8 @@ daemon sorts: urgent first, then the newest.
   badge) and `features/inbox/questions.ts` (answer and acknowledge bodies).
   The mock is in `api/mock/questions.ts` and `api/mock/inbox.ts`: two open
   questions (one urgent, with a hostile context), one answered, one retracted;
-  one open notice (with a hostile context) and one acknowledged notice; three
+  one open notice (with a hostile context) and one acknowledged notice; one
+  open bundle of three questions (one item with a hostile context); three
   open mails to the operator; and one paused thread with one held message.
   An answer sends one mail on the thread and resolves the `question` waits
   with no second mail, as the daemon does.
@@ -560,7 +573,7 @@ prefix or budget scope. The daemon also has `project`, `since`, `until`, and
 
 | Route | View | API calls |
 |---|---|---|
-| `/` | Home: usage strip, waiting-on-you queue; the tile detail has the usage split by project, agent, model, and card | `GET /api/subscriptions`, `GET /api/usage?bucket=hour&group=subscription`; tile detail: `GET /api/usage?subscription=&group=project\|agent\|model\|card`, `GET .../quota`; per project: `versions?status=in_review`, `wiki?status=ready_for_review`, `board`; Inbox items: `GET /api/inbox` (see "The Inbox") |
+| `/` | Home: usage strip, waiting-on-you queue, host cards (see "Home: hosts"); the tile detail has the usage split by project, agent, model, and card | `GET /api/subscriptions`, `GET /api/usage?bucket=hour&group=subscription`; tile detail: `GET /api/usage?subscription=&group=project\|agent\|model\|card`, `GET .../quota`; per project: `versions?status=in_review`, `wiki?status=ready_for_review`, `board`; Inbox items: `GET /api/inbox` (see "The Inbox"); hosts: `GET /api/hosts`, `GET /api/hosts/{name}/metrics?minutes=15` |
 | `/projects` | Projects: list, create. The Projects root of the sidebar tree links it | `GET`, `POST /api/projects` |
 | `/p/:project/settings` | Project edit and delete, Repos panel | `GET`, `PATCH`, `DELETE /api/projects/{name}?confirm=true`, `GET`, `POST .../repos`, `POST /api/repos/{id}/checkout` |
 | `/p/:project/agents` | Agents grid of the project, status filter, new agent (the form starts with the project of the route) | `GET`, `POST /api/agents`, events socket |
@@ -573,7 +586,7 @@ prefix or budget scope. The daemon also has `project`, `since`, `until`, and
 | `/p/:project/logs/mail` | Project logs, Mail tab: the mail log of one project; reply from the project inbox, make card | `GET /api/mail`, `POST .../inbox/{id}/reply`, `POST .../cards` (`from_mail`) |
 | `/p/:project/logs/events` | Project logs, Events tab: the event log of one project, with the kind and agent filters (the agents of the project only) | `GET /api/events?since=&kind=&project=&agent=`, events socket |
 | `/p/:project/inbox`, `/p/:project/mail`, `/p/:project/logs` | Gone: redirect to `/p/:project/logs/mail` (`app/nav.ts` `MOVED_ROUTES`). The redirect keeps the query. | none |
-| `/p/:project/board` | Board, drag and drop, card drawer | `GET .../board`, `PATCH /api/cards/{id}`, `POST .../comments`, `GET .../events`, `DELETE /api/cards/{id}` |
+| `/p/:project/board` | Board, drag and drop, ETA countdowns, card drawer (see "The board") | `GET .../board`, `PATCH /api/cards/{id}`, `POST .../comments`, `GET .../events`, `DELETE /api/cards/{id}` |
 | `/p/:project/memory` | Memory list, detail, graph | `GET .../memories`, `GET /api/memories/{project/MEM-n}/graph` |
 | `/p/:project/wiki/*path` | Page tree, render, edit, history, create | `GET .../wiki`, `GET`, `PUT /api/wiki/{project/path}`, `revisions`, `diff`, `restore`, `backlinks`, `review` |
 | `/p/:project/artifacts/:id?` | Artifact viewer, upload, delete | `GET .../artifacts`, `.../artifacts/usage`, `POST .../artifacts` (multipart), `POST /api/artifacts/{id}/url` |
@@ -598,6 +611,57 @@ browser builds a tar (`lib/tar.ts`) from the folder pick.
 
 The Targets and Hosts pages end with a footer that names the calls that are
 new or mock-only. A daemon without them answers "Not available yet".
+
+## Home: hosts
+
+`features/home/HostCards.tsx` shows one card for each host agent, online
+hosts first (docs/api.md §17.1). The model is `features/home/hosts.ts`.
+
+- The page polls every 10 seconds: `GET /api/hosts`, then
+  `GET /api/hosts/{name}/metrics?minutes=15` for each host with
+  `capabilities.metrics`. The daemon sends no event for a sample. While a
+  poll runs, the cards keep the last data.
+- Each card has CPU and memory (the share, 0 to 100) and network in and
+  out, disk read and write (bytes per second). Each metric shows its
+  current value as text and a line over the last 15 minutes. A rate line
+  scales to its peak (at least 1 KB/s); the text under it gives the peak.
+  A gap of more than 35 seconds breaks the line.
+- Point at a line, or focus it and use the arrow keys, to read the value
+  and the time of one sample. Escape goes back to the latest.
+- Disk space shows the 3 fullest filesystems; "N more" shows all. The bar
+  is amber from 80% and red from 90%, and the text says "filling" or
+  "almost full", so the level is not in the colour only.
+- States: `online`; `stale` (online, but no sample in 30 seconds: the
+  values are dim, with the time of the last sample); `offline` (the last
+  samples, dim, when the daemon has them). A host agent without the
+  `metrics` capability shows a note: install the new host agent on the
+  host (`just host::install`, or the one-line installer of Settings >
+  Hosts).
+- The host name links to Settings > Hosts (`/settings/hosts`).
+- The mock (`api/mock/hostMetrics.ts`) makes a sample every 10 seconds
+  from the time for `lab1` and `build1`; `nas` is an older host agent and
+  `pi-cluster` is offline.
+
+## The board
+
+`features/board/BoardPage.tsx` shows the columns, and the card drawer
+opens from `?card=<id>`. A `card` or `board` event of the project reloads
+the board after 300 ms.
+
+**ETAs.** A card with an `eta_at` (docs/api.md §8) shows a countdown chip
+below its title: "34m 05s left" under an hour, "1h 12m left" above, and
+"overdue 12m" in the danger colour. A thin bar under the chip shows the
+time used since `eta_set_at`; it is in the warn colour after 90%. The
+title and the aria-label give the absolute ETA and who set it. A done or
+archived card shows no countdown. The board has one clock (`now`) for all
+the chips: it ticks each second while a countdown is under an hour, each
+30 s otherwise, and stops when no card counts down (`lib/eta.ts`
+`tickInterval`). The card drawer shows the ETA, a duration input (`45m`,
+`2h30m`, `1d`) to set or change it, and **Clear ETA**. The input checks
+the value with the daemon's rule (`resolveEta`: in the future, at most 30
+days away) before it sends `PATCH /api/cards/{id}` with `eta_at`. A done
+card shows "done in X (estimated Y)" from `eta_set_at`, `eta_at`, and
+`done_at`.
 
 ## Security notes
 

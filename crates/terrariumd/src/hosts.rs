@@ -23,8 +23,11 @@
 //!   address logs a warning (security review F2).
 //! - An enrol token is swapped for a long-lived token after `hello`; the
 //!   new token goes in `welcome.token` (docs/host-protocol.md "Tokens").
+//! - `welcome.metrics` asks for `metrics` frames. The registry keeps the
+//!   last [`METRICS_HISTORY`] samples of each host in memory only: a
+//!   restart of the daemon loses them (docs/api.md §17.1).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -38,9 +41,10 @@ use axum::response::{IntoResponse, Response};
 use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
 use serde_json::{Value, json};
+pub use terrarium_host::protocol::METRICS_INTERVAL_SECS;
 use terrarium_host::protocol::{
-    DaemonFrame, DataFrame, ExitReason, Hello, HostCapabilities, HostFrame, PROTOCOL_VERSION,
-    ResumeAccept, SessionId, StreamTag, Welcome, decode_control, encode_control,
+    DaemonFrame, DataFrame, ExitReason, Hello, HostCapabilities, HostFrame, HostMetrics,
+    PROTOCOL_VERSION, ResumeAccept, SessionId, StreamTag, Welcome, decode_control, encode_control,
 };
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -69,6 +73,12 @@ const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 pub const DEFAULT_TLS_LISTEN: &str = "0.0.0.0:8082";
 /// The default dial-in address without TLS: loopback only.
 pub const DEFAULT_PLAIN_LISTEN: &str = "127.0.0.1:8082";
+/// The metrics samples kept for each host: 1 hour at one sample each
+/// [`METRICS_INTERVAL_SECS`].
+pub const METRICS_HISTORY: usize = 360;
+/// The latest metrics sample is stale when it is older than this, or when
+/// the host is offline.
+pub const METRICS_STALE: Duration = Duration::from_secs(30);
 
 /// What a session reports to its consumer.
 #[derive(Debug, Clone, PartialEq)]
@@ -182,6 +192,30 @@ struct Entry {
     info: Option<LiveInfo>,
     /// Counts links, so a grace timer knows if the host came back.
     generation: u64,
+    /// The last [`METRICS_HISTORY`] samples, oldest first. They stay when
+    /// the link drops.
+    metrics: VecDeque<MetricsSample>,
+}
+
+/// One `metrics` frame, with the time the daemon got it.
+#[derive(Debug, Clone, Serialize)]
+pub struct MetricsSample {
+    /// When the daemon got the sample (RFC 3339). The host's own clock
+    /// does not count.
+    pub at: String,
+    #[serde(skip)]
+    pub received: Instant,
+    #[serde(flatten)]
+    pub metrics: HostMetrics,
+}
+
+/// The metrics of one host for the API.
+#[derive(Debug, Clone, Serialize)]
+pub struct MetricsView {
+    /// No sample in the last [`METRICS_STALE`], or the host is offline.
+    pub stale: bool,
+    /// Oldest first.
+    pub samples: Vec<MetricsSample>,
 }
 
 /// What `GET /api/hosts` shows of a host's link.
@@ -256,6 +290,50 @@ impl HostRegistry {
         self.lock()
             .get(host)
             .and_then(|e| e.info.as_ref().and_then(|i| i.max_running_targets))
+    }
+
+    /// Keep a `metrics` sample that the daemon got at `received`.
+    pub fn record_metrics(&self, host: &str, metrics: HostMetrics, received: Instant) {
+        let mut g = self.lock();
+        let Some(e) = g.get_mut(host) else {
+            return;
+        };
+        while e.metrics.len() >= METRICS_HISTORY {
+            e.metrics.pop_front();
+        }
+        e.metrics.push_back(MetricsSample {
+            at: crate::db::now(),
+            received,
+            metrics,
+        });
+    }
+
+    /// The samples of a host from the last `window`, oldest first. `None`
+    /// when the host has no samples.
+    pub fn metrics(&self, host: &str, window: Duration) -> Option<MetricsView> {
+        let g = self.lock();
+        let e = g.get(host)?;
+        let last = e.metrics.back()?;
+        let now = Instant::now();
+        let stale =
+            e.conn.is_none() || now.saturating_duration_since(last.received) > METRICS_STALE;
+        let samples = e
+            .metrics
+            .iter()
+            .filter(|s| now.saturating_duration_since(s.received) <= window)
+            .cloned()
+            .collect();
+        Some(MetricsView { stale, samples })
+    }
+
+    /// The latest sample of a host, and whether it is stale.
+    pub fn latest_metrics(&self, host: &str) -> Option<(MetricsSample, bool)> {
+        let g = self.lock();
+        let e = g.get(host)?;
+        let last = e.metrics.back()?;
+        let stale = e.conn.is_none()
+            || Instant::now().saturating_duration_since(last.received) > METRICS_STALE;
+        Some((last.clone(), stale))
     }
 
     /// The capabilities of a host from its last `hello`.
@@ -367,6 +445,7 @@ impl HostRegistry {
                 resume_token: token,
                 resume,
                 token: None,
+                metrics: true,
             },
             old,
             n,
@@ -480,7 +559,10 @@ impl HostRegistry {
                 bytes,
                 sha256,
             } => (session, SessionEvent::CpDone { bytes, sha256 }),
-            HostFrame::Hello(_) | HostFrame::Ping { .. } | HostFrame::Pong { .. } => return,
+            HostFrame::Hello(_)
+            | HostFrame::Ping { .. }
+            | HostFrame::Pong { .. }
+            | HostFrame::Metrics(_) => return,
         };
         let mut g = self.lock();
         let Some(e) = g.get_mut(host) else { return };
@@ -1132,6 +1214,7 @@ async fn serve_link(
                         }
                         Ok(HostFrame::Pong { .. }) => {}
                         Ok(HostFrame::Hello(_)) => warn!(host = %row.name, "a second hello; ignored"),
+                        Ok(HostFrame::Metrics(m)) => reg.record_metrics(&row.name, *m, Instant::now()),
                         Ok(f) => reg.on_session_frame(&row.name, f),
                         Err(e) => warn!(host = %row.name, "bad control frame: {e}"),
                     },
@@ -1206,5 +1289,95 @@ async fn serve_link(
             tokio::time::sleep(grace).await;
             reg.expire(&host, generation);
         });
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    fn sample(cores: u32) -> HostMetrics {
+        HostMetrics {
+            interval_secs: 10.0,
+            cpu: Some(terrarium_host::protocol::CpuMetrics {
+                busy_pct: 5.0,
+                cores,
+                load1: 0.1,
+            }),
+            ..HostMetrics::default()
+        }
+    }
+
+    /// A registry with an entry for `host`, online or not.
+    fn registry(host: &str, online: bool) -> HostRegistry {
+        let reg = HostRegistry::default();
+        let conn = online.then(|| Conn {
+            id: 1,
+            tx: mpsc::unbounded_channel().0,
+        });
+        reg.lock().insert(
+            host.to_owned(),
+            Entry {
+                conn,
+                ..Entry::default()
+            },
+        );
+        reg
+    }
+
+    #[test]
+    fn the_history_keeps_the_last_hour() {
+        let reg = registry("lab1", true);
+        assert!(reg.latest_metrics("lab1").is_none());
+        assert!(reg.metrics("lab1", Duration::from_secs(3600)).is_none());
+        let now = Instant::now();
+        for i in 0..(METRICS_HISTORY as u32 + 5) {
+            let back = Duration::from_secs(10) * (METRICS_HISTORY as u32 + 4 - i);
+            reg.record_metrics("lab1", sample(i), now.checked_sub(back).unwrap_or(now));
+        }
+        let all = reg.metrics("lab1", Duration::from_secs(3600)).unwrap();
+        assert_eq!(all.samples.len(), METRICS_HISTORY);
+        // The 5 oldest went out; oldest first.
+        assert_eq!(all.samples[0].metrics.cpu.as_ref().unwrap().cores, 5);
+        let (last, stale) = reg.latest_metrics("lab1").unwrap();
+        assert_eq!(last.metrics.cpu.unwrap().cores, METRICS_HISTORY as u32 + 4);
+        assert!(!stale);
+        assert!(!all.stale);
+        // 15 minutes at 10 s: 91 samples (0 s to 900 s back). The window
+        // has 5 s more, because `metrics` reads the clock after `now`.
+        let recent = reg
+            .metrics("lab1", Duration::from_secs(15 * 60 + 5))
+            .unwrap();
+        assert_eq!(recent.samples.len(), 91);
+        // A sample for a host that never connected is dropped.
+        reg.record_metrics("nope", sample(1), now);
+        assert!(reg.latest_metrics("nope").is_none());
+    }
+
+    #[test]
+    fn old_or_offline_samples_are_stale() {
+        let reg = registry("lab1", true);
+        let old = Instant::now().checked_sub(METRICS_STALE + Duration::from_secs(1));
+        reg.record_metrics("lab1", sample(2), old.unwrap_or_else(Instant::now));
+        if old.is_some() {
+            assert!(reg.latest_metrics("lab1").unwrap().1);
+        }
+        let reg = registry("lab2", false);
+        reg.record_metrics("lab2", sample(2), Instant::now());
+        assert!(reg.latest_metrics("lab2").unwrap().1);
+        assert!(reg.metrics("lab2", Duration::from_secs(60)).unwrap().stale);
+    }
+
+    #[test]
+    fn a_sample_serializes_flat_with_its_time() {
+        let reg = registry("lab1", true);
+        reg.record_metrics("lab1", sample(8), Instant::now());
+        let (s, _) = reg.latest_metrics("lab1").unwrap();
+        let v = serde_json::to_value(&s).unwrap();
+        assert!(v["at"].is_string());
+        assert_eq!(v["cpu"]["cores"], 8);
+        assert!(v.get("received").is_none());
+        assert!(v.get("metrics").is_none());
     }
 }

@@ -12,6 +12,7 @@ import { shortQuestion } from "../inbox/questions";
 import { usageLabel } from "./labels";
 import { bucketStarts, cardProject, cardRows, tokenSeries, toPercent, totalsByKey } from "./usage";
 import { buildQueue, type ProjectSnapshot } from "./queue";
+import { HostCards } from "./HostCards";
 import { failedRecently, scheduleHref } from "../schedules/model";
 import { actionWords } from "../../lib/schedule";
 import type { Schedule } from "../../api/types";
@@ -248,6 +249,8 @@ export function Home() {
           </Show>
         </Show>
       </section>
+
+      <HostCards now={now()} />
 
       <Show when={subscriptions.byName(detail() ?? undefined)}>{(s) => <UsageDetail sub={s()} onClose={() => setDetail(null)} />}</Show>
     </>

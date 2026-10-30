@@ -430,6 +430,10 @@ unusual, ask the operator first.
    branch named after the card (`git checkout -b <card-id-lowercase>`).
    Commit and push the branch. Comment at checkpoints with
    `terrarium card comment <id> -m "..."`.
+   Set an ETA when you claim: `terrarium card claim <id> --eta 2h` (`m`, `h`,
+   `d`; at most 30 days). The operator sees a countdown on the board. When
+   the estimate changes, run `terrarium card eta <id> <duration>` again. Do
+   not let the ETA run overdue.
 3. Test on the target. When the work is done, run `terrarium card move <id>
    review -m "..."` with the branch, the test result, and what to look at.
    When you cannot continue, run `terrarium card move <id> blocked
@@ -552,7 +556,8 @@ mod tests {
         // 1020 (910 before): the section "Long runs and waits" (PLAN
         // §12d) after the snapshot line of the CLI list (docs/api.md §17.3).
         // 1030: mail comes as a tagged turn with its body (PLAN §8.5).
-        assert!(words < 1030, "{words} words");
+        // 1080: card ETAs on claim (PLAN §13).
+        assert!(words < 1080, "{words} words");
     }
 
     /// The prompt holds only stable facts, so a change of peer status, or of
@@ -740,7 +745,9 @@ mod tests {
                 "`terrarium question update <id>`",
                 "`terrarium question retract <id> -m \"<why>\"`",
                 "At the start of a session, after a compaction, or when you are not sure of\n  your state, run `terrarium question ls`.",
-                "`question ask | ls | show | update | retract`",
+                "`question ask | bundle | ls | show | update | retract`",
+                "`terrarium question bundle \"<summary>\" --items-file <path>`",
+                "Do not put unrelated questions in a\n  bundle",
                 "- `notify`: tell the operator something that needs no decision",
                 "run `terrarium notify \"<text>\"`",
                 "Do not mail\n  `operator` for these",

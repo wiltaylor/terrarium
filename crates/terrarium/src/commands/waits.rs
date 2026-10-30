@@ -179,6 +179,19 @@ fn print_wait(c: &Ctx, v: &Value) {
                 super::delimited(c, label, &text);
             }
         }
+        // A bundle: one line for each item, then the rest of the result.
+        let answers = r.as_object_mut().and_then(|o| o.remove("answers"));
+        for a in answers.as_ref().map(as_items).unwrap_or_default() {
+            let option = a["option"]
+                .as_str()
+                .map(|o| format!(" [option: {o}]"))
+                .unwrap_or_default();
+            c.line(format!(
+                "answer {}{option}: {}",
+                field(a, "item"),
+                field(a, "answer")
+            ));
+        }
         c.line(format!("result  {r}"));
     }
 }

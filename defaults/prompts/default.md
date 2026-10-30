@@ -86,6 +86,10 @@ unusual, ask the operator first.
    branch named after the card (`git checkout -b <card-id-lowercase>`).
    Commit and push the branch. Comment at checkpoints with
    `terrarium card comment <id> -m "..."`.
+   Set an ETA when you claim: `terrarium card claim <id> --eta 2h` (`m`, `h`,
+   `d`; at most 30 days). The operator sees a countdown on the board. When
+   the estimate changes, run `terrarium card eta <id> <duration>` again. Do
+   not let the ETA run overdue.
 3. Test on the target. When the work is done, run `terrarium card move <id>
    review -m "..."` with the branch, the test result, and what to look at.
    When you cannot continue, run `terrarium card move <id> blocked

@@ -19,6 +19,7 @@
 
 pub mod anthropic;
 pub mod github;
+pub mod kimi;
 pub mod moonshot;
 pub mod openai;
 pub mod openrouter;
@@ -68,6 +69,13 @@ pub enum ProbeError {
     Expired(String),
     #[error("HTTP {status} from {url}")]
     Status { status: u16, url: String },
+    /// A non-2xx answer, with what the operator must change.
+    #[error("HTTP {status} from {url}: {hint}")]
+    StatusHint {
+        status: u16,
+        url: String,
+        hint: String,
+    },
     #[error("request failed: {0}")]
     Http(String),
     #[error("unexpected answer: {0}")]
@@ -240,6 +248,7 @@ pub fn all() -> Vec<Arc<dyn QuotaProbe>> {
         Arc::new(openrouter::OpenRouterCredits),
         Arc::new(moonshot::GLOBAL),
         Arc::new(moonshot::CHINA),
+        Arc::new(kimi::KimiCodeUsage),
     ]
 }
 
@@ -413,7 +422,10 @@ pub async fn run_subscription(state: &Shared, name: &str) -> ApiResult<ProbeOutc
             let msg = e.to_string();
             warn!(subscription = %name, probe = %probe_name, "probe failed: {msg}");
             // The provider refused the credential: the login expired.
-            let refused = matches!(e, ProbeError::Status { status: 401, .. });
+            let refused = matches!(
+                e,
+                ProbeError::Status { status: 401, .. } | ProbeError::StatusHint { status: 401, .. }
+            );
             let n = name.clone();
             let m = msg.clone();
             state
@@ -607,6 +619,7 @@ pub(crate) mod tests {
             by_name("moonshot-cn-balance").unwrap().name(),
             moonshot::NAME_CN
         );
+        assert_eq!(by_name("kimi-code-usage").unwrap().name(), kimi::NAME);
         assert_eq!(
             by_name("openrouter-credits").unwrap().name(),
             openrouter::NAME

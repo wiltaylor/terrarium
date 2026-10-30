@@ -105,6 +105,21 @@ pub struct Card {
     pub created_at: String,
     pub updated_at: String,
     pub archived: bool,
+    /// When the work is expected to be done (RFC 3339, UTC). It stays
+    /// when the card moves to `done` or is archived.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eta_at: Option<String>,
+    /// When the ETA was set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eta_set_at: Option<String>,
+    /// The address that set the ETA: `operator` or an agent ULID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eta_set_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eta_set_by_name: Option<String>,
+    /// When the card last moved to `done`. A reopen clears it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub done_at: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -140,6 +155,10 @@ struct CardRow {
     created_at: String,
     updated_at: String,
     archived: bool,
+    eta_at: Option<String>,
+    eta_set_at: Option<String>,
+    eta_set_by: Option<String>,
+    done_at: Option<String>,
 }
 
 fn card_row(r: &Row<'_>) -> rusqlite::Result<CardRow> {
@@ -159,6 +178,10 @@ fn card_row(r: &Row<'_>) -> rusqlite::Result<CardRow> {
         created_at: r.get("created_at")?,
         updated_at: r.get("updated_at")?,
         archived: r.get::<_, i64>("archived")? != 0,
+        eta_at: r.get("eta_at")?,
+        eta_set_at: r.get("eta_set_at")?,
+        eta_set_by: r.get("eta_set_by")?,
+        done_at: r.get("done_at")?,
     })
 }
 
@@ -337,6 +360,11 @@ fn render(conn: &Connection, row: CardRow) -> ApiResult<Card> {
         .as_deref()
         .map(|a| name_of(conn, a))
         .transpose()?;
+    let eta_set_by_name = row
+        .eta_set_by
+        .as_deref()
+        .map(|a| name_of(conn, a))
+        .transpose()?;
     Ok(Card {
         depends_on: deps(conn, &row.id)?,
         blocked_by: unmet(conn, &row.id)?,
@@ -358,6 +386,11 @@ fn render(conn: &Connection, row: CardRow) -> ApiResult<Card> {
         created_at: row.created_at,
         updated_at: row.updated_at,
         archived: row.archived,
+        eta_at: row.eta_at,
+        eta_set_at: row.eta_set_at,
+        eta_set_by: row.eta_set_by,
+        eta_set_by_name,
+        done_at: row.done_at,
     })
 }
 
@@ -464,6 +497,10 @@ fn card_event(t: &mut Tx<'_>, card: &CardRow, change: &str, mut extra: Value) ->
             extra["from"].as_str().unwrap_or("?"),
             extra["to"].as_str().unwrap_or("?")
         ),
+        "eta" => match extra["eta_at"].as_str() {
+            Some(at) => format!("{} ETA {at} by {actor_name}", card.id),
+            None => format!("{} ETA cleared by {actor_name}", card.id),
+        },
         _ => format!("{} {change} by {actor_name}: {}", card.id, card.title),
     };
     if let Value::Object(map) = &mut extra {
@@ -778,9 +815,12 @@ fn apply_move(
          WHERE column_id = ?1 AND position >= ?2 AND id <> ?3",
         params![to.id, at, card.id],
     )?;
+    // `done_at` is when the card moved to `done`; another column clears it.
     t.execute(
-        "UPDATE cards SET column_id = ?2, position = ?3, updated_at = ?4 WHERE id = ?1",
-        params![card.id, to.id, at, now()],
+        "UPDATE cards SET column_id = ?2, position = ?3, updated_at = ?4,
+            done_at = CASE WHEN ?5 THEN done_at WHEN ?6 THEN ?4 ELSE NULL END
+         WHERE id = ?1",
+        params![card.id, to.id, at, now(), same, to.name == DONE],
     )?;
     if let Some(c) = comment {
         insert_comment(t, &card.id, &actor.address(), c)?;
@@ -979,6 +1019,9 @@ pub struct NewCard {
     /// Needed when `column` is `blocked`.
     #[serde(default)]
     pub comment: Option<String>,
+    /// The ETA: an RFC 3339 time or a duration from now (`2h30m`).
+    #[serde(default)]
+    pub eta_at: Option<String>,
 }
 
 fn set_deps(t: &mut Tx<'_>, card: &str, wanted: &[String]) -> ApiResult<()> {
@@ -1125,6 +1168,9 @@ pub fn create_card(
     if let Some(who) = &new.assignee {
         assign_card(t, actor, &id, Some(who))?;
     }
+    if let Some(eta) = new.eta_at.as_deref() {
+        set_eta(t, actor, &id, Some(eta))?;
+    }
     get_card(t, &id)
 }
 
@@ -1138,7 +1184,7 @@ where
 
 /// The body of `PATCH /api/cards/{id}`. Every field is optional. `column`
 /// moves the card, `assignee` assigns it (`null` unassigns), `comment` goes
-/// with the move or alone.
+/// with the move or alone, `eta_at` sets the ETA (`null` clears it).
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CardPatch {
@@ -1162,6 +1208,9 @@ pub struct CardPatch {
     pub assignee: Option<Option<String>>,
     #[serde(default)]
     pub comment: Option<String>,
+    /// An RFC 3339 time or a duration from now; `null` clears the ETA.
+    #[serde(default, deserialize_with = "double_option")]
+    pub eta_at: Option<Option<String>>,
 }
 
 pub fn update_card(t: &mut Tx<'_>, actor: &Actor, id: &str, p: CardPatch) -> ApiResult<Card> {
@@ -1234,6 +1283,65 @@ pub fn update_card(t: &mut Tx<'_>, actor: &Actor, id: &str, p: CardPatch) -> Api
     if !assign_first && let Some(who) = &p.assignee {
         assign_card(t, actor, &card.id, who.as_deref())?;
     }
+    // Last, so that an assignment in the same patch gives the right to it.
+    if let Some(eta) = &p.eta_at {
+        set_eta(t, actor, &card.id, eta.as_deref())?;
+    }
+    get_card(t, &card.id)
+}
+
+/// Set the ETA of a card, or clear it with `None` (PLAN §13). The value is
+/// an RFC 3339 time or a duration from now (`terrarium_core::eta`): in
+/// the future and at most 30 days away. The rights are those of an edit.
+/// A done card keeps its ETA and takes no new one; an admin can clear it.
+/// A change to the ETA of a card that is not the actor's is audited, as a
+/// reassignment is.
+pub fn set_eta(t: &mut Tx<'_>, actor: &Actor, id: &str, eta: Option<&str>) -> ApiResult<Card> {
+    let card = find_row(t, id)?;
+    policy::read_project(actor, &card.project)?;
+    not_archived(&card)?;
+    may_edit(actor, &card)?;
+    let at = match eta {
+        Some(v) => {
+            if card.column == DONE {
+                return Err(ApiError::conflict(format!(
+                    "{} is done; a done card takes no new ETA",
+                    card.id
+                )));
+            }
+            let at =
+                terrarium_core::eta::resolve(v, chrono::Utc::now()).map_err(ApiError::invalid)?;
+            Some(crate::time_param::stored(at))
+        }
+        None if card.eta_at.is_none() => return get_card(t, &card.id),
+        None => None,
+    };
+    let me = actor.address();
+    let stamp = now();
+    let (set_at, set_by) = match at {
+        Some(_) => (Some(stamp.as_str()), Some(me.as_str())),
+        None => (None, None),
+    };
+    t.execute(
+        "UPDATE cards SET eta_at = ?2, eta_set_at = ?3, eta_set_by = ?4, updated_at = ?5
+         WHERE id = ?1",
+        params![card.id, at, set_at, set_by, stamp],
+    )?;
+    if !owns(actor, &card) {
+        t.audit(
+            "card.eta",
+            &card.id,
+            Some(&card.project),
+            json!({"eta_at": at, "previous": card.eta_at}),
+        )?;
+    }
+    let row = find_row(t, &card.id)?;
+    card_event(
+        t,
+        &row,
+        "eta",
+        json!({"eta_at": at, "previous": card.eta_at}),
+    )?;
     get_card(t, &card.id)
 }
 

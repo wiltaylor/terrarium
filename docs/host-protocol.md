@@ -163,7 +163,8 @@ The host agent sends `hello` as its first frame:
     "vmlab": {"present": true, "version": "0.30.0-alpha"},
     "shell": "/bin/bash",
     "display": {"enabled": false, "tesseract": true,
-                "tools": ["xdotool", "import"], "drivers": ["vmlab", "docker"]}
+                "tools": ["xdotool", "import"], "drivers": ["vmlab", "docker"]},
+    "metrics": true
   },
   "max_sessions": 32,
   "max_running_targets": 4,
@@ -186,7 +187,9 @@ The host agent sends `hello` as its first frame:
   `drivers` lists the display backends this host agent can drive: `vmlab`
   and `docker` when the tool is there, `desktop` when the opt-in is on,
   and always `vnc` and `rdp` (the clients are in the host agent). An older
-  host agent sends no `display`: the daemon reads it as off.
+  host agent sends no `display`: the daemon reads it as off. `metrics` is
+  true when the host agent can send [`metrics`](#metrics) frames (Linux,
+  with `/proc`). An older host agent sends no `metrics`: false.
 - `max_running_targets` is the `max_running_targets` of the config. The
   daemon counts the docker and vmlab targets (and lab instances) on this
   host that it shows as `running`, and refuses an `up` past the limit. An
@@ -206,7 +209,8 @@ sends `welcome`:
   "host_id": "01JB...",
   "heartbeat_secs": 15,
   "resume_token": "r-01JC...",
-  "resume": [{"session": 7, "received": 17000}]
+  "resume": [{"session": 7, "received": 17000}],
+  "metrics": true
 }
 ```
 
@@ -219,6 +223,9 @@ sends `welcome`:
   (see [Tokens](#tokens)). It is the new long-lived host token. The host
   agent writes it to `token_file` (mode 0600, through a temporary file and a
   rename) and uses it for every later dial.
+- `metrics: true` asks for [`metrics`](#metrics) frames. An older daemon
+  does not send it. Then the host agent sends no `metrics` frames, because
+  the older daemon does not know the frame.
 
 The host agent waits 15 seconds for `welcome`. If it gets no `welcome`, it
 closes the connection and retries.
@@ -722,6 +729,61 @@ the password.
 from the host agent to `address` (`host:port`), for the `status` of a
 `vnc` or `rdp` target. The `result` is `{"address", "reachable",
 "elapsed_ms", "error"?}`, then `exit` 0. A bad address is `bad_request`.
+
+## `metrics`
+
+A host agent with the `metrics` capability sends one `metrics` frame every
+10 seconds (`METRICS_INTERVAL_SECS`), after a `welcome` with
+`"metrics": true`. The frame is about no session: it has no `session`, no
+replay, and no `ack`. The code is `crates/terrarium-host/src/metrics.rs`.
+
+```json
+{"type": "metrics", "interval_secs": 10.0,
+ "cpu": {"busy_pct": 12.4, "cores": 16, "load1": 1.32},
+ "memory": {"total_bytes": 100923486208, "used_bytes": 24047804416, "used_pct": 23.8,
+            "swap_total_bytes": 100923338752, "swap_used_bytes": 9918578688},
+ "net": {"rx_bytes_per_sec": 18234.5, "tx_bytes_per_sec": 4021.0},
+ "disk_io": {"read_bytes_per_sec": 0.0, "write_bytes_per_sec": 1294336.0},
+ "filesystems": [{"mount": "/", "fstype": "btrfs", "device": "/dev/mapper/luks-97cd...",
+                  "total_bytes": 1998694907904, "used_bytes": 1201450532864,
+                  "avail_bytes": 795540078592, "used_pct": 60.2}]}
+```
+
+- The host agent takes the first counters when the link comes up. Each
+  frame then gives the mean over the `interval_secs` since the last frame.
+- `cpu.busy_pct` is the busy share of all cores together (0 to 100), from
+  the `cpu` line of `/proc/stat`: idle is `idle + iowait`. `cores` counts
+  the `cpuN` lines. `load1` is the first number of `/proc/loadavg`.
+- `memory` is from `/proc/meminfo`: used is `MemTotal - MemAvailable`.
+  Swap used is `SwapTotal - SwapFree`.
+- `net` is the sum over the physical interfaces of `/proc/net/dev`. The
+  host agent skips `lo` and the interfaces whose name starts with `veth`,
+  `docker`, `br-`, `virbr`, `tap`, `tun`, `vnet`, `cni`, `flannel`,
+  `cali`, `wg`, `tailscale`, `vxlan`, `podman`, or `lxc`. So the traffic of
+  a container or a VPN counts one time, on the physical interface.
+- `disk_io` is the sum over the whole disks in `/sys/block` (a partition
+  is not there; without `/sys/block`, a name rule finds the partitions).
+  The host agent skips the disks whose name starts with `loop`, `ram`,
+  `zram`, `dm-`, `md`, `sr`, `fd`, or `nbd`: their IO also shows on the
+  physical disks under them. A `/proc/diskstats` sector is 512 bytes.
+- `filesystems` lists the real filesystems of `/proc/mounts`, with
+  `statvfs`. A mount counts when its source is a block device (`/dev/...`,
+  not `/dev/loop*`) or a ZFS dataset, its type is not `tmpfs`, `devtmpfs`,
+  `ramfs`, `overlay`, `squashfs`, `iso9660`, `udf`, `proc`, `sysfs`,
+  `cgroup`, `cgroup2`, `nsfs`, `autofs`, or `fuse.*`, and its mount point
+  is not under `/proc`, `/sys`, `/dev`, `/run`, `/snap`, `/var/lib/docker`,
+  `/var/lib/containers`, or `/var/lib/kubelet`. Network filesystems (NFS,
+  SMB, rclone) have no `/dev` source, so they are out: a `statvfs` on a
+  hung network mount can block. Each device shows one time, at its
+  shortest mount point (a btrfs volume with many subvolumes is one
+  entry). At most 32 entries. `used_pct` is `used / (used + avail)`, as
+  `df` shows it: the blocks reserved for root do not count as free.
+- A part that the host agent cannot read is absent. `filesystems` is then
+  `[]`.
+- The frames go on a queue of one. The writer sends them only when no
+  other frame waits, so a sample never delays a session. When a sample
+  finds the queue full, the host agent drops it. A slow `statvfs` holds
+  back only the next sample.
 
 ## Workspaces
 

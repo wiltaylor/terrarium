@@ -321,12 +321,18 @@ export function seed(now: number = Date.now()): MockWorld {
 
   const cards: Card[] = [
     card("TER-10", "terrarium", "done", "Scaffold the Cargo workspace", { assigneeName: "lead", labels: ["infra"] }),
-    card("TER-11", "terrarium", "done", "Dockerfile with pinned harnesses", { assigneeName: "lead", labels: ["infra", "docker"] }),
+    // ETAs (docs/api.md §8): done in 1h 30m of an estimated 2h.
+    card("TER-11", "terrarium", "done", "Dockerfile with pinned harnesses", { assigneeName: "lead", labels: ["infra", "docker"], eta_at: ago(60), eta_set_at: ago(180), eta_set_by: byName("lead").id, eta_set_by_name: "terrarium/lead", done_at: ago(90) }),
     card("TER-12", "terrarium", "in_progress", "PTY resize follows the browser", {
       assigneeName: "runner-dev",
       labels: ["runner"],
       branch: "runner-dev/pty-resize",
       repo: "terrarium",
+      // Minutes left: the chip counts each second.
+      eta_at: ahead(35),
+      eta_set_at: ago(40),
+      eta_set_by: byName("runner-dev").id,
+      eta_set_by_name: "terrarium/runner-dev",
       comments: [comment("runner-dev", "Claimed. Branch `runner-dev/pty-resize`.", 40), comment("runner-dev", "SIGWINCH reaches the child. Writing a test with the fake TUI.", 12)],
       links: [{ kind: "branch", ref: "runner-dev/pty-resize", created_by: byName("runner-dev").id, created_at: ago(40) }],
     }),
@@ -336,12 +342,17 @@ export function seed(now: number = Date.now()): MockWorld {
       assigneeName: "adapter-codex",
       labels: ["adapter", "codex"],
       comments: [comment("adapter-codex", "Blocked: `codex login status` fails in the image. Needs an operator login.", 11)],
+      // Overdue.
+      eta_at: ago(12),
+      eta_set_at: ago(120),
+      eta_set_by: byName("adapter-codex").id,
+      eta_set_by_name: "terrarium/adapter-codex",
     }),
-    card("TER-16", "terrarium", "review", "Mailbox push path", { assigneeName: "lead", labels: ["mail"], branch: "lead/mail-push" }),
+    card("TER-16", "terrarium", "review", "Mailbox push path", { assigneeName: "lead", labels: ["mail"], branch: "lead/mail-push", eta_at: ahead(60 * 3 + 20), eta_set_at: ago(60), eta_set_by: "operator", eta_set_by_name: "operator" }),
     card("TER-17", "terrarium", "backlog", "Memory graph FTS5 index", { labels: ["memory"] }),
     card("TER-18", "terrarium", "backlog", "Artifact origin with signed URLs", { labels: ["artifacts", "security"] }),
     card("WEB-1", "webshop", "done", "Product listing page", { assigneeName: "shop-lead" }),
-    card("WEB-4", "webshop", "in_progress", "Checkout flow", { assigneeName: "shop-lead", labels: ["checkout"] }),
+    card("WEB-4", "webshop", "in_progress", "Checkout flow", { assigneeName: "shop-lead", labels: ["checkout"], eta_at: ahead(72), eta_set_at: ago(8), eta_set_by: byName("shop-lead").id, eta_set_by_name: "webshop/shop-lead" }),
     card("WEB-5", "webshop", "blocked", "Dark mode stylesheet", {
       assigneeName: "css-worker",
       comments: [comment("css-worker", "Blocked: the harness crashed twice on the same prompt.", 26)],
@@ -813,8 +824,19 @@ ${XSS_DOCUMENT}
       capabilities: {
         docker: { present: true, version: "29.8.0" }, vmlab: { present: true, version: "0.30.0-alpha" }, shell: "/bin/bash",
         display: { enabled: false, tesseract: true, tools: ["xdotool", "import"], drivers: ["vmlab", "docker"] },
+        metrics: true,
       },
       summary: { os: "linux", arch: "x86_64", docker: true, vmlab: true, display: false },
+    },
+    {
+      name: "build1", id: fakeUlid("host", 3), host_id: fakeUlid("host", 3), status: "online", online: true, sessions: 0, max_sessions: 32, max_running_targets: 2, connected_at: ago(60 * 26), os: "linux", arch: "x86_64", version: "0.1.0", last_seen: ago(0.1),
+      capabilities: { docker: { present: true, version: "29.8.0" }, vmlab: { present: false }, shell: "/bin/bash", metrics: true },
+      summary: { os: "linux", arch: "x86_64", docker: true, vmlab: false, display: false },
+    },
+    {
+      name: "nas", id: fakeUlid("host", 4), host_id: fakeUlid("host", 4), status: "online", online: true, sessions: 0, max_sessions: 32, connected_at: ago(60 * 50), os: "linux", arch: "aarch64", version: "0.0.9", last_seen: ago(0.2),
+      capabilities: { docker: { present: false }, vmlab: { present: false }, shell: "/bin/sh" },
+      summary: { os: "linux", arch: "aarch64", docker: false, vmlab: false, display: false },
     },
     {
       name: "pi-cluster", id: fakeUlid("host", 2), host_id: fakeUlid("host", 2), status: "offline", online: false, sessions: 0, os: "linux", arch: "aarch64", version: "0.0.9", last_seen: ago(60 * 7),

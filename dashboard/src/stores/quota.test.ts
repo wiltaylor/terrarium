@@ -39,6 +39,7 @@ describe("quota holds", () => {
   it("seeds holds from /api/usage/me and describes causes", () => {
     const s = withHolds(emptyQuota(), "A1", [{ agent: "A1", cause: "quota:max", until: LATER, reason: "r", enforced: true }], "lead");
     expect(holdsFor(s, "A1", NOW)[0]).toMatchObject({ agent: "lead", enforced: true });
+    expect(describeCause("limit:max")).toBe("a usage-limit error on max");
     expect(describeCause("quota:max")).toBe("subscription max");
     expect(describeCause("budget:project:web/max")).toBe("the daily budget of web/max");
   });

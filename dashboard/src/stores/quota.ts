@@ -1,7 +1,8 @@
 // Quota holds from the event stream (docs/api.md §16.6, §16.7).
 //
-// `quota.blocked` holds an agent's new turns until a reset; the agent
-// badges show it. `quota.resumed` ends a hold. A `quota.alert` raises no
+// `quota.blocked` holds an agent's new turns: after a usage-limit error of
+// the provider (cause `limit:<subscription>`), or a spent daily budget.
+// The agent badges show it. `quota.resumed` ends a hold. A `quota.alert` raises no
 // banner: the operator gets one mail in the Inbox for each line
 // (`alert_at`, 90, used up). The logic is pure (`applyQuotaEvent`,
 // `holdsFor`); the store only feeds it events.
@@ -32,6 +33,7 @@ const str = (v: unknown): string | undefined => (typeof v === "string" && v ? v 
 
 /** `quota:<name>` for a plan; `budget:project:<p>[/<sub>]` for a budget. */
 export function describeCause(cause: string): string {
+  if (cause.startsWith("limit:")) return `a usage-limit error on ${cause.slice(6)}`;
   if (cause.startsWith("quota:")) return `subscription ${cause.slice(6)}`;
   if (cause.startsWith("budget:project:")) return `the daily budget of ${cause.slice(15)}`;
   if (cause.startsWith("budget:")) return `the daily budget of ${cause.slice(7)}`;

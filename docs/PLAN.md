@@ -1528,6 +1528,37 @@ lists the open notices and the acknowledgements since the last turn. The
 lead templates and the leader persona say: `notify` for news, `question
 ask` for a decision, and no mail to `operator` for either.
 
+**Bundles.** Asked for on 2026-10-30: a leader often has several related
+decisions for the operator at the same time (the plan of a release, the
+setup of a new project). The operator must answer them together, in one
+step. A bundle (`kind = bundle`) is a question with a summary (`text`),
+optional shared context, a priority, an optional card, and 2 to 20 items.
+Each item has a text (at most 2000 characters), optional options (the
+rules of a question), and an optional context (at most 4 KiB). A bundle
+has no options of its own; a question and a notice have no items. Only
+leaders ask bundles, with the rights of a question, and the open bundles
+share the limit of 50 open items of the agent.
+
+- `terrarium question bundle "<summary>" --items-file <path|->` (JSON) or
+  `--item "<text>"` repeated (items with no options) asks one.
+- The answer is all or nothing: one entry for each item, each with a text,
+  an option, or both. A partial answer is `422`, the message names the
+  items with no answer, and nothing changes. A full answer is one write:
+  one status change to `answered`, one `answered` event, and one mail with
+  all answers, item by item. The mail is the wake mail of the `question`
+  waits on the bundle; their result holds all answers.
+- An update can replace the items while the bundle is open, and adds 1 to
+  the revision. An answer can give the revision that the operator saw; an
+  answer for an older revision is `409`. The dashboard sends it, so an
+  operator who answered the old items sees the conflict.
+- A retract ends the whole bundle. A bundle has no acknowledgement.
+- In the Inbox, a bundle is one item of the kind `question` (ID
+  `bundle:<id>`). It counts once in the badge, and a critical bundle
+  shows the banner as a critical question does.
+- The lead templates and the leader persona teach a bundle only for
+  related decisions that the operator makes at the same time. An
+  unrelated question goes on its own.
+
 **The Inbox.** Everything that needs the operator goes to one Inbox, so
 nothing is lost (`docs/api.md` §6.9). It is a read model over the stores,
 not a table, and it copies no mail body:
@@ -1548,7 +1579,13 @@ then urgent items, then the newest. A question card shows the agent, the project
 the text (as plain text), the context (Markdown through the DOMPurify sink
 only), the choice buttons, a free-text answer, and Retract. A notice card
 shows the text, the context through the same sink, Acknowledge, and an
-optional reply. A mail card shows the sender, the subject, and the body
+optional reply. A bundle card shows the summary, the shared context, and
+each item with its number, text, context, choice buttons, and a free-text
+answer. The counter says "N of M answered", and "Submit all answers" is on
+only when each item has an answer. The draft stays in the card and in the
+session storage for each bundle and revision, so a reload does not lose
+it. A new revision keeps the answers of the items that did not change and
+says which items changed. After the answer, the card shows each answer. A mail card shows the sender, the subject, and the body
 as data, with Acknowledge and an optional reply. A mail from `system` with
 an `Open: <url>` line also has a button to that dashboard page (a quota
 mail opens Subscriptions). A system card shows the
@@ -1563,7 +1600,10 @@ of a leader. The `question` and `inbox` events keep all of them live.
 `waits` again with `question` in its CHECK. Migration 30: `questions.kind`
 and the status `acknowledged`; `messages.released_at` and `released_by`;
 the table `thread_resumes` for a resume with no mail. Migration 32: the
-priority `critical` in the CHECK of `questions.priority`.
+priority `critical` in the CHECK of `questions.priority`. Migration 39:
+the kind `bundle` in the CHECK of `questions.kind`, and the column
+`questions.items` (a JSON array of the items with their answers; NULL for
+a question and a notice).
 
 **Critical items.** Asked for on 2026-10-28. A leader uses
 `--critical` (`priority: "critical"`) only when the operator must act
@@ -1653,6 +1693,21 @@ and a "removed" chip for a deleted agent. The link opens a read-only
 session page (`/sessions/<id>`). The links work after `agent rm`: the
 session rows stay, and the transcript comes from the session archive
 (§18, api.md §6.6).
+
+ETA: a card can tell how long its work will take (`cards.eta_at`, with
+`eta_set_at` and `eta_set_by`; migration 40). The assignee sets it when it
+claims or starts the card (`terrarium card eta <id> 2h30m`, or `--eta` on
+`card claim`, `card new`, and `card move`) and updates it when the estimate
+changes. The operator can set or clear it from the dashboard. The value is
+a duration from now or an RFC 3339 time, in the future and at most 30 days
+away. The rights are those of an edit; a change to another's card is
+audited (`card.eta`). Each change is a `card` event with `change: eta`, so
+the board updates live; it types no pointer. A move to `done` keeps the
+ETA and sets `cards.done_at`, so the card shows "done in X (estimated Y)".
+The board shows a countdown chip on each card with an ETA that is not done
+or archived: "1h 12m left", or "overdue 12m" in the danger colour, with a
+thin bar of the time used. One shared timer ticks each second while a
+countdown is under an hour, and each 30 s otherwise (api.md §8.2).
 
 ---
 
@@ -1952,16 +2007,36 @@ Policy hooks:
   up). When a window goes up past a line, the daemon sends one mail to the
   operator. The mail is an item of the Inbox (§12e). Each line sends one
   mail in a window period, also after a daemon restart. The dashboard
-  shows no quota banner. At 100 percent the daemon pauses new turns on
-  agents on that subscription, marks them `blocked` with the reset time,
-  and resumes them after the reset. The used-up mail names the held
-  agents. An agent card shows a `quota hold` badge. An agent with an account pool moves to the next account
-  of its pool that is not full, before the hold (auto-swap, §16.3). An
-  operator, a project admin, or a sysadmin agent can also move an agent with
-  `terrarium admin agent swap <agent> <subscription>`.
+  shows no quota banner. The mails give information only: a window at
+  100 percent holds no turn and swaps no account, because a probe can show
+  100 percent while the plan still serves turns. The used-up mail names the
+  agents that spent the most.
+- **Usage-limit errors.** Only the refusal of the provider stops an agent
+  (`crates/terrariumd/src/usage_limit.rs`). The adapter turns the
+  usage-limit error of its harness into a `usage_limit` event, with the
+  message of the provider and the reset time when the message gives one.
+  Claude Code: the `StopFailure` hook with `error` `rate_limit` or
+  `billing_error`; the reset time comes from `resets <time> (<zone>)` in
+  the message. Codex, Copilot CLI, and pi have no known signal yet
+  (`docs/compat.md`, "Usage limits"); their errors stay notices. Then:
+  - An agent with an account pool moves to the next member that did not
+    hit a limit (auto-swap, §16.3).
+  - Else the daemon holds new turns of the agent: it is `blocked` with the
+    message, a `quota.blocked` event goes out, and the operator gets one
+    mail (an Inbox item). An agent card shows a `quota hold` badge.
+  - The hold ends at the reset time, when a later turn ends with no error
+    (Claude Code waits for the reset by itself, `autoContinueAtUsageLimit`),
+    at a swap, or when the operator starts or restarts the agent. Then the
+    waiting turns go out.
+  - A hold of an older version from a probe window at 100 percent ends at
+    the daemon start.
+
+  An operator, a project admin, or a sysadmin agent can also move an agent
+  with `terrarium admin agent swap <agent> <subscription>`.
 - Per-project budgets are optional: a cap on tokens or turns per day on a
-  given subscription. The lead template reads the numbers through
-  `terrarium usage` and plans around resets.
+  given subscription. At 100 percent the daemon holds new turns of the
+  agents of the project until the next UTC midnight. The lead template
+  reads the numbers through `terrarium usage` and plans around resets.
 
 Agent CLI:
 
@@ -2085,14 +2160,17 @@ drift.
   when the current one has. The answer says how it applied: `live`,
   `restart_scheduled`, `restarted`, or `next_start`.
 - CLI: `terrarium admin agent swap <agent> <subscription>`.
-- **Auto-swap.** When a probe finds a window of an account at 100 percent,
-  each agent on it with a pool moves to the next member, in pool order, that
-  is not full, not `expired` or `missing`, and has a login of the harness.
+- **Auto-swap.** When the provider refuses a turn of an agent with a
+  usage-limit error (§16.2), an agent with a pool moves to the next member,
+  in pool order, that did not hit a limit, is not `expired` or `missing`,
+  and has a login of the harness. The daemon keeps the accounts that hit a
+  limit in memory, until their reset time (or, with no reset time, until a
+  turn on the account ends with no error). A probe window does not count.
   An agent with no free member, or with no pool, gets the hold of §16.2.
   `TERRARIUM_AUTO_SWAP=off` turns the auto-swap off (default on).
 - Each swap writes an `agent.swap` audit row (from, to, how, auto) and an
-  `agent.swapped` event, and ends the quota hold of the old account for the
-  agent.
+  `agent.swapped` event, and ends the usage-limit hold of the old account
+  for the agent.
 - Rights: the same as a change of the agent's fields. The operator, a
   sysadmin agent, and a `project_admin` of the agent's project may edit the
   pool and swap. A file agent may swap among the accounts of its pool.
@@ -2755,6 +2833,12 @@ not be on the same machine as the labs. A **host agent** closes that gap.
   dashboard and the policy know what each host can do.
 - On reconnect it resumes without losing running targets. Running containers
   and VMs are state on the host, not in the connection.
+- It sends a performance sample every 10 seconds (Linux, from `/proc` and
+  `statvfs`): CPU busy share, cores, and load; memory and swap; network IO
+  of the physical interfaces; disk IO of the whole disks; and the space of
+  each real filesystem. The daemon keeps 1 hour of samples for each host
+  in memory only. Home shows a card for each host (docs/api.md §17.1,
+  docs/host-protocol.md "`metrics`").
 
 Target kinds:
 

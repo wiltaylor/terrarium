@@ -10,6 +10,7 @@ pub mod ci;
 pub mod config;
 pub mod display;
 pub mod error;
+pub mod eta;
 pub mod event;
 pub mod fleet;
 pub mod harness;

@@ -35,6 +35,8 @@ pub const CHUNK_SIZE: usize = 32 * 1024;
 pub const DEFAULT_BUFFER_LIMIT: usize = 8 * 1024 * 1024;
 /// The heartbeat interval the host agent uses until `welcome` sets one.
 pub const DEFAULT_HEARTBEAT_SECS: u64 = 15;
+/// The interval between two `metrics` frames.
+pub const METRICS_INTERVAL_SECS: u64 = 10;
 
 /// A session ID. The daemon picks it. It is unique among the live sessions
 /// of one host agent. `0` is reserved and never names a session.
@@ -217,6 +219,12 @@ pub struct Welcome {
     /// in its `token_file` and uses it for every later connection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
+    /// The daemon wants `metrics` frames. A host agent that has the
+    /// `metrics` capability then sends one every [`METRICS_INTERVAL_SECS`].
+    /// An older daemon sends no flag, so the host agent sends no frames
+    /// that the daemon does not know.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub metrics: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -762,6 +770,77 @@ fn yes() -> bool {
     true
 }
 
+// ---------------------------------------------------------------- metrics
+
+/// `metrics`: one performance sample of the host agent's machine
+/// (docs/host-protocol.md, "`metrics`"). The rates are the mean over the
+/// `interval_secs` before the sample. A part that the host agent cannot
+/// read is absent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct HostMetrics {
+    /// The seconds that the rates and the CPU busy share cover.
+    pub interval_secs: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu: Option<CpuMetrics>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<MemoryMetrics>,
+    /// Summed over the physical network interfaces.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub net: Option<NetMetrics>,
+    /// Summed over the whole disks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_io: Option<DiskIoMetrics>,
+    /// The real mounted filesystems, one for each device.
+    #[serde(default)]
+    pub filesystems: Vec<FsMetrics>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct CpuMetrics {
+    /// The busy share of all cores together, 0 to 100.
+    pub busy_pct: f64,
+    pub cores: u32,
+    /// The 1-minute load average.
+    pub load1: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct MemoryMetrics {
+    pub total_bytes: u64,
+    /// `MemTotal - MemAvailable`.
+    pub used_bytes: u64,
+    pub used_pct: f64,
+    pub swap_total_bytes: u64,
+    pub swap_used_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct NetMetrics {
+    pub rx_bytes_per_sec: f64,
+    pub tx_bytes_per_sec: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct DiskIoMetrics {
+    pub read_bytes_per_sec: f64,
+    pub write_bytes_per_sec: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct FsMetrics {
+    /// The mount point.
+    pub mount: String,
+    pub fstype: String,
+    /// The source in `/proc/mounts`, for example `/dev/nvme0n1p2`.
+    pub device: String,
+    pub total_bytes: u64,
+    pub used_bytes: u64,
+    /// The bytes that a user who is not root can still write.
+    pub avail_bytes: u64,
+    /// `used / (used + avail)`, 0 to 100, as `df` shows it.
+    pub used_pct: f64,
+}
+
 // ---------------------------------------------------------------- frames
 
 /// Control frames from the daemon to the host agent.
@@ -988,6 +1067,10 @@ pub enum HostFrame {
         bytes: u64,
         sha256: String,
     },
+    /// A performance sample. It is about no session. The host agent sends
+    /// it only after a `welcome` with `metrics: true`. Boxed: it is larger
+    /// than the other frames.
+    Metrics(Box<HostMetrics>),
 }
 
 impl HostFrame {
@@ -1140,6 +1223,7 @@ mod tests {
                     drivers: vec!["docker".into(), "desktop".into()],
                     ..DisplayCapability::default()
                 },
+                metrics: true,
             },
             max_sessions: 32,
             max_running_targets: Some(4),
@@ -1222,6 +1306,56 @@ mod tests {
         .unwrap();
         assert!(matches!(&docker, DaemonFrame::Display(d)
             if matches!(d.target, DisplayTarget::Docker { display: None, .. })));
+    }
+
+    #[test]
+    fn metrics_frame_matches_the_documented_shape() {
+        let text = r#"{"type":"metrics","interval_secs":10.0,
+            "cpu":{"busy_pct":12.5,"cores":8,"load1":0.42},
+            "memory":{"total_bytes":100,"used_bytes":40,"used_pct":40.0,
+                      "swap_total_bytes":0,"swap_used_bytes":0},
+            "net":{"rx_bytes_per_sec":1000.0,"tx_bytes_per_sec":20.0},
+            "disk_io":{"read_bytes_per_sec":0.0,"write_bytes_per_sec":4096.0},
+            "filesystems":[{"mount":"/","fstype":"ext4","device":"/dev/sda1",
+                "total_bytes":1000,"used_bytes":600,"avail_bytes":300,"used_pct":66.7}]}"#;
+        let frame: HostFrame = decode_control(text).unwrap();
+        let HostFrame::Metrics(m) = &frame else {
+            panic!("not metrics: {frame:?}")
+        };
+        assert_eq!(m.cpu.as_ref().unwrap().cores, 8);
+        assert_eq!(m.filesystems[0].mount, "/");
+        assert!(!frame.is_terminal());
+        let back: HostFrame = decode_control(&encode_control(&frame).unwrap()).unwrap();
+        assert_eq!(back, frame);
+        // A host agent that cannot read a part leaves it out.
+        let min: HostFrame = decode_control(r#"{"type":"metrics","interval_secs":10}"#).unwrap();
+        assert!(
+            matches!(&min, HostFrame::Metrics(m) if m.cpu.is_none() && m.filesystems.is_empty())
+        );
+    }
+
+    #[test]
+    fn welcome_metrics_flag_is_optional() {
+        // An older daemon sends no flag: no metrics frames.
+        let w: DaemonFrame = decode_control(
+            r#"{"type":"welcome","host_id":"h","heartbeat_secs":15,"resume_token":"r"}"#,
+        )
+        .unwrap();
+        assert!(matches!(&w, DaemonFrame::Welcome(w) if !w.metrics));
+        let on = DaemonFrame::Welcome(Welcome {
+            host_id: "h".into(),
+            heartbeat_secs: 15,
+            resume_token: "r".into(),
+            resume: vec![],
+            token: None,
+            metrics: true,
+        });
+        let v: serde_json::Value = serde_json::from_str(&encode_control(&on).unwrap()).unwrap();
+        assert_eq!(v["metrics"], true);
+        // An older host agent sends no `metrics` capability.
+        let caps: HostCapabilities =
+            serde_json::from_str(r#"{"docker":{"present":true}}"#).unwrap();
+        assert!(!caps.metrics);
     }
 
     #[test]

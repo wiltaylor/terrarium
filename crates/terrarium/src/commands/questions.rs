@@ -1,8 +1,9 @@
 //! `question`, `notify`, `admin question`, and `admin inbox` (docs/api.md
-//! §6.8, §6.9, PLAN §12e). A leader asks the operator, or sends a notice;
-//! the answer or the acknowledgement comes as mail. The text, the options,
-//! and the context of a question are the agent's own words: `show` prints
-//! them between data markers.
+//! §6.8, §6.9, PLAN §12e). A leader asks the operator, asks a bundle of
+//! related questions, or sends a notice; the answer or the acknowledgement
+//! comes as mail. The text, the options, the items, and the context of a
+//! question are the agent's own words: `show` prints them between data
+//! markers.
 
 use anyhow::Context as _;
 use serde_json::{Value, json};
@@ -77,6 +78,126 @@ fn context_value(ctx: &Ctx, c: &QuestionContext) -> anyhow::Result<Option<String
     Ok(None)
 }
 
+/// The text of a file argument: a path, or `-` for stdin.
+fn file_arg(ctx: &Ctx, arg: &str, what: &str) -> anyhow::Result<String> {
+    if arg == "-" {
+        return ctx.text("-");
+    }
+    std::fs::read_to_string(arg).with_context(|| format!("cannot read the {what} file {arg}"))
+}
+
+/// The JSON array of a file argument; `{"<key>": [...]}` is the same.
+fn json_list(ctx: &Ctx, arg: &str, what: &str, key: &str) -> anyhow::Result<Vec<Value>> {
+    let text = file_arg(ctx, arg, what)?;
+    let v: Value = serde_json::from_str(&text)
+        .map_err(|e| CliError::usage(format!("the {what} file is not JSON: {e}")))?;
+    match v {
+        Value::Array(a) => Ok(a),
+        Value::Object(mut o) if o.get(key).is_some_and(Value::is_array) => {
+            Ok(as_items(&o.remove(key).unwrap_or_default()).to_vec())
+        }
+        _ => Err(CliError::usage(format!(
+            "the {what} file needs a JSON array, or an object with `{key}`"
+        ))),
+    }
+}
+
+/// The items of a bundle from `--items-file`: a plain string is an item
+/// with no options. The daemon checks the rest.
+fn items_value(ctx: &Ctx, arg: &str) -> anyhow::Result<Value> {
+    let items = json_list(ctx, arg, "items", "items")?
+        .into_iter()
+        .map(|i| match i {
+            Value::String(t) => json!({"text": t}),
+            other => other,
+        })
+        .collect();
+    Ok(Value::Array(items))
+}
+
+/// The `items` of a bundle answer from `--answers-file`. An option is a
+/// label of its item, or a number from 1, as `--option` takes it.
+fn answers_value(ctx: &Ctx, arg: &str, bundle: &Value) -> anyhow::Result<Value> {
+    if bundle["kind"] != "bundle" {
+        return Err(CliError::usage(
+            "--answers-file is for a bundle; answer a question with a text or --option",
+        ));
+    }
+    let items = as_items(&bundle["items"]);
+    let given = json_list(ctx, arg, "answers", "items")?;
+    let mut out = Vec::with_capacity(given.len());
+    for (i, a) in given.into_iter().enumerate() {
+        let item = items.get(i).cloned().unwrap_or_default();
+        let mut entry = json!({});
+        match a {
+            Value::String(t) => entry["answer"] = json!(t),
+            Value::Object(o) => {
+                if let Some(t) = o.get("answer").and_then(Value::as_str) {
+                    entry["answer"] = json!(t);
+                }
+                let opt = match o.get("option") {
+                    Some(Value::String(l)) => Some(l.clone()),
+                    Some(Value::Number(n)) => Some(n.to_string()),
+                    _ => None,
+                };
+                if let Some(o) = opt {
+                    entry["option"] = option_ref(&item, &o)
+                        .map_err(|e| CliError::usage(format!("item {}: {e}", i + 1)))?;
+                }
+            }
+            _ => {
+                return Err(CliError::usage(format!(
+                    "answer {} is not a string or an object",
+                    i + 1
+                )));
+            }
+        }
+        out.push(entry);
+    }
+    Ok(Value::Array(out))
+}
+
+/// The items of a bundle: each item's words between markers, then its
+/// answer.
+fn print_items(c: &Ctx, v: &Value, items: &[Value]) {
+    for (i, item) in items.iter().enumerate() {
+        let n = i + 1;
+        let mut block = item["text"].as_str().unwrap_or_default().to_owned();
+        let options: Vec<&str> = as_items(&item["options"])
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        if !options.is_empty() {
+            block.push_str("\n\nOptions:\n");
+            for (k, o) in options.iter().enumerate() {
+                block.push_str(&format!("{}. {o}\n", k + 1));
+            }
+        }
+        if let Some(ctx) = item["context"].as_str() {
+            block.push_str(&format!("\n\nContext:\n{ctx}"));
+        }
+        delimited(c, &format!("ITEM {n} OF {}", items.len()), &block);
+        if let Some(k) = item["answer_option"].as_u64() {
+            let label = usize::try_from(k)
+                .ok()
+                .and_then(|k| options.get(k))
+                .copied()
+                .unwrap_or_default();
+            c.line(format!("item {n} chosen option: {}. {label}", k + 1));
+        }
+        if let Some(a) = item["answer"].as_str() {
+            c.line(format!(
+                "item {n} answer by {}:",
+                field(v, "answered_by_name")
+            ));
+            c.out.write_str(a);
+            if !a.ends_with('\n') {
+                c.line("");
+            }
+        }
+    }
+}
+
 /// One question: the fields, then the agent's words between markers,
 /// then the answer.
 fn print_question(c: &Ctx, v: &Value) {
@@ -87,10 +208,17 @@ fn print_question(c: &Ctx, v: &Value) {
     let context = take("context");
     let answer = take("answer");
     let option = take("answer_option");
+    let items = take("items");
     let notice = v["kind"] == "notice";
+    let bundle = v["kind"] == "bundle";
     print_object(c, &head);
     if let Some(t) = text.as_ref().and_then(Value::as_str) {
-        delimited(c, if notice { "NOTICE" } else { "QUESTION" }, t);
+        let what = match (notice, bundle) {
+            (true, _) => "NOTICE",
+            (_, true) => "BUNDLE",
+            _ => "QUESTION",
+        };
+        delimited(c, what, t);
     }
     let options: Vec<String> = options
         .as_ref()
@@ -109,6 +237,9 @@ fn print_question(c: &Ctx, v: &Value) {
     }
     if let Some(t) = context.as_ref().and_then(Value::as_str) {
         delimited(c, "CONTEXT", t);
+    }
+    if let Some(items) = items.as_ref() {
+        print_items(c, v, as_items(items));
     }
     if let Some(i) = option.as_ref().and_then(Value::as_u64) {
         let label = usize::try_from(i)
@@ -196,6 +327,72 @@ pub async fn question(ctx: &Ctx, cmd: &QuestionCmd) -> anyhow::Result<()> {
                 }
             })
         }
+        QuestionCmd::Bundle {
+            text,
+            items,
+            items_file,
+            context,
+            card,
+            urgent,
+            critical,
+            wait,
+            timeout,
+        } => {
+            if !ctx.is_agent() {
+                return Err(CliError::usage(
+                    "an agent asks questions; the operator answers them with \
+                     `terrarium admin question answer`",
+                ));
+            }
+            if text == "-" && items_file.as_deref() == Some("-") {
+                return Err(CliError::usage(
+                    "only one of the summary and --items-file can read stdin",
+                ));
+            }
+            let items = match items_file {
+                Some(f) => items_value(ctx, f)?,
+                None => items.iter().map(|t| json!({"text": t})).collect(),
+            };
+            let me = ctx.me().await?;
+            let mut body = json!({"kind": "bundle", "text": ctx.text(text)?, "items": items});
+            super::set_opt(&mut body, "context", context_value(ctx, context)?);
+            super::set_opt(&mut body, "card", card.clone());
+            set_priority(&mut body, *urgent, *critical);
+            if *wait {
+                body["wait"] = json!(true);
+            }
+            super::set_opt(&mut body, "timeout", timeout.clone());
+            let v = ctx
+                .api
+                .post(&format!("{}/questions", agent_path(&me)), Some(body))
+                .await?;
+            ctx.emit(&v, |c, v| {
+                c.line(format!(
+                    "bundle {} asked ({}): {} questions. The answers come as one mail on \
+                     thread {}.",
+                    field(v, "id"),
+                    field(v, "priority"),
+                    as_items(&v["items"]).len(),
+                    field(v, "thread_id")
+                ));
+                if v["wait"].is_object() {
+                    c.line(format!(
+                        "wait {} registered: {}",
+                        field(&v["wait"], "id"),
+                        field(&v["wait"], "summary")
+                    ));
+                    c.line(
+                        "End your turn now. The answer mail wakes you; do not poll and do not \
+                         ask again.",
+                    );
+                } else {
+                    c.line(
+                        "Go on with other work. Do not ask it again: `terrarium question ls` \
+                         lists it.",
+                    );
+                }
+            })
+        }
         QuestionCmd::Ls {
             all,
             status,
@@ -230,6 +427,7 @@ pub async fn question(ctx: &Ctx, cmd: &QuestionCmd) -> anyhow::Result<()> {
             text,
             options,
             clear_options,
+            items_file,
             context,
             card,
             urgent,
@@ -237,8 +435,16 @@ pub async fn question(ctx: &Ctx, cmd: &QuestionCmd) -> anyhow::Result<()> {
             normal,
         } => {
             let mut body = json!({});
+            if text.as_deref() == Some("-") && items_file.as_deref() == Some("-") {
+                return Err(CliError::usage(
+                    "only one of --text and --items-file can read stdin",
+                ));
+            }
             if let Some(t) = text {
                 body["text"] = json!(ctx.text(t)?);
+            }
+            if let Some(f) = items_file {
+                body["items"] = items_value(ctx, f)?;
             }
             if *clear_options {
                 body["options"] = json!([]);
@@ -253,14 +459,15 @@ pub async fn question(ctx: &Ctx, cmd: &QuestionCmd) -> anyhow::Result<()> {
             }
             if body.as_object().is_some_and(serde_json::Map::is_empty) {
                 return Err(CliError::usage(
-                    "nothing to change: give --text, --option, --clear-options, --context, \
-                     --card, --urgent, --critical, or --normal",
+                    "nothing to change: give --text, --option, --clear-options, --items-file, \
+                     --context, --card, --urgent, --critical, or --normal",
                 ));
             }
             let v = ctx.api.patch(&path(id), body).await?;
             ctx.emit(&v, |c, v| {
                 c.line(format!(
-                    "question {} updated (revision {}).",
+                    "{} {} updated (revision {}).",
+                    kind_of(v),
                     field(v, "id"),
                     field(v, "revision")
                 ));
@@ -278,13 +485,16 @@ async fn retract(ctx: &Ctx, id: &str, reason: &Option<String>) -> anyhow::Result
         .post(&format!("{}/retract", path(id)), Some(body))
         .await?;
     ctx.emit(&v, |c, v| {
-        let kind = if v["kind"] == "notice" {
-            "notice"
-        } else {
-            "question"
-        };
-        c.line(format!("{kind} {} retracted.", field(v, "id")));
+        c.line(format!("{} {} retracted.", kind_of(v), field(v, "id")));
     })
+}
+
+/// `question`, `notice`, or `bundle`, for a message.
+fn kind_of(v: &Value) -> &str {
+    match v["kind"].as_str() {
+        Some(k @ ("notice" | "bundle")) => k,
+        _ => "question",
+    }
 }
 
 /// The `option` of an answer: a label of the question as it is, else a
@@ -339,10 +549,34 @@ pub async fn admin(ctx: &Ctx, cmd: &AdminQuestionCmd) -> anyhow::Result<()> {
             let v = ctx.api.get(&path(id), vec![]).await?;
             ctx.emit(&v, print_question)
         }
-        AdminQuestionCmd::Answer { id, text, option } => {
+        AdminQuestionCmd::Answer {
+            id,
+            text,
+            option,
+            answers_file,
+        } => {
+            if let Some(f) = answers_file {
+                let q = ctx.api.get(&path(id), vec![]).await?;
+                // The revision that the answers are for: a change of the
+                // agent meanwhile is a conflict.
+                let body = json!({"items": answers_value(ctx, f, &q)?, "revision": q["revision"]});
+                let v = ctx
+                    .api
+                    .post(&format!("{}/answer", path(id)), Some(body))
+                    .await?;
+                return ctx.emit(&v, |c, v| {
+                    c.line(format!(
+                        "bundle {} answered: {} answers went to {} in one mail.",
+                        field(v, "id"),
+                        as_items(&v["items"]).len(),
+                        field(v, "agent_name")
+                    ));
+                });
+            }
             if text.is_none() && option.is_none() {
                 return Err(CliError::usage(
-                    "give the answer as text, --option <label|n>, or both",
+                    "give the answer as text, --option <label|n>, or both; answer a bundle \
+                     with --answers-file",
                 ));
             }
             let mut body = json!({});
@@ -478,7 +712,7 @@ fn inbox_rows(v: &Value) -> Vec<Value> {
 /// `(Some("notice"), id)`; a bare ID gives `(None, id)`.
 fn item_ref(id: &str) -> (Option<&str>, &str) {
     match id.split_once(':') {
-        Some((k @ ("question" | "notice" | "mail" | "thread"), rest)) => (Some(k), rest),
+        Some((k @ ("question" | "bundle" | "notice" | "mail" | "thread"), rest)) => (Some(k), rest),
         _ => (None, id),
     }
 }
@@ -512,17 +746,19 @@ pub async fn inbox(ctx: &Ctx, cmd: &AdminInboxCmd) -> anyhow::Result<()> {
                 Some("mail") => false,
                 Some(other) => {
                     return Err(CliError::usage(format!(
-                        "`{other}` items have no ack: answer a question with `terrarium admin \
-                         question answer`, resume a thread with `terrarium admin inbox resume`"
+                        "`{other}` items have no ack: answer a question or a bundle with \
+                         `terrarium admin question answer`, resume a thread with `terrarium \
+                         admin inbox resume`"
                     )));
                 }
                 // A bare ID: a notice when it is a question ID, else a mail.
                 None => match ctx.api.get(&path(key), vec![]).await {
                     Ok(q) if q["kind"] == "notice" => true,
-                    Ok(_) => {
+                    Ok(q) => {
                         return Err(CliError::usage(format!(
-                            "{key} is a question: answer it with `terrarium admin question \
-                             answer {key}`"
+                            "{key} is a {}: answer it with `terrarium admin question answer \
+                             {key}`",
+                            kind_of(&q)
                         )));
                     }
                     Err(e)

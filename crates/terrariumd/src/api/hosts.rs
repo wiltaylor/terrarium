@@ -1,7 +1,7 @@
 //! `/api/hosts`: the host agent registry (PLAN §19, docs/host-protocol.md).
 //! The dial-in WebSocket itself is `crate::hosts::connect`.
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -21,7 +21,11 @@ pub fn routes() -> Router<Shared> {
         .route("/hosts", get(list).post(create))
         .route("/hosts/{name}", get(show).delete(revoke))
         .route("/hosts/{name}/rotate", axum::routing::post(rotate))
+        .route("/hosts/{name}/metrics", get(metrics))
 }
+
+/// The longest history of `GET /api/hosts/{name}/metrics`, in minutes.
+const MAX_METRICS_MINUTES: u64 = 60;
 
 /// A host row with its live link state.
 fn view(state: &Shared, h: Host) -> Value {
@@ -50,6 +54,20 @@ fn view(state: &Shared, h: Host) -> Value {
         v["arch"].as_str().unwrap_or_default(),
     ))
     .unwrap_or(Value::Null);
+    // The latest performance sample (docs/api.md §17.1). `null`: no sample
+    // since the daemon started, or an older host agent.
+    v["metrics"] = match state
+        .executor
+        .hosts
+        .latest_metrics(v["name"].as_str().unwrap_or_default())
+    {
+        Some((sample, stale)) => {
+            let mut m = serde_json::to_value(&sample).unwrap_or(Value::Null);
+            m["stale"] = stale.into();
+            m
+        }
+        None => Value::Null,
+    };
     v
 }
 
@@ -62,6 +80,47 @@ async fn list(State(state): State<Shared>) -> ApiResult<Json<Vec<Value>>> {
 async fn show(State(state): State<Shared>, Path(name): Path<String>) -> ApiResult<Json<Value>> {
     let h = state.db.read(move |c| hosts::get(c, &name)).await?;
     Ok(Json(view(&state, h)))
+}
+
+#[derive(Debug, Deserialize)]
+struct MetricsQuery {
+    minutes: Option<u64>,
+}
+
+/// `GET /api/hosts/{name}/metrics?minutes=N`: the samples of the last `N`
+/// minutes (default and most: 60), oldest first. The history lives in
+/// memory only.
+async fn metrics(
+    State(state): State<Shared>,
+    Path(name): Path<String>,
+    Query(q): Query<MetricsQuery>,
+) -> ApiResult<Json<Value>> {
+    let minutes = q.minutes.unwrap_or(MAX_METRICS_MINUTES);
+    if !(1..=MAX_METRICS_MINUTES).contains(&minutes) {
+        return Err(crate::error::ApiError::bad_request(format!(
+            "minutes must be 1 to {MAX_METRICS_MINUTES}"
+        )));
+    }
+    let n = name.clone();
+    state.db.read(move |c| hosts::get(c, &n)).await?;
+    let view = state
+        .executor
+        .hosts
+        .metrics(&name, std::time::Duration::from_secs(minutes * 60));
+    let (stale, samples) = match view {
+        Some(v) => (
+            v.stale,
+            serde_json::to_value(&v.samples).unwrap_or(Value::Null),
+        ),
+        None => (true, json!([])),
+    };
+    Ok(Json(json!({
+        "host": name,
+        "interval_secs": crate::hosts::METRICS_INTERVAL_SECS,
+        "minutes": minutes,
+        "stale": stale,
+        "samples": samples,
+    })))
 }
 
 #[derive(Debug, Deserialize)]

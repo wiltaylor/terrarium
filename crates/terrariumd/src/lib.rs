@@ -46,6 +46,7 @@ pub mod time_param;
 pub mod transcripts;
 pub mod trash;
 pub mod usage_collector;
+pub mod usage_limit;
 pub mod waits;
 pub mod workspace;
 
@@ -292,7 +293,7 @@ pub async fn start_with_usage(
 }
 
 /// Start the usage subsystem (PLAN §16): the probe scheduler, the quota
-/// policy timer, and the start-up login check. Login sessions that a
+/// policy timer, the usage-limit listener, and the start-up login check. Login sessions that a
 /// daemon stop left open become `expired`.
 async fn start_usage(state: &Shared) -> Vec<JoinHandle<()>> {
     if let Err(e) = state
@@ -306,6 +307,7 @@ async fn start_usage(state: &Shared) -> Vec<JoinHandle<()>> {
         spawn_account_migration(state.clone()),
         probes::spawn_scheduler(state.clone()),
         quota_policy::spawn(state.clone()),
+        usage_limit::spawn(state.clone()),
     ]
 }
 
@@ -675,7 +677,7 @@ fn summary(name: &str, kind: &str, data: &Value) -> String {
     match kind {
         "turn_start" => format!("{name}: turn: {}", short(&data["prompt"])),
         "tool_use" => format!("{name}: tool {}", short(&data["tool"])),
-        "notification" | "question" | "warning" => {
+        "notification" | "question" | "warning" | "usage_limit" => {
             format!(
                 "{name}: {}",
                 short(data.get("message").unwrap_or(&data["question"]))

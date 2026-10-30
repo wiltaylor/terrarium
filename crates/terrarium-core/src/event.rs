@@ -116,6 +116,16 @@ pub enum Event {
     /// the screen did not go busy, even after the retry. `text` is the turn
     /// that was not delivered.
     DeliveryFailed { text: String, reason: String },
+    /// The provider refused a turn because of a usage limit or a rate
+    /// limit of the plan. The daemon moves the agent to the next account
+    /// of its pool, or holds its new turns (`terrariumd::usage_limit`).
+    UsageLimit {
+        /// The provider's message, on one line.
+        message: String,
+        /// When the limit resets, if the message gives the time.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resets_at: Option<DateTime<Utc>>,
+    },
 }
 
 fn default_true() -> bool {
@@ -382,6 +392,10 @@ mod tests {
             Event::DeliveryFailed {
                 text: s("t"),
                 reason: s("r"),
+            },
+            Event::UsageLimit {
+                message: s("m"),
+                resets_at: Some(Utc::now()),
             },
         ];
         for ev in all {

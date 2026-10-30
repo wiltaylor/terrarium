@@ -6,6 +6,7 @@ import { createEffect, createSignal, For, on, onCleanup, onMount, Show } from "s
 import type { Agent, Question } from "../../api/types";
 import { Empty, ErrorBanner, useNow } from "../../components/ui";
 import { api, events, inbox } from "../../stores";
+import { BundleCard } from "./BundleCard";
 import { QuestionCard } from "./QuestionCard";
 import { isQuestionEvent, putQuestion, sortQuestions } from "./questions";
 
@@ -59,7 +60,13 @@ export function QuestionsPanel(props: { agent: Agent }) {
         </div>
         <ErrorBanner error={error()} onDismiss={() => setError(null)} />
         <Show when={list().length} fallback={<Empty>{loading() ? "Loading…" : "No open or recent questions or notices."}</Empty>}>
-          <For each={list()}>{(x) => <QuestionCard question={x} now={now()} showKind onChange={change} />}</For>
+          <For each={list()}>
+            {(x) => (
+              <Show when={x.kind === "bundle"} fallback={<QuestionCard question={x} now={now()} showKind onChange={change} />}>
+                <BundleCard question={x} now={now()} showKind onChange={change} />
+              </Show>
+            )}
+          </For>
         </Show>
       </section>
     </Show>

@@ -106,7 +106,8 @@ pub struct SubscriptionView {
     pub local_estimate_only: bool,
     /// An API key is stored for it (never shown).
     pub has_api_key: bool,
-    /// Agents whose turns wait for a reset of this subscription.
+    /// Agents whose turns wait after a usage-limit error on this
+    /// subscription (`crate::usage_limit`).
     pub held_agents: usize,
     /// The model each harness gets on this subscription when the agent
     /// sets no `model`, by harness name. Only the harnesses where the
@@ -162,7 +163,7 @@ fn view(
         .into_iter()
         .map(WindowView::from)
         .collect();
-    let cause = format!("quota:{}", sub.name);
+    let cause = crate::usage_limit::cause(&sub.name);
     let held_agents = ustore::holds(c)?
         .iter()
         .filter(|h| h.cause == cause)

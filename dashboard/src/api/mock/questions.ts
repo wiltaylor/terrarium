@@ -6,9 +6,11 @@
 // the question, and resolves the `question` waits on it with no wake mail of
 // their own (store/questions.rs). A retract by the operator sends one mail.
 // An acknowledge of a notice sends one mail, with the reply when there is one.
+// A bundle takes an answer for every item in one step (a partial answer is a
+// 422), and sends one mail with all answers, item by item.
 
 import type { Api } from "../client";
-import type { Agent, AgentEvent, InboxEventData, Message, Question, QuestionEventData } from "../types";
+import type { Agent, AgentEvent, BundleItem, InboxEventData, Message, Question, QuestionAnswer, QuestionEventData } from "../types";
 import type { MockWorld } from "./data";
 
 type Fail = (status: number, code: string, message: string, details?: unknown) => never;
@@ -48,7 +50,8 @@ const quoted = (text: string) =>
 /**
  * The seed: two open questions (one urgent, with options and a hostile
  * context), one answered, one retracted; one open notice (with a hostile
- * context) and one acknowledged notice with a reply.
+ * context) and one acknowledged notice with a reply; one open bundle of
+ * three questions (one item with a hostile context).
  */
 export function seedQuestions(now: number, agents: Agent[]): Question[] {
   const ago = (min: number) => new Date(now - min * 60_000).toISOString();
@@ -135,6 +138,25 @@ export function seedQuestions(now: number, agents: Agent[]): Question[] {
       answered_at: ago(60 * 2),
       updated_at: ago(60 * 2),
     },
+    {
+      ...base(lead, 7, 10),
+      kind: "bundle",
+      text: "Release plan for v0.3: three decisions before I tag it",
+      options: [],
+      context: "The release branch is `release/0.3`. **CI** is green.",
+      items: [
+        { text: "Tag v0.3 on Friday, or wait one week for the PTY fix?", options: ["Friday", "Next week"] },
+        {
+          text: "Which staging host gets the release first?",
+          options: ["staging-eu", "staging-us"],
+          context: "`staging-us` has the newer kernel.\n\n<img src=x onerror=\"window.__xss=1\">",
+        },
+        { text: "Anything that must go in the release notes?", options: [] },
+      ],
+      card: "TER-12",
+      priority: "normal",
+      status: "open",
+    },
   ];
 }
 
@@ -148,7 +170,7 @@ const ORDER = (x: Question, y: Question): number => {
   return (y.answered_at ?? y.updated_at).localeCompare(x.answered_at ?? x.updated_at);
 };
 
-/** The inbox item ID of a question or a notice. */
+/** The inbox item ID of a question, a bundle, or a notice. */
 export const questionItemId = (q: Pick<Question, "id" | "kind">) => `${q.kind}:${q.id}`;
 
 /** The question endpoints. */
@@ -181,11 +203,74 @@ export function createQuestionMock(c: QuestionMockContext) {
       summary: `${q.agent_name.split("/")[1] ?? q.agent_name}: ${q.kind} ${change}: ${shortText(q.text, 80)}`,
       data: data as unknown as Record<string, unknown>,
     });
-    c.inboxEvent({ item: questionItemId(q), kind: q.kind, change: q.status === "open" ? (change === "asked" ? "opened" : "updated") : "closed", project: q.project });
+    c.inboxEvent({ item: questionItemId(q), kind: q.kind === "notice" ? "notice" : "question", change: q.status === "open" ? (change === "asked" ? "opened" : "updated") : "closed", project: q.project });
   };
 
   const notOpen = (q: Question, what: string) => fail(409, "conflict", `${q.kind} ${q.id} is ${q.status}; ${what} needs an open ${q.kind}`, { status: q.status });
   const wrongKind = (q: Question, what: string) => fail(409, "conflict", `${q.id} is a ${q.kind}; ${what} needs a ${q.kind === "notice" ? "question" : "notice"}`, { kind: q.kind });
+
+  /** The answer and the index of one item, or `null` when it has neither. */
+  const resolveItem = (item: BundleItem, n: number, a: { answer?: string; option?: string | number } | undefined): { answer: string; index?: number } | null => {
+    let index: number | undefined;
+    if (typeof a?.option === "number") {
+      if (a.option < 0 || a.option >= item.options.length) fail(422, "invalid", `option ${a.option} is not there: item ${n} has ${item.options.length} options`);
+      index = a.option;
+    } else if (typeof a?.option === "string") {
+      index = item.options.indexOf(a.option.trim());
+      if (index < 0) fail(422, "invalid", `item ${n} has no option \`${a.option.trim()}\``);
+    }
+    const text = a?.answer?.trim();
+    if (text && text.length > MAX_ANSWER) fail(422, "invalid", `the answer of item ${n} is longer than ${MAX_ANSWER} characters`);
+    const answer = text || (index !== undefined ? item.options[index] : undefined);
+    return answer ? { answer, ...(index !== undefined ? { index } : {}) } : null;
+  };
+
+  const answerBundle = (q: Question, body: QuestionAnswer): Question => {
+    if (body.answer !== undefined || body.option !== undefined) fail(422, "invalid", "a bundle takes `items`: one entry `{answer?, option?}` for each item, not `answer` or `option`");
+    const items = q.items ?? [];
+    const given = body.items ?? [];
+    if (given.length > items.length) fail(422, "invalid", `the bundle has ${items.length} items; the answer has ${given.length} entries`);
+    const resolved = items.map((item, i) => resolveItem(item, i + 1, given[i]));
+    const missing = resolved.flatMap((r, i) => (r ? [] : [i + 1]));
+    if (missing.length) {
+      const list = missing.length === 1 ? `${missing[0]}` : missing.length === 2 ? `${missing[0]} and ${missing[1]}` : `${missing.slice(0, -1).join(", ")}, and ${missing[missing.length - 1]}`;
+      fail(
+        422,
+        "invalid",
+        `${missing.length === 1 ? "item" : "items"} ${list} of ${items.length} ${missing.length === 1 ? "has" : "have"} no answer: a bundle needs an answer (a text, an option, or both) for every item, in one step`,
+        { missing, items: items.length },
+      );
+    }
+    const at = c.iso();
+    q.items = items.map((item, i) => {
+      const r = resolved[i]!;
+      return { ...item, answer: r.answer, ...(r.index !== undefined ? { answer_option: r.index } : {}) };
+    });
+    Object.assign(q, { status: "answered", answered_by: "operator", answered_by_name: "operator", answered_at: at, updated_at: at });
+    c.questionClosed(q.id, {
+      outcome: "answered",
+      kind: "bundle",
+      answers: q.items.map((item, i) => ({ item: i + 1, text: item.text, answer: item.answer, ...(item.answer_option != null ? { option: item.options[item.answer_option] } : {}) })),
+    });
+    const parts = q.items
+      .map((item, i) => {
+        const label = item.answer_option != null ? item.options[item.answer_option] : undefined;
+        const chosen = label !== undefined ? `Chosen option: ${item.answer_option! + 1}. ${label}\n` : "";
+        const own = item.answer !== label ? `The answer of operator:\n${quoted(item.answer!)}` : "";
+        return `\nItem ${i + 1} of ${q.items!.length}:\n${quoted(shortText(item.text, 200))}${chosen}${own}`;
+      })
+      .join("");
+    c.sendMail(
+      q.agent,
+      "operator",
+      `Answers: ${shortText(q.text)}`,
+      `operator answered your question bundle ${q.id} (revision ${q.revision}): all ${q.items.length} items are in this mail.\n\nYour bundle:\n${quoted(q.text)}${parts}\nRun \`terrarium question show ${q.id}\` for the details.\n`,
+      q.thread_id,
+    );
+    c.audit("question.answer", q.id, q.project, { agent: q.agent, by: "operator", kind: "bundle", items: q.items.length });
+    event(q, "answered");
+    return q;
+  };
 
   const questions: Api["questions"] = {
     list: (q = {}) =>
@@ -214,6 +299,10 @@ export function createQuestionMock(c: QuestionMockContext) {
         const q = question(id);
         if (q.kind === "notice") wrongKind(q, "an answer");
         if (q.status !== "open") notOpen(q, "an answer");
+        if (body.revision !== undefined && body.revision !== q.revision)
+          fail(409, "conflict", `${q.kind} ${q.id} changed: it is at revision ${q.revision}, and the answer is for revision ${body.revision}. Read it again, then answer`, { revision: q.revision, kind: q.kind });
+        if (q.kind === "bundle") return answerBundle(q, body);
+        if (body.items) fail(422, "invalid", "a question takes `answer`, `option`, or both; `items` is for a bundle");
         let index: number | undefined;
         if (typeof body.option === "number") {
           if (body.option < 0 || body.option >= q.options.length) fail(422, "invalid", `option ${body.option} is not there: the question has ${q.options.length} options`);
@@ -244,7 +333,7 @@ export function createQuestionMock(c: QuestionMockContext) {
         const r = reason?.trim() || null;
         Object.assign(q, { status: "retracted", retract_reason: r, retracted_by: "operator", updated_at: c.iso() });
         c.questionClosed(q.id, { outcome: "retracted" });
-        c.sendMail(q.agent, "operator", `Retracted: ${shortText(q.text)}`, `The operator retracted your question ${q.id}: you need no answer to it.\n\nYour question:\n${quoted(q.text)}${r ? `\nThe reason:\n${quoted(r)}` : ""}`, q.thread_id);
+        c.sendMail(q.agent, "operator", `Retracted: ${shortText(q.text)}`, `The operator retracted your ${q.kind} ${q.id}: you need no ${q.kind === "bundle" ? "answers" : "answer"} to it.\n\nYour question:\n${quoted(q.text)}${r ? `\nThe reason:\n${quoted(r)}` : ""}`, q.thread_id);
         c.audit("question.retract", q.id, q.project, { agent: q.agent, reason: r, by_owner: false });
         event(q, "retracted");
         return q;

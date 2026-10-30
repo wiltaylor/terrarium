@@ -21,6 +21,8 @@ describe("home queue", () => {
     expect(q.map((i) => (i.kind === "inbox" ? `${i.kind}:${i.item.kind}` : i.kind))).toEqual([
       "inbox:question",
       "inbox:mail",
+      // The bundle: an Inbox item of the kind `question`.
+      "inbox:question",
       "inbox:mail",
       "inbox:notice",
       "inbox:system",

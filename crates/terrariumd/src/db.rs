@@ -1264,6 +1264,41 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE targets ADD COLUMN credential_admin INTEGER NOT NULL DEFAULT 0;
     UPDATE targets SET credential_admin = 1;
     "#,
+    // 39: question bundles (PLAN §12e, docs/api.md §6.8). A bundle is a
+    // row of `questions` with `kind = 'bundle'`: `text` is the summary,
+    // and `items` is a JSON array of `{text, options, context?, answer?,
+    // answer_option?}`, 2 to 20 of them. The operator answers all items
+    // in one step. `items` is NULL for a question and a notice. The kind
+    // column is made again with the new CHECK (the way of migration 29);
+    // its indexes go first.
+    // Self-contained: when another branch takes number 39, move this
+    // entry to the end of the list. The test finds it by the name
+    // `kind_bundle`, not by its number.
+    r#"
+    DROP INDEX questions_agent;
+    DROP INDEX questions_status;
+    ALTER TABLE questions ADD COLUMN kind_bundle TEXT NOT NULL DEFAULT 'question'
+        CHECK (kind_bundle IN ('question', 'notice', 'bundle'));
+    UPDATE questions SET kind_bundle = kind;
+    ALTER TABLE questions DROP COLUMN kind;
+    ALTER TABLE questions RENAME COLUMN kind_bundle TO kind;
+    ALTER TABLE questions ADD COLUMN items TEXT;
+    CREATE INDEX questions_agent ON questions(agent, status);
+    CREATE INDEX questions_status ON questions(status, project);
+    "#,
+    // 40: the ETA of a card (PLAN §13, docs/api.md §8). `eta_at` is when
+    // the work is expected to be done; `eta_set_at` and `eta_set_by` (an
+    // address) say when and by whom. `done_at` is when the card last
+    // moved to `done`; it is NULL for a card done before this migration,
+    // and a reopen clears it.
+    // Self-contained: when another branch takes number 40, move this
+    // entry to the end of the list.
+    r#"
+    ALTER TABLE cards ADD COLUMN eta_at TEXT;
+    ALTER TABLE cards ADD COLUMN eta_set_at TEXT;
+    ALTER TABLE cards ADD COLUMN eta_set_by TEXT;
+    ALTER TABLE cards ADD COLUMN done_at TEXT;
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call
@@ -2474,6 +2509,45 @@ mod tests {
     /// Migration 37 keeps every session row and drops the cascade: a
     /// deleted agent keeps its sessions. Found by its content, so that a
     /// renumber does not break the test.
+    #[test]
+    fn migration_39_keeps_questions_and_takes_bundles() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        let n = MIGRATIONS
+            .iter()
+            .position(|m| m.contains("kind_bundle"))
+            .unwrap();
+        for (i, sql) in MIGRATIONS.iter().enumerate().take(n) {
+            conn.execute_batch(sql).unwrap();
+            conn.pragma_update(None, "user_version", i + 1).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO questions (id, agent, project, text, kind, thread_id, created_at, updated_at)
+               VALUES ('Q1', 'A1', 'p', 'Ship?', 'notice', 'T0', 't', 't')",
+            [],
+        )
+        .unwrap();
+        migrate(&mut conn).unwrap();
+        let (kind, items): (String, Option<String>) = conn
+            .query_row(
+                "SELECT kind, items FROM questions WHERE id = 'Q1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((kind.as_str(), items), ("notice", None));
+        conn.execute(
+            "INSERT INTO questions (id, agent, project, text, kind, items, thread_id, created_at,
+                                    updated_at)
+               VALUES ('Q2', 'A1', 'p', 'Plan', 'bundle', '[]', 'T1', 't', 't')",
+            [],
+        )
+        .unwrap();
+        assert!(
+            conn.execute("UPDATE questions SET kind = 'bogus' WHERE id = 'Q1'", [])
+                .is_err()
+        );
+    }
+
     #[test]
     fn migration_37_keeps_sessions_of_a_deleted_agent() {
         let mut conn = Connection::open_in_memory().unwrap();

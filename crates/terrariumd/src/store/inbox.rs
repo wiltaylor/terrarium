@@ -1,7 +1,9 @@
 //! The Inbox of the operator (PLAN §12e, docs/api.md §6.9): one read model
 //! of the things that wait for the operator. It is a view, not a table:
 //!
-//! - `question` and `notice`: the rows of `questions` ([`questions`]);
+//! - `question` and `notice`: the rows of `questions` ([`questions`]). A
+//!   bundle of questions is an item of the kind `question`, with the ID
+//!   `bundle:<id>`;
 //! - `mail`: the mail to `operator` that the operator did not acknowledge
 //!   (state `queued` or `delivered`). The acknowledgement marks it read;
 //!   a reply on its thread marks it replied ([`mail`]);
@@ -99,8 +101,8 @@ pub struct SystemItem {
 /// One item of the Inbox.
 #[derive(Debug, Clone, Serialize)]
 pub struct InboxItem {
-    /// `question:<id>`, `notice:<id>`, `mail:<message id>`, or
-    /// `thread:<thread id>`.
+    /// `question:<id>`, `bundle:<id>`, `notice:<id>`, `mail:<message id>`,
+    /// or `thread:<thread id>`.
     pub id: String,
     pub kind: InboxKind,
     pub open: bool,
@@ -146,11 +148,11 @@ fn sender_project(m: &Message) -> Option<String> {
 
 fn question_item(q: Question) -> InboxItem {
     let kind = match q.kind {
-        QuestionKind::Question => InboxKind::Question,
+        QuestionKind::Question | QuestionKind::Bundle => InboxKind::Question,
         QuestionKind::Notice => InboxKind::Notice,
     };
     InboxItem {
-        id: format!("{}:{}", q.kind.as_str(), q.id),
+        id: q.item_id(),
         kind,
         open: q.status == QuestionStatus::Open,
         urgent: q.status == QuestionStatus::Open && q.priority.at_least_urgent(),
@@ -258,7 +260,7 @@ fn question_items(conn: &Connection, f: &Filter, kind: QuestionKind) -> ApiResul
     }
     if f.status.done() {
         let done = match kind {
-            QuestionKind::Question => QuestionStatus::Answered,
+            QuestionKind::Question | QuestionKind::Bundle => QuestionStatus::Answered,
             QuestionKind::Notice => QuestionStatus::Acknowledged,
         };
         out.extend(take(Some(done))?);
@@ -273,6 +275,7 @@ pub fn list(conn: &Connection, f: &Filter) -> ApiResult<Vec<InboxItem>> {
     let mut items = Vec::new();
     if wants(f, InboxKind::Question) {
         items.extend(question_items(conn, f, QuestionKind::Question)?);
+        items.extend(question_items(conn, f, QuestionKind::Bundle)?);
     }
     if wants(f, InboxKind::Notice) {
         items.extend(question_items(conn, f, QuestionKind::Notice)?);
@@ -336,8 +339,10 @@ pub struct Counts {
 /// The counts of the open items, of every project or of one.
 pub fn counts(conn: &Connection, project: Option<&str>) -> ApiResult<Counts> {
     let q = questions::open_total(conn, project, Some(QuestionKind::Question))?;
+    let b = questions::open_total(conn, project, Some(QuestionKind::Bundle))?;
     let n = questions::open_total(conn, project, Some(QuestionKind::Notice))?;
-    let (question, notice) = (q.open, n.open);
+    // A bundle counts once, as a question.
+    let (question, notice) = (q.open + b.open, n.open);
     let f = Filter {
         status: Status::Open,
         kind: None,
@@ -356,8 +361,8 @@ pub fn counts(conn: &Connection, project: Option<&str>) -> ApiResult<Counts> {
     }
     Ok(Counts {
         open: question + notice + mail + system,
-        urgent: q.urgent + n.urgent,
-        critical: q.critical + n.critical,
+        urgent: q.urgent + b.urgent + n.urgent,
+        critical: q.critical + b.critical + n.critical,
         question,
         notice,
         mail,

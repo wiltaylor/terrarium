@@ -165,6 +165,11 @@ pub struct HostCapabilities {
     /// default is "off".
     #[serde(default)]
     pub display: DisplayCapability,
+    /// The host agent sends `metrics` frames (CPU, memory, network, disk)
+    /// when the daemon asks in `welcome`. An older host agent sends none:
+    /// false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub metrics: bool,
 }
 
 /// What the host agent can do for target displays (docs/host-protocol.md,

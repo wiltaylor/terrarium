@@ -1,13 +1,15 @@
 //! Questions to the operator (PLAN §12e, docs/api.md §6.8).
 //!
 //! - `GET|POST /api/agents/{id}/questions`: the questions and notices of
-//!   an agent; a leader asks a question or sends a notice (`kind:
-//!   "notice"`), with `wait: true` also a `question` wait on it.
+//!   an agent; a leader asks a question, sends a notice (`kind:
+//!   "notice"`), or asks a bundle of related questions (`kind: "bundle"`
+//!   with `items`), with `wait: true` also a `question` wait on it.
 //! - `GET /api/questions?status=&project=&agent=&kind=`: the questions and
 //!   notices that the caller may read.
 //! - `GET|PATCH /api/questions/{id}`.
 //! - `POST /api/questions/{id}/answer`: the operator, or a sysadmin agent
-//!   for the question of another agent. A notice is `409`.
+//!   for the question of another agent. A notice is `409`. A bundle takes
+//!   `items`, with an answer for each item.
 //! - `POST /api/questions/{id}/ack`: the same rights, for a notice. A
 //!   question is `409`.
 //! - `POST /api/questions/{id}/retract`: the asking leader or the
@@ -28,8 +30,8 @@ use crate::policy;
 use crate::store::agents::{self, AgentView};
 use crate::store::mail::Address;
 use crate::store::questions::{
-    self, Filter, NewQuestion, OptionRef, Priority, Question, QuestionKind, QuestionPatch,
-    QuestionStatus,
+    self, Answer, BundleItem, Filter, ItemAnswer, NewQuestion, OptionRef, Priority, Question,
+    QuestionKind, QuestionPatch, QuestionStatus,
 };
 use crate::store::waits::{self, NewWait, Wait, WaitKind};
 use crate::waits as rt;
@@ -194,16 +196,46 @@ async fn show(
     Ok(Json(find(&state, &actor, id).await?))
 }
 
+/// One item of a bundle in an ask or an update.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ItemBody {
+    text: String,
+    #[serde(default)]
+    options: Vec<String>,
+    #[serde(default)]
+    context: Option<String>,
+}
+
+impl From<ItemBody> for BundleItem {
+    fn from(b: ItemBody) -> Self {
+        BundleItem {
+            text: b.text,
+            options: b.options,
+            context: b.context,
+            ..BundleItem::default()
+        }
+    }
+}
+
+fn items_of(items: Vec<ItemBody>) -> Vec<BundleItem> {
+    items.into_iter().map(BundleItem::from).collect()
+}
+
 /// The body of `POST /api/agents/{id}/questions`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AskBody {
-    /// `question` (the default) or `notice`.
+    /// `question` (the default), `notice`, or `bundle`.
     #[serde(default)]
     kind: QuestionKind,
+    /// The question, the notice, or the summary of a bundle.
     text: String,
     #[serde(default)]
     options: Vec<String>,
+    /// The questions of a bundle: 2 to 20.
+    #[serde(default)]
+    items: Vec<ItemBody>,
     #[serde(default)]
     context: Option<String>,
     #[serde(default)]
@@ -284,7 +316,7 @@ async fn ask(
     let a = find_agent(&state, &actor, id).await?;
     let key = a.agent.id.to_string();
     let what = match b.kind {
-        QuestionKind::Question => "asking the operator",
+        QuestionKind::Question | QuestionKind::Bundle => "asking the operator",
         QuestionKind::Notice => "sending a notice to the operator",
     };
     policy::ask_question(&actor, &key, &a.agent.project, what)?;
@@ -308,6 +340,7 @@ async fn ask(
         kind: b.kind,
         text: b.text,
         options: b.options,
+        items: items_of(b.items),
         context: b.context,
         card: b.card,
         priority: b.priority.unwrap_or_default(),
@@ -346,6 +379,9 @@ struct PatchBody {
     /// `[]` or `null` clears the options.
     #[serde(default, deserialize_with = "nullable")]
     options: Option<Option<Vec<String>>>,
+    /// The new items of a bundle, all of them.
+    #[serde(default)]
+    items: Option<Vec<ItemBody>>,
     #[serde(default, deserialize_with = "nullable")]
     context: Option<Option<String>>,
     #[serde(default, deserialize_with = "nullable")]
@@ -368,6 +404,7 @@ async fn update(
     let patch = QuestionPatch {
         text: b.text,
         options: b.options.map(Option::unwrap_or_default),
+        items: b.items.map(items_of),
         context: b.context,
         card: b.card,
         priority: b.priority,
@@ -390,6 +427,12 @@ struct AnswerBody {
     /// A label, or a 0-based index.
     #[serde(default)]
     option: Option<OptionRef>,
+    /// A bundle: one entry for each item, in order.
+    #[serde(default)]
+    items: Option<Vec<ItemAnswer>>,
+    /// The revision that the answerer saw: another one is `409`.
+    #[serde(default)]
+    revision: Option<i64>,
 }
 
 /// `POST /api/questions/{id}/answer`.
@@ -403,12 +446,16 @@ async fn answer(
     policy::answer_question(&actor, &q.agent)?;
     let by = Address::from_actor(&actor);
     let qid = q.id.clone();
+    let a = Answer {
+        text: b.answer,
+        option: b.option,
+        items: b.items,
+        revision: b.revision,
+    };
     Ok(Json(
         state
             .db
-            .write(actor.label(), move |t| {
-                questions::answer(t, &qid, &by, b.answer.as_deref(), b.option.as_ref())
-            })
+            .write(actor.label(), move |t| questions::answer(t, &qid, &by, &a))
             .await?,
     ))
 }

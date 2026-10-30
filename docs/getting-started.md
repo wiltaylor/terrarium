@@ -206,10 +206,13 @@ terrarium admin agent swap terra/lead anthropic-max-20x-2
 
 Claude Code moves live, at its next request. Codex and Copilot restart
 with resume when the turn ends. A pi agent moves between API keys by a
-restart with resume. When a probe finds an account at
-100 percent, the daemon moves each agent with a pool to the next account
-with room (`TERRARIUM_AUTO_SWAP=off` turns this off). The agent page of
-the dashboard has the pool editor and **Swap**.
+restart with resume. A probe at 100 percent only sends you a mail: a
+probe can show 100 percent while the plan still serves turns. When the
+provider refuses a turn with a usage-limit error (Claude Code only, for
+now), the daemon moves an agent with a pool to the next account that did
+not hit a limit (`TERRARIUM_AUTO_SWAP=off` turns this off). An agent with
+no account left is `blocked` until the reset, and you get a mail. The
+agent page of the dashboard has the pool editor and **Swap**.
 
 #### Add a Z.ai (GLM) key
 

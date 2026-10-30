@@ -88,11 +88,11 @@ pub enum SupervisorEventKind {
     NewSession { outcome: String },
 }
 
-/// Why an agent's new turns wait (PLAN §16.2): its plan is at 100 percent,
-/// or its project spent a daily budget.
+/// Why an agent's new turns wait (PLAN §16.2): the provider refused a turn
+/// with a usage-limit error, or its project spent a daily budget.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurnHold {
-    /// When the hold ends by itself (the window reset), if known.
+    /// When the hold ends by itself (the reset), if known.
     pub until: Option<chrono::DateTime<chrono::Utc>>,
     /// For the `blocked` status reason.
     pub reason: String,
