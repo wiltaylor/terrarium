@@ -241,6 +241,15 @@ project, under `/p/<project>/logs`. The project settings screen is the
 same: it has a tab for each of General, Secrets, and Templates of
 the project, under `/p/<project>/settings`. The screens use
 `components/TabScreen.tsx`. The Logs item is active on each of its tabs.
+The project items are Agents, Board, Repos, Logs, Knowledge, and Schedules.
+The **Board** item (`features/board/BoardScreen.tsx`) has a tab for each of
+Cards, Versions, and Artifacts (`BOARD_TABS`). The Cards tab is the board
+at `/p/<project>/board`, so a `?card=` link keeps its path. The other tabs
+are under `/p/<project>/board/versions` and `/p/<project>/board/artifacts`.
+The **Knowledge** item (`features/knowledge/KnowledgePage.tsx`) has a tab
+for each of Wiki and Memory (`KNOWLEDGE_TABS`), under
+`/p/<project>/knowledge`. The Board and Knowledge items are active on each
+of their tabs.
 The **Repos** item of a project (after Board) opens `/p/<project>/repos`
 (`features/repos/ReposPage.tsx`): the repos, and **Add repo**. A repo opens
 its browser (`features/repos/RepoPage.tsx`, see "The repo browser").
@@ -605,11 +614,12 @@ prefix or budget scope. The daemon also has `project`, `since`, `until`, and
 | `/p/:project/logs/mail` | Project logs, Mail tab: the mail log of one project; reply from the project inbox, make card | `GET /api/mail`, `POST .../inbox/{id}/reply`, `POST .../cards` (`from_mail`) |
 | `/p/:project/logs/events` | Project logs, Events tab: the event log of one project, with the kind and agent filters (the agents of the project only) | `GET /api/events?since=&kind=&project=&agent=`, events socket |
 | `/p/:project/inbox`, `/p/:project/mail`, `/p/:project/logs` | Gone: redirect to `/p/:project/logs/mail` (`app/nav.ts` `MOVED_ROUTES`). The redirect keeps the query. | none |
-| `/p/:project/board` | Board, drag and drop, ETA countdowns, question badges, card drawer with its questions (see "The board") | `GET .../board`, `PATCH /api/cards/{id}`, `POST .../comments`, `GET .../events`, `DELETE /api/cards/{id}`, `GET /api/questions?project=\|card=`, `PATCH /api/questions/{id}` (`card`), `POST /api/questions/{id}/answer\|ack\|retract` |
-| `/p/:project/memory` | Memory list, detail, graph | `GET .../memories`, `GET /api/memories/{project/MEM-n}/graph` |
-| `/p/:project/wiki/*path` | Page tree, render, edit, history, create | `GET .../wiki`, `GET`, `PUT /api/wiki/{project/path}`, `revisions`, `diff`, `restore`, `backlinks`, `review` |
-| `/p/:project/artifacts/:id?` | Artifact viewer, upload, delete | `GET .../artifacts`, `.../artifacts/usage`, `POST .../artifacts` (multipart), `POST /api/artifacts/{id}/url` |
-| `/p/:project/versions/:id?` | Version timeline, review, new version | `GET`, `POST .../versions`, `POST /api/versions/{id}/submit|approve|reject|release`, `compare` |
+| `/p/:project/board` | Board, Cards tab: drag and drop, ETA countdowns, question badges, version chips and the Version filter (`?version=`), card drawer with its questions (see "The board") | `GET .../board`, `GET .../versions`, `PATCH /api/cards/{id}`, `POST .../comments`, `GET .../events`, `DELETE /api/cards/{id}`, `GET /api/questions?project=\|card=`, `PATCH /api/questions/{id}` (`card`), `POST /api/questions/{id}/answer\|ack\|retract` |
+| `/p/:project/board/versions/:id?` | Board, Versions tab: version timeline, review, new version | `GET`, `POST .../versions`, `POST /api/versions/{id}/submit|approve|reject|release`, `compare` |
+| `/p/:project/board/artifacts/:id?` | Board, Artifacts tab: artifact viewer, upload, delete | `GET .../artifacts`, `.../artifacts/usage`, `POST .../artifacts` (multipart), `POST /api/artifacts/{id}/url` |
+| `/p/:project/knowledge/wiki/*path` | Knowledge, Wiki tab: page tree, render, edit, history, create | `GET .../wiki`, `GET`, `PUT /api/wiki/{project/path}`, `revisions`, `diff`, `restore`, `backlinks`, `review` |
+| `/p/:project/knowledge/memory` | Knowledge, Memory tab: memory list, detail, graph | `GET .../memories`, `GET /api/memories/{project/MEM-n}/graph` |
+| `/p/:project/versions/:id?`, `/p/:project/artifacts/:id?`, `/p/:project/wiki/*path`, `/p/:project/memory`, `/p/:project/knowledge` | Gone: redirect to the Board and Knowledge tabs (`app/nav.ts` `MOVED_ROUTES`). The wiki redirect keeps the page path, and each redirect keeps the query. The daemon's `Version.url` and review mail still link `/p/<project>/versions/<id>`. `/p/:project/knowledge` opens the Wiki tab. | none |
 | `/p/:project/spend` | Gone: redirects to `/` (`app/nav.ts` `MOVED_ROUTES`). The daemon's budget alert mail still links it. | none |
 | `/p/:project/schedules` | Schedules of the project and the global ones, scope filter, run history, run now, enable, create, edit, delete | `GET /api/schedules?project=`, `POST /api/schedules`, `PATCH`, `DELETE /api/schedules/{id}`, `POST .../run\|enable\|disable`, `GET .../runs?limit=&cursor=` (docs/api.md §19) |
 | `/schedules` | All schedules, grouped by scope | `GET /api/schedules` and the calls above |
@@ -666,6 +676,16 @@ hosts first (docs/api.md §17.1). The model is `features/home/hosts.ts`.
 `features/board/BoardPage.tsx` shows the columns, and the card drawer
 opens from `?card=<id>`. A `card` or `board` event of the project reloads
 the board after 300 ms.
+
+**Versions.** The board reads the versions of the project once
+(`GET /api/projects/{name}/versions`), and a `version.*` event of the
+project reads them again after 300 ms. A card is in a version when
+`Version.cards` has it; a card can be in several versions
+(`features/board/versions.ts`). Each card shows a chip for each of its
+versions, with the name in the status colour. A click on a chip selects
+that version in the **Version** filter. The filter has "Any version",
+each version with its status, and "No version". The filter is in the URL
+query: `?version=<id>`, or `?version=none`.
 
 **ETAs.** A card with an `eta_at` (docs/api.md §8) shows a countdown chip
 below its title: "34m 05s left" under an hour, "1h 12m left" above, and

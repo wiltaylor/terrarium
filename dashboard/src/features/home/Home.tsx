@@ -188,7 +188,7 @@ export function Home() {
                         <Match when={item.kind === "version" && item}>
                           {(v) => (
                             <>
-                              <A href={`/p/${v().project}/versions/${v().version.id}`}>
+                              <A href={`/p/${v().project}/board/versions/${v().version.id}`}>
                                 <strong>{v().version.name}</strong>
                               </A>{" "}
                               is in review. <span class="muted">{v().version.notes}</span>
@@ -198,7 +198,7 @@ export function Home() {
                         <Match when={item.kind === "page" && item}>
                           {(p) => (
                             <>
-                              <A href={`/p/${p().project}/wiki/${p().page.path}`}>
+                              <A href={`/p/${p().project}/knowledge/wiki/${p().page.path}`}>
                                 <strong>{p().page.title}</strong>
                               </A>{" "}
                               is ready for review. <span class="muted">by {p().page.author_name ?? p().page.author ?? "someone"}</span>

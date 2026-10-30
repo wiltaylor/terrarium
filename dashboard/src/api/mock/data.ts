@@ -634,7 +634,8 @@ ${XSS_DOCUMENT}
     },
     {
       id: fakeUlid("ver", 1), project: "terrarium", name: "v0.1.0", status: "in_review", notes: "Phase 1: one Claude agent end to end. See [[reports/phase-1]].",
-      cards: ["TER-12", "TER-16"].map(cardRef), artifacts: ["ART-2", "ART-4"].map(artRef),
+      // TER-11 is in v0.0.1 too: a card can be in several versions (two chips on the board).
+      cards: ["TER-11", "TER-12", "TER-16"].map(cardRef), artifacts: ["ART-2", "ART-4"].map(artRef),
       reviews: [{ id: fakeUlid("rev", 3), author: lead.addr, author_name: lead.label, decision: "submitted", comment: "Please look.", created_at: ago(50) }],
       created_by: lead.addr, created_by_name: lead.label, created_at: ago(60 * 2), submitted_at: ago(50), submitted_by: lead.addr, git_ref: "main@4f2a9c1",
       url: `/p/terrarium/versions/${fakeUlid("ver", 1)}`,

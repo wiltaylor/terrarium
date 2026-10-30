@@ -8,11 +8,27 @@ export const PROJECT_ITEMS = [
   { path: "repos", label: "Repos" },
   // The logs of the project (PROJECT_LOGS_TABS): every message and every event that touches it.
   { path: "logs", label: "Logs" },
-  { path: "wiki", label: "Wiki" },
-  { path: "memory", label: "Memory" },
+  // The wiki and the memory of the project (KNOWLEDGE_TABS).
+  { path: "knowledge", label: "Knowledge" },
+  { path: "schedules", label: "Schedules" },
+] as const;
+
+/**
+ * The tabs of the board screen, in order. Each is a route under
+ * /p/:project/board. The Cards tab has the empty path: it is the board at
+ * /p/:project/board, so a `?card=` link opens the card drawer.
+ */
+export const BOARD_TABS = [
+  { path: "", label: "Cards" },
   { path: "versions", label: "Versions" },
   { path: "artifacts", label: "Artifacts" },
-  { path: "schedules", label: "Schedules" },
+] as const;
+
+/** The tabs of the knowledge screen, in order. Each is a route under /p/:project/knowledge. */
+export const KNOWLEDGE_TABS = [
+  // The wiki pages; the rest of the path is the page path.
+  { path: "wiki", label: "Wiki" },
+  { path: "memory", label: "Memory" },
 ] as const;
 
 /**
@@ -105,6 +121,13 @@ export const PROJECT_LOGS_TABS = [
  *   `/p/:project/settings` opens the first tab. The Repos panel left the
  *   General tab for the Repos item of the project (/p/:project/repos); the
  *   General tab keeps its path.
+ * - The project Versions and Artifacts pages are tabs of the board screen
+ *   (BOARD_TABS). The daemon puts `/p/<project>/versions/<id>` in
+ *   `Version.url` and in the review mail, so the old paths stay as
+ *   redirects.
+ * - The project Wiki and Memory pages are tabs of the knowledge screen
+ *   (KNOWLEDGE_TABS). The wiki redirect keeps the page path (`*path`).
+ *   `/p/:project/knowledge` opens the Wiki tab.
  */
 export const MOVED_ROUTES = [
   { path: "/p/:project/spend", to: "/" },
@@ -124,22 +147,35 @@ export const MOVED_ROUTES = [
   { path: "/p/:project/secrets", to: "/p/:project/settings/secrets" },
   { path: "/p/:project/templates", to: "/p/:project/settings/templates" },
   { path: "/p/:project/settings", to: "/p/:project/settings/general" },
+  { path: "/p/:project/versions", to: "/p/:project/board/versions" },
+  { path: "/p/:project/versions/:id", to: "/p/:project/board/versions/:id" },
+  { path: "/p/:project/artifacts", to: "/p/:project/board/artifacts" },
+  { path: "/p/:project/artifacts/:id", to: "/p/:project/board/artifacts/:id" },
+  { path: "/p/:project/wiki/*path", to: "/p/:project/knowledge/wiki/*path" },
+  { path: "/p/:project/memory", to: "/p/:project/knowledge/memory" },
+  { path: "/p/:project/knowledge", to: "/p/:project/knowledge/wiki" },
 ] as const;
 
-/** The new place of a moved path, or undefined. */
+/**
+ * The new place of a moved path, or undefined. A `/*name` splat at the end
+ * of a path takes the rest of the path, which can be empty. The rest goes
+ * into the same splat of `to`, with no slash when it is empty.
+ */
 export function movedTo(pathname: string): string | undefined {
   for (const r of MOVED_ROUTES) {
     const names: string[] = [];
     const re = new RegExp(
-      `^${r.path.replace(/:([a-z]+)/g, (_m, name: string) => {
-        names.push(name);
-        return "([^/]+)";
+      `^${r.path.replace(/\/\*([a-z]+)$|:([a-z]+)/g, (_m, splat: string | undefined, name: string | undefined) => {
+        names.push((splat ?? name)!);
+        return splat ? "(?:/(.*?))?" : "([^/]+)";
       })}/?$`,
     );
     const m = re.exec(pathname);
     if (!m) continue;
-    const values = Object.fromEntries(names.map((n, i) => [n, m[i + 1]!]));
-    return r.to.replace(/:([a-z]+)/g, (_x, name: string) => values[name] ?? "");
+    const values = Object.fromEntries(names.map((n, i) => [n, m[i + 1] ?? ""]));
+    return r.to.replace(/\/\*([a-z]+)$|:([a-z]+)/g, (_x, splat: string | undefined, name: string | undefined) =>
+      splat ? (values[splat] ? `/${values[splat]}` : "") : (values[name!] ?? ""),
+    );
   }
   return undefined;
 }

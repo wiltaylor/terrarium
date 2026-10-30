@@ -1059,6 +1059,23 @@ button.link-button {
   font-variant-numeric: tabular-nums;
   font-weight: 600;
 }
+/* The versions of a card (features/board/versions.ts): a chip in the status colour. A click filters the board by that version. */
+.kcard-versions {
+  flex-wrap: wrap;
+  gap: 4px;
+}
+button.chip.version-chip {
+  display: inline-block;
+  border: 0;
+  border-radius: 99px;
+  padding: 0 8px;
+  line-height: inherit;
+  cursor: pointer;
+}
+button.chip.version-chip:hover {
+  text-decoration: underline;
+  filter: brightness(0.97);
+}
 /* The card of a question in the Inbox: a chip that opens the card drawer on the board. */
 a.chip.card-link {
   text-decoration: none;

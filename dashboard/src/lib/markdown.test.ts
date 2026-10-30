@@ -21,15 +21,17 @@ describe("resolveWikilink", () => {
 
   it("builds dashboard hrefs", () => {
     expect(targetHref({ kind: "card", project: "terrarium", id: "TER-1" })).toBe("/p/terrarium/board?card=TER-1");
-    expect(targetHref({ kind: "page", project: "a b", path: "x/y z" })).toBe("/p/a%20b/wiki/x/y%20z");
+    expect(targetHref({ kind: "page", project: "a b", path: "x/y z" })).toBe("/p/a%20b/knowledge/wiki/x/y%20z");
+    expect(targetHref({ kind: "memory", project: "terrarium", id: "MEM-17" })).toBe("/p/terrarium/knowledge/memory?id=MEM-17");
+    expect(targetHref({ kind: "version", project: "terrarium", name: "v0.1.0" })).toBe("/p/terrarium/board/versions/v0.1.0");
   });
 });
 
 describe("renderWiki", () => {
   it("renders wikilinks and marks missing pages", () => {
     const html = renderWiki("See [[designs/runner-v2]] and [[nope]] and [[TER-12]].", ctx);
-    expect(html).toContain('href="/p/terrarium/wiki/designs/runner-v2"');
-    expect(html).toMatch(/class="wikilink wikilink-page missing" href="\/p\/terrarium\/wiki\/nope"/);
+    expect(html).toContain('href="/p/terrarium/knowledge/wiki/designs/runner-v2"');
+    expect(html).toMatch(/class="wikilink wikilink-page missing" href="\/p\/terrarium\/knowledge\/wiki\/nope"/);
     expect(html).toContain('href="/p/terrarium/board?card=TER-12"');
   });
 

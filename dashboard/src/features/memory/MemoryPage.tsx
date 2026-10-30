@@ -1,3 +1,6 @@
+// The Memory tab of the knowledge screen (app/nav.ts KNOWLEDGE_TABS): the
+// memories of the project, and the graph of the memory of `?id=`.
+
 import { A, useParams, useSearchParams } from "@solidjs/router";
 import { createMemo, createResource, createSignal, For, Show } from "solid-js";
 import { Empty, PageHead } from "../../components/ui";
@@ -44,7 +47,7 @@ export default function MemoryPage() {
 
   return (
     <>
-      <PageHead title={`Memory · ${params.project}`}>
+      <PageHead title="Memory" level={2}>
         <input type="search" placeholder="Search memories" value={q()} onInput={(e) => setQ(e.currentTarget.value)} aria-label="Search" />
         <select value={tag()} onChange={(e) => setTag(e.currentTarget.value)} aria-label="Tag">
           <option value="">Any tag</option>

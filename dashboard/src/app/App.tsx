@@ -8,6 +8,7 @@ import { LoginScreen } from "./LoginScreen";
 import { Home } from "../features/home/Home";
 import { AgentsPage } from "../features/agents/AgentsPage";
 import { BoardPage } from "../features/board/BoardPage";
+import BoardScreen from "../features/board/BoardScreen";
 
 const AgentDetail = lazy(() => import("../features/agents/AgentDetail"));
 const SubscriptionsPage = lazy(() => import("../features/subscriptions/SubscriptionsPage"));
@@ -27,6 +28,7 @@ const ProjectsPage = lazy(() => import("../features/projects/ProjectsPage"));
 const ProjectSettings = lazy(() => import("../features/projects/ProjectSettings"));
 const ReposPage = lazy(() => import("../features/repos/ReposPage"));
 const RepoPage = lazy(() => import("../features/repos/RepoPage"));
+const KnowledgePage = lazy(() => import("../features/knowledge/KnowledgePage"));
 const LogsPage = lazy(() => import("../features/logs/LogsPage"));
 const SettingsPage = lazy(() => import("../features/settings/SettingsPage"));
 const AccountPage = lazy(() => import("../features/settings/AccountPage"));
@@ -91,7 +93,12 @@ export function App() {
         </Route>
         <Route path="/p/:project" component={ProjectIndex} />
         <Route path="/p/:project/agents" component={AgentsPage} />
-        <Route path="/p/:project/board" component={BoardPage} />
+        {/* The board screen: the tabs Cards, Versions, and Artifacts (nav.ts BOARD_TABS). The Cards tab is the index route: /p/:project/board. */}
+        <Route path="/p/:project/board" component={BoardScreen}>
+          <Route path="/" component={BoardPage} />
+          <Route path="/versions/:id?" component={VersionsPage} />
+          <Route path="/artifacts/:id?" component={ArtifactsPage} />
+        </Route>
         {/* The repos of the project, and the browser of one repo (its trees: main and each agent checkout). */}
         <Route path="/p/:project/repos" component={ReposPage} />
         <Route path="/p/:project/repos/:repo" component={RepoPage} />
@@ -106,10 +113,11 @@ export function App() {
           <Route path="/secrets" component={SecretsPage} />
           <Route path="/templates" component={TemplatesPage} />
         </Route>
-        <Route path="/p/:project/memory" component={MemoryPage} />
-        <Route path="/p/:project/wiki/*path" component={WikiPage} />
-        <Route path="/p/:project/artifacts/:id?" component={ArtifactsPage} />
-        <Route path="/p/:project/versions/:id?" component={VersionsPage} />
+        {/* The knowledge screen: the tabs Wiki and Memory (nav.ts KNOWLEDGE_TABS). /p/:project/knowledge redirects to the Wiki tab. */}
+        <Route path="/p/:project/knowledge" component={KnowledgePage}>
+          <Route path="/wiki/*path" component={WikiPage} />
+          <Route path="/memory" component={MemoryPage} />
+        </Route>
         <Route path="/p/:project/schedules" component={SchedulesPage} />
         <Show when={isMock}>
           <Route path="/dev/xss" component={XssPage} />

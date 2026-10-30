@@ -1,23 +1,24 @@
 import { A, useParams, useSearchParams } from "@solidjs/router";
-import { createEffect, createResource, createSignal, For, on, onCleanup, Show } from "solid-js";
+import { createEffect, createMemo, createResource, createSignal, For, on, onCleanup, Show } from "solid-js";
 import { createPagedList } from "../../components/paged";
 import { HoldBadge } from "../../components/HoldBadge";
 import { StatusBadge } from "../../components/StatusBadge";
 import { ConfirmButton, Drawer, ErrorBanner, LoadMore, Modal, PageHead } from "../../components/ui";
-import type { Card, Question } from "../../api/types";
+import type { Card, Question, Version } from "../../api/types";
 import { ago, compact, humanize } from "../../lib/format";
 import { countdown, doneSummary, etaStopped, resolveEta, tickInterval } from "../../lib/eta";
 import { cardsIn, createBoardStore } from "../../stores/board";
 import { cardSessionRows, commentSessions, sessionHref, sessionRange } from "./sessions";
 import { CardQuestions } from "./CardQuestions";
 import { type CardQuestionBadge, cardQuestionBadges, isCardQuestionEvent, linkable } from "./questions";
+import { matchesVersion, parseVersionFilter, VERSION_CHIP, versionOptions, versionQuery, versionsByCard } from "./versions";
 import { agents, api, events } from "../../stores";
 
 type Drop = { column: string; index: number };
 
 export function BoardPage() {
   const params = useParams<{ project: string }>();
-  const [search, setSearch] = useSearchParams<{ card?: string }>();
+  const [search, setSearch] = useSearchParams<{ card?: string; version?: string }>();
   const board = createBoardStore(api);
   const [dragging, setDragging] = createSignal<string | null>(null);
   const [drop, setDrop] = createSignal<Drop | null>(null);
@@ -45,6 +46,31 @@ export function BoardPage() {
   createEffect(on(() => params.project, () => void loadQuestions()));
   const badges = () => cardQuestionBadges(questions());
 
+  // The versions of the project: the Version filter and the version chips of the cards.
+  const [versions, setVersions] = createSignal<Version[] | undefined>(undefined);
+  let vGen = 0;
+  const loadVersions = async () => {
+    const mine = ++vGen;
+    try {
+      const rows = await api.versions.list(params.project);
+      if (mine === vGen) setVersions(rows);
+    } catch {
+      // A daemon or a caller without versions gets no chips and no filter.
+      if (mine === vGen) setVersions([]);
+    }
+  };
+  createEffect(
+    on(
+      () => params.project,
+      () => {
+        setVersions(undefined);
+        void loadVersions();
+      },
+    ),
+  );
+  const byCard = createMemo(() => versionsByCard(versions() ?? []));
+  const versionFilter = () => parseVersionFilter(search.version, versions());
+
   // One shared clock for the ETA countdowns: 1 s while a countdown is under an hour, else 30 s; no timer without one.
   const [now, setNow] = createSignal(Date.now());
   createEffect(() => {
@@ -57,7 +83,8 @@ export function BoardPage() {
 
   let reloadTimer: ReturnType<typeof setTimeout> | undefined;
   let questionTimer: ReturnType<typeof setTimeout> | undefined;
-  // Live: card and board events of this project reload the board; question events reload the badges.
+  let versionTimer: ReturnType<typeof setTimeout> | undefined;
+  // Live: card and board events of this project reload the board; question events reload the badges; version events reload the versions.
   const off = events.on((e) => {
     if ((e.kind === "card" || e.kind === "board") && e.project === params.project && !dragging()) {
       clearTimeout(reloadTimer);
@@ -67,16 +94,22 @@ export function BoardPage() {
       clearTimeout(questionTimer);
       questionTimer = setTimeout(() => void loadQuestions(), 300);
     }
+    if (e.kind.startsWith("version.") && e.project === params.project) {
+      clearTimeout(versionTimer);
+      versionTimer = setTimeout(() => void loadVersions(), 300);
+    }
   });
   onCleanup(() => {
     off();
     clearTimeout(reloadTimer);
     clearTimeout(questionTimer);
+    clearTimeout(versionTimer);
   });
 
   const labels = () => [...new Set(board.state.board?.cards.flatMap((c) => c.labels) ?? [])].sort();
   const assignees = () => [...new Set(board.state.board?.cards.map((c) => c.assignee_name ?? c.assignee).filter((a): a is string => !!a) ?? [])].sort();
-  const visible = (c: Card) => (!label() || c.labels.includes(label())) && (!assignee() || (c.assignee_name ?? c.assignee) === assignee());
+  const visible = (c: Card) =>
+    (!label() || c.labels.includes(label())) && (!assignee() || (c.assignee_name ?? c.assignee) === assignee()) && matchesVersion(c.id, versionFilter(), byCard());
 
   const dropIndex = (columnEl: HTMLElement, y: number) => {
     const cards = [...columnEl.querySelectorAll<HTMLElement>("[data-card]")].filter((el) => el.dataset.card !== dragging());
@@ -99,11 +132,18 @@ export function BoardPage() {
 
   return (
     <>
-      <PageHead title={`Board · ${params.project}`}>
+      <PageHead title="Cards" level={2}>
         <select value={label()} onChange={(e) => setLabel(e.currentTarget.value)} aria-label="Filter by label">
           <option value="">Any label</option>
           <For each={labels()}>{(l) => <option value={l}>{l}</option>}</For>
         </select>
+        <Show when={versions()}>
+          {(vs) => (
+            <select value={versionFilter()} onChange={(e) => setSearch({ version: versionQuery(e.currentTarget.value) })} aria-label="Filter by version">
+              <For each={versionOptions(vs())}>{(o) => <option value={o.value}>{o.label}</option>}</For>
+            </select>
+          )}
+        </Show>
         <select value={assignee()} onChange={(e) => setAssignee(e.currentTarget.value)} aria-label="Filter by assignee">
           <option value="">Any assignee</option>
           <For each={assignees()}>{(a) => <option value={a}>{a}</option>}</For>
@@ -172,6 +212,8 @@ export function BoardPage() {
                             card={card}
                             now={now()}
                             questions={badges().get(card.id)}
+                            versions={byCard().get(card.id) ?? []}
+                            onVersion={(id) => setSearch({ version: id })}
                             hidden={!visible(card)}
                             dragging={dragging() === card.id}
                             onOpen={() => setSearch({ card: card.id })}
@@ -265,6 +307,10 @@ function KCard(props: {
   card: Card;
   now: number;
   questions?: CardQuestionBadge;
+  /** The versions that have the card. */
+  versions: Version[];
+  /** A click on a version chip: filter the board by that version. */
+  onVersion: (id: string) => void;
   hidden: boolean;
   dragging: boolean;
   onOpen: () => void;
@@ -306,6 +352,27 @@ function KCard(props: {
       <div class="row small">
         <For each={props.card.labels}>{(l) => <span class="chip">{l}</span>}</For>
       </div>
+      <Show when={props.versions.length}>
+        <div class="row small kcard-versions">
+          <For each={props.versions}>
+            {(v) => (
+              <button
+                type="button"
+                class={`chip version-chip ${VERSION_CHIP[v.status]}`}
+                title={`In version ${v.name} (${humanize(v.status)}). Show the cards of this version.`}
+                // A click filters the board; it does not open the card.
+                onClick={(e) => {
+                  e.stopPropagation();
+                  props.onVersion(v.id);
+                }}
+                onKeyDown={(e) => e.stopPropagation()}
+              >
+                {v.name}
+              </button>
+            )}
+          </For>
+        </div>
+      </Show>
       <Show when={props.card.assignee}>
         <div class="spread small">
           <span>{owner()?.name ?? props.card.assignee_name ?? props.card.assignee}</span>

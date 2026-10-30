@@ -280,7 +280,7 @@ describe("mock parity with docs/api.md", () => {
     await expect(api.versions.update(v.id, { notes: "x" })).rejects.toMatchObject({ code: "conflict" });
     const c = await api.versions.compare(v.id, "terrarium/v0.1.0");
     expect(c.cards.added).toEqual(["TER-13"]);
-    expect(c.cards.removed.sort()).toEqual(["TER-12", "TER-16"]);
+    expect(c.cards.removed.sort()).toEqual(["TER-11", "TER-12", "TER-16"]);
   });
 
   // ----- docs/api.md §16: subscriptions, quota, usage, login sessions -----

@@ -1,15 +1,17 @@
+// The Versions tab of the board screen (app/nav.ts BOARD_TABS): the version
+// timeline of the project and the version of the URL (/p/:project/board/versions/:id).
+
 import { A, useParams } from "@solidjs/router";
 import { createMemo, createResource, createSignal, For, onCleanup, Show } from "solid-js";
 import { ArtifactViewer } from "../../components/ArtifactViewer";
 import { Markdown } from "../../components/Markdown";
 import { Empty, ErrorBanner, Modal, PageHead } from "../../components/ui";
-import type { Version, VersionStatus } from "../../api/types";
+import type { Version } from "../../api/types";
 import { parseList } from "../agents/form";
 import { ago, humanize } from "../../lib/format";
 import { renderWiki } from "../../lib/markdown";
 import { api, events } from "../../stores";
-
-const CHIP: Record<VersionStatus, string> = { draft: "", in_review: "warn", approved: "ok", rejected: "bad", released: "info" };
+import { VERSION_CHIP as CHIP } from "../board/versions";
 
 export default function VersionsPage() {
   const params = useParams<{ project: string; id?: string }>();
@@ -24,7 +26,7 @@ export default function VersionsPage() {
 
   return (
     <>
-      <PageHead title={`Versions · ${params.project}`}>
+      <PageHead title="Versions" level={2}>
         <button class="primary" onClick={() => setCreating(true)}>
           New version
         </button>
@@ -39,7 +41,7 @@ export default function VersionsPage() {
               <For each={list()}>
                 {(v) => (
                   <li>
-                    <A href={`/p/${params.project}/versions/${v.id}`} style={{ "font-weight": current()?.id === v.id ? 700 : 500 }}>
+                    <A href={`/p/${params.project}/board/versions/${v.id}`} style={{ "font-weight": current()?.id === v.id ? 700 : 500 }}>
                       {v.name}
                     </A>{" "}
                     <span class={`chip ${CHIP[v.status]}`}>{humanize(v.status)}</span>
@@ -139,7 +141,7 @@ function VersionView(props: { version: Version; all: Version[]; onChange: () => 
                   <For each={c().pages} fallback={<span>none</span>}>
                     {(pg) => (
                       <>
-                        <A href={`/p/${props.version.project}/wiki/${pg.path}`}>{pg.path}</A>
+                        <A href={`/p/${props.version.project}/knowledge/wiki/${pg.path}`}>{pg.path}</A>
                         <span class="muted"> ({pg.from_rev ? `rev ${pg.from_rev} → ${pg.to_rev}` : `new, rev ${pg.to_rev}`}) </span>
                       </>
                     )}

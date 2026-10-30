@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import app from "./App.tsx?raw";
 import layout from "./Layout.tsx?raw";
-import { GLOBAL_ITEMS, LOGS_TABS, MOVED_ROUTES, movedTo, PROJECT_ITEMS, PROJECT_LOGS_TABS, PROJECT_SETTINGS_TABS, SETTINGS_ITEMS, SETTINGS_TABS, TOP_ITEMS } from "./nav";
+import { BOARD_TABS, GLOBAL_ITEMS, KNOWLEDGE_TABS, LOGS_TABS, MOVED_ROUTES, movedTo, PROJECT_ITEMS, PROJECT_LOGS_TABS, PROJECT_SETTINGS_TABS, SETTINGS_ITEMS, SETTINGS_TABS, TOP_ITEMS } from "./nav";
 
 describe("navigation", () => {
   it("has no Spend item; the project has Logs, not Inbox or Mail, with a route", () => {
@@ -60,7 +60,7 @@ describe("navigation", () => {
   it("has no Templates, Secrets, or Settings item under the project: they are tabs of the project settings screen, each with a route", () => {
     const paths = PROJECT_ITEMS.map((i) => i.path) as string[];
     for (const gone of ["templates", "secrets", "settings"]) expect(paths).not.toContain(gone);
-    expect(paths).toEqual(["agents", "board", "repos", "logs", "wiki", "memory", "versions", "artifacts", "schedules"]);
+    expect(paths).toEqual(["agents", "board", "repos", "logs", "knowledge", "schedules"]);
     expect(PROJECT_SETTINGS_TABS).toEqual([
       { path: "general", label: "General" },
       { path: "secrets", label: "Secrets" },
@@ -197,6 +197,13 @@ describe("navigation", () => {
       "/p/:project/secrets",
       "/p/:project/templates",
       "/p/:project/settings",
+      "/p/:project/versions",
+      "/p/:project/versions/:id",
+      "/p/:project/artifacts",
+      "/p/:project/artifacts/:id",
+      "/p/:project/wiki/*path",
+      "/p/:project/memory",
+      "/p/:project/knowledge",
     ]);
   });
 
@@ -213,7 +220,72 @@ describe("navigation", () => {
     for (const now of ["/logs/mail", "/logs/events", "/logs/audit", "/p/terrarium/logs/mail", "/p/terrarium/logs/events"]) expect(movedTo(now)).toBeUndefined();
     expect(movedTo("/mail/x")).toBeUndefined();
     // Every redirect lands on a page, not on a second redirect.
-    for (const r of MOVED_ROUTES) expect(movedTo(r.to.replace(":project", "terrarium"))).toBeUndefined();
+    for (const r of MOVED_ROUTES) {
+      const sample = r.path.replace(":project", "terrarium").replace(":id", "x1").replace("*path", "a/b");
+      const to = movedTo(sample);
+      expect(to, sample).toBeDefined();
+      expect(movedTo(to!), to).toBeUndefined();
+      expect(movedTo(r.to.replace(":project", "terrarium").replace(":id", "x1").replace("/*path", "")), r.to).toBeUndefined();
+    }
+  });
+
+  it("has Board with the tabs Cards, Versions, Artifacts, each with a route; Cards is the index route at /p/:project/board", () => {
+    expect(BOARD_TABS).toEqual([
+      { path: "", label: "Cards" },
+      { path: "versions", label: "Versions" },
+      { path: "artifacts", label: "Artifacts" },
+    ]);
+    expect(app).toMatch(/<Route path="\/p\/:project\/board" component=\{BoardScreen\}>/);
+    const start = app.indexOf('<Route path="/p/:project/board"');
+    const block = app.slice(start, app.indexOf("</Route>", start));
+    expect(block).toMatch(/path="\/" component=\{BoardPage\}/);
+    expect(block).toMatch(/path="\/versions\/:id\?" component=\{VersionsPage\}/);
+    expect(block).toMatch(/path="\/artifacts\/:id\?" component=\{ArtifactsPage\}/);
+    for (const gone of ["versions", "artifacts", "wiki", "memory"]) expect(app).not.toMatch(new RegExp(`path="/p/:project/${gone}[^"]*" component=`));
+    // The Cards tab and its `?card=` links keep the path.
+    expect(movedTo("/p/terrarium/board")).toBeUndefined();
+    for (const now of ["/p/terrarium/board/versions", "/p/terrarium/board/versions/01ABC", "/p/terrarium/board/artifacts/ART-2"]) expect(movedTo(now)).toBeUndefined();
+  });
+
+  it("has Knowledge with the tabs Wiki and Memory, each with a route; /p/:project/knowledge opens the Wiki tab", () => {
+    expect(PROJECT_ITEMS.find((i) => i.path === "knowledge")?.label).toBe("Knowledge");
+    expect(KNOWLEDGE_TABS).toEqual([
+      { path: "wiki", label: "Wiki" },
+      { path: "memory", label: "Memory" },
+    ]);
+    expect(app).toMatch(/<Route path="\/p\/:project\/knowledge" component=\{KnowledgePage\}>/);
+    const start = app.indexOf('<Route path="/p/:project/knowledge"');
+    const block = app.slice(start, app.indexOf("</Route>", start));
+    expect(block).toMatch(/path="\/wiki\/\*path" component=\{WikiPage\}/);
+    expect(block).toMatch(/path="\/memory" component=\{MemoryPage\}/);
+    expect(movedTo("/p/terrarium/knowledge")).toBe("/p/terrarium/knowledge/wiki");
+    expect(movedTo("/p/terrarium/knowledge/")).toBe("/p/terrarium/knowledge/wiki");
+    for (const now of ["/p/terrarium/knowledge/wiki", "/p/terrarium/knowledge/wiki/designs/runner-v2", "/p/terrarium/knowledge/memory"]) expect(movedTo(now)).toBeUndefined();
+  });
+
+  it("redirects the old Versions and Artifacts paths to the board tabs, with the ID", () => {
+    expect(movedTo("/p/terrarium/versions")).toBe("/p/terrarium/board/versions");
+    expect(movedTo("/p/terrarium/versions/")).toBe("/p/terrarium/board/versions");
+    // The daemon links `/p/<project>/versions/<id>` (Version.url, the review mail).
+    expect(movedTo("/p/terrarium/versions/01M5PA1A0K16V6G88P3SE78WAB")).toBe("/p/terrarium/board/versions/01M5PA1A0K16V6G88P3SE78WAB");
+    expect(movedTo("/p/my%20app/versions/v0.1.0/")).toBe("/p/my%20app/board/versions/v0.1.0");
+    expect(movedTo("/p/terrarium/artifacts")).toBe("/p/terrarium/board/artifacts");
+    expect(movedTo("/p/terrarium/artifacts/ART-2")).toBe("/p/terrarium/board/artifacts/ART-2");
+    expect(movedTo("/p/terrarium/versions/a/b")).toBeUndefined();
+  });
+
+  it("redirects the old Wiki path with its page path (a splat), and the old Memory path", () => {
+    expect(movedTo("/p/terrarium/wiki")).toBe("/p/terrarium/knowledge/wiki");
+    expect(movedTo("/p/terrarium/wiki/")).toBe("/p/terrarium/knowledge/wiki");
+    expect(movedTo("/p/terrarium/wiki/index")).toBe("/p/terrarium/knowledge/wiki/index");
+    expect(movedTo("/p/terrarium/wiki/designs/runner-v2")).toBe("/p/terrarium/knowledge/wiki/designs/runner-v2");
+    expect(movedTo("/p/terrarium/wiki/reports/2026/q4/perf%20week")).toBe("/p/terrarium/knowledge/wiki/reports/2026/q4/perf%20week");
+    expect(movedTo("/p/terrarium/wiki/designs/")).toBe("/p/terrarium/knowledge/wiki/designs");
+    expect(movedTo("/p/terrarium/wikis")).toBeUndefined();
+    expect(movedTo("/p/terrarium/memory")).toBe("/p/terrarium/knowledge/memory");
+    expect(movedTo("/p/terrarium/memory/x")).toBeUndefined();
+    // The router gives the query and the hash to the redirect (App.tsx).
+    expect(app).toMatch(/\$\{location\.search\}\$\{location\.hash\}/);
   });
 
   it("has Secrets after Skills in the global list, with a route to the page", () => {

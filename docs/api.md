@@ -3450,7 +3450,8 @@ Release points that the user reviews (PLAN §15.3). The code is in
 - `url` is the dashboard page of the version, `/p/<project>/versions/<id>`:
   absolute on `TERRARIUM_PUBLIC_URL` when it is set (the same link as the
   review mail, §13.2), else the path alone, which the dashboard opens on
-  its own origin.
+  its own origin. The dashboard redirects this path to the Versions tab of
+  the project board (`/p/<project>/board/versions/<id>`).
 
 ### 13.2 Rules
 

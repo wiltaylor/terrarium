@@ -50,13 +50,13 @@ export function targetHref(t: WikiTarget): string {
   const p = `/p/${encodeURIComponent(t.project)}`;
   switch (t.kind) {
     case "page":
-      return `${p}/wiki/${t.path.split("/").map(encodeURIComponent).join("/")}`;
+      return `${p}/knowledge/wiki/${t.path.split("/").map(encodeURIComponent).join("/")}`;
     case "card":
       return `${p}/board?card=${encodeURIComponent(t.id)}`;
     case "memory":
-      return `${p}/memory?id=${encodeURIComponent(t.id)}`;
+      return `${p}/knowledge/memory?id=${encodeURIComponent(t.id)}`;
     case "version":
-      return `${p}/versions/${encodeURIComponent(t.name)}`;
+      return `${p}/board/versions/${encodeURIComponent(t.name)}`;
   }
 }
 

@@ -71,7 +71,7 @@ describe("sanitizer: what the renderer emits survives", () => {
   it("keeps wikilinks, headings, lists, tables, code, and task lists", () => {
     const md = "# T\n\n[[index]] [[nope]]\n\n- [x] done\n- [ ] todo\n\n| a | b |\n|:-|-:|\n| 1 | 2 |\n\n```rust\nfn main() {}\n```\n\n3. three\n4. four\n\n> quote ~~old~~ **bold** _em_ `code`\n\n---\n";
     const out = sanitizeHtml(renderWiki(md, ctx));
-    expect(out).toContain('<a class="wikilink wikilink-page" href="/p/terrarium/wiki/index">');
+    expect(out).toContain('<a class="wikilink wikilink-page" href="/p/terrarium/knowledge/wiki/index">');
     expect(out).toContain('class="wikilink wikilink-page missing"');
     expect(out).toMatch(/<input (checked="" disabled=""|disabled="" checked="") type="checkbox">/);
     expect(out).toContain('<th align="left">');

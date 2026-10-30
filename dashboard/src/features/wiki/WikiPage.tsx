@@ -1,3 +1,6 @@
+// The Wiki tab of the knowledge screen (app/nav.ts KNOWLEDGE_TABS): the page
+// tree and the page of the URL (/p/:project/knowledge/wiki/*path).
+
 import { A, useParams } from "@solidjs/router";
 import { createMemo, createResource, createSignal, For, Match, Show, Switch, type JSX } from "solid-js";
 import { Markdown } from "../../components/Markdown";
@@ -24,7 +27,7 @@ function Tree(props: { nodes: TreeNode[]; project: string; current: string }): J
           <li>
             <Show when={n.page} fallback={<div class="dir">{n.name}/</div>}>
               {(p) => (
-                <A href={`/p/${props.project}/wiki/${p().path}`} class={props.current === p().path ? "active" : ""}>
+                <A href={`/p/${props.project}/knowledge/wiki/${p().path}`} class={props.current === p().path ? "active" : ""}>
                   {p().title}
                   <Show when={p().status === "ready_for_review"}>
                     {" "}
@@ -106,7 +109,7 @@ export default function WikiPage() {
 
   return (
     <>
-      <PageHead title={`Wiki · ${params.project}`}>
+      <PageHead title="Wiki" level={2}>
         <input type="search" placeholder="Search pages" value={q()} onInput={(e) => setQ(e.currentTarget.value)} aria-label="Search pages" />
       </PageHead>
       <ErrorBanner error={error()} onDismiss={() => setError(null)} />
@@ -129,7 +132,7 @@ export default function WikiPage() {
             <article class="stack">
               <div class="spread">
                 <div>
-                  <h1 style={{ margin: 0 }}>{p().title}</h1>
+                  <h3 style={{ margin: 0 }}>{p().title}</h3>
                   <div class="muted small">
                     {p().path} · rev {p().rev} · {p().author_name}, {ago(p().updated_at)}
                     <Show when={p().status}>
@@ -180,7 +183,7 @@ export default function WikiPage() {
                       <For each={backlinks()}>
                         {(b) => (
                           <>
-                            <A href={`/p/${params.project}/wiki/${b.path}`}>{b.title}</A>{" "}
+                            <A href={`/p/${params.project}/knowledge/wiki/${b.path}`}>{b.title}</A>{" "}
                           </>
                         )}
                       </For>

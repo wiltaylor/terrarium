@@ -1,3 +1,6 @@
+// The Artifacts tab of the board screen (app/nav.ts BOARD_TABS): the files of
+// the project and the viewer of the artifact of the URL (/p/:project/board/artifacts/:id).
+
 import { A, useNavigate, useParams } from "@solidjs/router";
 import { createResource, createSignal, For, Show } from "solid-js";
 import { ArtifactViewer } from "../../components/ArtifactViewer";
@@ -21,7 +24,7 @@ export default function ArtifactsPage() {
       await api.artifacts.remove(a.uid);
       void refetch();
       void refetchUsage();
-      navigate(`/p/${params.project}/artifacts`);
+      navigate(`/p/${params.project}/board/artifacts`);
     } catch (e) {
       setError(e);
     }
@@ -29,7 +32,7 @@ export default function ArtifactsPage() {
 
   return (
     <>
-      <PageHead title={`Artifacts · ${params.project}`}>
+      <PageHead title="Artifacts" level={2}>
         <span class="muted small">
           {list()?.length ?? 0} files · {bytes(total())} used
           {usage() ? ` of ${bytes(usage()!.quota_bytes)}` : ""}
@@ -46,7 +49,7 @@ export default function ArtifactsPage() {
           onDone={(a) => {
             void refetch();
             void refetchUsage();
-            navigate(`/p/${params.project}/artifacts/${a.id}`);
+            navigate(`/p/${params.project}/board/artifacts/${a.id}`);
           }}
         />
       </Show>
@@ -54,7 +57,7 @@ export default function ArtifactsPage() {
         <div class="card-box thread-list" style={{ padding: "4px" }}>
           <For each={list()} fallback={<Empty>No artifacts.</Empty>}>
             {(a) => (
-              <A href={`/p/${params.project}/artifacts/${a.id}`} style={{ display: "block", padding: "8px 6px", "border-bottom": "1px solid var(--border)", background: selected()?.id === a.id ? "var(--accent-soft)" : undefined }}>
+              <A href={`/p/${params.project}/board/artifacts/${a.id}`} style={{ display: "block", padding: "8px 6px", "border-bottom": "1px solid var(--border)", background: selected()?.id === a.id ? "var(--accent-soft)" : undefined }}>
                 <div>
                   <span class="mono muted small">{a.id}</span> {a.name}
                 </div>
@@ -86,7 +89,7 @@ export default function ArtifactsPage() {
                   Embedded in:{" "}
                   <For each={a().embedded_in}>
                     {(k) => (
-                      <A href={`/p/${k.split("/")[0]}/wiki/${k.split("/").slice(1).join("/")}`} style={{ "margin-right": "6px" }}>
+                      <A href={`/p/${k.split("/")[0]}/knowledge/wiki/${k.split("/").slice(1).join("/")}`} style={{ "margin-right": "6px" }}>
                         {k}
                       </A>
                     )}
