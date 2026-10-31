@@ -200,8 +200,8 @@ pub trait UsageSource: Send {
     /// response again; the store drops repeats.
     fn poll(&mut self) -> Result<Vec<SourceSample>, String>;
     /// The session signals that the last polls found, with the time of
-    /// each line: the compaction start and end of a harness that writes
-    /// them only to its session file (Copilot CLI). The collector gives
+    /// each line: the compaction end of a harness that writes it only to
+    /// its session file (Copilot CLI). The collector gives
     /// them to the supervisor ([`crate::supervisor::Supervisor::session_signal`]).
     fn take_signals(&mut self) -> Vec<(Event, Option<DateTime<Utc>>)> {
         Vec::new()
@@ -471,7 +471,9 @@ impl UsageSource for CodexSource {
 }
 
 /// Copilot CLI: tail the session `events.jsonl`. Each usage record is one
-/// sample, keyed by its `usage_id`.
+/// sample, keyed by its `usage_id`. A `session.compaction_complete` line
+/// is a signal ([`UsageSource::take_signals`]). The start of a compaction
+/// is not: the `PreCompact` hook reports it.
 pub struct CopilotSource {
     tail: terrarium_adapter_copilot::usage::TranscriptTail,
     signals: Vec<(Event, Option<DateTime<Utc>>)>,
@@ -486,7 +488,9 @@ impl UsageSource for CopilotSource {
             .into_iter()
             .filter_map(|r| match r {
                 R::Compaction { event, at } => {
-                    signals.push((event, at));
+                    if matches!(event, Event::CompactFinished { .. }) {
+                        signals.push((event, at));
+                    }
                     None
                 }
                 R::Sample(s) => Some(SourceSample {
@@ -501,6 +505,10 @@ impl UsageSource for CopilotSource {
                 _ => None,
             })
             .collect())
+    }
+
+    fn take_signals(&mut self) -> Vec<(Event, Option<DateTime<Utc>>)> {
+        std::mem::take(&mut self.signals)
     }
 }
 

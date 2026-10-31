@@ -1295,6 +1295,25 @@ harness ran a model turn for this table.
 | Copilot CLI | Background shells | `bash` with `mode: "async"` or `detach: true`; `read_bash`, `write_bash`, `list_bash`, `stop_bash` | **Not removed.** No flag or setting turns off async or `detach` (settings catalog, `--help`). A `sync` command that runs past `initial_wait` moves to the background by itself, and only `read_bash` and `stop_bash` read or stop it. So they stay, and the prompt says to use `terrarium run` | V (catalog, runtime strings) |
 | pi | All | None. pi has four tools (`read`, `bash`, `edit`, `write`); `bash` takes `command` and `timeout` only | Nothing to remove. `--no-extensions` keeps extension tools out | V (`dist/core/tools/bash.js`; README "skips features like sub-agents and plan mode") |
 
+Copilot CLI shows one line for each name of `--excluded-tools` that the
+session does not register: "● Unknown tool name in the tool excludedlist:
+"<name>"". Seen in the PTY logs of 1.0.103 agents (2026-10-28) and of a
+1.0.105 agent (2026-10-31), for the same six names: `session_artifacts`,
+`get_context_remaining`, `session_history`, `new_context`,
+`extensions_reload`, `extensions_manage`. The names are not renamed in
+1.0.105: `runtime.node` of 1.0.105 has the four context tools in the
+description of `contextManagementTools` ("Allow the agent to use the
+context management tools: session_artifacts, get_context_remaining,
+session_history, and new_context."), and `extensions_reload` and
+`extensions_manage` in its tool-name table, next to the canvas tools. The
+session does not register them, because `contextManagementTools` is
+`false` and no extension loads the extension tools. The line "● Disabled
+tools: ..." lists 12 of the other names; the rest get no line. The tool list of the 1.0.105 session
+had only `bash`, `read_bash`, `stop_bash`, `list_bash`, `view`, `create`,
+`edit`, `web_fetch`, `grep`, and `glob`. The list stays as it is: the
+names hide the tools if a later setting or extension registers them. The
+warnings do no harm.
+
 **Project instructions (D1).** Terrarium uses `AGENTS.md` only. The
 protocol template tells each agent to read `AGENTS.md` in its workspace
 and in each repo. Nothing loads `CLAUDE.md`. Per harness:
@@ -1404,20 +1423,36 @@ gives `Event::CompactStarted` and `Event::CompactFinished` for the signals
 below. `HarnessId::compact_command` lists the harnesses that the daemon
 compacts. Read on 2026-10-31 in the installed versions (Claude Code
 2.1.312, Codex 0.165.0, pi 1.4.0) and in the extracted Copilot CLI 1.0.103
-(the pin; the 1.0.105 binary keeps its JavaScript compressed). No harness
-ran a turn or a compaction: status **verified in the bundle, not run
-live** for each row.
+(the pin), and in the Copilot CLI 1.0.105 package that Copilot unpacks
+into `$COPILOT_HOME/cache/pkg/linux-x64/1.0.105/` at its first start.
+Status **verified in the bundle, not run live** for each row, except the
+parts of the Copilot row that are marked **verified live 2026-10-31**: two
+`/compact` runs of a Copilot CLI 1.0.105 agent (`claude-haiku-4.5`) on the
+local stack. The `events.jsonl`, the daemon events, and the PTY log of that
+agent were read after the runs.
 
 | Harness | Command | Start and end signals | Failure | Support |
 |---|---|---|---|---|
 | Claude Code | `/compact [instructions]`, a `local` command: `{type:"local",name:"compact",...,argumentHint:"<optional custom summarization instructions>"}` (byte 249197319 of `claude-code-linux-x64/claude`). A command does not go through `prompt.submit`, so no `UserPromptSubmit` fires ("the prompt did not go through prompt.submit (a command, bash mode, ...)", byte 256892978). | The PreCompact hook `{hook_event_name:"PreCompact", trigger:"manual"\|"auto", custom_instructions}` (byte 251795705), and the PostCompact hook `{hook_event_name:"PostCompact", trigger, compact_summary}` (byte 251796989). The adapter registers both (`flags.rs`) and maps them (`hooks.rs`). The session file also gets a `system` `compact_boundary` line and a user line with `isCompactSummary`. | No signal. "Not enough messages to compact." (byte 250811061) throws before the hooks; an API error throws before PostCompact. The daemon waits 5 minutes, then records `ok: false`. | supported |
 | Codex | `/compact`: "summarize conversation to prevent hitting the context limit" (byte 258750511 of `vendor/x86_64-unknown-linux-musl/bin/codex`). The compaction runs as a turn of its own ("cannot steer a compact turn", byte 252981858). | The PreCompact and PostCompact hooks, with the schemas `pre-compact.command.input` (byte 256456949) and `post-compact.command.input` (byte 256452054): `{session_id, turn_id, transcript_path, cwd, model, hook_event_name, trigger:"manual"\|"auto"}`. The adapter maps them (`hooks.rs`). The rollout file also gets a `compacted` item and an `event_msg` `context_compacted`. That `/compact` fires the hooks with `trigger: "manual"` is read from the schema, not seen. | Not known: "compaction failed" and `CompactionRequestFailed` are in the binary, but the hook payloads have no error field. The daemon waits 5 minutes. | supported |
-| Copilot CLI | `/compact [instructions]`: the regex `^\/compact(?:\s+([\s\S]*))?$` (byte 5498849 of `cli-main.js`, 1.0.103) calls `commands.invoke({name:"compact"})`. Empty session: "Nothing to compact." (`runtime.node`). | No hook end: the `preCompact` hook is not seen to fire, and there is no postCompact hook. `events.jsonl` has `session.compaction_start` `{compactionAttemptId?, trigger?, ...}` and `session.compaction_complete` `{success, error?, failureReason?, outcome?, ...}` (`copilot-sdk/generated/session-events.d.ts:4056`). The usage collector reads that file every 15 s; `usage::compaction_event` maps the two lines, and `Supervisor::session_signal` takes the lines that are not older than the command. | `success: false` with `error` or `failureReason`. | supported (the end comes up to 15 s late) |
+| Copilot CLI | `/compact [instructions]`: the regex `^\/compact(?:\s+([\s\S]*))?$` (byte 5498849 of `cli-main.js`, 1.0.103) calls `commands.invoke({name:"compact"})`. An empty session: "Nothing to compact." (`runtime.node`). **Verified live 2026-10-31** (1.0.105): `/compact` before the first prompt shows "✗ Compaction Failed: Error: Nothing to compact.", and after three turns "● Compaction completed" and "Use /session checkpoints 1 to view the compaction summary.". | Start: the `preCompact` hook `{sessionId, transcriptPath, trigger:"manual", customInstructions, timestamp, cwd}`. **Verified live 2026-10-31**: it fires for both runs (a `hook.start` and a `hook.end` `success: true` line of `hookType: "preCompact"` in `events.jsonl`), also for the run before the first prompt, before the `sessionStart` hook. The adapter maps it to `CompactStarted` (`hooks.rs`). When no `SessionStart` reported the session yet, it adds a `SessionStarted` with no `source`, so that the usage collector opens the session file. End: there is no postCompact hook. `events.jsonl` gets `session.compaction_start` `{compactionAttemptId, model, ..., trigger}` and `session.compaction_complete` `{success, error?, failureReason?, outcome?, outcomeReason?, ...}` (`copilot-sdk/generated/session-events.d.ts`; the fields of both events are the same in 1.0.103 and 1.0.105). **Verified live 2026-10-31**: both lines are written for both runs (`tests/fixtures/compaction-1.0.105.jsonl`). The usage collector reads that file at each `turn_end` and every 15 s, and gives each `session.compaction_complete` line to `Supervisor::session_signal`, which takes the lines that are not older than the command. | **Verified live 2026-10-31**: `success: false`, `error: "Nothing to compact."`, `outcome: "not_applicable"`, `outcomeReason: "nothing_to_compact"`. The adapter maps `error`, else `failureReason`, to the reason. A success has `success: true`, `outcome: "applied"`. | supported (the end comes up to 15 s late) |
 | pi | `/compact [instructions]` (`dist/core/slash-commands.js:23`). The TUI takes it before the prompt (`interactive-mode.js:2611`), so the `input` event does not fire. | The extension events `session_before_compact` `{reason:"manual"\|"threshold"\|"overflow", ...}` (`agent-session.js:2253`) and `session_compact` `{compactionEntry, reason, ...}` (`agent-session.js:2305`), from `dist/core/extensions/types.d.ts`. `ext/terrarium.ts` forwards both; the handler of `session_before_compact` returns nothing, so it never cancels. | `session_compact_failed` `{reason, errorMessage?, aborted}` (`agent-session.js:663`), also for "Nothing to compact (session too small)" (`agent-session.js:2250`). The adapter maps it to `ok: false`. | supported |
 
 A failure with no signal (Claude Code, perhaps Codex) costs the 5-minute
 time limit; turns that came meanwhile wait for it. The daemon compacts
 only after a turn, so "Not enough messages" is not expected.
+
+Copilot CLI before the fix of 2026-10-31: the daemon recorded no
+`compact_started` and no `compact_finished` for the two live runs, and
+each run ended at the 5-minute limit (`agent.compacted` `ok: false`, "no
+end of the compaction in 300 s"). The cause: `CopilotSource` in
+`usage_collector.rs` kept the compaction lines but did not give them to
+the collector (no `take_signals`). Also, a `/compact` before the first
+prompt comes before the `sessionStart` hook, so the collector did not read
+the session file yet. The test `collector_forwards_copilot_compaction_ends`
+(`crates/terrariumd/tests/subscriptions.rs`) covers the first cause, and
+`pre_compact_starts_the_compaction_and_reports_the_session` (`hooks.rs`)
+covers the second.
 
 The live check that is still to do, one compaction for each harness on a
 nearly empty session with the cheapest model: send one short turn, run

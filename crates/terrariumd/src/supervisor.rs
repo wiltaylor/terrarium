@@ -300,7 +300,7 @@ pub trait Supervisor: Send + Sync + 'static {
     }
     /// A signal of the harness that the daemon read from the session file
     /// of the agent, not from a hook (`crate::usage_collector`): the
-    /// compaction start and end of Copilot CLI. `at` is the time of the
+    /// compaction end of Copilot CLI. `at` is the time of the
     /// line. A supervisor uses only the signals of a compaction that runs
     /// and that are not older than its start. The default ignores them.
     fn session_signal(
@@ -491,6 +491,9 @@ mod fake {
         no_compact: HashSet<HarnessId>,
         /// The number of the next compaction.
         compact_seq: u64,
+        /// The session signals of each agent, in order
+        /// ([`Supervisor::session_signal`]).
+        signals: Vec<(AgentId, Event)>,
     }
 
     /// A fake supervisor. `start` goes `starting` -> `idle` after `delay`.
@@ -796,6 +799,17 @@ mod fake {
         /// The number of compactions of `agent` that started. For tests.
         pub fn compactions(&self, agent: AgentId) -> usize {
             self.lock().agents.get(&agent).map_or(0, |a| a.compactions)
+        }
+
+        /// The session signals that the collector gave for `agent`, in
+        /// order. For tests.
+        pub fn session_signals(&self, agent: AgentId) -> Vec<Event> {
+            self.lock()
+                .signals
+                .iter()
+                .filter(|(a, _)| *a == agent)
+                .map(|(_, e)| e.clone())
+                .collect()
         }
 
         /// End compaction `token` of `agent` (any one when `None`): the
@@ -1152,6 +1166,16 @@ mod fake {
 
         fn status(&self, agent: AgentId) -> BoxFuture<'_, Option<AgentStatus>> {
             Box::pin(async move { self.current(agent).map(|(s, _)| s) })
+        }
+
+        /// Recorded for [`InMemorySupervisor::session_signals`].
+        fn session_signal(
+            &self,
+            agent: AgentId,
+            event: Event,
+            _at: Option<chrono::DateTime<chrono::Utc>>,
+        ) {
+            self.lock().signals.push((agent, event));
         }
 
         /// The compact command of the harness, as raw text. The end

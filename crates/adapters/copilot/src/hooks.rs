@@ -25,9 +25,18 @@
 //!   tool hook after a `Stop` opens it: the mapper adds a
 //!   [`Event::TurnStart`] with no prompt.
 //! - `SessionStart` fires at the first prompt, not at start-up.
+//! - `PreCompact` fires when a compaction starts, also for a `/compact`
+//!   before the first prompt (verified live with 1.0.105 on 2026-10-31:
+//!   `hook.start` with `hookType: "preCompact"` in `events.jsonl`, before
+//!   the `sessionStart` hook). It maps to [`Event::CompactStarted`]. When
+//!   no `SessionStart` reported the session yet, it maps to an
+//!   [`Event::SessionStarted`] with no `source` first, so that the usage
+//!   collector reads the session file, where the end of the compaction
+//!   is (docs/compat.md, "Compaction").
 //!
 //! The mapper keeps a little state per session ID: whether a turn is open,
-//! the time of the last `Stop`, the open tool calls, and the last question.
+//! the time of the last `Stop`, the open tool calls, the last question, and
+//! whether the session was reported.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -77,6 +86,7 @@ fn canonical(name: &str) -> &str {
         "errorOccurred" => "ErrorOccurred",
         "subagentStop" => "SubagentStop",
         "permissionRequest" => "PermissionRequest",
+        "preCompact" => "PreCompact",
         other => other,
     }
 }
@@ -192,6 +202,8 @@ pub struct SessionState {
     pub open_tools: usize,
     /// The last `AskUserQuestion` input: the question and its choices.
     pub question: Option<(String, Vec<String>)>,
+    /// True after an `Event::SessionStarted` for this session.
+    pub reported: bool,
 }
 
 impl SessionState {
@@ -230,6 +242,7 @@ pub fn map_hook(hook: &HookPayload, state: &mut SessionState, config_dir: &Path)
         "SessionStart" => {
             *state = SessionState::default();
             if let Some(id) = ctx.session_id {
+                state.reported = true;
                 out.push(Event::SessionStarted {
                     transcript_path: Some(crate::session::events_file(config_dir, &id)),
                     harness_session: id,
@@ -323,6 +336,19 @@ pub fn map_hook(hook: &HookPayload, state: &mut SessionState, config_dir: &Path)
         "SessionEnd" => out.push(Event::SessionEnded {
             reason: s(b, "reason").map(str::to_owned),
         }),
+        "PreCompact" => {
+            if let Some(id) = ctx.session_id.filter(|_| !state.reported) {
+                state.reported = true;
+                out.push(Event::SessionStarted {
+                    transcript_path: Some(crate::session::events_file(config_dir, &id)),
+                    harness_session: id,
+                    source: None,
+                });
+            }
+            out.push(Event::CompactStarted {
+                trigger: s(b, "trigger").map(str::to_owned),
+            });
+        }
         _ => {}
     }
     out
@@ -668,7 +694,7 @@ mod tests {
             [Event::Question { question, options, request_id, .. }]
                 if question == "Information requested" && options.is_empty() && request_id == "s"
         ));
-        for name in ["SubagentStart", "SubagentStop", "PreCompact", "Mystery"] {
+        for name in ["SubagentStart", "SubagentStop", "Mystery"] {
             assert!(
                 map_hook(&hook(name, json!({})), &mut st, home).is_empty(),
                 "{name}"
@@ -683,6 +709,66 @@ mod tests {
                 home
             ),
             [Event::TurnEnd]
+        );
+    }
+
+    /// The `input` of the `preCompact` `hook.start` lines in a live
+    /// 1.0.105 `events.jsonl` (2026-10-31; the session ID is replaced).
+    /// The first `/compact` came before the first prompt, so before the
+    /// `sessionStart` hook.
+    #[test]
+    fn pre_compact_starts_the_compaction_and_reports_the_session() {
+        let sid = "00000000-0000-4000-8000-000000000105";
+        let pre = |ts: i64| {
+            hook(
+                "PreCompact",
+                json!({"transcriptPath": format!("{HOME}/session-state/{sid}/events.jsonl"),
+                       "trigger": "manual", "customInstructions": "", "sessionId": sid,
+                       "timestamp": ts, "cwd": "/home/agent/work"}),
+            )
+        };
+        let started = Event::SessionStarted {
+            harness_session: HarnessSessionId(sid.into()),
+            transcript_path: Some(PathBuf::from(format!(
+                "{HOME}/session-state/{sid}/events.jsonl"
+            ))),
+            source: None,
+        };
+        let compact = Event::CompactStarted {
+            trigger: Some("manual".into()),
+        };
+        let m = HookMapper::new();
+        let home = Path::new(HOME);
+        assert_eq!(
+            m.map(&pre(1_793_422_901_807), home),
+            [started, compact.clone()]
+        );
+        // The session is reported once.
+        assert_eq!(
+            m.map(&pre(1_793_422_901_900), home),
+            std::slice::from_ref(&compact)
+        );
+        let start = hook(
+            "SessionStart",
+            json!({"source": "new", "initialPrompt": "[User] Say ok.", "sessionId": sid,
+                   "timestamp": 1_793_422_908_367_i64, "cwd": "/home/agent/work"}),
+        );
+        assert!(matches!(
+            &m.map(&start, home)[..],
+            [Event::SessionStarted { source: Some(s), .. }] if s == "new"
+        ));
+        assert_eq!(m.map(&pre(1_793_423_351_488), home), [compact]);
+        // The camelCase name, and a payload with no session.
+        let mut st = SessionState::default();
+        assert_eq!(
+            map_hook(
+                &hook("preCompact", json!({"trigger": "auto"})),
+                &mut st,
+                home
+            ),
+            [Event::CompactStarted {
+                trigger: Some("auto".into())
+            }]
         );
     }
 

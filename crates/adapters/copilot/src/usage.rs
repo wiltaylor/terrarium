@@ -471,6 +471,57 @@ mod tests {
         ));
     }
 
+    /// The compaction lines of a live 1.0.105 session (2026-10-31, the IDs
+    /// replaced, the summary shortened): a `/compact` before the first
+    /// prompt ("Nothing to compact.") and one after three turns. The
+    /// `session-events.d.ts` of 1.0.103 and 1.0.105 have the same fields
+    /// for both events.
+    #[test]
+    fn captured_compactions_of_1_0_105() {
+        use terrarium_core::Event;
+        let text = std::fs::read_to_string(fixture("compaction-1.0.105.jsonl")).expect("read");
+        let mut p = UsageParser::new();
+        let got: Vec<(Event, String)> = text
+            .lines()
+            .filter_map(|l| match p.line(l) {
+                Some(UsageRecord::Compaction { event, at }) => {
+                    Some((event, at.expect("time").to_rfc3339()))
+                }
+                _ => None,
+            })
+            .collect();
+        let manual = || Some("manual".to_owned());
+        assert_eq!(
+            got,
+            [
+                (
+                    Event::CompactStarted { trigger: manual() },
+                    "2026-10-31T05:01:41.785+00:00".to_owned()
+                ),
+                (
+                    Event::CompactFinished {
+                        ok: false,
+                        trigger: manual(),
+                        message: Some("Nothing to compact.".into()),
+                    },
+                    "2026-10-31T05:01:41.820+00:00".to_owned()
+                ),
+                (
+                    Event::CompactStarted { trigger: manual() },
+                    "2026-10-31T05:09:11.483+00:00".to_owned()
+                ),
+                (
+                    Event::CompactFinished {
+                        ok: true,
+                        trigger: manual(),
+                        message: None,
+                    },
+                    "2026-10-31T05:09:25.161+00:00".to_owned()
+                ),
+            ]
+        );
+    }
+
     #[test]
     fn captured_session_file() {
         let u = read_transcript(&fixture("events.jsonl")).expect("read");

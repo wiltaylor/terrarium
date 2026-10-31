@@ -958,6 +958,64 @@ async fn collector_tails_a_growing_transcript() {
     td.get("/api/usage/project").await.err(400, "bad_request");
 }
 
+/// Copilot CLI writes the end of a compaction only to its session file
+/// (docs/compat.md, "Compaction"). The collector gives each
+/// `session.compaction_complete` line to the supervisor once, and not the
+/// start line (the `PreCompact` hook reports the start). The lines are
+/// from a live 1.0.105 session: "Nothing to compact.", then a success.
+#[tokio::test]
+async fn collector_forwards_copilot_compaction_ends() {
+    use terrarium_core::Event;
+    let env = boot(|_| {}, |_, _| {}).await;
+    let td = &env.td;
+    td.project("p").await;
+    let a = td.agent("p", "cop", json!({"harness": "copilot"})).await;
+    let id = a["id"].as_str().unwrap().to_owned();
+    let agent: AgentId = id.parse().unwrap();
+    let sid = "00000000-0000-4000-8000-000000000105";
+    let file = terrarium_runner::harness_dir(&td.state, agent)
+        .join(format!("copilot/session-state/{sid}/events.jsonl"));
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    let fixture = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../adapters/copilot/tests/fixtures/compaction-1.0.105.jsonl"
+    ))
+    .unwrap();
+    let lines: Vec<&str> = fixture.lines().collect();
+    std::fs::write(&file, lines[..2].join("\n") + "\n").unwrap();
+    emit(
+        td,
+        &a,
+        "session_started",
+        json!({"harness_session": sid,
+               "transcript_path": format!("/home/agent/.copilot/session-state/{sid}/events.jsonl")}),
+    )
+    .await;
+    let failed = Event::CompactFinished {
+        ok: false,
+        trigger: Some("manual".into()),
+        message: Some("Nothing to compact.".into()),
+    };
+    wait_for("the failed end", || async {
+        td.sup.session_signals(agent) == [failed.clone()]
+    })
+    .await;
+
+    // The file grows; the next poll gives the new end only.
+    std::fs::write(&file, fixture.clone()).unwrap();
+    emit(td, &a, "turn_end", json!({})).await;
+    let done = Event::CompactFinished {
+        ok: true,
+        trigger: Some("manual".into()),
+        message: None,
+    };
+    wait_for("the second end", || async {
+        td.sup.session_signals(agent).len() == 2
+    })
+    .await;
+    assert_eq!(td.sup.session_signals(agent), [failed, done]);
+}
+
 #[tokio::test]
 async fn budgets_hold_a_project() {
     let env = boot(

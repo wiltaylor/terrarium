@@ -189,7 +189,12 @@ pub const COPILOT_1_0: CopilotFlags = CopilotFlags {
         // tool goes: no setting removes only the tables.
         "sql",
         "update_todo",
-        // The context tools (also off by `contextManagementTools`).
+        // The context tools (also off by `contextManagementTools`). With
+        // the setting off, and with no extension loaded for the two
+        // extension tools below, Copilot does not register them and shows
+        // "Unknown tool name in the tool excludedlist" for each (1.0.103
+        // and 1.0.105; the names are the same in both `runtime.node`).
+        // The names stay, in case a later setting registers the tools.
         "session_artifacts",
         "get_context_remaining",
         "session_history",
