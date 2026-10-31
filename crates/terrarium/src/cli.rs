@@ -2057,9 +2057,14 @@ pub enum TemplateCmd {
     },
     /// Show one template: a ULID, `project/name`, `global:name`, or a
     /// name (the project's first, then the global one)
-    Show { template: String },
-    /// Make a template from flags or from a TOML file. The scope is
-    /// `--project`, else the caller's project (the operator: global)
+    Show {
+        template: String,
+        /// Print the template's WCL file of the config repo
+        #[arg(long)]
+        wcl: bool,
+    },
+    /// Make a template from flags or from a file (WCL or TOML). The scope
+    /// is `--project`, else the caller's project (the operator: global)
     New(Box<TemplateNewArgs>),
     /// Change a template: only the flags given change
     Edit(Box<TemplateEditArgs>),
@@ -2080,7 +2085,8 @@ pub enum TemplateCmd {
 
 #[derive(Debug, Args)]
 pub struct TemplateNewArgs {
-    pub name: String,
+    /// The name. Default with `--from-file x.wcl`: the file name, `x`
+    pub name: Option<String>,
     /// Make a global template (sysadmin)
     #[arg(long)]
     pub global: bool,
@@ -2105,8 +2111,10 @@ pub struct TemplateEditArgs {
 /// The agent settings of a template: the fields of `agent new`.
 #[derive(Debug, Args)]
 pub struct TemplateSpecArgs {
-    /// A TOML agent definition without `name` and `project`; with
-    /// `template edit` it replaces the whole spec
+    /// A template file: WCL (`<name>.wcl`, as in the config repo's
+    /// `templates/`), or a TOML agent definition without `name` and
+    /// `project` (any other extension); with `template edit` it replaces
+    /// the whole spec
     #[arg(long)]
     pub from_file: Option<PathBuf>,
     /// `claude`, `codex`, `copilot`, or `pi`
@@ -3039,7 +3047,7 @@ mod tests {
         else {
             panic!()
         };
-        assert_eq!(a.name, "worker");
+        assert_eq!(a.name.as_deref(), Some("worker"));
         assert!(a.global);
         assert_eq!(a.spec.harness.as_deref(), Some("claude"));
         assert_eq!(a.spec.targets, ["box"]);

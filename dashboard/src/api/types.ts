@@ -2625,13 +2625,25 @@ export interface AgentTemplate {
   /** Empty when none. */
   description: string;
   spec: TemplateSpec;
-  /** 1 at the create; one more at each change. */
+  /** 1 at the create; one more at each change of the template's file. */
   revision: number;
   created_by: string;
-  /** `api`, `file` (a project file), or `fleet:<name>`. */
-  source: Source | `fleet:${string}`;
+  /** `config` (a WCL file in the config repo), or `fleet:<name>` (a fleet owns it; its file is in the config repo too). `api` and `file`: a template from before the files, until the first load. */
+  source: "config" | Source | `fleet:${string}`;
   created_at: string;
   updated_at: string;
+  /** The WCL file in the config repo: `templates/<name>.wcl` or `templates/<project>/<name>.wcl`. Null until the file is written. */
+  file?: string | null;
+}
+
+/** `GET /api/templates/{key}/wcl`: the template's WCL file (docs/api.md §21.5). */
+export interface TemplateWcl {
+  /** The path in the config repo. */
+  path: string;
+  /** The text of the file. With no file (no config repo), the text that the file would have. */
+  text: string;
+  /** False when the text is not from a file. */
+  on_disk: boolean;
 }
 
 /** The template of an agent, as the agent records it. */

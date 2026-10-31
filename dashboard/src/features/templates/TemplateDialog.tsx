@@ -1,6 +1,8 @@
 // Create or edit an agent template (docs/api.md §21): the template name, its
 // scope (a project, or global), a description, and the agent fields of the
-// agent form. The scope does not change after the create.
+// agent form. The scope does not change after the create. A save writes the
+// template's WCL file in the config repo, without the comments of a file
+// edited by hand.
 
 import { createSignal, For, Show } from "solid-js";
 import { ErrorBanner, Modal } from "../../components/ui";
@@ -36,9 +38,6 @@ export function TemplateDialog(props: { template?: AgentTemplate; scope?: string
   return (
     <Modal title={editing() ? `Edit template ${pathKey(props.template!)}` : "New agent template"} onClose={() => props.onClose()}>
       <ErrorBanner error={error()} onDismiss={() => setError(null)} />
-      <Show when={props.template?.source === "file"}>
-        <p class="notice small">This template comes from a project file. The daemon refuses changes here (file_managed). Edit the file, then reload.</p>
-      </Show>
       <form class="stack" onSubmit={submit}>
         <div class="form-grid">
           <label>

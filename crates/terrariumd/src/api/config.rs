@@ -454,6 +454,9 @@ async fn pull(
     if !merged.conflicts.is_empty() {
         return Err(conflict_error(&merged));
     }
+    // The pulled template files, before the export: a fleet agent of the
+    // export may name one.
+    crate::template_files::refresh_quiet(&state).await;
     let (export, secrets) =
         export_plans(&state, &actor, &r, &merged, b.apply, b.approve_grants).await?;
     audit(
@@ -526,6 +529,7 @@ pub(crate) async fn run_sync(state: &Shared, actor: &Actor, b: SyncBodyIn) -> Ap
         return Err(conflict_error(&merged));
     }
     let pushed = blocking(r.clone(), ConfigRepo::push).await?;
+    crate::template_files::refresh_quiet(state).await;
     check_approve(actor, b.approve_grants)?;
     let (export, secrets) =
         export_plans(state, actor, &r, &merged, b.apply, b.approve_grants).await?;
@@ -624,6 +628,8 @@ pub(crate) async fn run_pull(state: &Shared) -> ApiResult<Merged> {
     {
         blocking(r, |r| r.set_export_pending(true)).await?;
     }
+    drop(_busy);
+    crate::template_files::refresh_quiet(state).await;
     Ok(merged)
 }
 
@@ -715,6 +721,8 @@ async fn defaults_accept(
         Ok(defaults::pending(&r.dir))
     })
     .await?;
+    // A new default of a template file.
+    crate::template_files::refresh_quiet(&state).await;
     audit(
         &state,
         &actor,

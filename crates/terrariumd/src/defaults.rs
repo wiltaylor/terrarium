@@ -9,7 +9,7 @@
 //!
 //! | The file in the config repo | What the start does |
 //! |---|---|
-//! | missing | writes the default |
+//! | missing | writes the default (a template under `templates/` that an earlier start wrote: nothing, the operator deleted it) |
 //! | the same as the new default | nothing |
 //! | the same as the default that the last start wrote (not edited) | writes the new default |
 //! | edited | keeps the file, and writes the new default next to it as `<file>.new` |
@@ -238,6 +238,15 @@ pub enum SeedAction {
     Kept,
     /// The file is the default.
     Current,
+    /// A default template file that the operator deleted: it stays
+    /// deleted.
+    Removed,
+}
+
+/// A default under `templates/`: an agent template (PLAN §5b). A delete
+/// of one by the operator stays, where a missing prompt comes back.
+fn is_template(rel: &str) -> bool {
+    rel.starts_with(&format!("{}/", terrarium_core::template_file::DIR))
 }
 
 /// One row of a seed report.
@@ -262,6 +271,8 @@ pub fn seed(defaults: &Defaults, target: &Path) -> Result<Vec<Seeded>, String> {
         };
         let entry = record.files.entry(f.rel.clone()).or_default();
         let action = match have {
+            // A default template that the operator deleted stays deleted.
+            None if is_template(&f.rel) && !entry.default.is_empty() => SeedAction::Removed,
             None => {
                 write_atomic(&path, &f.bytes)?;
                 remove_if_exists(&newp)?;

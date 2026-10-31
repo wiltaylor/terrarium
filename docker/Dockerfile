@@ -44,7 +44,11 @@ COPY crates ./crates
 # terrariumd embeds the host installer (GET /install/host.sh).
 COPY scripts/install-host.sh ./scripts/install-host.sh
 COPY --from=dashboard /src/dashboard/dist ./dashboard/dist
+# The git dependency wcl_lang (Cargo.toml) fetches from GitHub at the
+# commit that Cargo.lock pins (`--locked`); its checkout is cached as the
+# registry is.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/src/target,id=terrarium-target \
     cargo build --release --locked -p terrariumd -p terrarium -p terrarium-runner \
     && mkdir -p /out \
@@ -60,6 +64,7 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock harnesses.toml ./
 COPY crates ./crates
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/src/target,id=terrarium-host-target \
     target="$(uname -m)-unknown-linux-musl" \
     && cargo build --release --locked --target "$target" -p terrarium-host \

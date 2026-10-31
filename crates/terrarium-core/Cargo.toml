@@ -22,6 +22,13 @@ regex.workspace = true
 aho-corasick.workspace = true
 # The hash of an agent's delivered skills (`skills`).
 sha2.workspace = true
+# Agent template files (`template_file`, feature `wcl`). Off for the
+# host agent: it has no templates, and its static musl build stays small.
+wcl_lang = { workspace = true, optional = true }
+miette = { workspace = true, optional = true }
+
+[features]
+wcl = ["dep:wcl_lang", "dep:miette"]
 
 [dev-dependencies]
 tempfile.workspace = true

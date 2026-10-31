@@ -4892,6 +4892,58 @@ async fn templates_every_command() {
     .await;
     let r = exec(false, &["template", "new", "w"], vec![], None).await;
     assert_eq!(exit_code_of(&r.result.unwrap_err()), exit::USAGE);
+    // A WCL file (docs/api.md §21.5): the name is the file name, the flags
+    // go over the file.
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("kimi.wcl");
+    std::fs::write(
+        &file,
+        "description = \"Kimi\"\nharness = \"pi\"\nsystem_prompt = <<'P'\n  One.\n  Two.\n  P\npolicy {\n  mail_to = [\"lead\"]\n}\n",
+    )
+    .unwrap();
+    let f = file.to_str().unwrap();
+    ok(
+        false,
+        &[
+            "template",
+            "new",
+            "--from-file",
+            f,
+            "--model",
+            "k2",
+            "--global",
+        ],
+        vec![(201, tpl.clone())],
+        vec![(
+            Post,
+            "/api/templates",
+            vec![],
+            Some(
+                json!({"name": "kimi", "project": null, "description": "Kimi",
+                        "spec": {"harness": "pi", "model": "k2", "system_prompt": "One.\nTwo.\n",
+                                 "policy": {"mail_to": ["lead"]}}}),
+            ),
+        )],
+    )
+    .await;
+    // A bad file: a usage error with the file and the line.
+    std::fs::write(&file, "harness = \"pi\"\nrole = [\"x\"]\n").unwrap();
+    let r = exec(false, &["template", "new", "--from-file", f], vec![], None).await;
+    let e = r.result.unwrap_err();
+    assert_eq!(exit_code_of(&e), exit::USAGE);
+    assert!(e.to_string().contains("kimi.wcl:2:1: "), "{e}");
+    // `show --wcl` prints the file.
+    let out = ok(
+        false,
+        &["template", "show", "--wcl", "global:kimi"],
+        vec![(
+            200,
+            json!({"path": "templates/kimi.wcl", "text": "harness = \"pi\"\n", "on_disk": true}),
+        )],
+        vec![req(Get, "/api/templates/global%3Akimi/wcl")],
+    )
+    .await;
+    assert_eq!(out, "harness = \"pi\"\n");
     // Edit: the flags change the fields they name in the spec now.
     ok(
         false,

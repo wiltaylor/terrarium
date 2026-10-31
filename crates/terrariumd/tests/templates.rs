@@ -1,5 +1,6 @@
 //! Agent templates (docs/api.md §21): CRUD and scopes, the rights, a
-//! create from a template, from-agent, project files, and fleets.
+//! create from a template, from-agent, project files, and fleets. These
+//! daemons have no config repo: `template_files.rs` tests the files.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod common;
@@ -60,7 +61,7 @@ async fn crud_scopes_and_events() {
     // The operator's default scope is global.
     assert_eq!(g.ok()["project"], Value::Null);
     assert_eq!(g.body["revision"], 1);
-    assert_eq!(g.body["source"], "api");
+    assert_eq!(g.body["source"], "config");
     assert_eq!(g.body["created_by"], "operator");
     assert_eq!(
         g.body["spec"],
@@ -481,15 +482,30 @@ async fn project_file_templates() {
         );
     })
     .await;
+    // `[[templates]]` of a project file is an import: the template is a
+    // config template (a file of the config repo when the daemon has one),
+    // and the API may change it.
     let t = td.get("/api/templates/filed%2Fworker").await;
-    assert_eq!(t.ok()["source"], "file");
+    assert_eq!(t.ok()["source"], "config");
     assert_eq!(t.body["spec"]["policy"]["mail_to"], json!(["lead"]));
     td.patch("/api/templates/filed%2Fworker", json!({"description": "y"}))
         .await
-        .err(409, "file_managed");
-    td.delete("/api/templates/filed%2Fworker")
-        .await
-        .err(409, "file_managed");
+        .ok();
+    // A reload does not read the project file's template again; it tells
+    // the operator to remove it.
+    let r = td.post_empty("/api/reload").await;
+    assert!(
+        r.ok()["errors"].as_array().unwrap().iter().any(|e| e
+            .as_str()
+            .unwrap()
+            .contains("template worker is in templates/filed/worker.wcl now")),
+        "{}",
+        r.body
+    );
+    assert_eq!(
+        td.get("/api/templates/filed%2Fworker").await.ok()["description"],
+        "y"
+    );
     let a = td
         .post(
             "/api/agents",

@@ -6002,7 +6002,9 @@ An agent template is a named set of agent settings without a name and a
 project. A create copies them: `POST /api/agents` with `template`. A
 project_admin lead makes its workers from a template, so it gives each
 setting one time. PLAN §5b has the design. An agent template is not a
-prompt template (`prompt`, a file under `prompts/`).
+prompt template (`prompt`, a file under `prompts/`). Each template is a WCL
+file in the config repo (§21.5): the file is the truth, and the API reads
+and writes the files.
 
 ### 21.1 Shapes
 
@@ -6018,9 +6020,10 @@ A template:
            "policy": {"targets": [], "mail_to": ["*"]}, "restart": "on-failure"},
   "revision": 2,
   "created_by": "agent:01M5PA0T0Z0K16V6G88P3SE78W",
-  "source": "api",
+  "source": "config",
   "created_at": "2026-10-26T08:00:00.000Z",
-  "updated_at": "2026-10-26T09:12:40.031Z"
+  "updated_at": "2026-10-26T09:12:40.031Z",
+  "file": "templates/terrarium/worker.wcl"
 }
 ```
 
@@ -6029,8 +6032,9 @@ A template:
 | `name` | 1-63 of `a-z`, `0-9`, `-`, `_`. Unique in its scope: the project, or the global scope. A project template and a global template can have the same name. |
 | `project` | The project. `null` is a global template. |
 | `spec` | An agent definition (§6.1) without `name` and `project`: `harness` (required), `subscription`, `subscription_pool`, `model`, `prompt`, `system_prompt`, `persona`, `roles`, `policy`, `restart`, `idle_stop`, `compact_on_idle`, `compact_max_age`, `skills`, `new_session_on_prompt_change`. The daemon checks it with the rules of an agent definition and keeps it in a normal form: the defaults of `policy` and `restart` filled in, no empty `roles`, no empty `system_prompt`, no `new_session_on_prompt_change` when it is `true`. A `system_prompt` over 32 KiB is `422 invalid`. Another key (`name`, `project`, `template`, or an unknown key) is `422 invalid` with `details.field = "spec"`. |
-| `revision` | `1` at the create. Each change of the name, the description, or the spec adds `1`. A `PATCH` with the same values changes nothing. |
-| `source` | `api`, `file` (a `[[templates]]` of `projects/<name>.toml`), or `fleet:<name>` (§18.1). A `file` template refuses `PATCH` and `DELETE` with `409 file_managed`. |
+| `revision` | `1` at the create. Each change of the name, the description, or the spec adds `1`. A `PATCH` with the same values changes nothing. A change of the file by hand adds `1` when the load finds it (also a change of a comment only): one revision is one version of the file. |
+| `source` | `config` (a file of the config repo), or `fleet:<name>` (§18.1; its file is in the config repo too). `api` and `file` are templates from before the files: the first load writes their files and makes them `config`. |
+| `file` | The file in the config repo (§21.5): `templates/<name>.wcl`, or `templates/<project>/<name>.wcl`. `null` until the file is written (a daemon with no config repo). |
 
 A template key in a path is a ULID, `project/name`, `_/name` or
 `global:name` (a global template), or a name. A name finds the template of
@@ -6047,11 +6051,12 @@ the caller's project first, then the global one. Encode `/` as `%2F`.
 | `DELETE /api/templates/{key}` | | `204`. The agents made from it stay as they are. |
 | `GET /api/templates/{key}/resolve?project=P` | | `200`, `{template: {id, name, project, revision}, agent: {...}}`: the template that a create of an agent in `P` with `template: "{key}"` uses, and its spec with `project: P`. Without `project`: the caller's project. The dashboard fills its agent form from `agent`. |
 | `POST /api/templates/from-agent/{agent}` | `{name, project?, description?}` | `201`, a template with the settings of the agent now. An absent `project` is the agent's project; `null` is global. The default description is `from agent <project>/<name>`. |
+| `GET /api/templates/{key}/wcl` | | `200`, `{path, text, on_disk}`: the WCL file of the template (§21.5), as it is on disk, with its comments. `on_disk: false` (a daemon with no config repo): `text` is the file that a write would make. |
 
 Errors: `422 invalid` (a bad name or spec; a `pi` spec on a plan login,
-§6.2), `409 conflict` (the name is in
-use in the scope), `409 file_managed`, `404 not_found` (no such template or
-project), `403 forbidden` (the rules below).
+§6.2; a secret in the template file, below), `409 conflict` (the name is
+in use in the scope), `404 not_found` (no such template or project),
+`403 forbidden` (the rules below).
 
 | Caller | Read | Create, change, delete |
 |---|---|---|
@@ -6064,7 +6069,18 @@ Each change writes an audit row (`template.create`, `.update`, `.delete`)
 and a `template` event: `{change, template, name, key, revision}`;
 `change` is `created`, `updated`, or `deleted`, and `key` is
 `project/name` or `_/name`. A project template's event has the project.
-Deleting a project deletes its templates.
+Deleting a project deletes its templates and their files.
+
+A write (`POST`, `PATCH`, `DELETE`, `from-agent`, a fleet apply) writes,
+moves (a rename), or removes the template's file in the config repo, in
+the transaction of the write: the file goes to disk just before the
+commit, and a failure puts the old file back. The secret scan of the
+config repo (§25) checks the new file first: a hit is `422 invalid` with
+`details.findings` (the file, the line, and the rule, never the value),
+and nothing changes. The file stays uncommitted, as a prompt or a skill
+edit: `terrarium admin config commit` (or a sync) commits it, with the
+scan. A write replaces a file that you edited by hand, without its
+comments. Each read loads the changed files first (§21.5).
 
 ### 21.3 Create an agent from a template
 
@@ -6098,11 +6114,11 @@ The answer is the agent with `template: {id, name, project, revision}`.
 The daemon copies the values: a later change or delete of the template
 does not change the agent. The audit row `agent.create` has the template.
 
-### 21.4 Files and fleets
+### 21.4 Fleets and project files
 
-A project file has `[[templates]]` (`source = file`). A fleet has
-`[[templates]]` (global) and `[[projects.templates]]` (`source =
-fleet:<name>`). The spec keys sit next to `name` and `description`:
+A fleet has `[[templates]]` (global) and `[[projects.templates]]`
+(`source = fleet:<name>`). An apply writes the template files (§21.5). The
+spec keys sit next to `name` and `description`:
 
 ```toml
 [[projects.templates]]
@@ -6132,12 +6148,159 @@ template, then its own keys, with the merge of §21.3. The template comes
 from the file first, then from the daemon. An apply writes the agent from
 the template again, as the file is the truth for a fleet (§18). A fleet
 export writes the project's templates, and `template = "..."` and the keys
-that differ for each agent of a template.
+that differ for each agent of a template. The config export of the config
+repo (§25) has no templates: the files of `templates/` are in the repo.
+
+A project file (`projects/<name>.toml`) with `[[templates]]` is from
+before the template files. The first read (the start, `POST /api/reload`)
+writes each template that the store does not have as its file
+(`source = config`). After that the file of the config repo is the
+template: a read of the project file does not change it, and the reload
+answer has a line that tells you to remove `[[templates]]` from the
+project file. A template that you delete through the API comes back from
+the project file at the next read, until you remove it there.
+
+### 21.5 Template files
+
+Each template is one WCL file in the config repo (PLAN §8.3), in
+`templates/`:
+
+| File | Template |
+|---|---|
+| `templates/<name>.wcl` | the global template `<name>` |
+| `templates/<project>/<name>.wcl` | the template `<name>` of `<project>` |
+
+The file name is the template name (§21.1 has the name rules); a file
+with another name or at another depth is an error of the load. WCL is
+Wil's Configuration Language (`github.com/wiltaylor/wcl`, MIT): fields
+`key = value`, blocks `kind { ... }`, `//` comments, `"..."` strings with
+the escapes `\\`, `\"`, `\n`, `\t`, and `\r`, and heredocs. The file has
+the description and each spec key as a top-level field, and `policy` as a
+block. An absent field is the default, as in a spec:
+
+```wcl
+// Terrarium agent template: docs-writer (project `terrarium`).
+// The file name is the template name. Edit this file by hand, or with
+// `terrarium template edit` or the dashboard: they write the whole file
+// again, without your comments. The fields: docs/api.md §21.5.
+
+description  = "Docs writer on pi with GLM: wiki pages, READMEs, release notes."
+harness      = "pi"
+subscription = "zai-key"
+model        = "glm-5"
+persona      = "worker"
+roles        = []
+restart      = "on-failure"
+idle_stop    = "15m"
+skills       = ["docs-style"]
+
+system_prompt = <<'PROMPT'
+  You write the docs of this project.
+
+  Keep each sentence short. Use the words of the code.
+  PROMPT
+
+policy {
+  targets       = []
+  mail_to       = ["lead"]
+  cross_project = ["ops/*"]
+}
+```
+
+The schema, as WCL (the daemon gives it to WCL, so a file has no
+`import`):
+
+```wcl
+@document
+type AgentTemplate {
+  description: utf8?
+  harness: utf8?
+  subscription: utf8?
+  subscription_pool: list<utf8>?
+  model: utf8?
+  prompt: utf8?
+  persona: utf8?
+  roles: list<utf8>?
+  restart: utf8?
+  idle_stop: utf8?
+  compact_on_idle: bool?
+  compact_max_age: utf8?
+  skills: list<utf8>?
+  new_session_on_prompt_change: bool?
+  system_prompt: utf8?
+  @child("policy") policy: TemplatePolicy?
+}
+
+@block("policy")
+type TemplatePolicy {
+  targets: list<utf8>?
+  mail_to: list<utf8>?
+  cross_project: list<utf8>?
+}
+```
+
+The load checks a file in three steps. Each error names the file, the
+line, and the column (`templates/w.wcl:3:1: top-level field 'modle' is not
+declared by @document schema 'AgentTemplate'`):
+
+1. The WCL syntax.
+2. The schema: an unknown field or block, a value of the wrong type, a
+   field two times, two `policy` blocks.
+3. The spec, with the rules of §21.1: `harness` is required, and each
+   value must be valid (`harness = "emacs"` and `restart = "sometimes"`
+   are errors at their line).
+
+A file may use the rest of WCL: `let` names, `$"...${name}..."`
+interpolation, and expressions. A value is what the expression gives.
+
+**When the daemon reads the files.** At the start (with its config repo),
+before each template read of the API and each fleet plan and apply, after
+`terrarium admin config pull` or `sync` (and the automatic sync), at
+`POST /api/reload`, and every 10 seconds. A new file makes a template
+(`source = config`), a changed file changes it (`revision` + 1), and a
+removed file deletes it. An agent made from a template keeps its copy. A
+file that does not read keeps the last good template: the error goes to
+the log (one time) and to the `errors` of `POST /api/reload`. A project
+template whose project does not exist is an error too.
+
+**What a write makes.** The daemon writes a file in one form: the header
+comment, the fields in the order of the schema with their `=` in one
+column, a multi-line `system_prompt` as a raw heredoc (`<<'PROMPT'`, with a
+two-space indent that WCL removes; another tag when a line of the text is
+`PROMPT`), and `policy` last. A text that a heredoc cannot hold exactly
+(no final newline, an indent on each line, a `\r`) is a `"..."` string.
+The same template gives the same text, so a `PATCH` with the same values
+does not change the file.
+
+**From before the files.** At the first start of this version, the daemon
+writes the file of each template in the database (`source` `api`, or
+`file` from a project file) and makes it `config`. The database row wins
+over a file at that path (at that start, a file there is a packaged
+default that the same start wrote). It does this one time: migration 44
+adds `file_hash`, and a row with a file has it.
+
+**Packaged defaults.** The image has eight global templates in
+`defaults/templates/`: `claude-lead`, `claude-worker`,
+`claude-haiku-helper`, `codex-reviewer`, `codex-worker`, `copilot-worker`,
+`kimi-worker`, and `glm-docs-writer`. The start copies each one into
+`templates/` with the rules of the other defaults (PLAN §8.3: a new
+default of an edited file waits as `<file>.new`). A default that you
+delete stays deleted. Each names a subscription (`anthropic-max-20x`,
+`openai-pro`, `github-copilot`, `moonshot-key`, or `zai-key`): a template
+may name a subscription that does not exist, and an agent create from it
+then fails with the subscription error of §6.1. Make the subscription, or
+give `subscription` in the create.
+
+**The CLI.** `terrarium template new --from-file <name>.wcl` reads a WCL
+file (the name is the file name; a name argument wins), and `terrarium
+template show --wcl <template>` prints the file. A `--from-file` with
+another extension is a TOML agent definition, as before.
 
 ## 25. Config repo
 
-The config repo (PLAN §8.3) holds the prompts, the harness settings, and
-an export of the declarative objects, in git. These routes need the
+The config repo (PLAN §8.3) holds the prompts, the harness settings, the
+skills, the agent templates (§21.5), and an export of the declarative
+objects, in git. These routes need the
 operator or a sysadmin (`403 forbidden` for another agent). A daemon with
 no config repo answers `501 not_available`. One git operation runs at a
 time. No answer holds a secret: a remote URL shows without its user part
@@ -6202,19 +6365,22 @@ A merge conflict is `409 conflict` with `details.conflicts` (the paths).
   `422`. During a merge, a file that still has conflict markers is `409`.
 - **Export.** One fleet file per project,
   `export/projects/<project>.fleet.toml` (its repos, agents, project
-  targets, schedules, and templates; the fleet name is the fleet that owns
-  the project, else the project name), and `export/global.fleet.toml`
-  (the global templates and targets, fleet `terrarium-global`), and the
-  secrets files (below). No ULID,
+  targets, and schedules; the fleet name is the fleet that owns the
+  project, else the project name), and `export/global.fleet.toml` (the
+  global targets, fleet `terrarium-global`), and the secrets files
+  (below). No ULID,
   no mail `thread`, no `start`, no user part of a repo URL. A credential
   or a subscription shows by its name only. The file objects of a
-  definition file (`source = file`) of a template or a global target stay
-  out.
+  definition file (`source = file`) of a global target stay out. The
+  agent templates are not in the export: each one is a file of
+  `templates/` (§21.5), which a commit takes as it takes a prompt.
 - **Pull.** Fetch the remote branch into `refs/remotes/terrarium/<branch>`
   (the URL is not in `.git/config`), then merge: a fast-forward, else a
   merge commit. Local changes that are not committed are `409`, except in
   a repo with no commit yet: its files become the first commit, so a new
-  instance can join a shared repo. When `export/` changed, or
+  instance can join a shared repo. The daemon then loads the template
+  files (§21.5), so a pulled template is in the store at once. When
+  `export/` changed, or
   `export_pending` is set, the answer has a fleet plan of each export
   file (`export[].plan`, the shape of `POST /api/fleet/plan`) and the plan
   of the secrets import (`secrets`, below); with `apply`, each file goes

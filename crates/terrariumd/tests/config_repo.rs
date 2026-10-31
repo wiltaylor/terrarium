@@ -275,8 +275,9 @@ async fn the_hook_blocks_a_manual_commit_with_a_secret() {
     }
 }
 
-/// The export holds the projects, agents, targets, repos, templates, and
-/// schedules, with no secret and no ID of this instance.
+/// The export holds the projects, agents, targets, repos, and schedules,
+/// with no secret and no ID of this instance. A template is a file of
+/// `templates/`, not a part of the export.
 #[tokio::test]
 async fn the_export_has_no_secrets_and_no_instance_ids() {
     let (td, repo) = instance().await;
@@ -326,6 +327,8 @@ async fn the_export_has_no_secrets_and_no_instance_ids() {
     );
     let text = std::fs::read_to_string(repo.join("export/projects/demo.fleet.toml")).unwrap();
     assert!(text.contains("[[projects.agents]]"), "{text}");
+    assert!(!text.contains("[[projects.templates]]"), "{text}");
+    assert!(repo.join("templates/demo/worker.wcl").is_file());
     assert!(text.contains("persona = \"leader\""), "{text}");
     assert!(text.contains("credential = \"deploy\""), "{text}");
     assert!(

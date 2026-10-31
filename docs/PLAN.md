@@ -191,7 +191,8 @@ is the contract.
   `system_prompt` (§8), `roles`, `policy`, `restart`, and
   `new_session_on_prompt_change`. The daemon
   checks a spec with the agent definition rules and keeps it in a normal
-  form (the defaults filled in). There is no second schema.
+  form (the defaults filled in). There is no second schema: the WCL
+  schema of a template file (below) has the same fields.
 - **Create from a template.** `POST /api/agents` takes `template` and the
   fields that differ. A name picks the template of the agent's project,
   else the global one. `global:<name>` picks the global one. The daemon
@@ -209,18 +210,65 @@ is the contract.
   give `sysadmin` or a global target. Members of a project read its
   templates; every caller reads the global ones. A project_admin manages
   the templates of its project; a global template needs a sysadmin.
-- **Sources.** A template comes from the API, from a project file
-  (`[[templates]]`, `source = file`), or from a fleet (`[[templates]]` for
-  a global one, `[[projects.templates]]` for a project one,
-  `source = fleet:<name>`). A fleet agent entry can say `template =
-  "worker"`; a fleet apply then writes the agent from the template again
-  (the file is the truth). `POST /api/templates/from-agent/{agent}` makes
-  a template from an agent.
+- **Files.** Each template is a WCL file in the config repo (§8.3):
+  `templates/<name>.wcl` for a global template,
+  `templates/<project>/<name>.wcl` for a project template. The file name
+  is the template name. The file holds the description and the spec as
+  top-level fields, `policy` as a block, and a multi-line `system_prompt`
+  as a raw heredoc (`docs/api.md` §21.5 has the schema and an example).
+  WCL is Wil's Configuration Language (`wcl_lang`, MIT, from
+  `github.com/wiltaylor/wcl`; `Cargo.lock` pins the commit). The daemon
+  checks a file against a WCL schema (a `@document` type), then with the
+  agent definition rules; each error names the file, the line, and the
+  column.
+- **The files are the truth.** The `agent_templates` table is the index of
+  the files, so that the API, the fleets, and an agent create read one
+  store (`crate::template_files`). The daemon loads the files when it
+  starts with its config repo, before each template read of the API,
+  after a pull or a sync of the config repo, at `POST /api/reload`, and
+  every 10 seconds (an edit by hand). A file that does not read keeps the
+  last good template, and its error goes to the log and to the reload
+  answer. A removed file removes the template. A write through the API,
+  the CLI, the dashboard, or a fleet writes the file (formatted, fixed
+  field order, a header comment) in the transaction of the write: the
+  file goes to disk just before the commit, and a failure puts the old
+  file back. The secret scan of the config repo refuses a template file
+  with a secret at the write, and at each commit. The file stays
+  uncommitted, as a prompt or a skill edit: `terrarium admin config
+  commit` or `sync` commits it. The config export (`export/`) has no
+  templates: the files are the templates.
+- **Sources.** `source` is `config` (a file of the config repo) or
+  `fleet:<name>` (a fleet owns it; its file is in the config repo too). A
+  fleet has `[[templates]]` for a global one and `[[projects.templates]]`
+  for a project one. A fleet agent entry can say `template = "worker"`; a
+  fleet apply then writes the agent from the template again (the file is
+  the truth). `POST /api/templates/from-agent/{agent}` makes a template
+  from an agent. `[[templates]]` of a project file (`projects/<name>.toml`)
+  is an import from before the files: the first read writes each one that
+  the store does not have as a file, and a later read only tells the
+  operator to remove it from the project file.
+- **Packaged defaults.** The image ships eight global templates in
+  `defaults/templates/` (`claude-lead`, `claude-worker`,
+  `claude-haiku-helper`, `codex-reviewer`, `codex-worker`,
+  `copilot-worker`, `kimi-worker`, `glm-docs-writer`), with the rules of
+  the other defaults (§8.3: `.new` for an edited file). Each names its
+  subscription (`anthropic-max-20x`, `openai-pro`, `github-copilot`,
+  `moonshot-key`, `zai-key`); a template may name a subscription that does
+  not exist, and an agent create from it then fails on the subscription.
+  A default template that the operator deletes stays deleted.
 - **Storage.** Migration 22: `agent_templates` (`UNIQUE (scope, name)`;
   `scope` is `''` for a global template) and `agents.template`. Deleting a
-  project deletes its templates. Each change adds 1 to `revision`, writes
-  an audit row (`template.create`, `.update`, `.delete`), and a
-  `template` event. Migration 23 adds `agents.system_prompt` (§8).
+  project deletes its templates and their files. Each change adds 1 to
+  `revision`, writes an audit row (`template.create`, `.update`,
+  `.delete`), and a `template` event. A load from a file adds 1 to
+  `revision` when the file changed, also for a comment. Migration 23 adds
+  `agents.system_prompt` (§8). Migration 44 adds `file_hash` (the SHA-256
+  of the file that the row holds; NULL: no file yet). The first load
+  writes the file of each row with no file (the templates from before the
+  files, source `api` or `file`, become `config`), once; the row wins over
+  a file at that path. Migration 44 also gives the templates of the
+  export fleet `terrarium-global` up (`source = config`), as the export
+  has no templates now.
 
 ---
 
@@ -577,7 +625,8 @@ restart of each agent.
 **Packaged defaults.** The repo dir `defaults/` holds the default
 prompts (`prompts/leader.md`, `worker.md`, `default.md`,
 `project-lead.md`, `system-lead.md`, `README.md`), the default settings of
-each harness (`harness/<harness>/...`), the config repo `README.md`, and
+each harness (`harness/<harness>/...`), the default agent templates
+(`templates/<name>.wcl`, §5b), the config repo `README.md`, and
 `manifest.json` with the SHA-256 of each file (`just defaults::manifest`
 writes it; a test checks it). The image copies the dir to
 `/opt/terrarium/defaults` (`TERRARIUM_DEFAULTS_DIR`).
@@ -588,7 +637,7 @@ copies the defaults into it, at the same relative paths:
 
 | The file in the config repo | What the start does |
 |---|---|
-| Missing | Writes the default. |
+| Missing | Writes the default. A template (`templates/`) that an earlier start wrote: nothing, as the operator deleted it. |
 | The same as the new default | Nothing. |
 | The default of the last start, not edited | Writes the new default. |
 | Edited | Keeps the file, and writes the new default as `<file>.new`. |
@@ -602,12 +651,13 @@ diff; Accept takes the new default, Keep keeps the edit.
 `state/backup/config-terrarium-<time>/` and writes every default over it.
 
 **Git.** The config repo is a git repo (the daemon runs `git init` on
-first use). It holds `prompts/`, `harness/`, `skills/` (§8.6), `export/`,
+first use). It holds `prompts/`, `harness/`, `skills/` (§8.6),
+`templates/` (the agent templates, one WCL file each, §5b), `export/`,
 `README.md`, and `.gitignore`. `export/` is the declarative export of the store, written
 before each commit: one fleet file for each project
 (`export/projects/<project>.fleet.toml`: repos, agents, project targets,
-schedules, templates) and `export/global.fleet.toml` (global templates and
-targets). It has no runtime state and no ID of the instance: no ULID, no
+schedules) and `export/global.fleet.toml` (global targets). The templates
+are not in the export: their files are. It has no runtime state and no ID of the instance: no ULID, no
 mail thread, no `start`. A project that a fleet owns is exported under
 that fleet's name. `export/secrets/<scope>.toml` (`global.toml` and one
 file for each project with secrets) holds the secrets by name (§16b.5):
@@ -626,7 +676,7 @@ and session transcripts. Three controls (`docs/security-review.md`,
 1. The `.gitignore` is an allowlist: it ignores everything, allows only
    `prompts/**/*.md`, `harness/**/*.{json,toml,yaml}`,
    `export/**/*.{toml,json,yaml,md}`, the skill file types under
-   `skills/` (§8.6), `README.md`, and itself, then ignores the credential
+   `skills/` (§8.6), `templates/**/*.wcl` (§5b), `README.md`, and itself, then ignores the credential
    file names again. The daemon writes it.
 2. A secret scan (`terrarium_core::secret_scan`) runs on the staged files
    before each commit that the daemon makes, and in the `pre-commit` hook
@@ -655,7 +705,8 @@ be, else a merge commit; two repos that began apart merge
 conflict stops the merge with the files listed, and the repo waits in the
 merge: edit the files and commit, or `abort`. No step discards a local
 commit: no `reset --hard`, no force push. `pull` applies the changes:
-prompts and harness settings at the next agent start; `export/` changes
+prompts and harness settings at the next agent start; template files at
+once (the store loads them after the merge, §5b); `export/` changes
 show as a fleet plan and a secrets plan (`secrets` in the answer), and
 apply only with `--apply` (the fleet apply of §20, no prune). An apply
 imports the secrets first (a target names its login), then applies the
@@ -3373,7 +3424,7 @@ end-to-end scenarios of each phase are not scripted yet (no `spikes/e2e/`).
 | 5 · caps | `TERRARIUM_MAX_TARGETS_PER_PROJECT` (8, `409 conflict`) and the host agent's `max_running_targets` (4, `429 rate_limited`). The dashboard shows the cap errors and the running count of each host. | — |
 | 5 · scope | A target is global or belongs to one project (the `scope` field). A project target gets the prefix `<project>-`. A project_admin makes and leases the targets of its project; a global target needs sysadmin. The dashboard has scope chips and filters, and a targets panel on each project. | — |
 | Harnesses | The image holds no harness (`just ci::check` fails when the Dockerfile installs one). `terrariumd harness install` at each start (the entrypoint, then the daemon) installs each missing pin of `harnesses.toml` into the tools dir (`./tools` at `/opt/terrarium/tools`, one npm prefix for each version) and the Copilot prompt extension, and writes `terrarium-manifest.json`. Updates into version dirs: `POST /api/harnesses/{name}/update` and `POST /api/harnesses/update`, `terrarium admin harness update` (`--version`, `--force`, `--all`), `just harness::update` and `just harness::latest` (with `--pin`), and the "Update" buttons of the dashboard. Sysadmin or the operator only, audited as `harness.update`. The auto-update (§6, "Auto-update and pins"; `TERRARIUM_HARNESS_AUTO_UPDATE`, default `daily`; migration 43): a daemon task installs each newer npm release of a harness with the policy `auto` and mails the operator once for each update or failed version; `POST /api/harnesses/{name}/pin` (default: a rollback to the previous version), `unpin`, and `check`; `terrarium admin harness pin|unpin|check`; the policy chip and the "Roll back and pin", "Pin current", "Unpin", and "Check now" buttons of the dashboard; audited as `harness.auto_update`, `harness.pin`, and `harness.unpin`. Running agents keep their version dir until their next start; the GC removes the unused version dirs. The sandbox binds the tools dir read-only. The version guard at each agent start (`TERRARIUM_HARNESS_VERSION_POLICY`). `docs/getting-started.md` §7. | — |
-| Templates | Agent templates (§5b, `docs/api.md` §21): global and project templates, `POST /api/agents` with `template` (project over global, `global:`, field and `policy` key overrides, the create rights on the merged values), `resolve`, `from-agent`, `[[templates]]` in project files and fleets, `template = "..."` on fleet agents and in export, `terrarium template` and `agent new --template`, the Templates tab of the dashboard Settings, the template chooser of New agent, and "Save as template". The lead templates make workers from the `worker` template. | Agent files (`agents/<name>.toml`) cannot name a template. |
+| Templates | Agent templates (§5b, `docs/api.md` §21): global and project templates, `POST /api/agents` with `template` (project over global, `global:`, field and `policy` key overrides, the create rights on the merged values), `resolve`, `from-agent`, each template a WCL file of the config repo (`templates/`: the load at start, on a change, and after a pull; the writes of the API; `GET .../wcl`; the move of the old rows, migration 44; eight packaged default templates), `[[templates]]` in fleets (and as a one-time import from project files), `template = "..."` on fleet agents and in export, `terrarium template` (`new --from-file <name>.wcl`, `show --wcl`) and `agent new --template`, the Templates tab of the dashboard Settings (with View WCL), the template chooser of New agent, and "Save as template". The lead templates make workers from the `worker` template. | Agent files (`agents/<name>.toml`) cannot name a template. |
 | Waits | Waits and watches (§12d, `docs/api.md` §6.7): the status `waiting`, `agent`, `process`, `time`, and `card` waits with timeouts, the cycle check, and the limits; `terrarium run` (a detached exec session with a `process` wait); one wake mail for each end (a 2 s batch); watches with debounce and `--once`; `terrarium wait`, `run`, `watch`; the `waiting` chip and the Waits and Watches sections of the agent page; the prompt text. Tests with the fake supervisor and a real host agent (`tests/waits.rs`). | Not run live with real harnesses yet. The queued watch changes of a debounce do not live through a daemon restart. |
 | Lifecycle | Wake on demand, the idle stop, and the pause (§18, 2026-10-31): `crates/terrariumd/src/lifecycle.rs`; migration 41 (`agents.idle_stop`, `paused`, `status_reason`, `queued_turns`); `TERRARIUM_IDLE_STOP`; `POST /api/agents/{id}/pause` and `unpause`; `terrarium agent pause|unpause`, `--idle-stop`; Pause, Resume, the `paused` and `stopped (idle)` badges, and the queued count in the dashboard; the lead prompts wake workers with a card, not a start. Tests with the fake supervisor (`tests/lifecycle.rs`) and the real one (`tests/runtime.rs`). | Not run live with real harnesses yet. A turn queued before a stop that ends a launch before its first idle waits for the next launch in memory only. |
 | Questions | Questions to the operator (§12e, `docs/api.md` §6.8): the `questions` table, the rights (leaders ask; the operator, or a sysadmin for others, answers), the limits and the copy check, the answer mail on the thread, the `question` wait with one mail, the questions in the recap turn, `terrarium question` and `terrarium admin question`, the Questions page with the badge, the agent page panel, and the lead template text. Tests with the fake supervisor (`tests/questions.rs`). | Not run live with real harnesses yet. |

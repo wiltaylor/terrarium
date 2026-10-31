@@ -6,12 +6,13 @@
 // page lists the templates that apply to the project: its own, then the
 // global ones. A global template that a project template of the same name
 // overrides stays in the list with a chip, because the New agent chooser still
-// offers it (as `global:<name>`).
+// offers it (as `global:<name>`). Each template is a WCL file of the config
+// repo: "View WCL" shows the file, read-only, under the table.
 
 import { useParams } from "@solidjs/router";
 import { createResource, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { ConfirmButton, Empty, ErrorBanner, PageHead } from "../../components/ui";
-import type { AgentTemplate } from "../../api/types";
+import type { AgentTemplate, TemplateWcl } from "../../api/types";
 import { ago } from "../../lib/format";
 import { api, events, projects } from "../../stores";
 import { pathKey, scopeLabel, selectable } from "./model";
@@ -23,6 +24,8 @@ export default function TemplatesPage() {
   const [scope, setScope] = createSignal("all");
   const [dialog, setDialog] = createSignal<{ template?: AgentTemplate } | null>(null);
   const [error, setError] = createSignal<unknown>(null);
+  /** The WCL file on view, with its template key. */
+  const [wcl, setWcl] = createSignal<(TemplateWcl & { key: string }) | null>(null);
   const [list, { refetch }] = createResource(() => api.templates.list().catch((e: unknown) => (setError(e), [] as AgentTemplate[])));
   /** The project of the route wins over the scope select. */
   const shown = () => {
@@ -45,6 +48,15 @@ export default function TemplatesPage() {
       clearTimeout(timer);
     });
   });
+
+  const viewWcl = async (t: AgentTemplate) => {
+    try {
+      setWcl({ ...(await api.templates.wcl(t.id)), key: pathKey(t) });
+      setError(null);
+    } catch (e) {
+      setError(e);
+    }
+  };
 
   const remove = async (t: AgentTemplate) => {
     try {
@@ -72,7 +84,7 @@ export default function TemplatesPage() {
         </button>
       </PageHead>
       <p class="muted small">
-        A template holds every agent setting except the name and the project. Pick one in the New agent chooser, or use <code>terrarium agent new &lt;name&gt; --template &lt;template&gt;</code>. A project template wins over a global one with the same name.
+        A template holds every agent setting except the name and the project. Pick one in the New agent chooser, or use <code>terrarium agent new &lt;name&gt; --template &lt;template&gt;</code>. A project template wins over a global one with the same name. Each template is a WCL file in the config repo (<code>templates/</code>): a save here writes the file, and <code>terrarium admin config commit</code> commits it.
       </p>
       <Show when={dialog()}>
         {(d) => (
@@ -132,10 +144,13 @@ export default function TemplatesPage() {
                     </td>
                     <td>
                       <span class="row" style={{ gap: "4px" }}>
-                        <button class="small" disabled={t.source === "file"} onClick={() => setDialog({ template: t })} aria-label={`Edit ${pathKey(t)}`}>
+                        <button class="small" onClick={() => void viewWcl(t)} aria-label={`View the WCL file of ${pathKey(t)}`}>
+                          View WCL
+                        </button>
+                        <button class="small" onClick={() => setDialog({ template: t })} aria-label={`Edit ${pathKey(t)}`}>
                           Edit
                         </button>
-                        <ConfirmButton class="small danger" label="Delete" disabled={t.source === "file"} onConfirm={() => remove(t)} />
+                        <ConfirmButton class="small danger" label="Delete" onConfirm={() => remove(t)} />
                       </span>
                     </td>
                   </tr>
@@ -144,6 +159,28 @@ export default function TemplatesPage() {
             </tbody>
           </table>
         </div>
+      </Show>
+      <Show when={wcl()}>
+        {(f) => (
+          <section class="card-box stack" aria-label={`WCL file of ${f().key}`}>
+            <div class="row" style={{ "justify-content": "space-between" }}>
+              <strong class="mono">{f().path}</strong>
+              <span class="row" style={{ gap: "4px" }}>
+                <Show when={!f().on_disk}>
+                  <span class="chip warn" title="The daemon has no config repo: this is the text that the file would have.">
+                    not on disk
+                  </span>
+                </Show>
+                <button class="small" onClick={() => setWcl(null)}>
+                  Close
+                </button>
+              </span>
+            </div>
+            <pre class="mono small" style={{ margin: 0, "white-space": "pre", overflow: "auto", "max-height": "60vh" }}>
+              {f().text}
+            </pre>
+          </section>
+        )}
       </Show>
     </>
   );

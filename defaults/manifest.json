@@ -1,7 +1,7 @@
 {
   "version": 1,
   "files": {
-    "README.md": "51b47f4b091d2d104088031e95f3d968f875d91a7aa3126db4fd8250766b316b",
+    "README.md": "7e6fc57423ddc4eb0985ad097c0d7bc2deffe4d91223bee070ec3dc568aab4e0",
     "harness/claude/settings.json": "d5b5ea9dd861dbdfa4b41bcde785c5b30fbb1ee7502ec0db1042a1f179fe0fbf",
     "harness/codex/config.toml": "055e812aae3e09fc401dbe619fbce23beb04b06dcb4373a327eb99e1b66ae59e",
     "harness/copilot/settings.json": "13fd01aea6238c828d706954ec693cb818d5b4b6b03ac1179673e18437bb9c34",
@@ -15,6 +15,14 @@
     "prompts/leader.md": "367c92ae349c77c2727bb42f9616429d375b8ca5f91a55eaf5b11365eba85fc2",
     "prompts/project-lead.md": "8824ba1be2e3d83de6210d51551fd8b233973d04f96ce427d7d9a046af8be8f2",
     "prompts/system-lead.md": "a79fc940f8d82fb4cbfd0d674c3b763bf6796738c2c1645b63f4030a22819df3",
-    "prompts/worker.md": "3e76fa8c28a097aea56bb53671cf07566fe7c433b456a1a993a4b39a751dc17c"
+    "prompts/worker.md": "3e76fa8c28a097aea56bb53671cf07566fe7c433b456a1a993a4b39a751dc17c",
+    "templates/claude-haiku-helper.wcl": "c903543200e150331b1029cfda8ea94d3df481f4af8eab6816fe36394be0a4b6",
+    "templates/claude-lead.wcl": "1c5ac745c7f0a84c588ee82802b45ad182d5c24a15927bb6bc52c839a9f4951c",
+    "templates/claude-worker.wcl": "764edac808c17df0da5a718df454c0f8c8f961e015d707a6bf5a9d183cd871b4",
+    "templates/codex-reviewer.wcl": "19c70ca37e90cf54e32db5dc7cbaf1245d7e5101f27dd14a3621e453e779c3bd",
+    "templates/codex-worker.wcl": "dfecdb9bdffd3ba90a6850a1ace4233d5358f9d6387ccc45a9b848727e6fb3a2",
+    "templates/copilot-worker.wcl": "d37b7d75f2baa82a109d59ae41596a3f21015d7a9272f0a6088d9e9cfad451fe",
+    "templates/glm-docs-writer.wcl": "d480823a9a3138cbf8b8194e0c6cce77ea73049fbe0390e672b6c60e93675641",
+    "templates/kimi-worker.wcl": "455770f1b957202804032857bd032ccaa74f90320e3e1eac1107f3d32c141596"
   }
 }

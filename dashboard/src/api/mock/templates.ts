@@ -5,7 +5,8 @@
 // forbidden`): everyone reads the global templates; a member reads its
 // project's; a project_admin manages its project's; a global template needs
 // a sysadmin. `applyTemplate` is the merge of `POST /api/agents` with
-// `template`.
+// `template`. Each template is a WCL file of the config repo in the daemon
+// (`template_file`); `renderWcl` writes the same text for `wcl`.
 
 import type { Api } from "../client";
 import { HARNESSES, RESTART_POLICIES, type Agent, type AgentCreate, type AgentDef, type AgentEvent, type AgentPolicy, type AgentTemplate, type TemplateRef, type TemplateSpec } from "../types";
@@ -136,8 +137,8 @@ export function applyTemplate(spec: TemplateSpec, body: AgentCreate): AgentDef {
 export function seedTemplates(now: number): AgentTemplate[] {
   const ago = (min: number) => new Date(now - min * 60_000).toISOString();
   return [
-    { id: "01JBTPL000000000000000000001", name: "worker", project: null, description: "A board worker: takes cards from ready, mails its lead.", spec: { harness: "claude", prompt: "worker", policy: { targets: [], mail_to: ["*"] }, restart: "on-failure" }, revision: 2, created_by: "operator", source: "api", created_at: ago(60 * 24 * 3), updated_at: ago(60 * 24) },
-    { id: "01JBTPL000000000000000000002", name: "reviewer", project: "terrarium", description: "Reviews versions; codex with a model of its own.", spec: { harness: "codex", model: "gpt-5.5", prompt: "worker", policy: { targets: ["build-box"], mail_to: ["lead"] }, restart: "on-failure" }, revision: 1, created_by: "operator", source: "api", created_at: ago(60 * 24 * 2), updated_at: ago(60 * 24 * 2) },
+    { id: "01JBTPL000000000000000000001", name: "worker", project: null, description: "A board worker: takes cards from ready, mails its lead.", spec: { harness: "claude", prompt: "worker", policy: { targets: [], mail_to: ["*"] }, restart: "on-failure" }, revision: 2, created_by: "operator", source: "config", file: "templates/worker.wcl", created_at: ago(60 * 24 * 3), updated_at: ago(60 * 24) },
+    { id: "01JBTPL000000000000000000002", name: "reviewer", project: "terrarium", description: "Reviews versions; codex with a model of its own.", spec: { harness: "codex", model: "gpt-5.5", prompt: "worker", policy: { targets: ["build-box"], mail_to: ["lead"] }, restart: "on-failure" }, revision: 1, created_by: "operator", source: "config", file: "templates/terrarium/reviewer.wcl", created_at: ago(60 * 24 * 2), updated_at: ago(60 * 24 * 2) },
   ];
 }
 
@@ -216,7 +217,7 @@ export function createTemplateMock(c: TemplateMockContext): Api["templates"] {
   const make = (name: string, scope: string | null, description: string | undefined, s: TemplateSpec): AgentTemplate => {
     mayManage(scope);
     checkName(name, scope);
-    const t: AgentTemplate = { id: c.ulid("tpl"), name, project: scope, description: description ?? "", spec: s, revision: 1, created_by: "operator", source: "api", created_at: c.iso(), updated_at: c.iso() };
+    const t: AgentTemplate = { id: c.ulid("tpl"), name, project: scope, description: description ?? "", spec: s, revision: 1, created_by: "operator", source: "config", file: wclPath(scope, name), created_at: c.iso(), updated_at: c.iso() };
     w.templates.push(t);
     c.audit("template.create", t.id, t.project ?? undefined, { name: t.name });
     event(t, "created");
@@ -252,11 +253,10 @@ export function createTemplateMock(c: TemplateMockContext): Api["templates"] {
         const t = find(key);
         mayRead(t.project);
         mayManage(t.project);
-        if (t.source === "file") fail(409, "file_managed", `template \`${templateKey(t)}\` is declared in projects/${t.project}.toml; edit the file, then POST /api/reload`);
         if (patch.name !== undefined) checkName(patch.name, t.project, t.id);
         const next = { name: patch.name ?? t.name, description: patch.description ?? t.description, spec: patch.spec !== undefined ? spec(patch.spec) : t.spec };
         if (JSON.stringify(next) === JSON.stringify({ name: t.name, description: t.description, spec: t.spec })) return structuredClone(t);
-        Object.assign(t, next, { revision: t.revision + 1, updated_at: c.iso() });
+        Object.assign(t, next, { revision: t.revision + 1, updated_at: c.iso(), file: wclPath(t.project, next.name) });
         c.audit("template.update", t.id, t.project ?? undefined, { fields: Object.keys(patch), revision: t.revision });
         event(t, "updated");
         return structuredClone(t);
@@ -266,7 +266,6 @@ export function createTemplateMock(c: TemplateMockContext): Api["templates"] {
         const t = find(key);
         mayRead(t.project);
         mayManage(t.project);
-        if (t.source === "file") fail(409, "file_managed", `template \`${templateKey(t)}\` is declared in projects/${t.project}.toml`);
         w.templates.splice(w.templates.indexOf(t), 1);
         c.audit("template.delete", t.id, t.project ?? undefined, { name: t.name });
         event(t, "deleted");
@@ -301,5 +300,47 @@ export function createTemplateMock(c: TemplateMockContext): Api["templates"] {
         });
         return make(body.name, project(scope), body.description, s);
       }),
+    wcl: (key) =>
+      c.reply(() => {
+        const t = find(key);
+        mayRead(t.project);
+        return { path: wclPath(t.project, t.name), text: renderWcl(t), on_disk: true };
+      }),
   };
+}
+
+/** The file of a template in the config repo. */
+export const wclPath = (project: string | null, name: string) => (project ? `templates/${project}/${name}.wcl` : `templates/${name}.wcl`);
+
+/** The top-level fields of a template file, in the daemon's order (`template_file::FIELDS`). */
+const WCL_FIELDS = ["description", "harness", "subscription", "subscription_pool", "model", "prompt", "persona", "roles", "restart", "idle_stop", "compact_on_idle", "compact_max_age", "skills", "new_session_on_prompt_change", "system_prompt"] as const;
+
+const quote = (s: string) => `"${s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n").replace(/\t/g, "\\t").replace(/\r/g, "\\r")}"`;
+const literal = (v: unknown): string => (typeof v === "string" ? quote(v) : Array.isArray(v) ? `[${v.map((x) => quote(String(x))).join(", ")}]` : String(v));
+
+/** The template's WCL file, as the daemon writes it (`template_file::render`), with a multi-line system prompt as a raw heredoc. */
+export function renderWcl(t: Pick<AgentTemplate, "name" | "project" | "description" | "spec">): string {
+  const scope = t.project ? `project \`${t.project}\`` : "global";
+  let out = `// Terrarium agent template: ${t.name} (${scope}).\n// The file name is the template name. Edit this file by hand, or with\n// \`terrarium template edit\` or the dashboard: they write the whole file\n// again, without your comments. The fields: docs/api.md §21.5.\n\n`;
+  const spec = t.spec as Record<string, unknown>;
+  const rows: [string, string][] = [];
+  let long = "";
+  for (const k of WCL_FIELDS) {
+    const v = k === "description" ? t.description || undefined : spec[k];
+    if (v === undefined || v === null) continue;
+    if (k === "system_prompt" && typeof v === "string" && v.endsWith("\n") && v.slice(0, -1).includes("\n")) {
+      long = `\nsystem_prompt = <<'PROMPT'\n${v.slice(0, -1).split("\n").map((l) => (l ? `  ${l}` : "")).join("\n")}\n  PROMPT\n`;
+      continue;
+    }
+    rows.push([k, literal(v)]);
+  }
+  const width = Math.max(0, ...rows.map(([k]) => k.length));
+  out += rows.map(([k, v]) => `${k.padEnd(width)} = ${v}\n`).join("") + long;
+  const policy = spec.policy as Record<string, unknown> | undefined;
+  if (policy) {
+    const keys = (["targets", "mail_to", "cross_project"] as const).filter((k) => policy[k] !== undefined);
+    const w = Math.max(0, ...keys.map((k) => k.length));
+    out += `\npolicy {\n${keys.map((k) => `  ${k.padEnd(w)} = ${literal(policy[k])}\n`).join("")}}\n`;
+  }
+  return out;
 }

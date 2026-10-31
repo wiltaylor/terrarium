@@ -15,7 +15,8 @@ instances (`terrarium admin config sync`).
 | `harness/copilot/settings.json` | Copilot CLI settings, merged into the settings copy of each agent. |
 | `harness/pi/settings.json` | pi settings, merged into the settings copy of each agent. |
 | `skills/<name>/` | The skill library: one folder for each skill, with `SKILL.md` (front matter `name` and `description`, then the instructions) and optional `scripts/`, `references/`, `assets/`. An agent gets only the skills that its `skills` list names. Terrarium ships no skill. `terrarium skill validate` checks them. |
-| `export/` | The declarative export of the templates, schedules, and projects (agents, targets, repos), as fleet files. The daemon writes it at each commit. |
+| `templates/<name>.wcl`, `templates/<project>/<name>.wcl` | The agent templates: one WCL file each, for a global template or a template of `<project>`. The file name is the template name. The API, the CLI (`terrarium template`), and the dashboard write these files; you can edit them by hand, and the daemon reads them again within 10 seconds. Terrarium ships eight global templates. A default template that you delete stays deleted. |
+| `export/` | The declarative export of the schedules and projects (agents, targets, repos), as fleet files. The daemon writes it at each commit. The templates are not in it: their files are. |
 
 A change applies at the next start or restart of an agent. A file that
 does not parse stops the start of the agent, with the file and the line in
@@ -23,8 +24,9 @@ the error.
 
 ## Defaults and upgrades
 
-Terrarium ships a default for each file in `prompts/` and `harness/`. At
-each start the daemon writes a missing file. When a new Terrarium version
+Terrarium ships a default for each file in `prompts/` and `harness/`,
+and the default templates in `templates/`. At each start the daemon writes
+a missing file (not a template that you deleted). When a new Terrarium version
 changes a default, the daemon replaces a file that you did not edit. A
 file that you edited stays, and the new default goes next to it as
 `<file>.new`. The dashboard (Config page) and `terrarium admin config

@@ -1,0 +1,15 @@
+// Terrarium agent template: glm-docs-writer (global).
+// The file name is the template name. Edit this file by hand, or with
+// `terrarium template edit` or the dashboard: they write the whole file
+// again, without your comments. The fields: docs/api.md §21.5.
+
+description  = "Docs writer on pi with GLM (Z.ai): wiki pages, READMEs, release notes."
+harness      = "pi"
+subscription = "zai-key"
+persona      = "worker"
+restart      = "on-failure"
+
+policy {
+  targets = []
+  mail_to = ["lead"]
+}

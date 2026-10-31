@@ -54,6 +54,13 @@ semver = { version = "1.0.26", features = ["serde"] }
 cron = "=0.17.0"
 chrono-tz = "=0.10.4"
 
+# Agent templates as WCL files in the config repo (PLAN §5b). Wil's
+# Configuration Language, from GitHub as in his other projects: Cargo.lock
+# pins the commit; `cargo update -p wcl_lang` moves it to the newest main.
+wcl_lang = { git = "https://github.com/wiltaylor/wcl.git", branch = "main" }
+# The positions of a WCL error (its labels). The version of wcl_lang.
+miette = { version = "7.6", default-features = false }
+
 # CLI, logging, errors
 clap = { version = "4.5", features = ["derive", "env"] }
 tracing = "0.1.41"

@@ -114,12 +114,17 @@ async fn remove(
             format!("deleting project `{name}` deletes its board; add ?confirm=true"),
         ));
     }
+    let repo = crate::template_files::repo_dir(&state);
     state
         .db
         .write(actor.label(), move |t| {
             let p = projects::get(t, &name)?;
             if p.source == projects::SOURCE_FILE {
                 return Err(file_managed(&p));
+            }
+            // The project's templates go with it, and their files too.
+            for tpl in crate::store::templates::of_scope(t, Some(&name))? {
+                crate::store::templates::delete(t, &tpl.id, repo.as_deref())?;
             }
             projects::delete(t, &name)
         })

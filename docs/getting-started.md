@@ -365,6 +365,17 @@ click **Custom**. The **Templates** tab of the
 project settings (the cog of the project in the sidebar) shows the
 templates of one project.
 
+Each template is a WCL file in the config repo (section 2.12):
+`config/terrarium/templates/worker.wcl` for a global template,
+`config/terrarium/templates/demo/worker.wcl` for a template of `demo`.
+`t template show --wcl demo/worker` prints it, and **View WCL** on the
+**Templates** tab shows it. You can edit the file by hand: the daemon reads
+it again within 10 seconds. To make a template from a file, run
+`t -p demo template new --from-file worker.wcl`. Terrarium ships eight
+global templates (`claude-lead`, `claude-worker`, `codex-worker`, and
+others) that name a subscription (`anthropic-max-20x`, `openai-pro`, and others, section 2.4); an agent create from
+one of them needs that subscription, or a `--subscription` flag.
+
 Each harness keeps its own default system prompt, and Terrarium adds its
 protocol prompt after it. To replace the harness's default prompt, give
 the agent or the template a base system prompt: `--system-prompt <text>`
@@ -949,7 +960,8 @@ The config repo `config/terrarium/` holds what you tune for the agents:
 | `prompts/leader.md`, `prompts/worker.md` | The personas (PLAN §8.1). |
 | `prompts/default.md`, `project-lead.md`, `system-lead.md` | The protocol templates. |
 | `harness/claude/settings.json`, `harness/codex/config.toml`, `harness/copilot/settings.json`, `harness/pi/settings.json` | The settings of each harness for every agent (PLAN §8.2). Terrarium puts the keys that it needs (hooks, yolo, sandbox paths, telemetry off) on top. |
-| `export/` | The templates, schedules, and projects (agents, targets, repos) as fleet files. The daemon writes them at each commit. |
+| `templates/<name>.wcl`, `templates/<project>/<name>.wcl` | The agent templates, one WCL file each ([api.md §21.5](api.md#215-template-files)). The API, the CLI, and the dashboard write them; you can edit them by hand. |
+| `export/` | The schedules and projects (agents, targets, repos) as fleet files. The daemon writes them at each commit. |
 
 **Defaults.** At each start the daemon copies the packaged defaults into
 the repo. It writes a missing file, and upgrades a file that you did not

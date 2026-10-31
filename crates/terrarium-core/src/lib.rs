@@ -31,6 +31,8 @@ pub mod skills;
 pub mod status;
 pub mod tail;
 pub mod template;
+#[cfg(feature = "wcl")]
+pub mod template_file;
 pub mod transcript;
 pub mod turn_tag;
 pub mod zai;

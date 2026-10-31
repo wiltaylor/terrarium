@@ -27,6 +27,7 @@ import type {
   TemplateFromAgent,
   TemplatePatch,
   TemplateResolved,
+  TemplateWcl,
   NewSkill,
   SkillDetail,
   SkillSummary,
@@ -579,6 +580,8 @@ export interface Api {
     resolve(key: string, project: string): Promise<TemplateResolved>;
     /** `POST /api/templates/from-agent/{agent}`: a template from the agent's settings now. */
     fromAgent(agent: string, body: TemplateFromAgent): Promise<AgentTemplate>;
+    /** `GET /api/templates/{key}/wcl`: the template's WCL file in the config repo. */
+    wcl(key: string): Promise<TemplateWcl>;
   };
 
   /**
@@ -1053,6 +1056,7 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       remove: (key) => del(`/api/templates/${seg(key)}`),
       resolve: (key, project) => get(`/api/templates/${seg(key)}/resolve`, { project }),
       fromAgent: (agent, body) => post(`/api/templates/from-agent/${seg(agent)}`, body),
+      wcl: (key) => get(`/api/templates/${seg(key)}/wcl`),
     },
 
     config: {

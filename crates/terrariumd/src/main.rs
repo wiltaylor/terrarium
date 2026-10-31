@@ -174,7 +174,10 @@ async fn main() -> anyhow::Result<()> {
         daemon.state.state_dir.clone(),
     );
     repo.auto_sync = auto_sync.as_str().to_owned();
-    daemon.state.config_repo.configure(repo);
+    // The agent templates are files in the config repo (PLAN §5b): the
+    // first load writes the files of the templates from before them.
+    terrariumd::template_files::configure(&daemon.state, repo).await;
+    let template_watch = terrariumd::template_files::spawn_watch(daemon.state.clone());
     let sync_task = terrariumd::api::spawn_config_sync(
         daemon.state.clone(),
         auto_sync,
@@ -228,6 +231,7 @@ async fn main() -> anyhow::Result<()> {
     if let Some(t) = sync_task {
         t.abort();
     }
+    template_watch.abort();
     if let Some(t) = auto_update_task {
         t.abort();
     }

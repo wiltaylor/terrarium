@@ -269,6 +269,15 @@ docs/api.md §21.3). **Custom** opens the full form, with no template.
 dialog opens on the full form, with a link to Settings → Templates. The
 chooser model is the pure `features/agents/chooser.ts`.
 
+**Templates.** The Templates tab (`features/templates/TemplatesPage.tsx`)
+lists the templates, with Edit (`TemplateDialog.tsx`, the form) and Delete.
+Each template is a WCL file in the config repo (docs/api.md §21.5): a save
+writes the file. **View WCL** opens a read-only panel under the table with
+the path and the text of the file (`GET /api/templates/{key}/wcl`), in a
+`<pre>` text node, monospace. There is no WCL editor: edit the file by
+hand, or use the form. The mock writes the same text (`renderWcl` in
+`api/mock/templates.ts`).
+
 **Live mode of the log tabs.** Mail, Events, and Audit have the same
 **Live** control first in their toolbar (`components/Live.tsx`
 `LiveControl`), on at the start, with a pulsing dot while on. Each tab is

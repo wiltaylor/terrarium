@@ -1360,6 +1360,20 @@ const MIGRATIONS: &[&str] = &[
         updated_at     TEXT NOT NULL
     );
     "#,
+    // 44: agent templates are WCL files in the config repo (PLAN §5b,
+    // `crate::template_files`). The table is the index of the files.
+    // `file_hash` is the SHA-256 of the file that the row holds. NULL: the
+    // row has no file yet (a row from before this version, or a write with
+    // no config repo); the next load writes its file. The config export
+    // has no templates now, so the export fleet of the global objects
+    // gives its templates up: they are config templates.
+    // Self-contained: when another branch takes number 44, move this
+    // entry to the end of the list.
+    r#"
+    ALTER TABLE agent_templates ADD COLUMN file_hash TEXT;
+    UPDATE agent_templates SET source = 'config' WHERE source = 'fleet:terrarium-global';
+    DELETE FROM fleet_objects WHERE kind = 'template' AND fleet = 'terrarium-global';
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call
@@ -1451,6 +1465,7 @@ impl Db {
                 redactor,
                 view: OnceCell::new(),
                 rebuild: None,
+                files: Vec::new(),
             };
             let value = f(&mut t)?;
             let Tx {
@@ -1458,6 +1473,7 @@ impl Db {
                 events,
                 audits,
                 rebuild,
+                files,
                 ..
             } = t;
             // The new matcher reads the store as this transaction left it.
@@ -1466,7 +1482,13 @@ impl Db {
                 Some(dir) => Some(crate::secrets::redact::build(&tx, &dir)?),
                 None => None,
             };
-            tx.commit()?;
+            // The staged files go to disk before the commit; a failure
+            // puts the old files back, and the transaction rolls back.
+            let undo = apply_files(&files)?;
+            if let Err(e) = tx.commit() {
+                undo_files(undo);
+                return Err(e.into());
+            }
             // The swap comes before the guard goes (at the end of this
             // closure): the next write takes its snapshot after it.
             if let Some(r) = next {
@@ -1506,6 +1528,69 @@ pub struct Tx<'c> {
     view: OnceCell<View>,
     /// Set by [`Self::rebuild_redactor`]: the state dir of the build.
     rebuild: Option<PathBuf>,
+    /// The file writes of [`Self::stage_file`], in order.
+    files: Vec<FileOp>,
+}
+
+/// A file write that a transaction stages ([`Tx::stage_file`]).
+#[derive(Debug, Clone)]
+struct FileOp {
+    path: PathBuf,
+    /// The new content. `None` removes the file.
+    content: Option<Vec<u8>>,
+}
+
+/// The old state of a file that [`apply_files`] changed.
+type Undo = Vec<(PathBuf, Option<Vec<u8>>)>;
+
+/// Write the staged files, each one atomically. On a failure, put back
+/// the files that changed before it.
+fn apply_files(files: &[FileOp]) -> ApiResult<Undo> {
+    let mut undo: Undo = Vec::new();
+    for op in files {
+        let before = std::fs::read(&op.path).ok();
+        let result = match &op.content {
+            Some(bytes) => write_file(&op.path, bytes),
+            None => match std::fs::remove_file(&op.path) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+                _ => Ok(()),
+            },
+        };
+        if let Err(e) = result {
+            undo_files(undo);
+            return Err(ApiError::internal(format!("{}: {e}", op.path.display())));
+        }
+        undo.push((op.path.clone(), before));
+    }
+    Ok(undo)
+}
+
+/// Write `bytes` to a temp file next to `path`, then rename it.
+fn write_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let tmp = path.with_file_name(format!(".{name}.tmp-{}", ulid::Ulid::new()));
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
+}
+
+fn undo_files(undo: Undo) {
+    for (path, before) in undo.into_iter().rev() {
+        let r = match before {
+            Some(bytes) => write_file(&path, &bytes),
+            None => std::fs::remove_file(&path),
+        };
+        if let Err(e) = r {
+            tracing::warn!(path = %path.display(), "cannot put the file back: {e}");
+        }
+    }
 }
 
 impl<'c> std::ops::Deref for Tx<'c> {
@@ -1528,6 +1613,7 @@ impl<'c> Tx<'c> {
             redactor: Arc::new(Redactor::empty()),
             view: OnceCell::new(),
             rebuild: None,
+            files: Vec::new(),
         }
     }
 
@@ -1535,6 +1621,21 @@ impl<'c> Tx<'c> {
     #[cfg(test)]
     pub fn commit_for_test(self) -> rusqlite::Result<()> {
         self.tx.commit()
+    }
+
+    /// Write the staged files of a test transaction now.
+    #[cfg(test)]
+    pub fn apply_files_for_test(&mut self) -> ApiResult<()> {
+        apply_files(&std::mem::take(&mut self.files)).map(|_| ())
+    }
+
+    /// Write `content` to `path` (`None`: remove the file) when the
+    /// transaction commits: just before the commit, so that a failure of
+    /// the write rolls the transaction back, and a failure of the commit
+    /// puts the old files back. A write that fails before its end writes
+    /// no file.
+    pub fn stage_file(&mut self, path: PathBuf, content: Option<Vec<u8>>) {
+        self.files.push(FileOp { path, content });
     }
 
     /// Build the redaction matcher again in this transaction, before its

@@ -75,6 +75,7 @@ async fn validate(
     ApiJson(body): ApiJson<Body>,
 ) -> ApiResult<Json<Validation>> {
     let fallback = body.fallback();
+    crate::template_files::refresh_quiet(&state).await;
     let v = state
         .db
         .read(move |c| {
@@ -110,6 +111,8 @@ async fn validate(
 
 /// Parse, check, plan, and mark the agents that run in the supervisor.
 async fn plan_of(state: &Shared, body: &Body) -> ApiResult<(Option<Fleet>, Plan)> {
+    // A fleet names templates: the store has the files as they are now.
+    crate::template_files::refresh_quiet(state).await;
     let text = body.content.clone();
     let fallback = body.fallback();
     let (f, mut p) = state
@@ -234,11 +237,21 @@ async fn apply(
         content: body.content.clone(),
     };
     let state_dir = state.work_dir.clone();
+    let repo = crate::template_files::repo_dir(&state);
     let (prune, confirm, a, fl) = (body.prune, body.confirm, actor.clone(), f.clone());
     let applied = state
         .db
         .write(actor.label(), move |t| {
-            store::apply(t, &fl, &origin, &a, prune, confirm, &state_dir)
+            store::apply(
+                t,
+                &fl,
+                &origin,
+                &a,
+                prune,
+                confirm,
+                &state_dir,
+                repo.as_deref(),
+            )
         })
         .await?;
     drop(deleting);

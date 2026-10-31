@@ -11,7 +11,7 @@ name = "terrarium"
 path = "src/main.rs"
 
 [dependencies]
-terrarium-core.workspace = true
+terrarium-core = { workspace = true, features = ["wcl"] }
 tokio.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true

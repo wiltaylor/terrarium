@@ -8,8 +8,10 @@
 //!
 //! - `prompts/`: the personas and the protocol templates (`*.md`).
 //! - `harness/<harness>/`: the user settings of each harness.
-//! - `export/`: the templates, the schedules, and the projects with their
-//!   agents, targets, and repos, as fleet files ([`export_files`]); and the
+//! - `templates/`: the agent templates, one WCL file each
+//!   (`crate::template_files`).
+//! - `export/`: the schedules, and the projects with their agents,
+//!   targets, and repos, as fleet files ([`export_files`]); and the
 //!   secrets by name in `export/secrets/` (`crate::secrets::export`: the
 //!   names, kinds, plain fields, and grants, never a value). No runtime
 //!   state, and no ID of this instance.
@@ -85,6 +87,7 @@ pub const GITIGNORE: &str = "\
 !/harness/
 !/export/
 !/skills/
+!/templates/
 /prompts/**
 !/prompts/**/
 !/prompts/**/*.md
@@ -99,6 +102,9 @@ pub const GITIGNORE: &str = "\
 !/export/**/*.json
 !/export/**/*.yaml
 !/export/**/*.md
+/templates/**
+!/templates/**/
+!/templates/**/*.wcl
 /skills/**
 !/skills/**/
 !/skills/**/*.md
@@ -154,6 +160,8 @@ pub struct ConfigRepoRuntime {
     repo: RwLock<Option<ConfigRepo>>,
     /// One git operation at a time.
     pub busy: tokio::sync::Mutex<()>,
+    /// The loads of the template files (`crate::template_files`).
+    pub templates: crate::template_files::Runtime,
 }
 
 impl ConfigRepoRuntime {
@@ -1066,17 +1074,21 @@ fn clean_fleet(f: &mut terrarium_core::fleet::Fleet) {
         for a in &mut p.agents {
             a.start = false;
         }
+        // The templates are files of the repo (`templates/`), not a part
+        // of the export.
+        p.def.templates.clear();
     }
+    f.templates.clear();
 }
 
 /// The export of the store (PLAN §8.3): one fleet file for each project
-/// (its repos, agents, project targets, schedules, and templates), one
-/// for the global templates and targets, and one secrets file for each
+/// (its repos, agents, project targets, and schedules), one for the
+/// global targets, and one secrets file for each
 /// scope with secrets (`crate::secrets::export`: no value). A project that a fleet owns is
 /// exported under that fleet's name, so an apply on another instance
 /// keeps one owner.
 pub fn export_files(conn: &rusqlite::Connection) -> ApiResult<Vec<ExportFile>> {
-    use crate::store::{Page, projects, targets, templates};
+    use crate::store::{Page, projects, targets};
     use terrarium_core::fleet::{FLEET_VERSION, Fleet, FleetDefaults, Kind, valid_name};
     let mut out = Vec::new();
     let mut page = Page {
@@ -1113,25 +1125,20 @@ pub fn export_files(conn: &rusqlite::Connection) -> ApiResult<Vec<ExportFile>> {
             content: f.to_toml(),
         });
     }
-    let templates: Vec<_> = templates::of_scope(conn, None)?
-        .into_iter()
-        .filter(|t| t.source != crate::store::projects::SOURCE_FILE)
-        .map(|t| t.def())
-        .collect();
     let targets: Vec<_> = targets::list(conn)?
         .into_iter()
         .filter(|r| r.def.project.is_none() && r.source != crate::store::projects::SOURCE_FILE)
         .map(|r| r.def)
         .collect();
-    if !templates.is_empty() || !targets.is_empty() {
+    if !targets.is_empty() {
         let f = Fleet {
             version: FLEET_VERSION,
             name: GLOBAL_FLEET.into(),
-            description: Some("The global templates and targets of a Terrarium instance".into()),
+            description: Some("The global targets of a Terrarium instance".into()),
             defaults: FleetDefaults::default(),
             subscriptions: Vec::new(),
             targets,
-            templates,
+            templates: Vec::new(),
             projects: Vec::new(),
         };
         out.push(ExportFile {

@@ -547,13 +547,14 @@ one command ([api.md §21](api.md#21-agent-templates)).
 
 ```
 terrarium template ls [--global]
-terrarium template show <template>
+terrarium template show <template> [--wcl]
 terrarium template new <name> [--global] [--description d] --harness <h> [--subscription s]
                        [--model m] [--prompt p] [--role r]... [--target t]... [--mail-to a]...
                        [--cross-project p/a]... [--restart r] [--idle-stop 30m|off]
                        [--compact-on-idle on|off] [--compact-max-age 24h|off]
                        [--system-prompt <text | -> | --system-prompt-file path] [--persona p]
                        [--skill s]...
+terrarium template new [<name>] --from-file worker.wcl [flags that override the file]
 terrarium template new <name> --from-file worker.toml [flags that override the file]
 terrarium template edit <template> [--rename n] [--description d] [spec flags as in new]
 terrarium template rm <template>
@@ -562,6 +563,12 @@ terrarium template from-agent <agent> <name> [--global] [--description d]
 
 `<template>` is a ULID, `project/name`, `global:name`, or a name (the
 project's first, then the global one).
+
+Each template is a WCL file in the config repo: `templates/<name>.wcl`
+for a global one, `templates/<project>/<name>.wcl` for a project one
+([api.md §21.5](api.md#215-template-files)). Each command here goes
+through the API, which writes the file; you can also edit the file by
+hand. `terrarium admin config commit` (or `sync`) commits the files.
 
 - The scope of `new` and `from-agent` is `--project`. Without it, an agent
   makes a template of its own project, the operator a global one with
@@ -572,10 +579,16 @@ project's first, then the global one).
   revision; the agents made from the template do not change.
 - `ls` shows the template key, the harness, the prompt, the revision, the
   source, and the description.
+- `show --wcl` prints the WCL file of the template, as it is on disk.
+- `--from-file` reads a WCL template file when its extension is `.wcl`
+  (the format of `templates/`; the name defaults to the file name, so
+  `template new --from-file docs-writer.wcl` makes `docs-writer`). An
+  error names the file, the line, and the column. Any other extension is
+  a TOML agent definition without `name` and `project`, as before.
 - `--system-prompt`, `--system-prompt-file`, and (with `edit`)
   `--no-system-prompt` work as with `agent new|set`. `show` prints the
-  whole `system_prompt` after the other spec fields. A `--from-file` can
-  give `system_prompt_file = "<path>"`, relative to the file.
+  whole `system_prompt` after the other spec fields. A TOML `--from-file`
+  can give `system_prompt_file = "<path>"`, relative to the file.
 - `--skill` sets the skills of the spec, as with `agent new`. With `edit`,
   `--no-skills` removes them.
 

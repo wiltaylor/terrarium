@@ -1939,7 +1939,7 @@ describe("event sources (docs/api.md §20)", () => {
 });
 
 describe("agent templates (docs/api.md §21)", () => {
-  const TEMPLATE_KEYS = ["created_at", "created_by", "description", "id", "name", "project", "revision", "source", "spec", "updated_at"];
+  const TEMPLATE_KEYS = ["created_at", "created_by", "description", "file", "id", "name", "project", "revision", "source", "spec", "updated_at"];
 
   it("lists in the daemon's shape, global first, a project's with the global ones", async () => {
     const api = mock();
@@ -1967,6 +1967,18 @@ describe("agent templates (docs/api.md §21)", () => {
     expect((await api.templates.update(u.id, { description: "runs the tests" })).revision).toBe(2);
     await api.templates.remove(u.id);
     await expect(api.templates.get(u.id)).rejects.toMatchObject({ status: 404 });
+  });
+
+  it("serves the WCL file of each template, and a rename moves it", async () => {
+    const api = mock();
+    const t = await api.templates.create({ name: "docs", project: "terrarium", description: "Docs writer", spec: { harness: "pi", system_prompt: "Line one.\nLine two.\n", policy: { targets: [], mail_to: ["lead"] } } });
+    expect(t).toMatchObject({ source: "config", file: "templates/terrarium/docs.wcl" });
+    const f = await api.templates.wcl(t.id);
+    expect(f).toMatchObject({ path: "templates/terrarium/docs.wcl", on_disk: true });
+    expect(f.text).toContain('description = "Docs writer"');
+    expect(f.text).toContain("system_prompt = <<'PROMPT'\n  Line one.\n  Line two.\n  PROMPT\n");
+    expect(f.text).toContain('policy {\n  targets = []\n  mail_to = ["lead"]\n}\n');
+    expect((await api.templates.update(t.id, { name: "writer" })).file).toBe("templates/terrarium/writer.wcl");
   });
 
   it("resolves the project's template before the global one, and global: forces the global one", async () => {

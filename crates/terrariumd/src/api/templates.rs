@@ -5,6 +5,12 @@
 //! the global ones; a project_admin manages its project's; a global
 //! template needs a sysadmin. A template grants nothing: an agent create
 //! from it runs the normal rights checks on the values it copies.
+//!
+//! Each template is a WCL file in the config repo (`crate::template_files`).
+//! A read loads the changed files first; a write writes the file in its
+//! transaction. The file stays uncommitted, as a prompt or a skill edit:
+//! `terrarium admin config commit` (or a sync) commits it, with the secret
+//! scan.
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -17,18 +23,19 @@ use terrarium_core::config::AgentDef;
 
 use super::{ApiJson, ApiQuery, Shared};
 use crate::actor::Actor;
-use crate::error::{ApiError, ApiResult, Code};
+use crate::error::{ApiError, ApiResult};
 use crate::policy;
-use crate::store::projects::{SOURCE_API, SOURCE_FILE};
 use crate::store::templates::{
-    self, ListFilter, NewTemplate, Template, TemplatePatch, TemplateRef,
+    self, ListFilter, NewTemplate, SOURCE_CONFIG, Template, TemplatePatch, TemplateRef,
 };
+use crate::template_files;
 
 pub fn routes() -> Router<Shared> {
     Router::new()
         .route("/templates", get(list).post(create))
         .route("/templates/{id}", get(show).patch(update).delete(remove))
         .route("/templates/{id}/resolve", get(resolve))
+        .route("/templates/{id}/wcl", get(wcl))
         .route("/templates/from-agent/{agent}", post(from_agent))
 }
 
@@ -48,17 +55,6 @@ fn scope_of(actor: &Actor, project: Option<Option<String>>) -> Option<String> {
         Some(p) => p.filter(|p| !p.is_empty()),
         None => actor.project().map(str::to_owned),
     }
-}
-
-fn file_managed(t: &Template) -> ApiError {
-    ApiError::new(
-        Code::FileManaged,
-        format!(
-            "template `{}` is declared in projects/{}.toml; edit the file, then POST /api/reload",
-            t.key(),
-            t.project.as_deref().unwrap_or_default()
-        ),
-    )
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -108,11 +104,13 @@ async fn list(
             all: false,
         },
     };
+    template_files::refresh_quiet(&state).await;
     Ok(Json(state.db.read(move |c| templates::list(c, &f)).await?))
 }
 
 /// Find the template of the path and check that the actor may read it.
 async fn load(state: &Shared, actor: &Actor, key: String) -> ApiResult<Template> {
+    template_files::refresh_quiet(state).await;
     let context = actor.project().map(str::to_owned);
     let t = state
         .db
@@ -173,11 +171,15 @@ async fn create(
         description: b.description.unwrap_or_default(),
         spec,
         created_by: actor.label(),
-        source: SOURCE_API.into(),
+        source: SOURCE_CONFIG.into(),
     };
+    template_files::refresh_quiet(&state).await;
+    let repo = template_files::repo_dir(&state);
     let t = state
         .db
-        .write(actor.label(), move |t| templates::create(t, &new))
+        .write(actor.label(), move |t| {
+            templates::create(t, &new, repo.as_deref())
+        })
         .await?;
     Ok((StatusCode::CREATED, Json(t)))
 }
@@ -210,9 +212,6 @@ async fn update(
 ) -> ApiResult<Json<Template>> {
     let t = load(&state, &actor, id).await?;
     policy::manage_templates(&actor, t.project.as_deref(), "")?;
-    if t.source == SOURCE_FILE {
-        return Err(file_managed(&t));
-    }
     let spec = b.spec.map(spec_of).transpose()?;
     if let Some(spec) = &spec {
         check_skills(&state, spec)?;
@@ -223,10 +222,11 @@ async fn update(
         spec,
         source: None,
     };
+    let repo = template_files::repo_dir(&state);
     let v = state
         .db
         .write(actor.label(), move |tx| {
-            templates::update(tx, &t.id, &patch)
+            templates::update(tx, &t.id, &patch, repo.as_deref())
         })
         .await?;
     Ok(Json(v))
@@ -239,14 +239,51 @@ async fn remove(
 ) -> ApiResult<StatusCode> {
     let t = load(&state, &actor, id).await?;
     policy::manage_templates(&actor, t.project.as_deref(), "")?;
-    if t.source == SOURCE_FILE {
-        return Err(file_managed(&t));
-    }
+    let repo = template_files::repo_dir(&state);
     state
         .db
-        .write(actor.label(), move |tx| templates::delete(tx, &t.id))
+        .write(actor.label(), move |tx| {
+            templates::delete(tx, &t.id, repo.as_deref())
+        })
         .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// The answer of `GET /api/templates/{id}/wcl`.
+#[derive(Debug, Serialize)]
+struct Wcl {
+    /// The file in the config repo.
+    path: String,
+    /// The text of the file. With no file (no config repo), the text that
+    /// the file would have.
+    text: String,
+    /// False when the text is not from a file.
+    on_disk: bool,
+}
+
+/// `GET /api/templates/{id}/wcl`: the WCL file of a template.
+async fn wcl(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Wcl>> {
+    let t = load(&state, &actor, id).await?;
+    let path = t.rel_path();
+    let on_disk = template_files::repo_dir(&state)
+        .filter(|_| t.file.is_some())
+        .and_then(|repo| std::fs::read_to_string(repo.join(&path)).ok());
+    Ok(Json(match on_disk {
+        Some(text) => Wcl {
+            path,
+            text,
+            on_disk: true,
+        },
+        None => Wcl {
+            path,
+            text: t.render()?,
+            on_disk: false,
+        },
+    }))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -281,6 +318,7 @@ async fn resolve(
     };
     policy::read_project(&actor, &project)?;
     let p = project.clone();
+    template_files::refresh_quiet(&state).await;
     let t = state
         .db
         .read(move |c| {
@@ -350,11 +388,15 @@ async fn from_agent(
             .unwrap_or_else(|| format!("from agent {}/{}", def.project, def.name)),
         spec: agent_template::spec_of(&def),
         created_by: actor.label(),
-        source: SOURCE_API.into(),
+        source: SOURCE_CONFIG.into(),
     };
+    template_files::refresh_quiet(&state).await;
+    let repo = template_files::repo_dir(&state);
     let t = state
         .db
-        .write(actor.label(), move |t| templates::create(t, &new))
+        .write(actor.label(), move |t| {
+            templates::create(t, &new, repo.as_deref())
+        })
         .await?;
     Ok((StatusCode::CREATED, Json(t)))
 }
@@ -385,6 +427,7 @@ pub async fn create_body(
         _ => return Err(ApiError::bad_request("give `project` with `template`")),
     };
     let p = project.clone();
+    template_files::refresh_quiet(state).await;
     let t = state
         .db
         .read(move |c| templates::resolve(c, &p, &key))

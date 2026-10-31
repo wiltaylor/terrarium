@@ -5,11 +5,19 @@
 //! spec is an agent definition without `name` and `project`, kept in the
 //! normal form of `agent_template::normalize`. `revision` starts at 1 and
 //! goes up at each change, so an agent can show which version it copied.
+//!
+//! The source of truth is the WCL file of each template in the config
+//! repo (`terrarium_core::template_file`): this table is its index. Each
+//! write here with a config repo (`repo`) stages the file in the same
+//! transaction (`Tx::stage_file`) and records its hash in `file_hash`.
+//! `crate::template_files` reads the files back into the table.
+use std::path::Path;
 
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use terrarium_core::agent_template::{self, Lookup, Spec, TemplateDef};
+use terrarium_core::template_file;
 
 use crate::db::{Tx, now};
 use crate::error::{ApiError, ApiResult};
@@ -27,11 +35,19 @@ pub struct Template {
     pub spec: Spec,
     pub revision: i64,
     pub created_by: String,
-    /// `api`, `file` (a `[[templates]]` of a project file), or
-    /// `fleet:<name>`.
+    /// `config` (a file in the config repo), or `fleet:<name>` (a fleet
+    /// owns it; its file is in the config repo too). `api` and `file`
+    /// are from before the files (migration 44), until the first load.
     pub source: String,
     pub created_at: String,
     pub updated_at: String,
+    /// The file in the config repo: `templates/<name>.wcl` or
+    /// `templates/<project>/<name>.wcl`. `None` until the file is
+    /// written (no config repo).
+    pub file: Option<String>,
+    /// The SHA-256 of the file that the row holds.
+    #[serde(skip)]
+    pub file_hash: Option<String>,
 }
 
 /// The template that an agent was made from: `agents.template`.
@@ -67,6 +83,22 @@ impl Template {
         }
     }
 
+    /// The path of the template's file in the config repo.
+    pub fn rel_path(&self) -> String {
+        template_file::rel_path(self.project.as_deref(), &self.name)
+    }
+
+    /// The text of the template's file, as [`stage_file`] writes it.
+    pub fn render(&self) -> ApiResult<String> {
+        template_file::render(
+            &self.name,
+            self.project.as_deref(),
+            Some(&self.description),
+            &self.spec,
+        )
+        .map_err(spec_error)
+    }
+
     /// The file form: `[[templates]]` and `[[projects.templates]]`.
     pub fn def(&self) -> TemplateDef {
         TemplateDef {
@@ -79,10 +111,16 @@ impl Template {
 
 fn from_row(r: &Row<'_>) -> rusqlite::Result<Template> {
     let spec: String = r.get("spec")?;
+    let name: String = r.get("name")?;
+    let project: Option<String> = r.get("project")?;
+    let file_hash: Option<String> = r.get("file_hash")?;
     Ok(Template {
         id: r.get("id")?,
-        name: r.get("name")?,
-        project: r.get("project")?,
+        file: file_hash
+            .as_ref()
+            .map(|_| template_file::rel_path(project.as_deref(), &name)),
+        name,
+        project,
         description: r.get("description")?,
         spec: serde_json::from_str(&spec).unwrap_or_default(),
         revision: r.get("revision")?,
@@ -90,7 +128,55 @@ fn from_row(r: &Row<'_>) -> rusqlite::Result<Template> {
         source: r.get("source")?,
         created_at: r.get("created_at")?,
         updated_at: r.get("updated_at")?,
+        file_hash,
     })
+}
+
+/// The source of a template that a config repo file declares.
+pub const SOURCE_CONFIG: &str = "config";
+
+/// The refusal of a template file by the secret scan: `422 invalid` with
+/// the findings in `details.findings`, as a commit of the config repo.
+fn scan_refusal(findings: &[terrarium_core::secret_scan::Finding]) -> ApiError {
+    let list: Vec<String> = findings.iter().map(ToString::to_string).collect();
+    ApiError::invalid(format!(
+        "the secret scan refused the template file ({} finding(s)): {}. A template holds no \
+         secret: give the agent a secret grant (PLAN §16b), or for a false hit add `{}` to \
+         the line",
+        findings.len(),
+        list.join("; "),
+        terrarium_core::secret_scan::ALLOW_MARKER
+    ))
+    .with_details(json!({ "findings": findings }))
+}
+
+/// Stage the file of `tpl` in the config repo `repo` (it goes to disk at
+/// the commit), after the secret scan, and record its hash. `None`: no
+/// config repo; the row waits for its file.
+pub fn stage_file(t: &mut Tx<'_>, repo: Option<&Path>, tpl: &Template) -> ApiResult<()> {
+    let Some(repo) = repo else {
+        return Ok(());
+    };
+    let rel = tpl.rel_path();
+    let text = tpl.render()?;
+    let findings = terrarium_core::secret_scan::scan(&rel, text.as_bytes());
+    if !findings.is_empty() {
+        return Err(scan_refusal(&findings));
+    }
+    let hash = crate::store::artifacts::sha256_hex(text.as_bytes());
+    t.stage_file(repo.join(&rel), Some(text.into_bytes()));
+    t.execute(
+        "UPDATE agent_templates SET file_hash = ?2 WHERE id = ?1",
+        params![tpl.id, hash],
+    )?;
+    Ok(())
+}
+
+/// Stage the removal of the file `rel` of the config repo `repo`.
+fn stage_removal(t: &mut Tx<'_>, repo: Option<&Path>, rel: &str) {
+    if let Some(repo) = repo {
+        t.stage_file(repo.join(rel), None);
+    }
 }
 
 /// A bad spec: `422 invalid` with `details.field = "spec"`.
@@ -100,7 +186,7 @@ fn spec_error(e: impl std::fmt::Display) -> ApiError {
 
 /// [`normalize`], and the checks that read the store: a pi template names
 /// no plan login (PLAN §16.3).
-fn checked(conn: &Connection, spec: &Spec) -> ApiResult<Spec> {
+pub fn checked(conn: &Connection, spec: &Spec) -> ApiResult<Spec> {
     let n = normalize(spec)?;
     let def = agent_template::to_def(&n, "x", "x").map_err(spec_error)?;
     crate::store::agents::check_plan_logins(
@@ -269,8 +355,8 @@ fn emit(t: &mut Tx<'_>, tpl: &Template, change: &str) -> ApiResult<()> {
     Ok(())
 }
 
-/// Make a template.
-pub fn create(t: &mut Tx<'_>, new: &NewTemplate) -> ApiResult<Template> {
+/// Make a template, and stage its file in `repo`.
+pub fn create(t: &mut Tx<'_>, new: &NewTemplate, repo: Option<&Path>) -> ApiResult<Template> {
     check_name("template", &new.name)
         .map_err(|e| crate::store::schedules::field_error("name", e.message))?;
     if let Some(p) = &new.project
@@ -304,6 +390,7 @@ pub fn create(t: &mut Tx<'_>, new: &NewTemplate) -> ApiResult<Template> {
             at
         ],
     )?;
+    stage_file(t, repo, &get(t, &id)?)?;
     let tpl = get(t, &id)?;
     t.audit(
         "template.create",
@@ -333,9 +420,15 @@ pub struct TemplatePatch {
     pub source: Option<String>,
 }
 
-/// Change a template. A change of the name, the description, or the spec
-/// adds 1 to `revision`; an equal value is no change.
-pub fn update(t: &mut Tx<'_>, id: &str, p: &TemplatePatch) -> ApiResult<Template> {
+/// Change a template, and stage its file in `repo` (a rename moves the
+/// file). A change of the name, the description, or the spec adds 1 to
+/// `revision`; an equal value is no change.
+pub fn update(
+    t: &mut Tx<'_>,
+    id: &str,
+    p: &TemplatePatch,
+    repo: Option<&Path>,
+) -> ApiResult<Template> {
     let before = get(t, id)?;
     let name = match &p.name {
         Some(n) if *n != before.name => {
@@ -378,8 +471,13 @@ pub fn update(t: &mut Tx<'_>, id: &str, p: &TemplatePatch) -> ApiResult<Template
             now()
         ],
     )?;
-    let after = get(t, id)?;
+    let mut after = get(t, id)?;
     if changed {
+        if after.name != before.name {
+            stage_removal(t, repo, &before.rel_path());
+        }
+        stage_file(t, repo, &after)?;
+        after = get(t, id)?;
         t.audit(
             "template.update",
             id,
@@ -393,9 +491,11 @@ pub fn update(t: &mut Tx<'_>, id: &str, p: &TemplatePatch) -> ApiResult<Template
     Ok(after)
 }
 
-pub fn delete(t: &mut Tx<'_>, id: &str) -> ApiResult<()> {
+/// Delete a template, and stage the removal of its file in `repo`.
+pub fn delete(t: &mut Tx<'_>, id: &str, repo: Option<&Path>) -> ApiResult<()> {
     let tpl = get(t, id)?;
     t.execute("DELETE FROM agent_templates WHERE id = ?1", [id])?;
+    stage_removal(t, repo, &tpl.rel_path());
     t.audit(
         "template.delete",
         id,
@@ -414,6 +514,7 @@ pub fn upsert_def(
     def: &TemplateDef,
     source: &str,
     actor: &str,
+    repo: Option<&Path>,
 ) -> ApiResult<Template> {
     match find_in(t, project, &def.name)? {
         Some(have) => update(
@@ -425,6 +526,7 @@ pub fn upsert_def(
                 spec: Some(def.spec.clone()),
                 source: Some(source.to_owned()),
             },
+            repo,
         ),
         None => create(
             t,
@@ -436,35 +538,128 @@ pub fn upsert_def(
                 created_by: actor.to_owned(),
                 source: source.to_owned(),
             },
+            repo,
         ),
     }
 }
 
-/// Sync the `[[templates]]` of a project file: write each one with
-/// `source = file`, and delete the file templates of the project that the
-/// file no longer has. Returns the errors, one line each.
-pub fn sync_file(t: &mut Tx<'_>, project: &str, defs: &[TemplateDef]) -> ApiResult<Vec<String>> {
-    let mut errors = Vec::new();
+/// The `[[templates]]` of a project file, from before the template files:
+/// each one that the store does not have becomes a template with its file
+/// in `repo` (one import). The file is the template from then on: the
+/// project file is not read for it again. Returns one line for each
+/// entry, to tell the operator to remove `[[templates]]`, and the errors.
+pub fn import_file(
+    t: &mut Tx<'_>,
+    project: &str,
+    defs: &[TemplateDef],
+    repo: Option<&Path>,
+) -> ApiResult<Vec<String>> {
+    let mut out = Vec::new();
     for d in defs {
-        if let Err(e) = upsert_def(t, Some(project), d, projects::SOURCE_FILE, "operator") {
-            errors.push(format!(
+        let path = template_file::rel_path(Some(project), &d.name);
+        if find_in(t, Some(project), &d.name)?.is_some() {
+            out.push(format!(
+                "projects/{project}.toml: template {} is in {path} now; remove [[templates]] from the project file",
+                d.name
+            ));
+            continue;
+        }
+        let new = NewTemplate {
+            name: d.name.clone(),
+            project: Some(project.to_owned()),
+            description: d.description.clone().unwrap_or_default(),
+            spec: d.spec.clone(),
+            created_by: "operator".into(),
+            source: SOURCE_CONFIG.into(),
+        };
+        match create(t, &new, repo) {
+            Ok(_) => out.push(format!(
+                "projects/{project}.toml: template {} moved to {path}; remove [[templates]] from the project file",
+                d.name
+            )),
+            Err(e) => out.push(format!(
                 "projects/{project}.toml template {}: {}",
                 d.name, e.message
-            ));
+            )),
         }
     }
-    for tpl in of_scope(t, Some(project))? {
-        if tpl.source == projects::SOURCE_FILE && !defs.iter().any(|d| d.name == tpl.name) {
-            delete(t, &tpl.id)?;
-        }
-    }
-    Ok(errors)
+    Ok(out)
 }
 
-/// A project file is gone: its file templates become API templates.
+/// One row of [`index`]: `(id, project, name, file_hash)`.
+pub type IndexRow = (String, Option<String>, String, Option<String>);
+
+/// The rows of every template.
+pub fn index(conn: &Connection) -> ApiResult<Vec<IndexRow>> {
+    let mut stmt = conn.prepare("SELECT id, project, name, file_hash FROM agent_templates")?;
+    let rows = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+        .collect::<Result<_, _>>()?;
+    Ok(rows)
+}
+
+/// Write the template of a file into the table: make it (`source =
+/// config`), or change it to the file's values. A new `hash` adds 1 to
+/// `revision`, also when the values are the same (a comment changed):
+/// the revision names one version of the file.
+pub fn apply_file(
+    t: &mut Tx<'_>,
+    project: Option<&str>,
+    name: &str,
+    description: Option<String>,
+    spec: &Spec,
+    hash: &str,
+) -> ApiResult<Template> {
+    let description = description.unwrap_or_default();
+    let tpl = match find_in(t, project, name)? {
+        None => create(
+            t,
+            &NewTemplate {
+                name: name.to_owned(),
+                project: project.map(str::to_owned),
+                description,
+                spec: spec.clone(),
+                created_by: "config".into(),
+                source: SOURCE_CONFIG.into(),
+            },
+            None,
+        )?,
+        Some(have) => {
+            let after = update(
+                t,
+                &have.id,
+                &TemplatePatch {
+                    name: None,
+                    description: Some(description),
+                    spec: Some(spec.clone()),
+                    source: None,
+                },
+                None,
+            )?;
+            if after.revision == have.revision && have.file_hash.as_deref() != Some(hash) {
+                t.execute(
+                    "UPDATE agent_templates SET revision = revision + 1, updated_at = ?2
+                     WHERE id = ?1",
+                    params![have.id, now()],
+                )?;
+                let bumped = get(t, &have.id)?;
+                emit(t, &bumped, "updated")?;
+            }
+            after
+        }
+    };
+    t.execute(
+        "UPDATE agent_templates SET file_hash = ?2 WHERE id = ?1",
+        params![tpl.id, hash],
+    )?;
+    get(t, &tpl.id)
+}
+
+/// A project file is gone: its file templates become config templates
+/// (rows from before the template files).
 pub fn detach_file(t: &Tx<'_>, project: &str) -> ApiResult<()> {
     t.execute(
-        "UPDATE agent_templates SET source = 'api' WHERE project = ?1 AND source = 'file'",
+        "UPDATE agent_templates SET source = 'config' WHERE project = ?1 AND source = 'file'",
         [project],
     )?;
     Ok(())
@@ -513,24 +708,24 @@ mod tests {
         let mut c = conn();
         let tx = c.transaction().unwrap();
         let mut t = Tx::for_test(tx, "operator");
-        let g = create(&mut t, &new("worker", None, "codex")).unwrap();
-        let p = create(&mut t, &new("worker", Some("terra"), "claude")).unwrap();
-        create(&mut t, &new("lone", Some("other"), "pi")).unwrap();
+        let g = create(&mut t, &new("worker", None, "codex"), None).unwrap();
+        let p = create(&mut t, &new("worker", Some("terra"), "claude"), None).unwrap();
+        create(&mut t, &new("lone", Some("other"), "pi"), None).unwrap();
         // The normal form fills the defaults.
         assert_eq!(p.spec["policy"], json!({"targets": [], "mail_to": ["*"]}));
         assert_eq!(p.revision, 1);
         assert_eq!(g.key(), "_/worker");
         assert_eq!(p.key(), "terra/worker");
         // The name is unique in its scope only.
-        let e = create(&mut t, &new("worker", Some("terra"), "pi")).unwrap_err();
+        let e = create(&mut t, &new("worker", Some("terra"), "pi"), None).unwrap_err();
         assert_eq!(e.code, crate::error::Code::Conflict);
-        let e = create(&mut t, &new("Bad", None, "pi")).unwrap_err();
+        let e = create(&mut t, &new("Bad", None, "pi"), None).unwrap_err();
         assert_eq!(e.code, crate::error::Code::Invalid);
-        let e = create(&mut t, &new("x", Some("nope"), "pi")).unwrap_err();
+        let e = create(&mut t, &new("x", Some("nope"), "pi"), None).unwrap_err();
         assert_eq!(e.code, crate::error::Code::NotFound);
         let mut bad = new("y", None, "pi");
         bad.spec = spec(json!({"harness": "pi", "name": "y"}));
-        let e = create(&mut t, &bad).unwrap_err();
+        let e = create(&mut t, &bad, None).unwrap_err();
         assert_eq!(e.details, Some(json!({"field": "spec"})));
 
         // A project's template wins over the global one; `global:` and
@@ -576,6 +771,7 @@ mod tests {
                 spec: Some(spec(json!({"harness": "claude", "model": "m"}))),
                 ..Default::default()
             },
+            None,
         )
         .unwrap();
         assert_eq!(u.revision, 2);
@@ -586,10 +782,11 @@ mod tests {
                 spec: Some(spec(json!({"harness": "claude", "model": "m"}))),
                 ..Default::default()
             },
+            None,
         )
         .unwrap();
         assert_eq!(same.revision, 2);
-        delete(&mut t, &g.id).unwrap();
+        delete(&mut t, &g.id, None).unwrap();
         assert!(find_in(&t, None, "worker").unwrap().is_none());
         t.execute("DELETE FROM projects WHERE name = 'other'", [])
             .unwrap();
@@ -600,7 +797,7 @@ mod tests {
     }
 
     #[test]
-    fn a_project_file_syncs_its_templates() {
+    fn a_project_file_imports_its_templates_once() {
         let mut c = conn();
         let tx = c.transaction().unwrap();
         let mut t = Tx::for_test(tx, "system");
@@ -609,14 +806,79 @@ mod tests {
             description: None,
             spec: spec(json!({"harness": h})),
         };
-        let errors = sync_file(&mut t, "terra", &[def("a", "pi"), def("b", "nope")]).unwrap();
-        assert_eq!(errors.len(), 1, "{errors:?}");
+        let lines =
+            import_file(&mut t, "terra", &[def("a", "pi"), def("b", "nope")], None).unwrap();
+        assert!(
+            lines[0].contains("moved to templates/terra/a.wcl"),
+            "{lines:?}"
+        );
+        assert!(lines[1].contains("template b: "), "{lines:?}");
         let a = find_in(&t, Some("terra"), "a").unwrap().unwrap();
-        assert_eq!(a.source, "file");
-        sync_file(&mut t, "terra", &[def("a", "claude")]).unwrap();
+        assert_eq!(a.source, SOURCE_CONFIG);
+        // The second read does not change the template: the file is the
+        // template now.
+        let lines = import_file(&mut t, "terra", &[def("a", "claude")], None).unwrap();
+        assert!(
+            lines[0].contains("is in templates/terra/a.wcl now"),
+            "{lines:?}"
+        );
         let a2 = find_in(&t, Some("terra"), "a").unwrap().unwrap();
-        assert_eq!((a2.id.as_str(), a2.revision), (a.id.as_str(), 2));
-        sync_file(&mut t, "terra", &[]).unwrap();
-        assert!(find_in(&t, Some("terra"), "a").unwrap().is_none());
+        assert_eq!((a2.revision, &a2.spec), (1, &a.spec));
+    }
+
+    #[test]
+    fn writes_stage_the_files_with_the_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Some(dir.path());
+        let mut c = conn();
+        let tx = c.transaction().unwrap();
+        let mut t = Tx::for_test(tx, "operator");
+        let mut n = new("worker", Some("terra"), "claude");
+        n.description = "A worker".into();
+        let w = create(&mut t, &n, repo).unwrap();
+        assert_eq!(w.file.as_deref(), Some("templates/terra/worker.wcl"));
+        // Nothing is on disk before the commit.
+        let file = dir.path().join("templates/terra/worker.wcl");
+        assert!(!file.exists());
+        t.apply_files_for_test().unwrap();
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(text, w.render().unwrap());
+        assert_eq!(
+            w.file_hash.as_deref(),
+            Some(crate::store::artifacts::sha256_hex(text.as_bytes()).as_str())
+        );
+        let back = template_file::parse(&text, "worker.wcl").unwrap();
+        assert_eq!(normalize(&back.spec).unwrap(), w.spec);
+        assert_eq!(back.description.as_deref(), Some("A worker"));
+
+        // A rename moves the file.
+        let r = update(
+            &mut t,
+            &w.id,
+            &TemplatePatch {
+                name: Some("builder".into()),
+                ..Default::default()
+            },
+            repo,
+        )
+        .unwrap();
+        t.apply_files_for_test().unwrap();
+        assert!(!file.exists());
+        assert!(dir.path().join("templates/terra/builder.wcl").is_file());
+        assert_eq!(r.revision, 2);
+
+        // The secret scan refuses a secret, and stages nothing.
+        let mut bad = new("leaky", None, "claude");
+        bad.spec = spec(json!({"harness": "claude",
+            "system_prompt": format!("Use the key sk-ant-api03-{}", "a".repeat(40))}));
+        let e = create(&mut t, &bad, repo).unwrap_err();
+        assert_eq!(e.code, crate::error::Code::Invalid, "{e:?}");
+        assert!(e.message.contains("secret scan"), "{}", e.message);
+        assert!(e.message.contains("templates/leaky.wcl"), "{}", e.message);
+
+        // A delete removes the file.
+        delete(&mut t, &r.id, repo).unwrap();
+        t.apply_files_for_test().unwrap();
+        assert!(!dir.path().join("templates/terra/builder.wcl").exists());
     }
 }

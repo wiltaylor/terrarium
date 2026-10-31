@@ -45,6 +45,7 @@ pub mod ssh_agent;
 pub mod store;
 pub mod supervisor;
 pub mod target_test;
+pub mod template_files;
 pub mod time_param;
 pub mod transcripts;
 pub mod trash;
@@ -572,8 +573,11 @@ pub async fn apply_definitions(
     report.errors.extend(target_errors);
     // Schedules of the project files, after the agents and targets that
     // they name (docs/api.md §19), and the templates (§21).
+    // The `[[templates]]` of a project file are an import into the
+    // template files of the config repo (`crate::template_files`).
     let project_defs = defs.projects.clone();
     let gone = report.projects.removed.clone();
+    let repo = template_files::repo_dir(state);
     let schedule_errors = state
         .db
         .write("system", move |t| {
@@ -582,7 +586,12 @@ pub async fn apply_definitions(
             for p in &project_defs {
                 if store::projects::find(t, &p.name)?.is_some() {
                     errors.extend(store::schedules::sync_file(t, &p.name, &p.schedules, now)?);
-                    errors.extend(store::templates::sync_file(t, &p.name, &p.templates)?);
+                    errors.extend(store::templates::import_file(
+                        t,
+                        &p.name,
+                        &p.templates,
+                        repo.as_deref(),
+                    )?);
                 }
             }
             for p in &gone {
@@ -593,6 +602,13 @@ pub async fn apply_definitions(
         })
         .await?;
     report.errors.extend(schedule_errors);
+    // The template files, before the fleets: a fleet agent may name one.
+    match template_files::refresh(state).await {
+        Ok(r) => report.errors.extend(r.errors),
+        Err(e) => report
+            .errors
+            .push(format!("cannot load the template files: {}", e.message)),
+    }
     report.errors.extend(fleet::apply_config_dir(state).await);
     state.set_definitions(defs);
     // Like `DELETE /api/agents/{id}`: stop, then the dir to the trash.

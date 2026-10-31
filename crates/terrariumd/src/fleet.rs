@@ -1286,7 +1286,8 @@ fn conflict_error(plan: &Plan) -> ApiError {
 
 /// Apply a checked fleet in the transaction `t`: plan again, check the
 /// policy, then create, update, and (with `prune`) delete. Any failure
-/// rolls the whole apply back.
+/// rolls the whole apply back. `repo` is the config repo: the templates
+/// of the fleet are files there (`crate::template_files`).
 #[allow(clippy::too_many_arguments)]
 pub fn apply(
     t: &mut Tx<'_>,
@@ -1296,6 +1297,7 @@ pub fn apply(
     prune: bool,
     confirm: bool,
     state_dir: &Path,
+    repo: Option<&Path>,
 ) -> ApiResult<Applied> {
     let mut plan = plan(t, f)?;
     authorize(actor, &plan, prune)?;
@@ -1336,7 +1338,7 @@ pub fn apply(
         )?;
     }
     for (p, d) in f.all_templates() {
-        let live = templates::upsert_def(t, p, d, &source, &actor.label())?;
+        let live = templates::upsert_def(t, p, d, &source, &actor.label(), repo)?;
         record(
             t,
             &name,
@@ -1436,7 +1438,7 @@ pub fn apply(
                 }
                 Kind::Template => {
                     if let Some(id) = &e.id {
-                        templates::delete(t, id)?;
+                        templates::delete(t, id, repo)?;
                     }
                 }
                 _ => {}
@@ -1889,6 +1891,7 @@ pub async fn apply_config_dir(state: &Shared) -> Vec<String> {
             content: text,
         };
         let state_dir = state.work_dir.clone();
+        let repo = crate::template_files::repo_dir(state);
         let result = state
             .db
             .write("system", move |t| {
@@ -1901,7 +1904,16 @@ pub async fn apply_config_dir(state: &Shared) -> Vec<String> {
                 if !bad.is_empty() {
                     return Err(ApiError::new(Code::Invalid, bad.join("; ")));
                 }
-                apply(t, &f, &origin, &Actor::Operator, false, false, &state_dir)
+                apply(
+                    t,
+                    &f,
+                    &origin,
+                    &Actor::Operator,
+                    false,
+                    false,
+                    &state_dir,
+                    repo.as_deref(),
+                )
             })
             .await;
         match result {

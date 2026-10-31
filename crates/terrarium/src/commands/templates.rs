@@ -2,7 +2,7 @@
 
 use anyhow::Context as _;
 use serde_json::{Map, Value, json};
-use terrarium_core::agent_template;
+use terrarium_core::{agent_template, template_file};
 
 use super::{
     persona_value, print_object, print_object_with_text, print_table, set_opt, system_prompt_value,
@@ -39,7 +39,21 @@ pub async fn template(ctx: &Ctx, cmd: &TemplateCmd) -> anyhow::Result<()> {
             let v = ctx.api.get("/api/templates", q).await?;
             ctx.emit(&v, print_list)
         }
-        TemplateCmd::Show { template } => {
+        TemplateCmd::Show { template, wcl } => {
+            if *wcl {
+                let v = ctx
+                    .api
+                    .get(&format!("{}/wcl", path(template)), vec![])
+                    .await?;
+                return ctx.emit(&v, |c, v| {
+                    c.line(
+                        v["text"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .trim_end_matches('\n'),
+                    );
+                });
+            }
             let v = ctx.api.get(&path(template), vec![]).await?;
             ctx.emit(&v, print_one)
         }
@@ -50,7 +64,19 @@ pub async fn template(ctx: &Ctx, cmd: &TemplateCmd) -> anyhow::Result<()> {
                     "give --harness (claude, codex, copilot, or pi), or --from-file",
                 ));
             }
-            let mut body = json!({"name": a.name, "spec": spec});
+            let name = match (&a.name, &a.spec.from_file) {
+                (Some(n), _) => n.clone(),
+                (None, Some(p)) if is_wcl(p) => p
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                _ => {
+                    return Err(CliError::usage(
+                        "give the template name (or --from-file <name>.wcl)",
+                    ));
+                }
+            };
+            let mut body = json!({"name": name, "spec": spec});
             if a.global {
                 body["project"] = Value::Null;
             } else if let Some(p) = &ctx.project {
@@ -127,6 +153,29 @@ pub async fn template(ctx: &Ctx, cmd: &TemplateCmd) -> anyhow::Result<()> {
     }
 }
 
+/// A WCL template file: the extension `.wcl`.
+fn is_wcl(p: &std::path::Path) -> bool {
+    p.extension().is_some_and(|e| e == template_file::EXTENSION)
+}
+
+/// The spec and the description of a template file: WCL
+/// (`template_file::parse`, the format of the config repo), or TOML for
+/// any other extension.
+pub(crate) fn read_file(
+    p: &std::path::Path,
+) -> anyhow::Result<(Map<String, Value>, Option<String>)> {
+    let text =
+        std::fs::read_to_string(p).with_context(|| format!("cannot read {}", p.display()))?;
+    if is_wcl(p) {
+        let parsed = template_file::parse(&text, &p.display().to_string())
+            .map_err(|e| CliError::usage(e.to_string()))?;
+        return Ok((parsed.spec, parsed.description));
+    }
+    let dir = p.parent().unwrap_or(std::path::Path::new(""));
+    agent_template::spec_from_toml_in(&text, dir)
+        .map_err(|e| CliError::usage(format!("{}: {e}", p.display())))
+}
+
 fn has_spec_flags(a: &TemplateSpecArgs) -> bool {
     a.from_file.is_some()
         || a.harness.is_some()
@@ -158,13 +207,7 @@ fn spec_of(
     base: Map<String, Value>,
 ) -> anyhow::Result<(Map<String, Value>, Option<String>)> {
     let (base, description) = match &a.from_file {
-        Some(p) => {
-            let text = std::fs::read_to_string(p)
-                .with_context(|| format!("cannot read {}", p.display()))?;
-            let dir = p.parent().unwrap_or(std::path::Path::new(""));
-            agent_template::spec_from_toml_in(&text, dir)
-                .map_err(|e| CliError::usage(format!("{}: {e}", p.display())))?
-        }
+        Some(p) => read_file(p)?,
         None => (base, None),
     };
     let mut flags = Map::new();
