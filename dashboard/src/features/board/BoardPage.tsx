@@ -1,5 +1,5 @@
 import { A, useParams, useSearchParams } from "@solidjs/router";
-import { createEffect, createMemo, createResource, createSignal, For, on, onCleanup, Show } from "solid-js";
+import { createEffect, createMemo, createResource, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
 import { createPagedList } from "../../components/paged";
 import { HoldBadge } from "../../components/HoldBadge";
 import { StatusBadge } from "../../components/StatusBadge";
@@ -11,6 +11,7 @@ import { cardsIn, createBoardStore } from "../../stores/board";
 import { cardSessionRows, commentSessions, sessionHref, sessionRange } from "./sessions";
 import { CardQuestions } from "./CardQuestions";
 import { type CardQuestionBadge, cardQuestionBadges, isCardQuestionEvent, linkable } from "./questions";
+import { activeFilterCount, columnFromQuery, columnQuery, nearestColumn, PHONE_QUERY } from "./phone";
 import { matchesVersion, parseVersionFilter, VERSION_CHIP, versionOptions, versionQuery, versionsByCard } from "./versions";
 import { agents, api, events } from "../../stores";
 
@@ -18,7 +19,7 @@ type Drop = { column: string; index: number };
 
 export function BoardPage() {
   const params = useParams<{ project: string }>();
-  const [search, setSearch] = useSearchParams<{ card?: string; version?: string }>();
+  const [search, setSearch] = useSearchParams<{ card?: string; version?: string; col?: string }>();
   const board = createBoardStore(api);
   const [dragging, setDragging] = createSignal<string | null>(null);
   const [drop, setDrop] = createSignal<Drop | null>(null);
@@ -26,6 +27,17 @@ export function BoardPage() {
   const [label, setLabel] = createSignal("");
   const [assignee, setAssignee] = createSignal("");
   const [newTitle, setNewTitle] = createSignal("");
+  const [filtersOpen, setFiltersOpen] = createSignal(false);
+
+  // A phone (phone.ts PHONE_QUERY) shows one column at a time, and it has no drag and drop: the Column select of the card drawer moves a card.
+  const phoneQuery = typeof matchMedia === "function" ? matchMedia(PHONE_QUERY) : undefined;
+  const [phone, setPhone] = createSignal(phoneQuery?.matches ?? false);
+  onMount(() => {
+    if (!phoneQuery) return;
+    const change = () => setPhone(phoneQuery.matches);
+    phoneQuery.addEventListener("change", change);
+    onCleanup(() => phoneQuery.removeEventListener("change", change));
+  });
 
   createEffect(on(() => params.project, (p) => void board.load(p)));
 
@@ -130,26 +142,101 @@ export function BoardPage() {
 
   const selected = () => board.state.board?.cards.find((c) => c.id === search.card);
 
+  // The column of the phone board: `?col=` in the URL, so a reload and the back button keep it.
+  // A tap on a column chip and a swipe on the board change it; a change of the URL scrolls the board to it.
+  let boardEl: HTMLDivElement | undefined;
+  let chipsEl: HTMLDivElement | undefined;
+  const columnNames = () => board.state.board?.columns.map((c) => c.name) ?? [];
+  const activeColumn = () => columnFromQuery(search.col, columnNames());
+  const setColumn = (name: string) => setSearch({ col: columnQuery(name, columnNames()) }, { replace: true });
+  // The target of a scroll that the page started: the scroll events on the way to it do not change the column.
+  let pinned: string | null = null;
+  let pinTimer: ReturnType<typeof setTimeout> | undefined;
+  const columnEls = () => [...(boardEl?.querySelectorAll<HTMLElement>("[data-column]") ?? [])];
+  const showColumn = (name: string, smooth: boolean) => {
+    const el = columnEls().find((c) => c.dataset.column === name);
+    if (!boardEl || !el || Math.abs(boardEl.scrollLeft - el.offsetLeft) < 2) return;
+    pinned = name;
+    clearTimeout(pinTimer);
+    pinTimer = setTimeout(() => (pinned = null), 1000);
+    const reduce = typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+    boardEl.scrollTo({ left: el.offsetLeft, behavior: smooth && !reduce ? "smooth" : "auto" });
+  };
+  let scrollFrame = 0;
+  const onBoardScroll = () => {
+    if (!phone()) return;
+    cancelAnimationFrame(scrollFrame);
+    scrollFrame = requestAnimationFrame(() => {
+      if (!boardEl) return;
+      const name = nearestColumn(
+        boardEl.scrollLeft,
+        columnEls().map((el) => ({ name: el.dataset.column ?? "", left: el.offsetLeft })),
+      );
+      if (!name) return;
+      if (pinned) {
+        if (name !== pinned) return;
+        pinned = null;
+      }
+      if (name !== activeColumn()) setColumn(name);
+    });
+  };
+  createEffect(
+    on([activeColumn, phone, () => !!board.state.board], ([name, isPhone, loaded]) => {
+      if (!isPhone || !name || !loaded) return;
+      // After the columns render. A scroll that the page started to this column goes on.
+      requestAnimationFrame(() => {
+        if (pinned !== name) showColumn(name, false);
+        // The chip row keeps the active chip in view. It scrolls only itself, not the page.
+        const chip = chipsEl?.querySelector<HTMLElement>(`[data-column="${CSS.escape(name)}"]`);
+        if (chipsEl && chip) chipsEl.scrollTo({ left: chip.offsetLeft - (chipsEl.clientWidth - chip.offsetWidth) / 2 });
+      });
+    }),
+  );
+  onCleanup(() => {
+    clearTimeout(pinTimer);
+    cancelAnimationFrame(scrollFrame);
+  });
+
+  const filterCount = () => activeFilterCount({ label: label(), version: versionFilter(), assignee: assignee() });
+
   return (
-    <>
+    <div class="board-page">
       <PageHead title="Cards" level={2}>
-        <select value={label()} onChange={(e) => setLabel(e.currentTarget.value)} aria-label="Filter by label">
-          <option value="">Any label</option>
-          <For each={labels()}>{(l) => <option value={l}>{l}</option>}</For>
-        </select>
-        <Show when={versions()}>
-          {(vs) => (
-            <select value={versionFilter()} onChange={(e) => setSearch({ version: versionQuery(e.currentTarget.value) })} aria-label="Filter by version">
-              <For each={versionOptions(vs())}>{(o) => <option value={o.value}>{o.label}</option>}</For>
-            </select>
-          )}
-        </Show>
-        <select value={assignee()} onChange={(e) => setAssignee(e.currentTarget.value)} aria-label="Filter by assignee">
-          <option value="">Any assignee</option>
-          <For each={assignees()}>{(a) => <option value={a}>{a}</option>}</For>
-        </select>
+        {/* A phone folds the three filters into this button; a wider screen shows them in the row and hides the button. */}
+        <button
+          type="button"
+          class="board-filters-toggle"
+          aria-expanded={filtersOpen()}
+          aria-controls="board-filters"
+          classList={{ active: filterCount() > 0 }}
+          onClick={() => setFiltersOpen((o) => !o)}
+        >
+          Filters
+          <Show when={filterCount()}>
+            <span class="nav-count" aria-label={`${filterCount()} active`}>
+              {filterCount()}
+            </span>
+          </Show>
+        </button>
+        <div id="board-filters" class="board-filters" classList={{ open: filtersOpen() }}>
+          <select value={label()} onChange={(e) => setLabel(e.currentTarget.value)} aria-label="Filter by label">
+            <option value="">Any label</option>
+            <For each={labels()}>{(l) => <option value={l}>{l}</option>}</For>
+          </select>
+          <Show when={versions()}>
+            {(vs) => (
+              <select value={versionFilter()} onChange={(e) => setSearch({ version: versionQuery(e.currentTarget.value) })} aria-label="Filter by version">
+                <For each={versionOptions(vs())}>{(o) => <option value={o.value}>{o.label}</option>}</For>
+              </select>
+            )}
+          </Show>
+          <select value={assignee()} onChange={(e) => setAssignee(e.currentTarget.value)} aria-label="Filter by assignee">
+            <option value="">Any assignee</option>
+            <For each={assignees()}>{(a) => <option value={a}>{a}</option>}</For>
+          </select>
+        </div>
         <form
-          class="row"
+          class="row board-new"
           onSubmit={async (e) => {
             e.preventDefault();
             if (newTitle().trim() && (await board.create(newTitle().trim()))) setNewTitle("");
@@ -165,68 +252,94 @@ export function BoardPage() {
 
       <Show when={board.state.board} fallback={<p class="muted">{board.state.loading ? "Loading…" : ""}</p>}>
         {(b) => (
-          <div class="board">
-            <For each={b().columns}>
-              {(col) => {
-                const cards = () => cardsIn(b(), col.name);
-                const over = () => col.wip_limit !== undefined && cards().length > col.wip_limit;
-                const othersIndex = (id: string) => cards().filter((c) => c.id !== dragging()).findIndex((c) => c.id === id);
-                return (
-                  <section
-                    class={`column${drop()?.column === col.name ? " drop" : ""}${over() ? " over-limit" : ""}`}
-                    aria-label={col.name}
-                    onDragOver={(e) => {
-                      if (!dragging()) return;
-                      e.preventDefault();
-                      e.dataTransfer!.dropEffect = "move";
-                      const index = dropIndex(e.currentTarget, e.clientY);
-                      const d = drop();
-                      if (!d || d.column !== col.name || d.index !== index) setDrop({ column: col.name, index });
-                    }}
-                    onDragLeave={(e) => {
-                      if (!e.currentTarget.contains(e.relatedTarget as Node)) setDrop(null);
-                    }}
-                    onDrop={(e) => {
-                      e.preventDefault();
-                      const id = e.dataTransfer?.getData("text/plain") || dragging();
-                      const d = drop();
-                      setDrop(null);
-                      setDragging(null);
-                      if (id && d) void commitMove(id, d.column, d.index);
+          <>
+            {/* The phone board shows one column; these chips choose it. A wider screen hides them. */}
+            <div class="board-colnav" role="group" aria-label="Columns" ref={chipsEl}>
+              <For each={b().columns}>
+                {(col) => (
+                  <button
+                    type="button"
+                    data-column={col.name}
+                    aria-pressed={activeColumn() === col.name}
+                    aria-controls={`board-col-${col.name}`}
+                    classList={{ active: activeColumn() === col.name }}
+                    onClick={() => {
+                      showColumn(col.name, true);
+                      setColumn(col.name);
                     }}
                   >
-                    <div class="column-head">
-                      <span>{humanize(col.name)}</span>
-                      <span class="count muted small">
-                        {cards().length}
-                        {col.wip_limit !== undefined ? ` / ${col.wip_limit}` : ""}
-                      </span>
-                    </div>
-                    <For each={cards()}>
-                      {(card) => (
-                        <>
-                          <Show when={drop()?.column === col.name && dragging() !== card.id && othersIndex(card.id) === drop()?.index}>
-                            <div class="drop-marker" />
-                          </Show>
-                          <KCard
-                            card={card}
-                            now={now()}
-                            questions={badges().get(card.id)}
-                            versions={byCard().get(card.id) ?? []}
-                            onVersion={(id) => setSearch({ version: id })}
-                            hidden={!visible(card)}
-                            dragging={dragging() === card.id}
-                            onOpen={() => setSearch({ card: card.id })}
-                            onDragStart={(e) => {
-                              e.dataTransfer!.setData("text/plain", card.id);
-                              e.dataTransfer!.effectAllowed = "move";
-                              setDragging(card.id);
-                            }}
-                            onDragEnd={() => {
-                              setDragging(null);
-                              setDrop(null);
-                            }}
-                          />
+                    {humanize(col.name)}
+                    {/* The cards that the filters show, so a phone finds the matches. */}
+                    <span class="nav-count">{cardsIn(b(), col.name).filter(visible).length}</span>
+                  </button>
+                )}
+              </For>
+            </div>
+            <div class="board" ref={boardEl} onScroll={onBoardScroll}>
+              <For each={b().columns}>
+                {(col) => {
+                  const cards = () => cardsIn(b(), col.name);
+                  const over = () => col.wip_limit !== undefined && cards().length > col.wip_limit;
+                  const othersIndex = (id: string) => cards().filter((c) => c.id !== dragging()).findIndex((c) => c.id === id);
+                  return (
+                    <section
+                      id={`board-col-${col.name}`}
+                      data-column={col.name}
+                      class={`column${drop()?.column === col.name ? " drop" : ""}${over() ? " over-limit" : ""}`}
+                      aria-label={col.name}
+                      onDragOver={(e) => {
+                        if (!dragging()) return;
+                        e.preventDefault();
+                        e.dataTransfer!.dropEffect = "move";
+                        const index = dropIndex(e.currentTarget, e.clientY);
+                        const d = drop();
+                        if (!d || d.column !== col.name || d.index !== index) setDrop({ column: col.name, index });
+                      }}
+                      onDragLeave={(e) => {
+                        if (!e.currentTarget.contains(e.relatedTarget as Node)) setDrop(null);
+                      }}
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        const id = e.dataTransfer?.getData("text/plain") || dragging();
+                        const d = drop();
+                        setDrop(null);
+                        setDragging(null);
+                        if (id && d) void commitMove(id, d.column, d.index);
+                      }}
+                    >
+                      <div class="column-head">
+                        <span>{humanize(col.name)}</span>
+                        <span class="count muted small">
+                          {cards().length}
+                          {col.wip_limit !== undefined ? ` / ${col.wip_limit}` : ""}
+                        </span>
+                      </div>
+                      <For each={cards()}>
+                        {(card) => (
+                          <>
+                            <Show when={drop()?.column === col.name && dragging() !== card.id && othersIndex(card.id) === drop()?.index}>
+                              <div class="drop-marker" />
+                            </Show>
+                            <KCard
+                              card={card}
+                              now={now()}
+                              questions={badges().get(card.id)}
+                              versions={byCard().get(card.id) ?? []}
+                              onVersion={(id) => setSearch({ version: id })}
+                              hidden={!visible(card)}
+                              dragging={dragging() === card.id}
+                              draggable={!phone()}
+                              onOpen={() => setSearch({ card: card.id })}
+                              onDragStart={(e) => {
+                                e.dataTransfer!.setData("text/plain", card.id);
+                                e.dataTransfer!.effectAllowed = "move";
+                                setDragging(card.id);
+                              }}
+                              onDragEnd={() => {
+                                setDragging(null);
+                                setDrop(null);
+                              }}
+                            />
                         </>
                       )}
                     </For>
@@ -238,6 +351,7 @@ export function BoardPage() {
               }}
             </For>
           </div>
+          </>
         )}
       </Show>
 
@@ -277,7 +391,7 @@ export function BoardPage() {
           />
         )}
       </Show>
-    </>
+    </div>
   );
 }
 
@@ -313,6 +427,8 @@ function KCard(props: {
   onVersion: (id: string) => void;
   hidden: boolean;
   dragging: boolean;
+  /** False on a phone: a touch scrolls the board, and the drawer moves the card. */
+  draggable: boolean;
   onOpen: () => void;
   onDragStart: (e: DragEvent) => void;
   onDragEnd: () => void;
@@ -323,7 +439,7 @@ function KCard(props: {
       class={`kcard${props.dragging ? " dragging" : ""}`}
       style={{ display: props.hidden ? "none" : undefined }}
       data-card={props.card.id}
-      draggable={true}
+      draggable={props.draggable}
       tabIndex={0}
       onDragStart={(e) => props.onDragStart(e)}
       onDragEnd={() => props.onDragEnd()}
@@ -515,13 +631,13 @@ function CardDrawer(props: {
       </Show>
 
       <div class="row">
-        <label style={{ flex: 1 }}>
+        <label class="drawer-field">
           Column
           <select value={props.card.column} onChange={(e) => void props.onMove(e.currentTarget.value)}>
             <For each={props.columns}>{(c) => <option value={c}>{humanize(c)}</option>}</For>
           </select>
         </label>
-        <label style={{ flex: 1 }}>
+        <label class="drawer-field">
           Assignee
           <select value={props.card.assignee ?? ""} onChange={(e) => void save({ assignee: e.currentTarget.value || null })}>
             <option value="">unassigned</option>

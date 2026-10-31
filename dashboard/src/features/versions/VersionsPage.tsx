@@ -95,7 +95,7 @@ function VersionView(props: { version: Version; all: Version[]; onChange: () => 
 
       <Show when={props.version.status === "in_review"}>
         <div class="review-bar">
-          <input style={{ flex: 1, "min-width": "160px" }} placeholder="Comment (required to reject)" value={comment()} onInput={(e) => setComment(e.currentTarget.value)} aria-label="Review comment" />
+          <input class="review-comment" placeholder="Comment (required to reject)" value={comment()} onInput={(e) => setComment(e.currentTarget.value)} aria-label="Review comment" />
           <button class="primary" onClick={() => act("approve")}>
             Approve
           </button>

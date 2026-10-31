@@ -709,6 +709,13 @@ th {
   border-bottom-color: var(--accent);
   font-weight: 600;
 }
+/* A phone: tabs of 40px or more, for a finger. */
+@media (max-width: 760px) {
+  .tabs a,
+  .tabs button {
+    padding-block: 10px;
+  }
+}
 
 /* Badges and chips */
 .badge {
@@ -1038,6 +1045,8 @@ button.link-button {
 
 /* Board */
 .board {
+  /* The phone board scrolls to a column by its offsetLeft (features/board/BoardPage.tsx). */
+  position: relative;
   display: grid;
   grid-auto-flow: column;
   grid-auto-columns: minmax(250px, 1fr);
@@ -1046,13 +1055,97 @@ button.link-button {
   padding-bottom: 8px;
   align-items: start;
 }
-@media (max-width: 760px) {
+/* The column chips and the Filters button are for a phone only. On a wider screen the filters are items of the toolbar row. */
+.board-colnav,
+.board-filters-toggle {
+  display: none;
+}
+.board-filters {
+  display: contents;
+}
+/* A tablet: columns of one width, and the board scrolls and snaps to a column. */
+@media (min-width: 761px) and (max-width: 1100px) {
   .board {
-    grid-auto-columns: minmax(78vw, 1fr);
-    scroll-snap-type: x mandatory;
+    grid-auto-columns: 300px;
+    scroll-snap-type: x proximity;
   }
   .board .column {
     scroll-snap-align: start;
+  }
+}
+/* A phone: one column at full width. A swipe or a column chip moves to the next column. */
+@media (max-width: 760px) {
+  .board {
+    grid-auto-columns: 100%;
+    scroll-snap-type: x mandatory;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+  }
+  .board .column {
+    scroll-snap-align: start;
+    scroll-snap-stop: always;
+  }
+  /* The chips stay under the top bar (50px) while the column scrolls. */
+  .board-colnav {
+    display: flex;
+    gap: 6px;
+    overflow-x: auto;
+    scrollbar-width: none;
+    position: sticky;
+    top: 50px;
+    z-index: 10;
+    margin: 0 0 10px;
+    padding: 6px 0;
+    background: var(--bg);
+  }
+  .board-colnav button {
+    flex: none;
+    min-height: 40px;
+    padding: 0 14px;
+    border-radius: 99px;
+    text-transform: capitalize;
+  }
+  .board-colnav button.active {
+    background: var(--accent-soft);
+    border-color: var(--accent);
+    color: var(--link);
+    font-weight: 600;
+  }
+  .board-page .page-head .actions {
+    width: 100%;
+  }
+  .board-page .page-head .actions select,
+  .board-page .page-head .actions input,
+  .board-page .page-head .actions button {
+    min-height: 40px;
+  }
+  .board-filters-toggle {
+    display: inline-flex;
+  }
+  .board-filters-toggle.active {
+    border-color: var(--accent);
+  }
+  .board-filters {
+    display: none;
+  }
+  .board-filters.open {
+    display: grid;
+    gap: 8px;
+    flex: 1 1 100%;
+    padding: 10px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+  }
+  .board-filters select {
+    width: 100%;
+  }
+  .board-new {
+    flex: 1 1 100%;
+    flex-wrap: nowrap;
+  }
+  .board-new input {
+    flex: 1;
   }
 }
 .column {
@@ -1060,6 +1153,9 @@ button.link-button {
   border-radius: var(--radius);
   padding: 8px;
   display: grid;
+  /* A long card title wraps; it does not make the column wider. */
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
   gap: 8px;
   align-content: start;
   min-height: 140px;
@@ -1086,9 +1182,25 @@ button.link-button {
   border-radius: var(--radius-sm);
   padding: 9px 10px;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
   gap: 6px;
   cursor: grab;
   box-shadow: var(--shadow);
+}
+.kcard:not([draggable="true"]) {
+  cursor: pointer;
+}
+/* A long ID, label, version, or assignee ends in an ellipsis at the card edge. */
+.kcard .spread > *,
+.kcard .row > * {
+  min-width: 0;
+}
+.kcard .chip {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
 }
 .kcard:active {
   cursor: grabbing;
@@ -1098,6 +1210,7 @@ button.link-button {
 }
 .kcard .title {
   font-weight: 550;
+  overflow-wrap: anywhere;
 }
 /* The open questions of a card (features/board/questions.ts): "? n" in the Inbox priority colour. */
 .kcard .q-badge {
@@ -1120,6 +1233,19 @@ button.chip.version-chip {
 button.chip.version-chip:hover {
   text-decoration: underline;
   filter: brightness(0.97);
+}
+/* A phone: a version chip is small, so its tap area is 40px high. */
+@media (max-width: 760px) {
+  /* A version chip is small; its tap area is 40px high. */
+  button.chip.version-chip {
+    position: relative;
+    padding: 3px 10px;
+  }
+  button.chip.version-chip::after {
+    content: "";
+    position: absolute;
+    inset: -9px 0;
+  }
 }
 /* The card of a question in the Inbox: a chip that opens the card drawer on the board. */
 a.chip.card-link {
@@ -1160,6 +1286,10 @@ a.chip.card-link:hover {
   width: 9em;
   max-width: 100%;
 }
+/* The Column and Assignee selects of the card drawer: side by side, or one over the other in a narrow drawer. */
+.drawer-field {
+  flex: 1 1 180px;
+}
 .drop-marker {
   height: 3px;
   background: var(--accent);
@@ -1188,6 +1318,53 @@ a.chip.card-link:hover {
   display: grid;
   gap: 14px;
   align-content: start;
+}
+/* A phone: the drawer fills the screen, with the safe-area insets, and its head with the close button stays at the top. */
+@media (max-width: 760px) {
+  .drawer {
+    width: 100vw;
+    border-left: 0;
+    padding: 0 max(16px, env(safe-area-inset-right)) calc(24px + env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+    overscroll-behavior: contain;
+  }
+  .drawer-head {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    flex-wrap: nowrap;
+    padding: calc(6px + env(safe-area-inset-top)) 0 6px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+  }
+  .drawer-head > :first-child {
+    min-width: 0;
+  }
+  .drawer-head button {
+    flex: none;
+    min-width: 40px;
+    justify-content: center;
+  }
+  .drawer button,
+  .drawer select,
+  .drawer input:not([type="checkbox"]):not([type="radio"]) {
+    min-height: 40px;
+  }
+  /* A long option of a question wraps in its button. */
+  .drawer button {
+    min-width: 40px;
+    white-space: normal;
+    text-align: left;
+  }
+  .drawer .kv {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0;
+  }
+  .drawer .kv dt:not(:first-child) {
+    margin-top: 8px;
+  }
+  .drawer .eta-edit input {
+    flex: 1 1 100%;
+  }
 }
 .modal {
   position: fixed;
@@ -1479,6 +1656,21 @@ a.chip.card-link:hover {
   border: 1px solid var(--warn);
   border-radius: var(--radius-sm);
   padding: 8px 12px;
+}
+.review-comment {
+  flex: 1;
+  min-width: 160px;
+}
+/* A phone: the comment on its own row, and the two buttons under it. */
+@media (max-width: 760px) {
+  .review-comment {
+    flex-basis: 100%;
+  }
+  .review-bar button {
+    flex: 1;
+    justify-content: center;
+    min-height: 40px;
+  }
 }
 
 /* Artifact viewer */

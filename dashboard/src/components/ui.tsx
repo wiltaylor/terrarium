@@ -138,7 +138,8 @@ export function Drawer(props: { title: JSX.Element; onClose: () => void; childre
     <Portal>
       <div class="drawer-scrim" onClick={() => props.onClose()} />
       <aside class="drawer" role="dialog" aria-modal="true">
-        <div class="spread">
+        {/* On a phone the drawer fills the screen, and this head with the close button stays at the top. */}
+        <div class="spread drawer-head">
           <div>{props.title}</div>
           <button class="ghost" onClick={() => props.onClose()} aria-label="Close">
             ✕
