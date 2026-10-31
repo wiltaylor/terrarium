@@ -1,13 +1,14 @@
 // The Repos page of a project (/p/:project/repos): the repos, an Add repo
-// form (`POST /api/projects/{name}/repos`, project_admin), and for each repo
+// form (./AddRepoForm, `POST /api/projects/{name}/repos`, project_admin), and for each repo
 // a link to its browser (/p/:project/repos/:repo) and a checkout row.
 
 import { A, useParams } from "@solidjs/router";
-import { createResource, createSignal, For, Show } from "solid-js";
+import { createEffect, createResource, createSignal, For, on, Show } from "solid-js";
 import { isMissingEndpoint } from "../../api/http";
-import type { NewRepo, Repo, Target } from "../../api/types";
+import type { Repo, Target } from "../../api/types";
 import { Empty, ErrorBanner, PageHead } from "../../components/ui";
-import { api } from "../../stores";
+import { api, repos as reposStore } from "../../stores";
+import { AddRepoForm } from "./AddRepoForm";
 
 export const repoHref = (project: string, repo: string) => `/p/${encodeURIComponent(project)}/repos/${encodeURIComponent(repo)}`;
 
@@ -16,6 +17,8 @@ export default function ReposPage() {
   const [repos, { refetch }] = createResource(() => params.project, (p) => api.projects.repos(p));
   const [targets] = createResource(() => params.project, (p) => api.projects.targets(p).catch((): Target[] => []));
   const [adding, setAdding] = createSignal(false);
+  // An add here or from the "+" of the sidebar Repos node changes the repos store: read the list again.
+  createEffect(on(() => reposStore.inProject(params.project).length, () => void refetch(), { defer: true }));
 
   return (
     <>
@@ -27,10 +30,7 @@ export default function ReposPage() {
       <Show when={adding()}>
         <AddRepoForm
           project={params.project}
-          onAdded={() => {
-            setAdding(false);
-            void refetch();
-          }}
+          onAdded={() => setAdding(false)}
         />
       </Show>
       <ErrorBanner error={repos.error} />
@@ -40,64 +40,6 @@ export default function ReposPage() {
         </div>
       </Show>
     </>
-  );
-}
-
-/** Attach a repo (docs/api.md §5). Attaching does not clone. */
-export function AddRepoForm(props: { project: string; onAdded: () => void }) {
-  const [form, setForm] = createSignal<NewRepo>({ url: "" });
-  const [error, setError] = createSignal<unknown>(null);
-  const set = (k: keyof NewRepo, v: string) => setForm({ ...form(), [k]: v });
-  return (
-    <form
-      class="card-box stack"
-      style={{ gap: "8px", "margin-bottom": "16px" }}
-      aria-label="Add a repo"
-      onSubmit={async (e) => {
-        e.preventDefault();
-        const f = form();
-        const body: NewRepo = { url: f.url.trim() };
-        for (const k of ["name", "default_branch", "credential", "path"] as const) if (f[k]?.trim()) body[k] = f[k]!.trim();
-        try {
-          await api.projects.attachRepo(props.project, body);
-          setForm({ url: "" });
-          setError(null);
-          props.onAdded();
-        } catch (err) {
-          setError(err);
-        }
-      }}
-    >
-      <h2 style={{ margin: 0 }}>Add a repo</h2>
-      <ErrorBanner error={error()} onDismiss={() => setError(null)} />
-      <div class="form-grid">
-        <label>
-          URL
-          <input value={form().url} onInput={(e) => set("url", e.currentTarget.value)} required placeholder="https://github.com/me/infra.git" />
-        </label>
-        <label>
-          Name (empty: from the URL)
-          <input value={form().name ?? ""} onInput={(e) => set("name", e.currentTarget.value)} />
-        </label>
-        <label>
-          Default branch
-          <input value={form().default_branch ?? ""} onInput={(e) => set("default_branch", e.currentTarget.value)} placeholder="main" />
-        </label>
-        <label>
-          Credential (a key name, never the secret)
-          <input value={form().credential ?? ""} onInput={(e) => set("credential", e.currentTarget.value)} placeholder="github-deploy" />
-        </label>
-        <label>
-          Checkout path
-          <input value={form().path ?? ""} onInput={(e) => set("path", e.currentTarget.value)} placeholder="infra" />
-        </label>
-      </div>
-      <div>
-        <button class="primary" type="submit">
-          Add
-        </button>
-      </div>
-    </form>
   );
 }
 

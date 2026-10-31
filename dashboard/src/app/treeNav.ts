@@ -14,6 +14,8 @@ export interface TreeRow {
   open?: boolean;
   /** True for a row that is not a link: Enter and Space activate it. */
   button?: boolean;
+  /** True for a row with an add action (the "+" button): the `+` key runs it. */
+  add?: boolean;
 }
 
 /** The result of a key on a row. */
@@ -24,6 +26,8 @@ export type TreeAction =
   | { activate: true }
   /** Space on a link: Enter follows the link by itself; Space does not. */
   | { click: true }
+  /** `+` on a row with an add action. */
+  | { add: true }
   /** The key belongs to the tree, but there is nothing to do. */
   | { none: true };
 
@@ -53,6 +57,8 @@ export function treeKeyAction(keys: readonly string[], row: TreeRow, key: string
       return row.button ? { activate: true } : null;
     case " ":
       return row.button ? { activate: true } : { click: true };
+    case "+":
+      return row.add ? { add: true } : null;
   }
   return null;
 }
@@ -97,6 +103,7 @@ export function createRovingTree(opts: { keys: () => string[]; preferred?: () =>
             onOpen?: () => void;
             onClose?: () => void;
             onActivate?: () => void;
+            onAdd?: () => void;
           })
         | null,
     ) => {
@@ -111,6 +118,7 @@ export function createRovingTree(opts: { keys: () => string[]; preferred?: () =>
       else if ("close" in action) r.onClose?.();
       else if ("activate" in action) r.onActivate?.();
       else if ("click" in action) target.click();
+      else if ("add" in action) r.onAdd?.();
     },
   };
 }

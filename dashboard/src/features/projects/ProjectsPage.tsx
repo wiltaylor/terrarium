@@ -2,7 +2,9 @@ import { A, useNavigate } from "@solidjs/router";
 import { createSignal, For, Show } from "solid-js";
 import { Empty, ErrorBanner, Modal, PageHead } from "../../components/ui";
 import type { Project } from "../../api/types";
+import { ProjectDot } from "../../components/ProjectDot";
 import { ago } from "../../lib/format";
+import { projectHealth, projectHealthLabel } from "../../lib/projectHealth";
 import { agents, api, projects } from "../../stores";
 
 export function ProjectForm(props: { project?: Project; onClose: () => void; onSaved: (p: Project) => void }) {
@@ -88,20 +90,26 @@ export default function ProjectsPage() {
             </thead>
             <tbody>
               <For each={projects.projects()}>
-                {(p) => (
-                  <tr>
-                    <td>
-                      <A href={`/p/${encodeURIComponent(p.name)}/settings/general`}>
-                        <strong>{p.name}</strong>
-                      </A>
-                    </td>
-                    <td class="mono">{p.card_prefix}</td>
-                    <td>{p.description || <span class="muted">—</span>}</td>
-                    <td>{agents.inProject(p.name).length}</td>
-                    <td>{p.source ?? "api"}</td>
-                    <td>{ago(p.created_at)}</td>
-                  </tr>
-                )}
+                {(p) => {
+                  // The colour of all its agents; the link label gives it in words.
+                  const health = () => projectHealth(agents.inProject(p.name));
+                  const label = () => projectHealthLabel(p.name, health());
+                  return (
+                    <tr>
+                      <td>
+                        <A href={`/p/${encodeURIComponent(p.name)}/settings/general`} class="project-name" aria-label={label()} title={label()}>
+                          <ProjectDot level={health().level} />
+                          <strong>{p.name}</strong>
+                        </A>
+                      </td>
+                      <td class="mono">{p.card_prefix}</td>
+                      <td>{p.description || <span class="muted">—</span>}</td>
+                      <td>{agents.inProject(p.name).length}</td>
+                      <td>{p.source ?? "api"}</td>
+                      <td>{ago(p.created_at)}</td>
+                    </tr>
+                  );
+                }}
               </For>
             </tbody>
           </table>

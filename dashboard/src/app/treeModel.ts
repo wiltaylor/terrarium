@@ -42,6 +42,35 @@ export function projectOfAgentsNode(name: string): string | null {
 }
 
 /**
+ * The name of the Repos node of a project in the open set: `<project>/repos`.
+ * It is closed by default, as the Agents node.
+ */
+export const projectReposNode = (project: string): string => `${project}/repos`;
+
+/** The project of a project node name (Agents or Repos), or null for any other name. */
+export function projectOfNode(name: string): string | null {
+  const m = /^([^/]+)\/(agents|repos)$/.exec(name);
+  return m ? m[1]! : null;
+}
+
+/** The project whose Repos node a URL opens: /p/<project>/repos, or a repo page of that project. */
+export function projectReposFromPath(pathname: string): string | null {
+  const p = projectFromPath(pathname);
+  return p && /^\/p\/[^/]+\/repos(\/|$)/.test(pathname) ? p : null;
+}
+
+/** The repo name in a /p/<project>/repos/<repo> path, or null. */
+export function repoFromPath(pathname: string): string | null {
+  const m = /^\/p\/[^/]+\/repos\/([^/]+)/.exec(pathname);
+  if (!m) return null;
+  try {
+    return decodeURIComponent(m[1]!);
+  } catch {
+    return m[1]!;
+  }
+}
+
+/**
  * The project whose Agents node a URL opens: /p/<project>/agents, or the
  * page of an agent in that project. `projectOfAgent` gives the project of
  * an agent ID or `project/name` (undefined while the agents are not loaded).
@@ -68,6 +97,13 @@ export function agentFromPath(pathname: string): string | null {
 export function sortAgents<T extends Pick<Agent, "project" | "name">>(agents: readonly T[]): T[] {
   const cmp = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
   return [...agents].sort((a, b) => cmp(a.project, b.project) || cmp(a.name, b.name));
+}
+
+/** The repos whose name holds the query (case-insensitive). An empty query keeps all. */
+export function filterRepos<T extends { name: string }>(repos: readonly T[], query: string): T[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return [...repos];
+  return repos.filter((r) => r.name.toLowerCase().includes(q));
 }
 
 /** The agents whose `project/name` holds the query (case-insensitive). An empty query keeps all. */
@@ -115,14 +151,14 @@ export function toggle(list: readonly string[], name: string): string[] {
 }
 
 /**
- * Drop the names of projects that are gone, and their Agents nodes. An empty
+ * Drop the names of projects that are gone, and their Agents and Repos nodes. An empty
  * `known` list (not loaded yet) keeps all. The root marker stays. The old
  * Agents root goes always.
  */
 export function prune(list: readonly string[], known: readonly string[]): string[] {
   const kept = list.filter((n) => n !== OLD_AGENTS_ROOT);
   if (known.length === 0) return kept;
-  return kept.filter((n) => n === ROOT_CLOSED || known.includes(n) || known.includes(projectOfAgentsNode(n) ?? ""));
+  return kept.filter((n) => n === ROOT_CLOSED || known.includes(n) || known.includes(projectOfNode(n) ?? ""));
 }
 
 /** True for the pages under the Projects root: the cards (/projects) and every /p/<name>/... page. */
@@ -162,6 +198,7 @@ export function createExpandedStore(storage: KeyValueStorage | null = null) {
   };
   let lastFollowed: string | null = null;
   let lastProjectAgents: string | null = null;
+  let lastProjectRepos: string | null = null;
 
   const isOpen = (name: string) => (name === PROJECTS_ROOT ? !list().includes(ROOT_CLOSED) : list().includes(name));
   const open = (name: string) => {
@@ -184,7 +221,8 @@ export function createExpandedStore(storage: KeyValueStorage | null = null) {
     /**
      * Open the Projects root and the project of `pathname` when the URL moves
      * into the project pages or to a different project. Open the Agents node
-     * of a project when the URL moves to its agent list. When the URL moves
+     * of a project when the URL moves to its agent list, and its Repos node
+     * when the URL moves to its repo list or a repo page. When the URL moves
      * to a different agent page, open the Projects root, the project of the
      * agent, and its Agents node. `projectOfAgent` gives the project of an
      * agent ID or `project/name` (undefined while the agents are not loaded).
@@ -209,6 +247,11 @@ export function createExpandedStore(storage: KeyValueStorage | null = null) {
       if (node !== lastProjectAgents) {
         lastProjectAgents = node;
         if (node) open(projectAgentsNode(node));
+      }
+      const repos = projectReposFromPath(pathname);
+      if (repos !== lastProjectRepos) {
+        lastProjectRepos = repos;
+        if (repos) open(projectReposNode(repos));
       }
       const p = projectFromPath(pathname);
       const at = p ?? (inProjects(pathname) ? PROJECTS_ROOT : null);
@@ -235,11 +278,14 @@ export const projectKey = (name: string): string => `p:${name}`;
 export const itemKey = (name: string, path: string): string => `i:${name}/${path}`;
 /** The `data-key` of an agent row under the Agents node of a project. */
 export const projectAgentKey = (id: string): string => `pa:${id}`;
+/** The `data-key` of a repo row under the Repos node of a project. */
+export const projectRepoKey = (project: string, repo: string): string => `pr:${project}/${repo}`;
 
 /**
  * The rows of the project tree in screen order, for the roving tabindex.
- * `items` are the page paths of a project. The `agents` item is a node: open,
- * it shows `agentsOf(project)` (agent IDs, sorted and filtered).
+ * `items` are the page paths of a project. The `agents` and `repos` items
+ * are nodes: open, they show `agentsOf(project)` (agent IDs) and
+ * `reposOf(project)` (repo names), sorted and filtered.
  */
 export function projectTreeKeys(t: {
   rootKey: string;
@@ -248,9 +294,14 @@ export function projectTreeKeys(t: {
   items: readonly string[];
   isOpen: (name: string) => boolean;
   agentsOf: (project: string) => readonly string[];
+  reposOf?: (project: string) => readonly string[];
 }): string[] {
   if (!t.rootOpen) return [t.rootKey];
-  const rows = (p: string) =>
-    t.items.flatMap((path) => [itemKey(p, path), ...(path === "agents" && t.isOpen(projectAgentsNode(p)) ? t.agentsOf(p).map(projectAgentKey) : [])]);
+  const children = (p: string, path: string): string[] => {
+    if (path === "agents" && t.isOpen(projectAgentsNode(p))) return t.agentsOf(p).map(projectAgentKey);
+    if (path === "repos" && t.isOpen(projectReposNode(p))) return (t.reposOf?.(p) ?? []).map((r) => projectRepoKey(p, r));
+    return [];
+  };
+  const rows = (p: string) => t.items.flatMap((path) => [itemKey(p, path), ...children(p, path)]);
   return [t.rootKey, ...t.projects.flatMap((p) => [projectKey(p), ...(t.isOpen(p) ? rows(p) : [])])];
 }

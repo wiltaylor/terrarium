@@ -19,8 +19,14 @@ import {
   projectKey,
   projectOfAgentsNode,
   PROJECTS_ROOT,
+  projectOfNode,
+  projectRepoKey,
+  projectReposFromPath,
+  projectReposNode,
   projectTreeKeys,
   prune,
+  filterRepos,
+  repoFromPath,
   ROOT_CLOSED,
   sortAgents,
   toggle,
@@ -322,5 +328,77 @@ describe("the Agents node of a project", () => {
       projectKey("beta"),
     ]);
     expect(projectTreeKeys({ rootKey: "root", rootOpen: false, projects: ["alpha"], items: ["agents"], isOpen: () => true, agentsOf: () => ["a1"] })).toEqual(["root"]);
+  });
+});
+
+describe("the Repos node of a project", () => {
+  it("names the node apart from the projects, the roots, and the Agents node", () => {
+    expect(projectReposNode("alpha")).toBe("alpha/repos");
+    expect(projectOfNode("alpha/repos")).toBe("alpha");
+    expect(projectOfNode("alpha/agents")).toBe("alpha");
+    expect(projectOfNode("alpha")).toBeNull();
+    expect(projectOfNode(PROJECTS_ROOT)).toBeNull();
+    expect(projectOfNode(OLD_AGENTS_ROOT)).toBeNull();
+  });
+
+  it("reads the project from its repo list or from a repo page, and the repo from a repo page", () => {
+    expect(projectReposFromPath("/p/alpha/repos")).toBe("alpha");
+    expect(projectReposFromPath("/p/alpha/repos/infra")).toBe("alpha");
+    expect(projectReposFromPath("/p/alpha/reposx")).toBeNull();
+    expect(projectReposFromPath("/p/alpha/board")).toBeNull();
+    expect(projectReposFromPath("/projects")).toBeNull();
+    expect(repoFromPath("/p/alpha/repos/my%20repo")).toBe("my repo");
+    expect(repoFromPath("/p/alpha/repos")).toBeNull();
+  });
+
+  it("filters the repos on the name, case-insensitive", () => {
+    const repos = [{ name: "infra" }, { name: "Web" }];
+    expect(filterRepos(repos, "WE")).toEqual([{ name: "Web" }]);
+    expect(filterRepos(repos, " ")).toEqual(repos);
+  });
+
+  it("is closed by default, opens on a repo page of the project once, and persists", () => {
+    const s = memory();
+    const st = createExpandedStore(s);
+    expect(st.isOpen(projectReposNode("alpha"))).toBe(false);
+    st.follow("/p/alpha/repos/infra");
+    expect(st.isOpen("alpha")).toBe(true);
+    expect(st.isOpen(projectReposNode("alpha"))).toBe(true);
+    expect(st.isOpen(projectAgentsNode("alpha"))).toBe(false);
+    st.close(projectReposNode("alpha"));
+    st.follow("/p/alpha/repos/web"); // the same project: your close stays
+    expect(st.isOpen(projectReposNode("alpha"))).toBe(false);
+    st.follow("/p/alpha/board");
+    st.follow("/p/alpha/repos");
+    expect(st.isOpen(projectReposNode("alpha"))).toBe(true);
+    expect(createExpandedStore(s).isOpen(projectReposNode("alpha"))).toBe(true);
+  });
+
+  it("is pruned with its project only", () => {
+    expect(prune(["alpha", "alpha/repos", "beta/repos"], ["alpha"])).toEqual(["alpha", "alpha/repos"]);
+  });
+
+  it("puts the repos of an open node after its row, before the next page", () => {
+    const open = new Set(["alpha", "alpha/repos", "alpha/agents"]);
+    const keys = projectTreeKeys({
+      rootKey: "root",
+      rootOpen: true,
+      projects: ["alpha"],
+      items: ["board", "repos", "logs", "agents"],
+      isOpen: (n) => open.has(n),
+      agentsOf: () => ["a1"],
+      reposOf: () => ["infra", "web"],
+    });
+    expect(keys).toEqual([
+      "root",
+      projectKey("alpha"),
+      itemKey("alpha", "board"),
+      itemKey("alpha", "repos"),
+      projectRepoKey("alpha", "infra"),
+      projectRepoKey("alpha", "web"),
+      itemKey("alpha", "logs"),
+      itemKey("alpha", "agents"),
+      projectAgentKey("a1"),
+    ]);
   });
 });

@@ -9,6 +9,7 @@ import { createInboxStore } from "./inbox";
 import { createLeasesStore } from "./leases";
 import { createProjectsStore } from "./projects";
 import { createQuotaStore } from "./quota";
+import { createReposStore } from "./repos";
 import { createSubscriptionsStore } from "./subscriptions";
 import { createThemeStore } from "./theme";
 
@@ -33,6 +34,7 @@ export const api = createApi(auth);
 export const events = createEventsStore(api, { ready: () => auth.mode() === "session" || auth.mode() === "bearer" });
 export const projects = createProjectsStore(api, storage);
 export const agents = createAgentsStore(api, events);
+export const repos = createReposStore(api);
 export const subscriptions = createSubscriptionsStore(api, events);
 export const quota = createQuotaStore(events);
 export const leases = createLeasesStore(api, events);

@@ -2,13 +2,15 @@
 
 export const PROJECT_ITEMS = [
   { path: "board", label: "Board" },
-  // The repos of the project (PLAN §9a): add one, then browse its trees (main and each agent checkout).
+  // The repos of the project (PLAN §9a). In the tree a node, not a link: open, it shows the repos, each a link to its browser.
+  // The page /p/:project/repos stays (other links go to it).
   { path: "repos", label: "Repos" },
   // The logs of the project (PROJECT_LOGS_TABS): every message and every event that touches it.
   { path: "logs", label: "Logs" },
   // The wiki and the memory of the project (KNOWLEDGE_TABS).
   { path: "knowledge", label: "Knowledge" },
-  // Every agent of the project, in any status. Last, so the agent rows of the open node do not push the pages down.
+  // Every agent of the project, in any status. In the tree a node, not a link: open, it shows the agents.
+  // Last, so the agent rows of the open node do not push the pages down. The page /p/:project/agents stays.
   { path: "agents", label: "Agents" },
 ] as const;
 

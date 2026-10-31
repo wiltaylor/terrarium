@@ -1,19 +1,25 @@
 // The sidebar project tree: a Projects root that links the project cards,
-// and under it one node per project, open to show its pages. The Agents page
-// of a project is a node too: open, it shows the agents of that project.
-// Keyboard follows the WAI-ARIA tree pattern with a roving tabindex. A cog
-// at the right of each project row opens the project settings screen.
+// and under it one node per project, open to show its pages. Agents and
+// Repos are nodes, not pages: open, they show the agents and the repos of
+// that project, and a "+" at the right of each adds one. Keyboard follows
+// the WAI-ARIA tree pattern with a roving tabindex. A health dot before
+// each project name gives the state of its agents, and a cog at the right
+// of each project row opens the project settings screen.
 
-import { A, useLocation } from "@solidjs/router";
-import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
-import type { Agent } from "../api/types";
-import { agents, projects } from "../stores";
+import { A, useLocation, useNavigate } from "@solidjs/router";
+import { createEffect, createMemo, createSignal, For, lazy, Match, Show, Switch } from "solid-js";
+import type { Agent, Repo } from "../api/types";
+import { ProjectDot } from "../components/ProjectDot";
+import { AddRepoDialog } from "../features/repos/AddRepoForm";
+import { projectHealth, projectHealthLabel } from "../lib/projectHealth";
+import { agents, projects, repos } from "../stores";
 import { AgentRow } from "./AgentRow";
 import { PROJECT_ITEMS } from "./nav";
-import { expanded, ROOT_KEY, TreeRoot } from "./TreeRoot";
+import { expanded, ROOT_KEY, TreeNode, TreeRoot } from "./TreeRoot";
 import {
   filterAgents,
   filterProjects,
+  filterRepos,
   FILTER_THRESHOLD,
   itemKey,
   agentFromPath,
@@ -21,16 +27,28 @@ import {
   projectAgentsNode,
   projectFromPath,
   projectKey,
+  projectRepoKey,
+  projectReposNode,
   PROJECTS_ROOT,
   projectTreeKeys,
+  repoFromPath,
   sortAgents,
 } from "./treeModel";
 import { createRovingTree } from "./treeNav";
 
+// The template chooser loads with the dialog, not with the sidebar.
+const NewAgentDialog = lazy(() => import("../features/agents/NewAgentDialog").then((m) => ({ default: m.NewAgentDialog })));
+
 const href = (name: string, path: string) => `/p/${encodeURIComponent(name)}/${path}`;
+const repoHref = (project: string, repo: string) => href(project, `repos/${encodeURIComponent(repo)}`);
+
+/** The add dialog that a "+" of the tree opened. */
+type Adding = { kind: "agent" | "repo"; project: string };
 
 export function ProjectTree() {
   const location = useLocation();
+  const navigate = useNavigate();
+  const [adding, setAdding] = createSignal<Adding | null>(null);
   const [query, setQuery] = createSignal("");
 
   const urlProject = () => projectFromPath(location.pathname);
@@ -56,6 +74,15 @@ export function ProjectTree() {
   const [agentQueries, setAgentQueries] = createSignal<Record<string, string>>({});
   const projectAgents = (project: string) => sortAgents(agents.inProject(project));
   const visibleAgents = (project: string) => filterAgents(projectAgents(project), agentQueries()[project] ?? "");
+  // The filter of each project Repos node, by project.
+  const [repoQueries, setRepoQueries] = createSignal<Record<string, string>>({});
+  const visibleRepos = (project: string) => filterRepos(repos.inProject(project), repoQueries()[project] ?? "");
+  // The project and the repo of a repo page.
+  const urlRepo = () => {
+    const p = urlProject();
+    const r = repoFromPath(location.pathname);
+    return p && r ? projectRepoKey(p, r) : null;
+  };
 
   // The rows in screen order, for the roving tabindex.
   const keys = createMemo(() =>
@@ -66,6 +93,7 @@ export function ProjectTree() {
       items: PROJECT_ITEMS.map((i) => i.path),
       isOpen: expanded.isOpen,
       agentsOf: (p) => visibleAgents(p).map((a) => a.id),
+      reposOf: (p) => visibleRepos(p).map((r) => r.name),
     }),
   );
   // Tab reaches the last focused row, else the URL agent, else the URL project, else the root.
@@ -74,6 +102,8 @@ export function ProjectTree() {
     preferred: () => {
       const a = urlAgent();
       if (a) return projectAgentKey(a);
+      const r = urlRepo();
+      if (r) return r;
       const u = urlProject();
       return u ? projectKey(u) : null;
     },
@@ -107,11 +137,23 @@ export function ProjectTree() {
         };
       const project = target.dataset.project!;
       const agentsItem = itemKey(project, "agents");
-      if (key === agentsItem) {
-        const node = projectAgentsNode(project);
-        return { key, parent: projectKey(project), open: expanded.isOpen(node), onOpen: () => expanded.open(node), onClose: () => expanded.close(node) };
-      }
+      const reposItem = itemKey(project, "repos");
+      // The Agents and Repos nodes are not links: Enter and Space toggle them, and `+` adds one.
+      const node = key === agentsItem ? projectAgentsNode(project) : key === reposItem ? projectReposNode(project) : null;
+      if (node)
+        return {
+          key,
+          parent: projectKey(project),
+          open: expanded.isOpen(node),
+          button: true,
+          add: true,
+          onOpen: () => expanded.open(node),
+          onClose: () => expanded.close(node),
+          onActivate: () => expanded.toggle(node),
+          onAdd: () => setAdding({ kind: key === agentsItem ? "agent" : "repo", project }),
+        };
       if (key.startsWith("pa:")) return { key, parent: agentsItem };
+      if (key.startsWith("pr:")) return { key, parent: reposItem };
       if (key !== projectKey(project)) return { key, parent: projectKey(project) };
       return {
         key,
@@ -143,12 +185,15 @@ export function ProjectTree() {
             {(p) => {
               const open = () => expanded.isOpen(p.name);
               const current = () => urlProject() === p.name;
+              // The colour of all its agents, in the label and title too (not colour only).
+              const health = createMemo(() => projectHealth(agents.inProject(p.name)));
+              const label = () => projectHealthLabel(p.name, health());
               return (
                 <li
                   role="treeitem"
                   aria-expanded={open()}
                   aria-selected={current()}
-                  aria-label={p.name}
+                  aria-label={label()}
                   data-key={projectKey(p.name)}
                   data-project={p.name}
                   tabIndex={tabIndex(projectKey(p.name))}
@@ -168,7 +213,8 @@ export function ProjectTree() {
                     >
                       ▸
                     </span>
-                    <span class="tree-name" title={p.name}>
+                    <ProjectDot level={health().level} />
+                    <span class="tree-name" title={label()}>
                       {p.name}
                     </span>
                     <Show when={blocked(p.name) > 0}>
@@ -182,9 +228,24 @@ export function ProjectTree() {
                     <ul role="group" class="tree-group">
                       <For each={PROJECT_ITEMS}>
                         {(item) => (
-                          <Show
-                            when={item.path !== "agents"}
+                          <Switch
                             fallback={
+                              <li role="none">
+                                <A
+                                  href={href(p.name, item.path)}
+                                  activeClass="active"
+                                  role="treeitem"
+                                  data-key={itemKey(p.name, item.path)}
+                                  data-project={p.name}
+                                  tabIndex={tabIndex(itemKey(p.name, item.path))}
+                                  onFocus={() => setFocusKey(itemKey(p.name, item.path))}
+                                >
+                                  <span>{item.label}</span>
+                                </A>
+                              </li>
+                            }
+                          >
+                            <Match when={item.path === "agents"}>
                               <ProjectAgentsNode
                                 project={p.name}
                                 label={item.label}
@@ -195,23 +256,22 @@ export function ProjectTree() {
                                 currentAgent={urlAgent()}
                                 query={agentQueries()[p.name] ?? ""}
                                 onQuery={(q) => setAgentQueries((all) => ({ ...all, [p.name]: q }))}
+                                onAdd={() => setAdding({ kind: "agent", project: p.name })}
                               />
-                            }
-                          >
-                            <li role="none">
-                              <A
-                                href={href(p.name, item.path)}
-                                activeClass="active"
-                                role="treeitem"
-                                data-key={itemKey(p.name, item.path)}
-                                data-project={p.name}
-                                tabIndex={tabIndex(itemKey(p.name, item.path))}
-                                onFocus={() => setFocusKey(itemKey(p.name, item.path))}
-                              >
-                                <span>{item.label}</span>
-                              </A>
-                            </li>
-                          </Show>
+                            </Match>
+                            <Match when={item.path === "repos"}>
+                              <ProjectReposNode
+                                project={p.name}
+                                label={item.label}
+                                nav={nav}
+                                repos={visibleRepos(p.name)}
+                                currentRepo={urlRepo()}
+                                query={repoQueries()[p.name] ?? ""}
+                                onQuery={(q) => setRepoQueries((all) => ({ ...all, [p.name]: q }))}
+                                onAdd={() => setAdding({ kind: "repo", project: p.name })}
+                              />
+                            </Match>
+                          </Switch>
                         )}
                       </For>
                     </ul>
@@ -222,7 +282,63 @@ export function ProjectTree() {
           </For>
         </TreeRoot>
       </ul>
+      <Show when={adding()}>
+        {(a) => (
+          <Switch>
+            <Match when={a().kind === "agent"}>
+              <NewAgentDialog
+                project={a().project}
+                onClose={() => setAdding(null)}
+                onSaved={(agent) => {
+                  setAdding(null);
+                  expanded.open(projectAgentsNode(agent.project));
+                  navigate(`/agents/${encodeURIComponent(agent.id)}`);
+                }}
+              />
+            </Match>
+            <Match when={a().kind === "repo"}>
+              <AddRepoDialog
+                project={a().project}
+                onClose={() => setAdding(null)}
+                onAdded={(r) => {
+                  setAdding(null);
+                  expanded.open(r.project);
+                  expanded.open(projectReposNode(r.project));
+                }}
+              />
+            </Match>
+          </Switch>
+        )}
+      </Show>
     </div>
+  );
+}
+
+/**
+ * The "+" of a node row (Agents, Repos): it opens the add dialog of the
+ * project. As the cog, it is not a tree row, so it is not in the roving
+ * tabindex (tabindex -1). The keyboard runs it with the `+` key on the node
+ * row (aria-keyshortcuts). The pages /p/:project/agents and /p/:project/repos
+ * also have the add buttons.
+ */
+function AddButton(props: { label: string; onAdd: () => void }) {
+  return (
+    <button
+      type="button"
+      class="tree-add"
+      tabIndex={-1}
+      aria-label={props.label}
+      title={`${props.label} (+)`}
+      onClick={(e) => {
+        // A click adds; it does not open or close the node.
+        e.stopPropagation();
+        props.onAdd();
+      }}
+    >
+      <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
+        <path d="M8 3v10M3 8h10" />
+      </svg>
+    </button>
   );
 }
 
@@ -256,7 +372,7 @@ function SettingsCog(props: { project: string }) {
   );
 }
 
-/** The Agents page of a project as a node: the label goes to the page and opens the node; the chevron only toggles. */
+/** The Agents node of a project: the row only toggles; open, it shows the agents. */
 function ProjectAgentsNode(props: {
   project: string;
   label: string;
@@ -271,18 +387,17 @@ function ProjectAgentsNode(props: {
   currentAgent: string | null;
   query: string;
   onQuery: (q: string) => void;
+  onAdd: () => void;
 }) {
   const node = () => projectAgentsNode(props.project);
   return (
-    <TreeRoot
+    <TreeNode
       label={props.label}
-      href={href(props.project, "agents")}
+      ariaLabel={props.blocked > 0 ? `${props.label}, ${props.blocked} blocked or in error` : props.label}
       rowKey={itemKey(props.project, "agents")}
-      rowClass="tree-node"
       project={props.project}
       groupId={`project-agents-${props.project}`}
       open={expanded.isOpen(node())}
-      onOpen={() => expanded.open(node())}
       onToggle={() => expanded.toggle(node())}
       nav={props.nav}
       badge={
@@ -292,6 +407,8 @@ function ProjectAgentsNode(props: {
           </span>
         </Show>
       }
+      action={<AddButton label={`Add an agent to ${props.project}`} onAdd={props.onAdd} />}
+      actionKey="+"
       showFilter={props.total > FILTER_THRESHOLD}
       query={props.query}
       onQuery={props.onQuery}
@@ -299,6 +416,67 @@ function ProjectAgentsNode(props: {
       <For each={props.agents} fallback={<li class="tree-empty muted small">{props.query ? "No agent matches." : "No agents."}</li>}>
         {(a) => <AgentRow agent={a} rowKey={projectAgentKey(a.id)} nav={props.nav} project={props.project} current={a.id === props.currentAgent} />}
       </For>
-    </TreeRoot>
+    </TreeNode>
+  );
+}
+
+/** The Repos node of a project: the row only toggles; open, it loads and shows the repos, each a link to its browser. */
+function ProjectReposNode(props: {
+  project: string;
+  label: string;
+  nav: ReturnType<typeof createRovingTree>;
+  /** The repos to show: sorted and filtered. */
+  repos: Repo[];
+  /** The row key of the repo of the URL, or null. */
+  currentRepo: string | null;
+  query: string;
+  onQuery: (q: string) => void;
+  onAdd: () => void;
+}) {
+  const node = () => projectReposNode(props.project);
+  const open = () => expanded.isOpen(node());
+  createEffect(() => {
+    if (open()) repos.load(props.project);
+  });
+  const empty = () => (props.query ? "No repo matches." : repos.loaded(props.project) ? "No repos." : "Loading…");
+  return (
+    <TreeNode
+      label={props.label}
+      rowKey={itemKey(props.project, "repos")}
+      project={props.project}
+      groupId={`project-repos-${props.project}`}
+      open={open()}
+      onToggle={() => expanded.toggle(node())}
+      nav={props.nav}
+      action={<AddButton label={`Add a repo to ${props.project}`} onAdd={props.onAdd} />}
+      actionKey="+"
+      showFilter={repos.inProject(props.project).length > FILTER_THRESHOLD}
+      query={props.query}
+      onQuery={props.onQuery}
+    >
+      <For each={props.repos} fallback={<li class="tree-empty muted small">{empty()}</li>}>
+        {(r) => {
+          const key = projectRepoKey(props.project, r.name);
+          return (
+            <li role="none">
+              <A
+                href={repoHref(props.project, r.name)}
+                activeClass="active"
+                class="tree-repo"
+                aria-current={key === props.currentRepo ? "page" : undefined}
+                role="treeitem"
+                title={r.url}
+                data-key={key}
+                data-project={props.project}
+                tabIndex={props.nav.tabIndex(key)}
+                onFocus={() => props.nav.setFocusKey(key)}
+              >
+                <span class="tree-name">{r.name}</span>
+              </A>
+            </li>
+          );
+        }}
+      </For>
+    </TreeNode>
   );
 }

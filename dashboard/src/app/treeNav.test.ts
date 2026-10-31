@@ -51,8 +51,25 @@ describe("treeKeyAction", () => {
     expect(treeKeyAction(keys, agent("pa:2"), "ArrowDown")).toEqual({ focus: "p:y" });
     expect(treeKeyAction(keys, agent("pa:1"), "ArrowUp")).toEqual({ focus: "i:x/agents" });
     expect(treeKeyAction(keys, agent("pa:1"), "End")).toEqual({ focus: "p:y" });
-    // The node is a link: Enter follows it, Space clicks it.
-    expect(treeKeyAction(keys, node(true), "Enter")).toBeNull();
-    expect(treeKeyAction(keys, node(true), " ")).toEqual({ click: true });
+    // The node is not a link: Enter and Space toggle it, and `+` runs its add action.
+    const button = { ...node(true), button: true, add: true };
+    expect(treeKeyAction(keys, button, "Enter")).toEqual({ activate: true });
+    expect(treeKeyAction(keys, button, " ")).toEqual({ activate: true });
+    expect(treeKeyAction(keys, button, "+")).toEqual({ add: true });
+  });
+
+  it("gives `+` to a row with an add action only", () => {
+    expect(treeKeyAction(keys, leaf("a:1"), "+")).toBeNull();
+    expect(treeKeyAction(keys, { ...leaf("a:1"), button: true }, "+")).toBeNull();
+  });
+
+  it("walks a Repos node and its repos before the next page", () => {
+    const keys = ["root", "p:x", "i:x/board", "i:x/repos", "pr:x/infra", "pr:x/web", "i:x/logs", "i:x/agents"];
+    const repo = (key: string) => ({ key, parent: "i:x/repos" });
+    const node = { key: "i:x/repos", parent: "p:x", open: true, button: true, add: true };
+    expect(treeKeyAction(keys, node, "ArrowRight")).toEqual({ focus: "pr:x/infra" });
+    expect(treeKeyAction(keys, repo("pr:x/web"), "ArrowDown")).toEqual({ focus: "i:x/logs" });
+    expect(treeKeyAction(keys, repo("pr:x/web"), "ArrowLeft")).toEqual({ focus: "i:x/repos" });
+    expect(treeKeyAction(keys, repo("pr:x/web"), "Enter")).toBeNull();
   });
 });
