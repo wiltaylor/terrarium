@@ -72,7 +72,25 @@ impl Runner {
 }
 `;
 
-type Files = Record<string, string | { b64: string } | { link: string }>;
+/** A small binary: an ELF header with NUL bytes, so the daemon calls it binary. */
+const BINARY = btoa(String.fromCharCode(0x7f, 0x45, 0x4c, 0x46, 2, 1, 1, 0, ...Array.from({ length: 120 }, (_, i) => (i * 37) % 256)));
+
+/** A text file over 1 MiB: the view shows the first 1 MiB only. Made on the first read. */
+const BIG_LOG = () => Array.from({ length: 12000 }, (_, i) => `${String(i + 1).padStart(5, "0")} INFO runner: agent runner-dev turn ${i + 1} ended after ${(i * 7) % 900} ms; tokens in ${(i * 31) % 5000}, out ${(i * 17) % 2000}`).join("\n") + "\n";
+
+const GUIDES_README = `# Guides
+
+How to set up and run Terrarium.
+
+| Guide | For |
+| --- | --- |
+| [Install on Linux](install/linux.md) | A host with Docker |
+| [Agents](agents.md) | The first agent |
+
+> Each guide is short. Read them in order.
+`;
+
+type Files = Record<string, string | (() => string) | { b64: string } | { link: string }>;
 
 const MAIN_FILES: Files = {
   "README.md": README,
@@ -81,6 +99,12 @@ const MAIN_FILES: Files = {
   "docs/PLAN.md": "# Plan\n\n## 1. Goals\n\nRun many harnesses in one place.\n",
   "docs/logo.png": { b64: PNG },
   "docs/latest.md": { link: "PLAN.md" },
+  "docs/guides/README.md": GUIDES_README,
+  "docs/guides/agents.md": "# Agents\n\nStart an agent from the dashboard: **New agent**.\n",
+  "docs/guides/install/linux.md": "# Install on Linux\n\n```sh\ndocker compose up -d\n```\n",
+  "docs/guides/install/screenshot.gif": { b64: "R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==" },
+  "tools/bin/terrarium-probe": { b64: BINARY },
+  "logs/runner-big.log": BIG_LOG,
   "crates/terrariumd/src/main.rs": MAIN_RS,
   "crates/terrarium-runner/src/lib.rs": RUNNER_RS,
 };
@@ -335,6 +359,15 @@ export function mockTrees(repo: string): RepoTree[] {
   }));
 }
 
+const made = new Map<() => string, string>();
+/** The text of a file; a big file is made once, on the first read. */
+function text(v: string | (() => string)): string {
+  if (typeof v === "string") return v;
+  let t = made.get(v);
+  if (t === undefined) made.set(v, (t = v()));
+  return t;
+}
+
 export function mockList(repo: string, tree: string, rawPath: string): TreeListing {
   const path = cleanPath(rawPath);
   const files = treeOf(repo, tree).files;
@@ -346,7 +379,7 @@ export function mockList(repo: string, tree: string, rawPath: string): TreeListi
     const rest = f.slice(prefix.length);
     const name = rest.split("/")[0]!;
     if (rest.includes("/")) seen.set(name, { name, path: prefix + name, kind: "dir" });
-    else if (typeof v === "string") seen.set(name, { name, path: f, kind: "file", size: new TextEncoder().encode(v).length });
+    else if (typeof v === "string" || typeof v === "function") seen.set(name, { name, path: f, kind: "file", size: new TextEncoder().encode(text(v)).length });
     else if ("link" in v) seen.set(name, { name, path: f, kind: "symlink", target: v.link });
     else seen.set(name, { name, path: f, kind: "file", size: Math.floor((v.b64.length * 3) / 4) });
   }
@@ -359,7 +392,7 @@ export function mockFile(repo: string, tree: string, rawPath: string): { bytes: 
   const path = cleanPath(rawPath);
   const v = treeOf(repo, tree).files[path];
   if (v === undefined) fail(404, "not_found", `no file \`${path}\` in this tree`);
-  if (typeof v === "string") return { bytes: new TextEncoder().encode(v), text: true };
+  if (typeof v === "string" || typeof v === "function") return { bytes: new TextEncoder().encode(text(v)), text: true };
   if ("link" in v) fail(422, "invalid", `\`${path}\` is a symlink to \`${v.link}\`; the daemon does not follow it`);
   return { bytes: Uint8Array.from(atob(v.b64), (c) => c.charCodeAt(0)), text: false };
 }

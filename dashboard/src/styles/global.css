@@ -2439,3 +2439,121 @@ tr.row-open > td {
   /* clip, not hidden: no scroll box, so the file header stays sticky. */
   overflow: clip;
 }
+/* The Files tab: the file tree on the left, a bar to change its width, and
+   the preview on the right. On a phone, the tree goes above the preview and
+   a button opens and closes it. */
+.repo-browser {
+  display: grid;
+  grid-template-columns: var(--tree-w, 300px) 8px minmax(0, 1fr);
+  align-items: start;
+  gap: 0 6px;
+}
+.repo-tree-toggle {
+  display: none;
+}
+.repo-tree-pane {
+  position: sticky;
+  top: 12px;
+  max-height: calc(100vh - 24px);
+  overflow: auto;
+  min-width: 0;
+  padding: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.file-tree .tree-row {
+  padding-top: 3px;
+  padding-bottom: 3px;
+  font-size: 0.9rem;
+}
+.file-tree li[aria-selected="true"] > .tree-row {
+  background: var(--accent-soft);
+}
+.file-tree .tree-chevron:empty {
+  visibility: hidden;
+}
+.tree-link {
+  flex: none;
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.entry-icon {
+  flex: none;
+  fill: none;
+  stroke: var(--muted);
+  stroke-width: 1.2;
+  stroke-linejoin: round;
+}
+.entry-icon.entry-dir,
+.entry-icon.entry-submodule {
+  fill: var(--accent-soft);
+  stroke: var(--link);
+}
+.repo-splitter {
+  align-self: stretch;
+  min-height: 120px;
+  cursor: col-resize;
+  border-radius: var(--radius-sm);
+  touch-action: none;
+}
+.repo-splitter:hover,
+.repo-splitter:focus-visible {
+  background: var(--accent-soft);
+}
+.repo-splitter:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.repo-preview {
+  min-width: 0;
+}
+.file-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 10px;
+  min-width: 0;
+}
+.file-head .crumbs {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.file-actions {
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.file-actions .btn {
+  padding: 2px 8px;
+  font-size: 0.85rem;
+}
+.crumbs button.link,
+.diff-index button.link,
+.untracked button.link {
+  display: inline;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 760px) {
+  .repo-browser {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+  }
+  .repo-tree-toggle {
+    display: inline-flex;
+    justify-self: start;
+  }
+  .repo-splitter {
+    display: none;
+  }
+  .repo-tree-pane {
+    position: static;
+    max-height: 50vh;
+  }
+  .repo-browser.tree-closed .repo-tree-pane {
+    display: none;
+  }
+}

@@ -25,4 +25,18 @@ describe("the mock repo browser", () => {
     expect(p2.next).toBeNull();
     expect((await api.repos.commit(repo!.id, "main", p1.items[0]!.sha)).diff.files.length).toBe(1);
   });
+
+  it("has nested folders, a README in a subfolder, an image, a binary, and a file over 1 MiB", async () => {
+    const api = createMockApi();
+    const [repo] = await api.projects.repos("terrarium");
+    const guides = await api.repos.files(repo!.id, "main", "docs/guides");
+    expect(guides.entries.map((e) => `${e.name}:${e.kind}`)).toEqual(["install:dir", "agents.md:file", "README.md:file"]);
+    expect((await api.repos.file(repo!.id, "main", "docs/guides/README.md")).text).toBe(true);
+    expect((await api.repos.file(repo!.id, "main", "docs/guides/install/screenshot.gif")).text).toBe(false);
+    expect((await api.repos.file(repo!.id, "main", "tools/bin/terrarium-probe")).text).toBe(false);
+    const big = await api.repos.file(repo!.id, "main", "logs/runner-big.log");
+    expect(big).toMatchObject({ text: true, truncated: true });
+    expect(big.size).toBeGreaterThan(1 << 20);
+    expect(big.blob.size).toBe(1 << 20);
+  });
 });

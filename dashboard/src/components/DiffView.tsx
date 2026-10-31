@@ -57,8 +57,12 @@ function FileBlock(props: { file: FileDiff; open: boolean }) {
   );
 }
 
-/** A set of file diffs. Files open by default when there are 30 or fewer. */
-export function DiffView(props: { set: DiffSet; empty?: string }) {
+/**
+ * A set of file diffs. Files open by default when there are 30 or fewer.
+ * With `onOpen`, each name in the file list that is still in the tree is a
+ * link to the file.
+ */
+export function DiffView(props: { set: DiffSet; empty?: string; onOpen?: (path: string) => void }) {
   const totals = createMemo(() => props.set.files.reduce((t, f) => ({ a: t.a + f.additions, d: t.d + f.deletions }), { a: 0, d: 0 }));
   return (
     <Show when={props.set.files.length} fallback={<Empty>{props.empty ?? "No changes."}</Empty>}>
@@ -71,7 +75,12 @@ export function DiffView(props: { set: DiffSet; empty?: string }) {
           <For each={props.set.files}>
             {(f) => (
               <li>
-                <span class={`diff-status st-${f.status}`}>{STATUS[f.status]}</span> <span class="mono">{f.path}</span>{" "}
+                <span class={`diff-status st-${f.status}`}>{STATUS[f.status]}</span>{" "}
+                <Show when={props.onOpen && f.status !== "deleted" && f.status !== "refused"} fallback={<span class="mono">{f.path}</span>}>
+                  <button class="link mono diff-open" onClick={() => props.onOpen!(f.path)} title="Show the file in the Files tab">
+                    {f.path}
+                  </button>
+                </Show>{" "}
                 <span class="mono">
                   <span class="diff-add-n">+{f.additions}</span> <span class="diff-del-n">−{f.deletions}</span>
                 </span>

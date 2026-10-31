@@ -1,22 +1,20 @@
 // The browser of one repo (/p/:project/repos/:repo, docs/api.md §5.3): a
 // tree selector (main, and each agent checkout), then the tabs Files,
-// Changes, and Commits. The query keeps the tree, the tab, the dir, the
-// file, and the commit, so a link opens the same view.
+// Changes, and Commits. The query keeps the tree, the tab, the path (a file
+// or a folder), and the commit, so a link opens the same view.
 //
 // Agents control every name, file, and diff here. They go into text nodes
-// only. The one HTML render is a Markdown file with "Rendered" on, through
-// the safe Markdown component (lib/sanitize).
+// only. The Files tab (./FilesTab) has the one HTML render: a Markdown file
+// through the safe Markdown component (lib/sanitize).
 
 import { A, useParams, useSearchParams } from "@solidjs/router";
-import { createEffect, createMemo, createResource, createSignal, For, Match, on, onCleanup, Show, Switch } from "solid-js";
-import type { Repo, RepoCommit, RepoTree, TreeEntry } from "../../api/types";
+import { createEffect, createMemo, createResource, createSignal, For, Match, on, Show, Switch } from "solid-js";
+import type { Repo, RepoCommit, RepoTree } from "../../api/types";
 import { DiffView } from "../../components/DiffView";
-import { Markdown } from "../../components/Markdown";
 import { Empty, ErrorBanner, PageHead } from "../../components/ui";
-import { crumbs, dirOf, imageType, isMarkdown } from "../../lib/diff";
-import { ago, bytes } from "../../lib/format";
-import { renderMarkdown } from "../../lib/markdown";
+import { ago } from "../../lib/format";
 import { api } from "../../stores";
+import { FilesTab } from "./FilesTab";
 
 type Tab = "files" | "changes" | "commits";
 const TABS: { id: Tab; label: string }[] = [
@@ -25,6 +23,7 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "commits", label: "Commits" },
 ];
 
+// `file` is the query of an older build: it opens as `path`.
 type Search = { tree?: string; tab?: string; path?: string; file?: string; commit?: string };
 
 const short = (sha?: string | null) => (sha ? sha.slice(0, 8) : "—");
@@ -121,10 +120,10 @@ export default function RepoPage() {
         </nav>
         <Switch>
           <Match when={tab() === "files"}>
-            <FilesTab repo={repo()!} tree={treeId()} reload={reloadKey()} path={search.path ?? ""} file={search.file} onPath={(p) => setSearch({ path: p || undefined, file: undefined })} onFile={(f) => setSearch({ file: f })} />
+            <FilesTab repo={repo()!} tree={treeId()} head={current()!.head} reload={reloadKey()} path={search.path ?? search.file ?? ""} onPath={(p) => setSearch({ path: p || undefined, file: undefined })} />
           </Match>
           <Match when={tab() === "changes"}>
-            <ChangesTab repo={repo()!} tree={current()!} reload={reloadKey()} />
+            <ChangesTab repo={repo()!} tree={current()!} reload={reloadKey()} onOpen={(p) => setSearch({ tab: "files", path: p, file: undefined })} />
           </Match>
           <Match when={tab() === "commits"}>
             <CommitsTab repo={repo()!} tree={current()!} reload={reloadKey()} commit={search.commit} onCommit={(c) => setSearch({ commit: c })} />
@@ -174,198 +173,10 @@ function TreeFacts(props: { tree: RepoTree }) {
   );
 }
 
-// --- Files -------------------------------------------------------------
-
-function Crumbs(props: { path: string; onPath: (p: string) => void; file?: string }) {
-  return (
-    <nav class="crumbs small" aria-label="Path">
-      <button class="link" onClick={() => props.onPath("")}>
-        root
-      </button>
-      <For each={crumbs(props.path)}>
-        {([name, p]) => (
-          <>
-            <span class="muted"> / </span>
-            <button class="link" onClick={() => props.onPath(p)}>
-              {name}
-            </button>
-          </>
-        )}
-      </For>
-      <Show when={props.file}>
-        <span class="muted"> / </span>
-        <span class="mono">{props.file!.split("/").pop()}</span>
-      </Show>
-    </nav>
-  );
-}
-
-function FilesTab(props: { repo: Repo; tree: string; reload: string; path: string; file?: string; onPath: (p: string) => void; onFile: (f: string) => void }) {
-  const dir = () => (props.file ? dirOf(props.file) : props.path);
-  const [listing] = createResource(
-    () => [props.repo.id, props.tree, dir(), props.reload] as const,
-    ([id, tree, path]) => api.repos.files(id, tree, path),
-  );
-  const open = (e: TreeEntry) => {
-    if (e.kind === "dir") props.onPath(e.path);
-    else if (e.kind === "file") props.onFile(e.path);
-  };
-  return (
-    <div class="stack" style={{ gap: "8px" }}>
-      <Crumbs path={dir()} file={props.file} onPath={props.onPath} />
-      <Show when={props.file} fallback={<Listing listing={listing()} loading={listing.loading} error={listing.error} onOpen={open} />}>
-        <FileView repo={props.repo} tree={props.tree} reload={props.reload} path={props.file!} />
-      </Show>
-    </div>
-  );
-}
-
-function Listing(props: { listing?: { entries: TreeEntry[]; truncated: boolean }; loading: boolean; error: unknown; onOpen: (e: TreeEntry) => void }) {
-  return (
-    <>
-      <ErrorBanner error={props.error} />
-      <Show when={props.listing?.entries.length} fallback={<Empty>{props.loading ? "Loading…" : "This directory is empty."}</Empty>}>
-        <div class="table-wrap">
-          <table class="file-table">
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th class="num">Size</th>
-              </tr>
-            </thead>
-            <tbody>
-              <For each={props.listing!.entries}>
-                {(e) => (
-                  <tr>
-                    <td>
-                      <Switch fallback={<span class="mono muted">{e.name}</span>}>
-                        <Match when={e.kind === "dir" || e.kind === "file"}>
-                          <button class="link mono" onClick={() => props.onOpen(e)}>
-                            {e.kind === "dir" ? `${e.name}/` : e.name}
-                          </button>
-                        </Match>
-                        <Match when={e.kind === "symlink"}>
-                          <span class="mono" title="A symlink. The daemon does not follow it.">
-                            {e.name} <span class="muted">→ {e.target ?? "?"}</span>
-                          </span>
-                        </Match>
-                        <Match when={e.kind === "submodule"}>
-                          <span class="mono">{e.name}</span> <span class="chip">submodule</span>
-                        </Match>
-                      </Switch>
-                    </td>
-                    <td class="num small muted">{e.size != null ? bytes(e.size) : ""}</td>
-                  </tr>
-                )}
-              </For>
-            </tbody>
-          </table>
-        </div>
-        <Show when={props.listing!.truncated}>
-          <p class="small muted">This directory has more than 5000 entries: the list shows the first 5000.</p>
-        </Show>
-      </Show>
-    </>
-  );
-}
-
-function FileView(props: { repo: Repo; tree: string; reload: string; path: string }) {
-  const [rendered, setRendered] = createSignal(false);
-  const [file] = createResource(
-    () => [props.repo.id, props.tree, props.path, props.reload] as const,
-    async ([id, tree, path]) => {
-      const f = await api.repos.file(id, tree, path);
-      return { ...f, content: f.text ? await f.blob.text() : "" };
-    },
-  );
-  // An image: a blob URL with a fixed raster type. Never SVG, never the
-  // type of the answer (application/octet-stream).
-  const [imageUrl, setImageUrl] = createSignal<string | null>(null);
-  createEffect(
-    on(file, (f) => {
-      const old = imageUrl();
-      if (old) URL.revokeObjectURL(old);
-      const type = imageType(props.path);
-      setImageUrl(f && !f.text && type && !f.truncated ? URL.createObjectURL(new Blob([f.blob], { type })) : null);
-    }),
-  );
-  onCleanup(() => {
-    const u = imageUrl();
-    if (u) URL.revokeObjectURL(u);
-  });
-  const lines = createMemo(() => {
-    const c = file()?.content ?? "";
-    const l = c.split("\n");
-    if (l.length > 1 && l[l.length - 1] === "") l.pop();
-    return l;
-  });
-  return (
-    <div class="card-box stack" style={{ gap: "8px" }}>
-      <div class="spread" style={{ "flex-wrap": "wrap" }}>
-        <span class="mono" style={{ "overflow-wrap": "anywhere" }}>
-          {props.path}
-        </span>
-        <span class="row small muted">
-          <Show when={file()}>{(f) => <span>{bytes(f().size)}</span>}</Show>
-          <Show when={isMarkdown(props.path) && file()?.text}>
-            <span class="seg" role="group" aria-label="Markdown view">
-              <button class={rendered() ? "" : "active"} aria-pressed={!rendered()} onClick={() => setRendered(false)}>
-                Source
-              </button>
-              <button class={rendered() ? "active" : ""} aria-pressed={rendered()} onClick={() => setRendered(true)}>
-                Rendered
-              </button>
-            </span>
-          </Show>
-        </span>
-      </div>
-      <ErrorBanner error={file.error} />
-      <Show when={file.loading}>
-        <Empty>Loading…</Empty>
-      </Show>
-      <Show when={file()}>
-        {(f) => (
-          <Switch>
-            <Match when={imageUrl()}>
-              <img class="file-image" src={imageUrl()!} alt={props.path} />
-            </Match>
-            <Match when={!f().text}>
-              <Empty>
-                Binary, {bytes(f().size)} ({f().size} bytes). No content is shown.
-              </Empty>
-            </Match>
-            <Match when={rendered() && isMarkdown(props.path)}>
-              <Markdown html={renderMarkdown(f().content, props.repo.project)} />
-            </Match>
-            <Match when={true}>
-              <div class="code-scroll">
-                <table class="code-table">
-                  <tbody>
-                    <For each={lines()}>
-                      {(l, i) => (
-                        <tr>
-                          <td class="ln">{i() + 1}</td>
-                          <td class="code">{l}</td>
-                        </tr>
-                      )}
-                    </For>
-                  </tbody>
-                </table>
-              </div>
-            </Match>
-          </Switch>
-        )}
-      </Show>
-      <Show when={file()?.truncated}>
-        <p class="small muted">The file is {bytes(file()!.size)}: the view shows the first 1 MiB only.</p>
-      </Show>
-    </div>
-  );
-}
-
 // --- Changes -------------------------------------------------------------
 
-function ChangesTab(props: { repo: Repo; tree: RepoTree; reload: string }) {
+/** `onOpen` shows a file of the tree in the Files tab. */
+function ChangesTab(props: { repo: Repo; tree: RepoTree; reload: string; onOpen: (path: string) => void }) {
   const [changes] = createResource(
     () => [props.repo.id, props.tree.id, props.reload] as const,
     ([id, tree]) => api.repos.diff(id, tree),
@@ -395,7 +206,7 @@ function ChangesTab(props: { repo: Repo; tree: RepoTree; reload: string }) {
                     <span class="mono">{short(c().head)}</span>
                     {c().note ? ` · ${c().note}` : ""}
                   </p>
-                  <DiffView set={c().committed} empty="No commits on this tree that the base does not have." />
+                  <DiffView set={c().committed} empty="No commits on this tree that the base does not have." onOpen={props.onOpen} />
                 </section>
                 <section class="stack repo-section" style={{ gap: "6px" }} aria-label="Uncommitted changes">
                   <h2 style={{ margin: 0 }}>Uncommitted</h2>
@@ -403,13 +214,21 @@ function ChangesTab(props: { repo: Repo; tree: RepoTree; reload: string }) {
                     <p class="small muted">{u().note}</p>
                   </Show>
                   <h3 style={{ margin: 0 }}>Staged</h3>
-                  <DiffView set={u().staged} empty="Nothing staged." />
+                  <DiffView set={u().staged} empty="Nothing staged." onOpen={props.onOpen} />
                   <h3 style={{ margin: 0 }}>Not staged</h3>
-                  <DiffView set={u().unstaged} empty="No changes in the work tree." />
+                  <DiffView set={u().unstaged} empty="No changes in the work tree." onOpen={props.onOpen} />
                   <h3 style={{ margin: 0 }}>Untracked</h3>
                   <Show when={u().untracked.length} fallback={<Empty>No untracked files.</Empty>}>
                     <ul class="mono small untracked">
-                      <For each={u().untracked}>{(p) => <li>{p}</li>}</For>
+                      <For each={u().untracked}>
+                        {(p) => (
+                          <li>
+                            <button class="link mono" onClick={() => props.onOpen(p)}>
+                              {p}
+                            </button>
+                          </li>
+                        )}
+                      </For>
                     </ul>
                     <Show when={u().untracked_truncated}>
                       <p class="small muted">More untracked files: the list shows the first 1000.</p>
