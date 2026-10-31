@@ -820,7 +820,7 @@ describe("mock parity with docs/api.md", () => {
   it("answers GET /api/harnesses?latest=true and the harness update in the daemon's shapes", async () => {
     const api = mock();
     // The fields of `harness_versions::HarnessVersion` (docs/api.md GET /api/harnesses).
-    const ROW = ["harness", "package", "pinned", "tested", "installed", "in_range", "error", "checked_at", "latest", "update", "latest_error", "active", "versions", "agents", "auto_update"];
+    const ROW = ["harness", "package", "pinned", "installed", "error", "checked_at", "latest", "update", "latest_error", "active", "versions", "agents", "auto_update"];
     const r = await api.harnesses(true, true);
     for (const h of r.harnesses) {
       for (const k of Object.keys(h)) expect(ROW).toContain(k);
@@ -834,10 +834,10 @@ describe("mock parity with docs/api.md", () => {
     for (const h of (await api.harnesses()).harnesses) for (const k of ["latest", "update", "latest_error"]) expect(h).not.toHaveProperty(k);
     // `harness_install::UpdateResult` (docs/api.md POST /api/harnesses/{name}/update).
     // `note` and `removed` are absent when empty.
-    const RESULT = ["harness", "package", "from", "to", "output", "tested", "in_range", "reused", "agents_on_old_version"].sort();
+    const RESULT = ["harness", "package", "from", "to", "output", "reused", "agents_on_old_version"].sort();
     const one = await api.harnessUpdate("copilot-prompt", { force: true });
     expect(Object.keys(one).sort()).toEqual(RESULT);
-    expect(one).toMatchObject({ harness: "copilot-prompt", package: "copilot-custom-system-prompt", tested: null, in_range: null, reused: false, agents_on_old_version: [] });
+    expect(one).toMatchObject({ harness: "copilot-prompt", package: "copilot-custom-system-prompt", reused: false, agents_on_old_version: [] });
     // A live agent on the harness does not refuse the update.
     const claude = await api.harnessUpdate("claude", { version: "2.1.320" });
     expect(claude.agents_on_old_version).toEqual(expect.arrayContaining([expect.objectContaining({ agent: "terrarium/lead", version: "2.1.310" })]));
@@ -852,11 +852,11 @@ describe("mock parity with docs/api.md", () => {
     // `HarnessPinResult`: `output`, `note`, and `removed` are absent when empty.
     const un = await api.harnessUnpin("claude");
     expect(Object.keys(un).sort()).toEqual(["agents_on_old_version", "from", "harness", "pinned_version", "policy", "to"]);
-    // `CheckItem`: `from`, `to`, and `in_range` only on an install.
+    // `CheckItem`: `from` and `to` only on an install.
     const check = await api.harnessCheck();
     expect(Object.keys(check).sort()).toEqual(["checked_at", "results"]);
     for (const i of check.results) {
-      const keys = ["harness", "result", "detail", "latest", "mailed", ...(i.result === "updated" ? ["from", "to", "in_range"] : [])].sort();
+      const keys = ["harness", "result", "detail", "latest", "mailed", ...(i.result === "updated" ? ["from", "to"] : [])].sort();
       expect(Object.keys(i).sort()).toEqual(keys);
     }
   });

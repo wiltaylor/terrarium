@@ -164,7 +164,7 @@ import type {
 export interface Api {
   health(): Promise<Health>;
   /**
-   * `GET /api/harnesses`: each harness against its pin and tested range. `refresh` runs the binaries
+   * `GET /api/harnesses`: each harness against its pin. `refresh` runs the binaries
    * again (and asks npm again); `latest` adds the latest npm release and the update kind.
    */
   harnesses(refresh?: boolean, latest?: boolean): Promise<HarnessReport>;

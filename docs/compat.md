@@ -45,21 +45,21 @@ moves each package with hard links, with no npm run.
 
 `harnesses.toml` at the repo root pins each harness (the version of the
 first install). `just harness::latest --pin` and
-`just harness::update <name> --pin` add a row here for each pin change. The "Range" cell
-shows a change to the adapter's `tested` range. After
-`just ci::compat <harness>`, write the result in the "Compat" cell. When a
-bump changes a hook, a flag, or a config key, add a section for the new
-version below, as for the versions below.
+`just harness::update <name> --pin` add a row here for each pin change.
+Terrarium keeps no range of supported versions: the harnesses release
+about daily. After `just ci::compat <harness>`, write the result in the
+"Compat" cell. When a bump changes a hook, a flag, or a config key, add a
+section for the new version below, as for the versions below.
 
-| Date | Harness | Version | Bump | Range | Compat |
-|---|---|---|---|---|---|
-| 2026-10-24 | claude | 2.1.310 | first pin | `>=2.1.310, <2.2.0` | pass (Phase 0 spikes, `ci::compat`) |
-| 2026-10-24 | codex | 0.160.0 | first pin | `>=0.160.0, <0.161.0` | pass (Phase 0 spikes) |
-| 2026-10-24 | copilot | 1.0.103 | first pin | `>=1.0.103, <1.1.0` | pass (Phase 0 spikes) |
-| 2026-10-24 | pi | 0.85.1 | first pin | `>=0.85.1, <0.86.0` | pass (Phase 0 spikes) |
-| 2026-10-24 | copilot-prompt | 0.1.2 | first pin | - | - |
-| 2026-10-26 | codex | 0.160.0 → 0.164.0 | major | `>=0.160.0, <0.161.0` → `>=0.164.0, <0.165.0` | verified live in the container 2026-10-26 (codex: 1 turn; pi: 0 turns, start only) |
-| 2026-10-26 | pi | 0.85.1 → 1.4.0 | major | `>=0.85.1, <0.86.0` → `>=1.4.0, <1.5.0` | verified live in the container 2026-10-26 (codex: 1 turn; pi: 0 turns, start only) |
+| Date | Harness | Version | Bump | Compat |
+|---|---|---|---|---|
+| 2026-10-24 | claude | 2.1.310 | first pin | pass (Phase 0 spikes, `ci::compat`) |
+| 2026-10-24 | codex | 0.160.0 | first pin | pass (Phase 0 spikes) |
+| 2026-10-24 | copilot | 1.0.103 | first pin | pass (Phase 0 spikes) |
+| 2026-10-24 | pi | 0.85.1 | first pin | pass (Phase 0 spikes) |
+| 2026-10-24 | copilot-prompt | 0.1.2 | first pin | - |
+| 2026-10-26 | codex | 0.160.0 → 0.164.0 | major | verified live in the container 2026-10-26 (codex: 1 turn; pi: 0 turns, start only) |
+| 2026-10-26 | pi | 0.85.1 → 1.4.0 | major | verified live in the container 2026-10-26 (codex: 1 turn; pi: 0 turns, start only) |
 
 ---
 

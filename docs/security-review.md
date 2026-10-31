@@ -349,9 +349,9 @@ its version or the Copilot version changes. An update runs `npm install -g
 and each call writes the audit row `harness.update` and a `harness` event. Thus npm
 reaches the registry at the first start and at each update, not at the image build:
 the install trusts the registry at that moment (PLAN §21). The pins limit the first
-install, the manifest records what came in, and the version guard warns (or, with
-`TERRARIUM_HARNESS_VERSION_POLICY=refuse`, refuses) an agent start on a version
-outside the tested range. The dashboard uses `npm ci` with a lockfile, the Node image
+install, and the manifest records what came in. (The version guard of this review
+was removed later: Terrarium keeps no range of supported harness versions, because
+the harnesses release about daily.) The dashboard uses `npm ci` with a lockfile, the Node image
 is pinned in `harnesses.toml` (`[node] image`) and checked against the Dockerfile
 default, and the seccomp profile documents its moby source commit and SHA-256
 (`docker/seccomp-bwrap.README.md`). `systempaths=unconfined` plus the custom seccomp

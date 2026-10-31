@@ -3712,12 +3712,11 @@ async fn agent_rm_keep_workspace() {
 }
 
 #[tokio::test]
-async fn admin_harness_ls_shows_the_range_and_the_policy() {
+async fn admin_harness_ls_shows_the_versions_and_the_update_policy() {
     let answer = json!({
-        "policy": "warn",
         "harnesses": [
             {"harness": "claude", "package": "@anthropic-ai/claude-code", "pinned": "2.1.310",
-             "tested": ">=2.1.310, <2.2.0", "installed": "2.1.311", "in_range": true,
+             "installed": "2.1.311",
              "checked_at": "2026-10-25T10:00:00Z", "active": "2.1.311",
              "versions": ["2.1.310", "2.1.311"],
              "auto_update": {"policy": "pinned", "pinned_version": "2.1.311"},
@@ -3725,10 +3724,10 @@ async fn admin_harness_ls_shows_the_range_and_the_policy() {
                         {"agent": "terra/b", "id": "01B", "version": "2.1.311"},
                         {"agent": "terra/c", "id": "01C", "version": null}]},
             {"harness": "codex", "package": "@openai/codex", "pinned": "0.160.0",
-             "tested": ">=0.160.0, <0.161.0", "installed": "0.164.0", "in_range": false,
+             "installed": "0.164.0",
              "checked_at": "2026-10-25T10:00:00Z", "auto_update": {"policy": "auto"}},
             {"harness": "pi", "package": "@earendil-works/pi-coding-agent", "pinned": "0.85.1",
-             "tested": ">=0.85.1, <0.86.0", "installed": null, "in_range": null,
+             "installed": null,
              "error": "cannot run pi: No such file or directory", "checked_at": null}
         ],
         "auto_update": {"schedule": "daily", "next_check_at": "2026-10-26T10:05:00Z"}
@@ -3742,7 +3741,8 @@ async fn admin_harness_ls_shows_the_range_and_the_policy() {
     .await;
     let lines: Vec<&str> = out.lines().collect();
     assert!(lines[0].starts_with("HARNESS"), "{out}");
-    assert!(lines[0].contains("IN RANGE"), "{out}");
+    assert!(!lines[0].contains("RANGE"), "{out}");
+    assert!(!lines[0].contains("TESTED"), "{out}");
     assert!(out.contains("claude   2.1.310"), "{out}");
     assert!(lines[0].ends_with("ON DISK"), "{out}");
     assert!(
@@ -3754,13 +3754,13 @@ async fn admin_harness_ls_shows_the_range_and_the_policy() {
     assert!(
         lines
             .iter()
-            .any(|l| l.starts_with("codex") && l.contains(" NO ")),
+            .any(|l| l.starts_with("codex") && l.contains(" 0.164.0 ")),
         "{out}"
     );
     assert!(
         lines
             .iter()
-            .any(|l| l.starts_with("pi") && l.contains(" unknown ")),
+            .any(|l| l.starts_with("pi") && l.contains(" - ")),
         "{out}"
     );
     assert!(
@@ -3772,10 +3772,7 @@ async fn admin_harness_ls_shows_the_range_and_the_policy() {
         "{out}"
     );
     assert!(!out.contains("terra/b"), "{out}");
-    assert!(
-        out.contains("policy: warn (TERRARIUM_HARNESS_VERSION_POLICY)"),
-        "{out}"
-    );
+    assert!(!out.contains("TERRARIUM_HARNESS_VERSION_POLICY"), "{out}");
     assert!(lines[0].contains("UPDATES"), "{out}");
     assert!(
         lines
@@ -3795,10 +3792,8 @@ async fn admin_harness_ls_shows_the_range_and_the_policy() {
         ),
         "{out}"
     );
-    assert!(
-        out.contains("codex: 0.164.0 is outside >=0.160.0, <0.161.0; run `terrarium admin harness update codex` or `just harness::update codex`"),
-        "{out}"
-    );
+    // A version far from the pin is no warning.
+    assert!(!out.contains("outside"), "{out}");
     assert!(
         out.contains("pi: cannot run pi: No such file or directory"),
         "{out}"
@@ -3910,8 +3905,7 @@ async fn admin_harness_pin_unpin_and_check() {
 #[tokio::test]
 async fn admin_harness_update_posts_and_prints_from_and_to() {
     let one = json!({"harness": "codex", "package": "@openai/codex", "from": "0.164.0",
-        "to": "0.165.0", "output": "changed 1 package in 3s\n", "tested": ">=0.164.0, <0.165.0",
-        "in_range": false});
+        "to": "0.165.0", "output": "changed 1 package in 3s\n"});
     let out = ok(
         false,
         &[
@@ -3933,10 +3927,8 @@ async fn admin_harness_update_posts_and_prints_from_and_to() {
     )
     .await;
     assert!(out.contains("changed 1 package in 3s"), "{out}");
-    assert!(
-        out.contains("codex: 0.164.0 -> 0.165.0 (outside the tested range >=0.164.0, <0.165.0)"),
-        "{out}"
-    );
+    assert!(out.contains("codex: 0.164.0 -> 0.165.0\n"), "{out}");
+    assert!(!out.contains("range"), "{out}");
 
     // No flags: an empty body (the daemon takes `latest`).
     ok(
@@ -3948,7 +3940,7 @@ async fn admin_harness_update_posts_and_prints_from_and_to() {
     .await;
 
     let all = json!({"results": [one.clone(), {"harness": "pi", "package": "p", "from": null,
-        "to": "1.5.0", "output": "", "tested": null, "in_range": null}]});
+        "to": "1.5.0", "output": ""}]});
     let out = ok(
         false,
         &["admin", "harness", "update", "--all"],
@@ -4017,7 +4009,7 @@ async fn admin_harness_update_prints_npm_output_on_failure_and_the_old_agents() 
         vec![(
             200,
             json!({"harness": "codex", "package": "@openai/codex", "from": "0.164.0",
-                "to": "0.165.0", "output": "", "tested": null, "in_range": null,
+                "to": "0.165.0", "output": "",
                 "agents_on_old_version": [{"agent": "terra/worker", "id": "01A", "version": "0.164.0"}],
                 "note": "1 live agent(s) run another version of codex: terra/worker. Each keeps its version and moves to 0.165.0 at its next restart",
                 "removed": ["0.163.0"]}),

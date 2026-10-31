@@ -50,7 +50,7 @@ Rules for dependencies:
 ## Harness versions
 
 `harnesses.toml` at the repo root is the only place to change a harness
-pin, a tested range, the Node image, or the Copilot prompt extension pin.
+pin, the Node image, or the Copilot prompt extension pin.
 Do not edit a version in `docker/Dockerfile` or in an adapter's `flags.rs`:
 
 - The image installs no harness. It copies the file to
@@ -59,8 +59,13 @@ Do not edit a version in `docker/Dockerfile` or in an adapter's `flags.rs`:
   the tools dir. `just ci::check` fails when the Dockerfile installs a
   harness, or when its `NODE_IMAGE` default differs from `[node] image`.
 - `crates/terrarium-core/build.rs` makes `terrarium_core::harnesses` from
-  the file, and each adapter's `verified` and `tested` come from it. The
-  build fails when `tested` does not match `version`.
+  the file, and each adapter's `verified` comes from it.
+
+Terrarium keeps no range of supported harness versions: the harnesses
+release too often. Any installed version can start an agent, with no
+warning. To test a new version, run the compatibility suite
+(`just ci::compat`, [compat-suite.md](compat-suite.md)). The old setting
+`TERRARIUM_HARNESS_VERSION_POLICY` has no effect.
 
 **The tools dir.** The harnesses live in the tools dir, not in the image:
 `TERRARIUM_TOOLS_DIR`, which is `/opt/terrarium/tools` in the container
@@ -199,8 +204,8 @@ a new token, when `.env` does not exist. The daemon reads:
 | `TERRARIUM_INSECURE_AGENT_HEADER` | off. On: trust `X-Terrarium-Agent` on the Unix socket (tests only). |
 | `TERRARIUM_AUTO_SWAP` | `on`. When the provider refuses a turn with a usage-limit error, an agent with an account pool moves to the next account that did not hit a limit (PLAN §16.2, §16.3). A probe at 100 percent swaps nothing. `off` (or `0`, `false`, `no`): the agent stays, with a hold until the reset. |
 | `TERRARIUM_QUESTION_GUARD` | `on`. A member whose turn ends with a question in plain text, and that reported nothing, becomes `blocked`, and its lead (or the operator) gets the question by mail (PLAN §8.4). `off` (or `0`, `false`, `no`): no check. |
-| `TERRARIUM_HARNESS_AUTO_UPDATE` | `daily`. The background check for harness updates (PLAN §6, "Auto-update and pins"): for each harness with the policy `auto`, the daemon installs the latest release on npm (majors too) into a new version dir and switches to it. Running agents keep their version until their next start. One Inbox mail for each update. `off`, or a duration of `1h` or more (`6h`). The first check is 5 minutes after the start, or one interval after the last check when that is later. A pin (`POST /api/harnesses/{name}/pin`) stops the update of one harness. |
-| `TERRARIUM_HARNESS_VERSION_POLICY` | `warn`. An agent start on a harness whose installed version is outside the adapter's tested range (`harnesses.toml`) goes ahead, with a warning log and a `warning` event. `refuse`: the start is `422 invalid`. |
+| `TERRARIUM_HARNESS_AUTO_UPDATE` | `daily`. The background check for harness updates (PLAN §6, "Auto-update and pins"): for each harness with the policy `auto`, the daemon installs the latest release on npm (majors too) into a new version dir and switches to it. Running agents keep their version until their next start. `off`, or a duration of `1h` or more (`6h`). The first check is 5 minutes after the start, or one interval after the last check when that is later. A pin (`POST /api/harnesses/{name}/pin`) stops the update of one harness. |
+| `TERRARIUM_HARNESS_UPDATE_MAIL` | `off`. An installed auto-update sends no mail; the audit row (`harness.auto_update`), the `harness` event, and the dashboard table (Settings → Subscriptions) show it. `on`: one Inbox mail for each installed update, with the rollback command. A failed install sends one mail for each failed version with both values. |
 
 ### The directories
 

@@ -106,7 +106,12 @@ async fn main() -> anyhow::Result<()> {
     seed_config_repo(&settings);
     let mut cfg = supervisor_config(sandbox);
     cfg.mode = mode;
-    cfg.version_policy = settings.harness_version_policy;
+    if std::env::var_os(terrariumd::harness_versions::ENV_POLICY).is_some() {
+        info!(
+            "{} has no effect: Terrarium keeps no range of supported harness versions",
+            terrariumd::harness_versions::ENV_POLICY
+        );
+    }
     let supervisor = Arc::new(RunnerSupervisor::new(cfg));
     let usage = UsageConfig {
         homes: homes.clone(),
@@ -165,6 +170,10 @@ async fn main() -> anyhow::Result<()> {
     }
     // The harness auto-update (TERRARIUM_HARNESS_AUTO_UPDATE). Without a
     // tools dir it has nothing to update.
+    daemon
+        .state
+        .harness_auto_update
+        .set_update_mail(settings.harness_update_mail);
     let auto_update_task = daemon.state.harness_tools.config().map(|_| {
         terrariumd::harness_auto_update::spawn(daemon.state.clone(), settings.harness_auto_update)
     });
@@ -197,22 +206,15 @@ async fn main() -> anyhow::Result<()> {
         .map(|(task, _)| task);
 
     // Check the installed harness versions once at start, in the
-    // background, so the log shows a harness outside its tested range
-    // before an agent starts on it.
+    // background, so the log shows the version of each harness.
     let versions = daemon.state.supervisor.clone();
     tokio::spawn(async move {
         let report = versions.harness_versions(true).await;
         for h in report.harnesses {
-            let installed = h.installed.as_deref().unwrap_or("not found");
-            match h.in_range {
-                Some(true) => {
-                    info!(harness = %h.harness, installed, tested = %h.tested, "harness version")
+            match h.installed.as_deref() {
+                Some(installed) => {
+                    info!(harness = %h.harness, installed, pinned = %h.pinned, "harness version")
                 }
-                Some(false) => warn!(
-                    harness = %h.harness, installed, tested = %h.tested, pinned = %h.pinned,
-                    policy = %report.policy,
-                    "harness version outside the tested range: update it (`terrarium admin harness update <harness> --version <pinned>`)"
-                ),
                 None => {
                     warn!(harness = %h.harness, error = h.error.as_deref().unwrap_or(""), "harness version not known")
                 }

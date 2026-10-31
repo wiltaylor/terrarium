@@ -281,6 +281,7 @@ gives them to the routers and the mail code.
 | `TERRARIUM_PUBLIC_URL` | `--public-url` | unset (mail: `http://localhost:8080`) | Mail links, `Version.url`, the cookie `Origin` check, CORS on `/a/...`. |
 | `TERRARIUM_MAIL_LOOP_LIMIT` | none | `6` | The mail loop guard (§6, PLAN §12): the agent-to-agent messages a thread can have since the last operator or project-inbox message before new agent mail on it types no pointer. The daemon reads it once. |
 | `TERRARIUM_HARNESS_AUTO_UPDATE` | `--harness-auto-update` | `daily` | The background check for harness updates (§4, "Auto-update and pins"): `daily`, `off`, or a duration of `1h` or more (`6h`). A value that does not parse stops the daemon at start. |
+| `TERRARIUM_HARNESS_UPDATE_MAIL` | `--harness-update-mail` | `off` | An Inbox mail for each update that the auto-update installs (§4, "Auto-update and pins"): `off` or `on`. A failed install sends one mail for each failed version with both values. |
 | `TERRARIUM_IDLE_STOP` | none | `10m` | The idle stop of an agent that sets no `idle_stop` (§6.2, PLAN §18): a duration (`30m`, `1h30m`), or `off` (also `0`). The daemon reads it once. |
 | `TERRARIUM_COMPACT_ON_IDLE` | none | `off` | The `compact_on_idle` of an agent that sets none (§6.2, "Auto compact"): `on` or `off` (also `1`, `true`, `yes`, and `0`, `false`, `no`). The daemon reads it once. |
 | `TERRARIUM_COMPACT_MAX_AGE` | none | `off` | The `compact_max_age` of an agent that sets none (§6.2, "Auto compact"): a duration (`24h`, `12h30m`), or `off` (also `0`). The daemon reads it once. |
@@ -487,23 +488,21 @@ harnesses whose agents the daemon can compact.
 ### `GET /api/harnesses`
 
 Every caller may read it. For each registered harness: the pin and the
-package from `harnesses.toml`, the range that the adapter accepts, the
-version that `<binary> --version` reports, and whether that version is in
-the range. `policy` is `TERRARIUM_HARNESS_VERSION_POLICY` (§6.2). The
+package from `harnesses.toml`, and the version that `<binary> --version`
+reports. Terrarium keeps no range of supported versions (the harnesses
+release about daily), so any installed version can start an agent. The
 daemon caches each version for 10 minutes; `?refresh=true` runs the
 binaries again.
 
 ```json
-{"policy":"warn",
- "harnesses":[{"harness":"claude","package":"@anthropic-ai/claude-code","pinned":"2.1.310",
-   "tested":">=2.1.310, <2.2.0","installed":"2.1.310","in_range":true,
-   "checked_at":"2026-10-25T10:00:00Z"},
+{"harnesses":[{"harness":"claude","package":"@anthropic-ai/claude-code","pinned":"2.1.310",
+   "installed":"2.1.310","checked_at":"2026-10-25T10:00:00Z"},
   {"harness":"pi","package":"@earendil-works/pi-coding-agent","pinned":"0.85.1",
-   "tested":">=0.85.1, <0.86.0","installed":null,"in_range":null,
+   "installed":null,
    "error":"cannot run pi: No such file or directory","checked_at":"2026-10-25T10:00:00Z"}]}
 ```
 
-`in_range` is `null` when the version is not known, and `error` says why.
+`installed` is `null` when the version is not known, and `error` says why.
 `terrarium admin harness ls` prints this table.
 
 With a tools dir, each row also has these fields:
@@ -546,8 +545,7 @@ for 5 minutes. `?latest=true&refresh=true` asks npm again.
 
 ```json
 {"harness":"codex","package":"@openai/codex","pinned":"0.164.0",
- "tested":">=0.164.0, <0.165.0","installed":"0.164.0","in_range":true,
- "checked_at":"2026-10-26T09:00:00Z",
+ "installed":"0.164.0","checked_at":"2026-10-26T09:00:00Z",
  "latest":{"version":"0.165.0","published_at":"2026-10-25T09:30:00Z"},
  "update":"major"}
 ```
@@ -593,8 +591,7 @@ sysadmin or the operator.
 
 ```json
 {"harness":"codex","package":"@openai/codex","from":"0.164.0","to":"0.165.0",
- "output":"\nadded 2 packages in 2s\n","tested":">=0.164.0, <0.165.0","in_range":false,
- "reused":false,
+ "output":"\nadded 2 packages in 2s\n","reused":false,
  "agents_on_old_version":[{"agent":"terra/worker","id":"01K8...","version":"0.164.0"}],
  "note":"1 live agent(s) run another version of codex: terra/worker. Each keeps its version and moves to 0.165.0 at its next restart",
  "removed":["0.163.0"]}
@@ -605,7 +602,6 @@ sysadmin or the operator.
 | `from` | The version before; `null` when the package was not installed. |
 | `to` | The version after: the `package.json` version of the new version dir. |
 | `output` | npm's output: stdout, then stderr. |
-| `tested`, `in_range` | The adapter's range, and whether `to` is in it (`null` for the extension). Outside the range, an agent start follows `TERRARIUM_HARNESS_VERSION_POLICY` (§6.2). |
 | `reused` | `true` when the version dir of `to` was complete on disk, so npm did not run (for example a switch back). |
 | `agents_on_old_version` | The live agents on the harness that run another version than `to`, each with the version it runs (`null`: not known). Empty for the extension. |
 | `note` | Only with `agents_on_old_version`: one line that names them and says that each moves to `to` at its next restart. |
@@ -671,19 +667,23 @@ For each harness (not the extension), the policy decides:
 - `auto`: when npm has a release that is newer than the active version (a
   major too), the check installs it into its version dir and switches to
   it, as an update does. Live agents keep their version; each moves to the
-  new version at its next start or wake. The operator gets one mail (§6,
-  from `system`) for each installed update: the harness, the old and the
-  new version, a warning when the new version is outside the adapter's
-  tested range, the changelog link (else the npm versions page), and the
-  rollback command.
+  new version at its next start or wake. With
+  `TERRARIUM_HARNESS_UPDATE_MAIL=on`, the operator gets one mail (§6, from
+  `system`) for each installed update: the harness, the old and the new
+  version, the live agents on the old version, the changelog link (else
+  the npm versions page), the rollback command, and the dashboard link.
+  With `off` (the default), an installed update sends no mail (`mailed:
+  false`); the audit entry, the `harness` event, and the dashboard table
+  show it.
 - `pinned`: no install. The check still asks npm, so `latest` shows the
   newest release.
 
 A failed install keeps the active version. The operator gets one mail for
-each version that failed; the next checks try again with no new mail. A
+each version that failed, with both values of
+`TERRARIUM_HARNESS_UPDATE_MAIL`; the next checks try again with no new mail. A
 check skips a harness while a manual update runs. Each install, done or
 failed, writes the audit entry `harness.auto_update` (actor `system`;
-`detail`: `package`, `from`, `to`, `latest`, `ok`, `detail`, `in_range`),
+`detail`: `package`, `from`, `to`, `latest`, `ok`, `detail`),
 and a done one the event `harness` with `change: "auto_updated"`.
 
 The policy is in the state dir (the table `harness_updates`), so it stays
@@ -692,7 +692,7 @@ fresh install only.
 
 | Endpoint | Body | Answer |
 |---|---|---|
-| `POST /api/harnesses/check` | none | `200` `{"checked_at", "results": [{harness, result, detail, from?, to?, latest, in_range?, mailed}]}`: one check now, as the task runs it. `409 conflict` while a check runs. |
+| `POST /api/harnesses/check` | none | `200` `{"checked_at", "results": [{harness, result, detail, from?, to?, latest, mailed}]}`: one check now, as the task runs it. `detail` of an install is `<from> -> <to>`. `mailed` is `true` when the check sent a mail. `409 conflict` while a check runs. |
 | `POST /api/harnesses/{name}/pin` | none, or `{"version"?}` | `200` `{harness, policy, pinned_version, from, to, output?, agents_on_old_version, note?, removed?}` |
 | `POST /api/harnesses/{name}/unpin` | none | `200` the same object, with `policy: "auto"` and `pinned_version: null` |
 
@@ -2002,13 +2002,8 @@ default.
 - `start` of an agent whose harness adapter is not registered, or whose
   prompt template or harness home is missing, gets `422 invalid` with the
   reason.
-- At each launch (`start`, `restart`, a restart by the policy, a relaunch
-  after a daemon start), the daemon compares the installed harness version
-  with the adapter's tested range (§4, `GET /api/harnesses`). Outside it,
-  with `TERRARIUM_HARNESS_VERSION_POLICY=warn` (the default), the agent
-  starts, and a `warning` event names the version and the range. With
-  `refuse`, the start gets `422 invalid` with the same text. A version that
-  cannot be read never refuses a start.
+- The daemon does not check the installed harness version at a launch.
+  Any version starts, with no `warning` event (§4, `GET /api/harnesses`).
 - `start` of an agent whose subscription does not exist, or whose harness
   is not in the subscription's `harnesses` (PLAN §16, policy hooks), gets
   `422 invalid` with the reason. pi uses API keys only: a `pi` agent on a
@@ -3264,7 +3259,7 @@ Kinds:
 | `lease` | `{change, target, lease_id, expires_at, exclusive, state}`. `change` is `granted`, `extended`, or `ended` (a revoke or the expiry). The `agent` is the lease holder. The supervisor types a pointer from it (§17.7). |
 | `target` | `{change, target, ...}`. `change` is `reconciled` (`from`, `state`, `snapshots_cleared`): a `status` found the target other than the store said. `snapshots_dropped` (`snapshots_dropped`): a snapshot list found that the host lost stored names. `snapshot_deleted` (`snapshot`, `scope`, `machines`, `agent`?): a snapshot delete (§17.3). |
 | `schedule` | `{change, schedule, name, project, run?, status?, trigger?}`. `change` is `created`, `updated`, `deleted`, `enabled`, `disabled`, `run_started`, or `run_finished`. `schedule` is the schedule ULID. A run event has `run`, `status`, and `trigger` (§19). |
-| `harness` | `{change, harness, package, from, to, forced}`. `change` is `updated`: an update in the tools dir (§4, `POST /api/harnesses/{name}/update`); `auto_updated`: an install of the auto-update check (with `in_range`); `pinned` or `unpinned`: a pin or an unpin (§4, "Auto-update and pins"; `unpinned` has `was` in place of `from` and `to`). |
+| `harness` | `{change, harness, package, from, to, forced}`. `change` is `updated`: an update in the tools dir (§4, `POST /api/harnesses/{name}/update`); `auto_updated`: an install of the auto-update check; `pinned` or `unpinned`: a pin or an unpin (§4, "Auto-update and pins"; `unpinned` has `was` in place of `from` and `to`). |
 | `host.connected`, `host.disconnected` | `{host, host_id, ...}`: `version`, `os`, `arch`, `capabilities`, `summary`, `resumed` (sessions taken back), `reason`. See §17. |
 | `event_source` | `{change, source, name, key, kind, enabled}` after a change of an event source (§20). |
 | `ci.run.*`, `ci.job.failed`, `git.push`, `pr.*`, `ext.*` | A webhook of an event source (§20.4), or `POST /api/events` (§20.5). The actor is `source:<project>/<name>`, or the caller of `POST /api/events`. |

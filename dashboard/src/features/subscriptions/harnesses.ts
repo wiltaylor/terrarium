@@ -1,8 +1,7 @@
 // The "Harness versions" table of the Subscriptions page (GET /api/harnesses
 // ?latest=true, docs/api.md §4). harnesses.toml gives the version of the first
-// install; the daemon compares the installed version with the adapter's tested
-// range at every agent start, and reads the latest release of each package on
-// npm. An update runs npm in the container (POST /api/harnesses/{name}/update)
+// install; the daemon reads the installed version of each harness, and the
+// latest release of each package on npm. An update runs npm in the container (POST /api/harnesses/{name}/update)
 // into a new version dir and switches to it. Running agents keep their version
 // until their next restart; the table names them.
 
@@ -11,36 +10,26 @@ import { harnessUpdateKind } from "../../lib/harness-update";
 import type { HarnessAgent, HarnessCheckItem, HarnessPinResult, HarnessReport, HarnessUpdateResult, HarnessVersion } from "../../api/types";
 
 /** The status chip of one row. */
-export type HarnessStatus = "unsupported" | "update available (major)" | "update available" | "latest" | "in range" | "unknown";
+export type HarnessStatus = "update available (major)" | "update available" | "latest" | "installed" | "unknown";
 
 /**
  * The chip of one row. In order:
- * - `unsupported`: the installed version is outside the tested range (`in_range` false);
  * - `update available (major)` / `update available` / `latest`: from `update` (pin against npm);
- * - npm did not answer: `in range` when the installed version is in the range, else `unknown`.
+ * - npm did not answer: `installed` when the installed version is known, else `unknown`.
  */
 export function harnessStatus(h: HarnessVersion): { status: HarnessStatus; cls: string; title: string } {
-  if (h.in_range === false)
-    return {
-      status: "unsupported",
-      cls: "bad",
-      title: `${h.installed} is outside the tested range ${h.tested}. Update it here, or run just harness::update ${h.harness}.`,
-    };
   const latest = h.latest?.version;
   if (h.update === "major")
     return { status: "update available (major)", cls: "warn", title: `${current(h)} -> ${latest} is a major bump: hooks and flags may have changed.` };
   if (h.update === "minor") return { status: "update available", cls: "info", title: `${current(h)} -> ${latest} on npm.` };
   if (h.update === "none") return { status: "latest", cls: "ok", title: `${current(h)} is the latest release on npm.` };
   const why = h.latest_error ? `The latest release is not known: ${h.latest_error}` : "The latest release is not known.";
-  if (h.in_range === true) return { status: "in range", cls: "ok", title: `${h.installed} is in ${h.tested}. ${why}` };
+  if (h.installed) return { status: "installed", cls: "ok", title: `${h.installed} is installed. ${why}` };
   return { status: "unknown", cls: "warn", title: h.error ?? "The daemon could not read the version." };
 }
 
-/** Does the installed version differ from the pin (in range or not)? */
+/** Does the installed version differ from the pin? */
 export const offPin = (h: HarnessVersion) => h.installed !== null && h.installed !== h.pinned;
-
-/** The harnesses outside their range. */
-export const outOfRange = (r: HarnessReport | undefined) => (r?.harnesses ?? []).filter((h) => h.in_range === false);
 
 /** The harnesses with a newer release on npm. */
 export const withUpdate = (r: HarnessReport | undefined) => (r?.harnesses ?? []).filter((h) => h.update === "minor" || h.update === "major");
@@ -97,13 +86,6 @@ export function updateFailure(e: unknown): UpdateFailure {
 /** `2026-10-25T09:30:00Z` as `2026-10-25`. */
 export const publishedDay = (at: string | null | undefined) => (at ? at.slice(0, 10) : null);
 
-/** The line under the table: what a start does outside the range. */
-export function policyNote(r: HarnessReport): string {
-  return r.policy === "refuse"
-    ? "An agent start on a harness outside its tested range is refused (TERRARIUM_HARNESS_VERSION_POLICY=refuse)."
-    : "An agent start on a harness outside its tested range goes ahead with a warning event (TERRARIUM_HARNESS_VERSION_POLICY=warn).";
-}
-
 // ----- auto-update and pins (docs/api.md §4, "Auto-update and pins") -----
 
 /** The policy chip of one row: `auto`, or `pinned <version>`. */
@@ -134,13 +116,6 @@ export function lastCheckLine(h: HarnessVersion): string | null {
   if (!a?.checked_at) return null;
   const when = a.checked_at.slice(0, 16).replace("T", " ");
   return `${when} · ${a.result ?? "?"}${a.detail ? `: ${a.detail}` : ""}`;
-}
-
-/** The warning of a row outside its tested range, with the way back. Null in the range. */
-export function rangeWarning(h: HarnessVersion): string | null {
-  if (h.in_range !== false || !h.installed) return null;
-  const back = rollbackTarget(h);
-  return `${h.installed} is outside the tested range ${h.tested}: hooks and flags can be different.${back ? ` If agents break, roll back to ${back} and pin.` : ""}`;
 }
 
 /** The line about the background check: the schedule and the next check. */

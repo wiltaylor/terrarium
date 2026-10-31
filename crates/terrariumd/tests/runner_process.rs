@@ -19,7 +19,7 @@ use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
 use hyper::{Method, Request};
 use hyper_util::rt::TokioIo;
-use semver::{Version, VersionReq};
+use semver::Version;
 use serde_json::{Value, json};
 use terrarium_core::protocol::{HostCapabilities, ToolCapability};
 use terrarium_core::{Adapter, Agent, AgentId, Event, HarnessId, HarnessSessionId, HookPayload};
@@ -90,9 +90,6 @@ struct FakeLaunch {
 impl Adapter for FakeLaunch {
     fn id(&self) -> HarnessId {
         HarnessId::Claude
-    }
-    fn tested_version(&self) -> VersionReq {
-        VersionReq::STAR
     }
     fn detect_version(&self) -> terrarium_core::Result<Version> {
         Ok(Version::new(1, 0, 0))

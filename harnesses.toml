@@ -1,5 +1,5 @@
-# The harness pins: the versions of the first install, and the ranges the
-# adapters accept (docs/CONVENTIONS.md, docs/getting-started.md §7).
+# The harness pins: the versions of the first install (docs/CONVENTIONS.md,
+# docs/getting-started.md §7).
 #
 # The image installs no harness. These readers take their values from here:
 #
@@ -13,23 +13,22 @@
 #   (scripts/harness-versions.py check).
 # - the adapters: crates/terrarium-core/build.rs turns this file into
 #   `terrarium_core::harnesses`, and each adapter's `flags.rs` takes
-#   `verified` (the pin) and `tested` (the range) from there. The build
-#   fails when `tested` does not match `version`.
-# - the compatibility suite and the daemon's start-time guard: both compare
-#   the installed version with the adapter's `tested` range.
+#   `verified` (the pin) from there.
+#
+# Terrarium does not keep a range of supported versions: the harnesses
+# release too often. Any installed version can start an agent. The
+# compatibility suite (`just ci::compat`, docs/compat-suite.md) is the way
+# to test a new version.
 #
 # `just harness::update <name> [version]` updates the harness in place in
 # the running container (no image build). Add --pin to also write the new
-# version here (and widen `tested` where it is safe) and a row in
-# docs/compat.md "Version history", so a fresh install gets it. A new
-# `tested` range takes effect at the next image build (`just up`). To roll
-# back, run `just harness::update <name> <old version>`.
+# version here and a row in docs/compat.md "Version history", so a fresh
+# install gets it. To roll back, run
+# `just harness::update <name> <old version>`.
 #
 # Keys of a [harness.<name>] table:
 #   package  the npm package
 #   version  the pinned version, of the first install
-#   tested   the semver range the adapter accepts (Rust `semver::VersionReq`
-#            syntax: comma-separated `>=`, `>`, `<`, `<=`, `=`, `^`, `~`)
 #   binary   the command on PATH
 
 [node]
@@ -40,27 +39,22 @@ image = "node:22.23.4-trixie-slim"
 [harness.claude]
 package = "@anthropic-ai/claude-code"
 version = "2.1.310"
-tested = ">=2.1.310, <2.2.0"
 binary = "claude"
 
 [harness.codex]
 package = "@openai/codex"
 version = "0.164.0"
-tested = ">=0.164.0, <0.165.0"
 binary = "codex"
 
 [harness.copilot]
-# Copilot ships patch releases often; the range accepts later 1.0 patches.
 package = "@github/copilot"
 version = "1.0.103"
-tested = ">=1.0.103, <1.1.0"
 binary = "copilot"
 
 [harness.pi]
 # pi moved from @mariozechner/pi-coding-agent (last 0.73.1) to this package.
 package = "@earendil-works/pi-coding-agent"
 version = "1.4.0"
-tested = ">=1.4.0, <1.5.0"
 binary = "pi"
 
 # npm packages that are not harnesses. `for` names the harness that uses it.

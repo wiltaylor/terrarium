@@ -5,8 +5,8 @@
 //! and sandbox mode `none`, on the operator's real harness homes. One
 //! scenario per harness:
 //!
-//! 1. `version`: the installed version is in the adapter's tested range;
-//!    `auth`: the harness is logged in (else the rest is skipped).
+//! 1. `version`: the installed version (any version; the suite is the way
+//!    to test a new release); `auth`: the harness is logged in (else the rest is skipped).
 //! 2. `fresh_start`: materialize, launch, spawn, and reach `idle` with no
 //!    dialog within 30 s.
 //! 3. `turn_with_hooks`: one turn, the hooks, the session ID, the payload
@@ -21,7 +21,7 @@
 //! At most [`scenario::MAX_TURNS`] model turns per harness per run. The
 //! dry run (`TERRARIUM_COMPAT_DRY_RUN=1`, and the test that is not
 //! ignored) builds every launch spec, materializes into a temp home, and
-//! checks the versions; it starts no harness. See `docs/compat-suite.md`.
+//! reads the versions; it starts no harness. See `docs/compat-suite.md`.
 
 pub mod harness;
 pub mod leftovers;

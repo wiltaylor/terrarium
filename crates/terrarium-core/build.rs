@@ -2,10 +2,10 @@
 //!
 //! The file is the one source of truth for the harness pins: the first
 //! install into the tools dir uses these versions (`terrariumd harness
-//! install`), and the adapters take their `verified` and `tested` values from the consts
+//! install`), and the adapters take their `verified` value from the consts
 //! that this script writes. The build fails when the file is missing, has
-//! a harness that Terrarium does not know, or has a `tested` range that
-//! does not match its `version`.
+//! a harness that Terrarium does not know, or has a version that is not
+//! semver.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -35,7 +35,6 @@ struct Node {
 struct Harness {
     package: String,
     version: String,
-    tested: String,
     binary: String,
 }
 
@@ -73,16 +72,8 @@ fn main() {
         let Some(h) = file.harness.get(name) else {
             fail(format!("no [harness.{name}] table"));
         };
-        let v = semver::Version::parse(&h.version)
+        semver::Version::parse(&h.version)
             .unwrap_or_else(|e| fail(format!("{name}: version `{}`: {e}", h.version)));
-        let req = semver::VersionReq::parse(&h.tested)
-            .unwrap_or_else(|e| fail(format!("{name}: tested `{}`: {e}", h.tested)));
-        if !req.matches(&v) {
-            fail(format!(
-                "{name}: version {} is not in the tested range `{}`",
-                h.version, h.tested
-            ));
-        }
     }
     for (name, e) in &file.extension {
         semver::Version::parse(&e.version)
@@ -105,11 +96,10 @@ fn main() {
         let h = &file.harness[name];
         let _ = writeln!(
             out,
-            "    HarnessPin {{ harness: HarnessId::{}, package: {:?}, version: {:?}, tested: {:?}, binary: {:?} }},",
+            "    HarnessPin {{ harness: HarnessId::{}, package: {:?}, version: {:?}, binary: {:?} }},",
             variant(name),
             h.package,
             h.version,
-            h.tested,
             h.binary
         );
     }
@@ -134,7 +124,6 @@ fn main() {
         let _ = writeln!(out, "pub mod {name} {{");
         let _ = writeln!(out, "    pub const PACKAGE: &str = {:?};", h.package);
         let _ = writeln!(out, "    pub const VERSION: &str = {:?};", h.version);
-        let _ = writeln!(out, "    pub const TESTED: &str = {:?};", h.tested);
         let _ = writeln!(out, "    pub const BINARY: &str = {:?};", h.binary);
         let _ = writeln!(out, "}}");
     }

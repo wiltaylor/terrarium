@@ -455,8 +455,10 @@ The "Harness versions" table of Settings, Subscriptions
 - **Updates column.** The policy chip (`policyChip`): `auto`, or
   `pinned <version>`. Under it, the last check (`lastCheckLine`) and the
   changelog link.
-- **Status column.** A row outside its tested range has a red warning
-  with the way back (`rangeWarning`).
+- **Status column.** The chip comes from npm (`harnessStatus`): `latest`,
+  `update available`, or `update available (major)`. When npm does not
+  answer, the chip is `installed`. There is no tested range and no range
+  warning.
 - **Buttons.** "Roll back and pin" (with an inline confirm) when the
   previous version is older than the active one (`rollbackTarget`; `POST
   .../pin` with no version). "Pin current" for an `auto` row (`POST
@@ -465,9 +467,9 @@ The "Harness versions" table of Settings, Subscriptions
   shows one line for each result (`pinLine`, `checkLine`).
 - **Under the table.** The schedule and the next check (`scheduleNote`).
 - **Mock.** claude is pinned to 2.1.310. The auto-update moved pi to 1.5.1,
-  outside its tested range, so pi has "Roll back and pin" to 1.4.0. Check
-  now installs codex 0.165.0 (outside its range) and copilot 1.0.110, and
-  sends one Inbox mail for each, as the daemon does. The mock GC keeps the
+  so pi has "Roll back and pin" to 1.4.0. Check now installs codex 0.165.0
+  and copilot 1.0.110. It sends no Inbox mail, as the daemon does with
+  `TERRARIUM_HARNESS_UPDATE_MAIL=off` (the default). The mock GC keeps the
   previous and the pinned version and the newest two under the active one.
 
 ## Quota alerts and holds

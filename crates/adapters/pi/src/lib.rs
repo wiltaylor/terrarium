@@ -33,7 +33,7 @@ pub mod usage;
 
 use std::path::{Path, PathBuf};
 
-use semver::{Version, VersionReq};
+use semver::Version;
 use terrarium_core::adapter::{Screen, run_version};
 use terrarium_core::config::SubscriptionDef;
 use terrarium_core::{
@@ -44,10 +44,6 @@ use terrarium_core::{
 pub use error::PiError;
 pub use flags::{PI_PINNED, PiFlags};
 pub use provider::{provider_for, refusal, required_env, start_refusal};
-
-/// The pi versions this adapter accepts. Only [`PiFlags::verified`]
-/// (the pin in `harnesses.toml`) was measured.
-pub const TESTED: &str = PI_PINNED.tested;
 
 /// How the rendered prompt reaches pi.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -195,10 +191,6 @@ impl Adapter for PiAdapter {
         HarnessId::Pi
     }
 
-    fn tested_version(&self) -> VersionReq {
-        VersionReq::parse(self.options.flags.tested).unwrap_or(VersionReq::STAR)
-    }
-
     fn detect_version(&self) -> Result<Version> {
         run_version(&self.options.program)
     }
@@ -287,17 +279,11 @@ mod tests {
     }
 
     #[test]
-    fn tested_range_covers_the_verified_version() {
+    fn the_verified_version_is_the_pin() {
         let a = PiAdapter::default();
-        let req = a.tested_version();
-        assert!(req.matches(&Version::parse(PI_PINNED.verified).expect("v")));
-        // The pin and the range come from harnesses.toml.
+        // The pin comes from harnesses.toml.
         assert_eq!(PI_PINNED.verified, terrarium_core::harnesses::pi::VERSION);
-        assert_eq!(PI_PINNED.tested, terrarium_core::harnesses::pi::TESTED);
-        assert_eq!(
-            req,
-            VersionReq::parse(terrarium_core::harnesses::pi::TESTED).expect("req")
-        );
+        assert!(Version::parse(PI_PINNED.verified).is_ok());
         assert_eq!(a.id(), HarnessId::Pi);
     }
 
@@ -424,7 +410,7 @@ mod tests {
     fn smoke_pi_version_and_help() {
         let a = PiAdapter::default();
         let v = a.detect_version().expect("pi --version");
-        assert!(a.tested_version().matches(&v), "{v}");
+        assert!(!v.to_string().is_empty());
         let out = std::process::Command::new("pi")
             .arg("--help")
             .output()

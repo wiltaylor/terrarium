@@ -28,7 +28,9 @@ fn the_env_reaches_the_routers() {
         .env("TERRARIUM_WS_QUERY_TOKEN", "1")
         .env("TERRARIUM_SESSION_TTL", "30m")
         .env("TERRARIUM_CLI_SESSION_TTL", "2d")
+        // Removed: the daemon ignores it, and the start does not fail.
         .env("TERRARIUM_HARNESS_VERSION_POLICY", "refuse")
+        .env("TERRARIUM_HARNESS_UPDATE_MAIL", "on")
         .output()
         .unwrap();
     let text = format!(
@@ -73,8 +75,8 @@ async fn child_reads_the_env() {
     // `TERRARIUM_ARTIFACT_LISTEN=` (empty): no listener of its own.
     assert_eq!(s.artifact_listen(), None);
     assert_eq!(
-        s.harness_version_policy,
-        terrariumd::harness_versions::VersionPolicy::Refuse
+        s.harness_update_mail,
+        terrariumd::harness_auto_update::UpdateMail::On
     );
 
     let mut td = TestDaemon::start().await;
@@ -168,20 +170,23 @@ async fn child_reads_the_env() {
     assert_ne!(r.status(), StatusCode::UNAUTHORIZED);
 }
 
-/// Without the env var, the harness version policy is `warn`.
+/// Without the env var, an installed harness update sends no mail.
 #[test]
-fn the_harness_version_policy_defaults_to_warn() {
-    if std::env::var(CHILD).is_ok() || std::env::var("TERRARIUM_HARNESS_VERSION_POLICY").is_ok() {
+fn the_harness_update_mail_defaults_to_off() {
+    if std::env::var(CHILD).is_ok() || std::env::var("TERRARIUM_HARNESS_UPDATE_MAIL").is_ok() {
         return;
     }
     let s = Settings::try_parse_from(["terrariumd"]).unwrap();
     assert_eq!(
-        s.harness_version_policy,
-        terrariumd::harness_versions::VersionPolicy::Warn
+        s.harness_update_mail,
+        terrariumd::harness_auto_update::UpdateMail::Off
     );
-    let s = Settings::try_parse_from(["terrariumd", "--harness-version-policy", "refuse"]).unwrap();
+    let s = Settings::try_parse_from(["terrariumd", "--harness-update-mail", "on"]).unwrap();
     assert_eq!(
-        s.harness_version_policy,
-        terrariumd::harness_versions::VersionPolicy::Refuse
+        s.harness_update_mail,
+        terrariumd::harness_auto_update::UpdateMail::On
     );
+    // The removed flag is an error on the command line; the env var is
+    // ignored (`the_env_reaches_the_routers`).
+    assert!(Settings::try_parse_from(["terrariumd", "--harness-version-policy", "warn"]).is_err());
 }

@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use semver::{Version, VersionReq};
+use semver::Version;
 use terrarium_adapter_claude::{ClaudeAdapter, ClaudeOptions};
 use terrarium_adapter_codex::{CodexAdapter, CodexOptions};
 use terrarium_adapter_copilot::{CopilotAdapter, CopilotOptions};
@@ -68,9 +68,6 @@ struct FakeAdapter {
 impl Adapter for FakeAdapter {
     fn id(&self) -> HarnessId {
         self.harness
-    }
-    fn tested_version(&self) -> VersionReq {
-        VersionReq::STAR
     }
     fn detect_version(&self) -> terrarium_core::Result<Version> {
         Ok(Version::new(0, 0, 0))

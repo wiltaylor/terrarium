@@ -15,14 +15,13 @@ use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
 use hyper::{Method, Request};
 use hyper_util::rt::TokioIo;
-use semver::{Version, VersionReq};
+use semver::Version;
 use serde_json::{Value, json};
 use terrarium_core::{
     Adapter, Agent, AgentId, Event, HarnessId, HarnessSessionId, HookPayload, LaunchSpec,
 };
 use terrarium_runner::DefaultReadyDetector;
 use terrarium_runner::test_support::{RunnerProcessGuard, sweep_stale_runners_once};
-use terrariumd::harness_versions::VersionPolicy;
 use terrariumd::runner_supervisor::{
     AdapterEntry, RestartTuning, RunnerSupervisor, RunnerSupervisorConfig, RunnerTuning,
 };
@@ -53,8 +52,6 @@ struct FakeAdapter {
     exit_keys: Mutex<Vec<u8>>,
     /// `exit_key_pause`: the pause before the CR of the exit keys.
     exit_pause: Mutex<Duration>,
-    /// `tested_version`. `None`: any version. The fake reports 1.0.0.
-    tested: Mutex<Option<VersionReq>>,
 }
 
 impl FakeAdapter {
@@ -69,13 +66,6 @@ impl FakeAdapter {
 impl Adapter for FakeAdapter {
     fn id(&self) -> HarnessId {
         HarnessId::Claude
-    }
-    fn tested_version(&self) -> VersionReq {
-        self.tested
-            .lock()
-            .unwrap()
-            .clone()
-            .unwrap_or(VersionReq::STAR)
     }
     fn detect_version(&self) -> terrarium_core::Result<Version> {
         Ok(Version::new(1, 0, 0))
@@ -149,10 +139,10 @@ impl Td {
     }
 
     async fn start_with(insecure: bool) -> Self {
-        Self::start_full(insecure, FakeAdapter::default(), VersionPolicy::Warn).await
+        Self::start_full(insecure, FakeAdapter::default()).await
     }
 
-    async fn start_full(insecure: bool, adapter: FakeAdapter, policy: VersionPolicy) -> Self {
+    async fn start_full(insecure: bool, adapter: FakeAdapter) -> Self {
         let dir = tempfile::tempdir().unwrap();
         if let Some(bin) = process_mode_bin() {
             sweep_stale_runners_once(&bin);
@@ -161,7 +151,7 @@ impl Td {
         let mut td = Self {
             _guard: RunnerProcessGuard::new(dir.path().join("run")),
             socket: dir.path().join("api.sock"),
-            sup: Arc::new(supervisor_with(dir.path(), adapter.clone(), policy)),
+            sup: Arc::new(supervisor(dir.path(), adapter.clone())),
             dir,
             adapter,
             daemon: None,
@@ -337,14 +327,6 @@ fn process_mode_bin() -> Option<PathBuf> {
 }
 
 fn supervisor(root: &Path, adapter: Arc<FakeAdapter>) -> RunnerSupervisor {
-    supervisor_with(root, adapter, VersionPolicy::Warn)
-}
-
-fn supervisor_with(
-    root: &Path,
-    adapter: Arc<FakeAdapter>,
-    policy: VersionPolicy,
-) -> RunnerSupervisor {
     let home = root.join("auth/claude");
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(root.join("config")).unwrap();
@@ -392,7 +374,6 @@ fn supervisor_with(
         ..RunnerTuning::default()
     };
     cfg.lead_nudge_interval = LEAD_NUDGE;
-    cfg.version_policy = policy;
     RunnerSupervisor::new(cfg)
 }
 
@@ -567,34 +548,22 @@ async fn unregistered_harness_is_refused() {
     assert_eq!(td.status(&id).await, "stopped");
 }
 
-/// A fake harness whose version (1.0.0) is outside its tested range.
-fn out_of_range_adapter() -> FakeAdapter {
-    let a = FakeAdapter::default();
-    *a.tested.lock().unwrap() = Some(VersionReq::parse(">=2.0.0, <2.1.0").unwrap());
-    a
-}
-
-/// The default policy `warn`: the agent starts, and a `warning` event
-/// names the version and the range. `GET /api/harnesses` shows it.
+/// Any harness version starts: the fake reports 1.0.0, far from the pin,
+/// and the start has no `warning` event. `GET /api/harnesses` shows the
+/// version, with no range and no policy.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_out_of_range_harness_starts_with_a_warning() {
-    let td = Td::start_full(true, out_of_range_adapter(), VersionPolicy::Warn).await;
+async fn any_harness_version_starts_with_no_warning() {
+    let td = Td::start().await;
     let id = td.agent("demo", "old", json!({})).await;
     let (s, b) = td
         .req(Method::POST, &format!("/api/agents/{id}/start"), None, None)
         .await;
     assert_eq!(s, 202, "{b}");
     td.wait_status(&id, "idle").await;
-    let ev = td.wait_events(&id, "warning", |e| !e.is_empty()).await;
-    let msg = ev[0]["data"]["message"].as_str().unwrap();
-    assert!(
-        msg.starts_with("claude 1.0.0 is outside the tested range >=2.0.0, <2.1.0"),
-        "{msg}"
-    );
-    assert!(msg.contains("just harness::update claude"), "{msg}");
+    assert!(td.events(&id, "warning").await.is_empty());
 
     let r = td.get("/api/harnesses").await;
-    assert_eq!(r["policy"], "warn");
+    assert!(r.get("policy").is_none(), "{r}");
     let claude = r["harnesses"]
         .as_array()
         .unwrap()
@@ -603,33 +572,9 @@ async fn an_out_of_range_harness_starts_with_a_warning() {
         .unwrap()
         .clone();
     assert_eq!(claude["installed"], "1.0.0");
-    assert_eq!(claude["tested"], ">=2.0.0, <2.1.0");
-    assert_eq!(claude["in_range"], false);
     assert_eq!(claude["pinned"], terrarium_core::harnesses::claude::VERSION);
-    td.post(&format!("/api/agents/{id}/stop"), None).await;
-}
-
-/// `TERRARIUM_HARNESS_VERSION_POLICY=refuse`: the start is `422 invalid`,
-/// and the agent stays stopped. A harness in its range still starts.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn policy_refuse_refuses_an_out_of_range_harness() {
-    let td = Td::start_full(true, out_of_range_adapter(), VersionPolicy::Refuse).await;
-    let id = td.agent("demo", "old", json!({})).await;
-    let (s, b) = td
-        .req(Method::POST, &format!("/api/agents/{id}/start"), None, None)
-        .await;
-    assert_eq!(s, 422, "{b}");
-    assert_eq!(b["error"]["code"], "invalid");
-    let msg = b["error"]["message"].as_str().unwrap();
-    assert!(msg.contains("outside the tested range"), "{msg}");
-    assert!(msg.contains("TERRARIUM_HARNESS_VERSION_POLICY"), "{msg}");
-    assert_eq!(td.status(&id).await, "stopped");
-    assert_eq!(td.get("/api/harnesses").await["policy"], "refuse");
-
-    *td.adapter.tested.lock().unwrap() = None;
-    td.post(&format!("/api/agents/{id}/start"), None).await;
-    td.wait_status(&id, "idle").await;
-    assert!(td.events(&id, "warning").await.is_empty());
+    assert!(claude.get("tested").is_none(), "{claude}");
+    assert!(claude.get("in_range").is_none(), "{claude}");
     td.post(&format!("/api/agents/{id}/stop"), None).await;
 }
 

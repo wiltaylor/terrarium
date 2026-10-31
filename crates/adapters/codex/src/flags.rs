@@ -1,7 +1,7 @@
 //! The command-line surface of the pinned Codex version, as data.
 //!
 //! All version-specific names live in one table, [`CODEX_PINNED`]. The pin
-//! and the range come from `harnesses.toml`, so the name has no version in
+//! comes from `harnesses.toml`, so the name has no version in
 //! it. When a new Codex release changes a flag or a config key, change the
 //! table (or add a second one and pick it in [`crate::CodexOptions`]).
 //! Every entry was checked by the Phase 0 spikes (`docs/compat.md`,
@@ -14,9 +14,6 @@ pub struct CodexFlags {
     /// The pinned version, which the image installs. It comes from
     /// `harnesses.toml` at compile time (`terrarium_core::harnesses`).
     pub verified: &'static str,
-    /// The version range that the adapter accepts (a `semver::VersionReq`),
-    /// from `harnesses.toml`. `just harness::update` widens it.
-    pub tested: &'static str,
     /// The subcommand that continues a session: `codex resume <id>`. The
     /// session ID stays the same. A missing ID exits at once with
     /// `ERROR: No saved session found with ID <id>.`
@@ -90,7 +87,6 @@ pub struct CodexFlags {
 /// again on 0.164.0 (`docs/compat.md`).
 pub const CODEX_PINNED: CodexFlags = CodexFlags {
     verified: terrarium_core::harnesses::codex::VERSION,
-    tested: terrarium_core::harnesses::codex::TESTED,
     resume: "resume",
     no_daemon: "--no-daemon",
     yolo: "--dangerously-bypass-approvals-and-sandbox",
@@ -268,8 +264,6 @@ mod tests {
         assert_eq!(CODEX_PINNED.hook_events.len(), 11);
         assert!(!CODEX_PINNED.hook_events.contains(&"Notification"));
         assert!(!CODEX_PINNED.hook_events.contains(&"PreModelRequest"));
-        let v = semver::Version::parse(CODEX_PINNED.verified).expect("v");
-        let req = semver::VersionReq::parse(CODEX_PINNED.tested).expect("req");
-        assert!(req.matches(&v));
+        semver::Version::parse(CODEX_PINNED.verified).expect("v");
     }
 }

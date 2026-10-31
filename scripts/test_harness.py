@@ -1,5 +1,5 @@
-"""Tests for harness.py: semver ranges, the update plan (range widening and the
-major guard), the file edits, and the parsing for `harness::check`.
+"""Tests for harness.py: semver versions and bump kinds, the update plan, the
+file edits, and the parsing for `harness::check`.
 Run: uv run python -m unittest discover -s scripts -p 'test_harness*.py'"""
 
 import contextlib
@@ -30,18 +30,6 @@ def fixture_cfg():
 
 
 class Semver(unittest.TestCase):
-    def test_ranges_match_like_rust_semver(self):
-        r = ">=2.1.310, <2.2.0"
-        self.assertTrue(h.matches(V("2.1.310"), r))
-        self.assertTrue(h.matches(V("2.1.999"), r))
-        self.assertFalse(h.matches(V("2.1.309"), r))
-        self.assertFalse(h.matches(V("2.2.0"), r))
-        self.assertFalse(h.matches(V("2.1.311-beta.1"), r))
-        self.assertTrue(h.matches(V("1.4.0"), "^1.2"))
-        self.assertFalse(h.matches(V("0.86.0"), "^0.85.1"))
-        self.assertTrue(h.matches(V("0.85.9"), "~0.85.1"))
-        self.assertTrue(h.matches(V("1.0.0"), "=1.0.0"))
-
     def test_bump_kinds_follow_the_compatibility_rule(self):
         self.assertEqual(h.bump_kind(V("2.1.310"), V("2.1.320")), "patch")
         self.assertEqual(h.bump_kind(V("2.1.310"), V("2.2.0")), "minor")
@@ -61,75 +49,52 @@ class Semver(unittest.TestCase):
 
 
 class Plan(unittest.TestCase):
-    def test_a_patch_inside_the_range_keeps_the_range(self):
-        p = h.make_plan(fixture_cfg(), "claude", "2.1.320", False)
-        self.assertEqual((p.bump, p.tested_new), ("patch", ">=2.1.310, <2.2.0"))
-        self.assertEqual(p.warnings, [])
+    def test_a_patch_and_a_minor_bump(self):
+        p = h.make_plan(fixture_cfg(), "claude", "2.1.320")
+        self.assertEqual((p.old, p.new, p.bump, p.pinned), ("2.1.310", "2.1.320", "patch", "2.1.310"))
+        self.assertEqual(h.make_plan(fixture_cfg(), "claude", "2.2.4").bump, "minor")
 
-    def test_a_minor_bump_widens_only_the_upper_bound(self):
-        p = h.make_plan(fixture_cfg(), "claude", "2.2.4", False)
-        self.assertEqual(p.bump, "minor")
-        self.assertEqual(p.tested_new, ">=2.1.310, <2.3.0")
-        self.assertTrue(h.matches(V("2.2.4"), p.tested_new))
-        self.assertTrue(h.matches(V("2.1.310"), p.tested_new))
+    def test_a_major_bump_is_allowed_without_allow_major(self):
+        p = h.make_plan(fixture_cfg(), "codex", "0.164.0")
+        self.assertEqual(p.bump, "major")
+        self.assertEqual(h.make_plan(fixture_cfg(), "claude", "3.1.0").bump, "major")
 
-    def test_a_major_bump_needs_allow_major(self):
-        with self.assertRaises(h.PlanError) as e:
-            h.make_plan(fixture_cfg(), "claude", "3.0.0", False)
-        self.assertIn("--allow-major", str(e.exception))
-        with self.assertRaises(h.PlanError):
-            h.make_plan(fixture_cfg(), "codex", "0.164.0", False)
+    def test_a_downgrade_is_allowed(self):
+        p = h.make_plan(fixture_cfg(), "claude", "2.1.300")
+        self.assertEqual(p.bump, "downgrade")
 
-    def test_the_major_refusal_says_what_to_run(self):
-        with self.assertRaises(h.PlanError) as e:
-            h.make_plan(fixture_cfg(), "codex", "0.164.0", False)
-        msg = str(e.exception)
-        self.assertIn("codex 0.160.0 -> 0.164.0 is a major bump", msg)
-        self.assertIn("just harness::update codex --allow-major", msg)
-        self.assertIn("just harness::latest", msg)
-
-    def test_an_allowed_major_bump_resets_the_range_and_warns(self):
-        p = h.make_plan(fixture_cfg(), "codex", "0.164.0", True)
-        self.assertEqual((p.bump, p.tested_new), ("major", ">=0.164.0, <0.165.0"))
-        self.assertEqual(len(p.warnings), 1)
-        self.assertIn("hooks, flags", p.warnings[0])
-        p = h.make_plan(fixture_cfg(), "claude", "3.1.0", True)
-        self.assertEqual(p.tested_new, ">=3.1.0, <3.2.0")
-
-    def test_a_downgrade_below_the_range_is_refused(self):
-        with self.assertRaises(h.PlanError) as e:
-            h.make_plan(fixture_cfg(), "claude", "2.1.300", False)
-        self.assertIn("edit harnesses.toml", str(e.exception))
-
-    def test_an_extension_has_no_range(self):
-        p = h.make_plan(fixture_cfg(), "copilot-prompt", "0.1.3", False)
-        self.assertEqual((p.bump, p.tested_old, p.tested_new), ("patch", None, None))
+    def test_an_extension_plans_like_a_harness(self):
+        p = h.make_plan(fixture_cfg(), "copilot-prompt", "0.1.3")
+        self.assertEqual((p.kind, p.bump), ("extension", "patch"))
 
     def test_unknown_names_and_pre_releases_are_refused(self):
         with self.assertRaises(h.PlanError):
-            h.make_plan(fixture_cfg(), "gemini", "1.0.0", False)
+            h.make_plan(fixture_cfg(), "gemini", "1.0.0")
         with self.assertRaises(h.PlanError):
-            h.make_plan(fixture_cfg(), "claude", "2.1.311-beta.1", False)
+            h.make_plan(fixture_cfg(), "claude", "2.1.311-beta.1")
+
+    def test_an_old_toml_with_tested_keys_still_loads(self):
+        text = (FIX / "harnesses.toml").read_text().replace(
+            'version = "2.1.310"\n', 'version = "2.1.310"\ntested = ">=2.1.310, <2.2.0"\n'
+        )
+        cfg = h.hv.validate(tomllib.loads(text))
+        self.assertEqual(h.make_plan(cfg, "claude", "3.0.0").bump, "major")
 
 
 class Edits(unittest.TestCase):
     def test_set_table_values_touches_only_the_table(self):
         text = (FIX / "harnesses.toml").read_text()
-        new = h.set_table_values(text, "harness.codex", {"version": "0.164.0", "tested": ">=0.164.0, <0.165.0"})
+        new = h.set_table_values(text, "harness.codex", {"version": "0.164.0"})
         cfg = tomllib.loads(new)
         self.assertEqual(cfg["harness"]["codex"]["version"], "0.164.0")
-        self.assertEqual(cfg["harness"]["codex"]["tested"], ">=0.164.0, <0.165.0")
         self.assertEqual(cfg["harness"]["claude"]["version"], "2.1.310")
-        self.assertIn('tested = ">=0.164.0, <0.165.0" # trailing comment stays', new)
+        self.assertIn('version = "0.164.0" # trailing comment stays', new)
         self.assertIn("# A fixture", new)
 
     def test_history_row_goes_at_the_end_of_the_table(self):
-        p = h.make_plan(fixture_cfg(), "claude", "2.2.4", False)
+        p = h.make_plan(fixture_cfg(), "claude", "2.2.4")
         row = h.compat_row(p, "2026-10-25")
-        self.assertEqual(
-            row,
-            "| 2026-10-25 | claude | 2.1.310 → 2.2.4 | minor | `>=2.1.310, <2.2.0` → `>=2.1.310, <2.3.0` | not run yet |",
-        )
+        self.assertEqual(row, "| 2026-10-25 | claude | 2.1.310 → 2.2.4 | minor | not run yet |")
         new = h.add_history_row((FIX / "compat.md").read_text(), row)
         lines = new.splitlines()
         i = lines.index(row)
@@ -159,48 +124,42 @@ class CheckParsing(unittest.TestCase):
         self.assertIsNone(h.parse_npm_ls("{}", "copilot-custom-system-prompt"))
 
     def test_judge_flags_a_newer_major_version(self):
-        e = {"version": "0.160.0", "tested": ">=0.160.0, <0.161.0"}
-        in_range, status, notes = h.judge(e, "0.160.0", "0.159.0", "0.164.0", True)
-        self.assertEqual((in_range, status), (False, "update available (major)"))
-        self.assertEqual(len(notes), 1)
-        self.assertIn("the host has 0.159.0", notes[0])
+        e = {"version": "0.160.0"}
+        status, notes = h.judge(e, "0.160.0", "0.164.0", True)
+        self.assertEqual((status, notes), ("update available (major)", []))
 
     def test_judge_flags_a_container_that_is_not_on_the_pin(self):
-        e = {"name": "claude", "version": "2.1.310", "tested": ">=2.1.310, <2.2.0"}
-        in_range, status, notes = h.judge(e, "2.1.300", None, "2.1.320", True)
+        e = {"name": "claude", "version": "2.1.310"}
+        status, notes = h.judge(e, "2.1.300", "2.1.320", True)
         # The status compares npm with the container, not with the pin.
-        self.assertEqual((in_range, status), (True, "update available"))
+        self.assertEqual(status, "update available")
         self.assertEqual(
             notes[0],
             "the container has 2.1.300, the pin is 2.1.310 (`just harness::update claude 2.1.310`, or update with `--pin`)",
         )
-        e = {"name": "claude", "version": "2.1.310", "tested": ">=2.1.310, <2.2.0"}
-        self.assertEqual(h.judge(e, "2.1.320", None, "2.1.320", True)[1], "latest")
-        self.assertIn("not found in the container", h.judge(e, None, None, "2.1.320", True)[2][0])
+        self.assertEqual(h.judge(e, "2.1.320", "2.1.320", True)[0], "latest")
+        self.assertIn("not found in the container", h.judge(e, None, "2.1.320", True)[1][0])
 
     def test_judge_status_words(self):
-        e = {"version": "2.1.310", "tested": ">=2.1.310, <2.2.0"}
-        self.assertEqual(h.judge(e, None, None, "2.1.310", False)[1], "latest")
-        # A minor bump outside the range is still on the same major.
-        self.assertEqual(h.judge(e, None, None, "2.2.4", False)[:2], (False, "update available"))
-        self.assertEqual(h.judge(e, None, None, "3.0.0", False)[1], "update available (major)")
-        self.assertEqual(h.judge(e, None, None, None, False)[1], "unknown")
-        ext = {"version": "0.1.2", "tested": None}
-        self.assertEqual(h.judge(ext, None, None, "0.1.3", False)[:2], (None, "update available"))
+        e = {"version": "2.1.310"}
+        self.assertEqual(h.judge(e, None, "2.1.310", False)[0], "latest")
+        self.assertEqual(h.judge(e, None, "2.2.4", False)[0], "update available")
+        self.assertEqual(h.judge(e, None, "3.0.0", False)[0], "update available (major)")
+        self.assertEqual(h.judge(e, None, None, False)[0], "unknown")
 
     def test_table_renders_every_row(self):
-        rows = [h.Row("claude", "harness", "p", "2.1.310", ">=2.1.310, <2.2.0", "2.1.310", None, "2.1.310", "2026-10-23T18:00:00Z", True, "latest")]
+        rows = [h.Row("claude", "harness", "p", "2.1.310", "2.1.310", None, "2.1.310", "2026-10-23T18:00:00Z", "latest")]
         out = h.render_table(rows, True)
-        self.assertIn("HARNESS", out.splitlines()[0])
-        self.assertIn("LATEST IN TESTED RANGE", out.splitlines()[0])
+        self.assertEqual(out.splitlines()[0].split(), ["HARNESS", "PINNED", "CONTAINER", "HOST", "LATEST", "PUBLISHED", "STATUS"])
+        self.assertNotIn("TESTED", out)
         self.assertIn("2026-10-23", out)
         self.assertNotIn("harness::latest", out)
 
     def test_table_footer_names_both_commands(self):
-        rows = [h.Row("codex", "harness", "p", "0.160.0", ">=0.160.0, <0.161.0", None, None, "0.164.0", None, False, "update available (major)")]
+        rows = [h.Row("codex", "harness", "p", "0.160.0", None, None, "0.164.0", None, "update available (major)")]
         out = h.render_table(rows, False)
         self.assertIn("update available (major)", out)
-        self.assertNotIn("outside range", out)
+        self.assertNotIn("range", out)
         self.assertIn("`just harness::latest` updates every harness in place", out)
         self.assertIn("`just harness::update <name>` updates one", out)
         self.assertIn("Neither rebuilds the image", out)
@@ -214,9 +173,8 @@ class Latest(unittest.TestCase):
     def test_the_plan_bumps_each_harness_with_a_newer_release(self):
         items = {i.name: i for i in h.plan_latest(fixture_cfg(), self.NPM)}
         self.assertEqual(items["claude"].status, "minor")
-        self.assertEqual(items["claude"].plan.tested_new, ">=2.1.310, <2.3.0")
         self.assertEqual(items["codex"].status, "major")
-        self.assertEqual(items["codex"].plan.tested_new, ">=0.164.0, <0.165.0")
+        self.assertEqual(items["codex"].plan.new, "0.164.0")
         self.assertEqual(items["copilot-prompt"].status, "latest")
         self.assertIsNone(items["copilot-prompt"].plan)
 
@@ -240,14 +198,14 @@ class Latest(unittest.TestCase):
         lines = out.splitlines()
         self.assertIn("copilot-prompt: latest (0.1.2)", lines)
         self.assertIn("claude (@anthropic-ai/claude-code): 2.1.310 -> 2.2.4 (minor)", lines)
-        self.assertIn("  WARNING: codex 0.160.0 -> 0.164.0 is a major bump: hooks and flags may have changed", lines)
-        self.assertEqual(sum("WARNING" in l for l in lines), 1)
+        self.assertIn("codex (@openai/codex): 0.160.0 -> 0.164.0 (major)", lines)
+        self.assertFalse(any("WARNING" in l for l in lines), lines)
         self.assertIn("dry run: nothing changed", out)
         table = lines[lines.index("plan (dry run: nothing changed):") + 1 :]
-        self.assertEqual(table[0].split(), ["HARNESS", "FROM", "TO", "CHANGE", "TESTED", "RANGE"])
+        self.assertEqual(table[0].split(), ["HARNESS", "FROM", "TO", "CHANGE"])
         self.assertEqual(table[1].split()[:5], ["claude", "2.1.310", "2.2.4", "minor", "bump"])
         self.assertEqual(table[2].split()[:5], ["codex", "0.160.0", "0.164.0", "major", "bump"])
-        self.assertEqual(table[3].split(), ["copilot-prompt", "0.1.2", "0.1.2", "latest", "-"])
+        self.assertEqual(table[3].split(), ["copilot-prompt", "0.1.2", "0.1.2", "latest"])
         self.assertIn("  just ci::compat claude", lines)
         self.assertIn("  just ci::compat codex", lines)
         self.assertNotIn("  just ci::compat copilot", lines)
@@ -263,22 +221,14 @@ class Latest(unittest.TestCase):
 class InstalledPlan(unittest.TestCase):
     def test_the_bump_is_from_the_container_version(self):
         # The container is already on 2.2.0; 2.2.4 is a patch from there.
-        p = h.make_plan(fixture_cfg(), "claude", "2.2.4", False, current="2.2.0")
+        p = h.make_plan(fixture_cfg(), "claude", "2.2.4", current="2.2.0")
         self.assertEqual((p.old, p.pinned, p.bump), ("2.2.0", "2.1.310", "patch"))
-        self.assertEqual(p.tested_new, ">=2.1.310, <2.3.0")
         row = h.compat_row(p, "2026-10-26")
         self.assertIn("| claude | 2.1.310 → 2.2.4 | minor |", row)
 
-    def test_a_major_from_the_container_needs_allow_major(self):
-        with self.assertRaises(h.PlanError) as e:
-            h.make_plan(fixture_cfg(), "claude", "3.0.0", False, current="2.1.400")
-        self.assertIn("claude 2.1.400 -> 3.0.0 is a major bump", str(e.exception))
-
-    def test_without_pin_a_target_outside_the_range_is_a_warning(self):
-        p = h.make_plan(fixture_cfg(), "claude", "2.1.300", False, current="2.1.310", pin=False)
-        self.assertEqual(p.bump, "downgrade")
-        self.assertEqual(p.tested_new, p.tested_old)
-        self.assertTrue(any("outside the tested range" in w for w in p.warnings), p.warnings)
+    def test_a_major_from_the_container_is_allowed(self):
+        p = h.make_plan(fixture_cfg(), "claude", "3.0.0", current="2.1.400")
+        self.assertEqual((p.old, p.bump), ("2.1.400", "major"))
 
 
 class Manifest(unittest.TestCase):
@@ -358,7 +308,7 @@ class Update(unittest.TestCase):
         return rc, out.getvalue(), err.getvalue()
 
     def ok(self, name, frm, to):
-        return 0, {"harness": name, "package": "p", "from": frm, "to": to, "output": "added 1 package", "tested": None, "in_range": True}
+        return 0, {"harness": name, "package": "p", "from": frm, "to": to, "output": "added 1 package"}
 
     def test_update_calls_the_cli_in_the_container(self):
         with FakeContainer({"claude": "2.1.310"}, [self.ok("claude", "2.1.310", "2.1.320")]) as c:
@@ -381,9 +331,17 @@ class Update(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         cfg = tomllib.loads(self.toml.read_text())
         self.assertEqual(cfg["harness"]["claude"]["version"], "2.2.4")
-        self.assertEqual(cfg["harness"]["claude"]["tested"], ">=2.1.310, <2.3.0")
-        self.assertIn("| claude | 2.1.310 → 2.2.4 | minor |", self.md.read_text())
-        self.assertIn("next image build", out)
+        self.assertNotIn("tested", cfg["harness"]["claude"])
+        self.assertIn("| claude | 2.1.310 → 2.2.4 | minor | not run yet |", self.md.read_text())
+        self.assertIn("A fresh install gets the new version", out)
+
+    def test_a_major_bump_needs_no_flag_and_allow_major_is_accepted(self):
+        for extra in ([], ["--allow-major"]):
+            with FakeContainer({"codex": "0.160.0"}, [self.ok("codex", "0.160.0", "1.0.0")]) as c:
+                rc, out, err = self.update("codex", "1.0.0", *extra)
+            self.assertEqual(rc, 0, out + err)
+            self.assertEqual(c.calls, [["admin", "harness", "update", "codex", "--version", "1.0.0"]])
+            self.assertNotIn("WARNING", out)
 
     def test_a_conflict_prints_the_message_and_changes_no_file(self):
         busy = (1, {"error": {"code": "conflict", "message": "another harness update runs now; try again when it ends"}})

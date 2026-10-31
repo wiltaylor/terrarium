@@ -1,10 +1,9 @@
 //! The harness pins from `harnesses.toml` at the repo root, read at compile
 //! time by `build.rs`. The first install into the tools dir uses the same
-//! versions (`terrariumd harness install`), so the adapters, the daemon's
-//! start-time guard, and the compatibility suite agree with a fresh
-//! install. An update in place may move a harness past its pin; the guard
-//! then compares it with `tested`. Change a pin with
-//! `just harness::update <name> --pin`, never here.
+//! versions (`terrariumd harness install`), so the adapters and the
+//! compatibility suite agree with a fresh install. An update in place may
+//! move a harness past its pin; any version can start an agent. Change a
+//! pin with `just harness::update <name> --pin`, never here.
 
 use crate::harness::HarnessId;
 
@@ -16,8 +15,6 @@ pub struct HarnessPin {
     pub package: &'static str,
     /// The pinned version: the one of the first install.
     pub version: &'static str,
-    /// The range the adapter accepts (a `semver::VersionReq`).
-    pub tested: &'static str,
     /// The command on PATH.
     pub binary: &'static str,
 }
@@ -59,12 +56,12 @@ mod tests {
             let t = &tables[p.harness.as_str()];
             assert_eq!(t["package"].as_str(), Some(p.package), "{}", p.harness);
             assert_eq!(t["version"].as_str(), Some(p.version), "{}", p.harness);
-            assert_eq!(t["tested"].as_str(), Some(p.tested), "{}", p.harness);
+            assert!(t.get("tested").is_none(), "{}: no ranges", p.harness);
             assert_eq!(t["binary"].as_str(), Some(p.binary), "{}", p.harness);
             assert_eq!(pin(p.harness), p);
         }
         assert_eq!(claude::VERSION, pin(HarnessId::Claude).version);
-        assert_eq!(codex::TESTED, pin(HarnessId::Codex).tested);
+        assert_eq!(codex::PACKAGE, pin(HarnessId::Codex).package);
         assert_eq!(copilot::PACKAGE, pin(HarnessId::Copilot).package);
         assert_eq!(pi::BINARY, pin(HarnessId::Pi).binary);
         let ext = v["extension"].as_table().expect("[extension]");
@@ -79,17 +76,9 @@ mod tests {
     }
 
     #[test]
-    fn every_pin_is_in_its_range() {
+    fn every_pin_is_semver() {
         for p in PINS {
-            let v = semver::Version::parse(p.version).expect("version");
-            let req = semver::VersionReq::parse(p.tested).expect("tested");
-            assert!(
-                req.matches(&v),
-                "{}: {} not in {}",
-                p.harness,
-                p.version,
-                p.tested
-            );
+            semver::Version::parse(p.version).expect("version");
         }
         assert_eq!(PINS.len(), HarnessId::ALL.len());
     }

@@ -8,7 +8,7 @@ installs no harness: the container installs the pins of harnesses.toml into
 dir, and the daemon switches to it. No command here builds an image.
 
     harness.py check [--json]
-        For each harness (and extension): the pin, the tested range, the
+        For each harness (and extension): the pin, the
         version in the container (the tools manifest), on the host, and the
         latest on npm with its publish date. STATUS compares the container
         version (the pin when the stack is down) with the latest: `latest`,
@@ -18,22 +18,23 @@ dir, and the daemon switches to it. No command here builds an image.
     harness.py update <name> [version] [--allow-major] [--force] [--pin] [--dry-run]
         Update one harness in the container to `version` (default: the latest
         on npm), through the daemon (`npm install -g` into a version dir of
-        the tools volume, then the switch). A major bump from the installed
-        version needs --allow-major. Running agents keep their version until
-        their next restart; the daemon names them. --force installs the
-        version again when its version dir is on disk.
-        --pin also writes the version (and a widened `tested` range) into
-        harnesses.toml and a row into docs/compat.md "Version history", so a
-        fresh install gets the same version. --dry-run prints the plan.
+        the tools volume, then the switch). Any version is allowed: a major
+        bump and a downgrade too. --allow-major is accepted for
+        compatibility and has no effect. Running agents keep their version
+        until their next restart; the daemon names them. --force installs
+        the version again when its version dir is on disk.
+        --pin also writes the version into harnesses.toml and a row into
+        docs/compat.md "Version history", so a fresh install gets the same
+        version. --dry-run prints the plan.
 
     harness.py latest [--dry-run] [--pin] [--force]
         Update every harness (and extension) with a newer npm release to that
-        release, in one pass. A major bump is allowed and prints a warning.
+        release, in one pass. A major bump is allowed.
         It ends with a table of the changes and the `just ci::compat <name>`
         runs that give the live proof.
 
-"Major" follows the semver rule for compatibility, as Cargo does: the first
-non-zero part. So 2.1.x -> 2.2.0 is a minor bump, 2.x -> 3.0.0 is major, and
+"Major" (only a label in the output) follows the semver rule for
+compatibility, as Cargo does: the first non-zero part. So 2.1.x -> 2.2.0 is a minor bump, 2.x -> 3.0.0 is major, and
 for a 0.x version 0.160.0 -> 0.161.0 is major (semver: anything may change in
 0.x), 0.160.0 -> 0.160.1 is a patch.
 """
@@ -112,56 +113,6 @@ def find_version(output: str) -> str | None:
     return m.group(1) if m else None
 
 
-COMP_RE = re.compile(r"^(>=|<=|>|<|=|\^|~)?\s*v?(\d+)(?:\.(\d+))?(?:\.(\d+))?$")
-
-
-def _comparators(req: str) -> list[tuple[str, tuple[int, int, int]]]:
-    """`>=1.2.3, <1.3.0` -> [(">=", (1,2,3)), ("<", (1,3,0))]. Caret and tilde
-    become two comparators, as in Rust's `semver::VersionReq`."""
-    out = []
-    for part in req.split(","):
-        part = part.strip()
-        m = COMP_RE.match(part)
-        if not m:
-            raise ValueError(f"`{part}` in `{req}` is not a comparator this script knows")
-        op = m.group(1) or "^"
-        major = int(m.group(2))
-        minor = int(m.group(3) or 0)
-        patch = int(m.group(4) or 0)
-        lo = (major, minor, patch)
-        if op == "^":
-            if major:
-                hi = (major + 1, 0, 0)
-            elif minor or m.group(4) is None:
-                hi = (0, minor + 1, 0)
-            else:
-                hi = (0, 0, patch + 1)
-            out += [(">=", lo), ("<", hi)]
-        elif op == "~":
-            out += [(">=", lo), ("<", (major, minor + 1, 0))]
-        else:
-            out.append((op, lo))
-    return out
-
-
-def matches(version: Version, req: str) -> bool:
-    """Does `version` satisfy `req`? A pre-release never matches."""
-    if version.pre:
-        return False
-    v = version.core
-    for op, b in _comparators(req):
-        ok = {
-            ">=": v >= b,
-            ">": v > b,
-            "<": v < b,
-            "<=": v <= b,
-            "=": v == b,
-        }[op]
-        if not ok:
-            return False
-    return True
-
-
 def bump_kind(old: Version, new: Version) -> str:
     """`same`, `downgrade`, `patch`, `minor`, or `major` (see the module doc)."""
     if new == old:
@@ -175,36 +126,8 @@ def bump_kind(old: Version, new: Version) -> str:
     return "patch"
 
 
-def upper_for(new: Version) -> str:
-    """The upper bound that keeps a range on the minor line of `new`."""
-    return f"<{new.major}.{new.minor + 1}.0"
-
-
 class PlanError(Exception):
     pass
-
-
-def next_range(tested: str, old: Version, new: Version, kind: str, allow_major: bool) -> str:
-    """The `tested` range after a bump from `old` to `new`."""
-    if kind == "major":
-        if not allow_major:
-            raise PlanError(f"{old} -> {new} is a major bump: hooks and flags may have changed")
-        return f">={new}, {upper_for(new)}"
-    if matches(new, tested):
-        return tested
-    if kind == "downgrade":
-        raise PlanError(
-            f"{new} is below the tested range `{tested}`. To roll back, edit harnesses.toml "
-            "by hand (docs/getting-started.md, \"Updating a harness\")"
-        )
-    parts = [p.strip() for p in tested.split(",")]
-    kept = [p for p in parts if not p.startswith("<")]
-    if len(kept) == len(parts):
-        raise PlanError(f"{new} is outside `{tested}`, which has no upper bound to widen")
-    widened = ", ".join(kept + [upper_for(new)])
-    if not matches(new, widened):
-        raise PlanError(f"{new} is outside `{tested}`, and widening the upper bound gives `{widened}`")
-    return widened
 
 
 # ---------------------------------------------------------------- commands
@@ -336,7 +259,7 @@ def entries(cfg: dict) -> list[dict]:
     for name, h in cfg["harness"].items():
         out.append({"name": name, "kind": "harness", **h})
     for name, e in cfg.get("extension", {}).items():
-        out.append({"name": name, "kind": "extension", "tested": None, **e})
+        out.append({"name": name, "kind": "extension", **e})
     return out
 
 
@@ -346,28 +269,19 @@ class Row:
     kind: str
     package: str
     pinned: str
-    tested: str | None
     container: str | None
     host: str | None
     latest: str | None
     latest_published: str | None
-    latest_in_range: bool | None
     status: str
     notes: list[str] = field(default_factory=list)
 
 
-def judge(entry: dict, container: str | None, host: str | None, latest: str | None, up: bool) -> tuple[bool | None, str, list[str]]:
-    """(latest in range, status word, notes) for one row. The status
-    compares the latest with the container version, else with the pin."""
+def judge(entry: dict, container: str | None, latest: str | None, up: bool) -> tuple[str, list[str]]:
+    """(status word, notes) for one row. The status compares the latest with
+    the container version, else with the pin."""
     notes = []
     pinned = entry["version"]
-    tested = entry.get("tested")
-    in_range = None
-    if latest and tested:
-        try:
-            in_range = matches(parse_version(latest), tested)
-        except ValueError:
-            in_range = None
     if up and container is None:
         notes.append("not found in the container: the entrypoint installs it at the next start (`just docker::restart`)")
     elif container and container != pinned:
@@ -375,12 +289,6 @@ def judge(entry: dict, container: str | None, host: str | None, latest: str | No
             f"the container has {container}, the pin is {pinned} "
             f"(`just harness::update {entry['name']} {pinned}`, or update with `--pin`)"
         )
-    if host and tested:
-        try:
-            if not matches(parse_version(host), tested):
-                notes.append(f"the host has {host}, outside the range: `just ci::compat` will fail")
-        except ValueError:
-            pass
     base = container or pinned
     if not latest:
         status = "unknown"
@@ -397,7 +305,7 @@ def judge(entry: dict, container: str | None, host: str | None, latest: str | No
             except ValueError:
                 major = False
             status = "update available (major)" if major else "update available"
-    return in_range, status, notes
+    return status, notes
 
 
 def collect(cfg: dict) -> tuple[list[Row], bool]:
@@ -412,36 +320,28 @@ def collect(cfg: dict) -> tuple[list[Row], bool]:
             lv, ld, lerr = latest[i].result()
             cv = cont.get(e["name"])
             hv_ = host[i].result()
-            in_range, status, notes = judge(e, cv, hv_, lv, up)
+            status, notes = judge(e, cv, lv, up)
             if lerr:
                 notes.append(f"npm: {lerr}")
             rows.append(
-                Row(e["name"], e["kind"], e["package"], e["version"], e.get("tested"), cv, hv_, lv, ld, in_range, status, notes)
+                Row(e["name"], e["kind"], e["package"], e["version"], cv, hv_, lv, ld, status, notes)
             )
     return rows, up
 
 
 def render_table(rows: list[Row], up: bool) -> str:
     def cell(v) -> str:
-        if v is None:
-            return "-"
-        if v is True:
-            return "yes"
-        if v is False:
-            return "NO"
-        return str(v)
+        return "-" if v is None else str(v)
 
-    headers = ["HARNESS", "PINNED", "TESTED", "CONTAINER", "HOST", "LATEST", "PUBLISHED", "LATEST IN TESTED RANGE", "STATUS"]
+    headers = ["HARNESS", "PINNED", "CONTAINER", "HOST", "LATEST", "PUBLISHED", "STATUS"]
     body = [
         [
             r.name,
             r.pinned,
-            r.tested,
             r.container if up else "(stack down)",
             r.host,
             r.latest,
             (r.latest_published or "")[:10] or None,
-            r.latest_in_range,
             r.status,
         ]
         for r in rows
@@ -481,25 +381,13 @@ class Plan:
     old: str  # the installed version in the container (else the pin)
     new: str
     bump: str  # from `old` to `new`
-    tested_old: str | None
-    tested_new: str | None
     pinned: str = ""  # the pin in harnesses.toml
-    warnings: list[str] = field(default_factory=list)
 
 
-def major_refusal(name: str, old: Version, new: Version) -> str:
-    return (
-        f"{name} {old} -> {new} is a major bump: hooks and flags may have changed. "
-        "Read the release notes, then run one of:\n"
-        f"  just harness::update {name} --allow-major    this harness only\n"
-        "  just harness::latest                          every harness to the latest"
-    )
-
-
-def make_plan(cfg: dict, name: str, target: str, allow_major: bool, current: str | None = None, pin: bool = True) -> Plan:
+def make_plan(cfg: dict, name: str, target: str, current: str | None = None) -> Plan:
     """The plan to move `name` from `current` (the installed version; default:
-    the pin) to `target`. The `tested` range follows the pin: with `pin`, a
-    range that cannot take `target` is an error; without it, a warning."""
+    the pin) to `target`. Any release is allowed: a major bump or a downgrade
+    too."""
     if name in cfg["harness"]:
         kind, table = "harness", cfg["harness"][name]
     elif name in cfg.get("extension", {}):
@@ -515,31 +403,7 @@ def make_plan(cfg: dict, name: str, target: str, allow_major: bool, current: str
         raise PlanError(str(e)) from e
     if new.pre:
         raise PlanError(f"{new} is a pre-release; pin a release")
-    bump = bump_kind(old, new)
-    tested_old = table.get("tested")
-    tested_new = tested_old
-    warnings = []
-    if bump == "major":
-        if not allow_major:
-            raise PlanError(major_refusal(name, old, new))
-        warnings.append(
-            f"MAJOR bump {old} -> {new}: hooks, flags, and config keys may have changed. "
-            f"Read the release notes, compare with docs/compat.md, and run `just ci::compat {name}`."
-        )
-    if tested_old and new != pinned:
-        pin_bump = bump_kind(pinned, new)
-        try:
-            tested_new = next_range(tested_old, pinned, new, pin_bump, True)
-        except PlanError:
-            if pin:
-                raise
-            tested_new = tested_old
-        if not pin and not matches(new, tested_old):
-            warnings.append(
-                f"{new} is outside the tested range `{tested_old}`: an agent start warns or refuses "
-                "(TERRARIUM_HARNESS_VERSION_POLICY). --pin widens the range at the next image build."
-            )
-    return Plan(name, kind, table["package"], str(old), str(new), bump, tested_old, tested_new, str(pinned), warnings)
+    return Plan(name, kind, table["package"], str(old), str(new), bump_kind(old, new), str(pinned))
 
 
 def set_table_values(text: str, section: str, values: dict[str, str]) -> str:
@@ -566,15 +430,12 @@ HISTORY_HEADING = "## Version history"
 
 def compat_row(plan: Plan, date: str) -> str:
     """A "Version history" row: from the pin to the new version."""
-    rng = "unchanged" if plan.tested_new == plan.tested_old else f"`{plan.tested_old}` → `{plan.tested_new}`"
-    if plan.tested_old is None:
-        rng = "-"
     pinned = plan.pinned or plan.old
     try:
         kind = bump_kind(parse_version(pinned), parse_version(plan.new))
     except ValueError:
         kind = plan.bump
-    return f"| {date} | {plan.name} | {pinned} → {plan.new} | {kind} | {rng} | not run yet |"
+    return f"| {date} | {plan.name} | {pinned} → {plan.new} | {kind} | not run yet |"
 
 
 def add_history_row(text: str, row: str) -> str:
@@ -602,17 +463,10 @@ def update_args(plan: Plan, force: bool) -> list[str]:
 
 def print_plan(plan: Plan, pin: bool, force: bool) -> None:
     print(f"{plan.name} ({plan.package}): {plan.old} -> {plan.new} ({plan.bump})")
-    if plan.tested_old is not None:
-        if plan.tested_new == plan.tested_old:
-            print(f"  tested range: `{plan.tested_old}` (unchanged)")
-        else:
-            print(f"  tested range: `{plan.tested_old}` -> `{plan.tested_new}`" + ("" if pin else " (with --pin)"))
-    for w in plan.warnings:
-        print(f"  WARNING: {w}")
     print("  steps:")
     print(f"    1. in the container: terrarium admin harness update {' '.join(update_args(plan, force)[3:])}")
     if pin:
-        print(f"    2. harnesses.toml: [{plan.kind}.{plan.name}] version = \"{plan.new}\"" + (f', tested = "{plan.tested_new}"' if plan.tested_new != plan.tested_old else ""))
+        print(f"    2. harnesses.toml: [{plan.kind}.{plan.name}] version = \"{plan.new}\"")
         print(f'    3. docs/compat.md "Version history": {compat_row(plan, "<today>")}')
 
 
@@ -657,17 +511,14 @@ def write_files(plans: list[Plan]) -> None:
     toml_path = hv.TOML
     text = toml_path.read_text()
     for plan in plans:
-        values = {"version": plan.new}
-        if plan.tested_new != plan.tested_old:
-            values["tested"] = plan.tested_new
-        text = set_table_values(text, f"{plan.kind}.{plan.name}", values)
+        text = set_table_values(text, f"{plan.kind}.{plan.name}", {"version": plan.new})
     toml_path.write_text(text)
     md = COMPAT_MD.read_text()
     today = dt.date.today().isoformat()
     for plan in plans:
         md = add_history_row(md, compat_row(plan, today))
     COMPAT_MD.write_text(md)
-    print("\nupdated harnesses.toml and docs/compat.md. The adapters take the new tested range at the next image build (`just up`).")
+    print("\nupdated harnesses.toml and docs/compat.md. A fresh install gets the new version.")
 
 
 def next_steps(plan: Plan) -> str:
@@ -704,7 +555,7 @@ def cmd_update(args) -> int:
         print(f"latest {table['package']} on npm: {latest}" + (f" (published {date[:10]})" if date else ""))
         target = latest
     try:
-        plan = make_plan(cfg, args.name, target, args.allow_major, current, args.pin)
+        plan = make_plan(cfg, args.name, target, current)
     except PlanError as e:
         print(f"harness: {e}", file=sys.stderr)
         return 1
@@ -743,7 +594,7 @@ class LatestItem:
     note: str = ""
 
 
-def plan_latest(cfg: dict, latest: dict[str, str | None], current: dict[str, str] | None = None, pin: bool = False) -> list[LatestItem]:
+def plan_latest(cfg: dict, latest: dict[str, str | None], current: dict[str, str] | None = None) -> list[LatestItem]:
     """One item for each harness and extension: a plan to the latest npm
     release, or the reason for no change. `latest` maps a name to the npm
     version (None when npm did not answer); `current` maps a name to the
@@ -765,7 +616,7 @@ def plan_latest(cfg: dict, latest: dict[str, str | None], current: dict[str, str
                     item.note = f"the installed version is newer than the npm latest {lv}"
                 out.append(item)
                 continue
-            plan = make_plan(cfg, name, lv, allow_major=True, current=current.get(name), pin=pin)
+            plan = make_plan(cfg, name, lv, current=current.get(name))
         except (PlanError, ValueError) as err:
             item.status, item.note = "skipped", str(err)
             out.append(item)
@@ -775,12 +626,8 @@ def plan_latest(cfg: dict, latest: dict[str, str | None], current: dict[str, str
     return out
 
 
-def major_warning(plan: Plan) -> str:
-    return f"WARNING: {plan.name} {plan.old} -> {plan.new} is a major bump: hooks and flags may have changed"
-
-
 def render_latest(items: list[LatestItem]) -> str:
-    headers = ["HARNESS", "FROM", "TO", "CHANGE", "TESTED RANGE"]
+    headers = ["HARNESS", "FROM", "TO", "CHANGE"]
     table = [headers]
     for i in items:
         p = i.plan
@@ -790,7 +637,6 @@ def render_latest(items: list[LatestItem]) -> str:
                 i.pinned,
                 p.new if p else (i.latest or "-"),
                 f"{i.status} bump" if p and i.status != "failed" else i.status,
-                (p.tested_new or "-") if p else "-",
             ]
         )
     widths = [max(len(row[c]) for row in table) for c in range(len(headers))]
@@ -820,12 +666,10 @@ def run_latest(
     force: bool = False,
     current: dict[str, str] | None = None,
 ) -> int:
-    items = plan_latest(cfg, latest, current, pin)
+    items = plan_latest(cfg, latest, current)
     for i in items:
         if i.plan:
             print(f"{i.name} ({i.package}): {i.pinned} -> {i.plan.new} ({i.status})")
-            if i.status == "major":
-                print(f"  {major_warning(i.plan)}")
         else:
             print(f"{i.name}: {i.status}" + (f" ({i.pinned})" if i.status == "latest" else f": {i.note}"))
     failed = any(i.status in ("unknown", "skipped") for i in items)
@@ -885,7 +729,7 @@ def main(argv: list[str] | None = None) -> int:
     u = sub.add_parser("update", help="update one harness in the container, in place")
     u.add_argument("name")
     u.add_argument("version", nargs="?", help="default: the latest on npm")
-    u.add_argument("--allow-major", action="store_true", help="allow a major bump")
+    u.add_argument("--allow-major", action="store_true", help="accepted for compatibility; has no effect")
     u.add_argument("--force", action="store_true", help="install the version again when its version dir is on disk")
     u.add_argument("--pin", action="store_true", help="also write harnesses.toml and docs/compat.md")
     u.add_argument("--dry-run", action="store_true", help="print the plan; change nothing")

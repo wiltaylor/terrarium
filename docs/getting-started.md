@@ -1679,10 +1679,11 @@ the agent (a restart, or a crash and a relaunch) runs the active version.
   `tools/terrarium-manifest.json`:
   `{"<name>": {"package", "version", "installed_at", "versions"}}`, where
   `version` is the active version and `versions` the version dirs on disk.
-- It gives the **tested range** of each adapter. `crates/terrarium-core/build.rs`
-  reads the file at compile time, and each adapter's `flags.rs` takes
-  `verified` and `tested` from it. At each agent start, the daemon compares
-  the installed version with that range (section 7.5).
+- It gives the **verified version** of each adapter.
+  `crates/terrarium-core/build.rs` reads the file at compile time, and each
+  adapter's `flags.rs` takes `verified` (the pin) from it. Terrarium keeps
+  no range of supported versions: any installed version can start an
+  agent (section 7.5).
 
 An update runs `npm install -g <package>@<version>` in the running
 container, into a new version dir, and then switches to it. It needs no
@@ -1715,11 +1716,9 @@ just harness::check           # a table
 just harness::check --json
 ```
 
-For each harness and the extension, the table shows the pin, the tested
-range, the version in the container (from the manifest), the version on
-the host, the latest version on npm with its publish date, and whether the
-latest version is in the tested range (`LATEST IN TESTED RANGE`). The
-`STATUS` column compares the version in the container with the latest:
+For each harness and the extension, the table shows the pin, the version
+in the container (from the manifest), the version on the host, and the
+latest version on npm with its publish date. The `STATUS` column compares the version in the container with the latest:
 `latest`, `update available` (the same major version), or
 `update available (major)`. The command changes nothing.
 
@@ -1761,19 +1760,15 @@ switch back), npm does not run.
   (`terrarium agent restart <agent>`). The version dir of a running agent
   stays on disk until the agent stops or restarts. `--force` installs the
   version again, also when its version dir is on disk.
-- **A major bump.** From the version in the container, a major bump needs
-  `--allow-major`. The command uses the semver rule for "major": the first
-  part that is not zero. Thus, for a 0.x harness, 0.164.0 to 0.165.0 is a
-  major bump, and 0.164.0 to 0.164.1 is a patch bump.
+- **Any version.** The command updates to any version: a major bump and
+  a downgrade too. It needs no flag. `--allow-major` is still accepted,
+  and has no effect.
 - **`--pin`.** After a done update, the command also sets the new version
-  in `harnesses.toml`, widens `tested` for a patch or minor bump (`<2.2.0`
-  becomes `<2.3.0`), and adds a row to the "Version history" table in
+  in `harnesses.toml` and adds a row to the "Version history" table in
   [compat.md](compat.md). So a fresh install (an empty `tools/`) gets the
-  same version. The adapters read the new `tested` range at the next image
-  build (`just up`). Commit the files.
+  same version. Commit the files.
 
-Without `--pin`, a version outside the tested range is a warning, not an
-error: the agents still start (section 7.5).
+Without `--pin`, the agents also start on the new version (section 7.5).
 
 ### 7.3 Update every harness to the latest
 
@@ -1786,8 +1781,7 @@ just harness::latest --pin           # and write the new pins
 The command reads the latest release of each harness and of the Copilot
 prompt extension on npm. It skips each one that is at the latest. It
 updates each of the other ones, as in 7.2, with one call each. It allows a
-major bump, and it prints a one-line warning for each: hooks and flags may
-have changed. At the end, it prints a table of the changes and one
+major bump. At the end, it prints a table of the changes and one
 `just ci::compat <name>` command for each updated harness.
 
 `terrarium admin harness update --all` updates every harness and the
@@ -1834,15 +1828,16 @@ in [compat.md](compat.md). Look at these items:
 When a fact changes, add a section for the new version to
 [compat.md](compat.md), and change the adapter table in `flags.rs`.
 
-### 7.5 The version guard
+### 7.5 Any version starts
 
-At each agent start, the daemon compares the installed version with the
-tested range. Outside the range, the daemon logs a warning and writes a
-`warning` event for the agent, and the agent starts. Set
-`TERRARIUM_HARNESS_VERSION_POLICY=refuse` to refuse the start
-(`422 invalid`) in its place. `terrarium admin harness ls`,
-`GET /api/harnesses`, and the Subscriptions page of the dashboard show
-the installed version of each harness and its range.
+Terrarium keeps no range of supported versions. The harnesses release
+about daily, so a range is not maintainable. Any installed version starts
+an agent, with no warning and no refusal. To test a new version, run the
+compatibility suite (section 7.4). When it breaks something, roll back
+(section 7.6). `terrarium admin harness ls`, `GET /api/harnesses`, and
+the Subscriptions page of the dashboard show the installed version of
+each harness. The old setting `TERRARIUM_HARNESS_VERSION_POLICY` has no
+effect: the daemon ignores it.
 
 ### 7.6 Roll back
 
@@ -1855,7 +1850,8 @@ docker compose exec -u terrarium terrarium terrarium admin harness pin claude
 docker compose exec -u terrarium terrarium terrarium admin harness pin claude 2.1.310   # a given version
 ```
 
-The update mail of the auto-update gives this line with the old version.
+The update mail of the auto-update (with
+`TERRARIUM_HARNESS_UPDATE_MAIL=on`) gives this line with the old version.
 In the dashboard, use "Roll back and pin" in the "Harness versions" table
 (Settings, Subscriptions). The daemon keeps the previous version on disk,
 so the switch needs no npm run. Agents on the newer version move back at
@@ -1897,15 +1893,17 @@ Each harness has an update policy:
 
 - `auto` (the default): when npm has a newer release (a major too), the
   check installs it as in 7.2 and switches to it. Running agents keep
-  their version, and each moves at its next start or wake. You get one
-  Inbox mail for each update. The mail gives the old and the new version,
-  a warning when the new version is outside the adapter's tested range,
-  the changelog link, and the rollback line.
+  their version, and each moves at its next start or wake. By default,
+  you get no mail for an update: the dashboard table, the audit log, and
+  the `harness` event show it. Set `TERRARIUM_HARNESS_UPDATE_MAIL=on` in
+  `.env` to get one Inbox mail for each update. The mail gives the old
+  and the new version, the changelog link, and the rollback line.
 - `pinned`: the check installs nothing. `terrarium admin harness pin`
   sets it (section 7.6), and `unpin` removes it.
 
 When an install fails, the harness stays at its version, and you get one
-mail for that version. The next checks try again with no new mail.
+mail for that version (also with `TERRARIUM_HARNESS_UPDATE_MAIL=off`).
+The next checks try again with no new mail.
 
 The policy is in the state dir, so it stays through a restart and a
 deploy. `harnesses.toml` gives the versions of a fresh install (an empty

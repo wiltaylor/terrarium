@@ -191,7 +191,11 @@ mod tests {
     #[test]
     fn markdown_has_one_row_per_step_and_escapes_pipes() {
         let mut r = Report::new("dry run");
-        r.pass(HarnessId::Claude, "version", "2.1.310 in >=2.1.310");
+        r.pass(
+            HarnessId::Claude,
+            "version",
+            "2.1.310 is installed (pin 2.1.310)",
+        );
         r.add(
             HarnessId::Codex,
             "fresh_start",
@@ -201,7 +205,7 @@ mod tests {
         );
         r.set_turns(HarnessId::Claude, 3);
         let md = r.to_markdown();
-        assert!(md.contains("| claude | version | pass |  | 2.1.310 in >=2.1.310 |"));
+        assert!(md.contains("| claude | version | pass |  | 2.1.310 is installed (pin 2.1.310) |"));
         assert!(md.contains("| codex | fresh_start | FAIL | 1.5 s | a \\| b c |"));
         assert!(md.contains("- claude: 3"));
         assert!(r.failed());

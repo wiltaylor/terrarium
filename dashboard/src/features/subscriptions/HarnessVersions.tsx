@@ -1,5 +1,5 @@
 // The "Harness versions" table: the active version and the version dirs on
-// disk, the tested range, the latest release on npm, a status chip, and the
+// disk, the latest release on npm, a status chip, and the
 // live agents that still run an older version (GET /api/harnesses?latest=true).
 // A row with a newer release has an "Update" button, and "Update all" updates
 // every harness. The daemon runs npm in the container into a new version dir
@@ -29,12 +29,9 @@ import {
   oldAgentLine,
   oldAgents,
   otherVersions,
-  outOfRange,
   pinLine,
   policyChip,
-  policyNote,
   publishedDay,
-  rangeWarning,
   resultLine,
   resultNotes,
   rollbackTarget,
@@ -97,9 +94,6 @@ export function HarnessVersions() {
       <div class="spread">
         <h3 style={{ margin: 0 }}>
           Harness versions
-          <Show when={outOfRange(report.latest).length}>
-            {(n) => <span class="chip bad" style={{ "margin-left": "8px" }}>{n()} unsupported</span>}
-          </Show>
           <Show when={withUpdate(report.latest).length}>
             {(n) => <span class="chip warn" style={{ "margin-left": "8px" }}>{n()} update{n() > 1 ? "s" : ""} available</span>}
           </Show>
@@ -123,7 +117,6 @@ export function HarnessVersions() {
                   <tr>
                     <th>Harness</th>
                     <th>Installed</th>
-                    <th>Tested range</th>
                     <th>Latest</th>
                     <th>Status</th>
                     <th>Updates</th>
@@ -153,7 +146,6 @@ export function HarnessVersions() {
                               </div>
                             </Show>
                           </td>
-                          <td class="mono">{h.tested}</td>
                           <td class="mono" title={h.latest_error}>
                             <Show when={h.latest} fallback={<span class="muted">{h.latest_error ? "npm not reachable" : "—"}</span>}>
                               {(l) => (
@@ -168,13 +160,6 @@ export function HarnessVersions() {
                             <span class={`chip ${s.cls}`} title={s.title} data-status={s.status}>
                               {s.status}
                             </span>
-                            <Show when={rangeWarning(h)}>
-                              {(w) => (
-                                <div class="small" role="note" style={{ color: "var(--danger)", "max-width": "28ch", "margin-top": "4px" }}>
-                                  {w()}
-                                </div>
-                              )}
-                            </Show>
                           </td>
                           <td class="small" aria-label={`Updates of ${h.harness}`}>
                             <span class={`chip ${p.cls}`} title={p.title} data-policy={h.auto_update?.policy}>
@@ -282,7 +267,7 @@ export function HarnessVersions() {
               </div>
             </Show>
             <p class="muted small" style={{ margin: "6px 0 0" }}>
-              {scheduleNote(r())} {policyNote(r())} harnesses.toml gives the first install; see docs/getting-started.md, "Updating a harness".
+              {scheduleNote(r())} harnesses.toml gives the first install; see docs/getting-started.md, "Updating a harness".
             </p>
           </>
         )}

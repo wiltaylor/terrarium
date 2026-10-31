@@ -334,17 +334,14 @@ pub trait Supervisor: Send + Sync + 'static {
             ))
         })
     }
-    /// The installed version of each harness against its tested range
-    /// (`GET /api/harnesses`). `refresh` runs the binaries again. The
+    /// The installed version of each harness (`GET /api/harnesses`). `refresh` runs the binaries again. The
     /// default knows only the pins.
     fn harness_versions(
         &self,
         refresh: bool,
     ) -> BoxFuture<'_, crate::harness_versions::HarnessReport> {
         let _ = refresh;
-        Box::pin(async {
-            crate::harness_versions::pins_only(crate::harness_versions::VersionPolicy::default())
-        })
+        Box::pin(async { crate::harness_versions::pins_only() })
     }
     /// The harness version of each agent that runs or starts now. The
     /// harness update lists the agents on an older version, and the GC of

@@ -103,7 +103,7 @@ pub enum Event {
     /// A supervisor or daemon notice.
     System { message: String },
     /// A supervisor or daemon notice that needs the operator's attention,
-    /// for example a harness version outside the adapter's tested range.
+    /// for example a skill or a secret that the launch cannot give.
     Warning { message: String },
     /// The agent status changed. The runner raises one per transition.
     StatusChanged {

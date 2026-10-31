@@ -37,7 +37,7 @@ pub mod usage;
 
 use std::path::{Path, PathBuf};
 
-use semver::{Version, VersionReq};
+use semver::Version;
 use terrarium_core::adapter::{Screen, run_version};
 use terrarium_core::{
     Adapter, Agent, Answer, Event, FileOverlay, HarnessId, HarnessSessionId, HookPayload,
@@ -46,11 +46,6 @@ use terrarium_core::{
 
 pub use error::CodexError;
 pub use flags::{CODEX_PINNED, CodexFlags};
-
-/// The Codex versions this adapter accepts. Only [`CodexFlags::verified`]
-/// (the pin in `harnesses.toml`, the one place for the version pin) was
-/// measured.
-pub const TESTED: &str = CODEX_PINNED.tested;
 
 /// How the rendered prompt reaches Codex.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -202,10 +197,6 @@ impl Adapter for CodexAdapter {
         HarnessId::Codex
     }
 
-    fn tested_version(&self) -> VersionReq {
-        VersionReq::parse(self.options.flags.tested).unwrap_or(VersionReq::STAR)
-    }
-
     fn detect_version(&self) -> Result<Version> {
         run_version(&self.options.program)
     }
@@ -291,23 +282,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tested_range_covers_the_verified_version() {
+    fn the_verified_version_is_the_pin() {
         let a = CodexAdapter::default();
-        let req = a.tested_version();
-        assert!(req.matches(&Version::parse(CODEX_PINNED.verified).expect("v")));
-        // The pin and the range come from harnesses.toml.
+        // The pin comes from harnesses.toml.
         assert_eq!(
             CODEX_PINNED.verified,
             terrarium_core::harnesses::codex::VERSION
         );
-        assert_eq!(
-            CODEX_PINNED.tested,
-            terrarium_core::harnesses::codex::TESTED
-        );
-        assert_eq!(
-            req,
-            VersionReq::parse(terrarium_core::harnesses::codex::TESTED).expect("req")
-        );
+        assert!(Version::parse(CODEX_PINNED.verified).is_ok());
         assert_eq!(a.id(), HarnessId::Codex);
         assert!(a.prompt_frozen_on_resume());
     }
@@ -369,7 +351,7 @@ mod tests {
     fn smoke_codex_version() {
         let a = CodexAdapter::default();
         let v = a.detect_version().expect("codex --version");
-        assert!(a.tested_version().matches(&v), "{v}");
+        assert!(!v.to_string().is_empty());
         let out = std::process::Command::new("codex")
             .arg("--help")
             .output()

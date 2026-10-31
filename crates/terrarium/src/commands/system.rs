@@ -827,11 +827,7 @@ fn print_update_row(ctx: &Ctx, r: &Value) {
     let from = r["from"].as_str().unwrap_or("(not installed)");
     match (r["to"].as_str(), r["error"].as_str()) {
         (Some(to), _) => {
-            let range = match r["in_range"].as_bool() {
-                Some(false) => format!(" (outside the tested range {})", field(r, "tested")),
-                _ => String::new(),
-            };
-            ctx.line(format!("{}: {from} -> {to}{range}", field(r, "harness")));
+            ctx.line(format!("{}: {from} -> {to}", field(r, "harness")));
             if let Some(note) = r["note"].as_str() {
                 ctx.line(note);
             }
@@ -942,25 +938,13 @@ fn policy_cell(h: &Value) -> String {
     }
 }
 
-/// The harness table, then the policy, then a note for each harness out of
-/// its range.
+/// The harness table, then the auto-update schedule, then a note for each
+/// harness with an unknown version or an agent on an older version.
 fn print_harnesses(ctx: &Ctx, v: &Value) {
     let items = v["harnesses"].as_array().cloned().unwrap_or_default();
-    let mut t = crate::output::Table::new(&[
-        "HARNESS",
-        "PINNED",
-        "TESTED",
-        "INSTALLED",
-        "IN RANGE",
-        "UPDATES",
-        "ON DISK",
-    ]);
+    let mut t =
+        crate::output::Table::new(&["HARNESS", "PINNED", "INSTALLED", "UPDATES", "ON DISK"]);
     for h in &items {
-        let in_range = match h["in_range"].as_bool() {
-            Some(true) => "yes".to_owned(),
-            Some(false) => "NO".to_owned(),
-            None => "unknown".to_owned(),
-        };
         let on_disk: Vec<&str> = h["versions"]
             .as_array()
             .map(|a| a.iter().filter_map(Value::as_str).collect())
@@ -968,9 +952,7 @@ fn print_harnesses(ctx: &Ctx, v: &Value) {
         t.row(vec![
             field(h, "harness"),
             field(h, "pinned"),
-            field(h, "tested"),
             field(h, "installed"),
-            in_range,
             policy_cell(h),
             if on_disk.is_empty() {
                 "-".to_owned()
@@ -984,10 +966,6 @@ fn print_harnesses(ctx: &Ctx, v: &Value) {
     } else {
         ctx.out.write_str(&t.render(ctx.out.width()));
     }
-    ctx.line(format!(
-        "policy: {} (TERRARIUM_HARNESS_VERSION_POLICY)",
-        field(v, "policy")
-    ));
     if let Some(s) = v["auto_update"]["schedule"].as_str() {
         let next = v["auto_update"]["next_check_at"]
             .as_str()
@@ -998,16 +976,7 @@ fn print_harnesses(ctx: &Ctx, v: &Value) {
         ));
     }
     for h in &items {
-        if h["in_range"] == false {
-            ctx.line(format!(
-                "{}: {} is outside {}; run `terrarium admin harness update {}` or `just harness::update {}`",
-                field(h, "harness"),
-                field(h, "installed"),
-                field(h, "tested"),
-                field(h, "harness"),
-                field(h, "harness"),
-            ));
-        } else if h["in_range"].is_null() && !h["error"].is_null() {
+        if h["installed"].is_null() && !h["error"].is_null() {
             ctx.line(format!("{}: {}", field(h, "harness"), field(h, "error")));
         }
         // The live agents on another version than the active one.

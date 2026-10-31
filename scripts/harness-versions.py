@@ -28,7 +28,7 @@ ROOT = Path(__file__).resolve().parent.parent
 TOML = ROOT / "harnesses.toml"
 DOCKERFILE = ROOT / "docker" / "Dockerfile"
 
-HARNESS_KEYS = ("package", "version", "tested", "binary")
+HARNESS_KEYS = ("package", "version", "binary")
 EXTENSION_KEYS = ("package", "version", "binary", "for")
 
 

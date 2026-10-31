@@ -27,7 +27,7 @@ pub mod usage;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use semver::{Version, VersionReq};
+use semver::Version;
 use terrarium_core::adapter::Screen;
 use terrarium_core::{
     Adapter, Agent, Answer, Event, FileOverlay, HarnessId, HarnessSessionId, HookPayload,
@@ -37,10 +37,6 @@ use terrarium_core::{
 pub use error::CopilotError;
 pub use flags::{COPILOT_1_0, CopilotFlags};
 pub use launch::SessionStart;
-
-/// The Copilot CLI versions this adapter accepts. Only
-/// [`CopilotFlags::verified`] (the pin in `harnesses.toml`) was measured.
-pub const TESTED: &str = COPILOT_1_0.tested;
 
 /// The env var that carries the GitHub token into an agent. The daemon
 /// sets it from its credential store (see [`CopilotAdapter::required_env`]).
@@ -248,10 +244,6 @@ impl Adapter for CopilotAdapter {
         HarnessId::Copilot
     }
 
-    fn tested_version(&self) -> VersionReq {
-        VersionReq::parse(self.options.flags.tested).unwrap_or(VersionReq::STAR)
-    }
-
     /// `copilot --version` prints "GitHub Copilot CLI 1.0.103." (with a
     /// full stop), which the core parser does not read.
     fn detect_version(&self) -> Result<Version> {
@@ -367,23 +359,14 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn tested_range_covers_the_verified_version() {
+    fn the_verified_version_is_the_pin() {
         let a = CopilotAdapter::default();
-        let req = a.tested_version();
-        assert!(req.matches(&Version::parse(COPILOT_1_0.verified).expect("v")));
-        // The pin and the range come from harnesses.toml.
+        // The pin comes from harnesses.toml.
         assert_eq!(
             COPILOT_1_0.verified,
             terrarium_core::harnesses::copilot::VERSION
         );
-        assert_eq!(
-            COPILOT_1_0.tested,
-            terrarium_core::harnesses::copilot::TESTED
-        );
-        assert_eq!(
-            req,
-            VersionReq::parse(terrarium_core::harnesses::copilot::TESTED).expect("req")
-        );
+        assert!(Version::parse(COPILOT_1_0.verified).is_ok());
         assert_eq!(a.id(), HarnessId::Copilot);
     }
 
@@ -524,10 +507,7 @@ mod tests {
             .expect("run copilot --version");
         assert!(out.status.success());
         let v = CopilotAdapter::default().detect_version().expect("version");
-        assert!(
-            CopilotAdapter::default().tested_version().matches(&v),
-            "{v}"
-        );
+        assert!(!v.to_string().is_empty());
         let help = std::process::Command::new("copilot")
             .arg("--help")
             .output()

@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use semver::{Version, VersionReq};
+use semver::Version;
 use serde_json::Value;
 use terrarium_core::adapter::Screen;
 use terrarium_core::config::SubscriptionDef;
@@ -81,10 +81,6 @@ impl RecordingAdapter {
 impl Adapter for RecordingAdapter {
     fn id(&self) -> HarnessId {
         self.inner.id()
-    }
-
-    fn tested_version(&self) -> VersionReq {
-        self.inner.tested_version()
     }
 
     fn detect_version(&self) -> Result<Version> {

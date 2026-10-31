@@ -118,8 +118,11 @@ Observations that shape the design:
   Copilot, any OAuth login). Use Claude Code for a Claude plan and Codex for
   a ChatGPT plan (§16.1; `docs/compat.md`, "pi: facts that contradict the
   plan"). The daemon refuses a pi agent on a plan, and its start.
-- The flags change often. Each adapter pins the version it was tested against.
-  A compatibility suite runs in CI.
+- The flags change often. Each adapter records the version it was verified
+  against (the pin). Terrarium keeps no range of supported versions: the
+  harnesses release about daily, so a range is not maintainable. Any
+  installed version can start an agent. The compatibility suite tests a new
+  version.
 
 ---
 
@@ -330,10 +333,11 @@ deploy:
 - `auto` (the default): the check installs each newer release (a major
   too) through the same install path as an update (a new version dir, then
   a switch). Running agents keep their version, and each moves at its next
-  start or wake (§18). The operator gets one Inbox mail for each installed
-  update: the old and the new version, a warning when the new version is
-  outside the adapter's tested range, the changelog link, and the rollback
-  line. A failed install keeps the active version and mails once for each
+  start or wake (§18). With `TERRARIUM_HARNESS_UPDATE_MAIL=on`, the
+  operator gets one Inbox mail for each installed update: the old and the
+  new version, the changelog link, and the rollback line. With `off` (the
+  default), an installed update sends no mail; the audit row, the
+  `harness` event, and the dashboard table show it. A failed install keeps the active version and mails once for each
   failed version. A check skips a harness while a manual update runs.
 - `pinned` (a version): the check installs nothing.
   `POST /api/harnesses/{name}/pin` sets it; without a version, it switches
@@ -407,7 +411,6 @@ Storage layout inside the container:
 ```rust
 trait Adapter {
     fn id(&self) -> HarnessId;
-    fn tested_version(&self) -> VersionReq;
     fn detect_version(&self) -> Result<Version>;
 
     // Command line and env for a fresh start or a resume. Includes the yolo
@@ -2982,7 +2985,7 @@ agent. Raw sends and keys need a running harness (`409 not_running`).
   quota or budget hold (§16.2). Their work waits. The end of the last
   hold wakes an agent with work.
 - A wake counts as a start. When the start fails (a missing subscription,
-  a harness outside its range with `refuse`), the agent goes to `error`
+  a missing harness binary), the agent goes to `error`
   with the reason `wake failed: ...`, and no later work wakes it. A crash
   loop (below) also ends in `error`. The operator clears `error` with
   `stop`, `start`, or `restart`; then the next work wakes the agent.
@@ -3443,7 +3446,7 @@ end-to-end scenarios of each phase are not scripted yet (no `spikes/e2e/`).
 | 5 · caps | `TERRARIUM_MAX_TARGETS_PER_PROJECT` (8, `409 conflict`) and the host agent's `max_running_targets` (4, `429 rate_limited`). The dashboard shows the cap errors and the running count of each host. | — |
 | 5 · limits | Target resource limits (§19, `docs/api.md` §17.2): `limits` (`cpu`, `memory`, `swap`, `pids`, `io_weight`) on `host` targets (a systemd slice for each holder, a scope for each session, `systemd-run --user`) and `docker` targets (the `docker run` flags); the `limits` capability in `hello` and the `409` refusal; `--cpu`, `--memory`, `--swap`, `--pids`, `--io-weight`, `--no-limits`; the dashboard form, the target chip, and the host chip. Tests: argv building, the probe parser, the docker flags, the API rules and the refusal, and a test on a real systemd user manager (two scopes of one slice stay under the memory cap). | No per-agent usage view yet. `io_read` and `io_write` bandwidth limits are not done (they need a device). |
 | 5 · scope | A target is global or belongs to one project (the `scope` field). A project target gets the prefix `<project>-`. A project_admin makes and leases the targets of its project; a global target needs sysadmin. The dashboard has scope chips and filters, and a targets panel on each project. | — |
-| Harnesses | The image holds no harness (`just ci::check` fails when the Dockerfile installs one). `terrariumd harness install` at each start (the entrypoint, then the daemon) installs each missing pin of `harnesses.toml` into the tools dir (`./tools` at `/opt/terrarium/tools`, one npm prefix for each version) and the Copilot prompt extension, and writes `terrarium-manifest.json`. Updates into version dirs: `POST /api/harnesses/{name}/update` and `POST /api/harnesses/update`, `terrarium admin harness update` (`--version`, `--force`, `--all`), `just harness::update` and `just harness::latest` (with `--pin`), and the "Update" buttons of the dashboard. Sysadmin or the operator only, audited as `harness.update`. The auto-update (§6, "Auto-update and pins"; `TERRARIUM_HARNESS_AUTO_UPDATE`, default `daily`; migration 43): a daemon task installs each newer npm release of a harness with the policy `auto` and mails the operator once for each update or failed version; `POST /api/harnesses/{name}/pin` (default: a rollback to the previous version), `unpin`, and `check`; `terrarium admin harness pin|unpin|check`; the policy chip and the "Roll back and pin", "Pin current", "Unpin", and "Check now" buttons of the dashboard; audited as `harness.auto_update`, `harness.pin`, and `harness.unpin`. Running agents keep their version dir until their next start; the GC removes the unused version dirs. The sandbox binds the tools dir read-only. The version guard at each agent start (`TERRARIUM_HARNESS_VERSION_POLICY`). `docs/getting-started.md` §7. | — |
+| Harnesses | The image holds no harness (`just ci::check` fails when the Dockerfile installs one). `terrariumd harness install` at each start (the entrypoint, then the daemon) installs each missing pin of `harnesses.toml` into the tools dir (`./tools` at `/opt/terrarium/tools`, one npm prefix for each version) and the Copilot prompt extension, and writes `terrarium-manifest.json`. Updates into version dirs: `POST /api/harnesses/{name}/update` and `POST /api/harnesses/update`, `terrarium admin harness update` (`--version`, `--force`, `--all`), `just harness::update` and `just harness::latest` (with `--pin`), and the "Update" buttons of the dashboard. Sysadmin or the operator only, audited as `harness.update`. The auto-update (§6, "Auto-update and pins"; `TERRARIUM_HARNESS_AUTO_UPDATE`, default `daily`; migration 43): a daemon task installs each newer npm release of a harness with the policy `auto` and mails the operator once for each failed version (and for each update with `TERRARIUM_HARNESS_UPDATE_MAIL=on`, default `off`); `POST /api/harnesses/{name}/pin` (default: a rollback to the previous version), `unpin`, and `check`; `terrarium admin harness pin|unpin|check`; the policy chip and the "Roll back and pin", "Pin current", "Unpin", and "Check now" buttons of the dashboard; audited as `harness.auto_update`, `harness.pin`, and `harness.unpin`. Running agents keep their version dir until their next start; the GC removes the unused version dirs. The sandbox binds the tools dir read-only. No range of supported versions: any installed version starts an agent, and `just ci::compat` tests a new one. `docs/getting-started.md` §7. | — |
 | Templates | Agent templates (§5b, `docs/api.md` §21): global and project templates, `POST /api/agents` with `template` (project over global, `global:`, field and `policy` key overrides, the create rights on the merged values), `resolve`, `from-agent`, each template a WCL file of the config repo (`templates/`: the load at start, on a change, and after a pull; the writes of the API; `GET .../wcl`; the move of the old rows, migration 44; eight packaged default templates), `[[templates]]` in fleets (and as a one-time import from project files), `template = "..."` on fleet agents and in export, `terrarium template` (`new --from-file <name>.wcl`, `show --wcl`) and `agent new --template`, the Templates tab of the dashboard Settings (with View WCL), the template chooser of New agent, and "Save as template". The lead templates make workers from the `worker` template. | Agent files (`agents/<name>.toml`) cannot name a template. |
 | Waits | Waits and watches (§12d, `docs/api.md` §6.7): the status `waiting`, `agent`, `process`, `time`, and `card` waits with timeouts, the cycle check, and the limits; `terrarium run` (a detached exec session with a `process` wait); one wake mail for each end (a 2 s batch); watches with debounce and `--once`; `terrarium wait`, `run`, `watch`; the `waiting` chip and the Waits and Watches sections of the agent page; the prompt text. Tests with the fake supervisor and a real host agent (`tests/waits.rs`). | Not run live with real harnesses yet. The queued watch changes of a debounce do not live through a daemon restart. |
 | Lifecycle | Wake on demand, the idle stop, and the pause (§18, 2026-10-31): `crates/terrariumd/src/lifecycle.rs`; migration 41 (`agents.idle_stop`, `paused`, `status_reason`, `queued_turns`); `TERRARIUM_IDLE_STOP`; `POST /api/agents/{id}/pause` and `unpause`; `terrarium agent pause|unpause`, `--idle-stop`; Pause, Resume, the `paused` and `stopped (idle)` badges, and the queued count in the dashboard; the lead prompts wake workers with a card, not a start. Tests with the fake supervisor (`tests/lifecycle.rs`) and the real one (`tests/runtime.rs`). | Not run live with real harnesses yet. A turn queued before a stop that ends a launch before its first idle waits for the next launch in memory only. |
@@ -3488,7 +3491,7 @@ end-to-end scenarios of each phase are not scripted yet (no `spikes/e2e/`).
 | Host agent token leaks or a host is compromised | One token per host, stored as a hash, revocable from the dashboard. Rotation (`admin host rotate`) and one-time enrol tokens (`--enrol`, 10 minutes). `first_used_at` and `last_used_from` show a strange use. TLS on the link (F2 below). The host agent only accepts calls for targets defined on it. |
 | Host agent connection drops mid-exec | Exec sessions have IDs. The host agent keeps output buffered until acknowledged. Reconnect resumes or reports the exit code. |
 | Harness flags change | One adapter per harness, pinned version, CI. |
-| npm runs at container start and on update, so the install trusts the npm registry at that moment | Pins in `harnesses.toml` for the first install; the manifest (`tools/terrarium-manifest.json`) records what was installed; the version guard at each agent start (§7.5 of `docs/getting-started.md`); updates are operator/sysadmin only and audited (`harness.update`). |
+| npm runs at container start and on update, so the install trusts the npm registry at that moment | Pins in `harnesses.toml` for the first install; the manifest (`tools/terrarium-manifest.json`) records what was installed; updates are operator/sysadmin only and audited (`harness.update`). |
 | A daemon crash inside Docker stops every runner, because `terrariumd` is the only child of `tini`: when it exits, the container stops | **Mitigated.** The entrypoint is a supervisor loop: it starts `terrariumd` again after a crash, with backoff, and the runners keep running (`docker/README.md`, "The restart loop"; `just docker::crash-test`). Outside Docker, the runner processes live through a daemon restart. |
 | F1: a yolo agent rewrites its own event log, PTY log, launch spec, or exit record, and so defeats the budgets, the audit trail, and resume | **Fixed.** The agent dir has `private/`, `harness/`, and `workspace/`. The sandbox never binds `private/`, binds `harness/` read-only, and makes only the per-agent overlays writable (§11, `docs/runner.md` "Files"). A test checks that no bind names `private/`. |
 | F2: the host link is plaintext, so the host token and the exec traffic cross the network in clear text and the token replays | **Fixed.** TLS on the host listener with `TERRARIUM_HOST_TLS_CERT` and `TERRARIUM_HOST_TLS_KEY`, certificate pinning in the host agent, rotation, and enrol tokens (§19). Without a certificate, the host listener binds `127.0.0.1:8082` only (`TERRARIUM_HOST_LISTEN=auto`). A plaintext bind to another address logs an `INSECURE` warning. The host agent refuses `ws://` to a host that is not loopback without `allow_insecure`. |

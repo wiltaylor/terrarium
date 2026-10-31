@@ -115,8 +115,11 @@ async fn harness_row(td: &TestDaemon, harness: &str) -> Value {
     row(&v.ok()["harnesses"], harness).clone()
 }
 
+/// `TERRARIUM_HARNESS_UPDATE_MAIL=off` (the default): the check installs
+/// the update with no mail; the audit row, the event, and the table show
+/// it.
 #[tokio::test]
-async fn a_check_installs_a_newer_release_once_and_mails_once() {
+async fn a_check_installs_a_newer_release_once_with_no_mail() {
     let (td, cfg, _reg) = daemon("0.165.0").await;
     let codex_pin = pin(&cfg, "codex");
 
@@ -126,8 +129,9 @@ async fn a_check_installs_a_newer_release_once_and_mails_once() {
     assert_eq!(codex["result"], "updated");
     assert_eq!(codex["from"], codex_pin.as_str());
     assert_eq!(codex["to"], "0.165.0");
-    assert_eq!(codex["in_range"], false, "the pin range ends under 0.165.0");
-    assert_eq!(codex["mailed"], true);
+    assert_eq!(codex["detail"], format!("{codex_pin} -> 0.165.0"));
+    assert!(codex.get("in_range").is_none(), "{codex}");
+    assert_eq!(codex["mailed"], false);
     assert_eq!(row(&b["results"], "claude")["result"], "current");
     assert_eq!(row(&b["results"], "copilot")["result"], "current");
     let pi = row(&b["results"], "pi");
@@ -143,23 +147,8 @@ async fn a_check_installs_a_newer_release_once_and_mails_once() {
     );
     assert_eq!(cfg.read_manifest()["codex"].version, "0.165.0");
 
-    // One mail, with the warning and the rollback line.
-    let mail = operator_mail(&td).await;
-    assert_eq!(mail.len(), 1, "{mail:?}");
-    let (subject, body) = &mail[0];
-    assert_eq!(
-        subject,
-        &format!("Harness update: codex {codex_pin} -> 0.165.0 (outside the tested range)")
-    );
-    assert!(
-        body.contains("WARNING: 0.165.0 is outside the tested range"),
-        "{body}"
-    );
-    assert!(
-        body.contains(&format!("terrarium admin harness pin codex {codex_pin}")),
-        "{body}"
-    );
-    assert!(body.contains("/settings/subscriptions"), "{body}");
+    // No mail for an installed update.
+    assert!(operator_mail(&td).await.is_empty());
 
     // The audit row and the event.
     let audit = td.get("/api/audit?action=harness.auto_update").await;
@@ -167,16 +156,18 @@ async fn a_check_installs_a_newer_release_once_and_mails_once() {
     assert_eq!(rows.len(), 1, "{rows:?}");
     assert_eq!(rows[0]["actor"], "system");
     assert_eq!(rows[0]["detail"]["ok"], true);
+    assert!(rows[0]["detail"].get("in_range").is_none());
     let ev = td.get("/api/events?kind=harness").await;
     let ev = ev.ok().as_array().unwrap().clone();
     assert_eq!(ev.last().unwrap()["data"]["change"], "auto_updated");
+    assert!(ev.last().unwrap()["data"].get("in_range").is_none());
 
     // Nothing changed: no install and no mail.
     let again = td.post_empty("/api/harnesses/check").await;
     let codex = row(&again.ok()["results"], "codex").clone();
     assert_eq!(codex["result"], "current");
     assert_eq!(codex["mailed"], false);
-    assert_eq!(operator_mail(&td).await.len(), 1);
+    assert!(operator_mail(&td).await.is_empty());
 
     // The table: the policy, the last check, and the previous version
     // (kept on disk).
@@ -199,6 +190,44 @@ async fn a_check_installs_a_newer_release_once_and_mails_once() {
     );
 }
 
+/// `TERRARIUM_HARNESS_UPDATE_MAIL=on`: one mail for each installed
+/// update, with the rollback line and no range text.
+#[tokio::test]
+async fn with_update_mail_on_a_check_mails_once_for_an_update() {
+    let (td, cfg, _reg) = daemon("0.165.0").await;
+    let codex_pin = pin(&cfg, "codex");
+    td.daemon
+        .as_ref()
+        .unwrap()
+        .state
+        .harness_auto_update
+        .set_update_mail(terrariumd::harness_auto_update::UpdateMail::On);
+
+    let r = td.post_empty("/api/harnesses/check").await;
+    assert_eq!(row(&r.ok()["results"], "codex")["mailed"], true);
+    let mail = operator_mail(&td).await;
+    assert_eq!(mail.len(), 1, "{mail:?}");
+    let (subject, body) = &mail[0];
+    assert_eq!(
+        subject,
+        &format!("Harness update: codex {codex_pin} -> 0.165.0")
+    );
+    assert!(!body.contains("range"), "{body}");
+    assert!(!body.contains("WARNING"), "{body}");
+    assert!(
+        body.contains(&format!("terrarium admin harness pin codex {codex_pin}")),
+        "{body}"
+    );
+    assert!(body.contains("/settings/subscriptions"), "{body}");
+
+    // Nothing changed: no second mail.
+    let again = td.post_empty("/api/harnesses/check").await;
+    assert_eq!(row(&again.ok()["results"], "codex")["mailed"], false);
+    assert_eq!(operator_mail(&td).await.len(), 1);
+}
+
+/// A failed install mails with the default `TERRARIUM_HARNESS_UPDATE_MAIL`
+/// (`off`): it is an error, not an update notice.
 #[tokio::test]
 async fn a_failed_install_keeps_the_version_and_mails_once_for_each_version() {
     let (td, cfg, reg) = daemon("99.0.0").await;

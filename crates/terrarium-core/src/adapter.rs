@@ -3,7 +3,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use semver::{Version, VersionReq};
+use semver::Version;
 use serde::{Deserialize, Serialize};
 
 use crate::config::SubscriptionDef;
@@ -56,9 +56,6 @@ pub enum Answer {
 /// pure, or a short blocking call that the caller runs off the async runtime.
 pub trait Adapter: Send + Sync {
     fn id(&self) -> HarnessId;
-
-    /// The harness versions this adapter was tested against.
-    fn tested_version(&self) -> VersionReq;
 
     /// Run the harness to read its installed version. This blocks.
     fn detect_version(&self) -> Result<Version>;

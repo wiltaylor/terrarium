@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::{ms, until, wait};
-use semver::{Version, VersionReq};
+use semver::Version;
 use serde_json::{Value, json};
 use terrarium_core::{
     Adapter, Agent, AgentId, AgentStatus, Answer, Event, EventRecord, HarnessId, HarnessSessionId,
@@ -36,9 +36,6 @@ struct FakeAdapter {
 impl Adapter for FakeAdapter {
     fn id(&self) -> HarnessId {
         HarnessId::Claude
-    }
-    fn tested_version(&self) -> VersionReq {
-        VersionReq::STAR
     }
     fn detect_version(&self) -> terrarium_core::Result<Version> {
         Ok(Version::new(1, 0, 0))

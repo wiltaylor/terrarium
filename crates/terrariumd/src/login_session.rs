@@ -841,9 +841,6 @@ impl Adapter for LoginAdapter {
     fn id(&self) -> HarnessId {
         self.harness
     }
-    fn tested_version(&self) -> semver::VersionReq {
-        semver::VersionReq::STAR
-    }
     fn detect_version(&self) -> terrarium_core::Result<semver::Version> {
         Err(terrarium_core::Error::Other(
             "a login session does not check versions".into(),

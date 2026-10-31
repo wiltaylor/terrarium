@@ -18,9 +18,6 @@ pub struct PiFlags {
     /// The pinned version, which the image installs. It comes from
     /// `harnesses.toml` at compile time (`terrarium_core::harnesses`).
     pub verified: &'static str,
-    /// The version range that the adapter accepts (a `semver::VersionReq`),
-    /// from `harnesses.toml`. `just harness::update` widens it.
-    pub tested: &'static str,
     /// The provider id, for example `openai-codex` (see [`crate::provider`]).
     /// Since 1.4 it only narrows the search for `--model`: alone it is
     /// fatal ("Error: --provider requires --model"), and pi does not start.
@@ -83,7 +80,6 @@ pub struct PiFlags {
 /// on 1.4.0 (`docs/compat.md`).
 pub const PI_PINNED: PiFlags = PiFlags {
     verified: terrarium_core::harnesses::pi::VERSION,
-    tested: terrarium_core::harnesses::pi::TESTED,
     provider: "--provider",
     model: "--model",
     extension: "-e",

@@ -28,7 +28,7 @@ pub mod usage;
 
 use std::path::{Path, PathBuf};
 
-use semver::{Version, VersionReq};
+use semver::Version;
 use terrarium_core::adapter::{Screen, run_version};
 use terrarium_core::config::SubscriptionDef;
 use terrarium_core::{
@@ -39,10 +39,6 @@ use terrarium_core::{
 pub use error::ClaudeError;
 pub use flags::{CLAUDE_2_1, ClaudeFlags};
 pub use launch::SessionStart;
-
-/// The Claude Code versions this adapter accepts. Only
-/// [`ClaudeFlags::verified`] (the pin in `harnesses.toml`) was measured.
-pub const TESTED: &str = CLAUDE_2_1.tested;
 
 /// How the rendered prompt reaches Claude Code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -208,10 +204,6 @@ impl Adapter for ClaudeAdapter {
         HarnessId::Claude
     }
 
-    fn tested_version(&self) -> VersionReq {
-        VersionReq::parse(self.options.flags.tested).unwrap_or(VersionReq::STAR)
-    }
-
     fn detect_version(&self) -> Result<Version> {
         run_version(&self.options.program)
     }
@@ -322,20 +314,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tested_range_covers_the_verified_version() {
+    fn the_verified_version_is_the_pin() {
         let a = ClaudeAdapter::default();
-        let req = a.tested_version();
-        assert!(req.matches(&Version::parse(CLAUDE_2_1.verified).expect("v")));
-        // The pin and the range come from harnesses.toml.
+        // The pin comes from harnesses.toml.
         assert_eq!(
             CLAUDE_2_1.verified,
             terrarium_core::harnesses::claude::VERSION
         );
-        assert_eq!(CLAUDE_2_1.tested, terrarium_core::harnesses::claude::TESTED);
-        assert_eq!(
-            req,
-            VersionReq::parse(terrarium_core::harnesses::claude::TESTED).expect("req")
-        );
+        assert!(Version::parse(CLAUDE_2_1.verified).is_ok());
         assert_eq!(a.id(), HarnessId::Claude);
     }
 
@@ -481,6 +467,6 @@ mod tests {
             assert!(help.contains(flag), "{flag} is not in claude --help");
         }
         let v = ClaudeAdapter::default().detect_version().expect("version");
-        assert!(ClaudeAdapter::default().tested_version().matches(&v), "{v}");
+        assert!(!v.to_string().is_empty());
     }
 }

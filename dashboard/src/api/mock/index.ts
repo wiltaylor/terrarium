@@ -184,18 +184,17 @@ interface MockHarness {
   harness: HarnessVersion["harness"] | null;
   package: string;
   pinned: string;
-  tested: string | null;
   npm: { version: string; days: number } | { error: string };
 }
 
 const MOCK_HARNESSES: MockHarness[] = [
-  { name: "claude", harness: "claude", package: "@anthropic-ai/claude-code", pinned: "2.1.310", tested: ">=2.1.310, <2.2.0", npm: { version: "2.1.310", days: 3 } },
+  { name: "claude", harness: "claude", package: "@anthropic-ai/claude-code", pinned: "2.1.310", npm: { version: "2.1.310", days: 3 } },
   // 0.x: the second number is the major.
-  { name: "codex", harness: "codex", package: "@openai/codex", pinned: "0.164.0", tested: ">=0.164.0, <0.165.0", npm: { version: "0.165.0", days: 1 } },
-  { name: "copilot", harness: "copilot", package: "@github/copilot", pinned: "1.0.103", tested: ">=1.0.103, <1.1.0", npm: { version: "1.0.110", days: 2 } },
-  // Installed out of range, so mock mode shows the badge; npm does not answer for it.
-  { name: "pi", harness: "pi", package: "@earendil-works/pi-coding-agent", pinned: "1.4.0", tested: ">=1.4.0, <1.5.0", npm: { error: "cannot reach npm: connection refused" } },
-  { name: "copilot-prompt", harness: null, package: "copilot-custom-system-prompt", pinned: "0.1.2", tested: null, npm: { version: "0.1.2", days: 30 } },
+  { name: "codex", harness: "codex", package: "@openai/codex", pinned: "0.164.0", npm: { version: "0.165.0", days: 1 } },
+  { name: "copilot", harness: "copilot", package: "@github/copilot", pinned: "1.0.103", npm: { version: "1.0.110", days: 2 } },
+  // The auto-update moved it past its pin; npm does not answer for it.
+  { name: "pi", harness: "pi", package: "@earendil-works/pi-coding-agent", pinned: "1.4.0", npm: { error: "cannot reach npm: connection refused" } },
+  { name: "copilot-prompt", harness: null, package: "copilot-custom-system-prompt", pinned: "0.1.2", npm: { version: "0.1.2", days: 30 } },
 ];
 
 /** The release notes of each harness, as the daemon knows them (`harness_auto_update::changelog_url`). */
@@ -216,25 +215,6 @@ function checkHarnessVersion(v: string | undefined): string {
   if (version !== "latest" && !/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(version))
     fail(422, "invalid", `version \`${version}\` is not \`latest\` or x.y.z`);
   return version;
-}
-
-/** A `>=a, <b` range check, enough for the mock's ranges. */
-function inTested(version: string, tested: string): boolean {
-  const n = (s: string) => s.trim().replace(/^[<>=]+/, "").split(".").map(Number);
-  const cmp = (a: number[], b: number[]) => {
-    for (let i = 0; i < 3; i++) if ((a[i] ?? 0) !== (b[i] ?? 0)) return (a[i] ?? 0) - (b[i] ?? 0);
-    return 0;
-  };
-  const v = n(version);
-  return tested.split(",").every((part) => {
-    const p = part.trim();
-    const b = n(p);
-    if (p.startsWith(">=")) return cmp(v, b) >= 0;
-    if (p.startsWith("<=")) return cmp(v, b) <= 0;
-    if (p.startsWith(">")) return cmp(v, b) > 0;
-    if (p.startsWith("<")) return cmp(v, b) < 0;
-    return cmp(v, b) === 0;
-  });
 }
 
 /** The screen of every mock display (docs/api.md §17.10). */
@@ -311,11 +291,11 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
   const harnessAtStart: Record<string, string> = { ...harnessInstalled };
   const harnessRuns: Record<string, string> = {};
   // The update policy and the last check of each harness (the daemon's `harness_updates`). Demo state: claude is
-  // pinned; the auto-update moved pi to 1.5.1, outside its tested range, so "Roll back and pin" goes to 1.4.0.
+  // pinned; the auto-update moved pi to 1.5.1, so "Roll back and pin" goes to 1.4.0.
   const harnessPolicy: Record<string, Omit<HarnessAutoUpdate, "changelog">> = {};
   for (const h of ["claude", "codex", "copilot", "pi"]) harnessPolicy[h] = { policy: "auto", pinned_version: null, previous: null, latest: null, checked_at: null, result: null, detail: null };
   Object.assign(harnessPolicy.claude!, { policy: "pinned", pinned_version: "2.1.310", latest: "2.1.310", checked_at: new Date(startedAt - 6 * 3600_000).toISOString(), result: "pinned", detail: "pinned to 2.1.310; no auto-update" });
-  Object.assign(harnessPolicy.pi!, { previous: "1.4.0", latest: "1.5.1", checked_at: new Date(startedAt - 6 * 3600_000).toISOString(), result: "updated", detail: "1.4.0 -> 1.5.1 (outside the tested range)" });
+  Object.assign(harnessPolicy.pi!, { previous: "1.4.0", latest: "1.5.1", checked_at: new Date(startedAt - 6 * 3600_000).toISOString(), result: "updated", detail: "1.4.0 -> 1.5.1" });
   harnessOnDisk.pi = ["1.4.0", "1.5.1"];
 
   const reply = <T>(fn: () => T): Promise<T> =>
@@ -642,15 +622,12 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
     const at = new Date(startedAt).toISOString();
     const rows = MOCK_HARNESSES.filter((h): h is MockHarness & { harness: HarnessVersion["harness"] } => h.harness !== null).map((h) => {
       const installed = harnessInstalled[h.name] ?? null;
-      const in_range = installed === null ? null : inTested(installed, h.tested!);
       const agents = harnessAgents(h.harness);
       const base: HarnessVersion = {
         harness: h.harness,
         package: h.package,
         pinned: h.pinned,
-        tested: h.tested!,
         installed,
-        in_range,
         checked_at: at,
         ...(installed ? { active: installed, versions: [...(harnessOnDisk[h.name] ?? [])] } : {}),
         ...(agents.length ? { agents } : {}),
@@ -660,7 +637,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
       if ("error" in h.npm) return { ...base, latest: null, update: null, latest_error: h.npm.error };
       return { ...base, latest: { version: h.npm.version, published_at: new Date(startedAt - h.npm.days * 86_400_000).toISOString() }, update: harnessUpdateKind(installed ?? h.pinned, h.npm.version) };
     });
-    return { policy: "warn", harnesses: rows, auto_update: { schedule: "daily", next_check_at: new Date(startedAt + 5 * 60_000).toISOString() } };
+    return { harnesses: rows, auto_update: { schedule: "daily", next_check_at: new Date(startedAt + 5 * 60_000).toISOString() } };
   };
   /** The rollback target: the version before the last switch when it is on disk, else the newest dir under the active one. */
   const harnessPrevious = (name: string, active: string | null): string | null => {
@@ -716,8 +693,6 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
       from,
       to: target,
       output: reused ? `${h.package}@${target} is complete on disk: no npm run\n` : `\nadded 1 package in 3s\n`,
-      tested: h.tested,
-      in_range: h.tested ? inTested(target, h.tested) : null,
       reused,
       agents_on_old_version: old,
       ...(old.length ? { note: `${old.length} live agent(s) run another version of ${h.name}: ${names.join(", ")}. Each keeps its version and moves to ${target} at its next restart` } : {}),
@@ -1941,20 +1916,11 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           else if (latest === null) item = { harness: h.name, result: "skipped", detail: "error" in h.npm ? h.npm.error : "", latest, mailed: false };
           else if (!from || harnessUpdateKind(from, latest) === "none") item = { harness: h.name, result: "current", detail: `${from} is the latest release`, latest, mailed: false };
           else {
-            const r = updateHarness(h, latest, false, "auto");
-            const inRange = inTested(latest, h.tested!);
-            item = { harness: h.name, result: "updated", detail: `${from} -> ${latest}${inRange ? "" : " (outside the tested range)"}`, from, to: latest, latest, in_range: inRange, mailed: true };
-            audit("harness.auto_update", h.name, undefined, { package: h.package, from, to: latest, latest, ok: true, detail: item.detail, in_range: inRange }, "system");
-            emit({ kind: "harness", actor: "system", summary: `${h.name} ${from} -> ${latest} (auto-update)`, data: { change: "auto_updated", harness: h.name, package: h.package, from, to: latest, in_range: inRange } });
-            const warn = inRange ? `${latest} is in the tested range of the ${h.name} adapter (${h.tested}).\n` : `WARNING: ${latest} is outside the tested range of the ${h.name} adapter (${h.tested}). The hooks and the flags of the harness can be different. Look at the next agent turns on ${h.name}.\n`;
-            const log = HARNESS_CHANGELOG[h.name] ? `Changelog: ${HARNESS_CHANGELOG[h.name]}\n` : `Versions: https://www.npmjs.com/package/${h.package}?activeTab=versions\n`;
-            const old = r.agents_on_old_version.length;
-            sendMail(
-              "operator",
-              "system",
-              `Harness update: ${h.name} ${from} -> ${latest}${inRange ? "" : " (outside the tested range)"}`,
-              `The daemon updated ${h.name} (${h.package}) from ${from} to ${latest}.\n${old ? `${old} running agent(s) keep ${from}. Each agent moves to ${latest} at its next start or wake.` : `Each agent starts on ${latest} at its next start or wake.`}\n\n${warn}${log}\nTo roll back to ${from} and stop the auto-update of ${h.name}:\n  terrarium admin harness pin ${h.name} ${from}\n\nOpen: http://localhost:8080/settings/subscriptions\n`,
-            );
+            updateHarness(h, latest, false, "auto");
+            // TERRARIUM_HARNESS_UPDATE_MAIL is `off` (the default): an installed update sends no mail.
+            item = { harness: h.name, result: "updated", detail: `${from} -> ${latest}`, from, to: latest, latest, mailed: false };
+            audit("harness.auto_update", h.name, undefined, { package: h.package, from, to: latest, latest, ok: true, detail: item.detail }, "system");
+            emit({ kind: "harness", actor: "system", summary: `${h.name} ${from} -> ${latest} (auto-update)`, data: { change: "auto_updated", harness: h.name, package: h.package, from, to: latest } });
           }
           Object.assign(p, { checked_at: at, result: item.result, detail: item.detail, latest: latest ?? p.latest });
           return item;
@@ -1969,7 +1935,7 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
             return updateHarness(h, "latest", o.force === true);
           } catch (e) {
             const d = (e as ApiError).details as { output?: string } | undefined;
-            return { harness: h.name, package: h.package, from: harnessInstalled[h.name] ?? null, to: null, output: d?.output ?? "", tested: h.tested, in_range: null, reused: false, agents_on_old_version: [], error: (e as Error).message };
+            return { harness: h.name, package: h.package, from: harnessInstalled[h.name] ?? null, to: null, output: d?.output ?? "", reused: false, agents_on_old_version: [], error: (e as Error).message };
           }
         });
         const failed = results.filter((r) => r.error).length;

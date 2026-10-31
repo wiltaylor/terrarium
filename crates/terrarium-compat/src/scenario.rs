@@ -567,71 +567,24 @@ fn blocking<T>(f: impl FnOnce() -> T) -> T {
     tokio::task::block_in_place(f)
 }
 
-/// Check that the adapter's range is the one in `harnesses.toml`: the
-/// suite, the image, and the daemon read the same file.
+/// Report the harnesses.toml pin. The suite, the image, and the daemon
+/// read the same file.
 fn pin_step(h: &dyn Harness, report: &mut Report) {
     let id = h.id();
     let pin = terrarium_core::harnesses::pin(id);
-    let tested = h.adapter().tested_version().to_string();
-    let want = semver::VersionReq::parse(pin.tested)
-        .map(|r| r.to_string())
-        .ok();
-    if want.as_deref() == Some(tested.as_str()) {
-        report.pass(
-            id,
-            "pin",
-            format!(
-                "harnesses.toml pins {} with range {}",
-                pin.version, pin.tested
-            ),
-        );
-    } else {
-        report.fail(
-            id,
-            "pin",
-            format!(
-                "the adapter range {tested} is not the harnesses.toml range {}",
-                pin.tested
-            ),
-        );
-    }
+    report.pass(id, "pin", format!("harnesses.toml pins {}", pin.version));
 }
 
-/// Check the version. `false` when the binary is missing. In a dry run a
-/// version outside the range is a skip, not a failure: the dry run checks
-/// the adapter code, and the host install is the operator's. A real run
-/// (`just ci::compat`) fails on it.
-fn version_step(h: &dyn Harness, report: &mut Report, dry: bool) -> bool {
+/// Read the installed version. `false` when the binary is missing. Any
+/// version passes: the other steps test it, so the suite is the way to
+/// test a new release.
+fn version_step(h: &dyn Harness, report: &mut Report) -> bool {
     let id = h.id();
     let adapter = h.adapter();
-    let tested = adapter.tested_version();
     let pin = terrarium_core::harnesses::pin(id).version;
     match blocking(|| adapter.detect_version()) {
-        Ok(v) if tested.matches(&v) => {
-            report.pass(
-                id,
-                "version",
-                format!("{v} is in the tested range {tested} (pin {pin})"),
-            );
-            true
-        }
-        Ok(v) if dry => {
-            report.skip(
-                id,
-                "version",
-                format!(
-                    "the host has {v}, outside the tested range {tested}; install the pin \
-                     {pin} on the host before `just ci::compat`"
-                ),
-            );
-            true
-        }
         Ok(v) => {
-            report.fail(
-                id,
-                "version",
-                format!("{v} is not in the tested range {tested} (pin {pin})"),
-            );
+            report.pass(id, "version", format!("{v} is installed (pin {pin})"));
             true
         }
         Err(e) => {
@@ -646,7 +599,7 @@ fn version_step(h: &dyn Harness, report: &mut Report, dry: bool) -> bool {
 fn dry_run(h: &dyn Harness, report: &mut Report) {
     let id = h.id();
     pin_step(h, report);
-    version_step(h, report, true);
+    version_step(h, report);
     let check = || -> Result<String, String> {
         let tmp = tempfile::Builder::new()
             .prefix("tcompat-dry-")
@@ -808,7 +761,7 @@ async fn real_run(h: &dyn Harness, settings: &Settings, report: &mut Report) {
         return;
     }
     let before = blocking(|| Snapshot::take(&home));
-    if !version_step(h, report, false) {
+    if !version_step(h, report) {
         skip_rest(report, 0, "no binary");
         return;
     }
@@ -1426,7 +1379,7 @@ async fn codex_empty_hooks(h: &Codex, settings: &Settings, report: &mut Report) 
 mod tests {
     use std::sync::Mutex;
 
-    use semver::{Version, VersionReq};
+    use semver::Version;
     use terrarium_core::HookPayload;
 
     use super::*;
@@ -1439,9 +1392,6 @@ mod tests {
     impl Adapter for FakeAdapter {
         fn id(&self) -> HarnessId {
             HarnessId::Codex
-        }
-        fn tested_version(&self) -> VersionReq {
-            VersionReq::STAR
         }
         fn detect_version(&self) -> terrarium_core::Result<Version> {
             Ok(Version::new(1, 0, 0))

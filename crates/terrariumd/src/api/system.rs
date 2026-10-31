@@ -87,11 +87,10 @@ pub struct HarnessQuery {
     pub latest: bool,
 }
 
-/// `GET /api/harnesses`: for each harness, the pin from `harnesses.toml`,
-/// the adapter's tested range, the installed version, and whether it is in
-/// the range; with a tools dir, the active version dir, the version dirs
-/// on disk, and the live agents with the version each runs; and the start
-/// policy (`TERRARIUM_HARNESS_VERSION_POLICY`). Each row has its update
+/// `GET /api/harnesses`: for each harness, the pin from `harnesses.toml`
+/// and the installed version; with a tools dir, the active version dir,
+/// the version dirs on disk, and the live agents with the version each
+/// runs. Each row has its update
 /// policy and its last auto-update check (`auto_update`), and the report
 /// has the schedule of the check. With `latest`, also the
 /// latest release on npm and the update kind; npm that does not answer
@@ -165,10 +164,6 @@ pub struct HarnessUpdateResult {
     pub to: Option<String>,
     /// npm's output (stdout, then stderr).
     pub output: String,
-    /// The adapter's tested range; `null` for an extension.
-    pub tested: Option<String>,
-    /// Whether `to` is in `tested`; `null` when not known.
-    pub in_range: Option<bool>,
     /// True when the version dir was complete on disk, so npm did not run.
     #[serde(default)]
     pub reused: bool,
@@ -413,8 +408,6 @@ async fn update_one(
         from,
         to,
         output,
-        tested: None,
-        in_range: None,
         reused,
         agents_on_old_version: old,
         note,
@@ -423,24 +416,10 @@ async fn update_one(
     })
 }
 
-/// Run `<binary> --version` again for each harness, and fill `tested` and
-/// `in_range` of the results.
-async fn refresh(state: &Shared, results: &mut [HarnessUpdateResult]) {
-    let report = state.supervisor.harness_versions(true).await;
-    for r in results {
-        if let Some(row) = report
-            .harnesses
-            .iter()
-            .find(|h| h.harness.as_str() == r.harness)
-        {
-            r.tested = Some(row.tested.clone());
-            r.in_range = if r.to.is_some() && r.to == row.installed {
-                row.in_range
-            } else {
-                None
-            };
-        }
-    }
+/// Run `<binary> --version` again for each harness, so the version
+/// cache sees the new versions.
+async fn refresh(state: &Shared) {
+    state.supervisor.harness_versions(true).await;
 }
 
 /// The GC after an update; each result gets the removed versions of its
@@ -494,7 +473,7 @@ pub async fn harness_update(
         ApiError::conflict("another harness update runs now; try again when it ends")
     })?;
     let mut results = vec![update_one(&state, &actor, &cfg, &pin, version, body.force).await?];
-    refresh(&state, &mut results).await;
+    refresh(&state).await;
     if results[0].error.is_none() {
         gc_after(&state, cfg.clone(), &mut results).await;
     }
@@ -540,7 +519,7 @@ pub async fn harness_update_all(
     for pin in &cfg.pins {
         results.push(update_one(&state, &actor, &cfg, pin, version, body.force).await?);
     }
-    refresh(&state, &mut results).await;
+    refresh(&state).await;
     gc_after(&state, cfg.clone(), &mut results).await;
     let failed = results.iter().filter(|r| r.error.is_some()).count();
     if failed > 0 {

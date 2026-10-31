@@ -1767,7 +1767,7 @@ pub enum AdminCmd {
         #[command(subcommand)]
         command: SubscriptionCmd,
     },
-    /// Harness versions: the pins, the tested ranges, the installed versions
+    /// Harness versions: the pins, the installed versions, the updates
     Harness {
         #[command(subcommand)]
         command: HarnessCmd,
@@ -2687,8 +2687,8 @@ pub enum SubscriptionCmd {
 
 #[derive(Debug, Subcommand)]
 pub enum HarnessCmd {
-    /// List each harness: the pin (harnesses.toml), the tested range, the
-    /// installed version, and whether it is in the range
+    /// List each harness: the pin (harnesses.toml), the installed version,
+    /// the update policy, and the version dirs on disk
     Ls {
         /// Run `<harness> --version` again in place of the cached answer
         #[arg(long)]

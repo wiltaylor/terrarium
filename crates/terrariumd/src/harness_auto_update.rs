@@ -12,9 +12,11 @@
 //! - `auto` (the default): when npm has a newer release (a major too), the
 //!   check installs it into its version dir and switches to it, as
 //!   `POST /api/harnesses/{name}/update` does. Running agents keep their
-//!   version; each moves at its next start or wake. The operator gets one
-//!   mail for each installed update. A failed install keeps the active
-//!   version and mails once for each failed version.
+//!   version; each moves at its next start or wake. With
+//!   `TERRARIUM_HARNESS_UPDATE_MAIL=on`, the operator gets one mail for
+//!   each installed update; with `off` (the default), no mail. A failed
+//!   install keeps the active version and mails once for each failed
+//!   version, with both values.
 //! - `pinned`: no install. `POST /api/harnesses/{name}/pin` sets it (by
 //!   default to the previous version, a rollback), and `unpin` removes it.
 //!
@@ -26,7 +28,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use semver::{Version, VersionReq};
+use semver::Version;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use terrarium_core::HarnessId;
@@ -40,6 +42,8 @@ use crate::store::mail::{self, Address, Outgoing};
 
 /// The env var of the schedule.
 pub const ENV_AUTO_UPDATE: &str = "TERRARIUM_HARNESS_AUTO_UPDATE";
+/// The env var of the mail for an installed update.
+pub const ENV_UPDATE_MAIL: &str = "TERRARIUM_HARNESS_UPDATE_MAIL";
 /// The time from the daemon start to the first check.
 pub const FIRST_DELAY: Duration = Duration::from_secs(5 * 60);
 /// The shortest interval: npm documents are large.
@@ -50,6 +54,28 @@ pub const MAX_JITTER: Duration = Duration::from_secs(30 * 60);
 pub const DAILY: Duration = Duration::from_secs(86_400);
 /// The dashboard page of the harness versions, for the mails.
 pub const PAGE: &str = "/settings/subscriptions";
+
+/// Does an installed update send a mail to the operator
+/// (`TERRARIUM_HARNESS_UPDATE_MAIL`)? A failed install mails with both
+/// values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum UpdateMail {
+    /// No mail. The audit row, the `harness` event, and the dashboard
+    /// table still show the update.
+    #[default]
+    Off,
+    /// One mail for each installed update.
+    On,
+}
+
+impl std::fmt::Display for UpdateMail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Off => "off",
+            Self::On => "on",
+        })
+    }
+}
 
 /// When the background check runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -184,14 +210,6 @@ pub fn decide(st: &UpdateState, active: Option<&str>, latest: &Result<String, St
     }
 }
 
-/// Whether `version` is in the tested range of `harness`; `None` when
-/// either does not parse.
-pub fn in_tested_range(harness: HarnessId, version: &str) -> Option<bool> {
-    let req = VersionReq::parse(terrarium_core::harnesses::pin(harness).tested).ok()?;
-    let v = Version::parse(version).ok()?;
-    Some(req.matches(&v))
-}
-
 /// The release notes of a harness, when the project publishes them in a
 /// known place.
 pub fn changelog_url(harness: HarnessId) -> Option<&'static str> {
@@ -224,8 +242,6 @@ pub struct UpdateNotice<'a> {
     pub to: &'a str,
     /// The live agents that keep `from` until their next start.
     pub agents_on_old: usize,
-    /// `TERRARIUM_HARNESS_VERSION_POLICY=refuse`.
-    pub refuse: bool,
     /// The dashboard page.
     pub link: &'a str,
 }
@@ -233,12 +249,7 @@ pub struct UpdateNotice<'a> {
 /// The subject and the body of the mail for an installed update.
 pub fn update_mail(n: &UpdateNotice<'_>) -> (String, String) {
     let h = n.harness;
-    let tested = terrarium_core::harnesses::pin(h).tested;
-    let in_range = in_tested_range(h, n.to);
-    let mut subject = format!("Harness update: {h} {} -> {}", n.from, n.to);
-    if in_range == Some(false) {
-        subject.push_str(" (outside the tested range)");
-    }
+    let subject = format!("Harness update: {h} {} -> {}", n.from, n.to);
     let mut body = format!(
         "The daemon updated {h} ({}) from {} to {}.\n",
         n.package, n.from, n.to
@@ -255,30 +266,6 @@ pub fn update_mail(n: &UpdateNotice<'_>) -> (String, String) {
         ));
     }
     body.push('\n');
-    match in_range {
-        Some(false) => {
-            body.push_str(&format!(
-                "WARNING: {} is outside the tested range of the {h} adapter ({tested}). The hooks \
-                 and the flags of the harness can be different. Look at the next agent turns on \
-                 {h}.\n",
-                n.to
-            ));
-            if n.refuse {
-                body.push_str(&format!(
-                    "TERRARIUM_HARNESS_VERSION_POLICY is `refuse`: agent starts on {h} fail until \
-                     you roll back.\n"
-                ));
-            }
-        }
-        Some(true) => body.push_str(&format!(
-            "{} is in the tested range of the {h} adapter ({tested}).\n",
-            n.to
-        )),
-        None => body.push_str(&format!(
-            "The daemon cannot compare {} with the tested range ({tested}).\n",
-            n.to
-        )),
-    }
     match changelog_url(h) {
         Some(u) => body.push_str(&format!("Changelog: {u}\n")),
         None => body.push_str(&format!("Versions: {}\n", npm_page(n.package))),
@@ -391,9 +378,6 @@ pub struct CheckItem {
     pub to: Option<String>,
     /// The latest release on npm; `null` when npm did not answer.
     pub latest: Option<String>,
-    /// Whether `to` is in the tested range of the adapter.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub in_range: Option<bool>,
     /// True when the check sent a mail to the operator.
     #[serde(default)]
     pub mailed: bool,
@@ -411,6 +395,8 @@ pub struct CheckReport {
 #[derive(Debug)]
 pub struct Runtime {
     schedule: Mutex<Schedule>,
+    /// `TERRARIUM_HARNESS_UPDATE_MAIL`.
+    update_mail: Mutex<UpdateMail>,
     next_at: Mutex<Option<DateTime<Utc>>>,
     /// Held while a check runs.
     pub running: tokio::sync::Mutex<()>,
@@ -421,6 +407,7 @@ impl Default for Runtime {
     fn default() -> Self {
         Self {
             schedule: Mutex::new(Schedule::Off),
+            update_mail: Mutex::new(UpdateMail::Off),
             next_at: Mutex::new(None),
             running: tokio::sync::Mutex::new(()),
         }
@@ -433,6 +420,22 @@ impl Runtime {
             .schedule
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Does an installed update send a mail (`TERRARIUM_HARNESS_UPDATE_MAIL`)?
+    pub fn update_mail(&self) -> UpdateMail {
+        *self
+            .update_mail
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Set `TERRARIUM_HARNESS_UPDATE_MAIL` (the daemon start does it).
+    pub fn set_update_mail(&self, mail: UpdateMail) {
+        *self
+            .update_mail
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = mail;
     }
 
     /// The time of the next background check; `None` when it is off.
@@ -511,8 +514,7 @@ async fn record(
                     &it.harness,
                     None,
                     json!({"package": package, "from": it.from, "to": it.to,
-                           "latest": it.latest, "ok": ok, "detail": it.detail,
-                           "in_range": it.in_range}),
+                           "latest": it.latest, "ok": ok, "detail": it.detail}),
                 )?;
             }
             if switched && let Some(to) = &it.to {
@@ -524,7 +526,7 @@ async fn record(
                         it.from.as_deref().unwrap_or("(not installed)")
                     ),
                     json!({"change": "auto_updated", "harness": it.harness, "package": package,
-                           "from": it.from, "to": to, "in_range": it.in_range}),
+                           "from": it.from, "to": to}),
                 ))?;
             }
             let mut mailed = false;
@@ -587,7 +589,6 @@ pub async fn run_check(state: &Shared, now: DateTime<Utc>) -> CheckReport {
             from: active.clone(),
             to: None,
             latest: latest.as_ref().ok().cloned(),
-            in_range: None,
             mailed: false,
         };
         let mut mail_out = None;
@@ -621,11 +622,9 @@ pub async fn run_check(state: &Shared, now: DateTime<Utc>) -> CheckReport {
                             audit_ok = Some(true);
                             item.result = CheckResult::Updated;
                             item.to = Some(u.to.clone());
-                            item.in_range = in_tested_range(pin.harness, &u.to);
+                            // The version cache sees the new version.
+                            state.supervisor.harness_versions(true).await;
                             item.detail = format!("{from} -> {}", u.to);
-                            if item.in_range == Some(false) {
-                                item.detail.push_str(" (outside the tested range)");
-                            }
                             let agents_on_old = state
                                 .supervisor
                                 .harness_runs()
@@ -633,19 +632,16 @@ pub async fn run_check(state: &Shared, now: DateTime<Utc>) -> CheckReport {
                                 .filter(|r| r.harness == pin.harness)
                                 .filter(|r| r.version.as_deref() != Some(u.to.as_str()))
                                 .count();
-                            // The version cache and the start-time guard
-                            // see the new version.
-                            let refuse = state.supervisor.harness_versions(true).await.policy
-                                == crate::harness_versions::VersionPolicy::Refuse;
-                            mail_out = Some(update_mail(&UpdateNotice {
-                                harness: pin.harness,
-                                package: &pin.package,
-                                from: &from,
-                                to: &u.to,
-                                agents_on_old,
-                                refuse,
-                                link: &link,
-                            }));
+                            if state.harness_auto_update.update_mail() == UpdateMail::On {
+                                mail_out = Some(update_mail(&UpdateNotice {
+                                    harness: pin.harness,
+                                    package: &pin.package,
+                                    from: &from,
+                                    to: &u.to,
+                                    agents_on_old,
+                                    link: &link,
+                                }));
+                            }
                             // GC while the update lock is held.
                             let removed =
                                 crate::api::system::collect_garbage(state, cfg.clone()).await;
@@ -875,7 +871,7 @@ mod tests {
     }
 
     #[test]
-    fn the_update_mail_warns_outside_the_tested_range() {
+    fn the_update_mail_names_the_versions_and_the_way_back() {
         let pin = terrarium_core::harnesses::pin(HarnessId::Codex);
         let n = UpdateNotice {
             harness: HarnessId::Codex,
@@ -883,25 +879,16 @@ mod tests {
             from: pin.version,
             to: "99.0.0",
             agents_on_old: 2,
-            refuse: true,
             link: "http://x/settings/subscriptions",
         };
         let (subject, body) = update_mail(&n);
         assert_eq!(
             subject,
-            format!(
-                "Harness update: codex {} -> 99.0.0 (outside the tested range)",
-                pin.version
-            )
+            format!("Harness update: codex {} -> 99.0.0", pin.version)
         );
-        assert!(
-            body.contains(&format!(
-                "WARNING: 99.0.0 is outside the tested range of the codex adapter ({})",
-                pin.tested
-            )),
-            "{body}"
-        );
-        assert!(body.contains("`refuse`"), "{body}");
+        // Any version is good: no range and no warning.
+        assert!(!body.contains("WARNING"), "{body}");
+        assert!(!body.contains("range"), "{body}");
         assert!(body.contains("2 running agent(s) keep"), "{body}");
         assert!(
             body.contains("Changelog: https://github.com/openai/codex/releases"),
@@ -916,24 +903,31 @@ mod tests {
         );
         assert!(body.ends_with("Open: http://x/settings/subscriptions\n"));
 
-        // In the range: no warning; pi has no known changelog.
+        // pi has no known changelog.
         let pi = terrarium_core::harnesses::pin(HarnessId::Pi);
-        let (subject, body) = update_mail(&UpdateNotice {
+        let (_, body) = update_mail(&UpdateNotice {
             harness: HarnessId::Pi,
             package: pi.package,
             from: "0.0.1",
             to: pi.version,
             agents_on_old: 0,
-            refuse: false,
             link: "l",
         });
-        assert!(!subject.contains("outside"), "{subject}");
-        assert!(!body.contains("WARNING"), "{body}");
-        assert!(body.contains("is in the tested range"), "{body}");
         assert!(
             body.contains("Versions: https://www.npmjs.com/package/"),
             "{body}"
         );
+    }
+
+    #[test]
+    fn the_update_mail_setting_parses_and_is_off_by_default() {
+        use clap::ValueEnum;
+        assert_eq!(UpdateMail::default(), UpdateMail::Off);
+        assert_eq!(UpdateMail::from_str("on", true), Ok(UpdateMail::On));
+        assert_eq!(UpdateMail::from_str("off", true), Ok(UpdateMail::Off));
+        assert!(UpdateMail::from_str("loud", true).is_err());
+        assert_eq!(UpdateMail::On.to_string(), "on");
+        assert_eq!(Runtime::default().update_mail(), UpdateMail::Off);
     }
 
     #[test]

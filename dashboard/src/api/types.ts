@@ -45,18 +45,14 @@ export interface Health {
   compact_harnesses?: Harness[];
 }
 
-/** `GET /api/harnesses` (docs/api.md §4): one harness against its pin and tested range. */
+/** `GET /api/harnesses` (docs/api.md §4): one harness against its pin. */
 export interface HarnessVersion {
   harness: Harness;
   package: string;
   /** The version of the first install (harnesses.toml). */
   pinned: string;
-  /** The range the adapter accepts. */
-  tested: string;
   /** What `<binary> --version` reported; null when it did not answer. */
   installed: string | null;
-  /** Null when the installed version is not known. */
-  in_range: boolean | null;
   error?: string;
   checked_at: string | null;
   /** `?latest=true` only: the latest release on npm; null when npm did not answer (`latest_error` says why). */
@@ -122,7 +118,6 @@ export interface HarnessCheckItem {
   from?: string;
   to?: string;
   latest: string | null;
-  in_range?: boolean;
   /** True when the check sent a mail to the operator. */
   mailed: boolean;
 }
@@ -162,10 +157,6 @@ export interface HarnessUpdateResult {
   to: string | null;
   /** What npm printed. */
   output: string;
-  /** The adapter's tested range; null for the extension. */
-  tested: string | null;
-  /** Is `to` in `tested`? Null when it is not known. */
-  in_range: boolean | null;
   /** True when the version dir was complete on disk, so npm did not run. */
   reused: boolean;
   /** The live agents that run another version than `to`. Each keeps its version until its next restart. */
@@ -185,11 +176,7 @@ export interface HarnessUpdateOptions {
   force?: boolean;
 }
 
-/** What an agent start does outside the range (`TERRARIUM_HARNESS_VERSION_POLICY`). */
-export type HarnessVersionPolicy = "warn" | "refuse";
-
 export interface HarnessReport {
-  policy: HarnessVersionPolicy;
   harnesses: HarnessVersion[];
   /** `TERRARIUM_HARNESS_AUTO_UPDATE` (`daily`, `off`, or a duration) and the next background check. */
   auto_update?: { schedule: string; next_check_at: string | null };
