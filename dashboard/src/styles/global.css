@@ -925,22 +925,6 @@ button.link-button {
   }
 }
 
-/* Queue */
-.queue-item {
-  display: flex;
-  gap: 10px;
-  align-items: flex-start;
-  padding: 10px 0;
-  border-bottom: 1px solid var(--border);
-}
-.queue-item:last-child {
-  border-bottom: none;
-}
-.queue-kind {
-  flex: none;
-  width: 74px;
-}
-
 /* Agents */
 .agent-card {
   display: grid;

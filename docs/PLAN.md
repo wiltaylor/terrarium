@@ -2024,8 +2024,7 @@ Flow:
 
 Dashboard: a Versions timeline per project; a version page with status,
 notes, cards, artifacts, reviews, and compare-to-previous; approve and reject
-buttons with a comment box; a home-screen queue of everything `in_review`
-across projects.
+buttons with a comment box.
 
 The protocol in the system prompt tells an agent to:
 

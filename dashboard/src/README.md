@@ -301,7 +301,7 @@ the event stream (below).
 - Write each store as a factory (`createXStore(api, ...)`). Tests build their
   own instance with the mock API.
 - Put logic that has no UI in pure functions (`moveCard`, `applyAgentEvent`,
-  `buildQueue`, `renderWiki`). Test those functions directly.
+  `renderWiki`). Test those functions directly.
 - Import the API through `api` from `src/stores`. Do not call `fetch` in a view.
 - Add each new endpoint in three places: the `Api` interface, `createHttpApi`,
   and `createMockApi`. TypeScript fails the build when one is missing.
@@ -354,10 +354,10 @@ While the socket is down, the layout shows a **Disconnected** strip with a
 
 Every view listens through `events.on(...)`: agent status badges, the
 current card, and the self-report (`applyAgentEvent`), the board (`card` and
-`board` events), the Inbox count in the sidebar and the Inbox items of the
-Home queue (`stores/inbox.ts`, `inbox` and `question` events), the mail log (`features/mail/feed.ts`), the quota banner and the hold badges
+`board` events), the Inbox count in the sidebar (`stores/inbox.ts`, `inbox`
+and `question` events), the mail log (`features/mail/feed.ts`), the quota banner and the hold badges
 (`stores/quota.ts`), the subscription list (`quota.*` events) and the detect
-banner (`subscription.offer`), the home queue and usage strip, the Event
+banner (`subscription.offer`), the home usage strip, the Event
 log, and the agent's Events tab. `lease` events keep the lease lists on the
 Targets and agent pages live, and the "holds <target>" chips next to the
 agent status badges (`stores/leases.ts`, `lib/leases.ts`).
@@ -368,8 +368,7 @@ only: `{change, schedule, name, project, run?, status?, trigger?}`.
 `run_started` puts a spinner on the row. `run_finished` and the other
 changes read the list again, and an open run history reads its newest page
 again (`syncHead`). `POST .../run` answers with the run when it ends; that
-answer also sets the last run. The Home queue shows each schedule whose
-last run failed in the last 24 hours (`failedRecently`).
+answer also sets the last run.
 
 The dialog previews the next 3 runs of a cron expression with
 `lib/cron.ts`, a small 5-field parser. The preview does not stop a send:
@@ -564,7 +563,7 @@ daemon sorts: urgent first, then the newest.
   (`GET /api/inbox/counts`, `stores/inbox.ts`). It is red when one item is
   urgent, else it has the info style (`features/inbox/model.ts` `badge`).
 - `inbox` events (`{item, kind, change, project?}`) and `question` events
-  read the page, the badge, and the Home queue again.
+  read the page and the badge again.
 - The question text, the options, the bundle items, the mail subject and
   body, and the retract reason are the sender's words: the page shows them as
   text nodes only. The context of a question, a bundle item, or a notice is Markdown: it goes through
@@ -701,7 +700,7 @@ prefix or budget scope. The daemon also has `project`, `since`, `until`, and
 
 | Route | View | API calls |
 |---|---|---|
-| `/` | Home: usage strip, waiting-on-you queue, host cards (see "Home: hosts"); the tile detail has the usage split by project, agent, model, and card | `GET /api/subscriptions`, `GET /api/usage?bucket=hour&group=subscription`; tile detail: `GET /api/usage?subscription=&group=project\|agent\|model\|card`, `GET .../quota`; per project: `versions?status=in_review`, `wiki?status=ready_for_review`, `board`; Inbox items: `GET /api/inbox` (see "The Inbox"); hosts: `GET /api/hosts`, `GET /api/hosts/{name}/metrics?minutes=15` |
+| `/` | Home: usage strip, host cards (see "Home: hosts"); the tile detail has the usage split by project, agent, model, and card | `GET /api/subscriptions`, `GET /api/usage?bucket=hour&group=subscription`; tile detail: `GET /api/usage?subscription=&group=project\|agent\|model\|card`, `GET .../quota`; hosts: `GET /api/hosts`, `GET /api/hosts/{name}/metrics?minutes=15` |
 | `/projects` | Projects: list, create. The Projects root of the sidebar tree links it | `GET`, `POST /api/projects` |
 | `/p/:project/settings/general` | Project settings, General tab: project edit and delete, Targets panel, a link to the Repos page | `GET`, `PATCH`, `DELETE /api/projects/{name}?confirm=true`, `GET .../targets` |
 | `/p/:project/repos` | Repos of the project: list, **Add repo** (project_admin), a checkout row for each repo | `GET`, `POST /api/projects/{name}/repos`, `GET .../targets`, `POST /api/repos/{id}/checkout` |

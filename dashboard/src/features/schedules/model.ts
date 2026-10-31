@@ -190,14 +190,3 @@ export function runOutputText(output: unknown): string {
 export const runSeconds = (r: Pick<ScheduleRun, "started_at" | "finished_at">): number | null =>
   r.finished_at ? Math.max(0, Math.round((Date.parse(r.finished_at) - Date.parse(r.started_at)) / 1000)) : null;
 
-/** The schedules whose last run failed within `hours` before `now`: the attention items of Home. */
-export function failedRecently(list: Schedule[], now = Date.now(), hours = 24): Schedule[] {
-  const since = now - hours * 3_600_000;
-  return list.filter((s) => s.last_run?.status === "failed" && Date.parse(s.last_run.at) >= since);
-}
-
-/** The page of a schedule, with its row open, on the tab of its kind. */
-export const scheduleHref = (s: Pick<Schedule, "id" | "project"> & Partial<Pick<Schedule, "spec">>): string => {
-  const tab = s.spec?.kind === "on" ? "&tab=triggers" : "";
-  return `${s.project ? `/p/${encodeURIComponent(s.project)}/board/schedules` : "/schedules"}?open=${encodeURIComponent(s.id)}${tab}`;
-};

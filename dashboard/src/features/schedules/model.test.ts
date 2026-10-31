@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createMockApi } from "../../api/mock";
 import type { AgentEvent, Schedule, ScheduleRun } from "../../api/types";
-import { applyRunAnswer, applyScheduleEvent, failedRecently, filterSchedules, groupSchedules, inView, readScheduleEvent, runOutputText, runSeconds, scheduleHref, tabOf, tabParam, touchesRuns, type ScheduleListState } from "./model";
+import { applyRunAnswer, applyScheduleEvent, filterSchedules, groupSchedules, inView, readScheduleEvent, runOutputText, runSeconds, tabOf, tabParam, touchesRuns, type ScheduleListState } from "./model";
 import { createRunHistory } from "./history";
 import { fakeClock } from "../../test/wait";
 
@@ -131,20 +131,6 @@ describe("scope filter and groups", () => {
   });
   it("groups global first, then projects by name", () => {
     expect(groupSchedules(list).map((g) => g.label)).toEqual(["Global", "Project terrarium", "Project webshop"]);
-  });
-});
-
-describe("Home attention: failed runs in the last 24 h", () => {
-  const now = Date.parse("2026-10-26T12:00:00Z");
-  it("keeps a schedule whose last run failed in the window", () => {
-    const failed = (at: string) => ({ at, status: "failed" as const, summary: "x", run_id: "r" });
-    const list = [sched("a", "p", { last_run: failed("2026-10-26T11:00:00Z") }), sched("b", "p", { last_run: failed("2026-10-25T11:00:00Z") }), sched("c", "p", { last_run: { ...failed("2026-10-26T11:00:00Z"), status: "ok" } })];
-    expect(failedRecently(list, now).map((s) => s.id)).toEqual(["a"]);
-  });
-  it("links to the row", () => {
-    expect(scheduleHref({ id: "S1", project: "terrarium" })).toBe("/p/terrarium/board/schedules?open=S1");
-    expect(scheduleHref({ id: "S1", project: null })).toBe("/schedules?open=S1");
-    expect(scheduleHref({ id: "T1", project: "terrarium", spec: { kind: "on", kinds: ["ci.run.failed"] } })).toBe("/p/terrarium/board/schedules?open=T1&tab=triggers");
   });
 });
 
