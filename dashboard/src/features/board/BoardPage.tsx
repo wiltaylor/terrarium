@@ -1,16 +1,18 @@
 import { A, useParams, useSearchParams } from "@solidjs/router";
 import { createEffect, createMemo, createResource, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
+import { createStore } from "solid-js/store";
 import { createPagedList } from "../../components/paged";
 import { HoldBadge } from "../../components/HoldBadge";
 import { StatusBadge } from "../../components/StatusBadge";
 import { ConfirmButton, Drawer, ErrorBanner, LoadMore, Modal, PageHead } from "../../components/ui";
-import type { Card, Question, Version } from "../../api/types";
+import type { Card, NewCard, Question, Version } from "../../api/types";
 import { ago, compact, humanize } from "../../lib/format";
 import { countdown, doneSummary, etaStopped, resolveEta, tickInterval } from "../../lib/eta";
 import { cardsIn, createBoardStore } from "../../stores/board";
 import { cardSessionRows, commentSessions, sessionHref, sessionRange } from "./sessions";
 import { CardQuestions } from "./CardQuestions";
 import { type CardQuestionBadge, cardQuestionBadges, isCardQuestionEvent, linkable } from "./questions";
+import { emptyNewCardForm, type NewCardErrors, type NewCardForm, newCardBody, newCardColumn, nextNewCardForm } from "./newCard";
 import { activeFilterCount, columnFromQuery, columnQuery, nearestColumn, PHONE_QUERY } from "./phone";
 import { matchesVersion, parseVersionFilter, VERSION_CHIP, versionOptions, versionQuery, versionsByCard } from "./versions";
 import { agents, api, events } from "../../stores";
@@ -26,7 +28,9 @@ export function BoardPage() {
   const [pendingBlock, setPendingBlock] = createSignal<{ id: string; index: number } | null>(null);
   const [label, setLabel] = createSignal("");
   const [assignee, setAssignee] = createSignal("");
-  const [newTitle, setNewTitle] = createSignal("");
+  // The column of the open New card dialog, or null.
+  const [newCardIn, setNewCardIn] = createSignal<string | null>(null);
+  let addButton: HTMLButtonElement | undefined;
   const [filtersOpen, setFiltersOpen] = createSignal(false);
 
   // A phone (phone.ts PHONE_QUERY) shows one column at a time, and it has no drag and drop: the Column select of the card drawer moves a card.
@@ -235,18 +239,6 @@ export function BoardPage() {
             <For each={assignees()}>{(a) => <option value={a}>{a}</option>}</For>
           </select>
         </div>
-        <form
-          class="row board-new"
-          onSubmit={async (e) => {
-            e.preventDefault();
-            if (newTitle().trim() && (await board.create(newTitle().trim()))) setNewTitle("");
-          }}
-        >
-          <input placeholder={`New ${board.prefix() ?? ""} card title`.replace("  ", " ")} value={newTitle()} onInput={(e) => setNewTitle(e.currentTarget.value)} aria-label="New card title" />
-          <button class="primary" type="submit">
-            Add card
-          </button>
-        </form>
       </PageHead>
       <ErrorBanner error={board.state.error} onDismiss={board.clearError} />
 
@@ -309,9 +301,27 @@ export function BoardPage() {
                     >
                       <div class="column-head">
                         <span>{humanize(col.name)}</span>
-                        <span class="count muted small">
-                          {cards().length}
-                          {col.wip_limit !== undefined ? ` / ${col.wip_limit}` : ""}
+                        <span class="row column-head-end">
+                          <span class="count muted small">
+                            {cards().length}
+                            {col.wip_limit !== undefined ? ` / ${col.wip_limit}` : ""}
+                          </span>
+                          {/* New cards go to the backlog (newCard.ts newCardColumn), so only that column has the "+" button. */}
+                          <Show when={col.name === newCardColumn(columnNames())}>
+                            <button
+                              type="button"
+                              class="ghost column-add"
+                              ref={addButton}
+                              aria-label={`Add a card to ${humanize(col.name)}`}
+                              title={`Add a card to ${humanize(col.name)}`}
+                              aria-haspopup="dialog"
+                              onClick={() => setNewCardIn(col.name)}
+                            >
+                              <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
+                                <path d="M8 3v10M3 8h10" />
+                              </svg>
+                            </button>
+                          </Show>
                         </span>
                       </div>
                       <For each={cards()}>
@@ -352,6 +362,27 @@ export function BoardPage() {
             </For>
           </div>
           </>
+        )}
+      </Show>
+
+      <Show when={newCardIn()}>
+        {(column) => (
+          <NewCardModal
+            prefix={board.prefix()}
+            column={column()}
+            columns={columnNames()}
+            agents={agents.inProject(params.project)}
+            onCreate={async (body) => {
+              const card = await api.cards.create(params.project, body);
+              board.put(card);
+              return card;
+            }}
+            onClose={() => {
+              setNewCardIn(null);
+              // The focus goes back to the "+" button that opened the dialog.
+              addButton?.focus();
+            }}
+          />
         )}
       </Show>
 
@@ -503,6 +534,147 @@ function KCard(props: {
         </div>
       </Show>
     </article>
+  );
+}
+
+/**
+ * The New card dialog: the "+" button of the backlog column opens it.
+ * "Create and add another" keeps it open for the next card (newCard.ts nextNewCardForm).
+ */
+function NewCardModal(props: {
+  prefix: string | null;
+  column: string;
+  columns: string[];
+  agents: { id: string; name: string }[];
+  onCreate: (body: NewCard) => Promise<Card>;
+  onClose: () => void;
+}) {
+  const [form, setForm] = createStore<NewCardForm>(emptyNewCardForm(props.column));
+  const [errors, setErrors] = createSignal<NewCardErrors>({});
+  const [error, setError] = createSignal<unknown>(null);
+  const [busy, setBusy] = createSignal(false);
+  const [created, setCreated] = createSignal<string[]>([]);
+  let titleEl: HTMLInputElement | undefined;
+  onMount(() => titleEl?.focus());
+  const field = (k: keyof NewCardForm) => (e: { currentTarget: { value: string } }) => setForm(k, e.currentTarget.value);
+
+  const submit = async (another: boolean) => {
+    if (busy()) return;
+    const r = newCardBody(form);
+    if ("errors" in r) {
+      setErrors(r.errors);
+      if (r.errors.title) titleEl?.focus();
+      return;
+    }
+    setErrors({});
+    setBusy(true);
+    try {
+      const card = await props.onCreate(r.body);
+      setError(null);
+      if (!another) return props.onClose();
+      setCreated((c) => [...c, card.id]);
+      setForm(nextNewCardForm(form));
+      titleEl?.focus();
+    } catch (e) {
+      setError(e);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal title="New card" class="modal-full" onClose={() => props.onClose()}>
+      <form
+        class="stack new-card"
+        onSubmit={(e) => {
+          e.preventDefault();
+          void submit((e.submitter as HTMLElement | null)?.dataset.another === "1");
+        }}
+      >
+        <ErrorBanner error={error()} onDismiss={() => setError(null)} />
+        <Show when={created().length}>
+          <p class="small muted" role="status" style={{ margin: 0 }}>
+            Created: {created().join(", ")}
+          </p>
+        </Show>
+        <label classList={{ "field-bad": !!errors().title }}>
+          Title
+          <input
+            ref={titleEl}
+            value={form.title}
+            onInput={field("title")}
+            placeholder={`New ${props.prefix ?? ""} card title`.replace("  ", " ")}
+            aria-invalid={!!errors().title}
+            aria-required="true"
+          />
+          <Show when={errors().title}>
+            <span class="field-error small" role="alert">
+              {errors().title}
+            </span>
+          </Show>
+        </label>
+        <label>
+          Description (Markdown)
+          <textarea
+            value={form.body}
+            onInput={field("body")}
+            onKeyDown={(e) => {
+              // Ctrl+Enter or Cmd+Enter creates the card from the description.
+              if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+                e.preventDefault();
+                void submit(false);
+              }
+            }}
+          />
+        </label>
+        <div class="row">
+          <label class="drawer-field">
+            Column
+            <select value={form.column} onChange={field("column")}>
+              <For each={props.columns}>{(c) => <option value={c}>{humanize(c)}</option>}</For>
+            </select>
+          </label>
+          <label class="drawer-field">
+            Assignee
+            <select value={form.assignee} onChange={field("assignee")}>
+              <option value="">unassigned</option>
+              <option value="operator">operator</option>
+              <For each={props.agents}>{(a) => <option value={a.id}>{a.name}</option>}</For>
+            </select>
+          </label>
+        </div>
+        <div class="row">
+          <label class="drawer-field">
+            Labels (comma separated)
+            <input value={form.labels} onInput={field("labels")} placeholder="bug, ui" />
+          </label>
+          <label class="drawer-field">
+            Depends on (comma separated)
+            <input value={form.dependsOn} onInput={field("dependsOn")} placeholder={`${props.prefix ?? "TER"}-1, ${props.prefix ?? "TER"}-2`} />
+          </label>
+        </div>
+        <label classList={{ "field-bad": !!errors().eta }}>
+          ETA (optional)
+          <input value={form.eta} onInput={field("eta")} placeholder="2h30m" aria-label="ETA: a duration such as 45m, 2h30m, or 1d" aria-invalid={!!errors().eta} />
+          <Show when={errors().eta}>
+            <span class="field-error small" role="alert">
+              {errors().eta}
+            </span>
+          </Show>
+        </label>
+        <div class="row">
+          <button class="primary" type="submit" disabled={busy()}>
+            Create card
+          </button>
+          <button type="submit" data-another="1" disabled={busy()}>
+            Create and add another
+          </button>
+          <button type="button" onClick={() => props.onClose()}>
+            Cancel
+          </button>
+        </div>
+      </form>
+    </Modal>
   );
 }
 

@@ -1124,12 +1124,27 @@ button.link-button {
   .board-filters select {
     width: 100%;
   }
-  .board-new {
-    flex: 1 1 100%;
-    flex-wrap: nowrap;
+  /* The "+" button of the backlog column: a 40px tap target. */
+  .board .column-head .column-add {
+    min-width: 40px;
+    min-height: 40px;
   }
-  .board-new input {
-    flex: 1;
+  /* The New card dialog fills the screen, as the card drawer does. */
+  .modal.modal-full {
+    inset: 0;
+    transform: none;
+    width: 100vw;
+    max-height: none;
+    border: 0;
+    border-radius: 0;
+    align-content: start;
+    padding: calc(12px + env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) calc(24px + env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+    overscroll-behavior: contain;
+  }
+  .modal.modal-full button,
+  .modal.modal-full select,
+  .modal.modal-full input {
+    min-height: 40px;
   }
 }
 .column {
@@ -1159,6 +1174,20 @@ button.link-button {
   font-weight: 600;
   padding: 2px 4px;
   text-transform: capitalize;
+}
+.column-head-end {
+  gap: 4px;
+  flex-wrap: nowrap;
+}
+.column-head .column-add {
+  justify-content: center;
+  min-width: 28px;
+  min-height: 28px;
+  padding: 0;
+  color: var(--muted);
+}
+.column-head .column-add:hover {
+  color: var(--text);
 }
 .kcard {
   background: var(--surface);

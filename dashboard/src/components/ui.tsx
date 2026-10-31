@@ -114,12 +114,13 @@ function useEscape(fn: () => void) {
   });
 }
 
-export function Modal(props: { title: string; onClose: () => void; children: JSX.Element }) {
+/** A dialog over the page. `class` adds classes to the dialog box, such as `modal-full` (full screen on a phone). */
+export function Modal(props: { title: string; onClose: () => void; children: JSX.Element; class?: string }) {
   useEscape(() => props.onClose());
   return (
     <Portal>
       <div class="modal-scrim" onClick={() => props.onClose()} />
-      <div class="modal" role="dialog" aria-modal="true" aria-label={props.title}>
+      <div class={`modal${props.class ? ` ${props.class}` : ""}`} role="dialog" aria-modal="true" aria-label={props.title}>
         <div class="spread">
           <h2 style={{ margin: 0 }}>{props.title}</h2>
           <button class="ghost" onClick={() => props.onClose()} aria-label="Close">

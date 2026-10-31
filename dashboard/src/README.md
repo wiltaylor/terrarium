@@ -718,7 +718,7 @@ prefix or budget scope. The daemon also has `project`, `since`, `until`, and
 | `/p/:project/logs/mail` | Project logs, Mail tab: the mail log of one project; reply from the project inbox, make card | `GET /api/mail`, `POST .../inbox/{id}/reply`, `POST .../cards` (`from_mail`) |
 | `/p/:project/logs/events` | Project logs, Events tab: the event log of one project, with the kind and agent filters (the agents of the project only) | `GET /api/events?since=&kind=&project=&agent=`, events socket |
 | `/p/:project/inbox`, `/p/:project/mail`, `/p/:project/logs` | Gone: redirect to `/p/:project/logs/mail` (`app/nav.ts` `MOVED_ROUTES`). The redirect keeps the query. | none |
-| `/p/:project/board` | Board, Cards tab: drag and drop, ETA countdowns, question badges, version chips and the Version filter (`?version=`), card drawer with its questions (see "The board") | `GET .../board`, `GET .../versions`, `PATCH /api/cards/{id}`, `POST .../comments`, `GET .../events`, `DELETE /api/cards/{id}`, `GET /api/questions?project=\|card=`, `PATCH /api/questions/{id}` (`card`), `POST /api/questions/{id}/answer\|ack\|retract` |
+| `/p/:project/board` | Board, Cards tab: drag and drop, New card dialog (the "+" of the backlog column), ETA countdowns, question badges, version chips and the Version filter (`?version=`), card drawer with its questions (see "The board") | `GET .../board`, `GET .../versions`, `POST .../cards`, `PATCH /api/cards/{id}`, `POST .../comments`, `GET .../events`, `DELETE /api/cards/{id}`, `GET /api/questions?project=\|card=`, `PATCH /api/questions/{id}` (`card`), `POST /api/questions/{id}/answer\|ack\|retract` |
 | `/p/:project/board/versions/:id?` | Board, Versions tab: version timeline, review, new version | `GET`, `POST .../versions`, `POST /api/versions/{id}/submit|approve|reject|release`, `compare` |
 | `/p/:project/board/artifacts/:id?` | Board, Artifacts tab: artifact viewer, upload, delete | `GET .../artifacts`, `.../artifacts/usage`, `POST .../artifacts` (multipart), `POST /api/artifacts/{id}/url` |
 | `/p/:project/knowledge/wiki/*path` | Knowledge, Wiki tab: page tree, render, edit, history, create | `GET .../wiki`, `GET`, `PUT /api/wiki/{project/path}`, `revisions`, `diff`, `restore`, `backlinks`, `review` |
@@ -794,6 +794,18 @@ hosts first (docs/api.md §17.1). The model is `features/home/hosts.ts`.
 `features/board/BoardPage.tsx` shows the columns, and the card drawer
 opens from `?card=<id>`. A `card` or `board` event of the project reloads
 the board after 300 ms.
+
+**New card.** The "+" button in the head of the backlog column opens the
+**New card** dialog. A board with no backlog column has the button on its
+first column (`features/board/newCard.ts` `newCardColumn`). The dialog has
+the title, the Markdown description, the column, the assignee, the labels,
+the cards that the card depends on, and an optional ETA. Enter in the title
+or Ctrl+Enter in the description creates the card
+(`POST /api/projects/{name}/cards`). **Create and add another** keeps the
+dialog open with empty fields, and keeps the column, the assignee, and the
+labels. The dialog shows the field errors and the API errors. On a phone,
+the dialog fills the screen. Escape closes it, and the focus goes back to
+the "+" button.
 
 **Versions.** The board reads the versions of the project once
 (`GET /api/projects/{name}/versions`), and a `version.*` event of the
