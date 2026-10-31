@@ -29,6 +29,18 @@ pub struct Health {
     /// `off`, or a duration such as `10m`.
     #[serde(default)]
     pub idle_stop: String,
+    /// The `compact_on_idle` of an agent that sets none
+    /// (`TERRARIUM_COMPACT_ON_IDLE`).
+    #[serde(default)]
+    pub compact_on_idle: bool,
+    /// The `compact_max_age` of an agent that sets none
+    /// (`TERRARIUM_COMPACT_MAX_AGE`): `off`, or a duration such as `24h`.
+    #[serde(default)]
+    pub compact_max_age: String,
+    /// The harnesses whose agents the daemon can compact (PLAN §18, "Auto
+    /// compact"). The settings of an agent of another harness do nothing.
+    #[serde(default)]
+    pub compact_harnesses: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -53,6 +65,13 @@ pub async fn health(State(state): State<Shared>) -> Json<Health> {
             subscriptions: d.subscriptions.len(),
         },
         idle_stop: state.lifecycle.tuning().idle_stop.as_text(),
+        compact_on_idle: state.lifecycle.tuning().compact_on_idle,
+        compact_max_age: state.lifecycle.tuning().compact_max_age.as_text(),
+        compact_harnesses: terrarium_core::HarnessId::ALL
+            .into_iter()
+            .filter(|h| h.compact_command().is_some())
+            .map(|h| h.as_str().to_owned())
+            .collect(),
     })
 }
 

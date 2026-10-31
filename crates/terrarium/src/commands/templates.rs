@@ -139,6 +139,8 @@ fn has_spec_flags(a: &TemplateSpecArgs) -> bool {
         || a.system_prompt.persona.is_some()
         || a.restart.is_some()
         || a.idle_stop.is_some()
+        || a.compact_on_idle.is_some()
+        || a.compact_max_age.is_some()
         || !a.roles.is_empty()
         || !a.targets.is_empty()
         || !a.mail_to.is_empty()
@@ -173,10 +175,17 @@ fn spec_of(
         ("prompt", &a.prompt),
         ("restart", &a.restart),
         ("idle_stop", &a.idle_stop),
+        ("compact_max_age", &a.compact_max_age),
     ] {
         if let Some(v) = v {
             flags.insert(k.into(), v.clone().into());
         }
+    }
+    if let Some(v) = &a.compact_on_idle {
+        flags.insert(
+            "compact_on_idle".into(),
+            super::agents::switch(v, "--compact-on-idle")?.into(),
+        );
     }
     if let Some(v) = system_prompt_value(ctx, &a.system_prompt)? {
         flags.insert("system_prompt".into(), v);

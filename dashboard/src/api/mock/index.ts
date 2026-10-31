@@ -32,6 +32,7 @@ import { mockChanges, mockCommit, mockCommits, mockFile, mockList, mockTrees } f
 import type {
   Agent,
   AgentDef,
+  Harness,
   AgentEvent,
   AgentStatus,
   Artifact,
@@ -94,7 +95,7 @@ import { createQuestionMock } from "./questions";
 import { createInboxMock, isPauseNotice } from "./inbox";
 import { createConfigMock } from "./config";
 import { createSkillMock, skillsError } from "./skills";
-import { applyTemplate, createTemplateMock, idleStopError, personaError, resolveTemplate, systemPromptError, templateRef } from "./templates";
+import { applyTemplate, compactMaxAgeError, compactOnIdleError, createTemplateMock, idleStopError, personaError, resolveTemplate, systemPromptError, templateRef } from "./templates";
 import { createSecretMock } from "./secrets";
 import { createTranscriptStream, encodeTranscriptFrame } from "../sse";
 import { appendBlock, fakeReply, mockModel, titleOf, type Draft as BlockDraft } from "./transcripts";
@@ -247,6 +248,8 @@ const REQUIRED_COLUMNS = ["backlog", "in_progress", "blocked", "done"];
 const LIVE: AgentStatus[] = ["starting", "idle", "waiting", "working", "blocked", "restarting"];
 /** The global idle stop of the mock daemon (`TERRARIUM_IDLE_STOP`). The mock does not stop idle agents by time. */
 const MOCK_IDLE_STOP = "10m";
+/** The harnesses that the daemon can compact (PLAN §18, "Auto compact"): all four. */
+const MOCK_COMPACT_HARNESSES: Harness[] = ["claude", "codex", "copilot", "pi"];
 /** Why pi refuses a plan login (PLAN §16.3): it uses API keys only. */
 const PI_PLAN_REFUSAL = "pi uses API keys only; use Claude Code for a Claude plan and Codex for a ChatGPT plan";
 
@@ -1829,6 +1832,9 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
         started_at: new Date(startedAt - 3600_000).toISOString(),
         definitions: { projects: 1, agents: 1, targets: 0, subscriptions: 0 },
         idle_stop: MOCK_IDLE_STOP,
+        compact_on_idle: false,
+        compact_max_age: "off",
+        compact_harnesses: [...MOCK_COMPACT_HARNESSES],
       })),
     harnesses: (_refresh, latest) => reply(() => harnessReport(latest === true)),
     harnessUpdate: (name, o = {}) =>
@@ -1961,6 +1967,8 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           if (pe) fail(422, "invalid", pe, { field: "persona" });
           const ie = idleStopError(def.idle_stop);
           if (ie) fail(422, "invalid", ie, { field: "idle_stop" });
+          const ce = compactOnIdleError(def.compact_on_idle) ?? compactMaxAgeError(def.compact_max_age);
+          if (ce) fail(422, "invalid", ce);
           const sk = skillsError(def.skills, skillMock.names());
           if (sk) fail(422, "invalid", sk, { field: "skills" });
           if (!NAME_RE.test(def.name)) fail(422, "invalid", `\`${def.name}\` is not a valid name`);
@@ -1987,6 +1995,9 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
             policy: { targets: def.policy?.targets ?? [], mail_to: def.policy?.mail_to ?? ["*"], ...(def.policy?.cross_project?.length ? { cross_project: def.policy.cross_project } : {}) },
             restart: def.restart ?? "on-failure",
             ...(def.idle_stop?.trim() ? { idle_stop: def.idle_stop.trim() } : {}),
+            ...(typeof def.compact_on_idle === "boolean" ? { compact_on_idle: def.compact_on_idle } : {}),
+            ...(def.compact_max_age?.trim() ? { compact_max_age: def.compact_max_age.trim() } : {}),
+            compact_supported: MOCK_COMPACT_HARNESSES.includes(def.harness),
             paused: false,
             status: "stopped",
             source: "api",
@@ -2008,6 +2019,8 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
           if (pe) fail(422, "invalid", pe, { field: "persona" });
           const ie = idleStopError(patch.idle_stop);
           if (ie) fail(422, "invalid", ie, { field: "idle_stop" });
+          const ce = compactOnIdleError(patch.compact_on_idle) ?? compactMaxAgeError(patch.compact_max_age);
+          if (ce) fail(422, "invalid", ce);
           const sk = skillsError(patch.skills, skillMock.names());
           if (sk) fail(422, "invalid", sk, { field: "skills" });
           if (patch.subscription_pool !== undefined || patch.subscription !== undefined) {
@@ -2038,6 +2051,15 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
             if (patch.idle_stop?.trim()) a.idle_stop = patch.idle_stop.trim();
             else delete a.idle_stop;
           }
+          if (patch.compact_on_idle !== undefined) {
+            if (typeof patch.compact_on_idle === "boolean") a.compact_on_idle = patch.compact_on_idle;
+            else delete a.compact_on_idle;
+          }
+          if (patch.compact_max_age !== undefined) {
+            if (patch.compact_max_age?.trim()) a.compact_max_age = patch.compact_max_age.trim();
+            else delete a.compact_max_age;
+          }
+          if (patch.harness) a.compact_supported = MOCK_COMPACT_HARNESSES.includes(patch.harness);
           a.updated_at = iso();
           audit("agent.update", a.id, a.project, { ...patch });
           return a;
@@ -2142,6 +2164,28 @@ export function createMockApi(opts: MockOptions = {}): Api & { world: MockWorld;
             }
           }
           return clone(a);
+        }),
+      // 202 at the start. The agent shows `working` (`compacting`) until the end, then `agent.compacted`.
+      compact: (id) =>
+        reply(() => {
+          const a = agent(id);
+          if (!MOCK_COMPACT_HARNESSES.includes(a.harness)) fail(409, "conflict", `auto compact not supported for ${a.harness}`);
+          if (a.paused) fail(409, "conflict", `agent \`${a.project}/${a.name}\` is paused; it does not compact`);
+          if (!LIVE.includes(a.status)) fail(409, "not_running", `agent ${a.id} is not running`);
+          if (a.status !== "idle" && a.status !== "waiting") fail(409, "conflict", `agent \`${a.project}/${a.name}\` is not idle (${a.status}); it compacts only at rest`);
+          const snap = clone(a);
+          audit("agent.compact", a.id, a.project);
+          const began = now();
+          setStatus(a, "working", "compacting");
+          later(() => {
+            if (a.status !== "working" || a.status_reason !== "compacting") return;
+            a.last_compact_at = iso();
+            a.last_compact_ok = true;
+            agentEvent(a, "agent.compacted", `${a.name}: compacted (manual)`, { cause: "manual", ok: true, duration_ms: now() - began });
+            setStatus(a, waitMock.restStatus(a), "compacted");
+            flushQueue(a);
+          }, 1500);
+          return snap;
         }),
       // 202, idempotent. The agent wakes at once only when work waits for it.
       unpause: (id) =>

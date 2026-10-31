@@ -61,6 +61,8 @@ name = "lead"
 prompt = "project-lead"
 roles = ["project_admin"]
 idle_stop = "30m"                # optional: `off`, or the rest before the idle stop (PLAN §18)
+compact_on_idle = true           # optional: compact the session before the idle stop
+compact_max_age = "24h"          # optional: `off`, or compact an older session at its next rest
 start = true                     # start on `fleet apply --start`; work also wakes it
 
 [projects.agents.policy]
@@ -309,7 +311,8 @@ it as `fleet apply` does (no prune, no start).
 `[[templates]]` declares a global agent template, and
 `[[projects.templates]]` a template of the project. The spec keys
 (`harness`, `subscription`, `model`, `prompt`, `system_prompt`, `persona`, `roles`,
-`policy`, `restart`, `idle_stop`, `skills`, `new_session_on_prompt_change`) sit next to `name` and
+`policy`, `restart`, `idle_stop`, `compact_on_idle`, `compact_max_age`, `skills`,
+`new_session_on_prompt_change`) sit next to `name` and
 `description`. An agent entry with `template = "worker"` gets the values
 in this order: `[defaults]`, then the template, then the keys of the entry.
 `policy` merges key by key. `worker` is the project's template, else the

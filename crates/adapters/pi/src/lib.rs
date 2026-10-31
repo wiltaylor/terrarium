@@ -399,7 +399,9 @@ mod tests {
         for name in [
             "session_start",
             "session_shutdown",
+            "session_before_compact",
             "session_compact",
+            "session_compact_failed",
             "input",
             "agent_settled",
             "tool_execution_start",

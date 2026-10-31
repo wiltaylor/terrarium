@@ -37,6 +37,12 @@ export interface Health {
   definitions?: { projects: number; agents: number; targets: number; subscriptions: number };
   /** The global idle stop of an agent: a duration such as `10m`, or `off`. An agent's `idle_stop` overrides it. */
   idle_stop?: string;
+  /** The global `compact_on_idle` (`TERRARIUM_COMPACT_ON_IDLE`). An agent's own value overrides it. */
+  compact_on_idle?: boolean;
+  /** The global `compact_max_age`: `off`, or a duration such as `24h`. An agent's own value overrides it. */
+  compact_max_age?: string;
+  /** The harnesses whose agents the daemon can compact. */
+  compact_harnesses?: Harness[];
 }
 
 /** `GET /api/harnesses` (docs/api.md §4): one harness against its pin and tested range. */
@@ -335,6 +341,10 @@ export interface AgentDef {
    * Absent: the global default (`GET /api/health` `idle_stop`).
    */
   idle_stop?: string;
+  /** Compact the session at the idle stop (each compaction is a model call). Absent: the global default (`GET /api/health` `compact_on_idle`). */
+  compact_on_idle?: boolean;
+  /** Compact a session older than this at the next rest: `off`, or a duration such as `24h`. Absent: the global default. */
+  compact_max_age?: string;
 }
 
 /**
@@ -346,7 +356,7 @@ export interface AgentDef {
 export type AgentCreate =
   | AgentDef
   | (Pick<AgentDef, "name" | "project"> &
-      Partial<Omit<AgentDef, "name" | "project" | "subscription" | "model" | "prompt" | "policy" | "idle_stop">> & {
+      Partial<Omit<AgentDef, "name" | "project" | "subscription" | "model" | "prompt" | "policy" | "idle_stop" | "compact_on_idle" | "compact_max_age">> & {
         /** A template key: a name, `global:<name>`, `<project>/<name>`, or a ULID. */
         template: string;
         /** Merges per key over the template's policy. */
@@ -356,6 +366,10 @@ export type AgentCreate =
         prompt?: string | null;
         /** `null`: the global default, not the template's value. */
         idle_stop?: string | null;
+        /** `null`: the global default, not the template's value. */
+        compact_on_idle?: boolean | null;
+        /** `null`: the global default, not the template's value. */
+        compact_max_age?: string | null;
       });
 
 /** `PATCH /api/agents/{id}`. Name, project, and roles do not change here. `null` clears subscription, model, prompt, or system_prompt; an absent field does not change. A new system_prompt applies at the next start. */
@@ -372,6 +386,10 @@ export type AgentPatch = Partial<Pick<AgentDef, "harness" | "policy" | "restart"
   skills?: string[];
   /** `off`, `0`, or a duration. `null` goes back to the global default. */
   idle_stop?: string | null;
+  /** `null` goes back to the global default. */
+  compact_on_idle?: boolean | null;
+  /** `off`, `0`, or a duration. `null` goes back to the global default. */
+  compact_max_age?: string | null;
 };
 
 /** `subscription_detail` of `GET /api/agents/{id}`: the agent's subscription, when it exists. */
@@ -442,6 +460,16 @@ export interface Agent {
   paused?: boolean;
   /** See `AgentDef.idle_stop`. Absent: the global default. */
   idle_stop?: string;
+  /** See `AgentDef.compact_on_idle`. Absent: the global default. */
+  compact_on_idle?: boolean;
+  /** See `AgentDef.compact_max_age`. Absent: the global default. */
+  compact_max_age?: string;
+  /** False: the daemon cannot compact agents of this harness, and ignores the auto compact settings. */
+  compact_supported?: boolean;
+  /** The end of the last compaction (RFC 3339). Absent: none. */
+  last_compact_at?: string;
+  /** The result of the last compaction. Absent: none. */
+  last_compact_ok?: boolean;
   /** The reason of the last status change: `idle` for an idle stop, `paused`, `stopped`, crash text, and so on. */
   status_reason?: string;
   /** The turns, mail, and card or nudge pointers that wait for the agent. Absent when 0. */
@@ -805,6 +833,9 @@ export const EVENT_KINDS = [
   "system",
   "warning",
   "usage_limit",
+  // A compaction of the harness: `{trigger?}`, and `{ok, trigger?, message?}` (PLAN §18, "Auto compact").
+  "compact_started",
+  "compact_finished",
   "mail",
   "card",
   "board",
@@ -844,6 +875,8 @@ export const EVENT_KINDS = [
   "agent.paused",
   "agent.unpaused",
   "agent.woken",
+  // The end of a compaction that the daemon ran: `{cause, ok, duration_ms, reason?}`.
+  "agent.compacted",
   // docs/api.md §9, §17.7.
   "lease",
   // Waits: `{wait_id, change, kind, summary, state}`.

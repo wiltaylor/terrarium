@@ -744,6 +744,10 @@ fn record(t: &mut Tx<'_>, ev: &SupervisorEvent) -> ApiResult<()> {
     {
         agents::set_harness_session(t, &id, &harness_session.0)?;
     }
+    if let Event::TurnStart { .. } = event {
+        // Auto compact runs only after a turn (PLAN §18).
+        agents::note_turn(t, &id)?;
+    }
     let mut data = serde_json::to_value(event)?;
     let kind = data
         .as_object_mut()

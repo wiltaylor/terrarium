@@ -50,10 +50,17 @@
 //!   `blocked` with the reason and the reset time. Operator turns, push
 //!   pointers, and the recap turn wait. The release types the waiting turns
 //!   in order, then the pending pointer.
+//! - A compaction ([`Supervisor::compact`], PLAN §18 "Auto compact") types
+//!   the compact command of the harness into an idle agent and shows it
+//!   `working` with the reason `compacting`. Turns and pointers wait, and
+//!   the turn hooks of the command are notices, not turns. The
+//!   `CompactFinished` event of the adapter, a stop, or the time limit ends
+//!   it; then the agent shows its status again, and the waiting work goes
+//!   out.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
@@ -87,8 +94,9 @@ use crate::prompt::{self, Peer, PromptContext};
 use crate::sandbox::{self, AgentLayout, HarnessHome, SandboxConfig, SandboxMode};
 use crate::store::subscriptions::Subscription;
 use crate::supervisor::{
-    AnswerInput, BoxFuture, HarnessRun, PtyAttachment, PtyInput, Recovery, Supervisor,
-    SupervisorError, SupervisorEvent, SupervisorEventKind, SwapApplied, TurnHold, wants_restart,
+    AnswerInput, BoxFuture, CompactEnd, CompactWait, HarnessRun, PtyAttachment, PtyInput,
+    REASON_COMPACTING, Recovery, Supervisor, SupervisorError, SupervisorEvent, SupervisorEventKind,
+    SwapApplied, TurnHold, wants_restart,
 };
 
 /// One harness adapter and its prompt-ready detector.
@@ -933,6 +941,18 @@ struct Slot {
     /// A swap waits for the end of the turn: then the agent restarts with
     /// resume on `agent.subscription`.
     swap_pending: bool,
+    /// The compaction that runs ([`Supervisor::compact`]). A drop of its
+    /// sender (an exit, a new launch) ends the wait of the caller.
+    compacting: Option<Compacting>,
+}
+
+/// A compaction that runs: its number, and where its end goes.
+struct Compacting {
+    token: u64,
+    /// When the command went out: older session-file lines are not of
+    /// this compaction ([`Supervisor::session_signal`]).
+    started: chrono::DateTime<chrono::Utc>,
+    done: Option<tokio::sync::oneshot::Sender<CompactEnd>>,
 }
 
 impl Slot {
@@ -958,6 +978,7 @@ impl Slot {
             account: None,
             bound: Vec::new(),
             swap_pending: false,
+            compacting: None,
         }
     }
 
@@ -978,6 +999,44 @@ impl Slot {
 struct Held {
     hold: TurnHold,
     waiting: Vec<String>,
+}
+
+/// The number of the next compaction ([`Compacting::token`]).
+static COMPACT_TOKEN: AtomicU64 = AtomicU64::new(1);
+
+/// What a runner event means while a compaction runs.
+#[derive(Debug, PartialEq)]
+enum Notice {
+    /// Pass it on as it is.
+    Keep,
+    /// Pass on a `system` notice with this text: the turn hooks and the
+    /// idle and working changes of the compact command are not turns.
+    Replace(String),
+    /// The end of the compaction.
+    End { ok: bool, reason: Option<String> },
+}
+
+/// The meaning of `event` while a compaction runs ([`Notice`]).
+fn compaction_notice(event: &Event) -> Notice {
+    match event {
+        Event::CompactFinished { ok, message, .. } => Notice::End {
+            ok: *ok,
+            reason: message.clone(),
+        },
+        Event::TurnStart { .. } => {
+            Notice::Replace("compaction: the harness opened a turn for the command".into())
+        }
+        Event::TurnEnd => Notice::Replace("compaction: the harness closed the turn".into()),
+        Event::StatusChanged {
+            to: to @ (AgentStatus::Idle | AgentStatus::Working),
+            reason,
+            ..
+        } => Notice::Replace(format!(
+            "compaction: runner status {to} ({})",
+            reason.as_deref().unwrap_or("no reason")
+        )),
+        _ => Notice::Keep,
+    }
 }
 
 /// The `blocked` reason of a hold: its reason, with the reset time when the
@@ -2136,7 +2195,29 @@ impl RunnerSupervisor {
     }
 
     /// Pass one runner event on. True: it is the exit of the harness.
-    fn pass_on(&self, id: AgentId, epoch: u64, rec: EventRecord) -> bool {
+    fn pass_on(&self, id: AgentId, epoch: u64, mut rec: EventRecord) -> bool {
+        let compacting = lock(&self.inner.slots)
+            .get(&id)
+            .is_some_and(|s| s.epoch == epoch && s.compacting.is_some());
+        if compacting {
+            match compaction_notice(&rec.event) {
+                Notice::Keep => {}
+                Notice::Replace(message) => rec.event = Event::System { message },
+                Notice::End { ok, reason } => {
+                    self.emit_seq(id, SupervisorEventKind::Harness(rec.event), rec.seq);
+                    self.end_compaction(
+                        id,
+                        None,
+                        CompactEnd {
+                            ok,
+                            reason,
+                            work: false,
+                        },
+                    );
+                    return false;
+                }
+            }
+        }
         match &rec.event {
             // The supervisor decides the final status itself.
             Event::StatusChanged {
@@ -2289,7 +2370,7 @@ impl RunnerSupervisor {
     }
 
     /// Type the recap turn and the early turns, else the pending pointer.
-    /// Nothing goes out while a quota hold lasts.
+    /// Nothing goes out while a quota hold lasts or a compaction runs.
     fn deliver_pending(&self, id: AgentId) {
         if self.held(id).is_some() {
             return;
@@ -2299,6 +2380,9 @@ impl RunnerSupervisor {
             let Some(slot) = slots.get_mut(&id) else {
                 return;
             };
+            if slot.compacting.is_some() {
+                return;
+            }
             let Some(runner) = slot.runner.clone() else {
                 return;
             };
@@ -2334,6 +2418,55 @@ impl RunnerSupervisor {
                 warn!(agent = %id, "the recap turn was not delivered: {e}");
             }
         });
+    }
+
+    /// End the compaction of `id` (`token`: only that compaction; `None`:
+    /// the one that runs). The agent shows the status of its runner again,
+    /// the caller of [`Supervisor::compact`] gets `end`, and the work that
+    /// waited goes out. Returns `end` with `work` set, or `None` when no
+    /// such compaction runs.
+    fn end_compaction(
+        &self,
+        id: AgentId,
+        token: Option<u64>,
+        mut end: CompactEnd,
+    ) -> Option<CompactEnd> {
+        let (done, runner) = {
+            let mut slots = lock(&self.inner.slots);
+            let slot = slots.get_mut(&id)?;
+            if !slot
+                .compacting
+                .as_ref()
+                .is_some_and(|c| token.is_none_or(|t| t == c.token))
+            {
+                return None;
+            }
+            let c = slot.compacting.take()?;
+            end.work = !slot.turns.is_empty() || slot.recap.is_some() || !slot.pointer.is_empty();
+            (c.done, slot.runner.clone())
+        };
+        info!(agent = %id, ok = end.ok, reason = ?end.reason, "the compaction ended");
+        if let Some(r) = runner {
+            let status = r.status();
+            match self.held(id) {
+                Some(h) if status == AgentStatus::Idle => {
+                    self.emit_status(id, AgentStatus::Blocked, hold_reason(&h));
+                }
+                _ => {
+                    let reason = if end.ok {
+                        "compacted"
+                    } else {
+                        "compaction failed"
+                    };
+                    self.emit_status(id, status, reason);
+                }
+            }
+        }
+        if let Some(tx) = done {
+            let _ = tx.send(end.clone());
+        }
+        self.deliver_pending(id);
+        Some(end)
     }
 
     /// The questions part of a recap turn ([`crate::store::questions::recap`]).
@@ -2374,6 +2507,8 @@ impl RunnerSupervisor {
                 return;
             };
             slot.runner = None;
+            // A compaction ends with the harness: its caller sees a stop.
+            slot.compacting = None;
             let tuning = self.inner.cfg.restart;
             let resume_failed = slot.resume.is_some() && !slot.reached_idle && !clean;
             let next = if slot.stop_requested {
@@ -2547,6 +2682,7 @@ impl RunnerSupervisor {
         slot.resume = resume;
         slot.session = None;
         slot.recap = None;
+        slot.compacting = None;
         // Items that did not go out in the last run wait for this one, as
         // parked items do (their stored rows stay). Queued mail comes from
         // the store again.
@@ -2737,6 +2873,7 @@ impl RunnerSupervisor {
             if slot.pointer_busy
                 || slot.pointer.is_empty()
                 || slot.recap.is_some()
+                || slot.compacting.is_some()
                 || slot.seen != AgentStatus::Idle
             {
                 return;
@@ -3704,10 +3841,13 @@ impl Supervisor for RunnerSupervisor {
                 return Ok(());
             }
             // Before the first idle of the launch: the turn goes after the
-            // recap turn.
+            // recap turn. During a compaction: after its end.
             {
                 let mut slots = lock(&self.inner.slots);
-                if let Some(slot) = slots.get_mut(&agent).filter(|s| !s.reached_idle) {
+                if let Some(slot) = slots
+                    .get_mut(&agent)
+                    .filter(|s| !s.reached_idle || s.compacting.is_some())
+                {
                     slot.turns.push(text);
                     return Ok(());
                 }
@@ -3872,6 +4012,9 @@ impl Supervisor for RunnerSupervisor {
             let held = || lock(&self.inner.holds).contains_key(&agent);
             Some(match (&slot.runner, slot.phase) {
                 (Some(r), _) if r.status() == AgentStatus::Idle && held() => AgentStatus::Blocked,
+                (Some(r), _) if r.status() == AgentStatus::Idle && slot.compacting.is_some() => {
+                    AgentStatus::Working
+                }
                 (Some(r), _) => r.status(),
                 (None, Phase::Restarting) => AgentStatus::Restarting,
                 (None, Phase::Down(s)) => s,
@@ -3882,6 +4025,134 @@ impl Supervisor for RunnerSupervisor {
 
     fn subscribe(&self) -> broadcast::Receiver<SupervisorEvent> {
         self.inner.tx.subscribe()
+    }
+
+    fn session_signal(
+        &self,
+        agent: AgentId,
+        event: Event,
+        at: Option<chrono::DateTime<chrono::Utc>>,
+    ) {
+        let current = lock(&self.inner.slots)
+            .get(&agent)
+            .and_then(|s| s.compacting.as_ref())
+            .is_some_and(|c| at.is_none_or(|t| t >= c.started));
+        if !current {
+            return;
+        }
+        let end = match &event {
+            Event::CompactFinished { ok, message, .. } => Some((*ok, message.clone())),
+            Event::CompactStarted { .. } => None,
+            _ => return,
+        };
+        self.emit(agent, SupervisorEventKind::Harness(event));
+        if let Some((ok, reason)) = end {
+            self.end_compaction(
+                agent,
+                None,
+                CompactEnd {
+                    ok,
+                    reason,
+                    work: false,
+                },
+            );
+        }
+    }
+
+    fn compact(
+        &self,
+        agent: AgentId,
+        wait: Duration,
+    ) -> BoxFuture<'_, Result<CompactWait, SupervisorError>> {
+        Box::pin(async move {
+            if self.held(agent).is_some() {
+                return Err(SupervisorError::NotReady(
+                    "a quota hold lasts; the agent does not compact".into(),
+                ));
+            }
+            let (rx, token, command) = {
+                let mut slots = lock(&self.inner.slots);
+                let slot = slots
+                    .get_mut(&agent)
+                    .ok_or(SupervisorError::NotRunning(agent))?;
+                let runner = slot
+                    .runner
+                    .clone()
+                    .ok_or(SupervisorError::NotRunning(agent))?;
+                let command = slot.agent.harness.compact_command().ok_or_else(|| {
+                    SupervisorError::Unsupported(crate::lifecycle::compact_unsupported(
+                        slot.agent.harness,
+                    ))
+                })?;
+                if slot.compacting.is_some() {
+                    return Err(SupervisorError::NotReady(
+                        "the agent compacts already".into(),
+                    ));
+                }
+                let status = runner.status();
+                if !slot.reached_idle
+                    || slot.seen != AgentStatus::Idle
+                    || status != AgentStatus::Idle
+                    || slot.pointer_busy
+                    || slot.recap.is_some()
+                    || !slot.turns.is_empty()
+                    || slot.swap_pending
+                {
+                    return Err(SupervisorError::NotReady(format!(
+                        "the agent is not idle ({status}); it compacts only at rest"
+                    )));
+                }
+                let token = COMPACT_TOKEN.fetch_add(1, Ordering::Relaxed);
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                slot.compacting = Some(Compacting {
+                    token,
+                    // A session-file time has milliseconds at most.
+                    started: chrono::Utc::now() - chrono::Duration::seconds(1),
+                    done: Some(tx),
+                });
+                (rx, token, command)
+            };
+            info!(agent = %agent, %command, "compacting the session");
+            self.emit_status(agent, AgentStatus::Working, REASON_COMPACTING);
+            if let Err(e) = self.send_raw(agent, command.to_owned()).await {
+                self.end_compaction(
+                    agent,
+                    Some(token),
+                    CompactEnd {
+                        ok: false,
+                        reason: Some(e.to_string()),
+                        work: false,
+                    },
+                );
+                return Err(e);
+            }
+            let me = self.clone();
+            let end: CompactWait = Box::pin(async move {
+                match tokio::time::timeout(wait, rx).await {
+                    Ok(Ok(end)) => end,
+                    // An exit or a new launch dropped the compaction.
+                    Ok(Err(_)) => CompactEnd {
+                        ok: false,
+                        reason: Some("the agent stopped".into()),
+                        work: false,
+                    },
+                    Err(_) => {
+                        let end = CompactEnd {
+                            ok: false,
+                            reason: Some(format!(
+                                "no end of the compaction in {} s",
+                                wait.as_secs()
+                            )),
+                            work: false,
+                        };
+                        warn!(agent = %agent, "the harness did not report the end of the compaction");
+                        me.end_compaction(agent, Some(token), end.clone())
+                            .unwrap_or(end)
+                    }
+                }
+            });
+            Ok(end)
+        })
     }
 
     fn hold_turns(
@@ -4749,6 +5020,49 @@ mod tests {
             ] {
                 assert_eq!(map.get(&h).map(|e| e.adapter.id()), Some(h), "{mode}");
             }
+        }
+    }
+
+    /// While a compaction runs, the turn hooks and the idle and working
+    /// changes of the runner are notices, and `CompactFinished` ends it.
+    #[test]
+    fn compaction_notices() {
+        assert_eq!(
+            compaction_notice(&Event::CompactFinished {
+                ok: false,
+                trigger: None,
+                message: Some("x".into())
+            }),
+            Notice::End {
+                ok: false,
+                reason: Some("x".into())
+            }
+        );
+        for ev in [
+            Event::TurnStart {
+                prompt: Some("/compact".into()),
+            },
+            Event::TurnEnd,
+            Event::StatusChanged {
+                from: AgentStatus::Idle,
+                to: AgentStatus::Working,
+                reason: None,
+            },
+        ] {
+            assert!(
+                matches!(compaction_notice(&ev), Notice::Replace(m) if m.starts_with("compaction: ")),
+                "{ev:?}"
+            );
+        }
+        for ev in [
+            Event::CompactStarted { trigger: None },
+            Event::StatusChanged {
+                from: AgentStatus::Working,
+                to: AgentStatus::Blocked,
+                reason: None,
+            },
+        ] {
+            assert_eq!(compaction_notice(&ev), Notice::Keep, "{ev:?}");
         }
     }
 

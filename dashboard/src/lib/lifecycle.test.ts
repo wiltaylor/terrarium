@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Agent } from "../api/types";
-import { idleStopped, lifecycleActions, lifecycleBadge, queuedLabel } from "./lifecycle";
+import { compactAction, idleStopped, lastCompactedText, lifecycleActions, lifecycleBadge, queuedLabel } from "./lifecycle";
 
 type L = Pick<Agent, "status" | "paused" | "status_reason" | "waiting_on" | "queued">;
 const a = (over: Partial<L> = {}): L => ({ status: "idle", paused: false, ...over });
@@ -59,5 +59,32 @@ describe("lifecycleActions", () => {
       ["restart", "Restart", true],
     ]);
     expect(b[1]!.title).toMatch(/Resume it first/);
+  });
+});
+
+describe("compactAction", () => {
+  type C = Parameters<typeof compactAction>[0];
+  const c = (over: Partial<C> = {}): C => ({ harness: "claude", status: "idle", paused: false, compact_supported: true, ...over });
+
+  it("is on for an agent at rest", () => {
+    expect(compactAction(c()).disabled).toBe(false);
+    expect(compactAction(c({ status: "waiting" })).disabled).toBe(false);
+  });
+
+  it("is off, with the reason, when the daemon would refuse it", () => {
+    expect(compactAction(c({ compact_supported: false, harness: "pi" }))).toEqual({ disabled: true, title: "auto compact not supported for pi" });
+    expect(compactAction(c({ paused: true, status: "stopped" })).title).toMatch(/paused/);
+    expect(compactAction(c(), true).title).toMatch(/hold/);
+    expect(compactAction(c({ status: "working", status_reason: "compacting" })).title).toMatch(/compacts its session now/);
+    expect(compactAction(c({ status: "working" })).title).toMatch(/working.*wait until it is idle/);
+    expect(compactAction(c({ status: "stopped" })).title).toMatch(/stopped/);
+    expect(compactAction(c({ status: "starting" })).disabled).toBe(true);
+  });
+
+  it("says when the last compaction was, and when it failed", () => {
+    const at = (iso: string) => `at ${iso}`;
+    expect(lastCompactedText({}, at)).toBeNull();
+    expect(lastCompactedText({ last_compact_at: "T", last_compact_ok: true }, at)).toBe("last compacted at T");
+    expect(lastCompactedText({ last_compact_at: "T", last_compact_ok: false }, at)).toBe("last compacted at T (failed)");
   });
 });

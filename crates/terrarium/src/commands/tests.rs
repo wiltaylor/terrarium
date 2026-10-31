@@ -6662,3 +6662,103 @@ async fn agent_lifecycle_commands() {
     assert!(out.contains("QUEUED"), "{out}");
     assert!(Cli::try_parse_from(["terrarium", "agent", "pause"]).is_err());
 }
+
+/// `agent compact`, and the auto compact flags of `agent new`, `agent set`,
+/// and `template new` (PLAN §18, "Auto compact").
+#[tokio::test]
+async fn agent_compact_and_the_auto_compact_flags() {
+    let out = ok(
+        false,
+        &["agent", "compact", "terra/w"],
+        vec![(
+            202,
+            json!({"name": "w", "project": "terra", "status": "working",
+                   "status_reason": "compacting"}),
+        )],
+        vec![req(Post, "/api/agents/terra%2Fw/compact")],
+    )
+    .await;
+    assert!(out.starts_with("terra/w compacts its session"), "{out}");
+    ok(
+        false,
+        &[
+            "-p",
+            "terra",
+            "agent",
+            "new",
+            "w",
+            "--harness",
+            "claude",
+            "--compact-on-idle",
+            "on",
+            "--compact-max-age",
+            "24h",
+        ],
+        vec![(201, json!({"name": "w"}))],
+        vec![(
+            Post,
+            "/api/agents",
+            vec![],
+            Some(json!({"name": "w", "project": "terra", "harness": "claude",
+                        "compact_on_idle": true, "compact_max_age": "24h"})),
+        )],
+    )
+    .await;
+    for (args, want) in [
+        (
+            ["--compact-on-idle", "off"],
+            json!({"compact_on_idle": false}),
+        ),
+        (
+            ["--compact-on-idle", "default"],
+            json!({"compact_on_idle": null}),
+        ),
+        (
+            ["--compact-max-age", "off"],
+            json!({"compact_max_age": "off"}),
+        ),
+        (
+            ["--compact-max-age", "default"],
+            json!({"compact_max_age": null}),
+        ),
+    ] {
+        let mut argv = vec!["agent", "set", "w"];
+        argv.extend(args);
+        ok(
+            false,
+            &argv,
+            vec![(200, json!({}))],
+            vec![(Patch, "/api/agents/w", vec![], Some(want))],
+        )
+        .await;
+    }
+    ok(
+        true,
+        &[
+            "template",
+            "new",
+            "w",
+            "--harness",
+            "pi",
+            "--compact-on-idle",
+            "yes",
+        ],
+        vec![(201, json!({"name": "w", "spec": {}}))],
+        vec![(
+            Post,
+            "/api/templates",
+            vec![],
+            Some(json!({"name": "w", "spec": {"harness": "pi", "compact_on_idle": true}})),
+        )],
+    )
+    .await;
+    let r = exec(
+        false,
+        &["agent", "set", "w", "--compact-on-idle", "sometimes"],
+        vec![],
+        None,
+    )
+    .await;
+    assert_eq!(exit_code_of(&r.result.unwrap_err()), exit::USAGE);
+    assert!(Cli::try_parse_from(["terrarium", "agent", "compact"]).is_err());
+}

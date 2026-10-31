@@ -304,6 +304,8 @@ mod tests {
             "PermissionRequest",
             "Notification",
             "SessionEnd",
+            "PreCompact",
+            "PostCompact",
         ] {
             assert_eq!(
                 s["hooks"][name][0]["hooks"][0]["command"],

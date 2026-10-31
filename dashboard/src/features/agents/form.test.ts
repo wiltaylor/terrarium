@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Agent } from "../../api/types";
-import { agentToForm, effectivePersona, emptyAgentForm, formToDef, formToPatch, idleStopProblem, idleStopText, parseList, personaProblem, validateAgentForm } from "./form";
+import { agentToForm, autoCompactText, compactMaxAgeProblem, effectivePersona, emptyAgentForm, formToDef, formToPatch, idleStopProblem, idleStopText, parseList, personaProblem, validateAgentForm } from "./form";
 
 const agent: Agent = {
   id: "A1", name: "worker", project: "p", harness: "pi", model: "m1", workspace: "/w", status: "idle", roles: ["project_admin"],
@@ -126,6 +126,27 @@ describe("agent form", () => {
     expect(formToPatch(agent, { ...v, idle_stop: "off" })).toEqual({ idle_stop: "off" });
     expect(formToPatch({ ...agent, idle_stop: "1h" }, { ...v, idle_stop: "1h" })).toEqual({});
     expect(formToPatch({ ...agent, idle_stop: "1h" }, { ...v, idle_stop: "" })).toEqual({ idle_stop: null });
+  });
+
+  it("takes on, off, or empty for compact on idle, and the idle stop form for the compact max age", () => {
+    const v = agentToForm(agent);
+    expect([v.compact_on_idle, v.compact_max_age]).toEqual(["", ""]);
+    expect(agentToForm({ ...agent, compact_on_idle: false, compact_max_age: "24h" })).toMatchObject({ compact_on_idle: "off", compact_max_age: "24h" });
+    expect(formToDef({ ...emptyAgentForm("p"), name: "w" })).not.toHaveProperty("compact_on_idle");
+    expect(formToDef({ ...emptyAgentForm("p"), name: "w", compact_on_idle: "on", compact_max_age: " 24h " })).toMatchObject({ compact_on_idle: true, compact_max_age: "24h" });
+    expect(formToPatch(agent, { ...v, compact_on_idle: "off" })).toEqual({ compact_on_idle: false });
+    expect(formToPatch({ ...agent, compact_on_idle: true }, { ...agentToForm({ ...agent, compact_on_idle: true }), compact_on_idle: "" })).toEqual({ compact_on_idle: null });
+    expect(formToPatch({ ...agent, compact_max_age: "1d" }, { ...v, compact_max_age: "" })).toEqual({ compact_max_age: null });
+    for (const ok of ["", "off", "0", "24h", "12h30m"]) expect(compactMaxAgeProblem(ok)).toBeNull();
+    expect(validateAgentForm({ ...emptyAgentForm("p"), name: "w", compact_max_age: "1 day" })).toEqual([expect.stringContaining("Compact max age")]);
+  });
+
+  it("shows the auto compact settings, the defaults, and the note for a harness that cannot compact", () => {
+    const d = { on_idle: false, max_age: "off" };
+    expect(autoCompactText({ harness: "claude", compact_supported: true }, d)).toBe("not on idle, no max age (default)");
+    expect(autoCompactText({ harness: "claude", compact_on_idle: true }, d)).toBe("on idle, no max age");
+    expect(autoCompactText({ harness: "codex", compact_max_age: "24h" }, { on_idle: true })).toBe("on idle, max age 24h");
+    expect(autoCompactText({ harness: "pi", compact_supported: false, compact_on_idle: true }, d)).toBe("auto compact not supported for pi");
   });
 
   it("shows the idle stop with the global default", () => {

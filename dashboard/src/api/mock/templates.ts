@@ -14,7 +14,7 @@ import type { ScheduleCaller } from "./schedules";
 
 const NAME_RE = /^[a-z0-9][a-z0-9_-]{0,62}$/;
 const ULID_RE = /^[0-9A-Z]{26}$/;
-const SPEC_KEYS = ["harness", "subscription", "subscription_pool", "model", "prompt", "system_prompt", "persona", "roles", "policy", "restart", "new_session_on_prompt_change", "skills", "idle_stop"] as const;
+const SPEC_KEYS = ["harness", "subscription", "subscription_pool", "model", "prompt", "system_prompt", "persona", "roles", "policy", "restart", "new_session_on_prompt_change", "skills", "idle_stop", "compact_on_idle", "compact_max_age"] as const;
 /** The daemon's limit on `system_prompt`: 32 KiB of UTF-8. */
 export const SYSTEM_PROMPT_MAX_BYTES = 32 * 1024;
 
@@ -40,6 +40,19 @@ export function idleStopError(v: unknown, field = "idle_stop"): string | null {
   if (typeof v !== "string") return `${field}: use a string`;
   const n = v.trim();
   return n === "off" || n === "0" || /^(\d+[dhms])+$/.test(n) ? null : `${field}: \`${n}\` is not a duration: use \`off\`, \`0\`, or parts such as \`1h30m\` (units d, h, m, s)`;
+}
+
+/** The daemon's check of `compact_max_age`: the form of `idle_stop`. A message on a bad one, else null. */
+export function compactMaxAgeError(v: unknown, field = "compact_max_age"): string | null {
+  if (v === undefined || v === null) return null;
+  if (typeof v !== "string") return `${field}: use a string`;
+  const n = v.trim();
+  return n === "off" || n === "0" || /^(\d+[dhms])+$/.test(n) ? null : `${field}: \`${n}\` is not a compact max age: use \`off\`, or a duration such as 24h or 12h30m`;
+}
+
+/** The daemon's check of `compact_on_idle`: a bool. A message on a bad one, else null. */
+export function compactOnIdleError(v: unknown, field = "compact_on_idle"): string | null {
+  return v === undefined || v === null || typeof v === "boolean" ? null : `${field}: use true or false`;
 }
 
 type Fail = (status: number, code: string, message: string, details?: unknown) => never;
@@ -81,6 +94,8 @@ export function normalizeSpec(raw: unknown): TemplateSpec {
   if (pe) throw new Error(pe);
   const ie = idleStopError(o.idle_stop, "spec: idle_stop");
   if (ie) throw new Error(ie);
+  const ce = compactOnIdleError(o.compact_on_idle, "spec: compact_on_idle") ?? compactMaxAgeError(o.compact_max_age, "spec: compact_max_age");
+  if (ce) throw new Error(ce);
   const roles = ((o.roles as string[] | undefined) ?? []).filter((r) => r !== "member");
   const spec: TemplateSpec = { harness: o.harness as TemplateSpec["harness"] };
   for (const k of ["subscription", "model", "prompt", "system_prompt"] as const) if (typeof o[k] === "string" && o[k]) spec[k] = o[k];
@@ -95,6 +110,8 @@ export function normalizeSpec(raw: unknown): TemplateSpec {
   if (o.skills !== undefined && (!Array.isArray(o.skills) || o.skills.some((x) => typeof x !== "string"))) throw new Error("spec: skills: use a list of skill names");
   if ((o.skills as string[] | undefined)?.length) spec.skills = o.skills as string[];
   if (typeof o.idle_stop === "string" && o.idle_stop.trim()) spec.idle_stop = o.idle_stop.trim();
+  if (typeof o.compact_on_idle === "boolean") spec.compact_on_idle = o.compact_on_idle;
+  if (typeof o.compact_max_age === "string" && o.compact_max_age.trim()) spec.compact_max_age = o.compact_max_age.trim();
   return spec;
 }
 
@@ -276,6 +293,8 @@ export function createTemplateMock(c: TemplateMockContext): Api["templates"] {
           ...(a.persona ? { persona: a.persona } : {}),
           ...(a.skills?.length ? { skills: a.skills } : {}),
           ...(a.idle_stop ? { idle_stop: a.idle_stop } : {}),
+          ...(a.compact_on_idle !== undefined ? { compact_on_idle: a.compact_on_idle } : {}),
+          ...(a.compact_max_age ? { compact_max_age: a.compact_max_age } : {}),
           roles: a.roles,
           policy: a.policy,
           restart: a.restart,

@@ -337,6 +337,8 @@ async fn from_agent(
         policy: a.agent.policy.clone(),
         restart: a.agent.restart,
         idle_stop: a.agent.idle_stop,
+        compact_on_idle: a.agent.compact_on_idle,
+        compact_max_age: a.agent.compact_max_age,
         skills: a.agent.skills.clone(),
         new_session_on_prompt_change: a.agent.new_session_on_prompt_change,
     };

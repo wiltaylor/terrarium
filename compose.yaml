@@ -50,6 +50,10 @@ services:
       TERRARIUM_TRASH_DAYS: ${TERRARIUM_TRASH_DAYS:-}
       # The idle stop of an agent that sets none (PLAN §18): a duration, or off.
       TERRARIUM_IDLE_STOP: ${TERRARIUM_IDLE_STOP:-10m}
+      # Auto compact of an agent that sets none (PLAN §18): on or off, and a
+      # duration or off. Each compaction is one model call.
+      TERRARIUM_COMPACT_ON_IDLE: ${TERRARIUM_COMPACT_ON_IDLE:-off}
+      TERRARIUM_COMPACT_MAX_AGE: ${TERRARIUM_COMPACT_MAX_AGE:-off}
       TERRARIUM_HOST_TLS_CERT: ${TERRARIUM_HOST_TLS_CERT:-}
       TERRARIUM_HOST_TLS_KEY: ${TERRARIUM_HOST_TLS_KEY:-}
       # A harness outside its tested range (harnesses.toml) at an agent start:

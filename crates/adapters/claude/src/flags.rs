@@ -160,6 +160,11 @@ pub const CLAUDE_2_1: ClaudeFlags = ClaudeFlags {
         "PermissionRequest",
         "Notification",
         "SessionEnd",
+        // The start and the end of a compaction (docs/compat.md,
+        // "Compaction"). PostCompact fires only after a compaction that
+        // did not fail.
+        "PreCompact",
+        "PostCompact",
     ],
     quiet_settings: &[
         // Forced: without it, yolo mode shows a dialog at each start, and

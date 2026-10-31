@@ -26,7 +26,17 @@ export interface AgentFormValues {
   skills: string[];
   /** `off`, `0`, or a duration such as `30m` or `1h30m`. Empty: the global default. */
   idle_stop: string;
+  /** `on` or `off`. Empty: the global default. */
+  compact_on_idle: CompactSwitch;
+  /** `off`, `0`, or a duration such as `24h`. Empty: the global default. */
+  compact_max_age: string;
 }
+
+/** The form value of `compact_on_idle`: empty is the global default. */
+export type CompactSwitch = "" | "on" | "off";
+
+/** `true` -> `on`, `false` -> `off`, absent -> empty (the global default). */
+export const switchOf = (b: boolean | undefined): CompactSwitch => (b === undefined ? "" : b ? "on" : "off");
 
 /** "a, b\nc" -> ["a", "b", "c"]. */
 export const parseList = (s: string): string[] =>
@@ -36,7 +46,7 @@ export const parseList = (s: string): string[] =>
     .filter(Boolean);
 
 export function emptyAgentForm(project = ""): AgentFormValues {
-  return { name: "", project, harness: "claude", subscription: "", subscription_pool: [], model: "", prompt: "", system_prompt: "", persona: "", roles: [], targets: [], mail_to: "*", cross_project: "", restart: "on-failure", skills: [], idle_stop: "" };
+  return { name: "", project, harness: "claude", subscription: "", subscription_pool: [], model: "", prompt: "", system_prompt: "", persona: "", roles: [], targets: [], mail_to: "*", cross_project: "", restart: "on-failure", skills: [], idle_stop: "", compact_on_idle: "", compact_max_age: "" };
 }
 
 export function agentToForm(a: Agent): AgentFormValues {
@@ -57,6 +67,8 @@ export function agentToForm(a: Agent): AgentFormValues {
     restart: a.restart ?? "on-failure",
     skills: a.skills ?? [],
     idle_stop: a.idle_stop ?? "",
+    compact_on_idle: switchOf(a.compact_on_idle),
+    compact_max_age: a.compact_max_age ?? "",
   };
 }
 
@@ -102,6 +114,31 @@ export function idleStopText(value: string | undefined, fallback: string | undef
   return v === "off" || v === "0" ? "never" : `after ${v} idle`;
 }
 
+/** The problem of a compact max age, or null. Empty is the global default; `off` and `0` turn it off. */
+export function compactMaxAgeProblem(s: string): string | null {
+  const v = s.trim();
+  if (!v || v === "off" || v === "0" || DURATION_RE.test(v)) return null;
+  return `Compact max age "${v}": use off, 0, or a duration such as 24h or 12h30m (units d, h, m, s).`;
+}
+
+/**
+ * The auto compact settings as the agent page shows them, one line.
+ * `defaults` come from the health. An agent of a harness that cannot
+ * compact gets the note instead.
+ */
+export function autoCompactText(
+  a: Pick<Agent, "harness" | "compact_on_idle" | "compact_max_age" | "compact_supported">,
+  defaults: { on_idle?: boolean; max_age?: string },
+): string {
+  if (a.compact_supported === false) return `auto compact not supported for ${a.harness}`;
+  const onIdle = a.compact_on_idle ?? defaults.on_idle ?? false;
+  const own = a.compact_max_age?.trim();
+  const age = own || defaults.max_age || "off";
+  const parts = [onIdle ? "on idle" : "not on idle", age === "off" || age === "0" ? "no max age" : `max age ${age}`];
+  const isDefault = a.compact_on_idle === undefined && !own;
+  return `${parts.join(", ")}${isDefault ? " (default)" : ""}`;
+}
+
 /** Problems the daemon would refuse with 422. Empty when the form is fine. */
 export function validateAgentForm(v: AgentFormValues): string[] {
   const out: string[] = [];
@@ -114,6 +151,8 @@ export function validateAgentForm(v: AgentFormValues): string[] {
   if (pp) out.push(pp);
   const ip = idleStopProblem(v.idle_stop);
   if (ip) out.push(ip);
+  const cp = compactMaxAgeProblem(v.compact_max_age);
+  if (cp) out.push(cp);
   return out;
 }
 
@@ -144,6 +183,9 @@ export function formToDef(v: AgentFormValues): AgentDef {
   if (v.skills.length) def.skills = v.skills;
   const idleStop = opt(v.idle_stop);
   if (idleStop) def.idle_stop = idleStop;
+  if (v.compact_on_idle) def.compact_on_idle = v.compact_on_idle === "on";
+  const maxAge = opt(v.compact_max_age);
+  if (maxAge) def.compact_max_age = maxAge;
   return def;
 }
 
@@ -192,6 +234,10 @@ export function formDiff(before: AgentFormValues, v: AgentFormValues): AgentPatc
   // An emptied idle stop goes as null: back to the global default.
   const idleStop = changed(v.idle_stop, before.idle_stop);
   if (idleStop !== undefined) patch.idle_stop = idleStop;
+  // An emptied auto compact setting goes as null: back to the global default.
+  if (v.compact_on_idle !== before.compact_on_idle) patch.compact_on_idle = v.compact_on_idle ? v.compact_on_idle === "on" : null;
+  const maxAge = changed(v.compact_max_age, before.compact_max_age);
+  if (maxAge !== undefined) patch.compact_max_age = maxAge;
   const policy = { targets: v.targets, mail_to: parseList(v.mail_to), cross_project: parseList(v.cross_project) };
   const oldPolicy = { targets: before.targets, mail_to: parseList(before.mail_to), cross_project: parseList(before.cross_project) };
   if (!sameList(policy.targets, oldPolicy.targets) || !sameList(policy.mail_to, oldPolicy.mail_to) || !sameList(policy.cross_project, oldPolicy.cross_project)) patch.policy = policy;

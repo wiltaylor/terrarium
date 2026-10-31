@@ -1,11 +1,11 @@
 // The agent fields that an agent and a template share: harness,
-// subscription, model, prompt, system prompt, persona, skills, restart, idle stop, roles, and policy. No name and no
+// subscription, model, prompt, system prompt, persona, skills, restart, idle stop, auto compact, roles, and policy. No name and no
 // project: the agent form and the template form add those.
 
 import { createResource, createSignal, createUniqueId, For, Show } from "solid-js";
 import { GRANTABLE_ROLES, HARNESSES, RESTART_POLICIES, type Harness, type RestartPolicy, type Role } from "../../api/types";
 import { api, subscriptions } from "../../stores";
-import { idleStopProblem, PERSONAS, personaProblem, type AgentFormValues } from "./form";
+import { compactMaxAgeProblem, idleStopProblem, PERSONAS, personaProblem, type AgentFormValues, type CompactSwitch } from "./form";
 import { prunePool, reconcileSubscription } from "./subscription";
 import { defaultModelHint, ModelField, PoolPicker, SubscriptionSelect } from "./SubscriptionFields";
 import { SkillsPicker } from "../skills/SkillsPicker";
@@ -57,6 +57,64 @@ export function useGlobalIdleStop(): () => string | undefined {
     .catch(() => undefined);
   const [value] = createResource(() => idleStopDefault);
   return () => value();
+}
+
+// The global auto compact settings and the harnesses that can compact (`GET /api/health`). One request for each page load.
+let compactDefaults: Promise<{ on_idle?: boolean; max_age?: string; harnesses?: string[] }> | undefined;
+
+/** The global auto compact settings. Empty until the health answers, or when it does not say. */
+export function useCompactDefaults(): () => { on_idle?: boolean; max_age?: string; harnesses?: string[] } {
+  compactDefaults ??= api
+    .health()
+    .then((h) => ({ on_idle: h.compact_on_idle, max_age: h.compact_max_age, harnesses: h.compact_harnesses }))
+    .catch(() => ({}));
+  const [value] = createResource(() => compactDefaults);
+  return () => value() ?? {};
+}
+
+export const COMPACT_HELP = "Each compaction is one model call. It runs only after a turn, and never while the agent works.";
+
+/**
+ * Auto compact: compact at the idle stop (on, off, or the default), and the
+ * maximum age of the session context. A harness that cannot compact gets a
+ * note: the daemon ignores the settings of its agents.
+ */
+export function AutoCompactFields(props: { harness: string; onIdle: CompactSwitch; maxAge: string; onChange: (onIdle: CompactSwitch, maxAge: string) => void }) {
+  const d = useCompactDefaults();
+  const supported = () => !d().harnesses || d().harnesses!.includes(props.harness);
+  const onIdleDefault = () => (d().on_idle === undefined ? "default" : `default (${d().on_idle ? "on" : "off"})`);
+  return (
+    <fieldset class="stack" style={{ gap: "4px" }}>
+      <legend>Auto compact</legend>
+      <div class="row" style={{ gap: "12px", "flex-wrap": "wrap" }}>
+        <label>
+          Compact on idle
+          <select value={props.onIdle} onChange={(e) => props.onChange(e.currentTarget.value as CompactSwitch, props.maxAge)}>
+            <option value="" selected={props.onIdle === ""}>
+              {onIdleDefault()}
+            </option>
+            <option value="on" selected={props.onIdle === "on"}>
+              on
+            </option>
+            <option value="off" selected={props.onIdle === "off"}>
+              off
+            </option>
+          </select>
+        </label>
+        <label>
+          Compact max age
+          <input value={props.maxAge} onInput={(e) => props.onChange(props.onIdle, e.currentTarget.value)} placeholder={d().max_age ? `default (${d().max_age})` : "default"} pattern="off|0|([0-9]+[dhms])+" />
+        </label>
+      </div>
+      <Show when={compactMaxAgeProblem(props.maxAge)} fallback={<span class="muted small">{supported() ? COMPACT_HELP : `auto compact not supported for ${props.harness}: the daemon ignores these settings.`}</span>}>
+        {(p) => (
+          <span class="small" style={{ color: "var(--danger)" }}>
+            {p()}
+          </span>
+        )}
+      </Show>
+    </fieldset>
+  );
 }
 
 export const IDLE_STOP_HELP = "The time the agent stays idle before the daemon stops it. Work wakes it again. off: never stop it.";
@@ -160,6 +218,8 @@ export function AgentFields(props: {
         </label>
         <IdleStopField value={v().idle_stop} onChange={(s) => set("idle_stop", s)} />
       </div>
+
+      <AutoCompactFields harness={v().harness} onIdle={v().compact_on_idle} maxAge={v().compact_max_age} onChange={(onIdle, maxAge) => props.onChange({ ...v(), compact_on_idle: onIdle, compact_max_age: maxAge })} />
 
       <fieldset class="stack" style={{ gap: "4px" }}>
         <legend>Subscription pool</legend>

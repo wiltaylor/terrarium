@@ -27,6 +27,7 @@ pub fn routes() -> Router<Shared> {
         .route("/agents/{id}/restart", post(restart))
         .route("/agents/{id}/pause", post(pause))
         .route("/agents/{id}/unpause", post(unpause))
+        .route("/agents/{id}/compact", post(compact))
         .route("/agents/{id}/send", post(send))
         .route("/agents/{id}/keys", post(keys))
         .route("/agents/{id}/answer", post(answer))
@@ -340,6 +341,8 @@ async fn update(
                     "policy": patch.policy,
                     "restart": patch.restart,
                     "idle_stop": patch.idle_stop,
+                    "compact_on_idle": patch.compact_on_idle,
+                    "compact_max_age": patch.compact_max_age,
                 }),
             )?;
             agents::get(t, &id)
@@ -573,6 +576,76 @@ pub(super) async fn unpause(
     crate::lifecycle::wake_with_work(&state, Some(agent_id(&a)), "unpause").await;
     let id = a.agent.id.to_string();
     let v = state.db.read(move |c| agents::get(c, &id)).await?;
+    Ok((StatusCode::ACCEPTED, Json(v)))
+}
+
+/// `POST /api/agents/{id}/compact`: compact the session of an idle agent
+/// now (PLAN §18, "Auto compact"). The rights are those of `restart`. The
+/// answer comes when the compaction starts; the event `agent.compacted`
+/// gives its end. `409 conflict`: the harness has no compaction, or the
+/// agent is paused, held, not idle, or compacts already. `409
+/// not_running`: the agent does not run. Writes the audit row
+/// `agent.compact`.
+pub(super) async fn compact(
+    State(state): State<Shared>,
+    actor: Actor,
+    Path(id): Path<String>,
+) -> ApiResult<(StatusCode, Json<AgentView>)> {
+    let a = load(&state, &actor, id).await?;
+    policy::admin_project(&actor, &a.agent.project, "compacting an agent")?;
+    let conflict = |m: String| ApiError::new(Code::Conflict, m);
+    if !a.compact_supported {
+        return Err(conflict(crate::lifecycle::compact_unsupported(
+            a.agent.harness,
+        )));
+    }
+    if a.paused {
+        return Err(conflict(format!(
+            "agent `{}/{}` is paused; it does not compact",
+            a.agent.project, a.agent.name
+        )));
+    }
+    let key = a.agent.id.to_string();
+    let holds = state
+        .db
+        .read(move |c| crate::store::usage::holds_of(c, &key))
+        .await?
+        .len();
+    if holds > 0 {
+        return Err(conflict(
+            "a quota or budget hold lasts; the agent does not compact".into(),
+        ));
+    }
+    match state.supervisor.status(agent_id(&a)).await {
+        Some(AgentStatus::Idle) => {}
+        Some(s) if s.is_live() => {
+            let what = if state.lifecycle.compacting(agent_id(&a)) {
+                "compacts already".to_owned()
+            } else {
+                format!("is not idle ({s})")
+            };
+            return Err(conflict(format!(
+                "agent `{}/{}` {what}; it compacts only at rest",
+                a.agent.project, a.agent.name
+            )));
+        }
+        _ => return Err(supervisor_error(SupervisorError::NotRunning(agent_id(&a)))),
+    }
+    crate::lifecycle::start_compaction(&state, agent_id(&a), crate::lifecycle::CAUSE_MANUAL, false)
+        .await
+        .map_err(|e| match e {
+            SupervisorError::NotReady(m) | SupervisorError::Unsupported(m) => conflict(m),
+            e => supervisor_error(e),
+        })?;
+    let id = a.agent.id.to_string();
+    let project = a.agent.project.clone();
+    let v = state
+        .db
+        .write(actor.label(), move |t| {
+            t.audit("agent.compact", &id, Some(&project), json!({}))?;
+            agents::get(t, &id)
+        })
+        .await?;
     Ok((StatusCode::ACCEPTED, Json(v)))
 }
 

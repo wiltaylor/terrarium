@@ -20,7 +20,7 @@ use tokio::sync::{broadcast, mpsc};
 use crate::api::Shared;
 
 #[cfg(any(test, feature = "fake-supervisor"))]
-pub use fake::InMemorySupervisor;
+pub use fake::{FakeCompact, InMemorySupervisor};
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -107,6 +107,26 @@ pub struct SupervisorEvent {
     /// it drops a seq at or below the last one that it recorded.
     pub seq: Option<u64>,
 }
+
+/// The status reason of an agent while its session compacts (PLAN §18,
+/// "Auto compact"). The agent is `working`.
+pub const REASON_COMPACTING: &str = "compacting";
+
+/// How a compaction ended ([`Supervisor::compact`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompactEnd {
+    /// The harness reported a compaction that did not fail.
+    pub ok: bool,
+    /// Why it is not ok: the harness error, no end signal in time, or a
+    /// stop of the agent.
+    pub reason: Option<String>,
+    /// Work went to the agent at the end: turns that waited during the
+    /// compaction, the recap turn, or a push pointer.
+    pub work: bool,
+}
+
+/// The end of a compaction that runs ([`Supervisor::compact`]).
+pub type CompactWait = BoxFuture<'static, CompactEnd>;
 
 /// What [`Supervisor::recover`] found for an agent after a daemon start.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -255,6 +275,42 @@ pub trait Supervisor: Send + Sync + 'static {
             ))
         })
     }
+    /// Compact the session of an idle agent (PLAN §18, "Auto compact"):
+    /// type the compact command of its harness as a raw command
+    /// ([`terrarium_core::HarnessId::compact_command`]), show the agent
+    /// `working` with the reason [`REASON_COMPACTING`], and keep new turns
+    /// and pointers until the end. The answer comes when the compaction
+    /// starts; its future ends when the harness reports the end, or after
+    /// `wait`. Then the agent shows its status again, and the work that
+    /// waited goes out. `NotRunning`: the agent does not run. `NotReady`:
+    /// the agent is not idle, or compacts already. `Unsupported`: the
+    /// harness has no compaction that the daemon can see the end of. The
+    /// default cannot compact.
+    fn compact(
+        &self,
+        agent: AgentId,
+        wait: std::time::Duration,
+    ) -> BoxFuture<'_, Result<CompactWait, SupervisorError>> {
+        let _ = (agent, wait);
+        Box::pin(async {
+            Err(SupervisorError::Unsupported(
+                "this supervisor cannot compact".into(),
+            ))
+        })
+    }
+    /// A signal of the harness that the daemon read from the session file
+    /// of the agent, not from a hook (`crate::usage_collector`): the
+    /// compaction start and end of Copilot CLI. `at` is the time of the
+    /// line. A supervisor uses only the signals of a compaction that runs
+    /// and that are not older than its start. The default ignores them.
+    fn session_signal(
+        &self,
+        agent: AgentId,
+        event: Event,
+        at: Option<chrono::DateTime<chrono::Utc>>,
+    ) {
+        let _ = (agent, event, at);
+    }
     /// The live status, or `None` when the supervisor does not run the agent.
     fn status(&self, agent: AgentId) -> BoxFuture<'_, Option<AgentStatus>>;
     /// Every event from now on.
@@ -361,17 +417,30 @@ pub trait Supervisor: Send + Sync + 'static {
 
 #[cfg(any(test, feature = "fake-supervisor"))]
 mod fake {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use terrarium_core::{Agent, AgentId, AgentStatus, Event, HarnessSessionId};
-    use tokio::sync::{broadcast, mpsc};
+    use terrarium_core::{Agent, AgentId, AgentStatus, Event, HarnessId, HarnessSessionId};
+    use tokio::sync::{broadcast, mpsc, oneshot};
 
     use super::{
-        AnswerInput, BoxFuture, OLD_RUNNER, PtyAttachment, PtyInput, Supervisor, SupervisorError,
-        SupervisorEvent, SupervisorEventKind, TurnHold,
+        AnswerInput, BoxFuture, CompactEnd, CompactWait, OLD_RUNNER, PtyAttachment, PtyInput,
+        REASON_COMPACTING, Supervisor, SupervisorError, SupervisorEvent, SupervisorEventKind,
+        TurnHold,
     };
+
+    /// How the fake harness answers a compact command. For tests.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    pub enum FakeCompact {
+        /// `CompactFinished` with `ok` after the delay.
+        #[default]
+        Ok,
+        /// `CompactFinished` with an error after the delay.
+        Fail,
+        /// No end signal: the caller waits for its time limit.
+        Silent,
+    }
 
     #[derive(Default)]
     struct FakeAgent {
@@ -394,6 +463,14 @@ mod fake {
         early: Vec<String>,
         /// The text of each turn that started, in order. For tests.
         prompts: Vec<String>,
+        /// The harness of the last start.
+        harness: Option<HarnessId>,
+        /// The compaction that runs: its number and where its end goes.
+        compacting: Option<(u64, Option<oneshot::Sender<CompactEnd>>)>,
+        /// How the next compactions end.
+        compact: FakeCompact,
+        /// The compactions that started. For tests.
+        compactions: usize,
     }
 
     #[derive(Default)]
@@ -409,6 +486,11 @@ mod fake {
         state: Option<std::sync::Weak<crate::api::AppState>>,
         /// `stop` returns only after the store shows `stopped`.
         settle_stops: bool,
+        /// Harnesses that the fake cannot compact, on top of the ones with
+        /// no `compact_command`.
+        no_compact: HashSet<HarnessId>,
+        /// The number of the next compaction.
+        compact_seq: u64,
     }
 
     /// A fake supervisor. `start` goes `starting` -> `idle` after `delay`.
@@ -491,6 +573,7 @@ mod fake {
                 let mut inner = self.lock();
                 let a = inner.agents.entry(agent).or_default();
                 a.epoch += 1;
+                a.compacting = None;
                 a.epoch
             };
             self.set_status(agent, AgentStatus::Starting, None);
@@ -699,6 +782,63 @@ mod fake {
         pub fn pty_size(&self, agent: AgentId) -> Option<(u16, u16)> {
             self.lock().agents.get(&agent).and_then(|a| a.size)
         }
+
+        /// Set how the compactions of `agent` end. For tests.
+        pub fn set_compact(&self, agent: AgentId, mode: FakeCompact) {
+            self.lock().agents.entry(agent).or_default().compact = mode;
+        }
+
+        /// The fake cannot compact agents of `harness`. For tests.
+        pub fn refuse_compact(&self, harness: HarnessId) {
+            self.lock().no_compact.insert(harness);
+        }
+
+        /// The number of compactions of `agent` that started. For tests.
+        pub fn compactions(&self, agent: AgentId) -> usize {
+            self.lock().agents.get(&agent).map_or(0, |a| a.compactions)
+        }
+
+        /// End compaction `token` of `agent` (any one when `None`): the
+        /// status goes back to `idle` (or `blocked` under a hold), and the
+        /// turns that waited start.
+        fn end_compaction(
+            &self,
+            agent: AgentId,
+            token: Option<u64>,
+            mut end: CompactEnd,
+        ) -> Option<CompactEnd> {
+            let (done, held) = {
+                let mut inner = self.lock();
+                let a = inner.agents.get_mut(&agent)?;
+                if !a
+                    .compacting
+                    .as_ref()
+                    .is_some_and(|(t, _)| token.is_none_or(|w| w == *t))
+                {
+                    return None;
+                }
+                let (_, done) = a.compacting.take()?;
+                end.work = !a.early.is_empty();
+                (done, a.held.clone())
+            };
+            match held {
+                Some(h) => self.set_status(agent, AgentStatus::Blocked, Some(&h.reason)),
+                None => {
+                    let reason = if end.ok {
+                        "compacted"
+                    } else {
+                        "compaction failed"
+                    };
+                    self.set_status(agent, AgentStatus::Idle, Some(reason))
+                }
+            };
+            if let Some(tx) = done {
+                let _ = tx.send(end.clone());
+            }
+            self.next_early(agent);
+            self.push_mail(agent);
+            Some(end)
+        }
     }
 
     impl Supervisor for InMemorySupervisor {
@@ -766,6 +906,7 @@ mod fake {
                 if self.current(agent.id).is_some_and(|(s, _)| s.is_live()) {
                     return Err(SupervisorError::AlreadyRunning(agent.id));
                 }
+                self.lock().agents.entry(agent.id).or_default().harness = Some(agent.harness);
                 self.boot(agent.id, resume);
                 Ok(())
             })
@@ -780,6 +921,8 @@ mod fake {
                     let mut inner = self.lock();
                     if let Some(a) = inner.agents.get_mut(&agent) {
                         a.epoch += 1;
+                        // A compaction ends with the harness.
+                        a.compacting = None;
                     }
                 }
                 self.emit(
@@ -855,11 +998,13 @@ mod fake {
                         a.waiting.push(text);
                         return Ok(());
                     }
-                    // A starting agent, or one with early turns: in order,
-                    // after the start.
+                    // A starting agent, one with early turns, or one that
+                    // compacts: in order, after the start or the compaction.
                     if let Some(a) = inner.agents.get_mut(&agent)
                         && a.status.is_live()
-                        && (a.status == AgentStatus::Starting || !a.early.is_empty())
+                        && (a.status == AgentStatus::Starting
+                            || !a.early.is_empty()
+                            || a.compacting.is_some())
                     {
                         a.early.push(text);
                         return Ok(());
@@ -1007,6 +1152,105 @@ mod fake {
 
         fn status(&self, agent: AgentId) -> BoxFuture<'_, Option<AgentStatus>> {
             Box::pin(async move { self.current(agent).map(|(s, _)| s) })
+        }
+
+        /// The compact command of the harness, as raw text. The end
+        /// follows [`InMemorySupervisor::set_compact`].
+        fn compact(
+            &self,
+            agent: AgentId,
+            wait: Duration,
+        ) -> BoxFuture<'_, Result<CompactWait, SupervisorError>> {
+            Box::pin(async move {
+                let (rx, token, epoch, command, mode) = {
+                    let mut inner = self.lock();
+                    let refused = inner.no_compact.clone();
+                    inner.compact_seq += 1;
+                    let token = inner.compact_seq;
+                    let a = inner
+                        .agents
+                        .get_mut(&agent)
+                        .filter(|a| a.status.is_live())
+                        .ok_or(SupervisorError::NotRunning(agent))?;
+                    let harness = a.harness.unwrap_or(HarnessId::Claude);
+                    let command = harness
+                        .compact_command()
+                        .filter(|_| !refused.contains(&harness))
+                        .ok_or_else(|| {
+                            SupervisorError::Unsupported(crate::lifecycle::compact_unsupported(
+                                harness,
+                            ))
+                        })?;
+                    if a.compacting.is_some() {
+                        return Err(SupervisorError::NotReady(
+                            "the agent compacts already".into(),
+                        ));
+                    }
+                    if a.held.is_some() || a.status != AgentStatus::Idle || !a.early.is_empty() {
+                        return Err(SupervisorError::NotReady(format!(
+                            "the agent is not idle ({})",
+                            a.status
+                        )));
+                    }
+                    let (tx, rx) = oneshot::channel();
+                    a.compacting = Some((token, Some(tx)));
+                    a.compactions += 1;
+                    (rx, token, a.epoch, command, a.compact)
+                };
+                self.set_status(agent, AgentStatus::Working, Some(REASON_COMPACTING));
+                let bytes = terrarium_core::adapter::raw_text_keys(command);
+                self.type_bytes(agent, &bytes)?;
+                self.emit(
+                    agent,
+                    SupervisorEventKind::Harness(Event::CompactStarted {
+                        trigger: Some("manual".into()),
+                    }),
+                );
+                if mode != FakeCompact::Silent {
+                    self.later(agent, epoch, move |me| {
+                        let ok = mode == FakeCompact::Ok;
+                        let message = (!ok).then(|| "Not enough messages to compact.".to_owned());
+                        me.emit(
+                            agent,
+                            SupervisorEventKind::Harness(Event::CompactFinished {
+                                ok,
+                                trigger: Some("manual".into()),
+                                message: message.clone(),
+                            }),
+                        );
+                        me.end_compaction(
+                            agent,
+                            Some(token),
+                            CompactEnd {
+                                ok,
+                                reason: message,
+                                work: false,
+                            },
+                        );
+                    });
+                }
+                let me = self.clone();
+                let end: CompactWait = Box::pin(async move {
+                    match tokio::time::timeout(wait, rx).await {
+                        Ok(Ok(end)) => end,
+                        Ok(Err(_)) => CompactEnd {
+                            ok: false,
+                            reason: Some("the agent stopped".into()),
+                            work: false,
+                        },
+                        Err(_) => {
+                            let end = CompactEnd {
+                                ok: false,
+                                reason: Some("no end of the compaction".into()),
+                                work: false,
+                            };
+                            me.end_compaction(agent, Some(token), end.clone())
+                                .unwrap_or(end)
+                        }
+                    }
+                });
+                Ok(end)
+            })
         }
 
         fn subscribe(&self) -> broadcast::Receiver<SupervisorEvent> {

@@ -158,9 +158,23 @@ export default function (pi: Any) {
       target_session_file: e?.targetSessionFile,
     }),
   );
+  // A compaction (docs/compat.md, "Compaction"): `/compact` (reason
+  // "manual"), a full context ("threshold"), or an overflow. The handler of
+  // `session_before_compact` returns nothing, so it never cancels the
+  // compaction. `session_compact_failed` also fires for "Nothing to compact".
+  pi.on("session_before_compact", async (e: Any, ctx: Any) => {
+    send("session_before_compact", ctx, { reason: e?.reason });
+  });
   pi.on("session_compact", async (e: Any, ctx: Any) =>
     send("session_compact", ctx, { reason: e?.reason }),
   );
+  pi.on("session_compact_failed", async (e: Any, ctx: Any) => {
+    send("session_compact_failed", ctx, {
+      reason: e?.reason,
+      error_message: e?.errorMessage,
+      aborted: e?.aborted,
+    });
+  });
   pi.on("model_select", async (e: Any, ctx: Any) =>
     send("model_select", ctx, { new_model: modelName(e?.model), source: e?.source }),
   );

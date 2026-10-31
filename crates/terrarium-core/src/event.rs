@@ -126,6 +126,26 @@ pub enum Event {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resets_at: Option<DateTime<Utc>>,
     },
+    /// The harness started to compact the context of its session: a
+    /// `/compact` command, or a compaction that the harness started itself
+    /// (docs/compat.md, "Compaction").
+    CompactStarted {
+        /// `manual` or `auto`, when the harness says it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        trigger: Option<String>,
+    },
+    /// The harness finished a compaction. `ok` is false when the harness
+    /// reports that the compaction failed.
+    CompactFinished {
+        #[serde(default = "default_true")]
+        ok: bool,
+        /// `manual` or `auto`, when the harness says it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        trigger: Option<String>,
+        /// The error of a failed compaction, on one line.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+    },
 }
 
 fn default_true() -> bool {
@@ -397,6 +417,14 @@ mod tests {
                 message: s("m"),
                 resets_at: Some(Utc::now()),
             },
+            Event::CompactStarted {
+                trigger: Some(s("manual")),
+            },
+            Event::CompactFinished {
+                ok: false,
+                trigger: None,
+                message: Some(s("m")),
+            },
         ];
         for ev in all {
             let v = serde_json::to_value(&ev).expect("serialise");
@@ -404,6 +432,20 @@ mod tests {
                 assert!(v.get(key).is_none(), "{key} in {v}");
             }
         }
+    }
+
+    #[test]
+    fn a_compaction_end_is_ok_unless_it_says_otherwise() {
+        let ev: Event =
+            serde_json::from_value(serde_json::json!({"type": "compact_finished"})).expect("parse");
+        assert_eq!(
+            ev,
+            Event::CompactFinished {
+                ok: true,
+                trigger: None,
+                message: None
+            }
+        );
     }
 
     #[test]

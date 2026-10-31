@@ -204,6 +204,8 @@ pub const CODEX_PINNED: CodexFlags = CodexFlags {
         // events show in the log.
         "SubagentStart",
         "SubagentStop",
+        // The start and the end of a compaction (docs/compat.md,
+        // "Compaction"). The schemas are in the binary; not run.
         "PreCompact",
         "PostCompact",
         // Not registered: `PreModelRequest` (new in 0.164.0) and

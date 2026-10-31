@@ -95,6 +95,8 @@ const AGENT_KEYS: &[&str] = &[
     "policy",
     "restart",
     "idle_stop",
+    "compact_on_idle",
+    "compact_max_age",
     "skills",
     "new_session_on_prompt_change",
     "start",
@@ -134,6 +136,8 @@ const TEMPLATE_KEYS: &[&str] = &[
     "policy",
     "restart",
     "idle_stop",
+    "compact_on_idle",
+    "compact_max_age",
     "skills",
     "new_session_on_prompt_change",
 ];

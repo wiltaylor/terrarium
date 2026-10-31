@@ -93,6 +93,45 @@ pub enum UsageRecord {
     },
     /// The session ended.
     Shutdown(SessionTotals),
+    /// A compaction started or ended (`session.compaction_start`,
+    /// `session.compaction_complete`): an `Event::CompactStarted` or an
+    /// `Event::CompactFinished`, and the time of the line. The daemon
+    /// ends its compaction on it (docs/compat.md, "Compaction").
+    Compaction {
+        event: terrarium_core::Event,
+        at: Option<DateTime<Utc>>,
+    },
+}
+
+/// The compaction event of an `events.jsonl` record of type `kind` with
+/// `data`, if it is one. `session.compaction_complete` has `success`; a
+/// failure has `error` or `failureReason`.
+pub fn compaction_event(kind: &str, data: &Value) -> Option<terrarium_core::Event> {
+    let trigger = s(data, "trigger");
+    match kind {
+        "session.compaction_start" => Some(terrarium_core::Event::CompactStarted { trigger }),
+        "session.compaction_complete" => {
+            let ok = data.get("success").and_then(Value::as_bool).unwrap_or(true);
+            let message = (!ok).then(|| {
+                ["error", "failureReason", "outcome"]
+                    .iter()
+                    .find_map(|k| match data.get(*k) {
+                        Some(Value::String(t)) if !t.trim().is_empty() => Some(t.clone()),
+                        Some(v @ Value::Object(_)) => {
+                            v.get("message").and_then(Value::as_str).map(str::to_owned)
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| "the compaction failed".into())
+            });
+            Some(terrarium_core::Event::CompactFinished {
+                ok,
+                trigger,
+                message: message.map(|m| m.lines().next().unwrap_or_default().to_owned()),
+            })
+        }
+        _ => None,
+    }
 }
 
 fn u(v: &Value, key: &str) -> u64 {
@@ -148,7 +187,10 @@ impl UsageParser {
                 self.last_shutdown = Some(totals.clone());
                 Some(UsageRecord::Shutdown(totals))
             }
-            _ => None,
+            kind => compaction_event(kind, data).map(|event| UsageRecord::Compaction {
+                event,
+                at: time(&v),
+            }),
         }
     }
 
@@ -385,6 +427,48 @@ mod tests {
             "{}/tests/fixtures/{name}",
             env!("CARGO_MANIFEST_DIR")
         ))
+    }
+
+    #[test]
+    fn compaction_lines_give_compaction_events() {
+        use terrarium_core::Event;
+        // The captured line (tests/fixtures/transcript.jsonl:68), and the
+        // payload shapes of `session-events.d.ts` in the 1.0.103 bundle.
+        let done = std::fs::read_to_string(fixture("transcript.jsonl"))
+            .expect("read")
+            .lines()
+            .find(|l| l.contains("session.compaction_complete"))
+            .expect("a compaction line")
+            .to_owned();
+        let mut p = UsageParser::new();
+        let Some(UsageRecord::Compaction { event, at }) = p.line(&done) else {
+            panic!("no compaction record");
+        };
+        assert_eq!(
+            event,
+            Event::CompactFinished {
+                ok: true,
+                trigger: None,
+                message: None
+            }
+        );
+        assert!(at.is_some());
+        let start = r#"{"type":"session.compaction_start","data":{"trigger":"manual","compactionAttemptId":"c1"},"timestamp":"2026-10-25T07:58:30.000Z"}"#;
+        assert!(matches!(
+            p.line(start),
+            Some(UsageRecord::Compaction {
+                event: Event::CompactStarted { trigger: Some(t) },
+                ..
+            }) if t == "manual"
+        ));
+        let failed = r#"{"type":"session.compaction_complete","data":{"success":false,"error":"Nothing to compact.\nmore","trigger":"manual"},"timestamp":"2026-10-25T07:58:31.000Z"}"#;
+        assert!(matches!(
+            p.line(failed),
+            Some(UsageRecord::Compaction {
+                event: Event::CompactFinished { ok: false, message: Some(m), .. },
+                ..
+            }) if m == "Nothing to compact."
+        ));
     }
 
     #[test]

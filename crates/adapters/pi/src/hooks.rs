@@ -154,12 +154,31 @@ pub fn hook_events(hook: &HookPayload) -> Vec<Event> {
                     .unwrap_or_default()
             ),
         }],
-        "session_compact" => vec![Event::System {
-            message: format!(
-                "pi: the context was compacted{}",
-                s(b, "reason")
-                    .map(|r| format!(" ({r})"))
-                    .unwrap_or_default()
+        "session_before_compact" => vec![Event::CompactStarted {
+            trigger: s(b, "reason").map(str::to_owned),
+        }],
+        "session_compact" => vec![
+            Event::System {
+                message: format!(
+                    "pi: the context was compacted{}",
+                    s(b, "reason")
+                        .map(|r| format!(" ({r})"))
+                        .unwrap_or_default()
+                ),
+            },
+            Event::CompactFinished {
+                ok: true,
+                trigger: s(b, "reason").map(str::to_owned),
+                message: None,
+            },
+        ],
+        "session_compact_failed" => vec![Event::CompactFinished {
+            ok: false,
+            trigger: s(b, "reason").map(str::to_owned),
+            message: Some(
+                s(b, "error_message")
+                    .map(one_line)
+                    .unwrap_or_else(|| "the compaction failed".into()),
             ),
         }],
         "session_shutdown" => vec![Event::SessionEnded {
@@ -365,8 +384,30 @@ mod tests {
         assert!(hook_events(&hook("message_end", json!({"stop_reason": "stop"}))).is_empty());
         assert!(matches!(
             &hook_events(&hook("session_compact", json!({"reason": "threshold"})))[..],
-            [Event::System { message }] if message.ends_with("(threshold)")
+            [Event::System { message }, Event::CompactFinished { ok: true, trigger: Some(t), .. }]
+                if message.ends_with("(threshold)") && t == "threshold"
         ));
+        // The extension events of the 1.4.0 bundle
+        // (`dist/core/extensions/types.d.ts`), as `ext/terrarium.ts`
+        // forwards them.
+        assert_eq!(
+            hook_events(&hook("session_before_compact", json!({"reason": "manual"}))),
+            [Event::CompactStarted {
+                trigger: Some("manual".into())
+            }]
+        );
+        assert_eq!(
+            hook_events(&hook(
+                "session_compact_failed",
+                json!({"reason": "manual", "error_message": "Nothing to compact (session too small)",
+                       "aborted": false})
+            )),
+            [Event::CompactFinished {
+                ok: false,
+                trigger: Some("manual".into()),
+                message: Some("Nothing to compact (session too small)".into())
+            }]
+        );
         assert!(matches!(
             &hook_events(&hook(
                 "tool_execution_end",

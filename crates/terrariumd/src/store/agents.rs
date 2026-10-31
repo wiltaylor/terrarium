@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use terrarium_core::config::{AgentDef, IdleStop, Policy, RestartPolicy, check_system_prompt};
+use terrarium_core::config::{
+    AgentDef, CompactMaxAge, IdleStop, Policy, RestartPolicy, check_system_prompt,
+};
 use terrarium_core::{Agent, AgentId, AgentStatus, HarnessId, HarnessSessionId, Role};
 
 use crate::actor::AgentActor;
@@ -59,6 +61,19 @@ pub struct AgentView {
     /// the agent ([`queued_count`]). Absent when 0.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub queued: usize,
+    /// The harness of the agent has a compaction that the daemon can run
+    /// and see the end of (PLAN §18, "Auto compact"). False: the daemon
+    /// ignores the auto compact settings of the agent, and refuses a
+    /// manual compaction.
+    #[serde(default)]
+    pub compact_supported: bool,
+    /// The end of the last compaction that the daemon ran (RFC 3339).
+    /// Absent when none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_compact_at: Option<String>,
+    /// The result of the last compaction. Absent when none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_compact_ok: Option<bool>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -120,6 +135,10 @@ fn base_row(r: &Row<'_>) -> rusqlite::Result<AgentView> {
             idle_stop: r
                 .get::<_, Option<String>>("idle_stop")?
                 .and_then(|s| s.parse::<IdleStop>().ok()),
+            compact_on_idle: r.get("compact_on_idle")?,
+            compact_max_age: r
+                .get::<_, Option<String>>("compact_max_age")?
+                .and_then(|s| s.parse::<CompactMaxAge>().ok()),
             status: status_from(&r.get::<_, String>("status")?),
             session: None,
             new_session_on_prompt_change: r.get("new_session_on_prompt_change")?,
@@ -137,6 +156,11 @@ fn base_row(r: &Row<'_>) -> rusqlite::Result<AgentView> {
         paused: r.get("paused")?,
         status_reason: r.get("status_reason")?,
         queued: 0,
+        compact_supported: parse::<HarnessId>(&harness, "harness")?
+            .compact_command()
+            .is_some(),
+        last_compact_at: r.get("last_compact_at")?,
+        last_compact_ok: r.get("last_compact_ok")?,
         created_at: r.get("created_at")?,
         updated_at: r.get("updated_at")?,
     })
@@ -255,6 +279,70 @@ pub fn set_paused(t: &mut Tx<'_>, id: &str, paused: bool) -> ApiResult<bool> {
         params![id, paused, now()],
     )?;
     Ok(before)
+}
+
+/// Note a turn start of agent `id`. The event pump calls it for each
+/// `turn_start` event (PLAN §18, "Auto compact").
+pub fn note_turn(t: &mut Tx<'_>, id: &str) -> ApiResult<()> {
+    t.execute(
+        "UPDATE agents SET last_turn_at = ?2 WHERE id = ?1",
+        params![id, now()],
+    )?;
+    Ok(())
+}
+
+/// Record the end of a compaction of agent `id`, also a failed one.
+pub fn note_compaction(t: &mut Tx<'_>, id: &str, ok: bool) -> ApiResult<()> {
+    t.execute(
+        "UPDATE agents SET last_compact_at = ?2, last_compact_ok = ?3 WHERE id = ?1",
+        params![id, now(), ok],
+    )?;
+    Ok(())
+}
+
+/// What the auto compact of an agent reads from the store
+/// ([`compact_clock`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompactClock {
+    /// A turn started after the last compaction and after the start of
+    /// the current session.
+    pub turned: bool,
+    /// Where the age of the session context counts from (RFC 3339): the
+    /// end of the last compaction, else the start of the current session.
+    /// A resume keeps the start of its session. `None`: no current
+    /// session.
+    pub since: Option<String>,
+}
+
+/// The auto compact clock of agent `id` (PLAN §18, "Auto compact").
+pub fn compact_clock(conn: &Connection, id: &str) -> ApiResult<CompactClock> {
+    let (turn, compact): (Option<String>, Option<String>) = conn.query_row(
+        "SELECT last_turn_at, last_compact_at FROM agents WHERE id = ?1",
+        [id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let started: Option<String> = conn
+        .query_row(
+            "SELECT started_at FROM sessions WHERE agent_id = ?1 AND current = 1",
+            [id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(started) = started else {
+        return Ok(CompactClock {
+            turned: false,
+            since: None,
+        });
+    };
+    // RFC 3339 with milliseconds in UTC (`db::now`) sorts as text.
+    let since = match compact {
+        Some(c) if c > started => c,
+        _ => started,
+    };
+    Ok(CompactClock {
+        turned: turn.is_some_and(|t| t > since),
+        since: Some(since),
+    })
 }
 
 pub fn get(conn: &Connection, id: &str) -> ApiResult<AgentView> {
@@ -501,9 +589,10 @@ pub fn create_from(
         "INSERT INTO agents (id, name, project, harness, subscription, model, prompt, policy,
                              restart, status, workspace, source, created_at, updated_at,
                              new_session_on_prompt_change, template, system_prompt,
-                             subscription_pool, persona, skills, idle_stop)
+                             subscription_pool, persona, skills, idle_stop,
+                             compact_on_idle, compact_max_age)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'stopped', ?10, ?11, ?12, ?12, ?13, ?14,
-                 ?15, ?16, ?17, ?18, ?19)",
+                 ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
         params![
             id,
             agent.name,
@@ -523,7 +612,9 @@ pub fn create_from(
             serde_json::to_string(&agent.subscription_pool)?,
             agent.persona,
             serde_json::to_string(&agent.skills)?,
-            agent.idle_stop.map(IdleStop::as_text)
+            agent.idle_stop.map(IdleStop::as_text),
+            agent.compact_on_idle,
+            agent.compact_max_age.map(CompactMaxAge::as_text)
         ],
     )?;
     set_roles(t, &id, &def.project, &def.roles)?;
@@ -576,6 +667,14 @@ pub struct AgentPatch {
     /// to the global default.
     #[serde(default, deserialize_with = "nullable")]
     pub idle_stop: Option<Option<IdleStop>>,
+    /// Compact at the idle stop (PLAN §18, "Auto compact"). `null` goes
+    /// back to the global default.
+    #[serde(default, deserialize_with = "nullable")]
+    pub compact_on_idle: Option<Option<bool>>,
+    /// The maximum age of the session context: `off`, or a duration.
+    /// `null` goes back to the global default.
+    #[serde(default, deserialize_with = "nullable")]
+    pub compact_max_age: Option<Option<CompactMaxAge>>,
     #[serde(default)]
     pub new_session_on_prompt_change: Option<bool>,
     /// The skills (PLAN §8.6): names of the skill library, or `*`. `[]`
@@ -612,6 +711,8 @@ pub fn write_def(t: &mut Tx<'_>, id: &str, p: &AgentPatch) -> ApiResult<()> {
             policy: policy.clone(),
             restart: RestartPolicy::default(),
             idle_stop: None,
+            compact_on_idle: None,
+            compact_max_age: None,
             new_session_on_prompt_change: true,
         })?;
     }
@@ -642,6 +743,8 @@ pub fn write_def(t: &mut Tx<'_>, id: &str, p: &AgentPatch) -> ApiResult<()> {
             persona = CASE WHEN ?16 THEN ?17 ELSE persona END,
             skills = coalesce(?18, skills),
             idle_stop = CASE WHEN ?19 THEN ?20 ELSE idle_stop END,
+            compact_on_idle = CASE WHEN ?21 THEN ?22 ELSE compact_on_idle END,
+            compact_max_age = CASE WHEN ?23 THEN ?24 ELSE compact_max_age END,
             updated_at = ?8
          WHERE id = ?1",
         params![
@@ -668,6 +771,10 @@ pub fn write_def(t: &mut Tx<'_>, id: &str, p: &AgentPatch) -> ApiResult<()> {
             skills.as_ref().map(serde_json::to_string).transpose()?,
             p.idle_stop.is_some(),
             p.idle_stop.flatten().map(IdleStop::as_text),
+            p.compact_on_idle.is_some(),
+            p.compact_on_idle.flatten(),
+            p.compact_max_age.is_some(),
+            p.compact_max_age.flatten().map(CompactMaxAge::as_text),
         ],
     )?;
     if p.harness.is_some() || p.subscription.is_some() || p.subscription_pool.is_some() {
@@ -1099,13 +1206,16 @@ pub fn sync_def(t: &mut Tx<'_>, id: &str, def: &AgentDef) -> ApiResult<bool> {
         || before.agent.skills != skills
         || before.agent.policy != def.policy
         || before.agent.restart != def.restart
-        || before.agent.idle_stop != def.idle_stop;
+        || before.agent.idle_stop != def.idle_stop
+        || before.agent.compact_on_idle != def.compact_on_idle
+        || before.agent.compact_max_age != def.compact_max_age;
     if changed {
         t.execute(
             "UPDATE agents SET harness = ?2, subscription = ?3, model = ?4, prompt = ?5,
                     policy = ?6, restart = ?7, source = 'file', updated_at = ?8,
                     new_session_on_prompt_change = ?9, system_prompt = ?10,
-                    subscription_pool = ?11, persona = ?12, skills = ?13, idle_stop = ?14
+                    subscription_pool = ?11, persona = ?12, skills = ?13, idle_stop = ?14,
+                    compact_on_idle = ?15, compact_max_age = ?16
              WHERE id = ?1",
             params![
                 id,
@@ -1121,7 +1231,9 @@ pub fn sync_def(t: &mut Tx<'_>, id: &str, def: &AgentDef) -> ApiResult<bool> {
                 serde_json::to_string(&pool)?,
                 persona,
                 serde_json::to_string(&skills)?,
-                def.idle_stop.map(IdleStop::as_text)
+                def.idle_stop.map(IdleStop::as_text),
+                def.compact_on_idle,
+                def.compact_max_age.map(CompactMaxAge::as_text)
             ],
         )?;
     }

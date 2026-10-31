@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::{AgentDef, IdleStop, Policy, RestartPolicy};
+use crate::config::{AgentDef, CompactMaxAge, IdleStop, Policy, RestartPolicy};
 use crate::harness::HarnessId;
 use crate::ids::{AgentId, HarnessSessionId};
 use crate::role::Role;
@@ -51,6 +51,12 @@ pub struct Agent {
     /// See [`AgentDef::idle_stop`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_stop: Option<IdleStop>,
+    /// See [`AgentDef::compact_on_idle`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compact_on_idle: Option<bool>,
+    /// See [`AgentDef::compact_max_age`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compact_max_age: Option<CompactMaxAge>,
     #[serde(default)]
     pub status: AgentStatus,
     /// The current harness session, if one has started.
@@ -116,6 +122,8 @@ impl Agent {
             policy: def.policy.clone(),
             restart: def.restart,
             idle_stop: def.idle_stop,
+            compact_on_idle: def.compact_on_idle,
+            compact_max_age: def.compact_max_age,
             status: AgentStatus::Stopped,
             session: None,
             new_session_on_prompt_change: def.new_session_on_prompt_change,

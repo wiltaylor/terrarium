@@ -39,6 +39,8 @@ pub const SPEC_KEYS: &[&str] = &[
     "policy",
     "restart",
     "idle_stop",
+    "compact_on_idle",
+    "compact_max_age",
     "skills",
     "new_session_on_prompt_change",
 ];
@@ -222,6 +224,8 @@ fn full(def: &AgentDef) -> Spec {
     m.insert("policy".into(), Value::Object(p));
     m.insert("restart".into(), to(&def.restart));
     m.insert("idle_stop".into(), to(&def.idle_stop));
+    m.insert("compact_on_idle".into(), to(&def.compact_on_idle));
+    m.insert("compact_max_age".into(), to(&def.compact_max_age));
     m.insert("skills".into(), to(&def.skills));
     m.insert(
         "new_session_on_prompt_change".into(),

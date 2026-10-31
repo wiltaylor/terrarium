@@ -59,6 +59,10 @@ describe("template model", () => {
     expect(formToCreate({ ...form, idle_stop: "1h" }, pick)).toEqual({ name: "w1", project: "p", template: "w", idle_stop: "1h" });
     expect(specToForm({ ...t.spec, idle_stop: "off" }).idle_stop).toBe("off");
     expect(validateTemplateForm({ ...emptyTemplateForm(), name: "t", agent: { ...emptyTemplateForm().agent, idle_stop: "5x" } })).toEqual([expect.stringContaining("Idle stop")]);
+    // Auto compact: an override, and the spec round trip.
+    expect(formToCreate({ ...form, compact_on_idle: "on", compact_max_age: "24h" }, pick)).toEqual({ name: "w1", project: "p", template: "w", compact_on_idle: true, compact_max_age: "24h" });
+    expect(specToForm({ ...t.spec, compact_on_idle: false, compact_max_age: "12h" })).toMatchObject({ compact_on_idle: "off", compact_max_age: "12h" });
+    expect(validateTemplateForm({ ...emptyTemplateForm(), name: "t", agent: { ...emptyTemplateForm().agent, compact_max_age: "soon" } })).toEqual([expect.stringContaining("Compact max age")]);
     // Roles and the pool are overrides too.
     expect(formToCreate({ ...form, roles: ["project_admin"] }, pick)).toEqual({ name: "w1", project: "p", template: "w", roles: ["project_admin"] });
     expect(formToCreate({ ...form, subscription: "a", subscription_pool: ["a", "b"] }, pick)).toEqual({ name: "w1", project: "p", template: "w", subscription: "a", subscription_pool: ["a", "b"] });

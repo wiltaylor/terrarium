@@ -32,6 +32,13 @@ describe("applyAgentEvent", () => {
     expect(d!.status_reason).toBeUndefined();
   });
 
+  it("keeps the compacting reason, and the end of a compaction", () => {
+    const [a] = applyAgentEvent([agent()], ev({ data: { status: "working", from: "idle", reason: "compacting" } }));
+    expect(a).toMatchObject({ status: "working", status_reason: "compacting" });
+    const [b] = applyAgentEvent([a!], ev({ kind: "agent.compacted", at: "2026-10-24T10:01:00Z", data: { cause: "manual", ok: false } }));
+    expect(b).toMatchObject({ last_compact_at: "2026-10-24T10:01:00Z", last_compact_ok: false });
+  });
+
   it("applies status events and tracks turn start", () => {
     const [a] = applyAgentEvent([agent()], ev({ data: { status: "working" } }));
     expect(a!.status).toBe("working");

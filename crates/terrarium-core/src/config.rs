@@ -140,6 +140,81 @@ impl<'de> Deserialize<'de> for IdleStop {
     }
 }
 
+/// How old the context of a harness session may get before the daemon
+/// compacts it at the next rest of the agent (PLAN §18, "Auto compact").
+/// The age counts from the last compaction, else from the start of the
+/// session. The text form is that of [`IdleStop`]: `off` (or `0`), or a
+/// duration such as `24h`. A definition without the key takes the global
+/// default (`TERRARIUM_COMPACT_MAX_AGE`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CompactMaxAge {
+    /// No compaction for age.
+    Off,
+    /// Compact a session older than this at the next rest.
+    After(std::time::Duration),
+}
+
+impl CompactMaxAge {
+    /// The maximum age; `None` for `off`.
+    pub fn duration(self) -> Option<std::time::Duration> {
+        match self {
+            Self::Off => None,
+            Self::After(d) => Some(d),
+        }
+    }
+
+    /// The text form: `off`, or the duration in its largest units.
+    pub fn as_text(self) -> String {
+        match self {
+            Self::Off => "off".into(),
+            Self::After(d) => IdleStop::After(d).as_text(),
+        }
+    }
+}
+
+impl std::str::FromStr for CompactMaxAge {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, String> {
+        match s.parse::<IdleStop>() {
+            Ok(IdleStop::Off) => Ok(Self::Off),
+            Ok(IdleStop::After(d)) => Ok(Self::After(d)),
+            Err(_) => Err(format!(
+                "`{s}` is not a compact max age: use `off`, or a duration such as 24h or 12h30m"
+            )),
+        }
+    }
+}
+
+impl std::fmt::Display for CompactMaxAge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.as_text())
+    }
+}
+
+impl Serialize for CompactMaxAge {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        s.serialize_str(&self.as_text())
+    }
+}
+
+impl<'de> Deserialize<'de> for CompactMaxAge {
+    /// A text form, or a number of seconds (`0` is `off`).
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Secs(u64),
+            Text(String),
+        }
+        match Raw::deserialize(d)? {
+            Raw::Secs(0) => Ok(Self::Off),
+            Raw::Secs(n) => Ok(Self::After(std::time::Duration::from_secs(n))),
+            Raw::Text(t) => t.parse().map_err(serde::de::Error::custom),
+        }
+    }
+}
+
 /// An agent definition, `agents/<name>.toml`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentDef {
@@ -189,6 +264,15 @@ pub struct AgentDef {
     /// default (`TERRARIUM_IDLE_STOP`, 10 minutes).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_stop: Option<IdleStop>,
+    /// Compact the session when the agent reaches its idle stop (PLAN §18,
+    /// "Auto compact"). `None`: the global default
+    /// (`TERRARIUM_COMPACT_ON_IDLE`, off).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compact_on_idle: Option<bool>,
+    /// The maximum age of the session context ([`CompactMaxAge`]). `None`:
+    /// the global default (`TERRARIUM_COMPACT_MAX_AGE`, off).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compact_max_age: Option<CompactMaxAge>,
     /// The skills of the agent from the skill library (PLAN §8.6): skill
     /// names, or `*` for every skill of the library. Default none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -765,6 +849,29 @@ skills = ["code-review", "release-notes"]
         let none: AgentDef = toml::from_str("project = \"p\"\nharness = \"pi\"\n").expect("parse");
         assert!(none.skills.is_empty());
         assert!(!toml::to_string(&none).expect("ser").contains("skills"));
+    }
+
+    #[test]
+    fn auto_compact_keys_round_trip() {
+        let def: AgentDef = toml::from_str(
+            "project = \"p\"\nharness = \"claude\"\ncompact_on_idle = true\ncompact_max_age = \"24h\"\n",
+        )
+        .expect("parse");
+        assert_eq!(def.compact_on_idle, Some(true));
+        assert_eq!(
+            def.compact_max_age,
+            Some(CompactMaxAge::After(std::time::Duration::from_secs(86_400)))
+        );
+        let text = toml::to_string(&def).expect("ser");
+        assert!(text.contains("compact_max_age = \"1d\""), "{text}");
+        assert_eq!("off".parse::<CompactMaxAge>(), Ok(CompactMaxAge::Off));
+        assert_eq!("0".parse::<CompactMaxAge>(), Ok(CompactMaxAge::Off));
+        let bad = "soon".parse::<CompactMaxAge>().unwrap_err();
+        assert!(bad.contains("compact max age"), "{bad}");
+        // Absent keys stay absent: the global defaults apply.
+        let none: AgentDef = toml::from_str("project = \"p\"\nharness = \"pi\"\n").expect("parse");
+        assert_eq!((none.compact_on_idle, none.compact_max_age), (None, None));
+        assert!(!toml::to_string(&none).expect("ser").contains("compact"));
     }
 
     #[test]

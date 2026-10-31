@@ -8,7 +8,7 @@ import { StatusBadge } from "../../components/StatusBadge";
 import { Terminal } from "../../components/Terminal";
 import { ConfirmButton, ErrorBanner, PageHead, Tabs, useNow } from "../../components/ui";
 import { GRANTABLE_ROLES, type Agent, type AgentStatus, type Role } from "../../api/types";
-import { compact, timeUntil, windowValue } from "../../lib/format";
+import { ago, compact, timeUntil, windowValue } from "../../lib/format";
 import { agents, api, events, leases as holds, quota, subscriptions } from "../../stores";
 import { describeCause } from "../../stores/quota";
 import { eventAgentId } from "../../stores/agents";
@@ -22,13 +22,13 @@ import { AGENT_TABS, agentViewQuery, parseAgentView, type AgentTab } from "./ses
 import { RoleBadges } from "./AgentsPage";
 import { appliedText, changeSubscription, loginText, noSubscriptionAccount, noSubscriptionAccountText, normalizePool, samePool, swapTargets } from "./subscription";
 import { PoolPicker, SubscriptionSelect } from "./SubscriptionFields";
-import { SystemPromptField, useGlobalIdleStop } from "./AgentFields";
-import { effectivePersona, idleStopText, systemPromptProblem } from "./form";
+import { SystemPromptField, useCompactDefaults, useGlobalIdleStop } from "./AgentFields";
+import { autoCompactText, effectivePersona, idleStopText, systemPromptProblem } from "./form";
 import { WaitsPanel, WatchesPanel } from "./Waits";
 import { QuestionsPanel } from "../inbox/QuestionsPanel";
 import { SkillsPicker } from "../skills/SkillsPicker";
 import { RESTART_NOTE, skillsLabel } from "../skills/model";
-import { lifecycleActions, type LifecycleAction } from "../../lib/lifecycle";
+import { compactAction, lastCompactedText, lifecycleActions, type LifecycleAction } from "../../lib/lifecycle";
 
 /** The API call of a lifecycle button. Resume clears the pause (`unpause`). */
 const lifecycleCall = (kind: LifecycleAction["kind"], id: string) =>
@@ -71,6 +71,7 @@ export default function AgentDetail() {
   const agent = (): Agent | undefined => agents.byId(id()) ?? agents.byId(fetched()?.id ?? "") ?? fetched() ?? undefined;
   const running = () => RUNNING.includes(agent()?.status ?? "stopped");
   const globalIdleStop = useGlobalIdleStop();
+  const compactDefaults = useCompactDefaults();
   // The daemon removed the agent while this page shows it (an `agent_removed`
   // event), or the GET found no agent (404): the page says so, not a raw error.
   const [removedKey, setRemovedKey] = createSignal<string | null>(null);
@@ -140,6 +141,14 @@ export default function AgentDetail() {
                 </button>
               )}
             </For>
+            {(() => {
+              const c = () => compactAction(a(), quota.holdsFor(a().id).length > 0);
+              return (
+                <button onClick={() => act("Compaction", () => api.agents.compact(a().id))} disabled={c().disabled} title={c().title}>
+                  Compact now
+                </button>
+              );
+            })()}
             <button onClick={() => setEditing(true)}>Edit</button>
             <button onClick={() => setSaving(true)}>Save as template</button>
             <ConfirmButton label="Delete" confirmLabel={running() ? "Yes, stop and delete" : "Yes, delete"} onConfirm={() => remove(a())} />
@@ -201,6 +210,18 @@ export default function AgentDetail() {
                 {idleStopText(a().idle_stop, globalIdleStop())}
                 <Show when={a().status_reason && a().status === "stopped"}>
                   <span class="muted small"> · last stop: {a().status_reason}</span>
+                </Show>
+              </dd>
+              <dt>Auto compact</dt>
+              <dd>
+                <span classList={{ muted: a().compact_supported === false }}>{autoCompactText(a(), compactDefaults())}</span>
+                <Show when={lastCompactedText(a(), (t) => ago(t))}>
+                  {(t) => (
+                    <span class="muted small" style={a().last_compact_ok === false ? { color: "var(--warn)" } : undefined}>
+                      {" "}
+                      · {t()}
+                    </span>
+                  )}
                 </Show>
               </dd>
               <Show when={a().template}>

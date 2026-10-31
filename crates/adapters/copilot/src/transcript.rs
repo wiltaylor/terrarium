@@ -163,7 +163,13 @@ impl CopilotTranscript {
                 vec![system(id, no, at, &format!("Aborted: {reason}"), kind)]
             }
             "session.compaction_complete" => {
-                vec![system(id, no, at, "[context compacted]", kind)]
+                let text = match crate::usage::compaction_event(kind, &d) {
+                    Some(terrarium_core::Event::CompactFinished {
+                        ok: false, message, ..
+                    }) => format!("[compaction failed: {}]", message.unwrap_or_default()),
+                    _ => "[context compacted]".to_owned(),
+                };
+                vec![system(id, no, at, &text, kind)]
             }
             "session.info" | "session.warning" | "session.error" => {
                 let msg = s(&d, "message").unwrap_or_default();

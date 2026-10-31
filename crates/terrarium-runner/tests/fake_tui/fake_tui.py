@@ -18,6 +18,9 @@ Commands:
   /question   submit, send a Notification hook, wait for one answer line
   /flood N    submit, print N numbered lines of 64 bytes, then Stop
   /abort      die of SIGABRT, with no hooks
+  /compact    as Claude Code: no UserPromptSubmit. Send PreCompact
+              (trigger "manual"), print `compacting...`, wait the work time,
+              send PostCompact, and print `compacted`
 
 A command may come after a turn tag (`[User] /exit 1`, PLAN §8.5): the fake
 acts on it as a model that does what the turn says. The hooks get the whole
@@ -48,6 +51,9 @@ Env:
   FAKE_TUI_INPUT_LOG   a path; with FAKE_TUI_SLASH_NEEDS_PAUSE, append one
                        line for each read of the terminal: the bytes as
                        hex. ICRNL is off then, so a CR stays a CR.
+  FAKE_TUI_COMPACT     `silent`: /compact sends no PostCompact (a failed
+                       compaction of Claude Code). `turn`: /compact also
+                       sends UserPromptSubmit first and Stop last
 
 Signals: SIGTERM and SIGHUP end it at once (the Python default), unless
 FAKE_TUI_IGNORE_HUP is set. When its parent (the runner) dies, it exits
@@ -75,6 +81,7 @@ NO_SUBMIT_HOOK = os.environ.get("FAKE_TUI_NO_SUBMIT_HOOK") == "1"
 SUBMIT_GATE = os.environ.get("FAKE_TUI_SUBMIT_GATE")
 SLASH_NEEDS_PAUSE = os.environ.get("FAKE_TUI_SLASH_NEEDS_PAUSE") == "1"
 INPUT_LOG = os.environ.get("FAKE_TUI_INPUT_LOG")
+COMPACT = os.environ.get("FAKE_TUI_COMPACT", "")
 # The smallest gap between a slash command and its CR that submits it.
 SLASH_PAUSE = 0.1
 
@@ -210,6 +217,18 @@ def main():
             return int(text.split()[1])
         if text == "/abort":
             os.abort()
+        if text == "/compact":
+            if COMPACT == "turn":
+                hook("UserPromptSubmit", {"prompt": full})
+            hook("PreCompact", {"trigger": "manual"})
+            out("compacting...\n")
+            time.sleep(DELAY)
+            if COMPACT != "silent":
+                hook("PostCompact", {"trigger": "manual", "compact_summary": "s"})
+            out("compacted\n")
+            if COMPACT == "turn":
+                hook("Stop", {})
+            continue
         if NO_SUBMIT:
             out("ignored\n")
             continue

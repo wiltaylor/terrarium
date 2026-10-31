@@ -149,9 +149,19 @@ pub fn hook_events(hook: &HookPayload) -> Vec<Event> {
         "SessionEnd" => vec![Event::SessionEnded {
             reason: s(b, "reason").map(str::to_owned),
         }],
-        // SubagentStart, SubagentStop, PreCompact, PostCompact: not
-        // captured, and no status change. `SubagentStop` must not close
-        // the turn of the main thread.
+        // A compaction: `/compact` (`trigger` `manual`) or a full context
+        // (`auto`). The payloads have no error field (docs/compat.md,
+        // "Compaction"): a failure is a missing PostCompact.
+        "PreCompact" => vec![Event::CompactStarted {
+            trigger: s(b, "trigger").map(str::to_owned),
+        }],
+        "PostCompact" => vec![Event::CompactFinished {
+            ok: true,
+            trigger: s(b, "trigger").map(str::to_owned),
+            message: None,
+        }],
+        // SubagentStart, SubagentStop: not captured, and no status change.
+        // `SubagentStop` must not close the turn of the main thread.
         _ => Vec::new(),
     }
 }
@@ -317,15 +327,32 @@ mod tests {
             [Event::Question { request_id, question, .. }]
                 if request_id == "t" && question == "Allow Bash: rm -rf build…?"
         ));
-        for name in [
-            "SubagentStart",
-            "SubagentStop",
-            "PreCompact",
-            "PostCompact",
-            "Notification",
-        ] {
+        for name in ["SubagentStart", "SubagentStop", "Notification"] {
             assert!(hook_events(&hook(name, json!({"session_id": "s"}))).is_empty());
         }
+        // The `pre-compact.command.input` and `post-compact.command.input`
+        // schemas of the 0.165.0 binary.
+        let compact = |name: &str| {
+            hook_events(&hook(
+                name,
+                json!({"session_id": "s", "turn_id": "t", "hook_event_name": name,
+                       "trigger": "manual", "model": "gpt-5"}),
+            ))
+        };
+        assert_eq!(
+            compact("PreCompact"),
+            [Event::CompactStarted {
+                trigger: Some("manual".into())
+            }]
+        );
+        assert_eq!(
+            compact("PostCompact"),
+            [Event::CompactFinished {
+                ok: true,
+                trigger: Some("manual".into()),
+                message: None
+            }]
+        );
         assert!(hook_events(&hook("SessionStart", json!({}))).is_empty());
         // The payload name wins over the CLI argument.
         assert_eq!(

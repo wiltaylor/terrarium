@@ -37,7 +37,7 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 use terrarium_adapter_claude::usage::{TranscriptTail, UsageRecord};
-use terrarium_core::HarnessId;
+use terrarium_core::{Event, HarnessId};
 use tokio::sync::broadcast::error::RecvError;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
@@ -199,6 +199,13 @@ pub trait UsageSource: Send {
     /// The responses that are new since the last poll. A source may give a
     /// response again; the store drops repeats.
     fn poll(&mut self) -> Result<Vec<SourceSample>, String>;
+    /// The session signals that the last polls found, with the time of
+    /// each line: the compaction start and end of a harness that writes
+    /// them only to its session file (Copilot CLI). The collector gives
+    /// them to the supervisor ([`crate::supervisor::Supervisor::session_signal`]).
+    fn take_signals(&mut self) -> Vec<(Event, Option<DateTime<Utc>>)> {
+        Vec::new()
+    }
 }
 
 /// Makes a [`UsageSource`] for the sessions of one harness.
@@ -377,6 +384,10 @@ impl UsageSource for Guarded {
             .map_err(|e| format!("{}: {e}", self.path.display()))?;
         self.inner.poll()
     }
+
+    fn take_signals(&mut self) -> Vec<(Event, Option<DateTime<Utc>>)> {
+        self.inner.take_signals()
+    }
 }
 
 /// Claude Code: tail the session JSONL with the adapter's
@@ -463,15 +474,21 @@ impl UsageSource for CodexSource {
 /// sample, keyed by its `usage_id`.
 pub struct CopilotSource {
     tail: terrarium_adapter_copilot::usage::TranscriptTail,
+    signals: Vec<(Event, Option<DateTime<Utc>>)>,
 }
 
 impl UsageSource for CopilotSource {
     fn poll(&mut self) -> Result<Vec<SourceSample>, String> {
         use terrarium_adapter_copilot::usage::UsageRecord as R;
         let records = self.tail.poll().map_err(|e| e.to_string())?;
+        let signals = &mut self.signals;
         Ok(records
             .into_iter()
             .filter_map(|r| match r {
+                R::Compaction { event, at } => {
+                    signals.push((event, at));
+                    None
+                }
                 R::Sample(s) => Some(SourceSample {
                     model: s.model.clone(),
                     input_tokens: s.input_tokens,
@@ -548,6 +565,7 @@ pub fn default_sources() -> Vec<Arc<dyn UsageSourceFactory>> {
             make: |p| {
                 Box::new(CopilotSource {
                     tail: terrarium_adapter_copilot::usage::TranscriptTail::new(p),
+                    signals: Vec::new(),
                 })
             },
         }),
@@ -830,6 +848,12 @@ impl Collector {
                 Vec::new()
             }
         };
+        let signals = t.source.take_signals();
+        if let Ok(id) = agent.parse::<terrarium_core::AgentId>() {
+            for (event, at) in signals {
+                self.state.supervisor.session_signal(id, event, at);
+            }
+        }
         let card = if samples.is_empty() {
             None
         } else {

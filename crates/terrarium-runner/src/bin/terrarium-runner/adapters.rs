@@ -109,6 +109,14 @@ impl Adapter for FakeAdapter {
                 message: hook.str_field("message").unwrap_or_default().to_owned(),
                 question: true,
             }],
+            "PreCompact" => vec![Event::CompactStarted {
+                trigger: hook.str_field("trigger").map(str::to_owned),
+            }],
+            "PostCompact" => vec![Event::CompactFinished {
+                ok: true,
+                trigger: hook.str_field("trigger").map(str::to_owned),
+                message: None,
+            }],
             _ => vec![],
         }
     }

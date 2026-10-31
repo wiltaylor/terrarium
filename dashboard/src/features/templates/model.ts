@@ -3,7 +3,7 @@
 // picks a template for an agent, and the order of the template chooser. Pure.
 
 import type { AgentCreate, AgentDef, AgentPolicy, AgentTemplate, NewTemplate, TemplatePatch, TemplateResolved, TemplateSpec } from "../../api/types";
-import { emptyAgentForm, formDiff, formToDef, idleStopProblem, parseList, personaProblem, sameList, systemPromptProblem, type AgentFormValues } from "../agents/form";
+import { compactMaxAgeProblem, emptyAgentForm, formDiff, formToDef, idleStopProblem, parseList, personaProblem, sameList, switchOf, systemPromptProblem, type AgentFormValues } from "../agents/form";
 
 /** The template form: the template's own fields and the agent fields of its spec. */
 export interface TemplateFormValues {
@@ -35,6 +35,8 @@ export function specToForm(spec: TemplateSpec, project = "", name = ""): AgentFo
     restart: spec.restart ?? "on-failure",
     skills: spec.skills ?? [],
     idle_stop: spec.idle_stop ?? "",
+    compact_on_idle: switchOf(spec.compact_on_idle),
+    compact_max_age: spec.compact_max_age ?? "",
   };
 }
 
@@ -67,6 +69,8 @@ export function validateTemplateForm(v: TemplateFormValues): string[] {
   if (pp) out.push(pp);
   const ip = idleStopProblem(v.agent.idle_stop);
   if (ip) out.push(ip);
+  const cp = compactMaxAgeProblem(v.agent.compact_max_age);
+  if (cp) out.push(cp);
   return out;
 }
 

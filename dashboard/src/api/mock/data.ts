@@ -181,6 +181,7 @@ export function seed(now: number = Date.now()): MockWorld {
     policy: { targets: [], mail_to: ["*"] },
     restart: "on-failure",
     paused: false,
+    compact_supported: true,
     workspace: `/state/agents/${id}/workspace`,
     source: "api",
     created_at: ago(60 * 24 * 3),
@@ -189,7 +190,7 @@ export function seed(now: number = Date.now()): MockWorld {
   });
 
   const agents: Agent[] = [
-    agentRow("01JB0LEAD00000000000000001", "lead", "terrarium", "claude", "anthropic-max", "idle", { roles: ["project_admin"], prompt: "lead", source: "file", subscription_pool: ["anthropic-max", "anthropic-max-2"] }),
+    agentRow("01JB0LEAD00000000000000001", "lead", "terrarium", "claude", "anthropic-max", "idle", { roles: ["project_admin"], prompt: "lead", source: "file", subscription_pool: ["anthropic-max", "anthropic-max-2"], compact_max_age: "24h", last_compact_at: ago(60 * 5), last_compact_ok: true }),
     agentRow("01JB0WRK100000000000000002", "runner-dev", "terrarium", "claude", "anthropic-max", "working", { current_card: "TER-12", prompt: "worker", subscription_pool: ["anthropic-max", "anthropic-max-2"], skills: ["fern-check"], skills_restart: true }),
     agentRow("01JB0WRK200000000000000003", "adapter-codex", "terrarium", "codex", "chatgpt-pro", "blocked", { model: "gpt-5-codex", current_card: "TER-15" }),
     agentRow("01JB0WRK300000000000000004", "reviewer", "terrarium", "pi", "openrouter-key", "starting", { model: "anthropic/claude-sonnet", policy: { targets: [], mail_to: ["lead"], cross_project: ["webshop/shop-lead"] } }),

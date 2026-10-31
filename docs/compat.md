@@ -1186,7 +1186,8 @@ above are the reasons.
 ## pi: not tested
 
 - `ui_prompt_start` with a real extension prompt.
-- Compaction events.
+- Compaction events: read in the 1.4.0 bundle ("Compaction (all
+  harnesses)"), not run live.
 - A Copilot subscription through pi (`github-copilot` provider).
 - `pi auth print-bearer-token` and the provider usage endpoints.
 
@@ -1393,6 +1394,37 @@ a turn, and no limit was hit live.
 
 To close a gap, capture the session file or the hook payload of a turn
 that hits the limit, add it as a fixture, and map it in the adapter.
+
+## Compaction (all harnesses)
+
+The auto compact of PLAN §18 types `/compact` as a raw command into an
+idle agent, and waits for the end signal of the harness
+(`crates/terrariumd/src/lifecycle.rs`, `Supervisor::compact`). An adapter
+gives `Event::CompactStarted` and `Event::CompactFinished` for the signals
+below. `HarnessId::compact_command` lists the harnesses that the daemon
+compacts. Read on 2026-10-31 in the installed versions (Claude Code
+2.1.312, Codex 0.165.0, pi 1.4.0) and in the extracted Copilot CLI 1.0.103
+(the pin; the 1.0.105 binary keeps its JavaScript compressed). No harness
+ran a turn or a compaction: status **verified in the bundle, not run
+live** for each row.
+
+| Harness | Command | Start and end signals | Failure | Support |
+|---|---|---|---|---|
+| Claude Code | `/compact [instructions]`, a `local` command: `{type:"local",name:"compact",...,argumentHint:"<optional custom summarization instructions>"}` (byte 249197319 of `claude-code-linux-x64/claude`). A command does not go through `prompt.submit`, so no `UserPromptSubmit` fires ("the prompt did not go through prompt.submit (a command, bash mode, ...)", byte 256892978). | The PreCompact hook `{hook_event_name:"PreCompact", trigger:"manual"\|"auto", custom_instructions}` (byte 251795705), and the PostCompact hook `{hook_event_name:"PostCompact", trigger, compact_summary}` (byte 251796989). The adapter registers both (`flags.rs`) and maps them (`hooks.rs`). The session file also gets a `system` `compact_boundary` line and a user line with `isCompactSummary`. | No signal. "Not enough messages to compact." (byte 250811061) throws before the hooks; an API error throws before PostCompact. The daemon waits 5 minutes, then records `ok: false`. | supported |
+| Codex | `/compact`: "summarize conversation to prevent hitting the context limit" (byte 258750511 of `vendor/x86_64-unknown-linux-musl/bin/codex`). The compaction runs as a turn of its own ("cannot steer a compact turn", byte 252981858). | The PreCompact and PostCompact hooks, with the schemas `pre-compact.command.input` (byte 256456949) and `post-compact.command.input` (byte 256452054): `{session_id, turn_id, transcript_path, cwd, model, hook_event_name, trigger:"manual"\|"auto"}`. The adapter maps them (`hooks.rs`). The rollout file also gets a `compacted` item and an `event_msg` `context_compacted`. That `/compact` fires the hooks with `trigger: "manual"` is read from the schema, not seen. | Not known: "compaction failed" and `CompactionRequestFailed` are in the binary, but the hook payloads have no error field. The daemon waits 5 minutes. | supported |
+| Copilot CLI | `/compact [instructions]`: the regex `^\/compact(?:\s+([\s\S]*))?$` (byte 5498849 of `cli-main.js`, 1.0.103) calls `commands.invoke({name:"compact"})`. Empty session: "Nothing to compact." (`runtime.node`). | No hook end: the `preCompact` hook is not seen to fire, and there is no postCompact hook. `events.jsonl` has `session.compaction_start` `{compactionAttemptId?, trigger?, ...}` and `session.compaction_complete` `{success, error?, failureReason?, outcome?, ...}` (`copilot-sdk/generated/session-events.d.ts:4056`). The usage collector reads that file every 15 s; `usage::compaction_event` maps the two lines, and `Supervisor::session_signal` takes the lines that are not older than the command. | `success: false` with `error` or `failureReason`. | supported (the end comes up to 15 s late) |
+| pi | `/compact [instructions]` (`dist/core/slash-commands.js:23`). The TUI takes it before the prompt (`interactive-mode.js:2611`), so the `input` event does not fire. | The extension events `session_before_compact` `{reason:"manual"\|"threshold"\|"overflow", ...}` (`agent-session.js:2253`) and `session_compact` `{compactionEntry, reason, ...}` (`agent-session.js:2305`), from `dist/core/extensions/types.d.ts`. `ext/terrarium.ts` forwards both; the handler of `session_before_compact` returns nothing, so it never cancels. | `session_compact_failed` `{reason, errorMessage?, aborted}` (`agent-session.js:663`), also for "Nothing to compact (session too small)" (`agent-session.js:2250`). The adapter maps it to `ok: false`. | supported |
+
+A failure with no signal (Claude Code, perhaps Codex) costs the 5-minute
+time limit; turns that came meanwhile wait for it. The daemon compacts
+only after a turn, so "Not enough messages" is not expected.
+
+The live check that is still to do, one compaction for each harness on a
+nearly empty session with the cheapest model: send one short turn, run
+`terrarium agent compact <agent>`, and look for `compact_started`,
+`compact_finished`, and `agent.compacted` with `ok: true`. For Codex, also
+look for a `turn_start` of the command (the daemon makes it a `system`
+notice) and a `turn_end` after the end.
 
 ## Usage probes and login flows
 

@@ -281,6 +281,8 @@ gives them to the routers and the mail code.
 | `TERRARIUM_PUBLIC_URL` | `--public-url` | unset (mail: `http://localhost:8080`) | Mail links, `Version.url`, the cookie `Origin` check, CORS on `/a/...`. |
 | `TERRARIUM_MAIL_LOOP_LIMIT` | none | `6` | The mail loop guard (§6, PLAN §12): the agent-to-agent messages a thread can have since the last operator or project-inbox message before new agent mail on it types no pointer. The daemon reads it once. |
 | `TERRARIUM_IDLE_STOP` | none | `10m` | The idle stop of an agent that sets no `idle_stop` (§6.2, PLAN §18): a duration (`30m`, `1h30m`), or `off` (also `0`). The daemon reads it once. |
+| `TERRARIUM_COMPACT_ON_IDLE` | none | `off` | The `compact_on_idle` of an agent that sets none (§6.2, "Auto compact"): `on` or `off` (also `1`, `true`, `yes`, and `0`, `false`, `no`). The daemon reads it once. |
+| `TERRARIUM_COMPACT_MAX_AGE` | none | `off` | The `compact_max_age` of an agent that sets none (§6.2, "Auto compact"): a duration (`24h`, `12h30m`), or `off` (also `0`). The daemon reads it once. |
 | `TERRARIUM_ARTIFACT_LISTEN` | `--artifact-listen` | `0.0.0.0:8081` | The artifact origin listener. Empty: none, and the dashboard port serves `/a/...`. |
 | `TERRARIUM_ARTIFACT_PUBLIC_URL` | `--artifact-public-url` | unset | The artifact origin in signed URLs and the CSP. |
 | `TERRARIUM_WS_QUERY_TOKEN` | `--ws-query-token` | `0` | `1`: take `?token=` on an upgrade. |
@@ -468,12 +470,18 @@ Limits that always hold:
 
 ```json
 {"status":"ok","version":"0.1.0","uptime":1,"started_at":"2026-10-24T06:36:53.143044982Z",
- "definitions":{"projects":1,"agents":1,"targets":0,"subscriptions":0},"idle_stop":"10m"}
+ "definitions":{"projects":1,"agents":1,"targets":0,"subscriptions":0},"idle_stop":"10m",
+ "compact_on_idle":false,"compact_max_age":"off",
+ "compact_harnesses":["claude","codex","copilot","pi"]}
 ```
 
 `uptime` is in seconds. `definitions` counts the files loaded at the last
 start or reload. `idle_stop` is the idle stop of an agent that sets none
 (`TERRARIUM_IDLE_STOP`, §6.2): `off`, or a duration such as `10m`.
+`compact_on_idle` and `compact_max_age` are the auto compact settings of
+an agent that sets none (`TERRARIUM_COMPACT_ON_IDLE`,
+`TERRARIUM_COMPACT_MAX_AGE`, §6.2). `compact_harnesses` lists the
+harnesses whose agents the daemon can compact.
 
 ### `GET /api/harnesses`
 
@@ -1600,6 +1608,10 @@ An agent is the core `Agent` with bookkeeping fields:
 | `paused` | `true` while the agent is paused (§6.2): nothing wakes it, and its work waits. Always present. |
 | `queued` | The work that waits for the agent: queued turns, `queued` mail, and card and nudge lines (§6.2). Absent when 0. |
 | `idle_stop` | The idle stop of the agent (§6.2): `off`, or a duration such as `30m`. Absent: the daemon's `TERRARIUM_IDLE_STOP`. |
+| `compact_on_idle` | `true` or `false`: the agent compacts its session at its idle stop (§6.2, "Auto compact"). Absent: the daemon's `TERRARIUM_COMPACT_ON_IDLE`. |
+| `compact_max_age` | The maximum age of the session context (§6.2, "Auto compact"): `off`, or a duration such as `24h`. Absent: the daemon's `TERRARIUM_COMPACT_MAX_AGE`. |
+| `compact_supported` | `false` when the daemon cannot compact agents of the harness: it ignores `compact_on_idle` and `compact_max_age`, and `POST /api/agents/{id}/compact` is `409`. Always present. |
+| `last_compact_at`, `last_compact_ok` | The end of the last compaction that the daemon ran (RFC 3339, also a failed one) and its result. Absent when none. |
 | `waits` | The number of open waits (§6.7). Absent when it is 0. |
 | `waiting_on` | What the agent waits on, in one short line: the summaries of the oldest 3 open waits and a count of the others. Absent when the agent has no open wait. |
 | `session` | The harness session ID of the current session, when known. |
@@ -1615,7 +1627,7 @@ An agent is the core `Agent` with bookkeeping fields:
 | `GET /api/agents?project=` | | `200` agents by ID | read; an agent defaults to its project |
 | `POST /api/agents` | an agent definition, or `template` and the fields that differ (§21.3) | `201` agent | project_admin of `project`; some `policy` entries need sysadmin (below) |
 | `GET /api/agents/{id}` | | `200` agent, with `subscription_detail` (below) | read |
-| `PATCH /api/agents/{id}` | `{"harness"?, "subscription"?, "subscription_pool"?, "model"?, "prompt"?, "system_prompt"?, "persona"?, "skills"?, "policy"?, "restart"?, "idle_stop"?, "new_session_on_prompt_change"?}` | `200` agent | project_admin; some `policy` entries need sysadmin (below) |
+| `PATCH /api/agents/{id}` | `{"harness"?, "subscription"?, "subscription_pool"?, "model"?, "prompt"?, "system_prompt"?, "persona"?, "skills"?, "policy"?, "restart"?, "idle_stop"?, "compact_on_idle"?, "compact_max_age"?, "new_session_on_prompt_change"?}` | `200` agent | project_admin; some `policy` entries need sysadmin (below) |
 | `DELETE /api/agents/{id}` | `?confirm=true` when live; `?keep_workspace=true` | `204`; emits `agent_removed` (§9) | project_admin |
 
 `DELETE` stops a live agent, waits for it to end (up to 10 s), and moves
@@ -1692,8 +1704,9 @@ It is absent when the harness keeps its own default. The field has no
 secret and no quota numbers (those are in `GET /api/usage/me`).
 
 `PATCH` changes only the fields in the body. Send `null` for
-`subscription`, `model`, `prompt`, `system_prompt`, or `idle_stop` to clear
-it (`{"subscription": null}`). An empty `system_prompt` also clears it.
+`subscription`, `model`, `prompt`, `system_prompt`, `idle_stop`,
+`compact_on_idle`, or `compact_max_age` to clear it
+(`{"subscription": null}`). An empty `system_prompt` also clears it.
 `null` for the other fields changes nothing.
 
 `idle_stop` (in `POST`, `PATCH`, a template spec, an agent file, and a
@@ -1702,6 +1715,13 @@ fleet entry): how long the agent may rest before the idle stop (§6.2).
 units `d`, `h`, `m`, and `s` (`30m`, `1h30m`, `90s`). A number is
 seconds. Another value is `400 bad_request`. Absent or `null`: the daemon's
 `TERRARIUM_IDLE_STOP`.
+
+`compact_on_idle` and `compact_max_age` (in `POST`, `PATCH`, a template
+spec, an agent file, and a fleet entry): the auto compact settings
+(§6.2). `compact_on_idle` is `true` or `false`. `compact_max_age` has the
+form of `idle_stop`: `off` (or `0`), or a duration such as `24h`. Another
+value is `400 bad_request`. Absent or `null`: the daemon's
+`TERRARIUM_COMPACT_ON_IDLE` and `TERRARIUM_COMPACT_MAX_AGE` (both off).
 
 `subscription_pool` (in `POST` and `PATCH`): each member must exist, the
 agent's harness must be able to spend it, and all members and the current
@@ -1747,6 +1767,7 @@ lists the leases that the agent holds.
 | `POST /api/agents/{id}/restart` | none | `202` agent. Also on an agent in `error`: a new launch. A paused agent gets `409 conflict`. |
 | `POST /api/agents/{id}/pause` | none | `202` agent, `paused: true`. A running agent stops (reason `paused`). |
 | `POST /api/agents/{id}/unpause` | none | `202` agent, `paused: false`. It wakes when work waits. |
+| `POST /api/agents/{id}/compact` | none | `202` agent, `status` `working`, `status_reason` `compacting`. The end comes as `agent.compacted` (§9). `409 conflict`: no compaction for the harness, or the agent is paused, held, not idle, or compacts already. `409 not_running`: the agent does not run. |
 | `POST /api/agents/{id}/send` | `{"text": "Run the tests", "raw"?: false}` | `202 {"accepted": true}` (`"raw": true` with `raw`; `"queued": true` when the agent does not run) |
 | `POST /api/agents/{id}/keys` | `{"keys": ["esc", "down", "enter"]}` | `202 {"accepted": true, "keys": [...]}` (§6.5) |
 | `POST /api/agents/{id}/attachments` | the raw image, or `{"data_base64"}` | `201 {"path", "name", "bytes", "content_type"}` (below) |
@@ -1809,6 +1830,41 @@ need `start` and `stop`:
   Each change writes an audit row (`agent.pause`, `agent.unpause`, with
   `queued`) and an event (`agent.paused`, `agent.unpaused`). The rights
   are those of `stop`.
+
+**Auto compact (PLAN §18).** The daemon can compact the session of an
+agent at rest. Each compaction is one model call, so all of it is off by
+default.
+
+- **On idle.** With `compact_on_idle` (else `TERRARIUM_COMPACT_ON_IDLE`),
+  an agent at its idle stop compacts first, waits for the end (at most 5
+  minutes), and then stops. An agent with `idle_stop` `off` compacts once
+  after the same rest (the global idle stop, else 10 minutes) and stays
+  up.
+- **Max age.** With `compact_max_age` (else
+  `TERRARIUM_COMPACT_MAX_AGE`), an agent at rest whose session context is
+  older than the maximum compacts and goes on. The age counts from the
+  end of the last compaction, else from the start of the session. A wake
+  that resumes a session keeps the start of that session.
+- **Once for each turn.** An automatic compaction runs only after a turn
+  that is newer than the last compaction and the start of the session.
+  A manual one has no such rule.
+- **Manual.** `POST /api/agents/{id}/compact` compacts an idle agent now.
+  The rights are those of `restart`. It writes the audit row
+  `agent.compact`. `terrarium agent compact <agent>` calls it.
+- **Not compacted:** a paused agent, an agent with a quota or budget hold,
+  an agent that is not `idle` or `waiting`, an agent in `error`, and an
+  agent of a harness with no compaction (`compact_supported` `false`).
+- **How.** The supervisor types the harness's `/compact` as a raw
+  command (no tag, no escape), and shows the agent `working` with
+  `status_reason` `compacting`. Turns, the recap turn, and push pointers
+  wait until the end. The prompt and stop hooks of the command are
+  `system` notices, not turns. The end is the completion signal of the
+  harness (docs/compat.md, "Compaction"), a stop of the agent, or the time
+  limit. Then the agent shows its status again (`status_reason`
+  `compacted` or `compaction failed`), its idle clock starts again, and
+  the waiting work goes out.
+- Each end writes `agent.compacted` (§9) and `last_compact_at` (also for a
+  failed compaction, so that it does not run again without a new turn).
 
 - `start` opens a new session and resumes the last harness session.
   A running agent gets `409 already_running`. It is a wake now: the
@@ -3097,6 +3153,8 @@ Kinds:
 | `status` | `{status, from, reason, waits, waiting_on?}`. `from` is never the same as `status`: a runner report of the status the agent already has (for example the runner's `spawned <program>` at start) goes in as a `system` event `{message, status}`. `waits` is the number of open waits; `waiting_on` is the line of §6.7. |
 | `agent.woken` | `{cause, queued}`: the daemon woke the agent (§6.2). `cause` is `mail`, `turn`, `card`, `nudge`, `start`, `unpause`, `hold_end`, `queued`, or `daemon_start`; `queued` is the work that waited. A `status` event follows. An idle stop is a `status` event with `reason: "idle"`. |
 | `agent.paused`, `agent.unpaused` | `{paused, queued}`: a pause or an unpause changed the flag (§6.2). The actor is the caller. |
+| `agent.compacted` | `{cause, ok, duration_ms, reason?}`: a compaction that the daemon ran ended (§6.2, "Auto compact"). `cause` is `idle`, `max_age`, or `manual`. `ok` is false for a failure that the harness reports, a stop of the agent, or no end signal in 5 minutes; `reason` says which. |
+| `compact_started`, `compact_finished` | `{trigger?}` and `{ok, trigger?, message?}`: the harness reported the start or the end of a compaction (docs/compat.md, "Compaction"). `trigger` is the harness's word (`manual`, `auto`, `threshold`, ...). A compaction that the harness starts by itself also writes them. |
 | `agent_removed` | `{agent_id, project, name}`. The daemon deleted the agent: `DELETE /api/agents/{id}`, a fleet apply with prune, or a definitions sync that removes a file agent. The delete of a live agent stops it first, so a `status` event with `stopped` comes before this event. Clients remove the agent from their lists. `GET /api/agents` does not show the agent again. |
 | `wait` | `{wait_id, change, kind, summary, state, result?}`. `change` is `opened`, `resolved`, `timed_out`, `cancelled`, or `failed`. The `agent` is the waiter (§6.7). |
 | `watch` | `{watch_id, change, watcher, watcher_name, on, status?}`. `change` is `created`, `fired` (with `status`), or `removed`. The `agent` is the watched agent (§6.7). |
@@ -5881,7 +5939,7 @@ A template:
 |---|---|
 | `name` | 1-63 of `a-z`, `0-9`, `-`, `_`. Unique in its scope: the project, or the global scope. A project template and a global template can have the same name. |
 | `project` | The project. `null` is a global template. |
-| `spec` | An agent definition (§6.1) without `name` and `project`: `harness` (required), `subscription`, `subscription_pool`, `model`, `prompt`, `system_prompt`, `persona`, `roles`, `policy`, `restart`, `idle_stop`, `skills`, `new_session_on_prompt_change`. The daemon checks it with the rules of an agent definition and keeps it in a normal form: the defaults of `policy` and `restart` filled in, no empty `roles`, no empty `system_prompt`, no `new_session_on_prompt_change` when it is `true`. A `system_prompt` over 32 KiB is `422 invalid`. Another key (`name`, `project`, `template`, or an unknown key) is `422 invalid` with `details.field = "spec"`. |
+| `spec` | An agent definition (§6.1) without `name` and `project`: `harness` (required), `subscription`, `subscription_pool`, `model`, `prompt`, `system_prompt`, `persona`, `roles`, `policy`, `restart`, `idle_stop`, `compact_on_idle`, `compact_max_age`, `skills`, `new_session_on_prompt_change`. The daemon checks it with the rules of an agent definition and keeps it in a normal form: the defaults of `policy` and `restart` filled in, no empty `roles`, no empty `system_prompt`, no `new_session_on_prompt_change` when it is `true`. A `system_prompt` over 32 KiB is `422 invalid`. Another key (`name`, `project`, `template`, or an unknown key) is `422 invalid` with `details.field = "spec"`. |
 | `revision` | `1` at the create. Each change of the name, the description, or the spec adds `1`. A `PATCH` with the same values changes nothing. |
 | `source` | `api`, `file` (a `[[templates]]` of `projects/<name>.toml`), or `fleet:<name>` (§18.1). A `file` template refuses `PATCH` and `DELETE` with `409 file_managed`. |
 

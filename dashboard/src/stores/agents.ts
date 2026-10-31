@@ -58,6 +58,11 @@ export function applyAgentEvent(agents: Agent[], e: AgentEvent): Agent[] {
   if (e.kind === "exit") a.status = "error";
   if (e.kind === "agent.paused") a.paused = true;
   if (e.kind === "agent.unpaused") a.paused = false;
+  // The end of a compaction that the daemon ran (PLAN §18, "Auto compact").
+  if (e.kind === "agent.compacted") {
+    a.last_compact_at = e.at;
+    a.last_compact_ok = e.data?.ok !== false;
+  }
   if (e.kind === "self_report") {
     // The agent's own word. It does not change the runner status (docs/api.md §16.6).
     a.self_report = { status: String(e.data?.status ?? ""), at: e.at, ...(typeof e.data?.note === "string" && e.data.note ? { note: e.data.note } : {}) };

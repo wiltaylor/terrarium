@@ -801,6 +801,8 @@ mod tests {
             policy: Default::default(),
             restart: Default::default(),
             idle_stop: None,
+            compact_on_idle: None,
+            compact_max_age: None,
             skills: vec![],
             new_session_on_prompt_change: true,
         };

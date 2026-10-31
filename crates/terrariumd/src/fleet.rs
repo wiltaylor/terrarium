@@ -402,6 +402,8 @@ fn agent_spec(def: &AgentDef) -> Value {
         "policy": def.policy,
         "restart": def.restart,
         "idle_stop": def.idle_stop,
+        "compact_on_idle": def.compact_on_idle,
+        "compact_max_age": def.compact_max_age,
         "skills": def.skills,
         "new_session_on_prompt_change": def.new_session_on_prompt_change,
     })
@@ -423,6 +425,8 @@ fn view_def(v: &AgentView) -> AgentDef {
         policy: a.policy.clone(),
         restart: a.restart,
         idle_stop: a.idle_stop,
+        compact_on_idle: a.compact_on_idle,
+        compact_max_age: a.compact_max_age,
         skills: a.skills.clone(),
         new_session_on_prompt_change: a.new_session_on_prompt_change,
     }
@@ -1624,6 +1628,8 @@ fn apply_agent(t: &mut Tx<'_>, v: &AgentView, def: &AgentDef) -> ApiResult<()> {
         policy: Some(def.policy.clone()),
         restart: Some(def.restart),
         idle_stop: Some(def.idle_stop),
+        compact_on_idle: Some(def.compact_on_idle),
+        compact_max_age: Some(def.compact_max_age),
         new_session_on_prompt_change: Some(def.new_session_on_prompt_change),
         skills: Some(def.skills.clone()),
     };

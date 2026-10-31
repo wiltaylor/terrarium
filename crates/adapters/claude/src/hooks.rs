@@ -196,6 +196,16 @@ pub fn hook_events(hook: &HookPayload) -> Vec<Event> {
         "SessionEnd" => vec![Event::SessionEnded {
             reason: s(b, "reason").map(str::to_owned),
         }],
+        // A compaction: `/compact` (`trigger` `manual`) or a full context
+        // (`auto`). A failed compaction sends no PostCompact.
+        "PreCompact" => vec![Event::CompactStarted {
+            trigger: s(b, "trigger").map(str::to_owned),
+        }],
+        "PostCompact" => vec![Event::CompactFinished {
+            ok: true,
+            trigger: s(b, "trigger").map(str::to_owned),
+            message: None,
+        }],
         _ => Vec::new(),
     }
 }
@@ -331,6 +341,37 @@ mod tests {
             hook: name.into(),
             body,
         }
+    }
+
+    /// The payload shapes of the 2.1.312 bundle (docs/compat.md,
+    /// "Compaction"): PreCompact has `trigger` and `custom_instructions`,
+    /// PostCompact has `trigger` and `compact_summary`.
+    #[test]
+    fn compaction_hooks_give_the_start_and_the_end() {
+        let start = hook_events(&hook(
+            "PreCompact",
+            json!({"session_id": "s", "hook_event_name": "PreCompact",
+                   "trigger": "manual", "custom_instructions": ""}),
+        ));
+        assert_eq!(
+            start,
+            [Event::CompactStarted {
+                trigger: Some("manual".into())
+            }]
+        );
+        let end = hook_events(&hook(
+            "PostCompact",
+            json!({"session_id": "s", "hook_event_name": "PostCompact",
+                   "trigger": "auto", "compact_summary": "the summary"}),
+        ));
+        assert_eq!(
+            end,
+            [Event::CompactFinished {
+                ok: true,
+                trigger: Some("auto".into()),
+                message: None
+            }]
+        );
     }
 
     #[test]

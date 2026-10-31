@@ -2860,7 +2860,8 @@ stateDiagram-v2
     stopped --> starting: wake (work, start)
     starting --> idle
     idle --> working: turn
-    working --> idle: stop hook
+    idle --> working: compaction (reason compacting)
+    working --> idle: stop hook, end of the compaction
     idle --> waiting: open wait
     waiting --> idle: last wait ends
     idle --> stopped: idle stop (reason idle)
@@ -2944,6 +2945,59 @@ wake.
 **Start and stop.** `start` (a wake now) and `stop` (a stop now, not a
 pause) stay for the API and the CLI. The dashboard shows Pause or Resume,
 and Restart.
+
+**Auto compact.** Asked for on 2026-10-31: the context of a long session
+fills up, and a compaction at rest keeps it small. Each compaction is one
+model call, so all of it is off by default.
+
+- **Settings.** `compact_on_idle` (`true` or `false`) and
+  `compact_max_age` (`off`, or a duration such as `24h`) on an agent, a
+  template, an agent file, and a fleet entry. Absent: the global
+  `TERRARIUM_COMPACT_ON_IDLE` (default `off`) and
+  `TERRARIUM_COMPACT_MAX_AGE` (default `off`). Migration 42 adds the two
+  columns, `last_turn_at`, `last_compact_at`, and `last_compact_ok`.
+- **On idle.** An agent at its idle stop with `compact_on_idle` compacts
+  first, waits for the end (at most 5 minutes), and then stops. An agent
+  with no idle stop compacts once after the same rest: the global idle
+  stop, else 10 minutes. It does not stop.
+- **Max age.** An agent at rest whose session context is older than
+  `compact_max_age` compacts, and goes on. The age counts from the end of
+  the last compaction, else from the start of the session row. A wake
+  that resumes a session keeps the start of its row ("Restart policy and
+  the daemon start" below), so the age goes on from the stored time. The
+  check is at rest only: never in a turn.
+- **Once for each turn.** An automatic compaction needs a turn start
+  (`last_turn_at`) that is newer than the last compaction and the start
+  of the session. So an agent never compacts twice with no turn between,
+  and a new session with no turn does not compact.
+- **Manual.** `POST /api/agents/{id}/compact` and `terrarium agent compact
+  <agent>`, with the rights of `restart`, compact an idle agent now. The
+  dashboard has **Compact now** on the agent page; it is off, with the
+  reason, when the daemon would refuse it. Only the manual compaction
+  writes an audit row (`agent.compact`).
+- **Not compacted.** A paused agent, an agent with a quota or budget
+  hold, an agent that is not `idle` or `waiting` (also `starting` and
+  `error`), and an agent of a harness with no compaction
+  (`HarnessId::compact_command`). The idle stop of such an agent goes on
+  as before.
+- **Mechanism.** The supervisor types `/compact` as a raw command (as
+  `send --raw`: no tag, no U+00A0 escape) into an idle harness. The agent
+  shows `working` with the reason `compacting`. Turns, the recap turn, and
+  push pointers wait in the supervisor until the end; they go out in
+  order after it. The prompt and stop hooks of the command, and the idle
+  and working changes of the runner, become `system` notices, so the
+  command is not a turn. The adapter maps the start and end signals of the
+  harness to `compact_started` and `compact_finished` (docs/compat.md,
+  "Compaction"); Copilot CLI writes them only to `events.jsonl`, which the
+  usage collector reads every 15 s. The end is that signal, a stop of the
+  agent, or the time limit. Then the agent shows its runner status again
+  (reason `compacted` or `compaction failed`), and its idle clock starts
+  again. A compaction is not a turn: it does not move `last_turn_at`.
+- **Record.** Each end writes `last_compact_at`, `last_compact_ok`, and the
+  event `agent.compacted` (`{cause, ok, duration_ms, reason?}`, `cause`
+  `idle`, `max_age`, or `manual`). A failed compaction counts too, so that
+  it does not run again without a new turn. The agent page shows "last
+  compacted ...".
 
 ### Restart policy and the daemon start
 

@@ -244,6 +244,8 @@ export interface Api {
     pause(id: string): Promise<Agent>;
     /** Clear the pause. The agent wakes at once only when work waits for it. Idempotent. */
     unpause(id: string): Promise<Agent>;
+    /** Compact the session of an idle agent now (202). 409: the agent is not idle, is paused or held, or its harness cannot compact. */
+    compact(id: string): Promise<Agent>;
     /** `queued`: the agent does not run; the turn waits, and the agent wakes (unless paused). */
     send(id: string, text: string): Promise<{ accepted: boolean; queued?: boolean }>;
     /** `POST /api/agents/{id}/attachments` (docs/api.md §6.5): the raw image (PNG, JPEG, GIF, WebP; at most 20 MiB) into the agent's workspace. The answer has the path that the agent sees. The same rights as `send`. */
@@ -803,6 +805,7 @@ export function createHttpApi(t: Transport, opts: HttpApiOptions = {}): Api {
       restart: (id) => post(`${a(id)}/restart`),
       pause: (id) => post(`${a(id)}/pause`),
       unpause: (id) => post(`${a(id)}/unpause`),
+      compact: (id) => post(`${a(id)}/compact`),
       send: (id, text) => post(`${a(id)}/send`, { text }),
       attach: (id, file) => t.request("POST", `${a(id)}/attachments`, { raw: { data: file, type: file.type || "application/octet-stream" } }),
       sendRaw: (id, text) => post(`${a(id)}/send`, { text, raw: true }),

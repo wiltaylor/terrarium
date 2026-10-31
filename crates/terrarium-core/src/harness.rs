@@ -41,6 +41,18 @@ impl HarnessId {
         }
     }
 
+    /// The TUI command that compacts the session context, when the daemon
+    /// can run it and see its end (PLAN §18, "Auto compact"). The
+    /// adapter maps the start and end signals of the harness to
+    /// `Event::CompactStarted` and `Event::CompactFinished`.
+    /// docs/compat.md, "Compaction", has the evidence for each harness.
+    /// `None`: the daemon does not compact agents of this harness.
+    pub fn compact_command(self) -> Option<&'static str> {
+        match self {
+            Self::Claude | Self::Codex | Self::Copilot | Self::Pi => Some("/compact"),
+        }
+    }
+
     /// The env var the harness reads for its config home.
     pub fn home_env(self) -> &'static str {
         match self {

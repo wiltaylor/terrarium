@@ -4,7 +4,9 @@
 //
 // The daemon wakes a stopped agent when work comes (a turn, mail, a card).
 // It stops an agent that stays idle for its idle timeout (`status_reason`
-// `idle`). A paused agent does not run, and nothing wakes it.
+// `idle`). A paused agent does not run, and nothing wakes it. The daemon
+// can compact the session of an agent at rest (`status_reason`
+// `compacting` while it runs).
 
 import type { Agent } from "../api/types";
 
@@ -54,4 +56,32 @@ export function lifecycleActions(a: Pick<Agent, "paused">): LifecycleAction[] {
     ? { kind: "restart", label: "Restart", disabled: true, title: "The agent is paused. Resume it first." }
     : { kind: "restart", label: "Restart", disabled: false, title: "Stop the agent and start it again with a resume." };
   return [toggle, restart];
+}
+
+/** The "Compact now" button of the agent page: off, with the reason, when the daemon would refuse it. */
+export interface CompactAction {
+  disabled: boolean;
+  title: string;
+}
+
+/**
+ * The "Compact now" button. The daemon compacts only an agent that runs and
+ * rests (`idle` or `waiting`), is not paused, has no quota hold, and has a
+ * harness that can compact. `held` is true while a quota or budget hold
+ * lasts. Each compaction is one model call.
+ */
+export function compactAction(a: Pick<Agent, "harness" | "status" | "paused" | "status_reason" | "compact_supported">, held = false): CompactAction {
+  if (a.compact_supported === false) return { disabled: true, title: `auto compact not supported for ${a.harness}` };
+  if (a.paused) return { disabled: true, title: "The agent is paused. Resume it first." };
+  if (held) return { disabled: true, title: "A quota or budget hold lasts. The agent does not compact until it ends." };
+  if (a.status === "working" && a.status_reason === "compacting") return { disabled: true, title: "The agent compacts its session now." };
+  if (a.status === "stopped" || a.status === "error") return { disabled: true, title: `The agent is ${a.status}. It compacts only while it runs and is idle.` };
+  if (a.status !== "idle" && a.status !== "waiting") return { disabled: true, title: `The agent is ${a.status}. It compacts only at rest; wait until it is idle.` };
+  return { disabled: false, title: "Compact the session now: the harness summarises the conversation (one model call). New turns wait until it ends." };
+}
+
+/** "last compacted 5 min ago", with "(failed)" for a compaction that did not end well; null when none. */
+export function lastCompactedText(a: Pick<Agent, "last_compact_at" | "last_compact_ok">, ago: (iso: string) => string): string | null {
+  if (!a.last_compact_at) return null;
+  return `last compacted ${ago(a.last_compact_at)}${a.last_compact_ok === false ? " (failed)" : ""}`;
 }

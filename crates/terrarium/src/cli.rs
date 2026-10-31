@@ -435,6 +435,10 @@ pub enum AgentCmd {
     /// Unpause an agent. It wakes now when turns or mail wait for it, else
     /// at its next work
     Unpause { agent: String },
+    /// Compact the session of an idle agent now: the daemon types the
+    /// harness's `/compact` and holds new turns until the end. The event
+    /// `agent.compacted` gives the result
+    Compact { agent: String },
     /// Type one turn into the agent. Without `--raw`, the turn waits for
     /// the agent to be idle, and a text that starts with `/` or `!` stays
     /// plain text for the model
@@ -574,6 +578,15 @@ pub struct AgentNewArgs {
     /// or `1h30m`, or `off`. Default: the daemon's `TERRARIUM_IDLE_STOP`
     #[arg(long)]
     pub idle_stop: Option<String>,
+    /// Compact the session at the idle stop: `on` or `off`. Default: the
+    /// daemon's `TERRARIUM_COMPACT_ON_IDLE`
+    #[arg(long)]
+    pub compact_on_idle: Option<String>,
+    /// Compact a session older than this at the next rest: a duration
+    /// such as `24h`, or `off`. Default: the daemon's
+    /// `TERRARIUM_COMPACT_MAX_AGE`
+    #[arg(long)]
+    pub compact_max_age: Option<String>,
     /// A skill of the skill library; `*` is every skill; repeat for more
     #[arg(long = "skill")]
     pub skills: Vec<String>,
@@ -625,6 +638,15 @@ pub struct AgentSetArgs {
     /// `off`, or `default` (the daemon's `TERRARIUM_IDLE_STOP`)
     #[arg(long)]
     pub idle_stop: Option<String>,
+    /// Compact the session at the idle stop: `on`, `off`, or `default`
+    /// (the daemon's `TERRARIUM_COMPACT_ON_IDLE`)
+    #[arg(long)]
+    pub compact_on_idle: Option<String>,
+    /// Compact a session older than this at the next rest: a duration
+    /// such as `24h`, `off`, or `default` (the daemon's
+    /// `TERRARIUM_COMPACT_MAX_AGE`)
+    #[arg(long)]
+    pub compact_max_age: Option<String>,
     /// The whole policy as JSON, for example `{"targets":[],"mail_to":["*"]}`
     #[arg(long)]
     pub policy: Option<String>,
@@ -2118,6 +2140,13 @@ pub struct TemplateSpecArgs {
     /// or `off`
     #[arg(long)]
     pub idle_stop: Option<String>,
+    /// Compact the session at the idle stop: `on` or `off`
+    #[arg(long)]
+    pub compact_on_idle: Option<String>,
+    /// Compact a session older than this at the next rest: a duration
+    /// such as `24h`, or `off`
+    #[arg(long)]
+    pub compact_max_age: Option<String>,
     /// A skill of the skill library; `*` is every skill; repeat for more
     #[arg(long = "skill", conflicts_with = "no_skills")]
     pub skills: Vec<String>,

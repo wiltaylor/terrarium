@@ -413,10 +413,26 @@ The model is pure and in `lib/lifecycle.ts`.
 - **Store.** A `status` event sets `status_reason` from `reason`.
   `agent.paused` and `agent.unpaused` set `paused`. No event carries
   `queued`, so a lifecycle event or a stop reads the list again.
+- **Auto compact** (PLAN §18). The agent form and the template form have
+  an "Auto compact" group: "Compact on idle" (default, on, or off; the
+  default names the global `compact_on_idle` of `GET /api/health`) and
+  "Compact max age" (the form of the idle stop; `compactMaxAgeProblem`).
+  Empty goes back to the default (`null` in a patch). For a harness that
+  is not in `compact_harnesses`, the group says "auto compact not
+  supported for <harness>". The agent page shows the settings
+  (`autoCompactText`) and "last compacted ..." (`lastCompactedText`), with
+  "(failed)" for a failed one. **Compact now** (`POST .../compact`) is off,
+  with the reason in its title, for an agent that is not `idle` or
+  `waiting`, is paused or held, compacts now, or cannot compact
+  (`compactAction` in `lib/lifecycle.ts`). While it compacts, the agent is
+  `working` with `status_reason` `compacting`.
 - **Mock.** `docs-writer` is stopped by the idle timeout with 2 queued, and
   `seo-worker` is paused with 1 queued. A send to a stopped agent wakes it
   (`agent.woken`), and the mock runs the turn. The mock does not stop idle
-  agents by time.
+  agents by time, and does not compact by itself. `lead` has
+  `compact_max_age` `24h` and a compaction 5 hours ago. Compact now makes an
+  idle agent `working` (`compacting`) for 1.5 s, then writes
+  `agent.compacted`. Every harness can compact, as in the daemon.
 
 ## Quota alerts and holds
 

@@ -104,6 +104,30 @@ describe("mock parity with docs/api.md", () => {
     expect((await api.agents.update(a.id, { idle_stop: null })).idle_stop).toBeUndefined();
   });
 
+  it("checks the auto compact settings, and compacts an idle agent by hand", async () => {
+    const api = mock();
+    const h = await api.health();
+    expect(h).toMatchObject({ compact_on_idle: false, compact_max_age: "off", compact_harnesses: ["claude", "codex", "copilot", "pi"] });
+    const a = await api.agents.create({ name: "packer", project: "terrarium", harness: "claude", compact_on_idle: true, compact_max_age: "24h" });
+    expect(a).toMatchObject({ compact_on_idle: true, compact_max_age: "24h", compact_supported: true });
+    await expect(api.agents.update(a.id, { compact_max_age: "soon" })).rejects.toMatchObject({ status: 422 });
+    const b = await api.agents.update(a.id, { compact_on_idle: null, compact_max_age: null });
+    expect(b.compact_on_idle).toBeUndefined();
+    expect(b.compact_max_age).toBeUndefined();
+    // Not running: 409 not_running.
+    await expect(api.agents.compact(a.id)).rejects.toMatchObject({ status: 409 });
+    const frames: AgentEvent[] = [];
+    const s = api.events.stream({ since: api.world.seq });
+    s.subscribe((e) => frames.push(e));
+    // The lead of the seed is idle.
+    await api.agents.compact("terrarium/lead");
+    expect(api.world.agents.find((x) => x.name === "lead")).toMatchObject({ status: "working", status_reason: "compacting" });
+    await expect(api.agents.compact("terrarium/lead")).rejects.toMatchObject({ status: 409 });
+    await waitFor(() => expect(frames.some((e) => e.kind === "agent.compacted")).toBe(true));
+    expect(api.world.agents.find((x) => x.name === "lead")).toMatchObject({ status: "idle", last_compact_ok: true });
+    s.close();
+  });
+
   it("emits agent_removed when an agent is deleted, after the stop", async () => {
     const api = mock();
     const frames: AgentEvent[] = [];

@@ -1320,6 +1320,23 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX queued_turns_agent ON queued_turns(agent, id);
     "#,
+    // 42: auto compact (PLAN §18, "Auto compact"). `compact_on_idle` (0 or
+    // 1) and `compact_max_age` (`off` or a duration such as `24h`) are the
+    // settings of the agent: NULL for the global default. `last_turn_at`
+    // is the time of the last turn start of the agent.
+    // `last_compact_at` is the end of the last compaction (also a failed
+    // one), and `last_compact_ok` its result. A compaction runs only
+    // after a turn that is newer than the last compaction and the start
+    // of the session.
+    // Self-contained: when another branch takes number 42, move this
+    // entry to the end of the list.
+    r#"
+    ALTER TABLE agents ADD COLUMN compact_on_idle INTEGER;
+    ALTER TABLE agents ADD COLUMN compact_max_age TEXT;
+    ALTER TABLE agents ADD COLUMN last_turn_at TEXT;
+    ALTER TABLE agents ADD COLUMN last_compact_at TEXT;
+    ALTER TABLE agents ADD COLUMN last_compact_ok INTEGER;
+    "#,
 ];
 
 /// The shared database handle. One connection behind a mutex; every call

@@ -312,16 +312,19 @@ terrarium agent new <name> --harness <h> [--subscription s] [--pool s1,s2] [--mo
                     [--system-prompt <text | -> | --system-prompt-file path] [--persona p]
                     [--role r]... [--target t]... [--mail-to a]... [--cross-project p/a]...
                     [--restart always|on-failure|never] [--idle-stop 30m|off] [--skill s]...
+                    [--compact-on-idle on|off] [--compact-max-age 24h|off]
 terrarium agent new --from-file agents/lead.toml [flags that override the file]
 terrarium agent new <name> --template <t> [flags that override the template]
 terrarium agent set <agent> [--harness h] [--subscription s] [--pool s1,s2] [--model m] [--prompt p]
                     [--system-prompt <text | -> | --system-prompt-file path | --no-system-prompt]
                     [--persona p] [--restart r] [--idle-stop 30m|off|default] [--policy JSON]
                     [--new-session-on-prompt-change true|false] [--skill s... | --no-skills]
+                    [--compact-on-idle on|off|default] [--compact-max-age 24h|off|default]
 terrarium agent swap <agent> <subscription>  move to another plan account of the pool
 terrarium agent rm <agent> [--confirm] [--keep-workspace]
 terrarium agent start|stop|restart <agent> [--no-wait]
 terrarium agent pause|unpause <agent>         nothing wakes a paused agent
+terrarium agent compact <agent>               compact the session of an idle agent now
 terrarium agent send <agent> <text | -> [--raw]  --raw: project_admin, sysadmin, or the operator
 terrarium agent send <agent> [text | -] --image <file>...  attach images to the turn
 terrarium agent keys <agent> <key>...         project_admin, sysadmin, or the operator
@@ -372,6 +375,18 @@ need the rights of `stop`. A `start` or `restart` of a paused agent is
 refused (`409`). In `agent ls`, the column `STATUS` shows `paused` for a
 paused agent and `stopped (idle)` after an idle stop, and `QUEUED` counts
 the turns, mail, and card and nudge lines that wait for the agent.
+
+The daemon can compact the session of an agent at rest (PLAN §18, "Auto
+compact"). Each compaction is one model call, so it is off by default.
+`--compact-on-idle on` compacts the session at the idle stop, before the
+stop. `--compact-max-age 24h` compacts a session whose context is older
+than 24 hours, at the next rest. An automatic compaction runs only after
+a new turn. `default` (in `agent set`) goes back to the daemon's
+`TERRARIUM_COMPACT_ON_IDLE` and `TERRARIUM_COMPACT_MAX_AGE`. `agent compact
+<agent>` compacts an idle agent now, with the rights of `restart`; it
+prints when the compaction starts, and the event `agent.compacted` gives
+the result. It is refused (`409`) for an agent that does not run, is not
+idle, is paused or held, or whose harness cannot compact.
 
 `--pool` sets the account pool (PLAN §16.3): subscriptions of one
 provider that a swap may pick, comma-separated. The current subscription
@@ -536,6 +551,7 @@ terrarium template show <template>
 terrarium template new <name> [--global] [--description d] --harness <h> [--subscription s]
                        [--model m] [--prompt p] [--role r]... [--target t]... [--mail-to a]...
                        [--cross-project p/a]... [--restart r] [--idle-stop 30m|off]
+                       [--compact-on-idle on|off] [--compact-max-age 24h|off]
                        [--system-prompt <text | -> | --system-prompt-file path] [--persona p]
                        [--skill s]...
 terrarium template new <name> --from-file worker.toml [flags that override the file]

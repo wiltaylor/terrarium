@@ -303,6 +303,16 @@ starts it, and types the turn when it is ready. After 10 minutes at rest
 conversation. Change the time for one agent with `--idle-stop 30m` (or
 `off`), or for all agents with `TERRARIUM_IDLE_STOP` in `.env`.
 
+A long conversation fills the context of the harness. The daemon can
+compact it for you: `--compact-on-idle on` compacts the session before the
+idle stop, and `--compact-max-age 24h` compacts a session that is older
+than 24 hours at its next rest. Each compaction is one model call, so both
+are off by default (`TERRARIUM_COMPACT_ON_IDLE`,
+`TERRARIUM_COMPACT_MAX_AGE` in `.env`). An automatic compaction runs only
+after a new turn. To compact now, run `t agent compact demo/worker`, or
+click **Compact now** on the agent page. While the session compacts, the
+agent shows `working (compacting)`, and new turns wait.
+
 Give the agent a turn, and look at its status:
 
 ```sh

@@ -110,6 +110,14 @@ impl Adapter for FakeAdapter {
                 prompt: hook.str_field("prompt").map(str::to_owned),
             }],
             "Stop" => vec![Event::TurnEnd],
+            "PreCompact" => vec![Event::CompactStarted {
+                trigger: hook.str_field("trigger").map(str::to_owned),
+            }],
+            "PostCompact" => vec![Event::CompactFinished {
+                ok: true,
+                trigger: hook.str_field("trigger").map(str::to_owned),
+                message: None,
+            }],
             "SessionStart" => vec![Event::SessionStarted {
                 harness_session: HarnessSessionId(
                     hook.str_field("session_id").unwrap_or_default().to_owned(),
@@ -3021,6 +3029,7 @@ async fn work_wakes_a_stopped_agent_and_rest_stops_it() {
         .set_tuning(terrariumd::lifecycle::Tuning {
             idle_stop: IdleStop::After(Duration::from_millis(300)),
             tick: Duration::from_millis(50),
+            ..terrariumd::lifecycle::Tuning::default()
         });
     td.wait_status(&id, "stopped").await;
     let last = td.events(&id, "status").await.last().unwrap().clone();
@@ -3058,4 +3067,137 @@ async fn a_failed_wake_is_an_error_and_stops_the_wakes() {
     assert_eq!(td.status(&id).await, "error");
     assert_eq!(td.events(&id, "agent.woken").await.len(), 1);
     assert_eq!(td.get(&format!("/api/agents/{id}")).await["queued"], 2);
+}
+
+/// PLAN §18 "Auto compact" with the real supervisor and runner: a manual
+/// compaction types `/compact` as a raw command, shows `working` with the
+/// reason `compacting`, and holds a new turn until the PostCompact hook.
+/// Then `compact_on_idle` compacts before the idle stop.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_compaction_holds_turns_until_its_end_hook() {
+    use terrarium_core::config::{CompactMaxAge, IdleStop};
+    let td = Td::start().await;
+    td.adapter.set_env("FAKE_TUI_DELAY_MS", "600");
+    let id = td.agent("demo", "comp", json!({})).await;
+    td.post(&format!("/api/agents/{id}/start"), None).await;
+    td.wait_status(&id, "idle").await;
+    td.post(
+        &format!("/api/agents/{id}/send"),
+        Some(json!({"text": "first"})),
+    )
+    .await;
+    td.wait_events(&id, "turn_end", |e| !e.is_empty()).await;
+    td.wait_status(&id, "idle").await;
+
+    td.post(&format!("/api/agents/{id}/compact"), None).await;
+    let a = td.get(&format!("/api/agents/{id}")).await;
+    assert_eq!(a["status"], "working", "{a}");
+    assert_eq!(a["status_reason"], "compacting", "{a}");
+    td.post(
+        &format!("/api/agents/{id}/send"),
+        Some(json!({"text": "second"})),
+    )
+    .await;
+    let done = td
+        .wait_events(&id, "agent.compacted", |e| !e.is_empty())
+        .await;
+    assert_eq!(done[0]["data"]["ok"], true, "{done:#?}");
+    assert_eq!(done[0]["data"]["cause"], "manual");
+    let starts = td.wait_events(&id, "turn_start", |e| e.len() == 2).await;
+    let finished = td.events(&id, "compact_finished").await;
+    assert_eq!(finished.len(), 1, "{finished:#?}");
+    assert_eq!(td.events(&id, "compact_started").await.len(), 1);
+    // The held turn started after the end of the compaction; `/compact`
+    // was no turn.
+    assert!(
+        starts[1]["seq"].as_u64() > finished[0]["seq"].as_u64(),
+        "{starts:#?} {finished:#?}"
+    );
+    assert!(
+        !starts.iter().any(|s| s["data"]["prompt"]
+            .as_str()
+            .unwrap_or("")
+            .contains("/compact")),
+        "{starts:#?}"
+    );
+    td.wait_status(&id, "idle").await;
+
+    // On idle: compact first, then the idle stop.
+    td.daemon
+        .as_ref()
+        .unwrap()
+        .state
+        .lifecycle
+        .set_tuning(terrariumd::lifecycle::Tuning {
+            idle_stop: IdleStop::After(Duration::from_millis(300)),
+            tick: Duration::from_millis(50),
+            compact_on_idle: true,
+            compact_max_age: CompactMaxAge::Off,
+            compact_wait: Duration::from_secs(10),
+        });
+    td.wait_status(&id, "stopped").await;
+    let done = td.events(&id, "agent.compacted").await;
+    assert_eq!(done.len(), 2, "{done:#?}");
+    assert_eq!(done[1]["data"]["cause"], "idle", "{done:#?}");
+    let last = td.events(&id, "status").await.last().unwrap().clone();
+    assert_eq!(last["data"]["reason"], "idle", "{last}");
+}
+
+/// A harness that also opens a turn for `/compact` (`FAKE_TUI_COMPACT=turn`):
+/// its prompt and stop hooks are notices, not a turn. A harness that sends
+/// no end (`silent`): the compaction ends at its time limit, not ok, and
+/// the agent is idle again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn compaction_turn_hooks_are_no_turn_and_a_silent_end_times_out() {
+    use terrarium_core::config::{CompactMaxAge, IdleStop};
+    let td = Td::start().await;
+    td.adapter.set_env("FAKE_TUI_COMPACT", "turn");
+    let id = td.agent("demo", "comp2", json!({})).await;
+    td.post(&format!("/api/agents/{id}/start"), None).await;
+    td.wait_status(&id, "idle").await;
+    td.post(
+        &format!("/api/agents/{id}/send"),
+        Some(json!({"text": "one"})),
+    )
+    .await;
+    td.wait_events(&id, "turn_end", |e| !e.is_empty()).await;
+    td.wait_status(&id, "idle").await;
+    td.post(&format!("/api/agents/{id}/compact"), None).await;
+    td.wait_events(&id, "agent.compacted", |e| !e.is_empty())
+        .await;
+    td.wait_status(&id, "idle").await;
+    assert_eq!(td.events(&id, "turn_start").await.len(), 1);
+    let notices = td.events(&id, "system").await;
+    assert!(
+        notices.iter().any(|n| n["data"]["message"]
+            .as_str()
+            .is_some_and(|m| m.starts_with("compaction: the harness opened a turn"))),
+        "{notices:#?}"
+    );
+
+    td.daemon
+        .as_ref()
+        .unwrap()
+        .state
+        .lifecycle
+        .set_tuning(terrariumd::lifecycle::Tuning {
+            idle_stop: IdleStop::Off,
+            tick: Duration::from_millis(50),
+            compact_on_idle: false,
+            compact_max_age: CompactMaxAge::Off,
+            compact_wait: Duration::from_millis(800),
+        });
+    td.adapter.set_env("FAKE_TUI_COMPACT", "silent");
+    td.post(&format!("/api/agents/{id}/restart"), None).await;
+    td.wait_events(&id, "session_started", |e| e.len() == 2)
+        .await;
+    td.wait_status(&id, "idle").await;
+    td.post(&format!("/api/agents/{id}/compact"), None).await;
+    let done = td
+        .wait_events(&id, "agent.compacted", |e| e.len() == 2)
+        .await;
+    assert_eq!(done[1]["data"]["ok"], false, "{done:#?}");
+    td.wait_status(&id, "idle").await;
+    let a = td.get(&format!("/api/agents/{id}")).await;
+    assert_eq!(a["status_reason"], "compaction failed", "{a}");
 }

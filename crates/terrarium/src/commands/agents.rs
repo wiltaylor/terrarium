@@ -114,6 +114,7 @@ pub async fn agent(ctx: &Ctx, cmd: &AgentCmd) -> anyhow::Result<()> {
         AgentCmd::Restart { agent, no_wait } => lifecycle(ctx, agent, "restart", *no_wait).await,
         AgentCmd::Pause { agent } => pause(ctx, agent, "pause").await,
         AgentCmd::Unpause { agent } => pause(ctx, agent, "unpause").await,
+        AgentCmd::Compact { agent } => compact(ctx, agent).await,
         AgentCmd::Send {
             agent,
             text,
@@ -280,6 +281,10 @@ pub async fn definition(ctx: &Ctx, a: &AgentNewArgs) -> anyhow::Result<Value> {
     set_opt(&mut def, "persona", persona_value(&a.system_prompt));
     set_opt(&mut def, "restart", a.restart.clone());
     set_opt(&mut def, "idle_stop", a.idle_stop.clone());
+    if let Some(v) = &a.compact_on_idle {
+        def["compact_on_idle"] = switch(v, "--compact-on-idle")?.into();
+    }
+    set_opt(&mut def, "compact_max_age", a.compact_max_age.clone());
     set_opt(&mut def, "template", a.template.clone());
     if !a.roles.is_empty() {
         def["roles"] = json!(a.roles);
@@ -367,6 +372,16 @@ async fn set(ctx: &Ctx, a: &AgentSetArgs) -> anyhow::Result<()> {
         Some(v) => body["idle_stop"] = v.into(),
         None => {}
     }
+    match a.compact_on_idle.as_deref() {
+        Some("default") => body["compact_on_idle"] = Value::Null,
+        Some(v) => body["compact_on_idle"] = switch(v, "--compact-on-idle")?.into(),
+        None => {}
+    }
+    match a.compact_max_age.as_deref() {
+        Some("default") => body["compact_max_age"] = Value::Null,
+        Some(v) => body["compact_max_age"] = v.into(),
+        None => {}
+    }
     if let Some(p) = &a.policy {
         let p: Value = serde_json::from_str(p)
             .map_err(|e| CliError::usage(format!("--policy is not JSON: {e}")))?;
@@ -387,6 +402,33 @@ async fn set(ctx: &Ctx, a: &AgentSetArgs) -> anyhow::Result<()> {
     ctx.emit(&r, |c, r| {
         c.line(format!(
             "updated agent {}/{}",
+            field(r, "project"),
+            field(r, "name")
+        ));
+    })
+}
+
+/// `on` or `off` (also `true`, `yes`, `1`, and `false`, `no`, `0`) as a
+/// bool, for the flag `flag`.
+pub(crate) fn switch(v: &str, flag: &str) -> anyhow::Result<bool> {
+    match v.trim().to_ascii_lowercase().as_str() {
+        "on" | "true" | "yes" | "1" => Ok(true),
+        "off" | "false" | "no" | "0" => Ok(false),
+        _ => Err(CliError::usage(format!(
+            "{flag} takes `on` or `off`, not `{v}`"
+        ))),
+    }
+}
+
+/// `agent compact`: the daemon answers when the compaction starts.
+async fn compact(ctx: &Ctx, agent: &str) -> anyhow::Result<()> {
+    let r = ctx
+        .api
+        .post(&format!("{}/compact", agent_path(agent)), None)
+        .await?;
+    ctx.emit(&r, |c, r| {
+        c.line(format!(
+            "{}/{} compacts its session; the event agent.compacted gives the result",
             field(r, "project"),
             field(r, "name")
         ));
